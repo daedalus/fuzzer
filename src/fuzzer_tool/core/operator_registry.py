@@ -199,6 +199,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "count_overflow",
         "zero_run_amplify",
         "zero_run_suppress",
+        "type_promote",
+        "length_miscalculate",
+        "elias_gamma",
+        "elias_delta",
     },
     "adaptive": {
         "markov_bytes",

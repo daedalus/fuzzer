@@ -3315,6 +3315,26 @@ class OperatorEngine:
 
         return self._regularity(zero_run_suppress, buf)
 
+    def _op_type_promote(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import type_promote
+
+        return self._regularity(type_promote, buf)
+
+    def _op_length_miscalculate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import length_miscalculate
+
+        return self._regularity(length_miscalculate, buf)
+
+    def _op_elias_gamma(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import elias_gamma
+
+        return self._regularity(elias_gamma, buf)
+
+    def _op_elias_delta(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import elias_delta
+
+        return self._regularity(elias_delta, buf)
+
     def corpus_invariants(self):
         """Cached ``CorpusInvariants`` for the current corpus, or None.
 

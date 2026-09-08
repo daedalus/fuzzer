@@ -48,6 +48,10 @@ NEW_OPS = frozenset(
         "count_overflow",
         "zero_run_amplify",
         "zero_run_suppress",
+        "type_promote",
+        "length_miscalculate",
+        "elias_gamma",
+        "elias_delta",
     }
 )
 
@@ -294,6 +298,50 @@ class TestRoundTrip:
         data = bytes([i % 8 * 32 for i in range(256)])
         buf = bytearray(data)
         result = dispatch["zero_run_suppress"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_type_promote_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["type_promote"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_length_miscalculate_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["length_miscalculate"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_elias_gamma_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["elias_gamma"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_elias_delta_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["elias_delta"](buf, 0, data)
         assert result is not None
         assert len(result) == len(data)
 

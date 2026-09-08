@@ -1830,3 +1830,287 @@ def zero_run_suppress(data: bytes, rng=None) -> bytes:
     for pos in positions:
         block[pos] = rng.randint(1, 255)
     return _splice(data, offset, bytes(block))
+
+
+def type_promote(data: bytes, rng=None) -> bytes:
+    """Simulate a buggy integer promotion at a plausible field.
+
+    Type promotion bugs arise when a parser reads a small integer and
+    widens it without sign-extension or overflow checking: a 2-byte
+    unsigned count of 0xFFFF becomes 0 after `short + 1`, or a 1-byte
+    signed value of -1 becomes 0xFFFFFFFF when zero-extended to 32 bits.
+
+    This operator picks a 1/2/4-byte field, reads its current value,
+    and writes back a value that simulates a common promotion bug:
+    sign-extension of an unsigned value, zero-extension of a signed
+    value, or overflow past the field width.  The field width stays
+    the same so the result is always length-preserving.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    width = rng.choice((1, 2, 4))
+    if len(data) < width + 1:
+        return data
+    max_offset = len(data) - width
+    offset = rng.randint(0, max_offset)
+    raw = data[offset : offset + width]
+    val = int.from_bytes(raw, "little", signed=False)
+    max_val = (1 << (width * 8)) - 1
+    max_signed = (1 << (width * 8 - 1)) - 1
+    strategy = rng.randint(0, 3)
+    if strategy == 0:
+        # Zero-extend a signed-looking value: clear the high bit.
+        new_val = val & max_signed if val & (1 << (width * 8 - 1)) else val | (1 << (width * 8 - 1))
+    elif strategy == 1:
+        # Sign-extend an unsigned-looking value: set/copy high bit.
+        new_val = (
+            val | ((1 << (width * 8 - 1)) - 1) if val > max_signed else val | (1 << (width * 8 - 1))
+        )
+    elif strategy == 2:
+        # Overflow past width: add/subtract a large offset.
+        new_val = (val + (1 << (width * 8 - 1))) & max_val
+    else:
+        # Truncate-as-promote: write max_signed or 0 regardless of input.
+        new_val = rng.choice((0, max_signed, max_val))
+    endian = "<" if rng.random() < 0.5 else ">"
+    fmt = f"{endian}H" if width == 2 else f"{endian}I"
+    if width == 1:
+        packed = bytes([new_val & 0xFF])
+    else:
+        try:
+            packed = struct.pack(fmt, new_val & max_val)
+        except (struct.error, OverflowError):
+            return data
+    out = bytearray(data)
+    out[offset : offset + width] = packed
+    return bytes(out)
+
+
+def length_miscalculate(data: bytes, rng=None) -> bytes:
+    """Overwrite length/size fields with values that contradict actual payload.
+
+    Many format parsers compute a checksum, allocate a buffer, or enter a
+    loop based on a declared length field without verifying that the
+    declared length matches the actual payload on disk.  Setting the
+    length to 0, -1, or a value larger than the real payload triggers
+    allocation failures, infinite loops, or out-of-bounds reads.
+
+    The operator scans for 2/4-byte fields at aligned offsets whose
+    current value is within a plausible range and overwrites one with
+    a contradictory length.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 4:
+        return data
+    rng = _get_rng(rng)
+    width = rng.choice((2, 4))
+    if len(data) < width + 1:
+        return data
+    max_offset = len(data) - width
+    candidates = []
+    for off in range(0, max_offset, max(1, width)):
+        raw = data[off : off + width]
+        if len(raw) < width:
+            continue
+        if all(32 <= b < 127 for b in raw):
+            continue
+        val = int.from_bytes(raw, "little")
+        # Prefer fields whose value is in a plausible length range.
+        max_plausible = min(len(data) - off, 1 << (width * 8 - 1))
+        if 0 <= val <= max_plausible:
+            candidates.append(off)
+    if not candidates:
+        offset = rng.randint(0, max_offset)
+    else:
+        offset = candidates[rng.randint(0, len(candidates) - 1)]
+    endian = "<" if rng.random() < 0.5 else ">"
+    fmt = f"{endian}H" if width == 2 else f"{endian}I"
+    max_unsigned = (1 << (width * 8)) - 1
+    # Contradictory lengths: 0, -1, MAX, or larger than actual remaining payload.
+    actual_remainder = len(data) - offset - width
+    choices = (0, -1, max_unsigned, actual_remainder + rng.randint(1, 256))
+    new_val = choices[rng.randint(0, len(choices) - 1)]
+    try:
+        packed = struct.pack(fmt, new_val & max_unsigned)
+    except (struct.error, OverflowError):
+        return data
+    out = bytearray(data)
+    out[offset : offset + width] = packed
+    return bytes(out)
+
+
+def elias_gamma(data: bytes, rng=None) -> bytes:
+    """Elias gamma encode a region, edit codewords, decode back.
+
+    Elias gamma coding is a universal code for positive integers: the
+    codeword for integer N consists of floor(log2 N) zero bits followed
+    by the (log2 N + 1)-bit binary representation of N.  Small integers
+    get short codewords; large integers get long ones.
+
+    Many binary formats use gamma or similar universal codes for
+    variable-length integer fields (Google Protocol Buffers, MPEG,
+    FLAC).  Editing the codeword stream probes the decoder's length
+    parsing and variable-length integer reconstruction.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=2)
+    if length < 2:
+        return data
+    block = data[offset : offset + length]
+    # Encode each byte as Elias gamma (1-indexed: byte+1).
+    bits = bytearray()
+    for b in block:
+        n = b + 1
+        log2 = n.bit_length() - 1
+        bits.extend([0] * log2)
+        bits.extend(int(x) for x in format(n, f"0{log2 + 1}b"))
+    if not bits:
+        return data
+    # Mutate the bitstream.
+    n_mut = rng.randint(1, min(6, len(bits) // 2 + 1))
+    for _ in range(n_mut):
+        pos = rng.randint(0, len(bits) - 1)
+        if rng.random() < 0.5 and len(bits) < length * 16:
+            bits.insert(pos, rng.randint(0, 1))
+        elif len(bits) > length // 2:
+            del bits[pos]
+        else:
+            bits[pos] ^= 1
+    # Decode back.
+    restored = bytearray(length)
+    ridx = 0
+    bidx = 0
+    while ridx < length and bidx < len(bits):
+        # Count leading zeros.
+        log2 = 0
+        while bidx < len(bits) and bits[bidx] == 0:
+            log2 += 1
+            bidx += 1
+        if bidx >= len(bits) or log2 == 0:
+            break
+        total_bits = log2 + 1
+        if bidx + total_bits > len(bits):
+            break
+        val = 0
+        for i in range(total_bits):
+            val = (val << 1) | bits[bidx + i]
+        restored[ridx] = (val - 1) & 0xFF
+        ridx += 1
+        bidx += total_bits
+    while ridx < length:
+        restored[ridx] = rng.randint(0, 255)
+        ridx += 1
+    return _splice(data, offset, bytes(restored[:length]))
+
+
+def elias_delta(data: bytes, rng=None) -> bytes:
+    """Elias delta encode a region, edit codewords, decode back.
+
+    Elias delta coding is a universal code for positive integers that
+    prefixes each codeword with the Elias gamma code of floor(log2 N) + 1,
+    followed by the binary representation of N without the leading 1.
+    Delta coding is shorter than gamma for large N and is used in
+    variable-length integer schemes (e.g. Google Protocol Buffers'
+    varint, MPEG-4).
+
+    Editing the delta codeword stream probes parsers that decode
+    variable-length integers with assumptions about maximum codeword
+    length or minimum value.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=2)
+    if length < 2:
+        return data
+    block = data[offset : offset + length]
+    # Encode each byte+1 with Elias delta.
+    bits = bytearray()
+    for b in block:
+        n = b + 1
+        log2 = n.bit_length() - 1
+        # Gamma code of log2 + 1.
+        gamma = log2 + 1
+        g_log2 = gamma.bit_length() - 1
+        bits.extend([0] * g_log2)
+        bits.extend(int(x) for x in format(gamma, f"0{g_log2 + 1}b"))
+        # Remainder: binary of n without leading 1, length = log2 bits.
+        if log2 > 0:
+            bits.extend(int(x) for x in format(n & ((1 << log2) - 1), f"0{log2}b"))
+    if not bits:
+        return data
+    # Mutate.
+    n_mut = rng.randint(1, min(6, len(bits) // 2 + 1))
+    for _ in range(n_mut):
+        pos = rng.randint(0, len(bits) - 1)
+        if rng.random() < 0.5 and len(bits) < length * 16:
+            bits.insert(pos, rng.randint(0, 1))
+        elif len(bits) > length // 2:
+            del bits[pos]
+        else:
+            bits[pos] ^= 1
+    # Decode.
+    restored = bytearray(length)
+    ridx = 0
+    bidx = 0
+    while ridx < length and bidx < len(bits):
+        # Read gamma-coded length prefix.
+        g_log2 = 0
+        while bidx < len(bits) and bits[bidx] == 0:
+            g_log2 += 1
+            bidx += 1
+        if bidx >= len(bits) or g_log2 == 0:
+            break
+        gamma_bits = g_log2 + 1
+        if bidx + gamma_bits > len(bits):
+            break
+        gamma = 0
+        for i in range(gamma_bits):
+            gamma = (gamma << 1) | bits[bidx + i]
+        bidx += gamma_bits
+        log2 = gamma - 1
+        if log2 < 0:
+            break
+        total_bits = log2
+        if bidx + total_bits > len(bits):
+            break
+        val = 1 << log2
+        for i in range(total_bits):
+            val = (val << 1) | bits[bidx + i]
+        restored[ridx] = (val - 1) & 0xFF
+        ridx += 1
+        bidx += total_bits
+    while ridx < length:
+        restored[ridx] = rng.randint(0, 255)
+        ridx += 1
+    return _splice(data, offset, bytes(restored[:length]))

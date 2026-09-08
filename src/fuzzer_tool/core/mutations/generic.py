@@ -983,6 +983,10 @@ MUTATIONS = [
     "count_overflow",
     "zero_run_amplify",
     "zero_run_suppress",
+    "type_promote",
+    "length_miscalculate",
+    "elias_gamma",
+    "elias_delta",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.
