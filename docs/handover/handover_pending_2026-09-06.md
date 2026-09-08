@@ -681,7 +681,7 @@ harness.
   a measured *negative* on predictive validity but **no interventional run**:
   the score adds nothing over `A.sum(1)` (mean partial Spearman +0.006 over ten
   campaigns, Wilcoxon p=1.0). Full findings, and the seven methodology gaps that
-  qualify them, in `docs/handover/handover_tang_recommendation_2026-09-07.md`.
+  qualify them, in `docs/handover/handover_done_2026-09-06.md` §14.
   The higher-value run is item 2 of that document's §10 — re-measure the
   low-rank structure on ffmpeg, where the assumption plausibly holds — because
   a negative A/B on png/zlib would not distinguish "the method fails" from

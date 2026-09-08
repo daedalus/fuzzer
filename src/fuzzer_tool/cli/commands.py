@@ -2467,7 +2467,7 @@ def main() -> int:
         help="Tang quantum-inspired low-rank seed scheduling (arXiv:1807.04271): adds a "
         "'tang' Elo seed arm scoring seeds by the l2 mass of their rank-k coverage row. "
         "OFF by default and measured to add nothing over total hit volume -- see "
-        "docs/handover/handover_tang_recommendation_2026-09-07.md before enabling.",
+        "docs/handover/handover_done_2026-09-06.md §14 before enabling.",
     )
     fuzz_parser.add_argument(
         "--tang-rank",

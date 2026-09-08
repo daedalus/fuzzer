@@ -17,7 +17,7 @@ otherwise.** It is landed because the port is small, the paper's subroutines
 are independently useful, and a measured negative is worth more in-tree than
 out. The measurements behind that sentence — ten independent campaigns, and
 the two of our own earlier claims they overturned — are in
-``docs/handover/handover_tang_recommendation_2026-09-07.md``. The one-line
+``docs/handover/handover_done_2026-09-06.md`` §14. The one-line
 version: the score works, but controlling for ``A.sum(1)`` (total hit volume,
 one row sum) it adds nothing — mean partial Spearman +0.006 over ten corpora,
 Wilcoxon p=1.0.
