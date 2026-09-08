@@ -1312,20 +1312,9 @@ class Fuzzer:
             # skipping load() here deferred the read instead of preventing it.
             self._state_store.start_empty()
 
-        self._fluctuation = None
         self._fluctuation_beta = fluctuation_beta
         self._fluctuation_window = fluctuation_window
-        if fluctuation:
-            from fuzzer_tool.core.fluctuation import WorkFunctional
-
-            self._fluctuation = WorkFunctional(beta=fluctuation_beta, window=fluctuation_window)
-            data = self._state_store.get("fluctuation")
-            if data is not None:
-                self._fluctuation.restore(data)
-                print(
-                    f"[*] Fluctuation tracker loaded (beta={fluctuation_beta}, "
-                    f"samples={sum(len(v) for v in self._fluctuation._states.values())})"
-                )
+        self._fluctuation_requested = fluctuation
 
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
@@ -1845,40 +1834,17 @@ class Fuzzer:
                     "MI tracker loaded from state store (%d positions)", self._mi.max_positions
                 )
 
-        # Crash MI tracker: I(byte_position; crash_outcome)
-        from fuzzer_tool.core.crash_eta import CrashMITracker
-
-        self._crash_mi = CrashMITracker(max_positions=max_len, min_observations=20)
-        crash_mi_data = self._state_store.get("crash_mi")
-        if crash_mi_data is not None:
-            self._crash_mi.load(crash_mi_data)
-            log.info(
-                "Crash MI tracker loaded: %d execs, %d crashes",
-                self._crash_mi.total_execs,
-                self._crash_mi.total_crashes,
-            )
-
-        # Length-edge tracker: input_length → coverage edges
-        from fuzzer_tool.core.length_mi import LengthEdgeTracker
-
-        self._length_tracker = LengthEdgeTracker()
-        lt_data = self._state_store.get("length_tracker")
-        if lt_data is not None:
-            self._length_tracker.load(lt_data)
-            log.info("Length-edge tracker loaded: %d execs", self._length_tracker.total_execs)
-
         self._use_renyi_weight = renyi_weight
         self._use_transfer_entropy = transfer_entropy
-        self._te = None
         self._te_byte_edges: dict[int, dict[int, int]] = {}  # pos → {edge: count}
-        if transfer_entropy:
-            from fuzzer_tool.core.transfer_entropy import TransferEntropy
 
-            self._te = TransferEntropy(history_length=1)
-            self._te_input_history: list[bytes] = []
-            self._te_edge_history: list[bytes] = []
-            self._te_history_max = 500
-            log.info("Transfer entropy tracking enabled")
+        # Crash MI tracker, length-edge tracker, transfer entropy, Allan
+        # variance, and fluctuation tracking are constructed here in one
+        # pass — see core/analyzer_registry.py, the single source of truth
+        # for which analyzers exist and what gates each one.
+        from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
+
+        _ANALYZER_REGISTRY.wire_all(self)
 
         # FrameShift: universal length-field auto-adjustment
         from fuzzer_tool.core.frameshift import FrameShift
@@ -1959,13 +1925,9 @@ class Fuzzer:
         if self._garch is not None:
             self._garch.load(self._state_store.get("garch") or {})
 
-        # Allan variance detector for stall detection (edge discovery rate)
-        from fuzzer_tool.core.allan_variance import AllanVarianceDetector
-
-        self._allan = AllanVarianceDetector(
-            max_buffer_pow=ALLAN_BUFFER_POW, min_samples=ALLAN_MIN_SAMPLES
-        )
-        self._last_allan_edge_count = 0
+        # self._allan / self._last_allan_edge_count: constructed by
+        # analyzer_registry.wire_all() above, alongside crash_mi,
+        # length_tracker, transfer_entropy, and fluctuation.
 
         # ── Running aggregate cache for seed metadata ──────────────────
         # Avoids O(n·m) recomputation of corpus-wide sums every iteration.
