@@ -79,6 +79,7 @@ def _all_operator_schedulers():
     ducb = S.DUCBScheduler()
     swucb = S.SWUCBScheduler()
     cucb = S.CUCBScheduler()
+    round_robin = S.RoundRobinScheduler()
 
     def _ctx(_op):
         return [random.random() for _ in range(CONTEXT_DIM)]
@@ -104,6 +105,13 @@ def _all_operator_schedulers():
         ("SWUCBScheduler", swucb, swucb.select_op, swucb.record),
         # CUCB batches a round; select_op() closes any round left open.
         ("CUCBScheduler", cucb, cucb.select_op, cucb.record),
+        # RoundRobin is stateless in terms of rewards; record() is no-op.
+        (
+            "RoundRobinScheduler",
+            round_robin,
+            round_robin.select_op,
+            round_robin.record,
+        ),
     ]
 
 

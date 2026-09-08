@@ -9,8 +9,16 @@
 # the function was consolidated into gf2_common.py as the single source of
 # truth for GF(2) polynomial operations, and berlekamp_massey.py now imports
 # it from there instead of defining it locally.
+#
+# The find/union removal from overlap_density.py is an intentional refactor:
+# they were nested closures inside _build_clusters (never exported, never
+# called from outside that function) and were hoisted into a _UnionFind
+# class so the disjoint-set logic is unit-testable in its own right. The
+# only external import of the module is compute_corpus_overlap_density.
 [impactguard.analysis]
 suppress = [
     "src/fuzzer_tool/core/periodicity.py:detect_periodicity",
     "src/fuzzer_tool/core/berlekamp_massey.py:poly_gcd",
+    "src/fuzzer_tool/core/overlap_density.py:find",
+    "src/fuzzer_tool/core/overlap_density.py:union",
 ]

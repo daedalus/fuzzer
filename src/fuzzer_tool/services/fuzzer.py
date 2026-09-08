@@ -48,6 +48,7 @@ from fuzzer_tool.core.schedulers import (
     DUCBScheduler,
     EpsilonGreedyScheduler,
     Exp3Scheduler,
+    FPLScheduler,
     GPUCBScheduler,
     HierarchicalBanditScheduler,
     MonteCarloScheduler,
@@ -96,6 +97,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "ducb",
     "swucb",
     "cucb",
+    "fpl",
     "invasion",
     "round_robin",
 )
@@ -771,6 +773,8 @@ class Fuzzer:
         swucb_window=4000,
         cucb=False,
         cucb_gamma=0.9995,
+        fpl=False,
+        fpl_epsilon=1.0,
         contextual=False,
         contextual_alpha=1.0,
         contextual_lambda=1.0,
@@ -832,6 +836,13 @@ class Fuzzer:
         quiet_stats=False,
         no_save_state=False,
         dedup_execs=True,
+        # Exec-dedup backend.  "bloom" is the historic default (a
+        # BloomFilter with generational reset); "cuckoo" swaps in a
+        # CuckooFilter, which supports deletions and has a lower realised
+        # FP rate per bit.  Both expose the same update_bytes(key,
+        # reset_on_full) contract that _dedup_mutate drives, so the
+        # branch lives in one place: here, at construction.
+        exec_dedup_backend="bloom",
         fluctuation=False,
         fluctuation_beta=1.0,
         fluctuation_window=1000,
@@ -1305,20 +1316,9 @@ class Fuzzer:
             # skipping load() here deferred the read instead of preventing it.
             self._state_store.start_empty()
 
-        self._fluctuation = None
         self._fluctuation_beta = fluctuation_beta
         self._fluctuation_window = fluctuation_window
-        if fluctuation:
-            from fuzzer_tool.core.fluctuation import WorkFunctional
-
-            self._fluctuation = WorkFunctional(beta=fluctuation_beta, window=fluctuation_window)
-            data = self._state_store.get("fluctuation")
-            if data is not None:
-                self._fluctuation.restore(data)
-                print(
-                    f"[*] Fluctuation tracker loaded (beta={fluctuation_beta}, "
-                    f"samples={sum(len(v) for v in self._fluctuation._states.values())})"
-                )
+        self._fluctuation_requested = fluctuation
 
         self.corpus: list[bytes] = []
         self.seen_hashes: set[str] = set()
@@ -1332,8 +1332,18 @@ class Fuzzer:
         # exec, so re-rolling the mutation on a hit is close to free.
         # Generational: wiped once `capacity` inputs are absorbed, which keeps
         # the realised FP rate at 1e-3 over an unbounded exec stream.
-        self._exec_bloom = BloomFilter(capacity=EXEC_BLOOM_CAPACITY, error_rate=1e-3)
         self._dedup_execs = dedup_execs
+        self._exec_dedup_backend = exec_dedup_backend
+        if exec_dedup_backend == "cuckoo":
+            from fuzzer_tool.core.cuckoo import CuckooFilter
+
+            self._exec_bloom = CuckooFilter(capacity=EXEC_BLOOM_CAPACITY)
+        elif exec_dedup_backend == "bloom":
+            self._exec_bloom = BloomFilter(capacity=EXEC_BLOOM_CAPACITY, error_rate=1e-3)
+        else:
+            raise ValueError(
+                f"unknown exec_dedup_backend {exec_dedup_backend!r}; expected 'bloom' or 'cuckoo'"
+            )
         self._dedup_hits = 0
         self._dedup_gaveup = 0
         # Performance novelty (per-edge max hit count). Separate from the
@@ -1774,6 +1784,14 @@ class Fuzzer:
             self._cucb = CUCBScheduler(gamma=cucb_gamma, rng=self._rand_pool)
             log.info("CUCB enabled (gamma=%.5f)", cucb_gamma)
 
+        # Follow Perturbed Leader: perturb-and-select bandit with decaying
+        # perturbation schedule for stochastic bandit convergence.
+        self._use_fpl = fpl
+        self._fpl = None
+        if fpl:
+            self._fpl = FPLScheduler(epsilon=fpl_epsilon, rng=self._rand_pool)
+            log.info("FPL enabled (epsilon=%.2f)", fpl_epsilon)
+
         # Round-robin: deterministic baseline. --seed should reproduce
         # exactly, so no RandPool is used here -- the cycling order is
         # the registration order, fully driven by operator init.
@@ -1828,40 +1846,17 @@ class Fuzzer:
                     "MI tracker loaded from state store (%d positions)", self._mi.max_positions
                 )
 
-        # Crash MI tracker: I(byte_position; crash_outcome)
-        from fuzzer_tool.core.crash_eta import CrashMITracker
-
-        self._crash_mi = CrashMITracker(max_positions=max_len, min_observations=20)
-        crash_mi_data = self._state_store.get("crash_mi")
-        if crash_mi_data is not None:
-            self._crash_mi.load(crash_mi_data)
-            log.info(
-                "Crash MI tracker loaded: %d execs, %d crashes",
-                self._crash_mi.total_execs,
-                self._crash_mi.total_crashes,
-            )
-
-        # Length-edge tracker: input_length → coverage edges
-        from fuzzer_tool.core.length_mi import LengthEdgeTracker
-
-        self._length_tracker = LengthEdgeTracker()
-        lt_data = self._state_store.get("length_tracker")
-        if lt_data is not None:
-            self._length_tracker.load(lt_data)
-            log.info("Length-edge tracker loaded: %d execs", self._length_tracker.total_execs)
-
         self._use_renyi_weight = renyi_weight
         self._use_transfer_entropy = transfer_entropy
-        self._te = None
         self._te_byte_edges: dict[int, dict[int, int]] = {}  # pos → {edge: count}
-        if transfer_entropy:
-            from fuzzer_tool.core.transfer_entropy import TransferEntropy
 
-            self._te = TransferEntropy(history_length=1)
-            self._te_input_history: list[bytes] = []
-            self._te_edge_history: list[bytes] = []
-            self._te_history_max = 500
-            log.info("Transfer entropy tracking enabled")
+        # Crash MI tracker, length-edge tracker, transfer entropy, Allan
+        # variance, and fluctuation tracking are constructed here in one
+        # pass — see core/analyzer_registry.py, the single source of truth
+        # for which analyzers exist and what gates each one.
+        from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
+
+        _ANALYZER_REGISTRY.wire_all(self)
 
         # FrameShift: universal length-field auto-adjustment
         from fuzzer_tool.core.frameshift import FrameShift
@@ -1942,13 +1937,9 @@ class Fuzzer:
         if self._garch is not None:
             self._garch.load(self._state_store.get("garch") or {})
 
-        # Allan variance detector for stall detection (edge discovery rate)
-        from fuzzer_tool.core.allan_variance import AllanVarianceDetector
-
-        self._allan = AllanVarianceDetector(
-            max_buffer_pow=ALLAN_BUFFER_POW, min_samples=ALLAN_MIN_SAMPLES
-        )
-        self._last_allan_edge_count = 0
+        # self._allan / self._last_allan_edge_count: constructed by
+        # analyzer_registry.wire_all() above, alongside crash_mi,
+        # length_tracker, transfer_entropy, and fluctuation.
 
         # ── Running aggregate cache for seed metadata ──────────────────
         # Avoids O(n·m) recomputation of corpus-wide sums every iteration.
@@ -2006,6 +1997,7 @@ class Fuzzer:
             or self._ducb
             or self._swucb
             or self._cucb
+            or self._fpl
             or self._use_shapley
         )
 
@@ -2261,6 +2253,8 @@ class Fuzzer:
             _register_arms(self._swucb)
         if self._cucb:
             _register_arms(self._cucb)
+        if self._fpl:
+            _register_arms(self._fpl)
         if self._contextual:
             _register_arms(self._contextual)
         if self._round_robin:
@@ -4051,10 +4045,32 @@ class Fuzzer:
 
         # Bayesian seed quality feedback: record whether this parent seed
         # produced new coverage (Thompson sampling posterior update).
+        #
+        # The outcome weight is proportional to discovery rarity, per
+        # seed_quality.record_outcome's contract.  When the F0 estimator is
+        # wired (edge_tracker.enable_f0) it supplies that rarity signal
+        # directly: in an unsaturated corpus a new edge is common, so the
+        # weight is small; as the estimate saturates toward the exact count
+        # each remaining discovery is rare, so the weight rises toward 1.
+        # The weight is bounded above by 1.0, so the F0 signal never inflates
+        # a posterior beyond the default -- it only ever re-weights.
         if self._seed_quality:
             parent_key = self._seed_key(data)
             self._seed_quality.init_seed(parent_key)
-            self._seed_quality.record_outcome(parent_key, discovered=bool(has_new_coverage))
+            weight = 1.0
+            f0_est = self._edge_tracker.estimate_distinct_edges_f0()
+            if f0_est is not None:
+                observed = self._edge_tracker.get_cumulative_edge_count()
+                # Fraction of the estimated total that has been discovered.
+                # Near 1 = saturated -> each remaining discovery is rare ->
+                # weight rises toward 1.  Near 0 = lots undiscovered ->
+                # discoveries are common -> weight shrinks.  Bounded in
+                # (0, 1], so the F0 signal never inflates a posterior
+                # beyond the default -- it only ever re-weights.
+                weight = observed / max(1.0, f0_est)
+            self._seed_quality.record_outcome(
+                parent_key, discovered=bool(has_new_coverage), weight=weight
+            )
 
         # Mark cmplog tokens/pairs present during a coverage gain as more
         # valuable — they survive eviction longer.
@@ -4407,6 +4423,7 @@ class Fuzzer:
             self._ducb,
             self._swucb,
             self._cucb,
+            self._fpl,
         ):
             if scheduler is None:
                 continue
@@ -5504,8 +5521,12 @@ class Fuzzer:
             all_strategies.append("swucb")
         if self._cucb:
             all_strategies.append("cucb")
+        if self._fpl:
+            all_strategies.append("fpl")
         if self._use_invasion and self.mc and self.mc_bandit:
             all_strategies.append("invasion")
+        if self._use_round_robin and self._round_robin:
+            all_strategies.append("round_robin")
         for other in all_strategies:
             if other != self._meta_strategy:
                 self._elo.record_strategy_match(self._meta_strategy, other, score)
@@ -5577,8 +5598,12 @@ class Fuzzer:
             ops.append("swucb")
         if getattr(self, "_cucb", False):
             ops.append("cucb")
+        if getattr(self, "_fpl", False):
+            ops.append("fpl")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
             ops.append("invasion")
+        if getattr(self, "_use_round_robin", False) and self._round_robin:
+            ops.append("round_robin")
         if getattr(self, "_use_shapley", False):
             ops.append("shapley")
         if ops:
@@ -5793,12 +5818,16 @@ class Fuzzer:
             ops.append("swucb")
         if getattr(self, "_cucb", False):
             ops.append("cucb")
+        if getattr(self, "_fpl", False):
+            ops.append("fpl")
         if getattr(self, "_use_contextual", False):
             ops.append("contextual")
         if getattr(self, "_use_invasion", False):
             ops.append("invasion")
         if getattr(self, "_use_shapley", False):
             ops.append("shapley")
+        if getattr(self, "_use_round_robin", False):
+            ops.append("round-robin")
         if getattr(self, "_cmaes", False):
             groups["Scheduling"].append("cma-es")
         if ops:
@@ -5932,7 +5961,6 @@ class Fuzzer:
         print(f"[*] Ngram: k={detect_ngram_k(self.target)}")
         if self._validity.enabled:
             print(f"[*] Validity channel: reject-code {self._validity.reject_code}")
-        print(f"[*] Selected schedulers: {self._selected_schedulers_str()}")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
 
@@ -6405,12 +6433,18 @@ class Fuzzer:
                     # _print_stats_dr_str (stats.py:583); we only read its
                     # state here.  The homogeneity detector is fed above.
                     execs_since_edge = self.exec_count - self._last_new_edge_exec
+                    # F0 plateau: the streaming distinct-edge estimate has
+                    # stopped growing.  Opt-in via the edge tracker's
+                    # enable_f0 flag; None when the estimator is not wired,
+                    # so observe() leaves classification unchanged.
+                    f0_plateau = self._edge_tracker.f0_plateau()
                     self._regime.observe(
                         discovery_rate=self._stats.discovery_rate(),
                         allan_delta=delta,
                         homogeneity_result=homogeneity_result,
                         execs_since_edge=execs_since_edge,
                         exec_count=self.exec_count,
+                        f0_plateau=f0_plateau,
                     )
                     # Regime-driven strategy adjustment
                     if self._regime.actionable:

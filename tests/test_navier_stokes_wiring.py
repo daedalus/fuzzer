@@ -8,6 +8,8 @@ measurable.  These tests pin the ordering so a later change has to be
 deliberate.
 """
 
+import pytest
+
 from fuzzer_tool.core.coverage_regime import CoverageRegimeDetector
 from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
 from fuzzer_tool.core.navier_stokes import ContinuumField
@@ -104,16 +106,53 @@ class TestRegimeContinuumInstrumentation:
         d.observe(0.0, 0, None, execs_since_edge=50_000, exec_count=2000)
 
         corr = d.continuum_correlation()
-        assert CoverageRegime.SUPERCRITICAL in corr
-        assert CoverageRegime.SUBCRITICAL in corr
-        assert corr[CoverageRegime.SUPERCRITICAL] > 0.0
+        # The bucket means are still reported, so the per-regime Reynolds
+        # figure is reachable under ``bucket_means``.
+        assert CoverageRegime.SUPERCRITICAL in corr["bucket_means"]
+        assert CoverageRegime.SUBCRITICAL in corr["bucket_means"]
+        assert corr["bucket_means"][CoverageRegime.SUPERCRITICAL] > 0.0
+        # The two observations are in different regimes with different Re, so
+        # the rank correlation is defined and not degenerate.
+        assert -1.0 <= corr["rho"] <= 1.0
+        assert 0.0 <= corr["p_value"] <= 1.0
 
     def test_correlation_empty_without_a_field(self):
         d = self._detector()
         d.observe(2.0, 0, None, execs_since_edge=5, exec_count=1000)
-        assert d.continuum_correlation() == {}
+        corr = d.continuum_correlation()
+        assert corr["rho"] == 0.0
+        assert corr["p_value"] == 1.0
+        assert corr["bucket_means"] == {}
 
     def test_correlation_ignores_unobserved_field(self):
         d = self._detector(continuum=ContinuumField())
         d.observe(2.0, 0, None, execs_since_edge=5, exec_count=1000)
-        assert d.continuum_correlation() == {}
+        corr = d.continuum_correlation()
+        assert corr["rho"] == 0.0
+        assert corr["p_value"] == 1.0
+        assert corr["bucket_means"] == {}
+
+    def test_correlation_is_perfect_when_re_is_monotonic_in_regime(self):
+        """One observation per regime, Re monotonic in regime -> rho = 1."""
+        d = self._detector(continuum=ContinuumField())
+        for regime, re_value in [
+            (CoverageRegime.SUBCRITICAL, 1.0),
+            (CoverageRegime.CRITICAL, 10.0),
+            (CoverageRegime.SUPERCRITICAL, 20.0),
+        ]:
+            d._continuum_history.append((regime, re_value))
+        corr = d.continuum_correlation()
+        assert corr["rho"] == pytest.approx(1.0)
+        assert corr["p_value"] == pytest.approx(0.0)
+
+    def test_correlation_is_anti_monotonic_when_re_inverts_with_regime(self):
+        d = self._detector(continuum=ContinuumField())
+        for regime, re_value in [
+            (CoverageRegime.SUBCRITICAL, 20.0),
+            (CoverageRegime.CRITICAL, 10.0),
+            (CoverageRegime.SUPERCRITICAL, 1.0),
+        ]:
+            d._continuum_history.append((regime, re_value))
+        corr = d.continuum_correlation()
+        assert corr["rho"] == pytest.approx(-1.0)
+        assert corr["p_value"] == pytest.approx(0.0)

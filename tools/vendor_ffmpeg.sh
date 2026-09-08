@@ -17,10 +17,10 @@
 #   FFMPEG_COMPONENTS  = space-separated configure flags to override the component set entirely.
 #
 # Source (tried in order; first reachable wins). Override with FFMPEG_SRC=<url-or-gitref>.
-#   1. https://code.ffmpeg.org/FFmpeg/FFmpeg        (canonical git, primary)
-#   2. https://ffmpeg.org/releases/ffmpeg-<ver>.tar.xz        (upstream release tarball)
-#   3. https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n<ver>   (GitHub tarball mirror)
-#   4. git clone --depth 1 --branch n<ver> https://github.com/FFmpeg/FFmpeg   (git fallback)
+#   1. https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n<ver>   (GitHub codeload tarball, primary)
+#   2. git clone --depth 1 --branch n<ver> https://github.com/FFmpeg/FFmpeg   (GitHub git clone)
+#   3. https://code.ffmpeg.org/FFmpeg/FFmpeg        (canonical git)
+#   4. https://ffmpeg.org/releases/ffmpeg-<ver>.tar.xz        (upstream release tarball)
 # The GitHub mirrors matter in locked-down/CI networks where ffmpeg.org egress is blocked.
 #
 # Requirements: clang (for --nosan/--asan), make, curl or git, tar/xz.
@@ -147,14 +147,20 @@ fi
 
 
 # ── Step 1: Acquire source (multi-source with fallbacks) ─────────
+# Source priority (tried in order; first reachable wins):
+#   1. GitHub codeload tarball  (https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n<ver>)
+#   2. GitHub git clone         (git clone --depth 1 --branch n<ver> https://github.com/FFmpeg/FFmpeg)
+#   3. code.ffmpeg.org git      (canonical, for networks with ffmpeg.org egress)
+#   4. ffmpeg.org release tarball
+# Override with FFMPEG_SRC=<url-or-gitref>.
 fetch_source() {
-    [ -d "$FFMPEG_DIR" ] && [ -f "$FFMPEG_DIR/configure" ] && { echo "[1/4] Source present at $FFMPEG_DIR"; return 0; }
+    [ -d "$FFMPEG_DIR" ] && [ -f "$FFMPEG_DIR/configure" ] && { echo "[1/5] Source present at $FFMPEG_DIR"; return 0; }
     local tmp="$VENDOR_DIR/.ffsrc"; rm -rf "$tmp"; mkdir -p "$tmp"
     local tarball="$tmp/ffmpeg.tar"
 
     # explicit override
     if [ -n "$FFMPEG_SRC" ]; then
-        echo "[1/4] Fetching from FFMPEG_SRC=$FFMPEG_SRC"
+        echo "[1/5] Fetching from FFMPEG_SRC=$FFMPEG_SRC"
         if [[ "$FFMPEG_SRC" == *.git || "$FFMPEG_SRC" == git://* ]]; then
             git clone --depth 1 "$FFMPEG_SRC" "$FFMPEG_DIR" && return 0
         else
@@ -163,31 +169,32 @@ fetch_source() {
         echo "ERROR: FFMPEG_SRC fetch failed" >&2; return 1
     fi
 
-    # 1. canonical FFmpeg git (code.ffmpeg.org)
-    echo "[1/4] Trying code.ffmpeg.org git clone (tag n${FFMPEG_VERSION})..."
-    if git clone --depth 1 --branch "n${FFMPEG_VERSION}" \
-         https://code.ffmpeg.org/FFmpeg/FFmpeg "$FFMPEG_DIR" 2>/dev/null; then
-        return 0
-    fi
-    # 2. upstream release tarball
-    echo "    code.ffmpeg.org unreachable — trying ffmpeg.org release tarball..."
-    if curl -fL --connect-timeout 15 -o "$tarball" \
-         "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" 2>/dev/null; then
-        _extract "$tarball" && return 0
-    fi
-    # 3. GitHub codeload tarball (works where ffmpeg.org is blocked)
-    echo "    ffmpeg.org unreachable — trying GitHub codeload tarball..."
+    # 1. GitHub codeload tarball (works where ffmpeg.org is blocked)
+    echo "[1/5] Trying GitHub codeload tarball (tag n${FFMPEG_VERSION})..."
     if curl -fL --connect-timeout 15 -o "$tarball" \
          "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n${FFMPEG_VERSION}" 2>/dev/null; then
         _extract "$tarball" && return 0
     fi
-    # 4. git clone fallback
+    # 2. GitHub git clone fallback
     echo "    codeload failed — trying git clone of tag n${FFMPEG_VERSION}..."
     if git clone --depth 1 --branch "n${FFMPEG_VERSION}" \
          https://github.com/FFmpeg/FFmpeg "$FFMPEG_DIR" 2>/dev/null; then
         return 0
     fi
-    echo "ERROR: all FFmpeg source mirrors failed (code.ffmpeg.org, ffmpeg.org, codeload, github git)." >&2
+    # 3. canonical FFmpeg git (code.ffmpeg.org)
+    echo "    GitHub unreachable — trying code.ffmpeg.org git clone..."
+    if git clone --depth 1 --branch "n${FFMPEG_VERSION}" \
+         https://code.ffmpeg.org/FFmpeg/FFmpeg "$FFMPEG_DIR" 2>/dev/null; then
+        return 0
+    fi
+    # 4. upstream release tarball
+    echo "    code.ffmpeg.org unreachable — trying ffmpeg.org release tarball..."
+    if curl -fL --connect-timeout 15 -o "$tarball" \
+         "https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz" 2>/dev/null; then
+        _extract "$tarball" && return 0
+    fi
+
+    echo "ERROR: all FFmpeg source mirrors failed." >&2
     echo "       Set FFMPEG_SRC=<tarball-url|git-url> to a reachable mirror." >&2
     return 1
 }
@@ -201,8 +208,37 @@ _extract() {
 }
 fetch_source
 
-# ── Step 2: Configure ────────────────────────────────────────────
-echo "[2/4] Configuring FFmpeg ($MODE${MINIMAL:+, minimal})..."
+# Apply patches after fetching source
+apply_patches() {
+    local patch_file="${SCRIPT_DIR}/../patches/ffmpeg-vpk-divide-by-zero.patch"
+    if [ ! -f "$patch_file" ]; then
+        echo "[2/5] No ffmpeg patches found at $patch_file"
+        return 0
+    fi
+    echo "[2/5] Applying ffmpeg patches..."
+    # Check if patch can be applied
+    if (cd "$FFMPEG_DIR" && git apply --check "$patch_file" 2>/dev/null); then
+        if (cd "$FFMPEG_DIR" && git apply -v "$patch_file" 2>&1); then
+            echo "  OK: Patch applied successfully"
+        else
+            echo "ERROR: Failed to apply patch $patch_file"
+            return 1
+        fi
+    else
+        # Check if already applied by trying a dry-run
+        if (cd "$FFMPEG_DIR" && git apply --check "$patch_file" 2>&1 | grep -q "Check patch"); then
+            echo "  OK: Patch already applied"
+        else
+            echo "  WARN: Patch may not apply cleanly to FFmpeg $FFMPEG_VERSION"
+        fi
+    fi
+}
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+apply_patches
+
+# ── Step 3: Configure ────────────────────────────────────────────
+echo "[3/5] Configuring FFmpeg ($MODE${MINIMAL:+, minimal})..."
 (cd "$FFMPEG_DIR" && \
     CC="$CC" CFLAGS="$CFLAGS" \
     ./configure \
@@ -226,9 +262,9 @@ echo "[2/4] Configuring FFmpeg ($MODE${MINIMAL:+, minimal})..."
     exit 1
 }
 
-# ── Step 3: Build ────────────────────────────────────────────────
+# ── Step 4: Build ────────────────────────────────────────────────
 NPROC=$(nproc 2>/dev/null || echo 4)
-echo "[3/4] Building FFmpeg ($NPROC cores)..."
+echo "[4/5] Building FFmpeg ($NPROC cores)..."
 (cd "$FFMPEG_DIR" && make -j"$NPROC" -s \
     libavutil/libavutil.a libavcodec/libavcodec.a \
     libavformat/libavformat.a libswresample/libswresample.a 2>&1 | tail -5) || {
@@ -236,8 +272,8 @@ echo "[3/4] Building FFmpeg ($NPROC cores)..."
     exit 1
 }
 
-# ── Step 4: Verify ───────────────────────────────────────────────
-echo "[4/4] Verifying..."
+# ── Step 5: Verify ───────────────────────────────────────────────
+echo "[5/5] Verifying..."
 MISSING=0
 for lib in libavformat libavcodec libavutil libswresample; do
     a="$FFMPEG_DIR/$lib/$lib.a"

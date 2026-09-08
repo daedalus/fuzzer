@@ -371,8 +371,31 @@ def cmd_fuzz(args):
     if args.grammar:
         from fuzzer_tool.core.grammar import load_grammar
 
-        grammar = load_grammar(args.grammar)
-        print(f"[*] Grammar loaded: {len(grammar.rules)} rules")
+        # Expand glob patterns in each grammar path
+        grammar_paths = []
+        for spec in args.grammar:
+            if any(c in spec for c in "*?["):
+                matches = glob.glob(spec)
+                if not matches:
+                    print(f"[-] No grammar files found matching pattern: {spec}")
+                    sys.exit(1)
+                grammar_paths.extend(matches)
+                if len(matches) > 1:
+                    print(f"[*] Multiple grammar files match {spec}, using: {', '.join(matches)}")
+            else:
+                grammar_paths.append(spec)
+
+        # Load and merge all grammar files
+        for i, path in enumerate(grammar_paths):
+            g = load_grammar(path)
+            if grammar is None:
+                grammar = g
+            else:
+                grammar.merge(g)
+            if i == 0:
+                print(f"[*] Grammar loaded: {len(grammar.rules)} rules from {path}")
+            else:
+                print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
 
     # Parallel mode
     if args.jobs and args.jobs > 1:
@@ -445,6 +468,8 @@ def cmd_fuzz(args):
             swucb_window=getattr(args, "swucb_window", 4000),
             cucb=getattr(args, "cucb", False),
             cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
+            fpl=getattr(args, "fpl", False),
+            fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
             contextual=getattr(args, "contextual", False),
@@ -482,16 +507,20 @@ def cmd_fuzz(args):
         args.ducb = True
         args.swucb = True
         args.cucb = True
+        args.fpl = True
         args.contextual = True
         args.invasion = True
         args.garch = True
         args.continuum = True
+        args.cma_es = True
+        args.round_robin = True
         args.ga = True
         args.qea = True
         args.bayesian = True
         args.boltzmann = True
         args.ecofuzz = True
         args.markov_gen = True
+        args.tang = True
         # Mutation-side schedulers/features that are not Elo-arbitrated but are
         # part of the scheduling stack; flip them on so --elo all is the
         # everything-on switch (power schedule fast = classic AFL default)
@@ -617,6 +646,8 @@ def cmd_fuzz(args):
         swucb_window=getattr(args, "swucb_window", 4000),
         cucb=getattr(args, "cucb", False),
         cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
+        fpl=getattr(args, "fpl", False),
+        fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
         contextual=getattr(args, "contextual", False),
@@ -704,6 +735,7 @@ def cmd_fuzz(args):
         quiet_stats=False,
         no_save_state=getattr(args, "no_save_state", False),
         dedup_execs=not getattr(args, "no_dedup_execs", False),
+        exec_dedup_backend=getattr(args, "exec_dedup_backend", "bloom"),
         perf_novelty=not getattr(args, "no_perf_novelty", False),
         reject_code=getattr(args, "reject_code", None),
         op_span_reverse=getattr(args, "op_span_reverse", False),
@@ -825,8 +857,31 @@ def cmd_tmin(args):
     if args.grammar:
         from fuzzer_tool.core.grammar import load_grammar
 
-        grammar = load_grammar(args.grammar)
-        print(f"[*] Grammar loaded: {len(grammar.rules)} rules (tree-level shrinking enabled)")
+        # Expand glob patterns in each grammar path
+        grammar_paths = []
+        for spec in args.grammar:
+            if any(c in spec for c in "*?["):
+                matches = glob.glob(spec)
+                if not matches:
+                    print(f"[-] No grammar files found matching pattern: {spec}")
+                    sys.exit(1)
+                grammar_paths.extend(matches)
+            else:
+                grammar_paths.append(spec)
+
+        # Load and merge all grammar files
+        for i, path in enumerate(grammar_paths):
+            g = load_grammar(path)
+            if grammar is None:
+                grammar = g
+            else:
+                grammar.merge(g)
+            if i == 0:
+                print(
+                    f"[*] Grammar loaded: {len(grammar.rules)} rules from {path} (tree-level shrinking enabled)"
+                )
+            else:
+                print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
 
     minimized = tmin(
         target=args.target,
@@ -2053,6 +2108,17 @@ def main() -> int:
         help="CUCB discount per mutation round (default: 0.9995)",
     )
     fuzz_parser.add_argument(
+        "--fpl",
+        action="store_true",
+        help="Enable Follow Perturbed Leader operator scheduling",
+    )
+    fuzz_parser.add_argument(
+        "--fpl-epsilon",
+        type=float,
+        default=1.0,
+        help="FPL perturbation scale; higher = more exploration (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
         "--contextual",
         action="store_true",
         help=(
@@ -2661,6 +2727,18 @@ def main() -> int:
         help="Do not filter already-executed mutants through the exec bloom filter",
     )
     fuzz_parser.add_argument(
+        "--exec-dedup-backend",
+        choices=["bloom", "cuckoo"],
+        default="bloom",
+        help=(
+            "Which structure backs the exec-dedup gate. 'bloom' (default) is "
+            "the historic BloomFilter with generational reset; 'cuckoo' swaps "
+            "in a CuckooFilter, which supports deletions and a lower realised "
+            "false-positive rate per bit. Both expose the same update_bytes "
+            "contract, so the choice is opt-in and the default is unchanged."
+        ),
+    )
+    fuzz_parser.add_argument(
         "--reject-code",
         type=int,
         default=None,
@@ -2857,8 +2935,8 @@ def main() -> int:
     fuzz_parser.add_argument(
         "-g",
         "--grammar",
-        default=None,
-        help="Grammar spec (built-in: json, http_request, elf) or path to .gram file",
+        nargs="+",
+        help="Grammar file(s) (built-in: json, http_request, elf) or path to .gram file",
     )
     fuzz_parser.add_argument(
         "-j",
@@ -3178,8 +3256,8 @@ def main() -> int:
     tmin_parser.add_argument(
         "-g",
         "--grammar",
-        default=None,
-        help="Grammar for tree-level shrinking (built-in: json, http_request, elf or .gram file)",
+        nargs="+",
+        help="Grammar file(s) for tree-level shrinking (built-in: json, http_request, elf or .gram file)",
     )
     tmin_parser.add_argument(
         "-O", "--output", default=None, help="Output file for minimized input (default: stdout)"

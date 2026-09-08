@@ -628,10 +628,32 @@ class EdgeTracker:
         map_size: int = 65536,
         max_tracked_seeds: int = MAX_TRACKED_SEEDS,
         morris_mode: bool = False,
+        enable_f0: bool = False,
+        f0_eps: float = 0.1,
+        f0_delta: float = 1e-6,
+        f0_plateau_window: int = 64,
+        f0_plateau_threshold: float = 0.02,
     ):
         self.map_size = map_size
         self.max_tracked_seeds = max_tracked_seeds
         self._morris_mode = morris_mode
+        # ── Streaming F0 (CVM) distinct-elements estimator ─────────────────
+        # Opt-in: the exact cardinality is already available as
+        # len(cumulative_edges), so the estimator only pays for itself when
+        # the caller wants a memory-bounded approximate count over a stream
+        # the set cannot track, or a plateau signal that does not depend on
+        # the stall window.  It is fed the edge-ID stream as it arrives in
+        # record_edges() (the sparse path only -- the bitmap path carries
+        # slot indices, not edge IDs, and feeding those would conflate the
+        # two key spaces).
+        self._f0_enabled = enable_f0
+        if enable_f0:
+            from fuzzer_tool.core.cvm import F0Estimator
+
+            self._f0 = F0Estimator(eps=f0_eps, delta=f0_delta, m=map_size * 100)
+            self._f0_plateau_window = f0_plateau_window
+            self._f0_plateau_threshold = f0_plateau_threshold
+            self._f0_history: list[tuple[int, float]] = []  # (exec_count, estimate)
         # Per-seed edge sets: seed_key -> set of edge indices
         self.seed_edges: dict[str, set[int]] = {}
         # Per-seed hit counts: seed_key -> {edge_index: hit_count} (sparse)
@@ -779,6 +801,8 @@ class EdgeTracker:
                 val = hit_counts.get(edge_id, 1) if hit_counts else 1
                 new_edges.add(edge_id)
                 hc[edge_id] = val
+                if self._f0_enabled:
+                    self._f0.update(edge_id)
                 self._aggregate_totals[edge_id] = self._aggregate_totals.get(edge_id, 0) + val
                 self._aggregate_total_count += val
                 old_gh = self._global_edge_hits.get(edge_id, 0)
@@ -835,6 +859,12 @@ class EdgeTracker:
 
         # Prune old seeds if over limit
         self._maybe_prune()
+
+        # F0 plateau history: one sample per record_edges() call, keyed on
+        # the current cumulative edge count so the plateau test can be
+        # evaluated against the same axis the exact count uses.
+        if self._f0_enabled:
+            self._f0_history.append((len(self.cumulative_edges), self._f0.estimate()))
 
         return new_contributions
 
@@ -1504,6 +1534,22 @@ class EdgeTracker:
                     js += q * math.log(q / m)
         return 0.5 * js
 
+    def _aggregate_norms(self, hc: dict[int, int]) -> tuple[float, float]:
+        """L1 (Wasserstein) and Linf (KS) of the seed's hit-count profile vs the corpus.
+
+        Shared by the two aggregate-distance entry points.  ``_cdf_walk`` also
+        returns the L2 (CRPS) norm on the same pass; it is not surfaced here
+        because nothing consumes it and keeping the return pair narrow keeps
+        the call site honest about what is being measured.
+        """
+        if not hc:
+            return 0.0, 0.0
+        corpus = self._corpus_hitcount_profile()
+        if not corpus:
+            return 0.0, 0.0
+        wasserstein, ks, _crps = self._cdf_walk(self._hitcount_profile(hc), corpus)
+        return wasserstein, ks
+
     def _wasserstein_vs_aggregate(self, hc: dict[int, int]) -> float:
         """Wasserstein-1 between a seed's hit-count profile and the corpus's.
 
@@ -1515,13 +1561,22 @@ class EdgeTracker:
         The distance is computed on the log2 hit-count axis; the edge index
         carries no metric (see _hitcount_profile).
         """
-        if not hc:
-            return 0.0
-        corpus = self._corpus_hitcount_profile()
-        if not corpus:
-            return 0.0
-        wasserstein, _ks, _crps = self._cdf_walk(self._hitcount_profile(hc), corpus)
-        return wasserstein
+        return self._aggregate_norms(hc)[0]
+
+    def ks_vs_aggregate(self, hc: dict[int, int]) -> float:
+        """Kolmogorov-Smirnov distance between a seed's hit-count profile and the corpus.
+
+        The single largest absolute CDF gap -- the Linf norm of the same
+        CDF-difference quantity Wasserstein measures in L1.  Where
+        Wasserstein integrates the whole axis and is comparatively blind to
+        one localized spike, KS flags a seed with one sharply anomalous
+        hit-count bucket even if the rest of its profile matches the corpus
+        closely.  That is the "three edges hit 500 times" case this metric
+        family exists to catch, and it is why KS is surfaced alongside
+        Wasserstein rather than left discarded (it was already computed on
+        every call by ``_cdf_walk``).
+        """
+        return self._aggregate_norms(hc)[1]
 
     def compute_hitcount_diversity_weight(self, seed_key: str) -> float:
         """Compute weight based on JS divergence of hit-count distribution.
@@ -2138,6 +2193,67 @@ class EdgeTracker:
         so the count survives bitmap resizes.
         """
         return max(len(self.cumulative_edges), self._cumulative_edges_total)
+
+    # ── Streaming F0 (CVM) cardinality ────────────────────────────────────
+    # These methods are inert unless the tracker was constructed with
+    # enable_f0=True.  The exact count above is always authoritative; the
+    # F0 estimate is a memory-bounded approximate sibling that complements
+    # it -- useful when the caller wants an online count over a stream the
+    # set cannot hold, or a plateau signal that does not depend on the
+    # stall window.
+
+    def estimate_distinct_edges_f0(self) -> float | None:
+        """Streaming approximate distinct-edge count, or None if F0 is off."""
+        if not self._f0_enabled:
+            return None
+        return self._f0.estimate()
+
+    def f0_calibration(self) -> dict | None:
+        """Compare the F0 estimate against the exact count.
+
+        Returns None when F0 is off; otherwise a dict with the estimate,
+        the exact count, the absolute and relative error, and the current
+        sampling probability -- useful for tuning eps/delta on a real
+        corpus before wiring the estimate into a decision.
+        """
+        if not self._f0_enabled:
+            return None
+        est = self._f0.estimate()
+        exact = self.get_cumulative_edge_count()
+        abs_err = abs(est - exact)
+        rel_err = abs_err / exact if exact else float("inf")
+        return {
+            "estimate": est,
+            "exact": exact,
+            "abs_error": abs_err,
+            "rel_error": rel_err,
+            "p": self._f0.p,
+        }
+
+    def f0_plateau(self) -> bool | None:
+        """True when the F0 estimate has stopped growing.
+
+        A plateau is a different and stronger subcritical signal than a
+        small discovery delta: it says the cardinality itself has
+        saturated, not merely that the last few executions found nothing.
+        The test is a relative change over the last ``_f0_plateau_window``
+        record_edges() calls, below ``_f0_plateau_threshold``.
+        Returns None when F0 is off or not enough history exists yet.
+        History is appended by record_edges() (keyed on the cumulative
+        edge count, the same axis the exact count uses), so this method
+        is a pure evaluator -- it never mutates state.
+        """
+        if not self._f0_enabled:
+            return None
+        hist = self._f0_history
+        if len(hist) < self._f0_plateau_window:
+            return None
+        recent = hist[-self._f0_plateau_window :]
+        first = recent[0][1]
+        last = recent[-1][1]
+        if first <= 0:
+            return False
+        return (last - first) / first < self._f0_plateau_threshold
 
     def _rebuild_frequency_spectrum(self):
         """Rebuild the *abundance* frequency spectrum from global edge hits (lazy).

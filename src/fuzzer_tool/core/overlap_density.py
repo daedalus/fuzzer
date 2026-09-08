@@ -43,6 +43,47 @@ def _sig_jaccard(sig_a: list[int], sig_b: list[int]) -> float:
     return _sig_matches(sig_a, sig_b) / len(sig_a)
 
 
+class _UnionFind:
+    """Disjoint-set forest with union-by-size + path-halving compression.
+
+    Either heuristic alone bounds amortized find() to O(log n); combined
+    they give the standard O(alpha(n)) amortized bound. Kept as a small
+    standalone class (rather than inline closures) so it can be unit
+    tested independently of the LSH clustering that drives it.
+    """
+
+    def __init__(self, n: int) -> None:
+        self.parent = list(range(n))
+        self.size = [1] * n
+
+    def find(self, x: int) -> int:
+        parent = self.parent
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(self, a: int, b: int) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra == rb:
+            return
+        # Union by size: attach the smaller tree under the larger tree's
+        # root, keeping amortized find() close to O(log n) worst-case
+        # instead of degrading to O(n) on a chain-shaped similarity graph.
+        if self.size[ra] < self.size[rb]:
+            ra, rb = rb, ra
+        self.parent[rb] = ra
+        self.size[ra] += self.size[rb]
+
+    def depth(self, x: int) -> int:
+        """Uncompressed depth of x's tree walk (diagnostic / test use only)."""
+        d = 0
+        while self.parent[x] != x:
+            x = self.parent[x]
+            d += 1
+        return d
+
+
 def _build_clusters(
     seed_keys: list[str],
     minhash: MinHashLSH,
@@ -55,18 +96,7 @@ def _build_clusters(
         seed_to_cluster: seed_idx → cluster_idx mapping.
     """
     n = len(seed_keys)
-    parent = list(range(n))
-
-    def find(x: int) -> int:
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
-
-    def union(a: int, b: int) -> None:
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
+    uf = _UnionFind(n)
 
     for i in range(n):
         sk = seed_keys[i]
@@ -75,14 +105,17 @@ def _build_clusters(
         similar = minhash.find_similar(sk, min_jaccard=min_jaccard)
         if not similar:
             continue
+        # Union with the first match only: transitivity across later
+        # iterations of the outer loop merges the rest of the group, so
+        # we don't need to union every pairwise edge in `similar`.
         for j in range(n):
             if j != i and seed_keys[j] in similar:
-                union(i, j)
+                uf.union(i, j)
                 break
 
     raw: dict[int, list[int]] = {}
     for i in range(n):
-        raw.setdefault(find(i), []).append(i)
+        raw.setdefault(uf.find(i), []).append(i)
 
     clusters = list(raw.values())
     seed_to_cluster: dict[int, int] = {}

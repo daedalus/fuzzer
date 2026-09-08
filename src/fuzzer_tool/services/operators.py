@@ -3695,6 +3695,8 @@ class OperatorEngine:
             available.append("cucb")
         if f._use_invasion and f.mc and f.mc_bandit:
             available.append("invasion")
+        if f._use_round_robin and f._round_robin:
+            available.append("round_robin")
 
         if f._use_elo and f._elo and len(available) >= 2:
             # Resolve the meta-strategy once per exec and reuse it for all
@@ -3789,6 +3791,9 @@ class OperatorEngine:
                 op_stats, frontier_edges=frontier, flux_map=flux_map
             ) or self.ctx.rand_pool.choice(ops)
             f._last_mopt_particles.append(None)
+        elif strategy == "round_robin" and f._round_robin:
+            op = f._round_robin.select_op(ops)
+            f._last_mopt_particles.append(None)
         elif f._use_replicator and f._replicator:
             op = f._replicator.select_op(ops)
             f._last_mopt_particles.append(None)
@@ -3825,6 +3830,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif f._use_cucb and f._cucb:
             op = f._cucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_round_robin and f._round_robin:
+            op = f._round_robin.select_op(ops)
             f._last_mopt_particles.append(None)
         else:
             op = self.ctx.rand_pool.choice(ops)

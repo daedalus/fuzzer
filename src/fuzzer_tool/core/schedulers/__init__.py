@@ -6,6 +6,7 @@ from fuzzer_tool.core.schedulers.cucb import CUCBScheduler
 from fuzzer_tool.core.schedulers.ducb import DUCBScheduler
 from fuzzer_tool.core.schedulers.epsilon_greedy import EpsilonGreedyScheduler
 from fuzzer_tool.core.schedulers.exp3 import Exp3Scheduler
+from fuzzer_tool.core.schedulers.fpl import FPLScheduler
 from fuzzer_tool.core.schedulers.gp_ucb import GPUCBScheduler
 from fuzzer_tool.core.schedulers.hierarchical import HierarchicalBanditScheduler
 from fuzzer_tool.core.schedulers.mcts import AlphaBetaMCTSSeedScheduler, MCTSSeedScheduler
@@ -16,6 +17,7 @@ from fuzzer_tool.core.schedulers.round_robin import RoundRobinScheduler
 from fuzzer_tool.core.schedulers.swucb import SWUCBScheduler
 
 __all__ = [
+    "FPLScheduler",
     "CMAESScheduler",
     "MonteCarloScheduler",
     "MOptScheduler",

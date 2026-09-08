@@ -310,7 +310,9 @@ class TestGlobalRegistryUnaffected:
         the first in-tree implementors; ``fractal_voronoi`` (spatial
         meta-mutator, see docs/handover/handover_done_2026-09-06.md) is
         the second; the four ``ff_*`` FormatFuzzer template mutators are the
-        third. Anything else here is a surprise.
+        third; ``perlin_noise`` (coherent gradient-noise perturbation,
+        core/mutations/perlin_noise.py) is the fourth. Anything else here is
+        a surprise.
 
         Note the ``ff_*`` entries are registered at import, unconditionally,
         even though the feature is gated behind ``--formatfuzzer`` -- so they
@@ -327,6 +329,7 @@ class TestGlobalRegistryUnaffected:
             "ff_png",
             "ff_zip",
             "fractal_voronoi",
+            "perlin_noise",
             "weizz_chunk_mutate",
             "weizz_field_mutate",
         ]
