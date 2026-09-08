@@ -468,6 +468,8 @@ def cmd_fuzz(args):
             swucb_window=getattr(args, "swucb_window", 4000),
             cucb=getattr(args, "cucb", False),
             cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
+            fpl=getattr(args, "fpl", False),
+            fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
             contextual=getattr(args, "contextual", False),
@@ -505,6 +507,7 @@ def cmd_fuzz(args):
         args.ducb = True
         args.swucb = True
         args.cucb = True
+        args.fpl = True
         args.contextual = True
         args.invasion = True
         args.garch = True
@@ -640,6 +643,8 @@ def cmd_fuzz(args):
         swucb_window=getattr(args, "swucb_window", 4000),
         cucb=getattr(args, "cucb", False),
         cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
+        fpl=getattr(args, "fpl", False),
+        fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
         contextual=getattr(args, "contextual", False),
@@ -2098,6 +2103,17 @@ def main() -> int:
         type=float,
         default=0.9995,
         help="CUCB discount per mutation round (default: 0.9995)",
+    )
+    fuzz_parser.add_argument(
+        "--fpl",
+        action="store_true",
+        help="Enable Follow Perturbed Leader operator scheduling",
+    )
+    fuzz_parser.add_argument(
+        "--fpl-epsilon",
+        type=float,
+        default=1.0,
+        help="FPL perturbation scale; higher = more exploration (default: 1.0)",
     )
     fuzz_parser.add_argument(
         "--contextual",

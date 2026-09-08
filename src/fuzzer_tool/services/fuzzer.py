@@ -48,6 +48,7 @@ from fuzzer_tool.core.schedulers import (
     DUCBScheduler,
     EpsilonGreedyScheduler,
     Exp3Scheduler,
+    FPLScheduler,
     GPUCBScheduler,
     HierarchicalBanditScheduler,
     MonteCarloScheduler,
@@ -96,6 +97,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "ducb",
     "swucb",
     "cucb",
+    "fpl",
     "invasion",
     "round_robin",
 )
@@ -771,6 +773,8 @@ class Fuzzer:
         swucb_window=4000,
         cucb=False,
         cucb_gamma=0.9995,
+        fpl=False,
+        fpl_epsilon=1.0,
         contextual=False,
         contextual_alpha=1.0,
         contextual_lambda=1.0,
@@ -1780,6 +1784,14 @@ class Fuzzer:
             self._cucb = CUCBScheduler(gamma=cucb_gamma, rng=self._rand_pool)
             log.info("CUCB enabled (gamma=%.5f)", cucb_gamma)
 
+        # Follow Perturbed Leader: perturb-and-select bandit with decaying
+        # perturbation schedule for stochastic bandit convergence.
+        self._use_fpl = fpl
+        self._fpl = None
+        if fpl:
+            self._fpl = FPLScheduler(epsilon=fpl_epsilon, rng=self._rand_pool)
+            log.info("FPL enabled (epsilon=%.2f)", fpl_epsilon)
+
         # Round-robin: deterministic baseline. --seed should reproduce
         # exactly, so no RandPool is used here -- the cycling order is
         # the registration order, fully driven by operator init.
@@ -1985,6 +1997,7 @@ class Fuzzer:
             or self._ducb
             or self._swucb
             or self._cucb
+            or self._fpl
             or self._use_shapley
         )
 
@@ -2240,6 +2253,8 @@ class Fuzzer:
             _register_arms(self._swucb)
         if self._cucb:
             _register_arms(self._cucb)
+        if self._fpl:
+            _register_arms(self._fpl)
         if self._contextual:
             _register_arms(self._contextual)
         if self._round_robin:
@@ -4408,6 +4423,7 @@ class Fuzzer:
             self._ducb,
             self._swucb,
             self._cucb,
+            self._fpl,
         ):
             if scheduler is None:
                 continue
@@ -5505,6 +5521,8 @@ class Fuzzer:
             all_strategies.append("swucb")
         if self._cucb:
             all_strategies.append("cucb")
+        if self._fpl:
+            all_strategies.append("fpl")
         if self._use_invasion and self.mc and self.mc_bandit:
             all_strategies.append("invasion")
         if self._use_round_robin and self._round_robin:
@@ -5580,6 +5598,8 @@ class Fuzzer:
             ops.append("swucb")
         if getattr(self, "_cucb", False):
             ops.append("cucb")
+        if getattr(self, "_fpl", False):
+            ops.append("fpl")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
             ops.append("invasion")
         if getattr(self, "_use_round_robin", False) and self._round_robin:
@@ -5798,6 +5818,8 @@ class Fuzzer:
             ops.append("swucb")
         if getattr(self, "_cucb", False):
             ops.append("cucb")
+        if getattr(self, "_fpl", False):
+            ops.append("fpl")
         if getattr(self, "_use_contextual", False):
             ops.append("contextual")
         if getattr(self, "_use_invasion", False):
