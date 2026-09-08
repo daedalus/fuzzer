@@ -466,6 +466,10 @@ def cmd_fuzz(args):
             ducb_gamma=getattr(args, "ducb_gamma", 0.9999),
             swucb=getattr(args, "swucb", False),
             swucb_window=getattr(args, "swucb_window", 4000),
+            kl_ducb=getattr(args, "kl_ducb", False),
+            kl_ducb_gamma=getattr(args, "kl_ducb_gamma", 0.9999),
+            kl_swucb=getattr(args, "kl_swucb", False),
+            kl_swucb_window=getattr(args, "kl_swucb_window", 4000),
             cucb=getattr(args, "cucb", False),
             cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
             fpl=getattr(args, "fpl", False),
@@ -505,7 +509,13 @@ def cmd_fuzz(args):
         args.hierarchical_bandit = True
         args.gp_ucb = True
         args.ducb = True
+        args.ducb_gamma = 0.9999
+        args.kl_ducb = True
+        args.kl_ducb_gamma = 0.9999
         args.swucb = True
+        args.swucb_window = 4000
+        args.kl_swucb = True
+        args.kl_swucb_window = 4000
         args.cucb = True
         args.fpl = True
         args.contextual = True
@@ -1666,7 +1676,9 @@ _HAIL_MARY_FLAGS = (
     "hierarchical_bandit",
     "gp_ucb",
     "ducb",
+    "kl_ducb",
     "swucb",
+    "kl_swucb",
     "cucb",
     "fractal_partition",
     "contextual",
@@ -2090,6 +2102,36 @@ def main() -> int:
         type=int,
         default=4000,
         help="SW-UCB window length in pulls (default: 4000)",
+    )
+    fuzz_parser.add_argument(
+        "--kl-ducb",
+        action="store_true",
+        help=(
+            "Enable KL-UCB variant of discounted UCB operator scheduling: "
+            "uses the Bernoulli KL upper bound as the confidence width "
+            "instead of the Gaussian form"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--kl-ducb-gamma",
+        type=float,
+        default=0.9999,
+        help="KL-D-UCB discount per pull; effective memory is 1/(1-gamma) pulls (default: 0.9999)",
+    )
+    fuzz_parser.add_argument(
+        "--kl-swucb",
+        action="store_true",
+        help=(
+            "Enable KL-UCB variant of sliding-window UCB operator scheduling: "
+            "uses the Bernoulli KL upper bound as the confidence width "
+            "instead of the Gaussian form"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--kl-swucb-window",
+        type=int,
+        default=4000,
+        help="KL-SW-UCB window length in pulls (default: 4000)",
     )
     fuzz_parser.add_argument(
         "--cucb",

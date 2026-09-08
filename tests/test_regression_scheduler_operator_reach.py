@@ -78,6 +78,8 @@ def _all_operator_schedulers():
     lin = S.ContextualLinUCBScheduler(dim=CONTEXT_DIM)
     ducb = S.DUCBScheduler()
     swucb = S.SWUCBScheduler()
+    kl_ducb = S.KL_DUCBScheduler()
+    kl_swucb = S.KL_SWUCBScheduler()
     cucb = S.CUCBScheduler()
     round_robin = S.RoundRobinScheduler()
 
@@ -103,6 +105,8 @@ def _all_operator_schedulers():
         ),
         ("DUCBScheduler", ducb, ducb.select_op, ducb.record),
         ("SWUCBScheduler", swucb, swucb.select_op, swucb.record),
+        ("KL_DUCBScheduler", kl_ducb, kl_ducb.select_op, kl_ducb.record),
+        ("KL_SWUCBScheduler", kl_swucb, kl_swucb.select_op, kl_swucb.record),
         # CUCB batches a round; select_op() closes any round left open.
         ("CUCBScheduler", cucb, cucb.select_op, cucb.record),
         # RoundRobin is stateless in terms of rewards; record() is no-op.

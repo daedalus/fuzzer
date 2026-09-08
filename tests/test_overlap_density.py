@@ -5,8 +5,8 @@ import random
 
 from fuzzer_tool.core.edge_tracker import EdgeTracker, MinHashLSH
 from fuzzer_tool.core.overlap_density import (
-    _UnionFind,
     _build_clusters,
+    _UnionFind,
     compute_corpus_overlap_density,
 )
 

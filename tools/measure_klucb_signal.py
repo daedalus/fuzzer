@@ -1,26 +1,21 @@
-#!/usr/bin/env python3
-"""Measure whether KL-UCB buys tail share on the fuzzer's reward distribution.
-
-The D-UCB and SW-UCB indexes both ship with a Gaussian confidence width
-``B*sqrt(xi*log(n_t)/N_t(i))``.  That bound is valid for sub-Gaussian rewards,
-but the cost-adjusted surprisal weights handed to ``record()`` are not
-Gaussian: they are bounded in [0, 1] with a mass at zero (an operator that
-found no new coverage gets exactly 0), so the true tail is heavier and the
-Gaussian width under-covers.
-
-KL-UCB (Cappé, Garivier, Maillard, Munos, Stoltz, 2013) replaces it with the
-empirical-Bernoulli width, implemented as ``kl_ucb=True`` on both schedulers.
-This script runs both forms on a Bernoulli environment -- the fuzzer's reward
-distribution, since a coverage hit is binary -- and reports tail share on the
-best arm.  If KL-UCB is not better on the measured distribution, leave the
-flag off; if it is, enable it per-target rather than repo-wide, because the
-convergence floors in ``tests/test_scheduler_convergence.py`` were pinned
-against the Gaussian form.
-
-Usage::
-
-    python tools/measure_klucb_signal.py [--rounds 6000] [--seed 92]
-"""
+# Script: measure_klucb_signal.py
+# Measures whether KL-UCB buys tail share on the fuzzer's reward distribution.
+#
+# The D-UCB and SW-UCB indexes ship with a Gaussian confidence width
+# ``B*sqrt(xi*log(n_t)/N_t(i))``.  That bound is valid for sub-Gaussian
+# rewards, but the cost-adjusted surprisal weights handed to ``record()``
+# are not Gaussian: they are bounded in [0, 1] with a mass at zero (an
+# operator that found no new coverage gets exactly 0), so the true tail
+# is heavier and the Gaussian width under-covers.
+#
+# KL-UCB (Cappé, Garivier, Maillard, Munos, Stoltz, 2013) replaces it
+# with the empirical-Bernoulli width.  This script runs all four forms
+# on a Bernoulli environment -- the fuzzer's reward distribution, since
+# a coverage hit is binary -- and reports tail share on the best arm.
+#
+# Usage::
+#
+#     python tools/measure_klucb_signal.py [--rounds 6000] [--seed 92]
 
 from __future__ import annotations
 
@@ -37,7 +32,12 @@ sys.path.insert(0, str(_repo / "src"))
 from tests.support.bandit_env import StationaryBernoulli, run  # noqa: E402
 
 from fuzzer_tool.core.rand_pool import RandPool  # noqa: E402
-from fuzzer_tool.core.schedulers import DUCBScheduler, SWUCBScheduler  # noqa: E402
+from fuzzer_tool.core.schedulers import (  # noqa: E402
+    DUCBScheduler,
+    KL_DUCBScheduler,
+    KL_SWUCBScheduler,
+    SWUCBScheduler,
+)
 
 
 def main() -> int:
@@ -49,19 +49,20 @@ def main() -> int:
     env = StationaryBernoulli.build()
     print(f"env: {len(env.arms)} arms, best={env.best!r} p={env.probs[env.best]:.3f}")
 
-    print(f"\n{'scheduler':<12} {'width':<12} {'tail share':>11}")
-    print("-" * 39)
+    print(f"\n{'scheduler':<16} {'width':<12} {'tail share':>11}")
+    print("-" * 45)
     for sched_name, factory in (
         ("DUCB", lambda: DUCBScheduler(rng=RandPool(args.seed))),
         ("SWUCB", lambda: SWUCBScheduler(rng=RandPool(args.seed))),
+        ("KL-DUCB", lambda: KL_DUCBScheduler(rng=RandPool(args.seed))),
+        ("KL-SWUCB", lambda: KL_SWUCBScheduler(rng=RandPool(args.seed))),
     ):
-        for kl in (False, True):
-            sched = factory()
-            sched.kl_ucb = kl
-            c = run(sched, env, seed=args.seed, rounds=args.rounds)
-            print(
-                f"{sched_name:<12} {'KL' if kl else 'Gaussian':<12} {c.tail_share(env.best):>11.3f}"
-            )
+        c = factory()
+        c = run(c, env, seed=args.seed, rounds=args.rounds)
+        print(
+            f"{sched_name:<16} {'Gaussian' if 'KL' not in sched_name else 'KL':<12}"
+            f" {c.tail_share(env.best):>11.3f}"
+        )
     return 0
 
 

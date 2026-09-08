@@ -42,7 +42,6 @@ this one deliberately does not.
 import math
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers._kl_ucb import kl_upper_bound
 
 #: Below this the relative statistics are rescaled back to an absolute basis.
 #: 1e-12 leaves ~4 orders of float64 headroom above the point where
@@ -100,7 +99,6 @@ class DUCBScheduler:
         xi: float = 0.6,
         b: float = 1.0,
         exploration: float = 0.25,
-        kl_ucb: bool = False,
         rng: RandPool | None = None,
     ):
         if not 0.0 < gamma <= 1.0:
@@ -114,15 +112,6 @@ class DUCBScheduler:
         self.xi = xi
         self.b = b
         self.exploration = exploration
-        # KL-UCB replaces the Gaussian width with the empirical-Bernoulli
-        # width (see core/schedulers/_kl_ucb.py). Off by default: the
-        # convergence thresholds in test_scheduler_convergence.py were pinned
-        # against the Gaussian form and the KL form is a strict tightening,
-        # so enabling it would move every scheduler off its measured floor.
-        # Enable per-target once the measurement pass in
-        # tools/measure_klucb_signal.py has shown it buys tail share without
-        # starving the best arm on that target's reward distribution.
-        self.kl_ucb = kl_ucb
 
         # Hard Rule 16: all randomness comes from RandPool, so --seed
         # determines which unpulled arm is opened first and a crash found
@@ -209,13 +198,8 @@ class DUCBScheduler:
         The Gaussian form is the paper's ``2B*sqrt(xi*log(n_t)/N_t(i))`` --
         *gaussian_scale* already carries the ``exploration * UCB_WIDTH_COEFF *
         b`` prefix and the sqrt(xi*log_n) factor, so the width is that divided
-        by sqrt(n). The KL form is the Bernoulli upper bound at budget
-        ``xi*log(n_t)/N_t(i)`` minus the empirical mean: KL-UCB's theorem uses
-        a leading constant of 1, so ``exploration`` and ``b`` are tuning knobs
-        on the Gaussian form only and are not multiplied into the KL bound.
+        by sqrt(n).
         """
-        if self.kl_ucb:
-            return kl_upper_bound(mean, self.xi * log_n / n) - mean
         return gaussian_scale / math.sqrt(n)
 
     # -- update -----------------------------------------------------------

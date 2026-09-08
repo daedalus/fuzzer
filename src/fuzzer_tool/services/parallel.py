@@ -50,7 +50,11 @@ def _worker_main(
     hierarchical_bandit: bool = False,
     gp_ucb: bool = False,
     ducb: bool = False,
+    kl_ducb: bool = False,
+    kl_ducb_gamma: float = 0.9999,
     swucb: bool = False,
+    kl_swucb: bool = False,
+    kl_swucb_window: int = 4000,
     cucb: bool = False,
     gp_length_scale: float = 1.0,
     gp_beta: float = 2.0,
@@ -127,7 +131,11 @@ def _worker_main(
         hierarchical_bandit=hierarchical_bandit,
         gp_ucb=gp_ucb,
         ducb=ducb,
+        kl_ducb=kl_ducb,
+        kl_ducb_gamma=kl_ducb_gamma,
         swucb=swucb,
+        kl_swucb=kl_swucb,
+        kl_swucb_window=kl_swucb_window,
         cucb=cucb,
         gp_length_scale=gp_length_scale,
         gp_beta=gp_beta,
@@ -383,9 +391,9 @@ def _distribute_initial_corpus(
             and not entry.is_symlink()
             and entry.suffix not in _SEED_SKIP_SUFFIXES
             and entry.name not in ("state.pkl.gz", "state.json")
+            and entry not in seeds
         ):
-            if entry not in seeds:
-                seeds.append(entry)
+            seeds.append(entry)
 
     # Exclude anything already under a worker dir (restarts / nested layouts).
     # Without a ``seeds/`` tree at the top level, discover_seed_files walks
@@ -464,7 +472,11 @@ def run_parallel(
     hierarchical_bandit: bool = False,
     gp_ucb: bool = False,
     ducb: bool = False,
+    kl_ducb: bool = False,
+    kl_ducb_gamma: float = 0.9999,
     swucb: bool = False,
+    kl_swucb: bool = False,
+    kl_swucb_window: int = 4000,
     cucb: bool = False,
     gp_length_scale: float = 1.0,
     gp_beta: float = 2.0,
@@ -569,7 +581,11 @@ def run_parallel(
         hierarchical_bandit=hierarchical_bandit,
         gp_ucb=gp_ucb,
         ducb=ducb,
+        kl_ducb=kl_ducb,
+        kl_ducb_gamma=kl_ducb_gamma,
         swucb=swucb,
+        kl_swucb=kl_swucb,
+        kl_swucb_window=kl_swucb_window,
         cucb=cucb,
         gp_length_scale=gp_length_scale,
         gp_beta=gp_beta,

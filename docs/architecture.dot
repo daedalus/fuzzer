@@ -52,7 +52,7 @@ digraph fuzzer_tool {
         color="#bcd0c4"; fillcolor="#f2f8f4"; fontcolor="#33604a";
         picker [label="services/seed_picker.py  +  core/schedules.py\lweights · Pareto front · crowding · saturation gate\lFAST COE RARE MMOPT LIN QUAD GO AFLGO ENTROPIC KATZ\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
-        bandit [label="core/schedulers/ (14)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb cucb hierarchical replicator epsilon_greedy mcts katz\l",
+        bandit [label="core/schedulers/ (16)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy mcts katz\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
     }
 

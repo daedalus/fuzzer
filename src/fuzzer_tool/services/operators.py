@@ -3688,8 +3688,12 @@ class OperatorEngine:
             available.append("contextual")
         if f._use_ducb and f._ducb:
             available.append("ducb")
+        if f._use_kl_ducb and f._kl_ducb:
+            available.append("kl_ducb")
         if f._use_swucb and f._swucb:
             available.append("swucb")
+        if f._use_kl_swucb and f._kl_swucb:
+            available.append("kl_swucb")
         if f._use_cucb and f._cucb:
             available.append("cucb")
         if f._use_invasion and f.mc and f.mc_bandit:
@@ -3759,6 +3763,12 @@ class OperatorEngine:
         elif strategy == "swucb" and f._swucb:
             op = f._swucb.select_op(ops)
             f._last_mopt_particles.append(None)
+        elif strategy == "kl_ducb" and f._kl_ducb:
+            op = f._kl_ducb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "kl_swucb" and f._kl_swucb:
+            op = f._kl_swucb.select_op(ops)
+            f._last_mopt_particles.append(None)
         elif strategy == "cucb" and f._cucb:
             op = f._cucb.select_op(ops)
             f._last_mopt_particles.append(None)
@@ -3826,6 +3836,12 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif f._use_swucb and f._swucb:
             op = f._swucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_kl_ducb and f._kl_ducb:
+            op = f._kl_ducb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_kl_swucb and f._kl_swucb:
+            op = f._kl_swucb.select_op(ops)
             f._last_mopt_particles.append(None)
         elif f._use_cucb and f._cucb:
             op = f._cucb.select_op(ops)

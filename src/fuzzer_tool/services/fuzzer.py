@@ -51,6 +51,8 @@ from fuzzer_tool.core.schedulers import (
     FPLScheduler,
     GPUCBScheduler,
     HierarchicalBanditScheduler,
+    KL_DUCBScheduler,
+    KL_SWUCBScheduler,
     MonteCarloScheduler,
     MOptScheduler,
     ReplicatorScheduler,
@@ -96,6 +98,8 @@ _OPERATOR_STRATEGY_NAMES = (
     "cmaes",
     "ducb",
     "swucb",
+    "kl_ducb",
+    "kl_swucb",
     "cucb",
     "fpl",
     "invasion",
@@ -769,8 +773,12 @@ class Fuzzer:
         gp_beta=2.0,
         ducb=False,
         ducb_gamma=0.9999,
+        kl_ducb=False,
+        kl_ducb_gamma=0.9999,
         swucb=False,
         swucb_window=4000,
+        kl_swucb=False,
+        kl_swucb_window=4000,
         cucb=False,
         cucb_gamma=0.9995,
         fpl=False,
@@ -1776,6 +1784,21 @@ class Fuzzer:
             self._swucb = SWUCBScheduler(window=swucb_window, rng=self._rand_pool)
             log.info("SW-UCB enabled (window=%d)", swucb_window)
 
+        # KL-UCB variants: same structure as D-UCB/SW-UCB but with
+        # the Bernoulli KL upper bound as the confidence width,
+        # unconditionally.
+        self._use_kl_ducb = kl_ducb
+        self._kl_ducb = None
+        if kl_ducb:
+            self._kl_ducb = KL_DUCBScheduler(gamma=kl_ducb_gamma, rng=self._rand_pool)
+            log.info("KL-D-UCB enabled (gamma=%.5f)", kl_ducb_gamma)
+
+        self._use_kl_swucb = kl_swucb
+        self._kl_swucb = None
+        if kl_swucb:
+            self._kl_swucb = KL_SWUCBScheduler(window=kl_swucb_window, rng=self._rand_pool)
+            log.info("KL-SW-UCB enabled (window=%d)", kl_swucb_window)
+
         # Combinatorial UCB: the only scheduler here that models the round's
         # operator stack as one superarm rather than N independent pulls.
         self._use_cucb = cucb
@@ -2251,6 +2274,10 @@ class Fuzzer:
             _register_arms(self._ducb)
         if self._swucb:
             _register_arms(self._swucb)
+        if self._kl_ducb:
+            _register_arms(self._kl_ducb)
+        if self._kl_swucb:
+            _register_arms(self._kl_swucb)
         if self._cucb:
             _register_arms(self._cucb)
         if self._fpl:
@@ -4422,6 +4449,8 @@ class Fuzzer:
             self._cmaes,
             self._ducb,
             self._swucb,
+            self._kl_ducb,
+            self._kl_swucb,
             self._cucb,
             self._fpl,
         ):

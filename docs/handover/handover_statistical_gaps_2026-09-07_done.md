@@ -12,8 +12,9 @@
 All five queued improvements are implemented and tested. Wilcoxon, MCAR/MNAR,
 and Spearman are wired into live analysis paths; KS is surfaced but measured
 redundant with Wasserstein and therefore not wired into the diversity weight;
-KL-UCB is implemented as a flag on DUCB/SWUCB, default off, with a measurement
-pass showing it is not a one-size win.
+KL-UCB is promoted to full peer schedulers (KL_DUCB/KL_SWUCB), with the
+`kl_ucb` flag removed from DUCB/SWUCB (Gaussian width is now the only path
+on those two).
 
 ---
 
@@ -51,11 +52,13 @@ in `tests/test_edge_ground_metric.py`.
 
 ## 5. KL-UCB — `core/schedulers/_kl_ucb.py`, `ducb.py`, `swucb.py`
 
-Shared Bernoulli upper bound (`kl_upper_bound`) with `kl_ucb` flag on both
-DUCB and SWUCB, default off. `tools/measure_klucb_signal.py`:
+Shared Bernoulli upper bound (`kl_upper_bound`). Promoted to two full peer
+schedulers (`KL_DUCBScheduler`, `KL_SWUCBScheduler`); the `kl_ucb` flag was
+removed from `DUCBScheduler` and `SWUCBScheduler`, whose `_width()` is now the
+Gaussian form only. `tools/measure_klucb_signal.py` runs all four side by side:
 SW-UCB KL 0.997 vs Gaussian 0.985, DUCB KL 0.777 vs Gaussian 0.968 — not a
-one-size win, so the flag stays gated per-target. FPL (`core/schedulers/fpl.py`)
-has since been implemented (commit `ed09d59`).
+one-size win, so the KL variants stay opt-in via `--kl-ducb` / `--kl-swucb`.
+FPL (`core/schedulers/fpl.py`) has since been implemented (commit `ed09d59`).
 
 ---
 
