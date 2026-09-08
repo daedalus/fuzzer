@@ -1192,3 +1192,263 @@ def rle(data: bytes, rng=None) -> bytes:
     if len(out) != len(data):
         return data
     return _splice(data, 0, bytes(out))
+
+
+def delta_encode(data: bytes, rng=None) -> bytes:
+    """First-difference encode a region, edit deltas, decode back.
+
+    Delta encoding converts each byte to the difference from its predecessor.
+    For correlated data (adjacent bytes differ by small amounts), deltas
+    concentrate into a narrow range; a mutation in delta space becomes a
+    smooth local perturbation in the original.  For uncorrelated data the
+    deltas spread across the full byte range, so the mutation looks like
+    ordinary noise.
+
+    This is the inverse of a statistical test that rejects streams with
+    extreme first-difference variance; fuzzing the delta domain exercises
+    parser fast-paths keyed on sequential smoothness.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=2)
+    if length < 2:
+        return data
+    block = data[offset : offset + length]
+    deltas = bytearray(length)
+    deltas[0] = block[0]
+    for i in range(1, length):
+        deltas[i] = (block[i] - block[i - 1]) & 0xFF
+    n_mut = rng.randint(1, min(4, length))
+    for _ in range(n_mut):
+        pos = rng.randint(0, length - 1)
+        delta = rng.randint(-16, 16)
+        deltas[pos] = (deltas[pos] + delta) & 0xFF
+    restored = bytearray(length)
+    restored[0] = deltas[0]
+    for i in range(1, length):
+        restored[i] = (restored[i - 1] + deltas[i]) & 0xFF
+    return _splice(data, offset, bytes(restored))
+
+
+def delta_sigma(data: bytes, rng=None) -> bytes:
+    """Predictive first-order delta-sigma modulate a region, edit, demodulate.
+
+    Each byte is encoded as the prediction error from a running accumulated
+    sum rather than from the immediate predecessor.  For smooth input the
+    errors concentrate near zero; for abrupt changes they grow.  Editing the
+    error stream changes the cumulative offset of the reconstructed tail, so
+    a single edit propagates through many subsequent values.
+
+    Targets parsers that accumulate running checksums, running totals, or
+    stateful decoders where a small perturbation cascades through many
+    subsequent decoded values.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=2)
+    if length < 2:
+        return data
+    block = data[offset : offset + length]
+    modulated = bytearray(length)
+    acc = block[0]
+    modulated[0] = block[0]
+    for i in range(1, length):
+        modulated[i] = (block[i] - acc) & 0xFF
+        acc = (acc + modulated[i]) & 0xFF
+    n_mut = rng.randint(1, min(4, length))
+    for _ in range(n_mut):
+        pos = rng.randint(0, length - 1)
+        delta = rng.randint(-32, 32)
+        modulated[pos] = (modulated[pos] + delta) & 0xFF
+    restored = bytearray(length)
+    acc = modulated[0]
+    restored[0] = acc
+    for i in range(1, length):
+        acc = (acc + modulated[i]) & 0xFF
+        restored[i] = acc
+    return _splice(data, offset, bytes(restored))
+
+
+def bitcast_float(data: bytes, rng=None) -> bytes:
+    """Reinterpret a region as float/double, mutate, write back as bytes.
+
+    Targets parsers that decode floating-point fields: image pixel formats,
+    scientific-data containers, audio sample headers, 3D mesh normals/UVs,
+    and SIMD-friendly binary formats where a NaN or infinity triggers a
+    missing-error-handling path.
+
+    The mutation space is the IEEE 754 value domain, not the byte domain:
+    a single edit can produce NaN, +/-inf, subnormal, or a huge magnitude
+    that overflows a parser's fixed-point fallback.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 4:
+        return data
+    rng = _get_rng(rng)
+    width = rng.choice((4, 8))
+    if len(data) < width:
+        return data
+    offset = rng.randint(0, len(data) - width)
+    endian = "<" if rng.random() < 0.5 else ">"
+    fmt = f"{endian}f" if width == 4 else f"{endian}d"
+    try:
+        value = struct.unpack(fmt, data[offset : offset + width])[0]
+    except struct.error:
+        return data
+    strategy = rng.randint(0, 4)
+    if strategy == 0:
+        value = 0.0
+    elif strategy == 1:
+        value = float("inf")
+    elif strategy == 2:
+        value = float("-inf")
+    elif strategy == 3:
+        value = float("nan")
+    else:
+        value = value * 1e3 if value != 0.0 else 1e38
+    try:
+        packed = struct.pack(fmt, value)
+    except (struct.error, OverflowError):
+        return data
+    out = bytearray(data)
+    out[offset : offset + width] = packed
+    return bytes(out)
+
+
+def bitcast_int32(data: bytes, rng=None) -> bytes:
+    """Reinterpret a region as signed/unsigned int, mutate, write back.
+
+    Targets integer-overflow and truncation bugs in parsers that read
+    size/count/offset fields: a 4-byte length read as int32 with value
+    0x7FFFFFFF becomes 0xFFFFFFFF when sign-extended to int64, or a
+    2-byte count of 0xFFFF becomes 0 after a `short + 1` increment.
+
+    The mutation overwrites with values that are canonical overflow
+    triggers: 0, -1, MAX_SIGNED, MAX_UNSIGNED, and a few shifted
+    variants that survive one sanitizer pass.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    width = rng.choice((2, 4, 8))
+    if len(data) < width:
+        return data
+    offset = rng.randint(0, len(data) - width)
+    endian = "<" if rng.random() < 0.5 else ">"
+    if width == 2:
+        signed_fmt = f"{endian}h"
+    elif width == 4:
+        signed_fmt = f"{endian}i"
+    else:
+        signed_fmt = f"{endian}q"
+    try:
+        signed_val = struct.unpack(signed_fmt, data[offset : offset + width])[0]
+    except struct.error:
+        return data
+    max_signed = (1 << (width * 8 - 1)) - 1
+    max_unsigned = (1 << (width * 8)) - 1
+    strategy = rng.randint(0, 5)
+    if strategy == 0:
+        new_val = 0
+    elif strategy == 1:
+        new_val = -1
+    elif strategy == 2:
+        new_val = max_signed
+    elif strategy == 3:
+        new_val = max_unsigned
+    elif strategy == 4:
+        new_val = signed_val + max_signed
+    else:
+        new_val = signed_val - max_signed - 1
+    try:
+        packed = struct.pack(signed_fmt, new_val & max_unsigned)
+    except (struct.error, OverflowError):
+        return data
+    out = bytearray(data)
+    out[offset : offset + width] = packed
+    return bytes(out)
+
+
+def size_field_overflow(data: bytes, rng=None) -> bytes:
+    """Overwrite plausible size/count fields with overflow trigger values.
+
+    Scans the buffer for values that look like declared-size or count
+    fields — positions where a 2/4/8-byte integer is followed by at
+    least that many bytes of payload — and overwrites them with the
+    canonical overflow triggers: 0, -1, MAX_SIGNED, MAX_UNSIGNED.
+
+    Targets format parsers that compute memory allocation from a
+    size field without upper-bounds checking.  Classic failure mode:
+    `malloc(size_field)` with `size_field = 0xFFFFFFFF` on a 32-bit
+    target, or `size_field = -1` interpreted as a huge unsigned count.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 4:
+        return data
+    rng = _get_rng(rng)
+    width = rng.choice((2, 4))
+    if len(data) < width + 1:
+        return data
+    max_offset = len(data) - width
+    # Prefer offsets where the current value looks like a plausible size
+    # field: non-negative, not obviously ASCII, and the buffer extends past it.
+    candidates = []
+    for off in range(0, max_offset, max(1, width)):
+        raw = data[off : off + width]
+        if len(raw) < width:
+            continue
+        if all(32 <= b < 127 for b in raw):
+            continue  # Looks like text, not a size field.
+        candidates.append(off)
+    if not candidates:
+        offset = rng.randint(0, max_offset)
+    else:
+        offset = candidates[rng.randint(0, len(candidates) - 1)]
+    endian = "<" if rng.random() < 0.5 else ">"
+    fmt = f"{endian}H" if width == 2 else f"{endian}I"
+    max_signed = (1 << (width * 8 - 1)) - 1
+    max_unsigned = (1 << (width * 8)) - 1
+    triggers = (0, -1, max_signed, max_unsigned)
+    new_val = triggers[rng.randint(0, len(triggers) - 1)]
+    try:
+        packed = struct.pack(fmt, new_val & max_unsigned)
+    except (struct.error, OverflowError):
+        return data
+    out = bytearray(data)
+    out[offset : offset + width] = packed
+    return bytes(out)

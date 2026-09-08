@@ -271,6 +271,8 @@ class TestRegularityOperators:
         {
             "birthday_collide",
             "cycle_lock",
+            "delta_encode",
+            "delta_sigma",
             "degenerate_geometry",
             "feistel_scramble",
             "float_squeeze",
@@ -288,6 +290,9 @@ class TestRegularityOperators:
             "rle",
             "spectral_peak",
             "bwt",
+            "bitcast_float",
+            "bitcast_int32",
+            "size_field_overflow",
         }
     )
 

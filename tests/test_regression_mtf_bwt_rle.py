@@ -32,7 +32,18 @@ class _MockFuzzer:
         self.max_len = 4096
 
 
-NEW_OPS = frozenset({"mtf", "bwt", "rle"})
+NEW_OPS = frozenset(
+    {
+        "mtf",
+        "bwt",
+        "rle",
+        "delta_encode",
+        "delta_sigma",
+        "bitcast_float",
+        "bitcast_int32",
+        "size_field_overflow",
+    }
+)
 
 
 class TestRegistration:
@@ -145,6 +156,73 @@ class TestRoundTrip:
         assert result is not None
         assert len(result) == len(data)
 
+    def test_delta_encode_roundtrip_direct(self):
+        data = bytes(range(256)) * 4
+        result = structured.delta_encode(data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_delta_sigma_roundtrip_direct(self):
+        data = bytes(range(256)) * 4
+        result = structured.delta_sigma(data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_delta_encode_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["delta_encode"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_delta_sigma_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["delta_sigma"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_bitcast_float_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["bitcast_float"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_bitcast_int32_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["bitcast_int32"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_size_field_overflow_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["size_field_overflow"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
 
 class TestAdversarial:
     def test_rle_uniform_input_preserves_length(self):
@@ -174,6 +252,37 @@ class TestAdversarial:
         # All bytes map to index 0xAB after the first occurrence.
         alphabet = bytearray(range(256))
         assert structured._mtf_decode(encoded, alphabet) == data
+
+    def test_delta_encode_identity_on_constant(self):
+        """Delta of constant data should round-trip cleanly (all deltas = 0)."""
+        data = b"\x42" * 64
+        deltas = bytearray(len(data))
+        deltas[0] = data[0]
+        for i in range(1, len(data)):
+            deltas[i] = (data[i] - data[i - 1]) & 0xFF
+        restored = bytearray(len(data))
+        restored[0] = deltas[0]
+        for i in range(1, len(data)):
+            restored[i] = (restored[i - 1] + deltas[i]) & 0xFF
+        assert bytes(restored) == data
+
+    def test_delta_sigma_identity_on_constant(self):
+        """Delta-sigma of constant data should round-trip cleanly."""
+        data = b"\x42" * 64
+        # Predictive first-order: store first byte, then encode prediction error.
+        modulated = bytearray(len(data))
+        acc = data[0]
+        modulated[0] = data[0]
+        for i in range(1, len(data)):
+            modulated[i] = (data[i] - acc) & 0xFF
+            acc = (acc + modulated[i]) & 0xFF
+        restored = bytearray(len(data))
+        acc = modulated[0]
+        restored[0] = acc
+        for i in range(1, len(data)):
+            acc = (acc + modulated[i]) & 0xFF
+            restored[i] = acc
+        assert bytes(restored) == data
 
     def test_all_ops_dispatch_matches_registry(self):
         import tempfile

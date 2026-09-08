@@ -3260,6 +3260,31 @@ class OperatorEngine:
 
         return self._regularity(rle, buf)
 
+    def _op_delta_encode(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import delta_encode
+
+        return self._regularity(delta_encode, buf)
+
+    def _op_delta_sigma(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import delta_sigma
+
+        return self._regularity(delta_sigma, buf)
+
+    def _op_bitcast_float(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import bitcast_float
+
+        return self._regularity(bitcast_float, buf)
+
+    def _op_bitcast_int32(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import bitcast_int32
+
+        return self._regularity(bitcast_int32, buf)
+
+    def _op_size_field_overflow(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import size_field_overflow
+
+        return self._regularity(size_field_overflow, buf)
+
     def corpus_invariants(self):
         """Cached ``CorpusInvariants`` for the current corpus, or None.
 

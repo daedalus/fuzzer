@@ -188,6 +188,11 @@ _CATEGORIES: dict[str, set[str]] = {
         "mtf",
         "bwt",
         "rle",
+        "delta_encode",
+        "delta_sigma",
+        "bitcast_float",
+        "bitcast_int32",
+        "size_field_overflow",
     },
     "adaptive": {
         "markov_bytes",

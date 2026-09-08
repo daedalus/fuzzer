@@ -972,6 +972,11 @@ MUTATIONS = [
     "mtf",
     "bwt",
     "rle",
+    "delta_encode",
+    "delta_sigma",
+    "bitcast_float",
+    "bitcast_int32",
+    "size_field_overflow",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.
