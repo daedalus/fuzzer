@@ -3240,8 +3240,7 @@ class OperatorEngine:
     def _op_feistel_scramble(self, buf, _byte_idx, _data):
         # Not a diehard/dieharder inverse like its neighbours above; lives in
         # core/feistel.py rather than mutations/structured.py because it's a
-        # keyed bijective transform, not a statistic-tail construction. See
-        # docs/handover/handover_daedalus_aiscripts_port.md.
+        # keyed bijective transform, not a statistic-tail construction.
         from fuzzer_tool.core.feistel import feistel_scramble
 
         return self._regularity(feistel_scramble, buf)

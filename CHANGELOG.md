@@ -10,9 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Ported `CuckooFilter`, `F0Estimator` (CVM), and `Feistel` from AIscripts** in
-  `src/fuzzer_tool/core/{cuckoo,cvm,feistel}.py`
-  (handover `docs/handover/handover_daedalus_aiscripts_port.md`). Three
-  statistical primitives cleaned and dropped into the core layer:
+  `src/fuzzer_tool/core/{cuckoo,cvm,feistel}.py`. Three statistical primitives
+  cleaned and dropped into the core layer:
 
   - **`CuckooFilter`** (`core/cuckoo.py`) — a classic cuckoo hash filter with
     `add`/`contains`/`query`/`remove`/`update`/`clear`/`load_factor`, plus a
