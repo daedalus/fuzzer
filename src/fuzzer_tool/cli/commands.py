@@ -512,12 +512,15 @@ def cmd_fuzz(args):
         args.invasion = True
         args.garch = True
         args.continuum = True
+        args.cma_es = True
+        args.round_robin = True
         args.ga = True
         args.qea = True
         args.bayesian = True
         args.boltzmann = True
         args.ecofuzz = True
         args.markov_gen = True
+        args.tang = True
         # Mutation-side schedulers/features that are not Elo-arbitrated but are
         # part of the scheduling stack; flip them on so --elo all is the
         # everything-on switch (power schedule fast = classic AFL default)
