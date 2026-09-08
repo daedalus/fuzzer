@@ -67,6 +67,7 @@ from fuzzer_tool.core.schedulers import (
     DUCBScheduler,
     EpsilonGreedyScheduler,
     Exp3Scheduler,
+    FPLScheduler,
     GPUCBScheduler,
     HierarchicalBanditScheduler,
     MonteCarloScheduler,
@@ -107,6 +108,7 @@ RELIABLE = {
     "EpsilonGreedy": (lambda seed: EpsilonGreedyScheduler(), 0.85, 0.45),
     "Exp3": (lambda seed: Exp3Scheduler(), 0.78, 0.70),
     "GPUCB": (lambda seed: GPUCBScheduler(), 0.62, 0.75),
+    "FPL": (lambda seed: FPLScheduler(epsilon=1.0, rng=RandPool(seed)), 0.90, 0.40),
     "Hierarchical": (lambda seed: HierarchicalBanditScheduler(), 0.90, 0.40),
     "MonteCarlo": (lambda seed: MonteCarloScheduler(), 0.90, 0.45),
 }

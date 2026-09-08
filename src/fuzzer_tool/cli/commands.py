@@ -371,21 +371,31 @@ def cmd_fuzz(args):
     if args.grammar:
         from fuzzer_tool.core.grammar import load_grammar
 
-        # Expand glob patterns in grammar path
-        if any(c in args.grammar for c in "*?["):
-            matches = glob.glob(args.grammar)
-            if not matches:
-                print(f"[-] No grammar files found matching pattern: {args.grammar}")
-                sys.exit(1)
-            # Use the first match (consistent with single-value argument behavior)
-            grammar_path = matches[0]
-            if len(matches) > 1:
-                print(f"[*] Multiple grammar files match {args.grammar}, using: {grammar_path}")
-        else:
-            grammar_path = args.grammar
+        # Expand glob patterns in each grammar path
+        grammar_paths = []
+        for spec in args.grammar:
+            if any(c in spec for c in "*?["):
+                matches = glob.glob(spec)
+                if not matches:
+                    print(f"[-] No grammar files found matching pattern: {spec}")
+                    sys.exit(1)
+                grammar_paths.extend(matches)
+                if len(matches) > 1:
+                    print(f"[*] Multiple grammar files match {spec}, using: {', '.join(matches)}")
+            else:
+                grammar_paths.append(spec)
 
-        grammar = load_grammar(grammar_path)
-        print(f"[*] Grammar loaded: {len(grammar.rules)} rules")
+        # Load and merge all grammar files
+        for i, path in enumerate(grammar_paths):
+            g = load_grammar(path)
+            if grammar is None:
+                grammar = g
+            else:
+                grammar.merge(g)
+            if i == 0:
+                print(f"[*] Grammar loaded: {len(grammar.rules)} rules from {path}")
+            else:
+                print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
 
     # Parallel mode
     if args.jobs and args.jobs > 1:
@@ -839,20 +849,31 @@ def cmd_tmin(args):
     if args.grammar:
         from fuzzer_tool.core.grammar import load_grammar
 
-        # Expand glob patterns in grammar path
-        if any(c in args.grammar for c in "*?["):
-            matches = glob.glob(args.grammar)
-            if not matches:
-                print(f"[-] No grammar files found matching pattern: {args.grammar}")
-                sys.exit(1)
-            grammar_path = matches[0]
-            if len(matches) > 1:
-                print(f"[*] Multiple grammar files match {args.grammar}, using: {grammar_path}")
-        else:
-            grammar_path = args.grammar
+        # Expand glob patterns in each grammar path
+        grammar_paths = []
+        for spec in args.grammar:
+            if any(c in spec for c in "*?["):
+                matches = glob.glob(spec)
+                if not matches:
+                    print(f"[-] No grammar files found matching pattern: {spec}")
+                    sys.exit(1)
+                grammar_paths.extend(matches)
+            else:
+                grammar_paths.append(spec)
 
-        grammar = load_grammar(grammar_path)
-        print(f"[*] Grammar loaded: {len(grammar.rules)} rules (tree-level shrinking enabled)")
+        # Load and merge all grammar files
+        for i, path in enumerate(grammar_paths):
+            g = load_grammar(path)
+            if grammar is None:
+                grammar = g
+            else:
+                grammar.merge(g)
+            if i == 0:
+                print(
+                    f"[*] Grammar loaded: {len(grammar.rules)} rules from {path} (tree-level shrinking enabled)"
+                )
+            else:
+                print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
 
     minimized = tmin(
         target=args.target,
@@ -2895,8 +2916,8 @@ def main() -> int:
     fuzz_parser.add_argument(
         "-g",
         "--grammar",
-        default=None,
-        help="Grammar spec (built-in: json, http_request, elf) or path to .gram file",
+        nargs="+",
+        help="Grammar file(s) (built-in: json, http_request, elf) or path to .gram file",
     )
     fuzz_parser.add_argument(
         "-j",
@@ -3216,8 +3237,8 @@ def main() -> int:
     tmin_parser.add_argument(
         "-g",
         "--grammar",
-        default=None,
-        help="Grammar for tree-level shrinking (built-in: json, http_request, elf or .gram file)",
+        nargs="+",
+        help="Grammar file(s) for tree-level shrinking (built-in: json, http_request, elf or .gram file)",
     )
     tmin_parser.add_argument(
         "-O", "--output", default=None, help="Output file for minimized input (default: stdout)"

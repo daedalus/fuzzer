@@ -112,6 +112,19 @@ class Grammar:
         self._budget = GENERATION_BYTE_CAP
         self._produced = 0
 
+    def merge(self, other: "Grammar") -> "Grammar":
+        """Merge rules from another Grammar into this one.
+
+        If a rule name already exists, alternatives are appended
+        (later values take precedence on potential overlaps).
+        """
+        for name, alts in other.rules.items():
+            if name in self.rules:
+                self.rules[name].extend(alts)
+            else:
+                self.rules[name] = alts.copy()
+        return self
+
     def parse(self, spec: str):
         """Parse a grammar specification string.
 
