@@ -193,6 +193,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "bitcast_float",
         "bitcast_int32",
         "size_field_overflow",
+        "bpe",
     },
     "adaptive": {
         "markov_bytes",

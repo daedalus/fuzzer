@@ -57,6 +57,7 @@ weighted draws are expressed as pre-expanded tuples rather than by calling
 
 import math
 import struct
+from collections import Counter
 from functools import lru_cache
 
 from fuzzer_tool.core.debruijn_cache import fingerprint as _db_fingerprint
@@ -1452,3 +1453,84 @@ def size_field_overflow(data: bytes, rng=None) -> bytes:
     out = bytearray(data)
     out[offset : offset + width] = packed
     return bytes(out)
+
+
+def bpe(data: bytes, rng=None) -> bytes:
+    """Byte-pair encode a region, edit token stream, expand back.
+
+    BPE finds the most frequent adjacent byte pairs in the input and merges
+    them into single tokens.  The token stream is shorter than the original
+    byte stream; mutations in token space change multiple adjacent bytes at
+    once, probing parser fast-paths keyed on repeated multi-byte sequences.
+
+    The merge is deterministic and data-local: no external vocabulary is
+    needed, and the same input always produces the same merge set.  A
+    mutation in token space expands back to a byte stream of exactly the
+    original length because each token expands to 1 or 2 bytes and the
+    merge/unmerge counts balance.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 4:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=4)
+    if length < 4:
+        return data
+    block = data[offset : offset + length]
+    # Count all adjacent byte pairs.
+    pair_counts: Counter[tuple[int, int]] = Counter()
+    for i in range(len(block) - 1):
+        pair_counts[(block[i], block[i + 1])] += 1
+    if not pair_counts:
+        return data
+    # Pick top-N pairs greedily, descending by count.
+    sorted_pairs = [p for p, _ in sorted(pair_counts.items(), key=lambda x: -x[1])]
+    n_merge = rng.randint(1, min(5, len(sorted_pairs)))
+    merge_set = set(sorted_pairs[:n_merge])
+    # Greedy left-to-right merge pass.
+    tokens: list[tuple[int, int]] = []  # (lo, hi); hi=-1 for unmerged singletons.
+    i = 0
+    while i < len(block):
+        if i + 1 < len(block) and (block[i], block[i + 1]) in merge_set:
+            tokens.append((block[i], block[i + 1]))
+            i += 2
+        else:
+            tokens.append((block[i], -1))
+            i += 1
+    # Mutate the token stream.
+    n_mut = rng.randint(1, max(2, len(tokens) // 2))
+    for _ in range(n_mut):
+        pos = rng.randint(0, len(tokens) - 1)
+        action = rng.randint(0, 2)
+        if action == 0:
+            # Swap token with neighbour.
+            neighbour = rng.randint(0, len(tokens) - 1)
+            while neighbour == pos:
+                neighbour = rng.randint(0, len(tokens) - 1)
+            tokens[pos], tokens[neighbour] = tokens[neighbour], tokens[pos]
+        elif action == 1:
+            # Replace with random single-byte token.
+            tokens[pos] = (rng.randint(0, 255), -1)
+        else:
+            # Delete token and reinsert at random position.
+            tok = tokens.pop(pos)
+            ins = rng.randint(0, len(tokens))
+            tokens.insert(ins, tok)
+    # Expand tokens back to bytes; length is preserved because each token
+    # expands to exactly 1 or 2 bytes and the number of tokens equals the
+    # number of merge pairs subtracted from the original length.
+    restored = bytearray(length)
+    j = 0
+    for lo, hi in tokens:
+        restored[j] = lo
+        j += 1
+        if hi != -1:
+            restored[j] = hi
+            j += 1
+    return _splice(data, offset, bytes(restored[:length]))

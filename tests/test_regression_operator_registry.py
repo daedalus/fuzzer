@@ -293,6 +293,7 @@ class TestRegularityOperators:
             "bitcast_float",
             "bitcast_int32",
             "size_field_overflow",
+            "bpe",
         }
     )
 

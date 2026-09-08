@@ -3285,6 +3285,11 @@ class OperatorEngine:
 
         return self._regularity(size_field_overflow, buf)
 
+    def _op_bpe(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import bpe
+
+        return self._regularity(bpe, buf)
+
     def corpus_invariants(self):
         """Cached ``CorpusInvariants`` for the current corpus, or None.
 

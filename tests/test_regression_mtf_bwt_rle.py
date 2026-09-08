@@ -42,6 +42,7 @@ NEW_OPS = frozenset(
         "bitcast_float",
         "bitcast_int32",
         "size_field_overflow",
+        "bpe",
     }
 )
 
@@ -220,6 +221,18 @@ class TestRoundTrip:
         data = bytes(range(256)) * 4
         buf = bytearray(data)
         result = dispatch["size_field_overflow"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_bpe_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        # Repetitive data has strong byte pairs for BPE to merge.
+        data = bytes([i % 16 for i in range(256)])
+        buf = bytearray(data)
+        result = dispatch["bpe"](buf, 0, data)
         assert result is not None
         assert len(result) == len(data)
 

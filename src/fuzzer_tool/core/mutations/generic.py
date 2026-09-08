@@ -977,6 +977,7 @@ MUTATIONS = [
     "bitcast_float",
     "bitcast_int32",
     "size_field_overflow",
+    "bpe",
 ]
 
 # Format-aware mutations: structure-aware operators for specific file formats.
