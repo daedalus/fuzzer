@@ -303,6 +303,11 @@ class TestRegularityOperators:
             "length_miscalculate",
             "elias_gamma",
             "elias_delta",
+            "simd_shuffle",
+            "bit_interleave",
+            "gray_code",
+            "lz_dict_mutate",
+            "huffman_tree_mutate",
         }
     )
 

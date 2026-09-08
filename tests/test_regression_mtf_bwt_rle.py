@@ -52,6 +52,11 @@ NEW_OPS = frozenset(
         "length_miscalculate",
         "elias_gamma",
         "elias_delta",
+        "simd_shuffle",
+        "bit_interleave",
+        "gray_code",
+        "lz_dict_mutate",
+        "huffman_tree_mutate",
     }
 )
 
@@ -345,6 +350,62 @@ class TestRoundTrip:
         assert result is not None
         assert len(result) == len(data)
 
+    def test_simd_shuffle_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["simd_shuffle"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_bit_interleave_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["bit_interleave"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_gray_code_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["gray_code"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_lz_dict_mutate_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        # Repetitive data has long LZ matches.
+        data = bytes([i % 16 for i in range(256)])
+        buf = bytearray(data)
+        result = dispatch["lz_dict_mutate"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
+    def test_huffman_tree_mutate_handler_roundtrip_invariant(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256)) * 4
+        buf = bytearray(data)
+        result = dispatch["huffman_tree_mutate"](buf, 0, data)
+        assert result is not None
+        assert len(result) == len(data)
+
 
 class TestAdversarial:
     def test_rle_uniform_input_preserves_length(self):
@@ -405,6 +466,54 @@ class TestAdversarial:
             acc = (acc + modulated[i]) & 0xFF
             restored[i] = acc
         assert bytes(restored) == data
+
+    def test_bit_interleave_preserves_length_on_64_byte_input(self):
+        """bit_interleave must not crash or change length on exact 64-byte input."""
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=42)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(64))
+        buf = bytearray(data)
+        result = dispatch["bit_interleave"](buf, 0, data)
+        assert result is not None
+        assert len(result) == 64
+
+    def test_gray_code_preserves_length_on_2_byte_input(self):
+        """Gray code on minimum 2-byte input must not change length."""
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=7)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = b"\x00\xff"
+        buf = bytearray(data)
+        result = dispatch["gray_code"](buf, 0, data)
+        assert result is not None
+        assert len(result) == 2
+
+    def test_lz_dict_mutate_returns_bytes_of_same_length(self):
+        """lz_dict_mutate must return a bytes-like result of identical length."""
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=13)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = bytes(range(256))
+        buf = bytearray(data)
+        result = dispatch["lz_dict_mutate"](buf, 0, data)
+        assert result is not None
+        assert len(result) == 256
+
+    def test_huffman_tree_mutate_returns_bytes_of_same_length(self):
+        """huffman_tree_mutate must return a bytes-like result of identical length."""
+        fuzzer = _MockFuzzer()
+        fuzzer._rand_pool = RandPool(seed=21)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        data = b"ab" * 128
+        buf = bytearray(data)
+        result = dispatch["huffman_tree_mutate"](buf, 0, data)
+        assert result is not None
+        assert len(result) == 256
 
     def test_all_ops_dispatch_matches_registry(self):
         import tempfile

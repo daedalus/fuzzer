@@ -3335,6 +3335,31 @@ class OperatorEngine:
 
         return self._regularity(elias_delta, buf)
 
+    def _op_simd_shuffle(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import simd_shuffle
+
+        return self._regularity(simd_shuffle, buf)
+
+    def _op_bit_interleave(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import bit_interleave
+
+        return self._regularity(bit_interleave, buf)
+
+    def _op_gray_code(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import gray_code
+
+        return self._regularity(gray_code, buf)
+
+    def _op_lz_dict_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import lz_dict_mutate
+
+        return self._regularity(lz_dict_mutate, buf)
+
+    def _op_huffman_tree_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import huffman_tree_mutate
+
+        return self._regularity(huffman_tree_mutate, buf)
+
     def corpus_invariants(self):
         """Cached ``CorpusInvariants`` for the current corpus, or None.
 

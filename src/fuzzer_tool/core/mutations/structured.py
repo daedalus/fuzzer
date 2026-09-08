@@ -90,7 +90,9 @@ _STRUCT_FMT = {
 }
 
 
-def _region(data_len: int, rng, min_len: int = 1, align: int = 1) -> tuple[int, int]:
+def _region(
+    data_len: int, rng, min_len: int = 1, align: int = 1, max_len: int | None = None
+) -> tuple[int, int]:
     """Pick a random ``(offset, length)`` window to overwrite.
 
     Args:
@@ -101,6 +103,11 @@ def _region(data_len: int, rng, min_len: int = 1, align: int = 1) -> tuple[int, 
             fixed-width words line up with how a reader slices them. Without
             it an unaligned run reads as ordinary noise at the reader's own
             stride, silently defeating the construction.
+        max_len: When set, the returned length is rounded down to a multiple
+            of this value.  This lets callers enforce width-specific
+            invariants (e.g. bit-plane interleaving requires multiples of 8)
+            without altering the global ``_region`` contract for everyone
+            else.
 
     Returns:
         ``(offset, length)`` with ``offset + length <= data_len``, or
@@ -111,7 +118,12 @@ def _region(data_len: int, rng, min_len: int = 1, align: int = 1) -> tuple[int, 
     span = min(MAX_REGION, data_len)
     if span < min_len:
         return 0, 0
-    length = rng.randint(min_len, span)
+    hi = span if max_len is None else span - (span % max_len)
+    length = rng.randint(min_len, hi)
+    if max_len is not None:
+        length -= length % max_len
+        if length < min_len:
+            return 0, 0
     offset = rng.randint(0, data_len - length)
     if align > 1:
         offset -= offset % align
@@ -2110,6 +2122,334 @@ def elias_delta(data: bytes, rng=None) -> bytes:
         restored[ridx] = (val - 1) & 0xFF
         ridx += 1
         bidx += total_bits
+    while ridx < length:
+        restored[ridx] = rng.randint(0, 255)
+        ridx += 1
+    return _splice(data, offset, bytes(restored[:length]))
+
+
+def simd_shuffle(data: bytes, rng=None) -> bytes:
+    """Shuffle bytes within SIMD-width windows in a region.
+
+    SIMD instruction sets (SSE/AVX/NEON) process data in fixed-width
+    lanes of 16, 32, or 64 bytes.  Parsers that accelerate media or
+    crypto routines with SIMD often assume data is aligned to the lane
+    width and that adjacent lanes are independent.  Shuffling bytes
+    within each lane probes those assumptions: a lane that crosses a
+    field boundary can expose unvectorized fallback paths or
+    out-of-bounds lane loads.
+
+    The operator selects a random lane width, picks a region aligned
+    to that width, and permutes bytes within each lane independently.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 16:
+        return data
+    rng = _get_rng(rng)
+    width = rng.choice((16, 32, 64))
+    offset, length = _region(len(data), rng, min_len=width)
+    if length < width:
+        return data
+    aligned_offset = offset + ((width - offset % width) % width)
+    aligned_end = offset + length - ((offset + length - aligned_offset) % width)
+    if aligned_end <= aligned_offset:
+        return data
+    block = bytearray(data[aligned_offset:aligned_end])
+    for i in range(0, len(block), width):
+        lane = block[i : i + width]
+        rng.shuffle(lane)
+        block[i : i + width] = lane
+    return _splice(data, aligned_offset, bytes(block))
+
+
+def bit_interleave(data: bytes, rng=None) -> bytes:
+    """Interleave or deinterleave bit planes in a region.
+
+    Bit-plane interleaving reorders bytes by extracting one bit from
+    each of 8 consecutive bytes to form a new byte.  The result spreads
+    the bits of each original byte across 8 different output bytes.
+    Deinterleaving reverses the process.
+
+    This mutation is meaningful for formats that store pixels, audio
+    samples, or packed fields as bit planes rather than as packed bytes:
+    BMP, GIF, TIFF, and some RAW camera formats all use interleaved bit
+    layouts.  A parser that assumes the wrong plane order reads garbage
+    or crashes on the bit extraction fast path.
+
+    The operator operates on a 64-byte aligned window; shorter inputs
+    fall through to the identity.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 64:
+        return data
+    rng = _get_rng(rng)
+    # Bit-plane interleave needs regions that are a multiple of 64 bytes
+    # (8 groups of 8 bytes each).  Round the length to that granularity.
+    offset, length = _region(len(data), rng, min_len=64, max_len=64)
+    if length < 64:
+        return data
+    block = bytearray(data[offset : offset + length])
+    # Each 64-byte chunk: 8 groups of 8 bytes.  Extract one bit from
+    # each byte at position j (MSB-first) to form each destination byte,
+    # then shuffle the 64 destination bytes and reverse.
+    for chunk_start in range(0, length, 64):
+        grp = block[chunk_start : chunk_start + 64]
+        dst = bytearray(64)
+        for j in range(8):
+            for g in range(8):
+                dst[j * 8 + g] = (grp[g * 8 + j] >> (7 - j)) & 1
+        rng.shuffle(dst)
+        out = bytearray(64)
+        for g in range(8):
+            b = 0
+            for j in range(8):
+                b |= dst[g * 8 + j] << (7 - j)
+            out[g] = b
+        block[chunk_start : chunk_start + 64] = out
+    return _splice(data, offset, bytes(block))
+
+
+def gray_code(data: bytes, rng=None) -> bytes:
+    """Mutate bytes in Gray-coded space.
+
+    Gray code is a binary encoding where adjacent values differ by
+    exactly one bit.  Flipping bits in Gray-coded space produces
+    mutations that differ from the original by a Hamming distance of
+    exactly 1, 2, or 3 bits per byte — a different bias from ordinary
+    bit-flip operators, which tend to cluster in the low bits of the
+    byte.
+
+    This is useful for probing counter/register fields, CRC checksums,
+    and other values where single-bit transitions are the expected
+    update pattern.  A parser that assumes Gray-coded monotonicity can
+    miss the mutation; one that assumes natural binary order reads a
+    very different value.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=2)
+    if length < 2:
+        return data
+    block = bytearray(data[offset : offset + length])
+    gray = [b ^ (b >> 1) for b in block]
+    n_flip = rng.randint(1, min(3, length))
+    for _ in range(n_flip):
+        pos = rng.randint(0, length - 1)
+        bit = rng.randint(0, 7)
+        gray[pos] ^= 1 << bit
+    restored = bytearray(length)
+    for i, g in enumerate(gray):
+        b = g
+        k = g >> 1
+        while k:
+            b ^= k
+            k >>= 1
+        restored[i] = b & 0xFF
+    return _splice(data, offset, bytes(restored))
+
+
+def lz_dict_mutate(data: bytes, rng=None) -> bytes:
+    """Mutate an LZ77-style dictionary/literal pair in a region.
+
+    LZ77-family compressors (DEFLATE, LZ4, Zstandard, XZ) encode data
+    as a mix of literal bytes and back-reference tokens of the form
+    (distance, length).  The distance selects an earlier position in
+    the sliding window; the length selects how many bytes to copy from
+    there.
+
+    This operator simulates an LZ77 token stream over the input and
+    mutates the distance/length pairs.  A distance mutation changes
+    which historical bytes get copied; a length mutation changes how
+    many bytes get copied.  Both probe decompressor fast paths that
+    assume distance/length pairs are valid and within bounds.
+
+    The mutation is applied to a randomly-selected region; the result
+    is always the same length as the input.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 8:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=8)
+    if length < 8:
+        return data
+    block = bytearray(data[offset : offset + length])
+    tokens = []
+    i = 0
+    min_match = 3
+    max_match = min(64, length - 1)
+    while i < len(block):
+        best_dist, best_len = 0, 0
+        search_start = max(0, i - 32768)
+        for j in range(search_start, i):
+            match_len = 0
+            while (
+                match_len < max_match
+                and i + match_len < len(block)
+                and block[j + match_len] == block[i + match_len]
+            ):
+                match_len += 1
+            if match_len > best_len:
+                best_dist = i - j
+                best_len = match_len
+        if best_len >= min_match:
+            tokens.append(("ref", best_dist, best_len))
+            i += best_len
+        else:
+            tokens.append(("lit", block[i]))
+            i += 1
+    if not tokens:
+        return data
+    n_mut = rng.randint(1, min(4, len(tokens)))
+    for _ in range(n_mut):
+        pos = rng.randint(0, len(tokens) - 1)
+        tok = tokens[pos]
+        if tok[0] == "lit":
+            dist = rng.randint(1, min(32768, pos))
+            run_len = rng.randint(min_match, min(max_match, len(block) - pos))
+            tokens[pos] = ("ref", dist, run_len)
+        else:
+            action = rng.randint(0, 2)
+            if action == 0:
+                new_dist = max(1, min(32768, tok[1] + rng.randint(-16, 16)))
+                tokens[pos] = ("ref", new_dist, tok[2])
+            elif action == 1:
+                new_len = max(min_match, min(max_match, tok[2] + rng.randint(-2, 2)))
+                tokens[pos] = ("ref", tok[1], new_len)
+            else:
+                lit_pos = min(pos, len(block) - 1)
+                tokens[pos] = ("lit", block[lit_pos])
+    restored = bytearray(length)
+    ridx = 0
+    for tok in tokens:
+        if tok[0] == "lit":
+            if ridx < length:
+                restored[ridx] = tok[1]
+                ridx += 1
+        else:
+            _, dist, run_len = tok
+            for _ in range(run_len):
+                if ridx >= length:
+                    break
+                src_idx = ridx - dist
+                if 0 <= src_idx < length:
+                    restored[ridx] = restored[src_idx]
+                else:
+                    restored[ridx] = rng.randint(0, 255)
+                ridx += 1
+    while ridx < length:
+        restored[ridx] = rng.randint(0, 255)
+        ridx += 1
+    return _splice(data, offset, bytes(restored[:length]))
+
+
+def huffman_tree_mutate(data: bytes, rng=None) -> bytes:
+    """Mutate the Huffman codebook implied by a region, re-encode.
+
+    Huffman coding assigns short bit patterns to frequent symbols and
+    long ones to rare symbols.  The assignment is determined by a tree
+    structure: swapping two sibling leaves changes which symbol gets
+    the short code without violating the prefix-free property.
+
+    This operator builds an approximate Huffman tree for the region,
+    swaps two leaf assignments, and re-encodes the region with the
+    mutated tree.  The result is a valid Huffman stream that decodes
+    to different bytes — probing the decoder's tree traversal and
+    symbol reconstruction paths.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 4:
+        return data
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=4)
+    if length < 4:
+        return data
+    block = data[offset : offset + length]
+    freq = [0] * 256
+    for b in block:
+        freq[b] += 1
+    symbols = sorted(range(256), key=lambda s: (freq[s], s))
+    codes = [0] * 256
+    lengths = [0] * 256
+    code = 0
+    prev_len = 0
+    for rank, sym in enumerate(symbols):
+        if freq[sym] == 0:
+            continue
+        bit_len = max(1, rank.bit_length())
+        if rank > 0 and bit_len > prev_len:
+            code <<= bit_len - prev_len
+        codes[sym] = code
+        lengths[sym] = bit_len
+        code += 1
+        prev_len = bit_len
+    non_zero = [s for s in symbols if freq[s] > 0]
+    if len(non_zero) < 2:
+        return data
+    a, b = rng.sample(non_zero, 2)
+    codes[a], codes[b] = codes[b], codes[a]
+    lengths[a], lengths[b] = lengths[b], lengths[a]
+    bits = bytearray()
+    for b in block:
+        sym_code = codes[b]
+        sym_len = lengths[b]
+        for i in range(sym_len - 1, -1, -1):
+            bits.append((sym_code >> i) & 1)
+    decode_table = {}
+    for sym in range(256):
+        if lengths[sym] == 0:
+            continue
+        decode_table[(codes[sym], lengths[sym])] = sym
+    restored = bytearray(length)
+    ridx = 0
+    bidx = 0
+    while ridx < length and bidx < len(bits):
+        for bit_len in range(1, 17):
+            if bidx + bit_len > len(bits):
+                break
+            prefix = 0
+            for i in range(bit_len):
+                prefix = (prefix << 1) | bits[bidx + i]
+            key = (prefix, bit_len)
+            if key in decode_table:
+                restored[ridx] = decode_table[key]
+                ridx += 1
+                bidx += bit_len
+                break
+        else:
+            break
     while ridx < length:
         restored[ridx] = rng.randint(0, 255)
         ridx += 1
