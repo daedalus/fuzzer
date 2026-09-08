@@ -992,3 +992,203 @@ def popcount_lock(data: bytes, rng=None) -> bytes:
     weight = rng.choice(_POPCOUNT_WEIGHTS)
     block = rng.randbytes(length).translate(_popcount_table(weight))
     return _splice(data, offset, block)
+
+
+# ── 13. MTF / BWT / RLE round-trip transforms ────────────────────────────
+#
+# These are not diehard/dieharder inverses; they are reversible byte-domain
+# transforms that produce mutation shapes no existing operator can reach:
+#
+#   * mtf  — edits near frequent/recent symbols in the original byte stream.
+#   * bwt  — edits in BWT space scatter across every position sharing the
+#            same following context in the original.
+#   * rle  — edits run lengths/values, changing repetition structure.
+#
+# All three are length-preserving: the mutate-then-invert path always returns
+# a buffer of exactly len(data) bytes, or declines on inputs too short to
+# transform meaningfully.
+
+
+def _mtf_encode(data: bytes, alphabet: bytearray) -> bytes:
+    """Encode *data* with Move-To-Front, mutating *alphabet* in place."""
+    out = bytearray(len(data))
+    for i, b in enumerate(data):
+        idx = alphabet.index(b)
+        out[i] = idx & 0xFF
+        del alphabet[idx]
+        alphabet.insert(0, b)
+    return bytearray(out)
+
+
+def _mtf_decode(encoded: bytes, alphabet: bytearray) -> bytes:
+    """Decode MTF-encoded *encoded* using a fresh copy of *alphabet*."""
+    syms = list(alphabet)
+    out = bytearray(len(encoded))
+    for i, idx in enumerate(encoded):
+        out[i] = syms[idx]
+        del syms[idx]
+        syms.insert(0, out[i])
+    return bytes(out)
+
+
+def mtf(data: bytes, rng=None) -> bytes:
+    """Move-To-Front encode, edit MTF indices, decode back.
+
+    A one-byte edit in MTF-index space becomes a value-correlated edit in the
+    original: small indices correspond to frequent/recent symbols, so editing
+    them nudges common bytes rather than rare ones.  That is the opposite of
+    uniform random overwrite and exercises fast paths keyed on byte-value
+    distribution.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    alphabet = bytearray(range(256))
+    encoded = _mtf_encode(data, alphabet)
+    # Mutate 1–3 low indices (frequent symbols) in the MTF domain.
+    n_mut = rng.randint(1, min(3, len(encoded)))
+    for _ in range(n_mut):
+        pos = rng.randint(0, len(encoded) - 1)
+        # Weight toward small indices: frequent symbols sit near 0 after MTF.
+        encoded[pos] = rng.randint(0, min(15, len(encoded) - 1)) & 0xFF
+    alphabet = bytearray(range(256))
+    return _mtf_decode(encoded, alphabet)
+
+
+def _bwt(data: bytes) -> tuple[bytes, int]:
+    """Burrows–Wheeler transform: returns (bwt_data, primary_key)."""
+    n = len(data)
+    if n <= 1:
+        return data, 0
+    rotations = [data[i:] + data[:i] for i in range(n)]
+    rotations.sort()
+    primary = rotations.index(data)
+    return bytes(row[-1] for row in rotations), primary
+
+
+def _bwt_inverse(bwt_data: bytes, primary: int) -> bytes:
+    """Inverse Burrows–Wheeler transform."""
+    n = len(bwt_data)
+    if n <= 1:
+        return bwt_data
+    table = sorted((bwt_data[i], i) for i in range(n))
+    # First column F and rank lookup for the LF-mapping.
+    F = [table[i][0] for i in range(n)]
+    rows_f: dict[int, list[int]] = {}
+    for i, c in enumerate(F):
+        rows_f.setdefault(c, []).append(i)
+    idx = primary
+    out = bytearray(n)
+    for i in range(n):
+        c = bwt_data[idx]
+        out[n - 1 - i] = c
+        rank = sum(1 for j in range(idx + 1) if bwt_data[j] == c)
+        idx = rows_f[c][rank - 1]
+    return bytes(out)
+
+
+def bwt(data: bytes, rng=None) -> bytes:
+    """BWT + MTF round-trip: transform, edit in BWT+MTF space, invert back.
+
+    BWT groups bytes by following context; a one-byte edit in BWT space
+    scatters across every original position sharing that context.  MTF on top
+    converts the BWT output to small indices for frequent symbols, so the
+    mutation lands on structurally important bytes rather than noise.
+
+    The primary-key byte needed for inverse BWT is preserved unchanged; it is
+    not part of the MTF domain and is never mutated.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 4:
+        return data
+    rng = _get_rng(rng)
+    block_size = rng.choice((8, 16, 32, 64, 128, 256))
+    block_size = min(block_size, len(data))
+    offset = rng.randint(0, len(data) - block_size)
+    block = data[offset : offset + block_size]
+    bwt_data, primary = _bwt(block)
+    alphabet = bytearray(range(256))
+    encoded = _mtf_encode(bwt_data, alphabet)
+    n_mut = rng.randint(1, min(3, len(encoded)))
+    for _ in range(n_mut):
+        pos = rng.randint(0, len(encoded) - 1)
+        encoded[pos] = rng.randint(0, min(15, len(encoded) - 1)) & 0xFF
+    alphabet = bytearray(range(256))
+    decoded = _mtf_decode(encoded, alphabet)
+    restored = _bwt_inverse(decoded, primary)
+    return _splice(data, offset, restored)
+
+
+def rle(data: bytes, rng=None) -> bytes:
+    """Run-length encode, edit runs, decode back.
+
+    Editing run lengths changes repetition structure in the original: merging
+    adjacent runs creates longer uniform stretches, splitting creates shorter
+    ones, and changing run values swaps which byte repeats.  These are the
+    mutations a runs-test detector is most sensitive to and that RLE-compressed
+    format parsers (BMP, TIFF, PCX) process along their fast paths.
+
+    Length is preserved: run-length edits that would grow or shrink the total
+    are compensated by adjusting a neighbouring run in the opposite direction.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < 2:
+        return data
+    rng = _get_rng(rng)
+    runs: list[tuple[int, int]] = []
+    i = 0
+    while i < len(data):
+        b = data[i]
+        j = i + 1
+        while j < len(data) and data[j] == b:
+            j += 1
+        runs.append((b, j - i))
+        i = j
+    if len(runs) < 2:
+        return data
+    n_mut = rng.randint(1, min(3, len(runs)))
+    for _ in range(n_mut):
+        pos = rng.randint(0, len(runs) - 1)
+        if rng.random() < 0.6:
+            # Mutate run value.
+            runs[pos] = (rng.randint(0, 255), runs[pos][1])
+        else:
+            # Mutate run length, compensating to preserve total length.
+            new_len = rng.randint(1, max(2, runs[pos][1] * 3))
+            delta = new_len - runs[pos][1]
+            if delta > 0 and len(runs) >= 2:
+                other = rng.randint(0, len(runs) - 1)
+                while other == pos:
+                    other = rng.randint(0, len(runs) - 1)
+                new_other = max(1, runs[other][1] - delta)
+                delta -= runs[other][1] - new_other
+                runs[other] = (runs[other][0], new_other)
+                if delta > 0:
+                    runs[pos] = (runs[pos][0], runs[pos][1] + delta)
+            else:
+                runs[pos] = (runs[pos][0], max(1, runs[pos][1] + delta))
+    out = bytearray()
+    for b, length in runs:
+        out.extend([b] * length)
+    if len(out) != len(data):
+        return data
+    return _splice(data, 0, bytes(out))

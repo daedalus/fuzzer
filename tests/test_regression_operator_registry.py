@@ -281,10 +281,13 @@ class TestRegularityOperators:
             "kmer_starve",
             "lag_correlate",
             "monotone_fill",
+            "mtf",
             "perm_lock",
             "popcount_lock",
             "rank_deficient",
+            "rle",
             "spectral_peak",
+            "bwt",
         }
     )
 

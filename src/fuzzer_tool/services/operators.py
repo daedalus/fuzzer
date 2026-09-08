@@ -3245,6 +3245,21 @@ class OperatorEngine:
 
         return self._regularity(feistel_scramble, buf)
 
+    def _op_mtf(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import mtf
+
+        return self._regularity(mtf, buf)
+
+    def _op_bwt(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import bwt
+
+        return self._regularity(bwt, buf)
+
+    def _op_rle(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import rle
+
+        return self._regularity(rle, buf)
+
     def corpus_invariants(self):
         """Cached ``CorpusInvariants`` for the current corpus, or None.
 

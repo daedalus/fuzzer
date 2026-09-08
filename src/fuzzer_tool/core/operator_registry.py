@@ -185,6 +185,9 @@ _CATEGORIES: dict[str, set[str]] = {
         "float_squeeze",
         "popcount_lock",
         "feistel_scramble",
+        "mtf",
+        "bwt",
+        "rle",
     },
     "adaptive": {
         "markov_bytes",
