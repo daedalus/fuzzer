@@ -34,6 +34,7 @@ htmlcov/
 Thumbs.db
 
 # Project-specific
+uv.lock
 fuzzing/
 *.core
 targets/*.elf
