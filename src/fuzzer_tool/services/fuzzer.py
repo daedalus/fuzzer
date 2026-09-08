@@ -5804,6 +5804,8 @@ class Fuzzer:
             ops.append("invasion")
         if getattr(self, "_use_shapley", False):
             ops.append("shapley")
+        if getattr(self, "_use_round_robin", False):
+            ops.append("round-robin")
         if getattr(self, "_cmaes", False):
             groups["Scheduling"].append("cma-es")
         if ops:
@@ -5937,7 +5939,6 @@ class Fuzzer:
         print(f"[*] Ngram: k={detect_ngram_k(self.target)}")
         if self._validity.enabled:
             print(f"[*] Validity channel: reject-code {self._validity.reject_code}")
-        print(f"[*] Selected schedulers: {self._selected_schedulers_str()}")
         # Static branch density: conditional branches per KB of .text
         from fuzzer_tool.core.elf import branch_density
 
