@@ -157,6 +157,16 @@ docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agen
 └── targets/      #   $FUZZ_BUILD_ROOT  — built target artifacts (.so/.bin) and per-lib build trees
 ```
 
+## Key aspects from the existing schedulers:
+
+1. All have init_arm(name) method to register arms
+2. All have select_op(ops) method to select from a list of candidate ops
+3. All have record(name, success, weight) method to update statistics
+4. All have bandit_stats() method to return diagnostics
+5. All have supports_priors = False or True class attribute
+6. All use RandPool for RNG (Hard Rule 16)
+
+
 ## Code Style
 
 - Format: `ruff format`; lint: `ruff check`
