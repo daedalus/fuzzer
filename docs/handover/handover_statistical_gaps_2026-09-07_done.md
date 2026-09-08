@@ -55,13 +55,16 @@ Shared Bernoulli upper bound (`kl_upper_bound`) with `kl_ucb` flag on both
 DUCB and SWUCB, default off. `tools/measure_klucb_signal.py`:
 SW-UCB KL 0.997 vs Gaussian 0.985, DUCB KL 0.777 vs Gaussian 0.968 — not a
 one-size win, so the flag stays gated per-target. FPL (`core/schedulers/fpl.py`)
-remains unimplemented, deferred.
+has since been implemented (commit `ed09d59`).
 
 ---
 
 ## 6. What is still open
 
-- FPL scheduler (`core/schedulers/fpl.py`) — not implemented.
+- FPL scheduler (`core/schedulers/fpl.py`) — implemented in commit `ed09d59`,
+  wired into the service layer (`fuzzer.py`) and CLI (`--fpl`, `--fpl-epsilon`).
+  Convergence verified on StationaryBernoulli (tail share 0.999, regret
+  slope 0.012).
 - KS wiring into `compute_hitcount_diversity_weight` — gated until a real
   corpus shows KS separating a signal Wasserstein misses.
 - `kl_ucb=True` per-target enablement — gated until the target's reward
