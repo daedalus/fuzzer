@@ -56,11 +56,14 @@ def edge_sets_to_flow(
 ) -> dict[tuple[int, int], float]:
     """Directed edge-to-edge transfer entropy from a history of edge sets.
 
-    Same top-k-by-hit-count / binary-series construction as
-    ``TransferEntropy.edge_to_edge_flow``, adapted to the sparse
-    ``list[set[int]]`` representation already accumulated in
-    ``Fuzzer._te_edge_history`` (SHM edge ids), so callers never need to
-    materialise a per-run dense bitmap just to feed the causal-sector graph.
+    Same binary-series construction as ``TransferEntropy.edge_to_edge_flow``,
+    adapted to the sparse ``list[set[int]]`` representation already
+    accumulated in ``Fuzzer._te_edge_history`` (SHM edge ids), so callers
+    never need to materialise a per-run dense bitmap just to feed the
+    causal-sector graph. The top-k ranking differs, though: ``edge_history``
+    carries no per-exec hit counts, only per-step presence, so ``total_hits``
+    here counts the number of steps each edge appears in (at most 1 per
+    step) rather than summed hit counts as in ``edge_to_edge_flow``.
     """
     if not te or len(edge_history) < 3:
         return {}
