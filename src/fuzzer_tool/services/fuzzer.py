@@ -46,6 +46,7 @@ from fuzzer_tool.core.schedulers import (
     CMAESScheduler,
     ContextualLinUCBScheduler,
     CUCBScheduler,
+    CUSUM_UCBScheduler,
     DUCBScheduler,
     EpsilonGreedyScheduler,
     Exp3Scheduler,
@@ -102,6 +103,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "kl_ducb",
     "kl_swucb",
     "cucb",
+    "cusum_ucb",
     "fpl",
     "invasion",
     "round_robin",
@@ -784,6 +786,11 @@ class Fuzzer:
         kl_swucb_window=4000,
         cucb=False,
         cucb_gamma=0.9995,
+        cusum_ucb=False,
+        cusum_ucb_m=30,
+        cusum_ucb_epsilon=0.1,
+        cusum_ucb_h=40.0,
+        cusum_ucb_xi=0.6,
         fpl=False,
         fpl_epsilon=1.0,
         contextual=False,
@@ -1800,6 +1807,27 @@ class Fuzzer:
             self._cucb = CUCBScheduler(gamma=cucb_gamma, rng=self._rand_pool)
             log.info("CUCB enabled (gamma=%.5f)", cucb_gamma)
 
+        # CUSUM-UCB (Liu, Lee & Shroff 2018): change-point detection instead
+        # of D-UCB/SW-UCB's continuous forgetting -- see cusum_ucb.py for why
+        # both approaches earn a place here.
+        self._use_cusum_ucb = cusum_ucb
+        self._cusum_ucb = None
+        if cusum_ucb:
+            self._cusum_ucb = CUSUM_UCBScheduler(
+                m=cusum_ucb_m,
+                epsilon=cusum_ucb_epsilon,
+                h=cusum_ucb_h,
+                xi=cusum_ucb_xi,
+                rng=self._rand_pool,
+            )
+            log.info(
+                "CUSUM-UCB enabled (m=%d, epsilon=%.3f, h=%.2f, xi=%.2f)",
+                cusum_ucb_m,
+                cusum_ucb_epsilon,
+                cusum_ucb_h,
+                cusum_ucb_xi,
+            )
+
         # Follow Perturbed Leader: perturb-and-select bandit with decaying
         # perturbation schedule for stochastic bandit convergence.
         self._use_fpl = fpl
@@ -1973,6 +2001,7 @@ class Fuzzer:
             or self._ducb
             or self._swucb
             or self._cucb
+            or self._cusum_ucb
             or self._fpl
             or self._use_shapley
         )
@@ -2160,6 +2189,8 @@ class Fuzzer:
             _register_arms(self._kl_swucb)
         if self._cucb:
             _register_arms(self._cucb)
+        if self._cusum_ucb:
+            _register_arms(self._cusum_ucb)
         if self._fpl:
             _register_arms(self._fpl)
         if self._contextual:
@@ -4345,6 +4376,7 @@ class Fuzzer:
             self._kl_ducb,
             self._kl_swucb,
             self._cucb,
+            self._cusum_ucb,
             self._fpl,
         ):
             if scheduler is None:
@@ -5451,6 +5483,8 @@ class Fuzzer:
             all_strategies.append("swucb")
         if self._cucb:
             all_strategies.append("cucb")
+        if self._cusum_ucb:
+            all_strategies.append("cusum_ucb")
         if self._fpl:
             all_strategies.append("fpl")
         if self._use_invasion and self.mc and self.mc_bandit:
@@ -5528,6 +5562,8 @@ class Fuzzer:
             ops.append("swucb")
         if getattr(self, "_cucb", False):
             ops.append("cucb")
+        if getattr(self, "_cusum_ucb", False):
+            ops.append("cusum_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
@@ -5748,6 +5784,8 @@ class Fuzzer:
             ops.append("swucb")
         if getattr(self, "_cucb", False):
             ops.append("cucb")
+        if getattr(self, "_cusum_ucb", False):
+            ops.append("cusum_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
         if getattr(self, "_use_contextual", False):

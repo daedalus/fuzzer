@@ -3,6 +3,7 @@
 from fuzzer_tool.core.schedulers.cmaes import CMAESScheduler
 from fuzzer_tool.core.schedulers.contextual import ContextualLinUCBScheduler
 from fuzzer_tool.core.schedulers.cucb import CUCBScheduler
+from fuzzer_tool.core.schedulers.cusum_ucb import CUSUM_UCBScheduler
 from fuzzer_tool.core.schedulers.ducb import DUCBScheduler
 from fuzzer_tool.core.schedulers.epsilon_greedy import EpsilonGreedyScheduler
 from fuzzer_tool.core.schedulers.exp3 import Exp3Scheduler
@@ -32,6 +33,7 @@ __all__ = [
     "AlphaBetaMCTSSeedScheduler",
     "ContextualLinUCBScheduler",
     "CUCBScheduler",
+    "CUSUM_UCBScheduler",
     "DUCBScheduler",
     "SWUCBScheduler",
     "KL_DUCBScheduler",

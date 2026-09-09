@@ -3827,6 +3827,8 @@ class OperatorEngine:
             available.append("kl_swucb")
         if f._use_cucb and f._cucb:
             available.append("cucb")
+        if f._use_cusum_ucb and f._cusum_ucb:
+            available.append("cusum_ucb")
         if f._use_invasion and f.mc and f.mc_bandit:
             available.append("invasion")
         if f._use_round_robin and f._round_robin:
@@ -3903,6 +3905,9 @@ class OperatorEngine:
         elif strategy == "cucb" and f._cucb:
             op = f._cucb.select_op(ops)
             f._last_mopt_particles.append(None)
+        elif strategy == "cusum_ucb" and f._cusum_ucb:
+            op = f._cusum_ucb.select_op(ops)
+            f._last_mopt_particles.append(None)
         elif strategy == "invasion" and f.mc and f.mc_bandit:
             # No fallback-chain branch below by design: invasion reads
             # f.mc's own bandit_stats() as its resistance signal, so
@@ -3976,6 +3981,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif f._use_cucb and f._cucb:
             op = f._cucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif f._use_cusum_ucb and f._cusum_ucb:
+            op = f._cusum_ucb.select_op(ops)
             f._last_mopt_particles.append(None)
         elif f._use_round_robin and f._round_robin:
             op = f._round_robin.select_op(ops)

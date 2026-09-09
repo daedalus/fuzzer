@@ -472,6 +472,11 @@ def cmd_fuzz(args):
             kl_swucb_window=getattr(args, "kl_swucb_window", 4000),
             cucb=getattr(args, "cucb", False),
             cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
+            cusum_ucb=getattr(args, "cusum_ucb", False),
+            cusum_ucb_m=getattr(args, "cusum_ucb_m", 30),
+            cusum_ucb_epsilon=getattr(args, "cusum_ucb_epsilon", 0.1),
+            cusum_ucb_h=getattr(args, "cusum_ucb_h", 40.0),
+            cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
             fpl=getattr(args, "fpl", False),
             fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
@@ -517,6 +522,7 @@ def cmd_fuzz(args):
         args.kl_swucb = True
         args.kl_swucb_window = 4000
         args.cucb = True
+        args.cusum_ucb = True
         args.fpl = True
         args.contextual = True
         args.invasion = True
@@ -656,6 +662,11 @@ def cmd_fuzz(args):
         swucb_window=getattr(args, "swucb_window", 4000),
         cucb=getattr(args, "cucb", False),
         cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
+        cusum_ucb=getattr(args, "cusum_ucb", False),
+        cusum_ucb_m=getattr(args, "cusum_ucb_m", 30),
+        cusum_ucb_epsilon=getattr(args, "cusum_ucb_epsilon", 0.1),
+        cusum_ucb_h=getattr(args, "cusum_ucb_h", 40.0),
+        cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
         fpl=getattr(args, "fpl", False),
         fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
@@ -1684,6 +1695,7 @@ _HAIL_MARY_FLAGS = (
     "swucb",
     "kl_swucb",
     "cucb",
+    "cusum_ucb",
     "fractal_partition",
     "contextual",
     "invasion",
@@ -2164,6 +2176,40 @@ def main() -> int:
         type=float,
         default=0.9995,
         help="CUCB discount per mutation round (default: 0.9995)",
+    )
+    fuzz_parser.add_argument(
+        "--cusum-ucb",
+        action="store_true",
+        help=(
+            "Enable CUSUM-UCB operator scheduling (Liu, Lee & Shroff): "
+            "detects abrupt reward shifts via a per-arm CUSUM test and "
+            "resets all arms' statistics only when a change is actually "
+            "detected, instead of forgetting continuously like D-UCB/SW-UCB"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--cusum-ucb-m",
+        type=int,
+        default=30,
+        help="CUSUM-UCB warm-up pulls per arm before detection starts (default: 30)",
+    )
+    fuzz_parser.add_argument(
+        "--cusum-ucb-epsilon",
+        type=float,
+        default=0.1,
+        help="CUSUM-UCB minimum-detectable mean-shift margin (default: 0.1)",
+    )
+    fuzz_parser.add_argument(
+        "--cusum-ucb-h",
+        type=float,
+        default=40.0,
+        help="CUSUM-UCB decision threshold; lower resets more eagerly (default: 40.0)",
+    )
+    fuzz_parser.add_argument(
+        "--cusum-ucb-xi",
+        type=float,
+        default=0.6,
+        help="CUSUM-UCB exploration constant inside the post-reset UCB width (default: 0.6)",
     )
     fuzz_parser.add_argument(
         "--fpl",

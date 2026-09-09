@@ -35,6 +35,7 @@ import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.cucb import CUCBScheduler
+from fuzzer_tool.core.schedulers.cusum_ucb import CUSUM_UCBScheduler
 from fuzzer_tool.core.schedulers.ducb import DUCBScheduler
 from fuzzer_tool.core.schedulers.swucb import SWUCBScheduler
 
@@ -47,6 +48,7 @@ RULE_16_SCHEDULERS = {
     "ducb.py": DUCBScheduler,
     "swucb.py": SWUCBScheduler,
     "cucb.py": CUCBScheduler,
+    "cusum_ucb.py": CUSUM_UCBScheduler,
 }
 
 #: Enough arms that a tie-break or unpulled-arm draw is overwhelmingly
