@@ -7,9 +7,10 @@ causes dst pointer to go past buf_end, writing into AVBuffer.free.
 
 from __future__ import annotations
 
-import random
 import struct
 from dataclasses import dataclass
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 # AVI chunk types for video streams
 AVI_VideoChunks = [b"vprp", b"strh", b"strf", b"data"]
@@ -116,13 +117,17 @@ class MagicYUVMutator:
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         """Apply one MagicYUV-specific mutation."""
-        rng = rng or random
+        self._rng = rng or RandPool()
         parsed = parse_avi_chunks(data)
         if not parsed:
-            return self._generate_random_magicyuv(max_len, rng=rng)
+            return self._generate_random_magicyuv(max_len, rng=self._rng)
 
         form_type, chunks = parsed
-        op = rng.randint(0, 5)
+
+        form_type, chunks = parsed
+
+        op = self._rng.randint(0, 5)
+
         mutators = [
             self._mutate_slice_height,
             self._mutate_width,
@@ -131,7 +136,8 @@ class MagicYUVMutator:
             self._delete_chunk,
             self._generate_random_magicyuv,
         ]
-        return mutators[op](form_type, chunks, max_len)[:max_len]
+        result = mutators[op](form_type, chunks, max_len)
+        return result[:max_len]
 
     def _mutate_slice_height(self, form_type: bytes, chunks: list[AviChunk], max_len: int) -> bytes:
         """Corrupt slice_height to create uneven remainders.
@@ -160,7 +166,7 @@ class MagicYUVMutator:
 
         # Choose problematic remainders (e.g., 1, 2, 3, 5, 7, 9, 11, 13, 15, 17, 19, 31)
         problematic = [1, 2, 3, 5, 7, 9, 11, 13, 15, 17, 19, 31, 63, 127, 255]
-        new_slice_height = rng.choice(problematic)
+        new_slice_height = self._rng.choice(problematic)
 
         # Write back
         modified = bytearray(target.data)
@@ -177,7 +183,7 @@ class MagicYUVMutator:
 
         width = struct.unpack_from("<I", target.data, 12)[0]
         # Corrupt width to create problematic width/height combos
-        new_width = rng.choice([0, 1, 2, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095])
+        new_width = self._rng.choice([0, 1, 2, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095])
 
         modified = bytearray(target.data)
         struct.pack_into("<I", modified, 12, new_width)
@@ -194,9 +200,9 @@ class MagicYUVMutator:
         height = struct.unpack_from("<I", target.data, 16)[0]
         # Corrupt height to create remainder when divided by slice_height
         if height > 100:
-            new_height = height + rng.choice([1, 2, 3, 5, 7, 9, 11, 13, 15])
+            new_height = height + self._rng.choice([1, 2, 3, 5, 7, 9, 11, 13, 15])
         else:
-            new_height = rng.choice([0, 1, 2, 3, 7, 15, 31, 63, 127, 255, 511])
+            new_height = self._rng.choice([0, 1, 2, 3, 7, 15, 31, 63, 127, 255, 511])
 
         modified = bytearray(target.data)
         struct.pack_into("<I", modified, 16, new_height)
@@ -212,7 +218,7 @@ class MagicYUVMutator:
 
         stride = struct.unpack_from("<I", target.data, 20)[0]
         # Create problematic stride (too small for chroma subsampling)
-        new_stride = rng.choice([0, 1, 2, 3, 7, 15, 31, 63, 127, 255])
+        new_stride = self._rng.choice([0, 1, 2, 3, 7, 15, 31, 63, 127, 255])
 
         modified = bytearray(target.data)
         struct.pack_into("<I", modified, 20, new_stride)
@@ -229,14 +235,15 @@ class MagicYUVMutator:
         if not deletable:
             return serialize_avi_chunks(form_type, chunks)[:max_len]
 
-        target = rng.choice(deletable)
+        target = self._rng.choice(deletable)
         chunks.remove(target)
 
         return serialize_avi_chunks(form_type, chunks)[:max_len]
 
     def _generate_random_magicyuv(self, max_len: int = 4096, rng=None) -> bytes:
         """Generate a minimal valid MagicYUV AVI stream."""
-        rng = rng or random
+        self._rng = rng or self._rng
+        rng = self._rng
         # Common MagicYUV resolution
         width = 640
         height = 480

@@ -18,11 +18,12 @@ that target hdlr handler_type and stsd codec fourcc fields.
 
 from __future__ import annotations
 
-import random
 import struct
 from dataclasses import dataclass, field
+from typing import Any
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 # Box types that contain sub-boxes
 CONTAINER_TYPES = {
@@ -262,7 +263,18 @@ def _find_stsd(boxes: list[Box]) -> list[tuple[list[Box], int]]:
     return found
 
 
-def _mutate_hdlr_handler_type(box: Box, rng: random.Random) -> None:
+def _find_ctts(boxes: list[Box]) -> list[Box]:
+    """Find all ctts boxes in the box tree."""
+    found: list[Box] = []
+    for box in boxes:
+        if box.box_type == b"ctts":
+            found.append(box)
+        if box.children:
+            found.extend(_find_ctts(box.children))
+    return found
+
+
+def _mutate_hdlr_handler_type(box: Box, rng: Any) -> None:
     """Replace the handler_type field in a hdlr box payload.
 
     hdlr payload: [predefined: u32][handler_type: 4 bytes][reserved: 3*u32][name: str]
@@ -278,7 +290,7 @@ def _mutate_hdlr_handler_type(box: Box, rng: random.Random) -> None:
         box.data = bytes(data)
 
 
-def _mutate_stsd_codec(box: Box, rng: random.Random) -> None:
+def _mutate_stsd_codec(box: Box, rng: Any) -> None:
     """Corrupt the first sample entry's codec fourcc in an stsd box.
 
     stsd payload: [version: u8][flags: u24][entry_count: u32][entries...]
@@ -299,21 +311,24 @@ def _mutate_stsd_codec(box: Box, rng: random.Random) -> None:
 class IsobmffMutator:
     """Structure-aware ISO-BMFF box mutator."""
 
-    _rng = random
+    _rng: Any = None
 
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or RandPool()
         boxes = parse_boxes(data)
         if boxes is None or not boxes:
             return self._generate_random_isobmff(max_len=max_len, rng=self._rng)
 
-        op = self._rng.randint(0, 9)
+        op = self._rng.randint(0, 12)
         mutators = [
             self._mutate_box_type,
             self._mutate_box_size,
             self._mutate_ftyp,
             self._mutate_hdlr,
             self._mutate_stsd,
+            self._mutate_ctts,
+            self._mutate_ctts_sample_count,
+            self._mutate_ctts_sample_offset,
             self._swap_boxes,
             self._delete_box,
             self._duplicate_box,
@@ -384,7 +399,83 @@ class IsobmffMutator:
             _mutate_stsd_codec(parent[idx], self._rng)
         return boxes
 
-    def _swap_boxes(self, boxes: list[Box], max_len: int) -> list[Box]:
+    def _mutate_ctts(self, boxes: list[Box], max_len: int) -> list[Box]:
+        """Mutate ctts sample count/offset fields (CVE-2022-2566).
+
+        ctts is a FullBox: [version:u32][flags:u24][entry_count:u32]
+        then entry_count * {sample_count:u32}[sample_offset:s32}.
+        The vulnerability: sum of ctts_data[i].count overflows
+        sample_offsets_count → av_calloc too small → OOB writes.
+        """
+        ctts_locations = []
+        for box in boxes:
+            if box.box_type == b"ctts":
+                ctts_locations.append(box)
+            if box.children:
+                ctts_locations.extend(_find_ctts(box.children))
+        if ctts_locations:
+            target = self._rng.choice(ctts_locations)
+            if len(target.data) >= 8:
+                data = bytearray(target.data)
+                # FullBox header: version (4) + entry_count (4)
+                entry_count = struct.unpack_from(">I", data, 4)[0]
+                if entry_count > 0:
+                    # Corrupt entry_count to trigger overflow
+                    if self._rng.random() < 0.5:
+                        new_count = 0xFFFFFFFF
+                        struct.pack_into(">I", data, 4, new_count)
+                    else:
+                        # Corrupt a sample_count field in first entry
+                        if len(data) >= 12:
+                            new_sample_count = self._rng.choice([0, 1, 0xFFFFFFFF, 0x7FFFFFFF])
+                            struct.pack_into(">I", data, 8, new_sample_count)
+                else:
+                    # No entries yet - corrupt the entry_count itself
+                    struct.pack_into(
+                        ">I", data, 4, self._rng.choice([0xFFFFFFFF, 0x7FFFFFFF, 0x80000000])
+                    )
+                target.data = bytes(data)
+        return boxes
+
+    def _mutate_ctts_sample_count(self, boxes: list[Box], max_len: int) -> list[Box]:
+        """Mutate ctts sample_count fields."""
+        ctts_locations = []
+        for box in boxes:
+            if box.box_type == b"ctts":
+                ctts_locations.append(box)
+            if box.children:
+                ctts_locations.extend(_find_ctts(box.children))
+        if ctts_locations:
+            target = self._rng.choice(ctts_locations)
+            if len(target.data) >= 12:
+                data = bytearray(target.data)
+                # First entry: sample_count at offset 8
+                new_sample_count = self._rng.choice([0, 1, 0xFFFFFFFF, 0x7FFFFFFF])
+                struct.pack_into(">I", data, 8, new_sample_count)
+                target.data = bytes(data)
+        return boxes
+
+    def _mutate_ctts_sample_offset(self, boxes: list[Box], max_len: int) -> list[Box]:
+        """Mutate ctts sample_offset fields (s32)."""
+        ctts_locations = []
+        for box in boxes:
+            if box.box_type == b"ctts":
+                ctts_locations.append(box)
+            if box.children:
+                ctts_locations.extend(_find_ctts(box.children))
+        if ctts_locations:
+            target = self._rng.choice(ctts_locations)
+            if len(target.data) >= 12:
+                data = bytearray(target.data)
+                # First entry: sample_offset at offset 12
+                new_sample_offset = self._rng.choice(
+                    [-1, -2, -100, 1, 2, 100, 0x7FFFFFFF, 0x80000000]
+                )
+                struct.pack_into(">i", data, 12, new_sample_offset)
+                target.data = bytes(data)
+        return boxes
+
+    def _swap_boxes(self, boxes: list[Box]) -> list[Box]:
         """Swap two sibling boxes."""
         if (pair := _swap_pair(len(boxes), self._rng)) is not None:
             i, j = pair

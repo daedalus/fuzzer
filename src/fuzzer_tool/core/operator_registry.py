@@ -163,6 +163,14 @@ _CATEGORIES: dict[str, set[str]] = {
         "der_tag_mutate",
         "der_tlv_reorder",
         "der_tlv_insert",
+        "jpeg2000_chunk_mutate",
+        "magicyuv_chunk_mutate",
+        "av1_rtp_chunk_mutate",
+        "rasc_chunk_mutate",
+        "tiff_chunk_mutate",
+        "dvbsub_chunk_mutate",
+        "cfhd_chunk_mutate",
+        "shorten_chunk_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -470,6 +478,21 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "rank_deficient": _sniff_rar,
     # bit band: format-shaped op (see comment above its sniffer)
     "bit_repack": _sniff_bit_packed_samples,
+    # New format mutators from survey:
+    "jpeg2000_chunk_mutate": lambda d: (
+        len(d) >= 12 and d[:4] == b"\x00\x00\x00\x0c" and d[4:12] == b"jP\x0d\x0a\x87\x0a"
+    )
+    or (len(d) >= 2 and d[:2] == b"\xff\x4f"),
+    "magicyuv_chunk_mutate": lambda d: (len(d) >= 12 and d[8:12] in (b"BMH5", b"BMH6")),
+    "av1_rtp_chunk_mutate": lambda d: (len(d) >= 3 and d[:3] == b"\x00\x00\x01")
+    or (len(d) >= 1 and (d[0] & 0xF8) == 0x28),
+    "rasc_chunk_mutate": lambda d: (len(d) >= 12 and d[8:12] == b"RASC"),
+    "tiff_chunk_mutate": lambda d: len(d) >= 8
+    and (d[:2] == b"II" or d[:2] == b"MM")
+    and d[2:4] == b"*\x00",
+    "dvbsub_chunk_mutate": lambda d: (len(d) >= 4 and d[:4] == b"\x1a\x45\xdf\xa3"),
+    "cfhd_chunk_mutate": lambda d: (len(d) >= 4 and d[:4] == b"CFHD"),
+    "shorten_chunk_mutate": lambda d: (len(d) >= 4 and d[:4] == b"ajkg"),
 }
 
 # Fraction of selections on which a not-yet-seen format is still offered.

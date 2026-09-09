@@ -2880,6 +2880,110 @@ class OperatorEngine:
             mutated = self._zip_mutator._generate_random_zip(max_len=self.ctx.max_len, rng=rng)
         return bytearray(mutated[: self.ctx.max_len])
 
+    def _op_magicyuv_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.magicyuv import MagicYUVMutator, parse_avi_chunks
+
+        if not hasattr(self, "_magicyuv_mutator"):
+            self._magicyuv_mutator = MagicYUVMutator()
+        rng = self.ctx.rand_pool
+        if parse_avi_chunks(bytes(buf)):
+            mutated = self._magicyuv_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._magicyuv_mutator._generate_random_magicyuv(
+                max_len=self.ctx.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.ctx.max_len])
+
+    def _op_jpeg2000_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.jpeg2000 import Jpeg2000Mutator, parse_jpeg2000
+
+        if not hasattr(self, "_jpeg2000_mutator"):
+            self._jpeg2000_mutator = Jpeg2000Mutator()
+        rng = self.ctx.rand_pool
+        if parse_jpeg2000(bytes(buf)):
+            mutated = self._jpeg2000_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._jpeg2000_mutator._generate_random_jpeg2000(
+                max_len=self.ctx.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.ctx.max_len])
+
+    def _op_av1_rtp_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.av1_rtp import Av1RtpMutator, parse_av1
+
+        if not hasattr(self, "_av1_rtp_mutator"):
+            self._av1_rtp_mutator = Av1RtpMutator()
+        rng = self.ctx.rand_pool
+        if parse_av1(bytes(buf)):
+            mutated = self._av1_rtp_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._av1_rtp_mutator._generate_random_av1(max_len=self.ctx.max_len, rng=rng)
+        return bytearray(mutated[: self.ctx.max_len])
+
+    def _op_rasc_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.rasc import RascMutator, parse_rasc
+
+        if not hasattr(self, "_rasc_mutator"):
+            self._rasc_mutator = RascMutator()
+        rng = self.ctx.rand_pool
+        if parse_rasc(bytes(buf)):
+            mutated = self._rasc_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._rasc_mutator._generate_random_rasc(max_len=self.ctx.max_len, rng=rng)
+        return bytearray(mutated[: self.ctx.max_len])
+
+    def _op_tiff_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.tiff import TiffMutator, parse_tiff
+
+        if not hasattr(self, "_tiff_mutator"):
+            self._tiff_mutator = TiffMutator()
+        rng = self.ctx.rand_pool
+        if parse_tiff(bytes(buf)):
+            mutated = self._tiff_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._tiff_mutator._generate_random_tiff(max_len=self.ctx.max_len, rng=rng)
+        return bytearray(mutated[: self.ctx.max_len])
+
+    def _op_dvbsub_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.dvbsub import DvbsubMutator, parse_dvbsub
+
+        if not hasattr(self, "_dvbsub_mutator"):
+            self._dvbsub_mutator = DvbsubMutator()
+        rng = self.ctx.rand_pool
+        if parse_dvbsub(bytes(buf)):
+            mutated = self._dvbsub_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._dvbsub_mutator._generate_random_dvbsub(
+                max_len=self.ctx.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.ctx.max_len])
+
+    def _op_cfhd_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.cfhd import CfhdMutator, parse_cfhd
+
+        if not hasattr(self, "_cfhd_mutator"):
+            self._cfhd_mutator = CfhdMutator()
+        rng = self.ctx.rand_pool
+        if parse_cfhd(bytes(buf)):
+            mutated = self._cfhd_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._cfhd_mutator._generate_random_cfhd(max_len=self.ctx.max_len, rng=rng)
+        return bytearray(mutated[: self.ctx.max_len])
+
+    def _op_shorten_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.shorten import ShortenMutator, parse_shorten
+
+        if not hasattr(self, "_shorten_mutator"):
+            self._shorten_mutator = ShortenMutator()
+        rng = self.ctx.rand_pool
+        if parse_shorten(bytes(buf)):
+            mutated = self._shorten_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._shorten_mutator._generate_random_shorten(
+                max_len=self.ctx.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.ctx.max_len])
+
     def _op_x86_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.x86 import X86Mutator, _decode_insns
 

@@ -3061,6 +3061,30 @@ class Fuzzer:
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
         return self._operators._op_png_crc_fix(buf, _byte_idx, _data)
 
+    def _op_magicyuv_chunk_mutate(self, buf, _byte_idx, _data):
+        return self._operators._op_magicyuv_chunk_mutate(buf, _byte_idx, _data)
+
+    def _op_jpeg2000_chunk_mutate(self, buf, _byte_idx, _data):
+        return self._operators._op_jpeg2000_chunk_mutate(buf, _byte_idx, _data)
+
+    def _op_av1_rtp_chunk_mutate(self, buf, _byte_idx, _data):
+        return self._operators._op_av1_rtp_chunk_mutate(buf, _byte_idx, _data)
+
+    def _op_rasc_chunk_mutate(self, buf, _byte_idx, _data):
+        return self._operators._op_rasc_chunk_mutate(buf, _byte_idx, _data)
+
+    def _op_tiff_chunk_mutate(self, buf, _byte_idx, _data):
+        return self._operators._op_tiff_chunk_mutate(buf, _byte_idx, _data)
+
+    def _op_dvbsub_chunk_mutate(self, buf, _byte_idx, _data):
+        return self._operators._op_dvbsub_chunk_mutate(buf, _byte_idx, _data)
+
+    def _op_cfhd_chunk_mutate(self, buf, _byte_idx, _data):
+        return self._operators._op_cfhd_chunk_mutate(buf, _byte_idx, _data)
+
+    def _op_shorten_chunk_mutate(self, buf, _byte_idx, _data):
+        return self._operators._op_shorten_chunk_mutate(buf, _byte_idx, _data)
+
     def _op_redqueen(self, buf, _byte_idx, data):
         return self._operators._op_redqueen(buf, _byte_idx, data)
 

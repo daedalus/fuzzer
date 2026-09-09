@@ -10,8 +10,6 @@ Also tracks Brier score (binary CRPS) for bandit calibration diagnostics.
 import collections
 import logging
 import math
-import random
-import time
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
@@ -19,6 +17,7 @@ from pathlib import Path
 
 from fuzzer_tool.core.allan_variance import DispersionIndex
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.running_stats import (
     RunningMoments,
     kelly_fraction,
@@ -111,7 +110,9 @@ class MonteCarloScheduler:
         decay_interval: int = 100,
         hierarchical_pooling: float = 0.0,
         cem_dirichlet_concentration: float = 0.0,
+        rng: RandPool | None = None,
     ):
+        self._rng = rng if rng is not None else RandPool()
         self._hierarchical_pooling = max(0.0, min(1.0, hierarchical_pooling))
         self._cem_dirichlet_concentration = cem_dirichlet_concentration
         self.arm_alpha: dict[str, float] = {}
@@ -266,7 +267,7 @@ class MonteCarloScheduler:
             if not force_refresh and cached is not None and cached[0] == a and cached[1] == b:
                 thompson_vals[op] = cached[2]
             else:
-                draw = random.betavariate(a, b)
+                draw = self._rng.betavariate(a, b)
                 self._thompson_draw_cache[op] = (a, b, draw)
                 thompson_vals[op] = draw
 
@@ -506,7 +507,7 @@ class MonteCarloScheduler:
         elif temperature > 0.01:
             delta_e = worst_score - score
             acceptance = math.exp(-delta_e / temperature)
-            if random.random() < acceptance:
+            if self._rng.random() < acceptance:
                 self.elite_set[0] = (score, data)
 
     def maybe_refit(self) -> None:
@@ -830,7 +831,7 @@ class MonteCarloScheduler:
             acc = 0.0
             for observations, n1, n2 in per_pos:
                 shuffled = observations[:]
-                random.shuffle(shuffled)
+                self._rng.shuffle(shuffled)
                 a: dict[int, int] = {}
                 for k in shuffled[:n1]:
                     a[k] = a.get(k, 0) + 1
@@ -903,17 +904,17 @@ class MonteCarloScheduler:
         """
         freq = self.byte_freq.get(pos)
         if not freq:
-            return random.randint(0, 255)
+            return self._rng.randint(0, 255)
         alpha_0 = self._cem_alpha()
         total = sum(freq.values())
         denom = total + 256.0 * alpha_0
-        r = random.random() * denom
+        r = self._rng.random() * denom
         cumulative = 0.0
         for byte_val, count in freq.items():
             cumulative += count + alpha_0
             if r <= cumulative:
                 return byte_val
-        return random.randint(0, 255)
+        return self._rng.randint(0, 255)
 
     def cem_sample(self, length: int) -> bytes:
         """Generate a full input from the CEM distribution.
@@ -1372,9 +1373,7 @@ class MonteCarloScheduler:
         deflated: list[list[float]] = [
             [p_matrix[i][j] - v[i] * v[j] for j in range(n)] for i in range(n)
         ]
-        w = self._power_iteration_py(
-            [random.random() for _ in range(n)], deflated, n, max_iter, tol
-        )
+        w = self._power_iteration_py([1.0 / n] * n, deflated, n, max_iter, tol)
         eigenvalue2 = abs(
             sum(
                 a * b
@@ -1461,7 +1460,7 @@ class MonteCarloScheduler:
         z = (
             np.random.randn(n).astype(np.float64)
             if _HAS_NUMPY
-            else [random.gauss(0, 1) for _ in range(n)]
+            else [self._rng.gauss(0, 1) for _ in range(n)]
         )
         if _HAS_NUMPY:
             noise = chol @ z
@@ -1484,7 +1483,7 @@ class MonteCarloScheduler:
         best_val = -1.0
         for op in ops:
             a, b = self._get_effective_params(op)
-            val = random.betavariate(a, b)
+            val = self._rng.betavariate(a, b)
             if val > best_val:
                 best_val = val
                 best_op = op
