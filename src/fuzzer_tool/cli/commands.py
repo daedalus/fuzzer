@@ -668,6 +668,8 @@ def cmd_fuzz(args):
         mi_guided=getattr(args, "mi_guided", False),
         renyi_weight=getattr(args, "renyi_weight", False),
         transfer_entropy=getattr(args, "transfer_entropy", False),
+        occupation=getattr(args, "occupation", False),
+        causal_sector=getattr(args, "causal_sector", False),
         elo=getattr(args, "elo", False),
         lineage=getattr(args, "lineage", False),
         lineage_backtrack=getattr(args, "lineage_backtrack", False),
@@ -1669,6 +1671,8 @@ _HAIL_MARY_FLAGS = (
     "mi_guided",
     "renyi_weight",
     "transfer_entropy",
+    "occupation",
+    "causal_sector",
     "lineage",
     "lineage_backtrack",
     "exp3",
@@ -1967,6 +1971,18 @@ def main() -> int:
         "--transfer-entropy",
         action="store_true",
         help="Enable transfer entropy causal tracking (byte→edge influence detection)",
+    )
+    fuzz_parser.add_argument(
+        "--occupation",
+        action="store_true",
+        help="Track finite-time edge-visit occupation as a longitudinal statistical "
+        "support, distinct from EdgeTracker's horizontal hit frequencies",
+    )
+    fuzz_parser.add_argument(
+        "--causal-sector",
+        action="store_true",
+        help="Maintain a directed transfer-entropy causal-sector graph (Time-Causal "
+        "Structure analogue); requires --transfer-entropy to have a TE source",
     )
     fuzz_parser.add_argument(
         "--elo",

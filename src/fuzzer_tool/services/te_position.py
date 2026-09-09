@@ -47,3 +47,40 @@ def get_te_weighted_position(
         return None
     best_pos = max(byte_edges, key=lambda pos: sum(byte_edges[pos].values()))
     return best_pos if best_pos < input_length else None
+
+
+def edge_sets_to_flow(
+    te,
+    edge_history: list[set[int]],
+    top_k: int = 10,
+) -> dict[tuple[int, int], float]:
+    """Directed edge-to-edge transfer entropy from a history of edge sets.
+
+    Same top-k-by-hit-count / binary-series construction as
+    ``TransferEntropy.edge_to_edge_flow``, adapted to the sparse
+    ``list[set[int]]`` representation already accumulated in
+    ``Fuzzer._te_edge_history`` (SHM edge ids), so callers never need to
+    materialise a per-run dense bitmap just to feed the causal-sector graph.
+    """
+    if not te or len(edge_history) < 3:
+        return {}
+
+    total_hits: dict[int, int] = {}
+    for edges in edge_history:
+        for eid in edges:
+            total_hits[eid] = total_hits.get(eid, 0) + 1
+    top_edges = sorted(total_hits, key=lambda e: total_hits[e], reverse=True)[:top_k]
+    if not top_edges:
+        return {}
+
+    edge_series = {e: [1 if e in edges else 0 for edges in edge_history] for e in top_edges}
+
+    flow: dict[tuple[int, int], float] = {}
+    for src in top_edges:
+        for tgt in top_edges:
+            if src == tgt:
+                continue
+            te_val = te.transfer_entropy(edge_series[src], edge_series[tgt])
+            if te_val > 0:
+                flow[(src, tgt)] = te_val
+    return flow

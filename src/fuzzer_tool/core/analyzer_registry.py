@@ -43,6 +43,11 @@ exception is `kalman` (core.kalman.RobustKF): every usage found is embedded
 in something else's construction (a network-adapter settle-time smoother; a
 separate, unconditional filter-smoothing usage in services/stats.py), not a
 standalone analyzer with its own gating flag, so there's no good single
+migration site. Two later, non-migration additions follow the same pattern:
+`occupation` (core.occupation.LongitudinalRarity, finite-time edge-count
+occupation) and `causal_sector` (core.causal_sector.CausalSectorGraph,
+soft-requires `transfer_entropy`) -- see
+docs/handover/handover_RoRd.md.
 construction site to migrate. See
 docs/handover/handover_analyzer_registry_2026-09-07.md for the full
 per-component history and verification notes.
@@ -194,6 +199,61 @@ REGISTRY.register(
         available=lambda f: bool(getattr(f, "_use_transfer_entropy", False)),
         activate=_activate_transfer_entropy,
         deactivate=_deactivate_transfer_entropy,
+    )
+)
+
+
+def _activate_occupation(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.occupation import LongitudinalRarity
+
+    f._occupation_rarity = LongitudinalRarity()
+    f._last_occupation = None
+    f._occupation_max_edges = 256
+    log.info("Occupation tracking enabled")
+
+
+def _deactivate_occupation(f: FuzzerLike) -> None:
+    f._occupation_rarity = None
+    f._last_occupation = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="occupation",
+        category="coverage",
+        available=lambda f: bool(getattr(f, "_use_occupation", False)),
+        activate=_activate_occupation,
+        deactivate=_deactivate_occupation,
+    )
+)
+
+
+def _activate_causal_sector(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.causal_sector import CausalSectorGraph
+
+    f._causal_sector = CausalSectorGraph()
+    log.info("Causal-sector graph enabled")
+
+
+def _deactivate_causal_sector(f: FuzzerLike) -> None:
+    f._causal_sector = None
+
+
+# Registered after transfer_entropy so that within one wire_all() pass, when
+# both flags are on, f._te already exists by the time this activate() runs
+# (same registration-order dependency pattern as the coverage_regime cluster
+# below). `available` soft-requires transfer_entropy: a causal-sector graph
+# with no TE source to feed it would just sit empty.
+REGISTRY.register(
+    AnalyzerSpec(
+        name="causal_sector",
+        category="mutual_information",
+        available=lambda f: (
+            bool(getattr(f, "_use_causal_sector", False))
+            and bool(getattr(f, "_use_transfer_entropy", False))
+        ),
+        activate=_activate_causal_sector,
+        deactivate=_deactivate_causal_sector,
     )
 )
 

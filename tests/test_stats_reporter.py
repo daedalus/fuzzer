@@ -236,6 +236,10 @@ def _mock_fuzzer(**overrides) -> MagicMock:
         "_distance": None,
         "_dist_min_observed": None,
         "_dist_max_observed": None,
+        "_last_occupation": None,
+        "_occupation_rarity": None,
+        "_causal_sector": None,
+        "_ro_rd_edge_counts": {},
         "mc": None,
         "mc_bandit": False,
         "mc_cem": False,
@@ -381,6 +385,56 @@ class TestPrintStats:
             line = mock_print.call_args[0][0]
         # (1_000_000 - 999_900) / 10 = 10 eps, not 100_000
         assert "eps: 10" in line, f"expected session-local eps: 10 in: {line[:300]}"
+
+
+class TestPrintStatsSupplementary:
+    """Occupation / causal-sector / RO-RD additions to the supplementary line."""
+
+    def _make(self, **attrs):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(**attrs)
+
+    def test_occupation_reported_when_populated(self):
+        f = self._make(
+            _last_occupation={1: 3, 2: 1}, _occupation_rarity=SimpleNamespace(n_histories=5)
+        )
+        with patch("builtins.print") as mock_print:
+            StatsReporter(f)._print_stats_supplementary()
+        line = mock_print.call_args[0][0]
+        assert "occ:supp=2" in line
+        assert "n=5" in line
+
+    def test_no_occupation_when_unset(self):
+        f = self._make()
+        with patch("builtins.print") as mock_print:
+            StatsReporter(f)._print_stats_supplementary()
+        mock_print.assert_not_called()
+
+    def test_causal_sector_reported_when_present(self):
+        from fuzzer_tool.core.causal_sector import CausalSectorGraph
+
+        sector = CausalSectorGraph()
+        sector.observe_flow({(1, 2): 0.05})
+        f = self._make(_causal_sector=sector)
+        with patch("builtins.print") as mock_print:
+            StatsReporter(f)._print_stats_supplementary()
+        line = mock_print.call_args[0][0]
+        assert "sector:n=2 e=1" in line
+        assert "stable=n" in line  # one window, below stability_windows=3
+
+    def test_ro_rd_counts_reported_when_nonzero(self):
+        f = self._make(_ro_rd_edge_counts={"ro": 2.0, "rd": 5.0, "neutral": 0.0})
+        with patch("builtins.print") as mock_print:
+            StatsReporter(f)._print_stats_supplementary()
+        line = mock_print.call_args[0][0]
+        assert "ro:2 rd:5" in line
+
+    def test_ro_rd_all_zero_suppressed(self):
+        f = self._make(_ro_rd_edge_counts={"ro": 0.0, "rd": 0.0, "neutral": 3.0})
+        with patch("builtins.print") as mock_print:
+            StatsReporter(f)._print_stats_supplementary()
+        mock_print.assert_not_called()
 
 
 class TestPrintStatsSMT:

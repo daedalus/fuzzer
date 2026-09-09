@@ -462,18 +462,29 @@ Schreiber, *Measuring Information Transfer* (2000); Marschinski & Kantz effectiv
 - [x] No `afl_shim.c` changes  
 
 ### Wiring
-- [ ] Phase A: `AnalyzerSpec` for `occupation` and `causal_sector`; flags default off; registry tests green  
-- [ ] Phase B: record hooks; synthetic integration tests; still no selection change  
-- [ ] Phase C: RO/RD classification at report/record sites; RD reverse only when lineage-ready  
-- [ ] Phase D: optional scores with weight 0 default  
-- [ ] Phase E: CLI / report / CHANGELOG  
-- [ ] **No modifications to `afl_shim.c` or SHM layout**  
-- [ ] **No analyzer construction outside `analyzer_registry.wire_all`**  
-- [ ] Default campaigns bit-identical with flags off  
-- [ ] Done document (or update here) records decisions and rejected alternatives  
+- [x] Phase A: `AnalyzerSpec` for `occupation` and `causal_sector`; flags default off; registry tests green  
+- [x] Phase B: record hooks; synthetic integration tests; still no selection change  
+- [x] Phase C1: RO/RD classification at report/record sites (tagging only, metadata)  
+- [ ] Phase C2/C3: RD reverse wiring into lineage/tmin (deferred — lineage records can't yet supply `MutationStep(operator, site)`); soft RO gating (deferred until `causal_sector` is stable in real campaigns)  
+- [ ] Phase D: optional scores with weight 0 default (deferred, optional per this doc)  
+- [x] Phase E: CLI / report; CHANGELOG entry added  
+- [x] **No modifications to `afl_shim.c` or SHM layout**  
+- [x] **No analyzer construction outside `analyzer_registry.wire_all`**  
+- [x] Default campaigns bit-identical with flags off (both flags default `False`; existing tests pass unchanged)  
+- [x] Done document (or update here) records decisions and rejected alternatives — see notes below  
+
+---
+
+### Wiring decision ledger
+
+- Phase A/B/C1/E landed as described in §3. `occupation` and `causal_sector` registered in `core/analyzer_registry.py` immediately after `transfer_entropy` (registration order matters: `causal_sector.available` conjuncts on `_use_transfer_entropy` so `f._te` must already exist in the same `wire_all()` pass).
+- `causal_sector`'s record hook needed a new pure adapter, `services/te_position.py::edge_sets_to_flow`, because `Fuzzer._te_edge_history` stores `list[set[int]]` while `TransferEntropy.edge_to_edge_flow` expects dense `list[bytes]` bitmaps; materializing dense bitmaps was rejected as wasteful, so the adapter reimplements the top-k/binary-series logic directly on sets.
+- Phase C1 is metadata only: `classify_operator_name` tallies RO/RD/neutral edge credit into `Fuzzer._ro_rd_edge_counts` for reporting; it never influences scheduling or selection.
+- Phase C2 (RD reverse into lineage/tmin) and C3 (soft RO gating) remain deferred — lineage records still can't supply `MutationStep(operator, site)`, and `causal_sector` has not yet been observed stable across real campaigns. Phase D (seed_quality scoring) is deferred as explicitly optional in §3.
+- `--occupation` / `--causal-sector` CLI flags default off and are wired into `_HAIL_MARY_FLAGS`; report output added to `StatsReporter._print_stats_supplementary()`, each section independently guarded so a missing/partial analyzer never breaks the rest of the report line.
 
 ---
 
 ## 12. One-paragraph summary for the next agent
 
-Primitives for occupation, RO/RD, and causal-sector are landed and unit-tested but **unwired**. Wire them the same way as `transfer_entropy`: gating flags on `Fuzzer`, `AnalyzerSpec` + `activate`/`deactivate` in `core/analyzer_registry.py`, `REGISTRY.wire_all` only — never ad-hoc imports in `Fuzzer.__init__`. Soft-require TE for `causal_sector`. Record edge-count occupation and TE flows in Phase B without changing selection policy. Keep RO/RD labels on the operator side; keep `rd_reverse_lineage` pure until tmin/lineage needs it. Default flags off, policy weights 0, no `afl_shim.c`. Re-verify anchors against HEAD before editing.
+Primitives for occupation, RO/RD, and causal-sector are landed and unit-tested; Phases A, B, C1, and E are now wired (see decision ledger above). They are wired the same way as `transfer_entropy`: gating flags on `Fuzzer`, `AnalyzerSpec` + `activate`/`deactivate` in `core/analyzer_registry.py`, `REGISTRY.wire_all` only — never ad-hoc imports in `Fuzzer.__init__`. TE is soft-required for `causal_sector`. Edge-count occupation and TE flows are recorded in Phase B without changing selection policy. RO/RD labels stay on the operator side as metadata; `rd_reverse_lineage` remains pure and unwired until tmin/lineage can supply `MutationStep(operator, site)` (Phase C2/C3). Phase D (seed_quality scoring) is still deferred, matching its optional/weight-0 framing. Default flags off, policy weights 0, no `afl_shim.c` changes. Re-verify anchors against HEAD before editing further.
