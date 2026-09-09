@@ -3103,6 +3103,22 @@ class OperatorEngine:
             return self._op_havoc(buf, byte_idx, data)
         return bytearray(out[: self.ctx.max_len])
 
+    def _op_deflate_struct_mutate(self, buf, byte_idx, data):
+        """Mutate the DEFLATE bitstream's own structure inside a zlib/gzip
+        container -- block headers, the dynamic-Huffman code tables, and
+        back-reference (length, distance) pairs -- rather than the
+        plaintext (``recompress_*``) or the raw compressed bytes
+        (``*_chunk_mutate``). Falls back to havoc when the input isn't an
+        invertible zlib/gzip+DEFLATE stream.
+        """
+        from fuzzer_tool.core.mutations.deflate_struct import mutate_deflate_structure
+
+        rng = self.ctx.rand_pool
+        out = mutate_deflate_structure(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        if out is None:
+            return self._op_havoc(buf, byte_idx, data)
+        return bytearray(out[: self.ctx.max_len])
+
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
         rng = self.ctx.rand_pool
         from fuzzer_tool.core.mutations.png import parse_png_chunks, serialize_png_chunks

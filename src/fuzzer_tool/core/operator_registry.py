@@ -156,6 +156,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "elf_chunk_mutate",
         "recompress_zlib",
         "recompress_gzip",
+        "deflate_struct_mutate",
         "field_repair",
         "tlv_nest_mutate",
         "der_len_mutate",
@@ -446,6 +447,14 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
         len(d) >= 6 and (d[0] & 0x0F) == 8 and ((d[0] << 8) | d[1]) % 31 == 0
     ),
     "recompress_gzip": lambda d: len(d) >= 18 and d[:3] == b"\x1f\x8b\x08",
+    # Same containers as the recompress operators, reusing the same header
+    # checks -- this one mutates the DEFLATE bitstream's own structure
+    # (block headers, the dynamic-Huffman code tables, back-references)
+    # rather than the plaintext, so it needs nothing extra to be applicable.
+    "deflate_struct_mutate": lambda d: (
+        (len(d) >= 6 and (d[0] & 0x0F) == 8 and ((d[0] << 8) | d[1]) % 31 == 0)
+        or (len(d) >= 18 and d[:3] == b"\x1f\x8b\x08")
+    ),
     # Only formats with modelled derived fields; PNG for now.
     "field_repair": lambda d: len(d) >= 8 and d[:8] == b"\x89PNG\r\n\x1a\n",
     # BER/DER: a SEQUENCE (0x30) / SET (0x31) leading tag with a plausible
