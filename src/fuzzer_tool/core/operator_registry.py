@@ -534,7 +534,7 @@ def _format_available(name: str) -> Callable[[object, bytes], bool]:
             return True
         # Never seen this format: keep a thin bootstrap trickle so a target
         # that does parse it can still be reached from a garbage corpus.
-        rng = getattr(fuzzer, "_rand_pool", None)
+        rng = getattr(fuzzer, "_rng", None)
         if rng is None:
             return True
         try:
@@ -706,7 +706,7 @@ def _mutator_adapter(mutator, engine) -> Callable:
         context = MutationContext.from_fuzzer(f)
         max_len = context.max_len
         try:
-            result = mutator.mutate(bytes(buf), f._rand_pool, max_len=max_len, context=context)
+            result = mutator.mutate(bytes(buf), f._rng, max_len=max_len, context=context)
         except Exception:  # noqa: BLE001 - third-party mutator
             log.warning("mutator %r raised during mutate()", mutator, exc_info=True)
             return None

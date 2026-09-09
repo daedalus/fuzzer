@@ -56,7 +56,7 @@ class MockFuzzer:
         self._last_mopt_particles = []
         self._prev_bandit_op = None
 
-        self.rand_pool = RandPool()
+        self._rng = RandPool()
 
 
 def test_round_robin_in_available_list():
@@ -66,7 +66,7 @@ def test_round_robin_in_available_list():
     for op in ops:
         f._round_robin.init_arm(op)
 
-    f.rand_pool = RandPool(seed=42)
+    f._rng = RandPool(seed=42)
     engine = OperatorEngine(f)
 
     # Reset cached strategy to force re-evaluation
@@ -84,7 +84,7 @@ def test_round_robin_cycles_deterministically():
     for op in ops:
         f._round_robin.init_arm(op)
 
-    f.rand_pool = RandPool(seed=42)
+    f._rng = RandPool(seed=42)
     engine = OperatorEngine(f)
 
     # First call should return op_a

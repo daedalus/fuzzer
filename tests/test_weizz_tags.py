@@ -304,7 +304,7 @@ class _FakeFuzzer:
     def __init__(self, data: bytes, smap: StructureMap, max_len: int = 4096):
         self.max_len = max_len
         self.weizz_tags = True
-        self._rand_pool = _FakeRng(42)
+        self._rng = _FakeRng(42)
         meta = attach_tags_to_meta({}, smap)
         self.seed_meta = {data: meta}
 

@@ -64,7 +64,7 @@ class _FakeFuzzer:
 
     def __init__(self):
         self._stall_recovery_active = False
-        self._rand_pool = RandPool()
+        self._rng = RandPool()
         self._last_mopt_particles: list = []
         self._prev_bandit_op = None
         self._meta_strategy = None

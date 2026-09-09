@@ -306,7 +306,7 @@ def _prime_dict_scratch(f: Fuzzer, n: int = 4096) -> None:
     """
     if not getattr(f, "dictionary", None):
         return
-    f._dict_scratch = f._rand_pool.randint_list(0, len(f.dictionary) - 1, n)
+    f._dict_scratch = f._rng.randint_list(0, len(f.dictionary) - 1, n)
     f._dict_scratch_idx = 0
 
 
@@ -320,7 +320,7 @@ def measure(corpus: list[bytes], reps: int, seed: int) -> list[dict]:
     }
 
     for rep in range(reps):
-        f._rand_pool.reseed(seed + rep)
+        f._rng.reseed(seed + rep)
         for inp in corpus:
             _prime_dict_scratch(f)
             avail = set(REGISTRY.available(f, inp))

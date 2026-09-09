@@ -117,11 +117,11 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_._smt_solver = None
             self_.enable_regex_bomb = False
             if pool is not None:
-                self_._rand_pool = pool
+                self_._rng = pool
             else:
                 from fuzzer_tool.core.rand_pool import RandPool
 
-                self_._rand_pool = RandPool(seed)
+                self_._rng = RandPool(seed)
             self_._dict_scratch = []
             self_._dict_scratch_idx = 0
 

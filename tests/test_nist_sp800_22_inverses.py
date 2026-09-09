@@ -304,7 +304,7 @@ class TestRegistryWiring:
         table = REGISTRY.dispatch(f._operators)
         data = noise(4096)
         for op in ALL_NIST_OPS:
-            f._rand_pool.reseed(SEED)
+            f._rng.reseed(SEED)
             handler = table[op.__name__]
             out = handler(bytearray(data), len(data) // 2, bytes(data))
             assert len(out) == len(data)

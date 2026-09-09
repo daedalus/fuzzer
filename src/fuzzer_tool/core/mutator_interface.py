@@ -49,7 +49,7 @@ Why ``context`` and not ``fuzzer``
 instance. That is the coupling ``services/operators.py`` already
 demonstrates the cost of: 365 ``self.f.<attr>`` reads there resolve to 29
 distinct attributes, and 249 of them (68%) are just ``max_len`` and
-``_rand_pool``. The essential interface is an int and a PRNG, but because
+``_rng``. The essential interface is an int and a PRNG, but because
 the whole object is in scope, ``test_operator_smoke.py`` has to build a
 fuzzer -- and therefore compile a target binary -- to call
 ``_op_bit_flip``.
@@ -95,6 +95,7 @@ class MutationContext:
     """
 
     __slots__ = (
+        "_rng",
         "checksum_learner",
         "cmplog",
         "cmplog_pairs",
@@ -107,7 +108,6 @@ class MutationContext:
         "max_len",
         "mc",
         "path_solver",
-        "rand_pool",
         "seed_meta",
         "stall_recovery_active",
         "weizz_tags_enabled",
@@ -124,7 +124,7 @@ class MutationContext:
         cmplog_tokens: Sequence[bytes] = (),
         corpus: Sequence[bytes] = (),
         weizz_tags_enabled: bool = False,
-        rand_pool=None,
+        rng=None,
         seed_meta=None,
         markov=None,
         mc=None,
@@ -158,9 +158,9 @@ class MutationContext:
         #: its own positional argument to ``mutate()`` already; carried here
         #: too so ``OperatorEngine``'s existing ``_op_*`` handlers -- which
         #: read it dozens of times per call, see docs/port-backlog.md F1 --
-        #: can read ``ctx.rand_pool`` instead of reaching around the context
-        #: at ``self.f._rand_pool``.
-        self.rand_pool = rand_pool
+        #: can read ``ctx._rng`` instead of reaching around the context
+        #: at ``self.f._rng``.
+        self._rng = rng
         #: Per-seed metadata dict, keyed by raw seed bytes (record_stride,
         #: seed_passed_det, ...). A live reference like ``corpus`` and
         #: ``dictionary``, not a copy -- see their docstrings above.
@@ -220,7 +220,7 @@ class MutationContext:
             cmplog_tokens=getattr(cmplog, "tokens", None) or (),
             corpus=getattr(fuzzer, "corpus", None) or (),
             weizz_tags_enabled=bool(getattr(fuzzer, "weizz_tags", False)),
-            rand_pool=getattr(fuzzer, "_rand_pool", None),
+            rng=getattr(fuzzer, "_rng", None),
             seed_meta=getattr(fuzzer, "seed_meta", None),
             markov=getattr(fuzzer, "markov", None),
             mc=getattr(fuzzer, "mc", None),

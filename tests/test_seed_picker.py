@@ -19,7 +19,7 @@ class TestBoltzmannSelection:
         class MockFuzzer:
             corpus = [f"seed_{i}".encode() for i in range(corpus_size)]
             seed_meta = {}
-            _rand_pool = random
+            _rng = random
             _temperature = temperature
             _anneal_budget = anneal_budget
             _use_boltzmann = use_boltzmann
@@ -167,7 +167,7 @@ class TestEcoFuzzSelection:
         class MockFuzzer:
             corpus = [f"seed_{i}".encode() for i in range(len(seed_metas))]
             seed_meta = dict(zip(corpus, seed_metas, strict=False))
-            _rand_pool = random
+            _rng = random
             _use_ecofuzz = use_ecofuzz
             _profile = type("obj", (object,), {"format_signature": None})()
 
@@ -214,7 +214,7 @@ class TestEcoFuzzSelection:
         sp.f = f
 
         rng = random.Random(1234)
-        f._rand_pool = rng
+        f._rng = rng
         picks = [sp._pick_ecofuzz_seed() for _ in range(500)]
         assert picks.count(f.corpus[0]) > picks.count(f.corpus[1])
 
@@ -342,7 +342,7 @@ class TestSeedEloKeyMismatch:
     def _make_seed_elo_fuzzer(self):
         f = TestAflgoEloStrategy._make_fuzzer_mock(self, corpus_size=2)
         f._use_elo = True
-        f._rand_pool = random  # _pick_pareto_only falls back to pool.choice
+        f._rng = random  # _pick_pareto_only falls back to pool.choice
         f.ga = f.qea = None
         f._use_bayesian = False
         f.markov_generate = False
@@ -404,7 +404,7 @@ class TestEloParetoCachedWeights:
         f = TestAflgoEloStrategy._make_fuzzer_mock(self, corpus_size=3)
         assert not hasattr(f, "_cached_weights"), "precondition: cache must be absent"
         f._use_elo = True
-        f._rand_pool = random
+        f._rng = random
         f.exec_count = 0
         f._temperature = 1.0
         f.ga = f.qea = None
@@ -441,7 +441,7 @@ class TestComputeWeightsArrayPath:
             _distance = None
             _use_lineage = False
             _use_overlap_density = False
-            _rand_pool = None
+            _rng = None
             _edge_tracker = type("o", (object,), {"shannon_entropy_seed": lambda s, sk: 0.5})()
 
             def _seed_key(self, data):

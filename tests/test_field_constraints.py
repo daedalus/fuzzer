@@ -390,6 +390,6 @@ class TestOperatorRegistration:
     def test_sniffer_rejects_non_png(self):
         class _Fuzzer:
             dictionary = None
-            _rand_pool = random.Random(1)
+            _rng = random.Random(1)
 
         assert "field_repair" not in REGISTRY.available(_Fuzzer(), b"plain text input")

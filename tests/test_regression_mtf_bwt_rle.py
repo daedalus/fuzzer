@@ -94,7 +94,7 @@ class TestRegistration:
 class TestHandlers:
     def test_handlers_preserve_length(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         for name in sorted(NEW_OPS):
@@ -106,7 +106,7 @@ class TestHandlers:
 
     def test_empty_input(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         for name in sorted(NEW_OPS):
@@ -115,7 +115,7 @@ class TestHandlers:
 
     def test_single_byte(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         for name in sorted(NEW_OPS):
@@ -140,7 +140,7 @@ class TestRoundTrip:
 
     def test_mtf_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -151,7 +151,7 @@ class TestRoundTrip:
 
     def test_bwt_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = b"the quick brown fox jumps over the lazy dog " * 4
@@ -162,7 +162,7 @@ class TestRoundTrip:
 
     def test_rle_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes([i % 4 for i in range(256)])
@@ -185,7 +185,7 @@ class TestRoundTrip:
 
     def test_delta_encode_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -196,7 +196,7 @@ class TestRoundTrip:
 
     def test_delta_sigma_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -207,7 +207,7 @@ class TestRoundTrip:
 
     def test_bitcast_float_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -218,7 +218,7 @@ class TestRoundTrip:
 
     def test_bitcast_int32_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -229,7 +229,7 @@ class TestRoundTrip:
 
     def test_size_field_overflow_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -240,7 +240,7 @@ class TestRoundTrip:
 
     def test_bpe_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         # Repetitive data has strong byte pairs for BPE to merge.
@@ -252,7 +252,7 @@ class TestRoundTrip:
 
     def test_golomb_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -263,7 +263,7 @@ class TestRoundTrip:
 
     def test_endian_convert_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -274,7 +274,7 @@ class TestRoundTrip:
 
     def test_count_overflow_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -285,7 +285,7 @@ class TestRoundTrip:
 
     def test_zero_run_amplify_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         # Data with zero runs.
@@ -297,7 +297,7 @@ class TestRoundTrip:
 
     def test_zero_run_suppress_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes([i % 8 * 32 for i in range(256)])
@@ -308,7 +308,7 @@ class TestRoundTrip:
 
     def test_type_promote_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -319,7 +319,7 @@ class TestRoundTrip:
 
     def test_length_miscalculate_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -330,7 +330,7 @@ class TestRoundTrip:
 
     def test_elias_gamma_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -341,7 +341,7 @@ class TestRoundTrip:
 
     def test_elias_delta_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -352,7 +352,7 @@ class TestRoundTrip:
 
     def test_simd_shuffle_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -363,7 +363,7 @@ class TestRoundTrip:
 
     def test_bit_interleave_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -374,7 +374,7 @@ class TestRoundTrip:
 
     def test_gray_code_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -385,7 +385,7 @@ class TestRoundTrip:
 
     def test_lz_dict_mutate_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         # Repetitive data has long LZ matches.
@@ -397,7 +397,7 @@ class TestRoundTrip:
 
     def test_huffman_tree_mutate_handler_roundtrip_invariant(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256)) * 4
@@ -411,7 +411,7 @@ class TestAdversarial:
     def test_rle_uniform_input_preserves_length(self):
         """All-same-byte input has one run; RLE must not silently change length."""
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=99)
+        fuzzer._rng = RandPool(seed=99)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = b"\x00" * 1024
@@ -470,7 +470,7 @@ class TestAdversarial:
     def test_bit_interleave_preserves_length_on_64_byte_input(self):
         """bit_interleave must not crash or change length on exact 64-byte input."""
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=42)
+        fuzzer._rng = RandPool(seed=42)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(64))
@@ -482,7 +482,7 @@ class TestAdversarial:
     def test_gray_code_preserves_length_on_2_byte_input(self):
         """Gray code on minimum 2-byte input must not change length."""
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=7)
+        fuzzer._rng = RandPool(seed=7)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = b"\x00\xff"
@@ -494,7 +494,7 @@ class TestAdversarial:
     def test_lz_dict_mutate_returns_bytes_of_same_length(self):
         """lz_dict_mutate must return a bytes-like result of identical length."""
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=13)
+        fuzzer._rng = RandPool(seed=13)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = bytes(range(256))
@@ -506,7 +506,7 @@ class TestAdversarial:
     def test_huffman_tree_mutate_returns_bytes_of_same_length(self):
         """huffman_tree_mutate must return a bytes-like result of identical length."""
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=21)
+        fuzzer._rng = RandPool(seed=21)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         data = b"ab" * 128

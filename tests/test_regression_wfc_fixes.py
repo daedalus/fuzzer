@@ -282,7 +282,7 @@ class TestWfcFlagPropagation:
         class _Fuzzer:
             _wfc_enabled = enabled
             max_len = 4096
-            _rand_pool = random.Random(1)
+            _rng = random.Random(1)
 
         engine = OperatorEngine.__new__(OperatorEngine)
         engine.f = _Fuzzer()

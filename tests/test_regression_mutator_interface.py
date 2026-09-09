@@ -113,7 +113,7 @@ class _FakeFuzzer:
     max_len = 64
 
     def __init__(self, dictionary=(), cmplog_pairs=None, corpus=()):
-        self._rand_pool = _Rng()
+        self._rng = _Rng()
         self.dictionary = list(dictionary)
         self.corpus = list(corpus)
         self._cmplog = _FakeCmplog(cmplog_pairs) if cmplog_pairs is not None else None
@@ -405,7 +405,7 @@ class TestMutationContext:
             "cmplog_tokens",
             "corpus",
             "weizz_tags_enabled",
-            "rand_pool",
+            "_rng",
             "seed_meta",
             "markov",
             "mc",

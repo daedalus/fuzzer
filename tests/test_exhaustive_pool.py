@@ -9,7 +9,7 @@ See ``docs/learnings/2026-08-22-exhaustive-pool-p1-5.md``. Two halves:
    explored a subset.
 
 2. The real operator table driven through it. ``OperatorEngine`` reads its
-   randomness from ``self.f._rand_pool``, so substituting the pool turns
+   randomness from ``self.f._rng``, so substituting the pool turns
    "run this operator once" into "run it once per reachable combination of
    draws" for every operator that draws only bounded values.
 

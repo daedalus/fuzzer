@@ -162,7 +162,7 @@ class TestLineMutate:
         # Call order in _op_line_mutate: choice([del, dup, swap, perm,
         # repeat, clone])->1 ("dup"), then randint(0, len(parts)-1)->0
         # (duplicate line 0 immediately after itself).
-        self.engine.f._rand_pool = ScriptedRng(choice_idxs=[1], randints=[0])
+        self.engine.f._rng = ScriptedRng(choice_idxs=[1], randints=[0])
         data = b"a\nb\nc\nd\ne\nf"
         lines = data.split(b"\n")
         lines.insert(1, lines[0])  # exactly what dup@0 must produce
@@ -195,7 +195,7 @@ class TestLineMutate:
         # Call order: choice([del, dup, swap, perm, repeat, clone])->2
         # ("swap"), then randint(0, len(parts)-2)->0; two-line buffers admit
         # only index 0.
-        self.engine.f._rand_pool = ScriptedRng(choice_idxs=[2], randints=[0])
+        self.engine.f._rng = ScriptedRng(choice_idxs=[2], randints=[0])
         lines = b"aaa\nbbb".split(b"\n")
 
         buf = bytearray(b"aaa\nbbb")
@@ -635,7 +635,7 @@ class TestDictCompound:
         # then randint(0, len(buf))->insert position. Separator index 5 is
         # b",": index 0 is b"", which a non-empty-separator assertion could
         # never observe.
-        self.engine.f._rand_pool = ScriptedRng(choice_idxs=[0, 1, 5], randints=[0])
+        self.engine.f._rng = ScriptedRng(choice_idxs=[0, 1, 5], randints=[0])
         orig = b"test"
         t1 = self.engine.f.dictionary[0]
         t2 = self.engine.f.dictionary[1]

@@ -7,6 +7,7 @@ enabled-but-unused ones or stall-recovery pseudo-strategies.
 from types import SimpleNamespace
 
 from fuzzer_tool.core.elo import BayesianEloTracker
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers import MonteCarloScheduler
 from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.operators import OperatorEngine
@@ -237,9 +238,7 @@ class _FakeFuzzerForSelectOp:
         self._use_invasion = False
         self._use_elo = elo
         self._elo = BayesianEloTracker() if elo else None
-        import random
-
-        self._rand_pool = random
+        self._rng = RandPool(seed=0)
         self._last_mopt_particles = []
         self._prev_bandit_op = None
 

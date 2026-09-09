@@ -22,7 +22,7 @@ from fuzzer_tool.services.operators import (
 class _MockFuzzer:
     def __init__(self):
         self.max_len = 1 << 20
-        self._rand_pool = RandPool()
+        self._rng = RandPool()
         self._use_region_profile = True
         self._use_transfer_entropy = False
         self._te = None

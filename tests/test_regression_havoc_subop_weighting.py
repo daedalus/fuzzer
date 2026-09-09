@@ -77,7 +77,7 @@ class TestAdaptiveHavocSubops:
         # being flat the A/B baseline would be meaningless.
         self.fuzzer._adaptive_havoc = False
         counts = [0] * _HAVOC_N
-        rng = self.fuzzer._rand_pool
+        rng = self.fuzzer._rng
         for _ in range(20000):
             counts[rng.randint_list(0, 1 << 30, 4)[0] % _HAVOC_N] += 1
         expected = 20000 / _HAVOC_N

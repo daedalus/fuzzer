@@ -86,7 +86,7 @@ class TestVersifierDecimalDigits:
         # randint(0,3) candidate as length=2], then two digit draws, then a
         # final random() [skip trailing '-'].
         v = _V()
-        v._rand = _FakeRand(randints=[1, 2, 0, 0, 0, 5, 3], randoms=[1, 1])
+        v._rng = _FakeRand(randints=[1, 2, 0, 0, 0, 5, 3], randoms=[1, 1])
 
         node = _NumNode(samples=[])
         buf = bytearray()
@@ -163,7 +163,7 @@ class TestSeedPickerGenericSeedShortMaxLen:
 
         class _FakeFuzzer:
             max_len = 2
-            _rand_pool = RandPool(seed=1)
+            _rng = RandPool(seed=1)
             _profile = _FakeProfile()
 
         picker = SeedPicker(_FakeFuzzer())

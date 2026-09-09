@@ -123,7 +123,7 @@ def _pick(seed_meta, mean_exec, r, temperature=1.0):
     f = SimpleNamespace(
         corpus=corpus,
         seed_meta=seed_meta,
-        _rand_pool=rng,
+        _rng=rng,
         _temperature=temperature,
         mean_exec_time=lambda: mean_exec,
     )
@@ -178,7 +178,7 @@ class TestBoltzmannEnergyIsCostBased:
         f = SimpleNamespace(
             corpus=[],
             seed_meta={},
-            _rand_pool=random,
+            _rng=random,
             _temperature=1.0,
             mean_exec_time=lambda: 0.002,
         )

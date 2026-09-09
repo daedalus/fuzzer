@@ -26,7 +26,7 @@ from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.report import _elo_ratings
 
 # Fallback precedence, highest first. "random" is the terminal fallback (the
-# chain's else-branch, represented by _rand_pool.choice, not a scheduler).
+# chain's else-branch, represented by _rng.choice, not a scheduler).
 _FALLBACK_PRECEDENCE = [
     "replicator",
     "mopt",
@@ -134,7 +134,7 @@ class _FakeFuzzer:
         self._meta_strategy = None
         self._meta_strategy_cached = None
         self._meta_strategy_used: set[str] = set()
-        self._rand_pool = RandPool()
+        self._rng = RandPool()
         self.mc = _FakeMC()
         self.mc_bandit = False
         self.mc_cem = False
@@ -244,7 +244,7 @@ class TestFallbackPrecedence:
         f.mc_cem = True
         f.mc = _FakeMC(cem_fitted=True)
         pool = _RecordingRandPool()
-        f._rand_pool = pool
+        f._rng = pool
         op = OperatorEngine(f).select_op(["bit_flip", "byte_flip"])
         assert op == "bit_flip"
         assert f.mc.calls == 0, "cem consulted without Elo"

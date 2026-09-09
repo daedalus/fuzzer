@@ -110,7 +110,7 @@ class TestRegionShuffle:
         eng = _engine()
         data = _seed_bytes()
 
-        original = eng._ctx_cache.rand_pool
+        original = eng._ctx_cache._rng
 
         class _IdentityPool:
             def shuffle(self, seq):
@@ -120,12 +120,12 @@ class TestRegionShuffle:
                 return getattr(original, name)
 
         try:
-            eng._ctx_cache.rand_pool = _IdentityPool()
+            eng._ctx_cache._rng = _IdentityPool()
             buf = bytearray(data)
             assert eng._op_region_shuffle(buf, 10, data) is None
             assert buf == bytearray(data)
         finally:
-            eng._ctx_cache.rand_pool = original
+            eng._ctx_cache._rng = original
 
     def test_short_seed_is_a_no_op(self):
         """Below the region-profile minimum there is nothing to confine to."""

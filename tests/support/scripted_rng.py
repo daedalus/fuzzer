@@ -3,7 +3,7 @@
 Lineal descendant of the inline ``_FakeRand``/``_FakeRng`` classes from
 commits f00927a/f5d599a. Serves both injection seams in the codebase —
 operators taking a ``random.Random``-style ``rng=`` argument and handlers
-reading the ``RandPool``-API ``f._rand_pool`` — because both are duck-typed.
+reading the ``RandPool``-API ``f._rng`` — because both are duck-typed.
 
 Each method consumes the next value of its own iterator; bounds arguments
 are accepted but ignored, matching the reference fakes. Exhausting an

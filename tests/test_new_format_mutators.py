@@ -28,7 +28,7 @@ class TestRandPoolCompat:
 
     RandPool (core/rand_pool.py) exposes randint/choice/randbytes/random but
     NOT getrandbits — a mutator calling self._rng.getrandbits() only crashes
-    under the real fuzzer's _rand_pool, never under unit-test Random.
+    under the real fuzzer's _rng, never under unit-test Random.
     """
 
     @pytest.mark.parametrize(

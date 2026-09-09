@@ -30,7 +30,7 @@ def _picker(corpus, quality, key):
         corpus=list(corpus),
         _seed_quality=quality,
         _seed_key=key,
-        _rand_pool=SimpleNamespace(choice=lambda seq: seq[0]),
+        _rng=SimpleNamespace(choice=lambda seq: seq[0]),
     )
     return SeedPicker(fuzzer), fuzzer
 

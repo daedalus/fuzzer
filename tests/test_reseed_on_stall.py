@@ -100,7 +100,7 @@ class TestDeriveStallSeed:
         b = _make_fuzzer(seed=7)
         a._stall_reseed_count = b._stall_reseed_count = 3
         for _ in range(50):  # perturb a's draw history only
-            a._rand_pool._draw()
+            a._rng._draw()
         assert a._derive_stall_seed() == b._derive_stall_seed()
 
     def test_consecutive_stalls_differ(self):
@@ -155,9 +155,9 @@ class TestReseedOnStallWiring:
     def test_reseed_changes_the_mutation_stream(self):
         """The pool actually dispenses different values after the stall."""
         f = _stalled_fuzzer(reseed_on_stall=True, seed=42)
-        before = [f._rand_pool.randint(0, 255) for _ in range(32)]
+        before = [f._rng.randint(0, 255) for _ in range(32)]
         f._maybe_trigger_stall_recovery(400)
-        after = [f._rand_pool.randint(0, 255) for _ in range(32)]
+        after = [f._rng.randint(0, 255) for _ in range(32)]
         assert before != after
 
     def test_reseed_applies_to_stdlib_random_too(self):

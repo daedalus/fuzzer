@@ -199,7 +199,7 @@ class TangRecommendationScheduler:
             raise ValueError("TangRecommendationScheduler requires a RandPool (Hard Rule 16)")
         if mode not in self.MODES:
             raise ValueError(f"Unknown mode: {mode!r}. Use one of {self.MODES}")
-        self.rng = rng
+        self._rng = rng
         self.rank = max(1, int(rank))
         self.refit_interval = max(1, int(refit_interval))
         self.mode = mode
@@ -290,7 +290,7 @@ class TangRecommendationScheduler:
         else:
             width = min(rank + _OVERSAMPLE, matrix.shape[1])
             sketch = np.asarray(
-                self.rng.gauss_list(0.0, 1.0, matrix.shape[1] * width), dtype=np.float64
+                self._rng.gauss_list(0.0, 1.0, matrix.shape[1] * width), dtype=np.float64
             ).reshape(matrix.shape[1], width)
             q, _r = np.linalg.qr(matrix @ sketch)
             _u, sv, vt = np.linalg.svd(q.T @ matrix, full_matrices=False)
@@ -355,7 +355,7 @@ class TangRecommendationScheduler:
         if total <= 0.0:
             return []
         cdf = np.cumsum(mass / total)
-        draws = np.searchsorted(cdf, np.asarray(self.rng.random_list(count)), side="right")
+        draws = np.searchsorted(cdf, np.asarray(self._rng.random_list(count)), side="right")
         draws = np.clip(draws, 0, len(cdf) - 1)
         reverse = {i: e for e, i in self._edge_index.items()}
         return [reverse[int(d)] for d in draws]

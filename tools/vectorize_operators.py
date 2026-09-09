@@ -14,7 +14,7 @@ with open(path) as f:
 # We use a state machine to track if we're inside a docstring
 
 RANDOM_CALL = re.compile(
-    r"(?<!\.)(?<!self\.f\._rand_pool\.)\brandom\.(randint|randrange|choice|random|sample|shuffle)\("
+    r"(?<!\.)(?<!self\.f\._rng\.)\brandom\.(randint|randrange|choice|random|sample|shuffle)\("
 )
 
 # Split into lines, track each function's body
@@ -84,7 +84,7 @@ while i < len(lines):
                 if stripped and not stripped.startswith("#") and not in_doc:
                     break
 
-            # Insert rng = self.f._rand_pool after docstring
+            # Insert rng = self.f._rng after docstring
             insert_pos = max(doc_end_idx + 1, 0) if doc_end_idx >= 0 else 0
 
             # Check if rng already exists in body
@@ -92,7 +92,7 @@ while i < len(lines):
             has_self_f = "self.f" in body
 
             if not has_rng:
-                rng_line = f"{indent}    rng = self.f._rand_pool"
+                rng_line = f"{indent}    rng = self.f._rng"
                 body_lines.insert(insert_pos, rng_line)
 
             # Replace random.X(...) with rng.X(...) in ALL body lines

@@ -1240,7 +1240,7 @@ class TestPowerSchedulerWiring:
         f = MagicMock()
         f.mutations_per_input = 8
         f._last_perf_score = 200.0
-        f._rand_pool.randint_list.return_value = [0]
+        f._rng.randint_list.return_value = [0]
         f.dictionary = []
         f._stall_recovery_active = False
         f.max_len = 65536
@@ -1297,7 +1297,7 @@ class TestPowerSchedulerWiring:
         f = MagicMock()
         f.mutations_per_input = 8
         f._last_perf_score = 100.0
-        f._rand_pool.randint_list.return_value = [0]
+        f._rng.randint_list.return_value = [0]
         f.dictionary = []
         f._stall_recovery_active = False
         f.max_len = 65536

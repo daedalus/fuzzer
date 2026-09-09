@@ -334,7 +334,7 @@ class TestRegularityOperators:
 
         spectral_peak/degenerate_geometry/rank_deficient are gated on format
         relevance (see TestRegularityFormatGating below), but _MockFuzzer has
-        no ``_rand_pool``, and the format gate is permissive when it can't
+        no ``_rng``, and the format gate is permissive when it can't
         draw a bootstrap-trickle random number -- so they still come back
         available here.
         """
@@ -364,7 +364,7 @@ class TestRegularityOperators:
         """
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rand_pool = RandPool()
+        fuzzer._rng = RandPool()
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         for name in sorted(self.REGULARITY_OPS - {"invariant_break"}):
@@ -383,7 +383,7 @@ class TestRegularityOperators:
         """
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rand_pool = RandPool()
+        fuzzer._rng = RandPool()
         fuzzer.corpus = []
         engine = OperatorEngine(fuzzer)
         buf = bytearray(os.urandom(128))
@@ -393,7 +393,7 @@ class TestRegularityOperators:
         """The corpus scan is O(samples x length); it must not run per call."""
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rand_pool = RandPool()
+        fuzzer._rng = RandPool()
         fuzzer.corpus = [b"\x89MAGIC\x00\x01" + os.urandom(56) for _ in range(32)]
         engine = OperatorEngine(fuzzer)
         first = engine.corpus_invariants()
@@ -440,7 +440,7 @@ class TestRegularityFormatGating:
 
     def _fuzzer_with_rand_pool(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         return fuzzer
 
     def test_unmatched_data_gets_bootstrap_trickle_not_full_availability(self):
@@ -491,7 +491,7 @@ class TestFormatAvailableSkipsSniffOnceLive:
 
     def _fuzzer(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         return fuzzer
 
     def test_sniff_not_called_once_format_is_live(self):
@@ -534,7 +534,7 @@ class TestFormatAvailableSkipsSniffOnceLive:
         hits = 0
         for seed in range(3000):
             trial_fuzzer = _MockFuzzer()
-            trial_fuzzer._rand_pool = RandPool(seed=seed)
+            trial_fuzzer._rng = RandPool(seed=seed)
             if "spectral_peak" in REGISTRY.available(trial_fuzzer, non_matching):
                 hits += 1
         assert 0.0 < hits / 3000 < 0.10
@@ -582,7 +582,7 @@ class TestNewByteOperators:
 
     def test_unconditional_availability(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         available = set(REGISTRY.available(fuzzer, b"seed"))
         assert available >= self.NEW_OPS
 
@@ -595,7 +595,7 @@ class TestNewByteOperators:
     def test_handlers_mutate_non_empty_input(self):
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         for name in sorted(self.NEW_OPS):
@@ -631,7 +631,7 @@ class TestGoFuzzPorts:
 
     def test_unconditional_availability(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         available = set(REGISTRY.available(fuzzer, b"seed"))
         assert available >= self.NEW_OPS
 
@@ -644,7 +644,7 @@ class TestGoFuzzPorts:
     def test_handlers_preserve_length(self):
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         for name in sorted(self.NEW_OPS - {"ascii_num_replace"}):
@@ -736,7 +736,7 @@ class TestGoFuzzPorts2:
 
     def test_unconditional_availability(self):
         fuzzer = _MockFuzzer()
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         available = set(REGISTRY.available(fuzzer, b"seed"))
         assert available >= self.NEW_OPS
 
@@ -749,7 +749,7 @@ class TestGoFuzzPorts2:
     def test_handlers_preserve_length(self):
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         # digit_replace preserves length; insert_range_from_other does not.
@@ -762,7 +762,7 @@ class TestGoFuzzPorts2:
         data = b"err=12345;ok"
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         buf = bytearray(data)
@@ -776,7 +776,7 @@ class TestGoFuzzPorts2:
     def test_digit_replace_skips_non_digit(self):
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         buf = bytearray(b"abc")
@@ -788,7 +788,7 @@ class TestGoFuzzPorts2:
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
         fuzzer.corpus = [b"AAAA"]
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         # Buffer too small.
@@ -805,7 +805,7 @@ class TestGoFuzzPorts2:
         fuzzer = _MockFuzzer()
         fuzzer.max_len = 4096
         fuzzer.corpus = [b"prefix_" + b"A" * 64 + b"_suffix", b"prefix_" + b"B" * 64 + b"_suffix"]
-        fuzzer._rand_pool = RandPool(seed=1)
+        fuzzer._rng = RandPool(seed=1)
         engine = OperatorEngine(fuzzer)
         dispatch = REGISTRY.dispatch(engine)
         buf = bytearray(b"AAAA")

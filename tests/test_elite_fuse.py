@@ -24,7 +24,7 @@ def _fuzzer_with_corpus(corpus_and_coverage):
     f.corpus = [seed for seed, _ in corpus_and_coverage]
     f.seed_meta = _SeedMeta({seed: {"coverage_edges": cov} for seed, cov in corpus_and_coverage})
     f.max_len = 65536
-    f._rand_pool = RandPool(seed=1234)
+    f._rng = RandPool(seed=1234)
     return f
 
 

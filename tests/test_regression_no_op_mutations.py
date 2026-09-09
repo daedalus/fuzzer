@@ -336,7 +336,7 @@ def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
     for name in names:
         done = False
         for rep in range(_REPS):
-            f._rand_pool.reseed(_BASE_SEED + rep)
+            f._rng.reseed(_BASE_SEED + rep)
             for inp in battery:
                 if name not in set(REGISTRY.available(f, inp)):
                     continue
@@ -448,7 +448,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         # they decline every call and measure as no-ops that are really
         # harness artifacts.
         f.dictionary = [b"IHDR", b"IDAT", b"<script>", b"%n", b"\xff\xff", b"AAAA"]
-        f._dict_scratch = f._rand_pool.randint_list(0, len(f.dictionary) - 1, 4096)
+        f._dict_scratch = f._rng.randint_list(0, len(f.dictionary) - 1, 4096)
         f._dict_scratch_idx = 0
 
         # --- flag-gated band ----------------------------------------------
@@ -680,7 +680,7 @@ class TestStateGatedOperatorsAreNotNoOps:
 
         offered = changed = 0
         for rep in range(_REPS):
-            f._rand_pool.reseed(_BASE_SEED + rep)
+            f._rng.reseed(_BASE_SEED + rep)
             for inp in battery:
                 if "crc_learn" not in set(REGISTRY.available(f, inp)):
                     continue

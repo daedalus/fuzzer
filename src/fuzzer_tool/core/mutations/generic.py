@@ -2346,11 +2346,11 @@ class _WsNode(_VerseNode):
         self._samples = list(set(samples))
 
     def Generate(self, v, buf):
-        if v._rand.random() != 0 and self._samples:
-            buf += v._rand.choice(self._samples)
+        if v._rng.random() != 0 and self._samples:
+            buf += v._rng.choice(self._samples)
         else:
-            for _ in range(v._rand.randint(0, 3)):
-                buf += v._rand.choice([b" ", b"\t"])
+            for _ in range(v._rng.randint(0, 3)):
+                buf += v._rng.choice([b" ", b"\t"])
 
 
 class _AlphaNumNode(_VerseNode):
@@ -2358,22 +2358,22 @@ class _AlphaNumNode(_VerseNode):
         self._samples = list(set(samples))
 
     def Generate(self, v, buf):
-        if v._rand.random() != 0 and self._samples:
-            buf += v._rand.choice(self._samples)
+        if v._rng.random() != 0 and self._samples:
+            buf += v._rng.choice(self._samples)
         else:
-            length = [v._rand.randint(0, 3), v._rand.randint(0, 19), v._rand.randint(0, 99)][
-                v._rand.randint(0, 2)
+            length = [v._rng.randint(0, 3), v._rng.randint(0, 19), v._rng.randint(0, 99)][
+                v._rng.randint(0, 2)
             ]
             for _ in range(length):
-                kind = v._rand.randint(0, 3)
+                kind = v._rng.randint(0, 3)
                 if kind == 0:
                     buf += b"_"
                 elif kind == 1:
-                    buf += bytes([0x30 + v._rand.randint(0, 9)])
+                    buf += bytes([0x30 + v._rng.randint(0, 9)])
                 elif kind == 2:
-                    buf += bytes([0x61 + v._rand.randint(0, 25)])
+                    buf += bytes([0x61 + v._rng.randint(0, 25)])
                 else:
-                    buf += bytes([0x41 + v._rand.randint(0, 25)])
+                    buf += bytes([0x41 + v._rng.randint(0, 25)])
 
 
 class _NumNode(_VerseNode):
@@ -2382,34 +2382,34 @@ class _NumNode(_VerseNode):
         self._hex = hex
 
     def Generate(self, v, buf):
-        if v._rand.random() == 0 and self._samples:
-            buf += v._rand.choice(self._samples)
+        if v._rng.random() == 0 and self._samples:
+            buf += v._rng.choice(self._samples)
             return
-        base = [8, 10, 16][v._rand.randint(0, 2)]
-        length = [v._rand.randint(0, 3), v._rand.randint(0, 15), v._rand.randint(0, 39)][
-            v._rand.randint(0, 2)
+        base = [8, 10, 16][v._rng.randint(0, 2)]
+        length = [v._rng.randint(0, 3), v._rng.randint(0, 15), v._rng.randint(0, 39)][
+            v._rng.randint(0, 2)
         ]
         num = bytearray()
         for _ in range(length):
             if base == 8:
-                num += bytes([0x30 + v._rand.randint(0, 7)])
+                num += bytes([0x30 + v._rng.randint(0, 7)])
             elif base == 10:
-                num += bytes([0x30 + v._rand.randint(0, 9)])
+                num += bytes([0x30 + v._rng.randint(0, 9)])
             else:
-                kind = v._rand.randint(0, 2)
+                kind = v._rng.randint(0, 2)
                 if kind == 0:
-                    num += bytes([0x30 + v._rand.randint(0, 9)])
+                    num += bytes([0x30 + v._rng.randint(0, 9)])
                 elif kind == 1:
-                    num += bytes([0x61 + v._rand.randint(0, 5)])
+                    num += bytes([0x61 + v._rng.randint(0, 5)])
                 else:
-                    num += bytes([0x41 + v._rand.randint(0, 5)])
+                    num += bytes([0x41 + v._rng.randint(0, 5)])
         if base == 8:
             buf += b"0" + num
         elif base == 16:
             buf += b"0x" + num
         else:
             buf += num
-        if v._rand.random() == 0:
+        if v._rng.random() == 0:
             buf += b"-"
 
 
@@ -2418,11 +2418,11 @@ class _ControlNode(_VerseNode):
         self._ch = bytes([ch])
 
     def Generate(self, v, buf):
-        if v._rand.randint(0, 9) != 0:
+        if v._rng.randint(0, 9) != 0:
             buf += self._ch
         else:
             for _ in range(10):
-                b = v._rand.randint(0, 127)
+                b = v._rng.randint(0, 127)
                 if 0x30 <= b <= 0x39 or 0x61 <= b <= 0x7A or 0x41 <= b <= 0x5A:
                     continue
                 buf += bytes([b])
@@ -2447,16 +2447,16 @@ class _BracketNode(_VerseNode):
         self._inner = inner
 
     def Generate(self, v, buf):
-        if v._rand.randint(0, 9) != 0:
+        if v._rng.randint(0, 9) != 0:
             buf += self._open
             self._inner.Generate(v, buf)
             buf += self._close
         else:
             brk = [b"<", b"[", b"(", b"{", b"'", b'"', b"`"]
-            open_b = v._rand.choice(brk)
+            open_b = v._rng.choice(brk)
             close_b = bytes([_BRACKETS[open_b[0]]])
-            if v._rand.randint(0, 4) == 0:
-                close_b = bytes([_BRACKETS[v._rand.choice(brk)[0]]])
+            if v._rng.randint(0, 4) == 0:
+                close_b = bytes([_BRACKETS[v._rng.choice(brk)[0]]])
             buf += open_b
             self._inner.Generate(v, buf)
             buf += close_b
@@ -2469,7 +2469,7 @@ class _KeyValNode(_VerseNode):
 
     def Generate(self, v, buf):
         self._key.Generate(v, buf)
-        buf += bytes([0x3A if v._rand.random() < 0.5 else 0x3D])
+        buf += bytes([0x3A if v._rng.random() < 0.5 else 0x3D])
         self._value.Generate(v, buf)
 
 
@@ -2480,10 +2480,10 @@ class _ListNode(_VerseNode):
 
     def Generate(self, v, buf):
         blocks = list(self._blocks)
-        if v._rand.randint(0, 4) == 0:
+        if v._rng.randint(0, 4) == 0:
             blocks = []
-            while v._rand.randint(0, 2) != 0:
-                blocks.append(v._rand.choice(self._blocks))
+            while v._rng.randint(0, 2) != 0:
+                blocks.append(v._rng.choice(self._blocks))
         for i, b in enumerate(blocks):
             if i != 0:
                 buf += self._delim
@@ -2509,23 +2509,23 @@ class _BlockNode(_VerseNode):
 
     def Generate(self, v, buf):
         nodes = list(self._nodes)
-        if v._rand.randint(0, 9) == 0:
-            while len(nodes) > 0 and v._rand.randint(0, 1) == 0:
-                idx = v._rand.randint(0, len(nodes) - 1)
+        if v._rng.randint(0, 9) == 0:
+            while len(nodes) > 0 and v._rng.randint(0, 1) == 0:
+                idx = v._rng.randint(0, len(nodes) - 1)
                 nodes = nodes[:idx] + nodes[idx + 1 :]
-        if v._rand.randint(0, 9) == 0:
-            while len(nodes) > 0 and v._rand.randint(0, 1) == 0:
-                idx = v._rand.randint(0, len(nodes) - 1)
+        if v._rng.randint(0, 9) == 0:
+            while len(nodes) > 0 and v._rng.randint(0, 1) == 0:
+                idx = v._rng.randint(0, len(nodes) - 1)
                 nodes = nodes[:idx] + [None] + nodes[idx:]
-        if v._rand.randint(0, 9) == 0:
-            while len(nodes) > 0 and v._rand.randint(0, 1) == 0:
-                idx1 = v._rand.randint(0, len(nodes) - 1)
-                idx2 = v._rand.randint(0, len(nodes) - 1)
+        if v._rng.randint(0, 9) == 0:
+            while len(nodes) > 0 and v._rng.randint(0, 1) == 0:
+                idx1 = v._rng.randint(0, len(nodes) - 1)
+                idx2 = v._rng.randint(0, len(nodes) - 1)
                 nodes[idx1], nodes[idx2] = nodes[idx2], nodes[idx1]
         for n in nodes:
             if n is None:
                 continue
-            if v._rand.randint(0, 19) == 0:
+            if v._rng.randint(0, 19) == 0:
                 continue
             n.Generate(v, buf)
 
@@ -2534,7 +2534,7 @@ class Verse:
     def __init__(self, rng):
         self._blocks = []
         self._all_nodes = []
-        self._rand = rng
+        self._rng = rng
 
     def add_block(self, block):
         self._blocks.append(block)
@@ -2543,7 +2543,7 @@ class Verse:
         buf = bytearray()
         if not self._blocks:
             return buf
-        block = self._blocks[self._rand.randint(0, len(self._blocks) - 1)]
+        block = self._blocks[self._rng.randint(0, len(self._blocks) - 1)]
         block.Generate(self, buf)
         return bytes(buf)
 

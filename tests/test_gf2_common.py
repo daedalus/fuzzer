@@ -29,6 +29,7 @@ from fuzzer_tool.core.gf2_common import (
     poly_powmod,
     verified_apply_inverse,
 )
+from fuzzer_tool.core.rand_pool import RandPool
 
 # ---------------------------------------------------------------------------
 # poly_deg
@@ -220,13 +221,13 @@ def test_find_primitive_root_small():
                 return False
         return True
 
-    rng = pytest.importorskip("random").Random(0)
+    rng = RandPool(seed=0)
     a = find_primitive_root(7, is_prim, rng)
     assert 1 <= a < 7
 
 
 def test_find_primitive_root_order_1():
-    rng = pytest.importorskip("random").Random(0)
+    rng = RandPool(seed=0)
     assert find_primitive_root(1, lambda a: True, rng) == 1
 
 

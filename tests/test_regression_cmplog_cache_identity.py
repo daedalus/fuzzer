@@ -58,7 +58,7 @@ class TestColorizeCacheScope:
         """Drive _op_colorize far enough to populate the cache."""
         from fuzzer_tool.core.rand_pool import RandPool
 
-        eng._ctx_cache.rand_pool = RandPool(seed=1234)
+        eng._ctx_cache._rng = RandPool(seed=1234)
         eng._op_colorization(bytearray(buf), 0, bytes(buf))
         return eng._colorize_cache
 

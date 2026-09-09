@@ -46,7 +46,7 @@ _ORIGINAL_SELECT = OperatorEngine.select_position
 def _make_uniform():
     def select(self, buf, data):
         n = len(buf)
-        return self.f._rand_pool.randint(0, n - 1) if n else 0
+        return self.f._rng.randint(0, n - 1) if n else 0
 
     return select
 
@@ -58,7 +58,7 @@ def _make_head(exponent: float = 1.5):
         n = len(buf)
         if not n:
             return 0
-        u = self.f._rand_pool.random()
+        u = self.f._rng.random()
         # inverse-CDF of a bounded power law
         return min(n - 1, int((1 - u) ** (-1.0 / exponent) - 1))
 
@@ -72,7 +72,7 @@ def _make_edges():
         n = len(buf)
         if not n:
             return 0
-        u = self.f._rand_pool.random()
+        u = self.f._rng.random()
         x = math.sin(0.5 * math.pi * u) ** 2  # arcsine distribution
         return min(n - 1, int(x * n))
 

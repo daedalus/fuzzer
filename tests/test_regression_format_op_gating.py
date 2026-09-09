@@ -35,7 +35,7 @@ class _Fuzzer:
     """Minimal stand-in — the gate only touches these two attributes."""
 
     def __init__(self):
-        self._rand_pool = RandPool()
+        self._rng = RandPool()
 
 
 class TestFormatOpGating:

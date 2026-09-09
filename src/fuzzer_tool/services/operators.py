@@ -441,7 +441,7 @@ class OperatorEngine:
     docs/port-backlog.md item F1) to a ``MutationContext``. It is a
     property, not a field cached at construction time, because
     ``OperatorEngine`` is built before the Fuzzer finishes its own
-    ``__init__`` (before ``_rand_pool``/``corpus`` exist yet); a property
+    ``__init__`` (before ``_rng``/``corpus`` exist yet); a property
     re-derives it from live ``self.f`` state on every access, same
     freshness guarantee direct ``self.f.<attr>`` reads always had. Backed
     by a per-round cache (``self._ctx_cache``, refreshed at the top of
@@ -451,7 +451,7 @@ class OperatorEngine:
 
     What made it into ``_op_*`` handlers via ``self.f`` directly: 439
     ``self.f.<attr>`` reads (counting the local ``f = self.f`` alias form)
-    across 34 distinct attributes, dominated by ``max_len``/``_rand_pool``
+    across 34 distinct attributes, dominated by ``max_len``/``_rng``
     (69%) and 26 lazily-constructed format-mutator singletons
     (``_png_mutator``, ...). All but two categories now go through
     ``self.ctx`` or operator-owned lazy caches (relocated the same way the
@@ -528,7 +528,7 @@ class OperatorEngine:
 
         Backed by a cache refreshed once per ``mutate()`` round rather than
         rebuilt on every access: a single round can read ``ctx.max_len`` or
-        ``ctx.rand_pool`` a few dozen times across the deterministic gate,
+        ``ctx._rng`` a few dozen times across the deterministic gate,
         ``build_ops()``, and 2-16 havoc sub-mutations, and measured, per-
         access rebuilding cost ~19% of round latency (224us -> 267us/round
         on a no-op target, i.e. before any exec cost dilutes it). Refreshing
@@ -551,12 +551,12 @@ class OperatorEngine:
     # Each handler: (buf, byte_idx, data) -> None (in-place) or bytes (replace buf)
 
     def _op_bit_flip(self, buf, byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if buf:
             buf[byte_idx] ^= 1 << rng.randint(0, 7)
 
     def _op_bit_offset_flip(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf:
             return
         total_bits = len(buf) * 8
@@ -566,7 +566,7 @@ class OperatorEngine:
         buf[byte_idx] ^= 1 << bit_idx
 
     def _op_bit_offset_span(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf:
             return
         total_bits = len(buf) * 8
@@ -584,7 +584,7 @@ class OperatorEngine:
 
     def _op_simd_boundary(self, buf, _byte_idx, _data):
         """Resize buffer to SIMD boundary lengths (AVX2: 32, SSE2: 16)."""
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         from fuzzer_tool.core.mutations import SIMD_BOUNDARIES
 
         if not buf:
@@ -615,7 +615,7 @@ class OperatorEngine:
         truncated backtracking bomb is not a bomb, and silently emitting
         one would make this operator look like it fired when it had not.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         from fuzzer_tool.core.mutations import REGEX_BOMBS
 
         max_len = self.ctx.max_len
@@ -631,7 +631,7 @@ class OperatorEngine:
 
     def _op_clone_fixed(self, buf, _byte_idx, _data):
         """Insert a block of repeated constant bytes (AFL++ clone_fixed)."""
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf or len(buf) >= self.ctx.max_len:
             return
         fill_byte = rng.choice([buf[rng.randint(0, len(buf) - 1)], 0, 0xFF])
@@ -641,7 +641,7 @@ class OperatorEngine:
 
     def _op_overwrite_copy(self, buf, _byte_idx, _data):
         """Overwrite a region with bytes from another position (AFL++ overwrite_copy)."""
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) < 2:
             return
         src_len = rng.randint(1, min(16, len(buf)))
@@ -652,7 +652,7 @@ class OperatorEngine:
 
     def _op_overwrite_fixed(self, buf, _byte_idx, _data):
         """Overwrite a region with repeated constant bytes (AFL++ overwrite_fixed)."""
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) < 2:
             return
         fill_byte = rng.choice([buf[rng.randint(0, len(buf) - 1)], 0, 0xFF])
@@ -671,7 +671,7 @@ class OperatorEngine:
         Falls back to single-byte transforms (XOR, arithmetic, boundary) when
         the encoding engine yields no applicable mutations for the current pair.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not self.ctx.cmplog_pairs:
             return
         if not buf or len(buf) < 2:
@@ -788,7 +788,7 @@ class OperatorEngine:
         amplitude arrays, 8 float64s per byte) turn that into an OOM.
         Clamp explicitly here rather than relying on the caller.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         max_len = self.ctx.max_len or 65536
         if len(buf) < 4:
             return
@@ -828,7 +828,7 @@ class OperatorEngine:
         Radamsa sed-fuse-next: fuses prefix of the current block
         with suffix of a random corpus entry at a shared position.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         corpus = self.ctx.corpus
         if not corpus or len(buf) < 3:
             return
@@ -852,7 +852,7 @@ class OperatorEngine:
         Radamsa sed-fuse-old: maintains a ring buffer of previously
         mutated data and fuses fragments from it into the current input.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) < 3:
             return
         if not hasattr(self, "_fuse_memory"):
@@ -887,7 +887,7 @@ class OperatorEngine:
         from fuzzer_tool.core.tree_mutator import lightweight_tree_mutate  # noqa: PLC0415
 
         result = lightweight_tree_mutate(
-            bytes(buf), max_len=self.ctx.max_len, rng=self.ctx.rand_pool
+            bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng
         )
         if result != bytes(buf):
             buf[:] = result[: len(buf)]
@@ -911,7 +911,7 @@ class OperatorEngine:
         truncate, since truncating would corrupt the two-byte sequence
         this operator exists to produce.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf:
             return
         max_len = self.ctx.max_len
@@ -933,7 +933,7 @@ class OperatorEngine:
         have caused security issues: BOMs, right-to-left override,
         zero-width joiners, illegal surrogates, NFKC expansion bombs, etc.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf or len(buf) >= (self.ctx.max_len or 65536):
             return
         from fuzzer_tool.core.mutations import _FUNNY_UNICODE  # noqa: PLC0415
@@ -955,7 +955,7 @@ class OperatorEngine:
         - Repeat a line
         - Insert a line from elsewhere in the buffer
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf or len(buf) < 4:
             return
         # Split on newline
@@ -1002,7 +1002,7 @@ class OperatorEngine:
         prefer mutating bytes that appear in comparison operands, which
         increases the chance of cracking comparisons.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf:
             return
         tbl = _COLORIZE_TBL
@@ -1060,7 +1060,7 @@ class OperatorEngine:
         If not, those bytes are inert. This operator flips a random block
         to help discover which regions affect execution paths.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) < 8:
             return
         # Pick a random block (10-25% of buffer) and flip all bytes
@@ -1080,7 +1080,7 @@ class OperatorEngine:
         This operator injects previously collected extras or generates
         new sequences of consecutive interesting bytes.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf:
             return
         f = self.f
@@ -1114,7 +1114,7 @@ class OperatorEngine:
             buf[byte_idx] ^= 0xFF
 
     def _op_interesting_8(self, buf, byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if buf:
             if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.random() < 0.3:
                 crash_vals = self.ctx.crash_mi.top_values(byte_idx, k=5)
@@ -1125,7 +1125,7 @@ class OperatorEngine:
             buf[byte_idx] = rng.choice(vals) & 0xFF
 
     def _op_interesting_16(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) >= 2:
             idx = rng.randint(0, len(buf) - 2)
             if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.random() < 0.3:
@@ -1142,7 +1142,7 @@ class OperatorEngine:
             struct.pack_into(fmt, buf, idx, v)
 
     def _op_interesting_32(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) >= 4:
             idx = rng.randint(0, len(buf) - 4)
             if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.random() < 0.3:
@@ -1159,7 +1159,7 @@ class OperatorEngine:
             struct.pack_into(fmt, buf, idx, v)
 
     def _op_arithmetic(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
 
         width = rng.choice([1, 2, 4, 8])
@@ -1197,12 +1197,12 @@ class OperatorEngine:
                     struct.pack_into(">Q", buf, idx, val)
 
     def _op_random_bytes(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if buf:
             buf[rng.randint(0, len(buf) - 1)] = rng.randint(0, 255)
 
     def _op_block_insert(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) < self.ctx.max_len:
             idx = rng.randint(0, len(buf))
             max_size = min(64, self.ctx.max_len - len(buf))
@@ -1211,7 +1211,7 @@ class OperatorEngine:
                 buf[idx:idx] = bytes(rng.randint(0, 255) for _ in range(size))
 
     def _op_block_delete(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) > 1:
             idx = rng.randint(0, len(buf) - 1)
             max_size = min(64, len(buf) - idx, len(buf) - 1)
@@ -1220,7 +1220,7 @@ class OperatorEngine:
                 del buf[idx : idx + size]
 
     def _op_block_duplicate(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) < 2 or len(buf) >= self.ctx.max_len:
             return
         idx = rng.randint(0, len(buf) - 1)
@@ -1232,7 +1232,7 @@ class OperatorEngine:
             buf[ins:ins] = block
 
     def _op_dict_insert(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         f = self.f
         if self.ctx.dictionary and f._dict_scratch_idx < len(f._dict_scratch):
             token = self.ctx.dictionary[f._dict_scratch[f._dict_scratch_idx]]
@@ -1241,7 +1241,7 @@ class OperatorEngine:
                 buf[rng.randint(0, len(buf)) : 0] = token
 
     def _op_dict_replace(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         f = self.f
         if self.ctx.dictionary and buf and f._dict_scratch_idx < len(f._dict_scratch):
             token = self.ctx.dictionary[f._dict_scratch[f._dict_scratch_idx]]
@@ -1303,7 +1303,7 @@ class OperatorEngine:
         int_lits, str_lits = acc.result()
         if not int_lits and not str_lits:
             return None
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if rng.random() < 0.5 and int_lits:
             lit = rng.choice(int_lits)
         elif str_lits:
@@ -1322,7 +1322,7 @@ class OperatorEngine:
                 del buf[self.ctx.max_len :]
 
     def _op_checksum_repair(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
 
         if buf and len(buf) >= 4:
             pos = rng.randint(0, max(0, len(buf) - 4))
@@ -1353,7 +1353,7 @@ class OperatorEngine:
         learner = self.ctx.checksum_learner
         if not learner:
             return
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
 
         if learner.ensure_poly() is not None:
             # Try format-aware patching first
@@ -1453,7 +1453,7 @@ class OperatorEngine:
         return bytes(out)
 
     def _op_token_dup(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         f = self.f
         if self.ctx.dictionary and buf and f._dict_scratch_idx < len(f._dict_scratch):
             token = self.ctx.dictionary[f._dict_scratch[f._dict_scratch_idx]]
@@ -1462,7 +1462,7 @@ class OperatorEngine:
                 buf[rng.randint(0, len(buf)) : 0] = token
 
     def _op_markov_bytes(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if buf:
             idx = rng.randint(0, len(buf) - 1)
             ctx = (
@@ -1473,7 +1473,7 @@ class OperatorEngine:
             buf[idx] = self.ctx.markov.sample_byte(ctx)
 
     def _op_cem_bytes(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if self.ctx.mc and self.ctx.mc.cem_fitted:
             if buf:
                 buf[rng.randint(0, len(buf) - 1)] = self.ctx.mc.cem_byte(
@@ -1483,7 +1483,7 @@ class OperatorEngine:
                 return bytearray(self.ctx.mc.cem_sample(rng.randint(1, min(32, self.ctx.max_len))))
 
     def _op_splice(self, buf, _byte_idx, data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(self.ctx.corpus) >= 2:
             a = rng.choice(self.ctx.corpus)
             b = rng.choice(self.ctx.corpus)
@@ -1494,7 +1494,7 @@ class OperatorEngine:
                 return bytearray(splice(bytes(buf), rng.choice(others))[: self.ctx.max_len])
 
     def _op_splice_diff_located(self, buf, _byte_idx, data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(self.ctx.corpus) >= 2:
             a = rng.choice(self.ctx.corpus)
             b = rng.choice(self.ctx.corpus)
@@ -1513,7 +1513,7 @@ class OperatorEngine:
         two inputs and only splices the differing middle, skipping when
         the differing region is < 4 bytes.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(self.ctx.corpus) < 2:
             return None
         base = bytes(buf) if buf else b""
@@ -1531,7 +1531,7 @@ class OperatorEngine:
         short range from it, and splices it into a random position in the
         current buffer.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) < 4 or len(self.ctx.corpus) < 2:
             return None
         others = [c for c in self.ctx.corpus if c is not data]
@@ -1553,14 +1553,14 @@ class OperatorEngine:
         """Radamsa-style number mutation on a random byte."""
         if not buf:
             return None
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         pos = rng.randint(0, len(buf) - 1)
         val = radamsa_mutate_num(buf[pos], rng=rng)
         buf[pos] = val & 0xFF
         return buf
 
     def _op_crossover(self, buf, _byte_idx, data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         from fuzzer_tool.core.mutations import crossover
 
         if len(self.ctx.corpus) >= 2 and buf:
@@ -1585,7 +1585,7 @@ class OperatorEngine:
 
         if buf:
             return bytearray(
-                ascii_num_replace(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                ascii_num_replace(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     def _op_digit_replace(self, buf, _byte_idx, _data):
@@ -1593,7 +1593,7 @@ class OperatorEngine:
 
         Ported from go-fuzz case 14.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         digits = [i for i, b in enumerate(buf) if 0x30 <= b <= 0x39]
         if not digits:
             return None
@@ -1609,20 +1609,20 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import byte_shuffle
 
         if buf and len(buf) > 1:
-            return bytearray(byte_shuffle(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(byte_shuffle(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_byte_delete(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import byte_delete
 
         if buf and len(buf) > 1:
-            return bytearray(byte_delete(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(byte_delete(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_byte_insert(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import byte_insert
 
         if buf and len(buf) < self.ctx.max_len:
             return bytearray(
-                byte_insert(bytes(buf), self.ctx.max_len, rng=self.ctx.rand_pool)[
+                byte_insert(bytes(buf), self.ctx.max_len, rng=self.ctx._rng)[
                     : self.ctx.max_len
                 ]
             )
@@ -1632,7 +1632,7 @@ class OperatorEngine:
 
         if buf and len(buf) < self.ctx.max_len:
             return bytearray(
-                insert_ascii_num(bytes(buf), self.ctx.max_len, rng=self.ctx.rand_pool)[
+                insert_ascii_num(bytes(buf), self.ctx.max_len, rng=self.ctx._rng)[
                     : self.ctx.max_len
                 ]
             )
@@ -1642,7 +1642,7 @@ class OperatorEngine:
 
         if len(buf) >= 2:
             return bytearray(
-                transpose_bytes(bytes(buf), 2, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                transpose_bytes(bytes(buf), 2, rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     def _op_transpose_32(self, buf, _byte_idx, _data):
@@ -1650,7 +1650,7 @@ class OperatorEngine:
 
         if len(buf) >= 4:
             return bytearray(
-                transpose_bytes(bytes(buf), 4, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                transpose_bytes(bytes(buf), 4, rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     def _op_transpose_64(self, buf, _byte_idx, _data):
@@ -1658,7 +1658,7 @@ class OperatorEngine:
 
         if len(buf) >= 8:
             return bytearray(
-                transpose_bytes(bytes(buf), 8, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                transpose_bytes(bytes(buf), 8, rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     def _op_bit_transpose_8(self, buf, _byte_idx, _data):
@@ -1666,7 +1666,7 @@ class OperatorEngine:
 
         if buf:
             return bytearray(
-                bit_transpose(bytes(buf), 1, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                bit_transpose(bytes(buf), 1, rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     def _op_bit_transpose_16(self, buf, _byte_idx, _data):
@@ -1674,7 +1674,7 @@ class OperatorEngine:
 
         if len(buf) >= 2:
             return bytearray(
-                bit_transpose(bytes(buf), 2, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                bit_transpose(bytes(buf), 2, rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     def _op_bit_transpose_32(self, buf, _byte_idx, _data):
@@ -1682,7 +1682,7 @@ class OperatorEngine:
 
         if len(buf) >= 4:
             return bytearray(
-                bit_transpose(bytes(buf), 4, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                bit_transpose(bytes(buf), 4, rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     def _op_bit_transpose_64(self, buf, _byte_idx, _data):
@@ -1690,7 +1690,7 @@ class OperatorEngine:
 
         if len(buf) >= 8:
             return bytearray(
-                bit_transpose(bytes(buf), 8, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                bit_transpose(bytes(buf), 8, rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     # These three pick their own word width from what the buffer can hold, so
@@ -1700,19 +1700,19 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import bit_rotate
 
         if buf:
-            return bytearray(bit_rotate(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(bit_rotate(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_bit_shift(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_shift
 
         if buf:
-            return bytearray(bit_shift(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(bit_shift(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_span_invert(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import span_invert
 
         if buf:
-            return bytearray(span_invert(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(span_invert(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_bit_repack(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_repack
@@ -1722,25 +1722,25 @@ class OperatorEngine:
         # mid-element would silently turn this into a truncator.
         if len(buf) >= 2:
             return bytearray(
-                bit_repack(bytes(buf), rng=self.ctx.rand_pool, max_len=self.ctx.max_len)[
+                bit_repack(bytes(buf), rng=self.ctx._rng, max_len=self.ctx.max_len)[
                     : self.ctx.max_len
                 ]
             )
 
     def _op_length_grow(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if buf and len(buf) < self.ctx.max_len:
             size = rng.randint(1, min(64, self.ctx.max_len - len(buf)))
             if size > 0:
                 buf.extend(rng.randint(0, 255) for _ in range(size))
 
     def _op_length_shrink(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) > 2:
             del buf[rng.randint(1, len(buf) - 1) :]
 
     def _op_repeat_clone(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if buf and len(buf) < self.ctx.max_len:
             idx = rng.randint(0, len(buf) - 1)
             size = rng.randint(1, min(16, len(buf) - idx))
@@ -1750,12 +1750,12 @@ class OperatorEngine:
                 buf[ins:ins] = block
 
     def _op_truncate(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) > 2:
             del buf[rng.randint(2, len(buf)) :]
 
     def _op_length_boundary(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         from fuzzer_tool.core.mutations import LENGTH_BOUNDARIES
 
         if not buf:
@@ -1787,7 +1787,7 @@ class OperatorEngine:
                 buf.extend(bytearray(grow))  # zero-filled, fast
 
     def _op_swap_regions(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if len(buf) >= 4:
             i = rng.randint(0, len(buf) - 3)
             j = rng.randint(i + 2, len(buf) - 1)
@@ -1803,7 +1803,7 @@ class OperatorEngine:
 
     def _op_span_reverse(self, buf, _byte_idx, _data):
         """TSP 2-opt: reverse a contiguous byte span in place."""
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         n = len(buf)
         if n < 2:
             return
@@ -1815,7 +1815,7 @@ class OperatorEngine:
 
     def _op_span_relocate(self, buf, _byte_idx, _data):
         """Or-opt: relocate a short span elsewhere, length preserved."""
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         n = len(buf)
         if n < 3:
             return
@@ -1839,7 +1839,7 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.mutations.generic import _swap_pair, _swap_tuple
 
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         n = len(buf)
         if n < 2:
             return
@@ -1859,7 +1859,7 @@ class OperatorEngine:
         buf[i], buf[j] = buf[j], buf[i]
 
     def _op_endianness_swap(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if buf:
             width = rng.choice([2, 4, 8])
             if len(buf) >= width:
@@ -1868,7 +1868,7 @@ class OperatorEngine:
                 buf[idx : idx + width] = val.to_bytes(width, "big")
 
     def _op_insert_repeated_bytes(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf or len(buf) >= self.ctx.max_len:
             return
         fill_byte = rng.randint(0, 255)
@@ -1878,15 +1878,15 @@ class OperatorEngine:
 
     def _op_sort_bytes(self, buf, _byte_idx, _data):
         if buf and len(buf) > 1:
-            start = self.ctx.rand_pool.randint(0, len(buf) - 1)
-            end = min(start + self.ctx.rand_pool.randint(2, len(buf) - start + 1), len(buf))
+            start = self.ctx._rng.randint(0, len(buf) - 1)
+            end = min(start + self.ctx._rng.randint(2, len(buf) - start + 1), len(buf))
             buf[start:end] = sorted(buf[start:end])
 
     def _op_leb128_encode(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import leb128_encode
 
         if buf:
-            result = leb128_encode(bytes(buf), rng=self.ctx.rand_pool, max_len=self.ctx.max_len)
+            result = leb128_encode(bytes(buf), rng=self.ctx._rng, max_len=self.ctx.max_len)
             if result != bytes(buf):
                 return bytearray(result[: self.ctx.max_len])
 
@@ -1894,20 +1894,20 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
         if buf:
-            return bytearray(tlv_mutate(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(tlv_mutate(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_token_shuffle(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.token_shuffle import token_shuffle
 
         if buf and len(buf) >= 4:
-            return bytearray(token_shuffle(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len])
+            return bytearray(token_shuffle(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_gradient_cmp(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.gradient_cmp import gradient_cmp
 
         if buf and self.ctx.cmplog_pairs:
             return bytearray(
-                gradient_cmp(bytes(buf), self.ctx.cmplog_pairs, rng=self.ctx.rand_pool)[
+                gradient_cmp(bytes(buf), self.ctx.cmplog_pairs, rng=self.ctx._rng)[
                     : self.ctx.max_len
                 ]
             )
@@ -1917,9 +1917,9 @@ class OperatorEngine:
 
         if not (buf and self.ctx.cmplog_pairs):
             return
-        pair = self.ctx.rand_pool.choice(self.ctx.cmplog_pairs)
+        pair = self.ctx._rng.choice(self.ctx.cmplog_pairs)
         result = gradient_descent(
-            bytes(buf), pair, max_len=self.ctx.max_len, rng=self.ctx.rand_pool
+            bytes(buf), pair, max_len=self.ctx.max_len, rng=self.ctx._rng
         )
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
@@ -1930,8 +1930,8 @@ class OperatorEngine:
 
         if not (buf and self.ctx.cmplog_pairs):
             return
-        pair = self.ctx.rand_pool.choice(self.ctx.cmplog_pairs)
-        result = magic_byte_search(bytes(buf), pair, self.ctx.rand_pool, max_len=self.ctx.max_len)
+        pair = self.ctx._rng.choice(self.ctx.cmplog_pairs)
+        result = magic_byte_search(bytes(buf), pair, self.ctx._rng, max_len=self.ctx.max_len)
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
 
@@ -1941,8 +1941,8 @@ class OperatorEngine:
 
         if not (buf and self.ctx.cmplog_pairs):
             return
-        pair = self.ctx.rand_pool.choice(self.ctx.cmplog_pairs)
-        result = climb_hill(bytes(buf), pair, self.ctx.rand_pool, max_len=self.ctx.max_len)
+        pair = self.ctx._rng.choice(self.ctx.cmplog_pairs)
+        result = climb_hill(bytes(buf), pair, self.ctx._rng, max_len=self.ctx.max_len)
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
 
@@ -1956,7 +1956,7 @@ class OperatorEngine:
         ``TIMEOUT`` so the solver does not waste budget on it again.
         Falls back to havoc when no applicable branch exists.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not (buf and self.ctx.cmplog_pairs):
             return self._op_havoc(buf, _byte_idx, _data)
 
@@ -2037,7 +2037,7 @@ class OperatorEngine:
         covering SQL injection, XSS, path traversal, format strings,
         command injection, JSON edge cases, and control characters.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf or len(buf) >= self.ctx.max_len:
             return
         s = rng.choice(SPECIAL_STRINGS)
@@ -2050,7 +2050,7 @@ class OperatorEngine:
         Ported from honggfuzz mangle_Magic: 229 hardcoded boundary values
         covering 1/2/4/8-byte widths in both LE and BE endianness.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf:
             return
         width, packed = rng.choice(MAGIC_TABLE)
@@ -2070,7 +2070,7 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import ascii_num_arithmetic
 
         if buf and len(buf) >= 1:
-            result = ascii_num_arithmetic(bytes(buf), rng=self.ctx.rand_pool)
+            result = ascii_num_arithmetic(bytes(buf), rng=self.ctx._rng)
             if result is not None:
                 return bytearray(result[: self.ctx.max_len])
 
@@ -2083,7 +2083,7 @@ class OperatorEngine:
         squares, or negative big ints.
         """
         if buf and len(buf) >= 2:
-            result = ascii_num_replace(bytes(buf), rng=self.ctx.rand_pool)
+            result = ascii_num_replace(bytes(buf), rng=self.ctx._rng)
             return bytearray(result[: self.ctx.max_len])
 
     def _op_chunk_shuffle(self, buf, _byte_idx, data):
@@ -2098,7 +2098,7 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import chunk_shuffle
 
         if buf and len(buf) >= 8:
-            rng = self.ctx.rand_pool
+            rng = self.ctx._rng
             parent_meta = self.ctx.seed_meta.get(data)
             stride = None
             if parent_meta and rng.random() < 0.5:
@@ -2159,7 +2159,7 @@ class OperatorEngine:
         if n_records < 2:
             return None
 
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         order = list(range(n_records))
         rng.shuffle(order)
         if order == list(range(n_records)):
@@ -2261,7 +2261,7 @@ class OperatorEngine:
         spans = smap.field_spans()
         if not spans:
             return None
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         start, end, _cid = rng.choice(spans)
         if end <= start:
             return None
@@ -2305,7 +2305,7 @@ class OperatorEngine:
             spans = smap.field_spans()
         if not spans:
             return None
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         start, end, _ = rng.choice(spans)
         chunk = bytes(buf[start:end])
         if not chunk:
@@ -2330,7 +2330,7 @@ class OperatorEngine:
         candidates = [s for s in spans if 0 < (s[1] - s[0]) < len(buf)]
         if not candidates:
             return None
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         start, end, _ = rng.choice(candidates)
         out = bytearray(buf[:start]) + bytearray(buf[end:])
         if not out:
@@ -2348,7 +2348,7 @@ class OperatorEngine:
             spans = smap.field_spans()
         if len(spans) < 2:
             return None
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         a, b = rng.sample(spans, 2)
         if a[0] > b[0]:
             a, b = b, a
@@ -2389,7 +2389,7 @@ class OperatorEngine:
         smap = self._weizz_structure_map(data)
         if smap is None or not buf:
             return None
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         out = bytearray(buf)
         repaired = False
 
@@ -2452,7 +2452,7 @@ class OperatorEngine:
 
         if buf and len(buf) >= 8:
             return bytearray(
-                block_shuffle_variable(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len]
+                block_shuffle_variable(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     def _op_dict_compound(self, buf, _byte_idx, _data):
@@ -2462,7 +2462,7 @@ class OperatorEngine:
         tokens like ``key=value`` or ``param1&param2`` by joining two
         dictionary entries with a random separator.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not self.ctx.dictionary or len(self.ctx.dictionary) < 2:
             return
         if not buf or len(buf) >= self.ctx.max_len:
@@ -2487,7 +2487,7 @@ class OperatorEngine:
         Ported from honggfuzz mangle_Punctuation: useful for breaking
         escaping and structure in text-based protocols.
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         from fuzzer_tool.core.mutations import PUNCTUATION_CHARS
 
         if not buf or len(buf) >= self.ctx.max_len:
@@ -2501,7 +2501,7 @@ class OperatorEngine:
         if self.ctx.grammar:
             return bytearray(
                 self.ctx.grammar.mutate(
-                    bytes(buf), max_len=self.ctx.max_len, rng=self.ctx.rand_pool
+                    bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng
                 )[: self.ctx.max_len]
             )
 
@@ -2509,7 +2509,7 @@ class OperatorEngine:
         if self.ctx.grammar:
             from fuzzer_tool.core.grammar import SubtreePopulation, TreeMutator
 
-            rng = self.ctx.rand_pool
+            rng = self.ctx._rng
             if not hasattr(self, "_tree_mutator"):
                 self._tree_mutator = TreeMutator(self.ctx.grammar)
                 self._subtree_population = SubtreePopulation()
@@ -2546,7 +2546,7 @@ class OperatorEngine:
         """
         if not buf or not self.ctx.corpus:
             return None
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         verse = getattr(self, "_versifier_verse", None)
         if verse is None or getattr(self, "_versifier_corpus_len", 0) != len(self.ctx.corpus):
             from fuzzer_tool.core.mutations.generic import _build_verse
@@ -2574,7 +2574,7 @@ class OperatorEngine:
             self._png_mutator = PngChunkMutator()
         # Set WFC mode from fuzzer state
         self._png_mutator.use_wfc = self.ctx.wfc_enabled
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_png_chunks(bytes(buf)):
             mutated = self._png_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2587,7 +2587,7 @@ class OperatorEngine:
         if not hasattr(self, "_jpeg_mutator"):
             self._jpeg_mutator = JpegMutator()
         self._jpeg_mutator.use_wfc = self.ctx.wfc_enabled
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_jpeg_markers(bytes(buf)):
             mutated = self._jpeg_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2595,7 +2595,7 @@ class OperatorEngine:
         return bytearray(mutated[: self.ctx.max_len])
 
     def _op_jpeg_crc_fix(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         from fuzzer_tool.core.mutations.jpeg import (
             STANDALONE_MARKERS,
             parse_jpeg_markers,
@@ -2624,7 +2624,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_gzip_mutator"):
             self._gzip_mutator = GzipMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_gzip(bytes(buf)):
             mutated = self._gzip_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2640,7 +2640,7 @@ class OperatorEngine:
         parent_meta = self.ctx.seed_meta.get(data)
         stride = parent_meta.get("record_stride") if parent_meta else None
         self._bmp_mutator.tile_bytes = stride
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_bmp(bytes(buf)):
             mutated = self._bmp_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2652,7 +2652,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_zlib_mutator"):
             self._zlib_mutator = ZlibMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_zlib(bytes(buf)):
             mutated = self._zlib_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2662,7 +2662,7 @@ class OperatorEngine:
     def _op_format_lock(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.magic_lock import format_lock_havoc
 
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if buf:
             result = format_lock_havoc(bytes(buf), self.ctx.max_len, rng=rng)
             if result is not None:
@@ -2673,7 +2673,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_pgs_mutator"):
             self._pgs_mutator = PgsMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_pgs_segments(bytes(buf)):
             mutated = self._pgs_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2685,7 +2685,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_isobmff_mutator"):
             self._isobmff_mutator = IsobmffMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_boxes(bytes(buf)):
             mutated = self._isobmff_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2699,7 +2699,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_nal_mutator"):
             self._nal_mutator = NalMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_nal_units(bytes(buf)):
             mutated = self._nal_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2713,7 +2713,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_mpegts_mutator"):
             self._mpegts_mutator = MpegtsMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_ts_packets(bytes(buf)):
             mutated = self._mpegts_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2725,7 +2725,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_adts_mutator"):
             self._adts_mutator = AdtsMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_adts_frames(bytes(buf)):
             mutated = self._adts_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2737,7 +2737,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_mp3_mutator"):
             self._mp3_mutator = Mp3Mutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_mp3_frames(bytes(buf)):
             mutated = self._mp3_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2749,7 +2749,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_ogg_mutator"):
             self._ogg_mutator = OggMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_ogg_pages(bytes(buf)):
             mutated = self._ogg_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2761,7 +2761,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_flv_mutator"):
             self._flv_mutator = FlvMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_flv(bytes(buf)):
             mutated = self._flv_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2773,7 +2773,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_asf_mutator"):
             self._asf_mutator = AsfMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_asf_objects(bytes(buf)):
             mutated = self._asf_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2785,7 +2785,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_riff_mutator"):
             self._riff_mutator = RiffMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_riff_chunks(bytes(buf)):
             mutated = self._riff_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2797,7 +2797,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_avif_mutator"):
             self._avif_mutator = AvifMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_avif(bytes(buf)):
             mutated = self._avif_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2809,7 +2809,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_sqlite_mutator"):
             self._sqlite_mutator = SqliteMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_sqlite(bytes(buf)):
             mutated = self._sqlite_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2823,7 +2823,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_protobuf_mutator"):
             self._protobuf_mutator = ProtobufMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_protobuf(bytes(buf)):
             mutated = self._protobuf_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2837,7 +2837,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_gif_mutator"):
             self._gif_mutator = GifMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_gif(bytes(buf)):
             mutated = self._gif_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2849,7 +2849,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_webp_mutator"):
             self._webp_mutator = WebpMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_webp(bytes(buf)):
             mutated = self._webp_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2861,7 +2861,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_webm_mutator"):
             self._webm_mutator = WebmMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_webm(bytes(buf)):
             mutated = self._webm_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2873,7 +2873,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_zip_mutator"):
             self._zip_mutator = ZipMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_zip(bytes(buf)):
             mutated = self._zip_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2885,7 +2885,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_magicyuv_mutator"):
             self._magicyuv_mutator = MagicYUVMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_avi_chunks(bytes(buf)):
             mutated = self._magicyuv_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2899,7 +2899,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_jpeg2000_mutator"):
             self._jpeg2000_mutator = Jpeg2000Mutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_jpeg2000(bytes(buf)):
             mutated = self._jpeg2000_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2913,7 +2913,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_av1_rtp_mutator"):
             self._av1_rtp_mutator = Av1RtpMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_av1(bytes(buf)):
             mutated = self._av1_rtp_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2925,7 +2925,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_rasc_mutator"):
             self._rasc_mutator = RascMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_rasc(bytes(buf)):
             mutated = self._rasc_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2937,7 +2937,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_tiff_mutator"):
             self._tiff_mutator = TiffMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_tiff(bytes(buf)):
             mutated = self._tiff_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2949,7 +2949,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_dvbsub_mutator"):
             self._dvbsub_mutator = DvbsubMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_dvbsub(bytes(buf)):
             mutated = self._dvbsub_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2963,7 +2963,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_cfhd_mutator"):
             self._cfhd_mutator = CfhdMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_cfhd(bytes(buf)):
             mutated = self._cfhd_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2975,7 +2975,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_shorten_mutator"):
             self._shorten_mutator = ShortenMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_shorten(bytes(buf)):
             mutated = self._shorten_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -2989,7 +2989,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_x86_mutator"):
             self._x86_mutator = X86Mutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if _decode_insns(bytes(buf)):
             mutated = self._x86_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -3001,7 +3001,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_arm_mutator"):
             self._arm_mutator = ArmMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if parse_arm(bytes(buf)):
             mutated = self._arm_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
@@ -3022,7 +3022,7 @@ class OperatorEngine:
             resize_tlv_value,
         )
 
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         raw = bytes(buf)
         for tag_w, len_w, big in ((1, 2, True), (2, 2, True), (1, 4, True), (1, 2, False)):
             roots = parse_tlv(raw, tag_width=tag_w, length_width=len_w, big_endian=big)
@@ -3055,7 +3055,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_der_mutator"):
             self._der_mutator = DerMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         raw = bytes(buf)
         if parse_der(raw) is None:
             # Not DER yet (bootstrap): grow a random DER-shaped input so the
@@ -3093,7 +3093,7 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.structural_constraints import GOALS, solve_length_offset
 
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         out = bytearray(buf)
         width = rng.choice((2, 4, 8))
         if len(out) < width * 2 + 1:
@@ -3177,7 +3177,7 @@ class OperatorEngine:
 
         if not hasattr(self, "_elf_mutator"):
             self._elf_mutator = ElfMutator()
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         mutated = self._elf_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         return bytearray(mutated[: self.ctx.max_len])
 
@@ -3191,7 +3191,7 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.mutations.recompress import recompress_zlib
 
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         out = recompress_zlib(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         if out is None:
             return self._op_havoc(buf, byte_idx, data)
@@ -3201,7 +3201,7 @@ class OperatorEngine:
         """Inflate, mutate the plaintext, re-deflate as a valid gzip member."""
         from fuzzer_tool.core.mutations.recompress import recompress_gzip
 
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         out = recompress_gzip(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         if out is None:
             return self._op_havoc(buf, byte_idx, data)
@@ -3217,14 +3217,14 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.mutations.deflate_struct import mutate_deflate_structure
 
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         out = mutate_deflate_structure(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         if out is None:
             return self._op_havoc(buf, byte_idx, data)
         return bytearray(out[: self.ctx.max_len])
 
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         from fuzzer_tool.core.mutations.png import parse_png_chunks, serialize_png_chunks
 
         if buf:
@@ -3244,7 +3244,7 @@ class OperatorEngine:
                     return bytearray(serialize_png_chunks(chunks)[: self.ctx.max_len])
 
     def _op_redqueen(self, buf, _byte_idx, data):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         parent_meta = self.ctx.seed_meta.get(data)
         if not (buf and parent_meta):
             return
@@ -3285,7 +3285,7 @@ class OperatorEngine:
         buffer-returning handler, rather than relying on a property the
         module happens to have today.
         """
-        return bytearray(fn(bytes(buf), rng=self.ctx.rand_pool)[: self.ctx.max_len])
+        return bytearray(fn(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_gcd_worst_case(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import fibonacci_pairs
@@ -3539,7 +3539,7 @@ class OperatorEngine:
         if invariants is None:
             return None
         return bytearray(
-            invariant_break(bytes(buf), invariants, rng=self.ctx.rand_pool)[: self.ctx.max_len]
+            invariant_break(bytes(buf), invariants, rng=self.ctx._rng)[: self.ctx.max_len]
         )
 
     def elite_seeds(self):
@@ -3593,7 +3593,7 @@ class OperatorEngine:
         highest-coverage seeds are also the likeliest to share a lot of
         common structure (e.g. shared headers).
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         pool = self.elite_seeds()
         if len(pool) < 2:
             return None
@@ -3623,7 +3623,7 @@ class OperatorEngine:
         During normal operation: 2-8 mutations.
         During stall recovery: 8-16 mutations (honggfuzz-style escalation).
         """
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if self.ctx.stall_recovery_active:
             n = rng.randint_list(8, 16, 1)[0]
         else:
@@ -3664,14 +3664,14 @@ class OperatorEngine:
         return True
 
     def _apply_single_mutation(self, buf: bytearray):
-        rng = self.ctx.rand_pool
+        rng = self.ctx._rng
         if not buf:
             buf.extend(rng.randint(0, 255) for _ in range(rng.randint(1, 16)))
             return
         # Pre-fetch 4 random values in one vectorized call.
         # Each branch uses 2-4 values from this batch, avoiding N
         # individual randint/randrange Python calls.
-        r = self.ctx.rand_pool.randint_list(0, 1 << 30, 4)
+        r = self.ctx._rng.randint_list(0, 1 << 30, 4)
         f = self.f
         if f._adaptive_havoc:
             # Same draw (r[0]) as the uniform path, so RNG consumption per
@@ -3919,7 +3919,7 @@ class OperatorEngine:
 
         if f._stall_recovery_active:
             f._meta_strategy = "random_stall"
-            return self.ctx.rand_pool.choice(ops)
+            return self.ctx._rng.choice(ops)
 
         available = []
         if f._use_replicator and f._replicator:
@@ -4003,7 +4003,7 @@ class OperatorEngine:
             op = (
                 f.mc.select_op(ops, prev_op=f._prev_bandit_op)
                 if f.mc_bandit
-                else self.ctx.rand_pool.choice(ops)
+                else self.ctx._rng.choice(ops)
             )
             if f.mc_bandit:
                 f._prev_bandit_op = op
@@ -4073,7 +4073,7 @@ class OperatorEngine:
                 frontier = et.discovery_frontier_edges()
             op = invasion_select(
                 op_stats, frontier_edges=frontier, flux_map=flux_map
-            ) or self.ctx.rand_pool.choice(ops)
+            ) or self.ctx._rng.choice(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "round_robin" and f._round_robin:
             op = f._round_robin.select_op(ops)
@@ -4131,7 +4131,7 @@ class OperatorEngine:
             op = f._round_robin.select_op(ops)
             f._last_mopt_particles.append(None)
         else:
-            op = self.ctx.rand_pool.choice(ops)
+            op = self.ctx._rng.choice(ops)
             f._last_mopt_particles.append(None)
         return op
 
@@ -4330,7 +4330,7 @@ class OperatorEngine:
             # Fast path: no region has confirmed-dead liveness data yet,
             # so the cached cumulative/total (mutation_weight-only) is
             # already correct -- skip rebuilding it.
-            idx = bisect.bisect_left(cumulative, self.ctx.rand_pool.random() * total)
+            idx = bisect.bisect_left(cumulative, self.ctx._rng.random() * total)
         else:
             adjusted_cumulative = []
             adjusted_total = 0.0
@@ -4343,13 +4343,13 @@ class OperatorEngine:
             if adjusted_total <= 0.0:
                 return None
             idx = bisect.bisect_left(
-                adjusted_cumulative, self.ctx.rand_pool.random() * adjusted_total
+                adjusted_cumulative, self.ctx._rng.random() * adjusted_total
             )
         lo, hi = bounds[min(idx, len(bounds) - 1)]
         hi = min(hi, buf_len)
         if lo >= hi:
             return None
-        return self.ctx.rand_pool.randint(lo, hi - 1)
+        return self.ctx._rng.randint(lo, hi - 1)
 
     # ── Deterministic stage ──────────────────────────────────────────────
 
@@ -4465,9 +4465,9 @@ class OperatorEngine:
             p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos, region_pos] if p is not None
         ]
         if candidates:
-            byte_idx = self.ctx.rand_pool.choice(candidates)
+            byte_idx = self.ctx._rng.choice(candidates)
         else:
-            byte_idx = self.ctx.rand_pool.randint(0, buf_len - 1)
+            byte_idx = self.ctx._rng.randint(0, buf_len - 1)
         if getattr(f, "debug", False):
             print(
                 f"[select_position] buf_len={buf_len} sens={sens_pos} te={te_pos} "
@@ -4515,7 +4515,7 @@ class OperatorEngine:
 
         buf = bytearray(data)
         if not buf:
-            buf = bytearray(b"\x00" * self.ctx.rand_pool.randint_list(1, 32, 1)[0])
+            buf = bytearray(b"\x00" * self.ctx._rng.randint_list(1, 32, 1)[0])
 
         ops = self.build_ops(data)
         f._last_ops_used = []
@@ -4583,7 +4583,7 @@ class OperatorEngine:
         # vectorized call, replacing N individual random.choice(self.ctx.dictionary)
         # calls across _op_dict_* methods.
         if self.ctx.dictionary:
-            f._dict_scratch = self.ctx.rand_pool.randint_list(
+            f._dict_scratch = self.ctx._rng.randint_list(
                 0, len(self.ctx.dictionary) - 1, max(n_mutations * 8, 64)
             )
             f._dict_scratch_idx = 0
