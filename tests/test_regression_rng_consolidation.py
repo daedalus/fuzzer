@@ -19,6 +19,7 @@ Each test asserts the reachable symptom, not the spelling of the fix.
 
 import inspect
 import math
+import random
 
 import pytest
 
@@ -121,42 +122,55 @@ class TestCdfPickTakesItsPool:
             expected = next(p for p, c in zip(population, cum, strict=True) if draw * total < c)
 
             class OneDraw:
-                def random(self):
-                    return draw
+                def __init__(self, value):
+                    self._value = value
 
-            got = _cdf_pick(population, weights, {}, "slot", OneDraw())
+                def random(self):
+                    return self._value
+
+            got = _cdf_pick(population, weights, {}, "slot", OneDraw(draw))
             assert got == expected, f"draw={draw}"
 
-    def test_degenerate_inputs_go_through_the_pool_not_stdlib(self):
-        # Length mismatch and empty population take the slow arm, which must
-        # call a RandPool method (weighted_choice), never random.choices.
-        calls = []
+    def test_degenerate_inputs_raise_instead_of_picking_a_wrong_seed(self):
+        # RandPool.weighted_choice does NOT reproduce random.choices' errors:
+        # a length mismatch returns a value, and a zero/non-finite total
+        # walks bisect off the prefix sum (IndexError). Deferring would turn
+        # a loud caller-visible error into a silently wrong pick, so the
+        # checks live in _cdf_pick with CPython's messages.
+        class Exploding:
+            def weighted_choice(self, seq, weights):  # pragma: no cover
+                raise AssertionError("degenerate input was handed to the pool")
 
-        class Recorder:
-            def weighted_choice(self, seq, weights):
-                calls.append((tuple(seq), tuple(weights)))
-                return seq[0]
-
-            def random(self):  # pragma: no cover - slow arm should win
+            def random(self):  # pragma: no cover
                 raise AssertionError("fast path taken on a degenerate input")
 
+        with pytest.raises(ValueError, match="number of weights"):
+            _cdf_pick(["x", "y"], [1.0], {}, "slot", Exploding())
+
+        with pytest.raises(ValueError, match="greater than zero"):
+            _cdf_pick(["x", "y"], [0.0, 0.0], {}, "slot", Exploding())
+
+        with pytest.raises(ValueError, match="must be finite"):
+            _cdf_pick(["x", "y"], [math.inf, 1.0], {}, "slot", Exploding())
+
+    def test_error_shape_matches_stdlib_choices(self):
+        # Equivalence derived from CPython, not echoed from _cdf_pick: the
+        # old code deferred to random.choices, so the messages must match.
+        for weights in ([1.0], [0.0, 0.0], [math.inf, 1.0]):
+            with pytest.raises(ValueError) as stdlib:
+                random.choices(["x", "y"], weights=weights, k=1)
+            with pytest.raises(ValueError) as ours:
+                _cdf_pick(["x", "y"], list(weights), {}, "slot", RandPool(seed=1))
+            assert str(ours.value) == str(stdlib.value)
+
+    def test_negative_infinity_reports_as_non_positive(self):
+        # Order matters: CPython checks non-positive before non-finite.
+        with pytest.raises(ValueError, match="greater than zero"):
+            _cdf_pick(["x", "y"], [-math.inf, 1.0], {}, "slot", RandPool(seed=1))
+
+    def test_empty_population_still_defers_to_the_pool(self):
         with pytest.raises(IndexError):
-            # Empty population: weighted_choice raises, as choices did.
             _cdf_pick([], [], {}, "slot", RandPool(seed=1))
-
-        assert _cdf_pick(["x", "y"], [1.0], {}, "slot", Recorder()) == "x"
-        assert calls == [(("x", "y"), (1.0,))]
-
-    def test_non_finite_total_takes_the_slow_arm(self):
-        seen = []
-
-        class Recorder:
-            def weighted_choice(self, seq, weights):
-                seen.append(sum(weights))
-                return seq[0]
-
-        assert _cdf_pick(["x", "y"], [math.inf, 1.0], {}, "slot", Recorder()) == "x"
-        assert seen and not math.isfinite(seen[0])
 
     def test_cdf_cache_is_keyed_by_weight_identity(self):
         population = ["a", "b"]

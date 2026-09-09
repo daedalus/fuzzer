@@ -83,21 +83,31 @@ def _cdf_pick(population: list, weights: list[float], store: dict, slot: str, rn
     selected seeds is therefore unchanged, which is the property the
     reproducibility tests rest on.
 
-    Anything the fast path is not certain about is handed back to
-    ``rng.weighted_choice``: a length mismatch between population and
-    weights, a non-positive total and a non-finite total all raise there
-    today, and still do.
+    The three degenerate inputs raise here rather than being handed back to
+    the pool. This used to defer to ``random.choices``, which raised
+    ValueError for all three; ``RandPool.weighted_choice`` does not -- a
+    zero or non-finite total walks ``bisect_right`` off the end of the
+    prefix sum (IndexError), and a length mismatch does not raise at all,
+    it silently returns whatever index the short weight vector lands on.
+    Deferring would therefore have converted a loud caller-visible error
+    into a wrong seed pick, so the checks and CPython's exact messages
+    live here, in CPython's order (non-positive before non-finite, so
+    ``-inf`` still reports as non-positive).
     """
     n = len(population)
-    if n == 0 or len(weights) != n:
+    if n == 0:
+        # Same IndexError the pool raises for an empty population.
         return rng.weighted_choice(population, weights)
+    if len(weights) != n:
+        raise ValueError("The number of weights does not match the population")
     entry = store.get(slot)
     if entry is None or entry[0] is not weights:
         cum = list(itertools.accumulate(weights))
         total = cum[-1] + 0.0
-        if not (total > 0.0) or not math.isfinite(total):
-            # Let weighted_choice raise exactly the error it raised before.
-            return rng.weighted_choice(population, weights)
+        if total <= 0.0:
+            raise ValueError("Total of weights must be greater than zero")
+        if not math.isfinite(total):
+            raise ValueError("Total of weights must be finite")
         entry = (weights, cum, total)
         store[slot] = entry
     _w, cum, total = entry
