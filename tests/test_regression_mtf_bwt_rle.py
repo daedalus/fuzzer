@@ -173,13 +173,13 @@ class TestRoundTrip:
 
     def test_delta_encode_roundtrip_direct(self):
         data = bytes(range(256)) * 4
-        result = structured.delta_encode(data)
+        result = structured.delta_encode(data, RandPool(seed=42))
         assert result is not None
         assert len(result) == len(data)
 
     def test_delta_sigma_roundtrip_direct(self):
         data = bytes(range(256)) * 4
-        result = structured.delta_sigma(data)
+        result = structured.delta_sigma(data, RandPool(seed=42))
         assert result is not None
         assert len(result) == len(data)
 

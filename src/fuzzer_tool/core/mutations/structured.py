@@ -51,11 +51,15 @@ input in place and returns a buffer of the same size.  That keeps them cheap,
 keeps ``max_len`` a non-issue, and lets them compose with the length-changing
 operators instead of competing with them.
 
-Like the rest of :mod:`fuzzer_tool.core.mutations`, these functions use only
-the API shared by ``RandPool`` and stdlib ``random`` (``randint``, ``choice``,
-``random``, ``sample``, ``randbytes``) so they stay usable with either; the
-weighted draws are expressed as pre-expanded tuples rather than by calling
-``RandPool.weighted_choice``, which stdlib ``random`` does not have.
+Like the rest of :mod:`fuzzer_tool.core.mutations`, every operator takes its
+draw source as a required ``rng`` argument -- there is no default and no
+stdlib fallback (Hard Rule 16), so a caller that has lost its pool fails at
+the draw instead of quietly running off the global ``random`` stream.  They
+use only ``randint``, ``choice``, ``random``, ``sample`` and ``randbytes``,
+which keeps a scripted test double cheap to write; the weighted draws stay
+expressed as pre-expanded tuples rather than calling
+``RandPool.weighted_choice``, because respelling them would change how many
+values each operator pulls and move the output of every seeded run.
 """
 
 import math
@@ -66,7 +70,6 @@ from functools import lru_cache
 from fuzzer_tool.core.debruijn_cache import fingerprint as _db_fingerprint
 from fuzzer_tool.core.debruijn_cache import load as _db_cache_load
 from fuzzer_tool.core.debruijn_cache import store as _db_cache_store
-from fuzzer_tool.core.mutations.generic import _get_rng
 
 # Largest region any single operator will rewrite. Operators that scribble
 # over an entire multi-megabyte seed destroy the structure the corpus spent
@@ -100,7 +103,8 @@ def _region(
 
     Args:
         data_len: Length of the buffer being mutated.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
         min_len: Smallest window the caller's construction needs.
         align: Snap the offset down to a multiple of this so the caller's
             fixed-width words line up with how a reader slices them. Without
@@ -187,7 +191,7 @@ _FIB_TOP = {
 }
 
 
-def fibonacci_pairs(data: bytes, rng=None) -> bytes:
+def fibonacci_pairs(data: bytes, rng) -> bytes:
     """Overwrite a region with consecutive Fibonacci pairs (gcd worst case).
 
     The Euclidean algorithm's iteration count is maximised, over operands
@@ -204,12 +208,12 @@ def fibonacci_pairs(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     width = rng.choice(_WIDTHS_WORD)
     pair_size = width * 2
     offset, length = _region(len(data), rng, min_len=pair_size, align=width)
@@ -240,7 +244,7 @@ def fibonacci_pairs(data: bytes, rng=None) -> bytes:
 _STRIDES = (1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 7, 7, 7, 256, 256)
 
 
-def monotone_fill(data: bytes, rng=None) -> bytes:
+def monotone_fill(data: bytes, rng) -> bytes:
     """Overwrite a region with a strictly monotone run of fixed-width words.
 
     dab_filltree measures how many words a fixed-depth binary tree accepts
@@ -252,12 +256,12 @@ def monotone_fill(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     width = rng.choice(_WIDTHS)
     offset, length = _region(len(data), rng, min_len=width * 2, align=width)
     if length < width * 2:
@@ -340,7 +344,7 @@ def de_bruijn_bytes(k: int, n: int) -> bytes:
 _DE_BRUIJN_SHAPES = ((2, 8), (4, 4), (16, 2), (4, 6), (16, 3), (256, 2))
 
 
-def de_bruijn_fill(data: bytes, rng=None) -> bytes:
+def de_bruijn_fill(data: bytes, rng) -> bytes:
     """Overwrite the buffer with a de Bruijn sequence (k-mer saturation).
 
     OPSO, OQSO, DNA and BITSTREAM all count *missing* k-letter words in an
@@ -357,12 +361,12 @@ def de_bruijn_fill(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     if len(data) < 16:
         return data
     shapes = [(k, n) for k, n in _DE_BRUIJN_SHAPES if k**n <= len(data)]
@@ -374,7 +378,7 @@ def de_bruijn_fill(data: bytes, rng=None) -> bytes:
     return (seq * reps)[: len(data)]
 
 
-def kmer_starve(data: bytes, rng=None) -> bytes:
+def kmer_starve(data: bytes, rng) -> bytes:
     """Overwrite a region using a 2-4 symbol alphabet (k-mer starvation).
 
     The opposite tail of the same statistic: instead of hitting every k-mer,
@@ -386,12 +390,12 @@ def kmer_starve(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=8)
     if length < 8:
         return data
@@ -459,7 +463,7 @@ def de_bruijn_bits(n: int) -> bytes:
 _DE_BRUIJN_BIT_WORDS = (4, 6, 8, 10, 12, 14, 16, 18, 20)
 
 
-def kmer_saturate_bits(data: bytes, rng=None) -> bytes:
+def kmer_saturate_bits(data: bytes, rng) -> bytes:
     """Overwrite the buffer with a bit-packed binary de Bruijn sequence.
 
     The bit-granularity dual of :func:`de_bruijn_fill`: same idea (hit every
@@ -475,12 +479,12 @@ def kmer_saturate_bits(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     if len(data) < 16:
         return data
     bit_budget = len(data) * 8
@@ -501,7 +505,7 @@ def kmer_saturate_bits(data: bytes, rng=None) -> bytes:
 _RANK_SHAPES = ((32, 32, 4), (6, 8, 1))
 
 
-def rank_deficient(data: bytes, rng=None) -> bytes:
+def rank_deficient(data: bytes, rng) -> bytes:
     """Overwrite a region with rank-deficient GF(2) matrices.
 
     The binary rank tests build bit matrices from the stream and chi-square
@@ -514,12 +518,12 @@ def rank_deficient(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     rows, cols, row_bytes = rng.choice(_RANK_SHAPES)
     block_size = rows * row_bytes
     offset, length = _region(len(data), rng, min_len=block_size, align=block_size)
@@ -572,7 +576,7 @@ def _sorted_shape(n: int, mode: str) -> list[int]:
     return out
 
 
-def perm_lock(data: bytes, rng=None) -> bytes:
+def perm_lock(data: bytes, rng) -> bytes:
     """Overwrite a region with an ordering-degenerate word sequence.
 
     OPERM5 counts which of the 120 orderings each overlapping five-word
@@ -584,12 +588,12 @@ def perm_lock(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     width = rng.choice(_WIDTHS)
     offset, length = _region(len(data), rng, min_len=width * 4, align=width)
     if length < width * 4:
@@ -605,7 +609,7 @@ def perm_lock(data: bytes, rng=None) -> bytes:
 _CYCLE_MODES = ("single_cycle", "fixed_points")
 
 
-def cycle_lock(data: bytes, rng=None) -> bytes:
+def cycle_lock(data: bytes, rng) -> bytes:
     """Overwrite a region with an index permutation at a traversal extreme.
 
     ``perm_lock`` targets comparison-sort orderings; this targets index-chase
@@ -627,12 +631,12 @@ def cycle_lock(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     width = rng.choice(_WIDTHS)
     offset, length = _region(len(data), rng, min_len=width * 4, align=width)
     if length < width * 4:
@@ -653,7 +657,7 @@ def cycle_lock(data: bytes, rng=None) -> bytes:
 _LAGS = (1, 2, 3, 4, 5, 7, 8, 16, 17, 32, 64, 128, 255, 256)
 
 
-def lag_correlate(data: bytes, rng=None) -> bytes:
+def lag_correlate(data: bytes, rng) -> bytes:
     """Make a region exactly periodic at a chosen lag.
 
     rgb_lagged_sums correlates the stream against itself at lag ``L`` and
@@ -665,12 +669,12 @@ def lag_correlate(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     lag = rng.choice(_LAGS)
     offset, length = _region(len(data), rng, min_len=lag * 2)
     if length < lag * 2:
@@ -688,7 +692,7 @@ _SPECTRAL_MODES = ("cosine", "dc", "nyquist", "impulse", "max_ac")
 _DC_LEVELS = (0x00, 0x01, 0x7F, 0x80, 0xFF)
 
 
-def spectral_peak(data: bytes, rng=None) -> bytes:
+def spectral_peak(data: bytes, rng) -> bytes:
     """Overwrite a region with a spectrally degenerate signal.
 
     dab_dct transforms blocks of the stream and checks that the position of
@@ -701,12 +705,12 @@ def spectral_peak(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=8)
     if length < 8:
         return data
@@ -765,7 +769,7 @@ _BIRTHDAY_DELTAS = (
 )
 
 
-def birthday_collide(data: bytes, rng=None) -> bytes:
+def birthday_collide(data: bytes, rng) -> bytes:
     """Overwrite a region with words whose birthday spacings all coincide.
 
     The birthday test sorts the sampled words and checks that the *spacings*
@@ -780,12 +784,12 @@ def birthday_collide(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     width = rng.choice(_WIDTHS_WORD)
     offset, length = _region(len(data), rng, min_len=width * 4, align=width)
     if length < width * 4:
@@ -825,7 +829,7 @@ _HEADER_VALUES = (
 )
 
 
-def invariant_break(data: bytes, invariants, rng=None) -> bytes:
+def invariant_break(data: bytes, invariants, rng) -> bytes:
     """Randomise exactly the bytes the corpus never varies.
 
     rgb_persist reports the bits of a generator's output that never change.
@@ -842,12 +846,12 @@ def invariant_break(data: bytes, invariants, rng=None) -> bytes:
         data: Input bytes.
         invariants: A ``CorpusInvariants`` from
             :func:`fuzzer_tool.core.randomness.corpus_invariants`, or None.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     if not data or invariants is None:
         return data
     n = len(data)
@@ -878,7 +882,7 @@ _GEOMETRY_WIDTHS = (2, 4, 8)
 _GEOMETRY_DIMS = (2, 3)
 
 
-def degenerate_geometry(data: bytes, rng=None) -> bytes:
+def degenerate_geometry(data: bytes, rng) -> bytes:
     """Overwrite a region with coincident or collinear coordinate tuples.
 
     The parking-lot and minimum-distance tests both measure how close the
@@ -891,12 +895,12 @@ def degenerate_geometry(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     width = rng.choice(_GEOMETRY_WIDTHS)
     dims = rng.choice(_GEOMETRY_DIMS)
     point_size = width * dims
@@ -940,7 +944,7 @@ _FLOAT_PATTERNS = (
 _FLOAT_WIDTHS = (4, 8)
 
 
-def float_squeeze(data: bytes, rng=None) -> bytes:
+def float_squeeze(data: bytes, rng) -> bytes:
     """Overwrite a region with pathological IEEE-754 values.
 
     The squeeze test counts iterations of ``k = ceil(k * U)`` until ``k``
@@ -954,12 +958,12 @@ def float_squeeze(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     width = rng.choice(_FLOAT_WIDTHS)
     offset, length = _region(len(data), rng, min_len=width, align=width)
     if length < width:
@@ -983,7 +987,7 @@ def _popcount_table(weight: int) -> bytes:
     return _map_table(bytes(b for b in range(256) if b.bit_count() == weight))
 
 
-def popcount_lock(data: bytes, rng=None) -> bytes:
+def popcount_lock(data: bytes, rng) -> bytes:
     """Overwrite a region with bytes of a single Hamming weight.
 
     diehard_count_1s maps each byte to one of five letters by population
@@ -996,12 +1000,12 @@ def popcount_lock(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=4)
     if length < 4:
         return data
@@ -1020,7 +1024,7 @@ def popcount_lock(data: bytes, rng=None) -> bytes:
 _LMN_PERIODS = (3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15)
 
 
-def lmn_lock(data: bytes, rng=None) -> bytes:
+def lmn_lock(data: bytes, rng) -> bytes:
     """Overwrite a region with a short, sub-byte-aligned bit period.
 
     rgb_lmn's own description gives the canonical failure mode: counting
@@ -1041,12 +1045,12 @@ def lmn_lock(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     period = rng.choice(_LMN_PERIODS)
     min_len = max(4, period // 8 + 2)
     offset, length = _region(len(data), rng, min_len=min_len)
@@ -1103,7 +1107,7 @@ def _mtf_decode(encoded: bytes, alphabet: bytearray) -> bytes:
     return bytes(out)
 
 
-def mtf(data: bytes, rng=None) -> bytes:
+def mtf(data: bytes, rng) -> bytes:
     """Move-To-Front encode, edit MTF indices, decode back.
 
     A one-byte edit in MTF-index space becomes a value-correlated edit in the
@@ -1114,14 +1118,14 @@ def mtf(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     alphabet = bytearray(range(256))
     encoded = _mtf_encode(data, alphabet)
     # Mutate 1–3 low indices (frequent symbols) in the MTF domain.
@@ -1166,7 +1170,7 @@ def _bwt_inverse(bwt_data: bytes, primary: int) -> bytes:
     return bytes(out)
 
 
-def bwt(data: bytes, rng=None) -> bytes:
+def bwt(data: bytes, rng) -> bytes:
     """BWT + MTF round-trip: transform, edit in BWT+MTF space, invert back.
 
     BWT groups bytes by following context; a one-byte edit in BWT space
@@ -1179,14 +1183,14 @@ def bwt(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 4:
         return data
-    rng = _get_rng(rng)
     block_size = rng.choice((8, 16, 32, 64, 128, 256))
     block_size = min(block_size, len(data))
     offset = rng.randint(0, len(data) - block_size)
@@ -1204,7 +1208,7 @@ def bwt(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, restored)
 
 
-def rle(data: bytes, rng=None) -> bytes:
+def rle(data: bytes, rng) -> bytes:
     """Run-length encode, edit runs, decode back.
 
     Editing run lengths changes repetition structure in the original: merging
@@ -1218,14 +1222,14 @@ def rle(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     runs: list[tuple[int, int]] = []
     i = 0
     while i < len(data):
@@ -1266,7 +1270,7 @@ def rle(data: bytes, rng=None) -> bytes:
     return _splice(data, 0, bytes(out))
 
 
-def delta_encode(data: bytes, rng=None) -> bytes:
+def delta_encode(data: bytes, rng) -> bytes:
     """First-difference encode a region, edit deltas, decode back.
 
     Delta encoding converts each byte to the difference from its predecessor.
@@ -1282,14 +1286,14 @@ def delta_encode(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=2)
     if length < 2:
         return data
@@ -1310,7 +1314,7 @@ def delta_encode(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(restored))
 
 
-def delta_sigma(data: bytes, rng=None) -> bytes:
+def delta_sigma(data: bytes, rng) -> bytes:
     """Predictive first-order delta-sigma modulate a region, edit, demodulate.
 
     Each byte is encoded as the prediction error from a running accumulated
@@ -1325,14 +1329,14 @@ def delta_sigma(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=2)
     if length < 2:
         return data
@@ -1357,7 +1361,7 @@ def delta_sigma(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(restored))
 
 
-def bitcast_float(data: bytes, rng=None) -> bytes:
+def bitcast_float(data: bytes, rng) -> bytes:
     """Reinterpret a region as float/double, mutate, write back as bytes.
 
     Targets parsers that decode floating-point fields: image pixel formats,
@@ -1371,14 +1375,14 @@ def bitcast_float(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 4:
         return data
-    rng = _get_rng(rng)
     width = rng.choice((4, 8))
     if len(data) < width:
         return data
@@ -1409,7 +1413,7 @@ def bitcast_float(data: bytes, rng=None) -> bytes:
     return bytes(out)
 
 
-def bitcast_int32(data: bytes, rng=None) -> bytes:
+def bitcast_int32(data: bytes, rng) -> bytes:
     """Reinterpret a region as signed/unsigned int, mutate, write back.
 
     Targets integer-overflow and truncation bugs in parsers that read
@@ -1423,14 +1427,14 @@ def bitcast_int32(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     width = rng.choice((2, 4, 8))
     if len(data) < width:
         return data
@@ -1470,7 +1474,7 @@ def bitcast_int32(data: bytes, rng=None) -> bytes:
     return bytes(out)
 
 
-def size_field_overflow(data: bytes, rng=None) -> bytes:
+def size_field_overflow(data: bytes, rng) -> bytes:
     """Overwrite plausible size/count fields with overflow trigger values.
 
     Scans the buffer for values that look like declared-size or count
@@ -1485,14 +1489,14 @@ def size_field_overflow(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 4:
         return data
-    rng = _get_rng(rng)
     width = rng.choice((2, 4))
     if len(data) < width + 1:
         return data
@@ -1526,7 +1530,7 @@ def size_field_overflow(data: bytes, rng=None) -> bytes:
     return bytes(out)
 
 
-def bpe(data: bytes, rng=None) -> bytes:
+def bpe(data: bytes, rng) -> bytes:
     """Byte-pair encode a region, edit token stream, expand back.
 
     BPE finds the most frequent adjacent byte pairs in the input and merges
@@ -1542,14 +1546,14 @@ def bpe(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 4:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=4)
     if length < 4:
         return data
@@ -1607,7 +1611,7 @@ def bpe(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(restored[:length]))
 
 
-def golomb(data: bytes, rng=None) -> bytes:
+def golomb(data: bytes, rng) -> bytes:
     """Golomb/Rice code a region, edit codewords, decode back.
 
     Golomb coding is the optimal prefix code for geometric-distribution
@@ -1626,14 +1630,14 @@ def golomb(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=2)
     if length < 2:
         return data
@@ -1691,7 +1695,7 @@ def golomb(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(restored[:length]))
 
 
-def endian_convert(data: bytes, rng=None) -> bytes:
+def endian_convert(data: bytes, rng) -> bytes:
     """Flip endianness of integer fields in a region.
 
     Many binary formats store multi-byte integers in a fixed endianness,
@@ -1707,14 +1711,14 @@ def endian_convert(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=2)
     if length < 2:
         return data
@@ -1735,7 +1739,7 @@ def endian_convert(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(block))
 
 
-def count_overflow(data: bytes, rng=None) -> bytes:
+def count_overflow(data: bytes, rng) -> bytes:
     """Overwrite count/n fields with integer-overflow trigger values.
 
     Like :func:`size_field_overflow`, but targets count fields rather
@@ -1750,14 +1754,14 @@ def count_overflow(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 4:
         return data
-    rng = _get_rng(rng)
     width = rng.choice((2, 4))
     if len(data) < width + 1:
         return data
@@ -1792,7 +1796,7 @@ def count_overflow(data: bytes, rng=None) -> bytes:
     return bytes(out)
 
 
-def zero_run_amplify(data: bytes, rng=None) -> bytes:
+def zero_run_amplify(data: bytes, rng) -> bytes:
     """Extend zero runs in a region.
 
     Zero runs trigger fast paths in image/video codecs, compression
@@ -1807,14 +1811,14 @@ def zero_run_amplify(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 4:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=4)
     if length < 4:
         return data
@@ -1855,7 +1859,7 @@ def zero_run_amplify(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(block))
 
 
-def zero_run_suppress(data: bytes, rng=None) -> bytes:
+def zero_run_suppress(data: bytes, rng) -> bytes:
     """Break zero runs by injecting non-zero bytes.
 
     The inverse of :func:`zero_run_amplify`: finds a zero run and
@@ -1866,14 +1870,14 @@ def zero_run_suppress(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 4:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=4)
     if length < 4:
         return data
@@ -1903,7 +1907,7 @@ def zero_run_suppress(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(block))
 
 
-def type_promote(data: bytes, rng=None) -> bytes:
+def type_promote(data: bytes, rng) -> bytes:
     """Simulate a buggy integer promotion at a plausible field.
 
     Type promotion bugs arise when a parser reads a small integer and
@@ -1919,14 +1923,14 @@ def type_promote(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     width = rng.choice((1, 2, 4))
     if len(data) < width + 1:
         return data
@@ -1965,7 +1969,7 @@ def type_promote(data: bytes, rng=None) -> bytes:
     return bytes(out)
 
 
-def length_miscalculate(data: bytes, rng=None) -> bytes:
+def length_miscalculate(data: bytes, rng) -> bytes:
     """Overwrite length/size fields with values that contradict actual payload.
 
     Many format parsers compute a checksum, allocate a buffer, or enter a
@@ -1980,14 +1984,14 @@ def length_miscalculate(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 4:
         return data
-    rng = _get_rng(rng)
     width = rng.choice((2, 4))
     if len(data) < width + 1:
         return data
@@ -2024,7 +2028,7 @@ def length_miscalculate(data: bytes, rng=None) -> bytes:
     return bytes(out)
 
 
-def elias_gamma(data: bytes, rng=None) -> bytes:
+def elias_gamma(data: bytes, rng) -> bytes:
     """Elias gamma encode a region, edit codewords, decode back.
 
     Elias gamma coding is a universal code for positive integers: the
@@ -2039,14 +2043,14 @@ def elias_gamma(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=2)
     if length < 2:
         return data
@@ -2097,7 +2101,7 @@ def elias_gamma(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(restored[:length]))
 
 
-def elias_delta(data: bytes, rng=None) -> bytes:
+def elias_delta(data: bytes, rng) -> bytes:
     """Elias delta encode a region, edit codewords, decode back.
 
     Elias delta coding is a universal code for positive integers that
@@ -2113,14 +2117,14 @@ def elias_delta(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=2)
     if length < 2:
         return data
@@ -2187,7 +2191,7 @@ def elias_delta(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(restored[:length]))
 
 
-def simd_shuffle(data: bytes, rng=None) -> bytes:
+def simd_shuffle(data: bytes, rng) -> bytes:
     """Shuffle bytes within SIMD-width windows in a region.
 
     SIMD instruction sets (SSE/AVX/NEON) process data in fixed-width
@@ -2203,14 +2207,14 @@ def simd_shuffle(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 16:
         return data
-    rng = _get_rng(rng)
     width = rng.choice((16, 32, 64))
     offset, length = _region(len(data), rng, min_len=width)
     if length < width:
@@ -2227,7 +2231,7 @@ def simd_shuffle(data: bytes, rng=None) -> bytes:
     return _splice(data, aligned_offset, bytes(block))
 
 
-def bit_interleave(data: bytes, rng=None) -> bytes:
+def bit_interleave(data: bytes, rng) -> bytes:
     """Interleave or deinterleave bit planes in a region.
 
     Bit-plane interleaving reorders bytes by extracting one bit from
@@ -2246,14 +2250,14 @@ def bit_interleave(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 64:
         return data
-    rng = _get_rng(rng)
     # Bit-plane interleave needs regions that are a multiple of 64 bytes
     # (8 groups of 8 bytes each).  Round the length to that granularity.
     offset, length = _region(len(data), rng, min_len=64, max_len=64)
@@ -2280,7 +2284,7 @@ def bit_interleave(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(block))
 
 
-def gray_code(data: bytes, rng=None) -> bytes:
+def gray_code(data: bytes, rng) -> bytes:
     """Mutate bytes in Gray-coded space.
 
     Gray code is a binary encoding where adjacent values differ by
@@ -2298,14 +2302,14 @@ def gray_code(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 2:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=2)
     if length < 2:
         return data
@@ -2327,7 +2331,7 @@ def gray_code(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(restored))
 
 
-def lz_dict_mutate(data: bytes, rng=None) -> bytes:
+def lz_dict_mutate(data: bytes, rng) -> bytes:
     """Mutate an LZ77-style dictionary/literal pair in a region.
 
     LZ77-family compressors (DEFLATE, LZ4, Zstandard, XZ) encode data
@@ -2347,14 +2351,14 @@ def lz_dict_mutate(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 8:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=8)
     if length < 8:
         return data
@@ -2428,7 +2432,7 @@ def lz_dict_mutate(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(restored[:length]))
 
 
-def huffman_tree_mutate(data: bytes, rng=None) -> bytes:
+def huffman_tree_mutate(data: bytes, rng) -> bytes:
     """Mutate the Huffman codebook implied by a region, re-encode.
 
     Huffman coding assigns short bit patterns to frequent symbols and
@@ -2444,14 +2448,14 @@ def huffman_tree_mutate(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     if len(data) < 4:
         return data
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=4)
     if length < 4:
         return data
@@ -2538,7 +2542,7 @@ def huffman_tree_mutate(data: bytes, rng=None) -> bytes:
 # ===========================  ==========================================
 
 
-def cusum_bias_run(data: bytes, rng=None) -> bytes:
+def cusum_bias_run(data: bytes, rng) -> bytes:
     """Overwrite a region with a single repeated byte (0x00 or 0xFF).
 
     The cusum test walks the +-1 partial sums of the bit sequence and
@@ -2550,12 +2554,12 @@ def cusum_bias_run(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=32)
     if length < 32:
         return data
@@ -2563,7 +2567,7 @@ def cusum_bias_run(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes([fill]) * length)
 
 
-def apen_short_period(data: bytes, rng=None) -> bytes:
+def apen_short_period(data: bytes, rng) -> bytes:
     """Overwrite a region with a short-period repeating bit pattern.
 
     Approximate entropy compares how much new information an (m+1)-bit
@@ -2574,12 +2578,12 @@ def apen_short_period(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=32)
     if length < 32:
         return data
@@ -2602,7 +2606,7 @@ def apen_short_period(data: bytes, rng=None) -> bytes:
 _NOTM_TEMPLATE = (0, 0, 0, 0, 0, 0, 0, 0, 1)
 
 
-def template_saturate(data: bytes, rng=None) -> bytes:
+def template_saturate(data: bytes, rng) -> bytes:
     """Overwrite a region by tiling the non-overlapping-template-matching
     template back to back.
 
@@ -2613,12 +2617,12 @@ def template_saturate(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=32)
     if length < 32:
         return data
@@ -2634,7 +2638,7 @@ def template_saturate(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, bytes(block))
 
 
-def overlapping_template_flood(data: bytes, rng=None) -> bytes:
+def overlapping_template_flood(data: bytes, rng) -> bytes:
     """Overwrite a 1032-bit-aligned region with all-ones bytes.
 
     The overlapping-template test's fixed template (recommended
@@ -2645,12 +2649,12 @@ def overlapping_template_flood(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     block_bytes = 1032 // 8  # 129, the recommended OTM block length in bits
     # A handful of saturated blocks is not enough signal against the other
     # ~20 unaffected blocks a 4KB region spans -- the omnibus chi-square
@@ -2672,7 +2676,7 @@ def overlapping_template_flood(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, b"\xff" * length)
 
 
-def maurer_dictionary_collapse(data: bytes, rng=None) -> bytes:
+def maurer_dictionary_collapse(data: bytes, rng) -> bytes:
     """Overwrite a region by alternating between two distinct bytes.
 
     Maurer's test measures how many blocks pass between repeats of the
@@ -2684,12 +2688,12 @@ def maurer_dictionary_collapse(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=256)
     if length < 256:
         return data
@@ -2698,7 +2702,7 @@ def maurer_dictionary_collapse(data: bytes, rng=None) -> bytes:
     return _splice(data, offset, block)
 
 
-def excursion_square_wave(data: bytes, rng=None) -> bytes:
+def excursion_square_wave(data: bytes, rng) -> bytes:
     """Overwrite a region with a walk-back-to-zero header, then a repeating
     triangular random-walk pattern.
 
@@ -2722,12 +2726,12 @@ def excursion_square_wave(data: bytes, rng=None) -> bytes:
 
     Args:
         data: Input bytes.
-        rng: RandPool or stdlib random.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    rng = _get_rng(rng)
     offset, length = _region(len(data), rng, min_len=64)
     if length < 64:
         return data
