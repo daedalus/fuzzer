@@ -5039,6 +5039,7 @@ class Fuzzer:
                 exec_fn,
                 use_type_aware=True,
                 max_execs=min(2 * len(data), self.colorize_max_execs),
+                rng=self._rng,
             )
         except Exception:
             log.debug("colorization failed for a seed; continuing unfiltered", exc_info=True)
@@ -6223,6 +6224,7 @@ class Fuzzer:
                     use_cooling=self._qea_cooling,
                     cooling_decay=self._qea_cooling_decay,
                     cooling_min_angle=self._qea_cooling_min_angle,
+                    rng=self._rng,
                 )
                 self.qea.initialize(self.corpus, self._edge_tracker)
                 qea_data = self._state_store.get("qea")

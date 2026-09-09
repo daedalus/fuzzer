@@ -6,6 +6,7 @@ from fuzzer_tool.core.colorization import (
     _merge_ranges,
     colorize,
 )
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 class TestTaintRegion:
@@ -68,7 +69,7 @@ class TestMergeRanges:
 
 class TestColorize:
     def test_empty_data(self):
-        result = colorize(b"", lambda d: 0)
+        result = colorize(b"", lambda d: 0, rng=RandPool(seed=1))
         assert result.colorized == b""
         assert result.taints == []
 
@@ -79,7 +80,7 @@ class TestColorize:
         def exec_fn(d):
             return 42  # always same path
 
-        result = colorize(data, exec_fn, use_type_aware=False, max_execs=100)
+        result = colorize(data, exec_fn, use_type_aware=False, max_execs=100, rng=RandPool(seed=1))
         assert result.original_checksum == 42
         assert len(result.taints) > 0
 
@@ -89,7 +90,7 @@ class TestColorize:
         def exec_fn(d):
             return 42
 
-        result = colorize(data, exec_fn, use_type_aware=False, max_execs=100)
+        result = colorize(data, exec_fn, use_type_aware=False, max_execs=100, rng=RandPool(seed=1))
         # At least some bytes should differ
         assert result.colorized != data
 
@@ -99,7 +100,7 @@ class TestColorize:
         def exec_fn(d):
             return 42
 
-        result = colorize(data, exec_fn, use_type_aware=True, max_execs=100)
+        result = colorize(data, exec_fn, use_type_aware=True, max_execs=100, rng=RandPool(seed=1))
         assert len(result.colorized) == len(data)
 
     def test_path_changing_input(self):
@@ -109,7 +110,7 @@ class TestColorize:
         def exec_fn(d):
             return sum(d)  # every change → different path
 
-        result = colorize(data, exec_fn, use_type_aware=False, max_execs=100)
+        result = colorize(data, exec_fn, use_type_aware=False, max_execs=100, rng=RandPool(seed=1))
         # Very few safe ranges since almost everything changes the path
         assert result.exec_count > 0
 
@@ -121,7 +122,7 @@ class TestColorize:
             exec_count[0] += 1
             return 42
 
-        colorize(data, exec_fn, use_type_aware=False, max_execs=20)
+        colorize(data, exec_fn, use_type_aware=False, max_execs=20, rng=RandPool(seed=1))
         assert exec_count[0] <= 20 + 1
 
     def test_checksum_recorded(self):
@@ -130,7 +131,7 @@ class TestColorize:
         def exec_fn(d):
             return 999
 
-        result = colorize(data, exec_fn)
+        result = colorize(data, exec_fn, rng=RandPool(seed=1))
         assert result.original_checksum == 999
 
     def test_exec_count_recorded(self):
@@ -139,7 +140,7 @@ class TestColorize:
         def exec_fn(d):
             return 42
 
-        result = colorize(data, exec_fn, use_type_aware=False, max_execs=10)
+        result = colorize(data, exec_fn, use_type_aware=False, max_execs=10, rng=RandPool(seed=1))
         assert result.exec_count > 0
 
     def test_max_execs_zero_uses_default(self):
@@ -151,6 +152,6 @@ class TestColorize:
             exec_count[0] += 1
             return 42
 
-        colorize(data, exec_fn, use_type_aware=False, max_execs=0)
+        colorize(data, exec_fn, use_type_aware=False, max_execs=0, rng=RandPool(seed=1))
         # Should not exceed 2*50 + 1
         assert exec_count[0] <= 101

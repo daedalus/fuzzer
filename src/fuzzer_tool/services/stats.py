@@ -118,7 +118,7 @@ class StatsReporter:
                     mutated[self._rng.randint(0, len(mutated) - 1)] ^= 1 << self._rng.randint(0, 7)
                 mutated = bytes(mutated)
             else:
-                mutated = byte_insert(seed)
+                mutated = byte_insert(seed, rng=self._rng)
             f._runner.run_target(mutated)
             f.exec_count += 1
             exec_count += 1

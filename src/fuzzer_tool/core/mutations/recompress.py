@@ -26,7 +26,6 @@ every step is bounded):
 from __future__ import annotations
 
 import binascii
-import random
 import struct
 import zlib
 
@@ -97,10 +96,6 @@ def cache_stats() -> dict:
     return {"entries": len(_inflate_cache), "bytes": _inflate_cache_bytes}
 
 
-def _get_rng(rng=None):
-    return rng or random
-
-
 # ── Sniffers (cheap; safe to call on every selection) ──────────────────
 
 
@@ -159,7 +154,7 @@ def inflate_gzip(data: bytes) -> bytes | None:
 # ── Plaintext mutation ─────────────────────────────────────────────────
 
 
-def _mutate_plain(plain: bytes, max_len: int, rng=None) -> bytes:
+def _mutate_plain(plain: bytes, max_len: int, rng) -> bytes:
     """Apply one cheap byte-level mutation to the decompressed payload.
 
     Deliberately limited to O(1)-ish edits rather than calling back into the
@@ -167,7 +162,7 @@ def _mutate_plain(plain: bytes, max_len: int, rng=None) -> bytes:
     and the outer scheduler already re-selects this operator often enough to
     explore. Anything heavier would show up directly in EPS.
     """
-    r = _get_rng(rng)
+    r = rng
     if not plain:
         return plain
     buf = bytearray(plain)
@@ -245,7 +240,7 @@ def _fit(plain: bytes, deflate, max_len: int) -> bytes:
     return out
 
 
-def recompress_zlib(data: bytes, max_len: int = 4096, rng=None) -> bytes | None:
+def recompress_zlib(data: bytes, max_len: int = 4096, *, rng) -> bytes | None:
     """Inflate, mutate the plaintext, re-deflate as zlib.
 
     Returns None when *data* is not an inflatable zlib stream, so the caller
@@ -259,7 +254,7 @@ def recompress_zlib(data: bytes, max_len: int = 4096, rng=None) -> bytes | None:
     return _fit(mutated, deflate_zlib, max_len)
 
 
-def recompress_gzip(data: bytes, max_len: int = 4096, rng=None) -> bytes | None:
+def recompress_gzip(data: bytes, max_len: int = 4096, *, rng) -> bytes | None:
     """Inflate, mutate the plaintext, re-deflate as gzip."""
     plain = inflate_gzip(data)
     if plain is None:

@@ -181,9 +181,9 @@ _GA_MUTATION_OPS = [
     lambda data, rng: _mutate_block_insert(data, rng),
     lambda data, rng: _mutate_block_delete(data, rng),
     lambda data, rng: type_replace(data),
-    lambda data, rng: byte_shuffle(data),
-    lambda data, rng: byte_insert(data),
-    lambda data, rng: insert_ascii_num(data),
+    lambda data, rng: byte_shuffle(data, rng),
+    lambda data, rng: byte_insert(data, rng=rng),
+    lambda data, rng: insert_ascii_num(data, rng=rng),
 ]
 
 
@@ -414,8 +414,8 @@ class GALifecycle:
     def _crossover(self, a: bytes, b: bytes) -> bytes:
         """Two-point crossover using existing mutations.crossover."""
         if self._rng.random() < 0.5:
-            return crossover(a, b)
-        return splice(a, b)
+            return crossover(a, b, self._rng)
+        return splice(a, b, self._rng)
 
     def _mutate(self, data: bytes) -> bytes:
         """Apply a random mutation from available operators."""

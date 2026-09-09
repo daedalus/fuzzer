@@ -16,10 +16,11 @@ diverse comparison values.
 """
 
 import logging
-import random
 from dataclasses import dataclass, field
 
 import numpy as np
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ log = logging.getLogger(__name__)
 _SELF_OFFSET = 0xFF
 
 
-def _diverse_copy(data: bytes) -> bytearray:
+def _diverse_copy(data: bytes, rng: RandPool) -> bytearray:
     """Return a copy in which every byte differs from its original.
 
     Drawing until the value differs is a shifted draw done once: uniform on
@@ -36,8 +37,8 @@ def _diverse_copy(data: bytes) -> bytearray:
     on {0..254}. That removes the retry loop, and the shift is then plain
     arithmetic over the whole buffer instead of a per-byte Python round trip.
 
-    Entropy still comes from ``random`` -- numpy does the arithmetic only --
-    so ``--seed`` keeps determining the result.
+    Entropy still comes from the caller's pool -- numpy does the arithmetic
+    only -- so ``--seed`` keeps determining the result.
     """
     n = len(data)
     if n == 0:
@@ -45,10 +46,10 @@ def _diverse_copy(data: bytes) -> bytearray:
 
     # 255 offsets do not tile a 256-value byte, so the one offset that is a
     # no-op is rejected. Expected redraws are n/256; `find` scans in C.
-    offsets = bytearray(random.randbytes(n))
+    offsets = bytearray(rng.randbytes(n))
     pos = offsets.find(_SELF_OFFSET)
     while pos != -1:
-        drawn = random.randbytes(1)[0]
+        drawn = rng.randbytes(1)[0]
         offsets[pos] = drawn
         if drawn != _SELF_OFFSET:
             pos = offsets.find(_SELF_OFFSET, pos + 1)
@@ -85,6 +86,8 @@ def colorize(
     exec_fn,
     use_type_aware: bool = True,
     max_execs: int = 0,
+    *,
+    rng: RandPool,
 ) -> ColorizationResult:
     """Colorize an input for CmpLog comparison tracing.
 
@@ -98,6 +101,9 @@ def colorize(
         use_type_aware: If True, use type-aware replacement (preserves character
             classes). If False, use random replacement.
         max_execs: Maximum executions (0 = unlimited, use 2 * len(data)).
+        rng: The pool every replacement byte is drawn from. Required and
+            keyword-only: both branches below draw, and a default would put
+            them back on the stdlib global (Hard Rule 16).
 
     Returns:
         ColorizationResult with the colorized input and taint regions.
@@ -118,9 +124,9 @@ def colorize(
     if use_type_aware:
         from fuzzer_tool.core.mutations import type_replace_byte
 
-        changed = bytearray(type_replace_byte(b) for b in data)
+        changed = bytearray(type_replace_byte(b, rng) for b in data)
     else:
-        changed = _diverse_copy(data)
+        changed = _diverse_copy(data, rng)
 
     # Initialize with one range covering the entire input
     ranges: list[list[int]] = [[0, length - 1]]  # [start, end] inclusive

@@ -1488,10 +1488,10 @@ class OperatorEngine:
             a = rng.choice(self.ctx.corpus)
             b = rng.choice(self.ctx.corpus)
             if a is not data and b is not data:
-                return bytearray(splice(a, b)[: self.ctx.max_len])
+                return bytearray(splice(a, b, rng)[: self.ctx.max_len])
             others = [c for c in self.ctx.corpus if c is not data]
             if others:
-                return bytearray(splice(bytes(buf), rng.choice(others))[: self.ctx.max_len])
+                return bytearray(splice(bytes(buf), rng.choice(others), rng)[: self.ctx.max_len])
 
     def _op_splice_diff_located(self, buf, _byte_idx, data):
         rng = self.ctx._rng

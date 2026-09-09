@@ -17,6 +17,7 @@ from fuzzer_tool.core.mutations import (
     splice,
 )
 from fuzzer_tool.core.mutations.generic import byte_shuffle
+from fuzzer_tool.core.rand_pool import RandPool
 
 from .support.scripted_rng import ScriptedRng
 
@@ -99,7 +100,7 @@ class TestSplice:
     def test_basic_splice(self):
         a = b"AAAA"
         b = b"BBBB"
-        result = splice(a, b)
+        result = splice(a, b, RandPool(seed=1))
         assert isinstance(result, bytes)
         assert len(result) >= 2
 
@@ -115,25 +116,26 @@ class TestSplice:
         assert result == a[:cut_a] + b[cut_b:]
 
     def test_short_a_returns_a(self):
-        assert splice(b"A", b"BBBB") == b"A"
-        assert splice(b"", b"BBBB") == b""
+        assert splice(b"A", b"BBBB", RandPool(seed=1)) == b"A"
+        assert splice(b"", b"BBBB", RandPool(seed=1)) == b""
 
     def test_short_b_returns_a(self):
-        assert splice(b"AAAA", b"B") == b"AAAA"
+        assert splice(b"AAAA", b"B", RandPool(seed=1)) == b"AAAA"
 
     def test_both_short_returns_a(self):
-        assert splice(b"A", b"B") == b"A"
+        assert splice(b"A", b"B", RandPool(seed=1)) == b"A"
 
     def test_both_two_bytes(self):
-        result = splice(b"AB", b"CD")
+        result = splice(b"AB", b"CD", RandPool(seed=1))
         assert isinstance(result, bytes)
         assert 2 <= len(result) <= 2
 
     def test_result_is_combination(self):
         a = b"AABB"
         b = b"CCDD"
+        rng = RandPool(seed=1)
         for _ in range(200):
-            result = splice(a, b)
+            result = splice(a, b, rng)
             assert len(result) >= 2
             assert result[:1] in (b"A", b"C") or result[-1:] in (b"B", b"D")
 
@@ -192,32 +194,33 @@ class TestRadamsaMutateNum:
     def test_returns_integer(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
 
-        result = radamsa_mutate_num(42)
+        result = radamsa_mutate_num(42, RandPool(seed=1))
         assert isinstance(result, int)
 
     def test_produces_different_values(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
 
-        results = {radamsa_mutate_num(100) for _ in range(50)}
+        rng = RandPool(seed=1)
+        results = {radamsa_mutate_num(100, rng) for _ in range(50)}
         # Should produce at least some variety
         assert len(results) > 1
 
     def test_zero_input(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
 
-        result = radamsa_mutate_num(0)
+        result = radamsa_mutate_num(0, RandPool(seed=1))
         assert isinstance(result, int)
 
     def test_negative_input(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
 
-        result = radamsa_mutate_num(-5)
+        result = radamsa_mutate_num(-5, RandPool(seed=1))
         assert isinstance(result, int)
 
     def test_large_input(self):
         from fuzzer_tool.core.mutations import radamsa_mutate_num
 
-        result = radamsa_mutate_num(1_000_000)
+        result = radamsa_mutate_num(1_000_000, RandPool(seed=1))
         assert isinstance(result, int)
 
 

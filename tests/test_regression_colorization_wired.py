@@ -23,6 +23,7 @@ import types
 
 from fuzzer_tool.core.colorization import TaintRegion, colorize
 from fuzzer_tool.core.operator_registry import REGISTRY
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.fuzzer import _in_taint
 
 
@@ -64,7 +65,7 @@ class TestColorizeSeparatesRealOperandsFromCoincidence:
             # Path depends only on byte 0: everything else is inert.
             return 1 if candidate[watched] == data[watched] else 2
 
-        result = colorize(data, exec_fn, use_type_aware=False)
+        result = colorize(data, exec_fn, use_type_aware=False, rng=RandPool(seed=1))
 
         assert not _in_taint(result.taints, watched, 1), (
             "the one byte the target branches on was marked path-irrelevant"
@@ -78,7 +79,7 @@ class TestColorizeSeparatesRealOperandsFromCoincidence:
         def exec_fn(_candidate: bytes) -> int:
             return 7  # path never moves
 
-        result = colorize(data, exec_fn, use_type_aware=False)
+        result = colorize(data, exec_fn, use_type_aware=False, rng=RandPool(seed=1))
         assert result.taints
         assert (
             _in_taint(result.taints, 0, len(data))

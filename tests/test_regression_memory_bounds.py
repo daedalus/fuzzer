@@ -15,6 +15,7 @@ from fuzzer_tool.core.path_constraints import (
     BranchRecord,
     PathConstraintSolver,
 )
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 @pytest.fixture(autouse=True)
@@ -31,25 +32,31 @@ class TestInflateCacheIsByteBounded:
 
     def test_large_streams_do_not_accumulate(self):
         for i in range(60):
-            R.recompress_zlib(zlib.compress(bytes([i % 251]) * (2 << 20)), max_len=4096)
+            R.recompress_zlib(
+                zlib.compress(bytes([i % 251]) * (2 << 20)), max_len=4096, rng=RandPool(seed=1)
+            )
         assert R.cache_stats()["bytes"] <= R._CACHE_MAX_BYTES
 
     def test_oversized_entries_are_not_cached_at_all(self):
         """One huge entry would otherwise evict every useful small one."""
         blob = zlib.compress(b"A" * (R._CACHE_MAX_ENTRY * 2))
-        R.recompress_zlib(blob, max_len=4096)
+        R.recompress_zlib(blob, max_len=4096, rng=RandPool(seed=1))
         assert R.cache_stats()["entries"] == 0
 
     def test_small_entries_are_still_cached(self):
         """The cache must keep working — it exists to skip re-inflation."""
         for i in range(50):
-            R.recompress_zlib(zlib.compress(b"payload %d" % i * 20), max_len=4096)
+            R.recompress_zlib(
+                zlib.compress(b"payload %d" % i * 20), max_len=4096, rng=RandPool(seed=1)
+            )
         assert R.cache_stats()["entries"] == 50
 
     def test_byte_budget_is_enforced_across_mixed_sizes(self):
         for i in range(40):
             size = (1 << 10) if i % 2 else (1 << 18)
-            R.recompress_zlib(zlib.compress(bytes([i % 251]) * size), max_len=4096)
+            R.recompress_zlib(
+                zlib.compress(bytes([i % 251]) * size), max_len=4096, rng=RandPool(seed=1)
+            )
         assert R.cache_stats()["bytes"] <= R._CACHE_MAX_BYTES
 
     def test_eviction_is_oldest_first(self):
@@ -66,7 +73,7 @@ class TestInflateCacheIsByteBounded:
     def test_reset_clears_the_byte_counter_too(self):
         """A counter left non-zero after a clear would shrink the cache to
         nothing over time."""
-        R.recompress_zlib(zlib.compress(b"data" * 100), max_len=4096)
+        R.recompress_zlib(zlib.compress(b"data" * 100), max_len=4096, rng=RandPool(seed=1))
         R._cache_reset()
         assert R.cache_stats() == {"entries": 0, "bytes": 0}
 

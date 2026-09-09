@@ -27,14 +27,27 @@ class ScriptedRng:
         batch_value: Pinned value filling every multi-value ``randint_list``
             draw, so batch consumers (havoc sub-mutations) stay fully
             scripted instead of delegating to a real RNG.
+        randbytes: Blobs returned one per ``randbytes()`` call. The
+            requested length is ignored like every other bound here, so a
+            blob of the wrong size is a scripting error the consumer will
+            surface rather than something this class papers over.
     """
 
-    def __init__(self, randints=(), randoms=(), choice_idxs=(), counts=(), batch_value=0):
+    def __init__(
+        self,
+        randints=(),
+        randoms=(),
+        choice_idxs=(),
+        counts=(),
+        batch_value=0,
+        randbytes=(),
+    ):
         self._randints = iter(randints)
         self._randoms = iter(randoms)
         self._choice_idxs = iter(choice_idxs)
         self._counts = iter(counts)
         self._batch_value = batch_value
+        self._randbytes = iter(randbytes)
 
     def randint(self, _a, _b):
         return next(self._randints)
@@ -49,6 +62,9 @@ class ScriptedRng:
         if count == 1:
             return [next(self._counts)]
         return [self._batch_value] * count
+
+    def randbytes(self, _n):
+        return next(self._randbytes)
 
     def shuffle(self, seq):
         seq.reverse()

@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from fuzzer_tool.core.mutations import crossover
+from fuzzer_tool.core.rand_pool import RandPool
 
 log = logging.getLogger(__name__)
 
@@ -661,6 +662,10 @@ class QEALifecycle:
         cooling_decay: float = COOLING_DECAY_DEFAULT,
         cooling_min_angle: float = COOLING_MIN_ANGLE_DEFAULT,
         fitness: FitnessFunction | None = None,
+        rng: RandPool | None = None,
+        # ^ The pool crossover() draws from. Built here when absent so the
+        # lifecycle always owns one, the same shape the format mutators use;
+        # the fuzzer passes its own so --seed reaches this stream.
     ):
         self.pop_size = pop_size
         self.elite_fraction = elite_fraction
@@ -684,6 +689,7 @@ class QEALifecycle:
         from fuzzer_tool.core.ga import FitnessFunction as _FF
 
         self.fitness_fn = fitness or _FF()
+        self._rng = rng if rng is not None else RandPool()
 
         self.population: list[QEAIndividual] = []
         self.generation = 0
@@ -954,7 +960,7 @@ class QEALifecycle:
                 bytes_b = collapse(parent_b.amplitudes)
 
             # Use two-point crossover (from mutations module)
-            child_bytes = crossover(bytes_a, bytes_b)
+            child_bytes = crossover(bytes_a, bytes_b, self._rng)
 
             # Parents are already capped (see QEA_MAX_INPUT_BYTES), so
             # child_bytes can't exceed 2x that — cap anyway rather than
