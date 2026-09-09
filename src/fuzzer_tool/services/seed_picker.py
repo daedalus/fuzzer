@@ -21,6 +21,7 @@ from collections import Counter
 
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.crc32 import crc32
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
 
 log = logging.getLogger(__name__)
@@ -58,10 +59,10 @@ SATURATION_STALL_EXECS = 20000
 INVASION_STUCK_THRESHOLD = 10.0
 
 
-def _cdf_pick(population: list, weights: list[float], store: dict, slot: str):
-    """``random.choices(population, weights=weights, k=1)[0]`` with a cached CDF.
+def _cdf_pick(population: list, weights: list[float], store: dict, slot: str, rng):
+    """``rng.weighted_choice(population, weights)`` with a cached CDF.
 
-    ``random.choices`` rebuilds ``list(accumulate(weights))`` on every call.
+    ``weighted_choice`` rebuilds ``list(accumulate(weights))`` on every call.
     That prefix sum is O(len(population)) and it is the same vector every
     time: ``weighted_pick_seed`` already holds the weight list fixed for 200
     execs or until the corpus grows by 20 seeds. Sampling only needs the
@@ -74,33 +75,33 @@ def _cdf_pick(population: list, weights: list[float], store: dict, slot: str):
     id: a new weight vector is a new list, and a new list misses.
 
     Draw equivalence is exact rather than statistical. This mirrors
-    CPython's implementation term for term -- the same
+    ``RandPool.weighted_choice`` term for term -- the same
     ``itertools.accumulate`` (so the same floating-point prefix sums), the
     same ``random() * total`` scaling, the same ``hi = n - 1`` clamp against
     overshoot -- and consumes exactly one ``random()`` per pick, as
-    ``choices`` does. Under a fixed ``--seed`` the sequence of selected seeds
-    is therefore unchanged, which is the property the reproducibility tests
-    rest on.
+    ``weighted_choice`` does. Under a fixed ``--seed`` the sequence of
+    selected seeds is therefore unchanged, which is the property the
+    reproducibility tests rest on.
 
     Anything the fast path is not certain about is handed back to
-    ``random.choices``: a length mismatch between population and weights, a
-    non-positive total and a non-finite total all raise there today, and
-    still do.
+    ``rng.weighted_choice``: a length mismatch between population and
+    weights, a non-positive total and a non-finite total all raise there
+    today, and still do.
     """
     n = len(population)
     if n == 0 or len(weights) != n:
-        return self._rng.choices(population, weights=weights, k=1)[0]
+        return rng.weighted_choice(population, weights)
     entry = store.get(slot)
     if entry is None or entry[0] is not weights:
         cum = list(itertools.accumulate(weights))
         total = cum[-1] + 0.0
         if not (total > 0.0) or not math.isfinite(total):
-            # Let random.choices raise exactly the error it raised before.
-            return self._rng.choices(population, weights=weights, k=1)[0]
+            # Let weighted_choice raise exactly the error it raised before.
+            return rng.weighted_choice(population, weights)
         entry = (weights, cum, total)
         store[slot] = entry
     _w, cum, total = entry
-    return population[_bisect_mod.bisect(cum, self._rng.random() * total, 0, n - 1)]
+    return population[_bisect_mod.bisect(cum, rng.random() * total, 0, n - 1)]
 
 
 def _resistance(successes: float, failures: float) -> float:
@@ -220,8 +221,15 @@ class SeedPicker:
     Holds a reference to the Fuzzer instance for accessing shared state.
     """
 
-    def __init__(self, fuzzer):
+    def __init__(self, fuzzer, seed=None):
         self.f = fuzzer
+
+        # Bound once here rather than read off the fuzzer per pick: the
+        # katz/tang/aflgo arms below draw from it directly, and a picker
+        # built against a partially-constructed fuzzer (tests, and the
+        # `from_fuzzer` adapters) would otherwise have no pool at all.
+        rng = getattr(fuzzer, "_rng", None) or RandPool(seed=seed)
+        self._rng = rng
 
     def _pick_seed_elo(self) -> bytes | None:
         """Pick seed via Elo-arbitrated strategy selection. Returns None if fallback needed.
@@ -1458,7 +1466,7 @@ class SeedPicker:
         if not hasattr(f, "_cdf_cache"):
             f._cdf_cache = {}
         if len(f.corpus) < 3 or not f.seed_meta:
-            return _cdf_pick(f.corpus, weights, f._cdf_cache, "corpus")
+            return _cdf_pick(f.corpus, weights, f._cdf_cache, "corpus", f._rng)
 
         # Cache Pareto scores - recompute every 100 execs or when corpus changes
         cache_key = len(f.corpus)
@@ -1506,9 +1514,9 @@ class SeedPicker:
                 slice_entry = (front, weights, front_seeds, front_weights)
                 f._front_slice_cache = slice_entry
             _fr, _w, front_seeds, front_weights = slice_entry
-            return _cdf_pick(front_seeds, front_weights, f._cdf_cache, "front")
+            return _cdf_pick(front_seeds, front_weights, f._cdf_cache, "front", f._rng)
         else:
-            return _cdf_pick(f.corpus, weights, f._cdf_cache, "corpus")
+            return _cdf_pick(f.corpus, weights, f._cdf_cache, "corpus", f._rng)
 
     def _log_pick_signals(
         self, selected: bytes, now: float, weights: list[float] | None = None

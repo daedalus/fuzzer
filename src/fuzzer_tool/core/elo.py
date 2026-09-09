@@ -690,12 +690,14 @@ class BayesianEloTracker(RoundRecorderMixin):
         beta: float = 200.0,
         tau: float = 5.0,
         min_matches: int = 10,
+        rng: RandPool | None = None,
     ):
         self.initial_mu = initial_mu
         self.initial_sigma = initial_sigma
         self.beta = beta
         self.tau = tau
         self.min_matches = min_matches
+        self._rng = rng or RandPool()
 
         # Per-operator Gaussian posteriors: N(mu, sigma_sq)
         self.mu: dict[str, float] = {}
