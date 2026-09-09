@@ -86,6 +86,10 @@ def test_cli_default_max_size_is_4096(monkeypatch):
     monkeypatch.setattr("tools.extract_ffmpeg_seeds.download", _fake_download)
     monkeypatch.setattr("tools.extract_ffmpeg_seeds.load_cache", lambda: {})
     monkeypatch.setattr(
+        "tools.extract_ffmpeg_seeds.fetch_fate_list",
+        lambda: [{"testcase_id": "1", "fuzzer": "f", "url": "http://x"}],
+    )
+    monkeypatch.setattr(
         "sys.argv",
         ["extract_ffmpeg_seeds.py", "--source", "oss-fuzz", "--out", "out", "--max", "1"],
     )
@@ -106,6 +110,10 @@ def test_cli_max_size_zero_is_unlimited(monkeypatch):
 
     monkeypatch.setattr("tools.extract_ffmpeg_seeds.download", _fake_download)
     monkeypatch.setattr("tools.extract_ffmpeg_seeds.load_cache", lambda: {})
+    monkeypatch.setattr(
+        "tools.extract_ffmpeg_seeds.fetch_fate_list",
+        lambda: [{"testcase_id": "1", "fuzzer": "f", "url": "http://x"}],
+    )
     monkeypatch.setattr(
         "sys.argv",
         [
