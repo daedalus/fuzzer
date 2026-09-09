@@ -21,8 +21,9 @@ confusion specifically.
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 OGG_MIN_PAGE = 27  # header without segment table
 
@@ -91,8 +92,13 @@ def serialize_ogg_pages(pages: list[OggPage]) -> bytes:
 class OggMutator:
     """Structure-aware Ogg page-level mutator."""
 
+    def __init__(self, seed=None):
+        rng = RandPool(seed=seed)
+        self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        self._rng = rng or self._rng
+        rng = self._rng
         pages = parse_ogg_pages(data)
         if not pages:
             return self._generate_random_ogg(max_len=max_len, rng=rng)
@@ -172,7 +178,7 @@ class OggMutator:
             pages.pop(rng.randint(0, len(pages) - 1))
 
     def _generate_random_ogg(self, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        rng = rng or self._rng
         # Minimal single BOS page carrying an OpusHead-shaped identification
         # packet — small, single-segment, plausible for a demuxer to probe.
         opus_head = b"OpusHead" + bytes([1, 2, 0, 0]) + (48000).to_bytes(4, "little") + bytes(3)

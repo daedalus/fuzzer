@@ -18,8 +18,9 @@ size/data mismatch is a first-class mutation here too.
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 TAG_AUDIO = 8
 TAG_VIDEO = 9
@@ -99,8 +100,13 @@ def serialize_flv(header: bytes, tags: list[FlvTag], trailing: int | None) -> by
 class FlvMutator:
     """Structure-aware FLV tag-level mutator."""
 
+    def __init__(self, seed=None):
+        rng = RandPool(seed=seed)
+        self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        self._rng = rng or self._rng
+        rng = self._rng
         parsed = parse_flv(data)
         if not parsed:
             return self._generate_random_flv(max_len=max_len, rng=rng)
@@ -176,7 +182,7 @@ class FlvMutator:
             tags.pop(rng.randint(0, len(tags) - 1))
 
     def _generate_random_flv(self, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        rng = rng or self._rng
         header = b"FLV" + bytes([1, 0x05]) + (9).to_bytes(4, "big")
         payload = bytes([0x17, 0x00, 0x00, 0x00, 0x00]) + bytes(
             rng.randint(0, 255) for _ in range(64)

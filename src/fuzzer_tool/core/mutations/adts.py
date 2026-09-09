@@ -30,10 +30,10 @@ present), matching nal.py's choice not to interpret RBSP contents.
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 ADTS_HEADER_LEN = 7  # fixed + variable header, CRC (if any) folds into payload
 
@@ -109,8 +109,13 @@ def serialize_adts_frames(frames: list[AdtsFrame]) -> bytes:
 class AdtsMutator:
     """Structure-aware ADTS AAC frame mutator."""
 
+    def __init__(self, seed=None):
+        rng = RandPool(seed=seed)
+        self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        self._rng = rng or self._rng
+        rng = self._rng
         frames = parse_adts_frames(data)
         if not frames:
             return self._generate_random_adts(max_len=max_len, rng=rng)
@@ -193,7 +198,7 @@ class AdtsMutator:
 
     def _generate_random_adts(self, max_len: int = 65536, rng=None) -> bytes:
         """Minimal single-frame AAC-LC, 44.1kHz, stereo stream."""
-        rng = rng or random
+        rng = rng or self._rng
         payload = bytes(rng.randint(0, 255) for _ in range(rng.randint(32, 96)))
         frame_len = ADTS_HEADER_LEN + len(payload)
 

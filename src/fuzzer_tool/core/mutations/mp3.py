@@ -23,10 +23,10 @@ targets.
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 MP3_HEADER_LEN = 4
 
@@ -102,8 +102,13 @@ def serialize_mp3_frames(frames: list[Mp3Frame]) -> bytes:
 class Mp3Mutator:
     """Structure-aware MP3 frame mutator."""
 
+    def __init__(self, seed=None):
+        rng = RandPool(seed=seed)
+        self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        self._rng = rng or self._rng
+        rng = self._rng
         frames = parse_mp3_frames(data)
         if not frames:
             return self._generate_random_mp3(max_len=max_len, rng=rng)
@@ -179,7 +184,7 @@ class Mp3Mutator:
 
     def _generate_random_mp3(self, max_len: int = 65536, rng=None) -> bytes:
         """Minimal single-frame MPEG1 Layer III, 128kbps, 44.1kHz, stereo."""
-        rng = rng or random
+        rng = rng or self._rng
         payload = bytes(rng.randint(0, 255) for _ in range(rng.randint(64, 128)))
 
         version = 3  # MPEG1

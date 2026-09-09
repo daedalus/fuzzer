@@ -25,10 +25,10 @@ exercises the recursive-descent entry into it.
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 RIFF_HEADER_LEN = 12  # "RIFF" + size(4) + form_type(4)
 KNOWN_FOURCCS = [
@@ -100,8 +100,13 @@ def serialize_riff(form_type: bytes, chunks: list[RiffChunk]) -> bytes:
 class RiffMutator:
     """Structure-aware RIFF top-level chunk mutator."""
 
+    def __init__(self, seed=None):
+        rng = RandPool(seed=seed)
+        self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        self._rng = rng or self._rng
+        rng = self._rng
         parsed = parse_riff_chunks(data)
         if not parsed:
             return self._generate_random_riff(max_len=max_len, rng=rng)
@@ -184,7 +189,7 @@ class RiffMutator:
             target.data = target.data[:cut]
 
     def _generate_random_riff(self, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        rng = rng or self._rng
         # Minimal PCM WAVE: "fmt " (16-byte PCM format struct) + "data".
         fmt_data = (
             (1).to_bytes(2, "little")  # wFormatTag = PCM

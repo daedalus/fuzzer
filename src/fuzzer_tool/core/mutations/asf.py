@@ -20,10 +20,10 @@ structure back into an invalid file.
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 OBJECT_HEADER_LEN = 24  # guid(16) + size(8)
 
@@ -86,8 +86,13 @@ def serialize_asf_objects(objs: list[AsfObject]) -> bytes:
 class AsfMutator:
     """Structure-aware ASF top-level object mutator."""
 
+    def __init__(self, seed=None):
+        rng = RandPool(seed=seed)
+        self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        self._rng = rng or self._rng
+        rng = self._rng
         objs = parse_asf_objects(data)
         if not objs:
             return self._generate_random_asf(max_len=max_len, rng=rng)
@@ -162,7 +167,7 @@ class AsfMutator:
             objs[i], objs[j] = objs[j], objs[i]
 
     def _generate_random_asf(self, max_len: int = 65536, rng=None) -> bytes:
-        rng = rng or random
+        rng = rng or self._rng
         # File Properties Object as the sole header sub-object.
         file_props_body = bytes(rng.randint(0, 255) for _ in range(80))
         file_props = AsfObject(
