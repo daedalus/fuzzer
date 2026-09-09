@@ -3480,6 +3480,36 @@ class OperatorEngine:
 
         return self._regularity(huffman_tree_mutate, buf)
 
+    def _op_cusum_bias_run(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import cusum_bias_run
+
+        return self._regularity(cusum_bias_run, buf)
+
+    def _op_apen_short_period(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import apen_short_period
+
+        return self._regularity(apen_short_period, buf)
+
+    def _op_template_saturate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import template_saturate
+
+        return self._regularity(template_saturate, buf)
+
+    def _op_overlapping_template_flood(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import overlapping_template_flood
+
+        return self._regularity(overlapping_template_flood, buf)
+
+    def _op_maurer_dictionary_collapse(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import maurer_dictionary_collapse
+
+        return self._regularity(maurer_dictionary_collapse, buf)
+
+    def _op_excursion_square_wave(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import excursion_square_wave
+
+        return self._regularity(excursion_square_wave, buf)
+
     def corpus_invariants(self):
         """Cached ``CorpusInvariants`` for the current corpus, or None.
 

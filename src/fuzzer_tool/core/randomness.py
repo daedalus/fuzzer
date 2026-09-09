@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from functools import cache
 
 import numpy as np
 
@@ -40,6 +41,13 @@ __all__ = [
     "lagged_autocorrelation",
     "birthday_spacings",
     "kmer_occupancy",
+    "cumulative_sums",
+    "approximate_entropy",
+    "non_overlapping_template_matching",
+    "overlapping_template_matching",
+    "maurers_universal",
+    "random_excursions",
+    "random_excursions_variant",
     "ks_uniform",
     "kuiper_uniform",
     "fishers_method",
@@ -103,6 +111,275 @@ def block_frequency(data: bytes, block_bits: int = 128) -> float:
     pi = blocks.sum(axis=1) / block_bits
     x2 = 4.0 * block_bits * float(np.sum((pi - 0.5) ** 2))
     return chisq_sf(x2, n_blocks)
+
+
+def cumulative_sums(data: bytes, mode: str = "forward") -> float:
+    """NIST SP 800-22 2.13 cumulative sums (cusum) test.
+
+    Walks the +-1 partial sums of the bit sequence and asks whether the
+    largest excursion from zero is improbably far for a sequence this long.
+    ``mode="backward"`` runs the identical statistic over the reversed
+    sequence, per the NIST spec's two independent directions.
+    """
+    b = _bits(data)
+    n = b.size
+    if n < 100:
+        return 1.0
+    x = 2 * b.astype(np.int64) - 1
+    if mode == "backward":
+        x = x[::-1]
+    s = np.cumsum(x)
+    z = float(np.max(np.abs(s)))
+    if z == 0.0:
+        return 1.0
+    sqrt_n = math.sqrt(n)
+
+    def _phi(v: float) -> float:
+        return 0.5 * (1.0 + math.erf(v / _SQRT2))
+
+    total = 0.0
+    start1 = int(math.floor((-n / z + 1) / 4))
+    end1 = int(math.floor((n / z - 1) / 4))
+    for k in range(start1, end1 + 1):
+        total += _phi((4 * k + 1) * z / sqrt_n) - _phi((4 * k - 1) * z / sqrt_n)
+    start2 = int(math.floor((-n / z - 3) / 4))
+    end2 = end1
+    for k in range(start2, end2 + 1):
+        total -= _phi((4 * k + 3) * z / sqrt_n) - _phi((4 * k + 1) * z / sqrt_n)
+    return max(0.0, min(1.0, 1.0 - total))
+
+
+def approximate_entropy(data: bytes, m: int = 2) -> float:
+    """NIST SP 800-22 2.12 approximate entropy.
+
+    Compares the frequency of overlapping m-bit and (m+1)-bit patterns; a
+    sequence with short-range linear or repetitive structure compresses that
+    gap, which is exactly what ApEn measures (unlike ``serial_test``, which
+    looks at m-bit frequency alone and can miss structure that only shows up
+    across the m -> m+1 transition).
+    """
+    b = _bits(data)
+    n = b.size
+    if n < (1 << (m + 2)) or m < 1:
+        return 1.0
+
+    def _phi(width: int) -> float:
+        ext = np.concatenate([b, b[: width - 1]]) if width > 1 else b
+        idx = np.zeros(n, dtype=np.int64)
+        for j in range(width):
+            idx = (idx << 1) | ext[j : j + n].astype(np.int64)
+        counts = np.bincount(idx, minlength=1 << width).astype(np.float64)
+        counts = counts[counts > 0]
+        freq = counts / n
+        return float(np.sum(freq * np.log(freq)))
+
+    apen = _phi(m) - _phi(m + 1)
+    chi2 = 2.0 * n * (math.log(2.0) - apen)
+    return chisq_sf(chi2, 1 << m)
+
+
+def _template_positions(width: int) -> int:
+    return width
+
+
+def non_overlapping_template_matching(
+    data: bytes,
+    template: tuple[int, ...] = (0, 0, 0, 0, 0, 0, 0, 0, 1),
+    block_len: int | None = None,
+) -> float:
+    """NIST SP 800-22 2.7: non-overlapping occurrences of *template* per block.
+
+    On a match the scan jumps past the whole template (non-overlapping);
+    otherwise it advances one bit. *template* should be non-periodic (no
+    proper suffix equals a prefix) -- the default 8 zeros + a 1 is one of
+    NIST's own recommended m=9 templates and is aperiodic.
+    """
+    b = _bits(data)
+    n = b.size
+    m = len(template)
+    block_len = block_len or max(m * 8, 64)
+    n_blocks = n // block_len
+    if n_blocks < 2:
+        return 1.0
+    tpl = np.array(template, dtype=np.uint8)
+    counts = np.empty(n_blocks, dtype=np.int64)
+    for j in range(n_blocks):
+        block = b[j * block_len : (j + 1) * block_len]
+        i = 0
+        c = 0
+        limit = block_len - m
+        while i <= limit:
+            if np.array_equal(block[i : i + m], tpl):
+                c += 1
+                i += m
+            else:
+                i += 1
+        counts[j] = c
+    mu = (block_len - m + 1) / (1 << m)
+    var = block_len * (1.0 / (1 << m) - (2.0 * m - 1) / (1 << (2 * m)))
+    if var <= 0:
+        return 1.0
+    chi2 = float(np.sum((counts - mu) ** 2) / var)
+    return chisq_sf(chi2, n_blocks)
+
+
+# Corrected pi values for the recommended (m=9, M=1032) parameterization
+# (Hamano & Kaneko's correction of the original NIST SP 800-22 table; the
+# original table's small inaccuracy is well documented and widely
+# re-derived, most recently in the public comments on SP 800-22 Rev. 1a).
+_OTM_PI = (0.364091, 0.185659, 0.139381, 0.100571, 0.0704323, 0.139865)
+_OTM_M = 9
+_OTM_BLOCK = 1032
+
+
+def overlapping_template_matching(data: bytes) -> float:
+    """NIST SP 800-22 2.8: overlapping occurrences of an all-ones 9-bit
+    template per 1032-bit block, fixed at NIST's own recommended
+    parameterization (the reference pi distribution is only tabulated there).
+    """
+    b = _bits(data)
+    n = b.size
+    n_blocks = n // _OTM_BLOCK
+    if n_blocks < 1:
+        return 1.0
+    tpl_len = _OTM_M
+    limit = _OTM_BLOCK - tpl_len
+    v = np.zeros(6, dtype=np.int64)
+    for j in range(n_blocks):
+        block = b[j * _OTM_BLOCK : (j + 1) * _OTM_BLOCK]
+        c = 0
+        for i in range(limit + 1):
+            if int(block[i : i + tpl_len].sum()) == tpl_len:
+                c += 1
+        v[min(c, 5)] += 1
+    chi2 = 0.0
+    for k in range(6):
+        exp = n_blocks * _OTM_PI[k]
+        chi2 += (v[k] - exp) ** 2 / exp
+    return chisq_sf(chi2, 5)
+
+
+@cache
+def _maurer_reference(length: int) -> tuple[float, float]:
+    """Expected value and variance of log2(A) for an idealized (Q -> inf)
+    Maurer universal-test block, computed directly from the geometric
+    distribution P(A=l) = p*(1-p)^(l-1), p=2^-length, rather than a
+    transcribed constants table -- this closed form is given directly in
+    the NIST spec and its derivations (e.g. Hong & Kadowaki 2103.10660).
+    Summed to convergence rather than a fixed iteration count so it stays
+    correct at any L instead of only the handful of values a table would
+    cover.
+    """
+    p = 2.0**-length
+    e1 = 0.0
+    e2 = 0.0
+    term_prob = p
+    block_idx = 1
+    while term_prob > 1e-18 or block_idx < 4:
+        log2l = math.log2(block_idx)
+        e1 += log2l * term_prob
+        e2 += log2l * log2l * term_prob
+        term_prob *= 1.0 - p
+        block_idx += 1
+        if block_idx > 5_000_000:  # pathological guard; never hit for L in normal use
+            break
+    return e1, e2 - e1 * e1
+
+
+def maurers_universal(data: bytes, length: int = 6) -> float:
+    """NIST SP 800-22 2.9 Maurer's universal statistical test.
+
+    Detects compressibility more directly than entropy-style tests: it
+    measures how far apart repeats of the same L-bit block are, which is
+    short for anything an LZ-style or dictionary-based parser would also
+    find short. *length* (the block width L) defaults small (6) so the
+    Q+K block requirement stays reachable at the buffer sizes a single
+    mutation region covers, rather than NIST's own recommended L (>=6 with
+    K >= 1000*2^L, i.e. tens of KB minimum at L=6 alone).
+    """
+    b = _bits(data)
+    n = b.size
+    l_bits = length
+    n_blocks = n // l_bits
+    q = 10 * (1 << l_bits)
+    if n_blocks < q + 2:
+        return 1.0
+    k_blocks = n_blocks - q
+    weights = 1 << np.arange(l_bits - 1, -1, -1, dtype=np.int64)
+    blocks = b[: n_blocks * l_bits].reshape(n_blocks, l_bits).astype(np.int64) @ weights
+    last_seen = np.full(1 << l_bits, -1, dtype=np.int64)
+    last_seen[blocks[:q]] = np.arange(q)
+    total = 0.0
+    for i in range(q, n_blocks):
+        val = blocks[i]
+        total += math.log2(i - last_seen[val])
+        last_seen[val] = i
+    fn = total / k_blocks
+    expected, variance = _maurer_reference(l_bits)
+    c = 0.7 - 0.8 / l_bits + (4.0 + 32.0 / l_bits) * k_blocks ** (-3.0 / l_bits) / 15.0
+    sigma = c * math.sqrt(variance / k_blocks)
+    if sigma <= 0:
+        return 1.0
+    return _erfc(abs((fn - expected) / (_SQRT2 * sigma)))
+
+
+def _excursion_cycles(data: bytes) -> tuple[list[np.ndarray], int]:
+    b = _bits(data)
+    n = b.size
+    if n < 100:
+        return [], 0
+    x = 2 * b.astype(np.int64) - 1
+    s = np.concatenate([[0], np.cumsum(x), [0]])
+    zero_idx = np.flatnonzero(s == 0)
+    cycles = [s[zero_idx[i] + 1 : zero_idx[i + 1]] for i in range(len(zero_idx) - 1)]
+    return cycles, len(cycles)
+
+
+def random_excursions(data: bytes) -> float:
+    """NIST SP 800-22 2.14: visits-per-cycle to states +-1..+-4 of the
+    cumulative-sum random walk, one chi-square test per state, combined
+    into a single p-value via Fisher's method (see module docstring on
+    ``fishers_method`` for why that combination is valid here: independent
+    p-values under the null).
+    """
+    cycles, j = _excursion_cycles(data)
+    if j < 50:
+        return 1.0
+    pvals = []
+    for state in (-4, -3, -2, -1, 1, 2, 3, 4):
+        p_half = 1.0 / (2 * abs(state))
+        pi = [1 - p_half] + [0.25 / (state * state) * (1 - p_half) ** (k - 1) for k in range(1, 5)]
+        pi.append(p_half * (1 - p_half) ** 4)
+        v = np.zeros(6, dtype=np.int64)
+        for cyc in cycles:
+            c = int(np.count_nonzero(cyc == state))
+            v[min(c, 5)] += 1
+        chi2 = 0.0
+        for k in range(6):
+            exp = j * pi[k]
+            chi2 += (v[k] - exp) ** 2 / exp
+        pvals.append(chisq_sf(chi2, 5))
+    return fishers_method(pvals)
+
+
+def random_excursions_variant(data: bytes) -> float:
+    """NIST SP 800-22 2.15: total (not per-cycle) visits to states +-1..+-9
+    of the same random walk as :func:`random_excursions`, each compared to
+    its expected count via a normal approximation, combined with Fisher's
+    method into one p-value.
+    """
+    cycles, j = _excursion_cycles(data)
+    if j < 50:
+        return 1.0
+    walk = np.concatenate(cycles) if cycles else np.array([], dtype=np.int64)
+    pvals = []
+    for state in range(-9, 10):
+        if state == 0:
+            continue
+        xi = int(np.count_nonzero(walk == state))
+        denom = math.sqrt(2.0 * j * (4.0 * abs(state) - 2.0))
+        pvals.append(_erfc(abs(xi - j) / denom))
+    return fishers_method(pvals)
 
 
 def runs_test(data: bytes) -> float:

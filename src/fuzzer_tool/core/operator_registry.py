@@ -217,6 +217,12 @@ _CATEGORIES: dict[str, set[str]] = {
         "gray_code",
         "lz_dict_mutate",
         "huffman_tree_mutate",
+        "cusum_bias_run",
+        "apen_short_period",
+        "template_saturate",
+        "overlapping_template_flood",
+        "maurer_dictionary_collapse",
+        "excursion_square_wave",
     },
     "adaptive": {
         "markov_bytes",

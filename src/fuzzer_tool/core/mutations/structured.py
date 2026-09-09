@@ -2454,3 +2454,242 @@ def huffman_tree_mutate(data: bytes, rng=None) -> bytes:
         restored[ridx] = rng.randint(0, 255)
         ridx += 1
     return _splice(data, offset, bytes(restored[:length]))
+
+
+# ── 14. NIST SP 800-22 inverses ──────────────────────────────────────────
+#
+# The dieharder table above has a NIST SP 800-22 counterpart: six named
+# tests in that suite (cusum, approximate entropy, non-overlapping and
+# overlapping template matching, Maurer's universal statistical test, and
+# random excursions/variant) had no constructive inverse here.  Detectors
+# for all six now live in ``core/randomness`` alongside the existing
+# monobit/runs/serial family; the operators below are their constructive
+# duals, following the same "build the tail, don't search for it" approach
+# as the dieharder-inverse family above.
+#
+# ===========================  ==========================================
+# NIST SP 800-22 test          constructive inverse implemented here
+# ===========================  ==========================================
+# cumulative sums (cusum)      :func:`cusum_bias_run`
+# approximate entropy          :func:`apen_short_period`
+# non-overlapping templates    :func:`template_saturate`
+# overlapping templates        :func:`overlapping_template_flood`
+# Maurer's universal test      :func:`maurer_dictionary_collapse`
+# random excursions/variant    :func:`excursion_square_wave`
+# ===========================  ==========================================
+
+
+def cusum_bias_run(data: bytes, rng=None) -> bytes:
+    """Overwrite a region with a single repeated byte (0x00 or 0xFF).
+
+    The cusum test walks the +-1 partial sums of the bit sequence and
+    rejects when the largest excursion from zero is improbably large for
+    the sequence length. A run of identical bits is the extremal case: the
+    partial sum grows by exactly 1 every step in the same direction, so the
+    excursion is as large as the region allows -- rather than the O(sqrt n)
+    an unbiased sequence produces.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=32)
+    if length < 32:
+        return data
+    fill = rng.choice((0x00, 0xFF))
+    return _splice(data, offset, bytes([fill]) * length)
+
+
+def apen_short_period(data: bytes, rng=None) -> bytes:
+    """Overwrite a region with a short-period repeating bit pattern.
+
+    Approximate entropy compares how much new information an (m+1)-bit
+    window carries over an m-bit one; a sequence built from a period-2..5
+    bit pattern has almost no such information gain -- every window of a
+    given length repeats the same handful of patterns -- which collapses
+    ApEn toward 0 versus the ln(2) a random sequence gives.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=32)
+    if length < 32:
+        return data
+    period_bits = rng.choice((2, 3, 4, 5))
+    seed = rng.randint(1, (1 << period_bits) - 1)  # avoid the all-zero period
+    total_bits = length * 8
+    bits = [(seed >> (i % period_bits)) & 1 for i in range(total_bits)]
+    block = bytearray(length)
+    for i in range(length):
+        b = 0
+        for j in range(8):
+            b = (b << 1) | bits[i * 8 + j]
+        block[i] = b
+    return _splice(data, offset, bytes(block))
+
+
+# NIST's own recommended m=9 non-overlapping template: 8 zeros then a 1,
+# a non-periodic (no proper prefix equals a suffix) template, matching the
+# default in core.randomness.non_overlapping_template_matching.
+_NOTM_TEMPLATE = (0, 0, 0, 0, 0, 0, 0, 0, 1)
+
+
+def template_saturate(data: bytes, rng=None) -> bytes:
+    """Overwrite a region by tiling the non-overlapping-template-matching
+    template back to back.
+
+    The test counts non-overlapping hits of a fixed 9-bit template per
+    block and rejects when the count is far from the ~1-in-8 expected rate.
+    Tiling the template exactly means every non-overlapping window is a
+    hit -- the count saturates at the maximum the block length allows.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=32)
+    if length < 32:
+        return data
+    m = len(_NOTM_TEMPLATE)
+    total_bits = length * 8
+    bits = [_NOTM_TEMPLATE[i % m] for i in range(total_bits)]
+    block = bytearray(length)
+    for i in range(length):
+        b = 0
+        for j in range(8):
+            b = (b << 1) | bits[i * 8 + j]
+        block[i] = b
+    return _splice(data, offset, bytes(block))
+
+
+def overlapping_template_flood(data: bytes, rng=None) -> bytes:
+    """Overwrite a 1032-bit-aligned region with all-ones bytes.
+
+    The overlapping-template test's fixed template (recommended
+    parameterization) is 9 consecutive one-bits, counted with overlap
+    allowed. An all-ones region matches at every single bit position --
+    the count per block is the theoretical maximum instead of the ~2
+    NIST's reference distribution expects.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    rng = _get_rng(rng)
+    block_bytes = 1032 // 8  # 129, the recommended OTM block length in bits
+    # A handful of saturated blocks is not enough signal against the other
+    # ~20 unaffected blocks a 4KB region spans -- the omnibus chi-square
+    # (5 dof from the 6 occurrence-count bins) needs a double-digit share
+    # of the buffer's blocks pushed to the maximum before the aggregate
+    # statistic clears the rejection threshold. Buffers too small to ever
+    # host that many blocks still get a single-block flood: it won't move
+    # the statistic much, but "weak signal" beats "silently does nothing".
+    min_blocks = 10
+    offset, length = _region(
+        len(data), rng, min_len=block_bytes * min_blocks, align=block_bytes, max_len=block_bytes
+    )
+    if length < block_bytes * min_blocks:
+        offset, length = _region(
+            len(data), rng, min_len=block_bytes, align=block_bytes, max_len=block_bytes
+        )
+        if length < block_bytes:
+            return data
+    return _splice(data, offset, b"\xff" * length)
+
+
+def maurer_dictionary_collapse(data: bytes, rng=None) -> bytes:
+    """Overwrite a region by alternating between two distinct bytes.
+
+    Maurer's test measures how many blocks pass between repeats of the
+    same L-bit value -- short distances mean the sequence carries less
+    information than a random source (an LZ-style parser would compress
+    it the same way). Cycling through only two byte values keeps every
+    L-bit window's nearest match within a handful of blocks, driving the
+    average log2(distance) statistic far below its expected value.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=256)
+    if length < 256:
+        return data
+    a, b = rng.sample(range(256), 2)
+    block = bytes(a if i % 2 == 0 else b for i in range(length))
+    return _splice(data, offset, block)
+
+
+def excursion_square_wave(data: bytes, rng=None) -> bytes:
+    """Overwrite a region with a walk-back-to-zero header, then a repeating
+    triangular random-walk pattern.
+
+    Random excursions and its variant classify how a cumulative +-1 random
+    walk (bits mapped to +-1) visits states away from zero *between returns
+    to zero*; a random walk's visitation counts decay geometrically with
+    distance from zero, so most cycles are short and few reach far states.
+    A tiled ramp-up/ramp-down bit pattern (peak ones, then peak zeros,
+    repeating) makes every cycle climb to the same peak and back, visiting
+    every intermediate state exactly twice per cycle -- a flat profile up
+    to the peak instead of the expected exponential falloff.
+
+    The catch is that "zero" is the running sum from the start of the
+    *whole* buffer, not the start of this region: whatever precedes the
+    region has already walked the sum away from zero, and a self-cancelling
+    periodic pattern only touches *that* level repeatedly, never absolute
+    zero, so it would never register as completed cycles at all. The first
+    part of the region corrects for this by walking the sum back to exactly
+    zero before the periodic part begins, so the triangle pattern's cycles
+    are actually counted.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    rng = _get_rng(rng)
+    offset, length = _region(len(data), rng, min_len=64)
+    if length < 64:
+        return data
+    prefix = data[:offset]
+    s = 2 * int.from_bytes(prefix, "big").bit_count() - len(prefix) * 8 if prefix else 0
+    correction_bits = min(abs(s), length * 8 - 64)  # leave room for the pattern itself
+    if correction_bits < 0:
+        correction_bits = 0
+    bits = ([0] if s > 0 else [1]) * correction_bits
+    peak = rng.choice((3, 4, 5, 6, 8))
+    period = [1] * peak + [0] * peak
+    total_bits = length * 8
+    i = 0
+    while len(bits) < total_bits:
+        bits.append(period[i % len(period)])
+        i += 1
+    bits = bits[:total_bits]
+    block = bytearray(length)
+    for i in range(length):
+        b = 0
+        for j in range(8):
+            b = (b << 1) | bits[i * 8 + j]
+        block[i] = b
+    return _splice(data, offset, bytes(block))
