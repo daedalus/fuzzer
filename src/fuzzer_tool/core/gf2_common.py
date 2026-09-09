@@ -46,7 +46,7 @@ Callers in this repo
 
 from __future__ import annotations
 
-import random
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 def poly_deg(p: int) -> int:
@@ -157,9 +157,12 @@ def find_primitive_root(order: int, is_primitive, rng) -> int:
     Args:
         order: Size of the multiplicative group (e.g. ``2**q - 1``).
         is_primitive: Callable ``is_primitive(candidate) -> bool``.
-        rng: Random source with ``randrange(lo, hi)``.  Accepted types:
-            ``random.Random``, :class:`fuzzer_tool.core.rand_pool.RandPool`,
-            or any duck-typed object with the same method.
+        rng: Random source with ``randint(lo, hi)`` (inclusive on both
+            ends). Accepted types:
+            :class:`fuzzer_tool.core.rand_pool.RandPool`, ``random.Random``,
+            or any duck-typed object with the same method. ``randint`` and
+            not ``randrange`` because RandPool's ``randrange`` is one-arg
+            only, and this was the tree's sole two-arg caller.
 
     Returns:
         A primitive element in ``[1, order)``.
@@ -167,7 +170,7 @@ def find_primitive_root(order: int, is_primitive, rng) -> int:
     if order <= 1:
         return 1
     while True:
-        a = rng.randrange(1, order)
+        a = rng.randint(1, order - 1)
         if is_primitive(a):
             return a
 
@@ -181,7 +184,8 @@ class GF2n:
         self.m = self.order - 1  # |F*|, exponent of the multiplicative group
         self.mod = modulus if modulus is not None else find_irreducible(q)
         assert is_irreducible(self.mod, q), "supplied modulus is not irreducible"
-        self._rng = random.Random(seed)
+        rng = RandPool(seed=seed)
+        self._rng = rng
         self.gen = self._find_primitive()
 
     # ---- field ops ----
