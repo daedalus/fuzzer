@@ -433,7 +433,7 @@ class SeedPicker:
 
     def pick_seed(self) -> bytes:
         f = self.f
-        rng = f._rand_pool
+        rng = f._rng
 
         # Update SA temperature on every call, regardless of which
         # strategy Elo selects (bug: was inside weighted_pick_seed()
@@ -469,7 +469,7 @@ class SeedPicker:
 
     def _pick_markov_seed(self) -> bytes:
         f = self.f
-        rng = f._rand_pool
+        rng = f._rng
         from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 
         # Gate on the threshold the plateau decision actually used. This used to
@@ -527,7 +527,7 @@ class SeedPicker:
         uniform without changing T.
         """
         f = self.f
-        rng = f._rand_pool
+        rng = f._rng
         if not f.corpus or not f.seed_meta:
             return self._format_aware_seed()
         T = max(f._temperature, 0.01)
@@ -544,7 +544,7 @@ class SeedPicker:
             weights.append(max(w, 1e-6))
         total = sum(weights)
         if total <= 0:
-            return f._rand_pool.choice(f.corpus)
+            return f._rng.choice(f.corpus)
         r = rng.random() * total
         cumulative = 0.0
         for i, seed in enumerate(f.corpus):
@@ -575,7 +575,7 @@ class SeedPicker:
         empty.
         """
         f = self.f
-        rng = f._rand_pool
+        rng = f._rng
         if not f.corpus or not f.seed_meta:
             return self._format_aware_seed()
         mean_exec = f.mean_exec_time()
@@ -605,7 +605,7 @@ class SeedPicker:
     def _pick_pareto_only(self) -> bytes:
         f = self.f
         if len(f.corpus) < 3 or not f.seed_meta:
-            return f._rand_pool.choice(f.corpus)
+            return f._rng.choice(f.corpus)
         now = time.time()
         weights = [1.0] * len(f.corpus)
         return self._pick_from_pareto_front(weights, now)
@@ -621,7 +621,7 @@ class SeedPicker:
         if not f.corpus:
             return self._format_aware_seed()
         if not f._seed_quality:
-            return f._rand_pool.choice(f.corpus)
+            return f._rng.choice(f.corpus)
 
         # Build list of registered seed IDs (content hashes)
         seed_ids = [f._seed_key(s) for s in f.corpus]
@@ -644,12 +644,12 @@ class SeedPicker:
         """
         f = self.f
         if len(f.corpus) < 2:
-            return f._rand_pool.choice(f.corpus) if f.corpus else b""
+            return f._rng.choice(f.corpus) if f.corpus else b""
         from fuzzer_tool.core.similarity import find_nearest_bytes
 
         recent = getattr(f, "_recent_seeds", [])
         if not recent:
-            return f._rand_pool.choice(f.corpus)
+            return f._rng.choice(f.corpus)
         # Pick the seed least similar to any recently fuzzed seed
         worst_sim = 1.0
         worst_idx = 0
@@ -740,7 +740,7 @@ class SeedPicker:
                 + struct.pack("<I", 1)
             )
         # Generic: zero-filled random-length buffer
-        rng = f._rand_pool
+        rng = f._rng
         length = rng.randint(min(4, f.max_len), min(64, f.max_len))
         return bytes(rng.randint(0, 255) for _ in range(length))
 
@@ -1337,7 +1337,7 @@ class SeedPicker:
                     # symptom.
                     for sk, s in zip(seed_keys, corpus, strict=True)
                 ]
-                rng = getattr(f, "_rand_pool", None)
+                rng = getattr(f, "_rng", None)
                 sample_cap = 64
                 # Draw the peer pool once per pass instead of rebuilding
                 # `[k for k in all_sk if k != sk_i]` for every seed: that was

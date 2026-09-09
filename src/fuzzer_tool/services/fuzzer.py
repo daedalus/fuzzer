@@ -1675,7 +1675,7 @@ class Fuzzer:
         # already did -- and read it ~9,000 characters before it was
         # assigned, so `--cma-es` raised AttributeError at construction.
 
-        self._rand_pool = RandPool(seed=seed)
+        self._rng = RandPool(seed=seed)
 
         self.mc_cem = mc_cem
         # Opt-in Floyd cycle detection on the MC operator-transition
@@ -1712,7 +1712,7 @@ class Fuzzer:
                 # scheduling could not be replayed. Every other scheduler
                 # draws from the module-level `random` and is covered by the
                 # global seeding done at startup.
-                rng=self._rand_pool,
+                rng=self._rng,
                 pop_size=cmaes_pop_size,
                 generation_size=cmaes_generation_size,
                 step_size=cmaes_step_size,
@@ -1734,7 +1734,7 @@ class Fuzzer:
             from fuzzer_tool.core.schedulers.tang import TangRecommendationScheduler
 
             self._tang = TangRecommendationScheduler(
-                self._rand_pool, rank=tang_rank, refit_interval=tang_refit_interval
+                self._rng, rank=tang_rank, refit_interval=tang_refit_interval
             )
         self._use_ecofuzz = ecofuzz
         self._metropolis = metropolis
@@ -1782,13 +1782,13 @@ class Fuzzer:
         self._use_ducb = ducb
         self._ducb = None
         if ducb:
-            self._ducb = DUCBScheduler(gamma=ducb_gamma, rng=self._rand_pool)
+            self._ducb = DUCBScheduler(gamma=ducb_gamma, rng=self._rng)
             log.info("D-UCB enabled (gamma=%.5f)", ducb_gamma)
 
         self._use_swucb = swucb
         self._swucb = None
         if swucb:
-            self._swucb = SWUCBScheduler(window=swucb_window, rng=self._rand_pool)
+            self._swucb = SWUCBScheduler(window=swucb_window, rng=self._rng)
             log.info("SW-UCB enabled (window=%d)", swucb_window)
 
         # KL-UCB variants: same structure as D-UCB/SW-UCB but with
@@ -1797,13 +1797,13 @@ class Fuzzer:
         self._use_kl_ducb = kl_ducb
         self._kl_ducb = None
         if kl_ducb:
-            self._kl_ducb = KL_DUCBScheduler(gamma=kl_ducb_gamma, rng=self._rand_pool)
+            self._kl_ducb = KL_DUCBScheduler(gamma=kl_ducb_gamma, rng=self._rng)
             log.info("KL-D-UCB enabled (gamma=%.5f)", kl_ducb_gamma)
 
         self._use_kl_swucb = kl_swucb
         self._kl_swucb = None
         if kl_swucb:
-            self._kl_swucb = KL_SWUCBScheduler(window=kl_swucb_window, rng=self._rand_pool)
+            self._kl_swucb = KL_SWUCBScheduler(window=kl_swucb_window, rng=self._rng)
             log.info("KL-SW-UCB enabled (window=%d)", kl_swucb_window)
 
         # Combinatorial UCB: the only scheduler here that models the round's
@@ -1811,7 +1811,7 @@ class Fuzzer:
         self._use_cucb = cucb
         self._cucb = None
         if cucb:
-            self._cucb = CUCBScheduler(gamma=cucb_gamma, rng=self._rand_pool)
+            self._cucb = CUCBScheduler(gamma=cucb_gamma, rng=self._rng)
             log.info("CUCB enabled (gamma=%.5f)", cucb_gamma)
 
         # CUSUM-UCB (Liu, Lee & Shroff 2018): change-point detection instead
@@ -1825,7 +1825,7 @@ class Fuzzer:
                 epsilon=cusum_ucb_epsilon,
                 h=cusum_ucb_h,
                 xi=cusum_ucb_xi,
-                rng=self._rand_pool,
+                rng=self._rng,
             )
             log.info(
                 "CUSUM-UCB enabled (m=%d, epsilon=%.3f, h=%.2f, xi=%.2f)",
@@ -1840,7 +1840,7 @@ class Fuzzer:
         self._use_fpl = fpl
         self._fpl = None
         if fpl:
-            self._fpl = FPLScheduler(epsilon=fpl_epsilon, rng=self._rand_pool)
+            self._fpl = FPLScheduler(epsilon=fpl_epsilon, rng=self._rng)
             log.info("FPL enabled (epsilon=%.2f)", fpl_epsilon)
 
         # Round-robin: deterministic baseline. --seed should reproduce
@@ -3775,7 +3775,7 @@ class Fuzzer:
                 else:
                     _budget = 5
                 sample = self._cmplog.pairs[:]
-                _rand.shuffle(sample)
+                self._rng.shuffle(sample)
                 smt_counter = 0
                 for op_a, op_b in sample:
                     if smt_counter >= _budget:
@@ -5301,7 +5301,7 @@ class Fuzzer:
         random.seed(new_seed)
         self._seed_global_numpy(new_seed)
         if _HAS_NUMPY:
-            self._rand_pool.reseed(new_seed)
+            self._rng.reseed(new_seed)
         self._last_stall_seed = new_seed
         print(f"[*] Reseeded RNG → {new_seed} (stall reseed #{self._stall_reseed_count})")
         return new_seed
