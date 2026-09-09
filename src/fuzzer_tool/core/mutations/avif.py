@@ -33,13 +33,13 @@ full re-parsing round-trip fidelity is not needed for a corruption probe.
 
 from __future__ import annotations
 
-import random
 import struct
 from dataclasses import dataclass, field
 from typing import Any
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
 from fuzzer_tool.core.mutations.isobmff import Box, serialize_boxes
+from fuzzer_tool.core.rand_pool import RandPool
 
 # ftyp brands that mark a file as (an image derived from) AVIF
 AVIF_BRANDS = (b"avif", b"avis")
@@ -281,10 +281,14 @@ def _infe_entries(iinf_data: bytes) -> list[tuple[int, int]]:
 class AvifMutator:
     """Structure-aware AVIF mutator."""
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or self._rng
         doc = parse_avif(data)
         if doc is None:
             return self._generate_random_avif(max_len=max_len, rng=self._rng)
@@ -607,7 +611,7 @@ class AvifMutator:
 
     def _generate_random_avif(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate a minimal AVIF file: ftyp + meta(hdlr/pitm/iloc/iinf/iprp) + mdat."""
-        self._rng = rng or self._rng or random
+        self._rng = rng or self._rng
         r = self._rng
 
         ftyp_payload = b"avif" + struct.pack(">I", 0) + b"avifmif1miaf"

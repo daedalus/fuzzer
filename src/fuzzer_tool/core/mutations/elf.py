@@ -22,8 +22,9 @@ Throughput design:
 
 from __future__ import annotations
 
-import random
 import struct
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 _MAGIC = b"\x7fELF"
 
@@ -143,10 +144,6 @@ _SH_TYPES = (0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 14, 15, 16, 17, 18, 19, 0x6FFFFFF
 _P_TYPES = (0, 1, 2, 3, 4, 5, 6, 7, 0x6474E550, 0x6474E551, 0x6474E552, 0x70000000)
 
 
-def _get_rng(rng=None):
-    return rng or random
-
-
 def sniff_elf(data: bytes) -> bool:
     """Cheap magic + class/endianness sanity check."""
     return len(data) >= 64 and data[:4] == _MAGIC and data[4] in (1, 2) and data[5] in (1, 2)
@@ -203,10 +200,14 @@ class ElfMutator:
     an in-place patch, so a call costs the same regardless of binary size.
     """
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        self._rng = _get_rng(rng)
+        self._rng = rng or self._rng
         hdr = parse_elf_header(data)
         if hdr is None:
             return data

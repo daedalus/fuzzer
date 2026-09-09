@@ -19,9 +19,10 @@ bytes from their parsed fields only when a mutation changes them.
 
 from __future__ import annotations
 
-import random
 import struct
 from dataclasses import dataclass, field
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 MAGICS = (b"GIF87a", b"GIF89a")
 
@@ -212,10 +213,14 @@ def _find_first(nodes: list[GifNode], *kinds: str) -> GifNode | None:
 class GifMutator:
     """Structure-aware GIF mutator."""
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or self._rng
         nodes = parse_gif(data)
         if nodes is None:
             return self._generate_random_gif(max_len=max_len, rng=self._rng)

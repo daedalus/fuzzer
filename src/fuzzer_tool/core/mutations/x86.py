@@ -17,10 +17,10 @@ Immediate width follows the 66 prefix (operand16) and REX.W.
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 LEGACY_PREFIXES = {0x66, 0x67, 0xF0, 0xF2, 0xF3, 0x2E, 0x36, 0x3E, 0x26, 0x64, 0x65}
 
@@ -361,10 +361,14 @@ def _pack_imm(value: int, size: int) -> bytes:
 class X86Mutator:
     """Structure-aware x86/x86-64 mutator."""
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or self._rng
         insns = _decode_insns(data)
         if not insns:
             return self._generate_random_x86(max_len=max_len, rng=self._rng)

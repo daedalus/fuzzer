@@ -73,12 +73,15 @@ class TiffMutator:
     Targets IFD entry count overflow, offset wrapping, and tag manipulation.
     """
 
-    _rng: Any = None
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         """Apply one TIFF-specific mutation."""
-        self._rng = rng or RandPool()
-
+        self._rng = rng or self._rng
         header = parse_tiff(data)
         if not header or header.num_entries == 0:
             return self._generate_random_tiff(max_len=max_len, rng=self._rng)
@@ -132,8 +135,7 @@ class TiffMutator:
 
     def _generate_random_tiff(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate minimal TIFF with corrupt IFD."""
-        self._rng = rng or RandPool()
-
+        self._rng = rng or self._rng
         result = bytearray()
         result += b"II"  # little-endian
         result += struct.pack("<H", 0x002A)  # magic

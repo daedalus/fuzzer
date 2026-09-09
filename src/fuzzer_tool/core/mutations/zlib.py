@@ -17,6 +17,8 @@ import struct
 import zlib
 from dataclasses import dataclass
 
+from fuzzer_tool.core.rand_pool import RandPool
+
 ZLIB_MIN_SIZE = 6  # 2 header + 0 data + 4 trailer
 
 
@@ -164,16 +166,20 @@ class ZlibMutator:
     specific zlib structures for maximum code-path diversity.
     """
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         """Apply one structure-aware zlib mutation."""
-        self._rng = rng or random
+        self._rng = rng or self._rng
         info = parse_zlib(data)
         if info is None:
             return self._generate_random_zlib(max_len, rng=self._rng)
 
-        op = (self._rng or random).randint(0, 9)
+        op = self._rng.randint(0, 9)
         mutators = [
             self._mutate_cmf,
             self._mutate_flevel,
@@ -193,32 +199,32 @@ class ZlibMutator:
 
     def _mutate_cmf(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Corrupt the CMF byte (CM and CINFO)."""
-        method = (self._rng or random).randint(0, 3)
+        method = self._rng.randint(0, 3)
         if method == 0:
             # Valid CM=8, corrupt CINFO
-            info.cmf = 8 | ((self._rng or random).randint(0, 15) << 4)
+            info.cmf = 8 | (self._rng.randint(0, 15) << 4)
         elif method == 1:
             # Corrupt CM (not deflate)
-            info.cmf = (self._rng or random).randint(0, 255)
+            info.cmf = self._rng.randint(0, 255)
         elif method == 2:
             # Extreme CINFO (large window)
             info.cmf = 8 | (7 << 4)  # CINFO=7 → 32K window
         else:
-            info.cmf = (self._rng or random).randint(0, 255)
+            info.cmf = self._rng.randint(0, 255)
         return info
 
     def _mutate_flevel(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Corrupt the compression level hint in FLG."""
-        info.flevel = (self._rng or random).randint(0, 3)
+        info.flevel = self._rng.randint(0, 3)
         return info
 
     def _mutate_deflate_stream(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Flip random bytes in the deflate stream."""
         if info.compressed_data:
             data = bytearray(info.compressed_data)
-            for _ in range((self._rng or random).randint(1, min(8, len(data)))):
-                pos = (self._rng or random).randint(0, len(data) - 1)
-                data[pos] ^= 1 << (self._rng or random).randint(0, 7)
+            for _ in range(self._rng.randint(1, min(8, len(data)))):
+                pos = self._rng.randint(0, len(data) - 1)
+                data[pos] ^= 1 << self._rng.randint(0, 7)
             info.compressed_data = bytes(data)
         return info
 
@@ -226,16 +232,16 @@ class ZlibMutator:
         """Replace a chunk of the deflate stream with random data."""
         if info.compressed_data and len(info.compressed_data) > 4:
             data = bytearray(info.compressed_data)
-            chunk_start = (self._rng or random).randint(0, len(data) - 2)
-            chunk_len = (self._rng or random).randint(1, min(16, len(data) - chunk_start))
+            chunk_start = self._rng.randint(0, len(data) - 2)
+            chunk_len = self._rng.randint(1, min(16, len(data) - chunk_start))
             for i in range(chunk_start, chunk_start + chunk_len):
-                data[i] = (self._rng or random).randint(0, 255)
+                data[i] = self._rng.randint(0, 255)
             info.compressed_data = bytes(data)
         return info
 
     def _corrupt_trailer(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Corrupt the Adler-32 trailer."""
-        info.adler32 = (self._rng or random).randint(0, 0xFFFFFFFF)
+        info.adler32 = self._rng.randint(0, 0xFFFFFFFF)
         return info
 
     def _swap_header_nibbles(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
@@ -252,26 +258,26 @@ class ZlibMutator:
     def _inject_junk_before_deflate(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Inject random bytes between header and deflate stream."""
         junk = bytes(
-            (self._rng or random).randint(0, 255)
-            for _ in range((self._rng or random).randint(1, 32))
+            self._rng.randint(0, 255)
+            for _ in range(self._rng.randint(1, 32))
         )
         info.compressed_data = junk + info.compressed_data
         return info
 
     def _mutate_window_size(self, info: ZlibInfo, max_len: int) -> ZlibInfo:
         """Change the window size (CINFO field)."""
-        info.cinfo = (self._rng or random).randint(0, 7)
+        info.cinfo = self._rng.randint(0, 7)
         return info
 
     def _generate_random_zlib(self, info_or_max=None, max_len: int = 4096, rng=None) -> bytes:
         """Generate a minimal random zlib stream from scratch."""
-        self._rng = rng or random
+        self._rng = rng or self._rng
         if isinstance(info_or_max, int):
             max_len = info_or_max
 
         # Random uncompressed data
-        payload_len = (self._rng or random).randint(1, min(128, max_len - 10))
-        payload = bytes((self._rng or random).randint(0, 255) for _ in range(payload_len))
+        payload_len = self._rng.randint(1, min(128, max_len - 10))
+        payload = bytes(self._rng.randint(0, 255) for _ in range(payload_len))
 
         # Compress with deflate (wbits=15 for zlib format)
         compressor = zlib.compressobj(9, zlib.DEFLATED, zlib.MAX_WBITS)

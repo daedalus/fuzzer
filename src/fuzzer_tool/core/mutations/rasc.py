@@ -10,6 +10,8 @@ import struct
 from dataclasses import dataclass
 from typing import Any
 
+from fuzzer_tool.core.rand_pool import RandPool
+
 
 @dataclass
 class RascChunk:
@@ -52,8 +54,12 @@ class RascMutator:
     Targets chunk size/offset corruption and sequence header tampering.
     """
 
-    _rng: Any = None
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         """Apply one RASC-specific mutation."""
         self._rng = rng or self._rng

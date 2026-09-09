@@ -53,12 +53,15 @@ class ShnMutator:
     Targets frame header corruption and linear prediction coefficient manipulation.
     """
 
-    _rng: Any = None
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         """Apply one Shorten-specific mutation."""
-        self._rng = rng or RandPool()
-
+        self._rng = rng or self._rng
         frame_header = parse_shn_frame_header(data)
         if not frame_header:
             return self._generate_random_shn(max_len=max_len, rng=self._rng)
@@ -137,8 +140,7 @@ class ShnMutator:
 
     def _generate_random_shn(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate minimal Shorten frame with corrupt header."""
-        self._rng = rng or RandPool()
-
+        self._rng = rng or self._rng
         result = bytearray()
         result += struct.pack("<H", 0xFFFF)  # sample_rate (signed overflow)
         result += struct.pack("B", 0xFF)  # bits_per_sample (overflow)

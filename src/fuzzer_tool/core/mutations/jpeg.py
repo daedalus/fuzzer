@@ -12,6 +12,8 @@ import random
 import struct
 from dataclasses import dataclass
 
+from fuzzer_tool.core.rand_pool import RandPool
+
 # JPEG marker constants
 SOI = 0xD8
 EOI = 0xD9
@@ -210,18 +212,22 @@ class JpegMutator:
     specific JPEG structures for maximum code-path diversity.
     """
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         """Apply one structure-aware JPEG mutation."""
-        self._rng = rng or random
+        self._rng = rng or self._rng
         markers = parse_jpeg_markers(data)
         if markers is None or len(markers) < 2:
             return self._generate_random_jpeg(max_len, rng=self._rng)
 
-        op = (self._rng or random).randint(0, 15)
+        op = self._rng.randint(0, 15)
         mutators = [
             self._mutate_sof,
             self._mutate_dht,
@@ -254,23 +260,23 @@ class JpegMutator:
             return markers
 
         data = bytearray(sof.data)
-        field = (self._rng or random).randint(0, 3)
+        field = self._rng.randint(0, 3)
         if field == 0 and len(data) >= 1:
             # Sample precision (typically 8)
-            data[0] = (self._rng or random).choice([8, 12, 16, 0, 255])
+            data[0] = self._rng.choice([8, 12, 16, 0, 255])
         elif field == 1 and len(data) >= 3:
             # Height (2 bytes big-endian)
             h = struct.unpack(">H", data[1:3])[0]
-            h = _corrupt_value(h, max_val=65535, rng=self._rng or random)
+            h = _corrupt_value(h, max_val=65535, rng=self._rng)
             struct.pack_into(">H", data, 1, h)
         elif field == 2 and len(data) >= 5:
             # Width (2 bytes big-endian)
             w = struct.unpack(">H", data[3:5])[0]
-            w = _corrupt_value(w, max_val=65535, rng=self._rng or random)
+            w = _corrupt_value(w, max_val=65535, rng=self._rng)
             struct.pack_into(">H", data, 3, w)
         elif field == 3 and len(data) >= 6:
             # Number of components
-            data[5] = (self._rng or random).choice([1, 3, 4, 0, 255])
+            data[5] = self._rng.choice([1, 3, 4, 0, 255])
 
         sof.data = bytes(data)
         return markers
@@ -282,14 +288,14 @@ class JpegMutator:
             return markers
 
         data = bytearray(dht.data)
-        if (self._rng or random).random() < 0.3:
+        if self._rng.random() < 0.3:
             # Corrupt the class/type byte
-            data[0] ^= (self._rng or random).randint(1, 0xFF)
+            data[0] ^= self._rng.randint(1, 0xFF)
         else:
             # Corrupt a random value in the table
             if len(data) > 17:
-                idx = (self._rng or random).randint(17, len(data) - 1)
-                data[idx] ^= 1 << (self._rng or random).randint(0, 7)
+                idx = self._rng.randint(17, len(data) - 1)
+                data[idx] ^= 1 << self._rng.randint(0, 7)
 
         dht.data = bytes(data)
         return markers
@@ -301,14 +307,14 @@ class JpegMutator:
             return markers
 
         data = bytearray(dqt.data)
-        if (self._rng or random).random() < 0.3:
+        if self._rng.random() < 0.3:
             # Corrupt the precision/table ID byte
-            data[0] ^= (self._rng or random).randint(1, 0xFF)
+            data[0] ^= self._rng.randint(1, 0xFF)
         else:
             # Corrupt a random quantization value
             if len(data) > 2:
-                idx = (self._rng or random).randint(2, len(data) - 1)
-                data[idx] = (self._rng or random).randint(0, 255)
+                idx = self._rng.randint(2, len(data) - 1)
+                data[idx] = self._rng.randint(0, 255)
 
         dqt.data = bytes(data)
         return markers
@@ -321,14 +327,14 @@ class JpegMutator:
             if len(dri.data) >= 2:
                 data = bytearray(dri.data)
                 val = struct.unpack(">H", data[0:2])[0]
-                val = _corrupt_value(val, max_val=65535, rng=self._rng or random)
+                val = _corrupt_value(val, max_val=65535, rng=self._rng)
                 struct.pack_into(">H", data, 0, val)
                 dri.data = bytes(data)
         else:
             # Inject a DRI marker before SOS
             sos_idx = _find_marker_index(markers, SOS)
             if sos_idx is not None:
-                dri_data = struct.pack(">H", (self._rng or random).randint(0, 100))
+                dri_data = struct.pack(">H", self._rng.randint(0, 100))
                 markers.insert(sos_idx, JpegMarker(marker=DRI, data=dri_data))
         return markers
 
@@ -339,17 +345,17 @@ class JpegMutator:
             return markers
 
         data = bytearray(sos.data)
-        field = (self._rng or random).randint(0, 2)
+        field = self._rng.randint(0, 2)
         if field == 0 and len(data) >= 1:
             # Number of components
-            data[0] = (self._rng or random).choice([1, 3, 0, 255])
+            data[0] = self._rng.choice([1, 3, 0, 255])
         elif field == 1 and len(data) >= 4:
             # Spectral selection start/end
-            data[1] = (self._rng or random).randint(0, 63)
-            data[2] = (self._rng or random).randint(0, 63)
+            data[1] = self._rng.randint(0, 63)
+            data[2] = self._rng.randint(0, 63)
         elif field == 2 and len(data) >= 4:
             # Successive approximation
-            data[3] = (self._rng or random).randint(0, 15)
+            data[3] = self._rng.randint(0, 15)
 
         sos.data = bytes(data)
         return markers
@@ -360,13 +366,13 @@ class JpegMutator:
         if not app_markers:
             return markers
 
-        target = (self._rng or random).choice(app_markers)
+        target = self._rng.choice(app_markers)
         if len(target.data) < 2:
             return markers
 
         data = bytearray(target.data)
-        idx = (self._rng or random).randint(0, len(data) - 1)
-        data[idx] ^= 1 << (self._rng or random).randint(0, 7)
+        idx = self._rng.randint(0, len(data) - 1)
+        data[idx] ^= 1 << self._rng.randint(0, 7)
         target.data = bytes(data)
         return markers
 
@@ -377,7 +383,7 @@ class JpegMutator:
         if not candidates:
             return markers
 
-        src_idx = (self._rng or random).choice(candidates)
+        src_idx = self._rng.choice(candidates)
         src = markers[src_idx]
         # Truncate large markers to avoid blowing up size
         clone_data = src.data[: min(len(src.data), 64)]
@@ -391,7 +397,7 @@ class JpegMutator:
         candidates = [i for i, m in enumerate(markers) if m.marker not in (SOI, EOI, SOF0, SOF2)]
         if not candidates:
             return markers
-        idx = (self._rng or random).choice(candidates)
+        idx = self._rng.choice(candidates)
         markers.pop(idx)
         return markers
 
@@ -402,7 +408,7 @@ class JpegMutator:
         candidates = [i for i, m in enumerate(markers) if m.marker not in (SOI,)]
         if len(candidates) < 2:
             return markers
-        a, b = (self._rng or random).sample(candidates, 2)
+        a, b = self._rng.sample(candidates, 2)
         markers[a], markers[b] = markers[b], markers[a]
         return markers
 
@@ -443,7 +449,7 @@ class JpegMutator:
                 wave.superpositions[cell][tid] = True
 
         result = wave.run(
-            seed=(self._rng or random).randint(0, 2**31), max_restarts=3, ac3_budget=2000
+            seed=self._rng.randint(0, 2**31), max_restarts=3, ac3_budget=2000
         )
         if not result or not result[0]:
             return self._random_swap_markers(markers)
@@ -490,7 +496,7 @@ class JpegMutator:
         candidates = [i for i, m in enumerate(markers) if m.marker not in (SOI,)]
         if len(candidates) < 2:
             return markers
-        a, b = (self._rng or random).sample(candidates, 2)
+        a, b = self._rng.sample(candidates, 2)
         markers[a], markers[b] = markers[b], markers[a]
         return markers
 
@@ -508,10 +514,10 @@ class JpegMutator:
         if len(sos.data) > 0:
             data = bytearray(sos.data)
             # Flip a few bits
-            for _ in range((self._rng or random).randint(1, 4)):
+            for _ in range(self._rng.randint(1, 4)):
                 if data:
-                    idx = (self._rng or random).randint(0, len(data) - 1)
-                    data[idx] ^= 1 << (self._rng or random).randint(0, 7)
+                    idx = self._rng.randint(0, len(data) - 1)
+                    data[idx] ^= 1 << self._rng.randint(0, 7)
             sos.data = bytes(data)
         return markers
 
@@ -522,14 +528,14 @@ class JpegMutator:
             # Corrupt existing comment
             if com.data:
                 data = bytearray(com.data)
-                idx = (self._rng or random).randint(0, len(data) - 1)
-                data[idx] = (self._rng or random).randint(0x20, 0x7E)  # printable ASCII
+                idx = self._rng.randint(0, len(data) - 1)
+                data[idx] = self._rng.randint(0x20, 0x7E)  # printable ASCII
                 com.data = bytes(data)
         else:
             # Inject a new comment before EOI
             comment = bytes(
-                (self._rng or random).randint(0x20, 0x7E)
-                for _ in range((self._rng or random).randint(4, 32))
+                self._rng.randint(0x20, 0x7E)
+                for _ in range(self._rng.randint(4, 32))
             )
             eoi_idx = _find_marker_index(markers, EOI)
             if eoi_idx is not None:
@@ -562,9 +568,9 @@ class JpegMutator:
         if not candidates:
             return markers
 
-        target = (self._rng or random).choice(candidates)
+        target = self._rng.choice(candidates)
         # Replace data with random length
-        new_len = (self._rng or random).randint(0, min(len(target.data) + 10, 256))
+        new_len = self._rng.randint(0, min(len(target.data) + 10, 256))
         target.data = target.data[:new_len]
         return markers
 
@@ -580,8 +586,8 @@ class JpegMutator:
         # Find table boundaries: each table is 1 byte header + 64 or 128 values
         # Simple approach: swap two random bytes in the data portion
         if len(data) > 4:
-            a = (self._rng or random).randint(2, len(data) - 1)
-            b = (self._rng or random).randint(2, len(data) - 1)
+            a = self._rng.randint(2, len(data) - 1)
+            b = self._rng.randint(2, len(data) - 1)
             data[a], data[b] = data[b], data[a]
             dqt.data = bytes(data)
         return markers
@@ -592,7 +598,7 @@ class JpegMutator:
         Called from dispatch as _generate_random_jpeg(markers, max_len) or
         standalone as _generate_random_jpeg(max_len=N).
         """
-        self._rng = rng or random
+        self._rng = rng or self._rng
         if isinstance(markers_or_max, int):
             max_len = markers_or_max
 
@@ -608,16 +614,16 @@ class JpegMutator:
 
         # DQT
         precision_id = 0x00  # 8-bit
-        qt = bytes((self._rng or random).randint(1, 255) for _ in range(64))
+        qt = bytes(self._rng.randint(1, 255) for _ in range(64))
         dqt_data = bytes([precision_id]) + qt
         buf.extend(b"\xff\xdb")
         buf.extend(struct.pack(">H", len(dqt_data) + 2))
         buf.extend(dqt_data)
 
         # SOF0
-        height = (self._rng or random).randint(1, 256)
-        width = (self._rng or random).randint(1, 256)
-        num_components = (self._rng or random).choice([1, 3])
+        height = self._rng.randint(1, 256)
+        width = self._rng.randint(1, 256)
+        num_components = self._rng.choice([1, 3])
         sof_data = bytearray()
         sof_data.append(8)  # precision
         sof_data.extend(struct.pack(">H", height))
@@ -636,17 +642,17 @@ class JpegMutator:
         counts = bytearray(16)
         symbols = bytearray()
         # Create a table with a few symbols
-        num_symbols = (self._rng or random).randint(1, 8)
+        num_symbols = self._rng.randint(1, 8)
         for i in range(min(num_symbols, 16)):
             counts[i] = 1
-            symbols.append((self._rng or random).randint(0, 0xFF))
+            symbols.append(self._rng.randint(0, 0xFF))
         dht_data = bytes([0x10]) + bytes(counts) + bytes(symbols)  # AC, ID 0
         buf.extend(b"\xff\xc4")
         buf.extend(struct.pack(">H", len(dht_data) + 2))
         buf.extend(dht_data)
 
         # DRI
-        restart_interval = (self._rng or random).randint(0, 10)
+        restart_interval = self._rng.randint(0, 10)
         buf.extend(b"\xff\xdd")
         buf.extend(struct.pack(">H", 4))  # length = 4
         buf.extend(struct.pack(">H", restart_interval))
@@ -668,8 +674,8 @@ class JpegMutator:
         # Avoid 0xFF bytes — the parser interprets them as marker starts
         room = max_len - len(buf) - 2
         if room > 0:
-            scan_len = (self._rng or random).randint(1, min(256, room))
-            buf.extend(bytes((self._rng or random).randint(0, 0xFE) for _ in range(scan_len)))
+            scan_len = self._rng.randint(1, min(256, room))
+            buf.extend(bytes(self._rng.randint(0, 0xFE) for _ in range(scan_len)))
 
         # EOI
         buf.extend(b"\xff\xd9")

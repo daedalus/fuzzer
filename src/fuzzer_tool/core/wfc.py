@@ -26,11 +26,12 @@ Reference: Gumin, "Wave Function Collapse" 2016 (github.com/mxgmn/WaveFunctionCo
 from __future__ import annotations
 
 import collections
-import random
 from dataclasses import dataclass
 from typing import Literal
 
 import numpy as np
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 # ── Direction constants ───────────────────────────────────────────────
 
@@ -173,6 +174,7 @@ class WaveGrid:
         adjacency: AdjacencyTable,
         width: int,
         height: int = 1,
+        seed=None,
     ):
         self.tiles = tiles
         self.adjacency = adjacency
@@ -184,7 +186,8 @@ class WaveGrid:
         # Local RNG. Every stochastic choice in this class draws from here
         # rather than the ``random`` module, so a seeded run is reproducible
         # without disturbing any other consumer of the global stream.
-        self._rng = random.Random()
+        rng = RandPool(seed=seed)
+        self._rng = rng
 
         # Precompute tile weights as array for vectorized operations
         self._weights = np.array([t.weight for t in tiles], dtype=np.float64)
@@ -246,7 +249,7 @@ class WaveGrid:
             the cell couldn't be collapsed (budget exhausted).
         """
         if seed is not None:
-            self._rng = random.Random(seed)
+            self._rng.reseed(seed)
 
         # Capture whatever constraints the caller applied before running, so
         # _reset() can restore them instead of wiping them.
@@ -256,7 +259,7 @@ class WaveGrid:
             if attempt > 0:
                 self._reset()
                 if seed is not None:
-                    self._rng = random.Random(seed + attempt * 7919)
+                    self._rng.reseed(seed + attempt * 7919)
 
             self.contradiction = False
             self._budget_exhausted = False

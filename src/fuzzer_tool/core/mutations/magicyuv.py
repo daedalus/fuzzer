@@ -112,9 +112,16 @@ class MagicYUVMutator:
     Also corrupts width/height/stride to create edge-case arithmetic.
     """
 
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         """Apply one MagicYUV-specific mutation."""
-        self._rng = rng or RandPool()
+        self._rng = rng or self._rng
         parsed = parse_avi_chunks(data)
         if not parsed:
             return self._generate_random_magicyuv(max_len, rng=self._rng)

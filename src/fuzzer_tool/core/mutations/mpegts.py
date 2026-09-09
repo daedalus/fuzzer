@@ -29,10 +29,10 @@ demux stage that unwraps them before nal.py's target code ever runs.
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass, field
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 PACKET_SIZE = 188
 SYNC_BYTE = 0x47
@@ -155,10 +155,14 @@ def _pat_pids(packets: list[TsPacket]) -> list[int]:
 class MpegtsMutator:
     """Structure-aware MPEG-TS packet-level mutator."""
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or self._rng
         packets = parse_ts_packets(data)
         if not packets:
             return self._generate_random_ts(max_len=max_len, rng=self._rng)

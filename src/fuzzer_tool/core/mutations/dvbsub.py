@@ -53,12 +53,15 @@ class DvbsubMutator:
     Targets CVE-2026-70628: buffer size/offset overflow.
     """
 
-    _rng: Any = None
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         """Apply one DVBSub-specific mutation."""
-        self._rng = rng or RandPool()
-
+        self._rng = rng or self._rng
         buffers = parse_dvbsub(data)
         if not buffers:
             return self._generate_random_dvbsub(max_len=max_len, rng=self._rng)
@@ -113,8 +116,7 @@ class DvbsubMutator:
 
     def _generate_random_dvbsub(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate minimal data with malicious DVBSub structure."""
-        self._rng = rng or RandPool()
-
+        self._rng = rng or self._rng
         result = bytearray()
         result += struct.pack("<I", 0x10000000)  # size
         result += struct.pack("<I", 0xFFFFFFFF)  # offset (signed overflow)

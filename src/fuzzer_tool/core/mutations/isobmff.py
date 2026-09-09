@@ -311,10 +311,14 @@ def _mutate_stsd_codec(box: Box, rng: Any) -> None:
 class IsobmffMutator:
     """Structure-aware ISO-BMFF box mutator."""
 
-    _rng: Any = None
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        self._rng = rng or RandPool()
+        self._rng = rng or self._rng
         boxes = parse_boxes(data)
         if boxes is None or not boxes:
             return self._generate_random_isobmff(max_len=max_len, rng=self._rng)

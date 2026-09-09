@@ -22,8 +22,9 @@ Usage:
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass, field
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 # Maximum nesting depth the parser recurses into; deeper nodes are kept as
 # opaque leaves so adversarial nesting cannot blow up the recursion.
@@ -219,8 +220,12 @@ class DerMutator:
     parse or no valid mutation site exists (callers fall back).
     """
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     @staticmethod
     def _all_nodes(nodes: list[DerNode]) -> list[DerNode]:
         out: list[DerNode] = []

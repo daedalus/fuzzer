@@ -51,11 +51,11 @@ cell.
 
 from __future__ import annotations
 
-import random
 import struct
 from typing import Any
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 MAGIC = b"SQLite format 3\x00"
 
@@ -306,10 +306,14 @@ def _cell_starts(page: bytearray, is_page1: bool) -> list[int]:
 class SqliteMutator:
     """Structure-aware SQLite database file mutator."""
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or self._rng
         doc = parse_sqlite(data)
         if doc is None:
             return self._generate_random_sqlite(max_len=max_len, rng=self._rng)
@@ -523,7 +527,7 @@ class SqliteMutator:
         valid *empty* single-page database when ``max_len`` is too small to
         hold two pages.
         """
-        self._rng = rng or self._rng or random
+        self._rng = rng or self._rng
         r = self._rng
 
         # Largest legal page size that leaves room for both pages.

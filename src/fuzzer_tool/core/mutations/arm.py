@@ -13,11 +13,11 @@ is a 16-bit Thumb instruction.
 
 from __future__ import annotations
 
-import random
 import struct
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 # Interesting word values for arithmetic mutation
 WORD_VALUES = [0x00000000, 0x00000001, 0x0000FFFF, 0x7FFFFFFF, 0x80000000, 0xFFFFFFFF]
@@ -136,10 +136,14 @@ def _set_value(word: Word, value: int) -> None:
 class ArmMutator:
     """Structure-aware ARM mutator."""
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or self._rng
         words = parse_arm(data)
         if words is None:
             return self._generate_random_arm(max_len=max_len, rng=self._rng)

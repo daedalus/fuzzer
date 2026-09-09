@@ -18,11 +18,11 @@ recomputes only the outer RIFF size field.
 
 from __future__ import annotations
 
-import random
 import struct
 from dataclasses import dataclass, field
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 # Chunk fourcc values that can be swapped in
 CHUNK_TYPES = [b"VP8 ", b"VP8L", b"VP8X", b"ANIM", b"ANMF", b"ALPH", b"EXIF", b"ICCP", b"XMP "]
@@ -125,10 +125,14 @@ def _mutate_u24(payload: bytearray, off: int, value: int) -> None:
 class WebpMutator:
     """Structure-aware WebP mutator."""
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or self._rng
         chunks = parse_webp(data)
         if chunks is None:
             return self._generate_random_webp(max_len=max_len, rng=self._rng)

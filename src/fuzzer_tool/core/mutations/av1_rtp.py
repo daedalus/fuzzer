@@ -68,12 +68,15 @@ class Av1RtpMutator:
     Targets temporal_id/spatial_id corruption and OBU size overflow.
     """
 
-    _rng: Any = None
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         """Apply one AV1 over RTP-specific mutation."""
-        self._rng = rng or RandPool()
-
+        self._rng = rng or self._rng
         obus = parse_av1_obus(data)
         if not obus:
             return self._generate_random_av1(max_len=max_len, rng=self._rng)
@@ -135,7 +138,7 @@ class Av1RtpMutator:
 
     def _generate_random_av1(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate minimal AV1 OBU with corrupt temporal_id/spatial_id."""
-        self._rng = rng or RandPool()
+        self._rng = rng or self._rng
         r = self._rng
 
         result = bytearray()

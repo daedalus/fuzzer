@@ -22,10 +22,10 @@ NAL types (H.265): 19=IDR_W_RADL, 20=IDR_N_LP, 32=VPS, 33=SPS, 34=PPS
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass, field
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 # Start code patterns
 START_CODE_3 = b"\x00\x00\x01"
@@ -160,10 +160,14 @@ def serialize_nal_units(units: list[NalUnit]) -> bytes:
 class NalMutator:
     """Structure-aware NAL unit bitstream mutator."""
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or self._rng
         units = parse_nal_units(data)
         if units is None or not units:
             return self._generate_random_nal_stream(max_len=max_len, rng=self._rng)

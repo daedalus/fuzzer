@@ -258,10 +258,14 @@ WIRE_VALUES = [0, 1, 2, 5]
 class ProtobufMutator:
     """Structure-aware protobuf mutator."""
 
-    _rng: RandPool = None
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        self._rng = rng or RandPool()
+        self._rng = rng or self._rng
         fields = parse_protobuf(data)
         if fields is None:
             return self._generate_random_protobuf(max_len=max_len, rng=self._rng)

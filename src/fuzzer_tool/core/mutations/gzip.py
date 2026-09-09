@@ -14,6 +14,7 @@ import zlib
 from dataclasses import dataclass
 
 from fuzzer_tool.core.crc32 import crc32
+from fuzzer_tool.core.rand_pool import RandPool
 
 GZIP_MAGIC = b"\x1f\x8b"
 DEFLATE = 8
@@ -190,16 +191,20 @@ class GzipMutator:
     specific gzip structures for maximum code-path diversity.
     """
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         """Apply one structure-aware gzip mutation."""
-        self._rng = rng or random
+        self._rng = rng or self._rng
         info = parse_gzip(data)
         if info is None:
             return self._generate_random_gzip(max_len, rng=self._rng)
 
-        op = (self._rng or random).randint(0, 11)
+        op = self._rng.randint(0, 11)
         mutators = [
             self._mutate_flags,
             self._mutate_method,
@@ -221,29 +226,29 @@ class GzipMutator:
 
     def _mutate_flags(self, info: GzipInfo, max_len: int) -> GzipInfo:
         """Corrupt the flags byte."""
-        info.header[3] = (self._rng or random).randint(0, 15)
+        info.header[3] = self._rng.randint(0, 15)
         return info
 
     def _mutate_method(self, info: GzipInfo, max_len: int) -> GzipInfo:
         """Corrupt the compression method."""
-        info.header[2] = (self._rng or random).choice([8, 0, 1, 2, 255])
+        info.header[2] = self._rng.choice([8, 0, 1, 2, 255])
         return info
 
     def _mutate_xfl_os(self, info: GzipInfo, max_len: int) -> GzipInfo:
         """Corrupt XFL or OS fields."""
-        if (self._rng or random).random() < 0.5:
-            info.header[8] = (self._rng or random).randint(0, 255)  # XFL
+        if self._rng.random() < 0.5:
+            info.header[8] = self._rng.randint(0, 255)  # XFL
         else:
-            info.header[9] = (self._rng or random).randint(0, 255)  # OS
+            info.header[9] = self._rng.randint(0, 255)  # OS
         return info
 
     def _mutate_deflate_stream(self, info: GzipInfo, max_len: int) -> GzipInfo:
         """Flip random bytes in the deflate stream."""
         if info.compressed_data:
             data = bytearray(info.compressed_data)
-            for _ in range((self._rng or random).randint(1, min(8, len(data)))):
-                pos = (self._rng or random).randint(0, len(data) - 1)
-                data[pos] ^= 1 << (self._rng or random).randint(0, 7)
+            for _ in range(self._rng.randint(1, min(8, len(data)))):
+                pos = self._rng.randint(0, len(data) - 1)
+                data[pos] ^= 1 << self._rng.randint(0, 7)
             info.compressed_data = bytes(data)
         return info
 
@@ -251,19 +256,19 @@ class GzipMutator:
         """Replace a chunk of the deflate stream with random data."""
         if info.compressed_data and len(info.compressed_data) > 4:
             data = bytearray(info.compressed_data)
-            chunk_start = (self._rng or random).randint(0, len(data) - 2)
-            chunk_len = (self._rng or random).randint(1, min(16, len(data) - chunk_start))
+            chunk_start = self._rng.randint(0, len(data) - 2)
+            chunk_len = self._rng.randint(1, min(16, len(data) - chunk_start))
             for i in range(chunk_start, chunk_start + chunk_len):
-                data[i] = (self._rng or random).randint(0, 255)
+                data[i] = self._rng.randint(0, 255)
             info.compressed_data = bytes(data)
         return info
 
     def _corrupt_trailer(self, info: GzipInfo, max_len: int) -> GzipInfo:
         """Corrupt the CRC32 or original size in the trailer."""
-        if (self._rng or random).random() < 0.5:
-            info.original_crc = (self._rng or random).randint(0, 0xFFFFFFFF)
+        if self._rng.random() < 0.5:
+            info.original_crc = self._rng.randint(0, 0xFFFFFFFF)
         else:
-            info.original_size = (self._rng or random).randint(0, 0xFFFFFFFF)
+            info.original_size = self._rng.randint(0, 0xFFFFFFFF)
         return info
 
     def _swap_trailer_fields(self, info: GzipInfo, max_len: int) -> GzipInfo:
@@ -278,8 +283,8 @@ class GzipMutator:
     def _inject_junk_before_deflate(self, info: GzipInfo, max_len: int) -> GzipInfo:
         """Inject random bytes between header and deflate stream."""
         junk = bytes(
-            (self._rng or random).randint(0, 255)
-            for _ in range((self._rng or random).randint(1, 32))
+            self._rng.randint(0, 255)
+            for _ in range(self._rng.randint(1, 32))
         )
         info.compressed_data = junk + info.compressed_data
         return info
@@ -289,14 +294,14 @@ class GzipMutator:
         if info.flags & FEXTRA and info.extra:
             data = bytearray(info.extra)
             if data:
-                idx = (self._rng or random).randint(0, len(data) - 1)
-                data[idx] = (self._rng or random).randint(0, 255)
+                idx = self._rng.randint(0, len(data) - 1)
+                data[idx] = self._rng.randint(0, 255)
                 info.extra = bytes(data)
         else:
             # Inject extra field
             extra_data = bytes(
-                (self._rng or random).randint(0, 255)
-                for _ in range((self._rng or random).randint(2, 16))
+                self._rng.randint(0, 255)
+                for _ in range(self._rng.randint(2, 16))
             )
             info.flags |= FEXTRA
             info.extra = extra_data
@@ -307,21 +312,21 @@ class GzipMutator:
         if info.compressed_data:
             data = bytearray(info.compressed_data)
             # Flip block-type bits in the first byte
-            data[0] ^= (self._rng or random).randint(1, 7)
+            data[0] ^= self._rng.randint(1, 7)
             info.compressed_data = bytes(data)
         return info
 
     def _generate_random_gzip(self, info_or_max=None, max_len: int = 4096, rng=None) -> bytes:
         """Generate a minimal random gzip from scratch."""
-        self._rng = rng or random
+        self._rng = rng or self._rng
         if isinstance(info_or_max, GzipInfo):
             max_len = max_len
         elif isinstance(info_or_max, int):
             max_len = info_or_max
 
         # Random uncompressed data
-        payload_len = (self._rng or random).randint(1, min(128, max_len - 20))
-        payload = bytes((self._rng or random).randint(0, 255) for _ in range(payload_len))
+        payload_len = self._rng.randint(1, min(128, max_len - 20))
+        payload = bytes(self._rng.randint(0, 255) for _ in range(payload_len))
 
         # Compress with deflate
         compressor = zlib.compressobj(9, zlib.DEFLATED, -zlib.MAX_WBITS)

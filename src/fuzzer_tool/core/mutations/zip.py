@@ -21,12 +21,12 @@ byte-identically.
 
 from __future__ import annotations
 
-import random
 import struct
 from dataclasses import dataclass
 
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 # Interesting compression methods to swap in
 METHOD_VALUES = [0, 8, 9, 12, 14, 93, 0xFFFF]
@@ -252,10 +252,14 @@ def _locate_eocd(raw: bytes) -> int:
 class ZipMutator:
     """Structure-aware ZIP mutator."""
 
-    _rng = random
-
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or self._rng
         doc = parse_zip(data)
         if doc is None:
             return self._generate_random_zip(max_len=max_len, rng=self._rng)

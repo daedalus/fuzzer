@@ -8,8 +8,7 @@ mismatch → OOB write.
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass, field
-from typing import Any
+from dataclasses import dataclass
 
 from fuzzer_tool.core.rand_pool import RandPool
 
@@ -205,7 +204,6 @@ def parse_jp2_boxes(data: bytes) -> list | None:
     return []
 
 
-@dataclass
 class Jpeg2000Mutator:
     """Structure-aware JPEG2000 mutator.
 
@@ -216,7 +214,12 @@ class Jpeg2000Mutator:
     - cdef: Channel definition (CVE-2025-9951 target)
     """
 
-    _rng: Any = field(default_factory=RandPool)
+    def __init__(self, seed=None):
+        # One pool per mutator, built once. Callers that own a pool pass it
+        # as ``rng=`` and it wins for that call; this is the standalone
+        # default, never the stdlib module (Hard Rule 16).
+        rng = RandPool(seed=seed)
+        self._rng = rng
 
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
         """Apply one JPEG2000-specific mutation."""
