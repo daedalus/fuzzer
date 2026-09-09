@@ -35,8 +35,9 @@ Reference: Kocsis & Szepesvári, "Bandit based Monte-Carlo Planning" (ECML
 from __future__ import annotations
 
 import math
-import random
 from typing import TYPE_CHECKING
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 if TYPE_CHECKING:
     from fuzzer_tool.core.lineage import LineageTree
@@ -83,11 +84,11 @@ class MCTSSeedScheduler:
         self,
         exploration: float = DEFAULT_EXPLORATION,
         max_depth: int = 64,
-        rng: random.Random | None = None,
+        rng: RandPool | None = None,
     ):
         self.exploration = exploration
         self.max_depth = max_depth
-        self._rng = rng or random.Random()
+        self._rng = rng if rng is not None else RandPool()
 
         # key -> accumulated visits / squashed reward, including priors.
         # Aggregate stats cover a node *and everything below it*, and drive the
@@ -314,11 +315,11 @@ class AlphaBetaMCTSSeedScheduler:
         self,
         exploration: float = DEFAULT_EXPLORATION,
         max_depth: int = 64,
-        rng: random.Random | None = None,
+        rng: RandPool | None = None,
     ):
         self.exploration = exploration
         self.max_depth = max_depth
-        self._rng = rng or random.Random()
+        self._rng = rng if rng is not None else RandPool()
 
         # Visit counts and values for alpha-beta search (not UCT)
         self.visits: dict[str, float] = {}

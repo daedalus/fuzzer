@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 from .mutations import (
     byte_insert,
@@ -175,53 +176,53 @@ class Speciation:
 
 # Standalone mutation functions for GA breeding
 _GA_MUTATION_OPS = [
-    lambda data: _mutate_byte_flip(data),
-    lambda data: _mutate_random_bytes(data),
-    lambda data: _mutate_block_insert(data),
-    lambda data: _mutate_block_delete(data),
-    lambda data: type_replace(data),
-    lambda data: byte_shuffle(data),
-    lambda data: byte_insert(data),
-    lambda data: insert_ascii_num(data),
+    lambda data, rng: _mutate_byte_flip(data, rng),
+    lambda data, rng: _mutate_random_bytes(data, rng),
+    lambda data, rng: _mutate_block_insert(data, rng),
+    lambda data, rng: _mutate_block_delete(data, rng),
+    lambda data, rng: type_replace(data),
+    lambda data, rng: byte_shuffle(data),
+    lambda data, rng: byte_insert(data),
+    lambda data, rng: insert_ascii_num(data),
 ]
 
 
-def _mutate_byte_flip(data: bytes) -> bytes:
+def _mutate_byte_flip(data: bytes, rng: RandPool) -> bytes:
     """Flip a random byte at a random position."""
     if len(data) < 1:
         return data
     buf = bytearray(data)
-    pos = random.randint(0, len(buf) - 1)
+    pos = rng.randint(0, len(buf) - 1)
     buf[pos] ^= 0xFF
     return bytes(buf)
 
 
-def _mutate_random_bytes(data: bytes) -> bytes:
+def _mutate_random_bytes(data: bytes, rng: RandPool) -> bytes:
     """Replace a random byte with a random value."""
     if len(data) < 1:
         return data
     buf = bytearray(data)
-    pos = random.randint(0, len(buf) - 1)
-    buf[pos] = random.randint(0, 255)
+    pos = rng.randint(0, len(buf) - 1)
+    buf[pos] = rng.randint(0, 255)
     return bytes(buf)
 
 
-def _mutate_block_insert(data: bytes) -> bytes:
+def _mutate_block_insert(data: bytes, rng: RandPool) -> bytes:
     """Insert a random block at a random position."""
     if len(data) < 1:
         return data
-    pos = random.randint(0, len(data))
-    block_len = random.randint(1, min(16, max(1, len(data) // 4)))
-    block = bytes(random.randint(0, 255) for _ in range(block_len))
+    pos = rng.randint(0, len(data))
+    block_len = rng.randint(1, min(16, max(1, len(data) // 4)))
+    block = bytes(rng.randint(0, 255) for _ in range(block_len))
     return data[:pos] + block + data[pos:]
 
 
-def _mutate_block_delete(data: bytes) -> bytes:
+def _mutate_block_delete(data: bytes, rng: RandPool) -> bytes:
     """Delete a random block."""
     if len(data) <= 1:
         return data
-    pos = random.randint(0, len(data) - 1)
-    block_len = random.randint(1, min(16, max(1, len(data) // 4)))
+    pos = rng.randint(0, len(data) - 1)
+    block_len = rng.randint(1, min(16, max(1, len(data) // 4)))
     end = min(pos + block_len, len(data))
     return data[:pos] + data[end:]
 
@@ -243,6 +244,7 @@ class GALifecycle:
         generation_size: int = 500,
         speciation_threshold: float = 0.3,
         fitness: FitnessFunction | None = None,
+        rng: RandPool | None = None,
     ):
         self.pop_size = pop_size
         self.elite_fraction = elite_fraction
@@ -252,6 +254,7 @@ class GALifecycle:
         self.generation_size = generation_size
         self.speciation_threshold = speciation_threshold
         self.fitness = fitness or FitnessFunction()
+        self._rng = rng or RandPool()
 
         self.population: list[Individual] = []
         self.generation = 0
@@ -316,12 +319,12 @@ class GALifecycle:
         If speciation is active, selects within species with 50% probability,
         otherwise selects globally. Uses tournament selection.
         """
-        if self._speciation and random.random() < 0.5:
+        if self._speciation and self._rng.random() < 0.5:
             # Intra-species selection
             species_map = self._get_species_map()
             eligible = [s for s in species_map.values() if len(s) >= 2]
             if eligible:
-                pool = random.choice(eligible)
+                pool = self._rng.choice(eligible)
                 return self._tournament_select(pool)
         return self._tournament_select(self.population)
 
@@ -352,7 +355,7 @@ class GALifecycle:
         if n <= 1:
             return pool[0]
         k = min(self.tournament_size, n)
-        u = random.random()
+        u = self._rng.random()
         # Clip u to avoid log(0) or pow issues with tiny values
         u = max(u, 1e-10)
         rank = int(n * (1.0 - u ** (1.0 / k)))
@@ -390,12 +393,12 @@ class GALifecycle:
             parent_a = self.select_parent()
             parent_b = self.select_parent()
 
-            if random.random() < self.crossover_rate:
+            if self._rng.random() < self.crossover_rate:
                 child_data = self._crossover(parent_a.data, parent_b.data)
             else:
                 child_data = parent_a.data  # clone
 
-            if random.random() < self.mutation_rate:
+            if self._rng.random() < self.mutation_rate:
                 child_data = self._mutate(child_data)
 
             child = Individual(
@@ -410,14 +413,14 @@ class GALifecycle:
 
     def _crossover(self, a: bytes, b: bytes) -> bytes:
         """Two-point crossover using existing mutations.crossover."""
-        if random.random() < 0.5:
+        if self._rng.random() < 0.5:
             return crossover(a, b)
         return splice(a, b)
 
     def _mutate(self, data: bytes) -> bytes:
         """Apply a random mutation from available operators."""
-        op = random.choice(_GA_MUTATION_OPS)
-        result = op(data)
+        op = self._rng.choice(_GA_MUTATION_OPS)
+        result = op(data, self._rng)
         return result if result else data
 
     def _evaluate_all(self, edge_tracker: EdgeTracker):

@@ -35,7 +35,7 @@ def _legacy_walk(scores, buf_len, r):
 
 def _draw(tracker, seed_key, buf_len, r_val):
     """Run get_weighted_position with a fixed random.random() return."""
-    with patch("fuzzer_tool.core.sensitivity.random.random", return_value=r_val):
+    with patch.object(tracker._rng.__class__, "random", return_value=r_val):
         return tracker.get_weighted_position(seed_key, buf_len)
 
 

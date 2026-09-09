@@ -10,6 +10,7 @@ Also tracks Brier score (binary CRPS) for bandit calibration diagnostics.
 import collections
 import logging
 import math
+import time
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
@@ -722,6 +723,7 @@ class MonteCarloScheduler:
             samples = self._null_js_samples_python(
                 pooled,
                 self._JS_NULL_REPLICATES_NO_NUMPY,
+                self._rng,
                 deadline=deadline,
                 min_replicates=min(self._JS_NULL_MIN_REPLICATES, 4),
             )
@@ -813,7 +815,11 @@ class MonteCarloScheduler:
 
     @staticmethod
     def _null_js_samples_python(
-        pooled, replicates: int, deadline: float | None = None, min_replicates: int = 4
+        pooled,
+        replicates: int,
+        rng: RandPool,
+        deadline: float | None = None,
+        min_replicates: int = 4,
     ) -> list[float]:
         per_pos = []
         for counts, n1, n2 in pooled:
@@ -831,7 +837,7 @@ class MonteCarloScheduler:
             acc = 0.0
             for observations, n1, n2 in per_pos:
                 shuffled = observations[:]
-                self._rng.shuffle(shuffled)
+                rng.shuffle_list(shuffled)
                 a: dict[int, int] = {}
                 for k in shuffled[:n1]:
                     a[k] = a.get(k, 0) + 1

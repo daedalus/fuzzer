@@ -54,7 +54,7 @@ def parse_tiff(data: bytes) -> TiffHeader | None:
     entry_size = 12
     ifd_pos = offset + 2
 
-    for i in range(min(num_entries, 100)):
+    for _i in range(min(num_entries, 100)):
         if ifd_pos + entry_size > len(data):
             break
         tag = struct.unpack_from("<H", data, ifd_pos)[0]
@@ -133,7 +133,6 @@ class TiffMutator:
     def _generate_random_tiff(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate minimal TIFF with corrupt IFD."""
         self._rng = rng or RandPool()
-        r = self._rng
 
         result = bytearray()
         result += b"II"  # little-endian

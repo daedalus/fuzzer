@@ -104,11 +104,13 @@ def _all_operator_schedulers():
             lambda n, ok: lin.record(n, _ctx(n), 1.0 if ok else 0.0),
         ),
         ("DUCBScheduler", ducb, ducb.select_op, ducb.record),
+        ("FPLScheduler", fpl := S.FPLScheduler(), fpl.select_op, fpl.record),
         ("SWUCBScheduler", swucb, swucb.select_op, swucb.record),
         ("KL_DUCBScheduler", kl_ducb, kl_ducb.select_op, kl_ducb.record),
         ("KL_SWUCBScheduler", kl_swucb, kl_swucb.select_op, kl_swucb.record),
         # CUCB batches a round; select_op() closes any round left open.
         ("CUCBScheduler", cucb, cucb.select_op, cucb.record),
+        ("CUSUM_UCBScheduler", cusum := S.CUSUM_UCBScheduler(), cusum.select_op, cusum.record),
         # RoundRobin is stateless in terms of rewards; record() is no-op.
         (
             "RoundRobinScheduler",

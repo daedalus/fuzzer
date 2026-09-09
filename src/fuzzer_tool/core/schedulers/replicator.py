@@ -1,8 +1,9 @@
 """ReplicatorScheduler: replicator-dynamics bandit over the operator simplex."""
 
 import collections
-import random
 from collections import defaultdict
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 class ReplicatorScheduler:
@@ -38,7 +39,9 @@ class ReplicatorScheduler:
         window_size: int = 200,
         learning_rate: float = 0.1,
         mutation_rate: float = 0.02,
+        rng: RandPool | None = None,
     ):
+        self._rng = rng if rng is not None else RandPool()
         self.window_size = window_size
         self.eta = learning_rate
         self.mutation_rate = mutation_rate
@@ -90,10 +93,10 @@ class ReplicatorScheduler:
 
         total = sum(probs)
         if total <= 0:
-            return random.choice(ops)
+            return self._rng.choice(ops)
 
         # Roulette wheel selection
-        r = random.random() * total
+        r = self._rng.random() * total
         cumulative = 0.0
         for op, p in zip(ops, probs, strict=False):
             cumulative += p

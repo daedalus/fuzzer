@@ -18,10 +18,11 @@ perturbation completely changed the execution trace (high sensitivity);
 """
 
 import logging
-import random
 from array import array
 from bisect import bisect_left
 from itertools import accumulate
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 log = logging.getLogger(__name__)
 
@@ -42,6 +43,7 @@ class ByteSensitivityTracker:
         max_seeds: int = 100,
         max_bytes: int = 4096,
         sample_rate: float = 0.1,
+        rng: RandPool | None = None,
     ):
         self.max_seeds = max_seeds
         self.max_bytes = max_bytes
@@ -53,6 +55,7 @@ class ByteSensitivityTracker:
         # when a seed's scores change or are evicted.
         self._cum_cache: dict[bytes, array] = {}
         self._cum_cache_limit = 500
+        self._rng = rng or RandPool()
 
     def analyze_seed(
         self,
@@ -80,12 +83,12 @@ class ByteSensitivityTracker:
             return []
 
         sample_size = max(1, int(n * self.sample_rate))
-        positions = random.sample(range(n), min(sample_size, n))
+        positions = self._rng.sample(range(n), min(sample_size, n))
 
         scores = [0.0] * n
         for pos in positions:
             perturbed = bytearray(seed)
-            perturbed[pos] = random.randint(0, 255)
+            perturbed[pos] = self._rng.randint(0, 255)
             try:
                 perturbed_edges = exec_fn(bytes(perturbed))
                 if original_edges and perturbed_edges:
@@ -131,7 +134,7 @@ class ByteSensitivityTracker:
         if total <= 0:
             return None
 
-        r = random.random() * total
+        r = self._rng.random() * total
 
         # Weighted pick via cached cumulative sums + bisect: "first i with
         # cumulative >= r" == bisect_left. Negative scores (only possible via

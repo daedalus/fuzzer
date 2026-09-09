@@ -16,10 +16,10 @@ were canonically encoded (non-canonical varints are normalized).
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutations.generic import _swap_pair
+from fuzzer_tool.core.rand_pool import RandPool
 
 MAX_FIELD_NUM = (1 << 29) - 1
 
@@ -226,7 +226,7 @@ def _varint_value(payload: bytes) -> int | None:
     return value
 
 
-def _mutate_varint_payload(field: Field, rng: random.Random) -> None:
+def _mutate_varint_payload(field: Field, rng: RandPool) -> None:
     """Replace a wire-0 payload with a canonically-encoded mutated value."""
     value = _varint_value(field.raw_payload)
     if value is None:
@@ -258,10 +258,10 @@ WIRE_VALUES = [0, 1, 2, 5]
 class ProtobufMutator:
     """Structure-aware protobuf mutator."""
 
-    _rng = random
+    _rng: RandPool = None
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
-        self._rng = rng or random
+        self._rng = rng or RandPool()
         fields = parse_protobuf(data)
         if fields is None:
             return self._generate_random_protobuf(max_len=max_len, rng=self._rng)

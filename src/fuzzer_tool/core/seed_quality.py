@@ -22,7 +22,7 @@ Usage:
 
 from __future__ import annotations
 
-import random
+from fuzzer_tool.core.rand_pool import RandPool
 
 # Minimum parameter floor to avoid degenerate Beta(0, 0)
 MIN_BETA_PARAM = 1e-6
@@ -31,7 +31,7 @@ MIN_BETA_PARAM = 1e-6
 _UNIT_PARAM = 1.0
 
 
-def _beta_sample(alpha: float, beta: float) -> float:
+def _beta_sample(alpha: float, beta: float, rng: RandPool) -> float:
     """Draw from Beta(*alpha*, *beta*), by inverse CDF when one side is 1.
 
     Beta(a, 1) and Beta(1, b) invert in closed form::
@@ -45,16 +45,16 @@ def _beta_sample(alpha: float, beta: float) -> float:
     seed first discovers coverage, and per-seed discovery is rare: 83% of
     arms degenerate at 500 seeds, 95% at 2000, 99% at 8000.
 
-    Entropy comes from ``random`` on both branches, so ``--seed`` keeps
+    Entropy comes from ``rng`` on both branches, so ``--seed`` keeps
     determining the draw.
     """
     if alpha == _UNIT_PARAM:
-        return 1.0 - (1.0 - random.random()) ** (1.0 / beta)
+        return 1.0 - (1.0 - rng.random()) ** (1.0 / beta)
 
     if beta == _UNIT_PARAM:
-        return random.random() ** (1.0 / alpha)
+        return rng.random() ** (1.0 / alpha)
 
-    return random.betavariate(alpha, beta)
+    return rng.betavariate(alpha, beta)
 
 
 class BayesianSeedQuality:
@@ -95,6 +95,7 @@ class BayesianSeedQuality:
         decay: float = 1.0,
         decay_interval: int = 500,
         hierarchical_pooling: float = 0.0,
+        rng: RandPool | None = None,
     ):
         self._prior_alpha = max(prior_alpha, MIN_BETA_PARAM)
         self._prior_beta = max(prior_beta, MIN_BETA_PARAM)
@@ -114,6 +115,7 @@ class BayesianSeedQuality:
         # Pooled counts for hierarchical shrinkage
         self._pooled_successes = 0
         self._pooled_failures = 0
+        self._rng = rng or RandPool()
 
     def init_seed(
         self,
@@ -243,7 +245,7 @@ class BayesianSeedQuality:
             A float in (0, 1) drawn from the posterior.
         """
         a, b = self._get_pooled_params(seed_id)
-        return _beta_sample(a, b)
+        return _beta_sample(a, b, self._rng)
 
     def select_index(self, seed_ids: list[str]) -> int:
         """Return the *position* of the Thompson winner in *seed_ids*.

@@ -14,8 +14,9 @@ Renyi spectrum, rate-distortion and edge-tracker modules.
 from __future__ import annotations
 
 import math
-import random
 from collections.abc import Hashable
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 class F0Estimator:
@@ -31,7 +32,9 @@ class F0Estimator:
         Upper bound on stream length (used to size the threshold).
     """
 
-    def __init__(self, eps: float = 0.1, delta: float = 1e-6, m: int = 1_000_000) -> None:
+    def __init__(
+        self, eps: float = 0.1, delta: float = 1e-6, m: int = 1_000_000, rng: RandPool | None = None
+    ) -> None:
         if not (0 < eps < 1):
             raise ValueError("eps must be in (0, 1)")
         if not (0 < delta < 1):
@@ -42,6 +45,7 @@ class F0Estimator:
         self.eps = eps
         self.delta = delta
         self.m = m
+        self._rng = rng or RandPool()
         # thresh ≈ (2/ε²) · ln(8m/δ)
         self.thresh = math.ceil((2.0 / (eps**2)) * math.log((8.0 * m) / delta))
         self.X: set[Hashable] = set()
@@ -64,14 +68,14 @@ class F0Estimator:
             self.X.remove(a)
 
         # Re-sample with current probability p
-        if random.random() < self.p:
+        if self._rng.random() < self.p:
             self.X.add(a)
 
         # Down-sample when the working set reaches the threshold
         if len(self.X) == self.thresh:
             new_X: set[Hashable] = set()
             for x in self.X:
-                if random.random() < 0.5:
+                if self._rng.random() < 0.5:
                     new_X.add(x)
             self.X = new_X
             self.p /= 2.0

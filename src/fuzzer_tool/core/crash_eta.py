@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import bisect
 import math
-import random
 import re
 from dataclasses import dataclass
 
 import numpy as _np
 
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.target_profiler import TargetProfile
 
 # Matches error-related keywords in function names and rodata strings.
@@ -40,6 +40,7 @@ class CrashMITracker:
     Args:
         max_positions: Maximum byte positions to track.
         min_observations: Minimum observations before computing MI.
+        rng: Random number pool for sampling.
     """
 
     #: Positions past this are not tracked even if ``max_positions`` is
@@ -49,9 +50,12 @@ class CrashMITracker:
     #: ``min_observations`` samples of its own.
     DENSE_POSITION_CAP = 65536
 
-    def __init__(self, max_positions: int = 4096, min_observations: int = 20):
+    def __init__(
+        self, max_positions: int = 4096, min_observations: int = 20, rng: RandPool | None = None
+    ):
         self.max_positions = max_positions
         self.min_observations = min_observations
+        self._rng = rng or RandPool()
         # Per-position byte histograms, dense.
         #
         # These were dict[int, dict[int, int]] and record() walked every
@@ -266,8 +270,8 @@ class CrashMITracker:
         prefix = self._cached_prefix
         eligible_mass = prefix[idx - 1]
         if eligible_mass <= 0.0:
-            return self._cached_positions[random.randrange(idx)]
-        r = random.random() * eligible_mass
+            return self._cached_positions[self._rng.randrange(idx)]
+        r = self._rng.random() * eligible_mass
         # prefix is non-decreasing, so the first entry >= r is the pick.
         i = bisect.bisect_left(prefix, r, 0, idx)
         if i >= idx:

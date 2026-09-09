@@ -10,8 +10,6 @@ import struct
 from dataclasses import dataclass
 from typing import Any
 
-from fuzzer_tool.core.rand_pool import RandPool
-
 
 @dataclass
 class CfhdFrameHeader:
@@ -50,7 +48,7 @@ class CfhdMutator:
 
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         """Apply one CFHD-specific mutation."""
-        self._rng = rng or RandPool()
+        self._rng = rng or self._rng
 
         frame_header = parse_cfhd_frame_header(data)
         if not frame_header or frame_header.block_count == 0:
@@ -126,8 +124,7 @@ class CfhdMutator:
 
     def _generate_random_cfhd(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate minimal CFHD frame with corrupt header."""
-        self._rng = rng or RandPool()
-        r = self._rng
+        self._rng = rng or self._rng
 
         result = bytearray()
         result += struct.pack("<I", 0x100)  # version

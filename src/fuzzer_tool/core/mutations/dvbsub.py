@@ -114,7 +114,6 @@ class DvbsubMutator:
     def _generate_random_dvbsub(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate minimal data with malicious DVBSub structure."""
         self._rng = rng or RandPool()
-        r = self._rng
 
         result = bytearray()
         result += struct.pack("<I", 0x10000000)  # size

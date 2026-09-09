@@ -9,10 +9,10 @@ import collections
 import json
 import logging
 import math
-import random
 from array import array
 
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
+from fuzzer_tool.core.rand_pool import RandPool
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class MarkovChain:
         4
     """
 
-    def __init__(self, order: int = 1, smoothing: float = 0.01):
+    def __init__(self, order: int = 1, smoothing: float = 0.01, rng: RandPool | None = None):
         self.order = order
         self.smoothing = smoothing
         self.transitions: dict[bytes, collections.Counter] = collections.defaultdict(
@@ -59,6 +59,7 @@ class MarkovChain:
         self._snapshot_interval: int = 50  # snapshot every N train_corpus calls
         self._trains_since_snapshot: int = 0
         self._global_freq: collections.Counter = collections.Counter()
+        self._rng = rng or RandPool()
 
     def train(self, data: bytes) -> None:
         """Learn byte transitions from a single input.
@@ -119,11 +120,11 @@ class MarkovChain:
                 if self._global_freq:
                     result.append(self._global_freq.most_common(1)[0][0])
                 else:
-                    result.append(random.randint(0, 255))
+                    result.append(self._rng.randint(0, 255))
                 ctx = bytes(result[max(0, len(result) - self.order) :])
                 continue
             total = sum(counts.values()) + self.smoothing * 256
-            r = random.random() * total
+            r = self._rng.random() * total
             cumulative = 0.0
             for byte_val, count in counts.items():
                 cumulative += count + self.smoothing
@@ -131,7 +132,7 @@ class MarkovChain:
                     result.append(byte_val)
                     break
             else:
-                result.append(random.randint(0, 255))
+                result.append(self._rng.randint(0, 255))
             ctx = bytes(result[max(0, len(result) - self.order) :])
         return bytes(result)
 
@@ -148,15 +149,15 @@ class MarkovChain:
         if counts is None or not counts:
             if self._global_freq:
                 return self._global_freq.most_common(1)[0][0]
-            return random.randint(0, 255)
+            return self._rng.randint(0, 255)
         total = sum(counts.values()) + self.smoothing * 256
-        r = random.random() * total
+        r = self._rng.random() * total
         cumulative = 0.0
         for byte_val, count in counts.items():
             cumulative += count + self.smoothing
             if r <= cumulative:
                 return byte_val
-        return random.randint(0, 255)
+        return self._rng.randint(0, 255)
 
     def codelength(self, data: bytes) -> float:
         """Compute cross-entropy of input under the trained model (in bits).
@@ -416,13 +417,15 @@ class MarkovEnsemble:
         orders: list[int] | None = None,
         smoothing: float = 0.01,
         blend: bool = False,
+        rng: RandPool | None = None,
     ):
         if orders is None:
             orders = [0, 1, 2]
         self.orders = orders
         self.blend = blend
+        self._rng = rng or RandPool()
         self.chains: dict[int, MarkovChain] = {
-            o: MarkovChain(order=o, smoothing=smoothing) for o in orders
+            o: MarkovChain(order=o, smoothing=smoothing, rng=self._rng) for o in orders
         }
         # Convenience attributes for compatibility with single-chain code
         self.order = orders[0] if orders else 0
@@ -465,7 +468,7 @@ class MarkovEnsemble:
             weights.append(w)
 
         total = sum(weights)
-        r = random.random() * total
+        r = self._rng.random() * total
         cumulative = 0.0
         for i, w in enumerate(weights):
             cumulative += w

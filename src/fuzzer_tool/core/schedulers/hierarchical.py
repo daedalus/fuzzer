@@ -1,8 +1,7 @@
 """HierarchicalBanditScheduler: two-level (category → operator) bandit."""
 
-import random
-
 from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES, category_of
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 class HierarchicalBanditScheduler:
@@ -39,7 +38,9 @@ class HierarchicalBanditScheduler:
         arm_decay: float = 0.999,
         decay_interval: int = 100,
         max_pseudocount: float = 200.0,
+        rng: RandPool | None = None,
     ):
+        self._rng = rng if rng is not None else RandPool()
         self.arm_decay = arm_decay
         self.decay_interval = decay_interval
         # Ceiling on alpha + beta for any posterior. Beta(a, b) has variance
@@ -148,7 +149,7 @@ class HierarchicalBanditScheduler:
 
         # If no categorical mapping found, fall back to uniform random
         if not avail_cats:
-            return random.choice(ops)
+            return self._rng.choice(ops)
 
         # Apply periodic decay to both levels
         if (
@@ -169,7 +170,7 @@ class HierarchicalBanditScheduler:
         for cat in cat_ops:
             a = self.cat_alpha.get(cat, 1.0)
             b = self.cat_beta.get(cat, 1.0)
-            cat_scores[cat] = random.betavariate(a, b)
+            cat_scores[cat] = self._rng.betavariate(a, b)
         chosen_cat = max(cat_scores, key=cat_scores.get)
 
         # Bottom-level: Thompson sample operators within the chosen category
@@ -178,7 +179,7 @@ class HierarchicalBanditScheduler:
         for op in op_candidates:
             a = self.op_alpha.get(op, 1.0)
             b = self.op_beta.get(op, 1.0)
-            op_scores[op] = random.betavariate(a, b)
+            op_scores[op] = self._rng.betavariate(a, b)
         return max(op_scores, key=op_scores.get)
 
     def record(self, name: str, success: bool, weight: float = 1.0) -> None:

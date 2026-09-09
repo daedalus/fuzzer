@@ -15,6 +15,8 @@ import threading
 import time
 from typing import TYPE_CHECKING
 
+from fuzzer_tool.core.rand_pool import RandPool
+
 if TYPE_CHECKING:
     from fuzzer_tool.services.corpus_manager import PoissonDiskAdmission as _PoissonDiskAdmission
 from array import array
@@ -1666,7 +1668,6 @@ class Fuzzer:
         # following Hard Rule 16 takes it as its `rng`. CMAESScheduler
         # already did -- and read it ~9,000 characters before it was
         # assigned, so `--cma-es` raised AttributeError at construction.
-        from fuzzer_tool.core.rand_pool import RandPool
 
         self._rand_pool = RandPool(seed=seed)
 
@@ -2614,9 +2615,9 @@ class Fuzzer:
         std = self._boost_std if self._boost_std is not None else self._corpus_boost / 6.0
         std = max(std, 1.0)
         target_sizes = [
-            max(1, min(int(random.gauss(mean, std)), self._corpus_boost)) for _ in range(n)
+            max(1, min(int(self._rng.gauss(mean, std)), self._corpus_boost)) for _ in range(n)
         ]
-        random.shuffle(target_sizes)
+        self._rng.shuffle(target_sizes)
         self.corpus = [
             self._resize_seed(s, t) for s, t in zip(self.corpus, target_sizes, strict=False)
         ]
@@ -2683,7 +2684,7 @@ class Fuzzer:
         if self._boost_pad == "zero":
             return seed + b"\x00" * need
         if self._boost_pad == "random":
-            return seed + bytes(random.randrange(256) for _ in range(need))
+            return seed + bytes(self._rng.randrange(256) for _ in range(need))
         # "repeat" (default): AFL-style cyclic padding
         if len(seed) == 0:
             return b"\x00" * target_size
@@ -3259,7 +3260,7 @@ class Fuzzer:
                 edges = shm.cumulative_edges if shm else 0
                 weights.append(1.0 / max(edges, 1))
             total = sum(weights)
-            r = random.random() * total
+            r = self._rng.random() * total
             cumulative = 0.0
             for idx, w in enumerate(weights):
                 cumulative += w
@@ -3742,8 +3743,6 @@ class Fuzzer:
                 else:
                     _budget = 5
                 sample = self._cmplog.pairs[:]
-                import random as _rand
-
                 _rand.shuffle(sample)
                 smt_counter = 0
                 for op_a, op_b in sample:
@@ -4672,7 +4671,7 @@ class Fuzzer:
         # ── Metropolis acceptance for non-improving / non-crashing inputs ──
         if self._metropolis and self._anneal_budget > 0 and not is_timeout:
             p_accept = math.exp(-1.0 / max(self._temperature, 0.01))
-            if random.random() < p_accept:
+            if self._rng.random() < p_accept:
                 _corpus_len_before = len(self.corpus)
                 self.save_to_corpus(mutated, parent=data)
                 self._record_lineage_insert(mutated, data, _corpus_len_before)

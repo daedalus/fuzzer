@@ -21,9 +21,9 @@ Usage:
 import json
 import logging
 import math
-import random
 from array import array
 
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.running_stats import RunningMoments
 
 log = logging.getLogger(__name__)
@@ -34,13 +34,14 @@ log = logging.getLogger(__name__)
 _UCB_MIN_SAMPLES_BASE = 20
 
 
-def _softmax_select(scored: list[tuple[str, float]], temperature: float) -> str:
+def _softmax_select(scored: list[tuple[str, float]], temperature: float, rng: RandPool) -> str:
     """Weighted random selection via softmax over scored items.
 
     Args:
         scored: List of (name, score) tuples.  Scores can be on any scale
             — the softmax handles relative differences.
         temperature: Higher = more uniform, lower = more greedy.
+        rng: Random number pool for the draw.
 
     Returns:
         Selected name.
@@ -53,7 +54,7 @@ def _softmax_select(scored: list[tuple[str, float]], temperature: float) -> str:
     # Clamp to prevent underflow when max_s == min_s (all equal)
     weights = [math.exp((s - max_s) / max(temperature, 1e-9)) for _, s in scored]
     total = sum(weights)
-    r = random.random() * total
+    r = rng.random() * total
     cumulative = 0.0
     for i, (name, _) in enumerate(scored):
         cumulative += weights[i]
@@ -214,6 +215,7 @@ class EloTracker(RoundRecorderMixin):
         crash_track: bool = True,
         min_matches: int = 10,
         use_minimax: bool = False,
+        rng: RandPool | None = None,
     ):
         self.k_factor = k_factor
         self.default_rating = default_rating
@@ -221,6 +223,7 @@ class EloTracker(RoundRecorderMixin):
         self.crash_track = crash_track
         self.min_matches = min_matches
         self.use_minimax = use_minimax
+        self._rng = rng or RandPool()
 
         self.ratings: dict[str, float] = {}
         self.crash_ratings: dict[str, float] = {}
@@ -306,12 +309,12 @@ class EloTracker(RoundRecorderMixin):
 
         # Pure UCB selection
         if ucb_ready and not elo_only:
-            return _softmax_select(ucb_ready, temperature)
+            return _softmax_select(ucb_ready, temperature, self._rng)
 
         # Pure Elo selection
         if elo_only and not ucb_ready:
             scored = [(op, self.ratings.get(op, self.default_rating)) for op in elo_only]
-            return _softmax_select(scored, temperature)
+            return _softmax_select(scored, temperature, self._rng)
 
         # Both groups exist — probabilistically pick which group to draw from,
         # weighted by total sample count in each group.  This keeps both
@@ -319,11 +322,11 @@ class EloTracker(RoundRecorderMixin):
         # while avoiding the scale-mismatch bug.
         total_ucb = sum(self._reward_moments[op].count for op, _ in ucb_ready)
         total_elo = sum(self._match_count.get(op, 0) for op in elo_only)
-        if random.random() < total_ucb / (total_ucb + total_elo):
-            return _softmax_select(ucb_ready, temperature)
+        if self._rng.random() < total_ucb / (total_ucb + total_elo):
+            return _softmax_select(ucb_ready, temperature, self._rng)
         else:
             scored = [(op, self.ratings.get(op, self.default_rating)) for op in elo_only]
-            return _softmax_select(scored, temperature)
+            return _softmax_select(scored, temperature, self._rng)
 
     def get_reward_moments(self, op: str) -> RunningMoments | None:
         """Get reward statistics for an operator (for diagnostics)."""
@@ -410,7 +413,7 @@ class EloTracker(RoundRecorderMixin):
         max_r = max(ratings)
         weights = [math.exp((r - max_r) / temperature) for r in ratings]
         total = sum(weights)
-        r = random.random() * total
+        r = self._rng.random() * total
         cumulative = 0.0
         for i, w in enumerate(weights):
             cumulative += w
@@ -435,7 +438,7 @@ class EloTracker(RoundRecorderMixin):
         max_r = max(ratings)
         weights = [math.exp((r - max_r) / temperature) for r in ratings]
         total = sum(weights)
-        r = random.random() * total
+        r = self._rng.random() * total
         cumulative = 0.0
         for i, w in enumerate(weights):
             cumulative += w
@@ -513,7 +516,7 @@ class EloTracker(RoundRecorderMixin):
         max_r = max(ratings)
         weights = [math.exp((r - max_r) / temperature) for r in ratings]
         total = sum(weights)
-        r = random.random() * total
+        r = self._rng.random() * total
         cumulative = 0.0
         for i, w in enumerate(weights):
             cumulative += w
@@ -563,7 +566,7 @@ class EloTracker(RoundRecorderMixin):
             use_minimax is False or no data available.
         """
         if not self.use_minimax or not schedulers or not targets:
-            return random.choice(schedulers) if schedulers else ""
+            return self._rng.choice(schedulers) if schedulers else ""
 
         best_scheduler = None
         min_max_regret = float("inf")
@@ -577,7 +580,7 @@ class EloTracker(RoundRecorderMixin):
                 min_max_regret = max_regret
                 best_scheduler = scheduler
 
-        return best_scheduler if best_scheduler is not None else random.choice(schedulers)
+        return best_scheduler if best_scheduler is not None else self._rng.choice(schedulers)
 
     def get_rating(self, name: str) -> float:
         """Get current Elo rating for an operator."""
@@ -826,7 +829,7 @@ class BayesianEloTracker(RoundRecorderMixin):
         """Draw from the operator's posterior N(mu, sigma)."""
         mu = self.mu.get(name, self.initial_mu)
         sigma = math.sqrt(self.sigma_sq.get(name, self.initial_sigma**2))
-        return random.gauss(mu, sigma)
+        return self._rng.gauss(mu, sigma)
 
     def select_op(self, operators: list[str], temperature: float | None = None) -> str:
         """Select an operator via Thompson sampling from posteriors.
@@ -902,7 +905,7 @@ class BayesianEloTracker(RoundRecorderMixin):
         samples = [
             (
                 s,
-                random.gauss(
+                self._rng.gauss(
                     self._strategy_mu.get(s, self.initial_mu),
                     math.sqrt(self._strategy_sigma_sq.get(s, self.initial_sigma**2)),
                 ),

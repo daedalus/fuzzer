@@ -5,8 +5,9 @@ space rather than each operator's marginal success rate.
 """
 
 import collections
-import random
 from collections import defaultdict
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 #: Fractional jitter applied to initial particle positions. Enough to give
 #: PSO a gradient; small enough that no operator starts strongly favoured.
@@ -25,10 +26,12 @@ class _MOptParticle:
         "name",
         "discoveries",
         "execs_in_window",
+        "_rng",
     )
 
-    def __init__(self, name: str, n_ops: int, spread: float = _INIT_SPREAD):
+    def __init__(self, name: str, n_ops: int, spread: float = _INIT_SPREAD, rng=None):
         self.name = name
+        self._rng = rng
         # Randomized initial distribution, jittered around uniform.
         #
         # Every particle used to start at exactly 1/n with zero velocity.
@@ -41,7 +44,7 @@ class _MOptParticle:
         # positional diversity to generate a gradient; that is what makes it
         # a swarm.
         if n_ops > 0:
-            raw = [1.0 + spread * (random.random() * 2.0 - 1.0) for _ in range(n_ops)]
+            raw = [1.0 + spread * (self._rng.random() * 2.0 - 1.0) for _ in range(n_ops)]
             total = sum(raw)
             self.pos = [x / total for x in raw]
         else:
@@ -96,7 +99,9 @@ class MOptScheduler:
         max_vel: float = 0.2,
         min_prob_frac: float = 0.1,
         gbest_decay: float = 0.95,
+        rng: RandPool | None = None,
     ):
+        self._rng = rng if rng is not None else RandPool()
         self.n_particles = n_particles
         self.window_size = window_size
         self.w = w
@@ -167,17 +172,17 @@ class MOptScheduler:
                 # every call and destroys the randomized initialization above —
                 # re-freezing the swarm no matter how it was seeded.
                 new_pos = [x / old_total * keep for x in old.pos] + [
-                    (1.0 / n) * (1.0 + _INIT_SPREAD * (random.random() * 2.0 - 1.0))
+                    (1.0 / n) * (1.0 + _INIT_SPREAD * (self._rng.random() * 2.0 - 1.0))
                     for _ in range(n_new)
                 ]
                 total = sum(new_pos)
                 new_pos = [p / total for p in new_pos]
-                p = _MOptParticle(name, n)
+                p = _MOptParticle(name, n, rng=self._rng)
                 p.pos = new_pos
                 p.vel = [0.0] * n
                 p.pbest_pos = list(new_pos)
             else:
-                p = _MOptParticle(name, n)
+                p = _MOptParticle(name, n, rng=self._rng)
             self.particles.append(p)
         if not self.global_best_pos or len(self.global_best_pos) != n:
             self.global_best_pos = [1.0 / n] * n
@@ -215,7 +220,7 @@ class MOptScheduler:
         floor = max(0.1 * best_f, 0.001)
         fitnesses = [max(p.fitness, floor) for p in valid]
         total_f = sum(fitnesses)
-        r = random.random() * total_f
+        r = self._rng.random() * total_f
         cumulative = 0.0
         selected_particle = valid[0]
         selected_idx = 0
@@ -243,9 +248,9 @@ class MOptScheduler:
 
         total = sum(probs)
         if total <= 0:
-            return random.choice(ops)
+            return self._rng.choice(ops)
 
-        r = random.random() * total
+        r = self._rng.random() * total
         cumulative = 0.0
         for op, p in zip(ops, probs, strict=False):
             cumulative += p
@@ -353,9 +358,9 @@ class MOptScheduler:
             # v = w*v + c1*r1*(pbest - pos) + c2*r2*(gbest - pos)
             #         + c3*r3*(efficiency - pos)
             for i in range(n):
-                r1 = random.random()
-                r2 = random.random()
-                r3 = random.random()
+                r1 = self._rng.random()
+                r2 = self._rng.random()
+                r3 = self._rng.random()
                 cognitive = self.c1 * r1 * (p.pbest_pos[i] - p.pos[i])
                 social = self.c2 * r2 * (self.global_best_pos[i] - p.pos[i])
                 measured = self.c3 * r3 * (eff[i] - p.pos[i])

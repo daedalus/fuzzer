@@ -1,6 +1,6 @@
 """EpsilonGreedyScheduler: epsilon-greedy with annealing."""
 
-import random
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 class EpsilonGreedyScheduler:
@@ -28,10 +28,12 @@ class EpsilonGreedyScheduler:
         epsilon_0: float = 1.0,
         decay: float = 0.9995,
         min_epsilon: float = 0.01,
+        rng: RandPool | None = None,
     ):
         self.epsilon_0 = epsilon_0
         self.decay = decay
         self.min_epsilon = min_epsilon
+        self._rng = rng if rng is not None else RandPool()
         self.q_values: dict[str, float] = {}
         self.counts: dict[str, int] = {}
         self._total_pulls: int = 0
@@ -57,9 +59,9 @@ class EpsilonGreedyScheduler:
             self.epsilon_0 * (self.decay**self._total_pulls),
         )
 
-        if epsilon > 0 and random.random() < epsilon:
+        if epsilon > 0 and self._rng.random() < epsilon:
             # Explore: uniform random
-            return random.choice(ops)
+            return self._rng.choice(ops)
 
         # Exploit: pick highest Q
         return max(ops, key=lambda o: self.q_values.get(o, 0.0))

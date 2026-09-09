@@ -10,8 +10,6 @@ import struct
 from dataclasses import dataclass
 from typing import Any
 
-from fuzzer_tool.core.rand_pool import RandPool
-
 
 @dataclass
 class RascChunk:
@@ -58,7 +56,7 @@ class RascMutator:
 
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         """Apply one RASC-specific mutation."""
-        self._rng = rng or RandPool()
+        self._rng = rng or self._rng
 
         chunks = parse_rasc(data)
         if not chunks:
@@ -103,8 +101,7 @@ class RascMutator:
 
     def _generate_random_rasc(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate minimal RASC structure with corrupt chunk."""
-        self._rng = rng or RandPool()
-        r = self._rng
+        self._rng = rng or self._rng
 
         result = bytearray()
         result += bytes([0x00])  # chunk_type (INIT)

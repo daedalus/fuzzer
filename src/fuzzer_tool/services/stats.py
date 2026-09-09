@@ -20,11 +20,11 @@ import contextlib
 import json
 import logging
 import os
-import random
 import time
 
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.kalman import RobustKF
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate as _discovery_rate,
 )
@@ -74,8 +74,9 @@ class StatsReporter:
     Holds a reference to the Fuzzer instance for accessing shared state.
     """
 
-    def __init__(self, fuzzer):
+    def __init__(self, fuzzer, rng: RandPool | None = None):
         self.f = fuzzer
+        self._rng = rng if rng is not None else RandPool()
 
     def record_discovery_snapshot(self):
         f = self.f
@@ -110,11 +111,11 @@ class StatsReporter:
                 f._edge_tracker.record_edges(f._seed_key(seed), edge_set)
 
         while exec_count < max_execs:
-            seed = random.choice(seeds)
-            if random.random() < 0.5:
+            seed = self._rng.choice(seeds)
+            if self._rng.random() < 0.5:
                 mutated = bytearray(seed)
                 if mutated:
-                    mutated[random.randint(0, len(mutated) - 1)] ^= 1 << random.randint(0, 7)
+                    mutated[self._rng.randint(0, len(mutated) - 1)] ^= 1 << self._rng.randint(0, 7)
                 mutated = bytes(mutated)
             else:
                 mutated = byte_insert(seed)

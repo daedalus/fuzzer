@@ -138,7 +138,6 @@ class ShnMutator:
     def _generate_random_shn(self, max_len: int = 65536, rng: Any = None) -> bytes:
         """Generate minimal Shorten frame with corrupt header."""
         self._rng = rng or RandPool()
-        r = self._rng
 
         result = bytearray()
         result += struct.pack("<H", 0xFFFF)  # sample_rate (signed overflow)

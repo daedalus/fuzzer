@@ -98,9 +98,6 @@ def _parse_magicyuv_stream_header(data: bytes) -> int | None:
     """
     if len(data) < 32:
         return None
-    width = struct.unpack_from("<I", data, 12)[0]
-    height = struct.unpack_from("<I", data, 16)[0]
-    stride = struct.unpack_from("<I", data, 20)[0]
     slice_height = struct.unpack_from("<I", data, 24)[0]
     return slice_height
 
@@ -160,9 +157,7 @@ class MagicYUVMutator:
         # Create slice_height that doesn't evenly divide height
         # height from chunk header if available, otherwise guess from slice data
         if len(target.data) >= 16:
-            height = struct.unpack_from("<I", target.data, 16)[0]
-        else:
-            height = 480  # default common height
+            struct.unpack_from("<I", target.data, 16)[0]
 
         # Choose problematic remainders (e.g., 1, 2, 3, 5, 7, 9, 11, 13, 15, 17, 19, 31)
         problematic = [1, 2, 3, 5, 7, 9, 11, 13, 15, 17, 19, 31, 63, 127, 255]
@@ -181,7 +176,7 @@ class MagicYUVMutator:
         if not target or len(target.data) < 12:
             return serialize_avi_chunks(form_type, chunks)[:max_len]
 
-        width = struct.unpack_from("<I", target.data, 12)[0]
+        struct.unpack_from("<I", target.data, 12)[0]
         # Corrupt width to create problematic width/height combos
         new_width = self._rng.choice([0, 1, 2, 3, 7, 15, 31, 63, 127, 255, 511, 1023, 2047, 4095])
 
@@ -197,10 +192,11 @@ class MagicYUVMutator:
         if not target or len(target.data) < 16:
             return serialize_avi_chunks(form_type, chunks)[:max_len]
 
-        height = struct.unpack_from("<I", target.data, 16)[0]
+        # Read the current height
+        current_height = struct.unpack_from("<I", target.data, 16)[0]
         # Corrupt height to create remainder when divided by slice_height
-        if height > 100:
-            new_height = height + self._rng.choice([1, 2, 3, 5, 7, 9, 11, 13, 15])
+        if current_height > 100:
+            new_height = current_height + self._rng.choice([1, 2, 3, 5, 7, 9, 11, 13, 15])
         else:
             new_height = self._rng.choice([0, 1, 2, 3, 7, 15, 31, 63, 127, 255, 511])
 
@@ -216,7 +212,7 @@ class MagicYUVMutator:
         if not target or len(target.data) < 20:
             return serialize_avi_chunks(form_type, chunks)[:max_len]
 
-        stride = struct.unpack_from("<I", target.data, 20)[0]
+        struct.unpack_from("<I", target.data, 20)[0]
         # Create problematic stride (too small for chroma subsampling)
         new_stride = self._rng.choice([0, 1, 2, 3, 7, 15, 31, 63, 127, 255])
 

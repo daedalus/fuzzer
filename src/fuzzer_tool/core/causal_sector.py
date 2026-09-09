@@ -13,7 +13,6 @@ via ``observe_flow`` / ``observe_pair``.
 
 from __future__ import annotations
 
-import math
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
@@ -137,7 +136,9 @@ class CausalSectorGraph:
         ):
             self._stable_streak += 1
         else:
-            self._stable_streak = 1 if (fp is not None and len(fp) > 0 and asym >= self.min_asymmetry) else 0
+            self._stable_streak = (
+                1 if (fp is not None and len(fp) > 0 and asym >= self.min_asymmetry) else 0
+            )
         self._last_sign_fingerprint = fp
         self._stable = self._stable_streak >= self.stability_windows
 
@@ -163,7 +164,9 @@ class CausalSectorGraph:
             for n in drop:
                 del self._node_mass[n]
             self._edges = {
-                k: e for k, e in self._edges.items() if e.source not in drop and e.target not in drop
+                k: e
+                for k, e in self._edges.items()
+                if e.source not in drop and e.target not in drop
             }
         if len(self._edges) > self.max_edges:
             ranked_e = sorted(self._edges.items(), key=lambda kv: kv[1].te * kv[1].weight)

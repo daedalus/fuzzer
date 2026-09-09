@@ -15,7 +15,6 @@ import bisect as _bisect_mod
 import itertools
 import logging
 import math
-import random
 import struct
 import time
 from collections import Counter
@@ -90,18 +89,18 @@ def _cdf_pick(population: list, weights: list[float], store: dict, slot: str):
     """
     n = len(population)
     if n == 0 or len(weights) != n:
-        return random.choices(population, weights=weights, k=1)[0]
+        return self._rng.choices(population, weights=weights, k=1)[0]
     entry = store.get(slot)
     if entry is None or entry[0] is not weights:
         cum = list(itertools.accumulate(weights))
         total = cum[-1] + 0.0
         if not (total > 0.0) or not math.isfinite(total):
             # Let random.choices raise exactly the error it raised before.
-            return random.choices(population, weights=weights, k=1)[0]
+            return self._rng.choices(population, weights=weights, k=1)[0]
         entry = (weights, cum, total)
         store[slot] = entry
     _w, cum, total = entry
-    return population[_bisect_mod.bisect(cum, random.random() * total, 0, n - 1)]
+    return population[_bisect_mod.bisect(cum, self._rng.random() * total, 0, n - 1)]
 
 
 def _resistance(successes: float, failures: float) -> float:
@@ -364,7 +363,7 @@ class SeedPicker:
         total = sum(weights)
         if total <= 0:
             return None
-        r = random.random() * total
+        r = self._rng.random() * total
         acc = 0.0
         for seed, w in zip(f.corpus, weights, strict=False):
             acc += w
@@ -394,7 +393,7 @@ class SeedPicker:
         total = sum(weights)
         if total <= 0:
             return None
-        r = random.random() * total
+        r = self._rng.random() * total
         acc = 0.0
         for seed, w in zip(f.corpus, weights, strict=False):
             acc += w
@@ -424,7 +423,7 @@ class SeedPicker:
         total = sum(dists)
         if total <= 0:
             return None
-        r = random.random() * total
+        r = self._rng.random() * total
         acc = 0.0
         for seed, d in zip(f.corpus, dists, strict=False):
             acc += d

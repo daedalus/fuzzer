@@ -1,7 +1,10 @@
 """Exp3Scheduler: adversarial bandit (EXP3)."""
 
+from __future__ import annotations
+
 import math
-import random
+
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 class Exp3Scheduler:
@@ -22,15 +25,17 @@ class Exp3Scheduler:
         gamma: Exploration rate in [0, 1]. Higher = more uniform exploration.
         window_decay: Exponential decay per update (1.0 = no decay).
             Values < 1.0 discount older observations.
+        rng: PRNG for random draws. Defaults to RandPool().
     """
 
-    # Declares that init_arm() does NOT accept informative priors (EXP3
-    # uses uniform weight initialization, not Beta-Bernoulli).
     supports_priors = False
 
-    def __init__(self, gamma: float = 0.1, window_decay: float = 0.999):
+    def __init__(
+        self, gamma: float = 0.1, window_decay: float = 0.999, rng: RandPool | None = None
+    ):
         self.gamma = gamma
         self.window_decay = window_decay
+        self._rng = rng if rng is not None else RandPool()
         # Per-arm weights RELATIVE to _decay_factor: the actual weight is
         # weights[i] * _decay_factor. Decay is folded into the single
         # factor so record() stays O(1) instead of sweeping every arm.
@@ -62,7 +67,7 @@ class Exp3Scheduler:
         total_w = sum(self.weights.get(op, 1.0) for op in ops)
         if total_w <= 0:
             self._last_probs.clear()
-            return random.choice(ops)
+            return self._rng.choice(ops)
 
         # Build mixture: p = (1-γ) * w_i/Σw  +  γ/K
         probs: dict[str, float] = {}
@@ -74,7 +79,7 @@ class Exp3Scheduler:
         self._last_probs = dict(probs)
 
         # Roulette-wheel selection
-        r = random.random()
+        r = self._rng.random()
         cumulative = 0.0
         for op in ops:
             cumulative += probs[op]
