@@ -1,20 +1,28 @@
 # Handover — RO / RD temporal-orientation integration (paper-inspired)
 
-**Date:** 2026-09-08  
-**Status:** design + implementation plan (no code landed yet)  
+**Date:** 2026-09-08 (updated 2026-09-08 with wiring plan)  
+**Status:** primitives implemented + unit-tested (unwired); wiring plan below  
 **Constraint:** **Touching `src/fuzzer_tool/adapters/afl_shim.c` is forbidden.**  
 All work stays in Python (`core/`, `services/`, `cli/`, schedulers, seed metadata, report path).  
 **Paper citation:** G. Du, *A Systematic Solution to the Arrow of Time Problem: Reversal of Objective Temporal Orientation Is Not Dynamical History Reversal* (81 pp., attached as `paper.pdf` / document id DKV4j). Key distinctions: RO vs RD (eq. 1.2), Temporal Quantity-Type Existence + Time-Causal Structure postulates (Postulates 2.1–2.2, structure \(T_{\mathrm{phys}}=(Q_T,T_{\mathrm{loc}})\)), finite-time occupation measures (Sec. 3), horizontal vs longitudinal statistical support, typicality/concentration and the conditional form of the local second law \(P(H_{t+\tau}\mid L_t)\approx 1\) (eq. 1.3 / A4).
 
-**Base for this plan:** live source as of the zip that contained this handover (edge_tracker, transfer_entropy, renyi, execution_time, schedulers/*, seed_quality, lineage, path-negation / SMT paths). Re-verify every file:line anchor against HEAD before coding.
+**Base for this plan:** live source as of the campaign zip / HEAD that contains `core/analyzer_registry.py` (migration complete). Re-verify every file:line anchor against HEAD before coding.
 
 **Companion reading (repo):**  
-- `core/transfer_entropy.py` — already implements directed \(T_{X\to Y}\) with surrogate bias correction (Schreiber / Marschinski–Kantz style).  
+- `core/analyzer_registry.py` — **single source of truth** for pluggable analyzers; all construction of detectors/estimators goes here (`AnalyzerSpec` + `REGISTRY.wire_all`). See also `docs/handover/handover_analyzer_registry_2026-09-07.md`.  
+- `core/operator_registry.py` — mutation operator dispatcher (`path_negate` already registered).  
+- `core/transfer_entropy.py` — directed \(T_{X\to Y}\) with surrogate bias correction; already an analyzer (`transfer_entropy`).  
 - `core/edge_tracker.py` — per-seed edge sets, hit-count distributions, Chao2, Wasserstein, F0.  
 - `core/renyi.py`, `core/seed_quality.py`, `core/execution_time.py`.  
 - `core/schedulers/*` and Elo arbitration.  
-- Lineage / `--lineage` and path-negation / SMT paths (operators + cmplog consumers).  
+- Lineage / `--lineage` and path-negation / SMT paths.  
 - Existing handovers under `docs/handover/` for style and priority language.
+
+**Landed primitives (unwired, 41 unit tests):**  
+- `core/occupation.py` — `OccupationMeasure`, `LongitudinalRarity`  
+- `core/ro_rd.py` — `OrientationClass`, `classify_operator_name`, `rd_reverse_lineage`, `tag_operator_record`  
+- `core/causal_sector.py` — `CausalSectorGraph`, stability / asymmetry  
+- `tests/test_{occupation,ro_rd,causal_sector}.py`
 
 ---
 
@@ -34,7 +42,8 @@ Import the paper’s structural distinctions into the fuzzer’s *decision* and 
 - No per-edge wall-clock or cycle occupancy (would require shim or ptrace). We use the existing per-run `{edge_id, count}` map as a *discrete* occupation measure (visits, not time).
 - No cosmological entropy arguments, unit-covariance formalisms, or axiomatic measurement theory beyond the operational clocks already present.
 - No new universal prior over microstates; every probability / typicality claim must state its object, partition, and support (paper Sec. 2.1 / A3–A4).
-- Follow existing conventions: surgical changes, register new schedulers in the established places, match surrounding code style, do not invent parallel mechanisms.
+- Follow existing conventions: surgical changes, **register analyzers only via `analyzer_registry`**, match surrounding code style, do not invent parallel construction paths in `Fuzzer.__init__`.
+- Default campaign behaviour must remain bit-identical when new flags are off / weights are 0.
 
 ### Why this is feasible without the shim
 The shim already exports, per execution:
@@ -50,282 +59,421 @@ Whole-run wall time and optional `perf_event` instruction/branch counters alread
 
 | Paper concept | Fuzzer analogue | Data already present | New Python surface |
 |---------------|-----------------|----------------------|--------------------|
-| RO (objective orientation reversal) | Path-negation / branch inversion / SMT opposite-branch solving | Existing operators + cmplog / SMT | Explicit RO tag; sector-crossing arm |
-| RD (history reversal, orientation fixed) | Reverse recorded operator sequence on a seed’s lineage and re-execute | `--lineage`, mutation history | RD helper + intra-sector mutator / tmin use |
-| Time-Causal Structure / objective \(A\to B\) | Stable directed TE graph (edge→edge, byte→edge, op→coverage) | `TransferEntropy` + surrogate bias | Causal-sector graph + soft constraints |
-| Finite-time occupation \(\mu_I\) | Per-run edge **count** vector (normalised or raw) | SHM `{edge_id, count}` | `OccupationMeasure` / snapshot on seed |
-| Macroscopic push-forward \(\mu^{\mathrm{mac}}_I\) | Coarse map (function / module / BB group) | Edge IDs; optional CFG | Optional coarse occupation |
-| Horizontal support | Repeated seeds / hit frequencies across corpus | EdgeTracker owner counts, Chao2 | Keep; label explicitly |
-| Longitudinal support | Occupation along one execution history | Per-run counts | New longitudinal rarity / occupation score |
-| Typicality / concentration | Rényi, rarity, F0, Chao2 | Existing modules | Conditional \(P(H\mid L)\) form |
-| Conditional second law | Prefer mutations that start in low-measure \(L\) and transition toward high-measure \(H\) | TE, Markov, bandits | Re-weighting policy |
-| Theoretical probability object vs actual support | Bandit posteriors / Markov / MI vs empirical counts / occupation | Both exist | Bridge-deficit metric + report |
-| Sector selection | Orientation chosen by Time-Causal Structure; RO leaves the sector | — | Gating of RO arm by TE-graph stability |
+| RO (objective orientation reversal) | Path-negation / branch inversion / SMT opposite-branch solving | `path_negate` in `operator_registry` + cmplog / SMT | `OrientationClass.RO`; sector-crossing arm |
+| RD (history reversal, orientation fixed) | Reverse recorded operator sequence on a seed’s lineage and re-execute | `--lineage`, mutation history | `rd_reverse_lineage` (pure); later tmin |
+| Time-Causal Structure / objective \(A\to B\) | Stable directed TE graph | `TransferEntropy` analyzer | `CausalSectorGraph` analyzer |
+| Finite-time occupation \(\mu_I\) | Per-run edge **count** vector | SHM `{edge_id, count}` | `OccupationMeasure` analyzer |
+| Macroscopic push-forward \(\mu^{\mathrm{mac}}_I\) | Coarse map (function / module / BB group) | Edge IDs; optional CFG | `OccupationMeasure.push_forward` |
+| Horizontal support | Repeated seeds / hit frequencies | EdgeTracker owner counts, Chao2 | Keep; label explicitly |
+| Longitudinal support | Occupation along one execution history | Per-run counts | `LongitudinalRarity` |
+| Typicality / concentration | Rényi, rarity, F0, Chao2 | Existing modules | Conditional \(P(H\mid L)\) form (late) |
+| Conditional second law | Prefer \(L\to H\) transitions | TE, Markov, bandits | Re-weighting policy (late, weight 0 default) |
+| Theoretical vs actual support | Bandit / Markov / MI vs counts / occupation | Both exist | Bridge-deficit metric + report |
+| Sector selection | TE-graph stability gates RO soft weight | — | `CausalSectorGraph.stable` |
 
-**Formula-level reminder (paper eq. 1.2):** the same ordinary reversal map \(R\) lifts in two ways, \(\Pi_{R_D}=\Pi_{R_O}=R\Pi\), but \(R_D\not= R_O\). The fuzzer must never treat path-negation (RO-class) as merely “another history-reversal mutator”.
-
----
-
-## 2. Implementation plan (phased, no shim)
-
-### Phase 0 — Anchors and invariants (½ day, no behaviour change)
-
-1. Re-verify live anchors (do not trust this document’s line numbers after further commits):
-   - `core/transfer_entropy.py` — `TransferEntropy.transfer_entropy`, surrogate correction, `edge_to_edge_flow`.
-   - `core/edge_tracker.py` — `record_edges`, per-seed edge maps, hit-count distributions, prune ceilings, Chao2 / F0 paths.
-   - Seed metadata / corpus store — where extra per-seed blobs can be attached without blowing the tracked-seed memory bound (see edge_tracker comments on ~95 KiB / ~592 KiB per seed).
-   - Operator registry and path-negation / SMT entry points.
-   - Lineage storage and `--lineage` consumers (tmin, auto-minimize).
-   - Elo / bandit arbitration and `_OPERATOR_STRATEGY_NAMES` (or current equivalent).
-   - Report / stats-line path (`--report`, live stat line).
-
-2. Add a short note to `docs/learnings/` or this handover once anchors are confirmed.
-
-3. Invariant for all later phases: **every new probability or typicality number must name (a) the theoretical object, (b) the macroscopic partition if any, (c) the statistical support (horizontal or longitudinal).**
-
-### Phase 1 — Discrete occupation measure (1 day)
-
-**Goal.** Treat the per-run edge count vector as the paper’s finite-time occupation \(\mu_I\) (visits instead of Lebesgue time).
-
-**Work:**
-
-1. New small module `core/occupation.py` (or a clearly named helper inside edge_tracker if the surface is tiny):
-   - Input: the non-zero `(edge_id, count)` pairs from one execution (already available after the run).
-   - Outputs:
-     - raw visit vector / sparse map,
-     - normalised \(\mu_I(e)=\mathrm{count}(e)/\sum\mathrm{count}\),
-     - optional entropy of the occupation distribution (Shannon or Rényi),
-     - optional “dominant macroregion” under a trivial identity partition (paper Sec. 3.2 style `arg max`).
-   - Keep memory bounded: store a sparse dict or a fixed-size sketch (top-K edges by count, or a Count-Min / simple hash sketch) rather than a full dense map for every seed.
-
-2. Hook point: after a successful (or interesting) execution, snapshot occupation into seed metadata or an auxiliary structure owned by EdgeTracker / CorpusManager. Respect the existing tracked-seed ceiling and prune logic; occupation must not turn the 90% low-water prune into an OOM.
-
-3. Longitudinal rarity score:
-   - For each edge (or seed), compute a longitudinal rarity from the occupation mass it receives across the seeds that hit it (e.g. average or median \(\mu_I(e)\) among hitting seeds, or inverse).
-   - Expose `occupation_rarity(seed)` and/or per-edge longitudinal rarity alongside the existing horizontal rarity / Chao2.
-
-4. Tests:
-   - Unit tests on synthetic count vectors (normalisation, empty run, single-edge run, heavy-tailed occupation).
-   - Integration: occupation snapshot does not change coverage decisions when the new scores are disabled (feature flag or weight 0).
-   - Memory: occupation storage stays inside the documented per-seed budget or is explicitly opt-in.
-
-5. CLI / config: `--occupation` / `--occupation-weight` (default off or weight 0 so existing campaigns are byte-identical).
-
-**Out of scope for Phase 1:** true time-based occupation, CFG-based macroscopic maps (Phase 3 optional), writing occupation into the SHM itself.
-
-### Phase 2 — RO / RD tagging and lineage helpers (1–1.5 days)
-
-**Goal.** Make the paper’s RO ≠ RD distinction operational in the mutation and minimisation layers.
-
-**Work:**
-
-1. **Tagging**
-   - Classify existing operators:
-     - **RO-class:** path-negation, SMT opposite-branch / path-negation solves, any explicit “invert this comparison outcome” operator.
-     - **RD-class:** ordinary mutators; plus a new (or helper) “lineage reverse” that replays the inverse operator sequence recorded for a seed (where inverses are well-defined: bit flips, many arithmetic ops, some block ops; skip or approximate non-invertible ones).
-   - Store the class on the operator registry entry or on the mutation record so schedulers and reports can see it without string matching names.
-
-2. **RD helper**
-   - Given a seed’s lineage (parent + operator sequence + sites), produce a candidate reversed history and re-execute under the *same* coverage orientation.
-   - Use cases: tmin / auto-minimize unproductive-branch pruning; diversity checks; “is this crash path RD-reversible?”.
-   - Failure modes: non-invertible operators, length changes that break FrameShift invariants — document and skip rather than invent silent approximations.
-
-3. **RO gating (soft)**
-   - Do **not** remove RO operators from the pool.
-   - Optionally gate their *selection probability* or treat them as a separate arm whose reward is only fully credited when a causal orientation has been declared stable (Phase 3). Until Phase 3 lands, tag and report only.
-
-4. **Tests**
-   - Round-trip RD on a synthetic invertible lineage.
-   - RO-tagged operators still appear in the registry and can be forced via existing “select this operator” test hooks.
-   - No change to default campaign behaviour when RO/RD policy weights are zero.
-
-5. **Docs / report**
-   - Live stats or `--report` section: counts of RO vs RD applications, RO success rate, RD-reversible crash fraction (when lineage is on).
-
-### Phase 3 — Causal-sector graph from transfer entropy (1.5–2 days)
-
-**Goal.** Realise the paper’s Time-Causal Structure as a lightweight, decaying directed graph over edges (and optionally operators / byte positions) built from the existing TE estimator.
-
-**Work:**
-
-1. **Graph maintenance**
-   - Consume `TransferEntropy.edge_to_edge_flow` (and any byte→edge / op→coverage TE already computed).
-   - Maintain a sparse directed graph: nodes = edge ids (top-K by hit mass or by TE participation), weighted edges = bias-corrected TE, with exponential decay or sliding window so the graph tracks the current campaign.
-   - Stability predicate: e.g. the set of high-TE directions has not flipped for \(N\) observation windows, or the asymmetry \(T_{A\to B}-T_{B\to A}\) stays above a threshold with the same sign.
-
-2. **Soft constraints**
-   - Prefer operators / seeds whose recent discoveries align with the current orientation.
-   - When stability holds, optionally boost or isolate the RO arm (Phase 2 tags) so that orientation-reversing moves are deliberate probes rather than noise.
-   - Never hard-block coverage-increasing RO moves; the paper’s sector is a selector, not a censorship regime.
-
-3. **Integration points**
-   - Scheduler policy or Elo meta-feature: “causal alignment” score.
-   - Seed quality: slight bonus for seeds that extend a stable causal chain (new edges that are TE-successors of already oriented edges).
-
-4. **Tests**
-   - Synthetic TE series with a known direction; graph recovers it and marks stability.
-   - Surrogate / shuffled series → no stable orientation.
-   - Feature-flag off → zero effect on decisions (equivalence).
-
-5. **Memory / cost**
-   - Cap nodes and edges hard; TE is already the expensive part. Do not recompute full pairwise TE every iteration; reuse existing observation cadence.
-
-### Phase 4 — Conditional typicality scoring and bridge deficit (1–1.5 days)
-
-**Goal.** Implement the paper’s conditional form of the local second law and the theoretical-vs-actual bridge.
-
-**Work:**
-
-1. **Low / high measure regions**
-   - \(L\): seeds or edge-sets with high Rényi / high horizontal+longitudinal rarity / low F0-normalised mass (nonequilibrium preparation).
-   - \(H\): dense, typical coverage regions (high measure under the current reference, e.g. longitudinal occupation mass or horizontal hit frequency).
-   - Keep definitions explicit and configurable; do not silently identify “more edges” with “higher entropy” or with “progress”.
-
-2. **Conditional score**
-   - Prefer mutations that:
-     - start from an \(L\)-like seed, **and**
-     - have high estimated conditional probability (from TE, Markov, or recent empirical transitions) of reaching new \(H\)-like or previously unseen edges.
-   - This is a re-weighting of existing signals, not a new search algorithm. Wire as an optional term in seed_quality / operator reward with a weight defaulting to 0.
-
-3. **Bridge deficit**
-   - Theoretical object: bandit posteriors, Markov transition matrix, MI estimates, or any other formal probability the campaign already maintains.
-   - Actual support: horizontal hit frequencies and/or longitudinal occupation masses.
-   - Deficit = divergence (KL, total variation, or simple relative error on the support of interest).
-   - Report it; optionally down-weight theoretical-guided decisions when deficit is large (model has lost contact with observed histories).
-
-4. **Tests**
-   - Synthetic: L→H transitions scored higher than H→L or L→L under the conditional weight.
-   - Bridge deficit rises when theoretical model is deliberately desynchronised from counts.
-   - Default weights 0 → bit-identical behaviour.
-
-### Phase 5 — Reporting, CLI, and documentation (½–1 day)
-
-1. CLI flags (all default safe / off):
-   - `--occupation` / `--occupation-weight`
-   - `--ro-rd-policy` / `--ro-arm-weight` (or similar)
-   - `--causal-sector` / `--te-graph`
-   - `--conditional-typicality` / `--bridge-deficit`
-   - Or a single umbrella `--arrow-of-time` that enables a documented subset.
-
-2. `--report` and live stats:
-   - Occupation entropy / dominant edges.
-   - RO vs RD counts and yields.
-   - Causal-orientation stability and top directed TE pairs.
-   - Bridge deficit summary.
-   - Explicit statement of which probability objects and supports were used (paper discipline).
-
-3. Update:
-   - `CHANGELOG.md` (Added section).
-   - Short learning note under `docs/learnings/` if non-obvious pitfalls appear.
-   - This handover → move to a `*_done_*.md` when phases complete, with a removal / decision ledger.
-
-4. AGENTS.md / SPEC: only if new public CLI surface or hard rules appear; otherwise keep the change local.
+**Formula-level reminder (paper eq. 1.2):** \(\Pi_{R_D}=\Pi_{R_O}=R\Pi\) but \(R_D\not= R_O\). Never treat `path_negate` as merely another history-reversal mutator.
 
 ---
 
-## 3. File-level sketch (expected touch list)
+## 2. Architecture rule: analyzer_registry is the wiring surface
 
-**New**
-- `src/fuzzer_tool/core/occupation.py` — discrete occupation measure, normalisation, longitudinal rarity helpers.
-- `tests/test_occupation.py`
-- Optionally `src/fuzzer_tool/core/causal_sector.py` — TE graph + stability (or keep inside transfer_entropy / a scheduler helper if small).
+The analyzer-registry migration is **complete**. Historically each detector was constructed ad hoc in `Fuzzer.__init__`; every such component now lives behind one `AnalyzerSpec`:
 
-**Likely modified (surgical)**
-- `core/edge_tracker.py` — optional occupation snapshot hook; do not break prune / memory ceilings.
-- `core/seed_quality.py` — optional occupation / conditional / bridge terms.
-- `core/transfer_entropy.py` — only if small helpers for graph export are cleaner here than a new module.
-- Operator registry / mutation recording path — RO/RD class tags.
-- Lineage / tmin path — RD reverse helper.
-- Scheduler arbitration or one policy module — soft RO gating and causal alignment feature.
-- `cli/commands.py` — flags and wiring.
-- Report / stats path — new sections.
-- `CHANGELOG.md`, this handover (status updates).
+| Field | Role |
+|-------|------|
+| `name` | Stable id (`transfer_entropy`, `occupation`, …) |
+| `category` | Taxonomy bucket (e.g. `mutual_information`, `coverage`) |
+| `available(f)` | Reads a gating flag already set on the fuzzer (`getattr(f, "_use_x", False)`). `None` = always on |
+| `activate(f)` | Construct, optional state-store restore, one-time log |
+| `deactivate(f)` | Off defaults (usually `attr = None`) |
+| `phase` | `"main"` (default `wire_all`) or `"early"` (rare ordering constraint) |
+| `swallow_errors` | Only for fail-open legacy cases (e.g. checksum_learner) |
 
-**Forbidden**
-- `adapters/afl_shim.c` and any other C shim that defines SHM layout or edge recording.
-- Changes that alter default campaign semantics when the new flags are off.
+`REGISTRY.wire_all(fuzzer, phase="main")` runs once from `Fuzzer.__init__` after `_state_store` / `max_len` and after all gating flags are assigned. A second call with `phase="early"` exists only for order-sensitive analyzers (currently `sensitivity`).
+
+**Rule for this work:** anything that is “constructed when a flag is set and torn down when not” is registered in `core/analyzer_registry.py`. `Fuzzer.__init__` must not import `occupation` / `causal_sector` directly.
+
+**Parallel rule:** RO/RD *labels* belong with operators (`operator_registry` / `classify_operator_name`). RD *reverse* stays a pure helper until lineage/tmin asks for it — not an analyzer.
+
+Existing TE pattern to copy (`analyzer_registry.py`):
+
+```python
+def _activate_transfer_entropy(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.transfer_entropy import TransferEntropy
+    f._te = TransferEntropy(history_length=1)
+    f._te_input_history = []
+    f._te_edge_history = []
+    f._te_history_max = 500
+    log.info("Transfer entropy tracking enabled")
+
+def _deactivate_transfer_entropy(f: FuzzerLike) -> None:
+    f._te = None
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="transfer_entropy",
+        category="mutual_information",
+        available=lambda f: bool(getattr(f, "_use_transfer_entropy", False)),
+        activate=_activate_transfer_entropy,
+        deactivate=_deactivate_transfer_entropy,
+    )
+)
+```
+
+Gating flag assignment lives in `Fuzzer.__init__` next to `self._use_transfer_entropy = transfer_entropy` (kwargs default `False`).
 
 ---
 
-## 4. Testing and equivalence policy
+## 3. Implementation status and phases
 
-- Every phase must ship with tests that, under default / weight-0 configuration, preserve existing behaviour (corpus decisions, operator selection distribution under fixed RNG seed, report keys that already exist).
-- Prefer property / equivalence tests over golden large corpora when possible.
-- Memory: occupation and TE graph must respect documented ceilings; add a regression that fills many seeds and asserts the prune path still runs and RSS stays in the same ballpark.
-- No requirement for A/B fuzzing campaigns to land the feature, but a short offline evaluation script (synthetic or small real target) that shows L→H conditional scoring and RO/RD statistics is desirable before declaring Phase 4 done.
+### Done — Phase P (primitives, no wiring)
+
+| Module | Contents | Tests |
+|--------|----------|-------|
+| `core/occupation.py` | `OccupationMeasure.from_counts`, push-forward, Shannon/Rényi, `sparse_snapshot`, `LongitudinalRarity` | `tests/test_occupation.py` |
+| `core/ro_rd.py` | `OrientationClass`, `classify_operator_name`, `is_invertible_operator`, `MutationStep` / `LineageRecord`, `rd_reverse_lineage`, `tag_operator_record` | `tests/test_ro_rd.py` |
+| `core/causal_sector.py` | `CausalSectorGraph` (decay, caps, asymmetry, stability windows, `aligns`, `snapshot`) | `tests/test_causal_sector.py` |
+
+**41 unit tests, all pure — no Fuzzer, no CLI, no shim.**
+
+### Phase 0 — Anchors (½ day, no behaviour change)
+
+Re-verify against HEAD before any wiring commit:
+
+- `core/analyzer_registry.py` — `AnalyzerSpec`, `REGISTRY.wire_all`, TE registration, category strings, registration order (esp. anything `coverage_regime`-style that depends on earlier specs).
+- `services/fuzzer.py` — kwargs for `transfer_entropy`, assignment of `_use_transfer_entropy`, both `wire_all` call sites (`early` / `main`), edge-record / seed-outcome path (~coverage record and `seed_quality.record_outcome`), TE consumption sites.
+- `core/operator_registry.py` — `path_negate` availability (`_has_branch_records`), `OperatorSpec` shape.
+- `core/edge_tracker.py` — per-seed memory ceilings (comments on ~95 KiB / ~592 KiB per seed); do not attach heavy occupation blobs without a budget.
+- Lineage / tmin consumers if planning RD reverse later.
+- Report / stats-line path.
+
+Invariant: every new probability or typicality number must name (a) theoretical object, (b) macroscopic partition if any, (c) statistical support (horizontal or longitudinal).
 
 ---
 
-## 5. Risks and mitigations
+### Phase A — Register analyzers only (construct + deactivate)
+
+**Goal:** objects exist on the fuzzer when flags are on; default campaigns unchanged.
+
+#### A1. `occupation` analyzer
+
+```text
+name:        occupation
+category:    coverage          # confirm against REGISTRY.categories() usage
+available:   lambda f: bool(getattr(f, "_use_occupation", False))
+activate:    attach LongitudinalRarity + last-run snapshot slots
+deactivate:  f._occupation_rarity = None; f._last_occupation = None
+```
+
+**Activate should:**
+
+- `f._occupation_rarity = LongitudinalRarity()`
+- `f._last_occupation = None`
+- `f._occupation_max_edges = 256`  # bound for sparse_snapshot
+- log once: `"Occupation tracking enabled"`
+
+**Gating flag:** add `occupation: bool = False` to `Fuzzer.__init__` kwargs (near `transfer_entropy=False`); assign `self._use_occupation = occupation` in the same block as other analyzer flags (immediately before `wire_all(self)`).
+
+**CLI (same PR or follow-up):** `--occupation` → passes the flag. Default off.
+
+**Do not** import `occupation` inside `Fuzzer.__init__` body — only via registry activate.
+
+#### A2. `causal_sector` analyzer
+
+```text
+name:        causal_sector
+category:    mutual_information   # same family as transfer_entropy
+available:   lambda f: (
+                 bool(getattr(f, "_use_causal_sector", False))
+                 and bool(getattr(f, "_use_transfer_entropy", False))
+             )
+activate:    f._causal_sector = CausalSectorGraph(...)
+deactivate:  f._causal_sector = None
+```
+
+**Registration order:** register **after** the existing `transfer_entropy` spec so that when both flags are on in one `wire_all` pass, `_te` already exists (same pattern as `coverage_regime` depending on `csd` / `garch` / etc.).
+
+**Soft-require TE:** do not activate an empty sector with no TE source. Prefer the `available` conjunction above.
+
+**Gating:** `_use_causal_sector`, CLI `--causal-sector`, default off. Document that effective enablement also needs `--transfer-entropy` (or whatever the existing TE flag is).
+
+#### A3. Registry patch shape
+
+One block at the end of `analyzer_registry.py` (after existing registrations):
+
+```python
+def _activate_occupation(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.occupation import LongitudinalRarity
+    f._occupation_rarity = LongitudinalRarity()
+    f._last_occupation = None
+    f._occupation_max_edges = 256
+    log.info("Occupation tracking enabled")
+
+def _deactivate_occupation(f: FuzzerLike) -> None:
+    f._occupation_rarity = None
+    f._last_occupation = None
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="occupation",
+        category="coverage",
+        available=lambda f: bool(getattr(f, "_use_occupation", False)),
+        activate=_activate_occupation,
+        deactivate=_deactivate_occupation,
+    )
+)
+
+def _activate_causal_sector(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.causal_sector import CausalSectorGraph
+    f._causal_sector = CausalSectorGraph()
+    log.info("Causal-sector graph enabled")
+
+def _deactivate_causal_sector(f: FuzzerLike) -> None:
+    f._causal_sector = None
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="causal_sector",
+        category="mutual_information",
+        available=lambda f: bool(getattr(f, "_use_causal_sector", False))
+        and bool(getattr(f, "_use_transfer_entropy", False)),
+        activate=_activate_causal_sector,
+        deactivate=_deactivate_causal_sector,
+    )
+)
+```
+
+#### A4. Tests for Phase A
+
+- Extend registry / `wire_all` tests: activation matrix for `occupation` and `causal_sector`.
+- Flags off → attributes `None` after `wire_all`.
+- `occupation` on → `_occupation_rarity` is a `LongitudinalRarity`.
+- `causal_sector` on without TE → **not** activated.
+- Both on → `_causal_sector` constructed.
+- No behavioural change to campaigns when flags are default False.
+
+---
+
+### Phase B — Record hooks (still no selection policy)
+
+**Goal:** fill the objects from data the loop already produces.
+
+#### B1. Occupation after coverage record
+
+At the site that already turns a run’s sparse edge table into tracker updates (near EdgeTracker / seed outcome recording):
+
+```python
+if getattr(self, "_occupation_rarity", None) is not None:
+    from fuzzer_tool.core.occupation import OccupationMeasure
+    occ = OccupationMeasure.from_counts(edge_counts)  # sparse (id, count)
+    self._last_occupation = occ.sparse_snapshot(self._occupation_max_edges)
+    self._occupation_rarity.observe(occ)
+```
+
+**Memory:** Phase B keeps process-global `LongitudinalRarity` + `_last_occupation` only. Do **not** yet attach per-seed occupation blobs to EdgeTracker without an explicit byte budget and prune interaction review.
+
+#### B2. Causal sector from existing TE history
+
+TE already maintains `_te_edge_history` (and related) and is consulted on the exec path. At the same cadence TE already updates (or a periodic throttle):
+
+```python
+if getattr(self, "_causal_sector", None) is not None and self._te is not None:
+    flow = self._te.edge_to_edge_flow(self._te_edge_history, ...)
+    self._causal_sector.observe_flow(flow)
+```
+
+Reuse TE’s observation cadence; do not recompute full pairwise TE every iteration.
+
+#### B3. Policy still frozen
+
+No change to operator selection weights, seed selection, or `path_negate` frequency. Optional debug log of `snapshot().stable` behind the same flags.
+
+---
+
+### Phase C — RO/RD on the operator side (not analyzer_registry)
+
+`path_negate` is already registered in `operator_registry` (availability `_has_branch_records`).
+
+#### C1. Tagging (metadata only)
+
+**Preferred first step:** call `classify_operator_name(op_name)` / `tag_operator_record` at record and report sites only — zero change to `OperatorSpec` schema.
+
+**Optional later:** add `orientation: str | None = None` on `OperatorSpec`, set `"ro"` for `path_negate` (and SMT path-neg aliases). Only if many call sites need the field.
+
+#### C2. RD reverse
+
+Keep `rd_reverse_lineage` pure. Wire into lineage/tmin only when lineage records can supply `MutationStep(operator, site)`. That is a **services/tmin** change, not an analyzer.
+
+Refuse non-invertible steps and RO-containing lineages (already implemented in the primitive).
+
+#### C3. Soft RO gating (optional, last)
+
+Only after causal_sector is stable in real campaigns:
+
+- when `_causal_sector.stable`, apply a weight multiplier or separate arm for RO-class operators in Elo / bandit paths
+- **never** hard-disable coverage-positive RO moves
+
+---
+
+### Phase D — Scoring / seed_quality (optional, weight 0 default)
+
+`BayesianSeedQuality` remains the success/failure model. Do **not** fold occupation into Beta counts without a written contract.
+
+Safer pattern:
+
+- optional additive term when ranking seeds for the queue, e.g.  
+  `score += occupation_weight * longitudinal_rarity_bonus(...)`  
+  with `occupation_weight=0` by default
+- bridge deficit / conditional typicality as **report metrics first**, then weights
+
+Still no shim changes.
+
+---
+
+### Phase E — Report / CLI / CHANGELOG
+
+- CLI: `--occupation`, `--causal-sector` (and document TE dependency for the latter). Defaults off.
+- `--report` / live stats: occupation support size / entropy, longitudinal rarity summary, sector stability, top directed TE pairs, RO vs RD application counts (classification only).
+- `CHANGELOG.md` entries per landed phase.
+- When phases complete, move status in this file or write `handover_RoRd_done_*.md` with a decision ledger.
+
+---
+
+## 4. What goes where (summary)
+
+| Concern | Mechanism |
+|---------|-----------|
+| Construct occupation / causal_sector | **`analyzer_registry`** `AnalyzerSpec` + gating flags |
+| Construct TE (already done) | existing `transfer_entropy` spec |
+| Feed occupation from edge counts | one call site after coverage record |
+| Feed causal_sector from TE | same cadence as TE history update |
+| RO vs RD label on ops | `ro_rd.classify_operator_name` / optional `OperatorSpec` field |
+| RD lineage reverse | pure helper → later tmin/lineage |
+| Seed score terms | optional weights default 0; **not** inside analyzer `activate` |
+| CLI flags | thin pass-through to `Fuzzer(..., occupation=..., causal_sector=...)` |
+| `afl_shim.c` | **never** |
+
+**One-line rule:** anything “constructed when a flag is set and torn down when not” goes through `AnalyzerSpec` in `analyzer_registry.py`; RO/RD *labels* stay with operators; RD *reverse* stays pure until lineage/tmin asks for it.
+
+---
+
+## 5. File-level touch list
+
+### Already landed (primitives PR)
+- `src/fuzzer_tool/core/occupation.py` (new)
+- `src/fuzzer_tool/core/ro_rd.py` (new)
+- `src/fuzzer_tool/core/causal_sector.py` (new)
+- `tests/test_occupation.py`, `tests/test_ro_rd.py`, `tests/test_causal_sector.py` (new)
+
+### Phase A (next)
+- `src/fuzzer_tool/core/analyzer_registry.py` — two `REGISTRY.register(...)` blocks
+- `src/fuzzer_tool/services/fuzzer.py` — kwargs + `_use_occupation` / `_use_causal_sector` assignment only (no direct imports of the new modules)
+- Registry / wire_all tests
+
+### Phase B
+- `services/fuzzer.py` (or the exact coverage-record helper) — occupation observe + causal_sector `observe_flow`
+- Tests with synthetic edge counts / TE history
+
+### Phase C–E
+- Optional: `operator_registry.py` orientation field
+- Optional: tmin/lineage RD reverse
+- `cli/commands.py` flags
+- Report / stats path
+- `CHANGELOG.md`, this handover status
+
+### Forbidden
+- `adapters/afl_shim.c` and any SHM layout change
+- Ad-hoc analyzer construction inside `Fuzzer.__init__` outside `wire_all`
+- Default-on flags or non-zero policy weights without an explicit decision
+
+---
+
+## 6. Testing and equivalence policy
+
+- Every wiring phase ships with tests that, under default / flag-off configuration, preserve existing behaviour (registry activation matrix, no new attrs, unchanged operator selection under fixed RNG when weights are 0).
+- Prefer property / equivalence tests over large golden corpora.
+- Memory: if per-seed occupation is ever added, assert prune still runs and RSS stays in the same ballpark as EdgeTracker’s documented ceilings.
+- Registry tests must prove `causal_sector` does not activate without TE.
+
+---
+
+## 7. Risks and mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| Per-seed occupation blows EdgeTracker memory | Sparse / top-K / sketch; opt-in; respect existing prune ceiling and low-water mark |
-| TE graph cost | Cap nodes; reuse existing TE observation cadence; decay old edges |
-| RO gating reduces path-negation discoveries | Soft weights only; never hard-disable coverage-positive RO moves |
-| RD reverse undefined for many operators | Document invertible subset; skip or approximate explicitly; do not invent silent inverses |
-| Conceptual overload in stats line | Gate new numbers behind the same flags; keep default line unchanged |
-| “Entropy increase = progress” fallacy | Conditional form only; report theoretical vs actual support; cite paper discipline in comments |
+| Per-seed occupation blows EdgeTracker memory | Phase B = process-global only; per-seed needs explicit budget |
+| TE graph cost | Cap nodes/edges in `CausalSectorGraph`; reuse TE cadence |
+| RO gating reduces path-negation discoveries | Soft weights only; never hard-disable coverage-positive RO |
+| RD reverse undefined for many operators | Primitive already refuses; document invertible subset |
+| Ad-hoc wiring drifts from registry | Code review rule: no new analyzer imports in `Fuzzer.__init__` |
+| “Entropy increase = progress” fallacy | Conditional form only; report theoretical vs actual support |
 
 ---
 
-## 6. Priority relative to existing handovers
+## 8. Priority relative to existing handovers
 
-This work is **P3-design / P2-wiring** in the language of `handover_pending_2026-09-06.md`:
+**P3 design / P2 wiring** in the language of `handover_pending_2026-09-06.md`:
 
-- It is not a P0 defect in shipped code.
-- It is not a measured P1 win with an equivalence oracle already in hand.
-- It is design with genuine content, gated on the structural claims of the paper, and then cheap wiring once the objects exist.
+- Not a P0 defect in shipped code.
+- Not a measured P1 win with an equivalence oracle already in hand.
+- Design with genuine content; wiring is cheap once flags + `AnalyzerSpec` land.
 
-Do not schedule it ahead of open P0/P1 items unless a campaign is already blocked on causal / rarity scoring quality and the owner explicitly prioritises this thread.
+Do not schedule ahead of open P0/P1 items unless a campaign is blocked on causal / rarity scoring quality and the owner explicitly prioritises this thread.
+
+Respect the analyzer-registry handover: adding analyzers means **one `REGISTRY.register` call** — nothing else in the constructor.
 
 ---
 
-## 7. Suggested commit series (for the implementer)
+## 9. Suggested commit series
 
-1. `docs: add handover_RoRd.md (arrow-of-time / RO-RD plan)`  
-2. `feat(occupation): discrete finite-time occupation from edge counts` (+ tests, flag)  
-3. `feat(operators): RO/RD tags and lineage RD-reverse helper` (+ tests)  
-4. `feat(te): causal-sector graph and stability predicate` (+ tests)  
-5. `feat(scoring): conditional typicality and bridge deficit` (+ tests)  
-6. `feat(cli/report): wire arrow-of-time flags and report sections`  
+1. `docs: add/update handover_RoRd.md (primitives status + analyzer_registry wiring)`  
+2. `feat(core): RO/RD occupation and causal-sector primitives (unwired)` — already prepared as a format-patch  
+3. `feat(analyzers): register occupation and causal_sector (flags default off)`  
+4. `feat(fuzzer): record occupation and causal-sector observations`  
+5. `feat(cli/report): occupation / causal-sector flags and report sections`  
+6. `feat(policy): optional RO soft-weight and occupation seed term (weight 0)` — optional  
 7. `docs: mark handover_RoRd phases done + CHANGELOG`
 
-Each commit must leave the tree green and default behaviour unchanged when flags are off.
+Each commit leaves the tree green and default behaviour unchanged when flags are off.
 
 ---
 
-## 8. Citation and references
+## 10. Citation and references
 
 **Primary**  
 G. Du, *A Systematic Solution to the Arrow of Time Problem: Reversal of Objective Temporal Orientation Is Not Dynamical History Reversal*.  
-Especially: distinction RO vs RD (Introduction, eq. 1.2); Postulates 2.1–2.2 and \(T_{\mathrm{phys}}\); complete-input audit / orientation-recovery dichotomy; finite-time occupation (Sec. 3, classical \(\mu_I\) and macroscopic push-forward); horizontal vs longitudinal support; conditional local second law; probability-object / typicality / actual-support triad; limits of global Boltzmann extrapolation (Sec. 7 / Appendix C).
+Especially: RO vs RD (Introduction, eq. 1.2); Postulates 2.1–2.2 and \(T_{\mathrm{phys}}\); complete-input audit; finite-time occupation (Sec. 3); horizontal vs longitudinal support; conditional local second law; probability-object / typicality / actual-support triad.
 
 **Fuzzer-internal**  
-- `core/transfer_entropy.py` (Schreiber TE + surrogate bias)  
-- `core/edge_tracker.py`, `core/renyi.py`, `core/seed_quality.py`, `core/execution_time.py`  
+- `core/analyzer_registry.py` + `docs/handover/handover_analyzer_registry_2026-09-07.md`  
+- `core/operator_registry.py` (`path_negate`)  
+- `core/transfer_entropy.py`, `core/edge_tracker.py`, `core/seed_quality.py`  
 - Lineage, path-negation / SMT, Elo / bandit schedulers  
-- Existing handovers under `docs/handover/` for process and priority language  
 
 **External (already reflected in TE module)**  
 Schreiber, *Measuring Information Transfer* (2000); Marschinski & Kantz effective transfer entropy bias correction.
 
 ---
 
-## 9. Acceptance checklist (when this handover can be closed)
+## 11. Acceptance checklist
 
-- [ ] `docs/handover/handover_RoRd.md` present and anchors re-verified against HEAD  
-- [ ] Phase 1 occupation module + tests + opt-in flag; default behaviour unchanged  
-- [ ] Phase 2 RO/RD tags + RD lineage helper + tests; default unchanged  
-- [ ] Phase 3 causal-sector graph + soft constraints + tests; default unchanged  
-- [ ] Phase 4 conditional scoring + bridge deficit + tests; default unchanged  
-- [ ] Phase 5 CLI/report/CHANGELOG; learning note if needed  
+### Primitives
+- [x] `core/occupation.py`, `core/ro_rd.py`, `core/causal_sector.py` + 41 unit tests  
+- [x] No `afl_shim.c` changes  
+
+### Wiring
+- [ ] Phase A: `AnalyzerSpec` for `occupation` and `causal_sector`; flags default off; registry tests green  
+- [ ] Phase B: record hooks; synthetic integration tests; still no selection change  
+- [ ] Phase C: RO/RD classification at report/record sites; RD reverse only when lineage-ready  
+- [ ] Phase D: optional scores with weight 0 default  
+- [ ] Phase E: CLI / report / CHANGELOG  
 - [ ] **No modifications to `afl_shim.c` or SHM layout**  
-- [ ] Memory and prune regressions green  
-- [ ] Done document (or update to this file) records decisions and any rejected alternatives  
+- [ ] **No analyzer construction outside `analyzer_registry.wire_all`**  
+- [ ] Default campaigns bit-identical with flags off  
+- [ ] Done document (or update here) records decisions and rejected alternatives  
 
 ---
 
-## 10. One-paragraph summary for the next agent
+## 12. One-paragraph summary for the next agent
 
-Implement the paper’s RO ≠ RD distinction, discrete finite-time occupation from existing per-run edge **counts**, a TE-derived causal-sector graph, and conditional typicality / bridge-deficit scoring **entirely in Python**. Do not touch `afl_shim.c`. Keep every new score behind flags with default weight 0 so existing campaigns remain bit-identical. Follow the phased plan above, match existing scheduler/seed/report conventions, and re-verify every file:line anchor before editing. When finished, mark phases done and leave a short decision ledger.
+Primitives for occupation, RO/RD, and causal-sector are landed and unit-tested but **unwired**. Wire them the same way as `transfer_entropy`: gating flags on `Fuzzer`, `AnalyzerSpec` + `activate`/`deactivate` in `core/analyzer_registry.py`, `REGISTRY.wire_all` only — never ad-hoc imports in `Fuzzer.__init__`. Soft-require TE for `causal_sector`. Record edge-count occupation and TE flows in Phase B without changing selection policy. Keep RO/RD labels on the operator side; keep `rd_reverse_lineage` pure until tmin/lineage needs it. Default flags off, policy weights 0, no `afl_shim.c`. Re-verify anchors against HEAD before editing.
