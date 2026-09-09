@@ -754,6 +754,8 @@ class Fuzzer:
         mi_guided=False,
         renyi_weight=False,
         transfer_entropy=False,
+        occupation=False,
+        causal_sector=False,
         secretary=False,
         secretary_window=500,
         secretary_exploration=None,
@@ -1857,6 +1859,8 @@ class Fuzzer:
         self._use_renyi_weight = renyi_weight
         self._use_transfer_entropy = transfer_entropy
         self._te_byte_edges: dict[int, dict[int, int]] = {}  # pos → {edge: count}
+        self._use_occupation = occupation
+        self._use_causal_sector = causal_sector
 
         # Gating flags read by analyzer_registry specs below (elo, garch,
         # continuum, format_learner, corpus_compression, distance, trace all
@@ -1871,14 +1875,14 @@ class Fuzzer:
         self._use_cfg_cache = use_cfg_cache
         self._trace_crashes_requested = trace_crashes
 
-        # Crash MI tracker, length-edge tracker, transfer entropy, Allan
-        # variance, fluctuation tracking, execution-time tracking, frameshift,
-        # the coverage-regime cluster (csd / coverage_homogeneity / garch /
-        # continuum / coverage_regime), format learner, corpus PPMD
-        # compression, Elo, directed-distance, crash tracing, and the
-        # checksum learner are all constructed here in one pass — see
-        # core/analyzer_registry.py, the single source of truth for which
-        # analyzers exist and what gates each one.
+        # Crash MI tracker, length-edge tracker, transfer entropy, occupation,
+        # causal-sector, Allan variance, fluctuation tracking, execution-time
+        # tracking, frameshift, the coverage-regime cluster (csd /
+        # coverage_homogeneity / garch / continuum / coverage_regime), format
+        # learner, corpus PPMD compression, Elo, directed-distance, crash
+        # tracing, and the checksum learner are all constructed here in one
+        # pass — see core/analyzer_registry.py, the single source of truth
+        # for which analyzers exist and what gates each one.
         from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
         _ANALYZER_REGISTRY.wire_all(self)
