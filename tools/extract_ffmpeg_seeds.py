@@ -85,7 +85,9 @@ def save_cache(cache: dict) -> None:
 # ---------------------------------------------------------------------------
 # Download helpers
 # ---------------------------------------------------------------------------
-def download(url: str, dest: str, retries: int = 4, backoff: float = 1.0) -> bool:
+def download(
+    url: str, dest: str, retries: int = 4, backoff: float = 1.0, max_size: int = 4096
+) -> bool:
     """Download URL to dest. Returns True on success."""
     req = urllib.request.Request(url)
     req.add_header("Accept", "*/*")
@@ -93,7 +95,17 @@ def download(url: str, dest: str, retries: int = 4, backoff: float = 1.0) -> boo
     for attempt in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
+                # Check Content-Length header if present
+                if "Content-Length" in resp.headers and max_size > 0:
+                    try:
+                        cl = int(resp.headers["Content-Length"])
+                        if cl > max_size:
+                            return False
+                    except ValueError:
+                        pass
                 data = resp.read()
+            if max_size > 0 and len(data) > max_size:
+                return False
             if len(data) < MIN_SIZE:
                 return False
             os.makedirs(os.path.dirname(dest), exist_ok=True)
@@ -168,6 +180,7 @@ def download_oss_fuzz_seeds(
     entries: list[dict] | None = None,
     max_seeds: int = 0,
     cache: dict | None = None,
+    max_size: int = 4096,
 ) -> int:
     """Download OSS-Fuzz crash reproductions.
 
@@ -211,11 +224,11 @@ def download_oss_fuzz_seeds(
             continue
 
         print(f"  [{i + 1}/{total}] [{fuzzer}] downloading {testcase_id} ...")
-        if download(url, dest):
+        if download(url, dest, max_size=max_size):
             cache.setdefault("oss_fuzz", {})[testcase_id] = dest
             saved += 1
         else:
-            with open(dest, "wb") as f:
+            with open(dest, "wb"):
                 pass  # touch empty file so we don't retry
             print(f"  [warn] failed {testcase_id}", file=sys.stderr)
 
@@ -246,6 +259,7 @@ def download_fate_seeds(
     out_dir: str,
     codecs: list[str] | None = None,
     cache: dict | None = None,
+    max_size: int = 4096,
 ) -> int:
     """Download FATE suite baseline samples via HTTP.
 
@@ -292,7 +306,7 @@ def download_fate_seeds(
 
             file_url = urljoin(index_url, link)
             print(f"  downloading fate/{fmt}/{name} ...")
-            if download(file_url, dest):
+            if download(file_url, dest, max_size=max_size):
                 cache.setdefault("fate", {})[name] = dest
                 saved += 1
             time.sleep(0.1)  # be polite to the server
@@ -307,6 +321,7 @@ def download_cve_pocs(
     out_dir: str,
     cves: dict[str, dict] | None = None,
     cache: dict | None = None,
+    max_size: int = 4096,
 ) -> int:
     """Download CVE PoC files from ReportCVE / known repos."""
     if cache is None:
@@ -329,7 +344,7 @@ def download_cve_pocs(
         readme_dest = os.path.join(fmt_dir, "README.md")
         if not os.path.exists(readme_dest):
             print(f"  [{cve_id}] downloading README ...")
-            if download(readme_url, readme_dest):
+            if download(readme_url, readme_dest, max_size=max_size):
                 saved += 1
                 cache.setdefault("cve", {})[cve_id] = readme_dest
 
@@ -347,7 +362,7 @@ def download_cve_pocs(
             if os.path.exists(poc_dest):
                 continue
             print(f"  [{cve_id}] trying {fname} ...")
-            if download(poc_url, poc_dest):
+            if download(poc_url, poc_dest, max_size=max_size):
                 saved += 1
                 cache.setdefault("cve", {})[f"{cve_id}/{fname}"] = poc_dest
                 break
@@ -382,6 +397,13 @@ def main() -> int:
         help="Max OSS-Fuzz seeds to download (0=all 656)",
     )
     parser.add_argument(
+        "--max-size",
+        dest="max_size",
+        type=int,
+        default=4096,
+        help="Max download size per file in bytes (0=unlimited, default 4096)",
+    )
+    parser.add_argument(
         "--codecs",
         default=None,
         help="Comma-separated FATE codecs (default: all)",
@@ -391,12 +413,13 @@ def main() -> int:
 
     cache = load_cache()
     total_saved = 0
+    max_size = args.max_size
 
     if args.source in ("oss-fuzz", "all"):
         print("=" * 60)
         print("[*] OSS-Fuzz crash reproductions")
         print("=" * 60)
-        n = download_oss_fuzz_seeds(args.out, max_seeds=args.max, cache=cache)
+        n = download_oss_fuzz_seeds(args.out, max_seeds=args.max, cache=cache, max_size=max_size)
         total_saved += n
         print(f"[*] OSS-Fuzz: {n} seeds saved")
 
@@ -405,7 +428,7 @@ def main() -> int:
         print("[*] FATE suite baseline samples")
         print("=" * 60)
         codecs = args.codecs.split(",") if args.codecs else None
-        n = download_fate_seeds(args.out, codecs=codecs, cache=cache)
+        n = download_fate_seeds(args.out, codecs=codecs, cache=cache, max_size=max_size)
         total_saved += n
         print(f"[*] FATE: {n} seeds saved")
 
@@ -413,7 +436,7 @@ def main() -> int:
         print("=" * 60)
         print("[*] CVE PoC files")
         print("=" * 60)
-        n = download_cve_pocs(args.out, cache=cache)
+        n = download_cve_pocs(args.out, cache=cache, max_size=max_size)
         total_saved += n
         print(f"[*] CVE PoCs: {n} seeds saved")
 
@@ -437,19 +460,19 @@ def main() -> int:
         print(f"\n1. OSS-Fuzz Seeds: {len(oss_fuzz_cache)} crash reproductions")
         if oss_fuzz_cache:
             print("   Sample entries:")
-            for i, (testcase_id, path) in enumerate(list(oss_fuzz_cache.items())[:5]):
+            for _i, (testcase_id, path) in enumerate(list(oss_fuzz_cache.items())[:5]):
                 print(f"     - {testcase_id} -> {path}")
 
         print(f"\n2. FATE Suite Seeds: {len(fate_cache)} baseline samples")
         if fate_cache:
             print("   Sample entries:")
-            for i, (filename, path) in enumerate(list(fate_cache.items())[:5]):
+            for _i, (filename, path) in enumerate(list(fate_cache.items())[:5]):
                 print(f"     - {filename} -> {path}")
 
         print(f"\n3. CVE PoC Seeds: {len(cve_cache)} files")
         if cve_cache:
             print("   Sample entries:")
-            for i, (key, path) in enumerate(list(cve_cache.items())[:5]):
+            for _i, (key, path) in enumerate(list(cve_cache.items())[:5]):
                 print(f"     - {key} -> {path}")
 
     return 0
