@@ -3921,6 +3921,8 @@ class OperatorEngine:
             available.append("cmaes")
         if f._use_contextual and f._contextual:
             available.append("contextual")
+        if f._use_c2ucb and f._c2ucb:
+            available.append("c2ucb")
         if f._use_ducb and f._ducb:
             available.append("ducb")
         if f._use_kl_ducb and f._kl_ducb:
@@ -3993,6 +3995,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "contextual" and f._contextual:
             op = f._contextual.select_op(ops, self._context_vector)
+            f._last_mopt_particles.append(None)
+        elif strategy == "c2ucb" and f._c2ucb:
+            op = f._c2ucb.select_op(ops, self._context_vector)
             f._last_mopt_particles.append(None)
         elif strategy == "ducb" and f._ducb:
             op = f._ducb.select_op(ops)
@@ -4070,6 +4075,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif f._use_contextual and f._contextual:
             op = f._contextual.select_op(ops, self._context_vector)
+            f._last_mopt_particles.append(None)
+        elif f._use_c2ucb and f._c2ucb:
+            op = f._c2ucb.select_op(ops, self._context_vector)
             f._last_mopt_particles.append(None)
         elif f._use_ducb and f._ducb:
             op = f._ducb.select_op(ops)
@@ -4519,9 +4527,15 @@ class OperatorEngine:
         f._last_op_costs = {}
         # Shared LinUCB context for this round: the seed doesn't change
         # across the n_mutations loop, so build it once here instead of
-        # once per select_op() call.
+        # once per select_op() call. C2UCB reads the same per-op vectors
+        # via _context_vector() (see its own docstring on why context
+        # quality is not optional for it), so it must gate this too --
+        # otherwise _context_vector()'s getattr fallback silently hands it
+        # an all-zero context whenever contextual itself is disabled.
         f._current_context_shared = (
-            self._build_shared_context(data) if f._use_contextual and f._contextual else None
+            self._build_shared_context(data)
+            if (f._use_contextual and f._contextual) or (f._use_c2ucb and f._c2ucb)
+            else None
         )
         if not hasattr(f, "_prev_bandit_op"):
             f._prev_bandit_op = None

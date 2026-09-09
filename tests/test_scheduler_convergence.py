@@ -494,7 +494,9 @@ class TestHarnessCoverage:
             if cls_name in ("MCTSSeedScheduler", "AlphaBetaMCTSSeedScheduler"):
                 continue
             cls = getattr(pkg, cls_name)
-            sched = cls(dim=4) if cls_name == "ContextualLinUCBScheduler" else cls()
+            sched = (
+                cls(dim=4) if cls_name in ("ContextualLinUCBScheduler", "C2UCBScheduler") else cls()
+            )
             a = adapt(sched, env.arms)
             op = a.select()
             assert op in env.arms, f"{cls_name} returned {op!r}"

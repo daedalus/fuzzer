@@ -45,6 +45,7 @@ from fuzzer_tool.core.ro_rd import classify_operator_name
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
+    C2UCBScheduler,
     CMAESScheduler,
     ContextualLinUCBScheduler,
     CUCBScheduler,
@@ -106,6 +107,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "c2ucb",
     "fpl",
     "invasion",
     "round_robin",
@@ -798,6 +800,10 @@ class Fuzzer:
         contextual=False,
         contextual_alpha=1.0,
         contextual_lambda=1.0,
+        c2ucb=False,
+        c2ucb_alpha=1.0,
+        c2ucb_lambda=1.0,
+        c2ucb_min_out_rounds=30.0,
         overlap_density=False,
         overlap_density_mode="modifier",
         overlap_min_jaccard=0.25,
@@ -1860,6 +1866,29 @@ class Fuzzer:
                 contextual_alpha,
                 contextual_lambda,
             )
+
+        # C2UCB (Qin, Chen & Zhu 2014): CUCB's superarm/semi-bandit credit
+        # assignment fused with LinUCB's per-arm context -- see c2ucb.py for
+        # why neither half alone is enough, and for the documented context-
+        # dilution limitation when _track_op_effect is off.
+        self._use_c2ucb = c2ucb
+        self._c2ucb = None
+        if c2ucb:
+            from fuzzer_tool.services.operators import CONTEXT_DIM
+
+            self._c2ucb = C2UCBScheduler(
+                dim=CONTEXT_DIM,
+                alpha=c2ucb_alpha,
+                lambda_reg=c2ucb_lambda,
+                min_out_rounds=c2ucb_min_out_rounds,
+            )
+            log.info(
+                "C2UCB enabled (dim=%d, alpha=%.2f, lambda=%.2f, min_out_rounds=%.1f)",
+                CONTEXT_DIM,
+                c2ucb_alpha,
+                c2ucb_lambda,
+                c2ucb_min_out_rounds,
+            )
         # Running mean/stddev of corpus seed sizes, updated in
         # corpus_manager.save_to_corpus(). Feeds the contextual scheduler's
         # "position in corpus size distribution" feature via a cheap
@@ -1999,6 +2028,7 @@ class Fuzzer:
             # round's success exactly like the operator that did the work.
             or self._cmaes
             or self._contextual
+            or self._c2ucb
             or self._ducb
             or self._swucb
             or self._cucb
@@ -2196,6 +2226,8 @@ class Fuzzer:
             _register_arms(self._fpl)
         if self._contextual:
             _register_arms(self._contextual)
+        if self._c2ucb:
+            _register_arms(self._c2ucb)
         if self._round_robin:
             _register_arms(self._round_robin)
         if self._elo:
@@ -4417,6 +4449,27 @@ class Fuzzer:
             for op, ok, w in op_rewards:
                 self._contextual.record(op, self._operators._context_vector(op), w if ok else 0.0)
 
+        if self._c2ucb:
+            # Stage every operator's outcome+context into the open round;
+            # settle_round() computes the actual per-arm credit once the
+            # whole round's membership is known (see c2ucb.py's module
+            # docstring for why this can't happen per-record like
+            # ContextualLinUCBScheduler above).
+            for op, ok, w in op_rewards:
+                self._c2ucb.record(op, self._operators._context_vector(op), ok, weight=w)
+            # When _track_op_effect is on, `ok` above is already per-op
+            # attributed truth (see _op_success), not a broadcast outcome --
+            # bypass C2UCB's own inclusion-contrast entirely and hand it
+            # that truth directly. This is the documented difference
+            # between C2UCB actually working and merely running; see
+            # "Context dilution" in c2ucb.py.
+            c2ucb_credits = (
+                {op: (w if ok else 0.0) for op, ok, w in op_rewards}
+                if self._track_op_effect
+                else None
+            )
+            self._c2ucb.settle_round(credits=c2ucb_credits)
+
         # Chi-squared operator heterogeneity test
         if (
             self._chi2_operator_interval > 0
@@ -5500,6 +5553,8 @@ class Fuzzer:
             all_strategies.append("cmaes")
         if self._contextual:
             all_strategies.append("contextual")
+        if self._c2ucb:
+            all_strategies.append("c2ucb")
         if self._ducb:
             all_strategies.append("ducb")
         if self._swucb:
@@ -5579,6 +5634,8 @@ class Fuzzer:
             ops.append("cmaes")
         if getattr(self, "_contextual", False):
             ops.append("contextual")
+        if getattr(self, "_c2ucb", False):
+            ops.append("c2ucb")
         if getattr(self, "_ducb", False):
             ops.append("ducb")
         if getattr(self, "_swucb", False):
@@ -5813,6 +5870,8 @@ class Fuzzer:
             ops.append("fpl")
         if getattr(self, "_use_contextual", False):
             ops.append("contextual")
+        if getattr(self, "_use_c2ucb", False):
+            ops.append("c2ucb")
         if getattr(self, "_use_invasion", False):
             ops.append("invasion")
         if getattr(self, "_use_shapley", False):

@@ -254,6 +254,21 @@ class ContextualAdapter(Adapter):
         self.s.record(name, self._CTX, 1.0 if success else 0.0)
 
 
+class C2UCBAdapter(ContextualAdapter):
+    """C2UCBScheduler additionally needs settle_round() to commit a credit.
+
+    Unlike ContextualLinUCBScheduler.record (which updates the regressor
+    immediately), C2UCBScheduler.record only stages the pull into the open
+    round -- the credit isn't computed and fed to the inner regressor until
+    settle_round() closes it. See c2ucb.py's module docstring for why (the
+    per-round inclusion-contrast needs the whole round's membership first).
+    """
+
+    def update(self, name: str, success: bool) -> None:
+        self.s.record(name, self._CTX, success)
+        self.s.settle_round()
+
+
 def adapt(scheduler, arms: list[str]) -> Adapter:
     """Wrap *scheduler* in the right adapter, chosen by class name."""
     cls = type(scheduler).__name__
@@ -261,6 +276,8 @@ def adapt(scheduler, arms: list[str]) -> Adapter:
         return MOptAdapter(scheduler, arms)
     if cls == "ContextualLinUCBScheduler":
         return ContextualAdapter(scheduler, arms)
+    if cls == "C2UCBScheduler":
+        return C2UCBAdapter(scheduler, arms)
     return Adapter(scheduler, arms)
 
 

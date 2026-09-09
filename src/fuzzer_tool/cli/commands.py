@@ -484,6 +484,10 @@ def cmd_fuzz(args):
             contextual=getattr(args, "contextual", False),
             contextual_alpha=getattr(args, "contextual_alpha", 1.0),
             contextual_lambda=getattr(args, "contextual_lambda", 1.0),
+            c2ucb=getattr(args, "c2ucb", False),
+            c2ucb_alpha=getattr(args, "c2ucb_alpha", 1.0),
+            c2ucb_lambda=getattr(args, "c2ucb_lambda", 1.0),
+            c2ucb_min_out_rounds=getattr(args, "c2ucb_min_out_rounds", 30.0),
             asan_target=getattr(args, "asan_target", None),
             ubsan_target=getattr(args, "ubsan_target", None),
             chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
@@ -525,6 +529,7 @@ def cmd_fuzz(args):
         args.cusum_ucb = True
         args.fpl = True
         args.contextual = True
+        args.c2ucb = True
         args.invasion = True
         args.garch = True
         args.continuum = True
@@ -674,6 +679,10 @@ def cmd_fuzz(args):
         contextual=getattr(args, "contextual", False),
         contextual_alpha=getattr(args, "contextual_alpha", 1.0),
         contextual_lambda=getattr(args, "contextual_lambda", 1.0),
+        c2ucb=getattr(args, "c2ucb", False),
+        c2ucb_alpha=getattr(args, "c2ucb_alpha", 1.0),
+        c2ucb_lambda=getattr(args, "c2ucb_lambda", 1.0),
+        c2ucb_min_out_rounds=getattr(args, "c2ucb_min_out_rounds", 30.0),
         shapley=getattr(args, "shapley", False),
         bayesian=getattr(args, "bayesian", False),
         mi_guided=getattr(args, "mi_guided", False),
@@ -1698,6 +1707,7 @@ _HAIL_MARY_FLAGS = (
     "cusum_ucb",
     "fractal_partition",
     "contextual",
+    "c2ucb",
     "invasion",
     "garch",
     "continuum",
@@ -2243,6 +2253,40 @@ def main() -> int:
         type=float,
         default=1.0,
         help="LinUCB ridge regularization strength (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--c2ucb",
+        action="store_true",
+        help=(
+            "Enable C2UCB contextual combinatorial operator scheduling "
+            "(Qin, Chen & Zhu): CUCB's superarm/semi-bandit credit "
+            "assignment fused with LinUCB's per-arm seed context. Per-arm "
+            "attribution is tracked automatically whenever this or any "
+            "other attribution-consuming scheduler is enabled; without it "
+            "credit falls back to a context-blind inclusion contrast (see "
+            "c2ucb.py's module docstring, 'Context dilution')"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--c2ucb-alpha",
+        type=float,
+        default=1.0,
+        help="C2UCB's inner LinUCB exploration weight (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--c2ucb-lambda",
+        type=float,
+        default=1.0,
+        help="C2UCB's inner LinUCB ridge regularization strength (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--c2ucb-min-out-rounds",
+        type=float,
+        default=30.0,
+        help=(
+            "Minimum out-sample round mass before C2UCB's inclusion "
+            "contrast is trusted over the global-mean fallback (default: 30.0)"
+        ),
     )
     fuzz_parser.add_argument(
         "--overlap-density",

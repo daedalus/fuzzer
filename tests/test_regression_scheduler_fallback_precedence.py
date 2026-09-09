@@ -2,9 +2,9 @@
 
 With Elo arbitration disabled, operators.select_op() falls back to a fixed
 chain (operators.py:1632–1656): replicator → mopt → bandit → exp3 →
-eps_greedy → hierarchical → gp_ucb → cmaes → contextual → ducb → swucb →
-kl_ducb → kl_swucb → cucb → cusum_ucb → round_robin → random. These tests
-pin that contract
+eps_greedy → hierarchical → gp_ucb → cmaes → contextual → c2ucb → ducb →
+swucb → kl_ducb → kl_swucb → cucb → cusum_ucb → round_robin → random.
+These tests pin that contract
 so future scheduler additions/removals cannot silently change which
 scheduler wins, and document that cem and invasion are reachable only via
 Elo (see tests/test_invasion_elo_integration.py for invasion's own ballot
@@ -37,6 +37,7 @@ _FALLBACK_PRECEDENCE = [
     "gp_ucb",
     "cmaes",
     "contextual",
+    "c2ucb",
     "ducb",
     "swucb",
     "kl_ducb",
@@ -91,6 +92,17 @@ class _RecordingContextual(_RecordingScheduler):
         return "op_contextual"
 
 
+class _RecordingC2UCB(_RecordingScheduler):
+    """C2UCB's select_op has the same (ops, context) shape as LinUCB's —
+    see c2ucb.py's module docstring: it delegates selection to an internal
+    ContextualLinUCBScheduler entirely unchanged."""
+
+    def select_op(self, ops: list[str], context) -> str:
+        self.calls += 1
+        assert callable(context), "c2ucb dispatch must pass a per-arm context callable"
+        return "op_c2ucb"
+
+
 class _FakeFuzzer:
     """Minimal fuzzer stand-in exposing exactly the attrs select_op() reads."""
 
@@ -103,6 +115,7 @@ class _FakeFuzzer:
         "gp_ucb": ("_use_gp_ucb", "_gp_ucb"),
         "cmaes": ("_use_cmaes", "_cmaes"),
         "contextual": ("_use_contextual", "_contextual"),
+        "c2ucb": ("_use_c2ucb", "_c2ucb"),
         "ducb": ("_use_ducb", "_ducb"),
         "swucb": ("_use_swucb", "_swucb"),
         "kl_ducb": ("_use_kl_ducb", "_kl_ducb"),
@@ -145,6 +158,8 @@ class _FakeFuzzer:
             fake = _RecordingMopt(name)
         elif name == "contextual":
             fake = _RecordingContextual(name)
+        elif name == "c2ucb":
+            fake = _RecordingC2UCB(name)
         else:
             fake = _RecordingScheduler(name)
         flag, attr = self._SCHEDULER_ATTRS[name]
@@ -188,10 +203,13 @@ class TestFallbackPrecedence:
             (["hierarchical"], "hierarchical"),
             (["gp_ucb"], "gp_ucb"),
             (["contextual"], "contextual"),
+            (["c2ucb"], "c2ucb"),
             # Prefix-off subsets: the first enabled in precedence order wins.
             (["gp_ucb", "exp3"], "exp3"),
             (["contextual", "gp_ucb"], "gp_ucb"),
             (["contextual", "exp3"], "exp3"),
+            (["c2ucb", "contextual"], "contextual"),
+            (["c2ucb", "gp_ucb"], "gp_ucb"),
             (["hierarchical", "bandit"], "bandit"),
             (["mopt", "replicator", "eps_greedy"], "replicator"),
             (

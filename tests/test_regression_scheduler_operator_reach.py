@@ -76,6 +76,7 @@ def _all_operator_schedulers():
     hier = S.HierarchicalBanditScheduler()
     gp = S.GPUCBScheduler()
     lin = S.ContextualLinUCBScheduler(dim=CONTEXT_DIM)
+    c2ucb = S.C2UCBScheduler(dim=CONTEXT_DIM)
     ducb = S.DUCBScheduler()
     swucb = S.SWUCBScheduler()
     kl_ducb = S.KL_DUCBScheduler()
@@ -102,6 +103,15 @@ def _all_operator_schedulers():
             lin,
             lambda o: lin.select_op(o, _ctx),
             lambda n, ok: lin.record(n, _ctx(n), 1.0 if ok else 0.0),
+        ),
+        # C2UCB delegates select_op's (ops, context) shape to its internal
+        # LinUCB unchanged; select_op() closes any round left open, same as
+        # CUCB below.
+        (
+            "C2UCBScheduler",
+            c2ucb,
+            lambda o: c2ucb.select_op(o, _ctx),
+            lambda n, ok: c2ucb.record(n, _ctx(n), ok),
         ),
         ("DUCBScheduler", ducb, ducb.select_op, ducb.record),
         ("FPLScheduler", fpl := S.FPLScheduler(), fpl.select_op, fpl.record),
