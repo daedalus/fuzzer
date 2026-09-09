@@ -3,11 +3,19 @@
 With Elo arbitration disabled, operators.select_op() falls back to a fixed
 chain (operators.py:1632–1656): replicator → mopt → bandit → exp3 →
 eps_greedy → hierarchical → gp_ucb → cmaes → contextual → ducb → swucb →
-cucb → random. These tests pin that contract
+kl_ducb → kl_swucb → cucb → cusum_ucb → round_robin → random. These tests
+pin that contract
 so future scheduler additions/removals cannot silently change which
 scheduler wins, and document that cem and invasion are reachable only via
 Elo (see tests/test_invasion_elo_integration.py for invasion's own ballot
 and dispatch coverage).
+
+kl_ducb/kl_swucb/round_robin were real, reachable branches in that chain
+but were missing from both ``_FALLBACK_PRECEDENCE`` and ``_FakeFuzzer``'s
+attribute set: every test in this file crashed with ``AttributeError`` on
+``f._use_kl_ducb`` the moment ``select_op`` walked past the ``swucb``
+branch, regardless of which scheduler the test was actually exercising.
+Restored alongside adding ``cusum_ucb``.
 """
 
 import pytest
@@ -31,7 +39,11 @@ _FALLBACK_PRECEDENCE = [
     "contextual",
     "ducb",
     "swucb",
+    "kl_ducb",
+    "kl_swucb",
     "cucb",
+    "cusum_ucb",
+    "round_robin",
 ]
 
 
@@ -93,7 +105,11 @@ class _FakeFuzzer:
         "contextual": ("_use_contextual", "_contextual"),
         "ducb": ("_use_ducb", "_ducb"),
         "swucb": ("_use_swucb", "_swucb"),
+        "kl_ducb": ("_use_kl_ducb", "_kl_ducb"),
+        "kl_swucb": ("_use_kl_swucb", "_kl_swucb"),
         "cucb": ("_use_cucb", "_cucb"),
+        "cusum_ucb": ("_use_cusum_ucb", "_cusum_ucb"),
+        "round_robin": ("_use_round_robin", "_round_robin"),
     }
 
     def __init__(self):
