@@ -1,6 +1,7 @@
 """Tests for services/te_position.py — transfer entropy position selection."""
 
 from fuzzer_tool.services.te_position import (
+    edge_sets_to_flow,
     get_te_weighted_position,
     update_te_causal_map,
 )
@@ -78,7 +79,48 @@ class TestUpdateTeCausalMap:
         assert len(byte_edges) > 0
 
 
-class TestGetTeWeightedPosition:
+class TestEdgeSetsToFlow:
+    def test_no_te_object(self):
+        assert edge_sets_to_flow(None, [{1}, {2}, {1, 2}]) == {}
+
+    def test_insufficient_history(self):
+        te = FakeTE(return_val=0.05)
+        assert edge_sets_to_flow(te, [{1}, {2}]) == {}  # < 3 histories
+
+    def test_empty_history_edges(self):
+        te = FakeTE(return_val=0.05)
+        assert edge_sets_to_flow(te, [set(), set(), set()]) == {}
+
+    def test_directed_pairs_for_top_edges(self):
+        te = FakeTE(return_val=0.05)
+        history = [{1, 2}, {1}, {1, 2}, {2}]
+        flow = edge_sets_to_flow(te, history, top_k=2)
+        # Both directions between the two top edges, never a self-pair.
+        assert set(flow) == {(1, 2), (2, 1)}
+        assert all(v == 0.05 for v in flow.values())
+
+    def test_zero_te_excluded(self):
+        te = FakeTE(return_val=0.0)
+        history = [{1, 2}, {1}, {1, 2}, {2}]
+        assert edge_sets_to_flow(te, history, top_k=2) == {}
+
+    def test_top_k_limits_edge_count(self):
+        te = FakeTE(return_val=0.01)
+        # Edge 3 is hit in every history (most frequent); 1 and 2 less so.
+        history = [{1, 3}, {2, 3}, {3}, {1, 3}]
+        flow = edge_sets_to_flow(te, history, top_k=1)
+        # Only the single most-hit edge (3) survives top_k=1 -> no pairs.
+        assert flow == {}
+
+    def test_binary_series_built_from_membership(self):
+        te = FakeTE(return_val=0.05)
+        history = [{1}, set(), {1, 2}]
+        edge_sets_to_flow(te, history, top_k=2)
+        # Series passed to transfer_entropy encode edge membership per step.
+        series_by_call = {tuple(src): tuple(tgt) for src, tgt in te.calls}
+        assert (1, 0, 1) in series_by_call
+        assert series_by_call[(1, 0, 1)] == (0, 0, 1)
+
     def test_empty_byte_edges(self):
         assert get_te_weighted_position({}, 100) is None
 

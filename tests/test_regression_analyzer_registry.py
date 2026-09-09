@@ -35,6 +35,8 @@ _ALWAYS_ON = {
 _FLAG_GATED = {
     "fluctuation",
     "transfer_entropy",
+    "occupation",
+    "causal_sector",
     "format_learner",
     "corpus_compression",
     "elo",
@@ -147,6 +149,9 @@ class TestFlagGatedAnalyzers:
         f = _build_fuzzer()
         assert f._fluctuation is None
         assert f._te is None
+        assert f._occupation_rarity is None
+        assert f._last_occupation is None
+        assert f._causal_sector is None
         assert f._format_learner is None
         assert f._ppmd is None
         assert f._elo is None
@@ -172,6 +177,29 @@ class TestFlagGatedAnalyzers:
         assert f._te_input_history == []
         assert f._te_edge_history == []
         assert f._te_history_max == 500
+
+    def test_occupation_on_when_requested(self):
+        f = _build_fuzzer(occupation=True)
+        assert type(f._occupation_rarity).__name__ == "LongitudinalRarity"
+        assert f._last_occupation is None
+        assert f._occupation_max_edges == 256
+
+    def test_causal_sector_requires_transfer_entropy(self):
+        # `available` is a conjunction with `_use_transfer_entropy` -- the
+        # graph would otherwise sit permanently empty with no TE source.
+        f = _build_fuzzer(causal_sector=True)
+        assert f._causal_sector is None
+
+    def test_causal_sector_on_when_both_flags_set(self):
+        f = _build_fuzzer(causal_sector=True, transfer_entropy=True)
+        assert type(f._causal_sector).__name__ == "CausalSectorGraph"
+
+    def test_causal_sector_registered_after_transfer_entropy(self):
+        # activate() for causal_sector doesn't read f._te directly today, but
+        # the ordering guarantee mirrors coverage_regime's dependency
+        # cluster and must hold regardless.
+        names = REGISTRY.names()
+        assert names.index("transfer_entropy") < names.index("causal_sector")
 
     def test_format_learner_on_when_requested(self):
         f = _build_fuzzer(learn_format=True)

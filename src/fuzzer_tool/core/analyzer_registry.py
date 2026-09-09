@@ -248,8 +248,10 @@ REGISTRY.register(
     AnalyzerSpec(
         name="causal_sector",
         category="mutual_information",
-        available=lambda f: bool(getattr(f, "_use_causal_sector", False))
-        and bool(getattr(f, "_use_transfer_entropy", False)),
+        available=lambda f: (
+            bool(getattr(f, "_use_causal_sector", False))
+            and bool(getattr(f, "_use_transfer_entropy", False))
+        ),
         activate=_activate_causal_sector,
         deactivate=_deactivate_causal_sector,
     )

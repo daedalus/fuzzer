@@ -38,6 +38,7 @@ from fuzzer_tool.services.stats_reporter import (
     run_crash_replays as _run_crash_replays_fn,
 )
 from fuzzer_tool.services.te_position import (
+    edge_sets_to_flow,
     get_te_weighted_position,
     update_te_causal_map,
 )
@@ -500,6 +501,18 @@ class StatsReporter:
             f.map_size,
             f._te_byte_edges,
         )
+
+    def update_causal_sector(self):
+        """Feed the causal-sector graph from the TE edge history (Phase B2).
+
+        Reuses TE's own observation cadence -- called alongside
+        ``update_te_causal_map`` -- rather than recomputing full pairwise
+        transfer entropy every iteration.
+        """
+        f = self.f
+        flow = edge_sets_to_flow(f._te, f._te_edge_history)
+        if flow:
+            f._causal_sector.observe_flow(flow)
 
     def get_te_weighted_position(self, input_length: int) -> int | None:
         return get_te_weighted_position(self.f._te_byte_edges, input_length)
@@ -1137,6 +1150,43 @@ class StatsReporter:
                         parts.append(f"dist:{tail_avg:.1f}")
             except (AttributeError, OSError):
                 pass
+
+        # Finite-time occupation (Du, Sec. 3): last run's support size /
+        # entropy plus the number of histories folded into longitudinal
+        # rarity so far. Purely descriptive -- never gates selection.
+        occ = getattr(f, "_last_occupation", None)
+        if occ:
+            try:
+                from fuzzer_tool.core.occupation import OccupationMeasure
+
+                measure = OccupationMeasure.from_counts(occ)
+                rarity = getattr(f, "_occupation_rarity", None)
+                n_hist = rarity.n_histories if rarity is not None else 0
+                parts.append(
+                    f"occ:supp={measure.support_size()} "
+                    f"H={measure.shannon_entropy():.2f} n={n_hist}"
+                )
+            except (AttributeError, TypeError, ValueError):
+                pass
+
+        # Causal-sector graph (Time-Causal Structure analogue): node/edge
+        # counts and the stability gate later RO soft-weighting will read.
+        sector = getattr(f, "_causal_sector", None)
+        if sector is not None:
+            try:
+                snap = sector.snapshot()
+                parts.append(
+                    f"sector:n={snap.n_nodes} e={snap.n_edges} stable={'y' if snap.stable else 'n'}"
+                )
+            except (AttributeError, TypeError):
+                pass
+
+        # RO vs RD applied-operator edge attribution (classification only,
+        # docs/handover/handover_RoRd.md Phase C1). Never read back to gate
+        # operator selection.
+        ro_rd = getattr(f, "_ro_rd_edge_counts", None)
+        if ro_rd and (ro_rd.get("ro", 0.0) or ro_rd.get("rd", 0.0)):
+            parts.append(f"ro:{ro_rd.get('ro', 0.0):.0f} rd:{ro_rd.get('rd', 0.0):.0f}")
 
         if parts:
             print("    " + " | ".join(parts), flush=True)

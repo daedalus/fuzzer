@@ -39,6 +39,7 @@ from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.percolation import CoverageRegime
+from fuzzer_tool.core.ro_rd import classify_operator_name
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
@@ -1401,6 +1402,11 @@ class Fuzzer:
         self.op_applicable: dict[str, int] = {}
         self.op_success_applicable: dict[str, int] = {}
         self.op_edges: dict[str, int] = {}
+        # RO/RD classification counts (Du orientation vs history-reversal
+        # distinction, docs/handover/handover_RoRd.md Phase C1). Metadata
+        # only -- never read back to gate operator selection. Keyed by
+        # OrientationClass.value ("ro" / "rd" / "neutral").
+        self._ro_rd_edge_counts: dict[str, float] = {"ro": 0.0, "rd": 0.0, "neutral": 0.0}
         self._peak_rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         self._discovery_execs: array = array("Q")  # exec_count per discovery snapshot
         self._discovery_edges: array = array("Q")  # cumulative edges per snapshot
@@ -4081,6 +4087,15 @@ class Fuzzer:
                     else self._get_current_edge_set()
                 )
                 hit_counts = None
+            if getattr(self, "_occupation_rarity", None) is not None and hit_counts:
+                # Finite-time occupation (Du, Sec. 3): the run's own edge-visit
+                # counts as a longitudinal statistical support, distinct from
+                # EdgeTracker's horizontal (across-seeds) hit frequencies.
+                from fuzzer_tool.core.occupation import OccupationMeasure
+
+                occ = OccupationMeasure.from_counts(hit_counts)
+                self._last_occupation = occ.sparse_snapshot(self._occupation_max_edges)
+                self._occupation_rarity.observe(occ)
             if hit_edges:
                 # Read stack depth and path hash from SHM metadata (if available)
                 stack_depth = 0
@@ -4118,6 +4133,10 @@ class Fuzzer:
                         share = len(new) / len(unique_ops)
                         for op in unique_ops:
                             self.op_edges[op] = self.op_edges.get(op, 0.0) + share
+                            orientation = classify_operator_name(op).value
+                            self._ro_rd_edge_counts[orientation] = (
+                                self._ro_rd_edge_counts.get(orientation, 0.0) + share
+                            )
                     # Separate counter for cmplog-involved edge discoveries
                     # (cumulative with the op attribution above — cmplog is a
                     #  signal source, not a mutation op, so it can overlap).
@@ -4451,6 +4470,11 @@ class Fuzzer:
                 # Update byte→edge causal map periodically
                 if len(self._te_input_history) % 100 == 0 and len(self._te_input_history) > 50:
                     self._update_te_causal_map()
+                    # Same cadence: feed the causal-sector graph from the TE
+                    # edge history already being maintained above, rather
+                    # than recomputing full pairwise TE every iteration.
+                    if getattr(self, "_causal_sector", None) is not None:
+                        self._update_causal_sector()
 
         if is_crash:
             self.crash_count += 1
@@ -4842,6 +4866,9 @@ class Fuzzer:
 
     def _update_te_causal_map(self):
         return self._stats.update_te_causal_map()
+
+    def _update_causal_sector(self):
+        return self._stats.update_causal_sector()
 
     def _get_te_weighted_position(self, input_length: int):
         return self._stats.get_te_weighted_position(input_length)
@@ -5783,6 +5810,10 @@ class Fuzzer:
             groups["Analysis"].append("renyi")
         if getattr(self, "_use_transfer_entropy", False):
             groups["Analysis"].append("transfer-entropy")
+        if getattr(self, "_use_occupation", False):
+            groups["Analysis"].append("occupation")
+        if getattr(self, "_causal_sector", None) is not None:
+            groups["Analysis"].append("causal-sector")
         if getattr(self, "_use_sensitivity", False):
             groups["Analysis"].append("sensitivity")
         if getattr(self, "_use_lineage", False):

@@ -184,6 +184,9 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Rényi entropy** (`--renyi-weight`): generalized entropy spectrum for seed weighting — boosts seeds exercising rare (cold) edges
 - **Rate-distortion corpus minimization** (`--rate-distortion`): optimal compression of corpus preserving coverage diversity
 - **Transfer entropy** (`--transfer-entropy`): directional causal flow between byte positions and coverage edges
+- **Occupation / longitudinal rarity** (`--occupation`): folds each exec's edge-hit counts into a `LongitudinalRarity` history, reporting support size, entropy, and history count — flags edges that are rare *across time*, not just across the corpus
+- **Causal sector graph** (`--causal-sector`, requires `--transfer-entropy`): every 100 samples, top-k edge-to-edge transfer-entropy flows from the existing TE history are folded into a `CausalSectorGraph`, reporting node/edge counts and stability
+- **RO/RD orientation tagging** (metadata only, always on): each attributed operator edge is classified `ro`/`rd`/`neutral` via `classify_operator_name` and tallied for the stats report; classification never affects scheduling or selection
 - **Shannon entropy rate tracking**: global edge-hit distribution entropy sampled periodically; confirms genuine stall (no new edges + flat entropy rate) vs. transient redistribution before activating random-mode recovery
 - **Index of Dispersion** (Fano factor, D = σ²/μ): sliding-window variance-to-mean ratio on the incremental edge-discovery rate — resolves Allan variance's blind spot: a buffer full of zeros (genuine stall, D « 0.3) vs. rare bursts (bursty exploration, D › 1.5). D › 1.5 overrides stall recovery; D « 0.3 confirms it with higher aggression. Also available as a standalone `DispersionIndex` class for any per-operator or per-signal dispersion analysis.
 
@@ -450,6 +453,8 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--mi-guided` | Mutual information guided mutation (target high-MI byte positions) |
 | `--renyi-weight` | Rényi entropy weighting in seed selection (boost cold-edge seeds) |
 | `--transfer-entropy` | Transfer entropy causal tracking (byte→edge influence detection) |
+| `--occupation` | Longitudinal rarity tracking over edge-hit histories (support size / entropy in stats) |
+| `--causal-sector` | Causal sector graph from top-k TE edge flows; requires `--transfer-entropy` |
 | `--inprocess` | Persistent subprocess mode (auto-restart on crash) |
 | `--resume` | Resume from saved state |
 | `--profile-hotpath` | Profile the fuzz run with cProfile; prints tottime/cumtime/ncalls tables and dumps stats (ignored with `--jobs > 1`; suppresses the periodic `[*] execs:` status line for clean output) |

@@ -9,6 +9,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Wired the RO/RD temporal-orientation analyzers** (`core/occupation.py`,
+  `core/ro_rd.py`, `core/causal_sector.py`) into `analyzer_registry`, record
+  hooks, CLI, and reporting, per `docs/handover/handover_RoRd.md` Phases
+  A/B/C1/E. Both new analyzers default off and never construct outside
+  `REGISTRY.wire_all`, matching the `transfer_entropy` pattern.
+
+  - **`--occupation`** (`Fuzzer(occupation=...)`) — after each new-coverage
+    exec, folds `hit_counts` into `OccupationMeasure` via
+    `LongitudinalRarity.observe`, exposing support size / entropy / history
+    count in the live stats supplementary line.
+  - **`--causal-sector`** (`Fuzzer(causal_sector=...)`) — soft-requires
+    `--transfer-entropy` (registered directly after it in
+    `analyzer_registry.py` so `f._te` exists first). Every 100 samples,
+    `StatsReporter.update_causal_sector()` feeds `CausalSectorGraph.observe_flow`
+    via a new adapter, `services/te_position.py::edge_sets_to_flow`, which
+    reimplements the top-k/binary-series pairwise-TE logic directly on the
+    edge-id `set`s already stored in `Fuzzer._te_edge_history` (avoids
+    materializing dense bitmaps for `TransferEntropy.edge_to_edge_flow`).
+    Reports sector node/edge counts and stability.
+  - **RO/RD classification (metadata only)** — `classify_operator_name`
+    tags each attributed operator edge as `ro`/`rd`/`neutral` into
+    `Fuzzer._ro_rd_edge_counts`, reported alongside occupation/causal-sector
+    stats. Classification never influences scheduling or selection (Phase
+    C2 lineage-reverse wiring and C3 soft RO gating remain deferred, as does
+    the optional Phase D seed_quality scoring — see the handover doc's
+    updated acceptance checklist and decision ledger).
+  - Both flags added to `_HAIL_MARY_FLAGS` in `cli/commands.py` and to the
+    `--features` "Analysis" group summary.
+
 - **Ported `CuckooFilter`, `F0Estimator` (CVM), and `Feistel` from AIscripts** in
   `src/fuzzer_tool/core/{cuckoo,cvm,feistel}.py`. Three statistical primitives
   cleaned and dropped into the core layer:
