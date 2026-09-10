@@ -59,6 +59,7 @@ class DvbsubMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         """Apply one DVBSub-specific mutation."""
         self._rng = rng or self._rng
@@ -71,7 +72,16 @@ class DvbsubMutator:
             self._mutate_buffer_size,
             self._mutate_buffer_offset,
             self._corrupt_buffer_data,
-            self._generate_random_dvbsub,
+            # The generator replaces the input rather than editing it, so it
+            # takes neither the buffer nor the parsed buffers the other entries
+            # do. Adapted here rather than given vestigial `_data`/`_buffers`
+            # parameters: that placeholder shape is exactly what f5435af had
+            # to unpick across ten generators, where a positional `max_len`
+            # landed in the placeholder and the generator silently fell back
+            # to its own default.
+            lambda _data, _buffers, max_len: self._generate_random_dvbsub(
+                max_len=max_len, rng=self._rng
+            ),
         ]
         result = mutators[op](data, buffers, max_len)
         return result[:max_len]

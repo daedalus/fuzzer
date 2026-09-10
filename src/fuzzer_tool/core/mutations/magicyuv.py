@@ -128,8 +128,6 @@ class MagicYUVMutator:
 
         form_type, chunks = parsed
 
-        form_type, chunks = parsed
-
         op = self._rng.randint(0, 5)
 
         mutators = [
@@ -138,7 +136,16 @@ class MagicYUVMutator:
             self._mutate_height,
             self._mutate_stride,
             self._delete_chunk,
-            self._generate_random_magicyuv,
+            # The generator replaces the input rather than editing it, so it
+            # takes neither the buffer nor the parsed chunks the other entries
+            # do. Adapted here rather than given vestigial `_form_type`/`_chunks`
+            # parameters: that placeholder shape is exactly what f5435af had
+            # to unpick across ten generators, where a positional `max_len`
+            # landed in the placeholder and the generator silently fell back
+            # to its own default.
+            lambda _form_type, _chunks, max_len: self._generate_random_magicyuv(
+                max_len=max_len, rng=self._rng
+            ),
         ]
         result = mutators[op](form_type, chunks, max_len)
         return result[:max_len]

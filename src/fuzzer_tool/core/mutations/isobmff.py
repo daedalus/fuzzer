@@ -317,6 +317,7 @@ class IsobmffMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng=None) -> bytes:
         self._rng = rng or self._rng
         boxes = parse_boxes(data)
@@ -479,8 +480,13 @@ class IsobmffMutator:
                 target.data = bytes(data)
         return boxes
 
-    def _swap_boxes(self, boxes: list[Box]) -> list[Box]:
-        """Swap two sibling boxes."""
+    def _swap_boxes(self, boxes: list[Box], max_len: int) -> list[Box]:
+        """Swap two sibling boxes.
+
+        ``max_len`` is unused, as in ``_delete_box`` and ``_duplicate_box``:
+        these three return a box list, and ``mutate`` caps after serializing
+        it. The parameter is present because the dispatch list passes it.
+        """
         if (pair := _swap_pair(len(boxes), self._rng)) is not None:
             i, j = pair
             boxes[i], boxes[j] = boxes[j], boxes[i]

@@ -79,6 +79,7 @@ class TiffMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 65536, rng: Any = None) -> bytes:
         """Apply one TIFF-specific mutation."""
         self._rng = rng or self._rng
@@ -92,7 +93,16 @@ class TiffMutator:
             self._corrupt_offsets,
             self._mutate_tag,
             self._corrupt_byte_order,
-            self._generate_random_tiff,
+            # The generator replaces the input rather than editing it, so it
+            # takes neither the buffer nor the parsed header the other entries
+            # do. Adapted here rather than given vestigial `_data`/`_header`
+            # parameters: that placeholder shape is exactly what f5435af had
+            # to unpick across ten generators, where a positional `max_len`
+            # landed in the placeholder and the generator silently fell back
+            # to its own default.
+            lambda _data, _header, max_len: self._generate_random_tiff(
+                max_len=max_len, rng=self._rng
+            ),
         ]
         result = mutators[op](data, header, max_len)
         return result[:max_len]
