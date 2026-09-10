@@ -321,6 +321,9 @@ class CmplogCollector:
         self._token_set: set[bytes] = set()
         # Operand pairs: (operand_a, operand_b) for input-to-state matching
         self.pairs: list[tuple[bytes, bytes]] = []
+        # Occurrence count: how many times each pair has been observed across
+        # runs. Higher counts = more reliable comparison signals. Pruned with
+        # _pair_set at the eviction site, so it stays bounded by _max_pairs.
         self._pair_occurrence: dict[tuple[bytes, bytes], int] = {}
         self._pair_set: set[tuple[bytes, bytes]] = set()
         # PC mapping: pair -> program counter (optional, from trace-mode shim)
@@ -347,10 +350,9 @@ class CmplogCollector:
         # Used to detect which comparisons are consistently triggered by
         # which input variants (cross-referencing colored vs uncolored runs).
         self._run_history: dict[int, set[tuple[bytes, bytes]]] = {}
-        # Occurrence count: how many times each pair has been observed across runs.
-        # Higher counts = more reliable comparison signals.
         self.evicted_token_count: int = 0  # total tokens evicted due to cap
         self.evicted_pair_count: int = 0  # total pairs evicted due to cap
+        # Overridable caps (0 = use module default)
         self._max_tokens = max_tokens if max_tokens > 0 else CMPLOG_TOKENS_MAX
         self._max_pairs = max_pairs if max_pairs > 0 else CMPLOG_PAIRS_MAX
         # File offset: only read new data since last collection.
@@ -921,21 +923,14 @@ class CmplogCollector:
                 self._pair_set.discard(p)
                 self._pair_value.pop(p, None)
                 self._pair_cmp.pop(p, None)
+                # _pair_occurrence has to go with them. It is keyed by pair
+                # and nothing else bounds it, so leaving it made the cap
+                # cosmetic: measured at max_pairs=8 with 40 distinct pairs it
+                # held all 40, and high_confidence_pairs() named 32 the
+                # collector no longer holds.
+                self._pair_occurrence.pop(p, None)
                 self._pair_pc.pop(p, None)
                 self.evicted_pair_count += 1
-            self.pairs = list(self._pair_set)
-        if len(self.pairs) > self._max_pairs:
-            excess = len(self.pairs) - self._max_pairs
-            scored = [
-                (self._pair_value.get(p, 0) / max(len(p[0]) + len(p[1]), 1), p)
-                for p in self._pair_set
-            ]
-            scored.sort(key=lambda x: x[0])
-            for _, p in scored[:excess]:
-                self._pair_set.discard(p)
-                self._pair_value.pop(p, None)
-                self._pair_cmp.pop(p, None)
-                self._pair_pc.pop(p, None)
             self.pairs = list(self._pair_set)
 
         if new_tokens:
@@ -1347,8 +1342,13 @@ class CmplogCollector:
 
         High-confidence pairs are more likely to be genuine I2S candidates
         rather than one-off noise from edge-case execution paths.
+
+        Iterates the pairs actually held rather than the occurrence map, so
+        this cannot name an evicted pair even if some future companion map
+        is forgotten at the eviction site -- which is how it came to return
+        32 ghosts out of 40 with a cap of 8.
         """
-        return [p for p, count in self._pair_occurrence.items() if count >= min_occurrences]
+        return [p for p in self._pair_set if self._pair_occurrence.get(p, 0) >= min_occurrences]
 
     def pair_confidence(self, op_a: bytes, op_b: bytes) -> int:
         """Return how many times a pair has been observed."""

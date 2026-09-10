@@ -182,9 +182,15 @@ class TestMultiRunCollection:
 
     def test_high_confidence_pairs(self, tmp_path):
         c = CmplogCollector()
-        # Simulate pair seen in 3 runs
-        c._pair_occurrence[(b"AB", b"CD")] = 3
-        c._pair_occurrence[(b"EF", b"GH")] = 1
+        # Both maps, because the collector only ever increments an occurrence
+        # for a pair it holds. Seeding _pair_occurrence alone builds a state
+        # no run can reach, and the accessor iterates the pairs held rather
+        # than the occurrence map -- so this used to assert against a
+        # combination that only existed in this test.
+        for pair, seen in (((b"AB", b"CD"), 3), ((b"EF", b"GH"), 1)):
+            c._pair_set.add(pair)
+            c.pairs.append(pair)
+            c._pair_occurrence[pair] = seen
         high = c.high_confidence_pairs(min_occurrences=2)
         assert (b"AB", b"CD") in high
         assert (b"EF", b"GH") not in high
