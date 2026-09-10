@@ -2971,15 +2971,15 @@ class OperatorEngine:
         return bytearray(mutated[: self.ctx.max_len])
 
     def _op_shorten_chunk_mutate(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.mutations.shorten import ShortenMutator, parse_shorten
+        from fuzzer_tool.core.mutations.shorten import ShnMutator, parse_shorten
 
         if not hasattr(self, "_shorten_mutator"):
-            self._shorten_mutator = ShortenMutator()
+            self._shorten_mutator = ShnMutator()
         rng = self.ctx._rng
         if parse_shorten(bytes(buf)):
             mutated = self._shorten_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
-            mutated = self._shorten_mutator._generate_random_shorten(
+            mutated = self._shorten_mutator._generate_random_shn(
                 max_len=self.ctx.max_len, rng=rng
             )
         return bytearray(mutated[: self.ctx.max_len])
