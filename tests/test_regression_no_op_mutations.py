@@ -259,6 +259,12 @@ def _battery() -> list[bytes]:
         b"\x1f\x8b\x08\x00" + bytes(30),
         b"Rar!\x1a\x07\x00" + bytes(30),
         b"BM\x8a\x00\x00\x00" + bytes(30),
+        # CFHD (Cineform) and a raw JPEG 2000 codestream (SOC + SIZ): the
+        # two sniffers no other battery entry satisfies. jpeg2000's wants
+        # either the JP2 signature box or the bare 0xFF4F marker, and the
+        # seeded random inputs never start with it.
+        b"CFHD" + bytes(60),
+        b"\xff\x4f\xff\x51" + bytes(60),
         b"12345 6789 -3 0.5 abcdef ghij",
         _minimal_elf64(),
         _binary_stl(),
@@ -455,6 +461,26 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.enable_regex_bomb = True
         f.enable_x86_mutator = True
         f.enable_arm_mutator = True
+        # Opt-in operators, gated on nothing but their own flag. They were
+        # outside the sweep purely because the flags default off, which is
+        # exactly the "never offered, never checked" hole this class guards.
+        f.op_span_reverse = True
+        f.op_span_relocate = True
+
+        # --- FormatFuzzer band (4 operators) -------------------------------
+        # ff_* shell out to `<format>-fuzzer` binaries built from the
+        # upstream FormatFuzzer repo. The flag is only half the gate:
+        # `is_available` also needs the executable to have resolved, and
+        # `_bin_available` records that per registered instance. Turning the
+        # flag on and then excluding whatever found no binary keeps the two
+        # halves honest -- if the binaries ARE installed, these stop being
+        # excluded and get swept like everything else.
+        from fuzzer_tool.core.mutations.formatfuzzer import FormatFuzzerMutator
+
+        f.formatfuzzer = True
+        for mut in REGISTRY.mutators():
+            if isinstance(mut, FormatFuzzerMutator) and not getattr(mut, "_bin_available", False):
+                unreachable.add(mut.name)
 
         # --- cmplog band (6 operators + path_negate) -----------------------
         from fuzzer_tool.core.cmplog import CmplogCollector
@@ -593,6 +619,42 @@ class TestStateGatedOperatorsAreNotNoOps:
         if f._path_solver is None:
             unreachable.add("path_negate")
 
+        # Placed last on purpose: several bands above assign
+        # `f.seed_meta[inp] = {...}` wholesale, so tags written earlier
+        # were being replaced by the redqueen band and the gate saw an
+        # entry with no `weizz_tags_rle` in it.
+        # --- weizz band (7 operators) -------------------------------------
+        # `_weizz_tags_available` wants --weizz-tags on AND a StructureMap on
+        # the seed's metadata that is not marked dirty. Tags are normally
+        # produced by a cmplog-backed colorization pass, which the sweep has
+        # no target to run; a hand-built map is the same shape the operators
+        # consume (they read it back through `load_tags_from_meta`).
+        from fuzzer_tool.core.weizz_tags import (
+            ByteTag,
+            StructureMap,
+            TagFlags,
+            attach_tags_to_meta,
+        )
+
+        f.weizz_tags = True
+        for inp in _battery():
+            if len(inp) < 8:
+                continue
+            # A 4-byte IS_LEN field, then two more, so chunk_swap/dup/delete
+            # have distinct regions to move and field_mutate has a boundary
+            # to respect. The flag is what makes weizz_tag_repair reachable:
+            # it rewrites IS_LEN / IS_CHECKSUM fields and returns None when
+            # no flagged field exists, so an unflagged map made it look like
+            # a pure no-op rather than an unexercised one.
+            rest = len(inp) - 4
+            tags = (
+                [ByteTag(cmp_id=1, parent=0, flags=TagFlags.IS_LEN)] * 4
+                + [ByteTag(cmp_id=2, parent=0)] * (rest // 2)
+                + [ByteTag(cmp_id=3, parent=0)] * (rest - rest // 2)
+            )
+            smap = StructureMap(tags=tags, ntypes=3, input_len=len(inp), from_cmplog=True)
+            f.seed_meta[inp] = attach_tags_to_meta(f.seed_meta.get(inp, {}), smap)
+
         return unreachable
 
     def _make_gated_fuzzer(self) -> tuple[Fuzzer, set[str]]:
@@ -640,8 +702,11 @@ class TestStateGatedOperatorsAreNotNoOps:
         available, changed = _sweep(f)
 
         # Building the state must actually widen the sweep, or this whole
-        # class is a slower copy of the one above.
-        assert len(available) >= 115, f"only {len(available)} operators exercised"
+        # class is a slower copy of the one above. The floor was 115 when
+        # fourteen operators sat outside the sweep entirely; reaching them
+        # took it to 199, so the floor moves with it -- left at 115 it would
+        # not notice a band going dark again.
+        assert len(available) >= 195, f"only {len(available)} operators exercised"
 
         noops = available - changed - unreachable
         assert not noops, (
