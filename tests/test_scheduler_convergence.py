@@ -506,24 +506,46 @@ class TestHarnessCoverage:
 class TestSchedulerSeedability:
     """Reproducibility properties the ``--seed`` CLI flag implicitly promises."""
 
-    def test_cmaes_is_not_reproducible_without_an_explicit_rng(self):
-        """``services/fuzzer.py`` constructs CMAESScheduler with no ``rng``.
+    def test_every_scheduler_that_takes_an_rng_is_given_one(self):
+        """``--seed`` must reach every scheduler, not most of them.
 
-        ``CMAESScheduler.__init__`` falls back to ``RandPool()``, which seeds
-        from OS entropy, so ``--seed`` does not determine CMA-ES behaviour and
-        a crash found under CMA-ES scheduling cannot be replayed. Every other
-        scheduler draws from the module-level ``random`` and is therefore
-        covered by a global ``random.seed()``.
+        This replaces a test that asserted CMA-ES was *not* reproducible and
+        called it unique, on the premise that "every other scheduler draws
+        from the module-level ``random``". That stopped being true at the
+        Hard Rule 16 migration (8312b15), which moved all of them onto
+        ``rng if rng is not None else RandPool()`` -- an unseeded pool whose
+        private ``default_rng(None)`` takes OS entropy and which
+        ``random.seed`` cannot reach. Nine construction sites in
+        ``services/fuzzer.py`` were still leaving that fallback in place.
 
-        Fix: thread the campaign seed through at the construction site
-        (``services/fuzzer.py``, the ``CMAESScheduler(...)`` call).
+        Checked by parsing the construction sites rather than by sampling
+        behaviour: a statistical check on an unseeded scheduler agrees with
+        a seeded one often enough to pass.
         """
-        env = StationaryBernoulli.build()
-        a = run(CMAESScheduler(), env, seed=FIXED_SEED, rounds=400)
-        b = run(CMAESScheduler(), env, seed=FIXED_SEED, rounds=400)
-        assert a.picks != b.picks, (
-            "CMAESScheduler is now reproducible from the global seed -- if the "
-            "rng was wired up, delete this test and its counterpart below"
+        import ast
+        import inspect
+
+        import fuzzer_tool.core.schedulers as pkg
+        from fuzzer_tool.services import fuzzer as fz
+
+        takes_rng = {
+            name
+            for name in pkg.__all__
+            if "rng" in inspect.signature(getattr(pkg, name).__init__).parameters
+        }
+        assert takes_rng, "discovery guard: an empty set would pass vacuously"
+
+        missing = []
+        for node in ast.walk(ast.parse(inspect.getsource(fz))):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id not in takes_rng:
+                continue
+            if not any(k.arg == "rng" for k in node.keywords) and not node.args:
+                missing.append(node.func.id)
+
+        assert not missing, (
+            f"constructed without a pool, so --seed does not reach them: {sorted(set(missing))}"
         )
 
     def test_cmaes_is_reproducible_with_an_explicit_rng(self):

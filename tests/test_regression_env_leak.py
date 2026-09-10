@@ -213,8 +213,16 @@ def test_regression_native_hang_modules_opt_into_thread_method():
     marked: list[str] = []
 
     class _Item:
-        def __init__(self, nodeid: str) -> None:
+        def __init__(self, nodeid: str, slow: bool = False) -> None:
             self.nodeid = nodeid
+            self._slow = slow
+
+        def get_closest_marker(self, name):
+            # The hook also lifts the timeout ceiling for `slow`-marked
+            # tests, so the stand-in has to answer marker queries. Reporting
+            # no `timeout` marker is the interesting case: it is the one
+            # where the hook adds one.
+            return object() if (name == "slow" and self._slow) else None
 
         def add_marker(self, mark) -> None:
             marked.append((self.nodeid, mark.kwargs.get("method")))
@@ -233,4 +241,38 @@ def test_regression_native_hang_modules_opt_into_thread_method():
     conftest.pytest_collection_modifyitems(_Config(), items)
     assert marked == [("tests/test_structural_constraints.py::test_a", "thread")], (
         "exactly the native-hang modules get the thread method, and nothing else"
+    )
+
+
+def test_regression_slow_tests_get_a_ceiling_not_the_tight_default():
+    """A `slow` test is slow by construction, so the tight `--timeout` says
+    nothing about whether it hung -- but an unmarked one must keep it."""
+    conftest = _conftest()
+    added: list[tuple[str, tuple, dict]] = []
+
+    class _Item:
+        def __init__(self, nodeid: str, slow: bool) -> None:
+            self.nodeid = nodeid
+            self._slow = slow
+
+        def get_closest_marker(self, name):
+            return object() if (name == "slow" and self._slow) else None
+
+        def add_marker(self, mark) -> None:
+            added.append((self.nodeid, mark.args, mark.kwargs))
+
+    class _PM:
+        def hasplugin(self, _name):
+            return True
+
+    class _Config:
+        pluginmanager = _PM()
+
+    conftest.pytest_collection_modifyitems(
+        _Config(),
+        [_Item("tests/test_x.py::slow_one", True), _Item("tests/test_x.py::fast_one", False)],
+    )
+
+    assert added == [("tests/test_x.py::slow_one", (conftest._SLOW_TIMEOUT_SECONDS,), {})], (
+        "only the slow-marked item gets a raised ceiling"
     )

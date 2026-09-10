@@ -1061,6 +1061,17 @@ class Fuzzer:
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
         random.seed(seed)
+        # ── Vectorized random number pool for mutation hotpath ────────
+        # Generates random values in batches (one numpy C-level call per
+        # batch) instead of per-call Python-level random() invocations.
+        #
+        # Built here rather than further down with the schedulers: every
+        # scheduler that follows Hard Rule 16 takes it as its `rng`, and the
+        # MCTS seed schedulers are constructed ~600 lines above where it used
+        # to be assigned. It belongs next to `random.seed` anyway -- the three
+        # streams start together, the same invariant `_reseed_after_stall`
+        # maintains.
+        self._rng = RandPool(seed=seed)
         # RandPool holds its OWN np.random.default_rng(seed) Generator, which
         # shares no state with the legacy global np.random.* functions. Nothing
         # in src/ seeded that global, so every np.random draw outside RandPool
@@ -1617,13 +1628,13 @@ class Fuzzer:
         if self._use_mcts and self._lineage is not None:
             from fuzzer_tool.core.schedulers.mcts import MCTSSeedScheduler
 
-            self._mcts = MCTSSeedScheduler()
+            self._mcts = MCTSSeedScheduler(rng=self._rng)
             log.info("MCTS seed scheduling enabled")
 
         if self._use_alphabeta and self._lineage is not None:
             from fuzzer_tool.core.schedulers.mcts import AlphaBetaMCTSSeedScheduler
 
-            self._alphabeta = AlphaBetaMCTSSeedScheduler()
+            self._alphabeta = AlphaBetaMCTSSeedScheduler(rng=self._rng)
             log.info("Alpha-beta MCTS seed scheduling enabled")
 
         self._load_corpus()
@@ -1666,17 +1677,6 @@ class Fuzzer:
         # Bootstrap percolation corpus minimization
         self._use_bootstrap = bootstrap
         self._bootstrap_k = bootstrap_k
-        # ── Vectorized random number pool for mutation hotpath ────────
-        # Generates random values in batches (one numpy C-level call per
-        # batch) instead of per-call Python-level random() invocations.
-        #
-        # Constructed here, ahead of every scheduler, because a scheduler
-        # following Hard Rule 16 takes it as its `rng`. CMAESScheduler
-        # already did -- and read it ~9,000 characters before it was
-        # assigned, so `--cma-es` raised AttributeError at construction.
-
-        self._rng = RandPool(seed=seed)
-
         self.mc_cem = mc_cem
         # Opt-in Floyd cycle detection on the MC operator-transition
         # stationary distribution (see MonteCarloScheduler.stationary_distribution).
@@ -1692,6 +1692,7 @@ class Fuzzer:
                 refit_interval=mc_refit_interval,
                 pairwise_blend=pairwise_blend,
                 decay_interval=mc_decay_interval,
+                rng=self._rng,
             )
             if (mc_bandit or mc_cem or mopt)
             else None
@@ -1700,7 +1701,7 @@ class Fuzzer:
             self.mc.set_sharpe_kelly_blend(sharpe_kelly_blend)
         self._mopt = None
         if mopt:
-            self._mopt = MOptScheduler(n_particles=5, window_size=200)
+            self._mopt = MOptScheduler(n_particles=5, window_size=200, rng=self._rng)
             log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
         self._use_cmaes = cmaes
         self._cmaes = None
@@ -1709,9 +1710,11 @@ class Fuzzer:
                 # Without an explicit rng, CMAESScheduler falls back to
                 # RandPool(), which seeds from OS entropy -- so --seed did not
                 # determine CMA-ES behaviour and a crash found under CMA-ES
-                # scheduling could not be replayed. Every other scheduler
-                # draws from the module-level `random` and is covered by the
-                # global seeding done at startup.
+                # scheduling could not be replayed. That was once unique to
+                # CMA-ES because every other scheduler drew from the
+                # module-level `random`; the Hard Rule 16 migration (8312b15)
+                # moved them all to the same unseeded fallback, so they are
+                # all passed the pool now.
                 rng=self._rng,
                 pop_size=cmaes_pop_size,
                 generation_size=cmaes_generation_size,
@@ -1741,20 +1744,22 @@ class Fuzzer:
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:
-            self._replicator = ReplicatorScheduler(window_size=200, learning_rate=0.1)
+            self._replicator = ReplicatorScheduler(
+                window_size=200, learning_rate=0.1, rng=self._rng
+            )
             log.info("Replicator dynamics scheduling enabled (window=200, eta=0.1)")
         # EXP3 adversarial bandit
         self._use_exp3 = exp3
         self._exp3 = None
         if exp3:
-            self._exp3 = Exp3Scheduler(gamma=exp3_gamma)
+            self._exp3 = Exp3Scheduler(gamma=exp3_gamma, rng=self._rng)
             log.info("EXP3 adversarial bandit enabled (gamma=%.2f)", exp3_gamma)
         # Epsilon-greedy with annealing
         self._use_eps_greedy = eps_greedy
         self._eps_greedy = None
         if eps_greedy:
             self._eps_greedy = EpsilonGreedyScheduler(
-                epsilon_0=eps_greedy_epsilon0, decay=eps_greedy_decay
+                epsilon_0=eps_greedy_epsilon0, decay=eps_greedy_decay, rng=self._rng
             )
             log.info(
                 "Epsilon-greedy enabled (epsilon0=%.2f, decay=%.4f)",
@@ -1765,7 +1770,7 @@ class Fuzzer:
         self._use_hierarchical = hierarchical_bandit
         self._hierarchical = None
         if hierarchical_bandit:
-            self._hierarchical = HierarchicalBanditScheduler()
+            self._hierarchical = HierarchicalBanditScheduler(rng=self._rng)
             log.info(
                 "Hierarchical bandit enabled (%d categories)",
                 len(HierarchicalBanditScheduler.CATEGORIES),

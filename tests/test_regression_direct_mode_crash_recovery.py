@@ -189,6 +189,10 @@ class TestPreFixSourceActuallyHung:
         (pkg_dir / "adapters" / "inprocess.py").write_text(old_src)
         return tmpdir
 
+    @pytest.mark.slow
     def test_old_code_hangs_on_segv(self, target_so, prefix_src_dir):
+        # Spends _WATCHDOG_SECONDS waiting on purpose: the assertion IS
+        # that the pre-fix probe never returns. Slow by construction, so
+        # a tight --timeout would report the intended wait as a hang.
         with pytest.raises(subprocess.TimeoutExpired):
             _run_probe(str(prefix_src_dir), str(target_so), b"CRASHS")

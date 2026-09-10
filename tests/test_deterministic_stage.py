@@ -30,6 +30,8 @@ pin the merged, corrected version instead:
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS, INTERESTING_UNSIGNED_8
 from fuzzer_tool.core.skipdet import SkipDetector, trace_mini_from_edges
 from fuzzer_tool.services.operators import _deterministic_mutation_stream
@@ -98,6 +100,7 @@ class TestDeterministicMutationStream:
         assert list(_deterministic_mutation_stream(b"", max_mutations=1000)) == []
         assert _deterministic_mutation_stream.last_truncated == 0
 
+    @pytest.mark.slow
     def test_per_pass_quota_keeps_all_four_passes(self):
         """Regression for P0-1: a flat prefix deleted later passes entirely.
 

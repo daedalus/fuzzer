@@ -181,6 +181,22 @@ def pytest_configure(config):
 # parameter bounds check(), not assertion processing.
 _NATIVE_HANG_MODULES = ("test_structural_constraints", "test_field_constraints")
 
+# A tight `--timeout` (the project runs 15s) exists to catch hangs in tests
+# that should finish in milliseconds. A handful of tests are slow *by
+# construction* -- 200 bandit campaigns, a deliberate 10s subprocess
+# watchdog, a 65536-mutation deterministic sweep -- and for those the wall
+# clock says nothing about whether anything hung. They carry the `slow`
+# marker, so the marker is the place to lift the ceiling rather than raising
+# `--timeout` suite-wide and losing the hang detection everywhere else.
+#
+# Measured on this tree: the slowest `slow` test is
+# test_hierarchical_category_starvation_is_rare at ~15s, which is why the
+# default killed it roughly half the time and looked like a flaky assertion.
+# The budget is deliberately far above that -- it is a hang backstop, not a
+# performance assertion, and a test that has genuinely wedged will sit here
+# forever, not for 45 seconds.
+_SLOW_TIMEOUT_SECONDS = 300
+
 
 def pytest_collection_modifyitems(config, items):
     pm = getattr(config, "pluginmanager", None)
@@ -189,6 +205,9 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if any(mod in item.nodeid for mod in _NATIVE_HANG_MODULES):
             item.add_marker(pytest.mark.timeout(method="thread"))
+        # An explicit per-test timeout wins: it was chosen for that test.
+        if item.get_closest_marker("slow") and not item.get_closest_marker("timeout"):
+            item.add_marker(pytest.mark.timeout(_SLOW_TIMEOUT_SECONDS))
 
 
 def pytest_report_header(config):

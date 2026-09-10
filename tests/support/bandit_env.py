@@ -43,10 +43,14 @@ from __future__ import annotations
 
 import math
 import random
+import zlib
 from collections import Counter
 from dataclasses import dataclass, field
 
+import numpy as np
+
 from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES
+from fuzzer_tool.core.rand_pool import RandPool
 
 # ---------------------------------------------------------------------------
 # Arm construction
@@ -328,6 +332,31 @@ class Campaign:
         return sum((x - mx) * (y - my) for x, y in pts) / denom
 
 
+def _seed_scheduler(scheduler, seed: int) -> int:
+    """Reseed every ``RandPool`` the scheduler owns. Returns how many.
+
+    ``random.seed`` used to be enough: the schedulers drew from the
+    module-level ``random``. The Hard Rule 16 migration (8312b15) moved them
+    to ``self._rng = rng if rng is not None else RandPool()`` -- an
+    unseeded pool, whose private ``default_rng(None)`` takes OS entropy and
+    which ``random.seed`` cannot reach. Nothing failed loudly because the
+    assertions here are statistical, so the tests kept passing most of the
+    time and flipping the rest, which is what a missing seed looks like
+    when the threshold has margin.
+
+    Walked rather than listed: a scheduler that grows a second pool (mcts
+    has two) or a new scheduler added later is covered without editing
+    this. Sub-seeds are derived from the attribute *name* so adding a pool
+    does not shift the stream of the pools already there.
+    """
+    found = 0
+    for name, value in sorted(vars(scheduler).items()):
+        if isinstance(value, RandPool):
+            value.reseed((seed ^ zlib.crc32(name.encode())) & 0xFFFFFFFF)
+            found += 1
+    return found
+
+
 def run(
     scheduler,
     env,
@@ -338,13 +367,19 @@ def run(
 ) -> Campaign:
     """Drive *scheduler* against *env* for *rounds* pulls.
 
-    ``random.seed`` is set globally because six of the schedulers draw from
-    the module-level ``random`` rather than an injected generator (see
-    ``test_scheduler_convergence.py::TestSchedulerSeedability``). The
-    environment uses its own :class:`random.Random` so that changing the
-    number of environment draws cannot perturb the scheduler's stream.
+    Three streams are seeded, because the schedulers between them draw from
+    three: their own ``RandPool`` instances (see :func:`_seed_scheduler`),
+    the module-level ``random``, and the global ``np.random`` state that
+    ``MonteCarloScheduler`` reaches via ``np.random.randn``. Seeding one and
+    not the others leaves a campaign only partly reproducible, which is
+    worse than not seeding at all: it looks deterministic until the
+    threshold is close. The environment keeps its own
+    :class:`random.Random` so that changing the number of environment draws
+    cannot perturb the scheduler's stream.
     """
     random.seed(seed)
+    np.random.seed(seed & 0xFFFFFFFF)
+    _seed_scheduler(scheduler, seed)
     env_rng = random.Random(seed ^ 0x5EED)
 
     a = adapt(scheduler, env.arms)
