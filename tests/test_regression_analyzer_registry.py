@@ -24,6 +24,7 @@ _ALWAYS_ON = {
     "crash_mi",
     "length_tracker",
     "allan",
+    "discovery_uniformity",
     "sensitivity",
     "execution_time",
     "exec_time_anomaly",
@@ -105,6 +106,7 @@ class TestUnconditionalAnalyzers:
         assert type(f._length_tracker).__name__ == "LengthEdgeTracker"
         assert type(f._allan).__name__ == "AllanVarianceDetector"
         assert f._last_allan_edge_count == 0
+        assert type(f._discovery_uniformity).__name__ == "DiscoveryUniformityDetector"
         assert type(f._sensitivity).__name__ == "ByteSensitivityTracker"
         assert type(f._exec_time_tracker).__name__ == "ExecutionTimeTracker"
         assert type(f._exec_time_anomaly).__name__ == "ExecTimeCalibrator"

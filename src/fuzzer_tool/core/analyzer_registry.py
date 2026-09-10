@@ -47,7 +47,12 @@ migration site. Two later, non-migration additions follow the same pattern:
 `occupation` (core.occupation.LongitudinalRarity, finite-time edge-count
 occupation) and `causal_sector` (core.causal_sector.CausalSectorGraph,
 soft-requires `transfer_entropy`) -- see
-docs/handover/handover_RoRd.md.
+docs/handover/handover_RoRd.md. A third, `discovery_uniformity`
+(core.discovery_uniformity.DiscoveryUniformityDetector), is the
+nonparametric member of the regime_detection family: a rolling Poisson
+index-of-dispersion test of per-tick discovery counts, sitting next
+to `garch`/`allan`/`csd` without sharing any of their parametric noise-model
+assumptions.
 construction site to migrate. See
 docs/handover/handover_analyzer_registry_2026-09-07.md for the full
 per-component history and verification notes.
@@ -322,6 +327,21 @@ REGISTRY.register(
         name="allan",
         category="regime_detection",
         activate=_activate_allan,
+    )
+)
+
+
+def _activate_discovery_uniformity(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.discovery_uniformity import DiscoveryUniformityDetector
+
+    f._discovery_uniformity = DiscoveryUniformityDetector()
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="discovery_uniformity",
+        category="regime_detection",
+        activate=_activate_discovery_uniformity,
     )
 )
 

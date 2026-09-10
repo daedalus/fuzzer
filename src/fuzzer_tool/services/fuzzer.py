@@ -6438,6 +6438,14 @@ class Fuzzer:
                     self._allan.update(delta)
                     if self._garch is not None:
                         self._garch.update(delta)
+                    self._discovery_uniformity.update(delta)
+                    verdict = self._discovery_uniformity.verdict()
+                    if not verdict["homogeneous"] and verdict["n"] >= 32:
+                        log.info(
+                            "Discovery non-Poisson-dispersed: p=%.4f n=%d",
+                            verdict["p"],
+                            verdict["n"],
+                        )
                     self._last_allan_edge_count = current_edges
                     # Feed per-column edge counts to CoverageHomogeneityDetector
                     if self.shm_cov and hasattr(self, "_homogeneity"):
