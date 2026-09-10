@@ -241,7 +241,17 @@ class Jpeg2000Mutator:
             self._mutate_cdef,
             self._mutate_marker_length,
             self._insert_marker,
-            self._generate_random_jpeg2000,
+            # Right argument count, wrong slots: the generator is declared
+            # `(self, max_len=..., rng=...)`, so dispatching it as
+            # `(markers, max_len)` put the marker list in `max_len` and the
+            # length in `rng`, and it died on `rng.randbytes`. The other
+            # twelve dispatched generators dodge this with a vestigial first
+            # parameter (`_boxes`, `_words`, `info_or_max`); adapted here
+            # instead, since f5435af is the record of what that placeholder
+            # costs.
+            lambda _markers, max_len: self._generate_random_jpeg2000(
+                max_len=max_len, rng=self._rng
+            ),
         ]
         result = mutators[op](markers, max_len)
         if isinstance(result, list):
@@ -434,9 +444,22 @@ class Jpeg2000Mutator:
             Jpeg2000Marker(JPEG2000_SOC, 0, b"", 0),
         ]
 
-        # SIZ - minimal 3-component (YCbCr) image
+        # SIZ - minimal 3-component (YCbCr) image.
+        #
+        # Per-component fields are (Ssiz, XRsiz, YRsiz), Csiz times over --
+        # the layout the parse side already documents at :270. The format
+        # string is built from the component list rather than written out,
+        # because writing it out is how it came to describe one component
+        # while nineteen values were passed: `">HIIIIIIIIHBBB"` counts 13
+        # fields, so every call raised
+        # `struct.error: pack expected 13 items for packing (got 19)`.
+        components = (
+            (7, 1, 1),  # Y:  8-bit, no subsampling
+            (7, 1, 2),  # Cb: 8-bit, 2x2 subsampling
+            (7, 1, 2),  # Cr: 8-bit, 2x2 subsampling
+        )
         siz_data = struct.pack(
-            ">HIIIIIIIIHBBB",
+            ">HIIIIIIIIH" + "BBB" * len(components),
             0,  # Rsiz (capabilities)
             640,  # Xsiz (image width)
             480,  # Ysiz (image height)
@@ -446,16 +469,8 @@ class Jpeg2000Mutator:
             480,  # YTsiz (tile height)
             0,  # XTOsiz
             0,  # YTOsiz
-            3,  # Csiz (3 components: Y, Cb, Cr)
-            7,
-            1,
-            1,  # Component 0: 8-bit, no subsampling (Y)
-            7,
-            1,
-            2,  # Component 1: 8-bit, 2x2 subsampling (Cb)
-            7,
-            1,
-            2,  # Component 2: 8-bit, 2x2 subsampling (Cr)
+            len(components),  # Csiz
+            *(v for comp in components for v in comp),
         )
         markers.append(Jpeg2000Marker(JPEG2000_SIZ, len(siz_data) + 2, siz_data, 0))
 

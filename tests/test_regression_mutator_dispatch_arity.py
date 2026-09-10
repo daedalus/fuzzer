@@ -35,7 +35,7 @@ import fuzzer_tool.core.mutations as mutations_pkg
 
 
 def _dispatch_sites():
-    """Yield (module, class, method, entries, positional_arg_count).
+    """Yield (module, class, method, entries, call_site_arg_names).
 
     Finds ``mutators = [...]`` paired with a ``mutators[...](...)`` call in
     the same function body. Discovered by walking the package, so a mutator
@@ -68,7 +68,8 @@ def _dispatch_sites():
                         and isinstance(node.func.value, ast.Name)
                         and node.func.value.id == "mutators"
                     ):
-                        yield info.name, cls.name, fn.name, entries, len(node.args)
+                        arg_names = [a.id if isinstance(a, ast.Name) else None for a in node.args]
+                        yield info.name, cls.name, fn.name, entries, arg_names
 
 
 _SITES = list(_dispatch_sites())
@@ -83,7 +84,8 @@ def test_discovery_found_the_dispatch_sites():
     "site", _SITES, ids=lambda s: f"{s[0]}.{s[1]}.{s[2]}" if isinstance(s, tuple) else str(s)
 )
 def test_every_dispatch_entry_accepts_the_dispatch_call(site):
-    mod_name, cls_name, fn_name, entries, n_args = site
+    mod_name, cls_name, fn_name, entries, arg_names = site
+    n_args = len(arg_names)
     mod = import_module(f"{mutations_pkg.__name__}.{mod_name}")
     cls = getattr(mod, cls_name)
 
@@ -122,3 +124,20 @@ def test_every_dispatch_entry_accepts_the_dispatch_call(site):
             f"args but {entry.attr} accepts at most {len(positional)} -- that index "
             "raises TypeError every time it is drawn"
         )
+
+        # Matching the count is not enough. jpeg2000's generator accepted two
+        # positional args and was dispatched with two, so it type-checked and
+        # still died: `(markers, max_len)` landed on `(max_len, rng)` and it
+        # called `rng.randbytes` on an int. The parameter names cannot be
+        # compared in general -- the vestigial first slots are deliberately
+        # named `_boxes`, `_words`, `info_or_max` -- but the *last* argument
+        # carries its role in its name at every one of these call sites, so
+        # it must land on a parameter of that name.
+        last = arg_names[-1] if arg_names else None
+        if last is not None and not takes_varargs:
+            landed = positional[n_args - 1].name
+            assert landed == last, (
+                f"{mod_name}.{cls_name}.{fn_name} passes `{last}` as argument "
+                f"{n_args} but {entry.attr} receives it as `{landed}` -- the count "
+                "matches and the meaning does not"
+            )
