@@ -321,6 +321,7 @@ class CmplogCollector:
         self._token_set: set[bytes] = set()
         # Operand pairs: (operand_a, operand_b) for input-to-state matching
         self.pairs: list[tuple[bytes, bytes]] = []
+        self._pair_occurrence: dict[tuple[bytes, bytes], int] = {}
         self._pair_set: set[tuple[bytes, bytes]] = set()
         # PC mapping: pair -> program counter (optional, from trace-mode shim)
         self._pair_pc: dict[tuple[bytes, bytes], int | None] = {}
@@ -348,8 +349,8 @@ class CmplogCollector:
         self._run_history: dict[int, set[tuple[bytes, bytes]]] = {}
         # Occurrence count: how many times each pair has been observed across runs.
         # Higher counts = more reliable comparison signals.
-        self._pair_occurrence: dict[tuple[bytes, bytes], int] = {}
-        # Overridable caps (0 = use module default)
+        self.evicted_token_count: int = 0  # total tokens evicted due to cap
+        self.evicted_pair_count: int = 0  # total pairs evicted due to cap
         self._max_tokens = max_tokens if max_tokens > 0 else CMPLOG_TOKENS_MAX
         self._max_pairs = max_pairs if max_pairs > 0 else CMPLOG_PAIRS_MAX
         # File offset: only read new data since last collection.
@@ -907,7 +908,22 @@ class CmplogCollector:
             for _, t in scored[:excess]:
                 self._token_set.discard(t)
                 self._token_value.pop(t, None)
+                self.evicted_token_count += 1
             self.tokens = list(self._token_set)
+        if len(self.pairs) > self._max_pairs:
+            excess = len(self.pairs) - self._max_pairs
+            scored = [
+                (self._pair_value.get(p, 0) / max(len(p[0]) + len(p[1]), 1), p)
+                for p in self._pair_set
+            ]
+            scored.sort(key=lambda x: x[0])
+            for _, p in scored[:excess]:
+                self._pair_set.discard(p)
+                self._pair_value.pop(p, None)
+                self._pair_cmp.pop(p, None)
+                self._pair_pc.pop(p, None)
+                self.evicted_pair_count += 1
+            self.pairs = list(self._pair_set)
         if len(self.pairs) > self._max_pairs:
             excess = len(self.pairs) - self._max_pairs
             scored = [
@@ -1374,6 +1390,10 @@ class CmplogCollector:
     def get_tokens(self) -> list[bytes]:
         """Get all collected tokens."""
         return self.tokens
+
+    def get_eviction_stats(self) -> tuple[int, int]:
+        """Return (evicted_token_count, evicted_pair_count)."""
+        return self.evicted_token_count, self.evicted_pair_count
 
     def stop(self):
         """Release run-scoped resources: the log file and the env mutations.

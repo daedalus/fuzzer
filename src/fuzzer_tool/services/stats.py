@@ -631,7 +631,7 @@ class StatsReporter:
 
     @staticmethod
     def _is_number(value) -> bool:
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
+        return isinstance(value, int | float) and not isinstance(value, bool)
 
     def _print_stats_garch_str(self, f) -> str:
         """Format the GARCH volatility forecast, when the model is enabled."""
@@ -710,12 +710,12 @@ class StatsReporter:
         cmplog_str = ""
         if f._cmplog is not None:
             cmplog_str = f" | cmplog: {len(f._cmplog.tokens)}t {len(f._cmplog.pairs)}p"
+            # Include eviction statistics
+            ev_t, ev_p = f._cmplog.get_eviction_stats()
+            if ev_t or ev_p:
+                cmplog_str += f" evicted:{ev_t}t{ev_p}p"
             fired, asserted = f._cmplog.total_comparisons()
             if fired:
-                # Comparisons fired / of those, satisfied. Distinct from the
-                # token and pair counts beside it: those measure what the
-                # collector kept after dedup, this measures what the target
-                # actually executed.
                 cmplog_str += f" {_format_count(fired)}c/{_format_count(asserted)}a"
 
         smt_str = self._print_stats_smt_str(f)
