@@ -442,7 +442,20 @@ class TestComputeWeightsArrayPath:
             _use_lineage = False
             _use_overlap_density = False
             _rng = None
-            _edge_tracker = type("o", (object,), {"shannon_entropy_seed": lambda s, sk: 0.5})()
+            # `good_turing_estimate` is read by the saturation gate, which
+            # this test needs OFF: at >=99% saturation the gate cuts
+            # subsumption/diversity/Wasserstein/proximity to neutral
+            # multipliers and the closed form below would not hold.
+            # Reporting 0.0 is therefore not just a stub value, it is the
+            # precondition of the assertion.
+            _edge_tracker = type(
+                "o",
+                (object,),
+                {
+                    "shannon_entropy_seed": lambda s, sk: 0.5,
+                    "good_turing_estimate": lambda s: {"saturation": 0.0},
+                },
+            )()
 
             def _seed_key(self, data):
                 return data.hex()

@@ -10,6 +10,7 @@ from fuzzer_tool.core.ga import (
     Individual,
     Speciation,
 )
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 class TestIndividual:
@@ -197,14 +198,44 @@ class TestSpeciation:
 
 
 class TestMutationOps:
+    """Every op is `lambda data, rng`, so both arguments have to be passed.
+
+    These called `op(data)`. The signature has taken a pool since the
+    Hard Rule 16 migration, so both cases raised TypeError on the first
+    op and never reached an assertion -- which also means the type and
+    length invariants below have not actually been checked in a while.
+    """
+
     def test_all_ops_produce_bytes(self):
         data = b"hello world test data"
+        rng = RandPool(seed=1)
         for op in _GA_MUTATION_OPS:
-            result = op(data)
+            result = op(data, rng)
             assert isinstance(result, bytes)
             assert len(result) > 0
 
     def test_ops_handle_empty_input(self):
+        rng = RandPool(seed=1)
         for op in _GA_MUTATION_OPS:
-            result = op(b"")
+            result = op(b"", rng)
             assert isinstance(result, bytes)
+
+    def test_every_op_draws_from_the_pool_it_is_given(self):
+        """Falsification: an op that ignores `rng` would pass the two above.
+
+        `type_replace` is the one deliberate exception -- a translate-table
+        substitution with no draws at all -- so it is named rather than
+        silently tolerated.
+        """
+        data = b"hello world test data" * 4
+        deterministic = []
+        for i, op in enumerate(_GA_MUTATION_OPS):
+            a = op(data, RandPool(seed=1))
+            b = op(data, RandPool(seed=999))
+            if a == b:
+                deterministic.append(i)
+
+        assert deterministic == [4], (
+            "only type_replace (index 4) is deterministic by design; these "
+            f"ignore their pool or happened to collide: {deterministic}"
+        )

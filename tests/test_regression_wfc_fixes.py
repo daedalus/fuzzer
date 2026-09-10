@@ -284,10 +284,21 @@ class TestWfcFlagPropagation:
             max_len = 4096
             _rng = random.Random(1)
 
-        engine = OperatorEngine.__new__(OperatorEngine)
-        engine.f = _Fuzzer()
+        # Constructed, not `__new__`-ed: bypassing __init__ skips the
+        # invariants it establishes, and the handler reaches the `ctx`
+        # property, which reads `self._ctx_cache`. That property already
+        # handles the cache being *None* (the direct-handler-call pattern);
+        # it cannot handle the attribute being absent, which is what
+        # `__new__` leaves behind. __init__ reads nothing off the fuzzer --
+        # the class docstring says corpus/max_len are not set yet when it
+        # runs -- so there is nothing to avoid here.
+        engine = OperatorEngine(_Fuzzer())
         engine._op_jpeg_chunk_mutate(bytearray(SAMPLE_JPEG), 0, SAMPLE_JPEG)
-        assert engine.f._jpeg_mutator.use_wfc is enabled
+        # The handler caches its mutator on the engine, not on the
+        # fuzzer: `if not hasattr(self, "_jpeg_mutator")`. Asserting
+        # through `engine.f` looked for it in the wrong place, and only
+        # ever reported the AttributeError from the line before it.
+        assert engine._jpeg_mutator.use_wfc is enabled
 
 
 class TestWfcOutputIntegrity:

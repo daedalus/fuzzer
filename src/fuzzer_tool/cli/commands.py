@@ -764,7 +764,12 @@ def cmd_fuzz(args):
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
         chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
-        quiet_stats=False,
+        # --profile-hotpath wraps run() in cProfile; the periodic stats
+        # block prints from inside that window, so its own formatting and
+        # I/O land in the profile it is meant to measure -- and interleave
+        # with the pstats dump on the way out. Pinned False, so the
+        # suppression this flag exists to do never happened.
+        quiet_stats=getattr(args, "profile_hotpath", False),
         no_save_state=getattr(args, "no_save_state", False),
         dedup_execs=not getattr(args, "no_dedup_execs", False),
         exec_dedup_backend=getattr(args, "exec_dedup_backend", "bloom"),

@@ -63,6 +63,11 @@ def _make_fuzzer(tmp_path, history):
     store = StateStore(tmp_path)
     return SimpleNamespace(
         corpus_dir=tmp_path,
+        # `current_coverage_contract` reads `f.target` to scan the
+        # binary for __AFL_NGRAM_K. None makes detect_ngram_k fall to
+        # its documented k=2 compatibility default, which is what a
+        # contract written by an uninstrumented run should say.
+        target=None,
         _state_store=store,
         corpus=[],
         seed_meta={},
@@ -102,6 +107,7 @@ def test_init_builds_array():
             corpus=[b"a"],
             map_size=8192,
             resume=False,
+            target=None,
         )
         CorpusManager(f).init_seed_metadata()
         assert isinstance(f._corpus_size_history, array)

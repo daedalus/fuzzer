@@ -49,6 +49,11 @@ class _StubSaveLoad:
 def _make_fuzzer(tmp_path, **overrides):
     f = SimpleNamespace(
         corpus_dir=tmp_path,
+        # `current_coverage_contract` reads `f.target` to scan the
+        # binary for __AFL_NGRAM_K. None makes detect_ngram_k fall to
+        # its documented k=2 compatibility default, which is what a
+        # contract written by an uninstrumented run should say.
+        target=None,
         _state_store=StateStore(tmp_path),
         corpus=[],
         seed_meta={},
