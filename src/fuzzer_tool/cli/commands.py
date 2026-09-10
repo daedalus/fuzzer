@@ -1677,6 +1677,19 @@ def cmd_sweep(args):
 # recomputes the operator-transition stationary distribution on every
 # stats tick when enabled -- real overhead that --hail-mary (already the
 # heaviest preset) shouldn't add silently on everyone's behalf.
+#
+# rand_floyd_sample (--rand-floyd-sample) is excluded for a different
+# reason: it is not a strategy at all, it is a second implementation of
+# RandPool.sample for k>=3. It explores nothing --hail-mary is not already
+# exploring, and switching it on moves the draw stream, so a --hail-mary
+# run would stop being comparable to any other run of the same seed for no
+# behavioural gain.
+#
+# fpl, op_span_reverse and op_span_relocate were missing from the tuple
+# below while every other scheduler (exp3 .. cusum_ucb, c2ucb) and every
+# other operator gate (wfc, weizz_tags, formatfuzzer) was in it -- three
+# omissions of the kind this list exists to prevent, caught by
+# tests/test_regression_hail_mary_gates.py.
 _HAIL_MARY_FLAGS = (
     "continue_until_crash",
     "deep_coverage",
@@ -1710,6 +1723,7 @@ _HAIL_MARY_FLAGS = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "fpl",
     "fractal_partition",
     "contextual",
     "c2ucb",
@@ -1750,6 +1764,8 @@ _HAIL_MARY_FLAGS = (
     "colorize",
     "weizz_tags",
     "formatfuzzer",
+    "op_span_reverse",
+    "op_span_relocate",
     "cmplog_fifo_sink",
     "reseed_on_stall",
     "fractal_diversity",

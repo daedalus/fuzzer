@@ -8,6 +8,41 @@ import pytest
 from fuzzer_tool.core.schedulers import MonteCarloScheduler, MOptScheduler
 
 
+class _CountingPool:
+    """Delegates everything to a real pool, counting betavariate calls.
+
+    A proxy rather than a patch: `RandPool.betavariate` lives on the class,
+    so the instance attribute is read-only and `monkeypatch.setattr` on it
+    raises. Patching the class instead would count draws from every pool in
+    the process, and these assertions are about *this* scheduler's draws.
+    """
+
+    def __init__(self, pool):
+        self._pool = pool
+        self.n = 0
+
+    def betavariate(self, a, b):
+        self.n += 1
+        return self._pool.betavariate(a, b)
+
+    def __getattr__(self, name):
+        return getattr(self._pool, name)
+
+
+def _count_betavariate(mc):
+    """Count Thompson draws on the scheduler's own pool.
+
+    These three tests used to `monkeypatch.setattr(random, "betavariate", ...)`.
+    The scheduler drew from the module-level `random` when they were written
+    and draws from `self._rng` since 8312b15, so the counter stayed at zero:
+    every assertion below read 0, and the caching behaviour they exist to pin
+    had not been checked since.
+    """
+    pool = _CountingPool(mc._rng)
+    mc._rng = pool
+    return pool
+
+
 class TestMonteCarloScheduler:
     def test_init_defaults(self):
         mc = MonteCarloScheduler()
@@ -55,7 +90,7 @@ class TestMonteCarloScheduler:
         op = mc.select_op(["bit_flip", "byte_flip"])
         assert op in ("bit_flip", "byte_flip")
 
-    def test_regression_thompson_draws_cached_until_posterior_changes(self, monkeypatch):
+    def test_regression_thompson_draws_cached_until_posterior_changes(self):
         """Thompson draws must be cached per arm while the posterior is unchanged.
 
         Regression: select_op drew a fresh betavariate for every arm on every
@@ -67,58 +102,44 @@ class TestMonteCarloScheduler:
         mc.init_arm("B")
         mc.init_arm("C")
 
-        draws = {"n": 0}
-        real_betavariate = random.betavariate
-
-        def counting_betavariate(a, b):
-            draws["n"] += 1
-            return real_betavariate(a, b)
-
-        monkeypatch.setattr(random, "betavariate", counting_betavariate)
+        draws = _count_betavariate(mc)
 
         mc.select_op(["A", "B", "C"])
-        first = draws["n"]
+        first = draws.n
         assert first == 3  # one draw per arm on first select
 
         # Posterior unchanged -> draws reused, no new sampling
         mc.select_op(["A", "B", "C"])
-        assert draws["n"] == first
+        assert draws.n == first
 
         # Recording A changes its posterior -> only A is redrawn
         mc.record("A", success=True)
         mc.select_op(["A", "B", "C"])
-        assert draws["n"] == first + 1
+        assert draws.n == first + 1
 
         # B and C still cached; A redrawn once again after another record
         mc.record("A", success=False)
         mc.select_op(["A", "B", "C"])
-        assert draws["n"] == first + 2
+        assert draws.n == first + 2
 
-    def test_regression_thompson_draws_invalidated_by_decay(self, monkeypatch):
+    def test_regression_thompson_draws_invalidated_by_decay(self):
         """Periodic decay changes all arms' posteriors -> all draws redrawn."""
         mc = MonteCarloScheduler(arm_decay=0.5, decay_interval=1)
         mc.init_arm("A")
         mc.init_arm("B")
 
-        draws = {"n": 0}
-        real_betavariate = random.betavariate
-
-        def counting_betavariate(a, b):
-            draws["n"] += 1
-            return real_betavariate(a, b)
-
-        monkeypatch.setattr(random, "betavariate", counting_betavariate)
+        draws = _count_betavariate(mc)
 
         mc.select_op(["A", "B"])
-        first = draws["n"]
+        first = draws.n
         assert first == 2
 
         # Decay fires on every record with decay_interval=1 -> both redrawn
         mc.record("A", success=True)
         mc.select_op(["A", "B"])
-        assert draws["n"] == first + 2
+        assert draws.n == first + 2
 
-    def test_regression_thompson_draws_refreshed_after_interval(self, monkeypatch):
+    def test_regression_thompson_draws_refreshed_after_interval(self):
         """Draws must be force-refreshed after _draw_refresh_interval selects.
 
         Regression: caching draws purely on the posterior key froze a stale
@@ -131,25 +152,18 @@ class TestMonteCarloScheduler:
         mc.init_arm("A")
         mc.init_arm("B")
 
-        draws = {"n": 0}
-        real_betavariate = random.betavariate
-
-        def counting_betavariate(a, b):
-            draws["n"] += 1
-            return real_betavariate(a, b)
-
-        monkeypatch.setattr(random, "betavariate", counting_betavariate)
+        draws = _count_betavariate(mc)
 
         mc.select_op(["A", "B"])  # select 1: 2 fresh draws
         mc.select_op(["A", "B"])  # select 2: cached
         mc.select_op(["A", "B"])  # select 3: cached
-        assert draws["n"] == 2
+        assert draws.n == 2
 
         mc.select_op(["A", "B"])  # select 4: refresh fires -> 2 redraws
-        assert draws["n"] == 4
+        assert draws.n == 4
 
         mc.select_op(["A", "B"])  # select 5: cached again
-        assert draws["n"] == 4
+        assert draws.n == 4
 
     def test_regression_thompson_cache_correctness_preserved(self):
         """Cached draws must still follow the posterior: after a record, the

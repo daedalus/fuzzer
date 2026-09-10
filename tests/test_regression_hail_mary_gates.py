@@ -44,6 +44,8 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 #   * --mc-cycle-detect (diagnostic on the MC scheduler, not a strategy;
 #     recomputes the stationary distribution every stats tick when on --
 #     real overhead --hail-mary shouldn't add silently)
+#   * --rand-floyd-sample (a second implementation of RandPool.sample for
+#     k>=3, not a strategy; moves the draw stream for no behavioural gain)
 # Special-cased inside _apply_hail_mary (not plain bool dests in the tuple):
 #   * elo (string value "all")
 #   * anneal_budget (int)
@@ -62,6 +64,11 @@ _EXCLUDED_OPT_IN = frozenset(
         "enable_regex_bomb_mutations",  # experimental, untested
         "send_mail_require_tls",  # email config, not a strategy
         "mc_cycle_detect",  # MC diagnostic, not a strategy; has real per-tick overhead
+        # Not a strategy: a second implementation of RandPool.sample for
+        # k>=3. Explores nothing new and moves the draw stream, so
+        # enabling it would make a --hail-mary run incomparable to any
+        # other run of the same seed for no behavioural gain.
+        "rand_floyd_sample",
     }
 )
 

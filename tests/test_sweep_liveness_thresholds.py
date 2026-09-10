@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -110,6 +111,29 @@ class TestFlipInRegion:
 
 
 @requires_gcc
+class _Report(NamedTuple):
+    """The sweep's output plus the personality bits it started from.
+
+    Carried together because the ASLR check below is a *delta*: it needs the
+    value from before the sweep ran, and the fixture is the only place that
+    still has it.
+    """
+
+    text: str
+    personality_before: int
+
+
+def _personality() -> int:
+    """This process's current personality bits (0xFFFFFFFF is the query)."""
+    import ctypes
+    import ctypes.util
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    libc.personality.argtypes = [ctypes.c_ulong]
+    libc.personality.restype = ctypes.c_int
+    return libc.personality(0xFFFFFFFF)
+
+
 class TestSyntheticCalibrationEndToEnd:
     """Builds and runs the real target. Slow, and the only layer that can
     catch the calibration silently measuring nothing."""
@@ -127,23 +151,24 @@ class TestSyntheticCalibrationEndToEnd:
             calib_samples=60,
             switch_grid=(10, 25, 50),
         )
-        return _synthetic_report(cfg)
+        before = _personality()
+        return _Report(text=_synthetic_report(cfg), personality_before=before)
 
     def test_dead_region_never_moves_coverage(self, report):
-        assert "dead-region mutations moving coverage: 0/60" in report
+        assert "dead-region mutations moving coverage: 0/60" in report.text
 
     def test_live_region_always_moves_coverage(self, report):
-        assert "live-region mutations moving coverage: 60/60" in report
+        assert "live-region mutations moving coverage: 60/60" in report.text
 
     def test_verdict_is_correct_across_the_grid(self, report):
-        assert "CORRECT across the grid" in report
-        assert "MISCLASSIFICATION" not in report
+        assert "CORRECT across the grid" in report.text
+        assert "MISCLASSIFICATION" not in report.text
 
     def test_no_dead_verdict_is_given_to_the_live_region(self, report):
         """The false-positive half. Ground truth says the live region is live
         at every threshold; a DEAD column entry for it would mean the
         down-weight suppresses bytes that do drive coverage."""
-        rows = [ln for ln in report.splitlines() if ln.startswith("| ") and "DEAD" in ln]
+        rows = [ln for ln in report.text.splitlines() if ln.startswith("| ") and "DEAD" in ln]
         assert rows, "no verdict rows in report"
         for row in rows:
             # columns: | switch | dead | conv@ | live | mask bits | zero run |
@@ -157,24 +182,30 @@ class TestSyntheticCalibrationEndToEnd:
         pytest run without it -- which makes
         test_synthetic_target.py's unstable-variant checks silently skip
         rather than fail. A suite quietly losing coverage is worse than a
-        red test, so the sweep sets it per-child instead."""
-        import ctypes
-        import ctypes.util
+        red test, so the sweep sets it per-child instead.
 
+        Compared before and after the sweep, not against zero. Reading the
+        absolute flag made this a claim about the whole pytest process, and
+        `Fuzzer.__init__` calls `adapters.process.disable_aslr()` -- so any
+        earlier test that built a real Fuzzer failed this one, naming the
+        calibration for something it did not do. The delta is what the
+        docstring above actually asserts.
+        """
         from fuzzer_tool.adapters.process import ADDR_NO_RANDOMIZE
 
-        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
-        libc.personality.argtypes = [ctypes.c_ulong]
-        libc.personality.restype = ctypes.c_int
-        assert not (libc.personality(0xFFFFFFFF) & ADDR_NO_RANDOMIZE), (
-            "the calibration leaked ADDR_NO_RANDOMIZE into the test process"
+        before = report.personality_before
+        after = _personality()
+        leaked = (after & ADDR_NO_RANDOMIZE) and not (before & ADDR_NO_RANDOMIZE)
+        assert not leaked, (
+            "the calibration leaked ADDR_NO_RANDOMIZE into the test process "
+            f"(personality {before:#x} -> {after:#x})"
         )
 
     def test_calibration_runs_with_aslr_disabled_like_production(self, report):
         """services/fuzzer.py disables ASLR for every target it runs, so a
         calibration under ASLR *on* characterises a target the fuzzer never
         executes. The first version of this tool did exactly that."""
-        assert "ASLR disabled (production condition): True" in report
+        assert "ASLR disabled (production condition): True" in report.text
 
     def test_unstable_variant_is_deterministic_once_aslr_is_off(self):
         """The --unstable blocks are gated on a heap address, so they are
