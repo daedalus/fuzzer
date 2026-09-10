@@ -3,6 +3,7 @@
 from fuzzer_tool.core import schedulers as S
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.operators import OperatorEngine
+from tests.support.operator_env import install_scheduler_surface
 
 
 class MockFuzzer:
@@ -27,31 +28,7 @@ class MockFuzzer:
         # Scheduler flags
         self._use_round_robin = True
         self._round_robin = S.RoundRobinScheduler()
-        self._use_elo = False
-        self._elo = None
-        self._use_replicator = False
-        self._replicator = None
-        self._use_mopt = False
-        self._mopt = None
-        self._use_exp3 = False
-        self._exp3 = None
-        self._use_eps_greedy = False
-        self._eps_greedy = None
-        self._use_hierarchical = False
-        self._hierarchical = None
-        self._use_gp_ucb = False
-        self._gp_ucb = None
-        self._use_cmaes = False
-        self._cmaes = None
-        self._use_contextual = False
-        self._contextual = None
-        self._use_ducb = False
-        self._ducb = None
-        self._use_swucb = False
-        self._swucb = None
-        self._use_cucb = False
-        self._cucb = None
-        self._use_invasion = False
+        install_scheduler_surface(self)
 
         self._last_mopt_particles = []
         self._prev_bandit_op = None

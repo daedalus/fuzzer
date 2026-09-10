@@ -13,6 +13,78 @@ contract is the whole ``Fuzzer`` object. See ``docs/port-backlog.md``, item F1.
 
 from __future__ import annotations
 
+# Every scheduler `OperatorEngine.select_op` puts on the Elo ballot, plus the
+# two flags it reads alongside them. `select_op` reads each as a bare
+# `f._use_X and f._X`, so a fake missing one pair raises AttributeError while
+# the ballot is being built -- before any assertion in the test runs.
+#
+# One list, because there were six: this module and five hand-rolled fakes in
+# test_regression_elo_all, test_invasion_elo_integration,
+# test_regression_cmaes_elo_ballot, test_regression_round_robin_integration
+# and test_new_operators. Adding C2UCB broke 21 tests across those files,
+# none of them about C2UCB, and adding it to only some of them then surfaced
+# kl_ducb, kl_swucb and cusum_ucb behind it -- the same omission three
+# schedulers deep. test_regression_operator_env_covers_select_op parses the
+# ballot out of `select_op` and fails by name when this list falls behind.
+BALLOT_SCHEDULERS = (
+    "c2ucb",
+    "cmaes",
+    "contextual",
+    "cucb",
+    "cusum_ucb",
+    "ducb",
+    "eps_greedy",
+    "exp3",
+    "fpl",
+    "gp_ucb",
+    "hierarchical",
+    "kl_ducb",
+    "kl_swucb",
+    "mopt",
+    "replicator",
+    "round_robin",
+    "swucb",
+    "tang",
+)
+
+
+def install_scheduler_surface(obj, *, overwrite=False):
+    """Give *obj* every ballot attribute, all off.
+
+    ``overwrite=False`` leaves anything already set alone, so a fake that
+    deliberately enables one scheduler can call this first and keep its own
+    value. ``overwrite=True`` is for a test that pins how often the ballot is
+    resolved: there the whole surface has to be pinned, not just the part the
+    test cares about, or the ballot's contents vary with whatever the mock
+    happens to build.
+
+    Two notes carried over from the per-file lists this replaced, because
+    they are the reason the surface has to be complete rather than
+    convenient:
+
+    - cmaes is on the ballot like every other scheduler, and the no-Elo
+      fallback chain reads ``_use_cmaes`` unguarded. The fakes got away
+      without it only while cmaes was *missing* from the ballot -- a bug
+      fixed separately, which then broke every fake that had been relying
+      on the omission.
+    - invasion has no scheduler object of its own. It reads
+      ``f.mc.bandit_stats()``, gated on ``_use_invasion`` and ``mc_bandit``
+      alone, which is why those two are set here by name and not as a pair.
+    """
+    for sched in BALLOT_SCHEDULERS:
+        for name in (f"_use_{sched}", f"_{sched}"):
+            if overwrite or not hasattr(obj, name):
+                setattr(obj, name, False if name.startswith("_use_") else None)
+    for name, value in (
+        ("_use_invasion", False),
+        ("mc_bandit", False),
+        ("_use_elo", False),
+        ("_elo", None),
+    ):
+        if overwrite or not hasattr(obj, name):
+            setattr(obj, name, value)
+    return obj
+
 
 def make_minimal_fuzzer(seed=None, pool=None):
     """Build a minimal fuzzer-like object for operator testing.
@@ -116,6 +188,7 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_._wfc_enabled = False
             self_._smt_solver = None
             self_.enable_regex_bomb = False
+            install_scheduler_surface(self_)
             if pool is not None:
                 self_._rng = pool
             else:

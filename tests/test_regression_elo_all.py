@@ -11,6 +11,7 @@ from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers import MonteCarloScheduler
 from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.operators import OperatorEngine
+from tests.support.operator_env import install_scheduler_surface
 from tests.test_commands_extended import TestCmdFuzzConstruction
 
 
@@ -78,6 +79,10 @@ class _StubFuzzer:
 class TestSeedEloRecordsPoolOnly:
     def _make(self, strategy, pool, used, elo=True):
         f = _StubFuzzer()
+        # _record_strategy_matches walks every scheduler to build the Elo
+        # ballot, so the stub needs the whole surface even though this test
+        # is about seed strategies.
+        install_scheduler_surface(f)
         f._use_elo = elo
         f._elo = BayesianEloTracker() if elo else None
         f._seed_strategy = strategy
@@ -124,6 +129,9 @@ class TestSeedEloRecordsPoolOnly:
 class TestOperatorEloRecordsUsedOnly:
     def _make(self, strategy, used, elo=True):
         f = _StubFuzzer()
+        # Whole surface first, then the handful this test deliberately turns
+        # on -- install_scheduler_surface never overwrites what is set.
+        install_scheduler_surface(f)
         f._use_elo = elo
         f._elo = BayesianEloTracker() if elo else None
         f._meta_strategy = strategy
@@ -192,6 +200,8 @@ class _FakeBandit:
     def __init__(self):
         self.cem_fitted = False
 
+        install_scheduler_surface(self)
+
     def select_op(self, ops, prev_op=None):
         return "bit_flip"
 
@@ -209,32 +219,7 @@ class _FakeFuzzerForSelectOp:
         self.mc = None
         self.mc_bandit = False
         self.mc_cem = False
-        self._use_mopt = False
-        self._mopt = None
-        self._use_exp3 = False
-        self._exp3 = None
-        self._use_eps_greedy = False
-        self._eps_greedy = None
-        self._use_hierarchical = False
-        self._hierarchical = None
-        self._use_gp_ucb = False
-        self._gp_ucb = None
-        self._use_ducb = False
-        self._ducb = None
-        self._use_swucb = False
-        self._swucb = None
-        self._use_cucb = False
-        self._cucb = None
-        # cmaes is on the Elo ballot like every other scheduler; the real
-        # Fuzzer always sets both attributes (services/fuzzer.py), and the
-        # no-Elo fallback chain reads _use_cmaes unguarded. This fake only
-        # got away without them while cmaes was missing from the ballot.
-        self._use_cmaes = False
-        self._cmaes = None
-        self._use_contextual = False
-        self._contextual = None
-        # invasion has no scheduler object of its own -- it reads
-        # f.mc.bandit_stats(), gated on _use_invasion and mc_bandit alone.
+        install_scheduler_surface(self)
         self._use_invasion = False
         self._use_elo = elo
         self._elo = BayesianEloTracker() if elo else None

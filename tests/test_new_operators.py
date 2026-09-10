@@ -14,7 +14,7 @@ from fuzzer_tool.core.mutations import (
 )
 from fuzzer_tool.services.operators import OperatorEngine
 
-from .support.operator_env import make_minimal_fuzzer
+from .support.operator_env import install_scheduler_surface, make_minimal_fuzzer
 from .support.scripted_rng import ScriptedRng
 
 # ── Seed discipline (docs/port-backlog.md, item F6) ──────────────────
@@ -844,35 +844,16 @@ class TestEloMetaStrategyThrottle:
     """
 
     def _make_elo_fuzzer(self):
-        f = _make_minimal_fuzzer()
+        # This test pins how often the ballot is resolved, so every candidate
+        # on it has to be pinned too -- leaving one unset would let the
+        # ballot's contents vary with whatever the mock happens to build.
+        # `install_scheduler_surface` turns the whole surface off in one
+        # place; the four lines after it are what this test wants ON.
+        f = install_scheduler_surface(_make_minimal_fuzzer(), overwrite=True)
         f._use_elo = True
         f._use_mopt = True
-        f._use_replicator = False
-        f._replicator = None
         f.mc_bandit = True
         f.mc_cem = False
-        f._use_exp3 = False
-        f._use_eps_greedy = False
-        f._use_hierarchical = False
-        f._use_gp_ucb = False
-        # Set explicitly for the same reason as the other flags here: cmaes
-        # is a candidate on the Elo ballot, and this test pins how often the
-        # ballot is resolved, so leaving it unset would let the ballot's
-        # contents vary with whatever _make_minimal_fuzzer happens to build.
-        f._use_cmaes = False
-        f._cmaes = None
-        f._use_contextual = False
-        f._contextual = None
-        # Same reason: the recency/combinatorial family joins the ballot too.
-        f._use_ducb = False
-        f._ducb = None
-        f._use_swucb = False
-        f._swucb = None
-        f._use_cucb = False
-        f._cucb = None
-        # Same reason: invasion joins the ballot too (reads f.mc.bandit_stats
-        # directly, no scheduler object of its own).
-        f._use_invasion = False
 
         class _FakeMopt:
             def select_op(self, ops, prev_op=None):

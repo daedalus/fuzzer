@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.operators import OperatorEngine
+from tests.support.operator_env import install_scheduler_surface
 
 
 class _RecordingScheduler:
@@ -74,21 +75,7 @@ class _FakeFuzzer:
         self.mc = _FakeMC()
         self.mc_bandit = False
         self.mc_cem = False
-        for flag, attr in (
-            ("_use_replicator", "_replicator"),
-            ("_use_mopt", "_mopt"),
-            ("_use_exp3", "_exp3"),
-            ("_use_eps_greedy", "_eps_greedy"),
-            ("_use_hierarchical", "_hierarchical"),
-            ("_use_gp_ucb", "_gp_ucb"),
-            ("_use_cmaes", "_cmaes"),
-            ("_use_contextual", "_contextual"),
-            ("_use_ducb", "_ducb"),
-            ("_use_swucb", "_swucb"),
-            ("_use_cucb", "_cucb"),
-        ):
-            setattr(self, flag, False)
-            setattr(self, attr, None)
+        install_scheduler_surface(self)
         self._use_invasion = False
         self._use_elo = False
         self._elo = None
