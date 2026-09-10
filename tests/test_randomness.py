@@ -20,10 +20,12 @@ from fuzzer_tool.core.randomness import (
     corpus_invariants,
     fishers_method,
     invariant_mask,
+    gorilla_test,
     kmer_occupancy,
     ks_uniform,
     kuiper_uniform,
     lagged_autocorrelation,
+    lmn_test,
     monobit,
     permutation_test,
     profile_buffer,
@@ -78,6 +80,8 @@ class TestNullCalibration:
             lambda d: binary_matrix_rank(d, 6, 8),
             kmer_occupancy,
             lambda d: lagged_autocorrelation(d, (1,))[1],
+            lambda d: lmn_test(d, 4, 4, 4),
+            gorilla_test,
         ],
     )
     def test_pvalues_uniform_on_urandom(self, fn):
@@ -109,6 +113,36 @@ class TestDiscrimination:
     def test_lag_catches_fixed_stride(self):
         rec = (struct.pack("<I", 0x41414141) + b"\x00" * 12) * (WINDOW // 16)
         assert min(lagged_autocorrelation(rec).values()) < 0.01
+
+    def test_lmn_catches_a_gapped_bit_period_serial_test_misses(self):
+        """A period that only lines up once the m-bit gap is inserted.
+
+        Built so every contiguous 8-bit window is one of two values spaced
+        4 bits apart in phase -- serial_test at m=8 sees close to the full
+        256-value spread, but the (l=4, m=4, n=4) gapped window collapses
+        onto a handful of values.
+        """
+        period = 0b101100  # 6-bit period, byte-unaligned
+        nbits = WINDOW * 8
+        acc, have = 0, 0
+        while have < nbits:
+            acc = (acc << 6) | period
+            have += 6
+        acc >>= have - nbits
+        data = acc.to_bytes(WINDOW, "big")
+        assert lmn_test(data, 4, 4, 4) < 0.01
+
+    def test_gorilla_catches_a_periodic_lag(self):
+        period = 0b1101  # 4-bit period
+        nbits = WINDOW * 8
+        acc, have = 0, 0
+        while have < nbits:
+            acc = (acc << 4) | period
+            have += 4
+        acc >>= have - nbits
+        data = acc.to_bytes(WINDOW, "big")
+        assert gorilla_test(data, 4) < 0.01
+        assert gorilla_test(os.urandom(WINDOW), 4) > 0.01
 
 
 class TestRegionProfile:

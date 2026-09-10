@@ -278,6 +278,7 @@ class TestRegularityOperators:
             "float_squeeze",
             "gcd_worst_case",
             "invariant_break",
+            "lmn_lock",
             "kmer_saturate",
             "kmer_saturate_bits",
             "kmer_starve",

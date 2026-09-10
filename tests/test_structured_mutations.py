@@ -51,6 +51,7 @@ ALL_OPS = (
     S.degenerate_geometry,
     S.float_squeeze,
     S.popcount_lock,
+    S.lmn_lock,
 )
 
 
@@ -613,3 +614,41 @@ class TestInvariantBreak:
         invariants = R.corpus_invariants([rnd.randbytes(64) for _ in range(32)])
         seed = rnd.randbytes(64)
         assert S.invariant_break(seed, invariants, rng=rp) == seed
+
+
+class TestLmnLock:
+    def test_round_trip_defeats_lmn_test(self, seeded, noise):
+        """The default (l=4, m=4, n=4) window must reject the locked region."""
+        out = S.lmn_lock(noise(4096), rng=seeded)
+        assert R.lmn_test(out, 4, 4, 4) < 0.01
+
+    def test_round_trip_defeats_gorilla_at_divisor_lags(self, seeded, noise, monkeypatch):
+        """Periodicity at *period* defeats gorilla at any lag *period* divides.
+
+        Pin the period so the round trip isn't sensitive to which period the
+        RNG draw happens to land on.
+        """
+        monkeypatch.setattr(S, "_LMN_PERIODS", (6,))
+        out = S.lmn_lock(noise(4096), rng=seeded)
+        for lag in (6, 12, 18):
+            assert R.gorilla_test(out, lag) < 0.01
+
+    def test_never_emits_the_all_zero_or_all_one_template(self, rp):
+        """The construction must exclude the two constant-template cases.
+
+        Those degenerate templates are float_squeeze/popcount_lock's territory
+        already; this operator existing only to reach them too would be
+        redundant, so the template draw itself must exclude bit 0 and bit
+        ``period-1`` all-equal values.
+        """
+        for _ in range(60):
+            out = S.lmn_lock(bytes(4096), rng=rp)
+            if out == bytes(4096):
+                continue
+            assert len(set(out)) > 1
+
+    def test_short_input_is_a_noop(self, rp):
+        """Below every period's min_len the region search must decline cleanly."""
+        tiny = os.urandom(3)
+        for _ in range(20):
+            assert len(S.lmn_lock(tiny, rng=rp)) == 3

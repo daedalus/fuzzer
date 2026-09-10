@@ -193,6 +193,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "degenerate_geometry",
         "float_squeeze",
         "popcount_lock",
+        "lmn_lock",
         "feistel_scramble",
         "mtf",
         "bwt",

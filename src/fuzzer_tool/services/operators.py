@@ -3357,6 +3357,11 @@ class OperatorEngine:
 
         return self._regularity(popcount_lock, buf)
 
+    def _op_lmn_lock(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import lmn_lock
+
+        return self._regularity(lmn_lock, buf)
+
     def _op_feistel_scramble(self, buf, _byte_idx, _data):
         # Not a diehard/dieharder inverse like its neighbours above; lives in
         # core/feistel.py rather than mutations/structured.py because it's a

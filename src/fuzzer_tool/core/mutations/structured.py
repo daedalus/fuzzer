@@ -29,11 +29,14 @@ diehard_parking_lot,         :func:`degenerate_geometry`
   rgb_minimum_distance
 diehard_squeeze              :func:`float_squeeze`
 diehard_count_1s_byte/stream :func:`popcount_lock`
+rgb_lmn,                     :func:`lmn_lock`
+  marsaglia_tsang_gorilla
 ===========================  ==========================================
 
 The detectors for several of these already live in
 :mod:`fuzzer_tool.core.randomness` (``kmer_occupancy``, ``_batch_gf2_rank``,
-``birthday_spacings``, ``permutation_test``, ``corpus_invariants``); the
+``birthday_spacings``, ``permutation_test``, ``corpus_invariants``,
+``lmn_test``, ``gorilla_test``); the
 functions here are their constructive duals, and the tests assert the round
 trip wherever a detector exists.
 
@@ -1004,6 +1007,62 @@ def popcount_lock(data: bytes, rng=None) -> bytes:
         return data
     weight = rng.choice(_POPCOUNT_WEIGHTS)
     block = rng.randbytes(length).translate(_popcount_table(weight))
+    return _splice(data, offset, block)
+
+
+# ── 12b. rgb_lmn / marsaglia_tsang_gorilla inverse ──────────────────────
+
+# Sub-byte, non-power-of-two periods. 8/16/32/64 are already the territory
+# of the byte-aligned periodic patterns other operators produce (mtf/rle
+# round trips, monotone_fill); what nothing else in this module reaches is
+# a period that does not line up with a byte boundary at all, which is
+# exactly the case a byte-oriented reader is least likely to special-case.
+_LMN_PERIODS = (3, 5, 6, 7, 9, 10, 11, 12, 13, 14, 15)
+
+
+def lmn_lock(data: bytes, rng=None) -> bytes:
+    """Overwrite a region with a short, sub-byte-aligned bit period.
+
+    rgb_lmn's own description gives the canonical failure mode: counting
+    00 01 10 11 00 01 10 11 ... looks uniform 2 bits at a time but is really
+    one 8-bit string, ``00011011``, repeated -- because the underlying
+    *period* is 8 bits, far short of the window width. Any (l, m, n) gapped
+    window sliding over a bitstream of period ``p`` can take at most ``p``
+    distinct values however wide the window is, so a stream built from a
+    short repeating template starves the whole rgb_lmn family -- plain
+    bitdist (m=0) through wide, gapped probes -- at once, without needing to
+    know which l/m/n a reader applies.
+
+    The same construction defeats marsaglia_tsang_gorilla for free: that
+    test decimates the stream at a fixed lag and monobit-tests what is left,
+    and a bitstream whose period divides the lag is constant once decimated,
+    from *any* starting phase -- not just the one the operator happened to
+    pick.
+
+    Args:
+        data: Input bytes.
+        rng: RandPool or stdlib random.
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    rng = _get_rng(rng)
+    period = rng.choice(_LMN_PERIODS)
+    min_len = max(4, period // 8 + 2)
+    offset, length = _region(len(data), rng, min_len=min_len)
+    if length < min_len:
+        return data
+    # Exclude the all-0/all-1 templates: those are already the degenerate
+    # case other operators (float_squeeze, popcount_lock) reach directly,
+    # and would just make this operator a slower way to get there.
+    template = rng.randint(1, (1 << period) - 2)
+    total_bits = length * 8
+    acc, have = 0, 0
+    while have < total_bits:
+        acc = (acc << period) | template
+        have += period
+    acc >>= have - total_bits  # keep exactly total_bits bits, still periodic
+    block = acc.to_bytes(length, "big")
     return _splice(data, offset, block)
 
 

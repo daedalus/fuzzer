@@ -37,6 +37,8 @@ __all__ = [
     "runs_test",
     "byte_chisq",
     "serial_test",
+    "lmn_test",
+    "gorilla_test",
     "binary_matrix_rank",
     "lagged_autocorrelation",
     "birthday_spacings",
@@ -451,6 +453,68 @@ def serial_test(data: bytes, m: int = 8) -> float:
     d1 = psi2_from(idx_m, m) - psi2_from(idx_m >> 1, m - 1)
     # NIST SP 800-22: nabla psi^2_m ~ chi^2(2^(m-1))
     return chisq_sf(d1, 1 << (m - 1))
+
+
+def lmn_test(data: bytes, l: int = 4, m: int = 4, n: int = 4) -> float:
+    """rgb_lmn: chi-square on gapped l-bit/skip-m/n-bit sliding windows.
+
+    dieharder describes this as a "supertest" that subsumes bitdist (m=0)
+    and serial_test (m=0, n=0): at every bit offset, take *l* bits, skip
+    *m*, take *n* more, and concatenate into an (l+n)-bit integer. Under the
+    null those integers are uniform over ``2**(l+n)`` values.
+
+    The gap is the point. serial_test only ever looks at contiguous bits, so
+    a format that interleaves two independent fields at a fixed bit stride
+    (bit-plane data, packed flag/value pairs) can pass every contiguous test
+    while failing this one the moment the gap lines up with the stride.
+
+    As with serial_test, overlapping windows are not independent draws, so
+    the chi-square is an approximation rather than an exact tail; treat this
+    as a fuzzer classification signal, not a certified statistical test.
+    """
+    if l < 1 or n < 0 or m < 0:
+        return 1.0
+    w = l + n
+    if w < 1 or w > 20:
+        return 1.0
+    span = l + m + n
+    b = _bits(data).astype(np.int64)
+    total = b.size
+    if total < (1 << w) * 5 or total < span:
+        return 1.0
+    ext = np.concatenate([b, b[: span - 1]]) if span > 1 else b
+    idx = np.zeros(total, dtype=np.int64)
+    for k in range(l):
+        idx = (idx << 1) | ext[k : k + total]
+    for k in range(l + m, span):
+        idx = (idx << 1) | ext[k : k + total]
+    counts = np.bincount(idx, minlength=1 << w)
+    exp = total / float(1 << w)
+    x2 = float(np.sum((counts - exp) ** 2) / exp)
+    return chisq_sf(x2, (1 << w) - 1)
+
+
+def gorilla_test(data: bytes, lag: int = 2) -> float:
+    """Marsaglia-Tsang's "gorilla" monkey test: strided monobit at a fixed lag.
+
+    The original decimates the RNG's real-valued stream at every *lag*-th
+    call and Z-tests the running sum against its Gaussian null. The bit-level
+    analogue for a byte buffer: pick out every *lag*-th bit and monobit-test
+    that decimated stream. A format that stripes independent data across a
+    fixed bit period -- one flag bit per pixel, one parity bit per word --
+    shows up here even though the un-decimated stream monobits clean, because
+    monobit only ever sees the *sum* over all positions and this test isolates
+    one phase of a periodic structure.
+    """
+    if lag < 1:
+        return 1.0
+    b = _bits(data)
+    strided = b[::lag]
+    n = strided.size
+    if n < 100:
+        return 1.0
+    s = 2 * int(strided.sum()) - n
+    return _erfc(abs(s) / math.sqrt(2.0 * n))
 
 
 # ── GF(2) binary matrix rank ──────────────────────────────────────────
