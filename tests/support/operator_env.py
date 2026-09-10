@@ -188,6 +188,20 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_._wfc_enabled = False
             self_._smt_solver = None
             self_.enable_regex_bomb = False
+            # Read on the mutate() path, which this mock did not previously
+            # reach: test_operator_smoke and test_exhaustive_pool call the
+            # _op_* handlers directly.
+            self_._track_op_effect = False
+            self_._det_execs = 0
+            self_._op_time_ema = {}
+            self_._last_op_costs = {}
+            self_._last_ops_applicable = []
+            self_._last_ops_effective = []
+            self_._last_ops_with_sites = []
+            self_._current_context_shared = None
+            self_._last_mutation_offset = -1
+            self_._last_hamming_distance = -1
+            self_._use_sensitivity = False
             install_scheduler_surface(self_)
             if pool is not None:
                 self_._rng = pool

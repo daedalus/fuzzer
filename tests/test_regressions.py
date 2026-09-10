@@ -1237,43 +1237,19 @@ class TestPowerSchedulerWiring:
 
         from fuzzer_tool.services.operators import OperatorEngine
 
-        f = MagicMock()
+        from .support.operator_env import make_minimal_fuzzer
+
+        # Was a bare MagicMock. That auto-vivifies every unset
+        # attribute into a truthy Mock, so `_build_shared_context`
+        # read `_edge_tracker.map_size` and `stats.count` as Mocks and
+        # died comparing them to numbers -- two TypeErrors deep, with
+        # more behind them, none of which this test is about. The
+        # shared mock has real defaults for all of it.
+        f = make_minimal_fuzzer(seed=1)
         f.mutations_per_input = 8
         f._last_perf_score = 200.0
-        f._rng.randint_list.return_value = [0]
-        f.dictionary = []
-        f._stall_recovery_active = False
-        f.max_len = 65536
-        f._frameshift = MagicMock()
-        f._frameshift.relations = []
         f._op_dispatch = {"bit_flip": MagicMock(return_value=None)}
-        f._prev_bandit_op = None
-        f._last_ops_used = []
-        f._last_mopt_particles = []
-        f._meta_strategy = None
-        f.seed_meta = {}
-        f.markov_trained = False
-        f.mc = None
-        f.mc_bandit = False
-        f.mc_cem = False
-        f._use_replicator = False
-        f._replicator = None
-        f._use_mopt = False
-        f._mopt = None
-        f._use_contextual = False
-        f._contextual = None
-        f.grammar = None
-        f._cmplog = None
-        f.enable_regex_bomb = False
-        f._smt_solver = None
-        f._wfc_enabled = False
-        f._use_transfer_entropy = False
-        f._use_mi = False
-        f._sensitivity = MagicMock()
-        f._mi = MagicMock()
-        f._te = None
-        f._crash_mi = None
-        f._last_hamming_distance = -1
+        f._frameshift.relations = []
 
         engine = OperatorEngine(f)
 
@@ -1294,43 +1270,19 @@ class TestPowerSchedulerWiring:
 
         from fuzzer_tool.services.operators import OperatorEngine
 
-        f = MagicMock()
+        from .support.operator_env import make_minimal_fuzzer
+
+        # Was a bare MagicMock. That auto-vivifies every unset
+        # attribute into a truthy Mock, so `_build_shared_context`
+        # read `_edge_tracker.map_size` and `stats.count` as Mocks and
+        # died comparing them to numbers -- two TypeErrors deep, with
+        # more behind them, none of which this test is about. The
+        # shared mock has real defaults for all of it.
+        f = make_minimal_fuzzer(seed=1)
         f.mutations_per_input = 8
         f._last_perf_score = 100.0
-        f._rng.randint_list.return_value = [0]
-        f.dictionary = []
-        f._stall_recovery_active = False
-        f.max_len = 65536
-        f._frameshift = MagicMock()
-        f._frameshift.relations = []
         f._op_dispatch = {"bit_flip": MagicMock(return_value=None)}
-        f._prev_bandit_op = None
-        f._last_ops_used = []
-        f._last_mopt_particles = []
-        f._meta_strategy = None
-        f.seed_meta = {}
-        f.markov_trained = False
-        f.mc = None
-        f.mc_bandit = False
-        f.mc_cem = False
-        f._use_replicator = False
-        f._replicator = None
-        f._use_mopt = False
-        f._mopt = None
-        f._use_contextual = False
-        f._contextual = None
-        f.grammar = None
-        f._cmplog = None
-        f.enable_regex_bomb = False
-        f._smt_solver = None
-        f._wfc_enabled = False
-        f._use_transfer_entropy = False
-        f._use_mi = False
-        f._sensitivity = MagicMock()
-        f._mi = MagicMock()
-        f._te = None
-        f._crash_mi = None
-        f._last_hamming_distance = -1
+        f._frameshift.relations = []
 
         engine = OperatorEngine(f)
 
