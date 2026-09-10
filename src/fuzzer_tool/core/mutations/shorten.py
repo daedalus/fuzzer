@@ -108,7 +108,7 @@ class ShnMutator:
                 header.frame_samples + self._rng.choice([-128, -64, -32, 0, 32, 64, 128]),
             )
         elif op == 4:
-            struct.pack_into("<H", raw, 6, header.frame_crc + self._rng.choice([-1, 1]))
+            struct.pack_into("<H", raw, 6, (header.frame_crc + self._rng.choice([-1, 1])) & 0xFFFF)
         elif op == 5:
             struct.pack_into("B", raw, 8, min(16, header.lp_order + self._rng.choice([0, 1, 2])))
 
