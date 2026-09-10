@@ -837,7 +837,13 @@ class MonteCarloScheduler:
             acc = 0.0
             for observations, n1, n2 in per_pos:
                 shuffled = observations[:]
-                rng.shuffle_list(shuffled)
+                # RandPool.shuffle shuffles in place; there is no
+                # `shuffle_list`. The 8312b15 migration guessed the name by
+                # analogy with the genuine batch helpers (`random_list`,
+                # `choice_list`), so this whole backend raised AttributeError
+                # -- invisibly, because it is the `not _HAS_NUMPY` fallback
+                # and CI always has numpy.
+                rng.shuffle(shuffled)
                 a: dict[int, int] = {}
                 for k in shuffled[:n1]:
                     a[k] = a.get(k, 0) + 1

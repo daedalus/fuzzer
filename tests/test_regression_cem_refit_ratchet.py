@@ -41,6 +41,7 @@ import random
 
 import pytest
 
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
 
 STABLE_ALPHABET = b"ABCDEFGH"
@@ -203,7 +204,9 @@ class TestNullBackends:
         rng = random.Random(31)
         pooled = self._pooled(rng)
         np_samples = MonteCarloScheduler._null_js_samples_numpy(pooled, 60)
-        py_samples = MonteCarloScheduler._null_js_samples_python(pooled, 60)
+        # The python backend draws its permutations from a pool since
+        # 8312b15; the numpy one still uses np.random internally.
+        py_samples = MonteCarloScheduler._null_js_samples_python(pooled, 60, RandPool(seed=31))
         assert np_samples and py_samples
         np_mean = sum(np_samples) / len(np_samples)
         py_mean = sum(py_samples) / len(py_samples)

@@ -6,11 +6,11 @@ deterministic where possible, bare ``assert`` and ``pytest.approx``.
 """
 
 import math
-import random
 
 import pytest
 
 from fuzzer_tool.core.cvm import F0Estimator
+from fuzzer_tool.core.rand_pool import RandPool
 
 # ── construction / validation ──────────────────────────────────────────────
 
@@ -132,23 +132,19 @@ def test_down_sample_can_return_none_when_still_full():
     # Force both the admission draw and the down-sample draws to keep
     # every element: update() must surface the algorithm's perp (None)
     # rather than silently succeeding.
-    f0 = F0Estimator(eps=0.5, delta=0.25, m=100)
-    f0.thresh = 2
-    import fuzzer_tool.core.cvm as cvm
-
-    orig = cvm.random
-
+    # Injected, not monkeypatched onto the module: since 8312b15 the
+    # estimator holds its own pool and `cvm.random` does not exist, so
+    # swapping it patched nothing and the draws came from the real pool.
     class KeepAll:
         def random(self):
             return 0.0  # always admit AND always keep in down-sample
 
-    cvm.random = KeepAll()
-    try:
-        assert f0.update("a") is True  # X={a}, len=1
-        assert f0.update("b") is None  # X={a,b} -> down-sample keeps both
-        # -> still full -> perp
-    finally:
-        cvm.random = orig
+    f0 = F0Estimator(eps=0.5, delta=0.25, m=100, rng=KeepAll())
+    f0.thresh = 2
+
+    assert f0.update("a") is True  # X={a}, len=1
+    assert f0.update("b") is None  # X={a,b} -> down-sample keeps both
+    # -> still full -> perp
 
 
 # ── (eps, delta) guarantee (property test) ─────────────────────────────────
@@ -167,7 +163,7 @@ def test_estimate_within_eps_delta_after_downsample():
     (1 +/- eps) of the true distinct count with probability >= 1 - delta.
 
     Uses a stream long enough to trigger the down-sample at the formula's
-    own threshold, and seeds the module-level ``random`` per run for
+    own threshold, and gives the estimator a per-run seeded pool for
     reproducibility.
     """
     eps, delta = 0.5, 0.25
@@ -175,20 +171,12 @@ def test_estimate_within_eps_delta_after_downsample():
     true_count = 200
     bad = 0
     for seed in range(n_runs):
-        rng = random.Random(seed)
-        import fuzzer_tool.core.cvm as cvm
-
-        orig = cvm.random
-        cvm.random = rng
-        try:
-            f0 = F0Estimator(eps=eps, delta=delta, m=10_000)
-            for i in range(true_count):
-                f0.update(i)
-            est = f0.estimate()
-            if not (1 - eps <= est / true_count <= 1 + eps):
-                bad += 1
-        finally:
-            cvm.random = orig
+        f0 = F0Estimator(eps=eps, delta=delta, m=10_000, rng=RandPool(seed=seed))
+        for i in range(true_count):
+            f0.update(i)
+        est = f0.estimate()
+        if not (1 - eps <= est / true_count <= 1 + eps):
+            bad += 1
     # The CVM guarantee bounds the violation rate by delta; allow a small
     # margin for finite-sample noise so the test is stable across platforms.
     assert bad / n_runs <= delta + 0.05
