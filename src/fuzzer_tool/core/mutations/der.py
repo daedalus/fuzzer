@@ -226,6 +226,39 @@ class DerMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
+    #: The four operators, in the order ``mutate`` draws them. Named here
+    #: rather than inline so the operator handlers in services/operators.py
+    #: and this entry point cannot drift apart -- see
+    #: tests/test_regression_der_mutate_entrypoint.py.
+    OPERATORS = ("mutate_length", "mutate_tag", "reorder_children", "insert_tlv")
+
+    def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
+        """Apply one BER/DER mutation, the uniform entry point.
+
+        This class was written as one public method per operator, which is a
+        fine shape -- the operator handlers each name the method they want --
+        but it left DER outside every sweep that discovers mutators and
+        drives ``mutate()``: the dispatch-arity check, the truncation sweep
+        and the field-overflow sweep all skipped it, so DER length and tag
+        arithmetic was the one format family nothing exercised in bulk.
+
+        Unparseable input falls back to the generator, as every sibling
+        mutator does. A method that parses the input and then finds no
+        mutation site returns None by its own contract, and there is nothing
+        better to do with that here than hand the input back: the operator
+        path has a real fallback (``_op_havoc``) and keeps its own driver for
+        exactly that reason, so this is not a second copy of that decision.
+        """
+        self._rng = rng or self._rng
+        if parse_der(data) is None:
+            return self._generate_random_der(max_len=max_len, rng=self._rng)
+        op = self._rng.randint(0, len(self.OPERATORS) - 1)
+        result = getattr(self, self.OPERATORS[op])(data, max_len=max_len, rng=self._rng)
+        if result is None:
+            return data[:max_len]
+        return result[:max_len]
+
     @staticmethod
     def _all_nodes(nodes: list[DerNode]) -> list[DerNode]:
         out: list[DerNode] = []
