@@ -128,7 +128,7 @@ class RascMutator:
         chunk = self._rng.choice(chunks)
         pos = chunk.offset + 8 if chunk.offset > 0 else 8
         if pos + 4 <= len(raw):
-            struct.pack_into("<I", raw, pos, chunk.seq_num + 1)
+            struct.pack_into("<I", raw, pos, (chunk.seq_num + 1) & 0xFFFFFFFF)
         return bytes(raw[:max_len])
 
     def _generate_random_rasc(self, max_len: int = 65536, rng: Any = None) -> bytes:

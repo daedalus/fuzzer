@@ -202,6 +202,7 @@ class BmpMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
     use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
     tile_bytes: int | None = None  # WFC tile width from record-stride inference
 
@@ -439,16 +440,13 @@ class BmpMutator:
 
     def _inject_junk_before_pixels(self, info: BmpInfo, max_len: int) -> BmpInfo:
         """Inject random bytes between headers and pixel data."""
-        junk = bytes(
-            self._rng.randint(0, 255)
-            for _ in range(self._rng.randint(4, 64))
-        )
+        junk = bytes(self._rng.randint(0, 255) for _ in range(self._rng.randint(4, 64)))
         header = bytearray(info.header)
         insert_pos = min(info.pixel_offset, len(header))
         header[insert_pos:insert_pos] = junk
         # Update pixel offset
         if len(header) >= 14:
-            struct.pack_into("<I", header, 10, info.pixel_offset + len(junk))
+            struct.pack_into("<I", header, 10, (info.pixel_offset + len(junk)) & 0xFFFFFFFF)
         info.header = header
         return info
 

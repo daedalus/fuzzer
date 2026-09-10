@@ -86,16 +86,22 @@ class CfhdMutator:
         raw = bytearray(data)
         op = self._rng.randint(0, 5)
 
+        # Every field is read straight back out of the input, so it holds
+        # whatever a previous mutation left, and the `> 0` / `> 1` guards
+        # bound the field rather than the result. Masked, as d84ca15 did for
+        # the Shorten CRC: the generator itself writes 0xFFFFFFFF into
+        # slice_count, so `+ 2` raised struct.error on 3.5% of mutations of
+        # its own output.
         if op == 0 and header.version > 0:
-            struct.pack_into("<I", raw, 0, header.version - 1)
+            struct.pack_into("<I", raw, 0, (header.version - 1) & 0xFFFFFFFF)
         elif op == 1:
-            struct.pack_into("<I", raw, 4, header.frame_num + 1)
+            struct.pack_into("<I", raw, 4, (header.frame_num + 1) & 0xFFFFFFFF)
         elif op == 2:
-            struct.pack_into("<I", raw, 8, header.slice_count + 2)
+            struct.pack_into("<I", raw, 8, (header.slice_count + 2) & 0xFFFFFFFF)
         elif op == 3:
-            struct.pack_into("<I", raw, 12, max(1, header.block_count - 2))
+            struct.pack_into("<I", raw, 12, max(1, header.block_count - 2) & 0xFFFFFFFF)
         elif op == 4 and header.width > 1:
-            struct.pack_into("<I", raw, 16, header.width - 16)
+            struct.pack_into("<I", raw, 16, (header.width - 16) & 0xFFFFFFFF)
 
         return bytes(raw[:max_len])
 

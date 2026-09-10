@@ -92,20 +92,29 @@ class ShnMutator:
         raw = bytearray(data)
         op = self._rng.randint(0, 5)
 
+        # Every field here is read straight back out of the input, so it can
+        # be anything a mutation left behind, and every delta can leave the
+        # type. Masked, as d84ca15 did for the CRC: wrapping is a fine value
+        # to feed a decoder, a struct.error is not.
         if op == 0 and header.sample_rate < 0xFFFF:
-            struct.pack_into("<H", raw, 0, header.sample_rate + self._rng.choice([1, 2, 4, 8]))
+            # `< 0xFFFF` bounds the field, not the sum: 0xFFFE + 8 is
+            # still out of range.
+            struct.pack_into(
+                "<H", raw, 0, (header.sample_rate + self._rng.choice([1, 2, 4, 8])) & 0xFFFF
+            )
         elif op == 1 and header.bits_per_sample < 32:
             struct.pack_into(
                 "B", raw, 2, min(32, header.bits_per_sample + self._rng.choice([1, 2, 4, 8]))
             )
         elif op == 2:
-            struct.pack_into("B", raw, 3, header.channels + self._rng.choice([0, 1, 2]))
+            struct.pack_into("B", raw, 3, (header.channels + self._rng.choice([0, 1, 2])) & 0xFF)
         elif op == 3:
             struct.pack_into(
                 "<H",
                 raw,
                 4,
-                header.frame_samples + self._rng.choice([-128, -64, -32, 0, 32, 64, 128]),
+                (header.frame_samples + self._rng.choice([-128, -64, -32, 0, 32, 64, 128]))
+                & 0xFFFF,
             )
         elif op == 4:
             struct.pack_into("<H", raw, 6, (header.frame_crc + self._rng.choice([-1, 1])) & 0xFFFF)
