@@ -24,26 +24,42 @@ class RascChunk:
     data: bytes
 
 
+# Record layout, as `_generate_random_rasc` writes it: chunk_type(1) at 0,
+# size(4) at 1, offset(4) at 5, seq_num(4) at 9, payload from 13. The
+# offsets are named because the parser previously used 8 and 12 for the
+# last two, which is one byte short at both: seq_num re-read the top byte
+# of offset (a generated 0x10000000 parsed back as 255) and the stride
+# dropped a byte per record.
+_RASC_SIZE_OFF = 1
+_RASC_OFFSET_OFF = 5
+_RASC_SEQ_OFF = 9
+_RASC_HEADER_LEN = 13
+# Everything up to and including `offset` is read unconditionally.
+_RASC_MIN_RECORD = _RASC_OFFSET_OFF + 4
+
+
 def parse_rasc(data: bytes) -> list[RascChunk] | None:
     """Parse RASC chunk structure from data."""
-    if len(data) < 8:
+    if len(data) < _RASC_MIN_RECORD:
         return None
 
     chunks = []
     pos = 0
 
-    while pos + 8 <= len(data):
+    while pos + _RASC_MIN_RECORD <= len(data):
         chunk_type = data[pos]
-        size = struct.unpack_from("<I", data, pos + 1)[0]
-        offset = struct.unpack_from("<I", data, pos + 5)[0]
+        size = struct.unpack_from("<I", data, pos + _RASC_SIZE_OFF)[0]
+        offset = struct.unpack_from("<I", data, pos + _RASC_OFFSET_OFF)[0]
 
         if chunk_type > 1:
             break
 
-        seq_num = struct.unpack_from("<I", data, pos + 8)[0] if pos + 12 <= len(data) else 0
-        chunk_data = data[pos + 12 : pos + 12 + size] if pos + 12 + size <= len(data) else b""
+        have_seq = pos + _RASC_SEQ_OFF + 4 <= len(data)
+        seq_num = struct.unpack_from("<I", data, pos + _RASC_SEQ_OFF)[0] if have_seq else 0
+        end = pos + _RASC_HEADER_LEN + size
+        chunk_data = data[pos + _RASC_HEADER_LEN : end] if end <= len(data) else b""
         chunks.append(RascChunk(chunk_type, size, offset, seq_num, chunk_data))
-        pos += 12 + size
+        pos += _RASC_HEADER_LEN + size
 
     return chunks if chunks else None
 

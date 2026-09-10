@@ -45,6 +45,12 @@ def parse_av1_obus(data: bytes) -> list[Av1Obu] | None:
                 break
             size = data[pos + 2]
             if size & 0x80:
+                # Two-byte size: the continuation byte is at pos + 3, which
+                # the guard above does not cover -- it only proves pos + 2 is
+                # readable. A 3-byte buffer whose last byte has 0x80 set
+                # raised IndexError here.
+                if pos + 4 > len(data):
+                    break
                 size = (size & 0x7F) << 8
                 size |= data[pos + 3]
                 pos += 3
