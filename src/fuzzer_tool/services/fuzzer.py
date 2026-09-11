@@ -4425,7 +4425,29 @@ class Fuzzer:
                     b = self.mc.arm_beta.get(op, 1.0)
                     self._op_secretary[op].observe(a / (a + b))
 
-        if self._mopt and (not self._use_elo or self._meta_strategy == "mopt"):
+        # On-policy learners: their update is only valid for operators they
+        # drew themselves, so they learn from the rounds they selected and
+        # from nothing else. Everything else below learns from every round,
+        # which is sound for them -- a sample mean or Beta posterior does not
+        # care who pulled the arm -- and measurably helps: fed only their own
+        # draws, a 4-scheduler Elo portfolio lost ~8% of discoveries on a
+        # 150-arm synthetic campaign.
+        #
+        # - MOpt credits the particle that drew each op; another scheduler's
+        #   draw has no particle, and record(particle_id=None) spreads it over
+        #   every particle. This was already gated under Elo; with Elo off it
+        #   still recorded, whichever scheduler had precedence.
+        # - Exp3's estimate r / p_i is unbiased only when p_i is the
+        #   probability Exp3 itself drew i with. Fed another scheduler's draw
+        #   it divided by a _last_probs left over from the last round Exp3
+        #   selected -- possibly thousands of rounds stale.
+        # - CMA-ES closes a generation after generation_size records. Counting
+        #   every scheduler's records closed it after ~generation_size / N of
+        #   its own evaluations, and credited its current candidate whenever
+        #   another scheduler happened to pick the op that candidate had last
+        #   drawn.
+        selector = self._op_selector
+        if self._mopt and selector == "mopt":
             # MOpt is separate: it needs the particle each operator was drawn
             # from, so it pairs each op with its first particle rather than
             # iterating the deduped list.
@@ -4440,11 +4462,11 @@ class Fuzzer:
         # Schedulers sharing the record(op, success, weight=...) signature.
         for scheduler in (
             self._replicator if self._use_replicator else None,
-            self._exp3,
+            self._exp3 if selector == "exp3" else None,
             self._eps_greedy,
             self._hierarchical,
             self._gp_ucb,
-            self._cmaes,
+            self._cmaes if selector == "cmaes" else None,
             self._ducb,
             self._swucb,
             self._kl_ducb,

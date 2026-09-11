@@ -4562,6 +4562,11 @@ class OperatorEngine:
         # self._last_ops_used: return" guard no-ops for this round, same as
         # if nothing had run -- the deterministic pass simply isn't part of
         # that tournament.
+        # Nobody has chosen yet this exec. Cleared before the deterministic
+        # stage, which returns without calling select_op: the reward fan-out
+        # reads this name, and a stale one would credit a round it never
+        # drew to whichever scheduler chose last.
+        f._op_selector = None
         det_mutant = self.maybe_deterministic_mutation(data)
         if det_mutant is not None:
             f._last_ops_used = []
