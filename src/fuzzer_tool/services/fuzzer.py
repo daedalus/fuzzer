@@ -4141,10 +4141,17 @@ class Fuzzer:
                 parent_key, discovered=bool(has_new_coverage), weight=weight
             )
 
-        # Mark cmplog tokens/pairs present during a coverage gain as more
-        # valuable — they survive eviction longer.
+        # Credit the cmplog operands this gain is attributable to: the
+        # input-to-state matches found in the input, which are the operands
+        # the mutators actually had to work with. Crediting the whole
+        # resident pool instead (what this did before) cannot rank anything
+        # and froze the pool at the first gain -- see mark_coverage_gain.
         if has_new_coverage and self._cmplog:
-            self._cmplog.mark_coverage_gain()
+            _credit = meta.get("redqueen_matches", ()) if meta is not None else ()
+            self._cmplog.mark_coverage_gain(
+                pairs=[(m[1], m[2]) for m in _credit],
+                tokens=[m[1] for m in _credit],
+            )
 
         # Weizz structure tags: once-per-lineage passive collection after a
         # coverage gain, gated by --weizz-tags and max_len. Uses existing

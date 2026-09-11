@@ -32,6 +32,7 @@ import select
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 
 from fuzzer_tool.adapters.track_parser import (
     conds_from_cmplog_text,
@@ -164,6 +165,11 @@ CMPLOG_PAIRS_MAX = 5_000  # max unique operand pairs
 # as a named constant because collect_tokens()'s docstring referred to it by
 # name for a long time while it lived only as a local.
 CMPLOG_MAX_LINES_PER_READ = 10_000
+# Coverage gains between halvings of the eviction credit accumulated by
+# tokens/pairs. Credit has to decay or it becomes permanent immunity, which
+# is what froze the pool before; halving keeps an operand that keeps proving
+# useful ahead of one that proved useful once, without pinning either.
+CMPLOG_VALUE_AGE_GAINS = 256
 CMPLOG_FILE_MAX_BYTES = 100 * 1024 * 1024  # max cmplog file size before rotation
 # The counts sidecar carries at most one short line per callback per dump,
 # so it grows orders of magnitude slower than the record stream and gets a
@@ -357,6 +363,8 @@ class CmplogCollector:
         # Used to detect which comparisons are consistently triggered by
         # which input variants (cross-referencing colored vs uncolored runs).
         self._run_history: dict[int, set[tuple[bytes, bytes]]] = {}
+        # Gains observed since the last _age_values() pass.
+        self._gains_since_age: int = 0
         self.evicted_token_count: int = 0  # total tokens evicted due to cap
         self.evicted_pair_count: int = 0  # total pairs evicted due to cap
         # Overridable caps (0 = use module default)
@@ -896,9 +904,12 @@ class CmplogCollector:
 
     def _parse_lines(self, new_lines: list[str]) -> list[bytes]:
         """Shared line parser for both file and FIFO paths."""
-        tokens = set()
-        new_pairs = []
-        batch_pairs: set[tuple[bytes, bytes]] = set()
+        # Insertion-ordered rather than sets: the order these land in
+        # self.tokens is the order eviction retires them in, and iterating a
+        # set of bytes follows PYTHONHASHSEED. See _evict_tokens.
+        tokens: dict[bytes, None] = {}
+        new_pairs: list[tuple[bytes, bytes]] = []
+        batch_pairs: dict[tuple[bytes, bytes], None] = {}
         for c in conds_from_cmplog_text(new_lines):
             pair = (c.base.op_a, c.base.op_b)
             if pair not in self._pair_set:
@@ -908,16 +919,16 @@ class CmplogCollector:
                     self._pair_pc[pair] = c.base.pc
                 if c.base.result is not None and c.base.width is not None:
                     self._pair_cmp[pair] = (c.base.result, c.base.width)
-            batch_pairs.add(pair)
-            tokens.add(c.base.op_a)
-            tokens.add(c.base.op_b)
+            batch_pairs[pair] = None
+            tokens[c.base.op_a] = None
+            tokens[c.base.op_b] = None
 
         for pair in pairs_from_operand_records(new_lines):
             if pair not in self._pair_set:
                 self._pair_set.add(pair)
                 new_pairs.append(pair)
-            batch_pairs.add(pair)
-            tokens.add(pair[0])
+            batch_pairs[pair] = None
+            tokens[pair[0]] = None
 
         for pair in batch_pairs:
             self._pair_occurrence[pair] = self._pair_occurrence.get(pair, 0) + 1
@@ -927,35 +938,8 @@ class CmplogCollector:
         self.tokens.extend(new_tokens)
         self.pairs.extend(new_pairs)
 
-        if len(self.tokens) > self._max_tokens:
-            excess = len(self.tokens) - self._max_tokens
-            scored = [(self._token_value.get(t, 0) / max(len(t), 1), t) for t in self._token_set]
-            scored.sort(key=lambda x: x[0])
-            for _, t in scored[:excess]:
-                self._token_set.discard(t)
-                self._token_value.pop(t, None)
-                self.evicted_token_count += 1
-            self.tokens = list(self._token_set)
-        if len(self.pairs) > self._max_pairs:
-            excess = len(self.pairs) - self._max_pairs
-            scored = [
-                (self._pair_value.get(p, 0) / max(len(p[0]) + len(p[1]), 1), p)
-                for p in self._pair_set
-            ]
-            scored.sort(key=lambda x: x[0])
-            for _, p in scored[:excess]:
-                self._pair_set.discard(p)
-                self._pair_value.pop(p, None)
-                self._pair_cmp.pop(p, None)
-                # _pair_occurrence has to go with them. It is keyed by pair
-                # and nothing else bounds it, so leaving it made the cap
-                # cosmetic: measured at max_pairs=8 with 40 distinct pairs it
-                # held all 40, and high_confidence_pairs() named 32 the
-                # collector no longer holds.
-                self._pair_occurrence.pop(p, None)
-                self._pair_pc.pop(p, None)
-                self.evicted_pair_count += 1
-            self.pairs = list(self._pair_set)
+        self._evict_tokens()
+        self._evict_pairs()
 
         if new_tokens:
             log.info(
@@ -972,6 +956,71 @@ class CmplogCollector:
                 log.info("Cmplog: flagged %d hash-like pairs (skipped by encoder)", n_hash)
 
         return new_tokens
+
+    def _evict_tokens(self) -> None:
+        """Trim the token pool back to its cap, oldest-and-least-valued first.
+
+        Victims are chosen by ``(value, insertion index)`` ascending and
+        survivors keep insertion order. Both halves of that matter:
+
+        - The old pass scored over ``self._token_set`` and rebuilt
+          ``self.tokens`` from it, so *which* entries were evicted and the
+          order the survivors were handed to the mutators both followed
+          ``PYTHONHASHSEED``. A fixed ``--seed`` did not reproduce, and
+          ``-j N`` workers fed the identical record stream kept divergent
+          pools. ``docs/refs/bug-classes.md`` already bans builtin ``hash()``
+          for anything shared across processes; set iteration order is that
+          hash.
+        - Insertion index as the tiebreak makes the zero-value mass -- which
+          is nearly all of it -- rotate FIFO instead of freezing. That is the
+          behaviour a record stream wants: a comparison the target keeps
+          executing is re-emitted on the next drain and comes straight back,
+          so FIFO retains the hot comparisons on its own and ages out the
+          ones that stopped firing.
+
+        The old score divided value by operand length, which ranked a 2-byte
+        operand above a 16-byte magic value at equal evidence -- backwards
+        for input-to-state. Dropped.
+        """
+        excess = len(self.tokens) - self._max_tokens
+        if excess <= 0:
+            return
+        order = sorted(
+            range(len(self.tokens)),
+            key=lambda i: (self._token_value.get(self.tokens[i], 0), i),
+        )
+        victims = set(order[:excess])
+        for i in victims:
+            t = self.tokens[i]
+            self._token_set.discard(t)
+            self._token_value.pop(t, None)
+            self.evicted_token_count += 1
+        self.tokens = [t for i, t in enumerate(self.tokens) if i not in victims]
+
+    def _evict_pairs(self) -> None:
+        """Trim the pair pool back to its cap. See _evict_tokens for why."""
+        excess = len(self.pairs) - self._max_pairs
+        if excess <= 0:
+            return
+        order = sorted(
+            range(len(self.pairs)),
+            key=lambda i: (self._pair_value.get(self.pairs[i], 0), i),
+        )
+        victims = set(order[:excess])
+        for i in victims:
+            p = self.pairs[i]
+            self._pair_set.discard(p)
+            self._pair_value.pop(p, None)
+            self._pair_cmp.pop(p, None)
+            # _pair_occurrence has to go with them. It is keyed by pair
+            # and nothing else bounds it, so leaving it made the cap
+            # cosmetic: measured at max_pairs=8 with 40 distinct pairs it
+            # held all 40, and high_confidence_pairs() named 32 the
+            # collector no longer holds.
+            self._pair_occurrence.pop(p, None)
+            self._pair_pc.pop(p, None)
+            self.evicted_pair_count += 1
+        self.pairs = [p for i, p in enumerate(self.pairs) if i not in victims]
 
     def collect_counts(self) -> tuple[dict[str, int], dict[str, int]]:
         """Fold the shim's per-callback counter deltas into the run totals.
@@ -1398,18 +1447,58 @@ class CmplogCollector:
         """Return the program counter for a pair, if known (trace mode)."""
         return self._pair_pc.get((op_a, op_b))
 
-    def mark_coverage_gain(self) -> None:
-        """Bump value signal for all currently tracked tokens and pairs.
+    def mark_coverage_gain(
+        self,
+        pairs: Iterable[tuple[bytes, bytes]] = (),
+        tokens: Iterable[bytes] = (),
+    ) -> None:
+        """Credit the entries a coverage gain is actually attributable to.
 
-        Called by the fuzzer when a coverage gain is detected during a
-        fuzz iteration where cmplog data was used.  Tokens/pairs that
-        are frequently present during gains are preferentially retained
-        during eviction.
+        ``pairs``/``tokens`` are the operands the gaining iteration used --
+        the fuzzer passes the input-to-state matches it found in the input,
+        which is the only per-entry evidence available without a second
+        tracer. Credited entries outrank uncredited ones at the eviction
+        site.
+
+        This used to bump *every* resident token and pair on any new
+        coverage, which cannot rank anything: the excess an eviction pass has
+        to shed is exactly the batch that just arrived, every arrival starts
+        at zero, so after the first gain the resident set was permanently
+        immune and no new operand could ever enter the pool again. Measured
+        on the old code: fill a 200-entry pool, one gain, stream 500 fresh
+        pairs -- 1000 tokens evicted, zero new survivors, all 200 originals
+        still resident. Across 300 randomised gain/drain interleavings the
+        value term never once decided a victim.
+
+        Credit is aged rather than permanent (see _age_values): an operand
+        that helped once and then stopped appearing must eventually become
+        evictable, or the pool ossifies again by a slower route.
         """
-        for t in self._token_set:
-            self._token_value[t] = self._token_value.get(t, 0) + 1
-        for p in self._pair_set:
-            self._pair_value[p] = self._pair_value.get(p, 0) + 1
+        for p in pairs:
+            if p in self._pair_set:
+                self._pair_value[p] = self._pair_value.get(p, 0) + 1
+            elif (p[1], p[0]) in self._pair_set:
+                # The scan reports pass-2 hits with the operands swapped.
+                flipped = (p[1], p[0])
+                self._pair_value[flipped] = self._pair_value.get(flipped, 0) + 1
+        for t in tokens:
+            if t in self._token_set:
+                self._token_value[t] = self._token_value.get(t, 0) + 1
+
+        self._gains_since_age += 1
+        if self._gains_since_age >= CMPLOG_VALUE_AGE_GAINS:
+            self._gains_since_age = 0
+            self._age_values()
+
+    def _age_values(self) -> None:
+        """Halve accumulated credit, dropping entries that reach zero.
+
+        Keeps credit a measure of *recent* usefulness. Without it an operand
+        credited once early holds its rank against the whole rest of the
+        campaign, which is the same ossification in slow motion.
+        """
+        self._token_value = {t: v // 2 for t, v in self._token_value.items() if v > 1}
+        self._pair_value = {p: v // 2 for p, v in self._pair_value.items() if v > 1}
 
     def get_tokens(self) -> list[bytes]:
         """Get all collected tokens."""
