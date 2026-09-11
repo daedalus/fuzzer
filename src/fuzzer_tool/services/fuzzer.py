@@ -1514,7 +1514,7 @@ class Fuzzer:
         self._eps_history_max = 10  # stabilization window (in stats ticks)
 
         # Bayesian seed quality estimation
-        self._seed_quality = BayesianSeedQuality()
+        self._seed_quality = BayesianSeedQuality(rng=self._rng)
 
         # Schedule ablation: per-iteration CSV log of signal contributions
         self._ablation_path = Path(schedule_ablation) if schedule_ablation else None
@@ -1537,9 +1537,9 @@ class Fuzzer:
         else:
             orders = [markov_order]
         if len(orders) > 1:
-            self.markov = MarkovEnsemble(orders=orders, blend=markov_blend)
+            self.markov = MarkovEnsemble(orders=orders, blend=markov_blend, rng=self._rng)
         else:
-            self.markov = MarkovChain(order=orders[0])
+            self.markov = MarkovChain(order=orders[0], rng=self._rng)
         self.markov_generate = markov_generate
         self.markov_trained = False
 
@@ -1547,7 +1547,7 @@ class Fuzzer:
         self._operators = OperatorEngine(self)
         self._seed_picker = SeedPicker(self)
         self._runner = TargetRunner(self)
-        self._stats = StatsReporter(self)
+        self._stats = StatsReporter(self, rng=self._rng)
         self._corpus_manager = CorpusManager(self)
         self._poisson_admission = None  # lazy-init; created on first save_to_corpus()
         # PoissonDiskAdmission holds a reference to _edge_tracker._minhash,
@@ -6247,6 +6247,7 @@ class Fuzzer:
                     tournament_size=self._ga_tournament_size,
                     generation_size=self._ga_gen_size,
                     speciation_threshold=self._ga_speciation_threshold,
+                    rng=self._rng,
                 )
                 self.ga.initialize(self.corpus, self._edge_tracker)
                 # Restore and announce here, not inside the differential

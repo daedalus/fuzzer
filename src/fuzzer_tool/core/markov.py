@@ -616,7 +616,9 @@ class MarkovEnsemble:
             self.chains = {}
             for order_str, chain_data in data["chains"].items():
                 order = int(order_str)
-                chain = MarkovChain(order=order, smoothing=chain_data.get("smoothing", 1e-6))
+                chain = MarkovChain(
+                    order=order, smoothing=chain_data.get("smoothing", 1e-6), rng=self._rng
+                )
                 chain._contexts_seen = chain_data.get("contexts_seen", 0)
                 chain.transitions = collections.defaultdict(collections.Counter)
                 for ctx_hex, counts in chain_data.get("transitions", {}).items():
@@ -632,7 +634,9 @@ class MarkovEnsemble:
             self.transitions = self.chains.get(self.order, MarkovChain()).transitions
         else:
             # Legacy single-chain format — upgrade to ensemble
-            chain = MarkovChain(order=data.get("order", 1), smoothing=data.get("smoothing", 1e-6))
+            chain = MarkovChain(
+                order=data.get("order", 1), smoothing=data.get("smoothing", 1e-6), rng=self._rng
+            )
             chain._contexts_seen = data.get("contexts_seen", 0)
             chain.transitions = collections.defaultdict(collections.Counter)
             for ctx_hex, counts in data.get("transitions", {}).items():
