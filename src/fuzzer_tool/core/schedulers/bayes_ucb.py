@@ -89,6 +89,17 @@ score loop) -- it takes no ``rng`` parameter, the same precedent
 ``ContextualLinUCBScheduler`` already sets for a fully deterministic
 scheduler in this package.
 
+Ties are less rare than "exact float equality" suggests, though. The
+quantile is found by bisection to ``BISECT_TOL``, and near p=1 that grid
+is coarse enough to make genuinely different posteriors compare equal: a
+200/200 arm's Beta(200.5, 0.5) lands on the same grid point as an
+untouched Beta(0.5, 0.5). Falling to ``ops`` order there would be a
+systematic bias toward whatever the caller happened to list first, so
+``select_op`` breaks an indistinguishable pair toward the arm with fewer
+pulls. That is the same preference the forced zero-evidence branch
+expressed, at none of its cost -- it applies only where the index cannot
+separate the two, so a prior that *does* move the index still decides.
+
 Numerical cost
 ---------------
 There is no closed form for the Beta quantile function, so this module
@@ -136,8 +147,6 @@ instead of the practically-recommended one.
 from __future__ import annotations
 
 import math
-
-from fuzzer_tool.core.rand_pool import RandPool
 
 # Numerical defaults for the incomplete-beta bisection -- see the module
 # docstring's "Numerical cost" section for the accuracy/speed measurement
@@ -250,8 +259,11 @@ class BayesUCBScheduler:
         c: Exponent in the quantile order ``1 - 1/(t * (log t)^c))``.
             ``c=0`` is the paper's practically-recommended default (see
             module docstring "Reference"); must be non-negative.
-        rng: Shared ``RandPool`` (Hard Rule 16), consumed only when
-            breaking ties among arms with zero evidence.
+
+    Takes no ``rng``: with no zero-evidence branch there is nothing random
+    left to do, and an exact float tie falls to the first candidate in
+    ``ops`` order like every UCBBase score loop. Same precedent as
+    ``ContextualLinUCBScheduler``.
     """
 
     supports_priors = True
@@ -261,7 +273,6 @@ class BayesUCBScheduler:
         prior_alpha: float = 0.5,
         prior_beta: float = 0.5,
         c: float = 0.0,
-        rng: RandPool | None = None,
     ):
         if prior_alpha <= 0.0:
             raise ValueError(f"prior_alpha must be positive, got {prior_alpha!r}")
@@ -272,7 +283,6 @@ class BayesUCBScheduler:
         self.prior_alpha = prior_alpha
         self.prior_beta = prior_beta
         self.c = c
-        self._rng = rng if rng is not None else RandPool()
 
         self._counts: dict[str, int] = {}
         self._sums: dict[str, float] = {}
@@ -326,10 +336,12 @@ class BayesUCBScheduler:
         for op in ops:
             self.init_arm(op)
 
-        unpulled = [op for op in ops if self._counts.get(op, 0) <= 0]
-        if unpulled:
-            return self._rng.choice(unpulled)
-
+        # No zero-evidence branch here -- see the module docstring's "No
+        # forced unpulled-arm branch". The Beta quantile is well-defined at
+        # n=0 and already expresses the cold-start optimism that branch
+        # exists to force, and picking uniformly among n=0 arms discards
+        # exactly the per-arm prior this scheduler exists to honour, which
+        # is what `supports_priors` is supposed to buy.
         t = max(self._total_pulls, 2)
         log_t = math.log(t)
         q_t = 1.0 - 1.0 / (t * (log_t**self.c))
@@ -337,14 +349,28 @@ class BayesUCBScheduler:
 
         best_op = ops[0]
         best_score = -math.inf
+        best_pulls = math.inf
         for op in ops:
             n = self._counts.get(op, 0)
             s = self._sums.get(op, 0.0)
             a = self._prior_alpha.get(op, self.prior_alpha) + s
             b = self._prior_beta.get(op, self.prior_beta) + (n - s)
             score = beta_quantile(q_t, a, b)
-            if score > best_score:
+            # Ties are not as rare as "exact float equality" suggests. The
+            # bisection resolves to BISECT_TOL, and near p=1 that is coarse
+            # enough to make genuinely different posteriors compare equal:
+            # an arm at 200/200 has Beta(200.5, 0.5), whose q_t quantile
+            # lands on the same bisection grid point as an untouched
+            # Beta(0.5, 0.5). Falling to ops order there is a systematic
+            # bias toward whatever the caller listed first, so an
+            # indistinguishable pair is broken toward the less-explored arm
+            # instead. That is the same preference the forced
+            # zero-evidence branch expressed, without its cost: it only
+            # applies where the index genuinely cannot separate the two, so
+            # a per-arm prior that *does* move the index still decides.
+            if score > best_score or (score == best_score and n < best_pulls):
                 best_score = score
+                best_pulls = n
                 best_op = op
         return best_op
 

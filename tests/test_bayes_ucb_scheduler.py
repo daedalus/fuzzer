@@ -36,7 +36,11 @@ class TestIncompleteBeta:
         a, b = 3.0, 7.0
         xs = [i / 20.0 for i in range(21)]
         vals = [_betai(a, b, x) for x in xs]
-        assert all(v2 >= v1 - 1e-12 for v1, v2 in zip(vals, vals[1:], strict=True))
+        # Not strict=True: `vals[1:]` is one shorter than `vals` by
+        # construction, so the pairwise-adjacent idiom raises ValueError
+        # before it ever evaluates the comparison. Both monotonicity tests
+        # here were unconditionally erroring rather than checking anything.
+        assert all(v2 >= v1 - 1e-12 for v1, v2 in zip(vals, vals[1:], strict=False))
 
 
 class TestBetaQuantile:
@@ -59,7 +63,7 @@ class TestBetaQuantile:
         a, b = 4.0, 9.0
         ps = [0.1, 0.3, 0.5, 0.7, 0.9, 0.99]
         qs = [beta_quantile(p, a, b) for p in ps]
-        assert all(q2 >= q1 for q1, q2 in zip(qs, qs[1:], strict=True))
+        assert all(q2 >= q1 for q1, q2 in zip(qs, qs[1:], strict=False))
 
     def test_quantile_shifts_right_with_more_evidence_of_success(self):
         """More observed successes at fixed n shifts the quantile up."""
@@ -91,21 +95,21 @@ class TestSharedContract:
         assert BayesUCBScheduler.supports_priors is True
 
     def test_empty_candidate_list(self):
-        s = BayesUCBScheduler(rng=RandPool(seed=1))
+        s = BayesUCBScheduler()
         assert s.select_op([]) == ""
 
     def test_single_candidate(self):
-        s = BayesUCBScheduler(rng=RandPool(seed=1))
+        s = BayesUCBScheduler()
         assert s.select_op(["only"]) == "only"
 
     def test_record_auto_registers_unknown_arm(self):
-        s = BayesUCBScheduler(rng=RandPool(seed=1))
+        s = BayesUCBScheduler()
         s.record("never_initialized", True)
         assert s.bandit_stats()["bayes_ucb_arms"] == 1
 
     def test_unpulled_arms_take_priority(self):
         """An arm with zero pulls must be picked over a heavily-pulled one."""
-        s = BayesUCBScheduler(rng=RandPool(seed=1))
+        s = BayesUCBScheduler()
         s.init_arm("seasoned")
         for _ in range(200):
             s.record("seasoned", True)  # near-certain high success rate
@@ -117,7 +121,7 @@ class TestPerArmPriors:
     """The reason this scheduler isn't a UCBBase subclass — see module docstring."""
 
     def test_init_arm_accepts_a_per_arm_prior_override(self):
-        s = BayesUCBScheduler(prior_alpha=0.5, prior_beta=0.5, rng=RandPool(seed=1))
+        s = BayesUCBScheduler(prior_alpha=0.5, prior_beta=0.5)
         s.init_arm("informed", prior_alpha=40.0, prior_beta=2.0)
         s.init_arm("uninformed")
         # Before any evidence, the informed arm's prior alone should win —
@@ -126,7 +130,7 @@ class TestPerArmPriors:
 
     def test_prior_override_is_idempotent(self):
         """A second init_arm() call must not overwrite the first prior."""
-        s = BayesUCBScheduler(rng=RandPool(seed=1))
+        s = BayesUCBScheduler()
         s.init_arm("a", prior_alpha=10.0, prior_beta=1.0)
         s.init_arm("a", prior_alpha=1.0, prior_beta=10.0)  # must be ignored
         assert s._prior_alpha["a"] == 10.0
@@ -134,7 +138,7 @@ class TestPerArmPriors:
 
     def test_prior_alpha_and_beta_must_be_positive_after_clamping(self):
         """A degenerate override is clamped, not allowed to zero out the prior."""
-        s = BayesUCBScheduler(rng=RandPool(seed=1))
+        s = BayesUCBScheduler()
         s.init_arm("a", prior_alpha=0.0, prior_beta=-5.0)
         assert s._prior_alpha["a"] > 0.0
         assert s._prior_beta["a"] > 0.0
@@ -146,7 +150,7 @@ class TestAdversarialConvergence:
     """
 
     def test_adversarial_converges_to_the_better_arm(self):
-        s = BayesUCBScheduler(rng=RandPool(seed=3))
+        s = BayesUCBScheduler()
         ops = ["good", "bad"]
         for op in ops:
             s.init_arm(op)
@@ -161,21 +165,25 @@ class TestAdversarialConvergence:
             f"expected 'good' to dominate selections, got {counts}"
         )
 
-    def test_falsification_uniform_prior_does_not_prefer_either_arm_blind(self):
-        """Before any evidence, two arms with identical priors must not be
-        distinguishable — this is what the unpulled-first branch exists to
-        guarantee, and pins that no accidental bias sneaks into initial
-        ordering (e.g. dict iteration order, alphabetical tie-break)."""
-        seen = set()
-        for seed in range(20):
-            s = BayesUCBScheduler(rng=RandPool(seed=seed))
-            s.init_arm("x")
-            s.init_arm("y")
-            # Neither has been pulled — the choice must come from the
-            # unpulled-priority branch, which is randomized.
-            seen.add(s.select_op(["x", "y"]))
-        assert seen == {"x", "y"}, (
-            f"expected both arms to be selected across seeds when tied, got {seen}"
+    def test_identical_priors_are_an_exact_tie_broken_by_ops_order(self):
+        """Two arms with identical priors must score identically.
+
+        This asserted the opposite -- that both arms get selected across 20
+        seeds -- which only held because of the zero-evidence branch that
+        picked uniformly at random, the branch the module docstring says
+        must not exist. With it gone the scheduler is deterministic and an
+        exact tie falls to the first candidate in `ops` order, the same
+        convention every UCBBase score loop uses. What still needs pinning
+        is that nothing *else* decides it: not dict insertion order, not
+        alphabetical order, only the caller's list order.
+        """
+        s = BayesUCBScheduler()
+        s.init_arm("y")  # registered first, deliberately out of alphabetical order
+        s.init_arm("x")
+
+        assert s.select_op(["x", "y"]) == "x"
+        assert s.select_op(["y", "x"]) == "y", (
+            "the tie-break must follow ops order, not registration or sort order"
         )
 
 
@@ -190,7 +198,7 @@ class TestQuantileOrderParameter:
 
     def test_scheduler_does_not_crash_at_t_equals_one(self):
         """The first real (non-unpulled-branch) score computation guards t>=2."""
-        s = BayesUCBScheduler(c=2.0, rng=RandPool(seed=1))
+        s = BayesUCBScheduler(c=2.0)
         s.init_arm("a")
         s.init_arm("b")
         s.select_op(["a", "b"])  # unpulled branch
@@ -203,7 +211,7 @@ class TestQuantileOrderParameter:
 
 class TestBanditStats:
     def test_bandit_stats_shape(self):
-        s = BayesUCBScheduler(prior_alpha=1.0, prior_beta=2.0, c=1.5, rng=RandPool(seed=1))
+        s = BayesUCBScheduler(prior_alpha=1.0, prior_beta=2.0, c=1.5)
         s.init_arm("a")
         s.record("a", True)
         stats = s.bandit_stats()
@@ -216,7 +224,7 @@ class TestBanditStats:
     def test_bandit_stats_are_json_safe(self):
         import json
 
-        s = BayesUCBScheduler(rng=RandPool(seed=1))
+        s = BayesUCBScheduler()
         s.init_arm("a")
         s.record("a", True)
         json.dumps(s.bandit_stats())  # must not raise
