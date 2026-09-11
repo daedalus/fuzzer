@@ -30,6 +30,7 @@ from fuzzer_tool.services.report import _elo_ratings
 # Fallback precedence, highest first. "random" is the terminal fallback (the
 # chain's else-branch, represented by _rng.choice, not a scheduler).
 _FALLBACK_PRECEDENCE = [
+    "consolidated",
     "replicator",
     "mopt",
     "bandit",
@@ -110,6 +111,7 @@ class _FakeFuzzer:
     """Minimal fuzzer stand-in exposing exactly the attrs select_op() reads."""
 
     _SCHEDULER_ATTRS = {
+        "consolidated": ("_use_consolidated", "_consolidated"),
         "replicator": ("_use_replicator", "_replicator"),
         "mopt": ("_use_mopt", "_mopt"),
         "exp3": ("_use_exp3", "_exp3"),
@@ -186,15 +188,23 @@ class _RecordingRandPool:
 
 class TestFallbackPrecedence:
     def test_highest_priority_enabled_wins(self):
-        """All 8 schedulers enabled → only replicator is consulted."""
+        """Every scheduler enabled → only the first in precedence is consulted."""
         f = _FakeFuzzer()
         fakes = {name: f.enable(name) for name in _FALLBACK_PRECEDENCE}
         op = OperatorEngine(f).select_op(["bit_flip", "byte_flip"])
-        assert op == "op_replicator"
-        assert fakes["replicator"].calls == 1
+        first = _FALLBACK_PRECEDENCE[0]
+        assert op == f"op_{first}"
+        assert fakes[first].calls == 1
         for name, fake in fakes.items():
-            if name != "replicator":
-                assert fake.calls == 0, f"{name} consulted despite replicator enabled"
+            if name != first:
+                assert fake.calls == 0, f"{name} consulted despite {first} enabled"
+
+    def test_everything_but_consolidated_falls_to_replicator(self):
+        """The pre-consolidated order is unchanged underneath it."""
+        f = _FakeFuzzer()
+        fakes = {name: f.enable(name) for name in _FALLBACK_PRECEDENCE if name != "consolidated"}
+        assert OperatorEngine(f).select_op(["bit_flip", "byte_flip"]) == "op_replicator"
+        assert fakes["replicator"].calls == 1
 
     @pytest.mark.parametrize(
         ("enabled", "expected"),

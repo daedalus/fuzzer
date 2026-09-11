@@ -29,6 +29,7 @@ from __future__ import annotations
 BALLOT_SCHEDULERS = (
     "c2ucb",
     "cmaes",
+    "consolidated",
     "contextual",
     "cucb",
     "cusum_ucb",

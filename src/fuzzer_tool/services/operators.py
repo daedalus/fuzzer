@@ -435,9 +435,13 @@ _deterministic_mutation_stream.last_truncated = 0
 #: No-Elo selection order, highest first: with Elo off, the first enabled
 #: scheduler here selects every operator. ``cem`` and ``invasion`` are
 #: absent on purpose -- both ride on ``f.mc`` and ``mc_bandit``, which the
-#: ``bandit`` entry already claims ahead of them. Pinned by
+#: ``bandit`` entry already claims ahead of them. ``consolidated`` leads:
+#: it is the scheduler built to be the one that runs (see
+#: core/schedulers/consolidated.py), so enabling it alongside others without
+#: Elo means it selects. Pinned by
 #: test_regression_scheduler_fallback_precedence.
 _FALLBACK_PRECEDENCE = (
+    "consolidated",
     "replicator",
     "mopt",
     "bandit",
@@ -478,6 +482,8 @@ def operator_strategy_pool(f) -> list[str]:
     while nothing is rated yet, so it is not cosmetic.
     """
     available = []
+    if f._use_consolidated and f._consolidated:
+        available.append("consolidated")
     if f._use_replicator and f._replicator:
         available.append("replicator")
     if f.mc and f.mc_bandit:
@@ -4111,7 +4117,10 @@ class OperatorEngine:
         if f._use_elo and f._elo and strategy:
             f._meta_strategy_used.add(strategy)
 
-        if strategy == "replicator" and f._replicator:
+        if strategy == "consolidated" and f._consolidated:
+            op = f._consolidated.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "replicator" and f._replicator:
             op = f._replicator.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "mopt" and f._mopt:

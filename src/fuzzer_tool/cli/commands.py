@@ -479,6 +479,7 @@ def cmd_fuzz(args):
             cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
             fpl=getattr(args, "fpl", False),
             fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
+            consolidated=getattr(args, "consolidated", False),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
             contextual=getattr(args, "contextual", False),
@@ -528,6 +529,7 @@ def cmd_fuzz(args):
         args.cucb = True
         args.cusum_ucb = True
         args.fpl = True
+        args.consolidated = True
         args.contextual = True
         args.c2ucb = True
         args.invasion = True
@@ -674,6 +676,7 @@ def cmd_fuzz(args):
         cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
         fpl=getattr(args, "fpl", False),
         fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
+        consolidated=getattr(args, "consolidated", False),
         # kl_ducb/kl_swucb/markov_blend were passed to run_parallel but not
         # here, so in the default single-process mode --kl-ducb, --kl-swucb
         # (and --elo all, which sets both) and --markov-blend built nothing.
@@ -1734,6 +1737,7 @@ _HAIL_MARY_FLAGS = (
     "cucb",
     "cusum_ucb",
     "fpl",
+    "consolidated",
     "fractal_partition",
     "contextual",
     "c2ucb",
@@ -2262,6 +2266,15 @@ def main() -> int:
         type=float,
         default=1.0,
         help="FPL perturbation scale; higher = more exploration (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--consolidated",
+        action="store_true",
+        help=(
+            "Enable the consolidated operator scheduler: Thompson sampling with "
+            "a category-shrunk prior and capped evidence. Takes precedence over "
+            "every other operator scheduler when Elo is off"
+        ),
     )
     fuzz_parser.add_argument(
         "--contextual",

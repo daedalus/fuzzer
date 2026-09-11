@@ -9,6 +9,8 @@ reproduces a campaign.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES, category_of
@@ -136,3 +138,42 @@ def test_bandit_stats_shape():
 def test_rejects_invalid_parameters(kwargs):
     with pytest.raises(ValueError):
         ConsolidatedScheduler(**kwargs)
+
+
+_TARGET = Path(__file__).resolve().parent.parent / "targets" / "test_target"
+
+
+@pytest.mark.skipif(not _TARGET.exists(), reason="targets/test_target not built")
+def test_fuzzer_wiring_selects_and_learns(tmp_path):
+    """--consolidated builds it, it selects ahead of the bandit without Elo,
+    it learns from its rounds, and the bandit still learns from them too
+    (the shared fan-out is kept on purpose)."""
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    corpus, crashes = tmp_path / "c", tmp_path / "k"
+    corpus.mkdir()
+    crashes.mkdir()
+    f = Fuzzer(
+        target=str(_TARGET),
+        corpus_dir=str(corpus),
+        crashes_dir=str(crashes),
+        max_len=4096,
+        use_coverage=True,
+        consolidated=True,
+        mc_bandit=True,
+    )
+    assert isinstance(f._consolidated, ConsolidatedScheduler)
+    assert f._track_op_effect
+
+    def bandit_mass():
+        return sum(f.mc.arm_alpha.values()) + sum(f.mc.arm_beta.values())
+
+    before = bandit_mass()
+    selectors = set()
+    for i in range(40):
+        f.fuzz_one(bytes([65 + i % 26]) * 16)
+        selectors.add(f._op_selector)
+    assert "consolidated" in selectors
+    assert "bandit" not in selectors
+    assert f._consolidated.bandit_stats()["consolidated_pulls"] > 0
+    assert bandit_mass() > before, "the bandit stopped learning from rounds it did not select"

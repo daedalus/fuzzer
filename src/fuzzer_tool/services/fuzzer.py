@@ -47,6 +47,7 @@ from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
     C2UCBScheduler,
     CMAESScheduler,
+    ConsolidatedScheduler,
     ContextualLinUCBScheduler,
     CUCBScheduler,
     CUSUM_UCBScheduler,
@@ -91,6 +92,7 @@ _shutdown = False
 # Strategy names pre-registered with the Elo tracker (single source of truth
 # for the pre-registration loop and the meta-scheduler log line).
 _OPERATOR_STRATEGY_NAMES = (
+    "consolidated",
     "replicator",
     "bandit",
     "mopt",
@@ -797,6 +799,7 @@ class Fuzzer:
         cusum_ucb_xi=0.6,
         fpl=False,
         fpl_epsilon=1.0,
+        consolidated=False,
         contextual=False,
         contextual_alpha=1.0,
         contextual_lambda=1.0,
@@ -1851,6 +1854,15 @@ class Fuzzer:
             self._fpl = FPLScheduler(epsilon=fpl_epsilon, rng=self._rng)
             log.info("FPL enabled (epsilon=%.2f)", fpl_epsilon)
 
+        # Consolidated: flat Thompson with a category-shrunk prior and capped
+        # evidence -- the single learner meant to replace the Elo portfolio
+        # (see core/schedulers/consolidated.py for the measurements).
+        self._use_consolidated = consolidated
+        self._consolidated = None
+        if consolidated:
+            self._consolidated = ConsolidatedScheduler(rng=self._rng)
+            log.info("Consolidated operator scheduler enabled")
+
         # Round-robin: deterministic baseline. --seed should reproduce
         # exactly, so no RandPool is used here -- the cycling order is
         # the registration order, fully driven by operator init.
@@ -2055,6 +2067,7 @@ class Fuzzer:
             # were credited with the round's success.
             or self._kl_ducb
             or self._kl_swucb
+            or self._consolidated
             or self._cucb
             or self._cusum_ucb
             or self._fpl
@@ -2248,6 +2261,8 @@ class Fuzzer:
             _register_arms(self._cusum_ucb)
         if self._fpl:
             _register_arms(self._fpl)
+        if self._consolidated:
+            _register_arms(self._consolidated, _format_priors)
         if self._contextual:
             _register_arms(self._contextual)
         if self._c2ucb:
@@ -4496,6 +4511,7 @@ class Fuzzer:
             self._cucb,
             self._cusum_ucb,
             self._fpl,
+            self._consolidated,
         ):
             if scheduler is None:
                 continue
@@ -5638,6 +5654,8 @@ class Fuzzer:
             parts.append(f"power={self._power_schedule}")
 
         ops = []
+        if getattr(self, "_consolidated", False):
+            ops.append("consolidated")
         if self.mc_bandit:
             ops.append("bandit")
         if self.mc_cem:
@@ -5869,6 +5887,8 @@ class Fuzzer:
             groups["Scheduling"].append(f"power-schedule={sched_pol}")
 
         ops = []
+        if getattr(self, "_consolidated", False):
+            ops.append("consolidated")
         if self.mc_bandit:
             ops.append("bandit")
         if self.mc_cem:

@@ -50,6 +50,7 @@ class TestEloAllEnablesAllSchedulers:
             "cusum_ucb",
             "c2ucb",
             "fpl",
+            "consolidated",
             "contextual",
             "invasion",
             "cmaes",
