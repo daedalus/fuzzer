@@ -2050,6 +2050,11 @@ class Fuzzer:
             or self._c2ucb
             or self._ducb
             or self._swucb
+            # kl_ducb/kl_swucb were missing here the same way cmaes was:
+            # with only --kl-ducb or --kl-swucb enabled, no-op operators
+            # were credited with the round's success.
+            or self._kl_ducb
+            or self._kl_swucb
             or self._cucb
             or self._cusum_ucb
             or self._fpl
