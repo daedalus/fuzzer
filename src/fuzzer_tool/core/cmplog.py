@@ -157,6 +157,13 @@ def _prune_stale_shims(cmplog_dir: str, keep: str) -> int:
 # ── Memory bounds ────────────────────────────────────────────────────
 CMPLOG_TOKENS_MAX = 10_000  # max unique operand tokens
 CMPLOG_PAIRS_MAX = 5_000  # max unique operand pairs
+# Lines parsed per collect_tokens() call. Parsing dominated CPU at 60%+ on
+# 740K-line scans, so the read is capped. The remainder is *dropped*, not
+# deferred: collect_tokens() truncates the file on the way out and the shim
+# is reset right after, so there is nothing to come back to. The cap exists
+# as a named constant because collect_tokens()'s docstring referred to it by
+# name for a long time while it lived only as a local.
+CMPLOG_MAX_LINES_PER_READ = 10_000
 CMPLOG_FILE_MAX_BYTES = 100 * 1024 * 1024  # max cmplog file size before rotation
 # The counts sidecar carries at most one short line per callback per dump,
 # so it grows orders of magnitude slower than the record stream and gets a
@@ -785,10 +792,16 @@ class CmplogCollector:
     def collect_tokens(self) -> list[bytes]:
         """Read new cmplog data and extract operand tokens and pairs.
 
-        Reads from the current file position up to MAX_CMPLOG_LINES_PER_READ
+        Reads from the current file position up to CMPLOG_MAX_LINES_PER_READ
         lines. The token/pair sets are deduplicated, so once the pool is
         saturated, additional reads yield diminishing returns. Capping the
         read prevents 740K+ line scans from dominating CPU (was 60%+).
+
+        Anything past the cap is lost rather than left for the next call:
+        the file is truncated on the way out and the caller resets the
+        shim's own offset right after. Whatever the cap drops, it drops --
+        which is the intended trade, but it does mean the cap must not also
+        drop the lines it *did* read.
 
         Returns:
             List of unique byte sequences found in comparison operands.
@@ -815,18 +828,29 @@ class CmplogCollector:
         except OSError:
             pass
 
-        lines_read = 0
-        max_lines = 10_000  # cap per collection to bound CPU cost
+        # Bounded readline() loop rather than `for line in f` with a break.
+        # Iterating a text-mode file fills a read-ahead buffer and disables
+        # tell(), so abandoning the iterator mid-buffer -- which is exactly
+        # what the cap does -- made the following tell() raise OSError
+        # ("telling position disabled by next() call"). The handler below
+        # then discarded new_lines, and the truncate at the end of this
+        # method destroyed the records, so a drain carrying one line more
+        # than the cap harvested *nothing at all* instead of the cap's worth.
+        # readline() needs no tell(): the offset is the sum of what was read.
+        # Binary + latin-1 to match _collect_tokens_fifo()'s decoding and to
+        # keep the byte offset exact regardless of the ambient locale.
         try:
-            with open(self.log_path) as f:
+            with open(self.log_path, "rb") as f:
                 f.seek(self._read_offset)
+                consumed = self._read_offset
                 new_lines = []
-                for line in f:
-                    lines_read += 1
-                    if lines_read > max_lines:
+                for _ in range(CMPLOG_MAX_LINES_PER_READ):
+                    raw = f.readline()
+                    if not raw:
                         break
-                    new_lines.append(line)
-                self._read_offset = f.tell()
+                    consumed += len(raw)
+                    new_lines.append(raw.decode("latin-1"))
+                self._read_offset = consumed
         except OSError as e:
             log.debug("Failed to read cmplog file: %s", e)
             new_lines = []
