@@ -574,7 +574,7 @@ def cmd_fuzz(args):
         markov_order=args.markov_order if use_markov else 0,
         markov_generate=args.markov_gen,
         mc_bandit=args.mc_bandit,
-        slopt=args.slopt,
+        slopt=getattr(args, "slopt", False),
         mc_cem=args.mc_cem,
         mc_cycle_detect=getattr(args, "mc_cycle_detect", False),
         mopt=getattr(args, "mopt", False),
