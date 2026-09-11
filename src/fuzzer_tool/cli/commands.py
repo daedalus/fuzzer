@@ -674,6 +674,16 @@ def cmd_fuzz(args):
         cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
         fpl=getattr(args, "fpl", False),
         fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
+        # kl_ducb/kl_swucb/markov_blend were passed to run_parallel but not
+        # here, so in the default single-process mode --kl-ducb, --kl-swucb
+        # (and --elo all, which sets both) and --markov-blend built nothing.
+        # test_regression_cli_fuzzer_kwargs checks this call against every
+        # fuzz flag that names a Fuzzer parameter.
+        kl_ducb=getattr(args, "kl_ducb", False),
+        kl_ducb_gamma=getattr(args, "kl_ducb_gamma", 0.9999),
+        kl_swucb=getattr(args, "kl_swucb", False),
+        kl_swucb_window=getattr(args, "kl_swucb_window", 4000),
+        markov_blend=getattr(args, "markov_blend", False),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
         contextual=getattr(args, "contextual", False),
