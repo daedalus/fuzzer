@@ -325,6 +325,13 @@ def _make_fuzzer() -> Fuzzer:
 def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
     """Return (available_somewhere, changed_somewhere) operator-name sets.
 
+    Operators that *declined* on every input they were offered -- selected,
+    but with nothing to work on -- are recorded on ``_sweep.last_declined``
+    and are not no-ops: they changed nothing because there was nothing to
+    change, which is a corpus gap and not a broken operator. Before
+    `_op_declined` existed they fell through to havoc, so the buffer moved
+    and they were indistinguishable from operators that had done real work.
+
     Exceptions raised by operators are collected on ``_sweep.last_raised``
     rather than discarded, so a "no-op" that is really a crash can be told
     apart from one that is really silence.
@@ -339,6 +346,8 @@ def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
     available: set[str] = set(names)
     changed: set[str] = set()
     raised: dict[str, list[BaseException]] = {}
+    offered: dict[str, int] = {}
+    f._op_declines.clear()
     for name in names:
         done = False
         for rep in range(_REPS):
@@ -346,6 +355,7 @@ def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
             for inp in battery:
                 if name not in set(REGISTRY.available(f, inp)):
                     continue
+                offered[name] = offered.get(name, 0) + 1
                 buf = bytearray(inp)
                 idx = len(buf) // 2
                 try:
@@ -372,6 +382,9 @@ def _sweep(f: Fuzzer) -> tuple[set[str], set[str]]:
             if done:
                 break
     _sweep.last_raised = raised  # type: ignore[attr-defined]
+    _sweep.last_declined = {  # type: ignore[attr-defined]
+        name for name, n in offered.items() if n > 0 and f._op_declines.get(name, 0) >= n
+    }
     return available, changed
 
 
@@ -397,6 +410,7 @@ class TestNoMutationIsAPureNoOp:
         assert len(available) > 80, f"only {len(available)} operators exercised"
 
         noops = (available - changed) - self._NEEDS_VALID_FILE_BODY
+        noops -= _sweep.last_declined  # inapplicable here, not no-ops
         assert not noops, (
             "operator(s) are available but never changed any input "
             f"(pure no-ops): {', '.join(sorted(noops))}"
@@ -708,7 +722,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         # not notice a band going dark again.
         assert len(available) >= 195, f"only {len(available)} operators exercised"
 
-        noops = available - changed - unreachable
+        noops = available - changed - unreachable - _sweep.last_declined
         assert not noops, (
             "state-gated operator(s) are available but never changed any "
             f"input (pure no-ops): {', '.join(sorted(noops))}"

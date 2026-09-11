@@ -27,17 +27,23 @@ from fuzzer_tool.services import operators as operators_mod
 
 
 def _methods_the_handlers_dispatch() -> set[str]:
-    """The method names passed to `_der_mutate` from the `_op_der_*` handlers."""
+    """The method names passed to `_der_mutate` from the `_op_der_*` handlers.
+
+    `_der_mutate(op, method, ...)`: the operator name comes first so a
+    decline can be recorded under it, and the method name second.
+    """
     tree = ast.parse(inspect.getsource(operators_mod))
     found = set()
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
             continue
-        if node.func.attr != "_der_mutate" or not node.args:
+        if node.func.attr != "_der_mutate":
             continue
-        first = node.args[0]
-        if isinstance(first, ast.Constant) and isinstance(first.value, str):
-            found.add(first.value)
+        if len(node.args) < 2:
+            continue
+        method = node.args[1]
+        if isinstance(method, ast.Constant) and isinstance(method.value, str):
+            found.add(method.value)
     return found
 
 

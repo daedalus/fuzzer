@@ -195,6 +195,8 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_._det_execs = 0
             self_._op_time_ema = {}
             self_._last_op_costs = {}
+            self_._op_attempts = {}
+            self_._op_declines = {}
             self_._last_ops_applicable = []
             self_._last_ops_effective = []
             self_._last_ops_with_sites = []

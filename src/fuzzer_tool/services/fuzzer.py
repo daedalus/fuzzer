@@ -1976,6 +1976,17 @@ class Fuzzer:
         # (gradient_descent, condstmt_solve, path_negate, crc_learn) don't
         # get rated on the same scale as bit_flip.
         self._op_time_ema: dict[str, float] = {}
+        # Per-operator attempt and decline counts, campaign-cumulative (not
+        # reset per round like _last_op_costs). A decline is an operator that
+        # was selected and had nothing to work on: input did not parse, no
+        # constraint solved, no candidate site. They used to fall through to
+        # havoc under the declining operator's name, which made the
+        # effectiveness signal credit them for havoc's work -- see
+        # OperatorMixin._op_declined. The ratio is what `--stats` reports and
+        # what tells you a format-aware operator is never actually reaching
+        # its format.
+        self._op_attempts: dict[str, int] = {}
+        self._op_declines: dict[str, int] = {}
         self._last_new_edge_count = 0
         self._last_hamming_distance: int = -1
         self._last_mutation_offset: int = 0

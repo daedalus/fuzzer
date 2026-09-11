@@ -391,11 +391,20 @@ class DerMutator:
         )
 
         def gen(depth: int) -> bytes:
-            if depth <= 0 or rng.random() < 0.5:
+            # 0.35, not 0.5: at even odds two of every three nodes were a
+            # leaf and the trees came out with a median around 8 bytes.
+            if depth <= 0 or rng.random() < 0.35:
                 return primitives[rng.randint(0, len(primitives) - 1)]
-            inner = b"".join(gen(depth - 1) for _ in range(rng.randint(1, 3)))
+            inner = b"".join(gen(depth - 1) for _ in range(rng.randint(2, 4)))
             return b"\x30" + _encode_length(len(inner)) + inner
 
-        inner = gen(3)
+        # The root holds at least two children, unconditionally. `gen` used
+        # to be called once for it, and returned a bare primitive half the
+        # time, so the root SEQUENCE usually had a single leaf child. Both
+        # structural operators need more than that -- reorder_children wants
+        # a sibling pair to permute and insert_tlv wants a constructed
+        # parent -- so they found no site and declined on a third of draws,
+        # which the operator layer then served as havoc.
+        inner = b"".join(gen(3) for _ in range(rng.randint(2, 4)))
         out = b"\x30" + _encode_length(len(inner)) + inner
         return out[:max_len]

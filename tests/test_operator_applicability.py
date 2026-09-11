@@ -189,8 +189,13 @@ class TestReportUsesApplicable:
             op_success_applicable: dict = {}
 
         out = _mutation_effectiveness(_F())
+        row = next(ln for ln in out.splitlines() if "png_chunk_mutate" in ln)
         assert "  5.0%" in out
-        assert "n/a" not in out
+        # The RateA field specifically, not the whole row: the Declin column
+        # is legitimately n/a here (this stub records no attempts), and
+        # asserting on the row as a string made an unrelated column able to
+        # fail a test about applicability.
+        assert row.split()[6] != "n/a", f"RateA should be a rate, got {row.split()}"
 
     def test_ungated_operator_has_identical_pairs(self):
         from fuzzer_tool.services.report import _mutation_effectiveness
@@ -211,6 +216,9 @@ class TestReportUsesApplicable:
             "100",
             "5",
             "5.0%",
+            # Declin: this stub records no attempts, so the rate is
+            # undefined rather than zero -- same convention as RateA.
+            "n/a",
             "2.2%",
             "4.4%",
             "6.5%",

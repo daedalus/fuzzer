@@ -1958,11 +1958,11 @@ class OperatorEngine:
         """
         rng = self.ctx._rng
         if not (buf and self.ctx.cmplog_pairs):
-            return self._op_havoc(buf, _byte_idx, _data)
+            return self._op_declined("condstmt_solve", buf)
 
         conds = self._get_cond_stmts()
         if not conds:
-            return self._op_havoc(buf, _byte_idx, _data)
+            return self._op_declined("condstmt_solve", buf)
 
         # Prefer unsolved branches; fall back to any branch when all are
         # solved/unsolvable/timeout so the operator still produces a useful
@@ -2001,7 +2001,7 @@ class OperatorEngine:
             return buf
 
         target.mark_unsolvable()
-        return self._op_havoc(buf, _byte_idx, _data)
+        return self._op_declined("condstmt_solve", buf)
 
     def _get_cond_stmts(self) -> list[CondStmt]:
         """Lazily build and cache the CondStmt list from cmplog pairs."""
@@ -3047,9 +3047,9 @@ class OperatorEngine:
             )
             if out:
                 return bytearray(out[: self.ctx.max_len])
-        return self._op_havoc(buf, byte_idx, data)
+        return self._op_declined("tlv_nest_mutate", buf)
 
-    def _der_mutate(self, method: str, buf, byte_idx, data):
+    def _der_mutate(self, op: str, method: str, buf, byte_idx, data):
         """Shared driver for the BER/DER operators (png-handler pattern)."""
         from fuzzer_tool.core.mutations.der import DerMutator, parse_der
 
@@ -3064,24 +3064,24 @@ class OperatorEngine:
         else:
             mutated = getattr(self._der_mutator, method)(raw, max_len=self.ctx.max_len, rng=rng)
         if mutated is None:
-            return self._op_havoc(buf, byte_idx, data)
+            return self._op_declined(op, buf)
         return bytearray(mutated[: self.ctx.max_len])
 
     def _op_der_len_mutate(self, buf, byte_idx, data):
         """Mutate a BER/DER TLV length field (form flips, shrink/grow, indefinite)."""
-        return self._der_mutate("mutate_length", buf, byte_idx, data)
+        return self._der_mutate("der_len_mutate", "mutate_length", buf, byte_idx, data)
 
     def _op_der_tag_mutate(self, buf, byte_idx, data):
         """Mutate a BER/DER TLV tag byte (class, constructed, number)."""
-        return self._der_mutate("mutate_tag", buf, byte_idx, data)
+        return self._der_mutate("der_tag_mutate", "mutate_tag", buf, byte_idx, data)
 
     def _op_der_tlv_reorder(self, buf, byte_idx, data):
         """Reorder/duplicate/remove siblings inside a constructed value."""
-        return self._der_mutate("reorder_children", buf, byte_idx, data)
+        return self._der_mutate("der_tlv_reorder", "reorder_children", buf, byte_idx, data)
 
     def _op_der_tlv_insert(self, buf, byte_idx, data):
         """Insert a fresh or truncated TLV into a constructed value."""
-        return self._der_mutate("insert_tlv", buf, byte_idx, data)
+        return self._der_mutate("der_tlv_insert", "insert_tlv", buf, byte_idx, data)
 
     def _op_length_offset_goal(self, buf, byte_idx, data):
         """Write a solved offset/size pair into a candidate length field.
@@ -3097,12 +3097,12 @@ class OperatorEngine:
         out = bytearray(buf)
         width = rng.choice((2, 4, 8))
         if len(out) < width * 2 + 1:
-            return self._op_havoc(buf, byte_idx, data)
+            return self._op_declined("length_offset_goal", buf)
 
         goal = GOALS[rng.randint(0, len(GOALS) - 1)]
         solved = solve_length_offset(goal, width, len(out), rng=rng)
         if solved is None:
-            return self._op_havoc(buf, byte_idx, data)
+            return self._op_declined("length_offset_goal", buf)
         offset_value, size_value = solved
 
         pos = rng.randint(0, len(out) - width * 2)
@@ -3161,15 +3161,15 @@ class OperatorEngine:
         # the shared frontier so the two call sites do not re-solve the same
         # branch independently.
         if cmplog is None or solver is None:
-            return self._op_havoc(buf, byte_idx, data)
+            return self._op_declined("path_negate", buf)
 
         records = records_from_collector(cmplog)
         if not records:
-            return self._op_havoc(buf, byte_idx, data)
+            return self._op_declined("path_negate", buf)
 
         solved = solver.solve_first(records, bytes(buf))
         if solved is None:
-            return self._op_havoc(buf, byte_idx, data)
+            return self._op_declined("path_negate", buf)
         return bytearray(solved[: self.ctx.max_len])
 
     def _op_elf_chunk_mutate(self, buf, _byte_idx, _data):
@@ -3194,7 +3194,7 @@ class OperatorEngine:
         rng = self.ctx._rng
         out = recompress_zlib(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         if out is None:
-            return self._op_havoc(buf, byte_idx, data)
+            return self._op_declined("recompress_zlib", buf)
         return bytearray(out[: self.ctx.max_len])
 
     def _op_recompress_gzip(self, buf, byte_idx, data):
@@ -3204,7 +3204,7 @@ class OperatorEngine:
         rng = self.ctx._rng
         out = recompress_gzip(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         if out is None:
-            return self._op_havoc(buf, byte_idx, data)
+            return self._op_declined("recompress_gzip", buf)
         return bytearray(out[: self.ctx.max_len])
 
     def _op_deflate_struct_mutate(self, buf, byte_idx, data):
@@ -3220,7 +3220,7 @@ class OperatorEngine:
         rng = self.ctx._rng
         out = mutate_deflate_structure(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         if out is None:
-            return self._op_havoc(buf, byte_idx, data)
+            return self._op_declined("deflate_struct_mutate", buf)
         return bytearray(out[: self.ctx.max_len])
 
     def _op_png_crc_fix(self, buf, _byte_idx, _data):
@@ -3606,6 +3606,47 @@ class OperatorEngine:
         if a == b:
             return None
         return bytearray(splice_diff_located(bytes(a), bytes(b), rng=rng)[: self.ctx.max_len])
+
+    def op_decline_rates(self, min_attempts: int = 1) -> dict[str, float]:
+        """Declines / attempts per operator, for operators ever selected.
+
+        A rate near 1.0 says the operator is being scheduled and never
+        getting to do its job -- the format never matched, or the solver
+        never solved. That is a corpus or gating problem, not a bandit one,
+        and it is invisible in reward alone because a declining operator
+        simply earns nothing and looks merely unlucky.
+        """
+        f = self.f
+        return {
+            op: f._op_declines.get(op, 0) / n
+            for op, n in f._op_attempts.items()
+            if n >= min_attempts
+        }
+
+    def _op_declined(self, op: str, buf):
+        """Record that *op* had nothing to work on, and change nothing.
+
+        Thirteen handlers used to `return self._op_havoc(...)` when their
+        format-aware work was impossible -- input did not parse, no
+        constraint solved, no candidate site. Havoc then changed the buffer
+        under the declining operator's name, so `_last_ops_effective` (an
+        xxh3 compare across the call in `mutate`) saw a difference and
+        credited the operator for havoc's work. Measured across the gated
+        battery, four operators were 100% havoc and `tlv_nest_mutate` 88%:
+        the scheduler was rewarding them for a mutation they did not make,
+        which is worse than rewarding nothing, because it also hides the
+        format gap.
+
+        Returning the buffer untouched makes the existing effectiveness
+        signal correct without new wiring -- the hash does not move, the
+        operator is not added to `_last_ops_effective`, and the reward the
+        scheduler computes is the one it should have been getting. The
+        decline is counted separately so it is visible as a rate rather than
+        inferred from a missing reward.
+        """
+        f = self.f
+        f._op_declines[op] = f._op_declines.get(op, 0) + 1
+        return bytes(buf)
 
     def _op_havoc(self, buf, _byte_idx, data):
         """Havoc mutation with deterministic dedup: retry if fully redundant."""
@@ -4629,6 +4670,7 @@ class OperatorEngine:
             if format_gate_matches(op, buf) is not False:
                 f._last_ops_applicable.add(op)
 
+            f._op_attempts[op] = f._op_attempts.get(op, 0) + 1
             _t0 = time.perf_counter()
             result = f._op_dispatch[op](buf, byte_idx, data)
             _dt = time.perf_counter() - _t0

@@ -463,6 +463,17 @@ def _mutation_effectiveness(f) -> str:
     # is the same question restricted to the mutate-this-file regime.
     # For an ungated operator the two pairs are identical by construction,
     # which makes the invariant visible on every line.
+    # Declines: the operator was selected and had nothing to work on. Kept
+    # beside Rate rather than folded into it, because they answer different
+    # questions -- Rate is "when it ran, did it find anything", Declin is
+    # "how often did it get to run at all". A high Declin with a healthy
+    # RateA is a corpus that rarely carries the format, not a weak operator.
+    attempts = getattr(f, "_op_attempts", None)
+    declines = getattr(f, "_op_declines", None)
+    if not isinstance(attempts, dict):
+        attempts = {}
+    if not isinstance(declines, dict):
+        declines = {}
     applicable = _applicable_counts(f)
     succ_applicable = getattr(f, "op_success_applicable", None)
     if not isinstance(succ_applicable, dict):
@@ -475,9 +486,9 @@ def _mutation_effectiveness(f) -> str:
         "",
         "--- Mutation Effectiveness ---",
         f"  {'Operation':<22s} {'Count':>7s} {'Success':>7s} {'Rate':>6s} "
-        f"{'Applic':>7s} {'SuccA':>6s} {'RateA':>6s}  "
+        f"{'Applic':>7s} {'SuccA':>6s} {'RateA':>6s} {'Declin':>7s}  "
         f"{'±1σ':>7s} {'±2σ':>7s} {'±3σ':>7s}",
-        f"  {'-' * 22} {'-' * 7} {'-' * 7} {'-' * 6} {'-' * 7} {'-' * 6} {'-' * 6}  "
+        f"  {'-' * 22} {'-' * 7} {'-' * 7} {'-' * 6} {'-' * 7} {'-' * 6} {'-' * 6} {'-' * 7}  "
         f"{'-' * 7} {'-' * 7} {'-' * 7}",
     ]
 
@@ -503,9 +514,14 @@ def _mutation_effectiveness(f) -> str:
         # undefined is not zero, and printing zero is what made a working
         # operator read as broken -- same reasoning as Edges/Success below.
         rate_a = f"{'n/a':>6s}" if appl <= 0 else f"{succ_a / appl * 100:>5.1f}%"
+        # n/a rather than 0.0% when the operator was never selected through
+        # the instrumented path, for the same reason RateA is: undefined is
+        # not zero.
+        n_att = attempts.get(op, 0)
+        declin = f"{'n/a':>7s}" if n_att <= 0 else f"{declines.get(op, 0) / n_att * 100:>6.1f}%"
         lines.append(
             f"  {op:<22s} {count:>7d} {succ:>7d} {rate:>5.1f}% "
-            f"{appl:>7d} {succ_a:>6d} {rate_a}  "
+            f"{appl:>7d} {succ_a:>6d} {rate_a} {declin}  "
             f"{c1 * 100:>6.1f}% {c2 * 100:>6.1f}% {c3 * 100:>6.1f}%"
         )
 
@@ -514,6 +530,14 @@ def _mutation_effectiveness(f) -> str:
         if total
         else ""
     )
+    if any(declines.values()):
+        lines += [
+            "  Declin is the share of selections where the operator had nothing to",
+            "  work on -- input did not parse, no constraint solved, no candidate",
+            "  site. Those used to fall through to havoc under this operator's name,",
+            "  which credited it for havoc's work; they now change nothing, so Rate",
+            "  above counts only mutations this operator actually made.",
+        ]
     if split_regimes:
         lines += [
             "  Applic/SuccA/RateA restrict to selections where the operator's own",
