@@ -85,6 +85,18 @@ def _worker_main(
     fractal_diversity: bool = False,
     fractal_diversity_depth: int = 3,
     fractal_diversity_bonus: float = 1.3,
+    mc_cycle_detect: bool = False,
+    fpl: bool = False,
+    fpl_epsilon: float = 1.0,
+    invasion: bool = False,
+    garch: bool = False,
+    continuum: bool = False,
+    poisson_disk_admission: bool = False,
+    poisson_disk_min_jaccard: float = 0.25,
+    sharpe_kelly_blend: float = 0.0,
+    ducb_gamma: float = 0.9999,
+    cucb_gamma: float = 0.9995,
+    swucb_window: int = 4000,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -169,6 +181,18 @@ def _worker_main(
         fractal_diversity=fractal_diversity,
         fractal_diversity_depth=fractal_diversity_depth,
         fractal_diversity_bonus=fractal_diversity_bonus,
+        mc_cycle_detect=mc_cycle_detect,
+        fpl=fpl,
+        fpl_epsilon=fpl_epsilon,
+        invasion=invasion,
+        garch=garch,
+        continuum=continuum,
+        poisson_disk_admission=poisson_disk_admission,
+        poisson_disk_min_jaccard=poisson_disk_min_jaccard,
+        sharpe_kelly_blend=sharpe_kelly_blend,
+        ducb_gamma=ducb_gamma,
+        cucb_gamma=cucb_gamma,
+        swucb_window=swucb_window,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -524,8 +548,25 @@ def run_parallel(
     fractal_diversity: bool = False,
     fractal_diversity_depth: int = 3,
     fractal_diversity_bonus: float = 1.3,
+    mc_cycle_detect: bool = False,
+    fpl: bool = False,
+    fpl_epsilon: float = 1.0,
+    invasion: bool = False,
+    garch: bool = False,
+    continuum: bool = False,
+    poisson_disk_admission: bool = False,
+    poisson_disk_min_jaccard: float = 0.25,
+    sharpe_kelly_blend: float = 0.0,
+    ducb_gamma: float = 0.9999,
+    cucb_gamma: float = 0.9995,
+    swucb_window: int = 4000,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
+
+    The signature is closed on purpose (test_regression_bugreport_critical:
+    a ``**kwargs`` catch-all would hide drift), so every option cmd_fuzz
+    passes must be listed here, in _worker_main, and forwarded to Fuzzer.
+    test_regression_parallel_kwargs checks all three from source.
 
     Each worker writes to its own corpus subdirectory (.w0, .w1, ...) and
     periodically pulls new entries from siblings. Crashes go to the shared
@@ -640,6 +681,18 @@ def run_parallel(
         fractal_diversity=fractal_diversity,
         fractal_diversity_depth=fractal_diversity_depth,
         fractal_diversity_bonus=fractal_diversity_bonus,
+        mc_cycle_detect=mc_cycle_detect,
+        fpl=fpl,
+        fpl_epsilon=fpl_epsilon,
+        invasion=invasion,
+        garch=garch,
+        continuum=continuum,
+        poisson_disk_admission=poisson_disk_admission,
+        poisson_disk_min_jaccard=poisson_disk_min_jaccard,
+        sharpe_kelly_blend=sharpe_kelly_blend,
+        ducb_gamma=ducb_gamma,
+        cucb_gamma=cucb_gamma,
+        swucb_window=swucb_window,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:
