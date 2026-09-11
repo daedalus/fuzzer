@@ -708,6 +708,91 @@ class TestGoFuzzPorts:
         assert m is not None, result
         assert m.group(1) != b"12345"
 
+    def test_big_int_squared_matches_beta_half_one_cdf(self):
+        """random()**2, scaled, should follow F(y) = sqrt(y) on [0, cap**2]."""
+        from fuzzer_tool.core.mutations import _big_int_squared
+
+        cap = (1 << 30) - 1
+        rng = RandPool(seed=1)
+        n = 20000
+        samples = [_big_int_squared(rng, cap) / (cap * cap) for _ in range(n)]
+        samples.sort()
+
+        # Kolmogorov-Smirnov style check against the theoretical CDF
+        # F(y) = sqrt(y) without depending on scipy: max gap between the
+        # empirical CDF and sqrt(y) over the sorted sample.
+        max_gap = max(
+            abs((i + 1) / n - y**0.5) for i, y in enumerate(samples)
+        )
+        assert max_gap < 0.02, f"KS-style gap too large: {max_gap}"
+
+        # Sanity check on the shape itself: mean of Y = X**2 for X ~ U(0,1)
+        # is 1/3, not 1/2 (which uniform would give).
+        mean = sum(samples) / n
+        assert 0.30 < mean < 0.37, f"mean {mean} not close to theoretical 1/3"
+
+    def test_big_int_squared_is_not_limited_to_perfect_squares(self):
+        """Regression: squaring an already-discretized int (the previous
+        implementation, ``rng.randint(0, cap) ** 2``) can only ever produce
+        perfect squares -- out of ``cap**2`` reachable integers, only ``cap``
+        of them (the perfect squares) were possible outputs. The fixed
+        version samples the continuous identity ``random() ** 2`` instead,
+        so it should be dense over the full range.
+        """
+        import math
+
+        from fuzzer_tool.core.mutations import _big_int_squared
+
+        def is_perfect_square(v: int) -> bool:
+            if v < 0:
+                return False
+            root = math.isqrt(v)
+            return root * root == v
+
+        cap = (1 << 30) - 1
+        rng = RandPool(seed=2)
+        samples = [_big_int_squared(rng, cap) for _ in range(2000)]
+
+        non_squares = [v for v in samples if not is_perfect_square(v)]
+        assert len(non_squares) > 1900, (
+            f"expected the vast majority of {len(samples)} draws to be "
+            f"non-perfect-squares, got only {len(non_squares)}"
+        )
+
+        # Control: confirm the *old* formula really was restricted to
+        # perfect squares, so this test would have caught the bug.
+        old_formula_samples = [rng.randint(0, cap) ** 2 for _ in range(500)]
+        assert all(is_perfect_square(v) for v in old_formula_samples)
+
+    def test_ascii_num_replace_big_squared_strategy_reachable(self):
+        """End-to-end: driving ascii_num_replace enough times should surface
+        the big-int-squared strategy producing a non-perfect-square, ~18-20
+        digit replacement (distinguishing it from the plain big-int strategy,
+        which tops out around 10 digits)."""
+        import math
+        import re
+
+        from fuzzer_tool.core.mutations import ascii_num_replace
+
+        rng = RandPool(seed=3)
+        found_large_non_square = False
+        for _ in range(500):
+            result = ascii_num_replace(b"id=12345;x", rng=rng)
+            m = re.search(rb"id=(-?\d+);x", result)
+            if not m:
+                continue
+            digits = m.group(1).lstrip(b"-")
+            if len(digits) >= 15:
+                v = int(digits)
+                root = math.isqrt(v)
+                if root * root != v:
+                    found_large_non_square = True
+                    break
+        assert found_large_non_square, (
+            "never observed a large non-perfect-square replacement in 500 "
+            "draws -- big-int-squared strategy may still be square-only"
+        )
+
     def test_choose_len_prefers_short(self):
         from fuzzer_tool.core.mutations import choose_len
 

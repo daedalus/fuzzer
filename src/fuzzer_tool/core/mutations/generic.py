@@ -1519,6 +1519,22 @@ def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = Tr
 # ---------------------------------------------------------------------------
 
 
+def _big_int_squared(rng, cap: int = (1 << 30) - 1) -> int:
+    """Sample an int biased toward 0 with a heavy tail up to ``cap ** 2``.
+
+    Same Beta(1/2, 1) shape as squaring a uniform draw (density ~1/(2*sqrt(y)),
+    most mass near zero, occasional huge value), but applied to the
+    continuous identity ``random() ** 2`` rather than an already-discretized
+    int. Squaring an integer draw (``rng.randint(0, cap) ** 2``) only ever
+    lands on perfect squares -- out of the ``cap ** 2`` integers in range,
+    only the ``cap`` perfect squares are reachable, so a parser's
+    overflow/boundary checks would almost never see an arbitrary large
+    non-square value. Scaling a float draw keeps the density but is dense
+    over the whole range.
+    """
+    return int(rng.random() ** 2 * cap * cap)
+
+
 def ascii_num_replace(data: bytes, rng) -> bytes:
     """Replace a whole multi-digit ASCII number with a random numeric value.
 
@@ -1563,7 +1579,7 @@ def ascii_num_replace(data: bytes, rng) -> bytes:
     elif strategy == 1:
         v = rng.randint(0, (1 << 30) - 1)
     elif strategy == 2:
-        v = rng.randint(0, (1 << 30) - 1) ** 2
+        v = _big_int_squared(rng)
     else:
         v = -rng.randint(0, (1 << 30) - 1)
 
