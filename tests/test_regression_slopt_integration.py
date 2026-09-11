@@ -193,3 +193,27 @@ def test_mc_bandit_evidence_lands_on_arms_it_can_select(tmp_path):
     stats = f._slopt.stats()
     assert stats["slopt_pulls"] > 0
     assert stats["slopt_instances"] >= 2  # more than one size group was fuzzed
+
+
+def test_parallel_mode_forwards_slopt():
+    """cmd_fuzz passed --slopt only to the single-process Fuzzer(...), so
+    `fuzz -j N --slopt` ran every worker without it. The rest of the chain
+    (run_parallel -> worker -> Fuzzer) is checked generically by
+    test_regression_parallel_kwargs once cmd_fuzz passes the flag."""
+    import ast
+    import inspect
+
+    from fuzzer_tool.cli import commands
+
+    fn = next(
+        n
+        for n in ast.walk(ast.parse(inspect.getsource(commands)))
+        if isinstance(n, ast.FunctionDef) and n.name == "cmd_fuzz"
+    )
+    calls = [
+        n
+        for n in ast.walk(fn)
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "run_parallel"
+    ]
+    assert len(calls) == 1
+    assert "slopt" in {k.arg for k in calls[0].keywords}

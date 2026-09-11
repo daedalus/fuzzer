@@ -482,6 +482,7 @@ def cmd_fuzz(args):
             consolidated=getattr(args, "consolidated", False),
             moss=getattr(args, "moss", False),
             moss_gamma=getattr(args, "moss_gamma", 1.0),
+            slopt=getattr(args, "slopt", False),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
             contextual=getattr(args, "contextual", False),
