@@ -209,7 +209,8 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_._use_sensitivity = False
             # Mirrors Fuzzer.__init__ (c28f17c): mutate() branches on it.
             self_._use_slopt = False
-            self_._last_slopt_exp = 0.0
+            self_._slopt = None
+            self_._last_slopt_arm = None
             install_scheduler_surface(self_)
             if pool is not None:
                 self_._rng = pool

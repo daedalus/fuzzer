@@ -2082,7 +2082,11 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--slopt",
         action="store_true",
-        help="Enable SLOPT batch-size bandit optimisation (operator + exponent).",
+        help=(
+            "SLOPT: one operator per round, applied 2**t times, t in 1..7 learned "
+            "per seed-size group and operator (Thompson sampling); replaces -M "
+            "and perf-score stacking"
+        ),
     )
     fuzz_parser.add_argument(
         "--invasion",

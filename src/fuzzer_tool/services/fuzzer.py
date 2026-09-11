@@ -76,6 +76,7 @@ from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStoppi
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.shapley import ShapleyAttribution
 from fuzzer_tool.core.skipdet import SkipDetector
+from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.validity import Validity, ValidityChannel
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.operators import OperatorEngine, operator_strategy_pool
@@ -1765,9 +1766,13 @@ class Fuzzer:
         if exp3:
             self._exp3 = Exp3Scheduler(gamma=exp3_gamma, rng=self._rng)
             log.info("EXP3 adversarial bandit enabled (gamma=%.2f)", exp3_gamma)
-        # SLOPT batch-size bandit
+        # SLOPT (core/slopt.py): one operator per round, applied 2**t times,
+        # t learned per (seed-size group, operator).
         self._use_slopt = slopt
-        self._last_slopt_exp = 0.0
+        self._slopt = SloptBatchBandit(rng=self._rng) if slopt else None
+        # (op, seed_len, exponent) drawn this round; None when no arm was
+        # pulled (deterministic stage, SLOPT off).
+        self._last_slopt_arm = None
         # Epsilon-greedy with annealing
         self._use_eps_greedy = eps_greedy
         self._eps_greedy = None
@@ -4465,11 +4470,20 @@ class Fuzzer:
             w = self._cost_adjusted_weight(op, surprisal_weight if ok else 0.0)
             op_rewards.append((op, ok, min(1.0, w)))
 
+        # SLOPT: credit the batch exponent drawn for this round's operator
+        # with that operator's outcome. The scheme applies one operator per
+        # round, so the round's reward is the arm's reward.
+        if self._slopt is not None and self._last_slopt_arm is not None:
+            s_op, s_len, s_exp = self._last_slopt_arm
+            for op, ok, w in op_rewards:
+                if op == s_op:
+                    self._slopt.record(s_op, s_len, s_exp, ok, weight=w)
+                    break
+
         if self.mc and self.mc_bandit:
             for op, ok, w in op_rewards:
-                arm_name = f"{op}_{self._last_slopt_exp:.2f}" if self._use_slopt else op
-                self.mc.record(arm_name, ok, weight=w)
-                self.mc.record_brier(arm_name, ok, weight=w)
+                self.mc.record(op, ok, weight=w)
+                self.mc.record_brier(op, ok, weight=w)
                 # Secretary-problem: track operator quality for optimal stopping
                 if self._secretary:
                     if op not in self._op_secretary:

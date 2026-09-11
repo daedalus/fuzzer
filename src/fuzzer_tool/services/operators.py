@@ -539,19 +539,6 @@ def operator_strategy_pool(f) -> list[str]:
     return available
 
 
-def slopt_batch_size(seed: bytes, op: str, l0: int = 64) -> tuple[int, float]:
-    """Compute SLOPT batch size and exponent for a seed and operator."""
-    _SOPT_EXPONENTS = {
-        "havoc": 0.6,
-        "bit_flip": 0.3,
-        "arith": 0.5,
-        # all other operators default to 0.4
-    }
-    exp = _SOPT_EXPONENTS.get(op, 0.4)
-    batch = max(1, int((len(seed) / l0) ** exp))
-    return batch, exp
-
-
 class OperatorEngine:
     """Manages mutation operator selection and execution.
 
@@ -4741,6 +4728,7 @@ class OperatorEngine:
         # reads this name, and a stale one would credit a round it never
         # drew to whichever scheduler chose last.
         f._op_selector = None
+        f._last_slopt_arm = None
         det_mutant = self.maybe_deterministic_mutation(data)
         if det_mutant is not None:
             f._last_ops_used = []
@@ -4841,11 +4829,14 @@ class OperatorEngine:
         track_effect = f._track_op_effect
 
         if f._use_slopt:
+            # SLOPT Algorithm 2: one operator, applied 2**t times, t drawn
+            # from the (seed-size group, op) bandit. -M, the perf score and
+            # the stall floor above do not apply: the arm is credited for
+            # the batch it chose, so the batch applied must be that one.
             op = self.select_op(ops)
-            batch, exp = slopt_batch_size(data, op)
-            f._last_slopt_exp = exp
-            n_mutations = batch
-            for _ in range(batch):
+            exponent = f._slopt.choose(op, len(data))
+            f._last_slopt_arm = (op, len(data), exponent)
+            for _ in range(1 << exponent):
                 buf = self._apply_op_once(op, buf, data, track_effect)
         else:
             for _ in range(n_mutations):
