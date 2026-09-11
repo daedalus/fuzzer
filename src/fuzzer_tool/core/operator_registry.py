@@ -58,6 +58,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "sort_bytes",
         "leb128_encode",
         "sleb128_encode",
+        "varsize",
+        "value",
     },
     "block": {
         "block_insert",

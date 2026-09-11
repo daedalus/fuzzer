@@ -962,3 +962,184 @@ class TestRedqueenXformPairCache:
         engine.f._cmplog.pairs = [(b"ab", b"cd"), (b"abcde", b"fghij")]
         engine._op_redqueen_xform(buf, 0, b"")
         assert engine._redqueen_pair_lengths.tolist() == [2, 5]
+
+
+# ── varsize & value operator tests ─────────────────────────────
+
+
+class TestVarsizeOperator:
+    """Tests for AFL++ varsize mutator: variable-size byte insert/delete."""
+
+    def setup_method(self):
+        self.engine = OperatorEngine(_make_minimal_fuzzer())
+
+    def test_varsize_can_grow_buffer(self):
+        """varsize can insert bytes into buffer."""
+        grew = False
+        for _ in range(50):
+            buf = bytearray(b"abcdefgh")
+            self.engine._op_varsize(buf, 0, b"")
+            if len(buf) > 8:
+                grew = True
+                assert len(buf) <= 16  # max insert 8 bytes
+                break
+        assert grew, "varsize should sometimes grow the buffer"
+
+    def test_varsize_can_shrink_buffer(self):
+        """varsize can delete bytes from buffer."""
+        shrank = False
+        for _ in range(50):
+            buf = bytearray(b"abcdefgh")
+            self.engine._op_varsize(buf, 0, b"")
+            if len(buf) < 8:
+                shrank = True
+                assert len(buf) >= 1  # must keep at least 1 byte
+                break
+        assert shrank, "varsize should sometimes shrink the buffer"
+
+    def test_varsize_respects_max_len(self):
+        """varsize must not grow buffer beyond max_len."""
+        self.engine.f.max_len = 12
+        buf = bytearray(b"abcdefgh")  # 8 bytes
+        for _ in range(50):
+            buf = bytearray(b"abcdefgh")
+            self.engine._op_varsize(buf, 0, b"")
+            assert len(buf) <= 12
+
+    def test_varsize_empty_buffer_noop(self):
+        """Empty buffer is a no-op for varsize."""
+        buf = bytearray(b"")
+        self.engine._op_varsize(buf, 0, b"")
+        assert buf == b""
+
+    def test_varsize_single_byte_can_only_grow(self):
+        """Single-byte buffer can only grow (must keep at least 1 byte)."""
+        grew = False
+        for _ in range(50):
+            buf = bytearray(b"x")
+            self.engine._op_varsize(buf, 0, b"")
+            if len(buf) > 1:
+                grew = True
+                break
+        assert grew, "varsize should be able to grow single-byte buffer"
+
+    def test_varsize_never_deletes_all(self):
+        """varsize never reduces buffer to zero bytes."""
+        for _ in range(100):
+            buf = bytearray(b"abcdefgh")
+            self.engine._op_varsize(buf, 0, b"")
+            assert len(buf) >= 1
+
+
+class TestValueOperator:
+    """Tests for AFL++ value mutator: random byte value replacement."""
+
+    def setup_method(self):
+        self.engine = OperatorEngine(_make_minimal_fuzzer())
+
+    def test_value_changes_byte(self):
+        """value replaces a random byte with a random value."""
+        changed = False
+        for _ in range(50):
+            buf = bytearray(b"abcdefgh")
+            self.engine._op_value(buf, 0, b"")
+            if buf != b"abcdefgh":
+                changed = True
+                # Should only change one byte
+                diffs = sum(1 for a, b in zip(b"abcdefgh", buf, strict=True) if a != b)
+                assert diffs == 1, f"value should change exactly 1 byte, changed {diffs}"
+                break
+        assert changed, "value should change a byte"
+
+    def test_value_preserves_length(self):
+        """value never changes buffer length."""
+        for _ in range(20):
+            buf = bytearray(b"abcdefgh")
+            self.engine._op_value(buf, 0, b"")
+            assert len(buf) == 8
+
+    def test_value_empty_buffer_noop(self):
+        """Empty buffer is a no-op for value."""
+        buf = bytearray(b"")
+        self.engine._op_value(buf, 0, b"")
+        assert buf == b""
+
+    def test_value_single_byte_works(self):
+        """value works on single-byte buffers."""
+        buf = bytearray(b"A")
+        self.engine._op_value(buf, 0, b"")
+        assert len(buf) == 1
+        # Value might change or might not (if same random value)
+        assert isinstance(buf, bytearray)
+
+    def test_value_produces_random_values(self):
+        """value produces different byte values over multiple runs."""
+        seen_values = set()
+        for _ in range(100):
+            buf = bytearray(b"\x00" * 8)
+            self.engine._op_value(buf, 0, b"")
+            # Find the changed byte
+            for i in range(8):
+                if buf[i] != 0:
+                    seen_values.add(buf[i])
+                    break
+        # Should see multiple different values
+        assert len(seen_values) > 1
+
+    def test_value_respects_max_len(self):
+        """value doesn't change length so max_len is implicitly respected."""
+        self.engine.f.max_len = 4
+        buf = bytearray(b"abcd")
+        self.engine._op_value(buf, 0, b"")
+        assert len(buf) == 4
+
+
+class TestVarsizeValueRegistration:
+    """Verify varsize and value are properly registered."""
+
+    def test_varsize_in_registry(self):
+        from fuzzer_tool.core.operator_registry import REGISTRY
+
+        assert "varsize" in REGISTRY.names()
+        assert REGISTRY.category_of("varsize") == "byte"
+
+    def test_value_in_registry(self):
+        from fuzzer_tool.core.operator_registry import REGISTRY
+
+        assert "value" in REGISTRY.names()
+        assert REGISTRY.category_of("value") == "byte"
+
+    def test_both_unconditional(self):
+        from fuzzer_tool.core.operator_registry import REGISTRY
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        # Create a minimal mock fuzzer with required attributes
+        class _MockFuzzer:
+            max_len = 65536
+            _rng = RandPool(seed=1)
+            _cmplog = None
+            _path_solver = None
+            seed_meta = {}
+            corpus = []
+            dictionary = []
+            markov_trained = False
+            mc = None
+            mc_cem = False
+            grammar = None
+            enable_regex_bomb = False
+            enable_x86_mutator = False
+            enable_arm_mutator = False
+            weizz_tags = False
+            _wfc_enabled = False
+            formatfuzzer = False
+
+        fuzzer = _MockFuzzer()
+        available = set(REGISTRY.available(fuzzer, b"seed"))
+        assert "varsize" in available
+        assert "value" in available
+
+    def test_both_have_handlers(self):
+        engine = OperatorEngine(_make_minimal_fuzzer())
+        dispatch = engine.build_dispatch()
+        assert callable(dispatch["varsize"])
+        assert callable(dispatch["value"])

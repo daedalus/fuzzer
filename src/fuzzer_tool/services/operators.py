@@ -536,6 +536,19 @@ def operator_strategy_pool(f) -> list[str]:
     return available
 
 
+def slopt_batch_size(seed: bytes, op: str, l0: int = 64) -> tuple[int, float]:
+    """Compute SLOPT batch size and exponent for a seed and operator."""
+    _SOPT_EXPONENTS = {
+        "havoc": 0.6,
+        "bit_flip": 0.3,
+        "arith": 0.5,
+        # all other operators default to 0.4
+    }
+    exp = _SOPT_EXPONENTS.get(op, 0.4)
+    batch = max(1, int((len(seed) / l0) ** exp))
+    return batch, exp
+
+
 class OperatorEngine:
     """Manages mutation operator selection and execution.
 
@@ -997,9 +1010,7 @@ class OperatorEngine:
         """
         from fuzzer_tool.core.tree_mutator import lightweight_tree_mutate  # noqa: PLC0415
 
-        result = lightweight_tree_mutate(
-            bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng
-        )
+        result = lightweight_tree_mutate(bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng)
         if result != bytes(buf):
             buf[:] = result[: len(buf)]
 
@@ -1311,6 +1322,52 @@ class OperatorEngine:
         rng = self.ctx._rng
         if buf:
             buf[rng.randint(0, len(buf) - 1)] = rng.randint(0, 255)
+
+    def _op_varsize(self, buf, _byte_idx, _data):
+        """Variable-size mutation: insert or delete random bytes (AFL++ varsize).
+
+        Randomly chooses to insert or delete bytes, respecting max_len bounds.
+        Similar to AFL++'s Mutate_InsertByte/Mutate_EraseBytes.
+        """
+        rng = self.ctx._rng
+        if not buf:
+            return
+
+        # Randomly choose insert (True) or delete (False)
+        if rng.random() < 0.5:
+            # Insert mode
+            if len(buf) >= self.ctx.max_len:
+                return
+            # Insert 1-8 bytes
+            max_insert = min(8, self.ctx.max_len - len(buf))
+            if max_insert < 1:
+                return
+            insert_size = rng.randint(1, max_insert)
+            insert_pos = rng.randint(0, len(buf))
+            buf[insert_pos:insert_pos] = bytes(rng.randint(0, 255) for _ in range(insert_size))
+        else:
+            # Delete mode
+            if len(buf) <= 1:
+                return
+            # Delete 1-8 bytes
+            max_delete = min(8, len(buf) - 1)  # Keep at least 1 byte
+            if max_delete < 1:
+                return
+            delete_size = rng.randint(1, max_delete)
+            delete_pos = rng.randint(0, len(buf) - delete_size)
+            del buf[delete_pos : delete_pos + delete_size]
+
+    def _op_value(self, buf, _byte_idx, _data):
+        """Value-level mutation: change random byte value (AFL++ value).
+
+        Replace a random byte with a random value (0-255).
+        Similar to AFL++'s Mutate_ChangeByte.
+        """
+        rng = self.ctx._rng
+        if not buf:
+            return
+        pos = rng.randint(0, len(buf) - 1)
+        buf[pos] = rng.randint(0, 255)
 
     def _op_block_insert(self, buf, _byte_idx, _data):
         rng = self.ctx._rng
@@ -1695,9 +1752,7 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import ascii_num_replace
 
         if buf:
-            return bytearray(
-                ascii_num_replace(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len]
-            )
+            return bytearray(ascii_num_replace(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_digit_replace(self, buf, _byte_idx, _data):
         """Replace a single ASCII digit with another random digit.
@@ -1733,9 +1788,7 @@ class OperatorEngine:
 
         if buf and len(buf) < self.ctx.max_len:
             return bytearray(
-                byte_insert(bytes(buf), self.ctx.max_len, rng=self.ctx._rng)[
-                    : self.ctx.max_len
-                ]
+                byte_insert(bytes(buf), self.ctx.max_len, rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
     def _op_insert_ascii_num(self, buf, _byte_idx, _data):
@@ -1752,57 +1805,43 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import transpose_bytes
 
         if len(buf) >= 2:
-            return bytearray(
-                transpose_bytes(bytes(buf), 2, rng=self.ctx._rng)[: self.ctx.max_len]
-            )
+            return bytearray(transpose_bytes(bytes(buf), 2, rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_transpose_32(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import transpose_bytes
 
         if len(buf) >= 4:
-            return bytearray(
-                transpose_bytes(bytes(buf), 4, rng=self.ctx._rng)[: self.ctx.max_len]
-            )
+            return bytearray(transpose_bytes(bytes(buf), 4, rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_transpose_64(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import transpose_bytes
 
         if len(buf) >= 8:
-            return bytearray(
-                transpose_bytes(bytes(buf), 8, rng=self.ctx._rng)[: self.ctx.max_len]
-            )
+            return bytearray(transpose_bytes(bytes(buf), 8, rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_bit_transpose_8(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if buf:
-            return bytearray(
-                bit_transpose(bytes(buf), 1, rng=self.ctx._rng)[: self.ctx.max_len]
-            )
+            return bytearray(bit_transpose(bytes(buf), 1, rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_bit_transpose_16(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if len(buf) >= 2:
-            return bytearray(
-                bit_transpose(bytes(buf), 2, rng=self.ctx._rng)[: self.ctx.max_len]
-            )
+            return bytearray(bit_transpose(bytes(buf), 2, rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_bit_transpose_32(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if len(buf) >= 4:
-            return bytearray(
-                bit_transpose(bytes(buf), 4, rng=self.ctx._rng)[: self.ctx.max_len]
-            )
+            return bytearray(bit_transpose(bytes(buf), 4, rng=self.ctx._rng)[: self.ctx.max_len])
 
     def _op_bit_transpose_64(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_transpose
 
         if len(buf) >= 8:
-            return bytearray(
-                bit_transpose(bytes(buf), 8, rng=self.ctx._rng)[: self.ctx.max_len]
-            )
+            return bytearray(bit_transpose(bytes(buf), 8, rng=self.ctx._rng)[: self.ctx.max_len])
 
     # These three pick their own word width from what the buffer can hold, so
     # unlike the bit_transpose family they need no per-width length guard --
@@ -2037,9 +2076,7 @@ class OperatorEngine:
         if not (buf and self.ctx.cmplog_pairs):
             return
         pair = self.ctx._rng.choice(self.ctx.cmplog_pairs)
-        result = gradient_descent(
-            bytes(buf), pair, max_len=self.ctx.max_len, rng=self.ctx._rng
-        )
+        result = gradient_descent(bytes(buf), pair, max_len=self.ctx.max_len, rng=self.ctx._rng)
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
 
@@ -2619,9 +2656,9 @@ class OperatorEngine:
     def _op_grammar_mutate(self, buf, _byte_idx, _data):
         if self.ctx.grammar:
             return bytearray(
-                self.ctx.grammar.mutate(
-                    bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng
-                )[: self.ctx.max_len]
+                self.ctx.grammar.mutate(bytes(buf), max_len=self.ctx.max_len, rng=self.ctx._rng)[
+                    : self.ctx.max_len
+                ]
             )
 
     def _op_grammar_tree_mutate(self, buf, _byte_idx, data):
@@ -3098,9 +3135,7 @@ class OperatorEngine:
         if parse_shorten(bytes(buf)):
             mutated = self._shorten_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
         else:
-            mutated = self._shorten_mutator._generate_random_shn(
-                max_len=self.ctx.max_len, rng=rng
-            )
+            mutated = self._shorten_mutator._generate_random_shn(max_len=self.ctx.max_len, rng=rng)
         return bytearray(mutated[: self.ctx.max_len])
 
     def _op_x86_chunk_mutate(self, buf, _byte_idx, _data):
@@ -4423,9 +4458,7 @@ class OperatorEngine:
                 adjusted_cumulative.append(adjusted_total)
             if adjusted_total <= 0.0:
                 return None
-            idx = bisect.bisect_left(
-                adjusted_cumulative, self.ctx._rng.random() * adjusted_total
-            )
+            idx = bisect.bisect_left(adjusted_cumulative, self.ctx._rng.random() * adjusted_total)
         lo, hi = bounds[min(idx, len(bounds) - 1)]
         hi = min(hi, buf_len)
         if lo >= hi:
@@ -4559,6 +4592,125 @@ class OperatorEngine:
 
     # ── Main mutation orchestrator ─────────────────────────────────────
 
+    def _apply_op_once(self, op: str, buf: bytearray, data: bytes, track_effect: bool) -> bytearray:
+        f = self.f
+        f._last_ops_used.append(op)
+
+        byte_idx = self.select_position(buf, data)
+        # A delocalised operator never read this position, so publishing
+        # it as the mutation offset fabricates the region attribution the
+        # liveness estimator is built on. See _DELOCALISED_OPS.
+        f._last_mutation_offset = None if op in _DELOCALISED_OPS else byte_idx
+        f._last_ops_with_sites.append((op, byte_idx))
+        old_len = len(buf)
+
+        # Digest over a memoryview: no copy, ~3.4us at 64KiB. Only paid
+        # when a scheduler consumes the signal (_track_op_effect).
+        _h_before = xxhash.xxh3_64_intdigest(memoryview(buf)) if track_effect else 0
+
+        # Evaluated on the buffer actually handed to the operator, and
+        # before the call, because the operator may replace it. Returns
+        # None for the ~85% of ops that are not sniffer-gated, which is
+        # a dict miss and nothing more.
+        # `is not False`, not a truth test: format_gate_matches returns
+        # None for an operator that is not sniffer-gated, and None is
+        # falsy. Testing truthiness dropped every ungated operator out
+        # of the applicable set, so the ~85% of the table that has only
+        # one regime reported Applic 0 and RateA n/a.
+        if format_gate_matches(op, buf) is not False:
+            f._last_ops_applicable.add(op)
+
+        f._op_attempts[op] = f._op_attempts.get(op, 0) + 1
+        _t0 = time.perf_counter()
+        result = f._op_dispatch[op](buf, byte_idx, data)
+        _dt = time.perf_counter() - _t0
+
+        if track_effect:
+            # None means the handler mutated `buf` in place (the dominant
+            # convention here); anything else replaces the buffer.
+            _after = buf if result is None else result
+            if xxhash.xxh3_64_intdigest(memoryview(_after)) != _h_before:
+                f._last_ops_effective.add(op)
+            elif op not in _DECLINE_EXEMPT:
+                # Produced nothing. `_op_declined` covers the handlers
+                # that say so out loud; 41 more detect the same thing
+                # and then drop it -- `_op_sleb128_encode` tests
+                # `if result != bytes(buf)` and falls off the end, so
+                # the failure is known and unrecorded. Counted here
+                # rather than at 41 call sites: one definition of
+                # "produced nothing", and handlers added later are
+                # covered without remembering to.
+                #
+                # Inside the track_effect guard on purpose. The digest
+                # is the only cheap way to know, and a decline *is*
+                # scheduler feedback, so collecting it exactly when the
+                # scheduler consumes feedback is the right scope rather
+                # than a compromise; `Declin` reads n/a otherwise.
+                f._op_declines[op] = f._op_declines.get(op, 0) + 1
+        f._last_op_costs[op] = f._last_op_costs.get(op, 0.0) + _dt
+        # EMA of per-call cost, seeded on first observation so a single
+        # early sample doesn't get dragged toward zero.
+        prev_ema = f._op_time_ema.get(op)
+        f._op_time_ema[op] = _dt if prev_ema is None else (0.9 * prev_ema + 0.1 * _dt)
+
+        if result is not None:
+            if op == "havoc":
+                # Havoc's internal sub-mutations (2-16 per call, see
+                # havoc_mutate) can each touch a different position, so
+                # its frameshift bookkeeping is a full resync
+                # (apply_to_buffer) rather than the single
+                # on_insert/on_delete pair the other branch below uses
+                # for a single-site op.
+                #
+                # This used to `return result` here immediately,
+                # discarding whatever was left of n_mutations for this
+                # round. Since n_mutations is scaled by
+                # _last_perf_score (the seed-energy multiplier from
+                # SeedScorer), a highly-scored seed that earned extra
+                # mutation budget got none of the extra whenever havoc
+                # was drawn early in the loop -- which is often, since
+                # havoc is the most-drawn operator. Falling through to
+                # the shared loop tail instead (same as every other
+                # operator) makes the energy multiplier actually do
+                # something on havoc rounds; the existing loop-end
+                # hamming-distance computation after the for-loop
+                # already covers the havoc-selected case correctly, so
+                # nothing here needs to duplicate it.
+                buf = result if isinstance(result, bytearray) else bytearray(result)
+                if len(buf) > self.ctx.max_len:
+                    # _op_havoc's redundant-mutation retry path calls
+                    # _apply_single_mutation directly, bypassing
+                    # havoc_mutate's own end-of-call clamp -- so this
+                    # can't be assumed already true the way it is for
+                    # havoc_mutate's normal return.
+                    del buf[self.ctx.max_len :]
+                if f._frameshift.relations:
+                    f._frameshift.apply_to_buffer(buf)
+                return buf
+            new_len = min(len(result), self.ctx.max_len)
+            if f._frameshift.relations:
+                if new_len > old_len:
+                    f._frameshift.on_insert(byte_idx, new_len - old_len)
+                elif new_len < old_len:
+                    f._frameshift.on_delete(byte_idx, old_len - new_len)
+            buf = (
+                result[: self.ctx.max_len]
+                if isinstance(result, bytearray)
+                else bytearray(result[: self.ctx.max_len])
+            )
+        elif len(buf) > self.ctx.max_len:
+            # In-place handlers (result is None, the dominant convention
+            # here) are individually responsible for staying within
+            # max_len, and most do -- but a single missed bounds check
+            # in one of them (see _op_swap_regions) previously slipped
+            # straight through uncaught, since only the result-replaces-
+            # buf branch above was clamped. Enforce the invariant here
+            # too, for every in-place op, not just the ones we've
+            # already found bugs in.
+            del buf[self.ctx.max_len :]
+
+        return buf
+
     def mutate(self, data: bytes) -> bytes:
         from fuzzer_tool.core.similarity import hamming_distance
 
@@ -4682,122 +4834,17 @@ class OperatorEngine:
 
         track_effect = f._track_op_effect
 
-        for _ in range(n_mutations):
+        if f._use_slopt:
             op = self.select_op(ops)
-            f._last_ops_used.append(op)
-
-            byte_idx = self.select_position(buf, data)
-            # A delocalised operator never read this position, so publishing
-            # it as the mutation offset fabricates the region attribution the
-            # liveness estimator is built on. See _DELOCALISED_OPS.
-            f._last_mutation_offset = None if op in _DELOCALISED_OPS else byte_idx
-            f._last_ops_with_sites.append((op, byte_idx))
-            old_len = len(buf)
-
-            # Digest over a memoryview: no copy, ~3.4us at 64KiB. Only paid
-            # when a scheduler consumes the signal (_track_op_effect).
-            _h_before = xxhash.xxh3_64_intdigest(memoryview(buf)) if track_effect else 0
-
-            # Evaluated on the buffer actually handed to the operator, and
-            # before the call, because the operator may replace it. Returns
-            # None for the ~85% of ops that are not sniffer-gated, which is
-            # a dict miss and nothing more.
-            # `is not False`, not a truth test: format_gate_matches returns
-            # None for an operator that is not sniffer-gated, and None is
-            # falsy. Testing truthiness dropped every ungated operator out
-            # of the applicable set, so the ~85% of the table that has only
-            # one regime reported Applic 0 and RateA n/a.
-            if format_gate_matches(op, buf) is not False:
-                f._last_ops_applicable.add(op)
-
-            f._op_attempts[op] = f._op_attempts.get(op, 0) + 1
-            _t0 = time.perf_counter()
-            result = f._op_dispatch[op](buf, byte_idx, data)
-            _dt = time.perf_counter() - _t0
-
-            if track_effect:
-                # None means the handler mutated `buf` in place (the dominant
-                # convention here); anything else replaces the buffer.
-                _after = buf if result is None else result
-                if xxhash.xxh3_64_intdigest(memoryview(_after)) != _h_before:
-                    f._last_ops_effective.add(op)
-                elif op not in _DECLINE_EXEMPT:
-                    # Produced nothing. `_op_declined` covers the handlers
-                    # that say so out loud; 41 more detect the same thing
-                    # and then drop it -- `_op_sleb128_encode` tests
-                    # `if result != bytes(buf)` and falls off the end, so
-                    # the failure is known and unrecorded. Counted here
-                    # rather than at 41 call sites: one definition of
-                    # "produced nothing", and handlers added later are
-                    # covered without remembering to.
-                    #
-                    # Inside the track_effect guard on purpose. The digest
-                    # is the only cheap way to know, and a decline *is*
-                    # scheduler feedback, so collecting it exactly when the
-                    # scheduler consumes feedback is the right scope rather
-                    # than a compromise; `Declin` reads n/a otherwise.
-                    f._op_declines[op] = f._op_declines.get(op, 0) + 1
-            f._last_op_costs[op] = f._last_op_costs.get(op, 0.0) + _dt
-            # EMA of per-call cost, seeded on first observation so a single
-            # early sample doesn't get dragged toward zero.
-            prev_ema = f._op_time_ema.get(op)
-            f._op_time_ema[op] = _dt if prev_ema is None else (0.9 * prev_ema + 0.1 * _dt)
-
-            if result is not None:
-                if op == "havoc":
-                    # Havoc's internal sub-mutations (2-16 per call, see
-                    # havoc_mutate) can each touch a different position, so
-                    # its frameshift bookkeeping is a full resync
-                    # (apply_to_buffer) rather than the single
-                    # on_insert/on_delete pair the other branch below uses
-                    # for a single-site op.
-                    #
-                    # This used to `return result` here immediately,
-                    # discarding whatever was left of n_mutations for this
-                    # round. Since n_mutations is scaled by
-                    # _last_perf_score (the seed-energy multiplier from
-                    # SeedScorer), a highly-scored seed that earned extra
-                    # mutation budget got none of the extra whenever havoc
-                    # was drawn early in the loop -- which is often, since
-                    # havoc is the most-drawn operator. Falling through to
-                    # the shared loop tail instead (same as every other
-                    # operator) makes the energy multiplier actually do
-                    # something on havoc rounds; the existing loop-end
-                    # hamming-distance computation after the for-loop
-                    # already covers the havoc-selected case correctly, so
-                    # nothing here needs to duplicate it.
-                    buf = result if isinstance(result, bytearray) else bytearray(result)
-                    if len(buf) > self.ctx.max_len:
-                        # _op_havoc's redundant-mutation retry path calls
-                        # _apply_single_mutation directly, bypassing
-                        # havoc_mutate's own end-of-call clamp -- so this
-                        # can't be assumed already true the way it is for
-                        # havoc_mutate's normal return.
-                        del buf[self.ctx.max_len :]
-                    if f._frameshift.relations:
-                        f._frameshift.apply_to_buffer(buf)
-                    continue
-                new_len = min(len(result), self.ctx.max_len)
-                if f._frameshift.relations:
-                    if new_len > old_len:
-                        f._frameshift.on_insert(byte_idx, new_len - old_len)
-                    elif new_len < old_len:
-                        f._frameshift.on_delete(byte_idx, old_len - new_len)
-                buf = (
-                    result[: self.ctx.max_len]
-                    if isinstance(result, bytearray)
-                    else bytearray(result[: self.ctx.max_len])
-                )
-            elif len(buf) > self.ctx.max_len:
-                # In-place handlers (result is None, the dominant convention
-                # here) are individually responsible for staying within
-                # max_len, and most do -- but a single missed bounds check
-                # in one of them (see _op_swap_regions) previously slipped
-                # straight through uncaught, since only the result-replaces-
-                # buf branch above was clamped. Enforce the invariant here
-                # too, for every in-place op, not just the ones we've
-                # already found bugs in.
-                del buf[self.ctx.max_len :]
+            batch, exp = slopt_batch_size(data, op)
+            f._last_slopt_exp = exp
+            n_mutations = batch
+            for _ in range(batch):
+                buf = self._apply_op_once(op, buf, data, track_effect)
+        else:
+            for _ in range(n_mutations):
+                op = self.select_op(ops)
+                buf = self._apply_op_once(op, buf, data, track_effect)
 
         if f._frameshift.relations:
             f._frameshift.apply_to_buffer(buf)
