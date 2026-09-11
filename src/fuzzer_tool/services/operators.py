@@ -163,6 +163,13 @@ _DELOCALISED_OPS = frozenset(
     }
 )
 
+# Operators whose contract permits producing nothing without that being a
+# failure to record. `havoc` is measured by its sub-mutation count, not by
+# whether the top-level buffer moved; `field_repair` re-establishes
+# structural validity and is correct to be a no-op on an already-valid
+# input, which its own docstring states.
+_DECLINE_EXEMPT = frozenset({"havoc", "field_repair"})
+
 # Records per region when the parent seed carries no inferred `record_stride`.
 _REGION_SHUFFLE_RECORDS = 8
 
@@ -4705,6 +4712,22 @@ class OperatorEngine:
                 _after = buf if result is None else result
                 if xxhash.xxh3_64_intdigest(memoryview(_after)) != _h_before:
                     f._last_ops_effective.add(op)
+                elif op not in _DECLINE_EXEMPT:
+                    # Produced nothing. `_op_declined` covers the handlers
+                    # that say so out loud; 41 more detect the same thing
+                    # and then drop it -- `_op_sleb128_encode` tests
+                    # `if result != bytes(buf)` and falls off the end, so
+                    # the failure is known and unrecorded. Counted here
+                    # rather than at 41 call sites: one definition of
+                    # "produced nothing", and handlers added later are
+                    # covered without remembering to.
+                    #
+                    # Inside the track_effect guard on purpose. The digest
+                    # is the only cheap way to know, and a decline *is*
+                    # scheduler feedback, so collecting it exactly when the
+                    # scheduler consumes feedback is the right scope rather
+                    # than a compromise; `Declin` reads n/a otherwise.
+                    f._op_declines[op] = f._op_declines.get(op, 0) + 1
             f._last_op_costs[op] = f._last_op_costs.get(op, 0.0) + _dt
             # EMA of per-call cost, seeded on first observation so a single
             # early sample doesn't get dragged toward zero.

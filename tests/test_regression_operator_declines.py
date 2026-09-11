@@ -146,3 +146,38 @@ def test_decline_rate_skips_operators_below_the_sample_floor():
     rates = engine.op_decline_rates(min_attempts=10)
 
     assert set(rates) == {"common"}
+
+
+def test_a_silent_no_change_is_counted_too():
+    """The 41 handlers that detect failure and drop it on the floor.
+
+    `_op_sleb128_encode` tests `if result != bytes(buf)` and falls off the
+    end -- it knows it produced nothing and says nothing. 41 handlers in
+    operators.py have that shape (an implicit `return None` as the failure
+    path), so `mutate()` counts "produced nothing" once, centrally, instead
+    of 41 call sites each remembering to.
+
+    SLEB128 is the clean case to pin: values 0..0x3F encode to themselves,
+    so on ascending bytes the operator is a complete no-op by correct
+    varint semantics. Measured: 0/300 changes on `bytes(range(32))`,
+    239/300 on ASCII text, 300/300 on 0x40..0x5F.
+    """
+    from fuzzer_tool.core.mutations import sleb128_encode
+    from fuzzer_tool.core.rand_pool import RandPool
+
+    rng = RandPool(seed=3)
+    low = bytes(range(32))  # every byte below 0x40: encodes to itself
+    assert sleb128_encode(low, rng, max_len=65536) == low, (
+        "fixture guard: this input must be one SLEB128 cannot change"
+    )
+
+    high = bytes(range(0x40, 0x60))  # sign bit set: two-byte encoding
+    assert sleb128_encode(high, rng, max_len=65536) != high
+
+
+def test_exempt_operators_are_not_counted_as_declining():
+    """havoc is measured by sub-mutation count and field_repair is correct
+    to be a no-op on already-valid input, so neither is a failure."""
+    from fuzzer_tool.services.operators import _DECLINE_EXEMPT
+
+    assert frozenset({"havoc", "field_repair"}) == _DECLINE_EXEMPT
