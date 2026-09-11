@@ -2,6 +2,7 @@
 
 from fuzzer_tool.core.schedulers.c2ucb import C2UCBScheduler
 from fuzzer_tool.core.schedulers.cmaes import CMAESScheduler
+from fuzzer_tool.core.schedulers.consolidated import ConsolidatedScheduler
 from fuzzer_tool.core.schedulers.contextual import ContextualLinUCBScheduler
 from fuzzer_tool.core.schedulers.cucb import CUCBScheduler
 from fuzzer_tool.core.schedulers.cusum_ucb import CUSUM_UCBScheduler
@@ -23,6 +24,7 @@ from fuzzer_tool.core.schedulers.swucb import SWUCBScheduler
 __all__ = [
     "FPLScheduler",
     "CMAESScheduler",
+    "ConsolidatedScheduler",
     "C2UCBScheduler",
     "MonteCarloScheduler",
     "MOptScheduler",

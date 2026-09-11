@@ -62,6 +62,7 @@ import pytest
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers import (
     CMAESScheduler,
+    ConsolidatedScheduler,
     ContextualLinUCBScheduler,
     CUCBScheduler,
     DUCBScheduler,
@@ -104,6 +105,9 @@ ROUNDS = 6_000
 #:   Contextual 0.968 | EpsGreedy 0.920 | Exp3 0.850 | GPUCB 0.694
 #:   MonteCarlo 0.971 | Hierarchical 0.994 median (rare starvation: see below)
 RELIABLE = {
+    # Floors below the observed minimum over 40 seeds at ROUNDS: share
+    # 0.947, slope max 0.611 (median 0.267).
+    "Consolidated": (lambda seed: ConsolidatedScheduler(rng=RandPool(seed)), 0.90, 0.70),
     "ContextualLinUCB": (lambda seed: ContextualLinUCBScheduler(dim=4), 0.90, 0.40),
     "EpsilonGreedy": (lambda seed: EpsilonGreedyScheduler(), 0.85, 0.45),
     "Exp3": (lambda seed: Exp3Scheduler(), 0.78, 0.70),
@@ -325,6 +329,9 @@ RECOVERS = {
     "Exp3": (Exp3Scheduler, 0.30),
     "GPUCB": (GPUCBScheduler, 0.35),
     "Hierarchical": (HierarchicalBanditScheduler, 0.90),
+    # Minimum over 20 seeds 0.946: the same pseudocount cap as Hierarchical,
+    # without its category-first starvation.
+    "Consolidated": (lambda: ConsolidatedScheduler(rng=RandPool(FIXED_SEED)), 0.90),
     # The three schedulers built for this regime. Floors sit below the
     # observed minimum over 20 seeds at 20k rounds: D-UCB 0.739,
     # SW-UCB 0.806, CUCB 0.910.

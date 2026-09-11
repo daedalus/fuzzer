@@ -121,6 +121,12 @@ def _all_operator_schedulers():
         # CUCB batches a round; select_op() closes any round left open.
         ("CUCBScheduler", cucb, cucb.select_op, cucb.record),
         ("CUSUM_UCBScheduler", cusum := S.CUSUM_UCBScheduler(), cusum.select_op, cusum.record),
+        (
+            "ConsolidatedScheduler",
+            consolidated := S.ConsolidatedScheduler(),
+            consolidated.select_op,
+            consolidated.record,
+        ),
         # RoundRobin is stateless in terms of rewards; record() is no-op.
         (
             "RoundRobinScheduler",

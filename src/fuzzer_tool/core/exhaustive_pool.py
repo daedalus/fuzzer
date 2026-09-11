@@ -381,6 +381,9 @@ class ExhaustivePool:
     def betavariate_list(self, alpha: float, beta: float, count: int) -> list[float]:
         self._continuous("betavariate_list()")
 
+    def betavariate_array(self, alphas, betas):
+        self._continuous("betavariate_array()")
+
     def gammavariate(self, alpha: float, beta: float = 1.0) -> float:
         self._continuous("gammavariate()")
 

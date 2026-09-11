@@ -427,6 +427,15 @@ class RandPool:
             return []
         return list(self._rng.beta(alpha, beta, size=count))
 
+    def betavariate_array(self, alphas, betas) -> np.ndarray:
+        """Return one Beta(alphas[i], betas[i]) draw per element, as an array.
+
+        Unlike :meth:`betavariate_list` (one distribution, *count* draws),
+        the parameters vary per element: a Thompson-sampling step over K
+        arms in one C-level numpy call rather than K Python-level calls.
+        """
+        return self._rng.beta(alphas, betas)
+
     def gammavariate(self, alpha: float, beta: float = 1.0) -> float:
         """Return a random float from Gamma(*alpha*, *beta*).
 
