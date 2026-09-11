@@ -425,6 +425,32 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
 _deterministic_mutation_stream.last_truncated = 0
 
 
+#: No-Elo selection order, highest first: with Elo off, the first enabled
+#: scheduler here selects every operator. ``cem`` and ``invasion`` are
+#: absent on purpose -- both ride on ``f.mc`` and ``mc_bandit``, which the
+#: ``bandit`` entry already claims ahead of them. Pinned by
+#: test_regression_scheduler_fallback_precedence.
+_FALLBACK_PRECEDENCE = (
+    "replicator",
+    "mopt",
+    "bandit",
+    "exp3",
+    "eps_greedy",
+    "hierarchical",
+    "gp_ucb",
+    "cmaes",
+    "contextual",
+    "c2ucb",
+    "ducb",
+    "swucb",
+    "kl_ducb",
+    "kl_swucb",
+    "cucb",
+    "cusum_ucb",
+    "round_robin",
+)
+
+
 def operator_strategy_pool(f) -> list[str]:
     """The operator-strategy ballot: every scheduler that can select right now.
 
@@ -4042,6 +4068,7 @@ class OperatorEngine:
 
         if f._stall_recovery_active:
             f._meta_strategy = "random_stall"
+            f._op_selector = None
             return self.ctx._rng.choice(ops)
 
         available = operator_strategy_pool(f)
@@ -4060,7 +4087,16 @@ class OperatorEngine:
             strategy = available[0]
             f._meta_strategy = strategy
         else:
-            strategy = None
+            # No Elo: the highest-precedence enabled scheduler selects. This
+            # used to be a second copy of the whole dispatch chain below it,
+            # which is how a scheduler could have a branch in one chain and
+            # not the other (cmaes, then fpl, which had neither).
+            strategy = next((s for s in _FALLBACK_PRECEDENCE if s in available), None)
+
+        # Who actually chose this exec's operators, in either mode. The
+        # reward fan-out reads it: a scheduler whose update is only valid for
+        # its own draws must not be fed another scheduler's.
+        f._op_selector = strategy
 
         if f._use_elo and f._elo and strategy:
             f._meta_strategy_used.add(strategy)
@@ -4124,12 +4160,11 @@ class OperatorEngine:
             op = f._cusum_ucb.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "invasion" and f.mc and f.mc_bandit:
-            # No fallback-chain branch below by design: invasion reads
-            # f.mc's own bandit_stats() as its resistance signal, so
-            # without Elo the plain "bandit" branch already covers the
-            # same f.mc/mc_bandit condition earlier in that chain -- an
-            # invasion branch there would be dead code (see the cmaes note
-            # above for what that failure mode looks like in practice).
+            # Not in _FALLBACK_PRECEDENCE by design: invasion reads f.mc's
+            # own bandit_stats() as its resistance signal, so without Elo
+            # the plain "bandit" entry already covers the same
+            # f.mc/mc_bandit condition ahead of it -- invasion there could
+            # never be reached.
             #
             # bandit_stats() covers every registered arm, not just this
             # call's candidate `ops`, so it's filtered down first --
@@ -4152,58 +4187,6 @@ class OperatorEngine:
             ) or self.ctx._rng.choice(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "round_robin" and f._round_robin:
-            op = f._round_robin.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_replicator and f._replicator:
-            op = f._replicator.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_mopt and f._mopt:
-            op, pid = f._mopt.select_op(ops)
-            f._last_mopt_particles.append(pid)
-        elif f.mc and f.mc_bandit:
-            op = f.mc.select_op(ops, prev_op=f._prev_bandit_op)
-            f._prev_bandit_op = op
-            f._last_mopt_particles.append(None)
-        elif f._use_exp3 and f._exp3:
-            op = f._exp3.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_eps_greedy and f._eps_greedy:
-            op = f._eps_greedy.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_hierarchical and f._hierarchical:
-            op = f._hierarchical.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_gp_ucb and f._gp_ucb:
-            op = f._gp_ucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_cmaes and f._cmaes:
-            op = f._cmaes.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_contextual and f._contextual:
-            op = f._contextual.select_op(ops, self._context_vector)
-            f._last_mopt_particles.append(None)
-        elif f._use_c2ucb and f._c2ucb:
-            op = f._c2ucb.select_op(ops, self._context_vector)
-            f._last_mopt_particles.append(None)
-        elif f._use_ducb and f._ducb:
-            op = f._ducb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_swucb and f._swucb:
-            op = f._swucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_kl_ducb and f._kl_ducb:
-            op = f._kl_ducb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_kl_swucb and f._kl_swucb:
-            op = f._kl_swucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_cucb and f._cucb:
-            op = f._cucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_cusum_ucb and f._cusum_ucb:
-            op = f._cusum_ucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif f._use_round_robin and f._round_robin:
             op = f._round_robin.select_op(ops)
             f._last_mopt_particles.append(None)
         else:

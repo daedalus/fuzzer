@@ -1729,6 +1729,9 @@ class Fuzzer:
             )
         self._use_replicator = replicator
         self._seed_strategy = None
+        # Operator scheduler that made the last select_op choice (None when
+        # the random fallback or stall recovery chose). Set in select_op.
+        self._op_selector: str | None = None
         self._seed_strategy_pool: list[str] = []
         self._seed_strategies_used: set[str] = set()
         self._use_boltzmann = boltzmann

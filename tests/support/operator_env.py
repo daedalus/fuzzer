@@ -173,6 +173,7 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_._meta_strategy = None
             self_._meta_strategy_cached = None
             self_._meta_strategy_used = set()
+            self_._op_selector = None
             self_._stall_recovery_active = False
             self_._frameshift = _MockFrameshift()
             self_.markov = _MockMarkov()

@@ -18,6 +18,8 @@ branch, regardless of which scheduler the test was actually exercising.
 Restored alongside adding ``cusum_ucb``.
 """
 
+from types import SimpleNamespace
+
 import pytest
 
 from fuzzer_tool.core.elo import BayesianEloTracker
@@ -258,6 +260,46 @@ class TestFallbackPrecedence:
         op = OperatorEngine(f).select_op(["bit_flip"])
         assert op == "op_mopt"
         assert f._last_mopt_particles == [7]
+
+    def test_module_precedence_is_the_one_pinned_here(self):
+        """select_op resolves the no-Elo scheduler from
+        operators._FALLBACK_PRECEDENCE (it used to be a second copy of the
+        dispatch chain); this file's list is the pin, so they must agree."""
+        from fuzzer_tool.services.operators import _FALLBACK_PRECEDENCE as module_order
+
+        assert list(module_order) == _FALLBACK_PRECEDENCE
+
+
+class TestOpSelector:
+    """``f._op_selector`` names the scheduler that actually chose, in both
+    modes, so the reward fan-out can tell a scheduler's own draws from
+    another's."""
+
+    def test_without_elo_names_the_precedence_winner(self):
+        f = _FakeFuzzer()
+        f.enable("exp3")
+        f.enable("gp_ucb")
+        OperatorEngine(f).select_op(["bit_flip"])
+        assert f._op_selector == "exp3"
+
+    def test_with_elo_names_the_elected_strategy(self):
+        f = _FakeFuzzer()
+        f.enable("exp3")
+        f.enable("gp_ucb")
+        f._use_elo = True
+        f._elo = SimpleNamespace(select_strategy=lambda available: "gp_ucb")
+        OperatorEngine(f).select_op(["bit_flip"])
+        assert f._op_selector == "gp_ucb"
+
+    def test_random_fallback_and_stall_name_nobody(self):
+        f = _FakeFuzzer()
+        f._op_selector = "exp3"
+        OperatorEngine(f).select_op(["bit_flip"])
+        assert f._op_selector is None
+        f.enable("exp3")
+        f._stall_recovery_active = True
+        OperatorEngine(f).select_op(["bit_flip"])
+        assert f._op_selector is None
 
 
 class TestReportGroupSeparation:
