@@ -775,6 +775,7 @@ class Fuzzer:
         continuum=False,
         exp3=False,
         exp3_gamma=0.1,
+        slopt=False,
         eps_greedy=False,
         eps_greedy_epsilon0=1.0,
         eps_greedy_decay=0.9995,
@@ -1760,6 +1761,9 @@ class Fuzzer:
         if exp3:
             self._exp3 = Exp3Scheduler(gamma=exp3_gamma, rng=self._rng)
             log.info("EXP3 adversarial bandit enabled (gamma=%.2f)", exp3_gamma)
+        # SLOPT batch-size bandit
+        self._use_slopt = slopt
+        self._last_slopt_exp = 0.0
         # Epsilon-greedy with annealing
         self._use_eps_greedy = eps_greedy
         self._eps_greedy = None
@@ -4448,8 +4452,9 @@ class Fuzzer:
 
         if self.mc and self.mc_bandit:
             for op, ok, w in op_rewards:
-                self.mc.record(op, ok, weight=w)
-                self.mc.record_brier(op, ok, weight=w)
+                arm_name = f"{op}_{self._last_slopt_exp:.2f}" if self._use_slopt else op
+                self.mc.record(arm_name, ok, weight=w)
+                self.mc.record_brier(arm_name, ok, weight=w)
                 # Secretary-problem: track operator quality for optimal stopping
                 if self._secretary:
                     if op not in self._op_secretary:

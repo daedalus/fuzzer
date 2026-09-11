@@ -574,6 +574,7 @@ def cmd_fuzz(args):
         markov_order=args.markov_order if use_markov else 0,
         markov_generate=args.markov_gen,
         mc_bandit=args.mc_bandit,
+        slopt=args.slopt,
         mc_cem=args.mc_cem,
         mc_cycle_detect=getattr(args, "mc_cycle_detect", False),
         mopt=getattr(args, "mopt", False),
@@ -1727,6 +1728,7 @@ _HAIL_MARY_FLAGS = (
     "lineage",
     "lineage_backtrack",
     "exp3",
+    "slopt",
     "eps_greedy",
     "hierarchical_bandit",
     "gp_ucb",
@@ -2070,6 +2072,11 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--exp3", action="store_true", help="Enable EXP3 adversarial bandit operator scheduling"
+    )
+    fuzz_parser.add_argument(
+        "--slopt",
+        action="store_true",
+        help="Enable SLOPT batch-size bandit optimisation (operator + exponent).",
     )
     fuzz_parser.add_argument(
         "--invasion",
