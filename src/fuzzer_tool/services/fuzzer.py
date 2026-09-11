@@ -61,6 +61,7 @@ from fuzzer_tool.core.schedulers import (
     KL_SWUCBScheduler,
     MonteCarloScheduler,
     MOptScheduler,
+    MOSSScheduler,
     ReplicatorScheduler,
     RoundRobinScheduler,
     SWUCBScheduler,
@@ -109,6 +110,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "moss",
     "c2ucb",
     "fpl",
     "invasion",
@@ -801,6 +803,8 @@ class Fuzzer:
         fpl=False,
         fpl_epsilon=1.0,
         consolidated=False,
+        moss=False,
+        moss_gamma=1.0,
         contextual=False,
         contextual_alpha=1.0,
         contextual_lambda=1.0,
@@ -1867,6 +1871,14 @@ class Fuzzer:
             self._consolidated = ConsolidatedScheduler(rng=self._rng)
             log.info("Consolidated operator scheduler enabled")
 
+        # MOSS: UCB whose exploration bonus ends at an arm's fair share t/K,
+        # built for many low-yield operators (see core/schedulers/moss.py).
+        self._use_moss = moss
+        self._moss = None
+        if moss:
+            self._moss = MOSSScheduler(gamma=moss_gamma, rng=self._rng)
+            log.info("MOSS enabled (gamma=%.5f)", moss_gamma)
+
         # Round-robin: deterministic baseline. --seed should reproduce
         # exactly, so no RandPool is used here -- the cycling order is
         # the registration order, fully driven by operator init.
@@ -2072,6 +2084,7 @@ class Fuzzer:
             or self._kl_ducb
             or self._kl_swucb
             or self._consolidated
+            or self._moss
             or self._cucb
             or self._cusum_ucb
             or self._fpl
@@ -2267,6 +2280,8 @@ class Fuzzer:
             _register_arms(self._fpl)
         if self._consolidated:
             _register_arms(self._consolidated, _format_priors)
+        if self._moss:
+            _register_arms(self._moss)
         if self._contextual:
             _register_arms(self._contextual)
         if self._c2ucb:
@@ -4517,6 +4532,7 @@ class Fuzzer:
             self._cusum_ucb,
             self._fpl,
             self._consolidated,
+            self._moss,
         ):
             if scheduler is None:
                 continue
@@ -5694,6 +5710,8 @@ class Fuzzer:
             ops.append("cucb")
         if getattr(self, "_cusum_ucb", False):
             ops.append("cusum_ucb")
+        if getattr(self, "_moss", False):
+            ops.append("moss")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
@@ -5918,6 +5936,8 @@ class Fuzzer:
             ops.append("cucb")
         if getattr(self, "_cusum_ucb", False):
             ops.append("cusum_ucb")
+        if getattr(self, "_moss", False):
+            ops.append("moss")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
         if getattr(self, "_use_contextual", False):

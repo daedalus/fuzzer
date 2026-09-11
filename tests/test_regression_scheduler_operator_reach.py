@@ -127,6 +127,7 @@ def _all_operator_schedulers():
             consolidated.select_op,
             consolidated.record,
         ),
+        ("MOSSScheduler", moss := S.MOSSScheduler(), moss.select_op, moss.record),
         # RoundRobin is stateless in terms of rewards; record() is no-op.
         (
             "RoundRobinScheduler",

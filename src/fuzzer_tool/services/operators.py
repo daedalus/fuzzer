@@ -458,6 +458,7 @@ _FALLBACK_PRECEDENCE = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "moss",
     "fpl",
     "round_robin",
 )
@@ -527,6 +528,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("cucb")
     if f._use_cusum_ucb and f._cusum_ucb:
         available.append("cusum_ucb")
+    if f._use_moss and f._moss:
+        available.append("moss")
     if f._use_fpl and f._fpl:
         available.append("fpl")
     if f._use_invasion and f.mc and f.mc_bandit:
@@ -4212,6 +4215,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "cusum_ucb" and f._cusum_ucb:
             op = f._cusum_ucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "moss" and f._moss:
+            op = f._moss.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "invasion" and f.mc and f.mc_bandit:
             # Not in _FALLBACK_PRECEDENCE by design: invasion reads f.mc's

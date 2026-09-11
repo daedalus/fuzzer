@@ -73,6 +73,7 @@ from fuzzer_tool.core.schedulers import (
     HierarchicalBanditScheduler,
     MonteCarloScheduler,
     MOptScheduler,
+    MOSSScheduler,
     ReplicatorScheduler,
     SWUCBScheduler,
 )
@@ -115,6 +116,9 @@ RELIABLE = {
     "FPL": (lambda seed: FPLScheduler(epsilon=1.0, rng=RandPool(seed)), 0.90, 0.40),
     "Hierarchical": (lambda seed: HierarchicalBanditScheduler(), 0.90, 0.40),
     "MonteCarlo": (lambda seed: MonteCarloScheduler(), 0.90, 0.45),
+    # Floors below the observed minimum over 40 seeds at ROUNDS: share
+    # 0.963, slope max 0.368 (median 0.194).
+    "MOSS": (lambda seed: MOSSScheduler(rng=RandPool(seed)), 0.90, 0.45),
 }
 
 

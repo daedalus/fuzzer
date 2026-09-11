@@ -98,6 +98,8 @@ def _worker_main(
     cucb_gamma: float = 0.9995,
     swucb_window: int = 4000,
     consolidated: bool = False,
+    moss: bool = False,
+    moss_gamma: float = 1.0,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -195,6 +197,8 @@ def _worker_main(
         cucb_gamma=cucb_gamma,
         swucb_window=swucb_window,
         consolidated=consolidated,
+        moss=moss,
+        moss_gamma=moss_gamma,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -563,6 +567,8 @@ def run_parallel(
     cucb_gamma: float = 0.9995,
     swucb_window: int = 4000,
     consolidated: bool = False,
+    moss: bool = False,
+    moss_gamma: float = 1.0,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -697,6 +703,8 @@ def run_parallel(
         cucb_gamma=cucb_gamma,
         swucb_window=swucb_window,
         consolidated=consolidated,
+        moss=moss,
+        moss_gamma=moss_gamma,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

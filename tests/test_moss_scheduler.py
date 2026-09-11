@@ -292,8 +292,9 @@ _TARGET = Path(__file__).resolve().parent.parent / "targets" / "test_target"
 
 @pytest.mark.skipif(not _TARGET.exists(), reason="targets/test_target not built")
 def test_fuzzer_wiring_selects_and_learns(tmp_path):
-    """--moss builds it with the fuzzer's pool, it selects ahead of the
-    bandit without Elo, and it learns from its rounds."""
+    """--moss builds it with the fuzzer's pool and --moss-gamma; without
+    Elo it selects ahead of FPL (below it in _FALLBACK_PRECEDENCE), learns
+    from its rounds, and FPL still learns from them (shared fan-out)."""
     from fuzzer_tool.services.fuzzer import Fuzzer
 
     corpus, crashes = tmp_path / "c", tmp_path / "k"
@@ -307,7 +308,7 @@ def test_fuzzer_wiring_selects_and_learns(tmp_path):
         use_coverage=True,
         moss=True,
         moss_gamma=0.999,
-        mc_bandit=True,
+        fpl=True,
     )
     assert isinstance(f._moss, MOSSScheduler)
     assert f._moss.gamma == 0.999
@@ -318,6 +319,6 @@ def test_fuzzer_wiring_selects_and_learns(tmp_path):
     for i in range(40):
         f.fuzz_one(bytes([65 + i % 26]) * 16)
         selectors.add(f._op_selector)
-    assert "moss" in selectors
-    assert "bandit" not in selectors
+    assert selectors == {"moss"}
     assert f._moss.bandit_stats()["moss_pulls"] > 0
+    assert f._fpl.bandit_stats()["fpl_pulls"] > 0, "FPL stopped learning from MOSS's rounds"

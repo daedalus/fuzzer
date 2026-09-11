@@ -51,6 +51,7 @@ class TestEloAllEnablesAllSchedulers:
             "c2ucb",
             "fpl",
             "consolidated",
+            "moss",
             "contextual",
             "invasion",
             "cmaes",

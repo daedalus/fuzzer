@@ -30,6 +30,7 @@ requires_test_target = pytest.mark.skipif(
 #: Ballot name -> Fuzzer kwargs that enable it.
 _KWARGS = {
     "consolidated": {"consolidated": True},
+    "moss": {"moss": True},
     "replicator": {"replicator": True},
     "bandit": {"mc_bandit": True},
     "mopt": {"mopt": True},

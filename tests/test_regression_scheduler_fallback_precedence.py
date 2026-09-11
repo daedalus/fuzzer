@@ -47,6 +47,7 @@ _FALLBACK_PRECEDENCE = [
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "moss",
     "fpl",
     "round_robin",
 ]
@@ -127,6 +128,7 @@ class _FakeFuzzer:
         "kl_swucb": ("_use_kl_swucb", "_kl_swucb"),
         "cucb": ("_use_cucb", "_cucb"),
         "cusum_ucb": ("_use_cusum_ucb", "_cusum_ucb"),
+        "moss": ("_use_moss", "_moss"),
         "fpl": ("_use_fpl", "_fpl"),
         "round_robin": ("_use_round_robin", "_round_robin"),
     }

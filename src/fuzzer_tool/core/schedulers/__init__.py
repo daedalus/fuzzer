@@ -17,6 +17,7 @@ from fuzzer_tool.core.schedulers.kl_swucb import KL_SWUCBScheduler
 from fuzzer_tool.core.schedulers.mcts import AlphaBetaMCTSSeedScheduler, MCTSSeedScheduler
 from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
 from fuzzer_tool.core.schedulers.mopt import MOptScheduler
+from fuzzer_tool.core.schedulers.moss import MOSSScheduler
 from fuzzer_tool.core.schedulers.replicator import ReplicatorScheduler
 from fuzzer_tool.core.schedulers.round_robin import RoundRobinScheduler
 from fuzzer_tool.core.schedulers.swucb import SWUCBScheduler
@@ -28,6 +29,7 @@ __all__ = [
     "C2UCBScheduler",
     "MonteCarloScheduler",
     "MOptScheduler",
+    "MOSSScheduler",
     "ReplicatorScheduler",
     "Exp3Scheduler",
     "EpsilonGreedyScheduler",

@@ -480,6 +480,8 @@ def cmd_fuzz(args):
             fpl=getattr(args, "fpl", False),
             fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
             consolidated=getattr(args, "consolidated", False),
+            moss=getattr(args, "moss", False),
+            moss_gamma=getattr(args, "moss_gamma", 1.0),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
             contextual=getattr(args, "contextual", False),
@@ -530,6 +532,7 @@ def cmd_fuzz(args):
         args.cusum_ucb = True
         args.fpl = True
         args.consolidated = True
+        args.moss = True
         args.contextual = True
         args.c2ucb = True
         args.invasion = True
@@ -678,6 +681,8 @@ def cmd_fuzz(args):
         fpl=getattr(args, "fpl", False),
         fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
         consolidated=getattr(args, "consolidated", False),
+        moss=getattr(args, "moss", False),
+        moss_gamma=getattr(args, "moss_gamma", 1.0),
         # kl_ducb/kl_swucb/markov_blend were passed to run_parallel but not
         # here, so in the default single-process mode --kl-ducb, --kl-swucb
         # (and --elo all, which sets both) and --markov-blend built nothing.
@@ -1740,6 +1745,7 @@ _HAIL_MARY_FLAGS = (
     "cusum_ucb",
     "fpl",
     "consolidated",
+    "moss",
     "fractal_partition",
     "contextual",
     "c2ucb",
@@ -2282,6 +2288,20 @@ def main() -> int:
             "a category-shrunk prior and capped evidence. Takes precedence over "
             "every other operator scheduler when Elo is off"
         ),
+    )
+    fuzz_parser.add_argument(
+        "--moss",
+        action="store_true",
+        help=(
+            "Enable MOSS: UCB whose exploration bonus ends at an operator's "
+            "fair share of pulls; suited to many low-yield operators"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--moss-gamma",
+        type=float,
+        default=1.0,
+        help="MOSS discount per pull; <1 forgets, for decaying yields (default: 1.0)",
     )
     fuzz_parser.add_argument(
         "--contextual",
