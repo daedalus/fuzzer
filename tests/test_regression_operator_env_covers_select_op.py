@@ -31,8 +31,12 @@ from tests.support.operator_env import make_minimal_fuzzer
 
 def _attributes_select_op_reads() -> set[str]:
     tree = ast.parse(inspect.getsource(operators_mod))
-    fns = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "select_op"]
-    assert fns, "select_op not found -- this test's premise is stale"
+    # The ballot itself moved out of select_op into operator_strategy_pool(),
+    # which select_op calls with the same fuzzer, so both bodies are the
+    # contract.
+    wanted = {"select_op", "operator_strategy_pool"}
+    fns = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name in wanted]
+    assert {fn.name for fn in fns} == wanted, "select_op/ballot not found -- premise is stale"
 
     # `f` is the local the method binds the fuzzer to; anything read off it
     # is part of the contract a mock has to satisfy.

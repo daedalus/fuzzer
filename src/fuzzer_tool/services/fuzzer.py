@@ -76,7 +76,7 @@ from fuzzer_tool.core.shapley import ShapleyAttribution
 from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.validity import Validity, ValidityChannel
 from fuzzer_tool.services.corpus_manager import CorpusManager
-from fuzzer_tool.services.operators import OperatorEngine
+from fuzzer_tool.services.operators import OperatorEngine, operator_strategy_pool
 from fuzzer_tool.services.ptrace_coverage import (
     PtraceCoverage,
 )
@@ -5545,47 +5545,10 @@ class Fuzzer:
             return
         if self._meta_strategy not in self._meta_strategy_used:
             return
-        all_strategies = []
-        if self._use_replicator and self._replicator:
-            all_strategies.append("replicator")
-        if self.mc and self.mc_bandit:
-            all_strategies.append("bandit")
-        if self._use_mopt and self._mopt:
-            all_strategies.append("mopt")
-        if self.mc and self.mc_cem and self.mc.cem_fitted:
-            all_strategies.append("cem")
-        if self._exp3:
-            all_strategies.append("exp3")
-        if self._eps_greedy:
-            all_strategies.append("eps_greedy")
-        if self._hierarchical:
-            all_strategies.append("hierarchical")
-        if self._gp_ucb:
-            all_strategies.append("gp_ucb")
-        # cmaes was missing from this ballot while operators.py::select_op
-        # listed it: a cmaes-vs-other match was recorded when cmaes was the
-        # selected strategy, but never when the other one was, so its rating
-        # moved on only half its games.
-        if self._cmaes:
-            all_strategies.append("cmaes")
-        if self._contextual:
-            all_strategies.append("contextual")
-        if self._c2ucb:
-            all_strategies.append("c2ucb")
-        if self._ducb:
-            all_strategies.append("ducb")
-        if self._swucb:
-            all_strategies.append("swucb")
-        if self._cucb:
-            all_strategies.append("cucb")
-        if self._cusum_ucb:
-            all_strategies.append("cusum_ucb")
-        if self._fpl:
-            all_strategies.append("fpl")
-        if self._use_invasion and self.mc and self.mc_bandit:
-            all_strategies.append("invasion")
-        if self._use_round_robin and self._round_robin:
-            all_strategies.append("round_robin")
+        # Same list select_op offered, from the same function: an opponent
+        # list kept by hand here drifted from the selection side twice (cmaes,
+        # then kl_ducb/kl_swucb in one direction and fpl in the other).
+        all_strategies = operator_strategy_pool(self)
         for other in all_strategies:
             if other != self._meta_strategy:
                 self._elo.record_strategy_match(self._meta_strategy, other, score)

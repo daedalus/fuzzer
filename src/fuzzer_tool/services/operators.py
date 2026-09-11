@@ -425,6 +425,75 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
 _deterministic_mutation_stream.last_truncated = 0
 
 
+def operator_strategy_pool(f) -> list[str]:
+    """The operator-strategy ballot: every scheduler that can select right now.
+
+    One list, read by both sides of the Elo meta-strategy. ``select_op``
+    offers it to ``select_strategy``; ``Fuzzer._record_operator_strategy_matches``
+    plays the selected strategy against the rest of it. Those two used to be
+    two hand-kept lists, and they drifted in both directions at once:
+
+    - ``kl_ducb`` and ``kl_swucb`` were on the selection side and missing
+      from the opponent side, so a match involving them was recorded only
+      when they were the one selected -- their ratings moved on half their
+      games, the same asymmetry already fixed once for cmaes.
+    - ``fpl`` was on the opponent side and missing from the selection side:
+      it collected ratings as a phantom opponent while never being offered.
+
+    Order is ballot order; ``select_strategy`` falls back to the first entry
+    while nothing is rated yet, so it is not cosmetic.
+    """
+    available = []
+    if f._use_replicator and f._replicator:
+        available.append("replicator")
+    if f.mc and f.mc_bandit:
+        available.append("bandit")
+    if f._use_mopt and f._mopt:
+        available.append("mopt")
+    if f.mc and f.mc_cem and f.mc.cem_fitted:
+        available.append("cem")
+    if f._use_exp3 and f._exp3:
+        available.append("exp3")
+    if f._use_eps_greedy and f._eps_greedy:
+        available.append("eps_greedy")
+    if f._use_hierarchical and f._hierarchical:
+        available.append("hierarchical")
+    if f._use_gp_ucb and f._gp_ucb:
+        available.append("gp_ucb")
+    # cmaes was missing from this list while `strategy == "cmaes"` had a
+    # dispatch branch in select_op and `_use_cmaes` had a branch in the no-Elo
+    # fallback chain. The effect was not a preference, it was a
+    # disappearance: with --elo on and any other scheduler enabled, Elo
+    # picked a strategy from this list, the chain matched that strategy's
+    # branch, and the fallback chain -- the only place cmaes could ever
+    # be reached -- was never evaluated. `--cma-es --elo` ran CMA-ES that
+    # was arm-registered and fed record() on every outcome, and let it
+    # select nothing at all. Its dispatch branch was dead code.
+    if f._use_cmaes and f._cmaes:
+        available.append("cmaes")
+    if f._use_contextual and f._contextual:
+        available.append("contextual")
+    if f._use_c2ucb and f._c2ucb:
+        available.append("c2ucb")
+    if f._use_ducb and f._ducb:
+        available.append("ducb")
+    if f._use_kl_ducb and f._kl_ducb:
+        available.append("kl_ducb")
+    if f._use_swucb and f._swucb:
+        available.append("swucb")
+    if f._use_kl_swucb and f._kl_swucb:
+        available.append("kl_swucb")
+    if f._use_cucb and f._cucb:
+        available.append("cucb")
+    if f._use_cusum_ucb and f._cusum_ucb:
+        available.append("cusum_ucb")
+    if f._use_invasion and f.mc and f.mc_bandit:
+        available.append("invasion")
+    if f._use_round_robin and f._round_robin:
+        available.append("round_robin")
+    return available
+
+
 class OperatorEngine:
     """Manages mutation operator selection and execution.
 
@@ -3975,54 +4044,7 @@ class OperatorEngine:
             f._meta_strategy = "random_stall"
             return self.ctx._rng.choice(ops)
 
-        available = []
-        if f._use_replicator and f._replicator:
-            available.append("replicator")
-        if f.mc and f.mc_bandit:
-            available.append("bandit")
-        if f._use_mopt and f._mopt:
-            available.append("mopt")
-        if f.mc and f.mc_cem and f.mc.cem_fitted:
-            available.append("cem")
-        if f._use_exp3 and f._exp3:
-            available.append("exp3")
-        if f._use_eps_greedy and f._eps_greedy:
-            available.append("eps_greedy")
-        if f._use_hierarchical and f._hierarchical:
-            available.append("hierarchical")
-        if f._use_gp_ucb and f._gp_ucb:
-            available.append("gp_ucb")
-        # cmaes was missing from this list while `strategy == "cmaes"` had a
-        # dispatch branch below and `_use_cmaes` had a branch in the no-Elo
-        # fallback chain. The effect was not a preference, it was a
-        # disappearance: with --elo on and any other scheduler enabled, Elo
-        # picked a strategy from this list, the chain matched that strategy's
-        # branch, and the fallback chain -- the only place cmaes could ever
-        # be reached -- was never evaluated. `--cma-es --elo` ran CMA-ES that
-        # was arm-registered and fed record() on every outcome, and let it
-        # select nothing at all. Its dispatch branch was dead code.
-        if f._use_cmaes and f._cmaes:
-            available.append("cmaes")
-        if f._use_contextual and f._contextual:
-            available.append("contextual")
-        if f._use_c2ucb and f._c2ucb:
-            available.append("c2ucb")
-        if f._use_ducb and f._ducb:
-            available.append("ducb")
-        if f._use_kl_ducb and f._kl_ducb:
-            available.append("kl_ducb")
-        if f._use_swucb and f._swucb:
-            available.append("swucb")
-        if f._use_kl_swucb and f._kl_swucb:
-            available.append("kl_swucb")
-        if f._use_cucb and f._cucb:
-            available.append("cucb")
-        if f._use_cusum_ucb and f._cusum_ucb:
-            available.append("cusum_ucb")
-        if f._use_invasion and f.mc and f.mc_bandit:
-            available.append("invasion")
-        if f._use_round_robin and f._round_robin:
-            available.append("round_robin")
+        available = operator_strategy_pool(f)
 
         if f._use_elo and f._elo and len(available) >= 2:
             # Resolve the meta-strategy once per exec and reuse it for all
