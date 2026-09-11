@@ -447,6 +447,7 @@ _FALLBACK_PRECEDENCE = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "fpl",
     "round_robin",
 )
 
@@ -513,6 +514,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("cucb")
     if f._use_cusum_ucb and f._cusum_ucb:
         available.append("cusum_ucb")
+    if f._use_fpl and f._fpl:
+        available.append("fpl")
     if f._use_invasion and f.mc and f.mc_bandit:
         available.append("invasion")
     if f._use_round_robin and f._round_robin:
@@ -4185,6 +4188,9 @@ class OperatorEngine:
             op = invasion_select(
                 op_stats, frontier_edges=frontier, flux_map=flux_map
             ) or self.ctx._rng.choice(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "fpl" and f._fpl:
+            op = f._fpl.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "round_robin" and f._round_robin:
             op = f._round_robin.select_op(ops)
