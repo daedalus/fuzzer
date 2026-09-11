@@ -70,7 +70,7 @@ class SWUCBScheduler(WindowedUCBBase):
             re-find the best arm among 147 candidates on a real campaign, not
             12, and the lower value buys stationary tail share with
             exploration the larger arm set still needs.
-        b: Reward range; rewards from ``_cost_adjusted_weight`` are in [0, 1].
+        b: Reward range; ``Fuzzer.fuzz_one`` clamps rewards to [0, 1].
         rng: Shared ``RandPool`` (Hard Rule 16).
     """
 

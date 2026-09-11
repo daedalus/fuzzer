@@ -2912,22 +2912,33 @@ class Fuzzer:
         return cached
 
     def _cost_adjusted_weight(self, op: str, base_weight: float) -> float:
-        """Scale a bandit reward by inverse operator cost.
+        """Scale a bandit reward by the inverse of what the round cost.
 
         Converts "edges per selection" into an "edges per unit time"
-        proxy: an operator's raw reward is multiplied by
-        median_cost / this_op's_cost, so an operator costing the median
-        amount is unaffected (ratio ~= 1.0), a cheap operator (bit_flip,
-        ~us) gets a bonus, and an expensive operator (gradient_descent,
-        condstmt_solve, path_negate, crc_learn, ~ms-s) gets penalized in
-        proportion to how many cheap mutations could have run in the same
-        wall-clock budget. This is fed to every per-op reward call
-        (mc/mopt/replicator/exp3/eps_greedy/hierarchical/gp_ucb/elo) so
-        the whole tournament sees cost, not just Elo.
+        proxy. The unit of time is one iteration, and an iteration pays the
+        target execution whichever operator ran, so the ratio is
+
+            (t_exec + median_op_cost) / (t_exec + this_op_cost)
+
+        with t_exec the median execution time. An operator costing the
+        median is unaffected (1.0); an expensive one (gradient_descent,
+        condstmt_solve, path_negate, crc_learn, ~ms-s) is penalized in
+        proportion to how many ordinary iterations fit in its budget; a
+        cheap one gains only the time it actually saves, which next to the
+        execution is little.
+
+        This used to be median_op_cost / this_op_cost, with t_exec left
+        out. _op_time_ema times the operator call alone, so a 1us operator
+        was paid 10x the reward of a 10us one for a difference of 9us
+        against an execution of hundreds -- and since that ratio was
+        clamped at 20, not 1, rewards reached 20 while every scheduler
+        documents them as [0, 1]. The bounded scale is enforced where the
+        per-op bandit rewards are built in fuzz_one; the Elo edge_counts
+        caller wants proportions, not a bounded scale, and is unclamped.
 
         Falls back to the unscaled weight until at least a few operators
         have timing data, and clamps the ratio so a single outlier can't
-        zero out or blow up the reward scale.
+        zero out the reward.
         """
         if base_weight <= 0.0 or len(self._op_time_ema) < 2:
             return base_weight
@@ -2938,7 +2949,9 @@ class Fuzzer:
         if not costs:
             return base_weight
         median_cost = costs[len(costs) // 2]
-        ratio = median_cost / cost
+        tracker = getattr(self, "_exec_time_tracker", None)
+        t_exec = tracker.p50 if tracker is not None else 0.0
+        ratio = (t_exec + median_cost) / (t_exec + cost)
         ratio = max(0.05, min(ratio, 20.0))
         return base_weight * ratio
 
@@ -4402,12 +4415,16 @@ class Fuzzer:
         # Per-operator outcome and reward, computed once. Every scheduler
         # below scored the same operator identically, so this was seven
         # copies of the same dedup-and-weight loop.
+        # Bounded to [0, 1]: the contract every consumer below documents --
+        # KL-UCB's Bernoulli divergence and Exp3's exponent assume it, the
+        # UCB widths take b=1.0 as the range, and the Beta posteriors (mc,
+        # hierarchical) add the weight as pseudo-successes, so a weight of
+        # 15 was fifteen discoveries.
         op_rewards = []
         for op in dict.fromkeys(self._last_ops_used):
             ok = _op_success(op)
-            op_rewards.append(
-                (op, ok, self._cost_adjusted_weight(op, surprisal_weight if ok else 0.0))
-            )
+            w = self._cost_adjusted_weight(op, surprisal_weight if ok else 0.0)
+            op_rewards.append((op, ok, min(1.0, w)))
 
         if self.mc and self.mc_bandit:
             for op, ok, w in op_rewards:

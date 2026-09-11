@@ -397,9 +397,11 @@ class MonteCarloScheduler:
 
         `weight` is accepted for call-site symmetry with record() but is
         deliberately not used as the outcome. It carries the surprisal- and
-        cost-adjusted reward, which is unbounded above; feeding it in here
-        produced outcomes far outside [0, 1] and a "Brier score" in the tens
-        (35.57 on the ffmpeg_read_nosan run) for a statistic bounded by 1.
+        cost-adjusted reward, which was unbounded above until fuzz_one began
+        clamping it to [0, 1]; feeding it in here produced outcomes far
+        outside [0, 1] and a "Brier score" in the tens (35.57 on the
+        ffmpeg_read_nosan run) for a statistic bounded by 1. Even bounded it
+        is a reward, not the outcome of the event the Beta mean predicts.
 
         Brier score = mean((predicted - actual)²) — lower is better.
         """

@@ -61,7 +61,7 @@ class DUCBScheduler(DiscountedUCBBase):
             operators, 10,000 pulls is ~68 per arm.
         xi: Exploration constant inside the confidence width.
         b: Reward range. Rewards handed to ``record()`` are cost-adjusted
-            surprisal weights, which ``_cost_adjusted_weight`` keeps in [0, 1].
+            surprisal weights, which ``Fuzzer.fuzz_one`` clamps to [0, 1].
         exploration: Multiplier on the whole confidence width. The paper's
             index has a hard 2B in front, which is a large over-exploration at
             this reward scale -- the same finding ``GPUCBScheduler`` already
