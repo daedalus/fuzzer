@@ -1182,7 +1182,6 @@ class Fuzzer:
         # drain in fuzz_one and empty whenever cmplog is off.
         self._last_cmp_fired: dict[str, int] = {}
         self._last_cmp_asserted: dict[str, int] = {}
-        self._redqueen_index = 0
         self._cmplog_skip_counter = 0  # adaptive cmplog collection skip
         # Tri-state: None = auto-detect, True = forced on, False = forced off.
         # Auto-detect resolves here rather than at the direct_lite decision
@@ -3779,12 +3778,11 @@ class Fuzzer:
             # path, so an operand found there is coincidence, not
             # input-to-state. See _colorize_seed().
             taints = self._colorize_seed(mutated)
-            if (
-                self._cmplog.pairs
-                and meta is not None
-                and self._redqueen_index < len(self._cmplog.pairs)
-            ):
-                for op_a, op_b in self._cmplog.pairs[self._redqueen_index :]:
+            _pending = self._cmplog.pending_new_pairs() if meta is not None else []
+            if _pending:
+                _consumed = 0
+                for op_a, op_b in _pending:
+                    _consumed += 1
                     if len(op_a) < 2 or (op_a, op_b) in seen:
                         continue
 
@@ -3831,7 +3829,10 @@ class Fuzzer:
                             break
                         continue
 
-                self._redqueen_index = len(self._cmplog.pairs)
+                # Only what the loop actually reached. Breaking at the match
+                # cap above leaves the rest queued for the next iteration
+                # instead of dropping it on the floor.
+                self._cmplog.consume_new_pairs(_consumed)
 
             # SMT sampling pass: runs every iteration regardless of redqueen gate.
             # Adaptive sample size based on historical solve rate.

@@ -339,6 +339,16 @@ class CmplogCollector:
         # _pair_set at the eviction site, so it stays bounded by _max_pairs.
         self._pair_occurrence: dict[tuple[bytes, bytes], int] = {}
         self._pair_set: set[tuple[bytes, bytes]] = set()
+        # Pairs discovered but not yet handed to the redqueen input-to-state
+        # scan. A queue rather than a high-water index into self.pairs: that
+        # list is rebuilt at the eviction site, so an index into it stops
+        # meaning "everything below here was scanned" the first time the pool
+        # saturates -- and since eviction pins len(pairs) at _max_pairs, the
+        # index caught up to the length and the scan went permanently dead.
+        # Pruned alongside _pair_set on eviction, and bounded by _max_pairs so
+        # a consumer that never drains it (cmplog on, redqueen unreachable)
+        # cannot grow it without limit.
+        self._pending_redqueen: list[tuple[bytes, bytes]] = []
         # PC mapping: pair -> program counter (optional, from trace-mode shim)
         self._pair_pc: dict[tuple[bytes, bytes], int | None] = {}
         # (op_a, op_b) -> (result, width). The shim already emits the
@@ -937,6 +947,11 @@ class CmplogCollector:
         self._token_set.update(tokens)
         self.tokens.extend(new_tokens)
         self.pairs.extend(new_pairs)
+        self._pending_redqueen.extend(new_pairs)
+        if len(self._pending_redqueen) > self._max_pairs:
+            # Drop from the front: the tail is the recent comparison
+            # frontier, which is the half worth scanning.
+            del self._pending_redqueen[: len(self._pending_redqueen) - self._max_pairs]
 
         self._evict_tokens()
         self._evict_pairs()
@@ -1021,6 +1036,11 @@ class CmplogCollector:
             self._pair_pc.pop(p, None)
             self.evicted_pair_count += 1
         self.pairs = [p for i, p in enumerate(self.pairs) if i not in victims]
+        if self._pending_redqueen:
+            # Same reasoning as the companion maps above: a queued pair the
+            # collector no longer holds is an offer the scan would solve
+            # against and then never be able to look up again.
+            self._pending_redqueen = [p for p in self._pending_redqueen if p in self._pair_set]
 
     def collect_counts(self) -> tuple[dict[str, int], dict[str, int]]:
         """Fold the shim's per-callback counter deltas into the run totals.
@@ -1446,6 +1466,26 @@ class CmplogCollector:
     def pair_pc(self, op_a: bytes, op_b: bytes) -> int | None:
         """Return the program counter for a pair, if known (trace mode)."""
         return self._pair_pc.get((op_a, op_b))
+
+    def pending_new_pairs(self) -> list[tuple[bytes, bytes]]:
+        """Pairs discovered since the last ``consume_new_pairs()``.
+
+        The redqueen input-to-state scan reads this instead of slicing
+        ``self.pairs`` from a saved index. Returns a copy so the caller can
+        iterate it while deciding how much of it to consume.
+        """
+        return list(self._pending_redqueen)
+
+    def consume_new_pairs(self, count: int) -> None:
+        """Retire the first ``count`` pending pairs.
+
+        Split from ``pending_new_pairs`` so a scan that stops early -- the
+        redqueen pass bails at its match cap -- leaves the unscanned tail
+        queued instead of discarding it. The index this replaced was set to
+        ``len(pairs)`` whether the loop finished or broke.
+        """
+        if count > 0:
+            del self._pending_redqueen[:count]
 
     def mark_coverage_gain(
         self,
