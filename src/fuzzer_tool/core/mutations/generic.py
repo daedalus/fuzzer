@@ -2323,6 +2323,81 @@ def leb128_encode(data: bytes, rng, max_len: int = 65536) -> bytes:
     return result[:pos] + encoded + result[pos:max_len]
 
 
+def encode_sleb128(value: int) -> bytes:
+    """Encode a signed integer as SLEB128.
+
+    Unlike ULEB128, the last byte's sign bit (0x40) determines whether the
+    value's sign is already implied by the accumulated bits, so continuation
+    depends on both the remaining magnitude *and* the sign of what's left --
+    that's the part an unsigned-only mutator can never reach.
+
+    Args:
+        value: Integer to encode (may be negative).
+
+    Returns:
+        SLEB128 byte sequence.
+    """
+    out = bytearray()
+    more = True
+    while more:
+        byte = value & 0x7F
+        value >>= 7  # arithmetic shift: sign-extends negative values
+        if (value == 0 and not (byte & 0x40)) or (value == -1 and (byte & 0x40)):
+            more = False
+        else:
+            byte |= 0x80
+        out.append(byte)
+    return bytes(out)
+
+
+def sleb128_encode(data: bytes, rng, max_len: int = 65536) -> bytes:
+    """Mutate an input by rewriting or inserting an SLEB128-encoded integer.
+
+    Signed counterpart to :func:`leb128_encode`. Scans for a 1-5 byte
+    little-endian two's-complement candidate integer and rewrites it as
+    SLEB128, replacing the full candidate width (unlike the unsigned
+    sibling, which only overwrites ``width - 1`` bytes and leaves the
+    candidate's last byte in place -- a pre-existing quirk, not repeated
+    here). Falls back to inserting a random small signed LEB128 value when
+    no candidate is found.
+
+    Args:
+        data: Input bytes.
+        rng: Random source.
+        max_len: Maximum output length.
+
+    Returns:
+        Mutated bytes, or the original bytes if no mutation was applied.
+    """
+    if not data:
+        return data
+    r = rng
+    result = bytearray(data)
+
+    widths = [1, 2, 3, 4, 5]
+    for width in widths:
+        if len(result) < width:
+            continue
+        idx = r.randint(0, len(result) - width)
+        value = int.from_bytes(result[idx : idx + width], "little", signed=True)
+        encoded = encode_sleb128(value)
+        if not encoded:
+            continue
+        new_len = len(result) - width + len(encoded)
+        if new_len > max_len:
+            continue
+        result[idx : idx + width] = encoded
+        return bytes(result[:max_len])
+
+    # Fallback: insert a random small signed LEB128 value at a random position.
+    value = r.randint(-64, 63)
+    encoded = encode_sleb128(value)
+    if len(result) + len(encoded) > max_len:
+        return data
+    pos = r.randint(0, len(result))
+    return bytes(result[:pos] + encoded + result[pos:])[:max_len]
+
+
 # ---------------------------------------------------------------------------
 # Versifier: text-structure learner/generator (ported from go-fuzz)
 # ---------------------------------------------------------------------------

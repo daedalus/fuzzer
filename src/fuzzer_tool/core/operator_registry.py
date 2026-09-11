@@ -57,6 +57,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "insert_repeated_bytes",
         "sort_bytes",
         "leb128_encode",
+        "sleb128_encode",
     },
     "block": {
         "block_insert",

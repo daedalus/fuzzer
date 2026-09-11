@@ -611,6 +611,46 @@ class TestNewByteOperators:
                 assert result is None or result != buf
 
 
+class TestSleb128EncodeOperator:
+    """sleb128_encode is the signed counterpart to leb128_encode: same
+    unconditional byte-band availability, its own live dispatch handler."""
+
+    def test_is_registered_in_byte_band(self):
+        assert "sleb128_encode" in REGISTRY.names()
+        assert REGISTRY.category_of("sleb128_encode") == "byte"
+
+    def test_unconditional_availability(self):
+        fuzzer = _MockFuzzer()
+        fuzzer._rng = RandPool(seed=1)
+        available = set(REGISTRY.available(fuzzer, b"seed"))
+        assert "sleb128_encode" in available
+
+    def test_has_a_handler(self):
+        engine = OperatorEngine(_MockFuzzer())
+        dispatch = REGISTRY.dispatch(engine)
+        assert callable(dispatch["sleb128_encode"])
+
+    def test_handler_mutates_non_empty_input(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rng = RandPool(seed=1)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        buf = bytearray(b"ABCDEFGH")
+        result = dispatch["sleb128_encode"](buf, 0, bytes(buf))
+        assert result is None or result != buf
+
+    def test_never_exceeds_max_len(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 8
+        fuzzer._rng = RandPool(seed=3)
+        engine = OperatorEngine(fuzzer)
+        dispatch = REGISTRY.dispatch(engine)
+        buf = bytearray(b"ABCDEFGH")
+        result = dispatch["sleb128_encode"](buf, 0, bytes(buf))
+        assert result is None or len(result) <= fuzzer.max_len
+
+
 class TestGoFuzzPorts:
     """Regression tests for mutations ported from ~/code/go-fuzz."""
 
