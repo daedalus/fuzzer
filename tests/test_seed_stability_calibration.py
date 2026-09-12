@@ -32,15 +32,42 @@ import pytest
 class _FakeShm:
     """Replays a scripted sequence of edge sets, one per run."""
 
-    def __init__(self, runs: list[set[int]], hashes: list[int] | None = None):
+    def __init__(
+        self,
+        runs: list[set[int]],
+        hashes: list[int] | None = None,
+        drops: list[int] | None = None,
+    ):
         self._runs = list(runs)
         self._hashes = list(hashes) if hashes is not None else None
+        # Per-run dropped-edge counts, returned by dropped_edges_delta().
+        # Default is a clean map: no drops, so the set-diff verdict stands.
+        self._drops = list(drops) if drops is not None else None
         self._i = -1
+        # Drops already on the counter when calibration starts, i.e. the
+        # rest of the campaign's history.
+        self._drop_backlog = 0
+        self._last_drop_raw = 0
         self._seen_edge_ids: set[int] = set()
         self._masked_edge_ids: set[int] = set()
 
     def advance(self):
         self._i += 1
+
+    def dropped_edges_delta(self) -> int:
+        """Differences a monotone cumulative counter, as ShmCoverage does.
+
+        Modelled rather than stubbed so the pre-loop read in
+        `_calibrate_seed_stability` is actually exercised: that read exists
+        to discard drops accumulated *before* this calibration, and a stub
+        returning a per-index value would pass whether it was there or not.
+        """
+        raw = self._drop_backlog
+        if self._drops is not None and self._i >= 0:
+            raw += sum(self._drops[: min(self._i + 1, len(self._drops))])
+        delta = raw - self._last_drop_raw
+        self._last_drop_raw = raw
+        return delta
 
     def get_edge_ids(self) -> set[int]:
         return set(self._runs[min(self._i, len(self._runs) - 1)])
@@ -280,6 +307,66 @@ class TestMaskEdges:
             assert cov.masked_edges == {5}
         finally:
             cov.cleanup()
+
+
+class TestDroppedEdgesVetoTheVerdict:
+    """A truncated edge set is not evidence of nondeterminism.
+
+    When the table saturates, an edge whose probe window is full is
+    discarded, and WHICH edge loses the slot depends on arrival order
+    against whatever the previous execution left behind — reset_edge_map()
+    bumps a generation tag, it does not clear the table. So the same input,
+    firing the same edges in the same order, can report different edge sets
+    across runs with no nondeterminism in the target at all.
+
+    Measured on an 8192-entry table with a fixed 4000-guard sequence and
+    only the prior occupancy differing between runs: three runs shared 819
+    edges out of a 2,507-edge union. Calibration would have masked the other
+    1,688 — every one reproducible — and masking is permanent.
+
+    Declining to decide is the correct answer rather than masking a subset:
+    from the edge sets alone there is no way to tell which divergences were
+    drops and which were real.
+    """
+
+    def test_divergence_is_not_masked_when_edges_were_dropped(self):
+        shm = _FakeShm([{1, 2, 3}, {1, 2, 3, 9}, {1, 2, 3}], drops=[0, 40, 0])
+        f = _wire(_make_fuzzer(), shm)
+        assert f._calibrate_seed_stability(b"x", n_runs=3) == set()
+        assert shm.masked_edges == set(), "masked edges on evidence a full map invalidates"
+
+    def test_drops_in_any_run_veto_the_whole_calibration(self):
+        """One truncated run is enough: the intersection it participates in
+        is missing edges that every other run recorded."""
+        for drops in ([7, 0, 0], [0, 0, 7]):
+            shm = _FakeShm([{1, 2, 3}, {1, 2, 3, 9}, {1, 2, 3}], drops=drops)
+            f = _wire(_make_fuzzer(), shm)
+            assert f._calibrate_seed_stability(b"x", n_runs=3) == set(), drops
+
+    def test_clean_runs_still_reach_the_verdict(self):
+        """The veto must not disable calibration on a healthy map."""
+        shm = _FakeShm([{1, 2, 3}, {1, 2, 3, 9}, {1, 2, 3}], drops=[0, 0, 0])
+        f = _wire(_make_fuzzer(), shm)
+        assert f._calibrate_seed_stability(b"x", n_runs=3) == {9}
+        assert shm.masked_edges == {9}
+
+    def test_drops_from_before_the_calibration_do_not_veto(self):
+        """The pre-loop read exists to discard the backlog. Without it, a
+        single drop anywhere earlier in the run would veto calibration for
+        the rest of the campaign."""
+        shm = _FakeShm([{1, 2, 3}, {1, 2, 3, 9}, {1, 2, 3}], drops=[0, 0, 0])
+        shm._drop_backlog = 5000
+        f = _wire(_make_fuzzer(), shm)
+        assert f._calibrate_seed_stability(b"x", n_runs=3) == {9}
+
+    def test_vetoed_calibration_still_counts_as_performed(self):
+        """The calibration counter drives reporting and the opt-in's cost
+        accounting; a vetoed run consumed the same n_runs executions."""
+        shm = _FakeShm([{1, 2}, {1, 2, 9}, {1, 2}], drops=[0, 3, 0])
+        f = _wire(_make_fuzzer(), shm)
+        before = f._stability_calibrations
+        f._calibrate_seed_stability(b"x", n_runs=3)
+        assert f._stability_calibrations == before + 1
 
 
 if __name__ == "__main__":

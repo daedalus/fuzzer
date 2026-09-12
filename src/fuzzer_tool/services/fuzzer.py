@@ -1007,6 +1007,12 @@ class Fuzzer:
         self._novel_input_count = 0  # execs where record_edges found ≥1 new edge
         self._stall_recovery_active = False
         self._stall_recovery_count = 0  # times recovery was activated
+        # Drop-driven resize bookkeeping. The interval is in executions and
+        # only rate-limits the check; the stats interval already gates how
+        # often the surrounding block runs at all.
+        self._drop_resize_checked_at = 0
+        self._drop_resize_interval = 1000
+        self._drop_cap_warned = False
         self._stall_recovery_execs = 0  # execs spent in recovery mode
         self._stall_reseed_count = 0  # times the RNG was reseeded on stall
         self._last_stall_seed = None  # seed applied by the most recent reseed
@@ -4952,6 +4958,8 @@ class Fuzzer:
 
         edge_sets: list[set[int]] = []
         hashes: set[int] = set()
+        dropped = 0
+        shm.dropped_edges_delta()  # discard drops from before this calibration
         for _ in range(n_runs):
             try:
                 self._run_target(data)
@@ -4961,10 +4969,40 @@ class Fuzzer:
                 return set()
             edge_sets.append(shm.get_edge_ids())
             hashes.add(shm.read_path_hash())
+            dropped += shm.dropped_edges_delta()
 
         if not edge_sets:
             return set()
 
+        if dropped:
+            # The verdict this function reaches is "these edges did not
+            # reproduce, so they are nondeterministic" — and masking is
+            # permanent. A saturated table makes that inference invalid: an
+            # edge whose probe window is full is discarded, and WHICH edge
+            # loses the slot depends on arrival order against whatever the
+            # previous execution left behind (reset_edge_map bumps a tag, it
+            # does not clear the table). The same input, firing the same
+            # edges in the same order, can therefore report different edge
+            # sets across runs with no nondeterminism in the target at all.
+            #
+            # Measured on an 8192-entry table, a fixed 4000-guard sequence,
+            # and only the table's prior occupancy differing between runs:
+            # three runs shared 819 edges out of a 2,507-edge union. This
+            # function would have masked the other 1,688 — every one of them
+            # perfectly reproducible — and never unmasked them.
+            #
+            # Declining to decide is the right answer rather than masking a
+            # subset: there is no way to tell, from the edge sets alone,
+            # which divergences were drops and which were real.
+            self._stability_calibrations += 1
+            log.info(
+                "Stability calibration skipped: %d edge(s) dropped to a full map "
+                "during %d runs — set divergence is not evidence of instability "
+                "while coverage is being discarded",
+                dropped,
+                n_runs,
+            )
+            return set()
 
         # Cheap screen: one distinct hash across every run means the same
         # edges fired the same number of times in the same order.
@@ -5597,6 +5635,7 @@ class Fuzzer:
                 # Drops recorded against the old table say nothing about the
                 # new one; clearing keeps the next decision on fresh evidence.
                 self.shm_cov.reset_dropped_edges()
+                self._drop_resize_checked_at = self.exec_count
                 os.environ["__AFL_SHM_ID"] = self.shm_cov.env_id
                 os.environ["AFL_MAP_SIZE"] = str(new_size)
                 if self._inprocess_runner:
@@ -5606,6 +5645,71 @@ class Fuzzer:
                 if self._forkserver:
                     self._forkserver.update_shm_after_resize(self.shm_cov.env_id, new_size)
         return True
+
+    def _maybe_resize_on_drops(self) -> None:
+        """Grow the map when the shim reports drops, without waiting for a stall.
+
+        Drops were already consumed by ``_maybe_trigger_stall_recovery``, but
+        only there — and that path does not run until ``--stall`` executions
+        have passed with no new edge (default 1,000), and only when
+        ``--resize-map-on-stall`` is set. So the one honest saturation signal
+        in the system was read late, conditionally, and (while it was a
+        16-bit field packed into the diag word) pinned: measured at 1,953
+        drops per execution, it reached its 65,535 ceiling after 34
+        executions, which is to say every value that consumer ever read on a
+        saturating target was the ceiling.
+
+        A drop is not a symptom to be confirmed by other evidence. It is the
+        fuzzer being told, by the only component that can know, that coverage
+        it will never see has already been discarded. Waiting for a stall to
+        act on it inverts cause and effect: the stall is *downstream* of the
+        lost coverage.
+
+        Deliberately cheap and deliberately rate-limited to the stats
+        interval — this reads one word and calls a resize decision that
+        returns 0 in the common case. The rate limit also keeps a single
+        resize from being re-proposed on consecutive ticks while the new
+        table's own evidence accumulates.
+        """
+        if not self._resize_map_on_stall or self.shm_cov is None:
+            return
+        if self.exec_count - self._drop_resize_checked_at < self._drop_resize_interval:
+            return
+        self._drop_resize_checked_at = self.exec_count
+        dropped = self.shm_cov.read_dropped_edges()
+        if not dropped:
+            return
+        new_size = self._edge_tracker.recommended_map_size(dropped_edges=dropped)
+        if new_size <= self.shm_cov.size:
+            # Already at the cap, or the recommendation does not beat the
+            # current size. Say so once rather than silently doing nothing:
+            # a run that is losing coverage it cannot size its way out of is
+            # something the operator should know about, and the only other
+            # place this was ever reported was the stall path.
+            if not self._drop_cap_warned:
+                self._drop_cap_warned = True
+                print(
+                    f"[!] Coverage map saturated at {self.shm_cov.size:,} entries: "
+                    f"{dropped:,} edges dropped and no larger map available "
+                    f"(AFL_MAP_SIZE_MAX) — consider lowering __AFL_CTX_BITS"
+                )
+            return
+        print(
+            f"[*] Resizing SHM {self.shm_cov.size:,} → {new_size:,} entries "
+            f"(drop-triggered, dropped={dropped:,})"
+        )
+        self.shm_cov.resize(new_size)
+        self.map_size = new_size
+        self._edge_tracker.on_resize(new_size)
+        self.shm_cov.reset_dropped_edges()
+        os.environ["__AFL_SHM_ID"] = self.shm_cov.env_id
+        os.environ["AFL_MAP_SIZE"] = str(new_size)
+        if self._inprocess_runner:
+            self._inprocess_runner.update_shm_after_resize(
+                self.shm_cov._ptr, new_size, self.shm_cov.env_id
+            )
+        if self._forkserver:
+            self._forkserver.update_shm_after_resize(self.shm_cov.env_id, new_size)
 
     def _run_chi2_operator_test(self) -> None:
         """Chi-squared test: do operators have different success rates?
@@ -6616,6 +6720,7 @@ class Fuzzer:
 
                     # Record coverage snapshot for temporal analysis
                     self._edge_tracker.record_coverage_snapshot(self.exec_count)
+                    self._maybe_resize_on_drops()
                     if not self.quiet_stats:
                         self.print_stats()
                     self._append_coverage_log()
