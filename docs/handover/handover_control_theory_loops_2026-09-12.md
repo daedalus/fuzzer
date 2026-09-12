@@ -9,9 +9,19 @@
 [Closed-loop transfer function](https://en.wikipedia.org/wiki/Closed-loop_transfer_function).
 
 This is an analysis document with two measured results and a prioritised
-proposal. Nothing here is implemented. Tier 1 items have falsifiers named;
-Tier 2 does not yet, and producing one is the first step for whoever picks it
-up, not something done in advance for them.
+proposal.
+
+**Status: implemented 2026-09-12, and three of its claims were wrong.** See
+§6 for the corrections — they are recorded there rather than edited silently
+into the body, because two of them are the kind of mistake that is easy to
+make again and the reasoning that produced them is still readable below.
+
+Implementation: Tier 1.1 in the saturation gate (but *not* the fix proposed
+here), Tier 1.2/1.3 as `--stall-release-edges` plus
+`Fuzzer._stall_relay_stats()`, Tier 2 as `core/eso.py`,
+`core/pi_controller.py`, `core/temperature_control.py` behind
+`--temperature-control`, and Tier 3 recorded in the Rejected section of
+`docs/port-backlog.md`. The kill criterion in §5 remains unmeasured.
 
 **Negative result first, so nobody re-derives it:** there is no
 control-theory machinery in the tree. `grep -rniE
@@ -99,7 +109,7 @@ significant lag; on a self-reinforcing path there is *no* bounded steady
 state, so no amount of retuning `SATURATION_GATE` helps. Only two things do:
 break the loop (estimate saturation from a channel the gate does not
 influence), or give the relay a real dead band with a release threshold below
-the engage threshold.
+the engage threshold. *(The second is wrong — §6.2.)*
 
 Related, and already known: Chao2 returns 1.0 for *any* plateau, not only for
 a genuinely closed universe (measured previously: 60 seeds over a closed
@@ -241,6 +251,12 @@ for dwell in (0, 1, 3, 8):
     print(dwell + 1, *run(release_dwell=dwell))
 ```
 
+> **This table is wrong — corrected in §6.1.** The harness above regenerates
+> `arrivals` on every call from a shared `rng`, so each row saw a *different*
+> arrival realisation (561/641/584/603 edges) and the duty figures are not
+> comparable across rows. Kept as written because the repaired version is a
+> one-line change to the harness and the error is worth being able to see.
+
 | release after | engage/release cycles per 400k execs | execs in recovery |
 |---|---|---|
 | **1 edge (current)** | **106** | **65.9%** |
@@ -271,7 +287,9 @@ is Tier 1.3.
 
 ### Tier 1 — small, falsifiable, no new subsystem
 
-**1.1 Dead band on the saturation gate.** Engage at 0.99, release at ~0.95,
+**1.1 Dead band on the saturation gate.** *(Wrong — see §6.2. Release-below-
+engage is the wrong shape for a loop with this feedback sign. What shipped is
+an on-time cap plus a minimum off-time.)* Engage at 0.99, release at ~0.95,
 replacing reliance on the two watchdog timers as the only escape (keep the
 timers; they also cover the Chao2-plateau sensor problem, which a dead band
 does not).
@@ -338,7 +356,8 @@ lumped disturbance is: a new region unlocking, a region exhausting,
 
 Two thirds of the ESO is already built. `RobustKF` is 2D constant-velocity
 with Huber gating and adaptive measurement-noise covariance — the third state
-is the addition. And ADRC's tracking differentiator has a second purpose that
+is the addition. *(What the third state actually buys is weaker than stated
+here — §6.3.)* And ADRC's tracking differentiator has a second purpose that
 the same filter already serves: it avoids amplifying noise in a derivative
 term by integrating rather than differentiating, which is exactly why the 2D
 KF reads the rate off the state instead of differencing counts.
@@ -414,3 +433,115 @@ with a known sign and a bounded range:
   A dead band on a sensor that reads 1.0 for every plateau moves the latch
   point without removing the sensor's blind spot. The two fixes are
   independent and only one is proposed here.
+
+---
+
+## 6. Corrections found by implementing this
+
+Written after the fact. All three are errors in this document, not in the
+code that replaced it.
+
+### 6.1 §2.2's measurement was uncontrolled
+
+The harness regenerates its arrival process inside `run()` from a shared
+`rng`, so the dwell sweep compared four different realisations — visible in
+the row-to-row edge totals (561/641/584/603), which should have been
+identical. The "dwell of 2 costs nothing" reading, and the conclusion built
+on it, were artifacts of that.
+
+Repaired: generate arrivals once per seed and sweep dwell over the same
+realisation, averaged over 12 seeds.
+
+| release after | cycles (mean) | duty (mean) |
+|---|---|---|
+| 1 edge | 103.9 | 64.3% |
+| 2 edges | 100.8 | 66.0% |
+| 3 edges | 92.3 | 69.3% |
+| 4 edges | 81.1 | 73.1% |
+| 6 edges | 62.4 | 78.8% |
+| 9 edges | 48.2 | 83.8% |
+
+Duty rises **monotonically**. There is no free dwell; every step trades
+switching for time-on. So `--stall-release-edges` shipped defaulting to 1 —
+the mechanism with no behaviour change — and the choice is deferred to the
+relay amplitude that Tier 1.3 now measures, which is what §5 asked for in the
+first place. The general lesson is the ordinary one: a sweep that varies the
+thing under test must hold its environment fixed, and a column that should be
+constant across rows is the cheapest place to notice that it isn't.
+
+### 6.2 Tier 1.1's dead band points the wrong way
+
+A dead band with release below engage assumes the engaged state pushes the
+measured variable back *down* toward the release threshold. On this loop
+engaging pushes it *up*: gating suppresses the analyses that produce new
+coverage, and without new coverage the estimate stays saturated. So
+release-below-engage makes the engaged state stickier — the opposite of the
+intent, and it would have looked like a fix while making the latch worse.
+
+§1's own description of the loop contains everything needed to see this; the
+proposal simply reached for the standard remedy without checking the feedback
+sign against it.
+
+What bounds a relay on a positive-feedback path is a limit on its on-time,
+since that caps the duty cycle regardless of loop gain. Shipped:
+`SATURATION_MAX_GATED_EXECS = 5000` forced release, plus
+`SATURATION_MIN_UNGATED_EXECS = 1000` minimum off-time — not optional,
+because without it the next refresh sees a barely-moved estimate and
+re-engages at once. Guarantee: the analyses run at least 1,000 execs out of
+every 6,000 whatever the estimate says.
+
+### 6.3 The ADRC disturbance state buys less than claimed
+
+§3 said the extra state would mean a plateau is "absorbed by the disturbance
+state instead of being chased by the knob". Open loop that is false. The
+state holds unexplained *acceleration*, not an unexplained level: once the
+value state has tracked a step, a constant measurement with no control
+applied implies zero disturbance and the estimate decays back to zero.
+Measured on a 5:1 step down through `core/eso.py`, compensated and raw
+readings differ by more than 5% for 4 ticks out of 40, peaking at 12% of the
+new level, then agree.
+
+The rejection is therefore **transient, not permanent**. That is still worth
+having against a dead time of ~20 s to ~6 min — it damps the controller's
+reaction to a move it cannot yet have caused — but it is not what was
+promised.
+
+The stronger property is not available at all here, for a structural reason
+rather than a tuning one: a persistent level change and a persistent setpoint
+error are the *same signal*, and separating them requires knowing how much of
+the level the knob is responsible for. That is `b0`, which is the unmeasured
+derivative §5 names as the kill criterion. No observer can supply it; fitting
+it would be fitting noise.
+
+### 6.4 One thing that came out better than either account
+
+Closed loop, the disturbance estimate does *not* decay, because a nonzero
+control input has to be explained: if the knob moves and the rate does not
+follow, the observer attributes the gap to disturbance. An assumed `b0` that
+is too large — the situation here, since the true gain may be near zero —
+therefore makes the loop **throttle itself** instead of winding to its rail.
+Measured: 60 ticks of maximum sustained error leave the correction below 10%
+of its bound, unsaturated.
+
+That is graceful degradation toward doing nothing in exactly the case where
+the controller has no authority, which is the failure mode worth having on an
+unvalidated loop. It was not designed in, so it is pinned by a test
+(`test_a_sustained_plateau_does_not_drive_the_knob_to_its_rail`) — a later
+change that "corrects" the observer's steady-state bias would remove it
+silently otherwise.
+
+### 6.5 Two tests mirrored the code they were testing
+
+Both the relay test and the temperature test first reimplemented the predicate
+under test inline, mirroring the fuzz loop and `pick_seed` respectively. In
+both cases stripping the feature from production left every case passing.
+Fixed by extracting `Fuzzer._stall_note_coverage()` and
+`SeedPicker._update_temperature()` so the tests bind the real code. Same
+defect class as the previously-recorded case where patching a module could not
+distinguish a function drawing from a pool from one drawing from the module.
+
+A related one: the PI controller's two anti-windup mechanisms are
+independent, and at the default `integral_limit` the hard clamp alone is
+sufficient — making integration unconditional failed nothing. A case with a
+deliberately loose limit was added so the conditional-integration branch is
+exercised at all.

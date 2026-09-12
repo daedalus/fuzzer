@@ -649,6 +649,48 @@ HyLLfuzz** — overlap the existing GA/MOpt/hierarchical-bandit/directed-distanc
 stack; DeepGo's RL path-transition model is worth revisiting only if directed
 mode plateaus.
 
+**Nyquist plots, Bode plots, phase margin as artifacts.** Evaluated 2026-09-12
+(`docs/handover/handover_control_theory_loops_2026-09-12.md`). A frequency
+response needs sinusoidal setpoint injection over hours of campaign, and the
+plant is non-stationary by construction, so the measurement expires before it
+is useful. The *criterion* still earns its place as an argument — it is what
+says the saturation gate's positive-feedback path has no bounded steady state
+regardless of where its threshold sits, which is why `SATURATION_MAX_GATED_EXECS`
+is an on-time cap and not a dead band. The *plot* does not. Use the relay
+experiment instead: stall recovery is already a bang-bang relay and
+`Fuzzer._stall_relay_stats()` now reports its period and amplitude, which is
+what Åström–Hägglund relay auto-tuning measures.
+
+**Ziegler–Nichols tuning.** Same evaluation. Explicitly poor on time-delay
+processes, and the sensing chain's dead time here is both large and badly
+conditioned: stepping the discovery rate down through the real
+`AllanVarianceDetector` takes a median 2–34 ticks to leave `"active"` with
+p10=1 and p90≈36 across every step size tried, at roughly 10 s of work per
+tick. Tune from the relay data.
+
+**Full nonlinear ADRC — NESO plus nonlinear state error feedback.** Same
+evaluation. The linear ESO shipped as `core/eso.py`; the nonlinear half did
+not. Nonlinear error feedback buys disturbance rejection without overshoot on
+a plant whose dynamics can at least be bounded, and here they cannot. It adds
+two tuning parameters with no data to set them from — and note the linear
+version's own `b0` is already an assumption, not a measurement.
+
+**A derivative term anywhere in this codebase.** Same evaluation. Every
+process variable a controller here would see is a count per window, i.e.
+Poisson, and derivative action amplifies precisely the high-frequency
+component that dominates such a signal. `core/pi_controller.py` is PI and
+rejects a `kd` argument outright rather than defaulting it to zero.
+
+**A controller on top of the operator schedulers.** Same evaluation. They are
+already closed-loop learners with their own loop gains (`cucb.py`
+`gamma=0.9995`, `ducb.py` `gamma=0.9999`, `epsilon_greedy.py` `decay=0.9995`,
+EXP3's `gamma`, MOpt's inertia weight); a PI over a bandit is a cascade with
+two integrators, which is a stability problem rather than a feature. The one
+useful control observation about them is the transport delay already recorded
+in `ducb.py:37` — at `mutations_per_input = 8` a batch of eight selections
+shares one binary reward, so `gamma`'s effective horizon is ~8x shorter than
+it looks. That needs no new machinery.
+
 ---
 
 ## How much to trust the sources
