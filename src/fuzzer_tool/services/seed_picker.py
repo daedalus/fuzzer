@@ -50,6 +50,25 @@ SATURATION_REFRESH_EXECS = 2000
 # run are indistinguishable to it -- so past this point the estimate has
 # stopped carrying information and the full analysis comes back.
 SATURATION_STALL_EXECS = 20000
+# Maximum executions the gate may stay continuously engaged, and the minimum
+# it must stay released afterwards before it is allowed to re-engage.
+#
+# The gate sits on a POSITIVE feedback path: engaged, it replaces the very
+# analyses that steer the picker toward new coverage with neutral
+# multipliers, and without new coverage the Chao2 estimate keeps reporting
+# saturation -- so engaging makes the condition for engaging more likely.
+# Ordinary hysteresis (release below engage) does not help a loop with that
+# sign; it makes the engaged state stickier, which is the wrong direction.
+# What bounds a positive-feedback relay is a limit on its on-time: a forced
+# release caps the duty cycle regardless of loop gain. The minimum off-time
+# is the other half and is not optional -- without it the next refresh sees
+# a barely-moved estimate and re-engages immediately, so the forced release
+# buys nothing. Together they guarantee the discovery analyses run for at
+# least SATURATION_MIN_UNGATED_EXECS out of every
+# SATURATION_MAX_GATED_EXECS + SATURATION_MIN_UNGATED_EXECS, whatever the
+# estimate says.
+SATURATION_MAX_GATED_EXECS = 5000
+SATURATION_MIN_UNGATED_EXECS = 1000
 
 # ── Invasion percolation operator selection (percolation handover Module 4) ─
 # Resistance at or above which an operator counts as stuck: success_rate <=
@@ -1184,6 +1203,15 @@ class SeedPicker:
            neutral tuples written while saturated survived the gate turning
            off and kept those seeds neutral for the rest of the run. The
            cache is flushed whenever the gate flips, in either direction.
+        4. All three of the above still leave the gate on a positive feedback
+           path -- engaging suppresses the analyses that produce the new
+           coverage that would clear it -- and (1) and (2) are both timers
+           keyed on that suppressed signal. The duty cycle is now bounded
+           outright: at most ``SATURATION_MAX_GATED_EXECS`` continuously
+           engaged, then at least ``SATURATION_MIN_UNGATED_EXECS`` released
+           before it may re-engage. Note this is deliberately *not* ordinary
+           hysteresis; see the constants for why release-below-engage is the
+           wrong shape for a loop with this sign.
 
         Returns:
             True when the expensive per-seed analyses should be skipped.
@@ -1198,17 +1226,39 @@ class SeedPicker:
             f._saturation = sat
             f._saturation_exec = exec_count
 
+        was_gated = getattr(f, "_saturation_gated", False)
+        # None until the gate has flipped at least once, so the off-time floor
+        # below cannot delay the FIRST engagement (there is nothing to protect
+        # yet, and exec_count starts at 0).
+        flipped_at = getattr(f, "_saturation_gate_exec", None)
         gated = sat >= SATURATION_GATE
         if gated:
             since_edge = exec_count - getattr(f, "_last_new_edge_exec", 0)
             if since_edge >= SATURATION_STALL_EXECS:
                 gated = False
+            elif (
+                was_gated
+                and flipped_at is not None
+                and exec_count - flipped_at >= SATURATION_MAX_GATED_EXECS
+            ):
+                # On-time cap: forced release so the loop cannot latch.
+                gated = False
+        if (
+            gated
+            and not was_gated
+            and flipped_at is not None
+            and exec_count - flipped_at < SATURATION_MIN_UNGATED_EXECS
+        ):
+            # Off-time floor: the analyses have not had long enough to move
+            # the estimate, so re-engaging now would undo the forced release.
+            gated = False
 
-        if gated != getattr(f, "_saturation_gated", False):
+        if gated != was_gated:
             # Entries cached under the previous gate carry the wrong kind of
             # value: neutral tuples if it was on, full analyses if it was off.
             f._cached_weights = {}
             f._saturation_gated = gated
+            f._saturation_gate_exec = exec_count
         return gated
 
     def _compute_weights(self, now: float) -> list[float]:

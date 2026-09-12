@@ -16,6 +16,8 @@ import types
 
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 from fuzzer_tool.services.seed_picker import (
+    SATURATION_MAX_GATED_EXECS,
+    SATURATION_MIN_UNGATED_EXECS,
     SATURATION_REFRESH_EXECS,
     SATURATION_STALL_EXECS,
     SeedPicker,
@@ -159,3 +161,85 @@ class TestSeedPickerConstruction:
             _cached_weights={},
         )
         assert SeedPicker(f)._saturation_gate() is False
+
+
+class TestGateDutyCycleIsBounded:
+    """The gate sits on a positive feedback path; its on-time must be capped.
+
+    The three earlier mechanisms are all keyed on the signal the gate
+    suppresses: the refresh reads an estimate that stays high because the
+    analyses are off, and the stall override waits 20,000 execs for an edge
+    the gate makes less likely. On a plateau -- which Chao2 reports as 1.0
+    unconditionally, pinned by
+    ``TestGoodTuringReportsSaturationAtPlateau`` above -- that is a 20,000
+    exec latch. The on-time cap plus off-time floor bound the duty cycle
+    outright, independently of loop gain.
+
+    Deliberately *not* ordinary hysteresis: a release threshold below the
+    engage threshold makes the engaged state stickier, which is backwards
+    for a loop whose engaged state raises the measured variable.
+    """
+
+    def _sweep(self, saturation: float, n_execs: int, step: int = 250):
+        """Drive the gate over a campaign; return per-exec gated history."""
+        f, p = _picker(_tracker_with(saturation))
+        history = []
+        for e in range(0, n_execs, step):
+            f.exec_count = e
+            # No new coverage ever arrives: a plateau, the case the gate is
+            # worst at. Held below SATURATION_STALL_EXECS so the stall
+            # override is not what produces the release.
+            f._last_new_edge_exec = max(0, e - (SATURATION_STALL_EXECS - 1))
+            history.append((e, p._saturation_gate()))
+        return history
+
+    def test_gate_releases_before_the_stall_override_on_a_plateau(self):
+        history = self._sweep(1.0, SATURATION_STALL_EXECS)
+        released = [e for e, g in history if not g]
+        assert released, "gate never released on a plateau"
+        first_release = min(e for e, g in history if not g and e > 0)
+        assert first_release <= SATURATION_MAX_GATED_EXECS + 250
+        # The point of the fix: release arrives long before the 20k override.
+        assert first_release < SATURATION_STALL_EXECS
+
+    def test_duty_cycle_is_bounded_over_a_long_plateau(self):
+        history = self._sweep(1.0, 8 * SATURATION_MAX_GATED_EXECS)
+        duty = sum(1 for _, g in history if g) / len(history)
+        ceiling = SATURATION_MAX_GATED_EXECS / (
+            SATURATION_MAX_GATED_EXECS + SATURATION_MIN_UNGATED_EXECS
+        )
+        # Sampling granularity costs a little slack in either direction.
+        assert duty <= ceiling + 0.1, f"duty {duty:.2%} exceeds ceiling {ceiling:.2%}"
+        assert duty > 0.3, f"duty {duty:.2%} -- gate is not engaging at all"
+
+    def test_analyses_run_periodically_however_high_the_estimate(self):
+        """The guarantee that actually matters downstream."""
+        history = self._sweep(1.0, 4 * SATURATION_MAX_GATED_EXECS)
+        window = SATURATION_MAX_GATED_EXECS + SATURATION_MIN_UNGATED_EXECS
+        for start in range(0, 3 * SATURATION_MAX_GATED_EXECS, window):
+            inside = [g for e, g in history if start <= e < start + 2 * window]
+            assert any(not g for g in inside), (
+                f"no ungated sample in execs [{start}, {start + 2 * window})"
+            )
+
+    def test_off_time_floor_blocks_immediate_re_engagement(self):
+        f, p = _picker(_tracker_with(1.0))
+        f.exec_count = 0
+        assert p._saturation_gate() is True
+        f.exec_count = SATURATION_MAX_GATED_EXECS
+        assert p._saturation_gate() is False  # forced release
+        # Estimate has not moved; without the floor this re-engages at once.
+        f.exec_count = SATURATION_MAX_GATED_EXECS + 1
+        assert p._saturation_gate() is False
+        f.exec_count = SATURATION_MAX_GATED_EXECS + SATURATION_MIN_UNGATED_EXECS
+        assert p._saturation_gate() is True
+
+    def test_first_engagement_is_not_delayed_by_the_floor(self):
+        """`_saturation_gate_exec` starts unset, not 0, for exactly this."""
+        f, p = _picker(_tracker_with(1.0))
+        f.exec_count = 0
+        assert p._saturation_gate() is True
+
+    def test_a_genuinely_unsaturated_estimate_still_keeps_the_gate_off(self):
+        history = self._sweep(0.5, 4 * SATURATION_MAX_GATED_EXECS)
+        assert not any(g for _, g in history)
