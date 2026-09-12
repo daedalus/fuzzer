@@ -12,6 +12,40 @@ picks an item up, not something done in advance for them.
 
 ---
 
+## Disposition (2026-09-12, follow-up)
+
+All four were re-gated with actual evidence before touching code, per this
+document's own standard. Two flipped, two didn't move:
+
+- **C1 (Eytzinger layout) — still open.** Checked `cfg_cache.py`/`icfg.py`:
+  no repeated binary search over a static sorted array in a hot path, only
+  one-time sorts at construction. The gating question in C1 below is still
+  unanswered. Not implemented.
+- **C2 (quasiperiodicity) — implemented.** `core/quasiperiodicity.py` +
+  `tests/test_quasiperiodicity.py`, wired into `core/analyzer_registry.py`
+  behind `--corpus-quasiperiodicity` (opt-in, unmeasured, same policy as
+  `--tang`/`--continuum`), consumed in `seed_picker.py` and
+  `corpus_manager.py` alongside the existing PPMD bonus. The "decide between
+  this and CDC" question C2 posed was resolved in favor of this one, on the
+  grounds that it answers the specific question corpus minimization needs
+  (per-seed coverability) rather than the cross-seed question CDC answers;
+  CDC remains a separate, still-open port.
+- **C3 (NAF) — implemented, gate correction.** The original "no crypto
+  scalar-mult target" claim below was wrong — `targets/secp256k1_read.c`
+  exercises ECDSA/ECDH/Schnorr, all of which do scalar multiplication.
+  `core/mutations/naf_scalar.py` + `tests/test_naf_scalar.py`, registered as
+  the `naf_scalar_mutate` operator.
+- **C4 (Batcher sort) — rejected, not deferred.** Found after the fact:
+  `handover_algorithm_catalogue_survey_2026-09-06.md` already surveyed every
+  sort call site in both repos (47 modules, ~6,614 `sorted()`/`.sort()`
+  calls) and concluded none are hot enough for a hand-rolled sorting network
+  to win. C4's own gating question ("is any sort site a measured
+  bottleneck?") was already answered "no" by that survey before this
+  document was written. Left below unmodified for the record, but treat it
+  as closed, not merely unstarted.
+
+---
+
 ## 0. What was already found to be covered
 
 Before listing gaps, the negative result: most of the obvious overlap between
