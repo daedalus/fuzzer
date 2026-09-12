@@ -15,17 +15,31 @@ import sys
 import tempfile
 from pathlib import Path
 
-import numpy as np
 
 from fuzzer_tool.adapters import libc_shm
+from fuzzer_tool.adapters.shm import ShmCoverage
 
 
 def _read_shm_edges(shm_id: str, size: int = 65536) -> bytearray:
-    """Read edge bitmap from AFL SHM segment.
+    """Attach a SysV segment and read ``size`` raw bytes out of it.
 
-    Returns an all-zero bitmap if the segment cannot be attached.  Callers must
-    treat an all-zero result as "no coverage information", not as "this input
-    covers nothing" -- see ``_minimize_with_coverage``.
+    Returns all zeros if the segment cannot be attached. Callers must treat
+    that as "no coverage information", not "this input covers nothing".
+
+    NO LONGER ON THE CMIN PATH. _minimize_with_coverage used to read the
+    coverage segment through this, treating it as AFL's byte-per-edge bitmap;
+    this shim writes {edge_id, count} entries behind a 32-byte header, so the
+    byte indices it yielded were not edge ids. That path now asks
+    ShmCoverage for edge ids instead.
+
+    Retained because tests/test_regression_shmat_restype.py exercises it as
+    one of the three shmat call sites named in
+    docs/bugreport_2026-08-21_merged.md -- shmat bound with a default c_int
+    restype truncated the returned address to 32 bits and string_at() then
+    read an unmapped page. The sentinel and restype behaviour is also covered
+    directly against libc_shm in that file, so if this helper is dropped the
+    regression stays guarded; it is kept rather than deleted so that removing
+    it is a deliberate decision and not collateral of a sizing fix.
     """
     ptr = libc_shm.shmat(int(shm_id))
     if ptr is None:
@@ -150,41 +164,50 @@ def _minimize_with_coverage(
     from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
-    edge_map_size = 65536
-    file_edges: dict[str, bytearray] = {}
 
-    for i, fpath in enumerate(corpus_files):
-        data = fpath.read_bytes()
-        env = os.environ.copy()
-        env["AFL_MAP_SIZE"] = str(edge_map_size)
+    # One segment, reset between files, owned by ShmCoverage.
+    #
+    # This path used to hand-roll shmget/shmat/string_at with a single
+    # `edge_map_size = 65536` used for three incompatible purposes: the
+    # AFL_MAP_SIZE the child is told (which the shim reads as a count of
+    # ENTRIES), the byte size handed to shmget, and the byte count read back.
+    # 65,536 entries needs 32 + 65_536 * 8 = 524,320 bytes, so the shim wrote
+    # 448 KiB past the end of a 64 KiB segment and every child died on
+    # SIGSEGV. The blackout guard below then refused to prune, which is why
+    # this failed safe rather than deleting corpora -- cmin simply never
+    # worked on an instrumented target.
+    #
+    # The read was wrong independently of the size. It treated the segment as
+    # AFL's byte-per-edge bitmap and took nonzero byte INDICES as edge ids,
+    # but this shim writes {edge_id, count} entries behind a header, so the
+    # "edges" were byte offsets into a hash table plus the header. Asking
+    # ShmCoverage for edge ids fixes the sizing and the decoding together,
+    # and keeps the layout in the one module that owns it.
+    shm = ShmCoverage()
+    env_base = os.environ.copy()
+    env_base["__AFL_SHM_ID"] = shm.env_id
+    env_base["AFL_MAP_SIZE"] = str(shm.num_entries)
 
-        # Create a unique SHM segment for this run
-        shmid = libc_shm.shmget(edge_map_size)
-        if shmid is None:
-            file_edges[str(fpath)] = bytearray(edge_map_size)
-            continue
-        env["__AFL_SHM_ID"] = str(shmid)
+    seed_edges: dict[str, set[int]] = {}
+    try:
+        for i, fpath in enumerate(corpus_files):
+            data = fpath.read_bytes()
+            shm.reset_edge_map()
 
-        if file_mode:
-            run_target_file(target, data, timeout, str(tmp_dir), target_args or [], env=env)
-        else:
-            run_target_stdin(target, data, timeout, env=env)
+            if file_mode:
+                run_target_file(
+                    target, data, timeout, str(tmp_dir), target_args or [], env=env_base
+                )
+            else:
+                run_target_stdin(target, data, timeout, env=env_base)
 
-        # Read the edge bitmap from SHM.  shmat() is bound with
-        # restype=c_void_p; attaching with the default c_int restype truncated
-        # this address to 32 bits and string_at() then read an unmapped page.
-        ptr = libc_shm.shmat(shmid)
-        if ptr is not None:
-            try:
-                file_edges[str(fpath)] = bytearray(ctypes.string_at(ptr, edge_map_size))
-            finally:
-                libc_shm.shmdt(ptr)
-        else:
-            file_edges[str(fpath)] = bytearray(edge_map_size)
-        libc_shm.shmctl_rmid(shmid)
+            seed_edges[str(fpath)] = shm.get_edge_ids()
 
-        if (i + 1) % 10 == 0 or (i + 1) == len(corpus_files):
-            print(f"\r[*] Replayed {i + 1}/{len(corpus_files)}...", end="", flush=True)
+            if (i + 1) % 10 == 0 or (i + 1) == len(corpus_files):
+                print(f"\r[*] Replayed {i + 1}/{len(corpus_files)}...", end="", flush=True)
+    finally:
+        map_entries = shm.num_entries
+        shm.cleanup()
 
     print()
 
@@ -192,16 +215,14 @@ def _minimize_with_coverage(
 
     # Refuse to prune on a total coverage blackout. Both set-cover and
     # rate-distortion select files by the edges they contribute, so an
-    # all-zero bitmap set means nothing contributes anything and *every* file
+    # all-empty edge set means nothing contributes anything and *every* file
     # looks redundant -- the corpus is wiped rather than minimized.
     #
     # A blackout means the measurement failed, not that the seeds are
-    # worthless: an uninstrumented target, a failed shmat, or a segment the
-    # child never wrote. _read_shm_bitmap's docstring already says callers must
-    # read all-zero as "no coverage information" rather than "covers nothing";
-    # this is that check. Deleting a corpus on a broken measurement is the
-    # worst available outcome, so bail out and name the likely cause.
-    if not any(any(bm) for bm in file_edges.values()):
+    # worthless: an uninstrumented target, a failed attach, or a segment the
+    # child never wrote. Callers must read "no edges" as "no coverage
+    # information", never as "covers nothing".
+    if not any(seed_edges.values()):
         print(
             "[-] No edges recorded for any corpus file -- refusing to prune.\n"
             "    Every file would look redundant and the whole corpus would be "
@@ -213,34 +234,31 @@ def _minimize_with_coverage(
         )
         return len(corpus_files), 0
 
-    # Convert to sets for rate-distortion module
-    seed_edges = {}
-    for fpath, bm in file_edges.items():
-        seed_edges[fpath] = {j for j in range(edge_map_size) if bm[j]}
-
     if rate_distortion:
         print("[*] Using rate-distortion optimal pruning...")
         from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 
-        rd = RateDistortionCorpus(map_size=edge_map_size)
+        rd = RateDistortionCorpus(map_size=map_entries)
         covered_files, actual_frac = rd.optimal_pruning(seed_edges, target_fraction=target_frac)
         print(
             f"[*] Rate-distortion: kept {len(covered_files)}/{len(corpus_files)} "
             f"files ({actual_frac:.1%} coverage)"
         )
     else:
-        # Greedy set cover (bitmaps as numpy uint8 views: count_new = popcount
-        # of (edges & ~covered) — ~100x faster than a 65K-wide Python scan).
-        total_coverage = np.zeros(edge_map_size, dtype=np.uint8)
+        # Greedy set cover over edge-id sets. The previous version scored
+        # candidates with numpy popcounts over uint8 bitmap views, which was
+        # the right shape for AFL's byte bitmap and the wrong one for this
+        # shim's entry table; set difference is both correct here and cheaper
+        # than it looks, since the sets hold only edges actually hit.
+        covered: set[int] = set()
         covered_files: list[str] = []
-        remaining = list(file_edges.keys())
+        remaining = list(seed_edges.keys())
 
         while remaining:
             best_file = None
             best_new_edges = 0
             for fpath in remaining:
-                edges = np.frombuffer(file_edges[fpath], dtype=np.uint8)
-                new = int(np.count_nonzero(edges & ~total_coverage))
+                new = len(seed_edges[fpath] - covered)
                 if new > best_new_edges:
                     best_new_edges = new
                     best_file = fpath
@@ -249,7 +267,7 @@ def _minimize_with_coverage(
                 break
 
             covered_files.append(best_file)
-            total_coverage |= np.frombuffer(file_edges[best_file], dtype=np.uint8)
+            covered |= seed_edges[best_file]
             remaining.remove(best_file)
 
     return _commit_results(corpus_files, covered_files, output_dir, corpus_path)

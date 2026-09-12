@@ -101,17 +101,25 @@ class TestMinimizeCoverageBlackout:
         for i in range(5):
             (corpus / f"id_{i}").write_bytes(f"seed-{i}".encode())
 
-        # Stub both the attach and the execution. Patching shmat_checked alone
-        # is enough to produce the blackout, but minimize_corpus would still
-        # fork a real child -- and under the full suite that fork happens in a
-        # multithreaded interpreter, which segfaults (report finding E3).
-        # Nothing here needs a real subprocess: the guard under test keys off
-        # the bitmaps, so stubbing the runner keeps the test hermetic.
+        # Stub the coverage read and the execution. minimize_corpus would
+        # otherwise fork a real child -- and under the full suite that fork
+        # happens in a multithreaded interpreter, which segfaults (report
+        # finding E3). Nothing here needs a real subprocess: the guard under
+        # test keys off the edge sets, so stubbing keeps the test hermetic.
         # The runners are imported inside the function, so patch them at the
         # source module rather than on M.
+        #
+        # This used to force the blackout by patching libc_shm.shmat to
+        # return None, back when the coverage path attached the segment by
+        # hand. It now goes through ShmCoverage, which owns the layout and
+        # raises OSError on a failed attach rather than yielding an empty
+        # bitmap -- so patching shmat tested the constructor's error handling,
+        # not this guard. Emptying get_edge_ids() is the blackout the guard
+        # actually keys off.
         import fuzzer_tool.adapters.process as P
+        from fuzzer_tool.adapters.shm import ShmCoverage
 
-        monkeypatch.setattr(M.libc_shm, "shmat", lambda *_a, **_k: None)
+        monkeypatch.setattr(ShmCoverage, "get_edge_ids", lambda self: set())
         monkeypatch.setattr(P, "run_target_stdin", lambda *_a, **_k: (0, ""))
         monkeypatch.setattr(P, "run_target_file", lambda *_a, **_k: (0, ""))
 
