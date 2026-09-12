@@ -1,6 +1,7 @@
 """Fuzzer orchestration: coordinates mutations, execution, and coverage."""
 
 import atexit
+import collections
 import contextlib
 import logging
 import math
@@ -913,6 +914,7 @@ class Fuzzer:
         qea_cooling_min_angle=0.005,
         calibrate=0,
         stall_threshold=1000,
+        stall_release_edges=1,
         resize_map_on_stall=True,
         reseed_on_stall=False,
         map_size=0,
@@ -1049,6 +1051,20 @@ class Fuzzer:
         self._stall_recovery_execs = 0  # execs spent in recovery mode
         self._stall_reseed_count = 0  # times the RNG was reseeded on stall
         self._last_stall_seed = None  # seed applied by the most recent reseed
+        # Relay telemetry (see _stall_relay_stats). The stall mechanism is a
+        # relay: engage after `stall_threshold` execs of silence, release on
+        # new coverage. Its period and amplitude are exactly what a relay
+        # auto-tuning experiment measures, and the campaign runs the
+        # experiment whether or not anyone reads it -- so read it.
+        self._stall_release_edges = max(1, int(stall_release_edges))
+        self._stall_edges_in_recovery = 0  # edges since the current engage
+        self._stall_edges_active = 0  # cumulative edges found while engaged
+        self._stall_engaged_at = None  # exec of the current/last engage
+        self._stall_last_engage_exec = None  # exec of the PREVIOUS engage
+        self._stall_cycles: collections.deque = collections.deque(maxlen=256)
+        self._stall_cycle_edges = 0  # edges in the cycle being accumulated
+        self._stall_cycle_execs = 0  # execs engaged in that cycle
+        self._stall_release_reason = None
         self.extra_crash_codes = set(extra_crash_codes) if extra_crash_codes else set()
         self.max_len = max_len
         # Floor for the adaptive max_len in corpus_manager: that value
@@ -4472,12 +4488,7 @@ class Fuzzer:
                         self.op_edges["smt_solver"] = self.op_edges.get("smt_solver", 0.0) + len(
                             new
                         )
-                    if self._stall_recovery_active:
-                        print(
-                            f"\n[*] RECOVERED: found {len(new)} new edges at exec "
-                            f"{self.exec_count}, resuming normal mode"
-                        )
-                        self._stall_recovery_active = False
+                    self._stall_note_coverage(len(new))
                 if meta is not None and new:
                     meta["coverage_edges"] += len(new)
                     self._cached_total_edges += len(new)
@@ -5623,6 +5634,123 @@ class Fuzzer:
         print(f"[*] Reseeded RNG → {new_seed} (stall reseed #{self._stall_reseed_count})")
         return new_seed
 
+    def _stall_recovery_enter(self, reason: str, execs_since_edge: int) -> None:
+        """Engage the stall relay and open a new telemetry cycle."""
+        prev = self._stall_last_engage_exec
+        self._stall_recovery_count += 1
+        self._stall_recovery_active = True
+        self._stall_engaged_at = self.exec_count
+        self._stall_last_engage_exec = self.exec_count
+        self._stall_edges_in_recovery = 0
+        print(
+            f"\n[*] STALL #{self._stall_recovery_count}: {reason} in "
+            f"{execs_since_edge} execs, switching to random mode"
+        )
+        if prev is not None:
+            # Engage-to-engage spacing is the relay period. Recorded on
+            # engage rather than on release because a campaign that ends
+            # mid-recovery would otherwise drop its last period silently.
+            self._stall_cycles.append(
+                {
+                    "engage_exec": prev,
+                    "period": self.exec_count - prev,
+                    "edges_in_recovery": self._stall_cycle_edges,
+                    "recovery_execs": self._stall_cycle_execs,
+                }
+            )
+        self._stall_cycle_edges = 0
+        self._stall_cycle_execs = 0
+
+    def _stall_note_coverage(self, n_new: int) -> bool:
+        """Credit ``n_new`` edges to the relay; return True if it released.
+
+        Deliberately a method and not an inline block in the fuzz loop. The
+        release condition is what ``--stall-release-edges`` tunes, so a test
+        that mirrors it inline cannot detect the condition changing -- the
+        first version of tests/test_regression_stall_relay.py did mirror it,
+        and stripping the dwell from production left all 13 cases passing.
+
+        The dwell is counted in EDGES, not execs: a burst of ``n`` arriving
+        in one exec satisfies a dwell of ``n`` immediately, because the dwell
+        asks for evidence of renewed discovery, not for elapsed time.
+        """
+        if not self._stall_recovery_active or n_new <= 0:
+            return False
+        self._stall_edges_active += n_new
+        self._stall_edges_in_recovery += n_new
+        if self._stall_edges_in_recovery < self._stall_release_edges:
+            return False
+        print(
+            f"\n[*] RECOVERED: found {self._stall_edges_in_recovery} new edges "
+            f"by exec {self.exec_count}, resuming normal mode"
+        )
+        self._stall_recovery_exit("new coverage")
+        return True
+
+    def _stall_recovery_exit(self, reason: str) -> None:
+        """Release the stall relay. The single definition of the exit.
+
+        Three call sites used to assign ``_stall_recovery_active = False``
+        directly (new coverage, the SUPERCRITICAL regime clear, and the
+        release dwell), which is how a release condition ends up with three
+        slightly different meanings. Everything that must happen on release
+        -- cycle accounting, dwell reset -- happens here or nowhere.
+        """
+        if not self._stall_recovery_active:
+            return
+        self._stall_recovery_active = False
+        self._stall_cycle_edges = self._stall_edges_in_recovery
+        if self._stall_engaged_at is not None:
+            self._stall_cycle_execs = self.exec_count - self._stall_engaged_at
+        self._stall_edges_in_recovery = 0
+        self._stall_release_reason = reason
+
+    def _stall_relay_stats(self) -> dict:
+        """Relay period and amplitude, for tuning anything built on top.
+
+        ``amplitude`` is the ratio of discovery rate while engaged to
+        discovery rate while released -- the open question Tier 1.2 of the
+        control-theory handover cannot answer without it, since adding
+        release dwell trades switching frequency for duty cycle and which
+        side of that trade is better depends entirely on whether recovery
+        mode is more or less productive per exec than normal mode.
+
+        A ratio above 1.0 says recovery earns its execs and more dwell is
+        probably right; below 1.0 says the relay should be released sooner,
+        not held longer. Returns ``None`` for fields with no data rather
+        than 0.0: never-measured and measured-zero are different answers.
+        """
+        idle_execs = max(0, self.exec_count - self._stall_recovery_execs)
+        total_edges = self._edge_tracker.get_cumulative_edge_count()
+        idle_edges = max(0, total_edges - self._stall_edges_active)
+        active_rate = (
+            self._stall_edges_active / self._stall_recovery_execs
+            if self._stall_recovery_execs > 0
+            else None
+        )
+        idle_rate = idle_edges / idle_execs if idle_execs > 0 else None
+        periods = [c["period"] for c in self._stall_cycles if c.get("period")]
+        return {
+            "cycles": len(self._stall_cycles),
+            "engagements": self._stall_recovery_count,
+            "release_edges": self._stall_release_edges,
+            "period_mean": sum(periods) / len(periods) if periods else None,
+            "period_min": min(periods) if periods else None,
+            "period_max": max(periods) if periods else None,
+            "duty": (
+                self._stall_recovery_execs / self.exec_count if self.exec_count > 0 else None
+            ),
+            "edges_active": self._stall_edges_active,
+            "edges_idle": idle_edges,
+            "rate_active": active_rate,
+            "rate_idle": idle_rate,
+            "amplitude": (
+                active_rate / idle_rate
+                if active_rate is not None and idle_rate not in (None, 0.0)
+                else None
+            ),
+        }
+
     def _maybe_trigger_stall_recovery(self, execs_since_edge):
         """Activate stall recovery unless entropy shows active redistribution.
 
@@ -5715,12 +5843,7 @@ class Fuzzer:
         if growth["confidence"] > 0.3 and growth["current_rate"] < 0.001:
             reason += " + near-saturation"
 
-        self._stall_recovery_count += 1
-        print(
-            f"\n[*] STALL #{self._stall_recovery_count}: {reason} in "
-            f"{execs_since_edge} execs, switching to random mode"
-        )
-        self._stall_recovery_active = True
+        self._stall_recovery_enter(reason, execs_since_edge)
 
         # Optionally reseed the RNGs so recovery explores a different
         # mutation stream rather than continuing the exhausted one.
@@ -6889,7 +7012,7 @@ class Fuzzer:
                         elif regime is CoverageRegime.SUPERCRITICAL:
                             # Healthy: clear any emergency state
                             if self._stall_recovery_active:
-                                self._stall_recovery_active = False
+                                self._stall_recovery_exit("supercritical regime")
                                 log.info("REGIME: supercritical — clearing stall recovery")
                         self._regime.acknowledge()
                     # Stall detection: no new edges in threshold execs

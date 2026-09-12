@@ -182,6 +182,49 @@ class StatsReporter:
             getattr(f, "_crash_files", None),
         )
 
+    def _print_stall_relay(self, f) -> None:
+        """Relay period and amplitude for the stall recovery mechanism.
+
+        Stall recovery is a relay -- bang-bang between normal and random
+        mode -- and this is the measurement a relay auto-tuning experiment
+        exists to take. The campaign already runs the experiment; printing
+        it is the whole cost of having the data.
+
+        ``Amplitude`` is the one number that settles whether
+        ``--stall-release-edges`` should move: it is the ratio of edges per
+        exec while engaged to edges per exec while released. Above 1.0,
+        recovery is the more productive mode and holding it longer is
+        defensible; below 1.0, the relay should release sooner, not later.
+        Fields with no data print as n/a rather than 0.0 -- never-measured
+        and measured-zero are different answers, the same convention the
+        Mutation Effectiveness table uses for RateA.
+        """
+        st = f._stall_relay_stats()
+
+        def _fmt(v, spec=".3f"):
+            return "n/a" if v is None else format(v, spec)
+
+        print(f"  Relay dwell:       {st['release_edges']} edge(s) to release")
+        if st["period_mean"] is not None:
+            print(
+                f"  Relay period:      {st['period_mean']:,.0f} execs mean "
+                f"(min {st['period_min']:,}, max {st['period_max']:,}, "
+                f"n={st['cycles']})"
+            )
+        else:
+            print(f"  Relay period:      n/a (n={st['cycles']} complete cycles)")
+        print(
+            f"  Relay rates:       engaged {_fmt(st['rate_active'], '.5f')} "
+            f"edges/exec ({st['edges_active']:,} edges), "
+            f"released {_fmt(st['rate_idle'], '.5f')} ({st['edges_idle']:,})"
+        )
+        amp = st["amplitude"]
+        if amp is None:
+            print("  Relay amplitude:   n/a")
+        else:
+            verdict = "recovery more productive" if amp > 1.0 else "recovery less productive"
+            print(f"  Relay amplitude:   {amp:.3f}x ({verdict})")
+
     def _print_summary_coverage(self, f) -> None:
         """Print coverage-related summary lines."""
         shm_edges = f.shm_cov._peak_cumulative_edges if f.shm_cov else 0
@@ -314,6 +357,7 @@ class StatsReporter:
             print(
                 f"  Recovery execs:    {f._stall_recovery_execs:,} ({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)"
             )
+            self._print_stall_relay(f)
         if getattr(f, "_use_poisson_disk_admission", False):
             print(
                 f"  Poisson rejects:   {getattr(f, '_poisson_reject_count', 0)} "

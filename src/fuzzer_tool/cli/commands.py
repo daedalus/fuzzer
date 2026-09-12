@@ -765,6 +765,7 @@ def cmd_fuzz(args):
         continue_until_crash=getattr(args, "continue_until_crash", False),
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
+        stall_release_edges=getattr(args, "stall_release_edges", 1),
         map_size=getattr(args, "map_size", 0),
         max_collision_risk=getattr(args, "max_collision_risk", 30),
         debug=getattr(args, "debug", False),
@@ -3315,6 +3316,20 @@ def main() -> int:
         metavar="N",
         help="Detect stall after N execs without new edges and activate "
         "recovery mode with more aggressive mutations (default: 1000)",
+    )
+    fuzz_parser.add_argument(
+        "--stall-release-edges",
+        type=int,
+        default=1,
+        metavar="N",
+        help="Edges of renewed discovery required to leave stall recovery "
+        "(default: 1). The relay engages after --stall execs of silence but "
+        "releases on evidence of discovery, so the hysteresis is asymmetric "
+        "by the threshold: under bursty discovery a single arrival ends "
+        "recovery and the next quiet stretch re-engages. Raising this cuts "
+        "switching but raises the fraction of the campaign spent in recovery "
+        "-- consult the relay amplitude in the end-of-run report before "
+        "moving it (>1.0 means recovery is the more productive mode).",
     )
     fuzz_parser.add_argument(
         "--resize-map-on-stall",
