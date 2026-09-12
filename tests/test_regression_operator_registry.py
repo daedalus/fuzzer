@@ -296,6 +296,7 @@ class TestRegularityOperators:
             "size_field_overflow",
             "bpe",
             "golomb",
+            "naf_scalar_mutate",
             "endian_convert",
             "count_overflow",
             "zero_run_amplify",

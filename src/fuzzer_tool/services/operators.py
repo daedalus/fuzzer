@@ -3564,6 +3564,11 @@ class OperatorEngine:
 
         return self._regularity(golomb, buf)
 
+    def _op_naf_scalar_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.naf_scalar import naf_scalar_mutate
+
+        return self._regularity(naf_scalar_mutate, buf)
+
     def _op_endian_convert(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import endian_convert
 
