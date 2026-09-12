@@ -481,6 +481,29 @@ def _enumerate_operator(
     return ("over_budget" if pool.budget_exhausted else "enumerated"), outputs
 
 
+def _walk_operator(name: str, seed: bytes, max_len: int, max_runs: int = 4000):
+    """``_enumerate_operator``, falling back to a spread sample over budget.
+
+    Returns ``(status, outputs)`` where ``"sampled"`` means the outputs are
+    a low-discrepancy sample of the operator's space rather than all of it.
+    A sample is enough for any *universally quantified* claim -- max_len is
+    respected, the return type is bytes-or-None -- because one
+    counterexample falsifies those, and it is not enough for an
+    existentially quantified one ("the operator can produce X"), which is
+    why this is a separate function rather than a change to the one above.
+
+    The fallback matters because the lexicographic walk pins the leading
+    draws to zero once the budget bites: the 27 over-budget operators were
+    not being checked against the max_len invariant at all, and that
+    invariant is the one that caught ``utf8_widen`` and ``regex_bomb``.
+    """
+    status, outputs = _enumerate_operator(name, seed, max_len, max_runs)
+    if status != "over_budget":
+        return status, outputs
+    status, outputs = _enumerate_operator(name, seed, max_len, max_runs, order=ORDER_SPREAD)
+    return ("sampled" if status == "over_budget" else status), outputs
+
+
 class TestOperatorEnumeration:
     SEED = bytes(range(8))
     MAX_LEN = 8
@@ -490,7 +513,10 @@ class TestOperatorEnumeration:
 
         Measured at the time of writing: 70 of 134 fully enumerable on an
         8-byte buffer, 21 blocked by continuous draws, 14 by bulk draws,
-        4 too deep, 25 over budget. The floor exists to catch the
+        4 too deep, 25 over budget. Re-measured 2026-09-12 as the table
+        grew to 208: 129 enumerable, 34 continuous, 8 bulk, 10 too deep,
+        27 over budget -- the last group is the one ``_walk_operator``
+        now samples rather than skips. The floor exists to catch the
         regression where the pool stops intercepting something and
         everything silently reclassifies.
         """
@@ -520,18 +546,37 @@ class TestOperatorEnumeration:
         for max_len, seed in ((8, bytes(range(8))), (4, b"abcd"), (2, b"ab"), (1, b"a")):
             offenders = []
             for name in _operator_names():
-                status, outputs = _enumerate_operator(name, seed, max_len)
-                if status != "enumerated":
+                status, outputs = _walk_operator(name, seed, max_len)
+                if status not in ("enumerated", "sampled"):
                     continue
                 worst = max((len(r if r is not None else b) for r, b in outputs), default=0)
                 if worst > max_len:
-                    offenders.append((name, worst))
+                    offenders.append((name, worst, status))
             assert not offenders, f"max_len={max_len}: {offenders}"
+
+    def test_the_over_budget_operators_are_checked_and_not_skipped(self):
+        """A floor on how many operators the spread fallback brings in.
+
+        Without it these were not merely unproven, they were unexamined:
+        the lexicographic walk pins the leading draws to zero, so every
+        claim above quietly excluded them. This asserts the fallback keeps
+        working, because the failure mode is silent -- the invariant tests
+        pass either way, just over fewer operators.
+        """
+        sampled = [
+            n
+            for n in _operator_names()
+            if _walk_operator(n, self.SEED, self.MAX_LEN)[0] == "sampled"
+        ]
+        assert len(sampled) >= 15, (
+            f"only {len(sampled)} operators reached by the spread fallback; "
+            f"the over-budget set is no longer being checked"
+        )
 
     def test_every_reachable_output_is_bytes_or_none(self):
         for name in _operator_names():
-            status, outputs = _enumerate_operator(name, self.SEED, self.MAX_LEN)
-            if status != "enumerated":
+            status, outputs = _walk_operator(name, self.SEED, self.MAX_LEN)
+            if status not in ("enumerated", "sampled"):
                 continue
             bad = [
                 type(r).__name__
