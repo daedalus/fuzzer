@@ -180,3 +180,124 @@ directory does — each still needs its gating question answered on paper, and
 in C1's and C4's case, a profiling run establishing that the hot path they'd
 touch is actually hot. Treat this document as a triage input to *produce*
 that evidence, not as a backlog ready to implement against.
+
+---
+
+## Second pass (2026-09-12, later) — audit against live source
+
+Re-read this document against the tree at `e258d8b` instead of re-running the
+survey. The six "already covered" rows and the C1–C4 dispositions hold. What
+the first pass missed is below.
+
+### One of its neighbours was rejected on a premise that is false
+
+`handover_algorithm_catalogue_survey_2026-09-06.md` §10 rejects Gray code on
+structural grounds and closes with an escape clause: *"Gray code would only pay
+if we added an exhaustive enumeration of all `2^k` values of a `k`-bit field,
+which nothing does today."* `core/exhaustive_pool.py` is that enumeration, and
+it has been since P1-5. The rejection's reasoning about the deterministic stage
+is correct and unchanged — each mutant there is one edit from the base seed, not
+from the previous mutant. The escape clause is what fires.
+
+The applicable object is not the reflected binary code, though; it is the
+ordering of a mixed-radix counter, which is where **A382221** (products of
+primitive roots), **A371531** (multiplicative order) and **A374720** (RC4-like
+KSA permutation rank) come in.
+
+### Measured: a budget-truncated walk is a prefix of one draw, not a sample
+
+`max_runs` does not shorten the walk evenly. The odometer carries left, so the
+leading positions never move:
+
+| space | budget | distinct values reached per draw position |
+|---|---|---|
+| 4 × `randrange(256)` = 4.29e9 | 20,000 | 1, 1, 79, 256 |
+| 4 × `randrange(256)` = 4.29e9 | 1,000,000 (default) | 1, 16, 256, 256 |
+| `delta_encode`, bounds [7,7,2,2,33,2,33] | 4,000 (harness) | 1, 1, 2, 2, 33, 2, 33 |
+| `gray_code`, bounds [7,6,3,3,8,3,8] | 4,000 (harness) | 2, 7, 3, 3, 8, 3, 8 |
+
+`exhausted` correctly reports that the space was not covered. It does not report
+that the omission is all at one end.
+
+Consequence, which is the reason this was worth doing at all: **27 of 208
+operators** return `over_budget` at the harness budget, and
+`tests/test_exhaustive_pool.py` skips those for every invariant it states —
+including `test_no_operator_exceeds_max_len_on_any_reachable_path`, the test
+that caught `utf8_widen` and `regex_bomb`. They were not unproven, they were
+unexamined.
+
+### Implemented
+
+`ExhaustivePool(order=ORDER_SPREAD)`: visit `(k * stride) mod space` with
+`stride` coprime to `space` and nearest to `space/phi`. Coprimality gives the
+full period, the phi placement gives the low discrepancy; both are required and
+both are asserted. For `space = 2**32` the nearest coprime is 2654435769, which
+is Knuth's multiplicative-hash constant. The same 20,000-run budget on the
+4.29e9 space now reaches all 256 values at all four positions.
+
+Three properties were kept deliberately, and each cost something:
+
+- **It only engages when the space exceeds the budget.** Reordering a walk that
+  can finish would trade the `exhausted` guarantee for nothing. Spread order
+  therefore never reports `exhausted`, and `strided_runs` is what distinguishes
+  "sampled" from "walked".
+- **The threshold is re-tested on every advance, not decided after run 0.** The
+  first run of a path-dependent operator sees its narrowest tree —
+  `randrange(first + 1)` with `first == 0` is a bound of 1, which is not a
+  choice and is not recorded. `_shape` only grows, so the handover to the stride
+  happens at most once and never reverses.
+- **`NondeterministicDrawError` cannot fire in spread order**, because nothing
+  is replayed value-for-value; a mismatched bound is clamped instead and counted
+  on `shape_divergences`. That error is how outside entropy shows up, and the
+  sweep asserting no operator has any still runs in lexicographic order.
+
+### What the newly-checked operators showed
+
+Nothing. No `max_len` violation and no non-bytes return across the 27, at caps
+8, 4, 2 and 1. Recorded because the negative result is the result.
+
+One reclassification: `avif_chunk_mutate`, `golomb` and `pgs_chunk_mutate`
+report `too_deep` under spread order where the odometer called them
+`over_budget`. The odometer had never reached their deep paths, so "over budget"
+was hiding "exceeds `max_depth=16`". Those three remain unchecked, and raising
+the harness depth is the follow-up.
+
+### New candidates, gated
+
+- **A375585 / A375959 — compression-amplification record oracle.** The sequence
+  is a record-setting search over zlib output length. `targets/zlib_read.c`
+  discards `total_out`; `_max_counts` records per-edge maxima and nothing
+  records output size. `core/validity.py`'s `--reject-code` is the precedent for
+  a harness-chosen scalar channel. **Gate: build that channel first**, or this
+  is an oracle with nothing to read.
+- **A374625 / A374849 / A383976 / A375156 — line-code transducer mutators.**
+  A374625 is Manchester encode (1→10, 0→01), A374849 its decode. The
+  structured-regularity family's entry price is naming the statistical test the
+  fill defeats (§10, cellular automata, rejected for not paying it); this pays
+  it — `core/randomness.py::runs_test` exists and Manchester caps every run at
+  two bits, an extremal rather than random value. **Gate: no target decodes a
+  line code.** Same shape as C3's original gate, and note C3's gate turned out
+  to be wrong.
+- **A380790 — Erdős–Turán Golomb ruler as a non-adaptive probe design** for
+  `core/colorization.py`, which binary-searches ranges adaptively. Weak on
+  merit: non-adaptive group testing spends more execs to save rounds, and execs
+  are the currency. **Only worth revisiting if round count becomes the
+  constraint** (parallel workers).
+
+### Closed, with the reason
+
+- **A360760 (CRC-16-IBM polynomial).** `core/crc32.py`'s model is
+  `(poly, width, init, final_xor, reflect_in, reflect_out)` — width is a
+  parameter — and `checksum_learner`'s GF(2)-affine family recovers CRC-32/16/8
+  generically via Berlekamp–Massey. A hardcoded CRC-16 table adds nothing.
+- **A379604 (bucket-sort max occupancy), A384543 (distinct `i XOR j` values).**
+  Both are collision models for a hashed map. `aeedaf5` made the SHM front
+  region one field per address and `adapters/shm.py` states no hash collisions;
+  `edge_tracker.birthday_collision_risk` covers the rest. Moot, not deferred.
+- **A381457 (bitonic sorter).** Same class as C4 and closed by the same
+  47-module sort survey.
+- **C1 (Eytzinger), second data point.** Every `bisect` site in the tree is a
+  CDF draw over a small array (`seed_picker.py:114`, `operators.py:4447,4459`)
+  or an `insort` into a sliding window (`execution_time.py`). Still no repeated
+  binary search over a large static array, so still open and still unstarted for
+  the same reason.
