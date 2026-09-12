@@ -404,6 +404,82 @@ class TestCaching:
             s.solve_cmplog_pair(op_a, op_b)
         assert len(s._cache) <= 3
 
+    def test_regression_lru_hit_protects_from_eviction(self):
+        """A cache hit must count as recent use, not just the original insertion.
+
+        With capacity 3: insert A, B, C (fills the cache), re-touch A (hit),
+        then insert D. A true LRU evicts B (the least recently touched);
+        a FIFO-by-insertion-order cache would wrongly evict A despite the
+        intervening hit.
+        """
+        s = Z3Solver()
+        s._cache_maxsize = 3
+        pairs = [(struct.pack("<I", i * 100), struct.pack("<I", i * 100 + 1000)) for i in range(4)]
+        a, b, c, d = pairs
+
+        s.solve_cmplog_pair(*a)  # insert A
+        s.solve_cmplog_pair(*b)  # insert B
+        s.solve_cmplog_pair(*c)  # insert C — cache full: [A, B, C]
+
+        s.solve_cmplog_pair(*a)  # hit on A — must mark A as most-recently-used
+
+        s.solve_cmplog_pair(*d)  # insert D — evicts the true LRU entry (B)
+
+        assert a in s._cache, "recently-hit entry A was evicted despite the hit"
+        assert b not in s._cache, "B should be the evicted entry (least recently used)"
+        assert c in s._cache
+        assert d in s._cache
+
+    def test_adaptive_grow_on_repeated_ghost_hits(self):
+        """Capacity grows once enough evicted keys are re-requested (thrashing signal)."""
+        from fuzzer_tool.core.smt_solver import _GHOST_HIT_GROW_THRESHOLD
+
+        s = Z3Solver()
+        s._cache_maxsize = 2
+        original_maxsize = s._cache_maxsize
+        evicted = (struct.pack("<I", 0), struct.pack("<I", 1000))
+
+        s.solve_cmplog_pair(*evicted)  # insert, then evict via the two inserts below
+        s.solve_cmplog_pair(struct.pack("<I", 1), struct.pack("<I", 1001))
+        s.solve_cmplog_pair(struct.pack("<I", 2), struct.pack("<I", 1002))
+        assert evicted not in s._cache  # confirms it was actually evicted
+
+        for _ in range(_GHOST_HIT_GROW_THRESHOLD):
+            s.solve_cmplog_pair(*evicted)  # each re-request is a ghost hit
+            # re-fill so it gets evicted again before the next iteration
+            s.solve_cmplog_pair(struct.pack("<I", 900), struct.pack("<I", 1900))
+            s.solve_cmplog_pair(struct.pack("<I", 901), struct.pack("<I", 1901))
+
+        assert s._cache_maxsize > original_maxsize
+
+    def test_falsification_single_ghost_hit_does_not_grow(self):
+        """One repeated re-request must NOT grow capacity (needs the full threshold)."""
+        s = Z3Solver()
+        s._cache_maxsize = 2
+        original_maxsize = s._cache_maxsize
+        evicted = (struct.pack("<I", 0), struct.pack("<I", 1000))
+
+        s.solve_cmplog_pair(*evicted)
+        s.solve_cmplog_pair(struct.pack("<I", 1), struct.pack("<I", 1001))
+        s.solve_cmplog_pair(struct.pack("<I", 2), struct.pack("<I", 1002))
+        assert evicted not in s._cache
+
+        s.solve_cmplog_pair(*evicted)  # exactly one ghost hit
+
+        assert s._cache_maxsize == original_maxsize
+
+    def test_adversarial_grow_capped_at_hard_limit(self):
+        """A thrashing signal at the ceiling must not push capacity past the hard cap."""
+        from fuzzer_tool.core.smt_solver import _CACHE_MAXSIZE_CAP, _GHOST_HIT_GROW_THRESHOLD
+
+        s = Z3Solver()
+        s._cache_maxsize = _CACHE_MAXSIZE_CAP  # already at the ceiling
+        s._ghost_hits = _GHOST_HIT_GROW_THRESHOLD  # threshold reached
+
+        s._maybe_grow_cache()
+
+        assert s._cache_maxsize == _CACHE_MAXSIZE_CAP
+
 
 # ═══════════════════════════════════════════════════════════════════
 # 7. Edge cases

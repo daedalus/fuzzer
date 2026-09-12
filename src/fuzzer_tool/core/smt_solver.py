@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import struct
+from collections import OrderedDict
 
 from fuzzer_tool.core.cond_stmt import CondStmt
 from fuzzer_tool.core.crc32 import crc32
@@ -21,6 +22,16 @@ log = logging.getLogger(__name__)
 
 _SOLVER_TIMEOUT_MS = 50
 _CACHE_MAXSIZE = 1024
+
+# Adaptive growth: a "ghost" list remembers keys evicted from the LRU cache
+# (values discarded, only the key). A miss that lands on a ghost entry means
+# the working set exceeds current capacity, not that traffic is unique —
+# that is the thrashing signal ARC-style caches use to grow. We require
+# several such hits (not one) before growing, so a single repeated pair
+# cannot ratchet capacity up on its own.
+_CACHE_MAXSIZE_CAP = 1024 * 16
+_CACHE_GROW_FACTOR = 2
+_GHOST_HIT_GROW_THRESHOLD = 8
 
 # Concolic solving builds one z3 BitVec per input byte; on multi-MB inputs
 # that model alone exceeds a GB of transient memory (measured ~1.3 GB spikes
@@ -221,10 +232,14 @@ class Z3Solver:
         # Concolic trace accumulator
         self.concolic_trace = ConcolicTrace() if mod_solving_mode == "concolic" else None
 
-        # LRU cache
-        self._cache: dict[tuple[bytes, bytes], dict | None] = {}
-        self._cache_order: list[tuple[bytes, bytes]] = []
+        # LRU cache — OrderedDict gives O(1) move-to-end on hit, which is
+        # what makes this an actual LRU rather than insertion-order FIFO.
+        self._cache: OrderedDict[tuple[bytes, bytes], dict | None] = OrderedDict()
         self._cache_maxsize = _CACHE_MAXSIZE
+
+        # Ghost list of recently-evicted keys, for adaptive growth (see module docstring).
+        self._ghost: OrderedDict[tuple[bytes, bytes], None] = OrderedDict()
+        self._ghost_hits = 0
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -252,10 +267,15 @@ class Z3Solver:
             return None  # concolic mode returns None per-pair; batch solve later
 
         key = (op_a, op_b)
-        cached = self._cache.get(key)
-        if cached is not None or key in self._cache:
+        if key in self._cache:
             self.cache_hits += 1
-            return cached
+            self._cache.move_to_end(key)
+            return self._cache[key]
+
+        if key in self._ghost:
+            del self._ghost[key]
+            self._ghost_hits += 1
+            self._maybe_grow_cache()
 
         for width in (8, 4, 2, 1):
             if len(op_a) == width and len(op_b) == width:
@@ -566,12 +586,28 @@ class Z3Solver:
     # ── Cache helpers ───────────────────────────────────────────────────
 
     def _cache_set(self, key: tuple[bytes, bytes], value: dict | None):
-        """Insert into LRU cache, evicting oldest entry at capacity."""
+        """Insert into LRU cache, evicting the least-recently-used entry at capacity."""
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            self._cache[key] = value
+            return
         if len(self._cache) >= self._cache_maxsize:
-            oldest = self._cache_order.pop(0)
-            self._cache.pop(oldest, None)
+            evicted_key, _ = self._cache.popitem(last=False)
+            self._remember_evicted(evicted_key)
         self._cache[key] = value
-        self._cache_order.append(key)
+
+    def _remember_evicted(self, key: tuple[bytes, bytes]):
+        """Track an evicted key so a near-term re-request can signal thrashing."""
+        self._ghost[key] = None
+        if len(self._ghost) > self._cache_maxsize:
+            self._ghost.popitem(last=False)
+
+    def _maybe_grow_cache(self):
+        """Grow cache capacity once repeated ghost hits show the working set exceeds it."""
+        if self._ghost_hits < _GHOST_HIT_GROW_THRESHOLD:
+            return
+        self._ghost_hits = 0
+        self._cache_maxsize = min(self._cache_maxsize * _CACHE_GROW_FACTOR, _CACHE_MAXSIZE_CAP)
 
     # ── Comparison-wall solving as minimax game ────────────────────────
 
