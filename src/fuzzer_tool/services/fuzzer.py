@@ -818,6 +818,8 @@ class Fuzzer:
         hw_perf=False,
         intel_pt=False,
         intel_pt_mode="block",
+        lbr=False,
+        lbr_period=0,
         schedule_ablation=None,
         schedule="base",
         aflgo_cooling="exp",
@@ -1541,6 +1543,8 @@ class Fuzzer:
         self.hw_perf: bool = hw_perf
         self.intel_pt: bool = intel_pt
         self.intel_pt_mode: str = intel_pt_mode
+        self.lbr: bool = lbr
+        self.lbr_period: int = int(lbr_period or 0)
         self.crash_min_sizes: dict[str, int] = {}  # stack_hash -> min trigger size
         # Honggfuzz power factor stats (for display)
         self._hf_novelty_boosts: int = 0
@@ -1631,6 +1635,12 @@ class Fuzzer:
         self._pt_session = None
         if self.intel_pt:
             self._setup_intel_pt()
+
+        # Sampled branch-record coverage (AMD BRS/LbrExtV2, Intel LBR).
+        self.branch_cov = None
+        self._lbr_session = None
+        if self.lbr:
+            self._setup_lbr()
 
         # Hardware performance counters (optional, requires CAP_PERFMON)
         self._perf_counters = None
@@ -2724,6 +2734,7 @@ class Fuzzer:
             or self._cmplog
             or self._perf_counters
             or self._pt_session
+            or self._lbr_session
         ):
             return
 
@@ -2741,6 +2752,35 @@ class Fuzzer:
             print(f"[*] Forkserver: fork+exec from a loaded process ({self.target})")
         else:
             log.warning("Forkserver unavailable, falling back to spawn-per-exec")
+
+    def _setup_lbr(self) -> bool:
+        """Build the sampled branch-record map and the session feeding it.
+
+        Degrades like --intel-pt: no usable PMU leaves the configured
+        backend untouched.  Unlike PT this opens on AMD and on Intel, since
+        PERF_SAMPLE_BRANCH_STACK is vendor-neutral.
+        """
+        from fuzzer_tool.adapters.lbr_trace import DEFAULT_PERIOD, LbrSession
+        from fuzzer_tool.core.branch_record import BranchCoverage
+
+        cov = BranchCoverage()
+        period = self.lbr_period or DEFAULT_PERIOD
+        session = LbrSession(period=period, sink=cov)
+        if not session.available:
+            log.warning(
+                "Branch-record sampling unavailable (no branch-stack event); "
+                "coverage unchanged. Needs AMD Zen 3+ with BRS/LbrExtV2 or "
+                "Intel LBR, and perf_event_paranoid low enough to sample."
+            )
+            self.lbr = False
+            return False
+
+        self.branch_cov = cov
+        self._lbr_session = session
+        # Sampled, so absence of an edge is a fact about the period, not the
+        # input. Said out loud because the number looks like edge coverage.
+        print(f"[*] Coverage: branch records (sampled, period={period})")
+        return True
 
     def _setup_intel_pt(self) -> bool:
         """Build the PT coverage map and the AUX session that feeds it.
@@ -4117,6 +4157,7 @@ class Fuzzer:
                     (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
                     or (self.shm_cov and self.shm_cov.is_new_coverage())
                     or (self.pt_cov and self.pt_cov.is_new_coverage())
+                    or (self.branch_cov and self.branch_cov.is_new_coverage())
                 )
         elif self.shm_cov:
             has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
@@ -4127,6 +4168,7 @@ class Fuzzer:
             has_new_coverage = bool(
                 (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
                 or (self.pt_cov and self.pt_cov.is_new_coverage())
+                or (self.branch_cov and self.branch_cov.is_new_coverage())
             )
 
         # Performance novelty: an edge whose trip count grew substantially
@@ -6278,6 +6320,8 @@ class Fuzzer:
             groups["Execution"].append("hw-perf")
         if self.pt_cov:
             groups["Execution"].append("intel-pt")
+        if self.branch_cov:
+            groups["Execution"].append("lbr")
         if self._diff_target:
             groups["Execution"].append("differential")
 

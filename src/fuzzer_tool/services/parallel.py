@@ -103,6 +103,8 @@ def _worker_main(
     slopt: bool = False,
     intel_pt: bool = False,
     intel_pt_mode: str = "block",
+    lbr: bool = False,
+    lbr_period: int = 0,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -205,6 +207,8 @@ def _worker_main(
         slopt=slopt,
         intel_pt=intel_pt,
         intel_pt_mode=intel_pt_mode,
+        lbr=lbr,
+        lbr_period=lbr_period,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -578,6 +582,8 @@ def run_parallel(
     slopt: bool = False,
     intel_pt: bool = False,
     intel_pt_mode: str = "block",
+    lbr: bool = False,
+    lbr_period: int = 0,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -717,6 +723,8 @@ def run_parallel(
         slopt=slopt,
         intel_pt=intel_pt,
         intel_pt_mode=intel_pt_mode,
+        lbr=lbr,
+        lbr_period=lbr_period,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

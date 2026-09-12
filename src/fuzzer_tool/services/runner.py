@@ -200,6 +200,8 @@ class TargetRunner:
                 shm.reset_edge_map()
             if f.pt_cov:
                 f.pt_cov.reset_edge_map()
+            if f.branch_cov:
+                f.branch_cov.reset_edge_map()
             # Open perf counters on current process (pid=0, no extra perms needed)
             # so in-process target calls (direct/direct_lite) are counted.
             if f._perf_counters:
@@ -273,6 +275,8 @@ class TargetRunner:
         # this one, inventing a block that was never reached.
         if f.pt_cov:
             f.pt_cov.reset_edge_map()
+        if f.branch_cov:
+            f.branch_cov.reset_edge_map()
 
         env = os.environ.copy()
         if f.use_coverage:
@@ -290,6 +294,7 @@ class TargetRunner:
                 env=env,
                 perf_counters=f._perf_counters,
                 pt_session=f._pt_session,
+                lbr_session=f._lbr_session,
                 timeout=f.timeout,
             )
             f._last_child_pid = pid
@@ -297,6 +302,8 @@ class TargetRunner:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
             if f._pt_session:
                 f._pt_session.drain()
+            if f._lbr_session:
+                f._lbr_session.drain()
             return rc, stderr
 
         if f.file_mode:
@@ -309,12 +316,15 @@ class TargetRunner:
                 env=env,
                 perf_counters=f._perf_counters,
                 pt_session=f._pt_session,
+                lbr_session=f._lbr_session,
             )
             f._last_child_pid = pid
             if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
             if f._pt_session:
                 f._pt_session.drain()
+            if f._lbr_session:
+                f._lbr_session.drain()
             return rc, stderr
         rc, stderr, pid = run_target_stdin(
             f.target,
@@ -323,12 +333,15 @@ class TargetRunner:
             env=env,
             perf_counters=f._perf_counters,
             pt_session=f._pt_session,
+            lbr_session=f._lbr_session,
         )
         f._last_child_pid = pid
         if f._perf_counters:
             f._last_perf_deltas = f._perf_counters.read_and_reset()
         if f._pt_session:
             f._pt_session.drain()
+        if f._lbr_session:
+            f._lbr_session.drain()
         return rc, stderr
 
     def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf) -> bool:

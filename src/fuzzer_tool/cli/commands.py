@@ -485,6 +485,8 @@ def cmd_fuzz(args):
             slopt=getattr(args, "slopt", False),
             intel_pt=getattr(args, "intel_pt", False),
             intel_pt_mode=getattr(args, "intel_pt_mode", "block"),
+            lbr=getattr(args, "lbr", False),
+            lbr_period=getattr(args, "lbr_period", 0),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
             contextual=getattr(args, "contextual", False),
@@ -656,6 +658,8 @@ def cmd_fuzz(args):
         hw_perf=getattr(args, "hw_perf", False),
         intel_pt=getattr(args, "intel_pt", False),
         intel_pt_mode=getattr(args, "intel_pt_mode", "block"),
+        lbr=getattr(args, "lbr", False),
+        lbr_period=getattr(args, "lbr_period", 0),
         schedule_ablation=getattr(args, "schedule_ablation", None),
         schedule=getattr(args, "schedule", "base"),
         aflgo_cooling=getattr(args, "aflgo_cooling", "exp"),
@@ -1789,6 +1793,7 @@ _HAIL_MARY_FLAGS = (
     "honggfuzz",
     "hw_perf",
     "intel_pt",
+    "lbr",
     "colorize",
     "weizz_tags",
     "formatfuzzer",
@@ -3133,6 +3138,21 @@ def main() -> int:
         help="Coverage from Intel PT hardware trace instead of instrumentation, "
         "for binaries that cannot be rebuilt. Requires an Intel CPU exposing the "
         "intel_pt PMU (most VMs do not); falls back with a warning when absent.",
+    )
+    fuzz_parser.add_argument(
+        "--lbr",
+        action="store_true",
+        help="Coverage from sampled hardware branch records (AMD BRS/LbrExtV2, "
+        "Intel LBR) for binaries that cannot be rebuilt. Sampled, so a missing "
+        "edge means the period missed it, not that the input did not reach it.",
+    )
+    fuzz_parser.add_argument(
+        "--lbr-period",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Branch-instruction sampling period for --lbr. Lower sees more "
+        "branches and costs more. 0 uses the module default.",
     )
     fuzz_parser.add_argument(
         "--intel-pt-mode",

@@ -882,6 +882,18 @@ class StatsReporter:
                 f"lost:{pt['pt_trace_lost_bytes'] >> 10:,}KiB"
             )
 
+        lbr_str = ""
+        branch_cov = getattr(f, "branch_cov", None)
+        lbr_session = getattr(f, "_lbr_session", None)
+        if branch_cov and lbr_session and lbr_session.reads > 0:
+            br = branch_cov.stats | lbr_session.stats
+            # "sampled" is in the label on purpose: the edge count is a lower
+            # bound, and a reader who forgets that will misread a plateau.
+            lbr_str = (
+                f" | lbr(sampled): {br['br_map_entries']:,}e "
+                f"{br['br_samples']:,}s lost:{br['br_lost_records']:,}"
+            )
+
         qea_str = ""
         qea = getattr(f, "qea", None)
         if qea:
@@ -1068,7 +1080,7 @@ class StatsReporter:
             f"{bayes_str}{misc_str}"
             f"{poisson_str}"
             f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
-            f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{pt_str}{hf_str}{ops_str}"
+            f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{pt_str}{lbr_str}{hf_str}{ops_str}"
         )
         fluc_str = ""
         if getattr(f, "_fluctuation", None) is not None:
@@ -1247,6 +1259,12 @@ class StatsReporter:
                 fired, asserted = f._cmplog.total_comparisons()
                 rec["cmplog_cmp_fired"] = fired
                 rec["cmplog_cmp_asserted"] = asserted
+            branch_cov = getattr(f, "branch_cov", None)
+            if branch_cov is not None:
+                rec.update(branch_cov.stats)
+                lbr_session = getattr(f, "_lbr_session", None)
+                if lbr_session is not None:
+                    rec.update(lbr_session.stats)
             pt_cov = getattr(f, "pt_cov", None)
             if pt_cov is not None:
                 rec.update(pt_cov.stats)

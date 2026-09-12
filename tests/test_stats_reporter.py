@@ -255,6 +255,8 @@ def _mock_fuzzer(**overrides) -> MagicMock:
         "_perf_counters": None,
         "pt_cov": None,
         "_pt_session": None,
+        "branch_cov": None,
+        "_lbr_session": None,
         "honggfuzz": False,
         "_entropy_execs": array("Q"),
         "_entropy_vals": array("d"),

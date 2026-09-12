@@ -273,6 +273,7 @@ def run_target_fast(
     env: dict[str, str] | None = None,
     perf_counters=None,
     pt_session=None,
+    lbr_session=None,
     timeout: float | None = None,
 ) -> tuple[int, str, int]:
     """Fast execution path using os.posix_spawn + temp file.
@@ -310,6 +311,7 @@ def run_target_fast(
         perf_counters: Optional PerfCounters instance (opens on child PID).
         pt_session: Optional PtTraceSession (opens an Intel PT event on the
             child PID).  Drained by the caller once the child has exited.
+        lbr_session: Optional LbrSession, same protocol as pt_session.
         timeout: Seconds before the child is killed, or None for unbounded.
 
     Returns:
@@ -352,6 +354,8 @@ def run_target_fast(
         # startup, so the window covers the loader rather than the parse.
         if pt_session is not None and pid > 0:
             pt_session.attach(pid)
+        if lbr_session is not None and pid > 0:
+            lbr_session.attach(pid)
 
         stderr_data, timed_out = _drain_until_eof(stderr_r, timeout)
         if timed_out:
@@ -405,6 +409,7 @@ def run_target_stdin(
     env: dict[str, str] | None = None,
     perf_counters=None,
     pt_session=None,
+    lbr_session=None,
 ) -> tuple[int, str, int]:
     """Execute target with data on stdin.
 
@@ -419,6 +424,7 @@ def run_target_stdin(
         perf_counters: Optional PerfCounters instance (opens on child PID).
         pt_session: Optional PtTraceSession (opens an Intel PT event on the
             child PID).  Drained by the caller once the child has exited.
+        lbr_session: Optional LbrSession, same protocol as pt_session.
 
     Returns:
         Tuple of (returncode, stderr, subprocess_pid).
@@ -440,6 +446,8 @@ def run_target_stdin(
             perf_counters.open_for_pid(proc.pid)
         if pt_session is not None and proc.pid > 0:
             pt_session.attach(proc.pid)
+        if lbr_session is not None and proc.pid > 0:
+            lbr_session.attach(proc.pid)
 
         # Write data in a thread to avoid pipe deadlock
         writer = threading.Thread(target=_write_and_close, args=(proc.stdin, data), daemon=True)
@@ -496,6 +504,7 @@ def run_target_file(
     env: dict[str, str] | None = None,
     perf_counters=None,
     pt_session=None,
+    lbr_session=None,
 ) -> tuple[int, str, int]:
     """Execute target with data written to a temp file.
 
@@ -511,6 +520,7 @@ def run_target_file(
         perf_counters: Optional PerfCounters instance (opens on child PID).
         pt_session: Optional PtTraceSession (opens an Intel PT event on the
             child PID).  Drained by the caller once the child has exited.
+        lbr_session: Optional LbrSession, same protocol as pt_session.
 
     Returns:
         Tuple of (returncode, stderr, subprocess_pid).
@@ -539,6 +549,8 @@ def run_target_file(
             perf_counters.open_for_pid(proc.pid)
         if pt_session is not None and proc.pid > 0:
             pt_session.attach(proc.pid)
+        if lbr_session is not None and proc.pid > 0:
+            lbr_session.attach(proc.pid)
 
         # Watchdog
         done = threading.Event()

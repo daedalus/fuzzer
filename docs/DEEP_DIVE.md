@@ -1226,6 +1226,52 @@ Operational notes:
   kernel's own struct where a compiler is present) and the degrade path are
   covered.
 
+### Sampled Branch-Record Coverage (`--lbr`)
+
+The AMD counterpart to `--intel-pt`, and it works on Intel too. No AMD part
+emits a full control-flow trace; what exists is a 16-deep branch register file
+sampled at a PMU overflow — BRS on Zen 3, LbrExtV2 on Zen 4+. Both surface as
+`PERF_SAMPLE_BRANCH_STACK` on an ordinary sampling event, and the sample format
+is vendor-neutral, so one reader covers BRS, LbrExtV2 and Intel LBR.
+
+- `core/branch_record.py` — sample decoding (`iter_samples`, `count_lost`) and
+  the map (`BranchCoverage`).
+- `adapters/lbr_trace.py` — the sampling event and its data ring (`LbrSession`).
+
+**This is not a trace, and the difference is not a detail.** With period P the
+fuzzer sees roughly 16/P of the branches that executed. What rescues it for
+coverage is an asymmetry: a recorded from→to pair is a branch that really
+executed, so sampling gives false negatives and never false positives.
+
+- "This input reached a new edge" is sound evidence. Discovery and admission
+  consume the map.
+- "This input reached nothing new" is not evidence of anything. Stability
+  calibration and the trim's subset test read absence as a fact about the
+  input, so they must keep reading the SHM map only; both are pinned by
+  `tests/test_lbr_wiring.py::TestSampledMapStaysOutOfAbsenceConsumers`, and
+  `branch_record.SAMPLED` exists so a future generic reader can refuse.
+
+Unlike PT's TIP targets, an entry carries both ends of the transfer, so
+`(from >> 1) ^ to` is the AFL edge hash over real predecessor/successor pairs
+rather than over path fragments.
+
+`_is_user()` is load-bearing, not hygiene. BRS has no hardware privilege
+filter, so a stack requested with `PERF_SAMPLE_BRANCH_USER` can still carry
+kernel branch-from addresses (CVE-2026-72237, "perf/x86/amd/brs: Fix kernel
+address leakage", published 2026-08-15; fixed upstream, but a fixed kernel
+underneath cannot be assumed). A kernel address hashed into the map is
+coverage the target never had — the one error class that breaks the asymmetry
+above.
+
+Watch `lost:` on the status line: dropped ring records mean samples the map
+never saw, which widens the false-negative rate beyond what the period alone
+implies.
+
+Not verified against hardware: no host in this project's CI opens a
+branch-stack event, so the degrade path is what runs there. Decoding, the
+kernel-address filter, the ring arithmetic and the constants (checked against
+the installed uapi header) are covered.
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)
