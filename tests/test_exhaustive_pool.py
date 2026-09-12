@@ -26,6 +26,8 @@ import math
 import pytest
 
 from fuzzer_tool.core.exhaustive_pool import (
+    ORDER_LEXICOGRAPHIC,
+    ORDER_SPREAD,
     BulkDrawError,
     ContinuousDrawError,
     DepthExceededError,
@@ -276,6 +278,138 @@ class TestBudget:
         assert not pool.budget_exhausted
         assert pool.runs_completed == 5
 
+    def test_a_truncated_lexicographic_walk_pins_the_leading_draws(self):
+        """The defect spread order exists for, stated as a test.
+
+        ``exhausted`` already reports that the space was not covered. What
+        it does not report is that the omission is entirely at one end: the
+        odometer carries left, so the first draw never leaves zero and the
+        walk is a prefix of one position rather than a sample of four.
+        """
+        pool = ExhaustivePool(max_runs=20_000)
+        reached = [set() for _ in range(4)]
+        for _ in pool.runs():
+            for i in range(4):
+                reached[i].add(pool.randrange(256))
+        assert pool.budget_exhausted
+        assert [len(s) for s in reached] == [1, 1, 79, 256]
+
+
+class TestSpreadOrder:
+    def test_spread_reaches_every_value_at_every_position(self):
+        """20,000 runs of a 4.29-billion-wide space, all 256 values, all four draws.
+
+        The lexicographic control for the identical space and budget is
+        ``test_a_truncated_lexicographic_walk_pins_the_leading_draws``
+        above; the contrast between the two is the whole claim.
+        """
+        pool = ExhaustivePool(max_runs=20_000, order=ORDER_SPREAD)
+        reached = [set() for _ in range(4)]
+        for _ in pool.runs():
+            for i in range(4):
+                reached[i].add(pool.randrange(256))
+        assert pool.budget_exhausted
+        assert not pool.exhausted, "a sample must never claim coverage"
+        assert pool.strided_runs > 0
+        assert pool.space_size == 256**4
+        assert [len(s) for s in reached] == [256, 256, 256, 256]
+
+    def test_a_space_that_fits_is_still_walked_exhaustively(self):
+        """Spread order must not cost exhaustion where exhaustion was available.
+
+        Reordering only helps a walk that cannot finish. Applying it to one
+        that can would replace a proof with a sample, so the constructor
+        argument is a ceiling on the reordering, not a request for it.
+        """
+        pool = ExhaustivePool(max_runs=10_000, order=ORDER_SPREAD)
+        seen = set()
+        for _ in pool.runs():
+            seen.add((pool.randrange(5), pool.randrange(7)))
+        assert pool.exhausted
+        assert not pool.budget_exhausted
+        assert pool.order == ORDER_SPREAD, "the request is not rewritten"
+        assert pool.strided_runs == 0, "a space this size must not be strided"
+        assert len(seen) == 35
+        assert pool.runs_completed == 35
+
+    def test_the_stride_is_a_full_period_permutation(self):
+        """Coprimality is load-bearing, so it is asserted and not assumed.
+
+        A stride sharing a factor ``d`` with the space cycles through
+        ``space/d`` indices and never visits the rest -- a walk that looks
+        spread and is blind to a fixed fraction of the space. Checked as a
+        permutation on sizes small enough to enumerate, which is the only
+        way to check it at all: inside the pool the space is by definition
+        larger than the budget.
+        """
+        from math import gcd
+
+        from fuzzer_tool.core.exhaustive_pool import _coprime_stride
+
+        for space in (3, 17, 64, 100, 256, 1001, 4096, 426_888):
+            stride = _coprime_stride(space)
+            assert gcd(stride, space) == 1, f"stride {stride} not coprime to {space}"
+            visited = {(k * stride) % space for k in range(space)}
+            assert len(visited) == space
+
+    def test_the_stride_sits_near_the_golden_ratio_point(self):
+        """Full period gives coverage; the phi placement gives low discrepancy.
+
+        Both are required and they are separate properties -- a stride of 1
+        is coprime to everything and reproduces the odometer exactly.
+        """
+        from fuzzer_tool.core.exhaustive_pool import _coprime_stride
+
+        for space in (1000, 65_536, 426_888, 2**32):
+            stride = _coprime_stride(space)
+            # Within a handful of steps of space/phi: the search walks
+            # outward from the target and consecutive integers are coprime,
+            # so it can never need to go far.
+            assert abs(stride - space * 0.6180339887498949) < 16
+        assert _coprime_stride(2**32) == 2654435769, "Knuth's constant falls out of this"
+
+    def test_a_rectangular_tree_diverges_nowhere(self):
+        pool = ExhaustivePool(max_runs=500, order=ORDER_SPREAD)
+        for _ in pool.runs():
+            pool.randrange(40)
+            pool.randrange(40)
+            pool.randrange(40)
+        assert pool.space_size == 64_000
+        assert pool.shape_divergences == 0
+
+    def test_a_path_dependent_tree_is_clamped_and_counted(self):
+        """The cost of jumping instead of replaying, made observable.
+
+        Spread order cannot replay a prefix value-for-value, so a bound
+        that depends on an earlier draw will not match the one the stride
+        assumed. Clamping keeps every draw legal; the counter is what stops
+        that from being silent, since it also means the run is no longer
+        the index the stride picked.
+        """
+        pool = ExhaustivePool(max_runs=300, order=ORDER_SPREAD)
+        for _ in pool.runs():
+            first = pool.randrange(50)
+            # Width depends on the first draw, so the shape is not rectangular.
+            pool.randrange(first + 1)
+        assert pool.shape_divergences > 0
+
+    def test_nondeterminism_still_raises_in_lexicographic_order(self):
+        """The clamp is scoped to spread order and must not weaken the default.
+
+        ``NondeterministicDrawError`` is how outside entropy shows up, and
+        the sweep asserting no operator has any is the reason it matters.
+        """
+        pool = ExhaustivePool(max_runs=50)
+        bounds = itertools.cycle([4, 7])
+        with pytest.raises(NondeterministicDrawError):
+            for _ in pool.runs():
+                pool.randint(0, 1)
+                pool.randrange(next(bounds))
+
+    def test_an_unknown_order_is_refused(self):
+        with pytest.raises(ValueError, match="lexicographic/spread"):
+            ExhaustivePool(order="halton")
+
 
 class TestRandPoolParity:
     def test_implements_every_public_randpool_method(self):
@@ -315,14 +449,20 @@ def _operator_names() -> list[str]:
     return sorted(REGISTRY.dispatch(engine))
 
 
-def _enumerate_operator(name: str, seed: bytes, max_len: int, max_runs: int = 4000):
+def _enumerate_operator(
+    name: str,
+    seed: bytes,
+    max_len: int,
+    max_runs: int = 4000,
+    order: str = ORDER_LEXICOGRAPHIC,
+):
     """Walk every reachable output of one operator, or report why not.
 
     Returns ``(status, outputs)``. ``status`` is ``"enumerated"`` only when
     the space was covered; every other value means the caller must not
     treat the outputs as complete.
     """
-    pool = ExhaustivePool(max_depth=16, max_runs=max_runs)
+    pool = ExhaustivePool(max_depth=16, max_runs=max_runs, order=order)
     fuzzer = make_minimal_fuzzer(pool=pool)
     fuzzer.max_len = max_len
     handler = REGISTRY.dispatch(OperatorEngine(fuzzer))[name]

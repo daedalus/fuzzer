@@ -42,6 +42,30 @@ exhaustive rather than approximate:
   ``NondeterministicDrawError``. It means the code under enumeration is
   reading entropy the pool does not own.
 
+## When the budget runs out first
+
+``max_runs`` does not merely shorten the walk, it shortens it *at one end*.
+The odometer increments the last draw and carries left, so the indices it
+visits are ``0..max_runs-1`` of a mixed-radix counter and the leading
+positions never move: four ``randrange(256)`` draws under the default
+1,000,000-run budget reach 1, 16, 256 and 256 distinct values respectively
+-- the first draw is pinned to zero. Clearing ``exhausted`` reports that the
+space was not covered, which is correct and is not the same as reporting
+*which part* was skipped.
+
+``order=ORDER_SPREAD`` addresses that, and only that. It visits
+``(k * stride) mod space`` with ``stride`` coprime to ``space`` and near
+``space/phi``: the same full-period walk in a different order, so a
+truncated prefix varies every position. The two properties are independent
+-- coprimality gives the full period, proximity to ``space/phi`` gives the
+low discrepancy. On the four-draw space above, 20,000 runs out of
+4,294,967,296 reach all 256 values at all four positions.
+
+It engages only when the space exceeds the budget; below that it stays
+lexicographic, because reordering a walk that can finish would trade the
+``exhausted`` guarantee for nothing. Spread order therefore never reports
+``exhausted``, and a caller using it is taking a sample and should say so.
+
 ## What is deliberately not enumerable
 
 ``RandPool`` is much larger than the Zig interface this ports from, and
@@ -78,6 +102,49 @@ DEFAULT_MAX_DEPTH = 24
 #: Default cap on total runs. Reaching it clears ``exhausted``, so a test
 #: asserting ``pool.exhausted`` cannot pass on a partial walk.
 DEFAULT_MAX_RUNS = 1_000_000
+
+#: Odometer order: increment the last draw, carry left. Exhaustive when the
+#: budget allows it, and a *prefix of the space* when it does not.
+ORDER_LEXICOGRAPHIC = "lexicographic"
+
+#: Coprime-stride order: visit ``(k * stride) mod N`` instead of ``k``. Same
+#: space, same full period, but any prefix varies every draw position. Only
+#: engages when the space exceeds the budget -- see ``_advance_spread``.
+ORDER_SPREAD = "spread"
+
+#: ``round(phi**-1 * 10**16)``, used to place the stride at ``N/phi`` without
+#: a float division that would lose the low bits of a large ``N``. The additive
+#: recurrence ``k*N/phi mod N`` is the one-dimensional Kronecker sequence, the
+#: standard low-discrepancy choice; for ``N = 2**32`` the nearest coprime comes
+#: out as 2654435769, which is Knuth's multiplicative-hash constant.
+_INV_PHI_NUMERATOR = 6180339887498949
+_INV_PHI_DENOMINATOR = 10**16
+
+
+def _coprime_stride(space: int) -> int:
+    """Return a stride near ``space/phi`` that is coprime to ``space``.
+
+    Coprimality is what makes the walk a full-period permutation of
+    ``range(space)`` rather than a short cycle over a subgroup: a stride
+    sharing a factor ``d`` with ``space`` revisits the same ``space/d``
+    indices forever. Proximity to ``space/phi`` is what makes any *prefix*
+    of that permutation spread rather than clump.
+
+    Searches outward from the target so the returned stride is the closest
+    coprime, and the search is bounded because consecutive integers are
+    coprime to each other -- ``space-1`` always qualifies, so a stride
+    always exists for ``space >= 3``.
+    """
+    from math import gcd
+
+    if space < 3:
+        return 1
+    target = (space * _INV_PHI_NUMERATOR) // _INV_PHI_DENOMINATOR
+    for delta in range(space):
+        for candidate in (target - delta, target + delta):
+            if 2 <= candidate < space and gcd(candidate, space) == 1:
+                return candidate
+    return 1  # pragma: no cover - unreachable for space >= 3
 
 
 class ExhaustivePoolError(Exception):
@@ -117,6 +184,12 @@ class ExhaustivePool:
             ``exhausted`` false and ``budget_exhausted`` true.
         allow_bulk: Permit the ``*_list`` and ``randbytes`` draws. Off by
             default because their trees are combinatorial.
+        order: ``ORDER_LEXICOGRAPHIC`` (default) walks the odometer.
+            ``ORDER_SPREAD`` walks the same space by coprime stride *only
+            when the space exceeds* ``max_runs``, so a truncated walk
+            samples every draw position instead of a prefix of the first
+            one. Below that threshold it stays lexicographic, which is
+            what keeps ``exhausted`` reachable and meaningful.
     """
 
     def __init__(
@@ -124,16 +197,29 @@ class ExhaustivePool:
         max_depth: int = DEFAULT_MAX_DEPTH,
         max_runs: int = DEFAULT_MAX_RUNS,
         allow_bulk: bool = False,
+        order: str = ORDER_LEXICOGRAPHIC,
     ) -> None:
+        if order not in (ORDER_LEXICOGRAPHIC, ORDER_SPREAD):
+            raise ValueError(f"order must be one of lexicographic/spread, got {order!r}")
         self._v: list[list[int]] = []
         self._p = 0
         self._max_depth = max_depth
         self._max_runs = max_runs
         self._allow_bulk = allow_bulk
+        self._order = order
         self._runs = 0
         self._exhausted = False
         self._budget_exhausted = False
         self._max_depth_seen = 0
+        # Spread-mode state. ``_shape`` is the bounds vector learned from the
+        # runs so far; it only ever grows, so the stride is recomputed rather
+        # than the walk restarted when a deeper run appears.
+        self._shape: list[int] = []
+        self._space = 0
+        self._stride = 0
+        self._k = 0
+        self._strided_runs = 0
+        self._shape_divergences = 0
 
     # ── Driving the enumeration ──────────────────────────────────────
 
@@ -156,6 +242,11 @@ class ExhaustivePool:
                 return
 
     def _advance(self) -> bool:
+        if self._order == ORDER_SPREAD:
+            return self._advance_spread()
+        return self._advance_lexicographic()
+
+    def _advance_lexicographic(self) -> bool:
         # Positions past where this run stopped belong to a longer earlier
         # path that the last increment diverged away from.
         del self._v[self._p :]
@@ -166,6 +257,69 @@ class ExhaustivePool:
                 return True
             self._v.pop()
         return False
+
+    def _advance_spread(self) -> bool:
+        """Set up the next run's digits as ``(k * stride) mod space``.
+
+        Called after a run, so ``self._v`` holds the bounds that run
+        actually requested. Those bounds extend ``_shape``, which is how
+        the space is discovered: there is no way to know the tree's width
+        before walking into it, and a path-dependent operator can widen it
+        at any depth.
+
+        Falls back to the odometer whenever the space known *so far* fits
+        in the budget. That is not a shortcut -- it is the point.
+        Reordering an enumeration that can complete buys nothing and would
+        cost the ``exhausted`` guarantee, since a strided walk only proves
+        coverage after all ``space`` steps. Spread order exists for the
+        case where the walk is a sample whether we admit it or not.
+
+        The test is re-applied on every advance rather than decided once
+        after the first run, because the first run of a path-dependent
+        operator sees the narrowest tree it has: ``randrange(first + 1)``
+        after ``first == 0`` is a bound of 1, which is not a choice and is
+        not even recorded. Deciding on that estimate would pin the walk to
+        the odometer on exactly the operators whose shape is least
+        knowable up front. ``_shape`` only grows, so the handover to the
+        stride happens at most once and never reverses.
+        """
+        del self._v[self._p :]
+        grew = False
+        for depth, entry in enumerate(self._v):
+            if depth == len(self._shape):
+                self._shape.append(entry[1])
+                grew = True
+            elif entry[1] > self._shape[depth]:
+                # A wider bound at a known depth: take the widest seen, so
+                # the digit range covers every value the position can take.
+                self._shape[depth] = entry[1]
+                grew = True
+
+        if not self._shape:
+            return False  # nothing bounded was drawn; there is no space to walk
+
+        if grew or not self._space:
+            from math import prod
+
+            self._space = prod(self._shape)
+            self._stride = _coprime_stride(self._space)
+
+        if self._space <= self._max_runs:
+            # Walkable in full: hand to the odometer, which is already
+            # positioned on the run just finished. Not sticky -- a later run
+            # that widens the shape past the budget takes the stride below.
+            return self._advance_lexicographic()
+
+        self._strided_runs += 1
+        self._k += 1
+        index = (self._k * self._stride) % self._space
+        digits = []
+        for bound in reversed(self._shape):
+            digits.append(index % bound)
+            index //= bound
+        digits.reverse()
+        self._v = [[d, b] for d, b in zip(digits, self._shape, strict=True)]
+        return True
 
     @property
     def exhausted(self) -> bool:
@@ -184,6 +338,45 @@ class ExhaustivePool:
     @property
     def runs_completed(self) -> int:
         return self._runs
+
+    @property
+    def order(self) -> str:
+        """The order this pool was constructed with; never reassigned.
+
+        A spread-order pool still advances the odometer while the space it
+        has seen fits the budget, so this reports what was *requested*.
+        ``strided_runs`` is what reports what happened.
+        """
+        return self._order
+
+    @property
+    def strided_runs(self) -> int:
+        """Runs whose digits came from the stride rather than the odometer.
+
+        Zero means the walk was an ordinary odometer walk and ``exhausted``
+        carries its usual meaning. Non-zero means the space outgrew the
+        budget at some point and the visited set is a sample.
+        """
+        return self._strided_runs
+
+    @property
+    def space_size(self) -> int:
+        """Product of the widest bounds seen per position, or 0 if unknown.
+
+        Only maintained in spread order, and a *lower* bound on the true
+        space for an operator whose depth grows with later runs.
+        """
+        return self._space
+
+    @property
+    def shape_divergences(self) -> int:
+        """Draws whose bound differed from the shape the stride assumed.
+
+        Zero for a rectangular tree. Non-zero means the operator's bounds
+        depend on earlier draws, so the strided index was clamped and the
+        visited set is no longer a permutation of ``range(space_size)``.
+        """
+        return self._shape_divergences
 
     @property
     def max_depth_seen(self) -> int:
@@ -211,6 +404,19 @@ class ExhaustivePool:
                 )
             self._v.append([0, bound])
         entry = self._v[self._p]
+        if entry[1] != bound and self._order == ORDER_SPREAD:
+            # Spread order jumps to an arbitrary index instead of replaying a
+            # prefix value-for-value, so a different bound here is the ordinary
+            # case for a path-dependent operator, not evidence of outside
+            # entropy. Reduce the digit into the bound the operator actually
+            # asked for -- every draw stays legal, at the cost of visiting some
+            # digit vectors twice. Counted on ``shape_divergences`` because it
+            # is also the only remaining signal that this operator's tree is
+            # not rectangular, and because it means the run is no longer the
+            # index the stride selected.
+            self._shape_divergences += 1
+            entry[1] = bound
+            entry[0] %= bound
         if entry[1] != bound:
             raise NondeterministicDrawError(
                 f"draw {self._p} requested bound {bound} ({what}) but the "
