@@ -147,3 +147,42 @@ class TestAtTheCap:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestItIsActuallyWiredIn:
+    """The method existing is not the same as the main loop calling it.
+
+    Every test above drives _maybe_resize_on_drops() directly, so all of
+    them pass with the call site deleted from the main loop -- which is
+    exactly the state the previous design was already in: the drop counter
+    had a consumer that was only reachable through stall recovery, behind
+    an opt-in flag, and nobody noticed because the consumer itself was
+    tested in isolation.
+    """
+
+    def test_the_stats_interval_block_calls_it(self):
+        import inspect
+
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        src = inspect.getsource(Fuzzer.run)
+        assert "_maybe_resize_on_drops()" in src, (
+            "_maybe_resize_on_drops is defined but never called from the main "
+            "loop; the drop signal would be read only by stall recovery again"
+        )
+
+    def test_it_runs_alongside_the_coverage_snapshot(self):
+        """Pinned to the snapshot line so a refactor cannot quietly orphan it
+        into a branch that never executes."""
+        import inspect
+
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        lines = inspect.getsource(Fuzzer.run).splitlines()
+        snap = next(
+            i for i, ln in enumerate(lines) if "record_coverage_snapshot" in ln
+        )
+        window = "\n".join(lines[snap : snap + 4])
+        assert "_maybe_resize_on_drops()" in window, (
+            "the drop-resize check drifted away from the stats-interval block"
+        )
