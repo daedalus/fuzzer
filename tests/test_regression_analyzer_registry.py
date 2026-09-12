@@ -46,6 +46,7 @@ _FLAG_GATED = {
     "trace",
     "garch",
     "continuum",
+    "temperature_control",
 }
 _ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner"}
 

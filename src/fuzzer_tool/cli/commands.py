@@ -766,6 +766,9 @@ def cmd_fuzz(args):
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
         stall_release_edges=getattr(args, "stall_release_edges", 1),
+        temp_control=getattr(args, "temperature_control", False),
+        temp_setpoint_fraction=getattr(args, "temperature_setpoint", 0.5),
+        temp_reference_rate=getattr(args, "temperature_reference_rate", None),
         map_size=getattr(args, "map_size", 0),
         max_collision_risk=getattr(args, "max_collision_risk", 30),
         debug=getattr(args, "debug", False),
@@ -3316,6 +3319,37 @@ def main() -> int:
         metavar="N",
         help="Detect stall after N execs without new edges and activate "
         "recovery mode with more aggressive mutations (default: 1000)",
+    )
+    fuzz_parser.add_argument(
+        "--temperature-control",
+        action="store_true",
+        help="Close the loop on the seed-picker exploration temperature: a PI "
+        "correction over an ADRC-style extended state observer of the "
+        "discovery rate, added on top of the --anneal-budget clock schedule "
+        "(which remains the feed-forward term). UNVALIDATED: the sign and "
+        "magnitude of d(discovery rate)/d(temperature) have not been "
+        "measured, and if that derivative is near zero the loop cannot work "
+        "at all. Off by default for that reason.",
+    )
+    fuzz_parser.add_argument(
+        "--temperature-setpoint",
+        type=float,
+        default=0.5,
+        metavar="F",
+        help="Discovery-rate setpoint for --temperature-control, as a "
+        "fraction of the best rate the campaign has itself achieved "
+        "(default: 0.5). Self-normalising across targets; use "
+        "--temperature-reference-rate for an absolute target instead. Not "
+        "1.0 -- asking a campaign to hold its own peak forever is a setpoint "
+        "it can never meet, which saturates the output permanently.",
+    )
+    fuzz_parser.add_argument(
+        "--temperature-reference-rate",
+        type=float,
+        default=None,
+        metavar="R",
+        help="Absolute edges-per-exec reference for --temperature-setpoint, "
+        "replacing the campaign's running maximum (default: unset).",
     )
     fuzz_parser.add_argument(
         "--stall-release-edges",

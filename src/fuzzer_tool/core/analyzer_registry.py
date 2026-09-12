@@ -693,6 +693,39 @@ REGISTRY.register(
 )
 
 
+def _activate_temperature_control(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.temperature_control import TemperatureController
+
+    saved = f._state_store.get("temperature_control") or {}
+    if saved:
+        f._temp_controller = TemperatureController.from_dict(saved)
+    else:
+        f._temp_controller = TemperatureController(
+            setpoint_fraction=getattr(f, "_temp_setpoint_fraction", 0.5),
+            reference_rate=getattr(f, "_temp_reference_rate", None),
+        )
+    print(
+        "[*] Temperature control: closed loop on discovery rate "
+        f"(setpoint {f._temp_controller.setpoint_fraction:.0%} of reference, "
+        f"period {f._temp_controller.period_execs:,} execs)"
+    )
+
+
+def _deactivate_temperature_control(f: FuzzerLike) -> None:
+    f._temp_controller = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="temperature_control",
+        category="regime_detection",
+        available=lambda f: bool(getattr(f, "_use_temp_control", False)),
+        activate=_activate_temperature_control,
+        deactivate=_deactivate_temperature_control,
+    )
+)
+
+
 def _activate_continuum(f: FuzzerLike) -> None:
     from fuzzer_tool.core.navier_stokes import ContinuumField
 

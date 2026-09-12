@@ -182,6 +182,44 @@ class StatsReporter:
             getattr(f, "_crash_files", None),
         )
 
+    def _print_temperature_control(self, f) -> None:
+        """State of the closed temperature loop, when it is running.
+
+        ``disturbance`` is the ESO's lumped estimate of everything moving
+        the discovery rate that is not the knob. Reading it next to the raw
+        rate is the point: if the compensated rate tracks the setpoint while
+        the raw rate does not, the loop is working as intended and the
+        campaign is fighting the target, not the controller.
+
+        ``saturated`` matters more than it looks. A correction pinned at a
+        rail for most of a campaign means the knob has no authority over the
+        process variable, which is the kill criterion for this whole loop
+        rather than a tuning problem.
+        """
+        ctl = getattr(f, "_temp_controller", None)
+        if ctl is None:
+            return
+        st = ctl.stats()
+
+        def _fmt(v, spec=".5f"):
+            return "n/a" if v is None else format(v, spec)
+
+        print(f"  Temp control:      {st['ticks']} ticks", end="")
+        if not st["active"]:
+            print(" (warming up, no correction applied)")
+            return
+        print(f", correction {st['correction']:+.3f}{' [SATURATED]' if st['saturated'] else ''}")
+        print(
+            f"  Temp rate:         raw {_fmt(st['rate'])} edges/exec, "
+            f"compensated {_fmt(st['compensated'])}, "
+            f"disturbance {_fmt(st['disturbance'])}"
+        )
+        print(
+            f"  Temp setpoint:     {_fmt(st['setpoint'])} "
+            f"({ctl.setpoint_fraction:.0%} of {_fmt(st['reference'])}), "
+            f"integral {st['integral']:+.3f}"
+        )
+
     def _print_stall_relay(self, f) -> None:
         """Relay period and amplitude for the stall recovery mechanism.
 
@@ -358,6 +396,7 @@ class StatsReporter:
                 f"  Recovery execs:    {f._stall_recovery_execs:,} ({f._stall_recovery_execs / max(1, f.exec_count) * 100:.1f}%)"
             )
             self._print_stall_relay(f)
+        self._print_temperature_control(f)
         if getattr(f, "_use_poisson_disk_admission", False):
             print(
                 f"  Poisson rejects:   {getattr(f, '_poisson_reject_count', 0)} "

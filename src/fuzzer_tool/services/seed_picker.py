@@ -468,6 +468,38 @@ class SeedPicker:
                 return seed
         return f.corpus[-1] if f.corpus else None
 
+    def _update_temperature(self) -> float:
+        """Set and return ``f._temperature`` for this pick.
+
+        A method rather than a block inside :meth:`pick_seed` so tests bind
+        the real computation instead of a copy of it -- the same reason
+        ``Fuzzer._stall_note_coverage`` exists.
+
+        The annealing clock is the FEED-FORWARD term and stays that way when
+        the closed loop is enabled; the controller supplies an additive
+        correction. A feed-forward term is unaffected by the process
+        feedback, so it cannot contribute to oscillation, and with the loop
+        off the behaviour is byte-for-byte what it was before the loop
+        existed.
+
+        ``observe()`` self-gates on the controller's own fixed exec-count
+        clock, deliberately not the stats tick: that tick's width is
+        ``10 * last_avg_eps``, so it tracks the plant's own throughput, and
+        a PI sampled on a drifting period has a drifting integral gain.
+        """
+        f = self.f
+        if f._anneal_budget > 0:
+            feed_forward = max(0.1, 1.0 - f.exec_count / f._anneal_budget)
+        else:
+            feed_forward = 1.0
+        ctl = getattr(f, "_temp_controller", None)
+        if ctl is None:
+            f._temperature = feed_forward
+        else:
+            ctl.observe(f.exec_count, f._edge_tracker.get_cumulative_edge_count())
+            f._temperature = ctl.temperature(feed_forward)
+        return f._temperature
+
     def pick_seed(self) -> bytes:
         f = self.f
         rng = f._rng
@@ -475,10 +507,7 @@ class SeedPicker:
         # Update SA temperature on every call, regardless of which
         # strategy Elo selects (bug: was inside weighted_pick_seed()
         # so temperature only cooled when 'weighted' won the bandit).
-        if f._anneal_budget > 0:
-            f._temperature = max(0.1, 1.0 - f.exec_count / f._anneal_budget)
-        else:
-            f._temperature = 1.0
+        self._update_temperature()
 
         if f._stall_recovery_active and f.corpus:
             f._seed_strategy = "random_stall"

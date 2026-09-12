@@ -843,6 +843,9 @@ class Fuzzer:
         round_robin=False,
         garch=False,
         continuum=False,
+        temp_control=False,
+        temp_setpoint_fraction=0.5,
+        temp_reference_rate=None,
         exp3=False,
         exp3_gamma=0.1,
         slopt=False,
@@ -2078,6 +2081,15 @@ class Fuzzer:
         self._use_elo = elo
         self._use_garch = garch
         self._use_continuum = continuum
+        # Closed-loop temperature control (--temperature-control). Read by
+        # the analyzer registry's temperature_control spec, which builds
+        # self._temp_controller. Off by default: the sign and magnitude of
+        # d(discovery rate)/d(temperature) are unmeasured, and if that
+        # derivative is near zero the loop cannot work at all -- see
+        # docs/handover/handover_control_theory_loops_2026-09-12.md §5.
+        self._use_temp_control = temp_control
+        self._temp_setpoint_fraction = temp_setpoint_fraction
+        self._temp_reference_rate = temp_reference_rate
         self._learn_format_requested = learn_format
         self._corpus_ppmd_requested = corpus_ppmd
         self._corpus_quasiperiodicity_requested = corpus_quasiperiodicity
@@ -7099,6 +7111,14 @@ class Fuzzer:
             self._state_store.set("garch", self._garch.save())
         if self._continuum is not None:
             self._state_store.set("continuum", self._continuum.save())
+        if getattr(self, "_temp_controller", None) is not None:
+            # The observer's disturbance state and the PI accumulator are
+            # both histories, so a resume that drops them restarts the loop
+            # cold on a campaign that is anything but. Persisted together or
+            # not at all -- restoring the accumulator without the observer
+            # would apply an integral built against a disturbance estimate
+            # that no longer exists.
+            self._state_store.set("temperature_control", self._temp_controller.to_dict())
         self._save_state()
         if self._cmplog is not None:
             # Releases this run's .cmplog/.counts/.sites files. Nothing else
