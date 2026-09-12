@@ -808,6 +808,7 @@ class Fuzzer:
         trace_crashes=True,
         learn_format=False,
         corpus_ppmd=False,
+        corpus_quasiperiodicity=False,
         seed=42,
         extra_crash_codes=None,
         replay_n=0,
@@ -2063,6 +2064,7 @@ class Fuzzer:
         self._use_continuum = continuum
         self._learn_format_requested = learn_format
         self._corpus_ppmd_requested = corpus_ppmd
+        self._corpus_quasiperiodicity_requested = corpus_quasiperiodicity
         self._distance_targets = targets
         self._use_cfg_cache = use_cfg_cache
         self._trace_crashes_requested = trace_crashes

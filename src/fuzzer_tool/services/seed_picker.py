@@ -984,6 +984,10 @@ class SeedPicker:
         if ppmd and ppmd.enabled:
             w *= 1.0 + ppmd.compute_seed_novelty(seed) * 0.5
 
+        qp = getattr(f, "_qp", None)
+        if qp and qp.enabled:
+            w *= 1.0 + qp.compute_seed_novelty(seed) * 0.5
+
         if f._profile.hot_functions and f._profile.functions:
             # Cache hot/all density — they depend only on the profile, not
             # the seed. Without caching, these sums (over 691 functions)

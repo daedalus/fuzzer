@@ -454,6 +454,32 @@ REGISTRY.register(
 )
 
 
+def _activate_quasiperiodicity(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.quasiperiodicity import QuasiperiodicityAnalyzer
+
+    f._qp = QuasiperiodicityAnalyzer()
+
+
+def _deactivate_quasiperiodicity(f: FuzzerLike) -> None:
+    f._qp = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="quasiperiodicity",
+        category="structural",
+        # Opt-in like corpus_compression, pending an A/B run (see
+        # docs/handover/handover_oeis_port_candidates_2026-09-12.md, C2) --
+        # this is a new, unmeasured novelty signal and should not change
+        # scheduling weights for anyone until it has one, same policy as
+        # --tang and --continuum (handover_done_2026-09-06.md §14).
+        available=lambda f: bool(getattr(f, "_corpus_quasiperiodicity_requested", False)),
+        activate=_activate_quasiperiodicity,
+        deactivate=_deactivate_quasiperiodicity,
+    )
+)
+
+
 def _activate_elo(f: FuzzerLike) -> None:
     from fuzzer_tool.core.elo import BayesianEloTracker
 

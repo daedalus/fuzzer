@@ -643,6 +643,7 @@ def cmd_fuzz(args):
         trace_crashes=args.trace,
         learn_format=getattr(args, "learn_format", False),
         corpus_ppmd=getattr(args, "corpus_ppmd", False),
+        corpus_quasiperiodicity=getattr(args, "corpus_quasiperiodicity", False),
         inprocess=args.inprocess,
         inprocess_direct=args.inprocess_direct,
         inprocess_func=args.inprocess_func,
@@ -1785,6 +1786,7 @@ _HAIL_MARY_FLAGS = (
     "bootstrap",
     "learn_format",
     "corpus_ppmd",
+    "corpus_quasiperiodicity",
     "persistent",
     "net_keepalive",
     "inprocess",
@@ -3011,6 +3013,15 @@ def main() -> int:
         "--corpus-ppmd",
         action="store_true",
         help="Enable PPMD-based corpus compression for seed novelty scoring",
+    )
+    fuzz_parser.add_argument(
+        "--corpus-quasiperiodicity",
+        action="store_true",
+        help=(
+            "Enable string-cover-based seed novelty scoring (shortest "
+            "quasiperiod, complementary to --corpus-ppmd; unmeasured, "
+            "opt-in pending an A/B run)"
+        ),
     )
     fuzz_parser.add_argument(
         "--crash-codes",

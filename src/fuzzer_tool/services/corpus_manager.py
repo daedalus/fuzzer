@@ -1205,7 +1205,15 @@ class CorpusManager:
                 if getattr(f, "_ppmd", None) and f._ppmd.enabled:
                     ppmd_bonus = 1.0 + f._ppmd.compute_seed_novelty(seed) * 0.5
 
-                score = edge_score * wasserstein_weight * ppmd_bonus
+                # Quasiperiodicity novelty: seeds with no short internal
+                # cover are structurally more diverse (see
+                # core/quasiperiodicity.py) -- same shape as the PPMD bonus,
+                # a different and independent redundancy signal.
+                qp_bonus = 1.0
+                if getattr(f, "_qp", None) and f._qp.enabled:
+                    qp_bonus = 1.0 + f._qp.compute_seed_novelty(seed) * 0.5
+
+                score = edge_score * wasserstein_weight * ppmd_bonus * qp_bonus
                 scored.append((score, seed))
             scored.sort(key=lambda x: x[0], reverse=True)
             if f.max_corpus_bytes > 0:

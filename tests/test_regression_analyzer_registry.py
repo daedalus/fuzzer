@@ -40,6 +40,7 @@ _FLAG_GATED = {
     "causal_sector",
     "format_learner",
     "corpus_compression",
+    "quasiperiodicity",
     "elo",
     "distance",
     "trace",
