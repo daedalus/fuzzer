@@ -6,7 +6,7 @@ table, making reset_edge_map() O(1) independent of map size.
 
 import ctypes
 
-from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.adapters.shm import SHM_DROP_OFFSET, ShmCoverage
 
 
 class TestGenerationReset:
@@ -59,18 +59,28 @@ class TestGenerationReset:
         finally:
             cov.cleanup()
 
-    def test_drop_counter_preserves_generation(self):
-        """_note_drop() increments drops while preserving ctx + generation."""
+    def test_drop_counter_cannot_touch_the_diag_word(self):
+        """_note_drop() writes its own word and leaves diag alone.
+
+        It used to reconstruct ctx and generation around a 16-bit field
+        packed into diag on every drop, which made a hot path a writer of a
+        word the fuzzer also writes. Now the two cannot interact at all,
+        which is the property worth pinning: assert the diag word is
+        byte-identical across a drop, not merely that its fields survive
+        being rewritten.
+        """
         cov = ShmCoverage()
         try:
-            # Set diag with drops=1000, generation=7
-            ctypes.c_uint32.from_address(cov._ptr + 4).value = (1000 << 8) | (7 << 24) | 0
+            ctypes.c_uint32.from_address(cov._ptr + 4).value = (7 << 24) | 3
+            ctypes.c_uint32.from_address(cov._ptr + SHM_DROP_OFFSET).value = 1000
+            before = cov.read_diag()
             assert cov.read_dropped_edges() == 1000
             assert cov.read_generation() == 7
-            # Simulate a drop by calling _note_drop directly
             cov._note_drop()
             assert cov.read_dropped_edges() == 1001
+            assert cov.read_diag() == before, "a drop wrote the diag word"
             assert cov.read_generation() == 7
+            assert cov.read_ctx_bits() == 3
         finally:
             cov.cleanup()
 
@@ -80,14 +90,16 @@ class TestGenerationReset:
             ctypes.c_uint32.from_address(cov._ptr).value = 77
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 8888
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 55
-            ctypes.c_uint32.from_address(cov._ptr + 4).value = (1000 << 8) | (0 << 24) | 3
+            ctypes.c_uint32.from_address(cov._ptr + 4).value = 3
+            ctypes.c_uint32.from_address(cov._ptr + SHM_DROP_OFFSET).value = 1000
             cov.record_edge(10)
             cov.record_edge(20)
             # Re-set header values we want to verify survive reset
             ctypes.c_uint32.from_address(cov._ptr).value = 77
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 8888
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 55
-            ctypes.c_uint32.from_address(cov._ptr + 4).value = (1000 << 8) | (0 << 24) | 3
+            ctypes.c_uint32.from_address(cov._ptr + 4).value = 3
+            ctypes.c_uint32.from_address(cov._ptr + SHM_DROP_OFFSET).value = 1000
             cov.reset_edge_map()
             assert cov.read_stack_depth() == 77
             assert cov.read_path_hash() == 8888

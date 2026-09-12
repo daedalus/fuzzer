@@ -1663,6 +1663,44 @@ def detect_ngram_k(target: str) -> int:
     return best
 
 
+#: Segment layout the Python side is built for. Must equal
+#: __AFL_SHM_LAYOUT in adapters/afl_shim.c.
+SHM_LAYOUT_CURRENT = 2
+
+
+def detect_shm_layout(target: str) -> int:
+    """Read __AFL_SHM_LAYOUT out of a target's symbol table.
+
+    Same marker-name scan as `detect_ctx_bits` and `detect_ngram_k`.
+
+    This one is a safety check rather than a sizing input. The layouts differ
+    in where the edge table starts -- offset 24 in layout 1, offset 32 in
+    layout 2, which added a dedicated word for the dropped-edge counter -- so
+    running a stale prebuilt target against the current fuzzer does not
+    degrade coverage, it corrupts it: the target writes its entries eight
+    bytes before where the fuzzer reads them, so every edge id read back is
+    half of one entry and half of the next, and the fuzzer's own header bytes
+    are read as an edge. Nothing about that looks like a version mismatch
+    from the outside, which is why it is detected statically instead.
+
+    Absence of the marker means layout 1: every shim built before the
+    dedicated counter existed produced that, and none of them exported
+    anything to say so.
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("shm-layout detection failed for %s: %s", target, e)
+        return SHM_LAYOUT_CURRENT
+    best = 1
+    for name in names:
+        if name.startswith("__afl_shm_layout_"):
+            suffix = name[len("__afl_shm_layout_") :]
+            if suffix.isdigit():
+                best = max(best, int(suffix))
+    return best
+
+
 def detect_cmplog_functions(target: str) -> tuple[str, ...]:
     """Read supported cmplog interceptors from the target's exported symbols.
 

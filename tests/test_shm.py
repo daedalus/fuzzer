@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from fuzzer_tool.adapters.shm import (
+    SHM_DROP_OFFSET,
     SHM_MAP_SIZE,
     SHM_METADATA_SIZE,
     SHM_TAIL_SIZE,
@@ -491,14 +492,16 @@ class TestShmCoverage:
             ctypes.c_uint32.from_address(cov._ptr).value = 77
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 8888
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 55
-            ctypes.c_uint32.from_address(cov._ptr + 4).value = (1000 << 8) | (0 << 24) | 3
+            ctypes.c_uint32.from_address(cov._ptr + 4).value = 3
+            ctypes.c_uint32.from_address(cov._ptr + SHM_DROP_OFFSET).value = 1000
             cov.record_edge(10)
             cov.record_edge(20)
             # Re-set header values we want to verify survive reset
             ctypes.c_uint32.from_address(cov._ptr).value = 77
             ctypes.c_uint64.from_address(cov._ptr + 8).value = 8888
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 55
-            ctypes.c_uint32.from_address(cov._ptr + 4).value = (1000 << 8) | (0 << 24) | 3
+            ctypes.c_uint32.from_address(cov._ptr + 4).value = 3
+            ctypes.c_uint32.from_address(cov._ptr + SHM_DROP_OFFSET).value = 1000
             cov.reset_edge_map()
             assert cov.read_stack_depth() == 77
             assert cov.read_path_hash() == 8888
@@ -516,7 +519,8 @@ class TestShmCoverage:
         try:
             ctypes.c_uint32.from_address(cov._ptr).value = 1
             ctypes.c_uint64.from_address(cov._ptr + 16).value = 2
-            ctypes.c_uint32.from_address(cov._ptr + 4).value = (500 << 8) | (0 << 24) | 5
+            ctypes.c_uint32.from_address(cov._ptr + 4).value = 5
+            ctypes.c_uint32.from_address(cov._ptr + SHM_DROP_OFFSET).value = 500
             cov.reset_edge_map()
             cov.reset_edge_map()
             assert cov.read_stack_depth() == 1
@@ -682,8 +686,13 @@ class TestShmCoverage:
     # ── SHM_METADATA_SIZE constant ──────────────────────────────────────
 
     def test_shm_metadata_size_constant(self):
-        """SHM_METADATA_SIZE is exactly 24 bytes (stack_depth 4 + pad 4 + path_hash 8 + edge_count 8)."""
-        assert SHM_METADATA_SIZE == 24
+        """SHM_METADATA_SIZE covers everything before the edge table.
+
+        stack_depth 4 + diag 4 + path_hash 8 + edge_count 8 + dropped 4 +
+        4 bytes of padding that keep the 8-byte entry table 8-byte aligned.
+        """
+        assert SHM_METADATA_SIZE == 32
+        assert SHM_DROP_OFFSET == 24
 
     # ── SHM layout invariants ───────────────────────────────────────────
 

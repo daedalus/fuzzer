@@ -597,10 +597,43 @@ class Fuzzer:
         status = afl_instrumentation_status(self.target)
         if status == "present":
             print("[*] AFL instrumentation: detected")
+            self._check_shm_layout(self.target)
         elif status == "absent":
             self._warn_uninstrumented([self.target])
         # "unknown" (stripped binary, or no nm): say nothing rather than
         # guess. A false alarm here trains people to ignore the real one.
+
+    def _check_shm_layout(self, target: str) -> None:
+        """Refuse a target built against an incompatible SHM layout.
+
+        Fatal, unlike the uninstrumented warning, because there is no
+        degraded-but-usable mode to fall back to. The layouts disagree about
+        where the edge table starts, so a layout-1 target attached to a
+        layout-2 segment writes every entry eight bytes below where the
+        fuzzer reads it: the ids read back are halves of two adjacent
+        entries spliced together, and the fuzzer's own edge_count header is
+        read as an edge. That produces a plausible-looking stream of
+        never-before-seen edge ids -- a corpus that grows on garbage, which
+        is worse than a run that reports nothing.
+
+        Only reached when the target is known to carry shim instrumentation,
+        so an uninstrumented or stripped binary cannot trip it.
+        """
+        if not self.use_coverage or getattr(self, "shm_cov", None) is None:
+            return
+        from fuzzer_tool.core.elf import SHM_LAYOUT_CURRENT, detect_shm_layout
+
+        found = detect_shm_layout(target)
+        if found == SHM_LAYOUT_CURRENT:
+            return
+        raise RuntimeError(
+            f"{target} was built against SHM layout {found}, this fuzzer speaks "
+            f"layout {SHM_LAYOUT_CURRENT} — the two disagree about where the edge "
+            "table starts, so coverage would be read from the wrong offset rather "
+            "than simply missing. Rebuild the target against the current "
+            "adapters/afl_shim.c (tools/build_targets.sh), or run with "
+            "--no-coverage to fuzz it blind."
+        )
 
     def _warn_uninstrumented(self, targets: list[str]) -> None:
         """Warn that coverage is on but the target(s) cannot report edges.
@@ -4932,6 +4965,7 @@ class Fuzzer:
         if not edge_sets:
             return set()
 
+
         # Cheap screen: one distinct hash across every run means the same
         # edges fired the same number of times in the same order.
         if len(hashes) == 1:
@@ -5542,7 +5576,7 @@ class Fuzzer:
             dropped = self.shm_cov.read_dropped_edges()
             new_size = self._edge_tracker.recommended_map_size(dropped_edges=dropped)
             if dropped:
-                pinned = " (counter pinned)" if self.shm_cov.drop_counter_saturated() else ""
+                pinned = " (shim counter pinned)" if self.shm_cov.drop_counter_saturated() else ""
                 print(
                     f"[!] Coverage map saturated: {dropped:,} edges dropped{pinned} — "
                     f"coverage was lost, not merely delayed"
@@ -5562,7 +5596,7 @@ class Fuzzer:
                 self._edge_tracker.on_resize(new_size)
                 # Drops recorded against the old table say nothing about the
                 # new one; clearing keeps the next decision on fresh evidence.
-                self.shm_cov.reset_diag()
+                self.shm_cov.reset_dropped_edges()
                 os.environ["__AFL_SHM_ID"] = self.shm_cov.env_id
                 os.environ["AFL_MAP_SIZE"] = str(new_size)
                 if self._inprocess_runner:

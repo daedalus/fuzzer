@@ -240,8 +240,9 @@ struct __afl_entry {
  * distinct call sites. AFL++'s CTX variants mask for the same reason.
  *
  * Raise it with -D__AFL_CTX_BITS=N if a target genuinely has deep fan-in
- * AND the map has room; check the drop counter (see __afl_diag) rather than
- * guessing. __AFL_CTX_BITS=0 is equivalent to __AFL_CTX_SENSITIVE=0.
+ * AND the map has room; check the drop counter (offset 24, see
+ * __afl_note_drop) rather than guessing. __AFL_CTX_BITS=0 is equivalent to
+ * __AFL_CTX_SENSITIVE=0.
  */
 #if __AFL_CTX_SENSITIVE
 #  ifndef __AFL_CTX_BITS
@@ -304,12 +305,54 @@ const uint32_t __AFL_CAT(__afl_ctx_bits_, __AFL_CTX_BITS) = __AFL_CTX_BITS;
 __attribute__((visibility("default"), used))
 const uint32_t __AFL_CAT(__afl_ngram_k_, __AFL_NGRAM_K) = __AFL_NGRAM_K;
 
-/* Front header size (stack_depth + pad + path_hash + edge_count) */
-#define SHM_HEADER_SIZE 24
+/* ── Segment layout ───────────────────────────────────────────────────
+ *
+ *   offset  0  uint32  stack_depth
+ *   offset  4  uint32  diag           ctx width + generation (see below)
+ *   offset  8  uint64  path_hash
+ *   offset 16  uint64  edge_count
+ *   offset 24  uint32  dropped_edges  own word (see __afl_note_drop)
+ *   offset 28  uint32  reserved       keeps the entry table 8-byte aligned
+ *   offset 32  struct __afl_entry[__afl_map_size]
+ *   ...        16-byte AFLGo distance tail (adapters/shm.py SHM_TAIL_SIZE)
+ *
+ * SHM_TABLE_OFFSET must equal adapters/shm.py SHM_METADATA_SIZE. The Python
+ * side memsets and memmoves the table from that offset and reads entries as
+ * a struct array based there, so a disagreement does not degrade coverage --
+ * it shifts every entry the target writes by the difference, and reads the
+ * fuzzer's own header bytes as edge ids. The two constants are pinned
+ * against each other by tests/test_shm_layout.py.
+ *
+ * The reserved word at 28 exists only for alignment. struct __afl_entry
+ * needs 4-byte alignment, so a table at offset 28 would be legal, but every
+ * 8-byte entry would then straddle an 8-byte boundary and one in eight
+ * would straddle a cache line -- paid on the single hottest store in the
+ * system. Four bytes of padding is the cheaper side of that trade.
+ *
+ * Any change to these offsets must bump __AFL_SHM_LAYOUT below, so that a
+ * prebuilt target carrying the old layout is refused by
+ * elf.detect_shm_layout() rather than silently writing to the wrong place. */
+#define SHM_HEADER_SIZE  24
+#define SHM_DROP_OFFSET  24
+#define SHM_TABLE_OFFSET 32
+
+/* Layout generation, advertised in the symbol NAME for the same reason
+ * __afl_ctx_bits_N is (see above): the Python side must be able to read it
+ * from a binary it has not run, and a plain symbol-table scan is the only
+ * mechanism that works before the first execution.
+ *
+ *   1  header 24 bytes, table at 24, drop count packed in diag bits 8..23
+ *   2  header 24 bytes + dedicated u32 drop count at 24, table at 32
+ *
+ * Absence of the marker means layout 1, which is what every shim built
+ * before this counter existed produced. */
+#define __AFL_SHM_LAYOUT 2
+__attribute__((visibility("default"), used))
+const uint32_t __AFL_CAT(__afl_shm_layout_, __AFL_SHM_LAYOUT) = __AFL_SHM_LAYOUT;
 
 /* Default number of hash table entries.  AFL_MAP_SIZE directly sets
  * __afl_map_size (number of entries, not bytes).  Default 8192 entries:
- * edge table = 8192 × 8 = 65536 bytes, header = 24 bytes, total = 65560. */
+ * edge table = 8192 × 8 = 65536 bytes, front region = 32 bytes. */
 static uint32_t __afl_map_size  = 8192;
 
 struct __afl_entry *__afl_area   = NULL;
@@ -332,38 +375,66 @@ static uint32_t __afl_prev_idx  = 0;
  * __afl_get_caller_ctx. */
 static volatile int __afl_mapping = 0;
 
-/* Metadata pointers (front header, before the edge table) */
+/* Metadata pointers (front region, before the edge table) */
 static uint32_t *__afl_stack_depth = NULL;   /* offset 0: uint32 */
 static uint32_t *__afl_diag        = NULL;   /* offset 4: uint32 (was pad) */
 static uint64_t *__afl_path_hash   = NULL;   /* offset 8: uint64 */
 static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
+static uint32_t *__afl_dropped     = NULL;   /* offset 24: uint32 */
 
 /* ── Diagnostics word (header offset 4, previously an unused pad) ──────
  *
  *   bits  0..7   __AFL_CTX_BITS this target was built with
- *   bits  8..31  saturating count of edges DROPPED because the open-
- *                addressing probe found no free slot
+ *   bits  8..23  reserved (held the drop count in layout 1; see below)
+ *   bits 24..31  generation tag, written by the fuzzer's reset_edge_map()
  *
- * The drop counter closes a self-masking failure. When the table fills, the
- * probe loop in __afl_map_edge runs to completion and returns without
- * recording anything -- the edge is lost, silently. Every occupancy figure
- * the Python side computes is derived from edges it actually received, so a
- * saturated table looks UNDER-occupied from the outside, and
- * EdgeTracker.recommended_map_size() (which triggers on load factor > 0.7)
- * can never fire in precisely the situation it was written for.
- *
- * Counting the drops at the point of loss is the only place the information
- * exists. Increments are non-atomic, which is fine: this is a saturation
- * signal, not an accounting record, and it is only ever compared against
- * zero or used as a magnitude.
- *
- * Deliberately NOT cleared by reset_edge_map(): the header survives the
- * per-execution table wipe, so the counter accumulates over the run.       */
+ * Bits 8..23 are not reclaimed for anything, deliberately: the point of
+ * layout 2 is that this word has no field a hot path writes.               */
 #define __AFL_DIAG_CTX_MASK   0xFFu
-#define __AFL_DIAG_DROP_SHIFT 8
-#define __AFL_DIAG_DROP_MAX   0xFFFFu
 #define __AFL_DIAG_GEN_SHIFT  24
 #define __AFL_DIAG_GEN_MASK   0xFFu
+
+/* ── Dropped-edge counter (offset 24, its own 32-bit word) ─────────────
+ *
+ * Counts edges DISCARDED because the open-addressing probe found no free
+ * slot within its window. That closes a self-masking failure: when the
+ * table fills, the probe loop in __afl_map_edge runs to completion and
+ * returns without recording anything -- the edge is lost, silently. Every
+ * occupancy figure the Python side computes is derived from edges it
+ * actually received, so a saturated table looks UNDER-occupied from the
+ * outside, and EdgeTracker.recommended_map_size() (which otherwise triggers
+ * on load factor > 0.7) can never fire in precisely the situation it was
+ * written for. Counting at the point of loss is the only place the
+ * information exists.
+ *
+ * It had its own reason to be 16 bits packed into the diag word -- the word
+ * was already there and unused -- and that reason cost the signal. Measured
+ * on a 1024-entry table fed 4000 guards (1,953 drops per execution): the
+ * 16-bit field pinned at 65,535 after 34 EXECUTIONS. The only consumer that
+ * reads it as a magnitude, the stall-triggered resize, does not run until
+ * --stall executions have passed without a new edge (default 1,000), so on
+ * any target that saturates, the value that consumer read was 65,535 every
+ * single time, whatever the truth was. A pinned counter also has no usable
+ * derivative, which rules out the per-execution question that actually
+ * matters: "was THIS execution's edge set truncated?"
+ *
+ * 32 bits moves the pin from 2^16 to 2^32 -- at the rate above, from 34
+ * executions to 2.2 million -- and, more to the point, is far more than
+ * enough for the per-execution delta the Python side now differences out of
+ * it. The cumulative figure is accumulated there in a 64-bit int, so the
+ * number a report shows is not bounded by this word at all.
+ *
+ * Increments are non-atomic, which is fine: a saturation signal, compared
+ * against zero or used as a magnitude, never as an accounting record.
+ * Saturating rather than wrapping, because a wrap would read as zero drops.
+ *
+ * Deliberately NOT cleared between executions: this is the cumulative count
+ * for the segment, and the Python side derives per-execution counts by
+ * differencing. Clearing it here instead would need the shim to know where
+ * an execution begins, which on the persistent and in-process paths it does
+ * not. Cleared only by ShmCoverage.reset_dropped_edges(), after a resize,
+ * when drops against the old table stop being evidence about the new one.  */
+#define __AFL_DROP_MAX 0xFFFFFFFFu
 
 /* Maximum linear-probe distance in __afl_map_edge, for both lookup and
  * insertion. Bounds the per-edge-execution cost to a constant instead of
@@ -390,11 +461,9 @@ static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
 
 __attribute__((always_inline))
 static inline void __afl_note_drop(void) {
-    if (!__afl_diag) return;
-    uint32_t v = *__afl_diag;
-    uint32_t drops = (v >> __AFL_DIAG_DROP_SHIFT) & 0xFFFF;
-    if (drops < __AFL_DIAG_DROP_MAX)
-        *__afl_diag = ((drops + 1) << __AFL_DIAG_DROP_SHIFT) | (v & __AFL_DIAG_CTX_MASK) | (v & (0xFFu << __AFL_DIAG_GEN_SHIFT));
+    if (!__afl_dropped) return;
+    uint32_t v = *__afl_dropped;
+    if (v != __AFL_DROP_MAX) *__afl_dropped = v + 1;
 }
 
 /* Per-iteration state */
@@ -463,7 +532,8 @@ void __afl_map_shm(void) {
 
     /* Read map size from environment.  AFL_MAP_SIZE is the number of
      * hash table entries (not bytes).  The Python side allocates SHM as
-     * AFL_MAP_SIZE * sizeof(struct __afl_entry) + SHM_HEADER_SIZE bytes.   */
+     * SHM_TABLE_OFFSET + AFL_MAP_SIZE * sizeof(struct __afl_entry) bytes,
+     * plus the 16-byte distance tail.                                      */
     char *size_str = getenv("AFL_MAP_SIZE");
     if (size_str) {
         uint32_t s = (uint32_t)atoi(size_str);
@@ -482,19 +552,20 @@ void __afl_map_shm(void) {
         return;
     }
 
-    /* Edge table starts after the front header */
+    /* Edge table starts after the front region (header + drop word + pad) */
     uint8_t *base = (uint8_t *)p;
-    __afl_area = (struct __afl_entry *)(base + SHM_HEADER_SIZE);
+    __afl_area = (struct __afl_entry *)(base + SHM_TABLE_OFFSET);
 
-    /* Set up metadata pointers in front header (offsets 0/8/16) */
+    /* Set up metadata pointers in the front region */
     __afl_stack_depth = (uint32_t *)(base + 0);
     __afl_diag        = (uint32_t *)(base + 4);
     __afl_path_hash   = (uint64_t *)(base + 8);
     __afl_edge_count  = (uint64_t *)(base + 16);
+    __afl_dropped     = (uint32_t *)(base + SHM_DROP_OFFSET);
 
     /* Publish the context width so the fuzzer can confirm the map was sized
      * for the binary it is actually running, not the one it inspected.
-     * Preserves any drop count already accumulated in the upper bits. */
+     * The drop count is no longer in this word. */
     *__afl_diag = (*__afl_diag & ~(uint32_t)(__AFL_DIAG_CTX_MASK | (0xFFu << __AFL_DIAG_GEN_SHIFT)))
                 | ((uint32_t)__AFL_CTX_BITS & __AFL_DIAG_CTX_MASK);
 
@@ -935,7 +1006,7 @@ static void __afl_write_distance_tail(void) {
 __attribute__((visibility("default")))
 void __afl_map_reset(void) {
     if (__afl_area) {
-        __afl_generation = (__afl_generation + 1) & 0xFF;
+__afl_generation = (__afl_generation + 1) & 0xFF;
 
         /* Generation tags are 8 bits, so they repeat every 256 resets. An
          * entry keeps the tag of the last execution in which its edge
