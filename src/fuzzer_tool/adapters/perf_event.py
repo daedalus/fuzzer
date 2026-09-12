@@ -20,6 +20,7 @@ Ported from honggfuzz linux/perf.c.
 import contextlib
 import ctypes
 import ctypes.util
+import fcntl
 import logging
 import os
 import struct
@@ -77,14 +78,53 @@ class perf_event_attr(ctypes.Structure):
     ]
 
 
-# Flags bitfield positions (within the 64-bit flags field)
-_FLAG_DISABLED = 1 << 0
-_FLAG_INHERIT = 1 << 1
-_FLAG_PINNED = 1 << 2
-_FLAG_EXCLUDE_USER = 1 << 3
-_FLAG_EXCLUDE_KERNEL = 1 << 4
-_FLAG_EXCLUDE_HV = 1 << 5
-_FLAG_ENABLE_ON_EXEC = 1 << 11
+# Flags bitfield positions, derived from the uapi declaration order so a
+# missing field cannot shift the ones after it (see
+# include/uapi/linux/perf_event.h; precise_ip is two bits, hence the cut).
+_ATTR_FLAG_ORDER = (
+    "disabled",
+    "inherit",
+    "pinned",
+    "exclusive",
+    "exclude_user",
+    "exclude_kernel",
+    "exclude_hv",
+    "exclude_idle",
+    "mmap",
+    "comm",
+    "freq",
+    "inherit_stat",
+    "enable_on_exec",
+    "task",
+    "watermark",
+)
+
+
+def _attr_flag(name: str) -> int:
+    return 1 << _ATTR_FLAG_ORDER.index(name)
+
+
+_FLAG_DISABLED = _attr_flag("disabled")
+_FLAG_INHERIT = _attr_flag("inherit")
+_FLAG_PINNED = _attr_flag("pinned")
+_FLAG_EXCLUDE_USER = _attr_flag("exclude_user")
+_FLAG_EXCLUDE_KERNEL = _attr_flag("exclude_kernel")
+_FLAG_EXCLUDE_HV = _attr_flag("exclude_hv")
+_FLAG_ENABLE_ON_EXEC = _attr_flag("enable_on_exec")
+
+
+def _perf_ioc(nr: int) -> int:
+    """_IO('$', nr) -- the perf ioctl request encoding."""
+    return (ord("$") << 8) | nr
+
+
+PERF_IOC_ENABLE = _perf_ioc(0)
+PERF_IOC_DISABLE = _perf_ioc(1)
+PERF_IOC_RESET = _perf_ioc(3)
+
+# perf_event_paranoid values above this refuse kernel-space events to an
+# unprivileged process.
+PARANOID_KERNEL_OK = 0
 
 # Counter definitions: (name, perf_type, perf_config, needs_inherit)
 COUNTER_DEFS = {
@@ -106,7 +146,8 @@ class PerfCounters:
 
     Args:
         counter_names: Which counters to enable. Default: ["instructions", "branches", "branch_misses"].
-        exclude_kernel: If True, exclude kernel-space events (default True).
+        exclude_kernel: If True, exclude kernel-space events (default False;
+            forced on where perf_event_paranoid leaves no choice).
         inherit: If True, inherit counters to child threads (default True).
     """
 
@@ -133,11 +174,31 @@ class PerfCounters:
             ctypes.c_int,  # group_fd
             ctypes.c_ulong,  # flags
         ]
+        self._paranoid = self._read_paranoid()
         self._available = self._check_available()
         self._total_instructions = 0
         self._total_branches = 0
         self._total_branch_misses = 0
         self._read_count = 0
+
+    @staticmethod
+    def _read_paranoid() -> int | None:
+        try:
+            with open("/proc/sys/kernel/perf_event_paranoid") as f:
+                return int(f.read().strip())
+        except (OSError, ValueError):
+            return None
+
+    def _exclude_kernel_required(self) -> bool:
+        """Whether the kernel will refuse the attr without exclude_kernel.
+
+        Unprivileged access at paranoid >= 1 is user-space only, so the flag
+        is not optional there however the caller configured it.
+        """
+        if self._paranoid is None or self._paranoid <= PARANOID_KERNEL_OK:
+            return False
+
+        return os.geteuid() != 0
 
     def _check_available(self) -> bool:
         """Check if perf_event_open hardware counters are available.
@@ -148,13 +209,7 @@ class PerfCounters:
         3. perf_event_open syscall works (not blocked by seccomp, etc.)
         """
         # Check 1: perf_event_paranoid
-        paranoid_ok = False
-        try:
-            with open("/proc/sys/kernel/perf_event_paranoid") as f:
-                paranoid = int(f.read().strip())
-                paranoid_ok = paranoid <= 0
-        except (OSError, ValueError):
-            pass
+        paranoid_ok = self._paranoid is not None and self._paranoid <= PARANOID_KERNEL_OK
 
         if not paranoid_ok and os.geteuid() != 0:
             # Check capabilities
@@ -229,7 +284,7 @@ class PerfCounters:
 
             flags = 0
             flags |= _FLAG_DISABLED
-            if self.exclude_kernel:
+            if self.exclude_kernel or self._exclude_kernel_required():
                 flags |= _FLAG_EXCLUDE_KERNEL
             flags |= _FLAG_EXCLUDE_HV
             if needs_inherit and self.inherit:
@@ -266,9 +321,6 @@ class PerfCounters:
             # Enable immediately — enable_on_exec only triggers on the
             # process that calls exec(), but we open on the parent PID.
             # The child inherits already-enabled counters via inherit=1.
-            import fcntl
-
-            PERF_IOC_ENABLE = 0x2400
             with contextlib.suppress(OSError):
                 fcntl.ioctl(fd, PERF_IOC_ENABLE)
 
@@ -325,12 +377,13 @@ class PerfCounters:
         """Reset all counter values to zero."""
         for name, fd in self._fds.items():
             try:
-                # ioctl RESET = 0
-                import fcntl
+                fcntl.ioctl(fd, PERF_IOC_RESET)
+            except OSError as exc:
+                # Zeroing _last_values below still makes the next read a
+                # delta against now, so a failure here costs accuracy, not
+                # correctness — but it must not be silent.
+                log.debug("PERF_EVENT_IOC_RESET failed for %s: %s", name, exc)
 
-                fcntl.ioctl(fd, 0)
-            except (OSError, ImportError):
-                pass
             self._last_values[name] = 0
 
     def close(self) -> None:

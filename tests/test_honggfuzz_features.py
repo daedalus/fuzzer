@@ -567,8 +567,16 @@ class TestPerfCounters:
     # ── Regression tests for PMU detection fix ───────────────────────
 
     def test_default_exclude_kernel_false(self):
-        """exclude_kernel=False is the default (fix for AMD systems where
-        True zeros out user-space instruction counting)."""
+        """exclude_kernel=False is the default.
+
+        The symptom this was written for -- user-space instruction counts
+        reading zero, first seen on AMD -- was not caused by exclude_kernel.
+        _FLAG_EXCLUDE_KERNEL was one bit low and set exclude_user, so asking
+        to exclude the kernel excluded user space instead, on every vendor.
+        Fixed with the flag positions; see
+        tests/test_regression_perf_attr_flags.py.  The default stays False
+        because _exclude_kernel_required() now adds the flag exactly where
+        perf_event_paranoid leaves no choice."""
         from fuzzer_tool.adapters.perf_event import PerfCounters
 
         pc = PerfCounters()
