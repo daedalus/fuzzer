@@ -55,6 +55,8 @@ from pathlib import Path
 
 import pytest
 
+from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE
+
 REPO = Path(__file__).parent.parent
 SHIM = REPO / "src" / "fuzzer_tool" / "adapters" / "afl_shim.c"
 
@@ -71,7 +73,12 @@ NOBUILTIN = [
 ]
 
 MAP_ENTRIES = 8192
-SHM_HEADER = 24
+# Must match adapters/shm.py SHM_METADATA_SIZE / afl_shim.c SHM_TABLE_OFFSET
+# (32 bytes, layout 3). This was hardcoded at 24 -- the layout-1 header
+# size -- which undersized this segment by 8 bytes against what the shim
+# actually writes at (layout 2 onward): a silent out-of-bounds write past
+# the segment, not merely a stale comment.
+SHM_HEADER = SHM_METADATA_SIZE
 SHM_BYTES = MAP_ENTRIES * 8 + SHM_HEADER
 
 _TARGET_SO = """
@@ -311,8 +318,9 @@ def test_interceptors_and_coverage_share_one_segment(tmp_path, shm):
     subprocess.run([str(exe)], capture_output=True, env=shm.env(_CMPLOG_OUT=str(log)), timeout=60)
 
     raw = shm.read()
-    _stack, diag, _path_hash, edge_count = struct.unpack("<IIQQ", raw[:SHM_HEADER])
-    drops = diag >> 8
+    _stack, _generation, _path_hash, edge_count, drops = struct.unpack(
+        "<IIQQQ", raw[:SHM_HEADER]
+    )
     assert drops == 0, f"{drops} edges dropped on a trivial target — map is saturated"
 
     operands = set()
