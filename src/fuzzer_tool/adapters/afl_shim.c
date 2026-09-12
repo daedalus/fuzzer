@@ -388,8 +388,10 @@ static uint32_t *__afl_dropped     = NULL;   /* offset 24: uint32 */
  *   bits  8..23  reserved (held the drop count in layout 1; see below)
  *   bits 24..31  generation tag, written by the fuzzer's reset_edge_map()
  *
- * Bits 8..23 are not reclaimed for anything, deliberately: the point of
- * layout 2 is that this word has no field a hot path writes.               */
+ * Two fields, two owners: the target writes the ctx width once at attach,
+ * the fuzzer writes the generation once per execution. Bits 8..23 are left
+ * alone by both. They are not reclaimed for anything, deliberately -- the
+ * point of layout 2 is that this word has no field a hot path writes.      */
 #define __AFL_DIAG_CTX_MASK   0xFFu
 #define __AFL_DIAG_GEN_SHIFT  24
 #define __AFL_DIAG_GEN_MASK   0xFFu
@@ -565,8 +567,9 @@ void __afl_map_shm(void) {
 
     /* Publish the context width so the fuzzer can confirm the map was sized
      * for the binary it is actually running, not the one it inspected.
-     * The drop count is no longer in this word. */
-    *__afl_diag = (*__afl_diag & ~(uint32_t)(__AFL_DIAG_CTX_MASK | (0xFFu << __AFL_DIAG_GEN_SHIFT)))
+     * Writes bits 0..7 and nothing else: the drop count is no longer in
+     * this word, and the generation belongs to the fuzzer. */
+    *__afl_diag = (*__afl_diag & ~(uint32_t)__AFL_DIAG_CTX_MASK)
                 | ((uint32_t)__AFL_CTX_BITS & __AFL_DIAG_CTX_MASK);
 
 #if __AFL_DISTANCE_MODE
@@ -1006,7 +1009,26 @@ static void __afl_write_distance_tail(void) {
 __attribute__((visibility("default")))
 void __afl_map_reset(void) {
     if (__afl_area) {
-__afl_generation = (__afl_generation + 1) & 0xFF;
+        /* Advance the tag that is actually in effect, which lives in the
+         * diag word -- __afl_map_edge reads it from there, and the fuzzer's
+         * reset_edge_map() writes it there. The private static is only the
+         * fallback for a target running with no segment attached.
+         *
+         * This used to increment the static and then write it to the word,
+         * which is correct only while the two cannot disagree. They could
+         * not, for an accidental reason: __afl_map_shm() zeroed the word's
+         * generation bits at attach, matching the freshly-zeroed static. Now
+         * that attach preserves the fuzzer's tag, a static starting at 0
+         * against a word already at 1 would step the word BACKWARDS to 1 --
+         * i.e. not advance it at all, leaving the previous execution's
+         * entries readable as live. Caught by
+         * TestShimEdgeCountEndToEnd::test_shim_disambiguates_shared_function_by_caller,
+         * which is the one test that drives this function and a Python-side
+         * reset against the same segment. */
+        uint32_t gen = __afl_generation;
+        if (__afl_diag)
+            gen = (*__afl_diag >> __AFL_DIAG_GEN_SHIFT) & __AFL_DIAG_GEN_MASK;
+        __afl_generation = (gen + 1) & 0xFF;
 
         /* Generation tags are 8 bits, so they repeat every 256 resets. An
          * entry keeps the tag of the last execution in which its edge
