@@ -225,7 +225,7 @@ class TestShmCleanupDropsItsViews:
             "get_edge_counts",
             "reset_edge_map",
             "read_distance_tail",
-            "read_diag",
+            "read_generation",
             "read_path_hash",
             "read_edge_count",
         ],

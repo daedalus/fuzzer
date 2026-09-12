@@ -241,8 +241,7 @@ struct __afl_entry {
  *
  * Raise it with -D__AFL_CTX_BITS=N if a target genuinely has deep fan-in
  * AND the map has room; check the drop counter (offset 24, see
- * __afl_note_drop) rather than guessing. __AFL_CTX_BITS=0 is equivalent to
- * __AFL_CTX_SENSITIVE=0.
+ * __afl_note_drop) rather than guessing. __AFL_CTX_BITS=0 is equivalent to __AFL_CTX_SENSITIVE=0.
  */
 #if __AFL_CTX_SENSITIVE
 #  ifndef __AFL_CTX_BITS
@@ -307,46 +306,72 @@ const uint32_t __AFL_CAT(__afl_ngram_k_, __AFL_NGRAM_K) = __AFL_NGRAM_K;
 
 /* ── Segment layout ───────────────────────────────────────────────────
  *
- *   offset  0  uint32  stack_depth
- *   offset  4  uint32  diag           ctx width + generation (see below)
- *   offset  8  uint64  path_hash
- *   offset 16  uint64  edge_count
- *   offset 24  uint32  dropped_edges  own word (see __afl_note_drop)
- *   offset 28  uint32  reserved       keeps the entry table 8-byte aligned
+ *   offset  0  uint32  stack_depth     written by this shim
+ *   offset  4  uint32  generation      written by the fuzzer
+ *   offset  8  uint64  path_hash       written by this shim
+ *   offset 16  uint64  edge_count      written by this shim
+ *   offset 24  uint64  dropped_edges   written by this shim, saturating
  *   offset 32  struct __afl_entry[__afl_map_size]
  *   ...        16-byte AFLGo distance tail (adapters/shm.py SHM_TAIL_SIZE)
  *
- * SHM_TABLE_OFFSET must equal adapters/shm.py SHM_METADATA_SIZE. The Python
- * side memsets and memmoves the table from that offset and reads entries as
- * a struct array based there, so a disagreement does not degrade coverage --
- * it shifts every entry the target writes by the difference, and reads the
- * fuzzer's own header bytes as edge ids. The two constants are pinned
- * against each other by tests/test_shm_layout.py.
+ * One field per address, one writer per field, no bit packing anywhere.
+ * That is the whole design rule here, and it is a reaction to what the
+ * previous layout cost. A single uint32 at offset 4 held three bit fields
+ * with two owners -- the ctx width, a drop count, and the generation tag --
+ * and every write to any of them was a read-modify-write of the other two.
+ * Two bugs came directly out of that: attach masked off the fuzzer's
+ * generation while publishing the ctx width, and __afl_map_reset() wrote a
+ * private static over the shared tag. A third was latent in the same shape,
+ * inprocess.reset_bitmap() memsetting from the segment base and destroying
+ * all three at once.
  *
- * The reserved word at 28 exists only for alignment. struct __afl_entry
- * needs 4-byte alignment, so a table at offset 28 would be legal, but every
- * 8-byte entry would then straddle an 8-byte boundary and one in eight
- * would straddle a cache line -- paid on the single hottest store in the
- * system. Four bytes of padding is the cheaper side of that trade.
+ * Note that two uint32 fields side by side (offsets 0 and 4) are NOT bit
+ * packing. They are separate addressable objects, so a store to one is not
+ * a read-modify-write of the other, and the shim and the fuzzer can own one
+ * each without coordinating. Adjacency was never the problem.
  *
- * Any change to these offsets must bump __AFL_SHM_LAYOUT below, so that a
- * prebuilt target carrying the old layout is refused by
- * elf.detect_shm_layout() rather than silently writing to the wrong place. */
-#define SHM_HEADER_SIZE  24
-#define SHM_DROP_OFFSET  24
-#define SHM_TABLE_OFFSET 32
+ * SHM_TABLE_OFFSET must equal adapters/shm.py SHM_METADATA_SIZE, and each
+ * field offset its counterpart there. A disagreement is not a degradation:
+ * the target writes entries at its offset and the fuzzer reads them at its
+ * own, so every edge id read back is a splice of two adjacent entries and
+ * the fuzzer's own header words read as edges -- a plausible-looking stream
+ * of garbage rather than a visible failure. tests/test_shm_layout.py pins
+ * the constants against this source, and the layout marker below lets
+ * elf.detect_shm_layout() refuse a stale prebuilt target before it runs.
+ *
+ * The table starts at a multiple of sizeof(struct __afl_entry), which keeps
+ * (addr - base) / 8 an exact entry index in both languages and keeps the
+ * merged 8-byte stores the compiler emits in the wipe loop aligned. It is
+ * NOT a hot-path throughput argument: measured, a table at offset 28 costs
+ * +0.4% median against a 14-24% run-to-run spread, i.e. nothing. The reason
+ * to keep it is that the arithmetic stays exact and a future 64-bit entry
+ * field would otherwise become genuinely misaligned.
+ */
+#define SHM_STACK_DEPTH_OFFSET  0
+#define SHM_GENERATION_OFFSET   4
+#define SHM_PATH_HASH_OFFSET    8
+#define SHM_EDGE_COUNT_OFFSET  16
+#define SHM_DROP_OFFSET        24
+#define SHM_TABLE_OFFSET       32
 
 /* Layout generation, advertised in the symbol NAME for the same reason
- * __afl_ctx_bits_N is (see above): the Python side must be able to read it
- * from a binary it has not run, and a plain symbol-table scan is the only
- * mechanism that works before the first execution.
+ * __afl_ctx_bits_N is: the fuzzer must be able to read it from a binary it
+ * has not run, and a symbol-table scan is the only mechanism that works
+ * before the first execution.
  *
- *   1  header 24 bytes, table at 24, drop count packed in diag bits 8..23
- *   2  header 24 bytes + dedicated u32 drop count at 24, table at 32
+ *   1  table at 24; ctx width, 16-bit drop count and generation packed into
+ *      one uint32 at offset 4
+ *   2  an intermediate that added a dedicated uint32 drop count at 24 and
+ *      moved the table to 32, keeping ctx and generation packed at offset 4
+ *   3  this one: every field its own address, uint64 drop count, ctx width
+ *      no longer in the segment at all
  *
  * Absence of the marker means layout 1, which is what every shim built
- * before this counter existed produced. */
-#define __AFL_SHM_LAYOUT 2
+ * before the marker existed produced. Layout 2 was delivered for review but
+ * superseded before it shipped; it is listed so that a binary built from it
+ * is refused rather than misread, since its table offset matches this one
+ * but its offset-4 semantics do not. */
+#define __AFL_SHM_LAYOUT 3
 __attribute__((visibility("default"), used))
 const uint32_t __AFL_CAT(__afl_shm_layout_, __AFL_SHM_LAYOUT) = __AFL_SHM_LAYOUT;
 
@@ -376,67 +401,73 @@ static uint32_t __afl_prev_idx  = 0;
 static volatile int __afl_mapping = 0;
 
 /* Metadata pointers (front region, before the edge table) */
-static uint32_t *__afl_stack_depth = NULL;   /* offset 0: uint32 */
-static uint32_t *__afl_diag        = NULL;   /* offset 4: uint32 (was pad) */
-static uint64_t *__afl_path_hash   = NULL;   /* offset 8: uint64 */
+static uint32_t *__afl_stack_depth = NULL;   /* offset 0:  uint32 */
+static uint32_t *__afl_gen_word    = NULL;   /* offset 4:  uint32 */
+static uint64_t *__afl_path_hash   = NULL;   /* offset 8:  uint64 */
 static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
-static uint32_t *__afl_dropped     = NULL;   /* offset 24: uint32 */
+static uint64_t *__afl_dropped     = NULL;   /* offset 24: uint64 */
 
-/* ── Diagnostics word (header offset 4, previously an unused pad) ──────
+/* ── Generation word (offset 4) ────────────────────────────────────────
  *
- *   bits  0..7   __AFL_CTX_BITS this target was built with
- *   bits  8..23  reserved (held the drop count in layout 1; see below)
- *   bits 24..31  generation tag, written by the fuzzer's reset_edge_map()
+ * The tag that distinguishes entries written by the current execution from
+ * entries left by earlier ones, so a reset does not have to memset the
+ * table. Written by the fuzzer's reset_edge_map(), read by __afl_map_edge
+ * on every edge fire -- the most-read field in the segment.
  *
- * Two fields, two owners: the target writes the ctx width once at attach,
- * the fuzzer writes the generation once per execution. Bits 8..23 are left
- * alone by both. They are not reclaimed for anything, deliberately -- the
- * point of layout 2 is that this word has no field a hot path writes.      */
-#define __AFL_DIAG_CTX_MASK   0xFFu
-#define __AFL_DIAG_GEN_SHIFT  24
-#define __AFL_DIAG_GEN_MASK   0xFFu
+ * One writer, which is the point. It previously shared a uint32 with the
+ * ctx width and the drop count, and both of the bugs that produced came
+ * from a second writer read-modify-writing the word around its own field.
+ *
+ * Only the low 8 bits are meaningful, and widening the field would not
+ * change that: the tag is stored in each entry's `count` high byte
+ * ((gen << 24) | 1), and an 8-byte entry has no room for more. The
+ * wrap-at-256 table wipe in reset_edge_map() follows from the entry, not
+ * from this word.                                                          */
+#define __AFL_GEN_MASK 0xFFu
 
-/* ── Dropped-edge counter (offset 24, its own 32-bit word) ─────────────
+/* ── Dropped-edge counter (offset 24, uint64, saturating) ──────────────
  *
  * Counts edges DISCARDED because the open-addressing probe found no free
  * slot within its window. That closes a self-masking failure: when the
  * table fills, the probe loop in __afl_map_edge runs to completion and
  * returns without recording anything -- the edge is lost, silently. Every
- * occupancy figure the Python side computes is derived from edges it
- * actually received, so a saturated table looks UNDER-occupied from the
- * outside, and EdgeTracker.recommended_map_size() (which otherwise triggers
- * on load factor > 0.7) can never fire in precisely the situation it was
- * written for. Counting at the point of loss is the only place the
- * information exists.
+ * occupancy figure the fuzzer computes is derived from edges it actually
+ * received, so a saturated table looks UNDER-occupied from the outside, and
+ * EdgeTracker.recommended_map_size() (which otherwise triggers on load
+ * factor > 0.7) can never fire in precisely the situation it was written
+ * for. Counting at the point of loss is the only place the information
+ * exists.
  *
- * It had its own reason to be 16 bits packed into the diag word -- the word
- * was already there and unused -- and that reason cost the signal. Measured
- * on a 1024-entry table fed 4000 guards (1,953 drops per execution): the
- * 16-bit field pinned at 65,535 after 34 EXECUTIONS. The only consumer that
- * reads it as a magnitude, the stall-triggered resize, does not run until
- * --stall executions have passed without a new edge (default 1,000), so on
- * any target that saturates, the value that consumer read was 65,535 every
- * single time, whatever the truth was. A pinned counter also has no usable
- * derivative, which rules out the per-execution question that actually
- * matters: "was THIS execution's edge set truncated?"
+ * It began as 16 bits packed into the word at offset 4, and the packing
+ * cost it the signal. Measured on a 1024-entry table fed 4000 guards --
+ * 1,953 drops per execution -- the field pinned at 65,535 after 34
+ * EXECUTIONS. Its only magnitude consumer, the stall-triggered resize, does
+ * not run until --stall executions have passed with no new edge (default
+ * 1,000), so on any target that saturates every value that consumer ever
+ * read was the ceiling. A pinned counter also has no derivative, which
+ * ruled out the per-execution question that actually matters: was THIS
+ * execution's edge set truncated?
  *
- * 32 bits moves the pin from 2^16 to 2^32 -- at the rate above, from 34
- * executions to 2.2 million -- and, more to the point, is far more than
- * enough for the per-execution delta the Python side now differences out of
- * it. The cumulative figure is accumulated there in a 64-bit int, so the
- * number a report shows is not bounded by this word at all.
+ * 64 bits removes the ceiling rather than moving it, and costs nothing: on
+ * a drop-saturated path where this fires on nearly every edge, u64 against
+ * u32 measured +0.02% min / +0.06% median against a 1.4% spread.
  *
  * Increments are non-atomic, which is fine: a saturation signal, compared
- * against zero or used as a magnitude, never as an accounting record.
- * Saturating rather than wrapping, because a wrap would read as zero drops.
+ * against zero or used as a magnitude, never an accounting record.
+ * Saturating rather than wrapping, because a wrap would read as zero drops
+ * -- the exact self-masking the counter exists to prevent. On a 32-bit
+ * build the increment is two stores, so a concurrent reader could observe a
+ * torn value mid-carry; nothing in this tree builds -m32, but this shim is
+ * compiled into third-party targets, and a torn read here is a wrong
+ * magnitude in a report, not a wrong decision.
  *
  * Deliberately NOT cleared between executions: this is the cumulative count
- * for the segment, and the Python side derives per-execution counts by
- * differencing. Clearing it here instead would need the shim to know where
- * an execution begins, which on the persistent and in-process paths it does
+ * for the segment, and the fuzzer derives per-execution counts by
+ * differencing. Clearing it here would need the shim to know where an
+ * execution begins, which on the persistent and in-process paths it does
  * not. Cleared only by ShmCoverage.reset_dropped_edges(), after a resize,
- * when drops against the old table stop being evidence about the new one.  */
-#define __AFL_DROP_MAX 0xFFFFFFFFu
+ * when drops against the old table stop being evidence about the new one. */
+#define __AFL_DROP_MAX 0xFFFFFFFFFFFFFFFFull
 
 /* Maximum linear-probe distance in __afl_map_edge, for both lookup and
  * insertion. Bounds the per-edge-execution cost to a constant instead of
@@ -464,7 +495,7 @@ static uint32_t *__afl_dropped     = NULL;   /* offset 24: uint32 */
 __attribute__((always_inline))
 static inline void __afl_note_drop(void) {
     if (!__afl_dropped) return;
-    uint32_t v = *__afl_dropped;
+    uint64_t v = *__afl_dropped;
     if (v != __AFL_DROP_MAX) *__afl_dropped = v + 1;
 }
 
@@ -554,23 +585,31 @@ void __afl_map_shm(void) {
         return;
     }
 
-    /* Edge table starts after the front region (header + drop word + pad) */
+    /* Edge table starts after the front region */
     uint8_t *base = (uint8_t *)p;
     __afl_area = (struct __afl_entry *)(base + SHM_TABLE_OFFSET);
 
-    /* Set up metadata pointers in the front region */
-    __afl_stack_depth = (uint32_t *)(base + 0);
-    __afl_diag        = (uint32_t *)(base + 4);
-    __afl_path_hash   = (uint64_t *)(base + 8);
-    __afl_edge_count  = (uint64_t *)(base + 16);
-    __afl_dropped     = (uint32_t *)(base + SHM_DROP_OFFSET);
+    /* One pointer per field; see the layout map above. */
+    __afl_stack_depth = (uint32_t *)(base + SHM_STACK_DEPTH_OFFSET);
+    __afl_gen_word    = (uint32_t *)(base + SHM_GENERATION_OFFSET);
+    __afl_path_hash   = (uint64_t *)(base + SHM_PATH_HASH_OFFSET);
+    __afl_edge_count  = (uint64_t *)(base + SHM_EDGE_COUNT_OFFSET);
+    __afl_dropped     = (uint64_t *)(base + SHM_DROP_OFFSET);
 
-    /* Publish the context width so the fuzzer can confirm the map was sized
-     * for the binary it is actually running, not the one it inspected.
-     * Writes bits 0..7 and nothing else: the drop count is no longer in
-     * this word, and the generation belongs to the fuzzer. */
-    *__afl_diag = (*__afl_diag & ~(uint32_t)__AFL_DIAG_CTX_MASK)
-                | ((uint32_t)__AFL_CTX_BITS & __AFL_DIAG_CTX_MASK);
+    /* Nothing is published here. Attach used to write the ctx width into
+     * the segment, and the mask it used to do so zeroed the fuzzer's
+     * generation tag on every execution. The write is gone rather than
+     * merely corrected: the segment copy of the ctx width had no reader
+     * outside the test suite, and the value is already available to the
+     * fuzzer before the target has ever run, from the __afl_ctx_bits_N
+     * marker symbol that elf.detect_ctx_bits() reads -- which is the source
+     * the sizing path actually uses, because sizing happens before the
+     * first execution. A field with no reader and a second writer on a word
+     * someone else owns is a hazard with no upside.
+     *
+     * The consequence worth stating: this shim now never writes the
+     * generation word at all on the attach path, so that class of clobber
+     * is structurally impossible here rather than fixed by a mask. */
 
 #if __AFL_DISTANCE_MODE
     __afl_mapping = 1;  /* map_dist_shm is instrumented; no ctx during setup */
@@ -698,8 +737,8 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
     if (!__afl_area) return;
 
     uint32_t gen = __afl_generation;
-    if (__afl_diag)
-        gen = (*__afl_diag >> __AFL_DIAG_GEN_SHIFT) & 0xFF;
+    if (__afl_gen_word)
+        gen = *__afl_gen_word & __AFL_GEN_MASK;
 
 #if __AFL_NGRAM_K > 2
     /* FNV-1a over the k−1 ring slots (oldest→newest from __afl_prev_idx)
@@ -1010,25 +1049,21 @@ __attribute__((visibility("default")))
 void __afl_map_reset(void) {
     if (__afl_area) {
         /* Advance the tag that is actually in effect, which lives in the
-         * diag word -- __afl_map_edge reads it from there, and the fuzzer's
+         * diag word: __afl_map_edge reads it from there, and the fuzzer's
          * reset_edge_map() writes it there. The private static is only the
          * fallback for a target running with no segment attached.
          *
-         * This used to increment the static and then write it to the word,
-         * which is correct only while the two cannot disagree. They could
-         * not, for an accidental reason: __afl_map_shm() zeroed the word's
-         * generation bits at attach, matching the freshly-zeroed static. Now
-         * that attach preserves the fuzzer's tag, a static starting at 0
-         * against a word already at 1 would step the word BACKWARDS to 1 --
-         * i.e. not advance it at all, leaving the previous execution's
-         * entries readable as live. Caught by
-         * TestShimEdgeCountEndToEnd::test_shim_disambiguates_shared_function_by_caller,
-         * which is the one test that drives this function and a Python-side
-         * reset against the same segment. */
+         * This used to increment the static and write the result to the
+         * word, which is correct only while the two cannot disagree. They
+         * could not, for an accidental reason: __afl_map_shm() zeroed the
+         * word's generation bits at attach, matching a freshly-zeroed
+         * static. Now that attach preserves the fuzzer's tag, a static at 0
+         * against a word at 1 writes 1 back -- no advance at all, leaving
+         * the previous execution's entries readable as live. */
         uint32_t gen = __afl_generation;
-        if (__afl_diag)
-            gen = (*__afl_diag >> __AFL_DIAG_GEN_SHIFT) & __AFL_DIAG_GEN_MASK;
-        __afl_generation = (gen + 1) & 0xFF;
+        if (__afl_gen_word)
+            gen = *__afl_gen_word & __AFL_GEN_MASK;
+        __afl_generation = (gen + 1) & __AFL_GEN_MASK;
 
         /* Generation tags are 8 bits, so they repeat every 256 resets. An
          * entry keeps the tag of the last execution in which its edge
@@ -1057,9 +1092,8 @@ void __afl_map_reset(void) {
             }
         }
 
-        if (__afl_diag) {
-            *__afl_diag = (*__afl_diag & 0x00FFFFFFu)
-                        | (__afl_generation << __AFL_DIAG_GEN_SHIFT);
+        if (__afl_gen_word) {
+            *__afl_gen_word = __afl_generation;
         }
 
         /* Write metadata before resetting accumulators */

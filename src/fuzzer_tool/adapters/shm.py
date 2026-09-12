@@ -35,24 +35,34 @@ SHM_MAP_SIZE = 8192  # number of entries
 SIZEOF_ENTRY = 8  # bytes per {edge_id: u32, count: u32}
 
 # Metadata region at the front of SHM (before the edge table).
-# Layout (32 bytes total):
-#   offset 0: uint32 stack_depth   (max stack depth in bytes, from __sancov_lowest_stack)
-#   offset 4: uint32 diag          (bits 0-7: __AFL_CTX_BITS, 8-23 reserved, 24-31: generation)
-#   offset 8: uint64 path_hash     (rolling hash: hash = hash * 31 ^ edge_id)
-#   offset 16: uint64 edge_count   (monotonic new-slot insertion count)
-#   offset 24: uint32 dropped      (saturating count of edges the probe could not place)
-#   offset 28: uint32 reserved     (padding; keeps the 8-byte entry table 8-byte aligned)
+# Layout (32 bytes total) -- one field per address, one writer per field:
+#   offset 0:  uint32 stack_depth   shim   (max stack depth in bytes)
+#   offset 4:  uint32 generation    US     (stale-entry tag; low 8 bits used)
+#   offset 8:  uint64 path_hash     shim   (rolling: hash = hash * 31 ^ edge_id)
+#   offset 16: uint64 edge_count    shim   (monotonic new-slot insertions)
+#   offset 24: uint64 dropped_edges shim   (saturating; edges the probe lost)
 #
-# SHM_METADATA_SIZE must equal SHM_TABLE_OFFSET in adapters/afl_shim.c, and
-# SHM_DROP_OFFSET must equal its SHM_DROP_OFFSET.  A disagreement is not a
-# degradation, it is silent corruption: the target writes entries at its own
-# offset, so every edge id the fuzzer reads back is shifted by the
-# difference.  tests/test_shm_layout.py pins both against the C source, and
-# afl_shim.c advertises the layout generation as a marker symbol
-# (__afl_shm_layout_N) so elf.detect_shm_layout() can refuse a stale
-# prebuilt target before it ever runs.
+# There is deliberately no bit packing. A single uint32 at offset 4 used to
+# hold the ctx width, a 16-bit drop count and the generation tag, giving the
+# word two owners and making every write a read-modify-write of two other
+# fields. Two shipped bugs came straight out of that shape, and a third was
+# latent. Note that stack_depth and generation being adjacent is not the
+# same thing: separate addresses are separate objects, so neither write
+# touches the other.
+#
+# These offsets must equal their counterparts in adapters/afl_shim.c. A
+# mismatch is not a degradation but silent corruption -- the target writes
+# entries at its table offset and we read at ours, so every edge id read
+# back is a splice of two adjacent entries and our own header words read as
+# edges. tests/test_shm_layout.py pins the constants against the C source,
+# and the shim advertises the layout generation as a marker symbol so
+# elf.detect_shm_layout() can refuse a stale prebuilt target before it runs.
 SHM_METADATA_SIZE = 32  # bytes before the edge table
-SHM_DROP_OFFSET = 24  # uint32 dropped-edge counter
+SHM_STACK_DEPTH_OFFSET = 0
+SHM_GENERATION_OFFSET = 4
+SHM_PATH_HASH_OFFSET = 8
+SHM_EDGE_COUNT_OFFSET = 16
+SHM_DROP_OFFSET = 24
 
 # AFLGo SHM-tail distance channel: after the edge table, 16 bytes hold
 # the per-execution average distance accumulated by the target:
@@ -195,10 +205,9 @@ class ShmCoverage:
         # from the most recent scan (consumed by Fuzzer.fuzz_one).
         self.max_count_transitions: int = 0
         self._last_max_gain: int = 0
-        # Cursor for dropped_edges_delta(): the drop word as of its last
-        # call, so the difference is the drops of the execution just run.
-        # Single-consumer by construction — see that method.
-        self._last_dropped_raw: int = 0
+        # Cursor for dropped_edges_delta(): the counter is cumulative for
+        # the segment, so per-execution figures come from differencing.
+        self._last_dropped: int = 0
         # Last seen edge_count for O(1) fast-path in is_new_coverage
         self._last_edge_count: int = 0
         # Last seen path_hash for fast-path — catches same-count but different-edge sets
@@ -460,8 +469,7 @@ class ShmCoverage:
         """
         gen = self.read_generation()
         new_gen = (gen + 1) & 0xFF
-        diag = ctypes.c_uint32.from_address(self._ptr + 4)
-        diag.value = (diag.value & 0x00FFFFFF) | (new_gen << self.DIAG_GEN_SHIFT)
+        ctypes.c_uint32.from_address(self._ptr + SHM_GENERATION_OFFSET).value = new_gen
         if new_gen == 0:
             ctypes.memset(self._ptr + SHM_METADATA_SIZE, 0, self.table_bytes)
         ctypes.memset(self._tail, 0, SHM_TAIL_SIZE)
@@ -483,149 +491,123 @@ class ShmCoverage:
 
     # ── Diagnostics word (offset 4) ─────────────────────────────────────
     #
-    # Two fields with two owners: the target writes the context width it was
-    # compiled with, once, at attach; the fuzzer writes the generation tag,
-    # once per execution.  Bits 8..23 are reserved and written by neither.
+    # The shim packs two things into what used to be a pad: the context
+    # width the target was compiled with, and a saturating count of edges it
+    # had to throw away because the open-addressing probe found no free slot.
     #
-    # They used to hold the dropped-edge count, which is why this word had a
-    # hot-path writer at all.  See read_dropped_edges for what that cost.
+    # The drop count is the only honest occupancy signal available. Every
+    # other measure -- len(_seen_edge_ids), EdgeTracker._global_edge_hits,
+    # bitmap_density() -- is computed from edges that made it INTO the table,
+    # so a table so full it is losing edges reads as under-occupied from
+    # here. Reading occupancy alone, the fuzzer concludes the map is fine
+    # exactly when it is at its worst.
 
-    DIAG_GEN_SHIFT = 24
-    DIAG_GEN_MASK = 0xFF
+    GEN_MASK = 0xFF
     # Must equal __AFL_PROBE_MAX in adapters/afl_shim.c. The C shim bounds
     # both lookup and insertion to this many slots; record_edge() below is a
     # mirror of that loop, so an unbounded mirror would place edges the shim
     # could never find (and vice versa).
     PROBE_MAX = 64
-    DIAG_CTX_MASK = 0xFF
     # Must equal __AFL_DROP_MAX in adapters/afl_shim.c.
-    DROP_MAX = 0xFFFFFFFF
-
-    def read_diag(self) -> int:
-        """Read the raw diagnostics word from the SHM front header."""
-        return ctypes.c_uint32.from_address(self._ptr + 4).value
-
-    def read_ctx_bits(self) -> int:
-        """Context width (__AFL_CTX_BITS) the running target was built with.
-
-        0 means context-free coverage. Only meaningful after the target has
-        run at least once -- before that the header has never been written.
-        Use elf.detect_ctx_bits() for the pre-run, static answer.
-        """
-        return self.read_diag() & self.DIAG_CTX_MASK
+    DROP_MAX = 0xFFFFFFFFFFFFFFFF
 
     def read_dropped_edges(self) -> int:
-        """Edges lost to a full table, cumulative over the segment's life.
-
-        Edges the open-addressing probe could not place within its window,
-        counted by the shim at the point of loss because that is the only
-        place the information exists.  Every other occupancy measure --
-        len(_seen_edge_ids), EdgeTracker._global_edge_hits, bitmap_density()
-        -- is computed from edges that made it INTO the table, so a table so
-        full it is losing edges reads as under-occupied from here.  Reading
-        occupancy alone, the fuzzer concludes the map is fine exactly when it
-        is at its worst.
+        """Edges lost to a full table, cumulative over the run.
 
         Any non-zero value means the map is too small for this target and
-        coverage is being silently discarded.
+        coverage is being silently discarded -- permanently, not delayed.
+        Every other occupancy measure (len(_seen_edge_ids),
+        EdgeTracker._global_edge_hits, bitmap_density()) is computed from
+        edges that made it INTO the table, so a table so full it is losing
+        edges reads as under-occupied from here. Reading occupancy alone,
+        the fuzzer concludes the map is fine exactly when it is at its worst.
 
-        A plain read with no side effects, which matters because several
-        reporting paths call it on a timer and one decision path
-        (``dropped_edges_delta``) tracks its own cursor: an earlier version
-        of this folded deltas into an accumulator here, which let a stats
-        print land between two of the calibration loop's delta reads and
-        consume the drops it was about to look at.
-
-        The value is bounded by the shim's 32-bit word, which saturates
-        rather than wraps -- see ``drop_counter_saturated``.  That ceiling is
-        why the counter has its own word instead of 16 packed bits in the
-        diag word: as a 16-bit field it pinned at 65,535, and on a target
-        measured at 1,953 drops per execution that took 34 executions, while
-        the only consumer reading it as a magnitude (the stall-triggered
-        resize) does not run until --stall executions have passed without a
-        new edge -- default 1,000.  Every value that consumer ever read on a
-        saturating target was the ceiling.
+        Non-consuming, deliberately: four reporting sites call this on the
+        stats interval, and a consuming read would silently steal readings
+        from ``dropped_edges_delta()`` -- making the accuracy of a
+        per-execution decision depend on whether a stats tick landed in
+        between.
         """
-        return ctypes.c_uint32.from_address(self._ptr + SHM_DROP_OFFSET).value
+        return ctypes.c_uint64.from_address(self._ptr + SHM_DROP_OFFSET).value
 
     def dropped_edges_delta(self) -> int:
-        """Drops since this method last returned — i.e. for the last execution.
+        """Drops since the previous call — i.e. for the execution just run.
 
-        The question a per-execution decision needs, and one the old packed
-        counter could not answer at all: it pinned after 34 executions, and a
-        pinned counter has no derivative.
+        The question a per-execution decision needs, and the one the old
+        16-bit packed counter could not answer at all: it pinned at 65,535
+        after 34 executions on a saturating target, and a pinned counter has
+        no derivative.
 
         A truncated edge set is not merely incomplete, it is *misleading*.
-        Which edges lose their slot depends on arrival order against whatever
-        the previous execution left in the table (reset_edge_map bumps a tag,
-        it does not clear), so the same input run twice can report different
-        edge sets with no nondeterminism in the target whatsoever. Measured
-        on an 8192-entry table with a fixed 4000-guard sequence and only the
-        prior occupancy differing: three runs shared 819 edges out of a 2,507
-        union, making 1,688 perfectly reproducible edges look unstable.
+        Which edges lose their slot depends on arrival order against
+        whatever the previous execution left in the table (reset_edge_map
+        bumps a tag, it does not clear), so the same input run twice can
+        report different edge sets with no nondeterminism in the target
+        whatsoever. Measured on an 8192-entry table with a fixed 4000-guard
+        sequence and only the prior occupancy differing: three runs shared
+        819 edges out of a 2,507-edge union, making 1,688 perfectly
+        reproducible edges look unstable.
 
-        There is ONE cursor, so this is a single-consumer channel: two
-        callers interleaving would each see a fraction of the drops. The
-        consumer is Fuzzer._calibrate_seed_stability, which reads once before
-        its loop to discard the campaign's backlog and once per run. Anything
-        else wanting per-execution drops needs its own cursor, not this one.
-
-        Negative deltas are impossible from the shim (the counter is
-        monotone), but a resize rebinds the segment and a caller may clear
-        the word, so the floor is clamped rather than trusted.
+        Single cursor, so this is a single-consumer channel: whoever calls
+        it consumes the interval. Reporting paths use read_dropped_edges().
         """
         raw = self.read_dropped_edges()
-        delta = raw - self._last_dropped_raw
+        delta = raw - self._last_dropped
         if delta < 0:
+            # resize() rebinds the segment and a caller may clear the word;
+            # never report a negative interval, never a spurious huge one.
             delta = raw
-        self._last_dropped_raw = raw
+        self._last_dropped = raw
         return delta
 
     def read_generation(self) -> int:
-        """Generation counter from the SHM diag field (bits 24-31).
+        """Stale-entry tag (offset 4), owned by this side.
 
-        Incremented by reset_edge_map() to make stale entries identifiable
-        without memsetting the whole table.
+        Incremented by reset_edge_map() so entries left by earlier
+        executions are identifiable without memsetting the whole table. The
+        shim reads it on every edge fire to stamp what it writes.
+
+        Only the low 8 bits are meaningful: the tag is stored in each
+        entry's `count` high byte, and an 8-byte entry has no room for more.
         """
-        return (self.read_diag() >> self.DIAG_GEN_SHIFT) & self.DIAG_GEN_MASK
+        return ctypes.c_uint32.from_address(self._ptr + SHM_GENERATION_OFFSET).value & self.GEN_MASK
 
     def drop_counter_saturated(self) -> bool:
         """True when the counter has pinned and is no longer a magnitude.
 
-        Reachable, but no longer on any realistic timescale: at the 1,953
-        drops per execution measured on a deliberately undersized map, 2^32
-        needs ~2.2 million executions, against 34 for the old 16-bit field.
+        Kept for reporting honesty rather than because it is reachable: at
+        2^64 this needs more drops than any campaign can produce. The
+        16-bit predecessor reached its ceiling after 34 executions.
         """
         return self.read_dropped_edges() >= self.DROP_MAX
 
     def _note_drop(self) -> None:
         """Increment the drop counter — mirrors the shim's __afl_note_drop().
 
-        Used by ``record_edge()``, the Python stand-in for the shim's
-        insertion path. Saturates at DROP_MAX rather than wrapping, because
-        a wrap would read as "no drops" — the exact self-masking the counter
-        exists to prevent.
+        Used by ``record_edge()``, this module's stand-in for the shim's
+        insertion path. Saturates rather than wrapping: a wrap would read as
+        zero drops, which is the self-masking the counter exists to prevent.
         """
-        word = ctypes.c_uint32.from_address(self._ptr + SHM_DROP_OFFSET)
+        word = ctypes.c_uint64.from_address(self._ptr + SHM_DROP_OFFSET)
         if word.value != self.DROP_MAX:
             word.value += 1
 
     def reset_dropped_edges(self) -> None:
-        """Zero the drop counter and the delta cursor.
+        """Zero the drop counter.
 
         Called after a resize: drops recorded against the old table are not
-        evidence about the new one, and leaving them standing would keep
-        every drop-driven decision permanently latched on.
+        evidence about the new one, and leaving the count standing would
+        keep every drop-driven decision permanently latched on.
         """
-        ctypes.c_uint32.from_address(self._ptr + SHM_DROP_OFFSET).value = 0
-        self._last_dropped_raw = 0
+        ctypes.c_uint64.from_address(self._ptr + SHM_DROP_OFFSET).value = 0
+        self._last_dropped = 0
 
     def reset_diag(self) -> None:
-        """Clear the drop count, preserving the context width and generation.
+        """Deprecated alias for reset_dropped_edges().
 
-        Retained under its old name because callers outside this module use
-        it; the drop count is no longer in the diag word, so the work is all
-        in reset_dropped_edges().
+        Retained because callers outside this module use the old name; the
+        drop count no longer shares a word with anything, so clearing it is
+        all this ever did.
         """
         self.reset_dropped_edges()
 
@@ -1001,10 +983,10 @@ class ShmCoverage:
                 stored = True
                 break
         if not stored:
-            # The shim counts a full-window miss (__afl_note_drop at the last
-            # probe step); this mirror did not, so a test exercising the
-            # saturation path through record_edge() saw the edge vanish with
-            # the counter still reading zero -- the exact self-masking the
+            # The shim counts a full-window miss (__afl_note_drop at the
+            # last probe step); this mirror did not, so a test exercising
+            # saturation through record_edge() saw the edge vanish with the
+            # counter still reading zero -- the exact self-masking the
             # counter exists to prevent, reproduced in the mirror.
             self._note_drop()
         # Update path_hash unconditionally: hash = hash * 31 ^ edge_id
@@ -1042,13 +1024,13 @@ class ShmCoverage:
         # every execution; it stopped being invisible when the per-exec clear
         # became generation tagging, which now wipes only on wrap. Copying
         # only the header is both correct and cheaper: the
-        # table is scratch, the header (path_hash, edge_count, diag) is not.
+        # table is scratch, the front region is not.
         #
-        # SHM_METADATA_SIZE now covers the dropped-edge word at offset 24 as
-        # well, so it travels with the rest. Whether it SHOULD survive a
-        # resize is a caller's decision, not this one's -- the stall-driven
-        # resize in services/fuzzer.py clears it immediately afterwards,
-        # because drops against the old table say nothing about the new one.
+        # SHM_METADATA_SIZE now covers the dropped-edge counter as well, so
+        # it travels with the rest. Whether it SHOULD survive a resize is the
+        # caller's decision, not this one's: the drop-driven resize in
+        # services/fuzzer.py clears it immediately afterwards, because drops
+        # against the old table say nothing about the new one.
         ctypes.memmove(new_ptr, self._ptr, SHM_METADATA_SIZE)
 
         # Detach old SHM. Drop the views into it first: they are

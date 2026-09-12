@@ -117,13 +117,17 @@ class TestShmResizePreservesEdgeIdentity:
 
     @needs_cc
     def test_resize_preserves_the_header(self, drivers):
-        """Context width must survive; the table itself is scratch."""
+        """Front-region fields must survive; the table itself is scratch."""
         shm = ShmCoverage(size=4096)
         try:
             _exec(shm, drivers[8], 100)
-            assert shm.read_ctx_bits() == 8
+            hash_before = shm.read_path_hash()
+            count_before = shm.read_edge_count()
+            gen_before = shm.read_generation()
             shm.resize(16384)
-            assert shm.read_ctx_bits() == 8
+            assert shm.read_path_hash() == hash_before
+            assert shm.read_edge_count() == count_before
+            assert shm.read_generation() == gen_before
         finally:
             shm.cleanup()
 

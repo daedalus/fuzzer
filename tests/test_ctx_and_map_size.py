@@ -19,7 +19,7 @@ still open after two rounds.
 What to capture on the failing run, before doing anything else:
 
     cov.read_edge_count()     # header, not the table scan
-    cov.read_diag()           # generation + drop counter
+    cov.read_generation()     # stale-entry tag
     proc.returncode           # child exit status
     cov.shm_id                # and `ipcs -m` output alongside it
 
@@ -201,7 +201,7 @@ class TestDropCounter:
             state = (
                 f"rc={proc.returncode} "
                 f"edge_count={shm.read_edge_count()} "
-                f"diag=0x{shm.read_diag():08x} "
+                f"gen={shm.read_generation()} "
                 f"dropped={shm.read_dropped_edges()} "
                 f"occupied={len(shm.get_edge_ids())} "
                 f"stderr={proc.stderr[-200:]!r}"
@@ -223,27 +223,30 @@ class TestDropCounter:
             shm.cleanup()
 
     @needs_cc
-    def test_ctx_bits_published_to_header(self, built):
+    def test_ctx_bits_readable_from_the_built_binary(self, built):
+        """The width is discoverable, from the marker symbol rather than SHM.
+
+        It used to be published into the segment at attach, and the mask
+        that write used zeroed the fuzzer's generation tag every execution.
+        The segment copy had no reader outside this suite, and the value is
+        needed BEFORE the first execution anyway (map sizing), so the marker
+        symbol is the only source that was ever load-bearing.
+        """
         for bits, path in built.items():
-            shm = ShmCoverage(size=1024)
-            try:
-                env = {**os.environ, "__AFL_SHM_ID": shm.env_id, "AFL_MAP_SIZE": "1024"}
-                subprocess.run([path, "100"], env=env, capture_output=True)
-                assert shm.read_ctx_bits() == bits
-            finally:
-                shm.cleanup()
+            assert detect_ctx_bits(path) == bits
 
     @needs_cc
-    def test_reset_diag_clears_drops_but_keeps_width(self, built):
+    def test_reset_dropped_edges_clears_drops_only(self, built):
         shm = ShmCoverage(size=1024)
         try:
             env = {**os.environ, "__AFL_SHM_ID": shm.env_id, "AFL_MAP_SIZE": "1024"}
             subprocess.run([built[8], "4000"], env=env, capture_output=True)
             assert shm.read_dropped_edges() > 0
-            assert shm.read_ctx_bits() == 8
-            shm.reset_diag()
+            gen = shm.read_generation()
+            shm.reset_dropped_edges()
             assert shm.read_dropped_edges() == 0
-            assert shm.read_ctx_bits() == 8, "width must survive the reset"
+            assert shm.read_generation() == gen, "the tag is not ours to clear"
+            assert detect_ctx_bits(built[8]) == 8
         finally:
             shm.cleanup()
 

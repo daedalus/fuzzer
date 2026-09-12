@@ -100,13 +100,15 @@ def test_destination_offset_leaves_the_header_intact(cov, runner):
         )
 
         ctypes.c_uint64.from_address(cov._ptr).value = 0xFEEDFACE  # path_hash
-        diag_before = cov.read_diag()
+        gen_before = cov.read_generation()
+        drops_before = cov.read_dropped_edges()
 
         assert len(payload) <= cov.table_bytes
         ctypes.memmove(cov._ptr + SHM_METADATA_SIZE, payload, len(payload))
 
         assert ctypes.c_uint64.from_address(cov._ptr).value == 0xFEEDFACE
-        assert cov.read_diag() == diag_before
+        assert cov.read_generation() == gen_before
+        assert cov.read_dropped_edges() == drops_before
         assert 11 in cov.get_edge_ids()
     finally:
         src.cleanup()

@@ -608,13 +608,12 @@ class Fuzzer:
 
         Fatal, unlike the uninstrumented warning, because there is no
         degraded-but-usable mode to fall back to. The layouts disagree about
-        where the edge table starts, so a layout-1 target attached to a
-        layout-2 segment writes every entry eight bytes below where the
-        fuzzer reads it: the ids read back are halves of two adjacent
-        entries spliced together, and the fuzzer's own edge_count header is
-        read as an edge. That produces a plausible-looking stream of
-        never-before-seen edge ids -- a corpus that grows on garbage, which
-        is worse than a run that reports nothing.
+        where the edge table starts and what the word at offset 4 means, so
+        a stale target writes every entry at the wrong offset: the ids read
+        back are halves of two adjacent entries spliced together, and our own
+        edge_count header is read as an edge. That produces a
+        plausible-looking stream of never-before-seen edges -- a corpus that
+        grows on garbage, which is worse than a run reporting nothing.
 
         Only reached when the target is known to carry shim instrumentation,
         so an uninstrumented or stripped binary cannot trip it.
@@ -628,9 +627,9 @@ class Fuzzer:
             return
         raise RuntimeError(
             f"{target} was built against SHM layout {found}, this fuzzer speaks "
-            f"layout {SHM_LAYOUT_CURRENT} — the two disagree about where the edge "
-            "table starts, so coverage would be read from the wrong offset rather "
-            "than simply missing. Rebuild the target against the current "
+            f"layout {SHM_LAYOUT_CURRENT} — the two disagree about the segment "
+            "layout, so coverage would be read from the wrong offsets rather than "
+            "simply missing. Rebuild the target against the current "
             "adapters/afl_shim.c (tools/build_targets.sh), or run with "
             "--no-coverage to fuzz it blind."
         )
@@ -4959,6 +4958,9 @@ class Fuzzer:
         edge_sets: list[set[int]] = []
         hashes: set[int] = set()
         dropped = 0
+        # Discard the campaign's accumulated backlog: the counter is
+        # cumulative for the segment, and without this a single drop earlier
+        # in the run would veto every calibration for the rest of the session.
         shm.dropped_edges_delta()  # discard drops from before this calibration
         for _ in range(n_runs):
             try:
@@ -4976,7 +4978,7 @@ class Fuzzer:
 
         if dropped:
             # The verdict this function reaches is "these edges did not
-            # reproduce, so they are nondeterministic" — and masking is
+            # reproduce, so they are nondeterministic", and masking is
             # permanent. A saturated table makes that inference invalid: an
             # edge whose probe window is full is discarded, and WHICH edge
             # loses the slot depends on arrival order against whatever the
@@ -4985,15 +4987,17 @@ class Fuzzer:
             # edges in the same order, can therefore report different edge
             # sets across runs with no nondeterminism in the target at all.
             #
-            # Measured on an 8192-entry table, a fixed 4000-guard sequence,
-            # and only the table's prior occupancy differing between runs:
-            # three runs shared 819 edges out of a 2,507-edge union. This
-            # function would have masked the other 1,688 — every one of them
-            # perfectly reproducible — and never unmasked them.
+            # Measured on an 8192-entry table with a fixed 4000-guard
+            # sequence and only the prior occupancy differing: three runs
+            # shared 819 edges out of a 2,507-edge union. This function would
+            # have masked the other 1,688 -- every one of them perfectly
+            # reproducible -- and never unmasked them.
             #
-            # Declining to decide is the right answer rather than masking a
-            # subset: there is no way to tell, from the edge sets alone,
-            # which divergences were drops and which were real.
+            # Abstaining rather than masking a subset is the only available
+            # answer: from the edge sets alone there is no way to tell which
+            # divergences were drops. One drop is enough, because one drop is
+            # one edge this run will never see; there is no threshold below
+            # which the set diff becomes trustworthy again.
             self._stability_calibrations += 1
             log.info(
                 "Stability calibration skipped: %d edge(s) dropped to a full map "
@@ -5650,26 +5654,24 @@ class Fuzzer:
         """Grow the map when the shim reports drops, without waiting for a stall.
 
         Drops were already consumed by ``_maybe_trigger_stall_recovery``, but
-        only there — and that path does not run until ``--stall`` executions
+        only there -- and that path does not run until ``--stall`` executions
         have passed with no new edge (default 1,000), and only when
         ``--resize-map-on-stall`` is set. So the one honest saturation signal
         in the system was read late, conditionally, and (while it was a
-        16-bit field packed into the diag word) pinned: measured at 1,953
-        drops per execution, it reached its 65,535 ceiling after 34
-        executions, which is to say every value that consumer ever read on a
-        saturating target was the ceiling.
+        16-bit packed field) pinned: measured at 1,953 drops per execution it
+        reached its 65,535 ceiling after 34 executions, meaning every value
+        that consumer ever read on a saturating target was the ceiling.
 
-        A drop is not a symptom to be confirmed by other evidence. It is the
-        fuzzer being told, by the only component that can know, that coverage
-        it will never see has already been discarded. Waiting for a stall to
-        act on it inverts cause and effect: the stall is *downstream* of the
-        lost coverage.
+        A drop is not a symptom awaiting confirmation. It is the fuzzer being
+        told, by the only component that can know, that coverage it will
+        never see has already been discarded. Waiting for a stall to act on
+        it inverts cause and effect: the stall is downstream of the lost
+        coverage.
 
-        Deliberately cheap and deliberately rate-limited to the stats
-        interval — this reads one word and calls a resize decision that
-        returns 0 in the common case. The rate limit also keeps a single
-        resize from being re-proposed on consecutive ticks while the new
-        table's own evidence accumulates.
+        Cheap and rate-limited on purpose -- one word read and a decision
+        that returns 0 in the common case. The rate limit also stops a fresh
+        table from being re-proposed on consecutive ticks before it has
+        produced any evidence of its own.
         """
         if not self._resize_map_on_stall or self.shm_cov is None:
             return
@@ -5682,10 +5684,10 @@ class Fuzzer:
         new_size = self._edge_tracker.recommended_map_size(dropped_edges=dropped)
         if new_size <= self.shm_cov.size:
             # Already at the cap, or the recommendation does not beat the
-            # current size. Say so once rather than silently doing nothing:
-            # a run that is losing coverage it cannot size its way out of is
-            # something the operator should know about, and the only other
-            # place this was ever reported was the stall path.
+            # current size. Say so once rather than silently doing nothing: a
+            # run losing coverage it cannot size its way out of is something
+            # the operator should know about, and the stall path was the only
+            # other place this was ever reported.
             if not self._drop_cap_warned:
                 self._drop_cap_warned = True
                 print(

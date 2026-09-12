@@ -21,7 +21,11 @@ import pytest
 
 from fuzzer_tool.adapters.shm import (
     SHM_DROP_OFFSET,
+    SHM_EDGE_COUNT_OFFSET,
+    SHM_GENERATION_OFFSET,
     SHM_METADATA_SIZE,
+    SHM_PATH_HASH_OFFSET,
+    SHM_STACK_DEPTH_OFFSET,
     SIZEOF_ENTRY,
     ShmCoverage,
 )
@@ -58,25 +62,55 @@ def _shim_define(name: str) -> int:
 
 
 class TestLayoutConstantsAgree:
+    def test_every_field_offset_matches_the_shim(self):
+        for c_name, py_value in (
+            ("SHM_STACK_DEPTH_OFFSET", SHM_STACK_DEPTH_OFFSET),
+            ("SHM_GENERATION_OFFSET", SHM_GENERATION_OFFSET),
+            ("SHM_PATH_HASH_OFFSET", SHM_PATH_HASH_OFFSET),
+            ("SHM_EDGE_COUNT_OFFSET", SHM_EDGE_COUNT_OFFSET),
+            ("SHM_DROP_OFFSET", SHM_DROP_OFFSET),
+        ):
+            assert _shim_define(c_name) == py_value, c_name
+
     def test_table_offset_matches_the_shim(self):
         assert _shim_define("SHM_TABLE_OFFSET") == SHM_METADATA_SIZE
 
-    def test_drop_offset_matches_the_shim(self):
-        assert _shim_define("SHM_DROP_OFFSET") == SHM_DROP_OFFSET
+    def test_fields_do_not_overlap_and_fill_the_region(self):
+        """Widths: u32, u32, u64, u64, u64 = 32 bytes, no padding."""
+        fields = [
+            (SHM_STACK_DEPTH_OFFSET, 4),
+            (SHM_GENERATION_OFFSET, 4),
+            (SHM_PATH_HASH_OFFSET, 8),
+            (SHM_EDGE_COUNT_OFFSET, 8),
+            (SHM_DROP_OFFSET, 8),
+        ]
+        cursor = 0
+        for off, width in sorted(fields):
+            assert off == cursor, f"gap or overlap at offset {off}"
+            cursor = off + width
+        assert cursor == SHM_METADATA_SIZE, "front region has padding in it"
+
+    def test_every_multibyte_field_is_naturally_aligned(self):
+        assert SHM_PATH_HASH_OFFSET % 8 == 0
+        assert SHM_EDGE_COUNT_OFFSET % 8 == 0
+        assert SHM_DROP_OFFSET % 8 == 0
+        assert SHM_GENERATION_OFFSET % 4 == 0
 
     def test_layout_generation_matches_the_shim(self):
         assert _shim_define("__AFL_SHM_LAYOUT") == SHM_LAYOUT_CURRENT
 
     def test_drop_word_sits_between_header_and_table(self):
-        """The counter is inside the front region, not overlapping either side."""
-        header_end = _shim_define("SHM_HEADER_SIZE")
-        assert header_end <= SHM_DROP_OFFSET
-        assert SHM_DROP_OFFSET + 4 <= SHM_METADATA_SIZE
+        """The counter is inside the front region, below the edge table."""
+        assert SHM_EDGE_COUNT_OFFSET < SHM_DROP_OFFSET
+        assert SHM_DROP_OFFSET + 8 == SHM_METADATA_SIZE
 
     def test_table_stays_eight_byte_aligned(self):
-        """An 8-byte entry at a 4-mod-8 offset straddles a boundary on every
-        access, and one in eight straddles a cache line — paid on the single
-        hottest store in the system. That is what the pad at offset 28 buys.
+        """Not a throughput argument — measured, a table at offset 28 costs
+        +0.4% median against a 14-24% run-to-run spread, i.e. nothing. It
+        keeps (addr - base) / 8 an exact entry index in both languages, and
+        keeps the merged 8-byte stores the compiler emits in the wipe loop
+        aligned. Here it falls out for free: five naturally-aligned fields
+        happen to total 32.
         """
         assert SHM_METADATA_SIZE % SIZEOF_ENTRY == 0
 
@@ -96,9 +130,9 @@ class TestLayoutMarkerSymbol:
         assert detect_shm_layout(str(exe)) == SHM_LAYOUT_CURRENT
 
     def test_absent_marker_reads_as_layout_one(self):
-        """Every shim built before the dedicated drop counter produced layout
-        1 and exported nothing to say so, so absence must not read as
-        'current' — that is precisely the binary the check exists to catch.
+        """Every shim built before the marker existed produced layout 1 and
+        exported nothing to say so, so absence must not read as 'current' —
+        that is precisely the binary the check exists to catch.
         """
         assert detect_shm_layout("/bin/true") == 1
 
@@ -116,7 +150,7 @@ class TestSegmentSizing:
             entry0 = ctypes.addressof(cov._entries)
             assert entry0 - cov._ptr == SHM_METADATA_SIZE
             # The drop word must be inside the segment and below the table.
-            assert cov._ptr + SHM_DROP_OFFSET + 4 <= entry0
+            assert cov._ptr + SHM_DROP_OFFSET + 8 <= entry0
         finally:
             cov.cleanup()
 

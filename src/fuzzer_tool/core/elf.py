@@ -1665,31 +1665,33 @@ def detect_ngram_k(target: str) -> int:
 
 #: Segment layout the Python side is built for. Must equal
 #: __AFL_SHM_LAYOUT in adapters/afl_shim.c.
-SHM_LAYOUT_CURRENT = 2
+SHM_LAYOUT_CURRENT = 3
 
 
 def detect_shm_layout(target: str) -> int:
     """Read __AFL_SHM_LAYOUT out of a target's symbol table.
 
-    Same marker-name scan as `detect_ctx_bits` and `detect_ngram_k`.
+    Same marker-name scan as `detect_ctx_bits` and `detect_ngram_k`, and a
+    safety check rather than a sizing input.
 
-    This one is a safety check rather than a sizing input. The layouts differ
-    in where the edge table starts -- offset 24 in layout 1, offset 32 in
-    layout 2, which added a dedicated word for the dropped-edge counter -- so
-    running a stale prebuilt target against the current fuzzer does not
-    degrade coverage, it corrupts it: the target writes its entries eight
-    bytes before where the fuzzer reads them, so every edge id read back is
-    half of one entry and half of the next, and the fuzzer's own header bytes
-    are read as an edge. Nothing about that looks like a version mismatch
-    from the outside, which is why it is detected statically instead.
+    The layouts disagree about where the edge table starts and what the word
+    at offset 4 means, so running a stale prebuilt target against the
+    current fuzzer does not degrade coverage, it corrupts it: the target
+    writes entries at its offset and we read at ours, so every edge id read
+    back is a splice of two adjacent entries and our own header words are
+    read as edges. That produces a plausible-looking stream of
+    never-before-seen edge ids -- a corpus that grows on garbage, which is
+    worse than a run that reports nothing. Nothing downstream can detect it,
+    which is why it is caught statically.
 
-    Absence of the marker means layout 1: every shim built before the
-    dedicated counter existed produced that, and none of them exported
-    anything to say so.
+    Absence of the marker means layout 1: every shim built before the marker
+    existed produced that, and none of them exported anything to say so.
     """
     try:
         names = _symbol_names(target)
     except Exception as e:  # noqa: BLE001
+        # Unknown, not stale. Reporting a mismatch for every unreadable or
+        # non-ELF path would abort runs that are perfectly fine.
         log.debug("shm-layout detection failed for %s: %s", target, e)
         return SHM_LAYOUT_CURRENT
     best = 1

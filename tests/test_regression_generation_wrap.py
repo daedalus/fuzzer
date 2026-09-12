@@ -76,14 +76,14 @@ def test_wrap_preserves_the_header(cov):
     """The wipe covers the table only — the front header has one writer."""
     cov.record_edge(4242)
     ctypes.c_uint64.from_address(cov._ptr).value = 0xDEADBEEF  # path_hash
-    diag_before = cov.read_diag() & 0x00FFFFFF  # ctx bits + drop count
+    drops_before = cov.read_dropped_edges()  # not ours to touch on wrap
 
     for _ in range(GEN_PERIOD):
         cov.reset_edge_map()
 
     assert cov.read_generation() == 0
     assert ctypes.c_uint64.from_address(cov._ptr).value == 0xDEADBEEF
-    assert cov.read_diag() & 0x00FFFFFF == diag_before
+    assert cov.read_dropped_edges() == drops_before
 
 
 def test_edge_refired_after_the_wipe_is_visible_again(cov):

@@ -152,7 +152,7 @@ def test_regression_forkserver_coverage_reaches_parent_shm(runner):
     edges = shm.get_edge_ids()
     assert edges, (
         f"empty edge table after rc={rc}: edge_count={shm.read_edge_count()} "
-        f"diag=0x{shm.read_diag():08x} dropped={shm.read_dropped_edges()} "
+        f"gen={shm.read_generation()} dropped={shm.read_dropped_edges()} "
         f"path_hash=0x{shm.read_path_hash():016x} stderr={stderr!r}"
     )
 
