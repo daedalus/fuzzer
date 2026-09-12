@@ -69,6 +69,16 @@ _EXCLUDED_OPT_IN = frozenset(
         # enabling it would make a --hail-mary run incomparable to any
         # other run of the same seed for no behavioural gain.
         "rand_floyd_sample",
+        # Not a strategy: a feedback loop that overrides the temperature
+        # knob every other strategy reads. It is off by default for a
+        # substantive reason -- the sign and magnitude of
+        # d(discovery rate)/d(temperature) are unmeasured, and if that
+        # derivative is near zero the loop cannot work at all (see
+        # docs/handover/handover_control_theory_loops_2026-09-12.md §5).
+        # --hail-mary means "try everything plausible", not "enable the one
+        # switch that changes what every other switch sees while its own
+        # premise is untested".
+        "temperature_control",
     }
 )
 
