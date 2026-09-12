@@ -603,6 +603,35 @@ class Fuzzer:
         # "unknown" (stripped binary, or no nm): say nothing rather than
         # guess. A false alarm here trains people to ignore the real one.
 
+    def _report_map_cache_residency(self) -> None:
+        """Informational: the coverage map against the host cache hierarchy.
+
+        Silent when the topology is unknown (non-Linux, a container without
+        sysfs mounted) rather than guessing, and silent with no segment.
+
+        Phrased as capacity, not speed, on purpose. "Fits L2" is the obvious
+        thing to print here and the obvious reading of it is wrong: the edge
+        table is a sparsely-touched hash table, so only the lines an
+        execution actually reaches are ever resident and the size of the
+        allocation does not determine that. Measured with the touched set
+        held at 32 KiB and only the segment varied, 32 KiB to 32 MiB across
+        two cache boundaries, per-fire cost went 5.36, 5.28, 5.18, 5.21,
+        5.18, 5.25 ns -- no trend, the smallest segment fractionally
+        slowest. Holding the segment at 8 MiB and varying distinct edges
+        instead does move it, 5.18 ns at 512 distinct to 5.98 at 524,288.
+
+        So the line quotes how many distinct edges stay resident per level,
+        which is the quantity that actually moves, and leaves the operator
+        to compare it against the edge count they are seeing.
+        """
+        if self.shm_cov is None:
+            return
+        from fuzzer_tool.core.cpu_cache import describe_map_residency
+
+        line = describe_map_residency(self.shm_cov.shm_bytes, self.shm_cov.num_entries)
+        if line:
+            print(line)
+
     def _check_shm_layout(self, target: str) -> None:
         """Refuse a target built against an incompatible SHM layout.
 
@@ -6269,6 +6298,7 @@ class Fuzzer:
             if bd is not None:
                 print(f"[*] Branch density: {bd:.1f} cond branches/KB")
         print(f"[*] Edge bitmap: {self.map_size:,} entries (auto-sized)")
+        self._report_map_cache_residency()
         print(f"[*] Corpus: {self.corpus_dir} ({len(self.corpus)} seeds)")
         print(f"[*] Crashes: {self.crashes_dir}")
         print(f"[*] Max input length: {self.max_len}")
