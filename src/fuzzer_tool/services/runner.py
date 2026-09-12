@@ -198,6 +198,8 @@ class TargetRunner:
             # signal every consumer of coverage depends on.
             if shm:
                 shm.reset_edge_map()
+            if f.pt_cov:
+                f.pt_cov.reset_edge_map()
             # Open perf counters on current process (pid=0, no extra perms needed)
             # so in-process target calls (direct/direct_lite) are counted.
             if f._perf_counters:
@@ -266,6 +268,11 @@ class TargetRunner:
 
         if shm:
             shm.reset_edge_map()
+        # The decoder carries a reference IP across reads; leaving it set
+        # would let the previous execution's IP complete a compressed IP in
+        # this one, inventing a block that was never reached.
+        if f.pt_cov:
+            f.pt_cov.reset_edge_map()
 
         env = os.environ.copy()
         if f.use_coverage:
@@ -278,11 +285,18 @@ class TargetRunner:
         # Fast path: posix_spawn + temp file (no threads, no watchdog)
         if not f.file_mode and not f._cmplog:
             rc, stderr, pid = run_target_fast(
-                f.target, data, env=env, perf_counters=f._perf_counters, timeout=f.timeout
+                f.target,
+                data,
+                env=env,
+                perf_counters=f._perf_counters,
+                pt_session=f._pt_session,
+                timeout=f.timeout,
             )
             f._last_child_pid = pid
             if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
+            if f._pt_session:
+                f._pt_session.drain()
             return rc, stderr
 
         if f.file_mode:
@@ -294,17 +308,27 @@ class TargetRunner:
                 f.target_args,
                 env=env,
                 perf_counters=f._perf_counters,
+                pt_session=f._pt_session,
             )
             f._last_child_pid = pid
             if f._perf_counters:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
+            if f._pt_session:
+                f._pt_session.drain()
             return rc, stderr
         rc, stderr, pid = run_target_stdin(
-            f.target, data, f.timeout, env=env, perf_counters=f._perf_counters
+            f.target,
+            data,
+            f.timeout,
+            env=env,
+            perf_counters=f._perf_counters,
+            pt_session=f._pt_session,
         )
         f._last_child_pid = pid
         if f._perf_counters:
             f._last_perf_deltas = f._perf_counters.read_and_reset()
+        if f._pt_session:
+            f._pt_session.drain()
         return rc, stderr
 
     def _ptrace_handle_breakpoint(self, pid: int, libc, cov: PtraceCoverage, regs_buf) -> bool:

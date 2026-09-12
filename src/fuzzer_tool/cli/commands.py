@@ -483,6 +483,8 @@ def cmd_fuzz(args):
             moss=getattr(args, "moss", False),
             moss_gamma=getattr(args, "moss_gamma", 1.0),
             slopt=getattr(args, "slopt", False),
+            intel_pt=getattr(args, "intel_pt", False),
+            intel_pt_mode=getattr(args, "intel_pt_mode", "block"),
             gp_length_scale=getattr(args, "gp_length_scale", 1.0),
             gp_beta=getattr(args, "gp_beta", 2.0),
             contextual=getattr(args, "contextual", False),
@@ -652,6 +654,8 @@ def cmd_fuzz(args):
         save_smaller=getattr(args, "save_smaller", False),
         honggfuzz=getattr(args, "honggfuzz", False),
         hw_perf=getattr(args, "hw_perf", False),
+        intel_pt=getattr(args, "intel_pt", False),
+        intel_pt_mode=getattr(args, "intel_pt_mode", "block"),
         schedule_ablation=getattr(args, "schedule_ablation", None),
         schedule=getattr(args, "schedule", "base"),
         aflgo_cooling=getattr(args, "aflgo_cooling", "exp"),
@@ -1784,6 +1788,7 @@ _HAIL_MARY_FLAGS = (
     "save_smaller",
     "honggfuzz",
     "hw_perf",
+    "intel_pt",
     "colorize",
     "weizz_tags",
     "formatfuzzer",
@@ -3121,6 +3126,22 @@ def main() -> int:
         "--hw-perf",
         action="store_true",
         help="Enable hardware performance counters (instructions, branches, branch_misses) via perf_event_open. Requires CAP_PERFMON or root.",
+    )
+    fuzz_parser.add_argument(
+        "--intel-pt",
+        action="store_true",
+        help="Coverage from Intel PT hardware trace instead of instrumentation, "
+        "for binaries that cannot be rebuilt. Requires an Intel CPU exposing the "
+        "intel_pt PMU (most VMs do not); falls back with a warning when absent.",
+    )
+    fuzz_parser.add_argument(
+        "--intel-pt-mode",
+        choices=["block", "edge"],
+        default="block",
+        help="PT map granularity. 'block' is one bit per traced IP "
+        "(honggfuzz-equivalent); 'edge' folds in the predecessor, which records "
+        "path fragments rather than CFG edges since PT targets are not adjacent "
+        "basic blocks. Default: block",
     )
     fuzz_parser.add_argument(
         "--schedule-ablation",

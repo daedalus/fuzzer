@@ -868,6 +868,20 @@ class StatsReporter:
                 f"ipc:{stats['ipc']:.2f}"
             )
 
+        pt_str = ""
+        pt_cov = getattr(f, "pt_cov", None)
+        pt_session = getattr(f, "_pt_session", None)
+        if pt_cov and pt_session and pt_session.reads > 0:
+            pt = pt_cov.stats | pt_session.stats
+            # lost_bytes is the one number worth watching live: a ring that
+            # keeps overflowing means the map is missing blocks, and the fix
+            # is a bigger AUX ring, not a longer campaign.
+            pt_str = (
+                f" | pt: {pt['pt_map_entries']:,}blk "
+                f"{pt['pt_trace_bytes'] >> 10:,}KiB "
+                f"lost:{pt['pt_trace_lost_bytes'] >> 10:,}KiB"
+            )
+
         qea_str = ""
         qea = getattr(f, "qea", None)
         if qea:
@@ -1054,7 +1068,7 @@ class StatsReporter:
             f"{bayes_str}{misc_str}"
             f"{poisson_str}"
             f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
-            f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{hf_str}{ops_str}"
+            f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{pt_str}{hf_str}{ops_str}"
         )
         fluc_str = ""
         if getattr(f, "_fluctuation", None) is not None:
@@ -1233,6 +1247,12 @@ class StatsReporter:
                 fired, asserted = f._cmplog.total_comparisons()
                 rec["cmplog_cmp_fired"] = fired
                 rec["cmplog_cmp_asserted"] = asserted
+            pt_cov = getattr(f, "pt_cov", None)
+            if pt_cov is not None:
+                rec.update(pt_cov.stats)
+                pt_session = getattr(f, "_pt_session", None)
+                if pt_session is not None:
+                    rec.update(pt_session.stats)
             fh.write(json.dumps(rec, separators=(",", ":")) + "\n")
             fh.flush()
         except Exception:  # pragma: no cover - telemetry must never abort a run

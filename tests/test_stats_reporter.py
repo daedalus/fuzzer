@@ -253,6 +253,8 @@ def _mock_fuzzer(**overrides) -> MagicMock:
         "replay_n": 3,
         "_format_learner": None,
         "_perf_counters": None,
+        "pt_cov": None,
+        "_pt_session": None,
         "honggfuzz": False,
         "_entropy_execs": array("Q"),
         "_entropy_vals": array("d"),

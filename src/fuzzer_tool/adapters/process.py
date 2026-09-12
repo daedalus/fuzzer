@@ -272,6 +272,7 @@ def run_target_fast(
     data: bytes,
     env: dict[str, str] | None = None,
     perf_counters=None,
+    pt_session=None,
     timeout: float | None = None,
 ) -> tuple[int, str, int]:
     """Fast execution path using os.posix_spawn + temp file.
@@ -307,6 +308,8 @@ def run_target_fast(
         data: Input data.
         env: Optional environment variables.
         perf_counters: Optional PerfCounters instance (opens on child PID).
+        pt_session: Optional PtTraceSession (opens an Intel PT event on the
+            child PID).  Drained by the caller once the child has exited.
         timeout: Seconds before the child is killed, or None for unbounded.
 
     Returns:
@@ -343,6 +346,12 @@ def run_target_fast(
         # (inherit=1 doesn't survive exec, so we attach directly).
         if perf_counters is not None and pid > 0:
             perf_counters.open_for_pid(pid)
+        # Same late-attach window as the counters above, and it costs more
+        # here: whatever ran between spawn and this call is absent from the
+        # trace, not merely uncounted. The target reads its input after
+        # startup, so the window covers the loader rather than the parse.
+        if pt_session is not None and pid > 0:
+            pt_session.attach(pid)
 
         stderr_data, timed_out = _drain_until_eof(stderr_r, timeout)
         if timed_out:
@@ -395,6 +404,7 @@ def run_target_stdin(
     timeout: float,
     env: dict[str, str] | None = None,
     perf_counters=None,
+    pt_session=None,
 ) -> tuple[int, str, int]:
     """Execute target with data on stdin.
 
@@ -407,6 +417,8 @@ def run_target_stdin(
         timeout: Timeout in seconds.
         env: Optional environment variables.
         perf_counters: Optional PerfCounters instance (opens on child PID).
+        pt_session: Optional PtTraceSession (opens an Intel PT event on the
+            child PID).  Drained by the caller once the child has exited.
 
     Returns:
         Tuple of (returncode, stderr, subprocess_pid).
@@ -426,6 +438,8 @@ def run_target_stdin(
         # Open perf counters on child PID immediately after spawn
         if perf_counters is not None and proc.pid > 0:
             perf_counters.open_for_pid(proc.pid)
+        if pt_session is not None and proc.pid > 0:
+            pt_session.attach(proc.pid)
 
         # Write data in a thread to avoid pipe deadlock
         writer = threading.Thread(target=_write_and_close, args=(proc.stdin, data), daemon=True)
@@ -481,6 +495,7 @@ def run_target_file(
     target_args: list[str],
     env: dict[str, str] | None = None,
     perf_counters=None,
+    pt_session=None,
 ) -> tuple[int, str, int]:
     """Execute target with data written to a temp file.
 
@@ -494,6 +509,8 @@ def run_target_file(
         target_args: Target arguments ({file} is replaced with temp file path).
         env: Optional environment variables.
         perf_counters: Optional PerfCounters instance (opens on child PID).
+        pt_session: Optional PtTraceSession (opens an Intel PT event on the
+            child PID).  Drained by the caller once the child has exited.
 
     Returns:
         Tuple of (returncode, stderr, subprocess_pid).
@@ -520,6 +537,8 @@ def run_target_file(
         # Open perf counters on child PID immediately after spawn
         if perf_counters is not None and proc.pid > 0:
             perf_counters.open_for_pid(proc.pid)
+        if pt_session is not None and proc.pid > 0:
+            pt_session.attach(proc.pid)
 
         # Watchdog
         done = threading.Event()

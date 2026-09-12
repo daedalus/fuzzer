@@ -213,6 +213,9 @@ class PtTraceSession:
         exclude_kernel: drop kernel-space trace.  Forced on for an
             unprivileged process, which cannot ask for kernel trace at all.
         root: sysfs PMU directory, overridable for tests.
+        sink: object with ``ingest(bytes) -> int``, normally a
+            ``core.intel_pt.PtCoverage``.  ``drain()`` feeds it so the
+            execution path never has to know that the bytes are PT packets.
     """
 
     def __init__(
@@ -221,6 +224,7 @@ class PtTraceSession:
         data_pages: int = DEFAULT_DATA_PAGES,
         exclude_kernel: bool = True,
         root: str = PT_SYSFS_ROOT,
+        sink=None,
     ):
         # Before the validation below, not after: __del__ runs on a partly
         # built object too, and close() would raise AttributeError out of the
@@ -239,10 +243,12 @@ class PtTraceSession:
         self.exclude_kernel = exclude_kernel
         self.root = root
 
+        self.sink = sink
         self.bytes_read = 0
         self.lost_bytes = 0
         self.overflows = 0
         self.reads = 0
+        self.attach_failures = 0
 
         self._pmu_type = read_pmu_type(root)
         self._format_bits = read_format_bits(root)
@@ -415,6 +421,46 @@ class PtTraceSession:
         self.bytes_read += len(data)
         return data
 
+    def attach(self, pid: int) -> bool:
+        """Open a PT event on *pid* and start tracing.
+
+        One open plus two mmaps per execution, because the descriptor is
+        bound to the pid and cannot be rebound.  That is the same cost
+        ``PerfCounters`` pays on this path and it is what honggfuzz does; the
+        alternative this backend replaces is a ptrace breakpoint per basic
+        block, which is roughly two orders of magnitude worse.
+        """
+        if not self.open_for_pid(pid):
+            self.attach_failures += 1
+            return False
+
+        if not self.enable():
+            self.attach_failures += 1
+            self.close()
+            return False
+
+        return True
+
+    def drain(self) -> int:
+        """End the trace, hand the bytes to the sink, release the event.
+
+        Returns the number of new map entries, or 0 with no sink.  Stopping
+        first and closing after is the whole point of doing this in one
+        method: a caller that drains without disabling races the producer,
+        and one that forgets to close leaks a descriptor and an AUX ring per
+        execution.
+        """
+        if self._fd < 0:
+            return 0
+
+        self.disable()
+        raw = self.read_trace()
+        self.close()
+        if not raw or self.sink is None:
+            return 0
+
+        return self.sink.ingest(raw)
+
     def close(self) -> None:
         for region in ("_aux", "_base"):
             buf = getattr(self, region)
@@ -423,8 +469,14 @@ class PtTraceSession:
                 setattr(self, region, None)
 
         if self._fd >= 0:
-            os.close(self._fd)
-            self._fd = -1
+            # close() runs from __del__ too, and an exception there is printed
+            # and discarded by the interpreter -- which turns a stale fd into
+            # noise on an unrelated traceback instead of a diagnosable error.
+            fd, self._fd = self._fd, -1
+            try:
+                os.close(fd)
+            except OSError as exc:
+                log.debug("closing pt event fd %d failed: %s", fd, exc)
 
     @property
     def stats(self) -> dict:
@@ -433,6 +485,7 @@ class PtTraceSession:
             "pt_trace_reads": self.reads,
             "pt_trace_lost_bytes": self.lost_bytes,
             "pt_trace_overflows": self.overflows,
+            "pt_trace_attach_failures": self.attach_failures,
             "pt_aux_size": self.aux_size,
         }
 

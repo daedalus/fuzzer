@@ -257,6 +257,8 @@ def synthetic_session(aux_size=4096, fields=None):
     session.lost_bytes = 0
     session.overflows = 0
     session.reads = 0
+    session.attach_failures = 0
+    session.sink = None
     session._fd = -1
     session._pmu_type = 8
     session._format_bits = fields or {"pt": (0, 0), "branch": (13, 13), "noretcomp": (11, 11)}

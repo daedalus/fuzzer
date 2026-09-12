@@ -1179,6 +1179,53 @@ For targets with source already compiled by the build script (fgrep, tailslayer)
 the sancov flag is applied directly to their compilation. fgrep is vendored from
 [daedalus/fgrep](https://github.com/daedalus/fgrep) into `vendor/fgrep/`.
 
+### Intel PT Hardware Trace Coverage (`--intel-pt`)
+
+Coverage for binaries that cannot be rebuilt, with no instrumentation in the
+target. The CPU writes a compressed control-flow trace into a hardware buffer;
+the fuzzer decodes it into a block bitmap.
+
+- `core/intel_pt.py` — packet decoder (`iter_packets`, `calc_ip`) and the
+  coverage map (`PtCoverage`). Packet level, not instruction-flow
+  reconstruction: TIP/TIP.PGE/TIP.PGD/FUP carry a target IP, and taking TIP
+  targets gives one entry per indirect branch, call and return.
+- `adapters/pt_trace.py` — the `perf_event_open` event and its AUX ring
+  (`PtTraceSession`). `attach()` per execution, `drain()` after it.
+
+`--intel-pt-mode block` (default) is one bit per traced IP, matching
+honggfuzz `--linux_perf_ipt_block`. `edge` folds in the predecessor, but a TIP
+target is the destination of an indirect transfer, so consecutive targets are
+not adjacent basic blocks: `edge` records path fragments, not CFG edges.
+
+What this does not see: conditional branches. Following the TNT bits needs the
+decoded binary image, which is what pulls in libipt. Return compression is
+disabled (`noretcomp`) for the same reason — a compressed return is only
+recoverable with the image.
+
+Operational notes:
+
+- Requires an Intel CPU exposing the `intel_pt` PMU. Most VMs do not; the flag
+  then warns and leaves the configured coverage backend untouched.
+- Config bits come from `format/` under the PMU's sysfs directory, not from
+  constants: the bit positions differ across kernels, and a stale constant
+  would silently request a different trace mode rather than fail.
+- The forkserver is suppressed under `--intel-pt`. The event is bound to a pid
+  and the forkserver path never reaches the attach site.
+- Watch `lost:` on the status line. A ring that keeps overflowing means the map
+  is missing blocks; raise the AUX size rather than running longer.
+- `aux_head`/`aux_tail` are byte counters, not indices. Overflow is
+  `head - tail > aux_size`; comparing them as indices reads a full ring as an
+  empty one.
+- Attach happens just after spawn, so anything executing before it is absent
+  from the trace — the same window the hardware counters have, but here it
+  loses coverage rather than counts. Targets that read input after startup put
+  the parse safely inside the traced region.
+- Not verified against hardware: no host in this project's CI exposes the PMU,
+  so every path requiring the kernel to fill the buffer is unexercised. The
+  ring arithmetic, the sysfs parsing, the control-page offsets (against the
+  kernel's own struct where a compiler is present) and the degrade path are
+  covered.
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)

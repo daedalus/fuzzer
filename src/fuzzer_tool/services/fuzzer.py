@@ -816,6 +816,8 @@ class Fuzzer:
         save_smaller=False,
         honggfuzz=False,
         hw_perf=False,
+        intel_pt=False,
+        intel_pt_mode="block",
         schedule_ablation=None,
         schedule="base",
         aflgo_cooling="exp",
@@ -1537,6 +1539,8 @@ class Fuzzer:
         self.save_smaller: bool = save_smaller
         self.honggfuzz: bool = honggfuzz
         self.hw_perf: bool = hw_perf
+        self.intel_pt: bool = intel_pt
+        self.intel_pt_mode: str = intel_pt_mode
         self.crash_min_sizes: dict[str, int] = {}  # stack_hash -> min trigger size
         # Honggfuzz power factor stats (for display)
         self._hf_novelty_boosts: int = 0
@@ -1620,6 +1624,13 @@ class Fuzzer:
         # PoissonDiskAdmission holds a reference to _edge_tracker._minhash,
         # which is only fully initialized after corpus init; lazily create it
         # on first admission check so the reference is valid.
+
+        # Intel PT coverage (optional, uninstrumented binaries).  Built
+        # before the counters so the banner order matches the flag order.
+        self.pt_cov = None
+        self._pt_session = None
+        if self.intel_pt:
+            self._setup_intel_pt()
 
         # Hardware performance counters (optional, requires CAP_PERFMON)
         self._perf_counters = None
@@ -2712,6 +2723,7 @@ class Fuzzer:
             or self.target_args
             or self._cmplog
             or self._perf_counters
+            or self._pt_session
         ):
             return
 
@@ -2729,6 +2741,35 @@ class Fuzzer:
             print(f"[*] Forkserver: fork+exec from a loaded process ({self.target})")
         else:
             log.warning("Forkserver unavailable, falling back to spawn-per-exec")
+
+    def _setup_intel_pt(self) -> bool:
+        """Build the PT coverage map and the AUX session that feeds it.
+
+        Degrades instead of failing: a host without the PMU keeps whatever
+        coverage backend was already configured, because --intel-pt is an
+        additional source rather than a replacement for one.
+        """
+        from fuzzer_tool.adapters.pt_trace import PT_SYSFS_ROOT, PtTraceSession
+        from fuzzer_tool.core.intel_pt import PtCoverage, PtMapMode
+
+        mode = PtMapMode.EDGE if self.intel_pt_mode == "edge" else PtMapMode.BLOCK
+        # Not self.map_size: that is derived from the target's instrumentation
+        # via ELF symbol scanning, and a PT target has none.
+        cov = PtCoverage(mode=mode)
+        session = PtTraceSession(sink=cov)
+        if not session.available:
+            log.warning(
+                "Intel PT unavailable (%s absent); coverage unchanged. "
+                "PT needs an Intel CPU exposing the PMU, and most VMs do not.",
+                PT_SYSFS_ROOT,
+            )
+            self.intel_pt = False
+            return False
+
+        self.pt_cov = cov
+        self._pt_session = session
+        print(f"[*] Coverage: Intel PT ({mode.value}), aux={session.aux_size >> 10} KiB")
+        return True
 
     def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
         from fuzzer_tool.core.elf import detect_ngram_k
@@ -4075,6 +4116,7 @@ class Fuzzer:
                 has_new_coverage = bool(
                     (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
                     or (self.shm_cov and self.shm_cov.is_new_coverage())
+                    or (self.pt_cov and self.pt_cov.is_new_coverage())
                 )
         elif self.shm_cov:
             has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
@@ -4082,7 +4124,10 @@ class Fuzzer:
             has_new_coverage = has_new
             scanned_shm = self.shm_cov
         else:
-            has_new_coverage = bool(self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+            has_new_coverage = bool(
+                (self.ptrace_cov and self.ptrace_cov.is_new_coverage())
+                or (self.pt_cov and self.pt_cov.is_new_coverage())
+            )
 
         # Performance novelty: an edge whose trip count grew substantially
         # past anything seen before. The hit-count buckets saturate (129 and
@@ -6231,6 +6276,8 @@ class Fuzzer:
             groups["Execution"].append("honggfuzz")
         if self.hw_perf:
             groups["Execution"].append("hw-perf")
+        if self.pt_cov:
+            groups["Execution"].append("intel-pt")
         if self._diff_target:
             groups["Execution"].append("differential")
 
