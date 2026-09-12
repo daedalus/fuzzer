@@ -6,9 +6,12 @@
  * identified by its full 32-bit edge_id (caller_ctx ^ prev_loc ^ cur_loc,
  * call-stack-sensitive by default — see __afl_get_caller_ctx() below, or
  * plain prev_loc ^ cur_loc if built with -D__AFL_CTX_SENSITIVE=0) so there
- * are no silent bucket collisions.  AFL_MAP_SIZE is the number of hash table entries
- * (not bytes).  SHM size = AFL_MAP_SIZE * sizeof(struct __afl_entry) + 24
- * (24 bytes front header: stack_depth + pad + path_hash + edge_count).
+ * are no silent bucket collisions.  AFL_MAP_SIZE is the number of hash table
+ * ENTRIES, not bytes -- a caller that passes a byte count sizes the table
+ * eight times too large and the shim writes past the end of the segment.
+ * SHM size = SHM_TABLE_OFFSET + AFL_MAP_SIZE * sizeof(struct __afl_entry),
+ * i.e. 32 bytes of front region plus 8 bytes per entry (see the layout map
+ * further down), plus the 16-byte distance tail in __AFL_DISTANCE_MODE.
  *
  * Provides:
  *   - __afl_map_shm()     — attach to SHM segment
@@ -72,12 +75,14 @@
  *   __AFL_DISTANCE_MODE=1  AFLGo SHM-tail distance channel (inert until
  *                          the fuzzer uploads a table via __AFL_DIST_SHM_ID)
  *
- * Metadata layout (24 bytes at front of SHM):
- *   offset 0: uint32 stack_depth   (max stack depth in bytes)
- *   offset 4: uint32 _pad
- *   offset 8: uint64 path_hash     (rolling: hash = hash * 31 ^ edge_id)
- *   offset 16: uint64 edge_count   (monotonic new-slot insertion count)
- *   offset 24+:  edge table ({edge_id, count} × map_size entries)
+ * Metadata layout (32 bytes at front of SHM; see SHM_TABLE_OFFSET below
+ * for the authoritative map and the reasoning):
+ *   offset 0:  uint32 stack_depth    (max stack depth in bytes)
+ *   offset 4:  uint32 generation     (stale-entry tag, written by the fuzzer)
+ *   offset 8:  uint64 path_hash      (rolling: hash = hash * 31 ^ edge_id)
+ *   offset 16: uint64 edge_count     (monotonic new-slot insertion count)
+ *   offset 24: uint64 dropped_edges  (saturating; edges the probe lost)
+ *   offset 32+:  edge table ({edge_id, count} × map_size entries)
  *   after table:  distance tail (u64 dist_sum + u64 dist_count) in
  *                 __AFL_DISTANCE_MODE builds
  *
