@@ -1,6 +1,7 @@
 """Tests for filesystem adapter: save_crash, load_corpus, save_to_corpus."""
 
 from fuzzer_tool.adapters.filesystem import (
+    _bound_seen_hashes,
     hash_data,
     load_corpus,
     save_crash,
@@ -216,3 +217,73 @@ class TestSaveCrash:
         sigs = {}
         save_crash(b"a", -11, "SIGSEGV", tmp_path, hashes, sigs)
         assert "signal:11" in sigs
+
+
+class TestSeenHashesCap:
+    """P1-3: the seen_hashes cap must not silently re-admit every
+    previously-known hash the moment it's enforced."""
+
+    def test_bound_helper_is_noop_below_cap(self, monkeypatch):
+        monkeypatch.setattr(
+            "fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 10
+        )
+        seen = {f"h{i}" for i in range(10)}
+        _bound_seen_hashes(seen)
+        assert len(seen) == 10
+
+    def test_bound_helper_evicts_to_half_not_to_zero(self, monkeypatch):
+        monkeypatch.setattr(
+            "fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 10
+        )
+        seen = {f"h{i}" for i in range(11)}
+        _bound_seen_hashes(seen)
+        # The old behaviour was seen_hashes.clear() -- an unconditional
+        # wipe to 0. The fix must retain roughly half instead.
+        assert len(seen) == 5
+        assert len(seen) > 0
+
+    def test_retained_hash_still_dedups_after_cap_breach(self, tmp_path, monkeypatch):
+        """A hash that survives the cap-triggered eviction must go on being
+        recognised as a duplicate -- it must not be re-admitted just because
+        the set was resized.
+
+        Before the fix, hitting the cap called seen_hashes.clear(), so
+        *every* previously-known hash (not just an evicted fraction) would
+        be silently treated as new on its next appearance. With eviction to
+        half the cap instead of a full wipe, this asserts the retained half
+        is unaffected.
+        """
+        monkeypatch.setattr(
+            "fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 20
+        )
+        seen: set[str] = set()
+        # Save one seed we'll re-check at the end, then enough distinct
+        # seeds to push seen_hashes past the (patched) cap.
+        marker = b"marker_seed"
+        save_to_corpus(marker, tmp_path, seen)
+        marker_hash = hash_data(marker)
+        assert marker_hash in seen
+
+        for i in range(30):
+            save_to_corpus(f"filler_{i}".encode(), tmp_path, seen)
+
+        # The cap-triggered eviction must have run, bounding (not emptying)
+        # the set.
+        assert 0 < len(seen) <= 20
+
+        if marker_hash in seen:
+            # Retained: re-saving the identical bytes must still be
+            # rejected as a duplicate, not silently re-admitted.
+            result = save_to_corpus(marker, tmp_path, seen)
+            assert result is False
+
+    def test_never_wipes_the_whole_set(self, monkeypatch):
+        """Regression guard for the literal old bug shape: the cap must
+        never reduce seen_hashes to empty in one step."""
+        monkeypatch.setattr(
+            "fuzzer_tool.adapters.filesystem.SEEN_HASHES_MAX", 100
+        )
+        seen = {f"h{i}" for i in range(500)}
+        _bound_seen_hashes(seen)
+        assert len(seen) == 50
+        assert len(seen) != 0

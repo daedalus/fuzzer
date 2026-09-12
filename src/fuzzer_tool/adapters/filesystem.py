@@ -36,6 +36,34 @@ _REPRODUCER_MODE = 0o755
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
 
 
+def _bound_seen_hashes(seen_hashes: set[str]) -> None:
+    """Keep ``seen_hashes`` from growing without bound, without forgetting
+    everything at once.
+
+    ``bloom`` (see the four call sites below) never forgets a hash once
+    added, so it keeps answering "seen" for anything ever inserted here,
+    forever. That is the whole point of pairing an exact set with an
+    approximate filter: the set only exists to resolve the rare case where
+    ``bloom`` is wrong. Wiping the set entirely (the previous behaviour)
+    broke that pairing for every hash it held: on its next appearance each
+    one would query ``bloom`` as "seen" but the set as "no", fall into the
+    false-positive branch, and get silently re-admitted as if new — every
+    single previously-known hash, not a bounded fraction of them. See P1-3.
+
+    Evicting only half keeps the memory bound (the set never exceeds
+    ``SEEN_HASHES_MAX``) while leaving the retained half correctly
+    deduplicated — only the evicted half is exposed to the one-time
+    re-admission on its next appearance, not the whole set. ``set.pop()``
+    has no notion of insertion order to prefer, so which half survives is
+    arbitrary; that is unavoidable without tracking recency separately, and
+    unrelated to why this bounds the damage.
+    """
+    if len(seen_hashes) > SEEN_HASHES_MAX:
+        target = SEEN_HASHES_MAX // 2
+        while len(seen_hashes) > target:
+            seen_hashes.pop()
+
+
 def compute_delta(parent: bytes, child: bytes) -> list[list[int]] | None:
     """Compute a compact byte-level diff between parent and child.
 
@@ -549,9 +577,7 @@ def save_to_corpus(
         if h in seen_hashes:
             return False
     seen_hashes.add(h)
-    # Cap seen_hashes to bound memory; bloom filter handles fast dedup
-    if len(seen_hashes) > SEEN_HASHES_MAX:
-        seen_hashes.clear()
+    _bound_seen_hashes(seen_hashes)
     seeds_dir = corpus_dir / "seeds"
     seeds_dir.mkdir(parents=True, exist_ok=True)
     deltas_dir = corpus_dir / "deltas"
@@ -623,8 +649,7 @@ def save_irreplaceable(
             return False
     seen_hashes.add(h)
     irreplaceable_hashes.add(h)
-    if len(seen_hashes) > SEEN_HASHES_MAX:
-        seen_hashes.clear()
+    _bound_seen_hashes(seen_hashes)
 
     irep_dir = corpus_dir / "seeds" / "irreplaceable"
     irep_dir.mkdir(parents=True, exist_ok=True)
@@ -683,8 +708,7 @@ def save_crashing_seed(
         is_new = False
     seen_hashes.add(h)
     irreplaceable_hashes.add(h)
-    if len(seen_hashes) > SEEN_HASHES_MAX:
-        seen_hashes.clear()
+    _bound_seen_hashes(seen_hashes)
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
@@ -721,8 +745,7 @@ def save_timeout_seed(
         is_new = False
     seen_hashes.add(h)
     irreplaceable_hashes.add(h)
-    if len(seen_hashes) > SEEN_HASHES_MAX:
-        seen_hashes.clear()
+    _bound_seen_hashes(seen_hashes)
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
