@@ -763,6 +763,9 @@ class CorpusManager:
             parent=parent,
             lineage_depth=parent_depth,
         ):
+            # Purely observational bookkeeping for CorpusFlux (P4-T6); must
+            # never be able to break a save.
+            f._corpus_flux.record_addition()
             if (
                 # Under Elo arbitration the corpus-based seed strategies
                 # (weighted/pareto/bayesian/boltzmann) read f.corpus; if QEA's
@@ -784,6 +787,7 @@ class CorpusManager:
                     if decision == PoissonAdmissionDecision.REJECT_NEAR_DUP:
                         f._duplicate_reject_count += 1
                         f._poisson_reject_count += 1
+                        f._corpus_flux.record_rejection()
                         # Record that this seed was rejected for redundancy — but
                         # don't remove edges already tracked by record_edges; those
                         # are part of corpus coverage history.  Just skip corpus entry.
@@ -1431,6 +1435,7 @@ class CorpusManager:
             f._overlap_density_cache = {}
             f._last_minimize_exec = f.exec_count
             f._pruned_count += removed
+            f._corpus_flux.record_eviction(removed)
             log.info(
                 "Auto-minimized corpus: %d -> %d seeds -> pruned/ (stale_ratio=%.1f)",
                 len(f.corpus) + removed,
@@ -1531,6 +1536,7 @@ class CorpusManager:
             f._weight_cache = None
             f._cached_weights = {}
             f._overlap_density_cache = {}
+            f._corpus_flux.record_eviction(len(to_remove))
             log.info(
                 "Deprioritized %d near-duplicate seeds (Hamming <= 0.05 on edge bitmaps)",
                 len(to_remove),

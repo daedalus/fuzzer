@@ -6,6 +6,7 @@ import types
 from pathlib import Path
 
 from fuzzer_tool.adapters.filesystem import hash_data
+from fuzzer_tool.core.corpus_flux import CorpusFlux
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 from fuzzer_tool.services.corpus_manager import CorpusManager, save_irreplaceable
 
@@ -31,6 +32,7 @@ class MockFuzzer:
         self._weight_cache = None
         self._cached_weights: dict = {}
         self._pruned_count = 0
+        self._corpus_flux = CorpusFlux()
         self._last_minimize_exec = 0
         self.exec_count = 0
         self._stop_requested = False

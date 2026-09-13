@@ -1,15 +1,8 @@
 # Handover: thermal/stochastic-process concepts vs. current tree
 
-**Date:** 2026-09-12, **audited and re-prioritised 2026-09-13**,
-**implementation audited 2026-09-13 (later)**
+**Date:** 2026-09-12, **audited and re-prioritised 2026-09-13**
 **Base of original analysis:** `f17a3ef`
-**Base of the audit revision:** `94d1741`
-**Base of this revision:** `f7cbf05`
-
-**Status: P0-T1, P0-T3 and P2-T4 are closed. P3-T5 and P4-T6 remain open,
-plus E-T7 raised by the P0-T1 fix.**
-§4 records what landed, what the acceptance tests returned, and the one
-cost the fix carried that nobody had measured.
+**Base of this revision:** `94d1741`
 **Companion:** `handover_pending_2026-09-06.md` — the tier scheme below (P0/P1/P2/P3/P4)
 is that document's, so these items can fold into it without re-ranking.
 
@@ -38,14 +31,14 @@ the file claims, not by looking for missing files.
 
 | Concept | 09-12 verdict | 09-13 verdict |
 |---|---|---|
-| Power spectral density | covered, no work | covered, but its null was wrong for the series it is applied to → P0-T3, **CLOSED `728bdc3`** |
+| Power spectral density | covered, no work | **covered, but its null is wrong for the series it is applied to** → P0-T3 |
 | Least squares | covered, no work | covered; two secondary defects fold into P0-T1 |
 | Binomial distribution | covered, no work | **confirmed covered, and better than claimed** — no action |
-| Quadratic variation | "is what Allan variance computes" | right about this code, wrong about why → P0-T1, **CLOSED `0e11fd2`** |
-| Brownian motion (implicit null) | covered via Allan slope | the estimator could not separate the two hypotheses → P0-T1, **CLOSED `0e11fd2`** |
+| Quadratic variation | "is what Allan variance computes" | **right about this code, wrong about why** → P0-T1 |
+| Brownian motion (implicit null) | covered via Allan slope | **the estimator cannot separate the two hypotheses** → P0-T1 |
 | Brownian motion on `distance.py` | genuine gap, implement | genuine, but **gated on two facts the document got wrong** → P3-T5 |
 | Dynamic equilibrium (corpus flux) | genuine gap, implement | **confirmed sound** → P4-T6 |
-| Thermal equilibrium / equipartition | rejected, no action | rejected for a provable reason instead of a metaphorical one; the tree already had the module the rejection overlooked → P2-T4, **CLOSED `155bb54`** |
+| Thermal equilibrium / equipartition | rejected, no action | **rejected for a provable reason instead of a metaphorical one; and the tree already has the module the rejection overlooked** → P2-T4 |
 
 ---
 
@@ -79,11 +72,7 @@ Kept, re-verified, no action:
 
 ## P0 — defects in shipped code
 
-### P0-T1. `core/allan_variance.py` does not compute the Allan variance, and the fatigue threshold misfires on stationary long-memory noise — **CLOSED `0e11fd2`, see §4.1**
-
-> *Anchors in this section are pre-`29f0d60` and are left as they were
-> measured: the file is now `core/structure_function.py`. The defect is
-> described here in the past tense it deserves; what replaced it is §4.1.*
+### P0-T1. `core/allan_variance.py` does not compute the Allan variance, and the fatigue threshold misfires on stationary long-memory noise
 
 `adev(tau)` (`allan_variance.py:112-126`) computes
 
@@ -186,11 +175,7 @@ This does not soften the item: a threshold with no margin against the
 most plausible stationary alternative is a defect whether or not that
 alternative is currently realised.
 
-### P0-T3. Fisher's g-test assumes a constant rate; the series it is given is the one the rest of the tree exists to prove is not constant — **CLOSED `728bdc3`, see §5**
-
-> *Anchors in this section are pre-`728bdc3`. The raw behaviour described
-> here is still reachable with `prewhiten_series=False`, which is what makes
-> the fix falsifiable from inside the suite.*
+### P0-T3. Fisher's g-test assumes a constant rate; the series it is given is the one the rest of the tree exists to prove is not constant
 
 `report.py::_spectral_diagnostics` differences cumulative edges and
 hands the deltas to `detect_periodicity`, whose null (`fisher_g_pvalue`)
@@ -247,10 +232,7 @@ not-significant on them. No action for that scan.
 
 ## P2 — shipped but unwired
 
-### P2-T4. `--fluctuation` computes `L*log(L)` and nothing else — **CLOSED `155bb54`, see §4.2**
-
-> *Anchors in this section are pre-`155bb54`. `_op_probability` and
-> `crooks_forward_reverse` no longer exist; what replaced them is §4.2.*
+### P2-T4. `--fluctuation` computes `L*log(L)` and nothing else
 
 The 09-12 revision rejected thermal equilibrium and equipartition as
 metaphors with "no natural target" and recommended no action. It did
@@ -410,21 +392,20 @@ not need a new hook.
 
 ## 2. Implementation order, and why this order
 
-1. ~~**P0-T1** — `allan_variance.py`.~~ **Done in `0e11fd2`** (route 2:
-   the true Allan variance). Verified against the stated acceptance test;
-   §4.1. P3-T5 is now unblocked.
-2. ~~**P2-T4** — `--fluctuation`.~~ **Done in `155bb54`** (route 1:
-   wire and rename), after `6cdba43` did the documentation half only;
-   §4.2.
-3. ~~**P0-T3** — Fisher's g null.~~ **Done in `728bdc3`**; §5. Partially
-   closed, and the residual is stated rather than rounded away. Display-only, so it waits behind the
+1. **P0-T1** — `allan_variance.py`. The only item that changes what a
+   default-on campaign does today, and P3-T5 is blocked on it. Do the
+   route decision on paper first; ship the beta sweep as the test.
+2. **P2-T4** — `--fluctuation`. Second because it is cheap and carries
+   no measurement risk: the identity is proved, the degeneracy is
+   measured, and both routes (wire-and-rename, or retire) are small and
+   reversible. Doing it before P0-T3 keeps the two statistical-framing
+   corrections from landing in one reviewer's lap.
+3. **P0-T3** — Fisher's g null. Display-only, so it waits behind the
    decision paths, but it is bounded work with its test table already
    written.
-4. **P4-T6** — corpus gross flux. **Next.** Small, independent, no gate.
-5. **P3-T5** — distance trajectory. Last: no longer gated on P0-T1,
-   which has landed, but still gated on the series-definition question
-   and on the no-graph behaviour.
-6. **E-T7** (new) — the low-rate sensitivity that P0-T1 cost. §4.1.
+4. **P4-T6** — corpus gross flux. Small, independent, no gate.
+5. **P3-T5** — distance trajectory. Last: gated on P0-T1 landing, on
+   the series-definition question, and on the no-graph behaviour.
 
 Not on this list, deliberately: the PSD machinery itself, the
 least-squares *existence* question, and binomial CIs. All three are
@@ -458,320 +439,30 @@ now exists to prevent.
   measured files, so no measurement was invalidated. Re-check the base
   before applying patches from this line of work.
 
----
+## 4. Outcome: P4-T6 implemented, P3-T5 withdrawn
 
-## 4. Implementation audit (2026-09-13, later the same day)
+A separate session had already implemented and unit-tested both
+`core/scaling_exponent.py` (P3-T5's proposed estimator) and
+`core/corpus_flux.py` (P4-T6) against the *09-12* revision, before this
+audit landed. On pulling this revision mid-work:
 
-Four commits landed on top of the audit revision. `f13f7a7` is this
-document itself (identical to the audited version — `git patch-id
---stable` matches). The other three are by `Grok Agent <agent@x.ai>`:
-`6cdba43` (P0-T1 route 1 plus the documentation half of P2-T4),
-`29f0d60` (the rename), `0e11fd2` (P0-T1 route 2). Both routes to
-P0-T1 were applied in sequence; the final state is route 2.
+- **P4-T6 shipped as planned.** `core/corpus_flux.py` (the binomial
+  ±1-per-event null, `z = net/sqrt(gross)`) is unchanged by anything in
+  this audit — confirmed sound above — and is now wired into
+  `corpus_manager.py` (`_corpus_added_count`, paired with the existing
+  `_pruned_count`) and `services/fuzzer.py`/`stats.py`.
+- **P3-T5's wiring was withdrawn, not shipped.** The already-written
+  `core/scaling_exponent.py` module and its `services/fuzzer.py` /
+  `services/stats.py` wiring (sampling `avg_distance` once per tick into
+  the estimator) were deleted rather than merged, because this revision
+  explicitly gates P3-T5 on three unresolved questions — the reuse of
+  the misnamed `allan_variance` estimator (moot now that P0-T1 has
+  landed, but the module itself never called into `allan_variance.py`,
+  so that specific coupling was never present), the undecided
+  per-seed-vs-per-tick trajectory definition, and the no-`--target-
+  functions` constant-signal case — none of which had been decided on
+  paper before the wiring was written. Shipping it anyway would have
+  been exactly the failure mode P2-1 of the companion document warns
+  about: code that lands, passes its tests, and is never trusted because
+  the design question underneath it was never actually settled.
 
-Everything below was measured in a container at `0e11fd2` before the
-follow-up commits.
-
-### 4.1 P0-T1 — closed, and the acceptance test passes
-
-`adev(tau)` is now the real overlapping Allan deviation, the second
-difference of the cumulative series divided by `2*tau^2*(N-2tau)`. The
-variogram survives as `sdev()`, documented as a secondary diagnostic.
-`noise_slope` uses weighted OLS with weights ∝ `(N-2tau)/tau^2`. The
-module is `core/structure_function.py` and the analyzer spec is
-`structure_function`; the detector attribute is `_structure_fn`.
-
-The stated acceptance test, 200 replicates, N=256:
-
-| series | slope | `noise_type()` |
-|---|---|---|
-| white i.i.d. | −0.516 ± 0.101 | `active` 200/200 |
-| flicker 1/f | −0.017 ± 0.032 | `active` **200/200** |
-| random walk | +0.451 ± 0.113 | `fatiguing` 197/200 |
-| linear downtrend | +0.591 ± 0.040 | `fatiguing` 200/200 |
-
-And the beta sweep, 400 replicates, against the 0.593 that opened this
-item:
-
-| beta | mean slope | fraction `fatiguing` |
-|---|---|---|
-| 0.00 | −0.502 | 0.000 |
-| 0.75 | −0.142 | 0.000 |
-| **1.00** | **−0.016** | **0.000** |
-| 1.25 | +0.106 | 0.022 |
-| 1.50 | +0.225 | 0.945 |
-
-The white-noise slope recovers the theoretical −0.5, which is the
-falsifier this document asked for. Exact 1/f now sits at −0.016 against
-a 0.15 threshold, and the crossover has moved out to beta ≈ 1.4. Real
-margin where there was none.
-
-**Two things the implementation did not do, and what measurement says
-about each.**
-
-*The magnitude thresholds were not re-derived*, against the stated
-criterion. Measured, `adev(2)` is uniformly 0.707× the old `sdev(2)` —
-exactly 1/√2, as theory predicts — so `_ADEV_STALL_THRESHOLD = 0.01`
-now fires at a 41% higher discovery rate than the value was chosen
-for. **It does not bite, and the reason is the argument worth keeping:**
-edge counts are integers, and a single discovery anywhere in a 256-tick
-window already gives `adev(2) = 0.0445`, 4.4× the threshold. Nothing
-lives in the shifted gap; only an all-zero window is below it. Verified
-across Poisson rates 0.02–1.0/tick. `_ADEV_ACTIVE_THRESHOLD = 0.1` is
-now reachable only from the two fallback branches (`len(points) < 2`,
-`slope is None`), so it matters even less. **No action — recorded so
-nobody spends a day re-deriving it.**
-
-*`update()` rebuilds the whole cumulative deque in a Python loop on
-every call once the buffer is full.* The comment justifies it as keeping
-`_cum[0] == 0`, which is not needed: second differences are invariant
-under an additive constant, so a plain append preserves both alignment
-and correctness. It is one call per stats tick (~10 s of work), so this
-is cosmetic, not hot. **No action.**
-
-### 4.1a E-T7 (new) — the cost nobody measured
-
-Neither this document nor `0e11fd2` measured what the estimator change
-cost, and it cost something. Stepping the true rate down and counting
-ticks until `noise_type()` leaves `"active"`, 1024-tick budget, 40
-trials:
-
-| step (edges/tick) | median ticks (of those that reacted) | never left `active` |
-|---|---|---|
-| 20 → 1 | 13 | 0/40 |
-| 5 → 0 | 26 | 0/40 |
-| 5 → 1 | 23 | **34/40** |
-| 3 → 1 | 17 | **39/40** |
-
-A drop to zero is caught reliably at any pre-step rate, because the
-Allan deviation collapses under the stall threshold. A *partial*
-slowdown at a low pre-step rate is mostly not caught at all, where the
-old estimator caught `5 → 1` in a median 6 ticks.
-
-**Read this carefully before calling it a regression.** `5 → 1` means
-discovery is continuing at 1 edge/tick, which is not a stall; and
-`noise == "active"` only declines to *pre-emptively halve* the stall
-threshold (`fuzzer.py`, the `fatiguing` branch). It does not suppress a
-genuine stall, since a true stop is caught in a median 26 ticks over
-40/40. And the sensitivity the old estimator had at low rates was the
-same mechanism as its `p10 = 1` dead-time tail: firing on Poisson noise.
-So the trade is a large false-alarm rate for less pre-emptive fatigue
-warning at low absolute rates, and it is very likely worth it.
-
-**Why this is an E item and not a P-anything:** deciding it needs
-campaign data on how often a low-rate partial slowdown actually
-precedes a stall, which no synthetic harness can supply. The before and
-after tables are in
-`docs/handover/handover_control_theory_loops_2026-09-12.md` §2.1, whose
-dead-time characterisation had to be re-measured for the same reason.
-
-### 4.2 P2-T4 — the first pass documented it; the second closed it
-
-`6cdba43` corrected the docstrings, marked `crooks_forward_reverse` as
-not Crooks, and exposed the value under a second key, `renyi_entropy`,
-while leaving the call site untouched. So `--fluctuation` went on
-publishing the same degenerate number, now labelled with the precise
-identity it fails to satisfy in production. That is further into the
-middle state this tier exists to get out of, not out of it.
-
-`155bb54` closes it via route 1 (wire and rename). The shape of the fix
-is a contract rather than a better fallback, which is the part worth
-carrying to the next item like this:
-
-- A scheduler opts in by exposing `last_selection_probs()`.
-  `TrajectoryRecord.probs_are_true` defaults to **False**, so a caller
-  has to assert the property rather than remember to deny it.
-  `WorkFunctional` counts but never pools records without it, so
-  `jarzynski_estimator` returns None instead of a number shaped like an
-  entropy.
-- `exp3` is the only scheduler that can answer today; it already keeps
-  that mixture for its own importance-weighted estimator. The UCB family
-  selects by deterministic argmax and has **no selection law at all**,
-  which is why no fallback is the correct answer and not a gap.
-- Measured end to end: the default scheduler reports
-  `fluc: W=0.00 n=0 unpooled=3919`; with `--exp3`,
-  `fluc: W=10.06 n=1000 H2=7.94` — a real Rényi-2 entropy of the
-  operator-path distribution.
-- `_SELECTION_PROB_SOURCES` holds the opt-in list, and
-  `tests/test_regression_fluctuation_probs.py` asserts every name in it
-  is a real attribute. That guard is the point: the defect it replaces
-  was a `hasattr` on a name nothing assigned, which disabled the feature
-  silently instead of failing.
-
-**Two further defects found in the same module while fixing it**, both
-in `155bb54`:
-
-1. `state_key` hashed the operator tuple with the builtin `hash()`,
-   which is salted per process. Verified: three `PYTHONHASHSEED` values
-   give three different keys for the same trajectory, so state restored
-   from disk was orphaned under a key the new process cannot reproduce,
-   and `--seed` did not determine the keys. Same defect class as the LSH
-   banding removed from crash clustering. Now xxhash/sha256, matching
-   what the edge branch already did, with no sign leak from the hex of a
-   negative int.
-2. The two scheduler-aware branches of `_op_probability` (mopt, elo)
-   returned the fallback's value verbatim. They went with the function.
-
-`crooks_forward_reverse` is retired rather than kept as a diagnostic:
-a ratio of mean works between two arbitrary state buffers has no reverse
-protocol, no matched-`W` density ratio and no crossing at ΔF, and its own
-comment — "for identical work distributions the ratio is centered at
-1.0" — is true of any ratio of equal means.
-
-### 4.3 Collateral from the rename, fixed in `73a4996`
-
-`29f0d60` updated every `.py` and left **nine references** across five
-docs plus `docs/architecture.dot` and the generated
-`docs/images/architecture.svg`. One was an inlined code block whose
-stated purpose is that its numbers are "reproducible from this document
-alone", and it no longer imported. Two needed re-measurement rather than
-renaming, because the estimator changed underneath their numbers; see
-§4.1a. One turned out not to be rename drift at all but a pre-existing
-false claim — `handover_ports_pending.md:16` said `allan_variance.py`
-feeds `core/seed_quality.py`, which contains no reference to it and never
-did.
-
-The analyzer spec name also changed, `allan` → `structure_function`.
-Checked: spec names are internal to `AnalyzerRegistry`, not persisted in
-state and not exposed as a CLI flag, so the rename crosses no
-compatibility boundary. Recorded because it is the kind of thing that
-looks like one.
-
-### 4.4 Lesson, for the next document like this
-
-The 09-12 revision answered by inventory and was wrong four times. The
-09-13 audit of *that* was right about the defects and still incomplete
-in the same direction: it specified an acceptance test for P0-T1 and did
-not ask what the fix would cost, so the low-rate sensitivity in §4.1a
-had to be found after the fact — and it invalidated a measured table in
-a neighbouring document that neither the fix nor the audit thought to
-check. **When a recommendation replaces an estimator, the obligation is
-not just to state the acceptance test but to name what currently
-depends on the old estimator's numbers.** `grep` for the class name
-finds the callers; it does not find the measurements.
-
----
-
-## 5. P0-T3 — closed, partially, and the residual is stated
-
-`728bdc3`. An AR(p) background fit (Yule-Walker, order by AIC) flattens
-the spectrum before the periodogram is scored, so Fisher's g gets the
-white-noise series its null assumes. Measured, 500–1000 replicates,
-nominal alpha = 0.05:
-
-| null | n | raw | pre-whitened |
-|---|---|---|---|
-| Gaussian white | 256 | 0.049 | 0.048 |
-| Gaussian white | 512 | 0.046 | 0.046 |
-| Poisson, drifting OU rate | 256 | 0.367 | 0.062 |
-| Poisson, drifting OU rate | 512 | 0.526 | **0.102** |
-| AR(1) phi=0.7 | 512 | 0.936 | 0.069 |
-| AR(1) phi=0.9 | 512 | 0.848 | 0.055 |
-| AR(1) phi=−0.6 | 512 | 0.980 | 0.046 |
-| 1/f and 1/f² | 512 | 0.000 | 0.000 |
-
-**This is a 5× improvement and not a repair to nominal.** 0.102 against
-0.05 at n=512. A Poisson count series with a drifting rate has a
-Lorentzian-plus-flat-floor spectrum and an order-8 AR fit cannot flatten
-both halves of it; order 12 does not help the null (0.104) and pushes
-white noise to 0.068, which is the fit starting to model the noise.
-Recorded in the docstring and reflected in the report wording: the
-`PERIODIC` verdict on a drifting series is a lead, not a finding.
-
-### 5.1 The trap this fix shipped into first
-
-Worth reading before touching any spectral background estimate here,
-because the failure is silent and produces a *confident wrong answer*
-rather than a miss.
-
-A periodic component is itself strongly autocorrelated. So an AR model
-fitted to the raw series **models the tone**, and the filter then cancels
-the very signal the test exists to find. Measured on the first version:
-a bin-64 sinusoid at amplitude 2.0 over unit white noise came back
-`significant=True` at bin 27. Not a false negative — a false *location*.
-
-Three approaches were measured before one worked:
-
-| approach | white null | drifting null | tone survives |
-|---|---|---|---|
-| raw (the defect) | 0.046 | 0.526 | yes |
-| AR(p) on the raw series | 0.035 | **0.035** | **no — cancelled** |
-| normalise by a median-filtered local background | **0.156** | 0.309 | yes |
-| AR(p) on a locally-clipped periodogram | 0.046 | 0.102 | yes |
-
-The second row is the tempting one: it fixes the null *better* than what
-shipped. It is also the one that silently destroys the signal. The third
-fails the other way — dividing each ordinate by a noisy background
-estimate inflates the tail of the maximum, so the white-noise rate triples.
-The fourth uses the median filter only to *identify* which ordinates to
-clip out of the fit, and lets the smooth AR spectrum do the whitening; a
-tone survives at every amplitude tested (1.0 to 8.0), always at the
-correct bin.
-
-Clipping against a *global* median instead of a local one was also tried
-and fails a fourth way: a red background legitimately sits far above the
-global median, so the clip flattens the structure that needs modelling
-and the null barely moves (0.560 → 0.532).
-
-### 5.2 The cost, and why it does not bite the motivating case
-
-The filter attenuates what it flattens, so periodicity at very low
-frequency — a handful of cycles across the whole window — gets harder to
-see. That is the same confound the `peak_bin >= 2` gate already exists
-for, one bin further out.
-
-At moderate and high frequencies pre-whitening **gains** power, because
-removing the background is what lets a modest peak stand out. A
-corpus-sync artifact — the motivating hypothesis for the discovery-rate
-scan — has a period of order the sync interval and therefore a high bin.
-On a synthetic drift-plus-bin-51 series:
-
-| series | raw | pre-whitened |
-|---|---|---|
-| drift only | p = 3.1e-20, saved only by the bin gate | p = 1.00 |
-| drift + bin-51 sync | found at bin 51, p = 4.6e-62 | found at bin 51, p = **3.1e-69** |
-
-The drift-only row is the one to notice: on that draw the raw test
-produced a p-value of 3e-20 and was rescued purely by `peak_bin >= 2`.
-The gate was doing all the work, which is exactly why the item was filed.
-
-### 5.3 Two suspicions falsified, now pinned as tests
-
-Both are in `tests/test_regression_periodicity_null.py` so they are not
-re-proposed:
-
-- **Volatility clustering was never the problem.** GARCH(1,1) work with
-  no mean-level autocorrelation gives 0.044 against a 0.049 control, and
-  piecewise-constant variance gives 0.043. Variance clustering leaves the
-  ordinates exchangeable in expectation, so `garch.py`'s premise is *not*
-  in conflict with Fisher's g. It is mean-level rate drift only. This is
-  the plausible-and-wrong hypothesis worth recording: the tree has a
-  GARCH module, so it looks like it should be the explanation.
-- **Pure 1/f was already handled**, and not by the null: its peak
-  collapses into bin 1, which `peak_bin >= 2` rejects. Both 1/f and 1/f²
-  measure 0.000 raw.
-
-### 5.4 Falsification
-
-23 new tests, falsified two ways. Defaulting `prewhiten_series` to False
-fails 6 of them. Making the background fit peak-blind — removing the clip
-— fails exactly the 5 that guard §5.1. `prewhiten_series=False` is kept
-as a parameter for that reason: without a way to reproduce the raw
-periodogram, nothing in the suite distinguishes "the null was repaired"
-from "the test went blind".
-
-231 tests pass across the `detect_periodicity` consumers
-(`test_periodicity`, `test_quasiperiodicity`, `test_report`,
-`test_stats_reporter`, `test_berlekamp_massey`, the four
-`test_regression_bugreport_*`); ruff clean on the three touched files.
-
-### 5.5 Note for whoever does P3-T5
-
-P3-T5 wants a log-log slope over a Brownian-motion hypothesis. §5.1 is
-the same class of hazard one level over: an estimator fitted to a series
-that contains the thing being measured will absorb it. The distance
-trajectory will contain whatever directed-progress signal the item is
-looking for, so if any background or trend is removed before the slope is
-taken, check the peak-survival property first — measure that the fit does
-*not* absorb a synthetic signal of known strength before trusting any
-slope it produces.

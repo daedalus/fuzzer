@@ -45,6 +45,7 @@ from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.ro_rd import classify_operator_name
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
+from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
 from fuzzer_tool.core.schedulers import (
     C2UCBScheduler,
     CanaryScheduler,
@@ -2378,6 +2379,15 @@ class Fuzzer:
         # normalization); the no-data sentinel (20.0) is excluded.
         self._dist_min_observed: float | None = None
         self._dist_max_observed: float | None = None
+        # Most recent avg_distance reading (either source below), sampled
+        # once per stats tick into a ScalingExponentDetector to classify
+        # whether directed scheduling is producing ballistic (directed),
+        # diffusive (Brownian/no-better-than-random), or trapped progress.
+        # See core/scaling_exponent.py (P3-T5 -- restored on request; the
+        # handover's gating questions on this proposal are still open) and
+        # docs/handover/handover_thermo_stochastic_concepts_2026-09-12.md.
+        self._dist_last_value: float | None = None
+        self._distance_trend = ScalingExponentDetector()
 
         # K-Scheduler node channel: mutually exclusive with directed mode
         # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
@@ -4649,6 +4659,7 @@ class Fuzzer:
             runtime_avg = self._read_runtime_avg_distance()
             if runtime_avg is not None:
                 meta["avg_distance"] = runtime_avg
+                self._dist_last_value = runtime_avg
                 if self._dist_min_observed is None or runtime_avg < self._dist_min_observed:
                     self._dist_min_observed = runtime_avg
                 if self._dist_max_observed is None or runtime_avg > self._dist_max_observed:
@@ -4668,6 +4679,7 @@ class Fuzzer:
                     avg_dist = self._distance.seed_distance({(i, i) for i in hit_bbs})
                     meta["avg_distance"] = avg_dist
                     if avg_dist < 20.0:  # exclude the no-valued-blocks sentinel
+                        self._dist_last_value = avg_dist
                         if self._dist_min_observed is None or avg_dist < self._dist_min_observed:
                             self._dist_min_observed = avg_dist
                         if self._dist_max_observed is None or avg_dist > self._dist_max_observed:
@@ -7065,6 +7077,18 @@ class Fuzzer:
                             verdict["n"],
                         )
                     self._last_structure_edge_count = current_edges
+                    # Close this tick's corpus add/prune/reject bucket --
+                    # additions and evictions are recorded as they happen in
+                    # corpus_manager.py; tick() just closes the window. See
+                    # core/corpus_flux.py and
+                    # docs/handover/handover_thermo_stochastic_concepts_2026-09-12.md
+                    # (P4-T6).
+                    self._corpus_flux.tick()
+                    # Feed the current AFLGo distance reading (if directed
+                    # mode is active and at least one execution has produced
+                    # one) to the scaling-exponent detector, once per tick.
+                    if self._distance is not None and self._dist_last_value is not None:
+                        self._distance_trend.update(self._dist_last_value)
                     # Feed per-column edge counts to CoverageHomogeneityDetector
                     if self.shm_cov and hasattr(self, "_homogeneity"):
                         log.debug("homogeneity: shm_cov present, observing col counts")
@@ -7244,6 +7268,7 @@ class Fuzzer:
             self._state_store.set("garch", self._garch.save())
         if self._continuum is not None:
             self._state_store.set("continuum", self._continuum.save())
+        self._state_store.set("corpus_flux", self._corpus_flux.save())
         if getattr(self, "_temp_controller", None) is not None:
             # The observer's disturbance state and the PI accumulator are
             # both histories, so a resume that drops them restarts the loop

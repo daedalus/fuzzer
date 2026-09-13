@@ -390,6 +390,14 @@ class StatsReporter:
         print(f"  Duplicates rejected: {f._duplicate_reject_count}")
         if f._pruned_count > 0:
             print(f"  Seeds pruned:      {f._pruned_count}")
+        flux = getattr(f, "_corpus_flux", None)
+        if flux is not None and flux.total_additions + flux.total_evictions > 0:
+            turnover = flux.turnover()
+            turnover_str = f"{turnover:.2f}" if turnover is not None else "n/a"
+            print(
+                f"  Corpus flux:       +{flux.total_additions}/-{flux.total_evictions} "
+                f"lifetime, turnover={turnover_str}"
+            )
         if f._stall_recovery_count > 0:
             print(f"  Recovery entries:  {f._stall_recovery_count}")
             print(
@@ -1267,6 +1275,32 @@ class StatsReporter:
                         tail_avg = d_sum / d_count / 100.0
                         parts.append(f"dist:{tail_avg:.1f}")
             except (AttributeError, OSError):
+                pass
+            trend = getattr(f, "_distance_trend", None)
+            if trend is not None:
+                try:
+                    tv = trend.verdict()
+                    if isinstance(tv, dict) and tv.get("state") not in (
+                        "insufficient_data",
+                        "undefined",
+                    ):
+                        parts.append(f"trend:{tv['state']}(a={tv['alpha']:.2f})")
+                except (AttributeError, TypeError):
+                    pass
+
+        # Corpus add/prune/reject flux -- distinguishes a stalled campaign
+        # (no churn) from dynamic equilibrium (balanced churn, flat net
+        # size). See core/corpus_flux.py.
+        flux = getattr(f, "_corpus_flux", None)
+        if flux is not None:
+            try:
+                if flux.ticks > 0:
+                    gross = flux.gross()
+                    net = flux.net()
+                    turnover = flux.turnover()
+                    turnover_str = f"{turnover:.2f}" if turnover is not None else "n/a"
+                    parts.append(f"flux:gross={gross},net={net},turnover={turnover_str}")
+            except (AttributeError, TypeError):
                 pass
 
         # Finite-time occupation (Du, Sec. 3): last run's support size /

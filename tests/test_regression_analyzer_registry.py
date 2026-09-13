@@ -32,6 +32,7 @@ _ALWAYS_ON = {
     "csd",
     "coverage_homogeneity",
     "coverage_regime",
+    "corpus_flux",
 }
 _FLAG_GATED = {
     "fluctuation",

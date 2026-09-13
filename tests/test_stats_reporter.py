@@ -352,6 +352,75 @@ class TestPrintStats:
             line = mock_print.call_args[0][0]
             assert "dist: no-data" in line, f"expected dist: no-data in: {line[:300]}"
 
+    def test_corpus_flux_line_shown_once_ticks_recorded(self):
+        """A real CorpusFlux with recorded ticks prints a flux line."""
+        from fuzzer_tool.core.corpus_flux import CorpusFlux
+
+        flux = CorpusFlux()
+        flux.record_addition(3)
+        flux.record_eviction(1)
+        flux.tick()
+        flux.record_addition(2)
+        flux.record_eviction(2)
+        flux.tick()
+        fuzzer = _mock_fuzzer(_corpus_flux=flux, _pruned_count=3)
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            lines = [c[0][0] for c in mock_print.call_args_list]
+            assert any("flux:" in line for line in lines), lines
+
+    def test_corpus_flux_line_omitted_with_no_ticks(self):
+        """A freshly-constructed CorpusFlux (no ticks yet) prints no flux line."""
+        from fuzzer_tool.core.corpus_flux import CorpusFlux
+
+        fuzzer = _mock_fuzzer(_corpus_flux=CorpusFlux())
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            lines = [c[0][0] for c in mock_print.call_args_list]
+            assert not any("flux:" in line for line in lines), lines
+
+    def test_supplementary_line_includes_distance_trend_with_real_detector(self):
+        """A real ScalingExponentDetector with enough diffusive data adds
+        trend: to the supplementary line (P3-T5, core/scaling_exponent.py)."""
+        import random
+
+        from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
+
+        trend = ScalingExponentDetector(window=1000)
+        rng = random.Random(1)
+        x = 0.0
+        for _ in range(1000):
+            x += rng.choice((-1.0, 1.0))
+            trend.update(x)
+
+        shm = MagicMock()
+        shm.read_path_hash.return_value = 0
+        shm.read_distance_tail.return_value = (0, 0)
+        fuzzer = _mock_fuzzer(_distance=object(), shm_cov=shm, _distance_trend=trend)
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            lines = [c[0][0] for c in mock_print.call_args_list]
+            assert any("trend:diffusive" in line for line in lines), lines
+
+    def test_supplementary_line_omits_trend_before_window_fills(self):
+        """A freshly-constructed detector (insufficient_data) adds no trend: segment."""
+        from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
+
+        shm = MagicMock()
+        shm.read_path_hash.return_value = 0
+        shm.read_distance_tail.return_value = (0, 0)
+        fuzzer = _mock_fuzzer(
+            _distance=object(), shm_cov=shm, _distance_trend=ScalingExponentDetector()
+        )
+        reporter = StatsReporter(fuzzer)
+        with patch("builtins.print") as mock_print:
+            reporter.print_stats()
+            lines = [c[0][0] for c in mock_print.call_args_list]
+            assert not any("trend:" in line for line in lines), lines
+
     def test_regression_mopt_particle_count(self):
         """print_stats() reports the real MOpt particle count, not 0p.
 

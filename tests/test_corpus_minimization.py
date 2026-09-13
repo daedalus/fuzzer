@@ -5,6 +5,7 @@ import tempfile
 import types
 from pathlib import Path
 
+from fuzzer_tool.core.corpus_flux import CorpusFlux
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 from fuzzer_tool.services.corpus_manager import CorpusManager
 
@@ -44,6 +45,7 @@ class MockFuzzer:
         self._weight_cache = None
         self._cached_weights: dict = {}
         self._pruned_count = 0
+        self._corpus_flux = CorpusFlux()
         self._last_minimize_exec = 0
         self.exec_count = 0
         self._stop_requested = False
@@ -54,6 +56,7 @@ class MockFuzzer:
         self.seen_hashes: set[str] = set()
         self.bloom = None
         self._total_corpus_attempts = 0
+        self._duplicate_reject_count = 0
         self._last_hamming_distance = -1
         self._corpus_size_history: list[int] = []
         self._corpus_secretary = None
@@ -711,6 +714,71 @@ class TestDeferredMinimize:
         f._minimize_pending = True
         f._flush_pending_minimize()
         assert not f._minimize_pending, "flush must clear the flag"
+
+
+class TestCorpusAddedCount:
+    """save_to_corpus records an addition on CorpusFlux on every successful save.
+
+    This is the addition-side channel CorpusFlux pairs with evictions to
+    distinguish a stalled campaign from one in dynamic equilibrium -- see
+    core/corpus_flux.py (P4-T6).
+    """
+
+    def test_records_addition_on_each_successful_save(self):
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        mgr = CorpusManager(f)
+        f._edge_tracker.cumulative_edges = set()
+
+        assert f._corpus_flux.total_additions == 0
+        mgr.save_to_corpus(b"seed_one_" + b"x" * 60)
+        assert f._corpus_flux.total_additions == 1
+        mgr.save_to_corpus(b"seed_two_" + b"y" * 60)
+        assert f._corpus_flux.total_additions == 2
+
+    def test_does_not_record_addition_on_duplicate(self):
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        mgr = CorpusManager(f)
+        f._edge_tracker.cumulative_edges = set()
+
+        seed = b"seed_dup_" + b"x" * 60
+        mgr.save_to_corpus(seed)
+        assert f._corpus_flux.total_additions == 1
+        # Same content again: save_to_corpus (the module-level helper) sees
+        # the hash already in seen_hashes and does not re-save.
+        mgr.save_to_corpus(seed)
+        assert f._corpus_flux.total_additions == 1
+
+    def test_eviction_wiring_present_at_both_prune_sites(self):
+        """auto_minimize_corpus and deprioritize_near_duplicates both call
+        record_eviction alongside their existing f._pruned_count bookkeeping.
+
+        Behavioral tests exist elsewhere in this file for the (easy to
+        trigger) addition/rejection paths; both prune paths need enough
+        corpus/edge-tracker state to exercise for real that it isn't worth
+        duplicating here, so this checks the wiring is present in source
+        instead -- consistent with this repo's existing source-inspection
+        regression tests (e.g. tests/test_lbr_wiring.py).
+        """
+        import inspect
+
+        from fuzzer_tool.services import corpus_manager
+
+        source = inspect.getsource(corpus_manager)
+        assert "f._corpus_flux.record_eviction(removed)" in source
+        assert "f._corpus_flux.record_eviction(len(to_remove))" in source
+
+    def test_rejection_wiring_present_at_near_dup_site(self):
+        """The Poisson-disk REJECT_NEAR_DUP branch calls record_rejection.
+
+        See tests/test_regression_poisson_disk_admission.py for behavioral
+        coverage of the admission decision itself.
+        """
+        import inspect
+
+        from fuzzer_tool.services import corpus_manager
+
+        source = inspect.getsource(corpus_manager)
+        assert "f._corpus_flux.record_rejection()" in source
 
 
 class TestSingletonEdgePreservation:

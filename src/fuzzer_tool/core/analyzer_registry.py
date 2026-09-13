@@ -346,6 +346,24 @@ REGISTRY.register(
 )
 
 
+def _activate_corpus_flux(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.corpus_flux import CorpusFlux
+
+    f._corpus_flux = CorpusFlux()
+    data = f._state_store.get("corpus_flux")
+    if data is not None:
+        f._corpus_flux.load(data)
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="corpus_flux",
+        category="regime_detection",
+        activate=_activate_corpus_flux,
+    )
+)
+
+
 def _activate_sensitivity(f: FuzzerLike) -> None:
     from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
 
