@@ -4,9 +4,10 @@
 **implementation audited 2026-09-13 (later)**
 **Base of original analysis:** `f17a3ef`
 **Base of the audit revision:** `94d1741`
-**Base of this revision:** `73a4996`
+**Base of this revision:** `f7cbf05`
 
-**Status: P0-T1 and P2-T4 are closed. P0-T3, P3-T5 and P4-T6 remain open.**
+**Status: P0-T1, P0-T3 and P2-T4 are closed. P3-T5 and P4-T6 remain open,
+plus E-T7 raised by the P0-T1 fix.**
 §4 records what landed, what the acceptance tests returned, and the one
 cost the fix carried that nobody had measured.
 **Companion:** `handover_pending_2026-09-06.md` — the tier scheme below (P0/P1/P2/P3/P4)
@@ -37,7 +38,7 @@ the file claims, not by looking for missing files.
 
 | Concept | 09-12 verdict | 09-13 verdict |
 |---|---|---|
-| Power spectral density | covered, no work | **covered, but its null is wrong for the series it is applied to** → P0-T3 |
+| Power spectral density | covered, no work | covered, but its null was wrong for the series it is applied to → P0-T3, **CLOSED `728bdc3`** |
 | Least squares | covered, no work | covered; two secondary defects fold into P0-T1 |
 | Binomial distribution | covered, no work | **confirmed covered, and better than claimed** — no action |
 | Quadratic variation | "is what Allan variance computes" | right about this code, wrong about why → P0-T1, **CLOSED `0e11fd2`** |
@@ -185,7 +186,11 @@ This does not soften the item: a threshold with no margin against the
 most plausible stationary alternative is a defect whether or not that
 alternative is currently realised.
 
-### P0-T3. Fisher's g-test assumes a constant rate; the series it is given is the one the rest of the tree exists to prove is not constant
+### P0-T3. Fisher's g-test assumes a constant rate; the series it is given is the one the rest of the tree exists to prove is not constant — **CLOSED `728bdc3`, see §5**
+
+> *Anchors in this section are pre-`728bdc3`. The raw behaviour described
+> here is still reachable with `prewhiten_series=False`, which is what makes
+> the fix falsifiable from inside the suite.*
 
 `report.py::_spectral_diagnostics` differences cumulative edges and
 hands the deltas to `detect_periodicity`, whose null (`fisher_g_pvalue`)
@@ -411,10 +416,11 @@ not need a new hook.
 2. ~~**P2-T4** — `--fluctuation`.~~ **Done in `155bb54`** (route 1:
    wire and rename), after `6cdba43` did the documentation half only;
    §4.2.
-3. **P0-T3** — Fisher's g null. **Next.** Display-only, so it waits behind the
+3. ~~**P0-T3** — Fisher's g null.~~ **Done in `728bdc3`**; §5. Partially
+   closed, and the residual is stated rather than rounded away. Display-only, so it waits behind the
    decision paths, but it is bounded work with its test table already
    written.
-4. **P4-T6** — corpus gross flux. Small, independent, no gate.
+4. **P4-T6** — corpus gross flux. **Next.** Small, independent, no gate.
 5. **P3-T5** — distance trajectory. Last: no longer gated on P0-T1,
    which has landed, but still gated on the series-definition question
    and on the no-graph behaviour.
@@ -643,3 +649,129 @@ check. **When a recommendation replaces an estimator, the obligation is
 not just to state the acceptance test but to name what currently
 depends on the old estimator's numbers.** `grep` for the class name
 finds the callers; it does not find the measurements.
+
+---
+
+## 5. P0-T3 — closed, partially, and the residual is stated
+
+`728bdc3`. An AR(p) background fit (Yule-Walker, order by AIC) flattens
+the spectrum before the periodogram is scored, so Fisher's g gets the
+white-noise series its null assumes. Measured, 500–1000 replicates,
+nominal alpha = 0.05:
+
+| null | n | raw | pre-whitened |
+|---|---|---|---|
+| Gaussian white | 256 | 0.049 | 0.048 |
+| Gaussian white | 512 | 0.046 | 0.046 |
+| Poisson, drifting OU rate | 256 | 0.367 | 0.062 |
+| Poisson, drifting OU rate | 512 | 0.526 | **0.102** |
+| AR(1) phi=0.7 | 512 | 0.936 | 0.069 |
+| AR(1) phi=0.9 | 512 | 0.848 | 0.055 |
+| AR(1) phi=−0.6 | 512 | 0.980 | 0.046 |
+| 1/f and 1/f² | 512 | 0.000 | 0.000 |
+
+**This is a 5× improvement and not a repair to nominal.** 0.102 against
+0.05 at n=512. A Poisson count series with a drifting rate has a
+Lorentzian-plus-flat-floor spectrum and an order-8 AR fit cannot flatten
+both halves of it; order 12 does not help the null (0.104) and pushes
+white noise to 0.068, which is the fit starting to model the noise.
+Recorded in the docstring and reflected in the report wording: the
+`PERIODIC` verdict on a drifting series is a lead, not a finding.
+
+### 5.1 The trap this fix shipped into first
+
+Worth reading before touching any spectral background estimate here,
+because the failure is silent and produces a *confident wrong answer*
+rather than a miss.
+
+A periodic component is itself strongly autocorrelated. So an AR model
+fitted to the raw series **models the tone**, and the filter then cancels
+the very signal the test exists to find. Measured on the first version:
+a bin-64 sinusoid at amplitude 2.0 over unit white noise came back
+`significant=True` at bin 27. Not a false negative — a false *location*.
+
+Three approaches were measured before one worked:
+
+| approach | white null | drifting null | tone survives |
+|---|---|---|---|
+| raw (the defect) | 0.046 | 0.526 | yes |
+| AR(p) on the raw series | 0.035 | **0.035** | **no — cancelled** |
+| normalise by a median-filtered local background | **0.156** | 0.309 | yes |
+| AR(p) on a locally-clipped periodogram | 0.046 | 0.102 | yes |
+
+The second row is the tempting one: it fixes the null *better* than what
+shipped. It is also the one that silently destroys the signal. The third
+fails the other way — dividing each ordinate by a noisy background
+estimate inflates the tail of the maximum, so the white-noise rate triples.
+The fourth uses the median filter only to *identify* which ordinates to
+clip out of the fit, and lets the smooth AR spectrum do the whitening; a
+tone survives at every amplitude tested (1.0 to 8.0), always at the
+correct bin.
+
+Clipping against a *global* median instead of a local one was also tried
+and fails a fourth way: a red background legitimately sits far above the
+global median, so the clip flattens the structure that needs modelling
+and the null barely moves (0.560 → 0.532).
+
+### 5.2 The cost, and why it does not bite the motivating case
+
+The filter attenuates what it flattens, so periodicity at very low
+frequency — a handful of cycles across the whole window — gets harder to
+see. That is the same confound the `peak_bin >= 2` gate already exists
+for, one bin further out.
+
+At moderate and high frequencies pre-whitening **gains** power, because
+removing the background is what lets a modest peak stand out. A
+corpus-sync artifact — the motivating hypothesis for the discovery-rate
+scan — has a period of order the sync interval and therefore a high bin.
+On a synthetic drift-plus-bin-51 series:
+
+| series | raw | pre-whitened |
+|---|---|---|
+| drift only | p = 3.1e-20, saved only by the bin gate | p = 1.00 |
+| drift + bin-51 sync | found at bin 51, p = 4.6e-62 | found at bin 51, p = **3.1e-69** |
+
+The drift-only row is the one to notice: on that draw the raw test
+produced a p-value of 3e-20 and was rescued purely by `peak_bin >= 2`.
+The gate was doing all the work, which is exactly why the item was filed.
+
+### 5.3 Two suspicions falsified, now pinned as tests
+
+Both are in `tests/test_regression_periodicity_null.py` so they are not
+re-proposed:
+
+- **Volatility clustering was never the problem.** GARCH(1,1) work with
+  no mean-level autocorrelation gives 0.044 against a 0.049 control, and
+  piecewise-constant variance gives 0.043. Variance clustering leaves the
+  ordinates exchangeable in expectation, so `garch.py`'s premise is *not*
+  in conflict with Fisher's g. It is mean-level rate drift only. This is
+  the plausible-and-wrong hypothesis worth recording: the tree has a
+  GARCH module, so it looks like it should be the explanation.
+- **Pure 1/f was already handled**, and not by the null: its peak
+  collapses into bin 1, which `peak_bin >= 2` rejects. Both 1/f and 1/f²
+  measure 0.000 raw.
+
+### 5.4 Falsification
+
+23 new tests, falsified two ways. Defaulting `prewhiten_series` to False
+fails 6 of them. Making the background fit peak-blind — removing the clip
+— fails exactly the 5 that guard §5.1. `prewhiten_series=False` is kept
+as a parameter for that reason: without a way to reproduce the raw
+periodogram, nothing in the suite distinguishes "the null was repaired"
+from "the test went blind".
+
+231 tests pass across the `detect_periodicity` consumers
+(`test_periodicity`, `test_quasiperiodicity`, `test_report`,
+`test_stats_reporter`, `test_berlekamp_massey`, the four
+`test_regression_bugreport_*`); ruff clean on the three touched files.
+
+### 5.5 Note for whoever does P3-T5
+
+P3-T5 wants a log-log slope over a Brownian-motion hypothesis. §5.1 is
+the same class of hazard one level over: an estimator fitted to a series
+that contains the thing being measured will absorb it. The distance
+trajectory will contain whatever directed-progress signal the item is
+looking for, so if any background or trend is removed before the slope is
+taken, check the peak-survival property first — measure that the fit does
+*not* absorb a synthetic signal of known strength before trusting any
+slope it produces.
