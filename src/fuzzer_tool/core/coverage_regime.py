@@ -1,7 +1,7 @@
 """Coverage regime detector: percolation phase classification for fuzzing.
 
 Combines CriticalSlowingDown (discovery-rate CSD), CoverageHomogeneityDetector
-(spatial clustering), AllanVariance (stall detection), and edge-delta tracking
+(spatial clustering), StructureFunctionDetector (stall detection), and edge-delta tracking
 into a single phase classifier.  Emits actionable regime labels to the main
 loop via a property; the loop does not embed strategy logic in the detector.
 
@@ -197,13 +197,13 @@ class CoverageRegimeDetector:
         self._regime_history: list[tuple[int, CoverageRegime]] = []
         self._stall_triggered: bool = False
         self._last_discovery_rate: float = 0.0
-        self._last_allan_delta: int = 0
+        self._last_structure_delta: int = 0
         self._last_exec_count: int = 0
 
     def observe(
         self,
         discovery_rate: float,
-        allan_delta: int,
+        structure_delta: int,
         homogeneity_result: dict | None,
         execs_since_edge: int,
         exec_count: int,
@@ -215,7 +215,7 @@ class CoverageRegimeDetector:
             discovery_rate: Edges per 1000 executions.  Used as a weak
                 subcritical signal when every other detector is silent and
                 the rate has collapsed near zero under a long stall window.
-            allan_delta: Edge count delta since last observation.  Stored for
+            structure_delta: Edge count delta since last observation.  Stored for
                 diagnostics; classification reads CSD's own window instead.
             homogeneity_result: Output of CoverageHomogeneityDetector.detect(),
                 or None when the detector is not configured.
@@ -237,7 +237,7 @@ class CoverageRegimeDetector:
         # the hole any sixth argument would fall into.  Store them explicitly
         # and only feed _classify what it actually reads.
         self._last_discovery_rate = discovery_rate
-        self._last_allan_delta = allan_delta
+        self._last_structure_delta = structure_delta
         self._last_exec_count = exec_count
         self._last_f0_plateau = f0_plateau
 

@@ -6,7 +6,7 @@ approach of self-contained statistical implementations (see ``edge_tracker.py``
 for the equivalent KS test pattern).
 
 This module is the canonical home of the chi-squared survival function
-(:func:`chi_squared_pvalue`); :func:`allan_variance.chi2_sf` delegates here.
+(:func:`chi_squared_pvalue`); :func:`structure_function.chi2_sf` delegates here.
 
 Reference
 ---------

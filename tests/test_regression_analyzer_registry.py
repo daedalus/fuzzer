@@ -23,7 +23,7 @@ _TARGET = str(Path(__file__).resolve().parent.parent / "targets" / "test_target"
 _ALWAYS_ON = {
     "crash_mi",
     "length_tracker",
-    "allan",
+    "structure_function",
     "discovery_uniformity",
     "sensitivity",
     "execution_time",
@@ -106,8 +106,8 @@ class TestUnconditionalAnalyzers:
         f = _build_fuzzer()
         assert type(f._crash_mi).__name__ == "CrashMITracker"
         assert type(f._length_tracker).__name__ == "LengthEdgeTracker"
-        assert type(f._allan).__name__ == "AllanVarianceDetector"
-        assert f._last_allan_edge_count == 0
+        assert type(f._structure_fn).__name__ == "StructureFunctionDetector"
+        assert f._last_structure_edge_count == 0
         assert type(f._discovery_uniformity).__name__ == "DiscoveryUniformityDetector"
         assert type(f._sensitivity).__name__ == "ByteSensitivityTracker"
         assert type(f._exec_time_tracker).__name__ == "ExecutionTimeTracker"
@@ -307,7 +307,7 @@ class TestWireAllReturnValue:
         assert activated["transfer_entropy"] is False
         assert activated["crash_mi"] is True
         assert activated["length_tracker"] is True
-        assert activated["allan"] is True
+        assert activated["structure_function"] is True
         assert activated["elo"] is True
         assert activated["distance"] is False
         assert activated["checksum_learner"] is True

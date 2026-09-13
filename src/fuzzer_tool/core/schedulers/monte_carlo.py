@@ -16,7 +16,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from fuzzer_tool.core.allan_variance import DispersionIndex
+from fuzzer_tool.core.structure_function import DispersionIndex
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.running_stats import (
@@ -1569,7 +1569,7 @@ class MonteCarloScheduler:
         general LU; that still beats the old route because it carries one
         right-hand side instead of n. scipy.linalg.cho_solve would be another
         ~9x on top (35 us against 317 us at n=155) but this project has no
-        scipy dependency on purpose -- see the note in core/allan_variance.py.
+        scipy dependency on purpose -- see the note in core/structure_function.py.
         """
         if n == 0:
             return None

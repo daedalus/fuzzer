@@ -3,7 +3,7 @@
 Stall recovery is a relay. Engaging costs ``--stall`` execs of silence;
 releasing used to cost one edge, so the hysteresis was asymmetric by the
 whole threshold and under bursty discovery -- the regime
-``AllanVarianceDetector.is_overdispersed`` exists to identify -- a single
+``StructureFunctionDetector.is_overdispersed`` exists to identify -- a single
 arrival from a burst ended recovery and the next quiet stretch re-engaged.
 
 These tests drive ``Fuzzer._stall_recovery_enter`` / ``_stall_recovery_exit``

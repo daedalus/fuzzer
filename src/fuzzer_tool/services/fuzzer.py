@@ -360,9 +360,9 @@ EXEC_BLOOM_CAPACITY = 500_000  # executed-input filter capacity before generatio
 EXEC_DEDUP_RETRIES = 3  # re-rolls of the mutation before executing a repeat anyway
 ELO_MATCH_WINDOW_MAX = 1_000  # max Elo match history entries
 META_STRATEGY_CHOICES_MAX = 1_000  # max meta-strategy choice history entries
-# ── Allan variance detector ───────────────────────────────────────────
-ALLAN_BUFFER_POW = 8  # 2^8 = 256 samples
-ALLAN_MIN_SAMPLES = 8  # minimum before noise_type() returns a result
+# ── Structure-function detector ───────────────────────────────────────────
+STRUCTURE_BUFFER_POW = 8  # 2^8 = 256 samples
+STRUCTURE_MIN_SAMPLES = 8  # minimum before noise_type() returns a result
 
 # ── Continuum diagnostics ─────────────────────────────────────────────
 # Stats ticks between co-occurrence graph rebuilds, and pairs kept per
@@ -2137,7 +2137,7 @@ class Fuzzer:
         self._trace_crashes_requested = trace_crashes
 
         # Crash MI tracker, length-edge tracker, transfer entropy, occupation,
-        # causal-sector, Allan variance, fluctuation tracking, execution-time
+        # causal-sector, structure function, fluctuation tracking, execution-time
         # tracking, frameshift, the coverage-regime cluster (csd /
         # coverage_homogeneity / garch / continuum / coverage_regime), format
         # learner, corpus PPMD compression, Elo, directed-distance, crash
@@ -2189,7 +2189,7 @@ class Fuzzer:
         # analyzer_registry.wire_all() above (csd, coverage_homogeneity,
         # garch, continuum, coverage_regime specs, in that dependency order).
 
-        # self._allan / self._last_allan_edge_count: constructed by
+        # self._structure_fn / self._last_structure_edge_count: constructed by
         # analyzer_registry.wire_all() above, alongside crash_mi,
         # length_tracker, transfer_entropy, and fluctuation.
 
@@ -5837,34 +5837,34 @@ class Fuzzer:
         to measure the rate (`entropy_flat is None`), fall back to the
         no-new-edges signal alone.
 
-        Allan variance confirmation: the noise type of the incremental edge
+        structure function confirmation: the noise type of the incremental edge
         discovery rate provides a leading indicator. White noise = normal
         exploration (skip stall). Flicker noise = correlated discoveries
         approaching saturation (reduce threshold). Random walk = integrated
         signal, likely genuine stall (bypass entropy gate).
 
-        Dispersion index override: complements Allan variance by resolving
+        Dispersion index override: complements structure function by resolving
         a blind spot — a buffer dominated by zeros (genuine stall) and a
         buffer with rare bursts of discoveries (bursty exploration) both
-        produce near-zero Allan deviation, but dispersion index D tells
+        produce near-zero structure-function deviation, but dispersion index D tells
         them apart: D › 1.5 = bursty (override stall), D « 0.3 = stall.
         """
         entropy_flat = self._compute_entropy_flat()
         if entropy_flat is False:
             return False
 
-        # Consult Allan variance detector for noise-type signal
-        noise = self._allan.noise_type()
-        allan_slope = self._allan.noise_slope()
-        dispersion = self._allan.dispersion()
+        # Consult Structure-function detector for noise-type signal
+        noise = self._structure_fn.noise_type()
+        structure_slope = self._structure_fn.noise_slope()
+        dispersion = self._structure_fn.dispersion()
 
         reason = "no new edges"
         if entropy_flat:
             reason += " + flat entropy"
         if noise != "unknown":
             reason += (
-                f" + {noise} noise (slope={allan_slope:+.2f})"
-                if allan_slope is not None
+                f" + {noise} noise (slope={structure_slope:+.2f})"
+                if structure_slope is not None
                 else f" + {noise} noise"
             )
         if dispersion is not None:
@@ -5882,9 +5882,9 @@ class Fuzzer:
 
         # Dispersion index override: a *significantly* overdispersed D
         # (chi-squared dispersion test, not a fixed cutoff — see
-        # AllanVarianceDetector.is_overdispersed) means clusters of
-        # discoveries with gaps — NOT a stall even if Allan says stalled.
-        if self._allan.is_overdispersed():
+        # StructureFunctionDetector.is_overdispersed) means clusters of
+        # discoveries with gaps — NOT a stall even if structure-function says stalled.
+        if self._structure_fn.is_overdispersed():
             return False
 
         # Noise-type gating and threshold adjustment
@@ -5905,12 +5905,12 @@ class Fuzzer:
             # Bypass entropy gate and use minimal threshold.
             # Significantly underdispersed D (chi-squared test) further
             # confirms stall — use the most aggressive threshold.
-            if self._allan.is_underdispersed():
+            if self._structure_fn.is_underdispersed():
                 effective_threshold = max(self._stall_threshold // 8, 25)
             else:
                 effective_threshold = max(self._stall_threshold // 4, 50)
 
-        # Without any detector signal (Allan unknown + entropy unknown),
+        # Without any detector signal (structure-function unknown + entropy unknown),
         # fall through to original behavior (trigger on no-new-edges alone).
         if noise not in ("fatiguing", "stalled", "unknown") and entropy_flat is None:
             return False
@@ -6991,10 +6991,10 @@ class Fuzzer:
                     if self._edge_tracker._global_edge_hits:
                         sh = self._edge_tracker.shannon_entropy_global()
                         self._record_entropy_sample(sh)
-                    # Feed incremental edge count to Allan variance detector
+                    # Feed incremental edge count to Structure-function detector
                     current_edges = self._edge_tracker.get_cumulative_edge_count()
-                    delta = current_edges - self._last_allan_edge_count
-                    self._allan.update(delta)
+                    delta = current_edges - self._last_structure_edge_count
+                    self._structure_fn.update(delta)
                     if self._garch is not None:
                         self._garch.update(delta)
                     self._discovery_uniformity.update(delta)
@@ -7005,7 +7005,7 @@ class Fuzzer:
                             verdict["p"],
                             verdict["n"],
                         )
-                    self._last_allan_edge_count = current_edges
+                    self._last_structure_edge_count = current_edges
                     # Feed per-column edge counts to CoverageHomogeneityDetector
                     if self.shm_cov and hasattr(self, "_homogeneity"):
                         log.debug("homogeneity: shm_cov present, observing col counts")
@@ -7062,7 +7062,7 @@ class Fuzzer:
                     f0_plateau = self._edge_tracker.f0_plateau()
                     self._regime.observe(
                         discovery_rate=self._stats.discovery_rate(),
-                        allan_delta=delta,
+                        structure_delta=delta,
                         homogeneity_result=homogeneity_result,
                         execs_since_edge=execs_since_edge,
                         exec_count=self.exec_count,

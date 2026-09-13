@@ -7,7 +7,7 @@ with ``omega > 0``, ``alpha, beta >= 0`` and ``alpha + beta < 1``.
 Where this sits
 ---------------
 ``core/critical_slowing.py`` reacts to variance that is *already* rising.
-``core/allan_variance.py`` classifies the noise type at several averaging
+``core/structure_function.py`` classifies the noise type at several averaging
 times.  Neither maintains an autoregressive model of the conditional
 variance process itself, so neither can say what the variance will be on the
 next tick.  This module supplies that one-step forecast plus a clustering
@@ -17,7 +17,7 @@ verdict, and nothing else: strategy stays in the callers, exactly as
 What it is fed, and why it matters
 ----------------------------------
 The input is the **non-overlapping per-tick edge delta** — the same value
-``services/fuzzer.py`` already hands to ``AllanVarianceDetector.update()``.
+``services/fuzzer.py`` already hands to ``StructureFunctionDetector.update()``.
 
 It is deliberately *not* ``services/stats_reporter.discovery_rate()``.  That
 function averages over a sliding window of the last five snapshots, so

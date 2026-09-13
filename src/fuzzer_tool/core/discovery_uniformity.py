@@ -3,7 +3,7 @@
 Where this sits
 ----------------
 ``garch.py`` fits an ARCH(1,1) conditional-variance model.
-``allan_variance.py`` classifies the noise type at several averaging times.
+``structure_function.py`` classifies the noise type at several averaging times.
 ``critical_slowing.py`` watches for rising variance/autocorrelation before a
 regime shift. All three assume a specific parametric shape for what
 "normal" looks like, and score deviations from *that* shape.

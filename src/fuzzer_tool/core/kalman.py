@@ -8,7 +8,7 @@ These are used by the fuzzer for three specific applications:
   1. **Adaptive network settle time** — 1D KF over target processing
      latency, replacing the hardcoded ``net_settle_ms`` guess.
   2. **Denoised discovery rate** — 2D KF upstream of
-     :class:`CriticalSlowingDown` / :class:`AllanVarianceDetector`,
+     :class:`CriticalSlowingDown` / :class:`StructureFunctionDetector`,
      providing a causal, single-pass smoothed rate with uncertainty.
   3. **Execs/sec estimation** — 2D KF over EPS with irregular-time
      handling, used for ETA, dictionary-cap tuning, and budget allocation.

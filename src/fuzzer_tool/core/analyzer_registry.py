@@ -3,7 +3,7 @@
 Mirrors ``core.operator_registry`` (the mutation-operator dispatcher) but for
 the fuzzer's detector/estimator components -- transfer entropy, crash-outcome
 mutual information, length/edge correlation, work-functional fluctuation
-tracking, Allan-variance stall detection, and so on. Historically each of
+tracking, structure-function stall detection, and so on. Historically each of
 these was wired ad hoc, inline in ``Fuzzer.__init__``: a local ``from
 fuzzer_tool.core.<x> import <Y>`` import, construction, an optional
 state-store restore, and an optional log line, repeated with slightly
@@ -35,7 +35,7 @@ does, that analyzer belongs in this registry instead.
 
 Migration status: complete. All ~20 analyzer/detector components previously
 wired inline in Fuzzer.__init__ are registered here -- fluctuation,
-transfer_entropy, crash_mi, length_tracker, allan, sensitivity,
+transfer_entropy, crash_mi, length_tracker, structure_function, sensitivity,
 execution_time, exec_time_anomaly, frameshift, format_learner,
 corpus_compression, elo, distance, trace, checksum_learner, csd,
 coverage_homogeneity, garch, continuum, coverage_regime. The one deliberate
@@ -51,7 +51,7 @@ docs/handover/handover_RoRd.md. A third, `discovery_uniformity`
 (core.discovery_uniformity.DiscoveryUniformityDetector), is the
 nonparametric member of the regime_detection family: a rolling Poisson
 index-of-dispersion test of per-tick discovery counts, sitting next
-to `garch`/`allan`/`csd` without sharing any of their parametric noise-model
+to `garch`/`structure_function`/`csd` without sharing any of their parametric noise-model
 assumptions.
 construction site to migrate. See
 docs/handover/handover_analyzer_registry_2026-09-07.md for the full
@@ -308,25 +308,25 @@ REGISTRY.register(
 )
 
 
-def _activate_allan(f: FuzzerLike) -> None:
+def _activate_structure_function(f: FuzzerLike) -> None:
     # Local import of the fuzzer module (not a top-level import) to avoid
     # the circular import that a top-level one would create: services.fuzzer
     # imports this registry module at load time.
-    from fuzzer_tool.core.allan_variance import AllanVarianceDetector
+    from fuzzer_tool.core.structure_function import StructureFunctionDetector
     from fuzzer_tool.services import fuzzer as _fuzzer_mod
 
-    f._allan = AllanVarianceDetector(
-        max_buffer_pow=_fuzzer_mod.ALLAN_BUFFER_POW,
-        min_samples=_fuzzer_mod.ALLAN_MIN_SAMPLES,
+    f._structure_fn = StructureFunctionDetector(
+        max_buffer_pow=_fuzzer_mod.STRUCTURE_BUFFER_POW,
+        min_samples=_fuzzer_mod.STRUCTURE_MIN_SAMPLES,
     )
-    f._last_allan_edge_count = 0
+    f._last_structure_edge_count = 0
 
 
 REGISTRY.register(
     AnalyzerSpec(
-        name="allan",
+        name="structure_function",
         category="regime_detection",
-        activate=_activate_allan,
+        activate=_activate_structure_function,
     )
 )
 

@@ -5,7 +5,7 @@
     f._temperature = max(0.1, 1.0 - f.exec_count / f._anneal_budget)
 
 That is pure feed-forward. Every discovery-rate estimator in the tree
-(``RobustKF``, ``AllanVarianceDetector``, ``DispersionIndex``,
+(``RobustKF``, ``StructureFunctionDetector``, ``DispersionIndex``,
 ``CriticalSlowingDown``, ``coverage_growth_model``) feeds a *detector*; none
 feeds an *actuator*. This module closes that loop: the clock schedule stays
 as the feed-forward term and a PI correction is added on top.

@@ -5,19 +5,20 @@ variation / variogram) of the incremental edge-discovery rate:
 
   S(τ) = ⟨(x[i+τ] - x[i])²⟩ / 2
 
-Historically this was labelled "Allan variance". The true Allan variance is a
-first difference of *block averages* (equivalently a second difference of the
-cumulative series). The two estimators have different noise-type signatures;
-the structure function cannot separate white from flicker (1/f) noise. The
-name and header formula are therefore corrected here; the estimator itself is
-kept because recalibrating the fatigue threshold against the stationary 1/f
-null is cheaper than introducing a new default-on stall path.
+Historically this module was labelled "Allan variance". The true Allan
+variance is a first difference of *block averages* (equivalently a second
+difference of the cumulative series). The two estimators have different
+noise-type signatures; the structure function cannot separate white from
+flicker (1/f) noise. The module, class, and method names are therefore
+renamed to match what is actually computed; the estimator itself is kept
+because recalibrating the fatigue threshold against the stationary 1/f null
+is cheaper than introducing a new default-on stall path.
 
 Classification (tailored to edge-discovery-rate signals):
 
-  - **Active** (healthy random exploration):  adev(2) > 0.5, slope < fatigue
-  - **Fatiguing** (approaching saturation):   adev(2) > 0.01, slope ≥ fatigue
-  - **Stalled** (effectively zero discovery): adev(2) ≤ 0.01
+  - **Active** (healthy random exploration):  sdev(2) > 0.5, slope < fatigue
+  - **Fatiguing** (approaching saturation):   sdev(2) > 0.01, slope ≥ fatigue
+  - **Stalled** (effectively zero discovery): sdev(2) ≤ 0.01
 
 The fatigue slope threshold is set with explicit margin against stationary
 long-memory (1/f) processes, which produce mean slopes ≈ 0.105 under the
@@ -54,8 +55,8 @@ from fuzzer_tool.core.running_stats import RunningMoments
 # processes produce mean slope ≈ 0.105 under this estimator (false-positive
 # rate 0.593 at the old threshold). 0.25 leaves margin against beta≤1.0
 # while still catching clear downward trends (linear decay, random-walk).
-_ADEV_ACTIVE_THRESHOLD = 0.5  # adev(2) above this → signal has meaningful variance
-_ADEV_STALL_THRESHOLD = 0.01  # adev(2) below this → signal is effectively constant
+_SDEV_ACTIVE_THRESHOLD = 0.5  # sdev(2) above this → signal has meaningful variance
+_SDEV_STALL_THRESHOLD = 0.01  # sdev(2) below this → signal is effectively constant
 _FATIGUE_SLOPE_THRESHOLD = 0.25  # slope above this → variance grows with averaging
 
 # Default significance level for the chi-squared dispersion test.
@@ -70,7 +71,7 @@ _DISPERSION_ALPHA = 0.05
 # The survival function is canonical in core/chi_squared.py;
 # chi2_sf delegates there, keeping only the k<=0 ValueError contract.
 # Verified against reference chi-squared critical values in
-# tests/test_allan_variance.py.
+# tests/test_structure_function.py.
 # ---------------------------------------------------------------------------
 
 
@@ -94,11 +95,11 @@ def chi2_cdf(x: float, k: int) -> float:
     return 1.0 - chi2_sf(x, k)
 
 
-class AllanVarianceDetector:
-    """Overlapping Allan deviation detector for fuzzing stall analysis.
+class StructureFunctionDetector:
+    """Structure-function deviation detector for fuzzing stall analysis.
 
     Maintains a fixed-size buffer of incremental edge counts and computes the
-    overlapping Allan deviation at power-of-two averaging times. Classification
+    overlapping Structure-function deviation at power-of-two averaging times. Classification
     is tailored to edge-discovery-rate signals, not generic noise theory.
 
     Args:
@@ -121,7 +122,7 @@ class AllanVarianceDetector:
         self._buf.append(value)
         self._disp.update(value)
 
-    def adev(self, tau: int) -> float:
+    def sdev(self, tau: int) -> float:
         """Structure-function deviation (normalised quadratic variation) at lag *tau*.
 
         S(τ) = sqrt( 0.5 * mean_i (x[i+τ] - x[i])² )
@@ -146,11 +147,11 @@ class AllanVarianceDetector:
         Returns one of: ``"active"``, ``"fatiguing"``, ``"stalled"``,
         ``"unknown"``.
 
-        - ``active``: adev(2) > threshold and slope < fatigue threshold.
+        - ``active``: sdev(2) > threshold and slope < fatigue threshold.
           Normal random exploration — variance is stationary.
-        - ``fatiguing``: adev(2) > stall threshold and slope >= fatigue
+        - ``fatiguing``: sdev(2) > stall threshold and slope >= fatigue
           threshold. Discovery rate is trending downward — approaching stall.
-        - ``stalled``: adev(2) <= stall threshold. The signal is effectively
+        - ``stalled``: sdev(2) <= stall threshold. The signal is effectively
           constant — no new edges are being discovered.
         - ``unknown``: insufficient samples for a classification.
         """
@@ -158,12 +159,12 @@ class AllanVarianceDetector:
         if n < self._min_samples:
             return "unknown"
 
-        dev2 = self.adev(2)
+        dev2 = self.sdev(2)
         if not math.isfinite(dev2):
             return "unknown"
 
         # Near-zero variance → stalled
-        if dev2 <= _ADEV_STALL_THRESHOLD:
+        if dev2 <= _SDEV_STALL_THRESHOLD:
             return "stalled"
 
         # Compute log-log slope from larger tau values (weighted OLS).
@@ -176,17 +177,17 @@ class AllanVarianceDetector:
         points: list[tuple[float, float, float]] = []  # (log_tau, log_dev, weight)
         for p in range(2, max_pow + 1):  # start from tau=4 to avoid tau-2 noise
             tau = 2**p
-            dev = self.adev(tau)
+            dev = self.sdev(tau)
             if math.isfinite(dev) and dev > 0:
                 w = (n - tau) / float(tau)
                 points.append((math.log(tau), math.log(dev), w))
 
         if len(points) < 2:
-            return "active" if dev2 > _ADEV_ACTIVE_THRESHOLD else "fatiguing"
+            return "active" if dev2 > _SDEV_ACTIVE_THRESHOLD else "fatiguing"
 
         slope = self._weighted_slope(points)
         if slope is None:
-            return "active" if dev2 > _ADEV_ACTIVE_THRESHOLD else "fatiguing"
+            return "active" if dev2 > _SDEV_ACTIVE_THRESHOLD else "fatiguing"
 
         if slope >= _FATIGUE_SLOPE_THRESHOLD:
             return "fatiguing"
@@ -207,7 +208,7 @@ class AllanVarianceDetector:
         points: list[tuple[float, float, float]] = []
         for p in range(2, max_pow + 1):
             tau = 2**p
-            dev = self.adev(tau)
+            dev = self.sdev(tau)
             if math.isfinite(dev) and dev > 0:
                 w = (n - tau) / float(tau)
                 points.append((math.log(tau), math.log(dev), w))
@@ -356,7 +357,7 @@ class DispersionIndex:
 
     def dispersion_pvalue(self) -> float | None:
         """One-sided upper-tail p-value of the current D under the Poisson
-        dispersion test. See :meth:`AllanVarianceDetector.dispersion_pvalue`
+        dispersion test. See :meth:`StructureFunctionDetector.dispersion_pvalue`
         for the underlying test. Returns None if :attr:`value` is None.
         """
         n = self._moments.count
