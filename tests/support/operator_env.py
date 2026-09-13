@@ -44,6 +44,8 @@ BALLOT_SCHEDULERS = (
     "kl_swucb",
     "mopt",
     "moss",
+    "op_katz",
+    "op_tang",
     "replicator",
     "round_robin",
     "swucb",

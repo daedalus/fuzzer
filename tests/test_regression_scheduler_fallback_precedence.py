@@ -131,11 +131,14 @@ class _FakeFuzzer:
         "moss": ("_use_moss", "_moss"),
         "fpl": ("_use_fpl", "_fpl"),
         "round_robin": ("_use_round_robin", "_round_robin"),
-        # canary is deliberately absent from _FALLBACK_PRECEDENCE (see
-        # operators.py) -- it still needs an entry here so
-        # operator_strategy_pool()'s attribute read doesn't crash, but
-        # `enable("canary")` is never exercised by the precedence tests.
+        # canary, op_katz, op_tang are deliberately absent from
+        # _FALLBACK_PRECEDENCE (see operators.py) -- they still need
+        # entries here so operator_strategy_pool()'s attribute read
+        # doesn't crash, but `enable(...)` for them is never exercised by
+        # the precedence tests.
         "canary": ("_use_canary", "_canary"),
+        "op_katz": ("_use_op_katz", "_op_katz"),
+        "op_tang": ("_use_op_tang", "_op_tang"),
     }
 
     def __init__(self):

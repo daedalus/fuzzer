@@ -885,6 +885,11 @@ class Fuzzer:
         cusum_ucb_xi=0.6,
         fpl=False,
         fpl_epsilon=1.0,
+        op_katz=False,
+        op_katz_alpha_fraction=0.85,
+        op_tang=False,
+        op_tang_rank=10,
+        op_tang_refit_interval=2000,
         consolidated=False,
         moss=False,
         moss_gamma=1.0,
@@ -2023,6 +2028,36 @@ class Fuzzer:
         if fpl:
             self._fpl = FPLScheduler(epsilon=fpl_epsilon, rng=self._rng)
             log.info("FPL enabled (epsilon=%.2f)", fpl_epsilon)
+
+        # Katz centrality over the operator discovery-transition graph.
+        # Off by default: see core/schedulers/op_katz.py's module docstring
+        # for the empirical caveat before enabling this on a real campaign.
+        self._use_op_katz = op_katz
+        self._op_katz = None
+        if op_katz:
+            from fuzzer_tool.core.schedulers.op_katz import OpKatzScheduler
+
+            self._op_katz = OpKatzScheduler(
+                rng=self._rng, alpha_fraction=op_katz_alpha_fraction
+            )
+            log.info("op_katz enabled (alpha_fraction=%.2f)", op_katz_alpha_fraction)
+
+        # Tang's low-rank recommender over the operator x edge matrix. Off
+        # by default: see core/op_edge_tracker.py's module docstring for
+        # the empirical caveat before enabling this on a real campaign.
+        self._use_op_tang = op_tang
+        self._op_tang = None
+        if op_tang:
+            from fuzzer_tool.core.schedulers.op_tang import OpTangScheduler
+
+            self._op_tang = OpTangScheduler(
+                rng=self._rng, rank=op_tang_rank, refit_interval=op_tang_refit_interval
+            )
+            log.info(
+                "op_tang enabled (rank=%d, refit_interval=%d)",
+                op_tang_rank,
+                op_tang_refit_interval,
+            )
 
         # Consolidated: flat Thompson with a category-shrunk prior and capped
         # evidence -- the single learner meant to replace the Elo portfolio
@@ -4599,6 +4634,22 @@ class Fuzzer:
                             self._ro_rd_edge_counts[orientation] = (
                                 self._ro_rd_edge_counts.get(orientation, 0.0) + share
                             )
+                        # op_tang: attribute the actual new edge ids (not
+                        # just a scalar share) to every contributing op --
+                        # duplication across ops is fine, Tang's math
+                        # doesn't require exclusive ownership. Kept at this
+                        # call site (rather than the shared op_rewards loop
+                        # below) because Tang needs the edge identities
+                        # themselves, which only exist here; op_katz only
+                        # needs a success flag, so it's fed from the
+                        # canonical op_rewards loop instead, alongside
+                        # replicator/exp3/etc, so it gets the same
+                        # effective-op-filtered success signal they do
+                        # rather than a locally-reinvented one.
+                        if self._op_tang is not None:
+                            for op in unique_ops:
+                                self._op_tang.observe_new_edges(op, new)
+                            self._op_tang.maybe_refit(self.exec_count)
                     # Separate counter for cmplog-involved edge discoveries
                     # (cumulative with the op attribution above — cmplog is a
                     #  signal source, not a mutation op, so it can overlap).
@@ -4845,6 +4896,8 @@ class Fuzzer:
             self._consolidated,
             self._moss,
             self._canary,
+            self._op_katz,
+            self._op_tang,
         ):
             if scheduler is None:
                 continue

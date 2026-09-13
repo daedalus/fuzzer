@@ -461,10 +461,11 @@ _FALLBACK_PRECEDENCE = (
     "moss",
     "fpl",
     "round_robin",
-    # canary is deliberately absent here: it exists to be argued into last
-    # place by Elo, not to ever be the live selector when Elo is off. If it
-    # were added to this precedence chain, enabling --canary-scheduler
-    # without --elo would make it select every operator outright.
+    # canary, op_katz, op_tang are deliberately absent here: op_katz/op_tang
+    # are unproven exploratory arms (see their module docstrings) that
+    # should only ever be reached via Elo explicitly choosing them, not by
+    # being the top-precedence live selector whenever someone enables the
+    # flag without --elo -- the same reasoning canary already documents.
 )
 
 
@@ -542,6 +543,10 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("round_robin")
     if f._use_canary and f._canary:
         available.append("canary")
+    if f._use_op_katz and f._op_katz:
+        available.append("op_katz")
+    if f._use_op_tang and f._op_tang:
+        available.append("op_tang")
     return available
 
 
@@ -4252,6 +4257,12 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "canary" and f._canary:
             op = f._canary.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "op_katz" and f._op_katz:
+            op = f._op_katz.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "op_tang" and f._op_tang:
+            op = f._op_tang.select_op(ops)
             f._last_mopt_particles.append(None)
         else:
             op = self.ctx._rng.choice(ops)

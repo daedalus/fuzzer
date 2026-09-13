@@ -480,6 +480,11 @@ def cmd_fuzz(args):
             cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
             fpl=getattr(args, "fpl", False),
             fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
+            op_katz=getattr(args, "op_katz", False),
+            op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
+            op_tang=getattr(args, "op_tang", False),
+            op_tang_rank=getattr(args, "op_tang_rank", 10),
+            op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
             consolidated=getattr(args, "consolidated", False),
             moss=getattr(args, "moss", False),
             moss_gamma=getattr(args, "moss_gamma", 1.0),
@@ -692,6 +697,11 @@ def cmd_fuzz(args):
         cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
         fpl=getattr(args, "fpl", False),
         fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
+        op_katz=getattr(args, "op_katz", False),
+        op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
+        op_tang=getattr(args, "op_tang", False),
+        op_tang_rank=getattr(args, "op_tang_rank", 10),
+        op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
         consolidated=getattr(args, "consolidated", False),
         moss=getattr(args, "moss", False),
         moss_gamma=getattr(args, "moss_gamma", 1.0),
@@ -1794,6 +1804,8 @@ _HAIL_MARY_FLAGS = (
     "qea_cooling",
     "boltzmann",
     "tang",
+    "op_katz",
+    "op_tang",
     "ecofuzz",
     "metropolis",
     "auto_timeout",
@@ -2318,6 +2330,47 @@ def main() -> int:
         type=float,
         default=1.0,
         help="FPL perturbation scale; higher = more exploration (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--op-katz",
+        action="store_true",
+        help=(
+            "Enable Katz centrality over the operator discovery-transition "
+            "graph (experimental, off by default -- see "
+            "core/schedulers/op_katz.py for the empirical caveat before "
+            "using this on a real campaign)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-katz-alpha-fraction",
+        type=float,
+        default=0.85,
+        help=(
+            "Fraction of 1/spectral_radius(A) to use as Katz's alpha "
+            "(default: 0.85)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-tang",
+        action="store_true",
+        help=(
+            "Enable Tang's low-rank recommender over the operator x edge "
+            "matrix (experimental, off by default -- see "
+            "core/op_edge_tracker.py for the empirical caveat before "
+            "using this on a real campaign)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-tang-rank",
+        type=int,
+        default=10,
+        help="op_tang low-rank approximation rank (default: 10)",
+    )
+    fuzz_parser.add_argument(
+        "--op-tang-refit-interval",
+        type=int,
+        default=2000,
+        help="Executions between op_tang basis refits (default: 2000)",
     )
     fuzz_parser.add_argument(
         "--consolidated",
