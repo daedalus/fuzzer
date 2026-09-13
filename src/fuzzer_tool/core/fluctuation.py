@@ -18,6 +18,16 @@ class TrajectoryRecord:
     state_key: str = ""
     hit_edges: frozenset[int] = field(default_factory=frozenset)
     new_edges: int = 0
+    probs_are_true: bool = False
+    """Whether ``probs`` are genuine normalised selection probabilities.
+
+    The Rényi identity in :class:`WorkFunctional` holds only when the
+    trajectory was drawn from the very distribution recorded in ``probs``.
+    A caller that cannot supply that distribution must leave this False;
+    the work value is then not a path log-probability and is not pooled.
+    Default False so a caller has to assert the property, not forget to
+    deny it.
+    """
 
 
 class WorkFunctional:
@@ -34,10 +44,14 @@ class WorkFunctional:
     not a free-energy difference and there is no fluctuation–dissipation
     relation to exploit (β here is an entropy order, not a temperature).
 
-    Probability sources are delegated to the caller.  When the caller
-    cannot supply true selection probabilities the work collapses to
-    L·log(L) (uniform over the trajectory itself) — that degeneracy is
-    a call-site defect, not a property of this module.
+    The identity holds only if the trajectory was drawn from the same
+    ``p_i`` that are recorded.  Callers assert that with
+    ``TrajectoryRecord.probs_are_true``; records without it are counted
+    but never pooled, so the estimator returns None rather than a number
+    that looks like an entropy and is not one.  Deterministic (argmax)
+    schedulers have no selection distribution at all, so most of this
+    tree's schedulers cannot supply one — see the call site in
+    ``services/fuzzer.py::_record_fluctuation_observation``.
     """
 
     def __init__(self, beta: float = 1.0, window: int = 1000) -> None:
@@ -47,6 +61,7 @@ class WorkFunctional:
         self._last_work: float = 0.0
         self._last_state_key: str = ""
         self._last_outcome: str = ""
+        self._unpooled: int = 0
 
     @staticmethod
     def state_key(record: TrajectoryRecord) -> str:
@@ -63,7 +78,17 @@ class WorkFunctional:
                 return f"e_{xxhash.xxh3_64_intdigest(data):x}"
             return f"e_{hashlib.sha256(data).hexdigest()[:16]}"
         if record.ops:
-            return f"o_{hash(tuple(record.ops)):x}"
+            # Not the builtin hash(): PYTHONHASHSEED salts str hashing per
+            # process, so the same trajectory keyed differently on every run
+            # and any state restored from disk was orphaned under a key this
+            # process can no longer produce. Same defect class as the LSH
+            # banding that was removed from crash clustering.
+            data = "\x00".join(record.ops).encode("utf-8", "surrogatepass")
+            try:
+                import xxhash
+            except ImportError:
+                return f"o_{hashlib.sha256(data).hexdigest()[:16]}"
+            return f"o_{xxhash.xxh3_64_intdigest(data):016x}"
         return "_"
 
     def _append(self, state_key: str, work: float) -> None:
@@ -90,7 +115,14 @@ class WorkFunctional:
             probs = tuple(max(p, _EPS) for p in record.probs)
         work = sum(self._step_work(p) for p in probs)
         state_key = record.state_key or self.state_key(record)
-        self._append(state_key, work)
+        if record.probs_are_true:
+            self._append(state_key, work)
+        else:
+            # Counted, not pooled. Pooling would make jarzynski_estimator
+            # return a number with the shape of an entropy and none of its
+            # meaning -- which is what the uniform fallback above produces:
+            # W = L*log(L), a function of trajectory length alone.
+            self._unpooled += 1
         self._last_work = work
         self._last_state_key = state_key
         self._last_outcome = record.outcome
@@ -116,32 +148,10 @@ class WorkFunctional:
             return None
         return -math.log(mean_exp) / max(self.beta, _EPS)
 
-    def crooks_forward_reverse(self, state_a: str, state_b: str) -> dict:
-        """Ratio of mean works between two state buffers.
-
-        This is *not* Crooks' theorem: there is no reverse protocol, no
-        matched-W density ratio, and no crossing at ΔF.  Retained only as a
-        diagnostic of work-distribution shift between two arbitrary keys.
-        """
-        fwd = self._states.get(state_a, [])
-        rev = self._states.get(state_b, [])
-        if not fwd or not rev:
-            return {"forward": len(fwd), "reverse": len(rev), "ratio": None}
-        fwd_mean = sum(fwd) / len(fwd)
-        rev_mean = sum(rev) / len(rev)
-        ratio = None if fwd_mean <= _EPS or rev_mean <= _EPS else rev_mean / fwd_mean
-        return {
-            "forward": len(fwd),
-            "reverse": len(rev),
-            "forward_mean_work": fwd_mean,
-            "reverse_mean_work": rev_mean,
-            "ratio": ratio,
-        }
-
     def stats(self, state_key: str) -> dict:
         buf = self._states.get(state_key, [])
         if not buf:
-            return {"samples": 0}
+            return {"samples": 0, "unpooled": self._unpooled}
         est = self.jarzynski_estimator(state_key)
         return {
             "samples": len(buf),
@@ -150,6 +160,7 @@ class WorkFunctional:
             # Historical key name; value is Rényi entropy H_{1+β}.
             "jarzynski_delta_f": est,
             "renyi_entropy": est,
+            "unpooled": self._unpooled,
         }
 
     def snapshot(self) -> dict:
@@ -159,6 +170,7 @@ class WorkFunctional:
             "last_work": self._last_work,
             "last_state_key": self._last_state_key,
             "last_outcome": self._last_outcome,
+            "unpooled": self._unpooled,
             "states": {k: v[:] for k, v in self._states.items()},
         }
 
@@ -168,4 +180,5 @@ class WorkFunctional:
         self._last_work = float(data.get("last_work", 0.0))
         self._last_state_key = str(data.get("last_state_key", ""))
         self._last_outcome = str(data.get("last_outcome", ""))
+        self._unpooled = int(data.get("unpooled", 0))
         self._states = {str(k): list(v) for k, v in data.get("states", {}).items()}

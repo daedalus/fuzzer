@@ -56,6 +56,17 @@ class Exp3Scheduler:
             if self._max_relative < 1.0:
                 self._max_relative = 1.0
 
+    def last_selection_probs(self) -> dict[str, float]:
+        """The mixture this scheduler last sampled from, normalised to 1.
+
+        Exposed for the work functional in ``core/fluctuation.py``, whose
+        Rényi identity needs the actual law the trajectory was drawn from.
+        EXP3 is the scheduler that can answer: it already retains this
+        mixture for its own importance-weighted estimator. Deterministic
+        argmax schedulers have no such law and must not synthesise one.
+        """
+        return dict(self._last_probs)
+
     def select_op(self, ops: list[str]) -> str:
         """Select operator via EXP3 mixture distribution."""
         if not ops:

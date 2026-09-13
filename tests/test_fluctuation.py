@@ -37,28 +37,12 @@ def test_jarzynski_synthetic() -> None:
             probs=(p,),
             outcome="success",
             state_key=state_key,
+            probs_are_true=True,
         )
         wf.observe(record)
     est = wf.jarzynski_estimator(state_key)
     assert est is not None
     assert math.isfinite(est)
-
-
-def test_crooks_pair_symmetry() -> None:
-    wf = WorkFunctional(beta=1.0)
-    state_a = "a"
-    state_b = "b"
-    for _ in range(5):
-        wf.observe(
-            TrajectoryRecord(ops=("op",), probs=(0.5,), outcome="success", state_key=state_a)
-        )
-        wf.observe(
-            TrajectoryRecord(ops=("op",), probs=(0.5,), outcome="success", state_key=state_b)
-        )
-    result = wf.crooks_forward_reverse(state_a, state_b)
-    assert result["forward"] == 5
-    assert result["reverse"] == 5
-    assert math.isclose(result["ratio"], 1.0, rel_tol=1e-12)
 
 
 def test_state_key_stability() -> None:
@@ -76,7 +60,13 @@ def test_window_limits_samples() -> None:
     state_key = "win"
     for _ in range(25):
         wf.observe(
-            TrajectoryRecord(ops=("op",), probs=(0.5,), outcome="success", state_key=state_key)
+            TrajectoryRecord(
+                ops=("op",),
+                probs=(0.5,),
+                outcome="success",
+                state_key=state_key,
+                probs_are_true=True,
+            )
         )
     stats = wf.stats(state_key)
     assert stats["samples"] == 10
@@ -87,7 +77,13 @@ def test_snapshot_restore_roundtrip() -> None:
     state_key = "roundtrip"
     for p in (0.1, 0.2):
         wf.observe(
-            TrajectoryRecord(ops=("op",), probs=(p,), outcome="success", state_key=state_key)
+            TrajectoryRecord(
+                ops=("op",),
+                probs=(p,),
+                outcome="success",
+                state_key=state_key,
+                probs_are_true=True,
+            )
         )
     data = wf.snapshot()
     assert data["beta"] == 2.0

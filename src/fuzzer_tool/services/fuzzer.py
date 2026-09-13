@@ -567,6 +567,13 @@ def _detect_ubsan(target_path: str) -> bool:
     return False
 
 
+# Attributes on Fuzzer whose scheduler may expose last_selection_probs().
+# Every name here must be a real attribute -- asserted by
+# tests/test_regression_fluctuation_probs.py. A name that is not silently
+# disables the feature instead of failing, which is how W = L*log(L) shipped.
+_SELECTION_PROB_SOURCES: tuple[str, ...] = ("_exp3",)
+
+
 class Fuzzer:
     def _warn_no_coverage(self) -> None:
         """Warn that an in-process target is running without coverage.
@@ -3025,62 +3032,71 @@ class Fuzzer:
     def _load_state(self):
         return self._corpus_manager.load_state()
 
-    def _op_probability(self, op: str, available: list[str]) -> float:
-        """Return a normalized selection probability for *op*.
+    def _selection_distribution(self) -> dict[str, float] | None:
+        """Return the active scheduler's last normalised selection distribution.
 
-        Reads from the active scheduler when possible; falls back to uniform
-        over the available operator list so the work functional is always
-        defined.
+        Returns None when the scheduler has none to give. That is the common
+        case and not a failure: the UCB family selects by deterministic argmax,
+        so there is no distribution to report, and a fabricated uniform one
+        would make the work functional a function of trajectory length alone
+        (W = L*log(L)) while still being labelled an entropy.
+
+        A scheduler opts in by exposing ``last_selection_probs()`` returning a
+        mapping over the operators it was offered, normalised to 1. ``exp3`` is
+        the one that does today -- it already keeps that mixture for its own
+        importance-weighted estimator.
         """
-        if available:
-            if self.mc and self.mc_bandit:
-                stats = self.mc.bandit_stats()
-                if op in stats:
-                    a, b = stats[op]
-                    return max((a + 1.0) / (a + b + 2.0), 1e-12)
-            if (
-                self._mopt
-                and getattr(self, "_meta_strategy", None) == "mopt"
-                and op in getattr(self._mopt, "particles", {})
-            ):
-                return max(1.0 / max(len(available), 1), 1e-12)
-            if (
-                self._use_elo
-                and self._elo
-                and self._meta_strategy
-                in {
-                    *_OPERATOR_STRATEGY_NAMES,
-                    *_SEED_STRATEGY_NAMES,
-                }
-            ):
-                try:
-                    ranking = self._elo.get_strategy_ranking()
-                    top = next((name for name, _ in ranking), None)
-                except Exception:
-                    top = None
-                if top == self._meta_strategy and len(available) > 1:
-                    return max(1.0 / len(available), 1e-12)
-        return max(1.0 / max(len(available), 1), 1e-12)
+        for attr in _SELECTION_PROB_SOURCES:
+            sched = getattr(self, attr, None)
+            getter = getattr(sched, "last_selection_probs", None)
+            if getter is None:
+                continue
+            try:
+                probs = getter()
+            except Exception:
+                continue
+            if not probs:
+                continue
+            total = sum(probs.values())
+            if total <= 0 or not math.isfinite(total):
+                continue
+            # Normalise defensively: the identity needs a probability vector,
+            # and a scheduler that drifts off 1.0 would bias the estimate
+            # silently rather than loudly.
+            return {k: v / total for k, v in probs.items()}
+        return None
 
     def _record_fluctuation_observation(self, outcome: str, hit_edges: set[int]) -> None:
         """Ingest the current round's operator trajectory into the fluctuation tracker."""
         f = self._fluctuation
         if f is None or not self._last_ops_used:
             return
-        available = (
-            list(self._operators._available)
-            if hasattr(self._operators, "_available")
-            else list(self._last_ops_used)
-        )
-        probs = tuple(self._op_probability(op, available) for op in self._last_ops_used)
+        # `self._operators._available` used to be consulted here. It is not an
+        # attribute of the operators service and never was, so the hasattr
+        # guard always fell through to the trajectory itself, every step got
+        # probability 1/L, and the recorded work was exactly L*log(L) -- a
+        # function of the mutation-stack depth carrying no operator, scheduler
+        # or coverage information. Measured on a live run: 5,697 samples, 7
+        # distinct values, all n*log(n). See the thermo handover, P2-T4.
+        dist = self._selection_distribution()
+        ops = tuple(self._last_ops_used)
+        if dist is None:
+            probs = tuple(1.0 / max(len(ops), 1) for _ in ops)
+            probs_are_true = False
+        else:
+            probs = tuple(dist.get(op, 0.0) for op in ops)
+            # A missing operator means the distribution does not cover the
+            # trajectory, so it is not the law the trajectory was drawn from.
+            probs_are_true = all(p > 0.0 for p in probs)
         from fuzzer_tool.core.fluctuation import TrajectoryRecord
 
         record = TrajectoryRecord(
-            ops=tuple(self._last_ops_used),
+            ops=ops,
             probs=probs,
             outcome=outcome,
             hit_edges=frozenset(hit_edges),
             new_edges=self._last_new_edge_count,
+            probs_are_true=probs_are_true,
         )
         f.observe(record)
 

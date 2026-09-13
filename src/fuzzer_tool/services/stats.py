@@ -1170,8 +1170,16 @@ class StatsReporter:
             try:
                 stats = f._fluctuation.stats(f._fluctuation._last_state_key)
                 parts = [f"W={stats.get('last_work', 0):.2f}", f"n={stats.get('samples', 0)}"]
-                if stats.get("jarzynski_delta_f") is not None:
-                    parts.append(f"dF={stats['jarzynski_delta_f']:.2f}")
+                if stats.get("renyi_entropy") is not None:
+                    # Labelled by what it is: the Renyi entropy of order 1+beta
+                    # of the operator-path distribution, not a free energy.
+                    order = 1.0 + getattr(f._fluctuation, "beta", 1.0)
+                    parts.append(f"H{order:.3g}={stats['renyi_entropy']:.2f}")
+                elif stats.get("unpooled"):
+                    # The active scheduler cannot report a selection
+                    # distribution, so there is no path law to take an entropy
+                    # of. Say so rather than print a number.
+                    parts.append(f"unpooled={stats['unpooled']}")
                 fluc_str = " | fluc: " + " ".join(parts)
             except (AttributeError, TypeError):
                 pass
