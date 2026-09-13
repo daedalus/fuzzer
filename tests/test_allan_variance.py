@@ -37,12 +37,13 @@ class TestAllanVarianceDetector:
         assert dev < 1e-12, f"expected ~0, got {dev}"
 
     def test_adev_requires_samples(self):
-        """adev(tau) returns NaN when n < 2*tau+1."""
+        """adev(tau) returns NaN when n < tau+1."""
         d = AllanVarianceDetector(max_buffer_pow=4, min_samples=4)
         d.update(1.0)
         d.update(1.0)
+        assert math.isnan(d.adev(2))  # n=2, tau=2 → need 3
         d.update(1.0)
-        assert math.isnan(d.adev(2))  # n=3, tau=2 → need 5
+        assert math.isfinite(d.adev(2))  # n=3, tau=2 → ok
 
     def test_adev_power_of_two(self):
         """adev works for various tau values."""
@@ -88,7 +89,7 @@ class TestAllanVarianceDetector:
             d.update(rng.gauss(rate, max(rate * 0.3, 0.5)))
         assert d.noise_type() == "fatiguing", f"expected fatiguing, got {d.noise_type()}"
         slope = d.noise_slope()
-        assert slope is not None and slope > 0.1, f"expected slope > 0.1, got {slope}"
+        assert slope is not None and slope > 0.25, f"expected slope > 0.25, got {slope}"
 
     def test_noise_type_insufficient_data(self):
         """Returns 'unknown' with fewer than min_samples."""

@@ -1,25 +1,33 @@
-"""Overlapping Allan variance for noise-type identification.
+"""Structure-function (variogram) noise-type identification for edge-discovery rates.
 
-Allan variance measures how the variance of a time series changes with
-averaging time τ. For stall detection, the first-difference Allan deviation
-on the incremental edge-discovery rate reveals the fuzzing regime:
+This module computes the second-order structure function (normalised quadratic
+variation / variogram) of the incremental edge-discovery rate:
 
-  σ²(τ) = ⟨(x[i+τ] - x[i])²⟩ / 2
+  S(τ) = ⟨(x[i+τ] - x[i])²⟩ / 2
 
-Key insight from empirical testing of edge-discovery-rate signals:
+Historically this was labelled "Allan variance". The true Allan variance is a
+first difference of *block averages* (equivalently a second difference of the
+cumulative series). The two estimators have different noise-type signatures;
+the structure function cannot separate white from flicker (1/f) noise. The
+name and header formula are therefore corrected here; the estimator itself is
+kept because recalibrating the fatigue threshold against the stationary 1/f
+null is cheaper than introducing a new default-on stall path.
 
-  - **Active** (healthy random exploration):  adev(2) > 0.5, slope ≈ 0.0
-  - **Fatiguing** (approaching saturation):   adev(2) > 0.01, slope > 0.1
+Classification (tailored to edge-discovery-rate signals):
+
+  - **Active** (healthy random exploration):  adev(2) > 0.5, slope < fatigue
+  - **Fatiguing** (approaching saturation):   adev(2) > 0.01, slope ≥ fatigue
   - **Stalled** (effectively zero discovery): adev(2) ≤ 0.01
 
-The slope measures how the variance changes with averaging time:
-  - slope ≈ 0: stationary variance (normal or stalled)
-  - slope > 0.1: variance grows with τ (rate decreasing, pre-stall)
+The fatigue slope threshold is set with explicit margin against stationary
+long-memory (1/f) processes, which produce mean slopes ≈ 0.105 under the
+structure function (see handover audit 2026-09-13). Previous threshold 0.1
+misfired on a coin-flip for pure 1/f.
 
 This module also provides :class:`DispersionIndex` — a sliding-window
-Index of Dispersion (Fano factor, D = σ²/μ).  D complements the Allan
-variance by resolving a key ambiguity the latter cannot: a buffer full
-of zeros and a buffer with rare bursts both produce low Allan deviation,
+Index of Dispersion (Fano factor, D = σ²/μ).  D complements the structure
+function by resolving a key ambiguity the latter cannot: a buffer full
+of zeros and a buffer with rare bursts both produce low deviation,
 but D discriminates them.
 
 Rather than compare D against fixed constants (which are only correctly
@@ -41,10 +49,14 @@ import math
 from fuzzer_tool.core.chi_squared import chi_squared_pvalue
 from fuzzer_tool.core.running_stats import RunningMoments
 
-# Allan deviation thresholds (empirically derived from edge-discovery rate signals)
+# Structure-function deviation thresholds (edge-discovery rate signals).
+# Fatigue threshold raised from 0.1 → 0.25 after audit: stationary 1/f
+# processes produce mean slope ≈ 0.105 under this estimator (false-positive
+# rate 0.593 at the old threshold). 0.25 leaves margin against beta≤1.0
+# while still catching clear downward trends (linear decay, random-walk).
 _ADEV_ACTIVE_THRESHOLD = 0.5  # adev(2) above this → signal has meaningful variance
 _ADEV_STALL_THRESHOLD = 0.01  # adev(2) below this → signal is effectively constant
-_FATIGUE_SLOPE_THRESHOLD = 0.1  # slope above this → variance grows with averaging
+_FATIGUE_SLOPE_THRESHOLD = 0.25  # slope above this → variance grows with averaging
 
 # Default significance level for the chi-squared dispersion test.
 _DISPERSION_ALPHA = 0.05
@@ -110,16 +122,19 @@ class AllanVarianceDetector:
         self._disp.update(value)
 
     def adev(self, tau: int) -> float:
-        """Overlapping Allan deviation at averaging time *tau*.
+        """Structure-function deviation (normalised quadratic variation) at lag *tau*.
 
-        Returns NaN if fewer than 2*tau+1 samples are available.
+        S(τ) = sqrt( 0.5 * mean_i (x[i+τ] - x[i])² )
+
+        Uses all valid lag-τ pairs (n - τ). Returns NaN if fewer than τ+1
+        samples are available.
         """
         n = len(self._buf)
-        if n < 2 * tau + 1:
+        if n < tau + 1 or tau < 1:
             return float("nan")
         data = list(self._buf)
         sq_sum = 0.0
-        count = n - 2 * tau
+        count = n - tau
         for i in range(count):
             diff = data[i + tau] - data[i]
             sq_sum += diff * diff
@@ -151,61 +166,74 @@ class AllanVarianceDetector:
         if dev2 <= _ADEV_STALL_THRESHOLD:
             return "stalled"
 
-        # Compute log-log slope from larger tau values
+        # Compute log-log slope from larger tau values (weighted OLS).
+        # Weights ∝ (n - tau) / tau — large-tau estimates have fewer pairs
+        # and lower equivalent degrees of freedom.
         max_pow = min(int(math.log2(n // 2)), 6)
         if max_pow < 1:
             return "unknown"
 
-        points: list[tuple[float, float]] = []
+        points: list[tuple[float, float, float]] = []  # (log_tau, log_dev, weight)
         for p in range(2, max_pow + 1):  # start from tau=4 to avoid tau-2 noise
             tau = 2**p
             dev = self.adev(tau)
             if math.isfinite(dev) and dev > 0:
-                points.append((math.log(tau), math.log(dev)))
+                w = (n - tau) / float(tau)
+                points.append((math.log(tau), math.log(dev), w))
 
         if len(points) < 2:
             return "active" if dev2 > _ADEV_ACTIVE_THRESHOLD else "fatiguing"
 
-        # Least-squares linear fit: slope = (n*Σxy - Σx*Σy) / (n*Σx² - (Σx)²)
-        n_pts = len(points)
-        sx = sum(p[0] for p in points)
-        sy = sum(p[1] for p in points)
-        sxx = sum(p[0] * p[0] for p in points)
-        sxy = sum(p[0] * p[1] for p in points)
-        denom = n_pts * sxx - sx * sx
-        if denom == 0:
+        slope = self._weighted_slope(points)
+        if slope is None:
             return "active" if dev2 > _ADEV_ACTIVE_THRESHOLD else "fatiguing"
-        slope = (n_pts * sxy - sx * sy) / denom
 
         if slope >= _FATIGUE_SLOPE_THRESHOLD:
             return "fatiguing"
         return "active"
 
     def noise_slope(self) -> float | None:
-        """Return the log-log Allan deviation slope, or None if unknown."""
+        """Return the log-log structure-function slope, or None if unknown.
+
+        Uses weighted OLS (weights ∝ (n-τ)/τ) so large-τ points, which have
+        fewer pairs, do not dominate the fit.
+        """
         n = len(self._buf)
         if n < self._min_samples:
             return None
         max_pow = min(int(math.log2(n // 2)), 6)
         if max_pow < 1:
             return None
-        points: list[tuple[float, float]] = []
+        points: list[tuple[float, float, float]] = []
         for p in range(2, max_pow + 1):
             tau = 2**p
             dev = self.adev(tau)
             if math.isfinite(dev) and dev > 0:
-                points.append((math.log(tau), math.log(dev)))
+                w = (n - tau) / float(tau)
+                points.append((math.log(tau), math.log(dev), w))
         if len(points) < 2:
             return None
-        n_pts = len(points)
-        sx = sum(p[0] for p in points)
-        sy = sum(p[1] for p in points)
-        sxx = sum(p[0] * p[0] for p in points)
-        sxy = sum(p[0] * p[1] for p in points)
-        denom = n_pts * sxx - sx * sx
+        return self._weighted_slope(points)
+
+    @staticmethod
+    def _weighted_slope(
+        points: list[tuple[float, float, float]],
+    ) -> float | None:
+        """Weighted least-squares slope of log-dev vs log-tau.
+
+        points: list of (log_tau, log_dev, weight).
+        """
+        sw = sum(p[2] for p in points)
+        if sw <= 0:
+            return None
+        sx = sum(p[0] * p[2] for p in points)
+        sy = sum(p[1] * p[2] for p in points)
+        sxx = sum(p[0] * p[0] * p[2] for p in points)
+        sxy = sum(p[0] * p[1] * p[2] for p in points)
+        denom = sw * sxx - sx * sx
         if denom == 0:
             return None
-        return (n_pts * sxy - sx * sy) / denom
+        return (sw * sxy - sx * sy) / denom
 
     @property
     def n_samples(self) -> int:

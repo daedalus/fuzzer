@@ -21,12 +21,23 @@ class TrajectoryRecord:
 
 
 class WorkFunctional:
-    """Maps a mutation trajectory to a scalar work value.
+    """Maps a mutation trajectory to a scalar work value that is the Rényi
+    entropy of the operator-path distribution (order 1+β).
 
-    The work functional is defined as ``W(τ) = Σ_i -log(max(p_i, ε))`` where
-    ``p_i`` is the normalized selection probability of operator ``o_i`` at step
-    ``i``.  Probability sources are delegated to the caller via a provider
-    callback so this module stays scheduler-agnostic.
+    With ``W(τ) = Σ_i -log(max(p_i, ε))`` and trajectories drawn from the
+    same ``p_i``, the Jarzynski-style estimator
+
+        -log(E[e^{-β W}]) / β
+
+    is exactly the Rényi entropy H_{1+β} of the trajectory distribution.
+    Default β=1 yields collision entropy; β→0 recovers Shannon.  This is
+    not a free-energy difference and there is no fluctuation–dissipation
+    relation to exploit (β here is an entropy order, not a temperature).
+
+    Probability sources are delegated to the caller.  When the caller
+    cannot supply true selection probabilities the work collapses to
+    L·log(L) (uniform over the trajectory itself) — that degeneracy is
+    a call-site defect, not a property of this module.
     """
 
     def __init__(self, beta: float = 1.0, window: int = 1000) -> None:
@@ -106,12 +117,16 @@ class WorkFunctional:
         return -math.log(mean_exp) / max(self.beta, _EPS)
 
     def crooks_forward_reverse(self, state_a: str, state_b: str) -> dict:
+        """Ratio of mean works between two state buffers.
+
+        This is *not* Crooks' theorem: there is no reverse protocol, no
+        matched-W density ratio, and no crossing at ΔF.  Retained only as a
+        diagnostic of work-distribution shift between two arbitrary keys.
+        """
         fwd = self._states.get(state_a, [])
         rev = self._states.get(state_b, [])
         if not fwd or not rev:
             return {"forward": len(fwd), "reverse": len(rev), "ratio": None}
-        # Symmetry check: for identical work distributions the forward/reverse
-        # work ratio is centered at 1.0 under Crooks.
         fwd_mean = sum(fwd) / len(fwd)
         rev_mean = sum(rev) / len(rev)
         ratio = None if fwd_mean <= _EPS or rev_mean <= _EPS else rev_mean / fwd_mean
@@ -132,7 +147,9 @@ class WorkFunctional:
             "samples": len(buf),
             "mean_work": sum(buf) / len(buf),
             "last_work": buf[-1],
+            # Historical key name; value is Rényi entropy H_{1+β}.
             "jarzynski_delta_f": est,
+            "renyi_entropy": est,
         }
 
     def snapshot(self) -> dict:
