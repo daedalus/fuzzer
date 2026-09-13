@@ -31,7 +31,10 @@ class ShapleyAttribution:
     per-operator bitmap snapshots between mutation steps.
 
     Args:
-        n_samples: Number of random permutations to sample.
+        n_samples: Unused by :meth:`shapley_values`, which is now computed
+            in closed form (see its docstring) rather than by permutation
+            sampling. Kept as a constructor/attribute for backward
+            compatibility with existing callers and configs.
         window_size: Number of recent outcomes to consider.
     """
 
@@ -92,49 +95,29 @@ class ShapleyAttribution:
             for op_edges in self._operator_edges.values():
                 op_edges.discard(edge)
 
-    def _edge_attribution(self, edge: int) -> dict[str, float]:
-        """Compute frequency-weighted credit for a single edge.
-
-        Returns dict mapping operator -> credit weight. Credit is
-        proportional to co-occurrence frequency, normalized to sum to 1.
-        """
-        op_counts = self._edge_op_count.get(edge, {})
-        total = sum(op_counts.values())
-        if total == 0:
-            return {}
-        return {op: count / total for op, count in op_counts.items()}
-
-    def _op_credit(self, edge: int, op: str) -> float:
-        """Credit assigned to *op* for *edge* -- one entry of _edge_attribution.
-
-        _shapley_marginal only ever reads a single operator's share, so
-        building the full attribution dict per edge allocated a dict (and its
-        comprehension) for every edge of every operator on the hot path. This
-        computes the one value directly.
-        """
-        op_counts = self._edge_op_count.get(edge)
-        if not op_counts:
-            return 0.0
-        count = op_counts.get(op)
-        if not count:
-            return 0.0
-        total = sum(op_counts.values())
-        return count / total if total else 0.0
-
-    def _shapley_marginal(self, op: str, prefix_edges: set[int]) -> float:
-        """Compute marginal contribution of one operator given already-covered edges."""
-        marginal = 0.0
-        for edge in self._operator_edges.get(op, set()):
-            if edge not in prefix_edges:
-                marginal += self._op_credit(edge, op)
-        return marginal
-
     def shapley_values(self, operators: list[str] | None = None) -> dict[str, float]:
-        """Compute Shapley values using per-edge frequency-weighted attribution.
+        """Compute exact Shapley values for the per-edge frequency-weighted game.
 
-        For each edge, credit is distributed among operators proportional
-        to co-occurrence frequency. The Shapley computation then determines
-        marginal contributions given these per-edge credits.
+        This game has a closed form, so no permutation sampling is needed.
+        For each edge ``e``, let ``T_e`` be the operators (restricted to
+        ``operators``) that co-occurred with ``e``, and let
+        ``credit(e, op) = count(e, op) / sum(count(e, ·) for · in T_e)`` be
+        the fixed per-edge credit split (``_edge_op_count``). An
+        operator only earns that credit in a given permutation if it is the
+        *first* member of ``T_e`` to appear — and by symmetry, in a uniformly
+        random permutation each of the ``|T_e|`` members is equally likely to
+        be first. So the expected (= exact, since this is a linear
+        functional of a uniform distribution) marginal contribution of ``op``
+        from edge ``e`` is simply ``credit(e, op) / |T_e|``, with no
+        dependence on the other operators' relative order.
+
+        Summing that over every edge gives the exact Shapley value directly,
+        replacing an O(n_samples · n_ops · edges) Monte-Carlo estimate with a
+        single O(total edge-operator co-occurrences) pass — exact rather
+        than approximate, and independent of ``n_samples``. Verified against
+        the old permutation sampler: the two agree to within Monte-Carlo
+        noise that shrinks as ``n_samples`` grows (see
+        ``test_shapley_closed_form_identity.py``).
 
         Returns:
             Dict mapping operator name -> Shapley value (in [0, 1]).
@@ -149,17 +132,19 @@ class ShapleyAttribution:
             return {}
 
         n_ops = len(operators)
+        op_set = set(operators)
         shapley = {op: 0.0 for op in operators}
 
-        for _ in range(self.n_samples):
-            perm = operators[:]
-            random.shuffle(perm)
-
-            prefix_edges: set[int] = set()
-            for op in perm:
-                marginal = self._shapley_marginal(op, prefix_edges)
-                shapley[op] += marginal
-                prefix_edges.update(self._operator_edges.get(op, set()))
+        for _edge, op_counts in self._edge_op_count.items():
+            touching = [op for op in op_counts if op in op_set]
+            k = len(touching)
+            if k == 0:
+                continue
+            total = sum(op_counts[op] for op in touching)
+            if total == 0:
+                continue
+            for op in touching:
+                shapley[op] += op_counts[op] / total / k
 
         total = sum(shapley.values())
         if total > 0:
