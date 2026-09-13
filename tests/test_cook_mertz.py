@@ -103,3 +103,53 @@ def test_evaluate_mle_single_monomial():
     for j in range(1, F.m + 1):
         # x_0 evaluated at omega^j is omega^j itself (since e_idx=1 means bit 0 set)
         assert F.evaluate_mle(coeffs, p[j]) == p[j]
+
+
+# ---------------------------------------------------------------------------
+# The actual efficiency claim: evaluate_mle's polynomial has degree <= q in
+# the field variable (coefficient of monomial e_idx contributes
+# point**popcount(e_idx), and popcount ranges over [0, q]). A degree-<=q
+# polynomial is uniquely determined by q+1 points -- that sparse
+# reconstruction, not "give interpolate() every point", is what would let a
+# real Cook-Mertz tree-evaluation caller avoid storing all 2**q-1 values.
+# These tests exercise that claim directly, with both a positive and a
+# forced negative case (rather than only checking the trivial all-points
+# round-trip, which is exact regardless of the underlying function).
+# ---------------------------------------------------------------------------
+
+
+def test_interpolate_recovers_degree_q_polynomial_from_q_plus_1_points():
+    q = 4
+    F = CookMertzField.default(q)
+    p = F.powers()
+    # Force exact degree q: the top monomial (all q bits set) has
+    # popcount == q, so giving it a nonzero coefficient guarantees the
+    # polynomial's degree is exactly q, not accidentally lower.
+    coeffs = [0] * F.order
+    coeffs[F.order - 1] = 0x7
+    coeffs[3] = 0x5
+    coeffs[0] = 0x2
+    truth = {p[j]: F.evaluate_mle(coeffs, p[j]) for j in range(1, F.m + 1)}
+
+    subset = {p[i]: truth[p[i]] for i in range(1, q + 2)}  # q+1 points
+    recovered = F.interpolate(subset)
+    assert recovered == truth
+
+
+def test_interpolate_with_one_fewer_than_q_plus_1_points_diverges():
+    """Negative control: an under-determined degree-q polynomial must NOT
+    reconstruct correctly from only q points, or the positive test above
+    would be vacuous (interpolate() being exact regardless of subset size,
+    rather than because q+1 points are sufficient and necessary)."""
+    q = 4
+    F = CookMertzField.default(q)
+    p = F.powers()
+    coeffs = [0] * F.order
+    coeffs[F.order - 1] = 0x7  # forces exact degree q, as above
+    coeffs[3] = 0x5
+    coeffs[0] = 0x2
+    truth = {p[j]: F.evaluate_mle(coeffs, p[j]) for j in range(1, F.m + 1)}
+
+    subset = {p[i]: truth[p[i]] for i in range(1, q + 1)}  # only q points
+    recovered = F.interpolate(subset)
+    assert any(recovered[p[j]] != truth[p[j]] for j in range(1, F.m + 1))
