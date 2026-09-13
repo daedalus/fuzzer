@@ -176,7 +176,26 @@ def find_primitive_root(order: int, is_primitive, rng) -> int:
 
 
 class GF2n:
-    """The field GF(2^q) = GF(2)[x] / (modulus), modulus an irreducible degree-q poly."""
+    """The field GF(2^q) = GF(2)[x] / (modulus), modulus an irreducible degree-q poly.
+
+    Builds Zech (discrete-log/antilog) tables from the same omega-cycle
+    enumeration :meth:`omega_powers` computes, and routes ``mul``/``pow``/
+    ``inv`` through them once the tables exist: with ``g = log[a]``,
+    ``h = log[b]``, multiplication is ``exp[(g+h) % m]`` and inversion is
+    ``exp[(m-g) % m]`` -- addition mod ``m`` instead of a full carryless
+    multiply-then-reduce every call. This is the classical log-table
+    technique for GF(2^q) arithmetic (used e.g. in Reed-Solomon codecs);
+    it reuses the exact enumeration :class:`~fuzzer_tool.core.cook_mertz.CookMertzField`
+    already needs for MLE point indexing, so building it costs nothing
+    beyond what was already being computed.
+
+    Skipped above :data:`_MAX_TABLE_ORDER` (tables are O(order) ints) --
+    field construction still works via the polynomial path, just without
+    the speedup, so an unusually large ``q`` degrades gracefully instead
+    of exploding memory.
+    """
+
+    _MAX_TABLE_ORDER = 1 << 20  # 1M entries; every current caller uses q=8 (order 256)
 
     def __init__(self, q: int, modulus: int | None = None, seed: int = 0) -> None:
         self.q = q
@@ -186,22 +205,41 @@ class GF2n:
         assert is_irreducible(self.mod, q), "supplied modulus is not irreducible"
         rng = RandPool(seed=seed)
         self._rng = rng
+        self._log: list[int] | None = None  # built lazily; None => use the poly path
+        self._exp: list[int] | None = None
         self.gen = self._find_primitive()
+        self._build_tables()
 
     # ---- field ops ----
     def add(self, a: int, b: int) -> int:
         return a ^ b
 
-    def mul(self, a: int, b: int) -> int:
+    def _mul_poly(self, a: int, b: int) -> int:
+        """Polynomial-path multiplication -- used before tables exist."""
         return poly_mod(poly_mul(a, b), self.mod)
 
-    def pow(self, a: int, e: int) -> int:
+    def _pow_poly(self, a: int, e: int) -> int:
+        """Polynomial-path exponentiation -- used before tables exist."""
         e = e % self.m if a != 0 else e
         return poly_powmod(a, e, self.mod)
+
+    def mul(self, a: int, b: int) -> int:
+        if self._log is not None:
+            if a == 0 or b == 0:
+                return 0
+            return self._exp[(self._log[a] + self._log[b]) % self.m]
+        return self._mul_poly(a, b)
+
+    def pow(self, a: int, e: int) -> int:
+        if self._log is not None and a != 0:
+            return self._exp[(self._log[a] * (e % self.m)) % self.m]
+        return self._pow_poly(a, e)
 
     def inv(self, a: int) -> int:
         if a == 0:
             raise ZeroDivisionError("no inverse of 0")
+        if self._log is not None:
+            return self._exp[(self.m - self._log[a]) % self.m]
         return self.pow(a, self.m - 1)
 
     # ---- primitive element ----
@@ -211,9 +249,30 @@ class GF2n:
         factors = _prime_factors(self.m)
 
         def _is_primitive(a: int) -> bool:
-            return all(self.pow(a, self.m // p) != 1 for p in factors)
+            return all(self._pow_poly(a, self.m // p) != 1 for p in factors)
 
         return find_primitive_root(self.m, _is_primitive, self._rng)
+
+    def _build_tables(self) -> None:
+        """Populate the Zech log/antilog tables from the omega cycle.
+
+        No-op above :data:`_MAX_TABLE_ORDER`. Uses the polynomial-path
+        multiply (tables don't exist yet -- that's what this builds), so
+        this is the one place per field instance that still pays the slow
+        per-multiplication cost, and only O(m) times, not O(m^2).
+        """
+        if self.order > self._MAX_TABLE_ORDER or self.m == 1:
+            return
+        exp = [0] * self.m
+        log = [0] * self.order
+        cur = 1
+        for i in range(self.m):
+            exp[i] = cur
+            log[cur] = i
+            cur = self._mul_poly(cur, self.gen)
+        assert cur == 1, "generator did not cycle back to 1 after m steps"
+        self._exp = exp
+        self._log = log
 
     def omega_powers(self) -> dict[int, int]:
         """Return dict ``i -> omega^i`` for ``i = 0..m``."""
