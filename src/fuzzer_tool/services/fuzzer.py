@@ -80,6 +80,7 @@ from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.validity import Validity, ValidityChannel
 from fuzzer_tool.services.corpus_manager import CorpusManager
+from fuzzer_tool.services.maintenance import MaintenanceJob, MaintenanceQueue
 from fuzzer_tool.services.operators import OperatorEngine, operator_strategy_pool
 from fuzzer_tool.services.ptrace_coverage import (
     PtraceCoverage,
@@ -1095,9 +1096,37 @@ class Fuzzer:
         self.max_corpus_bytes = max_corpus_bytes
         self.minimize_every_execs = minimize_every_execs
         self.prune_corpus_max_memory = prune_corpus_max_memory
-        self._last_memory_prune_exec = 0
         self._last_corpus_prune_exec = 0
         self._last_bloat_warn_exec = 0
+        # P3-3 step 4: the three ad-hoc gates this used to be (i % 500 for
+        # gc/replays, an internal 1000-exec throttle for memory pruning) are
+        # now one MaintenanceQueue -- see services/maintenance.py. Each
+        # `active` predicate is the guard that used to sit beside the old
+        # call site (`self.replay_n > 0`, `self.asan_target or
+        # self.ubsan_target`, `self.prune_corpus_max_memory > 0`).
+        self._maintenance = MaintenanceQueue(
+            [
+                MaintenanceJob("gc", interval_execs=500, action=self._gc_collect),
+                MaintenanceJob(
+                    "crash_replays",
+                    interval_execs=500,
+                    action=self._run_crash_replays,
+                    active=lambda: self.replay_n > 0,
+                ),
+                MaintenanceJob(
+                    "sanitizer_replays",
+                    interval_execs=500,
+                    action=self._run_sanitizer_replays,
+                    active=lambda: bool(self.asan_target or self.ubsan_target),
+                ),
+                MaintenanceJob(
+                    "memory_prune",
+                    interval_execs=1000,
+                    action=self._check_memory_and_prune,
+                    active=lambda: self.prune_corpus_max_memory > 0,
+                ),
+            ]
+        )
         self._minimize_pending = False
         # Set by run()'s broad handler when the loop dies on an unexpected
         # exception. State is still persisted; this only marks the run as
@@ -3453,11 +3482,26 @@ class Fuzzer:
     def _deprioritize_near_duplicates(self):
         return self._corpus_manager.deprioritize_near_duplicates()
 
+    def _gc_collect(self):
+        """Periodic GC to return freed memory to OS.
+
+        Gating (the old ``i % 500``) now lives in ``self._maintenance``
+        (P3-3 step 4); this is just the action.
+        """
+        import gc
+
+        gc.collect()
+
     def _check_memory_and_prune(self):
         """Check RSS against total RAM and prune corpus if threshold exceeded.
 
         Uses /proc/meminfo for total RAM and /proc/self/statm for current RSS.
-        Only triggers once per 1000 execs to avoid constant polling overhead.
+
+        The "once per 1000 execs" throttle and the
+        ``self.prune_corpus_max_memory <= 0`` off-switch used to live here as
+        an internal early return; both now live in ``self._maintenance``
+        (P3-3 step 4), which is the only place tracking "when did this last
+        run" across all absorbed jobs.
 
         NOT ``getrusage(RUSAGE_SELF).ru_maxrss``, which this used to read: that
         is the high-water mark and never decreases, so a single transient spike
@@ -3465,12 +3509,6 @@ class Fuzzer:
         re-pruned an already-small corpus while printing the stale peak as if it
         were current usage.
         """
-        if self.prune_corpus_max_memory <= 0:
-            return
-        if self.exec_count - self._last_memory_prune_exec < 1000:
-            return
-        self._last_memory_prune_exec = self.exec_count
-
         try:
             rss_kb = _current_rss_kb()
             if rss_kb is None:
@@ -7034,25 +7072,19 @@ class Fuzzer:
                         and self.exec_count > 0
                     ):
                         self._maybe_trigger_stall_recovery(execs_since_edge)
-                    # Memory-based corpus pruning
-                    self._check_memory_and_prune()
                     # Corpus-size-based pruning: minimize when corpus is
                     # significantly larger than the edge-derived target size,
                     # even if --minimize-every-execs is not set.
                     self._check_corpus_size_and_prune()
-                    # Periodic GC to return freed memory to OS
-                    if i % 500 == 0:
-                        import gc
-
-                        gc.collect()
+                    # Memory pruning, sanitizer/crash replays, and periodic
+                    # GC: three formerly-separate ad-hoc gates (i % 500 /
+                    # i % 500 / an internal 1000-exec throttle), now one
+                    # precedence-aware queue (P3-3 step 4).
+                    self._maintenance.tick(self.exec_count)
                     self._last_stats_exec = self.exec_count
                     if self.stats_file:
                         self._dump_stats()
                         self._save_state()
-                if i % 500 == 0 and self.replay_n > 0:
-                    self._run_crash_replays()
-                if i % 500 == 0 and (self.asan_target or self.ubsan_target):
-                    self._run_sanitizer_replays()
         except (KeyboardInterrupt, SystemExit):
             pass
         except OSError as e:
