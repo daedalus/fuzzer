@@ -46,6 +46,9 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 #     real overhead --hail-mary shouldn't add silently)
 #   * --rand-floyd-sample (a second implementation of RandPool.sample for
 #     k>=3, not a strategy; moves the draw stream for no behavioural gain)
+#   * --canary-scheduler (deliberately worst-in-class, a floor for the Elo
+#     tournament's ranking, not a strategy trying to win; --hail-mary means
+#     "try every plausible strategy", not "add a scheduler built to lose")
 # Special-cased inside _apply_hail_mary (not plain bool dests in the tuple):
 #   * elo (string value "all")
 #   * anneal_budget (int)
@@ -86,6 +89,13 @@ _EXCLUDED_OPT_IN = frozenset(
         # switch that changes what every other switch sees while its own
         # premise is untested".
         "temperature_control",
+        # Deliberately worst-in-class operator scheduler: a floor for the
+        # Elo meta-scheduler's tournament ranking (see
+        # core/schedulers/canary.py), not a strategy that competes to win.
+        # --hail-mary force-enabling it would make it eat operator
+        # selections it should never win outside an Elo-arbitrated run,
+        # and it is meaningless without --elo already ranking it anyway.
+        "canary_scheduler",
     }
 )
 
