@@ -13,7 +13,7 @@ Only entries that still require action are listed here. Completed work is docume
 
 ### Already implemented (do not port)
 
-- **Statistical test infrastructure** (`chi_squared.py`, `allan_variance.py`) — these live in `src/fuzzer_tool/core/` and are already in use (e.g. `allan_variance.py` feeds `core/seed_quality.py`). The dieharder sub‑agent was wrong to flag them as pending.
+- **Statistical test infrastructure** (`chi_squared.py`, `structure_function.py`, renamed from `allan_variance.py` in `29f0d60`) — these live in `src/fuzzer_tool/core/` and are already in use. The dieharder sub‑agent was wrong to flag them as pending. **Corrected 2026-09-13:** the parenthetical used to say `allan_variance.py` feeds `core/seed_quality.py`; it does not and never did — `seed_quality.py` contains no reference to it. The real consumers are `services/fuzzer.py` (the stall-recovery path, via `_structure_fn`), `core/analyzer_registry.py` (always-on activation) and `core/schedulers/monte_carlo.py` (which imports `DispersionIndex` from it).
 - **RNG type registry pattern** — fuzzer‑new already has `REGISTRY.register_mutator()` (operator_registry.py:754) and `MutatorBase` (mutator_interface.py) with **5 concrete subclasses** (`FormatFuzzerMutator`, `WeizzFieldMutator`, `WeizzChunkMutator`, `PerlinNoiseMutator`, `FractalVoronoiMutator`). The dieharder macro‑style registry is effectively replicated in the `REGISTRY.register_mutator` mechanism.
 - **Burnside‑style cryptographic RNGs** — already rejected (complex, low ROI for fuzzing).
 

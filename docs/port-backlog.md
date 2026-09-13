@@ -664,9 +664,19 @@ what Åström–Hägglund relay auto-tuning measures.
 **Ziegler–Nichols tuning.** Same evaluation. Explicitly poor on time-delay
 processes, and the sensing chain's dead time here is both large and badly
 conditioned: stepping the discovery rate down through the real
-`AllanVarianceDetector` takes a median 2–34 ticks to leave `"active"` with
-p10=1 and p90≈36 across every step size tried, at roughly 10 s of work per
-tick. Tune from the relay data.
+`StructureFunctionDetector` takes a median 12–116 ticks to leave `"active"`
+at roughly 10 s of work per tick. Tune from the relay data.
+
+**Updated 2026-09-13:** this used to read "a median 2–34 ticks … with p10=1
+and p90≈36 across every step size tried". That was measured against the
+pre-`0e11fd2` estimator, which computed the variogram rather than the Allan
+variance; re-measured on the current one, the p10=1 tail is gone (p10 ≥ 11
+in every row) and the distribution is tight for high-rate steps. **The
+"badly conditioned" half of this rejection no longer holds** — the dead time
+is still large but no longer ill-conditioned, so re-argue Ziegler–Nichols on
+size alone or drop the item. Full before/after tables and the low-rate
+sensitivity cost are in
+`docs/handover/handover_control_theory_loops_2026-09-12.md` §2.1.
 
 **Full nonlinear ADRC — NESO plus nonlinear state error feedback.** Same
 evaluation. The linear ESO shipped as `core/eso.py`; the nonlinear half did

@@ -134,7 +134,7 @@ answering.
 **Related gap, recorded so it is not re-derived.** `consolidated.py:24-26`
 credits its design partly to "a 150-arm environment with rare heavy-tailed
 yields, **fatigue on success** and periodic unlocks". `grep -rn fatigue` over
-the whole tree returns only `core/allan_variance.py:134-136` (an unrelated
+the whole tree returns only `core/structure_function.py:21-22,202-204` (an unrelated
 slope threshold) and that docstring line. The environment that motivated the
 winning scheduler is **not in the repository** — same pattern as the PNG/JPEG
 sweep TSVs that were cited but never committed. Reconstructing it is a

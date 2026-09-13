@@ -57,7 +57,7 @@ discovering anything.
 
 The measured signal it would need already exists and already has consumers:
 `RobustKF` over discovery rate (`core/kalman.py`, 2D constant-velocity with
-Huber innovation gating and adaptive R), `AllanVarianceDetector`,
+Huber innovation gating and adaptive R), `StructureFunctionDetector`,
 `DispersionIndex`, `CriticalSlowingDown`, `coverage_growth_model()`. Every one
 of them feeds a *detector*. None feeds an *actuator*. That asymmetry is the
 whole finding: the sensing half of a control loop is built and the actuation
@@ -162,16 +162,24 @@ committed; this avoids repeating that.)
 ### 2.1 Sensing-chain dead time of the stall detector
 
 Step the true discovery rate down and count ticks until the real
-`AllanVarianceDetector.noise_type()` stops saying `"active"`.
+`StructureFunctionDetector.noise_type()` stops saying `"active"`.
+
+> **Re-measured 2026-09-13.** This section was characterised against the
+> estimator as it stood at `972470b`, which computed the *variogram* and not
+> the Allan variance, with `_FATIGUE_SLOPE_THRESHOLD = 0.1`. `0e11fd2`
+> replaced it with the true overlapping Allan variance at threshold `0.15`
+> (thermo handover, P0-T1), so both the harness import and the numbers below
+> changed. The original table is kept beneath the new one: the *comparison*
+> is the finding, not either table alone.
 
 ```python
 import numpy as np
-from fuzzer_tool.core.allan_variance import AllanVarianceDetector
+from fuzzer_tool.core.structure_function import StructureFunctionDetector
 
 rng = np.random.default_rng(42)
 
 def dead_time(rate_hi, rate_lo, warm=64, maxticks=256):
-    d = AllanVarianceDetector(max_buffer_pow=8, min_samples=8)   # repo defaults
+    d = StructureFunctionDetector(max_buffer_pow=8, min_samples=8)  # repo defaults
     for _ in range(warm):
         d.update(float(rng.poisson(rate_hi)))
     pre = d.noise_type()
@@ -192,6 +200,19 @@ for hi, lo in [(20, 0), (20, 1), (20, 2), (5, 0), (5, 1), (50, 0)]:
           int(np.percentile(ks, 90)), max(set(labels), key=labels.count))
 ```
 
+**Current, on the true Allan variance (`0e11fd2`), 20 trials per row:**
+
+| step (edges/tick) | classified as | median ticks | p10 | p90 | reacted |
+|---|---|---|---|---|---|
+| 20 → 0 | `fatiguing` | 13 | 12 | 17 | 20/20 |
+| 20 → 1 | `fatiguing` | 14 | 11 | 15 | 20/20 |
+| 20 → 2 | `fatiguing` | 14 | 11 | 15 | 20/20 |
+| 5 → 0 | `fatiguing` | 116 | 17 | 256 | 20/20 |
+| 5 → 1 | `fatiguing` | 28 | 20 | 29 | **5/20** |
+| 50 → 0 | `fatiguing` | 12 | 11 | 13 | 20/20 |
+
+**Previous, on the variogram at threshold 0.1 (`972470b`):**
+
 | step (edges/tick) | classified as | median ticks | p10 | p90 |
 |---|---|---|---|---|
 | 20 → 0 | `fatiguing` | 34 | 1 | 35 |
@@ -201,20 +222,46 @@ for hi, lo in [(20, 0), (20, 1), (20, 2), (5, 0), (5, 1), (50, 0)]:
 | 5 → 1 | `fatiguing` | 6 | 1 | 38 |
 | 50 → 0 | `fatiguing` | 34 | 1 | 35 |
 
-Read the spread, not the median: p10 = 1 and p90 ≈ 36 in every row. The
-dead time is not a constant with noise around it, it is a distribution
-covering the whole measurable range. At ~10 s per tick that is ~20 s to ~6 min
-before the detector reacts to a step.
+**What changed, and the part that matters for this document's argument.**
+The `p10 = 1` column is **gone** — every row now has p10 ≥ 11. The old
+caveat below turned out to be the whole explanation: those were the detector
+firing on Poisson noise, not on the step, and the estimator that did that was
+also the one classifying stationary 1/f noise as `fatiguing` 59.3% of the
+time. So the dead time is no longer "a distribution covering the whole
+measurable range"; for the three high-rate steps it is 11–17 ticks, a spread
+of roughly ±20% around the median. **That weakens this document's
+Ziegler–Nichols rejection**, which rests on the dead time being both large
+and badly conditioned. It is still large (~2 min at ~10 s/tick) but it is no
+longer badly conditioned. Re-argue that item on the size alone, or drop it.
 
-**Caveat on the p10 = 1 column:** some of those are the detector reacting to
-Poisson noise rather than to the step, so the low tail is optimistic. That
-makes the useful θ *longer* than the table suggests, not shorter.
+**And the cost, which neither the thermo handover nor `0e11fd2` measured.**
+Transient sensitivity at *low absolute* discovery rates fell sharply.
+Extending the probe to 1024 ticks and 40 trials:
+
+| step | median ticks (of those that reacted) | never left `active` |
+|---|---|---|
+| 20 → 1 | 13 | 0/40 |
+| 5 → 0 | 26 | 0/40 |
+| 5 → 1 | 23 | **34/40** |
+| 3 → 1 | 17 | **39/40** |
+
+A drop to zero is caught reliably and fast at any pre-step rate, because the
+Allan deviation collapses to the stall threshold. A *partial* slowdown at a
+low pre-step rate is mostly not caught at all. Read carefully before calling
+this a regression: `5 → 1` means discovery is continuing at 1 edge/tick,
+which is not a stall, and `noise == "active"` only declines to *pre-emptively
+halve* the stall threshold — it does not suppress a genuine stall, since a
+true stop drives `adev(2)` under `_ADEV_STALL_THRESHOLD` and is caught in a
+median 26 ticks over 40/40 trials. The honest summary is that the fix traded
+a large false-alarm rate for less pre-emptive fatigue warning at low rates,
+and the trade is very likely worth it. It should still be an evaluation item
+rather than an assumption.
 
 ### 2.2 Relay switching under bursty discovery
 
 Engage at `execs_since_edge >= 1000`; release after `dwell + 1` edges.
 Arrival process is clustered — bursts of ~4 edges separated by ~2500 execs,
-which is the regime `AllanVarianceDetector.is_overdispersed()` exists to
+which is the regime `StructureFunctionDetector.is_overdispersed()` exists to
 identify, and the one where a 1000-exec engage threshold and a 1-edge release
 interact worst.
 

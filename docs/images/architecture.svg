@@ -257,7 +257,7 @@
 <title>infoth</title>
 <path fill="#d6e6f0" stroke="transparent" stroke-width="0" d="M911,-167.5C911,-167.5 679,-167.5 679,-167.5 673,-167.5 667,-161.5 667,-155.5 667,-155.5 667,-130.5 667,-130.5 667,-124.5 673,-118.5 679,-118.5 679,-118.5 911,-118.5 911,-118.5 917,-118.5 923,-124.5 923,-130.5 923,-130.5 923,-155.5 923,-155.5 923,-161.5 917,-167.5 911,-167.5"/>
 <text text-anchor="start" x="679" y="-151.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">mi · transfer_entropy · renyi · sensitivity</text>
-<text text-anchor="start" x="679" y="-140.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">allan_variance · critical_slowing · running_stats</text>
+<text text-anchor="start" x="679" y="-140.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">structure_function · critical_slowing · running_stats</text>
 <text text-anchor="start" x="679" y="-129.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">perf_event (HW counters)</text>
 </g>
 <!-- cov&#45;&gt;infoth -->

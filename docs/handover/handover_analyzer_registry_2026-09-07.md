@@ -37,7 +37,7 @@ them. `AnalyzerSpec` declares `available(fuzzer)` / `activate(fuzzer)` /
 | `transfer_entropy` | main | `_use_transfer_entropy` | `core.transfer_entropy.TransferEntropy` |
 | `crash_mi` | main | always on | `core.crash_eta.CrashMITracker` |
 | `length_tracker` | main | always on | `core.length_mi.LengthEdgeTracker` |
-| `allan` | main | always on | `core.allan_variance.AllanVarianceDetector` |
+| `structure_function` | main | always on | `core.structure_function.StructureFunctionDetector` (was `allan` / `core.allan_variance.AllanVarianceDetector` until `29f0d60`; the spec name is internal only — not persisted, not a CLI flag, so the rename crosses no compatibility boundary) |
 | `sensitivity` | **early** | always on | `core.sensitivity.ByteSensitivityTracker` |
 | `execution_time` | main | always on | `core.execution_time.ExecutionTimeTracker` |
 | `exec_time_anomaly` | main | always on | `core.exec_time_anomaly.ExecTimeCalibrator` |
