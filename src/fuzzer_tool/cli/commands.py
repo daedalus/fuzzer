@@ -447,6 +447,7 @@ def cmd_fuzz(args):
             poisson_disk_admission=getattr(args, "poisson_disk_admission", False),
             poisson_disk_min_jaccard=getattr(args, "poisson_disk_min_jaccard", 0.25),
             resize_map_on_stall=getattr(args, "resize_map_on_stall", True),
+            job_scheduler=getattr(args, "job_scheduler", False),
             fractal_partition=getattr(args, "fractal_partition", False),
             fractal_partition_depth=getattr(args, "fractal_partition_depth", 3),
             fractal_diversity=getattr(args, "fractal_diversity", False),
@@ -793,6 +794,7 @@ def cmd_fuzz(args):
         seed_slide_size=getattr(args, "seed_slide_size", 0),
         seed_slide_max_seeds=getattr(args, "seed_slide_max_seeds", 0),
         resize_map_on_stall=getattr(args, "resize_map_on_stall", False),
+        job_scheduler=getattr(args, "job_scheduler", False),
         reseed_on_stall=getattr(args, "reseed_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
@@ -1718,6 +1720,13 @@ def cmd_sweep(args):
 # run would stop being comparable to any other run of the same seed for no
 # behavioural gain.
 #
+# job_scheduler (--job-scheduler) is excluded because it changes
+# maintenance-tick *cadence* (crash/sanitizer replays and gc.collect move
+# from an i % 500 gate to the stats-interval cadence memory pruning
+# already had -- see services/maintenance.py's module docstring), not a
+# fuzzing strategy. --hail-mary means "try every plausible strategy", not
+# "also change the timing of unrelated bookkeeping for everyone using it".
+#
 # fpl, op_span_reverse and op_span_relocate were missing from the tuple
 # below while every other scheduler (exp3 .. cusum_ucb, c2ucb) and every
 # other operator gate (wfc, weizz_tags, formatfuzzer) was in it -- three
@@ -2454,6 +2463,22 @@ def main() -> int:
         type=int,
         default=3,
         help="Fractal layer depth for --fractal-partition (default: 3)",
+    )
+    fuzz_parser.add_argument(
+        "--job-scheduler",
+        action="store_true",
+        default=False,
+        help=(
+            "Route maintenance-tick housekeeping (memory pruning, crash/"
+            "sanitizer replays, periodic GC) through a single precedence-"
+            "aware queue (Lawler's algorithm over lateness) instead of "
+            "three independent ad-hoc gates, and partition -j>1's initial "
+            "corpus by Multifit-packed cost instead of fractal Voronoi "
+            "root cell or content hash. Off by default: this changes "
+            "maintenance-tick cadence (see services/maintenance.py), not "
+            "just adds a strategy, so it is opt-in rather than folded into "
+            "the existing gates silently."
+        ),
     )
     fuzz_parser.add_argument(
         "--secretary",

@@ -921,6 +921,7 @@ class Fuzzer:
         stall_release_edges=1,
         resize_map_on_stall=True,
         reseed_on_stall=False,
+        job_scheduler=False,
         map_size=0,
         max_collision_risk=30,
         continue_until_crash=False,
@@ -1098,12 +1099,21 @@ class Fuzzer:
         self.prune_corpus_max_memory = prune_corpus_max_memory
         self._last_corpus_prune_exec = 0
         self._last_bloat_warn_exec = 0
-        # P3-3 step 4: the three ad-hoc gates this used to be (i % 500 for
-        # gc/replays, an internal 1000-exec throttle for memory pruning) are
-        # now one MaintenanceQueue -- see services/maintenance.py. Each
-        # `active` predicate is the guard that used to sit beside the old
-        # call site (`self.replay_n > 0`, `self.asan_target or
-        # self.ubsan_target`, `self.prune_corpus_max_memory > 0`).
+        # P3-3 step 4/6, gated behind --job-scheduler (excluded from
+        # --hail-mary: this changes maintenance-tick *cadence*, not a
+        # fuzzing strategy, and the change should be opted into
+        # deliberately rather than force-enabled alongside everything
+        # else). False (the default) keeps the original three independent
+        # ad-hoc gates byte-for-byte -- see _legacy_memory_prune_tick and
+        # the tick loop below. True replaces them with one MaintenanceQueue
+        # (services/maintenance.py) that sequences due jobs via Lawler's
+        # algorithm instead of running them in fixed program order, and
+        # folds crash/sanitizer replays and gc.collect into the same
+        # stats-interval cadence memory pruning already had (see
+        # maintenance.py's module docstring for the cadence-change caveat
+        # this implies for fast targets).
+        self.job_scheduler = job_scheduler
+        self._last_memory_prune_exec = 0  # legacy path only; queue owns its own bookkeeping
         self._maintenance = MaintenanceQueue(
             [
                 MaintenanceJob("gc", interval_execs=500, action=self._gc_collect),
@@ -3491,6 +3501,23 @@ class Fuzzer:
         import gc
 
         gc.collect()
+
+    def _legacy_memory_prune_tick(self):
+        """Pre-P3-3 gating for ``_check_memory_and_prune``, byte-for-byte.
+
+        Used only when ``self.job_scheduler`` is False (the default): the
+        off-switch and the once-per-1000-execs throttle both used to live
+        inside ``_check_memory_and_prune`` itself. They moved out to
+        ``self._maintenance``'s ``active``/``interval_execs`` when
+        ``--job-scheduler`` is on; this wrapper keeps the untouched
+        original behavior available for everyone who hasn't opted in.
+        """
+        if self.prune_corpus_max_memory <= 0:
+            return
+        if self.exec_count - self._last_memory_prune_exec < 1000:
+            return
+        self._last_memory_prune_exec = self.exec_count
+        self._check_memory_and_prune()
 
     def _check_memory_and_prune(self):
         """Check RSS against total RAM and prune corpus if threshold exceeded.
@@ -7076,15 +7103,30 @@ class Fuzzer:
                     # significantly larger than the edge-derived target size,
                     # even if --minimize-every-execs is not set.
                     self._check_corpus_size_and_prune()
-                    # Memory pruning, sanitizer/crash replays, and periodic
-                    # GC: three formerly-separate ad-hoc gates (i % 500 /
-                    # i % 500 / an internal 1000-exec throttle), now one
-                    # precedence-aware queue (P3-3 step 4).
-                    self._maintenance.tick(self.exec_count)
+                    if self.job_scheduler:
+                        # P3-3 step 4: memory pruning, sanitizer/crash
+                        # replays, and periodic GC as one precedence-aware
+                        # queue instead of three independent ad-hoc gates.
+                        self._maintenance.tick(self.exec_count)
+                    else:
+                        # Legacy path, byte-for-byte: independent gates,
+                        # crash/sanitizer replays and gc.collect keyed off
+                        # the raw iteration count rather than the stats
+                        # interval.
+                        self._legacy_memory_prune_tick()
+                        if i % 500 == 0:
+                            import gc
+
+                            gc.collect()
                     self._last_stats_exec = self.exec_count
                     if self.stats_file:
                         self._dump_stats()
                         self._save_state()
+                if not self.job_scheduler:
+                    if i % 500 == 0 and self.replay_n > 0:
+                        self._run_crash_replays()
+                    if i % 500 == 0 and (self.asan_target or self.ubsan_target):
+                        self._run_sanitizer_replays()
         except (KeyboardInterrupt, SystemExit):
             pass
         except OSError as e:

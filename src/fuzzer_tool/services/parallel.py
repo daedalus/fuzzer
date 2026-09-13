@@ -82,6 +82,7 @@ def _worker_main(
     n_workers: int = 1,
     fractal_partition: bool = False,
     fractal_partition_depth: int = 3,
+    job_scheduler: bool = False,
     fractal_diversity: bool = False,
     fractal_diversity_depth: int = 3,
     fractal_diversity_bonus: float = 1.3,
@@ -186,6 +187,7 @@ def _worker_main(
         c2ucb_lambda=c2ucb_lambda,
         c2ucb_min_out_rounds=c2ucb_min_out_rounds,
         resize_map_on_stall=resize_map_on_stall,
+        job_scheduler=job_scheduler,
         fractal_diversity=fractal_diversity,
         fractal_diversity_depth=fractal_diversity_depth,
         fractal_diversity_bonus=fractal_diversity_bonus,
@@ -409,6 +411,7 @@ def _distribute_initial_corpus(
     *,
     fractal_partition: bool = False,
     fractal_depth: int = 3,
+    cost_partition: bool = False,
 ) -> int:
     """Hand pre-existing seeds in *parent_dir* to the ``.wN`` dir that owns them.
 
@@ -420,15 +423,35 @@ def _distribute_initial_corpus(
 
     Assignment is by seed **content**, never by enumeration order:
 
+    * with ``cost_partition`` on, by
+      ``core.parallel_cost_partition.compute_partition`` (P3-3 step 5,
+      Multifit): input **byte size** is the cost proxy, because this runs
+      once at campaign start, before any seed has an execution-time
+      measurement in ``core.cost_ledger``. This balances total corpus
+      bytes across workers rather than total measured target time -- a
+      real but explicitly acknowledged gap between the proxy and what the
+      design note actually wants, stated here rather than silently
+      assumed away. Takes precedence over ``fractal_partition`` if both
+      are set.
     * with ``fractal_partition`` on, by ``assign_worker`` — the same
       function ``_sync_corpus_in`` enforces via ``accept_for_worker``.
       Round-robin disagreed with it, so a worker started fuzzing seeds
       outside its own cell while every sibling refused to import them.
-    * with it off, by a stable digest of the content.  Sync is fully
+    * with neither, by a stable digest of the content.  Sync is fully
       shared in that mode so ownership does not matter for correctness,
       but a stable map keeps a seed on the same worker across restarts
       and across changes in discovery order — the property the fractal
       partition exists to provide, given up by ``idx % n_workers``.
+
+    ``cost_partition`` only affects this one-shot initial distribution,
+    not the ongoing ``_sync_corpus_in`` boundary check that
+    ``fractal_partition`` also gates — the live-recompute path
+    (``core.parallel_cost_partition.maybe_repartition``, hysteresis over
+    per-tick ``core.cost_ledger`` measurements) is not wired in here; see
+    P3-3 step 5's handover note. Running this once at campaign start,
+    never again, is exactly the "or campaign start only" option that note
+    calls out as the safe alternative to live repacking's non-monotonicity
+    risk under drifting costs.
 
     Returns the number of seed files distributed.
     """
@@ -463,6 +486,28 @@ def _distribute_initial_corpus(
 
     for i in range(n_workers):
         (parent_dir / f".w{i}").mkdir(parents=True, exist_ok=True)
+
+    if cost_partition:
+        from fuzzer_tool.core.parallel_cost_partition import compute_partition
+
+        # Read once up front: compute_partition needs the whole cost
+        # vector before it can pack anything, unlike the other two modes,
+        # which assign one seed at a time via a per-item _owner closure.
+        contents: dict[Path, bytes] = {}
+        for p in seeds:
+            try:
+                contents[p] = p.read_bytes()
+            except OSError:
+                continue
+        costs = {p: float(max(len(data), 1)) for p, data in contents.items()}
+        partition = compute_partition(costs, n_workers).assignment
+
+        distributed = 0
+        for path, data in contents.items():
+            worker_dir = parent_dir / f".w{partition[path]}"
+            save_to_corpus(data, worker_dir, set())
+            distributed += 1
+        return distributed
 
     if fractal_partition:
         from fuzzer_tool.core.parallel_fractal_partition import assign_worker
@@ -561,6 +606,7 @@ def run_parallel(
     resize_map_on_stall: bool = True,
     fractal_partition: bool = False,
     fractal_partition_depth: int = 3,
+    job_scheduler: bool = False,
     fractal_diversity: bool = False,
     fractal_diversity_depth: int = 3,
     fractal_diversity_bonus: float = 1.3,
@@ -610,6 +656,7 @@ def run_parallel(
         jobs,
         fractal_partition=fractal_partition,
         fractal_depth=fractal_partition_depth,
+        cost_partition=job_scheduler,
     )
     if n_seed_files:
         print(f"[*] Distributed {n_seed_files} pre-existing seed(s) across {jobs} workers")
@@ -702,6 +749,7 @@ def run_parallel(
         n_workers=jobs,
         fractal_partition=fractal_partition,
         fractal_partition_depth=fractal_partition_depth,
+        job_scheduler=job_scheduler,
         fractal_diversity=fractal_diversity,
         fractal_diversity_depth=fractal_diversity_depth,
         fractal_diversity_bonus=fractal_diversity_bonus,

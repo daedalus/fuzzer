@@ -41,20 +41,25 @@ tick to have been "due since", so waiting for one is wrong.
 This module holds no ``Fuzzer`` reference and does no I/O of its own: each
 job's ``action`` is the caller's existing method, unmodified. Wiring
 (constructing the queue and calling ``tick`` once per stats interval in
-``services/fuzzer.py``) is a separate, deliberately small diff.
+``services/fuzzer.py``) is a separate, deliberately small diff, and is
+itself gated behind ``--job-scheduler`` (default off, excluded from
+``--hail-mary``) -- see ``Fuzzer.__init__``'s comment beside
+``self.job_scheduler``. With the flag off, ``services/fuzzer.py`` runs the
+original three independent gates byte-for-byte; this module is inert.
 
-**Cadence change, stated explicitly.** The old ``i % 500`` gates for
-crash/sanitizer replays and ``gc.collect`` ran on the raw iteration count,
-independent of the stats-print interval (``_stats_effective_interval``,
-1x-to-10x mean EPS). At high exec rates that interval can exceed 500 execs,
-so those two gates could previously fire several times between stats
-ticks; wired into ``self._maintenance.tick()`` inside the same
+**Cadence change, stated explicitly, and opt-in.** The old ``i % 500``
+gates for crash/sanitizer replays and ``gc.collect`` ran on the raw
+iteration count, independent of the stats-print interval
+(``_stats_effective_interval``, 1x-to-10x mean EPS). At high exec rates
+that interval can exceed 500 execs, so those two gates could previously
+fire several times between stats ticks; wired into
+``self._maintenance.tick()`` inside the same
 ``if self.exec_count - self._last_stats_exec >= effective_interval`` block
-as the rest of the tick, they now fire at most once per stats tick, same as
-memory pruning already did. This is the "shared vocabulary" P3-3 asks
-for, not a hidden side effect, but it is a real cadence change under fast
-targets and should be called out as such in the commit message, not
-buried in a diff.
+as the rest of the tick, under ``--job-scheduler`` they now fire at most
+once per stats tick, same as memory pruning already did. This is the
+"shared vocabulary" P3-3 asks for, not a hidden side effect, but it is a
+real cadence change under fast targets -- which is exactly why it sits
+behind a flag instead of replacing the default.
 """
 
 from __future__ import annotations

@@ -69,6 +69,13 @@ _EXCLUDED_OPT_IN = frozenset(
         # enabling it would make a --hail-mary run incomparable to any
         # other run of the same seed for no behavioural gain.
         "rand_floyd_sample",
+        # Changes maintenance-tick cadence (crash/sanitizer replays and
+        # gc.collect move off i % 500 onto the stats-interval cadence),
+        # not a fuzzing strategy. --hail-mary force-enabling it would
+        # silently change unrelated timing for everyone who uses
+        # --hail-mary, which is not what "try every plausible strategy"
+        # should imply. See services/maintenance.py's module docstring.
+        "job_scheduler",
         # Not a strategy: a feedback loop that overrides the temperature
         # knob every other strategy reads. It is off by default for a
         # substantive reason -- the sign and magnitude of
