@@ -1180,9 +1180,11 @@ def _spectral_diagnostics(f) -> str:
             has_data = True
             res = detect_periodicity([float(t) for t in times], min_samples=50)
             if res.significant:
+                bg = f" after removing AR({res.ar_order}) drift" if res.ar_order else ""
                 lines.append(
                     f"  Exec time:      PERIODIC — dominant period {res.dominant_period:.1f} "
-                    f"samples (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin {res.peak_bin})"
+                    f"samples (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin "
+                    f"{res.peak_bin}){bg}"
                 )
                 if res.dominant_period is not None:
                     intervals = _peak_intervals([float(t) for t in times])
@@ -1206,10 +1208,16 @@ def _spectral_diagnostics(f) -> str:
             deltas = [b - a for a, b in zip(edges_series[:-1], edges_series[1:], strict=True)]
             res = detect_periodicity([float(d) for d in deltas], min_samples=50)
             if res.significant:
+                # The AR order says how much drift had to be removed before
+                # the g-test's white-noise null applied. Worth showing: on a
+                # drifting series the residual false-positive rate is ~0.10
+                # and not the nominal 0.05, so this verdict is a lead rather
+                # than a finding. See core/periodicity.detect_periodicity.
+                bg = f" after removing AR({res.ar_order}) drift" if res.ar_order else ""
                 lines.append(
                     f"  Discovery rate: PERIODIC — dominant period {res.dominant_period:.1f} "
                     f"sync intervals (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin "
-                    f"{res.peak_bin}); possible corpus-sync artifact"
+                    f"{res.peak_bin}){bg}; possible corpus-sync artifact"
                 )
                 if res.dominant_period is not None:
                     intervals = _peak_intervals([float(d) for d in deltas])
