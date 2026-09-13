@@ -50,6 +50,7 @@ _KWARGS = {
     "c2ucb": {"c2ucb": True},
     "fpl": {"fpl": True},
     "invasion": {"invasion": True, "mc_bandit": True},
+    "canary": {"canary_scheduler": True},
 }
 
 #: On the ballot but learns nothing, so attribution has no consumer.

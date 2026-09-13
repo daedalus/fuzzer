@@ -670,6 +670,7 @@ def cmd_fuzz(args):
         exp3=getattr(args, "exp3", False),
         invasion=getattr(args, "invasion", False),
         round_robin=getattr(args, "round_robin", False),
+        canary_scheduler=getattr(args, "canary_scheduler", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
@@ -2141,6 +2142,14 @@ def main() -> int:
         "--round-robin",
         action="store_true",
         help="Enable round-robin operator scheduling (deterministic cycling through operators)",
+    )
+    fuzz_parser.add_argument(
+        "--canary-scheduler",
+        action="store_true",
+        help="Enable the canary operator scheduler: a deliberately worst-in-class scheduler "
+        "that always picks the lowest posterior success-rate candidate. Meant to run "
+        "alongside --elo as a floor for the meta-scheduler tournament -- if a real scheduler "
+        "ranks at or below it, that is logged as needing inspection.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

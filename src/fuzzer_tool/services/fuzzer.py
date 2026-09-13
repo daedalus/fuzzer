@@ -47,6 +47,7 @@ from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.schedulers import (
     C2UCBScheduler,
+    CanaryScheduler,
     CMAESScheduler,
     ConsolidatedScheduler,
     ContextualLinUCBScheduler,
@@ -118,6 +119,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "fpl",
     "invasion",
     "round_robin",
+    "canary",
 )
 _SEED_STRATEGY_NAMES = (
     "ga",
@@ -842,6 +844,7 @@ class Fuzzer:
         elo=False,
         invasion=False,
         round_robin=False,
+        canary_scheduler=False,
         garch=False,
         continuum=False,
         temp_control=False,
@@ -2039,6 +2042,17 @@ class Fuzzer:
             self._round_robin = RoundRobinScheduler()
             log.info("Round-robin operator scheduling enabled")
 
+        # Canary: deliberately worst-in-class operator scheduler. Fed the
+        # same record(op, success, weight) signal as every real scheduler
+        # in the pool, it always argmin-selects instead of argmax-selects
+        # (see core/schedulers/canary.py). Only meaningful alongside --elo,
+        # which is what actually ranks it against the rest of the pool.
+        self._use_canary = canary_scheduler
+        self._canary = None
+        if canary_scheduler:
+            self._canary = CanaryScheduler()
+            log.info("Canary operator scheduling enabled (deliberately worst-in-class)")
+
         self._use_contextual = contextual
         self._contextual = None
         if contextual:
@@ -2249,6 +2263,7 @@ class Fuzzer:
             or self._cucb
             or self._cusum_ucb
             or self._fpl
+            or self._canary
             or self._use_shapley
         )
 
@@ -2449,6 +2464,8 @@ class Fuzzer:
             _register_arms(self._c2ucb)
         if self._round_robin:
             _register_arms(self._round_robin)
+        if self._canary:
+            _register_arms(self._canary)
         if self._elo:
             _register_arms(self._elo)
         del _format_priors  # free priors dict after arm registration
@@ -4799,6 +4816,7 @@ class Fuzzer:
             self._fpl,
             self._consolidated,
             self._moss,
+            self._canary,
         ):
             if scheduler is None:
                 continue
@@ -4904,6 +4922,8 @@ class Fuzzer:
             if self._elo_decay_counter >= self._elo_decay_interval:
                 self._elo_decay_counter = 0
                 self._elo.apply_decay()
+                if self._use_canary and self._canary:
+                    self._check_canary_inspection()
 
         # Meta-elo: record operator strategy-level match. Only when the current
         # strategy is a real selectable scheduler (random_stall is excluded, so
@@ -6117,6 +6137,25 @@ class Fuzzer:
             if other != self._meta_strategy:
                 self._elo.record_strategy_match(self._meta_strategy, other, score)
 
+    def _check_canary_inspection(self) -> None:
+        """Warn when a real scheduler ranks at or below the canary floor.
+
+        Called on the same cadence as ``apply_decay`` (every
+        ``_elo_decay_interval`` recorded rounds), not every round --
+        canary and its rivals both need ``min_matches`` accumulated for
+        ``strategies_below_canary`` to say anything, so checking more
+        often just repeats the same "not enough data yet" empty result.
+        """
+        flagged = self._elo.strategies_below_canary()
+        for strategy, mu, canary_mu in flagged:
+            log.warning(
+                "Elo meta-scheduler: %r rated %.1f, at or below the canary "
+                "floor (%.1f) -- this scheduler needs inspection",
+                strategy,
+                mu,
+                canary_mu,
+            )
+
     def _seed_convergence_rows(self) -> list[tuple[str, float, float, int]]:
         """(name, rating, delta, matches) for every seed strategy actually used
         this run. Strategies that were never selected (only ever recorded as
@@ -6198,6 +6237,8 @@ class Fuzzer:
             ops.append("invasion")
         if getattr(self, "_use_round_robin", False) and self._round_robin:
             ops.append("round_robin")
+        if getattr(self, "_use_canary", False) and self._canary:
+            ops.append("canary")
         if getattr(self, "_use_shapley", False):
             ops.append("shapley")
         if ops:
@@ -6430,6 +6471,8 @@ class Fuzzer:
             ops.append("shapley")
         if getattr(self, "_use_round_robin", False):
             ops.append("round-robin")
+        if getattr(self, "_use_canary", False):
+            ops.append("canary")
         if getattr(self, "_cmaes", False):
             groups["Scheduling"].append("cma-es")
         if ops:

@@ -28,6 +28,7 @@ from __future__ import annotations
 # ballot out of `select_op` and fails by name when this list falls behind.
 BALLOT_SCHEDULERS = (
     "c2ucb",
+    "canary",
     "cmaes",
     "consolidated",
     "contextual",

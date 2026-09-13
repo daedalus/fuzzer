@@ -187,12 +187,24 @@ class TestAllSchedulersReachAllOperators:
         """schedulers.__all__ minus the seed scheduler == the list above.
 
         MCTSSeedScheduler picks *seeds*, not operators, so it has no
-        init_arm/select_op(ops) surface and is excluded by design. Anything
-        else appearing in __all__ without appearing here is a scheduler
-        nothing checks for reachability.
+        init_arm/select_op(ops) surface and is excluded by design.
+        CanaryScheduler is excluded for the opposite reason every other
+        scheduler here is included: full-reachability is a *bug bar* for a
+        scheduler meant to exploit, but canary is meant to fixate on
+        whichever arm looks worst -- under this test's uniform reward it
+        will lock onto the first arm it happens to try and never revisit
+        the rest, which is the correct behavior for it, not a reachability
+        bug (see core/schedulers/canary.py and
+        tests/test_canary_scheduler.py). Anything else appearing in
+        __all__ without appearing here is a scheduler nothing checks for
+        reachability.
         """
         covered = {entry[0] for entry in _all_operator_schedulers()}
-        exported = set(S.__all__) - {"MCTSSeedScheduler", "AlphaBetaMCTSSeedScheduler"}
+        exported = set(S.__all__) - {
+            "MCTSSeedScheduler",
+            "AlphaBetaMCTSSeedScheduler",
+            "CanaryScheduler",
+        }
         assert exported == covered, f"uncovered schedulers: {sorted(exported - covered)}"
 
 

@@ -943,6 +943,41 @@ class BayesianEloTracker(RoundRecorderMixin):
             if self._strategy_match_count.get(s, 0) >= self.min_matches
         ]
 
+    def strategies_below_canary(self, canary_name: str = "canary") -> list[tuple[str, float, float]]:
+        """Real strategies rated at or below the deliberately-worst canary.
+
+        ``canary_name`` always argmin-selects (see
+        ``core/schedulers/canary.py``), so it is meant to anchor the bottom
+        of ``get_strategy_ranking()``. A real strategy resting at or below
+        it is not evidence canary is doing well -- it means that strategy
+        is performing at or worse than a scheduler built to lose on
+        purpose, which is worth looking into.
+
+        Both sides must have accumulated ``min_matches`` matches already
+        (the same gate ``get_strategy_ranking`` uses) -- an unrated
+        strategy sitting at ``initial_mu`` isn't a finding, it just hasn't
+        played enough games yet.
+
+        Returns:
+            ``(strategy, strategy_mu, canary_mu)`` tuples, worst offender
+            (lowest strategy_mu) first. Empty if canary itself isn't rated
+            yet, or nothing else is at/below it.
+        """
+        if self._strategy_match_count.get(canary_name, 0) < self.min_matches:
+            return []
+        canary_mu = self._strategy_mu.get(canary_name)
+        if canary_mu is None:
+            return []
+        flagged = [
+            (s, mu, canary_mu)
+            for s, mu in self._strategy_mu.items()
+            if s != canary_name
+            and self._strategy_match_count.get(s, 0) >= self.min_matches
+            and mu <= canary_mu
+        ]
+        flagged.sort(key=lambda row: row[1])
+        return flagged
+
     def apply_decay(self) -> None:
         """Apply system noise (tau) to all posteriors. Called periodically.
 

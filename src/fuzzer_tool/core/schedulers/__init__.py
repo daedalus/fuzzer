@@ -1,6 +1,7 @@
 """Operator-selection schedulers (bandit algorithms)."""
 
 from fuzzer_tool.core.schedulers.c2ucb import C2UCBScheduler
+from fuzzer_tool.core.schedulers.canary import CanaryScheduler
 from fuzzer_tool.core.schedulers.cmaes import CMAESScheduler
 from fuzzer_tool.core.schedulers.consolidated import ConsolidatedScheduler
 from fuzzer_tool.core.schedulers.contextual import ContextualLinUCBScheduler
@@ -45,4 +46,5 @@ __all__ = [
     "KL_DUCBScheduler",
     "KL_SWUCBScheduler",
     "RoundRobinScheduler",
+    "CanaryScheduler",
 ]
