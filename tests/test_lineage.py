@@ -812,3 +812,83 @@ class TestLineageDiversityWeights:
         weights = sp._compute_weights(now)
         assert len(weights) == 1
         assert weights[0] > 0
+
+
+class TestLineageStrahler:
+    def test_single_leaf_is_one(self):
+        tree = LineageTree()
+        tree.insert(None, "a", [], [], 1)
+        assert tree.strahler("a") == 1
+
+    def test_unknown_key_is_zero(self):
+        tree = LineageTree()
+        assert tree.strahler("nope") == 0
+
+    def test_degenerate_chain_stays_one(self):
+        tree = LineageTree()
+        tree.insert(None, "a", [], [], 1)
+        tree.insert("a", "b", [], [], 1)
+        tree.insert("b", "c", [], [], 1)
+        tree.insert("c", "d", [], [], 1)
+        assert tree.strahler("a") == 1
+        assert tree.strahler("d") == 1
+
+    def test_single_child_inherits_max(self):
+        tree = LineageTree()
+        tree.insert(None, "a", [], [], 1)
+        tree.insert("a", "b", [], [], 1)  # strahler(b) == 1
+        tree.insert("b", "c", [], [], 1)
+        tree.insert("b", "d", [], [], 1)  # tie -> strahler(b) == 2
+        # a has one child (b) with number 2 -> a inherits 2, doesn't bump
+        assert tree.strahler("b") == 2
+        assert tree.strahler("a") == 2
+
+    def test_tie_bumps_number(self):
+        tree = LineageTree()
+        tree.insert(None, "root", [], [], 1)
+        tree.insert("root", "l", [], [], 1)
+        tree.insert("root", "r", [], [], 1)
+        # two leaf children tie at 1 -> root becomes 2
+        assert tree.strahler("root") == 2
+
+    def test_perfect_binary_tree_matches_height_plus_one(self):
+        tree = LineageTree()
+        tree.insert(None, "r", [], [], 1)
+        tree.insert("r", "l", [], [], 1)
+        tree.insert("r", "rr", [], [], 1)
+        tree.insert("l", "ll", [], [], 1)
+        tree.insert("l", "lr", [], [], 1)
+        tree.insert("rr", "rrl", [], [], 1)
+        tree.insert("rr", "rrr", [], [], 1)
+        # perfect binary tree of height 2 -> Strahler number 3
+        assert tree.strahler("r") == 3
+
+    def test_unbalanced_beats_no_tie(self):
+        tree = LineageTree()
+        tree.insert(None, "r", [], [], 1)
+        # r has two children: a leaf (1) and a 2-deep chain (still 1)
+        tree.insert("r", "leaf", [], [], 1)
+        tree.insert("r", "chain1", [], [], 1)
+        tree.insert("chain1", "chain2", [], [], 1)
+        # both children resolve to 1 -> tie -> r becomes 2
+        assert tree.strahler("r") == 2
+
+    def test_independent_of_node_weight(self):
+        # Strahler ignores node_weight entirely; only topology matters.
+        tree = LineageTree()
+        tree.insert(None, "r", [], [], 1000)
+        tree.insert("r", "a", [], [], 1)
+        tree.insert("r", "b", [], [], 500)
+        assert tree.strahler("r") == 2
+        assert tree.strahler("a") == 1
+
+    def test_deep_chain_no_recursion_error(self):
+        tree = LineageTree()
+        tree.insert(None, "n0", [], [], 1)
+        prev = "n0"
+        for i in range(1, 5000):
+            key = f"n{i}"
+            tree.insert(prev, key, [], [], 1)
+            prev = key
+        assert tree.strahler("n0") == 1
+        assert tree.strahler(prev) == 1

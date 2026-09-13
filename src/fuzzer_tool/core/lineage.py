@@ -16,6 +16,10 @@ Three queries are supported:
    from scratch.
 3. **LCA-based diversity** — ``lca`` / ``lca_distance`` over the
    parent-pointer forest feed a diversity term in seed scoring.
+4. **Branching-complexity ranking** — ``strahler`` gives the
+   Horton-Strahler number of a subtree, a weight-free topology measure
+   (bushy vs. degenerate-chain) usable alongside ``subtree_weight`` /
+   ``pagerank_credit`` when picking which branch to spend budget on.
 
 The tree is keyed by ``seed_key`` strings (16-hex xxhash) — one hash
 space shared with ``hash_data``, crash sidecars, and on-disk delta
@@ -298,6 +302,60 @@ class LineageTree:
             return total
 
         return dfs(key)
+
+    def strahler(self, key: str) -> int:
+        """Strahler (Horton-Strahler) number of the subtree rooted at *key*.
+
+        Bottom-up branching-complexity measure, per the standard rule: a
+        leaf is 1; a node whose children's numbers have a unique max i
+        keeps i; a node whose top two-or-more children tie at max i
+        becomes i + 1. Where ``subtree_weight`` sums discounted
+        productivity and ``pagerank_credit`` tracks yield per mutation,
+        this is a pure topology measure of a branch: how much
+        *concurrent* bifurcation was needed to build it, independent of
+        edge counts or weights. Two lineages with identical subtree_weight
+        can have very different Strahler numbers — one a single deep
+        mutation chain (degenerate, Strahler 1 regardless of depth), the
+        other balanced bifurcating exploration (Strahler ~ log2 of size).
+
+        Recomputed on demand via an iterative post-order walk (stack-based,
+        like the other traversals here, to avoid recursion-depth limits on
+        deep lineages) rather than maintained incrementally on insert —
+        unlike subtree_weight's ancestor-walk propagation, a new child can
+        raise its parent's number without changing by a bounded delta, so
+        there is no cheap short-circuit to propagate on insert.
+
+        Returns 0 for an unknown key.
+        """
+        if key not in self.nodes:
+            return 0
+
+        memo: dict[str, int] = {}
+        stack: list[tuple[str, bool]] = [(key, False)]
+        while stack:
+            k, expanded = stack.pop()
+            if k in memo:
+                continue
+            children = self._children.get(k, ())
+            if not expanded:
+                stack.append((k, True))
+                for ck in children:
+                    if ck not in memo:
+                        stack.append((ck, False))
+                continue
+            if not children:
+                memo[k] = 1
+                continue
+            top = 0
+            ties = 0
+            for ck in children:
+                v = memo.get(ck, 0)
+                if v > top:
+                    top, ties = v, 1
+                elif v == top:
+                    ties += 1
+            memo[k] = top + 1 if ties >= 2 else top
+        return memo[key]
 
     def pagerank_credit(
         self,
