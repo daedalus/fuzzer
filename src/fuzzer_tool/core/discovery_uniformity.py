@@ -39,6 +39,29 @@ Cost
 :meth:`DiscoveryUniformityDetector.update` is O(1). :meth:`verdict` is
 O(window) for the dispersion sum, called at most once per stats tick
 alongside the other regime-detection readouts it sits next to.
+
+Negative-binomial severity readout
+-----------------------------------
+The dispersion test above is deliberately a pure yes/no rejection of the
+homogeneous-Poisson null -- it says "clustered" but not "how clustered."
+When the null is rejected on the *over*-dispersed side (D high, variance
+exceeds the mean), the counts are a candidate fit for a negative binomial:
+NB is exactly the distribution obtained by letting a Poisson's rate itself
+vary as a Gamma(r, theta) draw per tick (the gamma-Poisson mixture), so a
+bursty discovery process -- ticks alternating between "nothing new" and "a
+vein of coverage just opened up" -- is the textbook NB regime, not a
+different failure mode that happens to also fail the dispersion test.
+``fit_negative_binomial`` gives the method-of-moments estimate of NB's
+aggregation parameter r from the same count window already collected here.
+r is inversely related to burstiness: r -> infinity recovers the Poisson
+limit (see the module's homogeneous case), while small r means a few ticks
+account for most of the discovered coverage. This is a strictly cheaper
+estimator than MLE (no digamma root-finding) and is reported only as a
+severity readout alongside the existing p-value -- it is not itself a
+second hypothesis test, and callers should gate on ``verdict()``'s
+existing p-value/alpha before trusting it, since the moment estimator is
+noisy at small sample counts and is undefined (returns ``None``) whenever
+the sample variance does not exceed the sample mean.
 """
 
 from __future__ import annotations
@@ -73,6 +96,35 @@ def dispersion_pvalue(counts) -> float:
     dof = n - 1
     p_over = chisq_sf(d, dof)
     return max(0.0, min(1.0, 2.0 * min(p_over, 1.0 - p_over)))
+
+
+def fit_negative_binomial(counts) -> dict | None:
+    """Method-of-moments fit of a negative binomial to *counts*.
+
+    Uses ``r = mean**2 / (var - mean)``, ``p = mean / var`` -- the
+    standard NB method-of-moments pair, valid exactly when the sample is
+    overdispersed relative to Poisson (``var > mean``). Returns ``None``
+    when there are fewer than two counts, the mean is zero, or
+    ``var <= mean`` (underdispersed or exactly Poisson: there is no
+    over-dispersion for NB to explain, and the ``r`` formula would divide
+    by zero or go negative).
+
+    Returns a dict with ``r`` (aggregation parameter; smaller means
+    burstier) and ``p`` (NB success-probability parameter in the "number
+    of failures before r successes" parameterization) on success.
+    """
+    n = len(counts)
+    if n < 2:
+        return None
+    mean = sum(counts) / n
+    if mean <= 0:
+        return None
+    var = sum((x - mean) ** 2 for x in counts) / n
+    if var <= mean:
+        return None
+    r = mean * mean / (var - mean)
+    p = mean / var
+    return {"r": r, "p": p}
 
 
 class DiscoveryUniformityDetector:
@@ -118,7 +170,13 @@ class DiscoveryUniformityDetector:
         if n < self.min_obs:
             return {"homogeneous": True, "p": 1.0, "n": n}
         p = dispersion_pvalue(self._counts)
-        return {"homogeneous": p > self.alpha, "p": p, "n": n}
+        verdict = {"homogeneous": p > self.alpha, "p": p, "n": n}
+        if not verdict["homogeneous"]:
+            nb = fit_negative_binomial(self._counts)
+            if nb is not None:
+                verdict["nb_r"] = nb["r"]
+                verdict["nb_p"] = nb["p"]
+        return verdict
 
     def reset(self) -> None:
         """Clear all state, keeping the configured parameters."""

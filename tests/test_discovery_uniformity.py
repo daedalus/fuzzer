@@ -14,6 +14,7 @@ import random
 from fuzzer_tool.core.discovery_uniformity import (
     DiscoveryUniformityDetector,
     dispersion_pvalue,
+    fit_negative_binomial,
 )
 
 
@@ -129,6 +130,66 @@ class TestDiscrimination:
         for c in [1, 2.0, -1, 0, 3]:
             d.update(c)
         d.verdict()  # must not raise
+
+
+class TestFitNegativeBinomial:
+    def test_too_few_counts_is_none(self):
+        assert fit_negative_binomial([5]) is None
+        assert fit_negative_binomial([]) is None
+
+    def test_zero_mean_is_none(self):
+        assert fit_negative_binomial([0, 0, 0, 0]) is None
+
+    def test_poisson_like_var_not_exceeding_mean_is_none(self):
+        # Perfectly constant: var == 0 <= mean, no overdispersion to fit.
+        assert fit_negative_binomial([7] * 20) is None
+
+    def test_bursty_counts_fit_a_small_r(self):
+        counts = [0] * 40 + [200] * 5
+        nb = fit_negative_binomial(counts)
+        assert nb is not None
+        assert 0 < nb["r"] < 1
+        assert 0 < nb["p"] < 1
+
+    def test_recovers_known_parameters_from_a_negative_binomial_sample(self):
+        """Sample from NB(r=3, p=0.4) via r iid geometric draws (the sum
+        representation the wiki article gives) and check the moment
+        estimator lands near the generating parameters."""
+        rng = random.Random(7)
+        r_true, p_true = 3, 0.4
+
+        def _geometric(rng, p):
+            k = 0
+            while rng.random() >= p:
+                k += 1
+            return k
+
+        counts = [
+            sum(_geometric(rng, p_true) for _ in range(r_true)) for _ in range(4000)
+        ]
+        nb = fit_negative_binomial(counts)
+        assert nb is not None
+        assert abs(nb["r"] - r_true) / r_true < 0.15
+        assert abs(nb["p"] - p_true) / p_true < 0.15
+
+    def test_verdict_surfaces_nb_fit_only_when_overdispersed(self):
+        d = DiscoveryUniformityDetector(window=300, min_obs=32)
+        _feed(d, _poisson_series(300, lam=8.0, seed=1))
+        v = d.verdict()
+        assert v["homogeneous"]
+        assert "nb_r" not in v
+
+        d2 = DiscoveryUniformityDetector(window=450, min_obs=32)
+        rng = random.Random(5)
+        bursty = []
+        for _ in range(150):
+            bursty.append(0)
+            bursty.append(0)
+            bursty.append(30 + rng.randint(-2, 2))
+        _feed(d2, bursty)
+        v2 = d2.verdict()
+        assert not v2["homogeneous"]
+        assert "nb_r" in v2 and "nb_p" in v2
 
 
 class TestReset:
