@@ -1,35 +1,38 @@
-"""Structure-function (variogram) noise-type identification for edge-discovery rates.
+"""Overlapping Allan variance for noise-type identification.
 
-This module computes the second-order structure function (normalised quadratic
-variation / variogram) of the incremental edge-discovery rate:
+This module implements the **true overlapping Allan deviation** on the
+incremental edge-discovery rate, and retains the second-order structure
+function (variogram) as a secondary diagnostic.
 
-  S(τ) = ⟨(x[i+τ] - x[i])²⟩ / 2
+Allan variance is a first difference of *block averages* — equivalently a
+second difference of the cumulative series.  For rate samples ``x`` with
+cumulative sum ``S`` (``S[0]=0``, ``S[k]=sum(x[:k])``) and averaging factor
+``m = τ``:
 
-Historically this module was labelled "Allan variance". The true Allan
-variance is a first difference of *block averages* (equivalently a second
-difference of the cumulative series). The two estimators have different
-noise-type signatures; the structure function cannot separate white from
-flicker (1/f) noise. The module, class, and method names are therefore
-renamed to match what is actually computed; the estimator itself is kept
-because recalibrating the fatigue threshold against the stationary 1/f null
-is cheaper than introducing a new default-on stall path.
+    σ²_y(τ) = 1 / (2 m² (N - 2m))  Σ_i (S[i+2m] - 2 S[i+m] + S[i])²
+    adev(τ) = √σ²_y(τ)
+
+This separates white noise (log-log slope ≈ −0.5) from flicker (≈ 0) and
+random-walk / trending discovery rates (slope ≳ +0.4), which the structure
+function cannot do.
 
 Classification (tailored to edge-discovery-rate signals):
 
-  - **Active** (healthy random exploration):  sdev(2) > 0.5, slope < fatigue
-  - **Fatiguing** (approaching saturation):   sdev(2) > 0.01, slope ≥ fatigue
-  - **Stalled** (effectively zero discovery): sdev(2) ≤ 0.01
+  - **Active** (healthy random exploration):  adev(2) > stall, slope < fatigue
+  - **Fatiguing** (approaching saturation):   adev(2) > stall, slope ≥ fatigue
+  - **Stalled** (effectively zero discovery): adev(2) ≤ stall
 
-The fatigue slope threshold is set with explicit margin against stationary
-long-memory (1/f) processes, which produce mean slopes ≈ 0.105 under the
-structure function (see handover audit 2026-09-13). Previous threshold 0.1
-misfired on a coin-flip for pure 1/f.
+Fatigue threshold is calibrated against true Allan slopes: white ≈ −0.5,
+flicker ≈ 0, random-walk ≈ +0.45, strong downtrend ≈ +0.8.  Threshold 0.15
+separates stationary / white from RW and trends (handover audit 2026-09-13).
+
+The structure-function deviation ``sdev`` is kept for diagnostics and for
+callers that explicitly want the variogram.
 
 This module also provides :class:`DispersionIndex` — a sliding-window
-Index of Dispersion (Fano factor, D = σ²/μ).  D complements the structure
-function by resolving a key ambiguity the latter cannot: a buffer full
-of zeros and a buffer with rare bursts both produce low deviation,
-but D discriminates them.
+Index of Dispersion (Fano factor, D = σ²/μ).  D complements Allan variance
+by resolving a key ambiguity: a buffer full of zeros and a buffer with rare
+bursts both produce low Allan deviation, but D discriminates them.
 
 Rather than compare D against fixed constants (which are only correctly
 calibrated at one particular sample size), dispersion significance is
@@ -50,14 +53,16 @@ import math
 from fuzzer_tool.core.chi_squared import chi_squared_pvalue
 from fuzzer_tool.core.running_stats import RunningMoments
 
-# Structure-function deviation thresholds (edge-discovery rate signals).
-# Fatigue threshold raised from 0.1 → 0.25 after audit: stationary 1/f
-# processes produce mean slope ≈ 0.105 under this estimator (false-positive
-# rate 0.593 at the old threshold). 0.25 leaves margin against beta≤1.0
-# while still catching clear downward trends (linear decay, random-walk).
-_SDEV_ACTIVE_THRESHOLD = 0.5  # sdev(2) above this → signal has meaningful variance
-_SDEV_STALL_THRESHOLD = 0.01  # sdev(2) below this → signal is effectively constant
-_FATIGUE_SLOPE_THRESHOLD = 0.25  # slope above this → variance grows with averaging
+# True overlapping Allan deviation thresholds (edge-discovery rate signals).
+# Calibrated against synthetic series (N=256, 50–80 replicates):
+#   white/Poisson  slope ≈ −0.53, adev(2) high
+#   flicker-ish    slope ≈ 0–0.2
+#   random-walk    slope ≈ +0.45
+#   strong down    slope ≈ +0.81
+# Fatigue at 0.15 separates stationary/white from RW and trends.
+_ADEV_ACTIVE_THRESHOLD = 0.1   # adev(2) above this → signal has meaningful variance
+_ADEV_STALL_THRESHOLD = 0.01   # adev(2) below this → signal is effectively constant
+_FATIGUE_SLOPE_THRESHOLD = 0.15  # Allan log-log slope above this → fatiguing
 
 # Default significance level for the chi-squared dispersion test.
 _DISPERSION_ALPHA = 0.05
@@ -96,11 +101,14 @@ def chi2_cdf(x: float, k: int) -> float:
 
 
 class StructureFunctionDetector:
-    """Structure-function deviation detector for fuzzing stall analysis.
+    """Overlapping Allan-variance detector for fuzzing stall analysis.
 
     Maintains a fixed-size buffer of incremental edge counts and computes the
-    overlapping Structure-function deviation at power-of-two averaging times. Classification
-    is tailored to edge-discovery-rate signals, not generic noise theory.
+    true overlapping Allan deviation at power-of-two averaging times.
+    Classification is tailored to edge-discovery-rate signals.
+
+    The structure-function deviation (:meth:`sdev`) is retained as a secondary
+    diagnostic; :meth:`noise_type` / :meth:`noise_slope` use :meth:`adev`.
 
     Args:
         max_buffer_pow: Buffer capacity = 2**max_buffer_pow. Default 8 → 256.
@@ -111,6 +119,9 @@ class StructureFunctionDetector:
         self._maxlen = 2**max_buffer_pow
         self._min_samples = min_samples
         self._buf: collections.deque[float] = collections.deque(maxlen=self._maxlen)
+        # Running cumulative sum for O(n) overlapping Allan (phase data).
+        # _cum[0] = 0; _cum[k] = sum of first k rate samples.
+        self._cum: collections.deque[float] = collections.deque([0.0], maxlen=self._maxlen + 1)
         # Dispersion index tracks the same sliding window (window=maxlen
         # keeps its count ≡ len(_buf) = min(total, maxlen)).
         self._disp = DispersionIndex(window=self._maxlen)
@@ -119,16 +130,56 @@ class StructureFunctionDetector:
 
     def update(self, value: float) -> None:
         """Record a new observation (incremental edge count)."""
+        dropped = self._buf[0] if len(self._buf) == self._maxlen else None
         self._buf.append(value)
+        if dropped is None:
+            self._cum.append(self._cum[-1] + value)
+        else:
+            # Window slid: rebuild cumulative sum over the current buffer
+            # so _cum[0] == 0 and len(_cum) == len(_buf) + 1.
+            self._cum = collections.deque([0.0], maxlen=self._maxlen + 1)
+            running = 0.0
+            for v in self._buf:
+                running += v
+                self._cum.append(running)
         self._disp.update(value)
 
+    def adev(self, tau: int) -> float:
+        """Overlapping Allan deviation at averaging time *tau*.
+
+        For rate samples ``x`` with cumulative sum ``S``:
+
+            σ²_y(τ) = 1/(2 τ² (N-2τ)) Σ_i (S[i+2τ] - 2 S[i+τ] + S[i])²
+            adev(τ) = √σ²_y(τ)
+
+        Returns NaN if fewer than ``2*tau+1`` samples are available.
+        """
+        n = len(self._buf)
+        m = tau
+        if m < 1 or n < 2 * m + 1:
+            return float("nan")
+        # Prefer the maintained cumulative buffer when it is in sync.
+        if len(self._cum) == n + 1:
+            S = self._cum
+        else:
+            S_list = [0.0]
+            for v in self._buf:
+                S_list.append(S_list[-1] + v)
+            S = S_list
+        sq_sum = 0.0
+        count = n - 2 * m
+        for i in range(count):
+            diff = S[i + 2 * m] - 2.0 * S[i + m] + S[i]
+            sq_sum += diff * diff
+        return math.sqrt(sq_sum / (2.0 * m * m * count))
+
     def sdev(self, tau: int) -> float:
-        """Structure-function deviation (normalised quadratic variation) at lag *tau*.
+        """Structure-function deviation (variogram) at lag *tau*.
 
         S(τ) = sqrt( 0.5 * mean_i (x[i+τ] - x[i])² )
 
-        Uses all valid lag-τ pairs (n - τ). Returns NaN if fewer than τ+1
-        samples are available.
+        Secondary diagnostic; classification uses :meth:`adev`.
+        Returns NaN if fewer than τ+1 samples are available.
         """
         n = len(self._buf)
         if n < tau + 1 or tau < 1:
@@ -144,60 +195,59 @@ class StructureFunctionDetector:
     def noise_type(self) -> str:
         """Classify the fuzzing regime from the edge-discovery-rate signal.
 
-        Returns one of: ``"active"``, ``"fatiguing"``, ``"stalled"``,
-        ``"unknown"``.
+        Uses the true overlapping Allan deviation (:meth:`adev`) and its
+        log-log slope.  Returns one of: ``"active"``, ``"fatiguing"``,
+        ``"stalled"``, ``"unknown"``.
 
-        - ``active``: sdev(2) > threshold and slope < fatigue threshold.
-          Normal random exploration — variance is stationary.
-        - ``fatiguing``: sdev(2) > stall threshold and slope >= fatigue
-          threshold. Discovery rate is trending downward — approaching stall.
-        - ``stalled``: sdev(2) <= stall threshold. The signal is effectively
-          constant — no new edges are being discovered.
-        - ``unknown``: insufficient samples for a classification.
+        - ``active``: adev(2) > stall and slope < fatigue.
+          White / stationary exploration (Allan slope ≲ 0).
+        - ``fatiguing``: adev(2) > stall and slope ≥ fatigue.
+          Random-walk or downward-trending discovery rate (slope ≳ +0.4).
+        - ``stalled``: adev(2) ≤ stall.  Effectively constant signal.
+        - ``unknown``: insufficient samples.
         """
         n = len(self._buf)
         if n < self._min_samples:
             return "unknown"
 
-        dev2 = self.sdev(2)
+        dev2 = self.adev(2)
         if not math.isfinite(dev2):
             return "unknown"
 
-        # Near-zero variance → stalled
-        if dev2 <= _SDEV_STALL_THRESHOLD:
+        # Near-zero Allan deviation → stalled
+        if dev2 <= _ADEV_STALL_THRESHOLD:
             return "stalled"
 
-        # Compute log-log slope from larger tau values (weighted OLS).
-        # Weights ∝ (n - tau) / tau — large-tau estimates have fewer pairs
-        # and lower equivalent degrees of freedom.
+        # Log-log slope of adev(τ) over τ = 4..64 (weighted OLS).
+        # For true Allan: weights ∝ (N - 2τ) / τ² reflect equivalent DOF.
         max_pow = min(int(math.log2(n // 2)), 6)
         if max_pow < 1:
             return "unknown"
 
         points: list[tuple[float, float, float]] = []  # (log_tau, log_dev, weight)
-        for p in range(2, max_pow + 1):  # start from tau=4 to avoid tau-2 noise
+        for p in range(2, max_pow + 1):  # start from tau=4
             tau = 2**p
-            dev = self.sdev(tau)
+            dev = self.adev(tau)
             if math.isfinite(dev) and dev > 0:
-                w = (n - tau) / float(tau)
+                w = max(n - 2 * tau, 1) / float(tau * tau)
                 points.append((math.log(tau), math.log(dev), w))
 
         if len(points) < 2:
-            return "active" if dev2 > _SDEV_ACTIVE_THRESHOLD else "fatiguing"
+            return "active" if dev2 > _ADEV_ACTIVE_THRESHOLD else "fatiguing"
 
         slope = self._weighted_slope(points)
         if slope is None:
-            return "active" if dev2 > _SDEV_ACTIVE_THRESHOLD else "fatiguing"
+            return "active" if dev2 > _ADEV_ACTIVE_THRESHOLD else "fatiguing"
 
         if slope >= _FATIGUE_SLOPE_THRESHOLD:
             return "fatiguing"
         return "active"
 
     def noise_slope(self) -> float | None:
-        """Return the log-log structure-function slope, or None if unknown.
+        """Return the log-log Allan deviation slope, or None if unknown.
 
-        Uses weighted OLS (weights ∝ (n-τ)/τ) so large-τ points, which have
-        fewer pairs, do not dominate the fit.
+        Uses weighted OLS with weights ∝ (N − 2τ) / τ² so large-τ points,
+        which have fewer overlapping pairs, do not dominate the fit.
         """
         n = len(self._buf)
         if n < self._min_samples:
@@ -208,9 +258,9 @@ class StructureFunctionDetector:
         points: list[tuple[float, float, float]] = []
         for p in range(2, max_pow + 1):
             tau = 2**p
-            dev = self.sdev(tau)
+            dev = self.adev(tau)
             if math.isfinite(dev) and dev > 0:
-                w = (n - tau) / float(tau)
+                w = max(n - 2 * tau, 1) / float(tau * tau)
                 points.append((math.log(tau), math.log(dev), w))
         if len(points) < 2:
             return None
@@ -293,6 +343,7 @@ class StructureFunctionDetector:
     def reset(self) -> None:
         """Clear all samples."""
         self._buf.clear()
+        self._cum = collections.deque([0.0], maxlen=self._maxlen + 1)
         self._disp = DispersionIndex(window=self._maxlen)
 
     def save(self) -> dict:
@@ -308,8 +359,10 @@ class StructureFunctionDetector:
         self._maxlen = 2 ** data.get("max_buffer_pow", int(math.log2(self._maxlen)))
         self._min_samples = data.get("min_samples", self._min_samples)
         self._buf = collections.deque(data.get("samples", []), maxlen=self._maxlen)
-        # Rebuild the dispersion index from the restored buffer (mean/var
-        # are order-independent; window=maxlen ⇒ count matches len(_buf)).
+        # Rebuild cumulative sum and dispersion index from the restored buffer.
+        self._cum = collections.deque([0.0], maxlen=self._maxlen + 1)
+        for v in self._buf:
+            self._cum.append(self._cum[-1] + v)
         self._disp = DispersionIndex(window=self._maxlen)
         for v in self._buf:
             self._disp.update(v)

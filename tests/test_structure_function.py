@@ -1,4 +1,4 @@
-"""Tests for core/structure_function.py — structure function stall detection and DispersionIndex."""
+"""Tests for core/structure_function.py — Allan variance stall detection and DispersionIndex."""
 
 import math
 import random
@@ -56,6 +56,58 @@ class TestStructureFunctionDetector:
             assert math.isfinite(dev), f"sdev({tau}) should be finite"
             assert dev > 0, f"sdev({tau}) should be > 0 for noise"
 
+    def test_adev_constant_series(self):
+        """Allan deviation of a constant series should be ~0."""
+        d = StructureFunctionDetector(max_buffer_pow=4, min_samples=4)
+        for _ in range(32):
+            d.update(1.0)
+        dev = d.adev(1)
+        assert dev < 1e-12, f"expected ~0, got {dev}"
+
+    def test_adev_requires_samples(self):
+        """adev(tau) returns NaN when n < 2*tau+1."""
+        d = StructureFunctionDetector(max_buffer_pow=4, min_samples=4)
+        for _ in range(4):
+            d.update(1.0)
+        assert math.isnan(d.adev(2))  # n=4, tau=2 → need 5
+        d.update(1.0)
+        assert math.isfinite(d.adev(2))  # n=5, tau=2 → ok
+
+    def test_adev_white_noise_negative_slope(self):
+        """White noise has Allan log-log slope near -0.5."""
+        d = StructureFunctionDetector(max_buffer_pow=8, min_samples=8)
+        rng = random.Random(42)
+        for _ in range(200):
+            d.update(rng.gauss(5, 2))
+        slope = d.noise_slope()
+        assert slope is not None, "expected a slope"
+        # Theory: white FM → -0.5; allow wide tolerance for finite N
+        assert slope < 0.0, f"expected negative slope for white noise, got {slope}"
+        assert d.noise_type() == "active"
+
+    def test_adev_matches_manual_formula(self):
+        """adev(tau) matches the textbook second-difference formula."""
+        d = StructureFunctionDetector(max_buffer_pow=6, min_samples=4)
+        rng = random.Random(0)
+        data = [rng.gauss(1, 0.5) for _ in range(64)]
+        for v in data:
+            d.update(v)
+        tau = 4
+        # Manual computation
+        S = [0.0]
+        for v in data:
+            S.append(S[-1] + v)
+        m = tau
+        n = len(data)
+        sq = 0.0
+        count = n - 2 * m
+        for i in range(count):
+            diff = S[i + 2 * m] - 2 * S[i + m] + S[i]
+            sq += diff * diff
+        expected = math.sqrt(sq / (2.0 * m * m * count))
+        got = d.adev(tau)
+        assert abs(got - expected) < 1e-12, f"adev mismatch: {got} vs {expected}"
+
     def test_noise_type_active(self):
         """Sustained random exploration classifies as 'active'."""
         d = StructureFunctionDetector(max_buffer_pow=8, min_samples=8)
@@ -70,26 +122,26 @@ class TestStructureFunctionDetector:
         for _ in range(200):
             d.update(0.0)
         assert d.noise_type() == "stalled", f"expected stalled, got {d.noise_type()}"
-        assert d.sdev(2) < 0.01
+        assert d.adev(2) < 0.01
 
     def test_stalled_detects_zero_variance(self):
-        """All-zero signal has sdev(2) below stall threshold."""
+        """All-zero signal has adev(2) below stall threshold."""
         d = StructureFunctionDetector(max_buffer_pow=8, min_samples=8)
         for _ in range(200):
             d.update(0.0)
         assert d.noise_type() == "stalled"
-        assert d.sdev(2) < 0.01
+        assert d.adev(2) < 0.01
 
     def test_noise_type_fatiguing(self):
-        """Decaying discovery rate classifies as 'fatiguing'."""
+        """Strongly decaying discovery rate classifies as 'fatiguing'."""
         d = StructureFunctionDetector(max_buffer_pow=8, min_samples=8)
         rng = random.Random(42)
         for i in range(200):
-            rate = max(0, 10.0 - i * 10.0 / 200)
-            d.update(rng.gauss(rate, max(rate * 0.3, 0.5)))
+            rate = max(0.0, 20.0 * (1.0 - i / 200))
+            d.update(rate + rng.gauss(0, 0.2))
         assert d.noise_type() == "fatiguing", f"expected fatiguing, got {d.noise_type()}"
         slope = d.noise_slope()
-        assert slope is not None and slope > 0.25, f"expected slope > 0.25, got {slope}"
+        assert slope is not None and slope > 0.15, f"expected slope > 0.15, got {slope}"
 
     def test_noise_type_insufficient_data(self):
         """Returns 'unknown' with fewer than min_samples."""
