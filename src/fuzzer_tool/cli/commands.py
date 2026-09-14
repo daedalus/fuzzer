@@ -485,6 +485,10 @@ def cmd_fuzz(args):
             gradient_temperature=getattr(args, "gradient_temperature", 1.0),
             gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
             gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
+            successive_elim=getattr(args, "successive_elim", False),
+            successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
+            successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
+            successive_elim_reopen=getattr(args, "successive_elim_reopen", 0),
             op_katz=getattr(args, "op_katz", False),
             op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
             op_tang=getattr(args, "op_tang", False),
@@ -548,6 +552,7 @@ def cmd_fuzz(args):
         args.cusum_ucb = True
         args.fpl = True
         args.gradient = True
+        args.successive_elim = True
         args.consolidated = True
         args.moss = True
         args.contextual = True
@@ -708,6 +713,10 @@ def cmd_fuzz(args):
         gradient_temperature=getattr(args, "gradient_temperature", 1.0),
         gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
         gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
+        successive_elim=getattr(args, "successive_elim", False),
+        successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
+        successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
+        successive_elim_reopen=getattr(args, "successive_elim_reopen", 0),
         op_katz=getattr(args, "op_katz", False),
         op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
         op_tang=getattr(args, "op_tang", False),
@@ -1790,6 +1799,7 @@ _HAIL_MARY_FLAGS = (
     "cusum_ucb",
     "fpl",
     "gradient",
+    "successive_elim",
     "consolidated",
     "moss",
     "fractal_partition",
@@ -2371,6 +2381,29 @@ def main() -> int:
         type=float,
         default=0.05,
         help="Floor on softmax temperature (default: 0.05)",
+    )
+    fuzz_parser.add_argument(
+        "--successive-elim",
+        action="store_true",
+        help="Enable successive-elimination / racing bandit for operators",
+    )
+    fuzz_parser.add_argument(
+        "--successive-elim-delta",
+        type=float,
+        default=0.1,
+        help="SE failure probability for Hoeffding bounds (default: 0.1)",
+    )
+    fuzz_parser.add_argument(
+        "--successive-elim-min-pulls",
+        type=int,
+        default=3,
+        help="Minimum pulls before an arm is eligible for elimination (default: 3)",
+    )
+    fuzz_parser.add_argument(
+        "--successive-elim-reopen",
+        type=int,
+        default=0,
+        help="Re-admit eliminated arms every N pulls; 0 = never (default: 0)",
     )
     fuzz_parser.add_argument(
         "--op-katz",

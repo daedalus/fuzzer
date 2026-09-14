@@ -2057,6 +2057,24 @@ class Fuzzer:
                 gradient_temp_decay,
             )
 
+        # Successive elimination / racing: prune arms whose UCB falls
+        # below the best LCB. Deterministic given the observation stream.
+        self._use_successive_elim = successive_elim
+        self._successive_elim = None
+        if successive_elim:
+            self._successive_elim = SuccessiveEliminationScheduler(
+                delta=successive_elim_delta,
+                min_pulls=successive_elim_min_pulls,
+                reopen_interval=successive_elim_reopen,
+                rng=self._rng,
+            )
+            log.info(
+                "Successive elimination enabled (delta=%.3f, min_pulls=%d, reopen=%d)",
+                successive_elim_delta,
+                successive_elim_min_pulls,
+                successive_elim_reopen,
+            )
+
         # Katz centrality over the operator discovery-transition graph.
         # Off by default: see core/schedulers/op_katz.py's module docstring
         # for the empirical caveat before enabling this on a real campaign.
@@ -2341,6 +2359,7 @@ class Fuzzer:
             or self._cusum_ucb
             or self._fpl
             or self._gradient
+            or self._successive_elim
             or self._canary
             or self._use_shapley
         )
@@ -2543,6 +2562,8 @@ class Fuzzer:
             _register_arms(self._fpl)
         if self._gradient:
             _register_arms(self._gradient)
+        if self._successive_elim:
+            _register_arms(self._successive_elim)
         if self._consolidated:
             _register_arms(self._consolidated, _format_priors)
         if self._moss:
@@ -4931,6 +4952,7 @@ class Fuzzer:
             self._cusum_ucb,
             self._fpl,
             self._gradient,
+            self._successive_elim,
             self._consolidated,
             self._moss,
             self._canary,
@@ -6371,6 +6393,8 @@ class Fuzzer:
             ops.append("fpl")
         if getattr(self, "_use_gradient", False) and self._gradient:
             ops.append("gradient")
+        if getattr(self, "_use_successive_elim", False) and self._successive_elim:
+            ops.append("successive_elim")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
             ops.append("invasion")
         if getattr(self, "_use_round_robin", False) and self._round_robin:
@@ -6601,6 +6625,8 @@ class Fuzzer:
             ops.append("fpl")
         if getattr(self, "_use_gradient", False) and self._gradient:
             ops.append("gradient")
+        if getattr(self, "_use_successive_elim", False) and self._successive_elim:
+            ops.append("successive-elim")
         if getattr(self, "_use_contextual", False):
             ops.append("contextual")
         if getattr(self, "_use_c2ucb", False):

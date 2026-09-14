@@ -461,6 +461,7 @@ _FALLBACK_PRECEDENCE = (
     "moss",
     "fpl",
     "gradient",
+    "successive_elim",
     "round_robin",
     # canary, op_katz, op_tang are deliberately absent here: op_katz/op_tang
     # are unproven exploratory arms (see their module docstrings) that
@@ -540,6 +541,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("fpl")
     if f._use_gradient and f._gradient:
         available.append("gradient")
+    if f._use_successive_elim and f._successive_elim:
+        available.append("successive_elim")
     if f._use_invasion and f.mc and f.mc_bandit:
         available.append("invasion")
     if f._use_round_robin and f._round_robin:
@@ -4257,6 +4260,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "gradient" and f._gradient:
             op = f._gradient.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "successive_elim" and f._successive_elim:
+            op = f._successive_elim.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "round_robin" and f._round_robin:
             op = f._round_robin.select_op(ops)

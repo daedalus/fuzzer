@@ -22,6 +22,7 @@ from fuzzer_tool.core.schedulers.mopt import MOptScheduler
 from fuzzer_tool.core.schedulers.moss import MOSSScheduler
 from fuzzer_tool.core.schedulers.replicator import ReplicatorScheduler
 from fuzzer_tool.core.schedulers.round_robin import RoundRobinScheduler
+from fuzzer_tool.core.schedulers.successive_elim import SuccessiveEliminationScheduler
 from fuzzer_tool.core.schedulers.swucb import SWUCBScheduler
 
 __all__ = [
@@ -49,4 +50,5 @@ __all__ = [
     "KL_SWUCBScheduler",
     "RoundRobinScheduler",
     "CanaryScheduler",
+    "SuccessiveEliminationScheduler",
 ]
