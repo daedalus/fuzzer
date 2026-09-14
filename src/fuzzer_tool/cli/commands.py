@@ -454,10 +454,12 @@ def cmd_fuzz(args):
             fractal_diversity_depth=getattr(args, "fractal_diversity_depth", 3),
             fractal_diversity_bonus=getattr(args, "fractal_diversity_bonus", 1.3),
             exp3=getattr(args, "exp3", False),
+            exp4=getattr(args, "exp4", False),
             invasion=getattr(args, "invasion", False),
             garch=getattr(args, "garch", False),
             continuum=getattr(args, "continuum", False),
             exp3_gamma=getattr(args, "exp3_gamma", 0.1),
+            exp4_gamma=getattr(args, "exp4_gamma", 0.1),
             eps_greedy=getattr(args, "eps_greedy", False),
             eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
             eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
@@ -537,6 +539,7 @@ def cmd_fuzz(args):
         args.mopt = True
         args.replicator = True
         args.exp3 = True
+        args.exp4 = True
         args.eps_greedy = True
         args.hierarchical_bandit = True
         args.gp_ucb = True
@@ -685,12 +688,14 @@ def cmd_fuzz(args):
         t_x_minutes=getattr(args, "t_x", 60.0),
         replicator=getattr(args, "replicator", False),
         exp3=getattr(args, "exp3", False),
+        exp4=getattr(args, "exp4", False),
         invasion=getattr(args, "invasion", False),
         round_robin=getattr(args, "round_robin", False),
         canary_scheduler=getattr(args, "canary_scheduler", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
+        exp4_gamma=getattr(args, "exp4_gamma", 0.1),
         eps_greedy=getattr(args, "eps_greedy", False),
         eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
         eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
@@ -1788,6 +1793,7 @@ _HAIL_MARY_FLAGS = (
     "lineage",
     "lineage_backtrack",
     "exp3",
+    "exp4",
     "slopt",
     "eps_greedy",
     "hierarchical_bandit",
@@ -2192,6 +2198,17 @@ def main() -> int:
         type=float,
         default=0.1,
         help="EXP3 exploration rate in [0,1] (default: 0.1)",
+    )
+    fuzz_parser.add_argument(
+        "--exp4",
+        action="store_true",
+        help="Enable EXP4 expert-advice bandit over operator categories",
+    )
+    fuzz_parser.add_argument(
+        "--exp4-gamma",
+        type=float,
+        default=0.1,
+        help="EXP4 exploration rate in [0,1] (default: 0.1)",
     )
     fuzz_parser.add_argument(
         "--eps-greedy",

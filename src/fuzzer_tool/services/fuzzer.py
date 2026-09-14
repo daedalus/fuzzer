@@ -58,6 +58,7 @@ from fuzzer_tool.core.schedulers import (
     DUCBScheduler,
     EpsilonGreedyScheduler,
     Exp3Scheduler,
+    Exp4Scheduler,
     FPLScheduler,
     GPUCBScheduler,
     GradientBanditScheduler,
@@ -107,6 +108,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "mopt",
     "cem",
     "exp3",
+    "exp4",
     "eps_greedy",
     "hierarchical",
     "gp_ucb",
@@ -864,6 +866,8 @@ class Fuzzer:
         temp_reference_rate=None,
         exp3=False,
         exp3_gamma=0.1,
+        exp4=False,
+        exp4_gamma=0.1,
         slopt=False,
         eps_greedy=False,
         eps_greedy_epsilon0=1.0,
@@ -1942,6 +1946,12 @@ class Fuzzer:
         if exp3:
             self._exp3 = Exp3Scheduler(gamma=exp3_gamma, rng=self._rng)
             log.info("EXP3 adversarial bandit enabled (gamma=%.2f)", exp3_gamma)
+        # EXP4 expert-advice bandit over operator categories
+        self._use_exp4 = exp4
+        self._exp4 = None
+        if exp4:
+            self._exp4 = Exp4Scheduler(gamma=exp4_gamma, rng=self._rng)
+            log.info("EXP4 expert-advice bandit enabled (gamma=%.2f)", exp4_gamma)
         # SLOPT (core/slopt.py): one operator per round, applied 2**t times,
         # t learned per (seed-size group, operator).
         self._use_slopt = slopt
@@ -2339,6 +2349,7 @@ class Fuzzer:
             or self._mopt
             or self._replicator
             or self._exp3
+            or self._exp4
             or self._eps_greedy
             or self._hierarchical
             or self._gp_ucb
@@ -2544,6 +2555,8 @@ class Fuzzer:
             _register_arms(self._replicator)
         if self._exp3:
             _register_arms(self._exp3)
+        if self._exp4:
+            _register_arms(self._exp4)
         if self._eps_greedy:
             _register_arms(self._eps_greedy)
         if self._hierarchical:
@@ -4944,6 +4957,7 @@ class Fuzzer:
         for scheduler in (
             self._replicator if self._use_replicator else None,
             self._exp3 if selector == "exp3" else None,
+            self._exp4 if selector == "exp4" else None,
             self._eps_greedy,
             self._hierarchical,
             self._gp_ucb,
@@ -6366,6 +6380,8 @@ class Fuzzer:
             ops.append("replicator")
         if getattr(self, "_use_exp3", False):
             ops.append("exp3")
+        if getattr(self, "_use_exp4", False) and self._exp4:
+            ops.append("exp4")
         if getattr(self, "_eps_greedy", False):
             ops.append("eps_greedy")
         # Was _hierarchical_bandit, an attribute that has never existed --
@@ -6607,6 +6623,8 @@ class Fuzzer:
             ops.append("replicator")
         if getattr(self, "_use_exp3", False):
             ops.append("exp3")
+        if getattr(self, "_use_exp4", False) and self._exp4:
+            ops.append("exp4")
         if getattr(self, "_eps_greedy", False):
             ops.append("eps-greedy")
         if getattr(self, "_use_hierarchical", False):

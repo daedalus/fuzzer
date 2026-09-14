@@ -446,6 +446,7 @@ _FALLBACK_PRECEDENCE = (
     "mopt",
     "bandit",
     "exp3",
+    "exp4",
     "eps_greedy",
     "hierarchical",
     "gp_ucb",
@@ -502,6 +503,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("cem")
     if f._use_exp3 and f._exp3:
         available.append("exp3")
+    if f._use_exp4 and f._exp4:
+        available.append("exp4")
     if f._use_eps_greedy and f._eps_greedy:
         available.append("eps_greedy")
     if f._use_hierarchical and f._hierarchical:
@@ -4188,6 +4191,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "exp3" and f._exp3:
             op = f._exp3.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "exp4" and f._exp4:
+            op = f._exp4.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "eps_greedy" and f._eps_greedy:
             op = f._eps_greedy.select_op(ops)

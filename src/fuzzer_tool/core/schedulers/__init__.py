@@ -10,6 +10,7 @@ from fuzzer_tool.core.schedulers.cusum_ucb import CUSUM_UCBScheduler
 from fuzzer_tool.core.schedulers.ducb import DUCBScheduler
 from fuzzer_tool.core.schedulers.epsilon_greedy import EpsilonGreedyScheduler
 from fuzzer_tool.core.schedulers.exp3 import Exp3Scheduler
+from fuzzer_tool.core.schedulers.exp4 import Exp4Scheduler
 from fuzzer_tool.core.schedulers.fpl import FPLScheduler
 from fuzzer_tool.core.schedulers.gp_ucb import GPUCBScheduler
 from fuzzer_tool.core.schedulers.gradient import GradientBanditScheduler
@@ -35,6 +36,7 @@ __all__ = [
     "MOSSScheduler",
     "ReplicatorScheduler",
     "Exp3Scheduler",
+    "Exp4Scheduler",
     "EpsilonGreedyScheduler",
     "GradientBanditScheduler",
     "HierarchicalBanditScheduler",
