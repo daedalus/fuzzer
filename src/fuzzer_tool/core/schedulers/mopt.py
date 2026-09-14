@@ -7,6 +7,7 @@ space rather than each operator's marginal success rate.
 import collections
 from collections import defaultdict
 
+from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
 
 #: Fractional jitter applied to initial particle positions. Enough to give
@@ -26,6 +27,8 @@ class _MOptParticle:
         "name",
         "discoveries",
         "execs_in_window",
+        "cum_execs",
+        "cum_discoveries",
         "_rng",
     )
 
@@ -55,6 +58,11 @@ class _MOptParticle:
         self.fitness = 0.0
         self.discoveries: collections.deque = collections.deque(maxlen=200)
         self.execs_in_window = 0
+        # Cumulative, never reset by a PSO update -- unlike execs_in_window
+        # and discoveries above, these feed the marginal-cost tracker, which
+        # needs a running total to diff between window boundaries.
+        self.cum_execs = 0
+        self.cum_discoveries = 0.0
 
 
 class MOptScheduler:
@@ -82,6 +90,19 @@ class MOptScheduler:
             Without it the swarm's attractor is whatever position ever
             scored highest, so an operator that saturates its region of the
             coverage map keeps pulling the swarm toward itself forever.
+        marginal_cost_stop_multiplier: Optional extra shrink applied to a
+            particle's fitness (before the pbest/gbest comparison) when its
+            marginal cost (execs spent per new discovery, between the last
+            two PSO windows -- see ``core/marginal_cost.py`` and
+            ``docs/handover/handover_decision_game_theory_survey_2026-09-13.md``
+            §1) exceeds this multiple of the population-average marginal
+            cost across particles. ``_update_fitness`` already computes a
+            *within-window* mean (``disc/total``), which is blind to
+            whether that window is better or worse than the one before it;
+            this catches a particle whose cost-per-discovery is actively
+            rising without waiting for its within-window mean to reflect
+            it. ``None`` (the default) disables this entirely -- existing
+            behavior is unchanged either way.
     """
 
     # Declares that init_arm() does NOT accept informative priors (PSO
@@ -100,6 +121,7 @@ class MOptScheduler:
         min_prob_frac: float = 0.1,
         gbest_decay: float = 0.95,
         rng: RandPool | None = None,
+        marginal_cost_stop_multiplier: float | None = None,
     ):
         self._rng = rng if rng is not None else RandPool()
         self.n_particles = n_particles
@@ -111,6 +133,8 @@ class MOptScheduler:
         self.max_vel = max_vel
         self.min_prob_frac = min_prob_frac
         self.gbest_decay = gbest_decay
+        self.marginal_cost_stop_multiplier = marginal_cost_stop_multiplier
+        self._mc_tracker = MarginalCostTracker()
 
         self.operators: list[str] = []
         self.op_index: dict[str, int] = {}
@@ -285,11 +309,15 @@ class MOptScheduler:
             p = self.particles[particle_id]
             p.execs_in_window += 1
             p.discoveries.append(reward)
+            p.cum_execs += 1
+            p.cum_discoveries += reward
         else:
             # Backward compat: update all particles
             for p in self.particles:
                 p.execs_in_window += 1
                 p.discoveries.append(reward)
+                p.cum_execs += 1
+                p.cum_discoveries += reward
 
         # Trigger PSO update when window fills
         if self._total_execs % self.window_size == 0 and self._total_execs > 0:
@@ -337,6 +365,14 @@ class MOptScheduler:
         if n == 0:
             return
 
+        # Snapshot cumulative (execs, discoveries) for every particle at
+        # this window boundary -- unconditionally, so the tracker has two
+        # snapshots to diff by the *next* boundary even if
+        # marginal_cost_stop_multiplier is turned on only later.
+        particle_names = [p.name for p in self.particles]
+        for p in self.particles:
+            self._mc_tracker.record_snapshot(p.name, p.cum_execs, p.cum_discoveries)
+
         # Personal and global bests must be recorded *before* the velocity
         # step, against the position that actually earned the fitness. The
         # pbest update used to run at the bottom of the loop below, which
@@ -345,6 +381,14 @@ class MOptScheduler:
         self.global_best_fitness *= self.gbest_decay
         for p in self.particles:
             self._update_fitness(p)
+            if self.marginal_cost_stop_multiplier is not None and self._mc_tracker.should_stop(
+                p.name, self.marginal_cost_stop_multiplier, keys=particle_names
+            ):
+                # This window's cost-per-discovery has run away relative to
+                # the swarm average: shrink the fitness pbest/gbest compare
+                # against, on top of (never instead of) the within-window
+                # mean _update_fitness already computed.
+                p.fitness = min(p.fitness, p.fitness / self.marginal_cost_stop_multiplier)
             if p.fitness > p.pbest_fitness:
                 p.pbest_fitness = p.fitness
                 p.pbest_pos = list(p.pos)
@@ -418,6 +462,14 @@ class MOptScheduler:
             particle.pos = [max(x, floor) for x in particle.pos]
             total = sum(particle.pos)
             particle.pos = [x / total for x in particle.pos]
+
+    def particle_marginal_costs(self) -> dict[str, float | None]:
+        """Current MC_i (execs per new discovery, between the last two PSO
+        windows) per particle, per ``core/marginal_cost.py``. ``None`` for
+        a particle with fewer than two window snapshots yet, or whose
+        discovery count hasn't moved since the prior snapshot.
+        """
+        return {p.name: self._mc_tracker.marginal_cost(p.name) for p in self.particles}
 
     def particle_stats(self) -> list[dict]:
         """Get stats for each particle (for diagnostics/logging)."""

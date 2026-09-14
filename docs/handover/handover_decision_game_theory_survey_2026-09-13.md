@@ -91,7 +91,9 @@ a synthetic or real-target harness comparing "fixed window" vs "marginal-cost
 stop" allocation the same way `handover_control_theory_loops_2026-09-12.md`
 §2 measured L1's dwell sweep, before writing a patch.
 
-**2026-09-14 update — consumer #2 implemented, consumer #1 still open.**
+**2026-09-14 update — consumer #2 implemented, plus two more sites beyond
+the original proposal's scope; consumer #1 (worker partitioning) still
+open.**
 `core/marginal_cost.py` now provides the estimator proposed above:
 `MarginalCostTracker.record_snapshot(key, cumulative_cost, cumulative_output)`
 taken at each window boundary, `.marginal_cost(key)` returning
@@ -119,7 +121,42 @@ snapshot timing, and a same-seed baseline-vs-gated comparison showing the
 flagged operator's population share can only shrink further, never less,
 under the stop rule).
 
+**Two more sites turned out to have the identical shape** and got the same
+treatment (found by grepping the tree for other "cumulative reward / cost"
+ratios computed once per decision with no cross-window memory):
+
+- `services/seed_picker.py::_pick_ecofuzz_seed` — EcoFuzz's
+  `energy = reward_prob / cost` is itself a *lifetime* average (both terms
+  cumulative since the seed was first seen), so a seed with a strong early
+  streak keeps healthy energy long after it has actually gone cold. Optional
+  `f._ecofuzz_mc_penalty_multiplier` (default `None`): every pick snapshots
+  each seed's cumulative `(cost, coverage_edges)` unconditionally, and when
+  set, divides the weight of any seed `should_stop()` flags by the
+  multiplier — same "additional, only ever shrinks" contract as the
+  replicator case. CLI flag `--ecofuzz-mc-penalty-multiplier`. 6 tests in
+  `tests/test_regression_ecofuzz_mc_penalty.py`, including one that
+  hand-derives the exact weight ratio and picks a fixed rng fraction that
+  provably crosses the cheap/expensive selection boundary only once the
+  penalty is applied.
+- `core/schedulers/mopt.py::_pso_update` — particle fitness
+  (`disc/execs_in_window`, `_update_fitness`) is a within-window mean with
+  no memory of the *previous* window, same pre-fix shape as `replicator.py`.
+  Optional `marginal_cost_stop_multiplier` (default `None`) on
+  `MOptScheduler`; each particle now also tracks cumulative
+  `(cum_execs, cum_discoveries)`, snapshotted at every PSO update, and
+  `min(fitness, fitness / multiplier)` is applied before the pbest/gbest
+  comparison for any particle `should_stop()` flags. New
+  `particle_marginal_costs()` diagnostic. CLI flag
+  `--mopt-mc-stop-multiplier`. 6 tests in
+  `tests/test_regression_mopt_mc_stop.py`.
+
+Both follow the same pattern as `replicator.py`: additive, off by default,
+and the penalty can only ever shrink a flagged key's weight/fitness relative
+to the baseline, never grow it, for any multiplier value — asserted directly
+in both new test files.
+
 Consumer #1 (`parallel_cost_partition.py` — equalize `MC_i` across workers
+
 instead of balancing total cost via Multifit) is **not** implemented. It's a
 different objective from what Multifit computes today, not a small
 extension like the replicator case, and the doc above is explicit that it

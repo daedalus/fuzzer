@@ -21,6 +21,7 @@ from collections import Counter
 
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.crc32 import crc32
+from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
 
@@ -259,6 +260,14 @@ class SeedPicker:
         # `from_fuzzer` adapters) would otherwise have no pool at all.
         rng = getattr(fuzzer, "_rng", None) or RandPool(seed=seed)
         self._rng = rng
+
+        # EcoFuzz's marginal-cost stopping signal (handover gap 1, candidate
+        # #1 -- see docs/handover/handover_decision_game_theory_survey_2026-09-13.md
+        # §1's "2026-09-14 update"). Snapshotted every _pick_ecofuzz_seed
+        # call regardless of whether the penalty is enabled, same as
+        # replicator.py's tracker, so it has history the moment a campaign
+        # turns the penalty on mid-run.
+        self._ecofuzz_mc_tracker = MarginalCostTracker()
 
     def _pick_seed_elo(self) -> bytes | None:
         """Pick seed via Elo-arbitrated strategy selection. Returns None if fallback needed.
@@ -639,12 +648,28 @@ class SeedPicker:
         fuzz_count grows, while a cheap-but-productive seed keeps its
         energy up. Falls back to random choice if corpus or seed_meta is
         empty.
+
+        ``reward_prob / cost`` is itself a *lifetime average*, not a
+        marginal rate -- exactly the gap 1 pattern (see
+        ``docs/handover/handover_decision_game_theory_survey_2026-09-13.md``
+        §1): a seed with a strong early streak keeps a healthy energy for a
+        long time after it has actually gone cold, because the numerator
+        and denominator are both cumulative since the seed was first seen.
+        When ``f._ecofuzz_mc_penalty_multiplier`` is set (default: unset,
+        this method is then unchanged from before), every pick snapshots
+        each seed's cumulative ``(cost, coverage_edges)`` into a
+        :class:`MarginalCostTracker` and divides the weight of any seed
+        whose *marginal* cost-per-edge has run past that multiple of the
+        population average -- catching the "gone cold recently" case the
+        lifetime average is slow to reflect, without touching the ranking
+        of any seed the tracker doesn't flag.
         """
         f = self.f
         rng = f._rng
         if not f.corpus or not f.seed_meta:
             return self._format_aware_seed()
         mean_exec = f.mean_exec_time()
+        mc_multiplier = getattr(f, "_ecofuzz_mc_penalty_multiplier", None)
         weights = []
         for seed in f.corpus:
             meta = f.seed_meta.get(seed)
@@ -656,7 +681,18 @@ class SeedPicker:
             reward_prob = (successes + 1) / (fuzz_count + 2)
             cost = max(effective_fuzz_count(meta, mean_exec), 1.0)
             w = reward_prob / cost
+            # Snapshot unconditionally -- see docstring -- even when the
+            # penalty below is off, so turning it on mid-campaign doesn't
+            # start from zero history.
+            self._ecofuzz_mc_tracker.record_snapshot(seed, cost, float(successes))
             weights.append(max(w, 1e-6))
+        if mc_multiplier is not None:
+            for i, seed in enumerate(f.corpus):
+                if self._ecofuzz_mc_tracker.should_stop(seed, mc_multiplier, keys=f.corpus):
+                    # Extra shrink on top of (never instead of) the energy
+                    # already computed above -- same "only ever smaller"
+                    # contract as replicator.py's stop rule.
+                    weights[i] = max(weights[i] / mc_multiplier, 1e-6)
         total = sum(weights)
         if total <= 0:
             return rng.choice(f.corpus)

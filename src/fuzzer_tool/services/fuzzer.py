@@ -770,6 +770,7 @@ class Fuzzer:
         mc_cem=False,
         mc_cycle_detect=False,
         mopt=False,
+        mopt_mc_stop_multiplier=None,
         cmaes=False,
         cmaes_pop_size=8,
         cmaes_generation_size=200,
@@ -782,6 +783,7 @@ class Fuzzer:
         tang_rank=10,
         tang_refit_interval=2000,
         ecofuzz=False,
+        ecofuzz_mc_penalty_multiplier=None,
         metropolis=False,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
@@ -1891,8 +1893,20 @@ class Fuzzer:
             self.mc.set_sharpe_kelly_blend(sharpe_kelly_blend)
         self._mopt = None
         if mopt:
-            self._mopt = MOptScheduler(n_particles=5, window_size=200, rng=self._rng)
-            log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
+            self._mopt = MOptScheduler(
+                n_particles=5,
+                window_size=200,
+                rng=self._rng,
+                marginal_cost_stop_multiplier=mopt_mc_stop_multiplier,
+            )
+            if mopt_mc_stop_multiplier is not None:
+                log.info(
+                    "MOpt PSO scheduling enabled (5 particles, window=200, "
+                    "mc_stop_multiplier=%.2f)",
+                    mopt_mc_stop_multiplier,
+                )
+            else:
+                log.info("MOpt PSO scheduling enabled (5 particles, window=200)")
         self._use_cmaes = cmaes
         self._cmaes = None
         if cmaes:
@@ -1933,6 +1947,7 @@ class Fuzzer:
                 self._rng, rank=tang_rank, refit_interval=tang_refit_interval
             )
         self._use_ecofuzz = ecofuzz
+        self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
         self._metropolis = metropolis
         self._op_dispatch = self._build_dispatch()
         self._replicator = None

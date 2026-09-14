@@ -607,6 +607,7 @@ def cmd_fuzz(args):
         mc_cem=args.mc_cem,
         mc_cycle_detect=getattr(args, "mc_cycle_detect", False),
         mopt=getattr(args, "mopt", False),
+        mopt_mc_stop_multiplier=getattr(args, "mopt_mc_stop_multiplier", None),
         cmaes=getattr(args, "cma_es", False),
         cmaes_pop_size=getattr(args, "cmaes_pop_size", 8),
         cmaes_generation_size=getattr(args, "cmaes_generation_size", 200),
@@ -620,6 +621,7 @@ def cmd_fuzz(args):
         tang_rank=getattr(args, "tang_rank", 10),
         tang_refit_interval=getattr(args, "tang_refit_interval", 2000),
         ecofuzz=getattr(args, "ecofuzz", False),
+        ecofuzz_mc_penalty_multiplier=getattr(args, "ecofuzz_mc_penalty_multiplier", None),
         metropolis=getattr(args, "metropolis", False),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
@@ -2045,6 +2047,15 @@ def main() -> int:
         help="Enable MOpt PSO operator scheduling (alternative to bandit)",
     )
     fuzz_parser.add_argument(
+        "--mopt-mc-stop-multiplier",
+        type=float,
+        default=None,
+        help="Extra shrink for a MOpt particle's fitness when its marginal "
+        "cost (execs spent per new discovery, between the last two PSO "
+        "windows) exceeds this multiple of the population-average marginal "
+        "cost. Unset by default -- --mopt alone is unaffected either way.",
+    )
+    fuzz_parser.add_argument(
         "--cma-es",
         action="store_true",
         help="Enable CMA-ES operator scheduling (covariance-adapted continuous optimization)",
@@ -2917,6 +2928,16 @@ def main() -> int:
         "reward_prob=(coverage_edges+1)/(fuzz_count+2) and cost is the "
         "cost-ledger's effective_fuzz_count. Weighs new-edge reward against "
         "observed execution cost instead of Boltzmann's pure pick-count rarity.",
+    )
+    fuzz_parser.add_argument(
+        "--ecofuzz-mc-penalty-multiplier",
+        type=float,
+        default=None,
+        help="Extra shrink for a seed whose marginal cost (execs spent per "
+        "new edge, between the last two --ecofuzz picks) exceeds this "
+        "multiple of the population-average marginal cost, on top of the "
+        "ordinary EcoFuzz energy. Unset by default -- --ecofuzz alone is "
+        "unaffected either way.",
     )
     fuzz_parser.add_argument(
         "--metropolis",
