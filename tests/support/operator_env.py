@@ -37,6 +37,7 @@ BALLOT_SCHEDULERS = (
     "ducb",
     "eps_greedy",
     "exp3",
+    "exp4",
     "fpl",
     "gradient",
     "gp_ucb",

@@ -123,7 +123,6 @@ _OPERATOR_STRATEGY_NAMES = (
     "moss",
     "c2ucb",
     "fpl",
-    "gradient",
     "invasion",
     "round_robin",
     "canary",
@@ -897,10 +896,11 @@ class Fuzzer:
         fpl=False,
         fpl_epsilon=1.0,
         gradient=False,
-        gradient_alpha=0.1,
+        gradient_alpha=0.05,
         gradient_temperature=1.0,
         gradient_temp_decay=0.9995,
         gradient_min_temperature=0.05,
+        gradient_floor=0.05,
         op_katz=False,
         op_katz_alpha_fraction=0.85,
         op_tang=False,
@@ -2081,7 +2081,12 @@ class Fuzzer:
 
         # Gradient / softmax bandit (Boltzmann exploration). Preference
         # weights updated by the classic REINFORCE-style rule with optional
-        # baseline and temperature annealing.
+        # baseline and temperature annealing. Off by default and Elo-only
+        # (see core/schedulers/gradient.py's module docstring): it is a
+        # legitimate stationary control arm but has no non-stationary
+        # forgetting mechanism, and the tuning that keeps it converging
+        # reliably even in the stationary case (alpha, floor) was found by
+        # testing, not derived -- same discipline as op_katz/op_tang below.
         self._use_gradient = gradient
         self._gradient = None
         if gradient:
@@ -2090,13 +2095,15 @@ class Fuzzer:
                 temperature=gradient_temperature,
                 temp_decay=gradient_temp_decay,
                 min_temperature=gradient_min_temperature,
+                floor=gradient_floor,
                 rng=self._rng,
             )
             log.info(
-                "Gradient bandit enabled (alpha=%.3f, temp=%.2f, decay=%.4f)",
+                "Gradient bandit enabled (alpha=%.3f, temp=%.2f, decay=%.4f, floor=%.3f)",
                 gradient_alpha,
                 gradient_temperature,
                 gradient_temp_decay,
+                gradient_floor,
             )
 
         # Successive elimination / racing: prune arms whose UCB falls
@@ -6447,8 +6454,8 @@ class Fuzzer:
             ops.append("moss")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        if getattr(self, "_use_gradient", False) and self._gradient:
-            ops.append("gradient")
+        # gradient is deliberately absent from this banner, matching
+        # op_katz/op_tang: it is Elo-only, see core/schedulers/gradient.py.
         if getattr(self, "_use_successive_elim", False) and self._successive_elim:
             ops.append("successive_elim")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
@@ -6681,8 +6688,8 @@ class Fuzzer:
             ops.append("moss")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        if getattr(self, "_use_gradient", False) and self._gradient:
-            ops.append("gradient")
+        # gradient is deliberately absent from this banner, matching
+        # op_katz/op_tang: it is Elo-only, see core/schedulers/gradient.py.
         if getattr(self, "_use_successive_elim", False) and self._successive_elim:
             ops.append("successive-elim")
         if getattr(self, "_use_contextual", False):

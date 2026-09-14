@@ -70,6 +70,7 @@ from fuzzer_tool.core.schedulers import (
     Exp3Scheduler,
     FPLScheduler,
     GPUCBScheduler,
+    GradientBanditScheduler,
     HierarchicalBanditScheduler,
     MonteCarloScheduler,
     MOptScheduler,
@@ -119,6 +120,18 @@ RELIABLE = {
     # Floors below the observed minimum over 40 seeds at ROUNDS: share
     # 0.963, slope max 0.368 (median 0.194).
     "MOSS": (lambda seed: MOSSScheduler(rng=RandPool(seed)), 0.90, 0.45),
+    # Softmax/Boltzmann preference bandit with a uniform exploration floor
+    # (see core/schedulers/gradient.py -- the floor and the lowered default
+    # alpha were both added post-hoc after this harness found the original
+    # version could reach tail_share 0.0/1.0, zero exploration in either
+    # direction, plus a specific-seed convergence failure at the original
+    # default alpha). Floors below the observed minimum over 40 seeds at
+    # ROUNDS with the corrected defaults: share 0.938, slope max 0.267.
+    "Gradient": (
+        lambda seed: GradientBanditScheduler(rng=RandPool(seed)),
+        0.90,
+        0.45,
+    ),
 }
 
 
@@ -391,6 +404,17 @@ def test_recency_family_converges_on_stationary(name):
 STUCK = {
     "EpsilonGreedy": EpsilonGreedyScheduler,
     "MonteCarlo": MonteCarloScheduler,
+    # Gradient's uniform exploration floor (added to fix a worse failure --
+    # see core/schedulers/gradient.py -- where the pre-fix version reached
+    # tail_share 0.0 on the revived arm, i.e. no recovery at all) bounds
+    # the *instantaneous* selection probability away from zero. It is not
+    # a forgetting mechanism: nothing here discounts the confidence built
+    # up before the decay, so recovery time scales with arm count and
+    # pre-decay confidence and blows through this environment's
+    # 10000-round recovery budget even at floor=0.5 (tail share on the
+    # revived arm measured at 0.004-0.05 across floor in [0.02, 0.5], vs
+    # Consolidated's ~0.97 on the same environment).
+    "Gradient": GradientBanditScheduler,
 }
 
 

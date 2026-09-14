@@ -461,14 +461,20 @@ _FALLBACK_PRECEDENCE = (
     "cusum_ucb",
     "moss",
     "fpl",
-    "gradient",
     "successive_elim",
     "round_robin",
-    # canary, op_katz, op_tang are deliberately absent here: op_katz/op_tang
-    # are unproven exploratory arms (see their module docstrings) that
-    # should only ever be reached via Elo explicitly choosing them, not by
-    # being the top-precedence live selector whenever someone enables the
-    # flag without --elo -- the same reasoning canary already documents.
+    # canary, op_katz, op_tang, gradient are deliberately absent here:
+    # op_katz/op_tang/gradient are unproven exploratory arms (see their
+    # module docstrings) that should only ever be reached via Elo
+    # explicitly choosing them, not by being the top-precedence live
+    # selector whenever someone enables the flag without --elo -- the same
+    # reasoning canary already documents. gradient was added to this list
+    # by an earlier commit and moved back out here: on this project's own
+    # convergence harness it has no non-stationary forgetting mechanism
+    # (see core/schedulers/gradient.py) and one seed in a 40-seed
+    # stationary-only sweep collapsed to near-zero tail share at its
+    # original default alpha -- not the profile of an arm that should be
+    # any campaign's silent default without --elo.
 )
 
 

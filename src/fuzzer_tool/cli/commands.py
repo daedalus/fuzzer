@@ -483,10 +483,11 @@ def cmd_fuzz(args):
             fpl=getattr(args, "fpl", False),
             fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
             gradient=getattr(args, "gradient", False),
-            gradient_alpha=getattr(args, "gradient_alpha", 0.1),
+            gradient_alpha=getattr(args, "gradient_alpha", 0.05),
             gradient_temperature=getattr(args, "gradient_temperature", 1.0),
             gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
             gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
+            gradient_floor=getattr(args, "gradient_floor", 0.05),
             successive_elim=getattr(args, "successive_elim", False),
             successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
             successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -718,10 +719,11 @@ def cmd_fuzz(args):
         fpl=getattr(args, "fpl", False),
         fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
         gradient=getattr(args, "gradient", False),
-        gradient_alpha=getattr(args, "gradient_alpha", 0.1),
+        gradient_alpha=getattr(args, "gradient_alpha", 0.05),
         gradient_temperature=getattr(args, "gradient_temperature", 1.0),
         gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
         gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
+        gradient_floor=getattr(args, "gradient_floor", 0.05),
         successive_elim=getattr(args, "successive_elim", False),
         successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
         successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -2397,13 +2399,18 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--gradient",
         action="store_true",
-        help="Enable gradient / softmax (Boltzmann) preference bandit for operators",
+        help=(
+            "Enable gradient / softmax (Boltzmann) preference bandit for "
+            "operators (experimental, off by default, Elo-only -- see "
+            "core/schedulers/gradient.py for the empirical caveat before "
+            "using this on a real campaign)"
+        ),
     )
     fuzz_parser.add_argument(
         "--gradient-alpha",
         type=float,
-        default=0.1,
-        help="Gradient bandit step size for preference updates (default: 0.1)",
+        default=0.05,
+        help="Gradient bandit step size for preference updates (default: 0.05)",
     )
     fuzz_parser.add_argument(
         "--gradient-temperature",
@@ -2421,7 +2428,21 @@ def main() -> int:
         "--gradient-min-temperature",
         type=float,
         default=0.05,
-        help="Floor on softmax temperature (default: 0.05)",
+        help=(
+            "Floor on softmax temperature, NOT on any arm's selection "
+            "probability -- see --gradient-floor for that (default: 0.05)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--gradient-floor",
+        type=float,
+        default=0.05,
+        help=(
+            "Uniform probability floor mixed into the gradient bandit's "
+            "softmax; without it the policy can collapse to zero residual "
+            "exploration and be unable to recover from a regime switch "
+            "(default: 0.05)"
+        ),
     )
     fuzz_parser.add_argument(
         "--successive-elim",
