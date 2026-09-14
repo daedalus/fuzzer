@@ -18,6 +18,7 @@ Seeds are fetched via urllib (no external deps). A pickle cache at
 """
 
 import argparse
+import base64
 import os
 import pickle
 import re
@@ -32,8 +33,9 @@ from urllib.parse import urljoin, urlparse
 FATE_LIST_URL = "https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/tools/target_dec_fate.list"
 FATE_SUITE_BASE = "https://fate-suite.ffmpeg.org"
 
-# Known CVE PoC sources from survey.txt
+# Known CVE PoC sources from survey.txt and FFmpeg security page
 CVE_POCS = {
+    # ReportCVE repo CVEs (hardcoded sources)
     "CVE-2024-7055": {
         "repo": "https://github.com/CookedMelon/ReportCVE",
         "path": "FFmpeg/poc3",
@@ -46,17 +48,58 @@ CVE_POCS = {
         "format": "Audio",
         "component": "libswresample/swresample.c",
     },
+    # Google Security Research advisory CVEs (inline PoC scripts / base64)
+    "CVE-2022-2566": {
+        "repo": "https://github.com/google/security-research/security/advisories/GHSA-vhxg-9wfx-7fcj",
+        "format": "MOV",
+        "component": "libavformat/mov.c",
+        "has_inline_poc": True,
+    },
     "CVE-2025-9951": {
         "repo": "https://github.com/fm0ss/cve-2025-9951-ffmpeg-jp2-poc",
         "path": ".",
         "format": "JPEG2000",
         "component": "libavcodec/jpeg2000dec.c",
     },
+    # Y5neKO CVE-2026-8461 EXP (MagicYUV) - already in original
     "CVE-2026-8461": {
         "repo": "https://github.com/Y5neKO/CVE-2026-8461-EXP",
         "path": ".",
         "format": "MagicYUV",
         "component": "libavcodec/magicyuv.c",
+    },
+    # DepthFirstDisclosures AV1 RTP
+    "CVE-2026-70628": {
+        "repo": "https://github.com/DepthFirstDisclosures/ffmpeg-dfvuln127",
+        "path": "",
+        "format": "AV1 RTP",
+        "component": "libavformat/rtpdec_av1.c",
+        "has_inline_poc": True,
+    },
+    # Fi1ix / exploitarium RASC DLTA calc
+    "CVE-2026-65704": {
+        "repo": "https://github.com/Fi1ix/exploitarium-06-29",
+        "path": "ffmpeg-rasc-dlta-calc-poc",
+        "format": "RASC",
+        "component": "libavcodec/rasc.c",
+    },
+    # fa1c4 / ffmpeg-rockchip MOV Metadata OOM
+    "CVE-2025-1373": {
+        "repo": "https://github.com/fa1c4/security-advisories",
+        "path": "ffmpeg-rockchip/PoC",
+        "format": "MOV",
+        "component": "libavformat/mov.c",
+    },
+    # Vulhub CVEs (hand-crafted seeds/scripts)
+    "CVE-2017-9993": {
+        "repo": "https://github.com/neex/ffmpeg-avi-m3u-xbin",
+        "format": "AVI/HLS",
+        "component": "ffmpeg muxer",
+    },
+    "CVE-2016-1897": {
+        "repo": "https://raw.githubusercontent.com/neex/ffmpeg-avi-m3u-xbin/master",
+        "format": "M3U/HLS",
+        "component": "ffmpeg demuxer",
     },
 }
 
@@ -134,7 +177,7 @@ def url_basename(url: str) -> str:
 def parse_fate_list(text: str) -> list[dict]:
     """Parse target_dec_fate.list into structured entries.
 
-    Format: <issue_num>/clusterfuzz-testcase-<testcase_id>  target_dec_<codec>_fuzzer
+    Format: <issue_num>/<testcase_id>  target_dec_<codec>_fuzzer
     Lines starting with # are comments.
     """
     entries = []
@@ -142,14 +185,13 @@ def parse_fate_list(text: str) -> list[dict]:
         line = line.strip()
         if not line or line.startswith("#"):
             continue
-        # Split on whitespace — fuzzer name is the last token
         parts = line.split()
         if len(parts) < 2:
             continue
         spec = parts[0]
         fuzzer = parts[-1]
-        # Match: <issue_num>/clusterfuzz-testcase-<testcase_id>
-        m = re.match(r"(\d+)/clusterfuzz-testcase-(\d+)", spec)
+        # Match: <issue_num>/<testcase_id> (bare format in target_dec_fate.list)
+        m = re.match(r"(\d+)/(\d+)", spec)
         if not m:
             continue
         issue_num, testcase_id = m.groups()
@@ -315,15 +357,150 @@ def download_fate_seeds(
 
 
 # ---------------------------------------------------------------------------
+# Google Security Research advisory inline PoC fetching
+# ---------------------------------------------------------------------------
+
+
+def fetch_google_advisory_poc(cve_id: str, out_dir: str, cache: dict | None = None) -> int:
+    """Fetch inline PoC from Google Security Research advisory (base64 or script)."""
+    if cache is None:
+        cache = {}
+    saved = 0
+
+    advisory_urls = {
+        "CVE-2022-2566": "https://github.com/google/security-research/security/advisories/GHSA-vhxg-9wfx-7fcj",
+        "CVE-2025-9951": "https://github.com/google/security-research/security/advisories/GHSA-39q3-f8jq-v6mg",
+    }
+
+    if cve_id not in advisory_urls:
+        return 0
+
+    advisory_url = advisory_urls[cve_id]
+    fmt_dir = os.path.join(out_dir, "seeds", f"cve_{cve_id}")
+    os.makedirs(fmt_dir, exist_ok=True)
+
+    # Try to fetch the advisory page
+    print(f"  [{cve_id}] fetching advisory: {advisory_url}")
+    try:
+        req = urllib.request.Request(advisory_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            html = resp.read().decode("utf-8")
+    except Exception as e:
+        print(f"  [warn] cannot fetch advisory for {cve_id}: {e}", file=sys.stderr)
+        return 0
+
+    # Look for base64 PoC data in the advisory
+    # Pattern: data:application/octet-stream;base64,... or base64 in <pre>/<code>
+    b64_matches = re.findall(r"base64[,:=\s]*([A-Za-z0-9+/=]{100,})", html)
+    if not b64_matches:
+        # Try finding <code> or <pre> blocks with base64 content
+        b64_matches = re.findall(r"<(?:code|pre)[^>]*>([A-Za-z0-9+/=]{100,})</(?:code|pre)>", html)
+
+    for i, b64_data in enumerate(b64_matches):
+        try:
+            data = base64.b64decode(b64_data)
+            if len(data) >= MIN_SIZE:
+                dest = os.path.join(fmt_dir, f"poc_{i}.bin")
+                if not os.path.exists(dest):
+                    with open(dest, "wb") as f:
+                        f.write(data)
+                    cache.setdefault("cve", {})[f"{cve_id}/poc_{i}.bin"] = dest
+                    print(f"  [{cve_id}] saved base64 PoC ({len(data)} bytes)")
+                    saved += 1
+        except Exception as e:
+            print(f"  [warn] failed to decode base64 for {cve_id}: {e}")
+
+    # Also try to find and save the inline poc.py script
+    script_matches = re.findall(r"<code[^>]*>(.*?)</code>", html, re.DOTALL)
+    for i, script in enumerate(script_matches):
+        if "poc" in script.lower() and (
+            "base64" in script or "exploit" in script.lower() or "def " in script
+        ):
+            dest = os.path.join(fmt_dir, f"poc_{i}.py")
+            if not os.path.exists(dest):
+                with open(dest, "w") as f:
+                    f.write(script)
+                cache.setdefault("cve", {})[f"{cve_id}/poc_{i}.py"] = dest
+                print(f"  [{cve_id}] saved inline script")
+                saved += 1
+
+    return saved
+
+
+# ---------------------------------------------------------------------------
+# FFmpeg security page CVE enumeration
+# ---------------------------------------------------------------------------
+FFMPEG_SECURITY_URL = "https://www.ffmpeg.org/security.html"
+
+
+def fetch_ffmpeg_cves() -> dict[str, dict]:
+    """Parse FFmpeg security page for CVE → component/commit mapping."""
+    print(f"[*] Fetching FFmpeg security page: {FFMPEG_SECURITY_URL}")
+    try:
+        req = urllib.request.Request(FFMPEG_SECURITY_URL, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            html = resp.read().decode("utf-8")
+    except Exception as e:
+        print(f"  [warn] cannot fetch security page: {e}", file=sys.stderr)
+        return {}
+
+    cves = {}
+    # Pattern: CVE-YYYY-NNNN followed by component and commit link
+    # The page uses tables: CVE, Component, Fix Commit, Type
+    rows = re.findall(
+        r"<td[^>]*>CVE-(\d{4}-\d{4,7})</td>.*?<td[^>]*>([^<]+)</td>.*?<td[^>]*><a[^>]+>([a-f0-9]{7,40})</a></td>.*?<td[^>]*>([^<]+)</td>",
+        html,
+        re.DOTALL,
+    )
+    for year_id, component, commit, vuln_type in rows:
+        cve_id = f"CVE-{year_id}"
+        cves[cve_id] = {
+            "component": component.strip(),
+            "fix_commit": commit.strip(),
+            "type": vuln_type.strip(),
+            "has_known_poc": cve_id in CVE_POCS,
+        }
+
+    # Also extract CVEs from the text content (some may not be in tables)
+    text_cves = re.findall(r"CVE-\d{4}-\d{4,7}", html)
+    for cve_id in set(text_cves):
+        if cve_id not in cves:
+            cves[cve_id] = {
+                "component": "unknown",
+                "fix_commit": "",
+                "type": "unknown",
+                "has_known_poc": cve_id in CVE_POCS,
+            }
+
+    print(f"[*] Parsed {len(cves)} CVEs from FFmpeg security page")
+    return cves
+
+
+def print_inventory() -> int:
+    """Print the FFmpeg CVE inventory with PoC availability."""
+    cves = fetch_ffmpeg_cves()
+    print("\n" + "=" * 60)
+    print("[*] FFmpeg CVE INVENTORY")
+    print("=" * 60)
+    for cve_id in sorted(cves):
+        info = cves[cve_id]
+        poc_flag = "YES" if info["has_known_poc"] else "no"
+        print(f"  {cve_id}  poc={poc_flag}  {info['component'][:40]:40}  {info['type'][:30]}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # CVE PoCs: fetch PoC files from ReportCVE repo
 # ---------------------------------------------------------------------------
+
+
 def download_cve_pocs(
     out_dir: str,
     cves: dict[str, dict] | None = None,
     cache: dict | None = None,
     max_size: int = 4096,
 ) -> int:
-    """Download CVE PoC files from ReportCVE / known repos."""
+    """Download CVE PoC files from ReportCVE / known repos / Google advisories."""
     if cache is None:
         cache = {}
     if cves is None:
@@ -335,11 +512,17 @@ def download_cve_pocs(
     saved = 0
     for cve_id, info in cves.items():
         repo = info["repo"]
-        path = info["path"]
+        path = info.get("path", "")
         fmt_dir = os.path.join(seeds_dir, f"cve_{cve_id}")
         os.makedirs(fmt_dir, exist_ok=True)
 
-        # Try to fetch README (usually contains PoC bytes as base64)
+        # Google Security Research advisory: fetch inline PoC from advisory page
+        if info.get("has_inline_poc"):
+            n = fetch_google_advisory_poc(cve_id, out_dir, cache)
+            saved += n
+            continue
+
+        # ReportCVE-style: fetch README (contains base64 PoC) and poc files
         readme_url = f"{repo}/main/{path}/README.md"
         readme_dest = os.path.join(fmt_dir, "README.md")
         if not os.path.exists(readme_dest):
@@ -366,6 +549,20 @@ def download_cve_pocs(
                 saved += 1
                 cache.setdefault("cve", {})[f"{cve_id}/{fname}"] = poc_dest
                 break
+
+        # Other PoC repos (DepthFirstDisclosures, Fi1ix, fa1c4, Vulhub):
+        # try common filenames at repo root or path
+        if path:
+            for fname in ["exploit.py", "generate_poc.py", "poc.cc", "poc0.bin", "poc1.bin"]:
+                poc_url = f"{repo}/raw/{path}/{fname}"
+                poc_dest = os.path.join(fmt_dir, fname)
+                if os.path.exists(poc_dest):
+                    continue
+                print(f"  [{cve_id}] trying {fname} ...")
+                if download(poc_url, poc_dest, max_size=max_size):
+                    saved += 1
+                    cache.setdefault("cve", {})[f"{cve_id}/{fname}"] = poc_dest
+                    break
 
         time.sleep(0.2)
 
@@ -409,7 +606,14 @@ def main() -> int:
         help="Comma-separated FATE codecs (default: all)",
     )
     parser.add_argument("--analyze", action="store_true", help="Print analysis of extracted seeds")
+    parser.add_argument(
+        "--list-cves", action="store_true", help="List FFmpeg CVEs and PoC availability"
+    )
     args = parser.parse_args()
+
+    if args.list_cves:
+        print_inventory()
+        return 0
 
     cache = load_cache()
     total_saved = 0
