@@ -480,6 +480,11 @@ def cmd_fuzz(args):
             cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
             fpl=getattr(args, "fpl", False),
             fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
+            gradient=getattr(args, "gradient", False),
+            gradient_alpha=getattr(args, "gradient_alpha", 0.1),
+            gradient_temperature=getattr(args, "gradient_temperature", 1.0),
+            gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
+            gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
             op_katz=getattr(args, "op_katz", False),
             op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
             op_tang=getattr(args, "op_tang", False),
@@ -542,6 +547,7 @@ def cmd_fuzz(args):
         args.cucb = True
         args.cusum_ucb = True
         args.fpl = True
+        args.gradient = True
         args.consolidated = True
         args.moss = True
         args.contextual = True
@@ -697,6 +703,11 @@ def cmd_fuzz(args):
         cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
         fpl=getattr(args, "fpl", False),
         fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
+        gradient=getattr(args, "gradient", False),
+        gradient_alpha=getattr(args, "gradient_alpha", 0.1),
+        gradient_temperature=getattr(args, "gradient_temperature", 1.0),
+        gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
+        gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
         op_katz=getattr(args, "op_katz", False),
         op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
         op_tang=getattr(args, "op_tang", False),
@@ -1778,6 +1789,7 @@ _HAIL_MARY_FLAGS = (
     "cucb",
     "cusum_ucb",
     "fpl",
+    "gradient",
     "consolidated",
     "moss",
     "fractal_partition",
@@ -2330,6 +2342,35 @@ def main() -> int:
         type=float,
         default=1.0,
         help="FPL perturbation scale; higher = more exploration (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--gradient",
+        action="store_true",
+        help="Enable gradient / softmax (Boltzmann) preference bandit for operators",
+    )
+    fuzz_parser.add_argument(
+        "--gradient-alpha",
+        type=float,
+        default=0.1,
+        help="Gradient bandit step size for preference updates (default: 0.1)",
+    )
+    fuzz_parser.add_argument(
+        "--gradient-temperature",
+        type=float,
+        default=1.0,
+        help="Initial softmax temperature; higher = more uniform (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--gradient-temp-decay",
+        type=float,
+        default=0.9995,
+        help="Per-pull multiplicative temperature decay (default: 0.9995)",
+    )
+    fuzz_parser.add_argument(
+        "--gradient-min-temperature",
+        type=float,
+        default=0.05,
+        help="Floor on softmax temperature (default: 0.05)",
     )
     fuzz_parser.add_argument(
         "--op-katz",

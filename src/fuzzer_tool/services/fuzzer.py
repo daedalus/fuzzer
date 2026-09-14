@@ -60,6 +60,7 @@ from fuzzer_tool.core.schedulers import (
     Exp3Scheduler,
     FPLScheduler,
     GPUCBScheduler,
+    GradientBanditScheduler,
     HierarchicalBanditScheduler,
     KL_DUCBScheduler,
     KL_SWUCBScheduler,
@@ -119,6 +120,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "moss",
     "c2ucb",
     "fpl",
+    "gradient",
     "invasion",
     "round_robin",
     "canary",
@@ -886,6 +888,11 @@ class Fuzzer:
         cusum_ucb_xi=0.6,
         fpl=False,
         fpl_epsilon=1.0,
+        gradient=False,
+        gradient_alpha=0.1,
+        gradient_temperature=1.0,
+        gradient_temp_decay=0.9995,
+        gradient_min_temperature=0.05,
         op_katz=False,
         op_katz_alpha_fraction=0.85,
         op_tang=False,
@@ -2030,6 +2037,26 @@ class Fuzzer:
             self._fpl = FPLScheduler(epsilon=fpl_epsilon, rng=self._rng)
             log.info("FPL enabled (epsilon=%.2f)", fpl_epsilon)
 
+        # Gradient / softmax bandit (Boltzmann exploration). Preference
+        # weights updated by the classic REINFORCE-style rule with optional
+        # baseline and temperature annealing.
+        self._use_gradient = gradient
+        self._gradient = None
+        if gradient:
+            self._gradient = GradientBanditScheduler(
+                alpha=gradient_alpha,
+                temperature=gradient_temperature,
+                temp_decay=gradient_temp_decay,
+                min_temperature=gradient_min_temperature,
+                rng=self._rng,
+            )
+            log.info(
+                "Gradient bandit enabled (alpha=%.3f, temp=%.2f, decay=%.4f)",
+                gradient_alpha,
+                gradient_temperature,
+                gradient_temp_decay,
+            )
+
         # Katz centrality over the operator discovery-transition graph.
         # Off by default: see core/schedulers/op_katz.py's module docstring
         # for the empirical caveat before enabling this on a real campaign.
@@ -2313,6 +2340,7 @@ class Fuzzer:
             or self._cucb
             or self._cusum_ucb
             or self._fpl
+            or self._gradient
             or self._canary
             or self._use_shapley
         )
@@ -2513,6 +2541,8 @@ class Fuzzer:
             _register_arms(self._cusum_ucb)
         if self._fpl:
             _register_arms(self._fpl)
+        if self._gradient:
+            _register_arms(self._gradient)
         if self._consolidated:
             _register_arms(self._consolidated, _format_priors)
         if self._moss:
@@ -4900,6 +4930,7 @@ class Fuzzer:
             self._cucb,
             self._cusum_ucb,
             self._fpl,
+            self._gradient,
             self._consolidated,
             self._moss,
             self._canary,
@@ -6338,6 +6369,8 @@ class Fuzzer:
             ops.append("moss")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
+        if getattr(self, "_use_gradient", False) and self._gradient:
+            ops.append("gradient")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
             ops.append("invasion")
         if getattr(self, "_use_round_robin", False) and self._round_robin:
@@ -6566,6 +6599,8 @@ class Fuzzer:
             ops.append("moss")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
+        if getattr(self, "_use_gradient", False) and self._gradient:
+            ops.append("gradient")
         if getattr(self, "_use_contextual", False):
             ops.append("contextual")
         if getattr(self, "_use_c2ucb", False):
