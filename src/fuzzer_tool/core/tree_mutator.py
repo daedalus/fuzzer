@@ -60,6 +60,67 @@ class _Node:
     def is_leaf(self) -> bool:
         return not self.children
 
+    def size(self) -> int:
+        """Number of ``_Node`` descendants, including self (iterative).
+
+        Kept iterative — like every other traversal in this module — so it
+        stays safe on the pathologically deep trees the regression tests
+        exercise (2000+ levels of nesting would blow the recursion limit).
+        """
+        total = 0
+        stack = [self]
+        while stack:
+            node = stack.pop()
+            total += 1
+            for child in node.children:
+                if isinstance(child, _Node):
+                    stack.append(child)
+        return total
+
+    def byte_length(self) -> int:
+        """Length of ``self.flatten()`` without building the bytes (iterative).
+
+        Mirrors ``flatten()``'s exact accounting (open byte always counted
+        if present, close byte only when ``closed``) so callers can budget
+        against ``max_len`` before doing any cloning/serialization work.
+        """
+        total = 0
+        stack = [self]
+        while stack:
+            node = stack.pop()
+            if node.open is not None:
+                total += 1
+                if node.closed:
+                    total += 1
+            for child in node.children:
+                if isinstance(child, bytes):
+                    total += len(child)
+                else:
+                    stack.append(child)
+        return total
+
+    def depth(self) -> int:
+        """Depth of the deepest ``_Node`` descendant below self (iterative).
+
+        Observability only — not used to cap or reject mutations. Deep
+        nesting is a deliberate, valuable fuzzing target (stack-overflow
+        bugs in recursive-descent parsers), confirmed by
+        ``TestDeepNesting`` in the test suite, so this mutator does not
+        enforce a depth ceiling; a caller that wants one (e.g. for
+        telemetry or a scheduler-level policy) has the primitive to build
+        it on top of.
+        """
+        max_d = 0
+        stack = [(self, 0)]
+        while stack:
+            node, d = stack.pop()
+            for child in node.children:
+                if isinstance(child, _Node):
+                    if d + 1 > max_d:
+                        max_d = d + 1
+                    stack.append((child, d + 1))
+        return max_d
+
     def flatten(self) -> bytes:
         """Flatten the tree back to raw bytes (iterative stack).
 
@@ -229,6 +290,60 @@ def _collect_nodes(node: _Node) -> list[_Node]:
     return nodes
 
 
+def _collect_nodes_with_sizes(root: _Node) -> list[tuple[_Node, int]]:
+    """Collect every non-root ``_Node`` with its subtree size, in one pass.
+
+    Same candidate set as ``_collect_nodes`` (all descendant ``_Node``s,
+    excluding the root), but computes each node's ``size()`` during a
+    single post-order traversal instead of calling ``size()`` separately
+    per node — O(n) total instead of O(n) per node (which is O(n^2) worst
+    case on a deep, thin chain of nested delimiters).
+    """
+    results: list[tuple[_Node, int]] = []
+    sizes: dict[_Node, int] = {}
+    stack: list[tuple[_Node, int]] = [(root, 0)]
+    while stack:
+        node, idx = stack[-1]
+        if idx < len(node.children):
+            child = node.children[idx]
+            stack[-1] = (node, idx + 1)
+            if isinstance(child, _Node):
+                stack.append((child, 0))
+            continue
+        stack.pop()
+        total = 1
+        for child in node.children:
+            if isinstance(child, _Node):
+                total += sizes[child]
+        sizes[node] = total
+        if node is not root:
+            results.append((node, total))
+    return results
+
+
+def _weighted_index(weights: list[int], rng=None) -> int:
+    """Pick an index with probability proportional to ``weights``.
+
+    Uniform selection over all nodes over-samples the many small subtrees
+    near the leaves of a Catalan-distributed tree and under-samples the
+    few large, structurally interesting subtrees near the root — the same
+    bias Koza's genetic-programming literature addresses with a 90/10
+    internal/leaf crossover-point split. Weighting by subtree size
+    corrects for it directly.
+    """
+    total = sum(weights)
+    if total <= 0:
+        idx = rng.randrange(len(weights)) if rng is not None else __import__("random").randrange(len(weights))
+        return idx
+    r = rng.randrange(total) if rng is not None else __import__("random").randrange(total)
+    acc = 0
+    for i, w in enumerate(weights):
+        acc += w
+        if r < acc:
+            return i
+    return len(weights) - 1
+
+
 def _collect_leaves(node: _Node) -> list[_Node | bytes]:
     """Return all leaf children (iterative depth-first)."""
     leaves: list[_Node | bytes] = []
@@ -247,66 +362,78 @@ def _collect_leaves(node: _Node) -> list[_Node | bytes]:
 
 
 def mutate_tree_del(root: _Node, rng=None) -> bool:
-    """Delete a random node from the tree."""
-    nodes = _collect_nodes(root)
-    n = len(nodes)
-    if n < 1:
+    """Delete a random node from the tree, biased toward larger subtrees."""
+    pairs = _collect_nodes_with_sizes(root)
+    if not pairs:
         return False
-    idx = rng.randrange(n) if rng is not None else __import__("random").randrange(n)
-    target = nodes[idx]
+    idx = _weighted_index([w for _, w in pairs], rng)
+    target = pairs[idx][0]
     _remove_child(root, target)
     return True
 
 
 def mutate_tree_dup(root: _Node, rng=None) -> bool:
-    """Duplicate a random node in-place."""
-    nodes = _collect_nodes(root)
-    n = len(nodes)
-    if n < 1:
+    """Duplicate a random node in-place, biased toward larger subtrees."""
+    pairs = _collect_nodes_with_sizes(root)
+    if not pairs:
         return False
-    idx = rng.randrange(n) if rng is not None else __import__("random").randrange(n)
-    target = nodes[idx]
+    idx = _weighted_index([w for _, w in pairs], rng)
+    target = pairs[idx][0]
     dup = _clone_node(target)
     _insert_after(root, target, dup)
     return True
 
 
 def mutate_tree_swap(root: _Node, rng=None) -> bool:
-    """Swap two random nodes in the tree."""
-    nodes = _collect_nodes(root)
-    n = len(nodes)
+    """Swap two random nodes in the tree, biased toward larger subtrees.
+
+    Delimiter-type-agnostic by design: the two nodes need not share the
+    same opening delimiter. Each node carries its own open/close byte, so
+    the swap stays round-trip safe either way — this mutator has no
+    grammar-rule concept to constrain the pick against (contrast with
+    ``TreeMutator._tree_swap`` in grammar.py, which *is* constrained to
+    same-rule nodes because it has grammar type information available).
+    """
+    pairs = _collect_nodes_with_sizes(root)
+    n = len(pairs)
     if n < 2:
         return False
-    if rng is not None:
-        i = rng.randrange(n)
-        j = rng.randrange(n - 1)
-        if j >= i:
-            j += 1
-    else:
-        import random as _rand
-
-        i = _rand.randrange(n)
-        j = _rand.randrange(n - 1)
-        if j >= i:
-            j += 1
-    _swap_nodes(root, nodes[i], nodes[j])
+    weights = [w for _, w in pairs]
+    i = _weighted_index(weights, rng)
+    remaining = [k for k in range(n) if k != i]
+    j = remaining[_weighted_index([weights[k] for k in remaining], rng)]
+    _swap_nodes(root, pairs[i][0], pairs[j][0])
     return True
 
 
-def mutate_tree_stutter(root: _Node, rng=None) -> bool:
-    """Repeat a random subtree path multiple times."""
-    nodes = _collect_nodes(root)
-    n = len(nodes)
-    if n < 1:
+def mutate_tree_stutter(root: _Node, rng=None, max_len: int | None = None) -> bool:
+    """Repeat a random subtree path multiple times, biased toward larger subtrees.
+
+    When *max_len* is given, the repeat count is capped up front against
+    the projected flattened size (via the cheap ``byte_length()`` counts)
+    instead of building the full duplication and only discovering it was
+    oversized after ``flatten()``.
+    """
+    pairs = _collect_nodes_with_sizes(root)
+    if not pairs:
         return False
+    idx = _weighted_index([w for _, w in pairs], rng)
+    target = pairs[idx][0]
     if rng is not None:
-        target = nodes[rng.randrange(n)]
         n_reps = rng.randint(2, 64)
     else:
         import random as _rand
 
-        target = nodes[_rand.randrange(n)]
         n_reps = _rand.randint(2, 64)
+
+    if max_len is not None:
+        subtree_len = target.byte_length()
+        if subtree_len > 0:
+            budget = max_len - root.byte_length()
+            n_reps = min(n_reps, max(0, budget // subtree_len))
+        if n_reps < 1:
+            return False
+
     clone = _clone_node(target)
     for _ in range(n_reps):
         _insert_after(root, target, _clone_node(clone))
@@ -432,7 +559,7 @@ def lightweight_tree_mutate(data: bytes, max_len: int = 65536, rng=None) -> byte
     elif op == "swap":
         mutated = mutate_tree_swap(root, rng=rng)
     elif op == "stutter":
-        mutated = mutate_tree_stutter(root, rng=rng)
+        mutated = mutate_tree_stutter(root, rng=rng, max_len=max_len)
 
     if not mutated:
         return data

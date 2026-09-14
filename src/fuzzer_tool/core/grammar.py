@@ -588,6 +588,28 @@ class TreeNode:
         return f"Node({self.rule!r}, children={len(self.children)})"
 
 
+def _weighted_choice(nodes: list["TreeNode"], rng) -> "TreeNode":
+    """Pick a node with probability proportional to its subtree size.
+
+    Plain uniform selection over-samples the many small subtrees near a
+    Catalan-distributed tree's leaves and under-samples the few large
+    subtrees near the root — the same bias Koza's genetic-programming
+    literature addresses with a 90/10 internal/leaf crossover-point split.
+    Weighting by ``TreeNode.size()`` corrects for it directly.
+    """
+    weights = [n.size() for n in nodes]
+    total = sum(weights)
+    if total <= 0:
+        return rng.choice(nodes)
+    r = rng.randint(0, total - 1)
+    acc = 0
+    for node, w in zip(nodes, weights):
+        acc += w
+        if r < acc:
+            return node
+    return nodes[-1]
+
+
 class SubtreePopulation:
     """Global pool of subtrees harvested across many corpus entries.
 
@@ -836,7 +858,7 @@ class TreeMutator:
         targets = tree.collect_interior()
         if not targets:
             return tree.serialize()[:max_len]
-        target = self._rng.choice(targets)
+        target = _weighted_choice(targets, self._rng)
         # Generate a replacement of the same rule type
         replacement_bytes = self.grammar.generate(target.rule, max_len=max_len)
         replacement = TreeNode(rule=target.rule, data=replacement_bytes)
@@ -851,7 +873,7 @@ class TreeMutator:
         candidates = [n for n in all_interior if n is not tree and n.children]
         if not candidates:
             return tree.serialize()[:max_len]
-        target = self._rng.choice(candidates)
+        target = _weighted_choice(candidates, self._rng)
         # Replace with empty leaf
         self._replace_in_tree(tree, target, TreeNode(rule=target.rule, data=b""))
         return tree.serialize()[:max_len]
@@ -863,7 +885,7 @@ class TreeMutator:
         parents_with_children = [n for n in all_interior if len(n.children) >= 2]
         if not parents_with_children:
             return tree.serialize()[:max_len]
-        parent = self._rng.choice(parents_with_children)
+        parent = _weighted_choice(parents_with_children, self._rng)
         idx = self._rng.randint(0, len(parent.children) - 1)
         clone = self._clone_tree(parent.children[idx])
         # Insert after the original
@@ -891,7 +913,7 @@ class TreeMutator:
         # all a single mutation needs.
         tries = min(len(targets), 8)
         for _ in range(tries):
-            target = targets[rng.randint(0, len(targets) - 1)]
+            target = _weighted_choice(targets, rng)
             donor = population.sample(target.rule, rng=rng)
             if donor is None or donor is target:
                 continue
@@ -915,7 +937,7 @@ class TreeMutator:
         ]
         if not multi_targets:
             return tree.serialize()[:max_len]
-        target = self._rng.choice(multi_targets)
+        target = _weighted_choice(multi_targets, self._rng)
         replacement_bytes = self.grammar.generate(target.rule, max_len=max_len)
         self._replace_in_tree(tree, target, TreeNode(rule=target.rule, data=replacement_bytes))
         return tree.serialize()[:max_len]
