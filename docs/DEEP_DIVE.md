@@ -571,6 +571,29 @@ fuzzer-tool import <source_dir> -d <corpus> [-o <crashes>] [--format afl|libfuzz
 
 **Autotokens** (`--autotokens`, `services/import_corpus.py::build_autotoken_dictionary`): ports AFL++'s no-grammar-needed tokenization. Every seed under the destination corpus is scanned for maximal runs of identifier-like ASCII bytes (`extract_tokens`, 3–32 bytes by default), tokens are ranked by the number of distinct seeds they appear in (not raw frequency, so one seed repeating a token can't crowd out corpus-wide tokens), and the top `max_tokens` (default 200) are written to `FILE` in the standard AFL dictionary format (`auto_0000="token"`), loadable directly via `-D`/`--dict`.
 
+
+### Seed Harvesting (`tools/extract_ffmpeg_seeds.py`)
+
+The `extract_ffmpeg_seeds.py` tool automates the collection of CVE PoC seeds from multiple sources: OSS-Fuzz (via `target_dec_fate.list`), the FATE suite baseline samples, and known CVE PoC repositories. Seeds land in `<out>/seeds/` so the fuzzer's `load_corpus` consumes them directly.
+
+**Key improvements over the original:**
+- **Expanded CVE inventory**: `CVE_POCS` now includes 10 CVEs (up from 4), covering critical FFmpeg vulnerabilities including MagicYUV heap OOB (CVE-2026-8461), AV1 RTP (CVE-2026-70628), RASC DLTA overflow (CVE-2026-65704), MOV metadata OOM (CVE-2025-1373), AVI/HLS (CVE-2017-9993), and M3U/HLS (CVE-2016-1897).
+- **CLI interface**: `--list-cves` enumerates all 473 CVEs from ffmpeg.org/security.html with PoC availability status; `--source cve --max 1` tests a single CVE quickly.
+- **Advisory fetching**: Google Security Research advisories (e.g., GHSA-vhxg-9wfx-7fcj) are scraped for inline PoC scripts and base64-encoded payloads.
+- **Fixed fate list parsing**: The regex was corrected from `r"(\d+)/clusterfuzz-testcase-(\d+)"` to `r"(\d+)/(\d+)"` to match the live `target_dec_fate.list` format (bare `<issue_num>/<testcase_id>`).
+- **Corpus integration**: Seeds land in `corpus_ffmpeg_seeds/seeds/` and are consumed directly by the fuzzer's `load_corpus` routine.
+
+**Usage examples:**
+```bash
+# List all CVEs and their PoC status
+python tools/extract_ffmpeg_seeds.py --list-cves
+
+# Test a single CVE (e.g., CVE-2026-8461)
+python tools/extract_ffmpeg_seeds.py --source cve --max 1
+
+# Get all seeds for a specific CVE
+python tools/extract_ffmpeg_seeds.py --source cve --codecs magicyuv --max 50
+```
 ## Coverage Modes
 
 Coverage-guided mode is **on by default** (`--no-coverage` to opt out).
