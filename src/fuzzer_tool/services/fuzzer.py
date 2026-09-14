@@ -69,6 +69,7 @@ from fuzzer_tool.core.schedulers import (
     MOSSScheduler,
     ReplicatorScheduler,
     RoundRobinScheduler,
+    SuccessiveEliminationScheduler,
     SWUCBScheduler,
 )
 from fuzzer_tool.core.schedules import (
@@ -1009,6 +1010,11 @@ class Fuzzer:
         formatfuzzer=False,
         ff_bin_dir=None,
         ff_templates=None,
+        # Successive-elimination / racing bandit for operator scheduling.
+        successive_elim=False,
+        successive_elim_delta=0.1,
+        successive_elim_min_pulls=3,
+        successive_elim_reopen=0,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2083,9 +2089,7 @@ class Fuzzer:
         if op_katz:
             from fuzzer_tool.core.schedulers.op_katz import OpKatzScheduler
 
-            self._op_katz = OpKatzScheduler(
-                rng=self._rng, alpha_fraction=op_katz_alpha_fraction
-            )
+            self._op_katz = OpKatzScheduler(rng=self._rng, alpha_fraction=op_katz_alpha_fraction)
             log.info("op_katz enabled (alpha_fraction=%.2f)", op_katz_alpha_fraction)
 
         # Tang's low-rank recommender over the operator x edge matrix. Off
@@ -5975,9 +5979,7 @@ class Fuzzer:
             "period_mean": sum(periods) / len(periods) if periods else None,
             "period_min": min(periods) if periods else None,
             "period_max": max(periods) if periods else None,
-            "duty": (
-                self._stall_recovery_execs / self.exec_count if self.exec_count > 0 else None
-            ),
+            "duty": (self._stall_recovery_execs / self.exec_count if self.exec_count > 0 else None),
             "edges_active": self._stall_edges_active,
             "edges_idle": idle_edges,
             "rate_active": active_rate,
