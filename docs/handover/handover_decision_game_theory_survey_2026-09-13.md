@@ -91,6 +91,41 @@ a synthetic or real-target harness comparing "fixed window" vs "marginal-cost
 stop" allocation the same way `handover_control_theory_loops_2026-09-12.md`
 §2 measured L1's dwell sweep, before writing a patch.
 
+**2026-09-14 update — consumer #2 implemented, consumer #1 still open.**
+`core/marginal_cost.py` now provides the estimator proposed above:
+`MarginalCostTracker.record_snapshot(key, cumulative_cost, cumulative_output)`
+taken at each window boundary, `.marginal_cost(key)` returning
+`Δcost/Δoutput` between the last two snapshots, `.population_average_mc()`,
+and `.should_stop(key, multiplier)` implementing the "MC_i exceeds a multiple
+of the population average" rule (including the edge case a naive port would
+miss: a window where an operator spent cost but produced zero output reads
+as `None` from `marginal_cost()`, but `should_stop()` still flags it as
+worse than any finite MC rather than silently treating undefined-ratio as
+"no signal, keep going").
+
+`replicator.py` (consumer #2) is wired: constructor gained an optional
+`marginal_cost_stop_multiplier` (default `None`, so `--replicator` alone is
+byte-for-byte unaffected); `record()` now also feeds cumulative
+`(execs, discoveries)` counters per operator, `_replicator_update()` snapshots
+them into the tracker at every window boundary regardless of whether the
+multiplier is set, and — only when it *is* set — applies `min(growth,
+1 - eta)` to any operator `should_stop()` flags, on top of (never instead
+of) the ordinary fitness-relative-to-mean update. `operator_marginal_costs()`
+exposes the current per-operator MC for diagnostics/stats display. CLI flag
+`--replicator-mc-stop-multiplier` threads it through. 13 tests in
+`tests/core/test_marginal_cost.py` (estimator in isolation) + 6 in
+`tests/test_regression_marginal_cost_stop.py` (disabled-by-default parity,
+snapshot timing, and a same-seed baseline-vs-gated comparison showing the
+flagged operator's population share can only shrink further, never less,
+under the stop rule).
+
+Consumer #1 (`parallel_cost_partition.py` — equalize `MC_i` across workers
+instead of balancing total cost via Multifit) is **not** implemented. It's a
+different objective from what Multifit computes today, not a small
+extension like the replicator case, and the doc above is explicit that it
+needs an empirical A/B before a patch is warranted — that measurement
+hasn't been run. Left as the open item.
+
 ---
 
 ## 2. Bug found: `smt_solver.py`'s "minimax game" carries no signal

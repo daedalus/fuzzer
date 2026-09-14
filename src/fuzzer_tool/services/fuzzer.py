@@ -845,6 +845,7 @@ class Fuzzer:
         t_x_minutes=60.0,
         differential_target=None,
         replicator=False,
+        replicator_mc_stop_multiplier=None,
         shapley=False,
         bayesian=False,
         mi_guided=False,
@@ -1937,9 +1938,19 @@ class Fuzzer:
         self._replicator = None
         if replicator:
             self._replicator = ReplicatorScheduler(
-                window_size=200, learning_rate=0.1, rng=self._rng
+                window_size=200,
+                learning_rate=0.1,
+                rng=self._rng,
+                marginal_cost_stop_multiplier=replicator_mc_stop_multiplier,
             )
-            log.info("Replicator dynamics scheduling enabled (window=200, eta=0.1)")
+            if replicator_mc_stop_multiplier is not None:
+                log.info(
+                    "Replicator dynamics scheduling enabled (window=200, eta=0.1, "
+                    "mc_stop_multiplier=%.2f)",
+                    replicator_mc_stop_multiplier,
+                )
+            else:
+                log.info("Replicator dynamics scheduling enabled (window=200, eta=0.1)")
         # EXP3 adversarial bandit
         self._use_exp3 = exp3
         self._exp3 = None

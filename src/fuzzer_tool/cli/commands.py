@@ -687,6 +687,7 @@ def cmd_fuzz(args):
         aflgo_cooling=getattr(args, "aflgo_cooling", "exp"),
         t_x_minutes=getattr(args, "t_x", 60.0),
         replicator=getattr(args, "replicator", False),
+        replicator_mc_stop_multiplier=getattr(args, "replicator_mc_stop_multiplier", None),
         exp3=getattr(args, "exp3", False),
         exp4=getattr(args, "exp4", False),
         invasion=getattr(args, "invasion", False),
@@ -2080,6 +2081,16 @@ def main() -> int:
         "--replicator",
         action="store_true",
         help="Enable replicator dynamics operator scheduling (evolutionary game theory)",
+    )
+    fuzz_parser.add_argument(
+        "--replicator-mc-stop-multiplier",
+        type=float,
+        default=None,
+        help="Extra shrink for an operator whose marginal cost (execs "
+        "spent per new discovery, between the last two --replicator "
+        "windows) exceeds this multiple of the population-average "
+        "marginal cost, on top of the ordinary replicator update. Unset "
+        "by default -- --replicator alone is unaffected either way.",
     )
     fuzz_parser.add_argument(
         "--shapley",

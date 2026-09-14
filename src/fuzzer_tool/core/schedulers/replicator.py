@@ -3,6 +3,7 @@
 import collections
 from collections import defaultdict
 
+from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
 
 
@@ -28,6 +29,19 @@ class ReplicatorScheduler:
         window_size: Executions per fitness evaluation.
         learning_rate: Replicator step size (eta). Smaller = smoother.
         mutation_rate: Minimum probability floor (exploration guarantee).
+        marginal_cost_stop_multiplier: Optional extra shrink applied to an
+            operator whose marginal cost (executions spent per new
+            discovery, MC_i = Δexecs/Δdiscoveries between the last two
+            windows -- see ``core/marginal_cost.py`` and
+            ``docs/handover/handover_decision_game_theory_survey_2026-09-13.md``
+            §1) exceeds this multiple of the population-average marginal
+            cost. This targets the case the fixed ``window_size`` cutoff
+            misses on its own: an operator whose cost-per-discovery is
+            actively rising (past the U-shaped MC curve's turning point)
+            gets penalized before its *average* fitness necessarily drops
+            enough for the ordinary replicator update to notice. ``None``
+            (the default) disables this entirely -- existing behavior is
+            unchanged either way.
     """
 
     # Declares that init_arm() does NOT accept informative priors (arm
@@ -40,11 +54,13 @@ class ReplicatorScheduler:
         learning_rate: float = 0.1,
         mutation_rate: float = 0.02,
         rng: RandPool | None = None,
+        marginal_cost_stop_multiplier: float | None = None,
     ):
         self._rng = rng if rng is not None else RandPool()
         self.window_size = window_size
         self.eta = learning_rate
         self.mutation_rate = mutation_rate
+        self.marginal_cost_stop_multiplier = marginal_cost_stop_multiplier
 
         self.operators: list[str] = []
         self.op_index: dict[str, int] = {}
@@ -58,6 +74,16 @@ class ReplicatorScheduler:
         self._total_discoveries = 0
         # History of distributions for convergence diagnostics
         self._history: collections.deque = collections.deque(maxlen=100)
+
+        # Cumulative (execs, discoveries) per operator -- the "cost" and
+        # "output" counters the marginal-cost snapshots are taken from.
+        # Kept separate from _fitness_sum/_fitness_count above because
+        # those two reset every window (see _replicator_update) while a
+        # marginal-cost *difference* needs the running total on both
+        # sides of the window boundary.
+        self._cum_execs: dict[str, int] = defaultdict(int)
+        self._cum_discoveries: dict[str, float] = defaultdict(float)
+        self._mc_tracker = MarginalCostTracker()
 
     def init_arm(self, name: str) -> None:
         """Register a mutation operator. Rebuilds population if operators changed."""
@@ -121,6 +147,9 @@ class ReplicatorScheduler:
         self._fitness_sum[name] += weight if success else 0.0
         self._fitness_count[name] += 1
 
+        self._cum_execs[name] += 1
+        self._cum_discoveries[name] += weight if success else 0.0
+
         if self._execs_in_window >= self.window_size:
             self._replicator_update()
 
@@ -171,6 +200,13 @@ class ReplicatorScheduler:
 
         fitness, has_data = self._replicator_compute_fitness()
 
+        # Snapshot cumulative (execs, discoveries) for every operator at
+        # this window boundary -- unconditionally, so the tracker has two
+        # snapshots to diff by the *next* boundary even if
+        # marginal_cost_stop_multiplier is turned on only later.
+        for op in self.operators:
+            self._mc_tracker.record_snapshot(op, self._cum_execs[op], self._cum_discoveries[op])
+
         if self.population and any(has_data):
             phi = sum(
                 x * f for x, f, hd in zip(self.population, fitness, has_data, strict=False) if hd
@@ -181,6 +217,19 @@ class ReplicatorScheduler:
         new_pop = []
         for i in range(n):
             growth = 1.0 + self.eta * (fitness[i] - phi) if has_data[i] else 1.0
+            if self.marginal_cost_stop_multiplier is not None and self._mc_tracker.should_stop(
+                self.operators[i], self.marginal_cost_stop_multiplier, keys=self.operators
+            ):
+                # Marginal cost (execs per new discovery) has run away
+                # relative to the population average: apply the same
+                # magnitude of shrink the ordinary update would apply to
+                # the single worst-average-fitness operator, regardless of
+                # what this operator's own average happens to be this
+                # window. Bounded by min() rather than replacing growth
+                # outright, so a stop signal can only ever shrink an
+                # operator further, never override a shrink the ordinary
+                # rule already computed.
+                growth = min(growth, 1.0 - self.eta)
             new_pop.append(max(0.0, self.population[i] * growth))
 
         self.population = self._replicator_normalize_with_floor(new_pop, n)
@@ -239,6 +288,14 @@ class ReplicatorScheduler:
                 self._total_execs - self._total_discoveries,
             )
         }
+
+    def operator_marginal_costs(self) -> dict[str, float | None]:
+        """Current MC_i (execs per new discovery, between the last two
+        window boundaries) per operator, per ``core/marginal_cost.py``.
+        ``None`` for an operator with fewer than two window snapshots yet,
+        or whose discovery count hasn't moved since the prior snapshot.
+        """
+        return {op: self._mc_tracker.marginal_cost(op) for op in self.operators}
 
     def operator_stats(self) -> list[dict]:
         """Get stats for each operator (for diagnostics/logging)."""
