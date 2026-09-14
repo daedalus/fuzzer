@@ -201,6 +201,34 @@ class TestOperatorEloRecordsUsedOnly:
         Fuzzer._record_operator_strategy_matches(f, 1.0)
         assert [r[0] for r in Fuzzer._operator_convergence_rows(f)] == ["bandit"]
 
+    def test_canary_included_even_though_never_selected(self):
+        # canary is designed to be selected the least of anyone (see
+        # core/schedulers/canary.py) -- unlike gp_ucb above, it must still
+        # show up in the report whenever it's enabled and has accrued match
+        # data as an opponent, even though it was never f._meta_strategy.
+        f = self._make("bandit", {"bandit"})
+        f._use_canary = True
+        f._canary = object()
+        Fuzzer._record_operator_strategy_matches(f, 1.0)
+        assert "canary" not in f._meta_strategy_used
+        assert f._elo._strategy_match_count.get("canary", 0) > 0
+        assert {r[0] for r in Fuzzer._operator_convergence_rows(f)} == {"bandit", "canary"}
+
+    def test_convergence_rows_sorted_by_rating_descending(self):
+        # bandit wins every recorded match, so it should end up rated above
+        # its opponents -- and the report should reflect that ranking, not
+        # alphabetical order.
+        f = self._make("bandit", {"bandit", "mopt"})
+        f._use_exp3 = True
+        f._exp3 = True
+        for _ in range(20):
+            Fuzzer._record_operator_strategy_matches(f, 1.0)
+        rows = Fuzzer._operator_convergence_rows(f)
+        names = [r[0] for r in rows]
+        assert names[0] == "bandit"
+        ratings = [r[1] for r in rows]
+        assert ratings == sorted(ratings, reverse=True)
+
 
 class _FakeBandit:
     def __init__(self):

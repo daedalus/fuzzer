@@ -6247,7 +6247,9 @@ class Fuzzer:
     def _seed_convergence_rows(self) -> list[tuple[str, float, float, int]]:
         """(name, rating, delta, matches) for every seed strategy actually used
         this run. Strategies that were never selected (only ever recorded as
-        phantom opponents) are excluded from the convergence report.
+        phantom opponents) are excluded from the convergence report. Sorted by
+        rating descending, same convention as the bandit/mopt/replicator
+        convergence tables above.
         """
         if not (self._use_elo and self._elo):
             return []
@@ -6258,22 +6260,37 @@ class Fuzzer:
             if count > 0:
                 rating = self._elo._strategy_mu.get(key, self._elo.initial_mu)
                 rows.append((s, rating, rating - self._elo.initial_mu, count))
-        return sorted(rows)
+        return sorted(rows, key=lambda r: -r[1])
 
     def _operator_convergence_rows(self) -> list[tuple[str, float, float, int]]:
         """(name, rating, delta, matches) for every operator scheduler actually
-        selected this run. Schedulers that were enabled but never selected are
-        excluded from the convergence report.
+        selected this run, plus ``canary`` whenever it is enabled and rated.
+        Schedulers that were enabled but never selected are otherwise excluded
+        from the convergence report.
+
+        canary is a deliberate exception: it is designed (see
+        ``core/schedulers/canary.py``) to be selected the *least* of any
+        scheduler in the pool, so gating it on "was ever selected" the same
+        way as real schedulers means it disappears from exactly the report
+        that exists to show it as a floor. It still accrues a real rating and
+        match count every round as the opponent side of
+        ``record_strategy_match`` regardless of whether it was picked, so it
+        is included here on rated-with-matches rather than
+        ``_meta_strategy_used`` membership. Sorted by rating descending, same
+        convention as the bandit/mopt/replicator convergence tables above.
         """
         if not (self._use_elo and self._elo):
             return []
+        used = set(getattr(self, "_meta_strategy_used", set()))
+        if getattr(self, "_use_canary", False) and self._canary:
+            used.add("canary")
         rows = []
-        for s in getattr(self, "_meta_strategy_used", set()):
+        for s in used:
             count = self._elo._strategy_match_count.get(s, 0)
             if count > 0:
                 rating = self._elo._strategy_mu.get(s, self._elo.initial_mu)
                 rows.append((s, rating, rating - self._elo.initial_mu, count))
-        return sorted(rows)
+        return sorted(rows, key=lambda r: -r[1])
 
     def _selected_schedulers_str(self) -> str:
         """One-line summary of the active scheduling stack (startup banner)."""
