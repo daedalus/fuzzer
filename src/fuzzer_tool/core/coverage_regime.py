@@ -468,7 +468,18 @@ class CoverageRegimeDetector:
             "regime": self._regime.value,
             "reason": self._reason,
             "actionable": self._actionable,
-            "regime_history": self._regime_history,
+            # `.value`, not the enum. The state file is loaded through
+            # state_store._SafeUnpickler, whose allowlist is containers and
+            # scalars only, so a persisted CoverageRegime member makes the
+            # WHOLE file unloadable -- every section, not just this one --
+            # and the failure is reported as "refusing to load untrusted
+            # state file", which blames tampering for something this code
+            # wrote itself. `self._regime` above was already converted for
+            # exactly this reason; the history was missed.
+            "regime_history": [
+                (int(exec_count), regime.value if hasattr(regime, "value") else str(regime))
+                for exec_count, regime in self._regime_history
+            ],
             "stall_triggered": self._stall_triggered,
             "csd": self._csd.save(),
             # CoverageHomogeneityDetector has no save(); its
@@ -486,7 +497,23 @@ class CoverageRegimeDetector:
         self._regime = CoverageRegime(data.get("regime", "supercritical"))
         self._reason = data.get("reason", "")
         self._actionable = data.get("actionable", False)
-        self._regime_history = data.get("regime_history", [])
+        # Accept either shape: `.value` strings from a current save(), or
+        # enum members from an in-memory round-trip that never went through
+        # the pickler. Unparseable entries are dropped rather than
+        # propagated -- a bad history entry is not worth failing a resume.
+        history: list[tuple[int, CoverageRegime]] = []
+        for entry in data.get("regime_history", []):
+            try:
+                exec_count, regime = entry
+                history.append(
+                    (
+                        int(exec_count),
+                        regime if isinstance(regime, CoverageRegime) else CoverageRegime(regime),
+                    )
+                )
+            except (TypeError, ValueError):
+                continue
+        self._regime_history = history
         self._stall_triggered = data.get("stall_triggered", False)
         if "csd" in data:
             self._csd.load(data["csd"])

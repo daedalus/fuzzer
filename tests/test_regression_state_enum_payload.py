@@ -154,5 +154,6 @@ def test_a_real_state_file_is_readable_end_to_end(tmp_path) -> None:
     store = StateStore(tmp_path)
     store.set("regime", _detector_with_history().save())
     store.save()
-    raw = gzip.open(store.path, "rb").read()
+    with gzip.open(store.path, "rb") as fh:
+        raw = fh.read()
     assert isinstance(_safe_loads(raw), dict)
