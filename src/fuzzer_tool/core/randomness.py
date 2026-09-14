@@ -195,11 +195,23 @@ def non_overlapping_template_matching(
     otherwise it advances one bit. *template* should be non-periodic (no
     proper suffix equals a prefix) -- the default 8 zeros + a 1 is one of
     NIST's own recommended m=9 templates and is aperiodic.
+
+    The chi-square statistic below assumes each block's expected hit count
+    ``mu = (block_len - m + 1) / 2**m`` is large enough for the per-block
+    count to be approximately normal. The previous default,
+    ``max(m * 8, 64)`` = 72 for m=9, gave ``mu`` ~= 0.125 -- almost every
+    block sees 0 or 1 hits, the chi-square collapses, and the test returns
+    p=1.0 unconditionally regardless of input (verified: constant across
+    30 independent RandPool streams). ``block_len`` now defaults to the
+    smallest size giving ``mu >= 2`` (NIST's own choice for the m=9 case:
+    solving ``2 * 2**m + m - 1`` at m=9 gives exactly NIST's recommended
+    M=1032), which restores real statistical power while still tracking
+    *m* for other template lengths.
     """
     b = _bits(data)
     n = b.size
     m = len(template)
-    block_len = block_len or max(m * 8, 64)
+    block_len = block_len or (2 * (1 << m) + m - 1)
     n_blocks = n // block_len
     if n_blocks < 2:
         return 1.0
