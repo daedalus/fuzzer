@@ -109,20 +109,59 @@ un-shrunk-vs-shrunk comparison still comes out wider than `ducb` rather than
 narrower as claimed, and the whole discounted+KL combination is an
 unproven composition of two separate papers' results.
 
-## Candidate directions (not implemented)
+## Update: tried the paper-literal fix, it made things worse
 
-1. Drop `exploration`/`xi` from `kl_ducb` entirely and use the paper's own
-   recommendation (`budget = log_n / n`, i.e. `c=0`), then re-measure against
-   `ducb` and `canary` empirically — this is what the cited paper actually
-   prescribes.
-2. If (1) still underperforms in the discounted, high-arm-count regime this
-   fuzzer runs in (147 operators, `gamma=0.9999`), that would itself be a
-   useful negative result: it would suggest the undiscounted KL-UCB
-   guarantee genuinely doesn't transfer to the discounted setting, matching
-   the gap identified in section 3.
-3. Either way, `kl_ducb.py`'s docstring claim ("explores less, exploits more
-   aggressively") should be corrected or removed — it's not supported by
-   what the code measurably does.
+Implemented candidate (1) first: dropped `exploration`/`xi` to `1.0` each
+(budget = `log(n)/N`, Garivier & Cappé's own `c=0` recommendation) and
+re-ran `tools/measure_klucb_signal.py`. Result: stationary tail share
+**dropped from 0.943 to 0.657** — the paper-literal fix made `kl_ducb`
+dramatically worse, not better. That's the opposite of the hypothesis in
+the original version of this doc.
 
-No patch attached; next step would be trying (1) and re-running the
-convergence measurement.
+Followed up with a shrinkage sweep (`xi` from 1.0 down to 0.01,
+`exploration` fixed at 1.0), averaged over 5 seeds on both a stationary
+environment (tail share) and a decaying-best environment (post-decay
+recovery), matching the two-metric methodology `ducb.py`'s own docstring
+uses:
+
+    xi      stationary   recovery
+    0.60    0.864        0.475
+    0.30    0.950        0.640
+    0.20    0.975        0.772
+    0.15    0.971        0.824
+    0.10    0.982        0.854   <- picked
+    0.075   1.000        0.556   (unstable across seeds)
+    0.05    0.400        0.783   (unstable across seeds)
+    DUCB reference: 0.978 / 0.858
+
+`xi=0.10` (with `exploration=1.0`) tracks `DUCBScheduler` on both metrics
+within noise. Below ~0.075 the measurement gets visibly unstable across
+seeds (not a smooth curve) — a further sign that this discounted+KL
+composition doesn't have the well-behaved, monotone tradeoff either
+source paper would lead you to expect near its own recommended constant.
+
+**Applied**: `KL_DUCBScheduler` now defaults to `xi=0.10, exploration=1.0`
+instead of `xi=0.6, exploration=0.25`. All 4 existing
+`tests/test_kl_ducb_scheduler.py` tests still pass unchanged (the
+adversarial test pins its own explicit `xi=0.6, exploration=0.25` and is
+checking the formula, not the default). The rest of the suite
+(`test_regression_scheduler_fallback_precedence.py`,
+`test_regression_operator_ballot_symmetry.py`,
+`test_regression_elo_all.py`, etc.) has 63 pre-existing failures in this
+environment verified identical with and without this change (`git stash`
+diff), so they're unrelated to this fix.
+
+## Remaining open question
+
+`xi=0.10` is an empirical fit to two synthetic environments, not a
+theoretical constant — nobody has proven a discounted-KL-UCB regret bound
+that this value would follow from. The honest characterization is still
+what section 3 above says: this scheduler is a heuristic composition of
+two papers' techniques, now re-tuned by measurement rather than by
+borrowing an unrelated constant. Re-measuring directly against a live
+fuzzing campaign (not just the two synthetic bandit environments here)
+would be the natural next check, and `kl_swucb` — which uses no
+`exploration` multiplier and a single `xi=0.15` for the *windowed* rather
+than discounted composition, and already measured well above `swucb`
+(0.997) without needing this fix — is worth a similar audit for
+completeness even though nothing currently flags it as underperforming.
