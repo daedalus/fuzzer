@@ -1,5 +1,7 @@
 """Tests for genetic algorithm lifecycle."""
 
+import hashlib
+
 import pytest
 
 from fuzzer_tool.core.edge_tracker import EdgeTracker
@@ -76,6 +78,19 @@ class TestGALifecycle:
         corpus = [b"seed_%d" % i for i in range(5)]
         ga.initialize(corpus, et)
         assert len(ga.population) == 5
+
+    def test_initialize_updates_best_fitness(self):
+        """Regression: best_fitness must be updated after initialize() so
+        stats lines like 'ga: gen=0 pop=200 fit=0.00' show real values."""
+        ga = GALifecycle(pop_size=10)
+        et = EdgeTracker()
+        corpus = [b"seed_%d" % i for i in range(5)]
+        for i, data in enumerate(corpus):
+            et.seed_edges[hashlib.sha256(data).hexdigest()[:16]] = {i * 10 + j for j in range(5)}
+        et.cumulative_edges = set(range(50))
+        ga.initialize(corpus, et)
+        assert ga.best_fitness > 0
+        assert ga.avg_fitness > 0
 
     def test_tournament_select_returns_individual(self):
         ga = GALifecycle(pop_size=10, tournament_size=3)

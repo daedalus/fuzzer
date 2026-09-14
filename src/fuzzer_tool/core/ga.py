@@ -280,6 +280,7 @@ class GALifecycle:
             )
             self.population.append(ind)
         self._evaluate_all(edge_tracker)
+        self._update_stats()
 
     def on_fuzz_result(
         self,

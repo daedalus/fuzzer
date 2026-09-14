@@ -10,6 +10,7 @@ Test categories:
 7. Integration
 """
 
+import hashlib
 import math
 import random
 
@@ -440,6 +441,20 @@ class TestQEALifecycle:
         corpus = [b"seed_%d" % i for i in range(5)]
         qea.initialize(corpus, et)
         assert len(qea.population) == 5
+
+    def test_initialize_updates_best_fitness(self):
+        """Regression: best_fitness must be updated after initialize() so
+        stats lines like 'qea: gen=0 pop=200 fit=0.00' show real values."""
+        qea = QEALifecycle(pop_size=10)
+        et = EdgeTracker()
+        corpus = [b"seed_%d" % i for i in range(5)]
+        for i, data in enumerate(corpus):
+            key = hashlib.sha256(data).hexdigest()[:16]
+            et.seed_edges[key] = {i * 10 + j for j in range(5)}
+        et.cumulative_edges = set(range(50))
+        qea.initialize(corpus, et)
+        assert qea.best_fitness > 0
+        assert qea.avg_fitness > 0
 
     def test_initialize_empty_corpus(self):
         """Empty corpus → empty population, no crash."""

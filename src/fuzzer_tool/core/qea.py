@@ -732,6 +732,7 @@ class QEALifecycle:
             self.population.append(ind)
 
         self._evaluate_all(edge_tracker)
+        self._update_stats()
 
     # ── Algorithmic cooling ────────────────────────────────────────
 
