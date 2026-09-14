@@ -38,6 +38,7 @@ BALLOT_SCHEDULERS = (
     "eps_greedy",
     "exp3",
     "fpl",
+    "gradient",
     "gp_ucb",
     "hierarchical",
     "kl_ducb",
@@ -48,6 +49,7 @@ BALLOT_SCHEDULERS = (
     "op_tang",
     "replicator",
     "round_robin",
+    "successive_elim",
     "swucb",
     "tang",
 )

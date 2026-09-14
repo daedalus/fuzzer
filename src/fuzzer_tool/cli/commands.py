@@ -553,6 +553,7 @@ def cmd_fuzz(args):
         args.fpl = True
         args.gradient = True
         args.successive_elim = True
+        args.canary_scheduler = True
         args.consolidated = True
         args.moss = True
         args.contextual = True
@@ -1800,6 +1801,7 @@ _HAIL_MARY_FLAGS = (
     "fpl",
     "gradient",
     "successive_elim",
+    "canary_scheduler",
     "consolidated",
     "moss",
     "fractal_partition",
@@ -2419,10 +2421,7 @@ def main() -> int:
         "--op-katz-alpha-fraction",
         type=float,
         default=0.85,
-        help=(
-            "Fraction of 1/spectral_radius(A) to use as Katz's alpha "
-            "(default: 0.85)"
-        ),
+        help=("Fraction of 1/spectral_radius(A) to use as Katz's alpha (default: 0.85)"),
     )
     fuzz_parser.add_argument(
         "--op-tang",

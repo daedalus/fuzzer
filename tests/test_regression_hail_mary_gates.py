@@ -92,9 +92,9 @@ _EXCLUDED_OPT_IN = frozenset(
         # Deliberately worst-in-class operator scheduler: a floor for the
         # Elo meta-scheduler's tournament ranking (see
         # core/schedulers/canary.py), not a strategy that competes to win.
-        # --hail-mary force-enabling it would make it eat operator
-        # selections it should never win outside an Elo-arbitrated run,
-        # and it is meaningless without --elo already ranking it anyway.
+        # --hail-mary force-enables it to test the "everything on" contract;
+        # without --elo it's meaningless, but with --elo all it runs as a
+        # proper floor scheduler.
         "canary_scheduler",
     }
 )
