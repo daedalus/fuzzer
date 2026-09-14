@@ -1868,6 +1868,30 @@ class OperatorEngine:
         if buf:
             return bytearray(bit_shift(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
+    def _op_bit_swap_8(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_swap
+
+        if buf:
+            return bytearray(bit_swap(bytes(buf), self.ctx._rng)[: self.ctx.max_len])
+
+    def _op_bit_swap_16(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_swap
+
+        if len(buf) >= 2:
+            return bytearray(bit_swap(bytes(buf), self.ctx._rng)[: self.ctx.max_len])
+
+    def _op_bit_swap_32(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_swap
+
+        if len(buf) >= 4:
+            return bytearray(bit_swap(bytes(buf), self.ctx._rng)[: self.ctx.max_len])
+
+    def _op_bit_swap_64(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations import bit_swap
+
+        if len(buf) >= 8:
+            return bytearray(bit_swap(bytes(buf), self.ctx._rng)[: self.ctx.max_len])
+
     def _op_span_invert(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import span_invert
 

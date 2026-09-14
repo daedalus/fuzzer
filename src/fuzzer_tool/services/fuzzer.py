@@ -3514,6 +3514,18 @@ class Fuzzer:
     def _op_bit_transpose_64(self, buf, _byte_idx, _data):
         return self._operators._op_bit_transpose_64(buf, _byte_idx, _data)
 
+    def _op_bit_swap_8(self, buf, _byte_idx, _data):
+        return self._operators._op_bit_swap_8(buf, _byte_idx, _data)
+
+    def _op_bit_swap_16(self, buf, _byte_idx, _data):
+        return self._operators._op_bit_swap_16(buf, _byte_idx, _data)
+
+    def _op_bit_swap_32(self, buf, _byte_idx, _data):
+        return self._operators._op_bit_swap_32(buf, _byte_idx, _data)
+
+    def _op_bit_swap_64(self, buf, _byte_idx, _data):
+        return self._operators._op_bit_swap_64(buf, _byte_idx, _data)
+
     def _op_length_grow(self, buf, _byte_idx, _data):
         return self._operators._op_length_grow(buf, _byte_idx, _data)
 

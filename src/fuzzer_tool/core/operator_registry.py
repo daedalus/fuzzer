@@ -40,6 +40,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "bit_shift",
         "span_invert",
         "bit_repack",
+        "bit_swap_8",
+        "bit_swap_16",
+        "bit_swap_32",
+        "bit_swap_64",
     },
     "byte": {
         "byte_flip",

@@ -925,6 +925,10 @@ MUTATIONS = [
     "bit_transpose_16",
     "bit_transpose_32",
     "bit_transpose_64",
+    "bit_swap_8",
+    "bit_swap_16",
+    "bit_swap_32",
+    "bit_swap_64",
     "bit_offset_flip",
     "bit_offset_span",
     "bit_rotate",
@@ -1817,6 +1821,47 @@ _INVERT_TABLE = bytes(b ^ 0xFF for b in range(256))
 # selection slot on a guaranteed no-op -- the failure mode that hid in
 # byte_shuffle until f4835f6.
 _DEGENERATE_RETRIES = 4
+
+
+def bit_swap(data: bytes, rng) -> bytes:
+    """Swap two randomly selected bit positions within a word-sized window.
+
+    Unlike bit_transpose which swaps 2-4 random bit pairs, this swaps exactly
+    one pair of bits for more granular mutation control. Preserves popcount
+    but changes bit field alignment.
+
+    Args:
+        data: Input bytes.
+        rng: Optional RNG; defaults to the module-level `random`.
+
+    Returns:
+        Bytes with two bits swapped, or input unchanged if no swap occurred.
+    """
+    if not data:
+        return data
+    r = rng
+    width = r.choice(tuple(w for w in (1, 1, 1, 2, 2, 4, 4, 8) if w <= len(data)))
+    total_bits = 8 * width
+    max_start = len(data) - width
+
+    result = bytearray(data)
+    for _ in range(_DEGENERATE_RETRIES):
+        start = r.randint(0, max_start)
+        val = int.from_bytes(data[start : start + width], "little")
+
+        pos1 = r.randint(0, total_bits - 1)
+        pos2 = r.randint(0, total_bits - 1)
+        if pos1 == pos2:
+            continue
+
+        bit1 = (val >> pos1) & 1
+        bit2 = (val >> pos2) & 1
+        if bit1 != bit2:
+            val ^= (1 << pos1) | (1 << pos2)
+            result[start : start + width] = val.to_bytes(width, "little")
+            return bytes(result)
+
+    return bytes(result)
 
 
 def bit_rotate(data: bytes, rng) -> bytes:

@@ -722,6 +722,26 @@ class TestFuzzerHelpers:
         buf = bytearray(b"\x00" * 10)
         f._op_bit_transpose_64(buf, 0, b"")
 
+    def test_op_bit_swap_8(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_bit_swap_8(buf, 0, b"")
+
+    def test_op_bit_swap_16(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_bit_swap_16(buf, 0, b"")
+
+    def test_op_bit_swap_32(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_bit_swap_32(buf, 0, b"")
+
+    def test_op_bit_swap_64(self):
+        f = self._make_fuzzer()
+        buf = bytearray(b"\x00" * 10)
+        f._op_bit_swap_64(buf, 0, b"")
+
     def test_op_length_grow(self):
         f = self._make_fuzzer()
         buf = bytearray(b"\x00" * 10)
