@@ -40,6 +40,7 @@ from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
+from fuzzer_tool.core.multiple_testing import collect_and_correct
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.ro_rd import classify_operator_name
@@ -2249,6 +2250,12 @@ class Fuzzer:
         # self._structure_fn / self._last_structure_edge_count: constructed by
         # analyzer_registry.wire_all() above, alongside crash_mi,
         # length_tracker, transfer_entropy, and fluctuation.
+
+        # BH-corrected view across the dispersion/Ljung-Box tests that all
+        # run on the same per-tick delta series -- see
+        # core/multiple_testing.py. Display-only; populated each stats
+        # tick, empty until the first one.
+        self._last_dispersion_corrections: list = []
 
         # ── Running aggregate cache for seed metadata ──────────────────
         # Avoids O(n·m) recomputation of corpus-wide sums every iteration.
@@ -7129,6 +7136,15 @@ class Fuzzer:
                             verdict["p"],
                             verdict["n"],
                         )
+                    # Multiple-testing correction across the tests that run
+                    # on this same `delta` series: structure_function's and
+                    # discovery_uniformity's dispersion tests are the same
+                    # statistic under different windowing, and garch's
+                    # Ljung-Box test is a different null on the same input.
+                    # Display-only -- see core/multiple_testing.py and
+                    # docs/handover/handover_multiple_testing_2026-09-13.md
+                    # for why this does not (yet) gate any decision.
+                    self._last_dispersion_corrections = collect_and_correct(self)
                     self._last_structure_edge_count = current_edges
                     # Close this tick's corpus add/prune/reject bucket --
                     # additions and evictions are recorded as they happen in

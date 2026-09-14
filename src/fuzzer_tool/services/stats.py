@@ -742,6 +742,25 @@ class StatsReporter:
         flag = " clust" if g.clustering is True else ""
         return f" | vol: {forecast:.2f} (p={persistence:.2f}){flag}"
 
+    def _print_stats_dispersion_corrections_str(self, f) -> str:
+        """Format BH-corrected significance across the dispersion/Ljung-Box
+        tests sharing the tick's delta series, when any are still
+        significant after correction. Silent otherwise, including when the
+        field is absent (older resumed state) or empty (nothing computed
+        yet, or nothing rejected) -- this is a rare-alarm readout, not a
+        steady-state stats line. See core/multiple_testing.py.
+        """
+        corrections = getattr(f, "_last_dispersion_corrections", None)
+        if not corrections:
+            return ""
+
+        rejected = [c for c in corrections if getattr(c, "rejected", False)]
+        if not rejected:
+            return ""
+
+        parts = ", ".join(f"{c.name}(q={c.adjusted:.3f})" for c in rejected)
+        return f" | disp-corrected: {parts}"
+
     def _print_stats_continuum_str(self, f) -> str:
         """Format the steady continuum diagnostics, when the field exists."""
         field = getattr(f, "_continuum", None)
@@ -901,6 +920,7 @@ class StatsReporter:
         dr_str = (
             self._print_stats_dr_str(f)
             + self._print_stats_garch_str(f)
+            + self._print_stats_dispersion_corrections_str(f)
             + self._print_stats_continuum_str(f)
         )
 
