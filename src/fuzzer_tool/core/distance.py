@@ -38,6 +38,15 @@ be disassembled), the legacy function-level mean is used instead.
 The distance signal integrates into scheduling via the ``aflgo`` power
 schedule (``core/schedules.py``), annealed over time from "maximize
 coverage" to "minimize distance."
+
+Optional control-dependence discount (``gate_bonus``, default 0.0 —
+disabled, exact backward-compatible BFS distances): blocks that
+*dominate* a target block (every path to it passes through them, per
+``core/dominators.py``) are mandatory gates, a stronger signal than mere
+BFS proximity. When enabled, their harmonic-BFS value is scaled down by
+``gate_bonus`` so they outrank BFS-equidistant non-gate blocks. This is
+a new signal, not a validated replacement for BFS distance — treat it as
+experimental until measured against a real target.
 """
 
 import bisect
@@ -52,6 +61,7 @@ from pathlib import Path
 
 from fuzzer_tool.core import cfg_cache
 from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
+from fuzzer_tool.core.dominators import gate_blocks
 
 log = logging.getLogger(__name__)
 
@@ -177,12 +187,23 @@ class TargetDistance:
         targets: list[str] | None = None,
         use_cfg_cache: bool = True,
         debug: bool = False,
+        gate_bonus: float = 0.0,
     ):
         self.target = target
         self.target_names: list[str] = targets or []
         self.target_addrs: set[int] = set()
         self._use_cfg_cache = use_cfg_cache
         self._debug = debug
+        # Opt-in control-dependence discount (see core/dominators.py). 0.0
+        # (default) reproduces pre-existing BFS-only distances exactly —
+        # this is a new, not-yet-default-on signal, not a replacement.
+        # A value in (0, 1] scales the harmonic-BFS value of every block
+        # that dominates a target block down by that fraction, so gate
+        # blocks outrank BFS-equidistant non-gate blocks without
+        # overriding target blocks themselves (which stay at 0.0).
+        if not 0.0 <= gate_bonus <= 1.0:
+            raise ValueError(f"gate_bonus must be in [0, 1], got {gate_bonus}")
+        self._gate_bonus = gate_bonus
 
         # Function table: name -> (start_addr, end_addr)
         self.functions: dict[str, tuple[int, int]] = {}
@@ -200,6 +221,8 @@ class TargetDistance:
         self._bb_value: dict[int, float] = {}
         # Target BB ranges (start, end) for is_target()
         self._target_bb_ranges: set[tuple[int, int]] = set()
+        # Blocks that dominate at least one target block (gate_bonus > 0 only)
+        self._bb_gate: set[int] = set()
 
         self._loaded = False
         self._entry_addr: int = 0
@@ -719,6 +742,20 @@ class TargetDistance:
                 elif bs in count:
                     self._bb_value[bs] = count[bs] / sum_inv[bs]
 
+            if self._gate_bonus:
+                # Mandatory control-flow gates for this function's targets
+                # (core/dominators.py). Discount is applied after the BFS
+                # values above are all in place, and only to blocks that
+                # already carry a harmonic-BFS value — a gate outside the
+                # BFS-reachable set (e.g. only reachable via an indirect
+                # jump) has no baseline value to discount and is skipped
+                # rather than invented.
+                gates = gate_blocks(cfg, tbbs)
+                for bs in gates:
+                    if bs in self._bb_value and bs not in tbbs:
+                        self._bb_value[bs] *= 1.0 - self._gate_bonus
+                self._bb_gate.update(gates)
+
     def bb_distance(self, bb_addr: int) -> float:
         """Get the distance of an address to the nearest target.
 
@@ -965,6 +1002,21 @@ class TargetDistance:
         else:
             self._cached_max_distance = 10.0
         return self._cached_max_distance
+
+    def is_gate(self, bb_addr: int) -> bool:
+        """True if the block containing *bb_addr* dominates a target block.
+
+        Always False unless constructed with ``gate_bonus > 0`` — the
+        gate set is only computed when the discount is enabled.
+        """
+        if not self._bb_gate:
+            return False
+        func = self._addr_to_function(bb_addr)
+        cfg = self._cfgs.get(func) if func else None
+        if cfg is None:
+            return False
+        blk = cfg.block_containing(bb_addr)
+        return blk is not None and blk.start in self._bb_gate
 
     def is_target(self, bb_addr: int) -> bool:
         """Check if an address is inside a target block/function."""
