@@ -22,6 +22,7 @@ import struct
 
 import numpy as np
 
+from fuzzer_tool.core.centrality import betweenness_centrality
 from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
 from fuzzer_tool.core.distance import _CALL_RE, _MAX_CFG_FUNC_SIZE
 from fuzzer_tool.core.mincut import min_cut
@@ -80,6 +81,20 @@ class InterproceduralCFG:
         edges = list(zip(self.src.tolist(), self.dst.tolist()))
         _, cut = min_cut(self.n_nodes, edges, sources, sinks)
         return {(self.node_addrs[u], self.node_addrs[v]) for u, v in cut}
+
+    def centrality_scores(self, normalized: bool = True) -> dict[int, float]:
+        """Betweenness centrality of every block, keyed by start address.
+
+        See ``core/centrality.py`` for the algorithm and its relationship
+        to dominance/min-cut. Unlike ``bottleneck_edges``, this needs no
+        hit-set or target-set -- it is a property of the ICFG's structure
+        alone, computed once over the whole graph. Nodes with no shortest
+        path running through them (leaves, isolated blocks) are present
+        in the result with score 0.0, not omitted.
+        """
+        edges = list(zip(self.src.tolist(), self.dst.tolist()))
+        scores = betweenness_centrality(self.n_nodes, edges, normalized=normalized)
+        return {self.node_addrs[i]: s for i, s in enumerate(scores)}
 
 
 def _decode_all_cfgs(td) -> dict[str, FunctionCFG]:
