@@ -78,7 +78,23 @@ class KatzChannel:
     def build(
         cls, target: str, use_cfg_cache: bool = True, debug: bool = False
     ) -> "KatzChannel | None":
-        """Detect viability and build the ICFG; None when not applicable."""
+        """Detect viability and build the ICFG; None when not applicable.
+
+        Deliberately never passes ``targets=`` to ``TargetDistance`` --
+        K-Scheduler is the *undirected*-campaign channel (see
+        ``services/fuzzer.py``'s ``if not targets:`` call site, mutually
+        exclusive with directed mode over the shared __AFL_DIST_SHM_ID
+        slot) and its centrality math (``core/horizon.py``,
+        ``core/schedulers/katz.py``) never reads ``target_addrs`` --
+        Katz scores come from execution counts and whole-program ICFG
+        structure alone. A prior version rejected construction outright
+        when ``td.target_addrs`` was empty, which -- given this method
+        never supplies targets in the first place -- meant the check was
+        unconditionally true and K-Scheduler could never activate at
+        all; see ``tests/test_katz_channel_build.py`` for the regression
+        test and git history (``fe8fd42``, a perf commit) for how it was
+        introduced.
+        """
         td_load_ok = _target_has_trace_pc(target)
         if not td_load_ok:
             if debug:
@@ -94,10 +110,6 @@ class KatzChannel:
         if not td.load():
             if debug:
                 print("[katz] skipped: td.load failed")
-            return None
-        if not td.target_addrs:
-            if debug:
-                print("[katz] skipped: no target functions")
             return None
         if debug:
             print(f"[katz] TargetDistance.load={time.perf_counter() - t0:.3f}s")
