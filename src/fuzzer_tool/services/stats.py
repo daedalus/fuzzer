@@ -638,11 +638,15 @@ class StatsReporter:
             ]
             return " | targets: " + " ".join(parts)
         if f.shm_cov:
+            dropped = int(f.shm_cov.read_dropped_edges())
             shm_edges = f.shm_cov.cumulative_edges
             gt = f._edge_tracker.good_turing_estimate()
             max_edges = gt["n"] + gt["estimated_undiscovered"]
             sat = gt["saturation"] * 100 if max_edges > 0 else 0
-            return f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}%"
+            if dropped > 0:
+                return f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}% drop: {dropped}"
+            else:
+                return f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}%"
         if f.ptrace_cov:
             s = f" | edges: {f.ptrace_cov.cumulative_edges} hits: {f.ptrace_cov.total_bp_hits}"
             if f.ptrace_cov.deep_coverage:
@@ -832,10 +836,6 @@ class StatsReporter:
 
         cov_str = self._print_stats_cov_str(f)
         ph_str = f" | ph: 0x{f.shm_cov.read_path_hash():x}" if f.shm_cov else ""
-        dropped_str = ""
-        if f.shm_cov:
-            dropped = int(f.shm_cov.read_dropped_edges())
-            dropped_str = f" | dropped: {dropped:,}"
 
         # AFLGo directed-distance stats (live tail average + observed
         # min/max over the run).  Present only in directed mode.
@@ -1185,7 +1185,7 @@ class StatsReporter:
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
             f"time: {elapsed:.0f}s{rss_str}{dict_str}{markov_str}{cmplog_str}"
-            f"{smt_str}{cov_str}{ph_str}{dropped_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{elo_str}"
+            f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
             f"{bayes_str}{misc_str}"
             f"{poisson_str}"
