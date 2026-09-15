@@ -61,14 +61,25 @@ def _reverse_postorder(cfg: FunctionCFG, entry: int) -> list[int]:
     return order
 
 
-def _predecessors(cfg: FunctionCFG) -> dict[int, list[int]]:
-    """Reverse adjacency — FunctionCFG only stores successors."""
+def predecessors(cfg: FunctionCFG) -> dict[int, list[int]]:
+    """Reverse adjacency — FunctionCFG only stores successors.
+
+    Public: also used by ``core/distance.py`` to BFS the *reversed* CFG
+    (walking backward from a target to whatever can reach it), which is
+    what an AFLGo-style "distance to target" actually requires — as
+    opposed to walking ``successors`` forward from the target, which
+    measures the unrelated quantity of what the target can reach.
+    """
     preds: dict[int, list[int]] = {b: [] for b in cfg.blocks}
     for b, blk in cfg.blocks.items():
         for s in blk.successors:
             if s in preds:
                 preds[s].append(b)
     return preds
+
+
+# Back-compat alias for the previous private name.
+_predecessors = predecessors
 
 
 def _intersect(a: int, b: int, idom: dict[int, int], rpo_number: dict[int, int]) -> int:
@@ -110,7 +121,7 @@ def compute_idom(cfg: FunctionCFG, entry: int | None = None) -> dict[int, int]:
     if not rpo:
         return {}
     rpo_number = {b: i for i, b in enumerate(rpo)}
-    preds = _predecessors(cfg)
+    preds = predecessors(cfg)
 
     idom: dict[int, int] = {entry: entry}
     changed = True

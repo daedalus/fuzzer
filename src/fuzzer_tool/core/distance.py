@@ -61,7 +61,7 @@ from pathlib import Path
 
 from fuzzer_tool.core import cfg_cache
 from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
-from fuzzer_tool.core.dominators import gate_blocks
+from fuzzer_tool.core.dominators import gate_blocks, predecessors
 
 log = logging.getLogger(__name__)
 
@@ -696,6 +696,18 @@ class TargetDistance:
         harmonic CFG distance to that function's target blocks; blocks
         elsewhere fall back to the 0-based function-level distance
         (d_cg(func) - 1), looked up lazily in ``bb_distance``.
+
+        The per-target BFS below walks the *reversed* CFG (predecessor
+        edges) starting at each target block, which is what actually
+        computes "shortest forward path from block b to target t" for
+        every b in one pass. An earlier version walked ``successors``
+        forward from the target instead, which computes the unrelated
+        quantity "shortest forward path from t to b" — identical only
+        when a back edge happens to make b and t mutually reachable
+        (e.g. both inside the same loop). In acyclic regions this meant
+        a target's own ancestors — the blocks that lead to it, which
+        directed fuzzing most wants to prioritize — silently got no CFG
+        value at all and fell back to the coarser per-function distance.
         """
         if not self._cfgs:
             return
@@ -718,8 +730,11 @@ class TargetDistance:
             if len(cfg.blocks) > _MAX_CFG_BLOCKS:
                 continue
 
-            # Reverse BFS from each target block: for every block b,
-            # accumulate 1/(1 + d(b,t)) and the reachable-target count.
+            # Reverse BFS from each target block over predecessor edges
+            # (see the docstring above): for every block b, accumulate
+            # 1/(1 + d(b,t)) and the reachable-target count, where d(b,t)
+            # is the shortest *forward* path from b to t.
+            preds = predecessors(cfg)
             sum_inv: dict[int, float] = {}
             count: dict[int, int] = {}
             for t in tbbs:
@@ -730,10 +745,10 @@ class TargetDistance:
                     d = visited[current]
                     sum_inv[current] = sum_inv.get(current, 0.0) + 1.0 / (1.0 + d)
                     count[current] = count.get(current, 0) + 1
-                    for succ in cfg.blocks[current].successors:
-                        if succ not in visited:
-                            visited[succ] = d + 1.0
-                            queue.append(succ)
+                    for pred in preds.get(current, ()):
+                        if pred not in visited:
+                            visited[pred] = d + 1.0
+                            queue.append(pred)
 
             for bs, blk in cfg.blocks.items():
                 if bs in tbbs:

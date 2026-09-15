@@ -11,26 +11,29 @@ CFG shape -- a loop with the target inside it::
     0(entry) -> 1(header) -> 2(target, loop body) -> 1  (back edge)
                           \\-> 3(exit)
 
-``_compute_bb_values``'s existing harmonic-BFS walks *forward* from the
-target over ``successors`` (see the open question recorded in
-``docs/handover/handover_dominator_gate_2026-09-15.md`` about whether
-this matches the module's own "reversed CFG" docstring claim), so the
-set of blocks it assigns a baseline value to is whatever the target can
-reach going forward -- which for a loop includes the loop header via
-the back edge but does NOT include the header's other predecessor
-(block 0, outside the loop, never forward-reachable from inside it).
-This shape was chosen deliberately to exercise both branches of the
+``_compute_bb_values`` BFS-explores the *reversed* CFG (predecessor
+edges, via ``core/dominators.py::predecessors``) starting at each target
+block, so the value assigned to block b is the shortest *forward* path
+length from b to the target -- exactly the AFLGo distance the module
+docstring promises. (An earlier version walked ``successors`` forward
+from the target instead, which computes the unrelated quantity "distance
+from target to b"; see git history / the dominator-gate handover doc for
+the bug this replaced.) This shape exercises both branches of the
 discount:
 
-  - block 1 (loop header) IS a dominator of the target AND already has
-    a baseline value (reached via the back edge) -> gets discounted.
-  - block 0 (entry) IS a dominator of the target but has NO baseline
-    value (never forward-reachable from inside the loop) -> structurally
-    still a gate (``is_gate`` is True) but nothing to discount, and the
-    code must not invent a value for it.
-  - block 3 (loop exit) has a baseline value but is NOT a dominator
-    (skippable -- you can reach 3 without ever hitting 2) -> must stay
-    untouched by the discount.
+  - block 1 (loop header) IS a dominator of the target AND has a
+    baseline value (one predecessor hop via the back edge, 2->1) ->
+    gets discounted.
+  - block 0 (entry) IS a dominator of the target, reached via two
+    predecessor hops (2->1->0) -> also gets discounted. Because every
+    dominator of a reachable target lies on *some* forward path to it
+    by definition, the reversed-CFG BFS is guaranteed to discover it --
+    unlike the old forward-from-target walk, which could (and did, for
+    block 0 here) miss real dominators entirely.
+  - block 3 (loop exit) is forward-reachable *from* block 1 but cannot
+    reach the target at all (it has no successors) -> correctly gets no
+    baseline value, and is not a dominator either (skippable: you can
+    reach 3 without ever visiting 2).
 """
 
 import pytest
@@ -69,14 +72,15 @@ class TestGateBonusDisabledByDefault:
 
     def test_zero_gate_bonus_leaves_bfs_values_untouched(self):
         td = _make_td(gate_bonus=0.0)
-        # Hand-derived harmonic-BFS values (forward from target=2):
-        # 2(target)=0.0; 1 reached via the back edge at d=1 -> 1/(1/2)=2.0;
-        # 3 reached from 1 at d=2 -> 1/(1/3)=3.0; 0 never forward-reachable
-        # from 2, so absent entirely.
+        # Hand-derived harmonic-BFS values (reversed CFG, backward from
+        # target=2): 2(target)=0.0; 1 is one predecessor hop away
+        # (2->1) -> 1+d=2.0; 0 is two predecessor hops away (2->1->0)
+        # -> 1+d=3.0; 3 has no path to the target at all (dead end past
+        # the loop exit) so it gets no baseline value.
         assert td._bb_value[2] == 0.0
         assert td._bb_value[1] == 2.0
-        assert td._bb_value[3] == 3.0
-        assert 0 not in td._bb_value
+        assert td._bb_value[0] == 3.0
+        assert 3 not in td._bb_value
         assert td._bb_gate == set()
         assert not td.is_gate(0)
         assert not td.is_gate(1)
@@ -93,17 +97,21 @@ class TestGateBonusDiscountsOnlyTrueGates:
         td = _make_td(gate_bonus=0.5)
         assert td._bb_value[1] == 2.0 * 0.5
 
-    def test_unreachable_gate_has_no_invented_value(self):
+    def test_every_dominator_gets_a_real_bfs_value(self):
+        # Block 0 is a dominator two predecessor-hops from the target.
+        # With the reversed-CFG BFS this is always discovered (a
+        # dominator, by definition, sits on some forward path to a
+        # reachable target, so it is backward-reachable from it too) --
+        # there is no "structural gate with no baseline value" case left
+        # for a genuine dominator to fall into.
         td = _make_td(gate_bonus=0.5)
-        # Block 0 is structurally a gate (is_gate True) even though the
-        # existing BFS never assigned it a baseline distance -- the
-        # discount must skip it, not fabricate one.
-        assert 0 not in td._bb_value
+        assert 0 in td._bb_value
+        assert td._bb_value[0] == 3.0 * 0.5
         assert td.is_gate(0)
 
     def test_non_gate_block_unchanged(self):
         td = _make_td(gate_bonus=0.5)
-        assert td._bb_value[3] == 3.0
+        assert 3 not in td._bb_value
         assert not td.is_gate(3)
 
     def test_target_block_stays_zero(self):
