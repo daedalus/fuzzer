@@ -835,8 +835,7 @@ class StatsReporter:
         dropped_str = ""
         if f.shm_cov:
             dropped = int(f.shm_cov.read_dropped_edges())
-            if dropped:
-                dropped_str = f" | dropped: {dropped:,}"
+            dropped_str = f" | dropped: {dropped:,}"
 
         # AFLGo directed-distance stats (live tail average + observed
         # min/max over the run).  Present only in directed mode.
