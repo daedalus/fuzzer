@@ -971,6 +971,27 @@ class TreeMutator:
             children=[self._clone_tree(c) for c in node.children],
         )
 
+    def _path_copy_replace(
+        self, root: TreeNode, path: list[int], replacement: TreeNode
+    ) -> TreeNode:
+        """Return a copy of *root* with the node at *path* swapped for *replacement*.
+
+        Trees guarantee a unique root-to-node path (see docs/handover/handover_trees.md
+        §1), so a full deep clone isn't needed to relocate one node: only the
+        nodes *on* the path from root to the target need copying (their
+        `children` list is rebuilt so the original tree is left untouched).
+        Every sibling subtree not on the path is reused by reference. This is
+        the standard "path copying" technique for persistent tree updates
+        (Okasaki, *Purely Functional Data Structures*) and turns a per-candidate
+        cost of O(n) (full clone) into O(depth).
+        """
+        if not path:
+            return replacement
+        idx, rest = path[0], path[1:]
+        new_children = list(root.children)
+        new_children[idx] = self._path_copy_replace(root.children[idx], rest, replacement)
+        return TreeNode(rule=root.rule, children=new_children)
+
     # ------------------------------------------------------------------
     # Hierarchical delta debugging for tmin
     # ------------------------------------------------------------------
@@ -1000,19 +1021,15 @@ class TreeMutator:
 
             improved = False
             for node in candidates:
-                # Try removing this subtree
-                clone = self._clone_tree(tree)
-                # Find the same node in the clone
+                # Try removing this subtree. Only the nodes on the root->node
+                # path need copying (path-copying, not a full O(n) clone) —
+                # see _path_copy_replace.
                 path = tree._find_path(node)
                 if path is None:
                     continue
-                clone_node = clone
-                for idx in path[:-1]:
-                    clone_node = clone_node.children[idx]
-                target_idx = path[-1]
-                # Replace with empty
-                clone_node.children[target_idx] = TreeNode(rule=node.rule, data=b"")
-                candidate = clone.serialize()
+                replacement = TreeNode(rule=node.rule, data=b"")
+                candidate_tree = self._path_copy_replace(tree, path, replacement)
+                candidate = candidate_tree.serialize()
                 if candidate and candidate != best and still_crashes(candidate):
                     best = candidate
                     improved = True
