@@ -1,0 +1,24 @@
+[package]
+name = "buggy_rust_target"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# staticlib: linked directly into the C wrapper (targets/rust_target.c) via
+# the normal `cc ... -include afl_shim.c wrapper.c -L... -lbuggy_rust_target`
+# path used by every other target in tools/build_targets.sh. No cdylib: two
+# copies of libstd (one per .so) is a real footgun and buys nothing here,
+# since the C wrapper is what afl_shim.c gets -included into either way.
+[lib]
+crate-type = ["staticlib"]
+
+[profile.release]
+# panic = "abort" turns a Rust panic into an illegal-instruction / abort
+# trap instead of unwinding -- unwinding across the extern "C" boundary
+# from rust_fuzz_entry back into the C wrapper is undefined behavior
+# (there is no landing pad on the C side), so this is required for
+# correctness here, not just a size/speed choice.
+panic = "abort"
+# Keep debug info so crash addresses in ASAN/backtrace output resolve to
+# Rust source lines instead of bare hex, matching -g on the C side.
+debug = true
