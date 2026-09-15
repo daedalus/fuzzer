@@ -24,6 +24,7 @@ import numpy as np
 
 from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
 from fuzzer_tool.core.distance import _CALL_RE, _MAX_CFG_FUNC_SIZE
+from fuzzer_tool.core.mincut import min_cut
 
 log = logging.getLogger(__name__)
 
@@ -57,6 +58,28 @@ class InterproceduralCFG:
     @property
     def n_edges(self) -> int:
         return len(self.src)
+
+    def bottleneck_edges(
+        self, hit_addrs: set[int], target_addrs: set[int]
+    ) -> set[tuple[int, int]]:
+        """Min edge cut (block-address pairs) separating *hit_addrs* from
+        *target_addrs* — see ``core/mincut.py`` for the full rationale.
+
+        *hit_addrs*/*target_addrs* are block-start addresses; any address
+        this ICFG has no node for is silently ignored (matches
+        ``TargetDistance``'s existing tolerance of stale/unmapped
+        addresses elsewhere in this module). Returns an empty set if
+        either side maps to no nodes at all, or if a node maps to both
+        (nothing to separate).
+        """
+        sources = {self.node_index[a] for a in hit_addrs if a in self.node_index}
+        sinks = {self.node_index[a] for a in target_addrs if a in self.node_index}
+        sources -= sinks
+        if not sources or not sinks:
+            return set()
+        edges = list(zip(self.src.tolist(), self.dst.tolist()))
+        _, cut = min_cut(self.n_nodes, edges, sources, sinks)
+        return {(self.node_addrs[u], self.node_addrs[v]) for u, v in cut}
 
 
 def _decode_all_cfgs(td) -> dict[str, FunctionCFG]:
