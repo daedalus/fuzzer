@@ -616,6 +616,7 @@ def cmd_fuzz(args):
         cmaes_elite_frac=getattr(args, "cmaes_elite_frac", 0.5),
         targets=getattr(args, "target_functions", None),
         use_cfg_cache=not getattr(args, "no_cfg_cache", False),
+        gate_bonus=getattr(args, "gate_bonus", 0.0),
         anneal_budget=getattr(args, "anneal_budget", 0),
         boltzmann=getattr(args, "boltzmann", False),
         tang=getattr(args, "tang", False),
@@ -1769,6 +1770,22 @@ def cmd_sweep(args):
 # fuzzing strategy. --hail-mary means "try every plausible strategy", not
 # "also change the timing of unrelated bookkeeping for everyone using it".
 #
+# gate_bonus (--gate-bonus) is excluded for two independent reasons, each
+# sufficient on its own: (1) it is conditionally inert -- the discount only
+# affects anything when directed mode is also active (--target-functions
+# set), and --hail-mary does not set target functions, so force-enabling it
+# would silently do nothing for a typical run, the same dependency already
+# noted for --canary-scheduler/--elo; (2) it is explicitly unvalidated --
+# see docs/handover/handover_dominator_gate_2026-09-15.md, "not yet
+# A/B-measured against a real target" -- same rationale as excluding
+# temperature_control. It is also a float dest (type=float, default 0.0),
+# not store_true/BooleanOptionalAction, so today it is structurally outside
+# what _HAIL_MARY_FLAGS's generic True-flip loop and
+# tests/test_regression_hail_mary_gates.py's scanner even consider; this
+# comment exists so the exclusion is a documented decision rather than an
+# accident of argparse type that silently breaks if gate_bonus ever grows a
+# boolean on/off form.
+#
 # fpl, op_span_reverse and op_span_relocate were missing from the tuple
 # below while every other scheduler (exp3 .. cusum_ucb, c2ucb) and every
 # other operator gate (wfc, weizz_tags, formatfuzzer) was in it -- three
@@ -2904,6 +2921,21 @@ def main() -> int:
         help="Target functions for directed fuzzing — names, hex addresses, "
         "or file.c:line (via DWARF). Note: use --target-functions (not the "
         "positional 'targets' binary list).",
+    )
+    fuzz_parser.add_argument(
+        "--gate-bonus",
+        type=float,
+        default=0.0,
+        metavar="X",
+        help="Directed mode only (requires --target-functions): discount "
+        "the AFLGo harmonic-BFS distance of blocks that *dominate* a "
+        "target block (mandatory control-flow gates — every path to the "
+        "target crosses them, per core/dominators.py) by this fraction, "
+        "in [0, 1]. 0.0 (default) reproduces exact prior BFS-only "
+        "distances. Experimental — not yet A/B-validated against a real "
+        "target; see docs/handover/handover_dominator_gate_2026-09-15.md. "
+        "Not force-enabled by --hail-mary (inert without --target-functions, "
+        "and unvalidated — see the comment above _HAIL_MARY_FLAGS).",
     )
     fuzz_parser.add_argument(
         "--anneal-budget",

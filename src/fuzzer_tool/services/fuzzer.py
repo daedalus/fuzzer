@@ -822,6 +822,10 @@ class Fuzzer:
         use_ptrace=False,
         adaptive_havoc=True,
         use_cfg_cache=True,
+        # Opt-in control-dependence discount for directed-mode distance
+        # (core/distance.py::TargetDistance). 0.0 (default) reproduces
+        # exact prior BFS-only distances; see --gate-bonus help text.
+        gate_bonus=0.0,
         adaptive_timeout=False,
         resume=False,
         trace_crashes=True,
@@ -2284,6 +2288,7 @@ class Fuzzer:
         self._corpus_quasiperiodicity_requested = corpus_quasiperiodicity
         self._distance_targets = targets
         self._use_cfg_cache = use_cfg_cache
+        self._gate_bonus = gate_bonus
         self._trace_crashes_requested = trace_crashes
 
         # Crash MI tracker, length-edge tracker, transfer entropy, occupation,

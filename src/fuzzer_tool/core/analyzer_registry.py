@@ -556,7 +556,11 @@ def _activate_distance(f: FuzzerLike) -> None:
     from fuzzer_tool.core.distance import TargetDistance
 
     f._distance = TargetDistance(
-        f.target, f._distance_targets, use_cfg_cache=f._use_cfg_cache, debug=f.debug
+        f.target,
+        f._distance_targets,
+        use_cfg_cache=f._use_cfg_cache,
+        debug=f.debug,
+        gate_bonus=getattr(f, "_gate_bonus", 0.0),
     )
     f._dist_table_shm = None
     if f._distance.load():
