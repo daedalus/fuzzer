@@ -3128,6 +3128,20 @@ class OperatorEngine:
             mutated = self._rasc_mutator._generate_random_rasc(max_len=self.ctx.max_len, rng=rng)
         return bytearray(mutated[: self.ctx.max_len])
 
+    def _op_ffconcat_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.ffconcat import FfconcatMutator, parse_ffconcat
+
+        if not hasattr(self, "_ffconcat_mutator"):
+            self._ffconcat_mutator = FfconcatMutator()
+        rng = self.ctx._rng
+        if parse_ffconcat(bytes(buf)):
+            mutated = self._ffconcat_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._ffconcat_mutator._generate_random_ffconcat(
+                max_len=self.ctx.max_len, rng=rng
+            )
+        return bytearray(mutated[: self.ctx.max_len])
+
     def _op_tiff_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.tiff import TiffMutator, parse_tiff
 

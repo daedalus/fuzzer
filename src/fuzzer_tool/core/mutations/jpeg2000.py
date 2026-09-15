@@ -27,7 +27,7 @@ JPEG2000_SOP = 0x91  # Start of packet
 JPEG2000_EPH = 0x92  # End of packet header
 JPEG2000_PPM = 0x93  # Packed packet memory, main header
 JPEG2000_PPT = 0x94  # Packed packet memory, tile-part
-JPEG2000_SOD = 0x93  # Start of data (wait, same as PPM?)
+JPEG2000_SOD = 0x93  # Start of data
 
 # Actually let me check: In JPEG2000 spec:
 # 0xFF 0x4F = SOC
@@ -169,25 +169,6 @@ def parse_jpeg2000_codestream(data: bytes) -> list[Jpeg2000Marker] | None:
     return markers if markers else None
 
 
-def serialize_jpeg2000_codestream(markers: list[Jpeg2000Marker]) -> bytes:
-    """Serialize markers back to JPEG2000 codestream."""
-    buf = bytearray()
-    buf.extend(b"\xff")
-    buf.extend(JPEG2000_SOC.to_bytes(1, "big"))
-
-    for m in markers:
-        buf.extend(b"\xff")
-        buf.extend(m.marker_type.to_bytes(1, "big"))
-        if m.marker_type in DELIMITER_MARKERS:
-            continue
-        # Length includes the 2 bytes for length field itself
-        length = len(m.data) + 2
-        buf.extend(length.to_bytes(2, "big"))
-        buf.extend(m.data)
-
-    return bytes(buf)
-
-
 def parse_jp2_boxes(data: bytes) -> list | None:
     """Parse JP2 ISO-BMFF boxes (reuse isobmff logic)."""
     # JP2 is based on ISO-BMFF but with different box types
@@ -202,6 +183,17 @@ def parse_jp2_boxes(data: bytes) -> list | None:
     # For now, just return that it's a JP2 file
     # Full box parsing would be more complex
     return []
+
+
+def _is_jp2(data: bytes) -> bool:
+    """Check if data is a JP2 file (ISO-BMFF with ftyp or signature box)."""
+    if len(data) < 12:
+        return False
+    if data[4:8] == b"ftyp" and data[8:12] in (b"jp2 ", b"jp2\x00"):
+        return True
+    # ISO BMFF files start with a signature box (jP, followed by \r\n\x87\n or \x0a\x87\x0a)
+    sig = data[4:12]
+    return sig[:4] == b"jP  " and sig[4:8] in (b"\r\n\x87\n", b"\x0a\x87\x0a")
 
 
 class Jpeg2000Mutator:
@@ -227,40 +219,29 @@ class Jpeg2000Mutator:
 
         # First try to parse as JPEG2000 codestream
         markers = parse_jpeg2000_codestream(data)
-        if markers is None:
+        if markers is not None:
+            # Codestream path
+            op = self._rng.randint(0, 6)
+            mutators = [
+                self._mutate_siz,
+                self._mutate_cod,
+                self._mutate_qcd,
+                self._mutate_cdef,
+                self._mutate_marker_length,
+                self._insert_marker,
+                lambda _markers, max_len: self._generate_random_jpeg2000(
+                    max_len=max_len, rng=self._rng
+                ),
+            ]
+            result = mutators[op](markers, max_len)
+            if isinstance(result, list):
+                return serialize_jpeg2000_codestream(result)[:max_len]
+            return result[:max_len]
+        else:
             # Try JP2 wrapper
-            if self._is_jp2(data):
+            if _is_jp2(data):
                 return self._mutate_jp2(data, max_len)
             return self._generate_random_jpeg2000(max_len=max_len, rng=self._rng)
-
-        op = self._rng.randint(0, 6)
-        mutators = [
-            self._mutate_siz,
-            self._mutate_cod,
-            self._mutate_qcd,
-            self._mutate_cdef,
-            self._mutate_marker_length,
-            self._insert_marker,
-            # Right argument count, wrong slots: the generator is declared
-            # `(self, max_len=..., rng=...)`, so dispatching it as
-            # `(markers, max_len)` put the marker list in `max_len` and the
-            # length in `rng`, and it died on `rng.randbytes`. The other
-            # twelve dispatched generators dodge this with a vestigial first
-            # parameter (`_boxes`, `_words`, `info_or_max`); adapted here
-            # instead, since f5435af is the record of what that placeholder
-            # costs.
-            lambda _markers, max_len: self._generate_random_jpeg2000(
-                max_len=max_len, rng=self._rng
-            ),
-        ]
-        result = mutators[op](markers, max_len)
-        if isinstance(result, list):
-            return serialize_jpeg2000_codestream(result)[:max_len]
-        return result[:max_len]
-
-    def _is_jp2(self, data: bytes) -> bool:
-        """Check if data is a JP2 file (ISO-BMFF with ftyp)."""
-        return len(data) >= 12 and data[4:8] == b"ftyp" and data[8:12] in (b"jp2 ", b"jp2\x00")
 
     def _mutate_siz(self, markers: list[Jpeg2000Marker], max_len: int) -> list[Jpeg2000Marker]:
         """Corrupt SIZ marker fields (image/tile dimensions)."""
@@ -343,7 +324,7 @@ class Jpeg2000Mutator:
     def _mutate_cdef(self, markers: list[Jpeg2000Marker], max_len: int) -> list[Jpeg2000Marker]:
         """Corrupt cdef (channel definition) marker - CVE-2025-9951 target.
 
-        The cdef marker has this structure:
+        The cdef marker has this structure in JP2 boxes:
         - N (2 bytes): number of channels
         - For each channel:
             - Cn (2 bytes): channel index
@@ -351,14 +332,13 @@ class Jpeg2000Mutator:
             - Asoc (2 bytes): association (which color channel this maps to)
 
         The vulnerability: cn=0, asoc=2 on YUV420P writes Y into U plane.
-        """
-        # Look for cdef marker (not standard, might be in JP2 boxes)
-        # In JP2, cdef is a box type, not a codestream marker
-        # But let's also check if there's a custom marker for it
 
-        # For raw codestream, we don't have cdef marker
-        # It's in the JP2 wrapper. So we'll handle it in _mutate_jp2
-        # For now, just return unchanged
+        Note: cdef is a JP2 box type, not a codestream marker. When we have
+        codestream markers (no JP2 wrapper), this is a no-op. The actual cdef
+        mutation happens in _mutate_jp2 which receives the raw data.
+        """
+        # cdef is a JP2 box, not a codestream marker. When we have codestream
+        # markers (no JP2 wrapper), there's nothing to mutate here.
         return markers
 
     def _mutate_marker_length(
@@ -429,11 +409,60 @@ class Jpeg2000Mutator:
         return markers
 
     def _mutate_jp2(self, data: bytes, max_len: int) -> bytes:
-        """Mutate JP2 file (ISO-BMFF wrapper)."""
-        # For now, just corrupt the codestream inside
-        # A full implementation would parse JP2 boxes (ftyp, jp2h, jp2c, etc.)
-        # and mutate the cdef box if present
-        return self._generate_random_jpeg2000(max_len=max_len, rng=self._rng)
+        """Mutate JP2 file (ISO-BMFF wrapper) — target CVE-2025-9951.
+
+        Walks JP2 boxes (ftyp → jp2h → cdef) and corrupts cdef
+        channel-index/association mappings so a YUV420P decoder
+        writes the Y plane into the U plane, triggering an OOB write.
+        """
+        if not _is_jp2(data) or len(data) < 12:
+            return data
+
+        out = bytearray(data)
+        pos = 0
+        n = len(out)
+
+        while pos + 8 <= n:
+            size = struct.unpack_from(">I", out, pos)[0]
+            box_type = out[pos + 4 : pos + 8]
+
+            if size == 1:
+                if pos + 16 > n:
+                    break
+                size = struct.unpack_from(">Q", out, pos + 8)[0]
+                payload_start = pos + 16
+            else:
+                if size < 8:
+                    size = 8
+                payload_start = pos + 8
+
+            if payload_start > n:
+                break
+            payload_end = min(pos + size, n)
+            payload = out[payload_start:payload_end]
+
+            if box_type == b"cdef" and len(payload) >= 8:
+                try:
+                    num_channels = struct.unpack_from(">H", payload, 0)[0]
+                    expected = 2 + num_channels * 6
+                    if len(payload) >= expected:
+                        cdef = bytearray(payload)
+                        # Corrupt cn/asoc mappings: set channel index to
+                        # 0 and association to 2 for the first channels.
+                        # On YUV420P this makes the decoder write the Y
+                        # sample into the U plane, an out-of-bounds write.
+                        for i in range(min(num_channels, 4)):
+                            off = 2 + i * 6
+                            struct.pack_into(">H", cdef, off, 0)  # Cn = 0
+                            struct.pack_into(">H", cdef, off + 4, 2)  # Asoc = 2
+                        out[payload_start:payload_end] = bytes(cdef)
+                        break
+                except (struct.error, ValueError):
+                    pass
+
+            pos = payload_end
+
+        return bytes(out)[:max_len]
 
     def _generate_random_jpeg2000(self, max_len: int = 65536, rng=None) -> bytes:
         """Generate a minimal valid JPEG2000 codestream."""
@@ -519,6 +548,25 @@ def parse_jpeg2000(data: bytes) -> list[Jpeg2000Marker] | None:
             return parse_jpeg2000_codestream(codestream)
 
     return None
+
+
+def serialize_jpeg2000_codestream(markers: list[Jpeg2000Marker]) -> bytes:
+    """Serialize markers back to JPEG2000 codestream."""
+    buf = bytearray()
+    buf.extend(b"\xff")
+    buf.extend(JPEG2000_SOC.to_bytes(1, "big"))
+
+    for m in markers:
+        buf.extend(b"\xff")
+        buf.extend(m.marker_type.to_bytes(1, "big"))
+        if m.marker_type in DELIMITER_MARKERS:
+            continue
+        # Length includes the 2 bytes for length field itself
+        length = len(m.data) + 2
+        buf.extend(length.to_bytes(2, "big"))
+        buf.extend(m.data)
+
+    return bytes(buf)
 
 
 # Export for operator registration

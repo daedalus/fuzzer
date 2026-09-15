@@ -3624,6 +3624,9 @@ class Fuzzer:
     def _op_rasc_chunk_mutate(self, buf, _byte_idx, _data):
         return self._operators._op_rasc_chunk_mutate(buf, _byte_idx, _data)
 
+    def _op_ffconcat_chunk_mutate(self, buf, _byte_idx, _data):
+        return self._operators._op_ffconcat_chunk_mutate(buf, _byte_idx, _data)
+
     def _op_tiff_chunk_mutate(self, buf, _byte_idx, _data):
         return self._operators._op_tiff_chunk_mutate(buf, _byte_idx, _data)
 

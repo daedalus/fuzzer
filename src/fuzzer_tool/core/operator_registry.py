@@ -174,6 +174,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "magicyuv_chunk_mutate",
         "av1_rtp_chunk_mutate",
         "rasc_chunk_mutate",
+        "ffconcat_chunk_mutate",
         "tiff_chunk_mutate",
         "dvbsub_chunk_mutate",
         "cfhd_chunk_mutate",
@@ -509,6 +510,10 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "dvbsub_chunk_mutate": lambda d: len(d) >= 4 and d[:4] == b"\x1a\x45\xdf\xa3",
     "cfhd_chunk_mutate": lambda d: len(d) >= 4 and d[:4] == b"CFHD",
     "shorten_chunk_mutate": lambda d: len(d) >= 4 and d[:4] == b"ajkg",
+    # ffconcat playlist: starts with a comment or a path/URL line. The
+    # distinctive signal is "ffconcat" on its own line (case-insensitive),
+    # which is what the demuxer looks for before parsing anything else.
+    "ffconcat_chunk_mutate": lambda d: (b"ffconcat" in d[:256].lower()),
 }
 
 # Fraction of selections on which a not-yet-seen format is still offered.

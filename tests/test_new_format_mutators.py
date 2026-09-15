@@ -13,6 +13,8 @@ import struct
 
 import pytest
 
+from fuzzer_tool.core.rand_pool import RandPool
+
 
 def _rng(seed: int = 42) -> random.Random:
     return random.Random(seed)
@@ -549,3 +551,103 @@ class TestGeneratorMaxLenIsHonoured:
 
         m = getattr(importlib.import_module(mod), cls)()
         assert len(m.mutate(b"xx", max_len=32, rng=_rng())) <= 32
+
+
+class TestFfconcatMutations:
+    """Tests for ffconcat (HLS/M3U) playlist mutator."""
+
+    def test_parse_basic(self):
+        from fuzzer_tool.core.mutations.ffconcat import parse_ffconcat
+
+        assert parse_ffconcat(b"ffconcat version 1.0\n") is not None
+        assert parse_ffconcat(b"FFCONCAT version 1.0\n") is not None
+        assert parse_ffconcat(b"some text\nffconcat version 1.0\nmore\n") is not None
+        assert parse_ffconcat(b"") is None
+        assert parse_ffconcat(b"concat version 1.0\n") is None
+        assert parse_ffconcat(b"ffconcat\n") is not None
+
+    def test_diversity(self):
+        from fuzzer_tool.core.mutations.ffconcat import FfconcatMutator
+
+        data = FfconcatMutator()._generate_random_ffconcat(max_len=4096, rng=_rng())
+        assert _diversity(FfconcatMutator(), data) > 1
+
+    def test_mutate_never_raises_on_degenerate_input(self):
+        from fuzzer_tool.core.mutations.ffconcat import FfconcatMutator
+
+        mut = FfconcatMutator()
+        for data in (b"", b"f", b"ff", b"ffc", b"ffco", b"ffcon", b"ffconcat"):
+            mut.mutate(data, max_len=4096, rng=_rng())
+
+
+class TestJpeg2000CdefMutation:
+    """Tests for JPEG2000 cdef box mutation (CVE-2025-9951)."""
+
+    def test_jp2_sniffer(self):
+        from fuzzer_tool.core.mutations.jpeg2000 import _is_jp2
+
+        assert _is_jp2(b"\x00\x00\x00\x14ftypjp2\x00\x0a\x87\x0a") is True
+        assert _is_jp2(b"\x00\x00\x00\x14ftypjp2\x00\x0a") is True
+        assert _is_jp2(b"\x00\x00\x00\x0cjP  \r\n\x87\n") is True
+        assert _is_jp2(b"\x00\x00\x00\x0cjP  \r\n\x87") is False
+        assert _is_jp2(b"\x00\x00\x00\x0cjP  \x0a\x87\x0a") is False
+        assert _is_jp2(b"\x00\x00\x00\x0cjP\x00\x0a\x87\x0a") is False
+
+    def test_cdef_mutation_corrupts_channel_mapping(self):
+        """A JP2 box with a cdef box must have its Cn/Asoc fields corrupted."""
+        from fuzzer_tool.core.mutations.jpeg2000 import Jpeg2000Mutator
+
+        ftyp = struct.pack(">I", 12) + b"ftyp" + b"jp2\x00"
+        jp2h = struct.pack(">I", 12) + b"jp2h" + b"\x00\x00\x00\x00"
+        cdef_box = (
+            struct.pack(">I", 16)
+            + b"cdef"
+            + struct.pack(">H", 1)  # num_channels = 1
+            + struct.pack(">H", 1)  # Cn = 1
+            + struct.pack(">H", 0)  # Typ = 0
+            + struct.pack(">H", 0)  # Asoc = 0
+        )
+        jp2 = ftyp + jp2h + cdef_box
+
+        mutator = Jpeg2000Mutator()
+        rng = RandPool(seed=42)
+        out = mutator.mutate(jp2, max_len=len(jp2), rng=rng)
+
+        # Walk JP2 boxes to find cdef
+        pos = 0
+        found = False
+        while pos + 8 <= len(out):
+            size = struct.unpack_from(">I", out, pos)[0]
+            if size == 1 and pos + 16 <= len(out):
+                size = struct.unpack_from(">Q", out, pos + 8)[0]
+                payload_start = pos + 16
+            else:
+                if size < 8:
+                    size = 8
+                payload_start = pos + 8
+            if payload_start > len(out):
+                break
+            payload_end = min(pos + size, len(out))
+            if out[pos + 4 : pos + 8] == b"cdef":
+                payload = out[payload_start:payload_end]
+                cn = struct.unpack_from(">H", payload, 2)[0]
+                asoc = struct.unpack_from(">H", payload, 6)[0]
+                assert cn == 0, f"expected cn=0 after mutation, got {cn}"
+                assert asoc == 2, f"expected asoc=2 after mutation, got {asoc}"
+                found = True
+                break
+            pos = payload_end
+        assert found, "cdef box not found in output"
+
+    def test_diversity(self):
+        from fuzzer_tool.core.mutations.jpeg2000 import Jpeg2000Mutator
+
+        data = Jpeg2000Mutator()._generate_random_jpeg2000(max_len=4096, rng=_rng())
+        assert _diversity(Jpeg2000Mutator(), data) > 1
+
+    def test_mutate_never_raises_on_degenerate_input(self):
+        from fuzzer_tool.core.mutations.jpeg2000 import Jpeg2000Mutator
+
+        mut = Jpeg2000Mutator()
+        for data in (b"", b"\x00", b"\x00\x00\x00", b"\x00\x00\x00\x00"):
+            mut.mutate(data, max_len=4096, rng=_rng())
