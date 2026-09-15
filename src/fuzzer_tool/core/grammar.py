@@ -1402,8 +1402,17 @@ class TreeMutator:
         best = data
         for _ in range(max_rounds):
             tree = self.parse(best)
-            # Collect all non-root interior nodes with children
+            # Collect all non-root interior nodes with children, largest
+            # subtree first (coarse-to-fine, à la classic ddmin): trying big
+            # cuts before small ones shrinks the remaining search space
+            # fastest, since a single large removal can make many smaller
+            # candidates moot. `.size()` is O(n) per node, but this list is
+            # already built (and its shape re-parsed) once per round, so
+            # the sort adds only an O(n log n) pass on top of an existing
+            # O(n) collection — negligible next to the crash-oracle calls
+            # in the loop below.
             candidates = [n for n in tree.collect_interior() if n is not tree and n.children]
+            candidates.sort(key=lambda n: n.size(), reverse=True)
             if not candidates:
                 break
 

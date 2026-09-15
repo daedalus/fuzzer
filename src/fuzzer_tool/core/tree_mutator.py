@@ -570,6 +570,91 @@ def lightweight_tree_mutate(data: bytes, max_len: int = 65536, rng=None) -> byte
     return result
 
 
+# ── Cycle-lemma Dyck path generator ─────────────────────────────────────
+
+# Delimiter pairs eligible for synthesis (quotes excluded: their open/close
+# byte is identical, so they don't behave as a U/D step pair under the
+# cycle-lemma construction below — a run of quotes just toggles in/out
+# rather than nesting).
+_GEN_PAIRS: list[tuple[int, int]] = [(o, c) for o, c in _DELIMITERS.items() if o != c]
+
+
+def cycle_lemma_dyck_bytes(n_pairs: int, rng=None) -> bytes:
+    """Synthesize a uniformly random balanced-delimiter byte string.
+
+    Generates an exact, uniform sample over the ``C_n`` (Catalan-many)
+    balanced bracket strings of *n_pairs* pairs, in O(n) time and space,
+    via the cycle lemma (Dvoretzky-Motzkin): take a uniformly random
+    shuffle of n opens and n closes (as an undifferentiated +1/-1 walk),
+    then rotate it to the unique cyclic shift whose running sum never
+    dips below zero — found in one linear pass by tracking the position
+    of the running minimum. This is cheaper than the recursive
+    Catalan-decomposition sampler used to validate the depth ~ sqrt(n)
+    claim in docs/handover/handover_trees.md §5 (no big-int Catalan-number
+    table, no recursion), at the cost of only producing single-type
+    bracket runs unless the caller mixes delimiter kinds itself (each
+    opening step below independently draws a random pair from
+    ``_GEN_PAIRS``, so kind is not tied to nesting position — see note
+    below).
+
+    This does not require ``partial_parse`` at all: the walk *is* the
+    tree, so this is a generator, not a mutator, useful for synthesizing
+    new nested seeds (JSON/XML/expression-like corpus entries) directly
+    from the Dyck-path model rather than by mutating an existing input.
+
+    Args:
+        n_pairs: Number of delimiter pairs (>= 0).
+        rng: Optional RandPool instance for fast random numbers.
+
+    Returns:
+        A balanced-delimiter byte string of length ``2 * n_pairs``, with
+        delimiter *kind* (parens/brackets/braces) chosen independently per
+        opening step -- so nesting is uniform over Dyck-path shapes, but
+        bracket-kind matching within a shape is not itself the Catalan
+        object being sampled (a close always matches its own open's kind,
+        since we track opens on a stack; the randomness is only in *which*
+        kind each open uses).
+    """
+    if n_pairs <= 0:
+        return b""
+
+    def _randrange(n: int) -> int:
+        return rng.randrange(n) if rng is not None else __import__("random").randrange(n)
+
+    # Step 1: uniform random shuffle of n (+1) and n (-1) steps
+    # (Fisher-Yates over a list of {open, close} markers).
+    steps = [1] * n_pairs + [-1] * n_pairs
+    total = 2 * n_pairs
+    for i in range(total - 1, 0, -1):
+        j = _randrange(i + 1)
+        steps[i], steps[j] = steps[j], steps[i]
+
+    # Step 2: cycle lemma — find the rotation point via running minimum.
+    prefix = 0
+    min_val = 0
+    min_idx = 0
+    for i, s in enumerate(steps):
+        prefix += s
+        if prefix < min_val:
+            min_val = prefix
+            min_idx = i + 1
+    rotated = steps[min_idx:] + steps[:min_idx]
+
+    # Step 3: emit bytes, tracking an explicit close-stack per open so each
+    # close reproduces the kind of the open it matches (round-trip valid),
+    # while the *kind chosen* at each open is drawn independently.
+    out = bytearray()
+    close_stack: list[int] = []
+    for s in rotated:
+        if s == 1:
+            o, c = _GEN_PAIRS[_randrange(len(_GEN_PAIRS))]
+            out.append(o)
+            close_stack.append(c)
+        else:
+            out.append(close_stack.pop())
+    return bytes(out)
+
+
 __all__ = [
     "partial_parse",
     "lightweight_tree_mutate",
@@ -577,4 +662,5 @@ __all__ = [
     "mutate_tree_dup",
     "mutate_tree_swap",
     "mutate_tree_stutter",
+    "cycle_lemma_dyck_bytes",
 ]

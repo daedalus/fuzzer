@@ -8,6 +8,7 @@ from fuzzer_tool.core.tree_mutator import (
     _insert_after,
     _Node,
     _remove_child,
+    cycle_lemma_dyck_bytes,
     lightweight_tree_mutate,
     mutate_tree_del,
     mutate_tree_dup,
@@ -216,3 +217,107 @@ class TestDeepNesting:
         flat = root.flatten()
         # Should contain the inserted () somewhere
         assert b"()" in flat
+
+
+class TestCycleLemmaDyckBytes:
+    """docs/handover/handover_trees.md §7.5 — cycle-lemma Dyck-path generator."""
+
+    def test_empty_for_zero_pairs(self):
+        assert cycle_lemma_dyck_bytes(0) == b""
+
+    def test_negative_treated_as_empty(self):
+        assert cycle_lemma_dyck_bytes(-3) == b""
+
+    def test_length_is_2n(self):
+        import random
+
+        rng = random.Random(1)
+        for n in (1, 2, 5, 17, 64):
+            out = cycle_lemma_dyck_bytes(n, rng=rng)
+            assert len(out) == 2 * n
+
+    def test_round_trips_through_partial_parse_fully_closed(self):
+        """Every generated string is a genuine balanced tree: no raw tail,
+        no unclosed node left on the parse stack."""
+        import random
+
+        rng = random.Random(2)
+        for n in (1, 3, 10, 40, 150):
+            data = cycle_lemma_dyck_bytes(n, rng=rng)
+            root = partial_parse(data)
+            assert root.flatten() == data
+            # Fully balanced: the only unclosed thing is the synthetic
+            # root itself, and every child is a closed delimited node
+            # (never a raw byte -- generator never emits literal bytes).
+            stack = [root]
+            n_closed_nodes = 0
+            n_open_nodes = 0
+            while stack:
+                node = stack.pop()
+                for child in node.children:
+                    assert isinstance(child, _Node), "generator must not leak raw bytes"
+                    if child.closed:
+                        n_closed_nodes += 1
+                    else:
+                        n_open_nodes += 1
+                    stack.append(child)
+            assert n_open_nodes == 0
+            assert n_closed_nodes == n
+
+    def test_never_dips_negative_by_construction(self):
+        """Direct check of the cycle-lemma invariant on the raw byte
+        stream: scanning left to right, opens never fall behind closes."""
+        import random
+
+        opens = {40, 91, 123}
+        rng = random.Random(3)
+        for n in (1, 5, 25, 100):
+            data = cycle_lemma_dyck_bytes(n, rng=rng)
+            balance = 0
+            for b in data:
+                balance += 1 if b in opens else -1
+                assert balance >= 0
+            assert balance == 0
+
+    def test_distribution_is_not_constant_shape(self):
+        """A degenerate generator (e.g. always fully left- or right-nested)
+        would pass every check above. Confirm real shape variety by
+        sampling max depth across many draws of the same n and checking
+        it isn't a single fixed value."""
+        import random
+
+        rng = random.Random(4)
+        n = 12
+        depths = set()
+        for _ in range(200):
+            data = cycle_lemma_dyck_bytes(n, rng=rng)
+            root = partial_parse(data)
+            max_depth = 0
+            stack = [(root, 0)]
+            while stack:
+                node, d = stack.pop()
+                max_depth = max(max_depth, d)
+                for child in node.children:
+                    stack.append((child, d + 1))
+            depths.add(max_depth)
+        assert len(depths) > 1
+
+    def test_uses_randpool_style_rng_when_given(self):
+        """rng is used via .randrange(n), matching the RandPool contract
+        used throughout this module (see mutate_tree_* above)."""
+
+        class _CountingRng:
+            def __init__(self, seed):
+                import random as _r
+
+                self._r = _r.Random(seed)
+                self.calls = 0
+
+            def randrange(self, n):
+                self.calls += 1
+                return self._r.randrange(n)
+
+        rng = _CountingRng(5)
+        out = cycle_lemma_dyck_bytes(20, rng=rng)
+        assert len(out) == 40
+        assert rng.calls > 0

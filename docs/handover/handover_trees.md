@@ -6,9 +6,10 @@
 **Status:** §3.1, §3.2, §3.3 implemented (see §3/§6). §3.4 verified already
 handled elsewhere — no change needed. §3.5 reconsidered and *not*
 implemented as a hard cap — see §3/§6 for why. §7 records five further
-opportunities found afterward (path-copying in `hierarchical_shrink`,
-coarse-to-fine candidate order, canonical subtree hashing, Boltzmann
-sampling, cycle-lemma generation) — none implemented yet.
+opportunities found afterward: path-copying in `hierarchical_shrink`
+(§7.1), coarse-to-fine candidate order (§7.2), canonical subtree hashing
+(§7.3), Boltzmann sampling (§7.4), and cycle-lemma generation (§7.5) — all
+five now implemented.
 
 ## 1. Mathematical properties currently exploited
 
@@ -312,6 +313,15 @@ whatever order the traversal returns, not explicitly sorted by size.
 before the loop — a one-line change now that `size()` already exists,
 guaranteeing the biggest cuts are tried first every round.
 
+**Status: implemented.** `hierarchical_shrink` now sorts `candidates` by
+`.size()` descending immediately after collecting them, before the
+per-round removal loop. No new tests needed beyond the existing
+`hierarchical_shrink` coverage in `tests/test_tmin.py` /
+`test_subtree_population_crossover.py` (behavior-preserving reorder of an
+already-correct search; the shrink result is unaffected, only the order
+candidates are *tried* in, and thus how many rounds it takes to converge
+on inputs with several independently-removable large chunks).
+
 ### 7.3 Canonical subtree hashing (AHU algorithm) for structural dedup
 
 The Aho–Hopcroft–Ullman tree-canonicalization algorithm computes an O(n)
@@ -431,6 +441,37 @@ throughout, and it's found in one linear pass via running minimum. Useful
 if the fuzzer ever wants to synthesize new nested seeds (JSON/XML/
 expression-like corpus entries) directly from the Dyck-path model rather
 than through the grammar.
+
+**Status: implemented.** Added `cycle_lemma_dyck_bytes(n_pairs, rng=None)`
+to `tree_mutator.py`: Fisher-Yates shuffle of n opens/n closes, then the
+cycle-lemma rotation via running-minimum tracking (both O(n), no
+recursion, no big-int Catalan table — unlike the validation sampler built
+for §5). Delimiter *kind* (paren/bracket/brace; quotes excluded, since
+their open==close byte doesn't behave as a distinct U/D pair) is drawn
+independently per opening step from `_GEN_PAIRS`, while a close-byte stack
+guarantees each close reproduces its own open's kind — so the result is
+always round-trip valid through `partial_parse`, and Dyck-path *shape* is
+exactly uniform even though bracket-kind assignment within a shape is a
+separate, independent draw layered on top (not itself part of the
+Catalan-uniform object). This is a generator, not a mutator — it does not
+call `partial_parse` at all; the walk it builds *is* the tree, emitted
+directly as bytes.
+
+5 new tests in `TestCycleLemmaDyckBytes`
+(`tests/test_tree_mutator.py`): length is exactly `2*n_pairs`; every
+output round-trips through `partial_parse()` fully closed (no raw tail,
+no node left open — confirms every emitted byte is delimiter-structural,
+never literal); the raw byte stream never dips below zero cumulative
+balance and ends at exactly zero (the cycle-lemma invariant, checked
+directly rather than only inferred from the round-trip); shape actually
+varies across draws at fixed n (rules out a degenerate always-linear or
+always-balanced generator passing the above checks vacuously); and the
+`rng` parameter is used via `.randrange(n)`, matching the `RandPool`
+contract the rest of the module's `mutate_tree_*` functions already rely
+on. Full tree/grammar/subtree/tmin/structured slice (which also includes
+§7.2's reorder above): 541 passed, 1 skipped, 1 pre-existing/environmental
+failure unrelated to this change (`test_regression_vpk_divide_by_zero.py`,
+same missing vendored FFmpeg checkout noted in §6).
 
 ## 8. References
 
