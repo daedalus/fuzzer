@@ -68,6 +68,109 @@ class TestSubtreePopulation:
         assert seen_late_item, "item #49 never survived reservoir sampling across 200 trials"
 
 
+class TestCanonicalHashing:
+    """AHU-style canonical subtree hashing (docs/handover/handover_trees.md §7.3)."""
+
+    @staticmethod
+    def _leaf(rule: str, data: bytes):
+        from fuzzer_tool.core.grammar import TreeNode
+
+        return TreeNode(rule=rule, data=data)
+
+    def test_identical_shapes_hash_identically(self):
+        from fuzzer_tool.core.grammar import TreeNode
+
+        a = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
+        b = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
+        assert a.canonical_hash() == b.canonical_hash()
+
+    def test_different_leaf_content_hashes_differently(self):
+        from fuzzer_tool.core.grammar import TreeNode
+
+        a = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
+        c = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"OTHER")])
+        assert a.canonical_hash() != c.canonical_hash()
+
+    def test_child_order_matters(self):
+        """Falsification: these are ordered (plane) trees, not unordered --
+        swapping children must change the hash, unlike classic AHU
+        isomorphism hashing which sorts child labels."""
+        from fuzzer_tool.core.grammar import TreeNode
+
+        a = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
+        d = TreeNode(rule="obj", children=[self._leaf("v", b"val"), self._leaf("k", b"key")])
+        assert a.canonical_hash() != d.canonical_hash()
+
+    def test_rule_label_matters(self):
+        from fuzzer_tool.core.grammar import TreeNode
+
+        a = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
+        e = TreeNode(rule="different_rule", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
+        assert a.canonical_hash() != e.canonical_hash()
+
+    def test_collect_interior_hashes_matches_per_node_hash(self):
+        """The batched one-pass hasher must agree with calling
+        canonical_hash() on each node individually."""
+        from fuzzer_tool.core.grammar import TreeNode
+
+        a = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
+        c = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"OTHER")])
+        tree = TreeNode(rule="root", children=[a, c])
+
+        pairs = dict((id(node), h) for node, h in tree.collect_interior_hashes())
+        assert pairs[id(a)] == a.canonical_hash()
+        assert pairs[id(c)] == c.canonical_hash()
+        assert pairs[id(tree)] == tree.canonical_hash()
+
+    def test_duplicate_shapes_do_not_crowd_the_reservoir(self):
+        """Falsification: harvesting 500 structurally-identical subtrees
+        under one rule must not fill the pool with 500 copies of the same
+        shape -- the population should end up holding exactly one."""
+        from fuzzer_tool.core.grammar import TreeNode
+
+        pop = SubtreePopulation(max_per_rule=8)
+        rng = random.Random(42)
+        for _ in range(500):
+            dup = TreeNode(rule="obj", children=[self._leaf("k", b"key"), self._leaf("v", b"val")])
+            pop.add(TreeNode(rule="wrapper", children=[dup]), rng=rng)
+        assert len(pop._pools["obj"]) == 1
+
+    def test_distinct_shapes_still_fill_the_reservoir(self):
+        """Sanity check on the above: real shape diversity must still
+        populate the pool up to max_per_rule, not just always stop at 1."""
+        from fuzzer_tool.core.grammar import TreeNode
+
+        pop = SubtreePopulation(max_per_rule=8)
+        rng = random.Random(7)
+        for i in range(500):
+            dup = TreeNode(
+                rule="obj",
+                children=[self._leaf("k", b"key"), self._leaf("v", str(i % 20).encode())],
+            )
+            pop.add(TreeNode(rule="wrapper", children=[dup]), rng=rng)
+        assert len(pop._pools["obj"]) == 8
+
+    def test_shape_bookkeeping_stays_consistent(self):
+        """Internal invariant: per-rule shape-count totals must always sum
+        to the pool length, and the hash parallel-list must always match
+        the hashes of the nodes actually sitting in the pool."""
+        from fuzzer_tool.core.grammar import TreeNode
+
+        pop = SubtreePopulation(max_per_rule=8)
+        rng = random.Random(7)
+        for i in range(500):
+            dup = TreeNode(
+                rule="obj",
+                children=[self._leaf("k", b"key"), self._leaf("v", str(i % 20).encode())],
+            )
+            pop.add(TreeNode(rule="wrapper", children=[dup]), rng=rng)
+
+        for rule, pool in pop._pools.items():
+            counts = pop._shape_counts[rule]
+            assert sum(counts.values()) == len(pool)
+            assert sorted(n.canonical_hash() for n in pool) == sorted(pop._pool_hashes[rule])
+
+
 class TestTreeSplice:
     def test_splice_falls_back_without_population(self):
         """No population supplied -> behaves like a plain subtree swap,

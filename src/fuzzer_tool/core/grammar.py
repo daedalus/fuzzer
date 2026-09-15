@@ -25,6 +25,7 @@ Example (HTTP request):
     body    = {} | {"key":"value"} | <html></html>
 """
 
+import hashlib
 import logging
 import random
 import re
@@ -555,6 +556,66 @@ class TreeNode:
                 result.extend(child.collect_interior(rule))
         return result
 
+    def canonical_hash(self) -> bytes:
+        """Canonical structural hash of this single subtree.
+
+        Aho-Hopcroft-Ullman-style: two subtrees hash identically iff they
+        have the same shape -- same rule label at every position, same
+        number/order of children, and (at leaves) the same raw bytes.
+        Unlike classic AHU tree-isomorphism hashing, child order is
+        preserved rather than sorted, since these are ordered (plane)
+        parse trees, not unordered trees -- a grammar production's child
+        order is semantically meaningful here, not an artifact to
+        normalize away.
+
+        For hashing every node of a tree (not just one), use
+        ``collect_interior_hashes()`` instead: calling this method once
+        per node, from the outside, recomputes every descendant's hash
+        once per ancestor -- O(n) per call, O(n^2) across a whole tree.
+        This method itself is the O(n) single-subtree building block that
+        ``collect_interior_hashes()`` amortizes across all nodes in one
+        pass.
+        """
+        if self.is_leaf:
+            return hashlib.sha1(
+                b"L|" + self.rule.encode("utf-8", "surrogateescape") + b"|" + self.data
+            ).digest()
+        child_hashes = b"".join(c.canonical_hash() for c in self.children)
+        return hashlib.sha1(
+            b"N|" + self.rule.encode("utf-8", "surrogateescape") + b"|" + child_hashes
+        ).digest()
+
+    def collect_interior_hashes(
+        self, rule: str | None = None
+    ) -> list[tuple["TreeNode", bytes]]:
+        """Collect ``(node, canonical_hash)`` pairs for interior nodes.
+
+        Hashes every node in this subtree bottom-up in a single O(n) pass
+        (mirrors the fix for the same per-node-recompute trap that
+        ``_collect_nodes_with_sizes`` addresses for size-weighted sampling,
+        see docs/handover/handover_trees.md §3.2/§7.3), then returns the
+        canonical hash for each interior node alongside the node itself --
+        the same filter ``collect_interior()`` applies, plus its hash as a
+        byproduct of the traversal rather than a second O(n) walk.
+        """
+        result: list[tuple[TreeNode, bytes]] = []
+
+        def visit(node: "TreeNode") -> bytes:
+            if node.is_leaf:
+                return hashlib.sha1(
+                    b"L|" + node.rule.encode("utf-8", "surrogateescape") + b"|" + node.data
+                ).digest()
+            child_hashes = b"".join(visit(c) for c in node.children)
+            h = hashlib.sha1(
+                b"N|" + node.rule.encode("utf-8", "surrogateescape") + b"|" + child_hashes
+            ).digest()
+            if rule is None or node.rule == rule:
+                result.append((node, h))
+            return h
+
+        visit(self)
+        return result
+
     def collect_leaves(self) -> list["TreeNode"]:
         if self.is_leaf:
             return [self]
@@ -624,26 +685,62 @@ class SubtreePopulation:
     Reservoir sampling (Algorithm R) bounds memory to ``max_per_rule``
     nodes per rule regardless of corpus size, while still giving every
     harvested node an equal chance of ending up in the pool.
+
+    Plain reservoir sampling treats every harvested node as distinct, so
+    exact structural duplicates (the same small JSON object shape
+    recurring across many corpus entries, say) compete for reservoir
+    slots on equal footing with genuinely novel shapes -- duplicates can
+    and do crowd out donors that would add real shape diversity. Each
+    rule's pool tracks a canonical-hash (AHU-style, see
+    ``TreeNode.canonical_hash``) count of the shapes it currently holds;
+    a newly harvested node whose shape is already represented in that
+    rule's pool is skipped rather than spending a slot on it, turning the
+    population into a shape-coverage set rather than a pure size-biased
+    random sample (docs/handover/handover_trees.md §7.3). Distinct shapes
+    still compete for the remaining slots via ordinary reservoir sampling.
     """
 
     def __init__(self, max_per_rule: int = 64):
         self.max_per_rule = max_per_rule
         self._pools: dict[str, list[TreeNode]] = {}
+        # Parallel to _pools[rule]: canonical hash of the node at each slot.
+        self._pool_hashes: dict[str, list[bytes]] = {}
+        # Per-rule count of how many pool slots currently hold each shape
+        # hash -- lets us tell in O(1) whether a shape is already represented.
+        self._shape_counts: dict[str, dict[bytes, int]] = {}
         self._seen: dict[str, int] = {}
 
     def add(self, tree: TreeNode, rng=None) -> None:
         """Harvest every interior node of *tree* into the population."""
         rand = rng or random
-        for node in tree.collect_interior():
-            pool = self._pools.setdefault(node.rule, [])
-            seen = self._seen.get(node.rule, 0)
-            self._seen[node.rule] = seen + 1
+        for node, node_hash in tree.collect_interior_hashes():
+            rule = node.rule
+            pool = self._pools.setdefault(rule, [])
+            pool_hashes = self._pool_hashes.setdefault(rule, [])
+            shape_counts = self._shape_counts.setdefault(rule, {})
+            seen = self._seen.get(rule, 0)
+            self._seen[rule] = seen + 1
+
+            if shape_counts.get(node_hash, 0) > 0:
+                # This exact shape is already sitting in the pool for this
+                # rule -- skip it rather than spend a reservoir slot on a
+                # structural duplicate.
+                continue
+
             if len(pool) < self.max_per_rule:
                 pool.append(node)
+                pool_hashes.append(node_hash)
+                shape_counts[node_hash] = shape_counts.get(node_hash, 0) + 1
                 continue
             j = rand.randint(0, seen)
             if j < self.max_per_rule:
+                old_hash = pool_hashes[j]
+                shape_counts[old_hash] -= 1
+                if shape_counts[old_hash] <= 0:
+                    del shape_counts[old_hash]
                 pool[j] = node
+                pool_hashes[j] = node_hash
+                shape_counts[node_hash] = shape_counts.get(node_hash, 0) + 1
 
     def sample(self, rule: str, rng=None) -> "TreeNode | None":
         """Return a random subtree previously harvested for *rule*, or None."""

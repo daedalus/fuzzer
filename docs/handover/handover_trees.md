@@ -326,6 +326,41 @@ population into something closer to a *shape-coverage set* than a
 size-biased random sample, the same idea Superion/Nautilus-style grammar
 fuzzers use as a coverage signal parallel to code coverage.
 
+**Status: implemented.** Added `TreeNode.canonical_hash()` — SHA-1 over
+`rule` + (for leaves) raw `data`, or `rule` + the concatenation of
+children's canonical hashes (for interior nodes). Deliberately *not*
+sorted-child AHU (which hashes unordered trees for isomorphism testing):
+these are ordered plane trees where child position is grammar-meaningful,
+so swapping two children must change the hash, not collapse to the same
+one. Added `TreeNode.collect_interior_hashes()` alongside it — hashes
+every node bottom-up in one O(n) traversal and returns each interior
+node's hash as a byproduct, avoiding the O(n²) trap of calling
+`canonical_hash()` once per node from the outside (each call would
+re-walk its own subtree).
+
+`SubtreePopulation` now tracks, per rule, a shape-hash → count map for
+whatever currently sits in its pool (parallel `_pool_hashes` list +
+`_shape_counts` dict, updated on both insertion and reservoir eviction).
+`add()` uses `collect_interior_hashes()` instead of `collect_interior()`
+and skips harvesting a node outright if its shape is already represented
+in that rule's pool — no reservoir slot spent, `_seen` counter still
+advances so later distinct-shape nodes get correct reservoir odds.
+Distinct shapes continue to compete via ordinary reservoir sampling.
+
+Added `TestCanonicalHashing` (8 tests) to
+`tests/test_subtree_population_crossover.py`: hash equality/inequality
+under identical shape, differing leaf content, differing child order,
+and differing rule label; the batched hasher agreeing with per-node
+`canonical_hash()`; 500 structural duplicates collapsing to a pool of 1;
+500 nodes across 20 real distinct shapes still filling the pool to
+`max_per_rule`; and internal bookkeeping (`_shape_counts` sums to pool
+length, `_pool_hashes` matches actual node hashes) staying consistent
+after heavy reservoir churn. Full tree/grammar/subtree/tmin/structured
+slice: 510 passed (502 prior + 8 new), same 2 pre-existing/environmental
+failures as before this change (`test_tmin_minimizes_crash` needs the
+package installed non-editably; `test_fix_applied_to_asan_tree` needs a
+vendored FFmpeg checkout not present in this environment).
+
 ### 7.4 Boltzmann sampling to replace ad hoc recursive-descent generation in `grammar.generate()`
 
 Directly connects to §5's finding: a naive greedy generator was shown to
