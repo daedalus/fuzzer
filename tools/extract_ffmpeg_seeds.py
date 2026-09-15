@@ -33,9 +33,12 @@ from urllib.parse import urljoin, urlparse
 FATE_LIST_URL = "https://raw.githubusercontent.com/FFmpeg/FFmpeg/master/tools/target_dec_fate.list"
 FATE_SUITE_BASE = "https://fate-suite.ffmpeg.org"
 
-# Known CVE PoC sources from survey.txt and FFmpeg security page
+# Known CVE PoC sources from survey.txt and FFmpeg security page.
+# Each entry: repo (GitHub owner/repo), path (subdirectory or ""),
+# format (codec/container), component (source file), and optional flags.
+# Multiple repos per CVE are supported via the "repos" key (list of dicts).
 CVE_POCS = {
-    # ReportCVE repo CVEs (hardcoded sources)
+    # ReportCVE repo CVEs
     "CVE-2024-7055": {
         "repo": "https://github.com/CookedMelon/ReportCVE",
         "path": "FFmpeg/poc3",
@@ -61,10 +64,28 @@ CVE_POCS = {
         "format": "JPEG2000",
         "component": "libavcodec/jpeg2000dec.c",
     },
-    # Y5neKO CVE-2026-8461 EXP (MagicYUV) - already in original
+    # CVE-2026-8461 MagicYUV — multiple PoC repos
     "CVE-2026-8461": {
-        "repo": "https://github.com/Y5neKO/CVE-2026-8461-EXP",
-        "path": ".",
+        "repos": [
+            {
+                "repo": "https://github.com/Y5neKO/CVE-2026-8461-EXP",
+                "path": ".",
+                "format": "MagicYUV",
+                "component": "libavcodec/magicyuv.c",
+            },
+            {
+                "repo": "https://github.com/0xBlackash/CVE-2026-8461",
+                "path": ".",
+                "format": "MagicYUV",
+                "component": "libavcodec/magicyuv.c",
+            },
+            {
+                "repo": "https://github.com/anyanything/CVE-2026-8461-PoC",
+                "path": ".",
+                "format": "MagicYUV",
+                "component": "libavcodec/magicyuv.c",
+            },
+        ],
         "format": "MagicYUV",
         "component": "libavcodec/magicyuv.c",
     },
@@ -90,18 +111,51 @@ CVE_POCS = {
         "format": "MOV",
         "component": "libavformat/mov.c",
     },
-    # Vulhub CVEs (hand-crafted seeds/scripts)
+    # Vulhub / neex CVEs (hand-crafted seeds/scripts)
     "CVE-2017-9993": {
         "repo": "https://github.com/neex/ffmpeg-avi-m3u-xbin",
+        "path": ".",
         "format": "AVI/HLS",
         "component": "ffmpeg muxer",
+        "has_generator": True,  # gen_xbin_avi.py generates the seed
     },
     "CVE-2016-1897": {
-        "repo": "https://raw.githubusercontent.com/neex/ffmpeg-avi-m3u-xbin/master",
+        "repo": "https://github.com/neex/ffmpeg-avi-m3u-xbin",
+        "path": ".",
         "format": "M3U/HLS",
         "component": "ffmpeg demuxer",
+        "has_generator": True,
     },
 }
+
+# Additional filename patterns to try when fetching PoC files.
+# Ordered by likelihood — the loop breaks on first success per CVE.
+POC_FILENAMES = [
+    "poc.bin",
+    "poc0.bin",
+    "poc1.bin",
+    "payload.bin",
+    "poc",
+    "exploit.py",
+    "generate_poc.py",
+    "poc.cc",
+    "poc0.cc",
+    "poc1.cc",
+    "exploit_cve_2026_8461.py",
+    "rasc_dlta_packet.bin",
+    "av1_payload.bin",
+    "rtp_packet.bin",
+]
+
+
+def _github_raw_url(repo: str, path: str, fname: str) -> str:
+    """Convert a GitHub repo URL to raw.githubusercontent.com URL for a file."""
+    if repo.startswith("https://github.com/"):
+        repo = repo[len("https://github.com/") :]
+    if path and path != ".":
+        return f"https://raw.githubusercontent.com/{repo}/main/{path}/{fname}"
+    return f"https://raw.githubusercontent.com/{repo}/main/{fname}"
+
 
 # Cache path
 CACHE_PATH = "/tmp/ffmpeg_seeds.pkl"
@@ -134,6 +188,7 @@ def download(
     """Download URL to dest. Returns True on success."""
     req = urllib.request.Request(url)
     req.add_header("Accept", "*/*")
+    req.add_header("User-Agent", "Mozilla/5.0 (compatible; seed-harvester)")
     last_err = None
     for attempt in range(retries):
         try:
@@ -410,7 +465,7 @@ def fetch_google_advisory_poc(cve_id: str, out_dir: str, cache: dict | None = No
         except Exception as e:
             print(f"  [warn] failed to decode base64 for {cve_id}: {e}")
 
-    # Also try to find and save the inline poc.py script
+    # Try to find and save the inline poc.py script from advisory HTML
     script_matches = re.findall(r"<code[^>]*>(.*?)</code>", html, re.DOTALL)
     for i, script in enumerate(script_matches):
         if "poc" in script.lower() and (
@@ -423,6 +478,30 @@ def fetch_google_advisory_poc(cve_id: str, out_dir: str, cache: dict | None = No
                 cache.setdefault("cve", {})[f"{cve_id}/poc_{i}.py"] = dest
                 print(f"  [{cve_id}] saved inline script")
                 saved += 1
+
+    # Also try to fetch poc.py from the GitHub advisory repo path.
+    # For CVE-2022-2566, the GHSA is vhxg-9wfx-7fcj
+    # For CVE-2025-9951, the GHSA is 39q3-f8jq-v6mg
+    ghsa_id = cve_id.split("-")[2]  # e.g. "vhxg" or "39q3"
+    raw_urls = [
+        f"https://raw.githubusercontent.com/google/security-research/main/security/advisories/GHSA-{ghsa_id}/poc.py",
+        f"https://raw.githubusercontent.com/google/security-research/master/security/advisories/GHSA-{ghsa_id}/poc.py",
+    ]
+    for raw_url in raw_urls:
+        req = urllib.request.Request(raw_url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                content = r.read()
+            dest = os.path.join(fmt_dir, "poc_from_repo.py")
+            if not os.path.exists(dest):
+                with open(dest, "wb") as f:
+                    f.write(content)
+                cache.setdefault("cve", {})[f"{cve_id}/poc_from_repo.py"] = dest
+                print(f"  [{cve_id}] saved poc.py from {raw_url} ({len(content)} bytes)")
+                saved += 1
+                break  # success, no need to try more URLs
+        except Exception:
+            continue  # try next URL
 
     return saved
 
@@ -511,8 +590,6 @@ def download_cve_pocs(
 
     saved = 0
     for cve_id, info in cves.items():
-        repo = info["repo"]
-        path = info.get("path", "")
         fmt_dir = os.path.join(seeds_dir, f"cve_{cve_id}")
         os.makedirs(fmt_dir, exist_ok=True)
 
@@ -522,40 +599,31 @@ def download_cve_pocs(
             saved += n
             continue
 
-        # ReportCVE-style: fetch README (contains base64 PoC) and poc files
-        readme_url = f"{repo}/main/{path}/README.md"
-        readme_dest = os.path.join(fmt_dir, "README.md")
-        if not os.path.exists(readme_dest):
-            print(f"  [{cve_id}] downloading README ...")
-            if download(readme_url, readme_dest, max_size=max_size):
-                saved += 1
-                cache.setdefault("cve", {})[cve_id] = readme_dest
+        # Support multiple PoC repos per CVE (e.g. CVE-2026-8461).
+        repos = info.get("repos")
+        if repos is None:
+            repos = [info]
 
-        # Try to fetch poc files (typically poc*.bin, poc*.jp2, etc.)
-        for fname in [
-            "poc.bin",
-            "poc0.bin",
-            "poc1.bin",
-            f"{cve_id.lower()}.bin",
-            "payload.bin",
-            "poc",
-        ]:
-            poc_url = f"{repo}/main/{path}/{fname}"
-            poc_dest = os.path.join(fmt_dir, fname)
-            if os.path.exists(poc_dest):
-                continue
-            print(f"  [{cve_id}] trying {fname} ...")
-            if download(poc_url, poc_dest, max_size=max_size):
-                saved += 1
-                cache.setdefault("cve", {})[f"{cve_id}/{fname}"] = poc_dest
-                break
+        for source in repos:
+            repo = source["repo"]
+            path = source.get("path", "")
+            repo_fmt_dir = fmt_dir
 
-        # Other PoC repos (DepthFirstDisclosures, Fi1ix, fa1c4, Vulhub):
-        # try common filenames at repo root or path
-        if path:
-            for fname in ["exploit.py", "generate_poc.py", "poc.cc", "poc0.bin", "poc1.bin"]:
-                poc_url = f"{repo}/raw/{path}/{fname}"
-                poc_dest = os.path.join(fmt_dir, fname)
+            # ReportCVE-style: fetch README (contains base64 PoC) and poc files.
+            readme_url = _github_raw_url(repo, path, "README.md")
+            readme_dest = os.path.join(repo_fmt_dir, "README.md")
+            if not os.path.exists(readme_dest):
+                print(f"  [{cve_id}] downloading README from {repo} ...")
+                if download(readme_url, readme_dest, max_size=max_size):
+                    saved += 1
+                    cache.setdefault("cve", {})[f"{cve_id}/README.md"] = readme_dest
+
+            # Try to fetch PoC files (typically poc*.bin, poc*.jp2, etc.).
+            for fname in POC_FILENAMES:
+                if fname == "README.md":
+                    continue
+                poc_url = _github_raw_url(repo, path, fname)
+                poc_dest = os.path.join(repo_fmt_dir, fname)
                 if os.path.exists(poc_dest):
                     continue
                 print(f"  [{cve_id}] trying {fname} ...")
@@ -564,7 +632,23 @@ def download_cve_pocs(
                     cache.setdefault("cve", {})[f"{cve_id}/{fname}"] = poc_dest
                     break
 
-        time.sleep(0.2)
+            # Other PoC repos (DepthFirstDisclosures, Fi1ix, fa1c4, Vulhub):
+            # try common filenames at repo root or path.
+            if path:
+                for fname in POC_FILENAMES:
+                    if fname == "README.md":
+                        continue
+                    poc_url = _github_raw_url(repo, path, fname)
+                    poc_dest = os.path.join(repo_fmt_dir, fname)
+                    if os.path.exists(poc_dest):
+                        continue
+                    print(f"  [{cve_id}] trying {fname} ...")
+                    if download(poc_url, poc_dest, max_size=max_size):
+                        saved += 1
+                        cache.setdefault("cve", {})[f"{cve_id}/{fname}"] = poc_dest
+                        break
+
+            time.sleep(0.2)
 
     return saved
 
