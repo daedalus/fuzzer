@@ -43,6 +43,7 @@ from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.percolation import CoverageRegime
+from fuzzer_tool.core.rng_health import quick_health_check
 from fuzzer_tool.core.ro_rd import classify_operator_name
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
@@ -712,6 +713,28 @@ class Fuzzer:
         )
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
+
+    def _report_rng_health(self) -> None:
+        """Quick PRNG sanity check, printed once on the startup banner.
+
+        Runs monobit + chi-squared smoke tests (see core/rng_health.py) on
+        a small sample from ``self._rng``. Not fatal -- a suspect RNG is a
+        warning, never a reason to abort a campaign that was otherwise
+        ready to start -- but a genuinely broken stream (stuck seed,
+        degenerate bit-generator) silently produces near-duplicate mutants
+        for the whole run, which is a much more expensive way to find out.
+        """
+        try:
+            result = quick_health_check(self._rng)
+        except Exception as exc:  # noqa: BLE001 -- never let a smoke test sink startup
+            log.warning("RNG health check errored: %s", exc)
+            return
+        if result.ok:
+            print(f"[*] RNG health: {result.summary()}")
+        else:
+            msg = f"PRNG health check: {result.summary()}"
+            log.warning(msg)
+            print(f"[!] WARNING: {msg}")
 
     @staticmethod
     def _probe_so_function(target):
@@ -6887,6 +6910,7 @@ class Fuzzer:
                     "[*] HW perf counters: requested but not available (needs CAP_PERFMON or root)"
                 )
         print(f"[*] Seed: {self.seed}")
+        self._report_rng_health()
         # Target profile summary
         if self._profile.functions:
             profile_cache = Path(self.target).with_suffix(
