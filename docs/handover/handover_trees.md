@@ -361,7 +361,7 @@ failures as before this change (`test_tmin_minimizes_crash` needs the
 package installed non-editably; `test_fix_applied_to_asan_tree` needs a
 vendored FFmpeg checkout not present in this environment).
 
-### 7.4 Boltzmann sampling to replace ad hoc recursive-descent generation in `grammar.generate()`
+### 7.4 Boltzmann sampling to replace ad hoc recursive-descent generation in `grammar.generate()` — IMPLEMENTED
 
 Directly connects to §5's finding: a naive greedy generator was shown to
 sample Dyck paths non-uniformly (biased toward deep, thin shapes).
@@ -375,6 +375,49 @@ for balanced-bracket structures. Needs the grammar's generating function
 (computed or estimated from the rule set); more machinery than §7.5, but
 the right tool if genuinely unbiased size-n structural coverage matters
 more than generation speed.
+
+Implemented by Claude as `Grammar.generate_boltzmann()` /
+`Grammar.generate(..., boltzmann=True)` in `core/grammar.py`. Because
+generation here is already bounded by `max_depth` (an unknown/undefined
+reference or a rule reached at depth 0 always becomes the single-byte
+`b"?"` atom, per `_expand_rule`), the generating function of every
+(rule, depth) pair is a genuine finite polynomial in x rather than
+something needing singularity analysis — evaluated exactly via
+`_gf_and_deriv`/`_gf_token_seq`/`_gf_repeat`, which track `(y(x), y'(x))`
+together (a small hand-rolled forward-mode autodiff) so the expected-size
+identity `E[size](x) = x*y'(x)/y(x)` falls out directly instead of needing
+a numerical derivative. `_tune_boltzmann_x` bisects on x (monotonic since
+E[size] is a coefficient-weighted average of a positive-coefficient
+polynomial's exponents) so the top-level rule's expected size lands near
+a caller-supplied `target_size`. Sampling itself (`_boltzmann_sample_rule`
+/`_boltzmann_expand_tokens`) mirrors `_expand_rule`/`_expand_tokens`
+token-for-token, swapping the uniform `self._rng.choice(alts)` for
+`self._rng.weighted_choice(alts, weights)` with weights from each
+alternative's own y(x), and swapping the uniform repeat count for a
+categorical draw over `[lo, hi]` weighted by `y_atom(x)**k`.
+
+Confirmed on the motivating case directly: for `expr = "(" expr ")" |
+"x"`, the plain generator's size distribution is geometric with mean ~3
+regardless of `max_depth` (10 vs 40 barely move it — the naive per-branch
+50/50 choice can't be steered), while `generate(boltzmann=True,
+target_size=25)` reaches sizes >= 15 in >15% of samples where the naive
+generator does so in <1% of 3000 samples, and tuning to `target_size=12`
+lands the empirical mean within ~1 of target. 23 new tests in
+`tests/test_grammar_boltzmann.py` (basics/edge-cases, size tuning tracks
+target, direct before/after comparison against naive generation on the
+recursive grammar, smoke tests against all three shipped `GRAMMARS`).
+Full grammar/tree-adjacent slice (`grammar`/`tree` test files, 243 tests)
+green except the one pre-existing environmental failure
+(`test_fix_applied_to_asan_tree`, needs a vendored FFmpeg checkout absent
+in this sandbox — unrelated).
+
+Found in passing, not fixed (out of scope for this item, and present in
+plain `generate()` too): the shipped `json` grammar's `string` rule
+(`string = "\"" text "\""`) mis-tokenizes into three literal tokens
+(`b'\\'`, `b' text '`, `b''`) instead of quote-literal / ref / quote-
+literal, so both the naive and the new Boltzmann path emit the literal
+bytes `\ text ` for that rule rather than an actual quoted string. Tests
+here exercise the `text` rule directly to route around it.
 
 ### 7.5 Cycle lemma as a cheaper exact Dyck-path generator
 
