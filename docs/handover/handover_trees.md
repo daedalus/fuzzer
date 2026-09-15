@@ -5,7 +5,10 @@
 `src/fuzzer_tool/core/grammar.py` (`TreeNode` / `TreeMutator` / `SubtreePopulation`)
 **Status:** §3.1, §3.2, §3.3 implemented (see §3/§6). §3.4 verified already
 handled elsewhere — no change needed. §3.5 reconsidered and *not*
-implemented as a hard cap — see §3/§6 for why.
+implemented as a hard cap — see §3/§6 for why. §7 records five further
+opportunities found afterward (path-copying in `hierarchical_shrink`,
+coarse-to-fine candidate order, canonical subtree hashing, Boltzmann
+sampling, cycle-lemma generation) — none implemented yet.
 
 ## 1. Mathematical properties currently exploited
 
@@ -272,7 +275,86 @@ unrelated to this change (`test_regression_vpk_divide_by_zero.py` needs a
 vendored FFmpeg checkout not present in this environment; confirmed it
 fails identically on `HEAD` before this patch).
 
-## 7. References
+## 7. Further opportunities identified (not yet implemented)
+
+While verifying §3.1-3.5's implementation, re-reading `hierarchical_shrink`
+(`grammar.py:978-1024`) surfaced a further, concrete inefficiency, plus
+some additional tree/combinatorics techniques worth recording for future
+work. None of these are implemented in this patch.
+
+### 7.1 `hierarchical_shrink` deep-clones the whole tree per candidate — O(n²) per round
+
+For every candidate node it tries removing, `hierarchical_shrink` calls
+`self._clone_tree(tree)` (line 1004) — a full deep clone of the *entire*
+tree — then patches one node via `_find_path`. Since trees guarantee a
+unique root-to-node path (§1), this doesn't need a full clone: only the
+nodes **on the path** from root to the target need copying; every other
+subtree can be shared by reference. This is the standard "path copying"
+technique from purely functional/persistent data structures (Okasaki,
+*Purely Functional Data Structures*). Cost per candidate drops from O(n)
+to O(depth), turning a round from O(n²) to O(n·depth) — a large win for
+bushy trees (depth ~ `√n`, per §5's empirical check), a smaller but still
+real one for the deep chains this fuzzer deliberately produces to hit
+stack-overflow bugs (§3.5).
+
+**Proposal:** add a path-copying clone helper (copy nodes along
+`_find_path`'s result, share the rest by reference) and use it in place
+of `_clone_tree` inside `hierarchical_shrink`'s inner loop.
+
+### 7.2 Candidate order in `hierarchical_shrink` isn't explicitly coarse-to-fine
+
+Classic delta-debugging (ddmin) tries removing large chunks before small
+ones, since early large cuts shrink the search space fastest. The
+candidate list here (`tree.collect_interior()`, line 997) is tried in
+whatever order the traversal returns, not explicitly sorted by size.
+
+**Proposal:** `candidates.sort(key=lambda n: n.size(), reverse=True)`
+before the loop — a one-line change now that `size()` already exists,
+guaranteeing the biggest cuts are tried first every round.
+
+### 7.3 Canonical subtree hashing (AHU algorithm) for structural dedup
+
+The Aho–Hopcroft–Ullman tree-canonicalization algorithm computes an O(n)
+canonical label for a subtree's shape (optionally folding in rule/content),
+so structurally-identical subtrees from different parses hash identically.
+`SubtreePopulation` currently reservoir-samples every interior node it
+sees, including exact duplicates (e.g. the same small JSON object shape
+recurring across many corpus entries) — those duplicates waste reservoir
+slots on redundant donors. Hashing each subtree canonically and
+skipping/down-weighting already-represented shapes would turn the
+population into something closer to a *shape-coverage set* than a
+size-biased random sample, the same idea Superion/Nautilus-style grammar
+fuzzers use as a coverage signal parallel to code coverage.
+
+### 7.4 Boltzmann sampling to replace ad hoc recursive-descent generation in `grammar.generate()`
+
+Directly connects to §5's finding: a naive greedy generator was shown to
+sample Dyck paths non-uniformly (biased toward deep, thin shapes).
+`grammar.generate()`'s recursive-descent-with-depth-cap is the same kind
+of ad hoc process, generalized to a full grammar. Boltzmann samplers
+(Duchon–Flajolet–Louchard–Schaeffer) derive per-rule branching
+probabilities from the grammar's generating function so that, for a
+target size n, every derivation tree *of that size* is equally likely —
+a principled fix for the same bias class, grammar-wide rather than just
+for balanced-bracket structures. Needs the grammar's generating function
+(computed or estimated from the rule set); more machinery than §7.5, but
+the right tool if genuinely unbiased size-n structural coverage matters
+more than generation speed.
+
+### 7.5 Cycle lemma as a cheaper exact Dyck-path generator
+
+A lighter-weight alternative to the recursive Catalan-decomposition
+sampler built for §5's experiment (which needed a full Catalan-number
+table and big-int arithmetic to avoid float overflow at n=3200). The
+cycle lemma (Dvoretzky–Motzkin) generates a uniformly random Dyck path in
+O(n) with neither: take a uniformly random shuffle of n U's and (n+1)
+D's; among its cyclic rotations, exactly one leaves the walk non-negative
+throughout, and it's found in one linear pass via running minimum. Useful
+if the fuzzer ever wants to synthesize new nested seeds (JSON/XML/
+expression-like corpus entries) directly from the Dyck-path model rather
+than through the grammar.
+
+## 8. References
 
 - GRIIN (ASE '23) and Grammarinator×AFL++ (2026) — subtree-population
   crossover, cited in `docs/DEEP_DIVE.md:46`.
@@ -280,3 +362,11 @@ fails identically on `HEAD` before this patch).
   (90/10 split), motivating §3.2.
 - Reflection principle for Dyck-path counting (`C_n = C(2n,n) - C(2n,n+1)`)
   — background for the Catalan growth-rate argument in §2.
+- Okasaki, *Purely Functional Data Structures* — path-copying / structural
+  sharing, motivating §7.1.
+- Aho, Hopcroft, Ullman — canonical tree labeling for isomorphism testing,
+  motivating §7.3. Superion (Wang et al., S&P '19) and Nautilus (Aschermann
+  et al., NDSS '19) — grammar/AST-shape coverage in fuzzing.
+- Duchon, Flajolet, Louchard, Schaeffer — Boltzmann samplers for
+  combinatorial structures, motivating §7.4.
+- Dvoretzky and Motzkin — cycle lemma, motivating §7.5.
