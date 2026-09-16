@@ -64,6 +64,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "sleb128_encode",
         "varsize",
         "value",
+        "vu64_encode",
     },
     "block": {
         "block_insert",

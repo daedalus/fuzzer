@@ -2203,6 +2203,14 @@ class OperatorEngine:
             if result != bytes(buf):
                 return bytearray(result[: self.ctx.max_len])
 
+    def _op_vu64_encode(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.vu64 import vu64_encode
+
+        if buf:
+            result = vu64_encode(bytes(buf), rng=self.ctx._rng, max_len=self.ctx.max_len)
+            if result != bytes(buf):
+                return bytearray(result[: self.ctx.max_len])
+
     def _op_tlv_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.tlv_mutate import tlv_mutate
 
