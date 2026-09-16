@@ -123,6 +123,15 @@ def _worker_main(
     intel_pt_mode: str = "block",
     lbr: bool = False,
     lbr_period: int = 0,
+    bo_gp_ucb: bool = False,
+    corral: bool = False,
+    corral_eta: float = 0.6,
+    whittle: bool = False,
+    whittle_n_states: int = 5,
+    whittle_gamma: float = 0.95,
+    whittle_passive_decay: float = 0.0,
+    whittle_floor: float = 0.05,
+    whittle_recompute_batch: int = 25,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -245,6 +254,15 @@ def _worker_main(
         intel_pt_mode=intel_pt_mode,
         lbr=lbr,
         lbr_period=lbr_period,
+        bo_gp_ucb=bo_gp_ucb,
+        corral=corral,
+        corral_eta=corral_eta,
+        whittle=whittle,
+        whittle_n_states=whittle_n_states,
+        whittle_gamma=whittle_gamma,
+        whittle_passive_decay=whittle_passive_decay,
+        whittle_floor=whittle_floor,
+        whittle_recompute_batch=whittle_recompute_batch,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -681,6 +699,15 @@ def run_parallel(
     intel_pt_mode: str = "block",
     lbr: bool = False,
     lbr_period: int = 0,
+    bo_gp_ucb: bool = False,
+    corral: bool = False,
+    corral_eta: float = 0.6,
+    whittle: bool = False,
+    whittle_n_states: int = 5,
+    whittle_gamma: float = 0.95,
+    whittle_passive_decay: float = 0.0,
+    whittle_floor: float = 0.05,
+    whittle_recompute_batch: int = 25,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -841,6 +868,15 @@ def run_parallel(
         intel_pt_mode=intel_pt_mode,
         lbr=lbr,
         lbr_period=lbr_period,
+        bo_gp_ucb=bo_gp_ucb,
+        corral=corral,
+        corral_eta=corral_eta,
+        whittle=whittle,
+        whittle_n_states=whittle_n_states,
+        whittle_gamma=whittle_gamma,
+        whittle_passive_decay=whittle_passive_decay,
+        whittle_floor=whittle_floor,
+        whittle_recompute_batch=whittle_recompute_batch,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:
