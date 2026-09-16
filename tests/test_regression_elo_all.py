@@ -230,6 +230,90 @@ class TestOperatorEloRecordsUsedOnly:
         assert ratings == sorted(ratings, reverse=True)
 
 
+class TestSeedAndOpArenasNeverCrossCompete:
+    """Op-mutator schedulers and seed schedulers share one BayesianEloTracker
+    instance but must never be matched against each other: the "seed_"
+    prefix keeps them in disjoint keyspaces, ``_record_operator_strategy_matches``
+    and ``_record_seed_strategy_matches`` each only ever pass names from their
+    own pool to ``record_strategy_match``, and both reporting surfaces
+    (``report.py``'s convergence block and ``stats.py``'s live status line)
+    must present two separate rankings rather than one blended leaderboard.
+    """
+
+    def _make(self):
+        f = _StubFuzzer()
+        install_scheduler_surface(f)
+        f._use_elo = True
+        f._elo = BayesianEloTracker()
+        f._meta_strategy = "bandit"
+        f._meta_strategy_used = {"bandit", "mopt"}
+        f._use_replicator = False
+        f._replicator = None
+        f.mc = SimpleNamespace(cem_fitted=False)
+        f.mc_bandit = True
+        f.mc_cem = False
+        f._use_mopt = True
+        f._mopt = object()
+        f._exp3 = False
+        f._eps_greedy = False
+        f._hierarchical = False
+        f._gp_ucb = False
+        f._cmaes = False
+        f._contextual = None
+        f._ducb = None
+        f._swucb = None
+        f._cucb = None
+        f._use_invasion = False
+        f._seed_strategy = "weighted"
+        f._seed_strategy_pool = ["weighted", "pareto"]
+        f._seed_strategies_used = {"weighted", "pareto"}
+        return f
+
+    def test_no_key_ever_crosses_arenas(self):
+        f = self._make()
+        for _ in range(5):
+            Fuzzer._record_operator_strategy_matches(f, 1.0)
+            Fuzzer._record_seed_strategy_matches(f, 1.0)
+        op_keys = {"bandit", "mopt"}
+        seed_keys = {"seed_weighted", "seed_pareto"}
+        assert set(f._elo._strategy_match_count) == op_keys | seed_keys
+        # Every op key only ever matched another op key, and vice versa --
+        # if a cross-arena match had ever been recorded, an op name would
+        # show up with a "seed_" match count contribution it never earned
+        # (or the two pools' match counts would fail to partition cleanly).
+        assert f._elo._strategy_match_count["bandit"] == 5  # 1 opponent (mopt)
+        assert f._elo._strategy_match_count["seed_weighted"] == 5  # 1 opponent (seed_pareto)
+
+    def test_report_partitions_both_pools_with_no_overlap(self):
+        f = self._make()
+        for _ in range(10):
+            Fuzzer._record_operator_strategy_matches(f, 1.0)
+            Fuzzer._record_seed_strategy_matches(f, 1.0)
+        ranking = f._elo.get_strategy_ranking()
+        op_strategies = [p for p in ranking if not p[0].startswith("seed_")]
+        seed_strategies = [p for p in ranking if p[0].startswith("seed_")]
+        assert {n for n, _ in op_strategies} == {"bandit", "mopt"}
+        assert {n for n, _ in seed_strategies} == {"seed_weighted", "seed_pareto"}
+        # Partition is total: nothing dropped, nothing double-counted.
+        assert len(op_strategies) + len(seed_strategies) == len(ranking)
+
+    def test_live_status_line_reports_separate_arena_leaders(self):
+        f = self._make()
+        for _ in range(10):
+            Fuzzer._record_operator_strategy_matches(f, 1.0)
+            Fuzzer._record_seed_strategy_matches(f, 1.0)
+        ranking = f._elo.get_strategy_ranking()
+        op_ranking = [p for p in ranking if not p[0].startswith("seed_")]
+        seed_ranking = [p for p in ranking if p[0].startswith("seed_")]
+        assert op_ranking and seed_ranking
+        # The two arenas must not be flattened into a single "top" pick --
+        # exercise the same split stats.py's live status line performs.
+        top_op = op_ranking[0][0]
+        top_seed = seed_ranking[0][0][len("seed_") :]
+        assert top_op in {"bandit", "mopt"}
+        assert top_seed in {"weighted", "pareto"}
+
+
 class _FakeBandit:
     def __init__(self):
         self.cem_fitted = False
