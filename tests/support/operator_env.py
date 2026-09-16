@@ -44,6 +44,7 @@ BALLOT_SCHEDULERS = (
     "exp3",
     "exp4",
     "fpl",
+    "corral",
     "gradient",
     "gp_ucb",
     "hierarchical",

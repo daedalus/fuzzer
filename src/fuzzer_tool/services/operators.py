@@ -465,8 +465,8 @@ _FALLBACK_PRECEDENCE = (
     "fpl",
     "successive_elim",
     "round_robin",
-    # canary, op_katz, op_tang, gradient, whittle are deliberately absent
-    # here: op_katz/op_tang/gradient/whittle are unproven exploratory arms
+    # canary, op_katz, op_tang, gradient, whittle, corral are deliberately
+    # absent here: they are unproven exploratory arms
     # (see their module docstrings) that should only ever be reached via
     # Elo explicitly choosing them, not by being the top-precedence live
     # selector whenever someone enables the flag without --elo -- the same
@@ -479,7 +479,11 @@ _FALLBACK_PRECEDENCE = (
     # any campaign's silent default without --elo. whittle's restless
     # assumption (passive_decay) is an unmeasured guess pending the
     # ablation-CSV operator column (see core/schedulers/whittle.py) and it
-    # has not been run against the convergence harness at all yet.
+    # has not been run against the convergence harness at all yet. corral
+    # passes the stationary harness comfortably but its recovery on
+    # DecayingBest is seed-fragile (best_late share min 0.006, median 0.777
+    # over 12 seeds -- see core/schedulers/corral.py), which is the same
+    # profile that moved gradient back out.
 )
 
 
@@ -554,6 +558,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("moss")
     if f._use_fpl and f._fpl:
         available.append("fpl")
+    if f._use_corral and f._corral:
+        available.append("corral")
     if f._use_gradient and f._gradient:
         available.append("gradient")
     if f._use_whittle and f._whittle:
@@ -4428,6 +4434,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "successive_elim" and f._successive_elim:
             op = f._successive_elim.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "corral" and f._corral:
+            op = f._corral.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "round_robin" and f._round_robin:
             op = f._round_robin.select_op(ops)

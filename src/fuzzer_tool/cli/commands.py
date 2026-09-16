@@ -489,6 +489,8 @@ def cmd_fuzz(args):
             gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
             gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
             gradient_floor=getattr(args, "gradient_floor", 0.05),
+            corral=getattr(args, "corral", False),
+            corral_eta=getattr(args, "corral_eta", 0.6),
             whittle=getattr(args, "whittle", False),
             whittle_n_states=getattr(args, "whittle_n_states", 5),
             whittle_gamma=getattr(args, "whittle_gamma", 0.95),
@@ -565,6 +567,7 @@ def cmd_fuzz(args):
         args.fpl = True
         args.gradient = True
         args.whittle = True
+        args.corral = True
         args.successive_elim = True
         args.canary_scheduler = True
         args.consolidated = True
@@ -735,6 +738,8 @@ def cmd_fuzz(args):
         gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
         gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
         gradient_floor=getattr(args, "gradient_floor", 0.05),
+        corral=getattr(args, "corral", False),
+        corral_eta=getattr(args, "corral_eta", 0.6),
         whittle=getattr(args, "whittle", False),
         whittle_n_states=getattr(args, "whittle_n_states", 5),
         whittle_gamma=getattr(args, "whittle_gamma", 0.95),
@@ -1846,6 +1851,7 @@ _HAIL_MARY_FLAGS = (
     "cucb",
     "cusum_ucb",
     "fpl",
+    "corral",
     "gradient",
     "whittle",
     "successive_elim",
@@ -2443,6 +2449,21 @@ def main() -> int:
         "--fpl",
         action="store_true",
         help="Enable Follow Perturbed Leader operator scheduling",
+    )
+    fuzz_parser.add_argument(
+        "--corral",
+        action="store_true",
+        help="Enable Corral (log-barrier OMD) operator scheduling: "
+        "importance-weighted losses with per-arm learning rates. Elo-only, "
+        "so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--corral-eta",
+        type=float,
+        default=0.6,
+        help="Corral base learning rate. 0.6 is the measured joint optimum "
+        "over 12 and 155 arms; above it the distribution locks onto a single "
+        "arm at high arm counts (default: 0.6)",
     )
     fuzz_parser.add_argument(
         "--fpl-epsilon",

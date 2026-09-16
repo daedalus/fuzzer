@@ -55,6 +55,7 @@ from fuzzer_tool.core.schedulers import (
     CMAESScheduler,
     ConsolidatedScheduler,
     ContextualLinUCBScheduler,
+    CorralScheduler,
     CUCBScheduler,
     CUSUM_UCBScheduler,
     DUCBScheduler,
@@ -127,6 +128,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "moss",
     "c2ucb",
     "fpl",
+    "corral",
     "invasion",
     "round_robin",
     "canary",
@@ -934,6 +936,8 @@ class Fuzzer:
         gradient_temp_decay=0.9995,
         gradient_min_temperature=0.05,
         gradient_floor=0.05,
+        corral=False,
+        corral_eta=0.6,
         whittle=False,
         whittle_n_states=5,
         whittle_gamma=0.95,
@@ -2155,6 +2159,23 @@ class Fuzzer:
                 gradient_floor,
             )
 
+        # Corral: log-barrier OMD over the operator arms with
+        # importance-weighted losses. Off by default and Elo-only, for a
+        # measured reason rather than by analogy -- see
+        # core/schedulers/corral.py. On the stationary convergence harness it
+        # is solid (best-arm tail share min 0.924 over 40 seeds, regret slope
+        # max 0.563), but on DecayingBest its recovery is seed-fragile
+        # (best_late share min 0.006, median 0.777 over 12 seeds): the
+        # doubling trick raises a starved arm's learning rate without getting
+        # it drawn again. That is the same profile that moved gradient back
+        # out of the fallback chain, so it must not become a campaign's
+        # silent selector without --elo.
+        self._use_corral = corral
+        self._corral = None
+        if corral:
+            self._corral = CorralScheduler(eta=corral_eta, rng=self._rng)
+            log.info("Corral (log-barrier OMD) enabled (eta=%.2f)", corral_eta)
+
         # Whittle index (restless-bandit index policy). Off by default and
         # Elo-only (see core/schedulers/whittle.py's module docstring): the
         # passive_decay restless-drift assumption is an unmeasured guess
@@ -2482,6 +2503,7 @@ class Fuzzer:
             # with only --kl-ducb or --kl-swucb enabled, no-op operators
             # were credited with the round's success.
             or self._kl_ducb
+            or self._corral
             or self._kl_swucb
             or self._consolidated
             or self._moss
@@ -2695,6 +2717,8 @@ class Fuzzer:
             _register_arms(self._cusum_ucb)
         if self._fpl:
             _register_arms(self._fpl)
+        if self._corral:
+            _register_arms(self._corral)
         if self._gradient:
             _register_arms(self._gradient)
         if self._whittle:
@@ -5105,6 +5129,10 @@ class Fuzzer:
             self._cucb,
             self._cusum_ucb,
             self._fpl,
+            # On-policy, like exp3/cmaes above: the importance weight is only
+            # unbiased against the distribution that produced the draw, so a
+            # round another scheduler selected must not reach it.
+            self._corral if selector == "corral" else None,
             self._gradient,
             self._whittle,
             self._successive_elim,
@@ -6548,6 +6576,8 @@ class Fuzzer:
             ops.append("moss")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
+        # corral is deliberately absent from this banner too, same reason,
+        # see core/schedulers/corral.py.
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/gradient.py.
         # whittle is deliberately absent from this banner too, same
@@ -6786,6 +6816,8 @@ class Fuzzer:
             ops.append("moss")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
+        # corral is deliberately absent from this banner too, same reason,
+        # see core/schedulers/corral.py.
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/gradient.py.
         # whittle is deliberately absent from this banner too, same

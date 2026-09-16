@@ -54,6 +54,7 @@ _KWARGS = {
     # omission was itself failing on a KeyError.
     "bo_gp_ucb": {"bo_gp_ucb": True},
     "fpl": {"fpl": True},
+    "corral": {"corral": True},
     "invasion": {"invasion": True, "mc_bandit": True},
     "canary": {"canary_scheduler": True},
     "exp4": {"exp4": True},
