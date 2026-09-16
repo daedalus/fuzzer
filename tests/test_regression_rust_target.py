@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import shutil
 import subprocess
 
@@ -159,13 +160,21 @@ def _run_guarded(so_path: str, data: bytes) -> int:
     [
         (b"not a trigger", False),
         (b"RUST\x00", False),  # unrecognized selector byte
-        (b"RUSTS", True),      # wild out-of-bounds read
-        (b"RUSTO\x64", True),  # scaled out-of-bounds read
-        (b"RUSTW\x64", True),  # scaled out-of-bounds write
+        (b"RUSTS", True),      # wild out-of-bounds read -- always faults
+        (b"RUSTO\x0a", False), # small OOB read -- silent without ASAN (that's the point)
+        (b"RUSTW\x0a", False), # small OOB write -- silent without ASAN (that's the point)
         (b"RUSTP", True),      # safe-Rust panic (checked index)
     ],
 )
 def test_guarded_call_crash_detection(rust_target_so, data, expect_crash):
+    """S and P are the two bugs a plain (non-ASAN) build can catch on its
+    own. O and W are deliberately NOT expected to crash here — see
+    test_asan_catches_small_overflows below for what they're actually
+    for. A plain build silently reading/writing a few bytes past a small
+    allocation without crashing is realistic, not a bug in this test: it's
+    the exact gap ASAN's redzones exist to close, verified in
+    docs/handover/handover_rust_target_2026-09-15.md.
+    """
     exit_code = _run_guarded(rust_target_so, data)
     if expect_crash:
         assert exit_code > 128, f"expected a signal-crash exit code, got {exit_code}"
@@ -311,11 +320,112 @@ def test_nightly_build_instruments_inside_the_crate(rust_target_so_nightly):
 
 def test_nightly_build_still_detects_all_crashes(rust_target_so_nightly):
     """Coverage instrumentation is additive; it must not change what
-    counts as a crash. Same four triggers, same expected outcome, this
-    time against the nightly-instrumented build.
+    counts as a crash. This build has coverage instrumentation only (no
+    ASAN — see test_asan_catches_small_overflows below for that), so S
+    and P are the ones expected to crash on their own, same as the
+    stable/plain build; O and W are deliberately quiet here too (small
+    overflows into live, mapped memory), which is the correct behavior to
+    verify, not a gap in this test.
     """
     assert _run_guarded(rust_target_so_nightly, b"benign") == 0
     assert _run_guarded(rust_target_so_nightly, b"RUSTS") == 128 + 11
-    assert _run_guarded(rust_target_so_nightly, b"RUSTO\x64") == 128 + 11
-    assert _run_guarded(rust_target_so_nightly, b"RUSTW\x64") == 128 + 11
+    assert _run_guarded(rust_target_so_nightly, b"RUSTO\x0a") == 0
+    assert _run_guarded(rust_target_so_nightly, b"RUSTW\x0a") == 0
     assert _run_guarded(rust_target_so_nightly, b"RUSTP") == 128 + 6
+
+
+def _find_matching_asan_clang(nightly_rustc: str):
+    """Mirror tools/build_rust_target.sh's clang-version-matching logic:
+    a mismatched major LLVM version between rustc's bundled ASAN
+    expectations and the C compiler's own runtime fails at process start
+    with "incompatible ASan runtimes", not a build error — confirmed
+    empirically (system clang's default LLVM 18 against this nightly's
+    LLVM 20). Returns a clang binary name or None.
+    """
+    result = subprocess.run(
+        [nightly_rustc, "--version", "--verbose"], capture_output=True, text=True,
+    )
+    match = re.search(r"^LLVM version: (\d+)", result.stdout, re.MULTILINE)
+    if not match:
+        return None
+    candidate = f"clang-{match.group(1)}"
+    return candidate if shutil.which(candidate) else None
+
+
+@pytest.fixture(scope="module")
+def rust_target_exe_asan_nightly(tmp_path_factory):
+    """The build that took the most work to get right this session --
+    real ASAN instrumentation of the Rust crate itself, linked with a C
+    compiler whose runtime actually matches. See
+    docs/handover/handover_rust_target_2026-09-15.md for the two separate
+    bugs this uncovered along the way (an ASAN-runtime version mismatch,
+    and a write silently optimized away because it was UB independent of
+    the bounds check being missing — deriving a `*mut u8` from a `&[u8]`
+    and writing through it).
+    """
+    nightly_rustc = _find_nightly_rustc()
+    if nightly_rustc is None:
+        pytest.skip("no nightly rustc found — see tools/fetch_rust_nightly.sh")
+    asan_cc = _find_matching_asan_clang(nightly_rustc)
+    if asan_cc is None:
+        pytest.skip(
+            "no clang matching this nightly rustc's LLVM version found — "
+            "install it (e.g. apt install clang-20) to run this test"
+        )
+
+    env = dict(os.environ)
+    env["RUSTC"] = nightly_rustc
+    env["RUSTFLAGS"] = (
+        "-Z sanitizer=address "
+        "-Cpasses=sancov-module "
+        "-Cllvm-args=-sanitizer-coverage-level=3 "
+        "-Cllvm-args=-sanitizer-coverage-trace-pc-guard"
+    )
+    build_dir = tmp_path_factory.mktemp("asan_nightly_cargo_target")
+    subprocess.run(
+        ["cargo", "build", "--release", "--target-dir", str(build_dir)],
+        cwd=CRATE_DIR, check=True, capture_output=True, env=env,
+    )
+    rlib = build_dir / "release" / "libbuggy_rust_target.a"
+    assert rlib.exists(), "ASAN cargo build did not produce the expected staticlib"
+
+    out = tmp_path_factory.mktemp("rust_target_asan_nightly") / "rust_target"
+    cmd = [
+        asan_cc, "-O2", "-g", "-fno-omit-frame-pointer", "-fsanitize=address",
+        "-include", SHIM, "-o", str(out), WRAPPER_SRC, str(rlib),
+        # Deliberately NOT passing -lasan: forcing one on top of what the
+        # matched clang auto-selects is exactly what reproduces the
+        # "incompatible ASan runtimes" failure.
+        "-lpthread", "-ldl", "-lm", "-lrt", "-lutil", "-lgcc_s",
+    ]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return str(out)
+
+
+def test_asan_catches_small_overflows(rust_target_exe_asan_nightly):
+    """The actual fix this session's work was for: with real Rust-side
+    ASAN instrumentation (and an exact-size heap allocation on the C
+    side — see targets/rust_target.c's main(), which used to read into a
+    fixed 256-byte scratch buffer that silently absorbed any overrun
+    shorter than its own leftover capacity), a SMALL out-of-bounds
+    read/write that a plain build can't catch at all now produces a real,
+    fully symbolicated "AddressSanitizer: heap-buffer-overflow" report
+    pointing at the actual Rust source line — not just a raw crash.
+    """
+    for trigger, direction in [(b"RUSTO\x0a", "READ"), (b"RUSTW\x0a", "WRITE")]:
+        proc = subprocess.run(
+            [rust_target_exe_asan_nightly], input=trigger, capture_output=True,
+        )
+        stderr = proc.stderr.decode(errors="replace")
+        assert "AddressSanitizer: heap-buffer-overflow" in stderr, (
+            f"expected a real ASAN report for {trigger!r}, got: {stderr[:500]}"
+        )
+        assert "rust/buggy_target/src/lib.rs" in stderr, (
+            f"expected the report to symbolicate into the Rust source for {trigger!r}"
+        )
+
+    benign = subprocess.run(
+        [rust_target_exe_asan_nightly], input=b"benign, nothing here", capture_output=True,
+    )
+    assert benign.returncode == 0
+    assert b"AddressSanitizer" not in benign.stderr

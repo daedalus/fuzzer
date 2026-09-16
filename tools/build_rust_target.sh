@@ -135,35 +135,95 @@ RUST_LIBS="-lpthread -ldl -lm -lrt -lutil -lgcc_s"
 mkdir -p "$OUT_DIR"
 
 build_variant() {
-    local suffix="$1" extra_flags="$2" cc="$3"
+    local suffix="$1" extra_flags="$2" cc="$3" rlib="$4" so_libs="$5"
     local exe_out="$OUT_DIR/rust_target${suffix}"
     local so_out="$OUT_DIR/rust_target${suffix}.so"
-    local so_libs="$RUST_LIBS"
-    [[ "$extra_flags" == *-fsanitize=address* ]] && so_libs="$so_libs -lasan"
 
     echo "  -> $exe_out"
     "$cc" $extra_flags $COV_FLAG -O2 -g $FRAME_POINTER -include "$SHIM" \
-        -o "$exe_out" "$WRAPPER_SRC" "$RLIB" $RUST_LIBS
+        -o "$exe_out" "$WRAPPER_SRC" "$rlib" $RUST_LIBS
     ok "$(basename "$exe_out")"
 
     echo "  -> $so_out"
     "$cc" $extra_flags $COV_FLAG -O2 -g $FRAME_POINTER -shared -fPIC -include "$SHIM" \
-        -o "$so_out" "$WRAPPER_SRC" "$RLIB" $so_libs
+        -o "$so_out" "$WRAPPER_SRC" "$rlib" $so_libs
     ok "$(basename "$so_out")"
 }
 
-build_variant "" "" "$CC"
+build_variant "" "" "$CC" "$RLIB" "$RUST_LIBS"
 
 if [ "$WITH_ASAN" -eq 1 ]; then
-    ASAN_CC="$CC"
-    command -v clang &>/dev/null && ASAN_CC="clang"
-    build_variant "_asan" "-fsanitize=address" "$ASAN_CC"
-    warn "ASAN build linked, but note: the Rust static lib itself is NOT" \
-         "ASAN-instrumented (stable rustc has no -Z sanitizer=address /" \
-         "-Z build-std). ASAN here only covers targets/rust_target.c's" \
-         "own few lines; the bugs inside rust/buggy_target that don't" \
-         "reach unmapped memory on their own will not be caught by it." \
-         "See the handover doc's 'What ASAN does and doesn't see' section."
+    if [ -n "$NIGHTLY_RUSTC" ]; then
+        # Real ASAN instrumentation of the Rust code itself, not just the
+        # wrapper — verified end to end (docs/handover/
+        # handover_rust_target_2026-09-15.md): both O and W now produce a
+        # genuine, fully symbolicated "AddressSanitizer: heap-buffer-
+        # overflow" report pointing at the actual Rust source line, for
+        # small overflows a plain build can't catch at all. Two things
+        # were required beyond just adding -Z sanitizer=address, both
+        # confirmed necessary by testing without them first:
+        #   1. -Z build-std is NOT needed for this — ASAN's heap redzones
+        #      come from intercepting malloc/free, which happens
+        #      regardless of whether std itself is instrumented; build-std
+        #      only matters for bugs inside std's own code. (This
+        #      toolchain couldn't do -Z build-std anyway — see the
+        #      handover doc on the missing rust-src component.)
+        #   2. The C compiler linking the final binary needs an ASAN
+        #      runtime that actually matches this rustc's bundled LLVM
+        #      version, or you get "Your application is linked against
+        #      incompatible ASan runtimes" (confirmed: system clang's
+        #      default LLVM 18 runtime against this nightly's LLVM 20
+        #      fails this way; clang-20 works). Auto-detected below by
+        #      parsing `rustc --version --verbose`'s LLVM version and
+        #      looking for a matching `clang-N`; install it yourself
+        #      (`apt install clang-N`) if it's missing.
+        LLVM_MAJOR="$("$NIGHTLY_RUSTC" --version --verbose | sed -n 's/^LLVM version: \([0-9]*\).*/\1/p')"
+        ASAN_CC=""
+        if [ -n "$LLVM_MAJOR" ] && command -v "clang-$LLVM_MAJOR" &>/dev/null; then
+            ASAN_CC="clang-$LLVM_MAJOR"
+        fi
+
+        if [ -z "$ASAN_CC" ]; then
+            warn "no clang-$LLVM_MAJOR found to match this nightly rustc's" \
+                 "LLVM $LLVM_MAJOR — real Rust-side ASAN needs a matching" \
+                 "runtime (confirmed: a mismatched major version fails" \
+                 "with \"incompatible ASan runtimes\" at process start, not" \
+                 "a build error). Install it (apt install clang-$LLVM_MAJOR)" \
+                 "to enable this. Falling back to coverage-only ASAN (the" \
+                 "wrapper only, same as without nightly)."
+            ASAN_CC="$CC"
+            build_variant "_asan" "-fsanitize=address" "$ASAN_CC" "$RLIB" "$RUST_LIBS -lasan"
+        else
+            ok "using $ASAN_CC (matches nightly's LLVM $LLVM_MAJOR) for real Rust-side ASAN"
+            ASAN_TARGET_DIR="$(mktemp -d)"
+            ( cd "$CRATE_DIR" && \
+              RUSTC="$NIGHTLY_RUSTC" \
+              RUSTFLAGS="-Z sanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc-guard" \
+              cargo build --release --target-dir "$ASAN_TARGET_DIR" )
+            ASAN_RLIB="$ASAN_TARGET_DIR/release/libbuggy_rust_target.a"
+            [ -f "$ASAN_RLIB" ] || fail "expected ASAN staticlib not found: $ASAN_RLIB"
+            # No explicit -lasan here: forcing one on top of what clang
+            # auto-selects is exactly what produced the "incompatible
+            # runtimes" error above when this was first tried.
+            build_variant "_asan" "-fsanitize=address" "$ASAN_CC" "$ASAN_RLIB" "$RUST_LIBS"
+            warn "in-process (.so, dlopen via ctypes) loading of this ASAN" \
+                 "build was NOT verified to work — confirmed failing with" \
+                 "an undefined-symbol error when loaded the naive way." \
+                 "This project's own fuzzer.py already has an LD_PRELOAD-" \
+                 "based mechanism for loading ASAN .so targets in-process" \
+                 "(see _detect_asan and around it); whether it resolves" \
+                 "this for a Rust-instrumented .so specifically was not" \
+                 "tested in this pass. The executable variant (subprocess" \
+                 "mode) was fully verified end to end and is the only" \
+                 "path to trust for this ASAN build without further work."
+        fi
+    else
+        warn "no nightly rustc found — ASAN build will not cover the Rust" \
+             "code itself (stable rustc has no -Z sanitizer=address); only" \
+             "targets/rust_target.c's own few lines get ASAN coverage." \
+             "Run tools/fetch_rust_nightly.sh to enable real Rust-side ASAN."
+        build_variant "_asan" "-fsanitize=address" "$CC" "$RLIB" "$RUST_LIBS -lasan"
+    fi
 fi
 
 echo "Rust target build complete."

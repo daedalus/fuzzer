@@ -41,11 +41,20 @@ script, if that's wanted.
 
 ## The four bugs (`RUST` + selector byte, `targets/rust_target.c` → `rust/buggy_target/src/lib.rs`)
 
+**Update 2026-09-16: O and W were redesigned.** They used to scale their
+reach by a huge multiplier (`n * 4 MiB`) specifically so they'd crash
+reliably even without ASAN — because at the time, nothing here could make
+ASAN see the Rust side at all. That's no longer true (see the big update
+below), so they're back to being real, small, realistic overflows —
+`n` bytes past the allocation, no scaling — matching this project's other
+sanitizer targets (`heap_oob_target.c`, `asan_target.c`). The table below
+reflects the current design.
+
 | selector | bug | crash without ASAN? |
 |---|---|---|
 | `S` | fixed-offset wild read (1 GiB past the buffer) | yes, reliably |
-| `O` | read whose offset scales with an attacker byte (`n * 4 MiB`) | yes, for `n` past ~0 |
-| `W` | same idea, a write | yes, for `n` past ~0 |
+| `O` | read of `n` bytes past the allocation, `n` = an attacker byte | no, silently reads adjacent live memory (verified) |
+| `W` | same idea, a write | no, silently writes adjacent live memory (verified) |
 | `P` | safe-Rust panic via checked indexing (no `unsafe` on this path) | yes — `panic = "abort"` |
 
 Verified through **both** real execution paths the fuzzer actually uses,
@@ -53,18 +62,111 @@ not just standalone:
 
 - **In-process (`direct`/`direct_lite`)**: loaded the built `.so` via
   `ctypes.CDLL` and called `fuzz_shm_run` through `__afl_guarded_call`
-  exactly as `adapters/inprocess.py` does. All four selectors return the
-  expected negated signal (`RUSTP` → `-6`/SIGABRT, the other three →
-  `-11`/SIGSEGV); a non-triggering input returns `0`. This is the
-  regression suite's main coverage (`test_guarded_call_crash_detection`,
-  `test_panic_reports_as_abort_not_segv`).
+  exactly as `adapters/inprocess.py` does. `S`/`P` return the expected
+  negated signal (`RUSTP` → `-6`/SIGABRT, `RUSTS` → `-11`/SIGSEGV); `O`/`W`
+  and a non-triggering input all return `0` (by design — see above). This
+  is the regression suite's main coverage
+  (`test_guarded_call_crash_detection`, `test_panic_reports_as_abort_not_segv`).
 - **Subprocess mode**: plain `fork`+`exec` of the executable variant,
   crash read from `os.waitpid`'s wait status (`returncode < 0`) — the
   same mechanism `persistent_subprocess.py`'s fallback path and any
   one-shot execution rely on. Covered by
   `test_subprocess_mode_detects_crash_via_exit_status`.
 
-## What does NOT work yet, and why (read before extending this)
+## Update 2026-09-16: ASAN now genuinely catches O and W
+
+Asked to "try fixing the ASAN crash" after the 2026-09-15 update below
+documented it as a known gap. It's fixed for subprocess-mode execution,
+verified end to end with a real, fully symbolicated
+`AddressSanitizer: heap-buffer-overflow` report pointing at the actual
+Rust source line — not assumed, not a raw crash mistaken for one. Getting
+there required finding and fixing **three separate bugs**, each of which
+would have silently defeated the others if left in place:
+
+**1. `-Z build-std` turned out not to be needed at all.** The
+2026-09-15 update below assumed ASAN parity needed `-Z build-std
+-Z sanitizer=address` (rebuilding `core`/`std` from source), and that this
+toolchain couldn't do it because it lacks the `rust-src` component. Tested
+directly instead of continuing to assume: `-Z sanitizer=address` alone,
+with no `-Z build-std`, compiles cleanly and produces real
+`__asan_report_*` references in the crate's object code. This makes
+sense in hindsight — ASAN's heap redzones come from intercepting
+malloc/free, which happens regardless of whether the calling code's
+instrumented, and instrumenting *this* crate's own loads/stores is all
+that's needed to catch overflows *in this crate's own code*. `-Z build-std`
+would only matter for a bug inside `std` itself. The missing `rust-src`
+component is a real, still-open gap (see below), just not the one that
+was blocking this.
+
+**2. Mismatched ASAN runtime versions.** Linking the ASAN-instrumented
+Rust object with the system's default `clang` (LLVM 18) failed at
+process start with `Your application is linked against incompatible ASan
+runtimes` — not a build error, a runtime one. The nightly rustc bundles
+LLVM 20.1.7; `apt install clang-20` (LLVM 20.1.2 — close enough on the
+major version to interoperate, confirmed) fixed it. Also confirmed:
+forcing an explicit `-lasan` on the link line reintroduces the same
+failure even with matching versions, by pulling in a second, differently-
+sourced runtime on top of whatever clang already auto-selects for
+`-fsanitize=address` — don't pass it manually. `tools/build_rust_target.sh`
+now parses `rustc --version --verbose`'s `LLVM version:` line and looks
+for a matching `clang-N`, warning and falling back to coverage-only ASAN
+(the old, more limited behavior) if none is found.
+
+**3. A real Rust UB bug in `bug_oob_write` itself, unrelated to the other
+two.** Even with (1) and (2) both fixed, `W` produced no crash and no
+ASAN report at all — just silently returned success. `bug_oob_write` took
+`buf: &[u8]` and wrote through a `*mut u8` cast from `buf.as_ptr()`.
+That's undefined behavior independent of the out-of-bounds access: a
+`&[u8]` carries a `noalias`+readonly contract, so LLVM is entitled to
+assume nothing writes through any pointer derived from one — and in the
+real crate build (though not in a minimal isolated probe used to first
+confirm write-side ASAN detection works at all), it exercised exactly
+that entitlement and eliminated the entire write loop as a provably-dead
+store. Fixed by changing `bug_oob_write` (and the `fuzz_me` dispatch that
+calls it) to take the raw `*const u8`/`len` pair instead of a slice, so no
+aliasing `&[u8]` is ever formed over memory the function is about to
+mutate through a raw pointer. Worth remembering for any future bug added
+here: deriving a mutable raw pointer from an existing shared reference and
+writing through it is UB in Rust *regardless of whether the write is
+in-bounds* — this has nothing to do with fuzzing or ASAN specifically, it
+would have been silently wrong even in safe, bounds-checked-adjacent code.
+
+**Also fixed along the way, in `targets/rust_target.c`:** `main()` used to
+read into a fixed `char buf[256]` stack buffer regardless of actual input
+length. ASAN's overflow check is a redzone around the *true* allocation
+boundary, not around however much of it the caller says it's using — so
+any Rust-side overread shorter than the buffer's remaining unused capacity
+(most of them, for short inputs) stayed inside that allocation and never
+reached a redzone at all, independent of whether the Rust side was
+instrumented. `main()` now reads all of stdin into a heap buffer sized
+exactly to what was actually read (`realloc` down to the exact length)
+before calling `fuzz_test`, matching how the in-process ctypes path
+already worked (a `ctypes` array is already exact-size).
+
+**Confirmed working**, via `tests/test_regression_rust_target.py::test_asan_catches_small_overflows`:
+both `O` and `W`, with a small `n` (10 in the test), produce a genuine
+`AddressSanitizer: heap-buffer-overflow` report with a full, correctly
+symbolicated stack trace through `main` → `fuzz_test` → `rust_fuzz_entry`
+→ `fuzz_me` → the actual bug function, landing on the real `.rs` line
+number. `W`'s report is via `__asan_memset` — LLVM vectorized the
+byte-by-byte write loop into a `memset` call, and ASAN's interceptor
+catches it there instead of via an inlined per-byte check; still a fully
+attributed, correct report.
+
+**Confirmed NOT working, still open:** loading this ASAN-instrumented
+`.so` in-process via a naive `ctypes.CDLL` fails immediately with
+`undefined symbol: __asan_option_detect_stack_use_after_return` — dlopen'ing
+an ASAN-instrumented shared library into a host process that wasn't
+itself built with ASAN is a known-fragile combination in general. This
+project's own `services/fuzzer.py` already has a real mechanism for this
+exact problem (`_detect_asan`, then `LD_PRELOAD`-ing the system's
+`libasan.so.8` with `verify_asan_link_order=0` before `ctypes.CDLL` ever
+runs) — but that mechanism is built around GCC's shared `libasan.so.8`,
+and whether it's compatible with this nightly-rustc/clang-20 combination's
+runtime specifically was **not tested** in this pass. Don't assume it
+works without checking. The executable variant (subprocess mode) needed
+none of that and is fully verified — trust that one, not the `.so` for
+in-process use, without further work.
 
 **Compiler choice matters more here than it looks like it should — use
 clang.** `afl_shim.c`'s edge map is populated by compiler-inserted calls
@@ -130,6 +232,13 @@ component (`$sysroot/lib/rustlib/src/rust` exists but is empty), and
 going back to the still-blocked official channel. The ASAN section below
 is otherwise unchanged.
 
+**Update 2026-09-16: ASAN on the Rust side is now real, for subprocess
+mode.** The paragraph below was accurate as of the 2026-09-15 nightly-rustc
+work, before ASAN was specifically debugged — see the "ASAN now genuinely
+catches O and W" section near the top of this document for what changed,
+what was fixed, and what's still open (in-process/dlopen loading of the
+ASAN `.so`, not yet verified).
+
 **Even with clang, no edge coverage from *inside* the Rust code — using
 only the default, stable-rustc build.** Those 84 call sites cover
 `targets/rust_target.c` and the few lines of `afl_shim.c` it pulls in —
@@ -145,28 +254,13 @@ feedback distinguishing "reached `bug_oob_read`" from "reached
 `bug_panic`" *inside* the crate. Crash detection is fully unaffected (it
 does not depend on coverage instrumentation at all).
 
-**What ASAN does and doesn't see.** Built an ASAN variant
-(`tools/build_rust_target.sh --asan`) and confirmed empirically — not
-assumed — that ASAN does not catch the `O`/`W` bugs at small overflow
-sizes: `RUSTO\xc8` (200-byte overread) and `RUSTW\xc8` under
-`-fsanitize=address` both exit `0`, no report. This is expected once
-you know why: ASAN's redzone checks are inserted by the *compiler* at
-each instrumented load/store; `rust/buggy_target`'s object code is not
-compiled with `-fsanitize=address` (same nightly-only gap as coverage,
-`-Z sanitizer=address` + `-Z build-std`), so its raw pointer reads/writes
-never consult ASAN's shadow memory at all — regardless of whether the
-memory they touch has a poisoned redzone. Only the C wrapper's few lines
-are actually ASAN-covered. This is *why* `O`/`W` are designed to scale
-their reach into clearly-unmapped memory (`n * 4 MiB`) rather than
-imitating `heap_oob_target.c`'s small-overflow-into-a-redzone style: a
-small overflow would have been a silent no-op bug here, invisible to both
-the plain build and the ASAN build, which would have been a worse target
-to hand off than an honest "no small-overflow demo without nightly rustc"
-gap. If a future pass gets a nightly toolchain with the `rust-src` component
-(this one doesn't — see the update above) plus
-`-Z build-std -Z sanitizer=address` working for the crate, redesigning
-`O`/`W` back to a small, ASAN-catchable overflow (matching the existing C
-sanitizer targets' style) becomes worthwhile and is the natural next step.
+**What ASAN does and doesn't see — superseded, see the 2026-09-16 update
+above.** (Originally: "ASAN does not catch the `O`/`W` bugs at small
+overflow sizes... this is why they're designed to scale their reach into
+clearly-unmapped memory instead." That turned out to be three separate,
+independently fixable problems rather than one hard toolchain limit — the
+update above walks through all three. `O`/`W` are back to small,
+realistic overflow sizes as a result; see the bug table further up.)
 
 **Standalone-executable crash signal can differ from the in-process one
 for the same input.** Not a bug introduced here — reproduced against
@@ -195,18 +289,25 @@ doesn't hold, not a shim bug in the modes that matter.
    above (`tools/fetch_rust_nightly.sh` + auto-detection in
    `tools/build_rust_target.sh`). Remember it's an unofficial third-party
    toolchain, opt-in by design.
-2. A toolchain with the `rust-src` component, so `-Z build-std
-   -Z sanitizer=address` becomes possible — the `a16z/rust` mirror doesn't
-   include it. Would need either a different mirror that does, or the
-   still-blocked official channel. Once available: redesign `O`/`W` as
-   small, redzone-catchable overflows matching the C sanitizer targets'
-   style (currently they scale their reach into clearly-unmapped memory
-   instead, specifically because nothing here could catch a small one).
-3. cmplog for the Rust side would need the same nightly
+2. ~~ASAN parity for the Rust side, redesign `O`/`W` as small,
+   redzone-catchable overflows~~ — **done for subprocess mode**, see the
+   2026-09-16 update near the top. `-Z build-std`/`rust-src` turned out
+   to be unnecessary for this specific goal (it matters for bugs inside
+   `std` itself, not for this crate's own code) — don't assume it's
+   still needed before checking.
+3. In-process (`.so`, `ctypes.CDLL`) loading of the ASAN build — **not
+   done**, confirmed failing with an undefined-symbol error the naive
+   way. This project's `services/fuzzer.py` has an existing
+   `LD_PRELOAD`-based mechanism for ASAN `.so` targets in-process
+   (`_detect_asan` and the code around it) built around GCC's system
+   `libasan.so.8`; whether it's compatible with this nightly-rustc/
+   clang-20 combination's runtime was not tested. Check that before
+   assuming in-process ASAN fuzzing of this target works at all.
+4. cmplog for the Rust side would need the same nightly
    `-Z sanitizer-coverage-trace-cmp` support — not investigated at all in
    this pass, though the toolchain now in hand could plausibly support it;
    worth a quick check before assuming it needs more setup.
-4. If it's ever worth wiring into `tools/build_targets.sh` proper (a
+5. If it's ever worth wiring into `tools/build_targets.sh` proper (a
    `--rust` flag calling this script, or reusing `build_target`/
    `build_so_target` directly against the staticlib), the `RUST_LIBS`
    list in `tools/build_rust_target.sh` was determined empirically from
@@ -215,7 +316,7 @@ doesn't hold, not a shim bug in the modes that matter.
    double-checking against whatever rustc version ships wherever this
    runs next, since libstd's own native dependencies do shift across
    versions.
-5. If this project ever wants to depend on the nightly toolchain more
+6. If this project ever wants to depend on the nightly toolchain more
    than opt-in-for-better-coverage, its provenance (unofficial, no
    published checksum, built for an unrelated project) is worth revisiting
    rather than just continuing to rely on the pin in
