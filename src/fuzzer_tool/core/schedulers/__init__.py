@@ -1,5 +1,6 @@
 """Operator-selection schedulers (bandit algorithms)."""
 
+from fuzzer_tool.core.schedulers.bo_gp_ucb import BOGPUCBScheduler
 from fuzzer_tool.core.schedulers.c2ucb import C2UCBScheduler
 from fuzzer_tool.core.schedulers.canary import CanaryScheduler
 from fuzzer_tool.core.schedulers.cmaes import CMAESScheduler
@@ -42,6 +43,7 @@ __all__ = [
     "EpsilonGreedyScheduler",
     "GradientBanditScheduler",
     "HierarchicalBanditScheduler",
+    "BOGPUCBScheduler",
     "GPUCBScheduler",
     "MCTSSeedScheduler",
     "AlphaBetaMCTSSeedScheduler",

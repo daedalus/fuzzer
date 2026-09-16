@@ -450,6 +450,7 @@ _FALLBACK_PRECEDENCE = (
     "eps_greedy",
     "hierarchical",
     "gp_ucb",
+    "bo_gp_ucb",
     "cmaes",
     "contextual",
     "c2ucb",
@@ -520,7 +521,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("hierarchical")
     if f._use_gp_ucb and f._gp_ucb:
         available.append("gp_ucb")
-    # cmaes was missing from this list while `strategy == "cmaes"` had a
+    if f._use_bo_gp_ucb and f._bo_gp_ucb:
+        available.append("bo_gp_ucb")
     # dispatch branch in select_op and `_use_cmaes` had a branch in the no-Elo
     # fallback chain. The effect was not a preference, it was a
     # disappearance: with --elo on and any other scheduler enabled, Elo
@@ -4252,6 +4254,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "gp_ucb" and f._gp_ucb:
             op = f._gp_ucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "bo_gp_ucb" and f._bo_gp_ucb:
+            op = f._bo_gp_ucb.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "cmaes" and f._cmaes:
             op = f._cmaes.select_op(ops)

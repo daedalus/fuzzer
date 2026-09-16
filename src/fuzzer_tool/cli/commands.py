@@ -465,6 +465,7 @@ def cmd_fuzz(args):
             eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
             hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
             gp_ucb=getattr(args, "gp_ucb", False),
+            bo_gp_ucb=getattr(args, "bo_gp_ucb", False),
             ducb=getattr(args, "ducb", False),
             ducb_gamma=getattr(args, "ducb_gamma", 0.9999),
             swucb=getattr(args, "swucb", False),
@@ -550,6 +551,7 @@ def cmd_fuzz(args):
         args.eps_greedy = True
         args.hierarchical_bandit = True
         args.gp_ucb = True
+        args.bo_gp_ucb = True
         args.ducb = True
         args.ducb_gamma = 0.9999
         args.kl_ducb = True
@@ -713,6 +715,7 @@ def cmd_fuzz(args):
         eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
         hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
         gp_ucb=getattr(args, "gp_ucb", False),
+        bo_gp_ucb=getattr(args, "bo_gp_ucb", False),
         ducb=getattr(args, "ducb", False),
         ducb_gamma=getattr(args, "ducb_gamma", 0.9999),
         swucb=getattr(args, "swucb", False),
@@ -762,6 +765,8 @@ def cmd_fuzz(args):
         markov_blend=getattr(args, "markov_blend", False),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
+        bo_gp_length_scale=getattr(args, "bo_gp_length_scale", 1.0),
+        bo_gp_noise=getattr(args, "bo_gp_noise", 0.01),
         contextual=getattr(args, "contextual", False),
         contextual_alpha=getattr(args, "contextual_alpha", 1.0),
         contextual_lambda=getattr(args, "contextual_lambda", 1.0),
@@ -1833,6 +1838,7 @@ _HAIL_MARY_FLAGS = (
     "eps_greedy",
     "hierarchical_bandit",
     "gp_ucb",
+    "bo_gp_ucb",
     "ducb",
     "kl_ducb",
     "swucb",
@@ -2303,6 +2309,23 @@ def main() -> int:
         type=float,
         default=2.0,
         help="GP-UCB exploration parameter (default: 2.0)",
+    )
+    fuzz_parser.add_argument(
+        "--bo-gp-ucb",
+        action="store_true",
+        help="Enable Bayesian Optimization GP-UCB with Expected Improvement",
+    )
+    fuzz_parser.add_argument(
+        "--bo-gp-length-scale",
+        type=float,
+        default=1.0,
+        help="BO-GP kernel RBF length scale (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--bo-gp-noise",
+        type=float,
+        default=0.01,
+        help="BO-GP observation noise sigma (default: 0.01)",
     )
     fuzz_parser.add_argument(
         "--ducb",

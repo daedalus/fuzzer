@@ -39,6 +39,7 @@ _FALLBACK_PRECEDENCE = [
     "eps_greedy",
     "hierarchical",
     "gp_ucb",
+    "bo_gp_ucb",
     "cmaes",
     "contextual",
     "c2ucb",
@@ -121,6 +122,7 @@ class _FakeFuzzer:
         "eps_greedy": ("_use_eps_greedy", "_eps_greedy"),
         "hierarchical": ("_use_hierarchical", "_hierarchical"),
         "gp_ucb": ("_use_gp_ucb", "_gp_ucb"),
+        "bo_gp_ucb": ("_use_bo_gp_ucb", "_bo_gp_ucb"),
         "cmaes": ("_use_cmaes", "_cmaes"),
         "contextual": ("_use_contextual", "_contextual"),
         "c2ucb": ("_use_c2ucb", "_c2ucb"),
@@ -232,6 +234,7 @@ class TestFallbackPrecedence:
             (["eps_greedy"], "eps_greedy"),
             (["hierarchical"], "hierarchical"),
             (["gp_ucb"], "gp_ucb"),
+            (["bo_gp_ucb"], "bo_gp_ucb"),
             (["contextual"], "contextual"),
             (["c2ucb"], "c2ucb"),
             # Prefix-off subsets: the first enabled in precedence order wins.

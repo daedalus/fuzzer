@@ -49,6 +49,7 @@ from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
 from fuzzer_tool.core.schedulers import (
+    BOGPUCBScheduler,
     C2UCBScheduler,
     CanaryScheduler,
     CMAESScheduler,
@@ -114,6 +115,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "eps_greedy",
     "hierarchical",
     "gp_ucb",
+    "bo_gp_ucb",
     "contextual",
     "cmaes",
     "ducb",
@@ -906,6 +908,9 @@ class Fuzzer:
         gp_ucb=False,
         gp_length_scale=1.0,
         gp_beta=2.0,
+        bo_gp_ucb=False,
+        bo_gp_length_scale=1.0,
+        bo_gp_noise=0.01,
         ducb=False,
         ducb_gamma=0.9999,
         kl_ducb=False,
@@ -2047,6 +2052,16 @@ class Fuzzer:
             self._gp_ucb = GPUCBScheduler(length_scale=gp_length_scale, beta=gp_beta)
             log.info("GP-UCB enabled (l=%.2f, beta=%.2f)", gp_length_scale, gp_beta)
 
+        # BO-GP-UCB bandit (Expected Improvement version)
+        self._use_bo_gp_ucb = bo_gp_ucb
+        self._bo_gp_ucb = None
+        if bo_gp_ucb:
+            self._bo_gp_ucb = BOGPUCBScheduler(
+                length_scale=bo_gp_length_scale,
+                noise=bo_gp_noise,
+            )
+            log.info("BO-GP-UCB enabled (l=%.2f, noise=%.4f)", bo_gp_length_scale, bo_gp_noise)
+
         # Recency-weighted UCB pair (Garivier & Moulines). Both take the
         # shared RandPool per Hard Rule 16 so --seed reproduces the campaign.
         self._use_ducb = ducb
@@ -2449,6 +2464,10 @@ class Fuzzer:
             or self._eps_greedy
             or self._hierarchical
             or self._gp_ucb
+            # bo_gp_ucb was missing here the same way: with only
+            # --bo-gp-ucb enabled, _track_op_effect stayed False and
+            # no-op operators were credited with the round's success.
+            or self._bo_gp_ucb
             # _cmaes was absent here while its dispatch branch in
             # operators.py was live: with only --cma-es enabled,
             # _track_op_effect stayed False, `effective` stayed None, and
@@ -2660,6 +2679,8 @@ class Fuzzer:
             _register_arms(self._hierarchical)
         if self._gp_ucb:
             _register_arms(self._gp_ucb)
+        if self._bo_gp_ucb:
+            _register_arms(self._bo_gp_ucb, _format_priors)
         if self._ducb:
             _register_arms(self._ducb)
         if self._swucb:
@@ -5075,6 +5096,7 @@ class Fuzzer:
             self._eps_greedy,
             self._hierarchical,
             self._gp_ucb,
+            self._bo_gp_ucb,
             self._cmaes if selector == "cmaes" else None,
             self._ducb,
             self._swucb,
@@ -6506,6 +6528,8 @@ class Fuzzer:
             ops.append("hierarchical")
         if getattr(self, "_gp_ucb", False):
             ops.append("gp_ucb")
+        if getattr(self, "_bo_gp_ucb", False):
+            ops.append("bo_gp_ucb")
         if getattr(self, "_cmaes", False):
             ops.append("cmaes")
         if getattr(self, "_contextual", False):
@@ -6748,6 +6772,8 @@ class Fuzzer:
             ops.append("hierarchical")
         if getattr(self, "_gp_ucb", False):
             ops.append("gp-ucb")
+        if getattr(self, "_bo_gp_ucb", False):
+            ops.append("bo-gp-ucb")
         if getattr(self, "_ducb", False):
             ops.append("ducb")
         if getattr(self, "_swucb", False):

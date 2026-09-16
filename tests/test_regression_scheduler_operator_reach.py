@@ -75,6 +75,7 @@ def _all_operator_schedulers():
     eps = S.EpsilonGreedyScheduler()
     hier = S.HierarchicalBanditScheduler()
     gp = S.GPUCBScheduler()
+    bo = S.BOGPUCBScheduler()
     lin = S.ContextualLinUCBScheduler(dim=CONTEXT_DIM)
     c2ucb = S.C2UCBScheduler(dim=CONTEXT_DIM)
     ducb = S.DUCBScheduler()
@@ -101,6 +102,8 @@ def _all_operator_schedulers():
         ("EpsilonGreedyScheduler", eps, eps.select_op, eps.record),
         ("HierarchicalBanditScheduler", hier, hier.select_op, hier.record),
         ("GPUCBScheduler", gp, gp.select_op, gp.record),
+        # BO-GP-UCB (Expected Improvement)
+        ("BOGPUCBScheduler", bo, bo.select_op, bo.record),
         # LinUCB takes a per-arm context callable and a numeric reward.
         (
             "ContextualLinUCBScheduler",

@@ -67,4 +67,7 @@ suppress = [
     "src/fuzzer_tool/core/schedulers/ucb_common.py:WindowedUCBBase.select_op",
     "src/fuzzer_tool/core/schedulers/ucb_common.py:WindowedUCBBase.windowed_counts",
     "src/fuzzer_tool/core/schedulers/ucb_common.py:WindowedUCBBase.windowed_means",
+    # BO-GP-UCB adds a new fallback-precedence test case; the parametrize
+    # decorator is intentionally extended, not removed.
+    "tests/test_regression_scheduler_fallback_precedence.py:TestFallbackPrecedence.test_precedence_order",
 ]
