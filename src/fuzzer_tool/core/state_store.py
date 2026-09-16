@@ -106,6 +106,32 @@ def _safe_loads(raw: bytes) -> Any:
     return _SafeUnpickler(io.BytesIO(raw)).load()
 
 
+def _verify_readable(blob: bytes) -> None:
+    """Raise :class:`UnsafeStateError` unless the reader would accept *blob*.
+
+    The store validated on read and not on write, so a component could
+    serialise a payload its own loader rejects -- and the reader's failure is
+    all-or-nothing, so one bad field cost every section.
+    ``CoverageRegimeDetector.save()`` did exactly that with
+    ``regime_history``: a measured campaign resumed with zero of nineteen
+    sections recovered, logging a message that blamed tampering for a payload
+    this codebase wrote itself.
+
+    The check runs the real unpickler rather than reasoning about types,
+    because the reader is the authority and a second implementation of its
+    rules drifts from it. That is not speculative: a heuristic
+    ``reducer_override`` written against :data:`_ALLOWED_GLOBALS` got three
+    cases wrong in a row -- class objects passed as reduction arguments,
+    ``numpy._core.numeric._frombuffer``, and ``numpy.float64``, whose
+    reduction names ``scalar`` and not the scalar's own type. Using the
+    unpickler cannot be wrong by construction.
+
+    Costs a second pass over the payload: 64 ms against the 2.26 s a real
+    5.9 MiB save already spends, so ~2.8%. Nearly all of that save is gzip.
+    """
+    _safe_loads(blob)
+
+
 class StateStore:
     """Load/save the whole fuzzer state as one compressed pickle.
 
@@ -204,16 +230,59 @@ class StateStore:
             # crash mid-write cannot leave a truncated state file behind.
             fd, tmp = tempfile.mkstemp(dir=str(self.corpus_dir), suffix=".tmp")
             try:
+                # Pickle, verify the reader would accept it, then compress.
+                # Verifying before gzip means a rejected payload does not pay
+                # for compression it will not use, and gzip is ~97% of a
+                # large save.
+                try:
+                    blob = pickle.dumps(self._data, protocol=pickle.HIGHEST_PROTOCOL)
+                    _verify_readable(blob)
+                except (UnsafeStateError, pickle.PicklingError, TypeError, AttributeError):
+                    # Not just the allowlist: an
+                    # object that cannot be pickled at all (a lambda, a lock,
+                    # an open file) raises PicklingError, TypeError or
+                    # AttributeError instead, and would otherwise abort the
+                    # whole save from inside one section -- the same
+                    # all-or-nothing failure this guard exists to break up.
+                    blob = pickle.dumps(
+                        self._writable_sections(), protocol=pickle.HIGHEST_PROTOCOL
+                    )
                 with open(fd, "wb") as raw, gzip.GzipFile(fileobj=raw, mode="wb", mtime=0) as fh:
-                    pickle.dump(self._data, fh, protocol=pickle.HIGHEST_PROTOCOL)
+                    fh.write(blob)
                 Path(tmp).replace(self.path)
             except BaseException:
                 Path(tmp).unlink(missing_ok=True)
                 raise
-        except (OSError, pickle.PicklingError) as exc:
+        except (OSError, pickle.PicklingError, UnsafeStateError) as exc:
             log.warning("could not write state file %s: %s", self.path, exc)
             return False
         return True
+
+    def _writable_sections(self) -> dict:
+        """Drop sections the reader would reject, keeping the rest.
+
+        Only reached after a guarded whole-payload dump has already failed,
+        so the per-section validation here is never on the happy path. It
+        drops the offenders rather than the file: resuming with eighteen of
+        nineteen sections beats resuming with none, which is what the
+        unguarded writer produced. The error names the section, because the
+        read-side message named nothing and blamed tampering.
+        """
+        kept: dict = {}
+        for section, value in self._data.items():
+            try:
+                _verify_readable(pickle.dumps(value, protocol=pickle.HIGHEST_PROTOCOL))
+            except (UnsafeStateError, pickle.PicklingError, TypeError, AttributeError) as exc:
+                log.error(
+                    "dropping state section %r: %s. Its save() must emit only "
+                    "what the reader accepts: primitives and containers. "
+                    "Convert an enum with .value and an ndarray with .tolist().",
+                    section,
+                    exc,
+                )
+                continue
+            kept[section] = value
+        return kept
 
     def cleanup_legacy(self) -> int:
         """Remove per-component JSON files superseded by the pickle."""
