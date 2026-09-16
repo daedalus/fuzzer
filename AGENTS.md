@@ -68,6 +68,7 @@ fuzzer, not just the target.
 47. Always do git commit and push after tests pass do not run tests after git commit and push.
 48. When planing to add new features: add code sketches and always add a section with the fully wiring the new feature.
 49. When planing a new feature always reason over small targeted code tests, copy the function to test and test it.
+50. The full pytest battery is almos 10k tests, running it is unpractical, always run the tests for the affected code.
 
 ## Corpus Rules
 
