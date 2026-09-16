@@ -233,6 +233,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "overlapping_template_flood",
         "maurer_dictionary_collapse",
         "excursion_square_wave",
+        "crc_advanced",
+        "murmurhash3",
     },
     "adaptive": {
         "markov_bytes",
@@ -513,7 +515,7 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     # ffconcat playlist: starts with a comment or a path/URL line. The
     # distinctive signal is "ffconcat" on its own line (case-insensitive),
     # which is what the demuxer looks for before parsing anything else.
-    "ffconcat_chunk_mutate": lambda d: (b"ffconcat" in d[:256].lower()),
+    "ffconcat_chunk_mutate": lambda d: b"ffconcat" in d[:256].lower(),
 }
 
 # Fraction of selections on which a not-yet-seen format is still offered.

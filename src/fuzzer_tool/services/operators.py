@@ -46,6 +46,7 @@ from fuzzer_tool.core.mutations import (
     splice_common_prefix,
     splice_diff_located,
 )
+from fuzzer_tool.core.mutations.structured import _region
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
@@ -1584,6 +1585,107 @@ class OperatorEngine:
         if checksum is None:
             return
         buf[-nbytes:] = checksum.to_bytes(nbytes, "big")
+
+    def _op_crc_advanced(self, buf, _byte_idx, _data):
+        """Overwrite a region with configurable CRC-32 output (FFmpeg av_crc family).
+
+        Uses polynomials from FFmpeg's libavutil/crc.c: CRC-8, CRC-16-CCITT,
+        CRC-32, CRC-32C (Castagnoli), CRC-32K (Koopman), CRC-32Q, CRC-64 variants.
+        Exercises checksum validation paths that assume CRC-32 specifically.
+        """
+        if not buf or len(buf) < 4:
+            return
+        rng = self.ctx._rng
+
+        # FFmpeg's predefined polynomials (non-reflected, GCD domain)
+        polynomials = [
+            0x07,  # CRC-8
+            0x1021,  # CRC-16-CCITT
+            0x8005,  # CRC-16 (ARC)
+            0x04C11DB7,  # CRC-32 (standard, non-reflected)
+            0x1EDC6F41,  # CRC-32C (Castagnoli)
+            0x741B8CD7,  # CRC-32K (Koopman)
+            0x814141AB,  # CRC-32Q
+            0x104C11DB7,  # CRC-64-ECMA
+            0x42F0E1EBA9EA3693,  # CRC-64-GO-ISO
+        ]
+
+        poly = rng.choice(polynomials)
+        width = (
+            8 if poly < 0x100 else (16 if poly < 0x10000 else (32 if poly < 0x100000000 else 64))
+        )
+        nbytes = width // 8
+        mask = (1 << width) - 1
+
+        offset, length = _region(len(buf), rng, min_len=nbytes, align=nbytes)
+        if length < nbytes:
+            return buf
+
+        region_data = bytes(buf[:offset])
+        crc_val = crc32(region_data, poly=poly) & mask
+        crc_bytes = crc_val.to_bytes(nbytes, "big")
+
+        out = bytearray(buf)
+        for i in range(length):
+            out[offset + i] = crc_bytes[i % len(crc_bytes)]
+        buf[:] = out[: self.ctx.max_len]
+        return buf
+
+    def _op_murmurhash3(self, buf, _byte_idx, _data):
+        """Overwrite a region with MurmurHash3 avalanche output (FFmpeg av_murmur3).
+
+        Produces bytes with strong avalanche property — exercises parsers that
+        reject inputs based on entropy/uniformity assumptions.
+        """
+        if not buf or len(buf) < 4:
+            return
+        rng = self.ctx._rng
+
+        offset, length = _region(len(buf), rng, min_len=4, align=4)
+        if length < 4:
+            return buf
+
+        seed = rng.randint(0, 0xFFFFFFFF)
+
+        def murmur3_32(data, seed=0):
+            c1, c2 = 0xCC9E2D51, 0x1B873593
+            h = seed
+            nblocks = len(data) // 4
+            for i in range(nblocks):
+                k = struct.unpack_from("<I", data, i * 4)[0]
+                k = (k * c1) & 0xFFFFFFFF
+                k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
+                k = (k * c2) & 0xFFFFFFFF
+                h ^= k
+                h = ((h << 13) | (h >> 19)) & 0xFFFFFFFF
+                h = (h * 5 + 0xE6546B64) & 0xFFFFFFFF
+            tail = data[nblocks * 4 :]
+            k = 0
+            for i, b in enumerate(tail):
+                k ^= b << (i * 8)
+            if k:
+                k = (k * c1) & 0xFFFFFFFF
+                k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
+                k = (k * c2) & 0xFFFFFFFF
+                h ^= k
+            h ^= len(data)
+            h ^= h >> 16
+            h = (h * 0x85EBCA6B) & 0xFFFFFFFF
+            h ^= h >> 13
+            h = (h * 0xC2B2AE35) & 0xFFFFFFFF
+            h ^= h >> 16
+            return h
+
+        out = bytearray(buf)
+        hash_input = bytes(buf[:offset]) if offset > 0 else b"\x00"
+        for i in range(0, length, 4):
+            h = murmur3_32(hash_input, seed ^ i)
+            block = struct.pack("<I", h)
+            for j in range(min(4, length - i)):
+                out[offset + i + j] = block[j]
+            hash_input = bytes(out[offset : offset + i + 4])
+        buf[:] = out[: self.ctx.max_len]
+        return buf
 
     # --- helpers for _op_crc_learn ---------------------------------------
 

@@ -40,6 +40,32 @@ _CONDITIONAL_OPS = {
 }
 
 
+# Newly registered operators since the last survey.
+_NEW_OPERATORS = {
+    "crc_advanced",
+    "murmurhash3",
+}
+
+
+def test_new_operators_registered():
+    """Verify the two new FFmpeg-p-port operators are in the registry."""
+    for op in _NEW_OPERATORS:
+        assert op in REGISTRY.names(), f"{op} not in REGISTRY.names()"
+        assert op in REGISTRY._ops, f"{op} not in REGISTRY._ops"
+        assert REGISTRY.category_of(op) == "regularity", (
+            f"{op} category should be regularity, got {REGISTRY.category_of(op)}"
+        )
+
+
+def test_new_operators_in_dispatch():
+    """Verify the new operators appear in the OperatorEngine dispatch table."""
+    engine = OperatorEngine(_build_fuzzer())
+    dispatch = engine.build_dispatch()
+    for op in _NEW_OPERATORS:
+        assert op in dispatch, f"{op} missing from OperatorEngine dispatch table"
+        assert callable(dispatch[op]), f"{op} handler is not callable"
+
+
 def _build_fuzzer():
     """Build a minimal real Fuzzer instance for dispatch coverage checks."""
     import tempfile
@@ -316,6 +342,8 @@ class TestRegularityOperators:
             "overlapping_template_flood",
             "maurer_dictionary_collapse",
             "excursion_square_wave",
+            "crc_advanced",
+            "murmurhash3",
         }
     )
 
@@ -722,9 +750,7 @@ class TestGoFuzzPorts:
         # Kolmogorov-Smirnov style check against the theoretical CDF
         # F(y) = sqrt(y) without depending on scipy: max gap between the
         # empirical CDF and sqrt(y) over the sorted sample.
-        max_gap = max(
-            abs((i + 1) / n - y**0.5) for i, y in enumerate(samples)
-        )
+        max_gap = max(abs((i + 1) / n - y**0.5) for i, y in enumerate(samples))
         assert max_gap < 0.02, f"KS-style gap too large: {max_gap}"
 
         # Sanity check on the shape itself: mean of Y = X**2 for X ~ U(0,1)
