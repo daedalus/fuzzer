@@ -53,7 +53,6 @@ patterns.
 | # | Algorithm | File:line | Band if ported | Mutator value |
 |---|---|---|---|---|
 | U1 | `av_murmur3_init_seeded` / `av_murmur3_update` / `av_murmur3_final` | `libavutil/murmur3.c` | regularity | Overwrite region with bytes derived from a Murmur3 hash of the input. Produces avalanche-distributed bytes that look structured but aren't — exercises parsers that assume hash output uniformity. Different mixing constants from the fuzzer's existing CRC-only checksum logic. |
-| U2 | `ff_sfc64_get` / `ff_sfc64_init` | `libavutil/sfc64.h` | adaptive | A PRNG with fundamentally different statistical structure than `RandPool`. Could feed a mutator that generates values biased toward SFC64's output distribution rather than RandPool's uniform/weighted draws. **Note:** Hard Rule 16 says "Always use the prng in rand_pool.py" — this would *feed* a mutator, not replace RandPool. |
 | U3 | `av_crc` (configurable polynomial) | `libavutil/crc.c` | regularity | The fuzzer's CRC mutator (`_op_crc_learn`) models CRCs as GF(2) polynomial recovery. FFmpeg's `av_crc` ships with 13 predefined polynomials (CRC-8, CRC-16-CCITT, CRC-32, CRC-32C, etc.). A mutator that overwrites checksums using a *wrong but plausible* polynomial exercises validation paths that assume CRC-32 specifically. |
 | U4 | `av_md5_sum` | `libavutil/md5.c` | regularity | 64 rounds of mixing per 512-bit block. A mutator that produces MD5-diffusion-shaped output rather than random bytes could hit parsers with cryptographic assumptions. |
 | U5 | `av_bswap64` / `AV_RB16` / `AV_WL32` | `libavutil/bswap.h`, `libavutil/intreadwrite.h` | bit | Cross-platform endianness macros with fixed width/endianness combos. Partial overlap with existing `endian_convert` but the explicit LE/BE per-width tables could produce patterns the current operator's uniform-width approach misses. |
@@ -111,9 +110,8 @@ to fully validate — see gating questions in §5.
 | 5 | **F1: motion estimation patterns** (`vf_mestimate`) | Medium-High | Structured spatial offsets. Requires a video target (H.264/VP9). |
 | 6 | **C2: CABAC probability mutator** (`cabac`) | High | Operates on a bit-level probability model — unique mutation shape. Requires a CABAC-decoding target. |
 | 7 | **F2: color space LUT mutator** (`vf_colorspace`) | Medium | Structured LUT values. Requires a color/image target. |
-| 8 | **U2: SFC64-based mutator** (`sfc64`) | Medium | Different PRNG distribution than RandPool. **Needs explicit approval** — Hard Rule 16 says always use RandPool; this would feed a mutator that draws from RandPool but uses SFC64 *internally* for a specific distributional shape. |
-| 9 | **C3: DCT coefficient patterns** (`dctref`) | Medium | Extends `spectral_peak` with actual transform values. Requires a DCT-based codec target. |
-| 10 | **M1/M2: WAV/index mutators** (`wavdec`, `seek`) | Medium | Container-specific. Requires WAV target (not in `targets/`). |
+| 8 | **C3: DCT coefficient patterns** (`dctref`) | Medium | Extends `spectral_peak` with actual transform values. Requires a DCT-based codec target. |
+| 9 | **M1/M2: WAV/index mutators** (`wavdec`, `seek`) | Medium | Container-specific. Requires WAV target (not in `targets/`). |
 
 ---
 
@@ -142,7 +140,6 @@ to fully validate — see gating questions in §5.
 | C2 (CABAC) | Same — CABAC is H.264-specific. No H.264 target → no mutation value. |
 | C4 (RLE) | Does the fuzzer have a BMP or PIC target that uses FFmpeg's RLE mode? |
 | F1 (motion estimation) | Does the fuzzer have a video codec target (H.264, VP9, etc.)? |
-| U2 (SFC64) | Hard Rule 16 explicitly forbids replacing RandPool. This candidate requires proof that SFC64 *seeds* distribution shape without bypassing RandPool reproducibility. **Approvals needed.** |
 | M1 (WAV) | No WAV target exists in `targets/`. Would need `tools/vendor_*` + `targets/` entry first. |
 
 ---
@@ -154,6 +151,8 @@ to fully validate — see gating questions in §5.
   mutation shape.
 - **M3: probe detection** — overlaps with existing magic-byte probing in format
   mutators. No new surface.
+- **U2: SFC64** — raw output is uniform; it is a PRNG, not a mutation shape.
+  Replacing `RandPool` would add complexity without improving mutation diversity.
 - **S1/S2: swscale/swr resample** — coefficient-based interpolation that
   produces smooth ramps. Already approximated by existing `monotone_fill` and
   `spectral_peak` operators. Low marginal value.
