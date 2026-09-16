@@ -46,6 +46,18 @@ from fuzzer_tool.services.te_position import (
 log = logging.getLogger(__name__)
 
 
+def _kruskal_str(f) -> str:
+    """Compact live-stats field for the Kruskal-count arm; empty when off."""
+    from fuzzer_tool.core.schedulers.kruskal_count import KruskalCountSeedStrategy
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    kc = getattr(f, "_kruskal_count", None)
+    if not isinstance(kc, KruskalCountSeedStrategy):
+        return ""
+    st = kc.stats()
+    return f" | kruskal: scored={st['scored']} gen={st['generated']}"
+
+
 def _format_count(n: int) -> str:
     """Abbreviate a count for the single-line live stats display.
 
@@ -1019,6 +1031,8 @@ class StatsReporter:
             with contextlib.suppress(AttributeError, TypeError):
                 mi_str = f" | mi: obs={mi.total_observations} pos={len(mi.position_counts)}"
 
+        kc_str = _kruskal_str(f)
+
         elo_str = ""
         if getattr(f, "_use_elo", False) and getattr(f, "_elo", None):
             try:
@@ -1199,7 +1213,7 @@ class StatsReporter:
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
             f"time: {elapsed:.0f}s{rss_str}{dict_str}{markov_str}{cmplog_str}"
-            f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{elo_str}"
+            f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{kc_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
             f"{bayes_str}{misc_str}"
             f"{poisson_str}"

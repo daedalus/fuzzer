@@ -430,3 +430,34 @@ class TestFuzzerWiring:
         from tests.test_regression_cli_fuzzer_kwargs import _fuzz_parser_dests
 
         assert "kruskal_count" in _fuzz_parser_dests(ast.parse(inspect.getsource(commands)))
+
+
+class TestReporting:
+    def _f(self, enabled=True):
+        s = _strategy(ScriptedRng()) if enabled else None
+        if s is not None:
+            s.scores([FUNNEL_1, ROTATION])
+            s.generate(FUNNEL_2, [b"\xaa" * 8])
+        return SimpleNamespace(_kruskal_count=s)
+
+    def test_report_lines(self):
+        from fuzzer_tool.services.report import _kruskal_lines
+
+        lines = _kruskal_lines(self._f())
+        assert lines[0].split() == ["Kruskal", "count:", "enabled"]
+        # Two seeds scored; FUNNEL_1 couples all 6 pairs.
+        assert "scored=2 coupled_pairs=6 generated=1" in lines[1]
+        assert f"mean_score={(1 - 1 / MAX_STEPS) / 2:.3f}" in lines[1]
+
+    def test_report_absent_when_disabled(self):
+        from fuzzer_tool.services.report import _kruskal_lines
+
+        assert _kruskal_lines(self._f(enabled=False)) == []
+        assert _kruskal_lines(SimpleNamespace()) == []
+
+    def test_live_stats_field(self):
+        from fuzzer_tool.services.stats import _kruskal_str
+
+        assert _kruskal_str(self._f()) == " | kruskal: scored=2 gen=1"
+        assert _kruskal_str(self._f(enabled=False)) == ""
+        assert _kruskal_str(SimpleNamespace()) == ""

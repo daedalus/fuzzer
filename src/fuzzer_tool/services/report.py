@@ -1724,6 +1724,8 @@ def _fuzzing_strategy(f) -> str:
             f"  Replicator:       window={f._replicator.window_size}, eta={f._replicator.eta}"
         )
 
+    strategies.extend(_kruskal_lines(f))
+
     # Markov
     if f.markov_trained:
         if hasattr(f.markov, "chains"):
@@ -1771,6 +1773,23 @@ def _fuzzing_strategy(f) -> str:
 
     lines.extend(strategies)
     return "\n".join(lines)
+
+
+def _kruskal_lines(f) -> list[str]:
+    """Kruskal-count seed arm counters; empty when the arm is off."""
+    from fuzzer_tool.core.schedulers.kruskal_count import KruskalCountSeedStrategy
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    kc = getattr(f, "_kruskal_count", None)
+    if not isinstance(kc, KruskalCountSeedStrategy):
+        return []
+
+    st = kc.stats()
+    return [
+        "  Kruskal count:    enabled",
+        f"    scored={st['scored']} coupled_pairs={st['coupled_pairs']} "
+        f"generated={st['generated']} mean_score={st['mean_score']:.3f}",
+    ]
 
 
 def _edge_rarity(f) -> str:
