@@ -4,7 +4,7 @@
 **implementation audited and closed out 2026-09-13 (later)**
 **Base of original analysis:** `f17a3ef`
 **Base of the audit revision:** `94d1741`
-**Base of this revision:** `388df9f`
+**Base of this revision:** `a98ac2e`
 
 **Status: P0-T1, P0-T3, P2-T4 and P4-T6 are closed; P3-T5 is withdrawn
 pending its three design questions; E-T7 was raised by the P0-T1 fix.**
@@ -872,14 +872,76 @@ fail. Hard Rule 39's lesson reached from a new direction: the oracle was not
 weak, it was structurally incapable of failing, and only falsification
 exposed it.
 
-### 7.2 Worth a sweep, not done here
+### 7.2 The sweep — done, clean, and guarded anyway
 
 `save()` converting one field and missing another in the same dict is a
-shape, not an accident. The other `save()` implementations persisting
-anything beyond plain containers and scalars have the same exposure, and the
-failure mode is total rather than local — one bad field costs every section.
-A mechanical check is cheap: walk each component's `save()` output and assert
-every leaf is a primitive. The recursive audit in
-`tests/test_regression_state_enum_payload.py` is the helper; pointing it at
-all of them is the work. Filed as a P0-class item for the companion
-document, not started.
+shape, not an accident, so every other `save()` that persists anything
+beyond primitives had the same exposure. Swept in `faeebad`.
+
+**The sweep is clean.** All 22 persisted sections audited: 19 from a real
+campaign's state file with every persisting analyzer enabled
+(`--garch --continuum --fluctuation-theorems --mcts --alphabeta --elo --ga
+--qea --markov --sensitivity --temperature-control --mc-bandit --corral`),
+plus `mi`, `cmaes` and `katz` by static construction — `katz.state_dict()`
+already converts with `.tolist()`. No second instance of the defect exists.
+
+So the fix is not a fix. `StateStore.save()` now pickles, checks the reader
+would accept the bytes, then compresses; a rejected payload falls back to
+per-section validation and drops the offenders rather than the file, naming
+the section. Eighteen of nineteen beats none. It exists because enumerating
+`save()` methods cannot prevent the next one and because the cost of the
+next one is total rather than local — and `PicklingError`/`TypeError`/
+`AttributeError` are isolated too, since an object that cannot be pickled at
+all would otherwise abort the whole save from inside one section.
+
+**The design lesson is the interesting part, and it is not the one I
+expected.** The first version was a `reducer_override` on a `Pickler`
+subclass, checked against `_ALLOWED_GLOBALS`. It measured cheaper — 0.9%
+against 2.8% — and it was wrong three times in a row, each caught only by
+its own tests:
+
+| attempt | what it got wrong |
+|---|---|
+| judge `type(obj)` | class objects passed as *reduction arguments* read as `builtins.type` |
+| allow allowlisted callables | `numpy._core.numeric._frombuffer` is not on the list |
+| ditto | `numpy.float64`'s reduction names `scalar`, not the scalar's own type |
+
+The allowlist is about what a `GLOBAL` opcode in a *file* may name, which is
+not the same question as what types a payload contains. Running the real
+unpickler over the pickled bytes cannot be wrong by construction and cannot
+drift from the reader, because it *is* the reader. The 2% was worth it. A
+test pins the mechanism so a future swap back to a type walk has to be
+deliberate.
+
+### 7.3 Second finding: the allowlist is stale for numpy 2.x — open
+
+`_ALLOWED_GLOBALS` lists `numpy.ndarray` and its comment says "numpy
+scalars/arrays appear in a few saved payloads". Under numpy 2.4.4 an ndarray
+does **not** reduce through the allowlisted
+`numpy._core.multiarray._reconstruct` but through
+`numpy._core.numeric._frombuffer`, which is not listed. So an ndarray written
+to state today cannot be read back, and under the unguarded writer it would
+have taken every other section with it. Scalars (`numpy.float64`,
+`numpy.int64`) are unaffected — they reduce through `scalar`, which is
+listed.
+
+Latent, not live: no current section carries an ndarray, and the guard now
+downgrades it from silent total loss at resume to a named section dropped at
+write.
+
+**Not resolved, deliberately.** The two options are not equivalent and the
+choice is about the read surface of a file that lives in a corpus directory
+a campaign writes constantly and a user might copy between machines:
+
+1. **Widen** the allowlist to the numpy 2.x reduction globals. Makes the
+   comment's stated intent true. `_frombuffer` is a narrow primitive,
+   comparable in risk to the `_reconstruct` already there — but it is still a
+   widening, and the legacy `numpy.core.*` spellings would need adding too.
+2. **Narrow**: drop `ndarray` and require components to convert with
+   `.tolist()`, which is what `katz.state_dict()` already does and what every
+   clean section already effectively does. No widening, at the cost of making
+   the allowlist's array entries dead and needing a note saying so.
+
+`tests/test_regression_state_write_guard.py` asserts the current behaviour
+in *both* directions, so either resolution fails the test and has to update
+it on purpose.
