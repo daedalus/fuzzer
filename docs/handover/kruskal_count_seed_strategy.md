@@ -1,4 +1,6 @@
 # Plan: hybrid `kruskal_count` seed strategy
+
+> **Status (2026-09-16): implemented.** Module, SeedPicker/Fuzzer/CLI/parallel wiring, state, report, docs. Open: the A/B (`docs/TODO.md`). Deviations: per-seed scores are not persisted (pure function of bytes + profile); "first coupled pair" means earliest-coupling, ties by pair index; the trajectory mask stops at the first revisited offset.
 ## Goal
 Add an opt-in `kruskal_count` seed strategy based on Kruskal-count coupling:
 - independent walkers traverse each corpus seed using value-driven jumps;

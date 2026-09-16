@@ -50,7 +50,7 @@ digraph fuzzer_tool {
     subgraph cluster_sched {
         label="1 · Scheduling   —   what to fuzz next";
         color="#bcd0c4"; fillcolor="#f2f8f4"; fontcolor="#33604a";
-        picker [label="services/seed_picker.py  +  core/schedules.py\lweights · Pareto front · crowding · saturation gate\lFAST COE RARE MMOPT LIN QUAD GO AFLGO ENTROPIC KATZ\l",
+        picker [label="services/seed_picker.py  +  core/schedules.py\lweights · Pareto front · crowding · saturation gate\lFAST COE RARE MMOPT LIN QUAD GO AFLGO ENTROPIC KATZ\lKRUSKAL-COUNT (coupling walkers · recombination)\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
         bandit [label="core/schedulers/ (16)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy mcts katz\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
@@ -122,7 +122,7 @@ digraph fuzzer_tool {
 
     // startup feeds
     profiler -> ops [style=dashed, label="dictionary tokens  "];
-    profiler -> picker [style=dashed, label="distance  "];
+    profiler -> picker [style=dashed, label="distance · boundary markers  "];
 
     // within-stage
     bandit -> ops [label="  operator"];
