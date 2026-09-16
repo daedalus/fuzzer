@@ -66,6 +66,7 @@ class TestEloAllEnablesAllSchedulers:
             "mcts",
             "alphabeta",
             "tang",
+            "kruskal_count",
             # mutation scheduling stack (non-Elo features)
             "metropolis",
             "shapley",

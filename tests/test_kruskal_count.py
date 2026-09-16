@@ -314,3 +314,119 @@ class TestState:
     def test_malformed_state_is_ignored_whole(self, bad):
         r = KruskalCountSeedStrategy.from_dict(bad, RandPool(seed=1), NO_PROFILE)
         assert r.stats() == _strategy().stats()
+
+
+class TestSeedPickerWiring:
+    """Elo pool eligibility, handler dispatch, and the non-Elo fallback."""
+
+    def _fuzzer(self, strategy=True, corpus=(FUNNEL_2, ROTATION)):
+        f = SimpleNamespace(
+            corpus=list(corpus),
+            seed_meta={},
+            _use_elo=True,
+            _elo=SimpleNamespace(select_strategy=lambda keys, **_: "seed_kruskal_count"),
+            _seed_strategy=None,
+            _seed_strategy_pool=[],
+            _seed_strategies_used=set(),
+            _stall_recovery_active=False,
+            _rng=RandPool(seed=4),
+            ga=None,
+            qea=None,
+            markov_generate=False,
+            markov_trained=False,
+            _use_bayesian=False,
+            _use_boltzmann=False,
+            _use_ecofuzz=False,
+            _profile=NO_PROFILE,
+        )
+        f._kruskal_count = KruskalCountSeedStrategy(f._rng, NO_PROFILE) if strategy else None
+        return f
+
+    def _picker(self, f):
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        sp = SeedPicker.__new__(SeedPicker)
+        sp.f = f
+        sp._rng = f._rng
+        return sp
+
+    def test_eligible_and_dispatched_under_elo(self):
+        f = self._fuzzer()
+        picked = self._picker(f)._pick_seed_elo()
+        assert "kruskal_count" in f._seed_strategy_pool
+        assert f._seed_strategy == "kruskal_count"
+        # Anchor FUNNEL_2 (ROTATION scores 0) recombined with the only donor.
+        assert picked == bytes([ROTATION[0], ROTATION[1]]) + FUNNEL_2[2:]
+
+    def test_not_eligible_when_disabled_or_empty(self):
+        for f in (self._fuzzer(strategy=False), self._fuzzer(corpus=())):
+            f._use_boltzmann = True  # two arms, so Elo is consulted
+            f._elo = SimpleNamespace(select_strategy=lambda keys, **_: "seed_unhandled")
+            self._picker(f)._pick_seed_elo()
+            assert "kruskal_count" not in f._seed_strategy_pool
+
+    def test_uncoupled_corpus_returns_anchor(self):
+        f = self._fuzzer(corpus=(ROTATION,))
+        assert self._picker(f)._pick_kruskal_count_seed() == ROTATION
+
+    def test_empty_corpus_falls_back_to_format_seed(self, monkeypatch):
+        f = self._fuzzer(corpus=())
+        sp = self._picker(f)
+        monkeypatch.setattr(sp, "_format_aware_seed", lambda: b"fmt")
+        assert sp._pick_kruskal_count_seed() == b"fmt"
+
+    def test_non_elo_fallback_dispatches_before_bayesian(self, monkeypatch):
+        f = self._fuzzer()
+        f._use_elo = False
+        f._use_bayesian = True
+        f._seed_quality = {"x": 1}
+        sp = self._picker(f)
+        monkeypatch.setattr(sp, "_update_temperature", lambda: None)
+        monkeypatch.setattr(sp, "_pick_bayesian_seed", lambda: pytest.fail("bayesian won"))
+        assert sp.pick_seed() == bytes([ROTATION[0], ROTATION[1]]) + FUNNEL_2[2:]
+
+
+class TestFuzzerWiring:
+    def test_registered_as_seed_strategy(self):
+        from fuzzer_tool.services.fuzzer import _SEED_STRATEGY_NAMES
+
+        assert "kruskal_count" in _SEED_STRATEGY_NAMES
+
+    def test_constructor_flag_is_appended_last(self):
+        import inspect
+
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        params = list(inspect.signature(Fuzzer.__init__).parameters)
+        assert params[-1] == "kruskal_count"
+        assert inspect.signature(Fuzzer.__init__).parameters["kruskal_count"].default is False
+
+    def test_cli_passes_flag_to_both_constructions(self):
+        import ast
+        import inspect
+
+        from fuzzer_tool.cli import commands
+        from fuzzer_tool.services import parallel
+
+        def kws(fn, callee):
+            tree = ast.parse(inspect.getsource(fn))
+            calls = [
+                n
+                for n in ast.walk(tree)
+                if isinstance(n, ast.Call) and getattr(n.func, "id", None) == callee
+            ]
+            return [{k.arg for k in c.keywords} for c in calls]
+
+        assert all("kruskal_count" in k for k in kws(commands.cmd_fuzz, "Fuzzer"))
+        assert all("kruskal_count" in k for k in kws(commands.cmd_fuzz, "run_parallel"))
+        assert all("kruskal_count" in k for k in kws(parallel._worker_main, "Fuzzer"))
+        assert "kruskal_count" in commands._HAIL_MARY_FLAGS
+
+    def test_parser_declares_flag(self):
+        import ast
+        import inspect
+
+        from fuzzer_tool.cli import commands
+        from tests.test_regression_cli_fuzzer_kwargs import _fuzz_parser_dests
+
+        assert "kruskal_count" in _fuzz_parser_dests(ast.parse(inspect.getsource(commands)))

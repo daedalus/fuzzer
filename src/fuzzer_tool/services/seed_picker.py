@@ -303,6 +303,8 @@ class SeedPicker:
             available.append("katz")
         if getattr(f, "_tang", None) is not None and f._tang.fitted and f.corpus:
             available.append("tang")
+        if getattr(f, "_kruskal_count", None) is not None and f.corpus:
+            available.append("kruskal_count")
 
         # Expose the eligible pool so the fuzzer records Elo matches only against
         # strategies that were actually selectable (no phantom opponents) and so
@@ -341,6 +343,7 @@ class SeedPicker:
             "alphabeta": lambda: self._pick_alphabeta_seed(),
             "katz": lambda: self._pick_katz_seed(),
             "tang": lambda: self._pick_tang_seed(),
+            "kruskal_count": lambda: self._pick_kruskal_count_seed(),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -447,6 +450,21 @@ class SeedPicker:
                 return seed
         return f.corpus[-1]
 
+    def _pick_kruskal_count_seed(self) -> bytes:
+        """Kruskal-count arm: coupling-weighted anchor, recombined along its trajectory.
+
+        Falls back to the anchor when no walker pair couples, and to the
+        format-aware seed on an empty corpus.
+        """
+        f = self.f
+        strategy = f._kruskal_count
+        if not f.corpus:
+            return self._format_aware_seed()
+
+        anchor = strategy.select(f.corpus)
+        generated = strategy.generate(anchor, f.corpus)
+        return anchor if generated is None else generated
+
     def _pick_aflgo_seed(self) -> bytes | None:
         """Distance-pure seed picker — the Elo-arbitrated 'aflgo' arm.
 
@@ -530,6 +548,8 @@ class SeedPicker:
             return f.qea.pick_seed()
         if f.ga:
             return f.ga.pick_seed()
+        if getattr(f, "_kruskal_count", None) is not None:
+            return self._pick_kruskal_count_seed()
         if f.corpus and getattr(f, "_use_bayesian", False) and f._seed_quality:
             return self._pick_bayesian_seed()
         if f.corpus and f.seed_meta:

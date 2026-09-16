@@ -147,6 +147,7 @@ _SEED_STRATEGY_NAMES = (
     "mcts",
     "alphabeta",
     "tang",
+    "kruskal_count",
 )
 
 
@@ -1065,6 +1066,7 @@ class Fuzzer:
         successive_elim_delta=0.1,
         successive_elim_min_pulls=3,
         successive_elim_reopen=0,
+        kruskal_count=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -1989,6 +1991,11 @@ class Fuzzer:
             self._tang = TangRecommendationScheduler(
                 self._rng, rank=tang_rank, refit_interval=tang_refit_interval
             )
+        self._kruskal_count = None
+        if kruskal_count:
+            from fuzzer_tool.core.schedulers.kruskal_count import KruskalCountSeedStrategy
+
+            self._kruskal_count = KruskalCountSeedStrategy(self._rng, self._profile)
         self._use_ecofuzz = ecofuzz
         self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
         self._metropolis = metropolis
@@ -6526,6 +6533,18 @@ class Fuzzer:
                 rows.append((s, rating, rating - self._elo.initial_mu, count))
         return sorted(rows, key=lambda r: -r[1])
 
+    def _load_kruskal_count(self) -> None:
+        """Restore Kruskal-count counters on resume; malformed payloads start fresh."""
+        from fuzzer_tool.core.schedulers.kruskal_count import KruskalCountSeedStrategy
+
+        data = self._state_store.get("kruskal_count")
+        if self.resume and data is not None:
+            self._kruskal_count = KruskalCountSeedStrategy.from_dict(data, self._rng, self._profile)
+            print(
+                f"[*] Kruskal count: loaded state ({self._kruskal_count.stats()['scored']} scored)"
+            )
+        print("[*] Kruskal-count seed scheduling enabled")
+
     def _selected_schedulers_str(self) -> str:
         """One-line summary of the active scheduling stack (startup banner)."""
         parts = []
@@ -6608,6 +6627,8 @@ class Fuzzer:
             seeds.append("ecofuzz")
         if getattr(self, "_distance", None) is not None:
             seeds.append("aflgo")
+        if getattr(self, "_kruskal_count", None) is not None:
+            seeds.append("kruskal-count")
         if seeds:
             parts.append("seeds=" + "+".join(seeds))
 
@@ -6866,6 +6887,8 @@ class Fuzzer:
             groups["Seed selection"].append("katz")
         if getattr(self, "_tang", None) is not None:
             groups["Seed selection"].append("tang")
+        if getattr(self, "_kruskal_count", None) is not None:
+            groups["Seed selection"].append("kruskal-count")
 
         if self.markov_trained:
             groups["Mutation"].append("markov")
@@ -7246,6 +7269,9 @@ class Fuzzer:
                     f"[*] Alpha-beta MCTS seed scheduling: exploration={self._alphabeta.exploration:.3f}"
                 )
 
+            if self._kruskal_count is not None:
+                self._load_kruskal_count()
+
             # Print WFC mode status
             if self._wfc_enabled:
                 print("[*] WFC: enabled — structural chunk reordering and pixel generation active")
@@ -7605,6 +7631,8 @@ class Fuzzer:
                 self._alphabeta.prune(set(self._lineage.nodes))
             self._state_store.set("alphabeta", self._alphabeta.to_dict())
             print(f"[*] AlphaBeta: saved state ({self._alphabeta.stats()['tracked_nodes']} nodes)")
+        if self._kruskal_count is not None:
+            self._state_store.set("kruskal_count", self._kruskal_count.to_dict())
         if self._fluctuation is not None:
             self._state_store.set("fluctuation", self._fluctuation.snapshot())
             samples = sum(len(v) for v in self._fluctuation._states.values())

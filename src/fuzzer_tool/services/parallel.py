@@ -132,6 +132,7 @@ def _worker_main(
     whittle_passive_decay: float = 0.0,
     whittle_floor: float = 0.05,
     whittle_recompute_batch: int = 25,
+    kruskal_count: bool = False,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -263,6 +264,7 @@ def _worker_main(
         whittle_passive_decay=whittle_passive_decay,
         whittle_floor=whittle_floor,
         whittle_recompute_batch=whittle_recompute_batch,
+        kruskal_count=kruskal_count,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -708,6 +710,7 @@ def run_parallel(
     whittle_passive_decay: float = 0.0,
     whittle_floor: float = 0.05,
     whittle_recompute_batch: int = 25,
+    kruskal_count: bool = False,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -877,6 +880,7 @@ def run_parallel(
         whittle_passive_decay=whittle_passive_decay,
         whittle_floor=whittle_floor,
         whittle_recompute_batch=whittle_recompute_batch,
+        kruskal_count=kruskal_count,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

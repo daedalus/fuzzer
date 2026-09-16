@@ -497,6 +497,7 @@ def cmd_fuzz(args):
             whittle_passive_decay=getattr(args, "whittle_passive_decay", 0.0),
             whittle_floor=getattr(args, "whittle_floor", 0.05),
             whittle_recompute_batch=getattr(args, "whittle_recompute_batch", 25),
+            kruskal_count=getattr(args, "kruskal_count", False),
             successive_elim=getattr(args, "successive_elim", False),
             successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
             successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -586,6 +587,7 @@ def cmd_fuzz(args):
         args.ecofuzz = True
         args.markov_gen = True
         args.tang = True
+        args.kruskal_count = True
         # Mutation-side schedulers/features that are not Elo-arbitrated but are
         # part of the scheduling stack; flip them on so --elo all is the
         # everything-on switch (power schedule fast = classic AFL default)
@@ -746,6 +748,7 @@ def cmd_fuzz(args):
         whittle_passive_decay=getattr(args, "whittle_passive_decay", 0.0),
         whittle_floor=getattr(args, "whittle_floor", 0.05),
         whittle_recompute_batch=getattr(args, "whittle_recompute_batch", 25),
+        kruskal_count=getattr(args, "kruskal_count", False),
         successive_elim=getattr(args, "successive_elim", False),
         successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
         successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -1882,6 +1885,7 @@ _HAIL_MARY_FLAGS = (
     "qea_cooling",
     "boltzmann",
     "tang",
+    "kruskal_count",
     "op_katz",
     "op_tang",
     "ecofuzz",
@@ -3085,6 +3089,14 @@ def main() -> int:
         type=int,
         default=2000,
         help="Executions between Tang low-rank refits (default: 2000).",
+    )
+    fuzz_parser.add_argument(
+        "--kruskal-count",
+        action="store_true",
+        default=False,
+        help="Kruskal-count seed scheduling: adds a 'kruskal_count' Elo seed arm scoring "
+        "seeds by how fast byte-driven walkers couple, then recombining the anchor with "
+        "a donor along the coupled trajectory. OFF by default; not yet A/B validated.",
     )
     fuzz_parser.add_argument(
         "--ecofuzz",
