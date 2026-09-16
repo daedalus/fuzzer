@@ -64,6 +64,7 @@ from fuzzer_tool.core.schedulers import (
     CMAESScheduler,
     ConsolidatedScheduler,
     ContextualLinUCBScheduler,
+    CorralScheduler,
     CUCBScheduler,
     DUCBScheduler,
     EpsilonGreedyScheduler,
@@ -132,6 +133,19 @@ RELIABLE = {
         0.90,
         0.45,
     ),
+    # Floors below the observed minimum over 40 seeds at ROUNDS with the
+    # measured default eta=0.6: share 0.924 (median 0.947), slope max 0.563
+    # (median 0.456). At FIXED_SEED: 0.946 / 0.466.
+    #
+    # Deliberately in neither RECOVERS nor STUCK. On DecayingBest its
+    # best_late tail share over 12 seeds was min 0.006, median 0.777, max
+    # 0.947 -- bimodal, not a property. Either set would be a flaky
+    # assertion, and the honest statement is the one in
+    # core/schedulers/corral.py: the doubling trick raises a starved arm's
+    # learning rate but does not get it drawn, so whether it recovers turns
+    # on whether the mixing floor happens to sample it early enough after
+    # the switch. That fragility is why the scheduler is Elo-only.
+    "Corral": (lambda seed: CorralScheduler(rng=RandPool(seed)), 0.90, 0.65),
 }
 
 
