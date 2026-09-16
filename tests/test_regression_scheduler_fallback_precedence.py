@@ -135,15 +135,16 @@ class _FakeFuzzer:
         "exp4": ("_use_exp4", "_exp4"),
         "successive_elim": ("_use_successive_elim", "_successive_elim"),
         "round_robin": ("_use_round_robin", "_round_robin"),
-        # canary, op_katz, op_tang, gradient are deliberately absent from
-        # _FALLBACK_PRECEDENCE (see operators.py) -- they still need
-        # entries here so operator_strategy_pool()'s attribute read
-        # doesn't crash, but `enable(...)` for them is never exercised by
-        # the precedence tests.
+        # canary, op_katz, op_tang, gradient, whittle are deliberately
+        # absent from _FALLBACK_PRECEDENCE (see operators.py) -- they
+        # still need entries here so operator_strategy_pool()'s attribute
+        # read doesn't crash, but `enable(...)` for them is never
+        # exercised by the precedence tests.
         "canary": ("_use_canary", "_canary"),
         "op_katz": ("_use_op_katz", "_op_katz"),
         "op_tang": ("_use_op_tang", "_op_tang"),
         "gradient": ("_use_gradient", "_gradient"),
+        "whittle": ("_use_whittle", "_whittle"),
     }
 
     def __init__(self):

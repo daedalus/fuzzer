@@ -53,6 +53,7 @@ BALLOT_SCHEDULERS = (
     "successive_elim",
     "swucb",
     "tang",
+    "whittle",
 )
 
 

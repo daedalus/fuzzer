@@ -25,8 +25,10 @@ from fuzzer_tool.core.schedulers.replicator import ReplicatorScheduler
 from fuzzer_tool.core.schedulers.round_robin import RoundRobinScheduler
 from fuzzer_tool.core.schedulers.successive_elim import SuccessiveEliminationScheduler
 from fuzzer_tool.core.schedulers.swucb import SWUCBScheduler
+from fuzzer_tool.core.schedulers.whittle import WhittleIndexScheduler
 
 __all__ = [
+    "WhittleIndexScheduler",
     "FPLScheduler",
     "CMAESScheduler",
     "ConsolidatedScheduler",

@@ -488,6 +488,12 @@ def cmd_fuzz(args):
             gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
             gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
             gradient_floor=getattr(args, "gradient_floor", 0.05),
+            whittle=getattr(args, "whittle", False),
+            whittle_n_states=getattr(args, "whittle_n_states", 5),
+            whittle_gamma=getattr(args, "whittle_gamma", 0.95),
+            whittle_passive_decay=getattr(args, "whittle_passive_decay", 0.0),
+            whittle_floor=getattr(args, "whittle_floor", 0.05),
+            whittle_recompute_batch=getattr(args, "whittle_recompute_batch", 25),
             successive_elim=getattr(args, "successive_elim", False),
             successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
             successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -556,6 +562,7 @@ def cmd_fuzz(args):
         args.cusum_ucb = True
         args.fpl = True
         args.gradient = True
+        args.whittle = True
         args.successive_elim = True
         args.canary_scheduler = True
         args.consolidated = True
@@ -725,6 +732,12 @@ def cmd_fuzz(args):
         gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
         gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
         gradient_floor=getattr(args, "gradient_floor", 0.05),
+        whittle=getattr(args, "whittle", False),
+        whittle_n_states=getattr(args, "whittle_n_states", 5),
+        whittle_gamma=getattr(args, "whittle_gamma", 0.95),
+        whittle_passive_decay=getattr(args, "whittle_passive_decay", 0.0),
+        whittle_floor=getattr(args, "whittle_floor", 0.05),
+        whittle_recompute_batch=getattr(args, "whittle_recompute_batch", 25),
         successive_elim=getattr(args, "successive_elim", False),
         successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
         successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -1828,6 +1841,7 @@ _HAIL_MARY_FLAGS = (
     "cusum_ucb",
     "fpl",
     "gradient",
+    "whittle",
     "successive_elim",
     "canary_scheduler",
     "consolidated",
@@ -2459,6 +2473,61 @@ def main() -> int:
             "softmax; without it the policy can collapse to zero residual "
             "exploration and be unable to recover from a regime switch "
             "(default: 0.05)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--whittle",
+        action="store_true",
+        help=(
+            "Enable Whittle-index restless-bandit scheduler for operators "
+            "(experimental, off by default, Elo-only -- see "
+            "core/schedulers/whittle.py for the restless-vs-rested caveat "
+            "before using this on a real campaign)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--whittle-n-states",
+        type=int,
+        default=5,
+        help="Discrete freshness levels per operator arm (default: 5)",
+    )
+    fuzz_parser.add_argument(
+        "--whittle-gamma",
+        type=float,
+        default=0.95,
+        help="Discount factor for the subsidized-MDP value iteration (default: 0.95)",
+    )
+    fuzz_parser.add_argument(
+        "--whittle-passive-decay",
+        type=float,
+        default=0.0,
+        help=(
+            "Probability an idle operator drifts one freshness state toward "
+            "fatigue per round it is not played -- the restless assumption. "
+            "0.0 (default) means rested: only an arm's own pulls move its "
+            "state, until the ablation-CSV operator column exists to "
+            "measure the real answer"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--whittle-floor",
+        type=float,
+        default=0.05,
+        help=(
+            "Uniform-random selection probability mixed in independent of "
+            "the index values, guarding against an arm getting stuck in a "
+            "fatigued state from early noise and never being revisited "
+            "(default: 0.05)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--whittle-recompute-batch",
+        type=int,
+        default=25,
+        help=(
+            "Recompute an arm's Whittle index table only every this many "
+            "record() calls against it; one recompute measures ~2.55 ms "
+            "(default: 25, same batching idiom as --op-tang-refit-interval)"
         ),
     )
     fuzz_parser.add_argument(

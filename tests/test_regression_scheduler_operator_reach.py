@@ -86,6 +86,7 @@ def _all_operator_schedulers():
     exp4 = S.Exp4Scheduler()
     gradient = S.GradientBanditScheduler()
     successive_elim = S.SuccessiveEliminationScheduler()
+    whittle = S.WhittleIndexScheduler()
 
     def _ctx(_op):
         return [random.random() for _ in range(CONTEXT_DIM)]
@@ -145,6 +146,12 @@ def _all_operator_schedulers():
             successive_elim,
             successive_elim.select_op,
             successive_elim.record,
+        ),
+        (
+            "WhittleIndexScheduler",
+            whittle,
+            whittle.select_op,
+            whittle.record,
         ),
     ]
 

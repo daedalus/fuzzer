@@ -463,10 +463,10 @@ _FALLBACK_PRECEDENCE = (
     "fpl",
     "successive_elim",
     "round_robin",
-    # canary, op_katz, op_tang, gradient are deliberately absent here:
-    # op_katz/op_tang/gradient are unproven exploratory arms (see their
-    # module docstrings) that should only ever be reached via Elo
-    # explicitly choosing them, not by being the top-precedence live
+    # canary, op_katz, op_tang, gradient, whittle are deliberately absent
+    # here: op_katz/op_tang/gradient/whittle are unproven exploratory arms
+    # (see their module docstrings) that should only ever be reached via
+    # Elo explicitly choosing them, not by being the top-precedence live
     # selector whenever someone enables the flag without --elo -- the same
     # reasoning canary already documents. gradient was added to this list
     # by an earlier commit and moved back out here: on this project's own
@@ -474,7 +474,10 @@ _FALLBACK_PRECEDENCE = (
     # (see core/schedulers/gradient.py) and one seed in a 40-seed
     # stationary-only sweep collapsed to near-zero tail share at its
     # original default alpha -- not the profile of an arm that should be
-    # any campaign's silent default without --elo.
+    # any campaign's silent default without --elo. whittle's restless
+    # assumption (passive_decay) is an unmeasured guess pending the
+    # ablation-CSV operator column (see core/schedulers/whittle.py) and it
+    # has not been run against the convergence harness at all yet.
 )
 
 
@@ -550,6 +553,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("fpl")
     if f._use_gradient and f._gradient:
         available.append("gradient")
+    if f._use_whittle and f._whittle:
+        available.append("whittle")
     if f._use_successive_elim and f._successive_elim:
         available.append("successive_elim")
     if f._use_invasion and f.mc and f.mc_bandit:
@@ -4310,6 +4315,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "gradient" and f._gradient:
             op = f._gradient.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "whittle" and f._whittle:
+            op = f._whittle.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "successive_elim" and f._successive_elim:
             op = f._successive_elim.select_op(ops)

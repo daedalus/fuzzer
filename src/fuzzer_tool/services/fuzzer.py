@@ -73,6 +73,7 @@ from fuzzer_tool.core.schedulers import (
     RoundRobinScheduler,
     SuccessiveEliminationScheduler,
     SWUCBScheduler,
+    WhittleIndexScheduler,
 )
 from fuzzer_tool.core.schedules import (
     ENTROPY_RANDOM_PCT,
@@ -928,6 +929,12 @@ class Fuzzer:
         gradient_temp_decay=0.9995,
         gradient_min_temperature=0.05,
         gradient_floor=0.05,
+        whittle=False,
+        whittle_n_states=5,
+        whittle_gamma=0.95,
+        whittle_passive_decay=0.0,
+        whittle_floor=0.05,
+        whittle_recompute_batch=25,
         op_katz=False,
         op_katz_alpha_fraction=0.85,
         op_tang=False,
@@ -2133,6 +2140,34 @@ class Fuzzer:
                 gradient_floor,
             )
 
+        # Whittle index (restless-bandit index policy). Off by default and
+        # Elo-only (see core/schedulers/whittle.py's module docstring): the
+        # passive_decay restless-drift assumption is an unmeasured guess
+        # pending the still-missing operator column in the ablation CSV
+        # (docs/handover/handover_non_ucb_schedulers_2026-09-13.md §6), and
+        # this has not been run against the convergence harness yet --
+        # same discipline as op_katz/op_tang/gradient above.
+        self._use_whittle = whittle
+        self._whittle = None
+        if whittle:
+            self._whittle = WhittleIndexScheduler(
+                n_states=whittle_n_states,
+                gamma=whittle_gamma,
+                passive_decay=whittle_passive_decay,
+                floor=whittle_floor,
+                recompute_batch=whittle_recompute_batch,
+                rng=self._rng,
+            )
+            log.info(
+                "Whittle index scheduler enabled (n_states=%d, gamma=%.2f, "
+                "passive_decay=%.3f, floor=%.3f, recompute_batch=%d)",
+                whittle_n_states,
+                whittle_gamma,
+                whittle_passive_decay,
+                whittle_floor,
+                whittle_recompute_batch,
+            )
+
         # Successive elimination / racing: prune arms whose UCB falls
         # below the best LCB. Deterministic given the observation stream.
         self._use_successive_elim = successive_elim
@@ -2435,6 +2470,7 @@ class Fuzzer:
             or self._cusum_ucb
             or self._fpl
             or self._gradient
+            or self._whittle
             or self._successive_elim
             or self._canary
             or self._use_shapley
@@ -2640,6 +2676,8 @@ class Fuzzer:
             _register_arms(self._fpl)
         if self._gradient:
             _register_arms(self._gradient)
+        if self._whittle:
+            _register_arms(self._whittle)
         if self._successive_elim:
             _register_arms(self._successive_elim)
         if self._consolidated:
@@ -5046,6 +5084,7 @@ class Fuzzer:
             self._cusum_ucb,
             self._fpl,
             self._gradient,
+            self._whittle,
             self._successive_elim,
             self._consolidated,
             self._moss,
@@ -6487,6 +6526,8 @@ class Fuzzer:
             ops.append("fpl")
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/gradient.py.
+        # whittle is deliberately absent from this banner too, same
+        # reason, see core/schedulers/whittle.py.
         if getattr(self, "_use_successive_elim", False) and self._successive_elim:
             ops.append("successive_elim")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
@@ -6721,6 +6762,8 @@ class Fuzzer:
             ops.append("fpl")
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/gradient.py.
+        # whittle is deliberately absent from this banner too, same
+        # reason, see core/schedulers/whittle.py.
         if getattr(self, "_use_successive_elim", False) and self._successive_elim:
             ops.append("successive-elim")
         if getattr(self, "_use_contextual", False):
