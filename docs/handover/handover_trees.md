@@ -489,3 +489,108 @@ same missing vendored FFmpeg checkout noted in §6).
 - Duchon, Flajolet, Louchard, Schaeffer — Boltzmann samplers for
   combinatorial structures, motivating §7.4.
 - Dvoretzky and Motzkin — cycle lemma, motivating §7.5.
+- Tarjan, "Applications of path compression on balanced trees" (JACM '79)
+  — offline LCA via union-find, motivating §9.
+
+## 9. Other tree structures in the codebase
+
+§1-§7 are all about the Dyck-path parse trees `tree_mutator.py` and
+`grammar.py`'s `TreeNode` build from delimited input. That is not the
+only tree in this codebase. `core/lineage.py`'s `LineageTree` is a
+parent-pointer forest over corpus seeds (each seed's mutation ancestry),
+and it already exploits several tree properties of its own: LCA-based
+diversity scoring, Horton-Strahler branching-complexity numbers, and a
+PageRank-style damped walk up the forest for per-branch mutation credit
+(see that file's module docstring for the existing list). This section
+covers one further property found and implemented afterward.
+
+**Finding: `lca_distance` is O(depth) per call, and depth is not
+bounded the way it is in §1-§7's parse trees.** The Dyck-path trees have
+a Catalan-uniform shape, so a random node's depth concentrates around
+Θ(√n) (Brownian-excursion scaling — this is what the empirical check in
+this section's investigation confirmed before finding the lineage
+forest was the more interesting target: measuring `avg_depth/√n` on a
+proper uniform-random Dyck path via the cycle-lemma generator in §7.5
+gives a roughly flat ratio across n from 10 to 12800, not a growing
+one). A mutation lineage forest has no such rebalancing force: a
+mutate-and-keep chain with occasional branching grows depth roughly
+linearly with node count. `seed_picker.py`'s diversity term
+(`_compute_weights`'s "LCA-based lineage diversity multipliers") calls
+`lca_distance` for every seed against a sampled peer pool of up to 64
+every pass — O(n · 64 · depth) total, which is O(n²) whenever depth is
+Θ(n), the realistic case.
+
+Benchmarked on a synthetic mostly-chain lineage (85% linear growth, 15%
+branch-from-recent-50 — chosen to mimic real fuzzing lineage shape, not
+a Catalan-uniform tree) with the same per-seed ×64-sample query shape
+`_compute_weights` uses: at n=500/2000/8000, the naive per-pair loop
+took ~0.10s/1.35s/21.6s; a single batched call took ~0.06s/0.25s/1.15s
+— 1.9x/5.4x/18.8x, and the gap widens with n exactly as the O(n²) vs
+O(n) complexity difference predicts.
+
+**Status: implemented.** Added `LineageTree.batch_lca_distances(pairs)`
+to `lineage.py`: Tarjan's offline LCA algorithm (union-find over an
+iterative post-order walk of the forest, O((n+q)·α(n)) for q pairs, no
+recursion — matching this module's existing convention for deep
+lineages). Two correctness traps came up building this and are worth
+recording since they're easy to reintroduce:
+
+1. **Union-before-query-check.** The classic algorithm resolves a
+   finishing node's own pending queries *before* that node gets unioned
+   into its parent's disjoint-set class. Doing the union first (my
+   first draft's bug) makes `find()` on any of that node's own
+   descendants resolve into the parent's class, reporting the *parent*
+   as the LCA for a pair that's really (node, one of node's own
+   descendants) — a consistent one-level-too-shallow answer, showing up
+   as `lca_distance` being off by exactly +2 (the formula subtracts
+   `2 * depth(lca)`, so one level of over-shallow LCA is +2 to every
+   affected pair). Caught by `test_distance_sum_matches_naive_loop` and
+   the direct per-pair cross-check against `lca_distance`.
+2. **`finished` must be scoped per tree, not global to the forest.**
+   The forest has multiple roots (the lineage is a forest, not a single
+   tree — `LineageTree.roots()` can return several keys). Running the
+   union-find bookkeeping with one `finished` set shared across every
+   root's traversal makes a node from an *earlier, already-completed*
+   tree look "already resolved" when a *later* tree's node queries
+   against it, producing a bogus shared LCA (often the wrong root, or
+   depth-0 nonsense) for two seeds that aren't even in the same tree.
+   Fixed by making `finished` local to each `run_from()` call (one per
+   root/component) while `uf_parent` / `ancestor` / `lca_key` stay
+   global across the whole batch (safe, since cross-tree `find()` calls
+   never happen once `finished` is scoped correctly). Caught by
+   `test_disconnected_roots_in_same_forest`.
+
+Both bugs passed every test written *before* they were found (the
+single-tree, single-root benchmarks) and only surfaced once the test
+suite included a multi-root forest and a batch-vs-naive sum comparison
+at larger n — the general lesson being that an offline batch algorithm
+adapted from single-tree pseudocode needs a forest-shaped test case and
+a scale large enough to make a systematic (not random) error visible in
+aggregate, not just a handful of hand-picked pairs.
+
+Unknown keys, `a == b` self-pairs, and a corrupted parent-pointer cycle
+(possible after `rebuild_from_meta` on untrusted metadata) are all
+handled the same way `lca()` / `lca_distance()` already do — resolve to
+-1 / 0 for the affected pair without hanging or poisoning the rest of
+the batch — verified by
+`TestBatchLcaDistancesEdgeCases::test_does_not_hang_on_corrupted_mutual_parent_cycle`
+and `::test_isolated_self_parent_node`.
+
+Wired into `seed_picker.py`'s diversity block: one `batch_lca_distances`
+call per pass building all `(seed, peer)` pairs up front, replacing the
+per-pair `lca_distance` loop. `TestBatchLcaMatchesSeedPickerDiversityPattern`
+reproduces the exact peer-pool-sampling access pattern that block uses
+and checks the per-seed diversity multipliers come out bit-identical
+between the old per-pair path and the new batched one — the wiring
+change should never alter seed scoring, only its cost.
+
+18 new tests in `tests/test_lineage_batch_lca.py`. Relevant slice
+(`lineage`, `seed_picker`, `corpus_minimize`): 249 passed, 5 skipped, no
+new failures.
+
+Not done: `seed_picker.py` still calls `lca_distance` nowhere else, and
+no other caller of `LineageTree` was found to have the same repeated-
+pairwise-query pattern (`grep`-checked at implementation time — see §8
+for the search). If a future caller adds another batch of pairwise LCA
+queries, prefer `batch_lca_distances` over a new per-pair loop from the
+start rather than needing this same finding twice.
