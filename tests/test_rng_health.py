@@ -67,6 +67,12 @@ def test_low_entropy_stream_flagged_by_byte_chisq():
     assert result.pvalues["byte_chisq"] < 0.01
 
 
+def test_low_entropy_stream_flagged_by_entropy_test():
+    result = quick_health_check(_LowEntropyRng())
+    assert not result.ok
+    assert result.pvalues["entropy"] < 0.01
+
+
 def test_sample_size_is_small_and_configurable():
     pool = RandPool(seed=1)
     result = quick_health_check(pool, n_bytes=512)
@@ -88,9 +94,11 @@ def test_never_raises_on_broken_rng():
 def test_summary_format_ok_and_suspect():
     ok_result = quick_health_check(RandPool(seed=7))
     assert ok_result.summary().startswith("OK")
+    assert "entropy=" in ok_result.summary()
 
     bad_result = quick_health_check(_ConstRng())
     assert bad_result.summary().startswith("SUSPECT")
+    assert "entropy=" in bad_result.summary()
 
 
 def test_reports_rng_health_prints_banner_line(capsys):

@@ -679,3 +679,88 @@ class TestRandintList:
         p3 = RandPool(seed=99)
         assert p1.randrange_list(1000, 100) == p2.randrange_list(1000, 100)
         assert p1.randrange_list(1000, 100) != p3.randrange_list(1000, 100)
+
+
+# ── RandPool exhaustion edge cases ────────────────────────────────────────
+
+
+class TestRandPoolExhaustion:
+    def test_exhaustion_across_many_refills(self):
+        """RandPool handles far more draws than one pool across many refills."""
+        p = RandPool(seed=42)
+        count = 100_000
+        values = p.randint_list(0, 255, count)
+        assert len(values) == count
+        assert all(0 <= v <= 255 for v in values)
+        assert p._idx == count % _POOL_ENTRIES
+
+    def test_exhaustion_with_entropy_gate(self):
+        """RandPool(min_entropy=0.0) stays healthy across many refills."""
+        p = RandPool(seed=42, min_entropy=0.0)
+        count = 100_000
+        values = p.randint_list(0, 255, count)
+        assert len(values) == count
+        assert all(0 <= v <= 255 for v in values)
+        h = p.pool_entropy()
+        assert h is not None
+        assert 0.0 <= h <= 8.0
+
+    def test_exhaustion_randbytes_across_refills(self):
+        """randbytes() drains and refills correctly across many pools."""
+        p = RandPool(seed=42)
+        count = 100_000
+        data = p.randbytes(count)
+        assert len(data) == count
+        assert p._idx == count % _POOL_ENTRIES
+
+    def test_pool_entropy_before_refill(self):
+        """pool_entropy() returns None until the first refill occurs."""
+        p = RandPool()
+        assert p.pool_entropy() is None
+
+    def test_pool_entropy_after_refill(self):
+        """pool_entropy() returns a float after a refill triggers."""
+        p = RandPool(seed=42)
+        p.randint(0, 255)  # triggers first refill
+        h = p.pool_entropy()
+        assert h is not None
+        assert 0.0 <= h <= 8.0
+
+    def test_measure_entropy_all_zeros(self):
+        """measure_entropy() on all-zeros data returns entropy ~0."""
+        p = RandPool()
+        entropy = p.measure_entropy(b"\x00" * 4096)
+        assert entropy == 0.0
+
+    def test_measure_entropy_full_range(self):
+        """measure_entropy() on random data returns a value in [0, 8]."""
+        p = RandPool(seed=42)
+        p.randint(0, 255)  # forces first refill
+        entropy = p.measure_entropy()
+        assert 0.0 <= entropy <= 8.0
+
+    def test_measure_entropy_before_refill_raises(self):
+        """measure_entropy(None) raises RuntimeError before any refill."""
+        p = RandPool()
+        with pytest.raises(RuntimeError, match="has not been refilled"):
+            p.measure_entropy()
+
+    def test_min_entropy_gate_disabled(self):
+        """Default RandPool with min_entropy=None never raises on refill."""
+        p = RandPool(seed=42)
+        for _ in range(100):
+            p.randint(0, 255)  # many draws; may trigger reseeds
+        # Should not have raised RuntimeError from entropy gate
+
+    def test_min_entropy_very_low(self):
+        """RandPool(min_entropy=0.0) — threshold too low to ever trigger raise."""
+        p = RandPool(seed=42, min_entropy=0.0)
+        for _ in range(100):
+            p.randint(0, 255)  # many draws
+        # Should have completed without RuntimeError
+
+    def test_min_entropy_impossible_raises(self):
+        """RandPool(min_entropy=100.0) raises RuntimeError after retries."""
+        p = RandPool(seed=42, min_entropy=100.0)
+        with pytest.raises(RuntimeError, match="entropy starvation"):
+            p.randint(0, 255)  # triggers first refill → gate fails → retry 3× → raise

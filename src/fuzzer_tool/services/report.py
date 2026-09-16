@@ -226,6 +226,19 @@ def _run_summary(f) -> str:
             f"  In-process:      {f._inprocess_runner is not None}",
         ]
     )
+
+    # Add RNG health check to final report
+    if hasattr(f, "_rng") and f._rng is not None:
+        from fuzzer_tool.core.rng_health import quick_health_check
+
+        try:
+            result = quick_health_check(f._rng)
+            lines.append(f"  RNG health:      {result.summary()}")
+        except Exception:
+            lines.append("  RNG health:      ERROR (health check failed)")
+    else:
+        lines.append("  RNG health:      Not checked")
+
     if f._cmplog is not None:
         n_tok = len(f._cmplog.tokens)
         n_prs = len(f._cmplog.pairs)

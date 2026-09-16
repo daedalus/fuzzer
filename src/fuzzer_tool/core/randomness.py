@@ -61,6 +61,8 @@ __all__ = [
     "invariant_mask",
     "permutation_test",
     "repeat_test",
+    "shannon_entropy",
+    "shannon_entropy_test",
 ]
 
 _SQRT2 = math.sqrt(2.0)
@@ -467,7 +469,7 @@ def serial_test(data: bytes, m: int = 8) -> float:
     return chisq_sf(d1, 1 << (m - 1))
 
 
-def lmn_test(data: bytes, l: int = 4, m: int = 4, n: int = 4) -> float:
+def lmn_test(data: bytes, l: int = 4, m: int = 4, n: int = 4) -> float:  # noqa: E741
     """rgb_lmn: chi-square on gapped l-bit/skip-m/n-bit sliding windows.
 
     dieharder describes this as a "supertest" that subsumes bitdist (m=0)
@@ -866,10 +868,27 @@ class RegionProfile:
         }.get(self.label, 1.0)
 
 
-def _shannon_bits_per_byte(window: bytes) -> float:
-    c = np.bincount(np.frombuffer(window, dtype=np.uint8), minlength=256).astype(np.float64)
-    c = c[c > 0] / len(window)
-    return float(-np.sum(c * np.log2(c)))
+def shannon_entropy(data: bytes) -> float:
+    """Shannon entropy in bits per byte of *data*."""
+    counts = np.bincount(np.frombuffer(data, dtype=np.uint8), minlength=256).astype(np.float64)
+    counts = counts[counts > 0] / len(data)
+    return float(-np.sum(counts * np.log2(counts)))
+
+
+def shannon_entropy_test(data: bytes) -> float:
+    """Shannon entropy test for uniformity.
+
+    Converts Shannon entropy to a chi-squared statistic using the
+    relationship chi2 ≈ 2*n*ln(2)*(log2(N) - H), where N=256 is the
+    alphabet size. Under the null of uniform byte distribution, the
+    chi-squared statistic follows a chi^2(255) distribution.
+    """
+    n = len(data)
+    if n < 256:
+        return 1.0
+    h = shannon_entropy(data)
+    chi2 = 2.0 * n * math.log(2.0) * (8.0 - h)
+    return chisq_sf(chi2, 255)
 
 
 def _classify(pv: dict, window: bytes) -> tuple[str, float]:
@@ -883,7 +902,7 @@ def _classify(pv: dict, window: bytes) -> tuple[str, float]:
     core = [pv["monobit"], pv["runs"], pv["byte_chisq"], pv["serial"], pv["rank"]]
     n_reject = sum(1 for p in core if p < alpha)
 
-    h = _shannon_bits_per_byte(window)
+    h = shannon_entropy(window)
     uniq = len(set(window))
     printable = float(np.mean([32 <= b < 127 or b in (9, 10, 13) for b in window]))
     lag_min = min(pv["lag"].values()) if pv["lag"] else 1.0

@@ -618,6 +618,15 @@ class TestReportExecLine:
         assert "Exec line:" in report
         assert "Invocation:" not in report
 
+    def test_run_summary_includes_rng_health(self):
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        f = _make_mock_fuzzer()
+        f._rng = RandPool(seed=42)
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "RNG health:" in report
+
 
 class TestReportConfiguration:
     def test_configuration_section_present(self):

@@ -6,21 +6,23 @@ setup before a campaign burns hours on it: a seed wired to a constant, a
 bit-generator that silently degenerates, a pool-refill bug that makes the
 stream sticky, etc.
 
-Rather than reimplementing statistical tests, this reuses three of the
-NIST/dieharder-derived checks already in ``core/randomness.py`` (calibrated
-there against ``os.urandom`` -- see ``test_randomness.py``):
+Rather than reimplementing statistical tests, this reuses the checks already in
+``core/randomness.py`` (calibrated there against ``os.urandom`` -- see
+``test_randomness.py``):
 
-  * ``monobit``     -- #1-bits vs #0-bits imbalance
-  * ``byte_chisq``  -- byte-histogram uniformity
-  * ``runs_test``   -- bit oscillation rate (catches RLE/padding-like output)
+  * ``monobit``       -- #1-bits vs #0-bits imbalance
+  * ``byte_chisq``    -- byte-histogram uniformity
+  * ``runs_test``     -- bit oscillation rate (catches RLE/padding-like output)
+  * ``shannon_entropy`` -- bits/byte uniformity (catches low-entropy streams
+    that pass the above by accident)
 
 plus ``repeat_test`` on the raw draws, which is the one failure mode the
-three bit/byte-level tests structurally can't see: a stream that repeats
-its previous value more often than chance (e.g. a pool-refill boundary bug
-or an EMA-style feedback loop feeding the RNG), since marginal byte
-frequencies stay uniform under stickiness.
+bit/byte-level tests structurally can't see: a stream that repeats its
+previous value more often than chance (e.g. a pool-refill boundary bug or
+an EMA-style feedback loop feeding the RNG), since marginal byte frequencies
+stay uniform under stickiness.
 
-The four p-values are combined with ``fishers_method``. This never raises:
+The five p-values are combined with ``fishers_method``. This never raises:
 a suspect RNG is a warning, not a reason to abort a run that was otherwise
 ready to go.
 """
@@ -29,7 +31,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from fuzzer_tool.core.randomness import byte_chisq, fishers_method, monobit, repeat_test, runs_test
+from fuzzer_tool.core.randomness import (
+    byte_chisq,
+    fishers_method,
+    monobit,
+    repeat_test,
+    runs_test,
+    shannon_entropy_test,
+)
 
 _DEFAULT_N_BYTES = 4096
 _P_THRESHOLD = 0.01  # standard NIST SP 800-22 significance level
@@ -62,9 +71,10 @@ def quick_health_check(rng, n_bytes: int = _DEFAULT_N_BYTES) -> RngHealthResult:
 
     Draws ``n_bytes`` bytes (default 4096 -- one ``RandPool`` refill's
     worth, negligible next to a fuzzing campaign) and runs monobit,
-    byte_chisq, runs_test and repeat_test, then combines the four p-values
-    with Fisher's method. Also flags an outright-constant stream, which a
-    single small sample could in principle slip past the statistical tests.
+    byte_chisq, runs_test, shannon_entropy and repeat_test, then combines
+    the five p-values with Fisher's method. Also flags an outright-constant
+    stream, which a single small sample could in principle slip past the
+    statistical tests.
 
     *rng* only needs a ``randint_list(a, b, count)`` method -- the public
     ``RandPool`` API -- so this does not reach into pool internals and
@@ -82,6 +92,7 @@ def quick_health_check(rng, n_bytes: int = _DEFAULT_N_BYTES) -> RngHealthResult:
         "monobit": monobit(data),
         "byte_chisq": byte_chisq(data),
         "runs": runs_test(data),
+        "entropy": shannon_entropy_test(data),
         "repeat": repeat_test(values, alphabet=256),
     }
     combined_p = fishers_method(list(pvalues.values()))

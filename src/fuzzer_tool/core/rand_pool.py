@@ -44,6 +44,13 @@ def rand_floyd_enabled() -> bool:
     return _RAND_FLOYD
 
 
+def _shannon_entropy(data: bytes) -> float:
+    """Compute Shannon entropy in bits/byte from a byte string."""
+    counts = np.bincount(np.frombuffer(data, dtype=np.uint8), minlength=256).astype(np.float64)
+    c = counts[counts > 0] / len(data)
+    return float(-np.sum(c * np.log2(c)))
+
+
 class RandPool:
     """Pre-fetched pool of random integers (numpy-backed).
 
@@ -55,9 +62,18 @@ class RandPool:
         pick = pool.choice(seq)            # like random.choice(seq)
     """
 
-    __slots__ = ("_pool", "_idx", "_m256", "_pool_l", "_m256_l", "_rng")
+    __slots__ = (
+        "_pool",
+        "_idx",
+        "_m256",
+        "_pool_l",
+        "_m256_l",
+        "_rng",
+        "_last_entropy",
+        "_min_entropy",
+    )
 
-    def __init__(self, seed=None) -> None:
+    def __init__(self, seed=None, min_entropy: float | None = None) -> None:
         self._rng = np.random.default_rng(seed)
         self._pool: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint32)
         self._m256: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint8)  # pre-computed % 256
@@ -72,10 +88,27 @@ class RandPool:
         self._pool_l: list[int] = []
         self._m256_l: list[int] = []
         self._idx = _POOL_ENTRIES
+        self._min_entropy = min_entropy
+        self._last_entropy: float | None = None
 
-    def _refill(self) -> None:
+    def _generate_pool(self) -> None:
+        """Fill ``_pool`` and ``_m256`` from the current generator."""
         self._pool[:] = self._rng.integers(0, 2**32, size=_POOL_ENTRIES, dtype=np.uint32)
         np.mod(self._pool, 256, out=self._m256)
+        self._last_entropy = _shannon_entropy(self._m256.tobytes())
+
+    def _refill(self) -> None:
+        self._generate_pool()
+        if self._min_entropy is not None and self._last_entropy < self._min_entropy:
+            for _ in range(3):
+                self.reseed(None)
+                self._generate_pool()
+                if self._last_entropy >= self._min_entropy:
+                    break
+            else:
+                raise RuntimeError(
+                    f"RandPool entropy starvation: {self._last_entropy:.2f} < {self._min_entropy:.2f}"
+                )
         self._pool_l = self._pool.tolist()
         self._m256_l = self._m256.tolist()
         self._idx = 0
@@ -104,6 +137,21 @@ class RandPool:
         """
         self._rng = np.random.default_rng(seed)
         self._idx = _POOL_ENTRIES
+
+    def pool_entropy(self) -> float | None:
+        """Return the Shannon entropy (bits/byte) of the most recent refill.
+
+        Returns ``None`` until the first refill has completed.
+        """
+        return self._last_entropy
+
+    def measure_entropy(self, data: bytes | None = None) -> float:
+        """Measure Shannon entropy (bits/byte) of bytes or the current pool."""
+        if data is None:
+            if self._last_entropy is None:
+                raise RuntimeError("RandPool has not been refilled")
+            data = self._m256.tobytes()
+        return _shannon_entropy(data)
 
     def randrange_list(self, n: int, count: int) -> list[int]:
         """Return *count* random integers in [0, *n*).  Vectorized.
