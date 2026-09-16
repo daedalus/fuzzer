@@ -27,6 +27,11 @@ from __future__ import annotations
 # schedulers deep. test_regression_operator_env_covers_select_op parses the
 # ballot out of `select_op` and fails by name when this list falls behind.
 BALLOT_SCHEDULERS = (
+    # bo_gp_ucb was added to operator_strategy_pool() without reaching this
+    # list, which is the exact drift this module's tripwire test exists to
+    # catch: every parametrised ballot case died on AttributeError at
+    # `f._use_bo_gp_ucb` before reaching its own assertion.
+    "bo_gp_ucb",
     "c2ucb",
     "canary",
     "cmaes",

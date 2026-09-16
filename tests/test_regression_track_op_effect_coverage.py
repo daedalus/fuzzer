@@ -48,6 +48,11 @@ _KWARGS = {
     "cucb": {"cucb": True},
     "cusum_ucb": {"cusum_ucb": True},
     "c2ucb": {"c2ucb": True},
+    # bo_gp_ucb is fully wired in services/fuzzer.py (ballot name,
+    # _track_op_effect, _register_arms, record fan-out, CLI) but never
+    # reached this map, so the test that exists to name exactly that
+    # omission was itself failing on a KeyError.
+    "bo_gp_ucb": {"bo_gp_ucb": True},
     "fpl": {"fpl": True},
     "invasion": {"invasion": True, "mc_bandit": True},
     "canary": {"canary_scheduler": True},
