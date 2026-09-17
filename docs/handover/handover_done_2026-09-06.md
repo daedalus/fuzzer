@@ -1349,7 +1349,7 @@ re-propose it without a C extension.
 | Transpose (for a rare late edge, which seed reaches it) | Degenerate: `\|\|D_i\|\|` gives *exactly* degree's precision (0.067/0.067, 0.516/0.516) |
 | Operator x edge matrix | Cannot be built from state — `corpus['op_edges']` is a scalar credit float per operator (119 entries), not a matrix. Would need new instrumentation |
 | Degree-normalized label (to test the degree confound) | Degree still wins (+0.338, +0.498); frontier/owners flips sign across datasets |
-| Lemma 3.1 Fenwick/BST sampler | §8 — loses to `accumulate`+`bisect` in CPython |
+| Lemma 3.1 Fenwick/BST sampler | §8 — loses to `accumulate`+`bisect` in CPython. Re-proposed by `handover_huffman_seed_scheduler_2026-09-16.md` and re-measured 2026-09-17 (see its Follow-up): still loses, and a reweight moves every weight (age term), so there are no point updates to exploit |
 
 ---
 
