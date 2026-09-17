@@ -279,6 +279,41 @@ largest connected component, which for a mostly-disjoint wall is
 exponentially cheaper than searching all of it — a genuine win, not just a
 correctness fix, once the wall has more than a handful of conditions.
 
+**Status: implemented (2026-09-13, same day).** `_connected_components_by_offset`
+added to `core/smt_solver.py` (module-level, reuses `_UnionFind` from
+`core/overlap_density.py` per the proposal above). `_alpha_beta_wall` now
+partitions first, runs the unchanged minimax only within each component,
+and concatenates components widest-first (by summed `len(offsets)`, singleton
+components skip the search entirely). Re-running the exact three symmetric
+fixtures from §2.2 now shows the partitioning actually distinguishing the
+overlap structure — 4 singleton components for the disjoint fixture vs. 1
+four-element component for the full-overlap fixture, where before both were
+searched as one undifferentiated 4-condition wall. Note this does **not**
+fix the residual parity artifact *within* a genuinely coupled component
+(§2.2's `evaluate([cond])`-on-a-singleton issue still applies to the
+minimax call inside `solve_component`) — that's now bounded to small,
+truly-interacting components instead of silently affecting the whole wall,
+which was the actual bug, but it's a known remaining limitation, not
+claimed as fixed. Regression tests in
+`tests/test_regression_alpha_beta_wall_disjunctive.py` (13 cases: component
+partitioning, empty/singleton/no-offset edge cases, widest-first ordering,
+independent-pair separation). `tests/test_smt_solver.py` and
+`tests/test_game_theory.py` still pass unchanged (84 passed, 53 skipped for
+missing `z3-solver` in this sandbox — pre-existing, unrelated to this
+change).
+
+Also noted in passing while implementing this, out of scope for the fix:
+`core/cond_stmt.py::solve_comparison_wall_minimax` (`:317-410`) is a second,
+independent minimax implementation of the same "comparison wall" idea, with
+its own bug (the minimizing branch's loop variable `_cond` is unused, so
+every branch of that loop is computed against identical unmutated state —
+the loop does `branching_limit` redundant recursions of the same call
+instead of exploring different target responses). It has no callers and no
+tests anywhere in the tree (`grep -rn "solve_comparison_wall_minimax"` only
+finds its own definition) — looks like an earlier, abandoned attempt at the
+same idea `Z3Solver.solve_comparison_wall` implements. Worth a follow-up
+decision (delete it, or fix and wire it in) but not addressed here.
+
 ---
 
 ## 3. What's already right and shouldn't be touched
@@ -311,13 +346,15 @@ correctness fix, once the wall has more than a handful of conditions.
   wall-clock time per edge (execs and wall-clock diverge under `--hail-mary`
   and job-scheduler-gated maintenance passes, per prior handovers)? Needs
   deciding before the estimator is written, not after.
-- **§2**: how large are connected components on real walls in practice? The
-  proposed fix is a clear win if components are small (the common case per
-  `evaluate()`'s own taint data), but if a wall is one fully-connected
-  component the fix degenerates to today's full search anyway — worth
-  measuring component-size distribution on a real target (e.g. the same
-  ffmpeg/sqlite corpora used in prior `_swap_pair` validation work) before
-  committing to the rewrite.
+- **§2**: *(resolved by implementation above — kept here for the record)*
+  how large are connected components on real walls in practice? The fix
+  is committed regardless since it's strictly more correct than before
+  even in the worst case (one fully-connected component degrades gracefully
+  to today's full search, just no longer silently blind to overlap
+  elsewhere in the wall), but the *performance* win depends on component
+  size — still worth measuring the distribution on a real target (e.g. the
+  same ffmpeg/sqlite corpora used in prior `_swap_pair` validation work) to
+  know how much it actually saves in practice.
 - Not investigated this turn: whether `op_katz.py`/`op_tang.py`'s
   Elo-arbitrated scheduling has the same false-minimax pattern as §2 — they
   weren't in scope for this survey but use adjacent machinery and are worth

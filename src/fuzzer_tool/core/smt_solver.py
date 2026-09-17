@@ -17,6 +17,7 @@ from collections import OrderedDict
 
 from fuzzer_tool.core.cond_stmt import CondStmt
 from fuzzer_tool.core.crc32 import crc32
+from fuzzer_tool.core.overlap_density import _UnionFind
 
 log = logging.getLogger(__name__)
 
@@ -192,6 +193,36 @@ def set_pc_divisor_map(mapping: dict[int, int]):
     """Set the PC→divisor map from static analysis."""
     PC_DIVISOR_MAP.clear()
     PC_DIVISOR_MAP.update(mapping)
+
+
+def _connected_components_by_offset(conditions: list) -> list[list]:
+    """Partition *conditions* into overlap-connected components.
+
+    Two conditions are in the same component iff they share at least one
+    taint offset, transitively. This is a disjunctive-sum decomposition
+    (Combinatorial Game Theory: sum of independent games): components that
+    share no offset cannot change each other's ``evaluate()`` contribution
+    regardless of relative order, so they never need to be searched jointly
+    — only conditions *within* a component can genuinely conflict. A
+    condition with no offsets at all forms its own singleton component.
+
+    Order within each returned component preserves the input order.
+    """
+    n = len(conditions)
+    uf = _UnionFind(n)
+    offset_owner: dict[int, int] = {}
+    for i, cond in enumerate(conditions):
+        for off in cond.offsets or ():
+            owner = offset_owner.get(off)
+            if owner is None:
+                offset_owner[off] = i
+            else:
+                uf.union(i, owner)
+
+    groups: dict[int, list] = {}
+    for i, cond in enumerate(conditions):
+        groups.setdefault(uf.find(i), []).append(cond)
+    return list(groups.values())
 
 
 def set_weak_mod_set(weak: set[int]):
@@ -658,10 +689,36 @@ class Z3Solver:
         max_mutations: int,
         max_depth: int,
     ) -> list | None:
-        """Alpha-beta minimax over comparison-wall solution order.
+        """Order a comparison wall by solving each overlap-connected
+        component independently, then concatenating widest-first.
 
-        Returns the order that maximizes coverage of comparisons while
-        minimizing conflicts, or None if no solution found.
+        Only conditions that share a taint offset can actually conflict
+        with each other (see ``evaluate()`` below); conditions in disjoint
+        offset ranges form a disjunctive sum whose relative order is
+        provably free (Combinatorial Game Theory: sum of independent
+        games). Searching a "minimax game" over the *whole* wall at once —
+        the previous approach — mixes non-interacting conditions into one
+        alternating maximizer/minimizer sequence. Because the recursion's
+        per-step reward is `evaluate([cond])` on a singleton (always
+        overlap-free by construction), that whole-wall search is blind to
+        overlap for the very sequence it's building, and its value collapses
+        to a function of len(conditions)'s parity alone rather than the
+        actual offset structure — confirmed empirically: fully-disjoint,
+        fully-overlapping, and partially-overlapping same-size fixtures all
+        produced identical output. See
+        docs/handover/handover_decision_game_theory_survey_2026-09-13.md §2.
+
+        Partitioning into overlap-connected components first fixes this:
+        the two-player search still applies *within* a component, where
+        conditions genuinely can conflict, but between components no search
+        is needed at all — only a placement order, for which we use the
+        same widest-first convention as
+        ``path_constraints.py::PathConstraintTracker.frontier()``. This also
+        bounds the search to the largest connected component instead of the
+        whole wall, which is the common case (most conditions in a wall
+        don't share taint) exponentially cheaper.
+
+        Returns the concatenated order, or None if no solution found.
         """
         if not conditions:
             return []
@@ -730,7 +787,28 @@ class Z3Solver:
                         break  # alpha cutoff
                 return worst_val, worst_seq
 
-        # Start with all conditions; search for best order
-        depth = min(max_depth, len(conditions))
-        _, best_order = minimax(conditions, depth, -float("inf"), float("inf"), True)
+        def solve_component(component: list) -> list:
+            """Search one overlap-connected component; trivial for size <= 1.
+
+            A singleton can't conflict with anything (no other condition to
+            overlap against within its own component by definition), so the
+            two-player search is skipped entirely rather than run on a
+            one-element sequence where it can only ever return that element.
+            """
+            if len(component) <= 1:
+                return list(component)
+            depth = min(max_depth, len(component))
+            _, order = minimax(component, depth, -float("inf"), float("inf"), True)
+            return order if order else list(component)
+
+        components = _connected_components_by_offset(conditions)
+        # No condition in one component can conflict with a condition in
+        # another (that's what "component" means here), so their relative
+        # order is free — place the widest-taint component first rather
+        # than search an ordering that provably can't change the result.
+        components.sort(key=lambda comp: sum(len(c.offsets) for c in comp), reverse=True)
+
+        best_order: list = []
+        for component in components:
+            best_order.extend(solve_component(component))
         return best_order
