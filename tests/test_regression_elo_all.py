@@ -11,6 +11,7 @@ from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers import MonteCarloScheduler
 from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.operators import OperatorEngine
+from fuzzer_tool.services.stats import _elo_status_str
 from tests.support.operator_env import install_scheduler_surface
 from tests.test_commands_extended import TestCmdFuzzConstruction
 
@@ -300,19 +301,17 @@ class TestSeedAndOpArenasNeverCrossCompete:
 
     def test_live_status_line_reports_separate_arena_leaders(self):
         f = self._make()
+        f._meta_strategy = "bandit"
         for _ in range(10):
             Fuzzer._record_operator_strategy_matches(f, 1.0)
             Fuzzer._record_seed_strategy_matches(f, 1.0)
-        ranking = f._elo.get_strategy_ranking()
-        op_ranking = [p for p in ranking if not p[0].startswith("seed_")]
-        seed_ranking = [p for p in ranking if p[0].startswith("seed_")]
-        assert op_ranking and seed_ranking
-        # The two arenas must not be flattened into a single "top" pick --
-        # exercise the same split stats.py's live status line performs.
-        top_op = op_ranking[0][0]
-        top_seed = seed_ranking[0][0][len("seed_") :]
-        assert top_op in {"bandit", "mopt"}
-        assert top_seed in {"weighted", "pareto"}
+        # The two arenas must not be flattened into a single "top" pick, and
+        # both leaders are shown under their op_/seed_ display names.
+        line = _elo_status_str(f)
+        assert "meta=op_bandit" in line
+        assert "seed=seed_weighted" in line
+        assert "top_op=op_bandit(" in line
+        assert "top_seed=seed_weighted(" in line
 
 
 class _FakeBandit:

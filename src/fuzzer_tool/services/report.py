@@ -11,6 +11,7 @@ import os
 from collections import Counter
 from pathlib import Path
 
+from fuzzer_tool.core.elo import strategy_display_name
 from fuzzer_tool.core.temporal_join import join_streams
 
 try:
@@ -1874,6 +1875,58 @@ def _format_duration(seconds: float) -> str:
         return f"{h}h {m}m {s}s"
 
 
+def strategy_table_lines(elo, keys: list[str], indent: str = "  ") -> list[str]:
+    """Rows for a meta-scheduler strategy pool, one per strategy-pool key.
+
+    Columns: display name (``op_``/``seed_`` prefixed), Rating, delta vs the
+    pool mean, Stddev, Rpi, K, Wins, Matches. Shared by the report's strategy
+    section and the end-of-run convergence tables so the two cannot drift.
+
+    Rpi is the expected score (%) against a player rated at the pool mean,
+    the same definition the operator ranking table uses. Stddev and K come
+    from the tracker's ``strategy_stats``: the posterior sigma and the
+    per-strategy step for BayesianEloTracker; no stddev and the fixed
+    k_factor for EloTracker.
+    """
+    if not keys:
+        return []
+    stats = {}
+    for key in keys:
+        if hasattr(elo, "strategy_stats"):
+            stats[key] = elo.strategy_stats(key)
+        else:
+            stats[key] = {
+                "rating": dict(elo.get_strategy_ranking()).get(key, 0.0),
+                "stddev": None,
+                "k": None,
+                "wins": None,
+                "matches": elo._strategy_match_count.get(key, 0),
+            }
+    pool_mean = sum(st["rating"] for st in stats.values()) / len(stats)
+    names = {key: strategy_display_name(key) for key in keys}
+    width = max(len("Strategy"), *(len(n) for n in names.values()))
+
+    def _opt(v, fmt):
+        return format(v, fmt) if v is not None else "-"
+
+    out = [
+        f"{indent}{'Strategy':<{width}s} {'Rating':>7s} {'vs pool':>7s} {'Stddev':>7s} "
+        f"{'Rpi':>6s} {'K':>6s} {'Wins':>7s} {'Matches':>8s}",
+        f"{indent}{'-' * width} {'-' * 7} {'-' * 7} {'-' * 7} {'-' * 6} {'-' * 6} "
+        f"{'-' * 7} {'-' * 8}",
+    ]
+    for key in keys:
+        st = stats[key]
+        rating = st["rating"]
+        rpi = 100.0 / (1.0 + 10.0 ** ((pool_mean - rating) / 400.0))
+        out.append(
+            f"{indent}{names[key]:<{width}s} {rating:>7.0f} {rating - pool_mean:>+7.0f} "
+            f"{_opt(st['stddev'], '.1f'):>7s} {rpi:>5.1f}% {_opt(st['k'], '.2f'):>6s} "
+            f"{_opt(st['wins'], 'd'):>7s} {st['matches']:>8d}"
+        )
+    return out
+
+
 def _elo_ratings(f) -> str:
     """Elo operator rankings and comparison with bandit rankings."""
     if not f._use_elo or not f._elo:
@@ -2014,27 +2067,19 @@ def _elo_ratings(f) -> str:
             seed_strategies = [p for p in strategy_ranking if p[0].startswith("seed_")]
 
             def _strategy_block(title, group):
-                # Deltas are measured against the pool mean, not the constant
-                # initial_mu. The Bayesian update scales each side by its own
-                # sigma^2/(sigma^2+beta^2), so a match moves the two players by
-                # different amounts and the pool is not zero-sum: on the
-                # ffmpeg_read_nosan run both strategy pools had drifted about
-                # -65 points in aggregate, which made every strategy look like
-                # a loser against a fixed 1500 baseline. Relative standing
+                # Deltas and Rpi are measured against the pool mean, not the
+                # constant initial_mu. The Bayesian update scales each side by
+                # its own sigma^2/(sigma^2+beta^2), so a match moves the two
+                # players by different amounts and the pool is not zero-sum:
+                # on the ffmpeg_read_nosan run both strategy pools had drifted
+                # about -65 points in aggregate, which made every strategy look
+                # like a loser against a fixed 1500 baseline. Relative standing
                 # within the pool is the meaningful quantity.
                 pool_mean = sum(r for _, r in group) / len(group)
-                width = max(len(name) for name, _ in group)
                 lines.append("")
                 lines.append(f"  {title}")
                 lines.append(f"    (pool mean {pool_mean:.0f}, initial {elo_mu:.0f})")
-                for name, rating in group:
-                    delta = rating - pool_mean
-                    sign = "+" if delta >= 0 else ""
-                    matches = f._elo._strategy_match_count.get(name, 0)
-                    lines.append(
-                        f"    {name:<{width}s}  {rating:>7.0f} "
-                        f"({sign}{delta:.0f} vs pool, {matches} matches)"
-                    )
+                lines.extend(strategy_table_lines(f._elo, [name for name, _ in group], "    "))
 
             if op_strategies:
                 _strategy_block("Meta-scheduler operator strategies (Elo):", op_strategies)

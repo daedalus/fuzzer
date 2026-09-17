@@ -23,6 +23,7 @@ import os
 import time
 
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
+from fuzzer_tool.core.elo import seed_strategy_display_name, strategy_display_name
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.stats_reporter import (
@@ -44,6 +45,44 @@ from fuzzer_tool.services.te_position import (
 )
 
 log = logging.getLogger(__name__)
+
+
+def _elo_status_str(f) -> str:
+    """Compact live-stats field for the Elo meta-scheduler; empty when off.
+
+    Strategy names carry the op_/seed_ prefix of their core/schedulers/
+    module (core.elo.strategy_display_name).
+    """
+    elo_str = ""
+    if getattr(f, "_use_elo", False) and getattr(f, "_elo", None):
+        try:
+            elo = f._elo
+            # Display names only: the Elo keys stay bare (op) / seed_ (seed).
+            meta_key = getattr(f, "_meta_strategy", None)
+            meta = strategy_display_name(meta_key) if meta_key else "—"
+            seed_key = getattr(f, "_seed_strategy", None)
+            seed = seed_strategy_display_name(seed_key) if seed_key else "?"
+            # op-mutator and seed schedulers are separate Elo arenas
+            # (disjoint keyspaces, never matched against each other —
+            # see Fuzzer._record_operator_strategy_matches vs.
+            # _record_seed_strategy_matches), so "top" must report one
+            # leader per arena rather than a single mixed ranking that
+            # would silently hide which arena it came from.
+            ranking = elo.get_strategy_ranking()
+            op_ranking = [p for p in ranking if not p[0].startswith("seed_")]
+            seed_ranking = [p for p in ranking if p[0].startswith("seed_")]
+            top_op = strategy_display_name(op_ranking[0][0]) if op_ranking else "?"
+            top_op_rating = op_ranking[0][1] if op_ranking else 0
+            top_seed = seed_ranking[0][0] if seed_ranking else "?"
+            top_seed_rating = seed_ranking[0][1] if seed_ranking else 0
+            elo_str = (
+                f" | elo: meta={meta} seed={seed} "
+                f"top_op={top_op}({top_op_rating:.0f}) "
+                f"top_seed={top_seed}({top_seed_rating:.0f})"
+            )
+        except (AttributeError, TypeError):
+            pass
+    return elo_str
 
 
 def _kruskal_str(f) -> str:
@@ -1033,32 +1072,7 @@ class StatsReporter:
 
         kc_str = _kruskal_str(f)
 
-        elo_str = ""
-        if getattr(f, "_use_elo", False) and getattr(f, "_elo", None):
-            try:
-                elo = f._elo
-                meta = getattr(f, "_meta_strategy", None) or "—"
-                seed = getattr(f, "_seed_strategy", "?")
-                # op-mutator and seed schedulers are separate Elo arenas
-                # (disjoint keyspaces, never matched against each other —
-                # see Fuzzer._record_operator_strategy_matches vs.
-                # _record_seed_strategy_matches), so "top" must report one
-                # leader per arena rather than a single mixed ranking that
-                # would silently hide which arena it came from.
-                ranking = elo.get_strategy_ranking()
-                op_ranking = [p for p in ranking if not p[0].startswith("seed_")]
-                seed_ranking = [p for p in ranking if p[0].startswith("seed_")]
-                top_op = op_ranking[0][0] if op_ranking else "?"
-                top_op_rating = op_ranking[0][1] if op_ranking else 0
-                top_seed = seed_ranking[0][0][len("seed_") :] if seed_ranking else "?"
-                top_seed_rating = seed_ranking[0][1] if seed_ranking else 0
-                elo_str = (
-                    f" | elo: meta={meta} seed={seed} "
-                    f"top_op={top_op}({top_op_rating:.0f}) "
-                    f"top_seed={top_seed}({top_seed_rating:.0f})"
-                )
-            except (AttributeError, TypeError):
-                pass
+        elo_str = _elo_status_str(f)
 
         hf_str = ""
         if getattr(f, "honggfuzz", False):

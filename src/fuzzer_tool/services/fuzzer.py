@@ -38,6 +38,7 @@ from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
+from fuzzer_tool.core.elo import strategy_display_name
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
@@ -6480,7 +6481,7 @@ class Fuzzer:
             log.warning(
                 "Elo meta-scheduler: %r rated %.1f, at or below the canary "
                 "floor (%.1f) -- this scheduler needs inspection",
-                strategy,
+                strategy_display_name(strategy),
                 mu,
                 canary_mu,
             )
@@ -7715,19 +7716,23 @@ class Fuzzer:
                         f"({s['window_successes']}/{s['window_execs']} = {rate:.0f}%)"
                     )
         # Seed strategy convergence (only strategies actually used this run)
+        # Same table (and op_/seed_ display names) as the report's strategy
+        # section; the rows functions only decide which strategies appear.
+        from fuzzer_tool.services.report import strategy_table_lines
+
         seed_rows = self._seed_convergence_rows()
         if seed_rows:
             print("\n[*] Seed strategy convergence:")
-            for s, rating, delta, count in seed_rows:
-                sign = "+" if delta >= 0 else ""
-                print(f"    {s:<20s}: {rating:>7.0f} ({sign}{delta:.0f}, {count} matches)")
+            for line in strategy_table_lines(
+                self._elo, [f"seed_{s}" for s, *_ in seed_rows], "    "
+            ):
+                print(line)
         # Operator strategy convergence (only schedulers actually selected)
         op_rows = self._operator_convergence_rows()
         if op_rows:
             print("\n[*] Operator strategy convergence:")
-            for s, rating, delta, count in op_rows:
-                sign = "+" if delta >= 0 else ""
-                print(f"    {s:<20s}: {rating:>7.0f} ({sign}{delta:.0f}, {count} matches)")
+            for line in strategy_table_lines(self._elo, [s for s, *_ in op_rows], "    "):
+                print(line)
         self._print_run_summary()
         epoch_end = time.time()
         boot_end = time.monotonic()

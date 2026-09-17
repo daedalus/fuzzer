@@ -33,6 +33,51 @@ log = logging.getLogger(__name__)
 # the stddev estimate is trustworthy.
 _UCB_MIN_SAMPLES_BASE = 20
 
+# Seed strategies are keyed ``seed_<name>`` in the strategy pool; operator
+# schedulers are keyed by their bare name. The keys are persisted in the
+# state store and are the Elo arm names, so they stay as they are -- the
+# ``op_`` prefix is applied only when a name is shown, matching the
+# ``op_*.py`` / ``seed_*.py`` module names under core/schedulers/.
+SEED_STRATEGY_PREFIX = "seed_"
+OP_STRATEGY_PREFIX = "op_"
+
+
+# Stall recovery sets _meta_strategy / _seed_strategy to this marker. It is
+# not a scheduler (no module, never recorded in the Elo pool), so it is shown
+# as-is rather than dressed up as op_random_stall / seed_random_stall.
+_UNPREFIXED_STRATEGY_NAMES = frozenset({"random_stall"})
+
+
+def strategy_display_name(key: str) -> str:
+    """Name to show for a strategy-pool key: ``op_<name>`` or ``seed_<name>``."""
+    if (
+        key in _UNPREFIXED_STRATEGY_NAMES
+        or key.startswith(SEED_STRATEGY_PREFIX)
+        or key.startswith(OP_STRATEGY_PREFIX)
+    ):
+        return key
+    return OP_STRATEGY_PREFIX + key
+
+
+def seed_strategy_display_name(name: str) -> str:
+    """Display name for a bare seed-strategy name (``Fuzzer._seed_strategy``)."""
+    if name in _UNPREFIXED_STRATEGY_NAMES:
+        return name
+    return SEED_STRATEGY_PREFIX + name
+
+
+def _record_strategy_win(wins: dict[str, int], a: str, b: str, score_a: float) -> None:
+    """A match is a win for whichever side scored more than half; 0.5 is a draw.
+
+    Scores are continuous (surprisal-weighted success in [0.05, 1], or 0.0),
+    so "points" in the chess sense would be a float sum; the win count is the
+    discrete companion shown beside it.
+    """
+    if score_a > 0.5:
+        wins[a] = wins.get(a, 0) + 1
+    elif score_a < 0.5:
+        wins[b] = wins.get(b, 0) + 1
+
 
 def _softmax_select(scored: list[tuple[str, float]], temperature: float, rng: RandPool) -> str:
     """Weighted random selection via softmax over scored items.
@@ -235,6 +280,7 @@ class EloTracker(RoundRecorderMixin):
 
         self._strategy_ratings: dict[str, float] = {}
         self._strategy_match_count: dict[str, int] = {}
+        self._strategy_win_count: dict[str, int] = {}
 
         # Per-operator reward moments for UCB-style exploration bonus.
         self._reward_moments: dict[str, RunningMoments] = {}
@@ -490,6 +536,7 @@ class EloTracker(RoundRecorderMixin):
         self._strategy_ratings[strategy_b] = rb + self.k_factor * ((1.0 - score_a) - eb)
         self._strategy_match_count[strategy_a] = self._strategy_match_count.get(strategy_a, 0) + 1
         self._strategy_match_count[strategy_b] = self._strategy_match_count.get(strategy_b, 0) + 1
+        _record_strategy_win(self._strategy_win_count, strategy_a, strategy_b, score_a)
 
     def select_strategy(self, strategies: list[str], temperature: float = 400.0) -> str:
         """Select a strategy weighted by Elo rating.
@@ -523,6 +570,20 @@ class EloTracker(RoundRecorderMixin):
             if r <= cumulative:
                 return rated[i]
         return rated[-1]
+
+    def strategy_stats(self, name: str) -> dict:
+        """Per-strategy display figures: rating, stddev, k, wins, matches.
+
+        EloTracker keeps no rating posterior for strategies, so ``stddev``
+        is None; ``k`` is the fixed ``k_factor`` every strategy update uses.
+        """
+        return {
+            "rating": self._strategy_ratings.get(name, self.default_rating),
+            "stddev": None,
+            "k": self.k_factor,
+            "wins": self._strategy_win_count.get(name, 0),
+            "matches": self._strategy_match_count.get(name, 0),
+        }
 
     def get_strategy_ranking(self) -> list[tuple[str, float]]:
         """Return strategies sorted by Elo rating (highest first)."""
@@ -609,6 +670,7 @@ class EloTracker(RoundRecorderMixin):
             "decay_ticks": self._decay_ticks,
             "strategy_ratings": self._strategy_ratings,
             "strategy_match_count": self._strategy_match_count,
+            "strategy_win_count": self._strategy_win_count,
             "reward_moments": reward_moments_ser,
         }
 
@@ -627,6 +689,7 @@ class EloTracker(RoundRecorderMixin):
         self._decay_ticks = data.get("decay_ticks", 0)
         self._strategy_ratings = data.get("strategy_ratings", {})
         self._strategy_match_count = data.get("strategy_match_count", {})
+        self._strategy_win_count = data.get("strategy_win_count", {})
         self._reward_moments = {}
         for op, rm_data in data.get("reward_moments", {}).items():
             rm = RunningMoments()
@@ -708,6 +771,7 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_mu: dict[str, float] = {}
         self._strategy_sigma_sq: dict[str, float] = {}
         self._strategy_match_count: dict[str, int] = {}
+        self._strategy_win_count: dict[str, int] = {}
 
         # Adaptive K-factor tracking
         self._prediction_errors: array = array("d")
@@ -892,6 +956,7 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_sigma_sq[strategy_b] = sig_b * (1.0 - var_b) + self.tau**2
         self._strategy_match_count[strategy_a] += 1
         self._strategy_match_count[strategy_b] += 1
+        _record_strategy_win(self._strategy_win_count, strategy_a, strategy_b, score_a)
 
     def select_strategy(self, strategies: list[str], temperature: float | None = None) -> str:
         """Select a strategy via Thompson sampling from its posterior."""
@@ -934,6 +999,26 @@ class BayesianEloTracker(RoundRecorderMixin):
     def get_unrated(self) -> list[str]:
         """Return operators with fewer than min_matches matches."""
         return [op for op, count in self._match_count.items() if count < self.min_matches]
+
+    def strategy_stats(self, name: str) -> dict:
+        """Per-strategy display figures: rating, stddev, k, wins, matches.
+
+        ``stddev`` is the posterior sigma in Elo points. ``k`` is the step
+        this strategy's next update would actually take: the tracker-wide
+        adaptive ``_effective_k()`` scaled by the strategy's own
+        ``sigma^2 / (sigma^2 + beta^2)``. The scale is per strategy (a
+        well-observed strategy moves less than a fresh one), so the
+        tracker-wide figure alone would show the same K on every row while
+        the ratings were in fact moving by different amounts.
+        """
+        sig_sq = self._strategy_sigma_sq.get(name, self.initial_sigma**2)
+        return {
+            "rating": self._strategy_mu.get(name, self.initial_mu),
+            "stddev": math.sqrt(sig_sq),
+            "k": self._effective_k() * sig_sq / (sig_sq + self.beta**2),
+            "wins": self._strategy_win_count.get(name, 0),
+            "matches": self._strategy_match_count.get(name, 0),
+        }
 
     def get_strategy_ranking(self) -> list[tuple[str, float]]:
         """Return strategies sorted by posterior mean (highest first)."""
@@ -1008,6 +1093,7 @@ class BayesianEloTracker(RoundRecorderMixin):
             "strategy_mu": self._strategy_mu,
             "strategy_sigma_sq": self._strategy_sigma_sq,
             "strategy_match_count": self._strategy_match_count,
+            "strategy_win_count": self._strategy_win_count,
             "prediction_errors": list(self._prediction_errors),
             "best_win_rate": list(self._best_win_rate),
         }
@@ -1025,6 +1111,7 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_mu = data.get("strategy_mu", {})
         self._strategy_sigma_sq = data.get("strategy_sigma_sq", {})
         self._strategy_match_count = data.get("strategy_match_count", {})
+        self._strategy_win_count = data.get("strategy_win_count", {})
         self._prediction_errors = array("d", data.get("prediction_errors", []))
         self._best_win_rate = array("d", data.get("best_win_rate", []))
 
