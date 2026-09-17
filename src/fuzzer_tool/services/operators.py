@@ -1597,19 +1597,19 @@ class OperatorEngine:
 
         Gated on ``PRNGStateLearner.has_state()`` (see
         ``core/operator_registry.py``'s ``_AVAILABLE["prng_predict"]``): by
-        the time this runs, 3+ consecutive draws from a taus88-family
+        the time this runs, 4+ consecutive draws from a taus88-family
         generator have already been observed via cmplog and verified (see
         ``core/prng_state_learner.py``), so every future draw is known.
 
-        Unlike ``_op_crc_learn``, there's no format-aware placement to try
-        first -- a checksum's position is implied by the container format
-        it's part of, but a predicted "random" nonce/token could be
-        anywhere the target reads 4 bytes from. Same blind placement
-        heuristic as ``_op_checksum_repair`` (a random 4-byte-aligned
-        offset): the learner already proved it knows the *value*; where
-        that value belongs in this particular buffer is exactly what havoc
-        + coverage feedback are good at narrowing down once the value
-        itself stops being the blocker.
+        Placement: a checksum's position is implied by the container format,
+        and a predicted nonce's is not, but it is not unknown either. The
+        field the target checks the token against is one it read from the
+        input and compared, so it appears in ``cmplog_pairs`` as an operand
+        that occurs verbatim in the buffer -- those offsets are tried first,
+        and a random 4-byte position (the ``_op_checksum_repair`` heuristic)
+        is the fallback when none is on record. Writing the right value at
+        the wrong offset leaves the comparison unsolved, so when the offsets
+        are known, spending selections on the rest of the buffer is waste.
         """
         if not buf or len(buf) < 4:
             return
@@ -1620,7 +1620,21 @@ class OperatorEngine:
         if predicted is None:
             return
         rng = self.ctx._rng
-        pos = rng.randint(0, max(0, len(buf) - 4))
+        src = bytes(buf)
+        offsets: list[int] = []
+        seen: set[int] = set()
+        for op_a, op_b in self.ctx.cmplog_pairs or ():
+            for op in (op_a, op_b):
+                if len(op) != 4:
+                    continue
+                pos = src.find(op)
+                if 0 <= pos <= len(buf) - 4 and pos not in seen:
+                    seen.add(pos)
+                    offsets.append(pos)
+        if offsets:
+            pos = offsets[0] if len(offsets) == 1 else rng.choice_list(offsets, 1)[0]
+        else:
+            pos = rng.randint(0, max(0, len(buf) - 4))
         buf[pos : pos + 4] = predicted
 
     def _op_crc_advanced(self, buf, _byte_idx, _data):
