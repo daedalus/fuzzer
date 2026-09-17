@@ -49,7 +49,7 @@ _FLAG_GATED = {
     "continuum",
     "temperature_control",
 }
-_ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner"}
+_ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner", "prng_state_learner"}
 
 
 def _build_fuzzer(**kwargs):

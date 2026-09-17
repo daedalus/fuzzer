@@ -657,6 +657,32 @@ REGISTRY.register(
 )
 
 
+def _activate_prng_state_learner(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.prng_state_learner import PRNGStateLearner
+
+    f.prng_state_learner = PRNGStateLearner(f)
+
+
+def _deactivate_prng_state_learner(f: FuzzerLike) -> None:
+    f.prng_state_learner = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="prng_state_learner",
+        category="format_recovery",
+        activate=_activate_prng_state_learner,
+        deactivate=_deactivate_prng_state_learner,
+        # Recovery is a GF(2) elimination that can fail to verify on
+        # candidates that were never really a taus88-family stream (see
+        # PRNGStateLearner docstring) -- same fail-open rationale as
+        # checksum_learner above, and for the same reason: this must never
+        # be what takes Fuzzer() down.
+        swallow_errors=True,
+    )
+)
+
+
 def _activate_csd(f: FuzzerLike) -> None:
     from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
 

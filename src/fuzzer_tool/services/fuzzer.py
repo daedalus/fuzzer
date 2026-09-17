@@ -4302,6 +4302,13 @@ class Fuzzer:
                 if cmp_pairs:
                     self.checksum_learner.add_pairs(cmp_pairs)
 
+            # Feed PRNG state learner: same cmplog pool, mirror-image
+            # extraction (operands absent from the input rather than
+            # present in it -- see core/prng_state_learner.py). Same
+            # _collect_now gate as checksum_learner, for the same reason.
+            if self.prng_state_learner and _collect_now:
+                self.prng_state_learner.observe_execution(data)
+
             # Dynamic cap: scale with recent throughput.
             # High EPS → larger dictionary (more mutations explore more).
             # Low EPS → smaller dictionary (reduce overhead).

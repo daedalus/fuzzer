@@ -261,6 +261,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "grammar_mutate",
         "grammar_tree_mutate",
         "crc_learn",
+        "prng_predict",
     },
 }
 
@@ -665,6 +666,12 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # otherwise recover a model the operator could never use)
     "crc_learn": lambda f, _d: bool(
         getattr(f, "checksum_learner", None) and f.checksum_learner.ensure_model()
+    ),
+    # learned taus88-family PRNG state (see core/prng_state_learner.py) --
+    # gated on an already-recovered, verified state; recovery itself runs
+    # off cmplog observations in the fuzz loop, not here.
+    "prng_predict": lambda f, _d: bool(
+        getattr(f, "prng_state_learner", None) and f.prng_state_learner.has_state()
     ),
     # flag-gated base op
     "regex_bomb": lambda f, _d: bool(getattr(f, "enable_regex_bomb", False)),

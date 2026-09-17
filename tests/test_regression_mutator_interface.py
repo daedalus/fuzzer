@@ -414,6 +414,7 @@ class TestMutationContext:
             "stall_recovery_active",
             "cmplog",
             "checksum_learner",
+            "prng_state_learner",
             "path_solver",
             "wfc_enabled",
             "formatfuzzer_enabled",

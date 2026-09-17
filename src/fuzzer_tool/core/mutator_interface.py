@@ -108,6 +108,7 @@ class MutationContext:
         "max_len",
         "mc",
         "path_solver",
+        "prng_state_learner",
         "seed_meta",
         "stall_recovery_active",
         "weizz_tags_enabled",
@@ -133,6 +134,7 @@ class MutationContext:
         stall_recovery_active: bool = False,
         cmplog=None,
         checksum_learner=None,
+        prng_state_learner=None,
         path_solver=None,
         wfc_enabled: bool = False,
         formatfuzzer_enabled: bool = False,
@@ -190,6 +192,10 @@ class MutationContext:
         #: been learned from observed inputs. ``None`` until a model
         #: verifies.
         self.checksum_learner = checksum_learner
+        #: Recovered taus88-family PRNG state (see
+        #: core/prng_state_learner.py), when 3+ consecutive internal draws
+        #: have been observed and verified. ``None`` until a state verifies.
+        self.prng_state_learner = prng_state_learner
         #: Shared z3 path-constraint solver, when ``--path-negation`` is on
         #: and z3 is installed. ``None`` otherwise -- callers respect that
         #: as "the feature is off" rather than constructing a private
@@ -229,6 +235,7 @@ class MutationContext:
             stall_recovery_active=bool(getattr(fuzzer, "_stall_recovery_active", False)),
             cmplog=cmplog,
             checksum_learner=getattr(fuzzer, "checksum_learner", None),
+            prng_state_learner=getattr(fuzzer, "prng_state_learner", None),
             path_solver=getattr(fuzzer, "_path_solver", None),
             wfc_enabled=bool(getattr(fuzzer, "_wfc_enabled", False)),
             formatfuzzer_enabled=bool(getattr(fuzzer, "formatfuzzer", False)),

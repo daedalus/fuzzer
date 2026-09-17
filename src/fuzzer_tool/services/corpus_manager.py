@@ -382,6 +382,9 @@ class CorpusManager:
             "checksum_learner": getattr(f, "checksum_learner", None)
             and f.checksum_learner.to_dict()
             or None,
+            "prng_state_learner": getattr(f, "prng_state_learner", None)
+            and f.prng_state_learner.to_dict()
+            or None,
             "seed_meta": {},
             "crash_frames": f.crash_frames,
             "crash_min_sizes": f.crash_min_sizes,
@@ -566,6 +569,16 @@ class CorpusManager:
             from fuzzer_tool.core.checksum_learner import ChecksumLearner
 
             f.checksum_learner = ChecksumLearner.from_dict(f, cl_data)
+        # Restore PRNG state learner state
+        prng_data = state.get("prng_state_learner")
+        if (
+            prng_data
+            and hasattr(f, "prng_state_learner")
+            and f.prng_state_learner is not None
+        ):
+            from fuzzer_tool.core.prng_state_learner import PRNGStateLearner
+
+            f.prng_state_learner = PRNGStateLearner.from_dict(f, prng_data)
         sens_data = f._state_store.get("sensitivity")
         if sens_data is not None:
             f._sensitivity.load(sens_data)

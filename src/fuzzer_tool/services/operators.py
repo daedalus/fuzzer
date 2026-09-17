@@ -1592,6 +1592,37 @@ class OperatorEngine:
             return
         buf[-nbytes:] = checksum.to_bytes(nbytes, "big")
 
+    def _op_prng_predict(self, buf, _byte_idx, _data):
+        """Overwrite a 4-byte field with the learner's predicted next draw.
+
+        Gated on ``PRNGStateLearner.has_state()`` (see
+        ``core/operator_registry.py``'s ``_AVAILABLE["prng_predict"]``): by
+        the time this runs, 3+ consecutive draws from a taus88-family
+        generator have already been observed via cmplog and verified (see
+        ``core/prng_state_learner.py``), so every future draw is known.
+
+        Unlike ``_op_crc_learn``, there's no format-aware placement to try
+        first -- a checksum's position is implied by the container format
+        it's part of, but a predicted "random" nonce/token could be
+        anywhere the target reads 4 bytes from. Same blind placement
+        heuristic as ``_op_checksum_repair`` (a random 4-byte-aligned
+        offset): the learner already proved it knows the *value*; where
+        that value belongs in this particular buffer is exactly what havoc
+        + coverage feedback are good at narrowing down once the value
+        itself stops being the blocker.
+        """
+        if not buf or len(buf) < 4:
+            return
+        learner = self.ctx.prng_state_learner
+        if not learner:
+            return
+        predicted = learner.next_value_bytes()
+        if predicted is None:
+            return
+        rng = self.ctx._rng
+        pos = rng.randint(0, max(0, len(buf) - 4))
+        buf[pos : pos + 4] = predicted
+
     def _op_crc_advanced(self, buf, _byte_idx, _data):
         """Overwrite a region with configurable CRC-32 output (FFmpeg av_crc family).
 
