@@ -40,6 +40,7 @@ import random
 import struct
 import tempfile
 import zlib
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import fuzzer_tool.core.mutations as _mutations
@@ -636,6 +637,47 @@ class TestStateGatedOperatorsAreNotNoOps:
             pass
         if f._path_solver is None:
             unreachable.add("path_negate")
+
+        # --- prng_predict ----------------------------------------------------
+        # Gated on a recovered, verified taus88 state. Built by feeding the
+        # learner a real stream through the same path production uses -- an
+        # in-process runner plus ordered cmplog records -- rather than by
+        # assigning _state directly: the operator reads next_value_bytes(),
+        # which is only meaningful when the frontier was derived too, and a
+        # hand-set state would leave that untested.
+        from fuzzer_tool.core.prng_state_learner import PRNGStateLearner
+        from fuzzer_tool.core.prng_state_recovery import taus88_output, taus88_step
+
+        class _Base:
+            def __init__(self, op_a, op_b, pc):
+                self.op_a = op_a
+                self.op_b = op_b
+                self.pc = pc
+
+        class _Cond:
+            def __init__(self, op_a, op_b, pc):
+                self.base = _Base(op_a, op_b, pc)
+
+        state = (0x12345678, 0x9ABCDEF0, 0xFEDCBA98)
+        words = []
+        for _ in range(6):
+            state = taus88_step(state)
+            words.append(taus88_output(state))
+
+        prng_learner = PRNGStateLearner(f)
+        prng_learner.f = SimpleNamespace(
+            _inprocess_runner=object(),
+            _cmplog=SimpleNamespace(
+                last_conds=[
+                    _Cond(w.to_bytes(4, "little"), b"\x00\x00\x00\x00", 0x4000)
+                    for w in words
+                ]
+            ),
+        )
+        assert prng_learner.observe_execution(b"\x00\x00\x00\x00seed"), (
+            "fixture failed to recover a taus88 state"
+        )
+        f.prng_state_learner = prng_learner
 
         # Placed last on purpose: several bands above assign
         # `f.seed_meta[inp] = {...}` wholesale, so tags written earlier
