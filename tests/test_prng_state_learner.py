@@ -8,8 +8,11 @@ this learner, and fails on that version:
     order" was not draw order and repeated draws were deduplicated away.
     Extraction now reads the ordered, PC-carrying ``last_conds`` of the most
     recent drain and takes the longest single-PC run;
-  * ``_MIN_SAMPLES = 3`` accepts unrelated 32-bit constants at ~1/2**8,
-    because 3 outputs leave 8 free consistency bits in the 96-bit solve;
+  * a single global ``_MIN_SAMPLES`` of 3 (taus88's own pinning count)
+    accepted unrelated 32-bit constants at ~1/2**8, because 3 outputs leave 8
+    free consistency bits in the 96-bit solve -- superseded by trying every
+    4-byte-output family (xorshift32/taus88/taus113/xorshift128) smallest-
+    state-first and gating each on its own ``confident_samples()``;
   * re-confirmation compared a later drain's samples against the
     origin-aligned state, which only matches if the stream repeats, so a good
     state was dropped and re-recovered on nearly every drain;
@@ -36,7 +39,12 @@ import pytest
 
 from fuzzer_tool.core.prng_state_learner import PRNGStateLearner
 from fuzzer_tool.core.prng_state_recovery import (
+    TAUS113,
     TAUS88_PARAMS,
+    XORSHIFT32,
+    XORSHIFT128,
+    output_word,
+    step_state,
     taus88_output,
     taus88_step,
 )
@@ -214,12 +222,29 @@ class TestNondeterminismPreference:
 
 
 class TestSampleFloor:
-    def test_three_samples_are_below_the_floor(self):
-        """3 pins the state mathematically but leaves 8 free consistency bits,
-        which unrelated constants satisfy at ~1/2**8."""
-        learner = _learner(_conds(_stream(3)))
+    def test_below_every_familys_floor_is_not_attempted(self):
+        """Below the *smallest* candidate family's confident_samples (2, for
+        xorshift32), no family could possibly verify, so no attempt is spent."""
+        from fuzzer_tool.core import prng_state_learner as mod
+
+        assert mod._MIN_SAMPLES == 2
+        learner = _learner(_conds(_stream(1)))
         assert learner.observe_execution(PAYLOAD) is False
         assert learner.attempts == 0
+
+    def test_three_taus88_samples_are_tried_and_correctly_rejected(self):
+        """3 real taus88 outputs clear xorshift32's floor (2) and get tried
+        against it first (smallest state first) -- and correctly fail, since
+        they are not an xorshift32 stream. They also pin taus88's own 96-bit
+        state mathematically but leave 8 free consistency bits, which
+        unrelated constants would satisfy at ~1/2**8; 3 is still below
+        taus88's own confident_samples (4), so that family is skipped, not
+        just failed.
+        """
+        learner = _learner(_conds(_stream(3)))
+        assert learner.observe_execution(PAYLOAD) is False
+        assert learner.attempts == 1
+        assert not learner.has_state()
 
     def test_four_random_constants_are_rejected(self):
         """The floor's purpose: a 4-word run that is not a taus88 stream must
@@ -228,6 +253,66 @@ class TestSampleFloor:
         assert learner.observe_execution(PAYLOAD) is False
         assert learner.attempts == 1, "recovery must have been attempted and refused"
         assert not learner.has_state()
+
+
+def _generic_stream(n: int, spec, state: tuple[int, ...]) -> list[int]:
+    """The first *n* outputs of *spec*'s stream started at *state*, matching
+    the same "output is taken after stepping" convention as ``_stream``."""
+    out: list[int] = []
+    s = state
+    for _ in range(n):
+        s = step_state(s, spec)
+        out.append(output_word(s, spec))
+    return out
+
+
+class TestCrossFamilyRecovery:
+    """The learner is not taus88-only: it tries every 4-byte-output shipped
+    family and keeps whichever verifies (see the module docstring's "Family
+    is not assumed" section)."""
+
+    def test_recovers_an_xorshift32_stream(self):
+        words = _generic_stream(4, XORSHIFT32, (0xACE1_2345,))
+        learner = _learner(_conds(words))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.name == "xorshift32"
+        assert learner.predict(1) == _generic_stream(5, XORSHIFT32, (0xACE1_2345,))[4:]
+
+    def test_recovers_an_xorshift128_stream(self):
+        seed = (0x1234_5678, 0x9ABC_DEF0, 0x0F1E_2D3C, 0x4B5A_6978)
+        words = _generic_stream(6, XORSHIFT128, seed)
+        learner = _learner(_conds(words))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.name == "xorshift128"
+
+    def test_recovers_a_taus113_stream(self):
+        seed = (0x1111_1111, 0x2222_2222, 0x3333_3333, 0x4444_4444)
+        words = _generic_stream(6, TAUS113, seed)
+        learner = _learner(_conds(words))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.name == "taus113"
+
+    def test_smallest_state_family_is_preferred_when_ambiguous(self):
+        """xorshift32's state IS its output, so a real xorshift32 stream also
+        satisfies taus88's system at low sample counts is not a real risk
+        here (different bit width in the map), but the ordering itself --
+        smallest state first -- is what this asserts: xorshift32 is checked,
+        and matches, before taus88 is ever tried."""
+        words = _generic_stream(2, XORSHIFT32, (0xDEAD_BEEF,))
+        learner = _learner(_conds(words))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.name == "xorshift32"
+
+    def test_round_trip_preserves_the_recovered_family(self):
+        words = _generic_stream(6, XORSHIFT128, (1, 2, 3, 4))
+        learner = _learner(_conds(words))
+        learner.observe_execution(PAYLOAD)
+        assert learner.to_dict()["family"] == "xorshift128"
+
+        restored = PRNGStateLearner.from_dict(_fuzzer(), learner.to_dict())
+        assert restored.has_state()
+        assert restored._spec.name == "xorshift128"
+        assert restored.predict(2) == learner.predict(2)
 
 
 class TestInProcessGate:

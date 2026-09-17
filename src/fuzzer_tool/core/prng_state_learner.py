@@ -1,4 +1,4 @@
-"""PRNG state learner: recovers a weak xor-combined-LFSR generator's internal
+"""PRNG state learner: recovers a weak GF(2)-linear generator's internal
 state from per-execution cmplog observations, and exposes predicted future
 draws to the fuzzer's mutation operators.
 
@@ -6,16 +6,26 @@ Attaches to the fuzzer instance as ``f.prng_state_learner`` (see
 ``analyzer_registry.py``), the same wiring shape as ``f.checksum_learner``.
 
 Targets CWE-338 (use of a predictable/weak PRNG). A fuzz target that seeds a
-``taus88``-family generator (Boost's taus88, or a hand-rolled xor-combine /
-combined-LFSR variant -- see ``core/prng_state_recovery.py`` for the family
-this covers) for nonces, session tokens, or sequence numbers leaks its output stream
-through comparison operands. Four observed consecutive draws pin the
-generator's whole future output (three pin the 96-bit state; the fourth is
-false-positive margin -- see below), after which every future draw is known
-in advance, which lets a mutation operator write
-the *actual* next value into the input instead of guessing -- turning an
-otherwise-unreachable "does this match the token I generated" check into a
-one-shot pass.
+combined-LFSR (taus88/taus113/LFSR258), Marsaglia xorshift, or other
+GF(2)-linear generator (see ``core/prng_state_recovery.py`` for the family
+this covers) for nonces, session tokens, or sequence numbers leaks its output
+stream through comparison operands. A handful of observed consecutive draws
+pin the generator's whole future output (how many is family-specific -- see
+``_CANDIDATE_FAMILIES`` and ``confident_samples``), after which every future
+draw is known in advance, which lets a mutation operator write the *actual*
+next value into the input instead of guessing -- turning an otherwise-
+unreachable "does this match the token I generated" check into a one-shot
+pass.
+
+Family is not assumed. ``_try_recover`` tries every 4-byte-output candidate
+family smallest-state-first (cheapest elimination first) and keeps whichever
+verifies -- the "reversing the target's binary just to learn which family it
+uses" step ``core/prng_state_recovery.py``'s module docstring says this class
+avoids. 8-byte-output families (``xorshift64``, ``lfsr258``) are shipped in
+``core/prng_state_recovery.py`` but not tried here yet: the extraction below
+and ``operators.py::_op_prng_predict`` both hard-code a 4-byte operand width,
+and widening either is a separate change (touching the mutator's placement
+search too) left as follow-up.
 
 Signal source
 -------------
@@ -76,16 +86,22 @@ almost every drain and re-ran recovery from scratch.
 
 Recovery cost and false-positive control
 -----------------------------------------
-``recover_taus88_state`` is a fixed-cost 96x96 GF(2) elimination per attempt
--- cheap, but not free enough to run unconditionally on every execution, so
-candidates are capped at ``_MAX_SAMPLES`` per attempt (mirrors
-``CHECKSUM_PAIRS_MAX``'s rationale exactly: bound the cost of an attempt,
-not just how often one is made). A recovered state is only kept once
-``verify_recovery`` confirms it reproduces every sample it was derived
-from, including ones beyond the 3 needed to pin the state -- an accidental
-96-bit fit to non-taus88 "random" data is not impossible, and extra
-confirming samples are what tells it apart from a real one. When later
-samples disagree with an already-cached state (a false-positive site, or a
+Each family's elimination is a fixed-cost ``state_bits x state_bits`` GF(2)
+solve -- cheap (at most 320x320, for lfsr258), but not free enough to run
+unconditionally on every execution, so candidates are capped at
+``_MAX_SAMPLES`` per attempt (mirrors ``CHECKSUM_PAIRS_MAX``'s rationale
+exactly: bound the cost of an attempt, not just how often one is made). A
+recovered state is only kept once ``verify_state`` confirms it reproduces
+every sample it was derived from, including ones beyond the family's own
+``min_samples`` -- an accidental fit to non-generator "random" data is not
+impossible at exactly the pinning count, and ``confident_samples``'s extra
+word is what tells it apart from a real one (see that function's docstring
+for the measured false-positive rates). ``attempts``/``successes`` count
+*window* attempts, not the per-family probes inside one: trying all of
+xorshift32/taus88/taus113/xorshift128 against one window and failing every
+one is a single recorded attempt, matching the cost model above (one
+elimination-sized decision per execution, not four). When later samples
+disagree with an already-cached state (a false-positive site, or a
 different generator instance), the cache is dropped rather than kept stale.
 """
 
@@ -95,28 +111,35 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from fuzzer_tool.core.prng_state_recovery import (
-    TAUS88_PARAMS,
-    LFSRParams,
-    predict_next,
-    recover_taus88_state,
-    taus88_output,
-    taus88_step,
-    verify_recovery,
+    FAMILIES,
+    LinearPRNG,
+    confident_samples,
+    family,
+    output_word,
+    predict_words,
+    recover_state,
+    step_state,
+    verify_state,
 )
 
-# Three outputs pin a 96-bit taus88 state, but leave 8 free consistency bits,
-# so unrelated 32-bit constants fit one in ~2**8 (measured: 74/20000 random
-# triples). A fourth sample takes that to zero (0/20000) for the cost of one
-# more observed operand, and a fuzzer's cmplog stream is full of unrelated
-# constants, so 4 is the floor here. recover_taus88_state still enforces its
-# own hard minimum of 3.
-_MIN_SAMPLES = 4
+_OPERAND_BYTES = 4  # width this learner extracts and the mutator writes back
+# The 4-byte-output shipped families, in FAMILIES' smallest-state-first
+# order (cheapest elimination tried first). 8-byte families (xorshift64,
+# lfsr258) are excluded -- see the module docstring's "Family is not
+# assumed" section for why.
+_CANDIDATE_FAMILIES: tuple[LinearPRNG, ...] = tuple(
+    spec for spec in FAMILIES.values() if spec.out_bytes == _OPERAND_BYTES
+)
+# Below this floor, no family has enough of a margin to be worth an attempt.
+# Individual families gate at their own (larger) confident_samples() inside
+# _try_recover; this is just the cheapest one, so windows never even reach
+# _try_recover before any family could possibly verify.
+_MIN_SAMPLES = min(confident_samples(spec) for spec in _CANDIDATE_FAMILIES)
 _MAX_SAMPLES = 16  # cap on candidates fed to one recovery attempt
 # How far ahead of the cached frontier to look for a later drain's samples.
 # Bounds the cost of continuation (one step is a few integer ops) while
 # tolerating draws the target made without comparing them.
 _MAX_ADVANCE_SEARCH = 64
-_OPERAND_BYTES = 4  # taus88 words are 32-bit
 # Cap on per-input PC histories retained for the nondeterminism filter.
 _RUN_HISTORY_CAP = 256
 # Sentinel for "no pending window at all", so a legitimate None PC bucket
@@ -135,23 +158,19 @@ class _PCHistory:
 
 
 class PRNGStateLearner:
-    """Learns and caches a recovered taus88-family PRNG state."""
+    """Learns and caches a recovered GF(2)-linear PRNG state, family included."""
 
-    def __init__(
-        self,
-        fuzzer: Any,
-        params: tuple[LFSRParams, LFSRParams, LFSRParams] = TAUS88_PARAMS,
-    ) -> None:
+    def __init__(self, fuzzer: Any) -> None:
         self.f = fuzzer
-        self.params = params
-        self._state: tuple[int, int, int] | None = None
+        self._spec: LinearPRNG | None = None
+        self._state: tuple[int, ...] | None = None
         # Samples the currently cached _state was confirmed against, in
         # order -- kept so a later observation can re-verify or invalidate it.
         self._confirmed_samples: list[int] = []
         # The frontier: walked forward so its own zero-step output equals the
         # LAST confirmed sample, i.e. the state to predict the future from.
         # Derived from _state, so it is not persisted -- from_dict rebuilds it.
-        self._frontier: tuple[int, int, int] | None = None
+        self._frontier: tuple[int, ...] | None = None
         # input hash -> {pc -> (values ever seen, widest single drain)}. A pc
         # is nondeterministic when it has produced MORE distinct values for one
         # input than any single drain of that input contained: that is a value
@@ -239,16 +258,16 @@ class PRNGStateLearner:
         """Predict the *n* draws after the last confirmed sample, or None.
 
         ``self._state`` is kept origin-aligned (its own, zero-step output
-        equals ``self._confirmed_samples[0]`` -- see :func:`recover_taus88_state`
+        equals ``self._confirmed_samples[0]`` -- see :func:`recover_state`
         and :meth:`_try_recover`), because that's the alignment
-        ``verify_recovery`` needs to cheaply re-confirm the cache in
+        ``verify_state`` needs to cheaply re-confirm the cache in
         :meth:`observe_execution`. Prediction wants the opposite end, so
         walk forward to the state whose own output is the *last* confirmed
         sample before asking for what comes after it.
         """
-        if self._frontier is None:
+        if self._frontier is None or self._spec is None:
             return None
-        return predict_next(self._frontier, n)
+        return predict_words(self._frontier, n, self._spec)
 
     def next_value_bytes(self, byteorder: Literal["little", "big"] = "little") -> bytes | None:
         """Convenience for mutators: the single next predicted draw, packed."""
@@ -347,17 +366,21 @@ class PRNGStateLearner:
     # Recovery
     # ------------------------------------------------------------------
 
-    def _set_state(self, state: tuple[int, int, int], samples: list[int]) -> None:
+    def _set_state(
+        self, spec: LinearPRNG, state: tuple[int, ...], samples: list[int]
+    ) -> None:
         """Cache *state* (its own output == samples[0]) and derive the frontier
         whose own output == samples[-1]."""
+        self._spec = spec
         self._state = state
         self._confirmed_samples = list(samples)
         frontier = state
         for _ in range(len(samples) - 1):
-            frontier = taus88_step(frontier, self.params)
+            frontier = step_state(frontier, spec)
         self._frontier = frontier
 
     def _clear_state(self) -> None:
+        self._spec = None
         self._state = None
         self._frontier = None
         self._confirmed_samples = []
@@ -370,17 +393,18 @@ class PRNGStateLearner:
         this side cannot see. On a match the frontier advances past the run, so
         the next prediction is relative to the newest confirmed draw.
         """
-        if self._frontier is None or not candidates:
+        if self._frontier is None or self._spec is None or not candidates:
             return False
+        spec = self._spec
         probe = self._frontier
         for _ in range(_MAX_ADVANCE_SEARCH):
-            probe = taus88_step(probe, self.params)
-            if taus88_output(probe) != candidates[0]:
+            probe = step_state(probe, spec)
+            if output_word(probe, spec) != candidates[0]:
                 continue
             walk = probe
             for expected in candidates[1:]:
-                walk = taus88_step(walk, self.params)
-                if taus88_output(walk) != expected:
+                walk = step_state(walk, spec)
+                if output_word(walk, spec) != expected:
                     break
             else:
                 self._frontier = walk
@@ -389,16 +413,25 @@ class PRNGStateLearner:
         return False
 
     def _try_recover(self, candidates: list[int]) -> bool:
+        """Try every candidate family, smallest-state first, on *candidates*.
+
+        One call is one recorded attempt regardless of how many families are
+        probed inside it -- see the module docstring's cost-model note.
+        """
         self.attempts += 1
-        try:
-            state = recover_taus88_state(candidates, params=self.params)
-        except ValueError:
-            return False
-        if state is None or not verify_recovery(state, candidates, self.params):
-            return False
-        self._set_state(state, candidates)
-        self.successes += 1
-        return True
+        for spec in _CANDIDATE_FAMILIES:
+            if len(candidates) < confident_samples(spec):
+                continue
+            try:
+                state = recover_state(candidates, spec)
+            except ValueError:
+                continue
+            if state is None or not verify_state(state, candidates, spec):
+                continue
+            self._set_state(spec, state, candidates)
+            self.successes += 1
+            return True
+        return False
 
     # ------------------------------------------------------------------
     # Persistence (mirrors ChecksumLearner.to_dict/from_dict)
@@ -407,6 +440,11 @@ class PRNGStateLearner:
     def to_dict(self) -> dict[str, Any]:
         return {
             "state": list(self._state) if self._state is not None else None,
+            # Which family the state belongs to, so from_dict rebuilds with
+            # the right step/output maps instead of guessing. Absent in dicts
+            # written before this field existed -- from_dict falls back to
+            # taus88 then, the only family the learner ever recovered.
+            "family": self._spec.name if self._spec is not None else None,
             "confirmed_samples": self._confirmed_samples,
             "attempts": self.attempts,
             "successes": self.successes,
@@ -417,15 +455,18 @@ class PRNGStateLearner:
         learner = cls(fuzzer)
         if data:
             state = data.get("state")
-            if state and len(state) == 3:
-                restored = (int(state[0]), int(state[1]), int(state[2]))
+            if state:
+                spec = family(data.get("family") or "taus88") or FAMILIES["taus88"]
+                restored = tuple(int(x) for x in state)
                 samples = [int(x) for x in data.get("confirmed_samples") or []]
                 # The frontier is derived, not stored, so rebuild it here --
                 # otherwise a resumed campaign predicts from the origin-aligned
                 # state and hands out draws it has already seen. With no
                 # samples recorded (a state dict written before this field
                 # existed), the state's own output is the only anchor there is.
-                learner._set_state(restored, samples or [taus88_output(restored)])
+                learner._set_state(
+                    spec, restored, samples or [output_word(restored, spec)]
+                )
             learner.attempts = int(data.get("attempts", 0))
             learner.successes = int(data.get("successes", 0))
         return learner
