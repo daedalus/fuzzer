@@ -15,7 +15,10 @@ loop):
   conditional variance (ARCH effects). A different null than the two above,
   but run on the same input series.
 - ``periodicity``'s Fisher's g-test -- spectral test for a dominant
-  periodicity, on a related (transformed) series.
+  periodicity, run here over first-differences of the fuzzer's persistent
+  ``_discovery_edges`` history (the same discovery-rate series
+  ``services/report.py``'s ``_spectral_diagnostics`` scans, read the same
+  way).
 
 Each of these is well-calibrated *on its own*: run in isolation, it rejects
 its null at its stated alpha the stated fraction of the time. But they are
@@ -188,19 +191,63 @@ def _fold_two_sided(p_upper: float) -> float:
     return min(1.0, 2.0 * min(p_upper, 1.0 - p_upper))
 
 
+def _periodicity_pvalue(fuzzer: FuzzerLike) -> float | None:
+    """Fisher's g-test p-value for a periodic component in the discovery-
+    rate series, read the same way ``services/report.py``'s
+    ``_spectral_diagnostics`` does: first-differences of
+    ``fuzzer._discovery_edges`` (the persistent cumulative-edges-per-sync-
+    interval history -- it does exist on the fuzzer object; an earlier
+    version of this module said otherwise before this attribute was
+    located).
+
+    Returns ``None`` when numpy isn't installed (``core.periodicity``
+    hard-imports it), the attribute is missing, or there aren't at least
+    two points to difference -- in every such case there is nothing to
+    test yet, not a computed non-finding.
+
+    One caveat worth carrying forward rather than silently absorbing: per
+    ``detect_periodicity``'s own docstring, when the series needed AR
+    drift-removal first (``res.ar_order > 0``) its p-value's actual
+    false-positive rate runs closer to ~0.10 than its nominal alpha --
+    report.py already flags this to the reader as "a lead rather than a
+    finding." Folding a p-value with a known-off calibration into a
+    procedure that assumes each input alpha is honest is an approximation,
+    not a rigorous combination; it is included anyway because the
+    alternative (silently dropping the one test that most directly
+    targets corpus-sync artifacts) is the worse approximation, and BH
+    itself degrades gracefully -- a single miscalibrated input shifts
+    where that one item lands, it does not invalidate the others' ranks.
+    """
+    try:
+        edges_series = fuzzer._discovery_edges
+    except AttributeError:
+        return None
+    if edges_series is None or len(edges_series) < 51:
+        return None
+    try:
+        from fuzzer_tool.core.periodicity import detect_periodicity
+    except ImportError:
+        return None
+
+    deltas = [
+        float(b) - float(a)
+        for a, b in zip(edges_series[:-1], edges_series[1:], strict=True)
+    ]
+    res = detect_periodicity(deltas, min_samples=50)
+    return res.p_value
+
+
 def collect_current_pvalues(fuzzer: FuzzerLike) -> dict[str, float | None]:
     """Gather this tick's p-values from the detectors known to test the
-    same ``delta`` (per-tick edge-discovery-count) series.
+    same (or a directly derived) per-tick edge-discovery-count series.
 
-    Currently covers ``_structure_fn`` (Poisson dispersion, folded
-    two-sided to match the others), ``_discovery_uniformity`` (the same
-    Poisson dispersion statistic, independently windowed), and ``_garch``
-    (Ljung-Box test for ARCH effects -- a different null, same series).
-    ``periodicity``'s Fisher's g-test is deliberately excluded: it runs on
-    a different (spectral) transform of a related but distinct series and
-    has no persistent per-fuzzer object to read from at this call site --
-    see the module docstring and the handover doc for why folding it in is
-    left as a documented follow-up rather than guessed at here.
+    Covers ``_structure_fn`` (Poisson dispersion, folded two-sided to
+    match the others), ``_discovery_uniformity`` (the same Poisson
+    dispersion statistic, independently windowed), ``_garch`` (Ljung-Box
+    test for ARCH effects -- a different null, same series), and
+    ``periodicity``'s Fisher's g-test over first-differences of
+    ``_discovery_edges`` (see :func:`_periodicity_pvalue` for the
+    calibration caveat that one carries).
 
     Missing/not-yet-available detectors and detectors that report ``None``
     (not enough data yet) are simply absent from the returned dict, which
@@ -228,6 +275,10 @@ def collect_current_pvalues(fuzzer: FuzzerLike) -> dict[str, float | None]:
     if garch is not None:
         _stat, p = garch.ljung_box()
         pvalues["garch_ljung_box"] = p
+
+    periodicity_p = _periodicity_pvalue(fuzzer)
+    if periodicity_p is not None:
+        pvalues["periodicity_discovery_rate"] = periodicity_p
 
     return pvalues
 

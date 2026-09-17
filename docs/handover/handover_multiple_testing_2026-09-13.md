@@ -106,30 +106,47 @@ correction utility" patch.
 
 ## What's still out
 
-- **`periodicity`'s Fisher's g-test is not in the correction batch.** It
-  runs on a different (spectral) transform of a related-but-distinct
-  series and has no persistent per-fuzzer attribute to read at this call
-  site the way `_structure_fn`/`_discovery_uniformity`/`_garch` do --
-  folding it in needs its own investigation of where it's actually
-  computed (appears to be inline in `report.py`'s `_spectral_diagnostics`
-  rather than a standing detector object), not a guess bolted on here.
-- **The recalibration question above** -- whether `structure_function`'s
-  own two internal tests (`is_overdispersed`/`is_underdispersed`, which
-  *do* already gate a decision) should have their effective alpha
-  adjusted for being evaluated every tick for the life of a campaign.
-  That is the "multiple looks" problem this doc explicitly said the
-  current patch does *not* address, and it needs its own before/after
-  measurement against a real campaign's stall-detection accuracy, not a
-  formula swapped in on paper.
+- **The recalibration question** -- whether `structure_function`'s own two
+  internal tests (`is_overdispersed`/`is_underdispersed`, which *do*
+  already gate a decision) should have their effective alpha adjusted for
+  being evaluated every tick for the life of a campaign. That is the
+  "multiple looks" problem this doc explicitly said the current patch does
+  *not* address, and it needs its own before/after measurement against a
+  real campaign's stall-detection accuracy, not a formula swapped in on
+  paper.
 - `CoverageRegimeDetector._classify` still ignores `discovery_rate`,
   `allan_delta`, and `exec_count` (`docs/handover/handover_pending_2026-09-06.md`,
   P2-5) -- unrelated to this patch but worth flagging again: a future
   corrected-significance signal routed toward regime classification would
   land in the same dead spot.
 
+### Update 2026-09-14: periodicity folded in
+
+The claim above that periodicity "has no persistent per-fuzzer attribute
+to read" was wrong -- `f._discovery_edges` is exactly that attribute, read
+the same way by `report.py`'s `_spectral_diagnostics` (first-differences,
+`detect_periodicity(..., min_samples=50)`). `collect_current_pvalues` now
+includes `periodicity_discovery_rate` alongside the original three,
+computed the identical way. One calibration caveat carried forward rather
+than silently absorbed: per `detect_periodicity`'s own docstring, when the
+series needed AR drift-removal first (`ar_order > 0`) its actual
+false-positive rate runs closer to ~0.10 than its nominal alpha --
+`report.py` already flags this to the reader as "a lead rather than a
+finding," and this module's docstring now says the same about folding a
+p-value with known-off calibration into a procedure that assumes each
+input alpha is honest: an approximation, not a rigorous combination,
+included because dropping the one test that most directly targets
+corpus-sync artifacts is the worse approximation. 6 new tests (missing
+attribute, `None`, too-short series all correctly omit the entry rather
+than error; a flat series still gets tested; a planted period-4 signal
+reads back significant as a positive control; `collect_and_correct`
+carries all four names through together). 34/34 pass in
+`tests/core/test_multiple_testing.py`.
+
 ## Verification
 
-`tests/core/test_multiple_testing.py`: 28/28 pass.
+`tests/core/test_multiple_testing.py`: 34/34 pass (28 from the original
+patch + 6 from the periodicity follow-up).
 Targeted regression sweep (`test_discovery_uniformity.py`, `test_garch.py`,
 `test_coverage_regime_garch.py`, `test_regression_analyzer_registry.py`,
 `test_regression_stats_eps_stabilization.py`,

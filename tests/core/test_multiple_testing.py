@@ -161,11 +161,14 @@ def test_holm_adjusted_is_none():
 # ── collect_current_pvalues: reading off a duck-typed fuzzer ───────────
 
 
-def _fake_fuzzer(structure_fn=None, discovery_uniformity=None, garch=None):
+def _fake_fuzzer(
+    structure_fn=None, discovery_uniformity=None, garch=None, discovery_edges=None
+):
     return SimpleNamespace(
         _structure_fn=structure_fn,
         _discovery_uniformity=discovery_uniformity,
         _garch=garch,
+        _discovery_edges=discovery_edges,
     )
 
 
@@ -265,3 +268,64 @@ def test_collect_and_correct_borderline_single_test_no_longer_significant():
     # BH threshold for the smallest of 3 at alpha=0.05 is (1/3)*0.05=0.0167;
     # 0.03 > 0.0167, so it must not reject.
     assert by_name["structure_function_dispersion"].rejected is False
+
+
+# ── periodicity: first-differences of _discovery_edges ─────────────────
+
+
+def test_collect_pvalues_omits_periodicity_when_attribute_missing():
+    f = SimpleNamespace()  # no _discovery_edges at all
+    assert "periodicity_discovery_rate" not in collect_current_pvalues(f)
+
+
+def test_collect_pvalues_omits_periodicity_when_series_too_short():
+    f = _fake_fuzzer(discovery_edges=list(range(10)))  # well under the 51 floor
+    assert "periodicity_discovery_rate" not in collect_current_pvalues(f)
+
+
+def test_collect_pvalues_omits_periodicity_when_none():
+    f = _fake_fuzzer(discovery_edges=None)
+    assert "periodicity_discovery_rate" not in collect_current_pvalues(f)
+
+
+def test_collect_pvalues_includes_periodicity_on_flat_series():
+    # A perfectly flat cumulative-edges series -> all-zero first differences
+    # -> no periodic component to find, but long enough to attempt the test
+    # at all, so it must appear (as a non-significant, high p-value read).
+    edges = [100] * 60
+    f = _fake_fuzzer(discovery_edges=edges)
+    result = collect_current_pvalues(f)
+    assert "periodicity_discovery_rate" in result
+    assert result["periodicity_discovery_rate"] is not None
+
+
+def test_collect_pvalues_periodicity_flags_a_planted_period():
+    # A strong exact period-4 square wave in the discovery-rate series
+    # should read back as a small (significant) p-value -- this is the
+    # positive control confirming the g-test is actually engaged, not
+    # just silently returning its own "not enough data" sentinel.
+    cumulative = 0
+    edges = [0]
+    for i in range(80):
+        cumulative += 20 if (i % 4 == 0) else 1
+        edges.append(cumulative)
+    f = _fake_fuzzer(discovery_edges=edges)
+    result = collect_current_pvalues(f)
+    assert "periodicity_discovery_rate" in result
+    assert result["periodicity_discovery_rate"] < 0.05
+
+
+def test_collect_and_correct_includes_periodicity_alongside_the_others():
+    structure_fn = SimpleNamespace(dispersion_pvalue=lambda: 0.5)
+    discovery_uniformity = SimpleNamespace(verdict=lambda: {"p": 0.6, "n": 200})
+    garch = SimpleNamespace(ljung_box=lambda: (0.1, 0.9))
+    edges = [100] * 60
+    f = _fake_fuzzer(structure_fn, discovery_uniformity, garch, edges)
+    result = collect_and_correct(f, alpha=0.05)
+    names = {c.name for c in result}
+    assert names == {
+        "structure_function_dispersion",
+        "discovery_uniformity_dispersion",
+        "garch_ljung_box",
+        "periodicity_discovery_rate",
+    }
