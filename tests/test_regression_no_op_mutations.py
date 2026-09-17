@@ -265,6 +265,10 @@ def _battery() -> list[bytes]:
         # seeded random inputs never start with it.
         b"CFHD" + bytes(60),
         b"\xff\x4f\xff\x51" + bytes(60),
+        # Native FLAC: magic + a STREAMINFO-shaped header is enough to
+        # satisfy flac_chunk_mutate's sniffer deterministically, same
+        # rationale as the CFHD/JPEG2000 entries above.
+        b"fLaC" + bytes(40),
         b"12345 6789 -3 0.5 abcdef ghij",
         _minimal_elf64(),
         _binary_stl(),

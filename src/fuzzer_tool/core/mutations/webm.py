@@ -11,6 +11,16 @@ An untouched element round-trips byte-identically: the size vint is
 re-emitted verbatim unless the payload length actually changed, in which
 case it is re-encoded at minimal length (parents recompute bottom-up in
 one recursive pass).
+
+_mutate_block_lacing reaches one level deeper: everything else here stops
+at the EBML element boundary, but a (Simple)Block/Block payload has its
+own header inside that leaf's data (matroskadec.c matroska_parse_block):
+  [track number: vint][timecode: i16 BE][flags: u8]
+and, when the flags' 0x06 bits select a lacing scheme, a
+[lace_count-1: u8] byte plus a lacing-specific frame-size table
+(matroska_parse_laces) before the laced frame data itself. None of the
+element-level mutators above can desync a frame boundary without also
+touching the EBML size field bounding the whole element; this can.
 """
 
 from __future__ import annotations
@@ -29,6 +39,7 @@ CONTAINER_IDS = {
     0x1654AE6B,  # Tracks
     0xAE,  # TrackEntry
     0x1F43B675,  # Cluster
+    0xA0,  # BlockGroup (holds Block + BlockDuration etc. inside a Cluster)
     0x114D9B74,  # SeekHead
     0x4DBB,  # Seek
     0x1043A770,  # Chapters
@@ -60,6 +71,8 @@ KNOWN_IDS = {
     0xE0: b"\xe0",  # Video
     0xE1: b"\xe1",  # Audio
     0xA3: b"\xa3",  # SimpleBlock
+    0xA0: b"\xa0",  # BlockGroup
+    0xA1: b"\xa1",  # Block (inside BlockGroup)
     0xE7: b"\xe7",  # Timecode
     0x83: b"\x83",  # TrackType
     0xD7: b"\xd7",  # TrackNumber
@@ -254,7 +267,7 @@ class WebmMutator:
         if elements is None:
             return self._generate_random_webm(max_len=max_len, rng=self._rng)
 
-        op = self._rng.randint(0, 11)
+        op = self._rng.randint(0, 12)
         mutators = [
             self._swap_id,
             self._rewrite_size_vint,
@@ -267,6 +280,7 @@ class WebmMutator:
             self._mutate_timecode_scale,
             self._mutate_duration,
             self._truncate_element,
+            self._mutate_block_lacing,
             self._generate_random_webm,
         ]
         result = mutators[op](elements, max_len)
@@ -413,6 +427,63 @@ class WebmMutator:
                 target.data = target.data[: self._rng.randint(0, len(target.data))]
         return elements
 
+    def _mutate_block_lacing(self, elements: list[Element], max_len: int) -> list[Element]:
+        """Corrupt the lacing header inside a (Simple)Block/Block payload.
+
+        See the module docstring for the byte layout. Three variants:
+
+        - retype: flip the 2-bit lacing-scheme field. Bytes immediately
+          after flags that used to be frame data get reinterpreted as a
+          lace-count byte plus a size table (or the reverse, if lacing
+          was already on) -- this alone needs no existing lace table to
+          be present, so it is the fallback whenever lacing is currently
+          off.
+        - lace_count_edge: force the lace-count byte to 0xFF, i.e. 256
+          laces -- exactly matroska_parse_laces' ``lace_size[256]``
+          array bound.
+        - xiph_run_extend: only when the scheme is already Xiph (type 1)
+          -- Xiph lace sizes are a run of continuation bytes terminated
+          by the first byte < 0xff (matroskadec.c's inner ``do/while``);
+          forcing an interior byte to 0xff extends that run toward the
+          buffer edge.
+        """
+        blocks = _find_all(elements, 0xA3) + _find_all(elements, 0xA1)
+        if not blocks:
+            return elements
+        target = self._rng.choice(blocks)
+        data = bytearray(target.data)
+        v = _read_vint(bytes(data), 0, max_len=8)
+        if v is None:
+            return elements
+        _, _, pos = v
+        flags_pos = pos + 2
+        lace_pos = flags_pos + 1
+        if flags_pos >= len(data):
+            return elements
+        flags = data[flags_pos]
+        lacing_type = (flags & 0x06) >> 1
+
+        if lacing_type == 0:
+            variant = "retype"
+        else:
+            variant = self._rng.choice(("retype", "lace_count_edge", "xiph_run_extend"))
+            if variant == "xiph_run_extend" and lacing_type != 1:
+                variant = "lace_count_edge"
+
+        if variant == "retype":
+            new_type = self._rng.choice([t for t in (0, 1, 2, 3) if t != lacing_type])
+            data[flags_pos] = (flags & ~0x06) | (new_type << 1)
+        elif variant == "lace_count_edge":
+            if lace_pos < len(data):
+                data[lace_pos] = 0xFF
+        else:  # xiph_run_extend
+            run_start = lace_pos + 1
+            if run_start < len(data):
+                idx = self._rng.randint(run_start, len(data) - 1)
+                data[idx] = 0xFF
+        target.data = bytes(data)
+        return elements
+
     def _generate_random_webm(self, _elements=None, max_len: int = 4096, rng=None) -> bytes:
         """Generate a minimal random WebM file."""
         # An int in the first slot is a max_len passed positionally. Without
@@ -476,7 +547,10 @@ class WebmMutator:
         )
         tracks = container(0x1654AE6B, [track])
 
-        cluster = container(0x1F43B675, [leaf(0xE7, b"\x81")])
+        # SimpleBlock payload: [track number vint][timecode i16 BE][flags u8]
+        # [frame bytes...]. flags=0x80 -> keyframe, no lacing (bits 0x06 clear).
+        simple_block = leaf(0xA3, b"\x81" + struct.pack(">h", 0) + b"\x80" + b"\x00" * 8)
+        cluster = container(0x1F43B675, [leaf(0xE7, b"\x81"), simple_block])
         segment = container(0x18538067, [info, tracks, cluster])
 
         return serialize_webm([ebml, segment])[:max_len]

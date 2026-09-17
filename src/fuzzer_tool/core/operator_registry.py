@@ -180,6 +180,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "dvbsub_chunk_mutate",
         "cfhd_chunk_mutate",
         "shorten_chunk_mutate",
+        "flac_chunk_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -513,6 +514,7 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "dvbsub_chunk_mutate": lambda d: len(d) >= 4 and d[:4] == b"\x1a\x45\xdf\xa3",
     "cfhd_chunk_mutate": lambda d: len(d) >= 4 and d[:4] == b"CFHD",
     "shorten_chunk_mutate": lambda d: len(d) >= 4 and d[:4] == b"ajkg",
+    "flac_chunk_mutate": lambda d: len(d) >= 4 and d[:4] == b"fLaC",
     # ffconcat playlist: starts with a comment or a path/URL line. The
     # distinctive signal is "ffconcat" on its own line (case-insensitive),
     # which is what the demuxer looks for before parsing anything else.

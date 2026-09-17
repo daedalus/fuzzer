@@ -274,6 +274,21 @@ def _find_ctts(boxes: list[Box]) -> list[Box]:
     return found
 
 
+def _find_moov(boxes: list[Box]) -> list[tuple[list[Box], int]]:
+    """Find all moov boxes in the box tree.
+
+    Returns list of (parent_children_list, index) tuples, matching
+    ``_find_hdlr``/``_find_stsd``.
+    """
+    found: list[tuple[list[Box], int]] = []
+    for i, box in enumerate(boxes):
+        if box.box_type == b"moov":
+            found.append((boxes, i))
+        if box.children:
+            found.extend(_find_moov(box.children))
+    return found
+
+
 def _mutate_hdlr_handler_type(box: Box, rng: Any) -> None:
     """Replace the handler_type field in a hdlr box payload.
 
@@ -324,7 +339,7 @@ class IsobmffMutator:
         if boxes is None or not boxes:
             return self._generate_random_isobmff(max_len=max_len, rng=self._rng)
 
-        op = self._rng.randint(0, 12)
+        op = self._rng.randint(0, 13)
         mutators = [
             self._mutate_box_type,
             self._mutate_box_size,
@@ -338,6 +353,7 @@ class IsobmffMutator:
             self._delete_box,
             self._duplicate_box,
             self._truncate_box,
+            self._mutate_free_hoov_confusion,
             self._generate_random_isobmff,
         ]
         result = mutators[op](boxes, max_len)
@@ -386,6 +402,28 @@ class IsobmffMutator:
                         [b"xxxx", b"\xff\xff\xff\xff", b"\x00\x00\x00\x00", b"????"]
                     )
                 box.data = bytes(data)
+        return boxes
+
+    def _mutate_free_hoov_confusion(self, boxes: list[Box], max_len: int) -> list[Box]:
+        """Relabel a moov box as free/hoov (mov.c's moov-in-free-atom quirk).
+
+        mov_read_default (mov.c:10158-10173) special-cases a top-level
+        'free' or 'hoov' box: it peeks 4 bytes into the payload, and if
+        those 4 bytes read 'mvhd' or 'cmov' it reclassifies the whole box
+        as 'moov' and parses it as one. A moov box's first child is
+        ordinarily mvhd, whose own [size][type] header already puts the
+        literal bytes 'mvhd' at payload offset 4:8 -- exactly where the
+        check peeks. Relabeling the outer fourcc with the children left
+        untouched reaches that reclassification path directly. This is
+        fourcc *aliasing*, not corruption -- the one case here where
+        renaming a box to something wrong makes it parse as something
+        else *more* fully, not less.
+        """
+        locations = _find_moov(boxes)
+        if not locations:
+            return boxes
+        parent, idx = self._rng.choice(locations)
+        parent[idx].box_type = self._rng.choice([b"free", b"hoov"])
         return boxes
 
     def _mutate_hdlr(self, boxes: list[Box], max_len: int) -> list[Box]:

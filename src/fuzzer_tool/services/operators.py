@@ -3315,6 +3315,18 @@ class OperatorEngine:
             mutated = self._shorten_mutator._generate_random_shn(max_len=self.ctx.max_len, rng=rng)
         return bytearray(mutated[: self.ctx.max_len])
 
+    def _op_flac_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.flac import FlacMutator, parse_flac
+
+        if not hasattr(self, "_flac_mutator"):
+            self._flac_mutator = FlacMutator()
+        rng = self.ctx._rng
+        if parse_flac(bytes(buf)):
+            mutated = self._flac_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._flac_mutator._generate_random_flac(max_len=self.ctx.max_len, rng=rng)
+        return bytearray(mutated[: self.ctx.max_len])
+
     def _op_x86_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.x86 import X86Mutator, _decode_insns
 
