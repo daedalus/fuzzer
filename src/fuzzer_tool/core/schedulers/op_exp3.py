@@ -6,6 +6,14 @@ import math
 
 from fuzzer_tool.core.rand_pool import RandPool
 
+# Blowup guard on the relative weights, and a floor for arms scaled below it.
+_RENORM_THRESHOLD = 1e9
+_WEIGHT_FLOOR = 1e-300
+# Largest log-weight step one record may take. A realistic step is <= the
+# reward weight (p >= gamma/K bounds r̂); the cap only stops a pathological
+# weight from raising OverflowError inside math.exp.
+_MAX_LOG_STEP = 100.0
+
 
 class Exp3Scheduler:
     """EXP3 adversarial bandit for operator selection.
@@ -35,12 +43,22 @@ class Exp3Scheduler:
     ):
         self.gamma = gamma
         self.window_decay = window_decay
+        self._log_window_decay = math.log(window_decay) if 0.0 < window_decay < 1.0 else 0.0
         self._rng = rng if rng is not None else RandPool()
-        # Per-arm weights RELATIVE to _decay_factor: the actual weight is
-        # weights[i] * _decay_factor. Decay is folded into the single
-        # factor so record() stays O(1) instead of sweeping every arm.
+        # Per-arm weights RELATIVE to exp(_log_decay): the actual weight is
+        # weights[i] * exp(_log_decay). Decay is folded into that one scalar
+        # so record() stays O(1) instead of sweeping every arm. The scalar is
+        # kept in log space because 0.999**n underflows to a subnormal and
+        # then sticks near 5e-324 after ~745k records.
+        #
+        # A factor common to every arm cancels in w_i / sum(w), so decay
+        # cannot change the sampling law; it only rescales the reported
+        # absolute weight. That is also why the blowup guard below must look
+        # at the RELATIVE weights: guarding on decay * max_relative let the
+        # shrinking factor hide relative growth until it overflowed to inf
+        # (NaN probabilities at pull 691,465 with K=20, window_decay=0.999).
         self.weights: dict[str, float] = {}
-        self._decay_factor: float = 1.0
+        self._log_decay: float = 0.0
         # Largest relative weight — only changes on the recorded arm, so
         # the blowup check below stays O(1). Non-decreasing until renorm.
         self._max_relative: float = 1.0
@@ -104,39 +122,48 @@ class Exp3Scheduler:
         Uses the importance-weighted estimator: reward_estimate = r / p_i,
         where p_i is the probability this operator had when it was selected.
 
-        Exponential decay is folded into ``_decay_factor`` (one multiply per
-        call) instead of multiplying every arm's weight; per-arm values in
-        ``self.weights`` are relative to it.
+        Exponential decay is folded into ``_log_decay`` (one add per call)
+        instead of multiplying every arm's weight; per-arm values in
+        ``self.weights`` are relative to ``exp(_log_decay)``.
         """
         self._total_pulls += 1
         reward = weight if success else 0.0
 
-        # Apply exponential decay to all weights (discounts old evidence)
+        # Exponential decay, folded into the log-space scalar (see __init__).
         if self.window_decay < 1.0:
-            self._decay_factor *= self.window_decay
+            self._log_decay += self._log_window_decay
 
         # EXP3 weight update: w_i *= exp(gamma * r̂_i / K)  (relative space)
-        # r̂_i = reward / p_i  (importance-weighted)
+        # r̂_i = reward / p_i  (importance-weighted). An arm record() has not
+        # seen starts at relative 1.0, the value init_arm() gives it and the
+        # default select_op() reads -- the old 1/decay default disagreed with
+        # both and grew without bound as the factor shrank.
         p = self._last_probs.get(name, 1.0 / max(len(self._last_probs), 1))
         K = max(len(self.weights), 1)
         estimated_reward = reward / max(p, 1e-9)
-        relative = self.weights.get(name, 1.0 / self._decay_factor) * math.exp(
-            self.gamma * estimated_reward / max(K, 1)
-        )
+        step = min(self.gamma * estimated_reward / max(K, 1), _MAX_LOG_STEP)
+        relative = self.weights.get(name, 1.0) * math.exp(step)
         self.weights[name] = relative
         if relative > self._max_relative:
             self._max_relative = relative
 
-        # Prevent floating-point blowup: renormalize if max weight is extreme
-        if self._decay_factor * self._max_relative > 1e9:
-            scale = 1.0 / (self._decay_factor * self._max_relative)
+        # Prevent floating-point blowup: renormalize relative weights so the
+        # largest is 1.0. The floor keeps an arm that fell below the double
+        # range revivable instead of pinned at exactly 0 forever.
+        if self._max_relative > _RENORM_THRESHOLD:
+            scale = 1.0 / self._max_relative
             for k in self.weights:
-                self.weights[k] *= scale
-            self._max_relative *= scale
+                self.weights[k] = max(self.weights[k] * scale, _WEIGHT_FLOOR)
+            self._max_relative = 1.0
 
     def bandit_stats(self) -> dict:
         """Return EXP3 diagnostics."""
         return {
             "exp3_pulls": self._total_pulls,
-            "exp3_max_weight": (self._decay_factor * self._max_relative if self.weights else 0.0),
+            "exp3_max_weight": (self._actual_max_weight() if self.weights else 0.0),
         }
+
+    def _actual_max_weight(self) -> float:
+        """Largest decay-adjusted weight, computed in log space (inf past range)."""
+        log_w = math.log(self._max_relative) + self._log_decay
+        return math.exp(log_w) if log_w < 709.0 else math.inf

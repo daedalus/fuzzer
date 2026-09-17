@@ -1211,7 +1211,7 @@ class TestExp3Scheduler:
         exp3.init_arm("a")
         exp3._last_probs = {"a": 0.8}
         exp3.record("a", success=True)
-        expected = exp3.weights["a"] * exp3._decay_factor
+        expected = exp3.weights["a"] * math.exp(exp3._log_decay)
         assert abs(exp3.bandit_stats()["exp3_max_weight"] - expected) < 1e-12
 
     @staticmethod
@@ -1257,7 +1257,7 @@ class TestExp3Scheduler:
             new.record(name, ok, weight=w)
             self._legacy_record(old, name, ok, weight=w)
         for a in arms:
-            actual_new = new.weights[a] * new._decay_factor
+            actual_new = new.weights[a] * math.exp(new._log_decay)
             assert abs(actual_new - old.weights[a]) <= 1e-9 * max(
                 1.0, abs(actual_new), abs(old.weights[a])
             ), f"arm {a}: {actual_new} vs {old.weights[a]}"
@@ -1285,8 +1285,8 @@ class TestExp3Scheduler:
             new.record(name, ok)
             self._legacy_record(old, name, ok)
         for a in arms:
-            assert new.weights[a] * new._decay_factor == old.weights[a], (
-                f"arm {a}: {new.weights[a] * new._decay_factor} vs {old.weights[a]}"
+            assert new.weights[a] * math.exp(new._log_decay) == old.weights[a], (
+                f"arm {a}: {new.weights[a]} vs {old.weights[a]}"
             )
 
 
