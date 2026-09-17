@@ -90,16 +90,17 @@ class ExecutionTimeTracker:
         else:
             crps = self._crps_history[-1] if self._crps_history else 0.0
 
+        # _times is a deque(maxlen=window_size): append() evicts the oldest
+        # value itself, so it must be read BEFORE the append. Reading
+        # _times[0] afterwards removed the second-oldest from _sorted and
+        # left the evicted value there for good -- an early outlier then
+        # held the percentiles (and suggested_timeout()) up indefinitely.
+        evicted = self._times[0] if len(self._times) == self._times.maxlen else None
         self._times.append(elapsed)
         self._moments.update(elapsed)
         bisect.insort(self._sorted, elapsed)
-        if len(self._sorted) > self.window_size:
-            # Remove oldest observation from sorted list
-            oldest = self._times[0] if len(self._times) > 1 else None
-            if oldest is not None:
-                idx = bisect.bisect_left(self._sorted, oldest)
-                if idx < len(self._sorted):
-                    self._sorted.pop(idx)
+        if evicted is not None:
+            self._sorted.pop(bisect.bisect_left(self._sorted, evicted))
 
         return crps
 
