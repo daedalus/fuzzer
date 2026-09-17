@@ -1421,6 +1421,11 @@ build_simple_so_targets() {
     build_so_target "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$TARGETS/gzip_read${out_suffix}.so" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
     build_so_target "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}.so" "-ljpeg" "$flags" "$cc" "$extra_cflags"
     build_so_target "${TARGETS_SRC:-$TARGETS}/nop_target.c" "$TARGETS/nop_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    # prng_token_read — CWE-338 demo: a weak taus88 token compared against an
+    # input field. .so only: the whole point is a generator instance that
+    # survives across in-process (direct_lite) iterations, which a
+    # process-per-exec build cannot show. No external deps.
+    build_so_target "${TARGETS_SRC:-$TARGETS}/prng_token_read.c" "$TARGETS/prng_token_read${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
     build_so_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" "$FFMPEG_LIBS" "$flags" "$cc" "$extra_cflags $FFMPEG_INC"
     # grep_read.so — see the note on the executable build above. The
     # config.h -include has to precede the shim's, which build_so_target
