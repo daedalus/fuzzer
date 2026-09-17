@@ -130,3 +130,35 @@ def test_cache_cleared_on_load():
     t.load({"sensitivity": {b"other".hex(): [0.1, 0.2]}})
     assert not t._cum_cache
     assert t._sensitivity == {b"other": [0.1, 0.2]}
+
+
+class _SliceCountingList(list):
+    """list that counts slice reads, to observe O(buf_len) passes."""
+
+    slices = 0
+
+    def __getitem__(self, key):
+        if isinstance(key, slice):
+            type(self).slices += 1
+        return super().__getitem__(key)
+
+
+def test_cached_pick_does_not_rescan_scores():
+    """Once the cumulative sums are cached, a pick reads the prefix total
+    from them instead of re-summing ``scores[:buf_len]`` (27 us at 4096
+    bytes, vs ~1 us for the bisect itself)."""
+    tracker = _make_tracker(_SliceCountingList([0.0, 1.0, 2.0, 3.0] * 32))
+    _draw(tracker, b"seed", 128, 0.3)  # builds the cache
+    _SliceCountingList.slices = 0
+    for _ in range(5):
+        _draw(tracker, b"seed", 128, 0.3)
+    assert _SliceCountingList.slices == 0
+
+
+def test_cached_total_honours_shorter_buf_len():
+    """The total must be the prefix up to buf_len, not the whole vector."""
+    scores = [1.0] * 10 + [1000.0] * 10
+    tracker = _make_tracker(scores)
+    _draw(tracker, b"seed", 20, 0.5)  # cache over all 20
+    assert _draw(tracker, b"seed", 10, 0.999999) == _legacy_walk(scores, 10, 0.999999 * 10.0)
+    assert _draw(tracker, b"seed", 10, 0.999999) == 9

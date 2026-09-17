@@ -130,12 +130,6 @@ class ByteSensitivityTracker:
         if not scores or len(scores) < buf_len:
             return None
 
-        total = sum(scores[:buf_len])
-        if total <= 0:
-            return None
-
-        r = self._rng.random() * total
-
         # Weighted pick via cached cumulative sums + bisect: "first i with
         # cumulative >= r" == bisect_left. Negative scores (only possible via
         # the JSON load path) break monotonicity — fall back to the walk.
@@ -151,9 +145,19 @@ class ByteSensitivityTracker:
                     for k in keys:
                         del self._cum_cache[k]
         if cum is not None:
+            # The prefix total is already in the cache; re-summing the score
+            # slice here was an O(buf_len) pass (plus a copy) on every pick.
+            total = cum[buf_len - 1]
+            if total <= 0:
+                return None
+            r = self._rng.random() * total
             i = bisect_left(cum, r, 0, buf_len)
             return i if i < buf_len else buf_len - 1
 
+        total = sum(scores[:buf_len])
+        if total <= 0:
+            return None
+        r = self._rng.random() * total
         cumulative = 0.0
         for i in range(buf_len):
             cumulative += scores[i]
