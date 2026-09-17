@@ -46,6 +46,10 @@ from fuzzer_tool.core.operator_categories import UNCATEGORIZED, category_of
 from fuzzer_tool.core.rand_pool import RandPool
 
 _UNIFORM_EXPERT = "uniform"
+# Operator-list layouts kept at once (see Exp4Scheduler._layout_for).
+# build_ops() filters the registry in a fixed order, so a campaign offers a
+# handful of distinct lists; evicted first-in first-out past this.
+_LAYOUT_CACHE_MAX = 16
 
 
 class Exp4Scheduler:
@@ -76,6 +80,10 @@ class Exp4Scheduler:
         self._last_p_arm: float = 0.0
         self._last_expert_xi: dict[str, float] = {}  # expert -> ξ_e(a)
         self._last_q: dict[str, float] = {}
+        # tuple(ops) -> (experts, member counts per category expert, category
+        # slot per offered op). None marks a list select_op cannot lay out
+        # (a repeated name) so the linear path handles it.
+        self._layouts: dict[tuple[str, ...], tuple | None] = {}
 
     def _cat_for(self, name: str) -> str:
         cat = self._op_to_cat.get(name)
@@ -112,8 +120,103 @@ class Exp4Scheduler:
         u = 1.0 / len(members)
         return {op: (u if op in members else 0.0) for op in ops}
 
+    def _layout_for(self, ops: list[str]) -> tuple | None:
+        """Per-list structure of the mixture: which expert covers which op.
+
+        Every category expert is uniform over its members, so p(a) takes one
+        value per category and select_op needs only the member counts and
+        each op's category slot, not the K x E table of xi dicts the linear
+        path builds. The layout depends on the list alone (``_cat_for`` is
+        memoised for the scheduler's lifetime), so it is cached per list.
+        """
+        key = tuple(ops)
+        layouts = self._layouts
+        if key in layouts:
+            return layouts[key]
+        layout = None
+        if len(set(key)) == len(key):
+            cats = [self._cat_for(op) for op in key]
+            experts = self._experts_for(ops)
+            slot = {e: i for i, e in enumerate(experts[1:])}
+            counts = [0] * (len(experts) - 1)
+            idx = [slot[c] for c in cats]
+            for i in idx:
+                counts[i] += 1
+            layout = (experts, counts, idx)
+        if len(layouts) >= _LAYOUT_CACHE_MAX:
+            del layouts[next(iter(layouts))]
+        layouts[key] = layout
+        return layout
+
     def select_op(self, ops: list[str]) -> str:
-        """Sample an operator from the EXP4 mixture over category experts."""
+        """Sample an operator from the EXP4 mixture over category experts.
+
+        Same law, same single ``random()`` and bit-identical arithmetic as
+        :meth:`_select_linear`, at O(K + E) per pick instead of O(K^2): the
+        linear path tests ``op in members`` over a list for every
+        (expert, op) pair. Lists with repeated names go the linear way.
+        """
+        if len(ops) < 2:
+            return self._select_linear(ops)
+        for op in ops:
+            self.init_arm(op)
+        layout = self._layout_for(ops)
+        if layout is None:
+            return self._select_linear(ops)
+        experts, counts, idx = layout
+        E = len(experts)
+        weights = self.weights
+        total_w = sum(weights.get(e, 1.0) for e in experts)
+        if total_w <= 0:
+            total_w = float(E)
+
+        gamma = self.gamma
+        q: dict[str, float] = {}
+        for e in experts:
+            w = weights.get(e, 1.0)
+            q[e] = (1.0 - gamma) * (w / total_w) + gamma / E
+        self._last_q = dict(q)
+
+        # The linear path forms p(a) as 0.0 + q_u*(1/K) + q_c*(1/m_c), the
+        # other experts adding q_e*0.0 == 0.0; reproduce that sum exactly.
+        K = len(ops)
+        base = 0.0 + q[_UNIFORM_EXPERT] * (1.0 / K)
+        cat_experts = experts[1:]
+        # 1.0 / len(members) in the linear path; counts are never 0 because
+        # experts come from the offered ops' own categories.
+        v_cat = [base + q[e] * (1.0 / m) for e, m in zip(cat_experts, counts, strict=True)]
+        values = [v_cat[i] for i in idx]
+        total = sum(values)
+        if total <= 0:
+            return self._select_linear(ops)
+        p_cat = [v / total for v in v_cat]
+
+        r = self._rng.random()
+        cumulative = 0.0
+        pos = K - 1
+        for j, i in enumerate(idx):
+            cumulative += p_cat[i]
+            if r <= cumulative:
+                pos = j
+                break
+
+        chosen = ops[pos]
+        ci = idx[pos]
+        self._last_op = chosen
+        self._last_p_arm = max(p_cat[ci], 1e-12)
+        chosen_cat = cat_experts[ci]
+        xi: dict[str, float] = {_UNIFORM_EXPERT: 1.0 / K}
+        for e, m in zip(cat_experts, counts, strict=True):
+            xi[e] = (1.0 / m) if e == chosen_cat else 0.0
+        self._last_expert_xi = xi
+        return chosen
+
+    def _select_linear(self, ops: list[str]) -> str:
+        """Reference EXP4 draw: builds every xi_e over *ops* explicitly.
+
+        Kept as the fallback for repeated names and a non-positive mixture
+        total, and as the oracle select_op is tested against.
+        """
         if not ops:
             return ""
         if len(ops) == 1:

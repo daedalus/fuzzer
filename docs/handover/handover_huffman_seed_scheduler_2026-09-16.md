@@ -167,3 +167,11 @@ consume.
 Where the shape does fit: `Exp3Scheduler.select_op` (one arm changes per
 record, the decay factor cancels). The tree landed there on 2026-09-17 —
 see `core/schedulers/op_exp3.py` and `tests/test_exp3_fenwick_select.py`.
+
+The other sampling schedulers were surveyed the same day. None needs a tree:
+`op_gradient` rewrites every preference per record (dense), `op_replicator`
+and `op_mopt` change their laws once per window, and `op_exp4`'s law is
+constant within a category. EXP4 was nonetheless the hot one — 630 us per
+pick at K=217, quadratic from `op in members` over lists — and now draws
+through a cached per-list category layout at ~25 us with bit-identical picks
+(`tests/test_exp4_layout_select.py`).
