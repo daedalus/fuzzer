@@ -35,6 +35,7 @@ import uuid
 from collections.abc import Iterable
 
 from fuzzer_tool.adapters.track_parser import (
+    CondStmt,
     conds_from_cmplog_text,
     pairs_from_operand_records,
 )
@@ -334,6 +335,18 @@ class CmplogCollector:
         self._token_set: set[bytes] = set()
         # Operand pairs: (operand_a, operand_b) for input-to-state matching
         self.pairs: list[tuple[bytes, bytes]] = []
+        # Ordered CondStmt list from the MOST RECENT drain only, in encounter
+        # order, each record carrying its comparison PC. `pairs` above cannot
+        # serve a consumer that needs either property: it is campaign-wide,
+        # keeps a pair only the first time it is ever seen, is capped at
+        # _MAX_PAIRS with eviction, and is drained on an interval once
+        # saturated -- so its iteration order is first-sighting order across
+        # many executions, not the order operands were compared in, and
+        # repeated values are gone entirely. A generator drained at one call
+        # site emits one value per query at one PC, so recovering its stream
+        # needs exactly the order and the PC that `pairs` discards.
+        # Replaced wholesale each drain, so it never grows unbounded.
+        self.last_conds: list[CondStmt] = []
         # Occurrence count: how many times each pair has been observed across
         # runs. Higher counts = more reliable comparison signals. Pruned with
         # _pair_set at the eviction site, so it stays bounded by _max_pairs.
@@ -920,7 +933,12 @@ class CmplogCollector:
         tokens: dict[bytes, None] = {}
         new_pairs: list[tuple[bytes, bytes]] = []
         batch_pairs: dict[tuple[bytes, bytes], None] = {}
-        for c in conds_from_cmplog_text(new_lines):
+        # Built once here rather than re-parsed by the consumer:
+        # conds_from_cmplog_text is the only thing that keeps encounter order
+        # and the PC field, and this is the one place the raw lines exist.
+        conds = conds_from_cmplog_text(new_lines)
+        self.last_conds = conds
+        for c in conds:
             pair = (c.base.op_a, c.base.op_b)
             if pair not in self._pair_set:
                 self._pair_set.add(pair)
