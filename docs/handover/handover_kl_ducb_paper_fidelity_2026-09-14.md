@@ -14,8 +14,8 @@ since the two schedulers differ only in `_width()`.
 
 ## What's cited, and what it actually says
 
-`kl_ducb.py` cites Garivier & Moulines (arXiv:0805.3415, the same D-UCB paper
-`ducb.py` implements) for the discounted structure, and `_kl_ucb.py`'s module
+`op_kl_ducb.py` cites Garivier & Moulines (arXiv:0805.3415, the same D-UCB paper
+`op_ducb.py` implements) for the discounted structure, and `_kl_ucb.py`'s module
 docstring cites Cappé, Garivier, Maillard, Munos, Stoltz (2013) for the KL
 bound — in practice the same result as Garivier & Cappé, *The KL-UCB Algorithm
 for Bounded Stochastic Bandits and Beyond*, COLT 2011 (arXiv:1102.2490), which
@@ -36,16 +36,16 @@ free shrinking multiplier in the theorem at all. That's the entire point of
 KL-UCB: unlike the Hoeffding/Gaussian bound, it needs no fudge factor to be
 tight.
 
-`kl_ducb.py`'s `_width()` instead computes the budget as
+`op_kl_ducb.py`'s `_width()` instead computes the budget as
 `exploration * xi * log_n / n = 0.25 * 0.6 * log_n / n = 0.15 * log_n/n` —
 i.e. it reuses the `exploration=0.25, xi=0.6` pair verbatim from
-`ducb.py`. That pair is a deliberate, empirically-measured correction
-documented in `ducb.py`'s own docstring (a 12-arm sweep showing the paper's
+`op_ducb.py`. That pair is a deliberate, empirically-measured correction
+documented in `op_ducb.py`'s own docstring (a 12-arm sweep showing the paper's
 literal `2B` coefficient is a massive over-exploration at this reward scale).
 But that correction was derived *for the Gaussian bound's own inflated
 leading constant* — it has no independent justification against the KL
 bound, whose paper explicitly says the untouched `log(t)` is already the
-right tuning. `kl_ducb.py`'s own docstring acknowledges this reasoning
+right tuning. `op_kl_ducb.py`'s own docstring acknowledges this reasoning
 ("the KL theorem uses a leading constant of 1, so `exploration` is the
 tuning knob here") but the reasoning doesn't hold: cutting the *budget*
 inside a KL divergence by 85% is not equivalent to cutting a linear
@@ -75,7 +75,7 @@ constant `c`; plugging in the actual defaults gives `c_kl = 0.30` vs.
     (constant 1.41 across every (n,p) tried outside p>=0.9)
 
 So the net, measured effect of points 1 and 2 together is the *opposite* of
-what `kl_ducb.py`'s docstring claims ("the KL bound is tighter, so it
+what `op_kl_ducb.py`'s docstring claims ("the KL bound is tighter, so it
 explores less"): in this operating regime `kl_ducb` explores **more** than
 `ducb`, not less, because the under-tuned budget still produces a wider
 Gaussian-shortcut width than `ducb`'s own already-corrected one. That's a
@@ -85,14 +85,14 @@ canary floor) in the live convergence table.
 ### 3. A structural gap neither cited paper actually covers
 
 Independent of the tuning question: Garivier & Moulines' Theorem 18 (the
-result `ducb.py` relies on) is a Hoeffding-type self-normalized deviation
+result `op_ducb.py` relies on) is a Hoeffding-type self-normalized deviation
 bound for **exponentially discounted** sums with a random number of
 summands. Garivier & Cappé's Theorem 10 (the result behind `kl_upper_bound`)
 proves the analogous statement for the **KL** divergence, but only for an
 *undiscounted* indicator sum (`N(t) = sum(eps_s)`, no `gamma^(t-s)` weight).
 Neither paper proves a KL-analog of Theorem 18 for the discounted case. That
 means composing "discounted counts/means" (`DiscountedUCBBase`) with
-`kl_upper_bound()` — as `kl_ducb.py` does — has no proof behind it in either
+`kl_upper_bound()` — as `op_kl_ducb.py` does — has no proof behind it in either
 source; it's a reasonable-looking heuristic combination of two papers, not
 the peer-reviewed algorithm the docstrings imply. This doesn't make it
 *wrong*, but "faithful to the paper" is not an accurate description of what
@@ -121,7 +121,7 @@ the original version of this doc.
 Followed up with a shrinkage sweep (`xi` from 1.0 down to 0.01,
 `exploration` fixed at 1.0), averaged over 5 seeds on both a stationary
 environment (tail share) and a decaying-best environment (post-decay
-recovery), matching the two-metric methodology `ducb.py`'s own docstring
+recovery), matching the two-metric methodology `op_ducb.py`'s own docstring
 uses:
 
     xi      stationary   recovery

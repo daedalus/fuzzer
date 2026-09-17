@@ -9,7 +9,7 @@ Defaults history
 Earlier versions defaulted to ``xi=0.6, exploration=0.25`` -- copied
 verbatim from ``DUCBScheduler``, where that pair is an empirically
 measured correction for the *Gaussian* bound's inflated ``2B`` leading
-constant (see ``ducb.py``). That pair has no justification in the KL
+constant (see ``op_ducb.py``). That pair has no justification in the KL
 paper: Garivier & Cappé (COLT 2011, arXiv:1102.2490) Remark 5 states
 "in practice ... we rather suggest to choose c = 0", i.e. their own
 recommended budget is the *unshrunk* ``log(t)``, since unlike the

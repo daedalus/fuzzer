@@ -135,7 +135,7 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     order-0 chains → trained unigram unreachable; ~22% of picks degenerate to
     most-common byte.
 
-43. **`monte_carlo.py:360-364`** [corroborated] — once `elite_set ≥ 10`, the
+43. **`op_monte_carlo.py:360-364`** [corroborated] — once `elite_set ≥ 10`, the
     refit-interval gate short-circuits; CEM refits (O(elite×len) rebuild + JS)
     on *every* interesting event; adaptive interval is dead code.
 
@@ -272,7 +272,7 @@ summary reprints the inner test name, so its `count(...) == 1` assertion sees 2.
     analyzed window.
 88. `qea.py:609-617` — empty population at generation boundary raises ValueError
     (empty-corpus start + 500 execs kills the loop).
-89. `monte_carlo.py:265-285,536-544` — Brier logs post-update prediction
+89. `op_monte_carlo.py:265-285,536-544` — Brier logs post-update prediction
     (systematically optimistic); `cem_byte` residual mass spills into uniform-
     over-all-256 instead of unobserved-only (TV ≈ 0.04 from true predictive).
 90. `randomness.py:338-358` — kmer_occupancy operates at λ≈0.14, not designed

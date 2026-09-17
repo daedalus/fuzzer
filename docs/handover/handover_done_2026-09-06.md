@@ -206,7 +206,7 @@ across all schedulers; LinUCB contextual bandit completed.
 **Minimax / adversarial search.** All five phases are in the tree, verified by
 inspection: `AlphaBetaMCTSSeedScheduler` in `core/schedulers/mcts.py` with
 `_pick_mcts_seed()` integration; `risk_matrix` in `core/elo.py:229`;
-`select_op_minimax` in `core/schedulers/monte_carlo.py:1776`; minimax framing
+`select_op_minimax` in `core/schedulers/op_monte_carlo.py:1776`; minimax framing
 in `core/cond_stmt.py` and `core/smt_solver.py`; `core/rate_distortion.py` +
 `corpus_manager.py` for robust corpus admission.
 **Correction:** the source document claimed all five landed in `b49441b`, and

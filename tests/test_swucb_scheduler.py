@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from fuzzer_tool.core.schedulers.swucb import SWUCBScheduler
+from fuzzer_tool.core.schedulers.op_swucb import SWUCBScheduler
 
 
 def test_swucb_falsification_width_decreases_with_n() -> None:

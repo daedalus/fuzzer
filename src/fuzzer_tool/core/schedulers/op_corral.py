@@ -57,7 +57,7 @@ value near ``1/p`` -- at uniform over 155 arms that is ~155 -- *every*
 round. Whoever played is punished hardest, which is churn, not learning,
 and it is the same pathology that makes the Elo fan-out prefer whoever
 played least recently (measured in
-``core/schedulers/consolidated.py``). Unbiasedness does not save it; the
+``core/schedulers/op_consolidated.py``). Unbiasedness does not save it; the
 variance is what does the damage.
 
 The fix is the standard loss shift. With running mean loss ``b``,

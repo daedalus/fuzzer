@@ -91,7 +91,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "temperature_control",
         # Deliberately worst-in-class operator scheduler: a floor for the
         # Elo meta-scheduler's tournament ranking (see
-        # core/schedulers/canary.py), not a strategy that competes to win.
+        # core/schedulers/op_canary.py), not a strategy that competes to win.
         # --hail-mary force-enables it to test the "everything on" contract;
         # without --elo it's meaningless, but with --elo all it runs as a
         # proper floor scheduler.

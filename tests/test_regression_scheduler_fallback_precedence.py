@@ -102,7 +102,7 @@ class _RecordingContextual(_RecordingScheduler):
 
 class _RecordingC2UCB(_RecordingScheduler):
     """C2UCB's select_op has the same (ops, context) shape as LinUCB's —
-    see c2ucb.py's module docstring: it delegates selection to an internal
+    see op_c2ucb.py's module docstring: it delegates selection to an internal
     ContextualLinUCBScheduler entirely unchanged."""
 
     def select_op(self, ops: list[str], context) -> str:

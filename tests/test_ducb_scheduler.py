@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from fuzzer_tool.core.schedulers.ducb import DUCBScheduler
+from fuzzer_tool.core.schedulers.op_ducb import DUCBScheduler
 
 
 def test_ducb_falsification_width_decreases_with_n() -> None:

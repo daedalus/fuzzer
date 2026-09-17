@@ -7,7 +7,7 @@ import math
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.bayes_ucb import (
+from fuzzer_tool.core.schedulers.op_bayes_ucb import (
     BayesUCBScheduler,
     _betai,
     beta_quantile,

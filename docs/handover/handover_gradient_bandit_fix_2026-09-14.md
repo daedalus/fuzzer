@@ -7,7 +7,7 @@
 Follow-up to `handover_non_ucb_schedulers_2026-09-13.md`'s T2-1 proposal
 (gradient bandit with baseline, "cheapest correct implementation"). Between
 that handover and this one, a different session implemented it directly as
-`core/schedulers/gradient.py` and wired it as a first-class fallback-precedence
+`core/schedulers/op_gradient.py` and wired it as a first-class fallback-precedence
 scheduler, without running it against this project's own convergence harness
 (`tests/support/bandit_env.py`) first. Running it turned up two real defects,
 both now fixed; this doc records what they were and why the fix looks the way
@@ -137,7 +137,7 @@ enumerate every scheduler by name:
 Fixed all three (mechanical, same one-line-per-file pattern already used
 for `gradient` above); confirmed via before/after diff of the exact failing
 node ID set that these were 100% pre-existing and unrelated to this
-session's `gradient.py` changes before being fixed.
+session's `op_gradient.py` changes before being fixed.
 
 ## 5. Also found and fixed: `parallel.py` gaps for the whole `gradient`/`exp4`/`successive_elim` family
 

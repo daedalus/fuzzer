@@ -52,7 +52,7 @@ else:
 Pure feed-forward on a clock. `_anneal_budget` defaults to 10000 when any
 annealing flag is set (`cli/commands.py:1821-1824`). The exploration
 temperature — consumed at `seed_picker.py:551`, `:1227`, `:1505`, `:1584` and
-in `monte_carlo.py::add_elite` — never reads whether the campaign is
+in `op_monte_carlo.py::add_elite` — never reads whether the campaign is
 discovering anything.
 
 The measured signal it would need already exists and already has consumers:
@@ -142,7 +142,7 @@ Two consequences for anything built on top:
   (§3, Tier 1.3).
 
 There is a second, smaller transport delay already documented in the tree:
-`core/schedulers/ducb.py:37` notes that with `mutations_per_input = 8` the
+`core/schedulers/op_ducb.py:37` notes that with `mutations_per_input = 8` the
 effective horizon of `gamma` is ~8× shorter than it looks, because a batch of
 8 operator selections shares one binary reward. That is a phase-lag statement
 and it is already written down; no action needed, but it is the reason §4
@@ -439,12 +439,12 @@ Recorded as rejected, not merely absent, so they are not re-proposed
 ## 4. Where *not* to put a controller
 
 **Not on the operator schedulers.** They are already closed-loop learners
-with their own loop gains — `cucb.py` `gamma=0.9995`, `ducb.py`
-`gamma=0.9999`, `epsilon_greedy.py` `decay=0.9995`, EXP3's `gamma`, MOpt's
+with their own loop gains — `op_cucb.py` `gamma=0.9995`, `op_ducb.py`
+`gamma=0.9999`, `op_epsilon_greedy.py` `decay=0.9995`, EXP3's `gamma`, MOpt's
 inertia weight. A PI on top of a bandit is a cascade with two integrators,
 which is a stability problem rather than a feature. The genuinely useful
 control observation about them is the transport delay already noted in
-`ducb.py:37`, and it needs no new machinery.
+`op_ducb.py:37`, and it needs no new machinery.
 
 **Actuator candidates, ranked.** A controller needs a manipulated variable
 with a known sign and a bounded range:

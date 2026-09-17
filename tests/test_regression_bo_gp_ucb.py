@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 
 from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES
-from fuzzer_tool.core.schedulers.bo_gp_ucb import BOGPUCBScheduler
+from fuzzer_tool.core.schedulers.op_bo_gp_ucb import BOGPUCBScheduler
 
 ALL_OPS = sorted({op for ops in OPERATOR_CATEGORIES.values() for op in ops})
 

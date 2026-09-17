@@ -59,13 +59,13 @@ the operator space:
 
 | File | Class | Mechanism |
 |------|-------|-----------|
-| `schedulers/monte_carlo.py` | `MonteCarloScheduler` | Thompson sampling over operators + CEM per-position byte distribution |
-| `schedulers/mopt.py` | `MOptScheduler` | PSO over joint operator-probability space |
-| `schedulers/replicator.py` | `ReplicatorScheduler` | Evolutionary replicator dynamics over the operator population |
-| `schedulers/exp3.py` | `Exp3Scheduler` | EXP3 adversarial bandit (non-stationary rewards) |
-| `schedulers/epsilon_greedy.py` | `EpsilonGreedyScheduler` | Epsilon-greedy with exponential annealing |
-| `schedulers/hierarchical.py` | `HierarchicalBanditScheduler` | Two-level Thompson bandit: category → operator |
-| `schedulers/gp_ucb.py` | `GPUCBScheduler` | GP-UCB with RBF kernel over operator-category features |
+| `schedulers/op_monte_carlo.py` | `MonteCarloScheduler` | Thompson sampling over operators + CEM per-position byte distribution |
+| `schedulers/op_mopt.py` | `MOptScheduler` | PSO over joint operator-probability space |
+| `schedulers/op_replicator.py` | `ReplicatorScheduler` | Evolutionary replicator dynamics over the operator population |
+| `schedulers/op_exp3.py` | `Exp3Scheduler` | EXP3 adversarial bandit (non-stationary rewards) |
+| `schedulers/op_epsilon_greedy.py` | `EpsilonGreedyScheduler` | Epsilon-greedy with exponential annealing |
+| `schedulers/op_hierarchical.py` | `HierarchicalBanditScheduler` | Two-level Thompson bandit: category → operator |
+| `schedulers/op_gp_ucb.py` | `GPUCBScheduler` | GP-UCB with RBF kernel over operator-category features |
 | `core/elo.py` | `BayesianEloTracker` | Meta-arbitration: Thompson-samples which scheduler's `select_op` to trust (`select_strategy`), ratings persisted to `elo.json` |
 
 - `--elo` enables Elo arbitration between whichever schedulers are enabled

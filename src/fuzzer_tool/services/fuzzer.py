@@ -1297,7 +1297,7 @@ class Fuzzer:
         # shares no state with the legacy global np.random.* functions. Nothing
         # in src/ seeded that global, so every np.random draw outside RandPool
         # — qea.py:267,361,364 (observe/mutate amplitudes) and
-        # schedulers/monte_carlo.py:778,895 (spectral probe vectors) — ran off
+        # schedulers/op_monte_carlo.py:778,895 (spectral probe vectors) — ran off
         # OS entropy and made --seed non-reproducible whenever QEA or the
         # Monte-Carlo scheduler was active. Seed it here, next to random.seed,
         # so the three streams start together.
@@ -2111,7 +2111,7 @@ class Fuzzer:
             log.info("CUCB enabled (gamma=%.5f)", cucb_gamma)
 
         # CUSUM-UCB (Liu, Lee & Shroff 2018): change-point detection instead
-        # of D-UCB/SW-UCB's continuous forgetting -- see cusum_ucb.py for why
+        # of D-UCB/SW-UCB's continuous forgetting -- see op_cusum_ucb.py for why
         # both approaches earn a place here.
         self._use_cusum_ucb = cusum_ucb
         self._cusum_ucb = None
@@ -2142,7 +2142,7 @@ class Fuzzer:
         # Gradient / softmax bandit (Boltzmann exploration). Preference
         # weights updated by the classic REINFORCE-style rule with optional
         # baseline and temperature annealing. Off by default and Elo-only
-        # (see core/schedulers/gradient.py's module docstring): it is a
+        # (see core/schedulers/op_gradient.py's module docstring): it is a
         # legitimate stationary control arm but has no non-stationary
         # forgetting mechanism, and the tuning that keeps it converging
         # reliably even in the stationary case (alpha, floor) was found by
@@ -2169,7 +2169,7 @@ class Fuzzer:
         # Corral: log-barrier OMD over the operator arms with
         # importance-weighted losses. Off by default and Elo-only, for a
         # measured reason rather than by analogy -- see
-        # core/schedulers/corral.py. On the stationary convergence harness it
+        # core/schedulers/op_corral.py. On the stationary convergence harness it
         # is solid (best-arm tail share min 0.924 over 40 seeds, regret slope
         # max 0.563), but on DecayingBest its recovery is seed-fragile
         # (best_late share min 0.006, median 0.777 over 12 seeds): the
@@ -2184,7 +2184,7 @@ class Fuzzer:
             log.info("Corral (log-barrier OMD) enabled (eta=%.2f)", corral_eta)
 
         # Whittle index (restless-bandit index policy). Off by default and
-        # Elo-only (see core/schedulers/whittle.py's module docstring): the
+        # Elo-only (see core/schedulers/op_whittle.py's module docstring): the
         # passive_decay restless-drift assumption is an unmeasured guess
         # pending the still-missing operator column in the ablation CSV
         # (docs/handover/handover_non_ucb_schedulers_2026-09-13.md §6), and
@@ -2259,7 +2259,7 @@ class Fuzzer:
 
         # Consolidated: flat Thompson with a category-shrunk prior and capped
         # evidence -- the single learner meant to replace the Elo portfolio
-        # (see core/schedulers/consolidated.py for the measurements).
+        # (see core/schedulers/op_consolidated.py for the measurements).
         self._use_consolidated = consolidated
         self._consolidated = None
         if consolidated:
@@ -2267,7 +2267,7 @@ class Fuzzer:
             log.info("Consolidated operator scheduler enabled")
 
         # MOSS: UCB whose exploration bonus ends at an arm's fair share t/K,
-        # built for many low-yield operators (see core/schedulers/moss.py).
+        # built for many low-yield operators (see core/schedulers/op_moss.py).
         self._use_moss = moss
         self._moss = None
         if moss:
@@ -2286,7 +2286,7 @@ class Fuzzer:
         # Canary: deliberately worst-in-class operator scheduler. Fed the
         # same record(op, success, weight) signal as every real scheduler
         # in the pool, it always argmin-selects instead of argmax-selects
-        # (see core/schedulers/canary.py). Only meaningful alongside --elo,
+        # (see core/schedulers/op_canary.py). Only meaningful alongside --elo,
         # which is what actually ranks it against the rest of the pool.
         self._use_canary = canary_scheduler
         self._canary = None
@@ -2310,7 +2310,7 @@ class Fuzzer:
             )
 
         # C2UCB (Qin, Chen & Zhu 2014): CUCB's superarm/semi-bandit credit
-        # assignment fused with LinUCB's per-arm context -- see c2ucb.py for
+        # assignment fused with LinUCB's per-arm context -- see op_c2ucb.py for
         # why neither half alone is enough, and for the documented context-
         # dilution limitation when _track_op_effect is off.
         self._use_c2ucb = c2ucb
@@ -5167,7 +5167,7 @@ class Fuzzer:
         if self._c2ucb:
             # Stage every operator's outcome+context into the open round;
             # settle_round() computes the actual per-arm credit once the
-            # whole round's membership is known (see c2ucb.py's module
+            # whole round's membership is known (see op_c2ucb.py's module
             # docstring for why this can't happen per-record like
             # ContextualLinUCBScheduler above).
             for op, ok, w in op_rewards:
@@ -5177,7 +5177,7 @@ class Fuzzer:
             # bypass C2UCB's own inclusion-contrast entirely and hand it
             # that truth directly. This is the documented difference
             # between C2UCB actually working and merely running; see
-            # "Context dilution" in c2ucb.py.
+            # "Context dilution" in op_c2ucb.py.
             c2ucb_credits = (
                 {op: (w if ok else 0.0) for op, ok, w in op_rewards}
                 if self._track_op_effect
@@ -6510,7 +6510,7 @@ class Fuzzer:
         from the convergence report.
 
         canary is a deliberate exception: it is designed (see
-        ``core/schedulers/canary.py``) to be selected the *least* of any
+        ``core/schedulers/op_canary.py``) to be selected the *least* of any
         scheduler in the pool, so gating it on "was ever selected" the same
         way as real schedulers means it disappears from exactly the report
         that exists to show it as a floor. It still accrues a real rating and
@@ -6596,11 +6596,11 @@ class Fuzzer:
         if getattr(self, "_fpl", False):
             ops.append("fpl")
         # corral is deliberately absent from this banner too, same reason,
-        # see core/schedulers/corral.py.
+        # see core/schedulers/op_corral.py.
         # gradient is deliberately absent from this banner, matching
-        # op_katz/op_tang: it is Elo-only, see core/schedulers/gradient.py.
+        # op_katz/op_tang: it is Elo-only, see core/schedulers/op_gradient.py.
         # whittle is deliberately absent from this banner too, same
-        # reason, see core/schedulers/whittle.py.
+        # reason, see core/schedulers/op_whittle.py.
         if getattr(self, "_use_successive_elim", False) and self._successive_elim:
             ops.append("successive_elim")
         if getattr(self, "_use_invasion", False) and self.mc_bandit:
@@ -6838,11 +6838,11 @@ class Fuzzer:
         if getattr(self, "_fpl", False):
             ops.append("fpl")
         # corral is deliberately absent from this banner too, same reason,
-        # see core/schedulers/corral.py.
+        # see core/schedulers/op_corral.py.
         # gradient is deliberately absent from this banner, matching
-        # op_katz/op_tang: it is Elo-only, see core/schedulers/gradient.py.
+        # op_katz/op_tang: it is Elo-only, see core/schedulers/op_gradient.py.
         # whittle is deliberately absent from this banner too, same
-        # reason, see core/schedulers/whittle.py.
+        # reason, see core/schedulers/op_whittle.py.
         if getattr(self, "_use_successive_elim", False) and self._successive_elim:
             ops.append("successive-elim")
         if getattr(self, "_use_contextual", False):

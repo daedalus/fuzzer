@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from fuzzer_tool.core.schedulers.cusum_ucb import CUSUM_UCBScheduler
+from fuzzer_tool.core.schedulers.op_cusum_ucb import CUSUM_UCBScheduler
 
 
 def test_cusum_ucb_falsification_width_decreases_with_n() -> None:

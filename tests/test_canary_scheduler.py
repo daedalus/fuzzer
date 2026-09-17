@@ -15,8 +15,8 @@ import random
 import pytest
 
 from fuzzer_tool.core.elo import BayesianEloTracker
-from fuzzer_tool.core.schedulers.canary import CanaryScheduler
-from fuzzer_tool.core.schedulers.consolidated import ConsolidatedScheduler
+from fuzzer_tool.core.schedulers.op_canary import CanaryScheduler
+from fuzzer_tool.core.schedulers.op_consolidated import ConsolidatedScheduler
 
 ARMS = ["bit_flip", "byte_flip", "havoc"]
 

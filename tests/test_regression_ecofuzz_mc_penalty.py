@@ -1,6 +1,6 @@
 """Regression tests for SeedPicker._pick_ecofuzz_seed's optional
 marginal-cost penalty (handover §1 candidate #1, added after the initial
-replicator.py wiring -- see
+op_replicator.py wiring -- see
 docs/handover/handover_decision_game_theory_survey_2026-09-13.md §1).
 
 EcoFuzz's energy = reward_prob / cost is a *lifetime* average; these tests

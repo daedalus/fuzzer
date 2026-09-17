@@ -1037,7 +1037,7 @@ def format_operator_priors(profile: "TargetProfile") -> dict[str, tuple[float, f
     strings, format signature) is prior knowledge about which
     structure-aware mutation operators are likely to be useful *before*
     any executions have happened. This lets the Thompson-sampling bandit
-    (:class:`fuzzer_tool.core.schedulers.monte_carlo.MonteCarloScheduler`) start with a
+    (:class:`fuzzer_tool.core.schedulers.op_monte_carlo.MonteCarloScheduler`) start with a
     Beta prior biased toward those operators instead of the uninformative
     Beta(1, 1) used for every arm by default.
 

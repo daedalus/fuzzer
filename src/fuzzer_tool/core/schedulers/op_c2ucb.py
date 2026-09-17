@@ -28,7 +28,7 @@ what this scheduler needs and neither solves the other half:
 
 C2UCB is neither on its own: it is LinUCB's regressor, selected and scored
 by LinUCB's own rule (``theta_a.x + alpha*sqrt(x^T A_inv x)``, entirely
-unmodified -- see ``contextual.py``), but *updated* from CUCB's per-round
+unmodified -- see ``op_contextual.py``), but *updated* from CUCB's per-round
 inclusion-contrast credit instead of the raw per-pull outcome. Composition
 over reimplementation: both halves are already correct and tested in
 isolation, so this module is the round bookkeeping that turns one CUCB
@@ -100,7 +100,7 @@ decay at all -- it assumes a stationary seed/operator relationship, full
 stop. This scheduler follows the *contextual* half's assumption, not the
 combinatorial half's: decaying a ridge regressor's design matrix while
 preserving Sherman-Morrison's O(d^2) update (no direct matrix inversion on
-the hot path -- the specific property ``contextual.py`` exists to have)
+the hot path -- the specific property ``op_contextual.py`` exists to have)
 is a real technique (see e.g. discounted/windowed LinUCB in the
 non-stationary bandit literature) but a distinct one, with its own
 numerical-stability surface this module does not take on. The round-level
@@ -126,8 +126,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from fuzzer_tool.core.schedulers.contextual import ContextualLinUCBScheduler
-from fuzzer_tool.core.schedulers.cucb import MIN_CONTRAST_DENOM, CUCBScheduler
+from fuzzer_tool.core.schedulers.op_contextual import ContextualLinUCBScheduler
+from fuzzer_tool.core.schedulers.op_cucb import MIN_CONTRAST_DENOM, CUCBScheduler
 
 
 class C2UCBScheduler:

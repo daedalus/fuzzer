@@ -16,7 +16,7 @@ import math
 
 import pytest
 
-from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
+from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
 
 np = pytest.importorskip("numpy")
 

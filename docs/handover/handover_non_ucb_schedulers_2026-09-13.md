@@ -33,7 +33,7 @@ sampling from a Gaussian posterior per strategy. There is no temperature. The
 already measured.** The first pass proposed a principled model-selection
 master (Corral / EXP3-over-schedulers) as a *new* opportunity, on the argument
 that the arbiter cannot concentrate. That argument is right, is not new, and is
-recorded verbatim in `core/schedulers/consolidated.py:1-19`, with numbers:
+recorded verbatim in `core/schedulers/op_consolidated.py:1-19`, with numbers:
 
 - the selected strategy loses ~97% of its games whatever its quality, because
   the score it is credited with is its own round outcome and fuzzing success
@@ -91,12 +91,12 @@ Ten of the schedulers exist to handle non-stationarity. Each of them indexes
 
 | Mechanism | Where | Clock |
 |---|---|---|
-| EXP3 window decay | `exp3.py:104-105` — one `_decay_factor` multiply per `record()`, applied to all arms through the shared factor | global |
-| Thompson arm decay | `monte_carlo.py:349-358` — every 100 `record()` calls, `arm_alpha[k] *= 0.999` for **every** `k` | global |
-| D-UCB / KL-D-UCB | `ducb.py:7-8` — `gamma^(t-s)` over all rounds `s <= t` | global |
-| SW-UCB / KL-SW-UCB | `swucb.py:5, 81` — hard window of the last 4000 pulls, any arm | global |
-| CUSUM-UCB | `cusum_ucb.py:11-18` — the CUSUM statistic is per arm, but *"a detection in any arm resets every arm's"* state | per-arm detect, global reset |
-| Consolidated cap | `consolidated.py:105-109` — ceiling on an arm's own `alpha + beta` | **per-arm, but bounds confidence only** |
+| EXP3 window decay | `op_exp3.py:104-105` — one `_decay_factor` multiply per `record()`, applied to all arms through the shared factor | global |
+| Thompson arm decay | `op_monte_carlo.py:349-358` — every 100 `record()` calls, `arm_alpha[k] *= 0.999` for **every** `k` | global |
+| D-UCB / KL-D-UCB | `op_ducb.py:7-8` — `gamma^(t-s)` over all rounds `s <= t` | global |
+| SW-UCB / KL-SW-UCB | `op_swucb.py:5, 81` — hard window of the last 4000 pulls, any arm | global |
+| CUSUM-UCB | `op_cusum_ucb.py:11-18` — the CUSUM statistic is per arm, but *"a detection in any arm resets every arm's"* state | per-arm detect, global reset |
+| Consolidated cap | `op_consolidated.py:105-109` — ceiling on an arm's own `alpha + beta` | **per-arm, but bounds confidence only** |
 
 The last row is the near miss and the reason this finding needs care. The
 capped pseudocount *is* indexed on the arm's own evidence, and the docstring is
@@ -131,7 +131,7 @@ gate: a suite that cannot detect the defect it was written for. Here the
 environment cannot express the hypothesis the schedulers are supposed to be
 answering.
 
-**Related gap, recorded so it is not re-derived.** `consolidated.py:24-26`
+**Related gap, recorded so it is not re-derived.** `op_consolidated.py:24-26`
 credits its design partly to "a 150-arm environment with rare heavy-tailed
 yields, **fatigue on success** and periodic unlocks". `grep -rn fatigue` over
 the whole tree returns only `core/structure_function.py:21-22,202-204` (an unrelated
@@ -199,7 +199,7 @@ reward-vs-own-pulls curves are flat, record it in the Rejected section of
 
 Sutton–Barto §2.8. One preference parameter per arm, constant step size,
 reward-baseline subtraction, no confidence width, O(K) per update. Absent from
-the tree; the closest thing is the softmax *inside* `cmaes.py:46`, which is
+the tree; the closest thing is the softmax *inside* `op_cmaes.py:46`, which is
 over CMA-ES logits and not a policy learned from reward.
 
 Two reasons it is the cheapest real candidate. First, a constant step size
@@ -344,7 +344,7 @@ shipped schedulers currently assume without evidence.
   `fuzz_count/(coverage+1)`, which is productivity. Neither is "pulls of this
   seed since its last discovery". The `last_picked` field that P3-3 needs is
   the same missing field.
-- `bayes_ucb.py` shipped uncabled with three of its own tests failing upstream.
+- `op_bayes_ucb.py` shipped uncabled with three of its own tests failing upstream.
   Is it meant to reach the ballot, or be retired? It is in neither
   `core/schedulers/__init__.py`'s `__all__` nor `operator_strategy_pool`; the
   same is true of `tang` and `katz`, which are *seed* strategies and correctly

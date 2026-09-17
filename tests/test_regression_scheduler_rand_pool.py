@@ -34,10 +34,10 @@ import re
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.cucb import CUCBScheduler
-from fuzzer_tool.core.schedulers.cusum_ucb import CUSUM_UCBScheduler
-from fuzzer_tool.core.schedulers.ducb import DUCBScheduler
-from fuzzer_tool.core.schedulers.swucb import SWUCBScheduler
+from fuzzer_tool.core.schedulers.op_cucb import CUCBScheduler
+from fuzzer_tool.core.schedulers.op_cusum_ucb import CUSUM_UCBScheduler
+from fuzzer_tool.core.schedulers.op_ducb import DUCBScheduler
+from fuzzer_tool.core.schedulers.op_swucb import SWUCBScheduler
 
 SCHEDULERS_DIR = (
     pathlib.Path(__file__).parent.parent / "src" / "fuzzer_tool" / "core" / "schedulers"
@@ -45,10 +45,10 @@ SCHEDULERS_DIR = (
 
 #: Schedulers added with the RandPool convention in force from the start.
 RULE_16_SCHEDULERS = {
-    "ducb.py": DUCBScheduler,
-    "swucb.py": SWUCBScheduler,
-    "cucb.py": CUCBScheduler,
-    "cusum_ucb.py": CUSUM_UCBScheduler,
+    "op_ducb.py": DUCBScheduler,
+    "op_swucb.py": SWUCBScheduler,
+    "op_cucb.py": CUCBScheduler,
+    "op_cusum_ucb.py": CUSUM_UCBScheduler,
 }
 
 #: Enough arms that a tie-break or unpulled-arm draw is overwhelmingly
@@ -94,7 +94,7 @@ class TestNoModuleRandom:
     @pytest.mark.parametrize("name,cls", sorted(RULE_16_SCHEDULERS.items()))
     def test_accepts_injected_rng(self, name, cls):
         params = inspect.signature(cls.__init__).parameters
-        assert "rng" in params, f"{cls.__name__} takes no rng= argument (see cmaes.py)"
+        assert "rng" in params, f"{cls.__name__} takes no rng= argument (see op_cmaes.py)"
         assert params["rng"].default is None, (
             f"{cls.__name__}'s rng default must be None so the fuzzer's shared pool wins"
         )

@@ -478,7 +478,7 @@ re-proposable.
 | `searches/simulated_annealing`, `hill_climbing` | temperature `T` in `_compute_weights`; `climb_hill` operator |
 | `machine_learning/gradient_descent` | `core/gradient_descent.py`, already optimised |
 | `graphs/tarjans_scc`, `scc_kosaraju` | `core/horizon.py` Tarjan-SCC DAG conversion |
-| `graphs/markov_chain` | `core/markov.py`, `schedulers/monte_carlo.py:103` |
+| `graphs/markov_chain` | `core/markov.py`, `schedulers/op_monte_carlo.py:103` |
 | `set/set_covering` (greedy) | `services/minimize.py:149` |
 | `data_structures` bloom filter | `core/bloom.py` |
 

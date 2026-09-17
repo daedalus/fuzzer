@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 
 from fuzzer_tool.core.schedulers._kl_ucb import kl_upper_bound
-from fuzzer_tool.core.schedulers.kl_ducb import KL_DUCBScheduler
+from fuzzer_tool.core.schedulers.op_kl_ducb import KL_DUCBScheduler
 
 
 def test_kl_ducb_falsification_gaussian_strict_tightening() -> None:

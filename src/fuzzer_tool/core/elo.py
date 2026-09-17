@@ -947,7 +947,7 @@ class BayesianEloTracker(RoundRecorderMixin):
         """Real strategies rated at or below the deliberately-worst canary.
 
         ``canary_name`` always argmin-selects (see
-        ``core/schedulers/canary.py``), so it is meant to anchor the bottom
+        ``core/schedulers/op_canary.py``), so it is meant to anchor the bottom
         of ``get_strategy_ranking()``. A real strategy resting at or below
         it is not evidence canary is doing well -- it means that strategy
         is performing at or worse than a scheduler built to lose on

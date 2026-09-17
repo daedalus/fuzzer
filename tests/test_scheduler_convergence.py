@@ -122,7 +122,7 @@ RELIABLE = {
     # 0.963, slope max 0.368 (median 0.194).
     "MOSS": (lambda seed: MOSSScheduler(rng=RandPool(seed)), 0.90, 0.45),
     # Softmax/Boltzmann preference bandit with a uniform exploration floor
-    # (see core/schedulers/gradient.py -- the floor and the lowered default
+    # (see core/schedulers/op_gradient.py -- the floor and the lowered default
     # alpha were both added post-hoc after this harness found the original
     # version could reach tail_share 0.0/1.0, zero exploration in either
     # direction, plus a specific-seed convergence failure at the original
@@ -141,7 +141,7 @@ RELIABLE = {
     # best_late tail share over 12 seeds was min 0.006, median 0.777, max
     # 0.947 -- bimodal, not a property. Either set would be a flaky
     # assertion, and the honest statement is the one in
-    # core/schedulers/corral.py: the doubling trick raises a starved arm's
+    # core/schedulers/op_corral.py: the doubling trick raises a starved arm's
     # learning rate but does not get it drawn, so whether it recovers turns
     # on whether the mixing floor happens to sample it early enough after
     # the switch. That fragility is why the scheduler is Elo-only.
@@ -419,7 +419,7 @@ STUCK = {
     "EpsilonGreedy": EpsilonGreedyScheduler,
     "MonteCarlo": MonteCarloScheduler,
     # Gradient's uniform exploration floor (added to fix a worse failure --
-    # see core/schedulers/gradient.py -- where the pre-fix version reached
+    # see core/schedulers/op_gradient.py -- where the pre-fix version reached
     # tail_share 0.0 on the revived arm, i.e. no recovery at all) bounds
     # the *instantaneous* selection probability away from zero. It is not
     # a forgetting mechanism: nothing here discounts the confidence built

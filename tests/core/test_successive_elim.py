@@ -1,7 +1,7 @@
 """Unit tests for SuccessiveEliminationScheduler."""
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.successive_elim import SuccessiveEliminationScheduler
+from fuzzer_tool.core.schedulers.op_successive_elim import SuccessiveEliminationScheduler
 
 
 def test_select_single():

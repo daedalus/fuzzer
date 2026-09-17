@@ -50,7 +50,7 @@ KS correlates 0.9993 with Wasserstein on the synthetic corpus, so the
 diversity-weight wiring stays gated. Test `test_ks_distance_separates_loop_heavy_seeds`
 in `tests/test_edge_ground_metric.py`.
 
-## 5. KL-UCB — `core/schedulers/_kl_ucb.py`, `ducb.py`, `swucb.py`
+## 5. KL-UCB — `core/schedulers/_kl_ucb.py`, `op_ducb.py`, `op_swucb.py`
 
 Shared Bernoulli upper bound (`kl_upper_bound`). Promoted to two full peer
 schedulers (`KL_DUCBScheduler`, `KL_SWUCBScheduler`); the `kl_ucb` flag was
@@ -58,13 +58,13 @@ removed from `DUCBScheduler` and `SWUCBScheduler`, whose `_width()` is now the
 Gaussian form only. `tools/measure_klucb_signal.py` runs all four side by side:
 SW-UCB KL 0.997 vs Gaussian 0.985, DUCB KL 0.777 vs Gaussian 0.968 — not a
 one-size win, so the KL variants stay opt-in via `--kl-ducb` / `--kl-swucb`.
-FPL (`core/schedulers/fpl.py`) has since been implemented (commit `ed09d59`).
+FPL (`core/schedulers/op_fpl.py`) has since been implemented (commit `ed09d59`).
 
 ---
 
 ## 6. What is still open
 
-- FPL scheduler (`core/schedulers/fpl.py`) — implemented in commit `ed09d59`,
+- FPL scheduler (`core/schedulers/op_fpl.py`) — implemented in commit `ed09d59`,
   wired into the service layer (`fuzzer.py`) and CLI (`--fpl`, `--fpl-epsilon`).
   Convergence verified on StationaryBernoulli (tail share 0.999, regret
   slope 0.012).

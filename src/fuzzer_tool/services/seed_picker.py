@@ -172,7 +172,7 @@ def invasion_select(
     Args:
         operator_stats: name -> (successes, failures), the shape every
             scheduler's ``bandit_stats()`` returns (e.g.
-            ``core/schedulers/monte_carlo.py``'s ``bandit_stats()``).
+            ``core/schedulers/op_monte_carlo.py``'s ``bandit_stats()``).
         frontier_edges: the coverage discovery frontier (see
             ``EdgeTracker.compute_coverage_proximity``) this selection is
             being made for. Only used to short-circuit: passing an empty
@@ -265,7 +265,7 @@ class SeedPicker:
         # #1 -- see docs/handover/handover_decision_game_theory_survey_2026-09-13.md
         # §1's "2026-09-14 update"). Snapshotted every _pick_ecofuzz_seed
         # call regardless of whether the penalty is enabled, same as
-        # replicator.py's tracker, so it has history the moment a campaign
+        # op_replicator.py's tracker, so it has history the moment a campaign
         # turns the penalty on mid-run.
         self._ecofuzz_mc_tracker = MarginalCostTracker()
 
@@ -711,7 +711,7 @@ class SeedPicker:
                 if self._ecofuzz_mc_tracker.should_stop(seed, mc_multiplier, keys=f.corpus):
                     # Extra shrink on top of (never instead of) the energy
                     # already computed above -- same "only ever smaller"
-                    # contract as replicator.py's stop rule.
+                    # contract as op_replicator.py's stop rule.
                     weights[i] = max(weights[i] / mc_multiplier, 1e-6)
         total = sum(weights)
         if total <= 0:

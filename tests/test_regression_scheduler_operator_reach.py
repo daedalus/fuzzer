@@ -215,7 +215,7 @@ class TestAllSchedulersReachAllOperators:
         whichever arm looks worst -- under this test's uniform reward it
         will lock onto the first arm it happens to try and never revisit
         the rest, which is the correct behavior for it, not a reachability
-        bug (see core/schedulers/canary.py and
+        bug (see core/schedulers/op_canary.py and
         tests/test_canary_scheduler.py). Anything else appearing in
         __all__ without appearing here is a scheduler nothing checks for
         reachability.

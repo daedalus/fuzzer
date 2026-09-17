@@ -3,7 +3,7 @@
 import random
 
 from fuzzer_tool.core.running_stats import kelly_fraction, sharpe_ratio
-from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
+from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
 
 
 def _seed(seed: int = 42) -> None:

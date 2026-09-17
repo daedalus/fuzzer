@@ -20,8 +20,8 @@ The fuzzer already has significant Bayesian infrastructure:
 | Component | File | Mechanism |
 |-----------|------|-----------|
 | `BayesianEloTracker` | `core/elo.py` | Gaussian posteriors + Thompson sampling for scheduler selection |
-| `GPUCBScheduler` | `core/schedulers/gp_ucb.py` | GP-UCB with RBF kernel over operator-category features |
-| `MonteCarloScheduler` | `core/schedulers/monte_carlo.py` | Thompson sampling over Beta-Bernoulli + CEM byte distributions |
+| `GPUCBScheduler` | `core/schedulers/op_gp_ucb.py` | GP-UCB with RBF kernel over operator-category features |
+| `MonteCarloScheduler` | `core/schedulers/op_monte_carlo.py` | Thompson sampling over Beta-Bernoulli + CEM byte distributions |
 | `BayesianSeedQuality` | `core/seed_quality.py` | Beta-Bernoulli posterior per seed over `P(new_coverage)` |
 
 ### Gap analysis (from Wikipedia article)
@@ -32,12 +32,12 @@ The Bayesian optimization article describes a canonical loop: **probabilistic mo
 
 | # | Concept | Integration | File | Disruption |
 |---|---------|-------------|------|------------|
-| BO-1 | **Expected Improvement (EI)** acquisition function | Replace UCB score in `GPUCBScheduler.select_op()` with EI: `EI(x) = (f_min - μ)Φ(z) + σφ(z)` where `z = (f_min - μ)/σ`. Uses existing GP posterior; only the scoring step changes. | `core/schedulers/gp_ucb.py` | Low |
-| BO-2 | **Noisy Gaussian Process** | Add observation-noise term to GP predictions. Relevant because crash detection is uncertain (a crash may or may not fire on a given run). Add `noise_variance` parameter to `GPUCBScheduler.__init__`. | `core/schedulers/gp_ucb.py` | Low |
+| BO-1 | **Expected Improvement (EI)** acquisition function | Replace UCB score in `GPUCBScheduler.select_op()` with EI: `EI(x) = (f_min - μ)Φ(z) + σφ(z)` where `z = (f_min - μ)/σ`. Uses existing GP posterior; only the scoring step changes. | `core/schedulers/op_gp_ucb.py` | Low |
+| BO-2 | **Noisy Gaussian Process** | Add observation-noise term to GP predictions. Relevant because crash detection is uncertain (a crash may or may not fire on a given run). Add `noise_variance` parameter to `GPUCBScheduler.__init__`. | `core/schedulers/op_gp_ucb.py` | Low |
 | BO-3 | **TPE Scheduler** (Tree-structured Parzen Estimator) | New scheduler per Wikipedia "related methods" section: models density of good vs bad outcomes rather than GP posterior. New file implementing `init_arm()`, `select_op()`, `record()`, `bandit_stats()`, `supports_priors = True`. | `core/schedulers/bayesian_optimization.py` (new) | Low |
-| BO-4 | **Batch/Parallel BO** | Wikipedia describes batch methods (Gonzalez 2016) for concurrent evaluations. Add batch selection to GPUCBScheduler or new scheduler via `--bo-batch` flag. | `core/schedulers/gp_ucb.py` or new | Medium |
-| BO-5 | **Constrained acquisition** | Wikipedia: "separate probabilistic models for objective and constraints, sampling criterion combines improvement with feasibility." Integrate with existing `field_constraints.py` — don't select operators that violate format constraints. | `core/schedulers/gp_ucb.py` + `core/field_constraints.py` | Medium |
-| BO-6 | **Hyperparameter BO for Monte Carlo** | Use EI to auto-tune `MonteCarloScheduler` parameters (`elite_frac`, `refit_interval`, `arm_decay`) instead of heuristic `_adapt_interval()` at `monte_carlo.py:863`. | `core/schedulers/monte_carlo.py` | Medium |
+| BO-4 | **Batch/Parallel BO** | Wikipedia describes batch methods (Gonzalez 2016) for concurrent evaluations. Add batch selection to GPUCBScheduler or new scheduler via `--bo-batch` flag. | `core/schedulers/op_gp_ucb.py` or new | Medium |
+| BO-5 | **Constrained acquisition** | Wikipedia: "separate probabilistic models for objective and constraints, sampling criterion combines improvement with feasibility." Integrate with existing `field_constraints.py` — don't select operators that violate format constraints. | `core/schedulers/op_gp_ucb.py` + `core/field_constraints.py` | Medium |
+| BO-6 | **Hyperparameter BO for Monte Carlo** | Use EI to auto-tune `MonteCarloScheduler` parameters (`elite_frac`, `refit_interval`, `arm_decay`) instead of heuristic `_adapt_interval()` at `op_monte_carlo.py:863`. | `core/schedulers/op_monte_carlo.py` | Medium |
 
 ---
 
@@ -50,8 +50,8 @@ The fuzzer has first-order optimization but no quasi-Newton methods:
 | Component | File | Mechanism |
 |-----------|------|-----------|
 | `gradient_descent` operator | `core/gradient_descent.py` | Angora-style descent with arithmetic ladder (±1, ±2, ... ±128). Uses Hamming distance to cmplog operands as objective. |
-| `CMAESScheduler` | `core/schedulers/cmaes.py` | Covariance Matrix Adaptation — rank-μ update, no Hessian approximation. |
-| `MOptScheduler` | `core/schedulers/mopt.py` | Particle Swarm — first-order, no gradient info. |
+| `CMAESScheduler` | `core/schedulers/op_cmaes.py` | Covariance Matrix Adaptation — rank-μ update, no Hessian approximation. |
+| `MOptScheduler` | `core/schedulers/op_mopt.py` | Particle Swarm — first-order, no gradient info. |
 
 ### Gap analysis
 
@@ -64,7 +64,7 @@ The BFGS article describes a quasi-Newton method that approximates the Hessian v
 | BFGS-1 | **BFGS descent variant** | Add `_bfgs_descent()` method to `gradient_descent.py`. Use Hamming-distance gradient over byte positions, maintain dense Hessian approximation, line search via `scipy.optimize.line_search`. Gate behind a flag or make it the default (benchmark first). | `core/gradient_descent.py` | Medium |
 | BFGS-2 | **Damped BFGS** | For non-convex objectives (the fuzzing landscape is non-convex), implement the Wolfe-condition curvature check from "Further developments" section. When `s^T y ≤ 0`, apply damped update modifying `s` or `y`. | `core/gradient_descent.py` | Medium |
 | BFGS-3 | **L-BFGS for hyperparameter tuning** | Use limited-memory BFGS to optimize scheduler hyperparameters (length_scale in GPUCB, pop_size in CMA-ES, etc.) based on a rolling `edges/sec` metric. Finite-difference gradient from perturbing each hyperparameter. | `core/schedulers/bfgs_tuner.py` (new) | Medium |
-| BFGS-4 | **CMA-ES → BFGS hybrid** | After CMA-ES converges (σ below threshold for N generations), switch to BFGS for local refinement of operator logit vector. Gradient estimate: `delta / sigma` from CMA-ES samples. | `core/schedulers/cmaes.py` | Low-Medium |
+| BFGS-4 | **CMA-ES → BFGS hybrid** | After CMA-ES converges (σ below threshold for N generations), switch to BFGS for local refinement of operator logit vector. Gradient estimate: `delta / sigma` from CMA-ES samples. | `core/schedulers/op_cmaes.py` | Low-Medium |
 | BFGS-5 | **BFGS for seed energy optimization** | Use BFGS to optimize the `SeedScorer` energy function parameters (power schedule factors). The gradient of energy w.r.t. schedule parameters can be estimated from historical seed performance data. | `core/schedules.py` | Medium |
 
 ### Key implementation note

@@ -264,7 +264,7 @@ class C2UCBAdapter(ContextualAdapter):
     Unlike ContextualLinUCBScheduler.record (which updates the regressor
     immediately), C2UCBScheduler.record only stages the pull into the open
     round -- the credit isn't computed and fed to the inner regressor until
-    settle_round() closes it. See c2ucb.py's module docstring for why (the
+    settle_round() closes it. See op_c2ucb.py's module docstring for why (the
     per-round inclusion-contrast needs the whole round's membership first).
     """
 

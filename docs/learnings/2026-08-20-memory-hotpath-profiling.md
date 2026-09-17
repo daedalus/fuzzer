@@ -30,7 +30,7 @@ Rebuilt against a vendored, coverage-instrumented ffmpeg: **4,248 edges**, a
 
 | site | harness-only rank | instrumented rank |
 |---|---|---|
-| `contextual.py` np.stack | #1 by count (5.5M allocs) | not in top 8 |
+| `op_contextual.py` np.stack | #1 by count (5.5M allocs) | not in top 8 |
 | `shm.py` `get_edge_ids` | #3 | #2 (11.5 GB) |
 | `seed_picker.py:465` | absent | #1 (13.4 GB) |
 | `shapley.py:95` | absent | #1 by count (1.27M) |

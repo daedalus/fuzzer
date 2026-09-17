@@ -20,7 +20,7 @@ import math
 import pytest
 
 from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES
-from fuzzer_tool.core.schedulers.gp_ucb import GPUCBScheduler
+from fuzzer_tool.core.schedulers.op_gp_ucb import GPUCBScheduler
 
 ALL_OPS = sorted({op for ops in OPERATOR_CATEGORIES.values() for op in ops})
 

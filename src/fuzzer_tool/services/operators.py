@@ -438,7 +438,7 @@ _deterministic_mutation_stream.last_truncated = 0
 #: absent on purpose -- both ride on ``f.mc`` and ``mc_bandit``, which the
 #: ``bandit`` entry already claims ahead of them. ``consolidated`` leads:
 #: it is the scheduler built to be the one that runs (see
-#: core/schedulers/consolidated.py), so enabling it alongside others without
+#: core/schedulers/op_consolidated.py), so enabling it alongside others without
 #: Elo means it selects. Pinned by
 #: test_regression_scheduler_fallback_precedence.
 _FALLBACK_PRECEDENCE = (
@@ -473,16 +473,16 @@ _FALLBACK_PRECEDENCE = (
     # reasoning canary already documents. gradient was added to this list
     # by an earlier commit and moved back out here: on this project's own
     # convergence harness it has no non-stationary forgetting mechanism
-    # (see core/schedulers/gradient.py) and one seed in a 40-seed
+    # (see core/schedulers/op_gradient.py) and one seed in a 40-seed
     # stationary-only sweep collapsed to near-zero tail share at its
     # original default alpha -- not the profile of an arm that should be
     # any campaign's silent default without --elo. whittle's restless
     # assumption (passive_decay) is an unmeasured guess pending the
-    # ablation-CSV operator column (see core/schedulers/whittle.py) and it
+    # ablation-CSV operator column (see core/schedulers/op_whittle.py) and it
     # has not been run against the convergence harness at all yet. corral
     # passes the stationary harness comfortably but its recovery on
     # DecayingBest is seed-fragile (best_late share min 0.006, median 0.777
-    # over 12 seeds -- see core/schedulers/corral.py), which is the same
+    # over 12 seeds -- see core/schedulers/op_corral.py), which is the same
     # profile that moved gradient back out.
 )
 

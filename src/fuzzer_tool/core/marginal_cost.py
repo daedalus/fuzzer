@@ -4,7 +4,7 @@ Why this exists
 ----------------
 ``docs/handover/handover_decision_game_theory_survey_2026-09-13.md`` §1
 found that every cost-aware mechanism in the tree reasons about **total**
-or **average** cost, never the first difference: ``replicator.py``'s
+or **average** cost, never the first difference: ``op_replicator.py``'s
 fitness is a per-window mean, ``elo.py``'s K-factor/rating decay are
 exponential smoothers, ``parallel_cost_partition.py`` balances total load
 via Multifit, and ``cost_ledger.py`` exposes point measurements and EWMAs.
@@ -20,7 +20,7 @@ rule; it does not implement the rule itself, because *what* counts as
 
 Deliberately generic in the (cost, output) unit
 ------------------------------------------------
-For operator scheduling (``core/schedulers/replicator.py``) the natural
+For operator scheduling (``core/schedulers/op_replicator.py``) the natural
 pairing is ``(execs, edges)``. For worker partitioning
 (``core/parallel_cost_partition.py``) it might instead be ``(wall_clock,
 edges)`` -- execs and wall-clock diverge under ``--hail-mary`` and

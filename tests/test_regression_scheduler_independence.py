@@ -17,13 +17,13 @@ from fuzzer_tool.core.schedulers import GPUCBScheduler, HierarchicalBanditSchedu
 
 SCHEDULERS_DIR = Path(inspect.getfile(schedulers_pkg)).parent
 SCHEDULER_MODULES = {
-    "epsilon_greedy",
-    "exp3",
-    "gp_ucb",
-    "hierarchical",
-    "monte_carlo",
-    "mopt",
-    "replicator",
+    "op_epsilon_greedy",
+    "op_exp3",
+    "op_gp_ucb",
+    "op_hierarchical",
+    "op_monte_carlo",
+    "op_mopt",
+    "op_replicator",
 }
 
 
@@ -52,7 +52,7 @@ class TestSchedulersIndependent:
                 )
 
     def test_gp_ucb_has_no_hierarchical_reference(self):
-        source = (SCHEDULERS_DIR / "gp_ucb.py").read_text()
+        source = (SCHEDULERS_DIR / "op_gp_ucb.py").read_text()
         assert "HierarchicalBanditScheduler" not in source
 
     def test_shared_categories_alias(self):

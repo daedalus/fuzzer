@@ -1,4 +1,4 @@
-"""Tests for ``core/schedulers/corral.py`` -- log-barrier OMD over operators.
+"""Tests for ``core/schedulers/op_corral.py`` -- log-barrier OMD over operators.
 
 Three carry the module's argument and are the ones to look at first:
 
@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.corral import MIN_PROB, CorralScheduler
+from fuzzer_tool.core.schedulers.op_corral import MIN_PROB, CorralScheduler
 
 
 def _sched(**kw) -> CorralScheduler:
@@ -273,7 +273,7 @@ def test_a_productive_operator_gains_probability():
 def test_concentrates_at_fuzzing_realistic_rates():
     """10% against 1% -- the regime where the loss shift matters.
 
-    ``core/schedulers/consolidated.py`` records that the Elo fan-out gave a
+    ``core/schedulers/op_consolidated.py`` records that the Elo fan-out gave a
     ten-times-more-productive arm only 54% of the picks. This is the bar
     that motivated the family.
     """
@@ -317,7 +317,7 @@ def test_equal_operators_produce_spurious_concentration():
     and 0.694/0.889, so it is the learning rate, not the estimator alone.
 
     This costs no regret when the arms really are equal -- but it is the same
-    mechanism as the lock-in measured in ``core/schedulers/corral.py``, and
+    mechanism as the lock-in measured in ``core/schedulers/op_corral.py``, and
     it is why the scheduler is Elo-only rather than a fallback selector.
     Asserted as an upper bound on entropy in the spirit of the convergence
     harness's STUCK set: information the operator needs, not an aspiration.

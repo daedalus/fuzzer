@@ -1,14 +1,14 @@
 # Handover — BO-GP-UCB Scheduler (Expected Improvement)
 
 **Date:** 2026-09-15
-**Files:** `src/fuzzer_tool/core/schedulers/bo_gp_ucb.py`, `tests/test_regression_bo_gp_ucb.py`
+**Files:** `src/fuzzer_tool/core/schedulers/op_bo_gp_ucb.py`, `tests/test_regression_bo_gp_ucb.py`
 **CLI flags:** `--bo-gp-ucb`, `--bo-gp-length-scale`, `--bo-gp-noise`
 
 ## What was built
 
 `BOGPUCBScheduler` — a bandit scheduler using Bayesian Optimization with
 Expected Improvement (EI) acquisition and a noisy Gaussian Process posterior.
-Scaffolded from `gp_ucb.py`; does not replace it.
+Scaffolded from `op_gp_ucb.py`; does not replace it.
 
 ### Acquisition function
 

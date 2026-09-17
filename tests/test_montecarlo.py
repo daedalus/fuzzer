@@ -1715,7 +1715,7 @@ class TestStationaryDistributionPeriodicity:
         assert mc.last_cycle_period == 2
 
     def test_periodic_chain_detected_python_fallback_matches_numpy(self, monkeypatch):
-        import fuzzer_tool.core.schedulers.monte_carlo as mc_module
+        import fuzzer_tool.core.schedulers.op_monte_carlo as mc_module
 
         monkeypatch.setattr(mc_module, "_HAS_NUMPY", False)
         mc = self._bipartite_period_two()
@@ -1744,7 +1744,7 @@ class TestStationaryDistributionPeriodicity:
         assert pi["A"] != pytest.approx(0.5, abs=1e-6)
 
     def test_cycle_detection_opt_in_python_fallback(self, monkeypatch):
-        import fuzzer_tool.core.schedulers.monte_carlo as mc_module
+        import fuzzer_tool.core.schedulers.op_monte_carlo as mc_module
 
         monkeypatch.setattr(mc_module, "_HAS_NUMPY", False)
         mc = self._bipartite_period_two()

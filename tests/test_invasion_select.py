@@ -1,7 +1,7 @@
 """Tests for invasion_select (percolation handover Module 4).
 
 operator_stats follows the (successes, failures) shape every scheduler's
-bandit_stats() returns (see core/schedulers/monte_carlo.py:654).
+bandit_stats() returns (see core/schedulers/op_monte_carlo.py:654).
 """
 
 from fuzzer_tool.services.seed_picker import INVASION_STUCK_THRESHOLD, invasion_select

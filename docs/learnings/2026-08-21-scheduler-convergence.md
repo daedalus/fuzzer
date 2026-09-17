@@ -197,8 +197,8 @@ strongest scheduler in the non-stationary regime by a wide margin.
 
 Found because the fixed-seed test was still flaky *after* the fix above.
 
-`OPERATOR_CATEGORIES` maps categories to **sets**. Both `hierarchical.py` and
-`gp_ucb.py` iterated them directly, so the order of `random.betavariate` calls
+`OPERATOR_CATEGORIES` maps categories to **sets**. Both `op_hierarchical.py` and
+`op_gp_ucb.py` iterated them directly, so the order of `random.betavariate` calls
 depended on `PYTHONHASHSEED`. With the RNG seed pinned at 92, tail share on
 the best arm ranged from **0.001 to 0.998** across hash seeds, with 4 of 26
 producing total starvation.

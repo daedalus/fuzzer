@@ -9,7 +9,7 @@ import math
 
 import numpy as np
 
-from fuzzer_tool.core.schedulers.contextual import ContextualLinUCBScheduler
+from fuzzer_tool.core.schedulers.op_contextual import ContextualLinUCBScheduler
 from fuzzer_tool.services.operators import CONTEXT_DIM, OperatorEngine
 
 

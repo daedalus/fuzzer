@@ -60,7 +60,7 @@ remain."
 | Configurable CRC | `core/crc32.py` |
 | Golomb/Rice coding (A380294) | `core/mutations/structured.py::golomb` |
 | Elias coding family | referenced in `core/mutations/generic.py`, `core/operator_registry.py` |
-| Floyd cycle detection (Pollard-rho-adjacent; A361913, A379863, A373879) | `core/cycle_detect.py`, consumed by `core/schedulers/monte_carlo.py` |
+| Floyd cycle detection (Pollard-rho-adjacent; A361913, A379863, A373879) | `core/cycle_detect.py`, consumed by `core/schedulers/op_monte_carlo.py` |
 
 Checked and confirmed **absent**, decimal check-digit schemes (Damm/Verhoeff,
 A375584/A374967) — rejected as a port target: these detect single-digit and

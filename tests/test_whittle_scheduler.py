@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.whittle import (
+from fuzzer_tool.core.schedulers.op_whittle import (
     WhittleIndexScheduler,
     whittle_index_table,
 )

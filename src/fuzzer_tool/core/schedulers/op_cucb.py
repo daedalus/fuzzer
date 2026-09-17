@@ -176,7 +176,7 @@ class CUCBScheduler:
         self.min_out_rounds = min_out_rounds
         self.exploration = exploration
 
-        # Hard Rule 16: see ducb.py.
+        # Hard Rule 16: see op_ducb.py.
         self._rng = rng if rng is not None else RandPool()
 
         # Per-arm, relative to _discount (same O(1) trick as DUCBScheduler):

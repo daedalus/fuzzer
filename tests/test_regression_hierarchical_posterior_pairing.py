@@ -16,7 +16,7 @@ the state a fresh arm is in.
 
 import pytest
 
-from fuzzer_tool.core.schedulers.hierarchical import HierarchicalBanditScheduler
+from fuzzer_tool.core.schedulers.op_hierarchical import HierarchicalBanditScheduler
 
 BASE_OPS = ["bit_flip", "byte_flip", "arith8"]
 LATE_OP = "voronoi_cell_swap"

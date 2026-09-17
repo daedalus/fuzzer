@@ -1,5 +1,5 @@
 """Regression tests for MOptScheduler's optional marginal-cost fitness
-penalty (handover §1 candidate #2, added after the initial replicator.py
+penalty (handover §1 candidate #2, added after the initial op_replicator.py
 wiring -- see
 docs/handover/handover_decision_game_theory_survey_2026-09-13.md §1).
 
@@ -12,7 +12,7 @@ the last two PSO windows, has run away relative to the swarm average.
 
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.mopt import MOptScheduler
+from fuzzer_tool.core.schedulers.op_mopt import MOptScheduler
 
 
 def _make_scheduler(**kwargs):

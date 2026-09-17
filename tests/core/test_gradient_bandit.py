@@ -1,7 +1,7 @@
 """Unit tests for GradientBanditScheduler."""
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.gradient import GradientBanditScheduler
+from fuzzer_tool.core.schedulers.op_gradient import GradientBanditScheduler
 
 
 def test_select_single_arm():

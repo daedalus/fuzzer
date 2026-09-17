@@ -11,7 +11,7 @@ Two defects in one line:
   the round actually took.
 - The ratio was clamped at 20, not 1, so rewards reached 20 while ducb,
   swucb, kl_*, cusum_ucb, exp3 and the Beta posteriors all take them to be
-  [0, 1] (ducb.py said ``_cost_adjusted_weight`` "keeps" them there).
+  [0, 1] (op_ducb.py said ``_cost_adjusted_weight`` "keeps" them there).
   Measured on targets/test_target over 1500 rounds: 16 of 25 success
   rewards above 1, maximum 15.2, mean 4.4. KL-UCB's bound saturates at 1.0
   for any arm whose mean exceeds 1, so every such arm scored exactly 1.0 and

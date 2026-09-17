@@ -204,7 +204,7 @@ class TestOperatorEloRecordsUsedOnly:
 
     def test_canary_included_even_though_never_selected(self):
         # canary is designed to be selected the least of anyone (see
-        # core/schedulers/canary.py) -- unlike gp_ucb above, it must still
+        # core/schedulers/op_canary.py) -- unlike gp_ucb above, it must still
         # show up in the report whenever it's enabled and has accrued match
         # data as an opponent, even though it was never f._meta_strategy.
         f = self._make("bandit", {"bandit"})

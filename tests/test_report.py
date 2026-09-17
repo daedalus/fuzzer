@@ -899,7 +899,7 @@ class TestReportInvariants:
 
     def test_brier_outcome_is_binary(self):
         """An unbounded reward weight must not leak into the outcome."""
-        from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
+        from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
 
         mc = MonteCarloScheduler()
         mc.init_arm("op")
@@ -910,7 +910,7 @@ class TestReportInvariants:
             assert outcome in (0.0, 1.0)
 
     def test_calibration_actual_is_a_frequency(self):
-        from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
+        from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
 
         mc = MonteCarloScheduler()
         mc.init_arm("op")

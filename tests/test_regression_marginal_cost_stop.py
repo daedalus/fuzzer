@@ -9,7 +9,7 @@ population average, using ``core/marginal_cost.py``.
 
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.replicator import ReplicatorScheduler
+from fuzzer_tool.core.schedulers.op_replicator import ReplicatorScheduler
 
 
 def _make_scheduler(**kwargs):

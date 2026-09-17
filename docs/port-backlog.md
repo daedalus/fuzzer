@@ -692,12 +692,12 @@ component that dominates such a signal. `core/pi_controller.py` is PI and
 rejects a `kd` argument outright rather than defaulting it to zero.
 
 **A controller on top of the operator schedulers.** Same evaluation. They are
-already closed-loop learners with their own loop gains (`cucb.py`
-`gamma=0.9995`, `ducb.py` `gamma=0.9999`, `epsilon_greedy.py` `decay=0.9995`,
+already closed-loop learners with their own loop gains (`op_cucb.py`
+`gamma=0.9995`, `op_ducb.py` `gamma=0.9999`, `op_epsilon_greedy.py` `decay=0.9995`,
 EXP3's `gamma`, MOpt's inertia weight); a PI over a bandit is a cascade with
 two integrators, which is a stability problem rather than a feature. The one
 useful control observation about them is the transport delay already recorded
-in `ducb.py:37` — at `mutations_per_input = 8` a batch of eight selections
+in `op_ducb.py:37` — at `mutations_per_input = 8` a batch of eight selections
 shares one binary reward, so `gamma`'s effective horizon is ~8x shorter than
 it looks. That needs no new machinery.
 

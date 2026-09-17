@@ -2,7 +2,7 @@
 
 Hard Rule 23: every new capability ships one falsification test and one
 adversarial test. This file additionally pins the documented context-
-dilution limitation (see c2ucb.py's module docstring) as an explicit
+dilution limitation (see op_c2ucb.py's module docstring) as an explicit
 regression: a future change to the credit arithmetic that accidentally
 "fixes" or further breaks that gap should be visible here, not discovered
 in production.
@@ -13,8 +13,8 @@ from __future__ import annotations
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.c2ucb import C2UCBScheduler
-from fuzzer_tool.core.schedulers.cucb import CUCBScheduler
+from fuzzer_tool.core.schedulers.op_c2ucb import C2UCBScheduler
+from fuzzer_tool.core.schedulers.op_cucb import CUCBScheduler
 
 ARMS = ["bit_flip", "byte_flip"]
 
@@ -220,7 +220,7 @@ class TestContextDependence:
         )
 
     def test_falsification_context_blind_contrast_dilutes_signal(self):
-        """Pins the documented limitation (see c2ucb.py's module docstring,
+        """Pins the documented limitation (see op_c2ucb.py's module docstring,
         'Context dilution'): without attribution, the global inclusion
         contrast hands the regressor one blended scalar per arm, largely
         independent of which context was actually active. Accuracy must
@@ -232,7 +232,7 @@ class TestContextDependence:
         assert acc <= 0.65, (
             f"context-blind contrast scored {acc:.3f}, above the documented "
             "near-chance ceiling -- the 'Context dilution' section of "
-            "c2ucb.py's docstring is now inaccurate and needs updating "
+            "op_c2ucb.py's docstring is now inaccurate and needs updating "
             "alongside whatever changed this"
         )
 

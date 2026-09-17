@@ -1,7 +1,7 @@
 """Unit tests for Exp4Scheduler."""
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.exp4 import Exp4Scheduler
+from fuzzer_tool.core.schedulers.op_exp4 import Exp4Scheduler
 
 
 def test_select_single():

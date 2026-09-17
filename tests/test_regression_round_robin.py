@@ -1,6 +1,6 @@
 """Regression test for RoundRobinScheduler operator selection."""
 
-from fuzzer_tool.core.schedulers.round_robin import RoundRobinScheduler
+from fuzzer_tool.core.schedulers.op_round_robin import RoundRobinScheduler
 
 
 def test_round_robin_basic_cycle():

@@ -4,16 +4,16 @@
 **Context:** fuzzer-new BO-GP-UCB scheduler implementation
 
 ## Problem
-A new operator scheduler was needed that uses Bayesian Optimization with Expected Improvement acquisition and noisy Gaussian Process posterior. It had to coexist with the existing `gp_ucb.py` scheduler rather than replace it, and wire through the full fuzzer stack (export, fuzzer service, operator dispatch, CLI, tests, docs).
+A new operator scheduler was needed that uses Bayesian Optimization with Expected Improvement acquisition and noisy Gaussian Process posterior. It had to coexist with the existing `op_gp_ucb.py` scheduler rather than replace it, and wire through the full fuzzer stack (export, fuzzer service, operator dispatch, CLI, tests, docs).
 
 ## Rejected
-- **Rename `gp_ucb.py` or reuse it in place** — the user explicitly required keeping the existing GP-UCB scheduler intact.
+- **Rename `op_gp_ucb.py` or reuse it in place** — the user explicitly required keeping the existing GP-UCB scheduler intact.
 - **UCB-style β parameter** — EI acquisition naturally balances exploration/exploitation without a separate β knob, so the new scheduler uses Expected Improvement instead.
 - **Beta priors for the GP scheduler** — the GP posterior is computed from observations, not Beta priors, so `supports_priors = False` matches the existing GP-UCB convention.
 - **Direct `random` usage** — project rule requires `RandPool` for production randomness.
 
 ## Approach
-- Created `src/fuzzer_tool/core/schedulers/bo_gp_ucb.py` using `gp_ucb.py`'s feature/kernel infrastructure (one-hot category features, `init_arm`, `RunningMoments`, category tracking).
+- Created `src/fuzzer_tool/core/schedulers/op_bo_gp_ucb.py` using `op_gp_ucb.py`'s feature/kernel infrastructure (one-hot category features, `init_arm`, `RunningMoments`, category tracking).
 - Implemented EI acquisition: `EI(op) = (μ(op) - f_max)Φ(z) + σ(op)φ(z)` with `z = (μ(op) - f_max) / σ(op)`.
 - Used Cholesky decomposition for stable GP posterior inference and added `noise` as observation σ² on the kernel diagonal.
 - Wired all four layers: `__init__.py` export, `fuzzer.py` registration/record/banner, `operators.py` fallback precedence/dispatch, and `commands.py` CLI flags (`--bo-gp-ucb`, `--bo-gp-length-scale`, `--bo-gp-noise`).

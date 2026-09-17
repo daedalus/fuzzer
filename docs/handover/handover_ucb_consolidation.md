@@ -5,7 +5,7 @@ Status: **PLAN ONLY — not implemented.** Save this file; implement when ready.
 ## Scope
 
 Deduplicate six UCB-family schedulers in `src/fuzzer_tool/core/schedulers/`:
-`ducb.py`, `kl_ducb.py`, `swucb.py`, `kl_swucb.py`, `cucb.py`, `gp_ucb.py`.
+`op_ducb.py`, `op_kl_ducb.py`, `op_swucb.py`, `op_kl_swucb.py`, `op_cucb.py`, `op_gp_ucb.py`.
 
 ## Verified baseline (read-only checks done)
 
@@ -84,8 +84,8 @@ Each flavor keeps its own statistics, width formula, and diagnostics.
 ## Implementation plan
 
 1. Create `src/fuzzer_tool/core/schedulers/ucb-common.py` with a `UCBBase` class holding the shared skeleton.
-2. Refactor `ducb.py`, `kl_ducb.py`, `swucb.py`, `kl_swucb.py` to subclass `UCBBase` via `super()`.
-3. Leave `cucb.py` and `gp_ucb.py` unchanged (their skeletons diverge too much).
+2. Refactor `op_ducb.py`, `op_kl_ducb.py`, `op_swucb.py`, `op_kl_swucb.py` to subclass `UCBBase` via `super()`.
+3. Leave `op_cucb.py` and `op_gp_ucb.py` unchanged (their skeletons diverge too much).
 
 ## Verification
 

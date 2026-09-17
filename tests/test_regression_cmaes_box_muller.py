@@ -20,7 +20,7 @@ import pytest
 from scipy import stats
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.cmaes import CMAESScheduler
+from fuzzer_tool.core.schedulers.op_cmaes import CMAESScheduler
 
 
 def _sched(seed=5):

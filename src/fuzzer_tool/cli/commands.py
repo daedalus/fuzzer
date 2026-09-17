@@ -2481,7 +2481,7 @@ def main() -> int:
         help=(
             "Enable gradient / softmax (Boltzmann) preference bandit for "
             "operators (experimental, off by default, Elo-only -- see "
-            "core/schedulers/gradient.py for the empirical caveat before "
+            "core/schedulers/op_gradient.py for the empirical caveat before "
             "using this on a real campaign)"
         ),
     )
@@ -2529,7 +2529,7 @@ def main() -> int:
         help=(
             "Enable Whittle-index restless-bandit scheduler for operators "
             "(experimental, off by default, Elo-only -- see "
-            "core/schedulers/whittle.py for the restless-vs-rested caveat "
+            "core/schedulers/op_whittle.py for the restless-vs-rested caveat "
             "before using this on a real campaign)"
         ),
     )
@@ -2694,7 +2694,7 @@ def main() -> int:
             "attribution is tracked automatically whenever this or any "
             "other attribution-consuming scheduler is enabled; without it "
             "credit falls back to a context-blind inclusion contrast (see "
-            "c2ucb.py's module docstring, 'Context dilution')"
+            "op_c2ucb.py's module docstring, 'Context dilution')"
         ),
     )
     fuzz_parser.add_argument(

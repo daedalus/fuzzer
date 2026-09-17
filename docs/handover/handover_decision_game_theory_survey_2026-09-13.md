@@ -15,7 +15,7 @@ Analysis only. No patch in this handover.
 motivate is already in the tree, under other names. `grep -rniE
 '(shapley|replicator|nash|elo|alpha.?beta|minimax|ucb|exp3)'` across `core/`
 and `core/schedulers/` turns up Shapley attribution (`core/shapley.py`),
-replicator dynamics / ESS (`core/schedulers/replicator.py`), Elo with a
+replicator dynamics / ESS (`core/schedulers/op_replicator.py`), Elo with a
 softmax selector (`core/elo.py`), and alpha-beta minimax in two places
 (`core/cond_stmt.py`, `core/smt_solver.py`). A survey that just re-proposed
 those would be re-deriving work already merged. The two things actually worth
@@ -32,7 +32,7 @@ it computes what its own docstring claims.
 document. Every cost-aware mechanism in the tree reasons about **total** or
 **average** cost, never the first difference:
 
-- `core/schedulers/replicator.py` fitness is `_fitness_sum[op] /
+- `core/schedulers/op_replicator.py` fitness is `_fitness_sum[op] /
   _fitness_count[op]` (`:134`) — an average over a fixed `window_size`
   (default 200), reset to zero every window (`:189-191`). It cannot see
   whether an operator's cost-per-edge is rising or falling within a window,
@@ -74,7 +74,7 @@ Two consumers, in order of how directly they map onto the wiki page:
    heterogeneous seed costs (the existing `docs/handover/handover_pending
    _2026-09-06.md` §P3-3 EWMA-drift caveat still applies to whichever cost
    signal feeds this).
-2. **`replicator.py`**: replace (or add alongside) the fixed `window_size`
+2. **`op_replicator.py`**: replace (or add alongside) the fixed `window_size`
    cutoff with a marginal-cost stopping rule — stop investing further
    executions in an operator once its `MC_i` (executions per new edge, over
    a short trailing window) exceeds some multiple of the population-average
@@ -82,7 +82,7 @@ Two consumers, in order of how directly they map onto the wiki page:
    regardless of whether the operator's cost curve is still falling
    (increasing returns) or has started rising (diminishing returns, the
    U-shaped MC curve from the wiki page). This is a more direct fit than the
-   worker-partition case because `replicator.py` already tracks per-operator
+   worker-partition case because `op_replicator.py` already tracks per-operator
    `_fitness_sum`/`_fitness_count`; a marginal-cost variant is a small
    extension, not a new subsystem.
 
@@ -105,7 +105,7 @@ as `None` from `marginal_cost()`, but `should_stop()` still flags it as
 worse than any finite MC rather than silently treating undefined-ratio as
 "no signal, keep going").
 
-`replicator.py` (consumer #2) is wired: constructor gained an optional
+`op_replicator.py` (consumer #2) is wired: constructor gained an optional
 `marginal_cost_stop_multiplier` (default `None`, so `--replicator` alone is
 byte-for-byte unaffected); `record()` now also feeds cumulative
 `(execs, discoveries)` counters per operator, `_replicator_update()` snapshots
@@ -138,9 +138,9 @@ ratios computed once per decision with no cross-window memory):
   hand-derives the exact weight ratio and picks a fixed rng fraction that
   provably crosses the cheap/expensive selection boundary only once the
   penalty is applied.
-- `core/schedulers/mopt.py::_pso_update` — particle fitness
+- `core/schedulers/op_mopt.py::_pso_update` — particle fitness
   (`disc/execs_in_window`, `_update_fitness`) is a within-window mean with
-  no memory of the *previous* window, same pre-fix shape as `replicator.py`.
+  no memory of the *previous* window, same pre-fix shape as `op_replicator.py`.
   Optional `marginal_cost_stop_multiplier` (default `None`) on
   `MOptScheduler`; each particle now also tracks cumulative
   `(cum_execs, cum_discoveries)`, snapshotted at every PSO update, and
@@ -150,7 +150,7 @@ ratios computed once per decision with no cross-window memory):
   `--mopt-mc-stop-multiplier`. 6 tests in
   `tests/test_regression_mopt_mc_stop.py`.
 
-Both follow the same pattern as `replicator.py`: additive, off by default,
+Both follow the same pattern as `op_replicator.py`: additive, off by default,
 and the penalty can only ever shrink a flagged key's weight/fitness relative
 to the baseline, never grow it, for any multiplier value — asserted directly
 in both new test files.
@@ -296,7 +296,7 @@ correctness fix, once the wall has more than a handful of conditions.
   and numerically brittle near indifference. No change needed; worth a
   one-line docstring cross-reference so a future reader doesn't reinvent
   softmax selection while reading the Best Response page.
-- `core/schedulers/replicator.py`'s ESS/Nash-equilibrium claim in its
+- `core/schedulers/op_replicator.py`'s ESS/Nash-equilibrium claim in its
   docstring (`:19-25`) is *not* verified anywhere in this survey — whether
   the operator-scheduling game is actually a potential game (the condition
   under which the Best Response page's convergence theorem applies) was out

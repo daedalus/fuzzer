@@ -23,7 +23,7 @@ is now advanced by `record()` alone.
 
 import random
 
-from fuzzer_tool.core.schedulers.monte_carlo import MonteCarloScheduler
+from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
 
 OPS = ["a", "b", "c", "d"]
 

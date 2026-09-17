@@ -8,7 +8,7 @@ Every global draw therefore ran off OS entropy regardless of ``--seed``:
 
 * ``core/qea.py:267``       -- observe(), collapsing amplitudes to a bitstring
 * ``core/qea.py:361,364``   -- mutate(), which amplitudes get perturbed
-* ``core/schedulers/monte_carlo.py:778,895`` -- spectral probe vectors
+* ``core/schedulers/op_monte_carlo.py:778,895`` -- spectral probe vectors
 
 so a seeded run was not reproducible whenever QEA or the Monte-Carlo scheduler
 was active. What kept this hidden is that ``_reseed_after_stall``'s docstring
