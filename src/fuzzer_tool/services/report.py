@@ -1910,16 +1910,74 @@ def _elo_ratings(f) -> str:
 
     # Top 10 and bottom 5 of rated operators
     if ranking:
-        lines.append(f"  {'Rank':<6s} {'Operator':<22s} {'Rating':>8s} {'Matches':>8s}")
-        lines.append(f"  {'-' * 6} {'-' * 22} {'-' * 8} {'-' * 8}")
-        for i, (op, rating) in enumerate(ranking[:10], 1):
+        # Stddev, Rpi (Rating Performance Index), and K-factor are derived
+        # per-row alongside Rating rather than tracked as separate state.
+        #
+        # K-factor is the tracker's current learning rate. EloTracker uses a
+        # fixed k_factor; BayesianEloTracker's _effective_k() is adaptive
+        # (based on recent prediction error) but is a tracker-wide value, not
+        # per-operator, so every row shows the same figure at report time.
+        if hasattr(f._elo, "k_factor"):
+            row_k = f._elo.k_factor
+        elif hasattr(f._elo, "_effective_k"):
+            row_k = f._elo._effective_k()
+        else:
+            row_k = None
+
+        # Rpi: expected score (as a percentage) against an average-rated
+        # opponent from the same pool, i.e. how this operator's rating
+        # translates into a head-to-head win rate against the field.
+        # `ranking` is truthy-but-len()-0 for a bare MagicMock in tests
+        # that stub f._elo without a real get_ranking(), so guard the
+        # division rather than assuming len(ranking) > 0 here.
+        _n = len(ranking)
+        pool_mean = (sum(r for _, r in ranking) / _n) if _n else 0.0
+
+        def _rpi(rating: float) -> float:
+            return 100.0 / (1.0 + 10.0 ** ((pool_mean - rating) / 400.0))
+
+        # Stddev: EloTracker has no posterior, so the closest per-operator
+        # spread is the stddev of its recorded match scores (reward
+        # moments, 0-1 scale). BayesianEloTracker tracks an actual rating
+        # posterior N(mu, sigma^2), so its stddev is sqrt(sigma_sq) in Elo
+        # points -- a different scale/meaning, noted below the table.
+        has_reward_moments = hasattr(f._elo, "get_reward_moments")
+        has_sigma_sq = hasattr(f._elo, "sigma_sq")
+
+        def _stddev(op: str) -> float | None:
+            if has_sigma_sq:
+                return math.sqrt(f._elo.sigma_sq.get(op, 0.0))
+            if has_reward_moments:
+                moments = f._elo.get_reward_moments(op)
+                if moments and moments.count > 1:
+                    return moments.stddev
+            return None
+
+        def _fmt_row(i: int, op: str, rating: float) -> str:
             matches = f._elo._match_count.get(op, 0)
-            lines.append(f"  {i:<6d} {op:<22s} {rating:>8.0f} {matches:>8d}")
+            sd = _stddev(op)
+            sd_str = f"{sd:.1f}" if sd is not None else "-"
+            k_str = f"{row_k:.1f}" if row_k is not None else "-"
+            return (
+                f"  {i:<6d} {op:<22s} {rating:>8.0f} {sd_str:>8s} "
+                f"{_rpi(rating):>7.1f}% {k_str:>8s} {matches:>8d}"
+            )
+
+        lines.append(
+            f"  {'Rank':<6s} {'Operator':<22s} {'Rating':>8s} {'Stddev':>8s} "
+            f"{'Rpi':>8s} {'K-fctr':>8s} {'Matches':>8s}"
+        )
+        lines.append(f"  {'-' * 6} {'-' * 22} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}")
+        for i, (op, rating) in enumerate(ranking[:10], 1):
+            lines.append(_fmt_row(i, op, rating))
         if len(ranking) > 10:
             lines.append(f"  {'...':<6s}")
             for i, (op, rating) in enumerate(ranking[-5:], len(ranking) - 4):
-                matches = f._elo._match_count.get(op, 0)
-                lines.append(f"  {i:<6d} {op:<22s} {rating:>8.0f} {matches:>8d}")
+                lines.append(_fmt_row(i, op, rating))
+        if has_sigma_sq:
+            lines.append("  (Stddev = posterior rating sigma; Rpi = expected score vs pool mean)")
+        elif has_reward_moments:
+            lines.append("  (Stddev = match-score stddev [0-1]; Rpi = expected score vs pool mean)")
 
     # Unrated operators
     if unrated:
