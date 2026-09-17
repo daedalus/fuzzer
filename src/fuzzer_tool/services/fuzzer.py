@@ -1863,13 +1863,13 @@ class Fuzzer:
             log.info("Mutation lineage tree enabled")
 
         if self._use_mcts and self._lineage is not None:
-            from fuzzer_tool.core.schedulers.mcts import MCTSSeedScheduler
+            from fuzzer_tool.core.schedulers.seed_mcts import MCTSSeedScheduler
 
             self._mcts = MCTSSeedScheduler(rng=self._rng)
             log.info("MCTS seed scheduling enabled")
 
         if self._use_alphabeta and self._lineage is not None:
-            from fuzzer_tool.core.schedulers.mcts import AlphaBetaMCTSSeedScheduler
+            from fuzzer_tool.core.schedulers.seed_mcts import AlphaBetaMCTSSeedScheduler
 
             self._alphabeta = AlphaBetaMCTSSeedScheduler(rng=self._rng)
             log.info("Alpha-beta MCTS seed scheduling enabled")
@@ -1986,14 +1986,14 @@ class Fuzzer:
         self._use_boltzmann = boltzmann
         self._tang = None
         if tang:
-            from fuzzer_tool.core.schedulers.tang import TangRecommendationScheduler
+            from fuzzer_tool.core.schedulers.seed_tang import TangRecommendationScheduler
 
             self._tang = TangRecommendationScheduler(
                 self._rng, rank=tang_rank, refit_interval=tang_refit_interval
             )
         self._kruskal_count = None
         if kruskal_count:
-            from fuzzer_tool.core.schedulers.kruskal_count import KruskalCountSeedStrategy
+            from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
 
             self._kruskal_count = KruskalCountSeedStrategy(self._rng, self._profile)
         self._use_ecofuzz = ecofuzz
@@ -6535,7 +6535,7 @@ class Fuzzer:
 
     def _load_kruskal_count(self) -> None:
         """Restore Kruskal-count counters on resume; malformed payloads start fresh."""
-        from fuzzer_tool.core.schedulers.kruskal_count import KruskalCountSeedStrategy
+        from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
 
         data = self._state_store.get("kruskal_count")
         if self.resume and data is not None:

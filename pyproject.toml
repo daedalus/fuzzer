@@ -167,7 +167,7 @@ module = [
     "fuzzer_tool.core.schedulers.op_exp3",
     "fuzzer_tool.core.schedulers.op_gp_ucb",
     "fuzzer_tool.core.schedulers.op_hierarchical",
-    "fuzzer_tool.core.schedulers.mcts",
+    "fuzzer_tool.core.schedulers.seed_mcts",
     "fuzzer_tool.core.schedulers.op_monte_carlo",
     "fuzzer_tool.core.schedulers.op_mopt",
     "fuzzer_tool.core.schedulers.op_replicator",

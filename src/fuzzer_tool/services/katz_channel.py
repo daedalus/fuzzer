@@ -30,7 +30,7 @@ from fuzzer_tool.core.icfg import (
     build_interprocedural_cfg,
     probe_key_node_table,
 )
-from fuzzer_tool.core.schedulers.katz import build_beta, katz_scores
+from fuzzer_tool.core.schedulers.seed_katz import build_beta, katz_scores
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +85,7 @@ class KatzChannel:
         ``services/fuzzer.py``'s ``if not targets:`` call site, mutually
         exclusive with directed mode over the shared __AFL_DIST_SHM_ID
         slot) and its centrality math (``core/horizon.py``,
-        ``core/schedulers/katz.py``) never reads ``target_addrs`` --
+        ``core/schedulers/seed_katz.py``) never reads ``target_addrs`` --
         Katz scores come from execution counts and whole-program ICFG
         structure alone. A prior version rejected construction outright
         when ``td.target_addrs`` was empty, which -- given this method

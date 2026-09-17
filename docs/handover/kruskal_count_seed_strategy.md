@@ -22,7 +22,7 @@ This is a low-blast, reversible feature. Rollback is removal of the new module p
 - Documentation and architecture conventions: `docs/DEEP_DIVE.md:49-58`, `:102-103`, `:173`, `:275-283`, `:432`, `:487`, `:707`; `docs/TODO.md`; `docs/architecture.dot` and generated `docs/images/architecture.png`/`.svg`.
 ## Recommended design
 ### 1. Add one core strategy module
-Create `src/fuzzer_tool/core/schedulers/kruskal_count.py` with `KruskalCountSeedStrategy`.
+Create `src/fuzzer_tool/core/schedulers/seed_kruskal_count.py` with `KruskalCountSeedStrategy`.
 Keep the implementation self-contained and pure enough for focused tests:
 ```python
 class KruskalCountSeedStrategy:
@@ -153,7 +153,7 @@ No corpus files or build artifacts should be committed.
 After implementation, run in this order:
 1. `pytest tests/test_kruskal_count.py tests/test_seed_picker.py tests/test_regression_cli_fuzzer_kwargs.py`
 2. Add any parallel-specific regression test discovered during wiring, then run it with the above set.
-3. `ruff format src/fuzzer_tool/core/schedulers/kruskal_count.py src/fuzzer_tool/services/seed_picker.py src/fuzzer_tool/services/fuzzer.py src/fuzzer_tool/services/parallel.py src/fuzzer_tool/cli/commands.py src/fuzzer_tool/services/report.py src/fuzzer_tool/services/stats.py tests/test_kruskal_count.py tests/test_seed_picker.py`
+3. `ruff format src/fuzzer_tool/core/schedulers/seed_kruskal_count.py src/fuzzer_tool/services/seed_picker.py src/fuzzer_tool/services/fuzzer.py src/fuzzer_tool/services/parallel.py src/fuzzer_tool/cli/commands.py src/fuzzer_tool/services/report.py src/fuzzer_tool/services/stats.py tests/test_kruskal_count.py tests/test_seed_picker.py`
 4. `ruff check` on the same touched Python files.
 5. Run a short real CLI smoke campaign with a local ASAN target and `--kruskal-count --elo --iterations ...`; verify the banner, live stats, report, and `state.pkl.gz` contain Kruskal data.
 6. Run the affected existing seed-strategy tests and CLI/parallel tests again after formatting.

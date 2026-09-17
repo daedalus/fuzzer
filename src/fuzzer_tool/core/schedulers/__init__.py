@@ -1,6 +1,5 @@
 """Operator-selection schedulers (bandit algorithms)."""
 
-from fuzzer_tool.core.schedulers.mcts import AlphaBetaMCTSSeedScheduler, MCTSSeedScheduler
 from fuzzer_tool.core.schedulers.op_bo_gp_ucb import BOGPUCBScheduler
 from fuzzer_tool.core.schedulers.op_c2ucb import C2UCBScheduler
 from fuzzer_tool.core.schedulers.op_canary import CanaryScheduler
@@ -28,6 +27,7 @@ from fuzzer_tool.core.schedulers.op_round_robin import RoundRobinScheduler
 from fuzzer_tool.core.schedulers.op_successive_elim import SuccessiveEliminationScheduler
 from fuzzer_tool.core.schedulers.op_swucb import SWUCBScheduler
 from fuzzer_tool.core.schedulers.op_whittle import WhittleIndexScheduler
+from fuzzer_tool.core.schedulers.seed_mcts import AlphaBetaMCTSSeedScheduler, MCTSSeedScheduler
 
 __all__ = [
     "CorralScheduler",

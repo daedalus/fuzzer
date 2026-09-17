@@ -20,7 +20,7 @@ import numpy as np
 import pytest
 
 from fuzzer_tool.core.horizon import HorizonGraph
-from fuzzer_tool.core.schedulers.katz import DEFAULT_MAX_ITER, _dag_depth, katz_scores
+from fuzzer_tool.core.schedulers.seed_katz import DEFAULT_MAX_ITER, _dag_depth, katz_scores
 
 
 def exact_fixed_point(src, dst, beta, alpha, n):

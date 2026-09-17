@@ -7,7 +7,7 @@ import pytest
 
 from fuzzer_tool.core.lineage import LineageTree
 from fuzzer_tool.core.schedulers import MCTSSeedScheduler
-from fuzzer_tool.core.schedulers.mcts import _squash
+from fuzzer_tool.core.schedulers.seed_mcts import _squash
 
 
 def _tree():

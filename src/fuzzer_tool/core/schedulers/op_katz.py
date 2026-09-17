@@ -1,6 +1,6 @@
 """OpKatzScheduler: Katz centrality over the operator *transition* graph.
 
-``core/schedulers/katz.py`` (the seed-picker's ``katz`` Elo arm) is
+``core/schedulers/seed_katz.py`` (the seed-picker's ``katz`` Elo arm) is
 deliberately DAG-only: it solves the fixed point by successor-summing for
 exactly ``depth`` rounds, which is only exact -- and only terminates without
 an explicit cap -- because the ICFG horizon graph it operates over is
@@ -26,7 +26,7 @@ rate (0 for an operator with no track record yet), so score = "how good is
 this op on its own" amplified by "does it feed into other productive ops."
 
 An earlier version of this beta used ``1 - success_rate`` (mirroring the
-seed-side katz.py's frontier-seeking convention, which favors *unexplored*
+seed-side seed_katz.py's frontier-seeking convention, which favors *unexplored*
 graph regions). That is actively wrong here: it assigns zero injection to
 exactly the operators an exploitation-oriented scheduler should be
 amplifying, so a perfectly-reinforcing cycle between two 100%-successful
@@ -90,7 +90,7 @@ def classical_katz_scores(
 
     That is successor-summing: c[i] accumulates alpha*c[j] for each
     observed i->j transition (row i, column j of ``a``), the same
-    convention as the DAG ``katz.py``'s ``contrib = bincount(src,
+    convention as the DAG ``seed_katz.py``'s ``contrib = bincount(src,
     weights=c[dst])`` / ``nxt[u] += alpha*contrib[u]``.
 
     alpha is auto-picked below 1/spectral_radius(a) when a has a nonzero
@@ -172,7 +172,7 @@ class OpKatzScheduler:
 
         beta_i is op_i's raw success rate (0.0 if never attempted) --
         exploitation-favoring, deliberately the opposite sign of the
-        seed-side katz.py's frontier-seeking beta. See module docstring.
+        seed-side seed_katz.py's frontier-seeking beta. See module docstring.
         """
         a = build_transition_matrix(self.transition_counts, ops)
         rates = []

@@ -13,7 +13,7 @@ import numpy as np
 import pytest
 
 from fuzzer_tool.core.horizon import HorizonGraph
-from fuzzer_tool.core.schedulers.katz import katz_scores
+from fuzzer_tool.core.schedulers.seed_katz import katz_scores
 
 
 def _graph(edges, n_u, seed_edges=None, seed_names=None):

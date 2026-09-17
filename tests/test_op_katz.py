@@ -56,7 +56,7 @@ class TestClassicalKatzScores:
         assert c[1] == pytest.approx(expected, rel=1e-6)
 
     def test_cycle_does_not_raise(self):
-        # The DAG katz.py raises ValueError on a cycle; this must not.
+        # The DAG seed_katz.py raises ValueError on a cycle; this must not.
         a = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]])
         c = classical_katz_scores(a, np.ones(3))
         assert c.shape == (3,)
@@ -108,7 +108,7 @@ class TestOpKatzScheduler:
 
     def test_scores_favor_reinforcing_productive_cycle(self):
         """beta is now the raw success rate (exploitation-favoring, the
-        opposite sign of the seed-side katz.py's frontier-seeking beta --
+        opposite sign of the seed-side seed_katz.py's frontier-seeking beta --
         see module docstring). A mutually-reinforcing cycle between two
         consistently-successful operators should score well above an
         isolated operator with a middling standalone rate, even though

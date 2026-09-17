@@ -19,7 +19,7 @@ import pytest
 
 from fuzzer_tool.core.horizon import HorizonGraph, build_horizon_graph
 from fuzzer_tool.core.icfg import InterproceduralCFG
-from fuzzer_tool.core.schedulers.katz import build_beta, katz_scores
+from fuzzer_tool.core.schedulers.seed_katz import build_beta, katz_scores
 
 
 def _icfg(n, edges):

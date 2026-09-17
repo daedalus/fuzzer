@@ -9,7 +9,7 @@ whole graph alone -- no target set or live frontier required. A block with
 high betweenness sits on a disproportionate share of shortest paths between
 *all* pairs of other blocks in the program, which is exactly the "central,
 load-bearing branch" signal the K-Scheduler's ICFG-based centrality (see
-``core/schedulers/katz.py``) approximates from *execution counts* rather
+``core/schedulers/seed_katz.py``) approximates from *execution counts* rather
 than pure structure -- this module answers the structural question those
 counts are trying to estimate.
 

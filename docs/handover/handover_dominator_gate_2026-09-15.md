@@ -12,7 +12,7 @@ environment).
 Requested graph-theory survey of the fuzzer identified five algorithms not
 yet exploited anywhere in the codebase (BFS distance, Tarjan SCC + Katz
 centrality, and a min-cut-style isoperimetric heuristic already exist —
-see `core/distance.py`, `core/horizon.py`/`core/schedulers/katz.py`,
+see `core/distance.py`, `core/horizon.py`/`core/schedulers/seed_katz.py`,
 `core/target_difficulty.py`). Ranked #1 by leverage/effort: **dominator
 trees**, because AFLGo's harmonic-mean BFS distance conflates "close" with
 "necessary" — a block can be BFS-near a target while sitting on a branch

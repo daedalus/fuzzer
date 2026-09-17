@@ -57,7 +57,7 @@ The resume guard lives as `current_coverage_contract()` /
 `node_channel` together.
 
 **K-Scheduler / Katz centrality.** Complete: `icfg.py`, `horizon.py`,
-`katz.py`, `katz_channel.py`, the node-bitmap channel (`node_idx` packed into
+`seed_katz.py`, `katz_channel.py`, the node-bitmap channel (`node_idx` packed into
 the distance-table entry, eager write in the same probe), the `katz` arm in
 `seed_picker` and `SeedScorer.SCHEDULES`, all three W3 transforms
 (connectivity-preserving visited-node deletion, Tarjan DAG, seed adjunction)
@@ -204,7 +204,7 @@ fixed bugs in MOpt, GP-UCB, Hierarchical and CMA-ES; cost-aware reward wiring
 across all schedulers; LinUCB contextual bandit completed.
 
 **Minimax / adversarial search.** All five phases are in the tree, verified by
-inspection: `AlphaBetaMCTSSeedScheduler` in `core/schedulers/mcts.py` with
+inspection: `AlphaBetaMCTSSeedScheduler` in `core/schedulers/seed_mcts.py` with
 `_pick_mcts_seed()` integration; `risk_matrix` in `core/elo.py:229`;
 `select_op_minimax` in `core/schedulers/op_monte_carlo.py:1776`; minimax framing
 in `core/cond_stmt.py` and `core/smt_solver.py`; `core/rate_distortion.py` +
@@ -1119,7 +1119,7 @@ interventional evidence exists. §7 lists exactly what was never tested.
 
 | File | What |
 |---|---|
-| `src/fuzzer_tool/core/schedulers/tang.py` | `TangRecommendationScheduler`, plus faithful ports of Prop 4.2 (inner-product estimation), Prop 4.3 (rejection sampling from `Vw`) and `modfkv_sample_complexity` (Alg. 2's `q`) |
+| `src/fuzzer_tool/core/schedulers/seed_tang.py` | `TangRecommendationScheduler`, plus faithful ports of Prop 4.2 (inner-product estimation), Prop 4.3 (rejection sampling from `Vw`) and `modfkv_sample_complexity` (Alg. 2's `q`) |
 | `src/fuzzer_tool/services/fuzzer.py` | `"tang"` in `_SEED_STRATEGY_NAMES`; constructor kwargs; refit hook on the exec path |
 | `src/fuzzer_tool/services/seed_picker.py` | `_pick_tang_seed`, the Elo arm, availability gate |
 | `src/fuzzer_tool/cli/commands.py` | `--tang`, `--tang-rank`, `--tang-refit-interval` |

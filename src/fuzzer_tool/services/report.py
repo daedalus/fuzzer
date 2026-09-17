@@ -1777,7 +1777,7 @@ def _fuzzing_strategy(f) -> str:
 
 def _kruskal_lines(f) -> list[str]:
     """Kruskal-count seed arm counters; empty when the arm is off."""
-    from fuzzer_tool.core.schedulers.kruskal_count import KruskalCountSeedStrategy
+    from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
 
     # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
     kc = getattr(f, "_kruskal_count", None)

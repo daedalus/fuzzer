@@ -79,7 +79,7 @@ against a real trace-pc-marked ELF (built with gcc, manual
 available) makes `KatzChannel.build()` return `None` unconditionally;
 with the guard removed it returns a channel with real nodes/edges. Also
 confirmed nothing about the channel actually depends on `target_addrs`:
-`horizon.py`/`schedulers/katz.py`'s centrality math reads only
+`horizon.py`/`schedulers/seed_katz.py`'s centrality math reads only
 `hit_counts` and ICFG structure, never `td.target_addrs`.
 
 Fix: removed the guard, documented why in `build()`'s docstring. New

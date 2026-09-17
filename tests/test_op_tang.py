@@ -13,7 +13,7 @@ import pytest
 from fuzzer_tool.core.op_edge_tracker import OperatorEdgeTracker
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.op_tang import OpTangScheduler
-from fuzzer_tool.core.schedulers.tang import TangRecommendationScheduler
+from fuzzer_tool.core.schedulers.seed_tang import TangRecommendationScheduler
 
 
 class TestOperatorEdgeTracker:
@@ -82,7 +82,7 @@ class TestOpTangScheduler:
         sched.observe_new_edges("a", [1, 2])
         sched.observe_new_edges("b", [3])
         # First call always fires (same -(1<<60) sentinel convention as
-        # TangRecommendationScheduler itself), consistent with tang.py.
+        # TangRecommendationScheduler itself), consistent with seed_tang.py.
         assert sched.maybe_refit(exec_count=5) is True
         assert sched.maybe_refit(exec_count=10) is False  # under interval since
         assert sched.maybe_refit(exec_count=150) is True  # crosses interval

@@ -48,7 +48,7 @@ log = logging.getLogger(__name__)
 
 def _kruskal_str(f) -> str:
     """Compact live-stats field for the Kruskal-count arm; empty when off."""
-    from fuzzer_tool.core.schedulers.kruskal_count import KruskalCountSeedStrategy
+    from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
 
     # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
     kc = getattr(f, "_kruskal_count", None)

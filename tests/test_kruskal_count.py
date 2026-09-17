@@ -1,4 +1,4 @@
-"""Tests for the Kruskal-count seed strategy (core/schedulers/kruskal_count.py).
+"""Tests for the Kruskal-count seed strategy (core/schedulers/seed_kruskal_count.py).
 
 Every coupled/non-coupled fixture is a hand-built jump table over 8 bytes,
 with walkers starting at 0, 2, 4, 6. Byte ``b`` at position ``p`` jumps to
@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.kruskal_count import (
+from fuzzer_tool.core.schedulers.seed_kruskal_count import (
     MAX_STEPS,
     STATE_VERSION,
     WALKER_COUNT,

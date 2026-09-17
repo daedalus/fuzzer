@@ -21,7 +21,7 @@ import numpy as np
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.tang import (
+from fuzzer_tool.core.schedulers.seed_tang import (
     DEFAULT_RANK,
     TangRecommendationScheduler,
     estimate_inner_product,

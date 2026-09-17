@@ -1,9 +1,9 @@
 """OpTangScheduler: Tang's low-rank recommender over operator x edge hits.
 
-Thin composition, not a fork: ``core/schedulers/tang.py``'s
+Thin composition, not a fork: ``core/schedulers/seed_tang.py``'s
 ``TangRecommendationScheduler`` is reused verbatim (see
 ``core/op_edge_tracker.py``'s module docstring for why no changes to
-``tang.py`` were needed), wrapped here so the fuzzer can hold one object
+``seed_tang.py`` were needed), wrapped here so the fuzzer can hold one object
 exposing the same ``select_op(ops)`` / ``record(op, success, ...)``-shaped
 interface as every other operator scheduler in this package, rather than
 threading a raw ``TangRecommendationScheduler`` plus an ``OperatorEdgeTracker``
@@ -20,7 +20,7 @@ import numpy as np
 
 from fuzzer_tool.core.op_edge_tracker import OperatorEdgeTracker
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.tang import (
+from fuzzer_tool.core.schedulers.seed_tang import (
     DEFAULT_RANK,
     DEFAULT_REFIT_INTERVAL,
     TangRecommendationScheduler,

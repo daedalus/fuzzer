@@ -16,7 +16,7 @@ needs no target set or live coverage frontier at all -- it's a property
 of the whole-program ICFG's structure alone. A block with high
 betweenness sits on a disproportionate share of shortest paths between
 *all* pairs of other blocks, which is the structural signal the
-K-Scheduler's Katz centrality (`core/schedulers/katz.py`) is estimating
+K-Scheduler's Katz centrality (`core/schedulers/seed_katz.py`) is estimating
 empirically from execution counts rather than computing directly from
 graph structure.
 
@@ -89,7 +89,7 @@ synthetic tests alone.
   over directed shortest paths, consistent with how `bottleneck_edges`
   and the horizon/Katz machinery already treat this graph.
 - **Standalone, not wired into K-Scheduler.** Wiring this into
-  `KatzChannel`/`schedulers/katz.py` would mean choosing how to combine a
+  `KatzChannel`/`schedulers/seed_katz.py` would mean choosing how to combine a
   purely-structural score with the existing execution-count-based Katz
   signal (replace it? blend it? use it only for cold-start before enough
   executions accumulate?) -- a design question, not a graph-theory one,

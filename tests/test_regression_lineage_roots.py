@@ -18,7 +18,7 @@ import time
 import pytest
 
 from fuzzer_tool.core.lineage import LineageTree
-from fuzzer_tool.core.schedulers.mcts import MCTSSeedScheduler
+from fuzzer_tool.core.schedulers.seed_mcts import MCTSSeedScheduler
 
 
 def _scan_roots(tree: LineageTree) -> list[str]:

@@ -1,17 +1,17 @@
 """OperatorEdgeTracker: per-operator coverage matrix for the ``op_tang`` arm.
 
-``TangRecommendationScheduler.refit()`` (``core/schedulers/tang.py``) reads
+``TangRecommendationScheduler.refit()`` (``core/schedulers/seed_tang.py``) reads
 exactly two attributes off whatever it's handed -- ``seed_edges`` (key ->
 set of edge ids) and ``seed_hit_counts`` (key -> {edge_id: count}) -- and
 does not otherwise care what the keys mean. That means it is directly
 reusable for operators with no changes at all: this module supplies an
 object with those same two attribute names, populated per-operator instead
-of per-seed, and ``core/schedulers/tang.py`` needs zero modification.
+of per-seed, and ``core/schedulers/seed_tang.py`` needs zero modification.
 
 The attribute names are kept as ``seed_edges``/``seed_hit_counts`` rather
 than renamed, specifically so this stays a drop-in for
 ``TangRecommendationScheduler.refit(tracker)`` -- renaming them would mean
-either forking ``tang.py`` or adding an adapter layer for no benefit.
+either forking ``seed_tang.py`` or adding an adapter layer for no benefit.
 
 Empirical note (synthetic paired benchmark, no live target available to
 validate against): the op_tang arm did not show a measurable benefit over
@@ -19,7 +19,7 @@ Thompson sampling even in a ground truth constructed specifically to favor
 low-rank structure (60 paired trials, 30/30 split, Wilcoxon p=0.28), and
 lost decisively when there was no structure to exploit (0/60, p<0.001).
 That's a second independent negative alongside the one already documented
-in ``tang.py``'s own docstring for the seed-side arm. It is landed off by
+in ``seed_tang.py``'s own docstring for the seed-side arm. It is landed off by
 default and should stay that way pending a real (not synthetic) A/B --
 this module exists so that check can be run cheaply, not because the
 prior evidence recommends turning it on.

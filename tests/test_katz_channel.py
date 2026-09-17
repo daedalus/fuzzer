@@ -11,7 +11,7 @@ import pytest
 
 from fuzzer_tool.core.horizon import HorizonGraph
 from fuzzer_tool.core.icfg import InterproceduralCFG
-from fuzzer_tool.core.schedulers.katz import KatzResult
+from fuzzer_tool.core.schedulers.seed_katz import KatzResult
 from fuzzer_tool.services.corpus_manager import check_coverage_contract, current_coverage_contract
 from fuzzer_tool.services.katz_channel import KatzChannel
 
