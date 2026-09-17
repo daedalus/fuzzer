@@ -163,3 +163,7 @@ stronger property; a replacement could only promise the weaker one.
 (or numpy-backed batch update) *and* an incremental `_compute_weights` that
 actually emits sparse deltas — without the second, the first has nothing to
 consume.
+
+Where the shape does fit: `Exp3Scheduler.select_op` (one arm changes per
+record, the decay factor cancels). The tree landed there on 2026-09-17 —
+see `core/schedulers/op_exp3.py` and `tests/test_exp3_fenwick_select.py`.
