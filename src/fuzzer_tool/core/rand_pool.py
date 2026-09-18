@@ -17,6 +17,25 @@ Opt-in Floyd sampling (``--rand-floyd-sample`` / ``FUZZER_RAND_FLOYD=1``):
 
 Modulo bias is acceptable for fuzzing — we are generating test inputs, not
 cryptographic keys.  The pool is not thread-safe.
+
+Determinism
+-----------
+This module never reads system or hardware entropy (``os.urandom``, CPU
+``RDRAND``, ``/dev/urandom``, etc.), directly or indirectly. A ``RandPool``
+built with ``seed=None`` does NOT fall through to OS entropy the way
+``np.random.default_rng(None)`` normally would -- it is seeded from
+``_NO_SEED_FALLBACK`` instead, so *every* pool, seeded or not, produces a
+byte-for-byte reproducible stream. This applies transitively to
+:func:`get_default_rand_pool`.
+
+Full determinism across the fuzzer also requires there being exactly one
+pool in play rather than many independently-constructed ones (even if each
+of those were individually deterministic, two schedulers each drawing from
+their own fresh, uncoordinated stream is a different, non-reproducible
+interleaving from run to run relative to everything else touching the
+pool). :func:`get_default_rand_pool` is the process-wide singleton every
+call site that does not receive an explicit ``rng``/``seed`` from its
+caller should fall back to -- see its docstring.
 """
 
 from __future__ import annotations
@@ -28,6 +47,11 @@ import os
 import numpy as np
 
 _POOL_ENTRIES = 4096  # refill every 4K draws
+
+# Fixed replacement for "seed from OS/hardware entropy". Arbitrary but
+# constant -- what matters is that it never changes between runs, not what
+# it is. Used any time a caller passes seed=None instead of an int.
+_NO_SEED_FALLBACK = 0x5EED_5EED
 
 # Opt-in Floyd path (Phase 1 / B1 of the seventeen-source survey).
 _RAND_FLOYD: bool = os.environ.get("FUZZER_RAND_FLOYD", "").strip() in ("1", "true", "yes")
@@ -74,7 +98,7 @@ class RandPool:
     )
 
     def __init__(self, seed=None, min_entropy: float | None = None) -> None:
-        self._rng = np.random.default_rng(seed)
+        self._rng = np.random.default_rng(_NO_SEED_FALLBACK if seed is None else seed)
         self._pool: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint32)
         self._m256: np.ndarray = np.empty(_POOL_ENTRIES, dtype=np.uint8)  # pre-computed % 256
         # Python-list mirrors of the pools. numpy is the right representation
@@ -101,7 +125,15 @@ class RandPool:
         self._generate_pool()
         if self._min_entropy is not None and self._last_entropy < self._min_entropy:
             for _ in range(3):
-                self.reseed(None)
+                # Derive the retry seed from the still-live (low-entropy)
+                # generator itself rather than reseeding from OS/hardware
+                # entropy or from the fixed no-seed fallback: the latter
+                # would retry with the exact same seed three times in a
+                # row (a no-op). Drawing the next seed from the current
+                # stream keeps the whole retry sequence a pure function of
+                # the pool's original seed, so it stays reproducible.
+                next_seed = int(self._rng.integers(0, 2**63))
+                self.reseed(next_seed)
                 self._generate_pool()
                 if self._last_entropy >= self._min_entropy:
                     break
@@ -126,8 +158,9 @@ class RandPool:
         """Replace the backing generator and discard the pre-fetched pool.
 
         Args:
-            seed: New seed for the pool's private ``Generator``.  ``None``
-                seeds from OS entropy.
+            seed: New seed for the pool's private ``Generator``. ``None``
+                seeds from ``_NO_SEED_FALLBACK`` (a fixed constant), not
+                OS/hardware entropy -- see the module docstring.
 
         Replacing the generator is not enough on its own: the pool still holds
         up to ``_POOL_ENTRIES`` values already drawn from the *old* stream,
@@ -135,7 +168,40 @@ class RandPool:
         would look like a no-op.  Invalidating ``_idx`` forces a refill from
         the new stream on the next draw.
         """
-        self._rng = np.random.default_rng(seed)
+        self._rng = np.random.default_rng(_NO_SEED_FALLBACK if seed is None else seed)
+        self._idx = _POOL_ENTRIES
+
+    def inject_entropy(self, raw: bytes) -> None:
+        """Mix externally supplied bytes into this pool's stream.
+
+        NOT wired into any call path yet — nothing in the fuzzer invokes
+        this today. It exists so a future external entropy source (a
+        hardware RNG health-check, a corpus-derived seed byte, whatever
+        gets proposed later) has a defined place to feed bytes into a
+        pool without inventing a new mechanism at that point, without
+        committing now to when or whether it actually gets called.
+
+        This is a *mix-in*, not a reseed: ``raw`` is folded together with
+        a snapshot of the pool's current (already-deterministic) state via
+        a SHA-256 digest, so the result is a deterministic function of
+        (prior state, raw) rather than of ``raw`` alone — the same bytes
+        injected into two pools with different histories still diverge.
+        Discards the current pre-fetched batch so the next draw reflects
+        the mix immediately.
+
+        Args:
+            raw: Entropy bytes to mix in. A falsy/empty value is a no-op.
+        """
+        if not raw:
+            return
+        import hashlib
+
+        state_bytes = self._pool.tobytes() if self._pool.size else b""
+        digest = hashlib.sha256(state_bytes + bytes(raw)).digest()
+        seed_words = [
+            int.from_bytes(digest[i : i + 4], "little") for i in range(0, len(digest), 4)
+        ]
+        self._rng = np.random.default_rng(np.random.SeedSequence(seed_words))
         self._idx = _POOL_ENTRIES
 
     def pool_entropy(self) -> float | None:
@@ -518,3 +584,68 @@ class RandPool:
         if count <= 0:
             return []
         return list(self._rng.lognormal(mu, sigma, size=count))
+
+
+# ── Process-wide singleton ───────────────────────────────────────────────
+#
+# Every call site in src/ that would otherwise construct its own fallback
+# ``RandPool()`` (because no ``rng``/``seed`` was threaded down to it) must
+# instead fetch this one shared instance. That is what makes "no explicit
+# seed anywhere in the call chain" behave like a single coordinated PRNG
+# rather than N independently-deterministic-but-uncoordinated ones: the
+# latter is still non-reproducible in aggregate, because how many draws
+# each fallback instance has consumed relative to the others depends on
+# scheduling order, not on the campaign seed.
+#
+# ``Fuzzer.__init__`` still builds and owns its *own* ``RandPool(seed=seed)``
+# for the campaign seed the person actually passed via ``--seed`` — that
+# instance is threaded explicitly to every scheduler/mutator it constructs,
+# same as before. This singleton only exists to catch the fallback path:
+# anything that wasn't handed a pool explicitly.
+_default_instance: "RandPool | None" = None
+
+
+def get_default_rand_pool(seed=None) -> "RandPool":
+    """Return the process-wide shared ``RandPool``, creating it if needed.
+
+    ``seed`` only has an effect on the call that actually creates the
+    singleton; once created, later calls (with or without a ``seed``)
+    just return the existing instance unchanged. Silently reseeding an
+    already-shared instance out from under everything already holding a
+    reference to it would move their stream without their knowledge,
+    which is its own source of non-determinism -- so seeding after the
+    fact is a hard error via :func:`configure_default_rand_pool_seed`
+    instead of a silent option here.
+    """
+    global _default_instance
+    if _default_instance is None:
+        _default_instance = RandPool(seed=seed)
+    return _default_instance
+
+
+def configure_default_rand_pool_seed(seed) -> None:
+    """Seed the shared default pool before its first use.
+
+    Raises ``RuntimeError`` if the singleton already exists — call this
+    (if at all) before any code path can have triggered
+    :func:`get_default_rand_pool`, e.g. at the very top of campaign
+    startup, right where ``Fuzzer.__init__`` seeds its own pool.
+    """
+    global _default_instance
+    if _default_instance is not None:
+        raise RuntimeError(
+            "default RandPool singleton already created; cannot reconfigure its seed"
+        )
+    _default_instance = RandPool(seed=seed)
+
+
+def reset_default_rand_pool(seed=None) -> None:
+    """Force-replace the shared singleton.
+
+    Test-only escape hatch: production code should never need to reset a
+    process-wide singleton mid-run. Existing holders of the old instance
+    keep drawing from it; only future ``get_default_rand_pool()`` callers
+    see the replacement.
+    """
+    global _default_instance
+    _default_instance = RandPool(seed=seed)
