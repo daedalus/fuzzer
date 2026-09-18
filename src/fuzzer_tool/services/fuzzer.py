@@ -6529,6 +6529,8 @@ class Fuzzer:
         ``strategies_below_canary`` to say anything, so checking more
         often just repeats the same "not enough data yet" empty result.
         """
+        # Only flag operator (non-seed) strategies below the canary floor.
+        # Seed strategies have their own separate seed-canary floor check below.
         flagged = self._elo.strategies_below_canary()
         for strategy, mu, canary_mu in flagged:
             log.warning(

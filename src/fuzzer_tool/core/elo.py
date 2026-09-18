@@ -1028,7 +1028,9 @@ class BayesianEloTracker(RoundRecorderMixin):
             if self._strategy_match_count.get(s, 0) >= self.min_matches
         ]
 
-    def strategies_below_canary(self, canary_name: str = "canary") -> list[tuple[str, float, float]]:
+    def strategies_below_canary(
+        self, canary_name: str = "canary"
+    ) -> list[tuple[str, float, float]]:
         """Real strategies rated at or below the deliberately-worst canary.
 
         ``canary_name`` always argmin-selects (see
@@ -1043,6 +1045,10 @@ class BayesianEloTracker(RoundRecorderMixin):
         strategy sitting at ``initial_mu`` isn't a finding, it just hasn't
         played enough games yet.
 
+        The operator arena (``canary_name="canary"``) and seed arena
+        (``canary_name="seed_canary"``) are disjoint; each call only checks
+        strategies belonging to the corresponding arena.
+
         Returns:
             ``(strategy, strategy_mu, canary_mu)`` tuples, worst offender
             (lowest strategy_mu) first. Empty if canary itself isn't rated
@@ -1053,10 +1059,23 @@ class BayesianEloTracker(RoundRecorderMixin):
         canary_mu = self._strategy_mu.get(canary_name)
         if canary_mu is None:
             return []
+
+        # Filter by arena: operator strategies have no "seed_" prefix,
+        # seed strategies are stored with "seed_" prefix.
+        if canary_name == "seed_canary":
+
+            def is_in_arena(s: str) -> bool:
+                return s.startswith("seed_")
+        else:
+
+            def is_in_arena(s: str) -> bool:
+                return not s.startswith("seed_")
+
         flagged = [
             (s, mu, canary_mu)
             for s, mu in self._strategy_mu.items()
             if s != canary_name
+            and is_in_arena(s)
             and self._strategy_match_count.get(s, 0) >= self.min_matches
             and mu <= canary_mu
         ]
