@@ -1301,6 +1301,27 @@ branch-stack event, so the degrade path is what runs there. Decoding, the
 kernel-address filter, the ring arithmetic and the constants (checked against
 the installed uapi header) are covered.
 
+### Predictable-PRNG State Recovery (CWE-338)
+
+A target that draws session tokens, nonces or sequence numbers from a weak linear generator leaks its whole future output through the comparison that checks them. `core/prng_state_recovery.py` recovers the generator's internal state from a handful of observed draws and `core/prng_state_learner.py` (wired as `f.prng_state_learner`, gated on in-process execution) feeds the next predicted draw to the `prng_predict` operator, which writes it into the input field the target compared — turning an otherwise unreachable equality check into a one-shot pass. Method ported from Gegell's Factorio RNG writeup; the elimination reuses `IncrementalXorMapSolver`.
+
+**Not one generator.** A step qualifies whenever it is built from XOR, constant-mask AND and shifts of its own state words, which is every combined Tausworthe/LFSR generator, every Marsaglia xorshift (Brent 2004 proved these are LFSRs), and classic Galois/Fibonacci LFSRs. A generator is described once, as a straight-line program over a register file, and that program is evaluated symbolically to get both the recovery equations and — regrouped into `(mask, shift)` terms — the concrete forward simulation, so simulated stream and recovered state cannot disagree. `combined_lfsr`, `xorshift`, `galois_lfsr` and `fib_lfsr` build one that is not shipped.
+
+Shipped families, with the counts derived (not assumed) from each one's own equations:
+
+| family | state | output | free equations | draws to pin | draws to trust |
+|---|---|---|---|---|---|
+| xorshift32 | 32 | 4 B | 0 | 1 | 2 |
+| xorshift64 | 64 | 8 B | 0 | 1 | 2 |
+| taus88 (Boost, GSL taus2, old Linux `prandom_u32`) | 96 | 4 B | 8 | 3 | 4 |
+| taus113 / LFSR113 (GSL, Linux `prandom_u32`) | 128 | 4 B | 15 | 4 | 5 |
+| xorshift128 | 128 | 4 B | 0 | 4 | 5 |
+| lfsr258 | 320 | 8 B | 62 | 5 | 6 |
+
+"Free equations" are the step's rank gap: a `linear_feedback_shift_engine` wastes `w - k` bits per component and those bits are linear in the rest, so any state the generator is actually in satisfies them without spending an observation. "Draws to trust" adds one whole output word of consistency margin on top of the count that pins the state — at exactly the pinning count unrelated constants fit at ~2^-8 for taus88 (measured 74/20000), and the extra word takes that to 2^-32 (0/20000).
+
+**The family is not assumed, and neither is word size.** Recovery tries every shipped family whose output word matches the operand width in hand, cheapest elimination first, and keeps whichever verifies. Candidate runs are accumulated per `(comparison PC, operand width)`: a 64-bit generator's draws arrive through `__sanitizer_cov_trace_cmp8`, which the shim logs at full 8 bytes, and the same PC comparing both widths is two streams. `prng_predict` writes the prediction at the recovered family's own width.
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)
