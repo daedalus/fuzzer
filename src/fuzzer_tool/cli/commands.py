@@ -711,6 +711,7 @@ def cmd_fuzz(args):
         invasion=getattr(args, "invasion", False),
         round_robin=getattr(args, "round_robin", False),
         canary_scheduler=getattr(args, "canary_scheduler", False),
+        seed_canary_scheduler=getattr(args, "seed_canary_scheduler", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
@@ -2263,6 +2264,15 @@ def main() -> int:
         "that always picks the lowest posterior success-rate candidate. Meant to run "
         "alongside --elo as a floor for the meta-scheduler tournament -- if a real scheduler "
         "ranks at or below it, that is logged as needing inspection.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-canary-scheduler",
+        action="store_true",
+        help="Enable the seed-arena canary: the seed-selection counterpart of "
+        "--canary-scheduler, a deliberately worst-in-class strategy that always picks the "
+        "corpus seed with the lowest posterior success-rate. Meant to run alongside --elo as "
+        "a floor for the seed-strategy tournament -- if a real seed strategy ranks at or "
+        "below it, that is logged as needing inspection.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

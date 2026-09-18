@@ -305,6 +305,8 @@ class SeedPicker:
             available.append("tang")
         if getattr(f, "_kruskal_count", None) is not None and f.corpus:
             available.append("kruskal_count")
+        if getattr(f, "_use_seed_canary", False) and f._seed_canary and f.corpus:
+            available.append("canary")
 
         # Expose the eligible pool so the fuzzer records Elo matches only against
         # strategies that were actually selectable (no phantom opponents) and so
@@ -344,6 +346,7 @@ class SeedPicker:
             "katz": lambda: self._pick_katz_seed(),
             "tang": lambda: self._pick_tang_seed(),
             "kruskal_count": lambda: self._pick_kruskal_count_seed(),
+            "canary": lambda: self._pick_seed_canary_seed(),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -464,6 +467,25 @@ class SeedPicker:
         anchor = strategy.select(f.corpus)
         generated = strategy.generate(anchor, f.corpus)
         return anchor if generated is None else generated
+
+    def _pick_seed_canary_seed(self) -> bytes | None:
+        """Deliberately worst-in-class picker -- the Elo-arbitrated 'canary' arm.
+
+        Not a real strategy: an instrumented floor for the seed arena's
+        tournament (see ``core/schedulers/seed_canary.py``). Argmin-selects
+        over the same per-seed Beta posterior every real seed strategy's
+        outcome feeds off-policy, so it should end up rated at the bottom
+        of the ``seed_``-prefixed pool and picked the least of anyone.
+
+        Returns None on an empty corpus, same as every other arm here.
+        """
+        f = self.f
+        canary = getattr(f, "_seed_canary", None)
+        if canary is None or not f.corpus:
+            return None
+        key_to_seed = {f._seed_key(s): s for s in f.corpus}
+        selected = canary.select_seed(list(key_to_seed))
+        return key_to_seed.get(selected)
 
     def _pick_aflgo_seed(self) -> bytes | None:
         """Distance-pure seed picker — the Elo-arbitrated 'aflgo' arm.

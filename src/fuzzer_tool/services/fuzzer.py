@@ -1068,6 +1068,9 @@ class Fuzzer:
         successive_elim_min_pulls=3,
         successive_elim_reopen=0,
         kruskal_count=False,
+        # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
+        # The op_canary counterpart for the seed-selection Elo pool.
+        seed_canary_scheduler=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -1999,6 +2002,17 @@ class Fuzzer:
             from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
 
             self._kruskal_count = KruskalCountSeedStrategy(self._rng, self._profile)
+        # Seed-arena canary: deliberately worst-in-class seed scheduler, the
+        # _pick_seed_elo counterpart of op_canary (see
+        # core/schedulers/seed_canary.py). Only meaningful alongside --elo,
+        # which is what ranks it against the rest of the seed-strategy pool.
+        self._use_seed_canary = seed_canary_scheduler
+        self._seed_canary = None
+        if seed_canary_scheduler:
+            from fuzzer_tool.core.schedulers.seed_canary import SeedCanaryScheduler
+
+            self._seed_canary = SeedCanaryScheduler()
+            log.info("Seed-canary scheduling enabled (deliberately worst-in-class)")
         self._use_ecofuzz = ecofuzz
         self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
         self._metropolis = metropolis
@@ -4702,9 +4716,8 @@ class Fuzzer:
         # each remaining discovery is rare, so the weight rises toward 1.
         # The weight is bounded above by 1.0, so the F0 signal never inflates
         # a posterior beyond the default -- it only ever re-weights.
-        if self._seed_quality:
+        if self._seed_quality or self._seed_canary:
             parent_key = self._seed_key(data)
-            self._seed_quality.init_seed(parent_key)
             weight = 1.0
             f0_est = self._edge_tracker.estimate_distinct_edges_f0()
             if f0_est is not None:
@@ -4716,9 +4729,18 @@ class Fuzzer:
                 # (0, 1], so the F0 signal never inflates a posterior
                 # beyond the default -- it only ever re-weights.
                 weight = observed / max(1.0, f0_est)
-            self._seed_quality.record_outcome(
-                parent_key, discovered=bool(has_new_coverage), weight=weight
-            )
+            if self._seed_quality:
+                self._seed_quality.init_seed(parent_key)
+                self._seed_quality.record_outcome(
+                    parent_key, discovered=bool(has_new_coverage), weight=weight
+                )
+            # Same off-policy signal, fed to the seed-arena canary floor
+            # (see core/schedulers/seed_canary.py) regardless of which seed
+            # strategy actually picked this parent, and independent of
+            # whether --bayesian is on -- canary does not need
+            # BayesianSeedQuality enabled to track its own posterior.
+            if self._seed_canary:
+                self._seed_canary.record(parent_key, success=bool(has_new_coverage), weight=weight)
 
         # Credit the cmplog operands this gain is attributable to: the
         # input-to-state matches found in the input, which are the operands
@@ -6494,6 +6516,20 @@ class Fuzzer:
                 mu,
                 canary_mu,
             )
+        # Same check for the seed arena's own floor (see
+        # core/schedulers/seed_canary.py) -- a separate tournament under
+        # seed_-prefixed keys, so it needs its own canary_name.
+        if getattr(self, "_use_seed_canary", False) and self._seed_canary:
+            seed_flagged = self._elo.strategies_below_canary("seed_canary")
+            for strategy, mu, canary_mu in seed_flagged:
+                log.warning(
+                    "Elo meta-scheduler: seed strategy %r rated %.1f, at or "
+                    "below the seed-canary floor (%.1f) -- this strategy "
+                    "needs inspection",
+                    strategy_display_name(strategy),
+                    mu,
+                    canary_mu,
+                )
 
     def _seed_convergence_rows(self) -> list[tuple[str, float, float, int]]:
         """(name, rating, delta, matches) for every seed strategy actually used
@@ -6639,6 +6675,8 @@ class Fuzzer:
             seeds.append("aflgo")
         if getattr(self, "_kruskal_count", None) is not None:
             seeds.append("kruskal-count")
+        if getattr(self, "_use_seed_canary", False) and self._seed_canary:
+            seeds.append("canary")
         if seeds:
             parts.append("seeds=" + "+".join(seeds))
 
