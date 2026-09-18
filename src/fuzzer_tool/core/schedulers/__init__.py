@@ -1,4 +1,4 @@
-"""Operator-selection schedulers (bandit algorithms)."""
+"""Operator-selection schedulers (bandit algorithms) and seed-selection schedulers."""
 
 from fuzzer_tool.core.schedulers.op_bo_gp_ucb import BOGPUCBScheduler
 from fuzzer_tool.core.schedulers.op_c2ucb import C2UCBScheduler
@@ -29,7 +29,10 @@ from fuzzer_tool.core.schedulers.op_successive_elim import SuccessiveElimination
 from fuzzer_tool.core.schedulers.op_swucb import SWUCBScheduler
 from fuzzer_tool.core.schedulers.op_topk import TopKScheduler
 from fuzzer_tool.core.schedulers.op_whittle import WhittleIndexScheduler
+from fuzzer_tool.core.schedulers.seed_canary import SeedCanaryScheduler
+from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
 from fuzzer_tool.core.schedulers.seed_mcts import AlphaBetaMCTSSeedScheduler, MCTSSeedScheduler
+from fuzzer_tool.core.schedulers.seed_tang import TangRecommendationScheduler
 
 __all__ = [
     "CorralScheduler",
@@ -63,4 +66,7 @@ __all__ = [
     "SuccessiveEliminationScheduler",
     "SoftmaxScheduler",
     "TopKScheduler",
+    "TangRecommendationScheduler",
+    "SeedCanaryScheduler",
+    "KruskalCountSeedStrategy",
 ]

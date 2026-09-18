@@ -398,8 +398,12 @@ class TestFuzzerWiring:
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         params = list(inspect.signature(Fuzzer.__init__).parameters)
-        assert params[-1] == "kruskal_count"
+        assert "kruskal_count" in params
+        assert params[-1] == "seed_canary_scheduler"
         assert inspect.signature(Fuzzer.__init__).parameters["kruskal_count"].default is False
+        assert (
+            inspect.signature(Fuzzer.__init__).parameters["seed_canary_scheduler"].default is False
+        )
 
     def test_cli_passes_flag_to_both_constructions(self):
         import ast

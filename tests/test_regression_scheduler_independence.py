@@ -77,3 +77,36 @@ class TestSchedulersIndependent:
         }
         for op, cat in scheduler._op_to_cat.items():
             assert op in OPERATOR_CATEGORIES[cat]
+
+
+class TestSeedSchedulerExports:
+    """Verify all seed schedulers are exported from the package."""
+
+    def test_seed_schedulers_in_all(self):
+        import fuzzer_tool.core.schedulers as schedulers_pkg
+
+        # All seed schedulers that should be publicly importable
+        assert "MCTSSeedScheduler" in schedulers_pkg.__all__
+        assert "AlphaBetaMCTSSeedScheduler" in schedulers_pkg.__all__
+        assert "TangRecommendationScheduler" in schedulers_pkg.__all__
+        assert "SeedCanaryScheduler" in schedulers_pkg.__all__
+        assert "KruskalCountSeedStrategy" in schedulers_pkg.__all__
+
+    def test_seed_schedulers_importable(self):
+        from fuzzer_tool.core.schedulers import (
+            AlphaBetaMCTSSeedScheduler,
+            KruskalCountSeedStrategy,
+            MCTSSeedScheduler,
+            SeedCanaryScheduler,
+            TangRecommendationScheduler,
+        )
+
+        # Sanity: they are classes, not modules
+        for cls in (
+            MCTSSeedScheduler,
+            AlphaBetaMCTSSeedScheduler,
+            TangRecommendationScheduler,
+            SeedCanaryScheduler,
+            KruskalCountSeedStrategy,
+        ):
+            assert isinstance(cls, type)
