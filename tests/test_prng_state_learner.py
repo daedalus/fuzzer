@@ -39,9 +39,11 @@ import pytest
 
 from fuzzer_tool.core.prng_state_learner import PRNGStateLearner
 from fuzzer_tool.core.prng_state_recovery import (
-    TAUS113,
+    LFSR258,
     TAUS88_PARAMS,
+    TAUS113,
     XORSHIFT32,
+    XORSHIFT64,
     XORSHIFT128,
     output_word,
     step_state,
@@ -96,6 +98,19 @@ class _Cond:
 def _conds(words: list[int], pc: int | None = 0x1000) -> list[_Cond]:
     """Records as the shim logs them: the drawn word against a zero field."""
     return [_Cond(w.to_bytes(4, "little"), b"\x00\x00\x00\x00", pc) for w in words]
+
+
+#: The 8-byte equivalent of PAYLOAD: the compared-against field has to be
+#: present in the input for the same reason (an operand found in the input
+#: is data the target read back, so extraction drops it -- and the zero
+#: field of a _wide_conds record is 8 bytes, not 4).
+WIDE_PAYLOAD = b"\x00" * 8 + b"PAYLOAD"
+
+
+def _wide_conds(words: list[int], pc: int | None = 0x1000) -> list[_Cond]:
+    """Records for a 64-bit generator: the shim's trace_cmp8 path logs both
+    operands at full 8-byte width (``__afl_cmplog_ints(a, b, 8, pc)``)."""
+    return [_Cond(w.to_bytes(8, "little"), b"\x00" * 8, pc) for w in words]
 
 
 def _fuzzer(conds: list[Any] | None = None, *, in_process: bool = True) -> Any:
@@ -204,9 +219,11 @@ class TestNondeterminismPreference:
         assert learner.predict(4) == words[8:12]
 
         history = learner._run_history[hash(PAYLOAD)]
-        assert len(history[0x1000].values) == 8, "generator site recorded both drains"
-        assert history[0x1000].max_drain_width == 4
-        stable_entry = history[0x2000]
+        # Sites are keyed (pc, operand width), so a PC comparing 4- and
+        # 8-byte values keeps two independent histories.
+        assert len(history[(0x1000, 4)].values) == 8, "generator site recorded both drains"
+        assert history[(0x1000, 4)].max_drain_width == 4
+        stable_entry = history[(0x2000, 4)]
         assert len(stable_entry.values) == stable_entry.max_drain_width == 5, (
             "a site that logs the same constants every drain must not read as varied"
         )
@@ -224,10 +241,11 @@ class TestNondeterminismPreference:
 class TestSampleFloor:
     def test_below_every_familys_floor_is_not_attempted(self):
         """Below the *smallest* candidate family's confident_samples (2, for
-        xorshift32), no family could possibly verify, so no attempt is spent."""
+        xorshift32 at 4 bytes and xorshift64 at 8), no family of that width
+        could possibly verify, so no attempt is spent."""
         from fuzzer_tool.core import prng_state_learner as mod
 
-        assert mod._MIN_SAMPLES == 2
+        assert mod._MIN_SAMPLES == {4: 2, 8: 2}
         learner = _learner(_conds(_stream(1)))
         assert learner.observe_execution(PAYLOAD) is False
         assert learner.attempts == 0
@@ -313,6 +331,64 @@ class TestCrossFamilyRecovery:
         assert restored.has_state()
         assert restored._spec.name == "xorshift128"
         assert restored.predict(2) == learner.predict(2)
+
+
+class TestWideOperandStreams:
+    """64-bit generators are observed and predicted at their own width.
+
+    A target drawing 8-byte tokens compares them through
+    ``__sanitizer_cov_trace_cmp8``, which the shim logs whole, so nothing
+    but the Python side's width assumption ever stood between lfsr258 /
+    xorshift64 and recovery.
+    """
+
+    def test_recovers_an_xorshift64_stream(self):
+        seed = (0x0123_4567_89AB_CDEF,)
+        words = _generic_stream(4, XORSHIFT64, seed)
+        learner = _learner(_wide_conds(words))
+        assert learner.observe_execution(WIDE_PAYLOAD) is True
+        assert learner._spec.name == "xorshift64"
+        assert learner.predict(1) == _generic_stream(5, XORSHIFT64, seed)[4:]
+
+    def test_recovers_an_lfsr258_stream(self):
+        seed = (153587801, 759022222, 1288503317, 1718083407, 123456789)
+        words = _generic_stream(8, LFSR258, seed)
+        learner = _learner(_wide_conds(words))
+        assert learner.observe_execution(WIDE_PAYLOAD) is True
+        assert learner._spec.name == "lfsr258"
+        assert learner.predict(2) == _generic_stream(10, LFSR258, seed)[8:]
+
+    def test_prediction_is_packed_at_the_generators_width(self):
+        """The mutator writes whatever next_value_bytes returns, so a 64-bit
+        draw truncated to 4 bytes would be a value the target never
+        compares."""
+        seed = (0x0123_4567_89AB_CDEF,)
+        learner = _learner(_wide_conds(_generic_stream(4, XORSHIFT64, seed)))
+        learner.observe_execution(WIDE_PAYLOAD)
+        packed = learner.next_value_bytes()
+        assert len(packed) == 8
+        assert int.from_bytes(packed, "little") == learner.predict(1)[0]
+
+    def test_widths_at_one_pc_are_separate_streams(self):
+        """One PC comparing both widths must not braid them into one window:
+        the 4-byte taus88 run still recovers with the 8-byte noise present."""
+        words = _stream(4)
+        noise = _wide_conds([0xDEAD_BEEF_0BAD_F00D, 0x0102_0304_0506_0708], pc=0x1000)
+        learner = _learner(noise + _conds(words, pc=0x1000))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.name == "taus88"
+        assert learner._confirmed_samples == words
+        assert sorted(learner._pending) == [(0x1000, 4), (0x1000, 8)]
+
+    def test_a_taus88_stream_widened_to_eight_bytes_is_not_recovered(self):
+        """Adversarial: the same words a 4-byte window recovers taus88 from,
+        logged as 8-byte operands. Width selects the families tried, so the
+        only candidates are the 64-bit ones and none of them fits -- a
+        zero-extended 32-bit stream is not a 64-bit generator's output."""
+        learner = _learner(_wide_conds(_stream(8)))
+        assert learner.observe_execution(WIDE_PAYLOAD) is False
+        assert learner.has_state() is False
+        assert learner.attempts == 1
 
 
 class TestInProcessGate:
@@ -445,7 +521,7 @@ class TestPersistenceRebuildsFrontier:
 class TestOperatorPlacement:
     """_op_prng_predict writes the prediction where the target reads it."""
 
-    def _engine(self, learner, pairs, buf_len=32):
+    def _engine(self, learner, pairs, buf_len=32, rng=None):
         from fuzzer_tool.core.mutator_interface import MutationContext
         from fuzzer_tool.core.rand_pool import RandPool
         from fuzzer_tool.services.operators import OperatorEngine
@@ -457,7 +533,7 @@ class TestOperatorPlacement:
         # called in isolation without a whole Fuzzer behind it.
         engine._ctx_cache = MutationContext(
             max_len=buf_len,
-            rng=RandPool(seed=7),
+            rng=rng if rng is not None else RandPool(seed=7),
             cmplog_pairs=pairs,
             prng_state_learner=learner,
         )
@@ -501,6 +577,56 @@ class TestOperatorPlacement:
         engine = self._engine(learner, [])
         engine._op_prng_predict(buf, 0, bytes(buf))
         assert bytes(buf) == b"ab"
+
+    def _wide_learner(self):
+        """A learner holding a recovered 64-bit (xorshift64) state."""
+        seed = (0x0123_4567_89AB_CDEF,)
+        learner = _learner(_wide_conds(_generic_stream(4, XORSHIFT64, seed)))
+        learner.observe_execution(WIDE_PAYLOAD)
+        assert learner.has_state()
+        return learner, _generic_stream(5, XORSHIFT64, seed)[4]
+
+    def test_writes_a_64_bit_draw_whole(self):
+        """The field is as wide as the generator's word: half an 8-byte token
+        satisfies nothing, and the other half is left as whatever was there."""
+        learner, nxt = self._wide_learner()
+        token_field = b"\x11\x22\x33\x44\x55\x66\x77\x88"
+        buf = bytearray(b"HDR-" + token_field + b"-rest-of-the-buffer-here")
+        offset = bytes(buf).find(token_field)
+        engine = self._engine(learner, [(token_field, b"\x00" * 8)])
+        engine._op_prng_predict(buf, 0, bytes(buf))
+        assert bytes(buf[offset : offset + 8]) == nxt.to_bytes(8, "little")
+
+    def test_four_byte_operands_do_not_place_an_eight_byte_draw(self):
+        """Adversarial: a same-width operand is what marks the token field.
+        A 4-byte operand occurring in the buffer is a different field, so it
+        must not be used as the placement offset -- writing 8 bytes there
+        would also run past what was compared. With no 8-byte operand on
+        record the fallback offset is used instead, scripted here (Hard Rule
+        39) so the assertion is on behaviour, not on a lucky draw.
+        """
+        from tests.support.scripted_rng import ScriptedRng
+
+        learner, nxt = self._wide_learner()
+        buf = bytearray(b"Z" * 64)
+        narrow_field = b"\xaa\xbb\xcc\xdd"
+        buf[4:8] = narrow_field
+        engine = self._engine(
+            learner,
+            [(narrow_field, b"\xee\xee\xee\xee")],
+            rng=ScriptedRng(randints=[40]),
+        )
+        engine._op_prng_predict(buf, 0, bytes(buf))
+        assert bytes(buf[40:48]) == nxt.to_bytes(8, "little")
+        assert bytes(buf[4:8]) == narrow_field, "the 4-byte field is untouched"
+
+    def test_buffer_shorter_than_the_wide_draw_is_left_alone(self):
+        """Six bytes is enough for a 4-byte token and not for an 8-byte one."""
+        learner, _ = self._wide_learner()
+        buf = bytearray(b"abcdef")
+        engine = self._engine(learner, [])
+        engine._op_prng_predict(buf, 0, bytes(buf))
+        assert bytes(buf) == b"abcdef"
 
 
 class TestCmplogExposesOrderedRecords:

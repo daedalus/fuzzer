@@ -1593,49 +1593,57 @@ class OperatorEngine:
         buf[-nbytes:] = checksum.to_bytes(nbytes, "big")
 
     def _op_prng_predict(self, buf, _byte_idx, _data):
-        """Overwrite a 4-byte field with the learner's predicted next draw.
+        """Overwrite one token field with the learner's predicted next draw.
 
         Gated on ``PRNGStateLearner.has_state()`` (see
         ``core/operator_registry.py``'s ``_AVAILABLE["prng_predict"]``): by
-        the time this runs, 4+ consecutive draws from a taus88-family
-        generator have already been observed via cmplog and verified (see
+        the time this runs, enough consecutive draws from a GF(2)-linear
+        generator have been observed via cmplog and verified (see
         ``core/prng_state_learner.py``), so every future draw is known.
+
+        The field is as wide as the prediction, not a fixed 4 bytes: the
+        learner reports the recovered family's own word width, so a 64-bit
+        generator (xorshift64, lfsr258) gets its 8-byte token written whole.
+        Writing half of one would leave the comparison unsolved as surely as
+        writing the right value at the wrong offset.
 
         Placement: a checksum's position is implied by the container format,
         and a predicted nonce's is not, but it is not unknown either. The
         field the target checks the token against is one it read from the
         input and compared, so it appears in ``cmplog_pairs`` as an operand
-        that occurs verbatim in the buffer -- those offsets are tried first,
-        and a random 4-byte position (the ``_op_checksum_repair`` heuristic)
-        is the fallback when none is on record. Writing the right value at
-        the wrong offset leaves the comparison unsolved, so when the offsets
-        are known, spending selections on the rest of the buffer is waste.
+        of the same width that occurs verbatim in the buffer -- those
+        offsets are tried first, and a random position (the
+        ``_op_checksum_repair`` heuristic) is the fallback when none is on
+        record. When the offsets are known, spending selections on the rest
+        of the buffer is waste.
         """
-        if not buf or len(buf) < 4:
-            return
         learner = self.ctx.prng_state_learner
-        if not learner:
+        if not buf or not learner:
             return
         predicted = learner.next_value_bytes()
         if predicted is None:
             return
+        width = len(predicted)
+        if len(buf) < width:
+            return
+
         rng = self.ctx._rng
         src = bytes(buf)
         offsets: list[int] = []
         seen: set[int] = set()
         for op_a, op_b in self.ctx.cmplog_pairs or ():
             for op in (op_a, op_b):
-                if len(op) != 4:
+                if len(op) != width:
                     continue
                 pos = src.find(op)
-                if 0 <= pos <= len(buf) - 4 and pos not in seen:
+                if 0 <= pos <= len(buf) - width and pos not in seen:
                     seen.add(pos)
                     offsets.append(pos)
         if offsets:
             pos = offsets[0] if len(offsets) == 1 else rng.choice_list(offsets, 1)[0]
         else:
-            pos = rng.randint(0, max(0, len(buf) - 4))
-        buf[pos : pos + 4] = predicted
+            pos = rng.randint(0, len(buf) - width)
+        buf[pos : pos + width] = predicted
 
     def _op_crc_advanced(self, buf, _byte_idx, _data):
         """Overwrite a region with configurable CRC-32 output (FFmpeg av_crc family).

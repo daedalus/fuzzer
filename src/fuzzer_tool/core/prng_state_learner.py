@@ -17,15 +17,17 @@ next value into the input instead of guessing -- turning an otherwise-
 unreachable "does this match the token I generated" check into a one-shot
 pass.
 
-Family is not assumed. ``_try_recover`` tries every 4-byte-output candidate
-family smallest-state-first (cheapest elimination first) and keeps whichever
+Family is not assumed, and neither is word size. ``_try_recover`` tries every
+shipped family whose output word is as wide as the operands in hand,
+smallest-state-first (cheapest elimination first), and keeps whichever
 verifies -- the "reversing the target's binary just to learn which family it
 uses" step ``core/prng_state_recovery.py``'s module docstring says this class
-avoids. 8-byte-output families (``xorshift64``, ``lfsr258``) are shipped in
-``core/prng_state_recovery.py`` but not tried here yet: the extraction below
-and ``operators.py::_op_prng_predict`` both hard-code a 4-byte operand width,
-and widening either is a separate change (touching the mutator's placement
-search too) left as follow-up.
+avoids. A 64-bit generator (``xorshift64``, ``lfsr258``) draws 8-byte tokens
+and its compares reach us through ``__sanitizer_cov_trace_cmp8``, which the
+shim logs at full width, so operand width is a property of the observation,
+not a constant: candidate runs are accumulated per ``(pc, width)`` site. The
+same PC comparing 4- and 8-byte values is two streams, and a window mixing
+widths is not a stream at all.
 
 Signal source
 -------------
@@ -120,21 +122,26 @@ from fuzzer_tool.core.prng_state_recovery import (
     recover_state,
     step_state,
     verify_state,
+    walk_stream,
 )
 
-_OPERAND_BYTES = 4  # width this learner extracts and the mutator writes back
-# The 4-byte-output shipped families, in FAMILIES' smallest-state-first
-# order (cheapest elimination tried first). 8-byte families (xorshift64,
-# lfsr258) are excluded -- see the module docstring's "Family is not
-# assumed" section for why.
-_CANDIDATE_FAMILIES: tuple[LinearPRNG, ...] = tuple(
-    spec for spec in FAMILIES.values() if spec.out_bytes == _OPERAND_BYTES
-)
-# Below this floor, no family has enough of a margin to be worth an attempt.
-# Individual families gate at their own (larger) confident_samples() inside
-# _try_recover; this is just the cheapest one, so windows never even reach
-# _try_recover before any family could possibly verify.
-_MIN_SAMPLES = min(confident_samples(spec) for spec in _CANDIDATE_FAMILIES)
+# Every shipped family, in FAMILIES' smallest-state-first order (cheapest
+# elimination tried first).
+_CANDIDATE_FAMILIES: tuple[LinearPRNG, ...] = tuple(FAMILIES.values())
+# Operand widths worth extracting at all: exactly the output widths some
+# family has, so a 2-byte compare is dropped at the source rather than
+# accumulated into a window no family could ever fit. Currently {4, 8}.
+_OPERAND_WIDTHS: frozenset[int] = frozenset(spec.out_bytes for spec in _CANDIDATE_FAMILIES)
+# Per width, the floor below which no family of that width has enough
+# margin to be worth an attempt. Individual families gate at their own
+# (larger) confident_samples() inside _try_recover; this is just the
+# cheapest one of the width, so a window never reaches _try_recover before
+# any family could possibly verify. 4-byte: xorshift32's 2. 8-byte:
+# xorshift64's 2.
+_MIN_SAMPLES: dict[int, int] = {
+    width: min(confident_samples(spec) for spec in _CANDIDATE_FAMILIES if spec.out_bytes == width)
+    for width in _OPERAND_WIDTHS
+}
 _MAX_SAMPLES = 16  # cap on candidates fed to one recovery attempt
 # How far ahead of the cached frontier to look for a later drain's samples.
 # Bounds the cost of continuation (one step is a few integer ops) while
@@ -147,6 +154,12 @@ _RUN_HISTORY_CAP = 256
 _NO_CANDIDATE = object()
 
 __all__ = ["PRNGStateLearner"]
+
+
+#: Where a candidate run was observed: the comparison PC (``None`` when the
+#: shim build logs none) and the operand width in bytes. Width is part of
+#: the key because it selects which families can fit the run at all.
+_Site = tuple[int | None, int]
 
 
 @dataclass
@@ -171,18 +184,18 @@ class PRNGStateLearner:
         # LAST confirmed sample, i.e. the state to predict the future from.
         # Derived from _state, so it is not persisted -- from_dict rebuilds it.
         self._frontier: tuple[int, ...] | None = None
-        # input hash -> {pc -> (values ever seen, widest single drain)}. A pc
-        # is nondeterministic when it has produced MORE distinct values for one
-        # input than any single drain of that input contained: that is a value
-        # that changed between replays, the signature of internal state. The
-        # comparison against drain width is what separates it from a site that
-        # merely compares several different constants every time.
-        self._run_history: dict[int, dict[int, _PCHistory]] = {}
-        # pc -> the run of draws accumulated at that site but not yet folded
-        # into a confirmed state. A drain typically contributes one value per
-        # site, so a run is assembled across executions; bounded to
-        # _MAX_SAMPLES, oldest dropped first.
-        self._pending: dict[int | None, list[int]] = {}
+        # input hash -> {site -> (values ever seen, widest single drain)}. A
+        # site is nondeterministic when it has produced MORE distinct values
+        # for one input than any single drain of that input contained: that is
+        # a value that changed between replays, the signature of internal
+        # state. The comparison against drain width is what separates it from
+        # a site that merely compares several different constants every time.
+        self._run_history: dict[int, dict[_Site, _PCHistory]] = {}
+        # site -> the run of draws accumulated there but not yet folded into a
+        # confirmed state. A drain typically contributes one value per site,
+        # so a run is assembled across executions; bounded to _MAX_SAMPLES,
+        # oldest dropped first.
+        self._pending: dict[_Site, list[int]] = {}
         self.attempts = 0
         self.successes = 0
 
@@ -220,27 +233,28 @@ class PRNGStateLearner:
         if getattr(self.f, "_inprocess_runner", None) is None:
             return self.has_state()
 
-        fresh = self._extract_by_pc(input_data)
-        for pc, values in fresh.items():
-            window = self._pending.setdefault(pc, [])
+        fresh = self._extract_by_site(input_data)
+        for site, values in fresh.items():
+            window = self._pending.setdefault(site, [])
             window.extend(values)
             if len(window) > _MAX_SAMPLES:
                 del window[:-_MAX_SAMPLES]
 
-        pc = self._best_pc()
-        if pc is _NO_CANDIDATE:
+        site = self._best_site()
+        if site is _NO_CANDIDATE:
             return self.has_state()
-        window = self._pending[pc]
+        window = self._pending[site]
+        width = site[1]
 
         if self._state is not None and self._continues_from_frontier(window):
             # Same stream, further along: advance rather than re-recover.
             window.clear()
             return True
 
-        if len(window) < _MIN_SAMPLES:
+        if len(window) < _MIN_SAMPLES[width]:
             return self.has_state()
 
-        if self._try_recover(window):
+        if self._try_recover(window, width):
             window.clear()
             return True
 
@@ -272,20 +286,24 @@ class PRNGStateLearner:
     def next_value_bytes(self, byteorder: Literal["little", "big"] = "little") -> bytes | None:
         """Convenience for mutators: the single next predicted draw, packed."""
         predicted = self.predict(1)
-        if not predicted:
+        if not predicted or self._spec is None:
             return None
-        return predicted[0].to_bytes(_OPERAND_BYTES, byteorder)
+        # The recovered family's own word width: a 64-bit generator's draw
+        # is an 8-byte field in the target, and packing it into 4 would
+        # write a value the target never compares.
+        return predicted[0].to_bytes(self._spec.out_bytes, byteorder)
 
     # ------------------------------------------------------------------
     # Extraction
     # ------------------------------------------------------------------
 
-    def _extract_by_pc(self, input_data: bytes) -> dict[int | None, list[int]]:
-        """This drain's 4-byte operands absent from *input_data*, grouped by
-        comparison PC and kept in encounter order within each group.
+    def _extract_by_site(self, input_data: bytes) -> dict[_Site, list[int]]:
+        """This drain's operands absent from *input_data*, grouped by
+        ``(comparison PC, width)`` and kept in encounter order within a group.
 
-        ``None`` is the no-PC bucket, so a shim build that logs no PC still
-        yields a usable sequence rather than nothing.
+        Only widths some family outputs (:data:`_OPERAND_WIDTHS`) are kept.
+        A ``None`` PC is the no-PC bucket, so a shim build that logs no PC
+        still yields a usable sequence rather than nothing.
         """
         cmplog = getattr(self.f, "_cmplog", None)
         conds = getattr(cmplog, "last_conds", None) if cmplog is not None else None
@@ -293,15 +311,15 @@ class PRNGStateLearner:
             return {}
 
         history = self._note_input(input_data)
-        by_pc: dict[int | None, list[int]] = {}
+        by_site: dict[_Site, list[int]] = {}
         for cond in conds:
             base = cond.base
-            pc = base.pc
             for op in (base.op_a, base.op_b):
-                if len(op) != _OPERAND_BYTES or input_data.find(op) >= 0:
+                width = len(op)
+                if width not in _OPERAND_WIDTHS or input_data.find(op) >= 0:
                     continue
                 value = int.from_bytes(op, "little")
-                bucket = by_pc.setdefault(pc, [])
+                bucket = by_site.setdefault((base.pc, width), [])
                 if value in bucket:
                     # A repeat inside one drain is not the next draw: a
                     # generator returning the same word twice running is
@@ -309,18 +327,18 @@ class PRNGStateLearner:
                     # the latter is overwhelmingly more likely.
                     continue
                 bucket.append(value)
-        for pc, values in by_pc.items():
-            if pc is None:
+        for site, values in by_site.items():
+            if site[0] is None:
                 continue
-            entry = history.get(pc)
+            entry = history.get(site)
             if entry is None:
-                entry = history[pc] = _PCHistory()
+                entry = history[site] = _PCHistory()
             entry.values.update(values)
             entry.max_drain_width = max(entry.max_drain_width, len(values))
-        return by_pc
+        return by_site
 
-    def _best_pc(self) -> Any:
-        """The PC whose pending window is the most promising candidate run.
+    def _best_site(self) -> Any:
+        """The site whose pending window is the most promising candidate run.
 
         Prefers a site already proven nondeterministic across replays of one
         input -- the signature of internal state rather than echoed input --
@@ -328,29 +346,29 @@ class PRNGStateLearner:
         """
         if not self._pending:
             return _NO_CANDIDATE
-        varied = self._varied_pcs()
+        varied = self._varied_sites()
 
-        def rank(pc: int | None) -> tuple[bool, int]:
-            return (pc in varied, len(self._pending[pc]))
+        def rank(site: _Site) -> tuple[bool, int]:
+            return (site in varied, len(self._pending[site]))
 
         return max(self._pending, key=rank)
 
-    def _varied_pcs(self) -> set[int]:
-        """PCs whose value changed between replays of one input.
+    def _varied_sites(self) -> set[_Site]:
+        """Sites whose value changed between replays of one input.
 
         More distinct values than the widest single drain of that input means
         a replay produced something new. A site logging the same five
         constants every execution never qualifies, however many they are.
         """
         return {
-            pc
+            site
             for history in self._run_history.values()
-            for pc, entry in history.items()
+            for site, entry in history.items()
             if len(entry.values) > entry.max_drain_width
         }
 
-    def _note_input(self, input_data: bytes) -> dict[int, _PCHistory]:
-        """Return (creating if needed) the per-PC value history for this input."""
+    def _note_input(self, input_data: bytes) -> dict[_Site, _PCHistory]:
+        """Return (creating if needed) the per-site value history for this input."""
         key = hash(input_data)
         history = self._run_history.get(key)
         if history is None:
@@ -396,31 +414,37 @@ class PRNGStateLearner:
         if self._frontier is None or self._spec is None or not candidates:
             return False
         spec = self._spec
-        probe = self._frontier
-        for _ in range(_MAX_ADVANCE_SEARCH):
-            probe = step_state(probe, spec)
-            if output_word(probe, spec) != candidates[0]:
+        for probe, word in walk_stream(self._frontier, _MAX_ADVANCE_SEARCH, spec):
+            if word != candidates[0]:
                 continue
             walk = probe
-            for expected in candidates[1:]:
-                walk = step_state(walk, spec)
-                if output_word(walk, spec) != expected:
+            for expected, (nxt, produced) in zip(
+                candidates[1:],
+                walk_stream(probe, len(candidates) - 1, spec),
+                strict=True,
+            ):
+                if produced != expected:
                     break
+                walk = nxt
             else:
                 self._frontier = walk
                 self._confirmed_samples.extend(candidates)
                 return True
         return False
 
-    def _try_recover(self, candidates: list[int]) -> bool:
-        """Try every candidate family, smallest-state first, on *candidates*.
+    def _try_recover(self, candidates: list[int], width: int) -> bool:
+        """Try every family of output width *width*, smallest-state first.
+
+        Width filters before cost does: a 4-byte run cannot be a 64-bit
+        generator's output whatever it fits numerically, and trying one
+        would spend lfsr258's 320x320 elimination to learn that.
 
         One call is one recorded attempt regardless of how many families are
         probed inside it -- see the module docstring's cost-model note.
         """
         self.attempts += 1
         for spec in _CANDIDATE_FAMILIES:
-            if len(candidates) < confident_samples(spec):
+            if spec.out_bytes != width or len(candidates) < confident_samples(spec):
                 continue
             try:
                 state = recover_state(candidates, spec)
@@ -464,9 +488,7 @@ class PRNGStateLearner:
                 # state and hands out draws it has already seen. With no
                 # samples recorded (a state dict written before this field
                 # existed), the state's own output is the only anchor there is.
-                learner._set_state(
-                    spec, restored, samples or [output_word(restored, spec)]
-                )
+                learner._set_state(spec, restored, samples or [output_word(restored, spec)])
             learner.attempts = int(data.get("attempts", 0))
             learner.successes = int(data.get("successes", 0))
         return learner
