@@ -362,6 +362,59 @@ the textbook lattice application (Frieze, Hastad, Kannan, Lagarias, Shamir),
 in a target that salts a format, and the dimension there is 5-20 rather than
 100. See P4-1 below.
 
+### F10. The transpose: two invariants, and one verdict that flips
+
+Every matrix analysis above re-run on `A^T` (445 edges x 250 seeds).
+
+| | seed x edge | edge x seed |
+|---|---|---|
+| singular spectrum | -- | identical to **9e-13**, all three cell semantics |
+| GF(2) rank / rank over Q | 133 / 108 | 133 / 108 |
+| XOR-dependent rows | 117 | 312 |
+| union-redundant rows | 235 of 250 | **445 of 445** |
+| greedy cover | 31 | **1** |
+| duplicate rows | 72 of 250 | **126 of 445** |
+| sparse relations, exhaustive | 0 multiples, 0 triples | **4 multiples, 34 triples** |
+| LLL, 100 rows | 12 relations, support 52, max coeff 47, 111 s | **45 relations, support 5, max coeff 1**, 42 s |
+
+The first two rows are theorems -- `sigma(A) = sigma(A^T)` and rank is
+orientation-free -- and the tool prints them as controls, because a
+difference there means the pipeline is wrong rather than the target
+interesting.
+
+**Two metrics are seed-side only and degenerate transposed.** Union redundancy
+goes to 445 of 445 (no seed fires exactly one edge, so every edge sits inside
+the union of the others) and greedy cover goes to 1: a single edge every input
+reaches. That last number is section [4]'s 0.952 rank-1 dominance restated
+combinatorially -- the parser prologue. Section [5] now prints a note rather
+than reporting them as if they meant something.
+
+**126 duplicate edges, and most of them are ours.** Edges whose count profile
+is identical across all 250 executions -- same information, nothing in this
+corpus told them apart. Split by `id >> 8`: **79 edges in 14 classes sit
+inside a single family**, i.e. context tags that never once differed, map slots
+`__AFL_CTX_SENSITIVE` bought and did not use. The largest is 45 edges, all
+family 17, consecutive odd ids from 4481. The other 47 edges in 21 classes span
+families and are straight-line block chains -- a property of the target. This
+is a better input to P3-1 than the ICC: exact and countable rather than a
+variance fraction, and it separates instrumentation waste from target
+structure. Section [7] of the tool reports it.
+
+**LLL flips from vacuous to informative.** F9's relations over seeds were dense
+(support 52 of 100, coefficients to 47). Over edges they are sparse with unit
+coefficients (support 5, max coeff 1), and the exhaustive search that found
+nothing among seeds finds 4 scalar-multiple pairs and 34 `A = B + C` triples
+among edges. That is flow conservation: edge counts on a CFG satisfy
+Kirchhoff's law at every join and loop, so the kernel of `A^T` is essentially
+the cycle space, and this is Ball-Larus optimal-profiling territory -- only a
+spanning tree's complement needs instrumenting, the rest is derivable. It also
+explains the rank: 445 edges carry at most 108 independent count coordinates.
+
+**The caveat that gates acting on it.** These relations hold across 250 runs of
+one target, which does not distinguish structural from coincidental. The
+separation is available: `core/icfg.py` already builds the CFG, so an
+empirical relation can be checked against it. See P1-2.
+
 ## Not defined on the id axis -- do not re-propose
 
 Linear regression or slope of count against id; autocorrelation or FFT along
@@ -389,10 +442,11 @@ dependency, so Spearman is rank + Pearson in-file). Reuses
     # reproduce F1
     python3 tools/edge_matrix_analysis.py --target ... --corpus ... --keep-aslr
 
-Seven sections: [0] cross-process id stability, [1] x-axis structure, [2] the
-permutation-invariant y marginal, [3] substituted axes, [4] the seed x edge
-singular spectrum, [5] its GF(2) structure and [6] its integer relations
-(opt-in, `--lll`, and the only section needing sympy). Per Hard Rule 46 the
+Eight sections: [0] cross-process id stability, [1] x-axis structure, [2] the
+permutation-invariant y marginal, [3] substituted axes, [4] the singular
+spectrum, [5] the GF(2) structure, [6] integer relations (opt-in, `--lll`, the
+only section needing sympy) and [7] edge equivalence classes. `--transpose`
+runs [4] to [6] on the edge x seed matrix and enables [7]. Per Hard Rule 46 the
 lag-1 statistic ships with both of its controls -- a global permutation null
 *and* a within-family shuffle that must leave the effect standing if the
 effect really is the blocking -- because the within-family control is what
@@ -458,6 +512,16 @@ ffmpeg is the one that matters -- 8189 edges, genuinely multimodal, and the
 target §14's measurements never reached because it would not build in that
 container. This gates P3-1 and feeds E6.
 
+### P1-2. Check the edge-count relations against the real CFG
+
+F10's 45 sparse relations either are Kirchhoff identities on the CFG or are
+artefacts of 250 runs of one target, and nothing measured so far separates the
+two. `core/icfg.py` builds the graph; the test is whether each empirical
+relation corresponds to a join or a loop in it. A positive opens Ball-Larus
+(instrument a spanning tree's complement, derive the rest, and stop paying for
+337 of 445 count coordinates); a negative closes the whole integer-relation
+line, which is worth as much. Blocked on nothing but machine time.
+
 ### P2-1. Wire `2^H` into the stall reason
 
 `edge_hit_distribution()` has zero callers in `src/` and zero in `tests/`.
@@ -483,7 +547,9 @@ section [3] names the axis and declines to collect it.
 
 Blocked on P1-1, and on paper first: write the decision rule before touching
 code. The inputs exist (ICC, family occupancy against the 2^(bits-1)
-reachable tags, `read_dropped_edges()`); what does not exist is a stated rule
+reachable tags, `read_dropped_edges()`, and -- better than the ICC -- F10's
+count of edges duplicated *within* a family, which is unused context width
+measured exactly rather than inferred); what does not exist is a stated rule
 for stepping the width down or up, or evidence that the ICC threshold means
 the same thing on a multimodal target as on a JSON parser.
 

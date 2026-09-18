@@ -37,11 +37,16 @@ distinction stops having to be re-derived:
    collected here) the distance-table ``node_idx``.  Reported as rank
    correlations against total count.
 
-Two further sections take the *seed x edge* matrix rather than the (id,
-count) columns, which are not a matrix at all: its singular spectrum, and its
-GF(2) rank against the redundancy that rank is a proxy for. Both are there
-mainly as sensitive detectors of the id drift described next -- far more
-sensitive than an edge count is.
+Three further sections take the *seed x edge* matrix rather than the (id,
+count) columns, which are not a matrix at all: its singular spectrum, its
+GF(2) rank against the redundancy that rank is a proxy for, and -- opt-in --
+its integer relations. All three are sensitive detectors of the id drift
+described next, far more sensitive than an edge count is.
+
+``--transpose`` runs those on the edge x seed matrix instead and adds section
+[7], the edge equivalence classes. The spectrum and both ranks are
+transpose-invariant and are printed as controls; everything derived from them
+is not, and the derived numbers are where the orientation earns its keep.
 
 It also measures cross-process id stability, which is what makes or breaks
 every number above: the context hash is taken over a raw return address, so
@@ -445,6 +450,7 @@ def gf2_structure(mat):
     pivot_cols = list(pivots)
     separated = len({binary[i][pivot_cols].tobytes() for i in range(binary.shape[0])})
     return {
+        "rows": int(binary.shape[0]),
         "gf2_rank": rank,
         "real_rank": int(np.linalg.matrix_rank(binary.astype(float))),
         "distinct_rows": len({r.tobytes() for r in binary}),
@@ -547,6 +553,43 @@ def integer_relations(mat, max_rows=LLL_ROW_BUDGET):
     return out
 
 
+# ── Section 7: edge equivalence classes (transposed orientation) ──────
+
+
+def duplicate_classes(mat, row_ids, ctx_bits):
+    """Group edges whose count profile is identical across every execution.
+
+    Only meaningful on the transposed matrix, where a row is an edge. Two
+    edges in one class carry the same information in this corpus: whatever
+    distinguishes them, no input here exercised it.
+
+    The split by ``id >> ctx_bits`` is the actionable part. A class confined
+    to one family is a base edge whose context tags never once differed --
+    map slots context sensitivity bought and did not use, countable exactly
+    rather than inferred from the ICC in section [1]. A class spanning
+    several families is a straight-line block chain, a property of the target
+    rather than of the instrumentation.
+    """
+    groups: dict[bytes, list[int]] = {}
+    for i, row in enumerate(mat.astype(int)):
+        groups.setdefault(row.tobytes(), []).append(i)
+    multi = [g for g in groups.values() if len(g) > 1]
+    within = [g for g in multi if len({int(row_ids[i]) >> ctx_bits for i in g}) == 1]
+    across = [g for g in multi if len({int(row_ids[i]) >> ctx_bits for i in g}) > 1]
+    largest = max(multi, key=len) if multi else []
+    return {
+        "rows": int(mat.shape[0]),
+        "classes": len(groups),
+        "duplicate_rows": sum(len(g) - 1 for g in multi),
+        "within_family_classes": len(within),
+        "within_family_rows": sum(len(g) - 1 for g in within),
+        "across_family_classes": len(across),
+        "across_family_rows": sum(len(g) - 1 for g in across),
+        "largest_class": len(largest),
+        "largest_class_families": sorted({int(row_ids[i]) >> ctx_bits for i in largest})[:4],
+    }
+
+
 # ── Reporting ─────────────────────────────────────────────────────────
 
 
@@ -556,6 +599,7 @@ def _report(result) -> None:
         f"inputs {coll['inputs']}  median live edges {coll['median_live_edges']}  "
         f"union {coll['union_edges']}  total hits {coll['total_hits']}"
     )
+    print(f"matrix orientation for sections [4]-[7]: {coll['orientation']}")
     if "stability" in result:
         s = result["stability"]
         print(f"\n[0] cross-process id stability ({s['repeats']} runs of one input)")
@@ -622,7 +666,13 @@ def _report(result) -> None:
     print("    distance-table node_idx: not collected here -- needs a __AFL_DISTANCE_MODE build")
 
     sp = result["spectrum"]
-    print("\n[4] seed x edge spectrum (not the (id, count) columns -- those are not a matrix)")
+    print(
+        f"\n[4] {result['collection']['orientation']} spectrum "
+        "(not the (id, count) columns -- those are not a matrix)"
+    )
+    if result["collection"]["orientation"] == "edge x seed":
+        print("    identical to the seed x edge spectrum by construction, sigma(A) = sigma(A^T);")
+        print("    printed as a control -- a difference here means the pipeline is wrong.")
     if "skipped" in sp:
         print(f"    skipped: {sp['skipped']}")
     else:
@@ -638,21 +688,27 @@ def _report(result) -> None:
             print("    of both transforms, not a result -- check the cells are counts.")
 
     g = result["gf2"]
+    transposed = result["collection"]["orientation"] == "edge x seed"
+    row, col = ("edges", "seeds") if transposed else ("seeds", "edges")
     print(
         f"\n[5] GF(2) structure: rank {g['gf2_rank']} (real rank {g['real_rank']}, "
-        f"{g['distinct_rows']} distinct rows of {result['collection']['inputs']})"
+        f"{g['distinct_rows']} distinct rows of {g['rows']} {row})"
     )
-    print(f"    XOR-dependent seeds {g['xor_dependent_rows']} -- sound but incomplete: each one is")
-    print(f"    union-redundant, but {g['union_redundant_seeds']} seeds actually are")
+    print(f"    XOR-dependent {row} {g['xor_dependent_rows']} -- sound but incomplete: each one")
+    print(f"    is union-redundant, but {g['union_redundant_seeds']} {row} actually are")
     if g["greedy_cover_seeds"] is not None:
         print(
-            f"    as a minimiser it loses: GF(2) basis {g['gf2_rank']} seeds vs greedy set cover "
+            f"    as a minimiser: GF(2) basis {g['gf2_rank']} {row} vs greedy set cover "
             f"{g['greedy_cover_seeds']}"
         )
     print(
-        f"    {g['pivot_edges']} pivot edges separate {g['distinct_rows_on_pivots']} of "
-        f"{g['distinct_rows']} distinct coverage vectors"
+        f"    {g['pivot_edges']} pivot {col} separate {g['distinct_rows_on_pivots']} of "
+        f"{g['distinct_rows']} distinct profiles"
     )
+    if transposed:
+        print("    note: union redundancy and greedy cover are seed-side metrics. Transposed")
+        print("    they degenerate -- every edge sits inside the union of the others, and the")
+        print("    cover is the single edge every input reaches.")
 
     if "integer_relations" in result:
         r = result["integer_relations"]
@@ -679,8 +735,33 @@ def _report(result) -> None:
                     f"L1 median {lll['l1_median']:.0f}, max|coeff| median "
                     f"{lll['max_coeff_median']:.0f}"
                 )
-                print("    dense relations are not actionable: the only short vectors here are")
-                print("    duplicate-row differences, which the hash above finds in O(m).")
+                sparse = lll["support_median"] <= 8 and lll["max_coeff_median"] <= 2
+                if sparse:
+                    print("    sparse, near-unit relations: on the edge orientation these are")
+                    print("    flow conservation on the CFG (Ball-Larus). Cross-check against")
+                    print("    core/icfg.py before treating any of them as structural -- holding")
+                    print("    over one corpus does not distinguish structural from coincidental.")
+                else:
+                    print("    dense relations are not actionable: the only short vectors here")
+                    print("    are duplicate-row differences, which the hash above finds in O(m).")
+
+    if "duplicate_classes" in result:
+        d = result["duplicate_classes"]
+        print(
+            f"\n[7] edge equivalence classes: {d['classes']} distinct profiles for "
+            f"{d['rows']} edges ({d['duplicate_rows']} exact copies)"
+        )
+        print(
+            f"    within one id>>ctx_bits family: {d['within_family_rows']} edges in "
+            f"{d['within_family_classes']} classes -- context tags that never differed"
+        )
+        print(
+            f"    across families: {d['across_family_rows']} edges in "
+            f"{d['across_family_classes']} classes -- straight-line block chains"
+        )
+        print(
+            f"    largest class {d['largest_class']} edges, families {d['largest_class_families']}"
+        )
 
 
 # ── Entry point ───────────────────────────────────────────────────────
@@ -715,6 +796,11 @@ def main(argv: list[str] | None = None) -> int:
         help="do not disable ASLR, reproducing FUZZER_KEEP_ASLR=1",
     )
     ap.add_argument("--timeout", type=float, default=10.0)
+    ap.add_argument(
+        "--transpose",
+        action="store_true",
+        help="run sections [4]-[6] on the edge x seed matrix and add section [7]",
+    )
     ap.add_argument(
         "--lll",
         action="store_true",
@@ -753,6 +839,10 @@ def main(argv: list[str] | None = None) -> int:
 
     agg = aggregate(runs)
     mat = seed_edge_matrix(runs)
+    # The spectrum and both ranks are transpose-invariant; everything derived
+    # from them is not. See the handover's F10 for the comparison.
+    if args.transpose:
+        mat = mat.T
     if len(agg["ids"]) == 0:
         print("no edges recorded -- is the target instrumented and linked against the shim?")
         return 1
@@ -765,6 +855,7 @@ def main(argv: list[str] | None = None) -> int:
             "union_edges": int(len(agg["ids"])),
             "total_hits": int(agg["total"].sum()),
             "aslr_disabled": (not args.keep_aslr) if args.load is None else None,
+            "orientation": "edge x seed" if args.transpose else "seed x edge",
         },
         "axis": axis_structure(agg["ids"], agg["total"], args.ctx_bits, args.perms, args.seed),
         "y_marginal": y_marginal(agg["total"]),
@@ -772,6 +863,8 @@ def main(argv: list[str] | None = None) -> int:
         "spectrum": spectrum(mat),
         "gf2": gf2_structure(mat),
     }
+    if args.transpose:
+        result["duplicate_classes"] = duplicate_classes(mat, agg["ids"], args.ctx_bits)
     if args.lll:
         result["integer_relations"] = integer_relations(mat, args.lll_rows)
     if stability is not None:
