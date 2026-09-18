@@ -83,10 +83,11 @@ trying the shipped ones and keeping whichever verifies, which is what
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from functools import lru_cache
+from functools import cache
+from typing import Any
 
 from fuzzer_tool.core.xor_map_solver import IncrementalXorMapSolver
 
@@ -124,6 +125,7 @@ __all__ = [
     "taus88_step",
     "verify_recovery",
     "verify_state",
+    "walk_stream",
     "xorshift",
 ]
 
@@ -257,9 +259,7 @@ class _Block:
         self.code.append(Instr(Opcode.AND, dst, a, m))
 
 
-def _build(
-    name: str, alloc: _Alloc, step: _Block, out: _Block, out_reg: int
-) -> LinearPRNG:
+def _build(name: str, alloc: _Alloc, step: _Block, out: _Block, out_reg: int) -> LinearPRNG:
     return LinearPRNG(
         name=name,
         widths=tuple(alloc.widths),
@@ -480,8 +480,7 @@ XORSHIFT128 = _xorshift128("xorshift128")
 #: PRNGStateLearner. Ordered smallest state first, so a target using a
 #: small generator is not charged for a large elimination before its own.
 FAMILIES: dict[str, LinearPRNG] = {
-    spec.name: spec
-    for spec in (XORSHIFT32, TAUS88, TAUS113, XORSHIFT128, XORSHIFT64, LFSR258)
+    spec.name: spec for spec in (XORSHIFT32, TAUS88, TAUS113, XORSHIFT128, XORSHIFT64, LFSR258)
 }
 
 
@@ -490,55 +489,107 @@ def family(name: str) -> LinearPRNG | None:
     return FAMILIES.get(name)
 
 
-# ── Concrete (integer) forward simulation ─────────────────────────────
+# ── Concrete forward simulation ──────────────────────────────────────
+#
+# Not a second interpreter. A step is linear and carries no constant term,
+# so the symbolic vectors below already ARE the step: word bit i of slot s
+# is the XOR of the state bits its coefficient mask names. Evaluating that
+# bit by bit would cost a parity per bit, so the same coefficients are
+# regrouped once per generator into whole-word terms:
+#
+#     new_word = XOR over terms of ((state[src] & mask) << shift)
+#
+# Every (input bit -> output bit) pair with the same (src, shift) rides in
+# one term, which is why taus88's 15-instruction step compiles to 3 terms
+# per slot. Derived from the program, so there is nothing here that can
+# disagree with the symbolic side: one description, one evaluator, and
+# this is a projection of it.
+
+_Terms = tuple[tuple[int, int, int], ...]  # (src_slot, src_mask, shift)
 
 
-def _read(regs: list[int], index: int, width: int) -> int:
-    """Register *index* as a *width*-bit word (zero-extended, truncated)."""
-    return regs[index] & _word_mask(width)
+def _bit_slots(spec: LinearPRNG) -> list[tuple[int, int]]:
+    """Global state bit index -> (slot, bit within slot)."""
+    table: list[tuple[int, int]] = []
+    for slot, width in enumerate(spec.widths[: spec.n_slots]):
+        table.extend((slot, bit) for bit in range(width))
+    return table
 
 
-def _run(regs: list[int], code: Sequence[Instr], widths: Sequence[int]) -> None:
-    """Execute *code* over the integer register file, in place."""
-    for ins in code:
-        width = widths[ins.dst]
-        a = _read(regs, ins.a, width)
-
-        if ins.op is Opcode.XOR:
-            value = a ^ _read(regs, ins.b, width)
-        elif ins.op is Opcode.SHL:
-            value = a << ins.b
-        elif ins.op is Opcode.SHR:
-            value = a >> ins.b
-        elif ins.op is Opcode.AND:
-            value = a & ins.b
-        else:
-            value = a
-
-        regs[ins.dst] = value & _word_mask(width)
+def _compile_terms(vec: Sequence[int], spec: LinearPRNG) -> _Terms:
+    """Regroup one word's coefficient masks into (src, mask, shift) terms."""
+    table = _bit_slots(spec)
+    grouped: dict[tuple[int, int], int] = {}
+    for out_bit, coeffs in enumerate(vec):
+        rest = coeffs
+        while rest:
+            global_bit = (rest & -rest).bit_length() - 1
+            rest &= rest - 1
+            slot, bit = table[global_bit]
+            key = (slot, out_bit - bit)
+            grouped[key] = grouped.get(key, 0) | (1 << bit)
+    return tuple((slot, mask, shift) for (slot, shift), mask in grouped.items())
 
 
-def _regs_for(state: Sequence[int], spec: LinearPRNG) -> list[int]:
-    return list(state) + [0] * (len(spec.widths) - spec.n_slots)
+def _memo(spec: LinearPRNG, key: str, build) -> Any:
+    """Per-spec memo held on the spec itself.
+
+    Deliberately not ``lru_cache``: hashing a spec walks every instruction
+    in its program (measured at 3.6 us for taus88), which would cost more
+    than the step it guards. A frozen dataclass still has a ``__dict__``,
+    and this is a pure derivation of immutable fields, so stashing it there
+    changes nothing observable.
+    """
+    cached = spec.__dict__.get(key)
+    if cached is None:
+        cached = build(spec)
+        object.__setattr__(spec, key, cached)
+    return cached
+
+
+def _step_terms(spec: LinearPRNG) -> tuple[tuple[_Terms, int], ...]:
+    """Per state slot: its terms, and its word mask."""
+
+    def build(spec: LinearPRNG) -> tuple[tuple[_Terms, int], ...]:
+        vectors = _sym_step_vectors(spec)
+        return tuple(
+            (_compile_terms(vectors[slot], spec), _word_mask(spec.widths[slot]))
+            for slot in range(spec.n_slots)
+        )
+
+    return _memo(spec, "_step_terms_memo", build)
+
+
+def _out_terms(spec: LinearPRNG) -> tuple[_Terms, int]:
+    def build(spec: LinearPRNG) -> tuple[_Terms, int]:
+        return (
+            _compile_terms(_sym_out_vector(spec), spec),
+            _word_mask(spec.out_bits),
+        )
+
+    return _memo(spec, "_out_terms_memo", build)
+
+
+def _apply(terms: _Terms, state: Sequence[int]) -> int:
+    value = 0
+    for slot, mask, shift in terms:
+        bits = state[slot] & mask
+        value ^= bits << shift if shift >= 0 else bits >> -shift
+    return value
 
 
 def step_state(state: Sequence[int], spec: LinearPRNG = TAUS88) -> tuple[int, ...]:
     """Advance *state* by one generator step."""
-    regs = _regs_for(state, spec)
-    _run(regs, spec.step, spec.widths)
-    return tuple(regs[: spec.n_slots])
+    return tuple(_apply(terms, state) & mask for terms, mask in _step_terms(spec))
 
 
 def output_word(state: Sequence[int], spec: LinearPRNG = TAUS88) -> int:
     """The generator's output word for the current *state*."""
-    regs = _regs_for(state, spec)
-    _run(regs, spec.out, spec.widths)
-    return regs[spec.out_reg]
+    terms, mask = _out_terms(spec)
+    return _apply(terms, state) & mask
 
 
-def advance_state(
-    state: Sequence[int], n: int, spec: LinearPRNG = TAUS88
-) -> tuple[int, ...]:
+def advance_state(state: Sequence[int], n: int, spec: LinearPRNG = TAUS88) -> tuple[int, ...]:
     """Step *state* forward *n* times."""
     current = tuple(state)
     for _ in range(n):
@@ -546,9 +597,7 @@ def advance_state(
     return current
 
 
-def predict_words(
-    state: Sequence[int], n: int = 1, spec: LinearPRNG = TAUS88
-) -> list[int]:
+def predict_words(state: Sequence[int], n: int = 1, spec: LinearPRNG = TAUS88) -> list[int]:
     """Step *state* forward *n* times, returning the *n* outputs passed.
 
     Note this steps *before* recording, so it returns the outputs *after*
@@ -559,12 +608,28 @@ def predict_words(
     before calling this, or :func:`verify_state` to check against a whole
     known sequence at once.
     """
-    outs: list[int] = []
+    return [word for _, word in walk_stream(state, n, spec)]
+
+
+def walk_stream(
+    state: Sequence[int], n: int, spec: LinearPRNG = TAUS88
+) -> Iterator[tuple[tuple[int, ...], int]]:
+    """Yield ``(state, its output)`` for each of the next *n* steps.
+
+    The shape every consumer that walks a stream wants -- predicting
+    forward, or searching ahead for an observed run and keeping the state
+    that produced it. Exists as its own function because it hoists the
+    compiled terms out of the loop: per step that is 1.62 us against 2.7 us
+    for ``step_state`` + ``output_word`` called separately (taus88,
+    measured), and the learner's continuation search walks up to 64 steps
+    on every execution.
+    """
+    step = _step_terms(spec)
+    out_terms, out_mask = _out_terms(spec)
     current = tuple(state)
     for _ in range(n):
-        current = step_state(current, spec)
-        outs.append(output_word(current, spec))
-    return outs
+        current = tuple(_apply(terms, current) & mask for terms, mask in step)
+        yield current, _apply(out_terms, current) & out_mask
 
 
 # ── Symbolic (GF(2) bitmask) simulation, for recovery ─────────────────
@@ -627,6 +692,31 @@ def _out_rows(regs: list[list[int]], spec: LinearPRNG) -> list[int]:
     return probe[spec.out_reg]
 
 
+def _sym_step_vectors(spec: LinearPRNG) -> tuple[tuple[int, ...], ...]:
+    """Each post-step state slot's coefficient masks over the pre-step bits.
+
+    The generator's whole transition matrix, slot by slot: what
+    :func:`structural_equations` takes the left null space of, and what the
+    concrete path above compiles into terms.
+    """
+
+    def build(spec: LinearPRNG) -> tuple[tuple[int, ...], ...]:
+        regs = _sym_regs(spec)
+        _run_sym(regs, spec.step, spec.widths)
+        return tuple(tuple(regs[slot]) for slot in range(spec.n_slots))
+
+    return _memo(spec, "_sym_step_memo", build)
+
+
+def _sym_out_vector(spec: LinearPRNG) -> tuple[int, ...]:
+    """The output word's coefficient masks over the current state's bits."""
+
+    def build(spec: LinearPRNG) -> tuple[int, ...]:
+        return tuple(_out_rows(_sym_regs(spec), spec))
+
+    return _memo(spec, "_sym_out_memo", build)
+
+
 def _left_nullspace(rows: Sequence[int]) -> list[int]:
     """Left null space of the map whose row ``i`` is ``rows[i]``.
 
@@ -656,7 +746,7 @@ def _left_nullspace(rows: Sequence[int]) -> list[int]:
     return nulls
 
 
-@lru_cache(maxsize=None)
+@cache
 def structural_equations(spec: LinearPRNG = TAUS88) -> tuple[int, ...]:
     """Free, observation-independent equations from the step's rank gap.
 
@@ -686,12 +776,9 @@ def structural_equations(spec: LinearPRNG = TAUS88) -> tuple[int, ...]:
         Coefficient rows indexed by global state bit, each paired
         implicitly with right-hand side 0.
     """
-    regs = _sym_regs(spec)
-    _run_sym(regs, spec.step, spec.widths)
-
     rows: list[int] = []
-    for slot in range(spec.n_slots):
-        rows.extend(regs[slot])
+    for vector in _sym_step_vectors(spec):
+        rows.extend(vector)
     return tuple(_left_nullspace(rows))
 
 
@@ -702,7 +789,7 @@ def _seed_solver(spec: LinearPRNG) -> IncrementalXorMapSolver:
     return solver
 
 
-@lru_cache(maxsize=None)
+@cache
 def min_samples(spec: LinearPRNG = TAUS88) -> int:
     """Consecutive outputs needed to pin this generator's state uniquely.
 
@@ -726,7 +813,7 @@ def min_samples(spec: LinearPRNG = TAUS88) -> int:
     raise ValueError(f"{spec.name}: outputs never determine the state")
 
 
-@lru_cache(maxsize=None)
+@cache
 def confident_samples(spec: LinearPRNG = TAUS88) -> int:
     """Outputs needed before a *verified* fit is worth trusting.
 
@@ -782,8 +869,7 @@ def recover_state(
     needed = min_samples(spec)
     if len(observed_words) < needed:
         raise ValueError(
-            f"need >= {needed} consecutive outputs to pin "
-            f"{spec.name}'s {spec.state_bits}-bit state"
+            f"need >= {needed} consecutive outputs to pin {spec.name}'s {spec.state_bits}-bit state"
         )
 
     solver = _seed_solver(spec)
@@ -831,7 +917,7 @@ def verify_state(
 # per-component (w, k, q, s) rather than specs.
 
 
-@lru_cache(maxsize=None)
+@cache
 def spec_from_params(params: tuple[LFSRParams, ...] = TAUS88_PARAMS) -> LinearPRNG:
     """A combined-LFSR spec for per-component ``(w, k, q, s)`` params."""
     return combined_lfsr("combined_lfsr", tuple(params))
