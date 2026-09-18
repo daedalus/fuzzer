@@ -779,6 +779,17 @@ class CorpusManager:
             # Purely observational bookkeeping for CorpusFlux (P4-T6); must
             # never be able to break a save.
             f._corpus_flux.record_addition()
+            # Mix the newly-admitted seed's bytes into the campaign's shared
+            # RandPool. This is deliberately gated on save_to_corpus()'s own
+            # novelty check (seen_hashes/bloom) above, not on the Poisson-disk
+            # near-duplicate check below: "new bytes we hadn't stored before"
+            # is the raw-entropy property we want, independent of whether a
+            # fuzzy similarity heuristic later decides not to keep it around.
+            # Determinism is preserved: for a fixed --seed, the sequence of
+            # admitted seeds is itself a deterministic function of the run,
+            # so this injection point never introduces run-to-run variance
+            # that wasn't already present in which inputs get admitted.
+            f._rng.inject_entropy(data)
             if (
                 # Under Elo arbitration the corpus-based seed strategies
                 # (weighted/pareto/bayesian/boltzmann) read f.corpus; if QEA's

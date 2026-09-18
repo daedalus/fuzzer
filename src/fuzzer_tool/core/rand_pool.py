@@ -189,6 +189,15 @@ class RandPool:
         Discards the current pre-fetched batch so the next draw reflects
         the mix immediately.
 
+        The snapshot is taken from the underlying ``Generator``'s own
+        ``bit_generator.state`` rather than from ``self._pool`` — the
+        pre-fetched batch buffer is allocated with ``np.empty`` and holds
+        uninitialized memory until the first refill actually happens, so
+        reading it before that point would fold in non-reproducible
+        garbage and defeat the very determinism this method is designed
+        to preserve. ``bit_generator.state`` is well-defined immediately
+        after construction, for any seed.
+
         Args:
             raw: Entropy bytes to mix in. A falsy/empty value is a no-op.
         """
@@ -196,7 +205,7 @@ class RandPool:
             return
         import hashlib
 
-        state_bytes = self._pool.tobytes() if self._pool.size else b""
+        state_bytes = repr(self._rng.bit_generator.state).encode()
         digest = hashlib.sha256(state_bytes + bytes(raw)).digest()
         seed_words = [
             int.from_bytes(digest[i : i + 4], "little") for i in range(0, len(digest), 4)
