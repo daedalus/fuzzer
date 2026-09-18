@@ -43,7 +43,7 @@ from __future__ import annotations
 import math
 
 from fuzzer_tool.core.operator_categories import UNCATEGORIZED, category_of
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 _UNIFORM_EXPERT = "uniform"
 # Operator-list layouts kept at once (see Exp4Scheduler._layout_for).
@@ -67,7 +67,7 @@ class Exp4Scheduler:
         if not (0.0 <= gamma <= 1.0):
             raise ValueError(f"gamma must be in [0, 1], got {gamma!r}")
         self.gamma = gamma
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         # Expert weights (relative). Keys: category names + "uniform".
         self.weights: dict[str, float] = {_UNIFORM_EXPERT: 1.0}

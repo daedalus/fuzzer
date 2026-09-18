@@ -22,7 +22,7 @@ from array import array
 from bisect import bisect_left
 from itertools import accumulate
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +55,7 @@ class ByteSensitivityTracker:
         # when a seed's scores change or are evicted.
         self._cum_cache: dict[bytes, array] = {}
         self._cum_cache_limit = 500
-        self._rng = rng or RandPool()
+        self._rng = rng or get_default_rand_pool()
 
     def analyze_seed(
         self,

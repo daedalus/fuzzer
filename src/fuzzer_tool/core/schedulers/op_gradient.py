@@ -72,7 +72,7 @@ from __future__ import annotations
 
 import math
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 
 class GradientBanditScheduler:
@@ -142,7 +142,7 @@ class GradientBanditScheduler:
         self.min_temperature = min_temperature
         self.floor = floor
         self.use_baseline = baseline
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         # Preference weights H_i (unbounded, relative scale)
         self.preferences: dict[str, float] = {}

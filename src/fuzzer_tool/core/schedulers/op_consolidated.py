@@ -88,7 +88,7 @@ from __future__ import annotations
 import numpy as np
 
 from fuzzer_tool.core.operator_categories import category_of
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 #: Floor on Beta parameters handed to the sampler; numpy's beta rejects 0.
 _MIN_PARAM = 1e-3
@@ -129,7 +129,7 @@ class ConsolidatedScheduler:
         self.prior_strength = float(prior_strength)
         self.max_pseudocount = float(max_pseudocount)
         self.category_max_pseudocount = float(category_max_pseudocount)
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         # Arm state lives in parallel numpy arrays indexed by arm id, so a
         # selection is one vectorized Beta draw over the candidates rather

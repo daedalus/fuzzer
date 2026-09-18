@@ -32,7 +32,7 @@ from typing import Any
 
 import numpy as np
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 log = logging.getLogger(__name__)
 
@@ -153,7 +153,7 @@ class CMAESScheduler:
         # evaluations per generation, so splitting it across the population is
         # what makes the two parameters consistent.
         self.evals_per_candidate = max(1, self.generation_size // self.pop_size)
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         self.operators: list[str] = []
         self.op_index: dict[str, int] = {}

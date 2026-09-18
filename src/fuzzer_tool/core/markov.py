@@ -12,7 +12,7 @@ import math
 from array import array
 
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 log = logging.getLogger(__name__)
 
@@ -59,7 +59,7 @@ class MarkovChain:
         self._snapshot_interval: int = 50  # snapshot every N train_corpus calls
         self._trains_since_snapshot: int = 0
         self._global_freq: collections.Counter = collections.Counter()
-        self._rng = rng or RandPool()
+        self._rng = rng or get_default_rand_pool()
 
     def train(self, data: bytes) -> None:
         """Learn byte transitions from a single input.
@@ -423,7 +423,7 @@ class MarkovEnsemble:
             orders = [0, 1, 2]
         self.orders = orders
         self.blend = blend
-        self._rng = rng or RandPool()
+        self._rng = rng or get_default_rand_pool()
         self.chains: dict[int, MarkovChain] = {
             o: MarkovChain(order=o, smoothing=smoothing, rng=self._rng) for o in orders
         }

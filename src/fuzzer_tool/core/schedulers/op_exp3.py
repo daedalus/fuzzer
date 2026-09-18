@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 # Blowup guard on the relative weights, and a floor for arms scaled below it.
 _RENORM_THRESHOLD = 1e9
@@ -40,7 +40,8 @@ class Exp3Scheduler:
         gamma: Exploration rate in [0, 1]. Higher = more uniform exploration.
         window_decay: Exponential decay per update (1.0 = no decay).
             Values < 1.0 discount older observations.
-        rng: PRNG for random draws. Defaults to RandPool().
+        rng: PRNG for random draws. Defaults to the shared
+            ``get_default_rand_pool()`` singleton.
     """
 
     supports_priors = False
@@ -51,7 +52,7 @@ class Exp3Scheduler:
         self.gamma = gamma
         self.window_decay = window_decay
         self._log_window_decay = math.log(window_decay) if 0.0 < window_decay < 1.0 else 0.0
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
         # Per-arm weights RELATIVE to exp(_log_decay): the actual weight is
         # weights[i] * exp(_log_decay). Decay is folded into that one scalar
         # so record() stays O(1) instead of sweeping every arm. The scalar is

@@ -8,7 +8,7 @@ import collections
 from collections import defaultdict
 
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 #: Fractional jitter applied to initial particle positions. Enough to give
 #: PSO a gradient; small enough that no operator starts strongly favoured.
@@ -123,7 +123,7 @@ class MOptScheduler:
         rng: RandPool | None = None,
         marginal_cost_stop_multiplier: float | None = None,
     ):
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
         self.n_particles = n_particles
         self.window_size = window_size
         self.w = w

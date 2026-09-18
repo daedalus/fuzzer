@@ -1,7 +1,7 @@
 """HierarchicalBanditScheduler: two-level (category → operator) bandit."""
 
 from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES, category_of
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 
 class HierarchicalBanditScheduler:
@@ -40,7 +40,7 @@ class HierarchicalBanditScheduler:
         max_pseudocount: float = 200.0,
         rng: RandPool | None = None,
     ):
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
         self.arm_decay = arm_decay
         self.decay_interval = decay_interval
         # Ceiling on alpha + beta for any posterior. Beta(a, b) has variance

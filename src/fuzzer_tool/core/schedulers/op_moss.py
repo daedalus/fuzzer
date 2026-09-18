@@ -44,7 +44,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 #: Fold the global discount back into the arrays below this, before underflow.
 _MIN_DISCOUNT = 1e-12
@@ -95,7 +95,7 @@ class MOSSScheduler:
         self.alpha = alpha
         self.exploration = exploration
         self._width_sq = exploration * exploration * (1.0 + alpha) / 2.0
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         # Counts and sums stored relative to one global discount factor, so a
         # record is O(1) (the D-UCB trick); true value = stored * _discount.

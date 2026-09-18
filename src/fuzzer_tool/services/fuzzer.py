@@ -1957,14 +1957,16 @@ class Fuzzer:
         self._cmaes = None
         if cmaes:
             self._cmaes = CMAESScheduler(
-                # Without an explicit rng, CMAESScheduler falls back to
-                # RandPool(), which seeds from OS entropy -- so --seed did not
-                # determine CMA-ES behaviour and a crash found under CMA-ES
-                # scheduling could not be replayed. That was once unique to
-                # CMA-ES because every other scheduler drew from the
-                # module-level `random`; the Hard Rule 16 migration (8312b15)
-                # moved them all to the same unseeded fallback, so they are
-                # all passed the pool now.
+                # Without an explicit rng, CMAESScheduler now falls back to
+                # the shared get_default_rand_pool() singleton (deterministic,
+                # no OS entropy -- see core/rand_pool.py), but that fallback
+                # is still a *different* stream from the campaign's own
+                # self._rng, so a crash found under CMA-ES scheduling would
+                # replay identically only if --seed also happened to match
+                # the fallback's fixed constant. Passing self._rng explicitly
+                # keeps CMA-ES on the one campaign-seeded stream, same as
+                # every other scheduler since the Hard Rule 16 migration
+                # (8312b15).
                 rng=self._rng,
                 pop_size=cmaes_pop_size,
                 generation_size=cmaes_generation_size,

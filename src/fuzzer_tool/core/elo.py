@@ -23,7 +23,7 @@ import logging
 import math
 from array import array
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import RunningMoments
 
 log = logging.getLogger(__name__)
@@ -268,7 +268,7 @@ class EloTracker(RoundRecorderMixin):
         self.crash_track = crash_track
         self.min_matches = min_matches
         self.use_minimax = use_minimax
-        self._rng = rng or RandPool()
+        self._rng = rng or get_default_rand_pool()
 
         self.ratings: dict[str, float] = {}
         self.crash_ratings: dict[str, float] = {}
@@ -760,7 +760,7 @@ class BayesianEloTracker(RoundRecorderMixin):
         self.beta = beta
         self.tau = tau
         self.min_matches = min_matches
-        self._rng = rng or RandPool()
+        self._rng = rng or get_default_rand_pool()
 
         # Per-operator Gaussian posteriors: N(mu, sigma_sq)
         self.mu: dict[str, float] = {}

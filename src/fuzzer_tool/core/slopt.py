@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import bisect
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 #: Upper edges of the seed-size groups (bytes); len >= 1e5 is the last group.
 SIZE_GROUP_EDGES = (100, 1_000, 10_000, 100_000)
@@ -57,7 +57,7 @@ class SloptBatchBandit:
     """
 
     def __init__(self, rng: RandPool | None = None) -> None:
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
         # (group, op) -> [alpha per arm], [beta per arm]
         self._alpha: dict[tuple[int, str], list[float]] = {}
         self._beta: dict[tuple[int, str], list[float]] = {}

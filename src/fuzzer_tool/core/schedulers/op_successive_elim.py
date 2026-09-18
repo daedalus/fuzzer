@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import math
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 
 class SuccessiveEliminationScheduler:
@@ -64,7 +64,7 @@ class SuccessiveEliminationScheduler:
         self.delta = delta
         self.min_pulls = min_pulls
         self.reopen_interval = reopen_interval
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         self._mean: dict[str, float] = {}
         self._n: dict[str, int] = {}

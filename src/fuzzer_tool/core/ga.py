@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 from .mutations import (
     byte_insert,
@@ -254,7 +254,7 @@ class GALifecycle:
         self.generation_size = generation_size
         self.speciation_threshold = speciation_threshold
         self.fitness = fitness or FitnessFunction()
-        self._rng = rng or RandPool()
+        self._rng = rng or get_default_rand_pool()
 
         self.population: list[Individual] = []
         self.generation = 0

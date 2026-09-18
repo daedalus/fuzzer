@@ -104,7 +104,7 @@ in the non-UCB handover) before pointing a real campaign at it.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 DEFAULT_N_STATES = 5
 DEFAULT_GAMMA = 0.95
@@ -341,7 +341,7 @@ class WhittleIndexScheduler:
         self.passive_decay = passive_decay
         self.floor = floor
         self.recompute_batch = recompute_batch
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         self._state: dict[str, int] = {}
         self._alpha: dict[str, list[float]] = {}

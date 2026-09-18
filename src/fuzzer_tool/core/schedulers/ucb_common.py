@@ -13,7 +13,7 @@ import collections
 import math
 from abc import ABC, abstractmethod
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 MIN_LOG_ARG = 1.0 + 1e-9
 
@@ -28,7 +28,7 @@ class UCBBase(ABC):
     supports_priors = False
 
     def __init__(self, rng: RandPool | None = None) -> None:
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
         self._total_pulls: int = 0
 
     # -- arm bookkeeping --------------------------------------------------

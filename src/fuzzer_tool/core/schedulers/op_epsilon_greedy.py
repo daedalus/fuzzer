@@ -1,6 +1,6 @@
 """EpsilonGreedyScheduler: epsilon-greedy with annealing."""
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 
 class EpsilonGreedyScheduler:
@@ -33,7 +33,7 @@ class EpsilonGreedyScheduler:
         self.epsilon_0 = epsilon_0
         self.decay = decay
         self.min_epsilon = min_epsilon
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
         self.q_values: dict[str, float] = {}
         self.counts: dict[str, int] = {}
         self._total_pulls: int = 0

@@ -23,7 +23,7 @@ References:
 
 import math
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 
 class FPLScheduler:
@@ -51,7 +51,7 @@ class FPLScheduler:
 
         self.epsilon = epsilon
         # Hard Rule 16: all randomness comes from RandPool for reproducibility
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         # Empirical mean rewards and pull counts for each arm
         self._mu: dict[str, float] = {}  # empirical mean reward

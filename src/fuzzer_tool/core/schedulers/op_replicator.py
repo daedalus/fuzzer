@@ -4,7 +4,7 @@ import collections
 from collections import defaultdict
 
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 
 class ReplicatorScheduler:
@@ -56,7 +56,7 @@ class ReplicatorScheduler:
         rng: RandPool | None = None,
         marginal_cost_stop_multiplier: float | None = None,
     ):
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
         self.window_size = window_size
         self.eta = learning_rate
         self.mutation_rate = mutation_rate

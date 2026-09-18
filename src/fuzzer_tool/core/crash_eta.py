@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 import numpy as _np
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.target_profiler import TargetProfile
 
 # Matches error-related keywords in function names and rodata strings.
@@ -55,7 +55,7 @@ class CrashMITracker:
     ):
         self.max_positions = max_positions
         self.min_observations = min_observations
-        self._rng = rng or RandPool()
+        self._rng = rng or get_default_rand_pool()
         # Per-position byte histograms, dense.
         #
         # These were dict[int, dict[int, int]] and record() walked every

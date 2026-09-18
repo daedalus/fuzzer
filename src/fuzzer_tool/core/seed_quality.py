@@ -22,7 +22,7 @@ Usage:
 
 from __future__ import annotations
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 # Minimum parameter floor to avoid degenerate Beta(0, 0)
 MIN_BETA_PARAM = 1e-6
@@ -115,7 +115,7 @@ class BayesianSeedQuality:
         # Pooled counts for hierarchical shrinkage
         self._pooled_successes = 0
         self._pooled_failures = 0
-        self._rng = rng or RandPool()
+        self._rng = rng or get_default_rand_pool()
 
     def init_seed(
         self,

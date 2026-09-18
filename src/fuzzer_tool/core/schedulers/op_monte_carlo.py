@@ -18,7 +18,7 @@ from pathlib import Path
 
 from fuzzer_tool.core.structure_function import DispersionIndex
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import (
     RunningMoments,
     kelly_fraction,
@@ -113,7 +113,7 @@ class MonteCarloScheduler:
         cem_dirichlet_concentration: float = 0.0,
         rng: RandPool | None = None,
     ):
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
         self._hierarchical_pooling = max(0.0, min(1.0, hierarchical_pooling))
         self._cem_dirichlet_concentration = cem_dirichlet_concentration
         self.arm_alpha: dict[str, float] = {}

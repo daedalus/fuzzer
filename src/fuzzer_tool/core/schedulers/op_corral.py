@@ -112,7 +112,7 @@ from typing import Any
 
 import numpy as np
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 #: Floor on any arm's probability. The doubling trick bounds probabilities
 #: away from zero in theory; this is the numerical guard that keeps ``1 / p``
@@ -223,7 +223,7 @@ class CorralScheduler:
         self.horizon = int(horizon)
         self.baseline = bool(baseline)
         self.mix = float(mix)
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         # Array-backed state. _names[i] <-> _idx[name] == i for every arm.
         self._names: list[str] = []

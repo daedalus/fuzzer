@@ -25,7 +25,7 @@ import time
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.elo import seed_strategy_display_name, strategy_display_name
 from fuzzer_tool.core.kalman import RobustKF
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate as _discovery_rate,
 )
@@ -127,7 +127,7 @@ class StatsReporter:
 
     def __init__(self, fuzzer, rng: RandPool | None = None):
         self.f = fuzzer
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
     def record_discovery_snapshot(self):
         f = self.f

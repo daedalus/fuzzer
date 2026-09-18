@@ -109,7 +109,7 @@ and makes this the textbook CUCB.
 
 import math
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 RENORM_FLOOR = 1e-12
 MIN_LOG_ARG = 1.0 + 1e-9
@@ -177,7 +177,7 @@ class CUCBScheduler:
         self.exploration = exploration
 
         # Hard Rule 16: see op_ducb.py.
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         # Per-arm, relative to _discount (same O(1) trick as DUCBScheduler):
         # rounds the arm appeared in, and the summed round reward of those.

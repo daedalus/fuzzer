@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 
 from fuzzer_tool.core.mutations import crossover
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 log = logging.getLogger(__name__)
 
@@ -689,7 +689,7 @@ class QEALifecycle:
         from fuzzer_tool.core.ga import FitnessFunction as _FF
 
         self.fitness_fn = fitness or _FF()
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         self.population: list[QEAIndividual] = []
         self.generation = 0

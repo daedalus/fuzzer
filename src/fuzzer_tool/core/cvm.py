@@ -16,7 +16,7 @@ from __future__ import annotations
 import math
 from collections.abc import Hashable
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 
 class F0Estimator:
@@ -45,7 +45,7 @@ class F0Estimator:
         self.eps = eps
         self.delta = delta
         self.m = m
-        self._rng = rng or RandPool()
+        self._rng = rng or get_default_rand_pool()
         # thresh ≈ (2/ε²) · ln(8m/δ)
         self.thresh = math.ceil((2.0 / (eps**2)) * math.log((8.0 * m) / delta))
         self.X: set[Hashable] = set()

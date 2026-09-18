@@ -37,7 +37,7 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 if TYPE_CHECKING:
     from fuzzer_tool.core.lineage import LineageTree
@@ -88,7 +88,7 @@ class MCTSSeedScheduler:
     ):
         self.exploration = exploration
         self.max_depth = max_depth
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         # key -> accumulated visits / squashed reward, including priors.
         # Aggregate stats cover a node *and everything below it*, and drive the
@@ -319,7 +319,7 @@ class AlphaBetaMCTSSeedScheduler:
     ):
         self.exploration = exploration
         self.max_depth = max_depth
-        self._rng = rng if rng is not None else RandPool()
+        self._rng = rng if rng is not None else get_default_rand_pool()
 
         # Visit counts and values for alpha-beta search (not UCT)
         self.visits: dict[str, float] = {}
