@@ -24,6 +24,8 @@ SCHEDULER_MODULES = {
     "op_monte_carlo",
     "op_mopt",
     "op_replicator",
+    "op_softmax",
+    "op_topk",
 }
 
 

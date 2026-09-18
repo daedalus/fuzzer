@@ -588,6 +588,9 @@ def cmd_fuzz(args):
         args.markov_gen = True
         args.tang = True
         args.kruskal_count = True
+        # Softmax and TopK scheduler flags for --elo all
+        args.softmax = True
+        args.topk = True
         # Mutation-side schedulers/features that are not Elo-arbitrated but are
         # part of the scheduling stack; flip them on so --elo all is the
         # everything-on switch (power schedule fast = classic AFL default)
@@ -719,6 +722,10 @@ def cmd_fuzz(args):
         eps_greedy=getattr(args, "eps_greedy", False),
         eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
         eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
+        softmax=getattr(args, "softmax", False),
+        softmax_tau=getattr(args, "softmax_tau", 1.0),
+        use_topk=getattr(args, "topk", False),
+        topk_k=getattr(args, "topk_k", 1),
         hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
         gp_ucb=getattr(args, "gp_ucb", False),
         bo_gp_ucb=getattr(args, "bo_gp_ucb", False),
@@ -2264,6 +2271,28 @@ def main() -> int:
         "that always picks the lowest posterior success-rate candidate. Meant to run "
         "alongside --elo as a floor for the meta-scheduler tournament -- if a real scheduler "
         "ranks at or below it, that is logged as needing inspection.",
+    )
+    fuzz_parser.add_argument(
+        "--softmax",
+        action="store_true",
+        help="Enable softmax operator scheduling (temperature-based probabilistic selection)",
+    )
+    fuzz_parser.add_argument(
+        "--softmax-tau",
+        type=float,
+        default=1.0,
+        help="Temperature parameter for softmax scheduler (default: 1.0, higher = more uniform)",
+    )
+    fuzz_parser.add_argument(
+        "--topk",
+        action="store_true",
+        help="Enable top-k operator scheduling (select uniformly from top-k by mean reward)",
+    )
+    fuzz_parser.add_argument(
+        "--topk-k",
+        type=int,
+        default=1,
+        help="Number of top arms to select from for top-k scheduler (default: 1)",
     )
     fuzz_parser.add_argument(
         "--seed-canary-scheduler",

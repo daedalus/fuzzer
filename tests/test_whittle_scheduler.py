@@ -57,9 +57,7 @@ def test_passive_decay_positive_drifts_idle_arms() -> None:
     is not selected -- the restless assumption should actually move the
     state, not just exist as an unused parameter.
     """
-    sched = WhittleIndexScheduler(
-        n_states=5, passive_decay=1.0, floor=0.0, rng=RandPool(seed=2)
-    )
+    sched = WhittleIndexScheduler(n_states=5, passive_decay=1.0, floor=0.0, rng=RandPool(seed=2))
     ops = ["a", "b"]
     for op in ops:
         sched.init_arm(op)

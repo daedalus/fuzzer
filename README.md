@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/daedalus/fuzzer)
 
-**Information-dense, coverage-guided binary fuzzer**: 148 mutation operators across 9 categories, 14 bandit and optimizer scheduler modules under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring.
+**Information-dense, coverage-guided binary fuzzer**: 148 mutation operators across 9 categories, 16 bandit and optimizer scheduler modules under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring.
 
 > **Honest caveat**: This is probably the most complex fuzzer from an information-theory standpoint, and also the slowest raw-throughput. The tradeoff is speed for edge-discovery novelty. For production fuzzing at scale, AFL family fuzzers remain the best choice.
 
@@ -124,6 +124,8 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 | Epsilon-greedy | `--eps-greedy` | Classic exploration/exploitation with annealing |
 | Hierarchical bandit | `--hierarchical-bandit` | Two-level: category → operator Thompson sampling |
 | GP-UCB | `--gp-ucb` | Gaussian Process UCB with RBF kernel covariance |
+| Softmax | `--softmax`, `--softmax-tau` | Temperature-based probabilistic selection; higher `tau` approaches uniform selection |
+| TopK | `--topk`, `--topk-k` | Uniform selection from top-k arms by running mean reward |
 | CMA-ES | `--cma-es` | Covariance-matrix adaptation over the continuous operator-weight vector |
 | LinUCB contextual | `--contextual` | Ridge-regression contextual bandit — operator choice conditioned on a seed feature vector |
 | Discounted UCB | `--ducb` | UCB with geometric discounting for non-stationary reward |

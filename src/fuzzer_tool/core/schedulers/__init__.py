@@ -24,8 +24,10 @@ from fuzzer_tool.core.schedulers.op_mopt import MOptScheduler
 from fuzzer_tool.core.schedulers.op_moss import MOSSScheduler
 from fuzzer_tool.core.schedulers.op_replicator import ReplicatorScheduler
 from fuzzer_tool.core.schedulers.op_round_robin import RoundRobinScheduler
+from fuzzer_tool.core.schedulers.op_softmax import SoftmaxScheduler
 from fuzzer_tool.core.schedulers.op_successive_elim import SuccessiveEliminationScheduler
 from fuzzer_tool.core.schedulers.op_swucb import SWUCBScheduler
+from fuzzer_tool.core.schedulers.op_topk import TopKScheduler
 from fuzzer_tool.core.schedulers.op_whittle import WhittleIndexScheduler
 from fuzzer_tool.core.schedulers.seed_mcts import AlphaBetaMCTSSeedScheduler, MCTSSeedScheduler
 
@@ -59,4 +61,6 @@ __all__ = [
     "RoundRobinScheduler",
     "CanaryScheduler",
     "SuccessiveEliminationScheduler",
+    "SoftmaxScheduler",
+    "TopKScheduler",
 ]

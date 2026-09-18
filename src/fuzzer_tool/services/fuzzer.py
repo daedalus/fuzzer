@@ -74,8 +74,10 @@ from fuzzer_tool.core.schedulers import (
     MOSSScheduler,
     ReplicatorScheduler,
     RoundRobinScheduler,
+    SoftmaxScheduler,
     SuccessiveEliminationScheduler,
     SWUCBScheduler,
+    TopKScheduler,
     WhittleIndexScheduler,
 )
 from fuzzer_tool.core.schedules import (
@@ -115,6 +117,8 @@ _OPERATOR_STRATEGY_NAMES = (
     "exp3",
     "exp4",
     "eps_greedy",
+    "softmax",
+    "topk",
     "hierarchical",
     "gp_ucb",
     "bo_gp_ucb",
@@ -908,6 +912,10 @@ class Fuzzer:
         eps_greedy=False,
         eps_greedy_epsilon0=1.0,
         eps_greedy_decay=0.9995,
+        softmax=False,
+        softmax_tau=1.0,
+        use_topk=False,
+        topk_k=1,
         hierarchical_bandit=False,
         gp_ucb=False,
         gp_length_scale=1.0,
@@ -2064,6 +2072,20 @@ class Fuzzer:
                 eps_greedy_epsilon0,
                 eps_greedy_decay,
             )
+        # Softmax and TopK schedulers
+        self._use_softmax = softmax
+        self._use_topk = use_topk
+        self._softmax = None
+        self._topk = None
+        if softmax:
+            self._softmax = SoftmaxScheduler(tau=softmax_tau, rng=self._rng)
+            log.info(
+                "Softmax scheduler enabled (tau=%.2f)",
+                softmax_tau,
+            )
+        if use_topk:
+            self._topk = TopKScheduler(k=topk_k, rng=self._rng)
+            log.info("TopK scheduler enabled (k=%d)", topk_k)
         # Hierarchical bandit
         self._use_hierarchical = hierarchical_bandit
         self._hierarchical = None

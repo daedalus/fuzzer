@@ -12,8 +12,6 @@ from __future__ import annotations
 import json
 import random
 
-import pytest
-
 from fuzzer_tool.core.elo import BayesianEloTracker
 from fuzzer_tool.core.schedulers.op_canary import CanaryScheduler
 from fuzzer_tool.core.schedulers.op_consolidated import ConsolidatedScheduler
@@ -147,7 +145,9 @@ class TestAdversarialFloor:
         matches against canary -- i.e. canary should NOT need inspection
         under ordinary conditions.
         """
-        elo = BayesianEloTracker(initial_mu=1500, initial_sigma=350, beta=200, tau=5.0, min_matches=10)
+        elo = BayesianEloTracker(
+            initial_mu=1500, initial_sigma=350, beta=200, tau=5.0, min_matches=10
+        )
         rng = random.Random(7)
         for _ in range(200):
             # "real" wins ~80% of its matches against canary.
@@ -160,7 +160,9 @@ class TestAdversarialFloor:
     def test_flags_a_real_strategy_that_actually_regressed(self):
         """When a 'real' strategy is losing to canary as often as it wins,
         strategies_below_canary must surface it."""
-        elo = BayesianEloTracker(initial_mu=1500, initial_sigma=350, beta=200, tau=5.0, min_matches=10)
+        elo = BayesianEloTracker(
+            initial_mu=1500, initial_sigma=350, beta=200, tau=5.0, min_matches=10
+        )
         rng = random.Random(99)
         for _ in range(200):
             # "broken" loses more often than it wins against canary --

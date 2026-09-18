@@ -576,6 +576,10 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_katz")
     if f._use_op_tang and f._op_tang:
         available.append("op_tang")
+    if f._use_softmax and f._softmax:
+        available.append("softmax")
+    if f._use_topk and f._topk:
+        available.append("topk")
     return available
 
 

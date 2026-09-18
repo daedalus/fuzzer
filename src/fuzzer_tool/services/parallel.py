@@ -133,6 +133,10 @@ def _worker_main(
     whittle_floor: float = 0.05,
     whittle_recompute_batch: int = 25,
     kruskal_count: bool = False,
+    softmax: bool = False,
+    softmax_tau: float = 1.0,
+    use_topk: bool = False,
+    topk_k: int = 1,
 ):
     """Entry point for each fuzzing worker process."""
     from fuzzer_tool.services.fuzzer import Fuzzer
@@ -185,6 +189,10 @@ def _worker_main(
         eps_greedy=eps_greedy,
         eps_greedy_epsilon0=eps_greedy_epsilon0,
         eps_greedy_decay=eps_greedy_decay,
+        softmax=softmax,
+        softmax_tau=softmax_tau,
+        use_topk=use_topk,
+        topk_k=topk_k,
         hierarchical_bandit=hierarchical_bandit,
         gp_ucb=gp_ucb,
         ducb=ducb,
@@ -711,6 +719,10 @@ def run_parallel(
     whittle_floor: float = 0.05,
     whittle_recompute_batch: int = 25,
     kruskal_count: bool = False,
+    softmax: bool = False,
+    softmax_tau: float = 1.0,
+    use_topk: bool = False,
+    topk_k: int = 1,
 ):
     """Launch N parallel fuzzer workers sharing the same corpus directory.
 
@@ -798,6 +810,10 @@ def run_parallel(
         eps_greedy=eps_greedy,
         eps_greedy_epsilon0=eps_greedy_epsilon0,
         eps_greedy_decay=eps_greedy_decay,
+        softmax=softmax,
+        softmax_tau=softmax_tau,
+        use_topk=use_topk,
+        topk_k=topk_k,
         hierarchical_bandit=hierarchical_bandit,
         gp_ucb=gp_ucb,
         ducb=ducb,
