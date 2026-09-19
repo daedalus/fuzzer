@@ -49,11 +49,20 @@ transpose-invariant and are printed as controls; everything derived from them
 is not, and the derived numbers are where the orientation earns its keep.
 
 It also measures cross-process id stability, which is what makes or breaks
-every number above: the context hash is taken over a raw return address, so
-under PIE + ASLR the same call chain hashes differently in every process.
+every number above: the context hash is taken over a return address, so
+under PIE + ASLR the same call chain hashes differently in every process
+unless the shim resolves that address relative to the load base first.
 ``services.fuzzer`` calls ``adapters.process.disable_aslr`` once at startup
-and children inherit it; this tool does the same, and ``--keep-aslr``
-reproduces what a run with ``FUZZER_KEEP_ASLR=1`` actually sees.
+and children inherit it; this tool does the same.
+
+``--keep-aslr`` skips that call and nothing else, which is the *raw* regime:
+ASLR on with the shim hashing addresses verbatim. That is no longer what a
+``FUZZER_KEEP_ASLR=1`` run sees -- the variable now also puts the shim in
+base-relative mode, and ``services.fuzzer`` sets it for the target whenever
+ASLR survives startup. To reproduce a production run with ASLR on, export
+``FUZZER_KEEP_ASLR=1`` alongside the flag; the flag by itself reproduces a
+target built before the shim grew that mode, which is still the sharpest
+canary the tool has for the sections below.
 
 Usage::
 
@@ -793,7 +802,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--keep-aslr",
         action="store_true",
-        help="do not disable ASLR, reproducing FUZZER_KEEP_ASLR=1",
+        help="do not disable ASLR (raw-address ctx regime; export "
+        "FUZZER_KEEP_ASLR=1 too for what a production run with ASLR on sees)",
     )
     ap.add_argument("--timeout", type=float, default=10.0)
     ap.add_argument(
