@@ -427,6 +427,147 @@ one target, which does not distinguish structural from coincidental. The
 separation is available: `core/icfg.py` already builds the CFG, so an
 empirical relation can be checked against it. See P1-2.
 
+### F11. Two build defects that made everything above unreachable in practice
+
+Both are fixed; recorded because the series F1-F10 was measured on
+hand-built targets and the repo's own build path was producing something
+different, which took three sessions to notice.
+
+**`dd834d1` did not survive a real instrumented build.** The commit that
+fixed F1 added `__afl_ctx_resolve_base()` and `__afl_ctx_use_relative()`
+without `__AFL_NO_COV`. Both are `static inline`, and at -O2 clang leaves
+them out of line -- `nm` shows them as local text symbols -- so in a build
+carrying `-fsanitize-coverage=trace-pc-guard` they are instrumented like
+anything else in the translation unit, and they are called from inside the
+callback. Measured on fuzzgoat (clang 18, -O2, PIE): SIGSEGV on the first
+input, 2 edges recorded of 59, in both raw and base-relative mode, with
+`__AFL_CTX_SENSITIVE=0` unaffected. Fixed in `ad23878`.
+
+The existing coverage could not see it. `test_edge_id_stability_guard.py`
+and `test_ctx_and_map_size.py` both drive `__sanitizer_cov_trace_pc_guard`
+directly from a **gcc** build, and gcc has no trace-pc-guard support at all
+-- its valid `-fsanitize-coverage=` arguments are `trace-cmp` and `trace-pc`
+-- so no part of the shim is ever instrumented in either.
+`test_shim_ctx_instrumented.py` adds the clang case.
+
+**`--clang-scov` never reached three targets.** The flag is
+`build_simple_targets`' fifth argument, forwarded to each build call as
+`$extra_cflags`. Three calls put something else in that slot:
+`fuzzgoat_read` passed `-I$VENDOR/fuzzgoat` in both the executable and .so
+passes (and `compile_fuzzgoat_object` took the include *instead of* the
+flags, leaving the parser itself dark), and the `ffmpeg_read` executable
+passed `$FFMPEG_INC`. Measured before the fix: `readelf` found no
+`__sancov_guards` in the built fuzzgoat, and a 250-input run recorded 3
+edges per execution -- the harness's own `__afl_map_edge` calls, ids all
+above 0x1000 -- against 73 after. Fixed in `e4e947f`.
+
+**And nothing said so at runtime.** `afl_instrumentation_status` looked for
+`__afl_area`/`__afl_map_shm`/`__sanitizer_cov`, all of which are the shim's
+own definitions, and the shim is `-include`'d into every target. A default
+`build_targets.sh` run produced 20 binaries, 4 carrying a guard section, and
+all 20 classified "present". 300 execs against `png_read_noasan.so` under
+`--inprocess-direct` reported
+
+    [*] AFL instrumentation: detected
+    [*] execs: 301 | shm: 2 max: 2 sat: 100% | map: 0.0%
+        Edges discovered:  2
+        Total richness:    2 - 2 (95% CI, Chao2)
+        P(new code next):  0.00%
+
+The schedulers, the rarity machinery and Chao2 all ran on a two-element
+universe and reported saturation -- indistinguishable from a target that
+really is exhausted. `core/elf.sancov_guard_status()` and
+`Fuzzer._warn_no_compiler_coverage()` fix that in `055ada2`; the tri-state
+has to be decided on `.symtab` alone, because `.dynsym` survives stripping
+and a merged check would false-alarm on a stripped working target.
+
+**Replication.** Re-measured on the repo-built clang target once all three
+were fixed: 412 distinct ids, ICC 0.518, lag-1 +0.134 at z = 3.33 with the
+within-family control at +0.107, dominance 0.949, effective rank 1.1, 120
+duplicate edges of which 79 in 15 within-family classes -- the same 79 as
+F10, from a different build. F2 still reproduces (5 first-execution ids that
+never return). Stability is 1.000 both with ASLR off and under
+`FUZZER_KEEP_ASLR=1`, so F1's fix holds on a production-flag build.
+
+### F12. Folding the edge vector into a square adds nothing
+
+Asked: lay the edges out on a grid of side `floor(sqrt(N)) + 1`, position
+from the index or the id, value the hit count. Measured on the repo-built
+target (N = 412, s = 21):
+
+| layout | row eta^2 | col eta^2 |
+|---|---|---|
+| rank order, 21x21 | **0.532** (null 0.045, z = +36.6) | 0.019 (null 0.045, z = -1.9) |
+
+Rows carry half the log-count variance and columns carry none -- below the
+null. The cause is direct: **10 of the 20 rows lie entirely inside one
+`id >> 8` family**, so the banding is F3's blocking drawn with a line break
+every 21 elements. A fold is a bijection on a 1-D vector; it cannot add
+information, only re-render it.
+
+Positioning by the raw id surfaces an artefact instead. At side 85 (odd) all
+85 columns are touched; fold at an **even** width and exactly half the
+columns are structurally empty -- 45 of 90 -- because `edge_id |= 1` makes
+every id odd, and column eta^2 rises from 0.006 to 0.047 purely from that
+comb. Vertical striping in such a picture is the OR in the shim, not the
+program.
+
+No periodic component exists to find: folding at 256, aligned exactly with
+the context-family period, gives row eta^2 0.202 against 0.200 at width 257.
+The large z-scores against a shuffled null at every width are occupancy
+clustering, not periodicity, and aligned-vs-misaligned is the control that
+settles it.
+
+One layout does beat the raster, if a bitmap is ever wanted for looking at:
+neighbour smoothness on a 128x128 grid, mean |difference| between
+4-neighbours of log counts, gives raster 0.151 (shuffled 0.175, z = -28.1)
+against **Morton / Z-order 0.136** (z = -54.9). Z-order interleaves the id
+bits, so cells sharing a high-bit prefix land in one square block -- F3's
+ultrametric made geometric, families as blocks instead of stripes. Use an
+odd stride or the parity comb comes back.
+
+### F13. The eigenvalues restate the SVD; the eigenvectors do not
+
+Eigen-decomposition needs a square matrix, and the three candidates here
+behave very differently.
+
+**The folded grid: no information.** The 21x21 image has 14 complex
+eigenvalues and |lambda|_1 = 8938; refolding the same 412 numbers at 22x22
+gives 8 complex pairs, |lambda|_1 = 4657, and a trace moving from 2882 to
+8686. Every quantity is a function of the fold width, because the matrix is
+not an operator on anything.
+
+**The Gram matrices: the SVD again.** Eigenvalues of `AA^T` are the squared
+singular values -- verified, max |lambda - sigma^2| = 7.5e-9 -- so lambda_1
+/ sum = 0.949 is F7's dominance, participation ratio 1.11, and 62 nonzero
+eigenvalues for 250 seeds. There is no second opinion available here: eigen
+of the Gram and SVD of the matrix are one computation.
+
+**The eigenvectors are where the content is.**
+
+- PC1 is volume: rho = +0.989 against total hits, +0.925 against live edge
+  count. The parser-prologue mass, again.
+- **PC2 separates valid from malformed input.** Orthogonal to volume by
+  construction and empirically uncorrelated with it (rho = -0.026), it gives
+  rho = +0.312 against a parse-success flag, mean +0.0109 over the 129
+  inputs that parse as JSON against -0.0129 over the 121 that do not. This
+  is the first quantity in the whole series that recovers a semantic
+  property of the inputs without being told about it. See P1-3.
+- PC3 is length: rho = -0.453 against input size.
+
+**The co-occurrence Laplacian: one component.** `W = B^T B` with a zeroed
+diagonal gives 412 nodes, 53301 edges, no isolated nodes, and exactly one
+zero eigenvalue, so no subset of edges avoids co-occurring with the rest.
+On a multi-format target that multiplicity would count independent code
+regions and is worth watching; on a single-format JSON parser, one is the
+expected answer. Fiedler value 19.05, and the Fiedler vector splits 5/407
+with rho = +0.930 against owner count -- popularity again, the same
+direction that sank Tang's sampling.
+
+Neither F12 nor F13 is in the tool. F12 is strictly weaker than section [1],
+and F13's eigenvalues are section [4] under another name. The one candidate
+for a section is PC2, gated on P1-3.
+
 ## Not defined on the id axis -- do not re-propose
 
 Linear regression or slope of count against id; autocorrelation or FFT along
@@ -677,6 +818,19 @@ relation corresponds to a join or a loop in it. A positive opens Ball-Larus
 (instrument a spanning tree's complement, derive the rest, and stop paying for
 337 of 445 count coordinates); a negative closes the whole integer-relation
 line, which is worth as much. Blocked on nothing but machine time.
+
+### P1-3. Does PC2 separate valid from invalid on other targets?
+
+F13 found the second principal component of the seed Gram matrix tracking
+parse success on fuzzgoat (rho = +0.312, means +0.0109 vs -0.0129). If that
+holds on png and zlib -- both have a well-defined notion of a valid file, so
+the label is free -- it is a validity signal derived from coverage alone.
+`ValidityChannel` already tracks the same property, but as a verdict the
+target reports per execution (`Validity.VALID/INVALID/UNKNOWN`, recorded
+into `seed_meta['valid']`), so a coverage-side estimate would be a second,
+independent read on it rather than a replacement. One afternoon of machine time, no code change to
+measure. If it replicates, section [4] of the tool should report the top
+eigenvector correlations and not just the spectrum.
 
 ### P2-1. Wire `2^H` into the stall reason
 
