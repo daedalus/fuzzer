@@ -605,6 +605,101 @@ lag-1 statistic ships with both of its controls -- a global permutation null
 effect really is the blocking -- because the within-family control is what
 separates F3 from F1's artefact.
 
+## A scheduler built on all of this
+
+Asked what a seed scheduler and an operator scheduler would look like if they
+used everything above. The honest answer is thin, and the shape is the
+result: most of F1-F13 is negative, so the design is one substrate that is
+unconditionally right, two small arms gated on measurements not yet made, and
+a long exclusion list. There are already 5 seed schedulers and 34 operator
+schedulers in `core/schedulers/`; a 6th and a 34th are not where the value
+is.
+
+### Shared substrate
+
+**Preflight guards.** Score nothing until two conditions hold, because every
+statistic below is meaningless otherwise. `sancov_guard_status(target)` must
+not be `"absent"` (F11 -- a campaign on an uninstrumented target reports
+Chao2 richness 2-2 and 100% saturation, which reads exactly like success),
+and the stability probe must be at Jaccard 1.0 (F1 -- under per-process ids
+every edge is a singleton owned by one seed, i.e. maximally rare to any
+rarity-weighted scheduler). Both checks exist now; neither is consulted by a
+scheduler.
+
+**Canonical edge space.** Collapse edges whose count profile is identical
+over the last W executions (F10: 126 of 445, 28%). The motive is correctness
+before performance: 79 of those were context tags that never differed, so
+scoring raw ids counts one branch up to 45 times and distorts every rarity
+and novelty weight by that multiplicity. Recompute at refit by hashing each
+column; do not maintain it incrementally, because classes split as the corpus
+grows and a merge-only structure would be wrong.
+
+**Independent-coordinate mask.** The count vector has rank 108 of 445 (F9),
+and on the edge orientation the relations are sparse with unit coefficients
+(F10), consistent with Kirchhoff conservation. If P1-2 confirms them against
+`core/icfg.py`, mark the derived edges: a spanning tree's complement carries
+the information and the remaining coordinates are determined. Off until then
+-- a relation holding over one corpus is not a CFG identity.
+
+### Seed arm: score what volume does not explain
+
+The most repeated result in this repo is that a derived seed score collapses
+to a row sum: Tang's partial correlation controlling for total hits was
++0.006 with Wilcoxon p = 1.0 over ten matrices, degree beat every low-rank
+score at +0.27..+0.77, and PC1 here is volume at rho = +0.989.
+
+So make the orthogonalisation the estimator rather than the audit. Score a
+seed by its mass on the canonical edge space *after* regressing out
+rank(total hits), weighted by `1/owner_count` -- incidence, not volume, since
+rho(owners, total) = +0.957 means the two look alike and are not, which was
+a live defect once already. Add PC2 and PC3 as features only if P1-3
+replicates.
+
+The module carries its own falsification, the way `seed_tang` exports
+`modfkv_sample_complexity`: recompute the partial correlation against total
+hits and degree at every refit and log it. Converging to zero means the arm
+has become a row sum again and should be pulled. It enters as one arm under
+the existing Elo dispatch, never as a replacement, because the arbiter
+degrades a weak arm rather than letting it do damage. Expected gain: small.
+
+### Operator side: reward shaping, not another bandit
+
+Nothing in F1-F13 touched operator selection, and the bandit family is
+already 34 modules deep, so the contribution is to the reward every one of
+them consumes.
+
+**Credit independent coordinates only.** An operator that reaches a derived
+edge learned nothing new, and a duplicate class should pay once rather than
+45 times. Because this changes the signal rather than the selector, it is
+testable against the current arms without replacing any of them -- the
+cheapest A/B available here.
+
+**Re-temper on `2^H`.** The measured reason learners fail in this codebase is
+drift, not capacity: the MLP fell to uniform (1.03 early, 0.98 late) while
+LinUCB held 1.07-1.14, and with drift switched off everything worked at 4x.
+Effective edges collapsing while the raw edge count is flat (F5: 65 of 445)
+is a drift signal the stall machinery has no equivalent of, and
+`edge_hit_distribution()` still has no caller. Use it to raise exploration
+and decay stale arm statistics, not to reset.
+
+### Excluded by measurement, not by taste
+
+Low-rank seed scoring in any form; l2-magnitude sampling, which returns the
+most crowded edges at 1.3-1.9x above uniform; GF(2) or LLL as a minimiser
+(133 seeds against greedy's 31, same 15 ms); every id-axis statistic in the
+"Not defined on the id axis" list above, including the square-fold picture
+whose banding is the sort order and whose vertical striping is `edge_id |= 1`
+(F12); and a neural scorer over aggregate metrics, which has 3.27 effective
+dimensions to work with and loses under drift.
+
+### Sequencing
+
+Substrate first and alone: it is the only part that corrects numbers already
+being computed, and it is gated on nothing. Operator reward shaping next,
+gated on P1-2. The seed arm last, gated on P1-3, with `bench_paired.py` and a
+pre-registered threshold, because observational correlation has been wrong
+twice on precisely this question. Tiered as P2-3, P3-3 and P3-4 below.
+
 ## Follow-up items
 
 Tiered by what the item *is*, matching `handover_pending_2026-09-06.md`: P0 a
@@ -852,6 +947,33 @@ rather than a result.
 
 Not covered and still open: `node_idx` needs a `__AFL_DISTANCE_MODE` build, so
 section [3] names the axis and declines to collect it.
+
+### P2-3. Scheduler substrate: guards and the canonical edge space
+
+Gated on nothing, and the only part of the design above that fixes numbers
+already being computed rather than adding a new one. Three pieces: consult
+`sancov_guard_status` and the stability probe before any scheduler scores
+anything (both checks exist, neither is consulted); collapse duplicate-profile
+edge classes at refit so rarity and novelty weights stop counting one branch
+up to 45 times; and expose `2^H` from `edge_hit_distribution()`, which still
+has no caller. Overlaps P2-1, which wires the same scalar into the stall
+reason -- do them together.
+
+### P3-3. Operator reward on independent coordinates
+
+Gated on P1-2. Credit a duplicate class once instead of per member, and give
+a derived edge no novelty credit at all. Changes the reward rather than the
+selector, so it is measurable against the 34 existing operator schedulers
+without replacing any of them. Paper question first: what happens to credit
+when a class splits mid-campaign.
+
+### P3-4. `seed_residual` arm
+
+Gated on P1-3 and on P2-3's canonical space. Mass orthogonal to
+rank(total hits), weighted by `1/owner_count`, with the partial-correlation
+falsification recomputed at every refit and logged. `bench_paired.py` with a
+pre-registered threshold, no exceptions: the same question has produced two
+wrong answers from observational correlation already.
 
 ### P3-1. `__AFL_CTX_BITS` feedback
 
