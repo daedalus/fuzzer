@@ -1731,6 +1731,7 @@ def _fuzzing_strategy(f) -> str:
         )
 
     strategies.extend(_kruskal_lines(f))
+    strategies.extend(_entropy_seed_lines(f))
 
     # Markov
     if f.markov_trained:
@@ -1796,6 +1797,34 @@ def _kruskal_lines(f) -> list[str]:
         f"    scored={st['scored']} coupled_pairs={st['coupled_pairs']} "
         f"generated={st['generated']} mean_score={st['mean_score']:.3f}",
     ]
+
+
+def _entropy_seed_lines(f) -> list[str]:
+    """Byte-entropy seed arm counters; empty when both arms are off."""
+    from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
+    from fuzzer_tool.core.schedulers.seed_entropy_zscore import EntropyZScoreSeedStrategy
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    lines = []
+    kl = getattr(f, "_entropy_kl", None)
+    if isinstance(kl, EntropyKLSeedStrategy):
+        st = kl.stats()
+        lines.append("  Entropy KL:       enabled")
+        lines.append(
+            f"    scored={st['scored']} selected={st['selected']} "
+            f"pooled={st['pooled']} mean_kl={st['mean_kl']:.3f} bits"
+        )
+
+    z = getattr(f, "_entropy_zscore", None)
+    if isinstance(z, EntropyZScoreSeedStrategy):
+        st = z.stats()
+        lines.append(f"  Entropy z-score:  enabled (target_z={st['target_z']:.2f})")
+        lines.append(
+            f"    observed={st['observed']} selected={st['selected']} "
+            f"ready={st['ready']} mean={st['mean_entropy']:.1f}% "
+            f"sd={st['stddev_entropy']:.1f}%"
+        )
+    return lines
 
 
 def _edge_rarity(f) -> str:

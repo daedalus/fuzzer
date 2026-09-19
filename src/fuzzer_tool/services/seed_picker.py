@@ -305,6 +305,15 @@ class SeedPicker:
             available.append("tang")
         if getattr(f, "_kruskal_count", None) is not None and f.corpus:
             available.append("kruskal_count")
+        if getattr(f, "_entropy_kl", None) is not None and f.corpus:
+            available.append("entropy_kl")
+        # Listed while it is still warming up (it observes the corpus when
+        # picked, and cannot warm up otherwise), then only while its
+        # calibration is trustworthy -- a corpus with no entropy spread at
+        # all would otherwise be a phantom opponent that declines forever.
+        zscore = getattr(f, "_entropy_zscore", None)
+        if zscore is not None and f.corpus and (zscore.ready or not zscore.warmed):
+            available.append("entropy_zscore")
         if getattr(f, "_use_seed_canary", False) and f._seed_canary and f.corpus:
             available.append("canary")
 
@@ -346,6 +355,8 @@ class SeedPicker:
             "katz": lambda: self._pick_katz_seed(),
             "tang": lambda: self._pick_tang_seed(),
             "kruskal_count": lambda: self._pick_kruskal_count_seed(),
+            "entropy_kl": lambda: self._pick_entropy_kl_seed(),
+            "entropy_zscore": lambda: self._pick_entropy_zscore_seed(),
             "canary": lambda: self._pick_seed_canary_seed(),
         }
         handler = strategy_map.get(strategy)
@@ -468,6 +479,36 @@ class SeedPicker:
         generated = strategy.generate(anchor, f.corpus)
         return anchor if generated is None else generated
 
+    def _pick_entropy_kl_seed(self) -> bytes | None:
+        """Byte-novelty arm: draw proportional to KL against the corpus pool.
+
+        Scores seeds by how far their byte distribution sits from the pooled
+        distribution of the corpus they are in, so a seed carrying a byte
+        pattern the corpus barely has is picked more often than one that
+        looks like the average of everything already collected. Returns None
+        on an empty corpus, same as every other arm here.
+        """
+        f = self.f
+        strategy = getattr(f, "_entropy_kl", None)
+        if strategy is None or not f.corpus:
+            return None
+        return strategy.select(f.corpus)
+
+    def _pick_entropy_zscore_seed(self) -> bytes | None:
+        """Self-calibrating entropy-regime arm.
+
+        Weights seeds by a gaussian on their byte entropy expressed as a
+        z-score against the corpus's own mean and spread, so the cut points
+        follow the target instead of SeedScorer's fixed 25/62/93. Returns
+        None while the corpus has too few distinct seeds (or no spread) for
+        that calibration to mean anything.
+        """
+        f = self.f
+        strategy = getattr(f, "_entropy_zscore", None)
+        if strategy is None or not f.corpus:
+            return None
+        return strategy.select(f.corpus)
+
     def _pick_seed_canary_seed(self) -> bytes | None:
         """Deliberately worst-in-class picker -- the Elo-arbitrated 'canary' arm.
 
@@ -572,6 +613,13 @@ class SeedPicker:
             return f.ga.pick_seed()
         if getattr(f, "_kruskal_count", None) is not None:
             return self._pick_kruskal_count_seed()
+        # Without --elo these arms have no arbiter, so they run ahead of the
+        # generic weighted picker the same way kruskal-count does -- and hand
+        # the pick straight back when they decline.
+        for pick in (self._pick_entropy_kl_seed, self._pick_entropy_zscore_seed):
+            chosen = pick()
+            if chosen is not None:
+                return chosen
         if f.corpus and getattr(f, "_use_bayesian", False) and f._seed_quality:
             return self._pick_bayesian_seed()
         if f.corpus and f.seed_meta:

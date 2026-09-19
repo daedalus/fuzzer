@@ -101,6 +101,24 @@ def _kruskal_str(f) -> str:
     return f" | kruskal: scored={st['scored']} gen={st['generated']}"
 
 
+def _entropy_seed_str(f) -> str:
+    """Compact live-stats field for the byte-entropy seed arms; empty when off."""
+    from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
+    from fuzzer_tool.core.schedulers.seed_entropy_zscore import EntropyZScoreSeedStrategy
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    out = ""
+    kl = getattr(f, "_entropy_kl", None)
+    if isinstance(kl, EntropyKLSeedStrategy):
+        out += f" | ent-kl: mean={kl.stats()['mean_kl']:.2f}"
+
+    z = getattr(f, "_entropy_zscore", None)
+    if isinstance(z, EntropyZScoreSeedStrategy):
+        st = z.stats()
+        out += f" | ent-z: mu={st['mean_entropy']:.1f} sd={st['stddev_entropy']:.1f}"
+    return out
+
+
 def _format_count(n: int) -> str:
     """Abbreviate a count for the single-line live stats display.
 
@@ -1126,7 +1144,7 @@ class StatsReporter:
             with contextlib.suppress(AttributeError, TypeError):
                 mi_str = f" | mi: obs={mi.total_observations} pos={len(mi.position_counts)}"
 
-        kc_str = _kruskal_str(f)
+        kc_str = _kruskal_str(f) + _entropy_seed_str(f)
 
         elo_str = _elo_status_str(f)
 

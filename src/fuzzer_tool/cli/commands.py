@@ -501,6 +501,9 @@ def cmd_fuzz(args):
             whittle_floor=getattr(args, "whittle_floor", 0.05),
             whittle_recompute_batch=getattr(args, "whittle_recompute_batch", 25),
             kruskal_count=getattr(args, "kruskal_count", False),
+            entropy_kl=getattr(args, "entropy_kl", False),
+            entropy_zscore=getattr(args, "entropy_zscore", False),
+            entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
             successive_elim=getattr(args, "successive_elim", False),
             successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
             successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -593,6 +596,8 @@ def cmd_fuzz(args):
         args.markov_gen = True
         args.tang = True
         args.kruskal_count = True
+        args.entropy_kl = True
+        args.entropy_zscore = True
         # Softmax and TopK scheduler flags for --elo all
         args.softmax = True
         args.topk = True
@@ -765,6 +770,9 @@ def cmd_fuzz(args):
         whittle_floor=getattr(args, "whittle_floor", 0.05),
         whittle_recompute_batch=getattr(args, "whittle_recompute_batch", 25),
         kruskal_count=getattr(args, "kruskal_count", False),
+        entropy_kl=getattr(args, "entropy_kl", False),
+        entropy_zscore=getattr(args, "entropy_zscore", False),
+        entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
         successive_elim=getattr(args, "successive_elim", False),
         successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
         successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -1907,6 +1915,8 @@ _HAIL_MARY_FLAGS = (
     "boltzmann",
     "tang",
     "kruskal_count",
+    "entropy_kl",
+    "entropy_zscore",
     "op_katz",
     "op_tang",
     "op_kruskal_count",
@@ -3183,6 +3193,31 @@ def main() -> int:
         help="Kruskal-count seed scheduling: adds a 'kruskal_count' Elo seed arm scoring "
         "seeds by how fast byte-driven walkers couple, then recombining the anchor with "
         "a donor along the coupled trajectory. OFF by default; not yet A/B validated.",
+    )
+    fuzz_parser.add_argument(
+        "--entropy-kl",
+        action="store_true",
+        default=False,
+        help="Entropy-KL seed scheduling: adds an 'entropy_kl' Elo seed arm scoring seeds "
+        "by the KL divergence of their byte distribution from the corpus's pooled one, so "
+        "a seed carrying byte patterns the corpus barely has gets picked more. OFF by "
+        "default; not yet A/B validated.",
+    )
+    fuzz_parser.add_argument(
+        "--entropy-zscore",
+        action="store_true",
+        default=False,
+        help="Entropy z-score seed scheduling: adds an 'entropy_zscore' Elo seed arm "
+        "weighting seeds by their byte entropy expressed as a z-score against the corpus's "
+        "own mean and spread, self-calibrating instead of using SeedScorer's fixed 25/62/93 "
+        "breakpoints. OFF by default; not yet A/B validated.",
+    )
+    fuzz_parser.add_argument(
+        "--entropy-zscore-target",
+        type=float,
+        default=0.0,
+        help="Z-score the --entropy-zscore arm peaks at (default 0.0, seeds typical for "
+        "this corpus). Positive chases the high-entropy tail, negative the sparse one.",
     )
     fuzz_parser.add_argument(
         "--ecofuzz",

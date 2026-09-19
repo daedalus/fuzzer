@@ -137,6 +137,9 @@ def _worker_main(
     whittle_floor: float = 0.05,
     whittle_recompute_batch: int = 25,
     kruskal_count: bool = False,
+    entropy_kl: bool = False,
+    entropy_zscore: bool = False,
+    entropy_zscore_target: float = 0.0,
     softmax: bool = False,
     softmax_tau: float = 1.0,
     use_topk: bool = False,
@@ -281,6 +284,9 @@ def _worker_main(
         whittle_floor=whittle_floor,
         whittle_recompute_batch=whittle_recompute_batch,
         kruskal_count=kruskal_count,
+        entropy_kl=entropy_kl,
+        entropy_zscore=entropy_zscore,
+        entropy_zscore_target=entropy_zscore_target,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -731,6 +737,9 @@ def run_parallel(
     whittle_floor: float = 0.05,
     whittle_recompute_batch: int = 25,
     kruskal_count: bool = False,
+    entropy_kl: bool = False,
+    entropy_zscore: bool = False,
+    entropy_zscore_target: float = 0.0,
     softmax: bool = False,
     softmax_tau: float = 1.0,
     use_topk: bool = False,
@@ -913,6 +922,9 @@ def run_parallel(
         whittle_floor=whittle_floor,
         whittle_recompute_batch=whittle_recompute_batch,
         kruskal_count=kruskal_count,
+        entropy_kl=entropy_kl,
+        entropy_zscore=entropy_zscore,
+        entropy_zscore_target=entropy_zscore_target,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

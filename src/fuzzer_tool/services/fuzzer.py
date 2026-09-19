@@ -155,6 +155,8 @@ _SEED_STRATEGY_NAMES = (
     "alphabeta",
     "tang",
     "kruskal_count",
+    "entropy_kl",
+    "entropy_zscore",
 )
 
 
@@ -1219,6 +1221,10 @@ class Fuzzer:
         successive_elim_min_pulls=3,
         successive_elim_reopen=0,
         kruskal_count=False,
+        # Byte-entropy seed arms (see handover_entropy_seed_schedulers).
+        entropy_kl=False,
+        entropy_zscore=False,
+        entropy_zscore_target=0.0,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
         seed_canary_scheduler=False,
@@ -2161,6 +2167,23 @@ class Fuzzer:
             from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
 
             self._kruskal_count = KruskalCountSeedStrategy(self._rng, self._profile)
+        # Byte-content entropy seed arms. Both score the corpus the picker
+        # hands them and keep no target state, so they cost nothing when the
+        # Elo pool does not select them.
+        self._entropy_kl = None
+        if entropy_kl:
+            from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
+
+            self._entropy_kl = EntropyKLSeedStrategy(self._rng)
+        self._entropy_zscore = None
+        if entropy_zscore:
+            from fuzzer_tool.core.schedulers.seed_entropy_zscore import (
+                EntropyZScoreSeedStrategy,
+            )
+
+            self._entropy_zscore = EntropyZScoreSeedStrategy(
+                self._rng, target_z=entropy_zscore_target
+            )
         # Seed-arena canary: deliberately worst-in-class seed scheduler, the
         # _pick_seed_elo counterpart of op_canary (see
         # core/schedulers/seed_canary.py). Only meaningful alongside --elo,
@@ -6823,6 +6846,28 @@ class Fuzzer:
             )
         print("[*] Kruskal-count seed scheduling enabled")
 
+    def _load_entropy_kl(self) -> None:
+        """Restore entropy-KL counters on resume; malformed payloads start fresh."""
+        from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
+
+        data = self._state_store.get("entropy_kl")
+        if self.resume and data is not None:
+            self._entropy_kl = EntropyKLSeedStrategy.from_dict(data, self._rng)
+        print("[*] Entropy-KL seed scheduling enabled")
+
+    def _load_entropy_zscore(self) -> None:
+        """Restore entropy z-score counters on resume; the moments rebuild
+        from the corpus on the first scoring pass (see the module docstring)."""
+        from fuzzer_tool.core.schedulers.seed_entropy_zscore import EntropyZScoreSeedStrategy
+
+        data = self._state_store.get("entropy_zscore")
+        if self.resume and data is not None:
+            self._entropy_zscore = EntropyZScoreSeedStrategy.from_dict(data, self._rng)
+        print(
+            "[*] Entropy z-score seed scheduling enabled "
+            f"(target_z={self._entropy_zscore.stats()['target_z']:.2f})"
+        )
+
     def _selected_schedulers_str(self) -> str:
         """One-line summary of the active scheduling stack (startup banner)."""
         parts = []
@@ -6909,6 +6954,10 @@ class Fuzzer:
             seeds.append("aflgo")
         if getattr(self, "_kruskal_count", None) is not None:
             seeds.append("kruskal-count")
+        if getattr(self, "_entropy_kl", None) is not None:
+            seeds.append("entropy-kl")
+        if getattr(self, "_entropy_zscore", None) is not None:
+            seeds.append("entropy-zscore")
         if getattr(self, "_use_seed_canary", False) and self._seed_canary:
             seeds.append("canary")
         if seeds:
@@ -7285,6 +7334,10 @@ class Fuzzer:
             groups["Seed selection"].append("tang")
         if getattr(self, "_kruskal_count", None) is not None:
             groups["Seed selection"].append("kruskal-count")
+        if getattr(self, "_entropy_kl", None) is not None:
+            groups["Seed selection"].append("entropy-kl")
+        if getattr(self, "_entropy_zscore", None) is not None:
+            groups["Seed selection"].append("entropy-zscore")
 
         if self.markov_trained:
             groups["Mutation"].append("markov")
@@ -7668,6 +7721,12 @@ class Fuzzer:
             if self._kruskal_count is not None:
                 self._load_kruskal_count()
 
+            if self._entropy_kl is not None:
+                self._load_entropy_kl()
+
+            if self._entropy_zscore is not None:
+                self._load_entropy_zscore()
+
             # Print WFC mode status
             if self._wfc_enabled:
                 print("[*] WFC: enabled — structural chunk reordering and pixel generation active")
@@ -8029,6 +8088,10 @@ class Fuzzer:
             print(f"[*] AlphaBeta: saved state ({self._alphabeta.stats()['tracked_nodes']} nodes)")
         if self._kruskal_count is not None:
             self._state_store.set("kruskal_count", self._kruskal_count.to_dict())
+        if self._entropy_kl is not None:
+            self._state_store.set("entropy_kl", self._entropy_kl.to_dict())
+        if self._entropy_zscore is not None:
+            self._state_store.set("entropy_zscore", self._entropy_zscore.to_dict())
         if self._fluctuation is not None:
             self._state_store.set("fluctuation", self._fluctuation.snapshot())
             samples = sum(len(v) for v in self._fluctuation._states.values())
