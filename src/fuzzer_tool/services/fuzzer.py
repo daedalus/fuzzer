@@ -759,10 +759,12 @@ class Fuzzer:
         gives a 76-id union with an empty intersection, relative mode gives
         22 ids reproduced exactly.
 
-        Silent when there is nothing to do, and never a substitute for the
-        measurement: a target built against an older shim ignores the
-        variable and cannot be told apart from a current one by any symbol
-        it exports, which is what :meth:`_report_edge_id_stability` is for.
+        A target built against a shim that predates relative mode ignores
+        the variable, so setting it would fix nothing and say it had. That
+        case is read off ``__afl_ctx_relative_capable`` and warned about by
+        name instead, with the rebuild as the only escape. The measurement
+        in :meth:`_report_edge_id_stability` still runs either way: a marker
+        says what the binary can do, not what it did.
         """
         if self._aslr_disabled or not self.use_coverage:
             return
@@ -770,22 +772,36 @@ class Fuzzer:
             # ptrace and the in-process modes do not go through the shim's
             # context hash, so the premise does not hold for them.
             return
-        if os.environ.get("FUZZER_KEEP_ASLR") == "1":
-            return  # already in relative mode, by the user's own hand
-        from fuzzer_tool.core.elf import detect_ctx_bits
+        from fuzzer_tool.core.elf import detect_ctx_bits, detect_ctx_relative_capable
 
-        affected = []
+        capable, stale = [], []
         for t in targets:
             if not t:
                 continue
             # None means "no marker, unknown shim", which is not evidence of
             # context sensitivity; only a positive width is.
-            if detect_ctx_bits(t):
-                affected.append(t)
-        if not affected:
-            return
+            if not detect_ctx_bits(t):
+                continue
+            # None here is "could not read the symbol table", which is not
+            # evidence that the shim is old -- leave those to the probe.
+            (stale if detect_ctx_relative_capable(t) is False else capable).append(t)
+        if stale:
+            which = os.path.basename(stale[0]) if len(stale) == 1 else f"{len(stale)} targets"
+            msg = (
+                f"ASLR is enabled and {which} was built against a shim without "
+                "base-relative caller context (no __afl_ctx_relative_capable "
+                "marker): edge ids are hashed from a raw return address, so "
+                "every execution of the same input reports a different edge "
+                "set and coverage feedback is noise. Rebuild the target "
+                "(tools/build_targets.sh), or build it with "
+                "-D__AFL_CTX_SENSITIVE=0."
+            )
+            log.warning(msg)
+            print(f"[!] WARNING: {msg}")
+        if not capable or os.environ.get("FUZZER_KEEP_ASLR") == "1":
+            return  # nothing to switch, or already switched by the user
         os.environ["FUZZER_KEEP_ASLR"] = "1"
-        which = os.path.basename(affected[0]) if len(affected) == 1 else f"{len(affected)} targets"
+        which = os.path.basename(capable[0]) if len(capable) == 1 else f"{len(capable)} targets"
         print(
             f"[*] ASLR survived startup and {which} is a context-sensitive build: "
             "setting FUZZER_KEEP_ASLR=1 for the target so the shim hashes "
@@ -6975,22 +6991,43 @@ class Fuzzer:
         )
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
-        from fuzzer_tool.core.elf import detect_ctx_bits
+        from fuzzer_tool.core.elf import detect_ctx_bits, detect_ctx_relative_capable
 
         ctx_bits = detect_ctx_bits(self.target) if self.target else None
         if ctx_bits and not self._aslr_disabled:
-            # Relative mode is already on by this point (see
-            # _ensure_ctx_ids_are_exec_stable), so a target still drifting
-            # here is one that cannot honour it.
-            print(
-                "[!]   Cause: this is a __AFL_CTX_SENSITIVE build "
-                f"(__AFL_CTX_BITS={ctx_bits}), ASLR is on, and the ids move "
-                "anyway — the target predates the shim's base-relative "
-                "caller context and hashes a raw return address, which is a "
-                "different value in every process. Rebuild it against the "
-                "current adapters/afl_shim.c (tools/build_targets.sh), or "
-                "with -D__AFL_CTX_SENSITIVE=0."
-            )
+            # Relative mode is on by this point for any target that can
+            # honour it (see _ensure_ctx_ids_are_exec_stable), so the marker
+            # says which of the two remaining stories this is.
+            capable = detect_ctx_relative_capable(self.target)
+            requested = os.environ.get("FUZZER_KEEP_ASLR") == "1"
+            if capable is False:
+                print(
+                    "[!]   Cause: this is a __AFL_CTX_SENSITIVE build "
+                    f"(__AFL_CTX_BITS={ctx_bits}) with no "
+                    "__afl_ctx_relative_capable marker, so it hashes a raw "
+                    "return address, which is a different value in every "
+                    "process while ASLR is on. Rebuild it against the "
+                    "current adapters/afl_shim.c (tools/build_targets.sh), "
+                    "or with -D__AFL_CTX_SENSITIVE=0."
+                )
+            elif not requested:
+                # _ensure_ctx_ids_are_exec_stable should have set this before
+                # anything executed. Reaching here in a real campaign means
+                # that hook did not run or did not see this target.
+                print(
+                    "[!]   Cause: the shim can hash caller context "
+                    "load-base-relative, but FUZZER_KEEP_ASLR is not set for "
+                    "the target, so it is hashing raw return addresses under "
+                    "live ASLR. Set it, or disable ASLR."
+                )
+            else:
+                print(
+                    "[!]   The target's shim can hash caller context "
+                    "load-base-relative and FUZZER_KEEP_ASLR is set for it, "
+                    "so the ids should be exec-stable and are not. This is "
+                    "not the known F1 shape; look for thread scheduling, "
+                    "time, or uninitialised memory in the target."
+                )
         else:
             print(
                 "[!]   ASLR and context hashing are not the cause here "

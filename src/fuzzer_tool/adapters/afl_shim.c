@@ -284,6 +284,30 @@ struct __afl_entry {
 __attribute__((visibility("default"), used))
 const uint32_t __AFL_CAT(__afl_ctx_bits_, __AFL_CTX_BITS) = __AFL_CTX_BITS;
 
+/* Static advertisement of ONE capability of this shim: that
+ * __afl_get_caller_ctx() honours FUZZER_KEEP_ASLR=1 by hashing return
+ * addresses relative to the load base (see __afl_ctx_use_relative()
+ * below), and is therefore exec-stable with ASLR left on.
+ *
+ * The Python side sets FUZZER_KEEP_ASLR for the target whenever ASLR
+ * survives startup (services/fuzzer._ensure_ctx_ids_are_exec_stable), and
+ * without this marker it cannot tell whether that had any effect: a target
+ * built against an older shim ignores the variable and reports a different
+ * edge set in every process, which looks exactly like a target with endless
+ * new coverage. Before this existed the only way to find out was to execute
+ * the target three times and compare edge sets.
+ *
+ * Deliberately a bare name, not the value-in-the-name encoding
+ * __afl_ctx_bits_N uses: there is no value here, only presence. Absent
+ * means "this shim predates base-relative context", which is the one thing
+ * the scanner needs to distinguish, and it means that for a context-free
+ * build too -- where the question is moot, since __AFL_CTX_SENSITIVE=0 ids
+ * carry no address-derived term to begin with. Emitted unconditionally for
+ * the same reason __afl_ctx_bits_0 is: a missing symbol must mean "old
+ * shim" and nothing else. See elf.detect_ctx_relative_capable(). */
+__attribute__((visibility("default"), used))
+const uint32_t __afl_ctx_relative_capable = 1;
+
 /* ── n-gram history depth ─────────────────────────────────────────────
  *
  * k = blocks encoded into one edge id: the current block plus its k−1

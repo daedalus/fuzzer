@@ -55,7 +55,13 @@ import sys
 import pytest
 
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.elf import detect_ctx_bits, detect_ctx_relative_capable
 from fuzzer_tool.services.fuzzer import Fuzzer
+
+
+def _symbols(path: str) -> str:
+    return subprocess.run(["nm", path], capture_output=True, text=True).stdout
+
 
 _SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src")
 SHIM = os.path.join(_SRC, "fuzzer_tool", "adapters", "afl_shim.c")
@@ -76,29 +82,108 @@ linux_only = pytest.mark.skipif(
 )
 
 
+#: The commit that introduced base-relative caller context. Its parent is
+#: the last tree without it, and is checked out below to build a genuine
+#: stale target rather than a simulated one -- the whole question the marker
+#: answers is "was this binary built before that commit", and a hand-written
+#: stand-in would beg it.
+_RELATIVE_MODE_COMMIT = "dd834d1"
+
+_CTX_FLAGS = {
+    8: ["-D__AFL_CTX_SENSITIVE=1", "-fno-omit-frame-pointer"],
+    0: ["-D__AFL_CTX_SENSITIVE=0"],
+}
+
+
+def _build(src, shim, exe, flags):
+    return subprocess.run(
+        ["gcc", "-O1", "-g", *flags, "-include", str(shim), "-o", str(exe), str(src)],
+        capture_output=True,
+        text=True,
+    )
+
+
 @pytest.fixture(scope="module")
 def drivers(tmp_path_factory):
-    """Build the driver context-sensitive and context-free. {bits: path}."""
+    """Build the driver at two context widths. {bits: path}."""
     if shutil.which("gcc") is None:
         pytest.skip("no C compiler")
     d = tmp_path_factory.mktemp("f1")
     src = d / "drv.c"
     src.write_text(_DRIVER)
     out = {}
-    for bits, flags in {
-        8: ["-D__AFL_CTX_SENSITIVE=1", "-fno-omit-frame-pointer"],
-        0: ["-D__AFL_CTX_SENSITIVE=0"],
-    }.items():
+    for bits, flags in _CTX_FLAGS.items():
         exe = d / f"drv_{bits}"
-        r = subprocess.run(
-            ["gcc", "-O1", "-g", *flags, "-include", SHIM, "-o", str(exe), str(src)],
-            capture_output=True,
-            text=True,
-        )
+        r = _build(src, SHIM, exe, flags)
         if r.returncode != 0:
             pytest.skip(f"shim failed to build at ctx_bits={bits}: {r.stderr[:300]}")
         out[bits] = str(exe)
     return out
+
+
+@pytest.fixture(scope="module")
+def stale_driver(tmp_path_factory):
+    """A ctx=8 driver built against the shim as it was before dd834d1.
+
+    Not a mock: `git show` the parent tree's afl_shim.c and compile it. A
+    target in this state is the one case no other signal can find -- it
+    ignores FUZZER_KEEP_ASLR, and before the marker existed it looked
+    identical to a current build from the outside.
+    """
+    if shutil.which("gcc") is None or shutil.which("git") is None:
+        pytest.skip("no C compiler or no git")
+    repo = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    r = subprocess.run(
+        [
+            "git",
+            "-C",
+            repo,
+            "show",
+            f"{_RELATIVE_MODE_COMMIT}^:src/fuzzer_tool/adapters/afl_shim.c",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        pytest.skip(f"cannot reach {_RELATIVE_MODE_COMMIT}^ in this checkout")
+    d = tmp_path_factory.mktemp("f1_old")
+    src, shim, exe = d / "drv.c", d / "old_shim.c", d / "drv_old"
+    src.write_text(_DRIVER)
+    shim.write_text(r.stdout)
+    b = _build(src, shim, exe, _CTX_FLAGS[8])
+    if b.returncode != 0:
+        pytest.skip(f"pre-{_RELATIVE_MODE_COMMIT} shim failed to build: {b.stderr[:300]}")
+    return str(exe)
+
+
+class TestMarker:
+    """__afl_ctx_relative_capable and elf.detect_ctx_relative_capable."""
+
+    @needs_cc
+    def test_current_builds_carry_the_marker(self, drivers):
+        """Both widths: the marker is a property of the shim, not of whether
+        this particular build uses context at all. Emitted unconditionally
+        so that "absent" has exactly one meaning."""
+        for path in drivers.values():
+            assert detect_ctx_relative_capable(path) is True
+            assert "__afl_ctx_relative_capable" in _symbols(path)
+
+    @needs_cc
+    def test_pre_dd834d1_build_does_not(self, stale_driver):
+        """The case the marker exists for, built from the real old source."""
+        assert detect_ctx_relative_capable(stale_driver) is False
+        assert detect_ctx_bits(stale_driver) == 8, "still an instrumented ctx build"
+
+    def test_unreadable_is_none_not_false(self):
+        """None is "no evidence", False is "evidence of an old shim". A
+        startup warning hangs off the difference."""
+        assert detect_ctx_relative_capable("/nonexistent/binary") is None
+
+    def test_absent_marker_alone_says_nothing(self):
+        """An uninstrumented binary has no marker either, which is why the
+        caller must gate on detect_ctx_bits first."""
+        assert detect_ctx_relative_capable("/bin/true") is False
+        assert detect_ctx_bits("/bin/true") is None
 
 
 class _Stub:
@@ -176,6 +261,33 @@ class TestRelativeModeFix:
         assert capsys.readouterr().out == ""
 
     @needs_cc
+    def test_warns_instead_of_pretending_on_a_stale_target(self, stale_driver, capsys, monkeypatch):
+        """Setting the variable for a target that ignores it would fix
+        nothing and announce that it had. The marker is what tells the two
+        apart, and the only escape is a rebuild."""
+        monkeypatch.delenv("FUZZER_KEEP_ASLR", raising=False)
+        f = _Stub(target=stale_driver, aslr_disabled=False, shm=object())
+        f._ensure_ctx_ids_are_exec_stable([stale_driver])
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "__afl_ctx_relative_capable" in out
+        assert "Rebuild" in out
+        assert "setting FUZZER_KEEP_ASLR=1" not in out
+        assert "FUZZER_KEEP_ASLR" not in os.environ
+
+    @needs_cc
+    def test_mixed_targets_get_both_halves(self, drivers, stale_driver, capsys, monkeypatch):
+        """Multi-target: the current one is switched, the stale one is named.
+        One bad target must not cost the others their fix."""
+        monkeypatch.delenv("FUZZER_KEEP_ASLR", raising=False)
+        f = _Stub(target=drivers[8], aslr_disabled=False, shm=object())
+        f._ensure_ctx_ids_are_exec_stable([drivers[8], stale_driver])
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "setting FUZZER_KEEP_ASLR=1" in out
+        assert os.environ.get("FUZZER_KEEP_ASLR") == "1"
+
+    @needs_cc
     def test_leaves_blind_and_ptrace_runs_alone(self, drivers, capsys, monkeypatch):
         """--no-coverage reads no edge ids; --no-shm does not go through the
         shim's context hash. Neither can be damaged by F1."""
@@ -197,7 +309,12 @@ import ctypes, ctypes.util, os, subprocess, sys
 sys.path.insert(0, {src!r})
 from fuzzer_tool.adapters.process import ADDR_NO_RANDOMIZE
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.elf import detect_ctx_bits, detect_ctx_relative_capable
 from fuzzer_tool.services.fuzzer import Fuzzer
+
+
+def _symbols(path: str) -> str:
+    return subprocess.run(["nm", path], capture_output=True, text=True).stdout
 
 if os.environ.get("DISABLE_ASLR") == "1":
     from fuzzer_tool.adapters.process import disable_aslr
@@ -282,12 +399,24 @@ class TestStabilityProbe:
     @needs_cc
     @linux_only
     def test_fires_on_real_id_drift(self, drivers):
-        """ASLR on, shim in raw mode: the regime a target built before
-        base-relative mode is stuck in no matter what the fuzzer sets."""
+        """ASLR on, current shim, relative mode never requested -- which in
+        a real campaign means the startup hook did not reach this target.
+        The probe must name that rather than the stale-build story, since
+        the marker says the binary could have honoured it."""
         out = _run_probe(drivers[8], disable_aslr=False)
         assert "WARNING" in out
         assert "Jaccard" in out
-        assert "predates" in out, "the cause must be named, not just the symptom"
+        assert "FUZZER_KEEP_ASLR is not set" in out, "the cause must be named"
+        assert "marker" not in out, "this build has the marker; do not blame it"
+
+    @needs_cc
+    @linux_only
+    def test_stale_target_drifts_even_with_the_variable_set(self, stale_driver):
+        """The residual case, end to end: relative mode is requested, the
+        target cannot honour it, and the probe is the thing that notices."""
+        out = _run_probe(stale_driver, disable_aslr=False, relative=True)
+        assert "WARNING" in out
+        assert "__afl_ctx_relative_capable" in out
 
     @needs_cc
     @linux_only

@@ -1663,6 +1663,45 @@ def detect_ngram_k(target: str) -> int:
     return best
 
 
+def detect_ctx_relative_capable(target: str) -> bool | None:
+    """Say whether *target*'s shim can hash caller context ASLR-invariantly.
+
+    The mode itself is chosen at runtime by the target, from
+    ``FUZZER_KEEP_ASLR`` in its environment; what this reads is whether the
+    shim compiled into the binary knows about that switch at all. A target
+    built before the shim grew base-relative context ignores the variable and
+    hashes raw return addresses, so with ASLR on it reports a different edge
+    set in every process (F1, docs/handover/
+    handover_edge_id_axis_2026-09-18.md) -- which is indistinguishable from a
+    target with endless new coverage, and was until this marker existed
+    indistinguishable from a current build by anything short of executing it
+    three times and comparing edge sets.
+
+    Same symbol-name scan as `detect_ctx_bits` and `detect_shm_layout`, and
+    like `detect_shm_layout` a safety check rather than a sizing input.
+
+    Returns:
+        True when the marker is present; False when the symbol table was read
+        and the marker is absent -- an older shim, or a binary this shim
+        never touched; None when no names could be read at all (stripped,
+        unreadable, not an ELF64), which is not evidence either way.
+
+        The distinction matters at the call site: False is worth warning
+        about, None is not. False is only meaningful once `detect_ctx_bits`
+        has established there is a shim and it hashes context -- without
+        that, "no marker" says nothing, because an uninstrumented binary has
+        no marker either.
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("ctx-relative detection failed for %s: %s", target, e)
+        return None
+    if not names:
+        return None
+    return "__afl_ctx_relative_capable" in names
+
+
 #: Segment layout the Python side is built for. Must equal
 #: __AFL_SHM_LAYOUT in adapters/afl_shim.c.
 SHM_LAYOUT_CURRENT = 3
