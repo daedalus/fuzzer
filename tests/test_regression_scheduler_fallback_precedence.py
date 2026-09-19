@@ -150,6 +150,8 @@ class _FakeFuzzer:
         "gradient": ("_use_gradient", "_gradient"),
         "whittle": ("_use_whittle", "_whittle"),
         "fewa": ("_use_fewa", "_fewa"),
+        "softmax": ("_use_softmax", "_softmax"),
+        "topk": ("_use_topk", "_topk"),
     }
 
     def __init__(self):
