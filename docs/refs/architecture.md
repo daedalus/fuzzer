@@ -35,6 +35,15 @@ struct __afl_entry { uint32_t edge_id; uint32_t count; };
   via the `__afl_ctx_bits_N` symbol for map sizing. Every shim build carries
   `-fno-omit-frame-pointer` (applied centrally by `tools/build_targets.sh`)
   because the context walk reads the caller's saved frame pointer.
+- `caller_ctx` hashes a return address, which moves between processes under
+  ASLR — so ids would not be comparable across executions, which is why
+  `adapters/process.disable_aslr()` runs before anything spawns. When ASLR
+  survives that call, the shim hashes the address relative to the load base
+  instead (`FUZZER_KEEP_ASLR=1`, read in the target), and
+  `services/fuzzer._ensure_ctx_ids_are_exec_stable` sets that variable. A
+  build that can do this advertises `__afl_ctx_relative_capable`; an older
+  target has no such symbol, ignores the variable, and gets warned about at
+  startup.
 - The AFLGo distance channel is also default-on (`__AFL_DISTANCE_MODE=1`;
   `=0` opts out) — inert until directed mode uploads a distance table.
 - Hash: `edge_id % map_size`, linear probing for matching or empty slot

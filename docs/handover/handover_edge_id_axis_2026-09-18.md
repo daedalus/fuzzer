@@ -578,15 +578,6 @@ Two things found on the way, both fixed here:
   trusting the parent, and skips where the host cannot randomize at all;
   `test_aslr.py` could take the same treatment.
 
-Still open, and cheap: **dd834d1 emits no marker symbol.** `__afl_ctx_bits_N`,
-`__AFL_NGRAM_K` and the SHM layout tag all exist precisely so the Python side
-can read a build contract before executing anything, and relative mode is the
-one contract it cannot read. A `__afl_ctx_relative_capable` marker would turn
-the probe's diagnosis into a startup check and would let
-`_ensure_ctx_ids_are_exec_stable` say "this target will ignore the variable,
-rebuild it" instead of setting it and hoping. One symbol, one `_symbol_names`
-scan.
-
 Sketch bugs from the first version, still worth recording:
 
 * The startup hook does **not** belong beside the `disable_aslr()` call as
@@ -618,6 +609,52 @@ write if only one gets done.
 
 Regression test: build a target both ways, assert the probe fires under
 `FUZZER_KEEP_ASLR=1` and is silent without it.
+
+### P0-3. `__afl_ctx_relative_capable` marker -- DONE
+
+dd834d1 shipped relative mode with no way for the Python side to know whether
+a given binary has it. `__afl_ctx_bits_N`, `__afl_ngram_k_N` and
+`__afl_shm_layout_N` all exist precisely so a build contract can be read
+before anything executes, and relative mode was the one contract that could
+only be discovered by running the target three times and comparing edge sets.
+
+The shim now emits `__afl_ctx_relative_capable` (bare name, no value encoded:
+there is no value, only presence), unconditionally rather than under
+`#if __AFL_CTX_SENSITIVE`, for the same reason `__afl_ctx_bits_0` is emitted
+for context-free builds -- a missing symbol has to mean "old shim" and
+nothing else. `elf.detect_ctx_relative_capable()` reads it with the same
+`_symbol_names` scan the other three use, returning True / False / None,
+where None is "could not read" and is deliberately not warned about. False is
+only meaningful once `detect_ctx_bits` has established there is a
+context-hashing shim at all, since an uninstrumented binary has no marker
+either.
+
+Three consumers, in the order a run hits them:
+
+* `_ensure_ctx_ids_are_exec_stable` now partitions the targets. Capable ones
+  get `FUZZER_KEEP_ASLR=1`; stale ones get a named warning with the rebuild
+  as the escape, instead of being handed a variable they ignore and told it
+  was fixed. A mixed multi-target run gets both halves -- one stale target
+  must not cost the others their fix.
+* The probe's attribution is now three-way rather than assumed: no marker ->
+  rebuild; marker but the variable unset -> the startup hook did not reach
+  this target, which in a real campaign is our own bug and now says so;
+  marker and variable set -> not the F1 shape, look at threads, time and
+  uninitialised memory.
+* `docs/refs/architecture.md` gains the marker alongside `__afl_ctx_bits_N`.
+
+The regression test builds the stale arm from the real pre-dd834d1 source
+(`git show dd834d1^:src/fuzzer_tool/adapters/afl_shim.c`, compiled with gcc)
+rather than simulating it: the question the marker answers is literally "was
+this built before that commit", and a hand-written stand-in would beg it.
+Both current widths carry the marker, the pre-dd834d1 build does not and
+still reads `__AFL_CTX_BITS=8`, and end to end that stale binary drifts
+(Jaccard 0.000) with `FUZZER_KEEP_ASLR=1` set, which is the one case no
+static check could reach before.
+
+Shim diagnostics are unchanged: identical gcc `-Wall -Wextra` output to
+dd834d1 under default, `-D__AFL_DISTANCE_MODE=0`, `-D__AFL_CTX_SENSITIVE=0`
+and `-D__AFL_NGRAM_K=4`.
 
 ### P1-1. Three targets, not one
 
