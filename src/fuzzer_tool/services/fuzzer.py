@@ -725,6 +725,74 @@ class Fuzzer:
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
 
+    def _ensure_ctx_ids_are_exec_stable(self, targets: list[str]) -> None:
+        """Put a context-sensitive target in base-relative mode if ASLR survived.
+
+        ``afl_shim.c``'s ``__afl_get_caller_ctx`` hashes the return address
+        of the frame above the edge. With ASLR on and
+        ``__AFL_CTX_SENSITIVE=1`` that address moves in every process, so
+        the same input reports a disjoint edge set every execution:
+        measured on fuzzgoat, six runs of one input shared 2 ids out of a
+        295-id union (Jaccard 0.007), and the union over 250 seeds inflated
+        445 -> 1513, every phantom id owned by exactly one seed and so
+        maximally "rare" to the seed picker. See F1 in docs/handover/
+        handover_edge_id_axis_2026-09-18.md.
+
+        The shim now resolves that address to a load-base-relative offset,
+        which is exec-stable -- but it switches on ``FUZZER_KEEP_ASLR=1``,
+        read in the *target* process, rather than on whether ASLR is
+        actually on. Those two are not the same condition.
+        ``disable_aslr()`` also returns False when ``personality()`` is
+        refused -- seccomp, some container runtimes, a non-Linux host --
+        and there the variable is unset, so the shim stays in raw mode
+        while ASLR is on. That is the whole remaining gap, and the user
+        cannot be expected to find it: the fix is to set a variable named
+        for keeping ASLR, on a host that never disabled it in the first
+        place.
+
+        So set it here instead of telling them to. ``os.environ`` is what
+        ``services/runner`` copies into every child, the value is only read
+        by the shim (and by ``disable_aslr()``, which has already run and
+        cached its answer), and for a target built before the shim grew
+        relative mode it is simply ignored. Measured on a gcc build of the
+        test driver, six executions of one input with ASLR on: raw mode
+        gives a 76-id union with an empty intersection, relative mode gives
+        22 ids reproduced exactly.
+
+        Silent when there is nothing to do, and never a substitute for the
+        measurement: a target built against an older shim ignores the
+        variable and cannot be told apart from a current one by any symbol
+        it exports, which is what :meth:`_report_edge_id_stability` is for.
+        """
+        if self._aslr_disabled or not self.use_coverage:
+            return
+        if getattr(self, "shm_cov", None) is None and not self._target_shm_covs:
+            # ptrace and the in-process modes do not go through the shim's
+            # context hash, so the premise does not hold for them.
+            return
+        if os.environ.get("FUZZER_KEEP_ASLR") == "1":
+            return  # already in relative mode, by the user's own hand
+        from fuzzer_tool.core.elf import detect_ctx_bits
+
+        affected = []
+        for t in targets:
+            if not t:
+                continue
+            # None means "no marker, unknown shim", which is not evidence of
+            # context sensitivity; only a positive width is.
+            if detect_ctx_bits(t):
+                affected.append(t)
+        if not affected:
+            return
+        os.environ["FUZZER_KEEP_ASLR"] = "1"
+        which = os.path.basename(affected[0]) if len(affected) == 1 else f"{len(affected)} targets"
+        print(
+            f"[*] ASLR survived startup and {which} is a context-sensitive build: "
+            "setting FUZZER_KEEP_ASLR=1 for the target so the shim hashes "
+            "load-base-relative return addresses. Without it every execution "
+            "would report a different edge set."
+        )
+
     def _report_rng_health(self) -> None:
         """Quick PRNG sanity check, printed once on the startup banner.
 
@@ -1563,6 +1631,14 @@ class Fuzzer:
                     log.warning("Failed to create SHM for %s, using shared SHM", t)
             if self._target_shm_covs:
                 print(f"[*] Multi-target: {len(self._target_shm_covs)} per-target SHM regions")
+
+        # Here rather than beside the disable_aslr() call above: that runs
+        # before self.use_coverage is assigned and before the coverage
+        # backend is chosen, so acting there would touch --no-coverage and
+        # --no-shm runs, neither of which reads a shim edge id. Still before
+        # anything executes a target, which is what matters -- the variable
+        # is read once per target process.
+        self._ensure_ctx_ids_are_exec_stable(list(self.multi_targets or [self.target]))
 
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
@@ -5530,6 +5606,43 @@ class Fuzzer:
     def _run_calibration(self, max_execs: int = 1000):
         return self._stats.run_calibration(max_execs)
 
+    def _repeat_edge_sets(self, data: bytes, n_runs: int):
+        """Execute *data* ``n_runs`` times; return what each run reported.
+
+        Returns ``(edge_sets, path_hashes, dropped)`` or None when no
+        measurement could be taken (no SHM coverage, fewer than two runs, or
+        an input that will not re-run). The caller decides what the numbers
+        mean; this only collects them, so that the two consumers --
+        :meth:`_calibrate_seed_stability`, which masks, and
+        :meth:`_report_edge_id_stability`, which only reports -- cannot drift
+        apart on how the measurement is taken.
+
+        The drop counter is drained before the first run on purpose: it is
+        cumulative for the segment, so without this one drop early in a
+        campaign would poison every later measurement. What the accumulated
+        total means afterwards is the caller's problem; both callers happen
+        to treat any drop as invalidating, for the reason spelled out in
+        :meth:`_calibrate_seed_stability`.
+        """
+        shm = self.shm_cov
+        if shm is None or n_runs < 2:
+            return None
+        edge_sets: list[set[int]] = []
+        hashes: set[int] = set()
+        dropped = 0
+        shm.dropped_edges_delta()  # discard drops from before this measurement
+        for _ in range(n_runs):
+            try:
+                self._run_target(data)
+            except Exception:
+                return None
+            edge_sets.append(shm.get_edge_ids())
+            hashes.add(shm.read_path_hash())
+            dropped += shm.dropped_edges_delta()
+        if not edge_sets:
+            return None
+        return edge_sets, hashes, dropped
+
     def _calibrate_seed_stability(self, data: bytes, n_runs: int = 3) -> set[int]:
         """Re-run *data* and mask edges that don't reproduce.
 
@@ -5563,29 +5676,13 @@ class Fuzzer:
         become the default.
         """
         shm = self.shm_cov
-        if shm is None or n_runs < 2:
+        measured = self._repeat_edge_sets(data, n_runs)
+        if measured is None:
+            # No SHM, too few runs, or a seed that will not re-run: none of
+            # those tell us anything about stability, so leave it unmasked
+            # rather than guessing.
             return set()
-
-        edge_sets: list[set[int]] = []
-        hashes: set[int] = set()
-        dropped = 0
-        # Discard the campaign's accumulated backlog: the counter is
-        # cumulative for the segment, and without this a single drop earlier
-        # in the run would veto every calibration for the rest of the session.
-        shm.dropped_edges_delta()  # discard drops from before this calibration
-        for _ in range(n_runs):
-            try:
-                self._run_target(data)
-            except Exception:
-                # A seed that will not re-run tells us nothing about
-                # stability; leave it unmasked rather than guessing.
-                return set()
-            edge_sets.append(shm.get_edge_ids())
-            hashes.add(shm.read_path_hash())
-            dropped += shm.dropped_edges_delta()
-
-        if not edge_sets:
-            return set()
+        edge_sets, hashes, dropped = measured
 
         if dropped:
             # The verdict this function reaches is "these edges did not
@@ -6774,6 +6871,10 @@ class Fuzzer:
             return
         baseline_edges = 0
         t0 = time.monotonic()
+        # Widest seed seen, for the edge-id stability probe below: more edges
+        # is more chances for a drifting id to show, at identical cost.
+        probe_seed: bytes | None = None
+        probe_width = 0
         for seed in list(self.corpus):
             returncode, stderr = self._run_target(seed)
             if self._is_crash(returncode, stderr):
@@ -6786,6 +6887,8 @@ class Fuzzer:
             has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
             if not edge_ids:
                 continue
+            if len(edge_ids) > probe_width:
+                probe_seed, probe_width = seed, len(edge_ids)
             hit_counts = self.shm_cov.get_edge_counts()
             stack_depth = self.shm_cov.read_stack_depth()
             path_hash = self.shm_cov.read_path_hash()
@@ -6810,6 +6913,91 @@ class Fuzzer:
                 f"({time.monotonic() - t0:.2f}s)"
             )
         self._report_comparison_reach(len(self.corpus))
+        self._report_edge_id_stability(probe_seed)
+
+    def _report_edge_id_stability(self, seed: bytes | None, n_runs: int = 3) -> None:
+        """Say whether edge ids reproduce across processes.
+
+        Every per-edge statistic the campaign computes assumes an edge id
+        means the same thing in the next process as in this one. When it
+        does not, nothing downstream reports a cause: the corpus grows on
+        phantom ids, each owned by exactly one seed and therefore maximally
+        rare to the seed picker, and the run looks like a target with
+        endless new coverage. ``--calibrate-stability`` finds those edges
+        one seed at a time and masks them without ever saying why, and it is
+        opt-in; this is the whole question asked once, for three executions.
+
+        The known cause is F1: a context-sensitive build whose caller
+        context is hashed from an address that moves.
+        :meth:`_ensure_ctx_ids_are_exec_stable` closes that by construction
+        for any target built against the current shim, which is exactly why
+        this still runs -- a target built against an older one ignores the
+        variable and exports no symbol that says so, so the only way to
+        know is to measure. Instability also has causes the id axis knows
+        nothing about: threads, time, uninitialised memory.
+        Calibration is where the question is cheap: the seeds have just run,
+        so the table is warm and a probe measures the steady state rather
+        than the first-execution regime, which is known to differ from it
+        for reasons still unresolved (F2). Warn-only, three extra
+        executions, no masking: this reports, it does not decide.
+        """
+        if seed is None or self.shm_cov is None:
+            return
+        measured = self._repeat_edge_sets(seed, n_runs)
+        if measured is None:
+            return
+        edge_sets, _hashes, dropped = measured
+        if dropped:
+            # A saturated table discards edges by arrival order, so set
+            # divergence is not evidence of id drift -- the same argument
+            # that makes _calibrate_seed_stability abstain.
+            print(
+                f"[*] Edge id stability: not measured, {dropped} edge(s) dropped "
+                "to a full map during the probe (raise --map-size)"
+            )
+            return
+        union = set.union(*edge_sets)
+        common = set.intersection(*edge_sets)
+        if not union:
+            return
+        jaccard = len(common) / len(union)
+        if jaccard == 1.0:
+            print(
+                f"[*] Edge id stability: {len(union)} edge ids reproduced exactly "
+                f"across {n_runs} executions of one seed"
+            )
+            return
+        msg = (
+            f"Edge id stability: {n_runs} executions of one unmutated seed agreed "
+            f"on {len(common)} of {len(union)} edge ids (Jaccard {jaccard:.3f}) — "
+            "the ids themselves are moving, so per-edge coverage feedback is "
+            "measuring the instability rather than the target"
+        )
+        log.warning(msg)
+        print(f"[!] WARNING: {msg}")
+        from fuzzer_tool.core.elf import detect_ctx_bits
+
+        ctx_bits = detect_ctx_bits(self.target) if self.target else None
+        if ctx_bits and not self._aslr_disabled:
+            # Relative mode is already on by this point (see
+            # _ensure_ctx_ids_are_exec_stable), so a target still drifting
+            # here is one that cannot honour it.
+            print(
+                "[!]   Cause: this is a __AFL_CTX_SENSITIVE build "
+                f"(__AFL_CTX_BITS={ctx_bits}), ASLR is on, and the ids move "
+                "anyway — the target predates the shim's base-relative "
+                "caller context and hashes a raw return address, which is a "
+                "different value in every process. Rebuild it against the "
+                "current adapters/afl_shim.c (tools/build_targets.sh), or "
+                "with -D__AFL_CTX_SENSITIVE=0."
+            )
+        else:
+            print(
+                "[!]   ASLR and context hashing are not the cause here "
+                "(the known one, F1, needs both). Look for thread scheduling, "
+                "time, or uninitialised memory in the target; "
+                "--calibrate-stability masks such edges per seed."
+            )
 
     def _report_comparison_reach(self, n_execs: int) -> None:
         """Say whether the comparison instrumentation reached the target.
