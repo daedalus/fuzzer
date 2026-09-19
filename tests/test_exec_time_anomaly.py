@@ -13,7 +13,7 @@ import random
 
 import pytest
 
-from fuzzer_tool.core.exec_time_anomaly import ExecTimeCalibrator
+from fuzzer_tool.core.analyzers.analyzer_exec_time_anomaly import ExecTimeCalibrator
 
 
 def _lognormal_baseline(rng: random.Random, n: int) -> list[float]:

@@ -354,7 +354,7 @@ class TestPrintStats:
 
     def test_corpus_flux_line_shown_once_ticks_recorded(self):
         """A real CorpusFlux with recorded ticks prints a flux line."""
-        from fuzzer_tool.core.corpus_flux import CorpusFlux
+        from fuzzer_tool.core.analyzers.analyzer_corpus_flux import CorpusFlux
 
         flux = CorpusFlux()
         flux.record_addition(3)
@@ -372,7 +372,7 @@ class TestPrintStats:
 
     def test_corpus_flux_line_omitted_with_no_ticks(self):
         """A freshly-constructed CorpusFlux (no ticks yet) prints no flux line."""
-        from fuzzer_tool.core.corpus_flux import CorpusFlux
+        from fuzzer_tool.core.analyzers.analyzer_corpus_flux import CorpusFlux
 
         fuzzer = _mock_fuzzer(_corpus_flux=CorpusFlux())
         reporter = StatsReporter(fuzzer)
@@ -485,7 +485,7 @@ class TestPrintStatsSupplementary:
         mock_print.assert_not_called()
 
     def test_causal_sector_reported_when_present(self):
-        from fuzzer_tool.core.causal_sector import CausalSectorGraph
+        from fuzzer_tool.core.analyzers.analyzer_causal_sector import CausalSectorGraph
 
         sector = CausalSectorGraph()
         sector.observe_flow({(1, 2): 0.05})

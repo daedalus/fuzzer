@@ -8,7 +8,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from fuzzer_tool.core.trace import (
+from fuzzer_tool.core.analyzers.analyzer_trace import (
     TraceReport,
     _get_exported_functions,
     _is_shared_object,
@@ -159,7 +159,7 @@ class TestTraceReport:
     def test_signal_map_positive_exit_codes(self):
         # The .so guarded-call path reports crashes as 128+signum (139 for
         # SIGSEGV) — the sidecar must label those, not show "(0)".
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         tracer = CrashTracer("targets/png_read_afl.so")
         report = tracer.gdb_replay(b"x", 139)
@@ -241,7 +241,7 @@ class TestGdbSoReplay:
     @pytest.mark.skipif(shutil.which("gdb") is None, reason="gdb not installed")
     @pytest.mark.skipif(shutil.which("clang") is None, reason="clang not installed")
     def test_gdb_replay_so_null_deref(self, tmp_path):
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         so = self._compile_shared(tmp_path)
         assert _probe_so_function(str(so)) == "fuzz_shm_run"
@@ -264,7 +264,7 @@ class TestGdbSoReplay:
     @pytest.mark.skipif(shutil.which("gdb") is None, reason="gdb not installed")
     @pytest.mark.skipif(shutil.which("clang") is None, reason="clang not installed")
     def test_gdb_replay_so_safe_input_no_crash(self, tmp_path):
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         so = self._compile_shared(tmp_path)
         report = CrashTracer(str(so), timeout=15).gdb_replay(b"SAFEXXX00", 0)
@@ -275,14 +275,14 @@ class TestGdbSoReplay:
 
 class TestCrashTracer:
     def test_check_tool_exists(self):
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         tracer = CrashTracer("targets/png_read_afl.so")
         # 'which gdb' or 'which strace' — may be True or False depending on system
         assert isinstance(tracer._has_gdb, bool)
 
     def test_build_repro(self):
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport()
@@ -291,7 +291,7 @@ class TestCrashTracer:
         assert "targets/png_read_afl.so" in report.repro_cmd
 
     def test_parse_gdb_output(self):
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport()
@@ -332,7 +332,7 @@ class TestCrashTracer:
         assert "push" in report.disassembly
 
     def test_parse_gdb_no_signal(self):
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport()
@@ -343,7 +343,7 @@ class TestCrashTracer:
         # Regression: gdb `list` output starts lines with the line number
         # directly (no leading whitespace); the parser used to require it,
         # silently dropping DWARF source context.
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport()
@@ -359,7 +359,7 @@ class TestCrashTracer:
         assert "fuzz_test" in report.backtrace
 
     def test_save_report(self, tmp_path):
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport(backtrace="#0 test")
@@ -369,7 +369,7 @@ class TestCrashTracer:
         assert (tmp_path / "crashes" / "crash_001.trace").exists()
 
     def test_save_report_writes_format(self, tmp_path):
-        from fuzzer_tool.core.trace import CrashTracer
+        from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
         tracer = CrashTracer("targets/png_read_afl.so")
         report = TraceReport(signal="SIGSEGV", signal_num=11)

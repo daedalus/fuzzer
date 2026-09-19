@@ -2,7 +2,7 @@
 
 import pytest
 
-from fuzzer_tool.core.corpus_compression import PPMD_AVAILABLE, CorpusCompressor
+from fuzzer_tool.core.analyzers.analyzer_corpus_compression import PPMD_AVAILABLE, CorpusCompressor
 
 
 @pytest.mark.skipif(not PPMD_AVAILABLE, reason="pyppmd not installed")

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import random
 
-from fuzzer_tool.core.crash_eta import CrashMITracker
+from fuzzer_tool.core.analyzers.analyzer_crash_eta import CrashMITracker
 
 
 class TestCrashMITrackerNonCrashObservations:

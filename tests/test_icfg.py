@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from fuzzer_tool.core.distance import TargetDistance
+from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 from fuzzer_tool.core.icfg import build_interprocedural_cfg, probe_key_node_table
 
 SRC = """\

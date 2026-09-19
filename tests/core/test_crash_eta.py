@@ -1,6 +1,6 @@
 """Tests for crash ETA estimation."""
 
-from fuzzer_tool.core.crash_eta import CrashETA, estimate_risky_density
+from fuzzer_tool.core.analyzers.analyzer_crash_eta import CrashETA, estimate_risky_density
 from fuzzer_tool.core.target_profiler import FunctionInfo, TargetProfile
 
 
@@ -171,7 +171,7 @@ def test_estimate_risky_density_mixed_normalization():
 
 
 def test_estimate_execs_basic():
-    from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+    from fuzzer_tool.core.analyzers.analyzer_crash_eta import estimate_execs_to_first_crash
 
     profile = TargetProfile(
         rodata_strings=[(0x1000, "error handler")],
@@ -201,7 +201,7 @@ def test_estimate_execs_basic():
 
 
 def test_estimate_execs_zero_density():
-    from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+    from fuzzer_tool.core.analyzers.analyzer_crash_eta import estimate_execs_to_first_crash
 
     profile = TargetProfile(
         rodata_strings=[],
@@ -228,7 +228,7 @@ def test_estimate_execs_zero_density():
 
 def test_calibration_execs_tightens_interval():
     """More calibration execs should narrow the confidence interval."""
-    from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+    from fuzzer_tool.core.analyzers.analyzer_crash_eta import estimate_execs_to_first_crash
 
     profile = TargetProfile(
         rodata_strings=[(0x1000, "error handler")],
@@ -262,7 +262,7 @@ def test_calibration_execs_tightens_interval():
 
 def test_calibration_execs_in_reasoning():
     """Reasoning string should include calibration execs and CI scale."""
-    from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+    from fuzzer_tool.core.analyzers.analyzer_crash_eta import estimate_execs_to_first_crash
 
     profile = TargetProfile(
         rodata_strings=[(0x1000, "error")],
@@ -288,7 +288,7 @@ def test_calibration_execs_in_reasoning():
 
 def test_no_calibration_widest_interval():
     """Zero calibration execs should produce the widest interval."""
-    from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+    from fuzzer_tool.core.analyzers.analyzer_crash_eta import estimate_execs_to_first_crash
 
     profile = TargetProfile(
         rodata_strings=[(0x1000, "error")],

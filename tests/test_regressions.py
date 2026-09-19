@@ -392,7 +392,7 @@ class TestFrameShiftBoundsCheck:
     """0b02c6d: apply_to_buffer must skip out-of-bounds relations."""
 
     def test_relation_beyond_buffer_skipped(self):
-        from fuzzer_tool.core.frameshift import FrameShift, Relation
+        from fuzzer_tool.core.analyzers.analyzer_frameshift import FrameShift, Relation
 
         fs = FrameShift()
         # Add a relation at position 8, size 4 — but buffer is only 6 bytes
@@ -406,7 +406,7 @@ class TestFrameShiftBoundsCheck:
         assert all(b == 0 for b in buf)
 
     def test_relation_within_buffer_applied(self):
-        from fuzzer_tool.core.frameshift import FrameShift, Relation
+        from fuzzer_tool.core.analyzers.analyzer_frameshift import FrameShift, Relation
 
         fs = FrameShift()
         rel = Relation(pos=2, size=2, anchor=0, insert_point=4, val=0x1234, le=True)
@@ -418,7 +418,7 @@ class TestFrameShiftBoundsCheck:
         assert buf[3] == 0x12
 
     def test_disabled_relation_skipped(self):
-        from fuzzer_tool.core.frameshift import FrameShift, Relation
+        from fuzzer_tool.core.analyzers.analyzer_frameshift import FrameShift, Relation
 
         fs = FrameShift()
         rel = Relation(pos=0, size=2, anchor=0, insert_point=2, val=0xBEEF, le=True)
@@ -1313,7 +1313,7 @@ class TestBayesianEloTrackerLiveDispatch:
         import tempfile
         from unittest.mock import patch
 
-        from fuzzer_tool.core.elo import BayesianEloTracker
+        from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")

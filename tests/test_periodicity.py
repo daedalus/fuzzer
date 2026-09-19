@@ -9,8 +9,8 @@ from unittest.mock import patch
 
 import pytest
 
-from fuzzer_tool.core.execution_time import ExecutionTimeTracker
-from fuzzer_tool.core.format_learner import FieldHypothesis, FormatLearner
+from fuzzer_tool.core.analyzers.analyzer_execution_time import ExecutionTimeTracker
+from fuzzer_tool.core.analyzers.analyzer_format_learner import FieldHypothesis, FormatLearner
 from fuzzer_tool.core.grammar import Grammar, TreeMutator
 from fuzzer_tool.core.mutations.generic import chunk_shuffle
 from fuzzer_tool.core.periodicity import detect_periodicity, estimate_record_size, fisher_g_pvalue

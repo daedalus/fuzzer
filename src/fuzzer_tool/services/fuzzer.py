@@ -38,7 +38,7 @@ from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
-from fuzzer_tool.core.elo import strategy_display_name
+from fuzzer_tool.core.analyzers.analyzer_elo import strategy_display_name
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
@@ -3579,7 +3579,7 @@ class Fuzzer:
             # A missing operator means the distribution does not cover the
             # trajectory, so it is not the law the trajectory was drawn from.
             probs_are_true = all(p > 0.0 for p in probs)
-        from fuzzer_tool.core.fluctuation import TrajectoryRecord
+        from fuzzer_tool.core.analyzers.analyzer_fluctuation import TrajectoryRecord
 
         record = TrajectoryRecord(
             ops=ops,
@@ -5064,7 +5064,7 @@ class Fuzzer:
                 # Finite-time occupation (Du, Sec. 3): the run's own edge-visit
                 # counts as a longitudinal statistical support, distinct from
                 # EdgeTracker's horizontal (across-seeds) hit frequencies.
-                from fuzzer_tool.core.occupation import OccupationMeasure
+                from fuzzer_tool.core.analyzers.analyzer_occupation import OccupationMeasure
 
                 occ = OccupationMeasure.from_counts(hit_counts)
                 self._last_occupation = occ.sparse_snapshot(self._occupation_max_edges)

@@ -100,7 +100,7 @@ class KatzChannel:
             if debug:
                 print("[katz] skipped: no trace_pc")
             return None
-        from fuzzer_tool.core.distance import TargetDistance
+        from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 
         t0 = time.perf_counter()
         td = TargetDistance(target, use_cfg_cache=use_cfg_cache, debug=debug)

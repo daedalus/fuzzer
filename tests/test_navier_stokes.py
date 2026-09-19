@@ -10,7 +10,7 @@ import math
 
 import pytest
 
-from fuzzer_tool.core.navier_stokes import (
+from fuzzer_tool.core.analyzers.analyzer_navier_stokes import (
     MAX_FLUX,
     ContinuumField,
     flux,
@@ -186,7 +186,7 @@ class TestNoTimeIntegration:
     """
 
     def test_module_exposes_no_step_function(self):
-        import fuzzer_tool.core.navier_stokes as ns
+        import fuzzer_tool.core.analyzers.analyzer_navier_stokes as ns
 
         forbidden = {"step", "advect", "integrate", "solve", "evolve", "lbm", "collide"}
         exported = {n.lower() for n in dir(ns) if not n.startswith("_")}

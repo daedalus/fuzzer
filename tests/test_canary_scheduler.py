@@ -12,7 +12,7 @@ from __future__ import annotations
 import json
 import random
 
-from fuzzer_tool.core.elo import BayesianEloTracker
+from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker
 from fuzzer_tool.core.schedulers.op_canary import CanaryScheduler
 from fuzzer_tool.core.schedulers.op_consolidated import ConsolidatedScheduler
 

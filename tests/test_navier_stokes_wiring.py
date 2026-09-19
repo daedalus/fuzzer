@@ -10,9 +10,9 @@ deliberate.
 
 import pytest
 
-from fuzzer_tool.core.coverage_regime import CoverageRegimeDetector
-from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
-from fuzzer_tool.core.navier_stokes import ContinuumField
+from fuzzer_tool.core.analyzers.analyzer_coverage_regime import CoverageRegimeDetector
+from fuzzer_tool.core.analyzers.analyzer_critical_slowing import CriticalSlowingDown
+from fuzzer_tool.core.analyzers.analyzer_navier_stokes import ContinuumField
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.services.seed_picker import INVASION_STUCK_THRESHOLD, invasion_select
 

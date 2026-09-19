@@ -19,7 +19,7 @@ formats:
 Both families are **integer-linear mod N** (true Z/NZ arithmetic), which is
 exactly what the GF(2) machinery in ``berlekamp_massey.py`` cannot represent.
 
-The active model is set by :class:`~fuzzer_tool.core.checksum_learner.ChecksumLearner`
+The active model is set by :class:`~fuzzer_tool.core.analyzers.analyzer_checksum_learner.ChecksumLearner`
 when integer-checksum recovery verifies, and read from mutation operators —
 hence the same lock pattern ``crc32.py`` uses.
 """

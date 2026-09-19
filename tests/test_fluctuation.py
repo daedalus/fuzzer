@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 
-from fuzzer_tool.core.fluctuation import TrajectoryRecord, WorkFunctional
+from fuzzer_tool.core.analyzers.analyzer_fluctuation import TrajectoryRecord, WorkFunctional
 
 
 def test_step_work_bounds() -> None:

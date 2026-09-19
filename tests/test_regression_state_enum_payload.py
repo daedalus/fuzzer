@@ -26,8 +26,8 @@ import pickle
 
 import pytest
 
-from fuzzer_tool.core.coverage_regime import CoverageRegimeDetector
-from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
+from fuzzer_tool.core.analyzers.analyzer_coverage_regime import CoverageRegimeDetector
+from fuzzer_tool.core.analyzers.analyzer_critical_slowing import CriticalSlowingDown
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.state_store import StateStore, UnsafeStateError, _safe_loads
 

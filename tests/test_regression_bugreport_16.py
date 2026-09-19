@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import random
 
-from fuzzer_tool.core.transfer_entropy import TransferEntropy
+from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TransferEntropy
 
 
 class TestTransferEntropyBiasCorrection:

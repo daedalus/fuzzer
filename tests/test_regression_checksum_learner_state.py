@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from fuzzer_tool.core.checksum_learner import (
+from fuzzer_tool.core.analyzers.analyzer_checksum_learner import (
     CHECKSUM_PAIRS_MAX,
     CHECKSUM_STATE_BYTES_MAX,
     ChecksumLearner,

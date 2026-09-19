@@ -11,7 +11,7 @@ import random
 
 import pytest
 
-from fuzzer_tool.core.execution_time import ExecutionTimeTracker
+from fuzzer_tool.core.analyzers.analyzer_execution_time import ExecutionTimeTracker
 
 
 def test_early_outlier_leaves_the_window():

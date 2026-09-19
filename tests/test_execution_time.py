@@ -1,6 +1,6 @@
 """Tests for ExecutionTimeTracker — CRPS scoring, percentile, trend."""
 
-from fuzzer_tool.core.execution_time import ExecutionTimeTracker
+from fuzzer_tool.core.analyzers.analyzer_execution_time import ExecutionTimeTracker
 
 
 class TestExecutionTimeTracker:

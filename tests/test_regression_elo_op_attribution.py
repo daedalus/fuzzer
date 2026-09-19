@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import pytest
 
-from fuzzer_tool.core.elo import BayesianEloTracker, EloTracker
+from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker, EloTracker
 
 TRACKERS = [EloTracker, BayesianEloTracker]
 
@@ -152,7 +152,7 @@ class TestSharedImplementation:
     def test_both_trackers_share_one_record_round(self):
         """It existed as two byte-identical copies; every fix had to be
         applied twice, and the failed-round fix duly was."""
-        from fuzzer_tool.core.elo import RoundRecorderMixin
+        from fuzzer_tool.core.analyzers.analyzer_elo import RoundRecorderMixin
 
         assert EloTracker.record_round is RoundRecorderMixin.record_round
         assert BayesianEloTracker.record_round is RoundRecorderMixin.record_round

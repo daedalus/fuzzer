@@ -78,7 +78,7 @@ future output, without needing to reverse the target's binary the way the
 original Factorio writeup did. That reversing step is now only needed to
 say *which* family a target uses -- and even that can be answered by
 trying the shipped ones and keeping whichever verifies, which is what
-:class:`fuzzer_tool.core.prng_state_learner.PRNGStateLearner` does.
+:class:`fuzzer_tool.core.analyzers.analyzer_prng_state_learner.PRNGStateLearner` does.
 """
 
 from __future__ import annotations

@@ -23,7 +23,7 @@ import random
 
 import pytest
 
-from fuzzer_tool.core.elo import BayesianEloTracker
+from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.seed_picker import SeedPicker, _cdf_pick

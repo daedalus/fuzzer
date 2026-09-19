@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from fuzzer_tool.core.corpus_compression import (
+from fuzzer_tool.core.analyzers.analyzer_corpus_compression import (
     PPMD_CACHE_MAX,
     PPMD_SAMPLE_BYTES,
     CorpusCompressor,

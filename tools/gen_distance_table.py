@@ -23,7 +23,7 @@ def main() -> int:
     parser.add_argument("targets", nargs="*", default=None, help="Target function(s)/file.c:line")
     args = parser.parse_args()
 
-    from fuzzer_tool.core.distance import TargetDistance
+    from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 
     td = TargetDistance(args.target, args.targets)
     if not td.load():

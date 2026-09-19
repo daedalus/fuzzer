@@ -1,4 +1,4 @@
-"""Unit tests for core.occupation primitives (no wiring)."""
+"""Unit tests for core.analyzers.analyzer_occupation primitives (no wiring)."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from fuzzer_tool.core.occupation import LongitudinalRarity, OccupationMeasure
+from fuzzer_tool.core.analyzers.analyzer_occupation import LongitudinalRarity, OccupationMeasure
 
 
 class TestOccupationMeasure:

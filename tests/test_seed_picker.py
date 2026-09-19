@@ -379,7 +379,7 @@ class TestSeedEloKeyMismatch:
         sampling over an unrated one (real BayesianEloTracker); plain keys
         with no recorded matches still hit the strategies[0] fallback,
         documenting the pre-fix inert behavior."""
-        from fuzzer_tool.core.elo import BayesianEloTracker
+        from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker
 
         elo = BayesianEloTracker(min_matches=1)
         for _ in range(500):

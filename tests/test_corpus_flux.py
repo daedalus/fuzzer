@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from fuzzer_tool.core.analyzer_registry import REGISTRY
-from fuzzer_tool.core.corpus_flux import CorpusFlux
+from fuzzer_tool.core.analyzers.analyzer_corpus_flux import CorpusFlux
 
 
 # --- the stated falsifier --------------------------------------------------

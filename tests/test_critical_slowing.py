@@ -1,6 +1,6 @@
 """Tests for critical slowing down detector and coverage homogeneity detector."""
 
-from fuzzer_tool.core.critical_slowing import (
+from fuzzer_tool.core.analyzers.analyzer_critical_slowing import (
     CoverageHomogeneityDetector,
     CriticalSlowingDown,
 )

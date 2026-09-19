@@ -11,8 +11,8 @@ from pathlib import Path
 import pytest
 
 from fuzzer_tool.core import cfg_cache
-from fuzzer_tool.core import distance as distance_mod
-from fuzzer_tool.core.distance import TargetDistance
+from fuzzer_tool.core.analyzers import analyzer_distance as distance_mod
+from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 from fuzzer_tool.core.elf import build_id
 
 needs_cc = pytest.mark.skipif(

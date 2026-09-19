@@ -1,6 +1,6 @@
 """Tests for per-byte sensitivity tracker."""
 
-from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
+from fuzzer_tool.core.analyzers.analyzer_sensitivity import ByteSensitivityTracker
 
 
 class TestByteSensitivityTracker:

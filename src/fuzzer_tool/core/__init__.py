@@ -15,7 +15,7 @@ from fuzzer_tool.core.count_class import (
     classify_single,
     new_bits,
 )
-from fuzzer_tool.core.critical_slowing import (
+from fuzzer_tool.core.analyzers.analyzer_critical_slowing import (
     CoverageHomogeneityDetector,
     CriticalSlowingDown,
 )
@@ -50,7 +50,7 @@ from fuzzer_tool.core.schedulers import (
 )
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.shapley import ShapleyAttribution
-from fuzzer_tool.core.transfer_entropy import TransferEntropy
+from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TransferEntropy
 
 __all__ = [
     "ContingencyTable",

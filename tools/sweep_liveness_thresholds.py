@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from fuzzer_tool.adapters.process import ADDR_NO_RANDOMIZE
-from fuzzer_tool.core.format_learner import FormatLearner
+from fuzzer_tool.core.analyzers.analyzer_format_learner import FormatLearner
 from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 
 # Reproduce the operator-side defaults so the sweep can override them.

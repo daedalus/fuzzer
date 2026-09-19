@@ -1416,7 +1416,7 @@ def cmd_ppmd(args):
 
     from fuzzer_tool.adapters.filesystem import load_corpus
     from fuzzer_tool.core.bloom import BloomFilter
-    from fuzzer_tool.core.corpus_compression import CorpusCompressor
+    from fuzzer_tool.core.analyzers.analyzer_corpus_compression import CorpusCompressor
 
     corpus_dir = Path(args.corpus)
     if not corpus_dir.exists():
@@ -1545,7 +1545,7 @@ def cmd_ppmd(args):
 
 def cmd_estimate(args):
     """Estimate executions to first crash."""
-    from fuzzer_tool.core.crash_eta import (
+    from fuzzer_tool.core.analyzers.analyzer_crash_eta import (
         estimate_execs_to_first_crash,
         estimate_risky_density,
     )

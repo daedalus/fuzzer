@@ -23,7 +23,7 @@ import os
 import time
 
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
-from fuzzer_tool.core.elo import seed_strategy_display_name, strategy_display_name
+from fuzzer_tool.core.analyzers.analyzer_elo import seed_strategy_display_name, strategy_display_name
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.services.stats_reporter import (
@@ -51,7 +51,7 @@ def _elo_status_str(f) -> str:
     """Compact live-stats field for the Elo meta-scheduler; empty when off.
 
     Strategy names carry the op_/seed_ prefix of their core/schedulers/
-    module (core.elo.strategy_display_name).
+    module (core.analyzers.analyzer_elo.strategy_display_name).
     """
     elo_str = ""
     if getattr(f, "_use_elo", False) and getattr(f, "_elo", None):
@@ -206,7 +206,7 @@ class StatsReporter:
             if n_rels > 0:
                 print(f"[*] FrameShift: discovered {n_rels} length-field relations")
 
-        from fuzzer_tool.core.crash_eta import estimate_execs_to_first_crash
+        from fuzzer_tool.core.analyzers.analyzer_crash_eta import estimate_execs_to_first_crash
 
         eta = estimate_execs_to_first_crash(f._profile, gt, dr, exec_count, f._crash_mi)
         print(
@@ -1370,7 +1370,7 @@ class StatsReporter:
         occ = getattr(f, "_last_occupation", None)
         if occ:
             try:
-                from fuzzer_tool.core.occupation import OccupationMeasure
+                from fuzzer_tool.core.analyzers.analyzer_occupation import OccupationMeasure
 
                 measure = OccupationMeasure.from_counts(occ)
                 rarity = getattr(f, "_occupation_rarity", None)

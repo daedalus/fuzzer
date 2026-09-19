@@ -11,7 +11,7 @@ this replaced after that measurement came back badly miscalibrated.
 
 import random
 
-from fuzzer_tool.core.discovery_uniformity import (
+from fuzzer_tool.core.analyzers.analyzer_discovery_uniformity import (
     DiscoveryUniformityDetector,
     dispersion_pvalue,
     fit_negative_binomial,

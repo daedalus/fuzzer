@@ -12,7 +12,7 @@ here for use by the detector.
 import logging
 import math
 
-from fuzzer_tool.core.critical_slowing import (
+from fuzzer_tool.core.analyzers.analyzer_critical_slowing import (
     CoverageHomogeneityDetector,
     CriticalSlowingDown,
 )
@@ -155,13 +155,13 @@ class CoverageRegimeDetector:
             subcritical.  Defaults to the fuzzer's _stall_threshold.
         csd_rise_threshold: Multiplier above baseline for CSD detection.
         regime_history_size: Observations kept in regime_history.
-        garch: Optional :class:`~fuzzer_tool.core.garch.OnlineGarch11`.  When
+        garch: Optional :class:`~fuzzer_tool.core.analyzers.analyzer_garch.OnlineGarch11`.  When
             supplied it can only *raise* an otherwise-supercritical tick to
             CRITICAL; it never overrides a stall or a CSD detection.  The
             model is fed from the main loop, not from here -- this detector
             reads state, it does not drive detectors.
         continuum: Optional
-            :class:`~fuzzer_tool.core.navier_stokes.ContinuumField`.
+            :class:`~fuzzer_tool.core.analyzers.analyzer_navier_stokes.ContinuumField`.
             Instrumentation only: it annotates ``reason`` and feeds
             :meth:`continuum_correlation`, and never changes the label.
             Handover §6 orders the work that way -- the Reynolds diagnostic

@@ -19,7 +19,7 @@ import math
 import random
 from collections import defaultdict
 
-from fuzzer_tool.core.transfer_entropy import TransferEntropy
+from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TransferEntropy
 
 
 def _analytic_panzeri_treves_te(te: TransferEntropy, source: list[int], target: list[int]) -> float:

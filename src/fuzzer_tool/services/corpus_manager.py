@@ -170,7 +170,7 @@ def _gdb_crash_replay(f, data: bytes, returncode: int) -> str:
     target is traceable) so the final crash report carries a real backtrace,
     registers, and fault address. Cost is ~1s on the rare crashing input.
     """
-    from fuzzer_tool.core.trace import CrashTracer
+    from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
     try:
         tracer = CrashTracer(f.target, timeout=max(5, int(getattr(f, "timeout", 5))))
@@ -566,7 +566,7 @@ class CorpusManager:
         # Restore checksum learner state
         cl_data = state.get("checksum_learner")
         if cl_data and hasattr(f, "checksum_learner") and f.checksum_learner is not None:
-            from fuzzer_tool.core.checksum_learner import ChecksumLearner
+            from fuzzer_tool.core.analyzers.analyzer_checksum_learner import ChecksumLearner
 
             f.checksum_learner = ChecksumLearner.from_dict(f, cl_data)
         # Restore PRNG state learner state
@@ -576,7 +576,7 @@ class CorpusManager:
             and hasattr(f, "prng_state_learner")
             and f.prng_state_learner is not None
         ):
-            from fuzzer_tool.core.prng_state_learner import PRNGStateLearner
+            from fuzzer_tool.core.analyzers.analyzer_prng_state_learner import PRNGStateLearner
 
             f.prng_state_learner = PRNGStateLearner.from_dict(f, prng_data)
         sens_data = f._state_store.get("sensitivity")

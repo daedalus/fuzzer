@@ -21,7 +21,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from fuzzer_tool.core.execution_time import ExecutionTimeTracker
+from fuzzer_tool.core.analyzers.analyzer_execution_time import ExecutionTimeTracker
 from fuzzer_tool.core.rand_pool import RandPool
 
 

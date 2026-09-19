@@ -21,7 +21,7 @@ import subprocess
 import pytest
 
 from fuzzer_tool.adapters.shm import DistanceTableShm, ShmCoverage
-from fuzzer_tool.core.distance import TargetDistance
+from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 
 SRC = """\
 #include <stdint.h>

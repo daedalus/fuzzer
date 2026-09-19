@@ -9,8 +9,8 @@ the fragment.  Guard on the value's type, not on ``is None``.
 
 from unittest.mock import MagicMock
 
-from fuzzer_tool.core.garch import OnlineGarch11
-from fuzzer_tool.core.navier_stokes import ContinuumField
+from fuzzer_tool.core.analyzers.analyzer_garch import OnlineGarch11
+from fuzzer_tool.core.analyzers.analyzer_navier_stokes import ContinuumField
 from fuzzer_tool.services.stats import StatsReporter
 
 

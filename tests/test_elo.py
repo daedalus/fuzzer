@@ -3,7 +3,7 @@
 import tempfile
 from pathlib import Path
 
-from fuzzer_tool.core.elo import BayesianEloTracker, EloTracker
+from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker, EloTracker
 
 
 class TestEloTracker:

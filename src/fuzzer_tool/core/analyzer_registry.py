@@ -44,11 +44,11 @@ in something else's construction (a network-adapter settle-time smoother; a
 separate, unconditional filter-smoothing usage in services/stats.py), not a
 standalone analyzer with its own gating flag, so there's no good single
 migration site. Two later, non-migration additions follow the same pattern:
-`occupation` (core.occupation.LongitudinalRarity, finite-time edge-count
-occupation) and `causal_sector` (core.causal_sector.CausalSectorGraph,
+`occupation` (core.analyzers.analyzer_occupation.LongitudinalRarity, finite-time edge-count
+occupation) and `causal_sector` (core.analyzers.analyzer_causal_sector.CausalSectorGraph,
 soft-requires `transfer_entropy`) -- see
 docs/handover/handover_RoRd.md. A third, `discovery_uniformity`
-(core.discovery_uniformity.DiscoveryUniformityDetector), is the
+(core.analyzers.analyzer_discovery_uniformity.DiscoveryUniformityDetector), is the
 nonparametric member of the regime_detection family: a rolling Poisson
 index-of-dispersion test of per-tick discovery counts, sitting next
 to `garch`/`structure_function`/`csd` without sharing any of their parametric noise-model
@@ -156,7 +156,7 @@ REGISTRY = AnalyzerRegistry()
 
 
 def _activate_fluctuation(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.fluctuation import WorkFunctional
+    from fuzzer_tool.core.analyzers.analyzer_fluctuation import WorkFunctional
 
     f._fluctuation = WorkFunctional(beta=f._fluctuation_beta, window=f._fluctuation_window)
     data = f._state_store.get("fluctuation")
@@ -184,7 +184,7 @@ REGISTRY.register(
 
 
 def _activate_transfer_entropy(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.transfer_entropy import TransferEntropy
+    from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TransferEntropy
 
     f._te = TransferEntropy(history_length=1)
     f._te_input_history = []
@@ -209,7 +209,7 @@ REGISTRY.register(
 
 
 def _activate_occupation(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.occupation import LongitudinalRarity
+    from fuzzer_tool.core.analyzers.analyzer_occupation import LongitudinalRarity
 
     f._occupation_rarity = LongitudinalRarity()
     f._last_occupation = None
@@ -234,7 +234,7 @@ REGISTRY.register(
 
 
 def _activate_causal_sector(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.causal_sector import CausalSectorGraph
+    from fuzzer_tool.core.analyzers.analyzer_causal_sector import CausalSectorGraph
 
     f._causal_sector = CausalSectorGraph()
     log.info("Causal-sector graph enabled")
@@ -264,7 +264,7 @@ REGISTRY.register(
 
 
 def _activate_crash_mi(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.crash_eta import CrashMITracker
+    from fuzzer_tool.core.analyzers.analyzer_crash_eta import CrashMITracker
 
     f._crash_mi = CrashMITracker(max_positions=f.max_len, min_observations=20)
     crash_mi_data = f._state_store.get("crash_mi")
@@ -287,9 +287,9 @@ REGISTRY.register(
 
 
 def _activate_length_tracker(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.length_mi import LengthEdgeTracker
+    from fuzzer_tool.core.analyzers.analyzer_length_mi import LengthEdgeTracker
 
-    # core.length_mi is on the mypy strictness-exemption ratchet list
+    # core.analyzers.analyzer_length_mi is on the mypy strictness-exemption ratchet list
     # (untyped legacy module); ignore the resulting no-untyped-call here
     # rather than exempting this module too.
     f._length_tracker = LengthEdgeTracker()  # type: ignore[no-untyped-call]
@@ -312,7 +312,7 @@ def _activate_structure_function(f: FuzzerLike) -> None:
     # Local import of the fuzzer module (not a top-level import) to avoid
     # the circular import that a top-level one would create: services.fuzzer
     # imports this registry module at load time.
-    from fuzzer_tool.core.structure_function import StructureFunctionDetector
+    from fuzzer_tool.core.analyzers.analyzer_structure_function import StructureFunctionDetector
     from fuzzer_tool.services import fuzzer as _fuzzer_mod
 
     f._structure_fn = StructureFunctionDetector(
@@ -332,7 +332,7 @@ REGISTRY.register(
 
 
 def _activate_discovery_uniformity(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.discovery_uniformity import DiscoveryUniformityDetector
+    from fuzzer_tool.core.analyzers.analyzer_discovery_uniformity import DiscoveryUniformityDetector
 
     f._discovery_uniformity = DiscoveryUniformityDetector()
 
@@ -347,7 +347,7 @@ REGISTRY.register(
 
 
 def _activate_corpus_flux(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.corpus_flux import CorpusFlux
+    from fuzzer_tool.core.analyzers.analyzer_corpus_flux import CorpusFlux
 
     f._corpus_flux = CorpusFlux()
     data = f._state_store.get("corpus_flux")
@@ -365,7 +365,7 @@ REGISTRY.register(
 
 
 def _activate_sensitivity(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
+    from fuzzer_tool.core.analyzers.analyzer_sensitivity import ByteSensitivityTracker
 
     f._sensitivity = ByteSensitivityTracker(max_seeds=50, max_bytes=f.max_len, sample_rate=0.02)
 
@@ -386,7 +386,7 @@ REGISTRY.register(
 
 
 def _activate_execution_time(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.execution_time import ExecutionTimeTracker
+    from fuzzer_tool.core.analyzers.analyzer_execution_time import ExecutionTimeTracker
 
     f._exec_time_tracker = ExecutionTimeTracker()
 
@@ -401,7 +401,7 @@ REGISTRY.register(
 
 
 def _activate_exec_time_anomaly(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.exec_time_anomaly import ExecTimeCalibrator
+    from fuzzer_tool.core.analyzers.analyzer_exec_time_anomaly import ExecTimeCalibrator
 
     f._exec_time_anomaly = ExecTimeCalibrator()
 
@@ -416,7 +416,7 @@ REGISTRY.register(
 
 
 def _activate_frameshift(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.frameshift import FrameShift
+    from fuzzer_tool.core.analyzers.analyzer_frameshift import FrameShift
 
     f._frameshift = FrameShift(max_relations=64)
 
@@ -431,7 +431,7 @@ REGISTRY.register(
 
 
 def _activate_format_learner(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.format_learner import FormatLearner
+    from fuzzer_tool.core.analyzers.analyzer_format_learner import FormatLearner
 
     f._format_learner = FormatLearner(max_timeline=10000)
 
@@ -452,7 +452,7 @@ REGISTRY.register(
 
 
 def _activate_corpus_compression(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.corpus_compression import CorpusCompressor
+    from fuzzer_tool.core.analyzers.analyzer_corpus_compression import CorpusCompressor
 
     f._ppmd = CorpusCompressor()
 
@@ -473,7 +473,7 @@ REGISTRY.register(
 
 
 def _activate_quasiperiodicity(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.quasiperiodicity import QuasiperiodicityAnalyzer
+    from fuzzer_tool.core.analyzers.analyzer_quasiperiodicity import QuasiperiodicityAnalyzer
 
     f._qp = QuasiperiodicityAnalyzer()
 
@@ -499,7 +499,7 @@ REGISTRY.register(
 
 
 def _activate_elo(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.elo import BayesianEloTracker
+    from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker
 
     # Local import: services.fuzzer defines _OPERATOR_STRATEGY_NAMES /
     # _SEED_STRATEGY_NAMES and imports this registry module at load time.
@@ -553,7 +553,7 @@ REGISTRY.register(
 def _activate_distance(f: FuzzerLike) -> None:
     import os
 
-    from fuzzer_tool.core.distance import TargetDistance
+    from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 
     f._distance = TargetDistance(
         f.target,
@@ -612,7 +612,7 @@ REGISTRY.register(
 
 
 def _activate_trace(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.trace import CrashTracer
+    from fuzzer_tool.core.analyzers.analyzer_trace import CrashTracer
 
     f._tracer = CrashTracer(f.target)
 
@@ -633,7 +633,7 @@ REGISTRY.register(
 
 
 def _activate_checksum_learner(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.checksum_learner import ChecksumLearner
+    from fuzzer_tool.core.analyzers.analyzer_checksum_learner import ChecksumLearner
 
     f.checksum_learner = ChecksumLearner(f)
 
@@ -658,7 +658,7 @@ REGISTRY.register(
 
 
 def _activate_prng_state_learner(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.prng_state_learner import PRNGStateLearner
+    from fuzzer_tool.core.analyzers.analyzer_prng_state_learner import PRNGStateLearner
 
     f.prng_state_learner = PRNGStateLearner(f)
 
@@ -684,7 +684,7 @@ REGISTRY.register(
 
 
 def _activate_csd(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.critical_slowing import CriticalSlowingDown
+    from fuzzer_tool.core.analyzers.analyzer_critical_slowing import CriticalSlowingDown
 
     f._csd = CriticalSlowingDown(window_size=50, rise_threshold=1.5, min_observations=20)
 
@@ -699,7 +699,7 @@ REGISTRY.register(
 
 
 def _activate_coverage_homogeneity(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.critical_slowing import CoverageHomogeneityDetector
+    from fuzzer_tool.core.analyzers.analyzer_critical_slowing import CoverageHomogeneityDetector
 
     num_cols = max(1, f.map_size // 8192)
     f._homogeneity = CoverageHomogeneityDetector(
@@ -720,7 +720,7 @@ REGISTRY.register(
 
 
 def _activate_garch(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.garch import OnlineGarch11
+    from fuzzer_tool.core.analyzers.analyzer_garch import OnlineGarch11
 
     f._garch = OnlineGarch11()
     f._garch.load(f._state_store.get("garch") or {})
@@ -742,7 +742,7 @@ REGISTRY.register(
 
 
 def _activate_temperature_control(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.temperature_control import TemperatureController
+    from fuzzer_tool.core.analyzers.analyzer_temperature_control import TemperatureController
 
     saved = f._state_store.get("temperature_control") or {}
     if saved:
@@ -775,7 +775,7 @@ REGISTRY.register(
 
 
 def _activate_continuum(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.navier_stokes import ContinuumField
+    from fuzzer_tool.core.analyzers.analyzer_navier_stokes import ContinuumField
 
     f._continuum = ContinuumField()
     f._continuum_adjacency = {}
@@ -800,7 +800,7 @@ REGISTRY.register(
 
 
 def _activate_coverage_regime(f: FuzzerLike) -> None:
-    from fuzzer_tool.core.coverage_regime import CoverageRegimeDetector
+    from fuzzer_tool.core.analyzers.analyzer_coverage_regime import CoverageRegimeDetector
 
     # Composite: depends on csd / coverage_homogeneity / garch / continuum
     # having already run. Registration order guarantees that within one

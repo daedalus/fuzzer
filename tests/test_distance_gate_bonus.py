@@ -39,7 +39,7 @@ discount:
 import pytest
 
 from fuzzer_tool.core.cfg import BasicBlock, FunctionCFG
-from fuzzer_tool.core.distance import TargetDistance
+from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 
 FUNC_NAME = "target_fn"
 

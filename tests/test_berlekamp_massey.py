@@ -257,7 +257,7 @@ def test_checksum_learner_recovers_reflected_from_independent_pairs():
     """
     import random
 
-    from fuzzer_tool.core.checksum_learner import ChecksumLearner
+    from fuzzer_tool.core.analyzers.analyzer_checksum_learner import ChecksumLearner
 
     class _FakeFuzzer:
         pass
@@ -351,7 +351,7 @@ def test_crc32_wrapper_reset():
 
 def test_extract_png_pairs():
     """Format-aware extractor pulls (type+data, crc) from a real PNG."""
-    from fuzzer_tool.core.checksum_learner import ChecksumLearner
+    from fuzzer_tool.core.analyzers.analyzer_checksum_learner import ChecksumLearner
 
     # Minimal valid PNG: signature + IHDR chunk + IEND chunk
     sig = b"\x89PNG\r\n\x1a\n"

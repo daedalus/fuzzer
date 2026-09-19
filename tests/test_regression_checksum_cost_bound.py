@@ -32,7 +32,7 @@ retrying.
 
 from __future__ import annotations
 
-from fuzzer_tool.core.checksum_learner import (
+from fuzzer_tool.core.analyzers.analyzer_checksum_learner import (
     CHECKSUM_PAIRS_MAX,
     RECOVERY_RETRY_BATCH,
     ChecksumLearner,

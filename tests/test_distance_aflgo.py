@@ -17,7 +17,7 @@ import subprocess
 
 import pytest
 
-from fuzzer_tool.core.distance import _NO_VALUE_DISTANCE, TargetDistance
+from fuzzer_tool.core.analyzers.analyzer_distance import _NO_VALUE_DISTANCE, TargetDistance
 
 SRC = """\
 __attribute__((noinline)) int leaf(int x) {

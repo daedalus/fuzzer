@@ -6,7 +6,7 @@ already accumulates, via ``services.te_position.edge_sets_to_flow``, without
 recomputing full pairwise transfer entropy anywhere else.
 """
 
-from fuzzer_tool.core.causal_sector import CausalSectorGraph
+from fuzzer_tool.core.analyzers.analyzer_causal_sector import CausalSectorGraph
 from fuzzer_tool.services.stats import StatsReporter
 
 

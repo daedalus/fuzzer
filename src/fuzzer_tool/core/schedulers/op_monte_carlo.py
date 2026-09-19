@@ -16,7 +16,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 
-from fuzzer_tool.core.structure_function import DispersionIndex
+from fuzzer_tool.core.analyzers.analyzer_structure_function import DispersionIndex
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import (

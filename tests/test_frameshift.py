@@ -1,6 +1,6 @@
 """Tests for core/frameshift.py — automatic length field tracking."""
 
-from fuzzer_tool.core.frameshift import FrameShift, Relation
+from fuzzer_tool.core.analyzers.analyzer_frameshift import FrameShift, Relation
 
 
 class TestRelation:

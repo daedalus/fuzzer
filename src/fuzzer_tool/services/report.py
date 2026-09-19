@@ -11,7 +11,7 @@ import os
 from collections import Counter
 from pathlib import Path
 
-from fuzzer_tool.core.elo import strategy_display_name
+from fuzzer_tool.core.analyzers.analyzer_elo import strategy_display_name
 from fuzzer_tool.core.temporal_join import join_streams
 
 try:

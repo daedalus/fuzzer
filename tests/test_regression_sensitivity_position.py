@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from fuzzer_tool.core.sensitivity import ByteSensitivityTracker
+from fuzzer_tool.core.analyzers.analyzer_sensitivity import ByteSensitivityTracker
 
 
 def _legacy_walk(scores, buf_len, r):

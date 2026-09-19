@@ -7,12 +7,12 @@ override a stall, a CSD detection, or a homogeneity rejection.
 
 import random
 
-from fuzzer_tool.core.coverage_regime import CoverageRegimeDetector
-from fuzzer_tool.core.critical_slowing import (
+from fuzzer_tool.core.analyzers.analyzer_coverage_regime import CoverageRegimeDetector
+from fuzzer_tool.core.analyzers.analyzer_critical_slowing import (
     CoverageHomogeneityDetector,
     CriticalSlowingDown,
 )
-from fuzzer_tool.core.garch import OnlineGarch11
+from fuzzer_tool.core.analyzers.analyzer_garch import OnlineGarch11
 from fuzzer_tool.core.percolation import CoverageRegime
 
 

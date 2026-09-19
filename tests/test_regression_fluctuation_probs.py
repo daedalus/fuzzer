@@ -29,7 +29,7 @@ import sys
 
 import pytest
 
-from fuzzer_tool.core.fluctuation import TrajectoryRecord, WorkFunctional
+from fuzzer_tool.core.analyzers.analyzer_fluctuation import TrajectoryRecord, WorkFunctional
 from fuzzer_tool.services import fuzzer as fuzzer_mod
 
 # --- Defect 1: the phantom attribute, and the guard against the next one ----
@@ -162,7 +162,7 @@ def test_probs_are_true_defaults_to_false() -> None:
 def test_ops_state_key_is_stable_across_processes() -> None:
     """The ops branch must not depend on PYTHONHASHSEED."""
     prog = (
-        "from fuzzer_tool.core.fluctuation import WorkFunctional, TrajectoryRecord;"
+        "from fuzzer_tool.core.analyzers.analyzer_fluctuation import WorkFunctional, TrajectoryRecord;"
         "r=TrajectoryRecord(ops=('byte_flip','havoc'),probs=(0.5,0.5),outcome='x');"
         "print(WorkFunctional.state_key(r))"
     )

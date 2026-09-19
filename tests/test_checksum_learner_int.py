@@ -13,7 +13,7 @@ import zlib
 
 import pytest
 
-from fuzzer_tool.core.checksum_learner import ChecksumLearner
+from fuzzer_tool.core.analyzers.analyzer_checksum_learner import ChecksumLearner
 from fuzzer_tool.core.int_checksum import (
     ADLER32,
     KIND_FLETCHER,

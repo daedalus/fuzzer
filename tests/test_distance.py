@@ -2,7 +2,7 @@
 
 import pytest
 
-from fuzzer_tool.core.distance import TargetDistance
+from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 
 
 class TestTargetDistanceUnit:

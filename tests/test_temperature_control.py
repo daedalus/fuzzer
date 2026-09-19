@@ -19,7 +19,7 @@ import pytest
 
 from fuzzer_tool.core.eso import ExtendedStateObserver
 from fuzzer_tool.core.pi_controller import PIController
-from fuzzer_tool.core.temperature_control import (
+from fuzzer_tool.core.analyzers.analyzer_temperature_control import (
     CORRECTION_MAX,
     CORRECTION_MIN,
     MIN_TICKS_BEFORE_ACTING,

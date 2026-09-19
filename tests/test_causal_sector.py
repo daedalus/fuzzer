@@ -1,10 +1,10 @@
-"""Unit tests for core.causal_sector primitives (no wiring)."""
+"""Unit tests for core.analyzers.analyzer_causal_sector primitives (no wiring)."""
 
 from __future__ import annotations
 
 import pytest
 
-from fuzzer_tool.core.causal_sector import CausalSectorGraph
+from fuzzer_tool.core.analyzers.analyzer_causal_sector import CausalSectorGraph
 
 
 class TestCausalSectorGraph:

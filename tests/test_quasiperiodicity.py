@@ -11,7 +11,7 @@ import random
 
 import pytest
 
-from fuzzer_tool.core.quasiperiodicity import (
+from fuzzer_tool.core.analyzers.analyzer_quasiperiodicity import (
     QP_SAMPLE_BYTES,
     QuasiperiodicityAnalyzer,
     cover_ratio,
@@ -178,7 +178,7 @@ class TestQuasiperiodicityAnalyzer:
 
     def test_cache_bounded(self):
         qp = QuasiperiodicityAnalyzer()
-        from fuzzer_tool.core.quasiperiodicity import QP_CACHE_MAX
+        from fuzzer_tool.core.analyzers.analyzer_quasiperiodicity import QP_CACHE_MAX
 
         for i in range(QP_CACHE_MAX + 10):
             qp.compute_seed_ratio(i.to_bytes(4, "big") * 3)

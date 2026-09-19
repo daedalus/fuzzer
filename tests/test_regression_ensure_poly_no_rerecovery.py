@@ -18,7 +18,7 @@ skipped the literal zero-new-pairs case. A real batch of new evidence
 from __future__ import annotations
 
 from fuzzer_tool.core.berlekamp_massey import compute_checksum
-from fuzzer_tool.core.checksum_learner import RECOVERY_RETRY_BATCH, ChecksumLearner
+from fuzzer_tool.core.analyzers.analyzer_checksum_learner import RECOVERY_RETRY_BATCH, ChecksumLearner
 
 # Same data with different checksums: no single polynomial reproduces two of
 # them, so recovery deterministically fails and never activates a model.

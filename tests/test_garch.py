@@ -8,7 +8,7 @@ import random
 
 import pytest
 
-from fuzzer_tool.core.garch import (
+from fuzzer_tool.core.analyzers.analyzer_garch import (
     OVERLAP_ARTIFACT_LAGS,
     OnlineGarch11,
     squared_acf,

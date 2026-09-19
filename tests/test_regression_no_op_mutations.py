@@ -599,7 +599,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         # through the z3 XOR-map solver, and this must run without the
         # optional smt extra. Installing it directly is a real reachable
         # state, and the same one ChecksumLearner.load() restores.
-        from fuzzer_tool.core.checksum_learner import ChecksumLearner
+        from fuzzer_tool.core.analyzers.analyzer_checksum_learner import ChecksumLearner
         from fuzzer_tool.core.xor_map_solver import XorBitmaskModel
 
         learner = ChecksumLearner(f)
@@ -645,7 +645,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         # assigning _state directly: the operator reads next_value_bytes(),
         # which is only meaningful when the frontier was derived too, and a
         # hand-set state would leave that untested.
-        from fuzzer_tool.core.prng_state_learner import PRNGStateLearner
+        from fuzzer_tool.core.analyzers.analyzer_prng_state_learner import PRNGStateLearner
         from fuzzer_tool.core.prng_state_recovery import taus88_output, taus88_step
 
         class _Base:

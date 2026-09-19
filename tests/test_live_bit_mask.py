@@ -262,7 +262,7 @@ class TestLivenessThresholdSensitivitySweep:
     """
 
     def test_synthetic_sweep_padding_sets_are_stable(self):
-        from fuzzer_tool.core.format_learner import FormatLearner
+        from fuzzer_tool.core.analyzers.analyzer_format_learner import FormatLearner
 
         dead_weights = [0.0, 0.05, 0.1, 0.2, 0.5, 1.0]
         switch_afters = [50, 100, 200, 400, 800]

@@ -11,7 +11,7 @@ computed the same way for both, straight from the rating.
 import math
 from types import SimpleNamespace
 
-from fuzzer_tool.core.elo import BayesianEloTracker, EloTracker
+from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker, EloTracker
 from fuzzer_tool.services.report import _elo_ratings
 
 

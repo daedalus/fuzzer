@@ -211,7 +211,7 @@ class TestCrashETA:
         entirely, so byte_total == joint_crash always and MI degenerated to
         position frequency x log2(1/p_crash). Both outcomes must feed
         byte_total; only crashes should additionally feed joint_crash."""
-        from fuzzer_tool.core.crash_eta import CrashMITracker
+        from fuzzer_tool.core.analyzers.analyzer_crash_eta import CrashMITracker
 
         tracker = CrashMITracker()
 
@@ -232,7 +232,7 @@ class TestCrashETA:
         assert tracker.byte_total != tracker.joint_crash
 
     def test_weighted_position_caching(self):
-        from fuzzer_tool.core.crash_eta import CrashMITracker
+        from fuzzer_tool.core.analyzers.analyzer_crash_eta import CrashMITracker
 
         tracker = CrashMITracker()
         tracker.load(
@@ -253,7 +253,7 @@ class TestCrashETA:
         assert 0 <= pos < 100
 
     def test_weighted_position_returns_none_when_no_data(self):
-        from fuzzer_tool.core.crash_eta import CrashMITracker
+        from fuzzer_tool.core.analyzers.analyzer_crash_eta import CrashMITracker
 
         tracker = CrashMITracker()
         # Empty tracker should return None, not 0

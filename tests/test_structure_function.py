@@ -5,7 +5,7 @@ import random
 
 import pytest
 
-from fuzzer_tool.core.structure_function import (
+from fuzzer_tool.core.analyzers.analyzer_structure_function import (
     StructureFunctionDetector,
     DispersionIndex,
     chi2_cdf,

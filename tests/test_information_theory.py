@@ -4,7 +4,7 @@ import math
 
 from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 from fuzzer_tool.core.renyi import CoverageSpectrumAnalyzer, RenyiEntropy
-from fuzzer_tool.core.transfer_entropy import TransferEntropy
+from fuzzer_tool.core.analyzers.analyzer_transfer_entropy import TransferEntropy
 
 
 class TestRenyiEntropy:

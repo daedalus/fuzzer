@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import pytest
 
-from fuzzer_tool.core.elo import BayesianEloTracker, EloTracker
+from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker, EloTracker
 
 
 def _seeded(tracker_cls):

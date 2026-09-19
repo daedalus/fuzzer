@@ -37,7 +37,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fuzzer_tool.core.prng_state_learner import PRNGStateLearner
+from fuzzer_tool.core.analyzers.analyzer_prng_state_learner import PRNGStateLearner
 from fuzzer_tool.core.prng_state_recovery import (
     LFSR258,
     TAUS88_PARAMS,
@@ -230,7 +230,7 @@ class TestNondeterminismPreference:
 
     def test_history_is_capped(self):
         learner = _learner()
-        from fuzzer_tool.core import prng_state_learner as mod
+        from fuzzer_tool.core.analyzers import analyzer_prng_state_learner as mod
 
         for i in range(mod._RUN_HISTORY_CAP + 50):
             learner.f._cmplog.last_conds = _conds([0x1000 + i], pc=0x3000)
@@ -243,7 +243,7 @@ class TestSampleFloor:
         """Below the *smallest* candidate family's confident_samples (2, for
         xorshift32 at 4 bytes and xorshift64 at 8), no family of that width
         could possibly verify, so no attempt is spent."""
-        from fuzzer_tool.core import prng_state_learner as mod
+        from fuzzer_tool.core.analyzers import analyzer_prng_state_learner as mod
 
         assert mod._MIN_SAMPLES == {4: 2, 8: 2}
         learner = _learner(_conds(_stream(1)))
@@ -466,7 +466,7 @@ class TestCrossDrainContinuation:
     def test_gap_beyond_the_search_window_is_not_claimed(self):
         """Past _MAX_ADVANCE_SEARCH the learner must not silently accept: it
         re-recovers from the new run instead, which is still correct."""
-        from fuzzer_tool.core import prng_state_learner as mod
+        from fuzzer_tool.core.analyzers import analyzer_prng_state_learner as mod
 
         words = _stream(mod._MAX_ADVANCE_SEARCH + 40)
         learner = _learner(_conds(words[:4]))

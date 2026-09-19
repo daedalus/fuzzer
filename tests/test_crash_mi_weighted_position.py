@@ -13,7 +13,7 @@ from collections import Counter
 
 import pytest
 
-from fuzzer_tool.core.crash_eta import CrashMITracker
+from fuzzer_tool.core.analyzers.analyzer_crash_eta import CrashMITracker
 
 
 def _tracker_with_positions(n_positions: int, input_len_for_mi: int = 200):

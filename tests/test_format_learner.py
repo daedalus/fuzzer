@@ -1,6 +1,6 @@
 """Tests for format structure learner (schema-harness methodology)."""
 
-from fuzzer_tool.core.format_learner import FieldHypothesis, FormatLearner
+from fuzzer_tool.core.analyzers.analyzer_format_learner import FieldHypothesis, FormatLearner
 
 
 class TestFormatLearnerInit:
@@ -176,7 +176,7 @@ class TestBacktest:
 class TestPeriodicBacktest:
     def test_backtest_triggered_at_interval(self):
         fl = FormatLearner(max_timeline=100)
-        from fuzzer_tool.core.format_learner import BACKTEST_INTERVAL
+        from fuzzer_tool.core.analyzers.analyzer_format_learner import BACKTEST_INTERVAL
 
         # Record enough transitions to trigger backtest
         for i in range(BACKTEST_INTERVAL + 1):

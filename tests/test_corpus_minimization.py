@@ -5,7 +5,7 @@ import tempfile
 import types
 from pathlib import Path
 
-from fuzzer_tool.core.corpus_flux import CorpusFlux
+from fuzzer_tool.core.analyzers.analyzer_corpus_flux import CorpusFlux
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 from fuzzer_tool.services.corpus_manager import CorpusManager
 

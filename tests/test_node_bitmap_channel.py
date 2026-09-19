@@ -174,7 +174,7 @@ def _popcount(buf):
 def _setup(target, input_bytes, tmp_path, cover_all=True):
     """Upload table + node bitmap; run one input; return bitmap bytes."""
     from fuzzer_tool.adapters.shm import ShmCoverage
-    from fuzzer_tool.core.distance import TargetDistance
+    from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 
     td = TargetDistance(target, targets=["target_fn"])
     assert td.load()
@@ -217,7 +217,7 @@ class TestNodeBitmapChannel:
         """Sentinel node_idx must be rejected by the bounds check even on
         a full hit."""
         from fuzzer_tool.adapters.shm import ShmCoverage
-        from fuzzer_tool.core.distance import TargetDistance
+        from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 
         td = TargetDistance(node_target, targets=["target_fn"])
         assert td.load()
@@ -245,7 +245,7 @@ class TestNodeBitmapChannel:
     def test_no_bitmap_env_is_inert(self, node_target, tmp_path):
         """Distance channel alone must keep working with no bitmap attached."""
         from fuzzer_tool.adapters.shm import ShmCoverage
-        from fuzzer_tool.core.distance import TargetDistance
+        from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 
         td = TargetDistance(node_target, targets=["target_fn"])
         assert td.load()

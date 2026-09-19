@@ -24,7 +24,7 @@ import numpy as np
 
 from fuzzer_tool.core.centrality import betweenness_centrality
 from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
-from fuzzer_tool.core.distance import _CALL_RE, _MAX_CFG_FUNC_SIZE
+from fuzzer_tool.core.analyzers.analyzer_distance import _CALL_RE, _MAX_CFG_FUNC_SIZE
 from fuzzer_tool.core.mincut import min_cut
 
 log = logging.getLogger(__name__)

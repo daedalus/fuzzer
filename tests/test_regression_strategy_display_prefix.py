@@ -14,7 +14,7 @@ persisted in the state store, so a rename would orphan every saved rating.
 import math
 from types import SimpleNamespace
 
-from fuzzer_tool.core.elo import (
+from fuzzer_tool.core.analyzers.analyzer_elo import (
     BayesianEloTracker,
     EloTracker,
     seed_strategy_display_name,
