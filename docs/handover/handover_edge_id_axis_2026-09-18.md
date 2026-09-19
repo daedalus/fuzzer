@@ -110,6 +110,15 @@ A cheaper and more general check is to run the stability probe itself:
 That would also catch ASLR-independent instability, which is what
 `mask_edges` currently discovers one edge at a time.
 
+**F1 is fixed in the shim as of dd834d1**, which resolves `ra` to a
+load-base-relative offset before hashing when `FUZZER_KEEP_ASLR=1` is set in
+the target's environment. Everything above still describes what a target
+built before that commit does, and the numbers are unchanged for it. See
+P0-2 for the residue: the shim keys the mode off the variable rather than off
+whether ASLR is actually on, which leaves the refused-`personality()` case in
+raw mode, and an old-shim target cannot be told from a current one by any
+symbol it exports.
+
 ### F2 (defect, mechanism unresolved). The first execution against a clean table disagrees with every later one
 
 Same input, same process image, ASLR off, one SHM segment reused with
@@ -482,7 +491,114 @@ a fresh segment is not comparable"), plus a regression test pinning whichever
 it is. Do not build anything on top of first-execution measurements until
 this closes.
 
-### P0-2. Guard F1 (per-process edge ids under ASLR)
+### P0-2. Guard F1 (per-process edge ids under ASLR) -- DONE, rescoped
+
+Written against the pre-dd834d1 tree, then re-aimed after the shim fix landed.
+What follows is the second version; the first is only interesting for the two
+sketch bugs it found, kept below.
+
+dd834d1 does not close the item, it moves it. The shim's base-relative mode
+switches on `FUZZER_KEEP_ASLR=1`, read by `getenv()` **in the target
+process** -- and that is not the same condition as "ASLR is on".
+`disable_aslr()` also returns False when `personality()` is refused (seccomp,
+container runtimes, non-Linux), and there the variable is unset, so a
+context-sensitive target runs in raw mode under live ASLR with nothing
+reporting it. Asking the user to fix that by hand means asking them to set a
+variable named for *keeping* ASLR on a host that never turned it off.
+
+Two pieces landed:
+
+1. `Fuzzer._ensure_ctx_ids_are_exec_stable()`, after the SHM setup block in
+   `__init__`: if ASLR survived startup, coverage is on the SHM path and any
+   target carries a positive `__AFL_CTX_BITS`, set `FUZZER_KEEP_ASLR=1` in
+   `os.environ` -- which `services/runner` copies into every child -- and say
+   so in one line. Silent when there is nothing to do. `disable_aslr()` has
+   already run and cached its answer by then, so writing the variable cannot
+   change what it decides; a target built before dd834d1 ignores it.
+2. `Fuzzer._report_edge_id_stability()`, three executions of one seed at the
+   end of `_calibrate_seed_baselines`, modelled on `_report_comparison_reach`:
+   same warn-only shape, same call site, no masking. This is the part that
+   survives the shim fix, because **an old-shim target cannot be detected
+   statically** -- dd834d1 adds no marker symbol, so `detect_ctx_bits` cannot
+   distinguish a binary that honours the variable from one that ignores it.
+   Only a measurement can. It also catches the causes the id axis knows
+   nothing about (threads, time, uninitialised memory), which is what
+   `mask_edges` currently discovers one edge at a time without reporting a
+   cause.
+
+Details worth keeping:
+
+* The probe measures the *widest* seed of the calibration pass, tracked for
+  free in the loop already there: more edges, more chances for a moving id,
+  identical cost. It runs after the seeds have, so the table is warm and F2's
+  first-execution regime cannot masquerade as F1.
+* No threshold was invented. Any Jaccard below 1.0 is reported; the
+  attribution is printed only when the diagnosable cause is present. Since
+  relative mode is already on by the time the probe runs, that diagnosis is
+  now specific: a target that still drifts is one that predates dd834d1.
+* Drops during the probe abstain, for the same reason
+  `_calibrate_seed_stability` abstains: a saturated table discards by arrival
+  order, so set divergence is not evidence of drift.
+* The collection loop is shared (`_repeat_edge_sets`) with
+  `_calibrate_seed_stability`, so the drop-counter drain cannot drift apart
+  between the consumer that masks and the one that only reports.
+
+Measured on a gcc build of the `test_ctx_and_map_size.py` driver -- the shim's
+callback is called directly, so no clang and no real target is needed. Six
+executions of the identical input, 40 guards, PIE, current shim:
+
+| | sizes | union | intersection | Jaccard |
+|---|---|---|---|---|
+| ctx=8, ASLR off | 22 x6 | 22 | 22 | **1.000** |
+| ctx=8, ASLR on, raw mode | 22 x6 | 76 | 0 | **0.000** |
+| ctx=8, ASLR on, relative mode | 22 x6 | 22 | 22 | **1.000** |
+| ctx=0, ASLR on | 22 x6 | 22 | 22 | **1.000** |
+
+Row 2 is the gap piece 1 closes and row 3 is what it closes it to, so the two
+rows together are also an end-to-end regression test for dd834d1 through the
+fuzzer's own probe rather than a standalone harness. Row 4 is the control
+pinning the context term rather than ASLR as the cause. Not one id survived in
+row 2, sharper than the 0.007 on fuzzgoat and the same phenomenon with less
+overlap to dilute it.
+
+Two things found on the way, both fixed here:
+
+* `tools/edge_matrix_analysis.py` claimed `--keep-aslr` "reproduces what a run
+  with `FUZZER_KEEP_ASLR=1` actually sees". After dd834d1 that is false in
+  both directions: the flag skips `disable_aslr()` and sets nothing, so it
+  reproduces the *raw* regime, while a real `FUZZER_KEEP_ASLR=1` run is now
+  base-relative and stable. Docstring and `--help` corrected; the flag's
+  behaviour is unchanged and is still the sharpest canary the tool has, it is
+  just no longer described as the thing it is not.
+* `tests/test_aslr.py::test_aslr_still_randomizes_without_the_call` fails
+  whenever it runs after any test that constructs a `Fuzzer`: `disable_aslr()`
+  sets the persona on the pytest process itself and children inherit it, so
+  the negative control has nothing left to randomize. Pre-existing, left
+  alone. The new probe launcher clears `ADDR_NO_RANDOMIZE` itself rather than
+  trusting the parent, and skips where the host cannot randomize at all;
+  `test_aslr.py` could take the same treatment.
+
+Still open, and cheap: **dd834d1 emits no marker symbol.** `__afl_ctx_bits_N`,
+`__AFL_NGRAM_K` and the SHM layout tag all exist precisely so the Python side
+can read a build contract before executing anything, and relative mode is the
+one contract it cannot read. A `__afl_ctx_relative_capable` marker would turn
+the probe's diagnosis into a startup check and would let
+`_ensure_ctx_ids_are_exec_stable` say "this target will ignore the variable,
+rebuild it" instead of setting it and hoping. One symbol, one `_symbol_names`
+scan.
+
+Sketch bugs from the first version, still worth recording:
+
+* The startup hook does **not** belong beside the `disable_aslr()` call as
+  sketched. That line runs before `self.use_coverage` is assigned and before
+  the coverage backend is chosen, so acting there touches `--no-coverage` and
+  `--no-shm` runs, neither of which reads a shim edge id.
+* `disable_aslr()` returning False does not imply `FUZZER_KEEP_ASLR=1`. The
+  sketch's message told the user to unset it, which for the
+  refused-`personality()` case is advice to unset something that was never
+  set -- and, after dd834d1, is advice that makes things strictly worse.
+
+Original sketch, for the record:
 
 Two forms, both worth landing; the second subsumes the first and is the one to
 write if only one gets done.
