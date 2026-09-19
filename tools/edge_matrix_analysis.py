@@ -476,6 +476,65 @@ def gf2_structure(mat):
 LLL_ROW_BUDGET = 100  # LLL here is ~2 minutes at 100 rows and superlinear
 
 
+def _lll_reduce(basis, delta=0.75):
+    """LLL-reduce *basis* (a list of integer row vectors) in place, returning it.
+
+    Written out rather than imported: Hard Rule 51, and the only outside
+    implementation that would fit here is sympy's, which is a dependency this
+    repo does not carry.
+
+    The basis vectors stay exact Python integers -- every subtraction and
+    swap below is integer arithmetic -- while the Gram-Schmidt coefficients
+    are float.  That split is the usual engineering compromise and it is safe
+    for what this tool reports: float error in ``mu`` can only make the
+    reduction *weaker* (a size reduction skipped, a swap not taken), never
+    turn a non-relation into one, because the caller decides what is a
+    relation by testing exact integer entries for zero.
+
+    The Gram-Schmidt row for ``k`` is recomputed from the orthogonalised rows
+    below it whenever ``B[k]`` changes, and both affected rows are refreshed
+    after a swap.  Rows above ``k`` are never read before ``k`` reaches them,
+    so nothing stale is ever used.
+    """
+    rows = [list(map(int, r)) for r in basis]
+    n = len(rows)
+    if n < 2:
+        return rows
+    dim = len(rows[0])
+    ortho = np.zeros((n, dim))
+    mu = np.zeros((n, n))
+    norms = np.zeros(n)
+
+    def orthogonalise(k):
+        v = np.array(rows[k], dtype=float)
+        for j in range(k):
+            if norms[j] > 0.0:
+                mu[k, j] = float(np.dot(v, ortho[j]) / norms[j])
+                v = v - mu[k, j] * ortho[j]
+            else:
+                mu[k, j] = 0.0
+        ortho[k] = v
+        norms[k] = float(np.dot(v, v))
+
+    orthogonalise(0)
+    k = 1
+    while k < n:
+        orthogonalise(k)
+        for j in range(k - 1, -1, -1):
+            q = int(round(mu[k, j]))
+            if q:
+                rows[k] = [a - q * b for a, b in zip(rows[k], rows[j], strict=True)]
+                orthogonalise(k)
+        if norms[k] >= (delta - mu[k, k - 1] ** 2) * norms[k - 1]:
+            k += 1
+        else:
+            rows[k], rows[k - 1] = rows[k - 1], rows[k]
+            orthogonalise(k - 1)
+            orthogonalise(k)
+            k = max(k - 1, 1)
+    return rows
+
+
 def integer_relations(mat, max_rows=LLL_ROW_BUDGET):
     """Integer structure of the raw-count matrix: duplicates, sparse relations, LLL.
 
@@ -522,13 +581,6 @@ def integer_relations(mat, max_rows=LLL_ROW_BUDGET):
         "sum_triples": triples,
     }
 
-    try:
-        from sympy import ZZ, Matrix
-        from sympy.polys.matrices import DomainMatrix
-    except ImportError:
-        out["lll"] = {"available": False, "reason": "sympy is not installed (not a dependency)"}
-        return out
-
     sub = dist[:max_rows]
     sub = sub[:, sub.any(axis=0)]
     n = sub.shape[0]
@@ -541,14 +593,13 @@ def integer_relations(mat, max_rows=LLL_ROW_BUDGET):
         [1 if j == i else 0 for j in range(n)] + [scale * int(v) for v in sub[i]] for i in range(n)
     ]
     start = time.perf_counter()
-    reduced = DomainMatrix.from_Matrix(Matrix(basis)).convert_to(ZZ).lll().to_Matrix().tolist()
+    reduced = _lll_reduce(basis)
     elapsed = time.perf_counter() - start
     rels = [row[:n] for row in reduced if not any(row[n:])]
     support = [sum(1 for v in c if v) for c in rels]
     l1 = [sum(abs(v) for v in c) for c in rels]
     peak = [max(abs(v) for v in c) for c in rels]
     out["lll"] = {
-        "available": True,
         "rows": n,
         "cols": int(sub.shape[1]),
         "rank": rank,
@@ -730,29 +781,26 @@ def _report(result) -> None:
             f"pairs, {r['sum_triples']} A=B+C triples"
         )
         lll = r["lll"]
-        if not lll["available"]:
-            print(f"    LLL skipped: {lll['reason']}")
-        else:
+        print(
+            f"    LLL on {lll['rows']}x{lll['cols']} (rank {lll['rank']}, kernel "
+            f"{lll['kernel_dim']}): {lll['relations_found']} exact relations in "
+            f"{lll['seconds']:.1f}s"
+        )
+        if lll["relations_found"]:
             print(
-                f"    LLL on {lll['rows']}x{lll['cols']} (rank {lll['rank']}, kernel "
-                f"{lll['kernel_dim']}): {lll['relations_found']} exact relations in "
-                f"{lll['seconds']:.1f}s"
+                f"    support median {lll['support_median']:.0f} of {lll['rows']}, "
+                f"L1 median {lll['l1_median']:.0f}, max|coeff| median "
+                f"{lll['max_coeff_median']:.0f}"
             )
-            if lll["relations_found"]:
-                print(
-                    f"    support median {lll['support_median']:.0f} of {lll['rows']}, "
-                    f"L1 median {lll['l1_median']:.0f}, max|coeff| median "
-                    f"{lll['max_coeff_median']:.0f}"
-                )
-                sparse = lll["support_median"] <= 8 and lll["max_coeff_median"] <= 2
-                if sparse:
-                    print("    sparse, near-unit relations: on the edge orientation these are")
-                    print("    flow conservation on the CFG (Ball-Larus). Cross-check against")
-                    print("    core/icfg.py before treating any of them as structural -- holding")
-                    print("    over one corpus does not distinguish structural from coincidental.")
-                else:
-                    print("    dense relations are not actionable: the only short vectors here")
-                    print("    are duplicate-row differences, which the hash above finds in O(m).")
+            sparse = lll["support_median"] <= 8 and lll["max_coeff_median"] <= 2
+            if sparse:
+                print("    sparse, near-unit relations: on the edge orientation these are")
+                print("    flow conservation on the CFG (Ball-Larus). Cross-check against")
+                print("    core/icfg.py before treating any of them as structural -- holding")
+                print("    over one corpus does not distinguish structural from coincidental.")
+            else:
+                print("    dense relations are not actionable: the only short vectors here")
+                print("    are duplicate-row differences, which the hash above finds in O(m).")
 
     if "duplicate_classes" in result:
         d = result["duplicate_classes"]
@@ -814,7 +862,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--lll",
         action="store_true",
-        help="run section [6]: integer relations over the raw counts (slow; needs sympy)",
+        help="run section [6]: integer relations over the raw counts (slow)",
     )
     ap.add_argument(
         "--lll-rows",

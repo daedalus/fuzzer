@@ -359,6 +359,9 @@ Cost ranking across everything now tried on this matrix, same data: hashing
 microseconds, SVD ~1 ms, GF(2) 15 ms, LLL 111 s and superlinear in rows. Most
 expensive, least returned, and unlike GF(2) it does not even leave a valid
 cover behind. Section [6] of the tool is opt-in (`--lll`) for that reason.
+The in-file reduction is about ten times faster than the sympy call it
+replaced (111 s -> 10.8 s on the seed orientation, 42 s -> 4.2 s on the edge
+one) and returns the same relations.
 
 **Where LLL would belong in this tree, one module over.**
 `core/prng_state_recovery.py` is GF(2)-linear by construction -- its `Opcode`
@@ -454,7 +457,7 @@ dependency, so Spearman is rank + Pearson in-file). Reuses
 Eight sections: [0] cross-process id stability, [1] x-axis structure, [2] the
 permutation-invariant y marginal, [3] substituted axes, [4] the singular
 spectrum, [5] the GF(2) structure, [6] integer relations (opt-in, `--lll`, the
-only section needing sympy) and [7] edge equivalence classes. `--transpose`
+only section that is opt-in) and [7] edge equivalence classes. `--transpose`
 runs [4] to [6] on the edge x seed matrix and enables [7]. Per Hard Rule 46 the
 lag-1 statistic ships with both of its controls -- a global permutation null
 *and* a within-family shuffle that must leave the effect standing if the
@@ -729,9 +732,9 @@ inflates effective rank 25x.
 `prng_state_recovery.py` cannot represent a multiplicative step, so the whole
 LCG family is out of its reach; F9 argues lattice reduction is the standard
 tool for exactly that gap, at dimensions where LLL is cheap. Genuine but
-blocking nothing -- and it needs a dependency decision first, since sympy is
-not in `pyproject.toml` and the LLL section of the tool degrades gracefully
-without it.
+blocking nothing. No dependency decision to make: the tool's LLL is written
+out in-file under Hard Rule 51, so the same routine is available to any
+caller in the tree.
 
 ### Docs nit
 
