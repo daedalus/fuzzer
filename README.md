@@ -134,6 +134,8 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 | MCTS / UCT | `--mcts` | Tree search for seed selection over the mutation lineage forest |
 | Boltzmann seeds | `--boltzmann` | P(seed) ∝ exp(−E/T) with E = log(fuzz_count + 1), annealed |
 | Kruskal-count seeds | `--kruskal-count` | Seeds scored by walker coupling speed; anchor recombined with a donor along the coupled trajectory |
+| Entropy-KL seeds | `--entropy-kl` | Seeds scored by KL divergence of their byte distribution from the corpus's pooled one |
+| Entropy z-score seeds | `--entropy-zscore` | Byte entropy read as a z-score against the corpus's own spread, self-calibrating instead of fixed thresholds |
 | Metropolis admission | `--metropolis` | Accept non-improving inputs with P = exp(−ΔE/T) |
 | Secretary stopping | `--secretary` | Optimal-stopping rule for seed/operator/corpus switching |
 | honggfuzz power factors | `--honggfuzz` | Novelty decay, freshness, fertility, density, entropy and timeout penalties |

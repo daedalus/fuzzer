@@ -2,7 +2,9 @@
 
 **Base:** `766fefc` (`corpus: cumulative Shannon entropy tracked at seed-read
 time`), on top of upstream `4af8a07`.
-**Status: ANALYSIS ONLY — nothing implemented.**
+**Status: §2 and §3 IMPLEMENTED (2026-09-19). §1, §4, §5, §6 still analysis
+only.** See `docs/DEEP_DIVE.md` (Byte-entropy seed arms) for what shipped;
+the corrections the build forced on this doc are recorded inline below.
 
 Asked what seed schedulers could harness the two Shannon-entropy signals now
 available (per-seed byte entropy, and the corpus-wide cumulative tracker from
@@ -118,6 +120,20 @@ literally "which seed introduces a byte pattern the corpus doesn't have,"
 matching the active-learning "expected information gain" seed-selection
 framing rather than a coarser one-number proxy.
 
+**IMPLEMENTED** as `core/schedulers/seed_entropy_kl.py` (`--entropy-kl`).
+
+Two corrections this doc got wrong. (1) The accessor is `freq_dist()` on
+`CumulativeByteEntropy` as proposed, but the arm does **not** read
+`f._corpus_entropy`: that tracker is built once per `load_corpus()` and
+never sees a seed discovered mid-campaign, and has no way to drop a pruned
+one, so scoring against it compares every mid-run seed to a distribution
+that predates it. The arm owns its own pool, folding on admission and
+unfolding on eviction (`CumulativeByteEntropy.remove()`, added for this) so
+`Q` is exactly the live corpus. (2) The fusion suggested here landed one
+level lower, as `byte_histogram()` + `entropy_bits_from_counts()` in
+`core/byte_entropy.py`, which `byte_entropy_bits` and the tracker both go
+through — a 4 KiB fold went 167us -> 24us as a side effect.
+
 **Open question before wiring:** `P_corpus` needs an epsilon floor
 (Laplace/add-one smoothing) wherever `P_corpus(b) = 0` for a byte value the
 seed uses but the corpus has never seen, or `log2(P_seed(b) / 0)` is
@@ -126,6 +142,15 @@ measured, not defaulted blindly — the KL-UCB paper-fidelity handover
 (`handover_kl_ducb_paper_fidelity_2026-09-14.md`) is the standing reminder in
 this repo that borrowing a formula without checking its assumptions against
 the actual regime it's applied in has bitten this project before.
+
+**RESOLVED.** `POOL_SMOOTHING = 1/256` (one pseudo-byte spread over the
+alphabet), not Laplace's add-one, which injects 256 pseudo-bytes and would
+dominate any pool under a few kilobytes. The question also turned out to be
+narrower than it looked: every seed passed to `scores()` is folded into the
+pool before it is scored, so its support is already in `Q` and the
+undefined `log2(p/0)` term cannot arise for a corpus seed at all. The floor
+guards the margin (a seed scored before folding), it does not tune the
+ranking.
 
 ---
 
@@ -156,6 +181,12 @@ once per corpus-load and once per `save_to_corpus` event (mirrors where
 share a single hook point rather than two separate ones scanning the same
 bytes).
 
+**IMPLEMENTED** as `core/schedulers/seed_entropy_zscore.py`
+(`--entropy-zscore`, `--entropy-zscore-target`). `target_z` is the only
+knob: 0 favours seeds typical for this corpus, positive chases the
+high-entropy tail, negative the sparse one, so "whichever direction the
+campaign wants" is one parameter rather than two modes.
+
 **Open question before wiring:** what to do in the first N seeds of a fresh
 corpus, where the running variance estimate is noisy or degenerate (a corpus
 of 1-2 seeds has no meaningful spread). `RunningMoments` callers elsewhere in
@@ -163,6 +194,26 @@ this tree already have a minimum-sample gate for this
 (`analyzer_critical_slowing.py` requires a minimum window before trusting its
 variance/autocorrelation signals) — reuse that precedent rather than inventing
 a new one.
+
+**RESOLVED, and the gate needed a second half this doc did not anticipate.**
+`MIN_OBSERVATIONS = 20` is `CriticalSlowingDown.min_observations` as
+suggested, but a count gate alone is not enough: `byte_entropy_bits` of a
+single-symbol input returns 5.6e-15, not 0.0, so a corpus of constant seeds
+passes any `stddev > 0` test with a 1.5e-15 spread and produces z-scores
+that are rounding noise amplified to +-3. Readiness therefore also requires
+`stddev > MIN_SPREAD_PCT = 1e-6`. Two further consequences:
+
+- The arm is listed in the Elo pool **while still cold** and only afterwards
+  while `ready`. Scoring is what observes seeds, so an arm excluded until
+  warm can never warm up; and a corpus with genuinely no entropy spread
+  would otherwise be a phantom opponent declining forever. On any corpus of
+  at least `MIN_OBSERVATIONS` seeds this costs no declined pick at all —
+  the first selection observes the whole corpus before its own readiness
+  check.
+- The moments are **not** persisted. A resume reloads the corpus whole and
+  the first scoring pass rebuilds the calibration from the seeds that
+  survived; restoring a window on top of that counts every one of them
+  twice. `to_dict()` carries counters and knobs only.
 
 ---
 
@@ -287,5 +338,8 @@ unresolved design question (credit assignment) and should wait until 6 has
 been measured, since 6 provides the child-fold-and-diff primitive 4 would
 otherwise have to invent from scratch anyway.
 
-Not implemented in this pass — analysis and module boundaries only, per the
-question asked.
+§2 and §3 were built on 2026-09-19, in that order, against this priority.
+§1 was deliberately skipped rather than shipped alongside §2: its open
+question (mean vs pooled) is a question about which metric §2 already
+answers properly, and shipping both would have conflated them exactly as
+this doc warned. §4, §5 and §6 are untouched.
