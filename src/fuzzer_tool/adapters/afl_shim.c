@@ -722,7 +722,7 @@ static struct {
     uintptr_t base;
 } __afl_ctx_base_cache[__AFL_CTX_CACHE_SIZE];
 
-static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
+__AFL_NO_COV static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
     uintptr_t key = (uintptr_t)ra;
     /* Return addresses are instruction-aligned (>=2 bytes on every arch
      * this shim targets), so the low bits never disambiguate two distinct
@@ -745,7 +745,7 @@ static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
  * would just add dladdr() cost for nothing), 1 = base-relative mode. */
 static int __afl_ctx_relative_mode = -1;
 
-static inline int __afl_ctx_use_relative(void) {
+__AFL_NO_COV static inline int __afl_ctx_use_relative(void) {
     if (__afl_ctx_relative_mode < 0) {
         const char *v = getenv("FUZZER_KEEP_ASLR");
         __afl_ctx_relative_mode = (v && v[0] == '1' && v[1] == '\0') ? 1 : 0;
