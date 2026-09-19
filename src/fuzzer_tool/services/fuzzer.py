@@ -756,23 +756,27 @@ class Fuzzer:
           stripped target cannot be judged here
         - hand-written ``__afl_map_edge`` calls still register, which is why
           the wording says "only those" rather than "no edges"
-        """
-        from fuzzer_tool.core.elf import sancov_guard_status
 
-        if not self.use_coverage or getattr(self, "_no_scov_warned", False):
+        The verdict is also recorded on ``self._coverage_trusted``, so a
+        scheduler can decline to draw conclusions from per-edge statistics
+        instead of confidently scoring the harness's own edges. Read it with
+        ``getattr(f, "_coverage_trusted", True)``: the check runs only when
+        the shim is detected at all, so the attribute may be absent.
+        """
+        from fuzzer_tool.core.scheduler_substrate import coverage_trust
+
+        if getattr(self, "_no_scov_warned", False):
             return
-        if getattr(self, "ptrace_cov", None) is not None or self.use_ptrace:
-            return
-        if sancov_guard_status(target) != "absent":
+        trusted, reason = coverage_trust(
+            target,
+            use_coverage=self.use_coverage,
+            ptrace=getattr(self, "ptrace_cov", None) is not None or self.use_ptrace,
+        )
+        self._coverage_trusted = trusted
+        if trusted:
             return
         self._no_scov_warned = True
-        msg = (
-            f"{target} carries the shim but no compiler-inserted edge coverage "
-            "(no __sancov_guards section): only hand-written __afl_map_edge "
-            "calls will register, so edge counts and saturation will look "
-            "like an exhausted target. Rebuild with "
-            "tools/build_targets.sh --clang-scov."
-        )
+        msg = f"{reason}. Rebuild with tools/build_targets.sh --clang-scov."
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
 

@@ -2619,6 +2619,24 @@ class EdgeTracker:
             "bounds": (cold_hi, warm_hi),
         }
 
+    def effective_edges(self) -> float:
+        """How many edges the execution volume is effectively spread over.
+
+        ``2 ** H`` of the global hit-count distribution: equal to the edge
+        count when every edge is hit equally, 1.0 when one edge takes all of
+        it. Collapsing while ``len(_global_edge_hits)`` stays flat is a
+        saturation signal nothing else here reports -- the corpus is finding
+        the same paths harder rather than finding new ones.
+
+        Reads ``_global_edge_hits`` directly, in one pass.
+        ``edge_hit_distribution()`` below carries the same counts but costs
+        O(edges x seeds) to build, because it recounts owners per edge
+        instead of reading ``_edge_owner_count``.
+        """
+        from fuzzer_tool.core.scheduler_substrate import effective_edges
+
+        return effective_edges(self._global_edge_hits)
+
     def edge_hit_distribution(self) -> dict[int, dict]:
         """Per-edge hit statistics across all seeds.
 

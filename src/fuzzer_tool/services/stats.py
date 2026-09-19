@@ -22,10 +22,14 @@ import logging
 import os
 import time
 
+from fuzzer_tool.core.analyzers.analyzer_elo import (
+    seed_strategy_display_name,
+    strategy_display_name,
+)
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
-from fuzzer_tool.core.analyzers.analyzer_elo import seed_strategy_display_name, strategy_display_name
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate as _discovery_rate,
 )
@@ -407,6 +411,40 @@ class StatsReporter:
         if redundant:
             print(f"  Dominated seeds:   {len(redundant)} (removable)")
 
+    #: Corpus x edge cells above which the class scan is skipped. The scan is
+    #: one pass over every seed's hit counts, so it is linear in this product
+    #: and pointless to pay per report on a large campaign.
+    EDGE_CLASS_CELL_BUDGET = 2_000_000
+
+    def _print_summary_edge_classes(self, f) -> None:
+        """Report edges no input has told apart.
+
+        Two edges with an identical count profile carry the same information
+        in this corpus. Measured on fuzzgoat: 120 of 412 edges are exact
+        copies of another, 79 of them context tags of one base edge that
+        never once differed, largest class 45. That multiplicity distorts
+        every rarity and novelty weight, which is why it is worth seeing --
+        but the weights are deliberately left alone here, because changing
+        them changes scheduling decisions and is gated on a paired benchmark.
+        """
+        tracker = f._edge_tracker
+        seeds = getattr(tracker, "seed_hit_counts", None)
+        if not seeds:
+            return
+        cells = len(seeds) * max(1, len(tracker._global_edge_hits))
+        if cells > self.EDGE_CLASS_CELL_BUDGET:
+            return
+        canon = EdgeCanonicalizer()
+        canon.refit(seeds)
+        stats = canon.stats()
+        if stats["duplicate_edges"] <= 0:
+            return
+        print(
+            f"  Edge classes:      {stats['classes']} profiles for "
+            f"{stats['edges']} edges ({stats['duplicate_edges']} duplicates, "
+            f"largest class {stats['largest_class']})"
+        )
+
     def _print_summary_rarity(self, f) -> None:
         """Print edge rarity summary lines."""
         rarity = f._edge_tracker.edge_rarity_stats()
@@ -416,6 +454,14 @@ class StatsReporter:
             f"  Edge rarity:       {rarity['singleton']} singleton / {rarity['cold']} cold / {rarity['warm']} warm / {rarity['hot']} hot"
         )
         print(f"  Avg seeds/edge:    {rarity['avg_seeds_per_edge']:.1f}")
+        effective = f._edge_tracker.effective_edges()
+        if effective > 0:
+            total_edges = len(f._edge_tracker._global_edge_hits)
+            print(
+                f"  Effective edges:   {effective:.0f} of {total_edges} "
+                f"({effective / total_edges:.0%} of the map carries the volume)"
+            )
+        self._print_summary_edge_classes(f)
         uniqueness = f._edge_tracker.seed_uniqueness()
         if uniqueness:
             irreplaceable = sum(1 for v in uniqueness.values() if v > 0)
@@ -480,6 +526,7 @@ class StatsReporter:
             "crash_count": f.crash_count,
             "timeout_count": f.timeout_count,
             "corpus_size": len(f.corpus),
+            "effective_edges": f._edge_tracker.effective_edges(),
             "unique_crash_sigs": len(f.crash_sigs),
             "eps": round(eps, 1),
             "elapsed_sec": round(elapsed, 1),
