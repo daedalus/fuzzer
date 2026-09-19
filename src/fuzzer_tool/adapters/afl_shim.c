@@ -676,6 +676,59 @@ void __afl_map_shm(void) {
  * above. */
 
 #if __AFL_CTX_SENSITIVE
+/* dladdr()/Dl_info, for __afl_ctx_resolve_base() below. Included here
+ * (rather than assumed from the __AFL_DISTANCE_MODE include further up)
+ * because CTX_SENSITIVE and DISTANCE_MODE are independently-gated default-on
+ * channels -- a build with -D__AFL_DISTANCE_MODE=0 must not lose this
+ * declaration. <dlfcn.h>'s own include guard makes a second #include here
+ * a no-op when both channels are on. */
+#include <dlfcn.h>
+
+/* ── ASLR-invariant caller context, opt-in ────────────────────────────
+ *
+ * dladdr() walks the link map, so it is too slow to call on every trace_pc
+ * hit -- cache resolved bases in a small direct-mapped table keyed by `ra`.
+ * The set of distinct return addresses is compile-time-bounded (one per
+ * call site in the binary), so a slot collision just costs one redundant
+ * dladdr() call on the next hit; it is never a correctness problem, since
+ * the `ra` tag check catches the mismatch and re-resolves. */
+#define __AFL_CTX_CACHE_SIZE 256
+static struct {
+    uintptr_t ra;
+    uintptr_t base;
+} __afl_ctx_base_cache[__AFL_CTX_CACHE_SIZE];
+
+static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
+    uintptr_t key = (uintptr_t)ra;
+    /* Return addresses are instruction-aligned (>=2 bytes on every arch
+     * this shim targets), so the low bits never disambiguate two distinct
+     * call sites -- drop them before folding into a slot index. */
+    uint32_t slot = (uint32_t)((key >> 2) % __AFL_CTX_CACHE_SIZE);
+    if (__afl_ctx_base_cache[slot].ra == key) return __afl_ctx_base_cache[slot].base;
+    Dl_info info;
+    uintptr_t base = 0;
+    if (dladdr(ra, &info) && info.dli_fbase) base = (uintptr_t)info.dli_fbase;
+    __afl_ctx_base_cache[slot].ra = key;
+    __afl_ctx_base_cache[slot].base = base;
+    return base;
+}
+
+/* FUZZER_KEEP_ASLR is fixed for the process's whole lifetime -- adapters/
+ * process.py's disable_aslr() reads it once, before any exec happens -- so
+ * resolve it once here too rather than calling getenv() on every hit.
+ * -1 = not yet resolved, 0 = raw-address mode (default: ASLR disabled,
+ * so the raw return address is already exec-stable and relativizing it
+ * would just add dladdr() cost for nothing), 1 = base-relative mode. */
+static int __afl_ctx_relative_mode = -1;
+
+static inline int __afl_ctx_use_relative(void) {
+    if (__afl_ctx_relative_mode < 0) {
+        const char *v = getenv("FUZZER_KEEP_ASLR");
+        __afl_ctx_relative_mode = (v && v[0] == '1' && v[1] == '\0') ? 1 : 0;
+    }
+    return __afl_ctx_relative_mode;
+}
+
 __attribute__((visibility("default"), always_inline))
 static inline uint32_t __afl_get_caller_ctx(void) {
     if (__afl_mapping) return 0;
@@ -702,17 +755,44 @@ static inline uint32_t __afl_get_caller_ctx(void) {
     void *ra = caller_fp[1];                    /* return addr into caller's caller */
     if (!ra) return 0;
 
-    /* Fold to 32 bits via a hash, not a truncation: return addresses in
-     * the same binary share high bits (load base + text segment), so a
-     * plain cast would collapide distinct call sites into the same low
-     * 32 bits far more than a real 64-bit space would. Fibonacci-hashing
-     * style mix (splitmix64 finalizer) also spreads return addresses
-     * that are only a few bytes apart (adjacent call instructions —
-     * common for PLT stubs / thin wrapper callers) into different
-     * buckets instead of adjacent ones. ASLR/PIE base differences across
-     * runs don't matter here: we only need identical call chains WITHIN
-     * one process/session to hash identically, which they do. */
-    uint64_t p = (uint64_t)(uintptr_t)ra;
+    /* The claim that used to sit here -- "ASLR/PIE base differences across
+     * runs don't matter, we only need identical call chains WITHIN one
+     * process/session to hash identically" -- only holds under a forkserver
+     * model, where every child is forked from one already-randomized parent
+     * and so shares its bases. adapters/process.py's disable_aslr() docstring
+     * spells out why that assumption doesn't hold here: the default execution
+     * path spawns a fresh process per input, ShmCoverage._seen_edge_ids in
+     * the fuzzer parent persists across all of them, and under PIE+ASLR a
+     * fresh exec gets a fresh base -- so the raw address below would hash
+     * differently every time even for the identical call chain, and
+     * is_new_coverage() would never return False. That's why ASLR is
+     * disabled globally by default; this function does not by itself make
+     * caller_ctx exec-stable.
+     *
+     * The one case that needs ASLR left on (FUZZER_KEEP_ASLR=1 -- ASAN
+     * shadow-memory range collisions, see disable_aslr()) would otherwise
+     * lose caller_ctx's cross-exec meaning entirely. In that case, resolve
+     * `ra` to a load-base-relative offset first: link-time layout, unlike
+     * the runtime load address, survives ASLR. Same trick __AFL_DISTANCE_MODE
+     * already uses for __afl_base, and PtraceCoverage.record_edge uses via
+     * /proc/pid/maps -- just not previously wired into this function. */
+    uintptr_t addr = (uintptr_t)ra;
+    if (__afl_ctx_use_relative()) {
+        uintptr_t base = __afl_ctx_resolve_base(ra);
+        /* dladdr() failure (base == 0) falls back to the raw address --
+         * degraded (exec-unstable) context for that one call site, not a
+         * crash or a corrupted hash. */
+        if (base) addr -= base;
+    }
+
+    /* Fold to 32 bits via a hash, not a truncation: return addresses (or
+     * their base-relative offsets) in the same binary share high bits, so a
+     * plain cast would collapse distinct call sites into the same low 32
+     * bits far more than a real 64-bit space would. Fibonacci-hashing style
+     * mix (splitmix64 finalizer) also spreads addresses that are only a few
+     * bytes apart (adjacent call instructions — common for PLT stubs / thin
+     * wrapper callers) into different buckets instead of adjacent ones. */
+    uint64_t p = (uint64_t)addr;
     p ^= p >> 33;
     p *= 0xff51afd7ed558ccdULL;
     p ^= p >> 33;
