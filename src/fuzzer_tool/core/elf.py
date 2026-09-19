@@ -1076,6 +1076,81 @@ def _sancov_section_bounds(target: str, section: str) -> tuple[int, int] | None:
     return None
 
 
+def _has_static_symtab(target: str) -> bool:
+    """True when *target* carries a non-empty SHT_SYMTAB section.
+
+    ``_symbol_names`` merges ``.symtab`` and ``.dynsym``, so it cannot answer
+    this: a stripped shared object still reports thousands of dynamic names.
+    The ``__start___sancov_*`` bounds are static-only, so only the static
+    table decides whether their absence means anything.
+    """
+    try:
+        with open(target, "rb") as f:
+            elf = f.read()
+    except OSError as e:
+        log.debug("ELF read failed for %s: %s", target, e)
+        return False
+    if len(elf) < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+        return False
+    try:
+        e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+        e_shnum = struct.unpack_from("<H", elf, 60)[0]
+        e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+        for i in range(e_shnum):
+            sh = e_shoff + i * e_shentsize
+            if struct.unpack_from("<I", elf, sh + 4)[0] == 2:  # SHT_SYMTAB
+                return struct.unpack_from("<Q", elf, sh + 32)[0] > 0  # sh_size
+    except struct.error as e:
+        log.debug("ELF parse failed for %s: %s", target, e)
+    return False
+
+
+def sancov_guard_status(target: str) -> str:
+    """Classify *target*'s compiler-inserted edge coverage as present/absent/unknown.
+
+    ``afl_instrumentation_status`` answers a different question: it looks for
+    ``__afl_area``/``__afl_map_shm``/``__sanitizer_cov``, which are the shim's
+    own definitions and are present in every target, because the shim is
+    ``-include``'d into all of them.  A binary with no instrumented call sites
+    at all therefore reports "present" there.  Measured: a default
+    ``tools/build_targets.sh`` run produced 20 binaries, 4 of which carried
+    any instrumentation, and all 20 were classified "present".
+
+    What actually produces edges is the guard array
+    ``-fsanitize-coverage=trace-pc-guard`` emits, which is what
+    ``verify_sancov`` in the build script greps for.  This is the same check,
+    available before a campaign rather than only at build time, and reading
+    the ELF directly rather than shelling out to ``readelf``.
+
+    ``inline-8bit-counters`` counts too: it is a different section with a
+    different element width, but a target carrying it is likewise
+    compiler-instrumented.
+
+    The third state matters for the same reason it does in
+    ``afl_instrumentation_status``: both section-bound symbols live in the
+    static symbol table, so a stripped-but-instrumented target is
+    indistinguishable from an uninstrumented one here.  Say "unknown" rather
+    than raise a false alarm.
+
+    Args:
+        target: Path to an ELF executable or shared object.
+
+    Returns:
+        One of ``"present"``, ``"absent"``, ``"unknown"``.
+    """
+    if not _has_static_symtab(target):
+        # Stripped, or unreadable. Both bound symbols live in .symtab, so
+        # there is nothing here to distinguish "no instrumentation" from
+        # "symbol table removed". A false alarm on a stripped-but-working
+        # target is the fastest way to teach someone to ignore the warning.
+        return "unknown"
+    for section in ("guards", "cntrs"):
+        bounds = _sancov_section_bounds(target, section)
+        if bounds is not None and bounds[1] > bounds[0]:
+            return "present"
+    return "absent"
+
+
 def build_id(target: str) -> bytes | None:
     """NT_GNU_BUILD_ID note contents, or None when absent/unparseable.
 

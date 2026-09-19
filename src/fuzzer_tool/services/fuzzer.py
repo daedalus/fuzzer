@@ -626,6 +626,7 @@ class Fuzzer:
         status = afl_instrumentation_status(self.target)
         if status == "present":
             print("[*] AFL instrumentation: detected")
+            self._warn_no_compiler_coverage(self.target)
             self._check_shm_layout(self.target)
         elif status == "absent":
             self._warn_uninstrumented([self.target])
@@ -721,6 +722,54 @@ class Fuzzer:
             "and corpus growth are all inactive. Rebuild with "
             "tools/build_targets.sh, or pass --no-coverage to run blind on "
             "purpose (crash detection is unaffected)."
+        )
+        log.warning(msg)
+        print(f"[!] WARNING: {msg}")
+
+    def _warn_no_compiler_coverage(self, target: str) -> None:
+        """Warn when the target carries the shim but no instrumented call sites.
+
+        ``afl_instrumentation_status`` cannot catch this. It looks for
+        ``__afl_area``/``__afl_map_shm``/``__sanitizer_cov``, all of which are
+        the shim's own definitions, and the shim is ``-include``'d into every
+        target -- so a binary the compiler never instrumented still reports
+        "present" and this function's caller still prints "detected".
+
+        Measured on a default ``tools/build_targets.sh`` run: 4 of 20
+        binaries carried a guard section, all 20 were classified "present",
+        and 300 execs against one of the other 16 in ``--inprocess-direct``
+        reported ``shm: 2 max: 2 sat: 100%``, ``Edges discovered: 2``,
+        ``Total richness: 2 - 2 (95% CI, Chao2)`` and
+        ``P(new code next): 0.00%``. The two edges were the harness's own
+        ``__afl_map_edge`` calls. Nothing in that output distinguishes it
+        from a genuinely exhausted target.
+
+        Warn-only, and deliberately narrow:
+
+        - silent under ptrace, which sets breakpoints on the binary and needs
+          no build-time instrumentation (the same carve-out
+          ``_warn_uninstrumented`` makes, for the same reason)
+        - silent with coverage off, since the premise does not hold
+        - silent on ``"unknown"``: the bound symbols are static-only, so a
+          stripped target cannot be judged here
+        - hand-written ``__afl_map_edge`` calls still register, which is why
+          the wording says "only those" rather than "no edges"
+        """
+        from fuzzer_tool.core.elf import sancov_guard_status
+
+        if not self.use_coverage or getattr(self, "_no_scov_warned", False):
+            return
+        if getattr(self, "ptrace_cov", None) is not None or self.use_ptrace:
+            return
+        if sancov_guard_status(target) != "absent":
+            return
+        self._no_scov_warned = True
+        msg = (
+            f"{target} carries the shim but no compiler-inserted edge coverage "
+            "(no __sancov_guards section): only hand-written __afl_map_edge "
+            "calls will register, so edge counts and saturation will look "
+            "like an exhausted target. Rebuild with "
+            "tools/build_targets.sh --clang-scov."
         )
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
