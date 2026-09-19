@@ -1070,7 +1070,7 @@ build_simple_targets() {
     build_target "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "$ZLIB_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
     build_target "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
     build_target "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags" "$cc" "$extra_cflags"
-    build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$cc" "$FFMPEG_INC"
+    build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$cc" "$extra_cflags $FFMPEG_INC"
     # grep_read — vendored GNU Grep (tools/vendor_grep.sh extracts to
     # vendor/grep). Skipped rather than built against the system grep: the
     # target links grep's matcher engines in-process, so without the vendored
@@ -1084,7 +1084,7 @@ build_simple_targets() {
     fi
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
         compile_fuzzgoat_object "$flags" "$cc" "$extra_cflags"
-        build_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+        build_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "$extra_cflags -I$VENDOR/fuzzgoat"
     fi
 }
 
@@ -1439,8 +1439,8 @@ build_simple_so_targets() {
         warn "grep_read${out_suffix}.so: vendor/grep not found, skipping (run tools/vendor_grep.sh)"
     fi
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
-        compile_fuzzgoat_object "$flags" "$cc" "-I$VENDOR/fuzzgoat"
-        build_so_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "-I$VENDOR/fuzzgoat"
+        compile_fuzzgoat_object "$flags" "$cc" "$extra_cflags"
+        build_so_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "$extra_cflags -I$VENDOR/fuzzgoat"
     fi
 }
 
