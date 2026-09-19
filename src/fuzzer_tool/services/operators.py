@@ -483,7 +483,11 @@ _FALLBACK_PRECEDENCE = (
     # passes the stationary harness comfortably but its recovery on
     # DecayingBest is seed-fragile (best_late share min 0.006, median 0.777
     # over 12 seeds -- see core/schedulers/op_corral.py), which is the same
-    # profile that moved gradient back out.
+    # profile that moved gradient back out. fewa is absent for the same
+    # reason: its confidence constant is a paper-native default, not a
+    # swept one (see core/schedulers/op_fewa.py), and it has not been run
+    # against this project's own convergence harness at all yet -- it
+    # should only ever be reached via Elo explicitly choosing it.
 )
 
 
@@ -554,6 +558,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("cucb")
     if f._use_cusum_ucb and f._cusum_ucb:
         available.append("cusum_ucb")
+    if f._use_fewa and f._fewa:
+        available.append("fewa")
     if f._use_moss and f._moss:
         available.append("moss")
     if f._use_fpl and f._fpl:
@@ -4471,6 +4477,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "cusum_ucb" and f._cusum_ucb:
             op = f._cusum_ucb.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "fewa" and f._fewa:
+            op = f._fewa.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "moss" and f._moss:
             op = f._moss.select_op(ops)

@@ -481,6 +481,9 @@ def cmd_fuzz(args):
             cusum_ucb_epsilon=getattr(args, "cusum_ucb_epsilon", 0.1),
             cusum_ucb_h=getattr(args, "cusum_ucb_h", 40.0),
             cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
+            fewa=getattr(args, "fewa", False),
+            fewa_alpha=getattr(args, "fewa_alpha", 0.5),
+            fewa_max_window=getattr(args, "fewa_max_window", 512),
             fpl=getattr(args, "fpl", False),
             fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
             gradient=getattr(args, "gradient", False),
@@ -566,6 +569,7 @@ def cmd_fuzz(args):
         args.kl_swucb_window = 4000
         args.cucb = True
         args.cusum_ucb = True
+        args.fewa = True
         args.fpl = True
         args.gradient = True
         args.whittle = True
@@ -741,6 +745,9 @@ def cmd_fuzz(args):
         cusum_ucb_epsilon=getattr(args, "cusum_ucb_epsilon", 0.1),
         cusum_ucb_h=getattr(args, "cusum_ucb_h", 40.0),
         cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
+        fewa=getattr(args, "fewa", False),
+        fewa_alpha=getattr(args, "fewa_alpha", 0.5),
+        fewa_max_window=getattr(args, "fewa_max_window", 512),
         fpl=getattr(args, "fpl", False),
         fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
         gradient=getattr(args, "gradient", False),
@@ -1863,6 +1870,7 @@ _HAIL_MARY_FLAGS = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "fewa",
     "fpl",
     "corral",
     "gradient",
@@ -2490,6 +2498,28 @@ def main() -> int:
         type=float,
         default=0.6,
         help="CUSUM-UCB exploration constant inside the post-reset UCB width (default: 0.6)",
+    )
+    fuzz_parser.add_argument(
+        "--fewa",
+        action="store_true",
+        help=(
+            "Enable FEWA operator scheduling (Seznec, Locatelli, Carpentier, "
+            "Lazaric & Valko): windowed elimination for arms whose own yield "
+            "rots with their own pull count, instead of an environment-wide "
+            "shift like D-UCB/CUSUM-UCB"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--fewa-alpha",
+        type=float,
+        default=0.5,
+        help="FEWA confidence-radius constant in B(h)=sqrt(alpha*log(t)/(2h)) (default: 0.5)",
+    )
+    fuzz_parser.add_argument(
+        "--fewa-max-window",
+        type=int,
+        default=512,
+        help="FEWA window-ladder ceiling and per-arm history length (default: 512)",
     )
     fuzz_parser.add_argument(
         "--fpl",

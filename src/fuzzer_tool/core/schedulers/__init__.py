@@ -13,6 +13,7 @@ from fuzzer_tool.core.schedulers.op_ducb import DUCBScheduler
 from fuzzer_tool.core.schedulers.op_epsilon_greedy import EpsilonGreedyScheduler
 from fuzzer_tool.core.schedulers.op_exp3 import Exp3Scheduler
 from fuzzer_tool.core.schedulers.op_exp4 import Exp4Scheduler
+from fuzzer_tool.core.schedulers.op_fewa import FEWAScheduler
 from fuzzer_tool.core.schedulers.op_fpl import FPLScheduler
 from fuzzer_tool.core.schedulers.op_gp_ucb import GPUCBScheduler
 from fuzzer_tool.core.schedulers.op_gradient import GradientBanditScheduler
@@ -57,6 +58,7 @@ __all__ = [
     "ContextualLinUCBScheduler",
     "CUCBScheduler",
     "CUSUM_UCBScheduler",
+    "FEWAScheduler",
     "DUCBScheduler",
     "SWUCBScheduler",
     "KL_DUCBScheduler",

@@ -149,6 +149,7 @@ class _FakeFuzzer:
         "corral": ("_use_corral", "_corral"),
         "gradient": ("_use_gradient", "_gradient"),
         "whittle": ("_use_whittle", "_whittle"),
+        "fewa": ("_use_fewa", "_fewa"),
     }
 
     def __init__(self):

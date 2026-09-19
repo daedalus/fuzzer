@@ -63,6 +63,7 @@ from fuzzer_tool.core.schedulers import (
     EpsilonGreedyScheduler,
     Exp3Scheduler,
     Exp4Scheduler,
+    FEWAScheduler,
     FPLScheduler,
     GPUCBScheduler,
     GradientBanditScheduler,
@@ -130,6 +131,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "kl_swucb",
     "cucb",
     "cusum_ucb",
+    "fewa",
     "moss",
     "c2ucb",
     "fpl",
@@ -1071,6 +1073,9 @@ class Fuzzer:
         cusum_ucb_epsilon=0.1,
         cusum_ucb_h=40.0,
         cusum_ucb_xi=0.6,
+        fewa=False,
+        fewa_alpha=0.5,
+        fewa_max_window=512,
         fpl=False,
         fpl_epsilon=1.0,
         gradient=False,
@@ -2312,6 +2317,23 @@ class Fuzzer:
                 cusum_ucb_xi,
             )
 
+        # FEWA (Seznec et al. 2019): windowed elimination for arms whose own
+        # yield rots with their own pull count, instead of an environment-wide
+        # shift -- see op_fewa.py for how this differs from D-UCB/CUSUM-UCB.
+        self._use_fewa = fewa
+        self._fewa = None
+        if fewa:
+            self._fewa = FEWAScheduler(
+                alpha=fewa_alpha,
+                max_window=fewa_max_window,
+                rng=self._rng,
+            )
+            log.info(
+                "FEWA enabled (alpha=%.3f, max_window=%d)",
+                fewa_alpha,
+                fewa_max_window,
+            )
+
         # Follow Perturbed Leader: perturb-and-select bandit with decaying
         # perturbation schedule for stochastic bandit convergence.
         self._use_fpl = fpl
@@ -2711,6 +2733,7 @@ class Fuzzer:
             or self._moss
             or self._cucb
             or self._cusum_ucb
+            or self._fewa
             or self._fpl
             or self._gradient
             or self._whittle
@@ -2917,6 +2940,8 @@ class Fuzzer:
             _register_arms(self._cucb)
         if self._cusum_ucb:
             _register_arms(self._cusum_ucb)
+        if self._fewa:
+            _register_arms(self._fewa)
         if self._fpl:
             _register_arms(self._fpl)
         if self._corral:
@@ -5345,6 +5370,7 @@ class Fuzzer:
             self._kl_swucb,
             self._cucb,
             self._cusum_ucb,
+            self._fewa,
             self._fpl,
             # On-policy, like exp3/cmaes above: the importance weight is only
             # unbiased against the distribution that produced the draw, so a
@@ -6839,6 +6865,8 @@ class Fuzzer:
             ops.append("cucb")
         if getattr(self, "_cusum_ucb", False):
             ops.append("cusum_ucb")
+        if getattr(self, "_fewa", False):
+            ops.append("fewa")
         if getattr(self, "_moss", False):
             ops.append("moss")
         if getattr(self, "_fpl", False):
@@ -7195,6 +7223,8 @@ class Fuzzer:
             ops.append("cucb")
         if getattr(self, "_cusum_ucb", False):
             ops.append("cusum_ucb")
+        if getattr(self, "_fewa", False):
+            ops.append("fewa")
         if getattr(self, "_moss", False):
             ops.append("moss")
         if getattr(self, "_fpl", False):

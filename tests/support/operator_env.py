@@ -43,6 +43,7 @@ BALLOT_SCHEDULERS = (
     "eps_greedy",
     "exp3",
     "exp4",
+    "fewa",
     "fpl",
     "corral",
     "gradient",
