@@ -17,8 +17,11 @@ import math
 from fuzzer_tool.adapters.filesystem import load_corpus, save_to_corpus
 from fuzzer_tool.core.byte_entropy import (
     ENTROPY_SAMPLE_CAP,
+    POOL_SMOOTHING,
     CumulativeByteEntropy,
     byte_entropy_bits,
+    byte_histogram,
+    entropy_bits_from_counts,
 )
 from fuzzer_tool.services.report import _corpus_byte_entropy
 
@@ -153,3 +156,105 @@ class TestLoadCorpusEntropyTracker:
         save_to_corpus(b"hello world", tmp_path, set())
         corpus, _, _ = load_corpus(tmp_path)
         assert len(corpus) == 1
+
+
+def _reference_freq_dist(seeds: list[bytes], smoothing: float, cap: int = ENTROPY_SAMPLE_CAP):
+    """Additive-smoothed pooled distribution, spelled out independently."""
+    freq = [0] * 256
+    total = 0
+    for seed in seeds:
+        for b in seed[:cap]:
+            freq[b] += 1
+            total += 1
+    denom = total + smoothing * 256
+    return [(c + smoothing) / denom for c in freq]
+
+
+class TestByteHistogram:
+    def test_counts_and_total_match_a_manual_tally(self):
+        data = b"aabbbc"
+        counts, total = byte_histogram(data)
+        assert total == len(data)
+        assert [int(counts[b]) for b in (ord("a"), ord("b"), ord("c"))] == [2, 3, 1]
+        assert sum(int(c) for c in counts) == total
+
+    def test_respects_the_cap(self):
+        counts, total = byte_histogram(b"\x00" * 10 + b"\x01" * 10, cap=10)
+        assert total == 10
+        assert int(counts[0]) == 10
+        assert int(counts[1]) == 0
+
+    def test_empty_input_is_an_all_zero_distribution(self):
+        counts, total = byte_histogram(b"")
+        assert total == 0
+        assert sum(int(c) for c in counts) == 0
+
+    def test_entropy_from_counts_matches_byte_entropy_bits(self):
+        for data in (b"", b"A", b"AB", b"aabbbc", bytes(range(256)) * 3):
+            counts, total = byte_histogram(data)
+            assert entropy_bits_from_counts(counts, total) == byte_entropy_bits(data)
+
+
+class TestPooledDistribution:
+    def test_freq_dist_sums_to_one(self):
+        tracker = CumulativeByteEntropy()
+        tracker.add(b"hello world")
+        assert abs(sum(tracker.freq_dist()) - 1.0) < 1e-12
+
+    def test_freq_dist_matches_an_independent_tally(self):
+        seeds = [b"aaaab", b"\x00\x01\x02", b"zzz"]
+        tracker = CumulativeByteEntropy()
+        for s in seeds:
+            tracker.add(s)
+        got = tracker.freq_dist(smoothing=0.5)
+        want = _reference_freq_dist(seeds, 0.5)
+        assert max(abs(g - w) for g, w in zip(got, want, strict=True)) < 1e-12
+
+    def test_unseen_byte_values_keep_positive_probability(self):
+        # Falsification of the smoothing: without it every byte the pool
+        # has never seen is 0.0 and log2(p_seed/q) is undefined there.
+        tracker = CumulativeByteEntropy()
+        tracker.add(b"\x00" * 64)
+        dist = tracker.freq_dist()
+        assert min(dist) > 0.0
+        assert dist[0] > dist[1]
+
+    def test_empty_pool_is_uniform(self):
+        assert CumulativeByteEntropy().freq_dist() == tuple([1.0 / 256] * 256)
+
+    def test_default_smoothing_adds_exactly_one_pseudo_byte(self):
+        assert POOL_SMOOTHING * 256 == 1.0
+
+    def test_remove_is_the_inverse_of_add(self):
+        a, b = b"aaaabbbb", b"\x00\x01\x02\x03"
+        tracker = CumulativeByteEntropy()
+        tracker.add(a)
+        before_bits, before_dist = tracker.bits(), tracker.freq_dist()
+        tracker.add(b)
+        tracker.remove(b)
+        assert len(tracker) == len(a)
+        assert tracker.bits() == before_bits
+        assert tracker.freq_dist() == before_dist
+
+    def test_remove_leaves_the_rest_of_the_pool_intact(self):
+        seeds = [b"aaaab", b"\x00\x01\x02", b"zzz"]
+        tracker = CumulativeByteEntropy()
+        for s in seeds:
+            tracker.add(s)
+        tracker.remove(seeds[1])
+        assert abs(tracker.bits() - _reference_pooled_entropy([seeds[0], seeds[2]])) < 1e-12
+
+    def test_removing_what_was_never_added_cannot_go_negative(self):
+        # Adversarial: a caller bug must not poison every later read.
+        tracker = CumulativeByteEntropy()
+        tracker.add(b"aa")
+        tracker.remove(b"zzzz")
+        assert len(tracker) >= 0
+        assert min(tracker.freq_dist()) > 0.0
+        assert tracker.bits() >= 0.0
+
+    def test_remove_respects_the_cap(self):
+        tracker = CumulativeByteEntropy()
+        tracker.add(b"\x00" * 10, cap=4)
+        tracker.remove(b"\x00" * 10, cap=4)
+        assert len(tracker) == 0
