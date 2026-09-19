@@ -96,6 +96,10 @@ _EXCLUDED_OPT_IN = frozenset(
         # without --elo it's meaningless, but with --elo all it runs as a
         # proper floor scheduler.
         "canary_scheduler",
+        # Its seed-selection counterpart (see --seed-canary-scheduler help):
+        # same deliberately-worst-in-class floor role, same reasoning, one
+        # tournament over.
+        "seed_canary_scheduler",
     }
 )
 
