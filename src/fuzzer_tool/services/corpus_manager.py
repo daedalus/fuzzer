@@ -31,6 +31,7 @@ from fuzzer_tool.adapters.filesystem import (
     save_timeout_seed,
     save_to_corpus,
 )
+from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
@@ -313,7 +314,14 @@ class CorpusManager:
 
     def load_corpus(self):
         f = self.f
-        f.corpus, f.seen_hashes, f.irreplaceable_hashes = load_corpus(f.corpus_dir, f.bloom)
+        # Fresh tracker each load: a resume/reload re-reads every seed from
+        # disk, so the running totals are rebuilt from that same pass
+        # rather than double-counting against whatever was accumulated in
+        # a previous process.
+        f._corpus_entropy = CumulativeByteEntropy()
+        f.corpus, f.seen_hashes, f.irreplaceable_hashes = load_corpus(
+            f.corpus_dir, f.bloom, entropy_tracker=f._corpus_entropy
+        )
         # Ensure the irreplaceable/ directory exists inside seeds/ so seeds can be
         # promoted to irreplaceable without a late mkdir.
         (f.corpus_dir / "seeds" / "irreplaceable").mkdir(parents=True, exist_ok=True)

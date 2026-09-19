@@ -1324,8 +1324,11 @@ def _corpus_health(f) -> str:
             f"  Dup rejection:     {dup_rate:.1f}% ({f._duplicate_reject_count}/{f._total_corpus_attempts})"
         )
 
-    # Shannon entropy of corpus byte distribution
-    _ent = _corpus_byte_entropy(f.corpus)
+    # Shannon entropy of corpus byte distribution -- cumulative running
+    # tracker when available (fed at seed-read time), else a full rescan.
+    _ent = _cumulative_corpus_byte_entropy(f)
+    if _ent is None:
+        _ent = _corpus_byte_entropy(f.corpus)
     if _ent is not None:
         lines.append(f"  Byte entropy:      {_ent:.2f} bits (max=8.0)")
     return "\n".join(lines)
@@ -1566,7 +1569,9 @@ def _entropy_metrics(f) -> str:
 
     # Byte entropy of corpus (same helper as Corpus Health -- one metric, one value)
     if f.corpus and isinstance(f.corpus, list):
-        _ent = _corpus_byte_entropy(f.corpus)
+        _ent = _cumulative_corpus_byte_entropy(f)
+        if _ent is None:
+            _ent = _corpus_byte_entropy(f.corpus)
         if _ent is not None:
             lines.append(f"  Corpus byte entropy: {_ent:.2f} bits (max=8.0)")
 
@@ -2144,6 +2149,22 @@ def _preview(data, width: int = 40) -> str:
     return text + ("..." if len(data) > width else "")
 
 
+def _cumulative_corpus_byte_entropy(f) -> float | None:
+    """Cumulative Shannon entropy from the running per-seed tracker, if any.
+
+    Fed by ``load_corpus()`` as each seed is read from disk (see
+    ``core.byte_entropy.CumulativeByteEntropy``): O(1) here instead of the
+    O(total corpus bytes) rescan ``_corpus_byte_entropy`` below does.
+    Returns None when no tracker is present (older resumed state, or a
+    corpus list built by a path that doesn't populate it) or it has not
+    seen any seed yet, so callers can fall back to the rescan.
+    """
+    tracker = getattr(f, "_corpus_entropy", None)
+    if tracker is None or len(tracker) == 0:
+        return None
+    return tracker.bits()
+
+
 def _corpus_byte_entropy(corpus, cap: int = 4096) -> float | None:
     """Shannon entropy of the corpus byte distribution, in bits/byte.
 
@@ -2151,6 +2172,9 @@ def _corpus_byte_entropy(corpus, cap: int = 4096) -> float | None:
     These were two separate loops with different per-seed caps (one sliced
     seed[:4096], the other consumed whole seeds), so the same metric printed
     two values in the same report -- 6.48 and 6.49 bits.
+
+    Only a rescan fallback now -- see ``_cumulative_corpus_byte_entropy``
+    for the O(1) path fed incrementally at seed-read time.
     """
     if not corpus:
         return None

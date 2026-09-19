@@ -1050,6 +1050,15 @@ class StatsReporter:
             ent_str = f" | ent: {f._edge_tracker.shannon_entropy_global():.2f}"
             simp_str = f" | simp: {f._edge_tracker.simpson_diversity_global():.2f}"
 
+        # Cumulative Shannon entropy of the on-disk corpus's byte content
+        # (distinct from ent_str above, which is entropy over *edge-hit*
+        # counts, not seed bytes). Read from the running tracker fed by
+        # load_corpus() -- O(1) here, no corpus rescan on every tick.
+        byte_ent_str = ""
+        corpus_entropy = getattr(f, "_corpus_entropy", None)
+        if corpus_entropy is not None and len(corpus_entropy) > 0:
+            byte_ent_str = f" | byte-ent: {corpus_entropy.bits():.2f}"
+
         rate_str = ""
         if hasattr(f, "_entropy_execs") and len(f._entropy_execs) >= 2:
             recent = list(zip(f._entropy_execs[-10:], f._entropy_vals[-10:], strict=True))
@@ -1279,7 +1288,8 @@ class StatsReporter:
             f"{bayes_str}{misc_str}"
             f"{poisson_str}"
             f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
-            f"{ent_str}{simp_str}{rate_str}{fmt_str}{perf_str}{pt_str}{lbr_str}{hf_str}{ops_str}"
+            f"{ent_str}{simp_str}{byte_ent_str}{rate_str}{fmt_str}{perf_str}{pt_str}{lbr_str}"
+            f"{hf_str}{ops_str}"
         )
         fluc_str = ""
         if getattr(f, "_fluctuation", None) is not None:

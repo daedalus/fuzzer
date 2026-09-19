@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from fuzzer_tool.core.bloom import BloomFilter
+from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.crash_metadata import CrashMetadata
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.similarity import crash_signature_similarity
@@ -354,6 +355,7 @@ def load_corpus(
     bloom: BloomFilter | None = None,
     add_default: bool = True,
     load_irreplaceable: bool = True,
+    entropy_tracker: CumulativeByteEntropy | None = None,
 ) -> tuple[list[bytes], set[str], set[str]]:
     """Load an existing corpus from the canonical layout under corpus_dir.
 
@@ -379,6 +381,12 @@ def load_corpus(
             are tracked in the returned irreplaceable set and so excluded
             from corpus pruning. If False they are still loaded as ordinary
             corpus entries -- the flag controls tracking, not loading.
+        entropy_tracker: Optional CumulativeByteEntropy to fold each seed's
+            bytes into as it is read from disk (full files and resolved
+            delta chains alike), so the caller can read a running
+            whole-corpus Shannon entropy without a second pass over the
+            corpus. The synthetic b"AAAAAAAA" default seed is not folded
+            in -- it was never read from disk.
 
     Returns:
         Tuple of (corpus list, seen hashes set, irreplaceable hashes set).
@@ -494,6 +502,8 @@ def load_corpus(
             seen.add(h)
             if bloom is not None:
                 bloom.add(h)
+            if entropy_tracker is not None:
+                entropy_tracker.add(data)
             corpus.append(data)
 
     # Reconstruct delta chains via topological resolution.
@@ -530,6 +540,8 @@ def load_corpus(
                 seen.add(h)
                 if bloom is not None:
                     bloom.add(h)
+                if entropy_tracker is not None:
+                    entropy_tracker.add(resolved[h])
                 corpus.append(resolved[h])
 
     if not corpus and add_default:

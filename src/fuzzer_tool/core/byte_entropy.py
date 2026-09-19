@@ -101,3 +101,62 @@ def byte_entropy_pct(data: bytes, cap: int = ENTROPY_SAMPLE_CAP) -> float:
     themselves rather than routing through here.
     """
     return byte_entropy_bits(data, cap) / MAX_BITS_PER_BYTE * 100.0
+
+
+class CumulativeByteEntropy:
+    """Running (aggregate) Shannon entropy of every seed folded in so far.
+
+    ``report._corpus_byte_entropy`` computes this same pooled-distribution
+    metric (treat every seed's bytes as one shared alphabet, not an
+    average of per-seed entropies) but rescans the whole corpus from
+    scratch each time it's called -- O(total corpus bytes) on every status
+    tick or report. This keeps 256 running byte-frequency counts instead,
+    so ``add()`` is O(cap) in the one seed just read and ``bits()`` is
+    O(1), the same incremental-over-rescan trade this codebase already
+    makes elsewhere (EdgeTracker, RunningMoments, the Kalman EPS filter).
+
+    Intended to be fed once per seed at the point its bytes are actually
+    read from disk (corpus load, resume, delta reconstruction) rather than
+    recomputed later from the in-memory corpus list.
+    """
+
+    __slots__ = ("_freq", "_total")
+
+    def __init__(self) -> None:
+        self._freq = [0] * 256
+        self._total = 0
+
+    def add(self, data: bytes, cap: int = ENTROPY_SAMPLE_CAP) -> float:
+        """Fold one seed's (capped) bytes into the running totals.
+
+        Returns that seed's own Shannon entropy in bits/byte, so a caller
+        reading a seed from disk gets the per-seed figure for free instead
+        of scanning the same bytes twice.
+        """
+        chunk = bytes(data[:cap])
+        if not chunk:
+            return 0.0
+        for b in chunk:
+            self._freq[b] += 1
+        self._total += len(chunk)
+        return byte_entropy_bits(chunk, cap)
+
+    def bits(self) -> float:
+        """Aggregate Shannon entropy, in bits/byte, of every seed added so far.
+
+        0.0 before anything has been added -- same empty-input convention
+        as ``byte_entropy_bits``.
+        """
+        if self._total <= 0:
+            return 0.0
+        total = self._total
+        ent = 0.0
+        for count in self._freq:
+            if count:
+                pr = count / total
+                ent -= pr * math.log2(pr)
+        return ent if ent > 0.0 else 0.0
+
+    def __len__(self) -> int:
+        """Total (capped) bytes folded in so far, across all seeds added."""
+        return self._total
