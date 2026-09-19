@@ -288,11 +288,18 @@ def collapse(amplitudes: np.ndarray) -> bytes:
 # ── Rotation gate ──────────────────────────────────────────────────────
 
 
+def _unpack_bits_to(data: bytes, n_bits: int) -> np.ndarray:
+    """Unpack ``data`` to a 0/1 bit array, padded or truncated to ``n_bits``."""
+    bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8)) if data else np.zeros(0, dtype=np.uint8)
+    return np.pad(bits, (0, n_bits - len(bits))) if len(bits) < n_bits else bits[:n_bits]
+
+
 def rotation_gate(
     amplitudes: np.ndarray,
     collapsed: bytes,
     *,
     improved: bool,
+    best: bytes | None = None,
     delta: float = 0.05,
     alpha_min: float = ALPHA_MIN,
     alpha_max: float = ALPHA_MAX,
@@ -319,15 +326,53 @@ def rotation_gate(
     Vectorized: trig identities applied over the whole array via numpy
     instead of a per-bit Python loop.
 
+    Two modes, selected by ``best``:
+
+    ``best=None`` (legacy, self-referential): every bit rotates every
+    call, toward or away from its own just-collapsed value depending on
+    ``improved`` alone. Kept only for backward compatibility with callers
+    that never tracked a per-lineage best solution — it does not match
+    the published algorithm (see below) because it has no notion of "this
+    bit already agrees with the best solution found so far", so it keeps
+    perturbing bits that are already correct.
+
     - bit=0, improved=True  → α increases (rotate toward |0⟩, Δθ < 0)
     - bit=0, improved=False → α decreases (rotate toward |1⟩, Δθ > 0)
     - bit=1, improved=True  → α decreases (rotate toward |1⟩, Δθ > 0)
     - bit=1, improved=False → α increases (rotate toward |0⟩, Δθ < 0)
 
+    ``best`` given (faithful mode): implements the standard lookup table
+    for the Q-gate from Han & Kim's original combinatorial-optimization
+    QEA, comparing this call's collapsed bits x against the bits of the
+    best solution found so far, ``best`` (b), together with whether x is
+    at least as good as b (``improved``). Per-bit outcome, for each of
+    the four (x_i, b_i) combinations crossed with ``improved``:
+
+    - ``improved`` True: Δθ=0 for every bit, regardless of x vs b — x is
+      now at least as good as the tracked best, so the caller should
+      promote it to the new best rather than have this function nudge
+      anything.
+    - ``improved`` False and x_i == b_i: Δθ=0 — this bit already agrees
+      with the best-known solution, so it needs no correction.
+    - ``improved`` False and x_i != b_i: rotate this bit's amplitude
+      toward b_i (Δθ > 0, α decreases, if b_i=1; Δθ < 0, α increases, if
+      b_i=0) so it is more likely to reproduce the best solution's bit
+      next time.
+
+    This differs from the legacy mode in exactly the cases where x_i
+    already equals b_i despite the overall outcome not improving on
+    best: legacy mode still perturbs that bit away from its own value;
+    faithful mode leaves it alone, since perturbing a bit that already
+    matches the best-known solution serves no purpose in the source
+    algorithm.
+
     Args:
         amplitudes: Current α values to update (in-place + return).
-        collapsed: Concrete bytes that the amplitudes produced.
-        improved: Whether the collapsed outcome was beneficial.
+        collapsed: Concrete bytes that the amplitudes produced (x).
+        improved: Whether x is at least as good as the tracked best (b).
+        best: Bytes of the best solution found so far for this lineage
+            (b). ``None`` selects the legacy self-referential mode above;
+            otherwise selects the literature-faithful lookup-table mode.
         delta: Rotation angle Δθ in radians (default 0.05 ≈ 2.9°).
         alpha_min: Minimum amplitude clamp (default 0.01).
         alpha_max: Maximum amplitude clamp (default 0.99).
@@ -337,15 +382,28 @@ def rotation_gate(
     """
     if not isinstance(amplitudes, np.ndarray):
         amplitudes = np.asarray(amplitudes, dtype=np.float64)
-    # Unpack collapsed bytes to bit array, pad/truncate to match length
     n_bits = len(amplitudes)
-    bits = np.unpackbits(np.frombuffer(collapsed, dtype=np.uint8))
-    bits = np.pad(bits, (0, n_bits - len(bits))) if len(bits) < n_bits else bits[:n_bits]
+    bits = _unpack_bits_to(collapsed, n_bits)
 
-    # bit=0 XOR improved=False → increase α (rotate toward |0⟩, Δθ < 0);
-    # the complementary set decreases α (Δθ > 0). Same truth table as the
-    # original linear version, just implemented as a rotation direction.
-    increase_alpha = (bits == 0) if improved else (bits == 1)
+    if best is None:
+        # Legacy mode: bit=0 XOR improved=False → increase α (rotate
+        # toward |0⟩, Δθ < 0); the complementary set decreases α
+        # (Δθ > 0). Same truth table as the original linear version,
+        # just implemented as a rotation direction.
+        increase_alpha = (bits == 0) if improved else (bits == 1)
+        decrease_alpha = ~increase_alpha
+    elif improved:
+        # Table rows with f(x) >= f(b): Δθ=0 unconditionally. The caller
+        # is expected to promote x to the new best in this case.
+        return amplitudes
+    else:
+        best_bits = _unpack_bits_to(best, n_bits)
+        differ = bits != best_bits
+        # Rotate only the bits that disagree with best, toward best's
+        # value: b_i=0 → increase α (Δθ<0), b_i=1 → decrease α (Δθ>0).
+        # Agreeing bits (differ=False) get neither flag and stay put.
+        increase_alpha = differ & (best_bits == 0)
+        decrease_alpha = differ & (best_bits == 1)
 
     beta = np.sqrt(np.maximum(0.0, 1.0 - amplitudes * amplitudes))
     cos_d = math.cos(delta)
@@ -356,7 +414,11 @@ def rotation_gate(
     rotated_toward_zero = amplitudes * cos_d + beta * sin_d  # Δθ < 0, α increases
     rotated_toward_one = amplitudes * cos_d - beta * sin_d  # Δθ > 0, α decreases
 
-    new_alpha = np.where(increase_alpha, rotated_toward_zero, rotated_toward_one)
+    new_alpha = np.select(
+        [increase_alpha, decrease_alpha],
+        [rotated_toward_zero, rotated_toward_one],
+        default=amplitudes,
+    )
     amplitudes[:] = np.clip(new_alpha, alpha_min, alpha_max)
     return amplitudes
 
@@ -829,12 +891,29 @@ class QEALifecycle:
         # all improved=False and drive its amplitudes onto the clamps,
         # destroying exactly the uncertainty QEA exists to preserve.
         if self._last_parent is not None and self._last_collapsed:
+            parent = self._last_parent
+            # f(x) >= f(b): compare this call's edge_count (x's proxy
+            # fitness) against the edge_count recorded for the parent's
+            # own best_collapsed (b) -- both fields already threaded
+            # through initialize()/on_fuzz_result() for exactly this
+            # purpose. Falls back to new_coverage when the parent has no
+            # tracked best yet (degenerate/freshly constructed case).
+            has_best = bool(parent.best_collapsed)
+            is_improved = edge_count >= parent.edge_count if has_best else new_coverage
             rotation_gate(
-                self._last_parent.amplitudes,
+                parent.amplitudes,
                 self._last_collapsed,
-                improved=new_coverage,
+                improved=is_improved,
+                best=parent.best_collapsed if has_best else None,
                 delta=self._effective_rotation_angle(),
             )
+            if is_improved:
+                # x is now at least as good as the tracked best for this
+                # lineage -- promote it, matching the table rows above
+                # (Δθ=0, no rotation) with the elitist replacement they
+                # presuppose.
+                parent.best_collapsed = self._last_collapsed
+                parent.edge_count = edge_count
             if self.use_correlation and self._last_parent.coupling is not None:
                 update_couplings(
                     self._last_parent.coupling,

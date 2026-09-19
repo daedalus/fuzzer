@@ -158,15 +158,26 @@ class TestRotationGateClearsParent:
         assert pinned < 0.5, f"{pinned:.0%} of amplitudes saturated from stale rotations"
 
     def test_rotation_still_applies_on_the_matching_iteration(self):
-        """Clearing must not disable legitimate feedback."""
+        """Clearing must not disable legitimate feedback.
+
+        With the faithful (best-tracking) rotation gate, an improved=True
+        result applies Δθ=0 to every bit by design (see rotation_gate's
+        ``best`` docstring) — its feedback shows up as a promotion of
+        best_collapsed/edge_count instead of amplitude movement, so that
+        is what confirms the clearing fix didn't also swallow the
+        feedback itself.
+        """
         qea = QEALifecycle(pop_size=4, generation_size=10_000)
         et = _edge_tracker()
         qea.initialize([b"aaaa", b"bbbb", b"cccc", b"dddd"], et)
         qea.pick_seed()
         parent = qea._last_parent
-        before = parent.amplitudes.copy()
+        collapsed = qea._last_collapsed
+        before_best, before_edge_count = parent.best_collapsed, parent.edge_count
         qea.on_fuzz_result(b"x", True, 1, et)
-        assert not np.array_equal(parent.amplitudes, before)
+        assert parent.best_collapsed == collapsed
+        assert parent.best_collapsed != before_best or parent.edge_count != before_edge_count
+        assert parent.edge_count == 1
 
 
 # ── Bug 3: generation boundary starved during productive runs ──────────

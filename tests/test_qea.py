@@ -253,6 +253,82 @@ class TestRotationGate:
         np.testing.assert_allclose(amps, original)
 
 
+class TestRotationGateFaithfulMode:
+    """``best`` given: the literature-faithful lookup-table mode.
+
+    Covers the standard Q-gate table for Han & Kim's combinatorial-
+    optimization QEA: rotation depends on comparing the collapsed bits
+    (x) to a tracked best solution's bits (b), not on x alone.
+    """
+
+    def test_improved_true_is_always_a_no_op(self):
+        """improved=True → Δθ=0 for every bit, regardless of x vs best."""
+        amps = np.array([0.3, 0.5, 0.7, 0.9], dtype=np.float64)
+        original = amps.copy()
+        # x and best deliberately disagree everywhere a bit could differ.
+        result = rotation_gate(amps, b"\x0f", improved=True, best=b"\xf0", delta=0.2)
+        np.testing.assert_allclose(result, original)
+        assert result is amps
+
+    def test_not_improved_agreeing_bit_is_a_no_op(self):
+        """improved=False, x_i == b_i → that bit does not rotate."""
+        amps = np.array([0.5], dtype=np.float64)
+        # Both x and best have bit=0.
+        result = rotation_gate(amps, b"\x00", improved=False, best=b"\x00", delta=0.2)
+        assert result[0] == 0.5
+
+    def test_not_improved_disagreeing_bit_rotates_toward_best_zero(self):
+        """improved=False, x_i=1, b_i=0 → rotate toward |0⟩ (α increases)."""
+        amps = np.array([0.5], dtype=np.float64)
+        result = rotation_gate(amps, b"\xff", improved=False, best=b"\x00", delta=0.2)
+        assert result[0] > 0.5 + 1e-10
+
+    def test_not_improved_disagreeing_bit_rotates_toward_best_one(self):
+        """improved=False, x_i=0, b_i=1 → rotate toward |1⟩ (α decreases)."""
+        amps = np.array([0.5], dtype=np.float64)
+        result = rotation_gate(amps, b"\x00", improved=False, best=b"\xff", delta=0.2)
+        assert result[0] < 0.5 - 1e-10
+
+    def test_not_improved_mixed_byte_only_rotates_disagreeing_bits(self):
+        """Per-bit independence: only bits where x != best move."""
+        amps = np.array([0.5] * 8, dtype=np.float64)
+        original = amps.copy()
+        x = 0b10101010
+        best = 0b10100000
+        result = rotation_gate(
+            amps, bytes([x]), improved=False, best=bytes([best]), delta=0.2
+        )
+        x_bits = _bytes_to_bits(bytes([x]))
+        best_bits = _bytes_to_bits(bytes([best]))
+        for i in range(8):
+            if x_bits[i] == best_bits[i]:
+                assert result[i] == original[i], f"agreeing bit {i} should not move"
+            else:
+                assert result[i] != original[i], f"disagreeing bit {i} should move"
+
+    def test_faithful_mode_differs_from_legacy_on_agreeing_bit(self):
+        """The exact case the two modes disagree on: x==best, not improved.
+
+        Legacy mode (best=None) has no notion of "best" and keeps
+        perturbing every bit purely from its own value; faithful mode
+        recognizes the bit is already correct and leaves it alone.
+        """
+        legacy = np.array([0.5], dtype=np.float64)
+        faithful = np.array([0.5], dtype=np.float64)
+        rotation_gate(legacy, b"\x00", improved=False, delta=0.2)
+        rotation_gate(faithful, b"\x00", improved=False, best=b"\x00", delta=0.2)
+        assert legacy[0] != 0.5
+        assert faithful[0] == 0.5
+
+    def test_faithful_mode_matches_legacy_delta_magnitude(self):
+        """When a rotation does happen, it's the same trig update as legacy."""
+        legacy = np.array([0.5], dtype=np.float64)
+        faithful = np.array([0.5], dtype=np.float64)
+        rotation_gate(legacy, b"\xff", improved=False, delta=0.2)  # bit=1, not improved
+        rotation_gate(faithful, b"\xff", improved=False, best=b"\x00", delta=0.2)
+        assert math.isclose(legacy[0], faithful[0], abs_tol=1e-12)
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # 3. Amplitude mutation
 # ═══════════════════════════════════════════════════════════════════════
@@ -728,18 +804,29 @@ class TestQEALifecycle:
         assert qea.avg_fitness >= 0
 
     def test_rotation_improves_fitness_sequence(self):
-        """Repeated good outcomes → amplitudes drift toward correct values."""
+        """Repeated non-improving results → amplitudes drift toward the tracked best.
+
+        Faithful mode applies Δθ=0 whenever the collapsed result is at
+        least as good as best_collapsed (see rotation_gate's ``best``
+        docstring) — convergence instead comes from repeated
+        *non*-improving results, each of which rotates every
+        disagreeing bit toward best_collapsed.
+        """
         qea = QEALifecycle(pop_size=10, rotation_angle=0.1, generation_size=100)
-        # One individual with uniform amplitudes
-        ind = QEAIndividual(amplitudes=[ALPHA_UNIFORM] * 8, best_collapsed=b"\x42")
-        qea.population = [ind]
-        # Repeatedly select, collapse, and report success for the same target value
         target = b"\x42"
+        # best_collapsed is the tracked best (b) to rotate toward.
+        ind = QEAIndividual(amplitudes=[ALPHA_UNIFORM] * 8, best_collapsed=target, edge_count=10)
+        qea.population = [ind]
+        # A collapsed result that disagrees with target in every bit, and
+        # a lower edge_count than the tracked best, so every call rotates
+        # (never promotes) — deterministic convergence toward target.
+        worst = bytes([~target[0] & 0xFF])
         for _ in range(50):
             qea._last_parent = ind
-            qea._last_collapsed = target
-            qea.on_fuzz_result(target, new_coverage=True, edge_count=10, edge_tracker=EdgeTracker())
-        # After 50 positive rotations, amplitudes should be strongly biased toward target
+            qea._last_collapsed = worst
+            qea.on_fuzz_result(worst, new_coverage=False, edge_count=0, edge_tracker=EdgeTracker())
+        # After 50 rotations toward the tracked best, amplitudes should be
+        # strongly biased toward target's bits.
         target_bits = _bytes_to_bits(target)
         for i, bit in enumerate(target_bits):
             if bit == 0:
@@ -872,33 +959,56 @@ class TestIntegration:
         assert len(qea.population) == 10
         assert any(i.fitness > 0 for i in qea.population)
 
-    def test_rotation_gate_within_on_fuzz_result(self):
-        """Verify that on_fuzz_result applies rotation in the expected direction."""
+    def test_rotation_gate_within_on_fuzz_result_improved(self):
+        """improved=True applies Δθ=0 and promotes best_collapsed instead."""
         qea = QEALifecycle(pop_size=5, rotation_angle=0.05)
-        # Start with known alpha
         amps = [0.5] * 8
-        ind = QEAIndividual(amplitudes=amps, best_collapsed=b"\x00")
+        ind = QEAIndividual(amplitudes=amps, best_collapsed=b"\x00", edge_count=0)
         qea.population = [ind]
         et = EdgeTracker()
 
-        # Pick seed (collapses from ind's amplitudes)
         seed = qea.pick_seed()
         assert qea._last_parent is ind
-
-        # Record the amplitude before rotation
         alpha_before = list(ind.amplitudes)
 
-        # Report success — rotation should move toward collapsed bits
+        # edge_count=5 >= parent.edge_count=0 -> improved -> no rotation,
+        # best_collapsed/edge_count promoted to this call's result instead.
         qea.on_fuzz_result(seed, new_coverage=True, edge_count=5, edge_tracker=et)
 
-        # After rotation: bits that were 0 in collapsed → α increased; bits 1 → α decreased
+        assert ind.amplitudes.tolist() == alpha_before
+        assert ind.best_collapsed == seed
+        assert ind.edge_count == 5
+
+    def test_rotation_gate_within_on_fuzz_result_not_improved(self):
+        """improved=False rotates each disagreeing bit toward best_collapsed."""
+        qea = QEALifecycle(pop_size=5, rotation_angle=0.05)
+        amps = [0.5] * 8
+        best = b"\x00"
+        ind = QEAIndividual(amplitudes=amps, best_collapsed=best, edge_count=10)
+        qea.population = [ind]
+        et = EdgeTracker()
+
+        seed = qea.pick_seed()
+        assert qea._last_parent is ind
+        alpha_before = list(ind.amplitudes)
+
+        # edge_count=0 < parent.edge_count=10 -> not improved -> rotate
+        # bits that disagree with best_collapsed (all zero) toward 0;
+        # agreeing bits (already 0) stay put.
+        qea.on_fuzz_result(seed, new_coverage=False, edge_count=0, edge_tracker=et)
+
         collapsed_bits = _bytes_to_bits(seed)
+        best_bits = _bytes_to_bits(best)
         for i in range(len(alpha_before)):
-            if collapsed_bits[i] == 0:
+            if collapsed_bits[i] != best_bits[i]:
+                # best_i == 0 here for every bit, so disagreement means
+                # collapsed_i == 1 and the bit should rotate toward |0>.
                 assert ind.amplitudes[i] > alpha_before[i], (
-                    f"bit {i}=0 should increase α: {alpha_before[i]:.3f} → {ind.amplitudes[i]:.3f}"
+                    f"bit {i} disagrees with best -> α should increase: "
+                    f"{alpha_before[i]:.3f} → {ind.amplitudes[i]:.3f}"
                 )
             else:
-                assert ind.amplitudes[i] < alpha_before[i], (
-                    f"bit {i}=1 should decrease α: {alpha_before[i]:.3f} → {ind.amplitudes[i]:.3f}"
+                assert ind.amplitudes[i] == alpha_before[i], (
+                    f"bit {i} already agrees with best -> α should not move"
                 )
+        assert ind.best_collapsed == best  # not promoted
