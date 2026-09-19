@@ -1,6 +1,8 @@
 # Plan: hybrid `kruskal_count` seed strategy
 
 > **Status (2026-09-16): implemented.** Module, SeedPicker/Fuzzer/CLI/parallel wiring, state, report, docs. Open: the A/B (`docs/TODO.md`). Deviations: per-seed scores are not persisted (pure function of bytes + profile); "first coupled pair" means earliest-coupling, ties by pair index; the trajectory mask stops at the first revisited offset.
+>
+> **Op-side port (2026-09-19): implemented as `core/schedulers/op_kruskal_count.py` / `OpKruskalCountScheduler`, same posture as `op_katz`/`op_tang` (off by default, no `to_dict`/`from_dict`, reachable only via `--elo` or `--op-kruskal-count`).** The domain here is the offered ops list (small, tens not thousands), not seed bytes, so the jump table is built from each op's own success rate instead of byte values, and the walk cap is `2n` (dynamic, exact) rather than this doc's fixed `MAX_STEPS=256` -- see that module's docstring for the full derivation. No hybrid `generate()` step: op schedulers only `select_op`/`record`, they don't synthesize seeds.
 ## Goal
 Add an opt-in `kruskal_count` seed strategy based on Kruskal-count coupling:
 - independent walkers traverse each corpus seed using value-driven jumps;

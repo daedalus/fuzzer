@@ -1043,6 +1043,7 @@ class Fuzzer:
         op_tang=False,
         op_tang_rank=10,
         op_tang_refit_interval=2000,
+        op_kruskal_count=False,
         consolidated=False,
         moss=False,
         moss_gamma=1.0,
@@ -2387,6 +2388,20 @@ class Fuzzer:
                 op_tang_rank,
                 op_tang_refit_interval,
             )
+
+        # Kruskal-count coupling over the operator jump graph. Off by
+        # default: see core/schedulers/op_kruskal_count.py's module
+        # docstring -- unproven exploratory arm, same posture as op_katz
+        # and op_tang above.
+        self._use_op_kruskal_count = op_kruskal_count
+        self._op_kruskal_count = None
+        if op_kruskal_count:
+            from fuzzer_tool.core.schedulers.op_kruskal_count import (
+                OpKruskalCountScheduler,
+            )
+
+            self._op_kruskal_count = OpKruskalCountScheduler(rng=self._rng)
+            log.info("op_kruskal_count enabled")
 
         # Consolidated: flat Thompson with a category-shrunk prior and capped
         # evidence -- the single learner meant to replace the Elo portfolio
@@ -5294,6 +5309,7 @@ class Fuzzer:
             self._canary,
             self._op_katz,
             self._op_tang,
+            self._op_kruskal_count,
         ):
             if scheduler is None:
                 continue

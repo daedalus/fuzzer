@@ -465,8 +465,8 @@ _FALLBACK_PRECEDENCE = (
     "fpl",
     "successive_elim",
     "round_robin",
-    # canary, op_katz, op_tang, gradient, whittle, corral are deliberately
-    # absent here: they are unproven exploratory arms
+    # canary, op_katz, op_tang, op_kruskal_count, gradient, whittle, corral
+    # are deliberately absent here: they are unproven exploratory arms
     # (see their module docstrings) that should only ever be reached via
     # Elo explicitly choosing them, not by being the top-precedence live
     # selector whenever someone enables the flag without --elo -- the same
@@ -576,6 +576,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_katz")
     if f._use_op_tang and f._op_tang:
         available.append("op_tang")
+    if f._use_op_kruskal_count and f._op_kruskal_count:
+        available.append("op_kruskal_count")
     if f._use_softmax and f._softmax:
         available.append("softmax")
     if f._use_topk and f._topk:
@@ -4526,6 +4528,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "op_tang" and f._op_tang:
             op = f._op_tang.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "op_kruskal_count" and f._op_kruskal_count:
+            op = f._op_kruskal_count.select_op(ops)
             f._last_mopt_particles.append(None)
         else:
             op = self.ctx._rng.choice(ops)

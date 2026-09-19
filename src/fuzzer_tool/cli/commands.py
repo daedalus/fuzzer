@@ -507,6 +507,7 @@ def cmd_fuzz(args):
             op_tang=getattr(args, "op_tang", False),
             op_tang_rank=getattr(args, "op_tang_rank", 10),
             op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
+            op_kruskal_count=getattr(args, "op_kruskal_count", False),
             consolidated=getattr(args, "consolidated", False),
             moss=getattr(args, "moss", False),
             moss_gamma=getattr(args, "moss_gamma", 1.0),
@@ -766,6 +767,7 @@ def cmd_fuzz(args):
         op_tang=getattr(args, "op_tang", False),
         op_tang_rank=getattr(args, "op_tang_rank", 10),
         op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
+        op_kruskal_count=getattr(args, "op_kruskal_count", False),
         consolidated=getattr(args, "consolidated", False),
         moss=getattr(args, "moss", False),
         moss_gamma=getattr(args, "moss_gamma", 1.0),
@@ -1896,6 +1898,7 @@ _HAIL_MARY_FLAGS = (
     "kruskal_count",
     "op_katz",
     "op_tang",
+    "op_kruskal_count",
     "ecofuzz",
     "metropolis",
     "auto_timeout",
@@ -2677,6 +2680,17 @@ def main() -> int:
         type=int,
         default=2000,
         help="Executions between op_tang basis refits (default: 2000)",
+    )
+    fuzz_parser.add_argument(
+        "--op-kruskal-count",
+        action="store_true",
+        help=(
+            "Enable Kruskal-count coupling over the operator jump graph "
+            "(experimental, off by default -- see "
+            "core/schedulers/op_kruskal_count.py for the design and the "
+            "same 'unproven arm' caveat op_katz/op_tang carry, before "
+            "using this on a real campaign)"
+        ),
     )
     fuzz_parser.add_argument(
         "--consolidated",
