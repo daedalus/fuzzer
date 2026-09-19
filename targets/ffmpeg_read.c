@@ -140,6 +140,87 @@ static int fuzz_ensure_initialized(void) {
     return 1;
 }
 
+/* ── Filename hint ────────────────────────────────────────────────
+ *
+ * avformat_open_input() was called with a NULL url, so AVProbeData.filename
+ * was always empty. Any demuxer gated on an extension was therefore
+ * unreachable by construction, no matter what bytes we fed it:
+ *
+ *   - 27 demuxers have no read_probe at all (g722, g729, sbc, rawvideo, the
+ *     s16le/u8/alaw raw family, ...). Extension is their *only* selector, so
+ *     they had never been fuzzed at all.
+ *   - Others have a probe that itself requires an extension or mime type.
+ *     hls is the motivating case: hls_probe() returns 0 unless the filename
+ *     matches m3u8/m3u to rule out non-standard extensions.
+ *
+ * Measured on the vendored FFmpeg 9.0.1: 172 of 355 demuxers declare
+ * extensions, and only 8 declare a mime type, so the filename is the only
+ * hint that reaches them.
+ *
+ * The hint is NOT taken from the input bytes. A tail/footer protocol was
+ * tried before (285d0fa) and reverted; beyond that, deriving the extension
+ * from content would make a one-byte mutation change which demuxer runs,
+ * which destabilises exactly the edge signal the scheduler reads. Instead:
+ *
+ *   1. FUZZ_FFMPEG_EXT pins an extension for a whole campaign. This is the
+ *      upstream idiom -- FFmpeg builds one target_dem_fuzzer binary per
+ *      demuxer via -DFFMPEG_DEMUXER -- and is how the 27 headerless raw
+ *      formats get reached, since they have no magic to sniff.
+ *   2. Otherwise a magic-byte sniff, only for formats that are gated on the
+ *      extension *and* carry a signature. These inputs are rejected outright
+ *      today, so a hint here can only add coverage, never move an input off
+ *      a demuxer it currently reaches.
+ *   3. Otherwise no hint, byte-identical to the old behaviour.
+ */
+#define FUZZ_EXT_MAX 16
+
+/* Read the env override once: getenv() on every execution shows up in the
+ * hot path, and a campaign cannot change it mid-run anyway. */
+static const char *fuzz_ext_override(void) {
+    static const char *cached;
+    static int         looked_up;
+    if (!looked_up) {
+        const char *v = getenv("FUZZ_FFMPEG_EXT");
+        looked_up = 1;
+        if (v && v[0] && strlen(v) < FUZZ_EXT_MAX && !strchr(v, '/') &&
+            !strchr(v, '\\') && !strchr(v, '.'))
+            cached = v;
+    }
+    return cached;
+}
+
+/* Magic → extension, for demuxers whose probe demands the extension. Keep
+ * this table small and literal: every entry silently redirects which demuxer
+ * an input reaches, so an over-eager match costs coverage elsewhere. */
+static const char *fuzz_sniff_ext(const unsigned char *buf, size_t size) {
+    if (size >= 7 && !memcmp(buf, "#EXTM3U", 7)) return "m3u8";
+    return NULL;
+}
+
+/* Build "fuzz.<ext>", or an empty string when there is no hint. Empty (not
+ * NULL) keeps av_match_ext()/ff_match_url_ext() on their no-match path
+ * rather than reintroducing a NULL filename. */
+static void fuzz_build_url(char *out, size_t out_size,
+                           const unsigned char *buf, size_t size) {
+    const char *ext = fuzz_ext_override();
+    if (!ext) ext = fuzz_sniff_ext(buf, size);
+    if (ext) snprintf(out, out_size, "fuzz.%s", ext);
+    else     out[0] = '\0';
+}
+
+/* Sub-resource budget. A playlist demuxer will retry a failing segment in a
+ * loop with a sleep between attempts -- FFmpeg's own fuzzer carries the same
+ * note ("HLS uses a loop with sleep, we thus must breakout or we timeout")
+ * and bounds it the same way. The watchdog below would fire eventually, but
+ * an interrupt callback lets the demuxer unwind and free its own state,
+ * which keeps the run clean under ASAN instead of dying mid-allocation. */
+#define FUZZ_INTERRUPT_BUDGET 256
+static int fuzz_interrupt_budget = FUZZ_INTERRUPT_BUDGET;
+static int fuzz_interrupt_cb(void *opaque) {
+    (void)opaque;
+    return --fuzz_interrupt_budget < 0;
+}
+
 /* Open an input from an in-memory buffer. Each call gets its own
  * AVIOContext buffer because ffmpeg's probe path may free the buffer
  * during avformat_open_input. */
@@ -180,7 +261,41 @@ static AVFormatContext *fuzz_open_input(const unsigned char *buf, size_t size) {
     fmt_ctx->probesize = 1 * 1024 * 1024;  /* 1 MB probe window */
     fmt_ctx->pb = avio_ctx;
 
-    if (avformat_open_input(&fmt_ctx, NULL, NULL, NULL) < 0) {
+    fuzz_interrupt_budget = FUZZ_INTERRUPT_BUDGET;
+    fmt_ctx->interrupt_callback.callback = fuzz_interrupt_cb;
+    fmt_ctx->interrupt_callback.opaque   = NULL;
+
+    char url[8 + FUZZ_EXT_MAX];
+    fuzz_build_url(url, sizeof(url), buf, size);
+
+    /* Empty protocol whitelist. Once the filename hint is live, a playlist
+     * demuxer will try to open the segments it just parsed -- relative to
+     * our url, so through the file protocol. That would let an input pull an
+     * arbitrary local path into the run, and would make coverage depend on
+     * the filesystem rather than on the bytes. Blocking every protocol keeps
+     * the target hermetic; the parse itself is what we want reached, and it
+     * still runs. Our own input is unaffected: pb is set, so AVFMT_FLAG_CUSTOM_IO
+     * means the url is never opened as a protocol. */
+    AVDictionary *opts = NULL;
+    av_dict_set(&opts, "protocol_whitelist", "", 0);
+
+    /* Bound the playlist reload loops. These are the sleeps FFmpeg's own
+     * fuzzer warns about: with the defaults (max_reload=1000), one hls input
+     * costs 10.0 s of wall clock retrying a segment it can never open, which
+     * trips the watchdog and reports a timeout instead of a result. Measured
+     * on the vendored 9.0.1: 10026 ms -> 8 ms with max_reload alone. The
+     * interrupt callback above does not help here, because the wait is an
+     * av_usleep() the demuxer does not poll through. m3u8_hold_counters
+     * bounds the same wait for a live playlist whose segment has not
+     * appeared yet. Both are hls-private AVOptions: when another demuxer is
+     * selected they are simply left in the dict, which we free. */
+    av_dict_set(&opts, "max_reload", "0", 0);
+    av_dict_set(&opts, "m3u8_hold_counters", "0", 0);
+
+    int open_rc = avformat_open_input(&fmt_ctx, url, NULL, &opts);
+    av_dict_free(&opts);
+
+    if (open_rc < 0) {
         avformat_close_input(&fmt_ctx);
         /* Nothing reads through the opaque any more — safe to reclaim here. */
         fuzz_release_io_state();
