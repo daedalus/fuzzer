@@ -7474,6 +7474,8 @@ class Fuzzer:
             groups["Seed selection"].append("entropy-kl")
         if getattr(self, "_entropy_zscore", None) is not None:
             groups["Seed selection"].append("entropy-zscore")
+        if getattr(self, "_entropy_deviation", None) is not None:
+            groups["Seed selection"].append("entropy-deviation")
         if getattr(self, "_seed_residual", None) is not None:
             groups["Seed selection"].append("residual")
 
