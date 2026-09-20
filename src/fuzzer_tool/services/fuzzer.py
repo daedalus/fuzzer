@@ -2325,6 +2325,7 @@ class Fuzzer:
             self._bo_gp_ucb = BOGPUCBScheduler(
                 length_scale=bo_gp_length_scale,
                 noise=bo_gp_noise,
+                rng=self._rng,
             )
             log.info("BO-GP-UCB enabled (l=%.2f, noise=%.4f)", bo_gp_length_scale, bo_gp_noise)
 
