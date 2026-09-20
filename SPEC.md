@@ -75,8 +75,6 @@ Options:
 - `--coverage-report FILE`: Dump edge coverage map to JSON on exit
 - `--auto-timeout`: Auto-tune timeout by probing target at startup
 - `-g, --grammar SPEC`: Grammar spec (built-in: json, http_request, elf) or path to .gram file
-- `-j, --jobs N`: Number of parallel fuzzing workers (default: 1)
-- `--sync-interval N`: Seconds between corpus sync in parallel mode (default: 30)
 - `--persistent`: Use persistent mode for AFL-loop targets (no fork per iteration)
 - `-s, --seed N`: RNG seed for reproducibility (default: 42)
 

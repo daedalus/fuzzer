@@ -104,8 +104,6 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 - **Persistent mode** (`--persistent`) for AFL-loop targets, no fork per iteration
 
 ### Campaign Modes
-- **Parallel workers** (`--jobs N`, `--sync-interval`): independent workers over a shared
-  corpus directory with periodic queue sync
 - **Network targets** (`--net-host`/`--net-port`/`--net-proto`/`--net-settle-ms`): drive the
   input over TCP/UDP into a listening server instead of stdin or a file
 - **Differential fuzzing** (`--differential`): run every input through a second target and

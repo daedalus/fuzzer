@@ -41,8 +41,11 @@ overhead is only the ctypes FFI call + target execution time.
   symbol but the inline code never initializes. The coverage bitmap
   remains all zeros.
 
-- **Thread safety.** The target must be thread-safe if used with parallel
-  workers. Each worker gets its own `ctypes.CDLL` handle.
+- **Thread safety.** Each fuzzer process gets its own `ctypes.CDLL`
+  handle, so concurrent instances over one corpus directory do not share
+  target state through the library itself -- but a target that keeps
+  state outside its own address space (a temp file at a fixed path, a
+  lock, a socket) still needs to tolerate several instances at once.
 
 - **`longjmp` across FFI.** If the target uses `longjmp` to recover from
   errors (as our libpng shim does), the jump must not cross the ctypes
@@ -68,8 +71,8 @@ and `ctypes.CDLL` load overhead on every iteration.
   initializing inline instrumentation. The bitmap is returned (correct
   size) but all bytes are zero.
 
-- **Single-threaded.** The persistent subprocess is a single process.
-  Parallel fuzzing spawns multiple subprocess instances.
+- **Single-threaded.** The persistent subprocess is a single process;
+  running several fuzzer instances means several such subprocesses.
 
 - **Pipe overhead.** Each iteration still involves stdin/stdout pipe I/O
   (~50μs per round-trip). This is the bottleneck vs direct ctypes.

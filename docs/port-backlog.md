@@ -179,25 +179,6 @@ distance, instrumenting only target-relevant blocks (<2% of reachable BBs) so
 irrelevant coverage never pollutes feedback. `distance.py` math plus one LLVM
 pass. **Effort L–M.**
 
-**D4. Measure, don't model, in `parallel.py`** (TigerBeetle) — the one genuine
-*algorithmic* port from that source; everything else it offers is testing
-methodology (see section F). `services/parallel.py` syncs corpora between
-workers on a **fixed `sync_interval: int = 30`** via `_sync_corpus_in`, scanning
-sibling directories on a per-sibling cursor. That is a static, modelled topology
-on a static, modelled cadence, and it assumes the cost/benefit of syncing is
-uniform across siblings and constant over time. It is not — late in a campaign
-most synced seeds are redundant.
-
-The PCC-style alternative maps cleanly: track, per sibling, the fraction of
-imported seeds that produced new coverage; periodically run an experiment with a
-different interval or a different subset of siblings; keep the change if
-measured edges-per-import-second improves. The measurement machinery exists
-(`core/seed_quality.py`, `core/elo.py`, `services/stats.py`) and, ironically,
-ten bandits sit in `core/schedulers/` solving exactly this problem while pointed
-only at operator selection. The scheduler-convergence harness is what would tell
-you whether the adaptive version actually beats the fixed 30s — build the fuzzer
-that can judge the algorithm, then build the algorithm.
-
 **D5. Read the per-seed cost ledger we already keep** (Persistence Mechanics,
 2026-08-29) — **mostly shipped, round 17.** The gating measurement said
 per-seed exec cost is *not* clustered
@@ -240,7 +221,8 @@ rewired off `fuzz_count` at the same time.
 
 **E1. Crash message normalization and grouping** (`R5`) — `core/trace.py`
 produces backtraces; what is missing is normalizing the message (strip
-identifiers, source locations, numbers), grouping across workers, and caching
+identifiers, source locations, numbers), grouping across runs sharing a
+crashes directory, and caching
 groups so previously-reported bugs don't resurface. The source's Solidity
 campaign went from 157 AFL-unique crashes to 16 distinct locations. **Warning
 worth repeating: backtrace parsing and grouping is where valid bugs get silently
@@ -584,6 +566,19 @@ than a memoryless queue. The six pillars map onto subsystems without producing a
 decision. Nothing ports from the accompanying demo scripts, which are matplotlib
 illustration and do not faithfully implement the paper's own equation 8.
 
+**D4: adaptive corpus-sync cadence in `parallel.py`** (TigerBeetle, rejected
+2026-09-20). The one genuine *algorithmic* port that source offered: replace
+`_sync_corpus_in`'s fixed `sync_interval: int = 30` with a PCC-style measured
+cadence — track per sibling the fraction of imported seeds that produced new
+coverage, periodically experiment with a different interval or subset, keep
+what improves edges-per-import-second. Sound, and moot: the `-j N` mode it
+would have tuned is retired, so there is no sync to pace. Its *observation*
+outlives it and is the reason this entry stays rather than vanishing — a fixed
+interval is a modelled cadence standing in for a measured one, and ten bandits
+sit in `core/schedulers/` solving exactly that shape of problem while pointed
+only at operator selection. Re-propose only against a cadence that still
+exists (the maintenance tick, the stats interval), not against corpus sync.
+
 **Do not disable cmplog.** One source disables cmplog/redqueen, reasoning that
 input-to-state machinery is built for byte-level mutation and only adds overhead
 once a grammar mutator produces valid tokens. True for text-source targets;
@@ -627,7 +622,8 @@ happens first.
 scoped out explicitly rather than fudged.
 
 **`std.testing.random_seed` verbatim, and ARR itself.** Language-specific and
-consensus-specific respectively. The pytest plugin (F6) and D4 are the real ports.
+consensus-specific respectively. The pytest plugin (F6) was the real port;
+D4 was the other one and is now in Rejected, its subject having been retired.
 
 **`av_force_cpu_flags(0)`.** In FFmpeg's own builds this reaches the scalar
 reference implementations, which is real coverage. In ours `vendor_ffmpeg.sh`

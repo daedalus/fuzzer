@@ -142,7 +142,7 @@ src/fuzzer_tool/
 │                 #   gif, webp, webm, zip, protobuf, …)
 ├── adapters/     # Process execution, filesystem ops, afl_shim.c (edge + cmplog) / perf_shim.c
 ├── services/     # Orchestration: fuzzer.py, operators.py, seed_picker.py, runner.py,
-│                 #   stats.py, corpus_manager.py, parallel.py, report.py
+│                 #   stats.py, corpus_manager.py, report.py
 └── cli/          # CLI entry point (commands.py, __main__.py)
 
 tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4/secp256k1/sqlite), corpus_png.py,
