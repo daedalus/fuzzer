@@ -504,6 +504,7 @@ def cmd_fuzz(args):
             entropy_kl=getattr(args, "entropy_kl", False),
             entropy_zscore=getattr(args, "entropy_zscore", False),
             entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
+            seed_residual=getattr(args, "seed_residual", False),
             successive_elim=getattr(args, "successive_elim", False),
             successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
             successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -514,6 +515,7 @@ def cmd_fuzz(args):
             op_tang_rank=getattr(args, "op_tang_rank", 10),
             op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
             op_kruskal_count=getattr(args, "op_kruskal_count", False),
+            op_credit=getattr(args, "op_credit", False),
             consolidated=getattr(args, "consolidated", False),
             moss=getattr(args, "moss", False),
             moss_gamma=getattr(args, "moss_gamma", 1.0),
@@ -773,6 +775,7 @@ def cmd_fuzz(args):
         entropy_kl=getattr(args, "entropy_kl", False),
         entropy_zscore=getattr(args, "entropy_zscore", False),
         entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
+        seed_residual=getattr(args, "seed_residual", False),
         successive_elim=getattr(args, "successive_elim", False),
         successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
         successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -783,6 +786,7 @@ def cmd_fuzz(args):
         op_tang_rank=getattr(args, "op_tang_rank", 10),
         op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
         op_kruskal_count=getattr(args, "op_kruskal_count", False),
+        op_credit=getattr(args, "op_credit", False),
         consolidated=getattr(args, "consolidated", False),
         moss=getattr(args, "moss", False),
         moss_gamma=getattr(args, "moss_gamma", 1.0),
@@ -1917,9 +1921,11 @@ _HAIL_MARY_FLAGS = (
     "kruskal_count",
     "entropy_kl",
     "entropy_zscore",
+    "seed_residual",
     "op_katz",
     "op_tang",
     "op_kruskal_count",
+    "op_credit",
     "ecofuzz",
     "metropolis",
     "auto_timeout",
@@ -2736,6 +2742,17 @@ def main() -> int:
         ),
     )
     fuzz_parser.add_argument(
+        "--op-credit",
+        action="store_true",
+        help=(
+            "Enable Thompson sampling over class-deduplicated operator credit: an "
+            "operator that finds a 45-edge duplicate chain earns one unit, not 45 "
+            "(experimental, off by default; leaves the Elo ballot while the edge-id "
+            "stability gate is closed -- see core/schedulers/op_credit.py and the same "
+            "'unproven arm' caveat op_tang carries)"
+        ),
+    )
+    fuzz_parser.add_argument(
         "--consolidated",
         action="store_true",
         help=(
@@ -3218,6 +3235,17 @@ def main() -> int:
         default=0.0,
         help="Z-score the --entropy-zscore arm peaks at (default 0.0, seeds typical for "
         "this corpus). Positive chases the high-entropy tail, negative the sparse one.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-residual",
+        action="store_true",
+        default=False,
+        help="Residual seed scheduling: adds a 'residual' Elo seed arm scoring each seed by "
+        "its incidence mass (sum of 1/owners over deduplicated edge classes) AFTER regressing "
+        "out the rank of its total hits, so it ranks what hit volume does not explain. "
+        "Abstains while the edge-id stability probe or the instrumentation check fails, and "
+        "logs its own falsification (partial correlation against volume) at every refit. OFF "
+        "by default; not yet A/B validated -- see core/schedulers/seed_residual.py.",
     )
     fuzz_parser.add_argument(
         "--ecofuzz",

@@ -961,7 +961,11 @@ reason -- do them together.
 
 ### P3-3. Operator reward on independent coordinates
 
-Gated on P1-2. Credit a duplicate class once instead of per member, and give
+**Built as `op_credit`, off by default, no bench result** (see
+`handover_matrix_schedulers_2026-09-19.md`). The duplicate-class half is in;
+the derived-edge half waits on P1-2 (`MatrixSubstrate.derived` is empty). The
+paper question is answered there: credit is a function of the current partition,
+so a split raises it. Gated on P1-2. Credit a duplicate class once instead of per member, and give
 a derived edge no novelty credit at all. Changes the reward rather than the
 selector, so it is measurable against the 34 existing operator schedulers
 without replacing any of them. Paper question first: what happens to credit
@@ -969,7 +973,9 @@ when a class splits mid-campaign.
 
 ### P3-4. `seed_residual` arm
 
-Gated on P1-3 and on P2-3's canonical space. Mass orthogonal to
+**Built, off by default, no bench result**
+(`handover_matrix_schedulers_2026-09-19.md`); the per-refit partial-correlation
+log is in. PC2/PC3 features are not, pending P1-3. Gated on P1-3 and on P2-3's canonical space. Mass orthogonal to
 rank(total hits), weighted by `1/owner_count`, with the partial-correlation
 falsification recomputed at every refit and logged. `bench_paired.py` with a
 pre-registered threshold, no exceptions: the same question has produced two

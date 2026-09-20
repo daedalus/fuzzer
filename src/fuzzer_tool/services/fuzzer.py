@@ -158,6 +158,7 @@ _SEED_STRATEGY_NAMES = (
     "kruskal_count",
     "entropy_kl",
     "entropy_zscore",
+    "residual",
 )
 
 
@@ -1105,6 +1106,7 @@ class Fuzzer:
         op_tang_rank=10,
         op_tang_refit_interval=2000,
         op_kruskal_count=False,
+        op_credit=False,
         consolidated=False,
         moss=False,
         moss_gamma=1.0,
@@ -1226,6 +1228,7 @@ class Fuzzer:
         entropy_kl=False,
         entropy_zscore=False,
         entropy_zscore_target=0.0,
+        seed_residual=False,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
         seed_canary_scheduler=False,
@@ -2185,6 +2188,28 @@ class Fuzzer:
             self._entropy_zscore = EntropyZScoreSeedStrategy(
                 self._rng, target_z=entropy_zscore_target
             )
+        # Matrix arms (seed_residual + op_credit) share one canonical edge space,
+        # one refit cadence and one preflight gate: see core/edge_matrix.py and
+        # docs/handover/handover_edge_id_axis_2026-09-18.md (P3-3, P3-4). Both are
+        # off by default and gated on a paired benchmark, not on this wiring.
+        self._matrix_substrate = None
+        self._seed_residual = None
+        if seed_residual or op_credit:
+            from fuzzer_tool.core.edge_matrix import MatrixSubstrate
+
+            self._matrix_substrate = MatrixSubstrate(
+                target=getattr(self, "target", None),
+                use_coverage=getattr(self, "use_coverage", True),
+                ptrace=getattr(self, "ptrace_cov", None) is not None
+                or bool(getattr(self, "use_ptrace", False)),
+            )
+        if seed_residual:
+            from fuzzer_tool.core.schedulers.seed_residual import ResidualSeedScheduler
+
+            self._seed_residual = ResidualSeedScheduler(
+                self._rng, self._matrix_substrate, outcome_fn=self._seed_residual_outcomes
+            )
+            log.info("seed_residual enabled")
         # Seed-arena canary: deliberately worst-in-class seed scheduler, the
         # _pick_seed_elo counterpart of op_canary (see
         # core/schedulers/seed_canary.py). Only meaningful alongside --elo,
@@ -2501,6 +2526,18 @@ class Fuzzer:
 
             self._op_kruskal_count = OpKruskalCountScheduler(rng=self._rng)
             log.info("op_kruskal_count enabled")
+
+        # Operator credit on canonical edge classes (P3-3): the reward is the
+        # change, the selector is a stock Thompson. Off by default; leaves the
+        # ballot while the preflight gate is closed. Same unproven-arm posture as
+        # op_tang above.
+        self._use_op_credit = op_credit
+        self._op_credit = None
+        if op_credit:
+            from fuzzer_tool.core.schedulers.op_credit import OpCreditScheduler
+
+            self._op_credit = OpCreditScheduler(self._rng, self._matrix_substrate)
+            log.info("op_credit enabled")
 
         # Consolidated: flat Thompson with a category-shrunk prior and capped
         # evidence -- the single learner meant to replace the Elo portfolio
@@ -3452,6 +3489,15 @@ class Fuzzer:
 
     def _init_seed_metadata(self):
         return self._corpus_manager.init_seed_metadata()
+
+    def _seed_residual_outcomes(self) -> dict[str, float]:
+        """Seed key -> edges its descendants found: the falsification log's outcome.
+
+        Read only by ``ResidualSeedScheduler.falsification`` at refit; never by the score.
+        """
+        return {
+            self._seed_key(d): float(m.get("coverage_edges", 0)) for d, m in self.seed_meta.items()
+        }
 
     def _seed_key(self, data: bytes) -> str:
         """Return content hash for *data*."""
@@ -5155,6 +5201,16 @@ class Fuzzer:
                             for op in unique_ops:
                                 self._op_tang.observe_new_edges(op, new)
                             self._op_tang.maybe_refit(self.exec_count)
+                        # op_credit needs the edge identities too: it stores what an
+                        # operator found and settles the credit against the canonical
+                        # classes at read time, so a class that splits later is right.
+                        if self._op_credit is not None:
+                            for op in unique_ops:
+                                self._op_credit.observe_new_edges(op, new)
+                    # The fold follows the tracker: refit on the arms' own cadence
+                    # whenever new edges (hence new seed rows) have appeared.
+                    if self._matrix_substrate is not None:
+                        self._matrix_substrate.maybe_refit(self._edge_tracker, self.exec_count)
                     # Separate counter for cmplog-involved edge discoveries
                     # (cumulative with the op attribution above — cmplog is a
                     #  signal source, not a mutation op, so it can overlap).
@@ -5414,6 +5470,7 @@ class Fuzzer:
             self._op_katz,
             self._op_tang,
             self._op_kruskal_count,
+            self._op_credit,
         ):
             if scheduler is None:
                 continue
@@ -6963,6 +7020,8 @@ class Fuzzer:
             seeds.append("entropy-kl")
         if getattr(self, "_entropy_zscore", None) is not None:
             seeds.append("entropy-zscore")
+        if getattr(self, "_seed_residual", None) is not None:
+            seeds.append("residual")
         if getattr(self, "_use_seed_canary", False) and self._seed_canary:
             seeds.append("canary")
         if seeds:
@@ -7128,6 +7187,11 @@ class Fuzzer:
         if not union:
             return
         jaccard = len(common) / len(union)
+        # The matrix arms' preflight gate reads this (F1): under per-process ids
+        # every edge is a singleton owned by one seed, i.e. maximally rare.
+        substrate = getattr(self, "_matrix_substrate", None)
+        if substrate is not None:
+            substrate.set_stability(jaccard)
         if jaccard == 1.0:
             print(
                 f"[*] Edge id stability: {len(union)} edge ids reproduced exactly "
@@ -7343,6 +7407,8 @@ class Fuzzer:
             groups["Seed selection"].append("entropy-kl")
         if getattr(self, "_entropy_zscore", None) is not None:
             groups["Seed selection"].append("entropy-zscore")
+        if getattr(self, "_seed_residual", None) is not None:
+            groups["Seed selection"].append("residual")
 
         if self.markov_trained:
             groups["Mutation"].append("markov")

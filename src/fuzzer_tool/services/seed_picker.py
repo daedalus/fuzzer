@@ -315,6 +315,11 @@ class SeedPicker:
         zscore = getattr(f, "_entropy_zscore", None)
         if zscore is not None and f.corpus and (zscore.ready or not zscore.warmed):
             available.append("entropy_zscore")
+        # Abstains (leaves the pool) while the preflight gate is closed: under
+        # per-process ids a rarity-shaped score is scoring noise (F1, F11).
+        residual = getattr(f, "_seed_residual", None)
+        if residual is not None and f.corpus and residual.available():
+            available.append("residual")
         if getattr(f, "_use_seed_canary", False) and f._seed_canary and f.corpus:
             available.append("canary")
 
@@ -358,6 +363,7 @@ class SeedPicker:
             "kruskal_count": lambda: self._pick_kruskal_count_seed(),
             "entropy_kl": lambda: self._pick_entropy_kl_seed(),
             "entropy_zscore": lambda: self._pick_entropy_zscore_seed(),
+            "residual": lambda: self._pick_residual_seed(),
             "canary": lambda: self._pick_seed_canary_seed(),
         }
         handler = strategy_map.get(strategy)
@@ -479,6 +485,19 @@ class SeedPicker:
         anchor = strategy.select(f.corpus)
         generated = strategy.generate(anchor, f.corpus)
         return anchor if generated is None else generated
+
+    def _pick_residual_seed(self) -> bytes | None:
+        """Score what hit volume does not explain, on canonical edge classes.
+
+        Returns None (abstains) while the preflight gate is closed or no fold exists
+        yet, which hands the pick back to the caller instead of degrading to uniform.
+        """
+        f = self.f
+        arm = getattr(f, "_seed_residual", None)
+        if arm is None or not f.corpus:
+            return None
+        idx = arm.select_index([f._seed_key(s) for s in f.corpus])
+        return None if idx is None else f.corpus[idx]
 
     def _pick_entropy_kl_seed(self) -> bytes | None:
         """Byte-novelty arm: draw proportional to KL against the corpus pool.
@@ -617,7 +636,11 @@ class SeedPicker:
         # Without --elo these arms have no arbiter, so they run ahead of the
         # generic weighted picker the same way kruskal-count does -- and hand
         # the pick straight back when they decline.
-        for pick in (self._pick_entropy_kl_seed, self._pick_entropy_zscore_seed):
+        for pick in (
+            self._pick_entropy_kl_seed,
+            self._pick_entropy_zscore_seed,
+            self._pick_residual_seed,
+        ):
             chosen = pick()
             if chosen is not None:
                 return chosen

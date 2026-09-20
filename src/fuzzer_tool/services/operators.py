@@ -584,6 +584,10 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_tang")
     if f._use_op_kruskal_count and f._op_kruskal_count:
         available.append("op_kruskal_count")
+    # Leaves the ballot while the preflight gate is closed: under per-process ids
+    # every phantom id is a "discovery", and credit for those is noise (F1, F11).
+    if f._use_op_credit and f._op_credit and f._op_credit.available():
+        available.append("op_credit")
     if f._use_softmax and f._softmax:
         available.append("softmax")
     if f._use_topk and f._topk:
@@ -4540,6 +4544,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "op_kruskal_count" and f._op_kruskal_count:
             op = f._op_kruskal_count.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "op_credit" and f._op_credit:
+            op = f._op_credit.select_op(ops)
             f._last_mopt_particles.append(None)
         else:
             op = self.ctx._rng.choice(ops)

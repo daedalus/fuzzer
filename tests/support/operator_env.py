@@ -53,13 +53,17 @@ BALLOT_SCHEDULERS = (
     "kl_swucb",
     "mopt",
     "moss",
+    "op_credit",
     "op_katz",
+    "op_kruskal_count",
     "op_tang",
     "replicator",
     "round_robin",
+    "softmax",
     "successive_elim",
     "swucb",
     "tang",
+    "topk",
     "whittle",
 )
 

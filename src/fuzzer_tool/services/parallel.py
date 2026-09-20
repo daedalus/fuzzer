@@ -115,6 +115,7 @@ def _worker_main(
     op_tang_rank: int = 10,
     op_tang_refit_interval: int = 2000,
     op_kruskal_count: bool = False,
+    op_credit: bool = False,
     invasion: bool = False,
     garch: bool = False,
     continuum: bool = False,
@@ -145,6 +146,7 @@ def _worker_main(
     entropy_kl: bool = False,
     entropy_zscore: bool = False,
     entropy_zscore_target: float = 0.0,
+    seed_residual: bool = False,
     softmax: bool = False,
     softmax_tau: float = 1.0,
     use_topk: bool = False,
@@ -262,6 +264,7 @@ def _worker_main(
         op_tang_rank=op_tang_rank,
         op_tang_refit_interval=op_tang_refit_interval,
         op_kruskal_count=op_kruskal_count,
+        op_credit=op_credit,
         invasion=invasion,
         garch=garch,
         continuum=continuum,
@@ -292,6 +295,7 @@ def _worker_main(
         entropy_kl=entropy_kl,
         entropy_zscore=entropy_zscore,
         entropy_zscore_target=entropy_zscore_target,
+        seed_residual=seed_residual,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -782,6 +786,7 @@ def run_parallel(
     op_tang_rank: int = 10,
     op_tang_refit_interval: int = 2000,
     op_kruskal_count: bool = False,
+    op_credit: bool = False,
     invasion: bool = False,
     garch: bool = False,
     continuum: bool = False,
@@ -812,6 +817,7 @@ def run_parallel(
     entropy_kl: bool = False,
     entropy_zscore: bool = False,
     entropy_zscore_target: float = 0.0,
+    seed_residual: bool = False,
     softmax: bool = False,
     softmax_tau: float = 1.0,
     use_topk: bool = False,
@@ -967,6 +973,7 @@ def run_parallel(
         op_tang_rank=op_tang_rank,
         op_tang_refit_interval=op_tang_refit_interval,
         op_kruskal_count=op_kruskal_count,
+        op_credit=op_credit,
         invasion=invasion,
         garch=garch,
         continuum=continuum,
@@ -997,6 +1004,7 @@ def run_parallel(
         entropy_kl=entropy_kl,
         entropy_zscore=entropy_zscore,
         entropy_zscore_target=entropy_zscore_target,
+        seed_residual=seed_residual,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

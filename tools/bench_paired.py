@@ -87,6 +87,14 @@ ARMS: dict[str, list[str]] = {
     # to the continuum.
     "invasion": ["--mc-bandit", "--invasion"],
     "continuum": ["--mc-bandit", "--invasion", "--continuum"],
+    # Matrix arms (docs/handover/handover_matrix_schedulers_2026-09-19.md). Both
+    # only mean anything under Elo arbitration, so each has its own baseline with
+    # --elo on and nothing else: measuring against plain `baseline` would attribute
+    # the arbiter's effect to the arm. Neither has a threshold yet -- the maintainer
+    # freezes one BEFORE the first run (P3-3, P3-4).
+    "elo": ["--elo", "--mc-bandit"],
+    "elo-seed-residual": ["--elo", "--mc-bandit", "--seed-residual"],
+    "elo-op-credit": ["--elo", "--mc-bandit", "--op-credit"],
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

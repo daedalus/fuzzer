@@ -33,6 +33,10 @@ class _Pick:
     def select_op(self, ops, *args):
         return ops[0]
 
+    def available(self):
+        # Gate-aware arms (op_credit) consult this when the ballot is built.
+        return True
+
 
 class _Mopt(_Pick):
     def select_op(self, ops, *args):
