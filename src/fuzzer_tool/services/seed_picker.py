@@ -308,6 +308,8 @@ class SeedPicker:
             available.append("kruskal_count")
         if getattr(f, "_entropy_kl", None) is not None and f.corpus:
             available.append("entropy_kl")
+        if getattr(f, "_entropy_deviation", None) is not None and f.corpus:
+            available.append("entropy_deviation")
         # Listed while it is still warming up (it observes the corpus when
         # picked, and cannot warm up otherwise), then only while its
         # calibration is trustworthy -- a corpus with no entropy spread at
@@ -363,6 +365,7 @@ class SeedPicker:
             "kruskal_count": lambda: self._pick_kruskal_count_seed(),
             "entropy_kl": lambda: self._pick_entropy_kl_seed(),
             "entropy_zscore": lambda: self._pick_entropy_zscore_seed(),
+            "entropy_deviation": lambda: self._pick_entropy_deviation_seed(),
             "residual": lambda: self._pick_residual_seed(),
             "canary": lambda: self._pick_seed_canary_seed(),
         }
@@ -529,6 +532,22 @@ class SeedPicker:
             return None
         return strategy.select(f.corpus)
 
+    def _pick_entropy_deviation_seed(self) -> bytes | None:
+        """Byte-entropy deviation-from-mean arm.
+
+        Weights each seed by how far its byte_entropy_pct deviates from the
+        corpus mean -- content-statistics deviation, not the edge-hit-entropy
+        deviation `_weight_entropy_and_distance` already scores. Returns None
+        on an empty corpus, or while too few distinct seeds have been
+        observed for the mean to mean anything (same warm-up gate
+        EntropyZScoreSeedStrategy uses).
+        """
+        f = self.f
+        strategy = getattr(f, "_entropy_deviation", None)
+        if strategy is None or not f.corpus:
+            return None
+        return strategy.select(f.corpus)
+
     def _pick_seed_canary_seed(self) -> bytes | None:
         """Deliberately worst-in-class picker -- the Elo-arbitrated 'canary' arm.
 
@@ -639,6 +658,7 @@ class SeedPicker:
         for pick in (
             self._pick_entropy_kl_seed,
             self._pick_entropy_zscore_seed,
+            self._pick_entropy_deviation_seed,
             self._pick_residual_seed,
         ):
             chosen = pick()

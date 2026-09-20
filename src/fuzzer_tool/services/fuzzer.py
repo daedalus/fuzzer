@@ -159,6 +159,7 @@ _SEED_STRATEGY_NAMES = (
     "kruskal_count",
     "entropy_kl",
     "entropy_zscore",
+    "entropy_deviation",
     "residual",
 )
 
@@ -1229,6 +1230,7 @@ class Fuzzer:
         entropy_kl=False,
         entropy_zscore=False,
         entropy_zscore_target=0.0,
+        entropy_deviation=False,
         seed_residual=False,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
@@ -2195,6 +2197,13 @@ class Fuzzer:
             self._entropy_zscore = EntropyZScoreSeedStrategy(
                 self._rng, target_z=entropy_zscore_target
             )
+        self._entropy_deviation = None
+        if entropy_deviation:
+            from fuzzer_tool.core.schedulers.seed_entropy_deviation import (
+                EntropyDeviationSeedStrategy,
+            )
+
+            self._entropy_deviation = EntropyDeviationSeedStrategy(self._rng)
         # Matrix arms (seed_residual + op_credit) share one canonical edge space,
         # one refit cadence and one preflight gate: see core/edge_matrix.py and
         # docs/handover/handover_edge_id_axis_2026-09-18.md (P3-3, P3-4). Both are

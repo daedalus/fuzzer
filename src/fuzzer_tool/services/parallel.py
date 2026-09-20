@@ -146,6 +146,7 @@ def _worker_main(
     entropy_kl: bool = False,
     entropy_zscore: bool = False,
     entropy_zscore_target: float = 0.0,
+    entropy_deviation: bool = False,
     seed_residual: bool = False,
     confirm_novelty: bool = False,
     softmax: bool = False,
@@ -296,6 +297,7 @@ def _worker_main(
         entropy_kl=entropy_kl,
         entropy_zscore=entropy_zscore,
         entropy_zscore_target=entropy_zscore_target,
+        entropy_deviation=entropy_deviation,
         seed_residual=seed_residual,
         confirm_novelty=confirm_novelty,
     )
@@ -819,6 +821,7 @@ def run_parallel(
     entropy_kl: bool = False,
     entropy_zscore: bool = False,
     entropy_zscore_target: float = 0.0,
+    entropy_deviation: bool = False,
     seed_residual: bool = False,
     confirm_novelty: bool = False,
     softmax: bool = False,
@@ -1007,6 +1010,7 @@ def run_parallel(
         entropy_kl=entropy_kl,
         entropy_zscore=entropy_zscore,
         entropy_zscore_target=entropy_zscore_target,
+        entropy_deviation=entropy_deviation,
         seed_residual=seed_residual,
         confirm_novelty=confirm_novelty,
     )

@@ -504,6 +504,7 @@ def cmd_fuzz(args):
             entropy_kl=getattr(args, "entropy_kl", False),
             entropy_zscore=getattr(args, "entropy_zscore", False),
             entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
+            entropy_deviation=getattr(args, "entropy_deviation", False),
             seed_residual=getattr(args, "seed_residual", False),
             confirm_novelty=getattr(args, "confirm_novelty", False),
             successive_elim=getattr(args, "successive_elim", False),
@@ -776,6 +777,7 @@ def cmd_fuzz(args):
         entropy_kl=getattr(args, "entropy_kl", False),
         entropy_zscore=getattr(args, "entropy_zscore", False),
         entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
+        entropy_deviation=getattr(args, "entropy_deviation", False),
         seed_residual=getattr(args, "seed_residual", False),
         confirm_novelty=getattr(args, "confirm_novelty", False),
         successive_elim=getattr(args, "successive_elim", False),
@@ -1923,6 +1925,7 @@ _HAIL_MARY_FLAGS = (
     "kruskal_count",
     "entropy_kl",
     "entropy_zscore",
+    "entropy_deviation",
     "seed_residual",
     "op_katz",
     "op_tang",
@@ -3237,6 +3240,15 @@ def main() -> int:
         default=0.0,
         help="Z-score the --entropy-zscore arm peaks at (default 0.0, seeds typical for "
         "this corpus). Positive chases the high-entropy tail, negative the sparse one.",
+    )
+    fuzz_parser.add_argument(
+        "--entropy-deviation",
+        action="store_true",
+        default=False,
+        help="Entropy-deviation seed scheduling: adds an 'entropy_deviation' Elo seed arm "
+        "weighting seeds by how far their byte entropy deviates from the corpus mean "
+        "(see docs/handover/handover_entropy_seed_schedulers_2026-09-19.md §1). OFF by "
+        "default; not yet A/B validated.",
     )
     fuzz_parser.add_argument(
         "--seed-residual",
