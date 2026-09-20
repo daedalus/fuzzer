@@ -3,7 +3,10 @@
 **Date:** 2026-09-06 consolidation commit `1c689e8abd40088d18bbddf507fa287c3ce8ecd7`
 **Base:** `d0ba9ad` (per consolidation docs)
 **Source:** 22 recovered files from `/tmp/recovered/docs/handover/`
-**Verification:** All pending items re-checked against live source via subagents on 2026-09-08
+**Verification:** All pending items re-checked against live source via subagents on 2026-09-08,
+and the four then-open P1/P2 entries re-checked again on 2026-09-20 (P1-3, P2-3 and P2-5 had
+shipped since; P2-4 was resolved by decision, not by wiring). **P0-1 through P2-5 are now all
+closed** -- the open work in this file starts at P3.
 
 ## Removal Ledger (from §12 of handover_done_2026-09-06.md)
 
@@ -254,7 +257,12 @@ byte for byte — not assuming it.
 - Measured 2.61× speedup at P=512 pairs
 
 #### P1-3. The `seen_hashes` clear silently re-admits every previously seen seed, once
-**Status: OPEN** (not yet re-verified against current source)
+**Status: FIXED** (re-verified against live source 2026-09-20)
+
+The unconditional `clear()` is gone: `adapters/filesystem.py:40 _bound_seen_hashes`
+keeps the set bounded by evicting down to a target when it passes `SEEN_HASHES_MAX`,
+and is called at every site that adds a hash (`:592`, `:664`, `:703`). Forgetting a
+bounded tail is not the same defect as forgetting everything.
 
 `adapters/filesystem.py:553, 626, 686, 724` — `if len(seen_hashes) >
 SEEN_HASHES_MAX: seen_hashes.clear()` with `SEEN_HASHES_MAX = 200_000`.
@@ -337,7 +345,12 @@ signals.
 - `_swap_tuple` caller wiring at `services/operators.py:1840,1850`
 
 #### P2-3. `invasion_select`'s `frontier_edges` is never passed
-**Status: OPEN**
+**Status: FIXED** (re-verified against live source 2026-09-20)
+
+`services/operators.py:4520-4521` reads `discovery_frontier_edges()` off the tracker
+and passes it. The per-selection recompute that shipped with the first cut is memoised
+in `core/edge_tracker.py:705` on `len(_edge_first_seen)`, which is a complete stamp
+because that map is insert-only.
 
 `services/seed_picker.py:126` takes `frontier_edges: set[int] | None = None`;
 production calls `invasion_select(op_stats, flux_map=flux_map)` at
@@ -346,7 +359,12 @@ short-circuit is **dead outside the tests**. The work is at the call site, not
 in the signature.
 
 #### P2-4. `_op_secretary` feeds a display and nothing else
-**Status: OPEN**
+**Status: RESOLVED BY DECISION** (2026-09-06, commit `0fd5f25`)
+
+Not wired, deliberately: the commit documents `SecretaryStopping` and
+`core/target_difficulty.py` as diagnostics and names the successor that would replace
+them (P3-2, retirement value). "Considered and rejected" is a different state from
+"absent", and only one of them should be re-proposable.
 
 `services/fuzzer.py:2058` declares it, `:4309` populates it via
 `SecretaryStopping.observe(a/(a+b))`, and the only reader is
@@ -361,7 +379,11 @@ replaced, the natural successor is the retirement-value formulation in P3-2.
 `corpus_manager.py`, and CLI flags despite handover recommendations to remove it.
 
 #### P2-5. `CoverageRegimeDetector._classify` ignores 3 of its 5 arguments
-**Status: OPEN**
+**Status: FIXED** (re-verified against live source 2026-09-20)
+
+`core/analyzers/analyzer_coverage_regime.py:264` now takes only the arguments that
+participate in a branch; the signals kept for diagnostics live on the detector as
+`_last_*` rather than as ignored formal arguments, and the docstring says so.
 
 `core/coverage_regime.py:128`. `discovery_rate`, `allan_delta` and `exec_count`
 are passed by `observe()` and never read (verified by AST). `allan_delta` is

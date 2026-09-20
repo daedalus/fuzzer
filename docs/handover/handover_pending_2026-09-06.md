@@ -15,6 +15,36 @@ FFmpeg build findings F1/F2/N1/N2/N5/N6 (see the done document, §5 and §8).
 
 ---
 
+## Status as of 2026-09-20 — read this before planning off the tiers below
+
+**P0-1 through P2-5 are all closed.** They shipped in `e445fdc..306017a` and the
+review fixes on top of it; each was re-checked against live source on 2026-09-20,
+and the per-item evidence is in `handover_FINDINGS.md`. The tier text below is
+left as written because it is the evidence and the reasoning, not a worklist —
+what an item *was* is still what a re-proposal has to argue against — but nothing
+in P0, P1 or P2 is open.
+
+Three of them closed in a way worth carrying forward rather than forgetting:
+
+* **P0-1** shipped as per-pass quotas, so all four deterministic passes survive
+  the cap. The trade it made is still open and is *not* a P0: the four passes now
+  truncate as a prefix of **bytes**, so the tail of a long seed gets no
+  deterministic treatment at all. A rotating start offset by `fuzz_count` would
+  close that; quotas alone cannot.
+* **P0-5** fixed the id-half bias, and the test pins it. Which half
+  `shapley._prune_edges` should evict is a *design* question that the fix did not
+  answer and "oldest" would not answer either, because recency correlates with
+  frequency for hot edges.
+* **P2-1/P2-4** were resolved by decision, not by wiring: both are documented as
+  diagnostics with their successor named (P3-2). Re-proposing them means arguing
+  against that, not filling a gap.
+
+The open work starts at **P3**, plus the measurement debt in **§E** — which has
+grown since this document was written: every scheduler arm added between
+2026-09-12 and 2026-09-20 is wired, tested and unmeasured.
+
+---
+
 ## 0. How this is ordered
 
 Priority is by **what the item is**, not by how interesting it is:
