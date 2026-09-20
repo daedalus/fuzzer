@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import numpy as _np
 
+from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.target_profiler import TargetProfile
 
@@ -116,7 +117,7 @@ class CrashMITracker:
         # values per position, which discarded evidence the MI estimate
         # then could not see; it also accounted for 17,724 of a 4000-exec
         # campaign's 36,140 sorted() calls.
-        if self.total_execs % 50 == 0:
+        if due(self.total_execs, 50, "crash_eta.invalidate"):
             self._cache_valid = False
 
     def _grow(self, n: int) -> None:

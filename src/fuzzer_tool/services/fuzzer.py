@@ -38,6 +38,7 @@ from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.analyzers.analyzer_elo import strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
+from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
@@ -4561,7 +4562,7 @@ class Fuzzer:
             # Low EPS → smaller dictionary (reduce overhead).
             # Window: last 500 iterations. Range: [64, 1024].
             window = 500
-            if self.exec_count > 0 and self.exec_count % 100 == 0:
+            if self.exec_count > 0 and due(self.exec_count, 100, "fuzzer.dict_eps"):
                 elapsed = time.time() - self.start_time
                 eps = (self.exec_count - self._resume_baseline_exec) / elapsed if elapsed > 0 else 0
                 self._dict_eps_window.append(eps)
@@ -4738,7 +4739,7 @@ class Fuzzer:
                 # Keep legacy field for state compat
                 meta["redqueen_offsets"] = [m[0] for m in meta["redqueen_matches"]]
 
-        if self.exec_count % 100 == 0:
+        if due(self.exec_count, 100, "fuzzer.rss_eps"):
             rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             if rss > self._peak_rss:
                 self._peak_rss = rss

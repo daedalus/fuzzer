@@ -19,6 +19,7 @@ import struct
 import time
 from collections import Counter
 
+from fuzzer_tool.core.cadence import bucket, due
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
@@ -652,7 +653,7 @@ class SeedPicker:
 
         if not hasattr(self, "_last_corpus_pp"):
             self._last_corpus_pp = 256.0
-        if f.exec_count % 500 == 0 and f.corpus:
+        if due(f.exec_count, 500, "seed_picker.corpus_perplexity") and f.corpus:
             pp_stats = f.markov.corpus_perplexity(f.corpus)
             self._last_corpus_pp = pp_stats["mean"]
         if self._last_corpus_pp > 200:
@@ -1425,7 +1426,9 @@ class SeedPicker:
 
         _saturated = self._saturation_gate()
 
-        if not _saturated and (not hasattr(f, "_classify_cache") or f.exec_count % 100 == 0):
+        if not _saturated and (
+            not hasattr(f, "_classify_cache") or due(f.exec_count, 100, "seed_picker.classify")
+        ):
             f._classify_cache = f._edge_tracker.classify_seeds()
         classifications = getattr(f, "_classify_cache", {})
 
@@ -1715,7 +1718,7 @@ class SeedPicker:
         if (
             not hasattr(f, "_pareto_cache")
             or f._pareto_cache_key != cache_key
-            or f.exec_count % 100 == 0
+            or due(f.exec_count, 100, "seed_picker.pareto")
         ):
             pareto_scores: list[tuple[float, ...]] = []
             for seed in f.corpus:
@@ -1864,7 +1867,7 @@ class SeedPicker:
         if abs(corpus_growth) >= 20:
             f._weight_cache = None
             f._last_weight_corpus_size = corpus_version
-        cache_key = f.exec_count // recompute_interval
+        cache_key = bucket(f.exec_count, recompute_interval, "seed_picker.weights")
         if cache_key != f._weight_cache_key:
             f._weight_cache_key = cache_key
             f._weight_cache = None
