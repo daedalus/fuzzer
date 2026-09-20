@@ -1,7 +1,7 @@
 """Regression tests: fractal-diversity seed weight (--fractal-diversity).
 
 Boosts seeds whose content hash sits on a fractal Voronoi boundary
-(``core/parallel_fractal_partition.crosses_boundary``), as a cheap
+(``core/fractal_partition.crosses_boundary``), as a cheap
 diversity signal against mode collapse toward one region of the corpus's
 own content-hash space. See ``SeedPicker._weight_fractal_diversity`` for
 why this is scoped away from Approach B in the original handover doc
@@ -19,7 +19,7 @@ Properties that must hold:
 
 from __future__ import annotations
 
-from fuzzer_tool.core.parallel_fractal_partition import crosses_boundary
+from fuzzer_tool.core.fractal_partition import crosses_boundary
 from fuzzer_tool.services.seed_picker import SeedPicker
 
 

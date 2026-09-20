@@ -1307,9 +1307,8 @@ class SeedPicker:
     def _weight_fractal_diversity(self, seed: bytes, w: float, f) -> float:
         """Boost seeds on a fractal Voronoi boundary in content-hash space.
 
-        Reuses the deterministic partition ``core/parallel_fractal_partition``
-        uses for cross-worker assignment (Approach C), applied here within a
-        single corpus instead: a seed whose content hash sits on a partition
+        Reuses the deterministic partition in ``core/fractal_partition``
+        (Approach C): a seed whose content hash sits on a partition
         "coastline" is one a small content change could plausibly have
         pushed into a neighboring cluster, so it is mildly boosted as a
         cheap counter to mode collapse toward one region of the corpus's
@@ -1329,7 +1328,7 @@ class SeedPicker:
         """
         if not getattr(f, "_use_fractal_diversity", False):
             return w
-        from fuzzer_tool.core.parallel_fractal_partition import crosses_boundary
+        from fuzzer_tool.core.fractal_partition import crosses_boundary
 
         depth = getattr(f, "_fractal_diversity_depth", 3)
         bonus = getattr(f, "_fractal_diversity_bonus", 1.3)

@@ -3011,8 +3011,7 @@ class Fuzzer:
         self._poisson_last_new_bucket_exec = 0
 
         # Fractal Voronoi corpus-diversity bonus (see
-        # core/parallel_fractal_partition.py; applied here within one
-        # corpus rather than across parallel workers)
+        # core/fractal_partition.py; applied within one corpus)
         self._use_fractal_diversity = fractal_diversity
         self._fractal_diversity_depth = fractal_diversity_depth
         self._fractal_diversity_bonus = fractal_diversity_bonus
