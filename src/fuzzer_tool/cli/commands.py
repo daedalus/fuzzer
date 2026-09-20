@@ -1949,6 +1949,7 @@ _HAIL_MARY_FLAGS = (
     "op_tang",
     "op_kruskal_count",
     "op_credit",
+    "confirm_novelty",
     "ecofuzz",
     "metropolis",
     "auto_timeout",
