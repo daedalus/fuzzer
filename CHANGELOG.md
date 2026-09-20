@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Crash field map and baseline in crash sidecars** (`core/field_map.py`, `services/crash_explain.py`). A novel crash's `.txt`/`.json` now name the fields of the crashing input (PNG, gzip, ZIP, RIFF) and mark which changed against the parent seed it was mutated from, falling back to a hash-rehydrated parent, then the nearest corpus seed. Static only: nothing executes the target, and `changed` does not claim causation.
+
 - **Wired the RO/RD temporal-orientation analyzers** (`core/occupation.py`,
   `core/ro_rd.py`, `core/causal_sector.py`) into `analyzer_registry`, record
   hooks, CLI, and reporting, per `docs/handover/handover_RoRd.md` Phases

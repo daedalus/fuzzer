@@ -36,6 +36,7 @@ from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 from fuzzer_tool.core.running_stats import RunningMoments
+from fuzzer_tool.services.crash_explain import explain_static
 from fuzzer_tool.services.operators import HAVOC_SUB_OPS
 
 log = logging.getLogger(__name__)
@@ -694,6 +695,24 @@ class CorpusManager:
                 meta.rbp = f._last_regs.get("rbp", 0)
             if fault_addr is not None:
                 meta.fault_addr = f"0x{fault_addr:x}"
+
+            # Name the crashing input's fields and mark those changed against
+            # the parent seed. Cheap (one alignment) and novel-only; the causal
+            # search that says which field triggers the crash is a later step.
+            # A bug here must not lose the crash, so it is logged, not raised.
+            try:
+                explain_static(
+                    meta,
+                    data,
+                    parent=getattr(f, "_last_parent_seed", None),
+                    parent_hash=meta.parent_seed_hash,
+                    crash_hashes=f.crash_hashes,
+                    corpus_dir=f.corpus_dir,
+                    corpus=f.corpus,
+                    nearest_label=meta.nearest_corpus_file,
+                )
+            except Exception:
+                log.warning("crash field explanation failed", exc_info=True)
 
             # Populate error_type from return code for subprocess/inprocess
             # mode where ptrace isn't available and sanitizer reports are absent.

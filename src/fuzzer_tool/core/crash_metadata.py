@@ -21,6 +21,11 @@ _CRASH_CLUSTER_THRESHOLD: float = float(
 )
 
 
+# Rows of the field map printed in the .txt sidecar; the .json keeps them all.
+MAX_TXT_ROWS = 64  # changed fields shown when a baseline is known
+MAX_TXT_ROWS_NO_BASE = 32  # fields shown when there is no baseline
+
+
 def configure_crash_cluster(threshold: float = 0.7) -> None:
     """Set the default crash-clustering similarity threshold."""
     global _CRASH_CLUSTER_THRESHOLD
@@ -73,6 +78,13 @@ class CrashMetadata:
     nearest_corpus_file: str = ""
     nearest_similarity: float = 0.0
     diff_bytes: list[int] = field(default_factory=list)
+
+    # Field map of the crashing input, marked against its baseline (the parent
+    # seed, or the nearest corpus seed). See services.crash_explain.
+    baseline_source: str = ""
+    baseline_hash: str = ""
+    field_format: str = ""
+    fields: list[dict] = field(default_factory=list)
 
     # Register state (ptrace)
     rip: int = 0
@@ -218,6 +230,10 @@ class CrashMetadata:
                 )
             lines.append("")
 
+        if self.fields:
+            lines.extend(self._format_fields())
+            lines.append("")
+
         # Raw stderr (ASAN diagnostics with file:line)
         if self.raw_stderr:
             lines.append("=== raw stderr ===")
@@ -237,6 +253,41 @@ class CrashMetadata:
             lines.append("")
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _field_line(row: dict, mark: str) -> str:
+        line = f"{mark} {row['name']} @0x{row['offset']:x} +{row['width']}"
+        if row["value"]:
+            line += f" value {row['value']}"
+        if row["changed"] and row["baseline"] is not None:
+            line += f" (was {row['baseline']})"
+        return line
+
+    def _format_fields(self) -> list[str]:
+        """The field map as text: changed fields when a baseline is known."""
+        source = self.baseline_source or "none"
+        if self.baseline_hash:
+            source += f" {self.baseline_hash}"
+        lines = [f"=== fields ({self.field_format or 'unknown'}; baseline: {source}) ==="]
+
+        if all(r["changed"] is None for r in self.fields):
+            shown = self.fields[:MAX_TXT_ROWS_NO_BASE]
+            lines.extend(self._field_line(r, " ") for r in shown)
+            if len(self.fields) > len(shown):
+                lines.append(f"(+{len(self.fields) - len(shown)} more fields; see .json)")
+            return lines
+
+        changed = [r for r in self.fields if r["changed"]]
+        lines.extend(self._field_line(r, "*") for r in changed[:MAX_TXT_ROWS])
+        if not changed:
+            lines.append("(no changed fields)")
+        if len(changed) > MAX_TXT_ROWS:
+            lines.append(f"(+{len(changed) - MAX_TXT_ROWS} more changed fields; see .json)")
+
+        unchanged = len(self.fields) - len(changed)
+        if unchanged:
+            lines.append(f"({unchanged} unchanged fields not shown)")
+        return lines
 
     def format_reproducer(self, data: bytes, target: str) -> str:
         """Generate a self-contained reproducer shell script."""
@@ -325,6 +376,9 @@ class CrashMetadata:
             "nearest_corpus_file": self.nearest_corpus_file,
             "nearest_similarity": self.nearest_similarity,
             "diff_bytes": list(self.diff_bytes),
+            "baseline": {"source": self.baseline_source, "hash": self.baseline_hash},
+            "field_format": self.field_format,
+            "fields": list(self.fields),
             "raw_stderr": self.raw_stderr,
             "input_hexdump": self.input_hexdump,
             "input_text_repr": self.input_text_repr,
