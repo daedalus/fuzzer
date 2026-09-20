@@ -1,5 +1,10 @@
 """Tests for ExecutionTimeTracker — CRPS scoring, percentile, trend."""
 
+import math
+import random
+
+import pytest
+
 from fuzzer_tool.core.analyzers.analyzer_execution_time import ExecutionTimeTracker
 
 
@@ -214,121 +219,165 @@ class TestSkewnessAndTailRisk:
         assert isinstance(t.tail_risk, bool)
 
 
-def _legacy_compute_crps(sorted_times, observation):
-    """Verbatim legacy _compute_crps (independent reference for equivalence)."""
-    if not sorted_times:
-        return 0.0
-    n = len(sorted_times)
-    crps = 0.0
-    cdf_diff = 0.0
-    prev = sorted_times[0]
-    for i, val in enumerate(sorted_times):
-        gap = val - prev
-        if gap > 0:
-            crps += cdf_diff * cdf_diff * gap
-        f_val = (i + 1) / n
-        indicator = 1.0 if val >= observation else 0.0
-        cdf_diff = f_val - indicator
-        prev = val
-    max_val = sorted_times[-1]
-    if observation > max_val:
-        crps += 1.0 * (observation - max_val)
-    return crps
+def _numeric_crps_lognormal(mu, sigma, observation, lo=1e-9, hi=None, steps=400000):
+    """CRPS by direct numerical integration of ∫(F(y) - 𝟙[y≥x])² dy.
+
+    Independent of the closed form under test: this integrates the
+    lognormal CDF on a grid, using only math.erf. Slow, so callers keep
+    the case count small.
+    """
+    if hi is None:
+        hi = max(observation, math.exp(mu + 6.0 * sigma)) * 1.2
+    step = (hi - lo) / steps
+    total = 0.0
+    y = lo + 0.5 * step
+    for _ in range(steps):
+        f = 0.5 * (1.0 + math.erf((math.log(y) - mu) / (sigma * math.sqrt(2.0))))
+        d = f - (1.0 if y >= observation else 0.0)
+        total += d * d
+        y += step
+    return total * step
 
 
-class TestComputeCrpsVectorized:
-    def test_matches_legacy_algorithm(self):
-        """Vectorized _compute_crps is numerically identical to the legacy walk."""
-        import random
-
-        rng = random.Random(20260803)
-        t = ExecutionTimeTracker(window_size=200)
-        for _ in range(300):
-            n = rng.randint(1, 200)
-            # Duplicates included -> zero gaps exercise the (dead) gap>0 guard.
-            times = sorted(rng.random() * 0.05 for _ in range(n))
-            obs = rng.random() * 0.06
-            t._sorted = list(times)
-            got = t._compute_crps(obs)
-            exp = _legacy_compute_crps(times, obs)
-            assert abs(got - exp) <= 1e-9 * max(1.0, abs(exp)), (got, exp, n, obs)
-
-    def test_edge_cases(self):
-        t = ExecutionTimeTracker()
-        assert t._compute_crps(0.5) == 0.0  # empty
-        t._sorted = [1.0]
-        assert t._compute_crps(0.5) == 0.0  # obs below sole value
-        assert t._compute_crps(2.0) == 1.0  # obs above sole value (tail term)
+def _tracker_over(samples, window_size=200):
+    t = ExecutionTimeTracker(window_size=window_size)
+    for s in samples:
+        t.record(s)
+    return t
 
 
-class TestCRPSSamplingOnceWarm:
-    """record() must recompute CRPS every call while the window is filling,
-    then subsample once it's warm -- this is the perf fix: the numpy CRPS
-    computation is expensive (fresh array + dot + diff) and only feeds a
-    periodic display / end-of-run report, neither of which needs per-exec
-    precision. suggested_timeout()/tail_risk must stay exact regardless,
-    since they read _sorted/_moments, which are always updated.
+class TestClosedFormCrps:
+    """_compute_crps is the closed-form lognormal CRPS (Baran & Lerch 2015),
+    replacing an O(n) walk over the sorted window. Three Φ evaluations, no
+    dependence on window size.
     """
 
-    def test_eager_while_filling(self):
-        t = ExecutionTimeTracker(window_size=10)
-        seen = []
-        for i in range(10):
-            seen.append(t.record(0.01 * (i + 1)))
-        # Every one of the first window_size calls actually computed a
-        # fresh CRPS (all mutually distinct inputs -> distinct scores).
-        assert len(set(seen)) > 1
+    def test_matches_numerical_integration(self):
+        rng = random.Random(20260920)
+        samples = [math.exp(rng.gauss(math.log(0.002), 0.4)) for _ in range(200)]
+        t = _tracker_over(samples)
+        mu = t._log_moments.mean
+        sigma = t._log_moments.stddev
+        for obs in (0.0008, 0.002, 0.005, 0.02):
+            got = t._compute_crps(obs)
+            exp = _numeric_crps_lognormal(mu, sigma, obs)
+            assert abs(got - exp) <= 1e-4 * max(exp, 1e-6) + 1e-9, (obs, got, exp)
 
-    def test_subsampled_once_warm(self):
+    def test_cost_is_independent_of_window_size(self):
+        """The whole point: no O(n) walk left. A 20x larger window must not
+        move the score, because the score never touches the window."""
+        rng = random.Random(4)
+        base = [math.exp(rng.gauss(math.log(0.002), 0.4)) for _ in range(100)]
+        small = _tracker_over(base, window_size=100)
+        # Same empirical sample, window big enough to hold it either way.
+        large = _tracker_over(base, window_size=2000)
+        assert small._compute_crps(0.003) == pytest.approx(large._compute_crps(0.003))
+
+    def test_degenerate_sigma_is_the_dirac_limit(self):
+        """sigma -> 0 makes the forecast a point mass; CRPS(δ_m, x) = |x-m|."""
+        t = _tracker_over([0.05] * 50)
+        assert t._compute_crps(0.05) == pytest.approx(0.0, abs=1e-12)
+        assert t._compute_crps(0.15) == pytest.approx(0.10, abs=1e-9)
+        assert t._compute_crps(1.0) == pytest.approx(0.95, abs=1e-9)
+
+    def test_empty_and_single_observation(self):
+        t = ExecutionTimeTracker()
+        assert t._compute_crps(0.5) == 0.0  # nothing recorded yet
+        t.record(1.0)
+        # One observation: still a point forecast at the running median.
+        assert t._compute_crps(2.0) == pytest.approx(1.0, abs=1e-9)
+
+    def test_non_positive_observation_does_not_blow_up(self):
+        """A zero elapsed time is reachable on a coarse clock; log(0) is not."""
+        t = _tracker_over([0.002, 0.003, 0.004, 0.005, 0.006])
+        assert t._compute_crps(0.0) >= 0.0
+        assert t.record(0.0) >= 0.0
+
+    def test_non_negative_everywhere(self):
+        rng = random.Random(11)
+        t = _tracker_over([math.exp(rng.gauss(math.log(0.01), 0.6)) for _ in range(200)])
+        for obs in (1e-6, 1e-3, 0.01, 0.1, 1.0, 100.0):
+            assert t._compute_crps(obs) >= 0.0
+
+    def test_monotone_in_distance_from_the_forecast(self):
+        """Typical < gap < extreme -- the property the old estimator was
+        tested for, preserved by the parametric one."""
+        rng = random.Random(12)
+        t = _tracker_over([math.exp(rng.gauss(math.log(0.05), 0.15)) for _ in range(200)])
+        typical = t._compute_crps(0.05)
+        gap = t._compute_crps(0.15)
+        extreme = t._compute_crps(1.0)
+        assert typical < gap < extreme
+
+    def test_agrees_with_the_empirical_estimator_on_a_lognormal_sample(self):
+        """Not the same estimator -- a two-parameter fit rather than the
+        window's own CDF -- but they must not disagree in magnitude when
+        the model is right, or the reported CRPS trend changes meaning."""
+        rng = random.Random(13)
+        samples = [math.exp(rng.gauss(math.log(0.001), 0.45)) for _ in range(200)]
+        t = _tracker_over(samples)
+        srt = sorted(samples)
+        n = len(srt)
+
+        def empirical(obs):
+            crps = 0.0
+            for i in range(n - 1):
+                cd = (i + 1) / n - (1.0 if srt[i] >= obs else 0.0)
+                crps += cd * cd * (srt[i + 1] - srt[i])
+            if obs > srt[-1]:
+                crps += obs - srt[-1]
+            return crps
+
+        probes = [math.exp(rng.gauss(math.log(0.001), 0.45)) for _ in range(300)]
+        mean_closed = sum(t._compute_crps(o) for o in probes) / len(probes)
+        mean_emp = sum(empirical(o) for o in probes) / len(probes)
+        assert abs(mean_closed - mean_emp) < 0.25 * mean_emp
+
+
+class TestCrpsScoredEveryObservation:
+    """The closed form is O(1), so the every-8th-observation subsampling
+    that mitigated the old O(n) walk is gone. Each record() contributes
+    its own score again."""
+
+    def test_every_record_computes_a_fresh_score(self):
         t = ExecutionTimeTracker(window_size=10)
         for i in range(10):
-            t.record(0.01 * (i + 1))
-        assert len(t._sorted) == t.window_size  # now warm
+            t.record(0.01 * (i + 1))  # fill the window
 
-        computed_calls = 0
-        real_compute = t._compute_crps
+        calls = 0
+        real = t._compute_crps
 
         def spy(obs):
-            nonlocal computed_calls
-            computed_calls += 1
-            return real_compute(obs)
+            nonlocal calls
+            calls += 1
+            return real(obs)
 
         t._compute_crps = spy
         for i in range(80):
             t.record(0.5 + i * 0.001)
-        # Only every _CRPS_SAMPLE_INTERVALth call after warm-up recomputes.
-        assert computed_calls == 80 // t._CRPS_SAMPLE_INTERVAL
+        assert calls == 80
 
-    def test_count_and_window_exact_regardless_of_sampling(self):
-        """count and the percentile window must not skip observations --
-        only the CRPS computation itself is sampled."""
+    def test_history_grows_with_every_observation(self):
+        t = ExecutionTimeTracker(window_size=10)
+        for i in range(40):
+            t.record(0.01 * (i + 1))
+        assert len(t._crps_history) == 40
+
+    def test_no_sampling_interval_attribute_remains(self):
+        """A leftover constant would invite the branch back."""
+        assert not hasattr(ExecutionTimeTracker, "_CRPS_SAMPLE_INTERVAL")
+
+    def test_count_and_window_still_exact(self):
         t = ExecutionTimeTracker(window_size=10)
         for i in range(100):
             t.record(0.01 * (i + 1))
         assert t.count == 100
-        assert len(t._sorted) == 10  # capped at window_size, as before
-        # p99 reflects the most recent 10 observations, unaffected by
-        # which of them got a CRPS computed.
+        assert len(t._sorted) == 10
         assert t.p99 == max(0.01 * (i + 1) for i in range(90, 100))
 
-    def test_suggested_timeout_unaffected_by_sampling(self):
-        """suggested_timeout reads _sorted/_moments only -- exact either way."""
-        t = ExecutionTimeTracker(window_size=10)
-        for _i in range(100):
-            t.record(0.01)
-        assert t.suggested_timeout() > 0.0
-
-    def test_return_value_when_not_recomputed_is_last_computed(self):
-        t = ExecutionTimeTracker(window_size=10)
-        for i in range(10):
-            t.record(0.01 * (i + 1))  # fills window
-        last_computed = t.record(0.5)  # call 11: 11 % 8 != 0 -> not recomputed
-        assert last_computed == t._crps_history[-1]
-
-    def test_mean_crps_still_meaningful_once_warm(self):
-        t = ExecutionTimeTracker(window_size=10)
-        for _ in range(10):
-            t.record(0.05)
-        for _ in range(50):
-            t.record(0.05)  # constant input, sampled or not
-        assert t.mean_crps() < 0.01
+    def test_percentile_path_still_empirical(self):
+        """suggested_timeout/p50/p99 must keep reading _sorted: a hang
+        threshold comes from observed times, not a model's extrapolation."""
+        t = _tracker_over([0.01] * 50 + [0.02] * 50, window_size=200)
+        assert t.p50 in (0.01, 0.02)
+        assert t.suggested_timeout() >= t.p99
