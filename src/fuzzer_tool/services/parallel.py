@@ -1,10 +1,15 @@
 """Parallel fuzzing: fork N workers sharing corpus/crashes directories."""
 
+import logging
 import multiprocessing
 import os
 import signal
 import time
 from pathlib import Path
+
+from fuzzer_tool.core.desync import PHASE_FILE, initial_offset, next_delay
+
+log = logging.getLogger(__name__)
 
 
 def _worker_main(
@@ -292,7 +297,10 @@ def _worker_main(
     print(f"{prefix} Started (target={target})")
 
     i = 0
-    last_sync = time.time()
+    # Workers are forked together, so a shared period alone puts every sync
+    # on the same instant. Stake out 1/N spacing up front, then let the
+    # phase exchange hold it against drift (core/desync.py).
+    next_sync = time.time() + initial_offset(worker_id, n_workers, sync_interval)
     try:
         while not stop_event.is_set():
             fuzzer._flush_pending_minimize()  # deferred minimize from save_to_corpus in sync
@@ -300,7 +308,7 @@ def _worker_main(
                 break
 
             now = time.time()
-            if now - last_sync >= sync_interval:
+            if now >= next_sync:
                 _sync_corpus_in(
                     Path(corpus_dir),
                     fuzzer,
@@ -309,7 +317,7 @@ def _worker_main(
                     n_workers=n_workers if fractal_partition else None,
                     fractal_depth=fractal_partition_depth,
                 )
-                last_sync = now
+                next_sync = now + _sync_delay(Path(corpus_dir), worker_corpus, now, sync_interval)
 
             seed_data = fuzzer._pick_seed()
             fuzzer.fuzz_one(seed_data)
@@ -362,6 +370,70 @@ _sync_seen: dict[str, set[str]] = {}
 # these workers hold in memory; dropping the set costs a re-offer, which
 # `seen_hashes` and `save_to_corpus` both dedup.
 _SYNC_SEEN_MAX = 200_000
+
+
+# A sibling's phase is trusted for this many periods after it was written.
+# Beyond that the worker is assumed dead: its file would otherwise pin a
+# slot forever and the survivors would spread around a ghost.
+_PHASE_STALE_PERIODS = 4
+
+
+def _publish_phase(own_dir: Path, now: float) -> None:
+    """Record this worker's firing time for its siblings to read.
+
+    Best effort: a failed write costs this round's coupling and nothing
+    else, so it must never propagate into the fuzzing loop.
+    """
+    try:
+        (own_dir / PHASE_FILE).write_text(f"{now!r}\n")
+    except OSError as ex:
+        log.debug("phase publish failed: %s", ex)
+
+
+def _sibling_phases(parent_dir: Path, own_dir: Path, now: float, period: float) -> list[float]:
+    """Firing phases of the live siblings, folded onto one *period*.
+
+    Skips this worker, non-worker directories, unreadable or unparseable
+    files, timestamps from the future (clock skew, or a stale file from an
+    earlier campaign in the same directory) and workers that have not fired
+    within ``_PHASE_STALE_PERIODS``.
+    """
+    own = own_dir.name
+    oldest = now - _PHASE_STALE_PERIODS * period
+    phases: list[float] = []
+
+    try:
+        siblings = sorted(parent_dir.iterdir())
+    except OSError:
+        return phases
+
+    for sibling_dir in siblings:
+        if not sibling_dir.name.startswith(".w") or sibling_dir.name == own:
+            continue
+
+        try:
+            fired = float((sibling_dir / PHASE_FILE).read_text())
+        except (OSError, ValueError):
+            continue
+
+        if not oldest <= fired <= now:
+            continue
+
+        phases.append(fired % period)
+
+    return phases
+
+
+def _sync_delay(parent_dir: Path, own_dir: Path, now: float, period: float) -> float:
+    """Seconds until this worker's next corpus sync.
+
+    Publishes this firing, then pushes the next one away from the siblings'
+    phases (``core/desync.py``). With no live sibling this is exactly
+    *period*, which is the pre-existing behaviour.
+    """
+    _publish_phase(own_dir, now)
+
+    return next_delay(now % period, _sibling_phases(parent_dir, own_dir, now, period), period)
 
 
 def _sync_corpus_in(
