@@ -1,9 +1,7 @@
 """Tests for core/skipdet.py — skip deterministic stages for low-info seeds."""
 
 from fuzzer_tool.core.skipdet import (
-    MAX_INF_EXECS,
     MAX_QUICK_EFF_EXECS,
-    MINIMAL_BLOCK_SIZE,
     THRESHOLD_DEC_TIME_MS,
     SkipDetector,
 )
@@ -154,138 +152,36 @@ class TestShouldDetFuzz:
         assert sd.undet_bits_threshold == old_threshold  # no change
 
 
-class TestBuildSkipEffMap:
-    def test_empty_data(self):
-        sd = SkipDetector()
-        result = sd.build_skip_eff_map(b"", lambda d: 0)
-        assert result == bytearray()
-
-    def test_all_bytes_effective(self):
-        """If every byte flip changes the checksum, all are effective."""
-        sd = SkipDetector()
-        data = b"ABCDEFGH"
-        # Make every single-byte flip produce a different checksum
-        call_count = [0]
-
-        def exec_fn(d):
-            call_count[0] += 1
-            return sum(d)  # different input → different checksum
-
-        eff_map = sd.build_skip_eff_map(data, exec_fn, max_execs=200)
-        assert all(b == 1 for b in eff_map)
-
-    def test_no_bytes_effective(self):
-        """If no flip changes checksum, all are ineffective."""
-        sd = SkipDetector()
-        data = b"ABCDEFGH"
-        eff_map = sd.build_skip_eff_map(data, lambda d: 42, max_execs=200)
-        assert all(b == 0 for b in eff_map)
-
-    def test_mixed_effective(self):
-        """Some bytes effective, some not."""
-        sd = SkipDetector()
-        data = bytes(128)
-
-        # Only byte 0 affects the checksum
-        def exec_fn(d):
-            return d[0]
-
-        eff_map = sd.build_skip_eff_map(data, exec_fn, max_execs=500)
-        assert eff_map[0] == 1
-        # Others may or may not be effective depending on block flipping
-
-    def test_respects_max_execs(self):
-        sd = SkipDetector()
-        data = bytes(256)
-        exec_count = [0]
-
-        def exec_fn(d):
-            exec_count[0] += 1
-            return sum(d)
-
-        sd.build_skip_eff_map(data, exec_fn, max_execs=10)
-        assert exec_count[0] <= 10 + 1  # +1 for baseline
-
-    def test_large_data_with_block_flips(self):
-        """Block flipping should find effective regions in large data."""
-        sd = SkipDetector()
-        # 256 bytes, only first 64 are effective
-        data = bytes(256)
-
-        def exec_fn(d):
-            # Only the first 64 bytes affect checksum
-            return sum(d[:64])
-
-        eff_map = sd.build_skip_eff_map(data, exec_fn, max_execs=1000)
-        # First 64 bytes should be marked effective
-        assert sum(eff_map[:64]) > 0
-
-
-class TestInference:
-    def test_short_data_returns_all_zeros(self):
-        sd = SkipDetector()
-        # Short data: length < MINIMAL_BLOCK_SIZE * 8 = 512
-        # Returns bytearray(length) — all zeros (no inference performed)
-        data = bytes(256)
-        result = sd.inference(data, lambda d: 0)
-        assert len(result) == 256
-        assert all(b == 0 for b in result)
-
-    def test_empty_data_returns_empty(self):
-        sd = SkipDetector()
-        result = sd.inference(b"", lambda d: 0)
-        assert len(result) == 0
-
-    def test_all_ineffective(self):
-        """If no flip changes checksum, eff_map stays all zeros."""
-        sd = SkipDetector()
-        data = bytes(MINIMAL_BLOCK_SIZE * 16)
-        eff_map = sd.inference(data, lambda d: 42, max_execs=1000)
-        assert all(b == 0 for b in eff_map)
-
-    def test_respects_max_execs(self):
-        sd = SkipDetector()
-        data = bytes(MINIMAL_BLOCK_SIZE * 16)
-        exec_count = [0]
-
-        def exec_fn(d):
-            exec_count[0] += 1
-            return sum(d)
-
-        sd.inference(data, exec_fn, max_execs=50)
-        assert exec_count[0] <= 50 + 1
-
-    def test_returns_correct_length(self):
-        """inference returns bytearray of length len(data)."""
-        sd = SkipDetector()
-        data = bytes(MINIMAL_BLOCK_SIZE * 16)
-        eff_map = sd.inference(data, lambda d: 42, max_execs=100)
-        assert len(eff_map) == len(data)
-
-    def test_exec_fn_called_for_baseline(self):
-        """Baseline checksum is computed (1 exec before loop)."""
-        sd = SkipDetector()
-        data = bytes(MINIMAL_BLOCK_SIZE * 16)
-        calls = []
-
-        def exec_fn(d):
-            calls.append(d)
-            return 42
-
-        sd.inference(data, exec_fn, max_execs=100)
-        assert len(calls) >= 1
-        assert calls[0] == data
-
-
 class TestConstants:
-    def test_minimal_block_size(self):
-        assert MINIMAL_BLOCK_SIZE == 64
-
-    def test_max_inf_execs(self):
-        assert MAX_INF_EXECS == 16 * 1024
-
     def test_max_quick_eff_execs(self):
         assert MAX_QUICK_EFF_EXECS == 64 * 1024
 
     def test_threshold_decay_time(self):
         assert THRESHOLD_DEC_TIME_MS == 20 * 60 * 1000
+
+
+class TestEffectorMapHalfIsRetired:
+    """The block-flip effector search is gone on purpose, not by accident.
+
+    ``build_skip_eff_map`` and ``inference`` were both unreachable from
+    ``src/``, and ``inference`` never wrote its output map at all -- it
+    returned all-zeros ("every byte ineffective") on every call, with a debug
+    line reporting a count that was zero by construction. The effector map is
+    now built from the byteflip 8/8 pass the deterministic schedule already
+    runs, for no extra executions, so reinstating either of these would be
+    paying ``O(len)`` probes for something already free.
+    """
+
+    def test_block_flip_effector_search_is_not_reinstated(self):
+        sd = SkipDetector()
+        assert not hasattr(sd, "build_skip_eff_map")
+        assert not hasattr(sd, "inference")
+
+    def test_the_gate_is_the_only_public_surface(self):
+        public = {n for n in vars(SkipDetector) if not n.startswith("_")}
+        assert public == {"should_det_fuzz"}
+
+    def test_effector_map_lives_in_the_deterministic_stream(self):
+        from fuzzer_tool.services.operators import DeterministicEffectorMap
+
+        assert hasattr(DeterministicEffectorMap(4), "eff")

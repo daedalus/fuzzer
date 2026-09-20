@@ -7,8 +7,23 @@ how many new undetermined bits its coverage map contains.
 Seeds whose coverage is largely subsumed by previously-deterministically-fuzzed
 seeds skip straight to havoc, saving significant execution time.
 
-Also includes an inference stage that identifies large ineffective byte
-ranges by binary-searching with block flips.
+This module is the *gate* half of SkipDet only. The *effector map* half --
+deciding which individual bytes deserve the arithmetic and interesting-value
+passes -- lives in ``services/operators.py``, built from the byteflip 8/8
+pass the deterministic schedule already runs. Two implementations of it used
+to live here, ``build_skip_eff_map`` and ``inference``; both were unreachable
+from ``src/`` and ``inference`` never wrote its output map at all, returning
+all-zeros ("every byte ineffective") on every call while logging a count that
+was zero by construction. They are retired rather than repaired: they spend
+``O(len)`` and ``O(len / MINIMAL_BLOCK_SIZE)`` extra executions respectively
+to learn what the byteflip pass now yields for free.
+
+One capability went with them and is worth naming so it is not mistaken for
+an oversight: ``inference`` answered a *prior* question -- finding large inert
+ranges *before* paying the 8L bitflip pass, which is the only way to skip
+bitflips too. That is a real gap, and the right shape for it is a pooling
+design rather than a block-halving search, so it is recorded as future work
+rather than kept as dead code.
 """
 
 import logging
@@ -16,9 +31,9 @@ import logging
 log = logging.getLogger(__name__)
 
 
-# Configurable thresholds (from AFL++ config.h)
-MINIMAL_BLOCK_SIZE = 64
-MAX_INF_EXECS = 16 * 1024
+# Configurable thresholds (from AFL++ config.h). MINIMAL_BLOCK_SIZE and
+# MAX_INF_EXECS went with the block-flip effector search; MAX_QUICK_EFF_EXECS
+# stays because MAX_DET_MUTATIONS below is defined against it.
 MAX_QUICK_EFF_EXECS = 64 * 1024
 THRESHOLD_DEC_TIME_MS = 20 * 60 * 1000  # 20 minutes
 
@@ -110,6 +125,11 @@ class SkipDetector:
 
         Returns:
             True if the seed should be deterministically fuzzed.
+
+        This is a whole-seed verdict. Which *bytes* of an accepted seed get
+        the arithmetic and interesting-value passes is decided separately, by
+        the effector map ``services/operators.py`` builds from the byteflip
+        8/8 pass (see ``DeterministicEffectorMap``).
         """
         # Already deterministically fuzzed or not favored
         if not seed_favored or seed_passed_det:
@@ -152,147 +172,3 @@ class SkipDetector:
             return True
 
         return False
-
-    def build_skip_eff_map(
-        self,
-        data: bytes,
-        exec_fn,
-        max_execs: int = MAX_QUICK_EFF_EXECS,
-    ) -> bytearray:
-        """Build a quick effective byte map via block flipping.
-
-        Identifies byte positions that affect execution by flipping
-        blocks of bytes and checking if the execution path changes.
-
-        Args:
-            data: Input data to analyze.
-            exec_fn: Callable(bytes) -> int, returns execution checksum.
-            max_execs: Maximum executions before giving up.
-
-        Returns:
-            Bytearray of length len(data) where 1 = effective, 0 = skip.
-        """
-        length = len(data)
-        if length == 0:
-            return bytearray()
-
-        eff_map = bytearray(length)  # all zeros = skip all initially
-        exec_count = 0
-
-        # Get baseline checksum
-        baseline_cksum = exec_fn(data)
-        exec_count += 1
-
-        # Flip blocks of increasing size to find effective regions
-        block_size = MINIMAL_BLOCK_SIZE
-        while block_size <= length and exec_count < max_execs:
-            for pos in range(0, length, block_size):
-                if exec_count >= max_execs:
-                    break
-
-                end = min(pos + block_size, length)
-                # Flip the block
-                flipped = bytearray(data)
-                for i in range(pos, end):
-                    flipped[i] ^= 0xFF
-
-                cksum = exec_fn(bytes(flipped))
-                exec_count += 1
-
-                if cksum != baseline_cksum:
-                    # This block is effective — mark individual bytes
-                    for i in range(pos, end):
-                        eff_map[i] = 1
-
-            block_size *= 2
-
-        # Also do single-byte flips for remaining positions
-        for i in range(length):
-            if eff_map[i] or exec_count >= max_execs:
-                continue
-
-            flipped = bytearray(data)
-            flipped[i] ^= 0xFF
-            cksum = exec_fn(bytes(flipped))
-            exec_count += 1
-
-            if cksum != baseline_cksum:
-                eff_map[i] = 1
-
-        log.debug(
-            "SkipDet eff map: %d/%d effective bytes (%d execs)",
-            sum(eff_map),
-            length,
-            exec_count,
-        )
-        return eff_map
-
-    def inference(
-        self,
-        data: bytes,
-        exec_fn,
-        max_execs: int = MAX_INF_EXECS,
-    ) -> bytearray:
-        """Inference stage: find large ineffective ranges via binary search.
-
-        Flips progressively larger blocks starting from each position.
-        If a block flip doesn't change the execution path, the entire
-        block is marked as ineffective.
-
-        Args:
-            data: Input data to analyze.
-            exec_fn: Callable(bytes) -> int, returns execution checksum.
-            max_execs: Maximum executions before giving up.
-
-        Returns:
-            Bytearray of length len(data) where 1 = effective, 0 = skip.
-        """
-        length = len(data)
-        if length < MINIMAL_BLOCK_SIZE * 8:
-            # Too short for inference — everything is effective
-            return bytearray(length)
-
-        eff_map = bytearray(length)  # all zeros
-        exec_count = 0
-
-        baseline_cksum = exec_fn(data)
-        exec_count += 1
-
-        pos = 0
-        while pos < length - 1 and exec_count < max_execs:
-            cur_block = MINIMAL_BLOCK_SIZE
-            max_block = length // 8
-
-            while cur_block < max_block and exec_count < max_execs:
-                flip_len = min(cur_block, length - 1 - pos)
-
-                flipped = bytearray(data)
-                for i in range(pos, pos + flip_len):
-                    flipped[i] ^= 0xFF
-
-                cksum = exec_fn(bytes(flipped))
-                exec_count += 1
-
-                if cksum == baseline_cksum:
-                    # No change — this range is ineffective, try larger
-                    cur_block *= 2
-                else:
-                    # Change detected — stop expanding
-                    break
-
-            if cur_block == MINIMAL_BLOCK_SIZE:
-                # First flip already changed path — byte is effective
-                pos += cur_block
-            else:
-                # Mark the ineffective half
-                skip_len = cur_block // 2
-                skip_len = min(skip_len, length - pos)
-                # Don't mark in eff_map (it's 0 = skip by default)
-                pos += skip_len
-
-        log.debug(
-            "SkipDet inference: %d execs, eff_map has %d effective bytes",
-            exec_count,
-            sum(1 for b in eff_map if b),
-        )
-        return eff_map
