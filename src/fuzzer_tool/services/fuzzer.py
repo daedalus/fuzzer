@@ -325,6 +325,30 @@ except (AttributeError, OSError, ValueError):  # pragma: no cover - env-dependen
     pass
 
 
+def _apply_reward_shape(
+    op_rewards: list[tuple[str, bool, float]], shape: float | None
+) -> list[tuple[str, bool, float]]:
+    """Scale the successful rounds' reward weights by *shape*.
+
+    ``shape is None`` means "the class partition has nothing to say about this
+    round" and the list is returned unchanged -- see
+    :meth:`Fuzzer._credit_reward_shape` for when that is the case.
+
+    Only the ``ok`` entries move. A failure already carries weight 0.0 (the
+    reward loop passes ``surprisal_weight if ok else 0.0``), so scaling it would
+    be arithmetic on a zero, but keeping the branch explicit means a future
+    non-zero failure weight does not get shaped by a factor that describes a
+    discovery the failure did not make.
+
+    The shaping is applied *after* the [0, 1] cap the loop already imposes, so
+    the result cannot climb back above the cap: scaling a capped weight is a
+    discount, never a promotion.
+    """
+    if shape is None:
+        return op_rewards
+    return [(op, ok, w * shape if ok else w) for op, ok, w in op_rewards]
+
+
 def _in_taint(taints, offset: int, length: int) -> bool:
     """True when ``[offset, offset+length)`` lies wholly inside one taint.
 
@@ -1116,6 +1140,8 @@ class Fuzzer:
         op_tang_refit_interval=2000,
         op_kruskal_count=False,
         op_credit=False,
+        shaped_reward=False,
+        shaped_reward_floor=0.0,
         consolidated=False,
         moss=False,
         moss_gamma=1.0,
@@ -2232,7 +2258,7 @@ class Fuzzer:
         # off by default and gated on a paired benchmark, not on this wiring.
         self._matrix_substrate = None
         self._seed_residual = None
-        if seed_residual or op_credit:
+        if seed_residual or op_credit or shaped_reward:
             from fuzzer_tool.core.edge_matrix import MatrixSubstrate
 
             self._matrix_substrate = MatrixSubstrate(
@@ -2606,6 +2632,25 @@ class Fuzzer:
 
             self._op_credit = OpCreditScheduler(self._rng, self._matrix_substrate)
             log.info("op_credit enabled")
+
+        # Reward shaping on the same canonical classes, but for EVERY scheduler's
+        # reward rather than for one arm's posterior: a round whose new edges are
+        # one duplicate chain pays 1/n instead of n (F10). Independent of
+        # --op-credit on purpose -- it is the cheapest single-variable A/B the
+        # edge-id handover names, and mixing it with a selector change would make
+        # the paired run answer two questions at once.
+        self._shaped_reward = bool(shaped_reward)
+        # Lower clamp on the factor (--shaped-reward-floor). 0.0 is the faithful
+        # form; it is a knob because the two ways the factor collapses (a long
+        # duplicate chain paying 1/n, a derived-only round paying 0 once P1-2
+        # fills `derived`) are a design bet the handover states and nothing has
+        # measured.
+        self._shaped_reward_floor = float(shaped_reward_floor)
+        self._shaped_reward_rounds = 0
+        self._shaped_reward_gated = 0
+        self._shaped_reward_factor_sum = 0.0
+        if shaped_reward:
+            log.info("shaped_reward enabled (op_rewards scaled by class credit)")
 
         # Consolidated: flat Thompson with a category-shrunk prior and capped
         # evidence -- the single learner meant to replace the Elo portfolio
@@ -4545,6 +4590,49 @@ class Fuzzer:
             self._cmp_novelty_hits += 1
         return reported
 
+    def _credit_reward_shape(self) -> float | None:
+        """Scale factor for this round's shared operator reward, or None.
+
+        None means "leave the reward alone", which is the answer in every case
+        where the class partition cannot speak to this round:
+
+        * ``--shaped-reward`` off, or no substrate built;
+        * the round discovered no edges -- ``success`` is a disjunction (crash,
+          interesting, slow, new max, cmp progress, new valid coverage), so most
+          successful rounds have nothing to deduplicate and a factor of 0.0 here
+          would silently delete every non-coverage reward in the fuzzer;
+        * the preflight gate is closed (F1 per-process ids, F11 uninstrumented
+          target), where every id is a singleton owned by one seed and the classes
+          are noise. Counted separately so a bench run can tell "shaping was off"
+          from "shaping was on and neutral".
+        """
+        if not self._shaped_reward or self._matrix_substrate is None:
+            return None
+        if not self._last_new_edge_ids:
+            return None
+        if not self._matrix_substrate.trusted:
+            self._shaped_reward_gated += 1
+            return None
+        from fuzzer_tool.core.schedulers.op_credit import shaped_weight
+
+        factor = shaped_weight(
+            self._matrix_substrate, self._last_new_edge_ids, self._shaped_reward_floor
+        )
+        self._shaped_reward_rounds += 1
+        self._shaped_reward_factor_sum += factor
+        return factor
+
+    def shaped_reward_stats(self) -> dict:
+        """Did the shaping bite? Instrument for the paired A/B, not a decision."""
+        n = self._shaped_reward_rounds
+        return {
+            "shaped_reward": self._shaped_reward,
+            "shaped_reward_floor": self._shaped_reward_floor,
+            "shaped_reward_rounds": n,
+            "shaped_reward_gated_rounds": self._shaped_reward_gated,
+            "shaped_reward_mean_factor": (self._shaped_reward_factor_sum / n) if n else None,
+        }
+
     def fuzz_one(self, data: bytes) -> bool:
         # Invalidate Elo K-factor cache at the start of each iteration
         # so record_strategy_match calls recompute K from the current
@@ -4553,6 +4641,11 @@ class Fuzzer:
             self._elo._eff_k_cache = None
         self._last_parent_seed = data
         self._last_new_edge_count = 0  # reset; set when record_edges finds new edges
+        # The ids themselves, not just how many: the shaped reward needs the
+        # identities to ask the canonical partition how many classes they are.
+        # Reset every round so a round with no discovery cannot be shaped by the
+        # previous round's edges.
+        self._last_new_edge_ids: list[int] = []
         meta = self.seed_meta.get(data)
         if meta is not None:
             meta["fuzz_count"] += 1
@@ -5269,6 +5362,7 @@ class Fuzzer:
                 if new:
                     self._last_new_edge_exec = self.exec_count
                     self._last_new_edge_count = len(new)
+                    self._last_new_edge_ids = list(new)
                     self._novel_input_count += 1
                     self._saturation = None  # invalidate cached saturation
                     # Attribute new edges to the operators that ran this iteration.
@@ -5475,6 +5569,14 @@ class Fuzzer:
             ok = _op_success(op)
             w = self._cost_adjusted_weight(op, surprisal_weight if ok else 0.0)
             op_rewards.append((op, ok, min(1.0, w)))
+
+        # Class-deduplicated shaping, applied once to the finished list because
+        # the partition does not depend on which operator ran. Applying it here
+        # rather than inside each scheduler is the whole point: every consumer of
+        # op_rewards below sees the same shaped number, so a paired run moves one
+        # variable. Kept as a pure transform (`_apply_reward_shape`) so it can be
+        # driven by a test without a live campaign.
+        op_rewards = _apply_reward_shape(op_rewards, self._credit_reward_shape())
 
         # SLOPT: credit the batch exponent drawn for this round's operator
         # with that operator's outcome. The scheme applies one operator per
@@ -7529,6 +7631,16 @@ class Fuzzer:
             ops.append("canary")
         if getattr(self, "_cmaes", False):
             groups["Scheduling"].append("cma-es")
+        # Not an arm, so not in `ops`: it rescales the reward every arm above
+        # reads. That is exactly why it is announced rather than silent -- a
+        # campaign whose rewards are being divided by class size and whose log
+        # does not say so is the "a suite cannot detect a reverted feature"
+        # failure this repo has already paid for once.
+        if getattr(self, "_shaped_reward", False):
+            floor = getattr(self, "_shaped_reward_floor", 0.0)
+            groups["Scheduling"].append(
+                "shaped-reward" if not floor else f"shaped-reward(floor={floor:g})"
+            )
         if ops:
             groups["Scheduling"].extend(ops)
 

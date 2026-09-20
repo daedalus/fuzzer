@@ -46,6 +46,37 @@ DECAY = 0.5
 EXPLORE_BASE = 0.05
 
 
+def shaped_weight(substrate: MatrixSubstrate, new_edge_ids, floor: float = 0.0) -> float:
+    """Fraction of a round's new edges that are independent, in ``[0, 1]``.
+
+    45 new edges that are one class weigh ``1/45``; 45 edges in 45 classes weigh
+    ``1.0``. This is the reward-shaping form of the same arithmetic
+    :meth:`OpCreditScheduler.credit` uses, factored out of the class because the
+    shaping is for *every* scheduler's reward and must not require electing this
+    selector to use it (``--shaped-reward`` is independent of ``--op-credit``).
+
+    Returns ``0.0`` for an empty round and for a round whose every edge is in
+    ``substrate.derived`` -- a derived edge pays nothing by design, so a round
+    that found only derived edges earned no credit. Nothing populates ``derived``
+    until P1-2 confirms the relations, so until then the smallest a non-empty
+    round can pay is ``1/len(edges)``.
+
+    *floor* clamps the result from below (``--shaped-reward-floor``). It exists
+    because the two ways this factor reaches zero-ish are a design bet, not a
+    measurement: a 45-edge chain paying 1/45 all but deletes that round's reward
+    for every arm, and once P1-2 fills ``derived`` a round of only derived edges
+    pays exactly nothing. ``floor=0.0`` is the faithful form, ``floor=1.0``
+    disables the shaping without touching the wiring, and anything between is the
+    knob a paired run can move. Clamped to ``[0, 1]``; an empty round still pays
+    0.0, because there is no round to shape.
+    """
+    edges = list(new_edge_ids)
+    if not edges:
+        return 0.0
+    raw = substrate.class_credit(edges) / len(edges)
+    return min(1.0, max(raw, max(0.0, floor)))
+
+
 class OpCreditScheduler:
     """Elo-arm operator scheduler over the shared :class:`MatrixSubstrate`.
 
@@ -103,15 +134,14 @@ class OpCreditScheduler:
             }
         return self._credit.get(op, 0)
 
-    def shaped_weight(self, new_edge_ids) -> float:
+    def shaped_weight(self, new_edge_ids, floor: float = 0.0) -> float:
         """Fraction of a round's new edges that are independent, in [0, 1].
 
-        For a caller that wants to scale the shared reward weight rather than run this
-        selector: 45 new edges that are one class weigh 1/45. Not wired anywhere; it is
-        the form the handover calls "the cheapest A/B available".
+        Thin bind of :func:`shaped_weight` to this arm's substrate. The shared
+        reward path uses the module function directly, so the shaping is available
+        without electing this selector; see ``Fuzzer._credit_reward_shape``.
         """
-        edges = list(new_edge_ids)
-        return self.substrate.class_credit(edges) / len(edges) if edges else 0.0
+        return shaped_weight(self.substrate, new_edge_ids, floor)
 
     def select_op(self, ops: list[str]) -> str:
         if not ops:

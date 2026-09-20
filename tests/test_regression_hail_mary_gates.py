@@ -100,6 +100,17 @@ _EXCLUDED_OPT_IN = frozenset(
         # same deliberately-worst-in-class floor role, same reasoning, one
         # tournament over.
         "seed_canary_scheduler",
+        # Measured and not adopted, which is why this exclusion is evidence
+        # rather than caution: paired on fuzzgoat over 12 seeds it went 5W/7L
+        # with a median of -7 edges on a 145-edge baseline, CI [-13.5, +1.6]
+        # (docs/learnings/2026-09-20-shaped-reward-ab-result.md). The structural
+        # argument stands on its own too: it is not a strategy, it rescales the
+        # reward every other strategy reads (core/schedulers/op_credit.py::
+        # shaped_weight), so --hail-mary would change what the whole portfolio
+        # is paid for -- the same reason temperature_control is excluded above --
+        # and it would destroy the single-variable paired run it exists for
+        # (bench arm "elo-shaped-reward").
+        "shaped_reward",
     }
 )
 

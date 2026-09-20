@@ -526,6 +526,8 @@ def cmd_fuzz(args):
             op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
             op_kruskal_count=getattr(args, "op_kruskal_count", False),
             op_credit=getattr(args, "op_credit", False),
+            shaped_reward=getattr(args, "shaped_reward", False),
+            shaped_reward_floor=getattr(args, "shaped_reward_floor", 0.0),
             consolidated=getattr(args, "consolidated", False),
             moss=getattr(args, "moss", False),
             moss_gamma=getattr(args, "moss_gamma", 1.0),
@@ -807,6 +809,8 @@ def cmd_fuzz(args):
         op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
         op_kruskal_count=getattr(args, "op_kruskal_count", False),
         op_credit=getattr(args, "op_credit", False),
+        shaped_reward=getattr(args, "shaped_reward", False),
+        shaped_reward_floor=getattr(args, "shaped_reward_floor", 0.0),
         consolidated=getattr(args, "consolidated", False),
         moss=getattr(args, "moss", False),
         moss_gamma=getattr(args, "moss_gamma", 1.0),
@@ -2821,6 +2825,31 @@ def main() -> int:
             "(experimental, off by default; leaves the Elo ballot while the edge-id "
             "stability gate is closed -- see core/schedulers/op_credit.py and the same "
             "'unproven arm' caveat op_tang carries)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--shaped-reward",
+        action="store_true",
+        help=(
+            "Scale EVERY scheduler's operator reward by the fraction of the round's "
+            "new edges that are independent canonical classes: a 45-edge duplicate "
+            "chain pays 1/45, not 45 (experimental, off by default; inert while the "
+            "edge-id stability gate is closed and on rounds that found no edge -- "
+            "see core/schedulers/op_credit.py::shaped_weight). Independent of "
+            "--op-credit so the paired A/B moves one variable"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--shaped-reward-floor",
+        type=float,
+        default=0.0,
+        metavar="F",
+        help=(
+            "Lower clamp on the --shaped-reward factor (default: 0.0, the faithful "
+            "form). A long duplicate chain otherwise pays 1/n and a derived-only "
+            "round pays 0, which all but deletes that round's reward for every arm; "
+            "both are a design bet, so the clamp is a knob a paired run can move. "
+            "1.0 disables the shaping without unwiring it"
         ),
     )
     fuzz_parser.add_argument(

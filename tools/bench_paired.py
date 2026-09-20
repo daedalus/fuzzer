@@ -95,6 +95,22 @@ ARMS: dict[str, list[str]] = {
     "elo": ["--elo", "--mc-bandit"],
     "elo-seed-residual": ["--elo", "--mc-bandit", "--seed-residual"],
     "elo-op-credit": ["--elo", "--mc-bandit", "--op-credit"],
+    # The reward-shaping form of the same class arithmetic, without the selector
+    # change: --shaped-reward rescales the reward EVERY arm reads, so this pairs
+    # against "elo" and isolates the reward, which is what makes it the cheapest
+    # single-variable test the edge-id handover names. Deliberately not combined
+    # with --op-credit: that would move the selector and the reward at once.
+    "elo-shaped-reward": ["--elo", "--mc-bandit", "--shaped-reward"],
+    # The clamp on the two ways that factor collapses. Registered because it was
+    # measured (docs/learnings/2026-09-20-shaped-reward-ab-result.md), so the arm
+    # list stays the record of what has been tested.
+    "elo-shaped-reward-floor25": [
+        "--elo",
+        "--mc-bandit",
+        "--shaped-reward",
+        "--shaped-reward-floor",
+        "0.25",
+    ],
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
