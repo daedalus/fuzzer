@@ -61,7 +61,7 @@ class PersistentRunner:
         if self._started:
             return True
 
-        # Use IPC_PRIVATE to avoid key collisions between parallel workers
+        # Use IPC_PRIVATE to avoid key collisions between concurrent runs
         self.shm_id = libc_shm.shmget(self.map_size, key=IPC_PRIVATE)
         if self.shm_id is None:
             log.warning("shmget failed with errno %d", ctypes.get_errno())

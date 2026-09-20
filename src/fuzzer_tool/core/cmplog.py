@@ -64,10 +64,14 @@ def _get_cmplog_dir() -> str:
 
 # A cmplog artifact is only swept if nothing has touched it for this long.
 # The sweep cannot tell a file abandoned by a killed run from one a
-# CONCURRENT run is writing: parallel workers are separate processes sharing
-# this directory, and the names carry a uuid rather than a pid. A live
-# collector truncates its log on every setup_env() and the shim writes on
-# every execution, so an mtime this old means no fuzzer is driving it.
+# CONCURRENT run is writing, and this directory is per-user, not per-run:
+# several fuzzer processes on one machine share it and the names carry a
+# uuid rather than a pid. This outlived the -j N mode that first motivated
+# it -- running N instances over one corpus is still the way to use N cores,
+# so an unconditional sweep at startup would still delete a live sibling's
+# log. A live collector truncates its log on every setup_env() and the shim
+# writes on every execution, so an mtime this old means no fuzzer is
+# driving it.
 _CMPLOG_STALE_AGE_S = 24 * 3600
 
 

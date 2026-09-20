@@ -13,31 +13,18 @@ import inspect
 from pathlib import Path
 
 
-class TestParallelSignature:
+class TestForwardedKwargs:
     """C2 -- cmd_fuzz passed kwargs run_parallel did not accept, so every
-    `--jobs > 1` run died with TypeError before spawning a worker."""
+    `--jobs > 1` run died with TypeError before spawning a worker.
 
-    def test_run_parallel_accepts_every_kwarg_cmd_fuzz_sends(self):
-        from fuzzer_tool.services.parallel import run_parallel
-
-        params = inspect.signature(run_parallel).parameters
-        assert not any(p.kind == p.VAR_KEYWORD for p in params.values()), (
-            "a **kwargs catch-all would hide this class of drift"
-        )
-        for kwarg in (
-            "contextual",
-            "contextual_alpha",
-            "contextual_lambda",
-            "lineage",
-            "lineage_backtrack",
-            "asan_target",
-            "ubsan_target",
-            "chi2_operator_interval",
-        ):
-            assert kwarg in params, f"run_parallel does not accept {kwarg}"
+    The mechanism is retired with the mode: there is one keyword list now,
+    so two of them cannot disagree. What survives is the other half of the
+    original check -- a flag plumbed through the CLI is useless if Fuzzer
+    rejects it -- which is also covered generally by
+    test_regression_cli_fuzzer_kwargs. Kept as the pinned narrow case.
+    """
 
     def test_forwarded_kwargs_are_accepted_by_fuzzer(self):
-        """Plumbing them into run_parallel is useless if Fuzzer rejects them."""
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         fuzzer_params = inspect.signature(Fuzzer.__init__).parameters
@@ -47,6 +34,9 @@ class TestParallelSignature:
             "contextual_lambda",
             "lineage",
             "lineage_backtrack",
+            "asan_target",
+            "ubsan_target",
+            "chi2_operator_interval",
         ):
             assert kwarg in fuzzer_params
 

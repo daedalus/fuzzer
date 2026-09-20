@@ -70,8 +70,8 @@ def _discover_corpus_files(corpus_path: Path) -> list[Path]:
     never-prune and must not be treated as minimization candidates.
 
     The layout itself lives in adapters.filesystem.discover_seed_files, which
-    is also what root_cause and the parallel worker sync use; the exclusions
-    below are this module's, the walk is not.
+    is also what root_cause uses; the exclusions below are this module's, the
+    walk is not.
     """
     from fuzzer_tool.adapters.filesystem import discover_seed_files
 

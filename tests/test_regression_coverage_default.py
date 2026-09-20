@@ -206,7 +206,7 @@ class TestUninstrumentedWarning:
         assert capsys.readouterr().out.count("WARNING") == 1
 
     def test_sentinel_is_per_instance(self):
-        """Parallel workers each build a Fuzzer; each should warn once."""
+        """Each Fuzzer built in one process should warn once on its own."""
         a, b = _Bare(), _Bare()
         a._warn_uninstrumented(["/tmp/plain"])
         assert getattr(a, "_uninstrumented_warned", False) is True

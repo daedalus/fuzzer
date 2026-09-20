@@ -6,10 +6,12 @@ what a killed run left behind. Neither was called from anywhere in the
 package -- only from tests -- so every run minted a fresh uuid-named trio
 under ``~/.cache/fuzzer_cmplog`` and nothing ever removed it.
 
-The sweep is age-gated on purpose: parallel workers are separate processes
-sharing that directory, and the filenames carry a uuid rather than a pid, so
-an unconditional sweep at startup would delete the log a concurrent worker is
-writing to.
+The sweep is age-gated on purpose, and the reason outlived the ``-j N`` mode
+that first raised it: the cache directory is per-user, several fuzzer
+processes on one machine share it, and the filenames carry a uuid rather than
+a pid -- so an unconditional sweep at startup would delete the log a
+concurrent run is writing to. Running N instances over one corpus is still
+how N cores get used, so this guard still has a job.
 """
 
 import os

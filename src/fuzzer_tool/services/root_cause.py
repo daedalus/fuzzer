@@ -30,8 +30,10 @@ def _load_corpus(corpus_dir: str) -> list[tuple[str, bytes]]:
     sidecars instead. ``state.pkl.gz`` was then reported as the "nearest
     corpus seed" and the crash was diffed against gzip bytes, producing a
     root-cause report with no relationship to the target. Same defect as the
-    one already fixed in ``minimize.py`` and in the parallel worker sync;
-    ``discover_seed_files`` is now the one place the layout is written down.
+    one already fixed in ``minimize.py`` and in the since-retired parallel
+    worker sync -- three independent modules reinvented the walk and two of
+    them got it wrong, which is why ``discover_seed_files`` is now the one
+    place the layout is written down.
 
     ``crashing/`` is excluded: a baseline must be non-crashing, and offering
     a known-crashing seed only to reject it at the reproduce check below

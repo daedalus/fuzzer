@@ -4,7 +4,7 @@
 Covers handover 10f
 (``docs/handover/handover_done_2026-09-06.md``):
 the de Bruijn construction is a pure function of ``(k, n)`` and was
-previously re-derived by every process in a parallel fuzzing campaign.
+previously re-derived by every fuzzer process on the machine.
 These tests exercise the disk cache directly (module-level, isolated
 per test via a fresh ``XDG_CACHE_HOME``) and the subprocess-level
 integration proving two independent Python processes actually share

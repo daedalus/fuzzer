@@ -658,11 +658,13 @@ def cmd_fuzz(args):
         consolidated=getattr(args, "consolidated", False),
         moss=getattr(args, "moss", False),
         moss_gamma=getattr(args, "moss_gamma", 1.0),
-        # kl_ducb/kl_swucb/markov_blend were passed to run_parallel but not
-        # here, so in the default single-process mode --kl-ducb, --kl-swucb
-        # (and --elo all, which sets both) and --markov-blend built nothing.
-        # test_regression_cli_fuzzer_kwargs checks this call against every
-        # fuzz flag that names a Fuzzer parameter.
+        # kl_ducb/kl_swucb/markov_blend were once passed to the retired
+        # run_parallel but not here, so in the default mode --kl-ducb,
+        # --kl-swucb (and --elo all, which sets both) and --markov-blend
+        # built nothing. This is now the only keyword list, but it can still
+        # drift against the parser, which is what
+        # test_regression_cli_fuzzer_kwargs checks: every fuzz flag naming a
+        # Fuzzer parameter must appear in this call.
         kl_ducb=getattr(args, "kl_ducb", False),
         kl_ducb_gamma=getattr(args, "kl_ducb_gamma", 0.9999),
         kl_swucb=getattr(args, "kl_swucb", False),

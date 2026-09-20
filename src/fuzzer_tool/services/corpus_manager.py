@@ -882,8 +882,10 @@ class CorpusManager:
             }
             # Lineage edge: parent key + the ops/sites that produced this seed.
             # Only recorded when a real parent exists (interesting/Metropolis
-            # paths in fuzz_one); parallel-sync inserts are roots. Gated on
-            # the flag so default runs stay byte-identical.
+            # paths in fuzz_one). Every in-tree caller now passes one; the
+            # parentless branch survives because `parent` is optional on the
+            # public Fuzzer.save_to_corpus, so an embedder can still insert a
+            # root. Gated on the flag so default runs stay byte-identical.
             if f._use_lineage and parent is not None:
                 f.seed_meta[data].update(
                     {
@@ -909,8 +911,8 @@ class CorpusManager:
                     pass
             # Propagate actual coverage_edges from EdgeTracker — when called
             # from fuzz_one, the seed's edges were already recorded by
-            # record_edges before save_to_corpus.  For the parallel-sync path
-            # (no prior fuzz_one), edge_count stays 0, which is correct.
+            # record_edges before save_to_corpus.  For a parentless insert
+            # with no prior fuzz_one, edge_count stays 0, which is correct.
             edge_count = len(f._edge_tracker.seed_edges.get(seed_key, set()))
             if edge_count > 0:
                 f.seed_meta[data]["coverage_edges"] = edge_count

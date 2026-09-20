@@ -238,9 +238,8 @@ class TestWiring:
         assert params["entropy_zscore"].default is False
         assert params["entropy_zscore_target"].default == 0.0
 
-    def test_cli_passes_flag_to_both_constructions(self):
+    def test_cli_passes_flag_to_the_fuzzer_construction(self):
         from fuzzer_tool.cli import commands
-        from fuzzer_tool.services import parallel
 
         def kws(fn, callee):
             tree = ast.parse(inspect.getsource(fn))
@@ -252,8 +251,6 @@ class TestWiring:
 
         for flag in ("entropy_zscore", "entropy_zscore_target"):
             assert all(flag in k for k in kws(commands.cmd_fuzz, "Fuzzer"))
-            assert all(flag in k for k in kws(commands.cmd_fuzz, "run_parallel"))
-            assert all(flag in k for k in kws(parallel._worker_main, "Fuzzer"))
         assert "entropy_zscore" in commands._HAIL_MARY_FLAGS
 
     def test_parser_declares_flag(self):

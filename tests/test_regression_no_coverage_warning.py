@@ -62,7 +62,7 @@ def test_logs_as_warning_level(caplog):
 
 def test_uses_sentinel_attribute_not_shared_state():
     """The once-per-run guard must be per-instance, so a second Fuzzer in
-    the same process (parallel workers, tests) still warns."""
+    the same process (embedders, tests) still warns."""
     a, b = _Bare(), _Bare()
     a._warn_no_coverage()
     assert getattr(a, "_no_cov_warned", False) is True

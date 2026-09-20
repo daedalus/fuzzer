@@ -10,8 +10,10 @@ zero seeds and silently substituted the sidecar:
   - ``root_cause.py``     reported state.pkl.gz as the "nearest corpus seed"
                           and diffed the crash against it
 
-The first two were fixed separately; this file pins the third and the shared
-``discover_seed_files`` all three now go through.
+The first two were fixed separately, and ``parallel.py`` has since been
+retired outright; this file pins the third and the shared
+``discover_seed_files`` the survivors go through. Three independent
+rediscoveries of one layout bug is why the walk has a single owner.
 
 Every assertion here is on VALUES — which bytes came back — because the
 defect produced a well-typed, non-empty, entirely wrong result. A test

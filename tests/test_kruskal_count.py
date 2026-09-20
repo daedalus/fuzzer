@@ -405,12 +405,11 @@ class TestFuzzerWiring:
             inspect.signature(Fuzzer.__init__).parameters["seed_canary_scheduler"].default is False
         )
 
-    def test_cli_passes_flag_to_both_constructions(self):
+    def test_cli_passes_flag_to_the_fuzzer_construction(self):
         import ast
         import inspect
 
         from fuzzer_tool.cli import commands
-        from fuzzer_tool.services import parallel
 
         def kws(fn, callee):
             tree = ast.parse(inspect.getsource(fn))
@@ -422,8 +421,6 @@ class TestFuzzerWiring:
             return [{k.arg for k in c.keywords} for c in calls]
 
         assert all("kruskal_count" in k for k in kws(commands.cmd_fuzz, "Fuzzer"))
-        assert all("kruskal_count" in k for k in kws(commands.cmd_fuzz, "run_parallel"))
-        assert all("kruskal_count" in k for k in kws(parallel._worker_main, "Fuzzer"))
         assert "kruskal_count" in commands._HAIL_MARY_FLAGS
 
     def test_parser_declares_flag(self):

@@ -671,7 +671,7 @@ class TestSaveToCorpusCoverageEdges:
         )
 
     def test_save_to_corpus_zero_edges_when_not_recorded(self):
-        """When called from parallel-sync path (no prior record_edges), coverage_edges stays 0."""
+        """On a parentless insert (no prior record_edges), coverage_edges stays 0."""
         f = MockFuzzer(Path(tempfile.mkdtemp()))
         mgr = CorpusManager(f)
         f._edge_tracker.cumulative_edges = set()

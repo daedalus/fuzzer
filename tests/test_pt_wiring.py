@@ -2,23 +2,23 @@
 
 Behavioural tests that drive ``PtTraceSession`` directly pass with every call
 site deleted, so the ones here read the source of the call sites themselves —
-the same gap that let a drop-triggered resize ship unreferenced.  Six places
-have to agree for ``--intel-pt`` to do anything: argparse, the direct
-``Fuzzer(...)`` call, ``run_parallel``, ``_worker_main``, the attach in
-``adapters/process.py`` and the drain in ``services/runner.py``.
+the same gap that let a drop-triggered resize ship unreferenced.  Four places
+have to agree for ``--intel-pt`` to do anything: argparse, the
+``Fuzzer(...)`` call, the attach in ``adapters/process.py`` and the drain in
+``services/runner.py``.  It was six before the ``-j N`` mode was retired,
+and two of the six were run_parallel and _worker_main re-declaring every
+flag.
 """
 
 import inspect
 import subprocess
 import sys
 
-import pytest
-
 from fuzzer_tool.adapters import process, pt_trace
 from fuzzer_tool.cli import commands
 from fuzzer_tool.core.intel_pt import PtCoverage, PtMapMode
 from fuzzer_tool.services import fuzzer as fuzzer_mod
-from fuzzer_tool.services import parallel, runner, stats
+from fuzzer_tool.services import runner, stats
 
 FLAGS = ("intel_pt", "intel_pt_mode")
 
@@ -53,22 +53,13 @@ class TestFlagReachesEveryLayer:
         params = inspect.signature(fuzzer_mod.Fuzzer.__init__).parameters
         assert set(FLAGS) <= set(params)
 
-    @pytest.mark.parametrize("fn", [parallel.run_parallel, parallel._worker_main])
-    def test_parallel_signatures_carry_the_flags(self, fn):
-        """A flag missing here is dropped silently for every ``-j N`` run --
-        the failure mode that hid --kl-ducb and --markov-blend."""
-        assert set(FLAGS) <= set(inspect.signature(fn).parameters)
-
-    def test_cmd_fuzz_passes_the_flags_to_both_entry_points(self):
+    def test_cmd_fuzz_passes_the_flags_to_the_fuzzer(self):
         src = inspect.getsource(commands)
         for flag in FLAGS:
-            # once into Fuzzer(...), once into run_parallel(...)
-            assert src.count(f'{flag}=getattr(args, "{flag}"') == 2
-
-    def test_worker_forwards_the_flags_to_fuzzer(self):
-        src = inspect.getsource(parallel)
-        for flag in FLAGS:
-            assert src.count(f"{flag}={flag},") == 2
+            # Exactly once: the second occurrence used to be run_parallel's
+            # keyword list, and the count is what caught a flag reaching one
+            # entry point but not the other.
+            assert src.count(f'{flag}=getattr(args, "{flag}"') == 1
 
 
 class TestExecPathCallSites:

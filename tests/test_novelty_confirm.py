@@ -352,7 +352,6 @@ class TestWiring:
         import inspect
 
         from fuzzer_tool.cli import commands
-        from fuzzer_tool.services import parallel
 
         def kws(fn, callee):
             tree = ast.parse(inspect.getsource(fn))
@@ -365,9 +364,6 @@ class TestWiring:
             return [{k.arg for k in c.keywords} for c in calls]
 
         assert all("confirm_novelty" in k for k in kws(commands.cmd_fuzz, "Fuzzer"))
-        assert all("confirm_novelty" in k for k in kws(commands.cmd_fuzz, "run_parallel"))
-        assert all("confirm_novelty" in k for k in kws(parallel._worker_main, "Fuzzer"))
-        assert "confirm_novelty" in inspect.signature(parallel.run_parallel).parameters
 
     def test_parser_declares_flag(self):
         import ast

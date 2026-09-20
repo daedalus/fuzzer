@@ -208,9 +208,11 @@ _SEED_SUBTREES = ("pruned", "crashing", "irreplaceable", "timeouts")
 # lists the directory instead of walking seeds/ picks these up INSTEAD of
 # the seeds -- state.pkl.gz is the only top-level regular file a live corpus
 # dir holds, so a flat scan yields exactly the wrong thing and yields it
-# silently. That defect has now been found in three separate modules
-# (minimize, parallel's worker sync, root_cause); discover_seed_files is the
-# single place the layout is encoded, so a fourth consumer cannot reinvent it.
+# silently. That defect was found in three separate modules (minimize,
+# root_cause, and the since-retired parallel worker sync); discover_seed_files
+# is the single place the layout is encoded, so a fourth consumer cannot
+# reinvent it. The count stands even though one of the three is gone -- three
+# independent rediscoveries is the evidence this walk needs one owner.
 _SEED_SKIP_SUFFIXES = (".txt", ".log", ".json", ".gz", ".tmp")
 
 

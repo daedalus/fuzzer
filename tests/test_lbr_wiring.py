@@ -14,15 +14,13 @@ import inspect
 import subprocess
 import sys
 
-import pytest
-
 from fuzzer_tool.adapters import lbr_trace, process
 from fuzzer_tool.cli import commands
 from fuzzer_tool.core import branch_record
 from fuzzer_tool.core.branch_record import BranchCoverage
 from fuzzer_tool.services import corpus_manager
 from fuzzer_tool.services import fuzzer as fuzzer_mod
-from fuzzer_tool.services import parallel, runner, stats
+from fuzzer_tool.services import runner, stats
 
 FLAGS = ("lbr", "lbr_period")
 
@@ -53,19 +51,13 @@ class TestFlagReachesEveryLayer:
         params = inspect.signature(fuzzer_mod.Fuzzer.__init__).parameters
         assert set(FLAGS) <= set(params)
 
-    @pytest.mark.parametrize("fn", [parallel.run_parallel, parallel._worker_main])
-    def test_parallel_signatures_carry_the_flags(self, fn):
-        assert set(FLAGS) <= set(inspect.signature(fn).parameters)
-
-    def test_cmd_fuzz_passes_the_flags_to_both_entry_points(self):
+    def test_cmd_fuzz_passes_the_flags_to_the_fuzzer(self):
         src = inspect.getsource(commands)
         for flag in FLAGS:
-            assert src.count(f'{flag}=getattr(args, "{flag}"') == 2
-
-    def test_worker_forwards_the_flags_to_fuzzer(self):
-        src = inspect.getsource(parallel)
-        for flag in FLAGS:
-            assert src.count(f"{flag}={flag},") == 2
+            # Exactly once: the second occurrence used to be run_parallel's
+            # keyword list, and the count is what caught a flag reaching one
+            # entry point but not the other.
+            assert src.count(f'{flag}=getattr(args, "{flag}"') == 1
 
 
 class TestExecPathCallSites:

@@ -1205,7 +1205,7 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
         # Simulate inherited control-channel fds without a real loader.
         #
         # 198/199 are process-global, and dup2 silently closes whatever is
-        # already there, so anything the interpreter (or a parallel worker)
+        # already there, so anything the interpreter (or a concurrent run)
         # happens to hold at those numbers is saved and put back afterwards
         # rather than simply closed.
         saved = {}

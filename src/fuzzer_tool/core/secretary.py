@@ -2,8 +2,8 @@
 
 Applies the classical secretary problem (explore first 1/e of candidates,
 then commit to the first candidate better than all seen) to fuzzing
-decisions across seed scheduling, operator selection, corpus minimization,
-and parallel worker allocation.
+decisions across seed scheduling, operator selection, and corpus
+minimization.
 
 Uses rank-based stopping with a sliding window for non-stationary
 quality adaptation. The 37% (1/e) exploration threshold is optimal
