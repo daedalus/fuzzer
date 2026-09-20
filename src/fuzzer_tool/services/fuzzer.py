@@ -43,6 +43,7 @@ from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
+from fuzzer_tool.core.novelty_confirm import confirm
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.rng_health import quick_health_check
@@ -1231,6 +1232,7 @@ class Fuzzer:
         seed_residual=False,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
+        confirm_novelty=False,
         seed_canary_scheduler=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
@@ -1568,6 +1570,11 @@ class Fuzzer:
         # Seed stability calibration (handover item D). n_runs per accepted
         # seed; 0 disables. Opt-in: see _calibrate_seed_stability.
         self._calibrate_stability = int(calibrate_stability or 0)
+        # F2: rerun an execution that reported new coverage and keep only what
+        # reproduces. See _confirm_new_coverage.
+        self._confirm_novelty = bool(confirm_novelty)
+        self._confirmed_edges: frozenset[int] | None = None
+        self._confirm_stats = {"reruns": 0, "withdrawn": 0, "phantom_ids": 0}
         self._unstable_edges: set[int] = set()
         self._stability_calibrations = 0
         self._cmplog_auto = True  # always auto-detect; no tri-state any more
@@ -4887,6 +4894,14 @@ class Fuzzer:
                 or (self.branch_cov and self.branch_cov.is_new_coverage())
             )
 
+        has_new_coverage, self._current_edges_cache = self._confirm_new_coverage(
+            mutated,
+            scanned_shm,
+            has_new_coverage,
+            self._current_edges_cache,
+            skip=is_crash or is_timeout,
+        )
+
         # Performance novelty: an edge whose trip count grew substantially
         # past anything seen before. The hit-count buckets saturate (129 and
         # 10^6 are the same bucket), so this is the only signal that stays
@@ -5126,7 +5141,7 @@ class Fuzzer:
             # from `self.shm_cov`, which in multi-target mode is a separate,
             # unscanned shared segment.
             if scanned_shm is not None and not self.ptrace_cov:
-                hit_counts = scanned_shm.get_edge_counts()
+                hit_counts = self._only_confirmed(scanned_shm.get_edge_counts())
                 hit_edges = set(hit_counts.keys())
             else:
                 hit_edges = (
@@ -5835,6 +5850,48 @@ class Fuzzer:
         if not edge_sets:
             return None
         return edge_sets, hashes, dropped
+
+    def _confirm_new_coverage(self, data: bytes, shm, has_new: bool, edge_ids, *, skip=False):
+        """Rerun *data* once if it reported new coverage; keep what reproduces.
+
+        F2: an execution can report ids no later execution of the same input
+        reproduces, and they were 12-18% of the "new coverage" successes on
+        the default path (``phantom_edge_probe.py``). Nothing else catches
+        them: ``_calibrate_seed_stability`` compares reruns with each other and
+        the phantoms are only in the original run. Withdrawing them here, before
+        ``record_edges``, the corpus and the reward fan-out read ``has_new``,
+        means no consumer needs a purge API.
+
+        Returns ``(has_new, edge_ids)`` after confirmation. Costs one execution
+        per new-coverage event and nothing otherwise. A crash or timeout is
+        never rerun (its ids are short, not phantom), a rerun that raises leaves
+        the verdict alone, and the flag off is a pass-through.
+        """
+        self._confirmed_edges = None
+        if not (self._confirm_novelty and has_new and shm is not None) or skip:
+            return has_new, edge_ids
+        new_ids = frozenset(shm.last_new_ids)
+        old_bucket = bool(shm.last_old_bucket_novel)
+        try:
+            self._run_target(data)
+        except Exception:
+            return has_new, edge_ids
+        result = confirm(has_new, new_ids, old_bucket, edge_ids, shm.get_edge_ids())
+        self._confirm_stats["reruns"] += 1
+        if result.phantoms:
+            shm.reject_phantoms(result.phantoms)
+            self._confirm_stats["phantom_ids"] += len(result.phantoms)
+        if has_new and not result.has_new:
+            self._confirm_stats["withdrawn"] += 1
+        self._confirmed_edges = result.edge_ids
+        return result.has_new, set(result.edge_ids)
+
+    def _only_confirmed(self, hit_counts):
+        """Restrict per-edge counts to the ids the last confirmation kept."""
+        keep = self._confirmed_edges
+        if keep is None or hit_counts is None:
+            return hit_counts
+        return {e: c for e, c in hit_counts.items() if e in keep}
 
     def _calibrate_seed_stability(self, data: bytes, n_runs: int = 3) -> set[int]:
         """Re-run *data* and mask edges that don't reproduce.
@@ -7111,11 +7168,12 @@ class Fuzzer:
                 self._corpus_manager.save_timeout(seed)
                 continue
             has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
+            has_new, edge_ids = self._confirm_new_coverage(seed, self.shm_cov, has_new, edge_ids)
             if not edge_ids:
                 continue
             if len(edge_ids) > probe_width:
                 probe_seed, probe_width = seed, len(edge_ids)
-            hit_counts = self.shm_cov.get_edge_counts()
+            hit_counts = self._only_confirmed(self.shm_cov.get_edge_counts())
             stack_depth = self.shm_cov.read_stack_depth()
             path_hash = self.shm_cov.read_path_hash()
             if path_hash == 0:

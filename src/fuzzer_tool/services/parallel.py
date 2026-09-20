@@ -147,6 +147,7 @@ def _worker_main(
     entropy_zscore: bool = False,
     entropy_zscore_target: float = 0.0,
     seed_residual: bool = False,
+    confirm_novelty: bool = False,
     softmax: bool = False,
     softmax_tau: float = 1.0,
     use_topk: bool = False,
@@ -296,6 +297,7 @@ def _worker_main(
         entropy_zscore=entropy_zscore,
         entropy_zscore_target=entropy_zscore_target,
         seed_residual=seed_residual,
+        confirm_novelty=confirm_novelty,
     )
 
     print(f"{prefix} Started (target={target})")
@@ -818,6 +820,7 @@ def run_parallel(
     entropy_zscore: bool = False,
     entropy_zscore_target: float = 0.0,
     seed_residual: bool = False,
+    confirm_novelty: bool = False,
     softmax: bool = False,
     softmax_tau: float = 1.0,
     use_topk: bool = False,
@@ -1005,6 +1008,7 @@ def run_parallel(
         entropy_zscore=entropy_zscore,
         entropy_zscore_target=entropy_zscore_target,
         seed_residual=seed_residual,
+        confirm_novelty=confirm_novelty,
     )
 
     def _spawn_worker(worker_id: int, rng_seed: int) -> multiprocessing.Process:

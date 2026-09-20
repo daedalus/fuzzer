@@ -505,6 +505,7 @@ def cmd_fuzz(args):
             entropy_zscore=getattr(args, "entropy_zscore", False),
             entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
             seed_residual=getattr(args, "seed_residual", False),
+            confirm_novelty=getattr(args, "confirm_novelty", False),
             successive_elim=getattr(args, "successive_elim", False),
             successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
             successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -776,6 +777,7 @@ def cmd_fuzz(args):
         entropy_zscore=getattr(args, "entropy_zscore", False),
         entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
         seed_residual=getattr(args, "seed_residual", False),
+        confirm_novelty=getattr(args, "confirm_novelty", False),
         successive_elim=getattr(args, "successive_elim", False),
         successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
         successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -3246,6 +3248,20 @@ def main() -> int:
         "Abstains while the edge-id stability probe or the instrumentation check fails, and "
         "logs its own falsification (partial correlation against volume) at every refit. OFF "
         "by default; not yet A/B validated -- see core/schedulers/seed_residual.py.",
+    )
+    fuzz_parser.add_argument(
+        "--confirm-novelty",
+        action="store_true",
+        default=False,
+        help=(
+            "Rerun an input once when it reports new coverage and keep only the edge ids that "
+            "reproduce. An execution can report ids no later run of the same input reproduces "
+            "(handover F2: ~6.5%% of executions, 12-18%% of 'new coverage' successes and most "
+            "singleton edges on the default path), and every rarity-based scheduler and every "
+            "operator reward reads them. Costs one extra execution per new-coverage event. OFF by "
+            "default; not yet A/B validated -- see docs/handover/"
+            "handover_strata_schedulers_2026-09-19.md and core/novelty_confirm.py."
+        ),
     )
     fuzz_parser.add_argument(
         "--ecofuzz",

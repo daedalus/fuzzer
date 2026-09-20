@@ -1,6 +1,8 @@
 # Strata schedulers: a seed arm and an op arm built on the edge-matrix findings
 
-**Status:** design plus measurements. No production code. Base `0b6d323`.
+**Status:** design plus measurements. Section 3.1 (`--confirm-novelty`) is built,
+off by default, unproven (see 8). Sections 3.2-3.4 are design only.
+Base `0b6d323`; rebased onto `fbd4cd3e`.
 Source: `handover_edge_id_axis_2026-09-18.md` (F1-F13, P0-P4).
 Repro: `tools/phantom_edge_probe.py`, `tools/edge_matrix_analysis.py`.
 Measured on one target (fuzzgoat, clang 18, `-fsanitize-coverage=trace-pc-guard`,
@@ -209,3 +211,46 @@ Control: A0 against a second A0 run must not reject.
 Arithmetic or regression on ids, spectral leverage, GF(2), class-collapsed
 rarity, tag-level reward discount, PC2 validity (needs P1-3), an unmeasured
 `2^H` temperature. Each has a measurement or a handover line above.
+
+## 8. Status after the build
+
+**Upstream overlap.** `fbd4cd3e` added `seed_residual`, `op_credit` and a
+`coverage_trust` gate (`handover_matrix_schedulers_2026-09-19.md`). Their gate is
+the F1 Jaccard from a steady-state probe, which by design skips F2, so it passes
+while phantoms sit in the tracker. Sections 3.3 and 3.4 overlap those arms:
+class-deduplicated mass and credit there versus family strata here. Section 1.3
+measured class collapse only against the rare-edge bonus (rho 0.999); it says
+nothing about their `1/owners` mass with volume regressed out. Reconcile through
+`bench_paired`, not by argument. `--confirm-novelty` is upstream-independent and
+feeds their tracker rows and rewards.
+
+**Built:** `core/novelty_confirm.py` (`confirm`), `ShmCoverage.last_new_ids`,
+`last_old_bucket_novel`, `reject_phantoms`, `Fuzzer._confirm_new_coverage`,
+`--confirm-novelty`, a summary line. 40 tests in `tests/test_novelty_confirm.py`.
+Open points from 3.1 resolved: the bucket event survives a phantom neighbour
+(the adapter splits the virgin fold so a new id's own bucket does not read as an
+old edge moving); no new id means the verdict is left as reported;
+`new_max_edges` is not gated.
+
+**Two defects found only by running it, both pinned by tests:**
+- The fuzz_one call site first passed `data` (the parent seed); the executed
+  input is `mutated`. Every rerun then measured a different input: a fuzzgoat
+  campaign found 60 edges instead of about 178 and withdrew 21 of 30 successes.
+  The helper's own tests could not see it. `TestCallSitesRerunTheInputThatRan`
+  pins both call sites to the variable that ran.
+- An unescaped `%` in the flag's help made `fuzz --help` raise. `TestHelp`.
+
+**Measured, fuzzgoat ctx build, one campaign, `--mc-bandit`, `-n 12000`:**
+8,473 executions in 99 s, 155 reruns (1.8% of executions), 2 successes withdrawn,
+29 phantom ids rejected, 166 edges, 162 seeds added. Only 2 of 155 successes
+were withdrawn against 12-18% on the static corpus of section 1.1, so mutation
+campaigns may carry less phantom contamination than that corpus suggests. There
+is no paired baseline on the fixed build and the run stopped at 8,473 of 12,000
+executions for a reason not investigated: this shows the gate runs end to end and
+costs about what 3.1 estimated. It shows nothing about coverage.
+
+**Complexity:** `fuzz_one` CCN 384 -> 385 (`is_crash or is_timeout`); new helpers
+CCN <= 9.
+
+**Not done:** the E-1 passive logging, arms A0-A4 of section 6, any target other
+than fuzzgoat, and the full test suite (only the affected tests were run).

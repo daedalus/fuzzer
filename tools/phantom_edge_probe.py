@@ -131,13 +131,23 @@ def weight_shift(obs, steady) -> dict[str, float]:
 
 def _report(name: str, obs, steady) -> None:
     n = len(obs)
-    ev, rare, wt = success_events(obs, steady), rare_ownership(obs, steady), weight_shift(obs, steady)
+    ev, rare, wt = (
+        success_events(obs, steady),
+        rare_ownership(obs, steady),
+        weight_shift(obs, steady),
+    )
     print(f"[{name}]")
     print(f"  execs carrying phantom ids   {ev['carry_phantoms']}/{n}")
-    print(f"  new-edge successes           observed {ev['observed']}  steady {ev['steady']}  phantom-only {ev['phantom_only']}")
+    print(
+        f"  new-edge successes           observed {ev['observed']}  steady {ev['steady']}  phantom-only {ev['phantom_only']}"
+    )
     print(f"  phantom ids in cumulative    {ev['phantom_ids']} of {ev['ids']}")
-    print(f"  singleton edges              {rare['singletons']}  phantom {rare['singletons_phantom']}")
-    print(f"  owner<={RARE_EDGE_OWNERS} edges              {rare['rare']}  phantom {rare['rare_phantom']}")
+    print(
+        f"  singleton edges              {rare['singletons']}  phantom {rare['singletons_phantom']}"
+    )
+    print(
+        f"  owner<={RARE_EDGE_OWNERS} edges              {rare['rare']}  phantom {rare['rare_phantom']}"
+    )
     print(f"  seeds boosted by phantoms    {wt['boosted']}/{n}  max boost x{wt['max_boost']:.2f}")
 
 

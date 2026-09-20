@@ -389,6 +389,17 @@ class StatsReporter:
                 f"P(growth): {1 - bayes['p_stalled']:.1%}"
                 f" {'[STALLED]' if bayes['p_stalled'] > 0.5 else ''}"
             )
+        self._print_summary_confirm(f)
+
+    def _print_summary_confirm(self, f) -> None:
+        """Say what --confirm-novelty did: reruns paid, successes it withdrew."""
+        if not getattr(f, "_confirm_novelty", False):
+            return
+        st = f._confirm_stats
+        print(
+            f"  Novelty confirm:   {st['reruns']} reruns, {st['withdrawn']} successes "
+            f"withdrawn, {st['phantom_ids']} phantom ids rejected"
+        )
 
     def _print_summary_seeds(self, f) -> None:
         """Print seed-related summary lines."""

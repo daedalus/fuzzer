@@ -218,6 +218,13 @@ class ShmCoverage:
         # get a real "same as before" set rather than a value that reads as
         # "the target fired zero edges this exec".
         self._last_ids: set[int] = set()
+        # What made the most recent scan report novelty, kept apart because
+        # a caller that wants to confirm the novelty has to know which part
+        # of it a rerun can contradict. Ids seen for the first time can be
+        # phantoms (F2); an already-seen edge reaching a new hit-count bucket
+        # cannot depend on one. Cleared by every scan, fast path included.
+        self.last_new_ids: frozenset[int] = frozenset()
+        self.last_old_bucket_novel: bool = False
         # Memo for the live-entry scan: (key, edge_ids, counts_or_None).
         # See _scan_key for what makes the key safe to reuse.
         self._scan_memo: tuple[tuple[int, int, int, int], np.ndarray, np.ndarray | None] | None = (
@@ -352,6 +359,24 @@ class ShmCoverage:
         previous resets are ignored.
         """
         return set(self._active_edge_ids().tolist())
+
+    def reject_phantoms(self, edge_ids) -> int:
+        """Withdraw ids this scan counted as new but a rerun did not reproduce.
+
+        Masks them (see :meth:`mask_edges`) and takes back what the scan
+        added to ``cumulative_edges`` and the fast-path snapshot, so the edge
+        count a report shows is not inflated by ids that were never edges.
+        Only ids the *last* scan counted as new are retracted; an id already
+        withdrawn, or one this scan did not add, changes nothing. Returns the
+        number retracted.
+        """
+        ids = {int(e) for e in edge_ids}
+        counted = ids & self.last_new_ids
+        self.mask_edges(ids)
+        self.cumulative_edges -= len(counted)
+        self.last_new_ids = self.last_new_ids - counted
+        self._last_ids = self._last_ids - ids
+        return len(counted)
 
     def mask_edges(self, edge_ids) -> int:
         """Suppress *edge_ids* from ever counting as new coverage again.
@@ -673,6 +698,22 @@ class ShmCoverage:
     # The bucket ladder lives in core/count_class.py. Here we keep the
     # virgin map: edge_id -> OR of every bucket bit seen for that edge.
 
+    def _fold_buckets(self, ids: np.ndarray, counts: np.ndarray, new: set[int]) -> bool:
+        """Fold this scan into the virgin map; say whether an OLD edge moved.
+
+        ``new`` are the ids seen for the first time. A brand-new id always
+        occupies a fresh bucket, so folding everything at once cannot tell a
+        real bucket event from the bucket that comes with a new id. When there
+        are new ids the fold is split, so that answer is available; it is the
+        same fold either way, and the common no-new-id scan takes one call.
+        """
+        if not new:
+            return self._update_virgin_buckets(ids, counts)
+        is_new = np.isin(ids, np.fromiter(new, dtype=ids.dtype, count=len(new)))
+        old_moved = self._update_virgin_buckets(ids[~is_new], counts[~is_new])
+        self._update_virgin_buckets(ids[is_new], counts[is_new])
+        return old_moved
+
     def _update_virgin_buckets(self, edge_ids: np.ndarray, counts: np.ndarray) -> bool:
         """Fold this execution's hit counts into the virgin bucket map.
 
@@ -868,6 +909,8 @@ class ShmCoverage:
             # used to read as "this exec fired no edges", which corrupted
             # any caller that diffs consecutive returns (see
             # Fuzzer._prev_edge_set / format-learner new_edges tracking).
+            self.last_new_ids = frozenset()
+            self.last_old_bucket_novel = False
             return False, self._last_ids
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
@@ -886,7 +929,10 @@ class ShmCoverage:
         # which the shim never produces but tests and torn reads do, and
         # cumulative_edges must stay an edge count either way.
         raw_counts = active_counts & 0xFFFFFF
-        if self._update_virgin_buckets(active_ids, raw_counts):
+        bucket_old = self._fold_buckets(active_ids, raw_counts, new)
+        self.last_new_ids = frozenset(new)
+        self.last_old_bucket_novel = bucket_old
+        if bucket_old:
             new_found = True
 
         # Deliberately NOT OR'd into new_found. has_new_coverage gates corpus
