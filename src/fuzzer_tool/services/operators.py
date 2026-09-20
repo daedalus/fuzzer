@@ -271,6 +271,71 @@ _CONTEXT_FORMAT_CATEGORIES = (
 CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
 
 # ── deterministic stage ───────────────────────────────────────────────────
+# Effector-map codes. A position is skipped by the arithmetic and
+# interesting-value passes only when it is positively known to be inert;
+# anything unprobed stays in the schedule. Three states rather than a
+# boolean because "flipping this byte changed nothing" and "this byte was
+# never flipped" must not collapse: the byteflip pass can stop early under
+# its quota, and _dedup_mutate can discard a mutant before it is executed,
+# and in both cases a boolean map would read the position as inert and
+# delete 24 of its 33 mutants on no evidence at all.
+_DET_EFF_UNKNOWN = 0
+_DET_EFF_INERT = 1
+_DET_EFF_LIVE = 2
+
+
+class DeterministicEffectorMap:
+    """Per-seed effector map plus the position of the mutant in flight.
+
+    AFL builds this during the byteflip 8/8 pass, which it has already paid
+    for, and uses it to skip the arithmetic and interesting-value passes on
+    bytes the target does not read. This tree ran all 33 mutants per byte
+    unconditionally while observing, on every one of those executions, the
+    coverage that answers the question -- ``maybe_deterministic_mutation``
+    routes deterministic mutants through the same execution path as every
+    other mutation, so the information was computed and discarded.
+
+    ``pending`` is the byte index of the byteflip mutant most recently
+    yielded, or -1. The stream sets it; the caller reads it once and resets
+    it. It exists so the yield type can stay ``bytes`` -- the stream has an
+    equivalence-oracle test (``test_deterministic_stage_p1_1.py``) that
+    compares mutants one by one against a reference implementation, and
+    widening the yield to a tuple would have meant rewriting that oracle
+    rather than keeping it as evidence.
+    """
+
+    __slots__ = ("eff", "pending")
+
+    def __init__(self, length: int):
+        self.eff = bytearray(length)
+        self.pending = -1
+
+
+def _split_det_quota(costs: list[int], budget: int) -> list[int]:
+    """Proportional per-pass quotas summing to *budget*, remainder to the
+    largest under-allocated pass.
+
+    Extracted verbatim from the inline version so the gated arithmetic /
+    interesting split can reuse it. A flat prefix cap would delete entire
+    later passes on large seeds; proportional shares keep every family
+    running and consume the full budget.
+    """
+    total = sum(costs)
+    if total <= budget:
+        return list(costs)
+    quotas = [int(budget * c / total) for c in costs]
+    shortfall = budget - sum(quotas)
+    order = sorted(range(len(costs)), key=lambda i: costs[i] - quotas[i], reverse=True)
+    for i in order:
+        if shortfall <= 0:
+            break
+        add = min(shortfall, costs[i] - quotas[i])
+        if add > 0:
+            quotas[i] += add
+            shortfall -= add
+    return quotas
+
+
 # AFL's classic deterministic schedule, walked systematically across a seed
 # rather than sampled at a random position by the bandit. This is the
 # machinery core/skipdet.py names and gates (SkipDetector.should_det_fuzz)
@@ -282,7 +347,11 @@ CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
 # interesting value, in order.
 
 
-def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUTATIONS):
+def _deterministic_mutation_stream(
+    data: bytes,
+    max_mutations: int = MAX_DET_MUTATIONS,
+    effector: "DeterministicEffectorMap | None" = None,
+):
     """Yield mutants from AFL's classic deterministic schedule, in order.
 
     Walks bitflip 1/1, byte flip 8/8, 8-bit arithmetic, and 8-bit
@@ -314,6 +383,14 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
             can't turn a single deterministic pass into an unbounded stall.
             Distributed as a per-pass quota when the full schedule exceeds
             the cap.
+        effector: Optional :class:`DeterministicEffectorMap`. When given,
+            the byteflip 8/8 pass publishes each mutant's byte index on
+            ``effector.pending`` so the caller can record whether the
+            execution changed the trace, and the arithmetic and
+            interesting-value passes then skip every position positively
+            marked inert. ``None`` reproduces the ungated schedule mutant
+            for mutant, so a seeded run without an effector is byte-identical
+            to one from before this parameter existed.
 
     Yields:
         bytes mutants, each one mutation away from *data*.
@@ -342,18 +419,7 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
         # Proportional per-pass quotas (by natural cost).  A flat prefix
         # would delete later passes entirely on large seeds; proportional
         # shares keep every family running and consume the full budget.
-        costs = [cost_bit, cost_byte, cost_arith, cost_interesting]
-        quotas = [int(max_mutations * c / full_cost) for c in costs]
-        # Distribute rounding remainder to the largest under-allocated passes.
-        shortfall = max_mutations - sum(quotas)
-        order = sorted(range(4), key=lambda i: costs[i] - quotas[i], reverse=True)
-        for i in order:
-            if shortfall <= 0:
-                break
-            add = min(shortfall, costs[i] - quotas[i])
-            if add > 0:
-                quotas[i] += add
-                shortfall -= add
+        quotas = _split_det_quota([cost_bit, cost_byte, cost_arith, cost_interesting], max_mutations)
         _deterministic_mutation_stream.last_truncated = full_cost - max_mutations
 
     n = 0
@@ -380,20 +446,61 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
         scratch[byte_idx] = orig  # restore
 
     # byte flip 8/8: XOR every byte with 0xFF in turn.
+    #
+    # This is the pass that builds the effector map. Every mutant here is
+    # executed by the normal pipeline anyway; publishing its byte index on
+    # `effector.pending` is the whole cost of learning which bytes the
+    # target reads.
     pass_n = 0
     for byte_idx in range(length):
         if pass_n >= q_byte:
             break
         orig = data[byte_idx]
         scratch[byte_idx] = orig ^ 0xFF
+        if effector is not None:
+            effector.pending = byte_idx
         yield bytes(scratch)
         scratch[byte_idx] = orig  # restore
         pass_n += 1
         n += 1
 
-    # arithmetic 8-bit: add/subtract each delta at every byte position.
+    # ── effector gate ────────────────────────────────────────────────────
+    # By the time the generator is resumed for the first arithmetic mutant,
+    # the last byteflip mutant has already been executed and reported: the
+    # caller runs and records mutant k before pulling mutant k+1.
+    #
+    # Only positively-inert positions are dropped. Positions the byteflip
+    # pass never reached (quota exhausted) and positions whose mutant was
+    # discarded before execution (_dedup_mutate re-rolls) stay UNKNOWN and
+    # keep their full schedule.
+    positions: range | list[int] = range(length)
+    if effector is not None:
+        eff = effector.eff
+        live = [i for i in range(length) if eff[i] != _DET_EFF_INERT]
+        # Fail-safe: a map that marks everything inert is evidence of a
+        # broken measurement (unstable path hash, a target that timed out
+        # under byteflips), not of a seed no byte of which is read. Treat it
+        # as absent rather than deleting both remaining passes.
+        if live and len(live) < length:
+            positions = live
+            n_live = len(live)
+            remaining = max(0, max_mutations - n)
+            gated = [n_live * n_arith_deltas * 2, n_live * n_interesting]
+            # Re-split the remaining budget against the gated costs. The
+            # up-front quotas were sized for `length` positions; leaving them
+            # in place would hand these passes an allowance for bytes they
+            # now skip and the budget would go unspent instead of reaching
+            # further into the seed.
+            q_arith, q_interesting = _split_det_quota(gated, remaining)
+            _deterministic_mutation_stream.last_truncated = (
+                (cost_bit - quotas[0])
+                + (cost_byte - quotas[1])
+                + max(0, sum(gated) - q_arith - q_interesting)
+            )
+
+    # arithmetic 8-bit: add/subtract each delta at every live byte position.
     pass_n = 0
-    for byte_idx in range(length):
+    for byte_idx in positions:
         if pass_n >= q_arith:
             break
         orig = data[byte_idx]
@@ -415,7 +522,7 @@ def _deterministic_mutation_stream(data: bytes, max_mutations: int = MAX_DET_MUT
 
     # interesting values 8-bit: substitute each known-interesting byte.
     pass_n = 0
-    for byte_idx in range(length):
+    for byte_idx in positions:
         if pass_n >= q_interesting:
             break
         orig = data[byte_idx]
@@ -695,6 +802,19 @@ class OperatorEngine:
         # maybe_deterministic_mutation), so building the full schedule
         # upfront for every seed would waste memory that's never read.
         self._det_queues: dict = {}
+        # Effector map per in-flight deterministic seed, one byte per input
+        # byte, using the tri-state codes in _DET_EFF_*. Filled by
+        # note_deterministic_result() as the byteflip 8/8 pass executes and
+        # read by the stream when it enters the arithmetic pass. Dropped with
+        # the queue when the stage finishes.
+        self._det_eff: dict[str, bytearray] = {}
+        # (seed_key, byte_idx) of the byteflip mutant most recently handed
+        # out, or None. Set on every draw and cleared at the top of
+        # maybe_deterministic_mutation, so it always names the mutant the
+        # caller is about to execute -- _dedup_mutate may pull several
+        # mutants and execute only the last, and the ones it drops must be
+        # left unprobed rather than silently recorded as inert.
+        self._det_pending: tuple[str, int] | None = None
         # Cache backing the `ctx` property below: refreshed once per
         # mutate() round rather than rebuilt on every ctx access. See
         # `ctx`'s docstring for why (measured ~19% round-latency cost from
@@ -4809,16 +4929,62 @@ class OperatorEngine:
         once the schedule is exhausted, at which point the queue entry is
         dropped -- the caller is expected to mark the seed's metadata
         ``seed_passed_det`` so should_det_fuzz is not re-consulted for it.
+
+        The effector map is created and dropped with the queue. Its
+        ``pending`` slot is read and cleared here rather than in the stream,
+        so it always names the mutant this call is handing to the caller.
         """
         q = self._det_queues.get(seed_key)
         if q is None:
-            q = _deterministic_mutation_stream(bytes(data))
+            effector = DeterministicEffectorMap(len(data))
+            self._det_eff[seed_key] = effector
+            q = _deterministic_mutation_stream(bytes(data), effector=effector)
             self._det_queues[seed_key] = q
         try:
-            return next(q)
+            mutant = next(q)
         except StopIteration:
             del self._det_queues[seed_key]
+            self._det_eff.pop(seed_key, None)
             return None
+        effector = self._det_eff.get(seed_key)
+        if effector is not None and effector.pending >= 0:
+            self._det_pending = (seed_key, effector.pending)
+            effector.pending = -1
+        return mutant
+
+    def pending_det_seed_key(self) -> str | None:
+        """Seed key of the byteflip mutant awaiting an effector verdict.
+
+        None means this execution is not one the effector map is learning
+        from -- any other deterministic pass, any bandit-driven mutation, or
+        a byteflip mutant that ``_dedup_mutate`` drew and then discarded.
+        """
+        pending = self._det_pending
+        return pending[0] if pending is not None else None
+
+    def note_deterministic_result(self, changed: bool) -> None:
+        """Record whether the pending byteflip mutant changed the trace.
+
+        *changed* is AFL's criterion -- the execution trace differs from the
+        seed's own -- and deliberately **not** "found new coverage". Almost
+        every byteflip changes the trace and almost none finds new coverage,
+        so keying the map on new coverage would mark nearly every byte inert
+        and delete the arithmetic and interesting-value passes outright
+        instead of gating them.
+
+        Not calling this at all leaves the position UNKNOWN, which keeps its
+        full schedule. Every path that cannot measure the trace takes that
+        branch rather than guessing.
+        """
+        pending = self._det_pending
+        self._det_pending = None
+        if pending is None:
+            return
+        seed_key, idx = pending
+        effector = self._det_eff.get(seed_key)
+        if effector is None or not 0 <= idx < len(effector.eff):
+            return
+        effector.eff[idx] = _DET_EFF_LIVE if changed else _DET_EFF_INERT
 
     def maybe_deterministic_mutation(self, data: bytes) -> bytes | None:
         """Return the next deterministic-stage mutant for *data*, or None.
@@ -4846,6 +5012,12 @@ class OperatorEngine:
         in-progress coverage.
         """
         f = self.f
+        # Cleared on every round, before anything can set it again: the slot
+        # must name the mutant the caller is about to execute. _dedup_mutate
+        # calls mutate() up to EXEC_DEDUP_RETRIES + 1 times and executes only
+        # the last, so without this a discarded byteflip mutant's position
+        # would collect the next execution's verdict.
+        self._det_pending = None
         skip_detector = getattr(f, "_skip_detector", None)
         if skip_detector is None:
             return None

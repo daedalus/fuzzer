@@ -4638,6 +4638,45 @@ class Fuzzer:
             "shaped_reward_mean_factor": (self._shaped_reward_factor_sum / n) if n else None,
         }
 
+    def _note_det_effector(self) -> None:
+        """Tell the operator engine whether the byteflip just run moved the trace.
+
+        Silence is the safe answer: every branch that cannot establish both
+        a baseline and a current trace hash returns without recording, which
+        leaves the byte position UNKNOWN and keeps its full deterministic
+        schedule. Only a positive "this byte was flipped and nothing moved"
+        removes the 24 arithmetic and interesting-value mutants at that
+        position.
+
+        The baseline is the seed's own path hash from ``EdgeTracker``, which
+        ``_calibrate_seed_baselines`` records by executing every starting
+        seed verbatim in this process, and which later seeds get from the
+        execution that discovered them. It is therefore same-process, which
+        matters: ``__afl_get_caller_ctx`` hashes a raw return address, so
+        under ``FUZZER_KEEP_ASLR=1`` edge ids -- and the rolling hash over
+        them -- are not stable across processes. A stale baseline makes every
+        byte look live, so the gate switches itself off rather than
+        mis-skipping.
+        """
+        engine = self._operators
+        seed_key = engine.pending_det_seed_key()
+        if seed_key is None:
+            return
+        if self.shm_cov is None:
+            return
+        baseline = self._edge_tracker.get_seed_path_hash(seed_key)
+        if baseline == 0:
+            return
+        current = self.shm_cov.read_path_hash()
+        if current == 0:
+            # Shim built without the rolling hash. The edge-set fallback used
+            # elsewhere costs a full SHM scan, and the memo in shm._scan is
+            # keyed partly on the path hash and bypassed when it is zero --
+            # exactly this case -- so it would be a second real scan on every
+            # byteflip. Not worth it to gate one pass; leave the map unfilled.
+            return
+        engine.note_deterministic_result(current != baseline)
+
     def fuzz_one(self, data: bytes) -> bool:
         # Invalidate Elo K-factor cache at the start of each iteration
         # so record_strategy_match calls recompute K from the current
@@ -4686,6 +4725,10 @@ class Fuzzer:
         returncode, stderr = self._run_target(mutated)
         t_elapsed = time.monotonic() - t_start
         self.exec_count += 1
+        # Effector map: read the trace hash while it is still this
+        # execution's. One ctypes word read, and only when the mutant just
+        # executed came from the byteflip 8/8 pass.
+        self._note_det_effector()
         if self._stall_recovery_active:
             self._stall_recovery_execs += 1
 
