@@ -1104,6 +1104,12 @@ class Fuzzer:
         whittle_recompute_batch=25,
         op_katz=False,
         op_katz_alpha_fraction=0.85,
+        op_kuramoto=False,
+        op_kuramoto_k=1.0,
+        op_kuramoto_omega_scale=1.0,
+        op_kuramoto_dt=0.05,
+        op_kuramoto_steps_per_batch=5,
+        op_kuramoto_recompute_batch=25,
         op_tang=False,
         op_tang_rank=10,
         op_tang_refit_interval=2000,
@@ -2513,6 +2519,35 @@ class Fuzzer:
             self._op_katz = OpKatzScheduler(rng=self._rng, alpha_fraction=op_katz_alpha_fraction)
             log.info("op_katz enabled (alpha_fraction=%.2f)", op_katz_alpha_fraction)
 
+        # Kuramoto phase-coherence bandit over the operator discovery-
+        # transition graph. Off by default: same unproven-exploratory-arm
+        # posture as op_katz/op_tang above -- see
+        # core/schedulers/op_kuramoto.py's module docstring for what is and
+        # isn't established empirically before enabling this on a real
+        # campaign.
+        self._use_op_kuramoto = op_kuramoto
+        self._op_kuramoto = None
+        if op_kuramoto:
+            from fuzzer_tool.core.schedulers.op_kuramoto import OpKuramotoScheduler
+
+            self._op_kuramoto = OpKuramotoScheduler(
+                rng=self._rng,
+                k=op_kuramoto_k,
+                omega_scale=op_kuramoto_omega_scale,
+                dt=op_kuramoto_dt,
+                steps_per_batch=op_kuramoto_steps_per_batch,
+                recompute_batch=op_kuramoto_recompute_batch,
+            )
+            log.info(
+                "op_kuramoto enabled (k=%.2f, omega_scale=%.2f, dt=%.3f, "
+                "steps_per_batch=%d, recompute_batch=%d)",
+                op_kuramoto_k,
+                op_kuramoto_omega_scale,
+                op_kuramoto_dt,
+                op_kuramoto_steps_per_batch,
+                op_kuramoto_recompute_batch,
+            )
+
         # Tang's low-rank recommender over the operator x edge matrix. Off
         # by default: see core/op_edge_tracker.py's module docstring for
         # the empirical caveat before enabling this on a real campaign.
@@ -3035,6 +3070,8 @@ class Fuzzer:
             _register_arms(self._whittle)
         if self._successive_elim:
             _register_arms(self._successive_elim)
+        if self._op_kuramoto:
+            _register_arms(self._op_kuramoto)
         if self._consolidated:
             _register_arms(self._consolidated, _format_priors)
         if self._moss:
@@ -5493,6 +5530,7 @@ class Fuzzer:
             self._moss,
             self._canary,
             self._op_katz,
+            self._op_kuramoto,
             self._op_tang,
             self._op_kruskal_count,
             self._op_credit,

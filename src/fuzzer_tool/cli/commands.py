@@ -513,6 +513,12 @@ def cmd_fuzz(args):
             successive_elim_reopen=getattr(args, "successive_elim_reopen", 0),
             op_katz=getattr(args, "op_katz", False),
             op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
+            op_kuramoto=getattr(args, "op_kuramoto", False),
+            op_kuramoto_k=getattr(args, "op_kuramoto_k", 1.0),
+            op_kuramoto_omega_scale=getattr(args, "op_kuramoto_omega_scale", 1.0),
+            op_kuramoto_dt=getattr(args, "op_kuramoto_dt", 0.05),
+            op_kuramoto_steps_per_batch=getattr(args, "op_kuramoto_steps_per_batch", 5),
+            op_kuramoto_recompute_batch=getattr(args, "op_kuramoto_recompute_batch", 25),
             op_tang=getattr(args, "op_tang", False),
             op_tang_rank=getattr(args, "op_tang_rank", 10),
             op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
@@ -786,6 +792,12 @@ def cmd_fuzz(args):
         successive_elim_reopen=getattr(args, "successive_elim_reopen", 0),
         op_katz=getattr(args, "op_katz", False),
         op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
+        op_kuramoto=getattr(args, "op_kuramoto", False),
+        op_kuramoto_k=getattr(args, "op_kuramoto_k", 1.0),
+        op_kuramoto_omega_scale=getattr(args, "op_kuramoto_omega_scale", 1.0),
+        op_kuramoto_dt=getattr(args, "op_kuramoto_dt", 0.05),
+        op_kuramoto_steps_per_batch=getattr(args, "op_kuramoto_steps_per_batch", 5),
+        op_kuramoto_recompute_batch=getattr(args, "op_kuramoto_recompute_batch", 25),
         op_tang=getattr(args, "op_tang", False),
         op_tang_rank=getattr(args, "op_tang_rank", 10),
         op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
@@ -1928,6 +1940,7 @@ _HAIL_MARY_FLAGS = (
     "entropy_deviation",
     "seed_residual",
     "op_katz",
+    "op_kuramoto",
     "op_tang",
     "op_kruskal_count",
     "op_credit",
@@ -2712,6 +2725,53 @@ def main() -> int:
         type=float,
         default=0.85,
         help=("Fraction of 1/spectral_radius(A) to use as Katz's alpha (default: 0.85)"),
+    )
+    fuzz_parser.add_argument(
+        "--op-kuramoto",
+        action="store_true",
+        help=(
+            "Enable Kuramoto phase-coherence bandit over the operator "
+            "discovery-transition graph (experimental, off by default -- see "
+            "core/schedulers/op_kuramoto.py for what is and isn't established "
+            "empirically before using this on a real campaign)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-kuramoto-k",
+        type=float,
+        default=1.0,
+        help="Kuramoto coupling strength K fed to the stepping ODE (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--op-kuramoto-omega-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "Scales an operator's raw success rate into its natural "
+            "frequency omega (default: 1.0)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-kuramoto-dt",
+        type=float,
+        default=0.05,
+        help="Euler step size for the phase-advance ODE (default: 0.05)",
+    )
+    fuzz_parser.add_argument(
+        "--op-kuramoto-steps-per-batch",
+        type=int,
+        default=5,
+        help="Euler steps run per batched phase advance (default: 5)",
+    )
+    fuzz_parser.add_argument(
+        "--op-kuramoto-recompute-batch",
+        type=int,
+        default=25,
+        help=(
+            "Advance phases only every this many record() calls, same "
+            "batching idiom as --whittle-recompute-batch/--op-tang-refit-"
+            "interval (default: 25)"
+        ),
     )
     fuzz_parser.add_argument(
         "--op-tang",

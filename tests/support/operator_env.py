@@ -55,6 +55,7 @@ BALLOT_SCHEDULERS = (
     "moss",
     "op_credit",
     "op_katz",
+    "op_kuramoto",
     "op_kruskal_count",
     "op_tang",
     "replicator",

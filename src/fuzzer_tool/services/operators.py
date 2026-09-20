@@ -465,8 +465,9 @@ _FALLBACK_PRECEDENCE = (
     "fpl",
     "successive_elim",
     "round_robin",
-    # canary, op_katz, op_tang, op_kruskal_count, gradient, whittle, corral
-    # are deliberately absent here: they are unproven exploratory arms
+    # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, gradient,
+    # whittle, corral are deliberately absent here: they are unproven
+    # exploratory arms
     # (see their module docstrings) that should only ever be reached via
     # Elo explicitly choosing them, not by being the top-precedence live
     # selector whenever someone enables the flag without --elo -- the same
@@ -487,7 +488,12 @@ _FALLBACK_PRECEDENCE = (
     # reason: its confidence constant is a paper-native default, not a
     # swept one (see core/schedulers/op_fewa.py), and it has not been run
     # against this project's own convergence harness at all yet -- it
-    # should only ever be reached via Elo explicitly choosing it.
+    # should only ever be reached via Elo explicitly choosing it. op_kuramoto
+    # is absent for the same reason op_katz/op_tang are: whether operators
+    # behave anything like coupled phase oscillators is an open empirical
+    # question this arm exists to test, not a settled premise (see
+    # core/schedulers/op_kuramoto.py), and it has not been run against the
+    # convergence harness or a real bench_paired A/B at all yet.
 )
 
 
@@ -580,6 +586,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("canary")
     if f._use_op_katz and f._op_katz:
         available.append("op_katz")
+    if f._use_op_kuramoto and f._op_kuramoto:
+        available.append("op_kuramoto")
     if f._use_op_tang and f._op_tang:
         available.append("op_tang")
     if f._use_op_kruskal_count and f._op_kruskal_count:
@@ -4538,6 +4546,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "op_katz" and f._op_katz:
             op = f._op_katz.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "op_kuramoto" and f._op_kuramoto:
+            op = f._op_kuramoto.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "op_tang" and f._op_tang:
             op = f._op_tang.select_op(ops)
