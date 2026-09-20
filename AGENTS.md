@@ -70,6 +70,7 @@ fuzzer, not just the target.
 49. When planing a new feature always reason over small targeted code tests, copy the function to test and test it.
 50. The full pytest battery is almos 10k tests, running it is unpractical, always run the tests for the affected code.
 51. Whenever any method from scipy, sympy or gmpy is needed implement it by ourselves instead of importing more libraries.
+52. Always run calibrations against fuzzgoat target and make sure it's built with clang.
 
 ## Corpus Rules
 
