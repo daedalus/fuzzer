@@ -1434,14 +1434,57 @@ class EdgeTracker:
                 self.seed_edge_traces[seed_key] = set(edges)
 
     def compute_subsumption_weight(self, seed_key: str) -> float:
-        """Compute a weight multiplier based on Jaccard similarity of edge sets.
+        """Fraction of this seed's edges that no other corpus seed covers.
 
-        Uses MinHash to approximate Jaccard(seed, corpus_union) in O(k) time
-        instead of O(n) full-set union. The corpus MinHash signature (element-wise
-        minimum of all individual signatures) is precomputed and cached.
+        Subsumption is set *inclusion*: a seed is subsumed when every edge it
+        reaches is reached by some other seed. The quantity returned is the
+        complement of that, per edge --
 
-        Returns a continuous weight in [0.1, 1.0] based on how much this
-        seed's coverage overlaps with other seeds.
+            |{ e in S : owner_count(e) == 1 }| / |S|
+
+        -- so 1.0 means the seed shares nothing with the rest of the corpus,
+        and 0.0 (clamped to the 0.1 floor) means it is fully subsumed. That is
+        the property this method's name, :class:`EdgeTracker`'s own class
+        docstring and ``services/stats.py``'s "fully subsumed" line all claim.
+
+        This replaces a MinHash estimate of ``Jaccard(S, corpus_union)`` that
+        was measuring something else entirely. ``corpus_minhash()`` is called
+        with ``seed_keys=None``, i.e. over *every* signature including this
+        seed's, so the union contained ``S``; then ``S & U == S`` and
+        ``S | U == U`` and the Jaccard degenerated to ``|S| / |U|``
+        identically. The returned weight was therefore ``1 - |S|/|U|`` -- a
+        normalised coverage *size*, with no dependence at all on whether the
+        coverage was unique or redundant. Measured over 480 seeds in 12 random
+        corpora: Spearman +/-0.00 to -0.11 against the true unique-edge
+        fraction, -0.658 against relative size, and a mean absolute residual of
+        0.0203 from the closed form. Two seeds of equal size scored the same
+        whether one owned every edge it touched or none of them, and the
+        direction on size was backwards -- the seed owning the most unique
+        coverage in a corpus took the 0.1 floor.
+
+        Read ``_edge_owner_count`` through ``.get``, never a bare subscript:
+        it is a ``defaultdict`` and subscripting *inserts*, which would turn
+        this read-only accessor into one that grows the map by ``|S|`` entries
+        per call. The default is ``1``, not ``0``: :meth:`record_edges`
+        increments the owner count for every edge it adds to ``seed_edges``,
+        so by that invariant an edge in ``S`` is owned by at least this seed,
+        and a zero can only mean a stale or absent map -- most concretely a
+        state snapshot written before ``edge_owner_count`` was persisted,
+        which restores ``seed_edges`` in full against an empty owner map. In
+        that case every edge reads as unowned; defaulting to 1 reports "all
+        novel", matching the cold-start value this method already returns for
+        a single-seed corpus, where defaulting to 0 would floor every seed in
+        the corpus at once. ``_weight_edge_penalties`` can use bare subscripts
+        because its write sites guarantee key presence; this path has no such
+        guarantee. Same reasoning, same default, as line 1708.
+
+        Cost is O(|S|) dict reads rather than O(num_perm) signature
+        comparisons, which is the one thing this change makes more expensive.
+        It is affordable because callers cache the result -- ``seed_picker``
+        holds it in ``f._cached_weights`` and only recomputes on cache fill,
+        not per weight pass.
+
+        Returns a continuous weight in [0.1, 1.0]; higher means less subsumed.
         """
         if seed_key not in self.seed_edges:
             return 1.0
@@ -1453,15 +1496,13 @@ class EdgeTracker:
         if len(self.seed_edges) <= 1:
             return 1.0  # only seed — all edges are novel
 
-        # Use MinHash: Jaccard ≈ matching positions / num_perm
-        # corpus_sig is the element-wise min of all signatures (= union MinHash)
-        if self._corpus_sig is None:
-            self._corpus_sig = self._minhash.corpus_minhash()
+        owners_get = self._edge_owner_count.get
+        unique = 0
+        for edge_id in seed_edges:
+            if owners_get(edge_id, 1) <= 1:
+                unique += 1
 
-        jaccard = self._minhash.approximate_union_jaccard(seed_key, self._corpus_sig)
-
-        # Scale: high overlap (jaccard → 1.0) → low weight, novel → high weight
-        return max(0.1, 1.0 - jaccard)
+        return max(0.1, unique / len(seed_edges))
 
     def _build_aggregate_distribution(self) -> dict[int, float]:
         """Build the corpus-wide aggregate hit-count distribution.
@@ -2737,13 +2778,26 @@ class EdgeTracker:
             singleton_count = uniqueness.get(seed_key, 0)
             edge_count = len(edges)
 
-            # Compute subsumption weight
-            weight = self.compute_subsumption_weight(seed_key) if self._corpus_sig else 1.0
+            # Compute subsumption weight.
+            #
+            # No longer gated on ``self._corpus_sig``: that guarded a MinHash
+            # cache the weight does not use any more, and it made the
+            # classification depend on whether some unrelated caller had
+            # happened to populate that cache first.
+            weight = self.compute_subsumption_weight(seed_key)
 
-            # Classify
+            # Classify.
+            #
+            # ``<= 0.1`` rather than ``< 0.1``: the weight is clamped at the
+            # 0.1 floor, so a strict test could never fire and "parasitic" was
+            # an unreachable label -- ``stats.py``'s "Parasitic seeds: N (fully
+            # subsumed)" line printed 0 unconditionally. Under the inclusion
+            # semantics the two tests below are now consistent by
+            # construction: a seed with no singleton edges is exactly a seed
+            # whose unique fraction is 0, which is exactly the floor.
             if singleton_count > 0:
                 classification = "keystone"
-            elif weight < 0.1:
+            elif weight <= 0.1:
                 classification = "parasitic"
             elif edge_count < 5:
                 classification = "redundant"
