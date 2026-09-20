@@ -1360,6 +1360,3 @@ Bugs discovered by fuzzing with this tool are documented in `docs/FINDINGS/`:
 ## License
 
 MIT
-
-</description>
-<｜｜DSML｜｜parameter name="file_path" string="true">/home/dclavijo/my_code/fuzzer-new/docs/DEEP_DIVE.md
