@@ -6,8 +6,8 @@ Why this exists
 found that every cost-aware mechanism in the tree reasons about **total**
 or **average** cost, never the first difference: ``op_replicator.py``'s
 fitness is a per-window mean, ``elo.py``'s K-factor/rating decay are
-exponential smoothers, ``parallel_cost_partition.py`` balances total load
-via Multifit, and ``cost_ledger.py`` exposes point measurements and EWMAs.
+exponential smoothers, and ``cost_ledger.py`` exposes point measurements
+and EWMAs.
 None of these can see whether a producer's cost-per-unit-of-output is
 rising or falling -- only its level.
 
@@ -21,12 +21,12 @@ rule; it does not implement the rule itself, because *what* counts as
 Deliberately generic in the (cost, output) unit
 ------------------------------------------------
 For operator scheduling (``core/schedulers/op_replicator.py``) the natural
-pairing is ``(execs, edges)``. For worker partitioning
-(``core/parallel_cost_partition.py``) it might instead be ``(wall_clock,
-edges)`` -- execs and wall-clock diverge under ``--hail-mary`` and
-job-scheduler-gated maintenance passes, per prior handovers, so which one
-is "the" cost is a decision the handover's §4 open questions explicitly
-leave to the caller, not something this module guesses at.
+pairing is ``(execs, edges)``; a caller weighing whole campaign phases
+might instead want ``(wall_clock, edges)`` -- execs and wall-clock diverge
+under ``--hail-mary`` and job-scheduler-gated maintenance passes, per prior
+handovers, so which one is "the" cost is a decision the handover's §4 open
+questions explicitly leave to the caller, not something this module guesses
+at.
 
 Windowed, not per-exec
 -----------------------
