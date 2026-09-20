@@ -7507,6 +7507,12 @@ class Fuzzer:
         # op_katz/op_tang: it is Elo-only, see core/schedulers/op_gradient.py.
         # whittle is deliberately absent from this banner too, same
         # reason, see core/schedulers/op_whittle.py.
+        # op_kuramoto is the exception to the Elo-only-silent pattern above:
+        # shown in the banner like every other scheduler, even though it is
+        # still off by default / Elo-only / absent from _FALLBACK_PRECEDENCE
+        # per its own module docstring (core/schedulers/op_kuramoto.py).
+        if getattr(self, "_op_kuramoto", None) is not None:
+            ops.append("op-kuramoto")
         if getattr(self, "_use_successive_elim", False) and self._successive_elim:
             ops.append("successive-elim")
         if getattr(self, "_use_contextual", False):
