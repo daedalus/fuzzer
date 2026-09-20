@@ -160,6 +160,7 @@ _SEED_STRATEGY_NAMES = (
     "entropy_kl",
     "entropy_zscore",
     "entropy_deviation",
+    "entropy_gradient",
     "residual",
 )
 
@@ -1237,6 +1238,8 @@ class Fuzzer:
         entropy_zscore=False,
         entropy_zscore_target=0.0,
         entropy_deviation=False,
+        entropy_gradient=False,
+        entropy_gradient_decay=0.98,
         seed_residual=False,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
@@ -2210,6 +2213,19 @@ class Fuzzer:
             )
 
             self._entropy_deviation = EntropyDeviationSeedStrategy(self._rng)
+        # Unlike the three siblings above, this one has to observe every
+        # corpus admission to assign credit (see the module docstring), not
+        # just the ones where it happens to be picked -- so it costs a small
+        # O(1) update per admission even when the Elo pool never selects it.
+        self._entropy_gradient = None
+        if entropy_gradient:
+            from fuzzer_tool.core.schedulers.seed_entropy_gradient import (
+                EntropyGradientSeedStrategy,
+            )
+
+            self._entropy_gradient = EntropyGradientSeedStrategy(
+                self._rng, decay=entropy_gradient_decay
+            )
         # Matrix arms (seed_residual + op_credit) share one canonical edge space,
         # one refit cadence and one preflight gate: see core/edge_matrix.py and
         # docs/handover/handover_edge_id_axis_2026-09-18.md (P3-3, P3-4). Both are
@@ -4151,6 +4167,25 @@ class Fuzzer:
             parent_key, self._seed_key(child), ops, sites, self._last_new_edge_count
         )
 
+    def _record_entropy_gradient_credit(
+        self, child: bytes, parent: bytes | None, corpus_len_before: int
+    ):
+        """Feed the entropy-gradient seed arm one admission event, if enabled.
+
+        Unconditional on which seed strategy actually picked *parent* --
+        this arm has to observe every admission to assign credit, not just
+        the ones from rounds where Elo happened to pick it (see
+        core/schedulers/seed_entropy_gradient.py). Gated the same way
+        _record_lineage_insert is: a no-op when the seed was rejected as a
+        duplicate (corpus length unchanged).
+        """
+        strategy = getattr(self, "_entropy_gradient", None)
+        if strategy is None:
+            return
+        if len(self.corpus) <= corpus_len_before:
+            return
+        strategy.record_child(parent, child, self.corpus)
+
     def _flush_pending_minimize(self):
         """Run deferred minimize if one is pending."""
         if self._minimize_pending:
@@ -5770,6 +5805,7 @@ class Fuzzer:
                 if meta is not None:
                     meta["valid"] = validity is Validity.VALID
             self._record_lineage_insert(mutated, data, _corpus_len_before)
+            self._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
             # GA: add new-coverage individual to population
             if self.ga and has_new_coverage:
                 edge_count = (
@@ -5831,6 +5867,7 @@ class Fuzzer:
                 _corpus_len_before = len(self.corpus)
                 self.save_to_corpus(mutated, parent=data)
                 self._record_lineage_insert(mutated, data, _corpus_len_before)
+                self._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
                 if self.mc and self.mc_cem:
                     self.mc.add_elite(mutated, 1, temperature=self._temperature)
                     self.mc.maybe_refit()
@@ -7125,6 +7162,13 @@ class Fuzzer:
             seeds.append("entropy-kl")
         if getattr(self, "_entropy_zscore", None) is not None:
             seeds.append("entropy-zscore")
+        # entropy_deviation was missing here too (same bug commit 18d2b051
+        # fixed for _print_enabled_features's "Seed selection" group; this
+        # sibling banner was not covered by that fix).
+        if getattr(self, "_entropy_deviation", None) is not None:
+            seeds.append("entropy-deviation")
+        if getattr(self, "_entropy_gradient", None) is not None:
+            seeds.append("entropy-gradient")
         if getattr(self, "_seed_residual", None) is not None:
             seeds.append("residual")
         if getattr(self, "_use_seed_canary", False) and self._seed_canary:
@@ -7515,6 +7559,8 @@ class Fuzzer:
             groups["Seed selection"].append("entropy-zscore")
         if getattr(self, "_entropy_deviation", None) is not None:
             groups["Seed selection"].append("entropy-deviation")
+        if getattr(self, "_entropy_gradient", None) is not None:
+            groups["Seed selection"].append("entropy-gradient")
         if getattr(self, "_seed_residual", None) is not None:
             groups["Seed selection"].append("residual")
 

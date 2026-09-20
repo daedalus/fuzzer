@@ -1802,6 +1802,7 @@ def _kruskal_lines(f) -> list[str]:
 def _entropy_seed_lines(f) -> list[str]:
     """Byte-entropy seed arm counters; empty when both arms are off."""
     from fuzzer_tool.core.schedulers.seed_entropy_deviation import EntropyDeviationSeedStrategy
+    from fuzzer_tool.core.schedulers.seed_entropy_gradient import EntropyGradientSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_zscore import EntropyZScoreSeedStrategy
 
@@ -1833,6 +1834,16 @@ def _entropy_seed_lines(f) -> list[str]:
         lines.append(
             f"    observed={st['observed']} selected={st['selected']} "
             f"warmed={st['warmed']} mean={st['mean_entropy']:.1f}%"
+        )
+
+    grad = getattr(f, "_entropy_gradient", None)
+    if isinstance(grad, EntropyGradientSeedStrategy):
+        st = grad.stats()
+        lines.append("  Entropy gradient: enabled")
+        lines.append(
+            f"    credited={st['credited']} selected={st['selected']} "
+            f"pooled={st['pooled']} warmed={st['warmed']} "
+            f"mean_credit={st['mean_credit']:.3f} bits"
         )
     return lines
 

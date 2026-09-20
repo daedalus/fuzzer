@@ -505,6 +505,8 @@ def cmd_fuzz(args):
             entropy_zscore=getattr(args, "entropy_zscore", False),
             entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
             entropy_deviation=getattr(args, "entropy_deviation", False),
+            entropy_gradient=getattr(args, "entropy_gradient", False),
+            entropy_gradient_decay=getattr(args, "entropy_gradient_decay", 0.98),
             seed_residual=getattr(args, "seed_residual", False),
             confirm_novelty=getattr(args, "confirm_novelty", False),
             successive_elim=getattr(args, "successive_elim", False),
@@ -784,6 +786,8 @@ def cmd_fuzz(args):
         entropy_zscore=getattr(args, "entropy_zscore", False),
         entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
         entropy_deviation=getattr(args, "entropy_deviation", False),
+        entropy_gradient=getattr(args, "entropy_gradient", False),
+        entropy_gradient_decay=getattr(args, "entropy_gradient_decay", 0.98),
         seed_residual=getattr(args, "seed_residual", False),
         confirm_novelty=getattr(args, "confirm_novelty", False),
         successive_elim=getattr(args, "successive_elim", False),
@@ -1938,6 +1942,7 @@ _HAIL_MARY_FLAGS = (
     "entropy_kl",
     "entropy_zscore",
     "entropy_deviation",
+    "entropy_gradient",
     "seed_residual",
     "op_katz",
     "op_kuramoto",
@@ -3309,6 +3314,23 @@ def main() -> int:
         "weighting seeds by how far their byte entropy deviates from the corpus mean "
         "(see docs/handover/handover_entropy_seed_schedulers_2026-09-19.md §1). OFF by "
         "default; not yet A/B validated.",
+    )
+    fuzz_parser.add_argument(
+        "--entropy-gradient",
+        action="store_true",
+        default=False,
+        help="Entropy-gradient seed scheduling: adds an 'entropy_gradient' Elo seed arm "
+        "weighting seeds by an EWMA of how much pooled corpus byte-entropy their direct "
+        "children have recently contributed (see "
+        "docs/handover/handover_entropy_seed_schedulers_2026-09-19.md §4). OFF by "
+        "default; not yet A/B validated.",
+    )
+    fuzz_parser.add_argument(
+        "--entropy-gradient-decay",
+        type=float,
+        default=0.98,
+        help="Per-admission multiplicative decay on the --entropy-gradient arm's stored "
+        "credit (default 0.98). Lower values forget unproductive parents faster.",
     )
     fuzz_parser.add_argument(
         "--seed-residual",

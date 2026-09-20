@@ -108,6 +108,7 @@ def _kruskal_str(f) -> str:
 def _entropy_seed_str(f) -> str:
     """Compact live-stats field for the byte-entropy seed arms; empty when off."""
     from fuzzer_tool.core.schedulers.seed_entropy_deviation import EntropyDeviationSeedStrategy
+    from fuzzer_tool.core.schedulers.seed_entropy_gradient import EntropyGradientSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_zscore import EntropyZScoreSeedStrategy
 
@@ -125,6 +126,10 @@ def _entropy_seed_str(f) -> str:
     dev = getattr(f, "_entropy_deviation", None)
     if isinstance(dev, EntropyDeviationSeedStrategy):
         out += f" | ent-dev: mu={dev.stats()['mean_entropy']:.1f}"
+
+    grad = getattr(f, "_entropy_gradient", None)
+    if isinstance(grad, EntropyGradientSeedStrategy):
+        out += f" | ent-grad: mean={grad.stats()['mean_credit']:.3f}"
     return out
 
 

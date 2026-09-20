@@ -310,6 +310,15 @@ class SeedPicker:
             available.append("entropy_kl")
         if getattr(f, "_entropy_deviation", None) is not None and f.corpus:
             available.append("entropy_deviation")
+        # Unlike its siblings, this arm warms up passively (it observes every
+        # corpus admission via Fuzzer._record_entropy_gradient_credit, not
+        # just the rounds it's picked in) -- so, unlike entropy_zscore, there
+        # is no "list it while cold so it can warm up" reason to include it
+        # before it has anything to say; a decline-every-time arm just wastes
+        # an Elo match.
+        gradient = getattr(f, "_entropy_gradient", None)
+        if gradient is not None and f.corpus and gradient.warmed:
+            available.append("entropy_gradient")
         # Listed while it is still warming up (it observes the corpus when
         # picked, and cannot warm up otherwise), then only while its
         # calibration is trustworthy -- a corpus with no entropy spread at
@@ -366,6 +375,7 @@ class SeedPicker:
             "entropy_kl": lambda: self._pick_entropy_kl_seed(),
             "entropy_zscore": lambda: self._pick_entropy_zscore_seed(),
             "entropy_deviation": lambda: self._pick_entropy_deviation_seed(),
+            "entropy_gradient": lambda: self._pick_entropy_gradient_seed(),
             "residual": lambda: self._pick_residual_seed(),
             "canary": lambda: self._pick_seed_canary_seed(),
         }
@@ -548,6 +558,22 @@ class SeedPicker:
             return None
         return strategy.select(f.corpus)
 
+    def _pick_entropy_gradient_seed(self) -> bytes | None:
+        """Track-record arm: draw proportional to a seed's recent child credit.
+
+        Weights each seed by an EWMA of how much pooled corpus byte-entropy
+        its own direct children have contributed lately -- "which parent has
+        recently been productive," the byte-diversity analogue of what
+        EdgeTracker's reward-shaping already does for coverage. Returns None
+        on an empty corpus or before enough admissions have been credited to
+        trust the ranking (see EntropyGradientSeedStrategy.warmed).
+        """
+        f = self.f
+        strategy = getattr(f, "_entropy_gradient", None)
+        if strategy is None or not f.corpus:
+            return None
+        return strategy.select(f.corpus)
+
     def _pick_seed_canary_seed(self) -> bytes | None:
         """Deliberately worst-in-class picker -- the Elo-arbitrated 'canary' arm.
 
@@ -659,6 +685,7 @@ class SeedPicker:
             self._pick_entropy_kl_seed,
             self._pick_entropy_zscore_seed,
             self._pick_entropy_deviation_seed,
+            self._pick_entropy_gradient_seed,
             self._pick_residual_seed,
         ):
             chosen = pick()
