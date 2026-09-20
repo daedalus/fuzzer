@@ -135,10 +135,23 @@ class RunningMoments:
 
     @property
     def variance(self) -> float:
-        """Sample variance (Bessel-corrected, /n-1). 0.0 if n < 2."""
+        """Sample variance (Bessel-corrected, /n-1). 0.0 if n < 2.
+
+        Clamped at zero. The sliding-window path recovers the central
+        moments from power sums (S1..S4), and m2 = S2 - S1**2/n is a
+        difference of two quantities that are nearly equal whenever the
+        observations are tightly clustered relative to their magnitude --
+        so it can land a few ULP below zero on a sample whose true
+        variance is exactly zero. ``stddev`` then raised ValueError out of
+        math.sqrt, which is a crash on a perfectly legitimate state (a
+        target with constant timing, a short window full of duplicates).
+        Reproduced at window=2 on both a raw-seconds stream (-2.2e-19 after
+        22 updates) and a log-seconds one (-3.6e-15 after 11); the
+        unbounded Welford path is unaffected.
+        """
         if self._n < 2:
             return 0.0
-        return self._m2 / (self._n - 1)
+        return max(self._m2 / (self._n - 1), 0.0)
 
     @property
     def stddev(self) -> float:

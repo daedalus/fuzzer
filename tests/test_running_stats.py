@@ -1,6 +1,7 @@
 """Tests for RunningMoments — Welford/Pébay online statistics."""
 
 import math
+import random
 import statistics
 
 from fuzzer_tool.core.running_stats import RunningMoments
@@ -321,3 +322,53 @@ class TestRunningMomentsSaveLoad:
                         assert abs(m.kurtosis - expected_kurt) < 1e-8, (
                             f"kurtosis mismatch at step {i}: {m.kurtosis} vs {expected_kurt}"
                         )
+
+
+class TestWindowedVarianceNeverNegative:
+    """The sliding-window path recovers m2 from power sums as
+    ``S2 - S1**2/n``, a difference of nearly-equal quantities when the
+    observations are tightly clustered relative to their magnitude. It can
+    land a few ULP below zero on a sample whose true variance is zero, and
+    ``stddev`` then raised ValueError out of math.sqrt -- a crash on a
+    legitimate state (constant target timing, a short window of
+    duplicates), reachable from ExecutionTimeTracker.suggested_timeout().
+    """
+
+    @staticmethod
+    def _coarse_stream(n=1000, seed=2):
+        rng = random.Random(seed)
+        return [float(rng.randrange(10)) * 0.01 for _ in range(n)]
+
+    def test_raw_axis_window_two(self):
+        m = RunningMoments(window=2)
+        for i, v in enumerate(self._coarse_stream()):
+            m.update(v)
+            assert m.variance >= 0.0, f"negative variance at step {i}: {m.variance}"
+            assert m.stddev >= 0.0  # must not raise
+
+    def test_log_axis_window_two(self):
+        m = RunningMoments(window=2)
+        for i, v in enumerate(self._coarse_stream()):
+            if v <= 0.0:
+                continue
+            m.update(math.log(v))
+            assert m.variance >= 0.0, f"negative variance at step {i}: {m.variance}"
+            assert m.stddev >= 0.0  # must not raise
+
+    def test_constant_stream_is_exactly_zero(self):
+        for window in (2, 3, 7, 50):
+            m = RunningMoments(window=window)
+            for _ in range(200):
+                m.update(0.05)
+            assert m.variance == 0.0
+            assert m.stddev == 0.0
+
+    def test_clamp_does_not_mask_real_variance(self):
+        """The clamp must not flatten a genuine spread."""
+        m = RunningMoments(window=50)
+        vals = [float(i % 17) for i in range(500)]
+        for v in vals:
+            m.update(v)
+        window = vals[-50:]
+        expected = statistics.variance(window)
+        assert abs(m.variance - expected) < 1e-8
