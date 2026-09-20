@@ -4853,6 +4853,16 @@ class OperatorEngine:
             return 0
         buf_len = len(buf)
         te_pos = f._get_te_weighted_position(buf_len) if f._use_transfer_entropy and f._te else None
+        # The TE map is capped at absolute offset 64. When the parent's
+        # inferred record stride shows those offsets are phase-locked, the
+        # same field recurs every `stride` bytes, which reaches the rest of
+        # the buffer; `get_phase_weighted_position` returns None otherwise.
+        phase_pos = None
+        if te_pos is not None:
+            meta = f.seed_meta.get(data)
+            phase_pos = f._get_phase_weighted_position(
+                buf_len, meta.get("record_stride") if meta else None
+            )
         mi_pos = f._mi.weighted_position(buf_len) if f._use_mi and f._mi else None
         # Sensitivity is a per-seed score cache: when disabled the tracker is
         # never populated, so the call would always return None.  Gate it like
@@ -4871,7 +4881,9 @@ class OperatorEngine:
             else None
         )
         candidates = [
-            p for p in [sens_pos, te_pos, mi_pos, crash_mi_pos, region_pos] if p is not None
+            p
+            for p in [sens_pos, te_pos, phase_pos, mi_pos, crash_mi_pos, region_pos]
+            if p is not None
         ]
         if candidates:
             byte_idx = self.ctx._rng.choice(candidates)
@@ -4880,6 +4892,7 @@ class OperatorEngine:
         if getattr(f, "debug", False):
             print(
                 f"[select_position] buf_len={buf_len} sens={sens_pos} te={te_pos} "
+                f"phase={phase_pos} "
                 f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} "
                 f"candidates={candidates} fallback={not candidates} byte_idx={byte_idx}"
             )

@@ -35,10 +35,10 @@ from fuzzer_tool.adapters.process import (
     disable_aslr,
 )
 from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
+from fuzzer_tool.core.analyzers.analyzer_elo import strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
-from fuzzer_tool.core.analyzers.analyzer_elo import strategy_display_name
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
@@ -2609,6 +2609,7 @@ class Fuzzer:
         self._use_renyi_weight = renyi_weight
         self._use_transfer_entropy = transfer_entropy
         self._te_byte_edges: dict[int, dict[int, int]] = {}  # pos → {edge: count}
+        self._te_causal_version = 0  # bumped per causal-map update; keys the phase-lock memo
         self._use_occupation = occupation
         self._use_causal_sector = causal_sector
 
@@ -6020,6 +6021,9 @@ class Fuzzer:
 
     def _get_te_weighted_position(self, input_length: int):
         return self._stats.get_te_weighted_position(input_length)
+
+    def _get_phase_weighted_position(self, input_length: int, stride: int | None):
+        return self._stats.get_phase_weighted_position(input_length, stride)
 
     def _colorize_seed(self, data: bytes):
         """Colorization taints for ``data``, or ``None`` when disabled.

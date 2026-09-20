@@ -2,6 +2,13 @@
 
 from __future__ import annotations
 
+from fuzzer_tool.core.circular_stats import (
+    DEFAULT_ALPHA,
+    MIN_STRIDE,
+    PhaseConcentration,
+    concentration,
+)
+
 
 def update_te_causal_map(
     te,
@@ -47,6 +54,77 @@ def get_te_weighted_position(
         return None
     best_pos = max(byte_edges, key=lambda pos: sum(byte_edges[pos].values()))
     return best_pos if best_pos < input_length else None
+
+
+def phase_lock(
+    byte_edges: dict[int, dict[int, int]],
+    stride: int | None,
+) -> PhaseConcentration | None:
+    """Test the causal byte map for a phase lock on a *stride*-byte record.
+
+    The expensive half of :func:`get_phase_weighted_position`, split out so
+    callers on the mutation hot path can memoise it: the causal map only
+    changes on the TE observation cadence, while the position is drawn on
+    every mutation.
+
+    Returns ``None`` when the question is not askable — no causal data, or
+    no usable stride. A returned concentration still has to clear its
+    significance gate; that is :func:`draw_phase_position`'s job.
+    """
+    if not byte_edges or not stride or stride < MIN_STRIDE:
+        return None
+
+    offsets = list(byte_edges)
+    weights = [float(sum(byte_edges[pos].values())) for pos in offsets]
+
+    return concentration(offsets, weights, stride)
+
+
+def draw_phase_position(
+    lock: PhaseConcentration | None,
+    input_length: int,
+    rng,
+    alpha: float = DEFAULT_ALPHA,
+) -> int | None:
+    """Pick a byte position at the locked field of a uniformly drawn record.
+
+    Returns ``None`` when *lock* is absent, fails its significance test at
+    *alpha*, or names an offset no record slot can reach inside
+    ``input_length``. The RNG is consulted only on the accepted path.
+    """
+    if lock is None or not lock.is_locked(alpha):
+        return None
+
+    # Slots at the locked offset that fit: offset, offset+stride, ...
+    n_slots = (input_length - lock.offset + lock.stride - 1) // lock.stride
+    if n_slots <= 0:
+        return None
+
+    return rng.randint(0, n_slots - 1) * lock.stride + lock.offset
+
+
+def get_phase_weighted_position(
+    byte_edges: dict[int, dict[int, int]],
+    input_length: int,
+    stride: int | None,
+    rng,
+    alpha: float = DEFAULT_ALPHA,
+) -> int | None:
+    """Extrapolate the causal byte map across a record-structured buffer.
+
+    ``update_te_causal_map`` only ever observes offsets below its own
+    64-byte cap, and :func:`get_te_weighted_position` can therefore never
+    name a position outside it. When the seed has an inferred
+    ``record_stride`` and the causal offsets are phase-locked on it — tested
+    at *alpha* by :func:`core.circular_stats.concentration` — the same field
+    recurs at ``offset + k*stride`` for every record in the buffer, so a
+    uniformly drawn record extends the evidence to the full length.
+
+    Returns ``None`` whenever the extrapolation is unwarranted: no stride,
+    no causal data, a rejected lock, or a buffer with no slot at the locked
+    offset. The RNG is consulted only on the accepted path.
+    """
+    return draw_phase_position(phase_lock(byte_edges, stride), input_length, rng, alpha)
 
 
 def edge_sets_to_flow(

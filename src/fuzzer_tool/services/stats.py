@@ -13,6 +13,7 @@ Extracted from Fuzzer class (~lines 3101-3613, 3435-3508). Contains:
 - _run_crash_replays() — crash reproducibility checking
 - _update_te_causal_map() — transfer entropy updates
 - _get_te_weighted_position() — TE-based mutation position
+- _get_phase_weighted_position() — TE map extrapolated across record phase
 - _get_current_edge_bitmap() — read current coverage bitmap
 """
 
@@ -26,6 +27,7 @@ from fuzzer_tool.core.analyzers.analyzer_elo import (
     seed_strategy_display_name,
     strategy_display_name,
 )
+from fuzzer_tool.core.circular_stats import PhaseConcentration
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
@@ -43,8 +45,10 @@ from fuzzer_tool.services.stats_reporter import (
     run_crash_replays as _run_crash_replays_fn,
 )
 from fuzzer_tool.services.te_position import (
+    draw_phase_position,
     edge_sets_to_flow,
     get_te_weighted_position,
+    phase_lock,
     update_te_causal_map,
 )
 
@@ -150,6 +154,10 @@ class StatsReporter:
     def __init__(self, fuzzer, rng: RandPool | None = None):
         self.f = fuzzer
         self._rng = rng if rng is not None else get_default_rand_pool()
+        # Memo for the record phase lock: the causal map changes on the TE
+        # observation cadence, the position is drawn every mutation.
+        self._phase_lock_key: tuple[int, int | None] | None = None
+        self._phase_lock: PhaseConcentration | None = None
 
     def record_discovery_snapshot(self):
         f = self.f
@@ -709,6 +717,7 @@ class StatsReporter:
             f.map_size,
             f._te_byte_edges,
         )
+        f._te_causal_version += 1
 
     def update_causal_sector(self):
         """Feed the causal-sector graph from the TE edge history (Phase B2).
@@ -724,6 +733,15 @@ class StatsReporter:
 
     def get_te_weighted_position(self, input_length: int) -> int | None:
         return get_te_weighted_position(self.f._te_byte_edges, input_length)
+
+    def get_phase_weighted_position(self, input_length: int, stride: int | None) -> int | None:
+        f = self.f
+        key = (f._te_causal_version, stride)
+        if key != self._phase_lock_key:
+            self._phase_lock_key = key
+            self._phase_lock = phase_lock(f._te_byte_edges, stride)
+
+        return draw_phase_position(self._phase_lock, input_length, f._rng)
 
     def get_current_edge_set(self) -> set[int]:
         """Return the set of currently-active edge IDs.
