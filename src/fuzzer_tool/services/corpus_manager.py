@@ -14,6 +14,7 @@ Signal name mapping for crash return codes.
 
 import hashlib
 import logging
+import math
 import os
 import shutil
 import struct
@@ -928,6 +929,14 @@ class CorpusManager:
                     f.markov.last_js_divergence,
                 )
             f._corpus_size_history.append(len(data))
+            # The contextual schedulers' corpus-size percentile feature reads
+            # this; nothing fed it before, so its guard (count >= 5) never
+            # passed and the feature was pinned at the neutral 0.5 for entire
+            # runs -- a constant column in a 14-dimensional LinUCB context,
+            # which is a second intercept direction rather than a no-op.
+            log_size_moments = getattr(f, "_corpus_log_size_stats", None)
+            if log_size_moments is not None:
+                log_size_moments.update(math.log1p(len(data)))
             seed_moments = getattr(f, "_seed_size_moments", None)
             if seed_moments is not None:
                 seed_moments.update(float(len(data)))

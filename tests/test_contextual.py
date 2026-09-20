@@ -155,7 +155,7 @@ def _minimal_fuzzer_stub():
         seed_meta = {}
         _edge_tracker = None
         _cmplog = None
-        _corpus_size_stats = None
+        _corpus_log_size_stats = None
         _op_time_ema: dict = {}
 
     return _Stub()
