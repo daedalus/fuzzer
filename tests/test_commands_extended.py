@@ -320,8 +320,6 @@ class TestCmdFuzzConstruction:
             inprocess=False,
             inprocess_direct=False,
             inprocess_func="LLVMFuzzerTestOneInput",
-            jobs=0,
-            sync_interval=1.0,
             plot_graph=None,
         )
 
@@ -484,19 +482,6 @@ class TestCmdFuzzConstruction:
         result = cmd_fuzz(args)
         assert result == 0
         assert not (tmp_path / "hot.prof").exists()
-
-    def test_fuzz_profile_hotpath_parallel_warns(self, monkeypatch, tmp_path, capsys):
-        """--profile-hotpath with --jobs > 1 should warn and skip profiling."""
-        args = self._make_default_args(tmp_path)
-        args.profile_hotpath = True
-        args.jobs = 2
-        mock_parallel = MagicMock()
-        monkeypatch.setattr("fuzzer_tool.services.parallel.run_parallel", mock_parallel)
-
-        result = cmd_fuzz(args)
-        assert result == 0
-        assert "ignored in parallel mode" in capsys.readouterr().out
-        mock_parallel.assert_called_once()
 
     def test_fuzz_profile_hotpath_quiet_stats(self, monkeypatch, tmp_path):
         """--profile-hotpath should thread quiet_stats=True into the Fuzzer."""

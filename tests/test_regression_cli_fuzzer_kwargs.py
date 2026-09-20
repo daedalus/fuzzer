@@ -1,13 +1,15 @@
 """Regression: every fuzz flag that names a Fuzzer parameter reaches Fuzzer().
 
-cmd_fuzz builds the fuzzer in one of two calls: run_parallel(...) for -j>1
-and Fuzzer(...) otherwise. Both are hand-written keyword lists, and the
-single-process one -- the default mode -- had dropped kl_ducb,
-kl_ducb_gamma, kl_swucb, kl_swucb_window and markov_blend while the parallel
-one passed them. --kl-ducb, --kl-swucb and --markov-blend parsed, were
-accepted, and built nothing; --elo all set args.kl_ducb/kl_swucb and they
-were discarded the same way. test_regression_elo_all's flag list never
-named the two KL schedulers, which is why it did not notice.
+cmd_fuzz builds the fuzzer from one hand-written keyword list. When there
+was a second one -- run_parallel(...) for the retired -j>1 mode -- the two
+drifted: the single-process list dropped kl_ducb, kl_ducb_gamma, kl_swucb,
+kl_swucb_window and markov_blend while the parallel one passed them, so
+--kl-ducb, --kl-swucb and --markov-blend parsed, were accepted, and built
+nothing; --elo all set args.kl_ducb/kl_swucb and they were discarded the
+same way. test_regression_elo_all's flag list never named the two KL
+schedulers, which is why it did not notice. One call site cannot drift
+against a sibling, but it can still drift against the parser, which is
+what this test pins.
 
 The structural test reads both sides from source: the fuzz parser's option
 dests and the keywords of the Fuzzer(...) call in cmd_fuzz. A flag whose

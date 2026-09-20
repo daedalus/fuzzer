@@ -397,162 +397,6 @@ def cmd_fuzz(args):
             else:
                 print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
 
-    # Parallel mode
-    if args.jobs and args.jobs > 1:
-        if getattr(args, "profile_hotpath", False):
-            print(
-                "[*] --profile-hotpath ignored in parallel mode (--jobs > 1); "
-                "profiling applies to single-process fuzz runs"
-            )
-        from fuzzer_tool.services.parallel import run_parallel
-
-        run_parallel(
-            target=args.target,
-            jobs=args.jobs,
-            corpus_dir=corpus_dir,
-            crashes_dir=crashes_dir,
-            max_len=args.max_len,
-            timeout=timeout,
-            mutations_per_input=args.mutations,
-            use_coverage=args.coverage,
-            deep_coverage=args.deep_coverage,
-            max_bps=args.max_bps,
-            dictionary=dictionary,
-            file_mode=args.file_mode,
-            target_args=args.target_args,
-            markov_order=args.markov_order if use_markov else "0",
-            markov_generate=args.markov_gen,
-            markov_blend=getattr(args, "markov_blend", False),
-            mc_bandit=args.mc_bandit,
-            mc_cem=args.mc_cem,
-            mc_cycle_detect=getattr(args, "mc_cycle_detect", False),
-            mc_elite_frac=args.mc_elite_frac,
-            mc_refit_interval=args.mc_refit_int,
-            mc_decay_interval=getattr(args, "mc_decay_interval", 100),
-            pairwise_blend=getattr(args, "pairwise_blend", 0.0),
-            sharpe_kelly_blend=getattr(args, "sharpe_kelly_blend", 0.0),
-            stats_file=args.stats_file,
-            stats_interval=args.stats_interval,
-            coverage_report=args.coverage_report,
-            iterations=args.iterations,
-            sync_interval=args.sync_interval,
-            seed=args.seed,
-            secretary=getattr(args, "secretary", False),
-            secretary_window=getattr(args, "secretary_window", 500),
-            secretary_exploration=getattr(args, "secretary_exploration", 0.368),
-            overlap_density=getattr(args, "overlap_density", False),
-            overlap_density_mode=getattr(args, "overlap_mode", "modifier"),
-            overlap_min_jaccard=getattr(args, "overlap_min_jaccard", 0.25),
-            overlap_density_blend=getattr(args, "overlap_blend", 0.5),
-            poisson_disk_admission=getattr(args, "poisson_disk_admission", False),
-            poisson_disk_min_jaccard=getattr(args, "poisson_disk_min_jaccard", 0.25),
-            resize_map_on_stall=getattr(args, "resize_map_on_stall", True),
-            job_scheduler=getattr(args, "job_scheduler", False),
-            fractal_partition=getattr(args, "fractal_partition", False),
-            fractal_partition_depth=getattr(args, "fractal_partition_depth", 3),
-            fractal_diversity=getattr(args, "fractal_diversity", False),
-            fractal_diversity_depth=getattr(args, "fractal_diversity_depth", 3),
-            fractal_diversity_bonus=getattr(args, "fractal_diversity_bonus", 1.3),
-            exp3=getattr(args, "exp3", False),
-            exp4=getattr(args, "exp4", False),
-            invasion=getattr(args, "invasion", False),
-            garch=getattr(args, "garch", False),
-            continuum=getattr(args, "continuum", False),
-            exp3_gamma=getattr(args, "exp3_gamma", 0.1),
-            exp4_gamma=getattr(args, "exp4_gamma", 0.1),
-            eps_greedy=getattr(args, "eps_greedy", False),
-            eps_greedy_epsilon0=getattr(args, "eps_greedy_epsilon0", 1.0),
-            eps_greedy_decay=getattr(args, "eps_greedy_decay", 0.9995),
-            hierarchical_bandit=getattr(args, "hierarchical_bandit", False),
-            gp_ucb=getattr(args, "gp_ucb", False),
-            bo_gp_ucb=getattr(args, "bo_gp_ucb", False),
-            ducb=getattr(args, "ducb", False),
-            ducb_gamma=getattr(args, "ducb_gamma", 0.9999),
-            swucb=getattr(args, "swucb", False),
-            swucb_window=getattr(args, "swucb_window", 4000),
-            kl_ducb=getattr(args, "kl_ducb", False),
-            kl_ducb_gamma=getattr(args, "kl_ducb_gamma", 0.9999),
-            kl_swucb=getattr(args, "kl_swucb", False),
-            kl_swucb_window=getattr(args, "kl_swucb_window", 4000),
-            cucb=getattr(args, "cucb", False),
-            cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
-            cusum_ucb=getattr(args, "cusum_ucb", False),
-            cusum_ucb_m=getattr(args, "cusum_ucb_m", 30),
-            cusum_ucb_epsilon=getattr(args, "cusum_ucb_epsilon", 0.1),
-            cusum_ucb_h=getattr(args, "cusum_ucb_h", 40.0),
-            cusum_ucb_xi=getattr(args, "cusum_ucb_xi", 0.6),
-            fewa=getattr(args, "fewa", False),
-            fewa_alpha=getattr(args, "fewa_alpha", 0.5),
-            fewa_max_window=getattr(args, "fewa_max_window", 512),
-            fpl=getattr(args, "fpl", False),
-            fpl_epsilon=getattr(args, "fpl_epsilon", 1.0),
-            gradient=getattr(args, "gradient", False),
-            gradient_alpha=getattr(args, "gradient_alpha", 0.05),
-            gradient_temperature=getattr(args, "gradient_temperature", 1.0),
-            gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
-            gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
-            gradient_floor=getattr(args, "gradient_floor", 0.05),
-            corral=getattr(args, "corral", False),
-            corral_eta=getattr(args, "corral_eta", 0.6),
-            whittle=getattr(args, "whittle", False),
-            whittle_n_states=getattr(args, "whittle_n_states", 5),
-            whittle_gamma=getattr(args, "whittle_gamma", 0.95),
-            whittle_passive_decay=getattr(args, "whittle_passive_decay", 0.0),
-            whittle_floor=getattr(args, "whittle_floor", 0.05),
-            whittle_recompute_batch=getattr(args, "whittle_recompute_batch", 25),
-            kruskal_count=getattr(args, "kruskal_count", False),
-            entropy_kl=getattr(args, "entropy_kl", False),
-            entropy_zscore=getattr(args, "entropy_zscore", False),
-            entropy_zscore_target=getattr(args, "entropy_zscore_target", 0.0),
-            entropy_deviation=getattr(args, "entropy_deviation", False),
-            entropy_gradient=getattr(args, "entropy_gradient", False),
-            entropy_gradient_decay=getattr(args, "entropy_gradient_decay", 0.98),
-            seed_residual=getattr(args, "seed_residual", False),
-            confirm_novelty=getattr(args, "confirm_novelty", False),
-            successive_elim=getattr(args, "successive_elim", False),
-            successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
-            successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
-            successive_elim_reopen=getattr(args, "successive_elim_reopen", 0),
-            op_katz=getattr(args, "op_katz", False),
-            op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
-            op_kuramoto=getattr(args, "op_kuramoto", False),
-            op_kuramoto_k=getattr(args, "op_kuramoto_k", 1.0),
-            op_kuramoto_omega_scale=getattr(args, "op_kuramoto_omega_scale", 1.0),
-            op_kuramoto_dt=getattr(args, "op_kuramoto_dt", 0.05),
-            op_kuramoto_steps_per_batch=getattr(args, "op_kuramoto_steps_per_batch", 5),
-            op_kuramoto_recompute_batch=getattr(args, "op_kuramoto_recompute_batch", 25),
-            op_tang=getattr(args, "op_tang", False),
-            op_tang_rank=getattr(args, "op_tang_rank", 10),
-            op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
-            op_kruskal_count=getattr(args, "op_kruskal_count", False),
-            op_credit=getattr(args, "op_credit", False),
-            shaped_reward=getattr(args, "shaped_reward", False),
-            shaped_reward_floor=getattr(args, "shaped_reward_floor", 0.0),
-            consolidated=getattr(args, "consolidated", False),
-            moss=getattr(args, "moss", False),
-            moss_gamma=getattr(args, "moss_gamma", 1.0),
-            slopt=getattr(args, "slopt", False),
-            intel_pt=getattr(args, "intel_pt", False),
-            intel_pt_mode=getattr(args, "intel_pt_mode", "block"),
-            lbr=getattr(args, "lbr", False),
-            lbr_period=getattr(args, "lbr_period", 0),
-            gp_length_scale=getattr(args, "gp_length_scale", 1.0),
-            gp_beta=getattr(args, "gp_beta", 2.0),
-            contextual=getattr(args, "contextual", False),
-            contextual_alpha=getattr(args, "contextual_alpha", 1.0),
-            contextual_lambda=getattr(args, "contextual_lambda", 1.0),
-            c2ucb=getattr(args, "c2ucb", False),
-            c2ucb_alpha=getattr(args, "c2ucb_alpha", 1.0),
-            c2ucb_lambda=getattr(args, "c2ucb_lambda", 1.0),
-            c2ucb_min_out_rounds=getattr(args, "c2ucb_min_out_rounds", 30.0),
-            asan_target=getattr(args, "asan_target", None),
-            ubsan_target=getattr(args, "ubsan_target", None),
-            chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
-            lineage=getattr(args, "lineage", False),
-            lineage_backtrack=getattr(args, "lineage_backtrack", False),
-        )
-        return 0
-
     plot_graph_path = None
     coverage_log_arg = args.coverage_log
     if getattr(args, "plot_graph", None) is not None:
@@ -1918,7 +1762,6 @@ _HAIL_MARY_FLAGS = (
     "topk",
     "consolidated",
     "moss",
-    "fractal_partition",
     "contextual",
     "c2ucb",
     "invasion",
@@ -2990,23 +2833,6 @@ def main() -> int:
         help="Weight multiplier applied to boundary seeds under --fractal-diversity (default: 1.3)",
     )
     fuzz_parser.add_argument(
-        "--fractal-partition",
-        action="store_true",
-        default=False,
-        help=(
-            "In parallel mode (--jobs > 1), partition the shared corpus "
-            "across workers by fractal Voronoi root cell instead of fully "
-            "sharing it: a worker only pulls a sibling's seed if it owns "
-            "that seed's root cell, or the seed crosses a fractal boundary"
-        ),
-    )
-    fuzz_parser.add_argument(
-        "--fractal-partition-depth",
-        type=int,
-        default=3,
-        help="Fractal layer depth for --fractal-partition (default: 3)",
-    )
-    fuzz_parser.add_argument(
         "--job-scheduler",
         action="store_true",
         default=False,
@@ -3014,9 +2840,7 @@ def main() -> int:
             "Route maintenance-tick housekeeping (memory pruning, crash/"
             "sanitizer replays, periodic GC) through a single precedence-"
             "aware queue (Lawler's algorithm over lateness) instead of "
-            "three independent ad-hoc gates, and partition -j>1's initial "
-            "corpus by Multifit-packed cost instead of fractal Voronoi "
-            "root cell or content hash. Off by default: this changes "
+            "three independent ad-hoc gates. Off by default: this changes "
             "maintenance-tick cadence (see services/maintenance.py), not "
             "just adds a strategy, so it is opt-in rather than folded into "
             "the existing gates silently."
@@ -3893,19 +3717,6 @@ def main() -> int:
         "--grammar",
         nargs="+",
         help="Grammar file(s) (built-in: json, http_request, elf) or path to .gram file",
-    )
-    fuzz_parser.add_argument(
-        "-j",
-        "--jobs",
-        type=int,
-        default=1,
-        help="Number of parallel fuzzing workers (default: 1)",
-    )
-    fuzz_parser.add_argument(
-        "--sync-interval",
-        type=int,
-        default=30,
-        help="Seconds between corpus sync in parallel mode (default: 30)",
     )
     fuzz_parser.add_argument(
         "--persistent",

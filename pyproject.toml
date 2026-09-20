@@ -192,7 +192,6 @@ module = [
     "fuzzer_tool.services.import_corpus",
     "fuzzer_tool.services.minimize",
     "fuzzer_tool.services.operators",
-    "fuzzer_tool.services.parallel",
     "fuzzer_tool.services.ptrace_coverage",
     "fuzzer_tool.services.report",
     "fuzzer_tool.services.runner",
