@@ -89,10 +89,36 @@ on F1.
 - `SATURATION_SCALE` (0.25) and `op_credit.DECAY` (0.5) are uncalibrated. The
   handover gives the direction, not the size.
 - Operator credit state (`_found`, `_pulls`) is in memory and not resumed.
-- The reward-shaping form the handover calls the cheapest A/B, scaling the
+- ~~The reward-shaping form the handover calls the cheapest A/B, scaling the
   shared `op_rewards` weight for **every** scheduler by
-  `OpCreditScheduler.shaped_weight`, exists and is tested but is not wired.
+  `OpCreditScheduler.shaped_weight`, exists and is tested but is not wired.~~
+  **Wired 2026-09-20** as `--shaped-reward` (`Fuzzer._credit_reward_shape`, one
+  multiply in the single shared `op_rewards` loop), with `--shaped-reward-floor`
+  as the clamp on the two ways the factor collapses. Measured on fuzzgoat and
+  **not adopted**: see §"A/B result" below. The arithmetic moved to a module-level
+  `shaped_weight(substrate, edges, floor)`; the method is a thin bind, because the
+  shaping is for every arm and must not require electing this selector.
 - Nothing populates `derived` (P1-2) and PC2/PC3 are unused (P1-3).
+
+## A/B result (2026-09-20): shaped reward measured, not adopted
+
+`--shaped-reward` was wired and run against plain `--elo` on a clang
+`--clang-scov` fuzzgoat build (Rule 52), paired over seeds 0-11 at 2,000 execs.
+
+| arm | W/L | median delta | 95% CI on mean | McNemar |
+|---|---|---|---|---|
+| `--shaped-reward` (floor 0) | 5/7 | -7.0 edges | [-13.5, +1.6] | p = 0.774 |
+| `+ --shaped-reward-floor 0.25` | 5/7 | -2.5 edges | [-8.9, +10.4] | p = 0.774 |
+
+Baseline median 145 edges. No gain in either form, and the faithful form's
+interval sits mostly below zero. Off by default, floor default 0.0, and out of
+`--hail-mary` on the strength of this rather than on caution. Full write-up,
+including the three cells that had to be discarded and re-run, in
+`docs/learnings/2026-09-20-shaped-reward-ab-result.md`.
+
+This closes the cheapest of the arms' A/Bs. It says nothing about `op_credit`'s
+own selector or about `seed_residual`: those move the selector, not the reward,
+and are still unmeasured.
 
 ## Protocol before it can be on by default
 
