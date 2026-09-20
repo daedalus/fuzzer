@@ -109,7 +109,16 @@ if [ -n "$NIGHTLY_RUSTC" ]; then
     fi
     ok "using nightly rustc for real Rust-side edge coverage: $NIGHTLY_RUSTC"
     export RUSTC="$NIGHTLY_RUSTC"
-    export RUSTFLAGS="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc-guard"
+    # trace-compares (not the plausible-looking but nonexistent
+    # -sanitizer-coverage-trace-cmp -- confirmed via `rustc -Cllvm-args=
+    # --help-hidden`) gives cmplog real comparison operands from inside
+    # the crate itself, e.g. the "RUST" magic-prefix check compiles to one
+    # atomic 4-byte comparison in release mode, and without this flag
+    # cmplog has no visibility into it at all -- only into libc calls
+    # (memcmp/strcmp/etc, already covered by the "Cmplog: comparison
+    # tracing enabled (strcmp,...)" interception path, which is separate
+    # from and does not substitute for this).
+    export RUSTFLAGS="-Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc-guard -Cllvm-args=-sanitizer-coverage-trace-compares"
 else
     warn "no nightly rustc found (checked \$RUSTC_NIGHTLY and $DEFAULT_NIGHTLY)" \
          "— building with stable rustc; the crate itself will carry no" \
@@ -117,6 +126,29 @@ else
          "this — read that script's header first, it's an unofficial" \
          "third-party toolchain, opt in deliberately)"
 fi
+
+# Comparison logging (cmplog/redqueen), on by default here for the same
+# reason build_targets.sh's WITH_CMPLOG defaults to 1 for .so targets:
+# afl_shim.c only compiles in its __sanitizer_cov_trace_cmp*/
+# __sanitizer_cov_trace_const_cmp* callback bodies behind -D__AFL_CMPLOG=1
+# (see the shim's own top comment) -- without it those symbols don't
+# exist in the wrapper's translation unit at all. This matters more here
+# than it might look like it should: an earlier version of this script
+# left it off, and separately added -sanitizer-coverage-trace-compares to
+# the *Rust* side's RUSTFLAGS (below) to get cmplog data out of the
+# crate's own comparisons. That combination produces a .so that FAILS TO
+# LOAD -- "undefined symbol: __sanitizer_cov_trace_const_cmp1" -- because
+# the Rust object references a callback the wrapper was never told to
+# compile in. Confirmed the hard way: every fuzzing run against a target
+# built that way silently fuzzed a binary that couldn't be dlopen'd,
+# producing a small constant edge count and zero crashes indistinguishable
+# from a genuinely hard-to-reach target, for hours of wall-clock time,
+# until directly attempting to CDLL() the .so surfaced the real error.
+# -D__AFL_CMPLOG=1 needs -ldl (already in RUST_LIBS below) and is harmless
+# to add even when the Rust side has no trace-compares instrumentation of
+# its own (stable rustc, no nightly) -- it just compiles in callback
+# bodies nothing calls.
+CMPLOG_CFLAG="-D__AFL_CMPLOG=1"
 
 echo "Building rust/buggy_target (cargo release, staticlib)..."
 ( cd "$CRATE_DIR" && cargo build --release )
@@ -140,12 +172,12 @@ build_variant() {
     local so_out="$OUT_DIR/rust_target${suffix}.so"
 
     echo "  -> $exe_out"
-    "$cc" $extra_flags $COV_FLAG -O2 -g $FRAME_POINTER -include "$SHIM" \
+    "$cc" $extra_flags $COV_FLAG $CMPLOG_CFLAG -O2 -g $FRAME_POINTER -include "$SHIM" \
         -o "$exe_out" "$WRAPPER_SRC" "$rlib" $RUST_LIBS
     ok "$(basename "$exe_out")"
 
     echo "  -> $so_out"
-    "$cc" $extra_flags $COV_FLAG -O2 -g $FRAME_POINTER -shared -fPIC -include "$SHIM" \
+    "$cc" $extra_flags $COV_FLAG $CMPLOG_CFLAG -O2 -g $FRAME_POINTER -shared -fPIC -include "$SHIM" \
         -o "$so_out" "$WRAPPER_SRC" "$rlib" $so_libs
     ok "$(basename "$so_out")"
 }
@@ -198,7 +230,7 @@ if [ "$WITH_ASAN" -eq 1 ]; then
             ASAN_TARGET_DIR="$(mktemp -d)"
             ( cd "$CRATE_DIR" && \
               RUSTC="$NIGHTLY_RUSTC" \
-              RUSTFLAGS="-Z sanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc-guard" \
+              RUSTFLAGS="-Z sanitizer=address -Cpasses=sancov-module -Cllvm-args=-sanitizer-coverage-level=3 -Cllvm-args=-sanitizer-coverage-trace-pc-guard -Cllvm-args=-sanitizer-coverage-trace-compares" \
               cargo build --release --target-dir "$ASAN_TARGET_DIR" )
             ASAN_RLIB="$ASAN_TARGET_DIR/release/libbuggy_rust_target.a"
             [ -f "$ASAN_RLIB" ] || fail "expected ASAN staticlib not found: $ASAN_RLIB"

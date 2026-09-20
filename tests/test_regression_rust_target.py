@@ -105,6 +105,7 @@ def rust_target_so(tmp_path_factory):
     cc, cov_flag = _pick_cc()
     cmd = [
         cc, "-O2", "-g", "-fno-omit-frame-pointer", *cov_flag,
+        "-D__AFL_CMPLOG=1",
         "-shared", "-fPIC",
         "-include", SHIM, "-o", str(out), WRAPPER_SRC, rlib,
         "-lpthread", "-ldl", "-lm", "-lrt", "-lutil", "-lgcc_s",
@@ -120,6 +121,7 @@ def rust_target_exe(tmp_path_factory):
     cc, cov_flag = _pick_cc()
     cmd = [
         cc, "-O2", "-g", "-fno-omit-frame-pointer", *cov_flag,
+        "-D__AFL_CMPLOG=1",
         "-include", SHIM, "-o", str(out), WRAPPER_SRC, rlib,
         "-lpthread", "-ldl", "-lm", "-lrt", "-lutil", "-lgcc_s",
     ]
@@ -249,6 +251,22 @@ def test_wrapper_actually_has_instrumented_call_sites(rust_target_so):
 
 @pytest.fixture(scope="module")
 def rust_target_so_nightly(tmp_path_factory):
+    """Builds with the same flag combination tools/build_rust_target.sh
+    uses by default: nightly rustc with both trace-pc-guard (edges) and
+    trace-compares (cmplog operands) on the Rust side, wrapper compiled
+    with -D__AFL_CMPLOG=1. That second half is not optional decoration --
+    a build with Rust-side trace-compares and a wrapper missing
+    -D__AFL_CMPLOG=1 produces a .so that FAILS TO LOAD AT ALL
+    ("undefined symbol: __sanitizer_cov_trace_const_cmp1"), because
+    afl_shim.c only compiles those callback bodies in behind that define.
+    Confirmed the hard way: an earlier, incomplete version of this fixture
+    (and of tools/build_rust_target.sh) added trace-compares to RUSTFLAGS
+    without the matching wrapper flag, and every crash-detection test
+    still using the OLDER, trace-compares-less .so kept passing -- nothing
+    here exercised the broken combination until a real fuzzing run tried
+    to dlopen it directly. test_nightly_cmplog_so_actually_loads below is
+    the test that would have caught it.
+    """
     nightly_rustc = _find_nightly_rustc()
     if nightly_rustc is None:
         pytest.skip(
@@ -263,7 +281,8 @@ def rust_target_so_nightly(tmp_path_factory):
     env["RUSTFLAGS"] = (
         "-Cpasses=sancov-module "
         "-Cllvm-args=-sanitizer-coverage-level=3 "
-        "-Cllvm-args=-sanitizer-coverage-trace-pc-guard"
+        "-Cllvm-args=-sanitizer-coverage-trace-pc-guard "
+        "-Cllvm-args=-sanitizer-coverage-trace-compares"
     )
     build_dir = tmp_path_factory.mktemp("nightly_cargo_target")
     subprocess.run(
@@ -277,12 +296,27 @@ def rust_target_so_nightly(tmp_path_factory):
     cc, cov_flag = _pick_cc()  # still clang for the wrapper side
     cmd = [
         cc, "-O2", "-g", "-fno-omit-frame-pointer", *cov_flag,
+        "-D__AFL_CMPLOG=1",
         "-shared", "-fPIC",
         "-include", SHIM, "-o", str(out), WRAPPER_SRC, str(rlib),
         "-lpthread", "-ldl", "-lm", "-lrt", "-lutil", "-lgcc_s",
     ]
     subprocess.run(cmd, check=True, capture_output=True)
     return str(out)
+
+
+def test_nightly_cmplog_so_actually_loads(rust_target_so_nightly):
+    """The actual regression: dlopen the .so directly, exactly the way
+    ctypes.CDLL (and therefore adapters/inprocess.py, and the real fuzzer
+    it drives) does it. A missing -D__AFL_CMPLOG=1 on the wrapper raises
+    OSError here with an undefined-symbol message rather than anywhere
+    the crash-detection tests below would notice -- they exercise
+    behavior *through* __afl_guarded_call, which never runs at all if the
+    library can't be loaded in the first place. Building without
+    error is not sufficient evidence this target works; loading it is
+    the missing check that let the broken combination through before.
+    """
+    ctypes.CDLL(rust_target_so_nightly)  # raises OSError on failure
 
 
 def test_nightly_build_instruments_inside_the_crate(rust_target_so_nightly):
@@ -379,7 +413,8 @@ def rust_target_exe_asan_nightly(tmp_path_factory):
         "-Z sanitizer=address "
         "-Cpasses=sancov-module "
         "-Cllvm-args=-sanitizer-coverage-level=3 "
-        "-Cllvm-args=-sanitizer-coverage-trace-pc-guard"
+        "-Cllvm-args=-sanitizer-coverage-trace-pc-guard "
+        "-Cllvm-args=-sanitizer-coverage-trace-compares"
     )
     build_dir = tmp_path_factory.mktemp("asan_nightly_cargo_target")
     subprocess.run(
@@ -392,6 +427,7 @@ def rust_target_exe_asan_nightly(tmp_path_factory):
     out = tmp_path_factory.mktemp("rust_target_asan_nightly") / "rust_target"
     cmd = [
         asan_cc, "-O2", "-g", "-fno-omit-frame-pointer", "-fsanitize=address",
+        "-D__AFL_CMPLOG=1",
         "-include", SHIM, "-o", str(out), WRAPPER_SRC, str(rlib),
         # Deliberately NOT passing -lasan: forcing one on top of what the
         # matched clang auto-selects is exactly what reproduces the

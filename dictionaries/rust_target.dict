@@ -1,0 +1,10 @@
+# rust_target.c / rust/buggy_target's magic prefix + selector bytes.
+# The whole "RUST" + selector comparison compiles to a single inlined
+# check in release mode -- coverage feedback alone has no intermediate
+# edge to reward getting 1-of-4 magic bytes right, so pure mutation
+# stalls before ever trying the exact sequence. These tokens give the
+# dictionary-based mutation operators the exact bytes to splice in.
+"RUSTS"
+"RUSTO"
+"RUSTW"
+"RUSTP"
