@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`wfc_reorder_learned` rolled out to ogg, flv, nal, asf, mpegts and zip** (`core/wfc_chunks.py`), joining isobmff/riff/webp/gif. Fixed three defects in the shared reorder core found on the way: `violate` mode indexed one cell past the grid when nothing was pinned last (swallowed by `mutate`, so a fraction of violate calls silently declined) and overwrote the pinned last cell when something was; chunks a collapse under-placed were appended after the pinned-last chunk; and strict mode's "never emits an unobserved adjacency" was only ever tested on a re-parsed output, which re-segments positional formats such as GIF.
+
 - **Crash field map and baseline in crash sidecars** (`core/field_map.py`, `services/crash_explain.py`). A novel crash's `.txt`/`.json` now name the fields of the crashing input (PNG, gzip, ZIP, RIFF) and mark which changed against the parent seed it was mutated from, falling back to a hash-rehydrated parent, then the nearest corpus seed. Static only: nothing executes the target, and `changed` does not claim causation.
 
 - **Wired the RO/RD temporal-orientation analyzers** (`core/occupation.py`,

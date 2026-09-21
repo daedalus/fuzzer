@@ -311,8 +311,9 @@ class TestGlobalRegistryUnaffected:
         meta-mutator, see docs/handover/handover_done_2026-09-06.md) is
         the second; the four ``ff_*`` FormatFuzzer template mutators are the
         third; ``perlin_noise`` (coherent gradient-noise perturbation,
-        core/mutations/perlin_noise.py) is the fourth. Anything else here is
-        a surprise.
+        core/mutations/perlin_noise.py) is the fourth; ``wfc_reorder_learned``
+        (learned-adjacency chunk reordering, core/wfc_chunks.py) is the fifth.
+        Anything else here is a surprise.
 
         Note the ``ff_*`` entries are registered at import, unconditionally,
         even though the feature is gated behind ``--formatfuzzer`` -- so they
@@ -332,6 +333,7 @@ class TestGlobalRegistryUnaffected:
             "perlin_noise",
             "weizz_chunk_mutate",
             "weizz_field_mutate",
+            "wfc_reorder_learned",
         ]
 
 
