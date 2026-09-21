@@ -3,7 +3,11 @@
 import random
 
 from fuzzer_tool.core.analyzers.analyzer_format_learner import FieldHypothesis, FormatLearner
-from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator, generate_seeds
+from fuzzer_tool.core.format_seed_generator import (
+    FormatSeedGenerator,
+    cold_start_seed,
+    generate_seeds,
+)
 
 
 def _hyp(**kw):
@@ -236,3 +240,93 @@ class TestEdgeCases:
         out1 = FormatSeedGenerator(fields, rng=random.Random(42)).generate(base, n_seeds=5)
         out2 = FormatSeedGenerator(fields, rng=random.Random(42)).generate(base, n_seeds=5)
         assert [g.data for g in out1] == [g.data for g in out2]
+
+
+class TestColdStartSeed:
+    """cold_start_seed() — the generator's no-base-seed entry point,
+    consolidated from what used to be SeedPicker._format_learner_seed."""
+
+    def test_no_confident_fields_returns_none(self):
+        fields = [_hyp(offset=0, width=1, confidence=0.1, observations=1)]
+        assert cold_start_seed(fields) is None
+
+    def test_confident_field_without_value_counts_returns_none(self):
+        # Confidence clears the bar but there's no observed byte value —
+        # nothing to fill the field with, so still None.
+        fields = [_hyp(offset=0, width=1, confidence=0.9, observations=10)]
+        assert cold_start_seed(fields) is None
+
+    def test_fills_field_with_most_common_value(self):
+        fields = [
+            _hyp(
+                offset=1,
+                width=1,
+                field_type="unknown",
+                confidence=0.9,
+                observations=10,
+                value_counts={0: {7: 5, 8: 1}},
+            )
+        ]
+        seed = cold_start_seed(fields, rng=random.Random(0))
+        assert seed is not None
+        assert seed[1] == 7  # most frequent observed byte at this position
+        assert len(seed) == 2  # offset 1 + width 1
+
+    def test_respects_max_len(self):
+        fields = [
+            _hyp(
+                offset=0,
+                width=10,
+                field_type="unknown",
+                confidence=0.9,
+                observations=10,
+                value_counts={i: {5: 1} for i in range(10)},
+            )
+        ]
+        seed = cold_start_seed(fields, max_len=3, rng=random.Random(0))
+        assert seed is not None
+        assert len(seed) == 3
+
+    def test_accepts_get_format_summary_dicts(self):
+        # Same shape SeedPicker._format_learner_seed used to consume
+        # directly from FormatLearner.get_format_summary()["fields"].
+        fields = [
+            {
+                "offset": 0,
+                "width": 2,
+                "type": "length",
+                "confidence": 0.8,
+                "observations": 6,
+                "most_common_value": 0xFF,
+                "controlled_edges": 2,
+                "sensitive_ops": {},
+            }
+        ]
+        seed = cold_start_seed(fields, rng=random.Random(0))
+        assert seed == b"\xff\xff"
+
+    def test_matches_live_format_learner_end_to_end(self):
+        """A FormatLearner fed real transitions produces the same
+        cold-start seed whether read through get_format_summary() dicts
+        or through its raw hypotheses — the two shapes SeedPicker and the
+        offline CLI each hand to cold_start_seed()."""
+        learner = FormatLearner()
+        for i in range(10):
+            op = "bit_flip" if i % 2 == 0 else "arithmetic"
+            learner.record_transition(
+                input_bytes=bytes([i % 10]) + bytes([i % 10]) * 3,
+                mutation_op=op,
+                mutation_offset=1 + (i % 3),
+                mutation_width=1,
+                coverage_before=10,
+                coverage_after=15 + i,
+                new_edges={100 + i},
+                lost_edges=set(),
+            )
+
+        from_summary = cold_start_seed(
+            learner.get_format_summary()["fields"], rng=random.Random(42)
+        )
+        from_hypotheses = cold_start_seed(learner.hypotheses, rng=random.Random(42))
+        assert from_summary is not None
+        assert from_summary == from_hypotheses

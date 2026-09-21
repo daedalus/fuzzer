@@ -42,6 +42,24 @@ Stdlib-only, no dependency on a live Fuzzer/OperatorEngine instance, so it
 works equally from inside a running fuzzer (fed a live ``FormatLearner``)
 and offline (fed a JSON dump of ``FormatLearner.get_state()``); see
 ``tools/gen_format_seeds.py`` for the offline CLI.
+
+Two entry points cover the two situations a caller is in:
+
+  cold_start_seed()   — no base seed to mutate yet (fresh corpus, or the
+                         live fuzzer's cold-start path in
+                         ``SeedPicker._format_aware_seed``). Builds one
+                         seed from nothing, filling each confident field
+                         with its ``most_common_value`` (the per-position
+                         byte histogram ``FormatLearner._track_values``
+                         maintains), occasionally swapped for a
+                         type-specific stress default. Originally lived
+                         as ``SeedPicker._format_learner_seed``; moved
+                         here so both call sites share one implementation.
+  generate_seeds()     — there *is* a base seed (a real corpus member, or
+                         cold_start_seed()'s own output), and the goal is
+                         many field-targeted variants of it: boundary
+                         sweeps for length fields, stress fills for crc,
+                         replayed sensitive_ops for data/unknown.
 """
 
 from __future__ import annotations
@@ -66,6 +84,26 @@ _SKIPPED_TYPES = frozenset({"magic", "padding"})
 # either verify strictly (early reject — interesting) or skip entirely
 # (silent corruption downstream — also interesting).
 _CRC_STRESS = (0x00, 0xFF, 0x01, 0x80)
+
+
+# ── Cold-start seed (previously SeedPicker._format_learner_seed) ───────────
+#
+# Confidence bar a field must clear before cold_start_seed() will trust its
+# value enough to emit it. Same threshold the live picker used.
+SEED_FIELD_CONFIDENCE = 0.5
+
+# Occasional type-specific stress default to swap in instead of a field's
+# most_common_value (30% of the time, per field) — keeps the cold-start
+# seed from being *purely* a replay of whatever was already observed.
+SEED_TYPE_DEFAULTS: dict[str, list[int]] = {
+    "magic": [],  # never overridden: use the learned value or nothing
+    "length": [0, 1, 255, 256, 65535],
+    "crc": [0],
+    "flags": [0, 0xFF, 1],
+    "padding": [0],
+    "data": [],  # use learned value or leave zero
+    "unknown": [],  # use learned value or leave zero
+}
 
 
 # Local approximations of the operators FormatLearner reports as
@@ -143,6 +181,9 @@ class _FieldSpec:
     observations: int
     controlled_edges: int
     sensitive_ops: dict = dc_field(default_factory=dict)
+    # Most frequent byte value seen across this field's positions, per
+    # FormatLearner's value_counts histogram — None if never tracked.
+    most_common_value: int | None = None
 
     def score(self) -> float:
         return (
@@ -150,6 +191,21 @@ class _FieldSpec:
             * (1 + self.controlled_edges)
             * math.log1p(max(self.observations, 0))
         )
+
+
+def _most_common_value_from_counts(value_counts: dict) -> int | None:
+    """Aggregate a FieldHypothesis.value_counts histogram (relative
+    position -> byte value -> count) into a single most-frequent byte,
+    the same reduction FormatLearner.get_format_summary() performs."""
+    if not value_counts:
+        return None
+    totals: dict[int, int] = {}
+    for pos_counts in value_counts.values():
+        for byte_val, count in pos_counts.items():
+            totals[byte_val] = totals.get(byte_val, 0) + count
+    if not totals:
+        return None
+    return max(totals.items(), key=lambda kv: kv[1])[0]
 
 
 def _coerce_fields(fields) -> list[_FieldSpec]:
@@ -160,6 +216,9 @@ def _coerce_fields(fields) -> list[_FieldSpec]:
         if isinstance(f, dict):
             edges = f.get("controlled_edges", 0)
             edges = len(edges) if isinstance(edges, list | set) else int(edges)
+            mcv = f.get("most_common_value")
+            if mcv is None and "value_counts" in f:
+                mcv = _most_common_value_from_counts(f["value_counts"])
             specs.append(
                 _FieldSpec(
                     offset=f["offset"],
@@ -169,6 +228,7 @@ def _coerce_fields(fields) -> list[_FieldSpec]:
                     observations=int(f.get("observations", 0)),
                     controlled_edges=edges,
                     sensitive_ops=dict(f.get("sensitive_ops", {})),
+                    most_common_value=mcv,
                 )
             )
         else:
@@ -181,9 +241,61 @@ def _coerce_fields(fields) -> list[_FieldSpec]:
                     observations=f.observations,
                     controlled_edges=len(f.controlled_edges),
                     sensitive_ops=dict(f.sensitive_ops),
+                    most_common_value=_most_common_value_from_counts(
+                        getattr(f, "value_counts", None)
+                    ),
                 )
             )
     return specs
+
+
+def cold_start_seed(
+    fields,
+    max_len: int = 0,
+    rng: random.Random | None = None,
+    confidence_threshold: float = SEED_FIELD_CONFIDENCE,
+) -> bytes | None:
+    """Build one seed from nothing, for when there's no base seed to mutate.
+
+    ``fields`` may be ``FormatLearner.hypotheses``, the ``fields`` list
+    from ``get_format_summary()``, or ``get_state()["hypotheses"]``.
+
+    Only fields with ``confidence >= confidence_threshold`` and a recorded
+    ``most_common_value`` are trusted; everything else is left at zero.
+    Each trusted field is filled with its most-common byte across its
+    width, with a 30% per-field chance of swapping in a type-specific
+    stress default (``SEED_TYPE_DEFAULTS``) instead — the same behavior
+    previously implemented as ``SeedPicker._format_learner_seed``.
+
+    Returns ``None`` when no field clears the confidence bar (nothing
+    reliable enough to build a seed from).
+    """
+    specs = sorted(_coerce_fields(fields), key=lambda s: s.offset)
+    learned = [
+        s
+        for s in specs
+        if s.confidence >= confidence_threshold and s.most_common_value is not None
+    ]
+    if not learned:
+        return None
+
+    rng = rng or random.Random()
+    seed_len = max(s.offset + s.width for s in learned)
+    if max_len > 0:
+        seed_len = min(seed_len, max_len)
+
+    seed = bytearray(seed_len)
+    for spec in learned:
+        if spec.offset >= seed_len:
+            continue
+        defaults = SEED_TYPE_DEFAULTS.get(spec.field_type, [])
+        value_byte = spec.most_common_value
+        if defaults and rng.random() < 0.3:
+            value_byte = rng.choice(defaults) & 0xFF
+        end = min(spec.offset + spec.width, seed_len)
+        for i in range(spec.offset, end):
+            seed[i] = value_byte & 0xFF
+    return bytes(seed)
 
 
 def _length_candidates(

@@ -932,20 +932,6 @@ class SeedPicker:
         "riff": ("riff", "RiffMutator", "_generate_random_riff"),
     }
 
-    # Minimum confidence for a field to be used in seed generation
-    _SEED_FIELD_CONFIDENCE = 0.5
-
-    # Type-specific value overrides for seed generation
-    _SEED_TYPE_DEFAULTS: dict[str, list[int]] = {
-        "magic": [],  # use learned value or known magic
-        "length": [0, 1, 255, 256, 65535],
-        "crc": [0],
-        "flags": [0, 0xFF, 1],
-        "padding": [0],
-        "data": [],  # use learned value or random
-        "unknown": [],  # use learned value or random
-    }
-
     def _format_aware_seed(self) -> bytes:
         """Cold-start seed for the sniffed format, or a short random buffer.
 
@@ -997,6 +983,11 @@ class SeedPicker:
         Uses learned field boundaries (offset, width, type) and per-position
         byte histograms to emit structurally valid seeds. Returns None when
         no learned structure with sufficient confidence is available.
+
+        Delegates to :func:`fuzzer_tool.core.format_seed_generator.cold_start_seed`
+        — the shared implementation also used by the offline
+        ``tools/gen_format_seeds.py`` CLI, so the live fuzzer and offline
+        seed generation agree on how a confident field turns into bytes.
         """
         f = self.f
         learner = getattr(f, "_format_learner", None)
@@ -1008,44 +999,10 @@ class SeedPicker:
         if not fields:
             return None
 
-        # Filter fields with enough confidence and learned value data
-        learned = [
-            field
-            for field in fields
-            if field.get("confidence", 0) >= self._SEED_FIELD_CONFIDENCE
-            and field.get("most_common_value") is not None
-        ]
-        if not learned:
-            return None
+        from fuzzer_tool.core.format_seed_generator import cold_start_seed
 
         limit = getattr(f, "max_len", 0) or 0
-        seed_len = max(field["offset"] + field["width"] for field in learned)
-        if limit > 0:
-            seed_len = min(seed_len, limit)
-
-        seed = bytearray(seed_len)
-        rng = self._rng
-
-        for field in learned:
-            offset = field["offset"]
-            width = field["width"]
-            if offset >= seed_len:
-                continue
-
-            # Determine the value to emit for this field
-            field_type = field.get("type", "unknown")
-            defaults = self._SEED_TYPE_DEFAULTS.get(field_type, [])
-            value_byte = field.get("most_common_value", 0)
-
-            if defaults and rng.random() < 0.3:
-                # Occasionally override with a type-specific default
-                value_byte = rng.choice(defaults) & 0xFF
-
-            end = min(offset + width, seed_len)
-            for i in range(offset, end):
-                seed[i] = value_byte & 0xFF
-
-        return bytes(seed)
+        return cold_start_seed(fields, max_len=limit, rng=self._rng)
 
     def _weight_exploit_parts(
         self, meta: dict, fuzz_count: int, coverage: int, age: float, T: float
