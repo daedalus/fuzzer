@@ -16,22 +16,29 @@ is inlined in the appendix so it can be re-run from a clean checkout
 | **P2-3** cold-start seeds | `c5414f04` | see the addendum under P2-3 |
 | **P2-2** Boltzmann / cycle-lemma wiring | `9fb172f2`, `a9098a76` | `generate(boltzmann=True)` wired into `Grammar.mutate`'s replacement paths; `cycle_lemma_dyck_bytes` wired as the `tree_generate` operator. (Landed between this handover and the P2-1 pass below; not recorded here until now.) |
 | **P2-1** learned-adjacency WFC (isobmff/webp/riff/gif) | `fd7c5cf8` | `AdjacencyTable.from_corpus` had no caller, 0 formats beyond png/jpeg/bmp had a chunk-order table → `core/wfc_chunks.py` + `wfc_reorder_learned` operator, one learned table per format via `on_new_coverage`; re-parses 100% of calls, ≥95% of strict-mode calls change the input, 0.7–3 ms/call |
-| **G0** bench arms for the generation group | this commit | `bench_paired.py` had 0 arms for wfc/mcts/alphabeta/bootstrap → `wfc`, `elo-lineage` (baseline), `elo-mcts`, `elo-alphabeta`, `bootstrap`; `ARM_BASELINES` records each pairing and `tests/test_bench_paired_arms.py` holds every arm to "baseline + added flags" against the real parser. **No campaign was run**: these are registered arms, not results. |
+| **G0** bench arms for the generation group | `4164def0` | `bench_paired.py` had 0 arms for wfc/mcts/alphabeta/bootstrap → `wfc`, `elo-lineage` (baseline), `elo-mcts`, `elo-alphabeta`, `bootstrap`; `ARM_BASELINES` records each pairing and `tests/test_bench_paired_arms.py` holds every arm to "baseline + added flags" against the real parser. **No campaign was run**: these are registered arms, not results. |
+| **P2-1 rollout** ogg/flv/nal/asf/mpegts/zip | this series | 4 of 10 formats covered → 10 of 11 (webm is the one left). Three defects in the shared reorder core, each pinned by a test that fails on the old code: `violate` mode indexed one cell past the grid when nothing was pinned last (`mutate` swallowed the `IndexError`, so a fraction of violate calls silently declined) and overwrote the pinned last cell when something was; chunks a collapse under-placed were appended *after* the pinned-last chunk; strict mode's "never emits an unobserved adjacency" was only checked on a re-parsed output, which re-segments positional formats (GIF: 2/60 calls emitted `extension→trailer`). Now: pins reserved by identity, skipped kinds placed at a table-legal slot, an illegal collapse retried (8 attempts) → **0 illegal adjacencies over 500 seeds × 10 formats** |
+| scheduler adaptability test | this series | `…test_every_exported_operator_scheduler_is_adaptable` excluded 2 of the 5 `seed_*` exports by name and failed on Tang, SeedCanary and KruskalCount; now excludes by `seed_*`/`op_*` module, and pins ≥25 tested and that no `op_*` export is skipped |
 
-Still open: P3+ (ogg/flv/asf/mpegts/nal/zip left out of
-P2-1's rollout for a follow-up; see `core/wfc_chunks.py`'s module docstring).
+Still open: **P3 and P4** (design work gated on stated questions; nothing in
+them was started), and **webm** in P2-1's rollout.
 G0 gaps: no arm for `--grammar-boltzmann` (needs a target that consumes a
 grammar; none in `eval_set.py`) or `tree_generate` (no flag, always on when the
 seed has brackets, so it is a source-edit arm like `boltzmann-cost`), and no
 `ffmpeg_read` target set for the isobmff/riff/gif side of `wfc`.
-Tests run were the affected modules only (300 passed, 11
-skipped); a full-suite run was started and abandoned, and two failures seen in
-it (`test_integration::test_fuzzer_eps_minimum`,
-`test_regression_build_lib_pairing::test_targets_are_actually_built`) were not
-compared against the base. One failure in the scheduler slice
-(`test_scheduler_convergence::…test_every_exported_operator_scheduler_is_adaptable`,
-`TangRecommendationScheduler.__init__() missing 'rng'`) fails identically on the
-base commit.
+
+Caveats on the rollout: tables are in process memory and rebuilt from
+admissions, not persisted across restarts (the handover proposed
+`state_store`); the strict-mode guarantee is empirical, not absolute — a chunk
+with no table-legal slot in any of 8 collapses is kept rather than dropped;
+and `on_new_coverage` learns even when `--wfc` is off (the NAL parser is a
+per-byte Python scan, so admitting a large NAL-sniffed seed costs real time).
+
+Tests run were the affected modules only. Two failures remain in them, both
+present on the untouched base: `test_regression_no_op_mutations::…test_every_selectable_operator_is_reachable`
+(`rasc_chunk_mutate`, `tiff_chunk_mutate` never offered by the sweep) and, before this series, `test_regression_mutator_interface::…test_builtin_registry_mutators_are_known`
+(P2-1 registered `wfc_reorder_learned` without listing it; fixed in this series). No
+full-suite run was made.
 
 **Tiering** follows `handover_pending_2026-09-06.md` §0 — P0 defect a running
 campaign can hit, P1 measured win with the correctness argument settled, P2
