@@ -60,6 +60,16 @@ class MarkovChain:
         self._trains_since_snapshot: int = 0
         self._global_freq: collections.Counter = collections.Counter()
         self._rng = rng or get_default_rand_pool()
+        # Per-generator stats for report integration
+        self.generator_stats: dict[str, int | float] = {
+            "is_trained": False,
+            "contexts_seen": 0,
+            "last_js_divergence": 0.0,
+            "last_plateau_threshold": 0.0,
+            "generation_rate": 0.0,
+            "population_size": 1,
+            "order": self.order,
+        }
 
     def train(self, data: bytes) -> None:
         """Learn byte transitions from a single input.
@@ -74,6 +84,9 @@ class MarkovChain:
         # Track global byte frequency for fallback generation
         self._global_freq.update(data)
         self._maybe_prune_transitions()
+        # Update generator_stats
+        self.generator_stats["contexts_seen"] = self._contexts_seen
+        self.generator_stats["is_trained"] = self.is_trained()
 
     def _maybe_prune_transitions(self) -> None:
         """Trim least-used contexts when MAX_TRANSITIONS is exceeded.
@@ -283,6 +296,8 @@ class MarkovChain:
         # Requires a previous snapshot to compare against (not the first one).
         threshold = ks_significance_threshold(self._contexts_seen, alpha=0.05)
         self.last_plateau_threshold = threshold
+        self.generator_stats["last_js_divergence"] = self.last_js_divergence
+        self.generator_stats["last_plateau_threshold"] = threshold
         return (
             has_previous
             and self.last_js_divergence < threshold
@@ -432,6 +447,16 @@ class MarkovEnsemble:
         self.smoothing = smoothing
         self.transitions = self.chains[self.order].transitions
         self._contexts_seen = 0
+        # Per-generator stats for report integration
+        self.generator_stats: dict[str, int | float] = {
+            "is_trained": False,
+            "contexts_seen": 0,
+            "last_js_divergence": 0.0,
+            "last_plateau_threshold": 0.0,
+            "population_size": len(orders),
+            "orders": ",".join(str(o) for o in orders),
+            "blend": blend,
+        }
         self.last_js_divergence = 0.0
         self.last_plateau_threshold = 0.0
         self._snapshot_interval = 50
@@ -443,6 +468,9 @@ class MarkovEnsemble:
             chain.train(data)
         self._contexts_seen += len(data)
         self.transitions = self.chains[self.order].transitions
+        # Update generator_stats
+        self.generator_stats["contexts_seen"] = self._contexts_seen
+        self.generator_stats["is_trained"] = self.is_trained()
 
     def train_corpus(self, corpus: list[bytes]) -> None:
         """Train all chains on multiple inputs."""

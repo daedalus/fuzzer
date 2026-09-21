@@ -265,6 +265,19 @@ class GALifecycle:
         self.best_fitness = 0.0
         self.avg_fitness = 0.0
         self.species_count = 0
+        # Per-generator stats for report integration
+        self.generator_stats: dict[str, int | float] = {
+            "generation": 0,
+            "population_size": 0,
+            "best_fitness": 0.0,
+            "avg_fitness": 0.0,
+            "species_count": 0,
+            "iterations_since_gen": 0,
+            "crossover_rate": self.crossover_rate,
+            "mutation_rate": self.mutation_rate,
+            "elite_fraction": self.elite_fraction,
+            "tournament_size": self.tournament_size,
+        }
 
     def initialize(self, corpus: list[bytes], edge_tracker: EdgeTracker):
         """Seed population from existing corpus."""
@@ -455,6 +468,13 @@ class GALifecycle:
         fitnesses = [i.fitness for i in self.population]
         self.best_fitness = max(fitnesses)
         self.avg_fitness = sum(fitnesses) / len(fitnesses)
+        # Sync with generator_stats for report
+        self.generator_stats["generation"] = self.generation
+        self.generator_stats["population_size"] = len(self.population)
+        self.generator_stats["best_fitness"] = self.best_fitness
+        self.generator_stats["avg_fitness"] = self.avg_fitness
+        self.generator_stats["species_count"] = self.species_count
+        self.generator_stats["iterations_since_gen"] = self.iterations_since_gen
 
     def pick_seed(self) -> bytes:
         """Return a seed for fuzz_one() — picks from population with fitness weighting."""
@@ -481,6 +501,7 @@ class GALifecycle:
             "avg_fitness": self.avg_fitness,
             "species_count": self.species_count,
             "population": [ind.to_dict() for ind in self.population],
+            "generator_stats": self.generator_stats,
         }
 
     def from_dict(self, data: dict) -> None:
@@ -490,6 +511,7 @@ class GALifecycle:
         self.avg_fitness = data.get("avg_fitness", 0.0)
         self.species_count = data.get("species_count", 0)
         self.population = [Individual.from_dict(d) for d in data.get("population", [])]
+        self.generator_stats = data.get("generator_stats", self.generator_stats)
 
     def save(self, path: Path):
         """Persist GA state to disk (legacy interface)."""

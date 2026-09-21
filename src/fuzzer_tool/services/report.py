@@ -800,6 +800,46 @@ def _seed_contribution(f) -> str:
 
     total_cov_seeds = len(ranked)
     lines.append(f"\n  {total_cov_seeds} of {len(f.corpus)} seeds contributed new coverage")
+
+    # Seed generation contribution breakdown
+    gen_lines = []
+    try:
+        if f.ga:
+            gs = f.ga.generator_stats
+            gen_lines.append(f"  GA generated: {gs['population_size']} individuals (gen {gs['generation']})")
+        if f.qea:
+            gs = f.qea.generator_stats
+            gen_lines.append(f"  QEA generated: {gs['population_size']} individuals (gen {gs['generation']})")
+        if f.markov_trained:
+            gs = f.markov.generator_stats
+            gen_lines.append(f"  Markov: contexts_seen={gs['contexts_seen']}, trained={gs['is_trained']}")
+        if getattr(f, "_cmaes", None) is not None:
+            gs = f._cmaes.generator_stats
+            gen_lines.append(f"  CMA-ES: pop={gs['pop_size']}, sigma={gs['sigma']:.3f} (gen {gs['generation']})")
+    except (KeyError, TypeError, AttributeError):
+        pass
+
+    if gen_lines:
+        lines.append("")
+        lines.append("  Seed Generation Sources:")
+        lines.extend(gen_lines)
+
+    # FormatSeedGenerator contribution
+    fsg = getattr(f, "_format_seed_generator", None)
+    if fsg is None:
+        fsg = getattr(f, "format_seed_generator", None)
+    if fsg is not None:
+        try:
+            stats = fsg.generator_stats
+            if stats["total_seeds_generated"] > 0:
+                lines.append("")
+                lines.append("  Format Seed Generator:")
+                lines.append(f"    Total seeds generated: {stats['total_seeds_generated']}")
+                lines.append(f"    Generation attempts:   {stats['generation_attempt_count']}")
+                lines.append(f"    Successful:            {stats['successful_attempts']}")
+        except (TypeError, AttributeError):
+            pass
+
     return "\n".join(lines)
 
 
@@ -1681,6 +1721,35 @@ def _format_learning(f) -> str:
         except (TypeError, AttributeError):
             pass
 
+    # FormatSeedGenerator stats
+    fsg = getattr(f, "_format_seed_generator", None)
+    if fsg is None:
+        fsg = getattr(f, "format_seed_generator", None)
+    if fsg is not None:
+        try:
+            stats = fsg.generator_stats
+            lines.append("")
+            lines.append("  Format Seed Generator:")
+            lines.append(f"    Total generated: {stats['total_seeds_generated']}")
+            lines.append(f"    Attempts:        {stats['generation_attempt_count']}")
+            lines.append(f"    Successful:      {stats['successful_attempts']}")
+            if stats.get("field_confidences"):
+                confs = stats["field_confidences"]
+                if isinstance(confs, list) and confs:
+                    lines.append(f"    Avg confidence:  {sum(confs)/len(confs):.3f}")
+                    lines.append(f"    High conf (>0.8): {sum(1 for c in confs if c > 0.8)}")
+                    lines.append(f"    Low conf (<0.5):  {sum(1 for c in confs if c < 0.5)}")
+            if stats.get("last_generated_field_type"):
+                lines.append(f"    Last offset:     {stats['last_generated_seed_offset']}")
+                lines.append(f"    Last width:      {stats['last_generated_seed_width']}")
+                lines.append(f"    Last type:       {stats['last_generated_field_type']}")
+                lines.append(f"    Last strategy:   {stats['last_generated_strategy']}")
+            if stats.get("field_types_used"):
+                ft = ", ".join(f"{k}={v}" for k, v in stats["field_types_used"].items())
+                lines.append(f"    Types used:      {ft}")
+        except (TypeError, AttributeError):
+            pass
+
     return "\n".join(lines)
 
 
@@ -1741,6 +1810,58 @@ def _fuzzing_strategy(f) -> str:
         else:
             strategies.append(f"  Markov chain:     order={f.markov.order}")
         strategies.append(f"    Generation:     {'enabled' if f.markov_generate else 'disabled'}")
+        if hasattr(f.markov, "generator_stats"):
+            try:
+                ms = f.markov.generator_stats
+                strategies.append(f"    Contexts seen:  {ms['contexts_seen']}")
+                strategies.append(f"    JS divergence:  {ms['last_js_divergence']:.4f}")
+                strategies.append(f"    Plateau thresh: {ms['last_plateau_threshold']:.4f}")
+                if hasattr(f.markov, "chains"):
+                    strategies.append(f"    Chains:         {len(f.markov.chains)}")
+            except (KeyError, TypeError, AttributeError):
+                pass
+
+    # Evolutionary seed generators
+    try:
+        if f.ga and getattr(f.ga, "generator_stats", None):
+            gs = f.ga.generator_stats
+            strategies.append(
+                f"  GA seed gen:      gen={gs['generation']}, pop={gs['population_size']}, "
+                f"best={gs['best_fitness']:.3f}, avg={gs['avg_fitness']:.3f}, "
+                f"species={gs['species_count']}, since_gen={gs['iterations_since_gen']}"
+            )
+            strategies.append(
+                f"    Rates:          crossover={gs['crossover_rate']:.0%}, "
+                f"mutation={gs['mutation_rate']:.0%}, elite={gs['elite_fraction']:.0%}"
+            )
+    except (KeyError, TypeError, AttributeError):
+        pass
+
+    try:
+        if f.qea and getattr(f.qea, "generator_stats", None):
+            gs = f.qea.generator_stats
+            strategies.append(
+                f"  QEA seed gen:     gen={gs['generation']}, pop={gs['population_size']}, "
+                f"best={gs['best_fitness']:.3f}, avg={gs['avg_fitness']:.3f}, "
+                f"species={gs['species_count']}, since_gen={gs['iterations_since_gen']}"
+            )
+            strategies.append(
+                f"    Rotation:       angle={gs['rotation_angle']:.3f}, "
+                f"mutation_prob={gs['mutation_prob']:.2%}"
+            )
+    except (KeyError, TypeError, AttributeError):
+        pass
+
+    try:
+        if getattr(f, "_cmaes", None) is not None:
+            gs = f._cmaes.generator_stats
+            strategies.append(
+                f"  CMA-ES:           gen={gs['generation']}, pop={gs['pop_size']}, "
+                f"sigma={gs['sigma']:.3f}, mu={gs['mu']}, "
+                f"gen_size={gs['generation_size']}, evals={gs['eval_count']}"
+            )
+    except (KeyError, TypeError, AttributeError):
+        pass
 
     # MI guided
     if f._use_mi and f._mi:

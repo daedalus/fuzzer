@@ -174,9 +174,18 @@ class CMAESScheduler:
         # Discovery bookkeeping
         self._total_execs: int = 0
         self._total_discoveries: int = 0
-
-    # ------------------------------------------------------------------
-    # Registration
+        # Per-generator stats for report integration
+        self.generator_stats: dict[str, int | float] = {
+            "generation": self._generation,
+            "pop_size": self.pop_size,
+            "step_size": self.step_size,
+            "generation_size": self.generation_size,
+            "mu": max(1, int(self.pop_size * self.elite_frac)),
+            "sigma": self._sigma,
+            "eval_count": 0,
+            "total_execs": 0,
+            "total_discoveries": 0,
+        }
     # ------------------------------------------------------------------
 
     def init_arm(self, name: str) -> None:

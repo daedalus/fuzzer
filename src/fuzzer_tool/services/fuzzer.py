@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 from fuzzer_tool.core.rand_pool import RandPool
 
@@ -2857,6 +2857,11 @@ class Fuzzer:
         # dict-aware operators instead of calling random.choice(f.dictionary).
         self._dict_scratch: list[int] = []
         self._dict_scratch_idx = 0
+
+        # FormatSeedGenerator: stats for _format_learning report section.
+        # Instantiated when format learning is active; provides per-field
+        # generation stats (counts, confidences, last generated seed).
+        self._format_seed_generator = None
 
         # self._format_learner / self._ppmd: constructed by
         # analyzer_registry.wire_all() above (format_learner,

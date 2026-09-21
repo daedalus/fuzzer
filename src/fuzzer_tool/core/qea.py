@@ -767,6 +767,17 @@ class QEALifecycle:
         self.best_fitness = 0.0
         self.avg_fitness = 0.0
         self.species_count = 0
+        # Per-generator stats for report integration
+        self.generator_stats: dict[str, int | float] = {
+            "generation": 0,
+            "population_size": 0,
+            "best_fitness": 0.0,
+            "avg_fitness": 0.0,
+            "species_count": 0,
+            "iterations_since_gen": 0,
+            "rotation_angle": self.rotation_angle,
+            "mutation_prob": self.mutation_prob,
+        }
 
     # ── Initialization ─────────────────────────────────────────────
 
@@ -1118,6 +1129,13 @@ class QEALifecycle:
         fitnesses = [i.fitness for i in self.population]
         self.best_fitness = max(fitnesses)
         self.avg_fitness = sum(fitnesses) / len(fitnesses)
+        # Sync with generator_stats for report
+        self.generator_stats["generation"] = self.generation
+        self.generator_stats["population_size"] = len(self.population)
+        self.generator_stats["best_fitness"] = self.best_fitness
+        self.generator_stats["avg_fitness"] = self.avg_fitness
+        self.generator_stats["species_count"] = self.species_count
+        self.generator_stats["iterations_since_gen"] = self.iterations_since_gen
 
     # ── Persistence ─────────────────────────────────────────────────
 
@@ -1129,6 +1147,7 @@ class QEALifecycle:
             "avg_fitness": self.avg_fitness,
             "species_count": self.species_count,
             "population": [ind.to_dict() for ind in self.population],
+            "generator_stats": self.generator_stats,
         }
 
     def from_dict(self, data: dict) -> None:
@@ -1138,6 +1157,7 @@ class QEALifecycle:
         self.avg_fitness = data.get("avg_fitness", 0.0)
         self.species_count = data.get("species_count", 0)
         self.population = [QEAIndividual.from_dict(d) for d in data.get("population", [])]
+        self.generator_stats = data.get("generator_stats", self.generator_stats)
 
     def save(self, path: Path):
         """Persist QEA state to disk (legacy interface)."""

@@ -833,6 +833,113 @@ class TestReportSMT:
         assert "enabled (no queries)" not in result
 
 
+class TestReportGeneratorStats:
+    def test_format_seed_generator_stats_in_format_learning(self):
+        from fuzzer_tool.services.report import _format_learning
+
+        f = _make_mock_fuzzer()
+        f._format_seed_generator = MagicMock()
+        f._format_seed_generator.generator_stats = {
+            "total_seeds_generated": 7,
+            "generation_attempt_count": 9,
+            "successful_attempts": 7,
+            "field_confidences": [0.9, 0.7, 0.4],
+            "last_generated_seed_offset": 4,
+            "last_generated_seed_width": 2,
+            "last_generated_field_type": "length",
+            "last_generated_strategy": "len_le_1",
+            "field_types_used": {"length": 4, "crc": 3},
+        }
+        result = _format_learning(f)
+        assert "Format Seed Generator:" in result
+        assert "Total generated: 7" in result
+        assert "Avg confidence:" in result
+        assert "High conf (>0.8): 1" in result
+        assert "Last type:       length" in result
+
+    def test_evolutionary_seed_generator_stats_in_fuzzing_strategy(self):
+        from fuzzer_tool.services.report import _fuzzing_strategy
+
+        f = _make_mock_fuzzer()
+        f.markov_trained = False  # avoid MagicMock auto-attr conflicts
+
+        f.ga = MagicMock(spec=["generator_stats"])
+        f.ga.generator_stats = {
+            "generation": 3,
+            "population_size": 12,
+            "best_fitness": 0.87,
+            "avg_fitness": 0.42,
+            "species_count": 5,
+            "iterations_since_gen": 17,
+            "crossover_rate": 0.7,
+            "mutation_rate": 0.3,
+            "elite_fraction": 0.1,
+        }
+        f.qea = MagicMock(spec=["generator_stats"])
+        f.qea.generator_stats = {
+            "generation": 2,
+            "population_size": 10,
+            "best_fitness": 0.75,
+            "avg_fitness": 0.31,
+            "species_count": 4,
+            "iterations_since_gen": 11,
+            "rotation_angle": 0.05,
+            "mutation_prob": 0.02,
+        }
+        f._cmaes = MagicMock(spec=["generator_stats"])
+        f._cmaes.generator_stats = {
+            "generation": 1,
+            "pop_size": 8,
+            "step_size": 0.3,
+            "generation_size": 200,
+            "mu": 4,
+            "sigma": 0.25,
+            "eval_count": 1600,
+        }
+
+        result = _fuzzing_strategy(f)
+        assert "GA seed gen:" in result
+        assert "QEA seed gen:" in result
+        assert "CMA-ES:" in result
+        assert "gen=3" in result
+
+    def test_seed_contribution_generation_sources(self):
+        from fuzzer_tool.services.report import _seed_contribution
+
+        f = _make_mock_fuzzer()
+        f.seed_meta = {
+            b"seed1": {"lineage_depth": 1, "coverage_edges": 5, "fuzz_count": 2},
+            b"seed2": {"lineage_depth": 0, "coverage_edges": 3, "fuzz_count": 1},
+        }
+        f.ga = MagicMock(spec=["generator_stats"])
+        f.ga.generator_stats = {
+            "generation": 3,
+            "population_size": 12,
+        }
+        f.qea = MagicMock(spec=["generator_stats"])
+        f.qea.generator_stats = {
+            "generation": 2,
+            "population_size": 10,
+        }
+        f.markov_trained = True
+        f.markov.generator_stats = {
+            "contexts_seen": 512,
+            "is_trained": True,
+        }
+        f._cmaes = MagicMock(spec=["generator_stats"])
+        f._cmaes.generator_stats = {
+            "generation": 1,
+            "pop_size": 8,
+            "sigma": 0.25,
+        }
+        result = _seed_contribution(f)
+        assert "Seed Generation Sources:" in result
+        assert "GA generated:" in result
+        assert "QEA generated:" in result
+        assert "Markov: contexts_seen=512" in result
+        assert "CMA-ES:" in result
+
+
 class TestReportInvariants:
     """Bounds that the ffmpeg_read_nosan report violated.
 
