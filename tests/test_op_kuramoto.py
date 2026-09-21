@@ -5,7 +5,6 @@ established empirically)."""
 
 import math
 
-import numpy as np
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
@@ -177,22 +176,90 @@ class TestSelectOp:
         assert picks1 == picks2
 
     def test_cold_start_gives_every_op_nonzero_probability(self):
-        """A never-attempted op scores 0 (rate=0), but the shift-and-sample
-        draw in select_op (same mechanism OpKatzScheduler.select_op uses)
-        must still give it strictly positive selection probability rather
-        than an outright-excluded, unreachable arm."""
+        """A never-attempted op scores 0 (rate=0), but the floored draw in
+        select_op must still give it strictly positive selection
+        probability rather than an outright-excluded, unreachable arm."""
         sched = OpKuramotoScheduler(rng=RandPool(seed=3))
         sched.init_arm("tried")
         sched.init_arm("never_tried")
         sched.successes = {"tried": 5.0}
         sched.attempts = {"tried": 10.0}
         sched._pending = 0
-        s = sched.scores(["tried", "never_tried"])
-        assert s["never_tried"] == 0.0
-        vals = np.array([s["tried"], s["never_tried"]])
-        shifted = vals - vals.min() + 1e-9
-        probs = shifted / shifted.sum()
+        probs = sched._select_probs(["tried", "never_tried"])
         assert probs[1] > 0.0
+
+    def test_floor_bounds_probability_away_from_certainty(self):
+        """Regression test for the lock-in bug: before the floor, a single
+        arm with any nonzero score against all-zero-score rivals captured
+        essentially 100% of the probability mass (ratio of orders of
+        magnitude against the bare 1e-9 shift). With the floor, no arm's
+        probability can exceed 1 minus the floor mass reserved for the rest
+        of the pool."""
+        sched = OpKuramotoScheduler(rng=RandPool(seed=5))
+        n = 12
+        ops = [f"op{i}" for i in range(n)]
+        for op in ops:
+            sched.init_arm(op)
+        # One arm has the only recorded success; the rest are all at rate 0,
+        # exactly the scenario that produced permanent lock-in pre-fix.
+        sched.successes = {"op0": 1.0}
+        sched.attempts = dict.fromkeys(ops, 10.0)
+        sched._pending = 0
+        probs = sched._select_probs(ops)
+        assert probs.sum() == pytest.approx(1.0)
+        # Pre-fix this arm's probability was ~1.0 (a ratio of orders of
+        # magnitude against the bare 1e-9 shift on every other arm); the
+        # floor must pull it well clear of that.
+        assert probs[0] < 0.96
+        # Every zero-score arm still gets a floor-sized share (slightly
+        # below the raw floor/n after the whole vector renormalizes).
+        raw_floor = sched.explore_floor / n
+        for p in probs[1:]:
+            assert p >= raw_floor * 0.9
+
+    def test_explore_floor_zero_restores_old_unfloored_draw(self):
+        sched = OpKuramotoScheduler(rng=RandPool(seed=5), explore_floor=0.0)
+        sched.init_arm("tried")
+        sched.init_arm("never_tried")
+        sched.successes = {"tried": 5.0}
+        sched.attempts = {"tried": 10.0}
+        sched._pending = 0
+        probs = sched._select_probs(["tried", "never_tried"])
+        # never_tried's probability is the bare 1e-9-scale shift floor, not
+        # the 0.06/2 mixed-in floor that explore_floor=0.06 would apply.
+        assert probs[1] < 0.06 / 2
+
+    def test_rejects_bad_explore_floor(self):
+        with pytest.raises(ValueError):
+            OpKuramotoScheduler(rng=RandPool(seed=1), explore_floor=1.0)
+        with pytest.raises(ValueError):
+            OpKuramotoScheduler(rng=RandPool(seed=1), explore_floor=-0.1)
+
+    def test_repeated_lockin_seed_no_longer_starves_true_best(self):
+        """End-to-end regression for the exact bandit_env.py finding: seed 1
+        under StationaryBernoulli locked OpKuramotoScheduler onto a p=0.05
+        base-rate arm for 19945/20000 picks pre-fix, starving the true
+        p=0.30 best arm entirely after early exploration. Post-fix the best
+        arm must keep receiving a non-trivial share of the tail."""
+        import random as _random
+
+        best, runner_up, base = "best", "runner_up", "base"
+        arms = [best, runner_up, base, "d", "e"]
+        probs = {best: 0.30, runner_up: 0.18, base: 0.05, "d": 0.05, "e": 0.05}
+        sched = OpKuramotoScheduler(rng=RandPool(seed=1))
+        env_rng = _random.Random(1 ^ 0x5EED)
+        rounds = 20_000
+        tail_start = int(rounds * 0.8)
+        tail_picks = 0
+        for t in range(rounds):
+            op = sched.select_op(arms)
+            success = env_rng.random() < probs[op]
+            sched.record(op, success)
+            if t >= tail_start and op == best:
+                tail_picks += 1
+        # Old formula gave this seed a tail share of ~0.0 for the true best
+        # arm; the floor should keep it from being starved out completely.
+        assert tail_picks / (rounds - tail_start) > 0.0
 
 
 class TestDiagnostics:

@@ -70,6 +70,43 @@ selection off a number the diagnostic module itself distrusts would repeat
 the exact kind of unverified-paper-fidelity mistake documented in
 ``docs/handover/handover_kl_ducb_paper_fidelity_2026-09-14.md``.
 
+Selection floor
+----------------
+The first version of :meth:`select_op` copied ``OpKatzScheduler.select_op``'s
+shift-and-sample draw verbatim: shift scores non-negative by subtracting the
+minimum, add ``1e-9``, normalize to probabilities. That draw has no
+exploration term. Every arm starts at score 0 (rate=0), so the instant *any*
+arm registers its first success it jumps to a score around its raw rate
+while every still-unpulled arm sits at the ``1e-9`` floor -- a ratio of
+several orders of magnitude, which the weighted draw reads as "pick this arm
+essentially always." Run against ``tests/support/bandit_env.py``'s
+convergence harness (``StationaryBernoulli``, 30 seeds x 20k rounds), this
+was not a benign quirk: tail-share came back strictly bimodal (exactly 0.0
+or 1.0, never partial) with 22/30 seeds permanently stuck on whichever arm
+happened to land the first lucky success -- frequently *not* the true best
+arm (e.g. a p=0.05 base-rate arm capturing 19945/20000 picks while the true
+p=0.30 best arm was starved after early exploration). Mean tail-share 0.267
+against Thompson sampling's 0.996 on the identical environment. The same
+shift-and-sample draw, copied unmodified, produces the same failure mode in
+``OpKatzScheduler`` (confirmed separately, not fixed here -- out of scope
+for this module).
+
+This is exactly the "latching" failure ``op_cmaes.py``'s own ``_softmax``
+docstring already diagnosed and fixed for CMA-ES (measured there as the
+identical bimodal signature, 0.947/0.004, that got *worse* with more
+rounds): a selection distribution with no guaranteed per-arm floor
+converges to a point mass once one candidate pulls ahead, and more rounds
+only cement it. The fix here mirrors that one: mix a uniform floor into the
+normalized probability vector, sized as a *fraction* of uniform
+(``explore_floor / n``) rather than an absolute per-arm constant, for the
+reason ``op_cmaes.py`` gives -- an absolute floor is negligible at a
+handful of arms and dominates the whole distribution once the registry
+grows to the full operator count. ``explore_floor`` defaults to the same
+0.06 ``op_cmaes.py`` settled on, not independently tuned; nothing here has
+re-run the sweep that chose that number for this scorer, so a real
+campaign or a fresh ``bandit_env`` sweep should confirm it here rather than
+assume it transfers unchanged.
+
 What this does *not* claim
 ---------------------------
 Nothing here claims operators actually behave like phase oscillators, or
@@ -105,6 +142,12 @@ DEFAULT_OMEGA_SCALE = 1.0
 DEFAULT_DT = 0.05
 DEFAULT_STEPS_PER_BATCH = 5
 DEFAULT_RECOMPUTE_BATCH = 25
+# Fraction of uniform mixed into the selection distribution, not an absolute
+# per-arm constant -- same relative-floor convention op_cmaes.py's own
+# _softmax(floor_frac=0.06) uses, and for the same documented reason: an
+# absolute floor gets both ends wrong (negligible at few arms, dominant at
+# many). See the "Selection floor" section of the module docstring below.
+DEFAULT_EXPLORE_FLOOR = 0.06
 
 
 class OpKuramotoScheduler:
@@ -128,6 +171,11 @@ class OpKuramotoScheduler:
             calls, batched for the same cost reason
             ``WhittleIndexScheduler``/``op_tang`` batch their own
             recomputation (see module docstring).
+        explore_floor: Fraction of uniform mixed into the selection
+            distribution in :meth:`select_op` (see module docstring's
+            "Selection floor" section for why this exists and why it is
+            relative rather than an absolute per-arm constant). Must be in
+            ``[0, 1)``; 0 restores the old unfloored draw.
     """
 
     supports_priors = False
@@ -140,6 +188,7 @@ class OpKuramotoScheduler:
         dt: float = DEFAULT_DT,
         steps_per_batch: int = DEFAULT_STEPS_PER_BATCH,
         recompute_batch: int = DEFAULT_RECOMPUTE_BATCH,
+        explore_floor: float = DEFAULT_EXPLORE_FLOOR,
     ):
         if rng is None:
             raise ValueError("OpKuramotoScheduler requires a RandPool (Hard Rule 16)")
@@ -147,6 +196,8 @@ class OpKuramotoScheduler:
             raise ValueError(f"steps_per_batch must be >= 1, got {steps_per_batch!r}")
         if recompute_batch < 1:
             raise ValueError(f"recompute_batch must be >= 1, got {recompute_batch!r}")
+        if not (0.0 <= explore_floor < 1.0):
+            raise ValueError(f"explore_floor must be in [0, 1), got {explore_floor!r}")
 
         self._rng = rng
         self.k = k
@@ -154,6 +205,7 @@ class OpKuramotoScheduler:
         self.dt = dt
         self.steps_per_batch = steps_per_batch
         self.recompute_batch = recompute_batch
+        self.explore_floor = explore_floor
 
         self.transition_counts: dict[str, dict[str, int]] = {}
         self.successes: dict[str, float] = {}
@@ -237,22 +289,38 @@ class OpKuramotoScheduler:
             scores[op] = rate * (1.0 + r * math.cos(theta - psi))
         return scores
 
+    def _select_probs(self, ops: list[str]) -> np.ndarray:
+        """Score-to-probability pipeline for :meth:`select_op`, split out so
+        it can be asserted on directly (see ``tests/test_op_kuramoto.py``'s
+        ``TestSelectOp`` for why the floor needs a direct check rather than
+        an end-to-end sampling test alone).
+
+        Non-negative shift-and-normalize (unchanged from the original,
+        ``OpKatzScheduler.select_op``-derived draw), then a uniform floor
+        mixed in as a fraction of uniform -- see the module docstring's
+        "Selection floor" section for why the floor exists and why it is
+        relative rather than absolute.
+        """
+        s = self.scores(ops)
+        vals = np.array([s[op] for op in ops], dtype=np.float64)
+        shifted = vals - vals.min() + 1e-9
+        total = float(shifted.sum())
+        probs = shifted / total if total > 0 else np.full(len(ops), 1.0 / len(ops))
+        floor = self.explore_floor / len(ops)
+        floored = np.maximum(probs, floor)
+        return floored / floored.sum()
+
     def select_op(self, ops: list[str]) -> str:
-        """Weighted pick by score, same non-negative-shift draw
-        ``OpKatzScheduler.select_op`` uses (see that method's docstring) --
-        kept identical so an unseen or all-zero-score offered set degrades
-        to a uniform draw instead of a divide-by-zero or a fixed pick.
+        """Weighted pick by score, floored so a single early success cannot
+        capture the whole distribution permanently (see :meth:`_select_probs`
+        and the module docstring's "Selection floor" section).
         """
         if not ops:
             return ""
         if len(ops) == 1:
             self.init_arm(ops[0])
             return ops[0]
-        s = self.scores(ops)
-        vals = np.array([s[op] for op in ops], dtype=np.float64)
-        shifted = vals - vals.min() + 1e-9
-        total = float(shifted.sum())
-        probs = shifted / total if total > 0 else np.full(len(ops), 1.0 / len(ops))
+        probs = self._select_probs(ops)
         r = self._rng.random()
         cumulative = 0.0
         for op, p in zip(ops, probs.tolist(), strict=True):
