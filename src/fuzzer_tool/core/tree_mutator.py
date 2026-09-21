@@ -579,6 +579,18 @@ def lightweight_tree_mutate(data: bytes, max_len: int = 65536, rng=None) -> byte
 _GEN_PAIRS: list[tuple[int, int]] = [(o, c) for o, c in _DELIMITERS.items() if o != c]
 
 
+def has_bracket_delimiter(data: bytes) -> bool:
+    """True if *data* contains at least one nesting delimiter byte.
+
+    Checks only ``_GEN_PAIRS``' opening bytes -- ``() [] {}`` -- excluding
+    quotes, since a quote run toggles in/out rather than nesting under the
+    cycle-lemma construction (see the note on ``_GEN_PAIRS`` above). Used to
+    gate the ``tree_generate`` operator: synthesizing a balanced-delimiter
+    fragment only makes sense for a seed that already has some.
+    """
+    return any(bytes([o]) in data for o, _c in _GEN_PAIRS)
+
+
 def cycle_lemma_dyck_bytes(n_pairs: int, rng=None) -> bytes:
     """Synthesize a uniformly random balanced-delimiter byte string.
 
@@ -662,5 +674,6 @@ __all__ = [
     "mutate_tree_dup",
     "mutate_tree_swap",
     "mutate_tree_stutter",
+    "has_bracket_delimiter",
     "cycle_lemma_dyck_bytes",
 ]

@@ -22,6 +22,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from fuzzer_tool.core.mutator_interface import MutationContext
+from fuzzer_tool.core.tree_mutator import has_bracket_delimiter as _tree_mutator_has_delims
 
 log = logging.getLogger(__name__)
 
@@ -129,6 +130,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "fuse_next",
         "fuse_old",
         "tree_mutate",
+        "tree_generate",
         "line_mutate",
         "utf8_widen",
         "utf8_insert",
@@ -706,6 +708,12 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "weizz_chunk_delete": _weizz_tags_available,
     "weizz_chunk_swap": _weizz_tags_available,
     "weizz_tag_repair": _weizz_tags_available,
+    # Synthesizes a fresh balanced-delimiter fragment via the cycle lemma
+    # (core/tree_mutator.cycle_lemma_dyck_bytes) rather than mutating the
+    # existing tree; only worth a slot when the seed already has nesting
+    # delimiters to blend in with. See P2-2,
+    # docs/handover/handover_generators_2026-09-20.md.
+    "tree_generate": lambda _f, d: _tree_mutator_has_delims(d),
 }
 
 

@@ -1191,6 +1191,47 @@ class OperatorEngine:
         if result != bytes(buf):
             buf[:] = result[: len(buf)]
 
+    def _op_tree_generate(self, buf, _byte_idx, _data):
+        """Splice in a freshly synthesized balanced-delimiter fragment.
+
+        Unlike ``_op_tree_mutate``, this does not touch the existing tree —
+        it draws a new one from scratch via ``cycle_lemma_dyck_bytes``
+        (uniform sampling over Catalan-many bracket shapes, see that
+        function's docstring) and inserts it at a random position. Gated on
+        the seed already containing a bracket delimiter
+        (``has_bracket_delimiter``), so this never fires on a seed with
+        nothing to blend the synthesized fragment into.
+
+        P2-2 of docs/handover/handover_generators_2026-09-20.md: this
+        generator shipped with tests but no caller; this is the wiring.
+        """
+        from fuzzer_tool.core.tree_mutator import cycle_lemma_dyck_bytes  # noqa: PLC0415
+
+        rng = self.ctx._rng
+        max_len = self.ctx.max_len or 65536
+        if not buf or len(buf) >= max_len:
+            return self._op_declined("tree_generate", buf)
+
+        n_pairs = rng.randint(1, 8)
+        fragment = cycle_lemma_dyck_bytes(n_pairs, rng=rng)
+        if not fragment:
+            return self._op_declined("tree_generate", buf)
+
+        room = max_len - len(buf)
+        if len(fragment) > room:
+            # A truncated fragment is no longer balanced; declining instead
+            # of splicing a broken tail keeps this operator's output
+            # meaningful to a decoder that tracks nesting.
+            if room < 2:
+                return self._op_declined("tree_generate", buf)
+            n_pairs = max(1, room // 2)
+            fragment = cycle_lemma_dyck_bytes(n_pairs, rng=rng)
+            if not fragment or len(fragment) > room:
+                return self._op_declined("tree_generate", buf)
+
+        pos = rng.randint(0, len(buf))
+        buf[pos:pos] = fragment
+
     # ── UTF-8 confusion mutations (from Radamsa) ────────────────────
 
     def _op_utf8_widen(self, buf, _byte_idx, _data):
