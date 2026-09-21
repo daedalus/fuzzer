@@ -41,15 +41,71 @@ class TestBootstrapPercolation:
 
     def test_transitive_redundancy_removal(self):
         # Chain: A={1,2}, B={2,3}, C={3,4}, D={4,5}
-        # Round 0: A unique={1}, B unique={}, C unique={}, D unique={5}
-        #          → remove B, C
-        # Round 1: A={1,2}, D={4,5} → A unique={1,2}, D unique={4,5} → fixed point
+        # B and C cover edge 3 only jointly, so each is redundant alone but
+        # both cannot go. Removed one at a time (fewest edges, ties by corpus
+        # order): B goes first, after which C uniquely owns edge 3 and stays.
         corpus, et, names = _make_corpus_and_tracker(
             {"A": [1, 2], "B": [2, 3], "C": [3, 4], "D": [4, 5]}
         )
         kept, removed = bootstrap_minimize_corpus(corpus, et, k=1)
-        assert set(kept) == {names["A"], names["D"]}
-        assert set(removed) == {names["B"], names["C"]}
+        assert set(kept) == {names["A"], names["C"], names["D"]}
+        assert removed == [names["B"]]
+
+    def test_k1_preserves_covered_edges_in_chain_fixture(self):
+        corpus, et, names = _make_corpus_and_tracker(
+            {"A": [1, 2], "B": [2, 3], "C": [3, 4], "D": [4, 5]}
+        )
+        kept, _ = bootstrap_minimize_corpus(corpus, et, k=1)
+        covered = set().union(*(et.seed_edges[_seed_key(s)] for s in kept))
+        assert covered == {1, 2, 3, 4, 5}
+
+    def test_k1_never_loses_coverage_on_random_corpora(self):
+        import random
+
+        for trial in range(200):
+            r = random.Random(trial)
+            universe = r.randint(10, 80)
+            spec = {
+                f"s{i}": r.sample(range(universe), r.randint(1, min(12, universe)))
+                for i in range(r.randint(2, 40))
+            }
+            corpus, et, _ = _make_corpus_and_tracker(spec)
+            before = set().union(*(set(e) for e in spec.values()))
+            kept, removed = bootstrap_minimize_corpus(corpus, et, k=1)
+            after = set().union(*(et.seed_edges[_seed_key(s)] for s in kept)) if kept else set()
+            assert after == before, f"trial {trial} lost {before - after}"
+            assert set(kept) | set(removed) == set(corpus)
+            assert not set(kept) & set(removed)
+            # Fixed point: every survivor owns at least one edge.
+            for s in kept:
+                mine = et.seed_edges[_seed_key(s)]
+                others = set().union(
+                    *(et.seed_edges[_seed_key(o)] for o in kept if o != s)
+                ) if len(kept) > 1 else set()
+                assert mine - others, f"trial {trial}: redundant survivor"
+
+    def test_k1_identical_seeds_keep_exactly_one(self):
+        corpus, et, names = _make_corpus_and_tracker({"A": [1, 2], "B": [1, 2], "C": [1, 2]})
+        kept, removed = bootstrap_minimize_corpus(corpus, et, k=1)
+        assert len(kept) == 1
+        assert len(removed) == 2
+
+    def test_k1_preserves_corpus_order_of_survivors(self):
+        corpus, et, names = _make_corpus_and_tracker(
+            {"A": [1], "B": [1, 2], "C": [2, 3], "D": [3]}
+        )
+        kept, _ = bootstrap_minimize_corpus(corpus, et, k=1)
+        assert kept == [s for s in corpus if s in set(kept)]
+
+    def test_k2_keeps_batch_k_rigid_semantics(self):
+        # k >= 2 is the k-rigid core: every seed below the threshold goes in
+        # the same round. B owns 0 edges and is removed; A and C each own 2+.
+        corpus, et, names = _make_corpus_and_tracker(
+            {"A": [1, 2, 3], "B": [3, 4], "C": [4, 5, 6]}
+        )
+        kept, removed = bootstrap_minimize_corpus(corpus, et, k=2)
+        assert set(kept) == {names["A"], names["C"]}
+        assert removed == [names["B"]]
 
     def test_k_value_filters(self):
         corpus, et, names = _make_corpus_and_tracker({"A": [1, 2], "B": [2, 3], "C": [3, 4]})

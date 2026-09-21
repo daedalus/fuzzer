@@ -32,12 +32,23 @@ def bootstrap_minimize_corpus(
     """Iteratively remove seeds with < k unique edges to fixed point.
 
     A seed's "unique edges" are those covered by no other seed currently in
-    the corpus. Seeds with fewer than k such edges are removed. After each
-    removal round, the unique-edge counts are recomputed from scratch, and the
-    process repeats until no seed changes state.
+    the corpus. Seeds with fewer than k such edges are removed, and the
+    unique-edge counts are recomputed after removal, until no seed changes
+    state.
 
-    The result is the k-rigid core: the smallest corpus where every seed has
-    at least k singleton edges.
+    Two removal disciplines, chosen by ``k``:
+
+    - ``k == 1`` — **coverage-preserving.** Seeds are removed *one at a time*
+      (fewest edges first, ties by corpus order), so two seeds that only cover
+      an edge jointly are never both dropped: after the first goes, the
+      survivor owns the edge and stays. The union of covered edges is
+      unchanged (seeds with no tracked edges contribute nothing and are
+      removed up front). Batch removal used to drop such pairs together and
+      lose the edge — see ``docs/handover/handover_generators_2026-09-20.md``
+      P1-1.
+    - ``k >= 2`` — **the k-rigid core.** Every seed below the threshold goes in
+      the same round. This is deliberately lossy: it keeps only seeds that
+      individually own at least k edges, whether or not coverage survives.
 
     Args:
         corpus: list of seed bytes (e.g. ``f.corpus``).
@@ -46,13 +57,16 @@ def bootstrap_minimize_corpus(
         k: Minimum unique edges required to keep a seed. Default 1.
 
     Returns:
-        ``(kept, removed)`` tuple of byte lists. ``kept`` is the k-rigid core.
+        ``(kept, removed)`` tuple of byte lists. ``kept`` preserves corpus order.
     """
     if not corpus:
         return [], []
 
     if not edge_tracker.seed_edges:
         return list(corpus), []
+
+    if k == 1:
+        return _minimize_preserving_coverage(corpus, edge_tracker)
 
     kept: list[bytes] = list(corpus)
     removed: list[bytes] = []
@@ -92,6 +106,63 @@ def bootstrap_minimize_corpus(
         for idx in sorted(to_remove, reverse=True):
             removed.append(kept.pop(idx))
 
+    return kept, removed
+
+
+def _minimize_preserving_coverage(
+    corpus: list[bytes],
+    edge_tracker,
+) -> tuple[list[bytes], list[bytes]]:
+    """k == 1 path: sequential removal of seeds that own no edge.
+
+    A seed with zero unique edges has every edge covered by another seed, so
+    removing it alone cannot shrink the covered union. Removing it can only
+    *raise* other seeds' unique counts (an edge whose owner count falls to one
+    becomes that owner's unique edge), so once a seed has a unique edge it
+    keeps it, and a lazy min-heap of zero-unique seeds is exact. Total cost is
+    O(sum of |edges| * log n).
+    """
+    import heapq
+
+    n = len(corpus)
+    seed_edges = edge_tracker.seed_edges
+    edges_of: list[frozenset | set] = []
+    owners: dict[int, set[int]] = {}
+    for idx, seed in enumerate(corpus):
+        edges = seed_edges.get(_seed_key(seed), set())
+        edges_of.append(edges)
+        for e in edges:
+            owners.setdefault(e, set()).add(idx)
+
+    removed_idx: list[int] = []
+    alive = [True] * n
+    unique = [0] * n
+    for idx in range(n):
+        unique[idx] = sum(1 for e in edges_of[idx] if len(owners[e]) == 1)
+
+    # Seeds with no tracked edges are always removable and touch no owner set.
+    for idx in range(n):
+        if not edges_of[idx]:
+            alive[idx] = False
+            removed_idx.append(idx)
+
+    heap = [(len(edges_of[i]), i) for i in range(n) if alive[i] and unique[i] == 0]
+    heapq.heapify(heap)
+    while heap:
+        _, idx = heapq.heappop(heap)
+        if not alive[idx] or unique[idx] != 0:
+            continue
+        alive[idx] = False
+        removed_idx.append(idx)
+        for e in edges_of[idx]:
+            own = owners[e]
+            own.discard(idx)
+            if len(own) == 1:
+                (sole,) = own
+                unique[sole] += 1
+
+    kept = [corpus[i] for i in range(n) if alive[i]]
+    removed = [corpus[i] for i in removed_idx]
     return kept, removed
 
 
