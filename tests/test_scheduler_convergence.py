@@ -532,17 +532,22 @@ class TestHarnessCoverage:
     def test_every_exported_operator_scheduler_is_adaptable(self):
         """Adding a scheduler must not silently skip convergence testing.
 
-        MCTSSeedScheduler and AlphaBetaMCTSSeedScheduler are excluded by name:
-        they schedule *seeds* against a LineageTree, not operators, and need
-        their own environment.
+        Seed schedulers are excluded: they schedule *seeds* (against a
+        LineageTree, an edge matrix, a corpus), not operators, and need their
+        own environment. They are identified by the package's own layout --
+        ``seed_*`` modules against ``op_*`` -- rather than by a hand-kept name
+        list: the list named two of the five and the test failed on the other
+        three (Tang, SeedCanary, KruskalCount), so it was a check that had
+        stopped checking. Anything not in a ``seed_*`` module is tested.
         """
         import fuzzer_tool.core.schedulers as pkg
 
         env = StationaryBernoulli.build()
+        tested = 0
         for cls_name in pkg.__all__:
-            if cls_name in ("MCTSSeedScheduler", "AlphaBetaMCTSSeedScheduler"):
-                continue
             cls = getattr(pkg, cls_name)
+            if _is_seed_scheduler(cls):
+                continue
             sched = (
                 cls(dim=4) if cls_name in ("ContextualLinUCBScheduler", "C2UCBScheduler") else cls()
             )
@@ -550,6 +555,36 @@ class TestHarnessCoverage:
             op = a.select()
             assert op in env.arms, f"{cls_name} returned {op!r}"
             a.update(op, True)
+            tested += 1
+        # A loop that skips everything passes; pin that it did not.
+        assert tested >= _MIN_OPERATOR_SCHEDULERS
+
+    def test_seed_scheduler_exclusion_is_exactly_the_seed_modules(self):
+        """The exclusion must not swallow an operator scheduler.
+
+        Falsification: every excluded export lives in a ``seed_*`` module and
+        no ``op_*`` export is excluded. If someone files an operator scheduler
+        under ``seed_*`` this fails rather than silently dropping it from
+        convergence testing.
+        """
+        import fuzzer_tool.core.schedulers as pkg
+
+        excluded = {n for n in pkg.__all__ if _is_seed_scheduler(getattr(pkg, n))}
+        assert excluded, "no seed schedulers found -- the layout assumption broke"
+        for n in pkg.__all__:
+            module = getattr(pkg, n).__module__.rsplit(".", 1)[-1]
+            assert module.startswith(("seed_", "op_")), f"{n} in {module}: neither seed nor op"
+            assert (n in excluded) == module.startswith("seed_"), n
+
+
+def _is_seed_scheduler(cls) -> bool:
+    """True for exports living in a ``seed_*`` module (seed, not operator, schedulers)."""
+    return cls.__module__.rsplit(".", 1)[-1].startswith("seed_")
+
+
+# 30 operator schedulers were exported when this was written; a floor well
+# under that still catches a loop that has started skipping everything.
+_MIN_OPERATOR_SCHEDULERS = 25
 
 
 class TestSchedulerSeedability:
