@@ -419,7 +419,9 @@ def _deterministic_mutation_stream(
         # Proportional per-pass quotas (by natural cost).  A flat prefix
         # would delete later passes entirely on large seeds; proportional
         # shares keep every family running and consume the full budget.
-        quotas = _split_det_quota([cost_bit, cost_byte, cost_arith, cost_interesting], max_mutations)
+        quotas = _split_det_quota(
+            [cost_bit, cost_byte, cost_arith, cost_interesting], max_mutations
+        )
         _deterministic_mutation_stream.last_truncated = full_cost - max_mutations
 
     n = 0
@@ -1238,6 +1240,25 @@ class OperatorEngine:
         seq = rng.choice(_FUNNY_UNICODE)
         pos = rng.randint(0, len(buf))
         buf[pos:pos] = seq
+
+    def _op_utf8_seq_mutate(self, buf, byte_idx, _data):
+        """Break a well-formed UTF-8 sequence already present in the buffer.
+
+        The sibling operators above only add bytes; neither decodes, so the
+        sequences already in the input are never the subject of a mutation.
+        This one picks the sequence covering -- or nearest after --
+        ``byte_idx`` and puts back a form a decoder must reject for a named
+        reason (see ``core/mutations/utf8``). ``byte_idx`` is used rather
+        than a fresh draw so the offset the mutation loop published stays
+        true and the region liveness estimator is not fed a fiction.
+        """
+        from fuzzer_tool.core.mutations.utf8 import seq_mutate  # noqa: PLC0415
+
+        result = seq_mutate(bytes(buf), byte_idx, rng=self.ctx._rng, max_len=self.ctx.max_len)
+        if result is None:
+            return self._op_declined("utf8_seq_mutate", buf)
+
+        return bytearray(result)
 
     # ── Line-level mutations (from Radamsa) ─────────────────────────
 

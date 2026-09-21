@@ -132,6 +132,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "line_mutate",
         "utf8_widen",
         "utf8_insert",
+        "utf8_seq_mutate",
     },
     "format": {
         "png_chunk_mutate",
