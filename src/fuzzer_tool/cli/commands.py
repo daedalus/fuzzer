@@ -977,6 +977,50 @@ def cmd_root_cause(args):
     return 0
 
 
+def cmd_genseed(args):
+    """Write from-scratch seeds for one or more formats into a corpus dir.
+
+    Exposes fuzzer_tool.core.format_generators -- the 35 shipped
+    `_generate_random_<fmt>`/MINIMAL_SEEDS builders -- as a corpus-writing
+    CLI, independent of whether a live campaign's target_profiler would
+    ever detect that format. Plumbing only: all generation logic lives in
+    format_generators/minimal_seeds/the mutation modules.
+    """
+    from fuzzer_tool.adapters.filesystem import hash_data
+    from fuzzer_tool.core.format_generators import FORMATS, generate
+    from fuzzer_tool.core.rand_pool import RandPool
+    from fuzzer_tool.services.import_corpus import _write_seed
+
+    fmts = list(FORMATS) if args.format == "all" else [args.format]
+    unknown = [f for f in fmts if f not in FORMATS]
+    if unknown:
+        print(f"[-] Unknown format(s): {', '.join(unknown)}")
+        print(f"[*] Available formats: {', '.join(FORMATS)}")
+        return 1
+
+    dest = Path(args.corpus)
+    rng = RandPool(seed=args.seed)
+    seen: set[str] = set()
+    written = 0
+    for fmt in fmts:
+        for _ in range(args.count):
+            data = generate(fmt, max_len=args.max_len, rng=rng)
+            if not data:
+                continue
+            h = hash_data(data)
+            if h in seen:
+                continue
+            seen.add(h)
+            _write_seed(dest, data, h)
+            written += 1
+
+    print(f"[+] Wrote {written} generated seed(s) across {len(fmts)} format(s) to {dest}/seeds/")
+    if written < len(fmts) * args.count:
+        skipped = len(fmts) * args.count - written
+        print(f"[*] Skipped {skipped} duplicate(s) (constant builders repeat under --count)")
+    return 0
+
+
 def cmd_minimize(args):
     """Corpus minimization subcommand."""
     _validate_target(args.target)
@@ -4170,6 +4214,30 @@ def main() -> int:
         help="Target coverage fraction for rate-distortion (default: 0.95)",
     )
     min_parser.set_defaults(func=cmd_minimize)
+
+    # --- genseed ---
+    genseed_parser = subparsers.add_parser(
+        "genseed", help="Write from-scratch seeds for a format into a corpus dir"
+    )
+    genseed_parser.add_argument(
+        "format",
+        nargs="?",
+        default="all",
+        help="Format name (see core.format_generators.FORMATS), or 'all' (default)",
+    )
+    genseed_parser.add_argument(
+        "-d", "--corpus", required=True, help="Destination corpus directory"
+    )
+    genseed_parser.add_argument(
+        "-n", "--count", type=int, default=1, help="Seeds per format (default: 1)"
+    )
+    genseed_parser.add_argument(
+        "--max-len", type=int, default=4096, help="Max seed length in bytes (default: 4096)"
+    )
+    genseed_parser.add_argument(
+        "--seed", type=int, default=None, help="RNG seed for reproducible generation"
+    )
+    genseed_parser.set_defaults(func=cmd_genseed)
 
     # --- replay ---
     replay_parser = subparsers.add_parser("replay", help="Replay a crash input against the target")
