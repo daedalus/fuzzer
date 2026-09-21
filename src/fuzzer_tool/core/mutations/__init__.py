@@ -15,3 +15,6 @@ from fuzzer_tool.core.mutations.generic import (  # noqa: F401
 
 # Perlin/gradient noise coherent-perturbation mutator (self-registers on import)
 from fuzzer_tool.core.mutations.perlin_noise import PerlinNoiseMutator  # noqa: F401
+
+# Learned-adjacency WFC chunk reordering, isobmff/webp/riff/gif (self-registers)
+from fuzzer_tool.core.wfc_chunks import WfcChunkMutator  # noqa: F401

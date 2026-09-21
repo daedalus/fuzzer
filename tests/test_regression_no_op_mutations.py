@@ -217,6 +217,62 @@ def _avif() -> bytes:
     return ftyp + meta
 
 
+def _isobmff_multi() -> bytes:
+    """ftyp + two free boxes + mdat: 4 top-level boxes for wfc_reorder_learned
+    (isobmff_chunk_mutate's single-``ftyp`` sniffer sample has nothing to
+    reorder -- this one has >=3 sibling boxes with >1 distinct kind)."""
+
+    def box(t: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", 8 + len(payload)) + t + payload
+
+    return (
+        box(b"ftyp", b"isom" + bytes(4))
+        + box(b"free", bytes(4))
+        + box(b"mdat", b"X" * 40)
+        + box(b"free", bytes(4))
+    )
+
+
+def _gif_multi() -> bytes:
+    """GIF89a header + LSD/GCT + one graphic-control extension + one image +
+    trailer: enough blocks and kinds for wfc_reorder_learned to have
+    something to reorder between the pinned header and trailer."""
+    lsd = bytes([10, 0, 10, 0, 0x80, 0, 0])
+    gct = b"\x00\x00\x00\xff\xff\xff" * 2
+    gce = b"\x21\xf9\x04\x00\x00\x00\x00\x00\x00"
+    image = b"\x2c" + bytes([0, 0, 0, 0, 10, 0, 10, 0, 0]) + b"\x02" + b"\x02\x4c\x01\x00"
+    return b"GIF89a" + lsd + gct + gce + image + b"\x3b"
+
+
+def _webp_multi() -> bytes:
+    """VP8X + ANIM + ICCP: 3 top-level chunks (the sniffer sample above,
+    ``_webp()``, has only one -- VP8 -- which wfc_reorder_learned declines
+    on for lack of anything to reorder)."""
+
+    def chunk(fourcc: bytes, payload: bytes) -> bytes:
+        out = fourcc + struct.pack("<I", len(payload)) + payload
+        if len(payload) % 2:
+            out += b"\x00"
+        return out
+
+    body = chunk(b"VP8X", bytes(10)) + chunk(b"ANIM", bytes(6)) + chunk(b"ICCP", b"Y" * 20)
+    return b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WEBP" + body
+
+
+def _riff_multi() -> bytes:
+    """fmt /data/JUNK: 3 top-level RIFF chunks for wfc_reorder_learned (the
+    WAVE sample above in the inline list is truncated mid-chunk)."""
+
+    def chunk(fourcc: bytes, payload: bytes) -> bytes:
+        out = fourcc + struct.pack("<I", len(payload)) + payload
+        if len(payload) % 2:
+            out += b"\x00"
+        return out
+
+    body = chunk(b"fmt ", bytes(16)) + chunk(b"data", b"Z" * 30) + chunk(b"JUNK", bytes(4))
+    return b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WAVE" + body
+
+
 def _sqlite() -> bytes:
     """Minimal SQLite database: the 100-byte file header plus one empty
     leaf page. Enough for the sniffer (which requires a full header) and
@@ -284,6 +340,10 @@ def _battery() -> list[bytes]:
         _mp3(),
         _avif(),
         _sqlite(),
+        _isobmff_multi(),
+        _gif_multi(),
+        _webp_multi(),
+        _riff_multi(),
         # zlib stream: covers zlib_chunk_mutate and recompress_zlib, whose
         # sniffers check the CMF/FLG header rather than a magic string.
         zlib.compress(b"the quick brown fox jumps over the lazy dog" * 3, 6),
@@ -485,6 +545,9 @@ class TestStateGatedOperatorsAreNotNoOps:
         # exactly the "never offered, never checked" hole this class guards.
         f.op_span_reverse = True
         f.op_span_relocate = True
+        # wfc_reorder_learned (core/wfc_chunks.py): same flag the existing
+        # PNG/JPEG/BMP WFC reorder ops gate on.
+        f._wfc_enabled = True
 
         # --- FormatFuzzer band (4 operators) -------------------------------
         # ff_* shell out to `<format>-fuzzer` binaries built from the
