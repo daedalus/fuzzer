@@ -14,9 +14,12 @@ is inlined in the appendix so it can be re-run from a clean checkout
 | **P1-1** bootstrap batch removal | `cc4e9b1a` | fixture loses edge 3 → 0 lost; 8/400 random post-greedy corpora lose coverage → **0/400** (seeds removed 149 → 140: the 9 kept are exactly the ones needed) |
 | **P0-1** alphabeta arm | `bc9852ab` | 1 distinct seed, 0 non-root picks in 300 rounds → **146 distinct, 217 non-root**; 5.3 / 17.2 / 41.1 ms per select → **0.1 ms** at 605 / 5,465 / 27,305 nodes |
 | **P2-3** cold-start seeds | `c5414f04` | see the addendum under P2-3 |
+| **P2-2** Boltzmann / cycle-lemma wiring | `9fb172f2`, `a9098a76` | `generate(boltzmann=True)` wired into `Grammar.mutate`'s replacement paths; `cycle_lemma_dyck_bytes` wired as the `tree_generate` operator. (Landed between this handover and the P2-1 pass below; not recorded here until now.) |
+| **P2-1** learned-adjacency WFC (isobmff/webp/riff/gif) | `fd7c5cf8` | `AdjacencyTable.from_corpus` had no caller, 0 formats beyond png/jpeg/bmp had a chunk-order table → `core/wfc_chunks.py` + `wfc_reorder_learned` operator, one learned table per format via `on_new_coverage`; re-parses 100% of calls, ≥95% of strict-mode calls change the input, 0.7–3 ms/call |
 
-Still open: P2-1 (learned-adjacency WFC), P2-2 (Boltzmann / cycle-lemma wiring),
-G0 and everything P3+. Tests run were the affected modules only (300 passed, 11
+Still open: G0 and everything P3+ (ogg/flv/asf/mpegts/nal/zip left out of
+P2-1's rollout for a follow-up; see `core/wfc_chunks.py`'s module docstring).
+Tests run were the affected modules only (300 passed, 11
 skipped); a full-suite run was started and abandoned, and two failures seen in
 it (`test_integration::test_fuzzer_eps_minimum`,
 `test_regression_build_lib_pairing::test_targets_are_actually_built`) were not
