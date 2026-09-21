@@ -2,10 +2,28 @@
 
 **Date:** 2026-09-20
 **Base:** `8216cedb` (`docs(deep-dive): document utf8_seq_mutate`)
-**Status:** analysis only. No production code changed; this document is the
-whole patch. Every number below was measured in-container at `8216cedb`, and
-every reproduction is inlined in the appendix so it can be re-run from a clean
-checkout (`pip install -e .`, numpy required).
+**Status:** analysis (commit `075ddedf`) plus three fixes applied on top — see
+"Resolved" below. Every number was measured in-container and every reproduction
+is inlined in the appendix so it can be re-run from a clean checkout
+(`pip install -e .`, numpy required).
+
+## Resolved
+
+| Item | Commit | Before → after (same probe) |
+|---|---|---|
+| **P1-1** bootstrap batch removal | `cc4e9b1a` | fixture loses edge 3 → 0 lost; 8/400 random post-greedy corpora lose coverage → **0/400** (seeds removed 149 → 140: the 9 kept are exactly the ones needed) |
+| **P0-1** alphabeta arm | `bc9852ab` | 1 distinct seed, 0 non-root picks in 300 rounds → **146 distinct, 217 non-root**; 5.3 / 17.2 / 41.1 ms per select → **0.1 ms** at 605 / 5,465 / 27,305 nodes |
+| **P2-3** cold-start seeds | `c5414f04` | see the addendum under P2-3 |
+
+Still open: P2-1 (learned-adjacency WFC), P2-2 (Boltzmann / cycle-lemma wiring),
+G0 and everything P3+. Tests run were the affected modules only (300 passed, 11
+skipped); a full-suite run was started and abandoned, and two failures seen in
+it (`test_integration::test_fuzzer_eps_minimum`,
+`test_regression_build_lib_pairing::test_targets_are_actually_built`) were not
+compared against the base. One failure in the scheduler slice
+(`test_scheduler_convergence::…test_every_exported_operator_scheduler_is_adaptable`,
+`TangRecommendationScheduler.__init__() missing 'rng'`) fails identically on the
+base commit.
 
 **Tiering** follows `handover_pending_2026-09-06.md` §0 — P0 defect a running
 campaign can hit, P1 measured win with the correctness argument settled, P2
@@ -272,6 +290,20 @@ via a dict dispatch instead of an if-chain; for unknown formats, build the
 fallback seed from `magic_bytes[0]` + a few dictionary tokens instead of pure
 random bytes. Given §1, treat the fallback change as P4 until measured with
 `tools/novelty_rate.py`. **Effort S.**
+
+**Addendum (found while fixing this).** All six *constant* cold-start seeds were
+rejected by real decoders, measured with Pillow / `zlib` / `gzip`: png (IHDR
+declared 10 bytes, not 13, and no IDAT), jpeg (no DQT/SOF/DHT/SOS), gif (declared
+a 256-entry colour table then ended), bmp (DIB header a field short), zlib (a
+`78 9c` header prepended to a stream that already had one), gzip (zlib-wrapped
+stream where raw deflate is required). The gzip branch *is* reachable (magic
+`1f8b`), so a gzip target started from an undecodable seed. Fixed in
+`core/minimal_seeds.py` (1x1 PNG/JPEG/GIF/BMP, valid zlib/gzip), each checked
+against the format's parser and Pillow; `_format_aware_seed` is now a dispatch
+over those plus the shipped generators, adds `riff`, and clamps to `max_len`.
+`bmp`/`zlib` remain unreachable from the profiler and are documented as such;
+adding a zlib symbol detector was rejected because libz symbols appear in most
+binaries and would mislabel PNG/ELF-linked targets.
 
 ---
 
