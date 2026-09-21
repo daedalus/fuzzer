@@ -510,6 +510,40 @@ class ExhaustivePool:
         this pool has no entropy to reset.
         """
 
+    def inject_entropy(self, raw: bytes) -> None:
+        """No-op, for the same reason ``reseed`` is.
+
+        ``CorpusManager.save_to_corpus`` folds admitted seed bytes into
+        the campaign pool. Under enumeration there is no stream to fold
+        into -- the walk order is state, not entropy -- so mixing is
+        meaningless rather than merely unnecessary, and ignoring it
+        keeps an operator that saves to the corpus mid-run enumerable.
+        """
+
+    def pool_entropy(self) -> float | None:
+        """Always ``None``: this pool never refills, so nothing to measure.
+
+        Matches ``RandPool``'s contract for the pre-first-refill state
+        rather than inventing a sentinel, so a caller that already
+        handles ``None`` needs no special case for enumeration.
+        """
+        return None
+
+    def measure_entropy(self, data: bytes | None = None) -> float:
+        """Shannon entropy of *data*; refuses the no-argument form.
+
+        With bytes in hand this is a pure function and the answer is the
+        same for any pool. Without them ``RandPool`` measures its own
+        last refill, and this pool has none -- so raise the same
+        ``RuntimeError`` it raises before its first refill instead of
+        returning a number that would mean something different here.
+        """
+        if data is None:
+            raise RuntimeError("ExhaustivePool never refills; pass bytes to measure")
+        from fuzzer_tool.core.rand_pool import _shannon_entropy
+
+        return _shannon_entropy(data)
+
     # ── Bulk draws: finite, but combinatorial ────────────────────────
 
     def _bulk_guard(self, what: str, paths: int) -> None:

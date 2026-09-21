@@ -18,6 +18,8 @@ and neither equivalence was previously pinned:
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 
@@ -91,42 +93,52 @@ class TestRandPoolMirrorConsistency:
         assert all(5 <= v <= 9 for v in pool.randint_list(5, 9, 500))
 
 
-class TestCrpsRampCache:
-    def test_cached_ramp_matches_freshly_computed(self):
-        t = ExecutionTimeTracker(window_size=50)
-        for v in (0.01, 0.02, 0.03, 0.04):
-            t.record(v)
-        # record() scores the observation against the CDF *before* appending
-        # it, so the cache is keyed on the pre-append lengths (n-1 max).
-        assert t._crps_ramp_cache, "ramp cache was never populated"
-        for n, ramp in t._crps_ramp_cache.items():
-            np.testing.assert_allclose(ramp, np.arange(1, n + 1) / n)
+class TestCrpsClosedForm:
+    """The lognormal closed form must equal the integral it claims to solve.
 
-    def test_cache_is_keyed_by_length(self):
-        """Different window fill levels must not share one ramp."""
-        t = ExecutionTimeTracker(window_size=50)
-        for i in range(10):
-            t.record(0.001 * (i + 1))
-        for n, ramp in t._crps_ramp_cache.items():
-            assert len(ramp) == n
-            np.testing.assert_allclose(ramp, np.arange(1, n + 1) / n)
+    These replace three tests that pinned ``_crps_ramp_cache`` and an
+    empirical-CDF recomputation. That estimator was deliberately retired
+    for a two-parameter lognormal fit (see ``_compute_crps``'s docstring),
+    so the old tests were asserting against an implementation that no
+    longer exists -- two raised AttributeError and the third compared the
+    parametric answer to the empirical one and called the difference a bug.
 
-    def test_crps_matches_uncached_reference(self):
-        """The cached implementation must equal a direct recomputation."""
+    Checking the formula against a numeric quadrature of its own defining
+    integral is what the old "matches uncached reference" test was for, and
+    it survives the estimator change instead of being invalidated by it.
+    """
+
+    @staticmethod
+    def _numeric_crps(mu: float, sigma: float, obs: float) -> float:
+        """Direct quadrature of integral (F(y) - 1[y >= obs])^2 dy."""
+        ys = np.linspace(1e-9, 5.0, 2_000_001)
+        phi = np.array([0.5 * (1.0 + math.erf(v / math.sqrt(2.0))) for v in (np.log(ys) - mu) / sigma])
+        return float(np.trapezoid((phi - (ys >= obs)) ** 2, ys))
+
+    def test_closed_form_matches_numeric_integration(self):
         t = ExecutionTimeTracker(window_size=64)
         rng = np.random.default_rng(7)
-        for v in rng.uniform(0.001, 0.05, size=40):
+        for v in rng.lognormal(math.log(0.02), 0.4, size=40):
             t.record(float(v))
 
-        obs = 0.02
-        arr = np.asarray(t._sorted, dtype=np.float64)
-        n = len(arr)
-        cd = np.arange(1, n + 1) / n - (arr >= obs)
-        expected = float(np.sum(cd[:-1] * cd[:-1] * np.diff(arr)))
-        if obs > arr[-1]:
-            expected += obs - arr[-1]
+        expected = self._numeric_crps(t._log_moments.mean, t._log_moments.stddev, 0.02)
+        # Tolerance is set by the quadrature grid, not by the formula: the
+        # residual shrinks with the step size (1.2e-3 at 4e5 points, 2.4e-4
+        # at 2e6), which is what a correct closed form looks like against a
+        # discretised integral.
+        assert t._compute_crps(0.02) == pytest.approx(expected, rel=1e-3)
 
-        assert t._compute_crps(obs) == pytest.approx(expected, abs=1e-12)
+    def test_degenerate_window_is_the_point_forecast(self):
+        """sigma -> 0 must give |x - m|, not a division by zero."""
+        t = ExecutionTimeTracker(window_size=50)
+        for _ in range(8):
+            t.record(0.01)
+        assert t._compute_crps(0.03) == pytest.approx(0.02, abs=1e-12)
+
+    def test_single_observation_is_the_point_forecast(self):
+        t = ExecutionTimeTracker(window_size=50)
+        t.record(0.01)
+        assert t._compute_crps(0.04) == pytest.approx(0.03, abs=1e-12)
 
     def test_crps_empty_history_is_zero(self):
         t = ExecutionTimeTracker(window_size=10)
