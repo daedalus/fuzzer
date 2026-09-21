@@ -396,6 +396,7 @@ def cmd_fuzz(args):
                 print(f"[*] Grammar loaded: {len(grammar.rules)} rules from {path}")
             else:
                 print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
+        grammar.boltzmann_mutate = args.grammar_boltzmann
 
     plot_graph_path = None
     coverage_log_arg = args.coverage_log
@@ -1820,6 +1821,7 @@ _HAIL_MARY_FLAGS = (
     "formatfuzzer",
     "op_span_reverse",
     "op_span_relocate",
+    "grammar_boltzmann",
     "cmplog_fifo_sink",
     "reseed_on_stall",
     "fractal_diversity",
@@ -3719,6 +3721,15 @@ def main() -> int:
         "--grammar",
         nargs="+",
         help="Grammar file(s) (built-in: json, http_request, elf) or path to .gram file",
+    )
+    fuzz_parser.add_argument(
+        "--grammar-boltzmann",
+        action="store_true",
+        help="Grammar.mutate()'s replacement-generation paths (extend/insert/"
+        "replace_section) sample via Boltzmann sampling instead of plain "
+        "recursive descent, correcting the depth bias documented in "
+        "generate()'s docstring. Default off pending a measured A/B "
+        "(see docs/handover/handover_generators_2026-09-20.md P2-2)",
     )
     fuzz_parser.add_argument(
         "--persistent",
