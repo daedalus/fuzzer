@@ -290,7 +290,9 @@ def collapse(amplitudes: np.ndarray) -> bytes:
 
 def _unpack_bits_to(data: bytes, n_bits: int) -> np.ndarray:
     """Unpack ``data`` to a 0/1 bit array, padded or truncated to ``n_bits``."""
-    bits = np.unpackbits(np.frombuffer(data, dtype=np.uint8)) if data else np.zeros(0, dtype=np.uint8)
+    bits = (
+        np.unpackbits(np.frombuffer(data, dtype=np.uint8)) if data else np.zeros(0, dtype=np.uint8)
+    )
     return np.pad(bits, (0, n_bits - len(bits))) if len(bits) < n_bits else bits[:n_bits]
 
 

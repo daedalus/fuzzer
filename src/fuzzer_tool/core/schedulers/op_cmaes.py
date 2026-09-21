@@ -186,6 +186,7 @@ class CMAESScheduler:
             "total_execs": 0,
             "total_discoveries": 0,
         }
+
     # ------------------------------------------------------------------
 
     def init_arm(self, name: str) -> None:

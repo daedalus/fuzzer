@@ -806,16 +806,24 @@ def _seed_contribution(f) -> str:
     try:
         if f.ga:
             gs = f.ga.generator_stats
-            gen_lines.append(f"  GA generated: {gs['population_size']} individuals (gen {gs['generation']})")
+            gen_lines.append(
+                f"  GA generated: {gs['population_size']} individuals (gen {gs['generation']})"
+            )
         if f.qea:
             gs = f.qea.generator_stats
-            gen_lines.append(f"  QEA generated: {gs['population_size']} individuals (gen {gs['generation']})")
+            gen_lines.append(
+                f"  QEA generated: {gs['population_size']} individuals (gen {gs['generation']})"
+            )
         if f.markov_trained:
             gs = f.markov.generator_stats
-            gen_lines.append(f"  Markov: contexts_seen={gs['contexts_seen']}, trained={gs['is_trained']}")
+            gen_lines.append(
+                f"  Markov: contexts_seen={gs['contexts_seen']}, trained={gs['is_trained']}"
+            )
         if getattr(f, "_cmaes", None) is not None:
             gs = f._cmaes.generator_stats
-            gen_lines.append(f"  CMA-ES: pop={gs['pop_size']}, sigma={gs['sigma']:.3f} (gen {gs['generation']})")
+            gen_lines.append(
+                f"  CMA-ES: pop={gs['pop_size']}, sigma={gs['sigma']:.3f} (gen {gs['generation']})"
+            )
     except (KeyError, TypeError, AttributeError):
         pass
 
@@ -1736,7 +1744,7 @@ def _format_learning(f) -> str:
             if stats.get("field_confidences"):
                 confs = stats["field_confidences"]
                 if isinstance(confs, list) and confs:
-                    lines.append(f"    Avg confidence:  {sum(confs)/len(confs):.3f}")
+                    lines.append(f"    Avg confidence:  {sum(confs) / len(confs):.3f}")
                     lines.append(f"    High conf (>0.8): {sum(1 for c in confs if c > 0.8)}")
                     lines.append(f"    Low conf (<0.5):  {sum(1 for c in confs if c < 0.5)}")
             if stats.get("last_generated_field_type"):

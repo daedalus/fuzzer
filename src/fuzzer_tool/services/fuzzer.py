@@ -15,7 +15,7 @@ import sys
 import tempfile
 import threading
 import time
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.rand_pool import RandPool
 
