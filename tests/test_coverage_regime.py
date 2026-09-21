@@ -36,7 +36,7 @@ class TestCoverageRegimeDetector:
         d = self._detector(stall_threshold=10_000)
         regime = d.observe(
             discovery_rate=2.5,
-            allan_delta=0,
+            structure_delta=0,
             homogeneity_result=None,
             execs_since_edge=10,
             exec_count=1000,
@@ -66,7 +66,7 @@ class TestCoverageRegimeDetector:
         d = self._detector(stall_threshold=10_000)
         regime = d.observe(
             discovery_rate=2.5,
-            allan_delta=0,
+            structure_delta=0,
             homogeneity_result=None,
             execs_since_edge=5,
             exec_count=500,
@@ -81,7 +81,7 @@ class TestCoverageRegimeDetector:
         d = self._detector(stall_threshold=10_000)
         regime = d.observe(
             discovery_rate=2.5,
-            allan_delta=0,
+            structure_delta=0,
             homogeneity_result=None,
             execs_since_edge=5,
             exec_count=500,
@@ -93,7 +93,7 @@ class TestCoverageRegimeDetector:
         d = self._detector(stall_threshold=10_000)
         regime = d.observe(
             discovery_rate=2.5,
-            allan_delta=0,
+            structure_delta=0,
             homogeneity_result=None,
             execs_since_edge=5,
             exec_count=500,
@@ -132,7 +132,7 @@ class TestCoverageRegimeDetector:
         d = CoverageRegimeDetector(csd=None, homogeneity=None, stall_threshold=10_000)
         regime = d.observe(
             discovery_rate=0.0,
-            allan_delta=0,
+            structure_delta=0,
             homogeneity_result=None,
             execs_since_edge=0,
             exec_count=0,

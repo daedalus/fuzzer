@@ -174,12 +174,13 @@ class RandPool:
     def inject_entropy(self, raw: bytes) -> None:
         """Mix externally supplied bytes into this pool's stream.
 
-        NOT wired into any call path yet — nothing in the fuzzer invokes
-        this today. It exists so a future external entropy source (a
-        hardware RNG health-check, a corpus-derived seed byte, whatever
-        gets proposed later) has a defined place to feed bytes into a
-        pool without inventing a new mechanism at that point, without
-        committing now to when or whether it actually gets called.
+        Wired at exactly one call site:
+        ``CorpusManager.save_to_corpus`` calls this with a seed's bytes
+        once the seen_hashes/bloom novelty gate has confirmed they are
+        genuinely new. It was added deliberately unwired and the
+        docstring was not updated when the call site landed, which is
+        why it says so explicitly now — a caller passing a fuzzer-like
+        object without ``_rng`` raises from inside a corpus save.
 
         This is a *mix-in*, not a reseed: ``raw`` is folded together with
         a snapshot of the pool's current (already-deterministic) state via

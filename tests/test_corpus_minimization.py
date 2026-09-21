@@ -7,6 +7,7 @@ from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_corpus_flux import CorpusFlux
 from fuzzer_tool.core.edge_tracker import EdgeTracker
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.corpus_manager import CorpusManager
 
 
@@ -37,6 +38,10 @@ class MockFuzzer:
         self.corpus: list[bytes] = []
         self.seed_meta: dict[bytes, dict] = {}
         self._edge_tracker = EdgeTracker()
+        # save_to_corpus() folds each newly-admitted seed's bytes into the
+        # campaign RandPool (corpus_manager.py, inject_entropy). A real
+        # Fuzzer always has this; the mock needs it or every save raises.
+        self._rng = RandPool(seed=42)
         self.shm_cov = None
         self.ptrace_cov = None
         self.max_corpus = 0
