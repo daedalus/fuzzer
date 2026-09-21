@@ -923,86 +923,51 @@ class SeedPicker:
                 worst_idx = idx
         return f.corpus[worst_idx]
 
+    # Formats whose cold-start seed comes from a shipped ``_generate_random_<fmt>``
+    # rather than a constant. (module, class, method) resolved lazily so a
+    # target that never sniffs these formats never imports them.
+    _GENERATED_SEED_FORMATS = {
+        "webp": ("webp", "WebpMutator", "_generate_random_webp"),
+        "webm": ("webm", "WebmMutator", "_generate_random_webm"),
+        "zip": ("zip", "ZipMutator", "_generate_random_zip"),
+        "protobuf": ("protobuf", "ProtobufMutator", "_generate_random_protobuf"),
+        "riff": ("riff", "RiffMutator", "_generate_random_riff"),
+    }
+
     def _format_aware_seed(self) -> bytes:
+        """Cold-start seed for the sniffed format, or a short random buffer.
+
+        Constant seeds come from :mod:`fuzzer_tool.core.minimal_seeds` (each
+        decodes with the format's own parser); ``webp``/``webm``/``zip``/
+        ``protobuf``/``riff`` use their mutator's generator. Any other
+        signature falls through to 4–64 random bytes.
+
+        Reachability: the profiler only ever emits the signatures in
+        ``target_profiler.py::_infer_format`` (17 magic names plus json,
+        archive, webp, protobuf). ``bmp`` and ``zlib`` are handled here but no
+        detector currently produces them, so they fire only if a signature is
+        set externally.
+        """
         f = self.f
         fmt = getattr(f._profile, "format_signature", None)
-        if fmt == "png":
-            ihdr_data = b"\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"
-            ihdr_chunk = b"IHDR" + ihdr_data
-            ihdr_crc = struct.pack(">I", crc32(ihdr_chunk))
-            iend_chunk = b"IEND"
-            iend_crc = struct.pack(">I", crc32(iend_chunk))
-            return (
-                b"\x89PNG\r\n\x1a\n"
-                + struct.pack(">I", len(ihdr_data))
-                + ihdr_chunk
-                + ihdr_crc
-                + struct.pack(">I", 0)
-                + iend_chunk
-                + iend_crc
-            )
-        elif fmt == "jpeg":
-            return (
-                b"\xff\xd8"
-                + b"\xff\xe0"
-                + b"\x00\x10"
-                + b"JFIF\x00"
-                + b"\x01\x01"
-                + b"\x00"
-                + b"\x00\x01"
-                + b"\x00\x01"
-                + b"\x00\x00"
-                + b"\xff\xd9"
-            )
-        elif fmt == "gif":
-            return b"GIF89a" + struct.pack("<HH", 1, 1) + b"\xf7\x00\x00"
-        elif fmt == "webp":
-            from fuzzer_tool.core.mutations.webp import WebpMutator
+        limit = getattr(f, "max_len", 0) or 0
 
-            return WebpMutator()._generate_random_webp(max_len=256)
-        elif fmt == "webm":
-            from fuzzer_tool.core.mutations.webm import WebmMutator
+        from fuzzer_tool.core.minimal_seeds import MINIMAL_SEEDS
 
-            return WebmMutator()._generate_random_webm(max_len=256)
-        elif fmt == "zip":
-            from fuzzer_tool.core.mutations.zip import ZipMutator
+        seed: bytes | None = None
+        builder = MINIMAL_SEEDS.get(fmt)
+        if builder is not None:
+            seed = builder()
+        elif fmt in self._GENERATED_SEED_FORMATS:
+            import importlib
 
-            return ZipMutator()._generate_random_zip(max_len=256)
-        elif fmt == "protobuf":
-            from fuzzer_tool.core.mutations.protobuf import ProtobufMutator
+            mod, cls, meth = self._GENERATED_SEED_FORMATS[fmt]
+            mutator = getattr(importlib.import_module(f"fuzzer_tool.core.mutations.{mod}"), cls)()
+            seed = getattr(mutator, meth)(max_len=256)
+        if seed is not None:
+            return seed[:limit] if limit > 0 else seed
 
-            return ProtobufMutator()._generate_random_protobuf(max_len=256)
-        elif fmt == "bmp":
-            return (
-                b"BM"
-                + struct.pack("<I", 54)
-                + b"\x00\x00\x00\x00"
-                + struct.pack("<I", 54)
-                + struct.pack("<I", 40)
-                + struct.pack("<I", 40)
-                + struct.pack("<H", 1)
-                + struct.pack("<H", 24)
-                + b"\x00" * 24
-            )
-        elif fmt == "zlib":
-            import zlib
-
-            return b"\x78\x9c" + zlib.compress(b"\x00")
-        elif fmt == "gzip":
-            import zlib
-
-            return (
-                b"\x1f\x8b"
-                + b"\x08"
-                + b"\x00"
-                + b"\x00\x00\x00\x00"
-                + b"\x00"
-                + b"\x00"
-                + zlib.compress(b"\x00")
-                + struct.pack("<I", crc32(b"\x00"))
-                + struct.pack("<I", 1)
-            )
-        # Generic: zero-filled random-length buffer
+        # Generic: short random buffer
         rng = f._rng
         length = rng.randint(min(4, f.max_len), min(64, f.max_len))
         return bytes(rng.randint(0, 255) for _ in range(length))
