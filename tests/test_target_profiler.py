@@ -318,3 +318,138 @@ class TestParserTokenExtraction:
         p = TargetProfile()
         profiler._extract_parser_tokens(p)
         assert p.parser_tokens == []
+
+
+class TestParserTokenArrayWalk:
+    """Tier 1.1: a yytname symbol is a pointer *array*, not a single pointer.
+
+    honggfuzz arch_bfdExtractStrArray walks consecutive pointers up to 2048
+    entries and stops at a NULL terminator. The single-pointer read that
+    preceded this only ever recovered the first token.
+    """
+
+    def _profiler_with_array(self):
+        elf = bytearray(0x300)
+        targets = [0x130, 0x150, 0x170]
+        names = [b"TOK_A\x00", b"TOK_B\x00", b"TOK_C\x00"]
+        for i, (tgt, nm) in enumerate(zip(targets, names, strict=True)):
+            struct.pack_into("<Q", elf, 0x110 + i * 8, tgt)
+            elf[tgt : tgt + len(nm)] = nm
+        struct.pack_into("<Q", elf, 0x110 + len(targets) * 8, 0)  # NULL terminator
+        profiler = TargetProfiler("/nonexistent")
+        profiler._elf = bytes(elf)
+        profiler._sections = {".rodata": (3, 0x100, 0x400000, 0x200)}
+        profiler._symtab = [("yytname", 0x400010, 64, 1)]
+        return profiler
+
+    def test_all_three_tokens_walked(self):
+        profiler = self._profiler_with_array()
+        p = TargetProfile()
+        profiler._extract_parser_tokens(p)
+        assert b"TOK_A" in p.parser_tokens
+        assert b"TOK_B" in p.parser_tokens
+        assert b"TOK_C" in p.parser_tokens
+
+    def test_null_terminator_stops_the_walk(self):
+        """A NULL entry must halt the walk, not be copied as a token."""
+        profiler = self._profiler_with_array()
+        p = TargetProfile()
+        profiler._extract_parser_tokens(p)
+        assert b"\x00" not in [t for t in p.parser_tokens]
+
+    def test_heuristic_scan_budget_past_4096(self):
+        """A pointer table above the old 4096-byte cap is recovered once
+        the heuristic scan is budget-bounded instead of hard-capped."""
+        rodata_off = 0x100
+        rodata = bytearray(0x5000)
+        table_off = 0x1400  # > 4096, the old scan bound
+        targets = [0x4000 + i * 0x100 for i in range(5)]
+        for i, tgt in enumerate(targets):
+            struct.pack_into("<Q", rodata, table_off + i * 8, rodata_off + tgt)
+        for i, tgt in enumerate(targets):
+            nm = f"TOK_P{i}\x00".encode()
+            rodata[tgt : tgt + len(nm)] = nm
+
+        profiler = TargetProfiler("/nonexistent")
+        elf = bytearray(0x6000)
+        elf[rodata_off : rodata_off + len(rodata)] = rodata
+        profiler._elf = bytes(elf)
+        profiler._sections = {".rodata": (3, rodata_off, 0x400000, len(rodata))}
+        profiler._symtab = []
+
+        p = TargetProfile()
+        profiler._extract_parser_tokens(p)
+        for i in range(5):
+            assert f"TOK_P{i}".encode() in p.parser_tokens
+
+
+def _elf_with_rodata(rodata_bytes: bytes) -> bytes:
+    """Build a minimal ELF64 with a single SHT_PROGBITS .rodata section."""
+    elf = bytearray(0x2000)
+    elf[0:4] = b"\x7fELF"
+    elf[4] = 2  # ELFCLASS64
+    elf[5] = 1  # ELFDATA2LSB
+    struct.pack_into("<Q", elf, 40, 0x40)  # e_shoff
+    struct.pack_into("<H", elf, 58, 64)  # e_shentsize
+    struct.pack_into("<H", elf, 60, 2)  # e_shnum
+    struct.pack_into("<H", elf, 62, 0)  # e_shstrndx
+
+    shstrtab = b"\x00.shstrtab\x00.rodata\x00"
+    rodata_off = (0x40 + 3 * 64 + 7) & ~7  # 0x100
+    shstr_off = rodata_off + len(rodata_bytes)
+
+    def _shdr(sh_type, sh_name, sh_offset, sh_size):
+        sh = bytearray(64)
+        struct.pack_into("<I", sh, 0, sh_name)
+        struct.pack_into("<I", sh, 4, sh_type)
+        struct.pack_into("<Q", sh, 16, sh_offset)
+        struct.pack_into("<Q", sh, 24, sh_offset)
+        struct.pack_into("<Q", sh, 32, sh_size)
+
+        return bytes(sh)
+
+    elf[0x40:0x80] = _shdr(3, 0, shstr_off, len(shstrtab))  # shstrtab
+    elf[0x80:0xC0] = _shdr(1, 11, rodata_off, len(rodata_bytes))  # ".rodata" at 11
+    elf[rodata_off : rodata_off + len(rodata_bytes)] = rodata_bytes
+    elf[shstr_off : shstr_off + len(shstrtab)] = shstrtab
+    return bytes(elf)
+
+
+class TestRoDataWordConstantsProfile:
+    """TargetProfile rodata_word_constants field + profiler wiring."""
+
+    def test_default_empty(self):
+        p = TargetProfile()
+        assert p.rodata_word_constants == []
+
+    def test_to_dict_hex_roundtrip(self):
+        words = [b"\x0d\x0a\x1a\x0a", b"\x88\x77\x66\x55\x44\x33\x22\x11"]
+        p = TargetProfile(rodata_word_constants=words)
+        d = p.to_dict()
+        assert d["rodata_word_constants"] == ["0d0a1a0a", "8877665544332211"]
+        p2 = TargetProfile.from_dict(d)
+        assert p2.rodata_word_constants == words
+
+    def test_old_cache_without_field_loads_empty(self):
+        d = TargetProfile(rodata_word_constants=[b"\x0d\x0a\x1a\x0a"]).to_dict()
+        del d["rodata_word_constants"]
+        p = TargetProfile.from_dict(d)
+        assert p.rodata_word_constants == []
+
+    def test_profiler_populates_from_rodata(self, tmp_path):
+        elf = _elf_with_rodata(b"\x0d\x0a\x1a\x0a\x0d\x0a\x1a\x0a\x88\x77\x66\x55\x44\x33\x22\x11")
+        p_bin = tmp_path / "prof_words.elf"
+        p_bin.write_bytes(elf)
+
+        profiler = TargetProfiler(str(p_bin))
+        profile = TargetProfile()
+        profiler._extract_data_word_constants(profile)
+
+        assert b"\x0d\x0a\x1a\x0a" in profile.rodata_word_constants
+        assert b"\x88\x77\x66\x55\x44\x33\x22\x11" in profile.rodata_word_constants
+
+    def test_profiler_absent_target_stays_empty(self):
+        profiler = TargetProfiler("/nonexistent")
+        profile = TargetProfile()
+        profiler._extract_data_word_constants(profile)
+        assert profile.rodata_word_constants == []

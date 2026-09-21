@@ -75,7 +75,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 
 ### Static Target Analysis
 - **TargetProfiler**: ELF static analysis at startup — extracts string constants, function boundaries, magic bytes, and input format hints
-- **Auto-populated dictionary**: interesting strings (format specifiers, error messages, keywords) and magic bytes extracted from `.rodata`
+- **Auto-populated dictionary**: interesting strings (format specifiers, error messages, keywords), magic bytes, disassembly-extracted constants, literal 4/8-byte word constants from `.rodata`/`.data`/`.data.rel.ro` (honggfuzz `arch_elfCollectRoValues` ro32/ro64 parity), and Bison/Yacc parser token tables (`yytname`/`yyTokenName` pointer-array walks, honggfuzz `arch_bfdExtractStrArray` parity) extracted from the target — merged in fixed channel order by `Fuzzer._merge_profile_dictionary`
 - **Format-aware seed generation**: produces structurally meaningful initial seeds (PNG headers, text protocols, JSON, XML, HTML) based on inferred format
 - **Informative Bayesian priors**: `format_operator_priors()` seeds the Thompson-sampling bandit's Beta prior toward structure-aware operators (e.g. `png_chunk_mutate`) and dictionary operators when static analysis detects a matching format or extractable tokens, instead of always starting from the uninformative Beta(1, 1)
 - **Hot-function weighting**: seeds exercising high-branch-density functions get a proportional boost in selection

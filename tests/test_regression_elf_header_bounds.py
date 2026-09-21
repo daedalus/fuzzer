@@ -24,6 +24,7 @@ from fuzzer_tool.core.elf import (
     _text_size,
     branch_density,
     extract_constants_pure,
+    extract_data_word_constants,
     extract_div_constants,
 )
 
@@ -33,9 +34,16 @@ ANALYSERS = [
     (_text_size, None),
     (extract_constants_pure, []),
     (extract_div_constants, ({}, set())),
+    (extract_data_word_constants, []),
 ]
 
-ANALYSER_IDS = ["branch_density", "_text_size", "extract_constants_pure", "extract_div_constants"]
+ANALYSER_IDS = [
+    "branch_density",
+    "_text_size",
+    "extract_constants_pure",
+    "extract_div_constants",
+    "extract_data_word_constants",
+]
 
 
 def _elf64(

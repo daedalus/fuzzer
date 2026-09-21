@@ -89,6 +89,10 @@ class TargetProfile:
     # Capstone-based constant extraction from disassembly
     extracted_constants: list[bytes] = field(default_factory=list)
 
+    # Literal word constants from .rodata/.data/.data.rel.ro
+    # (honggfuzz arch_elfCollectRoValues ro32/ro64 parity)
+    rodata_word_constants: list[bytes] = field(default_factory=list)
+
     # Parser token tables (Bison/Yacc yytname, yyTokenName, etc.)
     parser_tokens: list[bytes] = field(default_factory=list)
 
@@ -118,6 +122,7 @@ class TargetProfile:
             "interesting_strings": self.interesting_strings,
             "magic_bytes": [b.hex() for b in self.magic_bytes],
             "extracted_constants": [b.hex() for b in self.extracted_constants],
+            "rodata_word_constants": [b.hex() for b in self.rodata_word_constants],
             "parser_tokens": [b.hex() for b in self.parser_tokens],
             "functions": {k: v.to_dict() for k, v in self.functions.items()},
             "hot_functions": self.hot_functions,
@@ -138,6 +143,7 @@ class TargetProfile:
             interesting_strings=d.get("interesting_strings", []),
             magic_bytes=[bytes.fromhex(b) for b in d.get("magic_bytes", [])],
             extracted_constants=[bytes.fromhex(b) for b in d.get("extracted_constants", [])],
+            rodata_word_constants=[bytes.fromhex(b) for b in d.get("rodata_word_constants", [])],
             parser_tokens=[bytes.fromhex(b) for b in d.get("parser_tokens", [])],
             functions={k: FunctionInfo.from_dict(v) for k, v in d.get("functions", {}).items()},
             hot_functions=d.get("hot_functions", []),
@@ -278,6 +284,9 @@ class TargetProfiler:
 
         # 2. Capstone compile-time constant extraction (disassembly immediates)
         self._extract_constants(profile)
+
+        # 2b. Literal word constants from .rodata/.data/.data.rel.ro
+        self._extract_data_word_constants(profile)
 
         # 3. Function analysis
         self._analyze_functions(profile)
@@ -520,71 +529,99 @@ class TargetProfiler:
 
         Also looks for known symbol names in the symbol table.
         """
+        # honggfuzz arch_bfdExtractStrArray reads up to 2048 consecutive
+        # pointers starting at a symbol whose name matches a token-table
+        # pattern, and stops at a NULL entry or a pointer that leaves .rodata.
+        # The heuristic scan covers the whole section, budget-bounded, so a
+        # table past the old 4096-byte cap (e.g. a yytname with hundreds of
+        # terminals at the tail of a large .rodata) is still recovered.
         if ".rodata" not in self._sections:
             return
+        max_array_walk = 2048
+        heuristic_scan_budget = 32 * 1024 * 1024
 
         _, rodata_offset, _, rodata_size = self._sections[".rodata"]
         rodata = self._elf[rodata_offset : rodata_offset + rodata_size]
+        rodata_end = rodata_offset + rodata_size
 
         tokens: list[bytes] = []
         seen: set[bytes] = set()
+
+        def add_token(s: bytes) -> None:
+            if len(s) >= 1 and s not in seen:
+                tokens.append(s)
+                seen.add(s)
+
+        def resolve(ptr_val: int) -> bytes | None:
+            if not (rodata_offset <= ptr_val < rodata_end):
+                return None
+            str_off = ptr_val - rodata_offset
+            # Read null-terminated string
+            end = rodata.find(b"\x00", str_off)
+            if end < 0:
+                end = min(str_off + 64, len(rodata))
+            return rodata[str_off:end]
 
         # Check for known parser token table symbols
         known_names = {b"yytname", b"yyTokenName", b"yy_check", b"yytranslate"}
         for sym_name in known_names:
             # Find the symbol in the symbol table (_symtab is list of (name, addr, size, type))
             for sym_name_str, st_value, _st_size, _st_type in self._symtab:
-                if sym_name in sym_name_str.encode("utf-8", errors="replace"):
-                    if st_value == 0:
+                if sym_name not in sym_name_str.encode("utf-8", errors="replace"):
+                    continue
+                if st_value == 0:
+                    continue
+                # Find which section contains this address
+                for _sec_name, (_sec_idx, sec_off, sec_addr, _sec_size) in self._sections.items():
+                    if not (sec_addr <= st_value < sec_addr + _sec_size):
                         continue
-                    # Find which section contains this address
-                    for _sec_name, (
-                        _sec_idx,
-                        sec_off,
-                        sec_addr,
-                        _sec_size,
-                    ) in self._sections.items():
-                        if sec_addr <= st_value < sec_addr + _sec_size:
-                            # Read pointer from the section
-                            ptr_offset = st_value - sec_addr + sec_off
-                            if ptr_offset + 8 > len(self._elf):
-                                continue
-                            # Try 8-byte pointers first (64-bit), then 4-byte
-                            for ptr_size in (8, 4):
-                                if ptr_offset + ptr_size > len(self._elf):
-                                    continue
-                                if ptr_size == 8:
-                                    import struct
-
-                                    ptr_val = struct.unpack_from("<Q", self._elf, ptr_offset)[0]
-                                else:
-                                    import struct
-
-                                    ptr_val = struct.unpack_from("<I", self._elf, ptr_offset)[0]
-                                # Check if pointer points into .rodata
-                                if rodata_offset <= ptr_val < rodata_offset + rodata_size:
-                                    str_off = ptr_val - rodata_offset
-                                    # Read null-terminated string
-                                    end = rodata.find(b"\x00", str_off)
-                                    if end < 0:
-                                        end = min(str_off + 64, len(rodata))
-                                    s = rodata[str_off:end]
-                                    if len(s) >= 1 and s not in seen:
-                                        tokens.append(s)
-                                        seen.add(s)
-                            break
+                    # Read pointer from the section
+                    ptr_offset = st_value - sec_addr + sec_off
+                    if ptr_offset + 8 > len(self._elf):
+                        continue
+                    # Try 8-byte pointers first (64-bit), then 4-byte
+                    for ptr_size in (8, 4):
+                        if ptr_offset + ptr_size > len(self._elf):
+                            continue
+                        # Walk the array: consecutive pointers until a NULL
+                        # entry or a pointer leaving .rodata stops the walk.
+                        found_any = False
+                        for i in range(max_array_walk):
+                            pos = ptr_offset + i * ptr_size
+                            if pos + ptr_size > len(self._elf):
+                                break
+                            ptr_val = (
+                                struct.unpack_from("<Q", self._elf, pos)[0]
+                                if ptr_size == 8
+                                else struct.unpack_from("<I", self._elf, pos)[0]
+                            )
+                            if ptr_val == 0:
+                                break  # NULL terminator
+                            s = resolve(ptr_val)
+                            if s is None:
+                                break  # pointer leaves .rodata
+                            # A token table holds printable token names.
+                            if not all(32 <= b < 127 for b in s):
+                                break
+                            add_token(s)
+                            found_any = True
+                        if found_any:
+                            break  # 8-byte walk sufficed; do not re-read as 4-byte
+                    break
 
         # Heuristic: scan .rodata for pointer arrays to strings
         # Look for consecutive pointers (4 or 8 bytes each) pointing to
         # strings within .rodata. A valid token table has 5+ consecutive
         # valid pointers.
-        import struct
-
         for ptr_size in (8, 4):
             fmt = "<Q" if ptr_size == 8 else "<I"
             stride = ptr_size
-            # Scan with stride alignment
-            for off in range(0, min(len(rodata) - stride * 5, 4096), stride):
+            # Scan with stride alignment, budget-bounded over the whole
+            # section (was hard-capped at 4096 bytes).
+            scan_limit = min(max(0, len(rodata) - stride * 5), heuristic_scan_budget)
+            if scan_limit != len(rodata) - stride * 5:
+                log.info("Parser-token heuristic scan clamped to budget for large .rodata")
+            for off in range(0, scan_limit, stride):
                 valid_ptrs = 0
                 table_tokens = []
                 for i in range(32):  # max 32 entries per table
@@ -593,13 +630,9 @@ class TargetProfiler:
                         break
                     ptr_val = struct.unpack_from(fmt, rodata, pos)[0]
                     # Check if pointer points to a string in .rodata
-                    if rodata_offset <= ptr_val < rodata_offset + rodata_size:
-                        str_off = ptr_val - rodata_offset
-                        end = rodata.find(b"\x00", str_off)
-                        if end < 0:
-                            break
-                        s = rodata[str_off:end]
-                        if len(s) >= 1 and all(32 <= b < 127 for b in s):
+                    if rodata_offset <= ptr_val < rodata_end:
+                        s = resolve(ptr_val)
+                        if s is not None and all(32 <= b < 127 for b in s):
                             valid_ptrs += 1
                             if s not in seen:
                                 table_tokens.append(s)
@@ -641,6 +674,28 @@ class TargetProfiler:
                 )
         except Exception as e:
             log.debug("Constant extraction failed: %s", e)
+
+    def _extract_data_word_constants(self, profile: TargetProfile):
+        """Extract literal word constants from rodata/data sections.
+
+        Mirrors honggfuzz's arch_elfCollectRoValues ro32/ro64 channel: aligned
+        4/8-byte words in .rodata/.data/.data.rel.ro become little-endian
+        dictionary tokens. Read from disk through the elf module so the
+        shared, bounds-checked section walk is the single source of truth.
+        """
+        try:
+            from fuzzer_tool.core.elf import extract_data_word_constants
+
+            constants = extract_data_word_constants(self.target)
+            if constants:
+                profile.rodata_word_constants = constants
+                log.info(
+                    "Extracted %d data-word constants from %s",
+                    len(constants),
+                    self.target,
+                )
+        except Exception as e:
+            log.debug("Data-word constant extraction failed: %s", e)
 
     def _analyze_functions(self, profile: TargetProfile):
         """Analyze functions: sizes, branch density, hot functions."""

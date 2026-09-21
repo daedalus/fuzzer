@@ -3,6 +3,7 @@
 import atexit
 import collections
 import contextlib
+import itertools
 import logging
 import math
 import os
@@ -1569,28 +1570,11 @@ class Fuzzer:
 
             self.map_size = estimate_map_size(target, profile=self._profile)
 
-        # Auto-populate dictionary from extracted strings and magic bytes
-        if self._profile.interesting_strings:
-            for s in self._profile.interesting_strings[:200]:
-                token = s.encode("utf-8", errors="replace")
-                if token not in self.dictionary:
-                    self.dictionary.append(token)
-        if self._profile.magic_bytes:
-            for mb in self._profile.magic_bytes:
-                if mb not in self.dictionary:
-                    self.dictionary.append(mb)
-
-        # Auto-populate dictionary from disassembly-extracted constants
-        if self._profile.extracted_constants:
-            for c in self._profile.extracted_constants:
-                if c not in self.dictionary and len(c) >= 2:
-                    self.dictionary.append(c)
-
-        # Auto-populate dictionary from parser token tables (Bison/Yacc)
-        if self._profile.parser_tokens:
-            for t in self._profile.parser_tokens:
-                if t not in self.dictionary:
-                    self.dictionary.append(t)
+        # Auto-populate dictionary from the target profile (strings, magic
+        # bytes, disassembly constants, literal data-section words, parser
+        # token tables). Channel order is stable so corpus discovery does not
+        # depend on hash iteration order.
+        self._merge_profile_dictionary()
 
         # Cmplog: comparison tracing via LD_PRELOAD
         self._cmplog = None
@@ -2068,9 +2052,7 @@ class Fuzzer:
         self._alphabeta = None
         if self._use_alphabeta and not lineage:
             lineage = True
-            log.info(
-                "--alphabeta implies --lineage (the arm schedules over the lineage tree)"
-            )
+            log.info("--alphabeta implies --lineage (the arm schedules over the lineage tree)")
 
         self._lineage = None
         if lineage:
@@ -7596,6 +7578,27 @@ class Fuzzer:
                 "than operands. Rebuild with -fno-builtin-memcmp "
                 "(and -strcmp, -strncmp) to recover them."
             )
+
+    def _merge_profile_dictionary(self) -> None:
+        """Fold the target profile's token channels into ``self.dictionary``.
+
+        Channel order is fixed so dictionary contents do not depend on hash
+        iteration order. Strings and parser tokens may be single bytes; the
+        constant channels (disassembly and literal data words) skip tokens
+        shorter than 2 bytes -- single-byte values are too noisy.
+        """
+        profile = self._profile
+
+        def merge(tokens, min_len=1, limit=None):
+            for t in itertools.islice(tokens, limit):
+                if len(t) >= min_len and t not in self.dictionary:
+                    self.dictionary.append(t)
+
+        merge((s.encode("utf-8", errors="replace") for s in profile.interesting_strings), limit=200)
+        merge(profile.magic_bytes)
+        merge(profile.extracted_constants, min_len=2)
+        merge(profile.rodata_word_constants, min_len=2)
+        merge(profile.parser_tokens)
 
     def _print_enabled_features(self) -> None:
         """Print every enabled feature, grouped by category."""

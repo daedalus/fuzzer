@@ -1349,6 +1349,159 @@ def _read_target_elf(target: str) -> bytes | None:
         return None
 
 
+# ── Section-header table scan (shared, bounds-checked) ──────────────────
+
+# Section names that hold interesting word constants, mirroring honggfuzz's
+# arch_isInterestingSection (rodata, data, data.rel.ro, and the suffixed
+# variants; .text excluded).
+_SECT_WORD_EXACT = (b".rodata", b".data", b".data.rel.ro")
+_SECT_WORD_PREFIXES = (b".rodata.", b".data.rel.ro.")
+
+# A .rodata.data-probing cap guards against a huge or degenerate section
+# flooding the dictionary: collect at most 8192 raw words, dedupe, then
+# emit at most 1024 tokens.
+_DATA_WORD_COLLECT_CAP = 8192
+_DATA_WORD_RESULT_CAP = 1024
+
+
+def _iter_sections(elf: bytes):
+    """Yield ``(name, sh_type, sh_addr, sh_offset, sh_size)`` for every
+    SHT_PROGBITS section with a non-empty name.
+
+    Bounds-checked against the same hostile-header regime as
+    ``_find_text_section``: a corrupt or malicious binary must be declined,
+    never crash the prologue. The section-header table and the shstrtab
+    offset are validated before any unpack.
+    """
+    n = len(elf)
+    if n < 64 or elf[:4] != b"\x7fELF" or elf[4] != 2 or elf[5] != 1:
+        return
+
+    e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+    e_shnum = struct.unpack_from("<H", elf, 60)[0]
+    e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+    e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
+
+    if e_shnum == 0 or e_shstrndx >= e_shnum:
+        return
+    if e_shentsize < _ELF64_SHDR_MIN:
+        return
+    # The whole section-header table must lie inside the buffer.  Phrased as
+    # a subtraction so a 64-bit e_shoff cannot overflow the comparison.
+    if e_shoff == 0 or e_shoff > n or e_shnum * e_shentsize > n - e_shoff:
+        return
+
+    shstr_off = e_shoff + e_shstrndx * e_shentsize
+    shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
+
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
+        if sh_type != 1:  # SHT_PROGBITS
+            continue
+        sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
+        name_at = min(shstr_offset + sh_name_idx, n)
+        # Slicing clamps, so an out-of-range name reads as empty.
+        name = elf[name_at : name_at + 128].split(b"\x00")[0]
+        if not name:
+            continue
+        sh_addr = struct.unpack_from("<Q", elf, sh + 16)[0]
+        sh_offset = struct.unpack_from("<Q", elf, sh + 24)[0]
+        sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
+        yield name, sh_type, sh_addr, sh_offset, sh_size
+
+
+def _find_text_section(elf: bytes) -> tuple[bytes, int, int] | None:
+    """Locate ``.text`` in a 64-bit little-endian ELF image.
+
+    Returns ``(text_data, sh_addr, sh_size)``, or ``None`` when the image is
+    not a usable ELF64 or its section-header table does not fit inside the
+    buffer.
+
+    Every offset derived from the header is attacker-controlled -- the target
+    path is a command-line argument, and a corrupt or hostile binary must make
+    the fuzzer decline to analyse it, not abort out of startup.  The four
+    callers each inlined this prologue with no bounds check on ``e_shoff``, so
+    a crafted value reached ``struct.unpack_from("<Q", elf, shstr_off + 24)``
+    and raised ``struct.error`` before any target ran (finding #23; it also
+    violates the repo's own bounds-check rule).  The per-entry
+    ``sh + e_shentsize > len(elf)`` guard the loops did have is not enough on
+    its own: it says nothing about where the table starts, and it passes for a
+    small ``e_shentsize`` while ``sh + 32`` still reads past the buffer.
+
+    Sharing one prologue is the other half of the fix.  Four copies of the
+    same parse is exactly the "fixed classes recur in sibling files" pattern
+    the bug report calls out, and the next bounds bug found here would
+    otherwise have to be fixed four times again.
+    """
+    for name, _t, sh_addr, sh_offset, sh_size in _iter_sections(elf):
+        if name == b".text":
+            return elf[sh_offset : sh_offset + sh_size], sh_addr, sh_size
+    return None
+
+
+def extract_data_word_constants(target: str) -> list[bytes]:
+    """Extract literal word constants from rodata/.data as little-endian bytes.
+
+    Mirrors honggfuzz's ``arch_elfCollectRoValues`` ro32/ro64 channel: every
+    aligned 4- and 8-byte word in the interesting data sections is collected,
+    deduplicated, and packed into dictionary tokens. These catch comparison
+    constants (file magics, checksums, boundary values) that live in data
+    rather than as immediates in ``.text``.
+
+    Noise words (0, counters, -1, page-aligned addresses) are excluded through
+    the same ``_is_noise_immediate`` filter the disassembly extractor uses.
+
+    Returns:
+        List of unique little-endian byte words (capped), or [] on failure.
+    """
+    elf = _read_target_elf(target)
+    if elf is None:
+        return []
+
+    def _is_interesting(name: bytes) -> bool:
+        if name in _SECT_WORD_EXACT:
+            return True
+        return any(name.startswith(p) for p in _SECT_WORD_PREFIXES)
+
+    words: set[int] = set()
+    for _name, _t, _addr, offset, size in _iter_sections(elf):
+        if not _is_interesting(_name):
+            continue
+        if size <= 0 or offset > len(elf):
+            continue
+        section = elf[offset : offset + size]
+        for width in (8, 4):  # u64 first, then u32, like honggfuzz
+            n_words = size // width
+            for i in range(min(n_words, _DATA_WORD_COLLECT_CAP)):
+                value = struct.unpack_from("<Q" if width == 8 else "<I", section, i * width)[0]
+                if width == 8:
+                    # A 64-bit window that straddles noise u32 words (counters,
+                    # -1 halves) yields a padded garbage token; keep only words
+                    # whose two 32-bit halves are individually interesting.
+                    lo, hi = value & 0xFFFFFFFF, value >> 32
+                    if lo == 0 or hi == 0:
+                        continue
+                    if _is_noise_immediate(lo, 4) or _is_noise_immediate(hi, 4):
+                        continue
+                elif value == 0 or _is_noise_immediate(value, width):
+                    continue
+                words.add(value)
+            if len(words) >= _DATA_WORD_COLLECT_CAP:
+                break
+
+    if not words:
+        return []
+
+    # Pack each word as its minimal little-endian representation, at least 4
+    # bytes wide (mirroring the honggfuzz ro32/ro64 token, deduped by value).
+    result = sorted(v.to_bytes(max(4, (v.bit_length() + 7) // 8), "little") for v in words)[
+        :_DATA_WORD_RESULT_CAP
+    ]
+    log.info("Data-word constants: extracted %d values from %s", len(result), target)
+    return result
+
+
 def branch_density(target: str) -> float | None:
     """Compute branch density (conditional branches per KB) of a binary.
 

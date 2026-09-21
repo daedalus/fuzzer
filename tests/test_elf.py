@@ -1504,3 +1504,163 @@ class TestNgramSizing:
         assert est.ngram_k == 2
         assert est.entries == MAP_SIZE_DEFAULT
         assert est.source == "default"
+
+
+def _build_data_section_header(sh_type, sh_name, sh_offset, sh_size):
+    """Build a spec-correct 64-byte section header.
+
+    Distinct from ``_build_section_header`` above, whose ``sh_offset``/``sh_size``
+    parameters land in the sh_addr / sh_offset fields. The data-word parser reads
+    sh_addr@16, sh_offset@24, sh_size@32, so this helper packs them correctly.
+    """
+    sh = bytearray(64)
+    struct.pack_into("<I", sh, 0, sh_name)
+    struct.pack_into("<I", sh, 4, sh_type)
+    struct.pack_into("<Q", sh, 16, sh_offset)
+    struct.pack_into("<Q", sh, 24, sh_offset)
+    struct.pack_into("<Q", sh, 32, sh_size)
+    return bytes(sh)
+
+
+def _build_data_elf(sections):
+    """Build a complete ELF64 with named sections and a shstrtab.
+
+    ``sections`` is a list of ``(name: bytes, sh_type: int, data: bytes)``.
+    The shstrtab lives at section-header index 0; each listed section follows.
+    Every section body is placed 8-byte aligned, and its header points at the
+    real file offset/size so ``_iter_sections`` reads the data back.
+    """
+    names = [b".shstrtab"] + [s[0] for s in sections]
+    shstr = b"\x00" + b"".join(nm + b"\x00" for nm in names)
+    name_off: dict[bytes, int] = {}
+    cursor = 1
+    for nm in names:
+        name_off[nm] = cursor
+        cursor += len(nm) + 1
+
+    n_secs = len(sections) + 1
+    shoff = 0x40
+    dstart = (shoff + n_secs * 64 + 7) & ~7
+    elf = bytearray(dstart + len(shstr) + 32)
+
+    elf[:64] = _build_elf64_header(e_shoff=shoff, e_shnum=n_secs, e_shentsize=64, e_shstrndx=0)
+
+    locs = []
+    cursor = dstart
+    for _nm, _t, data in sections:
+        locs.append(cursor)
+        elf[cursor : cursor + len(data)] = data
+        cursor += len(data)
+    shstr_off = cursor
+    elf[shstr_off : shstr_off + len(shstr)] = shstr
+
+    base = shoff
+    elf[base : base + 64] = _build_data_section_header(3, 0, shstr_off, len(shstr))
+    for (nm, t, data), loc in zip(sections, locs, strict=True):
+        base += 64
+        elf[base : base + 64] = _build_data_section_header(t, name_off[nm], loc, len(data))
+    return bytes(elf)
+
+
+class TestExtractDataWordConstants:
+    """extract_data_word_constants — honggfuzz arch_elfCollectRoValues parity."""
+
+    def _write(self, tmp_path, sections):
+        p = tmp_path / "data_words.elf"
+        p.write_bytes(_build_data_elf(sections))
+        return str(p)
+
+    def test_pulls_aligned_words_from_rodata_and_data(self, tmp_path):
+        from fuzzer_tool.core.elf import extract_data_word_constants
+
+        rodata = b"\x0d\x0a\x1a\x0a\x0d\x0a\x1a\x0a"  # u32 0x0A1A0A0D x2, u64 0x0A1A0A0D0A1A0A0D
+        data = b"\x88\x77\x66\x55\x44\x33\x22\x11"  # u32 0x55667788, u64 0x1122334455667788
+        path = self._write(tmp_path, [(b".rodata", 1, rodata), (b".data", 1, data)])
+
+        result = extract_data_word_constants(path)
+
+        assert b"\x0d\x0a\x1a\x0a" in result  # u32 pass, .rodata
+        assert b"\x0d\x0a\x1a\x0a\x0d\x0a\x1a\x0a" in result  # u64 pass, same value widened
+        assert b"\x88\x77\x66\x55\x44\x33\x22\x11" in result  # u64 pass, .data
+        assert b"\x88\x77\x66\x55" in result  # u32 pass, .data high half
+        assert len(set(result)) == len(result)  # int-deduped across passes/sections
+
+    def test_noise_words_excluded(self, tmp_path):
+        """0 / small counters / -1 / page-aligned addresses never reach the dict."""
+        from fuzzer_tool.core.elf import extract_data_word_constants
+
+        rodata = (
+            b"\x00\x00\x00\x00"  # 0
+            b"\x2a\x00\x00\x00"  # 42
+            b"\x7f\x00\x00\x00"  # 127
+            b"\x00\x00\x00\x00"  # 0
+            b"\xff\xff\xff\xff\xff\xff\xff\xff"  # -1 (u64)
+            b"\x00\x00\x00\x00\xff\xff\xff\xff"  # 0xFFFFFFFF00000000 (page-aligned, hi-bit)
+        )
+        path = self._write(tmp_path, [(b".rodata", 1, rodata)])
+        assert extract_data_word_constants(path) == []
+
+    def test_non_progbits_and_unnamed_sections_ignored(self, tmp_path):
+        """SHT_NOBITS .rodata, SHT_STRTAB .data, and any .text/.comment are skipped."""
+        from fuzzer_tool.core.elf import extract_data_word_constants
+
+        magic = b"\x0d\x0a\x1a\x0a"  # 0x0A1A0A0D — valid word, must still be skipped
+        path = self._write(
+            tmp_path,
+            [
+                (b".rodata", 8, magic),  # SHT_NOBITS — not in the file
+                (b".data", 3, b"\x88\x77\x66\x55"),  # SHT_STRTAB
+                (b".text", 1, magic),  # .text excluded by name
+                (b".comment", 1, magic),  # not an interesting name
+            ],
+        )
+        assert extract_data_word_constants(path) == []
+
+    def test_misaligned_u64_only_caught_by_u32_pass(self, tmp_path):
+        """A qword spanning bytes 4..11 is invisible to the aligned u64 scan."""
+        from fuzzer_tool.core.elf import extract_data_word_constants
+
+        rodata = b"\xff\xff\xff\xff" + b"\x88\x77\x66\x55\x44\x33\x22\x11"
+        path = self._write(tmp_path, [(b".rodata", 1, rodata)])
+
+        result = extract_data_word_constants(path)
+
+        assert b"\x88\x77\x66\x55\x44\x33\x22\x11" not in result  # u64 pass missed it
+        assert b"\x88\x77\x66\x55" in result  # u32 pass caught the high half
+        assert b"\x44\x33\x22\x11" in result  # u32 pass caught the low half
+
+    def test_bad_targets_return_empty(self, tmp_path):
+        from fuzzer_tool.core.elf import extract_data_word_constants
+
+        assert extract_data_word_constants("/dev/null") == []
+        assert extract_data_word_constants(str(tmp_path / "missing")) == []
+        p = tmp_path / "nonelf"
+        p.write_bytes(b"MZ" + b"\x00" * 128)
+        assert extract_data_word_constants(str(p)) == []
+        p2 = tmp_path / "trunc"
+        p2.write_bytes(b"\x7fELF\x02\x01")
+        assert extract_data_word_constants(str(p2)) == []
+
+    def test_iter_sections_rejects_hostile_headers(self):
+        """The shared section iterator must decline tainted headers, not raise."""
+        from fuzzer_tool.core.elf import _iter_sections
+
+        head = bytearray(b"\x7fELF\x02\x01\x01\x00" + b"\x00" * 56)
+        struct.pack_into("<Q", head, 40, 0xDEADBEEF)  # e_shoff far past EOF
+        struct.pack_into("<H", head, 58, 64)  # e_shentsize
+        struct.pack_into("<H", head, 60, 5)  # e_shnum
+        struct.pack_into("<H", head, 62, 1)  # e_shstrndx
+        assert list(_iter_sections(bytes(head))) == []
+
+        assert list(_iter_sections(b"MZ" + b"\x00" * 256)) == []
+        assert list(_iter_sections(b"\x7fELF\x02\x01" + b"\x00" * 10)) == []
+
+    def test_iter_sections_yields_only_progbits_with_names(self, tmp_path):
+        from fuzzer_tool.core.elf import _iter_sections
+
+        elf = _build_data_elf([(b".rodata", 1, b"\x0d\x0a\x1a\x0a"), (b".text", 1, b"\xc3")])
+        got = list(_iter_sections(elf))
+        assert [(name, off, sz) for name, _t, off, _a, sz in got] == [
+            (b".rodata", 0x100, 4),
+            (b".text", 0x104, 1),
+        ]

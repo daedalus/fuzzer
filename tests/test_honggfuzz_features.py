@@ -708,6 +708,24 @@ class TestParserTokens:
         p2 = TargetProfile.from_dict(d)
         assert p2.parser_tokens == [b"token1", b"token2"]
 
+    def test_rodata_word_constants_serialization(self):
+        from fuzzer_tool.core.target_profiler import TargetProfile
+
+        p = TargetProfile(rodata_word_constants=[b"\x0d\x0a\x1a\x0a", b"\x88\x77\x66\x55"])
+        d = p.to_dict()
+        assert d["rodata_word_constants"] == ["0d0a1a0a", "88776655"]
+
+        p2 = TargetProfile.from_dict(d)
+        assert p2.rodata_word_constants == [b"\x0d\x0a\x1a\x0a", b"\x88\x77\x66\x55"]
+
+    def test_rodata_word_constants_absent_in_old_cache(self):
+        from fuzzer_tool.core.target_profiler import TargetProfile
+
+        # An old cache predates the field: from_dict must fall back to [].
+        d = {"parser_tokens": ["746f6b"]}
+        p = TargetProfile.from_dict(d)
+        assert p.rodata_word_constants == []
+
 
 # ── Save Crash with Stack Hash ──────────────────────────────────────
 
