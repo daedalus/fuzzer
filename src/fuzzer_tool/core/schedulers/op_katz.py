@@ -54,6 +54,16 @@ import numpy as np
 from fuzzer_tool.core.rand_pool import RandPool
 
 DEFAULT_ALPHA_FRACTION = 0.85  # fraction of 1/spectral_radius(A) to use
+# Fraction of uniform mixed into select_op's probability vector, not an
+# absolute per-arm constant -- same relative-floor convention op_cmaes.py's
+# _softmax(floor_frac=0.06) uses and OpKuramotoScheduler's select_op (which
+# copied this exact draw) now also uses. See select_op's docstring: without
+# this, the first arm to register any success captures the whole
+# distribution permanently, confirmed via tests/support/bandit_env.py's
+# convergence harness (see docs/handover/handover_op_kuramoto_lockin_fix_2026-09-21.md,
+# which found and fixed the identical bug in the scheduler this one was
+# copied from before this one was checked too).
+DEFAULT_EXPLORE_FLOOR = 0.06
 
 
 def build_transition_matrix(
@@ -134,15 +144,28 @@ class OpKatzScheduler:
     Args:
         rng: Shared ``RandPool`` (Hard Rule 16).
         alpha_fraction: Passed through to :func:`classical_katz_scores`.
+        explore_floor: Fraction of uniform mixed into the selection
+            distribution in :meth:`select_op` -- see that method's
+            docstring for why this exists and why it is relative rather
+            than an absolute per-arm constant. Must be in ``[0, 1)``; 0
+            restores the original unfloored draw.
     """
 
     supports_priors = False
 
-    def __init__(self, rng: RandPool | None = None, alpha_fraction: float = DEFAULT_ALPHA_FRACTION):
+    def __init__(
+        self,
+        rng: RandPool | None = None,
+        alpha_fraction: float = DEFAULT_ALPHA_FRACTION,
+        explore_floor: float = DEFAULT_EXPLORE_FLOOR,
+    ):
         if rng is None:
             raise ValueError("OpKatzScheduler requires a RandPool (Hard Rule 16)")
+        if not (0.0 <= explore_floor < 1.0):
+            raise ValueError(f"explore_floor must be in [0, 1), got {explore_floor!r}")
         self._rng = rng
         self.alpha_fraction = alpha_fraction
+        self.explore_floor = explore_floor
         self.transition_counts: dict[str, dict[str, int]] = {}
         self.successes: dict[str, float] = {}
         self.attempts: dict[str, float] = {}
@@ -184,23 +207,54 @@ class OpKatzScheduler:
         c = classical_katz_scores(a, beta, self.alpha_fraction)
         return dict(zip(ops, c.tolist(), strict=True))
 
-    def select_op(self, ops: list[str]) -> str:
-        """Softmax-free weighted pick: scores shifted non-negative, sampled by mass.
+    def _select_probs(self, ops: list[str]) -> np.ndarray:
+        """Score-to-probability pipeline for :meth:`select_op`, split out so
+        it can be asserted on directly.
 
-        Uses a direct weighted draw (not a temperature softmax) since Katz
-        scores are already a bounded positive-ish quantity once shifted,
-        and reserving softmax/temperature for the Elo meta-layer above this
-        arm keeps the two exploration mechanisms from compounding.
+        Non-negative shift-and-normalize (the original draw, unchanged),
+        then a uniform floor mixed in as a fraction of uniform. Without the
+        floor, every never-attempted op scores exactly 0 (beta_i=0 with no
+        incoming Katz injection either), so the instant *any* op registers
+        its first success it jumps to a nonzero score while every
+        still-unpulled op sits at the bare ``1e-9`` shift constant -- a
+        ratio of several orders of magnitude, which the weighted draw reads
+        as "pick this op essentially forever," independent of whether it's
+        actually the best one. ``tests/support/bandit_env.py``'s
+        convergence harness confirmed this empirically for
+        ``OpKuramotoScheduler`` (which copied this exact draw): strictly
+        bimodal tail-share (0.0 or 1.0, never partial), 22/30 seeds
+        permanently stuck on a suboptimal arm (see
+        ``docs/handover/handover_op_kuramoto_lockin_fix_2026-09-21.md``).
+        Re-running the same harness directly against this scheduler
+        reproduced the identical failure here.
+
+        ``explore_floor`` (fraction of uniform, not an absolute per-arm
+        constant -- same convention ``op_cmaes.py``'s
+        ``_softmax(floor_frac=0.06)`` uses, for the same reason: an
+        absolute floor is negligible at a handful of arms and dominates
+        the whole distribution once the registry grows to the full
+        operator count) mixes in a guaranteed minimum share for every arm,
+        the same fix ``OpKuramotoScheduler.select_op`` now uses.
         """
-        if not ops:
-            return ""
-        if len(ops) == 1:
-            return ops[0]
         s = self.scores(ops)
         vals = np.array([s[op] for op in ops], dtype=np.float64)
         shifted = vals - vals.min() + 1e-9
         total = float(shifted.sum())
         probs = shifted / total if total > 0 else np.full(len(ops), 1.0 / len(ops))
+        floor = self.explore_floor / len(ops)
+        floored = np.maximum(probs, floor)
+        return floored / floored.sum()
+
+    def select_op(self, ops: list[str]) -> str:
+        """Weighted pick by Katz score, floored so a single early success
+        cannot capture the whole distribution permanently (see
+        :meth:`_select_probs`).
+        """
+        if not ops:
+            return ""
+        if len(ops) == 1:
+            return ops[0]
+        probs = self._select_probs(ops)
         r = self._rng.random()
         cumulative = 0.0
         for op, p in zip(ops, probs.tolist(), strict=True):

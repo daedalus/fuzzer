@@ -146,3 +146,58 @@ class TestOpKatzScheduler:
         picks1 = [sched1.select_op(ops) for _ in range(10)]
         picks2 = [sched2.select_op(ops) for _ in range(10)]
         assert picks1 == picks2
+
+    def test_rejects_bad_explore_floor(self):
+        with pytest.raises(ValueError):
+            OpKatzScheduler(rng=RandPool(seed=1), explore_floor=1.0)
+        with pytest.raises(ValueError):
+            OpKatzScheduler(rng=RandPool(seed=1), explore_floor=-0.1)
+
+    def test_floor_bounds_probability_away_from_certainty(self):
+        """Regression test for the lock-in bug: before the floor, a single
+        arm with any nonzero score against all-zero-score rivals captured
+        essentially 100% of the probability mass. With the floor, no arm's
+        probability can approach certainty and every zero-score arm keeps
+        a floor-sized share."""
+        sched = OpKatzScheduler(rng=RandPool(seed=5))
+        n = 12
+        ops = [f"op{i}" for i in range(n)]
+        sched.successes = {"op0": 1.0}
+        sched.attempts = dict.fromkeys(ops, 10.0)
+        probs = sched._select_probs(ops)
+        assert probs.sum() == pytest.approx(1.0)
+        assert probs[0] < 0.96
+        raw_floor = sched.explore_floor / n
+        for p in probs[1:]:
+            assert p >= raw_floor * 0.9
+
+    def test_explore_floor_zero_restores_old_unfloored_draw(self):
+        sched = OpKatzScheduler(rng=RandPool(seed=5), explore_floor=0.0)
+        sched.successes = {"tried": 5.0}
+        sched.attempts = {"tried": 10.0, "never_tried": 10.0}
+        probs = sched._select_probs(["tried", "never_tried"])
+        assert probs[1] < 0.06 / 2
+
+    def test_repeated_lockin_seed_no_longer_starves_true_best(self):
+        """End-to-end regression matching the bandit_env.py finding that
+        motivated this fix: a scheduler using the old unfloored draw could
+        get permanently stuck on a suboptimal arm after its first lucky
+        success. Post-fix the true best arm must keep receiving a
+        non-trivial share of the tail."""
+        import random as _random
+
+        best = "best"
+        arms = [best, "runner_up", "base", "d", "e"]
+        probs = {best: 0.30, "runner_up": 0.18, "base": 0.05, "d": 0.05, "e": 0.05}
+        sched = OpKatzScheduler(rng=RandPool(seed=1))
+        env_rng = _random.Random(1 ^ 0x5EED)
+        rounds = 20_000
+        tail_start = int(rounds * 0.8)
+        tail_picks = 0
+        for t in range(rounds):
+            op = sched.select_op(arms)
+            success = env_rng.random() < probs[op]
+            sched.record(op, success)
+            if t >= tail_start and op == best:
+                tail_picks += 1
+        assert tail_picks / (rounds - tail_start) > 0.0

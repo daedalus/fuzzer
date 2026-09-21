@@ -88,8 +88,8 @@ arm (e.g. a p=0.05 base-rate arm capturing 19945/20000 picks while the true
 p=0.30 best arm was starved after early exploration). Mean tail-share 0.267
 against Thompson sampling's 0.996 on the identical environment. The same
 shift-and-sample draw, copied unmodified, produces the same failure mode in
-``OpKatzScheduler`` (confirmed separately, not fixed here -- out of scope
-for this module).
+``OpKatzScheduler`` (confirmed separately; fixed there too, see
+``docs/handover/handover_op_katz_lockin_fix_2026-09-21.md``).
 
 This is exactly the "latching" failure ``op_cmaes.py``'s own ``_softmax``
 docstring already diagnosed and fixed for CMA-ES (measured there as the
