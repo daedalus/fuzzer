@@ -7766,17 +7766,13 @@ class Fuzzer:
             groups["Analysis"].append("region-profile")
         if getattr(self, "_calibrate", 0) > 0:
             groups["Analysis"].append(f"calibrate={self._calibrate}")
+        if getattr(self, "_use_bootstrap", False):
+            groups["Analysis"].append("bootstrap")
 
         if getattr(self, "_wfc_enabled", False):
             groups["Generation"].append("wfc")
-        if getattr(self, "_use_mcts", False):
-            groups["Generation"].append("mcts")
-        if getattr(self, "_use_alphabeta", False):
-            groups["Generation"].append("alphabeta")
         if getattr(self, "_corpus_boost", 0) > 0:
             groups["Generation"].append(f"corpus-boost={self._corpus_boost}")
-        if getattr(self, "_use_bootstrap", False):
-            groups["Generation"].append("bootstrap")
 
         if self.persistent:
             groups["Execution"].append("persistent")
