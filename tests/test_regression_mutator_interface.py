@@ -312,7 +312,9 @@ class TestGlobalRegistryUnaffected:
         the second; the four ``ff_*`` FormatFuzzer template mutators are the
         third; ``perlin_noise`` (coherent gradient-noise perturbation,
         core/mutations/perlin_noise.py) is the fourth; ``wfc_reorder_learned``
-        (learned-adjacency chunk reordering, core/wfc_chunks.py) is the fifth.
+        (learned-adjacency chunk reordering, core/wfc_chunks.py) is the fifth;
+        ``covering_array_ihdr`` (pairwise-covering PNG IHDR field mutation,
+        core/mutations/covering_array_mutate.py) is the sixth.
         Anything else here is a surprise.
 
         Note the ``ff_*`` entries are registered at import, unconditionally,
@@ -325,6 +327,7 @@ class TestGlobalRegistryUnaffected:
 
         names = sorted(m.name for m in REGISTRY.mutators())
         assert names == [
+            "covering_array_ihdr",
             "ff_isobmff",
             "ff_jpeg",
             "ff_png",
