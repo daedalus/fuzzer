@@ -111,6 +111,44 @@ ARMS: dict[str, list[str]] = {
         "--shaped-reward-floor",
         "0.25",
     ],
+    # Generation group (docs/handover/handover_generators_2026-09-20.md G0).
+    # Each pairs against the baseline named in ARM_BASELINES.
+    #
+    # wfc: --wfc turns on WFC chunk reordering for png/jpeg/bmp and the learned
+    # wfc_reorder_learned operator for isobmff/webp/riff/gif. Only targets that
+    # parse one of those formats can move: png_read and jpeg_read qualify,
+    # zlib/lz4/gzip are bit-for-bit deterministic and cannot produce a
+    # discordant pair (the handover's power note).
+    "wfc": ["--wfc"],
+    # mcts / alphabeta only mean anything under Elo arbitration, so they carry
+    # `elo-lineage` as their baseline: the same --elo/--mc-bandit stack plus
+    # --lineage, which both flags imply, so lineage bookkeeping is not
+    # attributed to the tree policy. Compare mcts against alphabeta directly
+    # (the E3 question) with `analyse --baseline elo-mcts`.
+    "elo-lineage": ["--elo", "--mc-bandit", "--lineage"],
+    "elo-mcts": ["--elo", "--mc-bandit", "--lineage", "--mcts"],
+    "elo-alphabeta": ["--elo", "--mc-bandit", "--lineage", "--alphabeta"],
+    # bootstrap runs only inside corpus minimization, and the recorded `edges`
+    # is the tracker's cumulative count, which minimization does not shrink.
+    # The arm can therefore only move `edges` through the corpus it leaves
+    # behind; check "Bootstrap percolation removed" appears in a cell's log
+    # before reading a null as evidence.
+    "bootstrap": ["--bootstrap"],
+}
+
+# The arms added for the generation group, in the order the handover lists them.
+GENERATION_ARMS = ("wfc", "elo-mcts", "elo-alphabeta", "bootstrap")
+
+# Which arm each one is paired against. `analyse --baseline` takes one name;
+# this records the intended pairing so a reviewer does not have to reverse it
+# from comments. Only arms whose baseline is not plain `baseline` need care,
+# but every generation arm is listed so a test can hold them to one rule: the
+# arm is its baseline plus added flags.
+ARM_BASELINES: dict[str, str] = {
+    "wfc": "baseline",
+    "elo-mcts": "elo-lineage",
+    "elo-alphabeta": "elo-lineage",
+    "bootstrap": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

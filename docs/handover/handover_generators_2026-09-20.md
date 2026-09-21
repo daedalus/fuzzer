@@ -16,9 +16,14 @@ is inlined in the appendix so it can be re-run from a clean checkout
 | **P2-3** cold-start seeds | `c5414f04` | see the addendum under P2-3 |
 | **P2-2** Boltzmann / cycle-lemma wiring | `9fb172f2`, `a9098a76` | `generate(boltzmann=True)` wired into `Grammar.mutate`'s replacement paths; `cycle_lemma_dyck_bytes` wired as the `tree_generate` operator. (Landed between this handover and the P2-1 pass below; not recorded here until now.) |
 | **P2-1** learned-adjacency WFC (isobmff/webp/riff/gif) | `fd7c5cf8` | `AdjacencyTable.from_corpus` had no caller, 0 formats beyond png/jpeg/bmp had a chunk-order table → `core/wfc_chunks.py` + `wfc_reorder_learned` operator, one learned table per format via `on_new_coverage`; re-parses 100% of calls, ≥95% of strict-mode calls change the input, 0.7–3 ms/call |
+| **G0** bench arms for the generation group | this commit | `bench_paired.py` had 0 arms for wfc/mcts/alphabeta/bootstrap → `wfc`, `elo-lineage` (baseline), `elo-mcts`, `elo-alphabeta`, `bootstrap`; `ARM_BASELINES` records each pairing and `tests/test_bench_paired_arms.py` holds every arm to "baseline + added flags" against the real parser. **No campaign was run**: these are registered arms, not results. |
 
-Still open: G0 and everything P3+ (ogg/flv/asf/mpegts/nal/zip left out of
+Still open: P3+ (ogg/flv/asf/mpegts/nal/zip left out of
 P2-1's rollout for a follow-up; see `core/wfc_chunks.py`'s module docstring).
+G0 gaps: no arm for `--grammar-boltzmann` (needs a target that consumes a
+grammar; none in `eval_set.py`) or `tree_generate` (no flag, always on when the
+seed has brackets, so it is a source-edit arm like `boltzmann-cost`), and no
+`ffmpeg_read` target set for the isobmff/riff/gif side of `wfc`.
 Tests run were the affected modules only (300 passed, 11
 skipped); a full-suite run was started and abandoned, and two failures seen in
 it (`test_integration::test_fuzzer_eps_minimum`,
