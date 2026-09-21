@@ -304,29 +304,56 @@ class MCTSSeedScheduler:
 
 
 class AlphaBetaMCTSSeedScheduler:
-    """Alpha-Beta pruning over LineageTree, selecting which corpus seed to fuzz next.
+    """Thompson-sampling descent over ``LineageTree`` (the ``alphabeta`` arm).
 
-    This scheduler replaces UCT descent with alpha-beta minimax over the lineage tree,
-    treating the fuzzer as maximizer and target response as minimizer.
-    Uses _squash(new_edges) as leaf evaluation function.
+    The class keeps its historical name so the ``--alphabeta`` flag, the
+    ``alphabeta`` Elo arm, the state-store key and every import keep working.
+    It is **no longer alpha-beta minimax**, and the name is the only thing left
+    of that design. The minimax version had three defects, measured in
+    ``docs/handover/handover_generators_2026-09-20.md`` (P0-1):
+
+    - ``select()`` returned only a *root*: in 300 rounds on a 363-node forest it
+      picked one distinct seed and no descendant, while UCT picked 170.
+    - There was no adversary. The "minimizer" took the min over children's
+      running means of the same reward, so a single sterile child zeroed a
+      whole subtree's value.
+    - No exploration: unvisited nodes scored a constant 0.5 and the best root
+      was chosen deterministically forever. Cost was 5–41 ms per pick.
+
+    This implementation walks the same tree as :class:`MCTSSeedScheduler`, but
+    each decision is a **posterior sample** instead of a UCT score, so it has no
+    exploration constant to tune and its uncertainty shrinks with evidence:
+
+    - Every node has a Beta posterior over its squashed reward, built from an
+      aggregate statistic (the node *and everything below it*, which drives the
+      descent) and a self statistic (only outcomes of fuzzing that exact seed,
+      which decides whether to stop there).
+    - At each step the options are {stop here, if eligible} plus each child.
+      One draw per option; the largest draw wins. An unvisited option is
+      Beta(1, 1), so it is explored in proportion to how much it could still
+      be worth.
+    - ``update()`` credits the path from the root down to the returned seed.
+
+    Children are visited in sorted-key order so the RNG draw order does not
+    depend on set iteration order (and therefore not on ``PYTHONHASHSEED``).
     """
 
     def __init__(
         self,
-        exploration: float = DEFAULT_EXPLORATION,
         max_depth: int = 64,
         rng: RandPool | None = None,
     ):
-        self.exploration = exploration
         self.max_depth = max_depth
         self._rng = rng if rng is not None else get_default_rand_pool()
 
-        # Visit counts and values for alpha-beta search (not UCT)
+        # key -> accumulated visits / summed squashed reward. No priors are
+        # stored: the Beta(1, 1) prior is applied at sampling time so an
+        # unvisited node costs no memory.
         self.visits: dict[str, float] = {}
         self.values: dict[str, float] = {}
+        self.self_visits: dict[str, float] = {}
+        self.self_values: dict[str, float] = {}
 
-        # The path from a root down to the node handed out by select(),
-        # retained so we can update statistics without re-walking.
         self._last_path: list[str] = []
         self._last_selected: str | None = None
 
@@ -335,164 +362,107 @@ class AlphaBetaMCTSSeedScheduler:
 
     # ── statistics ─────────────────────────────────────────────────────
 
-    def _visits(self, key: str) -> float:
-        return self.visits.get(key, 0.0)  # No priors for alpha-beta
-
     def _value(self, key: str) -> float:
-        """Mean squashed reward for *key*."""
-        visits = self._visits(key)
-        if visits == 0:
-            return 0.0
-        return self.values.get(key, 0.0) / visits
+        """Mean squashed reward for *key* (0.0 before any visit)."""
+        v = self.visits.get(key, 0.0)
+        return self.values.get(key, 0.0) / v if v > 0 else 0.0
+
+    def _draw(self, keys: list[str]) -> list[float]:
+        """One Beta draw per key from the aggregate (subtree) posterior."""
+        alphas = [1.0 + self.values.get(k, 0.0) for k in keys]
+        betas = [1.0 + max(self.visits.get(k, 0.0) - self.values.get(k, 0.0), 0.0) for k in keys]
+        return [float(x) for x in self._rng.betavariate_array(alphas, betas)]
+
+    def _draw_self(self, key: str) -> float:
+        """One Beta draw from the posterior of fuzzing *key* itself."""
+        v = self.self_visits.get(key, 0.0)
+        r = self.self_values.get(key, 0.0)
+        return self._rng.betavariate(1.0 + r, 1.0 + max(v - r, 0.0))
 
     # ── selection ──────────────────────────────────────────────────────
 
     def select(self, tree: LineageTree, eligible: set[str]) -> str | None:
-        """Select a seed using alpha-beta minimax over the lineage tree.
+        """Descend the lineage forest by posterior sampling; return a seed key.
 
         Args:
-            tree: The lineage forest to search.
-            eligible: Keys currently backed by a live corpus entry.
+            tree: The lineage forest to walk.
+            eligible: Keys currently backed by a live corpus entry. The walk may
+                pass *through* an ineligible node but never returns one.
 
         Returns:
-            A key from *eligible*, or None if no reachable eligible node.
+            A key from *eligible* (a root **or any descendant**), or None when
+            the tree offers no reachable eligible node — the caller should fall
+            back to another strategy.
         """
         if not eligible:
             return None
 
-        roots = self._roots(tree, eligible)
+        roots = sorted(self._roots(tree, eligible))
         if not roots:
             return None
 
-        # Use alpha-beta search with iterative deepening
-        best_key = None
-        best_value = -float("inf")
+        draws = self._draw(roots)
+        node_key = roots[max(range(len(roots)), key=draws.__getitem__)]
 
-        # Try increasing depths for iterative deepening
-        for depth in range(1, self.max_depth + 1):
-            alpha = -float("inf")
-            beta = float("inf")
+        path = [node_key]
+        best_eligible = node_key if node_key in eligible else None
 
-            # Evaluate each root
-            for root in roots:
-                value = self._alpha_beta(tree, root, depth, alpha, beta, True, eligible)
-                if value > best_value:
-                    best_value = value
-                    best_key = root
-                # Update alpha for move ordering
-                if value > alpha:
-                    alpha = value
+        for _ in range(self.max_depth):
+            children = sorted(c for c in tree._children.get(node_key, ()) if c in tree.nodes)
+            if not children:
+                break
+            child_draws = self._draw(children)
+            best_i = max(range(len(children)), key=child_draws.__getitem__)
 
-            # If we found a good move, we can use it for move ordering in next iteration
-            if best_key is not None and len(roots) > 1 and roots[0] != best_key:
-                # Reorder roots to try the best one first next time (simple move ordering)
-                roots = [best_key] + [r for r in roots if r != best_key]
+            # Stopping is a real action that competes with descending; without
+            # it the walk would always bottom out at a leaf and interior seeds
+            # (including imported roots) would never be chosen.
+            if node_key in eligible and self._draw_self(node_key) >= child_draws[best_i]:
+                best_eligible = node_key
+                break
 
-        if best_key is None:
-            # Fallback to first eligible root
-            best_key = next(iter(roots)) if roots else None
+            node_key = children[best_i]
+            path.append(node_key)
+            if node_key in eligible:
+                best_eligible = node_key
 
-        if best_key is None or best_key not in eligible:
-            # Walked into a region with no live seeds
-            self._last_path = []
+        if best_eligible is None:
+            # Walked into a region with no live seeds: record a zero-reward
+            # visit so this branch's posterior drops instead of looping on it.
+            self._last_path = path
             self._last_selected = None
             self.update(0.0)
             return None
 
-        # Reconstruct path to the selected node (simplified - in practice we'd track during search)
-        self._last_path = [best_key]
-        self._last_selected = best_key
+        # Credit only down to the seed actually fuzzed.
+        self._last_path = path[: path.index(best_eligible) + 1]
+        self._last_selected = best_eligible
         self.selections += 1
-        return best_key
-
-    def _alpha_beta(
-        self,
-        tree: LineageTree,
-        node_key: str,
-        depth: int,
-        alpha: float,
-        beta: float,
-        maximizing_player: bool,
-        eligible: set[str],
-    ) -> float:
-        """Alpha-beta minimax search.
-
-        Returns the minimax value of the position.
-        """
-        # Terminal conditions
-        if depth == 0:
-            return self._evaluate_node(node_key)
-
-        # Check if node is terminal (no children or no eligible descendants)
-        children = [c for c in tree._children.get(node_key, ()) if c in tree.nodes]
-        if not children:
-            return self._evaluate_node(node_key)
-
-        # Check if current node is eligible (we can stop here)
-        node_is_eligible = node_key in eligible
-
-        if maximizing_player:
-            value = -float("inf")
-            for child in children:
-                child_value = self._alpha_beta(tree, child, depth - 1, alpha, beta, False, eligible)
-                value = max(value, child_value)
-                alpha = max(alpha, value)
-                if beta <= alpha:
-                    break  # Beta cut-off
-            # Also consider stopping at this node if it's eligible
-            if node_is_eligible:
-                stop_value = self._evaluate_node(node_key)
-                value = max(value, stop_value)
-            return value
-        else:
-            value = float("inf")
-            for child in children:
-                child_value = self._alpha_beta(tree, child, depth - 1, alpha, beta, True, eligible)
-                value = min(value, child_value)
-                beta = min(beta, value)
-                if beta <= alpha:
-                    break  # Alpha cut-off
-            # Also consider stopping at this node if it's eligible
-            if node_is_eligible:
-                stop_value = self._evaluate_node(node_key)
-                value = min(value, stop_value)
-            return value
-
-    def _evaluate_node(self, node_key: str) -> float:
-        """Evaluate a node using the _squash function on its value."""
-        # Return the average reward for this node
-        visits = self._visits(node_key)
-        if visits == 0:
-            return 0.5  # Neutral prior when unvisited
-        return self._value(node_key)
-
-    # ── Helper methods ────────────────────────────────────────────────
+        return best_eligible
 
     def _roots(self, tree: LineageTree, eligible: set[str]) -> list[str]:
-        """Root keys of the lineage forest, restricted to useful subtrees."""
+        """Root keys of the lineage forest (``LineageTree.roots()``, incremental)."""
         roots = tree.roots()
         if not roots:
             # Malformed/cyclic parent pointers: fall back to eligible keys
             # present in the tree so selection still makes progress.
             roots = [k for k in eligible if k in tree.nodes]
-        return roots
+        return list(roots)
 
     # ── backpropagation ────────────────────────────────────────────────
 
     def update(self, new_edges: float) -> None:
-        """Backpropagate the outcome of the last ``select()`` up the path.
-
-        Crediting every ancestor is the mechanism that makes a productive
-        subtree raise its whole chain: a discovery deep in the tree lifts the
-        evaluation score of the region containing it, so subsequent selections
-        are drawn back toward it.
-        """
+        """Backpropagate the outcome of the last ``select()`` along its path."""
         if not self._last_path:
             return
         reward = _squash(new_edges)
         for key in self._last_path:
-            self.visits[key] = self._visits(key) + 1.0
+            self.visits[key] = self.visits.get(key, 0.0) + 1.0
             self.values[key] = self.values.get(key, 0.0) + reward
+        if self._last_selected is not None:
+            key = self._last_selected
+            self.self_visits[key] = self.self_visits.get(key, 0.0) + 1.0
+            self.self_values[key] = self.self_values.get(key, 0.0) + reward
         self.updates += 1
         self._last_path = []
         self._last_selected = None
@@ -500,15 +470,14 @@ class AlphaBetaMCTSSeedScheduler:
     # ── maintenance ────────────────────────────────────────────────────
 
     def prune(self, live_keys: set[str]) -> int:
-        """Drop statistics for keys no longer in the tree.
-
-        Corpus minimization removes seeds permanently; without this the two
-        dicts grow for the whole run. Returns the number of entries dropped.
-        """
+        """Drop statistics for keys no longer in the tree; return entries dropped."""
         stale = [k for k in self.visits if k not in live_keys]
         for key in stale:
             self.visits.pop(key, None)
             self.values.pop(key, None)
+        for key in [k for k in self.self_visits if k not in live_keys]:
+            self.self_visits.pop(key, None)
+            self.self_values.pop(key, None)
         return len(stale)
 
     def stats(self) -> dict:
@@ -527,14 +496,28 @@ class AlphaBetaMCTSSeedScheduler:
         return {
             "visits": self.visits,
             "values": self.values,
+            "self_visits": self.self_visits,
+            "self_values": self.self_values,
             "selections": self.selections,
             "updates": self.updates,
         }
 
     def from_dict(self, data: dict) -> None:
-        self.visits = {str(k): float(v) for k, v in data.get("visits", {}).items()}
-        self.values = {str(k): float(v) for k, v in data.get("values", {}).items()}
-        self.selections = int(data.get("selections", 0))
-        self.updates = int(data.get("updates", 0))
+        # A blob without ``self_visits`` was written by the minimax scheduler,
+        # which credited roots only. Loading it would hand a few roots an
+        # enormous, meaningless prior, so it is discarded and the posterior
+        # restarts from Beta(1, 1).
+        if "self_visits" not in data:
+            self.visits, self.values = {}, {}
+            self.self_visits, self.self_values = {}, {}
+            self.selections = int(data.get("selections", 0))
+            self.updates = int(data.get("updates", 0))
+        else:
+            self.visits = {str(k): float(v) for k, v in data.get("visits", {}).items()}
+            self.values = {str(k): float(v) for k, v in data.get("values", {}).items()}
+            self.self_visits = {str(k): float(v) for k, v in data.get("self_visits", {}).items()}
+            self.self_values = {str(k): float(v) for k, v in data.get("self_values", {}).items()}
+            self.selections = int(data.get("selections", 0))
+            self.updates = int(data.get("updates", 0))
         self._last_path = []
         self._last_selected = None

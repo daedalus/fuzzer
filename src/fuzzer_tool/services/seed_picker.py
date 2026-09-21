@@ -406,12 +406,12 @@ class SeedPicker:
         return key_to_seed.get(selected)
 
     def _pick_alphabeta_seed(self) -> bytes | None:
-        """Alpha-beta minimax over the lineage tree — the Elo-arbitrated 'alphabeta' arm.
+        """Thompson-sampling descent over the lineage tree — the 'alphabeta' arm.
 
-        A distinct strategy from the UCT 'mcts' arm: instead of UCT bandit
-        descent, iterates alpha-beta pruning over the lineage forest. Fuzz the
-        maximizer, target response the minimizer; leaf evaluation is the
-        scheduler's running mean reward for the node.
+        The arm keeps its historical name (flag, Elo key, state-store key) but is
+        no longer minimax: it descends the same lineage forest as the UCT 'mcts'
+        arm using Beta-posterior draws instead of an exploration constant, and
+        can return any live seed, not only a root.
 
         Returns None (caller falls through to another strategy) when the tree
         offers no live seed.

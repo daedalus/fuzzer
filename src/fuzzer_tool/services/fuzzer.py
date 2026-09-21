@@ -2063,13 +2063,13 @@ class Fuzzer:
             lineage = True
             log.info("--mcts implies --lineage (MCTS schedules over the lineage tree)")
 
-        # Alpha-beta MCTS: same lineage dependency, distinct descent algorithm.
+        # "alphabeta" arm: same lineage dependency, Thompson-sampling descent (not minimax).
         self._use_alphabeta = bool(alphabeta)
         self._alphabeta = None
         if self._use_alphabeta and not lineage:
             lineage = True
             log.info(
-                "--alphabeta implies --lineage (alpha-beta MCTS schedules over the lineage tree)"
+                "--alphabeta implies --lineage (the arm schedules over the lineage tree)"
             )
 
         self._lineage = None
@@ -2089,7 +2089,7 @@ class Fuzzer:
             from fuzzer_tool.core.schedulers.seed_mcts import AlphaBetaMCTSSeedScheduler
 
             self._alphabeta = AlphaBetaMCTSSeedScheduler(rng=self._rng)
-            log.info("Alpha-beta MCTS seed scheduling enabled")
+            log.info("Alpha-beta (Thompson descent) seed scheduling enabled")
 
         self._load_corpus()
         self._apply_seed_transforms()
@@ -8104,9 +8104,7 @@ class Fuzzer:
                         "[*] AlphaBeta: loaded state from state store "
                         f"(nodes={self._alphabeta.stats()['tracked_nodes']})"
                     )
-                print(
-                    f"[*] Alpha-beta MCTS seed scheduling: exploration={self._alphabeta.exploration:.3f}"
-                )
+                print("[*] Alpha-beta seed scheduling: Thompson-sampling descent over lineage")
 
             if self._kruskal_count is not None:
                 self._load_kruskal_count()

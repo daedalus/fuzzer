@@ -2905,7 +2905,7 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--alphabeta",
         action="store_true",
-        help="Enable alpha-beta minimax seed scheduling over the mutation lineage tree "
+        help="Enable Thompson-sampling descent seed scheduling over the mutation lineage tree "
         "(implies --lineage; competes as a distinct Elo-arbitrated seed strategy)",
     )
     fuzz_parser.add_argument(
