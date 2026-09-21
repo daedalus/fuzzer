@@ -15,13 +15,11 @@ import bisect as _bisect_mod
 import itertools
 import logging
 import math
-import struct
 import time
 from collections import Counter
 
 from fuzzer_tool.core.cadence import bucket, due
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
-from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
@@ -934,6 +932,20 @@ class SeedPicker:
         "riff": ("riff", "RiffMutator", "_generate_random_riff"),
     }
 
+    # Minimum confidence for a field to be used in seed generation
+    _SEED_FIELD_CONFIDENCE = 0.5
+
+    # Type-specific value overrides for seed generation
+    _SEED_TYPE_DEFAULTS: dict[str, list[int]] = {
+        "magic": [],  # use learned value or known magic
+        "length": [0, 1, 255, 256, 65535],
+        "crc": [0],
+        "flags": [0, 0xFF, 1],
+        "padding": [0],
+        "data": [],  # use learned value or random
+        "unknown": [],  # use learned value or random
+    }
+
     def _format_aware_seed(self) -> bytes:
         """Cold-start seed for the sniffed format, or a short random buffer.
 
@@ -951,6 +963,13 @@ class SeedPicker:
         f = self.f
         fmt = getattr(f._profile, "format_signature", None)
         limit = getattr(f, "max_len", 0) or 0
+
+        # Try format-learner-driven seed first: uses inferred field
+        # structure (offset, width, type, value_counts) to emit a
+        # structurally valid seed that respects the learned format.
+        learner_seed = self._format_learner_seed()
+        if learner_seed is not None:
+            return learner_seed[:limit] if limit > 0 else learner_seed
 
         from fuzzer_tool.core.minimal_seeds import MINIMAL_SEEDS
 
@@ -971,6 +990,62 @@ class SeedPicker:
         rng = f._rng
         length = rng.randint(min(4, f.max_len), min(64, f.max_len))
         return bytes(rng.randint(0, 255) for _ in range(length))
+
+    def _format_learner_seed(self) -> bytes | None:
+        """Generate a seed from the format learner's inferred field structure.
+
+        Uses learned field boundaries (offset, width, type) and per-position
+        byte histograms to emit structurally valid seeds. Returns None when
+        no learned structure with sufficient confidence is available.
+        """
+        f = self.f
+        learner = getattr(f, "_format_learner", None)
+        if learner is None:
+            return None
+
+        summary = learner.get_format_summary()
+        fields = summary.get("fields", [])
+        if not fields:
+            return None
+
+        # Filter fields with enough confidence and learned value data
+        learned = [
+            field
+            for field in fields
+            if field.get("confidence", 0) >= self._SEED_FIELD_CONFIDENCE
+            and field.get("most_common_value") is not None
+        ]
+        if not learned:
+            return None
+
+        limit = getattr(f, "max_len", 0) or 0
+        seed_len = max(field["offset"] + field["width"] for field in learned)
+        if limit > 0:
+            seed_len = min(seed_len, limit)
+
+        seed = bytearray(seed_len)
+        rng = self._rng
+
+        for field in learned:
+            offset = field["offset"]
+            width = field["width"]
+            if offset >= seed_len:
+                continue
+
+            # Determine the value to emit for this field
+            field_type = field.get("type", "unknown")
+            defaults = self._SEED_TYPE_DEFAULTS.get(field_type, [])
+            value_byte = field.get("most_common_value", 0)
+
+            if defaults and rng.random() < 0.3:
+                # Occasionally override with a type-specific default
+                value_byte = rng.choice(defaults) & 0xFF
+
+            end = min(offset + width, seed_len)
+            for i in range(offset, end):
+                seed[i] = value_byte & 0xFF
+
+        return bytes(seed)
 
     def _weight_exploit_parts(
         self, meta: dict, fuzz_count: int, coverage: int, age: float, T: float

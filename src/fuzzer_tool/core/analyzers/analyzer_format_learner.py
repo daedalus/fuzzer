@@ -46,6 +46,8 @@ class FieldHypothesis:
     controlled_edges: set = field(default_factory=set)
     # Dependencies: "if I change this field, these other fields must also change"
     dependencies: list = field(default_factory=list)
+    # Per-position byte value frequency: relative_position -> byte_value -> count
+    value_counts: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -130,7 +132,7 @@ class FormatLearner:
         if len(self.timeline) > self.max_timeline:
             self.timeline = self.timeline[-self.max_timeline :]
 
-        self._update_hypotheses(entry)
+        self._update_hypotheses(entry, input_bytes)
 
         # Periodic backtest
         self._transitions_since_backtest += 1
@@ -140,7 +142,7 @@ class FormatLearner:
             if not ok:
                 log.debug("Backtest failed: %s", desc)
 
-    def _update_hypotheses(self, entry: TimelineEntry):
+    def _update_hypotheses(self, entry: TimelineEntry, input_bytes: bytes | None = None):
         """Update field hypotheses based on a new observation."""
         offset = entry.mutation_offset
         width = entry.mutation_width
@@ -203,7 +205,32 @@ class FormatLearner:
             self.hypotheses.append(h)
             self.field_map[offset] = h
 
+        if offset is not None and input_bytes is not None:
+            self._track_values(offset, width, input_bytes)
+
         self._classify_fields()
+
+    def _track_values(self, offset: int, width: int, input_bytes: bytes):
+        """Track per-position byte values inside each covered hypothesis.
+
+        value_counts maps relative position -> byte value -> count.  The seed
+        generator uses this to emit structurally valid seeds from learned
+        field content.  Only bytes inside an existing hypothesis are tracked
+        — values outside known fields are ignored.
+        """
+        if offset < 0 or offset >= len(input_bytes):
+            return
+
+        end = min(offset + width, len(input_bytes))
+        for pos in range(offset, end):
+            byte_val = input_bytes[pos]
+            # Find which hypothesis owns this byte position
+            for h in self.hypotheses:
+                if h.offset <= pos < h.offset + h.width:
+                    rel_pos = pos - h.offset
+                    pos_counts = h.value_counts.setdefault(rel_pos, {})
+                    pos_counts[byte_val] = pos_counts.get(byte_val, 0) + 1
+                    break
 
     def record_liveness(self, offset: int, width: int, confirmed_dead: bool) -> None:
         """Corroborating evidence from item 4's `LiveBitMaskEstimator`
@@ -358,6 +385,15 @@ class FormatLearner:
         sorted_hyps = sorted(self.hypotheses, key=lambda h: h.offset)
         fields = []
         for h in sorted_hyps:
+            # Overall most common byte value across all positions in this field
+            most_common_val = None
+            if h.value_counts:
+                all_counts: dict[int, int] = {}
+                for pos_counts in h.value_counts.values():
+                    for bv, cnt in pos_counts.items():
+                        all_counts[bv] = all_counts.get(bv, 0) + cnt
+                if all_counts:
+                    most_common_val = max(all_counts.items(), key=lambda kv: kv[1])[0]
             fields.append(
                 {
                     "offset": h.offset,
@@ -367,6 +403,7 @@ class FormatLearner:
                     "observations": h.observations,
                     "sensitive_ops": dict(h.sensitive_ops),
                     "controlled_edges": len(h.controlled_edges),
+                    "most_common_value": most_common_val,
                 }
             )
 
@@ -380,6 +417,36 @@ class FormatLearner:
             "record_stride": self.record_stride,
             "fields": fields,
         }
+
+    def get_learned_value(self, offset: int, width: int) -> bytes | None:
+        """Return the most commonly observed bytes for a field range.
+
+        Returns bytes of length `width` with the most frequent byte at
+        each position within the range, or None if no value data exists.
+        """
+        if not self.hypotheses:
+            return None
+
+        # Find hypothesis covering this range
+        covering = None
+        for h in self.hypotheses:
+            if h.offset <= offset and offset + width <= h.offset + h.width:
+                covering = h
+                break
+
+        if covering is None or not covering.value_counts:
+            return None
+
+        # For each position within the field, pick the most common byte value
+        result = bytearray()
+        for rel_pos in range(width):
+            counts = covering.value_counts.get(rel_pos)
+            if not counts:
+                result.append(0)
+            else:
+                most_common = max(counts.items(), key=lambda kv: kv[1])[0]
+                result.append(most_common)
+        return bytes(result)
 
     def get_state(self) -> dict:
         """Serialize for persistence."""
@@ -406,6 +473,7 @@ class FormatLearner:
                     "observations": h.observations,
                     "sensitive_ops": dict(h.sensitive_ops),
                     "controlled_edges": list(h.controlled_edges),
+                    "value_counts": dict(h.value_counts),
                 }
                 for h in self.hypotheses
             ],
@@ -440,6 +508,7 @@ class FormatLearner:
                 observations=h["observations"],
                 sensitive_ops=h.get("sensitive_ops", {}),
                 controlled_edges=set(h.get("controlled_edges", [])),
+                value_counts=dict(h.get("value_counts", {})),
             )
             self.hypotheses.append(hyp)
             self.field_map[hyp.offset] = hyp

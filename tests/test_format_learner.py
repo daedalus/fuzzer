@@ -519,3 +519,103 @@ class TestRecordLiveness:
         fl.record_liveness(offset=0, width=8, confirmed_dead=True)
         summary = fl.get_format_summary()
         assert summary["classified"] == 1
+
+    def test_value_tracking_empty(self):
+        fl = FormatLearner()
+        # No transitions recorded, should return None
+        assert fl.get_learned_value(0, 4) is None
+
+    def test_value_tracking_single_byte(self):
+        fl = FormatLearner()
+        # Record a transition that creates a hypothesis at offset 0, width 1
+        fl.record_transition(
+            input_bytes=b"\x42",
+            mutation_op="bit_flip",
+            mutation_offset=0,
+            mutation_width=1,
+            coverage_before=10,
+            coverage_after=15,
+            new_edges={100},
+            lost_edges=set(),
+        )
+        # Should have learned the value 0x42 at offset 0
+        val = fl.get_learned_value(0, 1)
+        assert val == b"\x42"
+
+    def test_value_tracking_multi_byte_field(self):
+        fl = FormatLearner()
+        # Record several transitions that modify a multi-byte field at known offset/width
+        for i in range(10):
+            # Create input where bytes at offset 2,3 are mostly 0xAA and 0xBB
+            inp = bytearray(10)
+            inp[2] = 0xAA if i % 3 != 0 else 0xCC  # 0xAA 70% of the time
+            inp[3] = 0xBB if i % 2 == 0 else 0xDD  # 0xBB 50% of the time
+            fl.record_transition(
+                input_bytes=bytes(inp),
+                mutation_op="byte_flip",
+                mutation_offset=2,  # Always mutate starting at offset 2
+                mutation_width=2,  # Width 2 covers both bytes
+                coverage_before=10,
+                coverage_after=15 + i,
+                new_edges={200 + i},
+                lost_edges=set(),
+            )
+        # After enough observations, should have a hypothesis for offset 2, width 2
+        # Check that we can get learned values
+        val = fl.get_learned_value(2, 2)
+        assert val is not None
+        assert len(val) == 2
+        # The exact values depend on the random walk, but should be reasonable
+        assert val[0] in (0xAA, 0xCC)
+        assert val[1] in (0xBB, 0xDD)
+
+    def test_value_tracking_with_liveness(self):
+        fl = FormatLearner()
+        # Create a hypothesis
+        fl.record_transition(
+            input_bytes=b"\x00\x01\x02\x03",
+            mutation_op="bit_flip",
+            mutation_offset=1,
+            mutation_width=1,
+            coverage_before=10,
+            coverage_after=20,
+            new_edges={100, 101},
+            lost_edges=set(),
+        )
+        # Mark the byte as dead (should create a padding hypothesis but not overwrite)
+        fl.record_liveness(offset=1, width=1, confirmed_dead=True)
+        # Should still be able to get the learned value from the coverage transition
+        val = fl.get_learned_value(1, 1)
+        assert val == b"\x01"
+
+    def test_value_counts_serialization(self):
+        fl = FormatLearner()
+        fl.record_transition(
+            input_bytes=b"\x89PNG\r\n\x1a\n",
+            mutation_op="bit_flip",
+            mutation_offset=0,
+            mutation_width=1,
+            coverage_before=10,
+            coverage_after=15,
+            new_edges={100},
+            lost_edges=set(),
+        )
+        fl.record_transition(
+            input_bytes=b"\x89PNG\r\n\x1a\n",
+            mutation_op="bit_flip",
+            mutation_offset=0,
+            mutation_width=1,
+            coverage_before=15,
+            coverage_after=20,
+            new_edges={101},
+            lost_edges=set(),
+        )
+        # Serialize and deserialize
+        state = fl.get_state()
+        fl2 = FormatLearner()
+        fl2.load_state(state)
+        # Should be able to get the same learned value
+        val = fl.get_learned_value(0, 1)
+        val2 = fl2.get_learned_value(0, 1)
+        assert val == val2
+        assert val == b"\x89"

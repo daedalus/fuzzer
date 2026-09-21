@@ -499,3 +499,284 @@ class TestComputeWeightsArrayPath:
             if staleness > 50.0 * T:
                 w *= 0.01
             assert weights[i] == pytest.approx(max(w, 1e-6))
+
+
+class TestFormatLearnerSeed:
+    """Tests for format-learner-driven seed generation."""
+
+    def _make_fuzzer_with_learner(self, transitions):
+        """Create a mock fuzzer with a format learner that has recorded transitions."""
+        from fuzzer_tool.core.analyzers.analyzer_format_learner import FormatLearner
+
+        class MockFuzzer:
+            def __init__(self):
+                self.corpus = [b"seed"]
+                self.seed_meta = {}
+                self._temperature = 1.0
+                self._anneal_budget = 100000
+                self._use_boltzmann = False
+                self._profile = type("obj", (object,), {"format_signature": None})()
+                self._format_learner = FormatLearner()
+                self._rng = __import__("random").Random(42)  # deterministic
+
+            def _seed_key(self, data):
+                return data.hex()
+
+        f = MockFuzzer()
+        for tx in transitions:
+            f._format_learner.record_transition(**tx)
+        return f
+
+    def test_format_learner_seed_no_learner(self):
+        """When no format learner exists, _format_learner_seed returns None."""
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        class MockFuzzer:
+            corpus = [b"seed"]
+            seed_meta = {}
+            _temperature = 1.0
+            _anneal_budget = 100000
+            _use_boltzmann = False
+            _profile = type("obj", (object,), {"format_signature": None})()
+            _format_learner = None
+            _rng = __import__("random").Random(42)
+
+            def _seed_key(self, data):
+                return data.hex()
+
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = MockFuzzer()
+        assert sp._format_learner_seed() is None
+
+    def test_format_learner_seed_empty_learner(self):
+        """When format learner has no data, _format_learner_seed returns None."""
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        f = self._make_fuzzer_with_learner([])
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+        assert sp._format_learner_seed() is None
+
+    def test_format_learner_seed_generates_from_learned_fields(self):
+        """When format learner has confident fields, seed is generated from learned values."""
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        # Create transitions that will create confident hypotheses at offsets 1, 2, 3.
+        # Need at least 2 different mutation operations to reach confidence >= 0.5.
+        transitions = []
+        for i in range(10):
+            op = "bit_flip" if i % 2 == 0 else "arithmetic"
+            transitions.append(
+                {
+                    "input_bytes": bytes([i % 10]) + bytes([i % 10]) * 3,
+                    "mutation_op": op,
+                    "mutation_offset": 1 + (i % 3),
+                    "mutation_width": 1,
+                    "coverage_before": 10,
+                    "coverage_after": 15 + i,
+                    "new_edges": {100 + i},
+                    "lost_edges": set(),
+                }
+            )
+
+        f = self._make_fuzzer_with_learner(transitions)
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+
+        seed = sp._format_learner_seed()
+        assert seed is not None
+        # Seed length should cover offsets 1, 2, 3 (width 1 each) → length 4
+        assert len(seed) >= 3
+        # Each position should contain the most common byte value (0-9 each appear once,
+        # so the first in iteration order is used)
+        assert seed[1] == 0  # offset 1
+        assert seed[2] == 1  # offset 2
+        assert seed[3] == 2  # offset 3
+
+    def test_format_learner_seed_respects_max_len(self):
+        """Generated seed respects the fuzzer's max_len limit."""
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        # Create transitions that will create a confident hypothesis at offset 0
+        # with width 10, so the seed length is 10 and max_len truncates it.
+        # Need at least 2 different mutation operations to reach confidence >= 0.5.
+        transitions = []
+        for i in range(10):
+            op = "bit_flip" if i % 2 == 0 else "arithmetic"
+            transitions.append(
+                {
+                    "input_bytes": bytes([i % 10]) * 10,
+                    "mutation_op": op,
+                    "mutation_offset": 0,
+                    "mutation_width": 10,
+                    "coverage_before": 10,
+                    "coverage_after": 15 + i,
+                    "new_edges": {100 + i},
+                    "lost_edges": set(),
+                }
+            )
+
+        f = self._make_fuzzer_with_learner(transitions)
+        f.max_len = 3  # Limit seed length
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+
+        seed = sp._format_learner_seed()
+        assert seed is not None
+        assert len(seed) == 3  # Should be truncated to max_len
+
+    def test_format_learner_seed_fallback_to_random_when_no_confidence(self):
+        """When fields exist but lack confidence, falls back to random-ish seed."""
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        # Create only one transition - not enough for confidence >= 0.5
+        transitions = [
+            {
+                "input_bytes": b"\x42\x24",
+                "mutation_op": "bit_flip",
+                "mutation_offset": 0,
+                "mutation_width": 1,
+                "coverage_before": 10,
+                "coverage_after": 12,
+                "new_edges": {100},
+                "lost_edges": set(),
+            }
+        ]
+
+        f = self._make_fuzzer_with_learner(transitions)
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+
+        seed = sp._format_learner_seed()
+        # Should return None because confidence will be too low (only 1 observation)
+        assert seed is None
+
+    def test_format_learner_seed_falsification_non_matching_input(self):
+        """Falsification: _format_learner_seed returns None when learner has no confident fields."""
+        from fuzzer_tool.core.analyzers.analyzer_format_learner import FormatLearner
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        class MockFuzzer:
+            corpus = [b"seed"]
+            seed_meta = {}
+            _temperature = 1.0
+            _anneal_budget = 100000
+            _use_boltzmann = False
+            _profile = type("obj", (object,), {"format_signature": None})()
+            _format_learner = FormatLearner()
+            _rng = __import__("random").Random(42)
+
+            def _seed_key(self, data):
+                return data.hex()
+
+        f = MockFuzzer()
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+
+        # No transitions recorded - learner is empty
+        assert sp._format_learner_seed() is None
+
+        # Single transition - confidence too low
+        f._format_learner.record_transition(
+            input_bytes=b"\x00" * 10,
+            mutation_op="bit_flip",
+            mutation_offset=0,
+            mutation_width=1,
+            coverage_before=10,
+            coverage_after=11,
+            new_edges={100},
+            lost_edges=set(),
+        )
+        assert sp._format_learner_seed() is None
+
+    def test_format_learner_seed_adversarial_malformed_summary(self):
+        """Adversarial: _format_learner_seed handles malformed format summary gracefully."""
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        class MockLearner:
+            def get_format_summary(self):
+                # Missing 'fields' key
+                return {"timeline_size": 0, "hypotheses": 0, "classified": 0}
+
+        class MockFuzzer:
+            corpus = [b"seed"]
+            seed_meta = {}
+            _temperature = 1.0
+            _anneal_budget = 100000
+            _use_boltzmann = False
+            _profile = type("obj", (object,), {"format_signature": None})()
+            _format_learner = MockLearner()
+            _rng = __import__("random").Random(42)
+            max_len = 100
+
+            def _seed_key(self, data):
+                return data.hex()
+
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = MockFuzzer()
+        assert sp._format_learner_seed() is None
+
+        # fields present but empty list
+        class MockLearner2:
+            def get_format_summary(self):
+                return {"fields": []}
+
+        sp.f._format_learner = MockLearner2()
+        assert sp._format_learner_seed() is None
+
+        # fields with missing confidence keys
+        class MockLearner3:
+            def get_format_summary(self):
+                return {"fields": [{"offset": 0, "width": 1}]}
+
+        sp.f._format_learner = MockLearner3()
+        assert sp._format_learner_seed() is None
+
+        # fields with confidence but missing most_common_value
+        class MockLearner4:
+            def get_format_summary(self):
+                return {"fields": [{"offset": 0, "width": 1, "confidence": 0.9}]}
+
+        sp.f._format_learner = MockLearner4()
+        assert sp._format_learner_seed() is None
+
+    def test_format_learner_seed_adversarial_max_len_zero(self):
+        """Adversarial: _format_learner_seed handles max_len=0 correctly."""
+        from fuzzer_tool.core.analyzers.analyzer_format_learner import FormatLearner
+        from fuzzer_tool.services.seed_picker import SeedPicker
+
+        class MockFuzzer:
+            corpus = [b"seed"]
+            seed_meta = {}
+            _temperature = 1.0
+            _anneal_budget = 100000
+            _use_boltzmann = False
+            _profile = type("obj", (object,), {"format_signature": None})()
+            _format_learner = FormatLearner()
+            _rng = __import__("random").Random(42)
+            max_len = 0  # Zero max_len means "no limit"
+
+            def _seed_key(self, data):
+                return data.hex()
+
+        f = MockFuzzer()
+        # Add enough transitions to reach confidence >= 0.5
+        for i in range(10):
+            f._format_learner.record_transition(
+                input_bytes=bytes([i % 10]) * 10,
+                mutation_op="bit_flip" if i % 2 == 0 else "arithmetic",
+                mutation_offset=0,
+                mutation_width=10,
+                coverage_before=10,
+                coverage_after=15 + i,
+                new_edges={100 + i},
+                lost_edges=set(),
+            )
+
+        sp = SeedPicker(type("o", (object,), {"__init__": lambda s: None})())
+        sp.f = f
+
+        seed = sp._format_learner_seed()
+        # max_len=0 means no limit, so seed is full length (10 bytes)
+        assert seed is not None
+        assert len(seed) == 10
