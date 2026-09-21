@@ -208,9 +208,7 @@ class RandPool:
 
         state_bytes = repr(self._rng.bit_generator.state).encode()
         digest = hashlib.sha256(state_bytes + bytes(raw)).digest()
-        seed_words = [
-            int.from_bytes(digest[i : i + 4], "little") for i in range(0, len(digest), 4)
-        ]
+        seed_words = [int.from_bytes(digest[i : i + 4], "little") for i in range(0, len(digest), 4)]
         self._rng = np.random.default_rng(np.random.SeedSequence(seed_words))
         self._idx = _POOL_ENTRIES
 
@@ -397,8 +395,19 @@ class RandPool:
             raise IndexError("cannot choose from empty sequence")
         cum = list(itertools.accumulate(weights))
         total = cum[-1]
+        if total <= 0:
+            # All weights zero (or net non-positive) is a caller bug, not a
+            # rounding artifact -- keep raising rather than silently picking
+            # an arbitrary element.
+            raise IndexError("weighted_choice: weights sum to <= 0")
         r = self.random() * total
-        return seq[bisect.bisect_right(cum, r)]
+        # ``r`` is mathematically < total (self.random() is in [0.0, 1.0)),
+        # but float64 rounding in the multiplication can push it up to
+        # exactly total (more likely as total grows, e.g. accumulating many
+        # small positive weights), which would make bisect_right return n --
+        # one past the end of seq. Clamp the search's upper bound to n - 1,
+        # mirroring how CPython's random.choices() avoids the same edge case.
+        return seq[bisect.bisect_right(cum, r, 0, n - 1)]
 
     def weighted_choice_list(self, seq: list | tuple, weights: list[float], k: int) -> list:
         """Return *k* elements from *seq* chosen proportional to *weights*.
@@ -612,10 +621,10 @@ class RandPool:
 # instance is threaded explicitly to every scheduler/mutator it constructs,
 # same as before. This singleton only exists to catch the fallback path:
 # anything that wasn't handed a pool explicitly.
-_default_instance: "RandPool | None" = None
+_default_instance: RandPool | None = None
 
 
-def get_default_rand_pool(seed=None) -> "RandPool":
+def get_default_rand_pool(seed=None) -> RandPool:
     """Return the process-wide shared ``RandPool``, creating it if needed.
 
     ``seed`` only has an effect on the call that actually creates the

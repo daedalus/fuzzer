@@ -70,4 +70,8 @@ suppress = [
     # BO-GP-UCB adds a new fallback-precedence test case; the parametrize
     # decorator is intentionally extended, not removed.
     "tests/test_regression_scheduler_fallback_precedence.py:TestFallbackPrecedence.test_precedence_order",
+    # rand_pool: weighted_choice fix also removed unnecessary string forward
+    # references on get_default_rand_pool's return type (RandPool is defined
+    # above the function, so the quotes were redundant). No runtime change.
+    "src/fuzzer_tool/core/rand_pool.py:get_default_rand_pool",
 ]
