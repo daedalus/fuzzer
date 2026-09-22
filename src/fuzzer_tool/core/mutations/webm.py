@@ -152,9 +152,19 @@ def _parse_element(data: bytes, pos: int) -> tuple[Element | None, int]:
     if v2 is None:
         return None, pos
     size_raw_val, size_raw, pos = v2
-    # Strip the marker bit: size values use the payload bits only
+    # Strip the marker bit: size values use the payload bits only. A length-L
+    # EBML vint reserves 1 marker bit per byte's leading run plus the final
+    # "1" marker, leaving 7*L payload bits total (7, 14, 21, ... for
+    # L=1,2,3,...) -- not "7 + 8*(L-1)", which only happens to equal 7*L at
+    # L=1 and silently overshoots for every L>=2. That mismatch made any
+    # multi-byte size vint (i.e. any element >=127 bytes -- Segment, Cluster,
+    # and most real content) decode to a value many times too large, which
+    # then always failed the `pos + size_val > len(data)` bounds check below
+    # and made `_parse_element` return None for the element. Caught by
+    # wfc_chunks.py's webm rollout (handover P2-1): its Segment-children test
+    # fixture was the first input to this module exceeding 126 bytes.
     length = len(size_raw)
-    size_val = -1 if size_raw_val == -1 else (size_raw_val & ((1 << (7 + 8 * (length - 1))) - 1))
+    size_val = -1 if size_raw_val == -1 else (size_raw_val & ((1 << (7 * length)) - 1))
 
     if size_val == -1:
         body = data[pos:]
