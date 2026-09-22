@@ -20,16 +20,37 @@ _CRASH_CLUSTER_THRESHOLD: float = float(
     os.environ.get("FUZZER_CRASH_CLUSTER_THRESHOLD", "0.7") or "0.7"
 )
 
+# Core threshold for the chaining diagnostic below (see detect_chained_clusters).
+# Deliberately looser than _CRASH_CLUSTER_THRESHOLD: this is not a second
+# clustering pass, just a check on how far single-linkage's chain stretched.
+_CRASH_CLUSTER_CORE_THRESHOLD: float = float(
+    os.environ.get("FUZZER_CRASH_CLUSTER_CORE_THRESHOLD", "0.5") or "0.5"
+)
+
+# Above this many members, the O(k^2) all-pairs diagnostic scan is skipped
+# for that cluster rather than run unconditionally -- same "bound the work,
+# don't skip correctness" posture as the alignment cost limits in
+# similarity.py, applied here to a diagnostic rather than to clustering
+# itself.
+_CRASH_CLUSTER_DIAG_MAX_SIZE: int = int(
+    os.environ.get("FUZZER_CRASH_CLUSTER_DIAG_MAX_SIZE", "500") or "500"
+)
+
 
 # Rows of the field map printed in the .txt sidecar; the .json keeps them all.
 MAX_TXT_ROWS = 64  # changed fields shown when a baseline is known
 MAX_TXT_ROWS_NO_BASE = 32  # fields shown when there is no baseline
 
 
-def configure_crash_cluster(threshold: float = 0.7) -> None:
-    """Set the default crash-clustering similarity threshold."""
-    global _CRASH_CLUSTER_THRESHOLD
+def configure_crash_cluster(threshold: float = 0.7, core_threshold: float = 0.5) -> None:
+    """Set the default crash-clustering similarity threshold.
+
+    ``core_threshold`` configures :func:`detect_chained_clusters`'s default;
+    it is independent of ``threshold`` and does not affect ``cluster_crashes``.
+    """
+    global _CRASH_CLUSTER_THRESHOLD, _CRASH_CLUSTER_CORE_THRESHOLD
     _CRASH_CLUSTER_THRESHOLD = float(threshold)
+    _CRASH_CLUSTER_CORE_THRESHOLD = float(core_threshold)
 
 
 @dataclass
@@ -580,3 +601,92 @@ def cluster_crashes(
         clusters_map.setdefault(root, []).append(i)
 
     return list(clusters_map.values())
+
+
+def detect_chained_clusters(
+    clusters: list[list[int]],
+    signatures: list[str],
+    frame_lists: list[list[str]] | None = None,
+    core_threshold: float | None = None,
+    max_diagnostic_size: int | None = None,
+) -> dict[int, float]:
+    """Flag ``cluster_crashes`` clusters that likely chained separate bugs together.
+
+    Single-linkage -- what ``cluster_crashes`` uses -- is subject to the
+    "chaining phenomenon": A and C can end up in the same cluster purely
+    because both are close to some intermediate B, even though A and C
+    themselves are far apart. The union-find merge only ever checks the one
+    link that triggered it, so a cluster's members are never re-checked
+    against each other once merged.
+
+    This is a read-only diagnostic over an existing ``cluster_crashes``
+    result: for each multi-member cluster it finds the *worst* (minimum)
+    pairwise similarity between any two members, using the same similarity
+    metrics ``cluster_crashes`` used to build it (frame-aware where both
+    sides have frames, signature-based otherwise). A cluster whose worst
+    pairwise similarity falls below ``core_threshold`` likely bridges two
+    distinct bugs through a chain and is worth a human look before trusting
+    its ``cluster_id`` as one root cause.
+
+    It does not split, re-merge, or otherwise alter clustering -- callers
+    decide what to do with a flagged cluster (e.g. a warning in triage
+    output). Nothing here changes ``cluster_crashes``'s return value or its
+    callers' existing behavior when unused.
+
+    Args:
+        clusters: Output of ``cluster_crashes`` -- lists of indices into
+            ``signatures``. Must be called with the same ``signatures`` and
+            ``frame_lists`` that produced it, or the similarity metric will
+            not match what actually drove the merges.
+        signatures: The same signature list passed to ``cluster_crashes``.
+        frame_lists: The same frame_lists passed to ``cluster_crashes``.
+        core_threshold: Minimum acceptable worst-case pairwise similarity
+            within a cluster. Defaults to the configured value
+            (``_CRASH_CLUSTER_CORE_THRESHOLD``, 0.5) -- deliberately looser
+            than the clustering threshold, since this checks the chain's
+            weakest link, not a second clustering pass.
+        max_diagnostic_size: Clusters larger than this are skipped (the
+            all-pairs scan is O(k^2) in cluster size). Defaults to the
+            configured value (``_CRASH_CLUSTER_DIAG_MAX_SIZE``, 500).
+
+    Returns:
+        Mapping from a cluster's position in ``clusters`` to its minimum
+        pairwise similarity, for clusters with >= 2 members whose minimum
+        is below ``core_threshold``. A cluster absent from the result is
+        either a singleton, clean (all pairs cleared the core threshold),
+        or skipped as oversized -- callers that need to tell "skipped"
+        apart from "clean" should check ``len(clusters[i]) >
+        max_diagnostic_size`` themselves.
+    """
+    if core_threshold is None:
+        core_threshold = _CRASH_CLUSTER_CORE_THRESHOLD
+    if max_diagnostic_size is None:
+        max_diagnostic_size = _CRASH_CLUSTER_DIAG_MAX_SIZE
+
+    framed = frame_lists is not None and len(frame_lists) > 0
+    n_framed = len(frame_lists) if framed else 0
+
+    tok_keys: list[list[str]] = []
+    if framed:
+        tok_keys = [[normalize_frame(f) for f in frames[:8]] for frames in frame_lists]
+    sig_keys = [normalize_frame(sig).encode() for sig in signatures]
+
+    def pair_sim(i: int, j: int) -> float:
+        if framed and i < n_framed and j < n_framed:
+            return normalized_frame_similarity(tok_keys[i], tok_keys[j])
+        return levenshtein_similarity(sig_keys[i], sig_keys[j])
+
+    flagged: dict[int, float] = {}
+    for cluster_idx, members in enumerate(clusters):
+        if len(members) < 2 or len(members) > max_diagnostic_size:
+            continue
+        worst = 1.0
+        for a in range(len(members)):
+            for b in range(a + 1, len(members)):
+                sim = pair_sim(members[a], members[b])
+                if sim < worst:
+                    worst = sim
+        if worst < core_threshold:
+            flagged[cluster_idx] = worst
+
+    return flagged

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Crash-cluster chaining diagnostic** (`core/crash_metadata.py::detect_chained_clusters`):
+  read-only check over `cluster_crashes`'s output that flags clusters
+  single-linkage likely chained together (A~B and B~C both clear the
+  clustering threshold, but A~C does not clear a looser core threshold).
+  Does not alter clustering. Wired into `--report`'s Crash Signatures
+  section, which now annotates flagged clusters `[CHAINED -- min pairwise
+  similarity X.XX, verify this is one bug]`. Tunable via
+  `configure_crash_cluster(core_threshold=...)` /
+  `FUZZER_CRASH_CLUSTER_CORE_THRESHOLD` (default 0.5) and
+  `FUZZER_CRASH_CLUSTER_DIAG_MAX_SIZE` (default 500, caps the O(k^2)
+  all-pairs scan per cluster).
 - **`--continuum-reward`** (`core/analyzers/analyzer_navier_stokes.py::frontier_weight`,
   `services/fuzzer.py::Fuzzer._continuum_reward_shape`): scales every scheduler's
   shared operator reward by the mean continuum pressure of the edges co-hit

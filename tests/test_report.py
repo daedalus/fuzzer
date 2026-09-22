@@ -6,6 +6,7 @@ from array import array
 from pathlib import Path
 from unittest.mock import MagicMock
 
+from fuzzer_tool.core.crash_metadata import configure_crash_cluster
 from fuzzer_tool.services.report import generate_report
 
 
@@ -703,6 +704,52 @@ class TestReportCrashSignatures:
         with tempfile.TemporaryDirectory() as td:
             report = generate_report(f, td, td)
         assert "Clustered by stack similarity" not in report
+
+    def test_crash_signatures_chained_cluster_is_flagged(self):
+        """A single-linkage chain (A~B~C, A!~C) must surface a CHAINED note.
+
+        report.py always builds a frame_lists entry per signature (even an
+        empty one), so cluster_crashes always takes the frame-similarity
+        path here rather than the signature-Levenshtein path -- unlike
+        test_chained_cluster_diagnostic.py, which calls cluster_crashes
+        directly with frame_lists=None. This fixture mirrors that: A--B and
+        B--C each clear the 0.7 cluster threshold at the frame level, while
+        A--C sits at the token-edit-distance ceiling the triangle
+        inequality allows for 8-token frames (0.50) -- right at, not below,
+        the default 0.5 core threshold, so this test loosens it to 0.55 to
+        demonstrate the flag firing through the real report path.
+        """
+        a_frames = ["a"] * 8
+        b_frames = ["a"] * 6 + ["b"] * 2
+        c_frames = ["c"] * 2 + ["a"] * 4 + ["b"] * 2
+        f = _make_mock_fuzzer(
+            crash_sigs={"sigA": 1, "sigB": 1, "sigC": 1},
+            crash_frames={"sigA": a_frames, "sigB": b_frames, "sigC": c_frames},
+        )
+        try:
+            configure_crash_cluster(threshold=0.7, core_threshold=0.55)
+            with tempfile.TemporaryDirectory() as td:
+                report = generate_report(f, td, td)
+        finally:
+            configure_crash_cluster(threshold=0.7, core_threshold=0.5)
+        assert "Clustered by stack similarity" in report
+        assert "1 likely distinct bug(s)" in report
+        assert "CHAINED" in report
+        assert "0.50" in report
+
+    def test_crash_signatures_tight_cluster_is_not_flagged(self):
+        """A cluster where every pair is close must not get a CHAINED note."""
+        f = _make_mock_fuzzer(
+            crash_sigs={"ASAN:heap-buffer-overflow@parse@main:100": 3, "sig2": 2},
+            crash_frames={
+                "ASAN:heap-buffer-overflow@parse@main:100": ["parse()", "main()"],
+                "sig2": ["parse()", "main()"],
+            },
+        )
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Clustered by stack similarity" in report
+        assert "CHAINED" not in report
 
     def test_coverage_analysis_without_seen_attribute(self):
         """Regression: _coverage_analysis must use cumulative_edges, not _seen."""

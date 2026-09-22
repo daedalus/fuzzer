@@ -322,6 +322,11 @@ def _crash_signatures(f) -> str:
     signatures caused by the same underlying bug -- differing only in
     inlined frames or instruction offsets -- are reported as one root
     cause instead of inflating the apparent bug count.
+
+    Clusters are single-linkage, which can chain two genuinely distinct
+    bugs together through an intermediate signature; any cluster flagged
+    by :func:`fuzzer_tool.core.crash_metadata.detect_chained_clusters` is
+    marked below so triage doesn't trust its grouping blindly.
     """
     sigs = getattr(f, "crash_sigs", None)
     if not sigs:
@@ -335,22 +340,29 @@ def _crash_signatures(f) -> str:
         lines.append(line)
 
     if len(sigs) > 1:
-        from fuzzer_tool.core.crash_metadata import cluster_crashes
+        from fuzzer_tool.core.crash_metadata import cluster_crashes, detect_chained_clusters
 
         sig_list = list(sigs.keys())
         frame_lists = [frames.get(s, []) for s in sig_list]
         clusters = cluster_crashes(sig_list, frame_lists=frame_lists)
-        multi = [c for c in clusters if len(c) > 1]
+        chained = detect_chained_clusters(clusters, sig_list, frame_lists=frame_lists)
+        multi = [(idx, c) for idx, c in enumerate(clusters) if len(c) > 1]
         if multi:
             lines.append("")
             lines.append(
                 f"  Clustered by stack similarity: {len(sigs)} signature(s) -> "
                 f"{len(clusters)} likely distinct bug(s)"
             )
-            for cluster in sorted(multi, key=len, reverse=True):
+            for idx, cluster in sorted(multi, key=lambda p: len(p[1]), reverse=True):
                 total = sum(sigs[sig_list[i]] for i in cluster)
                 members = ", ".join(sig_list[i] for i in cluster)
-                lines.append(f"    [{total:>4d}x] {members}")
+                note = ""
+                if idx in chained:
+                    note = (
+                        f"  [CHAINED -- min pairwise similarity "
+                        f"{chained[idx]:.2f}, verify this is one bug]"
+                    )
+                lines.append(f"    [{total:>4d}x] {members}{note}")
 
     return "\n".join(lines)
 
