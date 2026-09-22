@@ -51,27 +51,46 @@ def _lerp(a: float, b: float, t: float) -> float:
     return a + t * (b - a)
 
 
+# Module-level, keyed on (seed, node) rather than a bound method keyed on
+# (self, node): an ``lru_cache`` on an instance method holds a strong
+# reference to ``self`` in every cache entry, which keeps every
+# ``PerlinNoise1D`` that ever populated an entry alive for as long as that
+# entry survives eviction (ruff B019 -- the same leak already fixed for
+# fractal_voronoi.py's ``_site``/``_root``). Since almost every mutation
+# call derives a fresh, effectively-unique seed (content hash XORed with an
+# rng draw -- see ``PerlinNoiseMutator._noise_for``), a method-level cache
+# here meant up to 8192 otherwise-dead ``PerlinNoise1D`` instances pinned
+# alive at once, continuously replaced as new seeds arrived: steady,
+# unbounded-looking RSS growth over a campaign even though the *cache*
+# itself was size-capped. Keying on the plain ``(seed, node)`` tuple keeps
+# the same cache hit rate (repeated lattice points within one noise field)
+# without retaining the instance.
+@lru_cache(maxsize=8192)
+def _gradient(seed: int, node: int) -> float:
+    """Random unit gradient (scalar in [-1, 1]) at integer lattice point *node*."""
+    h = hashlib.sha256(f"{seed}:{node}".encode()).digest()
+    # 2 bytes -> [0, 65535] -> [-1, 1)
+    raw = (h[0] << 8) | h[1]
+    return (raw / 32768.0) - 1.0
+
+
 class PerlinNoise1D:
     """Deterministic 1D gradient noise, seeded and cacheable.
 
     Gradients are derived from a SHA-256 hash of ``(seed, node)`` rather
     than Perlin's original permutation-table hash -- avoids a 256-entry
     lookup table and its wraparound-at-256 correlation artifacts, at the
-    cost of being slower per node. Nodes are cached with ``lru_cache``
-    since a mutation pass revisits the same integer lattice points across
-    every fractional offset in a cell.
+    cost of being slower per node. Nodes are cached (module-level, keyed on
+    ``(seed, node)``; see ``_gradient`` above) since a mutation pass
+    revisits the same integer lattice points across every fractional
+    offset in a cell.
     """
 
     def __init__(self, seed: int = 0) -> None:
         self.seed = seed
 
-    @lru_cache(maxsize=8192)
     def _gradient(self, node: int) -> float:
-        """Random unit gradient (scalar in [-1, 1]) at integer lattice point *node*."""
-        h = hashlib.sha256(f"{self.seed}:{node}".encode()).digest()
-        # 2 bytes -> [0, 65535] -> [-1, 1)
-        raw = (h[0] << 8) | h[1]
-        return (raw / 32768.0) - 1.0
+        return _gradient(self.seed, node)
 
     def __call__(self, x: float) -> float:
         """Noise value at *x*, approximately in [-1, 1]."""
