@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Collection
 from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.rand_pool import RandPool
@@ -1144,6 +1145,8 @@ class Fuzzer:
         op_credit=False,
         shaped_reward=False,
         shaped_reward_floor=0.0,
+        continuum_reward=False,
+        continuum_reward_floor=0.0,
         consolidated=False,
         moss=False,
         moss_gamma=1.0,
@@ -2664,6 +2667,21 @@ class Fuzzer:
         self._shaped_reward_factor_sum = 0.0
         if shaped_reward:
             log.info("shaped_reward enabled (op_rewards scaled by class credit)")
+
+        # Reward shaping from the continuum's pressure field: a discovery's
+        # reward is scaled by how scarce the territory it landed in was
+        # (mean pressure of the edges co-hit alongside it), rather than the
+        # constant surprisal_weight every round gets today. Composes with
+        # --shaped-reward (both are pure multiplicative factors on the same
+        # op_rewards list) but is its own paired A/B question -- see
+        # Fuzzer._continuum_reward_shape.
+        self._continuum_reward = bool(continuum_reward)
+        self._continuum_reward_floor = float(continuum_reward_floor)
+        self._continuum_reward_rounds = 0
+        self._continuum_reward_neutral = 0
+        self._continuum_reward_factor_sum = 0.0
+        if continuum_reward:
+            log.info("continuum_reward enabled (op_rewards scaled by frontier pressure)")
 
         # Consolidated: flat Thompson with a category-shrunk prior and capped
         # evidence -- the single learner meant to replace the Elo portfolio
@@ -4655,6 +4673,64 @@ class Fuzzer:
             "shaped_reward_mean_factor": (self._shaped_reward_factor_sum / n) if n else None,
         }
 
+    def _continuum_reward_shape(self) -> float | None:
+        """Scale factor for this round's shared operator reward, or None.
+
+        None means "leave the reward alone", same contract as
+        ``_credit_reward_shape``, and for the same three reasons:
+
+        * ``--continuum-reward`` off;
+        * the round discovered no edges -- a factor here would zero every
+          non-coverage reward (crash, hang, new max, cmp progress) the same
+          way an unconditional class-shaping factor would;
+        * the discovery has no neighbourhood to price -- no corpus seeds
+          yet, or the trace is nothing but the new edges themselves.
+          Counted apart (``_continuum_reward_neutral``) so a bench run can
+          tell "off" from "on and the frontier had nothing to say".
+
+        Independent of ``--shaped-reward``/``--op-credit``: both call sites
+        multiply into the same ``op_rewards`` list (``_apply_reward_shape``
+        composes), so combining them would move two variables in one paired
+        run. This one prices *where* a discovery landed; that one prices
+        *how duplicated* it was.
+        """
+        if not self._continuum_reward:
+            return None
+        if not self._last_new_edge_ids:
+            return None
+        if self._edge_tracker is None:
+            return None
+
+        from fuzzer_tool.core.analyzers.analyzer_navier_stokes import frontier_weight
+
+        factor = frontier_weight(
+            self._last_new_edge_ids,
+            self._last_trace_edges,
+            self._edge_tracker.edge_owner_count,
+            len(self._edge_tracker.seed_edges),
+            self._continuum_reward_floor,
+        )
+        if factor is None:
+            self._continuum_reward_neutral += 1
+            return None
+
+        self._continuum_reward_rounds += 1
+        self._continuum_reward_factor_sum += factor
+        return factor
+
+    def continuum_reward_stats(self) -> dict:
+        """Did the shaping bite? Instrument for the paired A/B, not a decision."""
+        n = self._continuum_reward_rounds
+        return {
+            "continuum_reward": self._continuum_reward,
+            "continuum_reward_floor": self._continuum_reward_floor,
+            "continuum_reward_rounds": n,
+            "continuum_reward_neutral_rounds": self._continuum_reward_neutral,
+            "continuum_reward_mean_factor": (
+                (self._continuum_reward_factor_sum / n) if n else None
+            ),
+        }
+
     def _note_det_effector(self) -> None:
         """Tell the operator engine whether the byteflip just run moved the trace.
 
@@ -4707,6 +4783,10 @@ class Fuzzer:
         # Reset every round so a round with no discovery cannot be shaped by the
         # previous round's edges.
         self._last_new_edge_ids: list[int] = []
+        # This round's full hit-edge trace, for _continuum_reward_shape's
+        # neighbourhood. Reset for the same reason: a round with no
+        # discovery must not be priced against a stale trace.
+        self._last_trace_edges: Collection[int] = ()
         meta = self.seed_meta.get(data)
         if meta is not None:
             meta["fuzz_count"] += 1
@@ -5435,6 +5515,7 @@ class Fuzzer:
                     self._last_new_edge_exec = self.exec_count
                     self._last_new_edge_count = len(new)
                     self._last_new_edge_ids = list(new)
+                    self._last_trace_edges = hit_edges
                     self._novel_input_count += 1
                     self._saturation = None  # invalidate cached saturation
                     # Attribute new edges to the operators that ran this iteration.
@@ -5649,6 +5730,7 @@ class Fuzzer:
         # variable. Kept as a pure transform (`_apply_reward_shape`) so it can be
         # driven by a test without a live campaign.
         op_rewards = _apply_reward_shape(op_rewards, self._credit_reward_shape())
+        op_rewards = _apply_reward_shape(op_rewards, self._continuum_reward_shape())
 
         # SLOPT: credit the batch exponent drawn for this round's operator
         # with that operator's outcome. The scheme applies one operator per
@@ -7760,6 +7842,11 @@ class Fuzzer:
             floor = getattr(self, "_shaped_reward_floor", 0.0)
             groups["Scheduling"].append(
                 "shaped-reward" if not floor else f"shaped-reward(floor={floor:g})"
+            )
+        if getattr(self, "_continuum_reward", False):
+            floor = getattr(self, "_continuum_reward_floor", 0.0)
+            groups["Scheduling"].append(
+                "continuum-reward" if not floor else f"continuum-reward(floor={floor:g})"
             )
         if ops:
             groups["Scheduling"].extend(ops)

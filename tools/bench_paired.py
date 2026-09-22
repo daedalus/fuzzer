@@ -111,6 +111,11 @@ ARMS: dict[str, list[str]] = {
         "--shaped-reward-floor",
         "0.25",
     ],
+    # Prices *where* a discovery landed (frontier pressure) rather than *how
+    # duplicated* it was (shaped-reward, above). Pairs against "elo" for the
+    # same single-variable reason; deliberately not combined with
+    # --shaped-reward or --op-credit.
+    "elo-continuum-reward": ["--elo", "--mc-bandit", "--continuum-reward"],
     # Generation group (docs/handover/handover_generators_2026-09-20.md G0).
     # Each pairs against the baseline named in ARM_BASELINES.
     #

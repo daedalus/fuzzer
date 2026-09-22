@@ -657,6 +657,8 @@ def cmd_fuzz(args):
         op_credit=getattr(args, "op_credit", False),
         shaped_reward=getattr(args, "shaped_reward", False),
         shaped_reward_floor=getattr(args, "shaped_reward_floor", 0.0),
+        continuum_reward=getattr(args, "continuum_reward", False),
+        continuum_reward_floor=getattr(args, "continuum_reward_floor", 0.0),
         consolidated=getattr(args, "consolidated", False),
         moss=getattr(args, "moss", False),
         moss_gamma=getattr(args, "moss_gamma", 1.0),
@@ -2751,6 +2753,33 @@ def main() -> int:
             "round pays 0, which all but deletes that round's reward for every arm; "
             "both are a design bet, so the clamp is a knob a paired run can move. "
             "1.0 disables the shaping without unwiring it"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--continuum-reward",
+        action="store_true",
+        help=(
+            "Scale EVERY scheduler's operator reward by the mean continuum pressure "
+            "(core/analyzers/analyzer_navier_stokes.py) of the edges co-hit alongside "
+            "a discovery: a round that opens unvisited territory pays close to 1, one "
+            "that fills a gap between well-owned edges pays close to 0 (experimental, "
+            "off by default; leaves the reward alone on rounds with no discovery or no "
+            "neighbourhood to price). Independent of --continuum (which re-ranks "
+            "invasion operators instead) and of --shaped-reward/--op-credit (which "
+            "price duplication, not location), so a paired run moves one variable"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--continuum-reward-floor",
+        type=float,
+        default=0.0,
+        metavar="F",
+        help=(
+            "Lower clamp on the --continuum-reward factor (default: 0.0, the "
+            "faithful form). A discovery in fully-saturated territory otherwise pays "
+            "0, which all but deletes that round's reward for every arm; the clamp "
+            "is a knob a paired run can move. 1.0 disables the shaping without "
+            "unwiring it"
         ),
     )
     fuzz_parser.add_argument(

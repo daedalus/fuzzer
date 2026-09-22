@@ -244,6 +244,54 @@ class ContinuumField:
         )
 
 
+def frontier_weight(
+    new_edges,
+    trace_edges,
+    owner_count,
+    n_seeds: int,
+    floor: float = 0.0,
+) -> float | None:
+    """Mean pressure of the edges co-hit with a discovery, in ``[0, 1]``.
+
+    Reuses :func:`pressure_field`'s log-scaled ratio, per edge, with the
+    corpus seed count standing in for that function's ``max_occ``: an edge
+    no seed owns reads as full pressure (``1.0``), one owned by every seed
+    reads as none (``0.0``).  The *new* edges are excluded from their own
+    neighbourhood -- what is being weighted is the territory the discovery
+    landed in, not the discovery itself, which has no prior ownership to
+    read.
+
+    Returns ``None`` (not ``0.0``) when there is nothing to average over: no
+    seeds yet, or a trace that is nothing but the new edges themselves.  A
+    zero here would look identical to "this round found nothing worth
+    rewarding", which is a different thing from "this round cannot be
+    scored" -- the same distinction :func:`viscosity`'s floor exists for on
+    the operator side.
+
+    ``floor`` clamps the answer from below only, mirroring
+    ``op_credit.shaped_weight``'s floor: the result never falls below it and
+    never rises above ``1.0`` regardless of how large ``floor`` is passed.
+    """
+    if n_seeds <= 0:
+        return None
+
+    neighbours = set(trace_edges) - set(new_edges)
+    if not neighbours:
+        return None
+
+    ceiling = math.log1p(n_seeds)
+    if ceiling <= 0.0:
+        return None
+
+    total = 0.0
+    for edge in neighbours:
+        owned = min(max(float(owner_count(edge)), 0.0), float(n_seeds))
+        total += 1.0 - math.log1p(owned) / ceiling
+
+    raw = min(1.0, max(0.0, total / len(neighbours)))
+    return min(1.0, max(raw, float(floor)))
+
+
 def _length_scale(adjacency: Mapping) -> float:
     """Mean degree of the frontier graph, in hops; 1.0 without a graph."""
     if not adjacency:

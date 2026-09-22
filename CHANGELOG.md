@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--continuum-reward`** (`core/analyzers/analyzer_navier_stokes.py::frontier_weight`,
+  `services/fuzzer.py::Fuzzer._continuum_reward_shape`): scales every scheduler's
+  shared operator reward by the mean continuum pressure of the edges co-hit
+  alongside a discovery — a round that opens unvisited territory pays close to
+  1, one that fills a gap between well-owned edges pays close to 0. `--continuum-
+  reward-floor` clamps the factor from below, same contract as
+  `--shaped-reward-floor`. Off by default, out of `--hail-mary` (rescales the
+  reward every strategy reads, same structural exclusion as `--shaped-reward`);
+  independent of `--continuum` (which re-ranks invasion operators, not the
+  reward) and of `--shaped-reward`/`--op-credit` (which price duplication, not
+  location) — the two factors compose multiplicatively. Registered as bench arm
+  `elo-continuum-reward` against baseline `elo`; paired A/B on fuzzgoat (12
+  seeds, 2k execs) came back 4W/8L, median Δ -3.5 edges, McNemar p=0.388 — not
+  resolved at this cell count, point estimate a loss. See
+  `docs/learnings/2026-09-22-continuum-reward-ab-result.md`.
+
 - **Math-port plan P1–P4** (`docs/handover/handover_math_port_plan_2026-09-21.md`):
   - **`montgomery_mutate`** (`core/mutations/montgomery.py`) — structure-aware
     REDC/Barrett constant injector gated on the secp256k1 field prime or

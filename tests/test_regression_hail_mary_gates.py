@@ -111,6 +111,15 @@ _EXCLUDED_OPT_IN = frozenset(
         # and it would destroy the single-variable paired run it exists for
         # (bench arm "elo-shaped-reward").
         "shaped_reward",
+        # Same structural argument as shaped_reward directly above -- it is
+        # not a strategy, it rescales the reward every other strategy reads
+        # (core/analyzers/analyzer_navier_stokes.py::frontier_weight), so
+        # --hail-mary would change what the whole portfolio is paid for, and
+        # it would destroy the single-variable paired run it exists for
+        # (bench arm "elo-continuum-reward"). Unmeasured as yet -- see
+        # docs/learnings/ once that run lands -- so there is no result to
+        # cite the way shaped_reward's exclusion can.
+        "continuum_reward",
     }
 )
 
