@@ -807,6 +807,14 @@ def cmd_fuzz(args):
         # is owned by the try/finally below, which is the context manager.
         fuzzer._log_json_fh = open(log_json_path, "a", buffering=1)  # noqa: SIM115
 
+    # --output-graph: a plain list, not a file handle, since the whole
+    # point is one PNG rendered from the full history at teardown. Left
+    # as None (the StatsReporter no-ops on None) when the flag is unset,
+    # so campaigns that don't ask for a graph don't pay to keep one.
+    output_graph_path = getattr(args, "output_graph", None)
+    if output_graph_path:
+        fuzzer._campaign_graph_history = []
+
     try:
         _run_fuzzer(fuzzer, args)
     finally:
@@ -814,6 +822,15 @@ def cmd_fuzz(args):
         if fh is not None and fh is not sys.stderr:
             fh.close()
         fuzzer._log_json_fh = None
+
+        if output_graph_path:
+            from fuzzer_tool.core.campaign_graph import render_campaign_graph
+
+            render_campaign_graph(
+                fuzzer._campaign_graph_history,
+                output_graph_path,
+                target_label=", ".join(getattr(args, "targets", []) or []),
+            )
 
     if args.report is not None:
         from fuzzer_tool.services.report import generate_report
@@ -3885,6 +3902,20 @@ def main() -> int:
             "over the run (default: <corpus_dir>/report.html). Works "
             "standalone -- does not require --coverage-log to be set "
             "separately, an internal log is used automatically if needed."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--output-graph",
+        default=None,
+        metavar="FILE.png",
+        help=(
+            "Record every metric already printed on the periodic exec-status "
+            "tick (throughput, corpus/edges, crashes/timeouts, memory) and "
+            "render them as a multi-section PNG when the run ends. Off by "
+            "default -- unlike --plot-graph's HTML/SVG report, which reads "
+            "back a coverage-only CSV, this keeps the full per-tick history "
+            "in memory for the run and needs matplotlib installed. Not "
+            "included in --hail-mary: ask for it explicitly."
         ),
     )
     fuzz_parser.add_argument(

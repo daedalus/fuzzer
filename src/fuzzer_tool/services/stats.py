@@ -1415,6 +1415,46 @@ class StatsReporter:
         print(line, flush=True)
         self._print_stats_supplementary()
         self._emit_json_stats(elapsed, eps)
+        self._record_graph_snapshot(elapsed, eps)
+
+    def _record_graph_snapshot(self, elapsed: float, eps: float) -> None:
+        """Append one row to f._campaign_graph_history, if --output-graph is on.
+
+        Fires on the same cadence as the human status line and the
+        --log-json record (every print_stats() tick), but stays in memory
+        rather than hitting disk, since the whole point is a single PNG
+        rendered at the end of the run. Only active when cmd_fuzz has set
+        _campaign_graph_history to a list (i.e. --output-graph was passed);
+        otherwise this is a no-op so campaigns that don't ask for a graph
+        don't pay for one. Any failure is swallowed -- telemetry must not
+        be able to kill a campaign that is otherwise making progress.
+        """
+        history = getattr(self.f, "_campaign_graph_history", None)
+        if history is None:
+            return
+        f = self.f
+        try:
+            history.append(
+                {
+                    "elapsed": elapsed,
+                    "execs": f.exec_count,
+                    "eps": eps,
+                    "eps_filtered": round(getattr(f, "_eps_filtered", 0.0) or 0.0, 2),
+                    "corpus": len(f.corpus),
+                    "crashes": f.crash_count,
+                    "crash_sigs": len(f.crash_sigs or {}),
+                    "timeouts": f.timeout_count,
+                    "peak_rss_kb": getattr(f, "_peak_rss", 0),
+                    "edges": (
+                        int(getattr(f.shm_cov, "cumulative_edges", 0))
+                        if f.shm_cov is not None
+                        else None
+                    ),
+                    "novel_inputs": getattr(f, "_novel_input_count", 0),
+                }
+            )
+        except Exception:  # pragma: no cover - telemetry must never abort a run
+            log.debug("failed to record campaign graph snapshot", exc_info=True)
 
     def _print_stats_supplementary(self) -> None:
         """Print a second line of supplementary stats that don't fit on the main line."""
