@@ -121,3 +121,17 @@ is written from scratch against the existing module conventions, not vendored.
 
 Each step: TODO first (Hard Rule 10), regression tests (Hard Rule 23), suite for
 affected files, `ruff format/check`, docs per convention, commit+push.
+
+## Status (2026-09-21)
+
+- **P2 done**: `beta_quantile` Newton-polishes from Cornish-Fisher seed
+  (`use_newton=True` default, ≤2 iters); bisection kept as fallback.
+  Tests in `tests/test_bayes_ucb_scheduler.py::TestBetaQuantile`.
+- **P3 done**: `poly_mul` nibble-table path; signature unchanged. Tests in
+  `tests/test_gf2_common.py`.
+- **P1 done**: `core/mutations/montgomery.py` + registry (`format` band) +
+  `_op_montgomery_mutate` handler. Sniffer on field prime / curve order.
+  Tests in `tests/test_montgomery_mutate.py`.
+- **P4 done**: shared `core/ks_pvalue.py`; `edge_tracker` / `randomness`
+  re-export without behaviour change.
+- **P5 / P6**: parked pending profile evidence (Hard Rule 41).

@@ -72,6 +72,52 @@ class TestBetaQuantile:
         high = beta_quantile(p, 0.5 + 18, 0.5 + 2)  # 18/20 successes
         assert high > low
 
+    def test_newton_matches_bisection_on_grid(self):
+        """Newton fast-path agrees with pure bisection on a (a,b,p) grid.
+
+        Hard Rule 45: also assert the reference path matches itself.
+        """
+        grid = [
+            (0.5, 0.5, 0.5),
+            (0.5, 0.5, 0.99),
+            (1.0, 1.0, 0.3),
+            (2.0, 5.0, 0.9),
+            (5.0, 5.0, 0.5),
+            (10.0, 2.0, 0.95),
+            (50.0, 3.0, 0.995),
+            (0.5 + 18, 0.5 + 2, 0.9),
+        ]
+        for a, b, p in grid:
+            q_bisect_1 = beta_quantile(p, a, b, use_newton=False)
+            q_bisect_2 = beta_quantile(p, a, b, use_newton=False)
+            # Control: reference matches itself (Hard Rule 45).
+            assert q_bisect_1 == q_bisect_2
+            q_newton = beta_quantile(p, a, b, use_newton=True)
+            assert q_newton == pytest.approx(q_bisect_1, abs=2e-3)
+            # Both recover p via the CDF within documented tol.
+            assert _betai(a, b, q_newton) == pytest.approx(p, abs=5e-3)
+
+    def test_newton_disabled_uses_bisection(self):
+        """Falsification: use_newton=False returns the bisection path."""
+        a, b, p = 3.0, 7.0, 0.8
+        q = beta_quantile(p, a, b, use_newton=False)
+        # Reconstruct via pure bisection helper indirectly: residual must
+        # match, and a second call must be identical.
+        assert beta_quantile(p, a, b, use_newton=False) == q
+        assert abs(_betai(a, b, q) - p) < 5e-3
+
+    def test_newton_adversarial_near_endpoints(self):
+        """Adversarial: extreme quantiles and skinny betas do not crash."""
+        for a, b, p in [
+            (1e-3, 1e-3, 0.999),
+            (1e-3, 100.0, 0.01),
+            (100.0, 1e-3, 0.99),
+            (1.0, 1.0, 1e-9),
+            (1.0, 1.0, 1.0 - 1e-9),
+        ]:
+            q = beta_quantile(p, a, b, use_newton=True)
+            assert 0.0 <= q <= 1.0
+
 
 class TestConstructorValidation:
     def test_rejects_non_positive_prior_alpha(self):

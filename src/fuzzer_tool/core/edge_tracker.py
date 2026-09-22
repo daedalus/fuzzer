@@ -309,35 +309,18 @@ def ks_two_sample(samples_a: list[float], samples_b: list[float]) -> tuple[float
         d = max(d, abs(fi - fj))
         j += 1
 
-    # P-value from asymptotic Kolmogorov distribution
-    p = _kolmogorov_pvalue(d, n, m)
+    # P-value from asymptotic Kolmogorov distribution (shared helper).
+    from fuzzer_tool.core.ks_pvalue import kolmogorov_pvalue_two_sample
+
+    p = kolmogorov_pvalue_two_sample(d, n, m)
     return d, p
 
 
 def _kolmogorov_pvalue(d: float, n: int, m: int) -> float:
-    """P-value for two-sample KS test using asymptotic Kolmogorov distribution.
+    """Backward-compat alias — prefer ``kolmogorov_pvalue_two_sample``."""
+    from fuzzer_tool.core.ks_pvalue import kolmogorov_pvalue_two_sample
 
-    Uses the series: P(D >= d) = 2 * sum_{k=1}^{inf} (-1)^{k-1} exp(-2 k^2 lambda^2)
-    where lambda = d * sqrt(n*m / (n+m)).
-    Converges rapidly — 20 terms suffice for all practical values.
-    """
-    if d <= 0:
-        return 1.0
-    if d >= 1.0:
-        return 0.0
-
-    # Effective sample size
-    nm = n * m / (n + m)
-    lam = d * math.sqrt(nm)
-    lam2 = lam * lam
-
-    # Series converges fast; 20 terms covers everything
-    p = 0.0
-    for k in range(1, 21):
-        term = ((-1) ** (k - 1)) * math.exp(-2.0 * k * k * lam2)
-        p += term
-    p = max(0.0, min(1.0, 2.0 * p))
-    return p
+    return kolmogorov_pvalue_two_sample(d, n, m)
 
 
 def _ks_p_from_cdf_diff(max_cdf_diff: float, n_samples: int) -> float:

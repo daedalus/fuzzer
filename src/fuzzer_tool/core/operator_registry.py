@@ -184,6 +184,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "cfhd_chunk_mutate",
         "shorten_chunk_mutate",
         "flac_chunk_mutate",
+        "montgomery_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -523,6 +524,13 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     # distinctive signal is "ffconcat" on its own line (case-insensitive),
     # which is what the demuxer looks for before parsing anything else.
     "ffconcat_chunk_mutate": lambda d: b"ffconcat" in d[:256].lower(),
+    # secp256k1 field prime or curve order as a BE 32-byte literal.
+    "montgomery_mutate": lambda d: (
+        b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
+        b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xfc\x2f" in d
+        or b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe"
+        b"\xba\xae\xdc\xe6\xaf\x48\xa0\x3b\xbf\xd2\x5e\x8c\xd0\x36\x41\x41" in d
+    ),
 }
 
 # Fraction of selections on which a not-yet-seen format is still offered.

@@ -55,13 +55,41 @@ def poly_deg(p: int) -> int:
 
 
 def poly_mul(a: int, b: int) -> int:
-    """Carryless (GF(2)) polynomial multiplication."""
+    """Carryless (GF(2)) polynomial multiplication.
+
+    Nibble-table path: precompute ``a * {0..15}`` once, then consume *b*
+    four bits at a time. Same ``(int, int) -> int`` signature as the
+    original shift loop; asymptotically fewer Python loop iterations for
+    wide limbs (CRC / Rabin / BM callers).
+    """
+    if a == 0 or b == 0:
+        return 0
+    # Ensure the shorter factor is the one we scan bit-by-bit.
+    if a.bit_length() < b.bit_length():
+        a, b = b, a
+    # 4-bit × limb table: table[k] = a * k over GF(2).
+    table = [0] * 16
+    table[1] = a
+    table[2] = a << 1
+    table[3] = table[2] ^ a
+    table[4] = a << 2
+    table[5] = table[4] ^ a
+    table[6] = table[4] ^ table[2]
+    table[7] = table[6] ^ a
+    table[8] = a << 3
+    table[9] = table[8] ^ a
+    table[10] = table[8] ^ table[2]
+    table[11] = table[10] ^ a
+    table[12] = table[8] ^ table[4]
+    table[13] = table[12] ^ a
+    table[14] = table[12] ^ table[2]
+    table[15] = table[14] ^ a
     r = 0
+    shift = 0
     while b:
-        if b & 1:
-            r ^= a
-        a <<= 1
-        b >>= 1
+        r ^= table[b & 0xF] << shift
+        b >>= 4
+        shift += 4
     return r
 
 

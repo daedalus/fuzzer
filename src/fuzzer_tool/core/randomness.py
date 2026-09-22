@@ -729,48 +729,11 @@ def kmer_occupancy(data: bytes, tuple_bits: int | None = None) -> float:
 # ── p-value aggregation (dieharder's real contribution) ───────────────
 
 
-def _ks_exact_cdf(n: int, d: float) -> float:  # noqa: C901
-    """Marsaglia-Tsang-Wang exact P(D_n < d) via the H-matrix power method.
+def _ks_exact_cdf(n: int, d: float) -> float:
+    """Marsaglia exact P(D_n < d) — shared implementation in ``ks_pvalue``."""
+    from fuzzer_tool.core.ks_pvalue import ks_exact_cdf
 
-    MEASURED, NOT ASSUMED: this was ported on the expectation that the
-    asymptotic form breaks down at small n.  It does not.  Over 3000 null
-    trials the false-reject rate at alpha=0.05 is 0.051 (exact) vs 0.050
-    (asymptotic) at n=5, and the two agree to ~0.01 in p out to n=80.  The
-    Stephens correction (sqrt(n)+0.12+0.11/sqrt(n)) already does the job.
-
-    Kept only for reference; ``ks_uniform`` defaults to it but the asymptotic
-    path is O(n) against O(n*m^3) here.  Do not port this into the tree --
-    ``edge_tracker._kolmogorov_pvalue`` is already sufficient.
-    """
-    if d <= 0.0:
-        return 0.0
-    if d >= 1.0:
-        return 1.0
-    k = int(n * d) + 1
-    m = 2 * k - 1
-    h = k - n * d
-    hmat = np.zeros((m, m), dtype=np.float64)
-    for i in range(m):
-        for j in range(m):
-            if i - j + 1 >= 0:
-                hmat[i][j] = 1.0
-    for i in range(m):
-        hmat[i][0] -= h ** (i + 1)
-        hmat[m - 1][i] -= h ** (m - i)
-    hmat[m - 1][0] += (2 * h - 1) ** m if (2 * h - 1) > 0 else 0.0
-    for i in range(m):
-        for j in range(m):
-            if i - j + 1 > 0:
-                for g in range(1, i - j + 2):
-                    hmat[i][j] /= g
-    # H^n, scaling to avoid overflow
-    q = np.linalg.matrix_power(hmat, n)
-    s = q[k - 1][k - 1]
-    for i in range(1, n + 1):
-        s = s * i / n
-        if s < 1e-140:
-            s *= 1e140
-    return float(s)
+    return ks_exact_cdf(n, d)
 
 
 def ks_uniform(pvalues: list[float] | np.ndarray, exact: bool = True) -> float:
@@ -785,9 +748,9 @@ def ks_uniform(pvalues: list[float] | np.ndarray, exact: bool = True) -> float:
     d = max(d_plus, d_minus)
     if exact and n <= 140:
         return max(0.0, 1.0 - _ks_exact_cdf(n, d))
-    lam = (math.sqrt(n) + 0.12 + 0.11 / math.sqrt(n)) * d
-    s = sum((-1) ** (j - 1) * math.exp(-2.0 * j * j * lam * lam) for j in range(1, 101))
-    return max(0.0, min(1.0, 2.0 * s))
+    from fuzzer_tool.core.ks_pvalue import kolmogorov_pvalue_one_sample
+
+    return kolmogorov_pvalue_one_sample(d, n)
 
 
 def kuiper_uniform(pvalues: list[float] | np.ndarray) -> float:

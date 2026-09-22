@@ -4028,6 +4028,11 @@ class OperatorEngine:
 
         return self._regularity(naf_scalar_mutate, buf)
 
+    def _op_montgomery_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.montgomery import montgomery_mutate
+
+        return self._regularity(montgomery_mutate, buf)
+
     def _op_endian_convert(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import endian_convert
 

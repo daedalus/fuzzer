@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Math-port plan P1–P4** (`docs/handover/handover_math_port_plan_2026-09-21.md`):
+  - **`montgomery_mutate`** (`core/mutations/montgomery.py`) — structure-aware
+    REDC/Barrett constant injector gated on the secp256k1 field prime or
+    curve order appearing as a BE 32-byte literal; registered in the
+    `format` band with sniffer + `_op_montgomery_mutate` handler.
+  - **Shared KS p-value helpers** (`core/ks_pvalue.py`) — two-sample
+    asymptotic, one-sample asymptotic (Stephens), and Marsaglia exact CDF;
+    `edge_tracker` / `randomness` re-export without behaviour change.
+
 - **`wfc_reorder_learned` rolled out to ogg, flv, nal, asf, mpegts and zip** (`core/wfc_chunks.py`), joining isobmff/riff/webp/gif. Fixed three defects in the shared reorder core found on the way: `violate` mode indexed one cell past the grid when nothing was pinned last (swallowed by `mutate`, so a fraction of violate calls silently declined) and overwrote the pinned last cell when something was; chunks a collapse under-placed were appended after the pinned-last chunk; and strict mode's "never emits an unobserved adjacency" was only ever tested on a re-parsed output, which re-segments positional formats such as GIF.
 
 - **Crash field map and baseline in crash sidecars** (`core/field_map.py`, `services/crash_explain.py`). A novel crash's `.txt`/`.json` now name the fields of the crashing input (PNG, gzip, ZIP, RIFF) and mark which changed against the parent seed it was mutated from, falling back to a hash-rehydrated parent, then the nearest corpus seed. Static only: nothing executes the target, and `changed` does not claim causation.
@@ -302,6 +311,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fixes the two ASAN tests that passed in isolation and failed in a full run.
 
 ### Changed
+- **`beta_quantile` Newton fast-path** (`op_bayes_ucb.py`) — Cornish-Fisher
+  seed polished with ≤2 Newton steps against the CF CDF; pure bisection
+  remains the fallback (`use_newton=False` or residual miss).
+- **`poly_mul` nibble-table path** (`gf2_common.py`) — same signature, fewer
+  Python loop iterations on wide limbs (CRC / Rabin / Berlekamp-Massey).
 - **Coverage-guided mode is the default; `--no-coverage` opts out.** `fuzz`
   required `-c/--coverage`, and forgetting it failed silently: no SHM bitmap
   was created, so seed scheduling, MI/TE/sensitivity position weighting,

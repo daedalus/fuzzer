@@ -77,6 +77,47 @@ def test_poly_mul_known():
     assert poly_mul(0b11, 0b11) == 0b101
 
 
+def _poly_mul_ref(a: int, b: int) -> int:
+    """Independent shift-loop reference for poly_mul (Hard Rule 45 control)."""
+    r = 0
+    while b:
+        if b & 1:
+            r ^= a
+        a <<= 1
+        b >>= 1
+    return r
+
+
+def test_poly_mul_matches_ref_on_random():
+    """Nibble-table poly_mul equals the classic shift loop on random pairs.
+
+    Control: reference matches itself.
+    """
+    rng = __import__("random").Random(0xC0FFEE)
+    for _ in range(200):
+        a = rng.getrandbits(rng.randint(0, 128))
+        b = rng.getrandbits(rng.randint(0, 128))
+        ref1 = _poly_mul_ref(a, b)
+        ref2 = _poly_mul_ref(a, b)
+        assert ref1 == ref2  # control
+        assert poly_mul(a, b) == ref1
+
+
+def test_poly_mul_falsification_zero_and_one():
+    """Falsification: zero / unit inputs stay correct after the table rewrite."""
+    assert poly_mul(0, 0xDEADBEEF) == 0
+    assert poly_mul(0xDEADBEEF, 0) == 0
+    assert poly_mul(1, 0xABCD) == 0xABCD
+    assert poly_mul(0xABCD, 1) == 0xABCD
+
+
+def test_poly_mul_adversarial_wide_limbs():
+    """Adversarial: multi-limb factors (degree > 64) do not truncate."""
+    a = (1 << 100) | (1 << 37) | 1
+    b = (1 << 80) | (1 << 11) | 0b11
+    assert poly_mul(a, b) == _poly_mul_ref(a, b)
+
+
 # ---------------------------------------------------------------------------
 # poly_divmod / poly_mod
 # ---------------------------------------------------------------------------

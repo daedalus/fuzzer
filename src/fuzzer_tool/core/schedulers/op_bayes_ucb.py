@@ -109,8 +109,14 @@ independently -- already used for this purpose in ``coverage_regime.py``'s
 ``_betai``/``_betacf``; not imported from there because that module is
 about percolation-phase detection, an unrelated domain, and duplicating a
 ~40-line numerical primitive was judged less coupling than reaching into
-another module's underscore-prefixed internals) and inverts it by
-bisection to get the quantile.
+another module's underscore-prefixed internals) and inverts it to get the
+quantile.
+
+The default inverse path (``use_newton=True``) seeds from
+``approx_beta_quantile`` (Cornish-Fisher) and polishes with ≤2 Newton
+steps against the CF CDF, falling back to grid bisection when the
+residual exceeds ``BISECT_TOL`` or the density vanishes. Pure bisection
+remains available via ``use_newton=False`` and is the fallback path.
 
 This is real, measured cost, not a rounding error: at the loosened
 tolerances below (chosen because this index only needs to be accurate
@@ -126,7 +132,7 @@ matters, so ``approx_beta_quantile`` (a Cornish-Fisher expansion around
 the normal quantile, ~1.1us) ranks the well-evidenced arms first and the
 exact index runs on the top ``SHORTLIST_K`` of them; arms whose posterior
 mass is still below ``SHORTLIST_EXACT_BELOW`` skip the approximation
-entirely and are bisected exactly, because that is where the normal
+entirely and are inverted exactly, because that is where the normal
 approximation is unreliable and where the per-arm priors live. Measured
 over 200 rounds of 150 arms: 100.0% argmax agreement against scoring
 every arm exactly, 4.23ms -> 0.59ms (7.1x) warm, 3.80ms -> 1.35ms (2.8x)
@@ -236,26 +242,32 @@ def _betai(a: float, b: float, x: float, eps: float = CF_EPS, maxit: int = CF_MA
     return 1.0 - bt * _betacf(b, a, 1.0 - x, eps, maxit) / b
 
 
-def beta_quantile(
+#: Max Newton polish steps after Cornish-Fisher seed (P2 math-port plan).
+NEWTON_MAXIT = 2
+#: Density floor below which Newton step is abandoned (avoids div-by-near-zero).
+_NEWTON_DENS_FLOOR = 1e-300
+#: Clamp Newton iterates away from the [0, 1] endpoints.
+_NEWTON_X_EPS = 1e-15
+
+
+def _beta_pdf(a: float, b: float, x: float) -> float:
+    """Beta(a, b) density at *x*. Used as Newton derivative of the CDF."""
+    if x <= 0.0 or x >= 1.0:
+        return 0.0
+    lbeta = math.lgamma(a + b) - math.lgamma(a) - math.lgamma(b)
+    return math.exp(lbeta + (a - 1.0) * math.log(x) + (b - 1.0) * math.log(1.0 - x))
+
+
+def _beta_quantile_bisection(
     p: float,
     a: float,
     b: float,
-    tol: float = BISECT_TOL,
-    max_iter: int = BISECT_MAXIT,
-    cf_eps: float = CF_EPS,
-    cf_maxit: int = CF_MAXIT,
+    tol: float,
+    max_iter: int,
+    cf_eps: float,
+    cf_maxit: int,
 ) -> float:
-    """Quantile function (inverse CDF) of Beta(a, b) at probability p.
-
-    Bisection on ``_betai``, since there is no closed form. See the module
-    docstring's "Numerical cost" section for the accuracy this converges
-    to at the default tolerances, and why they are loosened relative to a
-    reference-quality incomplete-beta evaluation.
-    """
-    if p <= 0.0:
-        return 0.0
-    if p >= 1.0:
-        return 1.0
+    """Reference inverse-CDF via grid bisection on ``_betai``."""
     lo, hi = 0.0, 1.0
     for _ in range(max_iter):
         mid = (lo + hi) / 2.0
@@ -266,6 +278,50 @@ def beta_quantile(
         if hi - lo < tol:
             break
     return (lo + hi) / 2.0
+
+
+def beta_quantile(
+    p: float,
+    a: float,
+    b: float,
+    tol: float = BISECT_TOL,
+    max_iter: int = BISECT_MAXIT,
+    cf_eps: float = CF_EPS,
+    cf_maxit: int = CF_MAXIT,
+    use_newton: bool = True,
+) -> float:
+    """Quantile function (inverse CDF) of Beta(a, b) at probability p.
+
+    Fast path (default): Cornish-Fisher seed from ``approx_beta_quantile``
+    polished by ≤ ``NEWTON_MAXIT`` Newton steps against the continued-
+    fraction CDF. Falls back to grid bisection when the Newton residual
+    exceeds *tol*, when density vanishes, or when ``use_newton=False``.
+
+    See the module docstring's "Numerical cost" section for the accuracy
+    the bisection path converges to at the default tolerances.
+    """
+    if p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return 1.0
+
+    if use_newton:
+        x = approx_beta_quantile(p, a, b)
+        x = min(1.0 - _NEWTON_X_EPS, max(_NEWTON_X_EPS, x))
+        for _ in range(NEWTON_MAXIT):
+            fx = _betai(a, b, x, cf_eps, cf_maxit) - p
+            if abs(fx) < tol:
+                return x
+            dens = _beta_pdf(a, b, x)
+            if dens < _NEWTON_DENS_FLOOR:
+                break
+            x = x - fx / dens
+            x = min(1.0 - _NEWTON_X_EPS, max(_NEWTON_X_EPS, x))
+        # Accept Newton result only if residual is within tolerance.
+        if abs(_betai(a, b, x, cf_eps, cf_maxit) - p) < tol:
+            return x
+
+    return _beta_quantile_bisection(p, a, b, tol, max_iter, cf_eps, cf_maxit)
 
 
 #: Shortlist size for the approximate pre-pass in ``select_op`` (see the
