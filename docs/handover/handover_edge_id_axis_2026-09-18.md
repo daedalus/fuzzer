@@ -1112,6 +1112,42 @@ apples-to-apples because one logical edge can carry a different id value at
 `AFL_MAP_SIZE` for any comparison and evaluate all positional statistics on a
 single map size.
 
+**Addendum: the minimal direct-callback driver does not reproduce this, which
+narrows the search.** Attempted the cheapest possible reproduction of the
+CTX/id shift with `tests/test_ctx_and_map_size.py`'s own driver (gcc,
+`-D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer`, `__sanitizer_cov_trace_pc_guard`
+called directly, no clang, no real target) rather than fuzzgoat: same 65536-entry
+backing segment, two `subprocess.run` calls differing only in the
+`AFL_MAP_SIZE` view (512 vs 8192), edge_id logged per fire via a temporary
+env-gated write right after `edge_id |= 1` (the same hook P0-1 sketches,
+built as a scratch, uncommitted local patch to afl_shim.c for this
+investigation only). First attempt: all 40 fires differed between views --
+looked like an instant reproduction, until the same-view rerun (8192 vs 8192)
+*also* differed, which pins the cause on the harness rather than the shim:
+unsetting `FUZZER_KEEP_ASLR` disables the shim's own base-relative addressing,
+it does not touch the kernel's ASLR, so the two bare `subprocess.run` calls
+each got a fresh randomized PIE base and every `caller_ctx` naturally differed
+-- the exact class of artefact F1 already named, just at the harness level
+instead of the shim's. Re-run with the process actually pinned
+(`setarch x86_64 -R`, the same effect `disable_aslr()` achieves in
+`edge_diagnostic.py`'s `assert disable_aslr()` at line 132) and confirmed
+first via a same-view/same-pinning control (8192 vs 8192, byte-identical):
+0/40 fires differ between the 512 and 8192 views. `__afl_get_caller_ctx`'s
+own math -- fixed compile-time `__AFL_CTX_MASK`, no read of `__afl_map_size`
+anywhere in it or in `__afl_map_edge` up to the `|= 1` line -- is confirmed
+clean by direct measurement, not just by the grep the main writeup did.
+
+That the effect requires the real fuzzgoat/clang build to appear at all (a
+flat 40-guard single-TU loop, one call site, cannot produce it) says the
+missing line is not in the hashing math itself but in something only a
+multi-TU, dynamically-linked binary exercises around it -- `dladdr()`/PLT
+stub resolution, `.init_array` constructor ordering across translation
+units, or a second call site whose frame layout differs from the driver's.
+Next cheapest step, still no clang required: extend the direct-callback
+driver to two translation units with an indirect (function-pointer) call
+between them, the simplest structural difference from the single-TU loop
+that a real binary has and this driver does not.
+
 ### P3-1. `__AFL_CTX_BITS` feedback
 
 Blocked on P1-1, and on paper first: write the decision rule before touching
