@@ -479,6 +479,59 @@ class TestHonggfuzzFactors:
         )
         assert s_child > s_no_child
 
+    def test_stack_depth_boost(self):
+        from fuzzer_tool.core.schedules import SeedScorer
+
+        scorer = SeedScorer("base")
+        # No depth: below 16KB threshold
+        s_no_depth = scorer.score(
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
+        )
+        # 32KB depth: should get 1.5x boost
+        s_32kb = scorer.score(
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
+            stack_depth=32768,
+        )
+        # 64KB depth: should get 2.0x boost
+        s_64kb = scorer.score(
+            exec_us=100,
+            avg_exec_us=100,
+            bitmap_size=50,
+            avg_bitmap_size=50,
+            handicap=0,
+            depth=1,
+            fuzz_level=1,
+            n_fuzz=1,
+            total_execs=100,
+            stack_depth=65536,
+        )
+        # Larger depth yields higher energy
+        assert s_32kb > s_no_depth, "32KB stack_depth should boost energy"
+        assert s_64kb > s_32kb, "64KB stack_depth should boost more than 32KB"
+        # Verify the exact multipliers
+        assert abs(s_32kb / s_no_depth - 1.5) < 0.01, (
+            f"Expected 1.5x boost for 32KB depth, got {s_32kb / s_no_depth:.3f}x"
+        )
+        assert abs(s_64kb / s_no_depth - 2.0) < 0.01, (
+            f"Expected 2.0x boost for 64KB depth, got {s_64kb / s_no_depth:.3f}x"
+        )
+
     def test_all_schedules_get_hw_perf(self):
         from fuzzer_tool.core.schedules import SeedScorer
 

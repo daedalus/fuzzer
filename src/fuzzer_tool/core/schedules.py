@@ -140,6 +140,7 @@ class SeedScorer:
         t_x_minutes: float = 60.0,
         # K-Scheduler centrality (normalized 0-1 from the katz arm)
         katz_energy: float = 0.0,
+        stack_depth: int = 0,
     ) -> float:
         """Compute the energy score for a queue entry.
 
@@ -301,6 +302,7 @@ class SeedScorer:
             input_entropy=input_entropy,
             bitmap_size_avg=avg_bitmap_size,
             max_cov=max_cov,
+            stack_depth=stack_depth,
         )
 
         # Clamp
@@ -324,6 +326,7 @@ class SeedScorer:
         input_entropy: float = -1.0,
         bitmap_size_avg: int = 0,
         max_cov: int = 0,
+        stack_depth: int = 0,
     ) -> float:
         """Compute honggfuzz-style multiplicative energy factors.
 
@@ -399,6 +402,14 @@ class SeedScorer:
         # Timeout: heavy penalty
         if timed_out:
             factor /= 32.0
+
+        # Stack depth: deeper execution paths suggest complex logic/recursion
+        if stack_depth > 16 * 1024:  # > 16KB
+            stack_log = int(math.log2(stack_depth / 1024))
+            if stack_log > 4:
+                # Boost factor: 16KB->1x, 32KB->1.5x, 64KB->2x, 1MB->4x
+                boost = min(stack_log - 2, 8) / 2.0
+                factor *= boost
 
         return max(0.01, factor)
 

@@ -8352,6 +8352,7 @@ class Fuzzer:
                         if input_entropy > ENTROPY_RANDOM_PCT or input_entropy < ENTROPY_SPARSE_PCT:
                             self._hf_entropy_penalties += 1
 
+                        stack_depth = self._edge_tracker.get_seed_stack_depth(seed_key)
                         hf_kwargs = dict(
                             new_edges=new_edges,
                             time_added=time_added,
@@ -8365,6 +8366,7 @@ class Fuzzer:
                             max_cov=max(1, self._edge_tracker.get_cumulative_edge_count()),
                             hw_instructions=self._last_perf_deltas.get("instructions", 0),
                             hw_branches=self._last_perf_deltas.get("branches", 0),
+                            stack_depth=stack_depth,
                         )
 
                     self._last_perf_score = self._seed_scorer.score(
