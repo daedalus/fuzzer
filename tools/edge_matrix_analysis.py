@@ -48,6 +48,13 @@ described next, far more sensitive than an edge count is.
 transpose-invariant and are printed as controls; everything derived from them
 is not, and the derived numbers are where the orientation earns its keep.
 
+``--positions`` adds section [8], the (edge_pos, edge_id, count) matrix:
+edge_pos is the SHM slot index the live edge occupies, home = edge_id %
+map_size plus a linear-probe displacement.  It falsifies three shim-design
+predictions directly -- stable placement (a slot is never reclaimed), count
+independent of position, and the per-run (pos, id) view being a partial
+permutation whose spectrum is exactly the count histogram (F12, quantified).
+
 It also measures cross-process id stability, which is what makes or breaks
 every number above: the context hash is taken over a return address, so
 under PIE + ASLR the same call chain hashes differently in every process
@@ -106,17 +113,21 @@ COUNT_MASK = 0xFFFFFF  # the top byte of the SHM count field is the generation t
 
 
 def _run_one(target: Path, cov: ShmCoverage, path: Path, timeout: float):
-    """Execute *target* on *path* and return its live (ids, counts) columns."""
+    """Execute *target* on *path* and return its live (positions, ids, counts)."""
     cov.reset_edge_map()
     env = dict(os.environ, __AFL_SHM_ID=str(cov.shm_id), AFL_MAP_SIZE=str(cov.num_entries))
     with contextlib.suppress(subprocess.TimeoutExpired):
         subprocess.run([str(target), str(path)], env=env, capture_output=True, timeout=timeout)
-    ids, counts = cov._scan(True)
-    return ids.astype(np.int64), (counts & COUNT_MASK).astype(np.int64)
+    positions, ids, counts = cov._scan_with_positions()
+    return (
+        positions.astype(np.int64),
+        ids.astype(np.int64),
+        (counts & COUNT_MASK).astype(np.int64),
+    )
 
 
 def collect(target: Path, inputs: list[Path], map_size: int, timeout: float):
-    """Run every input once, returning one (ids, counts) pair per execution.
+    """Run every input once, returning one (positions, ids, counts) triple per execution.
 
     The first execution against a *clean* table does not produce the same
     ids as every later execution against a generation-reset one -- measured,
@@ -152,8 +163,8 @@ def measure_stability(target: Path, path: Path, repeats: int, map_size: int, tim
     """
     cov = ShmCoverage(size=map_size)
     try:
-        first = frozenset(_run_one(target, cov, path, timeout)[0].tolist())
-        sets = [frozenset(_run_one(target, cov, path, timeout)[0].tolist()) for _ in range(repeats)]
+        first = frozenset(_run_one(target, cov, path, timeout)[1].tolist())
+        sets = [frozenset(_run_one(target, cov, path, timeout)[1].tolist()) for _ in range(repeats)]
     finally:
         cov.cleanup()
     union = set().union(*sets)
@@ -169,24 +180,39 @@ def measure_stability(target: Path, path: Path, repeats: int, map_size: int, tim
     }
 
 
-def save_runs(path: Path, runs) -> None:
+def save_runs(path: Path, runs, map_size: int | None = None) -> None:
     """Store the ragged per-execution columns as three flat arrays."""
-    offsets = np.cumsum([0] + [len(i) for i, _ in runs])
+    offsets = np.cumsum([0] + [len(p) for p, _, _ in runs])
     np.savez_compressed(
         path,
-        ids=np.concatenate([i for i, _ in runs]) if runs else np.empty(0, np.int64),
-        counts=np.concatenate([c for _, c in runs]) if runs else np.empty(0, np.int64),
+        positions=np.concatenate([p for p, _, _ in runs]) if runs else np.empty(0, np.int64),
+        ids=np.concatenate([i for _, i, _ in runs]) if runs else np.empty(0, np.int64),
+        counts=np.concatenate([c for _, _, c in runs]) if runs else np.empty(0, np.int64),
         offsets=offsets,
+        map_size=map_size or 0,
     )
+
+
+def saved_map_size(path: Path):
+    """Table size a collection was recorded with, if the file carries it."""
+    with np.load(path) as z:
+        size = int(z["map_size"]) if "map_size" in z else 0
+    return size if size else None
 
 
 def load_runs(path: Path):
     z = np.load(path)
     off = z["offsets"]
-    return [
+    runs = [
         (z["ids"][off[i] : off[i + 1]], z["counts"][off[i] : off[i + 1]])
         for i in range(len(off) - 1)
     ]
+    if "positions" in z:
+        return [
+            (z["positions"][off[i] : off[i + 1]], ids, counts)
+            for i, (ids, counts) in enumerate(runs)
+        ]
+    return runs
 
 
 # ── Aggregation ───────────────────────────────────────────────────────
@@ -650,6 +676,147 @@ def duplicate_classes(mat, row_ids, ctx_bits):
     }
 
 
+# ── Section 8: the (edge_pos, edge_id, count) matrix (opt-in) ─────────
+#
+# x = edge_pos is the SHM slot index, derived by the shim's linear probe
+# from home = edge_id % map_size; y = edge_id; z = hit count.  The 2-D
+# projection (pos, id) with the count as its value and the 3-D binary
+# tensor (pos, id, count) are the two matrices under study.
+#
+# Three falsifiable predictions fall straight out of the shim design:
+#
+# *  a slot is claimed once and never reclaimed, so an id's position must
+#    be fixed for the whole run once its edge first fires;
+# *  an id's count is a property of the *input*, its position a property of
+#    the *insertion* -- so count and position should be independent;
+# *  per run the (pos, id) matrix is a partial permutation (one live id per
+#    slot, one slot per id), so its singular spectrum is exactly the
+#    per-edge count histogram: a fold is a bijection onto its image and
+#    cannot add information (handover F12, now made quantitative).
+#
+# Every correlation is tested against a null that permutes the companion
+# margin among the triples (Hard Rule 46), so the marginal distributions
+# are fixed under the null.
+
+SVD_CELL_BUDGET_POS = 20_000_000  # trimmed per-run matrix cells
+
+
+def _placement_rollup(pos_runs):
+    """Flatten every run into (run_idx, pos, id, count) plus slot/id membership."""
+    pos_of: dict[int, set[int]] = defaultdict(set)
+    ids_at_slot: dict[int, set[int]] = defaultdict(set)
+    triples = []
+    for run_idx, (positions, ids, counts) in enumerate(pos_runs):
+        for pos, eid, cnt in zip(positions.tolist(), ids.tolist(), counts.tolist(), strict=True):
+            pos_of[eid].add(pos)
+            ids_at_slot[pos].add(eid)
+            triples.append((run_idx, pos, eid, cnt))
+    return pos_of, ids_at_slot, triples
+
+
+def _placement_overview(arr, pos_of, ids_at_slot, map_size):
+    """Placement identity stats; the F14 machinery, end to end."""
+    arr_pos, arr_id, arr_cnt = arr[:, 1], arr[:, 2], arr[:, 3]
+    with np.errstate(invalid="ignore"):
+        home = arr_id % map_size
+        disp = (arr_pos - home) % map_size
+    n_ids = len(pos_of)
+    ids_multi_position = sum(1 for s in pos_of.values() if len(s) > 1)
+    slots_multi_id = sum(1 for ids_at_pos in ids_at_slot.values() if len(ids_at_pos) > 1)
+    return (
+        {
+            "unique_ids": n_ids,
+            "ids_single_position": n_ids - ids_multi_position,
+            "ids_single_position_pct": 100.0 * (n_ids - ids_multi_position) / n_ids,
+            "ids_multi_position": ids_multi_position,
+            "slots_multi_id": slots_multi_id,
+            "displacement_mean": float(disp.mean()),
+            "home_hit_frac": float((disp == 0).mean()),
+            "beyond_probe_max": int((disp >= ShmCoverage.PROBE_MAX).sum()),
+            "disp_hist_top": [int(c) for _k, c in Counter(disp.tolist()).most_common(8)],
+        },
+        home,
+        disp,
+        arr_cnt,
+    )
+
+
+def _spearman_null_block(a, b, perms, rng, prefix):
+    """Observed rank correlation against a b-preserving permutation null."""
+    obs = _spearman(a, b)
+    null = np.array([_spearman(a, rng.permutation(b)) for _ in range(perms)])
+    return {
+        f"{prefix}": obs,
+        f"{prefix}_null_mean": float(null.mean()),
+        f"{prefix}_null_sd": float(null.std()),
+        f"{prefix}_null_z": float((obs - null.mean()) / null.std()) if null.std() else 0.0,
+    }
+
+
+def _spectral_check(pos_runs, budget):
+    """F14 quantitative check: first-run (pos, id) spectrum == count histogram."""
+    first = pos_runs[0]
+    cells = len(first[0]) * len(first[1])
+    if not 0 < cells <= budget:
+        return {}
+    rowset = {int(p) for p in first[0].tolist()}
+    colset = {int(i) for i in first[1].tolist()}
+    rm = {r: k for k, r in enumerate(sorted(rowset))}
+    cm = {c: k for k, c in enumerate(sorted(colset))}
+    mat = np.zeros((len(rm), len(cm)), dtype=float)
+    for p, i, c in zip(first[0].tolist(), first[1].tolist(), first[2].tolist(), strict=True):
+        mat[rm[p], cm[i]] = c
+    sv = np.linalg.svd(mat, compute_uv=False)
+    ref = np.sort(first[2].astype(float))[::-1]
+    return {
+        "rank_2d": int(np.linalg.matrix_rank(mat)),
+        "single_run_sv_max_relerr": float(
+            np.max(np.abs(sv - ref) / ref.max()) if ref.size else 0.0
+        ),
+    }
+
+
+def positions_structure(pos_runs, map_size: int, perms: int, seed: int):
+    """Placement statistics over the (pos, id, count) triples of every run."""
+    if pos_runs is None:
+        return {"available": False}
+    rng = np.random.default_rng(seed)
+
+    pos_of, ids_at_slot, triples = _placement_rollup(pos_runs)
+    if not triples:
+        return {"available": True, "runs": len(pos_runs), "triples": 0, "unique_ids": 0}
+
+    arr = np.array(triples, dtype=np.int64)
+    first_run = {}
+    for run_idx, (_, ids, _) in enumerate(pos_runs):
+        for eid in ids.tolist():
+            first_run.setdefault(eid, run_idx)
+    arr_first = np.array([first_run[e] for e in arr[:, 2].tolist()], dtype=np.int64)
+
+    overview, home, disp, arr_cnt = _placement_overview(arr, pos_of, ids_at_slot, map_size)
+    out = {
+        "available": True,
+        "runs": len(pos_runs),
+        "triples": int(len(triples)),
+        "table_size": map_size,
+        **overview,
+        **_spearman_null_block(
+            disp.astype(float), arr_cnt.astype(float), perms, rng, "spearman_disp_count"
+        ),
+        **_spearman_null_block(
+            home.astype(float), disp.astype(float), perms, rng, "spearman_home_disp"
+        ),
+    }
+
+    # Confound check: displacement is decided by table occupancy at the
+    # moment of insertion, so any disp-count association should trace to
+    # first-seen run, not to the count itself.
+    out["spearman_disp_first_run"] = _spearman(disp.astype(float), arr_first.astype(float))
+    out["spearman_first_run_count"] = _spearman(arr_first.astype(float), arr_cnt.astype(float))
+    out.update(_spectral_check(pos_runs, SVD_CELL_BUDGET_POS))
+    return out
+
+
 # ── Reporting ─────────────────────────────────────────────────────────
 
 
@@ -820,6 +987,56 @@ def _report(result) -> None:
             f"    largest class {d['largest_class']} edges, families {d['largest_class_families']}"
         )
 
+    if "positions" in result:
+        p = result["positions"]
+        print("\n[8] edge_pos placement (SHM slot index), (pos, id, count) matrix")
+        if not p["available"]:
+            print("    unavailable: this collection has no positions -- re-collect with --save")
+            return
+        print(
+            f"    table {p['table_size']} slots; {p['triples']} triples over {p['runs']} runs, "
+            f"{p['unique_ids']} distinct ids"
+        )
+        print(
+            f"    ids at a single position {p['ids_single_position']} "
+            f"({p['ids_single_position_pct']:.1f}%)  -- slots are never reclaimed, so any"
+        )
+        print("    multi-position id contradicts the shim's design (first-fit is final)")
+        print(
+            f"    slots hosting >1 distinct id across runs: {p['slots_multi_id']}"
+            "  (expected: only broken placements)"
+        )
+        print(
+            f"    probe displacement: mean {p['displacement_mean']:.3f}, "
+            f"home hits {p['home_hit_frac'] * 100:.1f}%, "
+            f"beyond PROBE_MAX {p['beyond_probe_max']}  "
+            f"top bins {p['disp_hist_top']}"
+        )
+        obs = p["spearman_disp_count"]
+        print(
+            f"    Spearman(displacement, count) {obs:+.4f}  "
+            f"null {p['spearman_disp_count_null_mean']:+.4f} +/- "
+            f"{p['spearman_disp_count_null_sd']:.4f}  z={p['spearman_disp_count_null_z']:+.2f}"
+        )
+        obs2 = p["spearman_home_disp"]
+        print(
+            f"    Spearman(home, displacement)  {obs2:+.4f}  "
+            f"null {p['spearman_home_disp_null_mean']:+.4f} +/- "
+            f"{p['spearman_home_disp_null_sd']:.4f}  z={p['spearman_home_disp_null_z']:+.2f}"
+        )
+        print(
+            f"    confound: Spearman(disp, first_seen) {p['spearman_disp_first_run']:+.4f}, "
+            f"Spearman(first_seen, count) {p['spearman_first_run_count']:+.4f}"
+        )
+        if "rank_2d" in p:
+            print(
+                f"    first-run (pos x id) matrix rank {p['rank_2d']}; "
+                f"singular spectrum max|rel err| vs the count histogram "
+                f"{p['single_run_sv_max_relerr']:.2e}"
+            )
+            print("    (a fold is a bijection onto its image: the pos x id view is the (id, count)")
+            print("     view re-rendered, per handover F12 -- this measures that, F15)")
+
 
 # ── Entry point ───────────────────────────────────────────────────────
 
@@ -871,6 +1088,11 @@ def main(argv: list[str] | None = None) -> int:
         help=f"distinct rows fed to LLL (default {LLL_ROW_BUDGET}; cost is superlinear)",
     )
     ap.add_argument("--perms", type=int, default=2000, help="permutation null samples")
+    ap.add_argument(
+        "--positions",
+        action="store_true",
+        help="run section [8]: the (edge_pos, edge_id, count) placement matrix",
+    )
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args(argv)
 
@@ -878,7 +1100,7 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("either --load, or both --target and --corpus")
 
     if args.load is not None:
-        runs = load_runs(args.load)
+        runs_all = load_runs(args.load)
         stability = None
     else:
         if not args.keep_aslr:
@@ -886,14 +1108,22 @@ def main(argv: list[str] | None = None) -> int:
         inputs = sorted(p for p in args.corpus.rglob("*") if p.is_file())
         if not inputs:
             ap.error(f"no inputs under {args.corpus}")
-        runs = collect(args.target, inputs, args.map_size, args.timeout)
+        runs_all = collect(args.target, inputs, args.map_size, args.timeout)
         stability = (
             measure_stability(args.target, inputs[0], args.repeats, args.map_size, args.timeout)
             if args.repeats > 1
             else None
         )
         if args.save is not None:
-            save_runs(args.save, runs)
+            save_runs(args.save, runs_all, args.map_size)
+
+    if runs_all and len(runs_all[0]) == 3:
+        pos_runs = runs_all
+        runs = [(ids, counts) for _, ids, counts in runs_all]
+    else:
+        pos_runs = None
+        runs = runs_all
+    collected_map = saved_map_size(args.load) if args.load is not None else args.map_size
 
     agg = aggregate(runs)
     mat = seed_edge_matrix(runs)
@@ -925,6 +1155,8 @@ def main(argv: list[str] | None = None) -> int:
         result["duplicate_classes"] = duplicate_classes(mat, agg["ids"], args.ctx_bits)
     if args.lll:
         result["integer_relations"] = integer_relations(mat, args.lll_rows)
+    if args.positions:
+        result["positions"] = positions_structure(pos_runs, collected_map, args.perms, args.seed)
     if stability is not None:
         result["stability"] = stability
 

@@ -351,6 +351,31 @@ class ShmCoverage:
             self._scan_memo = (key, ids, counts)
         return ids, counts
 
+    def _scan_with_positions(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Live (position, edge_id, count) columns for the matrix analyses.
+
+        ``position`` is the SHM slot index the live edge occupies -- the
+        ``edge_pos`` of the (pos, id, count) matrices.  The shim derives it
+        by linear probing from ``home = edge_id % num_entries``, so
+        ``position == home + displacement`` with displacement in
+        ``[0, PROBE_MAX)``.
+
+        Analysis-only: un-memoized so it always reads the table fresh.
+        ``_scan`` stays the production hot path; this method only exists
+        because the edge-matrix tool needs the slot index that ``_scan``
+        deliberately discards.
+        """
+        arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
+        eid = arr["edge_id"]
+        occupied = np.flatnonzero(eid)
+        if occupied.size == 0:
+            empty = eid[:0]
+            return empty, empty, empty
+        live_counts = arr["count"][occupied]
+        live = ((live_counts >> 24) & 0xFF) == self.read_generation()
+        positions = occupied[live]
+        return positions, eid[positions], live_counts[live]
+
     def get_edge_ids(self) -> set[int]:
         """Return set of non-zero edge_ids currently in the hash table.
 

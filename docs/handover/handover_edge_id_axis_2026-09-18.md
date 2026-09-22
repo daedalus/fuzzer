@@ -1,7 +1,9 @@
 # The (edge_id, hit_count) matrix: what the id axis is, which analyses are defined on it
 
 **Status:** analysis plus one new standalone diagnostic,
-`tools/edge_matrix_analysis.py`. No production code changed. Two findings
+`tools/edge_matrix_analysis.py`. One production-code addition:
+`adapters.shm.ShmCoverage._scan_with_positions()` (a read-only, un-memoized
+analysis helper; the hot path is untouched) added with F14/F15 below. Two findings
 below (F1, F2) are defects with reproductions and no fix yet. Every number
 here was measured at `c26f0a1`; the patch is rebased onto `a45a63a`, whose two
 intervening commits add operator schedulers and touch neither the shim, the
@@ -59,6 +61,10 @@ Caveat on the target: `fuzzgoat_read.c` calls `__afl_map_edge(0x1000 + ...)`
 by hand for AST-walk structure, so ids above the natural `2 * guard_count`
 range are partly harness-made. Family *counts* and the correlations are
 unaffected; the raw id range is not worth reading closely on this target.
+F14/F15 additionally sweep `--map-size` over 512/1024/8192/65536 to force
+probe displacement (the target's max id 7069 cannot collide at native 8192+);
+the same 250 inputs, one execution each, ASLR off, clang rebuild with 1712
+guards as above.
 
 ## Findings
 
@@ -568,6 +574,73 @@ Neither F12 nor F13 is in the tool. F12 is strictly weaker than section [1],
 and F13's eigenvalues are section [4] under another name. The one candidate
 for a section is PC2, gated on P1-3.
 
+### F14. The (edge_pos, edge_id) count matrix is a stable bijection, so the fold adds nothing
+
+Asked: the same matrix families exist in another coordinate. `edge_pos` is the
+SHM slot index a live edge occupies -- `home = edge_id % map_size` plus a
+linear-probe displacement, read straight out of the occupied slot indices. What
+does the 2-D projection (x = edge_pos, y = edge_id, value = count) carry that
+the (id, count) columns do not?
+
+Nothing, and that is now measured rather than asserted. Four map sizes, the
+same 250-input corpus, fuzzgoat rebuilt with clang (ASLR off), every row
+reproduced exactly on a second collection:
+
+| map_size | triples | distinct ids | ids at one position | slots with >1 id | mean displacement | home hits |
+|---|---|---|---|---|---|---|
+| 65536 | 16250 | 317 | 317 (100%) | 0 | 0.000 | 100% |
+| 8192  | 16250 | 317 | 317 (100%) | 0 | 0.000 | 100% |
+| 1024  | 17116 | 327 | 327 (100%) | 0 | 0.054 | 94.7% |
+| 512   | 17216 | 328 | 328 (100%) | 0 | 0.227 | 85.6% |
+
+1. **Placement is a bijection and it is stable.** Every id sits at exactly one
+   position for the whole campaign, and no slot ever hosts two distinct ids --
+   the shim claims a slot on first fire and never reclaims it, and this is that
+   invariant measurable end to end.
+2. **The per-run matrix is a partial permutation**, so its singular spectrum is
+   exactly the sorted per-edge counts: max|rel err| = 0.00e+00 and rank = the
+   live edge count on a measured run. F12's theorem -- a fold is a bijection
+   onto its image; it cannot add information, only re-render it -- is now
+   quantitative, and section [8] verifies it per run rather than assuming it.
+3. The only content the position axis can carry is the probe displacement, and
+   at native occupancy it is zero: fuzzgoat's max id (7069) cannot collide in an
+   8192+ table, so every edge lands exactly at home. Displacement only appears
+   under artificial map pressure (512 slots: mean 0.227, 85.6% home hits).
+
+Unresolved, one item: the union *grows* as the map shrinks (317 -> 328 ids,
+triples 16250 -> 17216), stably per map across re-collections. A bigger table
+recording fewer distinct edges per run is not predicted by the placement
+machinery; see P1-4.
+
+### F15. The 3-D tensor (pos, id, count) factors through id; count-position independence is a load artefact
+
+The 3-D binary tensor T[pos, id, count] asks whether any co-occurrence
+structure survives the placement. It does not.
+
+* **T factors through id.** Placement is a stable bijection (F14), so every id
+  is observed at its single position in 100% of runs at every map size:
+  T[pos, id, c] = 1 iff (id, c) fired and pos = f(id). No residual triple, and
+  the 2-D matrix is the count histogram re-rendered through a permutation.
+* **Count is independent of position whenever the question is defined, and the
+  residual is a load artefact, not structure.** At 65536/8192 every
+  displacement is 0, so Spearman is degenerate (0.000) -- the two axes are
+  literally decoupled. Under map pressure a small sign-consistent negative
+  association appears (Spearman -0.059 at 512, -0.108 at 1024; z = -7.5 / -14.5
+  against a count-preserving permutation null whose mean is 0.0000 and sd 0.0075
+  -- 1/sqrt(n) to three digits, so the Spearman machinery is sound under this
+  null), but it does **not** resolve into the insertion-order confound:
+  displacement tracks first-seen run at 512 (+0.300) and almost not at 1024
+  (+0.041), while first-seen tracks count *positively* (+0.228) and displacement
+  tracks it negatively. The home-vs-displacement correlation even flips sign
+  between maps (-0.208 at 1024 vs +0.054 at 512). These are insensitive
+  load-regime quantities, not properties of the axis, and none of them survives
+  contact with F14.
+
+Section [8] in the tool reports all of the above with their permutation
+controls (Hard Rule 46) and the per-run spectrum check. Nothing in F14/F15
+changes a scheduler design: the position axis is F12's fold with a named,
+measurable cause instead of a hand-wave.
+
 ## Not defined on the id axis -- do not re-propose
 
 Linear regression or slope of count against id; autocorrelation or FFT along
@@ -577,6 +650,13 @@ ground metric; treating `Spearman(id, count)` as a trend (the tool prints it
 at -0.34 precisely so that it is visibly non-zero and visibly meaningless).
 Every one of these needs an ordered or metric x. Bit-prefix (trie) bucketing
 is the defined replacement when a positional statistic is genuinely wanted.
+
+`edge_pos` *is* ordered where `edge_id` is not -- it is a slot index, so
+|a - b| means "probe distance". That buy is void: pos is a stable bijection
+onto the ids (F14), so any ordered statistic along pos is the same statistic
+along a derangement of the id axis, i.e. F3's permutation null by
+construction. Plain (pos, count) bands and the displacement histogram are
+meaningful; correlated structure between pos and count is not.
 
 ## The tool
 
@@ -592,18 +672,26 @@ dependency, so Spearman is rank + Pearson in-file). Reuses
     # re-analyse without the target
     python3 tools/edge_matrix_analysis.py --load /tmp/edges.npz --json out.json
 
+    # placement / tensor structure (F14/F15), opt-in like --lll
+    python3 tools/edge_matrix_analysis.py --load /tmp/edges.npz --positions
+
     # reproduce F1
     python3 tools/edge_matrix_analysis.py --target ... --corpus ... --keep-aslr
 
-Eight sections: [0] cross-process id stability, [1] x-axis structure, [2] the
+Nine sections: [0] cross-process id stability, [1] x-axis structure, [2] the
 permutation-invariant y marginal, [3] substituted axes, [4] the singular
-spectrum, [5] the GF(2) structure, [6] integer relations (opt-in, `--lll`, the
-only section that is opt-in) and [7] edge equivalence classes. `--transpose`
+spectrum, [5] the GF(2) structure, [6] integer relations (opt-in, `--lll`),
+[7] edge equivalence classes and [8] placement structure (opt-in,
+`--positions`). `--transpose`
 runs [4] to [6] on the edge x seed matrix and enables [7]. Per Hard Rule 46 the
 lag-1 statistic ships with both of its controls -- a global permutation null
 *and* a within-family shuffle that must leave the effect standing if the
 effect really is the blocking -- because the within-family control is what
-separates F3 from F1's artefact.
+separates F3 from F1's artefact. The `--positions` section carries the same
+discipline per statistic: every Spearman it prints is ranked against a
+count-preserving permutation null, and it verifies F14's claim per run by
+checking the spectrum of the first-run (pos x id) matrix against the count
+histogram rather than assuming the fold is a bijection.
 
 ## A scheduler built on all of this
 
@@ -980,6 +1068,20 @@ rank(total hits), weighted by `1/owner_count`, with the partial-correlation
 falsification recomputed at every refit and logged. `bench_paired.py` with a
 pre-registered threshold, no exceptions: the same question has produced two
 wrong answers from observational correlation already.
+
+### P1-4. Why does the union grow as the map shrinks
+
+F14's table, reproduced on two independent collections: union 317 ids and
+16250 triples at 65536/8192, but 327/328 ids and 17116/17216 triples at
+1024/512. A smaller map recording *more* distinct edges per run is not what
+the placement machinery predicts -- the set of edges is a fact of the target,
+and the slot index is supposed to be downstream of it. Before treating any
+positional measurement at small maps as representative, explain the 3.5%
+inflation: it may be a double-fire coalescing differently per slot width, an
+id-rotated alias (edge % n) crossing into a different chain at small n, or
+another of F2's phantom regime. Decisive test is cheap once P0-1's fire-trace
+gating exists: dump the raw edge_id stream at one input at map 8192 and 512 and
+diff, the same way P0-1 diffs clean vs reset.
 
 ### P3-1. `__AFL_CTX_BITS` feedback
 
