@@ -201,3 +201,102 @@ class TestOpKatzScheduler:
             if t >= tail_start and op == best:
                 tail_picks += 1
         assert tail_picks / (rounds - tail_start) > 0.0
+
+
+class TestBadnessIndexedFloor:
+    """P1: `badness_fn` turns the single-point `explore_floor` constant
+    into a family indexed by a runtime badness score. See
+    core/badness_floor.py and
+    docs/handover/handover_badness_indexed_floor_2026-09-21.md.
+    """
+
+    def test_no_badness_fn_matches_original_static_floor(self):
+        sched = OpKatzScheduler(rng=RandPool(seed=1), explore_floor=0.1)
+        assert sched._current_explore_floor() == pytest.approx(0.1)
+
+    def test_badness_zero_matches_static_floor(self):
+        sched = OpKatzScheduler(
+            rng=RandPool(seed=1),
+            explore_floor=0.06,
+            badness_fn=lambda: 0.0,
+            max_explore_floor=0.3,
+        )
+        assert sched._current_explore_floor() == pytest.approx(0.06)
+
+    def test_badness_one_reaches_max_floor(self):
+        sched = OpKatzScheduler(
+            rng=RandPool(seed=1),
+            explore_floor=0.06,
+            badness_fn=lambda: 1.0,
+            max_explore_floor=0.3,
+        )
+        assert sched._current_explore_floor() == pytest.approx(0.3)
+
+    def test_badness_fn_sampled_fresh_each_call(self):
+        state = {"badness": 0.0}
+        sched = OpKatzScheduler(
+            rng=RandPool(seed=1),
+            explore_floor=0.06,
+            badness_fn=lambda: state["badness"],
+            max_explore_floor=0.3,
+        )
+        assert sched._current_explore_floor() == pytest.approx(0.06)
+        state["badness"] = 1.0
+        assert sched._current_explore_floor() == pytest.approx(0.3)
+
+    def test_raising_badness_fn_falls_back_to_static_floor(self):
+        def _broken():
+            raise RuntimeError("no regime detector yet")
+
+        sched = OpKatzScheduler(
+            rng=RandPool(seed=1),
+            explore_floor=0.06,
+            badness_fn=_broken,
+            max_explore_floor=0.3,
+        )
+        # Must not raise out of a live select_op-adjacent call.
+        assert sched._current_explore_floor() == pytest.approx(0.06)
+
+    def test_invalid_max_explore_floor_rejected_at_construction(self):
+        with pytest.raises(ValueError, match="max_floor"):
+            OpKatzScheduler(
+                rng=RandPool(seed=1),
+                explore_floor=0.3,
+                badness_fn=lambda: 0.5,
+                max_explore_floor=0.1,
+            )
+
+    def test_high_badness_raises_the_actual_selection_floor(self):
+        """End-to-end: pinning badness at 1.0 must yield a strictly higher
+        normalized selection probability for every never-attempted arm
+        than pinning badness at 0.0 does (comparative, not an absolute
+        threshold -- post-floor normalization dilutes the raised floor
+        by however much probability mass the dominant arm keeps, the same
+        dynamic `test_floor_bounds_probability_away_from_certainty`
+        exercises for the static floor).
+        """
+        n = 10
+        ops = [f"op{i}" for i in range(n)]
+
+        def _make(badness_fn):
+            sched = OpKatzScheduler(
+                rng=RandPool(seed=5),
+                explore_floor=0.06,
+                badness_fn=badness_fn,
+                max_explore_floor=0.5,
+            )
+            sched.successes = {"op0": 1.0}
+            sched.attempts = dict.fromkeys(ops, 10.0)
+            return sched
+
+        low_probs = _make(lambda: 0.0)._select_probs(ops)
+        high_probs = _make(lambda: 1.0)._select_probs(ops)
+        for i in range(1, n):
+            assert high_probs[i] > low_probs[i]
+
+    def test_badness_fn_not_called_when_none(self):
+        # Regression guard: with badness_fn=None, _current_explore_floor
+        # must not attempt to call anything.
+        sched = OpKatzScheduler(rng=RandPool(seed=1), explore_floor=0.06)
+        assert sched.badness_fn is None
+        assert sched._current_explore_floor() == pytest.approx(0.06)

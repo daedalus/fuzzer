@@ -49,8 +49,11 @@ and measure on a real campaign before trusting it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import numpy as np
 
+from fuzzer_tool.core.badness_floor import DEFAULT_MAX_EXPLORE_FLOOR, floor_for_badness
 from fuzzer_tool.core.rand_pool import RandPool
 
 DEFAULT_ALPHA_FRACTION = 0.85  # fraction of 1/spectral_radius(A) to use
@@ -148,7 +151,28 @@ class OpKatzScheduler:
             distribution in :meth:`select_op` -- see that method's
             docstring for why this exists and why it is relative rather
             than an absolute per-arm constant. Must be in ``[0, 1)``; 0
-            restores the original unfloored draw.
+            restores the original unfloored draw. Doubles as the
+            ``badness=0`` end of the badness-indexed family when
+            ``badness_fn`` is supplied (see below) -- otherwise this
+            single value is used unconditionally, exactly as before.
+        badness_fn: Optional zero-arg callable returning a badness score
+            in ``[0, 1]``, sampled fresh on every :meth:`select_op` call.
+            When supplied, the floor actually used is
+            ``core.badness_floor.floor_for_badness(explore_floor,
+            badness_fn(), max_explore_floor)`` instead of the bare
+            ``explore_floor`` constant -- a parametric guarantee ("floor
+            >= lambda(badness), whatever badness turns out to be") in
+            place of the single-point one. ``None`` (the default)
+            preserves the original unparametrized behavior exactly. A
+            ``badness_fn`` that raises is treated as a missed
+            observation, not a scheduler failure: the static
+            ``explore_floor`` is used for that call instead, and nothing
+            propagates out of :meth:`select_op`.
+        max_explore_floor: The ``badness=1`` end of the family. Must
+            satisfy ``explore_floor <= max_explore_floor < 1.0``
+            (validated eagerly here, not left to surface inside
+            :meth:`_select_probs`). Unused when ``badness_fn`` is
+            ``None``.
     """
 
     supports_priors = False
@@ -158,14 +182,23 @@ class OpKatzScheduler:
         rng: RandPool | None = None,
         alpha_fraction: float = DEFAULT_ALPHA_FRACTION,
         explore_floor: float = DEFAULT_EXPLORE_FLOOR,
+        badness_fn: Callable[[], float] | None = None,
+        max_explore_floor: float = DEFAULT_MAX_EXPLORE_FLOOR,
     ):
         if rng is None:
             raise ValueError("OpKatzScheduler requires a RandPool (Hard Rule 16)")
         if not (0.0 <= explore_floor < 1.0):
             raise ValueError(f"explore_floor must be in [0, 1), got {explore_floor!r}")
+        if badness_fn is not None:
+            # Eagerly validate the whole family, not just its base point --
+            # see floor_for_badness's own docstring for why this must not
+            # be deferred to a live _select_probs call.
+            floor_for_badness(explore_floor, 0.0, max_explore_floor)
         self._rng = rng
         self.alpha_fraction = alpha_fraction
         self.explore_floor = explore_floor
+        self.badness_fn = badness_fn
+        self.max_explore_floor = max_explore_floor
         self.transition_counts: dict[str, dict[str, int]] = {}
         self.successes: dict[str, float] = {}
         self.attempts: dict[str, float] = {}
@@ -235,15 +268,40 @@ class OpKatzScheduler:
         the whole distribution once the registry grows to the full
         operator count) mixes in a guaranteed minimum share for every arm,
         the same fix ``OpKuramotoScheduler.select_op`` now uses.
+
+        When ``self.badness_fn`` is set, the floor fraction itself is not
+        the bare ``self.explore_floor`` constant but
+        ``core.badness_floor.floor_for_badness(self.explore_floor,
+        self.badness_fn(), self.max_explore_floor)`` -- see
+        :meth:`__init__`'s docstring. A ``badness_fn`` that raises falls
+        back to the static ``self.explore_floor`` for this call only.
         """
         s = self.scores(ops)
         vals = np.array([s[op] for op in ops], dtype=np.float64)
         shifted = vals - vals.min() + 1e-9
         total = float(shifted.sum())
         probs = shifted / total if total > 0 else np.full(len(ops), 1.0 / len(ops))
-        floor = self.explore_floor / len(ops)
+        floor_frac = self._current_explore_floor()
+        floor = floor_frac / len(ops)
         floored = np.maximum(probs, floor)
         return floored / floored.sum()
+
+    def _current_explore_floor(self) -> float:
+        """The floor fraction to use for the next :meth:`_select_probs`
+        call: the static ``self.explore_floor`` when ``badness_fn`` is
+        unset, else that badness-indexed family evaluated at the current
+        ``badness_fn()`` reading (falling back to the static value if
+        ``badness_fn`` raises -- a missed observation must not take the
+        scheduler down).
+        """
+        if self.badness_fn is None:
+            return self.explore_floor
+        try:
+            badness = float(self.badness_fn())
+        except Exception:  # noqa: BLE001 - a badness source failing must not
+            # take select_op down with it; fall back to the static floor.
+            return self.explore_floor
+        return floor_for_badness(self.explore_floor, badness, self.max_explore_floor)
 
     def select_op(self, ops: list[str]) -> str:
         """Weighted pick by Katz score, floored so a single early success

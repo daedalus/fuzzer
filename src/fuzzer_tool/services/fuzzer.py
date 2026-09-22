@@ -2561,7 +2561,17 @@ class Fuzzer:
         if op_katz:
             from fuzzer_tool.core.schedulers.op_katz import OpKatzScheduler
 
-            self._op_katz = OpKatzScheduler(rng=self._rng, alpha_fraction=op_katz_alpha_fraction)
+            self._op_katz = OpKatzScheduler(
+                rng=self._rng,
+                alpha_fraction=op_katz_alpha_fraction,
+                # Badness-indexed exploration floor (P1 of
+                # docs/action_plan_compositional_stability.md): when the
+                # corpus is SUBCRITICAL (stalled), the floor rises toward
+                # max_explore_floor instead of staying pinned at the
+                # static default. See _current_scheduling_badness and
+                # core/badness_floor.py.
+                badness_fn=self._current_scheduling_badness,
+            )
             log.info("op_katz enabled (alpha_fraction=%.2f)", op_katz_alpha_fraction)
 
         # Kuramoto phase-coherence bandit over the operator discovery-
@@ -6521,6 +6531,31 @@ class Fuzzer:
         byte-bitmap ptrace coverage (non-zero byte positions).
         """
         return self._stats.get_current_edge_set()
+
+    def _current_scheduling_badness(self) -> float:
+        """Badness score in [0, 1] for badness-indexed scheduler floors.
+
+        Reads the coverage-regime classifier already maintained by
+        `_regime` (``core/analyzers/analyzer_coverage_regime.py`` --
+        SUBCRITICAL/CRITICAL/SUPERCRITICAL) and maps it to a scalar via
+        ``core.badness_floor.badness_from_regime``. No new signal: this
+        only translates an existing one into a form ``OpKatzScheduler``'s
+        (and, potentially, other schedulers') exploration floor can key
+        off of. See docs/handover/handover_badness_indexed_floor_2026-09-21.md.
+
+        `self._regime` may not exist yet the first time this is called
+        (`_op_katz` is constructed earlier in `__init__` than
+        `_regime`, and its own `badness_fn` is only invoked later, during
+        `select_op` calls in the fuzzing loop, by which point `__init__`
+        has finished -- the `getattr` default is defensive insurance
+        against that ordering changing, not insurance this is expected to
+        need at runtime).
+        """
+        from fuzzer_tool.core.badness_floor import badness_from_regime
+
+        regime_detector = getattr(self, "_regime", None)
+        regime = getattr(regime_detector, "regime", None)
+        return badness_from_regime(regime)
 
     def _read_runtime_avg_distance(self) -> float | None:
         """Read the per-execution average distance from the SHM tail.
