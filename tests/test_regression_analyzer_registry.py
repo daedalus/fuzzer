@@ -48,6 +48,7 @@ _FLAG_GATED = {
     "garch",
     "continuum",
     "temperature_control",
+    "kuramoto_sync",
 }
 _ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner", "prng_state_learner"}
 
@@ -164,6 +165,7 @@ class TestFlagGatedAnalyzers:
         assert f._dist_table_shm is None
         assert f._garch is None
         assert f._continuum is None
+        assert f._kuramoto_sync is None
         # checksum_learner has no gating flag (always attempted) -- its
         # off-path is the swallow_errors path, covered separately below.
 
@@ -246,6 +248,17 @@ class TestFlagGatedAnalyzers:
         f = _build_fuzzer()
         assert f._distance is None
         assert f._dist_table_shm is None
+
+    def test_kuramoto_sync_on_when_op_kuramoto_enabled(self):
+        # `available` soft-requires the op_kuramoto *scheduler*, not a
+        # dedicated CLI flag of its own -- see its spec's comment.
+        f = _build_fuzzer(op_kuramoto=True)
+        assert type(f._kuramoto_sync).__name__ == "KuramotoSyncMonitor"
+
+    def test_kuramoto_sync_off_without_op_kuramoto(self):
+        f = _build_fuzzer()
+        assert f._op_kuramoto is None
+        assert f._kuramoto_sync is None
 
 
 class TestChecksumLearner:

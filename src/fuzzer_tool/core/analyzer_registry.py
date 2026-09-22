@@ -52,7 +52,13 @@ docs/handover/handover_RoRd.md. A third, `discovery_uniformity`
 nonparametric member of the regime_detection family: a rolling Poisson
 index-of-dispersion test of per-tick discovery counts, sitting next
 to `garch`/`structure_function`/`csd` without sharing any of their parametric noise-model
-assumptions.
+assumptions. A fourth, `kuramoto_sync`
+(core.analyzers.analyzer_kuramoto_sync.KuramotoSyncMonitor), soft-requires the
+`op_kuramoto` scheduler (`available` reads `f._op_kuramoto`, set earlier in
+`Fuzzer.__init__` than this registry's main-phase `wire_all()` call) and
+reuses `CriticalSlowingDown` unmodified against the Kuramoto order
+parameter instead of the discovery rate -- see
+docs/handover/handover_kuramoto_sync_monitor_2026-09-21.md.
 construction site to migrate. See
 docs/handover/handover_analyzer_registry_2026-09-07.md for the full
 per-component history and verification notes.
@@ -819,5 +825,31 @@ REGISTRY.register(
         name="coverage_regime",
         category="regime_detection",
         activate=_activate_coverage_regime,
+    )
+)
+
+
+def _activate_kuramoto_sync(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.analyzers.analyzer_kuramoto_sync import KuramotoSyncMonitor
+
+    f._kuramoto_sync = KuramotoSyncMonitor(window_size=50, rise_threshold=1.5, min_observations=20)
+
+
+def _deactivate_kuramoto_sync(f: FuzzerLike) -> None:
+    f._kuramoto_sync = None
+
+
+# Soft-requires `op_kuramoto` (a scheduler, not itself analyzer-registry
+# managed -- constructed inline in Fuzzer.__init__ before this registry's
+# main-phase wire_all() call runs, same ordering `causal_sector` relies on
+# for `_te` above). A sync monitor with no OpKuramotoScheduler to sample
+# would just sit empty, same rationale as causal_sector's soft-require.
+REGISTRY.register(
+    AnalyzerSpec(
+        name="kuramoto_sync",
+        category="regime_detection",
+        available=lambda f: getattr(f, "_op_kuramoto", None) is not None,
+        activate=_activate_kuramoto_sync,
+        deactivate=_deactivate_kuramoto_sync,
     )
 )

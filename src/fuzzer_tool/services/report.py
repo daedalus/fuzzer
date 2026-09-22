@@ -1163,6 +1163,31 @@ def _distribution_diagnostics(f) -> str:
     except (TypeError, AttributeError):
         pass
 
+    # Kuramoto order-parameter r(t) moments (from KuramotoSyncMonitor,
+    # only present when op_kuramoto is enabled)
+    try:
+        sync = f._kuramoto_sync
+        if sync and hasattr(sync, "_csd") and len(sync._csd._history) >= 3:
+            has_data = True
+            from fuzzer_tool.core.running_stats import RunningMoments
+
+            r_moments = RunningMoments()
+            for v in sync._csd._history:
+                r_moments.update(float(v))
+            kc = sync.last_critical_coupling
+            kc_str = f"{kc:.2f}" if kc != float("inf") else "inf"
+            lines.append(
+                f"  Kuramoto order param (r): mean={r_moments.mean:.2f}  "
+                f"stddev={r_moments.stddev:.2f}  "
+                f"skew={r_moments.skewness:.2f}  kurt={r_moments.kurtosis:.2f}  "
+                f"Kc={kc_str}  rho={sync.last_spectral_radius:.2f}"
+            )
+            detected, reason = sync.status()
+            if detected:
+                lines.append(f"                    SYNC WARNING: {reason}")
+    except (TypeError, AttributeError):
+        pass
+
     # Per-operator reward moments (from Elo tracker)
     try:
         elo = f._elo

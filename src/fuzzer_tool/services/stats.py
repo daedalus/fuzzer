@@ -931,6 +931,42 @@ class StatsReporter:
 
         return f" | Re: {re_value:.2f} gp: {gradient:.2f}"
 
+    def _print_stats_kuramoto_sync_str(self, f) -> str:
+        """Format Kuramoto order-parameter synchronization diagnostics,
+        when `op_kuramoto` is enabled. Samples
+        `OpKuramotoScheduler.diagnostics()` into `f._kuramoto_sync`'s
+        rolling window and reports critical slowing down in the order
+        parameter r(t) the same way `_print_stats_dr_str` reports it for
+        the discovery-rate series -- see
+        core/analyzers/analyzer_kuramoto_sync.py. Read-only: this never
+        feeds back into `select_op`.
+        """
+        op_kuramoto = getattr(f, "_op_kuramoto", None)
+        monitor = getattr(f, "_kuramoto_sync", None)
+        if op_kuramoto is None or monitor is None:
+            return ""
+        # Type-check rather than None-check, same reason
+        # _print_stats_garch_str does: print_stats runs against whatever is
+        # on the fuzzer, and an unconfigured test stand-in answers every
+        # attribute/method with another Mock rather than raising.
+        diagnostics_fn = getattr(op_kuramoto, "diagnostics", None)
+        if not callable(diagnostics_fn):
+            return ""
+        diag = diagnostics_fn()
+        if not isinstance(diag, dict):
+            return ""
+        n_arms = diag.get("n_arms", 0)
+        if not self._is_number(n_arms) or n_arms < 2:
+            return ""
+        monitor.observe(diag)
+        detected, reason = monitor.status()
+        kc = monitor.last_critical_coupling
+        kc_str = f"{kc:.2f}" if kc != float("inf") else "inf"
+        s = f" | sync: r={monitor.last_r:.2f} Kc={kc_str}"
+        if detected:
+            s += f" [SYNC: {reason}]"
+        return s
+
     def print_stats(self):
         f = self.f
         elapsed = time.time() - f.start_time
@@ -1076,6 +1112,7 @@ class StatsReporter:
             + self._print_stats_garch_str(f)
             + self._print_stats_dispersion_corrections_str(f)
             + self._print_stats_continuum_str(f)
+            + self._print_stats_kuramoto_sync_str(f)
         )
 
         density_str = self._print_stats_density_str(f)
