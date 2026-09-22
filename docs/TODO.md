@@ -70,6 +70,21 @@ giving every sniffer-gated operator a matching sample in the battery; keep it
 that way when adding operators.
 
 
+### Profiling the fuzzer itself (2026-09-22)
+The "fuzzer eats memory" report splits into two unrelated facts.
+Steady-state RSS growth is glibc arena retention, not a leak: after warmup,
+`pyproject` heaps stay flat (gc object histogram deltas are ~0), operator
+caches saturate at their caps, and `malloc_trim(0)` returns 102.9→92.0MB
+RSS / 91.0→80.1MB USS. The real bug surfaced by the profile is at
+interpreter exit: `ForkserverRunner.__del__` → `stop()` → `_close_streams`
+closed fds during finalization, so wrapper dealloc flushed/read those fds and
+every session ended in `OSError: Bad file descriptor`. Fixed (both
+`forkserver.py` and `persistent_subprocess.py`) by making `_close_streams`
+a no-op when `sys.is_finalizing()` — the OS reclaims the pipes at process
+exit, and forcing a close risks a deadlock on a frozen daemon thread's lock.
+Regression: `tests/test_regression_forkserver_shutdown_ebadf.py`, which
+reproduces the EBADF by exiting a subprocess child without calling `stop()`.
+
 ### Verified not-a-bug
 - `--cmplog` under `--inprocess-direct` (reported as "Cmplog: disabled" in the
   FFmpeg session). The wiring is correct: `_detect_cmplog` finds the exported

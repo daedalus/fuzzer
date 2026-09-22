@@ -61,12 +61,17 @@ def _close_streams(proc: subprocess.Popen) -> None:
     The fd is closed first because a drain thread blocked inside
     ``readline()`` holds the BufferedReader's own lock: calling
     ``stream.close()`` directly would spin on that lock forever
-    (``_enter_buffered_busy`` at interpreter shutdown), while closing the fd
-    underneath makes the blocked read fail with EBADF and the thread exit on
-    its own.  The wrapper is then closed (so its destructor does not raise
-    over the fd we stole) — except during interpreter finalization, where a
-    frozen daemon thread may never release the lock.
+    (``_enter_buffered_busy``), while closing the fd underneath makes the
+    blocked read fail with EBADF and the thread exit on its own.  The
+    wrapper is then closed (so its destructor does not raise over the fd we
+    stole).  During interpreter finalization none of this runs: a frozen
+    daemon thread may never release the lock it holds, and the process is
+    exiting anyway, so the OS reclaims the pipes; forcing anything here
+    either deadlocks (close while frozen lock held) or leaves a wrapper
+    whose dealloc raises EBADF over an fd we already gave away.
     """
+    if sys.is_finalizing():
+        return
     for name in ("stdin", "stdout", "stderr"):
         stream = getattr(proc, name, None)
         fileno = getattr(stream, "fileno", None)
@@ -74,9 +79,8 @@ def _close_streams(proc: subprocess.Popen) -> None:
             continue
         with contextlib.suppress(OSError, ValueError):
             os.close(fileno())
-        if not sys.is_finalizing():
-            with contextlib.suppress(Exception):
-                stream.close()
+        with contextlib.suppress(Exception):
+            stream.close()
 
 
 # ── Memory bounds ────────────────────────────────────────────────────
