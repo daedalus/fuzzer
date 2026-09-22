@@ -4,10 +4,12 @@
 `tools/edge_matrix_analysis.py`. One production-code addition:
 `adapters.shm.ShmCoverage._scan_with_positions()` (a read-only, un-memoized
 analysis helper; the hot path is untouched) added with F14/F15 below. Two findings
-below (F1, F2) are defects with reproductions and no fix yet. Every number
-here was measured at `c26f0a1`; the patch is rebased onto `a45a63a`, whose two
-intervening commits add operator schedulers and touch neither the shim, the
-SHM path, nor any file cited below.
+below (F1, F2) are defects with reproductions and no fix yet; P1-4 (union
+inflation at small maps) is characterized empirically -- CTX-derived id-value
+shift keyed on the advertised map size, shim storage exonerated, exact ctx line
+unlocated (see P1-4). Every number here was measured at `c26f0a1`; the patch is
+rebased onto `a45a63a`, whose two intervening commits add operator schedulers
+and touch neither the shim, the SHM path, nor any file cited below.
 
 ## Trigger
 
@@ -608,9 +610,11 @@ reproduced exactly on a second collection:
    under artificial map pressure (512 slots: mean 0.227, 85.6% home hits).
 
 Unresolved, one item: the union *grows* as the map shrinks (317 -> 328 ids,
-triples 16250 -> 17216), stably per map across re-collections. A bigger table
-recording fewer distinct edges per run is not predicted by the placement
-machinery; see P1-4.
+triples 16250 -> 17216), stably per map across re-collections. Resolved in
+P1-4: not a placement artefact -- a CTX-derived id-value shift for one logical
+edge, keyed on the advertised map size, fire-side (path_hash diverges), layout-
+invariant, target-driven impossible (no getenv in the target). The exact shim
+line is unlocated, but the practical rule is safe: pin the map size.
 
 ### F15. The 3-D tensor (pos, id, count) factors through id; count-position independence is a load artefact
 
@@ -1069,19 +1073,44 @@ falsification recomputed at every refit and logged. `bench_paired.py` with a
 pre-registered threshold, no exceptions: the same question has produced two
 wrong answers from observational correlation already.
 
-### P1-4. Why does the union grow as the map shrinks
+### P1-4. Why does the union grow as the map shrinks -- RESOLVED (empirically), one shim line unlocated
 
-F14's table, reproduced on two independent collections: union 317 ids and
-16250 triples at 65536/8192, but 327/328 ids and 17116/17216 triples at
-1024/512. A smaller map recording *more* distinct edges per run is not what
-the placement machinery predicts -- the set of edges is a fact of the target,
-and the slot index is supposed to be downstream of it. Before treating any
-positional measurement at small maps as representative, explain the 3.5%
-inflation: it may be a double-fire coalescing differently per slot width, an
-id-rotated alias (edge % n) crossing into a different chain at small n, or
-another of F2's phantom regime. Decisive test is cheap once P0-1's fire-trace
-gating exists: dump the raw edge_id stream at one input at map 8192 and 512 and
-diff, the same way P0-1 diffs clean vs reset.
+F14's table: union 317 ids / 16250 triples at 65536/8192, 327/328 ids /
+17116/17216 at 1024/512. The 3.5% inflation is now characterized end to end.
+It is **not** a placement artefact; it is the child computing a *different
+edge_id stream* when the advertised `AFL_MAP_SIZE` changes, for one logical
+edge. The experiment trail on fuzzgoat (clang, ASLR pinned, `~/fuzzing/builds/fuzzgoat_read`):
+
+* **Segment size is irrelevant.** Allocate a 65536-entry segment and pass
+  `AFL_MAP_SIZE=512`: the extra id (209) appears. Same 65536 segment with
+  view 8192: it does not. The driver is the advertised map value, not the
+  backing store.
+* **It is fire-side, not storage-side.** Native `path_hash` (placement-
+  independent; `hash = hash * 31 ^ edge_id` per fire) differs between views
+  (7615122267079587265 vs 1946655851876716116) at equal `edge_count` (5) and
+  dropped=0. The same logical edge is stored as 209/223 at map 512 and 219 at
+  map 8192 -- mutually exclusive, tracked by the *current* exec (mixed-
+  history runs confirmed: 209 iff the recording exec ran at 512, 219 iff at
+  8192).
+* **It is a CTX artifact.** A rebuild with `-D__AFL_CTX_SENSITIVE=0` stores
+  byte-identical tables at 512 and 8192 (same 13 ids, same path_hash).
+* **It is layout-invariant.** Env-length padding (0..4096 B), `MALLOC_*`
+  tunables, and a 64 MiB anonymous LD_PRELOAD pad all leave 209 fixed at
+  map 512.
+* **The target cannot be the driver.** Neither `targets/fuzzgoat_read.c` nor
+  the vendored `fuzzgoat.c` calls `getenv` or reads the segment, so the value
+  shift is produced inside the shim's own CTX/fire path -- yet no `__afl_map_size`
+  read exists in `__afl_get_caller_ctx()`/the probe loop, only
+  placement/`window`/tail-offset/wrap-wipe reads. The exact line is still
+  unlocated; the storage semantics themselves are exonerated by the
+  path_hash divergence (placement cannot alter it).
+
+Consequence for F14/F15: the bijection and the tensor factorization hold per
+*fixed* map size; on a CTX-sensitive target, cross-map union comparison is not
+apples-to-apples because one logical edge can carry a different id value at
+512 vs 8192. Standing recommendation (unchanged, and now load-bearing): pin
+`AFL_MAP_SIZE` for any comparison and evaluate all positional statistics on a
+single map size.
 
 ### P3-1. `__AFL_CTX_BITS` feedback
 
