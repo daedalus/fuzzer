@@ -35,6 +35,7 @@ from fuzzer_tool.core.mutations.mpegts import TsPacket, parse_ts_packets, serial
 from fuzzer_tool.core.mutations.nal import parse_nal_units
 from fuzzer_tool.core.mutations.ogg import parse_ogg_pages
 from fuzzer_tool.core.mutations.riff import parse_riff_chunks
+from fuzzer_tool.core.mutations.webm import Element, _encode_size_vint, parse_webm, serialize_webm
 from fuzzer_tool.core.mutations.webp import parse_webp
 from fuzzer_tool.core.mutations.zip import parse_zip
 from fuzzer_tool.core.mutator_interface import MutationContext
@@ -50,6 +51,7 @@ from fuzzer_tool.core.wfc_chunks import (
     NAL_FORMAT,
     OGG_FORMAT,
     RIFF_FORMAT,
+    WEBM_FORMAT,
     WEBP_FORMAT,
     ZIP_FORMAT,
     VIOLATE_RATE,
@@ -66,6 +68,7 @@ from fuzzer_tool.core.wfc_chunks import (
     _try_nal,
     _try_ogg,
     _try_riff,
+    _try_webm,
     _try_webp,
     _try_zip,
     kind_sequence,
@@ -237,6 +240,39 @@ def zip_sample() -> bytes:
     return buf.getvalue()
 
 
+def _webm_elem(elem_id: int, id_raw: bytes, payload: bytes = b"", children=None) -> Element:
+    body = b"".join(serialize_webm([c]) for c in children) if children else payload
+    return Element(
+        elem_id=elem_id,
+        id_raw=id_raw,
+        size_raw=_encode_size_vint(len(body)),
+        size_val=len(body),
+        data=b"" if children else body,
+        children=children or [],
+    )
+
+
+def webm_sample() -> bytes:
+    """EBML header + Segment with six children: SeekHead, Info, Tracks, two
+    Clusters (same element ID -- real files repeat Cluster), Cues.
+
+    ``parse_webm`` only ever returns the two true top-level elements (the
+    EBML header and the Segment), so this is the sample that exercises
+    ``WEBM_FORMAT``'s Segment-children reorder, not the top level itself.
+    """
+    ebml_header = _webm_elem(0x1A45DFA3, b"\x1a\x45\xdf\xa3", b"\x01\x02\x03")
+    children = [
+        _webm_elem(0x114D9B74, b"\x11\x4d\x9b\x74", b"seek-1"),
+        _webm_elem(0x1549A966, b"\x15\x49\xa9\x66", b"info-1"),
+        _webm_elem(0x1654AE6B, b"\x16\x54\xae\x6b", b"tracks-1"),
+        _webm_elem(0x1F43B675, b"\x1f\x43\xb6\x75", b"cluster-a" * 4),
+        _webm_elem(0x1F43B675, b"\x1f\x43\xb6\x75", b"cluster-b" * 4),
+        _webm_elem(0x1C53BB6B, b"\x1c\x53\xbb\x6b", b"cues-1"),
+    ]
+    segment = _webm_elem(0x18538067, b"\x18\x53\x80\x67", children=children)
+    return serialize_webm([ebml_header, segment])
+
+
 _FORMATS_UNDER_TEST = [
     ("isobmff", isobmff_sample(), _try_isobmff, ISOBMFF_FORMAT),
     ("gif", gif_sample(), _try_gif, GIF_FORMAT),
@@ -248,6 +284,7 @@ _FORMATS_UNDER_TEST = [
     ("asf", asf_sample(), _try_asf, ASF_FORMAT),
     ("mpegts", mpegts_sample(), _try_mpegts, MPEGTS_FORMAT),
     ("zip", zip_sample(), _try_zip, ZIP_FORMAT),
+    ("webm", webm_sample(), _try_webm, WEBM_FORMAT),
 ]
 
 
@@ -478,10 +515,10 @@ class TestWfcChunkMutator:
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Rollout beyond isobmff/webp/riff/gif: ogg, flv, nal, asf, mpegts, zip
+# Rollout beyond isobmff/webp/riff/gif: ogg, flv, nal, asf, mpegts, zip, webm
 # ═══════════════════════════════════════════════════════════════════
 
-_ROLLOUT = ("ogg", "flv", "nal", "asf", "mpegts", "zip")
+_ROLLOUT = ("ogg", "flv", "nal", "asf", "mpegts", "zip", "webm")
 _ROLLOUT_UNDER_TEST = [row for row in _FORMATS_UNDER_TEST if row[0] in _ROLLOUT]
 
 
@@ -549,6 +586,18 @@ class TestRolloutKinds:
         assert kinds[2] != kinds[4]
         assert kinds[0] not in (kinds[2], kinds[4])  # `mimetype` is its own tile
         assert kinds[1] != kinds[2]  # META-INF/* is not just another .xml
+
+    def test_webm_kind_is_the_element_id(self):
+        kinds = kind_sequence(WEBM_FORMAT, webm_sample())
+        assert kinds == [
+            (0x114D9B74).to_bytes(4, "big"),
+            (0x1549A966).to_bytes(4, "big"),
+            (0x1654AE6B).to_bytes(4, "big"),
+            (0x1F43B675).to_bytes(4, "big"),
+            (0x1F43B675).to_bytes(4, "big"),
+            (0x1C53BB6B).to_bytes(4, "big"),
+        ]
+        assert kinds[3] == kinds[4]  # the two Cluster children share a tile
 
 
 class TestRolloutInvariants:
@@ -632,6 +681,25 @@ class TestRolloutInvariants:
         for out in outs:
             assert len(out) == len(data) and len(out) % 188 == 0
             assert parse_ts_packets(out) is not None
+
+    def test_webm_reorders_segment_children_keeping_header_and_segment_id(self):
+        """The true top level (EBML header, Segment) is untouched; only the
+        Segment's own children move, and the round-trip stays parseable with
+        the same set of children (by element ID)."""
+        data = webm_sample()
+        before_top = parse_webm(data)
+        before_ids = sorted(c.elem_id for c in before_top[1].children)
+        m = _trained_mutator(WEBM_FORMAT, data)
+        ctx = MutationContext(wfc_enabled=True)
+        rng = RandPool(seed=18)
+        outs = [o for o in (m.mutate(data, rng, context=ctx) for _ in range(40)) if o]
+        assert outs
+        for out in outs:
+            top = parse_webm(out)
+            assert top is not None
+            assert top[0].id_raw == before_top[0].id_raw  # EBML header untouched
+            assert top[1].id_raw == before_top[1].id_raw  # still a Segment
+            assert sorted(c.elem_id for c in top[1].children) == before_ids
 
 
 class TestRolloutGating:

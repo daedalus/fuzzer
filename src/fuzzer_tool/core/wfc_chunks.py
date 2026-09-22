@@ -5,8 +5,8 @@
 ``docs/handover/handover_generators_2026-09-20.md`` (P2-1) found missing:
 ``AdjacencyTable.from_corpus`` has no production caller, and eleven formats
 with an existing parse/serialize pair (riff, webp, isobmff, gif, ogg, flv,
-asf, mpegts, webm, nal, zip) have no chunk-order table at all. Ten of the
-eleven are covered here; webm (EBML) is the one still open.
+asf, mpegts, webm, nal, zip) have no chunk-order table at all. All eleven
+are covered here.
 
 ``ChunkFormat`` is the per-format adapter (parse/serialize/kind-extractor).
 ``WfcChunkTableStore`` learns one ``AdjacencyTable`` per format from admitted
@@ -57,6 +57,7 @@ from fuzzer_tool.core.mutations.nal import parse_nal_units, serialize_nal_units
 from fuzzer_tool.core.mutations.ogg import parse_ogg_pages, serialize_ogg_pages
 from fuzzer_tool.core.mutations.riff import parse_riff_chunks, serialize_riff
 from fuzzer_tool.core.mutations.webp import parse_webp, serialize_webp
+from fuzzer_tool.core.mutations.webm import Element, _encode_size_vint, parse_webm, serialize_webm
 from fuzzer_tool.core.mutations.zip import ZipDoc, parse_zip, serialize_zip
 from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
 from fuzzer_tool.core.wfc import AdjacencyTable, Tile, WaveGrid
@@ -408,7 +409,7 @@ def wfc_reorder_chunks(
     return finish(best[0])
 
 
-# ── Per-format adapters: isobmff, riff, webp, gif; then ogg, flv, nal, asf, mpegts, zip below ──
+# ── Per-format adapters: isobmff, riff, webp, gif; then ogg, flv, nal, asf, mpegts, zip, webm below ──
 #
 # Sniffers mirror operator_registry.py's isobmff_chunk_mutate / riff_chunk_mutate /
 # webp_chunk_mutate / gif_chunk_mutate _FORMAT_SNIFFERS entries verbatim (not
@@ -502,7 +503,7 @@ def _try_riff(data: bytes) -> tuple[ChunkFormat, list[Any]] | None:
     return bound, chunks
 
 
-# ── Rollout: ogg, flv, nal, asf, mpegts, zip ──
+# ── Rollout: ogg, flv, nal, asf, mpegts, zip, webm ──
 #
 # Formats whose serializer needs state the chunk list does not carry (FLV's
 # header/trailing size, a ZIP's EOCD) follow the RIFF pattern: the shared
@@ -643,6 +644,65 @@ def _sniff_zip(d: bytes) -> bool:
     return d[:2] == b"PK"
 
 
+# WebM (EBML): ``parse_webm`` returns exactly two top-level elements -- the
+# EBML header and the Segment -- always, so the true top level has nothing
+# to reorder (this was P2-1's "webm is the one still open" gap). The
+# reorderable sequence one level down is the Segment's own children
+# (SeekHead/Info/Tracks/Cues/Cluster*/Tags/...), whose relative order a
+# streaming demuxer's linear scan actually depends on, unlike ISO-BMFF's
+# free top level. A child's tile is its element ID; nothing is pinned: none
+# of these are needed to still recognize the file as WebM (the EBML header
+# and Segment ID, both outside this reorder's scope, already do that).
+#
+# Unlike a leaf format, "reorder just the children" has no bytes of its own
+# to serialize to: the shared global's placeholder serializer (used by the
+# generic per-format tests, which call ``fmt.serialize`` directly rather
+# than through ``_try_webm``) has to wrap them in *some* valid EBML header
+# and Segment to be self-sufficient -- mirroring FLV_FORMAT's stub header,
+# not a full round-trip of the real file's own framing. ``_try_webm`` below
+# binds the file's *real* EBML header and Segment for actual calls.
+#
+# The Segment's size is precomputed and written as a normal known-size vint
+# (not the unknown-size/"streaming" marker some real WebM files use):
+# ``_read_vint``/``_parse_element`` in this module only ever decode the
+# single-byte pattern ``\xff`` as "unknown" (a length-1 vint whose value
+# happens to equal that length's all-ones sentinel) -- an 8-byte ``\xff*8``
+# fallback, which ``_encode_size_vint`` emits for a value too large to
+# otherwise represent, is read back as that same 1-byte marker plus 7 stray
+# data bytes, corrupting whatever follows. Not otherwise reachable at these
+# payload sizes; found by giving this stub an unknown-size Segment first.
+_WEBM_STUB_EBML_HEADER = Element(
+    elem_id=0x1A45DFA3, id_raw=b"\x1a\x45\xdf\xa3", size_raw=b"\x80", size_val=0, data=b""
+)
+
+
+def _serialize_webm_stub(children: list[Any]) -> bytes:
+    payload = b"".join(serialize_webm([c]) for c in children)
+    segment = Element(
+        elem_id=0x18538067,
+        id_raw=b"\x18\x53\x80\x67",
+        size_raw=_encode_size_vint(len(payload)),
+        size_val=len(payload),
+        data=b"",
+        children=list(children),
+    )
+    return serialize_webm([_WEBM_STUB_EBML_HEADER, segment])
+
+
+WEBM_FORMAT = ChunkFormat(
+    name="webm",
+    parse=lambda d: (lambda t: t[1].children if t and t[1].children else None)(parse_webm(d)),
+    serialize=_serialize_webm_stub,  # replaced per-call by _try_webm
+    kind=lambda el: el.elem_id.to_bytes(4, "big"),
+    pin_first=False,
+    pin_last=False,
+)
+
+
+def _sniff_webm(d: bytes) -> bool:
+    return d[:4] == b"\x1a\x45\xdf\xa3"
+
+
 def _try_ogg(data: bytes) -> tuple[ChunkFormat, list[Any]] | None:
     pages = parse_ogg_pages(data)
     return (OGG_FORMAT, pages) if pages else None
@@ -687,6 +747,22 @@ def _try_zip(data: bytes) -> tuple[ChunkFormat, list[Any]] | None:
     return bound, doc.entries
 
 
+def _try_webm(data: bytes) -> tuple[ChunkFormat, list[Any]] | None:
+    top = parse_webm(data)
+    if not top:
+        return None
+    ebml_header, segment = top
+    if not segment.children:
+        return None
+    bound = dataclasses.replace(
+        WEBM_FORMAT,
+        serialize=lambda children, h=ebml_header, seg=segment: serialize_webm(
+            [h, dataclasses.replace(seg, children=children)]
+        ),
+    )
+    return bound, segment.children
+
+
 # (format name, sniffer, parser) -- checked in this order; the sniffers are
 # mutually exclusive (webp/riff split on the WEBP tag, isobmff/gif have
 # disjoint magics) so at most one entry ever matches a given input.
@@ -701,7 +777,9 @@ _FORMATS: list[tuple[str, Callable[[bytes], bool], Callable[[bytes], Any]]] = [
     ("asf", _sniff_asf, _try_asf),
     ("mpegts", _sniff_mpegts, _try_mpegts),
     ("zip", _sniff_zip, _try_zip),
+    ("webm", _sniff_webm, _try_webm),
 ]
+
 
 # Fraction of applicable calls that use "violate" mode over "strict".
 VIOLATE_RATE = 0.3
@@ -713,7 +791,8 @@ class WfcChunkMutator(MutatorBase):
     Wires ``AdjacencyTable.from_corpus`` (P2-1 of
     ``docs/handover/handover_generators_2026-09-20.md``) to a production
     caller: a per-format table, learned from admitted corpus seeds via
-    ``on_new_coverage``, applied to isobmff/webp/riff/gif top-level chunk
+    ``on_new_coverage``, applied to isobmff/webp/riff/gif/ogg/flv/nal/asf/
+    mpegts/zip top-level (and webm's Segment-level) chunk
     sequences. Gated on ``--wfc`` (the same flag the PNG/JPEG/BMP WFC
     reorder ops already use) plus the format being sniffed, so it costs
     nothing when WFC mode is off.

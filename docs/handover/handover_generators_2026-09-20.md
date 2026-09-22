@@ -19,9 +19,10 @@ is inlined in the appendix so it can be re-run from a clean checkout
 | **G0** bench arms for the generation group | `4164def0` | `bench_paired.py` had 0 arms for wfc/mcts/alphabeta/bootstrap → `wfc`, `elo-lineage` (baseline), `elo-mcts`, `elo-alphabeta`, `bootstrap`; `ARM_BASELINES` records each pairing and `tests/test_bench_paired_arms.py` holds every arm to "baseline + added flags" against the real parser. **No campaign was run**: these are registered arms, not results. |
 | **P2-1 rollout** ogg/flv/nal/asf/mpegts/zip | this series | 4 of 10 formats covered → 10 of 11 (webm is the one left). Three defects in the shared reorder core, each pinned by a test that fails on the old code: `violate` mode indexed one cell past the grid when nothing was pinned last (`mutate` swallowed the `IndexError`, so a fraction of violate calls silently declined) and overwrote the pinned last cell when something was; chunks a collapse under-placed were appended *after* the pinned-last chunk; strict mode's "never emits an unobserved adjacency" was only checked on a re-parsed output, which re-segments positional formats (GIF: 2/60 calls emitted `extension→trailer`). Now: pins reserved by identity, skipped kinds placed at a table-legal slot, an illegal collapse retried (8 attempts) → **0 illegal adjacencies over 500 seeds × 10 formats** |
 | scheduler adaptability test | this series | `…test_every_exported_operator_scheduler_is_adaptable` excluded 2 of the 5 `seed_*` exports by name and failed on Tang, SeedCanary and KruskalCount; now excludes by `seed_*`/`op_*` module, and pins ≥25 tested and that no `op_*` export is skipped |
+| **P2-1 rollout** webm | this series | 10 of 11 formats covered → **11 of 11**. `parse_webm` always returns exactly the top two elements (EBML header, Segment), so the free-order sequence WFC can act on is one level down: the Segment's own children (SeekHead/Info/Tracks/Cluster\*/Cues/...). Added `WEBM_FORMAT`/`_try_webm` on that basis (element ID as tile, nothing pinned). Found a real, unrelated bug while writing the fixture: `core/mutations/webm.py::_parse_element`'s size-vint mask was only correct for a 1-byte size vint (`7 + 8*(length-1)` vs. the correct `7*length`), so any element ≥127 bytes — every real Segment/Cluster — failed to parse; fixed, and `tests/test_webm.py` is this module's first dedicated test file (it had none). `tests/test_wfc_chunks.py`'s generic per-format sweep also needed a self-sufficient stub serializer for webm's unbound global (mirroring `FLV_FORMAT`'s stub header) — its first version used an 8-byte-`0xff` "unknown size" that doesn't actually round-trip through this module's `_read_vint` (documented as a separate known gap in `test_webm.py`, not fixed, since real unknown-size elements elsewhere already use the 1-byte form that does). |
 
 Still open: **P3 and P4** (design work gated on stated questions; nothing in
-them was started), and **webm** in P2-1's rollout.
+them was started).
 G0 gaps: no arm for `--grammar-boltzmann` (needs a target that consumes a
 grammar; none in `eval_set.py`) or `tree_generate` (no flag, always on when the
 seed has brackets, so it is a source-edit arm like `boltzmann-cost`), and no
@@ -34,11 +35,22 @@ with no table-legal slot in any of 8 collapses is kept rather than dropped;
 and `on_new_coverage` learns even when `--wfc` is off (the NAL parser is a
 per-byte Python scan, so admitting a large NAL-sniffed seed costs real time).
 
-Tests run were the affected modules only. Two failures remain in them, both
-present on the untouched base: `test_regression_no_op_mutations::…test_every_selectable_operator_is_reachable`
-(`rasc_chunk_mutate`, `tiff_chunk_mutate` never offered by the sweep) and, before this series, `test_regression_mutator_interface::…test_builtin_registry_mutators_are_known`
-(P2-1 registered `wfc_reorder_learned` without listing it; fixed in this series). No
-full-suite run was made.
+Tests run were the affected modules only. One failure remains, present on the
+untouched base (confirmed via `git stash`):
+`test_regression_no_op_mutations::…test_every_selectable_operator_is_reachable`
+— now flagging `ffconcat_chunk_mutate`, `magicyuv_chunk_mutate`,
+`rasc_chunk_mutate`, `shorten_chunk_mutate`, `tiff_chunk_mutate` never offered
+by the sweep (a flaky subset each run; `rasc_chunk_mutate`/`tiff_chunk_mutate`
+were already in it before this series). `test_regression_mutator_interface::…test_builtin_registry_mutators_are_known`
+(P2-1 registered `wfc_reorder_learned` without listing it) was fixed earlier
+in this series and stays fixed. Suite for the webm addition specifically:
+`test_wfc_chunks.py`, `test_webm.py` (new — this module's first dedicated
+test file), `test_regression_operator_registry.py`,
+`test_regression_no_op_mutations.py`, `test_regression_format_op_gating.py`,
+`test_regression_scheduler_operator_reach.py`,
+`test_regression_mutator_interface.py`, `test_operator_smoke.py`,
+`test_ffmpeg_port_mutators.py`, `test_new_format_mutators.py`, `test_wfc.py`
+— 374 passed, the one pre-existing failure above. No full-suite run was made.
 
 **Tiering** follows `handover_pending_2026-09-06.md` §0 — P0 defect a running
 campaign can hit, P1 measured win with the correctness argument settled, P2
