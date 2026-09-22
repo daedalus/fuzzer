@@ -23,7 +23,13 @@ came back — and the coloured edges on the right are the return paths that clos
 
 Boxes are *subsystems*, not files — one box can cover several modules — but every module path
 in the diagram is a real path under `src/fuzzer_tool/`. Source is
-[`docs/architecture.dot`](docs/architecture.dot)
+[`docs/architecture.dot`](docs/architecture.dot).
+
+This diagram shows *wiring* (what talks to what). For *which layer a new
+module belongs in and why* — including the couple of places this diagram
+and the runtime's own startup banner group things differently on purpose —
+see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), the canonical layer
+contract.
 
 ---
 
@@ -458,6 +464,7 @@ verify the link before tuning schedulers or dictionaries. See
 | Document | Contents |
 |----------|----------|
 | [`docs/architecture.dot`](docs/architecture.dot) | Graphviz source for the subsystem diagram above |
+| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Canonical layer contract — where new code belongs and why |
 | [`docs/DEEP_DIVE.md`](docs/DEEP_DIVE.md) | Full reference: all features, options, API, building targets |
 | [`docs/ASAN-LIMITATION.md`](docs/ASAN-LIMITATION.md) | ASAN in-process limitation & root cause analysis |
 | [`docs/tracecmp-howto.md`](docs/tracecmp-howto.md) | Compiler-IR comparison tracing vendor build guide |

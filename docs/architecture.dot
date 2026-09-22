@@ -9,6 +9,12 @@
 // subsystems, not files: a single box may cover several modules, and the
 // per-module detail lives in the README sections and docs/DEEP_DIVE.md.
 //
+// This file is wiring only (what talks to what). For which conceptual
+// layer a module belongs to -- and the couple of places this diagram
+// disagrees with the README/startup-banner on purpose -- see
+// docs/ARCHITECTURE.md, which is the canonical tie-breaker. Known debt:
+// this diagram's HW-perf-counter split from Execution is superseded there.
+//
 // Reading order: the campaign loop runs down the dark spine -- pick a
 // seed, mutate it, execute it, measure what came back. The coloured edges
 // on the right are the return paths that close the loop:
