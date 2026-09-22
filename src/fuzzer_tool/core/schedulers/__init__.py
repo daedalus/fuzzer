@@ -33,6 +33,7 @@ from fuzzer_tool.core.schedulers.op_whittle import WhittleIndexScheduler
 from fuzzer_tool.core.schedulers.seed_canary import SeedCanaryScheduler
 from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
 from fuzzer_tool.core.schedulers.seed_mcts import AlphaBetaMCTSSeedScheduler, MCTSSeedScheduler
+from fuzzer_tool.core.schedulers.seed_round_robin import SeedRoundRobinScheduler
 from fuzzer_tool.core.schedulers.seed_tang import TangRecommendationScheduler
 
 __all__ = [
@@ -70,5 +71,6 @@ __all__ = [
     "TopKScheduler",
     "TangRecommendationScheduler",
     "SeedCanaryScheduler",
+    "SeedRoundRobinScheduler",
     "KruskalCountSeedStrategy",
 ]

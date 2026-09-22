@@ -163,6 +163,7 @@ _SEED_STRATEGY_NAMES = (
     "entropy_deviation",
     "entropy_gradient",
     "residual",
+    "round_robin",
 )
 
 
@@ -1272,6 +1273,13 @@ class Fuzzer:
         # The op_canary counterpart for the seed-selection Elo pool.
         confirm_novelty=False,
         seed_canary_scheduler=False,
+        # Seed arena's deterministic baseline (see
+        # core/schedulers/seed_round_robin.py). The seed_ counterpart of
+        # --round-robin: reachable both as an Elo arm and, needing no
+        # arbiter, directly in pick_seed()'s no-elo fallback chain --
+        # the same standalone treatment round_robin already gets on the
+        # operator side.
+        seed_round_robin_scheduler=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2267,6 +2275,19 @@ class Fuzzer:
 
             self._seed_canary = SeedCanaryScheduler()
             log.info("Seed-canary scheduling enabled (deliberately worst-in-class)")
+        # Seed-arena round robin: deterministic cycling over the corpus, the
+        # _pick_seed_elo counterpart of op_round_robin (see
+        # core/schedulers/seed_round_robin.py). Unlike seed_canary it needs
+        # no arbiter, so it is also reachable directly from pick_seed()'s
+        # no-elo fallback chain -- the same standalone treatment round_robin
+        # already gets on the operator side.
+        self._use_seed_round_robin = seed_round_robin_scheduler
+        self._seed_round_robin = None
+        if seed_round_robin_scheduler:
+            from fuzzer_tool.core.schedulers.seed_round_robin import SeedRoundRobinScheduler
+
+            self._seed_round_robin = SeedRoundRobinScheduler()
+            log.info("Seed round-robin scheduling enabled")
         self._use_ecofuzz = ecofuzz
         self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
         self._metropolis = metropolis
@@ -5218,7 +5239,7 @@ class Fuzzer:
         # each remaining discovery is rare, so the weight rises toward 1.
         # The weight is bounded above by 1.0, so the F0 signal never inflates
         # a posterior beyond the default -- it only ever re-weights.
-        if self._seed_quality or self._seed_canary:
+        if self._seed_quality or self._seed_canary or self._seed_round_robin:
             parent_key = self._seed_key(data)
             weight = 1.0
             f0_est = self._edge_tracker.estimate_distinct_edges_f0()
@@ -5243,6 +5264,13 @@ class Fuzzer:
             # BayesianSeedQuality enabled to track its own posterior.
             if self._seed_canary:
                 self._seed_canary.record(parent_key, success=bool(has_new_coverage), weight=weight)
+            # Elo-compatibility signal only -- round-robin's own selection
+            # ignores it entirely (deterministic cycling), same as its
+            # operator-side counterpart's record().
+            if self._seed_round_robin:
+                self._seed_round_robin.record(
+                    parent_key, success=bool(has_new_coverage), weight=weight
+                )
 
         # Credit the cmplog operands this gain is attributable to: the
         # input-to-state matches found in the input, which are the operands
@@ -7309,6 +7337,8 @@ class Fuzzer:
             seeds.append("residual")
         if getattr(self, "_use_seed_canary", False) and self._seed_canary:
             seeds.append("canary")
+        if getattr(self, "_use_seed_round_robin", False) and self._seed_round_robin:
+            seeds.append("round-robin")
         if seeds:
             parts.append("seeds=" + "+".join(seeds))
 
@@ -7736,6 +7766,8 @@ class Fuzzer:
             groups["Seed selection"].append("entropy-gradient")
         if getattr(self, "_seed_residual", None) is not None:
             groups["Seed selection"].append("residual")
+        if getattr(self, "_use_seed_round_robin", False) and self._seed_round_robin:
+            groups["Seed selection"].append("round-robin")
 
         if self.markov_trained:
             groups["Mutation"].append("markov")

@@ -344,8 +344,8 @@ class TestWiring:
 
         params = inspect.signature(Fuzzer.__init__).parameters
         assert params["confirm_novelty"].default is False
-        # The kruskal-count wiring test pins seed_canary_scheduler as last.
-        assert list(params)[-1] == "seed_canary_scheduler"
+        # The kruskal-count wiring test pins seed_round_robin_scheduler as last.
+        assert list(params)[-1] == "seed_round_robin_scheduler"
 
     def test_cli_passes_flag_to_every_construction(self):
         import ast

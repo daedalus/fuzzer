@@ -90,6 +90,7 @@ class TestSeedSchedulerExports:
         assert "AlphaBetaMCTSSeedScheduler" in schedulers_pkg.__all__
         assert "TangRecommendationScheduler" in schedulers_pkg.__all__
         assert "SeedCanaryScheduler" in schedulers_pkg.__all__
+        assert "SeedRoundRobinScheduler" in schedulers_pkg.__all__
         assert "KruskalCountSeedStrategy" in schedulers_pkg.__all__
 
     def test_seed_schedulers_importable(self):
@@ -98,6 +99,7 @@ class TestSeedSchedulerExports:
             KruskalCountSeedStrategy,
             MCTSSeedScheduler,
             SeedCanaryScheduler,
+            SeedRoundRobinScheduler,
             TangRecommendationScheduler,
         )
 
@@ -107,6 +109,7 @@ class TestSeedSchedulerExports:
             AlphaBetaMCTSSeedScheduler,
             TangRecommendationScheduler,
             SeedCanaryScheduler,
+            SeedRoundRobinScheduler,
             KruskalCountSeedStrategy,
         ):
             assert isinstance(cls, type)

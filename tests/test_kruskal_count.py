@@ -399,10 +399,13 @@ class TestFuzzerWiring:
 
         params = list(inspect.signature(Fuzzer.__init__).parameters)
         assert "kruskal_count" in params
-        assert params[-1] == "seed_canary_scheduler"
+        assert params[-1] == "seed_round_robin_scheduler"
         assert inspect.signature(Fuzzer.__init__).parameters["kruskal_count"].default is False
         assert (
-            inspect.signature(Fuzzer.__init__).parameters["seed_canary_scheduler"].default is False
+            inspect.signature(Fuzzer.__init__)
+            .parameters["seed_round_robin_scheduler"]
+            .default
+            is False
         )
 
     def test_cli_passes_flag_to_the_fuzzer_construction(self):

@@ -584,6 +584,7 @@ def cmd_fuzz(args):
         round_robin=getattr(args, "round_robin", False),
         canary_scheduler=getattr(args, "canary_scheduler", False),
         seed_canary_scheduler=getattr(args, "seed_canary_scheduler", False),
+        seed_round_robin_scheduler=getattr(args, "seed_round_robin_scheduler", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
@@ -1805,6 +1806,7 @@ _HAIL_MARY_FLAGS = (
     "successive_elim",
     "canary_scheduler",
     "seed_canary_scheduler",
+    "seed_round_robin_scheduler",
     "softmax",
     "topk",
     "consolidated",
@@ -2251,6 +2253,14 @@ def main() -> int:
         "corpus seed with the lowest posterior success-rate. Meant to run alongside --elo as "
         "a floor for the seed-strategy tournament -- if a real seed strategy ranks at or "
         "below it, that is logged as needing inspection.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-round-robin-scheduler",
+        action="store_true",
+        help="Enable the seed-arena round-robin scheduler: the seed-selection counterpart of "
+        "--round-robin, deterministic cycling through the corpus in registration order. "
+        "Unlike --seed-canary-scheduler this is a real strategy, not a floor, so it needs no "
+        "--elo to run: it is also reachable directly whenever no arbiter picks a seed first.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

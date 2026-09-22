@@ -331,6 +331,8 @@ class SeedPicker:
             available.append("residual")
         if getattr(f, "_use_seed_canary", False) and f._seed_canary and f.corpus:
             available.append("canary")
+        if getattr(f, "_use_seed_round_robin", False) and f._seed_round_robin and f.corpus:
+            available.append("round_robin")
 
         # Expose the eligible pool so the fuzzer records Elo matches only against
         # strategies that were actually selectable (no phantom opponents) and so
@@ -376,6 +378,7 @@ class SeedPicker:
             "entropy_gradient": lambda: self._pick_entropy_gradient_seed(),
             "residual": lambda: self._pick_residual_seed(),
             "canary": lambda: self._pick_seed_canary_seed(),
+            "round_robin": lambda: self._pick_seed_round_robin_seed(),
         }
         handler = strategy_map.get(strategy)
         return handler() if handler else None
@@ -591,6 +594,25 @@ class SeedPicker:
         selected = canary.select_seed(list(key_to_seed))
         return key_to_seed.get(selected)
 
+    def _pick_seed_round_robin_seed(self) -> bytes | None:
+        """Deterministic cycling picker -- the seed-arena 'round_robin' arm.
+
+        Real, if simple, strategy (see ``core/schedulers/seed_round_robin.py``):
+        cycles the corpus in registration order, ignoring the outcome
+        signal entirely. Reachable both from ``_pick_seed_elo`` and from
+        :meth:`pick_seed`'s no-``--elo`` fallback chain, same standalone
+        treatment as ``op_round_robin`` on the operator side.
+
+        Returns None on an empty corpus, same as every other arm here.
+        """
+        f = self.f
+        scheduler = getattr(f, "_seed_round_robin", None)
+        if scheduler is None or not f.corpus:
+            return None
+        key_to_seed = {f._seed_key(s): s for s in f.corpus}
+        selected = scheduler.select_seed(list(key_to_seed))
+        return key_to_seed.get(selected)
+
     def _pick_aflgo_seed(self) -> bytes | None:
         """Distance-pure seed picker — the Elo-arbitrated 'aflgo' arm.
 
@@ -685,6 +707,7 @@ class SeedPicker:
             self._pick_entropy_deviation_seed,
             self._pick_entropy_gradient_seed,
             self._pick_residual_seed,
+            self._pick_seed_round_robin_seed,
         ):
             chosen = pick()
             if chosen is not None:

@@ -239,6 +239,11 @@ class TestAllSchedulersReachAllOperators:
             "KruskalCountSeedStrategy",
             # Both reasons at once: picks seeds, and is a canary.
             "SeedCanaryScheduler",
+            # Picks seeds, not operators -- no select_op(ops)/init_arm(name)
+            # over an operator table, same exclusion reason as the other
+            # seed schedulers above (not a canary itself, unlike its
+            # sibling immediately above).
+            "SeedRoundRobinScheduler",
             # Excluded for CanaryScheduler's reason, not by oversight. TopK
             # selects uniformly among the top-k arms by running mean, with
             # no exploration bonus and no forced first pull, so under this
