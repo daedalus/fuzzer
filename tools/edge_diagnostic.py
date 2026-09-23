@@ -1824,6 +1824,38 @@ def positions_structure(pos_runs, map_size: int, perms: int, seed: int):
 # ── Reporting ─────────────────────────────────────────────────────────
 
 
+def ground_truth(tracer: Path, inputs: list[Path], timeout: float) -> dict:
+    """Real edges per tools/ground_truth_tracer.c, over the collected inputs.
+
+    Returns the distinct context-free edges (prev, cur) and the distinct
+    (prev, cur, call site) triples. The tracer shares no code with the shim's
+    id function, so these are the reference the collected ids are judged
+    against. A non-zero exit is expected (fuzzgoat aborts on its planted
+    bugs); the tracer writes unbuffered, so those executions still count.
+    """
+    import subprocess
+    import tempfile
+
+    edges: set[tuple[int, int]] = set()
+    triples: set[tuple[int, int, int]] = set()
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "gt.bin"
+        for p in inputs:
+            out.unlink(missing_ok=True)
+            env = dict(os.environ, GT_OUT=str(out))
+            # A hang still leaves the edges logged before it.
+            with contextlib.suppress(subprocess.TimeoutExpired):
+                subprocess.run([str(tracer), str(p)], env=env, capture_output=True, timeout=timeout)
+            if not out.exists():
+                continue
+            raw = np.fromfile(out, dtype="<u8")
+            rec = raw[: len(raw) - len(raw) % 3].reshape(-1, 3)
+            for prev, cur, site in rec.tolist():
+                edges.add((prev, cur))
+                triples.add((prev, cur, site))
+    return {"edges": len(edges), "triples": len(triples)}
+
+
 def _matrix_report(result) -> None:
     coll = result["collection"]
     print(
@@ -1833,7 +1865,10 @@ def _matrix_report(result) -> None:
     print(f"matrix orientation for sections [4]-[7]: {coll['orientation']}")
     if "stability" in result:
         s = result["stability"]
-        print(f"\n[0] cross-process id stability ({s['repeats']} runs of one input)")
+        print(
+            f"\n[0] cross-process id stability ({s['repeats']} runs of "
+            f"{s.get('input', 'one input')}, the input with the most live edges)"
+        )
         print(
             f"    sizes {s['sizes']}  union {s['union']}  intersection {s['intersection']}  "
             f"jaccard {s['jaccard']:.3f}"
@@ -1859,6 +1894,13 @@ def _matrix_report(result) -> None:
         f"(all ids odd: {a['all_ids_odd']} -- True means a legacy `|= 1` shim, "
         "which kills tag bit 0)"
     )
+    if a["ctx_bits"] and not a["all_ids_odd"]:
+        print(
+            "    note: under the hashed-location shim a family is the hashed location's\n"
+            "    bits above ctx_bits, so context-free edges that share them count as one\n"
+            "    family (fuzzgoat: 323 families for 344 context-free edges). For an exact\n"
+            "    count pair this with a __AFL_CTX_SENSITIVE=0 build or --ground-truth."
+        )
     degenerate = (
         " (degenerate: one edge per family, nothing to decompose)"
         if a["families"] == a["n_edges"]
@@ -2042,6 +2084,32 @@ def _matrix_report(result) -> None:
             print("    (a fold is a bijection onto its image: the pos x id view is the (id, count)")
             print("     view re-rendered, per handover F12 -- this measures that, F15)")
 
+    if "ground_truth" in result:
+        g = result["ground_truth"]
+        print("\n[9] ground truth (tools/ground_truth_tracer.c over the same inputs)")
+        print(
+            f"    real context-free edges {g['edges']}, (edge, call site) triples "
+            f"{g['triples']}, ids reported by --target {g['ids']}"
+        )
+        if g["ctx_bits"] == 0:
+            merged = g["edges"] - g["ids"]
+            print(
+                f"    merged by the id function: {merged} of {g['edges']} "
+                f"({merged / max(g['edges'], 1):.1%}) -- exact for a context-free build,\n"
+                "    where each id is a function of (prev, cur) alone"
+            )
+            if merged < 0:
+                print(
+                    "    WARNING: more ids than real edges -- ids are not a function of the\n"
+                    "    edge (unstable ids, or --target and the tracer build differ)"
+                )
+        else:
+            print(
+                "    context build: the tracer's call sites are its own binary's, so compare\n"
+                "    counts, not triples; ids well below the triple count mean merging, and\n"
+                "    a __AFL_CTX_SENSITIVE=0 target gives the exact figure"
+            )
+
 
 # ── Entry point ───────────────────────────────────────────────────────
 
@@ -2178,6 +2246,14 @@ def _matrix_main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--perms", type=int, default=2000, help="permutation null samples")
     ap.add_argument(
+        "--ground-truth",
+        type=Path,
+        metavar="TRACER_BIN",
+        help="run section [9]: the same inputs through a build of the target made "
+        "with tools/ground_truth_tracer.c in place of the shim, and compare the "
+        "real edges it logs with the ids --target reported",
+    )
+    ap.add_argument(
         "--positions",
         action="store_true",
         help="run section [8]: the (edge_pos, edge_id, count) placement matrix",
@@ -2244,11 +2320,19 @@ def _matrix_main(argv: list[str] | None = None) -> int:
         if not inputs:
             ap.error(f"no inputs under {args.corpus}")
         runs_all = collect(args.target, inputs, args.map_size, args.timeout)
+        # Probe the input with the most live edges, not sorted()[0]: on the
+        # fuzzgoat corpus that is the empty file, whose 2 edges (both from the
+        # wrapper, no parser code) made a Jaccard of 1.000 vacuous.
+        richest = max(range(len(inputs)), key=lambda i: len(runs_all[i][-2]))
         stability = (
-            measure_stability(args.target, inputs[0], args.repeats, args.map_size, args.timeout)
+            measure_stability(
+                args.target, inputs[richest], args.repeats, args.map_size, args.timeout
+            )
             if args.repeats > 1
             else None
         )
+        if stability is not None:
+            stability["input"] = inputs[richest].name
         if args.save is not None:
             save_runs(args.save, runs_all, args.map_size)
 
@@ -2294,6 +2378,15 @@ def _matrix_main(argv: list[str] | None = None) -> int:
         result["positions"] = positions_structure(pos_runs, collected_map, args.perms, args.seed)
     if stability is not None:
         result["stability"] = stability
+    if args.ground_truth is not None:
+        if args.load is not None:
+            ap.error("--ground-truth needs the inputs; it is incompatible with --load")
+        if not os.access(args.ground_truth, os.X_OK):
+            ap.error(f"--ground-truth {args.ground_truth}: not an executable tracer build")
+        gt = ground_truth(args.ground_truth, inputs, args.timeout)
+        gt["ids"] = int(len(agg["ids"]))
+        gt["ctx_bits"] = args.ctx_bits
+        result["ground_truth"] = gt
     _matrix_report(result)
     if args.json is not None:
         args.json.write_text(json.dumps(result, indent=2, sort_keys=True))
