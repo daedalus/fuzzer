@@ -87,3 +87,5 @@ docs/sweeps/*.tsv
 results/
 targets/fuzzgoat_read
 targets/fuzzgoat_read_nosan
+docs/handover/handover_misc_port_plan_2026-09-21.md
+docs/learnings/2026-09-21-seed-generator-stats.md

@@ -6204,7 +6204,7 @@ class Fuzzer:
 
         F2: an execution can report ids no later execution of the same input
         reproduces, and they were 12-18% of the "new coverage" successes on
-        the default path (``phantom_edge_probe.py``). Nothing else catches
+        the default path (``edge_diagnostic.py phantom``). Nothing else catches
         them: ``_calibrate_seed_stability`` compares reruns with each other and
         the phantoms are only in the original run. Withdrawing them here, before
         ``record_edges``, the corpus and the reward fan-out read ``has_new``,
