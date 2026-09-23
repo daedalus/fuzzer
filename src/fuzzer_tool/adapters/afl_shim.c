@@ -75,6 +75,9 @@
  *   __AFL_DISTANCE_MODE=1  AFLGo SHM-tail distance channel (inert until
  *                          the fuzzer uploads a table via __AFL_DIST_SHM_ID)
  *
+ * Debug-only (default off):
+ *   __AFL_TRACE_FIRES=1    log every edge_id to $__AFL_FIRES_OUT
+ *
  * Metadata layout (32 bytes at front of SHM; see SHM_TABLE_OFFSET below
  * for the authoritative map and the reasoning):
  *   offset 0:  uint32 stack_depth    (max stack depth in bytes)
@@ -844,6 +847,32 @@ static inline uint32_t __afl_get_caller_ctx(void) {
 }
 #endif
 
+/* ── Fire log (debug build only) ───────────────────────────────────────
+ * -D__AFL_TRACE_FIRES=1 appends every final edge_id, one decimal per line, to
+ * $__AFL_FIRES_OUT: the sequence the path hash folds, so two runs can be
+ * diffed fire by fire (edge-id handover P0-1). Compiled out by default --
+ * a write(2) per fire. Opened lazily: guards can fire from other
+ * constructors before ours. Unset or unopenable path: logging stays off. */
+#ifndef __AFL_TRACE_FIRES
+#define __AFL_TRACE_FIRES 0
+#endif
+
+#if __AFL_TRACE_FIRES
+#include <fcntl.h>
+static int __afl_fire_fd = -2;  /* -2 not yet opened, -1 off */
+
+__AFL_NO_COV static void __afl_log_fire(uint32_t edge_id) {
+    if (__afl_fire_fd == -2) {
+        const char *p = getenv("__AFL_FIRES_OUT");
+        __afl_fire_fd = (p && p[0]) ? open(p, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
+    }
+    if (__afl_fire_fd < 0) return;
+    char b[16];
+    int n = snprintf(b, sizeof b, "%u\n", edge_id);
+    if (n > 0) { ssize_t w = write(__afl_fire_fd, b, (size_t)n); (void)w; }
+}
+#endif
+
 /* ── Edge recording (open-addressing hash table) ───────────────────────
  *
  * Hash: edge_id = caller_ctx ^ prev_loc ^ cur_loc  (__AFL_CTX_SENSITIVE=1)
@@ -976,6 +1005,9 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
     __afl_path_hash_acc = (__afl_path_hash_acc * 31) ^ edge_id;
     if (__afl_path_hash)
         *__afl_path_hash = __afl_path_hash_acc;
+#if __AFL_TRACE_FIRES
+    __afl_log_fire(edge_id);
+#endif
 
 #if __AFL_NGRAM_K > 2
     __afl_prev_locs[__afl_prev_idx] = cur_loc >> 1;

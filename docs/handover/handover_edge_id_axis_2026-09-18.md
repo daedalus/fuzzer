@@ -5,8 +5,8 @@ standalone diagnostic, now `tools/edge_diagnostic.py matrix` (the former
 `tools/edge_matrix_analysis.py` was folded into it in 9dad75b6). One
 production-code addition: `adapters.shm.ShmCoverage._scan_with_positions()` (a
 read-only, un-memoized analysis helper; the hot path is untouched) added with
-F14/F15 below. F1 is fixed (dd834d1, guarded by P0-2 and P0-3); F2 is half
-closed (P0-1). **F16 (2026-09-23) retracts F3 and part of F4 and re-measures
+F14/F15 below. F1 is fixed (dd834d1, guarded by P0-2 and P0-3); F2 is closed
+(P0-1: does not reproduce). **F16 (2026-09-23) retracts F3 and part of F4 and re-measures
 F7-F10: the shim's id function was merging 58% of fuzzgoat's edges until the
 hashed-location shim change. Read F16 before quoting any number above it.**
 F16's "after" column was reproduced independently on `5e18ccef` (see
@@ -133,6 +133,8 @@ raw mode, and an old-shim target cannot be told from a current one by any
 symbol it exports.
 
 ### F2 (defect, mechanism unresolved). The first execution against a clean table disagrees with every later one
+
+**Closed 2026-09-23 (P0-1): does not reproduce.** See P0-1 for the run.
 
 Same input, same process image, ASLR off, one SHM segment reused with
 `reset_edge_map()` between executions -- exactly the production arrangement:
@@ -927,7 +929,7 @@ the tool) continues or closes, and nothing else on the list has that leverage.
 
 | # | item | cost | gates / unblocks |
 |---|---|---|---|
-| 1 | **P0-1** close F2 (path-hash half) | one env-gated `write()`, one run | every first-execution number |
+| 1 | ~~P0-1~~ DONE, F2 does not reproduce | -- | first-execution numbers usable |
 | 2 | ~~P1-2~~ DONE, negative (F17) | -- | closed P3-3 derived half; [6] diagnostic only |
 | 3 | **P2-4** `edge_diagnostic.py` runs only on the maintainer's machine | one line + a smoke test | anyone else reproducing anything in this file |
 | 4 | **P1-1 + P1-3** png, zlib, ffmpeg (absorbs E6) | machine time, a table | P3-1, P3-4, E6 |
@@ -1052,7 +1054,20 @@ relation corresponds to a join or a loop in it. A positive opens Ball-Larus
 337 of 445 count coordinates); a negative closes the whole integer-relation
 line, which is worth as much. Blocked on nothing but machine time.
 
-### P0-1. Diagnose F2 (first-execution divergence) -- PRIORITY 2
+### P0-1. Diagnose F2 (first-execution divergence) -- DONE, does not reproduce
+
+**Closed 2026-09-23 on `d2bc7747`.** The fire log landed as a compile-time
+gate, `-D__AFL_TRACE_FIRES=1` (off by default), writing each final `edge_id`
+to `$__AFL_FIRES_OUT`. fuzzgoat, ctx and context-free builds, ASLR off, all
+250 corpus inputs, each run clean / reset / reset on one fresh segment: fire
+streams, path hashes and id sets identical in every case (0 of 250 diverge,
+both builds). The shims at `c26f0a1` (where F2 was measured) and
+`666839ac^` also give 0 of 250 on path hash, so F2 was not the id change;
+the harness and corpus that produced it have both moved since, and it is not
+recoverable. Invariant pinned instead: the first execution after a fresh
+segment is comparable. `tests/test_shim_fire_trace.py` checks it at ctx on
+and off, and checks the log replays the SHM path hash. `collect()`'s warm-up
+run is now redundant but harmless; left in.
 
 **Refreshed 2026-09-23:** still one run from closed. The fire log has to come
 from the shim, not from `tools/ground_truth_tracer.c`: F2 is about the shim's
