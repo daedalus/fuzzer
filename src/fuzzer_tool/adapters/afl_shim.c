@@ -663,9 +663,10 @@ void __afl_map_shm(void) {
  * return address of whoever called the function that CONTAINS the
  * current edge (not the edge's own PC — that's already cur_loc).
  *
- * Both call sites that invoke __afl_map_edge() are real (non-inlined)
+ * Both call sites that invoke __afl_map_loc() are real (non-inlined)
  * functions: __sanitizer_cov_trace_pc_guard() and __sanitizer_cov_trace_pc().
- * __afl_map_edge() itself is always_inline, so it never introduces its
+ * __afl_map_loc() (and its public
+ * __afl_map_edge() wrapper) itself is always_inline, so it never introduces its
  * own stack frame — from the CPU's point of view, this code still runs
  * inside trace_pc_guard/trace_pc's frame regardless of the C-level call
  * boundary. Frame 0 from that vantage is trace_pc_guard's own return
@@ -841,8 +842,16 @@ static inline uint32_t __afl_get_caller_ctx(void) {
  * Probe: linear probing from edge_id % map_size until we find a matching
  *        edge_id or an empty slot (edge_id == 0).                       */
 
+/* Location width shared by guard ids and hand-written __afl_map_edge ids;
+ * widened by __sanitizer_cov_trace_pc_guard_init (see "Guard numbering").
+ * 16 bits is the floor for manual-only (gcc, no trace-pc-guard) builds,
+ * whose wrappers carry tens of hand-picked ids. */
+static uint32_t __afl_loc_mask = 0xFFFFu;
+
+__AFL_NO_COV static inline uint32_t __afl_guard_mix(uint64_t x);
+
 __attribute__((visibility("default"), always_inline))
-static inline void __afl_map_edge(uint32_t cur_loc) {
+static inline void __afl_map_loc(uint32_t cur_loc) {
     if (!__afl_area) return;
 
     uint32_t gen = __afl_generation;
@@ -875,8 +884,14 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
 #endif
     /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
      * edge that hashes to 0 would be silently dropped and the slot
-     * reclaimed by the next collision. Force it to 1 instead. */
-    edge_id |= 1;
+     * reclaimed by the next collision. Remap exactly that one value to 1.
+     *
+     * Not `edge_id |= 1`: that forces bit 0 on EVERY id, which erases bit 0
+     * of cur_loc (and of the context tag) for all edges, so (p, 2k) and
+     * (p, 2k+1) -- very often the two successors of one branch -- became
+     * one id. Measured on fuzzgoat: 80 of 344 real edges merged by that
+     * alone. The remap below merges only the id-0 edge with the id-1 edge. */
+    if (!edge_id) edge_id = 1;
     uint32_t pos     = edge_id % __afl_map_size;
 
     /* Linear probe, bounded to __AFL_PROBE_MAX slots.
@@ -965,6 +980,27 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
  * direct call instructions within the target, bypassing PLT resolution
  * entirely (same pattern as the abort() override below). */
 
+/* Hand-written coverage points (the harness wrappers in targets/<name>.c call
+ * this with ids like 0x1100 + depth). Those ids are small, sequential and
+ * hand-picked, so fed straight in as cur_loc they alias exactly like the
+ * old sequential guards did: prev >> 1 drops bit 0 of the previous id, so
+ * (0x1102 -> X) and (0x1103 -> X) were one edge, and XORs of neighbouring
+ * constants collide (11 of the 12 residual merges on fuzzgoat after guard
+ * hashing were between wrapper ids). Mix them into the same location space
+ * as guard ids. Internal callers that already hold a well-spread location
+ * (guards, trace-pc keys, SGFuzz transition hashes) use __afl_map_loc.
+ *
+ * Deliberately outside the __AFL_DISTANCE_MODE gate: every harness wrapper
+ * calls this, so under -D__AFL_DISTANCE_MODE=0 (the documented opt-out) an
+ * executable failed to link and a .so linked with __afl_map_edge undefined,
+ * which dlopen(RTLD_NOW) refuses and RTLD_LAZY turns into a crash on the
+ * first coverage point. */
+__attribute__((visibility("default"), always_inline))
+static inline void __afl_map_edge(uint32_t cur_loc) {
+    uint32_t v = __afl_guard_mix((uint64_t)cur_loc ^ 0x6a09e667f3bcc909ULL) & __afl_loc_mask;
+    __afl_map_loc(v ? v : 1);
+}
+
 #if __AFL_DISTANCE_MODE
 /* Defined further down, after the distance-table state -- forward-declared
  * here so the guard callback (which comes first in the file) can reach it.
@@ -980,7 +1016,7 @@ static void __afl_probe_distance(uint64_t key);
 __attribute__((visibility("hidden")))
 void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
     if (!guard || *guard == 0) return;
-    __afl_map_edge(*guard);
+    __afl_map_loc(*guard);
 #if __AFL_DISTANCE_MODE
     /* Guard builds get the same AFLGo distance / K-Scheduler node-bitmap
      * channel as trace-pc builds, keyed off this call site's own return
@@ -1030,15 +1066,68 @@ void __sfuzz_state(unsigned var_id, unsigned long long value) {
     h = (h ^ prev) * 1099511628211ULL;
     h = (h ^ (uint64_t)value) * 1099511628211ULL;
 
-    __afl_map_edge((uint32_t)(h >> 32) | 0x80000000u);
+    __afl_map_loc((uint32_t)(h >> 32) | 0x80000000u);
+}
+
+/* ── Guard numbering ──────────────────────────────────────────────────
+ *
+ * Guards used to be numbered 1..N sequentially and used as cur_loc
+ * directly. That pinned every edge_id = (prev >> 1) ^ cur below ~2N, so a
+ * module with N blocks had at most N odd ids for its (typically >N) edges:
+ * pigeonhole-guaranteed aliasing, and structured aliasing on top -- XOR of
+ * small consecutive integers collides systematically (on fuzzgoat, 8 real
+ * edges shared id 95). 344 real edges in the fuzzgoat corpus reached Python
+ * as 145 ids. Classic AFL avoids this by giving each block a random cur_loc.
+ *
+ * Here each guard gets a deterministic hash of its index (ids must be
+ * stable across execs and resumes, so never rand()), masked to a width
+ * sized from the module's guard count: ceil(log2(N)) + __AFL_GUARD_SLACK_BITS,
+ * capped at __AFL_GUARD_MAX_BITS. The cap keeps every id (a masked cur_loc
+ * XOR a narrower prev and an 8-bit context tag) below adapters/shm.py's
+ * VIRGIN_DENSE_MAX = 2^24, so the direct-indexed virgin map stays on its
+ * fast path. The slack is the memory/collision trade: the Python side keeps
+ * per-id dense arrays whose size tracks the largest id, so width costs
+ * memory, and expected colliding pairs are ~E^2 / 2^(bits+1) for E edges.
+ *
+ * guard_counter is per module (hidden visibility), so the module's guard
+ * count salts the hash to keep two modules from minting the same stream.
+ * Modules with identical guard counts still share it -- a residual, not a
+ * regression: under sequential numbering every module aliased every other. */
+#ifndef __AFL_GUARD_SLACK_BITS
+#define __AFL_GUARD_SLACK_BITS 10
+#endif
+#ifndef __AFL_GUARD_MAX_BITS
+#define __AFL_GUARD_MAX_BITS 24
+#endif
+#if __AFL_GUARD_MAX_BITS > 24 || __AFL_GUARD_MAX_BITS < 8
+#error "__AFL_GUARD_MAX_BITS must be in [8, 24] (see VIRGIN_DENSE_MAX)"
+#endif
+
+__AFL_NO_COV static inline uint32_t __afl_guard_mix(uint64_t x) {
+    /* splitmix64 finalizer, same mixer __afl_get_caller_ctx uses. */
+    x += 0x9e3779b97f4a7c15ULL;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+    return (uint32_t)(x ^ (x >> 31));
 }
 
 __attribute__((visibility("hidden")))
 void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
     static uint32_t guard_counter;
     if (start == stop || *start) return;
-    for (uint32_t *g = start; g < stop; g++)
-        *g = ++guard_counter;
+    uint64_t n = (uint64_t)(stop - start) + guard_counter;
+    unsigned bits = 1;
+    while (bits < 32 && (1ULL << bits) <= n) bits++;
+    bits += __AFL_GUARD_SLACK_BITS;
+    if (bits > __AFL_GUARD_MAX_BITS) bits = __AFL_GUARD_MAX_BITS;
+    uint32_t mask = (uint32_t)((1ULL << bits) - 1);
+    if (mask > __afl_loc_mask) __afl_loc_mask = mask;
+    uint64_t salt = (uint64_t)(stop - start) * 0xd1b54a32d192ed03ULL;
+    for (uint32_t *g = start; g < stop; g++) {
+        /* 0 means "disabled guard" to __sanitizer_cov_trace_pc_guard. */
+        uint32_t v = __afl_guard_mix(salt ^ ++guard_counter) & mask;
+        *g = v ? v : 1;
+    }
 }
 
 /* ── AFLGo distance channel (__AFL_DISTANCE_MODE builds only) ─────────
@@ -1159,7 +1248,7 @@ void __sanitizer_cov_trace_pc(void) {
     uint64_t key = __afl_pc_key(pc);
 
     /* Edge coverage: PC-based (prev_loc ^ cur_loc, same sparse table). */
-    __afl_map_edge((uint32_t)(key >> 1));
+    __afl_map_loc((uint32_t)(key >> 1));
     __afl_probe_distance(key);
 }
 

@@ -85,13 +85,15 @@ SHM_TAIL_SIZE = 16  # bytes reserved at the end of SHM for the distance tail
 # searchsorted and 108ms via the dict loop.  edges/second is the metric, so
 # the novelty test must not itself be O(active) in the interpreter.
 #
-# Direct indexing is affordable because trace_pc_guard_init hands out small
-# sequential guard values, so edge_id = prev_loc ^ cur_loc lands in a dense
-# range of roughly 2 * guard_count -- and XOR with an __AFL_CTX_BITS-wide
-# context term cannot widen a value past its wider operand, so the default
-# 8-bit context does not change that.  One byte per reachable edge_id is
-# ~512 KiB for a target with 200k live edges, against the 8 bytes per SLOT
-# the edge table itself already costs.
+# Direct indexing is affordable because the shim bounds every location it
+# mints: trace_pc_guard_init hashes guard indices (and __afl_map_edge hashes
+# hand-written ids) into ceil(log2(guards)) + __AFL_GUARD_SLACK_BITS bits,
+# capped at __AFL_GUARD_MAX_BITS = 24 -- so edge_id = prev_loc ^ cur_loc stays
+# below this bound, and XOR with an __AFL_CTX_BITS-wide context term cannot
+# widen a value past its wider operand.  (Ids used to be raw sequential guard
+# numbers, dense in ~2 * guard_count; that density was also why they aliased.
+# The arrays below now grow toward 2^(bits) instead: ~0.5 MiB of virgin map
+# for a few hundred guards, 16 MiB at the 24-bit cap.)
 #
 # The exception is __AFL_CTX_BITS in the 24..32 range, which -- as the
 # shim's own comment says -- scatters ids across the entire u32 space and

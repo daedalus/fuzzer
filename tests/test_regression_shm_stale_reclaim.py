@@ -49,6 +49,8 @@ import textwrap
 
 import pytest
 
+from tests.support.shim_ids import edge_chain
+
 from fuzzer_tool.adapters.shm import ShmCoverage
 
 SHIM = os.path.join(
@@ -119,7 +121,7 @@ def harness(tmp_path_factory):
             cc,
             "-O2",
             "-g",
-            # The harness asserts literal edge IDs (e.g. {0x1111}); ctx
+            # The harness asserts exact edge IDs (edge_chain([0x1111])); ctx
             # hashing is default-on and would XOR a caller term into them.
             "-D__AFL_CTX_SENSITIVE=0",
             f"-include{SHIM}",
@@ -218,7 +220,9 @@ class TestStaleEntriesAreReclaimed:
             visible = cov.get_edge_ids()
         finally:
             cov.cleanup()
-        assert visible == {0x1111}, (
+        # The harness calls __afl_map_edge(0x1111) right after a reset;
+        # the shim maps hand-written ids into its hashed location space.
+        assert visible == set(edge_chain([0x1111])), (
             f"after {n_exec} execs the live set is {sorted(visible)}; "
             f"0xAAAA fired once at the start and must not reappear"
         )

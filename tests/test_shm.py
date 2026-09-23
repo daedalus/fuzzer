@@ -889,12 +889,14 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
                 # frame). C cancels out of any PAIRWISE xor between two
                 # edge_ids, so the pairwise-xor multiset is independent of
                 # C and still pins down the exact prev_loc^cur_loc chain:
-                #   raw0 = 0x1010 ^ 0           = 0x1010
-                #   raw1 = 0x2020 ^ (0x1010>>1) = 0x2828
-                #   raw2 = 0x3030 ^ (0x2020>>1) = 0x2020
+                # (hand-written ids are first mixed into the shim's hashed
+                # location space -- tests/support/shim_ids.py mirrors that)
                 import itertools
 
-                expected_pairwise = sorted([0x1010 ^ 0x2828, 0x1010 ^ 0x2020, 0x2828 ^ 0x2020])
+                from tests.support.shim_ids import edge_chain
+
+                raw = edge_chain([0x1010, 0x2020, 0x3030])
+                expected_pairwise = sorted(a ^ b for a, b in itertools.combinations(raw, 2))
                 got_pairwise = sorted(a ^ b for a, b in itertools.combinations(sorted(edge_ids), 2))
                 assert got_pairwise == expected_pairwise, (
                     f"pairwise edge_id xors {got_pairwise} != {expected_pairwise} "
