@@ -1322,7 +1322,11 @@ def axis_structure(ids: np.ndarray, total: np.ndarray, ctx_bits: int, perms: int
         "ctx_bits": ctx_bits,
         "families": len(families),
         "largest_families": sizes[:8],
-        "ctx_tags_reachable": (1 << ctx_bits) // 2 if ctx_bits else 1,
+        # A pre-2026-09-23 shim forced `edge_id |= 1`, which killed tag bit 0;
+        # the current one remaps only id 0. All-odd ids identify the old one.
+        "ctx_tags_reachable": ((1 << ctx_bits) // (2 if odd == len(ids) else 1))
+        if ctx_bits
+        else 1,
         "all_ids_odd": odd == len(ids),
         "icc_family": (between / ss_total) if ss_total else 0.0,
         "lag1_observed": observed,
@@ -1852,7 +1856,8 @@ def _matrix_report(result) -> None:
     )
     print(
         f"    reachable ctx tags per family {a['ctx_tags_reachable']} "
-        f"(|= 1 kills tag bit 0; all ids odd: {a['all_ids_odd']})"
+        f"(all ids odd: {a['all_ids_odd']} -- True means a legacy `|= 1` shim, "
+        "which kills tag bit 0)"
     )
     degenerate = (
         " (degenerate: one edge per family, nothing to decompose)"
