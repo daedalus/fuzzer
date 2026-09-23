@@ -1092,6 +1092,7 @@ def run_sanity_mode(args):
     print("run done")
 
 
+import enum  # noqa: E402
 import json  # noqa: E402
 import math  # noqa: E402
 import os  # noqa: E402
@@ -1324,9 +1325,7 @@ def axis_structure(ids: np.ndarray, total: np.ndarray, ctx_bits: int, perms: int
         "largest_families": sizes[:8],
         # A pre-2026-09-23 shim forced `edge_id |= 1`, which killed tag bit 0;
         # the current one remaps only id 0. All-odd ids identify the old one.
-        "ctx_tags_reachable": ((1 << ctx_bits) // (2 if odd == len(ids) else 1))
-        if ctx_bits
-        else 1,
+        "ctx_tags_reachable": ((1 << ctx_bits) // (2 if odd == len(ids) else 1)) if ctx_bits else 1,
         "all_ids_odd": odd == len(ids),
         "icc_family": (between / ss_total) if ss_total else 0.0,
         "lag1_observed": observed,
@@ -1589,43 +1588,21 @@ def integer_relations(mat, max_rows=LLL_ROW_BUDGET):
         first[key] = i
         distinct_idx.append(i)
     dist = mat.astype(int)[distinct_idx]
-
-    index = {dist[i].tobytes(): i for i in range(len(dist))}
-    triples = 0
-    multiples = 0
-    for i in range(len(dist)):
-        for j in range(i + 1, len(dist)):
-            if (dist[i] + dist[j]).tobytes() in index:
-                triples += 1
-            a, b = dist[i], dist[j]
-            if np.array_equal(a > 0, b > 0) and (a > 0).any():
-                ratio = a[a > 0] / b[a > 0]
-                if np.allclose(ratio, ratio[0]) and abs(ratio[0] - 1.0) > 1e-9:
-                    multiples += 1
+    triples, multiples = _sparse_relations(dist)
 
     out = {
         "rows": int(mat.shape[0]),
         "distinct_rows": len(dist),
         "duplicate_rows": int(mat.shape[0]) - len(dist),
-        "scalar_multiple_pairs": multiples,
-        "sum_triples": triples,
+        "scalar_multiple_pairs": len(multiples),
+        "sum_triples": len(triples),
     }
 
     sub = dist[:max_rows]
     sub = sub[:, sub.any(axis=0)]
     n = sub.shape[0]
     rank = int(np.linalg.matrix_rank(sub.astype(float)))
-    # [I | N*A]: a reduced row whose A-part vanishes carries an exact integer
-    # relation in its I-part. N only has to outweigh the coefficients we care
-    # about, so that a row keeping any coverage mass cannot look short.
-    scale = 10**4
-    basis = [
-        [1 if j == i else 0 for j in range(n)] + [scale * int(v) for v in sub[i]] for i in range(n)
-    ]
-    start = time.perf_counter()
-    reduced = _lll_reduce(basis)
-    elapsed = time.perf_counter() - start
-    rels = [row[:n] for row in reduced if not any(row[n:])]
+    rels, elapsed = _lll_relations(sub)
     support = [sum(1 for v in c if v) for c in rels]
     l1 = [sum(abs(v) for v in c) for c in rels]
     peak = [max(abs(v) for v in c) for c in rels]
@@ -1824,20 +1801,17 @@ def positions_structure(pos_runs, map_size: int, perms: int, seed: int):
 # ── Reporting ─────────────────────────────────────────────────────────
 
 
-def ground_truth(tracer: Path, inputs: list[Path], timeout: float) -> dict:
-    """Real edges per tools/ground_truth_tracer.c, over the collected inputs.
+def _gt_runs(tracer: Path, inputs: list[Path], timeout: float) -> list[np.ndarray]:
+    """One (n, 3) array of tracer records per input, in input order.
 
-    Returns the distinct context-free edges (prev, cur) and the distinct
-    (prev, cur, call site) triples. The tracer shares no code with the shim's
-    id function, so these are the reference the collected ids are judged
-    against. A non-zero exit is expected (fuzzgoat aborts on its planted
-    bugs); the tracer writes unbuffered, so those executions still count.
+    An input that left no log (died before its first coverage event) gets an
+    empty array rather than a gap, so row i is always input i -- the flow
+    section lines these rows up with the shim's collection.
     """
     import subprocess
     import tempfile
 
-    edges: set[tuple[int, int]] = set()
-    triples: set[tuple[int, int, int]] = set()
+    runs = []
     with tempfile.TemporaryDirectory() as tmp:
         out = Path(tmp) / "gt.bin"
         for p in inputs:
@@ -1846,14 +1820,331 @@ def ground_truth(tracer: Path, inputs: list[Path], timeout: float) -> dict:
             # A hang still leaves the edges logged before it.
             with contextlib.suppress(subprocess.TimeoutExpired):
                 subprocess.run([str(tracer), str(p)], env=env, capture_output=True, timeout=timeout)
-            if not out.exists():
-                continue
-            raw = np.fromfile(out, dtype="<u8")
-            rec = raw[: len(raw) - len(raw) % 3].reshape(-1, 3)
-            for prev, cur, site in rec.tolist():
-                edges.add((prev, cur))
-                triples.add((prev, cur, site))
+            raw = np.fromfile(out, dtype="<u8") if out.exists() else np.empty(0, "<u8")
+            runs.append(raw[: len(raw) - len(raw) % 3].reshape(-1, 3))
+    return runs
+
+
+def ground_truth(tracer: Path, inputs: list[Path], timeout: float, runs=None) -> dict:
+    """Real edges per tools/ground_truth_tracer.c, over the collected inputs.
+
+    Returns the distinct context-free edges (prev, cur) and the distinct
+    (prev, cur, call site) triples. The tracer shares no code with the shim's
+    id function, so these are the reference the collected ids are judged
+    against. A non-zero exit is expected (fuzzgoat aborts on its planted
+    bugs); the tracer writes unbuffered, so those executions still count.
+    Pass *runs* (from ``_gt_runs``) to reuse a collection instead of re-running.
+    """
+    if runs is None:
+        runs = _gt_runs(tracer, inputs, timeout)
+    edges: set[tuple[int, int]] = set()
+    triples: set[tuple[int, int, int]] = set()
+    for rec in runs:
+        for prev, cur, site in rec.tolist():
+            edges.add((prev, cur))
+            triples.add((prev, cur, site))
     return {"edges": len(edges), "triples": len(triples)}
+
+
+# ── Section 10: flow conservation on the tracer's walk graph (P1-2) ───
+#
+# A tracer log is a walk, so a run's edge counts form a circulation once the
+# walk is closed (last node -> EXIT -> ENTRY, both virtual). Circulations are
+# exactly the kernel of the node-edge incidence matrix B, spanned by the
+# fundamental cycles Z. Hence a relation r over edge counts holds for every
+# run the graph admits iff Z r = 0 (r in rowspan B: a sum of node laws), and
+# rank(Z) is the number of independent count coordinates -- the Ball-Larus
+# bound: instrument rank(Z) chords, derive the rest.
+#
+#        ENTRY --> 1 --> 2 --> 3 --> ... --> last --> EXIT
+#          ^                                            |
+#          +-------------- virtual return --------------+
+#
+# Everything here is exact: incidence and cycle vectors are small integers,
+# and ranks are taken over GF(p) for a 31-bit prime, which equals the rank
+# over Q unless p divides a minor -- the counts here are orders of magnitude
+# too small for that to be plausible.
+
+
+class FlowGraph(enum.Enum):
+    """Node identity of the walk graph."""
+
+    EDGE = "context-free"  # node = location, column = (prev, cur)
+    CALL_SITE = "call-site"  # node = (location, call site), column = (prev, cur, site)
+
+
+RANK_PRIME = 2**31 - 1
+NON_FLOW_SHOWN = 8  # non-structural relations kept per class, for reading
+_ENTRY, _EXIT = ("entry",), ("exit",)
+
+
+def _rank_p(mat) -> int:
+    """Rank of an integer matrix over GF(RANK_PRIME), by vectorised elimination."""
+    a = np.array([[int(v) % RANK_PRIME for v in row] for row in np.asarray(mat)], dtype=np.int64)
+    if a.size == 0:
+        return 0
+    rank = 0
+    for c in range(a.shape[1]):
+        nz = np.flatnonzero(a[rank:, c])
+        if not len(nz):
+            continue
+        p = rank + nz[0]
+        a[[rank, p]] = a[[p, rank]]
+        a[rank] = a[rank] * pow(int(a[rank, c]), RANK_PRIME - 2, RANK_PRIME) % RANK_PRIME
+
+        # Clear column c everywhere else; entries < 2^31, so products fit int64.
+        col = a[:, c].copy()
+        col[rank] = 0
+        a = (a - np.outer(col, a[rank]) % RANK_PRIME) % RANK_PRIME
+        rank += 1
+        if rank == a.shape[0]:
+            break
+    return rank
+
+
+def _cycle_basis(src: np.ndarray, dst: np.ndarray, n: int) -> np.ndarray:
+    """Fundamental cycles of a directed multigraph, one +/-1 row per chord.
+
+    BFS spanning forest over the undirected graph; each non-tree edge closes
+    one cycle through the tree. Row count is E - V + components.
+    """
+    adj = collections.defaultdict(list)
+    for i, (u, v) in enumerate(zip(src.tolist(), dst.tolist(), strict=True)):
+        adj[u].append((v, i))
+        adj[v].append((u, i))
+
+    # parent[w] = (tree edge, +1 if it points parent -> w else -1)
+    parent: dict[int, tuple[int, int] | None] = {}
+    for root in range(n):
+        if root in parent:
+            continue
+        parent[root] = None
+        queue = [root]
+        for u in queue:
+            for v, i in adj[u]:
+                if v in parent:
+                    continue
+                parent[v] = (i, 1 if src[i] == u else -1)
+                queue.append(v)
+
+    tree = {p[0] for p in parent.values() if p is not None}
+    rows = []
+    for i in range(len(src)):
+        if i in tree:
+            continue
+        z = np.zeros(len(src), dtype=np.int64)
+        z[i] = 1
+        _walk_up(z, int(dst[i]), -1, parent, src, dst)  # dst -> root, against the tree
+        _walk_up(z, int(src[i]), 1, parent, src, dst)  # root -> src, along it
+        rows.append(z)
+    return np.array(rows, dtype=np.int64).reshape(-1, len(src))
+
+
+def _walk_up(z, w, sign, parent, src, dst) -> None:
+    """Add the tree path w -> root to *z*, times *sign* (-1 walks it upward)."""
+    while parent[w] is not None:
+        i, orient = parent[w]
+        z[i] += sign * orient
+        w = int(src[i]) if orient == 1 else int(dst[i])
+
+
+def _flow_state(rec, kind: FlowGraph):
+    return rec[1] if kind is FlowGraph.EDGE else (rec[1], rec[2])
+
+
+def _flow_col(rec, kind: FlowGraph):
+    return (rec[0], rec[1]) if kind is FlowGraph.EDGE else (rec[0], rec[1], rec[2])
+
+
+def _flow_graph(runs: list[np.ndarray], kind: FlowGraph) -> dict:
+    """Walk graph of the tracer runs: incidence, per-run counts, cycles."""
+    nodes = {_ENTRY: 0, _EXIT: 1}
+    edges: dict[tuple, int] = {}
+    cols: dict[tuple, int] = {}
+    ecol: list[int] = []  # column of each walk edge, -1 for virtual ones
+    per_run, exits, discontinuities = [], set(), 0
+
+    def edge(a, b, col) -> int:
+        if (a, b) not in edges:
+            nodes.setdefault(a, len(nodes))
+            nodes.setdefault(b, len(nodes))
+            edges[(a, b)] = len(edges)
+            ecol.append(-1 if col is None else cols.setdefault(col, len(cols)))
+        return edges[(a, b)]
+
+    for rec in runs:
+        # Discontinuity: a record whose prev is not where the walk was.
+        if len(rec):
+            discontinuities += int(rec[0, 0] != 0) + int((rec[1:, 0] != rec[:-1, 1]).sum())
+        hits: Counter[int] = Counter()
+        prev = _ENTRY
+        for r in rec.tolist():
+            state = _flow_state(r, kind)
+            hits[edge(prev, state, _flow_col(r, kind))] += 1
+            prev = state
+        exits.add(prev)
+        hits[edge(prev, _EXIT, None)] += 1
+        hits[edge(_EXIT, _ENTRY, None)] += 1
+        per_run.append(hits)
+
+    n_e = len(edges)
+    src, dst = np.empty(n_e, dtype=np.int64), np.empty(n_e, dtype=np.int64)
+    for (a, b), i in edges.items():
+        src[i], dst[i] = nodes[a], nodes[b]
+    af = np.zeros((len(runs), n_e), dtype=np.int64)
+    for row, hits in enumerate(per_run):
+        for e, c in hits.items():
+            af[row, e] = c
+
+    # Project walk edges onto columns: several walk edges can share a column
+    # in the call-site graph (same (prev, cur, site), different prev site).
+    ecol_a = np.array(ecol, dtype=np.int64)
+    proj = np.zeros((n_e, len(cols)), dtype=np.int64)
+    real = np.flatnonzero(ecol_a >= 0)
+    proj[real, ecol_a[real]] = 1
+    z = _cycle_basis(src, dst, len(nodes))
+    return {
+        "src": src,
+        "dst": dst,
+        "nodes": len(nodes),
+        "cols": cols,
+        "af": af,
+        "ac": af @ proj,
+        "z": z,
+        "zp": z @ proj,
+        "exits": len(exits),
+        "discontinuities": discontinuities,
+    }
+
+
+def _is_structural(zp: np.ndarray, r: np.ndarray) -> bool:
+    """True iff relation *r* over columns is a sum of node laws."""
+    return not np.count_nonzero(zp @ r)
+
+
+def _flow_summary(g: dict, lll_rows: int) -> dict:
+    """Section [10] numbers for one walk graph."""
+    n_nodes, n_cols = g["nodes"], len(g["cols"])
+    b = np.zeros((n_nodes, len(g["src"])), dtype=np.int64)
+    b[g["src"], np.arange(len(g["src"]))] -= 1
+    b[g["dst"], np.arange(len(g["src"]))] += 1
+
+    independent = _rank_p(g["zp"])
+    count_rank = _rank_p(g["ac"])
+    return {
+        "runs": int(g["ac"].shape[0]),
+        "nodes": n_nodes,
+        "columns": n_cols,
+        "exits": g["exits"],
+        "discontinuities": g["discontinuities"],
+        "kirchhoff_violations": int(np.count_nonzero(b @ g["af"].T)),
+        "cycle_rank": int(g["z"].shape[0]),
+        "independent": independent,
+        "derivable": n_cols - independent,
+        "count_rank": count_rank,
+        "kernel_dims": n_cols - count_rank,
+        "non_flow_dims": independent - count_rank,
+        "counts_in_cycle_space": _rank_p(np.vstack([g["ac"], g["zp"]])) == independent,
+        "relations": _classify_relations(g, lll_rows),
+    }
+
+
+def _classify_relations(g: dict, lll_rows: int) -> dict:
+    """Every sparse empirical relation, split into node laws and the rest."""
+    keys = {i: k for k, i in g["cols"].items()}
+    out = {}
+    for cls, rels in _relation_sets(g["ac"].T, lll_rows).items():
+        shown, structural = [], 0
+        for rel in rels:
+            r = np.zeros(len(keys), dtype=np.int64)
+            for i, c in rel:
+                r[i] += c
+            if _is_structural(g["zp"], r):
+                structural += 1
+                continue
+            if len(shown) < NON_FLOW_SHOWN:
+                shown.append([[keys[i], c] for i, c in rel])
+        out[cls] = {"found": len(rels), "structural": structural, "non_flow": shown}
+    return out
+
+
+def _relation_sets(mat, lll_rows: int) -> dict[str, list[list[tuple[int, int]]]]:
+    """Duplicate, A=B+C, scalar-multiple and LLL relations among the rows of *mat*.
+
+    A relation is a list of (row, integer coefficient). Duplicates are paired
+    with the first row of their class; the other searches run on distinct rows.
+    """
+    mat = np.asarray(mat, dtype=np.int64)
+    first: dict[bytes, int] = {}
+    dups, distinct = [], []
+    for i, row in enumerate(mat):
+        j = first.setdefault(row.tobytes(), i)
+        if j == i:
+            distinct.append(i)
+        else:
+            dups.append([(j, 1), (i, -1)])
+
+    triples, multiples = _sparse_relations(mat[distinct])
+    rels, _ = _lll_relations(mat[distinct[:lll_rows]]) if lll_rows else ([], 0.0)
+    back = distinct.__getitem__
+    return {
+        "duplicates": dups,
+        "triples": [[(back(k), 1), (back(i), -1), (back(j), -1)] for k, i, j in triples],
+        "multiples": [[(back(i), q), (back(j), -p)] for i, j, p, q in multiples],
+        "lll": [[(back(i), c) for i, c in enumerate(rel) if c] for rel in rels],
+    }
+
+
+def _sparse_relations(dist):
+    """Exhaustive support-3 search over distinct rows.
+
+    Returns (triples, multiples): triples (k, i, j) with row k = row i + row j,
+    multiples (i, j, p, q) with q * row i = p * row j and p != q, both exact.
+    """
+    index = {dist[i].tobytes(): i for i in range(len(dist))}
+    triples, multiples = [], []
+    for i in range(len(dist)):
+        for j in range(i + 1, len(dist)):
+            k = index.get((dist[i] + dist[j]).tobytes())
+            if k is not None:
+                triples.append((k, i, j))
+            a, b = dist[i], dist[j]
+            if not (np.array_equal(a > 0, b > 0) and (a > 0).any()):
+                continue
+            nz = np.flatnonzero(a)[0]
+            p, q = int(a[nz]), int(b[nz])  # a / b = p / q
+            if p != q and np.array_equal(a * q, b * p):
+                multiples.append((i, j, p, q))
+    return triples, multiples
+
+
+def _lll_relations(sub):
+    """Exact integer relations among the rows of *sub* via LLL, and the time taken."""
+    sub = sub[:, sub.any(axis=0)]
+    n = sub.shape[0]
+    # [I | N*A]: a reduced row whose A-part vanishes carries an exact integer
+    # relation in its I-part. N only has to outweigh the coefficients we care
+    # about, so that a row keeping any coverage mass cannot look short.
+    scale = 10**4
+    basis = [
+        [1 if j == i else 0 for j in range(n)] + [scale * int(v) for v in sub[i]] for i in range(n)
+    ]
+    start = time.perf_counter()
+    reduced = _lll_reduce(basis)
+    return [row[:n] for row in reduced if not any(row[n:])], time.perf_counter() - start
+
+
+def flow_structure(gt_runs: list[np.ndarray], lll_rows: int = LLL_ROW_BUDGET) -> dict:
+    """Section [10]: both walk graphs, keyed by FlowGraph value."""
+    return {k.value: _flow_summary(_flow_graph(gt_runs, k), lll_rows) for k in FlowGraph}
+
+
+def _profile_match(a, b) -> bool:
+    """Same multiset of column profiles -- equal up to a column permutation."""
+    a, b = np.asarray(a), np.asarray(b)
+    if a.shape != b.shape:
+        return False
+    return sorted(map(tuple, a.T.tolist())) == sorted(map(tuple, b.T.tolist()))
 
 
 def _matrix_report(result) -> None:
@@ -2008,10 +2299,8 @@ def _matrix_report(result) -> None:
             )
             sparse = lll["support_median"] <= 8 and lll["max_coeff_median"] <= 2
             if sparse:
-                print("    sparse, near-unit relations: on the edge orientation these are")
-                print("    flow conservation on the CFG (Ball-Larus). Cross-check against")
-                print("    core/icfg.py before treating any of them as structural -- holding")
-                print("    over one corpus does not distinguish structural from coincidental.")
+                print("    sparse, near-unit relations -- diagnostic only: on fuzzgoat most")
+                print("    are not node laws (P1-2). --ground-truth --flow says which are.")
             else:
                 print("    dense relations are not actionable: the only short vectors here")
                 print("    are duplicate-row differences, which the hash above finds in O(m).")
@@ -2109,6 +2398,56 @@ def _matrix_report(result) -> None:
                 "    counts, not triples; ids well below the triple count mean merging, and\n"
                 "    a __AFL_CTX_SENSITIVE=0 target gives the exact figure"
             )
+    if "flow" in result:
+        _flow_report(result["flow"])
+
+
+def _flow_report(flow: dict) -> None:
+    print(f"\n[10] flow conservation on the tracer's walk graph (exact, GF({RANK_PRIME}))")
+    for kind, f in flow.items():
+        if kind == "profile_match":
+            continue
+        match = flow.get("profile_match", {}).get(kind)
+        print(
+            f"    {kind}: {f['nodes']} nodes, {f['columns']} edges, {f['exits']} exit nodes, "
+            f"discontinuities {f['discontinuities']}, Kirchhoff violations "
+            f"{f['kirchhoff_violations']}"
+            + ("" if match is None else f", profiles equal --target's: {match}")
+        )
+        print(
+            f"      independent counts {f['independent']} of {f['columns']} "
+            f"(Ball-Larus: {f['derivable']} derivable from the graph); count rank "
+            f"{f['count_rank']}, so {f['non_flow_dims']} of {f['kernel_dims']} "
+            "empirical kernel dims are not flow conservation"
+        )
+        rel = f["relations"]
+        print(
+            "      structural / found: "
+            + "  ".join(f"{c} {v['structural']}/{v['found']}" for c, v in rel.items())
+        )
+        for c, v in rel.items():
+            for r in v["non_flow"][:2]:
+                print(f"        not a node law, {c}: " + " ".join(f"{k:+d}*{e}" for e, k in r))
+    print("    verdict: " + _flow_verdict(flow))
+
+
+def _flow_verdict(flow: dict) -> str:
+    """P1-2's decision rule, applied to the call-site graph (it sees call/return)."""
+    f = flow[FlowGraph.CALL_SITE.value]
+    if f["discontinuities"] or f["kirchhoff_violations"] or not f["counts_in_cycle_space"]:
+        return "INVALID -- the walk graph does not conserve flow; fix the log before reading on"
+    found = sum(v["found"] for v in f["relations"].values())
+    structural = sum(v["structural"] for v in f["relations"].values())
+    if f["non_flow_dims"] == 0 and 2 * structural >= found:
+        return (
+            "positive -- the empirical relations are node laws; derive edges from "
+            "the graph (Ball-Larus)"
+        )
+    return (
+        f"negative -- {found - structural} of {found} sparse relations and "
+        f"{f['non_flow_dims']} kernel dims are not node laws; counts cannot tell "
+        "the node laws apart, the graph can"
+    )
 
 
 # ── Entry point ───────────────────────────────────────────────────────
@@ -2258,6 +2597,12 @@ def _matrix_main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="run section [8]: the (edge_pos, edge_id, count) placement matrix",
     )
+    ap.add_argument(
+        "--flow",
+        action="store_true",
+        help="run section [10] (needs --ground-truth): which count relations are flow "
+        "conservation on the tracer's walk graph, and which hold on this corpus only",
+    )
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument(
         "--hail-mary",
@@ -2289,6 +2634,9 @@ def _matrix_main(argv: list[str] | None = None) -> int:
 
     if args.load is None and (args.target is None or args.corpus is None):
         ap.error("either --load, or both --target and --corpus")
+
+    if args.flow and args.ground_truth is None:
+        ap.error("--flow needs --ground-truth")
 
     if args.hail_mary and args.load is not None:
         ap.error("--hail-mary grows a corpus; it is incompatible with --load")
@@ -2383,10 +2731,17 @@ def _matrix_main(argv: list[str] | None = None) -> int:
             ap.error("--ground-truth needs the inputs; it is incompatible with --load")
         if not os.access(args.ground_truth, os.X_OK):
             ap.error(f"--ground-truth {args.ground_truth}: not an executable tracer build")
-        gt = ground_truth(args.ground_truth, inputs, args.timeout)
+        gt_runs = _gt_runs(args.ground_truth, inputs, args.timeout)
+        gt = ground_truth(args.ground_truth, inputs, args.timeout, runs=gt_runs)
         gt["ids"] = int(len(agg["ids"]))
         gt["ctx_bits"] = args.ctx_bits
         result["ground_truth"] = gt
+        if args.flow:
+            result["flow"] = flow_structure(gt_runs, args.lll_rows if args.lll else 0)
+            shim = seed_edge_matrix(runs)
+            result["flow"]["profile_match"] = {
+                k.value: _profile_match(shim, _flow_graph(gt_runs, k)["ac"]) for k in FlowGraph
+            }
     _matrix_report(result)
     if args.json is not None:
         args.json.write_text(json.dumps(result, indent=2, sort_keys=True))
