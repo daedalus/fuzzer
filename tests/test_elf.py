@@ -13,6 +13,7 @@ from fuzzer_tool.core.elf import (
     _map_size_max,
     _size_from_blocks,
     detect_ctx_bits,
+    detect_elf_type,
     detect_ngram_k,
     estimate_map_size,
     estimate_map_size_detail,
@@ -1664,3 +1665,17 @@ class TestExtractDataWordConstants:
             (b".rodata", 0x100, 4),
             (b".text", 0x104, 1),
         ]
+
+
+class TestDetectElfType:
+    def test_pie_executable(self):
+        # /bin/true is a PIE executable (ET_DYN = 3)
+        assert detect_elf_type("/bin/true") == 3
+
+    def test_position_dependent_executable(self):
+        # /usr/bin/python3 is typically position-dependent (ET_EXEC = 2)
+        result = detect_elf_type("/usr/bin/python3")
+        assert result == 2 or result is None  # None if non-ELF64
+
+    def test_nonexistent(self):
+        assert detect_elf_type("/nonexistent/binary") is None

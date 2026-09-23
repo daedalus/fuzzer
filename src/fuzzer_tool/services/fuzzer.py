@@ -42,6 +42,7 @@ from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
+from fuzzer_tool.core.elf import SHM_LAYOUT_CURRENT, detect_elf_type, detect_shm_layout
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
@@ -715,7 +716,6 @@ class Fuzzer:
         """
         if not self.use_coverage or getattr(self, "shm_cov", None) is None:
             return
-        from fuzzer_tool.core.elf import SHM_LAYOUT_CURRENT, detect_shm_layout
 
         found = detect_shm_layout(target)
         if found == SHM_LAYOUT_CURRENT:
@@ -3460,6 +3460,22 @@ class Fuzzer:
             # --inprocess-direct, so try direct regardless — ASAN-detected bugs
             # may abort the process, but that's the user's accepted tradeoff.
             direct_ok = inprocess_direct
+            # Refuse PIE executables in direct ctypes mode: the OS refuses to
+            # dlopen a position-independent executable with the same cryptic
+            # OSError, but the failure is silent and easy to miss. Check the
+            # ELF type up front so the error message names the real problem
+            # instead of leaking the OS errno through.
+            if (
+                direct_ok
+                and not self.target.lower().endswith((".so", ".dylib", ".dll"))
+                and detect_elf_type(self.target) == 3
+            ):  # ET_DYN
+                raise RuntimeError(
+                    f"target {self.target!r} is a PIE executable (ET_DYN), "
+                    "which cannot be loaded via ctypes.CDLL in direct mode. "
+                    "Use a shared library (.so/.dylib/.dll) target, or drop "
+                    "--inprocess-direct and let the subprocess loader handle it."
+                )
             # Cmplog: mirror the auto-detect .so branch's env/shim setup
             # (see above). This branch is taken whenever --inprocess is
             # explicit -- including via --hail-mary, which force-enables

@@ -193,15 +193,19 @@ class TestStaleLayoutIsRefused:
         from unittest.mock import patch
 
         f = self._fuzzer()
-        with patch("fuzzer_tool.core.elf.detect_shm_layout", return_value=1):
-            with pytest.raises(RuntimeError, match="SHM layout 1"):
-                f._check_shm_layout("/some/stale/target")
+        with (
+            patch("fuzzer_tool.services.fuzzer.detect_shm_layout", return_value=1),
+            pytest.raises(RuntimeError, match="SHM layout 1"),
+        ):
+            f._check_shm_layout("/some/stale/target")
 
     def test_current_layout_passes(self):
         from unittest.mock import patch
 
         f = self._fuzzer()
-        with patch("fuzzer_tool.core.elf.detect_shm_layout", return_value=SHM_LAYOUT_CURRENT):
+        with patch(
+            "fuzzer_tool.services.fuzzer.detect_shm_layout", return_value=SHM_LAYOUT_CURRENT
+        ):
             f._check_shm_layout("/some/fresh/target")
 
     def test_no_coverage_means_no_layout_contract(self):
@@ -211,5 +215,5 @@ class TestStaleLayoutIsRefused:
 
         f = self._fuzzer()
         f.use_coverage = False
-        with patch("fuzzer_tool.core.elf.detect_shm_layout", return_value=1):
+        with patch("fuzzer_tool.services.fuzzer.detect_shm_layout", return_value=1):
             f._check_shm_layout("/some/stale/target")

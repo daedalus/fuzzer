@@ -979,7 +979,7 @@ def _symbol_names(target: str) -> list[str]:
             return []
         strtab_offset = struct.unpack_from("<Q", elf, str_sec + 24)[0]
         names: list[str] = []
-        for i in range(min(sym_size // sym_entsize, 20000)):
+        for i in range(sym_size // sym_entsize):
             sym = sym_offset + i * sym_entsize
             st_name_idx = struct.unpack_from("<I", elf, sym)[0]
             names.append(
@@ -1933,6 +1933,28 @@ def detect_ctx_relative_capable(target: str) -> bool | None:
 #: Segment layout the Python side is built for. Must equal
 #: __AFL_SHM_LAYOUT in adapters/afl_shim.c.
 SHM_LAYOUT_CURRENT = 3
+
+
+def detect_elf_type(target: str) -> int | None:
+    """Return the ELF e_type of *target* or None.
+
+    e_type values: ET_EXEC=2 (position-dependent executable),
+    ET_DYN=3 (shared object / PIE). Used to distinguish a PIE
+    executable from a shared library so that callers that rely on
+    ``ctypes.CDLL`` can refuse PIE targets with a clear error
+    instead of the cryptic OS OSError.
+    """
+    try:
+        with open(target, "rb") as f:
+            head = f.read(64)
+        if len(head) < 64 or head[:4] != b"\x7fELF":
+            return None
+        if head[4] != 2:  # EI_CLASS: ELFCLASS64 only
+            return None
+        return struct.unpack_from("<H", head, 16)[0]
+    except OSError:
+        log.debug("elf type detection failed for %s", target)
+        return None
 
 
 def detect_shm_layout(target: str) -> int:
