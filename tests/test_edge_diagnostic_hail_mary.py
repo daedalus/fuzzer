@@ -72,6 +72,8 @@ def test_hail_mary_grow_copies_corpus_and_strips_sidecars(tmp_path, monkeypatch)
 
     def fake_run(cmd, **kwargs):
         grown = Path(cmd[cmd.index("-d") + 1])
+        assert "--max-execs" in cmd, "campaign must budget by executions, not -n iterations"
+        assert "-n" not in cmd
         for name in ("state.json", "edge_tracker.json", "markov.json"):
             (grown / name).write_bytes(b"{}")
         (grown / "mutated1").write_bytes(b"xyz")

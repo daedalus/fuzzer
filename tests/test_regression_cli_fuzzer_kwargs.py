@@ -96,7 +96,7 @@ def test_flag_reaches_the_single_process_fuzzer(monkeypatch, tmp_path, flag, val
 
     def fake_fuzzer(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(run=lambda iterations: 0)
+        return SimpleNamespace(run=lambda iterations, max_execs=0: 0)
 
     monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", fake_fuzzer)
     assert commands.cmd_fuzz(args) == 0

@@ -2081,8 +2081,11 @@ def _hail_mary_grow(target: Path, corpus: Path, iters: int, inprocess_func: str)
     """Run the fuzzer CLI in hail-mary mode on a copy of a corpus.
 
     The fuzzer mutates and grows the corpus in place; the original is left
-    untouched per the corpus rules. Returns the grown copy so the matrix
-    analysis can be run over the edges the fuzzer actually discovered.
+    untouched per the corpus rules. ``iters`` is an execution budget passed
+    to the campaign as ``--max-execs`` (a real exec count, not ``-n``
+    iterations -- one iteration runs a whole mutation budget). Returns the
+    grown copy so the matrix analysis can be run over the edges the fuzzer
+    actually discovered.
     """
     grown = Path(tempfile.mkdtemp(prefix="edge_diag_hm_")) / "corpus"
     grown.mkdir()
@@ -2096,7 +2099,7 @@ def _hail_mary_grow(target: Path, corpus: Path, iters: int, inprocess_func: str)
         str(target),
         "-d",
         str(grown),
-        "-n",
+        "--max-execs",
         str(iters or 1),
         "--hail-mary",
         "--inprocess",
@@ -2195,8 +2198,8 @@ def _matrix_main(argv: list[str] | None = None) -> int:
         "--iters",
         type=int,
         default=0,
-        help="executions for the hail-mary fuzzer campaign (0 = unlimited; "
-        "avoid --continue-until-crash, keep it bounded)",
+        help="target executions for the hail-mary fuzzer campaign (0 = unlimited; "
+        "a real --max-execs budget, not -n iterations; keep it bounded)",
     )
     args = ap.parse_args(argv)
 

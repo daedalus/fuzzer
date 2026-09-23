@@ -157,7 +157,10 @@ def _run_fuzzer(fuzzer, args):
     and unprofiled arms.
     """
     if not getattr(args, "profile_hotpath", False):
-        fuzzer.run(iterations=args.iterations)
+        fuzzer.run(
+            iterations=args.iterations,
+            max_execs=getattr(args, "max_execs", 0),
+        )
         return
 
     import cProfile
@@ -166,7 +169,10 @@ def _run_fuzzer(fuzzer, args):
     pr = cProfile.Profile()
     pr.enable()
     try:
-        fuzzer.run(iterations=args.iterations)
+        fuzzer.run(
+            iterations=args.iterations,
+            max_execs=getattr(args, "max_execs", 0),
+        )
     finally:
         pr.disable()
         stats = pstats.Stats(pr)
@@ -1363,8 +1369,8 @@ def cmd_ppmd(args):
     from pathlib import Path
 
     from fuzzer_tool.adapters.filesystem import load_corpus
-    from fuzzer_tool.core.bloom import BloomFilter
     from fuzzer_tool.core.analyzers.analyzer_corpus_compression import CorpusCompressor
+    from fuzzer_tool.core.bloom import BloomFilter
 
     corpus_dir = Path(args.corpus)
     if not corpus_dir.exists():
@@ -1955,6 +1961,14 @@ def main() -> int:
     fuzz_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     fuzz_parser.add_argument(
         "-n", "--iterations", type=int, default=0, help="Number of iterations (0=infinite)"
+    )
+    fuzz_parser.add_argument(
+        "--max-execs",
+        type=int,
+        default=0,
+        help="Stop once this many target executions have run (0=unlimited; "
+        "checked once per iteration, so it may overshoot by one "
+        "mutation budget plus the initial seed pass)",
     )
     fuzz_parser.add_argument(
         "--continue-until-crash",
@@ -2696,8 +2710,7 @@ def main() -> int:
         type=float,
         default=1.0,
         help=(
-            "Scales an operator's raw success rate into its natural "
-            "frequency omega (default: 1.0)"
+            "Scales an operator's raw success rate into its natural frequency omega (default: 1.0)"
         ),
     )
     fuzz_parser.add_argument(

@@ -7972,7 +7972,7 @@ class Fuzzer:
             if feats:
                 print(f"    {group}: {', '.join(feats)}")
 
-    def run(self, iterations=0):
+    def run(self, iterations=0, max_execs=0):
         self._start_stack_heartbeat()
         if self.multi_targets:
             print(f"[*] Multi-target: {len(self.multi_targets)} targets, shared corpus")
@@ -8291,6 +8291,8 @@ class Fuzzer:
 
             while not _shutdown:
                 if iterations and i >= iterations:
+                    break
+                if max_execs and self.exec_count >= max_execs:
                     break
                 if self.continue_until_crash and self.crash_count > 0:
                     break
