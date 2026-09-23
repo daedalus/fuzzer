@@ -854,6 +854,11 @@ class CorpusManager:
                         # weighting.  This preserves the seed's edges while signaling
                         # it should be weighted lower in seed_key/population selection.
                         is_near_duplicate = True
+                        f._poisson_near_dup_admit_count += 1
+                        # Drives deprioritize_near_duplicates(): under Poisson
+                        # admission that reactive scan only runs after 50 of
+                        # these, so without the increment it never runs.
+                        f._redundant_admission_count += 1
 
                 f.corpus.append(data)
             if f.ga:

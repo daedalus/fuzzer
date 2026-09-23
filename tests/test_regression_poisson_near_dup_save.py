@@ -55,3 +55,24 @@ def test_plain_admission_does_not_set_flag(tmp_path, force_decision):
     f.save_to_corpus(data, parent=None)
     assert data in f.corpus
     assert "_is_near_duplicate" not in f.seed_meta[data]
+
+
+def test_near_dup_admission_bumps_counters(tmp_path, force_decision):
+    """Both counters were declared in Fuzzer.__init__ and read by stats /
+    deprioritize_near_duplicates, but never incremented: the stats line
+    always said 0 and the reactive near-dup scan never ran under
+    --poisson-disk-admission."""
+    f = _fuzzer(tmp_path)
+    force_decision(cm.PoissonAdmissionDecision.ADMIT_NEAR_DUP)
+    for i in range(3):
+        f.save_to_corpus(bytes([i + 2]) * 64, parent=None)
+    assert f._poisson_near_dup_admit_count == 3
+    assert f._redundant_admission_count == 3
+
+
+def test_plain_admission_leaves_counters(tmp_path, force_decision):
+    f = _fuzzer(tmp_path)
+    force_decision(cm.PoissonAdmissionDecision.ADMIT)
+    f.save_to_corpus(b"\x09" * 64, parent=None)
+    assert f._poisson_near_dup_admit_count == 0
+    assert f._redundant_admission_count == 0
