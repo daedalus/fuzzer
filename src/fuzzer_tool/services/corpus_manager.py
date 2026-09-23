@@ -1070,6 +1070,57 @@ class CorpusManager:
                 )
             log.debug("Trimmed %d -> %d bytes", len(data), len(trimmed))
 
+    def _mds_select_optional(
+        self, scored: list[tuple[float, bytes]], target_size: int, mandatory_count: int
+    ) -> list[bytes]:
+        """Value-weighted MDS local search over the optional (non-mandatory)
+        seed pool, replacing flat top-K-by-score (see core/mds_local_search.py
+        for the geometric framing). Falls back to top-K when there's nothing
+        for the Jaccard-signature index to work with.
+        """
+        from fuzzer_tool.core.mds_local_search import disk_radius, local_search_mds
+
+        budget = target_size - mandatory_count
+        if budget <= 0 or not scored:
+            return []
+
+        minhash = self.f._edge_tracker._minhash
+        score_by_key: dict[str, float] = {}
+        seed_by_key: dict[str, bytes] = {}
+        for score, seed in scored:
+            sk = self.seed_key(seed)
+            score_by_key[sk] = score
+            seed_by_key[sk] = seed
+
+        if not score_by_key:
+            keep = min(budget, len(scored))
+            return [s for _, s in scored[:keep]]
+
+        smin, smax = min(score_by_key.values()), max(score_by_key.values())
+        radius = {k: disk_radius(s, smin, smax) for k, s in score_by_key.items()}
+        result = local_search_mds(
+            keys=list(score_by_key),
+            weight=score_by_key,
+            radius=radius,
+            jaccard_fn=minhash.approximate_jaccard,
+            c=2,
+            max_rounds=4,
+        )
+
+        picked = result.selected
+        if len(picked) > budget:
+            picked = sorted(picked, key=lambda k: score_by_key[k], reverse=True)[:budget]
+        elif len(picked) < budget:
+            # MDS under-filled the budget (radii left slack unused) -- top
+            # off with the highest-scoring seeds not already selected,
+            # same as the plain top-K path would for the remaining slots.
+            picked_set = set(picked)
+            leftover = [k for k in score_by_key if k not in picked_set]
+            leftover.sort(key=lambda k: score_by_key[k], reverse=True)
+            picked = picked + leftover[: budget - len(picked)]
+
+        return [seed_by_key[k] for k in picked]
+
     def auto_minimize_corpus(self):
         f = self.f
         if f.ga or f.qea:
@@ -1299,6 +1350,8 @@ class CorpusManager:
                         selected.append(seed)
                         total_bytes += seed_bytes
                 unique = mandatory_seeds + selected
+            elif getattr(f, "_use_mds_select", False) and f._edge_tracker is not None:
+                unique = mandatory_seeds + self._mds_select_optional(scored, target_size, len(mandatory_seeds))
             else:
                 # Count-budget: keep top-K by score (original behavior)
                 budget = target_size - len(mandatory_seeds)

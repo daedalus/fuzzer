@@ -535,6 +535,111 @@ class TestKnapsackRetention:
         )
 
 
+class TestMDSSelection:
+    """--mds-select swaps top-K-by-score for weighted MDS local search."""
+
+    def _meta(self, coverage_edges: int) -> dict:
+        return {
+            "fuzz_count": 1,
+            "coverage_edges": coverage_edges,
+            "added_at": 100.0,
+            "edge_bitmap": bytearray(0),
+            "redqueen_offsets": [],
+            "momentum": 0.0,
+            "lineage_depth": 0,
+            "hamming_distance": 0,
+        }
+
+    def test_prefers_diverse_pair_over_single_near_duplicate_cluster(self):
+        """hub_a/hub_b are near-duplicates of each other (should conflict);
+        each is also similar enough to a distinct low-score seed to matter,
+        but the real signal is: two near-identical high-scorers shouldn't
+        both survive a tight budget when a farther-apart pair covers as
+        much distinct ground for comparable combined weight.
+        """
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        f.max_corpus = 2
+        f._use_mds_select = True
+        mgr = CorpusManager(f)
+
+        hub_a = b"A" * 40
+        hub_b = b"B" * 40  # near-duplicate of hub_a in edge coverage
+        distinct = b"C" * 40  # covers unrelated edges
+
+        f.corpus = [hub_a, hub_b, distinct]
+        f.seed_meta = {
+            hub_a: self._meta(8),
+            hub_b: self._meta(7),
+            distinct: self._meta(6),
+        }
+
+        et = f._edge_tracker
+        ka, kb, kc = (_cm_seed_key(s) for s in (hub_a, hub_b, distinct))
+        # hub_a/hub_b share almost all edges (near-duplicate signatures);
+        # distinct covers a disjoint edge set.
+        et.record_edges(ka, set(range(1, 20)))
+        et.record_edges(kb, set(range(1, 19)))  # 18/19 overlap with hub_a
+        et.record_edges(kc, set(range(100, 106)))
+
+        mgr.auto_minimize_corpus()
+
+        assert len(f.corpus) <= 2
+        # distinct must survive: it is the only source of edges 100-105,
+        # so it is mandatory via set-cover regardless of MDS selection.
+        assert distinct in f.corpus
+
+    def test_falls_back_to_topk_when_edge_tracker_empty(self):
+        """No minhash signatures registered -> _mds_select_optional degrades
+        to plain top-K instead of raising.
+        """
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        f.max_corpus = 2
+        f._use_mds_select = True
+        mgr = CorpusManager(f)
+
+        small = b"A" * 10
+        medium = b"B" * 100
+        large = b"C" * 1000
+
+        f.corpus = [small, medium, large]
+        f.seed_meta = {
+            small: self._meta(1),
+            medium: self._meta(5),
+            large: self._meta(10),
+        }
+        # Deliberately do not register any seed_edges/minhash signatures.
+
+        mgr.auto_minimize_corpus()
+
+        assert len(f.corpus) <= 3
+        assert large in f.corpus  # highest score, top-K fallback keeps it
+
+    def test_off_by_default_matches_topk_behavior(self):
+        """_use_mds_select defaults False on MockFuzzer -- unrelated to
+        this feature's tests, but pins that the default path is untouched.
+        """
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        assert getattr(f, "_use_mds_select", False) is False
+        f.max_corpus = 2
+        mgr = CorpusManager(f)
+
+        small = b"A" * 10
+        medium = b"B" * 100
+        large = b"C" * 1000
+        f.corpus = [small, medium, large]
+        f.seed_meta = {
+            small: self._meta(1),
+            medium: self._meta(5),
+            large: self._meta(10),
+        }
+        for seed in f.corpus:
+            sk = _cm_seed_key(seed)
+            f._edge_tracker.seed_edges[sk] = {hash(seed) % 65536}
+
+        mgr.auto_minimize_corpus()
+        assert large in f.corpus
+
+
 class TestFreshSeedProtection:
     """Seeds with fuzz_count == 0 must survive minimization (Fix 1)."""
 

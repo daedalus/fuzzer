@@ -1166,6 +1166,7 @@ class Fuzzer:
         fractal_diversity_bonus=1.3,
         lineage=False,
         lineage_backtrack=False,
+        mds_select=False,
         mcts=False,
         alphabeta=False,
         sensitivity=False,
@@ -2050,6 +2051,12 @@ class Fuzzer:
         self._use_lineage_backtrack = bool(lineage_backtrack and lineage)
         self._lineage_backtrack_decay = 0.7
         self._lineage_backtrack_min_fuzz = 8
+        # Weighted local-search Maximum Disjoint Set selection in
+        # auto_minimize_corpus: replaces flat top-K-by-score with a
+        # value-weighted packing over Jaccard-signature space (see
+        # core/mds_local_search.py). Only affects the count-budget path
+        # (max_corpus_bytes uses its own knapsack).
+        self._use_mds_select = mds_select
         # MCTS seed scheduling walks the lineage genealogy, so it is
         # meaningless without the tree; --mcts implies --lineage.
         self._use_mcts = bool(mcts)

@@ -695,6 +695,7 @@ def cmd_fuzz(args):
         elo=getattr(args, "elo", False),
         lineage=getattr(args, "lineage", False),
         lineage_backtrack=getattr(args, "lineage_backtrack", False),
+        mds_select=getattr(args, "mds_select", False),
         secretary=getattr(args, "secretary", False),
         secretary_window=getattr(args, "secretary_window", 500),
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
@@ -1776,6 +1777,15 @@ def cmd_sweep(args):
 # accident of argparse type that silently breaks if gate_bonus ever grows a
 # boolean on/off form.
 #
+# mds_select (--mds-select) is excluded for the same reason as gate_bonus's
+# second point: it is explicitly unvalidated. It swaps
+# auto_minimize_corpus's top-K-by-score selection for a weighted Maximum
+# Disjoint Set local search over Jaccard-signature space
+# (core/mds_local_search.py); the score->radius mapping and the c/max_rounds
+# search bounds are untuned defaults, not benchmarked against the plain
+# top-K path it replaces. --hail-mary means "every plausible strategy", not
+# "every strategy whose selection-quality tradeoff is still a guess".
+#
 # fpl, op_span_reverse and op_span_relocate were missing from the tuple
 # below while every other scheduler (exp3 .. cusum_ucb, c2ucb) and every
 # other operator gate (wfc, weizz_tags, formatfuzzer) was in it -- three
@@ -2193,6 +2203,15 @@ def main() -> int:
         "seeds whose subtree has gained no edges are penalised by depth, "
         "shifting selection back toward shallow seeds with unexplored "
         "siblings (implies --lineage)",
+    )
+    fuzz_parser.add_argument(
+        "--mds-select",
+        action="store_true",
+        help="In auto_minimize_corpus, replace flat top-K-by-score selection with a "
+        "value-weighted Maximum Disjoint Set local search over Jaccard-signature "
+        "space: high-scoring seeds get a smaller exclusion radius (pack densely), "
+        "low-scoring seeds get a larger one (need more clearance to keep a slot). "
+        "Only affects the count-budget path, not --max-corpus-bytes.",
     )
     fuzz_parser.add_argument(
         "--exp3", action="store_true", help="Enable EXP3 adversarial bandit operator scheduling"

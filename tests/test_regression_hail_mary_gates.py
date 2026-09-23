@@ -96,6 +96,14 @@ _EXCLUDED_OPT_IN = frozenset(
         # without --elo it's meaningless, but with --elo all it runs as a
         # proper floor scheduler.
         "canary_scheduler",
+        # Not yet A/B-measured against a real target -- same rationale as
+        # gate_bonus/temperature_control above. Swaps auto_minimize_corpus's
+        # top-K-by-score selection for a weighted Maximum Disjoint Set local
+        # search (core/mds_local_search.py); the radius mapping (score ->
+        # exclusion radius) and c/max_rounds bounds are untuned defaults.
+        # --hail-mary means "every plausible strategy", not "every strategy
+        # whose selection-quality tradeoff is still a guess".
+        "mds_select",
         # Its seed-selection counterpart (see --seed-canary-scheduler help):
         # same deliberately-worst-in-class floor role, same reasoning, one
         # tournament over.
