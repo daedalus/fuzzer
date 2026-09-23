@@ -234,6 +234,12 @@ class TargetDistance:
         self._segments: list[tuple[int, int, int]] = []
         # Address of __sanitizer_cov_trace_pc (trace-pc distance builds)
         self._trace_pc_addr: int | None = None
+        # Address of __sanitizer_cov_trace_pc_guard (trace-pc-guard builds
+        # -- the normal fuzzing build). The shim probes the AFLGo distance
+        # table / K-Scheduler node bitmap from both callbacks, keyed off
+        # whichever one the build actually calls -- see afl_shim.c's
+        # __afl_probe_distance() for the runtime half of this.
+        self._trace_pc_guard_addr: int | None = None
         self._dwarf = None
         # Pre-sorted numpy arrays for vectorized distance lookup
         self._func_starts_np = None
@@ -388,6 +394,8 @@ class TargetDistance:
             )
             if name == "__sanitizer_cov_trace_pc" and st_value > 0:
                 self._trace_pc_addr = st_value
+            if name == "__sanitizer_cov_trace_pc_guard" and st_value > 0:
+                self._trace_pc_guard_addr = st_value
             # STT_FUNC = 2
             if (st_info & 0xF) == 2 and st_value > 0 and st_value >= self._text_start:
                 end = st_value + st_size if st_size > 0 else st_value + 1
@@ -805,19 +813,32 @@ class TargetDistance:
             return None
         return self._bb_value.get(blk.start)
 
+    def _trace_targets(self) -> set[int]:
+        """Addresses of whichever sancov coverage callback(s) this build
+        calls. A build calls exactly one of the two in practice (they're
+        alternative ``-fsanitize-coverage=`` flavors), but checking both is
+        cheap and makes no assumption about which one a given binary used.
+        """
+        return {
+            a for a in (self._trace_pc_addr, self._trace_pc_guard_addr) if a is not None
+        }
+
     def pc_distance_table(self) -> dict[int, float]:
         """PC→distance table for the SHM-tail channel.
 
         Keys are the return addresses of ``call __sanitizer_cov_trace_pc``
-        sites (the exact PCs the shim's ``__sanitizer_cov_trace_pc()``
-        observes), relative to the object base, restricted to blocks with
-        a valued AFLGo distance.  Modern clang does not emit a
-        ``__sancov_pcs`` section for trace-pc, so the call sites are
+        (trace-pc builds) or ``call __sanitizer_cov_trace_pc_guard``
+        (trace-pc-guard builds) sites — the exact PCs the shim's
+        ``__afl_probe_distance()`` observes via ``__builtin_return_address``
+        in either callback — relative to the object base, restricted to
+        blocks with a valued AFLGo distance. Modern clang does not emit a
+        ``__sancov_pcs`` section for either flavor, so the call sites are
         recovered by scanning the text for REL32 calls to the shim's
-        trace_pc symbol.  Empty dict for non-distance builds or when no
-        site maps to a valued block.
+        symbol. Empty dict for non-instrumented builds or when no site maps
+        to a valued block.
         """
-        if not self._bb_value or self._trace_pc_addr is None:
+        targets = self._trace_targets()
+        if not self._bb_value or not targets:
             return {}
         table: dict[int, float] = {}
         base = self._base_addr or 0
@@ -833,7 +854,7 @@ class TargetDistance:
                     continue
                 disp = struct.unpack_from("<i", code, offset + 1)[0]
                 call_target = start + offset + 5 + disp
-                if call_target != self._trace_pc_addr:
+                if call_target not in targets:
                     continue
                 site = start + offset + 5  # return address after the call
                 dist = self._bb_value_of(site)

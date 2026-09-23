@@ -965,10 +965,30 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
  * direct call instructions within the target, bypassing PLT resolution
  * entirely (same pattern as the abort() override below). */
 
+#if __AFL_DISTANCE_MODE
+/* Defined further down, after the distance-table state -- forward-declared
+ * here so the guard callback (which comes first in the file) can reach it.
+ * __afl_probe_distance() must be called with a PC computed via
+ * __builtin_return_address(0) taken directly in the CALLER's own body
+ * (frame 0 there is the instrumented call site) -- never from inside
+ * another function, or the wrong frame gets captured. Same rule
+ * __afl_get_caller_ctx() already documents for __afl_map_edge(). */
+static uint64_t __afl_pc_key(uintptr_t pc);
+static void __afl_probe_distance(uint64_t key);
+#endif
+
 __attribute__((visibility("hidden")))
 void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
     if (!guard || *guard == 0) return;
     __afl_map_edge(*guard);
+#if __AFL_DISTANCE_MODE
+    /* Guard builds get the same AFLGo distance / K-Scheduler node-bitmap
+     * channel as trace-pc builds, keyed off this call site's own return
+     * address -- exactly the address icfg.py's probe_key_node_table() and
+     * TargetDistance.pc_distance_table() recover when they scan for calls
+     * to __sanitizer_cov_trace_pc_guard instead of the bare trace_pc. */
+    __afl_probe_distance(__afl_pc_key((uintptr_t)__builtin_return_address(0)));
+#endif
 }
 
 /* ── SGFuzz state transitions (instrumented sources only) ─────────────
@@ -1088,11 +1108,12 @@ static void __afl_map_dist_shm(void) {
     __afl_dist_table = (struct __afl_dist_entry *)((uint8_t *)p + 4);
 }
 
-/* Hidden visibility: same PLT-interposition rationale as the guard
- * callbacks — the CLI's libasan LD_PRELOAD must not shadow this. */
-__attribute__((visibility("hidden")))
-void __sanitizer_cov_trace_pc(void) {
-    uintptr_t pc = (uintptr_t)__builtin_return_address(0);
+/* PC -> base-relative key, resolving __afl_base lazily on first use (any
+ * caller works to resolve it -- dladdr identifies the mapped object, not
+ * the specific PC within it). Shared by __sanitizer_cov_trace_pc() and
+ * __sanitizer_cov_trace_pc_guard(); matches the forward declaration above
+ * so the guard callback, defined earlier in this file, can call it. */
+static uint64_t __afl_pc_key(uintptr_t pc) {
     if (__afl_base == 0) {
         Dl_info info;
         if (dladdr((void *)pc, &info) && info.dli_fbase)
@@ -1100,11 +1121,16 @@ void __sanitizer_cov_trace_pc(void) {
         else
             __afl_base = 1;  /* dladdr failed — treat the PC as absolute */
     }
-    uint64_t key = (uint64_t)pc - __afl_base;
+    return (uint64_t)pc - __afl_base;
+}
 
-    /* Edge coverage: PC-based (prev_loc ^ cur_loc, same sparse table). */
-    __afl_map_edge((uint32_t)(key >> 1));
-
+/* Distance-table lookup + node-bitmap probe for one already-computed key.
+ * Shared by __sanitizer_cov_trace_pc() (PC-based edge, trace-pc builds) and
+ * __sanitizer_cov_trace_pc_guard() (guard-counter edge, trace-pc-guard
+ * builds) — the AFLGo distance / K-Scheduler node-bitmap channel works
+ * under either coverage flavor as long as icfg.py's probe-key scan looks
+ * for calls to whichever of the two symbols the build actually calls. */
+static void __afl_probe_distance(uint64_t key) {
     if (!__afl_dist_table || !__afl_dist_count) return;
     uint32_t size = *__afl_dist_count;
     if (size == 0) return;
@@ -1123,6 +1149,18 @@ void __sanitizer_cov_trace_pc(void) {
             break;
         }
     }
+}
+
+/* Hidden visibility: same PLT-interposition rationale as the guard
+ * callbacks — the CLI's libasan LD_PRELOAD must not shadow this. */
+__attribute__((visibility("hidden")))
+void __sanitizer_cov_trace_pc(void) {
+    uintptr_t pc = (uintptr_t)__builtin_return_address(0);
+    uint64_t key = __afl_pc_key(pc);
+
+    /* Edge coverage: PC-based (prev_loc ^ cur_loc, same sparse table). */
+    __afl_map_edge((uint32_t)(key >> 1));
+    __afl_probe_distance(key);
 }
 
 #endif /* __AFL_DISTANCE_MODE */

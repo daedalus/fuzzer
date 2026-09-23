@@ -44,6 +44,7 @@ class InterproceduralCFG:
         src: np.ndarray,
         dst: np.ndarray,
         cfgs: dict[str, FunctionCFG],
+        is_call: np.ndarray | None = None,
     ):
         self.node_addrs = node_addrs
         self.node_funcs = node_funcs
@@ -51,6 +52,39 @@ class InterproceduralCFG:
         self.src = src
         self.dst = dst
         self._cfgs = cfgs
+        # Parallel bool array, same shape as src/dst: True where the edge is
+        # a caller->callee call-graph edge (blk.callees) rather than a real
+        # intraprocedural branch/fallthrough successor (blk.successors).
+        # Defaults to all-False (every edge treated as a branch edge) for
+        # callers -- mostly tests -- that build a purely intraprocedural
+        # graph and never populated this distinction.
+        self.is_call = (
+            np.zeros(len(src), dtype=bool) if is_call is None else is_call
+        )
+
+    @property
+    def branch_src(self) -> np.ndarray:
+        """Source nodes of real conditional-branch/fallthrough edges only.
+
+        Use this (with ``branch_dst``) instead of ``src``/``dst`` for
+        questions about program branching -- e.g. "did the corpus split
+        this fork both ways?". ``src``/``dst`` mixes those edges with
+        caller->callee call-graph edges (see ``is_call``), so an
+        out-degree check against them will count an ordinary function
+        call as if it were a second branch target -- concretely, a call
+        to a helper that's never itself flagged "visited" (it's the
+        probe, not a probed site, e.g. ``__sanitizer_cov_trace_pc``)
+        looks exactly like an unreached branch sibling. ``bottleneck_edges``
+        and ``centrality_scores`` deliberately keep using the full
+        ``src``/``dst`` -- interprocedural reachability and whole-program
+        centrality are supposed to route through calls.
+        """
+        return self.src[~self.is_call]
+
+    @property
+    def branch_dst(self) -> np.ndarray:
+        """See ``branch_src``."""
+        return self.dst[~self.is_call]
 
     @property
     def n_nodes(self) -> int:
@@ -142,28 +176,37 @@ def build_interprocedural_cfg(td) -> InterproceduralCFG | None:
     idx = {a: i for i, a in enumerate(node_addrs)}
     entry_of = {name: idx[min(cfg.blocks)] for name, cfg in cfgs.items()}
 
-    edge_set: set[tuple[int, int]] = set()
+    # Kept separate, not one edge_set: a call edge and a branch edge can
+    # land on the same (u, v) pair (rare, but a tail-position call whose
+    # fallthrough block starts exactly at the callee is possible in theory),
+    # and a real branch must win that tie -- see InterproceduralCFG.is_call.
+    branch_edges: set[tuple[int, int]] = set()
+    call_edges: set[tuple[int, int]] = set()
     for cfg in cfgs.values():
         for blk in cfg.blocks.values():
             u = idx[blk.start]
             for succ in blk.successors:
                 v = idx.get(succ)
                 if v is not None:
-                    edge_set.add((u, v))
+                    branch_edges.add((u, v))
             for callee in blk.callees:
                 v = entry_of.get(callee)
                 # caller→callee only; a resolved callee outside the decoded
                 # set (e.g. libc) has no entry node to point at.
                 if v is not None and v != u:
-                    edge_set.add((u, v))
+                    call_edges.add((u, v))
 
-    src = np.array(sorted(edge_set), dtype=np.int64)[:, 0]
-    dst = np.array(sorted(edge_set), dtype=np.int64)[:, 1]
-    if src.size == 0:
+    ordered = sorted(branch_edges | call_edges)
+    if ordered:
+        src = np.array([e[0] for e in ordered], dtype=np.int64)
+        dst = np.array([e[1] for e in ordered], dtype=np.int64)
+        is_call = np.array([e not in branch_edges for e in ordered], dtype=bool)
+    else:
         src = np.zeros(0, dtype=np.int64)
         dst = np.zeros(0, dtype=np.int64)
+        is_call = np.zeros(0, dtype=bool)
     node_funcs = [func_of[a] for a in node_addrs]
-    return InterproceduralCFG(node_addrs, node_funcs, src, dst, cfgs)
+    return InterproceduralCFG(node_addrs, node_funcs, src, dst, cfgs, is_call=is_call)
 
 
 def probe_key_node_table(td, icfg: InterproceduralCFG) -> dict[int, int]:
@@ -171,9 +214,14 @@ def probe_key_node_table(td, icfg: InterproceduralCFG) -> dict[int, int]:
 
     Same scan as ``pc_distance_table`` — keys must match what the shim
     computes byte-for-byte — but the value is the node index of the block
-    containing the call site instead of an AFLGo distance.
+    containing the call site instead of an AFLGo distance. Matches calls to
+    either ``__sanitizer_cov_trace_pc`` or ``__sanitizer_cov_trace_pc_guard``
+    (see ``TargetDistance._trace_targets``): the shim probes the distance
+    table / node bitmap from both callbacks, so this works whichever
+    ``-fsanitize-coverage=`` flavor the target was built with.
     """
-    if td._trace_pc_addr is None:
+    targets = td._trace_targets()
+    if not targets:
         return {}
     base = td._base_addr or 0
     table: dict[int, int] = {}
@@ -188,7 +236,7 @@ def probe_key_node_table(td, icfg: InterproceduralCFG) -> dict[int, int]:
             if offset + 5 > len(code):
                 continue
             disp = struct.unpack_from("<i", code, offset + 1)[0]
-            if start + offset + 5 + disp != td._trace_pc_addr:
+            if start + offset + 5 + disp not in targets:
                 continue
             site = start + offset + 5  # return address after the call
             cfg = icfg._cfgs.get(name)
