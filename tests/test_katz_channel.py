@@ -138,7 +138,7 @@ class TestCoverageContract:
 
     def test_current_contract_detects_legacy_k2(self):
         c = current_coverage_contract(self._stub())
-        assert c == {"ngram_k": 2, "node_channel": False}
+        assert c == {"ngram_k": 2, "node_channel": False, "edge_ids": 1}
 
     def test_missing_saved_section_resumes_freely(self):
         check_coverage_contract(None, {"ngram_k": 3, "node_channel": True})
@@ -158,6 +158,24 @@ class TestCoverageContract:
             check_coverage_contract(
                 {"ngram_k": 3, "node_channel": False}, {"ngram_k": 3, "node_channel": True}
             )
+
+    def test_edge_id_scheme_mismatch_refuses(self):
+        with pytest.raises(RuntimeError, match="edge_ids"):
+            check_coverage_contract(
+                {"ngram_k": 2, "node_channel": False, "edge_ids": 1},
+                {"ngram_k": 2, "node_channel": False, "edge_ids": 2},
+            )
+
+    def test_contract_without_edge_ids_is_scheme_1(self):
+        # Written before the key existed, i.e. by a sequential-guard shim.
+        saved = {"ngram_k": 2, "node_channel": False}
+        with pytest.raises(RuntimeError, match="edge_ids"):
+            check_coverage_contract(saved, {**saved, "edge_ids": 2})
+        check_coverage_contract(saved, {**saved, "edge_ids": 1})
+
+    def test_unreadable_target_does_not_refuse(self):
+        saved = {"ngram_k": 2, "node_channel": False, "edge_ids": 2}
+        check_coverage_contract(saved, {**saved, "edge_ids": None})
 
     def test_horizon_graph_type_still_importable_for_wiring(self):
         # Guards against accidental circular-import breakage of the seam

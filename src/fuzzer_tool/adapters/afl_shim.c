@@ -308,6 +308,18 @@ const uint32_t __AFL_CAT(__afl_ctx_bits_, __AFL_CTX_BITS) = __AFL_CTX_BITS;
 __attribute__((visibility("default"), used))
 const uint32_t __afl_ctx_relative_capable = 1;
 
+/* Edge-id scheme marker. Present means edge ids come from the hashed
+ * location scheme (guard indices and hand-written __afl_map_edge ids mixed
+ * through __afl_guard_mix, zero remapped instead of `|= 1`); absent means
+ * the older sequential-guard / `|= 1` scheme or no shim at all. The two
+ * schemes assign different ids to the same edge, so seed_edges, owner
+ * counts and virgin bits persisted under one are meaningless under the
+ * other -- corpus_manager.check_coverage_contract refuses that resume.
+ * Presence-only, like __afl_ctx_relative_capable. See
+ * elf.detect_edge_id_scheme(). */
+__attribute__((visibility("default"), used))
+const uint32_t __afl_edge_ids_v2 = 2;
+
 /* ── n-gram history depth ─────────────────────────────────────────────
  *
  * k = blocks encoded into one edge id: the current block plus its k−1

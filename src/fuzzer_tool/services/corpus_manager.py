@@ -226,13 +226,14 @@ def _returncode_to_signal(returncode: int) -> tuple[str | None, int | None]:
 
 def current_coverage_contract(f) -> dict:
     """The coverage semantics this session runs under. Resume states are
-    only valid when both halves match (edge ids change with k; node-channel
-    state is meaningless without the bitmap)."""
-    from fuzzer_tool.core.elf import detect_ngram_k
+    only valid when every part matches (edge ids change with k and with the
+    shim's id scheme; node-channel state is meaningless without the bitmap)."""
+    from fuzzer_tool.core.elf import detect_edge_id_scheme, detect_ngram_k
 
     return {
         "ngram_k": detect_ngram_k(f.target),
         "node_channel": getattr(f, "_katz_channel", None) is not None,
+        "edge_ids": detect_edge_id_scheme(f.target),
     }
 
 
@@ -248,6 +249,20 @@ def check_coverage_contract(saved: dict | None, current: dict) -> None:
                 f"state={saved.get(key)!r} vs current={current.get(key)!r} — "
                 "start a fresh corpus dir or rebuild the target to match the saved run"
             )
+    # edge_ids joined the contract after the scheme change, so a contract
+    # without it was written by a scheme-1 run (or by a scheme-2 build in the
+    # short window before this key existed -- refusing that is the safe
+    # error). An unreadable target reports None: unknown, not a mismatch.
+    cur_ids = current.get("edge_ids")
+    saved_ids = saved.get("edge_ids", 1)
+    if cur_ids is not None and saved_ids is not None and saved_ids != cur_ids:
+        raise RuntimeError(
+            f"coverage contract mismatch on 'edge_ids': state={saved_ids!r} vs "
+            f"current={cur_ids!r} — the target's shim assigns different edge ids "
+            "than the one that wrote this state; start a fresh corpus dir (the "
+            "seed files themselves are fine to re-import) or rebuild the target "
+            "with the matching shim"
+        )
 
 
 def seed_key(data: bytes) -> str:

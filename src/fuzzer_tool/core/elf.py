@@ -1930,6 +1930,32 @@ def detect_ctx_relative_capable(target: str) -> bool | None:
     return "__afl_ctx_relative_capable" in names
 
 
+def detect_edge_id_scheme(target: str) -> int | None:
+    """Say which edge-id function *target*'s shim uses.
+
+    The shim stopped merging distinct edges in ad4e7869 (hashed guard and
+    manual locations, zero remapped instead of ``edge_id |= 1``); every edge
+    got a new id. State persisted under one scheme cannot be resumed under
+    the other, and nothing short of this marker distinguishes the two before
+    the target runs.
+
+    Returns:
+        2 when ``__afl_edge_ids_v2`` is present; 1 when the symbol table was
+        read and the marker is absent (an older shim, or no shim -- ptrace
+        targets hash addresses and never had either scheme, so they stay at
+        1 on both sides of a resume); None when no names could be read,
+        which the contract check treats as "unknown, do not compare".
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("edge-id scheme detection failed for %s: %s", target, e)
+        return None
+    if not names:
+        return None
+    return 2 if "__afl_edge_ids_v2" in names else 1
+
+
 #: Segment layout the Python side is built for. Must equal
 #: __AFL_SHM_LAYOUT in adapters/afl_shim.c.
 SHM_LAYOUT_CURRENT = 3

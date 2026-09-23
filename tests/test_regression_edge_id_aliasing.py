@@ -150,3 +150,11 @@ def test_manual_edge_survives_distance_mode_opt_out(tmp_path):
     assert r.returncode == 0, r.stderr[-1500:]
     ia, ib = _ids(str(exe), 4), _ids(str(exe), 5)
     assert len(ia) == len(ib) == 2 and ia != ib, (sorted(ia), sorted(ib))
+
+
+def test_scheme_marker_is_exported(harness):
+    """elf.detect_edge_id_scheme must see the marker in a current build."""
+    from fuzzer_tool.core.elf import detect_edge_id_scheme
+
+    assert detect_edge_id_scheme(harness) == 2
+    assert detect_edge_id_scheme("/bin/true") == 1
