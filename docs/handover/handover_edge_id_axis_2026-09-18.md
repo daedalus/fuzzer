@@ -7,7 +7,10 @@ analysis helper; the hot path is untouched) added with F14/F15 below. Two findin
 below (F1, F2) are defects with reproductions and no fix yet; P1-4 (union
 inflation at small maps) is characterized empirically -- CTX-derived id-value
 shift keyed on the advertised map size, shim storage exonerated, exact ctx line
-unlocated (see P1-4). Every number here was measured at `c26f0a1`; the patch is
+unlocated (see P1-4). **F16 (2026-09-23) retracts F3 and part of F4 and
+re-measures F7-F10: the shim's id function was merging 58% of fuzzgoat's
+edges until the hashed-location shim change. Read F16 before quoting any number above it.** Every
+other number here was measured at `c26f0a1`; the patch is
 rebased onto `a45a63a`, whose two intervening commits add operator schedulers
 and touch neither the shim, the SHM path, nor any file cited below.
 
@@ -645,6 +648,73 @@ controls (Hard Rule 46) and the per-run spectrum check. Nothing in F14/F15
 changes a scheduler design: the position axis is F12's fold with a named,
 measurable cause instead of a hand-wave.
 
+### F16 (defect, fixed by hashing guard and wrapper locations). The id function merged most edges; F3-F10 were measured through it
+
+Measured 2026-09-23 on fuzzgoat (clang 18, trace-pc-guard, the 250-input
+`corpus_fuzzgoat.py` corpus) against `tools/ground_truth_tracer.c`, which logs
+the real (prev location, cur location, call site) of every coverage event and
+computes no ids. Reproduce with `edge_diagnostic.py matrix --ground-truth`:
+
+    context-free build, shim before the fix    344 real edges -> 145 ids  (57.8% merged)
+    context-free build, shim after             344 real edges -> 344 ids
+    context build, after                       408 (edge, call site) -> 408 ids
+
+Two causes, both in the "What the x axis actually is" formula above:
+`edge_id |= 1` erased bit 0 of `cur_loc` on every edge (80 of the 344 alone:
+successors 2k and 2k+1 of one block, typically the two sides of one branch),
+and sequential guards pinned every id below ~2N (fuzzgoat: 256 odd values for
+344 edges, 8 of them on id 95). Consequence 3 above understated it: `|= 1`
+merged edges, not just context tags. Section [8] could not see any of this --
+every id sat at its home slot with zero probing, because the merging happens
+before the table.
+
+**What this does to the findings above.** Same corpus, same fuzzgoat object,
+context build, old shim vs new shim (`--transpose --lll`):
+
+| | before | after |
+|---|---|---|
+| distinct ids (union) | 188 | 408 |
+| effective edges, 2^H | 62 | 110 |
+| lag-1 autocorr along id, z | +0.2225, **+3.63** | -0.0503, -1.22 |
+| binary effective rank | 2.6 | 3.9 |
+| GF(2) rank | 85 | 89 |
+| exact duplicate edge profiles | 26 of 188 | **178 of 408** |
+| LLL relations: support / max coeff | 16 / 1 | **5 / 1** |
+| [7] same-family duplicates ("unused ctx tags") | 5 | **0** |
+
+* **F3 is retracted.** The block structure on the id axis was the structure of
+  the aliasing: all ~280 guard edges sat in families 0 and 1 (`id >> 8`), so the
+  "family" ICC contrasted parser code against the wrapper's hand-written ids.
+  With hashed locations lag-1 is indistinguishable from the null. The "do not
+  re-propose" list below stands, now for a stronger reason.
+* **F4's saturation reading is retracted.** "Largest family 102 of 128 tags"
+  was family 0 -- about 93 distinct context-free edges, not one edge in 102
+  contexts. Context now costs 408/344 = 1.19x ids on this corpus. P3-1 needs
+  re-measuring before anyone sizes `__AFL_CTX_BITS` from these numbers.
+* **F7-F9 hold in shape, not in number.** GF(2) rank barely moves (85 -> 89)
+  while ids double: real coverage on this corpus is low-dimensional, and the
+  merges had been hiding that as fewer columns rather than more dependence.
+* **F10's flow-conservation reading gets stronger, not weaker.** Aliasing summed
+  unrelated edges into one column, which is what spread the old relations; with
+  that gone LLL returns support-5 unit relations and 178 of 408 edges duplicate
+  another's profile exactly (straight-line chains). The "79 edges in one family
+  = unused context tags" split does not survive: after the fix no within-family
+  duplicates remain. P1-2 is still the gate.
+* **F1** is fixed (base-relative context under `FUZZER_KEEP_ASLR=1`; Jaccard
+  1.000 on the three richest inputs). **F2**'s id-set divergence no longer
+  reproduces (`first_exec_matches` true on the same three inputs, context and
+  context-free builds, already on the old shim, before the id change); its
+  path-hash half was not rechecked. See P0-1.
+
+Absolute numbers here differ from the c26f0a1 ones (445 ids then, 188 now on
+the old shim) because the corpus and wrapper moved since; the before/after
+columns are the comparable pair.
+
+Follow-up: a context-free family is now the hashed location's bits above
+`ctx_bits`, so edges sharing them count as one family (323 families for 344
+edges). Section [1] says so; exact counts need a `__AFL_CTX_SENSITIVE=0` build
+or `--ground-truth`.
+
 ## Not defined on the id axis -- do not re-propose
 
 Linear regression or slope of count against id; autocorrelation or FFT along
@@ -800,6 +870,10 @@ harness already in hand, P2 shipped-but-unwired, P3 design work gated on a
 question answered on paper first, E an evaluation run.
 
 ### P0-1. Diagnose F2 (first-execution divergence)
+
+**Status 2026-09-23:** the id-set half does not reproduce on the old shim either (see
+F16); the path-hash half was not rechecked. Close after one run of the fire
+log below confirms the path hash too, or re-open with the input that diverges.
 
 Gates every first-execution number, and the first execution is what
 calibrates seed baselines. The path hash proves the fire *sequence* differs;

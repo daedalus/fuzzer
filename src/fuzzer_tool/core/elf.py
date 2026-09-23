@@ -1933,7 +1933,7 @@ def detect_ctx_relative_capable(target: str) -> bool | None:
 def detect_edge_id_scheme(target: str) -> int | None:
     """Say which edge-id function *target*'s shim uses.
 
-    The shim stopped merging distinct edges in ad4e7869 (hashed guard and
+    The shim stopped merging distinct edges with the hashed-location scheme (hashed guard and
     manual locations, zero remapped instead of ``edge_id |= 1``); every edge
     got a new id. State persisted under one scheme cannot be resumed under
     the other, and nothing short of this marker distinguishes the two before
