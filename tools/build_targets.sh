@@ -882,13 +882,25 @@ compile_sqlite_objects() {
 # the AFL shim (which is injected via `-include $SHIM` into the wrapper TU
 # only), compile fuzzgoat.c separately without the shim and link the object.
 compile_fuzzgoat_object() {
-    local flags="$1" cc="${2:-$DEFAULT_CC}" extra_cflags="${3:-}"
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
     # return 0, not 1: every other optional-vendor guard in this script
     # does the same, and under `set -e` a non-zero return from here aborts
     # the whole build.  Callers gate on $HAS_FUZZGOAT.
     [ -f "$VENDOR/fuzzgoat/fuzzgoat.c" ] || return 0
-    $cc $flags -O2 -g $extra_cflags -I"$VENDOR/fuzzgoat" \
-        -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o /tmp/fuzzgoat.o 2>>"$BUILD_LOG"
+    # The object is the only thing that instruments json_parse_ex; the
+    # wrapper TU carries just the __afl_map_edge calls.  Mirror the grep
+    # objects: add cov_flag here rather than trusting callers to pass it --
+    # the default ASAN / No-ASAN passes invoke with empty extra_cflags and
+    # the .so was silently uninstrumented (88 trace refs, 0 in json_parse_ex)
+    # while its PIE sibling had 198.  Per-suffix path so one pass's object
+    # cannot clobber another's before its link.
+    local cov_flag="-fsanitize-coverage=trace-pc-guard"
+    case "$cc" in
+        *clang*) cov_flag="-fsanitize-coverage=trace-pc-guard" ;;
+        *) cov_flag="" ;;   # gcc has no trace-pc-guard; see _pick_cc
+    esac
+    $cc $flags $cov_flag -O2 -g $extra_cflags -I"$VENDOR/fuzzgoat" \
+        -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o "/tmp/fuzzgoat${suffix}.o" 2>>"$BUILD_LOG"
 }
 
 # ── Build a target ────────────────────────────────────────────────
@@ -1083,8 +1095,8 @@ build_simple_targets() {
         warn "grep_read${out_suffix}: vendor/grep not found, skipping (run tools/vendor_grep.sh)"
     fi
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
-        compile_fuzzgoat_object "$flags" "$cc" "$extra_cflags"
-        build_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "$extra_cflags -I$VENDOR/fuzzgoat"
+        compile_fuzzgoat_object "$1" "$flags" "$cc" "$extra_cflags"
+        build_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}" "/tmp/fuzzgoat${1}.o -lm" "$flags" "$cc" "$extra_cflags -I$VENDOR/fuzzgoat"
     fi
 }
 
@@ -1123,8 +1135,8 @@ build_sanitizer_targets() {
     build_target "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target${suffix}" "" "$common" "clang"
     build_target "${TARGETS_SRC:-$TARGETS}/grep_read.c" "$TARGETS/grep_read${suffix}" "" "$common" "clang"
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
-        compile_fuzzgoat_object "$common" "clang" "-I$VENDOR/fuzzgoat"
-        build_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${suffix}" "/tmp/fuzzgoat.o -lm" "$common" "clang" "-I$VENDOR/fuzzgoat"
+        compile_fuzzgoat_object "$1" "$common" "clang" "-I$VENDOR/fuzzgoat"
+        build_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${suffix}" "/tmp/fuzzgoat${1}.o -lm" "$common" "clang" "-I$VENDOR/fuzzgoat"
     fi
     # Targets linking uninstrumented system libraries (libpng/libz/libjpeg)
     # are intentionally omitted for MSAN: without an instrumented build of
@@ -1439,8 +1451,8 @@ build_simple_so_targets() {
         warn "grep_read${out_suffix}.so: vendor/grep not found, skipping (run tools/vendor_grep.sh)"
     fi
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
-        compile_fuzzgoat_object "$flags" "$cc" "$extra_cflags"
-        build_so_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat.o -lm" "$flags" "$cc" "$extra_cflags -I$VENDOR/fuzzgoat"
+        compile_fuzzgoat_object "$1" "$flags" "$cc" "$extra_cflags"
+        build_so_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat${1}.o -lm" "$flags" "$cc" "$extra_cflags -I$VENDOR/fuzzgoat"
     fi
 }
 
@@ -1992,7 +2004,7 @@ build_ngram_so_targets() {
 
         # fuzzgoat_read
         if [ "$HAS_FUZZGOAT" -eq 1 ]; then
-            compile_fuzzgoat_object "" "$DEFAULT_CC" ""
+            compile_fuzzgoat_object "" "" "$DEFAULT_CC" ""
             build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read_ng${k}.so" "/tmp/fuzzgoat.o -lm" "" "$DEFAULT_CC" "-I$VENDOR/fuzzgoat" "$k"
         fi
 

@@ -1222,6 +1222,21 @@ For targets with source already compiled by the build script (fgrep, tailslayer)
 the sancov flag is applied directly to their compilation. fgrep is vendored from
 [daedalus/fgrep](https://github.com/daedalus/fgrep) into `vendor/fgrep/`.
 
+**fuzzgoat's parser object is the only thing that instruments `json_parse_ex`.**
+`fuzzgoat_read.c` is a wrapper TU whose own calls are hand-placed
+`__afl_map_edge()` (a fixed ceiling around `0x1000`); the parser is compiled
+separately by `compile_fuzzgoat_object()` into `/tmp/fuzzgoat.o`. That object
+must add `-fsanitize-coverage=trace-pc-guard` itself, mirroring
+`compile_grep_objects()` — if it relies on callers passing the flag, the default
+ASAN / No-ASAN passes (empty `extra_cflags`) produce an uninstrumented object
+while the `--clang-scov` pass does not, so builds differ run to run. Measured
+regression: an in-process campaign against `fuzzgoat_read_noasan.so` never
+escaped `shm: 5` (the wrapper's manual-edge ceiling) while the PIE collector
+saw 179-196 ids on the same corpus; `nm` showed the `.so` with 88
+`sanitizer_cov_trace_pc` refs and *zero* inside `json_parse_ex` vs 198 in the
+PIE. The object is also keyed per suffix (`/tmp/fuzzgoat${suffix}.o`) so one
+pass cannot clobber another variant's object before its link.
+
 ### Intel PT Hardware Trace Coverage (`--intel-pt`)
 
 Coverage for binaries that cannot be rebuilt, with no instrumentation in the
