@@ -123,7 +123,9 @@ own docstring, in the same commit. Don't leave the three disagreeing again.
 ### 9 — Developer Tooling (outside the runtime entirely)
 `tools/*.py`, `tools/*.sh` — benchmarks (`bench_*.py`), corpus/target
 generation (`corpus_fuzzgoat.py`, `gen_*`, `vendor_*.sh`), diagnostics
-(`edge_diagnostic.py`, `edge_matrix_analysis.py`, `phantom_edge_probe.py`).
+(`edge_diagnostic.py` — consolidated matrix/phantom/stored-ids/hail-mary
+probes formerly split across `edge_matrix_analysis.py` and
+`phantom_edge_probe.py`).
 Never imported by `src/fuzzer_tool/`; runs against a checkout, not inside a
 campaign. New one-off scripts belong here, not in `core/`, even if they
 import fuzzer internals for analysis.

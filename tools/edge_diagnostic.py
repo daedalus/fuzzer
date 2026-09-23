@@ -59,8 +59,10 @@ import glob
 import logging
 import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import tracemalloc
 
@@ -2036,6 +2038,87 @@ def _matrix_report(result) -> None:
 # ── Entry point ───────────────────────────────────────────────────────
 
 
+STATESTORE_JSON_FILES = frozenset(
+    {
+        "markov.json",
+        "mi.json",
+        "elo.json",
+        "ga.json",
+        "qea.json",
+        "state.json",
+        "sensitivity.json",
+        "crash_mi.json",
+        "length_tracker.json",
+        "seed_quality.json",
+        "edge_tracker.json",
+    }
+)
+
+
+def _so_sibling(target: Path) -> Path | None:
+    """Find a dlopen-able sibling of a PIE target for the hail-mary campaign.
+
+    Ordered most-to-least usable: the coverage-only .so variants first
+    (_noasan/_nosan, a plain .so), then _asan.so last.  An _asan.so can
+    double-load libasan in-process (preload + dlopen) and trip an ASAN CHECK
+    intermittently; the coverage-only variants avoid it and the campaign only
+    needs coverage growth, not sanitizer detection.
+    """
+    stem = str(target)
+    candidates = (
+        [f"{stem}_noasan.so", f"{stem}_nosan.so", f"{stem}.so", f"{stem}_asan.so"]
+        if Path(stem).suffix not in (".so", ".dylib", ".dll")
+        else []
+    )
+    for c in candidates:
+        p = Path(c)
+        if p.is_file():
+            return p
+    return None
+
+
+def _hail_mary_grow(target: Path, corpus: Path, iters: int, inprocess_func: str) -> Path:
+    """Run the fuzzer CLI in hail-mary mode on a copy of a corpus.
+
+    The fuzzer mutates and grows the corpus in place; the original is left
+    untouched per the corpus rules. Returns the grown copy so the matrix
+    analysis can be run over the edges the fuzzer actually discovered.
+    """
+    grown = Path(tempfile.mkdtemp(prefix="edge_diag_hm_")) / "corpus"
+    grown.mkdir()
+    for p in corpus.rglob("*"):
+        if p.is_file():
+            shutil.copy2(p, grown / p.name)
+    proc = "fuzzer-tool"
+    cmd = [
+        proc,
+        "fuzz",
+        str(target),
+        "-d",
+        str(grown),
+        "-n",
+        str(iters or 1),
+        "--hail-mary",
+        "--inprocess",
+        "--inprocess-func",
+        inprocess_func,
+        "-o",
+        str(grown.parent / "crashes"),
+    ]
+    print(f"[*] hail-mary campaign: {' '.join(cmd)}")
+    result = subprocess.run(cmd, cwd=os.path.expanduser("~"), capture_output=True, text=True)
+    if result.returncode != 0:
+        print(result.stdout[-2000:])
+        print(result.stderr[-2000:])
+        raise SystemExit(f"hail-mary campaign failed with rc={result.returncode}")
+    for p in grown.glob("*.json"):
+        if p.name in STATESTORE_JSON_FILES:
+            p.unlink()
+    n = sum(1 for p in grown.rglob("*") if p.is_file())
+    print(f"[*] hail-mary corpus now has {n} inputs")
+    return grown
+
+
 def _matrix_main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
@@ -2089,15 +2172,61 @@ def _matrix_main(argv: list[str] | None = None) -> int:
         help="run section [8]: the (edge_pos, edge_id, count) placement matrix",
     )
     ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument(
+        "--hail-mary",
+        action="store_true",
+        help="before collecting, run the fuzzer CLI in hail-mary mode against a "
+        "copy of --corpus for --iters executions and analyze the grown corpus",
+    )
+    ap.add_argument(
+        "--hm-target",
+        type=Path,
+        help="target for the hail-mary campaign. Must be a .so loadable by the "
+        "fuzzer's in-process mode (hail-mary force-enables it); for a PIE build "
+        "pass its _asan.so sibling. Defaults to --target when --target ends in "
+        ".so",
+    )
+    ap.add_argument(
+        "--hm-inprocess-func",
+        default="fuzz_shm_run",
+        help="symbol the campaign's in-process mode calls (default fuzz_shm_run)",
+    )
+    ap.add_argument(
+        "--iters",
+        type=int,
+        default=0,
+        help="executions for the hail-mary fuzzer campaign (0 = unlimited; "
+        "avoid --continue-until-crash, keep it bounded)",
+    )
     args = ap.parse_args(argv)
 
     if args.load is None and (args.target is None or args.corpus is None):
         ap.error("either --load, or both --target and --corpus")
 
+    if args.hail_mary and args.load is not None:
+        ap.error("--hail-mary grows a corpus; it is incompatible with --load")
+
+    if args.hail_mary and args.hm_target is None and str(args.target).endswith(".so") is False:
+        sibling = _so_sibling(args.target)
+        if sibling is not None:
+            args.hm_target = sibling
+        else:
+            ap.error(
+                "--hail-mary needs a .so campaign target: pass --hm-target "
+                "fuzzgoat_read_nosan.so (hail-mary force-enables in-process mode, "
+                "which cannot dlopen a PIE executable, and an ASAN .so double-loads "
+                "libasan)"
+            )
+
     if args.load is not None:
         runs_all = load_runs(args.load)
         stability = None
     else:
+        if args.hail_mary:
+            hm_target = args.hm_target or args.target
+            args.corpus = _hail_mary_grow(
+                hm_target, args.corpus, args.iters, args.hm_inprocess_func
+            )
         if not args.keep_aslr:
             disable_aslr()
         inputs = sorted(p for p in args.corpus.rglob("*") if p.is_file())
