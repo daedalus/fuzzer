@@ -920,6 +920,47 @@ class StatsReporter:
         parts = ", ".join(f"{c.name}(q={c.adjusted:.3f})" for c in rejected)
         return f" | disp-corrected: {parts}"
 
+    def _print_stats_seed_energy_gini_str(self, f) -> str:
+        """Gini coefficient of ``fuzz_count`` across the live corpus.
+
+        A single, scale-free readout of how concentrated the campaign's
+        execution budget is across seeds -- complementary to the per-seed
+        ``select_count > 100`` diminishing-returns penalty already applied
+        in ``core/schedules.py``'s honggfuzz factors, which softens one
+        seed's energy but never reports how skewed the corpus as a whole
+        has become. See core/gini.py. Needs at least 2 seeds to be
+        meaningful; silent below that (startup, tiny corpora).
+        """
+        seed_meta = getattr(f, "seed_meta", None)
+        if not seed_meta or len(seed_meta) < 2:
+            return ""
+        from fuzzer_tool.core.gini import gini as _gini
+
+        g = _gini(m.get("fuzz_count", 0) for m in seed_meta.values())
+        if g is None:
+            return ""
+        return f" | seed-gini: {g:.2f}"
+
+    def _print_stats_op_gini_str(self, f) -> str:
+        """Gini coefficient of per-operator selection attempts.
+
+        Detects scheduler mode-collapse onto one mutation operator --
+        complementary to the Elo/Thompson-sampling operator arenas (which
+        report *which* operator is favored) rather than *how concentrated*
+        selection has become across the whole operator pool. See
+        core/gini.py. Needs at least 2 operators with a recorded attempt to
+        be meaningful.
+        """
+        attempts = getattr(f, "_op_attempts", None)
+        if not attempts or len(attempts) < 2:
+            return ""
+        from fuzzer_tool.core.gini import gini as _gini
+
+        g = _gini(attempts.values())
+        if g is None:
+            return ""
+        return f" | op-gini: {g:.2f}"
+
     def _print_stats_continuum_str(self, f) -> str:
         """Format the steady continuum diagnostics, when the field exists."""
         field = getattr(f, "_continuum", None)
@@ -1113,6 +1154,8 @@ class StatsReporter:
             + self._print_stats_dispersion_corrections_str(f)
             + self._print_stats_continuum_str(f)
             + self._print_stats_kuramoto_sync_str(f)
+            + self._print_stats_seed_energy_gini_str(f)
+            + self._print_stats_op_gini_str(f)
         )
 
         density_str = self._print_stats_density_str(f)
@@ -1139,10 +1182,11 @@ class StatsReporter:
             else ""
         )
 
-        ent_str = simp_str = ""
+        ent_str = simp_str = edge_gini_str = ""
         if f._edge_tracker._global_edge_hits:
             ent_str = f" | ent: {f._edge_tracker.shannon_entropy_global():.2f}"
             simp_str = f" | simp: {f._edge_tracker.simpson_diversity_global():.2f}"
+            edge_gini_str = f" | edge-gini: {f._edge_tracker.gini_edge_global():.2f}"
 
         # Cumulative Shannon entropy of the on-disk corpus's byte content
         # (distinct from ent_str above, which is entropy over *edge-hit*
@@ -1382,7 +1426,8 @@ class StatsReporter:
             f"{bayes_str}{misc_str}"
             f"{poisson_str}"
             f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
-            f"{ent_str}{simp_str}{byte_ent_str}{rate_str}{fmt_str}{perf_str}{pt_str}{lbr_str}"
+            f"{ent_str}{simp_str}{edge_gini_str}{byte_ent_str}"
+            f"{rate_str}{fmt_str}{perf_str}{pt_str}{lbr_str}"
             f"{hf_str}{ops_str}"
         )
         fluc_str = ""

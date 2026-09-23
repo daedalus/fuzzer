@@ -76,6 +76,7 @@ logging.disable(logging.INFO)
 from fuzzer_tool.adapters import shm as shmmod  # noqa: E402
 from fuzzer_tool.adapters.process import disable_aslr  # noqa: E402
 from fuzzer_tool.adapters.shm import ShmCoverage  # noqa: E402
+from fuzzer_tool.core.gini import gini as _gini  # noqa: E402
 from fuzzer_tool.services.fuzzer import Fuzzer  # noqa: E402
 
 CTX_TARGET = "/home/dclavijo/fuzzing/builds/fuzzgoat_read"
@@ -1341,9 +1342,11 @@ def y_marginal(total: np.ndarray):
     p = total / total.sum()
     entropy = float(-(p * np.log2(p)).sum())
     desc = np.sort(total)[::-1]
-    asc = desc[::-1]
     n = len(total)
-    gini = float(1.0 - 2.0 * np.sum(np.cumsum(asc)) / (n * asc.sum()) + 1.0 / n)
+    # Shared with the live per-tick Gini readouts (seed energy, operator
+    # selection, edge hits) and the crash-cluster-size Gini in report.py --
+    # see core/gini.py for why this moved out of a local copy.
+    gini = _gini(total.tolist())
     rank = np.arange(1, n + 1, dtype=float)
     slope, intercept = np.polyfit(np.log(rank), np.log(desc), 1)
     resid = np.log(desc) - (slope * np.log(rank) + intercept)

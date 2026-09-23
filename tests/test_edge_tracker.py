@@ -165,6 +165,29 @@ class TestEdgeTrackerCore:
         # 5 → class 4, 3 → class 3 (count_class bucketization)
         assert et._global_edge_hits[10] == 7  # 4+3
 
+    def test_gini_edge_global_empty(self):
+        et = EdgeTracker(map_size=256)
+        assert et.gini_edge_global() == 0.0
+
+    def test_gini_edge_global_even(self):
+        et = EdgeTracker(map_size=256)
+        et._global_edge_hits = {1: 10, 2: 10, 3: 10}
+        assert et.gini_edge_global() == pytest.approx(0.0, abs=1e-12)
+
+    def test_gini_edge_global_skewed(self):
+        et = EdgeTracker(map_size=256)
+        et._global_edge_hits = {1: 1000, 2: 1, 3: 1, 4: 1}
+        g = et.gini_edge_global()
+        assert 0.5 < g < 1.0
+
+    def test_gini_edge_global_matches_core_gini(self):
+        from fuzzer_tool.core.gini import gini as _gini
+
+        et = EdgeTracker(map_size=256)
+        hits = {1: 4, 2: 9, 3: 1, 4: 20, 5: 2}
+        et._global_edge_hits = hits
+        assert et.gini_edge_global() == pytest.approx(_gini(hits.values()))
+
     def test_record_edges_invalidation(self):
         et = EdgeTracker(map_size=256)
         bm = bytearray(256)

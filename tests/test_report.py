@@ -699,6 +699,47 @@ class TestReportCrashSignatures:
         assert "Clustered by stack similarity" in report
         assert "1 likely distinct bug(s)" in report
 
+    def test_crash_cluster_gini_two_singletons(self):
+        """Default fixture has 2 dissimilar sigs -> 2 singleton clusters
+        with occurrence totals [3, 2]; Gini over those totals is 0.1."""
+        f = _make_mock_fuzzer()
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Crash-cluster Gini: 0.10 (2 distinct bug(s)" in report
+
+    def test_crash_cluster_gini_absent_for_single_cluster(self):
+        """Only one cluster overall -> nothing to be unequal about."""
+        f = _make_mock_fuzzer(
+            crash_sigs={"ASAN:heap-buffer-overflow@parse@main:100": 3, "sig2": 2},
+            crash_frames={
+                "ASAN:heap-buffer-overflow@parse@main:100": ["parse()", "main()"],
+                "sig2": ["parse()", "main()"],
+            },
+        )
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Crash-cluster Gini" not in report
+
+    def test_crash_cluster_gini_weighted_by_occurrence_not_signature_count(self):
+        """Gini is over each cluster's summed crash count, not how many
+        distinct signatures merged into it -- a 2-signature cluster with
+        few total crashes can still be the smaller side of the split."""
+        f = _make_mock_fuzzer(
+            crash_sigs={
+                "ASAN:heap-buffer-overflow@parse@main:100": 3,
+                "sig2": 2,
+                "sig3": 100,
+            },
+            crash_frames={
+                "ASAN:heap-buffer-overflow@parse@main:100": ["parse()", "main()"],
+                "sig2": ["parse()", "main()"],
+                "sig3": ["totally_different()"],
+            },
+        )
+        with tempfile.TemporaryDirectory() as td:
+            report = generate_report(f, td, td)
+        assert "Crash-cluster Gini: 0.45 (2 distinct bug(s)" in report
+
     def test_crash_signatures_not_clustered_when_dissimilar(self):
         f = _make_mock_fuzzer()
         with tempfile.TemporaryDirectory() as td:

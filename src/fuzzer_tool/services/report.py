@@ -347,6 +347,23 @@ def _crash_signatures(f) -> str:
         clusters = cluster_crashes(sig_list, frame_lists=frame_lists)
         chained = detect_chained_clusters(clusters, sig_list, frame_lists=frame_lists)
         multi = [(idx, c) for idx, c in enumerate(clusters) if len(c) > 1]
+        # Gini over each cluster's total crash *occurrence* count (not its
+        # signature count) -- a triage read of whether crashes concentrate
+        # on a couple of root causes or spread across many, independent of
+        # whether any given cluster happened to merge multiple signatures.
+        # Computed over every cluster, including singletons: an all-
+        # singleton corpus is itself a meaningful (possibly even) point on
+        # the same scale. See core/gini.py.
+        if len(clusters) >= 2:
+            from fuzzer_tool.core.gini import gini as _gini
+
+            cluster_totals = [sum(sigs[sig_list[i]] for i in c) for c in clusters]
+            g = _gini(cluster_totals)
+            if g is not None:
+                lines.append(
+                    f"  Crash-cluster Gini: {g:.2f} ({len(clusters)} distinct "
+                    "bug(s), by occurrence count)"
+                )
         if multi:
             lines.append("")
             lines.append(

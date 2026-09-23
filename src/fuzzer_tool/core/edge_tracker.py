@@ -2012,6 +2012,25 @@ class EdgeTracker:
         sum_p_sq = sum((count / total) ** 2 for count in hits.values())
         return 1.0 - sum_p_sq
 
+    def gini_edge_global(self) -> float:
+        """Gini coefficient of the global edge hit distribution.
+
+        0.0 = every hit edge has been hit equally often; climbs toward 1.0
+        as hits concentrate onto fewer edges (hot loops dominating the
+        execution trace). Complements shannon_entropy_global/
+        simpson_diversity_global with a scale that stays comparable as the
+        number of distinct edges hit grows over a campaign -- see
+        core/gini.py. Same estimator ``tools/edge_diagnostic.py`` already
+        used, post-hoc, on a replayed corpus; this is the live per-tick
+        version over ``_global_edge_hits``.
+        """
+        hits = self._global_edge_hits
+        if not hits:
+            return 0.0
+        from fuzzer_tool.core.gini import gini as _gini
+
+        return _gini(hits.values()) or 0.0
+
     def shannon_entropy_seed(self, seed_key: str) -> float:
         """Shannon entropy of a single seed's hit-count distribution.
 
