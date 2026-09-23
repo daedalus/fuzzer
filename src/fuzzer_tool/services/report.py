@@ -1682,6 +1682,18 @@ def _format_learning(f) -> str:
     try:
         # Overview
         summary = fl.get_format_summary()
+        format_count = summary.get("format_count", 1)
+        if format_count > 1:
+            lines.append(
+                f"  Formats tracked: {format_count} concurrent hypotheses "
+                f"(showing the primary one below)"
+            )
+            others = ", ".join(
+                f"{c['signature'] or '<default>'} ({c['sample_count']} obs)"
+                for c in summary.get("formats", [])[1:]
+            )
+            if others:
+                lines.append(f"  Other formats:   {others}")
         lines.append(f"  Timeline:        {summary['timeline_size']} transitions recorded")
         lines.append(
             f"  Hypotheses:      {summary['hypotheses']} total, {summary['classified']} classified"

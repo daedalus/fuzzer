@@ -8,16 +8,34 @@ Maps the schema-harness control loop to the fuzzer's observation space:
   action:    mutation operators applied at specific positions
   mechanism: how mutations in positions affect coverage paths
 
-The learner maintains:
+Multi-format targets (an ffmpeg-style demuxer probing RIFF/MP4/MKV/... in
+turn, any parser that dispatches on a magic number) give the *same* byte
+offset different meanings depending on which format an input actually is —
+offset 4 is a RIFF chunk size in a WAV file and part of an `ftyp` box in an
+MP4. A single global field map conflates these into noise. So the learner
+doesn't maintain one field map: it maintains a `FormatCluster` per observed
+input signature (by default, the first couple of bytes), each with its own
+independent Timeline, field hypotheses, and backtest history. Growing the
+corpus with a new container type grows a new cluster instead of corrupting
+the existing ones, and each cluster can be exploited as its own model.
+
+The learner (per cluster) maintains:
 - A Timeline of (input_hash, mutation_op, position, coverage_delta, sanitizer)
 - Candidate field hypotheses with confidence scores
 - A backtested format model that predicts coverage consequences of mutations
 
-Core loop:
+Core loop, per cluster:
   1. Mutate → observe coverage transition
   2. Hypothesize field boundaries from transition patterns
-  3. Backtest hypotheses against full Timeline
+  3. Backtest hypotheses against that cluster's full Timeline
   4. Only trust hypotheses that survive full backtest
+
+`FormatLearner` itself stays call-compatible with the single-format version:
+`.hypotheses`, `.timeline`, `.field_map`, `.backtest_passes/fails`, and
+`.format_model_version` are views onto the "primary" cluster (the one with
+the most recorded observations), so existing callers that don't care about
+multi-format tracking keep working unchanged. `get_format_summary()` adds a
+`formats` list with one summary per cluster for callers that do.
 """
 
 import hashlib
@@ -29,6 +47,11 @@ from fuzzer_tool.core.running_stats import RunningMoments
 log = logging.getLogger(__name__)
 
 BACKTEST_INTERVAL = 500  # run backtest every N recorded transitions
+DEFAULT_SIG_LEN = 2  # bytes of prefix used to cluster inputs into format hypotheses
+DEFAULT_MAX_FORMATS = 6  # cap on concurrently tracked format clusters (bounds memory)
+DEFAULT_SIGNATURE = ""  # cluster key used before any real signature is known
+DEFAULT_PROMOTE_THRESHOLD = 3  # times a signature must recur before it gets its own cluster
+MAX_TRACKED_SIGNATURES = 4096  # cap on candidate signatures awaiting promotion
 
 
 @dataclass
@@ -67,30 +90,33 @@ class TimelineEntry:
     lost_edges: set
 
 
-class FormatLearner:
-    """Induces format structure from fuzzing observations.
+@dataclass
+class FormatCluster:
+    """One candidate format's independent field map, Timeline, and backtest
+    history — everything `FormatLearner` used to hold as a single flat
+    model, now scoped to inputs sharing one signature.
 
-    Follows the schema-harness methodology:
-    - State grounding: infers field boundaries from mutation sensitivity
-    - Mechanism discovery: finds how fields control coverage paths
-    - Backtesting: validates hypotheses against full Timeline
-    - Action for discovery: selects mutations that discriminate hypotheses
+    Deliberately isolated from every other cluster: an observation routed
+    here never updates another cluster's hypotheses, and its backtest only
+    ever replays its own Timeline. That isolation is the whole point — it's
+    what lets the learner hold "offset 4 is a chunk length" and "offset 4 is
+    a codec tag" as two live, uncontradicted hypotheses at once.
     """
 
-    def __init__(self, max_timeline: int = 5000, z_score_threshold: float = 2.0):
-        self.timeline: list[TimelineEntry] = []
-        self.max_timeline = max_timeline
-        self.hypotheses: list[FieldHypothesis] = []
-        self.field_map: dict[int, FieldHypothesis] = {}
-        self.backtest_passes: int = 0
-        self.backtest_fails: int = 0
-        self.format_model_version: int = 0
-        self._transitions_since_backtest: int = 0
-        self.z_score_threshold = z_score_threshold
-        self._delta_moments: RunningMoments = RunningMoments()
-        # Byte-level record stride inferred from the seed's raw bytes
-        # (estimate_record_size) — a structural prior for field classification.
-        self.record_stride: int | None = None
+    signature: str
+    z_score_threshold: float = 2.0
+    timeline: list[TimelineEntry] = field(default_factory=list)
+    hypotheses: list[FieldHypothesis] = field(default_factory=list)
+    field_map: dict[int, FieldHypothesis] = field(default_factory=dict)
+    backtest_passes: int = 0
+    backtest_fails: int = 0
+    format_model_version: int = 0
+    # Byte-level record stride inferred from this format's own seeds
+    # (estimate_record_size) — a structural prior for field classification.
+    record_stride: int | None = None
+    total_observations: int = 0
+    _transitions_since_backtest: int = 0
+    _delta_moments: RunningMoments = field(default_factory=RunningMoments)
 
     def set_record_stride(self, stride: int | None):
         """Set the record-stride structural prior from periodicity detection.
@@ -101,46 +127,22 @@ class FormatLearner:
         """
         self.record_stride = stride
 
-    def record_transition(
-        self,
-        input_bytes: bytes,
-        mutation_op: str,
-        mutation_offset: int,
-        mutation_width: int,
-        coverage_before: int,
-        coverage_after: int,
-        new_edges: set,
-        lost_edges: set,
-    ):
-        """Append a real transition to the Timeline.
-
-        Stores only input hash, not full bytes, to save memory.
-        """
-        input_hash = hashlib.sha256(input_bytes).hexdigest()[:16]
-
-        entry = TimelineEntry(
-            input_hash=input_hash,
-            mutation_op=mutation_op,
-            mutation_offset=mutation_offset,
-            mutation_width=mutation_width,
-            coverage_before=coverage_before,
-            coverage_after=coverage_after,
-            new_edges=new_edges,
-            lost_edges=lost_edges,
-        )
+    def record(self, entry: TimelineEntry, input_bytes: bytes, max_timeline: int):
+        """Append a real transition to this cluster's Timeline and update
+        its hypotheses, periodically backtesting against its own history."""
         self.timeline.append(entry)
-        if len(self.timeline) > self.max_timeline:
-            self.timeline = self.timeline[-self.max_timeline :]
+        if len(self.timeline) > max_timeline:
+            self.timeline = self.timeline[-max_timeline:]
+        self.total_observations += 1
 
         self._update_hypotheses(entry, input_bytes)
 
-        # Periodic backtest
         self._transitions_since_backtest += 1
         if self._transitions_since_backtest >= BACKTEST_INTERVAL:
             self._transitions_since_backtest = 0
             ok, desc = self.backtest()
             if not ok:
-                log.debug("Backtest failed: %s", desc)
+                log.debug("Backtest failed for format %r: %s", self.signature, desc)
 
     def _update_hypotheses(self, entry: TimelineEntry, input_bytes: bytes | None = None):
         """Update field hypotheses based on a new observation."""
@@ -324,7 +326,7 @@ class FormatLearner:
         return deviations[len(deviations) // 2]
 
     def backtest(self) -> tuple[bool, str | None]:
-        """Replay the ENTIRE Timeline through the current format model."""
+        """Replay this cluster's ENTIRE Timeline through its current format model."""
         if not self.hypotheses:
             return True, None
 
@@ -381,7 +383,7 @@ class FormatLearner:
         return None
 
     def get_format_summary(self) -> dict:
-        """Return a summary of the inferred format structure."""
+        """Return a summary of this cluster's inferred format structure."""
         sorted_hyps = sorted(self.hypotheses, key=lambda h: h.offset)
         fields = []
         for h in sorted_hyps:
@@ -408,6 +410,8 @@ class FormatLearner:
             )
 
         return {
+            "signature": self.signature,
+            "sample_count": self.total_observations,
             "timeline_size": len(self.timeline),
             "hypotheses": len(self.hypotheses),
             "classified": sum(1 for h in self.hypotheses if h.field_type != "unknown"),
@@ -449,8 +453,10 @@ class FormatLearner:
         return bytes(result)
 
     def get_state(self) -> dict:
-        """Serialize for persistence."""
+        """Serialize this cluster for persistence."""
         return {
+            "signature": self.signature,
+            "sample_count": self.total_observations,
             "timeline": [
                 {
                     "input_hash": e.input_hash,
@@ -480,13 +486,15 @@ class FormatLearner:
             "backtest_passes": self.backtest_passes,
             "backtest_fails": self.backtest_fails,
             "model_version": self.format_model_version,
+            "record_stride": self.record_stride,
         }
 
-    def load_state(self, state: dict):
-        """Restore from persistence."""
-        self.timeline = []
+    @classmethod
+    def from_state(cls, signature: str, state: dict, z_score_threshold: float = 2.0):
+        """Reconstruct a cluster from `get_state()` output."""
+        cluster = cls(signature=signature, z_score_threshold=z_score_threshold)
         for e in state.get("timeline", []):
-            self.timeline.append(
+            cluster.timeline.append(
                 TimelineEntry(
                     input_hash=e.get("input_hash", ""),
                     mutation_op=e["op"],
@@ -498,7 +506,6 @@ class FormatLearner:
                     lost_edges=set(e.get("lost_edges", [])),
                 )
             )
-        self.hypotheses = []
         for h in state.get("hypotheses", []):
             hyp = FieldHypothesis(
                 offset=h["offset"],
@@ -510,8 +517,419 @@ class FormatLearner:
                 controlled_edges=set(h.get("controlled_edges", [])),
                 value_counts=dict(h.get("value_counts", {})),
             )
-            self.hypotheses.append(hyp)
-            self.field_map[hyp.offset] = hyp
-        self.backtest_passes = state.get("backtest_passes", 0)
-        self.backtest_fails = state.get("backtest_fails", 0)
-        self.format_model_version = state.get("model_version", 0)
+            cluster.hypotheses.append(hyp)
+            cluster.field_map[hyp.offset] = hyp
+        cluster.backtest_passes = state.get("backtest_passes", 0)
+        cluster.backtest_fails = state.get("backtest_fails", 0)
+        cluster.format_model_version = state.get("model_version", 0)
+        cluster.record_stride = state.get("record_stride")
+        cluster.total_observations = state.get("sample_count", len(cluster.timeline))
+        return cluster
+
+
+class FormatLearner:
+    """Induces format structure from fuzzing observations.
+
+    Follows the schema-harness methodology:
+    - State grounding: infers field boundaries from mutation sensitivity
+    - Mechanism discovery: finds how fields control coverage paths
+    - Backtesting: validates hypotheses against full Timeline
+    - Action for discovery: selects mutations that discriminate hypotheses
+
+    Observations are routed into per-format `FormatCluster`s, keyed by an
+    input signature (`sig_len` bytes of prefix, by default). A target that
+    demuxes several container formats therefore accumulates several
+    concurrent, mutually uncontradicted field maps instead of one map that
+    silently averages incompatible formats together. `max_formats` bounds
+    how many clusters are tracked at once; the least-observed cluster is
+    evicted to make room for a new signature once the cap is hit, so a
+    stream of one-off garbage prefixes can't crowd out real formats.
+
+    A signature only gets its own cluster once it has recurred
+    `promote_threshold` times; until then, observations under it fall
+    into the shared default cluster. This matters because the signature
+    window can itself be the byte range a mutation (or synthetic value)
+    is varying — a real recurring format (repeatedly re-mutated from the
+    same seed, header usually untouched) clears the threshold easily,
+    while a prefix that never repeats twice never earns its own cluster
+    and behaves exactly like the old single-format learner.
+
+    For callers that only care about "the" format, `.hypotheses`,
+    `.timeline`, `.field_map`, `.backtest_passes`/`.backtest_fails`, and
+    `.format_model_version` are read/write views onto the *primary*
+    cluster — the one with the most recorded observations — so this stays
+    drop-in compatible with single-format use.
+    """
+
+    def __init__(
+        self,
+        max_timeline: int = 5000,
+        z_score_threshold: float = 2.0,
+        max_formats: int = DEFAULT_MAX_FORMATS,
+        sig_len: int = DEFAULT_SIG_LEN,
+        promote_threshold: int = DEFAULT_PROMOTE_THRESHOLD,
+    ):
+        self.max_timeline = max_timeline
+        self.z_score_threshold = z_score_threshold
+        self.max_formats = max_formats
+        self.sig_len = sig_len
+        self.promote_threshold = promote_threshold
+        self.clusters: dict[str, FormatCluster] = {}
+        # Signature of the most recently recorded transition — used as the
+        # routing target for calls (like record_liveness) that don't carry
+        # their own input_bytes.
+        self._last_signature: str | None = None
+        # Raw-signature recurrence counts, for promotion — not full
+        # clusters, just a cheap int per candidate signature.
+        self._signature_counts: dict[str, int] = {}
+        # Small buffer of (entry, input_bytes) per not-yet-promoted raw
+        # signature, capped at promote_threshold — replayed into a fresh
+        # dedicated cluster the moment that signature is promoted, so a
+        # recurring format's *first* few observations aren't stranded in
+        # the shared default cluster once it earns its own.
+        self._pending: dict[str, list[tuple[TimelineEntry, bytes]]] = {}
+
+    # ------------------------------------------------------------------
+    # Clustering
+    # ------------------------------------------------------------------
+    @staticmethod
+    def format_signature(input_bytes: bytes, sig_len: int = DEFAULT_SIG_LEN) -> str:
+        """Cluster key for an input: hex of its first `sig_len` bytes.
+
+        This mirrors how a real demuxer dispatches — on a magic number at
+        (or near) offset 0 — so inputs that a target would itself route to
+        different format-specific parsing code end up in different
+        clusters. It's a heuristic, not ground truth: a mutation that
+        happens to land inside the signature window can still split one
+        real format across clusters, which is exactly why clusters are
+        cheap and eviction-bounded rather than assumed authoritative.
+        """
+        if not input_bytes:
+            return DEFAULT_SIGNATURE
+        return input_bytes[:sig_len].hex()
+
+    def _signature_for(self, input_bytes: bytes | None) -> str | None:
+        if input_bytes is not None:
+            return self.format_signature(input_bytes, self.sig_len)
+        return self._last_signature
+
+    def _bound_signature_tracking(self):
+        """Cheap, approximate forgetting so `_signature_counts`/`_pending`
+        can't grow without limit over a long campaign full of one-off
+        prefixes that never recur."""
+        if len(self._signature_counts) < MAX_TRACKED_SIGNATURES:
+            return
+        stalest = sorted(self._signature_counts.items(), key=lambda kv: kv[1])
+        for sig, _ in stalest[: len(stalest) // 4 or 1]:
+            del self._signature_counts[sig]
+            self._pending.pop(sig, None)
+
+    def _known_cluster_for(self, raw_signature: str) -> str:
+        """Route a signature that's only being *read* (or is a secondary
+        signal, not itself a Timeline observation): use its own cluster if
+        one already exists, otherwise the shared default — never triggers
+        promotion, since there's no observation here to buffer."""
+        if raw_signature in self.clusters:
+            return raw_signature
+        return DEFAULT_SIGNATURE
+
+    def _get_or_create_cluster(self, signature: str) -> FormatCluster:
+        cluster = self.clusters.get(signature)
+        if cluster is not None:
+            return cluster
+        if len(self.clusters) >= self.max_formats:
+            # Never evict the shared default cluster — it's the fallback
+            # every not-yet-promoted signature depends on.
+            candidates = [c for c in self.clusters.values() if c.signature != DEFAULT_SIGNATURE]
+            evicted = min(candidates or self.clusters.values(), key=lambda c: c.total_observations)
+            del self.clusters[evicted.signature]
+            log.debug(
+                "format_learner: evicting cluster %r (%d obs) for new signature %r",
+                evicted.signature,
+                evicted.total_observations,
+                signature,
+            )
+        cluster = FormatCluster(signature=signature, z_score_threshold=self.z_score_threshold)
+        self.clusters[signature] = cluster
+        return cluster
+
+    @property
+    def primary_cluster(self) -> FormatCluster | None:
+        """The cluster with the most recorded observations, or None."""
+        if not self.clusters:
+            return None
+        return max(self.clusters.values(), key=lambda c: c.total_observations)
+
+    # ------------------------------------------------------------------
+    # Backward-compatible single-format view (reads/writes primary cluster)
+    # ------------------------------------------------------------------
+    @property
+    def hypotheses(self) -> list[FieldHypothesis]:
+        # Returns the primary cluster's live list (not a copy), so
+        # `fl.hypotheses.append(...)` on a fresh learner persists — it
+        # lands in (and creates, if needed) the default cluster.
+        c = self.primary_cluster or self._get_or_create_cluster(
+            self._last_signature or DEFAULT_SIGNATURE
+        )
+        return c.hypotheses
+
+    @hypotheses.setter
+    def hypotheses(self, value: list[FieldHypothesis]):
+        self._get_or_create_cluster(self._last_signature or DEFAULT_SIGNATURE).hypotheses = value
+
+    @property
+    def field_map(self) -> dict[int, FieldHypothesis]:
+        c = self.primary_cluster or self._get_or_create_cluster(
+            self._last_signature or DEFAULT_SIGNATURE
+        )
+        return c.field_map
+
+    @field_map.setter
+    def field_map(self, value: dict[int, FieldHypothesis]):
+        self._get_or_create_cluster(self._last_signature or DEFAULT_SIGNATURE).field_map = value
+
+    @property
+    def timeline(self) -> list[TimelineEntry]:
+        c = self.primary_cluster
+        return c.timeline if c is not None else []
+
+    @property
+    def format_model_version(self) -> int:
+        c = self.primary_cluster
+        return c.format_model_version if c is not None else 0
+
+    @property
+    def backtest_passes(self) -> int:
+        c = self.primary_cluster
+        return c.backtest_passes if c is not None else 0
+
+    @property
+    def backtest_fails(self) -> int:
+        c = self.primary_cluster
+        return c.backtest_fails if c is not None else 0
+
+    @property
+    def record_stride(self) -> int | None:
+        c = self.primary_cluster
+        return c.record_stride if c is not None else None
+
+    @property
+    def _delta_moments(self) -> RunningMoments:
+        c = self.primary_cluster
+        return c._delta_moments if c is not None else RunningMoments()
+
+    def _classify_fields(self):
+        c = self.primary_cluster
+        if c is not None:
+            c._classify_fields()
+
+    def backtest(self) -> tuple[bool, str | None]:
+        c = self.primary_cluster
+        if c is None:
+            return True, None
+        return c.backtest()
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+    def set_record_stride(self, stride: int | None, input_bytes: bytes | None = None):
+        """Set the record-stride structural prior for one format cluster.
+
+        Routes by `input_bytes`'s signature when given (each format keeps
+        its own stride), otherwise applies to the most recently recorded
+        cluster.
+        """
+        if input_bytes is not None:
+            sig = self._known_cluster_for(self.format_signature(input_bytes, self.sig_len))
+        else:
+            sig = self._last_signature or DEFAULT_SIGNATURE
+        self._get_or_create_cluster(sig).set_record_stride(stride)
+
+    def record_transition(
+        self,
+        input_bytes: bytes,
+        mutation_op: str,
+        mutation_offset: int,
+        mutation_width: int,
+        coverage_before: int,
+        coverage_after: int,
+        new_edges: set,
+        lost_edges: set,
+    ):
+        """Append a real transition to the appropriate format cluster's Timeline.
+
+        Stores only the input hash, not full bytes, to save memory. Which
+        cluster this lands in is decided by `input_bytes`'s signature (see
+        `format_signature`) — except a signature seen for the first time
+        isn't immediately trusted with a cluster of its own: it's buffered
+        and, if it recurs `promote_threshold` times, promoted to a fresh
+        cluster built by replaying the buffer. Until (and unless) that
+        happens, it's folded into the shared default cluster, so a
+        signature that never recurs still contributes its observation
+        instead of being lost.
+        """
+        input_hash = hashlib.sha256(input_bytes).hexdigest()[:16]
+        entry = TimelineEntry(
+            input_hash=input_hash,
+            mutation_op=mutation_op,
+            mutation_offset=mutation_offset,
+            mutation_width=mutation_width,
+            coverage_before=coverage_before,
+            coverage_after=coverage_after,
+            new_edges=new_edges,
+            lost_edges=lost_edges,
+        )
+        raw_signature = self.format_signature(input_bytes, self.sig_len)
+
+        if raw_signature == DEFAULT_SIGNATURE or raw_signature in self.clusters:
+            self._last_signature = raw_signature
+            self._get_or_create_cluster(raw_signature).record(
+                entry, input_bytes, self.max_timeline
+            )
+            return
+
+        self._bound_signature_tracking()
+        pending = self._pending.setdefault(raw_signature, [])
+        pending.append((entry, input_bytes))
+        if len(pending) > self.promote_threshold:
+            pending.pop(0)
+        count = self._signature_counts.get(raw_signature, 0) + 1
+        self._signature_counts[raw_signature] = count
+
+        if count >= self.promote_threshold:
+            # Promote: this signature has now recurred enough to earn its
+            # own cluster. Replay everything buffered for it (in order)
+            # into a fresh cluster, rather than starting from just this
+            # one observation.
+            del self._pending[raw_signature]
+            cluster = self._get_or_create_cluster(raw_signature)
+            for pend_entry, pend_bytes in pending:
+                cluster.record(pend_entry, pend_bytes, self.max_timeline)
+            self._last_signature = raw_signature
+        else:
+            # Still unproven — fold into the shared default cluster so
+            # the observation isn't lost if this signature never recurs.
+            self._get_or_create_cluster(DEFAULT_SIGNATURE).record(
+                entry, input_bytes, self.max_timeline
+            )
+            self._last_signature = DEFAULT_SIGNATURE
+
+    def record_liveness(
+        self, offset: int, width: int, confirmed_dead: bool, input_bytes: bytes | None = None
+    ) -> None:
+        """Corroborating dead-region evidence, routed to a format cluster.
+
+        See `FormatCluster.record_liveness` for the reasoning. Routes by
+        `input_bytes`'s signature when given (only into an *already
+        promoted* cluster — this alone never promotes a signature),
+        otherwise by whichever cluster last recorded a transition
+        (falling back to the default cluster if none has yet).
+        """
+        if not confirmed_dead:
+            return
+        if input_bytes is not None:
+            sig = self._known_cluster_for(self.format_signature(input_bytes, self.sig_len))
+        else:
+            sig = self._last_signature or DEFAULT_SIGNATURE
+        self._get_or_create_cluster(sig).record_liveness(offset, width, confirmed_dead=True)
+
+    def suggest_discriminating_mutation(self, candidates: list[str]) -> tuple[str, int] | None:
+        """Suggest a mutation that would discriminate between hypotheses
+        within the primary format cluster."""
+        c = self.primary_cluster
+        if c is None:
+            return None
+        return c.suggest_discriminating_mutation(candidates)
+
+    def get_format_summary(self) -> dict:
+        """Return a summary of the inferred format structure.
+
+        Top-level keys mirror the single-format shape (and describe the
+        primary cluster, for backward compatibility). `format_count` and
+        `formats` additionally expose every tracked cluster, ranked by
+        observation count, for callers that want to reason about — or
+        seed from — more than one live format hypothesis.
+        """
+        if not self.clusters:
+            return {
+                "timeline_size": 0,
+                "hypotheses": 0,
+                "classified": 0,
+                "backtest_passes": 0,
+                "backtest_fails": 0,
+                "model_version": 0,
+                "record_stride": None,
+                "fields": [],
+                "format_count": 0,
+                "formats": [],
+            }
+
+        ranked = sorted(self.clusters.values(), key=lambda c: -c.total_observations)
+        summary = ranked[0].get_format_summary()
+        summary["format_count"] = len(self.clusters)
+        summary["formats"] = [c.get_format_summary() for c in ranked]
+        return summary
+
+    def get_learned_value(
+        self, offset: int, width: int, input_bytes: bytes | None = None
+    ) -> bytes | None:
+        """Return the most commonly observed bytes for a field range.
+
+        When `input_bytes` is given, reads from the cluster matching its
+        signature (so a caller building a seed for a specific format gets
+        that format's learned values, not whichever cluster happens to be
+        primary). Falls back to the primary cluster otherwise.
+        """
+        sig = self._signature_for(input_bytes)
+        cluster = self.clusters.get(sig) if sig is not None else None
+        if cluster is None:
+            cluster = self.primary_cluster
+        if cluster is None:
+            return None
+        return cluster.get_learned_value(offset, width)
+
+    def get_state(self) -> dict:
+        """Serialize for persistence.
+
+        Top-level keys mirror the primary cluster's own `get_state()` for
+        backward compatibility with consumers (e.g. `format_seed_generator`)
+        that only ever knew about one format. `clusters` carries every
+        tracked format's full state for anyone that wants it.
+        """
+        primary = self.primary_cluster
+        base = (
+            primary.get_state()
+            if primary is not None
+            else FormatCluster(signature=DEFAULT_SIGNATURE).get_state()
+        )
+        base["sig_len"] = self.sig_len
+        base["max_formats"] = self.max_formats
+        base["primary_signature"] = primary.signature if primary is not None else None
+        base["clusters"] = {sig: c.get_state() for sig, c in self.clusters.items()}
+        return base
+
+    def load_state(self, state: dict):
+        """Restore from persistence.
+
+        Accepts both the current multi-cluster shape (a `clusters` key)
+        and a legacy single-format dump (no `clusters` key), which loads
+        entirely into the default cluster.
+        """
+        self.clusters = {}
+        clusters_state = state.get("clusters")
+        if clusters_state:
+            self.sig_len = state.get("sig_len", self.sig_len)
+            self.max_formats = state.get("max_formats", self.max_formats)
+            for sig, cstate in clusters_state.items():
+                self.clusters[sig] = FormatCluster.from_state(
+                    sig, cstate, self.z_score_threshold
+                )
+            self._last_signature = state.get("primary_signature") or next(
+                iter(self.clusters), None
+            )
+        else:
+            cluster = FormatCluster.from_state(
+                DEFAULT_SIGNATURE, state, self.z_score_threshold
+            )
+            self.clusters[DEFAULT_SIGNATURE] = cluster
+            self._last_signature = DEFAULT_SIGNATURE

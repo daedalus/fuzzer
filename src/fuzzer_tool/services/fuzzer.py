@@ -5338,7 +5338,7 @@ class Fuzzer:
                 if newly_dead is not None and self._format_learner:
                     region_offset, region_width = newly_dead
                     self._format_learner.record_liveness(
-                        region_offset, region_width, confirmed_dead=True
+                        region_offset, region_width, confirmed_dead=True, input_bytes=mutated
                     )
 
         # Bayesian seed quality feedback: record whether this parent seed
@@ -5433,8 +5433,12 @@ class Fuzzer:
             )
             parent_meta = self.seed_meta.get(self._last_parent_seed)
             stride = parent_meta.get("record_stride") if parent_meta else None
-            if stride != self._format_learner.record_stride:
-                self._format_learner.set_record_stride(stride)
+            # Set per-format-cluster (not globally): different formats in a
+            # multi-format target can have different record strides, so this
+            # is routed by `mutated`'s own signature rather than compared
+            # against whatever the primary cluster's stride happens to be.
+            if stride is not None:
+                self._format_learner.set_record_stride(stride, input_bytes=mutated)
             self._format_learner.record_transition(
                 input_bytes=mutated,
                 mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",
