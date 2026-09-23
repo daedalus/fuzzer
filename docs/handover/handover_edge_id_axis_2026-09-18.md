@@ -1148,6 +1148,64 @@ driver to two translation units with an indirect (function-pointer) call
 between them, the simplest structural difference from the single-TU loop
 that a real binary has and this driver does not.
 
+**Second addendum, with clang now available, on the real target: the CTX
+attribution above does not survive direct measurement, and the actual
+mechanism looks like a bug in fuzzgoat, not in the shim.** Built
+`targets/fuzzgoat_read` for real (`tools/vendor_fuzzgoat.sh`, clang
+`-fsanitize-coverage=trace-pc-guard`, exactly `build_targets.sh`'s recipe:
+`fuzzgoat.c` compiled separately without the shim, linked into the
+`-include afl_shim.c` wrapper). `tools/corpus_fuzzgoat.py`'s 120-file
+corpus reproduces the union growth directly (197 ids at map 8192/65536,
+203 at map 512, ASLR pinned via the real `disable_aslr()`); 6 of the 120
+inputs individually diverge. Traced one (`mut_insert_0047.json`) fire by
+fire with the same env-gated log used in the first addendum: divergence
+starts at fire #39, and the field that differs there is **`cur_loc`
+itself** (416 vs 420), not just the derived `edge_id` -- the target calls
+`__afl_map_edge` with a different value, meaning the *actual sequence of
+instrumentation points reached* differs (151 vs 147 total fires), not
+merely which id that sequence hashes to. That is a stronger and different
+claim than "CTX id-value shift": it survives a rebuild of the exact same
+driver with `__AFL_CTX_SENSITIVE` left off entirely (no `caller_ctx` term
+in `edge_id` at all) -- 155 vs 147 fires, same split. Whatever this is, it
+is not in `__afl_get_caller_ctx()`, confirming that function is a dead end
+for this line of investigation. A same-map-size/same-binary control run
+five times each was byte-identical both ways, and padding `AFL_MAP_SIZE`'s
+own env-string length while holding its parsed value at 8192 reproduced
+nothing (0/9 pad lengths shifted the fire count) -- ruling out both
+non-determinism and the stack-layout-via-env-length hypothesis the first
+addendum's team already tested, now specifically against a confirmed
+reproducer rather than in the abstract.
+
+The fire count changing from 155 to 151 after an unrelated rebuild (one
+extra `fprintf` argument logging `__afl_map_size` itself, which read back
+correctly and uncorrupted at every single fire in both views) is the tell:
+a *deterministic-per-binary but layout-fragile-across-rebuilds* effect is
+the signature of memory corruption, not of a hash computation. An ASan
+build of the same target (`fuzzgoat.c` ASan-instrumented separately per
+the same no-shim-in-that-TU rule, then linked) confirms it directly:
+`mut_insert_0047.json` trips a real
+**heap-buffer-overflow READ of 8 bytes, 7 bytes past a 33-byte allocation,
+in `json_value_free_ex` (vendor/fuzzgoat/fuzzgoat.c:258)** -- identically
+at both AFL_MAP_SIZE=512 and 8192 (same address, same stack, ASan does not
+care about the shim's env var). 13 of the 120 corpus inputs trip the same
+report; 3 of the 5 fire-count-diverging inputs are among them (the other
+2 diverge without tripping this particular redzone, consistent with a type
+confusion bug in the value union that only sometimes reads far enough to
+hit a poisoned byte). This crash fires *after* the traversal that produces
+the diverging fire count (`json_value_free` runs once `process_value` has
+already completed in `fuzz_shm_run`), so it cannot be the literal
+mechanism -- but it is very likely the same family of bug: fuzzgoat's
+`json_value` union being read under the wrong member/size assumption
+somewhere upstream, silently in-bounds often enough that ASan does not
+always catch it during the parse/traversal phase, occasionally out-of-
+bounds enough that it does during the free phase. This reframes P1-4: the
+union-growth-under-a-smaller-map is likely a real, ASan-confirmed bug in
+the *vendored fuzzgoat target* surfacing as an id-count artifact, not a
+defect in the shim's CTX or hashing path, both of which are now measured
+clean. Next step: minimize `mut_insert_0047.json` under the ASan build and
+locate the exact union member fuzzgoat reads with the wrong type -- ordinary
+crash triage, no more shim archaeology needed.
+
 ### P3-1. `__AFL_CTX_BITS` feedback
 
 Blocked on P1-1, and on paper first: write the decision rule before touching
