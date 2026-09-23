@@ -1,18 +1,18 @@
 # The (edge_id, hit_count) matrix: what the id axis is, which analyses are defined on it
 
-**Status:** analysis plus one new standalone diagnostic,
-`tools/edge_matrix_analysis.py`. One production-code addition:
-`adapters.shm.ShmCoverage._scan_with_positions()` (a read-only, un-memoized
-analysis helper; the hot path is untouched) added with F14/F15 below. Two findings
-below (F1, F2) are defects with reproductions and no fix yet; P1-4 (union
-inflation at small maps) is characterized empirically -- CTX-derived id-value
-shift keyed on the advertised map size, shim storage exonerated, exact ctx line
-unlocated (see P1-4). **F16 (2026-09-23) retracts F3 and part of F4 and
-re-measures F7-F10: the shim's id function was merging 58% of fuzzgoat's
-edges until the hashed-location shim change. Read F16 before quoting any number above it.** Every
-other number here was measured at `c26f0a1`; the patch is
-rebased onto `a45a63a`, whose two intervening commits add operator schedulers
-and touch neither the shim, the SHM path, nor any file cited below.
+**Status (refreshed 2026-09-23 on `5e18ccef`):** analysis plus one
+standalone diagnostic, now `tools/edge_diagnostic.py matrix` (the former
+`tools/edge_matrix_analysis.py` was folded into it in 9dad75b6). One
+production-code addition: `adapters.shm.ShmCoverage._scan_with_positions()` (a
+read-only, un-memoized analysis helper; the hot path is untouched) added with
+F14/F15 below. F1 is fixed (dd834d1, guarded by P0-2 and P0-3); F2 is half
+closed (P0-1). **F16 (2026-09-23) retracts F3 and part of F4 and re-measures
+F7-F10: the shim's id function was merging 58% of fuzzgoat's edges until the
+hashed-location shim change. Read F16 before quoting any number above it.**
+F16's "after" column was reproduced independently on `5e18ccef` (see
+"Reference run" under Follow-up items). Numbers in F1-F15 were measured at
+`c26f0a1` or later as each section states. **The follow-up items are
+re-prioritized below; read "Priority order" first.**
 
 ## Trigger
 
@@ -869,7 +869,144 @@ defect in shipped code a live campaign can hit, P1 measurement with the
 harness already in hand, P2 shipped-but-unwired, P3 design work gated on a
 question answered on paper first, E an evaluation run.
 
-### P0-1. Diagnose F2 (first-execution divergence)
+### Priority order (refreshed 2026-09-23 on `5e18ccef`)
+
+The tiers above say what an item *is*; this says what to do *next*. The order
+is by what each result unblocks, not by tier: P1-2 decides whether an entire
+line (Ball-Larus, `op_credit`'s derived half, the integer-relation sections of
+the tool) continues or closes, and nothing else on the list has that leverage.
+
+| # | item | cost | gates / unblocks |
+|---|---|---|---|
+| 1 | **P1-2** edge-count relations vs the real CFG | an afternoon, no production code | P3-3 derived half; Ball-Larus; closes or keeps tool [6] |
+| 2 | **P0-1** close F2 (path-hash half) | one env-gated `write()`, one run | every first-execution number |
+| 3 | **P2-4** `edge_diagnostic.py` runs only on the maintainer's machine | one line + a smoke test | anyone else reproducing anything in this file |
+| 4 | **P1-1 + P1-3** png, zlib, ffmpeg (absorbs E6) | machine time, a table | P3-1, P3-4, E6 |
+| 5 | **P2-1** 2^H in the stall reason | one commit | nothing; self-contained |
+| 6 | **P3-1** `__AFL_CTX_BITS` feedback | paper first | blocked on 4; its best input is gone (see item) |
+| 7 | **P3-4** `seed_residual` A/B | bench_paired run | blocked on 4 (PC2/PC3 features) |
+| 8 | **P3-3** `op_credit` derived-edge credit | re-run the existing A/B | blocked on 1 |
+| 9 | **P3-2** column leverage | bench design first | nothing; lowest expected value |
+| 10 | **P4-1** LCG recovery by lattice reduction | new feature | nothing; blocks nothing |
+| 11 | **P1-4 residual** fuzzgoat crash triage | ordinary triage | nothing; the id effect is gone |
+
+Closed and kept for the record (below the open items): P0-2, P0-3, P2-2,
+P2-3, and the Docs nit (superseded by the hashed-location shim).
+
+**Standing precondition for items 1, 4, 6-9:** ASLR off (or a
+`__afl_ctx_relative_capable` target), stability probe at Jaccard 1.000, and a
+compiler-instrumented build (`coverage_trust()` passes). F1, F7 and F8 each
+show what a violation does to the numbers.
+
+### Reference run (2026-09-23, `5e18ccef`)
+
+Reproduces F16's "after" column exactly, so it is the baseline the items below
+compare against. fuzzgoat, clang 18, 250-input `corpus_fuzzgoat.py` corpus,
+ASLR pinned, 65536-entry map. Three builds (vendored tree at
+`$FUZZ_VENDOR_ROOT/fuzzgoat`, default `~/fuzzing/vendoring/fuzzgoat`):
+
+```sh
+V=~/fuzzing/vendoring/fuzzgoat; SHIM=src/fuzzer_tool/adapters/afl_shim.c
+clang -fsanitize-coverage=trace-pc-guard -O2 -g -fno-omit-frame-pointer -I$V \
+    -c $V/fuzzgoat.c -o /tmp/fg.o
+clang -O2 -g -fno-omit-frame-pointer -I$V -include $SHIM \
+    -o /tmp/fg_ctx targets/fuzzgoat_read.c /tmp/fg.o -lm
+clang -O2 -g -fno-omit-frame-pointer -D__AFL_CTX_SENSITIVE=0 -I$V -include $SHIM \
+    -o /tmp/fg_noctx targets/fuzzgoat_read.c /tmp/fg.o -lm
+clang -O2 -fno-omit-frame-pointer -I$V -include tools/ground_truth_tracer.c \
+    -o /tmp/fg_gt targets/fuzzgoat_read.c /tmp/fg.o -lm -ldl
+python3 tools/corpus_fuzzgoat.py --out /tmp/corpus
+python3 tools/edge_diagnostic.py matrix --target /tmp/fg_ctx --corpus /tmp/corpus \
+    --ground-truth /tmp/fg_gt --positions --lll --save /tmp/ctx.npz
+python3 tools/edge_diagnostic.py matrix --load /tmp/ctx.npz --transpose --lll
+```
+
+| | ctx build | context-free build |
+|---|---|---|
+| ids (union) / real edges [9] | 408 / 408 (edge, site) | 344 / 344, **0 merged** |
+| [0] Jaccard, 6 processes | 1.000 | 1.000 |
+| [0] Jaccard, `--keep-aslr` + `FUZZER_KEEP_ASLR=1` | 1.000 (F1 fixed) | -- |
+| 2^H effective edges | 110 | 95 |
+| lag-1 along id | -0.0503, z = -1.22 | -0.0679, z = -1.40 |
+| binary effective rank | 3.9 | 3.3 |
+| GF(2) rank | 89 | 89 |
+| greedy cover vs GF(2) basis (seeds) | 44 vs 89 | -- |
+| exact duplicate edge profiles [7] | 178 in 102 classes, all cross-family | 121 in 79 classes |
+| transposed: scalar pairs / A=B+C triples | 5 / 81 | -- |
+| LLL, 100 rows: relations, support, max coeff, time | 29, 5, 1, 2.0 s | -- |
+| [8] ids at one slot / beyond PROBE_MAX | 100% / 0 | -- |
+
+Context costs 408/344 = **1.19x** ids. The ctx build's family ICC (0.892) is
+near-degenerate and not a finding: under hashed locations a family is the
+location's upper bits, and 408 ids fall in 323 families, mostly singletons, so
+it mostly measures edge identity. It is not F3 coming back.
+
+### P1-2. Check the edge-count relations against the real CFG -- PRIORITY 1
+
+**Refreshed 2026-09-23.** The counts this item was written against ("F10's 45
+sparse relations", "337 of 445 count coordinates") were measured through the
+merging id function (F16) and are void. Current numbers, transposed ctx build:
+29 LLL relations of support 5 and unit coefficients (2.0 s on 100x242, rank 71,
+kernel 29), exhaustive 5 scalar-multiple pairs and 81 A=B+C triples, 178 of
+408 edges duplicating another's profile. F16 already notes the relations got
+*sparser* when the aliasing went away, which is the direction the Kirchhoff
+reading predicts, but that is still one corpus of one target.
+
+**Method change: the ground-truth tracer makes `core/icfg.py` unnecessary for
+the mapping.** On the context-free build [9] shows ids and real (prev, cur)
+pairs are in bijection (0 of 344 merged), so the graph comes straight from
+`GT_OUT`: nodes are locations (guard indices, plus the wrapper's raw
+`__afl_map_edge` values -- 0x1000+, above fuzzgoat's 1712 guards, so the two
+ranges do not collide), edges are (prev, cur) pairs, per-run counts from the
+same log. Three steps, cheapest first:
+
+1. **Kirchhoff per node, per run.** In-flow equals out-flow at every node of
+   every one of the 250 runs, except the entry node, sinks, and runs that
+   abort. fuzzgoat aborts on its planted bugs; the tracer is unbuffered so the
+   tail survives, but an aborted run ends at a node with no out-edge -- add a
+   virtual exit rather than dropping the run. Any violation at an interior
+   node is a tracer or mapping bug; stop and fix it before step 3.
+2. **The Ball-Larus bound, measured.** Cycle rank E - V + c of the observed
+   graph against the Q-rank of the full count matrix (not the 100-row LLL
+   sample). If they agree, the rank *is* the cycle space and instrumenting a
+   spanning tree's complement is exact; the gap is the saving on this target.
+3. **Each empirical relation against the incidence matrix.** A relation r
+   over edge counts holds for every flow iff r is in the row space of the
+   node-edge incidence matrix B (each row is one node's conservation law).
+   Test all 29 LLL relations and all 81 triples for membership over Q;
+   relations outside rowspan(B) are coincidences of this corpus. The A=B+C
+   triples should be almost entirely one-in/two-out or two-in/one-out nodes.
+
+Then, and only then, `core/icfg.py`: the tracer sees executed edges only, so
+the static graph is what says whether a relation that held on 250 runs holds
+on unexecuted paths too. Harness-made ids are not CFG edges; report them
+separately.
+
+**Decision.** Positive (most relations in rowspan(B), rank = cycle rank):
+Ball-Larus opens, `MatrixSubstrate.derived` gets populated, and P3-3's A/B is
+re-run -- that is exactly the case `--shaped-reward-floor` was kept for.
+Negative: close the integer-relation line and demote tool section [6] to
+diagnostic-only. Either is worth the same afternoon.
+
+Original text (numbers void after F16, kept for the trail):
+
+F10's 45 sparse relations either are Kirchhoff identities on the CFG or are
+artefacts of 250 runs of one target, and nothing measured so far separates the
+two. `core/icfg.py` builds the graph; the test is whether each empirical
+relation corresponds to a join or a loop in it. A positive opens Ball-Larus
+(instrument a spanning tree's complement, derive the rest, and stop paying for
+337 of 445 count coordinates); a negative closes the whole integer-relation
+line, which is worth as much. Blocked on nothing but machine time.
+
+### P0-1. Diagnose F2 (first-execution divergence) -- PRIORITY 2
+
+**Refreshed 2026-09-23:** still one run from closed. The fire log has to come
+from the shim, not from `tools/ground_truth_tracer.c`: F2 is about the shim's
+table state (clean vs generation-reset), which the tracer does not have. The
+snippet below still applies unchanged under the hashed-location shim --
+`edge_id` is final at the same point. If the path hash matches, close F2 as
+fixed-by-F16 with the run attached; if not, the first diverging id names the
+location.
 
 **Status 2026-09-23:** the id-set half does not reproduce on the old shim either (see
 F16); the path-hash half was not rechecked. Close after one run of the fire
@@ -895,6 +1032,301 @@ diagnosis; then either a fix or a stated invariant ("the first execution after
 a fresh segment is not comparable"), plus a regression test pinning whichever
 it is. Do not build anything on top of first-execution measurements until
 this closes.
+
+### P2-4. `tools/edge_diagnostic.py` runs only on the maintainer's machine -- PRIORITY 3
+
+New 2026-09-23. Line 74 hardcodes
+`SRCDIR = "/home/dclavijo/my_code/fuzzer-new/src"` and prepends it to
+`sys.path`, so from a fresh clone every mode dies with
+`ModuleNotFoundError: No module named 'fuzzer_tool'` unless the package happens
+to be installed (`pip install -e .` works around it). Every reproduction command
+in this file goes through that tool. Fix with the idiom the neighbouring tools
+already use (`tools/find_hidden_edges.py`:
+`Path(__file__).resolve().parent.parent / "src"`), plus a smoke test that runs
+`edge_diagnostic.py matrix --help` from a clean interpreter. Same defect class
+as `tools/profile_hotpath.py`'s hardcoded `os.chdir`. While there: the module
+docstring still says the originals "are preserved untouched at
+/tmp/opencode/*.py", which is true of one machine and one boot; and several
+memory/edge modes need binaries under `/tmp/opencode/` or `/tmp/libpad.so`
+with no build recipe -- either add the recipe or say the mode is local-only.
+
+### P1-1. Three targets, not one -- PRIORITY 4 (with P1-3, absorbs E6)
+
+**Refreshed 2026-09-23.** Still the gate for P3-1 and P3-4. Two changes to
+what gets recorded, both from F16: drop the family ICC (near-degenerate under
+hashed locations, see the reference run) and record instead the ctx /
+context-free id ratio, [9]'s merge count, [7]'s duplicate classes, 2^H, the
+[4] spectrum, and the drop counter. Run P1-3's PC2-vs-validity correlation in
+the same pass -- png and zlib carry the validity label for free. ffmpeg is the
+one that matters; `tools/vendor_ffmpeg.sh --nosan --minimal` is about four
+minutes on one core. E6's precondition (ASLR off, probe clean) is the standing
+precondition above, so E6 is done when ffmpeg's row is.
+
+Every number in this document is one small JSON parser. Re-run the tool on
+`png_read`, `zlib_read` and ffmpeg and record ICC, family occupancy, the drop
+counter and (per F7) the spectrum. No code change; machine time and a table.
+ffmpeg is the one that matters -- 8189 edges, genuinely multimodal, and the
+target §14's measurements never reached because it would not build in that
+container. This gates P3-1 and feeds E6.
+
+### P1-3. Does PC2 separate valid from invalid on other targets? -- run with P1-1
+
+F13 found the second principal component of the seed Gram matrix tracking
+parse success on fuzzgoat (rho = +0.312, means +0.0109 vs -0.0129). If that
+holds on png and zlib -- both have a well-defined notion of a valid file, so
+the label is free -- it is a validity signal derived from coverage alone.
+`ValidityChannel` already tracks the same property, but as a verdict the
+target reports per execution (`Validity.VALID/INVALID/UNKNOWN`, recorded
+into `seed_meta['valid']`), so a coverage-side estimate would be a second,
+independent read on it rather than a replacement. One afternoon of machine time, no code change to
+measure. If it replicates, section [4] of the tool should report the top
+eigenvector correlations and not just the spectrum.
+
+### P2-1. Wire `2^H` into the stall reason -- PRIORITY 5
+
+**Refreshed 2026-09-23.** Half landed via P2-3: `EdgeTracker.effective_edges()`
+exists and the end-of-run summary prints it ("Effective edges: N of M").
+Still not in the stall reason: `Fuzzer`'s stall path builds `reason` from the
+noise type, the entropy gate and `coverage_growth_model()` (the
+`" + near-saturation"` suffix) and never reads 2^H. The signal is the *trend* --
+effective edges collapsing while the raw count is flat -- so it needs the value
+at the last new edge, not just the current one. `edge_hit_distribution()`
+still has no caller in `src/`; `scheduler_substrate.effective_edges` documents
+why it should stay that way (O(edges x seeds) vs one pass).
+
+`edge_hit_distribution()` has zero callers in `src/` and zero in `tests/`.
+Effective edges collapsing while the raw edge count is flat is a saturation
+signal the stall machinery has no equivalent of; it belongs in the same
+reason string as the Allan noise type and `wall_summary()`. Self-contained,
+one commit.
+
+### P3-1. `__AFL_CTX_BITS` feedback -- PRIORITY 6, blocked on P1-1
+
+**Refreshed 2026-09-23: its best input is gone.** The text below names F10's
+count of edges duplicated *within* a family as the exact measure of unused
+context width. After F16 that count is **0** on fuzzgoat (79 edges in 14
+classes at `c26f0a1`, 5 just before the fix): they were the aliasing. The ICC is near-degenerate too. What is
+left to build the rule on: the ctx / context-free id ratio (1.19x here), the
+drop counter, and [9]'s (edge, site) triples against ids. Write the rule
+against those, on paper, after P1-1 has a multimodal target in the table.
+
+Blocked on P1-1, and on paper first: write the decision rule before touching
+code. The inputs exist (ICC, family occupancy against the 2^(bits-1)
+reachable tags, `read_dropped_edges()`, and -- better than the ICC -- F10's
+count of edges duplicated *within* a family, which is unused context width
+measured exactly rather than inferred); what does not exist is a stated rule
+for stepping the width down or up, or evidence that the ICC threshold means
+the same thing on a multimodal target as on a JSON parser.
+
+### P3-4. `seed_residual` arm -- PRIORITY 7, blocked on P1-1/P1-3
+
+**Built, off by default, no bench result**
+(`handover_matrix_schedulers_2026-09-19.md`); the per-refit partial-correlation
+log is in. PC2/PC3 features are not, pending P1-3. Gated on P1-3 and on P2-3's canonical space. Mass orthogonal to
+rank(total hits), weighted by `1/owner_count`, with the partial-correlation
+falsification recomputed at every refit and logged. `bench_paired.py` with a
+pre-registered threshold, no exceptions: the same question has produced two
+wrong answers from observational correlation already.
+
+### P3-3. Operator reward on independent coordinates -- PRIORITY 8, blocked on P1-2
+
+**Refreshed 2026-09-23: there is a bench result.** `--shaped-reward` was run
+paired against `--elo` on fuzzgoat (seeds 0-11, 2,000 execs): 5W/7L, median
+-7.0 edges, CI [-13.5, +1.6], and with floor 0.25 5W/7L, -2.5; not adopted
+(`docs/learnings/2026-09-20-shaped-reward-ab-result.md`,
+`handover_matrix_schedulers_2026-09-19.md` "A/B result"). That measured the
+duplicate-class half only, with `derived` empty. Re-run the same A/B once P1-2
+populates `derived`; until then there is nothing new to measure. `op_credit`'s
+own selector is still unmeasured.
+
+**Built as `op_credit`, off by default, no bench result** (see
+`handover_matrix_schedulers_2026-09-19.md`). The duplicate-class half is in;
+the derived-edge half waits on P1-2 (`MatrixSubstrate.derived` is empty). The
+paper question is answered there: credit is a function of the current partition,
+so a split raises it. Gated on P1-2. Credit a duplicate class once instead of per member, and give
+a derived edge no novelty credit at all. Changes the reward rather than the
+selector, so it is measurable against the 34 existing operator schedulers
+without replacing any of them. Paper question first: what happens to credit
+when a class splits mid-campaign.
+
+### P3-2. Column leverage as a seed score -- PRIORITY 9
+
+The one SVD-derived score §14 did not test. Leverage measures distance from
+the dominant subspace, which is the direction Tang's l2 sampling gets
+backwards, and it is *not* the algebraic complement of covered mass -- so it
+is not the sign-flip that already failed. Given that record, the only
+acceptable form is `bench_paired.py` with a pre-registered threshold,
+designed before implementation. Observational correlation has been wrong
+twice on this question.
+
+### P4-1. LCG state recovery by lattice reduction -- PRIORITY 10
+
+`prng_state_recovery.py` cannot represent a multiplicative step, so the whole
+LCG family is out of its reach; F9 argues lattice reduction is the standard
+tool for exactly that gap, at dimensions where LLL is cheap. Genuine but
+blocking nothing. No dependency decision to make: the tool's LLL is written
+out in-file under Hard Rule 51, so the same routine is available to any
+caller in the tree.
+
+### E6 (existing, amended) -- folded into P1-1
+
+Done when P1-1's ffmpeg row is recorded under the standing precondition.
+Original amendment kept:
+
+`handover_pending_2026-09-06.md` E6 already asks for the ffmpeg re-measurement
+of low-rank structure. Amendment from F7: assert ASLR is off and the
+stability probe is clean *before* reading the spectrum, because the ASAN
+kernel workaround that may be needed to run ffmpeg is the same variable that
+inflates effective rank 25x.
+
+### Closed items
+
+Kept verbatim below each note: a closed item still needs a pointer to where
+its artefacts live, or the next reader re-proposes it.
+
+### P1-4. Why does the union grow as the map shrinks -- NO LONGER REPRODUCES after F16; residual is PRIORITY 11
+
+**Re-measured 2026-09-23 on `5e18ccef`, same corpus:** the growth is gone.
+ctx build: union 403 at map 512, 408 at 1024, 8192 and 65536; context-free
+build: 344 at both 512 and 8192. The union now *shrinks* at 512 (5 ids and 8
+hits fewer), which is the ordinary saturation direction at load 408/512 = 0.80
+(mean probe displacement 0.386, 83.7% home hits); the tool does not print the
+drop counter, so that attribution is by direction, not by count. The
+"unlocated ctx line" is moot. What remains is the fuzzgoat heap-buffer-overflow
+triage described at the end -- but fuzzgoat plants memory bugs on purpose, so
+check the report against fuzzgoat's list of planted bugs before treating it as
+a finding.
+
+F14's table: union 317 ids / 16250 triples at 65536/8192, 327/328 ids /
+17116/17216 at 1024/512. The 3.5% inflation is now characterized end to end.
+It is **not** a placement artefact; it is the child computing a *different
+edge_id stream* when the advertised `AFL_MAP_SIZE` changes, for one logical
+edge. The experiment trail on fuzzgoat (clang, ASLR pinned, `~/fuzzing/builds/fuzzgoat_read`):
+
+* **Segment size is irrelevant.** Allocate a 65536-entry segment and pass
+  `AFL_MAP_SIZE=512`: the extra id (209) appears. Same 65536 segment with
+  view 8192: it does not. The driver is the advertised map value, not the
+  backing store.
+* **It is fire-side, not storage-side.** Native `path_hash` (placement-
+  independent; `hash = hash * 31 ^ edge_id` per fire) differs between views
+  (7615122267079587265 vs 1946655851876716116) at equal `edge_count` (5) and
+  dropped=0. The same logical edge is stored as 209/223 at map 512 and 219 at
+  map 8192 -- mutually exclusive, tracked by the *current* exec (mixed-
+  history runs confirmed: 209 iff the recording exec ran at 512, 219 iff at
+  8192).
+* **It is a CTX artifact.** A rebuild with `-D__AFL_CTX_SENSITIVE=0` stores
+  byte-identical tables at 512 and 8192 (same 13 ids, same path_hash).
+* **It is layout-invariant.** Env-length padding (0..4096 B), `MALLOC_*`
+  tunables, and a 64 MiB anonymous LD_PRELOAD pad all leave 209 fixed at
+  map 512.
+* **The target cannot be the driver.** Neither `targets/fuzzgoat_read.c` nor
+  the vendored `fuzzgoat.c` calls `getenv` or reads the segment, so the value
+  shift is produced inside the shim's own CTX/fire path -- yet no `__afl_map_size`
+  read exists in `__afl_get_caller_ctx()`/the probe loop, only
+  placement/`window`/tail-offset/wrap-wipe reads. The exact line is still
+  unlocated; the storage semantics themselves are exonerated by the
+  path_hash divergence (placement cannot alter it).
+
+Consequence for F14/F15: the bijection and the tensor factorization hold per
+*fixed* map size; on a CTX-sensitive target, cross-map union comparison is not
+apples-to-apples because one logical edge can carry a different id value at
+512 vs 8192. Standing recommendation (unchanged, and now load-bearing): pin
+`AFL_MAP_SIZE` for any comparison and evaluate all positional statistics on a
+single map size.
+
+**Addendum: the minimal direct-callback driver does not reproduce this, which
+narrows the search.** Attempted the cheapest possible reproduction of the
+CTX/id shift with `tests/test_ctx_and_map_size.py`'s own driver (gcc,
+`-D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer`, `__sanitizer_cov_trace_pc_guard`
+called directly, no clang, no real target) rather than fuzzgoat: same 65536-entry
+backing segment, two `subprocess.run` calls differing only in the
+`AFL_MAP_SIZE` view (512 vs 8192), edge_id logged per fire via a temporary
+env-gated write right after `edge_id |= 1` (the same hook P0-1 sketches,
+built as a scratch, uncommitted local patch to afl_shim.c for this
+investigation only). First attempt: all 40 fires differed between views --
+looked like an instant reproduction, until the same-view rerun (8192 vs 8192)
+*also* differed, which pins the cause on the harness rather than the shim:
+unsetting `FUZZER_KEEP_ASLR` disables the shim's own base-relative addressing,
+it does not touch the kernel's ASLR, so the two bare `subprocess.run` calls
+each got a fresh randomized PIE base and every `caller_ctx` naturally differed
+-- the exact class of artefact F1 already named, just at the harness level
+instead of the shim's. Re-run with the process actually pinned
+(`setarch x86_64 -R`, the same effect `disable_aslr()` achieves in
+`edge_diagnostic.py`'s `assert disable_aslr()` at line 132) and confirmed
+first via a same-view/same-pinning control (8192 vs 8192, byte-identical):
+0/40 fires differ between the 512 and 8192 views. `__afl_get_caller_ctx`'s
+own math -- fixed compile-time `__AFL_CTX_MASK`, no read of `__afl_map_size`
+anywhere in it or in `__afl_map_edge` up to the `|= 1` line -- is confirmed
+clean by direct measurement, not just by the grep the main writeup did.
+
+That the effect requires the real fuzzgoat/clang build to appear at all (a
+flat 40-guard single-TU loop, one call site, cannot produce it) says the
+missing line is not in the hashing math itself but in something only a
+multi-TU, dynamically-linked binary exercises around it -- `dladdr()`/PLT
+stub resolution, `.init_array` constructor ordering across translation
+units, or a second call site whose frame layout differs from the driver's.
+Next cheapest step, still no clang required: extend the direct-callback
+driver to two translation units with an indirect (function-pointer) call
+between them, the simplest structural difference from the single-TU loop
+that a real binary has and this driver does not.
+
+**Second addendum, with clang now available, on the real target: the CTX
+attribution above does not survive direct measurement, and the actual
+mechanism looks like a bug in fuzzgoat, not in the shim.** Built
+`targets/fuzzgoat_read` for real (`tools/vendor_fuzzgoat.sh`, clang
+`-fsanitize-coverage=trace-pc-guard`, exactly `build_targets.sh`'s recipe:
+`fuzzgoat.c` compiled separately without the shim, linked into the
+`-include afl_shim.c` wrapper). `tools/corpus_fuzzgoat.py`'s 120-file
+corpus reproduces the union growth directly (197 ids at map 8192/65536,
+203 at map 512, ASLR pinned via the real `disable_aslr()`); 6 of the 120
+inputs individually diverge. Traced one (`mut_insert_0047.json`) fire by
+fire with the same env-gated log used in the first addendum: divergence
+starts at fire #39, and the field that differs there is **`cur_loc`
+itself** (416 vs 420), not just the derived `edge_id` -- the target calls
+`__afl_map_edge` with a different value, meaning the *actual sequence of
+instrumentation points reached* differs (151 vs 147 total fires), not
+merely which id that sequence hashes to. That is a stronger and different
+claim than "CTX id-value shift": it survives a rebuild of the exact same
+driver with `__AFL_CTX_SENSITIVE` left off entirely (no `caller_ctx` term
+in `edge_id` at all) -- 155 vs 147 fires, same split. Whatever this is, it
+is not in `__afl_get_caller_ctx()`, confirming that function is a dead end
+for this line of investigation. A same-map-size/same-binary control run
+five times each was byte-identical both ways, and padding `AFL_MAP_SIZE`'s
+own env-string length while holding its parsed value at 8192 reproduced
+nothing (0/9 pad lengths shifted the fire count) -- ruling out both
+non-determinism and the stack-layout-via-env-length hypothesis the first
+addendum's team already tested, now specifically against a confirmed
+reproducer rather than in the abstract.
+
+The fire count changing from 155 to 151 after an unrelated rebuild (one
+extra `fprintf` argument logging `__afl_map_size` itself, which read back
+correctly and uncorrupted at every single fire in both views) is the tell:
+a *deterministic-per-binary but layout-fragile-across-rebuilds* effect is
+the signature of memory corruption, not of a hash computation. An ASan
+build of the same target (`fuzzgoat.c` ASan-instrumented separately per
+the same no-shim-in-that-TU rule, then linked) confirms it directly:
+`mut_insert_0047.json` trips a real
+**heap-buffer-overflow READ of 8 bytes, 7 bytes past a 33-byte allocation,
+in `json_value_free_ex` (vendor/fuzzgoat/fuzzgoat.c:258)** -- identically
+at both AFL_MAP_SIZE=512 and 8192 (same address, same stack, ASan does not
+care about the shim's env var). 13 of the 120 corpus inputs trip the same
+report; 3 of the 5 fire-count-diverging inputs are among them (the other
+2 diverge without tripping this particular redzone, consistent with a type
+confusion bug in the value union that only sometimes reads far enough to
+hit a poisoned byte). This crash fires *after* the traversal that produces
+the diverging fire count (`json_value_free` runs once `process_value` has
+already completed in `fuzz_shm_run`), so it cannot be the literal
+mechanism -- but it is very likely the same family of bug: fuzzgoat's
+`json_value` union being read under the wrong member/size assumption
+somewhere upstream, silently in-bounds often enough that ASan does not
+always catch it during the parse/traversal phase, occasionally out-of-
+bounds enough that it does during the free phase. This reframes P1-4: the
+union-growth-under-a-smaller-map is likely a real, ASan-confirmed bug in
+the *vendored fuzzgoat target* surfacing as an id-count artifact, not a
+defect in the shim's CTX or hashing path, both of which are now measured
+clean. Next step: minimize `mut_insert_0047.json` under the ASan build and
+locate the exact union member fuzzgoat reads with the wrong type -- ordinary
+crash triage, no more shim archaeology needed.
 
 ### P0-2. Guard F1 (per-process edge ids under ASLR) -- DONE, rescoped
 
@@ -1061,46 +1493,6 @@ Shim diagnostics are unchanged: identical gcc `-Wall -Wextra` output to
 dd834d1 under default, `-D__AFL_DISTANCE_MODE=0`, `-D__AFL_CTX_SENSITIVE=0`
 and `-D__AFL_NGRAM_K=4`.
 
-### P1-1. Three targets, not one
-
-Every number in this document is one small JSON parser. Re-run the tool on
-`png_read`, `zlib_read` and ffmpeg and record ICC, family occupancy, the drop
-counter and (per F7) the spectrum. No code change; machine time and a table.
-ffmpeg is the one that matters -- 8189 edges, genuinely multimodal, and the
-target §14's measurements never reached because it would not build in that
-container. This gates P3-1 and feeds E6.
-
-### P1-2. Check the edge-count relations against the real CFG
-
-F10's 45 sparse relations either are Kirchhoff identities on the CFG or are
-artefacts of 250 runs of one target, and nothing measured so far separates the
-two. `core/icfg.py` builds the graph; the test is whether each empirical
-relation corresponds to a join or a loop in it. A positive opens Ball-Larus
-(instrument a spanning tree's complement, derive the rest, and stop paying for
-337 of 445 count coordinates); a negative closes the whole integer-relation
-line, which is worth as much. Blocked on nothing but machine time.
-
-### P1-3. Does PC2 separate valid from invalid on other targets?
-
-F13 found the second principal component of the seed Gram matrix tracking
-parse success on fuzzgoat (rho = +0.312, means +0.0109 vs -0.0129). If that
-holds on png and zlib -- both have a well-defined notion of a valid file, so
-the label is free -- it is a validity signal derived from coverage alone.
-`ValidityChannel` already tracks the same property, but as a verdict the
-target reports per execution (`Validity.VALID/INVALID/UNKNOWN`, recorded
-into `seed_meta['valid']`), so a coverage-side estimate would be a second,
-independent read on it rather than a replacement. One afternoon of machine time, no code change to
-measure. If it replicates, section [4] of the tool should report the top
-eigenvector correlations and not just the spectrum.
-
-### P2-1. Wire `2^H` into the stall reason
-
-`edge_hit_distribution()` has zero callers in `src/` and zero in `tests/`.
-Effective edges collapsing while the raw edge count is flat is a saturation
-signal the stall machinery has no equivalent of; it belongs in the same
-reason string as the Allan noise type and `wall_summary()`. Self-contained,
-one commit.
-
 ### P2-2. Spectrum and GF(2) sections in the tool -- DONE
 
 Landed as sections [4] and [5]: F7's three spectrum rows and F8's GF(2) rank,
@@ -1114,7 +1506,16 @@ rather than a result.
 Not covered and still open: `node_idx` needs a `__AFL_DISTANCE_MODE` build, so
 section [3] names the axis and declines to collect it.
 
-### P2-3. Scheduler substrate: guards and the canonical edge space
+### P2-3. Scheduler substrate: guards and the canonical edge space -- DONE
+
+Landed as 4af8a07c (`core/scheduler_substrate.py`): `coverage_trust()`
+consults `sancov_guard_status` and the stability probe and is the single
+preflight used by `Fuzzer` and `MatrixSubstrate`; `EdgeCanonicalizer` collapses
+duplicate-profile classes; `effective_edges()` is exposed (and printed in the
+summary). Applying them to weights was left to P3-3/P3-4 on purpose. The 2^H
+half of P2-1 that it overlapped is noted there.
+
+Original text:
 
 Gated on nothing, and the only part of the design above that fixes numbers
 already being computed rather than adding a new one. Three pieces: consult
@@ -1125,199 +1526,14 @@ up to 45 times; and expose `2^H` from `edge_hit_distribution()`, which still
 has no caller. Overlaps P2-1, which wires the same scalar into the stall
 reason -- do them together.
 
-### P3-3. Operator reward on independent coordinates
+### Docs nit -- SUPERSEDED by F16
 
-**Built as `op_credit`, off by default, no bench result** (see
-`handover_matrix_schedulers_2026-09-19.md`). The duplicate-class half is in;
-the derived-edge half waits on P1-2 (`MatrixSubstrate.derived` is empty). The
-paper question is answered there: credit is a function of the current partition,
-so a split raises it. Gated on P1-2. Credit a duplicate class once instead of per member, and give
-a derived edge no novelty credit at all. Changes the reward rather than the
-selector, so it is measurable against the 34 existing operator schedulers
-without replacing any of them. Paper question first: what happens to credit
-when a class splits mid-campaign.
+The `|= 1` this nit asks to cross-reference no longer exists: the
+hashed-location shim remaps zero instead of forcing bit 0 (`afl_shim.c`,
+"Not `edge_id |= 1`"), so `N` context bits give `N` usable ones. Considered and
+overtaken, not done -- recorded so it is not re-applied to the new code.
 
-### P3-4. `seed_residual` arm
-
-**Built, off by default, no bench result**
-(`handover_matrix_schedulers_2026-09-19.md`); the per-refit partial-correlation
-log is in. PC2/PC3 features are not, pending P1-3. Gated on P1-3 and on P2-3's canonical space. Mass orthogonal to
-rank(total hits), weighted by `1/owner_count`, with the partial-correlation
-falsification recomputed at every refit and logged. `bench_paired.py` with a
-pre-registered threshold, no exceptions: the same question has produced two
-wrong answers from observational correlation already.
-
-### P1-4. Why does the union grow as the map shrinks -- RESOLVED (empirically), one shim line unlocated
-
-F14's table: union 317 ids / 16250 triples at 65536/8192, 327/328 ids /
-17116/17216 at 1024/512. The 3.5% inflation is now characterized end to end.
-It is **not** a placement artefact; it is the child computing a *different
-edge_id stream* when the advertised `AFL_MAP_SIZE` changes, for one logical
-edge. The experiment trail on fuzzgoat (clang, ASLR pinned, `~/fuzzing/builds/fuzzgoat_read`):
-
-* **Segment size is irrelevant.** Allocate a 65536-entry segment and pass
-  `AFL_MAP_SIZE=512`: the extra id (209) appears. Same 65536 segment with
-  view 8192: it does not. The driver is the advertised map value, not the
-  backing store.
-* **It is fire-side, not storage-side.** Native `path_hash` (placement-
-  independent; `hash = hash * 31 ^ edge_id` per fire) differs between views
-  (7615122267079587265 vs 1946655851876716116) at equal `edge_count` (5) and
-  dropped=0. The same logical edge is stored as 209/223 at map 512 and 219 at
-  map 8192 -- mutually exclusive, tracked by the *current* exec (mixed-
-  history runs confirmed: 209 iff the recording exec ran at 512, 219 iff at
-  8192).
-* **It is a CTX artifact.** A rebuild with `-D__AFL_CTX_SENSITIVE=0` stores
-  byte-identical tables at 512 and 8192 (same 13 ids, same path_hash).
-* **It is layout-invariant.** Env-length padding (0..4096 B), `MALLOC_*`
-  tunables, and a 64 MiB anonymous LD_PRELOAD pad all leave 209 fixed at
-  map 512.
-* **The target cannot be the driver.** Neither `targets/fuzzgoat_read.c` nor
-  the vendored `fuzzgoat.c` calls `getenv` or reads the segment, so the value
-  shift is produced inside the shim's own CTX/fire path -- yet no `__afl_map_size`
-  read exists in `__afl_get_caller_ctx()`/the probe loop, only
-  placement/`window`/tail-offset/wrap-wipe reads. The exact line is still
-  unlocated; the storage semantics themselves are exonerated by the
-  path_hash divergence (placement cannot alter it).
-
-Consequence for F14/F15: the bijection and the tensor factorization hold per
-*fixed* map size; on a CTX-sensitive target, cross-map union comparison is not
-apples-to-apples because one logical edge can carry a different id value at
-512 vs 8192. Standing recommendation (unchanged, and now load-bearing): pin
-`AFL_MAP_SIZE` for any comparison and evaluate all positional statistics on a
-single map size.
-
-**Addendum: the minimal direct-callback driver does not reproduce this, which
-narrows the search.** Attempted the cheapest possible reproduction of the
-CTX/id shift with `tests/test_ctx_and_map_size.py`'s own driver (gcc,
-`-D__AFL_CTX_SENSITIVE=1 -fno-omit-frame-pointer`, `__sanitizer_cov_trace_pc_guard`
-called directly, no clang, no real target) rather than fuzzgoat: same 65536-entry
-backing segment, two `subprocess.run` calls differing only in the
-`AFL_MAP_SIZE` view (512 vs 8192), edge_id logged per fire via a temporary
-env-gated write right after `edge_id |= 1` (the same hook P0-1 sketches,
-built as a scratch, uncommitted local patch to afl_shim.c for this
-investigation only). First attempt: all 40 fires differed between views --
-looked like an instant reproduction, until the same-view rerun (8192 vs 8192)
-*also* differed, which pins the cause on the harness rather than the shim:
-unsetting `FUZZER_KEEP_ASLR` disables the shim's own base-relative addressing,
-it does not touch the kernel's ASLR, so the two bare `subprocess.run` calls
-each got a fresh randomized PIE base and every `caller_ctx` naturally differed
--- the exact class of artefact F1 already named, just at the harness level
-instead of the shim's. Re-run with the process actually pinned
-(`setarch x86_64 -R`, the same effect `disable_aslr()` achieves in
-`edge_diagnostic.py`'s `assert disable_aslr()` at line 132) and confirmed
-first via a same-view/same-pinning control (8192 vs 8192, byte-identical):
-0/40 fires differ between the 512 and 8192 views. `__afl_get_caller_ctx`'s
-own math -- fixed compile-time `__AFL_CTX_MASK`, no read of `__afl_map_size`
-anywhere in it or in `__afl_map_edge` up to the `|= 1` line -- is confirmed
-clean by direct measurement, not just by the grep the main writeup did.
-
-That the effect requires the real fuzzgoat/clang build to appear at all (a
-flat 40-guard single-TU loop, one call site, cannot produce it) says the
-missing line is not in the hashing math itself but in something only a
-multi-TU, dynamically-linked binary exercises around it -- `dladdr()`/PLT
-stub resolution, `.init_array` constructor ordering across translation
-units, or a second call site whose frame layout differs from the driver's.
-Next cheapest step, still no clang required: extend the direct-callback
-driver to two translation units with an indirect (function-pointer) call
-between them, the simplest structural difference from the single-TU loop
-that a real binary has and this driver does not.
-
-**Second addendum, with clang now available, on the real target: the CTX
-attribution above does not survive direct measurement, and the actual
-mechanism looks like a bug in fuzzgoat, not in the shim.** Built
-`targets/fuzzgoat_read` for real (`tools/vendor_fuzzgoat.sh`, clang
-`-fsanitize-coverage=trace-pc-guard`, exactly `build_targets.sh`'s recipe:
-`fuzzgoat.c` compiled separately without the shim, linked into the
-`-include afl_shim.c` wrapper). `tools/corpus_fuzzgoat.py`'s 120-file
-corpus reproduces the union growth directly (197 ids at map 8192/65536,
-203 at map 512, ASLR pinned via the real `disable_aslr()`); 6 of the 120
-inputs individually diverge. Traced one (`mut_insert_0047.json`) fire by
-fire with the same env-gated log used in the first addendum: divergence
-starts at fire #39, and the field that differs there is **`cur_loc`
-itself** (416 vs 420), not just the derived `edge_id` -- the target calls
-`__afl_map_edge` with a different value, meaning the *actual sequence of
-instrumentation points reached* differs (151 vs 147 total fires), not
-merely which id that sequence hashes to. That is a stronger and different
-claim than "CTX id-value shift": it survives a rebuild of the exact same
-driver with `__AFL_CTX_SENSITIVE` left off entirely (no `caller_ctx` term
-in `edge_id` at all) -- 155 vs 147 fires, same split. Whatever this is, it
-is not in `__afl_get_caller_ctx()`, confirming that function is a dead end
-for this line of investigation. A same-map-size/same-binary control run
-five times each was byte-identical both ways, and padding `AFL_MAP_SIZE`'s
-own env-string length while holding its parsed value at 8192 reproduced
-nothing (0/9 pad lengths shifted the fire count) -- ruling out both
-non-determinism and the stack-layout-via-env-length hypothesis the first
-addendum's team already tested, now specifically against a confirmed
-reproducer rather than in the abstract.
-
-The fire count changing from 155 to 151 after an unrelated rebuild (one
-extra `fprintf` argument logging `__afl_map_size` itself, which read back
-correctly and uncorrupted at every single fire in both views) is the tell:
-a *deterministic-per-binary but layout-fragile-across-rebuilds* effect is
-the signature of memory corruption, not of a hash computation. An ASan
-build of the same target (`fuzzgoat.c` ASan-instrumented separately per
-the same no-shim-in-that-TU rule, then linked) confirms it directly:
-`mut_insert_0047.json` trips a real
-**heap-buffer-overflow READ of 8 bytes, 7 bytes past a 33-byte allocation,
-in `json_value_free_ex` (vendor/fuzzgoat/fuzzgoat.c:258)** -- identically
-at both AFL_MAP_SIZE=512 and 8192 (same address, same stack, ASan does not
-care about the shim's env var). 13 of the 120 corpus inputs trip the same
-report; 3 of the 5 fire-count-diverging inputs are among them (the other
-2 diverge without tripping this particular redzone, consistent with a type
-confusion bug in the value union that only sometimes reads far enough to
-hit a poisoned byte). This crash fires *after* the traversal that produces
-the diverging fire count (`json_value_free` runs once `process_value` has
-already completed in `fuzz_shm_run`), so it cannot be the literal
-mechanism -- but it is very likely the same family of bug: fuzzgoat's
-`json_value` union being read under the wrong member/size assumption
-somewhere upstream, silently in-bounds often enough that ASan does not
-always catch it during the parse/traversal phase, occasionally out-of-
-bounds enough that it does during the free phase. This reframes P1-4: the
-union-growth-under-a-smaller-map is likely a real, ASan-confirmed bug in
-the *vendored fuzzgoat target* surfacing as an id-count artifact, not a
-defect in the shim's CTX or hashing path, both of which are now measured
-clean. Next step: minimize `mut_insert_0047.json` under the ASan build and
-locate the exact union member fuzzgoat reads with the wrong type -- ordinary
-crash triage, no more shim archaeology needed.
-
-### P3-1. `__AFL_CTX_BITS` feedback
-
-Blocked on P1-1, and on paper first: write the decision rule before touching
-code. The inputs exist (ICC, family occupancy against the 2^(bits-1)
-reachable tags, `read_dropped_edges()`, and -- better than the ICC -- F10's
-count of edges duplicated *within* a family, which is unused context width
-measured exactly rather than inferred); what does not exist is a stated rule
-for stepping the width down or up, or evidence that the ICC threshold means
-the same thing on a multimodal target as on a JSON parser.
-
-### P3-2. Column leverage as a seed score
-
-The one SVD-derived score §14 did not test. Leverage measures distance from
-the dominant subspace, which is the direction Tang's l2 sampling gets
-backwards, and it is *not* the algebraic complement of covered mass -- so it
-is not the sign-flip that already failed. Given that record, the only
-acceptable form is `bench_paired.py` with a pre-registered threshold,
-designed before implementation. Observational correlation has been wrong
-twice on this question.
-
-### E6 (existing, amended)
-
-`handover_pending_2026-09-06.md` E6 already asks for the ffmpeg re-measurement
-of low-rank structure. Amendment from F7: assert ASLR is off and the
-stability probe is clean *before* reading the spectrum, because the ASAN
-kernel workaround that may be needed to run ffmpeg is the same variable that
-inflates effective rank 25x.
-
-### P4-1. LCG state recovery by lattice reduction
-
-`prng_state_recovery.py` cannot represent a multiplicative step, so the whole
-LCG family is out of its reach; F9 argues lattice reduction is the standard
-tool for exactly that gap, at dimensions where LLL is cheap. Genuine but
-blocking nothing. No dependency decision to make: the tool's LLL is written
-out in-file under Hard Rule 51, so the same routine is available to any
-caller in the tree.
-
-### Docs nit
+Original text:
 
 The `|= 1` comment and the `__AFL_CTX_BITS` comment in `afl_shim.c` should
 each mention the other: the OR costs one bit of context width, so `N` bits
