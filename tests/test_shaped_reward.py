@@ -66,8 +66,8 @@ class TestShapedWeightFunction:
         assert shaped_weight(_sub(), [], floor=0.9) == 0.0
 
     def test_a_derived_only_round_pays_nothing(self):
-        # P1-2's future state: `derived` is empty today, so this is the one
-        # behaviour that changes under this feature the day it is populated.
+        # `derived` is empty in production (P1-2 negative, handover F17); this
+        # pins the contract should a graph-derived mask ever fill it.
         sub = _sub()
         sub.derived = {10, 11, 12}
         assert shaped_weight(sub, {10, 11, 12}) == 0.0

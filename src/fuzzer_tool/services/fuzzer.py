@@ -2665,9 +2665,9 @@ class Fuzzer:
         self._shaped_reward = bool(shaped_reward)
         # Lower clamp on the factor (--shaped-reward-floor). 0.0 is the faithful
         # form; it is a knob because the two ways the factor collapses (a long
-        # duplicate chain paying 1/n, a derived-only round paying 0 once P1-2
-        # fills `derived`) are a design bet the handover states and nothing has
-        # measured.
+        # duplicate chain paying 1/n, a derived-only round paying 0 were `derived`
+        # ever filled -- P1-2 says it is not) are a design bet the handover states
+        # and nothing has measured.
         self._shaped_reward_floor = float(shaped_reward_floor)
         self._shaped_reward_rounds = 0
         self._shaped_reward_gated = 0

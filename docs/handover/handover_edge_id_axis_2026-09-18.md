@@ -12,7 +12,9 @@ hashed-location shim change. Read F16 before quoting any number above it.**
 F16's "after" column was reproduced independently on `5e18ccef` (see
 "Reference run" under Follow-up items). Numbers in F1-F15 were measured at
 `c26f0a1` or later as each section states. **The follow-up items are
-re-prioritized below; read "Priority order" first.**
+re-prioritized below; read "Priority order" first.** **F17 (2026-09-23,
+P1-2 done): most count relations are not node laws; the integer-relation line
+is closed.**
 
 ## Trigger
 
@@ -715,6 +717,50 @@ Follow-up: a context-free family is now the hashed location's bits above
 edges). Section [1] says so; exact counts need a `__AFL_CTX_SENSITIVE=0` build
 or `--ground-truth`.
 
+### F17 (P1-2). Most count relations are not flow conservation
+
+Measured on `d2bc7747`, reference setup below, with
+`edge_diagnostic.py matrix --ground-truth /tmp/fg_gt --lll --flow` (section
+[10]). A tracer log is a walk; closed through a virtual exit it is a
+circulation, so a relation r over edge counts is a node law iff `Z r = 0` for
+the fundamental cycles Z of the walk graph. Exact: integer cycles, ranks over
+GF(2^31-1). Two graphs: nodes = locations, and nodes = (location, call site),
+which also sees one level of call/return pairing.
+
+Controls: tracer events 23733 = shim total hits; 0 discontinuities, 0
+Kirchhoff violations; the call-site graph's 408 column profiles equal the
+`fg_ctx` ids' as a multiset, the context-free graph's 344 equal `fg_noctx`'s.
+
+| | context-free | call-site |
+|---|---|---|
+| count rank | 89 | 89 |
+| independent counts (rank of Z on columns) | 192 of 344 | 194 of 408 |
+| kernel dims not explained by flow | 103 of 255 | 105 of 319 |
+| duplicates / A=B+C / multiples / LLL that are node laws | 50/121, 16/59, 0/6, 7/30 | 95/178, 25/81, 0/5, 9/34 |
+
+* **Rank is not the cycle space** (89 vs 194), and 169 of 298 sparse
+  relations are not node laws.
+* **Not all of them are corpus coincidence.** Re-checked on the 250 inputs
+  plus 1500 random mutants (byte set/insert/delete/append, Python `random`
+  seed 1, scratch): about half the non-law relations survive (dups 49/83,
+  triples 38/56, LLL 12/25). The ones read by hand are allocator call/return
+  pairs one level deeper than the call-site graph sees, and correlated cases in
+  `json_parse_ex`'s two passes. Program invariants, but not flow; counts cannot
+  separate them from coincidences.
+* **Node laws are laws of the observed graph only.** 11 of 129 stopped being
+  laws once the mutants grew the graph (graph 408 -> 485 columns). Adding
+  edges only enlarges the cycle space, so a static CFG (`core/icfg.py`) can
+  shrink the structural set, never grow it -- the static step cannot turn this
+  negative into a positive.
+* **Ball-Larus is real but graph-side.** 214 of 408 counts (52%; 152 of 344
+  context-free) are derivable from the walk graph. The fuzzer has ids, not the
+  graph, so nothing at runtime can use that.
+
+**Decision (P1-2's rule): negative.** Mining relations from counts is closed;
+tool section [6] is diagnostic only and says so. `MatrixSubstrate.derived`
+stays empty; P3-3's derived half is closed. Re-open only with a graph-derived
+mask (guard -> static CFG), not with a relation search.
+
 ## Not defined on the id axis -- do not re-propose
 
 Linear regression or slope of count against id; autocorrelation or FFT along
@@ -755,8 +801,9 @@ dependency, so Spearman is rank + Pearson in-file). Reuses
 Nine sections: [0] cross-process id stability, [1] x-axis structure, [2] the
 permutation-invariant y marginal, [3] substituted axes, [4] the singular
 spectrum, [5] the GF(2) structure, [6] integer relations (opt-in, `--lll`),
-[7] edge equivalence classes and [8] placement structure (opt-in,
-`--positions`). `--transpose`
+[7] edge equivalence classes, [8] placement structure (opt-in,
+`--positions`), [9] ground truth (`--ground-truth`) and [10] flow conservation
+(`--ground-truth --flow`, F17). `--transpose`
 runs [4] to [6] on the edge x seed matrix and enables [7]. Per Hard Rule 46 the
 lag-1 statistic ships with both of its controls -- a global permutation null
 *and* a within-family shuffle that must leave the effect standing if the
@@ -796,7 +843,9 @@ and novelty weight by that multiplicity. Recompute at refit by hashing each
 column; do not maintain it incrementally, because classes split as the corpus
 grows and a merge-only structure would be wrong.
 
-**Independent-coordinate mask.** The count vector has rank 108 of 445 (F9),
+**Independent-coordinate mask -- closed by F17.** Most empirical relations
+are not node laws, so nothing mined from counts may populate it. Original text:
+The count vector has rank 108 of 445 (F9),
 and on the edge orientation the relations are sparse with unit coefficients
 (F10), consistent with Kirchhoff conservation. If P1-2 confirms them against
 `core/icfg.py`, mark the derived edges: a spanning tree's complement carries
@@ -878,14 +927,14 @@ the tool) continues or closes, and nothing else on the list has that leverage.
 
 | # | item | cost | gates / unblocks |
 |---|---|---|---|
-| 1 | **P1-2** edge-count relations vs the real CFG | an afternoon, no production code | P3-3 derived half; Ball-Larus; closes or keeps tool [6] |
-| 2 | **P0-1** close F2 (path-hash half) | one env-gated `write()`, one run | every first-execution number |
+| 1 | **P0-1** close F2 (path-hash half) | one env-gated `write()`, one run | every first-execution number |
+| 2 | ~~P1-2~~ DONE, negative (F17) | -- | closed P3-3 derived half; [6] diagnostic only |
 | 3 | **P2-4** `edge_diagnostic.py` runs only on the maintainer's machine | one line + a smoke test | anyone else reproducing anything in this file |
 | 4 | **P1-1 + P1-3** png, zlib, ffmpeg (absorbs E6) | machine time, a table | P3-1, P3-4, E6 |
 | 5 | **P2-1** 2^H in the stall reason | one commit | nothing; self-contained |
 | 6 | **P3-1** `__AFL_CTX_BITS` feedback | paper first | blocked on 4; its best input is gone (see item) |
 | 7 | **P3-4** `seed_residual` A/B | bench_paired run | blocked on 4 (PC2/PC3 features) |
-| 8 | **P3-3** `op_credit` derived-edge credit | re-run the existing A/B | blocked on 1 |
+| 8 | **P3-3** `op_credit` derived-edge credit | -- | closed by F17 (P1-2 negative) |
 | 9 | **P3-2** column leverage | bench design first | nothing; lowest expected value |
 | 10 | **P4-1** LCG recovery by lattice reduction | new feature | nothing; blocks nothing |
 | 11 | **P1-4 residual** fuzzgoat crash triage | ordinary triage | nothing; the id effect is gone |
@@ -941,7 +990,12 @@ near-degenerate and not a finding: under hashed locations a family is the
 location's upper bits, and 408 ids fall in 323 families, mostly singletons, so
 it mostly measures edge identity. It is not F3 coming back.
 
-### P1-2. Check the edge-count relations against the real CFG -- PRIORITY 1
+### P1-2. Check the edge-count relations against the real CFG -- DONE, negative (F17)
+
+**Closed 2026-09-23 on `d2bc7747`.** Steps 1-3 below are section [10]
+(`--ground-truth --flow`); results and decision in F17. The static
+`core/icfg.py` step was not run: it can only remove node laws, so it cannot
+change the verdict.
 
 **Refreshed 2026-09-23.** The counts this item was written against ("F10's 45
 sparse relations", "337 of 445 count coordinates") were measured through the
@@ -1128,7 +1182,10 @@ falsification recomputed at every refit and logged. `bench_paired.py` with a
 pre-registered threshold, no exceptions: the same question has produced two
 wrong answers from observational correlation already.
 
-### P3-3. Operator reward on independent coordinates -- PRIORITY 8, blocked on P1-2
+### P3-3. Operator reward on independent coordinates -- derived half CLOSED by F17
+
+**Closed 2026-09-23:** P1-2 was negative, so `derived` stays empty and there
+is no second A/B to run. The duplicate-class half and its bench result stand.
 
 **Refreshed 2026-09-23: there is a bench result.** `--shaped-reward` was run
 paired against `--elo` on fuzzgoat (seeds 0-11, 2,000 execs): 5W/7L, median

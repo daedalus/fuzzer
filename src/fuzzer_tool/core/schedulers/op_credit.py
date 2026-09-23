@@ -12,8 +12,8 @@ The reward is ``substrate.class_credit(edges the operator was on the round it fo
 * **A duplicate class pays once, not once per member** (F10: 126 of 445 edges are
   copies, largest class 45). An operator that walks into a 45-edge straight-line chain
   earns one unit.
-* **A derived edge pays nothing** once P1-2 has confirmed the relations against
-  ``core/icfg.py``; until then ``substrate.derived`` is empty and this is a no-op.
+* **A derived edge pays nothing.** No-op: P1-2 was negative (handover F17 -- most
+  count relations are not node laws), so ``substrate.derived`` stays empty.
 * **The credit is a function of the current partition, not an accumulator.** This is
   the answer to P3-3's paper question, what happens to credit when a class splits
   mid-campaign: nothing stored can go stale, because the arm stores only the edges an
@@ -58,14 +58,14 @@ def shaped_weight(substrate: MatrixSubstrate, new_edge_ids, floor: float = 0.0) 
     Returns ``0.0`` for an empty round and for a round whose every edge is in
     ``substrate.derived`` -- a derived edge pays nothing by design, so a round
     that found only derived edges earned no credit. Nothing populates ``derived``
-    until P1-2 confirms the relations, so until then the smallest a non-empty
-    round can pay is ``1/len(edges)``.
+    (P1-2 negative, handover F17), so the smallest a non-empty round can pay is
+    ``1/len(edges)``.
 
     *floor* clamps the result from below (``--shaped-reward-floor``). It exists
     because the two ways this factor reaches zero-ish are a design bet, not a
     measurement: a 45-edge chain paying 1/45 all but deletes that round's reward
-    for every arm, and once P1-2 fills ``derived`` a round of only derived edges
-    pays exactly nothing. ``floor=0.0`` is the faithful form, ``floor=1.0``
+    for every arm, and were ``derived`` ever filled a round of only derived edges
+    would pay exactly nothing. ``floor=0.0`` is the faithful form, ``floor=1.0``
     disables the shaping without touching the wiring, and anything between is the
     knob a paired run can move. Clamped to ``[0, 1]``; an empty round still pays
     0.0, because there is no round to shape.

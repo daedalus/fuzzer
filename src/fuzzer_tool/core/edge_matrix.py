@@ -136,10 +136,10 @@ def build_fold(
         profiles: Seed key -> {edge id: hit count}.
         canon: Canonicalizer to refit. Classes are rebuilt wholesale every call, never
             merged incrementally, so a class that one new input splits is split here.
-        derived: Edges determined by others (P1-2's independent-coordinate mask). They
-            carry no mass and earn no credit. Nothing populates this yet: a relation
-            holding over one corpus is not a CFG identity, so it stays empty until the
-            relations are confirmed against ``core/icfg.py``.
+        derived: Edges determined by others (independent-coordinate mask). They
+            carry no mass and earn no credit. Nothing populates this: P1-2 found most
+            count relations are not node laws (edge-id handover F17), so only a
+            graph-derived mask may fill it.
         cell_budget: Seeds x distinct-edges bound.
     """
     keys = list(profiles)

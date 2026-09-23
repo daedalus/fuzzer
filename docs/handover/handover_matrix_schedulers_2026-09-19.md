@@ -42,7 +42,7 @@ reset).
 | F6 owners are incidence, volume is not | `1/owners`, never hit volume |
 | F5 `2^H` | `MatrixSubstrate.saturation_signal` (shape from the handover, scale uncalibrated) |
 | P3-3 paper question: a class splits mid-campaign | credit is a function of the current partition, never an accumulator (test: `test_a_split_raises_credit_because_nothing_is_stored`) |
-| P1-2 independent-coordinate mask | `MatrixSubstrate.derived`, empty; nothing fills it until the relations are confirmed against `core/icfg.py` |
+| P1-2 independent-coordinate mask | `MatrixSubstrate.derived`, empty; P1-2 was negative (edge-id handover F17), so it stays empty |
 
 Absent on purpose, as excluded by measurement: any low-rank seed score (SVD
 leverage, PC1-3; PC2/PC3 wait on P1-3), l2-magnitude sampling, GF(2)/LLL as a
@@ -98,7 +98,7 @@ on F1.
   **not adopted**: see §"A/B result" below. The arithmetic moved to a module-level
   `shaped_weight(substrate, edges, floor)`; the method is a thin bind, because the
   shaping is for every arm and must not require electing this selector.
-- Nothing populates `derived` (P1-2) and PC2/PC3 are unused (P1-3).
+- Nothing populates `derived` (P1-2 negative, F17) and PC2/PC3 are unused (P1-3).
 
 ## A/B result (2026-09-20): shaped reward measured, not adopted
 
