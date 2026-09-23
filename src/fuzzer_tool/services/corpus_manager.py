@@ -796,6 +796,11 @@ class CorpusManager:
         # downstream GA population block below) both need it, but the old
         # placement at line 800 was after the check that consumed it.
         seed_key = self.seed_key(data)
+        # Set by the Poisson-disk gate below; applied only once seed_meta[data]
+        # exists. The entry is created further down by a fresh dict literal,
+        # so writing the flag at the gate would KeyError on a new seed (and,
+        # for a re-admitted one, be clobbered by that literal anyway).
+        is_near_duplicate = False
         if save_to_corpus(
             data,
             f.corpus_dir,
@@ -848,7 +853,7 @@ class CorpusManager:
                         # Admit normally but flag as near-duplicate for deprioritized
                         # weighting.  This preserves the seed's edges while signaling
                         # it should be weighted lower in seed_key/population selection.
-                        f.seed_meta[data]["_is_near_duplicate"] = True
+                        is_near_duplicate = True
 
                 f.corpus.append(data)
             if f.ga:
@@ -880,6 +885,8 @@ class CorpusManager:
                 "record_stride": estimate_record_size(data),
                 "input_size": len(data),
             }
+            if is_near_duplicate:
+                f.seed_meta[data]["_is_near_duplicate"] = True
             # Lineage edge: parent key + the ops/sites that produced this seed.
             # Only recorded when a real parent exists (interesting/Metropolis
             # paths in fuzz_one). Every in-tree caller now passes one; the
