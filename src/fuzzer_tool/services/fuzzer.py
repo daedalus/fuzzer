@@ -1232,6 +1232,7 @@ class Fuzzer:
         quiet_stats=False,
         no_save_state=False,
         dedup_execs=True,
+        seed_calibration=True,
         # Exec-dedup backend.  "bloom" is the historic default (a
         # BloomFilter with generational reset); "cuckoo" swaps in a
         # CuckooFilter, which supports deletions and has a lower realised
@@ -1833,6 +1834,7 @@ class Fuzzer:
         # Generational: wiped once `capacity` inputs are absorbed, which keeps
         # the realised FP rate at 1e-3 over an unbounded exec stream.
         self._dedup_execs = dedup_execs
+        self._seed_calibration = seed_calibration
         self._exec_dedup_backend = exec_dedup_backend
         if exec_dedup_backend == "cuckoo":
             from fuzzer_tool.core.cuckoo import CuckooFilter
@@ -7921,6 +7923,9 @@ class Fuzzer:
         genuinely carry. Crashes/timeouts during calibration are counted,
         not fatal — a hostile corpus must not kill startup.
         """
+        # --no-calibration: skip the pass, its RSS and its per-seed executions.
+        if not self._seed_calibration:
+            return
         if not self.use_coverage or not self.shm_cov or self.multi_targets:
             return
         if not self.corpus:

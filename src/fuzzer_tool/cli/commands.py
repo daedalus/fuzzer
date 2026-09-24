@@ -794,6 +794,7 @@ def cmd_fuzz(args):
         quiet_stats=getattr(args, "profile_hotpath", False),
         no_save_state=getattr(args, "no_save_state", False),
         dedup_execs=not getattr(args, "no_dedup_execs", False),
+        seed_calibration=not getattr(args, "no_calibration", False),
         exec_dedup_backend=getattr(args, "exec_dedup_backend", "bloom"),
         perf_novelty=not getattr(args, "no_perf_novelty", False),
         reject_code=getattr(args, "reject_code", None),
@@ -3688,6 +3689,12 @@ def main() -> int:
         "--no-dedup-execs",
         action="store_true",
         help="Do not filter already-executed mutants through the exec bloom filter",
+    )
+    fuzz_parser.add_argument(
+        "--no-calibration",
+        action="store_true",
+        help="Skip the verbatim seed execution pass before the fuzz loop "
+        "(saves startup time and RSS; seed coverage then comes only from mutants)",
     )
     fuzz_parser.add_argument(
         "--exec-dedup-backend",

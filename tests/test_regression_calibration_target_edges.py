@@ -38,6 +38,7 @@ class _FakeShm:
 def _fuzzer(seeds: list[bytes], edges: set[int], *, multi: bool = False) -> Fuzzer:
     f = Fuzzer.__new__(Fuzzer)
     f.use_coverage = True
+    f._seed_calibration = True
     f.multi_targets = ["a", "b"] if multi else []
     f.target = "/x/ffmpeg_read_asan.so"
     f.corpus = list(seeds)

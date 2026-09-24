@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--no-calibration`**: skips `_calibrate_seed_baselines` (saves its startup time and RSS).
+
 - **Heap trim per status line** (`adapters/libc_mem.py`): `print_stats()` runs glibc
   `malloc_trim(0)` each status line and shows the RSS released (`| trim: 512KB`).
 
