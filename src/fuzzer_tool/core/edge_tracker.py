@@ -2851,52 +2851,52 @@ class EdgeTracker:
     def coverage_dominance_tree(self) -> dict[str, list[str]]:
         """Build a coverage dominance tree.
 
-        Seed A dominates seed B if edge(A) is a strict subset of edge(B).
-        Returns dict mapping seed_key -> list of seeds it dominates.
+        Seed A is dominated by seed B if edge(A) is a subset of edge(B).
+        Returns dict mapping seed_key -> list of seeds it dominates. Seeds are
+        ranked by edge count (stable), and equal sets dominate forward only:
+        the earlier-ranked copy is the dominated one.
 
-        Uses MinHash for approximate subset checks on large edge sets,
-        exact checks for small sets (< 100 edges).
+        Exact at every size, by the Gram identity: with B the binary
+        seed x edge matrix, S_a is a subset of S_b iff (B B^T)[a, b] = |S_a|,
+        i.e. iff b owns every edge of a. So a's dominators are the
+        intersection of owners(e) over e in S_a, started from a's rarest edge
+        -- no pair loop, and no Jaccard stand-in. The pair loop this replaces
+        tested "MinHash Jaccard > 0.8" above 100 edges, which missed every
+        small-inside-large subset (150 in 600 is Jaccard 0.25) and reported
+        near-twins that contain neither each other.
 
         Returns:
             Dict mapping dominator -> list of dominated seeds.
         """
+        owners: dict[int, set[str]] = {}
+        for key, edges in self.seed_edges.items():
+            for e in edges:
+                owners.setdefault(e, set()).add(key)
+
+        ranked = sorted(self.seed_edges.items(), key=lambda x: len(x[1]))
+        rank = {key: i for i, (key, _) in enumerate(ranked)}
         dominance: dict[str, list[str]] = {k: [] for k in self.seed_edges}
 
-        # Sort seeds by edge count (ascending) for efficiency
-        sorted_seeds = sorted(
-            self.seed_edges.items(),
-            key=lambda x: len(x[1]),
-        )
-
-        for i, (key_a, edges_a) in enumerate(sorted_seeds):
+        for key_a, edges_a in ranked:
             if not edges_a:
                 continue
-            for j in range(i + 1, len(sorted_seeds)):
-                key_b, edges_b = sorted_seeds[j]
-                if not edges_b:
-                    continue
-
-                # Check if edges_a ⊂ edges_b (A dominated by B)
-                if len(edges_a) > len(edges_b):
-                    continue
-
-                # For small sets, use exact check
-                if len(edges_a) <= 100 and len(edges_b) <= 100:
-                    is_subset = edges_a.issubset(edges_b)
-                else:
-                    # Use MinHash approximation
-                    if self._corpus_sig is None:
-                        self._corpus_sig = self._minhash.corpus_minhash()
-                    jaccard_ab = self._minhash.approximate_jaccard(key_a, key_b)
-                    # If Jaccard is high and |A| <= |B|, likely subset
-                    is_subset = jaccard_ab > 0.8 and len(edges_a) <= len(edges_b)
-
-                if is_subset:
-                    # A is dominated by B
+            for key_b in self._dominators(edges_a, owners):
+                # Equal size + containment means equal sets: forward only.
+                if key_b != key_a and rank[key_b] > rank[key_a]:
                     dominance[key_b].append(key_a)
 
-        # Remove empty entries
         return {k: v for k, v in dominance.items() if v}
+
+    @staticmethod
+    def _dominators(edges: set[int], owners: dict[int, set[str]]) -> set[str]:
+        """Seeds owning every edge in *edges*: the intersection of their owner sets."""
+        by_rarity = sorted(edges, key=lambda e: len(owners[e]))
+        common = set(owners[by_rarity[0]])
+        for e in by_rarity[1:]:
+            if len(common) <= 1:  # only a itself left
+                break
+            common &= owners[e]
+        return common
 
     def find_redundant_seeds(self) -> list[str]:
         """Find seeds that are fully dominated by other seeds.
