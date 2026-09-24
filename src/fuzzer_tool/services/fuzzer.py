@@ -5676,50 +5676,6 @@ class Fuzzer:
         if self._crash_mi:
             self._crash_mi.record(mutated, is_crash)
 
-        # Format learner: only record when coverage actually changes
-        if self._format_learner and self._last_ops_used and has_new_coverage:
-            current_edges = (
-                self._current_edges_cache
-                if self._current_edges_cache is not None
-                else self._get_current_edge_set()
-            )
-            new_edges = set()
-            lost_edges = set()
-            if hasattr(self, "_prev_edge_set"):
-                new_edges = current_edges - self._prev_edge_set
-                lost_edges = self._prev_edge_set - current_edges
-            self._prev_edge_set = current_edges
-
-            cov_after = (
-                len(self._edge_tracker._global_edge_hits)
-                if hasattr(self._edge_tracker, "_global_edge_hits")
-                else 0
-            )
-            parent_meta = self.seed_meta.get(self._last_parent_seed)
-            stride = parent_meta.get("record_stride") if parent_meta else None
-            # Set per-format-cluster (not globally): different formats in a
-            # multi-format target can have different record strides, so this
-            # is routed by `mutated`'s own signature rather than compared
-            # against whatever the primary cluster's stride happens to be.
-            if stride is not None:
-                self._format_learner.set_record_stride(stride, input_bytes=mutated)
-            self._format_learner.record_transition(
-                input_bytes=mutated,
-                mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",
-                mutation_offset=self._last_mutation_offset,
-                mutation_width=len(mutated),
-                coverage_before=self._cov_before_fuzz,
-                coverage_after=cov_after,
-                new_edges=new_edges,
-                lost_edges=lost_edges,
-            )
-        elif self._format_learner:
-            self._prev_edge_set = (
-                self._current_edges_cache
-                if self._current_edges_cache is not None
-                else self._get_current_edge_set()
-            )
-
         # Write ablation log row: signal data + outcome
         if self._ablation_file and hasattr(self, "_last_pick_signals"):
             self._write_ablation_row(has_new_coverage, is_crash)
@@ -5868,6 +5824,56 @@ class Fuzzer:
                     fuzz_count = max(meta["fuzz_count"], 1) if meta else 1
                     discovery_rate = len(new) / fuzz_count
                     self._seed_secretary[seed_key].observe(discovery_rate)
+
+        # Format learner. Runs after the record_edges block above on purpose:
+        # coverage_after is len(_global_edge_hits), which only record_edges
+        # grows, and _cov_before_fuzz was sampled from the same dict at the
+        # top of the round. Recorded before record_edges (where this block
+        # used to sit) the two were always equal, so every TimelineEntry
+        # carried delta == 0 and the learner's delta statistics never saw a
+        # discovery. Only record when coverage actually changes.
+        if self._format_learner and self._last_ops_used and has_new_coverage:
+            current_edges = (
+                self._current_edges_cache
+                if self._current_edges_cache is not None
+                else self._get_current_edge_set()
+            )
+            new_edges = set()
+            lost_edges = set()
+            if hasattr(self, "_prev_edge_set"):
+                new_edges = current_edges - self._prev_edge_set
+                lost_edges = self._prev_edge_set - current_edges
+            self._prev_edge_set = current_edges
+
+            cov_after = (
+                len(self._edge_tracker._global_edge_hits)
+                if hasattr(self._edge_tracker, "_global_edge_hits")
+                else 0
+            )
+            parent_meta = self.seed_meta.get(self._last_parent_seed)
+            stride = parent_meta.get("record_stride") if parent_meta else None
+            # Set per-format-cluster (not globally): different formats in a
+            # multi-format target can have different record strides, so this
+            # is routed by `mutated`'s own signature rather than compared
+            # against whatever the primary cluster's stride happens to be.
+            if stride is not None:
+                self._format_learner.set_record_stride(stride, input_bytes=mutated)
+            self._format_learner.record_transition(
+                input_bytes=mutated,
+                mutation_op=self._last_ops_used[0] if self._last_ops_used else "unknown",
+                mutation_offset=self._last_mutation_offset,
+                mutation_width=len(mutated),
+                coverage_before=self._cov_before_fuzz,
+                coverage_after=cov_after,
+                new_edges=new_edges,
+                lost_edges=lost_edges,
+            )
+        elif self._format_learner:
+            self._prev_edge_set = (
+                self._current_edges_cache
+                if self._current_edges_cache is not None
+                else self._get_current_edge_set()
+            )
 
         # Update edge lifetime tracking for every execution
         if self._inprocess_runner or self.ptrace_cov or self.shm_cov:
