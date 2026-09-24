@@ -814,6 +814,17 @@ reliability (mutants 1-100 vs 101-200) bounds what any score can reach:
   uniqueness is positive in both but weaker than rarity; loop depth (peak
   count) is anti-predictive of unique finds in both.
 
+**Addendum: the signal is already in the default seed weights.**
+`SeedPicker._weight_edge_penalties` (default weighted pick) applies a
+`log2(1 + #edges with owners <= RARE_EDGE_OWNERS)` bonus and a crowding factor
+on mean owner count. On the same data, given degree and length, those two
+terms carry it: crowding (-mean owners) +0.36 / +0.34 (rarity-weighted, A / B)
+and +0.28 / +0.24 (unique); the rare-edge count +0.11 / +0.39 and +0.12 /
++0.35. With them also controlled, rarity mass adds -0.01 / +0.12 and +0.10 /
+-0.04, rarest edge -0.13 / +0.18 and +0.10 / -0.02 -- inside or at the noise
+band, sign-inconsistent. A new rarity driver would duplicate what the picker
+already does; do not build one on F18.
+
 Scope: one small target, synthetic corpora, a scratch mutator rather than the
 fuzzer's operators, and correlation at seed level. This supports the direction
 of the existing `1/owner_count` weighting and of `seed_residual`'s score; it is
@@ -1250,7 +1261,9 @@ the same thing on a multimodal target as on a JSON parser.
 score direction (partial +0.24..+0.45 on rarity-weighted novelty, two corpora)
 and shows the PC2/PC3 features are not needed, so the bench no longer waits on
 P1-1/P1-3. Pre-register against the rarity-weighted outcome, not raw edge
-count, whose sign F18 found corpus-dependent.
+count, whose sign F18 found corpus-dependent. Expect a small effect: the
+arm's score adds nothing measurable over the default picker's rare-edge and
+crowding terms (F18 addendum).
 
 **Built, off by default, no bench result**
 (`handover_matrix_schedulers_2026-09-19.md`); the per-refit partial-correlation
