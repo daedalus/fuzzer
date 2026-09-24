@@ -355,10 +355,33 @@ def _split_det_quota(costs: list[int], budget: int) -> list[int]:
 # interesting value, in order.
 
 
+def _det_cost_per_byte() -> int:
+    """Mutants per byte of the full schedule: 8 + 1 + 2*deltas + interesting (33)."""
+    from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
+
+    return 8 + 1 + 2 * len(ARITHMETIC_DELTAS) + len(INTERESTING_UNSIGNED_8)
+
+
+def _det_start(length: int, fuzz_count: int, max_mutations: int = MAX_DET_MUTATIONS) -> int:
+    """Start offset for a seed's deterministic stage.
+
+    A truncated schedule covers ``span = max_mutations // 33`` bytes per
+    pass, so rotating by ``fuzz_count * span`` tiles the seed across runs
+    (e.g. len 4000, span 1985: runs start at 0, 1985, 3970 -> 1955, ...).
+    0 when the whole schedule fits: nothing to rotate toward.
+    """
+    per_byte = _det_cost_per_byte()
+    if length == 0 or length * per_byte <= max_mutations:
+        return 0
+    span = max(1, max_mutations // per_byte)
+    return (fuzz_count * span) % length
+
+
 def _deterministic_mutation_stream(
     data: bytes,
     max_mutations: int = MAX_DET_MUTATIONS,
     effector: "DeterministicEffectorMap | None" = None,
+    start: int = 0,
 ):
     """Yield mutants from AFL's classic deterministic schedule, in order.
 
@@ -399,6 +422,8 @@ def _deterministic_mutation_stream(
             marked inert. ``None`` reproduces the ungated schedule mutant
             for mutant, so a seeded run without an effector is byte-identical
             to one from before this parameter existed.
+        start: Byte offset every pass begins at, wrapping past the end
+            (see :func:`_det_start`). 0 is the original order.
 
     Yields:
         bytes mutants, each one mutation away from *data*.
@@ -435,6 +460,13 @@ def _deterministic_mutation_stream(
     n = 0
     q_bit, q_byte, q_arith, q_interesting = quotas
 
+    # Visit order shared by every pass; rotated so truncated passes reach
+    # the tail on later runs (e.g. len 5, start 3 -> 3, 4, 0, 1, 2).
+    start %= length
+    order: range | list[int] = (
+        range(length) if start == 0 else [*range(start, length), *range(start)]
+    )
+
     # --- Persistent scratch buffer: mutate in place, yield, restore ---
     # Avoids O(n) bytearray(data) allocation per mutant (P1-1).
     # The bytes(scratch) copy per yield is still required by contract.
@@ -442,7 +474,7 @@ def _deterministic_mutation_stream(
 
     # bitflip 1/1: flip every bit in turn.
     pass_n = 0
-    for byte_idx in range(length):
+    for byte_idx in order:
         if pass_n >= q_bit:
             break
         orig = data[byte_idx]
@@ -462,7 +494,7 @@ def _deterministic_mutation_stream(
     # `effector.pending` is the whole cost of learning which bytes the
     # target reads.
     pass_n = 0
-    for byte_idx in range(length):
+    for byte_idx in order:
         if pass_n >= q_byte:
             break
         orig = data[byte_idx]
@@ -483,10 +515,10 @@ def _deterministic_mutation_stream(
     # pass never reached (quota exhausted) and positions whose mutant was
     # discarded before execution (_dedup_mutate re-rolls) stay UNKNOWN and
     # keep their full schedule.
-    positions: range | list[int] = range(length)
+    positions: range | list[int] = order
     if effector is not None:
         eff = effector.eff
-        live = [i for i in range(length) if eff[i] != _DET_EFF_INERT]
+        live = [i for i in order if eff[i] != _DET_EFF_INERT]
         # Fail-safe: a map that marks everything inert is evidence of a
         # broken measurement (unstable path hash, a target that timed out
         # under byteflips), not of a seed no byte of which is read. Treat it
@@ -5054,7 +5086,11 @@ class OperatorEngine:
         if q is None:
             effector = DeterministicEffectorMap(len(data))
             self._det_eff[seed_key] = effector
-            q = _deterministic_mutation_stream(bytes(data), effector=effector)
+            meta = self.f.seed_meta.get(data)
+            fuzz_count = meta.get("fuzz_count", 0) if meta else 0
+            q = _deterministic_mutation_stream(
+                bytes(data), effector=effector, start=_det_start(len(data), fuzz_count)
+            )
             self._det_queues[seed_key] = q
         try:
             mutant = next(q)
