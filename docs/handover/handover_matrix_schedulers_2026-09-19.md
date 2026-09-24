@@ -83,9 +83,16 @@ on F1.
 - The fold is over the tracker's `seed_hit_counts`, i.e. one row per recorded
   input, bounded by tracker pruning. It is the matrix the handover measured
   only to the extent the tracker keeps the same rows.
-- The fold is skipped above `CELL_BUDGET` (2M seeds x edges, the same bound as
-  the summary's class scan), then the arms abstain rather than score stale
-  data. Large campaigns get no arm until the fold is made incremental.
+- The fold is skipped above `NNZ_BUDGET` (200k nonzero cells), then the arms
+  abstain rather than score stale data. 2026-09-24: `EdgeCanonicalizer.refit`
+  groups edges by a linear fingerprint (two 64-bit weight families) instead of
+  dense profiles, and the fold is vectorised, so both are linear in nonzeros.
+  Refit 5x at 244 seeds, 60x at 8000 on an 8189-edge map; the fold at the new
+  bound costs ~80 ms, what the dense one cost at its old 2M-cell bound. On
+  ffmpeg-shaped corpora (~330 edges per seed) that moves the cutoff from 244
+  seeds to ~600; on narrow maps it is roughly unchanged. Not incremental: a
+  seed's counts are overwritten on every re-execution, so an update hook would
+  sit in the per-exec path to save one refit per 2000 execs.
 - `SATURATION_SCALE` (0.25) and `op_credit.DECAY` (0.5) are uncalibrated. The
   handover gives the direction, not the size.
 - Operator credit state (`_found`, `_pulls`) is in memory and not resumed.

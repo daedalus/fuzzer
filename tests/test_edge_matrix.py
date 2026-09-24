@@ -114,6 +114,55 @@ class TestFold:
         fold, why = build_fold(_p({1: 1}, {2: 1}, {3: 1}), EdgeCanonicalizer(), cell_budget=2)
         assert fold is None and "budget" in why
 
+    def test_budget_counts_nonzeros_not_the_dense_product(self):
+        # 300 seeds x 30000 edges = 9e6 cells, far past the old 2e6 cell bound,
+        # but one edge each besides a shared prologue: 600 nonzeros.
+        profiles = _p(*({0: 1, 1 + 100 * s: 1} for s in range(300)))
+        profiles["pad"] = {29999: 1}
+        fold, why = build_fold(profiles, EdgeCanonicalizer(), cell_budget=1000)
+        assert fold is not None, why
+        assert fold.n_edges == 302
+        fold, why = build_fold(profiles, EdgeCanonicalizer(), cell_budget=600)
+        assert fold is None and "601 nonzeros" in why
+
+    def test_matches_the_per_cell_formulation(self):
+        """The vectorised fold equals the loop it replaced, derived edges included."""
+        profiles = {
+            f"s{s}": {e: 1 + (e // 3 * 7 + s) % 5 for e in range(60) if (e // 3 + s) % 4}
+            for s in range(40)
+        }
+        derived = {7, 8, 30}
+        canon = EdgeCanonicalizer()
+        fold, _ = build_fold(profiles, canon, derived=derived)
+
+        # Reference: the per-cell Python loop, classes from the same refit.
+        per_seed = [
+            sorted({canon.class_of(e) for e in hc if e not in derived}) for hc in profiles.values()
+        ]
+        owners: dict[int, int] = {}
+        for classes in per_seed:
+            for c in classes:
+                owners[c] = owners.get(c, 0) + 1
+        assert [c.tolist() for c in fold.seed_classes] == per_seed
+        assert fold.class_owners == owners
+        assert fold.mass.tolist() == pytest.approx(
+            [sum(1.0 / owners[c] for c in cls) for cls in per_seed]
+        )
+        assert fold.total.tolist() == [float(sum(hc.values())) for hc in profiles.values()]
+        assert fold.degree.tolist() == [float(len(c)) for c in per_seed]
+        assert (fold.n_edges, fold.n_classes) == (60, len(owners))
+
+    def test_every_edge_derived_folds_to_nothing(self):
+        fold, _ = build_fold(_p({1: 1}, {1: 2}, {2: 1}), EdgeCanonicalizer(), derived={1, 2})
+        assert fold.n_classes == 0 and fold.class_owners == {}
+        assert fold.mass.tolist() == [0.0, 0.0, 0.0]
+        assert [c.tolist() for c in fold.seed_classes] == [[], [], []]
+
+    def test_a_seed_with_only_derived_edges_is_an_empty_row(self):
+        fold, _ = build_fold(_p({1: 1}, {1: 1, 2: 2}, {3: 1}), EdgeCanonicalizer(), derived={1})
+        assert fold.seed_classes[0].tolist() == []
+        assert fold.degree[0] == 0 and fold.mass[0] == 0.0 and fold.total[0] == 1.0
+
     def test_seed_without_counts_reads_as_one_per_edge(self):
         class T:
             seed_edges = {"a": {1, 2}}

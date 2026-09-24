@@ -21,6 +21,7 @@ minimiser (F8).
 
 from __future__ import annotations
 
+import itertools
 import logging
 import math
 from collections import deque
@@ -33,10 +34,10 @@ from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer, coverage_tru
 
 log = logging.getLogger(__name__)
 
-#: Seeds x edges above which the fold is skipped. Same bound, same reason as
-#: ``StatsReporter.EDGE_CLASS_CELL_BUDGET``: the class scan is linear in the product and
-#: a refit must not stall the campaign loop.
-CELL_BUDGET = 2_000_000
+#: Nonzero (seed, edge) cells above which the fold is skipped: refit and fold are
+#: linear in them, and a refit must not stall the campaign loop. ~80 ms here,
+#: the cost of the old dense fold at its 2e6-cell bound (90 ms).
+NNZ_BUDGET = 200_000
 MIN_SEEDS = 3
 DEFAULT_REFIT_INTERVAL = 2000
 #: Snapshots kept for the saturation signal.
@@ -128,7 +129,7 @@ def build_fold(
     profiles: Mapping[str, Mapping[int, int]],
     canon: EdgeCanonicalizer,
     derived: frozenset[int] | set[int] = frozenset(),
-    cell_budget: int = CELL_BUDGET,
+    cell_budget: int = NNZ_BUDGET,
 ) -> tuple[MatrixFold | None, str]:
     """Refit *canon* on *profiles* and fold them; ``(None, reason)`` when it cannot.
 
@@ -140,7 +141,8 @@ def build_fold(
             carry no mass and earn no credit. Nothing populates this: P1-2 found most
             count relations are not node laws (edge-id handover F17), so only a
             graph-derived mask may fill it.
-        cell_budget: Seeds x distinct-edges bound.
+        cell_budget: Bound on nonzero (seed, edge) cells. Was seeds x edges; the
+            name is kept so positional callers do not break.
     """
     keys = list(profiles)
     if len(keys) < MIN_SEEDS:
@@ -148,19 +150,12 @@ def build_fold(
     edges = {e for hc in profiles.values() for e in hc}
     if not edges:
         return None, "empty matrix"
-    if len(keys) * len(edges) > cell_budget:
-        return None, f"{len(keys)} seeds x {len(edges)} edges over budget {cell_budget}"
+    nnz = sum(len(hc) for hc in profiles.values())
+    if nnz > cell_budget:
+        return None, f"{nnz} nonzeros over budget {cell_budget}"
 
     canon.refit(profiles)
-    per_seed = [
-        np.array(sorted({canon.class_of(e) for e in hc if e not in derived}), dtype=np.int64)
-        for hc in profiles.values()
-    ]
-    owners: dict[int, int] = {}
-    for classes in per_seed:
-        for c in classes.tolist():
-            owners[c] = owners.get(c, 0) + 1
-    mass = np.array([sum(1.0 / owners[c] for c in cls.tolist()) for cls in per_seed])
+    per_seed, owners, mass = _fold_classes(profiles, canon, derived)
     total = np.array([float(sum(hc.values())) for hc in profiles.values()])
     return (
         MatrixFold(
@@ -175,6 +170,35 @@ def build_fold(
         ),
         "",
     )
+
+
+def _fold_classes(profiles, canon: EdgeCanonicalizer, derived):
+    """Per-seed sorted classes, class owner counts and 1/owners mass, over all cells at once.
+
+    One (seed, class) pair per seed and class however many member edges the seed
+    hits, so a chain counts once: unique the pairs, then owners is a bincount
+    over classes and mass a weighted bincount over seeds.
+    """
+    rows = list(profiles.values())
+    lens = [len(hc) for hc in rows]
+    edges = np.fromiter(itertools.chain.from_iterable(rows), dtype=np.int64, count=sum(lens))
+    seed = np.repeat(np.arange(len(rows)), lens)
+    if derived:
+        keep = ~np.isin(edges, np.fromiter(derived, dtype=np.int64, count=len(derived)))
+        edges, seed = edges[keep], seed[keep]
+
+    # Dense class index, then one int key per (seed, class): 1-D unique is a sort,
+    # where unique over rows is a structured-array sort several times slower.
+    labels, cls_idx = np.unique(canon.class_array(edges), return_inverse=True)
+    pair = np.unique(seed * len(labels) + cls_idx.ravel())
+    seed, cls_idx = np.divmod(pair, max(len(labels), 1))
+    owner_n = np.bincount(cls_idx, minlength=len(labels))
+    mass = np.bincount(seed, weights=1.0 / owner_n[cls_idx], minlength=len(rows))
+
+    # pairs are sorted by (seed, class), so each seed's classes are a sorted run.
+    per_seed = np.split(labels[cls_idx], np.searchsorted(seed, np.arange(1, len(rows))))
+    owners = dict(zip(labels.tolist(), owner_n.tolist(), strict=True))
+    return per_seed, owners, mass
 
 
 class MatrixSubstrate:
