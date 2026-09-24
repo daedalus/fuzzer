@@ -859,3 +859,28 @@ REGISTRY.register(
         deactivate=_deactivate_kuramoto_sync,
     )
 )
+
+
+def _activate_pll(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.analyzers.analyzer_pll import PLLMonitor
+
+    f._pll = PLLMonitor()
+    f._pll_disc_idx = 0
+
+
+def _deactivate_pll(f: FuzzerLike) -> None:
+    f._pll = None
+
+
+# Read-only PLL observation layer over exec-time and discovery-rate series
+# (docs/handover/handover_pll_2026-09-22.md step 1). --pll only: the per-exec
+# push is the one hot-path cost, so it stays off by default.
+REGISTRY.register(
+    AnalyzerSpec(
+        name="pll",
+        category="regime_detection",
+        available=lambda f: bool(getattr(f, "_use_pll", False)),
+        activate=_activate_pll,
+        deactivate=_deactivate_pll,
+    )
+)

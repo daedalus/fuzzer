@@ -254,3 +254,21 @@ CCN <= 9.
 
 **Not done:** the E-1 passive logging, arms A0-A4 of section 6, any target other
 than fuzzgoat, and the full test suite (only the affected tests were run).
+
+## 9. Update 2026-09-24: 3.2-3.4 and the §6 harness built
+
+Built: `core/edge_ledger.py`, `core/schedulers/seed_strata.py`,
+`core/schedulers/op_strata.py`, wiring (`--strata`, `--op-strata`, ledger fed
+at both `record_edges` sites, trust from `_report_edge_id_stability`,
+persistence under `strata`), and `bench_paired.py` arms `strata-a0..a4` plus
+`strata` analysis. Tests: phantom injection, relabeling invariance, trust flip,
+adversarial, control.
+
+Deviations: A3/A4 pair against `strata-a1-elo`, not A1 (op_strata is
+Elo-only; pairing against A1 credits `--elo` to the arm). E-1 passive
+logging not built.
+
+Finding: fuzzgoat, `--strata` sole picker, 2000 execs: 0 hits in 1939 picks.
+A new edge in an unseen family cannot match phi, and new tags in known
+families are rare, so posteriors only collect misses. E-1's kill criterion
+would likely fire; measure before the matrix.

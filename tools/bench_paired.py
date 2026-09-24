@@ -139,7 +139,28 @@ ARMS: dict[str, list[str]] = {
     # behind; check "Bootstrap percolation removed" appears in a cell's log
     # before reading a null as evidence.
     "bootstrap": ["--bootstrap"],
+    # Strata A0-A4 (docs/handover/handover_strata_schedulers_2026-09-19.md §6).
+    # a0-ctl is a0 again: the control that must not reject (Rule 46). op_strata
+    # is Elo-only, so A3/A4 pair against a1-elo, not a1 as §6 wrote: pairing
+    # against a1 would credit --elo to the arm.
+    "strata-a0": [],
+    "strata-a0-ctl": [],
+    "strata-a1": ["--confirm-novelty"],
+    "strata-a2": ["--confirm-novelty", "--strata"],
+    "strata-a1-elo": ["--confirm-novelty", "--elo", "--mc-bandit"],
+    "strata-a3": ["--confirm-novelty", "--elo", "--mc-bandit", "--op-strata"],
+    "strata-a4": ["--confirm-novelty", "--elo", "--mc-bandit", "--strata", "--op-strata"],
 }
+
+STRATA_ARMS = (
+    "strata-a0",
+    "strata-a0-ctl",
+    "strata-a1",
+    "strata-a2",
+    "strata-a1-elo",
+    "strata-a3",
+    "strata-a4",
+)
 
 # The arms added for the generation group, in the order the handover lists them.
 GENERATION_ARMS = ("wfc", "elo-mcts", "elo-alphabeta", "bootstrap")
@@ -154,6 +175,11 @@ ARM_BASELINES: dict[str, str] = {
     "elo-mcts": "elo-lineage",
     "elo-alphabeta": "elo-lineage",
     "bootstrap": "baseline",
+    "strata-a1": "strata-a0",
+    "strata-a2": "strata-a1",
+    "strata-a1-elo": "strata-a1",
+    "strata-a3": "strata-a1-elo",
+    "strata-a4": "strata-a1-elo",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
@@ -178,6 +204,8 @@ UNWIRED_ARMS = {
 _EDGES = re.compile(r"Edges discovered:\s+(\d+)")
 _CORPUS = re.compile(r"Corpus:\s+(\d+)")
 _CRASHES = re.compile(r"Crashes:\s+(\d+)")
+# Campaign summary prints "Avg eps:"; the report section "Avg throughput:".
+_EPS = re.compile(r"(?:Avg eps|Avg throughput):\s+([\d.]+)")
 
 
 def _parse(log: str) -> dict:
@@ -189,6 +217,7 @@ def _parse(log: str) -> dict:
         "edges": one(_EDGES),
         "corpus": one(_CORPUS),
         "crashes": one(_CRASHES),
+        "eps": float(m.group(1)) if (m := _EPS.search(log)) else 0.0,
         "coverage_attached": _EDGES.search(log) is not None and one(_EDGES) > 0,
     }
 
@@ -521,6 +550,97 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
     }
 
 
+def holm(ps: list[float]) -> list[float]:
+    """Holm step-down adjusted p-values, in input order.
+
+    Example: [.04, .01, .03] -> sorted .01, .03, .04 scaled x3, x2, x1 ->
+    .03, .06, .04 -> running max .03, .06, .06.
+    """
+    m = len(ps)
+    order = sorted(range(m), key=lambda i: ps[i])
+    out = [0.0] * m
+    running = 0.0
+    for rank, i in enumerate(order):
+        running = max(running, min(1.0, (m - rank) * ps[i]))
+        out[i] = running
+    return out
+
+
+# Pre-registered strata thresholds (§6).
+STRATA_ALPHA = 0.05
+STRATA_EPS_FLOOR = 0.98  # A1 may lose < 2% execs/s
+STRATA_TESTS = ("strata-a2", "strata-a3", "strata-a4")
+
+
+def _eps_ratio(base: list[dict], test: list[dict]) -> float:
+    """Median per-cell execs/s ratio test/base over cells both measured."""
+    b = {_key(r): r["eps"] for r in base if r.get("eps")}
+    t = {_key(r): r["eps"] for r in test if r.get("eps")}
+    shared = b.keys() & t.keys()
+    return statistics.median(t[k] / b[k] for k in shared) if shared else 0.0
+
+
+def strata_verdict(loaded: dict[str, list[dict]]) -> dict:
+    """§6 analysis: control first, then A1 gates, then Holm over A2-A4.
+
+    A control that rejects means the oracle is broken, and nothing after it
+    is reported (Rule 46).
+    """
+    ctl = compare(loaded["strata-a0"], loaded["strata-a0-ctl"])
+    out: dict = {"control": ctl, "control_ok": ctl["mcnemar_p"] >= STRATA_ALPHA, "comparisons": {}}
+    if not out["control_ok"]:
+        return out
+
+    a1 = compare(loaded["strata-a0"], loaded["strata-a1"])
+    worse = a1["losses"] > a1["wins"] and a1["mcnemar_p"] < STRATA_ALPHA
+    ratio = _eps_ratio(loaded["strata-a0"], loaded["strata-a1"])
+    out.update(
+        a1=a1, a1_noninferior=not worse, a1_eps_ratio=ratio, a1_eps_ok=ratio >= STRATA_EPS_FLOOR
+    )
+
+    rows = {arm: compare(loaded[ARM_BASELINES[arm]], loaded[arm]) for arm in STRATA_TESTS}
+    adj = holm([rows[a]["mcnemar_p"] for a in STRATA_TESTS])
+    for arm, p in zip(STRATA_TESTS, adj, strict=True):
+        rows[arm]["holm_p"] = p
+    out["comparisons"] = rows
+    return out
+
+
+def cmd_strata(args: argparse.Namespace) -> int:
+    loaded: dict[str, list[dict]] = {}
+    for path in args.files:
+        rows = json.loads(Path(path).read_text())
+        if rows:
+            loaded.setdefault(rows[0]["arm"], []).extend(rows)
+    missing = [a for a in STRATA_ARMS if a not in loaded]
+    if missing:
+        print(f"missing arms: {', '.join(missing)}", file=sys.stderr)
+        return 2
+
+    v = strata_verdict(loaded)
+    c = v["control"]
+    print(
+        f"control a0 vs a0-ctl: W{c['wins']} L{c['losses']} T{c['ties']} McNemar {c['mcnemar_p']:.3g}"
+    )
+    if not v["control_ok"]:
+        print("[!] control rejected: the comparison is broken, not the arms. Stop.")
+        return 1
+
+    a1 = v["a1"]
+    print(
+        f"A1 vs A0: W{a1['wins']} L{a1['losses']} McNemar {a1['mcnemar_p']:.3g} "
+        f"non-inferior={v['a1_noninferior']} execs/s ratio {v['a1_eps_ratio']:.3f} "
+        f"(floor {STRATA_EPS_FLOOR}) ok={v['a1_eps_ok']}"
+    )
+    for arm, r in v["comparisons"].items():
+        print(
+            f"{arm} vs {ARM_BASELINES[arm]}: W{r['wins']} L{r['losses']} T{r['ties']} "
+            f"McNemar {r['mcnemar_p']:.3g} Holm {r['holm_p']:.3g} "
+            f"med Δ {r['median_delta']:+.1f} IQR {r['iqr']}"
+        )
+    return 0
+
+
 def cmd_analyse(args: argparse.Namespace) -> int:
     loaded: dict[str, list[dict]] = {}
     for path in args.files:
@@ -742,7 +862,7 @@ def main() -> int:
     a = sub.add_parser("analyse", help="paired analysis of recorded runs")
     a.add_argument("files", nargs="+")
     a.add_argument("--baseline", default="baseline")
-    a.add_argument("--metric", default="edges", choices=("edges", "corpus", "crashes"))
+    a.add_argument("--metric", default="edges", choices=("edges", "corpus", "crashes", "eps"))
     a.add_argument(
         "--by-target",
         action="store_true",
@@ -754,6 +874,10 @@ def main() -> int:
         help="output risk matrix for minimax-robust scheduler selection",
     )
     a.set_defaults(func=cmd_analyse)
+
+    st = sub.add_parser("strata", help="pre-registered strata A0-A4 analysis (§6)")
+    st.add_argument("files", nargs="+")
+    st.set_defaults(func=cmd_strata)
 
     args = ap.parse_args()
     return args.func(args)

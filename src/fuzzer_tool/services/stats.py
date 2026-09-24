@@ -98,6 +98,55 @@ def _elo_status_str(f) -> str:
     return elo_str
 
 
+def _pll_str(f) -> str:
+    """Feed new discovery deltas, flush the PLL monitor, format lock state.
+
+    Example: `` | pll: t:20.1L d:-`` -- exec-time period 20.1 locked,
+    discovery series not yet bootstrapped.
+    """
+    from fuzzer_tool.core.analyzers.analyzer_pll import PLLMonitor, Series, Stall
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    pll = getattr(f, "_pll", None)
+    if not isinstance(pll, PLLMonitor):
+        return ""
+
+    # Discovery deltas since the last tick; snapshot 0 has no predecessor.
+    edges = f._discovery_edges
+    n = len(edges)
+    for i in range(max(f._pll_disc_idx, 1), n):
+        pll.push(Series.DISCOVERY, float(edges[i] - edges[i - 1]))
+    f._pll_disc_idx = n
+
+    stall = Stall.YES if f._stall_recovery_active else Stall.NO
+    pll.flush(f.exec_count, stall)
+
+    parts = []
+    for series, tag in ((Series.EXEC_TIME, "t"), (Series.DISCOVERY, "d")):
+        st = pll.state(series)
+        parts.append(
+            f"{tag}:-" if st is None else f"{tag}:{st.period:.1f}{'L' if st.locked else 'u'}"
+        )
+    return " | pll: " + " ".join(parts)
+
+
+def _strata_str(f) -> str:
+    """Compact live-stats field for the strata arms; empty when off."""
+    from fuzzer_tool.core.edge_ledger import EdgeLedger
+    from fuzzer_tool.core.schedulers.seed_strata import StrataSeedScheduler
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    led = getattr(f, "_edge_ledger", None)
+    if not isinstance(led, EdgeLedger):
+        return ""
+    out = f" | strata: front={len(led.frontier())}"
+    arm = getattr(f, "_seed_strata", None)
+    if isinstance(arm, StrataSeedScheduler):
+        st = arm.stats()
+        out += f" hit={st['hits']}/{st['picks']}"
+    return out
+
+
 def _kruskal_str(f) -> str:
     """Compact live-stats field for the Kruskal-count arm; empty when off."""
     from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
@@ -1273,7 +1322,7 @@ class StatsReporter:
             with contextlib.suppress(AttributeError, TypeError):
                 mi_str = f" | mi: obs={mi.total_observations} pos={len(mi.position_counts)}"
 
-        kc_str = _kruskal_str(f) + _entropy_seed_str(f)
+        kc_str = _kruskal_str(f) + _entropy_seed_str(f) + _strata_str(f) + _pll_str(f)
 
         elo_str = _elo_status_str(f)
 

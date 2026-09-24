@@ -49,6 +49,7 @@ _FLAG_GATED = {
     "continuum",
     "temperature_control",
     "kuramoto_sync",
+    "pll",
 }
 _ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner", "prng_state_learner"}
 
@@ -259,6 +260,15 @@ class TestFlagGatedAnalyzers:
         f = _build_fuzzer()
         assert f._op_kuramoto is None
         assert f._kuramoto_sync is None
+
+    def test_pll_on_when_requested(self):
+        f = _build_fuzzer(pll=True)
+        assert type(f._pll).__name__ == "PLLMonitor"
+        assert f._pll_disc_idx == 0
+
+    def test_pll_off_by_default(self):
+        f = _build_fuzzer()
+        assert f._pll is None
 
 
 class TestChecksumLearner:

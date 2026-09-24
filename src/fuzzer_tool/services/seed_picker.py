@@ -331,6 +331,9 @@ class SeedPicker:
             available.append("entropy_zscore")
         # Abstains (leaves the pool) while the preflight gate is closed: under
         # per-process ids a rarity-shaped score is scoring noise (F1, F11).
+        strata = getattr(f, "_seed_strata", None)
+        if strata is not None and f.corpus and strata.available():
+            available.append("strata")
         residual = getattr(f, "_seed_residual", None)
         if residual is not None and f.corpus and residual.available():
             available.append("residual")
@@ -383,6 +386,7 @@ class SeedPicker:
             "entropy_gradient": lambda: self._pick_entropy_gradient_seed(),
             "entropy_loo": lambda: self._pick_entropy_loo_seed(),
             "residual": lambda: self._pick_residual_seed(),
+            "strata": lambda: self._pick_strata_seed(),
             "canary": lambda: self._pick_seed_canary_seed(),
             "round_robin": lambda: self._pick_seed_round_robin_seed(),
         }
@@ -505,6 +509,32 @@ class SeedPicker:
         anchor = strategy.select(f.corpus)
         generated = strategy.generate(anchor, f.corpus)
         return anchor if generated is None else generated
+
+    def _pick_strata_seed(self) -> bytes | None:
+        """Thompson over frontier families, rarity-weighted seed within.
+
+        Abstains (None) when the arm is off, the guard is not "present" or the
+        frontier is empty (see core/schedulers/seed_strata.py). Evicted seeds
+        are forgotten by the ledger whenever the corpus size changed.
+        """
+        f = self.f
+        arm = getattr(f, "_seed_strata", None)
+        if arm is None or not f.corpus or not arm.available():
+            return None
+
+        data_of = f._strata_bytes
+        if len(f.corpus) != f._strata_live_len:
+            meta = f.seed_meta
+            for key in [k for k, d in data_of.items() if d not in meta]:
+                f._edge_ledger.forget(key)
+                del data_of[key]
+            f._strata_live_len = len(f.corpus)
+
+        key = arm.select_key(data_of)
+        if key is None:
+            return None
+        data = data_of[key]
+        return data if data in f.seed_meta else None
 
     def _pick_residual_seed(self) -> bytes | None:
         """Score what hit volume does not explain, on canonical edge classes.
@@ -768,6 +798,7 @@ class SeedPicker:
             self._pick_entropy_gradient_seed,
             self._pick_entropy_loo_seed,
             self._pick_residual_seed,
+            self._pick_strata_seed,
             self._pick_seed_round_robin_seed,
         ):
             chosen = pick()

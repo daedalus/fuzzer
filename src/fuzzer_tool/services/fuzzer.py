@@ -38,6 +38,7 @@ from fuzzer_tool.adapters.process import (
 )
 from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
+from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due
@@ -170,6 +171,7 @@ _SEED_STRATEGY_NAMES = (
     "entropy_gradient",
     "entropy_loo",
     "residual",
+    "strata",
     "round_robin",
 )
 
@@ -1083,6 +1085,7 @@ class Fuzzer:
         canary_scheduler=False,
         garch=False,
         continuum=False,
+        pll=False,
         temp_control=False,
         temp_setpoint_fraction=0.5,
         temp_reference_rate=None,
@@ -1153,6 +1156,7 @@ class Fuzzer:
         op_kruskal_count=False,
         op_credit=False,
         op_tpe=False,
+        op_strata=False,
         shaped_reward=False,
         shaped_reward_floor=0.0,
         continuum_reward=False,
@@ -1286,6 +1290,7 @@ class Fuzzer:
         entropy_gradient_decay=0.98,
         entropy_loo=False,
         seed_residual=False,
+        strata=False,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
         confirm_novelty=False,
@@ -2308,6 +2313,15 @@ class Fuzzer:
                 self._rng, self._matrix_substrate, outcome_fn=self._seed_residual_outcomes
             )
             log.info("seed_residual enabled")
+        # Strata arms (docs/handover/handover_strata_schedulers_2026-09-19.md
+        # §3.2-3.4): one EdgeLedger of confirmed ids folded into families,
+        # shared by the seed arm and the op arm. Off by default; unmeasured.
+        self._edge_ledger = None
+        self._seed_strata = None
+        self._strata_bytes: dict[str, bytes] = {}
+        self._strata_live_len = -1
+        if strata or op_strata:
+            self._build_strata(strata)
         # Seed-arena canary: deliberately worst-in-class seed scheduler, the
         # _pick_seed_elo counterpart of op_canary (see
         # core/schedulers/seed_canary.py). Only meaningful alongside --elo,
@@ -2707,6 +2721,16 @@ class Fuzzer:
             self._op_kruskal_count = OpKruskalCountScheduler(rng=self._rng)
             log.info("op_kruskal_count enabled")
 
+        # Stratified Thompson over (op, family) cells (strata §3.4). Off by
+        # default, Elo-only; see core/schedulers/op_strata.py.
+        self._use_op_strata = op_strata
+        self._op_strata = None
+        if op_strata:
+            from fuzzer_tool.core.schedulers.op_strata import OpStrataScheduler
+
+            self._op_strata = OpStrataScheduler(rng=self._rng)
+            log.info("op_strata enabled")
+
         # Categorical TPE (BO-3): l/g density ratio over operators. Off by
         # default, Elo-only; see core/schedulers/op_tpe.py.
         self._use_op_tpe = op_tpe
@@ -2887,6 +2911,7 @@ class Fuzzer:
         self._use_elo = elo
         self._use_garch = garch
         self._use_continuum = continuum
+        self._use_pll = pll
         # Closed-loop temperature control (--temperature-control). Read by
         # the analyzer registry's temperature_control spec, which builds
         # self._temp_controller. Off by default: the sign and magnitude of
@@ -3269,6 +3294,8 @@ class Fuzzer:
             _register_arms(self._canary)
         if self._op_tpe:
             _register_arms(self._op_tpe, _format_priors)
+        if self._op_strata:
+            _register_arms(self._op_strata)
         if self._elo:
             _register_arms(self._elo)
         del _format_priors  # free priors dict after arm registration
@@ -3744,6 +3771,84 @@ class Fuzzer:
 
     def _init_seed_metadata(self):
         return self._corpus_manager.init_seed_metadata()
+
+    def _build_strata(self, seed_arm: bool) -> None:
+        """EdgeLedger at the target's ctx width; the seed arm if asked."""
+        from fuzzer_tool.core import elf
+        from fuzzer_tool.core.edge_ledger import EdgeLedger
+        from fuzzer_tool.core.schedulers.seed_strata import Guard, StrataSeedScheduler
+
+        target = getattr(self, "target", None)
+        self._edge_ledger = EdgeLedger(elf.detect_ctx_bits(target) if target else None)
+        if not seed_arm:
+            return
+
+        guard = Guard(elf.sancov_guard_status(target)) if target else Guard.UNKNOWN
+        self._seed_strata = StrataSeedScheduler(self._rng, self._edge_ledger, guard)
+        log.info("strata enabled (guard %s, family shift %d)", guard.value, self._edge_ledger.shift)
+
+    def _strata_observe(self, seed: bytes, edges) -> None:
+        """Mirror one record_edges call into the ledger; credit the strata pick."""
+        # getattr: __new__-built test fuzzers reach record_edges without __init__.
+        led = getattr(self, "_edge_ledger", None)
+        if led is None or not edges or isinstance(edges, (bytes, bytearray)):
+            return
+
+        key = self._seed_key(seed)
+        self._strata_bytes[key] = seed
+        nov = led.observe(key, frozenset(edges))
+        if self._seed_strata is not None and nov.families:
+            self._seed_strata.credit(nov.families, key)
+
+    def _strata_set_stability(self, jaccard: float) -> None:
+        """Edge id probe verdict -> ledger trust (F1: moving ids -> family resolution)."""
+        from fuzzer_tool.core.edge_ledger import Trust
+
+        if self._edge_ledger is not None:
+            self._edge_ledger.set_trust(Trust.STABLE if jaccard == 1.0 else Trust.UNSTABLE)
+
+    def _strata_stratum(self, seed: bytes) -> int | None:
+        """op_strata's stratum: the strata arm's phi for its own pick, else the rarest family."""
+        led = self._edge_ledger
+        if led is None:
+            return None
+
+        key = self._seed_key(seed)
+        arm = self._seed_strata
+        if arm is not None and arm.last_phi is not None and arm.last_key == key:
+            return arm.last_phi
+        return led.rarest_family(key)
+
+    def _save_strata(self) -> None:
+        if self._edge_ledger is None:
+            return
+        state = {"ledger": self._edge_ledger.to_dict(), "bytes": dict(self._strata_bytes)}
+        if self._seed_strata is not None:
+            state["seed"] = self._seed_strata.to_dict()
+        self._state_store.set("strata", state)
+
+    def _load_strata(self) -> None:
+        """Restore ledger + seed arm on resume; malformed payloads start fresh."""
+        from fuzzer_tool.core.edge_ledger import EdgeLedger
+        from fuzzer_tool.core.schedulers.seed_strata import StrataSeedScheduler
+
+        data = self._state_store.get("strata")
+        if not self.resume or data is None:
+            return
+        try:
+            ledger = EdgeLedger.from_dict(data["ledger"])
+            arm = self._seed_strata
+            if arm is not None and "seed" in data:
+                arm = StrataSeedScheduler.from_dict(data["seed"], self._rng, ledger, arm._guard)
+        except (KeyError, TypeError, ValueError) as e:
+            log.warning("strata state unreadable, starting fresh: %s", e)
+            return
+        self._edge_ledger = ledger
+        self._seed_strata = arm
+        self._strata_bytes = dict(data.get("bytes", {}))
+        print(
+            f"[*] Strata: loaded ledger ({ledger.n_seeds} seeds, {len(ledger.frontier())} frontier)"
+        )
 
     def _seed_residual_outcomes(self) -> dict[str, float]:
         """Seed key -> edges its descendants found: the falsification log's outcome.
@@ -4883,6 +4988,8 @@ class Fuzzer:
         if self._use_elo and self._elo:
             self._elo._eff_k_cache = None
         self._last_parent_seed = data
+        if self._op_strata is not None:
+            self._op_strata.set_stratum(self._strata_stratum(data))
         self._last_new_edge_count = 0  # reset; set when record_edges finds new edges
         # The ids themselves, not just how many: the shaped reward needs the
         # identities to ask the canonical partition how many classes they are.
@@ -4944,6 +5051,10 @@ class Fuzzer:
 
         # Record execution time for adaptive timeout calibration
         self._exec_time_tracker.record(t_elapsed)
+        # PLL observation (--pll): getattr since __new__-built test fuzzers skip wire_all.
+        pll = getattr(self, "_pll", None)
+        if pll is not None:
+            pll.push(PLLSeries.EXEC_TIME, t_elapsed)
 
         # Feed the anomaly calibrator for slow-but-completed detection.
         self._exec_time_anomaly.observe(t_elapsed)
@@ -5633,6 +5744,7 @@ class Fuzzer:
                     hw_branches=self._last_perf_deltas.get("branches", 0),
                     hw_branch_misses=self._last_perf_deltas.get("branch_misses", 0),
                 )
+                self._strata_observe(data, hit_edges)
                 if new:
                     self._last_new_edge_exec = self.exec_count
                     self._exec_perplexity.note_new_edge()
@@ -5949,6 +6061,7 @@ class Fuzzer:
             self._op_kruskal_count,
             self._op_credit,
             self._op_tpe,
+            self._op_strata,
         ):
             if scheduler is None:
                 continue
@@ -7673,6 +7786,8 @@ class Fuzzer:
             seeds.append("entropy-loo")
         if getattr(self, "_seed_residual", None) is not None:
             seeds.append("residual")
+        if getattr(self, "_seed_strata", None) is not None:
+            seeds.append("strata")
         if getattr(self, "_use_seed_canary", False) and self._seed_canary:
             seeds.append("canary")
         if getattr(self, "_use_seed_round_robin", False) and self._seed_round_robin:
@@ -7782,6 +7897,7 @@ class Fuzzer:
             path_hash = self.shm_cov.read_path_hash()
             if path_hash == 0:
                 path_hash = self.shm_cov.compute_path_hash_from_edges(edge_ids)
+            self._strata_observe(seed, edge_ids)
             new = self._edge_tracker.record_edges(
                 self._seed_key(seed),
                 edge_ids,
@@ -7854,6 +7970,8 @@ class Fuzzer:
         substrate = getattr(self, "_matrix_substrate", None)
         if substrate is not None:
             substrate.set_stability(jaccard)
+        if getattr(self, "_edge_ledger", None) is not None:
+            self._strata_set_stability(jaccard)
         if jaccard == 1.0:
             print(
                 f"[*] Edge id stability: {len(union)} edge ids reproduced exactly "
@@ -8120,6 +8238,8 @@ class Fuzzer:
             groups["Seed selection"].append("entropy-loo")
         if getattr(self, "_seed_residual", None) is not None:
             groups["Seed selection"].append("residual")
+        if getattr(self, "_seed_strata", None) is not None:
+            groups["Seed selection"].append("strata")
         if getattr(self, "_use_seed_round_robin", False) and self._seed_round_robin:
             groups["Seed selection"].append("round-robin")
         if getattr(self, "_burn_front", None) is not None:
@@ -8503,6 +8623,9 @@ class Fuzzer:
             if self._kruskal_count is not None:
                 self._load_kruskal_count()
 
+            if self._edge_ledger is not None:
+                self._load_strata()
+
             if self._entropy_kl is not None:
                 self._load_entropy_kl()
 
@@ -8875,6 +8998,7 @@ class Fuzzer:
             print(f"[*] AlphaBeta: saved state ({self._alphabeta.stats()['tracked_nodes']} nodes)")
         if self._kruskal_count is not None:
             self._state_store.set("kruskal_count", self._kruskal_count.to_dict())
+        self._save_strata()
         if self._entropy_kl is not None:
             self._state_store.set("entropy_kl", self._entropy_kl.to_dict())
         if self._entropy_zscore is not None:

@@ -108,3 +108,13 @@ rather than leave the wrong claim in place.
    save/load convention used by `analyzer_temperature_control.py`) was
    not added -- not needed until there's a consumer that needs to
    survive a resume, same reasoning `kuramoto.py` itself uses.
+
+## Update 2026-09-24: steps 1-2 built
+
+`core/analyzers/analyzer_pll.py` (`PLLMonitor`, `--pll`, registry spec `pll`):
+per-series warm-up + `detect_periodicity` bootstrap, transition log with
+stall flag, `stall_lift`. Consumers: stats `pll:` field, report "PLL" lines
+under Spectral Diagnostics. Read-only; no behavioural consumer until a
+correlation is measured. Persistence (step 3) still not added. fuzzgoat
+smoke: exec-time bootstraps at period ≈ 5, unlocked; discovery series
+never reaches 256 snapshots in a short run.

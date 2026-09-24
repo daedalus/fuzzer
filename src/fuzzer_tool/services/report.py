@@ -1349,9 +1349,49 @@ def _spectral_diagnostics(f) -> str:
     except (TypeError, AttributeError):
         pass
 
+    pll_lines = _pll_lines(f)
+    lines.extend(pll_lines)
+    has_data = has_data or bool(pll_lines)
+
     if not has_data:
         return ""
     return "\n".join(lines)
+
+
+def _pll_lines(f) -> list[str]:
+    """Online-tracked period per series (--pll), next to the batch FFT above.
+
+    The FFT averages a drifting period over the whole window; the PLL line
+    shows where it is now. Example::
+
+        Exec time PLL:  locked, period 20.1 (bootstrap 19.2), coherence 0.63,
+                        3 transitions, stall lift 2.00
+    """
+    from fuzzer_tool.core.analyzers.analyzer_pll import PLLMonitor, Series
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    pll = getattr(f, "_pll", None)
+    if not isinstance(pll, PLLMonitor):
+        return []
+
+    lines = []
+    for series, label in (
+        (Series.EXEC_TIME, "Exec time PLL: "),
+        (Series.DISCOVERY, "Discovery PLL: "),
+    ):
+        s = pll.summary(series)
+        if s["bootstrap_period"] is None:
+            lines.append(f"  {label} no period ({s['misses']} bootstrap misses)")
+            continue
+
+        lift = pll.stall_lift(series)
+        lift_str = "n/a" if lift is None else f"{lift:.2f}"
+        state = "locked" if s["locked"] else "unlocked"
+        lines.append(
+            f"  {label} {state}, period {s['period']:.1f} (bootstrap {s['bootstrap_period']:.1f}), "
+            f"coherence {s['coherence']:.2f}, {s['transitions']} transitions, stall lift {lift_str}"
+        )
+    return lines
 
 
 def _temporal_correlation(f) -> str:
@@ -1875,6 +1915,7 @@ def _fuzzing_strategy(f) -> str:
 
     strategies.extend(_kruskal_lines(f))
     strategies.extend(_entropy_seed_lines(f))
+    strategies.extend(_strata_lines(f))
 
     # Markov
     if f.markov_trained:
@@ -1992,6 +2033,34 @@ def _kruskal_lines(f) -> list[str]:
         f"    scored={st['scored']} coupled_pairs={st['coupled_pairs']} "
         f"generated={st['generated']} mean_score={st['mean_score']:.3f}",
     ]
+
+
+def _strata_lines(f) -> list[str]:
+    """Strata ledger, seed arm and op arm (--strata / --op-strata)."""
+    from fuzzer_tool.core.edge_ledger import EdgeLedger
+    from fuzzer_tool.core.schedulers.op_strata import OpStrataScheduler
+    from fuzzer_tool.core.schedulers.seed_strata import StrataSeedScheduler
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    led = getattr(f, "_edge_ledger", None)
+    if not isinstance(led, EdgeLedger):
+        return []
+
+    lines = [
+        f"  Strata ledger:    seeds={led.n_seeds} frontier={len(led.frontier())} "
+        f"trust={led.trust.name.lower()} eff_edges={led.eff_edges():.1f}"
+    ]
+    arm = getattr(f, "_seed_strata", None)
+    if isinstance(arm, StrataSeedScheduler):
+        st = arm.stats()
+        lines.append(
+            f"  Strata seed:      picks={st['picks']} hits={st['hits']} families={st['families']}"
+        )
+    op = getattr(f, "_op_strata", None)
+    if isinstance(op, OpStrataScheduler):
+        st = op.bandit_stats()
+        lines.append(f"  Strata op:        pulls={st['strata_pulls']} cells={st['strata_cells']}")
+    return lines
 
 
 def _entropy_seed_lines(f) -> list[str]:

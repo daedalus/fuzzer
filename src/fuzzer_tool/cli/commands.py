@@ -596,6 +596,7 @@ def cmd_fuzz(args):
         position_arena=getattr(args, "position_arena", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
+        pll=getattr(args, "pll", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
         exp4_gamma=getattr(args, "exp4_gamma", 0.1),
         eps_greedy=getattr(args, "eps_greedy", False),
@@ -666,6 +667,8 @@ def cmd_fuzz(args):
         op_kruskal_count=getattr(args, "op_kruskal_count", False),
         op_credit=getattr(args, "op_credit", False),
         op_tpe=getattr(args, "op_tpe", False),
+        op_strata=getattr(args, "op_strata", False),
+        strata=getattr(args, "strata", False),
         shaped_reward=getattr(args, "shaped_reward", False),
         shaped_reward_floor=getattr(args, "shaped_reward_floor", 0.0),
         continuum_reward=getattr(args, "continuum_reward", False),
@@ -1891,6 +1894,9 @@ _HAIL_MARY_FLAGS = (
     "op_kruskal_count",
     "op_credit",
     "op_tpe",
+    "op_strata",
+    "strata",
+    "pll",
     "confirm_novelty",
     "ecofuzz",
     "metropolis",
@@ -2267,6 +2273,13 @@ def main() -> int:
         help="Model the conditional variance of the per-tick edge-discovery delta with an "
         "online GARCH(1,1). Emits a one-step volatility forecast on the stats line and can "
         "raise an otherwise-healthy tick to CRITICAL when clustering is statistically real.",
+    )
+    fuzz_parser.add_argument(
+        "--pll",
+        action="store_true",
+        help="Track exec-time and discovery-rate periodicity online with a phase-locked "
+        "loop; logs lock/unlock transitions against stall recovery. Diagnostic only "
+        "(see core/analyzers/analyzer_pll.py).",
     )
     fuzz_parser.add_argument(
         "--continuum",
@@ -3379,6 +3392,22 @@ def main() -> int:
         default=0.98,
         help="Per-admission multiplicative decay on the --entropy-gradient arm's stored "
         "credit (default 0.98). Lower values forget unproductive parents faster.",
+    )
+    fuzz_parser.add_argument(
+        "--strata",
+        action="store_true",
+        default=False,
+        help="Strata seed scheduling: adds a 'strata' Elo seed arm that Thompson-samples a "
+        "rare edge family (id >> ctx bits) and picks a seed within it by edge rarity. Abstains "
+        "on uninstrumented builds. OFF by default; not yet A/B validated -- see "
+        "core/schedulers/seed_strata.py.",
+    )
+    fuzz_parser.add_argument(
+        "--op-strata",
+        action="store_true",
+        default=False,
+        help="Stratified Thompson operator arm over (op, edge family) cells, partially pooled "
+        "per operator (experimental, Elo-only -- see core/schedulers/op_strata.py).",
     )
     fuzz_parser.add_argument(
         "--seed-residual",

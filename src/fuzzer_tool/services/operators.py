@@ -583,7 +583,7 @@ _FALLBACK_PRECEDENCE = (
     "fpl",
     "successive_elim",
     "round_robin",
-    # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_tpe, gradient,
+    # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_tpe, op_strata, gradient,
     # whittle, corral are deliberately absent here: they are unproven
     # exploratory arms
     # (see their module docstrings) that should only ever be reached via
@@ -716,6 +716,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_credit")
     if f._use_op_tpe and f._op_tpe:
         available.append("op_tpe")
+    if f._use_op_strata and f._op_strata:
+        available.append("op_strata")
     if f._use_softmax and f._softmax:
         available.append("softmax")
     if f._use_topk and f._topk:
@@ -4811,6 +4813,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "op_tpe" and f._op_tpe:
             op = f._op_tpe.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "op_strata" and f._op_strata:
+            op = f._op_strata.select_op(ops)
             f._last_mopt_particles.append(None)
         else:
             op = self.ctx._rng.choice(ops)
