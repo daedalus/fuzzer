@@ -288,6 +288,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Ptrace runner fixes** (found while wiring the above, both pre-existing): (1) the breakpoint handler read `rsp` from register offset 176 (`128+48`) instead of 152 — offset 176 is `gs_base` (0 for the main thread), so `rsp > 0x1000` was always false and every instrumented function's first instruction was skipped, corrupting the tracee into spurious stack-address SIGSEGVs with zero edge coverage; (2) the wait loop tested `status == 0` from `os.waitpid()` instead of the returned PID, conflating "no event" `(0, 0)` with a clean exit `(pid, 0)` — every rc=0 exit was misreported as `-2` ("exec failed") and its input saved to the corpus as "interesting", polluting the corpus in ptrace mode.
 
 ### Observability
+- **Schedule ablation CSV** (`--schedule-ablation FILE`): one row per execution — seed-pick signals, `new_coverage`, `new_crash`, and `operator` (the round's op stack joined by `+`, e.g. `bit_flip+havoc`). The `operator` column is what per-operator reward vs own-pull-count (fatigue) is measured from.
 - **Branch density**: per-target static analysis at startup (`cond branches/KB`) with average across targets
 - **Per-target coverage stats**: live display shows `targets: name1:N name2:N name3:N` (edge counts per target)
 - **AFL detection**: binary checked for `__afl_area`/`__afl_map_shm` symbols via `nm` — shows `[AFL]`/`[no-AFL]` per target

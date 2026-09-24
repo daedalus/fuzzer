@@ -1987,7 +1987,7 @@ class Fuzzer:
             self._ablation_file.write(
                 "iter,seed_idx,seed_hash,fuzz_count,coverage_edges,age_s,"
                 "temperature,base_w,burst,penalty,subsumption,diversity,"
-                "spatial,mdl,final_w,new_coverage,new_crash\n"
+                "spatial,mdl,final_w,new_coverage,new_crash,operator\n"
             )
             self._ablation_file.flush()
 
@@ -2597,7 +2597,7 @@ class Fuzzer:
         # Whittle index (restless-bandit index policy). Off by default and
         # Elo-only (see core/schedulers/op_whittle.py's module docstring): the
         # passive_decay restless-drift assumption is an unmeasured guess
-        # pending the still-missing operator column in the ablation CSV
+        # pending measurement via the ablation CSV's operator column
         # (docs/handover/handover_non_ucb_schedulers_2026-09-13.md §6), and
         # this has not been run against the convergence harness yet --
         # same discipline as op_katz/op_tang/gradient above.
@@ -4478,6 +4478,25 @@ class Fuzzer:
             return
         strategy.record_child(parent, child, self.corpus)
 
+    def _write_ablation_row(self, has_new_coverage: bool, is_crash: bool) -> None:
+        """Append one --schedule-ablation row: pick signals, outcome, op stack.
+
+        ``operator`` is the round's op stack joined by ``+`` (e.g.
+        ``bit_flip+havoc``), so reward vs own-pull-count is measurable.
+        """
+        ps = self._last_pick_signals
+        self._ablation_file.write(
+            f"{self.exec_count},{ps['seed_idx']},{ps['seed_hash']},"
+            f"{ps['fuzz_count']},{ps['coverage_edges']},{ps['age_s']},"
+            f"{ps['temperature']},{ps['base_w']},{ps['burst']},{ps['penalty']},"
+            f"{ps['subsumption']},{ps['diversity']},{ps['spatial']},"
+            f"{ps['mdl']},{ps['final_w']},"
+            f"{1 if has_new_coverage else 0},{1 if is_crash else 0},"
+            f"{'+'.join(self._last_ops_used)}\n"
+        )
+        if self.exec_count % 100 == 0:
+            self._ablation_file.flush()
+
     def _flush_pending_minimize(self):
         """Run deferred minimize if one is pending."""
         if self._minimize_pending:
@@ -5666,17 +5685,7 @@ class Fuzzer:
 
         # Write ablation log row: signal data + outcome
         if self._ablation_file and hasattr(self, "_last_pick_signals"):
-            ps = self._last_pick_signals
-            self._ablation_file.write(
-                f"{self.exec_count},{ps['seed_idx']},{ps['seed_hash']},"
-                f"{ps['fuzz_count']},{ps['coverage_edges']},{ps['age_s']},"
-                f"{ps['temperature']},{ps['base_w']},{ps['burst']},{ps['penalty']},"
-                f"{ps['subsumption']},{ps['diversity']},{ps['spatial']},"
-                f"{ps['mdl']},{ps['final_w']},"
-                f"{1 if has_new_coverage else 0},{1 if is_crash else 0}\n"
-            )
-            if self.exec_count % 100 == 0:
-                self._ablation_file.flush()
+            self._write_ablation_row(has_new_coverage, is_crash)
 
         # K-Scheduler bitmap sampling runs EVERY exec (beta needs R_i over
         # all mutations); per-seed mask attribution only for corpus-worthy

@@ -8,15 +8,15 @@ total rounds have passed, not by how many times the arm itself has been
 pulled. Operator fatigue (an operator exhausting the structural ground it
 can reach) is a priori a *pull-indexed* process, which is exactly what
 motivated T1 (rotting bandits / FEWA) in that handover. T1 itself is
-gated on a still-missing telemetry column (an operator field in the
-schedule-ablation CSV, see ``services/fuzzer.py``'s ``schedule_ablation``
-writer) and cannot be measured yet.
+gated on measuring reward vs own pulls from the schedule-ablation CSV's
+``operator`` column (``services/fuzzer.py``'s ``_write_ablation_row``);
+not measured yet.
 
 This is the *other* open question from the same section: is fatigue
 *rested* (only the arm's own pulls change its state) or *restless* (other
 operators' progress -- global corpus growth -- also moves it, whether or
-not this arm is played)? Nobody has measured this either; the ablation
-gap that blocks T1 blocks this too. What follows is therefore built to be
+not this arm is played)? Nobody has measured this either; the same
+ablation measurement gates both. What follows is therefore built to be
 usable as an experimental Elo arm *now*, with the restless assumption
 isolated to one tunable parameter (``passive_decay``) that defaults to a
 small, explicitly-labeled guess rather than a fitted value, so that
@@ -293,7 +293,7 @@ class WhittleIndexScheduler:
         passive_decay: Probability an idle arm drifts one state toward
             fatigue per round it is *not* played -- the entire restless
             assumption. Default 0.0 (rested: only this arm's own pulls
-            move its state) until the ablation-CSV operator column exists
+            move its state) until the ablation-CSV operator column is used
             to measure whether real operator fatigue is restless. See
             module docstring.
         floor: Uniform-random selection probability, independent of the
