@@ -216,6 +216,33 @@ class TestRefit:
         assert not s.maybe_refit(_Tracker(_p({1: 1}, {2: 1})), 0)
         assert s.fold is None and "seeds" in s.skip_reason
 
+    def test_too_few_seeds_does_not_start_the_cadence_clock(self):
+        """A campaign's first discovery arrives with one or two seeds.  That
+        refusal used to stamp the clock, barring every retry for a full
+        refit_interval: at the default 2000 the fold stayed empty for the first
+        2000 execs of every small-corpus run, so seed_residual never entered the
+        Elo pool and shaped_weight paid 1.0 -- a 2000-exec A/B was an A/A."""
+        t = _Tracker(_p({1: 1}, {2: 1}))
+        s = MatrixSubstrate()  # default refit_interval
+        assert not s.maybe_refit(t, 5)
+        t.grow("s2", {3: 1})
+        assert s.maybe_refit(t, 6) and s.fold is not None and s.version == 1
+        # the successful fit starts the clock as before
+        t.grow("s3", {4: 1})
+        assert not s.maybe_refit(t, 7)
+
+    def test_canonical_classes_exist_once_the_fold_does(self):
+        """shaped_weight reads class_credit; before any fit every edge is its
+        own class and the shaping pays 1.0 whatever it is shown."""
+        prof = _p({1: 2, 2: 2}, {1: 5, 2: 5}, {1: 1, 2: 1, 3: 4})
+        t = _Tracker({k: dict(v) for k, v in list(prof.items())[:2]})
+        s = MatrixSubstrate()
+        assert not s.maybe_refit(t, 3)
+        assert s.class_credit([1, 2]) == 2  # unfitted: edges 1 and 2 separate
+        t.grow("s2", prof["s2"])
+        assert s.maybe_refit(t, 4)
+        assert s.class_credit([1, 2]) == 1  # identical count profiles: one class
+
     def test_saturation_needs_flat_edges_and_falling_2h(self):
         s = MatrixSubstrate()
         assert s.saturation_signal() == 0.0

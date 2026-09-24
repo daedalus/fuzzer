@@ -267,6 +267,19 @@ class MatrixSubstrate:
         """Rebuild the fold if the cadence allows and the tracker has grown."""
         if not force and exec_count - self._last_exec < self.refit_interval:
             return False
+        # Too few seeds is refused before the cadence clock is stamped.  It
+        # used to stamp first: a campaign's first discovery usually arrives
+        # with one or two seeds, build_fold refused ("fewer than 3 seeds"),
+        # and the stamp then barred every retry for refit_interval (2000)
+        # execs -- so the fold, the canonical classes and both arms reading
+        # them stayed empty for the first 2000 execs of every run started
+        # from a small corpus.  seed_residual never entered the Elo pool and
+        # shaped_weight paid 1.0 (every edge its own class) throughout, i.e.
+        # a 2000-exec A/B of either arm was an A/A.  The check is a len();
+        # retrying it on every discovery costs nothing.
+        if len(getattr(tracker, "seed_edges", {}) or {}) < MIN_SEEDS:
+            self.skip_reason = f"fewer than {MIN_SEEDS} seeds"
+            return False
         stamp = (
             len(getattr(tracker, "seed_edges", {})),
             len(getattr(tracker, "cumulative_edges", ())),
