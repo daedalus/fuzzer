@@ -25,6 +25,7 @@ widely-used return-value APIs, or test mocks.
 - **Never use `tempfile.mktemp()`.** It's a TOCTOU/symlink race by construction. Use `mkstemp()`/`mkdtemp()`.
 - **Namespace any filesystem path shared across parallel workers by PID.** Compiled shim/loader binaries and other on-disk artifacts written under `-j N` must embed `os.getpid()` (or equivalent), or concurrent workers race to compile/clean up the same file.
 - **Return the actual PID on exception, not 0.** `run_target_stdin`/`run_target_file` callers use the returned PID for crash attribution. Returning `pid=0` on exception matches the swapper/idle process, silently discarding real kernel crashes.
+- **Never `atexit.register(self.cleanup)`.** The bound method pins `self`, so `__del__` never runs and the resource lives until exit (3 SHM segments per dropped `Fuzzer`). Register through a `weakref.WeakMethod` (`adapters/shm.py::_atexit_weak`) and pair it with `__del__`.
 
 ## Hashing & identity
 

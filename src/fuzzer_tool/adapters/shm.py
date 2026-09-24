@@ -18,6 +18,7 @@ import atexit
 import ctypes
 import logging
 import os
+import weakref
 
 import numpy as np
 
@@ -107,6 +108,23 @@ VIRGIN_DENSE_MAX = 1 << 24
 # maximum before the execution is reported as performance novelty. See
 # ShmCoverage._update_max_counts for why this is not strict `>`.
 MAX_COUNT_GROWTH_FACTOR = 1.5
+
+
+def _atexit_weak(obj) -> None:
+    """Run ``obj.cleanup()`` at exit without keeping ``obj`` alive.
+
+    ``atexit.register(obj.cleanup)`` holds a strong ref through the bound
+    method, so ``__del__`` never ran and every dropped segment stayed
+    attached until exit (3 per ``Fuzzer``).
+    """
+    atexit.register(_cleanup_if_alive, weakref.WeakMethod(obj.cleanup))
+
+
+def _cleanup_if_alive(ref: weakref.WeakMethod) -> None:
+    cleanup = ref()
+    if cleanup is None:
+        return
+    cleanup()
 
 
 def _alloc_segment(size: int, what: str = "") -> tuple[int, int]:
@@ -1179,7 +1197,7 @@ class ShmCoverage:
         self.cleanup()
 
     def _register_atexit(self):
-        atexit.register(self.cleanup)
+        _atexit_weak(self)
 
 
 class DistanceTableShm:
@@ -1244,7 +1262,7 @@ class DistanceTableShm:
                     break
                 pos = (pos + 1) % self.capacity
         self.env_id = str(self.shm_id)
-        atexit.register(self.cleanup)
+        _atexit_weak(self)
 
     def cleanup(self):
         """Detach and remove the segment.
@@ -1260,6 +1278,9 @@ class DistanceTableShm:
         if self.shm_id >= 0:
             libc_shm.shmctl_rmid(self.shm_id)
             self.shm_id = -1
+
+    def __del__(self):
+        self.cleanup()
 
 
 # node_idx sentinel for table entries with no ICFG mapping; the shim's
@@ -1293,7 +1314,7 @@ class NodeBitmapShm:
         ctypes.memset(self._ptr, 0, self.shm_bytes)
         ctypes.c_uint32.from_address(self._ptr).value = self.size_bytes
         self.env_id = str(self.shm_id)
-        atexit.register(self.cleanup)
+        _atexit_weak(self)
 
     def read_and_clear(self) -> bytes:
         """Snapshot the bitmap and zero it atomically-enough for one
@@ -1309,3 +1330,6 @@ class NodeBitmapShm:
         if self.shm_id >= 0:
             libc_shm.shmctl_rmid(self.shm_id)
             self.shm_id = -1
+
+    def __del__(self):
+        self.cleanup()

@@ -127,6 +127,9 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Format learner z-score gate**: replaces fixed `delta != 0` threshold with z-score-based outlier detection; MAD fallback under high kurtosis for robustness against zero-inflated coverage deltas
 - **Corpus bloat early-warning**: rising right skew in seed file sizes is a leading indicator of bloat that precedes RSS threshold tripping
 - **Bounded memory structures**: all accumulative data structures (correlation matrix, coverage timeline, cmplog tokens/pairs, Shapley attribution edges, stderr buffer, seed secretary, seen hashes) are capped via module-level constants — RSS plateaus instead of growing linearly with exec count
+- **Heap trim per status line**: `print_stats()` calls `adapters/libc_mem.trim_heap()` (glibc `malloc_trim(0)`; no-op on libcs without it) on each status line and shows the RSS it released (`| trim: 512KB`, current RSS from `/proc/self/statm` around the call, clamped at 0). Returns freed malloc pages CPython leaves mapped (5-7 MB after 26k fuzzgoat execs); ≤0.04 ms per call. Skipped with `quiet_stats`.
+- **Exec-time anomaly window**: `ExecTimeCalibrator` takes the median over the last `DEFAULT_WINDOW` (4096) execs via deque + sorted list, O(1) `threshold()`. It used to keep every exec time and re-sort them each exec.
+- **SHM exit hooks are weak**: `adapters/shm.py::_atexit_weak` registers `cleanup` via `weakref.WeakMethod`, so a dropped `Fuzzer` releases its segments on collection.
 - **Report distribution diagnostics**: stddev, skewness, and kurtosis for exec time, discovery rate, per-operator rewards, and seed sizes
 
 ### Statistical Region Profiling (`--region-profile`)

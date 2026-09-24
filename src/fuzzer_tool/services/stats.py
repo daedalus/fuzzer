@@ -23,6 +23,7 @@ import logging
 import os
 import time
 
+from fuzzer_tool.adapters import libc_mem
 from fuzzer_tool.core.analyzers.analyzer_elo import (
     Arena,
     seed_strategy_display_name,
@@ -1190,6 +1191,10 @@ class StatsReporter:
         rss_kb = f._peak_rss
         rss_str = f" | rss: {rss_kb // 1024}MB" if rss_kb >= 1024 else f" | rss: {rss_kb}KB"
 
+        # Return freed malloc pages each status tick (glibc keeps them mapped).
+        freed_kb = libc_mem.trim_heap() >> 10
+        trim_str = f" | trim: {freed_kb >> 10}MB" if freed_kb >= 1024 else f" | trim: {freed_kb}KB"
+
         ops_str = ""
         if f._last_ops_used:
             recent = list(dict.fromkeys(reversed(f._last_ops_used)))[:3]
@@ -1478,7 +1483,7 @@ class StatsReporter:
         line = (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{dict_str}{markov_str}{cmplog_str}"
+            f"time: {elapsed:.0f}s{rss_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
             f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{kc_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
             f"{bayes_str}{misc_str}"

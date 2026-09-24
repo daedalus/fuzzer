@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Heap trim per status line** (`adapters/libc_mem.py`): `print_stats()` runs glibc
+  `malloc_trim(0)` each status line and shows the RSS released (`| trim: 512KB`).
+
 - **Position schedulers and their Elo arena** (`core/schedulers/pos_base.py`,
   `pos_burn_front.py`, `services/position_arena.py`): position selection is
   now a formal third scheduling axis with a `propose`/`record` contract.
@@ -154,6 +157,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gains `TestF0DerivedWeight` (3 tests).
 
 ### Fixed
+
+- **Exec-time anomaly threshold leaked and slowed every exec** (`core/analyzers/analyzer_exec_time_anomaly.py`):
+  all exec times were kept (32 B/exec) and median-sorted each exec (1.1 ms at 10k execs, 235 ms at 1M).
+  Now an exact median over the last 4096. fuzzgoat, 26k execs: 172 s -> 125 s.
+
+- **SHM segments outlived their `Fuzzer`** (`adapters/shm.py`): `atexit.register(self.cleanup)`
+  pinned `ShmCoverage`, `DistanceTableShm` and `NodeBitmapShm`; each dropped `Fuzzer` kept 3
+  segments attached until exit. Exit hooks now hold weak refs; the latter two gain `__del__`.
 - **Minimax estimator and algorithm for fuzzer enhancement**
   (`src/fuzzer_tool/core/schedulers/mcts.py`,
   `src/fuzzer_tool/core/schedulers/monte_carlo.py`,
