@@ -318,3 +318,59 @@ class TestSimulateIntegration:
             sched._maybe_advance(ops)
         r_after = sched.diagnostics()["r"]
         assert r_after > r_before
+
+
+class TestBadnessIndexedFloor:
+    """Same badness-indexed floor family as OpKatzScheduler (core/badness_floor.py)."""
+
+    def _make(self, badness_fn, max_floor=0.3):
+        return OpKuramotoScheduler(
+            rng=RandPool(seed=1),
+            explore_floor=0.06,
+            badness_fn=badness_fn,
+            max_explore_floor=max_floor,
+        )
+
+    def test_no_badness_fn_matches_static_floor(self):
+        sched = OpKuramotoScheduler(rng=RandPool(seed=1), explore_floor=0.1)
+        assert sched.badness_fn is None
+        assert sched._current_explore_floor() == pytest.approx(0.1)
+
+    def test_badness_endpoints(self):
+        assert self._make(lambda: 0.0)._current_explore_floor() == pytest.approx(0.06)
+        assert self._make(lambda: 1.0)._current_explore_floor() == pytest.approx(0.3)
+
+    def test_badness_fn_sampled_fresh_each_call(self):
+        state = {"badness": 0.0}
+        sched = self._make(lambda: state["badness"])
+        assert sched._current_explore_floor() == pytest.approx(0.06)
+        state["badness"] = 1.0
+        assert sched._current_explore_floor() == pytest.approx(0.3)
+
+    def test_raising_badness_fn_falls_back_to_static_floor(self):
+        """Adversarial: a broken badness source must not break selection."""
+
+        def _broken():
+            raise RuntimeError("no regime detector yet")
+
+        assert self._make(_broken)._current_explore_floor() == pytest.approx(0.06)
+
+    def test_invalid_max_explore_floor_rejected(self):
+        with pytest.raises(ValueError, match="max_floor"):
+            self._make(lambda: 0.5, max_floor=0.01)
+
+    def test_high_badness_raises_selection_floor(self):
+        """Falsification: badness=1 must lift every cold arm's probability."""
+        ops = [f"op{i}" for i in range(10)]
+
+        def _probs(badness):
+            sched = self._make(lambda: badness, max_floor=0.5)
+            for op in ops:
+                sched.init_arm(op)
+            sched.successes = {"op0": 1.0}
+            sched.attempts = dict.fromkeys(ops, 10.0)
+            return sched._select_probs(ops)
+
+        low, high = _probs(0.0), _probs(1.0)
+        for i in range(1, len(ops)):
+            assert high[i] > low[i]

@@ -125,9 +125,11 @@ harness runs -- reach it only through Elo explicitly choosing it.
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 
+from fuzzer_tool.core.badness_floor import DEFAULT_MAX_EXPLORE_FLOOR, floor_for_badness
 from fuzzer_tool.core.kuramoto import (
     critical_coupling,
     kuramoto_step,
@@ -176,6 +178,10 @@ class OpKuramotoScheduler:
             "Selection floor" section for why this exists and why it is
             relative rather than an absolute per-arm constant). Must be in
             ``[0, 1)``; 0 restores the old unfloored draw.
+        badness_fn: Optional zero-arg badness score in ``[0, 1]``. When set,
+            the floor is ``floor_for_badness(explore_floor, badness_fn(),
+            max_explore_floor)``, same family as ``OpKatzScheduler``.
+        max_explore_floor: The ``badness=1`` end of that family.
     """
 
     supports_priors = False
@@ -189,6 +195,8 @@ class OpKuramotoScheduler:
         steps_per_batch: int = DEFAULT_STEPS_PER_BATCH,
         recompute_batch: int = DEFAULT_RECOMPUTE_BATCH,
         explore_floor: float = DEFAULT_EXPLORE_FLOOR,
+        badness_fn: Callable[[], float] | None = None,
+        max_explore_floor: float = DEFAULT_MAX_EXPLORE_FLOOR,
     ):
         if rng is None:
             raise ValueError("OpKuramotoScheduler requires a RandPool (Hard Rule 16)")
@@ -198,6 +206,9 @@ class OpKuramotoScheduler:
             raise ValueError(f"recompute_batch must be >= 1, got {recompute_batch!r}")
         if not (0.0 <= explore_floor < 1.0):
             raise ValueError(f"explore_floor must be in [0, 1), got {explore_floor!r}")
+        if badness_fn is not None:
+            # Validate the whole family now, not in a live select_op.
+            floor_for_badness(explore_floor, 0.0, max_explore_floor)
 
         self._rng = rng
         self.k = k
@@ -206,6 +217,8 @@ class OpKuramotoScheduler:
         self.steps_per_batch = steps_per_batch
         self.recompute_batch = recompute_batch
         self.explore_floor = explore_floor
+        self.badness_fn = badness_fn
+        self.max_explore_floor = max_explore_floor
 
         self.transition_counts: dict[str, dict[str, int]] = {}
         self.successes: dict[str, float] = {}
@@ -306,9 +319,22 @@ class OpKuramotoScheduler:
         shifted = vals - vals.min() + 1e-9
         total = float(shifted.sum())
         probs = shifted / total if total > 0 else np.full(len(ops), 1.0 / len(ops))
-        floor = self.explore_floor / len(ops)
+        floor = self._current_explore_floor() / len(ops)
         floored = np.maximum(probs, floor)
         return floored / floored.sum()
+
+    def _current_explore_floor(self) -> float:
+        """Static ``explore_floor``, or its badness-indexed value when
+        ``badness_fn`` is set. A raising ``badness_fn`` falls back to the
+        static floor, mirroring ``OpKatzScheduler._current_explore_floor``.
+        """
+        if self.badness_fn is None:
+            return self.explore_floor
+        try:
+            badness = float(self.badness_fn())
+        except Exception:  # noqa: BLE001 - missed observation, not fatal
+            return self.explore_floor
+        return floor_for_badness(self.explore_floor, badness, self.max_explore_floor)
 
     def select_op(self, ops: list[str]) -> str:
         """Weighted pick by score, floored so a single early success cannot

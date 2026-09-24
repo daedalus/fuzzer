@@ -2679,6 +2679,8 @@ class Fuzzer:
                 dt=op_kuramoto_dt,
                 steps_per_batch=op_kuramoto_steps_per_batch,
                 recompute_batch=op_kuramoto_recompute_batch,
+                # Same badness-indexed floor as op_katz above.
+                badness_fn=self._current_scheduling_badness,
             )
             log.info(
                 "op_kuramoto enabled (k=%.2f, omega_scale=%.2f, dt=%.3f, "

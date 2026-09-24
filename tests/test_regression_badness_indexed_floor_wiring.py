@@ -87,3 +87,16 @@ class TestBadnessFnWiring:
         # as under SUPERCRITICAL (badness=0, static default floor).
         for i in range(1, n):
             assert high_floor_probs[i] >= low_floor_probs[i] - 1e-9
+
+
+class TestKuramotoBadnessFnWiring:
+    def test_op_kuramoto_badness_fn_is_the_fuzzer_method(self):
+        f = _build_fuzzer(op_kuramoto=True)
+        assert f._op_kuramoto.badness_fn == f._current_scheduling_badness
+
+    def test_op_kuramoto_floor_tracks_regime(self):
+        f = _build_fuzzer(op_kuramoto=True)
+        f._regime._regime = CoverageRegime.SUPERCRITICAL
+        low = f._op_kuramoto._current_explore_floor()
+        f._regime._regime = CoverageRegime.SUBCRITICAL
+        assert f._op_kuramoto._current_explore_floor() > low
