@@ -14,7 +14,9 @@ F16's "after" column was reproduced independently on `5e18ccef` (see
 `c26f0a1` or later as each section states. **The follow-up items are
 re-prioritized below; read "Priority order" first.** **F17 (2026-09-23,
 P1-2 done): most count relations are not node laws; the integer-relation line
-is closed.**
+is closed.** **F18 (2026-09-24): the one matrix signal that predicts novelty
+under a uniform budget is edge rarity; spectral and Gram-uniqueness scores add
+nothing reliable.**
 
 ## Trigger
 
@@ -763,6 +765,61 @@ tool section [6] is diagnostic only and says so. `MatrixSubstrate.derived`
 stays empty; P3-3's derived half is closed. Re-open only with a graph-derived
 mask (guard -> static CFG), not with a relation search.
 
+### F18. Under a uniform mutation budget, only edge rarity predicts novelty beyond size
+
+Asked: does any signal in the matrices drive edge-novelty discovery? Every
+earlier test here was observational on a corpus the scheduler had already
+shaped (the off-policy hole the Tang analysis recorded). This one is
+interventional: each seed gets the same budget, so allocation cannot leak into
+the label.
+
+Setup, `d5529003` (no code changes): fuzzgoat ctx build (reference recipe
+above), ASLR off, 200 mutants per seed from a scratch mutator (1-4 of: byte
+set, JSON-token insert, delete, local copy, corpus splice, bit flip; Python
+`random` seeded per seed), one `ShmCoverage` segment with a warm-up run. Label
+inputs: edges a seed's mutants reached that no corpus seed reaches. Two
+independent 250-seed corpora: A = `corpus_fuzzgoat.py`, B = every sixth of
+1500 random mutants of A (the F17 mutant set). 100k executions, ~100 s each.
+
+Scores from the corpus's seed x edge matrix, correlated (Spearman) with the
+label after regressing out rank(degree) and rank(length). Noise scores through
+the same partial give a 95% |rho| of 0.12 (Hard Rule 46). Split-half label
+reliability (mutants 1-100 vs 101-200) bounds what any score can reach:
+
+| label | split-half A / B |
+|---|---|
+| distinct new edges | +0.71 / +0.54 |
+| rarity-weighted finds, sum 1/(#seeds finding the edge) | +0.55 / +0.46 |
+| finds no other seed made (233-234 zeros) | +0.42 / +0.47 |
+
+| partial rho given degree, length | new edges A / B | rarity-weighted A / B | unique finds A / B |
+|---|---|---|---|
+| **sum 1/owners (rarity mass)** | -0.20 / +0.33 | **+0.24 / +0.43** | **+0.26 / +0.28** |
+| rarest edge, -min owners | -0.22 / +0.37 | +0.20 / +0.46 | +0.26 / +0.28 |
+| (edge, AFL bucket) rarity; class mass (`op_credit`); `seed_residual` score | within 0.03 of rarity mass in every cell | | |
+| 1 - max Jaccard to another seed (Gram) | -0.10 / +0.16 | +0.12 / +0.25 | +0.24 / +0.21 |
+| top-10 SVD leverage | +0.04 / -0.02 | +0.23 / +0.08 | +0.15 / -0.08 |
+| peak count | -0.03 / +0.01 | -0.23 / -0.04 | -0.39 / -0.21 |
+| raw rho of degree (no control) | +0.58 / +0.39 | +0.52 / +0.30 | +0.06 / +0.17 |
+
+* **Size predicts volume, not novelty.** Degree carries the raw count of new
+  edges and nothing of the finds no other seed makes.
+* **Rarity is one signal.** Rarity mass, rarest edge, bucketed rarity, class
+  mass and the `seed_residual` score agree to 0.03: canonical classes and
+  count buckets add nothing over plain `1/owner_count`, and the single rarest
+  edge is as good as the sum.
+* **The raw new-edge count is not a stable target** -- its sign flips between
+  corpora. The rarity-weighted labels are what replicate.
+* **Nothing else holds.** Leverage fails replication (+0.23 -> +0.08); Gram
+  uniqueness is positive in both but weaker than rarity; loop depth (peak
+  count) is anti-predictive of unique finds in both.
+
+Scope: one small target, synthetic corpora, a scratch mutator rather than the
+fuzzer's operators, and correlation at seed level. This supports the direction
+of the existing `1/owner_count` weighting and of `seed_residual`'s score; it is
+not a campaign result. P3-4's paired bench is the test; PC2/PC3 are not needed
+for it (leverage did not replicate).
+
 ## Not defined on the id axis -- do not re-propose
 
 Linear regression or slope of count against id; autocorrelation or FFT along
@@ -935,7 +992,7 @@ the tool) continues or closes, and nothing else on the list has that leverage.
 | 4 | **P1-1 + P1-3** png, zlib, ffmpeg (absorbs E6) | machine time, a table | P3-1, P3-4, E6 |
 | 5 | **P2-1** 2^H in the stall reason | one commit | nothing; self-contained |
 | 6 | **P3-1** `__AFL_CTX_BITS` feedback | paper first | blocked on 4; its best input is gone (see item) |
-| 7 | **P3-4** `seed_residual` A/B | bench_paired run | blocked on 4 (PC2/PC3 features) |
+| 7 | **P3-4** `seed_residual` A/B | bench_paired run | unblocked by F18: run without PC2/PC3 |
 | 8 | **P3-3** `op_credit` derived-edge credit | -- | closed by F17 (P1-2 negative) |
 | 9 | **P3-2** column leverage | bench design first | nothing; lowest expected value |
 | 10 | **P4-1** LCG recovery by lattice reduction | new feature | nothing; blocks nothing |
@@ -1187,7 +1244,13 @@ measured exactly rather than inferred); what does not exist is a stated rule
 for stepping the width down or up, or evidence that the ICC threshold means
 the same thing on a multimodal target as on a JSON parser.
 
-### P3-4. `seed_residual` arm -- PRIORITY 7, blocked on P1-1/P1-3
+### P3-4. `seed_residual` arm -- PRIORITY 7
+
+**2026-09-24:** F18 is the first allocation-unbiased evidence for this arm's
+score direction (partial +0.24..+0.45 on rarity-weighted novelty, two corpora)
+and shows the PC2/PC3 features are not needed, so the bench no longer waits on
+P1-1/P1-3. Pre-register against the rarity-weighted outcome, not raw edge
+count, whose sign F18 found corpus-dependent.
 
 **Built, off by default, no bench result**
 (`handover_matrix_schedulers_2026-09-19.md`); the per-refit partial-correlation
