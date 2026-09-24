@@ -17,8 +17,12 @@ are ICFG node indices. A site whose containing block is undecodable is
 omitted — the shim's bounds check would reject it anyway.
 """
 
+import bisect
 import logging
 import struct
+from array import array
+from collections.abc import Sequence
+from itertools import repeat
 
 import numpy as np
 
@@ -39,16 +43,22 @@ class InterproceduralCFG:
 
     def __init__(
         self,
-        node_addrs: list[int],
+        node_addrs: Sequence[int],
         node_funcs: list[str],
         src: np.ndarray,
         dst: np.ndarray,
-        cfgs: dict[str, FunctionCFG],
+        cfgs: dict[str, FunctionCFG] | None,
         is_call: np.ndarray | None = None,
     ):
-        self.node_addrs = node_addrs
+        # Sorted block starts, 8 B each. A list of ints plus an addr->index
+        # dict kept ~1.4 GB of freed block memory pinned on ffmpeg (2.7M
+        # nodes); _node_at() bisects instead.
+        self.node_addrs = (
+            node_addrs
+            if isinstance(node_addrs, array) and node_addrs.typecode == "Q"
+            else array("Q", node_addrs)
+        )
         self.node_funcs = node_funcs
-        self.node_index: dict[int, int] = {a: i for i, a in enumerate(node_addrs)}
         self.src = src
         self.dst = dst
         self._cfgs = cfgs
@@ -61,6 +71,21 @@ class InterproceduralCFG:
         self.is_call = (
             np.zeros(len(src), dtype=bool) if is_call is None else is_call
         )
+
+    def _node_at(self, addr: int) -> int | None:
+        """Index of the node starting exactly at *addr*, else None."""
+        addrs = self.node_addrs
+        i = bisect.bisect_left(addrs, addr)
+        if i < len(addrs) and addrs[i] == addr:
+            return i
+        return None
+
+    def release_cfgs(self) -> None:
+        """Drop per-function CFGs; only probe_key_node_table() reads them.
+
+        2.7M BasicBlock objects on ffmpeg, dead after the build.
+        """
+        self._cfgs = None
 
     @property
     def branch_src(self) -> np.ndarray:
@@ -107,8 +132,8 @@ class InterproceduralCFG:
         either side maps to no nodes at all, or if a node maps to both
         (nothing to separate).
         """
-        sources = {self.node_index[a] for a in hit_addrs if a in self.node_index}
-        sinks = {self.node_index[a] for a in target_addrs if a in self.node_index}
+        sources = {i for a in hit_addrs if (i := self._node_at(a)) is not None}
+        sinks = {i for a in target_addrs if (i := self._node_at(a)) is not None}
         sources -= sinks
         if not sources or not sinks:
             return set()
@@ -165,6 +190,80 @@ def _decode_all_cfgs(td) -> dict[str, FunctionCFG]:
     return cfgs
 
 
+# Edge (u, v) packed as u << 32 | v: one int64 that sorts as the tuple did.
+# Node counts stay far below 2**31 (ffmpeg: 2.74M).
+_KEY_SHIFT = 32
+_KEY_MASK = (1 << _KEY_SHIFT) - 1
+
+
+def _node_table(cfgs: dict[str, FunctionCFG]) -> tuple[np.ndarray, list[str]]:
+    """Sorted unique block starts, and the function each belongs to.
+
+    A start claimed by two functions goes to the later one, as the old
+    addr->func dict's last write did. Arrays, not dicts: those were ~330 B
+    per block of the build peak on ffmpeg.
+    """
+    names = list(cfgs)
+    starts = array("Q")
+    owner = array("I")
+    for i, cfg in enumerate(cfgs.values()):
+        starts.extend(cfg.blocks)
+        owner.extend(repeat(i, len(cfg.blocks)))
+
+    flat = np.frombuffer(starts, dtype=np.uint64)
+
+    # unique() keeps each value's first index; on the reversed array that
+    # is the last occurrence.
+    addrs, first = np.unique(flat[::-1], return_index=True)
+    last = len(flat) - 1 - first
+    owners = np.frombuffer(owner, dtype=np.uint32)[last]
+    # Object-array gather: str refs only, no int object per block.
+    return addrs, np.array(names, dtype=object)[owners].tolist()
+
+
+def _raw_edges(cfgs: dict[str, FunctionCFG]) -> tuple[array, array, array, array]:
+    """Address pairs: (block, successor) and (block, callee entry)."""
+    entry = {name: min(cfg.blocks) for name, cfg in cfgs.items()}
+    bu, bv, cu, cv = array("Q"), array("Q"), array("Q"), array("Q")
+    for cfg in cfgs.values():
+        for blk in cfg.blocks.values():
+            bu.extend(repeat(blk.start, len(blk.successors)))
+            bv.extend(blk.successors)
+            for callee in blk.callees:
+                e = entry.get(callee)
+                # caller→callee only; a resolved callee outside the decoded
+                # set (e.g. libc) has no entry node to point at.
+                if e is None:
+                    continue
+                cu.append(blk.start)
+                cv.append(e)
+    return bu, bv, cu, cv
+
+
+def _lookup(addrs: np.ndarray, query: array) -> tuple[np.ndarray, np.ndarray]:
+    """Node index of each queried address, and whether it is a node at all."""
+    q = np.frombuffer(query, dtype=np.uint64)
+    pos = np.minimum(np.searchsorted(addrs, q), len(addrs) - 1)
+    return pos.astype(np.int64, copy=False), addrs[pos] == q
+
+
+def _edge_keys(addrs: np.ndarray, bu, bv, cu, cv) -> tuple[np.ndarray, np.ndarray]:
+    """Unique packed branch and call edge keys.
+
+    Branch successors that are not nodes are dropped; a call from a
+    function's own entry block to itself (u == v) is not an edge.
+    """
+    u, _ = _lookup(addrs, bu)
+    v, is_node = _lookup(addrs, bv)
+    branch = np.unique((u[is_node] << _KEY_SHIFT) | v[is_node])
+
+    u, _ = _lookup(addrs, cu)
+    v, _ = _lookup(addrs, cv)
+    distinct = u != v
+    call = np.unique((u[distinct] << _KEY_SHIFT) | v[distinct])
+    return branch, call
+
+
 def build_interprocedural_cfg(td) -> InterproceduralCFG | None:
     """Build the whole-program ICFG from a loaded TargetDistance.
 
@@ -176,47 +275,21 @@ def build_interprocedural_cfg(td) -> InterproceduralCFG | None:
     if not cfgs:
         return None
 
-    addrs: set[int] = set()
-    func_of: dict[int, str] = {}
-    for name, cfg in cfgs.items():
-        for bs in cfg.blocks:
-            addrs.add(bs)
-            func_of[bs] = name
-    node_addrs = sorted(addrs)
-    idx = {a: i for i, a in enumerate(node_addrs)}
-    entry_of = {name: idx[min(cfg.blocks)] for name, cfg in cfgs.items()}
+    node_addrs, node_funcs = _node_table(cfgs)
+    branch, call = _edge_keys(node_addrs, *_raw_edges(cfgs))
 
-    # Kept separate, not one edge_set: a call edge and a branch edge can
-    # land on the same (u, v) pair (rare, but a tail-position call whose
-    # fallthrough block starts exactly at the callee is possible in theory),
-    # and a real branch must win that tie -- see InterproceduralCFG.is_call.
-    branch_edges: set[tuple[int, int]] = set()
-    call_edges: set[tuple[int, int]] = set()
-    for cfg in cfgs.values():
-        for blk in cfg.blocks.values():
-            u = idx[blk.start]
-            for succ in blk.successors:
-                v = idx.get(succ)
-                if v is not None:
-                    branch_edges.add((u, v))
-            for callee in blk.callees:
-                v = entry_of.get(callee)
-                # caller→callee only; a resolved callee outside the decoded
-                # set (e.g. libc) has no entry node to point at.
-                if v is not None and v != u:
-                    call_edges.add((u, v))
+    # A call edge and a branch edge can land on the same (u, v) pair (rare,
+    # but a tail-position call whose fallthrough block starts exactly at the
+    # callee is possible in theory), and a real branch must win that tie --
+    # see InterproceduralCFG.is_call. Keys sort as (u, v).
+    keys = np.union1d(branch, call)
+    src = keys >> _KEY_SHIFT
+    dst = keys & _KEY_MASK
+    is_call = ~np.isin(keys, branch)
 
-    ordered = sorted(branch_edges | call_edges)
-    if ordered:
-        src = np.array([e[0] for e in ordered], dtype=np.int64)
-        dst = np.array([e[1] for e in ordered], dtype=np.int64)
-        is_call = np.array([e not in branch_edges for e in ordered], dtype=bool)
-    else:
-        src = np.zeros(0, dtype=np.int64)
-        dst = np.zeros(0, dtype=np.int64)
-        is_call = np.zeros(0, dtype=bool)
-    node_funcs = [func_of[a] for a in node_addrs]
-    return InterproceduralCFG(node_addrs, node_funcs, src, dst, cfgs, is_call=is_call)
+    packed = array("Q")
+    packed.frombytes(node_addrs.tobytes())
+    return InterproceduralCFG(packed, node_funcs, src, dst, cfgs, is_call=is_call)
 
 
 def probe_key_node_table(td, icfg: InterproceduralCFG) -> dict[int, int]:
@@ -258,7 +331,7 @@ def probe_key_node_table(td, icfg: InterproceduralCFG) -> dict[int, int]:
                 blk = alt_cfg.block_containing(site) if alt_cfg else None
             if blk is None:
                 continue
-            nidx = icfg.node_index.get(blk.start)
+            nidx = icfg._node_at(blk.start)
             if nidx is not None:
                 table[site - base] = nidx
     return table

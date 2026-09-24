@@ -127,6 +127,9 @@ class KatzChannel:
             print(f"[katz] probe_key_node_table={time.perf_counter() - t0:.3f}s n={len(node_of)}")
         if not node_of:
             return None
+
+        # The probe table was the last reader of the per-function CFGs.
+        icfg.release_cfgs()
         ch = cls(icfg, node_of)
         ch._td = td
         return ch
@@ -137,6 +140,9 @@ class KatzChannel:
 
         dist = self._td.pc_distance_table()
         table = {key: float(dist.get(key, 0.0)) for key in self.node_of}
+
+        # Last reader of _td: drop the ELF parse (~115 MB on ffmpeg).
+        self._td = None
         try:
             self.table_shm = DistanceTableShm(table, node_of=self.node_of)
             self.bmp = NodeBitmapShm(num_nodes=self.n_nodes)

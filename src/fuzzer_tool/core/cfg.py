@@ -35,7 +35,8 @@ log = logging.getLogger(__name__)
 _MAX_INSNS_PER_FUNC = 1_000_000
 
 
-@dataclass
+# slots: no 296 B per-instance __dict__; ffmpeg decodes 2.74M blocks at once.
+@dataclass(slots=True)
 class BasicBlock:
     """A basic block within a function.
 
@@ -55,7 +56,9 @@ class BasicBlock:
     start: int
     end: int
     successors: list[int] = field(default_factory=list)
-    callees: set[str] = field(default_factory=set)
+    # Shared empty default: most blocks call nothing, and an empty set per
+    # block was 216 B x 2.74M on ffmpeg. _close_block assigns a real set.
+    callees: set[str] | frozenset[str] = frozenset()
     indirect_call: bool = False
     indirect_jump: bool = False
     is_entry: bool = False
@@ -229,16 +232,19 @@ def _close_block(start, insns, base_addr, func_end, resolve_callee) -> BasicBloc
     # A call whose target cannot be resolved (indirect form, or a direct
     # target outside the known function set) is flagged so callers can
     # treat it as a CG gap for runtime-edge patching.
+    callees: set[str] = set()
     for k, tgt in ((i[2], i[3]) for i in insns):
         if k == _CALL:
             if tgt is not None and resolve_callee is not None:
                 callee = resolve_callee(tgt)
                 if callee:
-                    blk.callees.add(callee)
+                    callees.add(callee)
                 else:
                     blk.indirect_call = True
             elif tgt is None:
                 blk.indirect_call = True
+    if callees:
+        blk.callees = callees
 
     def _intra(addr: int) -> bool:
         return base_addr <= addr < func_end
