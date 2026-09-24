@@ -85,11 +85,10 @@ matching the layout `adapters/filesystem.py::load_corpus` reads.
   op recorded for a field isn't one of `bit_flip`/`byte_flip`/`xor_byte`/
   `havoc_arith`, generation falls back to generic byte stress rather than
   actually replaying that specific operator's real behavior.
-- No live wiring into `Fuzzer.run()` (e.g. periodically calling
-  `FormatSeedGenerator(self._format_learner.hypotheses).generate(...)` and
-  feeding results back into the corpus) — this patch only adds the
-  generator and the offline CLI; hooking it into the live run loop, and
-  deciding a cadence/budget for it, is a follow-up.
+- ~~No live wiring into `Fuzzer.run()`~~ — DONE 2026-09-24:
+  `Fuzzer._refill_format_seeds` (stats tick, every 5000 execs, 32 seeds)
+  queues variants; `OperatorEngine.mutate` drains one per round.
+  Tests: `tests/test_regression_format_seed_wiring.py`. A/B owed (TODO.md).
 - `crc` stress values don't attempt checksum recomputation even when a
   format's algorithm could plausibly be guessed (e.g. width=4 near a
   `zip`/`png`-classified seed) — out of scope for this pass, flagged as a

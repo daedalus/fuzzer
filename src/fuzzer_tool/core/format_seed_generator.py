@@ -347,7 +347,7 @@ class FormatSeedGenerator:
     def __init__(self, fields, rng: random.Random | None = None):
         """``fields`` may be ``FormatLearner.hypotheses``, the ``fields``
         list from ``get_format_summary()``, or ``get_state()["hypotheses"]``."""
-        self.fields = sorted(_coerce_fields(fields), key=lambda s: s.score(), reverse=True)
+        self.set_fields(fields)
         self.rng = rng or random.Random()
         # Per-generation stats for the report's format-learning section.
         self.generator_stats: dict[str, int | float] = {
@@ -362,6 +362,10 @@ class FormatSeedGenerator:
             "field_types_used": {},
             "strategies_used": {},
         }
+
+    def set_fields(self, fields) -> None:
+        """Replace the field table, keeping stats (the learner keeps refining it)."""
+        self.fields = sorted(_coerce_fields(fields), key=lambda s: s.score(), reverse=True)
 
     def generate(self, base_seed: bytes, n_seeds: int = 32) -> list[GeneratedSeed]:
         """Produce up to ``n_seeds`` field-targeted variants of ``base_seed``.

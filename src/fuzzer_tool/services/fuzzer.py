@@ -43,6 +43,7 @@ from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.elf import SHM_LAYOUT_CURRENT, detect_elf_type, detect_shm_layout
+from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
@@ -417,6 +418,10 @@ SEED_SECRETARY_MAX = 500  # max per-seed SecretaryStopping entries
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
 EXEC_BLOOM_CAPACITY = 500_000  # executed-input filter capacity before generational wipe
 EXEC_DEDUP_RETRIES = 3  # re-rolls of the mutation before executing a repeat anyway
+# Format seed generator: every FORMAT_SEED_EVERY_EXECS execs, queue up to
+# FORMAT_SEED_BUDGET field-targeted variants of the last fuzzed seed.
+FORMAT_SEED_EVERY_EXECS = 5_000
+FORMAT_SEED_BUDGET = 32
 ELO_MATCH_WINDOW_MAX = 1_000  # max Elo match history entries
 META_STRATEGY_CHOICES_MAX = 1_000  # max meta-strategy choice history entries
 # ── Structure-function detector ───────────────────────────────────────────
@@ -2952,10 +2957,12 @@ class Fuzzer:
         self._dict_scratch: list[int] = []
         self._dict_scratch_idx = 0
 
-        # FormatSeedGenerator: stats for _format_learning report section.
-        # Instantiated when format learning is active; provides per-field
-        # generation stats (counts, confidences, last generated seed).
-        self._format_seed_generator = None
+        # FormatSeedGenerator: built on the first _refill_format_seeds when
+        # format learning is active. Its queue is drained one seed per round
+        # by OperatorEngine.mutate(); its stats feed the report.
+        self._format_seed_generator: FormatSeedGenerator | None = None
+        self._format_seed_queue: collections.deque[bytes] = collections.deque()
+        self._format_seed_exec = 0
 
         # self._format_learner / self._ppmd: constructed by
         # analyzer_registry.wire_all() above (format_learner,
@@ -7032,6 +7039,36 @@ class Fuzzer:
             ),
         }
 
+    def _refill_format_seeds(self) -> None:
+        """Queue field-targeted variants of the last fuzzed seed.
+
+        Runs on the stats tick, at most every FORMAT_SEED_EVERY_EXECS execs
+        and only once the previous batch is drained. mutate() hands out one
+        per round, so each goes through the normal exec/coverage/save path.
+        """
+        learner = self._format_learner
+        if learner is None or self._format_seed_queue:
+            return
+        if self.exec_count - self._format_seed_exec < FORMAT_SEED_EVERY_EXECS:
+            return
+
+        base = getattr(self, "_last_parent_seed", None)
+        if not base or not learner.hypotheses:
+            return
+        self._format_seed_exec = self.exec_count
+
+        # One generator for the whole run so its stats accumulate.
+        gen = self._format_seed_generator
+        if gen is None:
+            gen = FormatSeedGenerator(learner.hypotheses, rng=self._rng)
+            self._format_seed_generator = gen
+        else:
+            gen.set_fields(learner.hypotheses)
+
+        limit = self.max_len
+        for s in gen.generate(base, n_seeds=FORMAT_SEED_BUDGET):
+            self._format_seed_queue.append(s.data[:limit] if limit > 0 else s.data)
+
     def _maybe_trigger_stall_recovery(self, execs_since_edge):
         """Activate stall recovery unless entropy shows active redistribution.
 
@@ -8707,6 +8744,7 @@ class Fuzzer:
                     # significantly larger than the edge-derived target size,
                     # even if --minimize-every-execs is not set.
                     self._check_corpus_size_and_prune()
+                    self._refill_format_seeds()
                     if self.job_scheduler:
                         # P3-3 step 4: memory pruning, sanitizer/crash
                         # replays, and periodic GC as one precedence-aware

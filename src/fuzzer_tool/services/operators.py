@@ -5309,6 +5309,23 @@ class OperatorEngine:
 
         return buf
 
+    def _reset_round_ops(self, data: bytes, mutant: bytes) -> None:
+        """Clear this round's operator bookkeeping for a mutant no operator drew."""
+        from fuzzer_tool.core.similarity import hamming_distance
+
+        f = self.f
+        f._last_ops_used = []
+        f._last_ops_with_sites = []
+        f._last_mopt_particles = []
+        f._last_ops_effective = set()
+        f._last_ops_applicable = set()
+        f._last_havoc_subops = 0
+        f._last_op_costs = {}
+        f._last_mutation_offset = 0
+        f._last_hamming_distance = (
+            hamming_distance(data, mutant) if len(data) == len(mutant) else -1
+        )
+
     def mutate(self, data: bytes) -> bytes:
         from fuzzer_tool.core.similarity import hamming_distance
 
@@ -5341,19 +5358,17 @@ class OperatorEngine:
         f._last_slopt_arm = None
         det_mutant = self.maybe_deterministic_mutation(data)
         if det_mutant is not None:
-            f._last_ops_used = []
-            f._last_ops_with_sites = []
-            f._last_mopt_particles = []
-            f._last_ops_effective = set()
-            f._last_ops_applicable = set()
-            f._last_havoc_subops = 0
-            f._last_op_costs = {}
-            f._last_mutation_offset = 0
-            f._last_hamming_distance = (
-                hamming_distance(data, det_mutant) if len(data) == len(det_mutant) else -1
-            )
+            self._reset_round_ops(data, det_mutant)
             f._det_execs = getattr(f, "_det_execs", 0) + 1
             return det_mutant
+
+        # Format seed generator output (Fuzzer._refill_format_seeds): one per
+        # round, off the bandit tournament like the deterministic stage.
+        format_queue = getattr(f, "_format_seed_queue", None)
+        if format_queue:
+            format_seed = format_queue.popleft()
+            self._reset_round_ops(data, format_seed)
+            return format_seed
 
         buf = bytearray(data)
         if not buf:
