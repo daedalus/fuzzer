@@ -1,9 +1,31 @@
 """Consolidated diagnostic tool for the fuzzgoat edge-coverage determinism
 probes (P1-4) and the fuzzer memory/leak profilers.
 
-Consolidates every scratch probe formerly living at /tmp/opencode/*.py into a
-single CLI.  The originals are preserved untouched at /tmp/opencode/*.py; this
-file is the only new artifact.
+Consolidates the scratch probes of the P1-4 investigation (originally loose
+scripts; the script names are kept in the tables below for provenance) into a
+single CLI.
+
+Portability.  ``matrix`` and ``phantom`` are self-contained: they take every
+binary and corpus on the command line and run from any clone (the package is
+imported from this checkout's ``src/``).  The legacy probe and memory modes
+are local-only: they were written against one machine's fixed builds and are
+kept because they reproduce the P1-4 trail, not because they are general
+tools.  Their inputs resolve from the environment, and a missing input stops
+the mode with the variable to set instead of a traceback:
+
+    EDGE_DIAG_SCRATCH      scratch dir (debug targets, cj40 corpus, logs);
+                           default /tmp/opencode
+    EDGE_DIAG_BUILDS       prebuilt targets; default ~/fuzzing/builds
+    EDGE_DIAG_CTX_TARGET   fuzzgoat ctx build; default $EDGE_DIAG_BUILDS/fuzzgoat_read
+    EDGE_DIAG_DBG_TARGET   default $EDGE_DIAG_SCRATCH/fuzzgoat_dbg_dist
+    EDGE_DIAG_TRACE_TARGET default $EDGE_DIAG_SCRATCH/fuzzgoat_dbg (fire-trace-build)
+    EDGE_DIAG_CORPUS       input dir for the probe modes; default $EDGE_DIAG_SCRATCH/cj40
+    EDGE_DIAG_LIBPAD       LD_PRELOAD pad library for mappad; default /tmp/libpad.so
+    EDGE_DIAG_PROF_TARGET  memory-mode target; default $EDGE_DIAG_BUILDS/test_target_v3
+    EDGE_DIAG_PROF_CORPUS  memory-mode corpus; default ~/fuzzing/prof_corpus
+
+``python3 tools/corpus_fuzzgoat.py --out DIR`` builds a usable corpus and the
+handover's reference-run recipe builds the ctx target.
 
 Edge-coverage modes reproduce the P1-4 experiment trail (fuzzgoat, clang,
 ASLR pinned via disable_aslr()):
@@ -18,10 +40,10 @@ ASLR pinned via disable_aslr()):
     env-layout       env_layout_probe.py   (env pad 200B, path_hash)
     env-pad          env_pad_sweep.py      (pad sweep 0..4096 at 512/8192)
     malloc-tunables  heap_probe.py         (MALLOC_* tunables vs id 209)
-    mappad           pad_mb_probe.py       (needs /tmp/libpad.so)
+    mappad           pad_mb_probe.py       (needs $EDGE_DIAG_LIBPAD)
     strace-map       strace_probe.py       (needs strace; shmat/mmap addrs)
     gdb-guards       gdb_guard_capture.py  (needs gdb; __sanitizer_cov stream)
-    fire-trace       fire_trace.py         (needs /tmp/opencode/fuzzgoat_dbg)
+    fire-trace       fire_trace.py         (needs $EDGE_DIAG_TRACE_TARGET)
     fire-trace-build (build recipe for the ___AFL_EDGE_TRACE debug target)
 
 Sub-command modes (deep analysis; each delegates to its own argparse parser):
@@ -65,10 +87,11 @@ import sys
 import tempfile
 import threading
 import tracemalloc
+from pathlib import Path
 
 import numpy as np
 
-SRCDIR = "/home/dclavijo/my_code/fuzzer-new/src"
+SRCDIR = str(Path(__file__).resolve().parent.parent / "src")
 sys.path.insert(0, SRCDIR)
 
 logging.disable(logging.INFO)
@@ -79,11 +102,18 @@ from fuzzer_tool.adapters.shm import ShmCoverage  # noqa: E402
 from fuzzer_tool.core.gini import gini as _gini  # noqa: E402
 from fuzzer_tool.services.fuzzer import Fuzzer  # noqa: E402
 
-CTX_TARGET = "/home/dclavijo/fuzzing/builds/fuzzgoat_read"
-DBG_TARGET = "/tmp/opencode/fuzzgoat_dbg_dist"
-EDGE_TRACE_TARGET = "/tmp/opencode/fuzzgoat_dbg"
-PROF_TARGET = "/home/dclavijo/fuzzing/builds/test_target_v3"
-PROF_CORPUS = "/home/dclavijo/fuzzing/prof_corpus"
+# Inputs of the local-only modes (see the module docstring).  Strings, not
+# Paths: several modes build derived names by concatenation.
+_ENV = os.environ.get
+SCRATCH = _ENV("EDGE_DIAG_SCRATCH", "/tmp/opencode")
+BUILDS = _ENV("EDGE_DIAG_BUILDS", str(Path.home() / "fuzzing" / "builds"))
+CTX_TARGET = _ENV("EDGE_DIAG_CTX_TARGET", os.path.join(BUILDS, "fuzzgoat_read"))
+DBG_TARGET = _ENV("EDGE_DIAG_DBG_TARGET", os.path.join(SCRATCH, "fuzzgoat_dbg_dist"))
+EDGE_TRACE_TARGET = _ENV("EDGE_DIAG_TRACE_TARGET", os.path.join(SCRATCH, "fuzzgoat_dbg"))
+CORPUS_DIR = _ENV("EDGE_DIAG_CORPUS", os.path.join(SCRATCH, "cj40"))
+LIBPAD = _ENV("EDGE_DIAG_LIBPAD", "/tmp/libpad.so")
+PROF_TARGET = _ENV("EDGE_DIAG_PROF_TARGET", os.path.join(BUILDS, "test_target_v3"))
+PROF_CORPUS = _ENV("EDGE_DIAG_PROF_CORPUS", str(Path.home() / "fuzzing" / "prof_corpus"))
 BASE_IDS = [
     13,
     17,
@@ -134,7 +164,7 @@ BASE_IDS = [
     6361,
 ]
 
-FILES = sorted(glob.glob("/tmp/opencode/cj40/*"))
+FILES = sorted(glob.glob(os.path.join(CORPUS_DIR, "*")))
 
 DEVNULL = open(os.devnull, "w")  # noqa: SIM115
 
@@ -504,10 +534,10 @@ def ids_at(m, extra):
 
 def mappad_mode(args):
     pin()
-    if not os.path.exists("/tmp/libpad.so"):
+    if not os.path.exists(LIBPAD):
         print(
-            "missing /tmp/libpad.so (build from /tmp/pad.c: "
-            "clang -shared -fPIC -O1 /tmp/pad.c -o /tmp/libpad.so)"
+            f"missing {LIBPAD} (a local LD_PRELOAD pad library; set "
+            "EDGE_DIAG_LIBPAD -- no recipe is kept in the tree)"
         )
     for pad in (0, 2, 8, 64):
         for m in (512, 8192):
@@ -516,7 +546,7 @@ def mappad_mode(args):
                 os.environ,
                 __AFL_SHM_ID=str(cov.shm_id),
                 AFL_MAP_SIZE=str(m),
-                LD_PRELOAD="/tmp/libpad.so",
+                LD_PRELOAD=LIBPAD,
                 __PAD_MB=str(pad),
             )
             for g in range(3):
@@ -537,7 +567,7 @@ def strace_map_mode(args):
         env = dict(os.environ, __AFL_SHM_ID=str(cov.shm_id), AFL_MAP_SIZE=str(m))
         for _i in range(3):
             cov.reset_edge_map()
-        log = f"/tmp/opencode/strace_{m}.log"
+        log = os.path.join(SCRATCH, f"strace_{m}.log")
         r = subprocess.run(
             ["strace", "-f", "-e", "trace=shmat,mmap,brk", "-o", log, CTX_TARGET, str(FILES[1])],
             env=env,
@@ -587,10 +617,11 @@ end
 run {FILES[1]}
 quit
 """
-        with open("/tmp/opencode/gdb_cmd.txt", "w") as _fh:
+        gdb_cmd = os.path.join(SCRATCH, "gdb_cmd.txt")
+        with open(gdb_cmd, "w") as _fh:
             _fh.write(script)
         r = subprocess.run(
-            ["gdb", "-batch", "-x", "/tmp/opencode/gdb_cmd.txt", CTX_TARGET],
+            ["gdb", "-batch", "-x", gdb_cmd, CTX_TARGET],
             env=env,
             capture_output=True,
             timeout=120,
@@ -669,7 +700,9 @@ def fire_trace_build(args):
     print("        -I$FUZZ_VENDOR_ROOT/fuzzgoat -c fuzzgoat.c -o /tmp/fuzzgoat_dbg2.o")
     print("  clang -O2 -g -fno-omit-frame-pointer -include /tmp/afl_shim_dbg.c \\")
     print("        -I$FUZZ_VENDOR_ROOT/fuzzgoat targets/fuzzgoat_read.c /tmp/fuzzgoat_dbg2.o \\")
-    print("        -o /tmp/opencode/fuzzgoat_dbg -lm")
+    print(f"        -o {EDGE_TRACE_TARGET} -lm")
+    print("the shim's own -D__AFL_TRACE_FIRES=1 fire log (P0-1) covers the same")
+    print("ground without a patched shim; prefer it for new work.")
 
 
 # ── memory profiler modes ────────────────────────────────────────────────
@@ -2923,6 +2956,62 @@ MODES = {
 }
 
 
+_EDGE_PROBE_MODES = frozenset(
+    {
+        "per-input-sweep",
+        "fresh-sweep",
+        "collect-dump",
+        "full-table",
+        "view-mismatch",
+        "mixed-map",
+        "env-layout",
+        "env-pad",
+        "malloc-tunables",
+        "mappad",
+        "strace-map",
+        "gdb-guards",
+    }
+)
+
+
+def _mode_requirements(mode, args):
+    """What a local-only mode reads, as (description, env var, present?) triples.
+
+    Checked before dispatch so a fresh clone gets the variable to set rather
+    than an IndexError on an empty corpus glob or a FileNotFoundError from a
+    subprocess.  ``fire-trace-build`` only prints a recipe and needs nothing.
+    """
+    need = []
+    corpus = ("probe corpus (>= 6 inputs)", "EDGE_DIAG_CORPUS", len(FILES) >= 6)
+    if mode in _EDGE_PROBE_MODES:
+        need += [("ctx target", "EDGE_DIAG_CTX_TARGET", os.path.exists(CTX_TARGET)), corpus]
+    if mode == "stored-ids":
+        need.append(corpus)  # the binaries are --target/--second-target; it skips missing ones
+    if mode == "trace-stored":
+        need += [("debug target", "EDGE_DIAG_DBG_TARGET", os.path.exists(DBG_TARGET)), corpus]
+    if mode == "fire-trace":
+        need += [
+            ("fire-trace target", "EDGE_DIAG_TRACE_TARGET", os.path.exists(EDGE_TRACE_TARGET)),
+            corpus,
+        ]
+    if mode == "mappad":
+        need.append(("pad library", "EDGE_DIAG_LIBPAD", os.path.exists(LIBPAD)))
+    if mode in ("strace-map", "gdb-guards"):
+        tool = "strace" if mode == "strace-map" else "gdb"
+        need.append((f"{tool} on PATH", "PATH", shutil.which(tool) is not None))
+        need.append(("scratch dir", "EDGE_DIAG_SCRATCH", os.path.isdir(SCRATCH)))
+    if mode.startswith("mem-") or mode in ("op-caches", "run-sanity"):
+        need.append(("memory-mode target", "EDGE_DIAG_PROF_TARGET", os.path.exists(PROF_TARGET)))
+    return need
+
+
+def _preflight(mode, args):
+    missing = [(d, v) for d, v, ok in _mode_requirements(mode, args) if not ok]
+    for desc, var in missing:
+        print(f"edge_diagnostic {mode}: missing {desc} -- set {var}", file=sys.stderr)
+    return not missing
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] in ("matrix", "phantom"):
         if sys.argv[1] == "matrix":
@@ -2931,7 +3020,8 @@ def main():
     parser = argparse.ArgumentParser(
         prog="edge_diagnostic",
         description="Consolidated fuzzgoat coverage-determinism + fuzzer memory diagnostics. "
-        "matrix/phantom: deep analysis. Consolidates /tmp/opencode/*.py; originals untouched.",
+        "matrix/phantom: deep analysis, portable.  The modes below are local-only; "
+        "their inputs come from EDGE_DIAG_* (see the module docstring).",
     )
     parser.add_argument("mode", choices=sorted(MODES))
     parser.add_argument("--target", default=CTX_TARGET, help="stored-ids first binary")
@@ -2957,8 +3047,10 @@ def main():
     )
     args = parser.parse_args()
 
+    if not _preflight(args.mode, args):
+        return 2
     MODES[args.mode](args)
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
