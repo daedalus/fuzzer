@@ -5313,6 +5313,11 @@ class OperatorEngine:
         from fuzzer_tool.core.similarity import hamming_distance
 
         f = self.f
+        # A new mutant starts a new position round: drop what the arena saw
+        # for any mutant _dedup_mutate discarded before this one.
+        arena = getattr(f, "_position_arena", None)
+        if isinstance(arena, PositionArena):
+            arena.begin_round()
         # Refresh once per round -- see `ctx` property docstring. Every
         # handler this round (deterministic gate, build_ops, 2-16 havoc
         # sub-mutations) shares this snapshot rather than each rebuilding

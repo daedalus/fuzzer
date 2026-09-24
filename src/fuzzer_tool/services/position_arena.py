@@ -106,6 +106,17 @@ class PositionArena:
         """Names of arms whose feature is on now; uniform first."""
         return [name for name, (_, gate) in self._arms.items() if gate()]
 
+    def begin_round(self) -> None:
+        """Forget selections from a mutant that will not be executed.
+
+        ``OperatorEngine.mutate`` calls this first thing. ``_dedup_mutate``
+        re-rolls a mutant the exec bloom has already seen, and each re-roll
+        is a fresh ``mutate()``; without this the arms that served the
+        discarded mutants stayed in ``_used`` and were credited with the
+        outcome of the one that actually ran. ``settle`` still clears too.
+        """
+        self._used, self._seen_pool = [], []
+
     def used(self) -> list[str]:
         """Arms that served a position this round, in order."""
         return list(self._used)

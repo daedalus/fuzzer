@@ -398,6 +398,38 @@ class TestSettle:
         arena.settle(SEED, [], Outcome.MISS, weight=0.0, score=0.0)
         assert f._elo._strategy_match_count == {}
 
+    def test_begin_round_discards_a_rerolled_mutant(self):
+        # REGRESSION: _dedup_mutate re-rolls a seen mutant with a fresh
+        # mutate(); the arm that served the discarded one must not share the
+        # executed round's outcome.
+        f, arena = self._played(picked="sensitivity")
+        arena.begin_round()
+        _force(f, "te")
+        arena.select(SEED, len(SEED))
+        arena.settle(SEED, [], Outcome.GAIN, weight=1.0, score=1.0)
+        counts = f._elo._strategy_match_count
+        assert counts["pos_te"] == 3
+        assert counts["pos_sensitivity"] == 1  # as te's opponent only
+
+    def test_mutate_starts_a_position_round(self, monkeypatch):
+        # Wiring: OperatorEngine.mutate must reset the arena before anything
+        # else, so every dedup re-roll starts clean. Stop mutate right after
+        # the reset by failing the context refresh that follows it.
+        from fuzzer_tool.services import operators as ops_mod
+
+        class _Stop(Exception):
+            pass
+
+        def stop(_f):
+            raise _Stop
+
+        monkeypatch.setattr(ops_mod.MutationContext, "from_fuzzer", staticmethod(stop))
+        f, arena = self._played()
+        f._position_arena = arena
+        with pytest.raises(_Stop):
+            OperatorEngine(f).mutate(SEED)
+        assert arena.used() == []
+
     def test_burn_front_is_credited_off_policy(self):
         # The picker was sensitivity, not burn_front; the front still learns.
         bf = _bf()
