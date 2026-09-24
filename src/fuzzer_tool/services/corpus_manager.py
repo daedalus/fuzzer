@@ -38,6 +38,7 @@ from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 from fuzzer_tool.core.running_stats import RunningMoments
+from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.services.crash_explain import explain_static
 from fuzzer_tool.services.operators import HAVOC_SUB_OPS
 
@@ -972,20 +973,18 @@ class CorpusManager:
             seed_moments = getattr(f, "_seed_size_moments", None)
             if seed_moments is not None:
                 seed_moments.update(float(len(data)))
-                # Bloat early-warning: rising right skew in seed sizes means
-                # a few oversized seeds are growing relative to the median.
-                # Rate-limited to once per 500 execs to avoid log spam.
-                if (
-                    seed_moments.count >= 50
-                    and seed_moments.skewness > 2.0
-                    and f.exec_count - f._last_bloat_warn_exec >= 500
-                ):
+            # Bloat early-warning on the *location* of recent sizes (seeds
+            # pinned at max_len, or the median doubling across the window).
+            # It used to be seed-size skewness > 2, which reads the shape of
+            # a heavy-tailed distribution rather than growth: it fired on
+            # nearly every check of a stationary lognormal corpus and never
+            # on real bloat, which piles sizes at the cap and skews left.
+            # See core/size_bloat.py. Rate-limited to once per 500 execs.
+            if f.exec_count - f._last_bloat_warn_exec >= 500:
+                reason = seed_size_bloat(f._corpus_size_history, f.max_len)
+                if reason is not None:
                     f._last_bloat_warn_exec = f.exec_count
-                    log.warning(
-                        "Corpus bloat warning: seed-size skewness=%.2f "
-                        "(rising right tail — minimizing)",
-                        seed_moments.skewness,
-                    )
+                    log.warning("Corpus bloat warning: %s — minimizing", reason)
                     f._defer_minimize()
             if len(f._corpus_size_history) > 1000:
                 f._corpus_size_history = f._corpus_size_history[-500:]
@@ -1006,8 +1005,8 @@ class CorpusManager:
                 # large seeds pushed p90 up, max_len never came back down, so
                 # mutation kept producing larger seeds, which kept p90 up. That
                 # is a positive feedback loop into exactly the bloat the
-                # skewness warning below reports, and minimizing the corpus
-                # could not undo it. The configured max_len is the floor.
+                # warning above (core/size_bloat.py) reports, and minimizing
+                # the corpus could not undo it. The configured max_len is the floor.
                 f.max_len = min(max(p90 * 2, f._max_len_floor), 65536)
         else:
             f._duplicate_reject_count += 1

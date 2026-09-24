@@ -12,6 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_elo import Arena, strategy_arena, strategy_display_name
+from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.core.temporal_join import join_streams
 
 try:
@@ -1243,8 +1244,12 @@ def _distribution_diagnostics(f) -> str:
                 f"stddev={float(seed_moments.stddev):.0f}B  "
                 f"skew={float(seed_moments.skewness):.2f}  kurt={float(seed_moments.kurtosis):.2f}"
             )
-            if float(seed_moments.skewness) > 2.0:
-                lines.append("                    BLOAT WARNING: rising right tail in seed sizes")
+            bloat = seed_size_bloat(
+                list(getattr(f, "_corpus_size_history", [])),
+                int(getattr(f, "max_len", 0) or 0),
+            )
+            if bloat is not None:
+                lines.append(f"                    BLOAT WARNING: {bloat}")
     except (TypeError, AttributeError):
         pass
 
