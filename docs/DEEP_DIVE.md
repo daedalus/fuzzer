@@ -850,6 +850,8 @@ pip install -e ".[dev]"
 pytest
 ```
 
+Ground-truth oracles in `tests/support/`: `bandit_env.py` (scheduler convergence: stationary, decaying, pull-indexed `RottingArms`, 150-arm `Fatigue150`) and `sjt.py` (Steinhaus-Johnson-Trotter walk over all n! orders, recosting two jobs per adjacent swap; checks `job_scheduling` optimality).
+
 ## Development
 
 ```bash
