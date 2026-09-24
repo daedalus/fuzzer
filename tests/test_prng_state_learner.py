@@ -333,6 +333,48 @@ class TestCrossFamilyRecovery:
         assert restored.predict(2) == learner.predict(2)
 
 
+class TestLCGRecovery:
+    """P4-1: truncated-output LCGs recovered by lattice reduction, through the learner."""
+
+    @staticmethod
+    def _lcg(n: int, x: int, a: int, c: int, m: int, shift: int, bits: int) -> list[int]:
+        out = []
+        for _ in range(n):
+            out.append((x >> shift) & ((1 << bits) - 1))
+            x = (a * x + c) % m
+        return out
+
+    def test_recovers_a_java_random_stream(self):
+        words = self._lcg(6, 0x1234_5678_9ABC, 0x5DEECE66D, 0xB, 1 << 48, 16, 32)
+        learner = _learner(_conds(words[:5]))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.name == "java"
+        assert learner.predict(1) == words[5:]
+
+    def test_recovers_an_msvc_rand_stream(self):
+        words = self._lcg(7, 0xCAFE_F00D, 214013, 2531011, 1 << 32, 16, 15)
+        learner = _learner(_conds(words[:6]))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.name == "msvc"
+        assert learner.predict(1) == words[6:]
+
+    def test_round_trip_preserves_an_lcg_family(self):
+        words = self._lcg(5, 99, 0x5DEECE66D, 0xB, 1 << 48, 16, 32)
+        learner = _learner(_conds(words))
+        learner.observe_execution(PAYLOAD)
+        restored = PRNGStateLearner.from_dict(_fuzzer(), learner.to_dict())
+        assert restored._spec.name == "java"
+        assert restored.predict(2) == learner.predict(2)
+
+    def test_lcg_stream_continues_across_drains(self):
+        words = self._lcg(12, 7, 0x5DEECE66D, 0xB, 1 << 48, 16, 32)
+        learner = _learner(_conds(words[:5]))
+        learner.observe_execution(PAYLOAD)
+        learner.f._cmplog.last_conds = _conds(words[7:10])
+        assert learner.observe_execution(PAYLOAD2) is True
+        assert learner.predict(1) == words[10:11]
+
+
 class TestWideOperandStreams:
     """64-bit generators are observed and predicted at their own width.
 

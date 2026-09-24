@@ -100,6 +100,7 @@ from fuzzer_tool.adapters import shm as shmmod  # noqa: E402
 from fuzzer_tool.adapters.process import disable_aslr  # noqa: E402
 from fuzzer_tool.adapters.shm import ShmCoverage  # noqa: E402
 from fuzzer_tool.core.gini import gini as _gini  # noqa: E402
+from fuzzer_tool.core.lattice import lll_reduce  # noqa: E402
 from fuzzer_tool.services.fuzzer import Fuzzer  # noqa: E402
 
 # Inputs of the local-only modes (see the module docstring).  Strings, not
@@ -1538,63 +1539,7 @@ def gf2_structure(mat):
 LLL_ROW_BUDGET = 100  # LLL here is ~2 minutes at 100 rows and superlinear
 
 
-def _lll_reduce(basis, delta=0.75):
-    """LLL-reduce *basis* (a list of integer row vectors) in place, returning it.
-
-    Written out rather than imported: Hard Rule 51, and the only outside
-    implementation that would fit here is sympy's, which is a dependency this
-    repo does not carry.
-
-    The basis vectors stay exact Python integers -- every subtraction and
-    swap below is integer arithmetic -- while the Gram-Schmidt coefficients
-    are float.  That split is the usual engineering compromise and it is safe
-    for what this tool reports: float error in ``mu`` can only make the
-    reduction *weaker* (a size reduction skipped, a swap not taken), never
-    turn a non-relation into one, because the caller decides what is a
-    relation by testing exact integer entries for zero.
-
-    The Gram-Schmidt row for ``k`` is recomputed from the orthogonalised rows
-    below it whenever ``B[k]`` changes, and both affected rows are refreshed
-    after a swap.  Rows above ``k`` are never read before ``k`` reaches them,
-    so nothing stale is ever used.
-    """
-    rows = [list(map(int, r)) for r in basis]
-    n = len(rows)
-    if n < 2:
-        return rows
-    dim = len(rows[0])
-    ortho = np.zeros((n, dim))
-    mu = np.zeros((n, n))
-    norms = np.zeros(n)
-
-    def orthogonalise(k):
-        v = np.array(rows[k], dtype=float)
-        for j in range(k):
-            if norms[j] > 0.0:
-                mu[k, j] = float(np.dot(v, ortho[j]) / norms[j])
-                v = v - mu[k, j] * ortho[j]
-            else:
-                mu[k, j] = 0.0
-        ortho[k] = v
-        norms[k] = float(np.dot(v, v))
-
-    orthogonalise(0)
-    k = 1
-    while k < n:
-        orthogonalise(k)
-        for j in range(k - 1, -1, -1):
-            q = int(round(mu[k, j]))
-            if q:
-                rows[k] = [a - q * b for a, b in zip(rows[k], rows[j], strict=True)]
-                orthogonalise(k)
-        if norms[k] >= (delta - mu[k, k - 1] ** 2) * norms[k - 1]:
-            k += 1
-        else:
-            rows[k], rows[k - 1] = rows[k - 1], rows[k]
-            orthogonalise(k - 1)
-            orthogonalise(k)
-            k = max(k - 1, 1)
-    return rows
+_lll_reduce = lll_reduce  # moved to core/lattice.py
 
 
 def integer_relations(mat, max_rows=LLL_ROW_BUDGET):

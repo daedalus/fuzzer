@@ -110,24 +110,29 @@ different generator instance), the cache is dropped rather than kept stale.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import ModuleType
 from typing import Any, Literal
 
-from fuzzer_tool.core.prng_state_recovery import (
-    FAMILIES,
-    LinearPRNG,
-    confident_samples,
-    family,
-    output_word,
-    predict_words,
-    recover_state,
-    step_state,
-    verify_state,
-    walk_stream,
-)
+from fuzzer_tool.core import lcg_recovery, prng_state_recovery
+from fuzzer_tool.core.lcg_recovery import LCG_FAMILIES, LCGSpec, lcg_family
+from fuzzer_tool.core.prng_state_recovery import FAMILIES, LinearPRNG, family
 
-# Every shipped family, in FAMILIES' smallest-state-first order (cheapest
-# elimination tried first).
-_CANDIDATE_FAMILIES: tuple[LinearPRNG, ...] = tuple(FAMILIES.values())
+#: A recoverable generator: GF(2)-linear or LCG (P4-1).
+_Spec = LinearPRNG | LCGSpec
+
+
+def _driver(spec: _Spec) -> ModuleType:
+    """Recovery module for *spec*; both expose the same step/output/recover API."""
+    return lcg_recovery if isinstance(spec, LCGSpec) else prng_state_recovery
+
+
+def _confident(spec: _Spec) -> int:
+    return _driver(spec).confident_samples(spec)
+
+
+# Every shipped linear family, in FAMILIES' smallest-state-first order
+# (cheapest elimination tried first), then the LCGs (one small LLL each).
+_CANDIDATE_FAMILIES: tuple[_Spec, ...] = (*FAMILIES.values(), *LCG_FAMILIES.values())
 # Operand widths worth extracting at all: exactly the output widths some
 # family has, so a 2-byte compare is dropped at the source rather than
 # accumulated into a window no family could ever fit. Currently {4, 8}.
@@ -139,7 +144,7 @@ _OPERAND_WIDTHS: frozenset[int] = frozenset(spec.out_bytes for spec in _CANDIDAT
 # any family could possibly verify. 4-byte: xorshift32's 2. 8-byte:
 # xorshift64's 2.
 _MIN_SAMPLES: dict[int, int] = {
-    width: min(confident_samples(spec) for spec in _CANDIDATE_FAMILIES if spec.out_bytes == width)
+    width: min(_confident(spec) for spec in _CANDIDATE_FAMILIES if spec.out_bytes == width)
     for width in _OPERAND_WIDTHS
 }
 _MAX_SAMPLES = 16  # cap on candidates fed to one recovery attempt
@@ -175,7 +180,7 @@ class PRNGStateLearner:
 
     def __init__(self, fuzzer: Any) -> None:
         self.f = fuzzer
-        self._spec: LinearPRNG | None = None
+        self._spec: _Spec | None = None
         self._state: tuple[int, ...] | None = None
         # Samples the currently cached _state was confirmed against, in
         # order -- kept so a later observation can re-verify or invalidate it.
@@ -281,7 +286,7 @@ class PRNGStateLearner:
         """
         if self._frontier is None or self._spec is None:
             return None
-        return predict_words(self._frontier, n, self._spec)
+        return _driver(self._spec).predict_words(self._frontier, n, self._spec)
 
     def next_value_bytes(self, byteorder: Literal["little", "big"] = "little") -> bytes | None:
         """Convenience for mutators: the single next predicted draw, packed."""
@@ -384,17 +389,16 @@ class PRNGStateLearner:
     # Recovery
     # ------------------------------------------------------------------
 
-    def _set_state(
-        self, spec: LinearPRNG, state: tuple[int, ...], samples: list[int]
-    ) -> None:
+    def _set_state(self, spec: _Spec, state: tuple[int, ...], samples: list[int]) -> None:
         """Cache *state* (its own output == samples[0]) and derive the frontier
         whose own output == samples[-1]."""
         self._spec = spec
         self._state = state
         self._confirmed_samples = list(samples)
+        step = _driver(spec).step_state
         frontier = state
         for _ in range(len(samples) - 1):
-            frontier = step_state(frontier, spec)
+            frontier = step(frontier, spec)
         self._frontier = frontier
 
     def _clear_state(self) -> None:
@@ -414,6 +418,7 @@ class PRNGStateLearner:
         if self._frontier is None or self._spec is None or not candidates:
             return False
         spec = self._spec
+        walk_stream = _driver(spec).walk_stream
         for probe, word in walk_stream(self._frontier, _MAX_ADVANCE_SEARCH, spec):
             if word != candidates[0]:
                 continue
@@ -444,13 +449,14 @@ class PRNGStateLearner:
         """
         self.attempts += 1
         for spec in _CANDIDATE_FAMILIES:
-            if spec.out_bytes != width or len(candidates) < confident_samples(spec):
+            if spec.out_bytes != width or len(candidates) < _confident(spec):
                 continue
+            driver = _driver(spec)
             try:
-                state = recover_state(candidates, spec)
+                state = driver.recover_state(candidates, spec)
             except ValueError:
                 continue
-            if state is None or not verify_state(state, candidates, spec):
+            if state is None or not driver.verify_state(state, candidates, spec):
                 continue
             self._set_state(spec, state, candidates)
             self.successes += 1
@@ -480,7 +486,8 @@ class PRNGStateLearner:
         if data:
             state = data.get("state")
             if state:
-                spec = family(data.get("family") or "taus88") or FAMILIES["taus88"]
+                name = data.get("family") or "taus88"
+                spec: _Spec = family(name) or lcg_family(name) or FAMILIES["taus88"]
                 restored = tuple(int(x) for x in state)
                 samples = [int(x) for x in data.get("confirmed_samples") or []]
                 # The frontier is derived, not stored, so rebuild it here --
@@ -488,7 +495,8 @@ class PRNGStateLearner:
                 # state and hands out draws it has already seen. With no
                 # samples recorded (a state dict written before this field
                 # existed), the state's own output is the only anchor there is.
-                learner._set_state(spec, restored, samples or [output_word(restored, spec)])
+                anchor = samples or [_driver(spec).output_word(restored, spec)]
+                learner._set_state(spec, restored, anchor)
             learner.attempts = int(data.get("attempts", 0))
             learner.successes = int(data.get("successes", 0))
         return learner
