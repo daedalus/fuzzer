@@ -11,11 +11,12 @@ import os
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 TARGET = sys.argv[1] if len(sys.argv) > 1 else "targets/png_read_nosan.so"
 CORPUS = sys.argv[2] if len(sys.argv) > 2 else "corpus/png_read_smt_3"
 ITERS = sys.argv[3] if len(sys.argv) > 3 else "200"
-BASE = "/home/dclavijo/my_code/fuzzer"
+BASE = str(Path(__file__).resolve().parent.parent)
 
 os.chdir(BASE)
 

@@ -49,8 +49,8 @@ trap 'rc=$?; printf "\n\033[0;31mFAIL\033[0m: build aborted (exit %d) at %s:%d\n
       "$rc" "${BASH_SOURCE[0]}" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 if [ -z "${TMPDIR:-}" ]; then
-    mkdir -p /home/dclavijo/tmp
-    export TMPDIR=/home/dclavijo/tmp
+    mkdir -p "$HOME/tmp"
+    export TMPDIR="$HOME/tmp"
 fi
 
 # ── Path roots ────────────────────────────────────────────────────────

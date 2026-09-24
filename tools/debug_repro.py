@@ -4,10 +4,13 @@
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
 
 script = """
 import sys
-sys.path.insert(0, '.')
+sys.path.insert(0, 'src')
 import numpy as np
 from fuzzer_tool.services.fuzzer import Fuzzer
 from unittest.mock import patch
@@ -28,7 +31,7 @@ for i in range(2):
             [sys.executable, "-c", script, td],
             capture_output=True,
             text=True,
-            cwd="/home/dclavijo/my_code/fuzzer",
+            cwd=ROOT,
         )
         hexes = [line.strip() for line in r.stdout.strip().split()]
         results.append(hexes)

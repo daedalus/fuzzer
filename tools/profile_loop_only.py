@@ -12,10 +12,11 @@ import cProfile
 import os
 import pstats
 import sys
+from pathlib import Path
 
 
 def main():
-    os.chdir("/home/dclavijo/my_code/fuzzer")
+    os.chdir(Path(__file__).resolve().parent.parent)
 
     target = sys.argv[1] if len(sys.argv) > 1 else "targets/png_read_nosan.so"
     corpus = sys.argv[2] if len(sys.argv) > 2 else "/tmp/png"

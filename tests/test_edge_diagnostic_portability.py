@@ -102,3 +102,16 @@ def test_recipe_mode_needs_nothing(tmp_path):
     r = _run(["fire-trace-build"], cwd=tmp_path, EDGE_DIAG_SCRATCH=str(tmp_path))
     assert r.returncode == 0
     assert str(tmp_path) in r.stdout
+
+
+def test_no_python_tool_hardcodes_a_home_directory():
+    """Same defect class as the SRCDIR above, across tools/: a repo root or
+    a working directory pinned to one user's home.  bench_cache,
+    debug_repro and the three profile_* scripts chdir'd there."""
+    offenders = [
+        f"{p.name}:{n}"
+        for p in sorted((ROOT / "tools").glob("*.py"))
+        for n, line in enumerate(p.read_text(errors="replace").splitlines(), 1)
+        if "/home/" in line and not line.lstrip().startswith("#")
+    ]
+    assert offenders == []
