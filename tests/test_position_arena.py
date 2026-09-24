@@ -167,6 +167,22 @@ class TestBurnFront:
         s.record(SEED, [len(SEED) + 500], Outcome.GAIN)
         assert 0 <= s.propose(SEED, len(SEED) + 600) < len(SEED) + 600
 
+    def test_conduction_stops_at_the_seed_end(self):
+        # REGRESSION: the kernel's right tail used to heat bins past the
+        # seed, and propose() clamps them all onto the last byte.
+        s = _bf()
+        seed = bytes(32)
+        s.record(seed, [31], Outcome.GAIN)
+        heat = s.hot_bins(seed)
+        assert max(heat) == 31
+        assert set(heat) == set(range(31 - KERNEL_RADIUS, 32))
+
+    def test_gain_past_the_seed_end_lights_only_its_own_bin_beyond(self):
+        s = _bf()
+        s.record(SEED, [len(SEED) + 500], Outcome.GAIN)
+        beyond = [b for b in s.hot_bins(SEED) if b >= len(SEED)]
+        assert beyond == [len(SEED) + 500]
+
     def test_negative_offsets_are_ignored(self):
         s = _bf()
         s.record(SEED, [-5], Outcome.GAIN)

@@ -99,11 +99,18 @@ class BurnFrontPositionScheduler:
 
         front = self._front_for(data)
         share = weight / len(offsets)
+        # Conduction stops at the seed's last bin. propose() clamps any bin
+        # past the live buffer onto its last byte, so a kernel tail that ran
+        # off the end piled onto that one byte: a gain at the last byte of a
+        # 32-byte seed drew 51% of proposals there, against 12% for a gain
+        # mid-seed. A gain *at* an offset past the end (the child grew) still
+        # lights its own bin; only the spread is clipped.
+        last_bin = max(0, len(data) - 1) // front.width
         for off in offsets:
             hot = off // front.width
             for i, k in enumerate(_KERNEL):
                 b = hot + i - KERNEL_RADIUS
-                if b >= 0:
+                if b >= 0 and (b <= last_bin or b == hot):
                     front.heat[b] = front.heat.get(b, 0.0) + share * k
             front.fuel[hot] = 1.0
         self._trim(front)
