@@ -26,7 +26,7 @@ class TestEloAllEnablesAllSchedulers:
 
         def fake_fuzzer(**kwargs):
             captured.update(kwargs)
-            return SimpleNamespace(run=lambda iterations: 0)
+            return SimpleNamespace(run=lambda iterations, **_: 0)
 
         monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", fake_fuzzer)
         from fuzzer_tool.cli.commands import cmd_fuzz
