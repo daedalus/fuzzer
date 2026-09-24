@@ -324,6 +324,14 @@ harder problem.
 
 ---
 
+**Status 2026-09-24: not built — already covered.** `seed_entropy_gradient.py`
+(shipped as §4) implements exactly this rule: direct-child fold-and-diff credit,
+EWMA via a lazy global discount per admission. A second module would duplicate
+it. Its signed credit reached `weighted_choice` as a negative weight (IndexError
+when all negative); fixed by flooring at `MIN_WEIGHT`.
+
+---
+
 ## Priority, if picking one to build first
 
 1 and 2 are the cheapest and most directly testable against a synthetic

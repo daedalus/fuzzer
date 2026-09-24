@@ -214,7 +214,7 @@ class EntropyGradientSeedStrategy:
         return [self._credit(s) for s in seeds]
 
     def select(self, seeds: list[bytes]) -> bytes | None:
-        """Draw proportional to ``credit + MIN_WEIGHT``; None while cold.
+        """Draw proportional to ``max(credit, 0) + MIN_WEIGHT``; None while cold.
 
         Declining while ``not warmed`` (rather than picking uniformly
         among all-zero credits) matches every sibling entropy arm's
@@ -224,7 +224,9 @@ class EntropyGradientSeedStrategy:
         if not seeds or not self.warmed:
             return None
 
-        weights = [self._credit(s) + MIN_WEIGHT for s in seeds]
+        # Credit is signed (a flat child lowers pooled entropy); a negative
+        # weight breaks weighted_choice, so floor it -- "never helped".
+        weights = [max(self._credit(s), 0.0) + MIN_WEIGHT for s in seeds]
         self._selected += 1
         chosen: bytes = self._rng.weighted_choice(seeds, weights)
         return chosen

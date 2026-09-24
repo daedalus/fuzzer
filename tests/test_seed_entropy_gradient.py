@@ -337,7 +337,7 @@ class TestFalsification:
         root = [b"\x00" * 64]
         _fill_root(strategy, root)
         corpus = list(root)
-        for i in range(5):
+        for _i in range(5):
             child = b"\x00" * 64  # exact duplicate distribution
             corpus.append(child)
             strategy.record_child(root[0], child, corpus)
@@ -413,3 +413,28 @@ def test_scores_aligned_with_input_order():
     scores = strategy.scores(seeds)
     assert scores[1] == pytest.approx(strategy._credit(root[0]))
     assert scores[0] == pytest.approx(0.0)
+
+
+def test_regression_negative_credit_never_reaches_weighted_choice():
+    """A low-diversity child lowers pooled entropy, so its parent's credit
+    goes negative. Negative weights break RandPool.weighted_choice: an
+    all-negative set raises IndexError, a mixed set makes the cumulative
+    sum non-monotone. Weights must be floored at MIN_WEIGHT."""
+    from fuzzer_tool.core.rand_pool import RandPool
+
+    diverse = bytes(range(256))
+    flat = b"\x00" * 256
+    corpus = [diverse]
+    strategy = _strategy(rng=RandPool(seed=1), min_observations=1)
+    _fill_root(strategy, corpus)
+    corpus.append(flat)
+    assert _marginal_oracle([diverse], flat) < 0
+    strategy.record_child(diverse, flat, corpus)
+    assert strategy.scores([diverse])[0] < 0
+
+    assert strategy.select([diverse]) == diverse
+
+    capture = CapturingRng()
+    strategy._rng = capture
+    strategy.select([diverse, flat])
+    assert min(capture.weights) >= MIN_WEIGHT
