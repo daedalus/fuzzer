@@ -2667,13 +2667,16 @@ class EdgeTracker:
         }
 
     def effective_edges(self) -> float:
-        """How many edges the execution volume is effectively spread over.
+        """How many edges the recorded hit mass is effectively spread over.
 
         ``2 ** H`` of the global hit-count distribution: equal to the edge
         count when every edge is hit equally, 1.0 when one edge takes all of
-        it. Collapsing while ``len(_global_edge_hits)`` stays flat is a
-        saturation signal nothing else here reports -- the corpus is finding
-        the same paths harder rather than finding new ones.
+        it.  The mass is what ``record_edges()`` saw, which in the fuzz loop
+        is inputs with new coverage only -- not execution volume -- and it is
+        cumulative, so it is a campaign summary and cannot show a trend:
+        a stall's concentration can even *raise* it by flattening the tail.
+        The stall reason reads ``scheduler_substrate.ExecutionPerplexity``
+        instead, which samples executed inputs per discovery window.
 
         Reads ``_global_edge_hits`` directly, in one pass.
         ``edge_hit_distribution()`` below carries the same counts but costs

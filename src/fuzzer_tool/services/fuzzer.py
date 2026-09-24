@@ -1343,6 +1343,11 @@ class Fuzzer:
         self._reseed_on_stall = reseed_on_stall
         self._max_collision_risk = max_collision_risk
         self._last_new_edge_exec = 0
+        # Effective edges of the executions between discoveries, for the
+        # stall reason (P2-1).  Sparse SHM path only; empty elsewhere.
+        from fuzzer_tool.core.scheduler_substrate import ExecutionPerplexity
+
+        self._exec_perplexity = ExecutionPerplexity()
         self._novel_input_count = 0  # execs where record_edges found ≥1 new edge
         self._stall_recovery_active = False
         self._stall_recovery_count = 0  # times recovery was activated
@@ -5245,6 +5250,18 @@ class Fuzzer:
             skip=is_crash or is_timeout,
         )
 
+        # Sampled per-execution hit mass for the stall reason's effective-edge
+        # trend.  Every executed input, not only admitted ones -- a stall is
+        # precisely a run of inputs that are never admitted.  Crashes and
+        # timeouts are skipped: their counts are truncated executions.
+        if (
+            self._exec_perplexity.due()
+            and scanned_shm is not None
+            and not is_crash
+            and not is_timeout
+        ):
+            self._exec_perplexity.observe(scanned_shm.get_edge_counts())
+
         # Performance novelty: an edge whose trip count grew substantially
         # past anything seen before. The hit-count buckets saturate (129 and
         # 10^6 are the same bucket), so this is the only signal that stays
@@ -5540,6 +5557,7 @@ class Fuzzer:
                 )
                 if new:
                     self._last_new_edge_exec = self.exec_count
+                    self._exec_perplexity.note_new_edge()
                     self._last_new_edge_count = len(new)
                     self._last_new_edge_ids = list(new)
                     self._last_trace_edges = hit_edges
@@ -7065,6 +7083,11 @@ class Fuzzer:
         growth = self._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.3 and growth["current_rate"] < 0.001:
             reason += " + near-saturation"
+
+        # Where the executions' hits went since coverage last grew, against
+        # the window that ended in that discovery.  A fall with the raw edge
+        # count flat is the collapse this reason had no equivalent of.
+        reason += self._exec_perplexity.reason_suffix()
 
         self._stall_recovery_enter(reason, execs_since_edge)
 

@@ -43,6 +43,7 @@ log = logging.getLogger(__name__)
 
 __all__ = [
     "EdgeCanonicalizer",
+    "ExecutionPerplexity",
     "coverage_trust",
     "effective_edges",
 ]
@@ -60,7 +61,10 @@ def effective_edges(hits: Mapping[int, int] | Iterable[int]) -> float:
         Equal to the edge count when every edge is hit equally, 1.0 when one
         edge takes all of it, and 0.0 when there is nothing to measure.
 
-    Computed from the counts alone, in one pass.  Note that
+    Computed from the counts alone, in one pass.  What the counts cover is
+    the caller's choice: ``EdgeTracker.effective_edges()`` passes the tracker's
+    cumulative hits, which in the fuzz loop are recorded only for inputs with
+    new coverage; ``ExecutionPerplexity`` passes sampled executions.  Note that
     ``EdgeTracker.edge_hit_distribution()`` also carries this information but
     costs O(edges x seeds) to build, because it recounts owners per edge
     rather than reading ``_edge_owner_count``.
@@ -75,6 +79,105 @@ def effective_edges(hits: Mapping[int, int] | Iterable[int]) -> float:
         p = v / total
         entropy -= p * math.log2(p)
     return 2.0**entropy
+
+
+# Sampling cadence and minimum evidence for ExecutionPerplexity.  One scan
+# every 32 executions keeps the cost off the hot path (a memoised scan is a
+# dict build over the live edges; an unmemoised one was ~0.7-1.2 ms on
+# ffmpeg, i.e. <= ~40 us amortised).  16 samples = 512 executions, half the
+# default --stall-threshold, so a window is normally measurable by the time a
+# stall is declared; the aggressive thresholds (//4, //8) are not, and the
+# reason string then says nothing rather than quoting a tiny sample.
+EXEC_PERPLEXITY_STRIDE = 32
+EXEC_PERPLEXITY_MIN_SAMPLES = 16
+
+
+class ExecutionPerplexity:
+    """``2 ** H`` of the executions between discoveries, not of the campaign.
+
+    P2-1 of the edge-id handover asked for effective edges in the stall
+    reason, as a trend: the value when coverage last grew against the value
+    now.  ``EdgeTracker.effective_edges()`` cannot give that, for two
+    reasons.  It is cumulative, so a stall's concentration is averaged into
+    the whole history -- and not merely diluted: mass piling onto edges that
+    were in the tail of the history *flattens* the cumulative distribution,
+    so its ``2 ** H`` can rise while the executions collapse (simulated:
+    32 -> 47 cumulative against 20 in the window).  And in the fuzz loop it
+    only sees inputs admitted to the corpus, which is exactly the population
+    a stall stops producing.
+
+    This keeps a separate count vector over *executed* inputs, sampled every
+    ``stride`` executions, and closes a window at each new-edge discovery:
+    the closed window's ``2 ** H`` becomes the reference, and the open one is
+    the current value.  A window closed with fewer than ``min_samples``
+    samples is not a measurement -- early in a campaign discoveries arrive
+    every few executions -- so it is left open and keeps accumulating; the
+    open window therefore starts at the last *measured* discovery, which is
+    the last new edge whenever discoveries are sparse, i.e. whenever a stall
+    is possible at all.
+
+    A drop means the executed inputs spend their hits on fewer edges -- most
+    often mutants dying in the same early-reject path.  Reported, not acted
+    on: using it to temper exploration is operator-side design (P3).
+    """
+
+    __slots__ = ("stride", "min_samples", "_window", "_samples", "_reference", "_seen")
+
+    def __init__(
+        self,
+        stride: int = EXEC_PERPLEXITY_STRIDE,
+        min_samples: int = EXEC_PERPLEXITY_MIN_SAMPLES,
+    ) -> None:
+        if stride < 1 or min_samples < 1:
+            raise ValueError("stride and min_samples must be >= 1")
+        self.stride = stride
+        self.min_samples = min_samples
+        self._window: dict[int, int] = {}
+        self._samples = 0
+        self._reference: float | None = None
+        self._seen = 0
+
+    def due(self) -> bool:
+        """Advance the execution clock; True when this execution is sampled."""
+        self._seen += 1
+        return self._seen % self.stride == 0
+
+    def observe(self, counts: Mapping[int, int]) -> None:
+        """Add one sampled execution's ``{edge_id: hit count}``."""
+        if not counts:
+            return
+        w = self._window
+        for edge, c in counts.items():
+            if c > 0:
+                w[edge] = w.get(edge, 0) + c
+        self._samples += 1
+
+    def note_new_edge(self) -> None:
+        """Close the open window at a discovery, if it holds a measurement."""
+        if self._samples < self.min_samples:
+            return
+        self._reference = effective_edges(self._window)
+        self._window = {}
+        self._samples = 0
+
+    @property
+    def reference(self) -> float | None:
+        """``2 ** H`` of the last measured window that ended in a discovery."""
+        return self._reference
+
+    @property
+    def current(self) -> float | None:
+        """``2 ** H`` of the open window, or None below ``min_samples``."""
+        if self._samples < self.min_samples:
+            return None
+        return effective_edges(self._window)
+
+    def reason_suffix(self) -> str:
+        """``" + effective edges R->C"`` when both ends are measured, else ``""``."""
+        ref, cur = self._reference, self.current
+        if ref is None or cur is None:
+            return ""
+        return f" + effective edges {ref:.0f}->{cur:.0f}"
 
 
 def coverage_trust(

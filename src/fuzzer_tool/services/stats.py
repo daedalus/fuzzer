@@ -505,7 +505,7 @@ class StatsReporter:
             total_edges = len(f._edge_tracker._global_edge_hits)
             print(
                 f"  Effective edges:   {effective:.0f} of {total_edges} "
-                f"({effective / total_edges:.0%} of the map carries the volume)"
+                f"({effective / total_edges:.0%} of the edges carry the admitted inputs' hits)"
             )
         self._print_summary_edge_classes(f)
         uniqueness = f._edge_tracker.seed_uniqueness()
