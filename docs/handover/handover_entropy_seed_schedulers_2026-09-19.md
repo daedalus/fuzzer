@@ -298,6 +298,14 @@ rate is actually large enough to matter for minimization decisions.
 
 ---
 
+**Status 2026-09-24: LOO step shipped** as `seed_entropy_loo.py`
+(`--entropy-loo`). The near-duplicate misprice is pinned by
+`tests/test_seed_entropy_loo.py` (same-histogram pair: LOO 0/0, Shapley 3.5/3.5
+bits). Open: measure the disagreement rate on real corpora before building
+permutation Shapley; wiring the score into minimization is not done.
+
+---
+
 ## 6. `seed_entropy_contribution.py` — EWMA parent-credit scheduler
 
 The seed-scoped sibling of proposal §4, factored out as its own module because

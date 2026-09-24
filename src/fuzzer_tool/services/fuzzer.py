@@ -168,6 +168,7 @@ _SEED_STRATEGY_NAMES = (
     "entropy_zscore",
     "entropy_deviation",
     "entropy_gradient",
+    "entropy_loo",
     "residual",
     "round_robin",
 )
@@ -1282,6 +1283,7 @@ class Fuzzer:
         entropy_deviation=False,
         entropy_gradient=False,
         entropy_gradient_decay=0.98,
+        entropy_loo=False,
         seed_residual=False,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
@@ -2264,6 +2266,12 @@ class Fuzzer:
             )
 
             self._entropy_deviation = EntropyDeviationSeedStrategy(self._rng)
+        # Leave-one-out pooled-entropy arm (entropy §5, first step)
+        self._entropy_loo = None
+        if entropy_loo:
+            from fuzzer_tool.core.schedulers.seed_entropy_loo import EntropyLOOSeedStrategy
+
+            self._entropy_loo = EntropyLOOSeedStrategy(self._rng)
         # Unlike the three siblings above, this one has to observe every
         # corpus admission to assign credit (see the module docstring), not
         # just the ones where it happens to be picked -- so it costs a small
@@ -7647,6 +7655,8 @@ class Fuzzer:
             seeds.append("entropy-deviation")
         if getattr(self, "_entropy_gradient", None) is not None:
             seeds.append("entropy-gradient")
+        if getattr(self, "_entropy_loo", None) is not None:
+            seeds.append("entropy-loo")
         if getattr(self, "_seed_residual", None) is not None:
             seeds.append("residual")
         if getattr(self, "_use_seed_canary", False) and self._seed_canary:
@@ -8092,6 +8102,8 @@ class Fuzzer:
             groups["Seed selection"].append("entropy-deviation")
         if getattr(self, "_entropy_gradient", None) is not None:
             groups["Seed selection"].append("entropy-gradient")
+        if getattr(self, "_entropy_loo", None) is not None:
+            groups["Seed selection"].append("entropy-loo")
         if getattr(self, "_seed_residual", None) is not None:
             groups["Seed selection"].append("residual")
         if getattr(self, "_use_seed_round_robin", False) and self._seed_round_robin:

@@ -1999,6 +1999,7 @@ def _entropy_seed_lines(f) -> list[str]:
     from fuzzer_tool.core.schedulers.seed_entropy_deviation import EntropyDeviationSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_gradient import EntropyGradientSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
+    from fuzzer_tool.core.schedulers.seed_entropy_loo import EntropyLOOSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_zscore import EntropyZScoreSeedStrategy
 
     # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
@@ -2039,6 +2040,14 @@ def _entropy_seed_lines(f) -> list[str]:
             f"    credited={st['credited']} selected={st['selected']} "
             f"pooled={st['pooled']} warmed={st['warmed']} "
             f"mean_credit={st['mean_credit']:.3f} bits"
+        )
+
+    loo = getattr(f, "_entropy_loo", None)
+    if isinstance(loo, EntropyLOOSeedStrategy):
+        st = loo.stats()
+        lines.append("  Entropy LOO:      enabled")
+        lines.append(
+            f"    selected={st['selected']} pooled={st['pooled']} mean_loo={st['mean_loo']:.3f} bits"
         )
     return lines
 

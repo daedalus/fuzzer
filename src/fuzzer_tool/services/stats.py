@@ -115,6 +115,7 @@ def _entropy_seed_str(f) -> str:
     from fuzzer_tool.core.schedulers.seed_entropy_deviation import EntropyDeviationSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_gradient import EntropyGradientSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
+    from fuzzer_tool.core.schedulers.seed_entropy_loo import EntropyLOOSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_zscore import EntropyZScoreSeedStrategy
 
     # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
@@ -135,6 +136,10 @@ def _entropy_seed_str(f) -> str:
     grad = getattr(f, "_entropy_gradient", None)
     if isinstance(grad, EntropyGradientSeedStrategy):
         out += f" | ent-grad: mean={grad.stats()['mean_credit']:.3f}"
+
+    loo = getattr(f, "_entropy_loo", None)
+    if isinstance(loo, EntropyLOOSeedStrategy):
+        out += f" | ent-loo: mean={loo.stats()['mean_loo']:.3f}"
     return out
 
 

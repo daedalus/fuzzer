@@ -645,6 +645,7 @@ def cmd_fuzz(args):
         entropy_deviation=getattr(args, "entropy_deviation", False),
         entropy_gradient=getattr(args, "entropy_gradient", False),
         entropy_gradient_decay=getattr(args, "entropy_gradient_decay", 0.98),
+        entropy_loo=getattr(args, "entropy_loo", False),
         seed_residual=getattr(args, "seed_residual", False),
         confirm_novelty=getattr(args, "confirm_novelty", False),
         successive_elim=getattr(args, "successive_elim", False),
@@ -1881,6 +1882,7 @@ _HAIL_MARY_FLAGS = (
     "entropy_zscore",
     "entropy_deviation",
     "entropy_gradient",
+    "entropy_loo",
     "seed_residual",
     "op_katz",
     "op_kuramoto",
@@ -3338,6 +3340,15 @@ def main() -> int:
         help="Entropy-deviation seed scheduling: adds an 'entropy_deviation' Elo seed arm "
         "weighting seeds by how far their byte entropy deviates from the corpus mean "
         "(see docs/handover/handover_entropy_seed_schedulers_2026-09-19.md §1). OFF by "
+        "default; not yet A/B validated.",
+    )
+    fuzz_parser.add_argument(
+        "--entropy-loo",
+        action="store_true",
+        default=False,
+        help="Entropy leave-one-out seed scheduling: adds an 'entropy_loo' Elo seed arm "
+        "weighting seeds by how much pooled corpus byte-entropy drops without them "
+        "(docs/handover/handover_entropy_seed_schedulers_2026-09-19.md §5). OFF by "
         "default; not yet A/B validated.",
     )
     fuzz_parser.add_argument(

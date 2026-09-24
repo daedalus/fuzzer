@@ -311,6 +311,8 @@ class SeedPicker:
             available.append("entropy_kl")
         if getattr(f, "_entropy_deviation", None) is not None and f.corpus:
             available.append("entropy_deviation")
+        if getattr(f, "_entropy_loo", None) is not None and f.corpus:
+            available.append("entropy_loo")
         # Unlike its siblings, this arm warms up passively (it observes every
         # corpus admission via Fuzzer._record_entropy_gradient_credit, not
         # just the rounds it's picked in) -- so, unlike entropy_zscore, there
@@ -379,6 +381,7 @@ class SeedPicker:
             "entropy_zscore": lambda: self._pick_entropy_zscore_seed(),
             "entropy_deviation": lambda: self._pick_entropy_deviation_seed(),
             "entropy_gradient": lambda: self._pick_entropy_gradient_seed(),
+            "entropy_loo": lambda: self._pick_entropy_loo_seed(),
             "residual": lambda: self._pick_residual_seed(),
             "canary": lambda: self._pick_seed_canary_seed(),
             "round_robin": lambda: self._pick_seed_round_robin_seed(),
@@ -558,6 +561,18 @@ class SeedPicker:
         """
         f = self.f
         strategy = getattr(f, "_entropy_deviation", None)
+        if strategy is None or not f.corpus:
+            return None
+        return strategy.select(f.corpus)
+
+    def _pick_entropy_loo_seed(self) -> bytes | None:
+        """Leave-one-out pooled byte-entropy arm (entropy §5, first step).
+
+        Weights each seed by how much pooled corpus entropy drops without it
+        (see core/schedulers/seed_entropy_loo.py). None on an empty corpus.
+        """
+        f = self.f
+        strategy = getattr(f, "_entropy_loo", None)
         if strategy is None or not f.corpus:
             return None
         return strategy.select(f.corpus)
@@ -751,6 +766,7 @@ class SeedPicker:
             self._pick_entropy_zscore_seed,
             self._pick_entropy_deviation_seed,
             self._pick_entropy_gradient_seed,
+            self._pick_entropy_loo_seed,
             self._pick_residual_seed,
             self._pick_seed_round_robin_seed,
         ):
