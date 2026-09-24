@@ -158,6 +158,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Seed calibration duplicated every seed's edge set** (`services/fuzzer.py`): `_calibrate_seed_baselines`
+  passed `target_name`, filling `seed_target_edges`, which only multi-target mode reads and calibration
+  skips. ffmpeg_read_asan.so, 480 seeds: calibration RSS growth 465 -> 336 MB.
+
 - **Exec-time anomaly threshold leaked and slowed every exec** (`core/analyzers/analyzer_exec_time_anomaly.py`):
   all exec times were kept (32 B/exec) and median-sorted each exec (1.1 ms at 10k execs, 235 ms at 1M).
   Now an exact median over the last 4096. fuzzgoat, 26k execs: 172 s -> 125 s.

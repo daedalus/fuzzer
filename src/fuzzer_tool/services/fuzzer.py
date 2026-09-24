@@ -7955,7 +7955,9 @@ class Fuzzer:
             new = self._edge_tracker.record_edges(
                 self._seed_key(seed),
                 edge_ids,
-                target_name=os.path.basename(self.target),
+                # "" skips seed_target_edges: a full per-seed duplicate that only
+                # multi-target mode reads, and this pass never runs there.
+                target_name="",
                 hit_counts=hit_counts,
                 stack_depth=stack_depth,
                 path_hash=path_hash,
