@@ -427,7 +427,8 @@ plain `generate()` too): the shipped `json` grammar's `string` rule
 (`b'\\'`, `b' text '`, `b''`) instead of quote-literal / ref / quote-
 literal, so both the naive and the new Boltzmann path emit the literal
 bytes `\ text ` for that rule rather than an actual quoted string. Tests
-here exercise the `text` rule directly to route around it.
+here exercise the `text` rule directly to route around it. **Fixed 2026-09-24:** the tokenizer now skips `\"` inside quotes
+(`tests/test_regression_json_grammar_string.py`).
 
 ### 7.5 Cycle lemma as a cheaper exact Dyck-path generator
 

@@ -865,6 +865,7 @@ def _activate_pll(f: FuzzerLike) -> None:
     from fuzzer_tool.core.analyzers.analyzer_pll import PLLMonitor
 
     f._pll = PLLMonitor()
+    f._pll.load(f._state_store.get("pll"))
     f._pll_disc_idx = 0
 
 

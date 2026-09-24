@@ -1585,6 +1585,9 @@ class Fuzzer:
 
         # WFC structural generation mode
         self._wfc_enabled = wfc
+        from fuzzer_tool.core.wfc_chunks import WFC_MUTATOR
+
+        WFC_MUTATOR.use_wfc = wfc
 
         # Corpus size boost: normal-distribution seed resizing
         self._corpus_boost = corpus_boost
@@ -3828,6 +3831,40 @@ class Fuzzer:
         if self._seed_strata is not None:
             state["seed"] = self._seed_strata.to_dict()
         self._state_store.set("strata", state)
+
+    def _save_learned(self) -> None:
+        """Persist op_credit, burn-front, PLL and WFC tables for ``--resume``."""
+        from fuzzer_tool.core.wfc_chunks import WFC_MUTATOR
+
+        if self._op_credit is not None:
+            self._state_store.set("op_credit", self._op_credit.to_dict())
+        if self._burn_front is not None:
+            self._state_store.set("burn_front", self._burn_front.to_dict())
+        pll = getattr(self, "_pll", None)
+        if pll is not None:
+            self._state_store.set("pll", pll.save())
+        if self._wfc_enabled:
+            self._state_store.set("wfc_tables", WFC_MUTATOR.store.to_dict())
+
+    def _load_learned(self) -> None:
+        """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
+
+        PLL is restored at analyzer activation (``_activate_pll``).
+        """
+        from fuzzer_tool.core.wfc_chunks import WFC_MUTATOR, WfcChunkTableStore
+
+        # WFC_MUTATOR is process-global: without the reset a second campaign
+        # in one process would inherit the first one's tables.
+        if not self.resume:
+            WFC_MUTATOR.store = WfcChunkTableStore()
+            return
+
+        if self._op_credit is not None:
+            self._op_credit.from_dict(self._state_store.get("op_credit", {}))
+        if self._burn_front is not None:
+            self._burn_front.from_dict(self._state_store.get("burn_front", {}))
+        if self._wfc_enabled:
+            WFC_MUTATOR.store.from_dict(self._state_store.get("wfc_tables", {}))
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""
@@ -8643,6 +8680,8 @@ class Fuzzer:
             if self._entropy_zscore is not None:
                 self._load_entropy_zscore()
 
+            self._load_learned()
+
             # Print WFC mode status
             if self._wfc_enabled:
                 print("[*] WFC: enabled — structural chunk reordering and pixel generation active")
@@ -9014,6 +9053,7 @@ class Fuzzer:
             self._state_store.set("entropy_kl", self._entropy_kl.to_dict())
         if self._entropy_zscore is not None:
             self._state_store.set("entropy_zscore", self._entropy_zscore.to_dict())
+        self._save_learned()
         if self._fluctuation is not None:
             self._state_store.set("fluctuation", self._fluctuation.snapshot())
             samples = sum(len(v) for v in self._fluctuation._states.values())

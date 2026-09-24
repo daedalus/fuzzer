@@ -148,6 +148,22 @@ class AdjacencyTable:
                 table.add_forward(seq[i], seq[i + 1])
         return table
 
+    def to_dict(self) -> dict[bytes, dict[str, set[bytes]]]:
+        """Rules as plain containers (state_store pickles only those)."""
+        return {t: {d: set(s) for d, s in dirs.items()} for t, dirs in self._rules.items()}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> AdjacencyTable:
+        """Inverse of :meth:`to_dict`; raises TypeError/AttributeError on bad shapes."""
+        table = cls()
+        for t, dirs in data.items():
+            table._ensure(bytes(t))
+            for d, names in dirs.items():
+                if d not in table._rules[t]:
+                    raise ValueError(f"unknown direction {d!r}")
+                table._rules[t][d].update(bytes(n) for n in names)
+        return table
+
     def _ensure(self, name: bytes):
         if name not in self._rules:
             self._rules[name] = {d: set() for d in ["left", "right", "up", "down"]}

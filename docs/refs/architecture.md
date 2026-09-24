@@ -9,7 +9,7 @@ meta-scheduler, or state persistence (`state.pkl.gz` via `core/state_store.py`).
 
 Fuzzer state is saved to `{corpus_dir}/state.pkl.gz` on shutdown via `core/state_store.py:StateStore`. Use `--resume` to continue. Pass `--no-save-state` to skip writing the file entirely.
 
-Sections: `corpus` (exec counts, crash sigs, op stats, seed metadata), `edge_tracker`, `markov`, `mi`, `elo`, `ga`, `qea`, `crash_mi`, `sensitivity`, `length_tracker`, `seed_quality`. Legacy per-component JSON files are auto-migrated on first `--resume` and cleaned up via `cleanup_legacy()`.
+Sections: `corpus` (exec counts, crash sigs, op stats, seed metadata), `edge_tracker`, `markov`, `mi`, `elo`, `ga`, `qea`, `crash_mi`, `sensitivity`, `length_tracker`, `seed_quality`, plus opt-in learners via `Fuzzer._save_learned` / `_load_learned`: `op_credit`, `burn_front`, `pll`, `wfc_tables`. Legacy per-component JSON files are auto-migrated on first `--resume` and cleaned up via `cleanup_legacy()`.
 
 Reload paths must skip re-derivation (see "State & double-counting" in docs/refs/bug-classes.md).
 

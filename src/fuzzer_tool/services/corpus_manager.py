@@ -34,6 +34,7 @@ from fuzzer_tool.adapters.filesystem import (
 )
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.cost_ledger import seed_exec_us
+from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 from fuzzer_tool.core.running_stats import RunningMoments
@@ -952,6 +953,8 @@ class CorpusManager:
                 f._calibrate_seed_stability(data, n_runs=f._calibrate_stability)
             f.markov.train(data)
             f.markov_trained = f.markov.is_trained()
+            # Mutator feedback hook (e.g. wfc_reorder_learned's adjacency tables).
+            REGISTRY.notify_new_coverage(data, getattr(f, "_last_new_edge_count", 0))
             if f.markov.snapshot_and_check_plateau():
                 log.info(
                     "Markov plateau detected (JS=%.4f) — reducing generation rate",

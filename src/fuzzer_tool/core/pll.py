@@ -349,6 +349,62 @@ class PhaseLockedLoop:
             locked=self.locked,
         )
 
+    def to_dict(self) -> dict[str, Any]:
+        """Parameters plus running state; :meth:`from_dict` resumes mid-trajectory."""
+        return {
+            "center_freq": self.center_freq,
+            "max_freq_correction": self._max_freq_correction,
+            "dc_alpha": self.dc_alpha,
+            "amp_alpha": self.amp_alpha,
+            "detector_alpha": self.detector_alpha,
+            "lock_threshold": self.lock_threshold,
+            "unlock_threshold": self.unlock_threshold,
+            "min_lock_ticks": self.min_lock_ticks,
+            "pi": self._pi.to_dict(),
+            "theta": self._theta,
+            "dc": self._dc,
+            "amp": self._amp,
+            "q_lp": self._q_lp,
+            "i_lp": self._i_lp,
+            "consec_locked": self._consec_locked,
+            "tick": self._tick,
+            "locked": self.locked,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Any) -> PhaseLockedLoop:
+        """Inverse of :meth:`to_dict`.
+
+        Raises:
+            ValueError: on any malformed payload, so callers catch one type.
+        """
+        try:
+            pi = PIController.from_dict(data["pi"])
+            pll = cls(
+                center_freq=data["center_freq"],
+                kp=pi.kp,
+                ki=pi.ki,
+                max_freq_correction=data["max_freq_correction"],
+                dc_alpha=data["dc_alpha"],
+                amp_alpha=data["amp_alpha"],
+                detector_alpha=data["detector_alpha"],
+                lock_threshold=data["lock_threshold"],
+                unlock_threshold=data["unlock_threshold"],
+                min_lock_ticks=data["min_lock_ticks"],
+            )
+            pll._pi = pi
+            pll._theta = float(data["theta"])
+            pll._dc = float(data["dc"])
+            pll._amp = float(data["amp"])
+            pll._q_lp = float(data["q_lp"])
+            pll._i_lp = float(data["i_lp"])
+            pll._consec_locked = int(data["consec_locked"])
+            pll._tick = int(data["tick"])
+            pll.locked = bool(data["locked"])
+        except (KeyError, TypeError, AttributeError) as e:
+            raise ValueError(f"malformed PLL state: {e!r}") from e
+        return pll
+
     def reset(self, center_freq: float | None = None) -> None:
         """Reset all running state. Optionally re-centers the frequency."""
         if center_freq is not None:

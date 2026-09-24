@@ -17,13 +17,14 @@ models here.
 ``weight(bin) = heat * fuel``. A gain refuels its bin: a productive site is
 not exhausted. Heat cools geometrically every COOL_EVERY proposals.
 
-State is per parent seed, in memory only (LRU-bounded, MAX_SEEDS), and
-sparse: at most MAX_HOT_BINS heated bins per seed. Not persisted; a fresh
-run re-learns it from the first gains.
+State is per parent seed (LRU-bounded, MAX_SEEDS) and sparse: at most
+MAX_HOT_BINS heated bins per seed. Persisted through ``state_store``
+(``Fuzzer._save_learned``) so ``--resume`` keeps the fronts.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -34,6 +35,9 @@ import xxhash
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 
+log = logging.getLogger(__name__)
+
+STATE_VERSION = 1
 MAX_BINS = 4096  # offsets per seed are binned down to this
 MAX_SEEDS = 256  # LRU bound on per-seed fronts
 MAX_HOT_BINS = 256  # sparse heat cap per seed
@@ -57,6 +61,10 @@ class _Front:
     heat: dict[int, float] = field(default_factory=dict)
     fuel: dict[int, float] = field(default_factory=dict)
     proposals: int = 0
+
+
+def _floats(d) -> dict[int, float]:
+    return {int(b): float(v) for b, v in d.items()}
 
 
 class BurnFrontPositionScheduler:
@@ -126,6 +134,39 @@ class BurnFrontPositionScheduler:
 
     def seed_count(self) -> int:
         return len(self._fronts)
+
+    def to_dict(self) -> dict:
+        """Fronts oldest-first, so a restore keeps the LRU order."""
+        return {
+            "version": STATE_VERSION,
+            "fronts": {
+                k: (f.width, dict(f.heat), dict(f.fuel), f.proposals)
+                for k, f in self._fronts.items()
+            },
+        }
+
+    def from_dict(self, data) -> None:
+        """Replace every front with *data*'s; a malformed payload clears them."""
+        self._fronts = OrderedDict()
+        if not data:
+            return
+        try:
+            if data.get("version") != STATE_VERSION:
+                raise ValueError(f"version {data.get('version')!r}")
+            fronts = OrderedDict(
+                (int(k), _Front(int(w), _floats(heat), _floats(fuel), int(p)))
+                for k, (w, heat, fuel, p) in data["fronts"].items()
+            )
+            if any(f.width < 1 for f in fronts.values()):
+                raise ValueError("front width < 1")
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            log.warning("burn-front state unreadable, starting fresh: %s", e)
+            return
+
+        # Oldest entries are dropped first, as _front_for would have.
+        while len(fronts) > MAX_SEEDS:
+            fronts.popitem(last=False)
+        self._fronts = fronts
 
     @staticmethod
     def _key(data: bytes) -> int:

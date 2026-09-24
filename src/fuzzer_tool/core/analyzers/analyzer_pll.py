@@ -26,8 +26,9 @@ import logging
 import math
 from array import array
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from enum import Enum
+from typing import Any
 
 from fuzzer_tool.core.periodicity import detect_periodicity
 from fuzzer_tool.core.pll import PhaseLockedLoop, PLLState
@@ -44,6 +45,9 @@ PENDING_CAP = 65536
 MAX_TRANSITIONS = 256
 #: Nyquist: ``PhaseLockedLoop.from_period`` refuses periods <= 2.
 NYQUIST_PERIOD = 2.0
+STATE_VERSION = 1
+#: ``_Track`` counters persisted verbatim.
+_COUNTERS = ("misses", "dropped", "ticks", "ticks_stalled", "transitions", "transitions_stalled")
 
 
 class Series(Enum):
@@ -82,6 +86,27 @@ class _Track:
         self.ticks_stalled = 0
         self.transitions = 0
         self.transitions_stalled = 0
+
+    def save(self) -> dict[str, Any]:
+        out: dict[str, Any] = {c: getattr(self, c) for c in _COUNTERS}
+        out["buf"] = self._buf.tolist()
+        out["pll"] = self.pll.to_dict() if self.pll is not None else None
+        out["bootstrap_period"] = self.bootstrap_period
+        out["last"] = asdict(self.last) if self.last is not None else None
+        return out
+
+    @classmethod
+    def load(cls, series: Series, warmup: int, data: Any) -> _Track:
+        """Inverse of :meth:`save`; raises ValueError/TypeError/KeyError on bad shapes."""
+        t = cls(series, warmup)
+        for c in _COUNTERS:
+            setattr(t, c, int(data[c]))
+        t._buf = array("d", data["buf"])
+        t.pll = PhaseLockedLoop.from_dict(data["pll"]) if data["pll"] is not None else None
+        bp = data["bootstrap_period"]
+        t.bootstrap_period = float(bp) if bp is not None else None
+        t.last = PLLState(**data["last"]) if data["last"] is not None else None
+        return t
 
     def feed(self, xs: array, exec_count: int, stall: Stall) -> list[PLLTransition]:
         out: list[PLLTransition] = []
@@ -139,10 +164,43 @@ class PLLMonitor:
     def __init__(self, warmup: int = WARMUP, max_transitions: int = MAX_TRANSITIONS):
         if warmup < MIN_WARMUP:
             raise ValueError(f"warmup {warmup} must be >= {MIN_WARMUP}")
+        self._warmup = warmup
         self._tracks = {s: _Track(s, warmup) for s in Series}
         self._pending = {s: array("d") for s in Series}
         self.transitions: deque[PLLTransition] = deque(maxlen=max_transitions)
         self._last_ctx = (0, Stall.NO)
+
+    def save(self) -> dict[str, Any]:
+        """Loops, counters, warm-up and pending buffers, transition log."""
+        return {
+            "version": STATE_VERSION,
+            "tracks": {s.value: t.save() for s, t in self._tracks.items()},
+            "pending": {s.value: b.tolist() for s, b in self._pending.items()},
+            "transitions": [
+                (t.series.value, t.tick, t.exec_count, t.locked, t.period, t.stalled)
+                for t in self.transitions
+            ],
+            "last_ctx": (self._last_ctx[0], self._last_ctx[1].value),
+        }
+
+    def load(self, data: Any) -> None:
+        """Restore :meth:`save` output; a malformed payload leaves this monitor fresh."""
+        if not data:
+            return
+        try:
+            if data["version"] != STATE_VERSION:
+                raise ValueError(f"version {data['version']!r}")
+            tracks = {s: _Track.load(s, self._warmup, data["tracks"][s.value]) for s in Series}
+            pending = {s: array("d", data["pending"][s.value]) for s in Series}
+            log_ = [PLLTransition(Series(r[0]), *r[1:]) for r in data["transitions"]]
+            ctx = (int(data["last_ctx"][0]), Stall(data["last_ctx"][1]))
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError) as e:
+            log.warning("pll state unreadable, starting fresh: %s", e)
+            return
+
+        self._tracks, self._pending, self._last_ctx = tracks, pending, ctx
+        self.transitions.clear()
+        self.transitions.extend(log_)
 
     def push(self, series: Series, x: float) -> None:
         """Queue one sample; flushes inline past ``PENDING_CAP``."""

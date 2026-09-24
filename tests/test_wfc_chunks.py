@@ -485,6 +485,7 @@ class TestWfcChunkMutator:
 
     def test_mutate_reorders_and_reparses(self):
         m = WfcChunkMutator()
+        m.use_wfc = True
         ctx = MutationContext(wfc_enabled=True)
         rng = RandPool(seed=7)
         for _name, data, try_parse, _fmt in _FORMATS_UNDER_TEST:
@@ -501,12 +502,14 @@ class TestWfcChunkMutator:
 
     def test_on_new_coverage_populates_the_store(self):
         m = WfcChunkMutator()
+        m.use_wfc = True
         m.on_new_coverage(isobmff_sample(), 3)
         table = m.store.table_for("isobmff")
         assert table.compatible(b"ftyp", b"free", "right")
 
     def test_on_new_coverage_ignores_empty_and_garbage(self):
         m = WfcChunkMutator()
+        m.use_wfc = True
         m.on_new_coverage(b"", 0)  # must not raise
         m.on_new_coverage(b"not any known container", 1)  # must not raise
 
@@ -712,6 +715,7 @@ class TestRolloutGating:
 
     def test_on_new_coverage_learns_each_new_format(self):
         m = WfcChunkMutator()
+        m.use_wfc = True
         for name, data, _try, fmt in _ROLLOUT_UNDER_TEST:
             m.on_new_coverage(data, 1)
             kinds = kind_sequence(fmt, data)
@@ -720,6 +724,7 @@ class TestRolloutGating:
     def test_truncated_new_format_inputs_decline_without_raising(self):
         """Adversarial: half a file must never make ``mutate`` raise."""
         m = WfcChunkMutator()
+        m.use_wfc = True
         ctx = MutationContext(wfc_enabled=True)
         rng = RandPool(seed=17)
         for _name, data, _try, _fmt in _ROLLOUT_UNDER_TEST:

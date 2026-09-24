@@ -41,6 +41,7 @@ WFC run can't find a valid ordering.
 from __future__ import annotations
 
 import dataclasses
+import logging
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -66,6 +67,9 @@ from fuzzer_tool.core.wfc import AdjacencyTable, Tile, WaveGrid
 # caller can feed this module, rather than relying solely on WaveGrid's own
 # work_budget.
 MAX_TILES = 64
+STATE_VERSION = 1
+
+log = logging.getLogger(__name__)
 MAX_CELLS = 200_000
 
 
@@ -104,11 +108,8 @@ def kind_sequence(fmt: ChunkFormat, data: bytes) -> list[bytes] | None:
 class WfcChunkTableStore:
     """One learned ``AdjacencyTable`` per format name.
 
-    Not persisted across process restarts (see the handover's "per-format
-    table store ... persisted through state_store" proposal) -- this is the
-    in-process half: a table built from whatever corpus admissions this run
-    has already seen. Wiring survival across restarts was deferred; see the
-    handover-fix commit message for the tradeoff.
+    Persisted through ``state_store`` (``Fuzzer._save_learned``) so a
+    ``--resume`` keeps what earlier admissions taught.
     """
 
     def __init__(self) -> None:
@@ -143,6 +144,28 @@ class WfcChunkTableStore:
             table.add_forward(a, b)
             known.add(a)
             known.add(b)
+
+    def to_dict(self) -> dict:
+        return {
+            "version": STATE_VERSION,
+            "tables": {f: t.to_dict() for f, t in self._tables.items()},
+        }
+
+    def from_dict(self, data) -> None:
+        """Replace every table with *data*'s; a malformed payload empties the store."""
+        self._tables, self._known = {}, {}
+        if not data:
+            return
+        try:
+            if data.get("version") != STATE_VERSION:
+                raise ValueError(f"version {data.get('version')!r}")
+            tables = {str(f): AdjacencyTable.from_dict(t) for f, t in data["tables"].items()}
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            log.warning("wfc table state unreadable, starting fresh: %s", e)
+            return
+
+        self._tables = tables
+        self._known = {f: set(t.to_dict()) for f, t in tables.items()}
 
 
 def _table_pairs(table: AdjacencyTable, kinds: list[bytes]) -> set[tuple[bytes, bytes]]:
@@ -800,6 +823,7 @@ class WfcChunkMutator(MutatorBase):
 
     name = "wfc_reorder_learned"
     category = "format"
+    use_wfc: bool = False  # set by Fuzzer from --wfc; gates learning too
 
     def __init__(self) -> None:
         self.store = WfcChunkTableStore()
@@ -841,7 +865,8 @@ class WfcChunkMutator(MutatorBase):
         return None
 
     def on_new_coverage(self, seed: bytes, new_edges: int) -> None:
-        if not seed:
+        # Off means free: the NAL sniffer is a per-byte Python scan.
+        if not self.use_wfc or not seed:
             return
         for fmt_name, sniff, try_parse in _FORMATS:
             if not sniff(seed):
@@ -853,12 +878,15 @@ class WfcChunkMutator(MutatorBase):
             return
 
 
+#: The registered instance; the fuzzer sets its flag and persists its store.
+WFC_MUTATOR = WfcChunkMutator()
+
+
 def _register() -> None:
     from fuzzer_tool.core.operator_registry import REGISTRY
 
-    m = WfcChunkMutator()
-    if m.name not in REGISTRY.names():
-        REGISTRY.register_mutator(m)
+    if WFC_MUTATOR.name not in REGISTRY.names():
+        REGISTRY.register_mutator(WFC_MUTATOR)
 
 
 _register()

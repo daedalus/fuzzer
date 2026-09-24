@@ -188,8 +188,8 @@ class Grammar:
         """
         # Match: "literal", rule_ref, rule_ref{N}, rule_ref{N,M}, rule_ref+, rule_ref*
         pattern = re.compile(
-            r'"([^"]*)"'  # quoted literal
-            r"|'([^']*)'"  # single-quoted literal
+            r'"((?:[^"\\]|\\.)*)"'  # quoted literal; \" does not close it
+            r"|'((?:[^'\\]|\\.)*)'"  # single-quoted literal
             r"|(\w+)\{(\d+),(\d+)\}"  # {N,M}
             r"|(\w+)\{(\d+)\}"  # {N}
             r"|(\w+)\+"  # +
@@ -232,6 +232,10 @@ class Grammar:
         while i < n:
             ch = alt[i]
             if in_quote is not None:
+                # Skip the escaped char: "\"" is one quote, not a close.
+                if ch == "\\":
+                    i += 2
+                    continue
                 if ch == in_quote:
                     in_quote = None
                 i += 1

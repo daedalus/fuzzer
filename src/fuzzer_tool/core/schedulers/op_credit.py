@@ -38,12 +38,17 @@ in ``_FALLBACK_PRECEDENCE``, like ``op_tang``.
 
 from __future__ import annotations
 
+import logging
+
 from fuzzer_tool.core.edge_matrix import MatrixSubstrate
 from fuzzer_tool.core.rand_pool import RandPool
+
+log = logging.getLogger(__name__)
 
 #: Share of stale failure evidence dropped at full saturation. Uncalibrated.
 DECAY = 0.5
 EXPLORE_BASE = 0.05
+STATE_VERSION = 1
 
 
 def shaped_weight(substrate: MatrixSubstrate, new_edge_ids, floor: float = 0.0) -> float:
@@ -161,6 +166,33 @@ class OpCreditScheduler:
             if theta > best_v:
                 best, best_v = op, theta
         return best
+
+    def to_dict(self) -> dict:
+        """Found edges and pulls; credit is re-derived against the partition on load."""
+        return {
+            "version": STATE_VERSION,
+            "found": {o: set(e) for o, e in self._found.items()},
+            "pulls": dict(self._pulls),
+        }
+
+    def from_dict(self, data) -> None:
+        """Restore :meth:`to_dict` output; a malformed payload is ignored whole."""
+        if not data:
+            return
+        try:
+            if data.get("version") != STATE_VERSION:
+                raise ValueError(f"version {data.get('version')!r}")
+            found = {str(o): {int(e) for e in es} for o, es in data["found"].items()}
+            pulls = {str(o): float(p) for o, p in data["pulls"].items()}
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            log.warning("op_credit state unreadable, starting fresh: %s", e)
+            return
+
+        # Merge over init_arm's zero rows so arms armed this run stay present.
+        self._found.update(found)
+        self._pulls.update(pulls)
+        self._observed = sum(len(es) for es in self._found.values())
+        self._cache_key = None
 
     def bandit_stats(self) -> dict:
         return {
