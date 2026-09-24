@@ -34,6 +34,10 @@ _CHAO_BIAS_CORRECT_BELOW = 10
 # compute_coverage_proximity().
 _FRONTIER_FRACTION = 0.25
 
+#: edge_cooccurrence scores pairs among this many multi-owner edges (discovery
+#: order) and keeps pairs with Jaccard strictly above the floor.
+_COOCCUR_EDGE_CAP = 200
+_COOCCUR_MIN_JACCARD = 0.1
 CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
 COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
 
@@ -2708,34 +2712,40 @@ class EdgeTracker:
         """Find edges that co-occur most frequently in seeds.
 
         Returns list of (edge_a, edge_b, jaccard_similarity) sorted
-        by similarity descending. Only considers edges hit by >= 2 seeds.
+        by similarity descending. Only considers edges hit by >= 2 seeds,
+        and only the first ``_COOCCUR_EDGE_CAP`` of them in discovery order.
+
+        Scored by the Gram identity rather than per pair: with B the binary
+        seed x edge matrix over those edges, C = B^T B counts shared seeds, and
+        Jaccard(a, b) = C[a, b] / (o_a + o_b - C[a, b]) with o the owner
+        counts. Same numbers and the same (stable) tie order as the set loop.
         """
-        # Build edge -> seed set mapping
-        edge_to_seeds: dict[int, set[str]] = {}
-        for seed_key, edges in self.seed_edges.items():
+        edge_to_seeds: dict[int, list[int]] = {}
+        for row, edges in enumerate(self.seed_edges.values()):
             for e in edges:
-                if e not in edge_to_seeds:
-                    edge_to_seeds[e] = set()
-                edge_to_seeds[e].add(seed_key)
+                edge_to_seeds.setdefault(e, []).append(row)
 
-        # Only consider edges with >= 2 seeds
-        common = {e: s for e, s in edge_to_seeds.items() if len(s) >= 2}
-        edges = list(common.keys())
+        common = [e for e, rows in edge_to_seeds.items() if len(rows) >= 2]
+        edges = common[:_COOCCUR_EDGE_CAP]
+        if len(edges) < 2:
+            return []
 
-        pairs = []
-        for i in range(min(len(edges), 200)):  # cap for performance
-            for j in range(i + 1, min(len(edges), 200)):
-                a, b = edges[i], edges[j]
-                intersection = len(common[a] & common[b])
-                union = len(common[a] | common[b])
-                if union > 0:
-                    jaccard = intersection / union
-                    if jaccard > 0.1:  # only meaningful co-occurrences
-                        pairs.append((a, b, jaccard))
+        # B: one column per kept edge. float32 is exact for counts below 2^24.
+        b = np.zeros((len(self.seed_edges), len(edges)), dtype=np.float32)
+        for col, e in enumerate(edges):
+            b[edge_to_seeds[e], col] = 1.0
+        del edge_to_seeds  # free bipartite map before the product
 
-        pairs.sort(key=lambda x: x[2], reverse=True)
-        del edge_to_seeds, common  # free bipartite map before return
-        return pairs[:top_k]
+        shared = (b.T @ b).astype(np.int64)
+        owners = np.diag(shared)
+        union = owners[:, None] + owners[None, :] - shared
+        i, j = np.triu_indices(len(edges), k=1)  # row-major: the loop's pair order
+        jac = shared[i, j] / union[i, j]
+        keep = jac > _COOCCUR_MIN_JACCARD
+        i, j, jac = i[keep], j[keep], jac[keep]
+
+        best = np.argsort(-jac, kind="stable")[:top_k]
+        return [(edges[i[t]], edges[j[t]], float(jac[t])) for t in best.tolist()]
 
     def seed_uniqueness(self) -> dict[str, int]:
         """For each seed, count how many edges ONLY it covers.
