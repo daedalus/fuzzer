@@ -207,7 +207,7 @@ warn_failed() {
 }
 
 FGREP="${FGREP_DIR:-$VENDOR/fgrep}"
-TAILSLAYER="${TAILSLAYER_DIR:-/home/dclavijo/code/tailslayer}"
+TAILSLAYER="${TAILSLAYER_DIR:-$VENDOR/tailslayer}"
 SHIM="src/fuzzer_tool/adapters/afl_shim.c"
 # Comparison logging lives in $SHIM behind -D__AFL_CMPLOG=1 (it used to be a
 # separate cmplog_shim.c compiled to its own object and linked in). $CMPLOG_CFLAGS
