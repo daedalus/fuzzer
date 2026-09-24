@@ -22,7 +22,7 @@ discovery to a single operator name, and whether that attribution means what
 the schedulers assume is exactly the kind of thing a ground-truth harness
 answers and a live campaign cannot.
 
-Two environments:
+Four environments:
 
 * :class:`StationaryBernoulli` -- fixed per-arm success probabilities. The
   textbook case; a scheduler that fails here is broken.
@@ -30,6 +30,15 @@ Two environments:
   partway through. This is the regime fuzzing actually operates in (an
   operator that was productive saturates its region of the coverage map), and
   it is where bandits without a recency mechanism get permanently stuck.
+* :class:`RottingArms` -- same collapse, but indexed by the arm's *own* pull
+  count, not the global round. Separates rested (per-arm) forgetters from
+  round-indexed ones; DecayingBest cannot.
+* :class:`Fatigue150` -- 150 arms, rare heavy-tailed yields, fatigue on
+  success, periodic unlocks: the environment ``op_consolidated.py`` was tuned
+  on, reconstructed.
+
+Stateful environments (the last two) expose ``reset()`` and
+``observe(arm, success, t)``; :func:`run` calls them when present.
 
 Arm names are drawn from the real ``OPERATOR_CATEGORIES`` taxonomy, not
 synthetic strings: :class:`HierarchicalBanditScheduler` silently ignores
@@ -59,7 +68,18 @@ from fuzzer_tool.core.rand_pool import RandPool
 #: Categories used to build arm sets, in a fixed order so arm selection is a
 #: pure function of (n_arms, spread) and does not drift when the taxonomy
 #: gains operators.
-_CATEGORY_ORDER = ("bit", "byte", "block", "dict", "structural", "radamsa")
+#: Appending only: a prefix of this tuple must keep selecting the same arms.
+_CATEGORY_ORDER = (
+    "bit",
+    "byte",
+    "block",
+    "dict",
+    "structural",
+    "radamsa",
+    "format",
+    "regularity",
+    "adaptive",
+)
 
 
 def build_arms(n_arms: int = 12, n_categories: int = 4) -> list[str]:
@@ -179,6 +199,142 @@ class DecayingBest:
 
     def p_max(self, t: int) -> float:
         return max(self.p(a, t) for a in self.arms)
+
+    def best_at(self, t: int) -> str:
+        return max(self.arms, key=lambda a: self.p(a, t))
+
+
+@dataclass
+class RottingArms:
+    """Rested rotting bandit: *best_early* decays with its own pull count.
+
+    ``p = max(p_floor, p0 * rho ** pulls)`` for *best_early*; every other arm
+    is stationary. An arm left alone keeps its value whatever ``t`` does,
+    which is the property DecayingBest (round-indexed) lacks. Default
+    ``rho`` drops 0.30 below the 0.18 runner-up after ~1000 own pulls.
+    """
+
+    arms: list[str]
+    best_early: str
+    best_late: str
+    p0: dict[str, float]
+    p_runner_up: float
+    rho: float
+    p_floor: float
+    pulls: Counter = field(default_factory=Counter)
+
+    @classmethod
+    def build(
+        cls,
+        n_arms: int = 12,
+        p_high: float = 0.30,
+        p_runner_up: float = 0.18,
+        p_base: float = 0.05,
+        rho: float = 0.9995,
+        p_floor: float = 0.02,
+    ) -> RottingArms:
+        arms = build_arms(n_arms)
+        best_early, best_late = arms[len(arms) // 2], arms[0]
+        p0 = dict.fromkeys(arms, p_base)
+        p0[best_late] = p_runner_up
+        p0[best_early] = p_high
+        return cls(arms, best_early, best_late, p0, p_runner_up, rho, p_floor)
+
+    def reset(self) -> None:
+        self.pulls.clear()
+
+    def observe(self, arm: str, success: bool, t: int) -> None:  # noqa: ARG002
+        self.pulls[arm] += 1
+
+    def p(self, arm: str, t: int) -> float:  # noqa: ARG002 - pull-indexed
+        if arm != self.best_early:
+            return self.p0[arm]
+        return max(self.p_floor, self.p0[arm] * self.rho ** self.pulls[arm])
+
+    def p_max(self, t: int) -> float:
+        return max(self.p(a, t) for a in self.arms)
+
+    def best_at(self, t: int) -> str:
+        return max(self.arms, key=lambda a: self.p(a, t))
+
+
+@dataclass
+class Fatigue150:
+    r"""150 arms: Zipf yields, fatigue on success, periodic unlocks.
+
+    Open arms get ``p_scale / rank ** zipf_s`` (rank by name CRC, so the best
+    arm is not ``arms[0]``). Every success multiplies that arm's yield by
+    ``fatigue``. ``n_locked`` arms yield 0 until ``(j + 1) * unlock_every``,
+    then ``p_unlock`` (fatigued the same way)::
+
+        p
+        |  locked[0]    locked[1]
+        |    ___          ___
+        |___|   \________|   \____   <- each success: p *= fatigue
+        +---+-------------+-------- t
+           unlock_every  2*unlock_every
+    """
+
+    arms: list[str]
+    base: dict[str, float]
+    locked: list[str]
+    fatigue: float
+    unlock_every: int
+    p_unlock: float
+    _mult: dict[str, float] = field(default_factory=dict)
+    _open_max: float = 0.0
+    _dirty: bool = True
+
+    @classmethod
+    def build(
+        cls,
+        n_arms: int = 150,
+        n_locked: int = 10,
+        p_scale: float = 0.3,
+        zipf_s: float = 1.2,
+        fatigue: float = 0.97,
+        unlock_every: int = 5000,
+        p_unlock: float = 0.3,
+    ) -> Fatigue150:
+        arms = build_arms(n_arms, n_categories=len(_CATEGORY_ORDER))
+        step = n_arms // n_locked
+        locked = arms[step - 1 :: step][:n_locked]
+        locked_set = set(locked)
+        open_arms = sorted(
+            (a for a in arms if a not in locked_set), key=lambda a: zlib.crc32(a.encode())
+        )
+        base = {a: p_scale / (rank + 1) ** zipf_s for rank, a in enumerate(open_arms)}
+        env = cls(arms, base, locked, fatigue, unlock_every, p_unlock)
+        env.reset()
+        return env
+
+    def reset(self) -> None:
+        self._mult = dict.fromkeys(self.arms, 1.0)
+        self._dirty = True
+
+    def observe(self, arm: str, success: bool, t: int) -> None:  # noqa: ARG002
+        if not success:
+            return
+        self._mult[arm] *= self.fatigue
+        self._dirty = True
+
+    def p(self, arm: str, t: int) -> float:
+        base = self.base.get(arm)
+        if base is not None:
+            return base * self._mult[arm]
+
+        # Locked arm j unlocks at (j + 1) * unlock_every.
+        j = self.locked.index(arm)
+        if t < (j + 1) * self.unlock_every:
+            return 0.0
+        return self.p_unlock * self._mult[arm]
+
+    def p_max(self, t: int) -> float:
+        # Open-arm max only changes on a success: recompute lazily.
+        if self._dirty:
+            self._open_max = max(b * self._mult[a] for a, b in self.base.items())
+            self._dirty = False
+        return max([self._open_max] + [self.p(a, t) for a in self.locked])
 
     def best_at(self, t: int) -> str:
         return max(self.arms, key=lambda a: self.p(a, t))
@@ -382,6 +538,12 @@ def run(
     _seed_scheduler(scheduler, seed)
     env_rng = random.Random(seed ^ 0x5EED)
 
+    # Stateful envs (RottingArms, Fatigue150) start fresh and see each pull.
+    reset = getattr(env, "reset", None)
+    if reset is not None:
+        reset()
+    observe = getattr(env, "observe", None)
+
     a = adapt(scheduler, env.arms)
     c = Campaign(rounds=rounds)
     tail_start = int(rounds * (1.0 - tail_frac))
@@ -398,6 +560,8 @@ def run(
         c.successes += success
         c.failures += not success
         c.regret += env.p_max(t) - env.p(op, t)
+        if observe is not None:
+            observe(op, success, t)
         if t % trace_every == 0:
             c.regret_trace.append(c.regret)
         if t >= tail_start:
