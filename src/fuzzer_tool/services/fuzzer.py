@@ -2322,7 +2322,10 @@ class Fuzzer:
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
-            if not self._use_elo:
+            # The ctor parameter, not self._use_elo: that attribute is only
+            # assigned ~500 lines further down, so reading it here raised
+            # AttributeError and --position-arena could never construct.
+            if not elo:
                 log.warning("--position-arena has no effect without --elo")
             self._position_arena = PositionArena(
                 self,

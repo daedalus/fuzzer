@@ -560,3 +560,30 @@ class TestFuzzerWiring:
         Fuzzer._settle_positions(f, outcome=Outcome.GAIN, weight=1.0)
         assert 100 in bf.hot_bins(SEED)
         assert 300 not in bf.hot_bins(SEED)
+
+
+class TestRealConstruction:
+    """Build a real Fuzzer: every other test here uses the _Fuzzer mock,
+    which is how a constructor that could never run went unnoticed."""
+
+    @staticmethod
+    def _build(tmp_path, **kw):
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        (tmp_path / "c").mkdir()
+        (tmp_path / "x").mkdir()
+        return Fuzzer(
+            "/bin/true", corpus_dir=str(tmp_path / "c"), crashes_dir=str(tmp_path / "x"), **kw
+        )
+
+    def test_position_arena_constructs(self, tmp_path):
+        # REGRESSION: the arena block read self._use_elo ~500 lines before
+        # the constructor assigns it -> AttributeError on every
+        # --position-arena run.
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._position_arena, PositionArena)
+
+    def test_position_arena_without_elo_warns_and_constructs(self, tmp_path, caplog):
+        f = self._build(tmp_path, position_arena=True)
+        assert "no effect without --elo" in caplog.text
+        assert isinstance(f._position_arena, PositionArena)
