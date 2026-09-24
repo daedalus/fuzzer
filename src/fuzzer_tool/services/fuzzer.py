@@ -37,7 +37,7 @@ from fuzzer_tool.adapters.process import (
     disable_aslr,
 )
 from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
-from fuzzer_tool.core.analyzers.analyzer_elo import strategy_display_name
+from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due
@@ -86,6 +86,7 @@ from fuzzer_tool.core.schedulers import (
     TopKScheduler,
     WhittleIndexScheduler,
 )
+from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.schedules import (
     ENTROPY_RANDOM_PCT,
     ENTROPY_SPARSE_PCT,
@@ -100,7 +101,8 @@ from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.validity import Validity, ValidityChannel
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.maintenance import MaintenanceJob, MaintenanceQueue
-from fuzzer_tool.services.operators import OperatorEngine, operator_strategy_pool
+from fuzzer_tool.services.operators import _DELOCALISED_OPS, OperatorEngine, operator_strategy_pool
+from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, PositionArena
 from fuzzer_tool.services.ptrace_coverage import (
     PtraceCoverage,
 )
@@ -1284,6 +1286,12 @@ class Fuzzer:
         # the same standalone treatment round_robin already gets on the
         # operator side.
         seed_round_robin_scheduler=False,
+        # Position arena (see services/position_arena.py): Elo arbitrates the
+        # position proposers, uniform included. Needs --elo. --burn-front
+        # adds the BurnFrontPositionScheduler arm; without --position-arena
+        # it is one more candidate in select_position's uniform pick.
+        burn_front=False,
+        position_arena=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2303,6 +2311,25 @@ class Fuzzer:
 
             self._seed_round_robin = SeedRoundRobinScheduler()
             log.info("Seed round-robin scheduling enabled")
+        # Position selection (core/schedulers/pos_*.py): burn-front proposer
+        # and the Elo arena that arbitrates it against the other proposers.
+        self._burn_front = None
+        if burn_front:
+            from fuzzer_tool.core.schedulers.pos_burn_front import BurnFrontPositionScheduler
+
+            self._burn_front = BurnFrontPositionScheduler(self._rng)
+            log.info("Burn-front position scheduling enabled")
+        self._use_position_arena = position_arena
+        self._position_arena = None
+        if position_arena:
+            if not self._use_elo:
+                log.warning("--position-arena has no effect without --elo")
+            self._position_arena = PositionArena(
+                self,
+                region_fn=self._operators._region_weighted_position,
+                burn_front=self._burn_front,
+            )
+            log.info("Position arena enabled (Elo over pos_ strategies)")
         self._use_ecofuzz = ecofuzz
         self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
         self._metropolis = metropolis
@@ -5989,6 +6016,9 @@ class Fuzzer:
             score = surprisal_weight if success else 0.0
             self._record_seed_strategy_matches(score)
 
+        # Position arena matches and burn-front credit
+        self._settle_positions(Outcome.GAIN if success else Outcome.MISS, surprisal_weight)
+
         if self._use_shapley and self._shapley:
             new_edges = self._get_current_edge_set()
             if new_edges:
@@ -7268,6 +7298,24 @@ class Fuzzer:
                     f"seed_{self._seed_strategy}", f"seed_{other}", score
                 )
 
+    def _settle_positions(self, outcome: Outcome, weight: float) -> None:
+        """Close the round for position schedulers: burn-front credit and,
+        with the arena on, the Elo matches. Delocalised operators have no
+        true offset and are not credited (see _DELOCALISED_OPS).
+        """
+        arena = getattr(self, "_position_arena", None)
+        front = getattr(self, "_burn_front", None)
+        if arena is None and front is None:
+            return
+
+        sites = [s for op, s in self._last_ops_with_sites if op not in _DELOCALISED_OPS]
+        if arena is None:
+            front.record(self._last_parent_seed, sites, outcome, weight)
+            return
+
+        score = weight if outcome is Outcome.GAIN else 0.0
+        arena.settle(self._last_parent_seed, sites, outcome, weight, score)
+
     def _record_operator_strategy_matches(self, score: float) -> None:
         """Record the active operator scheduler's Elo match against every other
         enabled scheduler. Only schedulers actually selected this run
@@ -7306,6 +7354,17 @@ class Fuzzer:
                 mu,
                 canary_mu,
             )
+        # Position arena: uniform is the floor. A proposer rated at or below
+        # it is no better than picking offsets blindly.
+        if getattr(self, "_position_arena", None) is not None:
+            for strategy, mu, floor_mu in self._elo.strategies_below_canary("pos_uniform"):
+                log.warning(
+                    "Elo meta-scheduler: position strategy %r rated %.1f, at or "
+                    "below uniform (%.1f) -- this proposer needs inspection",
+                    strategy_display_name(strategy),
+                    mu,
+                    floor_mu,
+                )
         # Same check for the seed arena's own floor (see
         # core/schedulers/seed_canary.py) -- a separate tournament under
         # seed_-prefixed keys, so it needs its own canary_name.
@@ -7333,6 +7392,19 @@ class Fuzzer:
         rows = []
         for s in getattr(self, "_seed_strategies_used", set()):
             key = f"seed_{s}"
+            count = self._elo._strategy_match_count.get(key, 0)
+            if count > 0:
+                rating = self._elo._strategy_mu.get(key, self._elo.initial_mu)
+                rows.append((s, rating, rating - self._elo.initial_mu, count))
+        return sorted(rows, key=lambda r: -r[1])
+
+    def _position_convergence_rows(self) -> list[tuple[str, float, float, int]]:
+        """(name, rating, delta, matches) for every pos_ strategy with matches."""
+        if not (self._use_elo and self._elo and self._position_arena is not None):
+            return []
+        rows = []
+        for s in POSITION_STRATEGY_NAMES:
+            key = POS_STRATEGY_PREFIX + s
             count = self._elo._strategy_match_count.get(key, 0)
             if count > 0:
                 rating = self._elo._strategy_mu.get(key, self._elo.initial_mu)
@@ -7508,6 +7580,14 @@ class Fuzzer:
             seeds.append("round-robin")
         if seeds:
             parts.append("seeds=" + "+".join(seeds))
+
+        positions = []
+        if getattr(self, "_burn_front", None) is not None:
+            positions.append("burn-front")
+        if getattr(self, "_position_arena", None) is not None:
+            positions.append("arena")
+        if positions:
+            parts.append("positions=" + "+".join(positions))
 
         if getattr(self, "_use_elo", False):
             parts.append("elo")
@@ -7807,6 +7887,7 @@ class Fuzzer:
         groups: dict[str, list[str]] = {
             "Scheduling": [],
             "Seed selection": [],
+            "Position selection": [],
             "Mutation": [],
             "Analysis": [],
             "Generation": [],
@@ -7940,6 +8021,10 @@ class Fuzzer:
             groups["Seed selection"].append("residual")
         if getattr(self, "_use_seed_round_robin", False) and self._seed_round_robin:
             groups["Seed selection"].append("round-robin")
+        if getattr(self, "_burn_front", None) is not None:
+            groups["Position selection"].append("burn-front")
+        if getattr(self, "_position_arena", None) is not None:
+            groups["Position selection"].append("position-arena")
 
         if self.markov_trained:
             groups["Mutation"].append("markov")
@@ -8783,6 +8868,13 @@ class Fuzzer:
             print("\n[*] Seed strategy convergence:")
             for line in strategy_table_lines(
                 self._elo, [f"seed_{s}" for s, *_ in seed_rows], "    "
+            ):
+                print(line)
+        pos_rows = self._position_convergence_rows()
+        if pos_rows:
+            print("\n[*] Position strategy convergence:")
+            for line in strategy_table_lines(
+                self._elo, [POS_STRATEGY_PREFIX + s for s, *_ in pos_rows], "    "
             ):
                 print(line)
         # Operator strategy convergence (only schedulers actually selected)

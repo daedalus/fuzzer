@@ -41,13 +41,26 @@ call it first.
 dictionary tokens) that later layers read but never recompute mid-campaign.
 
 ### 2 — Scheduling ("what to fuzz next")
-Two sub-layers, kept textually separate because they're different files and
-different questions, even though the diagram draws them as one node:
+Three sub-layers, kept textually separate because they're different files and
+different questions, even though the diagram draws them as one node. They map
+onto three disjoint Elo tournaments (`strategy_arena()` in
+`core/analyzers/analyzer_elo.py`; keys `<name>` / `seed_<name>` /
+`pos_<name>`; they never play each other):
 - **2a Operator scheduling** — `core/schedulers/op_*.py`, `shapley.py`,
   Elo rating. Picks *which mutation operator* runs this iteration.
 - **2b Seed scheduling** — `services/seed_picker.py`, `schedules.py`,
   `core/schedulers/seed_*.py`, `ga.py`, `qea.py`. Picks *which corpus entry*
   runs this iteration.
+- **2c Position scheduling** — `core/schedulers/pos_*.py`,
+  `services/position_arena.py`. Picks *which byte offset* the operator lands
+  on. Contract in `pos_base.py`: `propose(data, buf_len) -> int | None`
+  (`None` = no opinion), `record(data, offsets, outcome, weight)`. Arms:
+  `uniform` (baseline, always pooled), `sensitivity`, `te`, `phase`, `mi`,
+  `crash_mi`, `region` (existing trackers, adapted; they keep their own
+  feedback loops) and `burn_front`. With `--position-arena` + `--elo`, Elo
+  picks the arm and a proposer rated at or below `pos_uniform` is logged;
+  without it, `OperatorEngine.select_position` keeps its uniform pick over
+  candidates. Sole caller: `select_position`.
 **Placement rule:** output is "pick X now," not "produce bytes" (→3) and not
 "measure a signal" (→5).
 
@@ -138,7 +151,7 @@ import fuzzer internals for analysis.
    `analyzer_registry.py` (5 or 8), a `core/schedulers/` dispatch table
    (2a/2b), or nothing (0, 1, 4, 6, 7, 9 mostly wire in directly).
 3. **Add the banner entry** in `_print_enabled_features()` under the same
-   layer's group name (Scheduling/Seed selection/Mutation/Generation/
+   layer's group name (Scheduling/Seed selection/Position selection/Mutation/Generation/
    Execution/Analysis/Output). If your feature doesn't fit an existing
    banner group, that's a signal the group list itself needs a new bucket —
    update this doc first, then the banner, not the other way round.

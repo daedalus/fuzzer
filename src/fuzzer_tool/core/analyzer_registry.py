@@ -510,6 +510,7 @@ def _activate_elo(f: FuzzerLike) -> None:
     # Local import: services.fuzzer defines _OPERATOR_STRATEGY_NAMES /
     # _SEED_STRATEGY_NAMES and imports this registry module at load time.
     from fuzzer_tool.services import fuzzer as _fuzzer_mod
+    from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES
 
     f._elo = BayesianEloTracker(
         initial_mu=1500,
@@ -536,6 +537,11 @@ def _activate_elo(f: FuzzerLike) -> None:
         f._elo._strategy_match_count.setdefault(s, 0)
     for s in _fuzzer_mod._SEED_STRATEGY_NAMES:
         key = f"seed_{s}"
+        f._elo._strategy_mu.setdefault(key, f._elo.initial_mu)
+        f._elo._strategy_sigma_sq.setdefault(key, f._elo.initial_sigma**2)
+        f._elo._strategy_match_count.setdefault(key, 0)
+    for s in POSITION_STRATEGY_NAMES:
+        key = f"pos_{s}"
         f._elo._strategy_mu.setdefault(key, f._elo.initial_mu)
         f._elo._strategy_sigma_sq.setdefault(key, f._elo.initial_sigma**2)
         f._elo._strategy_match_count.setdefault(key, 0)

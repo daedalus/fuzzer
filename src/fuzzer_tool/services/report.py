@@ -11,7 +11,7 @@ import os
 from collections import Counter
 from pathlib import Path
 
-from fuzzer_tool.core.analyzers.analyzer_elo import strategy_display_name
+from fuzzer_tool.core.analyzers.analyzer_elo import Arena, strategy_arena, strategy_display_name
 from fuzzer_tool.core.temporal_join import join_streams
 
 try:
@@ -2313,8 +2313,9 @@ def _elo_ratings(f) -> str:
         strategy_ranking = f._elo.get_strategy_ranking()
         if strategy_ranking:
             elo_mu = getattr(f._elo, "initial_mu", getattr(f._elo, "default_rating", 1500))
-            op_strategies = [p for p in strategy_ranking if not p[0].startswith("seed_")]
-            seed_strategies = [p for p in strategy_ranking if p[0].startswith("seed_")]
+            op_strategies = [p for p in strategy_ranking if strategy_arena(p[0]) is Arena.OPERATOR]
+            seed_strategies = [p for p in strategy_ranking if strategy_arena(p[0]) is Arena.SEED]
+            pos_strategies = [p for p in strategy_ranking if strategy_arena(p[0]) is Arena.POSITION]
 
             def _strategy_block(title, group):
                 # Deltas and Rpi are measured against the pool mean, not the
@@ -2335,6 +2336,8 @@ def _elo_ratings(f) -> str:
                 _strategy_block("Meta-scheduler operator strategies (Elo):", op_strategies)
             if seed_strategies:
                 _strategy_block("Seed strategies (Elo):", seed_strategies)
+            if pos_strategies:
+                _strategy_block("Position strategies (Elo):", pos_strategies)
 
     # Compare with bandit if available
     if f.mc and f.mc_bandit and f.mc.arm_alpha:

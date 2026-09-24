@@ -128,6 +128,12 @@ _EXCLUDED_OPT_IN = frozenset(
         # docs/learnings/ once that run lands -- so there is no result to
         # cite the way shaped_reward's exclusion can.
         "continuum_reward",
+        # Position arena: --hail-mary would rewire every position pick from
+        # uniform-over-candidates to Elo arbitration, and burn-front is a
+        # new proposer with no paired run yet (bench: uniform baseline,
+        # 12 seeds x 2k execs). Unmeasured, so opt-in only.
+        "burn_front",
+        "position_arena",
     }
 )
 

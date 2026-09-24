@@ -50,7 +50,9 @@ from fuzzer_tool.core.mutations import (
 from fuzzer_tool.core.mutations.structured import _region
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
+from fuzzer_tool.core.schedulers.pos_burn_front import BurnFrontPositionScheduler
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
+from fuzzer_tool.services.position_arena import PositionArena
 from fuzzer_tool.services.seed_picker import invasion_select
 
 log = logging.getLogger(__name__)
@@ -5131,6 +5133,11 @@ class OperatorEngine:
         if not buf:
             return 0
         buf_len = len(buf)
+        # Elo arena (--position-arena): arbitrates the proposers below
+        # instead of the uniform pick over their candidates.
+        arena = getattr(f, "_position_arena", None)
+        if isinstance(arena, PositionArena) and getattr(f, "_use_elo", False) and f._elo:
+            return arena.select(data, buf_len)
         te_pos = f._get_te_weighted_position(buf_len) if f._use_transfer_entropy and f._te else None
         # The TE map is capped at absolute offset 64. When the parent's
         # inferred record stride shows those offsets are phase-locked, the
@@ -5159,9 +5166,13 @@ class OperatorEngine:
             if getattr(f, "_use_region_profile", False)
             else None
         )
+        burn = getattr(f, "_burn_front", None)
+        burn_pos = (
+            burn.propose(data, buf_len) if isinstance(burn, BurnFrontPositionScheduler) else None
+        )
         candidates = [
             p
-            for p in [sens_pos, te_pos, phase_pos, mi_pos, crash_mi_pos, region_pos]
+            for p in [sens_pos, te_pos, phase_pos, mi_pos, crash_mi_pos, region_pos, burn_pos]
             if p is not None
         ]
         if candidates:
@@ -5172,7 +5183,7 @@ class OperatorEngine:
             print(
                 f"[select_position] buf_len={buf_len} sens={sens_pos} te={te_pos} "
                 f"phase={phase_pos} "
-                f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} "
+                f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} burn={burn_pos} "
                 f"candidates={candidates} fallback={not candidates} byte_idx={byte_idx}"
             )
         return byte_idx

@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Position schedulers and their Elo arena** (`core/schedulers/pos_base.py`,
+  `pos_burn_front.py`, `services/position_arena.py`): position selection is
+  now a formal third scheduling axis with a `propose`/`record` contract.
+  `--position-arena` (needs `--elo`) puts uniform, sensitivity, TE, phase, MI,
+  crash-MI, region and burn-front in one Elo tournament under `pos_` keys;
+  `--burn-front` adds a Gaussian-conduction/fuel-burn proposer over byte
+  offsets. Both off by default and outside `--hail-mary` (unmeasured).
+  `Arena`/`strategy_arena()` now partition the Elo keyspace (stats, report,
+  canary floors); `pos_` keys previously would have fallen into the operator
+  arena.
+
 - **Crash-cluster chaining diagnostic** (`core/crash_metadata.py::detect_chained_clusters`):
   read-only check over `cluster_crashes`'s output that flags clusters
   single-linkage likely chained together (A~B and B~C both clear the

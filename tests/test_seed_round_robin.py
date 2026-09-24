@@ -229,7 +229,7 @@ class TestFuzzerWiring:
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         params = inspect.signature(Fuzzer.__init__).parameters
-        assert list(params)[-1] == "seed_round_robin_scheduler"
+        assert list(params)[-1] == "position_arena"
         assert params["seed_round_robin_scheduler"].default is False
 
     def test_cli_passes_flag_to_the_fuzzer_construction(self):

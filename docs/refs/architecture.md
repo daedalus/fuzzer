@@ -84,6 +84,18 @@ the operator space:
 - Probabilistic selection via Thompson sampling over the Gaussian posterior
   (softmax over Elo gap, temperature=400 for the operator-level ranking).
 
+### Position arena (third Elo tournament)
+
+`--position-arena` (needs `--elo`) arbitrates *where* a mutation lands under
+`pos_<name>` keys, disjoint from operator and seed keys
+(`strategy_arena()`). Pool = uniform + every enabled proposer; uniform is
+first (Elo's cold-start pick) and is the floor. A declining arm is served by
+uniform and charged as uniform. Matches: each arm that served a position in
+the round plays each pool member that did not, with the round's
+surprisal-weighted score (`PositionArena.settle`, called from
+`Fuzzer._settle_positions`). `--burn-front` adds the burn-front arm and is
+credited off-policy on every round, delocalised operators excluded.
+
 ### Recording (`.record()` fan-out, fuzzer.py:2418–2478)
 
 Every enabled scheduler records shadow stats per run, with the same success +

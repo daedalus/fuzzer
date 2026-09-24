@@ -591,6 +591,8 @@ def cmd_fuzz(args):
         canary_scheduler=getattr(args, "canary_scheduler", False),
         seed_canary_scheduler=getattr(args, "seed_canary_scheduler", False),
         seed_round_robin_scheduler=getattr(args, "seed_round_robin_scheduler", False),
+        burn_front=getattr(args, "burn_front", False),
+        position_arena=getattr(args, "position_arena", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
@@ -2313,6 +2315,21 @@ def main() -> int:
         "--round-robin, deterministic cycling through the corpus in registration order. "
         "Unlike --seed-canary-scheduler this is a real strategy, not a floor, so it needs no "
         "--elo to run: it is also reachable directly whenever no arbiter picks a seed first.",
+    )
+    fuzz_parser.add_argument(
+        "--burn-front",
+        action="store_true",
+        help="Enable the burn-front position scheduler: coverage gains heat the mutated "
+        "byte offsets and their neighbours; proposals burn per-bin fuel so the front "
+        "moves on. Joins the position arena with --position-arena, else is one more "
+        "candidate in the uniform position pick.",
+    )
+    fuzz_parser.add_argument(
+        "--position-arena",
+        action="store_true",
+        help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
+        "crash-MI, region, burn-front) with uniform as the baseline arm, under pos_ "
+        "keys. Needs --elo; a proposer rated at or below uniform is logged.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

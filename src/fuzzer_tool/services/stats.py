@@ -24,7 +24,9 @@ import os
 import time
 
 from fuzzer_tool.core.analyzers.analyzer_elo import (
+    Arena,
     seed_strategy_display_name,
+    strategy_arena,
     strategy_display_name,
 )
 from fuzzer_tool.core.circular_stats import PhaseConcentration
@@ -73,12 +75,13 @@ def _elo_status_str(f) -> str:
             # op-mutator and seed schedulers are separate Elo arenas
             # (disjoint keyspaces, never matched against each other —
             # see Fuzzer._record_operator_strategy_matches vs.
-            # _record_seed_strategy_matches), so "top" must report one
+            # _record_seed_strategy_matches vs. PositionArena.settle), so "top" must report one
             # leader per arena rather than a single mixed ranking that
             # would silently hide which arena it came from.
             ranking = elo.get_strategy_ranking()
-            op_ranking = [p for p in ranking if not p[0].startswith("seed_")]
-            seed_ranking = [p for p in ranking if p[0].startswith("seed_")]
+            op_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.OPERATOR]
+            seed_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.SEED]
+            pos_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.POSITION]
             top_op = strategy_display_name(op_ranking[0][0]) if op_ranking else "?"
             top_op_rating = op_ranking[0][1] if op_ranking else 0
             top_seed = seed_ranking[0][0] if seed_ranking else "?"
@@ -88,6 +91,8 @@ def _elo_status_str(f) -> str:
                 f"top_op={top_op}({top_op_rating:.0f}) "
                 f"top_seed={top_seed}({top_seed_rating:.0f})"
             )
+            if pos_ranking:
+                elo_str += f" top_pos={pos_ranking[0][0]}({pos_ranking[0][1]:.0f})"
         except (AttributeError, TypeError):
             pass
     return elo_str

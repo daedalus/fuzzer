@@ -18,6 +18,7 @@ Usage:
     op = elo.select_op(["bit_flip", "byte_insert"])
 """
 
+import enum
 import json
 import logging
 import math
@@ -40,6 +41,26 @@ _UCB_MIN_SAMPLES_BASE = 20
 # ``op_*.py`` / ``seed_*.py`` module names under core/schedulers/.
 SEED_STRATEGY_PREFIX = "seed_"
 OP_STRATEGY_PREFIX = "op_"
+# Position schedulers (core/schedulers/pos_*.py) are a third tournament:
+# which byte offset a mutation lands on. Keys are ``pos_<name>``.
+POS_STRATEGY_PREFIX = "pos_"
+
+
+class Arena(enum.Enum):
+    """The three disjoint Elo tournaments; they never play each other."""
+
+    OPERATOR = "op"
+    SEED = "seed"
+    POSITION = "pos"
+
+
+def strategy_arena(key: str) -> Arena:
+    """Arena a strategy-pool key belongs to, by its prefix."""
+    if key.startswith(SEED_STRATEGY_PREFIX):
+        return Arena.SEED
+    if key.startswith(POS_STRATEGY_PREFIX):
+        return Arena.POSITION
+    return Arena.OPERATOR
 
 
 # Stall recovery sets _meta_strategy / _seed_strategy to this marker. It is
@@ -49,10 +70,11 @@ _UNPREFIXED_STRATEGY_NAMES = frozenset({"random_stall"})
 
 
 def strategy_display_name(key: str) -> str:
-    """Name to show for a strategy-pool key: ``op_<name>`` or ``seed_<name>``."""
+    """Name to show for a strategy-pool key: ``op_``/``seed_``/``pos_<name>``."""
     if (
         key in _UNPREFIXED_STRATEGY_NAMES
         or key.startswith(SEED_STRATEGY_PREFIX)
+        or key.startswith(POS_STRATEGY_PREFIX)
         or key.startswith(OP_STRATEGY_PREFIX)
     ):
         return key
@@ -1045,8 +1067,10 @@ class BayesianEloTracker(RoundRecorderMixin):
         strategy sitting at ``initial_mu`` isn't a finding, it just hasn't
         played enough games yet.
 
-        The operator arena (``canary_name="canary"``) and seed arena
-        (``canary_name="seed_canary"``) are disjoint; each call only checks
+        The operator arena (``canary_name="canary"``), seed arena
+        (``canary_name="seed_canary"``) and position arena
+        (``canary_name="pos_uniform"``, a baseline rather than a
+        worst-in-class floor) are disjoint; each call only checks
         strategies belonging to the corresponding arena.
 
         Returns:
@@ -1060,22 +1084,13 @@ class BayesianEloTracker(RoundRecorderMixin):
         if canary_mu is None:
             return []
 
-        # Filter by arena: operator strategies have no "seed_" prefix,
-        # seed strategies are stored with "seed_" prefix.
-        if canary_name == "seed_canary":
-
-            def is_in_arena(s: str) -> bool:
-                return s.startswith("seed_")
-        else:
-
-            def is_in_arena(s: str) -> bool:
-                return not s.startswith("seed_")
-
+        # Filter by arena: the floor's own prefix names the tournament.
+        arena = strategy_arena(canary_name)
         flagged = [
             (s, mu, canary_mu)
             for s, mu in self._strategy_mu.items()
             if s != canary_name
-            and is_in_arena(s)
+            and strategy_arena(s) is arena
             and self._strategy_match_count.get(s, 0) >= self.min_matches
             and mu <= canary_mu
         ]
