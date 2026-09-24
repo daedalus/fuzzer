@@ -1659,7 +1659,11 @@ class StatsReporter:
                     net = flux.net()
                     turnover = flux.turnover()
                     turnover_str = f"{turnover:.2f}" if turnover is not None else "n/a"
-                    parts.append(f"flux:gross={gross},net={net},turnover={turnover_str}")
+                    z = flux.z_score()
+                    z_str = f"{z:+.2f}{'*' if flux.is_significant_drift() else ''}" if z is not None else "n/a"
+                    parts.append(
+                        f"flux:gross={gross},net={net},turnover={turnover_str},z={z_str}"
+                    )
             except (AttributeError, TypeError):
                 pass
 

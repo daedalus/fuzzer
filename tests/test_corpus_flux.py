@@ -211,3 +211,75 @@ def test_state_roundtrips_through_the_store_section() -> None:
     restored.load(store.get("corpus_flux"))
     assert restored.windowed() == (4, 2, 0)
     assert restored.gross() == 6
+
+
+# --- z_score: is the net drift distinguishable from a random walk? --------
+#
+# net and gross alone don't say whether a nonzero net is a real directional
+# trend or just the imbalance you'd expect from a handful of coin flips.
+# Model each admission/eviction as an i.i.d. +-1 step (X_i); under the null
+# of undirected churn, mu=0 and sigma=1, so by the CLT
+# Z_n = sum(X_i - mu) / (sigma * sqrt(n)) = net / sqrt(gross).
+
+
+def test_z_score_is_none_when_there_has_been_no_flux() -> None:
+    """0/0 must not read as a z-score of 0 (which would claim confidence)."""
+    flux = CorpusFlux()
+    flux.tick()
+    assert flux.z_score() is None
+    assert flux.is_significant_drift() is None
+
+
+def test_z_score_matches_the_closed_form() -> None:
+    flux = CorpusFlux()
+    flux.record_addition(7)
+    flux.record_eviction(3)
+    flux.tick()
+    # net=4, gross=10 -> z = 4 / sqrt(10)
+    assert flux.z_score() == pytest.approx(4 / (10**0.5))
+
+
+def test_single_event_imbalance_is_not_significant() -> None:
+    """The falsifier: bare turnover would call one lone addition 100%
+    one-directional, but a single +-1 step carries no statistical power --
+    it is indistinguishable from a coin flip. gross must temper net.
+    """
+    flux = CorpusFlux()
+    flux.record_addition()
+    flux.tick()
+    assert flux.turnover() == pytest.approx(0.0)  # looks maximally directional
+    assert flux.z_score() == pytest.approx(1.0)  # but |z|=1 is unremarkable
+    assert flux.is_significant_drift() is False
+
+
+def test_large_one_directional_run_is_significant() -> None:
+    """Sustained growth with no evictions at all: gross is large enough for
+    the same directionality to actually be improbable under the null."""
+    flux = CorpusFlux(window=200)
+    for _ in range(100):
+        flux.record_addition()
+        flux.tick()
+    assert flux.z_score() == pytest.approx(10.0)  # 100 / sqrt(100)
+    assert flux.is_significant_drift() is True
+
+
+def test_small_residual_imbalance_in_balanced_churn_is_not_significant() -> None:
+    """Balanced turnover (per the module's own thesis) can still leave a
+    small nonzero net just from noise; that residual should not trip the
+    significance flag merely for being nonzero."""
+    flux = CorpusFlux()
+    flux.record_addition(5)
+    flux.record_eviction(4)
+    flux.tick()
+    # net=1, gross=9 -> z = 1/sqrt(9) = 0.33
+    assert flux.z_score() == pytest.approx(1 / (9**0.5))
+    assert flux.is_significant_drift() is False
+
+
+def test_is_significant_drift_respects_custom_threshold() -> None:
+    flux = CorpusFlux()
+    flux.record_addition()
+    flux.tick()
+    assert flux.z_score() == pytest.approx(1.0)
+    assert flux.is_significant_drift(threshold=1.96) is False
+    assert flux.is_significant_drift(threshold=0.5) is True

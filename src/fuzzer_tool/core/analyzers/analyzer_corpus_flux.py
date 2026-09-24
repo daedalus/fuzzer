@@ -122,6 +122,43 @@ class CorpusFlux:
             return None
         return 1.0 - abs(adds - evicts) / total
 
+    def z_score(self) -> float | None:
+        """Standardized net drift: is it a trend, or noise?
+
+        ``turnover`` alone can't say whether a nonzero net is a real
+        directional pull or just the imbalance you'd expect from a handful
+        of admissions and evictions landing unevenly. Model each event in
+        the window as an i.i.d. +-1 step (addition or eviction); under the
+        null hypothesis of undirected churn, mu=0 and sigma=1 per step, so
+        by the CLT the standardized sum is::
+
+            Z_n = sum(X_i - mu) / (sigma * sqrt(n)) = net / sqrt(gross)
+
+        None when ``gross`` is 0 -- the same 0/0 case ``turnover`` guards,
+        and for the same reason: reporting 0.0 would claim a confident
+        "no drift" verdict where there is no evidence either way. The
+        normal approximation is only good for a reasonably large ``gross``
+        (rule of thumb: several dozen events); at small gross this is a
+        rough estimate, which is exactly why :meth:`is_significant_drift`
+        exists rather than eyeballing this number directly -- a single
+        event always has |z|=1 no matter which direction it went.
+        """
+        gross = self.gross()
+        if gross <= 0:
+            return None
+        return self.net() / (gross**0.5)
+
+    def is_significant_drift(self, threshold: float = 1.96) -> bool | None:
+        """Whether ``z_score`` clears a two-sided significance threshold.
+
+        Default 1.96 is the ~95% two-sided normal critical value. None when
+        there has been no flux at all (see :meth:`z_score`).
+        """
+        z = self.z_score()
+        if z is None:
+            return None
+        return abs(z) >= threshold
+
     def rates(self) -> dict[str, float]:
         """Per-tick rates over the window. Empty dict before the first tick."""
         if not self._buckets:
@@ -146,6 +183,8 @@ class CorpusFlux:
             "gross": adds + evicts,
             "net": adds - evicts,
             "turnover": self.turnover(),
+            "z_score": self.z_score(),
+            "significant_drift": self.is_significant_drift(),
             "total_additions": self.total_additions,
             "total_evictions": self.total_evictions,
             "total_rejections": self.total_rejections,

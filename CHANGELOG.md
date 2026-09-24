@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`CorpusFlux.z_score()` / `is_significant_drift()`** (`core/analyzers/analyzer_corpus_flux.py`):
+  standardizes the existing net/gross flux counts as `Z_n = net / sqrt(gross)`
+  (CLT normal approximation, treating each admission/eviction as an i.i.d.
+  +-1 step under a null of undirected churn), so a nonzero `turnover` can be
+  flagged as a real directional trend versus noise from a handful of events.
+  Surfaced in the `flux:` stats line as `z=<value>[*]` (`*` marks
+  `|z| >= 1.96`).
+
 - **`--no-calibration`**: skips `_calibrate_seed_baselines` (saves its startup time and RSS).
 
 - **Heap trim per status line** (`adapters/libc_mem.py`): `print_stats()` runs glibc
