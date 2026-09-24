@@ -18,8 +18,14 @@ Arms::
     burn_front   BurnFrontPositionScheduler (opt-in, --burn-front)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
-matches. An arm that declines is replaced by uniform and *charged as
-uniform*: a decline must not earn or lose rating for the arm.
+matches. An arm that declines gets a uniform offset but is *charged under
+its own name*: Elo picked it, so the round is its round. Charging the
+decline to uniform instead made a declining arm unbeatable -- it never
+served, so it only ever played as an opponent, and in a miss-dominated
+campaign every opponent wins. Measured (20k rounds, 5% gains): an arm that
+always declines rated 1725 against 1165 for uniform and 1627 for a real
+proposer of uniform quality, and the uniform floor flagged nothing. Charged
+to itself, a pure decliner is exactly uniform and rates as uniform.
 
 Matches: a round's operators may land several positions. Every arm that
 served one plays each pool member that did not, with the round score. Arms
@@ -105,14 +111,17 @@ class PositionArena:
         return list(self._used)
 
     def select(self, data: bytes, buf_len: int) -> int:
-        """Elo picks the arm; a declining arm falls back to uniform."""
+        """Elo picks the arm; a declining arm gets a uniform offset.
+
+        The arm stays charged for the round even when it declines (see the
+        module docstring): a decline is the arm's choice, not uniform's.
+        """
         pool = self.pool()
         self._seen_pool.extend(n for n in pool if n not in self._seen_pool)
         name = self._arbitrate(pool)
 
         pos = self._arms[name][0].propose(data, buf_len)
         if pos is None:
-            name = UNIFORM
             pos = self._uniform.propose(data, buf_len)
 
         self._used.append(name)

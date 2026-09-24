@@ -23,7 +23,10 @@ off by default, excluded from `--hail-mary`.
 
 ## Decisions
 - `uniform` is an arm and the floor (not a worst-in-class canary).
-- Decline => uniform, charged as uniform.
+- Decline => uniform offset, charged to the arm that declined. (Was:
+  charged as uniform. That made a declining arm unbeatable -- it only
+  ever played as an opponent and won every miss round; see the
+  position_arena.py docstring for the measurement.)
 - Matches: served arms vs unserved pool members, per round.
 - burn_front credited off-policy; `_DELOCALISED_OPS` filtered.
 - Existing trackers keep their own feedback; the arena only borrows proposals.

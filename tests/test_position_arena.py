@@ -311,12 +311,36 @@ class TestSelect:
         assert seen[0][0] == "pos_uniform"
         assert all(k.startswith("pos_") for k in seen[0])
 
-    def test_declining_arm_falls_back_to_uniform_and_is_charged_as_uniform(self):
+    def test_declining_arm_gets_a_uniform_offset_but_is_charged_itself(self):
         f, arena = _arena(_Fuzzer(te=True))  # phase declines: no stride
         _force(f, "phase")
         pos = arena.select(SEED, len(SEED))
         assert 0 <= pos < len(SEED)
-        assert arena.used() == ["uniform"]
+        assert arena.used() == ["phase"]
+
+    def test_a_decliner_cannot_outrate_uniform(self):
+        # REGRESSION: a decline used to be charged to uniform, so an arm that
+        # never proposed never served, only ever played as an opponent, and
+        # won every miss round. With 5% gains it rated ~560 above uniform and
+        # the uniform floor could never flag it. Charged to itself it *is*
+        # uniform, so the two must end up level. Real Elo, no forcing.
+        import random
+
+        f = _Fuzzer(sensitivity=True)
+        f._elo = BayesianEloTracker(
+            initial_mu=1500, initial_sigma=350, beta=200, tau=5.0,
+            min_matches=10, rng=RandPool(seed=12),
+        )  # fmt: skip
+        f._sensitivity = SimpleNamespace(get_weighted_position=lambda d, n: None)
+        _, arena = _arena(f)
+        draw = random.Random(0)
+        for _ in range(4000):
+            arena.select(SEED, len(SEED))
+            gain = draw.random() < 0.05
+            outcome = Outcome.GAIN if gain else Outcome.MISS
+            arena.settle(SEED, [], outcome, weight=1.0, score=1.0 if gain else 0.0)
+        mu = f._elo._strategy_mu
+        assert abs(mu["pos_sensitivity"] - mu["pos_uniform"]) < 50
 
     def test_phase_receives_the_parent_stride(self):
         f, arena = _arena(_Fuzzer(te=True))
