@@ -1908,6 +1908,8 @@ _HAIL_MARY_FLAGS = (
     "cmplog_fifo_sink",
     "reseed_on_stall",
     "fractal_diversity",
+    "burn_front",
+    "position_arena",
 )
 
 
@@ -2321,15 +2323,16 @@ def main() -> int:
         action="store_true",
         help="Enable the burn-front position scheduler: coverage gains heat the mutated "
         "byte offsets and their neighbours; proposals burn per-bin fuel so the front "
-        "moves on. Joins the position arena with --position-arena, else is one more "
-        "candidate in the uniform position pick.",
+        "moves on. Implied by --position-arena, which always fields it as an arm; "
+        "alone it is one more candidate in the uniform position pick.",
     )
     fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
         "crash-MI, region, burn-front) with uniform as the baseline arm, under pos_ "
-        "keys. Needs --elo; a proposer rated at or below uniform is logged.",
+        "keys. Needs --elo; a proposer rated at or below uniform is logged. Implies "
+        "--burn-front. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

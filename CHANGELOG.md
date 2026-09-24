@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--position-arena` (needs `--elo`) puts uniform, sensitivity, TE, phase, MI,
   crash-MI, region and burn-front in one Elo tournament under `pos_` keys;
   `--burn-front` adds a Gaussian-conduction/fuel-burn proposer over byte
-  offsets. Both off by default and outside `--hail-mary` (unmeasured).
+  offsets. Both off by default; `--position-arena` implies `--burn-front`, and
+  `--hail-mary` enables both.
   `Arena`/`strategy_arena()` now partition the Elo keyspace (stats, report,
   canary floors); `pos_` keys previously would have fallen into the operator
   arena.

@@ -3,8 +3,8 @@
 ## What
 Position selection (where a mutation lands) formalised as a third scheduling
 axis and a third Elo tournament (`pos_<name>` keys). New `burn_front`
-proposer. Flags `--position-arena` (needs `--elo`), `--burn-front`; both
-off by default, excluded from `--hail-mary`.
+proposer. Flags `--position-arena` (needs `--elo`, implies `--burn-front`),
+`--burn-front`; both off by default, both enabled by `--hail-mary`.
 
 ## Files
 - `core/schedulers/pos_base.py` -- `PositionScheduler` protocol, `Outcome`,

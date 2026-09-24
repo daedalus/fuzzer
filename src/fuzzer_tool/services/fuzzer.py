@@ -1287,9 +1287,9 @@ class Fuzzer:
         # operator side.
         seed_round_robin_scheduler=False,
         # Position arena (see services/position_arena.py): Elo arbitrates the
-        # position proposers, uniform included. Needs --elo. --burn-front
-        # adds the BurnFrontPositionScheduler arm; without --position-arena
-        # it is one more candidate in select_position's uniform pick.
+        # position proposers, uniform included. Needs --elo. The arena always
+        # fields the BurnFrontPositionScheduler arm; --burn-front alone adds
+        # it as one more candidate in select_position's uniform pick.
         burn_front=False,
         position_arena=False,
     ):
@@ -2314,7 +2314,10 @@ class Fuzzer:
         # Position selection (core/schedulers/pos_*.py): burn-front proposer
         # and the Elo arena that arbitrates it against the other proposers.
         self._burn_front = None
-        if burn_front:
+        # The arena always fields burn-front: it is the one proposer that
+        # exists only as a position scheduler, and the arena is where its
+        # rating against uniform gets measured.
+        if burn_front or position_arena:
             from fuzzer_tool.core.schedulers.pos_burn_front import BurnFrontPositionScheduler
 
             self._burn_front = BurnFrontPositionScheduler(self._rng)

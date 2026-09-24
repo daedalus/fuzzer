@@ -526,7 +526,7 @@ class TestFuzzerWiring:
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
 
-    def test_cli_passes_flags_and_excludes_them_from_hail_mary(self):
+    def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
         import inspect
 
@@ -545,7 +545,7 @@ class TestFuzzerWiring:
             assert {"burn_front", "position_arena"} <= kw
         dests = _fuzz_parser_dests(ast.parse(inspect.getsource(commands)))
         assert {"burn_front", "position_arena"} <= dests
-        assert not {"burn_front", "position_arena"} & set(commands._HAIL_MARY_FLAGS)
+        assert {"burn_front", "position_arena"} <= set(commands._HAIL_MARY_FLAGS)
 
     def test_settle_skips_delocalised_ops(self):
         from fuzzer_tool.services.fuzzer import Fuzzer
@@ -582,6 +582,30 @@ class TestRealConstruction:
         # --position-arena run.
         f = self._build(tmp_path, elo="all", position_arena=True)
         assert isinstance(f._position_arena, PositionArena)
+
+    def test_position_arena_implies_burn_front(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._burn_front, BurnFrontPositionScheduler)
+        assert "burn_front" in f._position_arena.pool()
+
+    def test_burn_front_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, burn_front=True)
+        assert isinstance(f._burn_front, BurnFrontPositionScheduler)
+        assert f._position_arena is None
+
+    def test_hail_mary_enables_the_arena_and_burn_front(self, monkeypatch):
+        import sys
+
+        from fuzzer_tool.cli import commands
+
+        seen = {}
+        monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", "t", "--hail-mary"])
+        monkeypatch.setattr(commands, "cmd_fuzz", lambda a: seen.setdefault("a", a) and 0)
+        commands.main()
+        args = seen["a"]
+        assert args.position_arena is True
+        assert args.burn_front is True
+        assert args.elo == "all"  # the arena needs it; hail-mary sets it
 
     def test_position_arena_without_elo_warns_and_constructs(self, tmp_path, caplog):
         f = self._build(tmp_path, position_arena=True)
