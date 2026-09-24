@@ -999,9 +999,9 @@ the tool) continues or closes, and nothing else on the list has that leverage.
 |---|---|---|---|
 | 1 | ~~P0-1~~ DONE, F2 does not reproduce | -- | first-execution numbers usable |
 | 2 | ~~P1-2~~ DONE, negative (F17) | -- | closed P3-3 derived half; [6] diagnostic only |
-| 3 | **P2-4** `edge_diagnostic.py` runs only on the maintainer's machine | one line + a smoke test | anyone else reproducing anything in this file |
+| 3 | ~~P2-4~~ DONE (`2c8dc1d8`, `9f351c58`) | -- | `matrix`/`phantom` run from any clone |
 | 4 | **P1-1 + P1-3** png, zlib, ffmpeg (absorbs E6) | machine time, a table | P3-1, P3-4, E6 |
-| 5 | **P2-1** 2^H in the stall reason | one commit | nothing; self-contained |
+| 5 | ~~P2-1~~ DONE (`caffd071`), over sampled executions, not the tracker | -- | nothing |
 | 6 | **P3-1** `__AFL_CTX_BITS` feedback | paper first | blocked on 4; its best input is gone (see item) |
 | 7 | **P3-4** `seed_residual` A/B | bench_paired run | unblocked by F18: run without PC2/PC3 |
 | 8 | **P3-3** `op_credit` derived-edge credit | -- | closed by F17 (P1-2 negative) |
@@ -1170,7 +1170,19 @@ a fresh segment is not comparable"), plus a regression test pinning whichever
 it is. Do not build anything on top of first-execution measurements until
 this closes.
 
-### P2-4. `tools/edge_diagnostic.py` runs only on the maintainer's machine -- PRIORITY 3
+### P2-4. `tools/edge_diagnostic.py` runs only on the maintainer's machine -- DONE
+
+**Closed 2026-09-24** (`2c8dc1d8`, `9f351c58`). `SRCDIR` is this checkout's
+`src/`; `matrix` and `phantom` take everything on the command line and run
+from any clone. The legacy probe and memory modes read one machine's builds
+and stay local-only by design: their inputs resolve from `EDGE_DIAG_*`
+(listed in the module docstring) and a missing one exits 2 naming the
+variable. Same defect fixed in `bench_cache`, `debug_repro` and the three
+`profile_*` tools, with a static test over `tools/*.py`; and
+`build_targets.sh` no longer sets `TMPDIR=/home/dclavijo/tmp` (under
+`set -e` that aborted every non-root build on another machine).
+`tests/test_edge_diagnostic_portability.py`. Original text:
+
 
 New 2026-09-23. Line 74 hardcodes
 `SRCDIR = "/home/dclavijo/my_code/fuzzer-new/src"` and prepends it to
@@ -1219,7 +1231,20 @@ independent read on it rather than a replacement. One afternoon of machine time,
 measure. If it replicates, section [4] of the tool should report the top
 eigenvector correlations and not just the spectrum.
 
-### P2-1. Wire `2^H` into the stall reason -- PRIORITY 5
+### P2-1. Wire `2^H` into the stall reason -- DONE, with a changed source
+
+**Closed 2026-09-24** (`caffd071`). The recipe below would have been wrong
+as written: `EdgeTracker.effective_edges()` reads `_global_edge_hits`, which
+is cumulative (a stall piling onto the history's tail *raises* its 2^H --
+simulated 32 -> 47 while the executions sat at 20) and, in the fuzz loop, is
+fed only by inputs with new coverage, i.e. never by a stall. The reason now
+reads `scheduler_substrate.ExecutionPerplexity`: every 32nd executed input,
+windows closed at each measured discovery (>= 16 samples), suffix
+`" + effective edges R->C"`. Reported only; acting on it is P3. Corollary
+recorded there too: the end-of-run "Effective edges" line describes admitted
+inputs' hits, not execution volume. `tests/test_exec_perplexity.py`.
+Original text:
+
 
 **Refreshed 2026-09-23.** Half landed via P2-3: `EdgeTracker.effective_edges()`
 exists and the end-of-run summary prints it ("Effective edges: N of M").
