@@ -458,10 +458,10 @@ class StatsReporter:
         if redundant:
             print(f"  Dominated seeds:   {len(redundant)} (removable)")
 
-    #: Corpus x edge cells above which the class scan is skipped. The scan is
-    #: one pass over every seed's hit counts, so it is linear in this product
-    #: and pointless to pay per report on a large campaign.
-    EDGE_CLASS_CELL_BUDGET = 2_000_000
+    #: Nonzero (seed, edge) cells above which the class scan is skipped. The
+    #: fingerprint refit is linear in them: ~75 ms at this bound, what the old
+    #: dense scan cost at its 2e6-cell bound.
+    EDGE_CLASS_NNZ_BUDGET = 500_000
 
     def _print_summary_edge_classes(self, f) -> None:
         """Report edges no input has told apart.
@@ -478,8 +478,7 @@ class StatsReporter:
         seeds = getattr(tracker, "seed_hit_counts", None)
         if not seeds:
             return
-        cells = len(seeds) * max(1, len(tracker._global_edge_hits))
-        if cells > self.EDGE_CLASS_CELL_BUDGET:
+        if sum(len(hc) for hc in seeds.values()) > self.EDGE_CLASS_NNZ_BUDGET:
             return
         canon = EdgeCanonicalizer()
         canon.refit(seeds)

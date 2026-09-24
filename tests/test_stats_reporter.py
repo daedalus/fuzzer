@@ -595,3 +595,37 @@ class TestAppendCoverageLog:
         reporter = StatsReporter.__new__(StatsReporter)
         reporter.f = f
         reporter.append_coverage_log()  # must not raise
+
+
+class TestEdgeClassBudget:
+    """The summary's class scan is bounded by nonzero cells, which is what it costs.
+
+    It used to be bounded by seeds x distinct edges, which a wide sparse
+    corpus (a large map, few edges per seed) blows through at a few hundred
+    seeds although the fingerprint refit is linear in its nonzeros.
+    """
+
+    @staticmethod
+    def _fuzzer(seeds):
+        tracker = SimpleNamespace(
+            seed_hit_counts=seeds,
+            _global_edge_hits={e: 1 for hc in seeds.values() for e in hc},
+        )
+        return SimpleNamespace(_edge_tracker=tracker)
+
+    def test_wide_sparse_corpus_is_reported(self, capsys):
+        # 3000 seeds x 6001 edges = 1.8e7 cells, 9000 nonzeros; each seed's two
+        # private edges are duplicates of each other.
+        seeds = {f"s{s}": {2 * s: 1, 2 * s + 1: 1, 10**6: 2} for s in range(3000)}
+        StatsReporter(self._fuzzer(seeds))._print_summary_edge_classes(self._fuzzer(seeds))
+        assert "Edge classes:" in capsys.readouterr().out
+
+    def test_budget_is_on_nonzeros(self, capsys, monkeypatch):
+        seeds = {f"s{s}": {100 * s: 1, 100 * s + 1: 1} for s in range(10)}
+        f = self._fuzzer(seeds)
+        monkeypatch.setattr(StatsReporter, "EDGE_CLASS_NNZ_BUDGET", 19)
+        StatsReporter(f)._print_summary_edge_classes(f)
+        assert capsys.readouterr().out == ""
+        monkeypatch.setattr(StatsReporter, "EDGE_CLASS_NNZ_BUDGET", 20)
+        StatsReporter(f)._print_summary_edge_classes(f)
+        assert "Edge classes:" in capsys.readouterr().out
