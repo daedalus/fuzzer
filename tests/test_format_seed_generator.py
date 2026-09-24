@@ -75,6 +75,30 @@ class TestLengthField:
         assert 0x00 in values
         assert 0xFF in values
 
+    def test_regression_wide_length_field_int_str_limit(self):
+        # Learner can merge a run into a multi-KB "length" field; building
+        # 8*width-bit ints and str()-ing them hit Python's 4300-digit limit.
+        width = 4096
+        base = b"H" + b"\x00" * width + b"T"
+        fields = [_hyp(offset=1, width=width, field_type="length", confidence=0.7, observations=6)]
+        out = FormatSeedGenerator(fields, rng=random.Random(1)).generate(base, n_seeds=64)
+        assert out
+        for g in out:
+            assert len(g.data) == len(base)
+            assert g.data[0:1] == b"H" and g.data[-1:] == b"T"
+            assert len(g.strategy) < 64
+
+    def test_length_width_cap_adversarial_values_fit(self):
+        # Capped width still yields max-for-u64 in both endiannesses.
+        base = b"\x00" * 64
+        fields = [_hyp(offset=0, width=32, field_type="length", confidence=0.7, observations=6)]
+        out = FormatSeedGenerator(fields).generate(base, n_seeds=256)
+        u64_max = (1 << 64) - 1
+        strategies = {g.strategy for g in out}
+        assert f"len_le_{u64_max}" in strategies
+        assert f"len_be_{u64_max}" in strategies
+        assert all(g.data[8:] == base[8:] for g in out)
+
 
 class TestCrcField:
     def test_stress_values_cover_zero_and_all_ones(self):

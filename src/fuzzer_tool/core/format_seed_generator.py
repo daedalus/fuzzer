@@ -85,6 +85,10 @@ _SKIPPED_TYPES = frozenset({"magic", "padding"})
 # (silent corruption downstream — also interesting).
 _CRC_STRESS = (0x00, 0xFF, 0x01, 0x80)
 
+# Widest real length field (u64). The learner can merge adjacent bytes into
+# a multi-KB "length"; uncapped, 8*width-bit ints overflow int->str limits.
+_MAX_LENGTH_WIDTH = 8
+
 
 # ── Cold-start seed (previously SeedPicker._format_learner_seed) ───────────
 #
@@ -272,9 +276,7 @@ def cold_start_seed(
     """
     specs = sorted(_coerce_fields(fields), key=lambda s: s.offset)
     learned = [
-        s
-        for s in specs
-        if s.confidence >= confidence_threshold and s.most_common_value is not None
+        s for s in specs if s.confidence >= confidence_threshold and s.most_common_value is not None
     ]
     if not learned:
         return None
@@ -304,7 +306,7 @@ def _length_candidates(
     """Boundary-ish values for a length-classified field, width bytes wide,
     tried in both endiannesses since the model doesn't record which one
     the format actually uses."""
-    w = max(spec.width, 1)
+    w = min(max(spec.width, 1), _MAX_LENGTH_WIDTH)
     max_val = (1 << (8 * w)) - 1
     payload_after = max(seed_len - (spec.offset + w), 0)
     raw_values = {
