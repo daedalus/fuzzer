@@ -5952,7 +5952,11 @@ class Fuzzer:
                 log.debug("Chi-squared operator test failed: %s", ex)
 
         # Elo: record matches between operators that were used
-        if self._use_elo and self._elo and len(self._last_ops_used) >= 2:
+        # `>= 1`, not `>= 2`: a SLOPT round applies one operator 2**t times,
+        # so its deduplicated set always has one member. The old guard
+        # skipped every such round, and record_round's cross-round path is
+        # the one that can still score it (see there).
+        if self._use_elo and self._elo and self._last_ops_used:
             unique_ops = list(dict.fromkeys(self._last_ops_used))  # preserve order, dedup
             # Winners are the operators that actually changed the buffer. This
             # used to be `set(self._last_ops_used)`, which is by construction

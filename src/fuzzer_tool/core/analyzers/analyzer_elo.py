@@ -202,7 +202,16 @@ class RoundRecorderMixin:
                     for loser in losers:
                         self.record_match(w, loser, score_a=1.0, crash=crash)
 
-        elif len(operators) >= 2 and self._prev_operators:
+        elif operators and self._prev_operators:
+            # One operator per round is a legitimate round shape, not a
+            # degenerate one: SLOPT applies a single operator 2**t times, so
+            # every one of its rounds has exactly one unique operator. This
+            # guard used to be `len(operators) >= 2`, which under --slopt
+            # (and so under --hail-mary) recorded zero operator matches for
+            # the whole run -- BayesianEloTracker's _prediction_errors stayed
+            # empty and _effective_k() sat at _base_k forever. A single-op
+            # round against a different single-op round is the cleanest
+            # contrast this branch ever sees: nothing else shares the credit.
             # All winners or all losers: no within-round signal, so compare
             # this round against the previous one.
             #
