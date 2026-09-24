@@ -22,7 +22,7 @@ import struct
 
 import numpy as np
 
-from fuzzer_tool.core.centrality import betweenness_centrality
+from fuzzer_tool.core.centrality import betweenness_centrality, closeness_centrality
 from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
 from fuzzer_tool.core.analyzers.analyzer_distance import _CALL_RE, _MAX_CFG_FUNC_SIZE
 from fuzzer_tool.core.mincut import min_cut
@@ -128,6 +128,16 @@ class InterproceduralCFG:
         """
         edges = list(zip(self.src.tolist(), self.dst.tolist()))
         scores = betweenness_centrality(self.n_nodes, edges, normalized=normalized)
+        return {self.node_addrs[i]: s for i, s in enumerate(scores)}
+
+    def closeness_scores(self) -> dict[int, float]:
+        """Out-closeness of every block, keyed by start address.
+
+        High score: the block reaches much of the ICFG in few hops. See
+        ``core/centrality.closeness_centrality``.
+        """
+        edges = list(zip(self.src.tolist(), self.dst.tolist()))
+        scores = closeness_centrality(self.n_nodes, edges)
         return {self.node_addrs[i]: s for i, s in enumerate(scores)}
 
 
