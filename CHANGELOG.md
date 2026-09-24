@@ -168,6 +168,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Katz channel kept ~1.9 GB of build-only state** (`core/icfg.py`, `core/cfg.py`, `services/katz_channel.py`):
+  CFGs and `TargetDistance` are dropped after use, `node_addrs` is `array('Q')` + bisect (no `node_index` dict),
+  `BasicBlock` is slotted with a shared empty `callees`, and ICFG assembly uses packed arrays. ffmpeg, retained
+  2112 -> 217 MB, build peak 2525 -> 1613 MB, output byte-identical. `ASAN_OPTIONS` default gains
+  `allocator_release_to_os_interval_ms=1000` (ASAN never released freed memory; no exec/s cost measured).
+
 - **Seed calibration duplicated every seed's edge set** (`services/fuzzer.py`): `_calibrate_seed_baselines`
   passed `target_name`, filling `seed_target_edges`, which only multi-target mode reads and calibration
   skips. ffmpeg_read_asan.so, 480 seeds: calibration RSS growth 465 -> 336 MB.

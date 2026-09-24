@@ -16,6 +16,11 @@ import os
 import subprocess
 import sys
 
+# ASAN never returns freed memory to the OS by default. In-process, that
+# pinned ~870 MB the Katz ICFG build had already freed (ffmpeg). 1000 ms
+# costs no measurable exec/s; 0 ms costs ~3%.
+ASAN_RELEASE_TO_OS = "allocator_release_to_os_interval_ms=1000"
+
 
 def _has_undefined_symbol(target: str, name: bytes) -> bool:
     """True if *target* imports *name* as a strong undefined symbol.
@@ -138,6 +143,7 @@ def main() -> None:
                 "abort_on_error=0",
                 "verify_asan_link_order=0",
                 "detect_leaks=0",
+                ASAN_RELEASE_TO_OS,
             ):
                 key = opt.split("=")[0]
                 if key not in seen:

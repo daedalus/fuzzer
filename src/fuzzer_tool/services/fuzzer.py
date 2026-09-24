@@ -6708,7 +6708,7 @@ class Fuzzer:
     @staticmethod
     def _setup_asan_env(env: dict) -> None:
         """Set LD_PRELOAD and ASAN_OPTIONS for an ASAN-instrumented target."""
-        from fuzzer_tool.cli.ldpreload_wrapper import _resolve_asan
+        from fuzzer_tool.cli.ldpreload_wrapper import ASAN_RELEASE_TO_OS, _resolve_asan
 
         libasan = _resolve_asan()
         if libasan:
@@ -6719,7 +6719,7 @@ class Fuzzer:
         asan_opts = env.get("ASAN_OPTIONS", "")
         opt_parts = [p for p in asan_opts.split(":") if p] if asan_opts else []
         seen = {p.split("=")[0] for p in opt_parts}
-        for opt in ("halt_on_error=0", "abort_on_error=0", "detect_leaks=0"):
+        for opt in ("halt_on_error=0", "abort_on_error=0", "detect_leaks=0", ASAN_RELEASE_TO_OS):
             key = opt.split("=")[0]
             if key not in seen:
                 opt_parts.append(opt)
