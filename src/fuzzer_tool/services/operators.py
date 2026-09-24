@@ -47,6 +47,7 @@ from fuzzer_tool.core.mutations import (
     splice_common_prefix,
     splice_diff_located,
 )
+from fuzzer_tool.core.mutations.afl_det import det_variant
 from fuzzer_tool.core.mutations.structured import _region
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
@@ -86,6 +87,11 @@ _REGION_CACHE_MAX = 64
 # profile_buffer() skips windows below 512 bytes, so anything shorter has no
 # profile to weight by.
 _REGION_MIN_LEN = 512
+
+# _op_afl_det: parents whose sweep position is remembered (LRU beyond this),
+# and how many consecutive no-op variants one call may skip before declining.
+_AFL_DET_CURSOR_CAP = 4096
+_AFL_DET_MAX_SKIP = 64
 
 # ── region liveness (item 4, handover_skittercreek_tailslayer_port.md) ───
 # Coverage-bit width the per-region LiveBitMaskEstimator folds edge ids
@@ -763,6 +769,8 @@ class OperatorEngine:
         self._redqueen_sorted_pairs: list | None = None
         self._redqueen_pair_lengths: array | None = None
         self._redqueen_sorted_version: int = 0
+        # _op_afl_det: parent hash -> next sweep index, LRU order (oldest first).
+        self._afl_det_cursor: dict[int, int] = {}
         # Cache for _op_invariant_break: CorpusInvariants plus the corpus
         # size it was measured at, so it is rebuilt on growth and not per
         # mutation (see corpus_invariants()).
@@ -1432,6 +1440,35 @@ class OperatorEngine:
         mv = memoryview(buf)[start : start + block_size]
         for i in range(block_size):
             mv[i] ^= 0xFF
+
+    def _op_afl_det(self, buf, _byte_idx, data):
+        """Next step of AFL's deterministic sweep over the parent (T1-1).
+
+        One cursor per parent (content hash), advanced past no-op variants,
+        so repeated picks walk bitflip -> arith -> interest across the seed;
+        the bandit decides how often. Applied to *buf*, so stacked ops before
+        it still count. Declines once the parent's sweep is done.
+        """
+        key = xxhash.xxh3_64_intdigest(data)
+        cursors = self._afl_det_cursor
+        k = cursors.pop(key, 0)
+        base = bytes(buf)
+
+        # Bounded skip: a run of no-ops (e.g. interest values already present)
+        variant = None
+        for _ in range(_AFL_DET_MAX_SKIP):
+            variant = det_variant(base, k)
+            k += 1
+            if variant is None or variant != base:
+                break
+
+        cursors[key] = k
+        while len(cursors) > _AFL_DET_CURSOR_CAP:
+            del cursors[next(iter(cursors))]
+
+        if variant is None or variant == base:
+            return self._op_declined("afl_det", buf)
+        return bytearray(variant)
 
     def _op_auto_extras(self, buf, _byte_idx, _data):
         """Collect and inject sequences of "interesting" bytes.

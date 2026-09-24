@@ -793,6 +793,7 @@ def cmd_fuzz(args):
         perf_novelty=not getattr(args, "no_perf_novelty", False),
         reject_code=getattr(args, "reject_code", None),
         op_span_reverse=getattr(args, "op_span_reverse", False),
+        op_afl_det=getattr(args, "op_afl_det", False),
         op_span_relocate=getattr(args, "op_span_relocate", False),
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
@@ -1908,6 +1909,7 @@ _HAIL_MARY_FLAGS = (
     "formatfuzzer",
     "op_span_reverse",
     "op_span_relocate",
+    "op_afl_det",
     "grammar_boltzmann",
     "cmplog_fifo_sink",
     "reseed_on_stall",
@@ -4227,6 +4229,15 @@ def main() -> int:
         help=(
             "Enable span_reverse mutation operator (TSP 2-opt: reverse a "
             "contiguous byte span). Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-afl-det",
+        action="store_true",
+        help=(
+            "Enable afl_det: AFL's deterministic sweep (bitflip 1/4/8/32, arith "
+            "8/16/32, interest 8/16/32) as a bandit arm, one step per pick from a "
+            "per-parent cursor. Off by default."
         ),
     )
     fuzz_parser.add_argument(

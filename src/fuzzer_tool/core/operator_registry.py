@@ -247,6 +247,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "cem_bytes",
         "colorization",
         "skipdet_probe",
+        "afl_det",
         "auto_extras",
         "redqueen_xform",
         "gradient_cmp",
@@ -527,9 +528,11 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     # secp256k1 field prime or curve order as a BE 32-byte literal.
     "montgomery_mutate": lambda d: (
         b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
-        b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xfc\x2f" in d
+        b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xfc\x2f"
+        in d
         or b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe"
-        b"\xba\xae\xdc\xe6\xaf\x48\xa0\x3b\xbf\xd2\x5e\x8c\xd0\x36\x41\x41" in d
+        b"\xba\xae\xdc\xe6\xaf\x48\xa0\x3b\xbf\xd2\x5e\x8c\xd0\x36\x41\x41"
+        in d
     ),
 }
 
@@ -690,6 +693,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "arm_chunk_mutate": lambda f, _d: bool(getattr(f, "enable_arm_mutator", False)),
     # TSP neighbourhood (Phase 1 / C2) — off until --op-span-reverse / --op-span-relocate
     "span_reverse": lambda f, _d: bool(getattr(f, "op_span_reverse", False)),
+    # AFL deterministic sweep as an arbitrated arm (T1-1); --op-afl-det
+    "afl_det": lambda f, d: bool(d) and bool(getattr(f, "op_afl_det", False)),
     "span_relocate": lambda f, _d: bool(getattr(f, "op_span_relocate", False)),
     # dispatch-only, never selectable
     # colorization: gated on cmplog pairs. The handler is a byte randomizer

@@ -66,6 +66,9 @@ fill a real gap. Answers are verified against upstream source paths below.
    *sequence as a seed factory* is absent (`_is_deterministically_redundant` at
    `operators.py:4297` is the dedup half only). Insert as a bootstrap operator +
    `genseed` subcommand.
+   **Shipped 2026-09-24** as the `afl_det` arm (`--op-afl-det`). `genseed`
+   half not done: an offline sweep needs target execution to keep only
+   coverage-new outputs, which `genseed` does not do.
 2. **`fuzzer-tool genseed` subcommand.** Expose existing `_generate_random_<fmt>`,
    `Grammar.generate`, `markov.generate` as a corpus-writing CLI. Plumbing only;
    model on `cmd_minimize` / `cmd_import` (`cli/commands.py`), write via

@@ -1263,6 +1263,8 @@ class Fuzzer:
         # TSP neighbourhood operators (Phase 1 / C2). Appended at the end.
         op_span_reverse=False,
         op_span_relocate=False,
+        # AFL deterministic sweep as an arbitrated arm (T1-1, core/mutations/afl_det.py)
+        op_afl_det=False,
         # FormatFuzzer structural mutators (see handover_formatfuzzer_integration).
         formatfuzzer=False,
         ff_bin_dir=None,
@@ -1515,6 +1517,7 @@ class Fuzzer:
         # TSP neighbourhood operators (Phase 1 / C2) — gated availability.
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate
+        self.op_afl_det = op_afl_det
         # MailConfig | None — novel-crash email notification (see services/sendmail.py)
         self.email_on_crash = email_on_crash
         self.enable_x86_mutator = enable_x86_mutator
