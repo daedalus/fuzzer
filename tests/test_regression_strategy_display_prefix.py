@@ -71,7 +71,7 @@ class TestReportStrategySection:
         section = _strategy_section(self._elo(BayesianEloTracker))
         header = next(line for line in section.splitlines() if "Strategy" in line)
         cols = header.split()
-        for col in ("Rating", "Stddev", "Rpi", "K", "Wins", "Matches"):
+        for col in ("Rating", "Stddev", "Sigmas", "Rpi", "K", "Wins", "Matches"):
             assert col in cols
 
     def test_bayesian_row_values(self):
@@ -80,11 +80,11 @@ class TestReportStrategySection:
         rep = _row(lines, "op_replicator")
         st = elo.strategy_stats("replicator")
         assert float(rep[3]) == round(math.sqrt(elo._strategy_sigma_sq["replicator"]), 1)
-        assert rep[6] == "4" and rep[7] == "4"  # 4 wins of 4 matches
-        assert _row(lines, "op_bandit")[6] == "0"
+        assert rep[7] == "4" and rep[8] == "4"  # 4 wins of 4 matches
+        assert _row(lines, "op_bandit")[7] == "0"
         pool_mean = (st["rating"] + elo.strategy_stats("bandit")["rating"]) / 2
         rpi = 100.0 / (1.0 + 10.0 ** ((pool_mean - st["rating"]) / 400.0))
-        assert rep[4] == f"{rpi:.1f}%"
+        assert rep[5] == f"{rpi:.1f}%"
 
     def test_bayesian_k_is_the_step_the_update_actually_takes(self):
         """K must predict the next rating move, not just the tracker-wide K."""
@@ -105,8 +105,9 @@ class TestReportStrategySection:
         lines = strategy_table_lines(elo, ["replicator", "bandit"], "")
         rep = _row(lines, "op_replicator")
         assert rep[3] == "-"
-        assert rep[5] == f"{elo.k_factor:.2f}"
-        assert rep[6] == "4"
+        assert rep[4] == "-"  # no posterior, no sigmas
+        assert rep[6] == f"{elo.k_factor:.2f}"
+        assert rep[7] == "4"
 
     def test_draw_is_nobodys_win(self):
         elo = BayesianEloTracker(min_matches=1)
@@ -117,7 +118,7 @@ class TestReportStrategySection:
     def test_seed_convergence_keys_render_with_seed_prefix(self):
         elo = self._elo(BayesianEloTracker)
         lines = strategy_table_lines(elo, ["seed_ga", "seed_pareto"], "    ")
-        assert _row(lines, "seed_ga")[7] == "4"
+        assert _row(lines, "seed_ga")[8] == "4"
 
 
 class TestWinCountPersistence:
@@ -163,3 +164,18 @@ class TestLiveStatusLine:
 
     def test_off(self):
         assert _elo_status_str(SimpleNamespace(_use_elo=False, _elo=None)) == ""
+
+
+def test_sigmas_is_pool_delta_over_posterior_stddev():
+    elo = BayesianEloTracker(min_matches=1)
+    for _ in range(4):
+        elo.record_strategy_match("replicator", "bandit", 1.0)
+    lines = strategy_table_lines(elo, ["replicator", "bandit"], "")
+    stats = {k: elo.strategy_stats(k) for k in ("replicator", "bandit")}
+    pool_mean = sum(s["rating"] for s in stats.values()) / 2
+    for key, name in (("replicator", "op_replicator"), ("bandit", "op_bandit")):
+        st = stats[key]
+        expected = (st["rating"] - pool_mean) / st["stddev"]
+        assert _row(lines, name)[4] == f"{expected:+.2f}"
+    header = next(line for line in lines if "Strategy" in line).split()
+    assert header.index("Stddev") + 1 == header.index("Sigmas")

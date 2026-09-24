@@ -99,3 +99,35 @@ class TestBayesianEloTrackerColumns:
         elo.record_round(["a", "b"], {"a"})
         report = _elo_ratings(_fake_fuzzer(elo))
         assert "posterior rating sigma" in report
+
+
+class TestSigmasColumn:
+    def test_header_puts_sigmas_right_after_stddev(self):
+        elo = BayesianEloTracker(min_matches=1)
+        elo.record_round(["a", "b"], {"a"})
+        report = _elo_ratings(_fake_fuzzer(elo))
+        cols = next(line for line in report.splitlines() if "Rank" in line).split()
+        assert cols.index("Stddev") + 1 == cols.index("Sigmas")
+
+    def test_bayesian_sigmas_value(self):
+        elo = BayesianEloTracker(min_matches=1)
+        elo.record_round(["a", "b"], {"a"})
+        report = _elo_ratings(_fake_fuzzer(elo))
+        ranking = elo.get_ranking()
+        pool_mean = sum(r for _, r in ranking) / len(ranking)
+        for op, rating in ranking:
+            z = (rating - pool_mean) / math.sqrt(elo.sigma_sq[op])
+            line = next(line for line in report.splitlines() if f" {op:<22s}" in line)
+            assert f"{z:+.2f}" in line.split()
+
+    def test_plain_elo_has_no_sigmas(self):
+        """EloTracker's stddev is a 0-1 match-score spread, not Elo points."""
+        elo = EloTracker(k_factor=16.0, min_matches=1)
+        elo.record_match("a", "b", score_a=1.0)
+        elo.record_match("b", "a", score_a=1.0)
+        report = _elo_ratings(_fake_fuzzer(elo))
+        cols = next(line for line in report.splitlines() if "Rank" in line).split()
+        z_idx = cols.index("Sigmas")
+        a_line = next(line for line in report.splitlines() if " a " in f" {line} ")
+        # row = rank, op, rating, stddev, sigmas, ...; header has the same order
+        assert a_line.split()[z_idx] == "-"

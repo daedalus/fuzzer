@@ -2125,11 +2125,25 @@ def _format_duration(seconds: float) -> str:
         return f"{h}h {m}m {s}s"
 
 
+def _sigmas(delta: float, stddev: float | None) -> float | None:
+    """``delta / stddev`` in Elo points, or None when there is no usable
+    posterior sigma to divide by."""
+    if stddev is None or stddev <= 0.0:
+        return None
+    return delta / stddev
+
+
 def strategy_table_lines(elo, keys: list[str], indent: str = "  ") -> list[str]:
     """Rows for a meta-scheduler strategy pool, one per strategy-pool key.
 
     Columns: display name (``op_``/``seed_`` prefixed), Rating, delta vs the
-    pool mean, Stddev, Rpi, K, Wins, Matches. Shared by the report's strategy
+    pool mean, Stddev, Sigmas, Rpi, K, Wins, Matches.
+
+    Sigmas is ``(rating - pool mean) / stddev``: how many posterior standard
+    deviations the strategy sits from the pool. Rpi says how large the edge
+    is; Sigmas says whether the tracker is sure of it. At the tau-floor
+    steady state every row's stddev is ~31.8, so a +23 lead reads +0.7
+    sigma -- not a separation. Absent (``-``) when there is no posterior. Shared by the report's strategy
     section and the end-of-run convergence tables so the two cannot drift.
 
     Rpi is the expected score (%) against a player rated at the pool mean,
@@ -2161,17 +2175,19 @@ def strategy_table_lines(elo, keys: list[str], indent: str = "  ") -> list[str]:
 
     out = [
         f"{indent}{'Strategy':<{width}s} {'Rating':>7s} {'vs pool':>7s} {'Stddev':>7s} "
-        f"{'Rpi':>6s} {'K':>6s} {'Wins':>7s} {'Matches':>8s}",
-        f"{indent}{'-' * width} {'-' * 7} {'-' * 7} {'-' * 7} {'-' * 6} {'-' * 6} "
+        f"{'Sigmas':>7s} {'Rpi':>6s} {'K':>6s} {'Wins':>7s} {'Matches':>8s}",
+        f"{indent}{'-' * width} {'-' * 7} {'-' * 7} {'-' * 7} {'-' * 7} {'-' * 6} {'-' * 6} "
         f"{'-' * 7} {'-' * 8}",
     ]
     for key in keys:
         st = stats[key]
         rating = st["rating"]
         rpi = 100.0 / (1.0 + 10.0 ** ((pool_mean - rating) / 400.0))
+        sigmas = _sigmas(rating - pool_mean, st["stddev"])
         out.append(
             f"{indent}{names[key]:<{width}s} {rating:>7.0f} {rating - pool_mean:>+7.0f} "
-            f"{_opt(st['stddev'], '.1f'):>7s} {rpi:>5.1f}% {_opt(st['k'], '.2f'):>6s} "
+            f"{_opt(st['stddev'], '.1f'):>7s} {_opt(sigmas, '+.2f'):>7s} "
+            f"{rpi:>5.1f}% {_opt(st['k'], '.2f'):>6s} "
             f"{_opt(st['wins'], 'd'):>7s} {st['matches']:>8d}"
         )
     return out
@@ -2260,17 +2276,24 @@ def _elo_ratings(f) -> str:
             matches = f._elo._match_count.get(op, 0)
             sd = _stddev(op)
             sd_str = f"{sd:.1f}" if sd is not None else "-"
+            # Only a posterior sigma is in Elo points. EloTracker's fallback
+            # stddev is the spread of 0-1 match scores; dividing a rating
+            # delta by it would print a number with no meaning.
+            z = _sigmas(rating - pool_mean, sd) if has_sigma_sq else None
+            z_str = f"{z:+.2f}" if z is not None else "-"
             k_str = f"{row_k:.1f}" if row_k is not None else "-"
             return (
-                f"  {i:<6d} {op:<22s} {rating:>8.0f} {sd_str:>8s} "
+                f"  {i:<6d} {op:<22s} {rating:>8.0f} {sd_str:>8s} {z_str:>8s} "
                 f"{_rpi(rating):>7.1f}% {k_str:>8s} {matches:>8d}"
             )
 
         lines.append(
             f"  {'Rank':<6s} {'Operator':<22s} {'Rating':>8s} {'Stddev':>8s} "
-            f"{'Rpi':>8s} {'K-fctr':>8s} {'Matches':>8s}"
+            f"{'Sigmas':>8s} {'Rpi':>8s} {'K-fctr':>8s} {'Matches':>8s}"
         )
-        lines.append(f"  {'-' * 6} {'-' * 22} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}")
+        lines.append(
+            f"  {'-' * 6} {'-' * 22} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}"
+        )
         for i, (op, rating) in enumerate(ranking[:10], 1):
             lines.append(_fmt_row(i, op, rating))
         if len(ranking) > 10:
@@ -2278,7 +2301,10 @@ def _elo_ratings(f) -> str:
             for i, (op, rating) in enumerate(ranking[-5:], len(ranking) - 4):
                 lines.append(_fmt_row(i, op, rating))
         if has_sigma_sq:
-            lines.append("  (Stddev = posterior rating sigma; Rpi = expected score vs pool mean)")
+            lines.append(
+                "  (Stddev = posterior rating sigma; Sigmas = (rating - pool mean) / Stddev;"
+                " Rpi = expected score vs pool mean)"
+            )
         elif has_reward_moments:
             lines.append("  (Stddev = match-score stddev [0-1]; Rpi = expected score vs pool mean)")
 
