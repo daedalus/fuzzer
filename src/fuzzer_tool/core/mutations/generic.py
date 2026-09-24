@@ -772,14 +772,20 @@ def block_shuffle_variable(data: bytes, rng) -> bytes:
     # because its draw sequence is part of what --seed reproduces.
     exps = [r.expovariate(1.0) for _ in range(n_cuts + 1)]
     s = sum(exps)
+    n = len(data)
     cum = 0.0
+    prev_cut = 0
     cuts: list[int] = []
     for i in range(n_cuts):
         cum += exps[i]
-        pos = int(len(data) * cum / s)
-        pos = max(1, min(pos, len(data) - 1))
+        pos = int(n * cum / s)
+
+        # Integer collisions on short inputs would merge blocks; keep cuts
+        # strictly increasing and leave room for the remaining ones so all
+        # k blocks stay non-empty (e.g. n=8, raw 4,4,4,4 -> 4,5,6,7).
+        pos = max(prev_cut + 1, min(pos, n - (n_cuts - i)))
         cuts.append(pos)
-    cuts = sorted(set(cuts))  # deduplicate in case of integer collisions
+        prev_cut = pos
 
     # Build blocks from cut points
     blocks: list[bytes] = []
