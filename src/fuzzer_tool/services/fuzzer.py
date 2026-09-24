@@ -1152,6 +1152,7 @@ class Fuzzer:
         op_tang_refit_interval=2000,
         op_kruskal_count=False,
         op_credit=False,
+        op_tpe=False,
         shaped_reward=False,
         shaped_reward_floor=0.0,
         continuum_reward=False,
@@ -2706,6 +2707,16 @@ class Fuzzer:
             self._op_kruskal_count = OpKruskalCountScheduler(rng=self._rng)
             log.info("op_kruskal_count enabled")
 
+        # Categorical TPE (BO-3): l/g density ratio over operators. Off by
+        # default, Elo-only; see core/schedulers/op_tpe.py.
+        self._use_op_tpe = op_tpe
+        self._op_tpe = None
+        if op_tpe:
+            from fuzzer_tool.core.schedulers.op_tpe import OpTPEScheduler
+
+            self._op_tpe = OpTPEScheduler(rng=self._rng)
+            log.info("op_tpe enabled")
+
         # Operator credit on canonical edge classes (P3-3): the reward is the
         # change, the selector is a stock Thompson. Off by default; leaves the
         # ballot while the preflight gate is closed. Same unproven-arm posture as
@@ -3256,6 +3267,8 @@ class Fuzzer:
             _register_arms(self._round_robin)
         if self._canary:
             _register_arms(self._canary)
+        if self._op_tpe:
+            _register_arms(self._op_tpe, _format_priors)
         if self._elo:
             _register_arms(self._elo)
         del _format_priors  # free priors dict after arm registration
@@ -5935,6 +5948,7 @@ class Fuzzer:
             self._op_tang,
             self._op_kruskal_count,
             self._op_credit,
+            self._op_tpe,
         ):
             if scheduler is None:
                 continue

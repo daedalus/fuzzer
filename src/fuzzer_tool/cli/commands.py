@@ -665,6 +665,7 @@ def cmd_fuzz(args):
         op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
         op_kruskal_count=getattr(args, "op_kruskal_count", False),
         op_credit=getattr(args, "op_credit", False),
+        op_tpe=getattr(args, "op_tpe", False),
         shaped_reward=getattr(args, "shaped_reward", False),
         shaped_reward_floor=getattr(args, "shaped_reward_floor", 0.0),
         continuum_reward=getattr(args, "continuum_reward", False),
@@ -1889,6 +1890,7 @@ _HAIL_MARY_FLAGS = (
     "op_tang",
     "op_kruskal_count",
     "op_credit",
+    "op_tpe",
     "confirm_novelty",
     "ecofuzz",
     "metropolis",
@@ -2803,6 +2805,16 @@ def main() -> int:
             "core/schedulers/op_kruskal_count.py for the design and the "
             "same 'unproven arm' caveat op_katz/op_tang carry, before "
             "using this on a real campaign)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-tpe",
+        action="store_true",
+        help=(
+            "Enable the categorical Tree-structured Parzen Estimator operator "
+            "arm: picks the op maximising l/g, the density ratio between "
+            "top-quantile and remaining outcomes (experimental, Elo-only -- "
+            "see core/schedulers/op_tpe.py)"
         ),
     )
     fuzz_parser.add_argument(

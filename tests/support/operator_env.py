@@ -58,6 +58,7 @@ BALLOT_SCHEDULERS = (
     "op_kuramoto",
     "op_kruskal_count",
     "op_tang",
+    "op_tpe",
     "replicator",
     "round_robin",
     "softmax",

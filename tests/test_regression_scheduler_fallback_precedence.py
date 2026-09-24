@@ -148,6 +148,7 @@ class _FakeFuzzer:
         "op_tang": ("_use_op_tang", "_op_tang"),
         "op_kruskal_count": ("_use_op_kruskal_count", "_op_kruskal_count"),
         "op_credit": ("_use_op_credit", "_op_credit"),
+        "op_tpe": ("_use_op_tpe", "_op_tpe"),
         "corral": ("_use_corral", "_corral"),
         "gradient": ("_use_gradient", "_gradient"),
         "whittle": ("_use_whittle", "_whittle"),
