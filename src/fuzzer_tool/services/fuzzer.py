@@ -1291,6 +1291,9 @@ class Fuzzer:
         # the same standalone treatment round_robin already gets on the
         # operator side.
         seed_round_robin_scheduler=False,
+        # Least-slack revisit bound in seconds (P3-3 step 6); 0 disables.
+        # See SeedPicker._pick_lst_seed.
+        lst_revisit=0.0,
         # Position arena (see services/position_arena.py): Elo arbitrates the
         # position proposers, uniform included. Needs --elo. The arena always
         # fields the BurnFrontPositionScheduler arm; --burn-front alone adds
@@ -2316,6 +2319,10 @@ class Fuzzer:
 
             self._seed_round_robin = SeedRoundRobinScheduler()
             log.info("Seed round-robin scheduling enabled")
+        # LST override: no seed waits more than lst_revisit seconds between
+        # picks (SeedPicker._pick_lst_seed); last_picked is stamped in _pick_seed.
+        self._lst_revisit = max(0.0, float(lst_revisit))
+        self._lst_next_check = 0.0
         # Position selection (core/schedulers/pos_*.py): burn-front proposer
         # and the Elo arena that arbitrates it against the other proposers.
         self._burn_front = None
@@ -4478,7 +4485,13 @@ class Fuzzer:
         self.target = self.multi_targets[self._active_target_idx]
 
     def _pick_seed(self):
-        return self._seed_picker.pick_seed()
+        seed = self._seed_picker.pick_seed()
+
+        # last_picked: revisit clock for the --lst-revisit override (P3-3 step 6)
+        meta = self.seed_meta.get(seed)
+        if meta is not None:
+            meta["last_picked"] = time.time()
+        return seed
 
     def _pick_markov_seed(self):
         return self._seed_picker._pick_markov_seed()

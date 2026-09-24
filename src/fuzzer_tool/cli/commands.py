@@ -591,6 +591,7 @@ def cmd_fuzz(args):
         canary_scheduler=getattr(args, "canary_scheduler", False),
         seed_canary_scheduler=getattr(args, "seed_canary_scheduler", False),
         seed_round_robin_scheduler=getattr(args, "seed_round_robin_scheduler", False),
+        lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
         position_arena=getattr(args, "position_arena", False),
         garch=getattr(args, "garch", False),
@@ -1785,6 +1786,9 @@ def cmd_sweep(args):
 # accident of argparse type that silently breaks if gate_bonus ever grows a
 # boolean on/off form.
 #
+# lst_revisit (--lst-revisit) is excluded: a float dest like gate_bonus,
+# and unmeasured -- P3-3 step 6 still owes its replicated A/B.
+#
 # mds_select (--mds-select) is excluded for the same reason as gate_bonus's
 # second point: it is explicitly unvalidated. It swaps
 # auto_minimize_corpus's top-K-by-score selection for a weighted Maximum
@@ -2317,6 +2321,15 @@ def main() -> int:
         "--round-robin, deterministic cycling through the corpus in registration order. "
         "Unlike --seed-canary-scheduler this is a real strategy, not a floor, so it needs no "
         "--elo to run: it is also reachable directly whenever no arbiter picks a seed first.",
+    )
+    fuzz_parser.add_argument(
+        "--lst-revisit",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Bound seed revisit latency: once a seed has gone SECONDS without a pick "
+        "(minus one round of its measured cost), it pre-empts every other seed "
+        "strategy, least slack first. 0 (default) disables. Unmeasured; not in --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--burn-front",

@@ -1,4 +1,4 @@
-"""Classical job-scheduling primitives (P3-3, step 1 of 6).
+"""Classical job-scheduling primitives (P3-3, step 1 of 6; LST added in step 6).
 
 **Status:** pure functions, no wiring.  Nothing in the production fuzz loop
 imports this module yet.  It exists to give the maintenance-tick ordering
@@ -39,7 +39,10 @@ sequencers with no arm to reward.
 
 from __future__ import annotations
 
-from typing import Callable, NamedTuple
+from collections.abc import Callable
+from typing import NamedTuple
+
+import numpy as np
 
 __all__ = [
     "Job",
@@ -49,6 +52,8 @@ __all__ = [
     "lawler_order",
     "ffd_pack",
     "multifit",
+    "lst_pick",
+    "least_slack",
 ]
 
 
@@ -117,9 +122,7 @@ def _check_acyclic(jobs: list[Job], precedence: dict[object, set[object]]) -> No
         remaining = [j for j in remaining if j.id not in scheduled]
 
 
-def mdd_order(
-    jobs: list[Job], precedence: dict[object, set[object]] | None = None
-) -> list[Job]:
+def mdd_order(jobs: list[Job], precedence: dict[object, set[object]] | None = None) -> list[Job]:
     """Modified Due Date heuristic for 1|prec|Lmax.
 
     A greedy, precedence-respecting heuristic -- **not** exact (1|prec|Lmax
@@ -158,9 +161,7 @@ def mdd_order(
     return order
 
 
-def wmdd_order(
-    jobs: list[Job], precedence: dict[object, set[object]] | None = None
-) -> list[Job]:
+def wmdd_order(jobs: list[Job], precedence: dict[object, set[object]] | None = None) -> list[Job]:
     """Weighted variant of :func:`mdd_order`.
 
     Design choice, stated explicitly because "weighted MDD" is not a single
@@ -266,11 +267,7 @@ def lawler_order(
     max_cost = float("-inf")
 
     while remaining:
-        sinks = [
-            j
-            for j in remaining.values()
-            if not (successors[j.id] & remaining.keys())
-        ]
+        sinks = [j for j in remaining.values() if not (successors[j.id] & remaining.keys())]
         assert sinks, "acyclicity was checked above; this cannot be empty"
         chosen = min(sinks, key=lambda j: (cost(j, total_time), j.id))
         c = cost(chosen, total_time)
@@ -284,9 +281,7 @@ def lawler_order(
     return tail, max_cost
 
 
-def ffd_pack(
-    items: list[tuple[object, float]], capacity: float
-) -> list[list[object]]:
+def ffd_pack(items: list[tuple[object, float]], capacity: float) -> list[list[object]]:
     """First Fit Decreasing bin packing.
 
     Sort items by size descending, then place each into the first bin (in
@@ -312,9 +307,7 @@ def ffd_pack(
         if size <= 0:
             raise ValueError(f"item {item_id!r} has non-positive size {size!r}")
         if size > capacity:
-            raise ValueError(
-                f"item {item_id!r} has size {size!r} exceeding capacity {capacity!r}"
-            )
+            raise ValueError(f"item {item_id!r} has size {size!r} exceeding capacity {capacity!r}")
 
     ordered = sorted(items, key=lambda kv: (-kv[1], kv[0]))
     bins: list[list[object]] = []
@@ -402,9 +395,7 @@ def multifit(
             # bound -- the caller wants an actual packing, not only the
             # makespan estimate.
             capacity_by_id = dict(items)
-            makespan = max(
-                sum(capacity_by_id[i] for i in b) for b in packed
-            )
+            makespan = max(sum(capacity_by_id[i] for i in b) for b in packed)
             if best_bins is None or makespan < best_makespan:
                 best_bins = packed
                 best_makespan = makespan
@@ -420,3 +411,40 @@ def multifit(
         best_makespan = max(sum(capacity_by_id[i] for i in b) for b in best_bins)
 
     return best_bins, best_makespan
+
+
+def lst_pick(jobs: list[Job], now: float) -> object | None:
+    """Least Slack Time: the job closest to breaching its due date, if late.
+
+    ``slack = due_date - now - processing_time`` is how long a job can still
+    wait and finish on time.  Returns the id with the least slack once that
+    slack is negative, else ``None`` (nothing needs to jump the queue).
+    Unlike :func:`edf_order`, a long job due later can beat a short job due
+    sooner: e.g. at ``now=10``, (p=5, d=9.5) has slack -5.5 and goes before
+    (p=0.1, d=9) at -1.1.  Ties keep the first job, so callers control order.
+
+    Raises:
+        ValueError: any negative processing time.
+    """
+    _validate_positive_processing_times(jobs)
+    if not jobs:
+        return None
+
+    due = np.fromiter((j.due_date for j in jobs), float, len(jobs))
+    proc = np.fromiter((j.processing_time for j in jobs), float, len(jobs))
+    idx, slack = least_slack(due, proc, now)
+    return jobs[idx].id if slack < 0 else None
+
+
+def least_slack(due: np.ndarray, proc: np.ndarray, now: float) -> tuple[int, float]:
+    """Index and value of the minimum ``due - now - proc``; first on ties.
+
+    Vectorized kernel behind :func:`lst_pick`, exposed so hot callers can
+    skip building :class:`Job` tuples. Empty input returns ``(-1, inf)``.
+    """
+    if not len(due):
+        return -1, float("inf")
+
+    slack = due - now - proc
+    idx = int(slack.argmin())
+    return idx, float(slack[idx])

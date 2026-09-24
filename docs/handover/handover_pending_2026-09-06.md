@@ -464,6 +464,11 @@ the best property of the current fractal partitioning — a seed lands in the sa
 worker on every run regardless of discovery order — is exactly what a cost-based
 partition gives up.
 
+**Status 2026-09-24.** (6) shipped: `last_picked` + `--lst-revisit` (see
+`SeedPicker._pick_lst_seed`), A/B still owed. (5) not shipped: `-j` parallel
+mode no longer exists, so a cost partition has no consumer — tracked in
+`docs/TODO.md`.
+
 Item (6) inherits the A/B requirement from the Boltzmann result: bounded null,
 noise floor sd ≈ 4.6 edges (png), 4.7 (jpeg), 12.3 (grep), and **replicates are
 what resolve it, not seeds**. Run `tools/cost_dispersion.py` per target before

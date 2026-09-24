@@ -18,8 +18,11 @@ import math
 import time
 from collections import Counter
 
+import numpy as np
+
 from fuzzer_tool.core.cadence import bucket, due
-from fuzzer_tool.core.cost_ledger import effective_fuzz_count
+from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
+from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
@@ -675,6 +678,44 @@ class SeedPicker:
             f._temperature = ctl.temperature(feed_forward)
         return f._temperature
 
+    def _pick_lst_seed(self, now: float) -> bytes | None:
+        """Least-slack override bounding revisit latency (``--lst-revisit D``).
+
+        P3-3 step 6. Each seed is a job due ``D`` seconds after its last
+        visit (``last_picked``, else admission), clamped to session start so
+        a resume does not mark the whole corpus overdue. Its processing time
+        is one ``fuzz_one`` round: mean exec time x ``mutations_per_input``.
+        Returns the least-slack seed once any is late, else None.
+
+        A clean scan caches ``now + min_slack`` in ``f._lst_next_check``:
+        slack only shrinks with time, so nothing goes late before then and
+        the O(n) scan (~0.8 ms at 2000 seeds) is skipped. Seeds admitted or
+        re-costed meanwhile are off by at most one round of cost drift.
+        """
+        f = self.f
+        revisit = getattr(f, "_lst_revisit", 0.0)
+        if revisit <= 0 or not f.corpus:
+            return None
+        if now < getattr(f, "_lst_next_check", 0.0):
+            return None
+
+        fallback = f.mean_exec_time()
+        floor = f.start_time
+        metas = [f.seed_meta.get(seed, {}) for seed in f.corpus]
+        n = len(metas)
+        last = np.fromiter(
+            (m.get("last_picked", m.get("added_at", floor)) for m in metas), float, n
+        )
+        cost = np.fromiter((seed_exec_time(m, fallback) for m in metas), float, n)
+        deadline = np.maximum(last, floor) + revisit
+
+        idx, slack = least_slack(deadline, cost * f.mutations_per_input, now)
+        if slack >= 0:
+            f._lst_next_check = now + slack
+            return None
+        f._seed_strategy = "lst"
+        return f.corpus[idx]
+
     def pick_seed(self) -> bytes:
         f = self.f
         rng = f._rng
@@ -687,6 +728,10 @@ class SeedPicker:
         if f._stall_recovery_active and f.corpus:
             f._seed_strategy = "random_stall"
             return rng.choice(f.corpus)
+
+        overdue = self._pick_lst_seed(time.time())
+        if overdue is not None:
+            return overdue
 
         elo_pick = self._pick_seed_elo()
         if elo_pick is not None:
