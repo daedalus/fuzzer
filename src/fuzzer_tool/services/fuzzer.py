@@ -45,6 +45,7 @@ from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.elf import SHM_LAYOUT_CURRENT, detect_elf_type, detect_shm_layout
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
+from fuzzer_tool.core.metropolis import accept_prob, path_energy
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
 from fuzzer_tool.core.novelty_confirm import confirm
@@ -6223,7 +6224,8 @@ class Fuzzer:
 
         # ── Metropolis acceptance for non-improving / non-crashing inputs ──
         if self._metropolis and self._anneal_budget > 0 and not is_timeout:
-            p_accept = math.exp(-1.0 / max(self._temperature, 0.01))
+            mutant_edges = self._get_current_edge_set()
+            p_accept = self._metropolis_accept_p(data, mutant_edges)
             if self._rng.random() < p_accept:
                 _corpus_len_before = len(self.corpus)
                 self.save_to_corpus(mutated, parent=data)
@@ -6232,7 +6234,7 @@ class Fuzzer:
                 if self.mc and self.mc_cem:
                     self.mc.add_elite(mutated, 1, temperature=self._temperature)
                     self.mc.maybe_refit()
-                self._record_fluctuation_observation("success", self._get_current_edge_set())
+                self._record_fluctuation_observation("success", mutant_edges)
                 return True
 
         # Periodic minimization (also for non-interesting iterations)
@@ -6710,6 +6712,16 @@ class Fuzzer:
             self._weizz_tags_collected += 1
         except Exception:  # noqa: BLE001 — never take down the fuzz loop
             log.debug("weizz tag collection failed", exc_info=True)
+
+    def _metropolis_accept_p(self, parent: bytes, mutant_edges: set[int]) -> float:
+        """Admission probability for a non-improving mutant of *parent*.
+
+        ``ΔE = |P| / |M ∪ P|`` against the parent's recorded path (see
+        core/metropolis.py). ``.get`` so an untracked parent is not inserted.
+        """
+        parent_edges = self._edge_tracker.seed_edges.get(self._seed_key(parent), set())
+        delta_e = path_energy(mutant_edges, parent_edges)
+        return accept_prob(delta_e, self._temperature)
 
     def _get_current_edge_set(self) -> set[int]:
         """Return the set of currently-active edge IDs.

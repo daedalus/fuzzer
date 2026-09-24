@@ -331,6 +331,34 @@ The regression that pins the defect: two mutants with very different
 divergence must **not** get the same acceptance probability — that assertion
 fails on `master` for every pair.
 
+**Design settled (2026-09-24).** Candidate (1) as written is sign-inverted:
+`ΔE = 1 − Jaccard` gives an *identical* mutant `ΔE = 0`, `p = 1`, admitting
+every behaviour-duplicate — the opposite of the prose ("rewards a different
+route"). Flipping it (`ΔE = Jaccard`) fails the other way: a magic-broken
+mutant taking a 5-edge error path is near-disjoint from a 100-edge parent and
+would be accepted at `p ≈ 1`. Divergence has to be size-aware.
+
+Chosen: with `M` the mutant's edges and `P` the parent's,
+
+    ΔE = |P| / |M ∪ P|      p = min(1, exp(−ΔE / T))
+
+the share of the combined path the parent already explains, in `[0, 1]`.
+
+| case | ΔE | p |
+|---|---|---|
+| `M = P`, or `M ⊂ P` (early exit) | 1 | `exp(−1/T)` — today's rate, the floor |
+| 5-edge error path vs 100-edge parent, 2 new | 100/102 | ≈ floor |
+| half the path rerouted (50 of 100) | 100/150 | `exp(−0.67/T)` |
+| `P = ∅` (untracked parent) | defined 1 | floor |
+
+`ΔE = 0` is unreachable for non-empty `P`: nothing boring is "as good as an
+admission", which is the anchor (admissions have `ΔE ≤ 0` and are always
+kept). Acceptance never drops below today's, so this does not shrink corpus
+growth; it redistributes the extra toward reroutes. Rejected: (2) rarity via
+`edge_owner_count` prices edges globally, with no incumbent anchor for
+`ΔE = 0`; (3) hit counts exist only on the SHM path, so the energy would
+depend on execution mode. Code: `core/metropolis.py`.
+
 ---
 
 ## P1-1. The effector map is observed on every deterministic exec and discarded
