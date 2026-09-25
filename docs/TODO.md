@@ -65,7 +65,7 @@
 - [ ] **Pre-existing red tests** (2026-09-25) — `test_regression_track_op_effect_coverage::test_every_ballot_name_is_mapped` (no kwargs for `fewa`, `softmax`, `topk`); `test_kruskal_count` / `test_seed_round_robin` `TestFuzzerWiring::test_constructor_flag_is_*last*` (constructor order); `test_regression_no_op_mutations::test_every_selectable_operator_is_reachable`. Red on master before the LRU/bayes-ucb change.
 
 ## Scheduling
-- [ ] **`pos_fibonacci` vs `pos_round_robin` unmeasured where it should matter** (2026-09-25) — fuzzgoat (8-byte seed, <=4-entry corpus) has too few bins and too few seeds for ordering or LRU eviction to matter; 4x20k-iteration arena campaigns are the only data. Rerun on a target with a >256-seed corpus and multi-KB inputs (png_read), `tools/bench_paired.py`.
+- [ ] **`pos_fibonacci` vs `pos_round_robin` unmeasured where it should matter** (2026-09-25) — fuzzgoat (8-byte seed, <=4-entry corpus) has too few bins and too few seeds for ordering or LRU eviction to matter; measured (2x20k iterations, --elo all --position-arena): fibonacci +0.15σ / -0.14σ, round_robin +0.04σ / +0.04σ, and the deliberately-worst pos_canary landed mid-pack (-0.04σ) in one run, so the arena has no discriminating power on this target. Rerun on a target with a >256-seed corpus and multi-KB inputs (png_read), `tools/bench_paired.py`.
 
 ## Standing notes
 
