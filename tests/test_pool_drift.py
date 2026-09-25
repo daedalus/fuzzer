@@ -6,6 +6,8 @@ formulas over plain probability lists -- never from the tracker under test.
 
 from __future__ import annotations
 
+import ast
+import inspect
 import math
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -204,7 +206,9 @@ class TestPoolDriftAdversarial:
 
 class TestWiring:
     def test_init_seed_metadata_freezes_baseline(self):
-        f = SimpleNamespace(corpus=[b"AAAA", b"BBBB"], map_size=64, resume=False)
+        f = SimpleNamespace(
+            corpus=[b"AAAA", b"BBBB"], map_size=64, resume=False, _use_pool_drift=True
+        )
         CorpusManager(f).init_seed_metadata()
         assert isinstance(f._pool_drift, PoolDrift)
         f.corpus.append(bytes(range(256)))
@@ -231,3 +235,48 @@ class TestWiring:
         ref = _ref([b"AAAA"], f.corpus)
         assert f"JS={ref['js_bits']:.4f}" in out
         assert f"I(seed; byte)={ref['mutual_info']:.3f}" in out
+
+    def test_off_by_default(self):
+        # Falsification: without the flag no tracker exists, so no tick cost.
+        f = SimpleNamespace(corpus=[b"AAAA"], map_size=64, resume=False)
+        CorpusManager(f).init_seed_metadata()
+        assert f._pool_drift is None
+        assert StatsReporter.__new__(StatsReporter)._print_stats_drift_str(f) == ""
+
+    def test_constructor_takes_the_flag(self):
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        assert inspect.signature(Fuzzer.__init__).parameters["pool_drift"].default is False
+
+    def test_cli_and_hail_mary(self):
+        from fuzzer_tool.cli import commands
+        from tests.test_regression_cli_fuzzer_kwargs import _fuzz_parser_dests
+
+        assert "pool_drift" in _fuzz_parser_dests(ast.parse(inspect.getsource(commands)))
+        assert "pool_drift" in commands._HAIL_MARY_FLAGS
+        calls = [
+            {k.arg for k in c.keywords}
+            for c in ast.walk(ast.parse(inspect.getsource(commands.cmd_fuzz)))
+            if isinstance(c, ast.Call) and getattr(c.func, "id", None) == "Fuzzer"
+        ]
+        assert calls
+        assert all("pool_drift" in k for k in calls)
+
+    def test_hail_mary_parses_on(self, monkeypatch):
+        # End to end through the real parser: --hail-mary alone turns it on.
+        from fuzzer_tool.cli import commands
+
+        seen = {}
+        monkeypatch.setattr(commands, "cmd_fuzz", lambda args: seen.setdefault("a", args) and 0)
+        monkeypatch.setattr("sys.argv", ["fuzzer-tool", "fuzz", "/bin/true", "--hail-mary"])
+        commands.main()
+        assert seen["a"].pool_drift is True
+
+    def test_enabled_features_banner(self, capsys):
+        from fuzzer_tool.services.fuzzer import Fuzzer
+        from tests.test_regression_enabled_features_entropy_deviation import _make_fake_fuzzer
+
+        Fuzzer._print_enabled_features(_make_fake_fuzzer())
+        assert "pool-drift" not in capsys.readouterr().out
+        Fuzzer._print_enabled_features(_make_fake_fuzzer(_pool_drift=PoolDrift()))
+        assert "pool-drift" in capsys.readouterr().out

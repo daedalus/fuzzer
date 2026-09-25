@@ -1292,6 +1292,7 @@ class Fuzzer:
         entropy_loo=False,
         seed_residual=False,
         strata=False,
+        pool_drift=False,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
         confirm_novelty=False,
@@ -1589,6 +1590,9 @@ class Fuzzer:
         from fuzzer_tool.core.wfc_chunks import WFC_MUTATOR
 
         WFC_MUTATOR.use_wfc = wfc
+
+        # Corpus byte drift vs seeds (core/pool_drift.py); read by init_seed_metadata
+        self._use_pool_drift = pool_drift
 
         # Corpus size boost: normal-distribution seed resizing
         self._corpus_boost = corpus_boost
@@ -8325,6 +8329,8 @@ class Fuzzer:
 
         if getattr(self, "_use_mi", False):
             groups["Analysis"].append("mi-guided")
+        if getattr(self, "_pool_drift", None) is not None:
+            groups["Analysis"].append("pool-drift")
         if getattr(self, "_use_renyi_weight", False):
             groups["Analysis"].append("renyi")
         if getattr(self, "_use_transfer_entropy", False):

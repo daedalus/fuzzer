@@ -647,6 +647,7 @@ def cmd_fuzz(args):
         entropy_gradient=getattr(args, "entropy_gradient", False),
         entropy_gradient_decay=getattr(args, "entropy_gradient_decay", 0.98),
         entropy_loo=getattr(args, "entropy_loo", False),
+        pool_drift=getattr(args, "pool_drift", False),
         seed_residual=getattr(args, "seed_residual", False),
         confirm_novelty=getattr(args, "confirm_novelty", False),
         successive_elim=getattr(args, "successive_elim", False),
@@ -1888,6 +1889,7 @@ _HAIL_MARY_FLAGS = (
     "entropy_deviation",
     "entropy_gradient",
     "entropy_loo",
+    "pool_drift",
     "seed_residual",
     "op_katz",
     "op_kuramoto",
@@ -3376,6 +3378,13 @@ def main() -> int:
         "weighting seeds by how much pooled corpus byte-entropy drops without them "
         "(docs/handover/handover_entropy_seed_schedulers_2026-09-19.md §5). OFF by "
         "default; not yet A/B validated.",
+    )
+    fuzz_parser.add_argument(
+        "--pool-drift",
+        action="store_true",
+        default=False,
+        help="Diagnostic: corpus byte drift vs the seed set (dH, JS, novel mass, "
+        "I(seed; byte)) in the status line and report. OFF by default.",
     )
     fuzz_parser.add_argument(
         "--entropy-gradient",

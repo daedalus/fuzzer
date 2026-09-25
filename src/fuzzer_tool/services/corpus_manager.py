@@ -377,8 +377,10 @@ class CorpusManager:
 
         # Freeze the seed byte distribution after transforms/boost, before
         # any admission; status and report compare the live pool to it.
-        f._pool_drift = PoolDrift()
-        f._pool_drift.sync(f.corpus)
+        f._pool_drift = None
+        if getattr(f, "_use_pool_drift", False):
+            f._pool_drift = PoolDrift()
+            f._pool_drift.sync(f.corpus)
 
         if f.resume:
             self.load_state()
