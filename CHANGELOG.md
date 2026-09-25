@@ -168,6 +168,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Katz horizon recompute held Python lists for every ICFG node** (`core/horizon.py`, `core/schedulers/seed_katz.py`):
+  adjacency, shortcut walk, SCC and DAG depth run on CSR arrays; Tarjan only on nodes that can be on a cycle;
+  `u_nodes`/`u_icfg_index` packed, `node_index` built on first use. One recompute on ffmpeg's ICFG:
+  2.67M nodes 34.8 s / 1923 MB -> 12.4 s / 300 MB; 833k nodes 13.5 s / 550 MB -> 6.8 s / 68 MB. Output identical.
+
 - **Katz channel kept ~1.9 GB of build-only state** (`core/icfg.py`, `core/cfg.py`, `services/katz_channel.py`):
   CFGs and `TargetDistance` are dropped after use, `node_addrs` is `array('Q')` + bisect (no `node_index` dict),
   `BasicBlock` is slotted with a shared empty `callees`, and ICFG assembly uses packed arrays. ffmpeg, retained

@@ -46,8 +46,9 @@ class TestIndexSpaces:
         icfg = _icfg(6, [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)])
         h = build_horizon_graph(icfg, {"s": _mask(6, [0, 1, 2])})
         assert h.n_u == 3
-        assert h.u_icfg_index == [3, 4, 5]
-        assert h.u_nodes == [icfg.node_addrs[i] for i in (3, 4, 5)]
+        # Packed arrays (8 B per U node), so compare contents.
+        assert list(h.u_icfg_index) == [3, 4, 5]
+        assert list(h.u_nodes) == [icfg.node_addrs[i] for i in (3, 4, 5)]
 
     def test_visited_parents_are_icfg_indices(self):
         icfg = _icfg(6, [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)])

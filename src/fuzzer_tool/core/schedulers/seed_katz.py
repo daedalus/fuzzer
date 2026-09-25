@@ -44,7 +44,7 @@ whose score is α × the centrality of the horizons they attach to.
 
 import numpy as np
 
-from fuzzer_tool.core.horizon import HorizonGraph
+from fuzzer_tool.core.horizon import HorizonGraph, _gather, _out_csr
 
 DEFAULT_ALPHA = 0.5  # paper Table XI
 
@@ -62,36 +62,29 @@ def _dag_depth(src: np.ndarray, dst: np.ndarray, n: int) -> int:
     prove acyclicity; the depth is one accumulator on that same walk, so it
     costs nothing beyond what the assertion was already paying.
     """
-    indeg = np.zeros(n, dtype=np.int64)
-    for d in dst.tolist():
-        indeg[d] += 1
-    children: dict[int, list[int]] = {}
-    for s, d in zip(src.tolist(), dst.tolist(), strict=False):
-        children.setdefault(s, []).append(d)
-    queue = [v for v in range(n) if indeg[v] == 0]
-    order: list[int] = []
-    while queue:
-        v = queue.pop()
-        order.append(v)
-        for w in children.get(v, ()):
-            indeg[w] -= 1
-            if indeg[w] == 0:
-                queue.append(w)
-    if len(order) != n:
+    # Level-synchronous Kahn on CSR arrays: a node's level is its longest
+    # path from a source, so the last level is the depth. The dict/list
+    # version held a Python list per node (~2 GB peak on ffmpeg).
+    src = np.asarray(src, dtype=np.int64)
+    dst = np.asarray(dst, dtype=np.int64)
+    ptr, nbr = _out_csr(n, src, dst)
+    indeg = np.bincount(dst, minlength=n)
+    frontier = np.flatnonzero(indeg == 0)
+    settled = 0
+    depth = -1
+    while frontier.size:
+        settled += frontier.size
+        depth += 1
+        kids, counts = np.unique(nbr[_gather(ptr[frontier], ptr[frontier + 1])], return_counts=True)
+        indeg[kids] -= counts
+        frontier = kids[indeg[kids] == 0]
+
+    if settled != n:
         raise ValueError(
             f"horizon graph must be a DAG before Katz "
-            f"(found {n - len(order)} nodes in cycles); run build_horizon_graph"
+            f"(found {n - settled} nodes in cycles); run build_horizon_graph"
         )
-    # depth[u] = 1 + max(depth[v] for v in children[u]); a reverse pass over
-    # the order just produced settles every node in one visit.
-    depth = [0] * n
-    for u in reversed(order):
-        best = 0
-        for v in children.get(u, ()):
-            if depth[v] + 1 > best:
-                best = depth[v] + 1
-        depth[u] = best
-    return max(depth) if depth else 0
+    return max(depth, 0)
 
 
 def build_beta(
