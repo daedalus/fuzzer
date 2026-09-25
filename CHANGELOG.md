@@ -168,6 +168,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Position-canary misreports** (`services/fuzzer.py`): the uniform-floor check no longer flags
+  `pos_canary` (built to lose) as needing inspection on every `--position-arena` run, and the banner lists
+  "canary" only when the arena fields it (`--position-arena` with `--elo`).
+
 - **Katz horizon recompute held Python lists for every ICFG node** (`core/horizon.py`, `core/schedulers/seed_katz.py`):
   adjacency, shortcut walk, SCC and DAG depth run on CSR arrays; Tarjan only on nodes that can be on a cycle;
   `u_nodes`/`u_icfg_index` packed, `node_index` built on first use. One recompute on ffmpeg's ICFG:

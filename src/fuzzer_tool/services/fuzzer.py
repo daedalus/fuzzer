@@ -643,6 +643,9 @@ def _detect_ubsan(target_path: str) -> bool:
 # disables the feature instead of failing, which is how W = L*log(L) shipped.
 _SELECTION_PROB_SOURCES: tuple[str, ...] = ("_exp3",)
 
+# Elo key of the position arena's deliberately-worst floor (pos_canary.py).
+_POS_CANARY_KEY = "pos_canary"
+
 
 def _active_position_schedulers(f) -> list[str]:
     """Position proposers whose feature is on right now (uniform excluded).
@@ -672,7 +675,14 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("region")
     if getattr(f, "_burn_front", None) is not None:
         names.append("burn-front")
-    if getattr(f, "_pos_canary", None) is not None:
+    # Only PositionArena.select reaches the canary, and only with --elo
+    # (select_position excludes it on purpose); otherwise it never runs.
+    arena_live = (
+        getattr(f, "_position_arena", None) is not None
+        and getattr(f, "_use_elo", False)
+        and getattr(f, "_elo", None)
+    )
+    if getattr(f, "_pos_canary", None) is not None and arena_live:
         names.append("canary")
     if getattr(f, "_pos_round_robin", None) is not None:
         names.append("round-robin")
@@ -7725,6 +7735,9 @@ class Fuzzer:
         # blindly.
         if getattr(self, "_position_arena", None) is not None:
             for strategy, mu, floor_mu in self._elo.strategies_below_canary("pos_uniform"):
+                # The canary is built to lose; below uniform is its job.
+                if strategy == _POS_CANARY_KEY:
+                    continue
                 log.warning(
                     "Elo meta-scheduler: position strategy %r rated %.1f, at or "
                     "below uniform (%.1f) -- this proposer needs inspection",
@@ -7738,7 +7751,7 @@ class Fuzzer:
         # this one. A real proposer at or below pos_canary is a stronger
         # signal than merely tying uniform.
         if getattr(self, "_pos_canary", None) is not None:
-            pos_flagged = self._elo.strategies_below_canary("pos_canary")
+            pos_flagged = self._elo.strategies_below_canary(_POS_CANARY_KEY)
             for strategy, mu, canary_mu in pos_flagged:
                 log.warning(
                     "Elo meta-scheduler: position strategy %r rated %.1f, at or "
