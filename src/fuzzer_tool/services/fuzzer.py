@@ -688,7 +688,7 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("canary")
     if getattr(f, "_pos_round_robin", None) is not None:
         names.append("round-robin")
-    if getattr(f, "_pos_fibonacci", None) is not None and arena_live:
+    if getattr(f, "_pos_fibonacci", None) is not None:
         names.append("fibonacci")
     return names
 
@@ -1379,6 +1379,9 @@ class Fuzzer:
         # Elo arm and, needing no arbiter, directly in select_position's
         # non-arena candidate list alongside burn-front.
         pos_round_robin=False,
+        # Golden-ratio sibling of pos_round_robin (see
+        # core/schedulers/pos_fibonacci.py); same two reaches.
+        pos_fibonacci=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2477,15 +2480,16 @@ class Fuzzer:
             self._pos_round_robin = PositionRoundRobinScheduler()
             log.info("Position round-robin scheduling enabled")
         # Position-arena fibonacci: golden-ratio sweep with no per-seed
-        # state (see core/schedulers/pos_fibonacci.py). Arena-only, like
-        # the canary: it exists to be rated against round-robin and uniform.
+        # state (see core/schedulers/pos_fibonacci.py). Like round-robin it
+        # is also a non-arena select_position candidate.
         self._pos_fibonacci = None
-        if position_arena:
+        if pos_fibonacci or position_arena:
             from fuzzer_tool.core.schedulers.pos_fibonacci import (
                 PositionFibonacciScheduler,
             )
 
             self._pos_fibonacci = PositionFibonacciScheduler()
+            log.info("Position fibonacci scheduling enabled")
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:

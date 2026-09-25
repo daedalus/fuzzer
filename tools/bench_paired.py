@@ -150,6 +150,11 @@ ARMS: dict[str, list[str]] = {
     "strata-a1-elo": ["--confirm-novelty", "--elo", "--mc-bandit"],
     "strata-a3": ["--confirm-novelty", "--elo", "--mc-bandit", "--op-strata"],
     "strata-a4": ["--confirm-novelty", "--elo", "--mc-bandit", "--strata", "--op-strata"],
+    # Standalone position policies, no arena: with no other tracker on, the
+    # scheduler is select_position's only candidate. Pair each against
+    # baseline (uniform offsets) and against each other.
+    "pos-round-robin": ["--pos-round-robin"],
+    "pos-fibonacci": ["--pos-fibonacci"],
 }
 
 STRATA_ARMS = (
@@ -164,6 +169,8 @@ STRATA_ARMS = (
 
 # The arms added for the generation group, in the order the handover lists them.
 GENERATION_ARMS = ("wfc", "elo-mcts", "elo-alphabeta", "bootstrap")
+
+POSITION_ARMS = ("pos-round-robin", "pos-fibonacci")
 
 # Which arm each one is paired against. `analyse --baseline` takes one name;
 # this records the intended pairing so a reviewer does not have to reverse it
@@ -180,6 +187,8 @@ ARM_BASELINES: dict[str, str] = {
     "strata-a1-elo": "strata-a1",
     "strata-a3": "strata-a1-elo",
     "strata-a4": "strata-a1-elo",
+    "pos-round-robin": "baseline",
+    "pos-fibonacci": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

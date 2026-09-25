@@ -53,6 +53,7 @@ from fuzzer_tool.core.mutations.structured import _region
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.schedulers.pos_burn_front import BurnFrontPositionScheduler
+from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
 from fuzzer_tool.services.position_arena import PositionArena
@@ -5293,6 +5294,10 @@ class OperatorEngine:
         # the arena tournament, not to steer real fuzzing.
         rr = getattr(f, "_pos_round_robin", None)
         rr_pos = rr.propose(data, buf_len) if isinstance(rr, PositionRoundRobinScheduler) else None
+        fib = getattr(f, "_pos_fibonacci", None)
+        fib_pos = (
+            fib.propose(data, buf_len) if isinstance(fib, PositionFibonacciScheduler) else None
+        )
         candidates = [
             p
             for p in [
@@ -5304,6 +5309,7 @@ class OperatorEngine:
                 region_pos,
                 burn_pos,
                 rr_pos,
+                fib_pos,
             ]
             if p is not None
         ]
@@ -5316,7 +5322,7 @@ class OperatorEngine:
                 f"[select_position] buf_len={buf_len} sens={sens_pos} te={te_pos} "
                 f"phase={phase_pos} "
                 f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} burn={burn_pos} "
-                f"round_robin={rr_pos} "
+                f"round_robin={rr_pos} fibonacci={fib_pos} "
                 f"candidates={candidates} fallback={not candidates} byte_idx={byte_idx}"
             )
         return byte_idx
