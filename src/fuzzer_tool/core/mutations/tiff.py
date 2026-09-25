@@ -48,6 +48,9 @@ def parse_tiff(data: bytes) -> TiffHeader | None:
         return None
 
     offset = struct.unpack_from("<I", data, 4)[0]
+    # IFD offset is input-controlled: an entry count past the end is malformed.
+    if offset + 2 > len(data):
+        return None
     num_entries = struct.unpack_from("<H", data, offset)[0]
 
     entries = []
