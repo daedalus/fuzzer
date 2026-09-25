@@ -56,6 +56,19 @@ MAX_TRACKED_SIGNATURES = 4096  # cap on candidate signatures awaiting promotion
 _FENWICK_INIT_SIZE = 64  # initial byte-offset capacity; doubles on demand
 
 
+_MIN_CLASSIFY_OBS = 3  # observations before a field is typed or stride-boosted
+
+
+def _rank_value(items: list[tuple[float, int]], rank: int) -> float:
+    """Value at 0-based *rank* in a sorted (value, count) histogram."""
+    seen = 0
+    for v, cnt in items:
+        seen += cnt
+        if seen > rank:
+            return v
+    return items[-1][0]
+
+
 class _CoverageFenwick:
     """Range-add / point-query Fenwick tree over byte offsets.
 
@@ -202,6 +215,8 @@ class FormatCluster:
     total_observations: int = 0
     _transitions_since_backtest: int = 0
     _delta_moments: RunningMoments = field(default_factory=RunningMoments)
+    # delta -> count; exact MAD in O(distinct deltas) instead of sorting history.
+    _delta_counts: dict[float, int] = field(default_factory=dict, repr=False, compare=False)
     # Coverage index over `hypotheses`; rebuilt if the list is swapped or
     # appended to from outside (`_synced_cover`).
     _cover: _CoverageFenwick = field(default_factory=_CoverageFenwick, repr=False, compare=False)
@@ -257,8 +272,10 @@ class FormatCluster:
         """Append a real transition to this cluster's Timeline and update
         its hypotheses, periodically backtesting against its own history."""
         self.timeline.append(entry)
-        if len(self.timeline) > max_timeline:
-            self.timeline = self.timeline[-max_timeline:]
+        # In place: a slice copy would copy all max_timeline entries per record.
+        excess = len(self.timeline) - max_timeline
+        if excess > 0:
+            del self.timeline[:excess]
         self.total_observations += 1
 
         self._update_hypotheses(entry, input_bytes)
@@ -276,27 +293,7 @@ class FormatCluster:
         width = entry.mutation_width
         delta = entry.coverage_after - entry.coverage_before
 
-        # Z-score gate: a mutation only counts as "field-sensitive" if
-        # its effect is a statistical outlier relative to ambient noise,
-        # not just nonzero.  Under high excess kurtosis (zero-inflated
-        # coverage deltas), fall back to MAD-based z-score for robustness.
-        self._delta_moments.update(float(delta))
-        if self._delta_moments.count >= 3 and self._delta_moments.stddev > 0:
-            if self._delta_moments.kurtosis > 3.0:
-                # Heavy-tailed: use MAD-based robust z-score
-                mad = self._median_absolute_deviation()
-                if mad > 0:
-                    z = abs(delta - self._delta_moments.mean) / (mad * 1.4826)
-                else:
-                    z = abs(self._delta_moments.z_score(delta))
-            else:
-                z = abs(self._delta_moments.z_score(delta))
-            has_effect = (
-                z > self.z_score_threshold or bool(entry.new_edges) or bool(entry.lost_edges)
-            )
-        else:
-            # Too few observations for z-score — fall back to nonzero check
-            has_effect = delta != 0 or bool(entry.new_edges) or bool(entry.lost_edges)
+        has_effect = self._has_effect(entry, delta)
 
         # Delocalised ops set `mutation_offset=None`; they have no single byte
         # to attribute, so skip field-hypothesis updates rather than crashing.
@@ -305,6 +302,7 @@ class FormatCluster:
 
         existing = self._covering(offset)
 
+        touched = existing
         if existing:
             existing.observations += 1
             if has_effect:
@@ -327,11 +325,40 @@ class FormatCluster:
                 controlled_edges=set(entry.new_edges),
             )
             self._add_hypothesis(h)
+            touched = h
 
         if offset is not None and input_bytes is not None:
             self._track_values(offset, width, input_bytes)
 
-        self._classify_fields()
+        # Only the field this record is evidence about; O(1), not O(H).
+        if touched is not None and touched.observations >= _MIN_CLASSIFY_OBS:
+            self._boost_stride(touched)
+            self._classify(touched)
+
+    def _has_effect(self, entry: TimelineEntry, delta: int) -> bool:
+        """Whether *entry*'s coverage delta is field-sensitive evidence."""
+        # Z-score gate: a mutation only counts as "field-sensitive" if
+        # its effect is a statistical outlier relative to ambient noise,
+        # not just nonzero.  Under high excess kurtosis (zero-inflated
+        # coverage deltas), fall back to MAD-based z-score for robustness.
+        self._observe_delta(float(delta))
+        if self._delta_moments.count >= 3 and self._delta_moments.stddev > 0:
+            if self._delta_moments.kurtosis > 3.0:
+                # Heavy-tailed: use MAD-based robust z-score
+                mad = self._median_absolute_deviation()
+                if mad > 0:
+                    z = abs(delta - self._delta_moments.mean) / (mad * 1.4826)
+                else:
+                    z = abs(self._delta_moments.z_score(delta))
+            else:
+                z = abs(self._delta_moments.z_score(delta))
+            has_effect = (
+                z > self.z_score_threshold or bool(entry.new_edges) or bool(entry.lost_edges)
+            )
+        else:
+            # Too few observations for z-score — fall back to nonzero check
+            has_effect = delta != 0 or bool(entry.new_edges) or bool(entry.lost_edges)
+        return has_effect
 
     def _track_values(self, offset: int, width: int, input_bytes: bytes):
         """Track per-position byte values inside each covered hypothesis.
@@ -396,6 +423,9 @@ class FormatCluster:
         if h is not None:
             if h.field_type != "padding":
                 h.confidence = max(0.0, h.confidence - 0.05)
+                # Re-type now; no stride boost, liveness is not field evidence.
+                if h.observations >= _MIN_CLASSIFY_OBS:
+                    self._classify(h)
             return
 
         h = FieldHypothesis(
@@ -408,42 +438,64 @@ class FormatCluster:
         self._add_hypothesis(h)
 
     def _classify_fields(self):
-        """Classify hypotheses into field types based on evidence patterns."""
+        """Full pass: boost and classify every field with enough observations."""
         for h in self.hypotheses:
-            if h.observations < 3:
+            if h.observations < _MIN_CLASSIFY_OBS:
                 continue
 
-            # Structural prior: stride-aligned hypotheses are likelier real fields
-            if self.record_stride and (
-                h.width == self.record_stride or h.offset % self.record_stride == 0
-            ):
-                h.confidence = min(1.0, h.confidence + 0.05)
+            self._boost_stride(h)
+            self._classify(h)
 
-            if h.offset == 0 and h.confidence > 0.5:
-                h.field_type = "magic"
-                continue
-            if len(h.controlled_edges) > 5 and h.confidence > 0.4:
-                h.field_type = "length"
-                continue
-            if len(h.sensitive_ops) > 3 and h.confidence > 0.3:
-                h.field_type = "crc"
-                continue
-            if h.observations > 10 and h.confidence > 0.2:
-                h.field_type = "data"
-                continue
-            h.field_type = "unknown"
+    def _boost_stride(self, h: FieldHypothesis) -> None:
+        """Structural prior: stride-aligned hypotheses are likelier real fields."""
+        stride = self.record_stride
+        if stride and (h.width == stride or h.offset % stride == 0):
+            h.confidence = min(1.0, h.confidence + 0.05)
+
+    @staticmethod
+    def _classify(h: FieldHypothesis) -> None:
+        """Derive *h*'s field type from its own evidence."""
+        if h.offset == 0 and h.confidence > 0.5:
+            h.field_type = "magic"
+            return
+        if len(h.controlled_edges) > 5 and h.confidence > 0.4:
+            h.field_type = "length"
+            return
+        if len(h.sensitive_ops) > 3 and h.confidence > 0.3:
+            h.field_type = "crc"
+            return
+        if h.observations > 10 and h.confidence > 0.2:
+            h.field_type = "data"
+            return
+        h.field_type = "unknown"
+
+    def _observe_delta(self, delta: float) -> None:
+        """Feed one coverage delta to the moments and the MAD histogram."""
+        self._delta_moments.update(delta)
+        counts = self._delta_counts
+        counts[delta] = counts.get(delta, 0) + 1
 
     def _median_absolute_deviation(self) -> float:
-        """MAD of coverage deltas — robust alternative to stddev under heavy tails."""
-        buf = self._delta_moments._buf
-        if len(buf) < 3:
+        """MAD of coverage deltas — robust alternative to stddev under heavy tails.
+
+        Upper median (rank n//2) of the deltas, then of |delta - median|,
+        read off the histogram: O(D log D) for D distinct deltas, not
+        O(n log n) over the whole history. E.g. {0: 40, 1: 1, 12: 1}:
+        median 0, deviations {0: 40, 1: 1, 12: 1}, MAD 0.
+        """
+        counts = self._delta_counts
+        n = sum(counts.values())
+        if n < 3:
             return 0.0
-        sorted_vals = sorted(buf)
-        n = len(sorted_vals)
-        median = sorted_vals[n // 2]
-        deviations = [abs(v - median) for v in sorted_vals]
-        deviations.sort()
-        return deviations[len(deviations) // 2]
+
+        rank = n // 2
+        median = _rank_value(sorted(counts.items()), rank)
+
+        devs: dict[float, int] = {}
+        for v, cnt in counts.items():
+            d = abs(v - median)
+            devs[d] = devs.get(d, 0) + cnt
+        return _rank_value(sorted(devs.items()), rank)
 
     def backtest(self) -> tuple[bool, str | None]:
         """Replay this cluster's ENTIRE Timeline through its current format model."""
