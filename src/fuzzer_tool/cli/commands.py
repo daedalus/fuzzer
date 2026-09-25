@@ -2417,7 +2417,7 @@ def main() -> int:
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
-        "crash-MI, region, burn-front, canary, round-robin) with uniform as the "
+        "crash-MI, region, burn-front, canary, round-robin, fibonacci) with uniform as the "
         "baseline arm, under pos_ keys. Needs --elo; a proposer rated at or below "
         "uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-canary and --pos-round-robin. Enabled by --hail-mary.",

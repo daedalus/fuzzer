@@ -33,6 +33,7 @@ from fuzzer_tool.core.schedulers.pos_burn_front import (
     BurnFrontPositionScheduler,
 )
 from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
+from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, PositionArena
@@ -311,6 +312,91 @@ class TestPositionRoundRobin:
         assert s.seed_count() == RR_MAX_SEEDS
 
 
+INV_PHI = (5**0.5 - 1) / 2  # 1/phi, derived independently of pos_fibonacci
+
+
+def _max_gap(picks, num_bins):
+    """Largest circular gap between distinct picked bins."""
+    pts = sorted(set(picks))
+    gaps = [b - a for a, b in zip(pts, pts[1:], strict=False)]
+    return max(gaps + [num_bins - pts[-1] + pts[0]])
+
+
+class TestPositionFibonacci:
+    def test_satisfies_the_protocol(self):
+        assert isinstance(PositionFibonacciScheduler(), PositionScheduler)
+
+    def test_name_is_fibonacci(self):
+        assert PositionFibonacciScheduler().name == "fibonacci"
+
+    def test_follows_the_golden_ratio_sequence(self):
+        # bin_n = floor(frac(n / phi) * num_bins); width 1 for a 1000-byte seed.
+        s = PositionFibonacciScheduler()
+        picks = [s.propose(SEED, len(SEED)) for _ in range(8)]
+        assert picks == [int((n * INV_PHI) % 1.0 * len(SEED)) for n in range(8)]
+
+    def test_any_prefix_spreads_evenly(self):
+        # Falsification: the same bound round-robin must fail, else it is vacuous.
+        data = bytes(MAX_BINS)
+        for k in (8, 34, 89):
+            fib, rr = PositionFibonacciScheduler(), PositionRoundRobinScheduler()
+            bound = 3 * MAX_BINS // k
+            assert _max_gap([fib.propose(data, len(data)) for _ in range(k)], MAX_BINS) <= bound
+            assert _max_gap([rr.propose(data, len(data)) for _ in range(k)], MAX_BINS) > bound
+
+    def test_long_seed_lands_on_bin_starts(self):
+        data = bytes(3 * MAX_BINS)
+        s = PositionFibonacciScheduler()
+        assert all(s.propose(data, len(data)) % 3 == 0 for _ in range(64))
+
+    def test_clamps_to_a_shrunk_buffer(self):
+        s = PositionFibonacciScheduler()
+        assert all(s.propose(SEED, 10) <= 9 for _ in range(64))
+
+    def test_empty_buffer_declines(self):
+        assert PositionFibonacciScheduler().propose(b"", 0) is None
+
+    def test_empty_seed_with_live_buffer_proposes_zero(self):
+        s = PositionFibonacciScheduler()
+        assert [s.propose(b"", 4) for _ in range(3)] == [0, 0, 0]
+
+    def test_record_does_not_perturb_the_sequence(self):
+        a, b = PositionFibonacciScheduler(), PositionFibonacciScheduler()
+        a.propose(SEED, len(SEED))
+        b.propose(SEED, len(SEED))
+        a.record(SEED, [999], Outcome.GAIN)
+        assert a.propose(SEED, len(SEED)) == b.propose(SEED, len(SEED))
+
+    def test_counter_wrap_stays_in_range(self):
+        # Adversarial: the 64-bit counter wraps without leaving [0, len).
+        s = PositionFibonacciScheduler()
+        s._n = (1 << 64) - 2
+        picks = [s.propose(SEED, len(SEED)) for _ in range(4)]
+        assert all(0 <= p < len(SEED) for p in picks)
+        assert s._n < 1 << 64
+
+    def test_reaches_the_tail_under_seed_churn(self):
+        # Adversarial: more distinct seeds than round-robin's LRU holds are
+        # fuzzed between two visits of SEED. Round-robin (control) forgets
+        # its cycle and restarts at bin 0; fibonacci keeps no per-seed state.
+        from fuzzer_tool.core.schedulers.pos_round_robin import (
+            MAX_SEEDS as RR_MAX_SEEDS,
+        )
+
+        fib, rr = PositionFibonacciScheduler(), PositionRoundRobinScheduler()
+        fib_picks, rr_picks = [], []
+        for _ in range(16):
+            fib_picks.append(fib.propose(SEED, len(SEED)))
+            rr_picks.append(rr.propose(SEED, len(SEED)))
+            for i in range(RR_MAX_SEEDS + 1):
+                other = i.to_bytes(4, "big") * 4
+                fib.propose(other, len(other))
+                rr.propose(other, len(other))
+
+        assert set(rr_picks) == {0}
+        assert max(fib_picks) >= 3 * len(SEED) // 4
+
+
 class _Fuzzer:
     """Mock exposing the position sources the arena consults."""
 
@@ -337,10 +423,22 @@ class _Fuzzer:
         return None if stride is None else 44
 
 
-def _arena(f=None, burn_front=None, canary=None, round_robin=None, region=lambda d, n: 55):
+def _arena(
+    f=None,
+    burn_front=None,
+    canary=None,
+    round_robin=None,
+    fibonacci=None,
+    region=lambda d, n: 55,
+):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
-        f, region_fn=region, burn_front=burn_front, canary=canary, round_robin=round_robin
+        f,
+        region_fn=region,
+        burn_front=burn_front,
+        canary=canary,
+        round_robin=round_robin,
+        fibonacci=fibonacci,
     )
 
 
@@ -412,6 +510,10 @@ class TestPool:
         _, arena = _arena(round_robin=PositionRoundRobinScheduler())
         assert "round_robin" in arena.pool()
 
+    def test_fibonacci_joins_when_supplied(self):
+        _, arena = _arena(fibonacci=PositionFibonacciScheduler())
+        assert "fibonacci" in arena.pool()
+
     def test_every_pool_name_is_registered(self):
         f = _Fuzzer(sensitivity=True, te=True, mi=True, region=True)
         f._crash_mi = SimpleNamespace(
@@ -422,6 +524,7 @@ class TestPool:
             burn_front=_bf(),
             canary=PositionCanaryScheduler(),
             round_robin=PositionRoundRobinScheduler(),
+            fibonacci=PositionFibonacciScheduler(),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -590,6 +693,15 @@ class TestSettle:
         arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
         assert rr.propose(SEED, len(SEED)) == first + 1
 
+    def test_fibonacci_is_credited_off_policy(self):
+        # record() is a documented no-op: settle must not advance the sequence.
+        fib, ref = PositionFibonacciScheduler(), PositionFibonacciScheduler()
+        f, arena = self._played(fibonacci=fib)
+        fib.propose(SEED, len(SEED))
+        ref.propose(SEED, len(SEED))
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert fib.propose(SEED, len(SEED)) == ref.propose(SEED, len(SEED))
+
 
 class TestSelectPositionWiring:
     def _engine(self, f):
@@ -731,6 +843,11 @@ class TestRealConstruction:
         assert isinstance(f._pos_round_robin, PositionRoundRobinScheduler)
         assert "canary" in f._position_arena.pool()
         assert "round_robin" in f._position_arena.pool()
+
+    def test_position_arena_implies_fibonacci(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_fibonacci, PositionFibonacciScheduler)
+        assert "fibonacci" in f._position_arena.pool()
 
     def test_burn_front_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, burn_front=True)

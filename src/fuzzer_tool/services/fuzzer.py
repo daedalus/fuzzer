@@ -688,6 +688,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("canary")
     if getattr(f, "_pos_round_robin", None) is not None:
         names.append("round-robin")
+    if getattr(f, "_pos_fibonacci", None) is not None and arena_live:
+        names.append("fibonacci")
     return names
 
 
@@ -2474,6 +2476,16 @@ class Fuzzer:
 
             self._pos_round_robin = PositionRoundRobinScheduler()
             log.info("Position round-robin scheduling enabled")
+        # Position-arena fibonacci: golden-ratio sweep with no per-seed
+        # state (see core/schedulers/pos_fibonacci.py). Arena-only, like
+        # the canary: it exists to be rated against round-robin and uniform.
+        self._pos_fibonacci = None
+        if position_arena:
+            from fuzzer_tool.core.schedulers.pos_fibonacci import (
+                PositionFibonacciScheduler,
+            )
+
+            self._pos_fibonacci = PositionFibonacciScheduler()
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
@@ -2488,6 +2500,7 @@ class Fuzzer:
                 burn_front=self._burn_front,
                 canary=self._pos_canary,
                 round_robin=self._pos_round_robin,
+                fibonacci=self._pos_fibonacci,
             )
             log.info("Position arena enabled (Elo over pos_ strategies)")
         self._use_ecofuzz = ecofuzz
@@ -3918,7 +3931,7 @@ class Fuzzer:
         """Mirror one record_edges call into the ledger; credit the strata pick."""
         # getattr: __new__-built test fuzzers reach record_edges without __init__.
         led = getattr(self, "_edge_ledger", None)
-        if led is None or not edges or isinstance(edges, (bytes, bytearray)):
+        if led is None or not edges or isinstance(edges, bytes | bytearray):
             return
 
         key = self._seed_key(seed)
