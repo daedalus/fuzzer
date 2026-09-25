@@ -168,6 +168,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Unbounded fuzz-loop growth** (`core/analyzers/analyzer_prng_state_learner.py`, `core/cmplog.py`):
+  `_run_history` capped inputs but not their site records (~1.9 MB/input on ffmpeg); now a total budget,
+  current input never evicted. `hash_candidates` outlived pair eviction; now pruned with its pair. ffmpeg
+  non-ASAN, 3.5k execs: RSS 2066 -> 1836 MB and flat, peak 2562 -> 2096 MB, exec speed unchanged.
+
 - **Position-canary misreports** (`services/fuzzer.py`): the uniform-floor check no longer flags
   `pos_canary` (built to lose) as needing inspection on every `--position-arena` run, and the banner lists
   "canary" only when the arena fields it (`--position-arena` with `--elo`).
