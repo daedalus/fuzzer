@@ -53,6 +53,7 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 #   * elo (string value "all")
 #   * anneal_budget (int)
 #   * dirichlet_alpha (string value "learned")
+#   * minimize_every_execs (int, default 5000 under --hail-mary)
 # Default-on BooleanOptionalAction features are not additive opt-ins.
 # cmplog is always on (no argparse dest).  cmplog_fifo_sink is default-on
 # BooleanOptionalAction, so it is in the tuple, not the exclusion set.
@@ -266,3 +267,11 @@ class TestHailMaryWiresEveryOptInGate:
             assert getattr(args, dest) is True, f"--hail-mary left {dest!r} off"
         assert args.elo == "all"
         assert args.anneal_budget == 10000
+        assert args.minimize_every_execs == 5000
+        # --hail-mary implies --elo all, which force-enables both --ga and
+        # --qea (see the "QEA and GA now run simultaneously" comment in
+        # cmd_fuzz) -- so the combination this exists for actually happens
+        # under plain --hail-mary, not just when a user stacks the flags by
+        # hand.
+        assert args.ga is True
+        assert args.qea is True

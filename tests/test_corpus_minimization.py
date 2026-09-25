@@ -447,6 +447,35 @@ class TestQEACorpusInteraction:
         assert len(f.corpus) == 1, "QEA+Elo run did not minimize down to max_corpus"
         assert keep in f.corpus
 
+    def test_auto_minimize_runs_under_ga_and_qea_and_elo_together(self):
+        """Regression: the --hail-mary combination (--ga --qea --elo all) must
+        actually minimize, not just each flag individually.
+
+        --elo all force-enables both --ga and --qea (see the "QEA and GA now
+        run simultaneously" comment in cli/commands.py's cmd_fuzz), so this
+        three-way combination is what --hail-mary itself produces, not just
+        a hand-stacked edge case.
+        """
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        f.ga = object()  # truthy — GA is active
+        f.qea = object()  # truthy — QEA is active
+        f._use_elo = True  # e.g. --elo all
+        mgr = CorpusManager(f)
+
+        keep = b"hailmary_keep_" + b"x" * 60
+        stale = b"hailmary_stale_" + b"y" * 60
+        f.corpus = [keep, stale]
+        f.seed_meta = {
+            keep: {"fuzz_count": 10, "coverage_edges": 5, "added_at": 100.0, "input_size": len(keep)},
+            stale: {"fuzz_count": 200, "coverage_edges": 0, "added_at": 200.0, "input_size": len(stale)},
+        }
+        f.max_corpus = 1
+
+        mgr.auto_minimize_corpus()
+
+        assert len(f.corpus) == 1, "--ga --qea --elo all still disables corpus minimization"
+        assert keep in f.corpus
+
     def test_auto_minimize_runs_under_ga(self):
         """Regression: --ga must not silently disable --minimize-every-execs.
 

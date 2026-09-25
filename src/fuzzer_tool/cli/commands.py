@@ -1960,6 +1960,16 @@ def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentPar
     if args.dirichlet_alpha == fuzz_parser.get_default("dirichlet_alpha"):
         args.dirichlet_alpha = AlphaMode.LEARNED.value
 
+    # --minimize-every-execs takes an int (0=disabled), not a bool -- same
+    # special-casing as --elo/--anneal-budget/--dirichlet-alpha above. It was
+    # previously absent from both _HAIL_MARY_FLAGS and this block, so
+    # --hail-mary silently left corpus minimization off even though it is a
+    # real strategy ("try every plausible strategy" should include it). 5000
+    # matches auto_minimize_corpus's own target_size ceiling (core/corpus_manager.py)
+    # and the 1000-exec throttle other periodic corpus maintenance already uses.
+    if args.minimize_every_execs == fuzz_parser.get_default("minimize_every_execs"):
+        args.minimize_every_execs = 5000
+
     print(
         "[hail-mary] every left-at-default fuzzing option has been force-enabled; "
         "expect a slow, noisy, exploratory run."
