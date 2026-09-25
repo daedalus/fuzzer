@@ -1140,6 +1140,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from fuzzer_tool.core.count_class import classify_single  # noqa: E402
 
 COUNT_MASK = 0xFFFFFF  # the top byte of the SHM count field is the generation tag
+MIN_FLAKY_REPEATS = 2  # one repeat has no variance to measure
+DEFAULT_BOOTSTRAP = 200  # --all-offline resamples when --bootstrap is not given
 
 
 # ── Collection ────────────────────────────────────────────────────────
@@ -1172,6 +1174,20 @@ def collect(target: Path, inputs: list[Path], map_size: int, timeout: float):
     try:
         _run_one(target, cov, inputs[0], timeout)  # warm-up, discarded
         return [_run_one(target, cov, p, timeout) for p in inputs]
+    finally:
+        cov.cleanup()
+
+
+def collect_repeats(target: Path, inputs: list[Path], repeats: int, map_size: int, timeout: float):
+    """Run every input *repeats* times: per input, a list of (ids, counts).
+
+    One discarded warm-up first, as in ``collect``, so every repeat runs in the
+    steady-state regime the campaign lives in.
+    """
+    cov = ShmCoverage(size=map_size)
+    try:
+        _run_one(target, cov, inputs[0], timeout)
+        return [[_run_one(target, cov, p, timeout)[1:] for _ in range(repeats)] for p in inputs]
     finally:
         cov.cleanup()
 
@@ -1213,9 +1229,13 @@ def measure_stability(target: Path, path: Path, repeats: int, map_size: int, tim
     }
 
 
-def save_runs(path: Path, runs, map_size: int | None = None) -> None:
-    """Store the ragged per-execution columns as three flat arrays."""
+def save_runs(path: Path, runs, map_size: int | None = None, sizes=None) -> None:
+    """Store the ragged per-execution columns as three flat arrays.
+
+    *sizes* (input bytes per execution) rides along for ``--length-confound``.
+    """
     offsets = np.cumsum([0] + [len(p) for p, _, _ in runs])
+    extra = {} if sizes is None else {"sizes": np.asarray(sizes, dtype=np.int64)}
     np.savez_compressed(
         path,
         positions=np.concatenate([p for p, _, _ in runs]) if runs else np.empty(0, np.int64),
@@ -1223,7 +1243,14 @@ def save_runs(path: Path, runs, map_size: int | None = None) -> None:
         counts=np.concatenate([c for _, _, c in runs]) if runs else np.empty(0, np.int64),
         offsets=offsets,
         map_size=map_size or 0,
+        **extra,
     )
+
+
+def load_sizes(path: Path):
+    """Input sizes a collection was saved with, or None (older collections)."""
+    with np.load(path) as z:
+        return z.get("sizes", None)
 
 
 def saved_map_size(path: Path):
@@ -2581,6 +2608,52 @@ def _matrix_main(argv: list[str] | None = None) -> int:
         help="run section [10] (needs --ground-truth): which count relations are flow "
         "conservation on the tracer's walk graph, and which hold on this corpus only",
     )
+    ap.add_argument(
+        "--flaky",
+        type=int,
+        default=0,
+        metavar="K",
+        help="section [11]: rerun every input K times (>= 2, needs --target/--corpus) "
+        "and report edges whose presence or count varies across repeats",
+    )
+    ap.add_argument("--subsumption", action="store_true", help="section [12]: subset order")
+    ap.add_argument(
+        "--admission-replay",
+        action="store_true",
+        help="section [13]: replay the corpus through edge / bucket / maxcount admission",
+    )
+    ap.add_argument(
+        "--rarefaction", action="store_true", help="section [14]: accumulation curve, Chao2 check"
+    )
+    ap.add_argument(
+        "--bootstrap",
+        type=int,
+        default=0,
+        metavar="N",
+        help="section [15]: N seed resamples of the headline statistics",
+    )
+    ap.add_argument(
+        "--length-confound",
+        action="store_true",
+        help="section [16]: is hit volume input size (needs sizes: re-collect with --save)",
+    )
+    ap.add_argument(
+        "--prefix-fold", action="store_true", help="section [17]: fold the ctx tag bits away"
+    )
+    ap.add_argument(
+        "--score-audit", action="store_true", help="section [18]: screen seed scores (kills only)"
+    )
+    ap.add_argument(
+        "--all-offline",
+        action="store_true",
+        help="sections [12]-[18]: everything that needs only the collected matrix",
+    )
+    ap.add_argument(
+        "--resamples",
+        type=int,
+        default=100,
+        help="random orders for --admission-replay and --rarefaction (default 100)",
+    )
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument(
         "--hail-mary",
@@ -2631,8 +2704,17 @@ def _matrix_main(argv: list[str] | None = None) -> int:
                 "libasan)"
             )
 
+    if args.all_offline:
+        args.subsumption = args.admission_replay = args.rarefaction = True
+        args.length_confound = args.prefix_fold = args.score_audit = True
+        args.bootstrap = args.bootstrap or DEFAULT_BOOTSTRAP
+
+    if args.flaky and (args.load is not None or args.flaky < MIN_FLAKY_REPEATS):
+        ap.error(f"--flaky needs a live --target/--corpus and K >= {MIN_FLAKY_REPEATS}")
+
     if args.load is not None:
         runs_all = load_runs(args.load)
+        sizes = load_sizes(args.load)
         stability = None
     else:
         if args.hail_mary:
@@ -2646,6 +2728,7 @@ def _matrix_main(argv: list[str] | None = None) -> int:
         if not inputs:
             ap.error(f"no inputs under {args.corpus}")
         runs_all = collect(args.target, inputs, args.map_size, args.timeout)
+        sizes = np.array([p.stat().st_size for p in inputs], dtype=np.int64)
         # Probe the input with the most live edges, not sorted()[0]: on the
         # fuzzgoat corpus that is the empty file, whose 2 edges (both from the
         # wrapper, no parser code) made a Jaccard of 1.000 vacuous.
@@ -2660,7 +2743,7 @@ def _matrix_main(argv: list[str] | None = None) -> int:
         if stability is not None:
             stability["input"] = inputs[richest].name
         if args.save is not None:
-            save_runs(args.save, runs_all, args.map_size)
+            save_runs(args.save, runs_all, args.map_size, sizes)
 
     if runs_all and len(runs_all[0]) == 3:
         pos_runs = runs_all
@@ -2672,6 +2755,7 @@ def _matrix_main(argv: list[str] | None = None) -> int:
 
     agg = aggregate(runs)
     mat = seed_edge_matrix(runs)
+    smat = mat  # sections [11]-[18] always read seed x edge, whatever --transpose does
     # The spectrum and both ranks are transpose-invariant; everything derived
     # from them is not. See the handover's F10 for the comparison.
     if args.transpose:
@@ -2720,11 +2804,74 @@ def _matrix_main(argv: list[str] | None = None) -> int:
             result["flow"]["profile_match"] = {
                 k.value: _profile_match(shim, _flow_graph(gt_runs, k)["ac"]) for k in FlowGraph
             }
+    if args.flaky:
+        if args.load is not None:
+            ap.error("--flaky needs a live --target/--corpus; it is incompatible with --load")
+        reps = collect_repeats(args.target, inputs, args.flaky, args.map_size, args.timeout)
+        result["flaky"] = emm.flaky_edges(reps)
+    result.update(_offline_sections(args, smat, agg["ids"], sizes))
     _matrix_report(result)
+    emm.print_sections(result)
     if args.json is not None:
-        args.json.write_text(json.dumps(result, indent=2, sort_keys=True))
+        args.json.write_text(json.dumps(result, indent=2, sort_keys=True, default=_np_default))
         print(f"\nwrote {args.json}")
     return 0
+
+
+def _headline(mat):
+    """Headline statistics of one seed resample, for ``emm.bootstrap_ci``."""
+    live = mat[:, mat.any(axis=0)]
+    if live.size == 0:
+        return dict.fromkeys(HEADLINE_KEYS, 0.0)
+    g = gf2_structure(live)
+    p = live.sum(axis=0) / live.sum()
+    greedy = g["greedy_cover_seeds"]
+    return {
+        "union_edges": float(live.shape[1]),
+        "effective_edges": float(2.0 ** -(p * np.log2(p)).sum()),
+        "gf2_rank": float(g["gf2_rank"]),
+        "real_rank": float(g["real_rank"]),
+        "distinct_rows": float(g["distinct_rows"]),
+        "greedy_cover": math.nan if greedy is None else float(greedy),
+        "edge_classes": float(len({c.tobytes() for c in live.T})),
+    }
+
+
+HEADLINE_KEYS = (
+    "union_edges", "effective_edges", "gf2_rank", "real_rank", "distinct_rows",
+    "greedy_cover", "edge_classes",
+)  # fmt: skip
+
+
+def _np_default(obj):
+    """json.dumps hook: numpy scalars and arrays."""
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"not JSON serializable: {type(obj).__name__}")
+
+
+def _offline_sections(args, smat, ids, sizes) -> dict:
+    """The analyses that need only the collected matrix, keyed by result section."""
+    out = {}
+    if args.subsumption:
+        out["subsumption"] = emm.subsumption(smat, ids)
+    if args.admission_replay:
+        out["admission"] = emm.admission_replay(smat, args.resamples, args.seed)
+    if args.rarefaction:
+        out["rarefaction"] = emm.rarefaction(smat, args.resamples, args.seed)
+    if args.bootstrap:
+        out["bootstrap"] = emm.bootstrap_ci(smat, _headline, args.bootstrap, args.seed)
+    if args.length_confound:
+        out["length_confound"] = emm.length_confound(smat, ids, sizes)
+    if args.prefix_fold:
+        out["prefix_fold"] = emm.prefix_fold(smat, ids, args.ctx_bits)
+    if args.score_audit:
+        out["score_audit"] = emm.score_audit(smat, ids)
+    return out
 
 
 import sys  # noqa: E402
@@ -2735,6 +2882,8 @@ import numpy as np  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import edge_matrix_modes as emm  # noqa: E402
 
 from fuzzer_tool.adapters.shm import ShmCoverage  # noqa: E402
 from fuzzer_tool.core.edge_tracker import EdgeTracker  # noqa: E402
