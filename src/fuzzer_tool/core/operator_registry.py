@@ -185,6 +185,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "shorten_chunk_mutate",
         "flac_chunk_mutate",
         "montgomery_mutate",
+        "lz4_chunk_mutate",
+        "rar_chunk_mutate",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -525,6 +527,10 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     # distinctive signal is "ffconcat" on its own line (case-insensitive),
     # which is what the demuxer looks for before parsing anything else.
     "ffconcat_chunk_mutate": lambda d: b"ffconcat" in d[:256].lower(),
+    # lz4_read.c spends byte 0 on a mode selector (even = frame decode), so
+    # the frame magic sits at offset 1.
+    "lz4_chunk_mutate": lambda d: len(d) >= 8 and not d[0] & 1 and d[1:5] == b"\x04\x22\x4d\x18",
+    "rar_chunk_mutate": _sniff_rar,
     # secp256k1 field prime or curve order as a BE 32-byte literal.
     "montgomery_mutate": lambda d: (
         b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"

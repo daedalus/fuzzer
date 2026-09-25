@@ -23,6 +23,7 @@ from fuzzer_tool.core.operator_registry import (
     _sniff_der,
     _sniff_mesh_or_vector_geometry,
     _sniff_rar,
+    format_gate_matches,
 )
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.operators import OperatorEngine
@@ -967,3 +968,43 @@ class TestGoFuzzPorts2:
         assert len(buf) > 4
         # The inserted bytes must come from one of the corpus entries.
         assert any(b"B" in buf or b"A" * 64 in buf for _ in [0])
+
+
+class TestTargetFormatOperators:
+    """Structural ops for in-tree targets that had none."""
+
+    OPS = {
+        "lz4_chunk_mutate": (b"\x00\x04\x22\x4d\x18\x64\x40\xa7" + bytes(8), b"\x04\x22\x4d\x18"),
+        "rar_chunk_mutate": (b"Rar!\x1a\x07\x01\x00" + bytes(8), b"PK\x03\x04" + bytes(8)),
+    }
+
+    def test_registered_in_format_band(self):
+        for op in self.OPS:
+            assert REGISTRY.category_of(op) == "format"
+
+    def test_in_dispatch(self):
+        dispatch = OperatorEngine(_build_fuzzer()).build_dispatch()
+        for op in self.OPS:
+            assert callable(dispatch[op])
+
+    def test_sniffers_split_match_from_miss(self):
+        for op, (hit, miss) in self.OPS.items():
+            assert format_gate_matches(op, hit) is True, op
+            assert format_gate_matches(op, miss) is False, op
+
+    def test_regression_lz4_sniffer_skips_mode_byte(self):
+        """byte 0 selects the lz4_read.c path; odd means raw block, not frame."""
+        frame = b"\x04\x22\x4d\x18\x64\x40\xa7" + bytes(8)
+        assert format_gate_matches("lz4_chunk_mutate", b"\x02" + frame) is True
+        assert format_gate_matches("lz4_chunk_mutate", b"\x01" + frame) is False
+
+    def test_handlers_mutate_matching_input(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rng = RandPool(seed=7)
+        dispatch = REGISTRY.dispatch(OperatorEngine(fuzzer))
+        for op, (hit, _miss) in self.OPS.items():
+            buf = bytearray(hit)
+            out = dispatch[op](buf, 0, bytes(hit))
+            result = buf if out is None else out
+            assert len(result) <= fuzzer.max_len, op

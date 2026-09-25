@@ -3663,6 +3663,30 @@ class OperatorEngine:
             mutated = self._flac_mutator._generate_random_flac(max_len=self.ctx.max_len, rng=rng)
         return bytearray(mutated[: self.ctx.max_len])
 
+    def _op_lz4_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.lz4 import Lz4Mutator, parse_lz4
+
+        if not hasattr(self, "_lz4_mutator"):
+            self._lz4_mutator = Lz4Mutator()
+        rng = self.ctx._rng
+        if parse_lz4(bytes(buf)):
+            mutated = self._lz4_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._lz4_mutator._generate_random_lz4(max_len=self.ctx.max_len, rng=rng)
+        return bytearray(mutated[: self.ctx.max_len])
+
+    def _op_rar_chunk_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.rar import RarMutator, parse_rar
+
+        if not hasattr(self, "_rar_mutator"):
+            self._rar_mutator = RarMutator()
+        rng = self.ctx._rng
+        if parse_rar(bytes(buf)):
+            mutated = self._rar_mutator.mutate(bytes(buf), max_len=self.ctx.max_len, rng=rng)
+        else:
+            mutated = self._rar_mutator._generate_random_rar(max_len=self.ctx.max_len, rng=rng)
+        return bytearray(mutated[: self.ctx.max_len])
+
     def _op_x86_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.x86 import X86Mutator, _decode_insns
 

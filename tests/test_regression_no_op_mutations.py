@@ -326,6 +326,8 @@ def _battery() -> list[bytes]:
         # satisfy flac_chunk_mutate's sniffer deterministically, same
         # rationale as the CFHD/JPEG2000 entries above.
         b"fLaC" + bytes(40),
+        # lz4_read.c frame path: even mode byte, then the LZ4 frame magic.
+        b"\x00\x04\x22\x4d\x18\x64\x40\xa7" + bytes(40),
         b"12345 6789 -3 0.5 abcdef ghij",
         _minimal_elf64(),
         _binary_stl(),
