@@ -462,6 +462,18 @@ class StatsReporter:
             )
         self._print_summary_confirm(f)
 
+    def _print_summary_gravity(self, f) -> None:
+        """Fitted gravity exponents: γ ≈ 0 means distance carries no signal."""
+        gravity = getattr(f, "_gravity", None)
+        if gravity is None:
+            return
+        st = gravity.summary()
+        print(
+            f"  Gravity splice:    alpha={st['alpha']:.2f} beta={st['beta']:.2f} "
+            f"gamma={st['gamma']:.2f} ({st['observations']} obs, {st['positives']} hits, "
+            f"{st['refits']} refits)"
+        )
+
     def _print_summary_confirm(self, f) -> None:
         """Say what --confirm-novelty did: reruns paid, successes it withdrew."""
         if not getattr(f, "_confirm_novelty", False):
@@ -621,6 +633,7 @@ class StatsReporter:
         self._print_summary_coverage(f)
         self._print_summary_seeds(f)
         self._print_summary_rarity(f)
+        self._print_summary_gravity(f)
 
     def dump_stats(self):
         f = self.f

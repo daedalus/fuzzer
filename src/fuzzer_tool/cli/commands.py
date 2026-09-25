@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from fuzzer_tool.core.dirichlet import AlphaMode
+from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.services.fuzzer import Fuzzer
 
@@ -696,6 +697,7 @@ def cmd_fuzz(args):
         kl_swucb_window=getattr(args, "kl_swucb_window", 4000),
         markov_blend=getattr(args, "markov_blend", False),
         dirichlet_alpha=AlphaMode(getattr(args, "dirichlet_alpha", AlphaMode.FIXED.value)),
+        splice_donor=SpliceDonor(getattr(args, "splice_donor", SpliceDonor.UNIFORM.value)),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
         bo_gp_length_scale=getattr(args, "bo_gp_length_scale", 1.0),
@@ -1963,6 +1965,10 @@ def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentPar
     if args.dirichlet_alpha == fuzz_parser.get_default("dirichlet_alpha"):
         args.dirichlet_alpha = AlphaMode.LEARNED.value
 
+    # --splice-donor takes a value, not a bool -- same special case.
+    if args.splice_donor == fuzz_parser.get_default("splice_donor"):
+        args.splice_donor = SpliceDonor.GRAVITY.value
+
     # --minimize-every-execs takes an int (0=disabled), not a bool -- same
     # special-casing as --elo/--anneal-budget/--dirichlet-alpha above. It was
     # previously absent from both _HAIL_MARY_FLAGS and this block, so
@@ -2117,6 +2123,13 @@ def main() -> int:
         default=AlphaMode.FIXED.value,
         help="Markov smoothing / CEM byte α: 'fixed' (0.01 / add-1) or 'learned' "
         "(Dirichlet-Multinomial MLE of the counts). Default: fixed.",
+    )
+    fuzz_parser.add_argument(
+        "--splice-donor",
+        choices=[m.value for m in SpliceDonor],
+        default=SpliceDonor.UNIFORM.value,
+        help="Splice-family donor pick: 'uniform' or 'gravity' (P ∝ M_i^α M_j^β / d^γ over "
+        "MinHash edge complements; exponents fitted online by PPML). Default: uniform.",
     )
     fuzz_parser.add_argument(
         "--mc-bandit", action="store_true", help="Enable Thompson sampling bandit"
