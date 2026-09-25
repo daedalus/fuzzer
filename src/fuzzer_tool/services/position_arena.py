@@ -21,6 +21,9 @@ Arms::
     round_robin  PositionRoundRobinScheduler, deterministic cycling
                  (opt-in, --pos-round-robin; see
                  core/schedulers/pos_round_robin.py)
+    fibonacci    PositionFibonacciScheduler, golden-ratio sweep, no
+                 per-seed state (implied by --position-arena; see
+                 core/schedulers/pos_fibonacci.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
 matches. An arm that declines gets a uniform offset but is *charged under
@@ -36,7 +39,7 @@ Matches: a round's operators may land several positions. Every arm that
 served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
-``burn_front``, ``canary`` and ``round_robin`` are each credited
+``burn_front``, ``canary``, ``round_robin`` and ``fibonacci`` are each credited
 off-policy on every settled round, whoever served the positions, like
 ``seed_canary`` on the seed side.
 """
@@ -65,6 +68,7 @@ POSITION_STRATEGY_NAMES = (
     "burn_front",
     "canary",
     "round_robin",
+    "fibonacci",
 )
 
 Gate = Callable[[], bool]
@@ -79,15 +83,17 @@ class PositionArena:
         burn_front: PositionScheduler | None = None,
         canary: PositionScheduler | None = None,
         round_robin: PositionScheduler | None = None,
+        fibonacci: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         self._uniform = UniformPosition(f._rng)
         self._burn_front = burn_front
         self._canary = canary
         self._round_robin = round_robin
+        self._fibonacci = fibonacci
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
-        for extra in (burn_front, canary, round_robin):
+        for extra in (burn_front, canary, round_robin, fibonacci):
             if extra is not None:
                 self._arms[extra.name] = (extra, lambda: True)
         self._used: list[str] = []
@@ -171,8 +177,9 @@ class PositionArena:
         weight: float,
         score: float,
     ) -> None:
-        """End of round: feed burn_front/canary/round_robin, then play the Elo matches."""
-        for extra in (self._burn_front, self._canary, self._round_robin):
+        """End of round: feed the off-policy arms, then play the Elo matches."""
+        extras = (self._burn_front, self._canary, self._round_robin, self._fibonacci)
+        for extra in extras:
             if extra is not None:
                 extra.record(data, offsets, outcome, weight)
 
