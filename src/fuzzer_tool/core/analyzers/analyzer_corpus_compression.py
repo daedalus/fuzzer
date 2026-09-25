@@ -18,6 +18,8 @@ raw size) is informationally novel — it exercises different patterns.
 import hashlib
 import logging
 
+from fuzzer_tool.core.lru import LRUCache
+
 log = logging.getLogger(__name__)
 
 # Try to import pyppmd; fall back gracefully if not installed
@@ -44,9 +46,8 @@ except ImportError:
 PPMD_SAMPLE_BYTES = 65536
 
 # Cache entries are (digest -> float). Bounded because a long campaign sees
-# unboundedly many distinct seeds; cleared wholesale on overflow, since
-# recomputing is the same cost as a miss and an LRU would cost more
-# bookkeeping than it saves.
+# unboundedly many distinct seeds; LRU so an overflow drops one cold seed,
+# not the working set (each miss is a full PPMd compression).
 PPMD_CACHE_MAX = 4096
 
 
@@ -64,7 +65,7 @@ class CorpusCompressor:
 
     def __init__(self, enabled: bool = True):
         self.enabled = enabled and PPMD_AVAILABLE
-        self._seed_ratios: dict[str, float] = {}  # seed digest -> ratio
+        self._seed_ratios: LRUCache = LRUCache(PPMD_CACHE_MAX)  # digest -> ratio
         self._last_computed_count = 0
 
     def compute_seed_ratio(self, seed: bytes) -> float:
@@ -92,8 +93,6 @@ class CorpusCompressor:
         except Exception:
             return 1.0
 
-        if len(self._seed_ratios) >= PPMD_CACHE_MAX:
-            self._seed_ratios.clear()
         self._seed_ratios[key] = ratio
         return ratio
 

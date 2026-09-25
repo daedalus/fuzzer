@@ -26,10 +26,17 @@ _SRC = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
 # disable_aslr in Fuzzer.__init__, before anything spawns) and the probes
 # stand in for target processes.  A single-level test would report the
 # launcher's own base and pass for the wrong reason.
+#
+# The launcher first clears ADDR_NO_RANDOMIZE it may have inherited from the
+# pytest process (any test that built a Fuzzer set it there); otherwise the
+# FUZZER_KEEP_ASLR=1 control's children stop moving and the control fails.
 _LAUNCHER = """
-import os, subprocess, sys
+import ctypes, ctypes.util, os, subprocess, sys
 sys.path.insert(0, {src!r})
-from fuzzer_tool.adapters.process import disable_aslr
+from fuzzer_tool.adapters.process import ADDR_NO_RANDOMIZE, disable_aslr
+libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6")
+libc.personality.argtypes = [ctypes.c_ulong]
+libc.personality(libc.personality(0xFFFFFFFF) & ~ADDR_NO_RANDOMIZE)
 ok = disable_aslr()
 probe = "print([l.split('-')[0] for l in open('/proc/self/maps') if 'libc.so' in l][0])"
 bases = [
@@ -42,6 +49,27 @@ print(ok, " ".join(bases))
 linux_only = pytest.mark.skipif(
     not sys.platform.startswith("linux"), reason="personality() is Linux-only"
 )
+
+_QUERY_PERSONA = 0xFFFFFFFF
+
+
+def _personality(persona: int) -> int:
+    """Raw personality(2); 0xFFFFFFFF queries without changing it."""
+    import ctypes
+    import ctypes.util
+
+    libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
+    libc.personality.argtypes = [ctypes.c_ulong]
+    libc.personality.restype = ctypes.c_int
+    return libc.personality(persona)
+
+
+@pytest.fixture
+def _restore_persona():
+    """This process's persona is inherited by every later child; put it back."""
+    saved = _personality(_QUERY_PERSONA)
+    yield
+    _personality(saved)
 
 
 def _launch(env: dict | None = None) -> tuple[str, list[str]]:
@@ -72,18 +100,22 @@ class TestDisableAslr:
         assert len(set(bases)) > 1, "ASLR appears disabled system-wide; test is not meaningful"
 
     @linux_only
-    def test_persona_flag_is_set_on_this_process(self, monkeypatch):
+    def test_regression_control_ignores_inherited_persona(self, _restore_persona):
+        """Any earlier test that built a Fuzzer left ADDR_NO_RANDOMIZE on this
+        process; the control's children inherited it and stopped moving."""
+        _personality(_personality(_QUERY_PERSONA) | ADDR_NO_RANDOMIZE)
+
+        ok, bases = _launch(env={"FUZZER_KEEP_ASLR": "1"})
+
+        assert ok == "False"
+        assert len(set(bases)) > 1, f"control inherited the parent persona: {set(bases)}"
+
+    @linux_only
+    def test_persona_flag_is_set_on_this_process(self, monkeypatch, _restore_persona):
         monkeypatch.setattr(proc_mod, "_aslr_disabled", None)
         monkeypatch.delenv("FUZZER_KEEP_ASLR", raising=False)
         assert disable_aslr() is True
-
-        import ctypes
-        import ctypes.util
-
-        libc = ctypes.CDLL(ctypes.util.find_library("c") or "libc.so.6", use_errno=True)
-        libc.personality.argtypes = [ctypes.c_ulong]
-        libc.personality.restype = ctypes.c_int
-        assert libc.personality(0xFFFFFFFF) & ADDR_NO_RANDOMIZE
+        assert _personality(_QUERY_PERSONA) & ADDR_NO_RANDOMIZE
 
     def test_opt_out_env_var(self, monkeypatch):
         monkeypatch.setattr(proc_mod, "_aslr_disabled", None)

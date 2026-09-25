@@ -17,6 +17,8 @@ import struct
 from collections.abc import Callable
 from itertools import product
 
+from fuzzer_tool.core.lru import LRUCache
+
 log = logging.getLogger(__name__)
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -310,10 +312,9 @@ MAX_MUTATIONS_PER_PAIR = 256
 # Value: {encoder: (pattern_chunks, repl_variants | None)} — only the
 # applicable encoders appear, and replacement variants are filled in
 # lazily on the first call that actually finds the pattern in the input.
-# Cleared wholesale when it outgrows the cap so stale cmplog pairs don't
-# accumulate.
+# LRU-bounded so stale cmplog pairs age out while hot ones stay.
 _RQ_MUTATIONS_CACHE_MAX = 20000
-_rq_mutations_cache: dict = {}
+_rq_mutations_cache: LRUCache = LRUCache(_RQ_MUTATIONS_CACHE_MAX)
 
 
 def find_offsets(data: bytes, pattern: bytes) -> list[int]:
@@ -396,8 +397,6 @@ def generate_mutations(
             pattern_chunks = tuple(enc.encode(operand_a))
             enc_cache[enc] = (pattern_chunks, None)
         _cache[pair_key] = enc_cache
-        if len(_cache) > _RQ_MUTATIONS_CACHE_MAX:
-            _cache.clear()
 
     for enc, (pattern_chunks, repl_variants) in enc_cache.items():
         if not pattern_chunks:

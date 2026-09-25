@@ -1,5 +1,6 @@
 """Operator-selection schedulers (bandit algorithms) and seed-selection schedulers."""
 
+from fuzzer_tool.core.schedulers.op_bayes_ucb import BayesUCBScheduler
 from fuzzer_tool.core.schedulers.op_bo_gp_ucb import BOGPUCBScheduler
 from fuzzer_tool.core.schedulers.op_c2ucb import C2UCBScheduler
 from fuzzer_tool.core.schedulers.op_canary import CanaryScheduler
@@ -46,6 +47,7 @@ __all__ = [
     "MonteCarloScheduler",
     "MOptScheduler",
     "MOSSScheduler",
+    "BayesUCBScheduler",
     "ReplicatorScheduler",
     "Exp3Scheduler",
     "Exp4Scheduler",

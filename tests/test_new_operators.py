@@ -301,19 +301,18 @@ class TestFuseOld:
         assert buf == b"AAAAAAAA"  # first call just records, doesn't fuse
 
     def test_fuse_old_changes_on_second_call(self):
-        buf = bytearray(b"AAAAAAAA")
-        self.engine._op_fuse_old(buf, 0, b"")  # records
+        """Second call splices cur[:p_cur] + old[p_old:] (scripted RNG)."""
+        from tests.support.scripted_rng import ScriptedRng
 
-        # Reset the memory to have previous content
-        # (already recorded from first call)
-        found_change = False
-        for _ in range(30):
-            buf2 = bytearray(b"BBBBBBBB")
-            self.engine._op_fuse_old(buf2, 0, b"")
-            if buf2 != b"BBBBBBBB":
-                found_change = True
-                break
-        assert found_change, "Expected fuse_old to change buffer on second+ call"
+        old, cur = b"AAAAAAAA", b"BBBBBBBB"
+        p_cur, p_old = 3, 5
+        self.engine.f._rng = ScriptedRng(choice_idxs=[0], randints=[p_cur, p_old])
+        self.engine._op_fuse_old(bytearray(old), 0, b"")  # records
+
+        buf = bytearray(cur)
+        self.engine._op_fuse_old(buf, 0, b"")
+
+        assert buf == cur[:p_cur] + old[p_old:]
 
     def test_fuse_old_short_buffer(self):
         buf = bytearray(b"ab")

@@ -12,12 +12,18 @@ themselves (maximum marginal likelihood) instead of hand-picking it:
 from __future__ import annotations
 
 import enum
+import logging
 import math
 from collections.abc import Iterable, Sequence
 
 import numpy as np
 
 from fuzzer_tool.core.rand_pool import RandPool
+
+log = logging.getLogger(__name__)
+
+# Bumped when the to_dict() layout changes; older payloads load as fresh.
+_STATE_VERSION = 1
 
 
 class AlphaMode(enum.Enum):
@@ -157,6 +163,13 @@ def dm_alpha(rows: Iterable[Iterable[int]], k: int, alpha: float = 1.0) -> float
     return math.exp(0.5 * (lo + hi))
 
 
+def _token(t) -> bytes:
+    """Validate a persisted token key (``bytes(int)`` would zero-fill)."""
+    if not isinstance(t, bytes):
+        raise TypeError(f"token {t!r} is not bytes")
+    return t
+
+
 class DirichletPicker:
     """Thompson sampling over dictionary tokens with a Dirichlet posterior.
 
@@ -207,6 +220,25 @@ class DirichletPicker:
         """Drop the pending round without credit (no coverage gain)."""
         self._pending = []
         self._drawn_from = ()
+
+    def to_dict(self) -> dict:
+        """Per-token wins for ``--resume``; the pending round is not kept."""
+        return {"version": _STATE_VERSION, "wins": dict(self.wins)}
+
+    def from_dict(self, data) -> None:
+        """Restore :meth:`to_dict` output; a malformed payload is ignored whole."""
+        if not data:
+            return
+        try:
+            if data.get("version") != _STATE_VERSION:
+                raise ValueError(f"version {data.get('version')!r}")
+            wins = {_token(t): int(n) for t, n in data["wins"].items()}
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            log.warning("dict-thompson state unreadable, starting fresh: %s", e)
+            return
+
+        self.wins = wins
+        self._alpha = None
 
     def _alphas(self, tokens: Sequence[bytes]) -> np.ndarray:
         fresh = tokens is self._alpha_src and len(tokens) == self._alpha_len

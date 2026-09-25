@@ -2075,9 +2075,12 @@ class SeedPicker:
             f._recent_seed_max = 20
 
         corpus_version = len(f.corpus)
-        if not hasattr(f, "_weight_cache"):
+        # Guarded on the key: corpus pruning writes _weight_cache and
+        # _cached_weights too, so they may exist before the first pick.
+        # bucket() is >= 0, so -1 never matches and the first pick computes.
+        if not hasattr(f, "_weight_cache_key"):
             f._weight_cache = None
-            f._weight_cache_key = (-1, -1)
+            f._weight_cache_key = -1
             f._cached_weights = {}
         if len(f._cached_weights) > max(corpus_version * 2, 4000):
             keys = list(f._cached_weights)[: len(f._cached_weights) // 2]

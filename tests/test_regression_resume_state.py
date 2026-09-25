@@ -11,6 +11,7 @@ import math
 import pytest
 
 from fuzzer_tool.core.analyzers.analyzer_pll import PLLMonitor, Series, Stall
+from fuzzer_tool.core.dirichlet import DirichletPicker
 from fuzzer_tool.core.edge_matrix import MatrixSubstrate
 from fuzzer_tool.core.pll import PhaseLockedLoop
 from fuzzer_tool.core.rand_pool import RandPool
@@ -102,6 +103,42 @@ class TestOpCredit:
         arm.from_dict(bad)
         assert all(arm.credit(o) == 0 for o in _OPS)
         assert arm.bandit_stats()["op_credit_pulls"] == dict.fromkeys(_OPS, 0.0)
+
+
+# ── dict-thompson ─────────────────────────────────────────────────────
+
+_TOKENS = [b"IHDR", b"IDAT", b"IEND"]
+
+
+def _picker_with_wins() -> DirichletPicker:
+    p = DirichletPicker(RandPool(seed=1))
+    p.wins = {b"IHDR": 3, b"IEND": 1}
+    return p
+
+
+class TestDirichletPicker:
+    def test_roundtrip_keeps_wins(self):
+        a = _picker_with_wins()
+        b = DirichletPicker(RandPool(seed=1))
+        b.from_dict(a.to_dict())
+
+        assert b.wins == a.wins
+
+    def test_restored_picker_draws_like_the_original(self):
+        a = _picker_with_wins()
+        b = DirichletPicker(RandPool(seed=9))
+        b.from_dict(a.to_dict())
+        a._rng, b._rng = RandPool(seed=3), RandPool(seed=3)
+
+        assert b.draw(_TOKENS, 16) == a.draw(_TOKENS, 16)
+
+    @pytest.mark.parametrize(
+        "bad", (*_MALFORMED, {"version": 1, "wins": {b"A": "x"}}, {"version": 1, "wins": {1: 2}})
+    )
+    def test_malformed_payload_starts_fresh(self, bad):
+        p = DirichletPicker(RandPool(seed=1))
+        p.from_dict(bad)
+        assert p.wins == {}
 
 
 # ── PLL ───────────────────────────────────────────────────────────────
@@ -310,3 +347,14 @@ class TestFuzzerResume:
 
         assert g._op_credit.credit("flip") == 0
         assert WFC_MUTATOR.store.to_dict()["tables"] == {}
+
+    def test_regression_dict_thompson_wins_survive_resume(self, tmp_path):
+        f = _fuzzer(tmp_path, dict_thompson=True)
+        f._dict_picker.wins = {b"IHDR": 4}
+        f._save_learned()
+
+        g = _fuzzer(tmp_path / "g", dict_thompson=True, resume=True)
+        g._state_store = f._state_store
+        g._load_learned()
+
+        assert g._dict_picker.wins == {b"IHDR": 4}

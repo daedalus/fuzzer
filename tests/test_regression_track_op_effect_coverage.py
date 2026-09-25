@@ -31,6 +31,7 @@ requires_test_target = pytest.mark.skipif(
 _KWARGS = {
     "consolidated": {"consolidated": True},
     "moss": {"moss": True},
+    "bayes_ucb": {"bayes_ucb": True},
     "replicator": {"replicator": True},
     "bandit": {"mc_bandit": True},
     "mopt": {"mopt": True},

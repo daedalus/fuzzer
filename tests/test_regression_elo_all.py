@@ -53,6 +53,7 @@ class TestEloAllEnablesAllSchedulers:
             "fpl",
             "consolidated",
             "moss",
+            "bayes_ucb",
             "contextual",
             "invasion",
             "cmaes",

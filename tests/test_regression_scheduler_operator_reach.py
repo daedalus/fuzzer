@@ -138,6 +138,7 @@ def _all_operator_schedulers():
             consolidated.record,
         ),
         ("MOSSScheduler", moss := S.MOSSScheduler(), moss.select_op, moss.record),
+        ("BayesUCBScheduler", bayes := S.BayesUCBScheduler(), bayes.select_op, bayes.record),
         # RoundRobin is stateless in terms of rewards; record() is no-op.
         (
             "RoundRobinScheduler",

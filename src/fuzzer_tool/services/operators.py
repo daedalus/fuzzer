@@ -28,6 +28,7 @@ from fuzzer_tool.core.cond_stmt import CondState, CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.gaussian import norm_cdf
 from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
+from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations import (
     INTERESTING_8,
     INTERESTING_16,
@@ -80,11 +81,12 @@ _ELITE_FUSE_POOL_SIZE = 8
 
 # ── region-profile position weighting ────────────────────────────────────
 # Distinct seeds to keep profiles for. The corpus is far larger than this,
-# but seed selection is heavily skewed toward a working set, so a small
-# cache with a clear-on-full policy keeps the hit rate high without tracking
-# recency. Cleared wholesale rather than evicted one at a time: the profiles
-# are cheap to rebuild and an LRU would cost more bookkeeping than it saves.
+# but seed selection is heavily skewed toward a working set, so a small LRU
+# keeps the hit rate high. A miss costs ~1 ms of profiling; clear-on-full
+# re-paid that for the whole working set on every overflow.
 _REGION_CACHE_MAX = 64
+# Distinguishes a cached None (seed not profilable) from a cache miss.
+_REGION_MISS = object()
 # profile_buffer() skips windows below 512 bytes, so anything shorter has no
 # profile to weight by.
 _REGION_MIN_LEN = 512
@@ -613,6 +615,7 @@ _FALLBACK_PRECEDENCE = (
     "cucb",
     "cusum_ucb",
     "moss",
+    "bayes_ucb",
     "fpl",
     "successive_elim",
     "round_robin",
@@ -719,6 +722,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("fewa")
     if f._use_moss and f._moss:
         available.append("moss")
+    if f._use_bayes_ucb and f._bayes_ucb:
+        available.append("bayes_ucb")
     if f._use_fpl and f._fpl:
         available.append("fpl")
     if f._use_corral and f._corral:
@@ -823,16 +828,17 @@ class OperatorEngine:
         # hash. profile_buffer() runs a whole statistical battery per 4 KiB
         # window (~1 ms), so it must be paid once per seed, not once per
         # mutation -- see region_weights().
-        self._region_cache: dict[int, tuple | None] = {}
+        self._region_cache: LRUCache = LRUCache(
+            _REGION_CACHE_MAX, on_evict=self._drop_region_liveness
+        )
         # Per-region liveness estimators, keyed by the same seed content
         # hash as _region_cache, one LiveBitMaskEstimator per region index
         # (parallel array to the bounds/cumulative lists in that cache
         # entry). Lazily populated by record_coverage_diff() as mutation
         # exec results come in -- most seeds never get an entry here if
-        # the caller never reports a diff for them. Same clear-on-full
-        # policy and cap as _region_cache; the two caches are evicted
-        # together in region_weights() so they never disagree about which
-        # seeds are tracked.
+        # the caller never reports a diff for them. Bounded by
+        # _region_cache: its eviction drops the matching entry here, so a
+        # stale liveness list never outlives its region layout.
         self._region_liveness: dict[int, list[LiveBitMaskEstimator | None]] = {}
         # Havoc sub-mutation credit. Laplace-smoothed at 1 hit / 2 trials so
         # every branch starts at a 0.5 ratio -- identical weights, so the
@@ -4805,6 +4811,9 @@ class OperatorEngine:
         elif strategy == "moss" and f._moss:
             op = f._moss.select_op(ops)
             f._last_mopt_particles.append(None)
+        elif strategy == "bayes_ucb" and f._bayes_ucb:
+            op = f._bayes_ucb.select_op(ops)
+            f._last_mopt_particles.append(None)
         elif strategy == "invasion" and f.mc and f.mc_bandit:
             # Not in _FALLBACK_PRECEDENCE by design: invasion reads f.mc's
             # own bandit_stats() as its resistance signal, so without Elo
@@ -4879,6 +4888,10 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         return op
 
+    def _drop_region_liveness(self, key: int) -> None:
+        """Evict *key*'s liveness with its region layout (LRU callback)."""
+        self._region_liveness.pop(key, None)
+
     def region_weights(self, data: bytes):
         """Cumulative region weights for *data*, cached by content hash.
 
@@ -4890,8 +4903,9 @@ class OperatorEngine:
         if len(data) < _REGION_MIN_LEN:
             return None
         key = xxhash.xxh3_64_intdigest(data)
-        if key in self._region_cache:
-            return self._region_cache[key]
+        entry = self._region_cache.get(key, _REGION_MISS)
+        if entry is not _REGION_MISS:
+            return entry
 
         from fuzzer_tool.core.randomness import profile_buffer
 
@@ -4907,12 +4921,6 @@ class OperatorEngine:
                 bounds.append((profile.offset, profile.offset + profile.length))
             if total > 0.0:
                 entry = (cumulative, bounds, total)
-        if len(self._region_cache) >= _REGION_CACHE_MAX:
-            self._region_cache.clear()
-            # Evicted together: a liveness list surviving past its region
-            # bounds/cumulative arrays would silently misattribute the next
-            # seed's diffs to a stale region layout.
-            self._region_liveness.clear()
         self._region_cache[key] = entry
         return entry
 

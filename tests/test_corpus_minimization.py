@@ -62,6 +62,7 @@ class MockFuzzer:
         self.bloom = None
         self._total_corpus_attempts = 0
         self._duplicate_reject_count = 0
+        self._last_bloat_warn_exec = 0
         self._last_hamming_distance = -1
         self._corpus_size_history: list[int] = []
         self._corpus_secretary = None

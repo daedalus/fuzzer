@@ -332,6 +332,35 @@ class CorpusManager:
     def __init__(self, fuzzer):
         self.f = fuzzer
 
+    def _entropy_add(self, data: bytes) -> None:
+        """Fold an admitted seed into the byte-entropy readout.
+
+        Absent tracker (state from before it existed) stays absent.
+        """
+        tracker = getattr(self.f, "_corpus_entropy", None)
+        if tracker is None:
+            return
+
+        tracker.add(data)
+
+    def _entropy_remove(self, data: bytes) -> None:
+        """Unfold a seed that left the corpus from the readout."""
+        tracker = getattr(self.f, "_corpus_entropy", None)
+        if tracker is None:
+            return
+
+        tracker.remove(data)
+
+    def rebuild_entropy(self) -> None:
+        """Refold the readout from ``f.corpus`` after a wholesale swap."""
+        f = self.f
+        if getattr(f, "_corpus_entropy", None) is None:
+            return
+
+        f._corpus_entropy = CumulativeByteEntropy()
+        for seed in f.corpus:
+            f._corpus_entropy.add(seed)
+
     def load_corpus(self):
         f = self.f
         # Fresh tracker each load: a resume/reload re-reads every seed from
@@ -606,11 +635,7 @@ class CorpusManager:
             f.checksum_learner = ChecksumLearner.from_dict(f, cl_data)
         # Restore PRNG state learner state
         prng_data = state.get("prng_state_learner")
-        if (
-            prng_data
-            and hasattr(f, "prng_state_learner")
-            and f.prng_state_learner is not None
-        ):
+        if prng_data and hasattr(f, "prng_state_learner") and f.prng_state_learner is not None:
             from fuzzer_tool.core.analyzers.analyzer_prng_state_learner import PRNGStateLearner
 
             f.prng_state_learner = PRNGStateLearner.from_dict(f, prng_data)
@@ -886,6 +911,7 @@ class CorpusManager:
                         f._redundant_admission_count += 1
 
                 f.corpus.append(data)
+                self._entropy_add(data)
             if f.ga:
                 import hashlib as _hashlib
 
@@ -1063,6 +1089,8 @@ class CorpusManager:
         if data in f.corpus:
             idx = f.corpus.index(data)
             f.corpus[idx] = trimmed
+            self._entropy_remove(data)
+            self._entropy_add(trimmed)
             # Persist the swap. The in-memory replacement alone lost the seed
             # outright (finding #27): the trimmed bytes were never written, and
             # auto_minimize_corpus() builds its kept-set from f.corpus, so the
@@ -1403,7 +1431,9 @@ class CorpusManager:
                         total_bytes += seed_bytes
                 unique = mandatory_seeds + selected
             elif getattr(f, "_use_mds_select", False) and f._edge_tracker is not None:
-                unique = mandatory_seeds + self._mds_select_optional(scored, target_size, len(mandatory_seeds))
+                unique = mandatory_seeds + self._mds_select_optional(
+                    scored, target_size, len(mandatory_seeds)
+                )
             else:
                 # Count-budget: keep top-K by score (original behavior)
                 budget = target_size - len(mandatory_seeds)
@@ -1591,6 +1621,7 @@ class CorpusManager:
             del kept_set  # free kept hashes after file pruning
 
             f.corpus = unique
+            self.rebuild_entropy()
             new_meta = {}
             for seed in unique:
                 if seed in f.seed_meta:
@@ -1699,6 +1730,7 @@ class CorpusManager:
             f.corpus = [s for s in f.corpus if s not in to_remove]
             for s in to_remove:
                 f.seed_meta.pop(s, None)
+                self._entropy_remove(s)
             f._agg_cache_valid = False
             f._weight_cache = None
             f._cached_weights = {}

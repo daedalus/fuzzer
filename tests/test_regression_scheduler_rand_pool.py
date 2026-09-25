@@ -37,6 +37,9 @@ from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.op_cucb import CUCBScheduler
 from fuzzer_tool.core.schedulers.op_cusum_ucb import CUSUM_UCBScheduler
 from fuzzer_tool.core.schedulers.op_ducb import DUCBScheduler
+from fuzzer_tool.core.schedulers.op_gp_ucb import GPUCBScheduler
+from fuzzer_tool.core.schedulers.op_kl_ducb import KL_DUCBScheduler
+from fuzzer_tool.core.schedulers.op_kl_swucb import KL_SWUCBScheduler
 from fuzzer_tool.core.schedulers.op_swucb import SWUCBScheduler
 
 SCHEDULERS_DIR = (
@@ -49,7 +52,12 @@ RULE_16_SCHEDULERS = {
     "op_swucb.py": SWUCBScheduler,
     "op_cucb.py": CUCBScheduler,
     "op_cusum_ucb.py": CUSUM_UCBScheduler,
+    "op_kl_ducb.py": KL_DUCBScheduler,
+    "op_kl_swucb.py": KL_SWUCBScheduler,
 }
+
+#: Draws no randomness at all, so it takes no rng; pinned deterministic.
+DETERMINISTIC_SCHEDULERS = {"op_gp_ucb.py": GPUCBScheduler}
 
 #: Enough arms that a tie-break or unpulled-arm draw is overwhelmingly
 #: unlikely to coincide across two independent PRNG streams.
@@ -73,7 +81,7 @@ def _settle(scheduler) -> None:
 class TestNoModuleRandom:
     """Static: the module-level PRNG must not appear in these sources."""
 
-    @pytest.mark.parametrize("name", sorted(RULE_16_SCHEDULERS))
+    @pytest.mark.parametrize("name", sorted(RULE_16_SCHEDULERS | DETERMINISTIC_SCHEDULERS))
     def test_does_not_import_random(self, name):
         tree = ast.parse(_source(name))
         imported = set()
@@ -86,7 +94,7 @@ class TestNoModuleRandom:
             f"{name} imports the module-level `random`; Hard Rule 16 requires RandPool"
         )
 
-    @pytest.mark.parametrize("name", sorted(RULE_16_SCHEDULERS))
+    @pytest.mark.parametrize("name", sorted(RULE_16_SCHEDULERS | DETERMINISTIC_SCHEDULERS))
     def test_no_bare_random_calls(self, name):
         hits = re.findall(r"(?<![\w.])random\.\w+", _source(name))
         assert not hits, f"{name} calls {sorted(set(hits))} instead of drawing from RandPool"
@@ -162,6 +170,29 @@ class TestGlobalRandomIsolation:
                 picks.append(op)
                 s.record(op, success=(i % 5 == 0))
                 _settle(s)
+            return picks
+
+        assert drive(1) == drive(987654321)
+
+    @pytest.mark.parametrize(
+        "cls", sorted(DETERMINISTIC_SCHEDULERS.values(), key=lambda c: c.__name__)
+    )
+    def test_unseeded_scheduler_ignores_global_seed(self, cls):
+        """No rng to inject, so the selection sequence must be a pure
+        function of the rewards: global-PRNG churn cannot move it."""
+        import random as _global_random
+
+        def drive(global_seed):
+            _global_random.seed(global_seed)
+            s = cls()
+            for a in ARMS:
+                s.init_arm(a)
+            picks = []
+            for i in range(PULLS):
+                _global_random.random()
+                op = s.select_op(ARMS)
+                picks.append(op)
+                s.record(op, success=(i % 5 == 0))
             return picks
 
         assert drive(1) == drive(987654321)

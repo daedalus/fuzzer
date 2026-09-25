@@ -252,10 +252,10 @@ class TestCacheEvictionParity:
         for _ in range(_REGION_CACHE_MAX + 5):
             engine.region_weights(os.urandom(8192))
 
-        # Once _region_cache is wholesale-cleared, _region_liveness must
-        # have been cleared in the same pass -- a stale liveness entry
-        # surviving past its region bounds/cumulative would misattribute
-        # the next seed sharing that hash's diffs to the wrong region.
+        # An entry evicted from _region_cache must leave _region_liveness
+        # too -- a stale liveness entry surviving past its region
+        # bounds/cumulative would misattribute the next seed sharing that
+        # hash's diffs to the wrong region.
         assert len(engine._region_cache) <= _REGION_CACHE_MAX
         assert len(engine._region_liveness) <= _REGION_CACHE_MAX
 

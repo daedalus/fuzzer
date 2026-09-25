@@ -769,6 +769,25 @@ __AFL_NO_COV static inline int __afl_ctx_use_relative(void) {
     return __afl_ctx_relative_mode;
 }
 
+/* Frame-slot load ASAN cannot see. The walk's one unvalidated hop can pass
+ * the range check yet land in a stack redzone; an instrumented load then
+ * aborts the whole in-process fuzzer. no_sanitize("address") on the walk
+ * does not help: it is always_inline, so ASAN instruments it as part of its
+ * caller. Inline asm is never instrumented. The address is inside the live
+ * stack window, so the raw read cannot fault. */
+__AFL_NO_COV __attribute__((always_inline))
+static inline void *__afl_raw_load(void *const *p) {
+    void *v;
+#if defined(__x86_64__)
+    __asm__("movq (%1), %0" : "=r"(v) : "r"(p));
+#elif defined(__aarch64__)
+    __asm__("ldr %0, [%1]" : "=r"(v) : "r"(p));
+#else
+    v = *p;
+#endif
+    return v;
+}
+
 __attribute__((visibility("default"), always_inline))
 static inline uint32_t __afl_get_caller_ctx(void) {
     if (__afl_mapping) return 0;
@@ -785,14 +804,14 @@ static inline uint32_t __afl_get_caller_ctx(void) {
     void **fp = (void **)__builtin_frame_address(0);
     if (!fp) return 0;  /* frame-pointer-less build: no walkable chain */
     uintptr_t cur = (uintptr_t)fp;
-    void **caller_fp = (void **)fp[0];          /* saved FP of the frame above */
+    void **caller_fp = (void **)__afl_raw_load(fp);   /* saved FP of the frame above */
     uintptr_t cfp = (uintptr_t)caller_fp;
     /* The stack grows down, so a genuine older frame sits at a higher
      * address than ours and within a sane single-hop span (4 MiB covers
      * any realistic frame without risking a wild read).  Anything outside
      * that window is an unlinked/garbage frame — skip context for it. */
     if (cfp <= cur || cfp - cur > (4u << 20)) return 0;
-    void *ra = caller_fp[1];                    /* return addr into caller's caller */
+    void *ra = __afl_raw_load(caller_fp + 1);   /* return addr into caller's caller */
     if (!ra) return 0;
 
     /* The claim that used to sit here -- "ASLR/PIE base differences across

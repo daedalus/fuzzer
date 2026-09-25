@@ -59,6 +59,7 @@ from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
 from fuzzer_tool.core.schedulers import (
+    BayesUCBScheduler,
     BOGPUCBScheduler,
     C2UCBScheduler,
     CanaryScheduler,
@@ -147,6 +148,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "cusum_ucb",
     "fewa",
     "moss",
+    "bayes_ucb",
     "c2ucb",
     "fpl",
     "corral",
@@ -1214,6 +1216,7 @@ class Fuzzer:
         consolidated=False,
         moss=False,
         moss_gamma=1.0,
+        bayes_ucb=False,
         contextual=False,
         contextual_alpha=1.0,
         contextual_lambda=1.0,
@@ -2203,9 +2206,13 @@ class Fuzzer:
             log.info("Alpha-beta (Thompson descent) seed scheduling enabled")
 
         self._load_corpus()
+        loaded = self.corpus
         self._apply_seed_transforms()
         if self._corpus_boost > 0 and self.corpus:
             self._boost_corpus_sizes()
+        # Transforms/boost replace seeds in memory; refold the byte readout.
+        if self.corpus is not loaded:
+            self._corpus_manager.rebuild_entropy()
         self._init_seed_metadata()
 
         # Rebuild the lineage tree from persisted seed_meta (single source
@@ -2914,6 +2921,13 @@ class Fuzzer:
             self._moss = MOSSScheduler(gamma=moss_gamma, rng=self._rng)
             log.info("MOSS enabled (gamma=%.5f)", moss_gamma)
 
+        # Bayes-UCB: ranks operators by a high quantile of their Beta
+        # posterior (core/schedulers/op_bayes_ucb.py). Deterministic, no rng.
+        self._use_bayes_ucb = bayes_ucb
+        self._bayes_ucb = BayesUCBScheduler() if bayes_ucb else None
+        if bayes_ucb:
+            log.info("Bayes-UCB enabled")
+
         # Round-robin: deterministic baseline. --seed should reproduce
         # exactly, so no RandPool is used here -- the cycling order is
         # the registration order, fully driven by operator init.
@@ -3168,6 +3182,7 @@ class Fuzzer:
             or self._kl_swucb
             or self._consolidated
             or self._moss
+            or self._bayes_ucb
             or self._cucb
             or self._cusum_ucb
             or self._fewa
@@ -3394,6 +3409,8 @@ class Fuzzer:
             _register_arms(self._consolidated, _format_priors)
         if self._moss:
             _register_arms(self._moss)
+        if self._bayes_ucb:
+            _register_arms(self._bayes_ucb, _format_priors)
         if self._contextual:
             _register_arms(self._contextual)
         if self._c2ucb:
@@ -3938,7 +3955,7 @@ class Fuzzer:
         self._state_store.set("strata", state)
 
     def _save_learned(self) -> None:
-        """Persist op_credit, burn-front, PLL and WFC tables for ``--resume``."""
+        """Persist op_credit, burn-front, PLL, WFC and dict-thompson for ``--resume``."""
         from fuzzer_tool.core.wfc_chunks import WFC_MUTATOR
 
         if self._op_credit is not None:
@@ -3950,6 +3967,8 @@ class Fuzzer:
             self._state_store.set("pll", pll.save())
         if self._wfc_enabled:
             self._state_store.set("wfc_tables", WFC_MUTATOR.store.to_dict())
+        if self._dict_picker is not None:
+            self._state_store.set("dict_picker", self._dict_picker.to_dict())
 
     def _load_learned(self) -> None:
         """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
@@ -3970,6 +3989,8 @@ class Fuzzer:
             self._burn_front.from_dict(self._state_store.get("burn_front", {}))
         if self._wfc_enabled:
             WFC_MUTATOR.store.from_dict(self._state_store.get("wfc_tables", {}))
+        if self._dict_picker is not None:
+            self._dict_picker.from_dict(self._state_store.get("dict_picker", {}))
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""
@@ -6220,6 +6241,7 @@ class Fuzzer:
             self._successive_elim,
             self._consolidated,
             self._moss,
+            self._bayes_ucb,
             self._canary,
             self._op_katz,
             self._op_kuramoto,
@@ -7921,6 +7943,8 @@ class Fuzzer:
             ops.append("fewa")
         if getattr(self, "_moss", False):
             ops.append("moss")
+        if getattr(self, "_bayes_ucb", False):
+            ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
         # corral is deliberately absent from this banner too, same reason,
@@ -8340,6 +8364,8 @@ class Fuzzer:
             ops.append("fewa")
         if getattr(self, "_moss", False):
             ops.append("moss")
+        if getattr(self, "_bayes_ucb", False):
+            ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
         # corral is deliberately absent from this banner too, same reason,

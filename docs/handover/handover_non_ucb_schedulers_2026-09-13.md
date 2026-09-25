@@ -349,6 +349,7 @@ shipped schedulers currently assume without evidence.
   `core/schedulers/__init__.py`'s `__all__` nor `operator_strategy_pool`; the
   same is true of `tang` and `katz`, which are *seed* strategies and correctly
   absent — `bayes_ucb` is the only unexplained one.
+  → Wired 2026-09-25 (`--bayes-ucb`); its tests pass.
 
 ---
 

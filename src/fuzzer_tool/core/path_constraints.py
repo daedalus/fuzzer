@@ -38,6 +38,8 @@ from __future__ import annotations
 
 import logging
 
+from fuzzer_tool.core.lru import LRUCache
+
 log = logging.getLogger(__name__)
 
 DEFAULT_TIMEOUT_MS = 200
@@ -78,10 +80,9 @@ MAX_ATTEMPTED = 50_000
 
 Each entry holds the operand bytes, so an unbounded set grows roughly 200
 bytes per distinct branch — ~40 MB per 200k, and a long campaign sees far
-more than that. Once the cap is hit the set is cleared rather than evicted
-piecewise: the frontier is an optimisation to avoid re-solving branches, not
-a correctness requirement, so forgetting costs at worst a few duplicate
-queries."""
+more than that. Past the cap the least-recently attempted branch is
+forgotten: the frontier is an optimisation to avoid re-solving branches, not
+a correctness requirement, so forgetting costs at worst a duplicate query."""
 
 
 class BranchRecord:
@@ -118,7 +119,8 @@ class PathConstraintSolver:
 
     def __init__(self, timeout_ms: int = DEFAULT_TIMEOUT_MS):
         self.timeout_ms = timeout_ms
-        self._attempted: set[tuple] = set()
+        # Ordered set (values unused) with LRU eviction.
+        self._attempted: LRUCache = LRUCache(MAX_ATTEMPTED)
         self.queries = 0
         self.solved = 0
         self.unsat = 0
@@ -266,9 +268,7 @@ class PathConstraintSolver:
         if offset + width > len(input_data):
             return None
 
-        if len(self._attempted) >= MAX_ATTEMPTED:
-            self._attempted.clear()
-        self._attempted.add(rec.key)
+        self._attempted[rec.key] = None
         self.queries += 1
 
         observed = self._effective_result(rec, input_data)

@@ -11,12 +11,16 @@ Convergence against ground-truth environments lives in
 runs depend on.
 """
 
+import inspect
 import math
 
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers import CUCBScheduler, DUCBScheduler, SWUCBScheduler
+from fuzzer_tool.core.schedulers.op_gp_ucb import GPUCBScheduler
+from fuzzer_tool.core.schedulers.op_kl_ducb import KL_DUCBScheduler
+from fuzzer_tool.core.schedulers.op_kl_swucb import KL_SWUCBScheduler
 
 ARMS = ["bit_flip", "byte_flip", "block_insert", "dict_append"]
 
@@ -26,7 +30,10 @@ FAST_GAMMA = 0.9
 
 
 def _seeded(cls, **kw):
-    return cls(rng=RandPool(seed=1234), **kw)
+    # GP-UCB draws no randomness, so it takes no rng.
+    if "rng" in inspect.signature(cls.__init__).parameters:
+        kw["rng"] = RandPool(seed=1234)
+    return cls(**kw)
 
 
 def _settle(scheduler) -> None:
@@ -380,7 +387,17 @@ class TestCUCB:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("cls", [DUCBScheduler, SWUCBScheduler, CUCBScheduler])
+@pytest.mark.parametrize(
+    "cls",
+    [
+        DUCBScheduler,
+        SWUCBScheduler,
+        CUCBScheduler,
+        KL_DUCBScheduler,
+        KL_SWUCBScheduler,
+        GPUCBScheduler,
+    ],
+)
 class TestSharedContract:
     def test_declares_supports_priors(self, cls):
         """Hard Rule 40: the flag must be explicit, not inherited by default."""

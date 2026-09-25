@@ -19,6 +19,7 @@ import math
 from collections.abc import Callable
 from functools import lru_cache
 
+from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
 
 # Geometry helpers are pure functions of (layer, cell): the jittered
@@ -145,7 +146,7 @@ class FractalVoronoiMutator(MutatorBase):
         # self and would keep every mutator that ever ran alive.
         self._boundary_cache: dict[tuple[int, tuple[int, int]], bool] = {}
         self._root_hash_cache: dict[tuple[int, int], int] = {}
-        self._plan_cache: dict[tuple[int, int, int], tuple] = {}
+        self._plan_cache: LRUCache = LRUCache(self._PLAN_CACHE_MAX)
 
     # ------------------------------------------------------------------
     # Voronoi geometry (deterministic, cached)
@@ -251,8 +252,6 @@ class FractalVoronoiMutator(MutatorBase):
                 )
             )
         result = tuple(plan)
-        if len(self._plan_cache) >= self._PLAN_CACHE_MAX:
-            self._plan_cache.clear()
         self._plan_cache[key] = result
         return result
 

@@ -447,6 +447,7 @@ def cmd_fuzz(args):
         args.canary_scheduler = True
         args.consolidated = True
         args.moss = True
+        args.bayes_ucb = True
         args.contextual = True
         args.c2ucb = True
         args.invasion = True
@@ -681,6 +682,7 @@ def cmd_fuzz(args):
         consolidated=getattr(args, "consolidated", False),
         moss=getattr(args, "moss", False),
         moss_gamma=getattr(args, "moss_gamma", 1.0),
+        bayes_ucb=getattr(args, "bayes_ucb", False),
         # kl_ducb/kl_swucb/markov_blend were once passed to the retired
         # run_parallel but not here, so in the default mode --kl-ducb,
         # --kl-swucb (and --elo all, which sets both) and --markov-blend
@@ -1865,6 +1867,7 @@ _HAIL_MARY_FLAGS = (
     "topk",
     "consolidated",
     "moss",
+    "bayes_ucb",
     "contextual",
     "c2ucb",
     "invasion",
@@ -2968,6 +2971,14 @@ def main() -> int:
         type=float,
         default=1.0,
         help="MOSS discount per pull; <1 forgets, for decaying yields (default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--bayes-ucb",
+        action="store_true",
+        help=(
+            "Enable Bayes-UCB: rank operators by a high quantile of their Beta "
+            "posterior; deterministic, uses format-operator priors"
+        ),
     )
     fuzz_parser.add_argument(
         "--contextual",
