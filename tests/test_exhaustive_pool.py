@@ -190,6 +190,7 @@ class TestRefusals:
             lambda p: p.lognormvariate(),
             lambda p: p.random_list(3),
             lambda p: p.gauss_list(0.0, 1.0, 3),
+            lambda p: p.dirichlet([1.0, 2.0]),
         ],
     )
     def test_continuous_draws_refuse(self, call):
@@ -217,6 +218,7 @@ class TestRefusals:
             lambda p: p.randrange_list(10, 4),
             lambda p: p.choice_list("abc", 4),
             lambda p: p.weighted_choice_list("abc", [1, 1, 1], 4),
+            lambda p: p.categorical([1.0, 1.0, 1.0], 4),
         ],
     )
     def test_bulk_draws_refuse_by_default(self, call):
@@ -229,6 +231,11 @@ class TestRefusals:
         seen = {pool.randbytes(2) for _ in pool.runs()}
         assert pool.exhausted
         assert len(seen) == 256 * 256
+
+    def test_categorical_skips_zero_weight(self):
+        pool = ExhaustivePool(allow_bulk=True)
+        seen = {tuple(pool.categorical([1.0, 0.0, 2.0], 2)) for _ in pool.runs()}
+        assert seen == set(itertools.product((0, 2), repeat=2))
 
     def test_empty_bulk_draws_need_no_opt_in(self):
         """Zero-width bulk draws branch one way and are not a budget risk."""

@@ -588,6 +588,13 @@ class ExhaustivePool:
         self._bulk_guard(f"weighted_choice_list(len={len(seq)}, {k})", len(seq) ** k)
         return [self.weighted_choice(seq, weights) for _ in range(k)]
 
+    def categorical(self, probs: Sequence[float], count: int) -> list[int]:
+        if count <= 0:
+            return []
+        n = len(probs)
+        self._bulk_guard(f"categorical(len={n}, {count})", n**count)
+        return [self.weighted_choice(range(n), probs) for _ in range(count)]
+
     # ── Continuous draws: refused ────────────────────────────────────
 
     def _continuous(self, what: str):
@@ -623,6 +630,9 @@ class ExhaustivePool:
 
     def betavariate_array(self, alphas, betas):
         self._continuous("betavariate_array()")
+
+    def dirichlet(self, alphas):
+        self._continuous("dirichlet()")
 
     def gammavariate(self, alpha: float, beta: float = 1.0) -> float:
         self._continuous("gammavariate()")

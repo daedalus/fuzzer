@@ -52,6 +52,7 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 # Special-cased inside _apply_hail_mary (not plain bool dests in the tuple):
 #   * elo (string value "all")
 #   * anneal_budget (int)
+#   * dirichlet_alpha (string value "learned")
 # Default-on BooleanOptionalAction features are not additive opt-ins.
 # cmplog is always on (no argparse dest).  cmplog_fifo_sink is default-on
 # BooleanOptionalAction, so it is in the tuple, not the exclusion set.

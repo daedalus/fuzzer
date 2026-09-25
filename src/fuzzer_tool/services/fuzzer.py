@@ -43,6 +43,7 @@ from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
+from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.elf import SHM_LAYOUT_CURRENT, detect_elf_type, detect_shm_layout
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
@@ -116,6 +117,9 @@ from fuzzer_tool.services.stats import StatsReporter
 log = logging.getLogger(__name__)
 
 _shutdown = False
+
+# CEM α when nothing is fittable yet under --dirichlet-alpha learned (Laplace).
+_CEM_ALPHA_FALLBACK = 1.0
 
 # Strategy names pre-registered with the Elo tracker (single source of truth
 # for the pre-registration loop and the meta-scheduler log line).
@@ -983,6 +987,7 @@ class Fuzzer:
         markov_order=1,
         markov_generate=False,
         markov_blend=False,
+        dirichlet_alpha=AlphaMode.FIXED,
         mc_bandit=False,
         mc_cem=False,
         mc_cycle_detect=False,
@@ -1293,6 +1298,7 @@ class Fuzzer:
         seed_residual=False,
         strata=False,
         pool_drift=False,
+        dict_thompson=False,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
         confirm_novelty=False,
@@ -1593,6 +1599,10 @@ class Fuzzer:
 
         # Corpus byte drift vs seeds (core/pool_drift.py); read by init_seed_metadata
         self._use_pool_drift = pool_drift
+
+        # Dictionary token Thompson sampling (core/dirichlet.py): drawn in
+        # OperatorEngine.mutate, credited in fuzz_one on new coverage
+        self._dict_picker = DirichletPicker(self._rng) if dict_thompson else None
 
         # Corpus size boost: normal-distribution seed resizing
         self._corpus_boost = corpus_boost
@@ -2007,10 +2017,14 @@ class Fuzzer:
             orders = markov_order
         else:
             orders = [markov_order]
+        # LEARNED: Markov smoothing and CEM α refit as Dirichlet MLEs (core/dirichlet.py)
+        self._dirichlet_alpha = dirichlet_alpha
         if len(orders) > 1:
-            self.markov = MarkovEnsemble(orders=orders, blend=markov_blend, rng=self._rng)
+            self.markov = MarkovEnsemble(
+                orders=orders, blend=markov_blend, rng=self._rng, alpha_mode=dirichlet_alpha
+            )
         else:
-            self.markov = MarkovChain(order=orders[0], rng=self._rng)
+            self.markov = MarkovChain(order=orders[0], rng=self._rng, alpha_mode=dirichlet_alpha)
         self.markov_generate = markov_generate
         self.markov_trained = False
 
@@ -2188,6 +2202,9 @@ class Fuzzer:
                 refit_interval=mc_refit_interval,
                 pairwise_blend=pairwise_blend,
                 decay_interval=mc_decay_interval,
+                cem_dirichlet_concentration=(
+                    _CEM_ALPHA_FALLBACK if dirichlet_alpha is AlphaMode.LEARNED else 0.0
+                ),
                 rng=self._rng,
             )
             if (mc_bandit or mc_cem or mopt)
@@ -5667,6 +5684,13 @@ class Fuzzer:
                 tokens=[m[1] for m in _credit],
             )
 
+        # Dirichlet token posterior: credit the tokens this round inserted
+        if self._dict_picker is not None:
+            if has_new_coverage:
+                self._dict_picker.reward(self._dict_scratch_idx)
+            else:
+                self._dict_picker.clear()
+
         # Weizz structure tags: once-per-lineage passive collection after a
         # coverage gain, gated by --weizz-tags and max_len. Uses existing
         # cmplog pairs (+ optional colorize taints); no second tracer.
@@ -8316,6 +8340,8 @@ class Fuzzer:
             groups["Mutation"].append("markov")
         if getattr(self, "_adaptive_havoc", False):
             groups["Mutation"].append("adaptive-havoc")
+        if getattr(self, "_dict_picker", None) is not None:
+            groups["Mutation"].append("dict-thompson")
         if self.enable_x86_mutator:
             groups["Mutation"].append("x86-mutator")
         if self.enable_arm_mutator:
@@ -8358,6 +8384,8 @@ class Fuzzer:
             groups["Generation"].append("wfc")
         if getattr(self, "_corpus_boost", 0) > 0:
             groups["Generation"].append(f"corpus-boost={self._corpus_boost}")
+        if getattr(self, "_dirichlet_alpha", AlphaMode.FIXED) is AlphaMode.LEARNED:
+            groups["Generation"].append("dirichlet-alpha=learned")
 
         if self.persistent:
             groups["Execution"].append("persistent")

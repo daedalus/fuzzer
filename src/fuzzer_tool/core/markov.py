@@ -11,6 +11,7 @@ import logging
 import math
 from array import array
 
+from fuzzer_tool.core.dirichlet import AlphaMode, dm_alpha
 from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
@@ -22,6 +23,9 @@ log = logging.getLogger(__name__)
 # transition count) are evicted.
 MAX_TRANSITIONS = 200_000
 
+# Categories of the next-byte distribution.
+_BYTE_VALUES = 256
+
 
 class MarkovChain:
     """Byte-level Markov chain for fuzz input generation.
@@ -32,6 +36,8 @@ class MarkovChain:
     Args:
         order: Number of previous bytes to use as context (n-gram order).
         smoothing: Laplace smoothing factor to avoid zero probabilities.
+        alpha_mode: LEARNED refits *smoothing* as the Dirichlet MLE of the
+            transition counts (``core.dirichlet.dm_alpha``).
 
     Examples:
         >>> mc = MarkovChain(order=1)
@@ -43,9 +49,16 @@ class MarkovChain:
         4
     """
 
-    def __init__(self, order: int = 1, smoothing: float = 0.01, rng: RandPool | None = None):
+    def __init__(
+        self,
+        order: int = 1,
+        smoothing: float = 0.01,
+        rng: RandPool | None = None,
+        alpha_mode: AlphaMode = AlphaMode.FIXED,
+    ):
         self.order = order
         self.smoothing = smoothing
+        self.alpha_mode = alpha_mode
         self.transitions: dict[bytes, collections.Counter] = collections.defaultdict(
             collections.Counter
         )
@@ -114,6 +127,18 @@ class MarkovChain:
         """
         for data in corpus:
             self.train(data)
+        self.refit_alpha()
+
+    def refit_alpha(self) -> None:
+        """Refit *smoothing* to the Dirichlet MLE of the counts (LEARNED only).
+
+        Peaked contexts (format grammar) drive it far below the 0.01 default,
+        so generation stops spending mass on bytes the format never emits.
+        """
+        if self.alpha_mode is not AlphaMode.LEARNED:
+            return
+        rows = (counts.values() for counts in self.transitions.values())
+        self.smoothing = dm_alpha(rows, _BYTE_VALUES, self.smoothing)
 
     def generate(self, length: int) -> bytes:
         """Generate a new input of specified length from learned distribution.
@@ -282,6 +307,7 @@ class MarkovChain:
         if self._trains_since_snapshot < self._snapshot_interval:
             return False
         self._trains_since_snapshot = 0
+        self.refit_alpha()
 
         has_previous = self._prev_snapshot is not None
         prev = self._prev_snapshot
@@ -415,6 +441,7 @@ class MarkovEnsemble:
     Args:
         orders: List of n-gram orders to use (e.g. [0, 1, 2]).
         smoothing: Laplace smoothing factor for each chain.
+        alpha_mode: Passed to each chain (see MarkovChain).
         blend: If True, blend probability distributions instead of
                selecting a single order. Produces smoother output but
                is slower.
@@ -433,14 +460,17 @@ class MarkovEnsemble:
         smoothing: float = 0.01,
         blend: bool = False,
         rng: RandPool | None = None,
+        alpha_mode: AlphaMode = AlphaMode.FIXED,
     ):
         if orders is None:
             orders = [0, 1, 2]
         self.orders = orders
         self.blend = blend
         self._rng = rng or get_default_rand_pool()
+        self.alpha_mode = alpha_mode
         self.chains: dict[int, MarkovChain] = {
-            o: MarkovChain(order=o, smoothing=smoothing, rng=self._rng) for o in orders
+            o: MarkovChain(order=o, smoothing=smoothing, rng=self._rng, alpha_mode=alpha_mode)
+            for o in orders
         }
         # Convenience attributes for compatibility with single-chain code
         self.order = orders[0] if orders else 0
@@ -476,6 +506,8 @@ class MarkovEnsemble:
         """Train all chains on multiple inputs."""
         for data in corpus:
             self.train(data)
+        for chain in self.chains.values():
+            chain.refit_alpha()
 
     def _select_chain(self) -> MarkovChain:
         """Select a chain weighted by information content (contexts learned).
@@ -645,7 +677,10 @@ class MarkovEnsemble:
             for order_str, chain_data in data["chains"].items():
                 order = int(order_str)
                 chain = MarkovChain(
-                    order=order, smoothing=chain_data.get("smoothing", 1e-6), rng=self._rng
+                    order=order,
+                    smoothing=chain_data.get("smoothing", 1e-6),
+                    rng=self._rng,
+                    alpha_mode=self.alpha_mode,
                 )
                 chain._contexts_seen = chain_data.get("contexts_seen", 0)
                 chain.transitions = collections.defaultdict(collections.Counter)
@@ -663,7 +698,10 @@ class MarkovEnsemble:
         else:
             # Legacy single-chain format — upgrade to ensemble
             chain = MarkovChain(
-                order=data.get("order", 1), smoothing=data.get("smoothing", 1e-6), rng=self._rng
+                order=data.get("order", 1),
+                smoothing=data.get("smoothing", 1e-6),
+                rng=self._rng,
+                alpha_mode=self.alpha_mode,
             )
             chain._contexts_seen = data.get("contexts_seen", 0)
             chain.transitions = collections.defaultdict(collections.Counter)

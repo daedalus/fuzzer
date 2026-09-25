@@ -5522,9 +5522,14 @@ class OperatorEngine:
         # Pre-fetch dictionary indices for dict-aware operators in one
         # vectorized call, replacing N individual random.choice(self.ctx.dictionary)
         # calls across _op_dict_* methods.
+        # --dict-thompson: one Dirichlet posterior draw per round instead.
         if self.ctx.dictionary:
-            f._dict_scratch = self.ctx._rng.randint_list(
-                0, len(self.ctx.dictionary) - 1, max(n_mutations * 8, 64)
+            n_draw = max(n_mutations * 8, 64)
+            picker = getattr(f, "_dict_picker", None)
+            f._dict_scratch = (
+                picker.draw(self.ctx.dictionary, n_draw)
+                if picker is not None
+                else self.ctx._rng.randint_list(0, len(self.ctx.dictionary) - 1, n_draw)
             )
             f._dict_scratch_idx = 0
 

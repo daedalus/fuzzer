@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.services.fuzzer import Fuzzer
 
@@ -648,6 +649,7 @@ def cmd_fuzz(args):
         entropy_gradient_decay=getattr(args, "entropy_gradient_decay", 0.98),
         entropy_loo=getattr(args, "entropy_loo", False),
         pool_drift=getattr(args, "pool_drift", False),
+        dict_thompson=getattr(args, "dict_thompson", False),
         seed_residual=getattr(args, "seed_residual", False),
         confirm_novelty=getattr(args, "confirm_novelty", False),
         successive_elim=getattr(args, "successive_elim", False),
@@ -689,6 +691,7 @@ def cmd_fuzz(args):
         kl_swucb=getattr(args, "kl_swucb", False),
         kl_swucb_window=getattr(args, "kl_swucb_window", 4000),
         markov_blend=getattr(args, "markov_blend", False),
+        dirichlet_alpha=AlphaMode(getattr(args, "dirichlet_alpha", AlphaMode.FIXED.value)),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
         bo_gp_length_scale=getattr(args, "bo_gp_length_scale", 1.0),
@@ -1890,6 +1893,7 @@ _HAIL_MARY_FLAGS = (
     "entropy_gradient",
     "entropy_loo",
     "pool_drift",
+    "dict_thompson",
     "seed_residual",
     "op_katz",
     "op_kuramoto",
@@ -1947,6 +1951,10 @@ def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentPar
     # give it one so enabling the flags actually does something.
     if args.anneal_budget == fuzz_parser.get_default("anneal_budget"):
         args.anneal_budget = 10000
+
+    # --dirichlet-alpha takes a value, not a bool -- special-case it like --elo.
+    if args.dirichlet_alpha == fuzz_parser.get_default("dirichlet_alpha"):
+        args.dirichlet_alpha = AlphaMode.LEARNED.value
 
     print(
         "[hail-mary] every left-at-default fuzzing option has been force-enabled; "
@@ -2085,6 +2093,13 @@ def main() -> int:
         "--markov-blend",
         action="store_true",
         help="Blend probability distributions across orders (slower but smoother)",
+    )
+    fuzz_parser.add_argument(
+        "--dirichlet-alpha",
+        choices=[m.value for m in AlphaMode],
+        default=AlphaMode.FIXED.value,
+        help="Markov smoothing / CEM byte α: 'fixed' (0.01 / add-1) or 'learned' "
+        "(Dirichlet-Multinomial MLE of the counts). Default: fixed.",
     )
     fuzz_parser.add_argument(
         "--mc-bandit", action="store_true", help="Enable Thompson sampling bandit"
@@ -3378,6 +3393,13 @@ def main() -> int:
         "weighting seeds by how much pooled corpus byte-entropy drops without them "
         "(docs/handover/handover_entropy_seed_schedulers_2026-09-19.md §5). OFF by "
         "default; not yet A/B validated.",
+    )
+    fuzz_parser.add_argument(
+        "--dict-thompson",
+        action="store_true",
+        default=False,
+        help="Pick dictionary tokens by Thompson sampling: one p ~ Dirichlet(1 + wins) "
+        "per round, wins = rounds a token was in when coverage grew. OFF by default.",
     )
     fuzz_parser.add_argument(
         "--pool-drift",

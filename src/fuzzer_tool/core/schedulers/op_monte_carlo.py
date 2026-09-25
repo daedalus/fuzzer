@@ -18,6 +18,7 @@ from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_structure_function import DispersionIndex
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
+from fuzzer_tool.core.dirichlet import dm_alpha
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import (
     RunningMoments,
@@ -39,6 +40,9 @@ log = logging.getLogger(__name__)
 # (e.g. a caller passing 0 or a negative value) without silently overriding
 # intentionally weak-but-valid priors above this threshold.
 MIN_BETA_PARAM = 1e-6
+
+# Categories of the CEM per-position byte distribution.
+_BYTE_VALUES = 256
 
 
 @dataclass(frozen=True)
@@ -557,59 +561,18 @@ class MonteCarloScheduler:
         self._adapt_interval()
 
     def _learn_cem_concentration(self, elite: list[bytes]) -> None:
-        """Learn the Dirichlet concentration parameter from the elite set.
+        """Learn the Dirichlet concentration α from the elite byte counts.
 
-        Estimates alpha_0 by matching the expected entropy of the Dirichlet
-        distribution to the empirical entropy of the elite set.
-
-        The Dirichlet(alpha_0, ..., alpha_0) has expected entropy:
-            H(Dir) = ln(Gamma(256*alpha_0)) - 256*ln(Gamma(alpha_0))
-                     - (256*alpha_0 - 1) * (psi(256*alpha_0) - psi(alpha_0))
-
-        We solve for alpha_0 such that the empirical per-position entropy
-        matches this expectation. When data is highly structured (low entropy),
-        alpha_0 increases (stronger prior). When data is uniform (high entropy),
-        alpha_0 stays near 1 (weak prior).
-
-        Order-statistics connection (docs/learnings/order-statistics-learnings.md):
-        The gaps (spacings) between sorted Uniform(0,1) draws are jointly
-        distributed as Dirichlet(1,...,1) — equivalently, normalized i.i.d.
-        Exponential(1) draws. This is the same Dirichlet family that CEM uses
-        for per-byte distributions, but with a different categorical structure
-        (over 256 byte values rather than over gap positions). The concentration
-        alpha_0 in CEM controls how Dirichlet-like the byte distribution is:
-        high alpha_0 → peaked prior (expects structured data), low alpha_0 →
-        weak prior (expects near-uniform data).
+        α is the Dirichlet-Multinomial MLE over per-position counts
+        (``core.dirichlet.dm_alpha``). Structured positions (one byte per
+        position) drive α → 0 so cem_byte trusts the counts; random
+        positions drive α up toward uniform. The configured concentration
+        is the fallback when no position has 2+ observations.
 
         Stores the learned alpha_0 in self._cem_learned_alpha.
         """
-        # Compute average empirical entropy across positions
-        total_entropy = 0.0
-        n_positions = 0
-        for _, freq in self.byte_freq.items():
-            total = sum(freq.values())
-            if total < 2:
-                continue
-            n_positions += 1
-            pos_entropy = 0.0
-            for count in freq.values():
-                p = count / total
-                if p > 0:
-                    pos_entropy -= p * math.log2(p)
-            total_entropy += pos_entropy
-
-        if n_positions == 0:
-            self._cem_learned_alpha = self._cem_dirichlet_concentration
-            return
-
-        avg_entropy = total_entropy / n_positions
-        # Max entropy for 256 categories = log2(256) = 8
-        # Map entropy to alpha in [0.5, 10]:
-        #   High entropy (near 8) → low alpha (near 0.5) → weak prior
-        #   Low entropy (near 0) → high alpha (near 10) → strong prior
-        uniformity = avg_entropy / 8.0  # 0 = fully structured, 1 = uniform
-        alpha = self._cem_dirichlet_concentration * (2.0 - uniformity)
-        self._cem_learned_alpha = max(0.1, alpha)
+        rows = (freq.values() for freq in self.byte_freq.values())
+        self._cem_learned_alpha = dm_alpha(rows, _BYTE_VALUES, self._cem_dirichlet_concentration)
 
     def _cem_alpha(self) -> float:
         """Get the effective Dirichlet concentration parameter for CEM."""

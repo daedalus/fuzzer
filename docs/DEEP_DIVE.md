@@ -52,6 +52,8 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Dictionary support**: inject protocol tokens from dictionary files
 - **Markov chain**: learn byte-level transition probabilities from corpus, generate statistically similar inputs, persist across runs
 - **Monte Carlo scheduling**: Thompson sampling bandit for operator selection + Cross-Entropy Method for byte distribution learning
+- **Learned Dirichlet α** (`--dirichlet-alpha learned`, `core/dirichlet.py`; default `fixed`, on under `--hail-mary`): Markov smoothing (fixed 0.01) and CEM byte α (fixed add-1) are symmetric Dirichlet priors. `dm_alpha` refits each as the Dirichlet-Multinomial MLE of its counts: bisection on log α of Minka's score `Σ[ψ(n+α)−ψ(α)] = K·Σ[ψ(N+Kα)−ψ(Kα)]` over count histograms (own vectorised digamma; rows with < 2 observations carry no information and are dropped). Peaked contexts → α → 1e-6, flat → up to 1e4. Markov refits after `train_corpus` and on each plateau snapshot (every 50 trains); CEM on each elite refit. Cost: 42 ms for 20k contexts. Fixes the old CEM heuristic, which raised α on low-entropy elites and so smoothed structured bytes toward uniform (`tests/test_regression_cem_dirichlet_alpha.py`). **Not shown to help.** fuzzgoat (`fuzzgoat_read_nosan`, 60 JSON seeds, `--markov --mc-bandit --mc-cem`, 3k execs, 8 paired seeds): 3W/5L, median −13.5 edges (n.s.). Likelihood-optimal α is not exploration-optimal: tiny α stops Markov/CEM emitting unseen bytes.
+- **Dictionary Thompson sampling** (`--dict-thompson`, `DirichletPicker`; off by default, on under `--hail-mary`): per round, one `p ~ Dir(1 + wins)` over the dictionary, then the round's token indices `~ Cat(p)` (`RandPool.categorical`, inverse CDF). `wins[token]` counts rounds in which the token was inserted and coverage grew (`fuzz_one` rewards or clears every round). Wins are keyed by token bytes, so dictionary truncation (`dictionary[-keep:]`) does not misattribute them. One `p` per round is the point: a fresh `p` per index reduces to plain frequency weighting. Cost: 41 µs/round at 1024 tokens vs 8 µs uniform. **Not shown to help.** fuzzgoat, `-D json.dict`, 3k execs, 8 paired seeds: 2W/5L/1T, median −8 edges (n.s.).
 - **Surprisal-weighted rewards**: all scheduling mechanisms (bandit, MOpt, Replicator, Elo) weight discovery credit by `1 - bitmap_density` — rare discoveries in sparse coverage regions get more credit than discoveries near already-saturated areas
 - **Perplexity-gated generation**: model quality dynamically scales generation rate (more generation when model is lost, less when well-calibrated); rejects extreme-perplexity outputs as pure noise
 
@@ -462,6 +464,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--deep-coverage` | Capstone-based basic block discovery |
 | `-F` | File mode (write input to temp file) |
 | `-D FILE` | Load dictionary tokens |
+| `--dict-thompson` | Dictionary tokens by Thompson sampling over a Dirichlet posterior of winning tokens |
 | `--no-adaptive-havoc` | Draw havoc's 11 inline sub-mutations uniformly instead of weighting them by measured new-coverage rate (weighting is on by default; use this as the A/B baseline) |
 | `-g GRAMMAR` | Grammar-aware mutations (built-in: png, json, http_request, elf) |
 | `--cmplog` | Comparison tracing via LD_PRELOAD (or build the target with `-D__AFL_CMPLOG=1` for direct_lite compatibility) |
@@ -521,6 +524,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--aflgo-cooling exp\|log\|lin\|quad` | Cooling schedule for the `aflgo` power factor (default exp) |
 | `--t-x MINUTES` | AFLGo time-to-exploitation in minutes; temperature cools to 1/20 over this window |
 | `--markov-order N` | Markov chain order(s), comma-separated (e.g. '0,1,2' for ensemble) |
+| `--dirichlet-alpha fixed\|learned` | Markov smoothing / CEM byte α: hand-set, or Dirichlet-Multinomial MLE of the counts |
 | `--save-smaller` | Replace crash triggers with smaller inputs for the same stack hash |
 | `--crash-blocklist FILE` | Skip crashes matching these stack hashes |
 | `--crash-allowlist FILE` | Override blocklist for specific crash hashes |

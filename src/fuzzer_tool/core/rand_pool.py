@@ -569,6 +569,29 @@ class RandPool:
         """
         return self._rng.beta(alphas, betas)
 
+    def dirichlet(self, alphas) -> np.ndarray:
+        """Return one point on the simplex drawn from Dirichlet(*alphas*).
+
+        One C-level numpy call; numpy's small-α path avoids the Gamma
+        underflow (NaN) of naive normalisation at α ≲ 0.01.
+        """
+        a = np.asarray(alphas, dtype=np.float64)
+        if a.size == 0 or not np.isfinite(a).all() or (a <= 0.0).any():
+            raise ValueError("dirichlet needs a non-empty vector of finite alphas > 0")
+        return self._rng.dirichlet(a)
+
+    def categorical(self, probs: np.ndarray, count: int) -> list[int]:
+        """Return *count* indices drawn from the (unnormalised) weights *probs*.
+
+        Inverse-CDF over one cumsum: ~2x cheaper than
+        :meth:`weighted_choice_list` on a numpy vector (no list round-trip).
+        """
+        if count <= 0:
+            return []
+        cum = np.cumsum(probs)
+        idx = np.searchsorted(cum, self._rng.random(count) * cum[-1], side="right")
+        return np.minimum(idx, len(cum) - 1).tolist()
+
     def gammavariate(self, alpha: float, beta: float = 1.0) -> float:
         """Return a random float from Gamma(*alpha*, *beta*).
 
