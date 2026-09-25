@@ -460,6 +460,51 @@ class TestPrintStats:
         assert "eps: 10" in line, f"expected session-local eps: 10 in: {line[:300]}"
 
 
+class TestPrintRunSummary:
+    """Tests for StatsReporter.print_run_summary() — end-of-run block."""
+
+    @staticmethod
+    def _run_summary_fuzzer(**overrides):
+        defaults = {
+            "start_time": time.time() - 10.0,
+            "exec_count": 500,
+            "_peak_eps": 42.0,
+            "crash_count": 7,
+            "crash_sigs": {"sig_a": 5, "sig_b": 2},
+            "corpus": [1, 2, 3],
+            "_total_corpus_attempts": 10,
+            "_duplicate_reject_count": 1,
+            "_pruned_count": 0,
+            "_corpus_flux": None,
+            "_stall_recovery_count": 0,
+            "_use_poisson_disk_admission": False,
+        }
+        defaults.update(overrides)
+        return SimpleNamespace(**defaults)
+
+    def _lines(self, fuzzer):
+        reporter = StatsReporter(fuzzer)
+        with (
+            patch.object(StatsReporter, "_print_temperature_control"),
+            patch.object(StatsReporter, "_print_summary_coverage"),
+            patch.object(StatsReporter, "_print_summary_seeds"),
+            patch.object(StatsReporter, "_print_summary_rarity"),
+            patch("builtins.print") as mock_print,
+        ):
+            reporter.print_run_summary()
+        return [c.args[0] for c in mock_print.call_args_list if c.args]
+
+    def test_shows_crash_count_and_unique_signatures(self):
+        lines = self._lines(self._run_summary_fuzzer())
+        crash_line = next(line for line in lines if "Crashes:" in line)
+        assert "7 (2 unique signatures)" in crash_line
+
+    def test_shows_zero_crashes(self):
+        lines = self._lines(self._run_summary_fuzzer(crash_count=0, crash_sigs={}))
+        crash_line = next(line for line in lines if "Crashes:" in line)
+        assert "0 (0 unique signatures)" in crash_line
+
+
 class TestPrintStatsSupplementary:
     """Occupation / causal-sector / RO-RD additions to the supplementary line."""
 

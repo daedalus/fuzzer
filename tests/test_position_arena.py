@@ -32,6 +32,8 @@ from fuzzer_tool.core.schedulers.pos_burn_front import (
     SPARK_RATE,
     BurnFrontPositionScheduler,
 )
+from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
+from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, PositionArena
 
@@ -213,6 +215,102 @@ class TestBurnFront:
         assert 0 in heat
 
 
+class TestPositionCanary:
+    def test_satisfies_the_protocol(self):
+        assert isinstance(PositionCanaryScheduler(), PositionScheduler)
+
+    def test_name_is_canary(self):
+        assert PositionCanaryScheduler().name == "canary"
+
+    def test_cold_seed_proposes_the_first_bin(self):
+        # No data yet -> every bin ties at the Beta(1,1) prior; deterministic
+        # tie-break picks the lowest-indexed (leftmost) bin.
+        assert PositionCanaryScheduler().propose(SEED, len(SEED)) == 0
+
+    def test_targets_the_bin_with_the_worst_posterior(self):
+        s = PositionCanaryScheduler()
+        # bin 0 (offset 0) gains every time; bin width for a 1000-byte seed
+        # under MAX_BINS is 1, so offset 100 is its own bin.
+        for _ in range(10):
+            s.record(SEED, [0], Outcome.GAIN)
+        s.record(SEED, [100], Outcome.MISS)
+        assert s.propose(SEED, len(SEED)) == 100
+
+    def test_miss_lowers_the_posterior_mean(self):
+        s = PositionCanaryScheduler()
+        s.record(SEED, [50], Outcome.MISS)
+        a, b = s.bandit_stats(SEED)[50]
+        assert a == 1.0
+        assert b == 2.0
+
+    def test_gain_raises_the_posterior_mean(self):
+        s = PositionCanaryScheduler()
+        s.record(SEED, [50], Outcome.GAIN, weight=1.0)
+        a, b = s.bandit_stats(SEED)[50]
+        assert a == 2.0
+        assert b == 1.0
+
+    def test_empty_offsets_is_a_no_op(self):
+        s = PositionCanaryScheduler()
+        s.record(SEED, [], Outcome.GAIN)
+        assert s.bandit_stats(SEED) == {}
+
+    def test_empty_buffer_declines(self):
+        assert PositionCanaryScheduler().propose(b"", 0) is None
+
+    def test_ties_go_to_the_lowest_bin_index(self):
+        s = PositionCanaryScheduler()
+        s.record(SEED, [0, 200], Outcome.MISS)  # both bins now tied at 1/3
+        assert s.propose(SEED, len(SEED)) == 0
+
+    def test_seed_table_is_lru_bounded(self):
+        from fuzzer_tool.core.schedulers.pos_canary import MAX_SEEDS as CANARY_MAX_SEEDS
+
+        s = PositionCanaryScheduler()
+        for i in range(CANARY_MAX_SEEDS + 50):
+            s.record(i.to_bytes(4, "big") * 4, [1], Outcome.GAIN)
+        assert s.seed_count() == CANARY_MAX_SEEDS
+        assert s.bandit_stats((0).to_bytes(4, "big") * 4) == {}  # oldest evicted
+
+
+class TestPositionRoundRobin:
+    def test_satisfies_the_protocol(self):
+        assert isinstance(PositionRoundRobinScheduler(), PositionScheduler)
+
+    def test_name_is_round_robin(self):
+        assert PositionRoundRobinScheduler().name == "round_robin"
+
+    def test_cycles_through_bins_in_order(self):
+        s = PositionRoundRobinScheduler()
+        picks = [s.propose(SEED, len(SEED)) for _ in range(3)]
+        assert picks == [0, 1, 2]  # width 1 for a 1000-byte seed under MAX_BINS
+
+    def test_wraps_around_after_the_last_bin(self):
+        small = bytes(3)
+        s = PositionRoundRobinScheduler()
+        picks = [s.propose(small, len(small)) for _ in range(4)]
+        assert picks == [0, 1, 2, 0]
+
+    def test_record_does_not_perturb_the_cycle(self):
+        s = PositionRoundRobinScheduler()
+        s.propose(SEED, len(SEED))
+        s.record(SEED, [999], Outcome.GAIN)
+        assert s.propose(SEED, len(SEED)) == 1
+
+    def test_empty_buffer_declines(self):
+        assert PositionRoundRobinScheduler().propose(b"", 0) is None
+
+    def test_seed_table_is_lru_bounded(self):
+        from fuzzer_tool.core.schedulers.pos_round_robin import (
+            MAX_SEEDS as RR_MAX_SEEDS,
+        )
+
+        s = PositionRoundRobinScheduler()
+        for i in range(RR_MAX_SEEDS + 50):
+            s.propose(i.to_bytes(4, "big") * 4, 16)
+        assert s.seed_count() == RR_MAX_SEEDS
+
+
 class _Fuzzer:
     """Mock exposing the position sources the arena consults."""
 
@@ -239,9 +337,11 @@ class _Fuzzer:
         return None if stride is None else 44
 
 
-def _arena(f=None, burn_front=None, region=lambda d, n: 55):
+def _arena(f=None, burn_front=None, canary=None, round_robin=None, region=lambda d, n: 55):
     f = f or _Fuzzer(sensitivity=True, te=True)
-    return f, PositionArena(f, region_fn=region, burn_front=burn_front)
+    return f, PositionArena(
+        f, region_fn=region, burn_front=burn_front, canary=canary, round_robin=round_robin
+    )
 
 
 def _force(f, name):
@@ -304,12 +404,25 @@ class TestPool:
         _, arena = _arena(burn_front=_bf())
         assert "burn_front" in arena.pool()
 
+    def test_canary_joins_when_supplied(self):
+        _, arena = _arena(canary=PositionCanaryScheduler())
+        assert "canary" in arena.pool()
+
+    def test_round_robin_joins_when_supplied(self):
+        _, arena = _arena(round_robin=PositionRoundRobinScheduler())
+        assert "round_robin" in arena.pool()
+
     def test_every_pool_name_is_registered(self):
         f = _Fuzzer(sensitivity=True, te=True, mi=True, region=True)
         f._crash_mi = SimpleNamespace(
             total_execs=9, min_observations=1, weighted_position=lambda n: 1
         )
-        _, arena = _arena(f, burn_front=_bf())
+        _, arena = _arena(
+            f,
+            burn_front=_bf(),
+            canary=PositionCanaryScheduler(),
+            round_robin=PositionRoundRobinScheduler(),
+        )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
 
@@ -461,6 +574,22 @@ class TestSettle:
         assert bf.hot_bins(SEED)
         assert f._elo._strategy_match_count == {}
 
+    def test_canary_is_credited_off_policy(self):
+        # The picker was sensitivity, not canary; canary's posterior still learns.
+        canary = PositionCanaryScheduler()
+        f, arena = self._played(canary=canary)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert canary.bandit_stats(SEED)[100] == (2.0, 1.0)
+
+    def test_round_robin_is_credited_off_policy(self):
+        # settle() calls round_robin.record(), which is a documented no-op;
+        # this just pins that calling it does not raise or perturb state.
+        rr = PositionRoundRobinScheduler()
+        f, arena = self._played(round_robin=rr)
+        first = rr.propose(SEED, len(SEED))
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert rr.propose(SEED, len(SEED)) == first + 1
+
 
 class TestSelectPositionWiring:
     def _engine(self, f):
@@ -522,9 +651,16 @@ class TestFuzzerWiring:
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         params = inspect.signature(Fuzzer.__init__).parameters
-        assert list(params)[-2:] == ["burn_front", "position_arena"]
+        assert list(params)[-4:] == [
+            "burn_front",
+            "position_arena",
+            "pos_canary",
+            "pos_round_robin",
+        ]
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
+        assert params["pos_canary"].default is False
+        assert params["pos_round_robin"].default is False
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
@@ -540,12 +676,13 @@ class TestFuzzerWiring:
             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "Fuzzer"
         ]
         assert calls
+        expected = {"burn_front", "position_arena", "pos_canary", "pos_round_robin"}
         for c in calls:
             kw = {k.arg for k in c.keywords}
-            assert {"burn_front", "position_arena"} <= kw
+            assert expected <= kw
         dests = _fuzz_parser_dests(ast.parse(inspect.getsource(commands)))
-        assert {"burn_front", "position_arena"} <= dests
-        assert {"burn_front", "position_arena"} <= set(commands._HAIL_MARY_FLAGS)
+        assert expected <= dests
+        assert expected <= set(commands._HAIL_MARY_FLAGS)
 
     def test_settle_skips_delocalised_ops(self):
         from fuzzer_tool.services.fuzzer import Fuzzer
@@ -588,9 +725,26 @@ class TestRealConstruction:
         assert isinstance(f._burn_front, BurnFrontPositionScheduler)
         assert "burn_front" in f._position_arena.pool()
 
+    def test_position_arena_implies_pos_canary_and_round_robin(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_canary, PositionCanaryScheduler)
+        assert isinstance(f._pos_round_robin, PositionRoundRobinScheduler)
+        assert "canary" in f._position_arena.pool()
+        assert "round_robin" in f._position_arena.pool()
+
     def test_burn_front_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, burn_front=True)
         assert isinstance(f._burn_front, BurnFrontPositionScheduler)
+        assert f._position_arena is None
+
+    def test_pos_canary_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_canary=True)
+        assert isinstance(f._pos_canary, PositionCanaryScheduler)
+        assert f._position_arena is None
+
+    def test_pos_round_robin_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_round_robin=True)
+        assert isinstance(f._pos_round_robin, PositionRoundRobinScheduler)
         assert f._position_arena is None
 
     def test_hail_mary_enables_the_arena_and_burn_front(self, monkeypatch):
@@ -605,6 +759,8 @@ class TestRealConstruction:
         args = seen["a"]
         assert args.position_arena is True
         assert args.burn_front is True
+        assert args.pos_canary is True
+        assert args.pos_round_robin is True
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 
     def test_position_arena_without_elo_warns_and_constructs(self, tmp_path, caplog):

@@ -1077,10 +1077,14 @@ class BayesianEloTracker(RoundRecorderMixin):
         played enough games yet.
 
         The operator arena (``canary_name="canary"``), seed arena
-        (``canary_name="seed_canary"``) and position arena
-        (``canary_name="pos_uniform"``, a baseline rather than a
-        worst-in-class floor) are disjoint; each call only checks
-        strategies belonging to the corresponding arena.
+        (``canary_name="seed_canary"``) and position arena are disjoint;
+        each call only checks strategies belonging to the corresponding
+        arena. The position arena has two floors: ``canary_name=
+        "pos_uniform"`` (a baseline rather than a worst-in-class floor,
+        always available once the arena is running) and, when
+        ``--pos-canary``/``--position-arena`` is on, ``canary_name=
+        "pos_canary"`` (see ``core/schedulers/pos_canary.py``), a real
+        argmin floor like the operator/seed canaries.
 
         Returns:
             ``(strategy, strategy_mu, canary_mu)`` tuples, worst offender

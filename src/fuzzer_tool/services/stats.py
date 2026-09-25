@@ -589,6 +589,7 @@ class StatsReporter:
         print(f"  Executions:        {f.exec_count:,}")
         print(f"  Avg eps:           {eps:.1f}")
         print(f"  Peak eps:          {f._peak_eps:.1f}")
+        print(f"  Crashes:           {f.crash_count} ({len(f.crash_sigs)} unique signatures)")
         print(f"  Corpus:            {len(f.corpus)} entries")
         print(f"  Seeds added:       {f._total_corpus_attempts}")
         print(f"  Duplicates rejected: {f._duplicate_reject_count}")

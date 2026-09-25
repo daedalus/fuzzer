@@ -595,6 +595,8 @@ def cmd_fuzz(args):
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
         position_arena=getattr(args, "position_arena", False),
+        pos_canary=getattr(args, "pos_canary", False),
+        pos_round_robin=getattr(args, "pos_round_robin", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -1932,6 +1934,8 @@ _HAIL_MARY_FLAGS = (
     "reseed_on_stall",
     "fractal_diversity",
     "burn_front",
+    "pos_canary",
+    "pos_round_robin",
     "position_arena",
 )
 
@@ -2377,12 +2381,33 @@ def main() -> int:
         "alone it is one more candidate in the uniform position pick.",
     )
     fuzz_parser.add_argument(
+        "--pos-canary",
+        action="store_true",
+        help="Enable the position-arena canary: the position-selection counterpart of "
+        "--canary-scheduler/--seed-canary-scheduler, a deliberately worst-in-class "
+        "proposer that always targets the offset bin with the lowest posterior "
+        "success-rate. Meant to run alongside --position-arena as a floor for the "
+        "pos_ tournament -- if a real proposer ranks at or below it, that is logged "
+        "as needing inspection. Implied by --position-arena, which always fields it.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-round-robin",
+        action="store_true",
+        help="Enable the position-arena round-robin scheduler: the position-selection "
+        "counterpart of --round-robin/--seed-round-robin-scheduler, deterministic "
+        "cycling through a seed's offset bins. Unlike --pos-canary this is a real "
+        "strategy, not a floor, so it needs no --position-arena to run: it is also "
+        "one more candidate in the uniform position pick, alongside burn-front. "
+        "Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
-        "crash-MI, region, burn-front) with uniform as the baseline arm, under pos_ "
-        "keys. Needs --elo; a proposer rated at or below uniform is logged. Implies "
-        "--burn-front. Enabled by --hail-mary.",
+        "crash-MI, region, burn-front, canary, round-robin) with uniform as the "
+        "baseline arm, under pos_ keys. Needs --elo; a proposer rated at or below "
+        "uniform (or, once running, the pos-canary floor) is logged. Implies "
+        "--burn-front, --pos-canary and --pos-round-robin. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

@@ -52,6 +52,7 @@ from fuzzer_tool.core.mutations.structured import _region
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.schedulers.pos_burn_front import BurnFrontPositionScheduler
+from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS, trace_mini_from_edges
 from fuzzer_tool.services.position_arena import PositionArena
 from fuzzer_tool.services.seed_picker import invasion_select
@@ -5253,9 +5254,25 @@ class OperatorEngine:
         burn_pos = (
             burn.propose(data, buf_len) if isinstance(burn, BurnFrontPositionScheduler) else None
         )
+        # pos_round_robin is a real, signal-free strategy (not a floor like
+        # pos_canary), so it earns a seat in the non-arena candidate pool
+        # too, the same standalone treatment burn_front gets here. canary
+        # is deliberately excluded: it exists only to be measured inside
+        # the arena tournament, not to steer real fuzzing.
+        rr = getattr(f, "_pos_round_robin", None)
+        rr_pos = rr.propose(data, buf_len) if isinstance(rr, PositionRoundRobinScheduler) else None
         candidates = [
             p
-            for p in [sens_pos, te_pos, phase_pos, mi_pos, crash_mi_pos, region_pos, burn_pos]
+            for p in [
+                sens_pos,
+                te_pos,
+                phase_pos,
+                mi_pos,
+                crash_mi_pos,
+                region_pos,
+                burn_pos,
+                rr_pos,
+            ]
             if p is not None
         ]
         if candidates:
@@ -5267,6 +5284,7 @@ class OperatorEngine:
                 f"[select_position] buf_len={buf_len} sens={sens_pos} te={te_pos} "
                 f"phase={phase_pos} "
                 f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} burn={burn_pos} "
+                f"round_robin={rr_pos} "
                 f"candidates={candidates} fallback={not candidates} byte_idx={byte_idx}"
             )
         return byte_idx

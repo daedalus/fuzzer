@@ -644,6 +644,41 @@ def _detect_ubsan(target_path: str) -> bool:
 _SELECTION_PROB_SOURCES: tuple[str, ...] = ("_exp3",)
 
 
+def _active_position_schedulers(f) -> list[str]:
+    """Position proposers whose feature is on right now (uniform excluded).
+
+    Same gates as ``PositionArena._add_trackers`` and ``OperatorEngine.
+    select_position``'s non-arena candidate list, so this reports
+    accurately whether or not ``--position-arena`` itself is running --
+    sensitivity/te/phase/mi/crash_mi/region all reach select_position
+    directly, arena or not. A plain function, not a Fuzzer method, so the
+    startup-banner tests' bare stand-in objects (see
+    test_regression_enabled_features_*.py) don't need to define it: every
+    field read here goes through ``getattr(f, ..., default)``.
+    """
+    names = []
+    if getattr(f, "_use_sensitivity", False) and getattr(f, "_sensitivity", None):
+        names.append("sensitivity")
+    te_on = getattr(f, "_use_transfer_entropy", False) and getattr(f, "_te", None)
+    if te_on:
+        names.append("te")
+        names.append("phase")
+    if getattr(f, "_use_mi", False) and getattr(f, "_mi", None):
+        names.append("mi")
+    cm = getattr(f, "_crash_mi", None)
+    if cm and cm.total_execs >= cm.min_observations:
+        names.append("crash-mi")
+    if getattr(f, "_use_region_profile", False):
+        names.append("region")
+    if getattr(f, "_burn_front", None) is not None:
+        names.append("burn-front")
+    if getattr(f, "_pos_canary", None) is not None:
+        names.append("canary")
+    if getattr(f, "_pos_round_robin", None) is not None:
+        names.append("round-robin")
+    return names
+
+
 class Fuzzer:
     def _warn_no_coverage(self) -> None:
         """Warn that an in-process target is running without coverage.
@@ -1319,6 +1354,16 @@ class Fuzzer:
         # it as one more candidate in select_position's uniform pick.
         burn_front=False,
         position_arena=False,
+        # Position arena's argmin floor (see core/schedulers/pos_canary.py).
+        # The op_canary/seed_canary counterpart for the position-selection
+        # Elo pool. --position-arena always fields it too, same as burn_front.
+        pos_canary=False,
+        # Position arena's deterministic baseline (see
+        # core/schedulers/pos_round_robin.py). The pos_ counterpart of
+        # --round-robin/--seed-round-robin-scheduler: reachable both as an
+        # Elo arm and, needing no arbiter, directly in select_position's
+        # non-arena candidate list alongside burn-front.
+        pos_round_robin=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2387,6 +2432,31 @@ class Fuzzer:
 
             self._burn_front = BurnFrontPositionScheduler(self._rng)
             log.info("Burn-front position scheduling enabled")
+        # Position-arena canary: deliberately worst-in-class position
+        # proposer, the position-selection counterpart of op_canary/
+        # seed_canary (see core/schedulers/pos_canary.py). The arena always
+        # fields it too, same as burn_front, since it exists only to be
+        # measured against the rest of the pos_ pool.
+        self._pos_canary = None
+        if pos_canary or position_arena:
+            from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
+
+            self._pos_canary = PositionCanaryScheduler()
+            log.info("Position-canary scheduling enabled (deliberately worst-in-class)")
+        # Position-arena round robin: deterministic cycling over a seed's
+        # offset bins, the position-selection counterpart of op_round_robin/
+        # seed_round_robin (see core/schedulers/pos_round_robin.py). Unlike
+        # pos_canary it needs no arbiter, so it is also reachable directly
+        # from select_position's non-arena candidate list alongside
+        # burn-front.
+        self._pos_round_robin = None
+        if pos_round_robin or position_arena:
+            from fuzzer_tool.core.schedulers.pos_round_robin import (
+                PositionRoundRobinScheduler,
+            )
+
+            self._pos_round_robin = PositionRoundRobinScheduler()
+            log.info("Position round-robin scheduling enabled")
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
@@ -2399,6 +2469,8 @@ class Fuzzer:
                 self,
                 region_fn=self._operators._region_weighted_position,
                 burn_front=self._burn_front,
+                canary=self._pos_canary,
+                round_robin=self._pos_round_robin,
             )
             log.info("Position arena enabled (Elo over pos_ strategies)")
         self._use_ecofuzz = ecofuzz
@@ -7648,8 +7720,9 @@ class Fuzzer:
                 mu,
                 canary_mu,
             )
-        # Position arena: uniform is the floor. A proposer rated at or below
-        # it is no better than picking offsets blindly.
+        # Position arena: uniform is the always-on baseline floor. A
+        # proposer rated at or below it is no better than picking offsets
+        # blindly.
         if getattr(self, "_position_arena", None) is not None:
             for strategy, mu, floor_mu in self._elo.strategies_below_canary("pos_uniform"):
                 log.warning(
@@ -7658,6 +7731,22 @@ class Fuzzer:
                     strategy_display_name(strategy),
                     mu,
                     floor_mu,
+                )
+        # Same check against the position arena's own deliberately-worst
+        # floor (see core/schedulers/pos_canary.py), when it's running --
+        # the pos_ counterpart of the operator/seed canary checks around
+        # this one. A real proposer at or below pos_canary is a stronger
+        # signal than merely tying uniform.
+        if getattr(self, "_pos_canary", None) is not None:
+            pos_flagged = self._elo.strategies_below_canary("pos_canary")
+            for strategy, mu, canary_mu in pos_flagged:
+                log.warning(
+                    "Elo meta-scheduler: position strategy %r rated %.1f, at or "
+                    "below the pos-canary floor (%.1f) -- this proposer "
+                    "needs inspection",
+                    strategy_display_name(strategy),
+                    mu,
+                    canary_mu,
                 )
         # Same check for the seed arena's own floor (see
         # core/schedulers/seed_canary.py) -- a separate tournament under
@@ -7879,9 +7968,7 @@ class Fuzzer:
         if seeds:
             parts.append("seeds=" + "+".join(seeds))
 
-        positions = []
-        if getattr(self, "_burn_front", None) is not None:
-            positions.append("burn-front")
+        positions = _active_position_schedulers(self)
         if getattr(self, "_position_arena", None) is not None:
             positions.append("arena")
         if positions:
@@ -8331,10 +8418,9 @@ class Fuzzer:
             groups["Seed selection"].append("strata")
         if getattr(self, "_use_seed_round_robin", False) and self._seed_round_robin:
             groups["Seed selection"].append("round-robin")
-        if getattr(self, "_burn_front", None) is not None:
-            groups["Position selection"].append("burn-front")
+        groups["Position selection"].extend(_active_position_schedulers(self))
         if getattr(self, "_position_arena", None) is not None:
-            groups["Position selection"].append("position-arena")
+            groups["Position selection"].append("arena")
 
         if self.markov_trained:
             groups["Mutation"].append("markov")

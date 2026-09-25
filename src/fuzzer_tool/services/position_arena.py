@@ -16,6 +16,11 @@ Arms::
     crash_mi     crash mutual-information map (after min_observations)
     region       statistical region profile
     burn_front   BurnFrontPositionScheduler (opt-in, --burn-front)
+    canary       PositionCanaryScheduler, deliberately worst-in-class floor
+                 (opt-in, --pos-canary; see core/schedulers/pos_canary.py)
+    round_robin  PositionRoundRobinScheduler, deterministic cycling
+                 (opt-in, --pos-round-robin; see
+                 core/schedulers/pos_round_robin.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
 matches. An arm that declines gets a uniform offset but is *charged under
@@ -31,8 +36,9 @@ Matches: a round's operators may land several positions. Every arm that
 served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
-``burn_front`` is credited off-policy on every settled round, whoever
-served the positions, like ``seed_canary`` on the seed side.
+``burn_front``, ``canary`` and ``round_robin`` are each credited
+off-policy on every settled round, whoever served the positions, like
+``seed_canary`` on the seed side.
 """
 
 from __future__ import annotations
@@ -57,6 +63,8 @@ POSITION_STRATEGY_NAMES = (
     "crash_mi",
     "region",
     "burn_front",
+    "canary",
+    "round_robin",
 )
 
 Gate = Callable[[], bool]
@@ -64,14 +72,24 @@ Arm = tuple[PositionScheduler, Gate]
 
 
 class PositionArena:
-    def __init__(self, f, region_fn, burn_front: PositionScheduler | None = None) -> None:
+    def __init__(
+        self,
+        f,
+        region_fn,
+        burn_front: PositionScheduler | None = None,
+        canary: PositionScheduler | None = None,
+        round_robin: PositionScheduler | None = None,
+    ) -> None:
         self._f = f
         self._uniform = UniformPosition(f._rng)
         self._burn_front = burn_front
+        self._canary = canary
+        self._round_robin = round_robin
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
-        if burn_front is not None:
-            self._arms[burn_front.name] = (burn_front, lambda: True)
+        for extra in (burn_front, canary, round_robin):
+            if extra is not None:
+                self._arms[extra.name] = (extra, lambda: True)
         self._used: list[str] = []
         self._seen_pool: list[str] = []
 
@@ -153,9 +171,10 @@ class PositionArena:
         weight: float,
         score: float,
     ) -> None:
-        """End of round: feed burn_front, then play the Elo matches."""
-        if self._burn_front is not None:
-            self._burn_front.record(data, offsets, outcome, weight)
+        """End of round: feed burn_front/canary/round_robin, then play the Elo matches."""
+        for extra in (self._burn_front, self._canary, self._round_robin):
+            if extra is not None:
+                extra.record(data, offsets, outcome, weight)
 
         served = list(dict.fromkeys(self._used))
         pool = self._seen_pool
