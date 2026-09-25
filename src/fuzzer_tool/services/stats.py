@@ -1231,6 +1231,8 @@ class StatsReporter:
         freed_kb = libc_mem.trim_heap() >> 10
         trim_str = f" | trim: {freed_kb >> 10}MB" if freed_kb >= 1024 else f" | trim: {freed_kb}KB"
 
+        seed_ovh_str = self._print_stats_seed_overhead_str(f)
+
         ops_str = ""
         if f._last_ops_used:
             recent = list(dict.fromkeys(reversed(f._last_ops_used)))[:3]
@@ -1255,7 +1257,6 @@ class StatsReporter:
             + self._print_stats_kuramoto_sync_str(f)
             + self._print_stats_seed_energy_gini_str(f)
             + self._print_stats_op_gini_str(f)
-            + self._print_stats_seed_overhead_str(f)
         )
 
         density_str = self._print_stats_density_str(f)
@@ -1520,7 +1521,7 @@ class StatsReporter:
         line = (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
+            f"time: {elapsed:.0f}s{rss_str}{seed_ovh_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
             f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{kc_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
             f"{bayes_str}{misc_str}"
@@ -1697,10 +1698,12 @@ class StatsReporter:
                     turnover = flux.turnover()
                     turnover_str = f"{turnover:.2f}" if turnover is not None else "n/a"
                     z = flux.z_score()
-                    z_str = f"{z:+.2f}{'*' if flux.is_significant_drift() else ''}" if z is not None else "n/a"
-                    parts.append(
-                        f"flux:gross={gross},net={net},turnover={turnover_str},z={z_str}"
+                    z_str = (
+                        f"{z:+.2f}{'*' if flux.is_significant_drift() else ''}"
+                        if z is not None
+                        else "n/a"
                     )
+                    parts.append(f"flux:gross={gross},net={net},turnover={turnover_str},z={z_str}")
             except (AttributeError, TypeError):
                 pass
 
