@@ -154,6 +154,10 @@ _MAX_SAMPLES = 16  # cap on candidates fed to one recovery attempt
 _MAX_ADVANCE_SEARCH = 64
 # Cap on per-input PC histories retained for the nondeterminism filter.
 _RUN_HISTORY_CAP = 256
+# Total history size, one unit per recorded site plus one per stored value.
+# The input cap alone let each entry hold every comparison site one drain
+# hit: ~1.9 MB per input and +337 MB per 2k execs on ffmpeg.
+_RUN_HISTORY_BUDGET = 1 << 18
 # Sentinel for "no pending window at all", so a legitimate None PC bucket
 # (a shim build that logs no PCs) is not confused with the empty case.
 _NO_CANDIDATE = object()
@@ -173,6 +177,11 @@ class _PCHistory:
 
     values: set[int] = field(default_factory=set)
     max_drain_width: int = 0
+
+
+def _history_cost(history: dict[_Site, _PCHistory]) -> int:
+    """Budget units one input's history holds: a site plus its values."""
+    return sum(1 + len(e.values) for e in history.values())
 
 
 class PRNGStateLearner:
@@ -196,6 +205,7 @@ class PRNGStateLearner:
         # state. The comparison against drain width is what separates it from
         # a site that merely compares several different constants every time.
         self._run_history: dict[int, dict[_Site, _PCHistory]] = {}
+        self._history_units = 0  # _history_cost() summed over _run_history
         # site -> the run of draws accumulated there but not yet folded into a
         # confirmed state. A drain typically contributes one value per site,
         # so a run is assembled across executions; bounded to _MAX_SAMPLES,
@@ -338,9 +348,25 @@ class PRNGStateLearner:
             entry = history.get(site)
             if entry is None:
                 entry = history[site] = _PCHistory()
+                self._history_units += 1
+            before = len(entry.values)
             entry.values.update(values)
+            self._history_units += len(entry.values) - before
             entry.max_drain_width = max(entry.max_drain_width, len(values))
+
+        self._trim_history(hash(input_data))
         return by_site
+
+    def _trim_history(self, keep: int) -> None:
+        """Evict oldest inputs, never *keep*, until within _RUN_HISTORY_BUDGET."""
+        if self._history_units <= _RUN_HISTORY_BUDGET:
+            return
+        for key in list(self._run_history):
+            if self._history_units <= _RUN_HISTORY_BUDGET:
+                return
+            if key == keep:
+                continue
+            self._history_units -= _history_cost(self._run_history.pop(key))
 
     def _best_site(self) -> Any:
         """The site whose pending window is the most promising candidate run.
@@ -380,7 +406,8 @@ class PRNGStateLearner:
             if len(self._run_history) >= _RUN_HISTORY_CAP:
                 # Oldest insertion first (dicts preserve order). This is a
                 # coincidence filter, not a ledger, so plain FIFO is enough.
-                self._run_history.pop(next(iter(self._run_history)))
+                old = self._run_history.pop(next(iter(self._run_history)))
+                self._history_units -= _history_cost(old)
             history = {}
             self._run_history[key] = history
         return history

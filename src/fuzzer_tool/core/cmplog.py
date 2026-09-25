@@ -987,8 +987,11 @@ class CmplogCollector:
                 len(self.pairs),
             )
 
-        if new_pairs:
-            n_hash = self.detect_hash_candidates(new_pairs)
+        # Eviction above already ran: flag only pairs still held, or the
+        # flag outlives its pair and hash_candidates grows without bound.
+        held = [p for p in new_pairs if p in self._pair_set]
+        if held:
+            n_hash = self.detect_hash_candidates(held)
             if n_hash:
                 log.info("Cmplog: flagged %d hash-like pairs (skipped by encoder)", n_hash)
 
@@ -1056,6 +1059,7 @@ class CmplogCollector:
             # collector no longer holds.
             self._pair_occurrence.pop(p, None)
             self._pair_pc.pop(p, None)
+            self.hash_candidates.discard(p)
             self.evicted_pair_count += 1
         self.pairs = [p for i, p in enumerate(self.pairs) if i not in victims]
         if self._pending_redqueen:
