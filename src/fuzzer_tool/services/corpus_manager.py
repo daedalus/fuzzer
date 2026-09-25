@@ -1160,7 +1160,22 @@ class CorpusManager:
 
     def auto_minimize_corpus(self):
         f = self.f
-        if f.ga or f.qea:
+        # GA feeds f.corpus/f.seed_meta the same as the default path (see
+        # save_to_corpus: the `if f.ga:` block runs alongside, not instead
+        # of, the corpus.append) -- GALifecycle's own population is a
+        # separate list of Individuals keyed on seed bytes/seed_key, not on
+        # f.corpus indices or f.seed_meta, so pruning f.corpus never touches
+        # it. The old blanket `if f.ga: return` predates that and just
+        # silently disabled --minimize-every-execs for every GA run.
+        #
+        # QEA is different only in standalone mode: save_to_corpus() skips
+        # the corpus.append() there (QEA's own population is the sole seed
+        # source), so f.corpus stays frozen at the initial seed set and
+        # there's nothing live to minimize. Under `--elo all` (or any
+        # _use_elo path), QEA's bypass is lifted and f.corpus grows and is
+        # read by the corpus-based seed strategies -- same condition
+        # save_to_corpus() itself uses to decide whether to append.
+        if f.qea and not getattr(f, "_use_elo", False):
             return
         if not f.corpus:
             return

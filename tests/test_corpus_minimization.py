@@ -395,8 +395,12 @@ class TestQEACorpusInteraction:
         assert f.corpus[-1] == data
         assert data in f.seed_meta
 
-    def test_auto_minimize_skips_under_qea(self):
-        """auto_minimize_corpus is a no-op when QEA is active (seed_meta preserved)."""
+    def test_auto_minimize_skips_under_standalone_qea(self):
+        """auto_minimize_corpus is a no-op under standalone QEA (no --elo).
+
+        f.corpus is frozen at the initial seed set there (save_to_corpus
+        never appends to it), so there's nothing live to minimize.
+        """
         f = MockFuzzer(Path(tempfile.mkdtemp()))
         f.qea = object()  # truthy — QEA is active
         mgr = CorpusManager(f)
@@ -416,6 +420,57 @@ class TestQEACorpusInteraction:
         assert seed_a in f.seed_meta
         assert seed_b in f.seed_meta
         assert f.seed_meta[seed_a]["fuzz_count"] == 10
+
+    def test_auto_minimize_runs_under_qea_with_elo_arbitration(self):
+        """Regression: `--qea --elo all` must still be able to minimize.
+
+        Same condition as save_to_corpus()'s append gate: once Elo lifts
+        QEA's corpus bypass, f.corpus is the real live pool again and
+        stale/redundant seeds should be pruned like any other run.
+        """
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        f.qea = object()  # truthy — QEA is active
+        f._use_elo = True  # Elo seed arbitration on (e.g. --elo all)
+        mgr = CorpusManager(f)
+
+        keep = b"qea_elo_keep_" + b"x" * 60
+        stale = b"qea_elo_stale_" + b"y" * 60
+        f.corpus = [keep, stale]
+        f.seed_meta = {
+            keep: {"fuzz_count": 10, "coverage_edges": 5, "added_at": 100.0, "input_size": len(keep)},
+            stale: {"fuzz_count": 200, "coverage_edges": 0, "added_at": 200.0, "input_size": len(stale)},
+        }
+        f.max_corpus = 1
+
+        mgr.auto_minimize_corpus()
+
+        assert len(f.corpus) == 1, "QEA+Elo run did not minimize down to max_corpus"
+        assert keep in f.corpus
+
+    def test_auto_minimize_runs_under_ga(self):
+        """Regression: --ga must not silently disable --minimize-every-execs.
+
+        GALifecycle keeps its own population of Individuals (seed bytes +
+        seed_key), independent of f.corpus/f.seed_meta indices, so pruning
+        f.corpus is safe under GA.
+        """
+        f = MockFuzzer(Path(tempfile.mkdtemp()))
+        f.ga = object()  # truthy — GA is active
+        mgr = CorpusManager(f)
+
+        keep = b"ga_keep_" + b"x" * 60
+        stale = b"ga_stale_" + b"y" * 60
+        f.corpus = [keep, stale]
+        f.seed_meta = {
+            keep: {"fuzz_count": 10, "coverage_edges": 5, "added_at": 100.0, "input_size": len(keep)},
+            stale: {"fuzz_count": 200, "coverage_edges": 0, "added_at": 200.0, "input_size": len(stale)},
+        }
+        f.max_corpus = 1
+
+        mgr.auto_minimize_corpus()
+
+        assert len(f.corpus) == 1, "--ga still disables corpus minimization"
+        assert keep in f.corpus
 
 
 class TestKnapsackRetention:
