@@ -1037,6 +1037,25 @@ class StatsReporter:
             return ""
         return f" | op-gini: {g:.2f}"
 
+    def _print_stats_seed_overhead_str(self, f) -> str:
+        """Peak RSS divided by the live corpus size, in MB/seed.
+
+        Pure diagnostic readout of per-seed memory overhead -- nothing in
+        the scheduler or scoring path reads it, same status as seed-gini
+        and op-gini above. Needs at least one corpus seed to be meaningful
+        (avoids a division by zero during startup, before any seed has
+        been loaded).
+        """
+        rss_kb = getattr(f, "_peak_rss", None)
+        corpus = getattr(f, "corpus", None)
+        if not rss_kb or not corpus:
+            return ""
+        n = len(corpus)
+        if n <= 0:
+            return ""
+        mb_per_seed = (rss_kb / 1024.0) / n
+        return f" | seed-ovh: {mb_per_seed:.2f}MB/seed"
+
     def _print_stats_continuum_str(self, f) -> str:
         """Format the steady continuum diagnostics, when the field exists."""
         field = getattr(f, "_continuum", None)
@@ -1236,6 +1255,7 @@ class StatsReporter:
             + self._print_stats_kuramoto_sync_str(f)
             + self._print_stats_seed_energy_gini_str(f)
             + self._print_stats_op_gini_str(f)
+            + self._print_stats_seed_overhead_str(f)
         )
 
         density_str = self._print_stats_density_str(f)
