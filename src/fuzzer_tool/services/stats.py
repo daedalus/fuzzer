@@ -33,6 +33,7 @@ from fuzzer_tool.core.analyzers.analyzer_elo import (
 from fuzzer_tool.core.circular_stats import PhaseConcentration
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.kalman import RobustKF
+from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
 from fuzzer_tool.services.stats_reporter import (
@@ -1000,6 +1001,21 @@ class StatsReporter:
             return ""
         return f" | seed-gini: {g:.2f}"
 
+    def _print_stats_drift_str(self, f) -> str:
+        """Byte drift of the live corpus from its seed set (core/pool_drift.py).
+
+        dH > 0: pool drifting toward noise; dH < 0: concentrating.
+        js: how far it moved, in [0, 1] bits.
+        """
+        drift = getattr(f, "_pool_drift", None)
+        if not isinstance(drift, PoolDrift):
+            return ""
+        drift.sync(f.corpus)
+        r = drift.reading()
+        if r is None:
+            return ""
+        return f" | drift: dH={r.delta_bits:+.2f} js={r.js_bits:.3f}"
+
     def _print_stats_op_gini_str(self, f) -> str:
         """Gini coefficient of per-operator selection attempts.
 
@@ -1489,7 +1505,7 @@ class StatsReporter:
             f"{bayes_str}{misc_str}"
             f"{poisson_str}"
             f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
-            f"{ent_str}{simp_str}{edge_gini_str}{byte_ent_str}"
+            f"{ent_str}{simp_str}{edge_gini_str}{byte_ent_str}{self._print_stats_drift_str(f)}"
             f"{rate_str}{fmt_str}{perf_str}{pt_str}{lbr_str}"
             f"{hf_str}{ops_str}"
         )

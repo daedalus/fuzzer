@@ -36,6 +36,7 @@ from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.periodicity import estimate_record_size
+from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.size_bloat import seed_size_bloat
@@ -373,6 +374,11 @@ class CorpusManager:
         f._edge_tracker = EdgeTracker(map_size=f.map_size, morris_mode=morris_mode)
         f._corpus_size_history: array = array("I")
         f._seed_size_moments = RunningMoments(window=200)
+
+        # Freeze the seed byte distribution after transforms/boost, before
+        # any admission; status and report compare the live pool to it.
+        f._pool_drift = PoolDrift()
+        f._pool_drift.sync(f.corpus)
 
         if f.resume:
             self.load_state()

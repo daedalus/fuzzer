@@ -31,7 +31,7 @@
 </g>
 <g id="clust5" class="cluster">
 <title>cluster_fb</title>
-<path fill="#f2f7fa" stroke="#b9cbd8" stroke-width="1.3" d="M171,-110.5C171,-110.5 687,-110.5 687,-110.5 693,-110.5 699,-116.5 699,-122.5 699,-122.5 699,-316 699,-316 699,-322 693,-328 687,-328 687,-328 171,-328 171,-328 165,-328 159,-322 159,-316 159,-316 159,-122.5 159,-122.5 159,-116.5 165,-110.5 171,-110.5"/>
+<path fill="#f2f7fa" stroke="#b9cbd8" stroke-width="1.3" d="M171,-105C171,-105 687,-105 687,-105 693,-105 699,-111 699,-117 699,-117 699,-316 699,-316 699,-322 693,-328 687,-328 687,-328 171,-328 171,-328 165,-328 159,-322 159,-316 159,-316 159,-117 159,-117 159,-111 165,-105 171,-105"/>
 <text text-anchor="middle" x="256.5" y="-315.2" font-family="Helvetica Bold" font-size="11.00" fill="#37596e">4 · Feedback &#160;&#160;— &#160;&#160;what came back</text>
 </g>
 <g id="clust6" class="cluster">
@@ -256,16 +256,17 @@
 <!-- infoth -->
 <g id="node13" class="node">
 <title>infoth</title>
-<path fill="#d6e6f0" stroke="transparent" stroke-width="0" d="M450.5,-167.5C450.5,-167.5 201.5,-167.5 201.5,-167.5 195.5,-167.5 189.5,-161.5 189.5,-155.5 189.5,-155.5 189.5,-130.5 189.5,-130.5 189.5,-124.5 195.5,-118.5 201.5,-118.5 201.5,-118.5 450.5,-118.5 450.5,-118.5 456.5,-118.5 462.5,-124.5 462.5,-130.5 462.5,-130.5 462.5,-155.5 462.5,-155.5 462.5,-161.5 456.5,-167.5 450.5,-167.5"/>
-<text text-anchor="start" x="201.5" y="-151.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">mi · transfer_entropy · renyi · sensitivity</text>
-<text text-anchor="start" x="201.5" y="-140.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">structure_function · critical_slowing · running_stats</text>
-<text text-anchor="start" x="201.5" y="-129.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">perf_event (HW counters) · pll (lock vs stall)</text>
+<path fill="#d6e6f0" stroke="transparent" stroke-width="0" d="M450.5,-173C450.5,-173 201.5,-173 201.5,-173 195.5,-173 189.5,-167 189.5,-161 189.5,-161 189.5,-125 189.5,-125 189.5,-119 195.5,-113 201.5,-113 201.5,-113 450.5,-113 450.5,-113 456.5,-113 462.5,-119 462.5,-125 462.5,-125 462.5,-161 462.5,-161 462.5,-167 456.5,-173 450.5,-173"/>
+<text text-anchor="start" x="201.5" y="-157" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">mi · transfer_entropy · renyi · sensitivity</text>
+<text text-anchor="start" x="201.5" y="-146" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">structure_function · critical_slowing · running_stats</text>
+<text text-anchor="start" x="201.5" y="-135" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">perf_event (HW counters) · pll (lock vs stall)</text>
+<text text-anchor="start" x="201.5" y="-124" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">pool_drift (corpus vs seed bytes)</text>
 </g>
 <!-- cov&#45;&gt;infoth -->
 <g id="edge14" class="edge">
 <title>cov&#45;&gt;infoth</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M323.56,-245.49C324.05,-225.45 324.74,-196.51 325.26,-174.66"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="327.64,-174.69 325.43,-167.83 322.89,-174.57 327.64,-174.69"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M323.56,-245.49C324.01,-227.06 324.63,-201.11 325.13,-180.06"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="327.52,-179.98 325.3,-173.13 322.76,-179.87 327.52,-179.98"/>
 </g>
 <!-- ledger -->
 <g id="node14" class="node">
@@ -341,8 +342,8 @@
 <!-- infoth&#45;&gt;obs -->
 <g id="edge23" class="edge">
 <title>infoth&#45;&gt;obs</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M287.38,-118.48C257.57,-100.31 216.63,-75.37 187.6,-57.69"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="188.64,-55.53 181.59,-54.03 186.16,-59.6 188.64,-55.53"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M277.99,-112.75C249.4,-95.34 213.73,-73.61 187.65,-57.72"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="188.61,-55.52 181.57,-54.01 186.14,-59.58 188.61,-55.52"/>
 </g>
 <!-- ledger&#45;&gt;picker -->
 <g id="edge16" class="edge">

@@ -92,7 +92,7 @@ digraph fuzzer_tool {
              fillcolor="#c6dcea", fontcolor="#22475c"];
         cmplog [label="core/cmplog.py\lpairs + tokens · fired/asserted\lper callback and per call site (PC)\lwalls · progress reward\l",
                 fillcolor="#c6dcea", fontcolor="#22475c"];
-        infoth [label="mi · transfer_entropy · renyi · sensitivity\lstructure_function · critical_slowing · running_stats\lperf_event (HW counters) · pll (lock vs stall)\l",
+        infoth [label="mi · transfer_entropy · renyi · sensitivity\lstructure_function · critical_slowing · running_stats\lperf_event (HW counters) · pll (lock vs stall)\lpool_drift (corpus vs seed bytes)\l",
                 fillcolor="#d6e6f0", fontcolor="#22475c"];
         ledger [label="core/edge_ledger.py\lconfirmed ids → families (id >> ctx)\lfrontier · trust · tag occupancy\l",
                 fillcolor="#d6e6f0", fontcolor="#22475c"];

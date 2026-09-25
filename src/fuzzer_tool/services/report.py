@@ -12,6 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_elo import Arena, strategy_arena, strategy_display_name
+from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.core.temporal_join import join_streams
 
@@ -1721,6 +1722,18 @@ def _entropy_metrics(f) -> str:
             _ent = _corpus_byte_entropy(f.corpus)
         if _ent is not None:
             lines.append(f"  Corpus byte entropy: {_ent:.2f} bits (max=8.0)")
+
+    # Live pool vs frozen seed set (core/pool_drift.py)
+    drift = getattr(f, "_pool_drift", None)
+    if isinstance(drift, PoolDrift):
+        drift.sync(f.corpus)
+        r = drift.reading()
+        if r is not None:
+            lines.append(
+                f"  Pool drift vs seeds: dH={r.delta_bits:+.3f} bits, JS={r.js_bits:.4f} bits, "
+                f"novel mass={r.novel_mass:.1%}"
+            )
+            lines.append(f"  Inter-seed diversity: I(seed; byte)={r.mutual_info:.3f} bits")
 
     return "\n".join(lines)
 
