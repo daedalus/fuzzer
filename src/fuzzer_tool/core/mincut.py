@@ -26,8 +26,8 @@ capacity flow network — O(V*E^2) worst case but at most E augmentations
 (unit capacities bound total flow by min(out-degree(sources),
 in-degree(sinks))), and this is a diagnostic/opt-in query intended to run
 on demand, not per-iteration. Simplicity over asymptotic optimality
-(Dinic's, push-relabel), same tradeoff already made for
-``dominators.py``'s CHK over Lengauer-Tarjan.
+(Dinic's, push-relabel); revisit if adversarial ICFGs make it hot, as
+``dominators.py`` did (CHK -> Semi-NCA).
 
 Multi-source/multi-sink is handled via a super-source/super-sink with
 capacity effectively infinite (``len(edges) + 1``, provably larger than
