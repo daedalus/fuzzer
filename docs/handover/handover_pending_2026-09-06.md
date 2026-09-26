@@ -339,6 +339,9 @@ in the signature.
 `services/fuzzer.py:2058` declares it, `:4309` populates it via
 `SecretaryStopping.observe(a/(a+b))`, and the only reader is
 `services/stats.py:943` — display. Nothing stops, skips or reweights on it.
+(2026-09-26: false when written -- `_seed_secretary` cut seed weights 100x and
+`_corpus_secretary` deferred minimization. Both consumers removed; see
+`handover_bandit_stopping_search_2026-09-02.md` §1.)
 
 The companion finding is that `core/secretary.py` **is not a stopping rule** as
 written: its rank term cannot bind, and the surviving clause is a clock rather
@@ -671,9 +674,9 @@ its own before/after.
     over-conservative; 10c the `rng.random() < p` coin-flip idiom defeats
     enumeration (~20 sites, follow-up to the tigerbeetle P1-5 work); 10d the
     pairwise Markov chain is first-order only; 10e the grammar's full derivation
-    space is unreachable; 10g `byte_shuffle` is registered but only the byte
-    version exists; 10h `core/markov.py` state transfer across runs is
-    unverified. §10a, §10a.1 and §10f are done; §10i is a **verified no-op** —
+    space is unreachable. (2026-09-26: 10g closed by decision -- the arms stay
+    separate; 10h done -- `markov.to_dict`/`from_dict` persisted via
+    `_state_store`.) §10a, §10a.1 and §10f are done; §10i is a **verified no-op** —
     the literal fix proposed there changes nothing for any blend weight below
     1.0, and the one real (narrower) edge case found instead is recorded in
     place. Do not re-propose 10i.

@@ -1023,6 +1023,12 @@ it and, where applicable, what is still open.
 | `suite_segfault_z3_finalization_2026-08-16.md` | §10 | closed |
 | `test_shm_hang_2026-08-14.md` | §10 | closed |
 
+**2026-09-26 re-audit.** All but the catalogue survey (re-added in `b3d91a7c`)
+were restored (`4c021daa`), re-verified against live source and pruned to open
+items; see `handover_FINDINGS.md` §"2026-09-26 restore". Corrections to the table:
+GARCH and QEA are **not** closed (their A/Bs never ran); SJT, `test_shm_hang`,
+`suite_segfault_z3` and minimax-alphabeta had nothing open and stay removed.
+
 **The ledger exists because of a specific failure.** A document that is pruned
 repeatedly needs a per-round "what was removed" record, because a closed item
 still needs a pointer to where its artifacts live or the next person re-proposes
