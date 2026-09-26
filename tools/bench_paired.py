@@ -150,6 +150,10 @@ ARMS: dict[str, list[str]] = {
     "strata-a1-elo": ["--confirm-novelty", "--elo", "--mc-bandit"],
     "strata-a3": ["--confirm-novelty", "--elo", "--mc-bandit", "--op-strata"],
     "strata-a4": ["--confirm-novelty", "--elo", "--mc-bandit", "--strata", "--op-strata"],
+    # Gravity splice donor (core/gravity.py). Only the six corpus-crossing
+    # operators change; read "Gravity splice: ... hits, refits" in a cell's
+    # log before trusting a null -- a closed fit gate means prior exponents.
+    "splice-gravity": ["--splice-donor", "gravity"],
 }
 
 STRATA_ARMS = (
@@ -180,6 +184,7 @@ ARM_BASELINES: dict[str, str] = {
     "strata-a1-elo": "strata-a1",
     "strata-a3": "strata-a1-elo",
     "strata-a4": "strata-a1-elo",
+    "splice-gravity": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
