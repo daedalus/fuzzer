@@ -78,6 +78,99 @@ from fuzzer_tool.core.elf import (  # noqa: E402
 )
 
 
+class _DenseEdgeCounter:
+    """dict[int, int]-compatible counter backed by a fixed-size numpy array.
+
+    Only valid for the "position" key space, where keys are bounded slot
+    indices in ``[0, size)`` (bitmap/ptrace coverage). record_edges() is
+    called once per execution and, on that path, touches these counters
+    for every hit edge -- a plain dict scatters that across a Python hash
+    table whose backing store grows unboundedly with distinct edges seen,
+    while a ``size``-length array (``map_size`` is bounded, typically
+    8192-65536) stays small enough to remain resident in L2 for the life
+    of the run. Missing keys read as 0, mirroring the defaultdict(int)
+    semantics ``_edge_owner_count`` already relied on; ``.items()``/
+    ``.values()``/``len()`` only see entries that were ever set nonzero,
+    matching plain-dict semantics for these always-nonzero counters.
+    """
+
+    __slots__ = ("_arr",)
+
+    def __init__(self, size: int, dtype=None):
+        self._arr = np.zeros(size, dtype=dtype or np.uint32)
+
+    def __getitem__(self, key: int) -> int:
+        if 0 <= key < self._arr.size:
+            return int(self._arr[key])
+        return 0
+
+    def __setitem__(self, key: int, value: int) -> None:
+        if 0 <= key < self._arr.size:
+            self._arr[key] = value
+
+    def __contains__(self, key: int) -> bool:
+        return 0 <= key < self._arr.size and bool(self._arr[key])
+
+    def __len__(self) -> int:
+        return int(np.count_nonzero(self._arr))
+
+    def __bool__(self) -> bool:
+        return bool(np.any(self._arr))
+
+    def __eq__(self, other) -> bool:
+        if isinstance(other, _DenseEdgeCounter):
+            if self._arr.size == other._arr.size:
+                return bool(np.array_equal(self._arr, other._arr))
+            other = dict(other.items())
+        if isinstance(other, dict):
+            return dict(self.items()) == other
+        return NotImplemented
+
+    def get(self, key: int, default=0):
+        if 0 <= key < self._arr.size:
+            return int(self._arr[key])
+        return default
+
+    def items(self):
+        idx = np.flatnonzero(self._arr)
+        for i in idx.tolist():
+            yield i, int(self._arr[i])
+
+    def keys(self):
+        return np.flatnonzero(self._arr).tolist()
+
+    def values(self):
+        idx = np.flatnonzero(self._arr)
+        return (int(v) for v in self._arr[idx])
+
+    def clear(self) -> None:
+        self._arr.fill(0)
+
+    def bulk_add(self, indices, values) -> None:
+        """Vectorized ``self[i] += v`` for each (i, v) pair.
+
+        ``indices`` must not contain duplicates within one call -- plain
+        fancy-index ``+=`` silences repeats instead of accumulating them.
+        record_edges() only ever calls this with indices drawn from
+        ``np.flatnonzero()`` (bitmap path) or a Python set (owner-count
+        path), both already duplicate-free.
+        """
+        self._arr[indices] += np.asarray(values, dtype=self._arr.dtype)
+
+    def max_at(self, indices) -> int:
+        """Max current value across ``indices``, or 0 if empty."""
+        if len(indices) == 0:
+            return 0
+        return int(self._arr[indices].max())
+
+    def resized(self, new_size: int) -> "_DenseEdgeCounter":
+        """Copy into a new array of ``new_size``, preserving the overlap."""
+        out = _DenseEdgeCounter(new_size, dtype=self._arr.dtype)
+        n = min(new_size, self._arr.size)
+        out._arr[:n] = self._arr[:n]
+        return out
+
+
 def _clamp_entropy(value: float) -> float:
     """Pin a counts-form entropy to its non-negative range.
 
@@ -767,19 +860,53 @@ class EdgeTracker:
             if not morris_mode:
                 bitmap = classify_counts(bitmap)
             arr = np.frombuffer(bitmap, dtype=np.uint8, count=min(len(bitmap), self.map_size))
-            for i in np.flatnonzero(arr):
-                i = int(i)
-                raw_val = int(arr[i])
-                val = int(round(morris_estimate(raw_val))) if morris_mode else raw_val
-                new_edges.add(i)
-                hc[i] = val
-                self._aggregate_totals[i] = self._aggregate_totals.get(i, 0) + val
-                self._aggregate_total_count += val
-                old_gh = self._global_edge_hits.get(i, 0)
-                self._global_edge_hits[i] = old_gh + val
+            idx = np.flatnonzero(arr)
+            dense = isinstance(self._aggregate_totals, _DenseEdgeCounter) and isinstance(
+                self._global_edge_hits, _DenseEdgeCounter
+            )
+            if idx.size and dense:
+                # Keep the whole per-exec accumulation inside two small,
+                # map_size-bounded arrays (see _DenseEdgeCounter) instead of
+                # scattering four dict touches per hit edge across a Python
+                # hash table -- this loop runs once per execution.
+                raw_vals = arr[idx].astype(np.int64)
+                if morris_mode:
+                    vals = np.fromiter(
+                        (int(round(morris_estimate(int(rv)))) for rv in raw_vals),
+                        dtype=np.int64,
+                        count=raw_vals.size,
+                    )
+                else:
+                    vals = raw_vals
+                idx_list = idx.tolist()
+                vals_list = vals.tolist()
+                new_edges.update(idx_list)
+                for i, v in zip(idx_list, vals_list, strict=True):
+                    hc[i] = v
+                self._aggregate_totals.bulk_add(idx, vals)
+                self._aggregate_total_count += int(vals.sum())
+                self._global_edge_hits.bulk_add(idx, vals)
                 self._spectrum_dirty = True
-                if self._global_edge_hits[i] > self.max_hit_count:
-                    self.max_hit_count = self._global_edge_hits[i]
+                cur_max = self._global_edge_hits.max_at(idx)
+                if cur_max > self.max_hit_count:
+                    self.max_hit_count = cur_max
+            elif idx.size:
+                # Fallback: one or both counters got downgraded back to a
+                # plain dict (e.g. a "mixed" key-space run, or a caller that
+                # replaced the attribute directly). Same accounting, just
+                # not vectorized.
+                for i in idx.tolist():
+                    raw_val = int(arr[i])
+                    val = int(round(morris_estimate(raw_val))) if morris_mode else raw_val
+                    new_edges.add(i)
+                    hc[i] = val
+                    self._aggregate_totals[i] = self._aggregate_totals.get(i, 0) + val
+                    self._aggregate_total_count += val
+                    old_gh = self._global_edge_hits.get(i, 0)
+                    self._global_edge_hits[i] = old_gh + val
+                    self._spectrum_dirty = True
+                    if self._global_edge_hits[i] > self.max_hit_count:
+                        self.max_hit_count = self._global_edge_hits[i]
 
         else:
             # New sparse path: hit_edges is a set of edge IDs
@@ -815,8 +942,14 @@ class EdgeTracker:
         # idempotent: re-executing the same seed must not inflate its
         # ownership share.
         already_owned = self.seed_edges[seed_key]
-        for edge_id in new_edges - already_owned:
-            self._edge_owner_count[edge_id] = self._edge_owner_count[edge_id] + 1
+        new_owners = new_edges - already_owned
+        if isinstance(self._edge_owner_count, _DenseEdgeCounter):
+            if new_owners:
+                owner_idx = np.fromiter(new_owners, dtype=np.int64, count=len(new_owners))
+                self._edge_owner_count.bulk_add(owner_idx, 1)
+        else:
+            for edge_id in new_owners:
+                self._edge_owner_count[edge_id] = self._edge_owner_count[edge_id] + 1
 
         self.seed_edges[seed_key].update(new_edges)
 
@@ -859,6 +992,8 @@ class EdgeTracker:
         """Record which key space record_edges() is populating."""
         if self._key_space is None:
             self._key_space = space
+            if space == "position":
+                self._make_dense()
         elif self._key_space != space:
             # Both spaces share the same dicts, so mixing them corrupts every
             # per-edge statistic. Warn rather than raise: the tracker is not
@@ -871,6 +1006,36 @@ class EdgeTracker:
                 self._key_space,
             )
             self._key_space = "mixed"
+
+    def _densify(self, d) -> "_DenseEdgeCounter":
+        """Convert a dict/defaultdict[int,int] into an array-backed counter.
+
+        Preserves existing entries (e.g. one just restored by from_dict()
+        from a snapshot taken in the "position" key space). Safe to call
+        on an already-dense counter.
+        """
+        dc = _DenseEdgeCounter(self.map_size)
+        for k, v in d.items():
+            if 0 <= k < self.map_size:
+                dc[k] = v
+        return dc
+
+    def _make_dense(self) -> None:
+        """Switch the global per-edge counters to array-backed storage.
+
+        Only valid for the "position" key space (keys are bounded slot
+        indices < map_size). record_edges() touches these counters every
+        execution, so keeping them in a fixed-size array instead of a
+        Python dict lets them stay resident in cache for the life of the
+        run instead of scattering across a hash table. No-op for entries
+        already array-backed.
+        """
+        if not isinstance(self._global_edge_hits, _DenseEdgeCounter):
+            self._global_edge_hits = self._densify(self._global_edge_hits)
+        if not isinstance(self._aggregate_totals, _DenseEdgeCounter):
+            self._aggregate_totals = self._densify(self._aggregate_totals)
+        if not isinstance(self._edge_owner_count, _DenseEdgeCounter):
+            self._edge_owner_count = self._densify(dict(self._edge_owner_count))
 
     def on_resize(self, new_map_size: int) -> None:
         """Adapt tracked state to a resized coverage map.
@@ -917,11 +1082,19 @@ class EdgeTracker:
         log.info("Resize invalidates slot-indexed coverage state; clearing")
         self._cumulative_edges_total = max(self._cumulative_edges_total, len(self.cumulative_edges))
         self.cumulative_edges.clear()
-        self._global_edge_hits.clear()
+        if isinstance(self._global_edge_hits, _DenseEdgeCounter):
+            self._global_edge_hits = _DenseEdgeCounter(new_map_size)
+        else:
+            self._global_edge_hits.clear()
         self.seed_edges.clear()
         self.seed_hit_counts.clear()
         self.seed_edge_traces.clear()
-        self._aggregate_totals.clear()
+        if isinstance(self._aggregate_totals, _DenseEdgeCounter):
+            self._aggregate_totals = _DenseEdgeCounter(new_map_size)
+        else:
+            self._aggregate_totals.clear()
+        if isinstance(self._edge_owner_count, _DenseEdgeCounter):
+            self._edge_owner_count = self._edge_owner_count.resized(new_map_size)
         self._aggregate_total_count = 0
         self._aggregate_cache = None
         self._spectrum_dirty = True
@@ -3044,6 +3217,15 @@ class EdgeTracker:
         self._edge_owner_count = defaultdict(
             int, {int(e): c for e, c in data.get("edge_owner_count", {}).items()}
         )
+        # from_dict() always rebuilds these three as plain dict/defaultdict
+        # above. If this tracker is already in the "position" key space
+        # (restoring into a live tracker that had already recorded bitmap
+        # coverage, or _key_space having been re-established by a
+        # record_edges() call before this restore landed), re-promote them
+        # to array-backed storage rather than silently losing the cache
+        # benefit on every restore.
+        if self._key_space == "position":
+            self._make_dense()
         self.seed_hw_instructions = data.get("seed_hw_instructions", {})
         self.seed_hw_branches = data.get("seed_hw_branches", {})
         self.seed_hw_branch_misses = data.get("seed_hw_branch_misses", {})
