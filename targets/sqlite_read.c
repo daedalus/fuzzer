@@ -337,6 +337,38 @@ static int fuzz_sqlite_db(const unsigned char *buf, size_t size) {
     return 0;
 }
 
+/* Prepare and run the one statement at tail. Returns the next statement's
+ * start, or NULL when the parser made no progress or input is exhausted. */
+static const char *fuzz_sql_step(sqlite3 *db, const char *tail, unsigned *nstmt) {
+    sqlite3_stmt *stmt = NULL;
+    const char *next = NULL;
+    int rc = sqlite3_prepare_v2(db, tail, -1, &stmt, &next);
+    if (rc != SQLITE_OK) {
+        /* Don't abandon the input here. A denied ATTACH or a single
+         * syntax error fails one statement, and pzTail still points
+         * past it, so the statements after it are reachable — bailing
+         * out would silently cap every multi-statement input at its
+         * first bad statement. The nstmt++ keeps a wall of errors from
+         * spinning: failures spend the statement budget too. */
+        __afl_map_edge(0x4700 + (unsigned)(rc & 0xFF));
+        if (stmt) sqlite3_finalize(stmt);
+        (*nstmt)++;
+        if (!next || next <= tail) return NULL;
+        return next;
+    }
+    if (!stmt) {  /* whitespace or a comment — no statement to run */
+        __afl_map_edge(0x4602);
+        if (!next || next == tail) return NULL;
+        return next;
+    }
+    __afl_map_edge(0x4800 + *nstmt);
+    fuzz_drain(stmt, SQLITE_FUZZ_DRAIN_SQL);
+    sqlite3_finalize(stmt);
+    (*nstmt)++;
+    if (!next || next == tail) return NULL;
+    return next;
+}
+
 /* ── SQL-text path ──────────────────────────────────────────────────── */
 static int fuzz_sqlite_sql(const unsigned char *buf, size_t size) {
     __afl_map_edge(0x4600);
@@ -373,34 +405,8 @@ static int fuzz_sqlite_sql(const unsigned char *buf, size_t size) {
     const char *tail = sql;
     unsigned nstmt = 0;
     while (*tail && nstmt < SQLITE_FUZZ_MAX_STMTS && ticks <= SQLITE_FUZZ_MAX_OPCODES) {
-        sqlite3_stmt *stmt = NULL;
-        const char *next = NULL;
-        int rc = sqlite3_prepare_v2(db, tail, -1, &stmt, &next);
-        if (rc != SQLITE_OK) {
-            /* Don't abandon the input here. A denied ATTACH or a single
-             * syntax error fails one statement, and pzTail still points
-             * past it, so the statements after it are reachable — bailing
-             * out would silently cap every multi-statement input at its
-             * first bad statement. The nstmt++ keeps a wall of errors from
-             * spinning: failures spend the statement budget too. */
-            __afl_map_edge(0x4700 + (unsigned)(rc & 0xFF));
-            if (stmt) sqlite3_finalize(stmt);
-            nstmt++;
-            if (!next || next <= tail) break;
-            tail = next;
-            continue;
-        }
-        if (!stmt) {  /* whitespace or a comment — no statement to run */
-            __afl_map_edge(0x4602);
-            if (!next || next == tail) break;
-            tail = next;
-            continue;
-        }
-        __afl_map_edge(0x4800 + nstmt);
-        fuzz_drain(stmt, SQLITE_FUZZ_DRAIN_SQL);
-        sqlite3_finalize(stmt);
-        nstmt++;
-        if (!next || next == tail) break;
+        const char *next = fuzz_sql_step(db, tail, &nstmt);
+        if (!next) break;
         tail = next;
     }
 

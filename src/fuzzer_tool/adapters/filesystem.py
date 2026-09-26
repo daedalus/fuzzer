@@ -352,6 +352,93 @@ def hash_data_crypto(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
+def _read_full_file(f: Path, base_real: Path) -> tuple[str, bytes] | None:
+    """Read one full corpus file, renaming it to ``id_{hash}``.
+
+    Returns None for non-files, symlinks, entries escaping *base_real*, and
+    delta records (loaded separately).
+    """
+    if not f.is_file():
+        return None
+    # is_symlink catches a symlinked file; the resolve comparison also
+    # catches a file reached through a symlinked *parent*. Both are
+    # needed -- neither subsumes the other.
+    if f.is_symlink():
+        return None
+    try:
+        if f.resolve().parent != base_real:
+            return None
+    except OSError:
+        return None
+    if f.suffix == ".json" and f.name.startswith("delta_"):
+        return None  # handled as delta, not full file
+
+    data = f.read_bytes()
+    h = hash_data(data)
+
+    # Normalize filename to id_{hash} so pruning can find it.
+    expected = f"id_{h}"
+    if f.name != expected:
+        dest = f.with_name(expected)
+        if not dest.exists():
+            f.rename(dest)
+        else:
+            f.unlink()  # duplicate of an already-loaded seed
+    return h, data
+
+
+def _absorb(
+    entries,
+    seen: set[str],
+    bloom: BloomFilter | None,
+    entropy_tracker: CumulativeByteEntropy | None,
+    corpus: list[bytes],
+) -> None:
+    """Append unseen ``(hash, data)`` entries to *corpus*, updating indexes."""
+    for h, data in entries:
+        if h in seen:
+            continue
+        seen.add(h)
+        if bloom is not None:
+            bloom.add(h)
+        if entropy_tracker is not None:
+            entropy_tracker.add(data)
+        corpus.append(data)
+
+
+def _resolve_deltas(
+    full_files: dict[str, bytes], delta_files: list[tuple[str, Path]]
+) -> dict[str, bytes]:
+    """Resolve delta chains against full files; returns hash -> bytes.
+
+    Resolve in passes: each pass resolves deltas whose parent is already
+    resolved. Caps at SNAPSHOT_INTERVAL passes since chains can't be deeper.
+    """
+    resolved: dict[str, bytes] = dict(full_files)
+    remaining = dict(delta_files)
+    for _ in range(SNAPSHOT_INTERVAL + 1):
+        if not remaining:
+            break
+        still_remaining = {}
+        for h, f in remaining.items():
+            try:
+                delta = json.loads(f.read_text())
+                parent_hash = delta["parent"]
+                if parent_hash in resolved:
+                    version = delta.get("v", 1)
+                    if version == 2:
+                        reconstructed = apply_delta_v2(resolved[parent_hash], delta["diff"])
+                    else:
+                        reconstructed = apply_delta(resolved[parent_hash], delta["diff"])
+                    resolved[h] = reconstructed
+                else:
+                    still_remaining[h] = f
+            except (json.JSONDecodeError, KeyError, IndexError):
+                pass  # corrupt delta — skip
+        remaining = still_remaining
+    return resolved
+
+
 def load_corpus(
     corpus_dir: Path,
     bloom: BloomFilter | None = None,
@@ -419,31 +506,10 @@ def load_corpus(
         # resolution on every corpus file at load time.
         base_real = base_dir.resolve()
         for f in base_dir.iterdir():
-            if not f.is_file():
+            entry = _read_full_file(f, base_real)
+            if entry is None:
                 continue
-            # is_symlink catches a symlinked file; the resolve comparison also
-            # catches a file reached through a symlinked *parent*. Both are
-            # needed -- neither subsumes the other.
-            if f.is_symlink():
-                continue
-            try:
-                if f.resolve().parent != base_real:
-                    continue
-            except OSError:
-                continue
-            if f.suffix == ".json" and f.name.startswith("delta_"):
-                continue  # handled as delta, not full file
-            data = f.read_bytes()
-            h = hash_data(data)
-            # Normalize filename to id_{hash} so pruning can find it.
-            expected = f"id_{h}"
-            if f.name != expected:
-                dest = f.with_name(expected)
-                if not dest.exists():
-                    f.rename(dest)
-                else:
-                    f.unlink()  # duplicate of an already-loaded seed
-                f = dest
+            h, data = entry
             full_files[h] = data
             if mark_irreplaceable:
                 irreplaceable_hashes.add(h)
@@ -499,52 +565,14 @@ def load_corpus(
             _collect_deltas_from_dir(base)
 
     # Load full files
-    for h, data in full_files.items():
-        if h not in seen:
-            seen.add(h)
-            if bloom is not None:
-                bloom.add(h)
-            if entropy_tracker is not None:
-                entropy_tracker.add(data)
-            corpus.append(data)
+    _absorb(full_files.items(), seen, bloom, entropy_tracker, corpus)
 
     # Reconstruct delta chains via topological resolution.
     # Each delta depends on its parent; resolve in order from full snapshots.
     if delta_files:
-        resolved: dict[str, bytes] = dict(full_files)
-        remaining = dict(delta_files)
-
-        # Resolve in passes: each pass resolves deltas whose parent is already resolved.
-        # Caps at SNAPSHOT_INTERVAL passes since chains can't be deeper than that.
-        for _ in range(SNAPSHOT_INTERVAL + 1):
-            if not remaining:
-                break
-            still_remaining = {}
-            for h, f in remaining.items():
-                try:
-                    delta = json.loads(f.read_text())
-                    parent_hash = delta["parent"]
-                    if parent_hash in resolved:
-                        version = delta.get("v", 1)
-                        if version == 2:
-                            reconstructed = apply_delta_v2(resolved[parent_hash], delta["diff"])
-                        else:
-                            reconstructed = apply_delta(resolved[parent_hash], delta["diff"])
-                        resolved[h] = reconstructed
-                    else:
-                        still_remaining[h] = f
-                except (json.JSONDecodeError, KeyError, IndexError):
-                    pass  # corrupt delta — skip
-            remaining = still_remaining
-
-        for h, _ in delta_files:
-            if h in resolved and h not in seen:
-                seen.add(h)
-                if bloom is not None:
-                    bloom.add(h)
-                if entropy_tracker is not None:
-                    entropy_tracker.add(resolved[h])
-                corpus.append(resolved[h])
+        resolved = _resolve_deltas(full_files, delta_files)
+        chained = ((h, resolved[h]) for h, _ in delta_files if h in resolved)
+        _absorb(chained, seen, bloom, entropy_tracker, corpus)
 
     if not corpus and add_default:
         corpus.append(b"AAAAAAAA")
@@ -831,14 +859,7 @@ def classify_crash(
     """
     h = hash_data(data)
     report = SanitizerReport.parse(stderr)
-    if report and report.is_valid():
-        sig = report.signature
-    elif fault_addr is not None:
-        # Distinguish NULL-deref / wild-pointer / stack-overflow crashes that
-        # all share the same signal number but fault at different addresses.
-        sig = f"signal:{abs(returncode)}@{fault_addr:#x}"
-    else:
-        sig = f"signal:{abs(returncode)}"
+    sig = _crash_sig(report, returncode, fault_addr)
     stack_h = report.stack_hash() if report else ""
 
     if h in crash_hashes:
@@ -863,11 +884,30 @@ def classify_crash(
     # is noise for ASAN sigs but IS the distinguishing signal for
     # address-bearing fallback sigs like "signal:11@0xdead0000".
     if report and report.is_valid() and "@" in sig:
-        for existing_sig in crash_sigs:
-            if crash_signature_similarity(sig, existing_sig) >= 0.8:
-                return CrashVerdict(False, h, sig, stack_h, report, existing_sig, False, False)
+        existing_sig = _fuzzy_sig_match(sig, crash_sigs)
+        if existing_sig is not None:
+            return CrashVerdict(False, h, sig, stack_h, report, existing_sig, False, False)
 
     return CrashVerdict(True, h, sig, stack_h, report, None, False, False)
+
+
+def _crash_sig(report: SanitizerReport | None, returncode: int, fault_addr: int | None) -> str:
+    """Sanitizer signature, else ``signal:<n>[@<fault_addr>]``."""
+    if report and report.is_valid():
+        return report.signature
+    if fault_addr is not None:
+        # Distinguish NULL-deref / wild-pointer / stack-overflow crashes that
+        # all share the same signal number but fault at different addresses.
+        return f"signal:{abs(returncode)}@{fault_addr:#x}"
+    return f"signal:{abs(returncode)}"
+
+
+def _fuzzy_sig_match(sig: str, crash_sigs: dict[str, int]) -> str | None:
+    """First known signature at least 0.8-similar to *sig*, else None."""
+    for existing_sig in crash_sigs:
+        if crash_signature_similarity(sig, existing_sig) >= 0.8:
+            return existing_sig
+    return None
 
 
 def save_crash(
@@ -945,31 +985,9 @@ def save_crash(
     # and the new trigger is smaller, remove the old one.
     if crash_min_sizes is not None and stack_h:
         old_min = crash_min_sizes.get(stack_h)
-        if old_min is not None and len(data) >= old_min:
-            # New trigger is not smaller — skip replacement
-            pass
-        elif old_min is not None:
+        if old_min is not None and len(data) < old_min:
             # New trigger is smaller — find and remove the old crash files
-            for f in crashes_dir.iterdir():
-                if f.is_file() and f.suffix in (".bin", ".txt", ".sh", ".hex", ".json"):
-                    try:
-                        old_data = f.read_bytes() if f.suffix == ".bin" else None
-                        if old_data and hash_data(old_data) != h:
-                            # Check if this old crash has the same stack hash
-                            old_report = SanitizerReport.parse(
-                                (crashes_dir / f"{f.stem}.txt").read_text()
-                                if (crashes_dir / f"{f.stem}.txt").exists()
-                                else ""
-                            )
-                            if old_report and old_report.stack_hash() == stack_h:
-                                # Remove old crash files
-                                for ext in (".bin", ".txt", ".sh", ".hex", ".json"):
-                                    old_file = crashes_dir / f"{f.stem}{ext}"
-                                    if old_file.exists():
-                                        old_file.unlink()
-                                break
-                    except Exception:
-                        continue
+            _evict_crash(crashes_dir, h, stack_h)
         crash_min_sizes[stack_h] = len(data)
 
     # Build CrashMetadata if not provided
@@ -983,12 +1001,7 @@ def save_crash(
     metadata.build_cluster_id(sig)
 
     # Derive error short name for filename
-    if report and report.is_valid():
-        error_short = report.error_type.replace("-", "")[:20]
-        sanitizer_short = report.sanitizer.replace("Sanitizer", "")[:4].lower()
-    else:
-        error_short = f"signal{abs(returncode)}"
-        sanitizer_short = "sig"
+    error_short, sanitizer_short = _crash_name_parts(report, returncode)
 
     # Fill timestamp if not set
     if not metadata.timestamp:
@@ -1005,19 +1018,7 @@ def save_crash(
     _chmod_readonly(crash_file)
 
     # Build and write enriched sidecar
-    if report:
-        metadata.sanitizer = report.sanitizer
-        metadata.error_type = report.error_type
-        metadata.fault_addr = report.fault_addr
-        metadata.frames = report.frames
-        metadata.access_type = report.access_type
-        metadata.access_size = report.access_size
-        metadata.shadow_info = report.shadow_info
-        metadata.alloc_frames = report.alloc_frames
-        metadata.dealloc_frames = report.dealloc_frames
-        metadata.exploitability = report.exploitability
-    else:
-        metadata.returncode = returncode
+    _fill_report(metadata, report, returncode)
 
     sidecar = crashes_dir / f"{base_name}.txt"
     sidecar.write_text(metadata.format_sidecar())
@@ -1044,6 +1045,63 @@ def save_crash(
     _chmod_readonly(hexdump_file)
 
     return base_name
+
+
+# Artifact extensions written per crash by save_crash().
+_CRASH_EXTS = (".bin", ".txt", ".sh", ".hex", ".json")
+
+
+def _evict_crash(crashes_dir: Path, h: str, stack_h: str) -> None:
+    """Remove the first on-disk crash with stack hash *stack_h* but other input."""
+    for f in crashes_dir.iterdir():
+        if not f.is_file() or f.suffix not in _CRASH_EXTS:
+            continue
+        try:
+            old_data = f.read_bytes() if f.suffix == ".bin" else None
+            if not old_data or hash_data(old_data) == h:
+                continue
+
+            # Check if this old crash has the same stack hash
+            txt = crashes_dir / f"{f.stem}.txt"
+            old_report = SanitizerReport.parse(txt.read_text() if txt.exists() else "")
+            if not old_report or old_report.stack_hash() != stack_h:
+                continue
+
+            # Remove old crash files
+            for ext in _CRASH_EXTS:
+                old_file = crashes_dir / f"{f.stem}{ext}"
+                if old_file.exists():
+                    old_file.unlink()
+            return
+        except Exception:
+            continue
+
+
+def _crash_name_parts(report: SanitizerReport | None, returncode: int) -> tuple[str, str]:
+    """``(error_short, sanitizer_short)`` filename fragments."""
+    if report and report.is_valid():
+        error_short = report.error_type.replace("-", "")[:20]
+        sanitizer_short = report.sanitizer.replace("Sanitizer", "")[:4].lower()
+        return error_short, sanitizer_short
+    return f"signal{abs(returncode)}", "sig"
+
+
+def _fill_report(metadata: CrashMetadata, report: SanitizerReport | None, returncode: int) -> None:
+    """Copy parsed sanitizer fields into *metadata*; raw rc when no report."""
+    if not report:
+        metadata.returncode = returncode
+        return
+
+    metadata.sanitizer = report.sanitizer
+    metadata.error_type = report.error_type
+    metadata.fault_addr = report.fault_addr
+    metadata.frames = report.frames
+    metadata.access_type = report.access_type
+    metadata.access_size = report.access_size
+    metadata.shadow_info = report.shadow_info
+    metadata.alloc_frames = report.alloc_frames
+    metadata.dealloc_frames = report.dealloc_frames
+    metadata.exploitability = report.exploitability
 
 
 def _chmod_readonly(path: Path) -> None:

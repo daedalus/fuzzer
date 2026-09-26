@@ -421,6 +421,130 @@ static struct {
 
 /* ── Core fuzz function ──────────────────────────────────────────── */
 
+/* Audio, video and subtitle streams have a decoder contract; see fuzz_ffmpeg. */
+static int fuzz_is_decodable(const AVCodecParameters *par) {
+    return par->codec_type == AVMEDIA_TYPE_VIDEO ||
+           par->codec_type == AVMEDIA_TYPE_AUDIO ||
+           par->codec_type == AVMEDIA_TYPE_SUBTITLE;
+}
+
+/* Non-decodable stream (data, attachment): observe what the demuxer parsed. */
+static void fuzz_touch_nodec(const AVCodecParameters *par) {
+    /* Data and attachment streams have no decoder, but the demuxer
+     * still parsed something for them and that output was previously
+     * discarded untouched. Observe it so a bad length or a truncated
+     * payload is actually read rather than merely allocated.
+     *
+     * Attachments (embedded fonts, cover art in Matroska) carry their
+     * whole payload in extradata, so nothing in the packet loop would
+     * ever reach it. */
+    __afl_map_edge(0x1800 + (par->codec_type & 0x0F));
+    if (par->extradata && par->extradata_size > 0) {
+        __afl_map_edge(0x1810);
+        fuzz_touch(par->extradata, par->extradata_size);
+    }
+}
+
+/* Open (or reuse, when the codec matches) the decoder for stream i. */
+static void fuzz_setup_decoder(unsigned i, const AVCodecParameters *par) {
+    const AVCodec *codec = avcodec_find_decoder(par->codec_id);
+    if (!codec) { return; }
+
+    DecoderSlot *slot = &g_decs[i];
+    if (!slot->inited || slot->codec_id != par->codec_id) {
+        if (slot->ctx) avcodec_free_context(&slot->ctx);
+        slot->ctx = avcodec_alloc_context3(codec);
+        if (!slot->ctx) return;
+        avcodec_parameters_to_context(slot->ctx, par);
+        int ret = avcodec_open2(slot->ctx, codec, NULL);
+        if (ret < 0) {
+            avcodec_free_context(&slot->ctx);
+            slot->ctx      = NULL;
+            slot->codec_id = 0;
+            slot->inited   = 0;
+            return;
+        }
+        slot->codec_id   = par->codec_id;
+        slot->codec_type = par->codec_type;
+        slot->inited     = 1;
+        fuzz_phase_stats.decoder_opens++;
+    } else {
+        avcodec_parameters_to_context(slot->ctx, par);
+        slot->codec_type = par->codec_type;
+        fuzz_phase_stats.decoder_reuses++;
+    }
+    __afl_map_edge(0x1100 + (i & 0xFF));
+}
+
+/* Decode one subtitle packet on stream si; returns frames produced. */
+static unsigned fuzz_decode_sub(int si) {
+    unsigned frames = 0;
+    /* Subtitles use the packet-in/AVSubtitle-out API. Driving
+     * them through send_packet/receive_frame trips
+     * av_assert0(frame->buf[0]) inside decode_simple_internal. */
+    AVSubtitle sub;
+    memset(&sub, 0, sizeof(sub));
+    int got_sub = 0;
+    int ret = avcodec_decode_subtitle2(g_decs[si].ctx, &sub, &got_sub, g_pkt);
+    if (ret >= 0 && got_sub) {
+        frames++;
+        __afl_map_edge(0x1600 + (si & 0xFF));
+        /* Touch the decoded rects so a corrupt region descriptor
+         * is actually observed rather than just allocated. */
+        for (unsigned r = 0; r < sub.num_rects; r++) {
+            const AVSubtitleRect *rect = sub.rects[r];
+            if (!rect) continue;
+            __afl_map_edge(0x1700 + (rect->type & 0x0F));
+            if (rect->w > 0 && rect->h > 0) __afl_map_edge(0x1710);
+            if (rect->nb_colors > 0)        __afl_map_edge(0x1711);
+        }
+    }
+    /* avcodec_decode_subtitle2 allocates rects on success; the
+     * struct is zeroed above so this is safe on failure too.
+     * Omitting it leaks every decoded subtitle, per execution. */
+    avsubtitle_free(&sub);
+    return frames;
+}
+
+/* Send one audio/video packet on stream si; returns frames received. */
+static unsigned fuzz_decode_av(int si) {
+    unsigned frames = 0;
+    int ret = avcodec_send_packet(g_decs[si].ctx, g_pkt);
+    if (ret >= 0) {
+        while (avcodec_receive_frame(g_decs[si].ctx, g_frame) >= 0) {
+            frames++;
+            __afl_map_edge(0x1400 + (si & 0xFF));
+        }
+    }
+    return frames;
+}
+
+/* Packet on a stream with no open decoder: read payload and side data. */
+static void fuzz_touch_packet(void) {
+    /* A packet on a stream with no decoder -- data, attachment, or a
+     * codec we could not open. The demuxer still produced it, so read
+     * the payload and its side data instead of dropping the packet
+     * unexamined. This is demuxer output, which is exactly the layer
+     * this target exists to exercise. */
+    __afl_map_edge(0x1820);
+    fuzz_touch(g_pkt->data, g_pkt->size);
+    for (int sd = 0; sd < g_pkt->side_data_elems; sd++) {
+        __afl_map_edge(0x1830 + (g_pkt->side_data[sd].type & 0x1F));
+        fuzz_touch(g_pkt->side_data[sd].data,
+                   (int)g_pkt->side_data[sd].size);
+    }
+}
+
+/* Route the current packet to its decoder; returns frames produced. */
+static unsigned fuzz_decode_packet(int si, unsigned nb_streams) {
+    if (si >= 0 && (int)si < (int)nb_streams && g_decs[si].inited && g_decs[si].ctx) {
+        if (g_decs[si].codec_type == AVMEDIA_TYPE_SUBTITLE) return fuzz_decode_sub(si);
+        return fuzz_decode_av(si);
+    }
+    if (si >= 0 && (int)si < (int)nb_streams) fuzz_touch_packet();
+    return 0;
+}
+
 __attribute__((visibility("default")))
 int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     __afl_map_edge(0x1000);
@@ -503,51 +627,11 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
          *
          * Data and attachment streams have no decoder contract at all and
          * stay excluded. */
-        if (par->codec_type != AVMEDIA_TYPE_VIDEO &&
-            par->codec_type != AVMEDIA_TYPE_AUDIO &&
-            par->codec_type != AVMEDIA_TYPE_SUBTITLE) {
-            /* Data and attachment streams have no decoder, but the demuxer
-             * still parsed something for them and that output was previously
-             * discarded untouched. Observe it so a bad length or a truncated
-             * payload is actually read rather than merely allocated.
-             *
-             * Attachments (embedded fonts, cover art in Matroska) carry their
-             * whole payload in extradata, so nothing in the packet loop would
-             * ever reach it. */
-            __afl_map_edge(0x1800 + (par->codec_type & 0x0F));
-            if (par->extradata && par->extradata_size > 0) {
-                __afl_map_edge(0x1810);
-                fuzz_touch(par->extradata, par->extradata_size);
-            }
+        if (!fuzz_is_decodable(par)) {
+            fuzz_touch_nodec(par);
             continue;
         }
-        const AVCodec *codec = avcodec_find_decoder(par->codec_id);
-        if (!codec) { continue; }
-
-        DecoderSlot *slot = &g_decs[i];
-        if (!slot->inited || slot->codec_id != par->codec_id) {
-            if (slot->ctx) avcodec_free_context(&slot->ctx);
-            slot->ctx = avcodec_alloc_context3(codec);
-            if (!slot->ctx) continue;
-            avcodec_parameters_to_context(slot->ctx, par);
-            ret = avcodec_open2(slot->ctx, codec, NULL);
-            if (ret < 0) {
-                avcodec_free_context(&slot->ctx);
-                slot->ctx      = NULL;
-                slot->codec_id = 0;
-                slot->inited   = 0;
-                continue;
-            }
-            slot->codec_id   = par->codec_id;
-            slot->codec_type = par->codec_type;
-            slot->inited     = 1;
-            fuzz_phase_stats.decoder_opens++;
-        } else {
-            avcodec_parameters_to_context(slot->ctx, par);
-            slot->codec_type = par->codec_type;
-            fuzz_phase_stats.decoder_reuses++;
-        }
-        __afl_map_edge(0x1100 + (i & 0xFF));
+        fuzz_setup_decoder(i, par);
     }
 
     /* Read and decode frames */
@@ -556,56 +640,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
         total_packets++;
         __afl_map_edge(0x1200 + (g_pkt->stream_index & 0x1F));
 
-        int si = g_pkt->stream_index;
-        if (si >= 0 && (int)si < (int)nb_streams && g_decs[si].inited && g_decs[si].ctx) {
-            if (g_decs[si].codec_type == AVMEDIA_TYPE_SUBTITLE) {
-                /* Subtitles use the packet-in/AVSubtitle-out API. Driving
-                 * them through send_packet/receive_frame trips
-                 * av_assert0(frame->buf[0]) inside decode_simple_internal. */
-                AVSubtitle sub;
-                memset(&sub, 0, sizeof(sub));
-                int got_sub = 0;
-                ret = avcodec_decode_subtitle2(g_decs[si].ctx, &sub, &got_sub, g_pkt);
-                if (ret >= 0 && got_sub) {
-                    total_frames++;
-                    __afl_map_edge(0x1600 + (si & 0xFF));
-                    /* Touch the decoded rects so a corrupt region descriptor
-                     * is actually observed rather than just allocated. */
-                    for (unsigned r = 0; r < sub.num_rects; r++) {
-                        const AVSubtitleRect *rect = sub.rects[r];
-                        if (!rect) continue;
-                        __afl_map_edge(0x1700 + (rect->type & 0x0F));
-                        if (rect->w > 0 && rect->h > 0) __afl_map_edge(0x1710);
-                        if (rect->nb_colors > 0)        __afl_map_edge(0x1711);
-                    }
-                }
-                /* avcodec_decode_subtitle2 allocates rects on success; the
-                 * struct is zeroed above so this is safe on failure too.
-                 * Omitting it leaks every decoded subtitle, per execution. */
-                avsubtitle_free(&sub);
-            } else {
-                ret = avcodec_send_packet(g_decs[si].ctx, g_pkt);
-                if (ret >= 0) {
-                    while (avcodec_receive_frame(g_decs[si].ctx, g_frame) >= 0) {
-                        total_frames++;
-                        __afl_map_edge(0x1400 + (si & 0xFF));
-                    }
-                }
-            }
-        } else if (si >= 0 && (int)si < (int)nb_streams) {
-            /* A packet on a stream with no decoder -- data, attachment, or a
-             * codec we could not open. The demuxer still produced it, so read
-             * the payload and its side data instead of dropping the packet
-             * unexamined. This is demuxer output, which is exactly the layer
-             * this target exists to exercise. */
-            __afl_map_edge(0x1820);
-            fuzz_touch(g_pkt->data, g_pkt->size);
-            for (int sd = 0; sd < g_pkt->side_data_elems; sd++) {
-                __afl_map_edge(0x1830 + (g_pkt->side_data[sd].type & 0x1F));
-                fuzz_touch(g_pkt->side_data[sd].data,
-                           (int)g_pkt->side_data[sd].size);
-            }
-        }
+        total_frames += fuzz_decode_packet(g_pkt->stream_index, nb_streams);
 
         av_packet_unref(g_pkt);
 

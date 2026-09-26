@@ -413,14 +413,7 @@ class PersistentLoader:
         except (BrokenPipeError, OSError):
             # Subprocess died — try restart
             self._ready = False
-            if not self._restarting:
-                self._restarting = True
-                try:
-                    if self.start():
-                        return self.run_one(data)
-                finally:
-                    self._restarting = False
-            return -2, None
+            return self._restart_retry(data)
 
         # Threaded readline with timeout — prevents hang if loader gets stuck
         result = [None]
@@ -432,26 +425,7 @@ class PersistentLoader:
         t.start()
         t.join(timeout=self.timeout)
         if t.is_alive():
-            log.warning("Persistent loader timed out after %.1fs", self.timeout)
-            # Kill orphaned grandchild first (it's in its own process group)
-            self._kill_orphaned_child()
-            # Then kill the loader itself
-            proc = self._proc
-            with contextlib.suppress(Exception):
-                proc.kill()
-                proc.wait()
-            _close_streams(proc)
-            self._ready = False
-            # Don't retry — hangs are input-deterministic, retrying just
-            # costs another full timeout wait for the same hung input.
-            # Restart the loader so future inputs work, but return immediately.
-            if not self._restarting:
-                self._restarting = True
-                try:
-                    self.start()
-                finally:
-                    self._restarting = False
-            return -1, None
+            return self._on_hang()
 
         header = result[0]
         if not header:
@@ -467,14 +441,7 @@ class PersistentLoader:
         # Optional trailing tokens relayed by newer loaders:
         # <fault_addr> <rip> <rsp> <rbp> ('-' when absent).
         if len(parts) >= 7:
-
-            def _hex_or_none(v: str) -> int | None:
-                return None if v == "-" else int(v, 16)
-
-            fault, rip, rsp, rbp = (_hex_or_none(p) for p in parts[3:7])
-            self._last_fault_addr = fault
-            if rip is not None or rsp is not None or rbp is not None:
-                self._last_regs = {"rip": rip or 0, "rsp": rsp or 0, "rbp": rbp or 0}
+            self._parse_regs(parts)
 
         bitmap = None
         if bmp_len > 0:
@@ -482,8 +449,58 @@ class PersistentLoader:
 
         self._last_bitmap = bitmap
 
-        # Track throughput
-        elapsed = time.monotonic() - t_start
+        self._track_throughput(time.monotonic() - t_start)
+        return rc, bitmap
+
+    def _restart_retry(self, data: bytes) -> tuple[int, bytes | None]:
+        """Restart a dead loader once and rerun *data*; ``(-2, None)`` otherwise."""
+        if self._restarting:
+            return -2, None
+
+        self._restarting = True
+        try:
+            if self.start():
+                return self.run_one(data)
+        finally:
+            self._restarting = False
+        return -2, None
+
+    def _on_hang(self) -> tuple[int, None]:
+        """Kill a hung loader (grandchild first), restart it, report timeout."""
+        log.warning("Persistent loader timed out after %.1fs", self.timeout)
+        # Kill orphaned grandchild first (it's in its own process group)
+        self._kill_orphaned_child()
+        # Then kill the loader itself
+        proc = self._proc
+        with contextlib.suppress(Exception):
+            proc.kill()
+            proc.wait()
+        _close_streams(proc)
+        self._ready = False
+        # Don't retry — hangs are input-deterministic, retrying just
+        # costs another full timeout wait for the same hung input.
+        # Restart the loader so future inputs work, but return immediately.
+        if not self._restarting:
+            self._restarting = True
+            try:
+                self.start()
+            finally:
+                self._restarting = False
+        return -1, None
+
+    def _parse_regs(self, parts: list[str]) -> None:
+        """Record fault address and registers from reply tokens 3..6."""
+
+        def _hex_or_none(v: str) -> int | None:
+            return None if v == "-" else int(v, 16)
+
+        fault, rip, rsp, rbp = (_hex_or_none(p) for p in parts[3:7])
+        self._last_fault_addr = fault
+        if rip is not None or rsp is not None or rbp is not None:
+            self._last_regs = {"rip": rip or 0, "rsp": rsp or 0, "rbp": rbp or 0}
+
+    def _track_throughput(self, elapsed: float) -> None:
+        """Window exec times; restart the loader on sustained slowdown."""
         self._exec_times.append(elapsed)
         if len(self._exec_times) > self._exec_window_size:
             self._exec_times.pop(0)
@@ -514,8 +531,6 @@ class PersistentLoader:
                     self._exec_times.clear()
                     self._baseline_eps = 0.0
                     self.start()
-
-        return rc, bitmap
 
     def stop(self):
         proc = self._proc
