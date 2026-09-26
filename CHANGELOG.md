@@ -172,6 +172,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--secretary` no longer reweights seeds or triggers minimization**: its stop rule
+  fires on a `1/t` discovery-rate envelope (rank capped at 20 vs threshold `n/e`), so a
+  seed was cut 100x after 20 observations and never recovered; `--elo all` enabled it.
+  Now display-only, as `SecretaryStopping` already documented (P2-4).
+- **`edge_diagnostic.py op-caches`**: reads the fractal-voronoi / perlin caches from the
+  registered mutator instances; the module globals it read were moved in `6b3b7c3b`.
+
 - **`--resume` refused on Katz-capable targets**: `load_state` ran before the Katz
   channel was built, so the `node_channel` contract always mismatched.
 - **`vendor_ffmpeg.sh` masked configure/make failures** (`pipefail`).

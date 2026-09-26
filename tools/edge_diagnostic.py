@@ -1099,6 +1099,12 @@ def mem_shm_mode(args):
 def op_caches_mode(args):
     logging.disable(logging.NOTSET)
     from fuzzer_tool.core.mutations import fractal_voronoi, perlin_noise
+    from fuzzer_tool.core.operator_registry import REGISTRY
+
+    # Instance caches live on the registered mutators the fuzzer dispatches to.
+    by_name = {m.name: m for m in REGISTRY.mutators()}
+    pn = by_name[perlin_noise.PerlinNoiseMutator.name]
+    fv = by_name[fractal_voronoi.FractalVoronoiMutator.name]
 
     f = build_fuzzer()
     print(
@@ -1114,9 +1120,9 @@ def op_caches_mode(args):
             fractal_voronoi._nearest_site.cache_info(),
             fractal_voronoi._root.cache_info(),
         )
-        plbytes = sum(sys.getsizeof(t) for t in fractal_voronoi._plan_cache.values())
+        plbytes = sum(sys.getsizeof(t) for t in fv._plan_cache.values())
         print(
-            f"{i * per:>6} {len(perlin_noise._noise_cache):>5} {pnl.currsize:>6} {fl[0].currsize:>6} {fl[1].currsize:>6} {fl[2].currsize:>6} {len(fractal_voronoi._boundary_cache):>6} {len(fractal_voronoi._root_hash_cache):>6} {len(fractal_voronoi._plan_cache):>5} {plbytes / 1048576:>7}"
+            f"{i * per:>6} {len(pn._noise_cache):>5} {pnl.currsize:>6} {fl[0].currsize:>6} {fl[1].currsize:>6} {fl[2].currsize:>6} {len(fv._boundary_cache):>6} {len(fv._root_hash_cache):>6} {len(fv._plan_cache):>5} {plbytes / 1048576:>7}"
         )
 
 

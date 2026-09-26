@@ -1022,13 +1022,9 @@ class CorpusManager:
                     f._defer_minimize()
             if len(f._corpus_size_history) > 1000:
                 f._corpus_size_history = f._corpus_size_history[-500:]
+            # Display-only (P2-4): the report reads the rule, nothing acts on it.
             if f._corpus_secretary:
-                dr = f._stats.discovery_rate()
-                f._corpus_secretary.observe(dr)
-                stop, _reason = f._corpus_secretary.should_stop()
-                if stop:
-                    log.info("Corpus secretary stopping: %s", _reason)
-                    f._defer_minimize()
+                f._corpus_secretary.observe(f._stats.discovery_rate())
             if f.max_corpus > 0 and len(f.corpus) > f.max_corpus:
                 f._defer_minimize()
             if len(f._corpus_size_history) >= 100:
