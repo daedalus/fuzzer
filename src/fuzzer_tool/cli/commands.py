@@ -406,6 +406,13 @@ def cmd_fuzz(args):
                 print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
         grammar.boltzmann_mutate = args.grammar_boltzmann
 
+    # Constraint-labelled FSM format (core/format_fsm.py): fsm_regen op.
+    fsm = None
+    if getattr(args, "fsm", None):
+        fsm = _load_fsm_arg(args.fsm)
+        if fsm is None:
+            return 1
+
     plot_graph_path = None
     coverage_log_arg = args.coverage_log
     if getattr(args, "plot_graph", None) is not None:
@@ -535,6 +542,7 @@ def cmd_fuzz(args):
             else getattr(args, "stack_heartbeat", None)
         ),
         grammar=grammar,
+        fsm=fsm,
         persistent=args.persistent,
         net_host=getattr(args, "net_host", None),
         net_port=getattr(args, "net_port", None),
@@ -1025,6 +1033,44 @@ def cmd_root_cause(args):
     return 0
 
 
+def _load_fsm_arg(path: str):
+    """Load an --fsm spec; print the error and return None if it is bad."""
+    from fuzzer_tool.core.format_fsm import load_fsm
+
+    try:
+        fsm = load_fsm(path)
+    except (OSError, ValueError) as e:
+        print(f"[-] --fsm {path}: {e}")
+        return None
+    print(f"[*] FSM loaded: {len(fsm.edges)} transitions from {path}")
+    return fsm
+
+
+def _genseed_fsm(args) -> int:
+    """genseed --fsm: messages from a constraint-labelled FSM (StateLifter §6.3)."""
+    from fuzzer_tool.adapters.filesystem import hash_data
+    from fuzzer_tool.core.rand_pool import RandPool
+    from fuzzer_tool.services.import_corpus import _write_seed
+
+    fsm = _load_fsm_arg(args.fsm)
+    if fsm is None:
+        return 1
+
+    dest = Path(args.corpus)
+    rng = RandPool(seed=args.seed)
+    seen: set[str] = set()
+    for _ in range(args.count):
+        data = fsm.generate(rng, args.max_len)[: args.max_len]
+        h = hash_data(data)
+        if not data or h in seen:
+            continue
+        seen.add(h)
+        _write_seed(dest, data, h)
+
+    print(f"[+] Wrote {len(seen)} FSM seed(s) to {dest}/seeds/")
+    return 0
+
+
 def cmd_genseed(args):
     """Write from-scratch seeds for one or more formats into a corpus dir.
 
@@ -1038,6 +1084,9 @@ def cmd_genseed(args):
     from fuzzer_tool.core.format_generators import FORMATS, generate
     from fuzzer_tool.core.rand_pool import RandPool
     from fuzzer_tool.services.import_corpus import _write_seed
+
+    if args.fsm:
+        return _genseed_fsm(args)
 
     fmts = list(FORMATS) if args.format == "all" else [args.format]
     unknown = [f for f in fmts if f not in FORMATS]
@@ -4050,6 +4099,13 @@ def main() -> int:
         help="Grammar file(s) (built-in: json, http_request, elf) or path to .gram file",
     )
     fuzz_parser.add_argument(
+        "--fsm",
+        default=None,
+        metavar="FILE",
+        help="Constraint-labelled FSM spec (see core/format_fsm.py); enables the "
+        "fsm_regen op: keep an input's longest valid prefix, regenerate a valid tail",
+    )
+    fuzz_parser.add_argument(
         "--grammar-boltzmann",
         action="store_true",
         help="Grammar.mutate()'s replacement-generation paths (extend/insert/"
@@ -4542,6 +4598,12 @@ def main() -> int:
     )
     genseed_parser.add_argument(
         "--seed", type=int, default=None, help="RNG seed for reproducible generation"
+    )
+    genseed_parser.add_argument(
+        "--fsm",
+        default=None,
+        metavar="FILE",
+        help="Generate from a constraint-labelled FSM spec instead of a format",
     )
     genseed_parser.set_defaults(func=cmd_genseed)
 

@@ -1067,6 +1067,7 @@ class Fuzzer:
         coverage_log=None,
         stack_heartbeat=None,
         grammar=None,
+        fsm=None,
         persistent=False,
         net_host=None,
         net_port=None,
@@ -1551,6 +1552,7 @@ class Fuzzer:
         if self.coverage_log:
             self.coverage_log.parent.mkdir(parents=True, exist_ok=True)
         self.grammar = grammar
+        self.fsm = fsm
         self.persistent = persistent
         self.net_host = net_host
         self.net_port = net_port

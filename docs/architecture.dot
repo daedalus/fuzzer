@@ -68,7 +68,7 @@ digraph fuzzer_tool {
         color="#c3c6da"; fillcolor="#f4f4fa"; fontcolor="#454a75";
         ops [label="services/operators.py\ldispatch · havoc (11 sub-ops, adaptive draw)\l",
              fillcolor="#c9cbe6", fontcolor="#2f3560"];
-        lib [label="core/mutations/ (36 format ops)  ·  core/operator_registry.py\lpng jpeg gif webp webm avif zip gzip zlib riff ogg flv asf mp3\ladts mpegts nal isobmff pgs sqlite der elf protobuf x86 arm\lgrammar · tree_mutator · frameshift · markov · wfc · regularity\lchecksum_learner (Berlekamp-Massey)\l",
+        lib [label="core/mutations/ (36 format ops)  ·  core/operator_registry.py\lpng jpeg gif webp webm avif zip gzip zlib riff ogg flv asf mp3\ladts mpegts nal isobmff pgs sqlite der elf protobuf x86 arm\lgrammar · format_fsm · tree_mutator · frameshift · markov · wfc · regularity\lchecksum_learner (Berlekamp-Massey)\l",
              fillcolor="#dedff0", fontcolor="#2f3560"];
     }
 

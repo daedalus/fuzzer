@@ -415,6 +415,7 @@ class TestMutationContext:
             "markov",
             "mc",
             "grammar",
+            "fsm",
             "crash_mi",
             "stall_recovery_active",
             "cmplog",
