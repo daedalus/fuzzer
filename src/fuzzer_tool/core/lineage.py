@@ -94,6 +94,30 @@ class LineageNode:
         )
 
 
+def _damped_walk(
+    base: list[float],
+    parent: list[int],
+    n_children: list[int],
+    damping: float,
+    max_iter: int,
+    tol: float,
+) -> list[float]:
+    """Power-iterate credit flowing child -> parent split by sibling count, until *tol*."""
+    n = len(base)
+    rank = list(base)
+    for _ in range(max_iter):
+        nxt = [(1.0 - damping) * b for b in base]
+        for i in range(n):
+            p = parent[i]
+            if p >= 0:
+                nxt[p] += damping * rank[i] / n_children[p]
+        delta = max(abs(a - b) for a, b in zip(nxt, rank, strict=False))
+        rank = nxt
+        if delta < tol:
+            break
+    return rank
+
+
 class LineageTree:
     """Parent-pointer forest over corpus seeds with subtree aggregates.
 
@@ -233,32 +257,38 @@ class LineageTree:
         if na is None or nb is None:
             return None
         limit = len(self.nodes) + 1
-        steps = 0
-        while na.depth > nb.depth:
-            na = self.nodes.get(na.parent_key) if na.parent_key else None
-            if na is None:
-                return None
-            steps += 1
-            if steps > limit:
-                return None
-        steps = 0
-        while nb.depth > na.depth:
-            nb = self.nodes.get(nb.parent_key) if nb.parent_key else None
-            if nb is None:
-                return None
-            steps += 1
-            if steps > limit:
-                return None
+        na = self._lift(na, nb.depth, limit)
+        if na is None:
+            return None
+        nb = self._lift(nb, na.depth, limit)
+        if nb is None:
+            return None
         steps = 0
         while na is not nb:
-            na = self.nodes.get(na.parent_key) if na.parent_key else None
-            nb = self.nodes.get(nb.parent_key) if nb.parent_key else None
+            na = self._parent_of(na)
+            nb = self._parent_of(nb)
             if na is None or nb is None:
                 return None
             steps += 1
             if steps > limit:
                 return None
         return na.key
+
+    def _parent_of(self, node: LineageNode) -> LineageNode | None:
+        """Parent node, or None at a root / dangling parent key."""
+        return self.nodes.get(node.parent_key) if node.parent_key else None
+
+    def _lift(self, node: LineageNode, depth: int, limit: int) -> LineageNode | None:
+        """Walk *node* up until its depth <= *depth*; None on a broken or over-long chain."""
+        steps = 0
+        while node.depth > depth:
+            node = self._parent_of(node)
+            if node is None:
+                return None
+            steps += 1
+            if steps > limit:
+                return None
+        return node
 
     def lca_distance(self, a: str, b: str) -> int:
         """Tree distance between *a* and *b* via their LCA; -1 if disconnected."""
@@ -323,17 +353,7 @@ class LineageTree:
         if not pairs:
             return result
 
-        q_by_node: dict[str, list[tuple[str, str]]] = {}
-        for a, b in pairs:
-            if a == b:
-                result[(a, b)] = 0 if a in self.nodes else -1
-                continue
-            if a not in self.nodes or b not in self.nodes:
-                result[(a, b)] = -1
-                continue
-            q_by_node.setdefault(a, []).append((a, b))
-            q_by_node.setdefault(b, []).append((b, a))
-
+        q_by_node = self._bucket_queries(pairs, result)
         if not q_by_node:
             return result
 
@@ -348,7 +368,9 @@ class LineageTree:
             return root
 
         ancestor: dict[str, str] = {}
-        globally_done: set[str] = set()  # union of every component's `finished`, for the outer loop only
+        globally_done: set[str] = (
+            set()
+        )  # union of every component's `finished`, for the outer loop only
         visiting: set[str] = set()
         lca_key: dict[tuple[str, str], str] = {}
 
@@ -415,17 +437,33 @@ class LineageTree:
             if (a, b) in result:
                 continue
             lk = lca_key.get((a, b)) or lca_key.get((b, a))
-            if lk is None:
+            result[(a, b)] = -1 if lk is None else self._depth_dist(a, b, lk)
+        return result
+
+    def _bucket_queries(
+        self, pairs: list[tuple[str, str]], result: dict[tuple[str, str], int]
+    ) -> dict[str, list[tuple[str, str]]]:
+        """Per-node pending LCA queries; trivial/unknown pairs are resolved into *result*."""
+        q_by_node: dict[str, list[tuple[str, str]]] = {}
+        for a, b in pairs:
+            if a == b:
+                result[(a, b)] = 0 if a in self.nodes else -1
+                continue
+            if a not in self.nodes or b not in self.nodes:
                 result[(a, b)] = -1
                 continue
-            na = self.nodes.get(a)
-            nb = self.nodes.get(b)
-            lnode = self.nodes.get(lk)
-            if na is None or nb is None or lnode is None:
-                result[(a, b)] = -1
-            else:
-                result[(a, b)] = na.depth + nb.depth - 2 * lnode.depth
-        return result
+            q_by_node.setdefault(a, []).append((a, b))
+            q_by_node.setdefault(b, []).append((b, a))
+        return q_by_node
+
+    def _depth_dist(self, a: str, b: str, lk: str) -> int:
+        """Tree distance of *a*, *b* through known LCA *lk*; -1 if any key is missing."""
+        na = self.nodes.get(a)
+        nb = self.nodes.get(b)
+        lnode = self.nodes.get(lk)
+        if na is None or nb is None or lnode is None:
+            return -1
+        return na.depth + nb.depth - 2 * lnode.depth
 
     # ── aggregates ────────────────────────────────────────────────────
 
@@ -541,7 +579,6 @@ class LineageTree:
         if not keys:
             return {}
         idx = {k: i for i, k in enumerate(keys)}
-        n = len(keys)
 
         weights = [float(max(self.nodes[k].node_weight, 0)) for k in keys]
         total_w = sum(weights)
@@ -552,26 +589,8 @@ class LineageTree:
         # Parent link and live-child count, both restricted to active nodes:
         # a pruned parent is not a credit sink, and counting soft-deleted
         # siblings in the divisor would dilute the survivors.
-        parent = [-1] * n
-        n_children = [0] * n
-        for k in keys:
-            pk = self.nodes[k].parent_key
-            pi = idx.get(pk) if pk is not None else None
-            if pi is not None:
-                parent[idx[k]] = pi
-                n_children[pi] += 1
-
-        rank = list(base)
-        for _ in range(max_iter):
-            nxt = [(1.0 - damping) * b for b in base]
-            for i in range(n):
-                p = parent[i]
-                if p >= 0:
-                    nxt[p] += damping * rank[i] / n_children[p]
-            delta = max(abs(a - b) for a, b in zip(nxt, rank, strict=False))
-            rank = nxt
-            if delta < tol:
-                break
+        parent, n_children = self._active_links(keys, idx)
+        rank = _damped_walk(base, parent, n_children, damping, max_iter, tol)
         # The walk only moves toward roots, so mass leaks out at every
         # childless node and the raw vector is not a distribution. Rescale so
         # callers can threshold on a share of total credit rather than on a
@@ -580,6 +599,19 @@ class LineageTree:
         if s > 0.0:
             rank = [r / s for r in rank]
         return dict(zip(keys, rank, strict=False))
+
+    def _active_links(self, keys: list[str], idx: dict[str, int]) -> tuple[list[int], list[int]]:
+        """Parent index (-1 = none) and live-child count per active node."""
+        n = len(keys)
+        parent = [-1] * n
+        n_children = [0] * n
+        for k in keys:
+            pk = self.nodes[k].parent_key
+            pi = idx.get(pk) if pk is not None else None
+            if pi is not None:
+                parent[idx[k]] = pi
+                n_children[pi] += 1
+        return parent, n_children
 
     def operator_credit(self, op: str | int) -> float:
         """Global γ-discounted new-edge credit attributed to *op*.
@@ -682,6 +714,32 @@ class LineageTree:
 
     # ── rebuild ───────────────────────────────────────────────────────
 
+    def _node_from_meta(self, seed, meta: dict, key_fn: Callable[[bytes], str]) -> LineageNode:
+        """Build one node from persisted meta; missing/bad fields degrade to defaults."""
+        parent_key = meta.get("parent_key")
+        parent_key = parent_key if isinstance(parent_key, str) else None
+        if parent_key is not None:
+            parent = self.nodes.get(parent_key)
+            depth = parent.depth + 1 if parent is not None else int(meta.get("lineage_depth", 0))
+        else:
+            depth = int(meta.get("lineage_depth", 0))
+        ops = meta.get("parent_ops") or []
+        sites = meta.get("parent_sites") or []
+        try:
+            weight = int(meta.get("new_edge_count", 0))
+        except (TypeError, ValueError):
+            weight = 0
+        self._seq += 1
+        return LineageNode(
+            key=key_fn(seed) if not isinstance(seed, str) else seed,
+            parent_key=parent_key,
+            depth=depth,
+            node_weight=weight,
+            child_ops=[self._op_id(str(op)) for op in ops],
+            child_sites=[int(s) for s in sites],
+            seq=self._seq,
+        )
+
     def rebuild_from_meta(
         self,
         seed_meta: dict,
@@ -709,34 +767,10 @@ class LineageTree:
         for seed, meta in seed_meta.items():
             if not isinstance(meta, dict):
                 continue
-            parent_key = meta.get("parent_key")
-            parent_key = parent_key if isinstance(parent_key, str) else None
-            if parent_key is not None:
-                parent = self.nodes.get(parent_key)
-                depth = (
-                    parent.depth + 1 if parent is not None else int(meta.get("lineage_depth", 0))
-                )
-            else:
-                depth = int(meta.get("lineage_depth", 0))
-            ops = meta.get("parent_ops") or []
-            sites = meta.get("parent_sites") or []
-            try:
-                weight = int(meta.get("new_edge_count", 0))
-            except (TypeError, ValueError):
-                weight = 0
-            self._seq += 1
-            node = LineageNode(
-                key=key_fn(seed) if not isinstance(seed, str) else seed,
-                parent_key=parent_key,
-                depth=depth,
-                node_weight=weight,
-                child_ops=[self._op_id(str(op)) for op in ops],
-                child_sites=[int(s) for s in sites],
-                seq=self._seq,
-            )
+            node = self._node_from_meta(seed, meta, key_fn)
             self.nodes[node.key] = node
-            if parent_key is not None:
-                self._children.setdefault(parent_key, set()).add(node.key)
+            if node.parent_key is not None:
+                self._children.setdefault(node.parent_key, set()).add(node.key)
 
         # Roots are recomputed in one pass rather than maintained during the
         # loop above: a node whose parent_key is set but whose parent never

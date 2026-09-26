@@ -39,6 +39,53 @@ MAX_JOINT_CELLS = 250_000
 MI_MAX_POSITIONS = 4096
 
 
+def _fold_edges(hit_edges: set[int], map_size: int) -> set[int]:
+    """Fold opaque edge hashes into [0, map_size): mask for power-of-two maps, else modulo."""
+    if map_size & (map_size - 1) == 0:
+        return {e & (map_size - 1) for e in hit_edges}
+    return {e % map_size for e in hit_edges}
+
+
+def _load_edge_marginal(em: dict | list) -> array:
+    """Rebuild the dense edge_marginal array from its list or legacy sparse-dict form."""
+    if not isinstance(em, dict):
+        return array("Q", em)
+    max_idx = max((int(k) for k in em), default=-1) + 1 if em else 0
+    out = array("Q", [0]) * max_idx
+    for k, v in em.items():
+        out[int(k)] = v
+    return out
+
+
+def _load_joint(raw_joint: dict) -> defaultdict:
+    """Rebuild the nested joint table from nested-dict or legacy packed-key form."""
+    first_val = next(iter(raw_joint.values()))
+    if isinstance(first_val, dict):
+        return defaultdict(
+            lambda: defaultdict(lambda: defaultdict(int)),
+            {
+                int(pos): defaultdict(
+                    lambda: defaultdict(int),
+                    {
+                        int(bv): defaultdict(int, {int(e): c for e, c in edges.items()})
+                        for bv, edges in byte_vals.items()
+                    },
+                )
+                for pos, byte_vals in raw_joint.items()
+            },
+        )
+
+    # Legacy packed key: pos<<16 | byte_val<<8 | edge.
+    joint: defaultdict = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
+    for k, v in raw_joint.items():
+        key = int(k)
+        pos = (key >> 16) & 0xFFFF
+        bv = (key >> 8) & 0xFF
+        edge = key & 0xFF
+        joint[pos][bv][edge] = v
+    return joint
+
+
 class MutualInformationTracker:
     """Track mutual information between byte positions and coverage edges.
 
@@ -94,28 +141,10 @@ class MutualInformationTracker:
         # an unmasked high hash would force a multi-GB allocation on its first
         # sighting.  Power-of-two maps (AFL convention) mask; others modulo.
         if map_size > 0:
-            if map_size & (map_size - 1) == 0:
-                hit_edges = {e & (map_size - 1) for e in hit_edges}
-            else:
-                hit_edges = {e % map_size for e in hit_edges}
+            hit_edges = _fold_edges(hit_edges, map_size)
         # Invalidate weighted_position cache when a new position appears
         if hasattr(self, "_wp_sorted_pos") and self._wp_sorted_pos is not None:
-            max_pos = len(input_bytes) - 1 if input_bytes else 0
-            if max_pos >= self.max_positions:
-                max_pos = self.max_positions - 1
-            import bisect
-
-            if (
-                bisect.bisect_left(self._wp_sorted_pos, max_pos) == len(self._wp_sorted_pos)
-                or self._wp_sorted_pos[
-                    min(
-                        bisect.bisect_left(self._wp_sorted_pos, max_pos),
-                        len(self._wp_sorted_pos) - 1,
-                    )
-                ]
-                != max_pos
-            ):
-                self._wp_sorted_pos = None
+            self._drop_stale_wp(input_bytes)
 
         for pos, byte_val in enumerate(input_bytes):
             if pos >= self.max_positions:
@@ -141,17 +170,38 @@ class MutualInformationTracker:
                     self.joint[pos][byte_val][edge] = old + 1
                     # Update edge marginal array
                     if edge >= self._edge_marginal_size:
-                        # Release the view first: array.array refuses to
-                        # resize while a frombuffer view exports its buffer.
-                        self._edge_marginal_view = None
-                        self._edge_marginal_view_len = -1
-                        self.edge_marginal.extend(
-                            array("Q", [0]) * (edge + 1 - self._edge_marginal_size)
-                        )
-                        self._edge_marginal_size = edge + 1
+                        self._grow_edge_marginal(edge)
                     self.edge_marginal[edge] += 1
                     if bv_edges >= MAX_EDGES_PER_CELL:
                         break
+
+    def _drop_stale_wp(self, input_bytes: bytes) -> None:
+        """Clear the weighted_position cache if this input's last position is new."""
+        max_pos = len(input_bytes) - 1 if input_bytes else 0
+        if max_pos >= self.max_positions:
+            max_pos = self.max_positions - 1
+        import bisect
+
+        if (
+            bisect.bisect_left(self._wp_sorted_pos, max_pos) == len(self._wp_sorted_pos)
+            or self._wp_sorted_pos[
+                min(
+                    bisect.bisect_left(self._wp_sorted_pos, max_pos),
+                    len(self._wp_sorted_pos) - 1,
+                )
+            ]
+            != max_pos
+        ):
+            self._wp_sorted_pos = None
+
+    def _grow_edge_marginal(self, edge: int) -> None:
+        """Extend the dense edge_marginal array to cover ``edge`` (cold path)."""
+        # Release the view first: array.array refuses to
+        # resize while a frombuffer view exports its buffer.
+        self._edge_marginal_view = None
+        self._edge_marginal_view_len = -1
+        self.edge_marginal.extend(array("Q", [0]) * (edge + 1 - self._edge_marginal_size))
+        self._edge_marginal_size = edge + 1
 
     def _evict_least_observed(self) -> None:
         """Drop the least-observed position with joint cells.
@@ -426,14 +476,7 @@ class MutualInformationTracker:
         self.position_counts = defaultdict(
             int, {int(k): v for k, v in data.get("position_counts", {}).items()}
         )
-        em = data.get("edge_marginal", [])
-        if isinstance(em, dict):
-            max_idx = max((int(k) for k in em), default=-1) + 1 if em else 0
-            self.edge_marginal = array("Q", [0]) * max_idx
-            for k, v in em.items():
-                self.edge_marginal[int(k)] = v
-        else:
-            self.edge_marginal = array("Q", em)
+        self.edge_marginal = _load_edge_marginal(data.get("edge_marginal", []))
         self._edge_marginal_size = len(self.edge_marginal)
         self._edge_marginal_view = None
         self._edge_marginal_view_len = -1
@@ -446,29 +489,7 @@ class MutualInformationTracker:
         )
         raw_joint = data.get("joint", {})
         if raw_joint:
-            first_val = next(iter(raw_joint.values()))
-            if isinstance(first_val, dict):
-                self.joint = defaultdict(
-                    lambda: defaultdict(lambda: defaultdict(int)),
-                    {
-                        int(pos): defaultdict(
-                            lambda: defaultdict(int),
-                            {
-                                int(bv): defaultdict(int, {int(e): c for e, c in edges.items()})
-                                for bv, edges in byte_vals.items()
-                            },
-                        )
-                        for pos, byte_vals in raw_joint.items()
-                    },
-                )
-            else:
-                self.joint = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))
-                for k, v in raw_joint.items():
-                    key = int(k)
-                    pos = (key >> 16) & 0xFFFF
-                    bv = (key >> 8) & 0xFF
-                    edge = key & 0xFF
-                    self.joint[pos][bv][edge] = v
+            self.joint = _load_joint(raw_joint)
         self._joint_cells = sum(
             len(edges) for pos_vals in self.joint.values() for edges in pos_vals.values()
         )

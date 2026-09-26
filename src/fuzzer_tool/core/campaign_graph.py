@@ -37,77 +37,17 @@ def render_campaign_graph(history: list[dict], output_path: str, target_label: s
         return False
 
     try:
-        elapsed = [row["elapsed"] for row in history]
-        execs = [row["execs"] for row in history]
-        eps = [row["eps"] for row in history]
-        eps_filtered = [row["eps_filtered"] for row in history]
-        corpus = [row["corpus"] for row in history]
-        edges = [row["edges"] for row in history if row["edges"] is not None]
-        edges_elapsed = [row["elapsed"] for row in history if row["edges"] is not None]
-        crashes = [row["crashes"] for row in history]
-        crash_sigs = [row["crash_sigs"] for row in history]
-        timeouts = [row["timeouts"] for row in history]
-        rss_mb = [row["peak_rss_kb"] / 1024 for row in history]
-        novel = [row["novel_inputs"] for row in history]
+        d = _series(history)
+        elapsed = d["elapsed"]
 
         fig, axes = plt.subplots(4, 1, figsize=(11, 14), sharex=True)
         title = f"Fuzzing campaign — {target_label}" if target_label else "Fuzzing campaign"
         fig.suptitle(f"{title} ({len(history)} ticks, {elapsed[-1]:.0f}s elapsed)", fontsize=14)
 
-        # Section 1: throughput
-        ax = axes[0]
-        ax.plot(elapsed, eps, color="#90A4AE", linewidth=1, alpha=0.6, label="eps (raw)")
-        ax.plot(elapsed, eps_filtered, color="#2196F3", linewidth=2, label="eps (filtered)")
-        ax.set_ylabel("execs / sec")
-        ax.set_title("Throughput", fontsize=11, loc="left")
-        ax.legend(loc="upper left", fontsize=8)
-        ax.grid(True, alpha=0.3)
-        ax_execs = ax.twinx()
-        ax_execs.plot(elapsed, execs, color="#455A64", linewidth=1, linestyle="--", alpha=0.5)
-        ax_execs.set_ylabel("cumulative execs", color="#455A64")
-
-        # Section 2: coverage
-        ax = axes[1]
-        ax.plot(elapsed, corpus, color="#4CAF50", linewidth=2, label="corpus size")
-        ax.plot(elapsed, novel, color="#8BC34A", linewidth=1, alpha=0.6, label="novel inputs")
-        ax.set_ylabel("seeds", color="#4CAF50")
-        ax.set_title("Coverage & corpus growth", fontsize=11, loc="left")
-        ax.legend(loc="upper left", fontsize=8)
-        ax.grid(True, alpha=0.3)
-        if edges:
-            ax_edges = ax.twinx()
-            ax_edges.plot(edges_elapsed, edges, color="#FF9800", linewidth=2, label="edges")
-            ax_edges.set_ylabel("cumulative edges", color="#FF9800")
-
-        # Section 3: crashes & timeouts
-        ax = axes[2]
-        ax.step(elapsed, crashes, where="post", color="#F44336", linewidth=2, label="crashes")
-        ax.step(
-            elapsed,
-            crash_sigs,
-            where="post",
-            color="#C62828",
-            linewidth=1,
-            linestyle="--",
-            label="unique signatures",
-        )
-        ax.step(
-            elapsed, timeouts, where="post", color="#9C27B0", linewidth=1, alpha=0.7,
-            label="timeouts",
-        )
-        ax.set_ylabel("count")
-        ax.set_title("Crashes & timeouts", fontsize=11, loc="left")
-        ax.legend(loc="upper left", fontsize=8)
-        ax.grid(True, alpha=0.3)
-
-        # Section 4: memory
-        ax = axes[3]
-        ax.plot(elapsed, rss_mb, color="#607D8B", linewidth=2, label="peak RSS")
-        ax.set_ylabel("MB")
-        ax.set_xlabel("elapsed (s)")
-        ax.set_title("Memory", fontsize=11, loc="left")
-        ax.legend(loc="upper left", fontsize=8)
-        ax.grid(True, alpha=0.3)
+        _plot_throughput(axes[0], d)
+        _plot_coverage(axes[1], d)
+        _plot_faults(axes[2], d)
+        _plot_memory(axes[3], d)
 
         plt.tight_layout(rect=(0, 0, 1, 0.97))
         plt.savefig(output_path, dpi=150)
@@ -118,3 +58,89 @@ def render_campaign_graph(history: list[dict], output_path: str, target_label: s
         log.debug("failed to render campaign graph", exc_info=True)
         print(f"\n  Error generating --output-graph: {e}")
         return False
+
+
+def _series(history: list[dict]) -> dict[str, list]:
+    """Column-wise metric series from per-tick rows; edges drop ticks without a count."""
+    return {
+        "elapsed": [row["elapsed"] for row in history],
+        "execs": [row["execs"] for row in history],
+        "eps": [row["eps"] for row in history],
+        "eps_filtered": [row["eps_filtered"] for row in history],
+        "corpus": [row["corpus"] for row in history],
+        "edges": [row["edges"] for row in history if row["edges"] is not None],
+        "edges_elapsed": [row["elapsed"] for row in history if row["edges"] is not None],
+        "crashes": [row["crashes"] for row in history],
+        "crash_sigs": [row["crash_sigs"] for row in history],
+        "timeouts": [row["timeouts"] for row in history],
+        "rss_mb": [row["peak_rss_kb"] / 1024 for row in history],
+        "novel": [row["novel_inputs"] for row in history],
+    }
+
+
+def _plot_throughput(ax, d: dict[str, list]) -> None:
+    """Section 1: raw/filtered eps plus cumulative execs on a twin axis."""
+    elapsed = d["elapsed"]
+    ax.plot(elapsed, d["eps"], color="#90A4AE", linewidth=1, alpha=0.6, label="eps (raw)")
+    ax.plot(elapsed, d["eps_filtered"], color="#2196F3", linewidth=2, label="eps (filtered)")
+    ax.set_ylabel("execs / sec")
+    ax.set_title("Throughput", fontsize=11, loc="left")
+    ax.legend(loc="upper left", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    ax_execs = ax.twinx()
+    ax_execs.plot(elapsed, d["execs"], color="#455A64", linewidth=1, linestyle="--", alpha=0.5)
+    ax_execs.set_ylabel("cumulative execs", color="#455A64")
+
+
+def _plot_coverage(ax, d: dict[str, list]) -> None:
+    """Section 2: corpus/novel growth; edges on a twin axis when recorded."""
+    elapsed = d["elapsed"]
+    ax.plot(elapsed, d["corpus"], color="#4CAF50", linewidth=2, label="corpus size")
+    ax.plot(elapsed, d["novel"], color="#8BC34A", linewidth=1, alpha=0.6, label="novel inputs")
+    ax.set_ylabel("seeds", color="#4CAF50")
+    ax.set_title("Coverage & corpus growth", fontsize=11, loc="left")
+    ax.legend(loc="upper left", fontsize=8)
+    ax.grid(True, alpha=0.3)
+    if not d["edges"]:
+        return
+    ax_edges = ax.twinx()
+    ax_edges.plot(d["edges_elapsed"], d["edges"], color="#FF9800", linewidth=2, label="edges")
+    ax_edges.set_ylabel("cumulative edges", color="#FF9800")
+
+
+def _plot_faults(ax, d: dict[str, list]) -> None:
+    """Section 3: crashes, unique signatures and timeouts as step curves."""
+    elapsed = d["elapsed"]
+    ax.step(elapsed, d["crashes"], where="post", color="#F44336", linewidth=2, label="crashes")
+    ax.step(
+        elapsed,
+        d["crash_sigs"],
+        where="post",
+        color="#C62828",
+        linewidth=1,
+        linestyle="--",
+        label="unique signatures",
+    )
+    ax.step(
+        elapsed,
+        d["timeouts"],
+        where="post",
+        color="#9C27B0",
+        linewidth=1,
+        alpha=0.7,
+        label="timeouts",
+    )
+    ax.set_ylabel("count")
+    ax.set_title("Crashes & timeouts", fontsize=11, loc="left")
+    ax.legend(loc="upper left", fontsize=8)
+    ax.grid(True, alpha=0.3)
+
+
+def _plot_memory(ax, d: dict[str, list]) -> None:
+    """Section 4: peak RSS in MB."""
+    ax.plot(d["elapsed"], d["rss_mb"], color="#607D8B", linewidth=2, label="peak RSS")
+    ax.set_ylabel("MB")
+    ax.set_xlabel("elapsed (s)")
+    ax.set_title("Memory", fontsize=11, loc="left")
+    ax.legend(loc="upper left", fontsize=8)
+    ax.grid(True, alpha=0.3)

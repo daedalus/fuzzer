@@ -121,6 +121,25 @@ def magic_byte_search(
     return bytes(buf)
 
 
+def _cbh_sites(buf: bytearray, target: bytes, rng, max_sites: int) -> list[int]:
+    """Candidate windows for ``climb_hill``, best-matching first; empty if none fit."""
+    if len(buf) < len(target):
+        return []
+
+    candidates = _candidate_positions(bytes(buf), target, rng)
+    candidates = [p for p in candidates if p + len(target) <= len(buf)]
+    if not candidates:
+        return []
+
+    # Order sites by how well the *original* buffer matches there. The
+    # first is the argmin the old implementation committed to; the rest
+    # are the re-anchor targets, in decreasing promise.
+    origin = bytes(buf)
+    candidates.sort(key=lambda p: _window_distance(origin, p, target))
+    del candidates[max(1, max_sites) :]
+    return candidates
+
+
 def climb_hill(
     input_buf: bytes,
     cmp_pair: tuple[bytes, bytes],
@@ -190,21 +209,11 @@ def climb_hill(
         return input_buf
 
     buf = bytearray(input_buf[:max_len] if max_len else input_buf)
-    if len(buf) < len(target):
-        return input_buf
-
-    candidates = _candidate_positions(bytes(buf), target, rng)
-    candidates = [p for p in candidates if p + len(target) <= len(buf)]
+    candidates = _cbh_sites(buf, target, rng, max_sites)
     if not candidates:
         return input_buf
 
-    # Order sites by how well the *original* buffer matches there. The
-    # first is the argmin the old implementation committed to; the rest
-    # are the re-anchor targets, in decreasing promise.
     origin = bytes(buf)
-    candidates.sort(key=lambda p: _window_distance(origin, p, target))
-    del candidates[max(1, max_sites) :]
-
     site_idx = 0
     site = candidates[0]
 
