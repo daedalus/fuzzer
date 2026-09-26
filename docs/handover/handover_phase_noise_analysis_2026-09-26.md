@@ -1,11 +1,16 @@
 # Phase noise theory applied to core/pll.py
 
-**Status:** analysis only, no code change. Same category as
-`handover_c_hd_shortest_path_2026-09-*.md` and the C-HD writeup: a
-concrete mathematical connection was found and is documented here, but
-turning it into a patch needs a real campaign's exec-time/discovery
-series, which was not available in this pass. HEAD at time of writing:
-`077b369d`.
+**Status:** partially implemented. The one piece from the original
+analysis that does not need real-campaign data to validate -- an
+Allan-deviation noise-regime classifier, tested against synthetic
+series the same way `kuramoto.py`/`pll.py` themselves were before any
+real-campaign data was available -- is now built as
+`core/allan_deviation.py`, standalone, same status as `kuramoto.py` and
+`pll.py`: not wired into any scheduler, analyzer, or the CLI. The other
+two pieces (a `D`-derived lock threshold, a Leeson-derived loop
+bandwidth) are still analysis only -- see "What was deliberately not
+done" below; they still need real-campaign data this pass did not have.
+HEAD at time of writing: `077b369d`.
 
 ## Trigger
 
@@ -89,20 +94,78 @@ itself. This analysis only shows that *if* they do (or approximately
 do), phase-noise theory gives closed-form replacements for the two
 values currently tuned by hand.
 
+## What was built (update 2026-09-26)
+
+`core/allan_deviation.py`:
+
+- `allan_deviation(y, tau0=1.0, m_values=None) -> list[AllanPoint]` --
+  the standard fully-overlapping Allan-variance estimator
+  (`sigma_y^2(tau) = 1/(2*(N-2m)) * sum (ybar_{i+m} - ybar_i)^2`) over
+  a frequency-like series, using prefix sums for O(N) work per `m`
+  instead of the naive O(N*m). Defaults to power-of-two `m` up to
+  `N//4`; degrades (drops the point) rather than raising when an
+  explicit `m` would leave fewer than one overlapping window, same
+  "degrade rather than fail" pattern `services/stats.py` already uses
+  for sparse data.
+- `classify_segments(points) -> list[Segment]` -- classifies the
+  *local* log-log slope between each adjacent pair of points against
+  the five canonical power-law exponents from the module docstring
+  (phase noise -1, white FM -1/2, flicker FM 0, random-walk FM +1/2,
+  drift +1), each within a 0.25 half-width band (the canonical
+  exponents are spaced 0.5 apart, so the bands tile exactly with no
+  gaps). Classifies locally rather than fitting one slope through the
+  whole curve, since a real series typically shows different regimes
+  at different averaging times -- the entire point of an Allan
+  deviation plot over a single variance number.
+- 23 tests in `tests/test_allan_deviation.py`: input validation,
+  `AllanPoint` bookkeeping (tau/m/n_pairs arithmetic, degrade-not-raise
+  on an oversized `m`, dedup, default `m_values`), and noise-regime
+  classification verified two ways -- against fixed-seed synthetic
+  white-frequency-noise and random-walk-frequency-noise series (the
+  two regimes with the simplest, least-flaky generators: i.i.d.
+  Gaussian samples and their cumulative sum, respectively; textbook
+  exponents -1/2 and +1/2 confirmed numerically before writing the
+  test, see the sanity check below), and directly against fabricated
+  points on each of the five exact canonical slopes so the
+  classification boundary itself is pinned down independent of any
+  synthetic-noise generator's imperfections.
+
+Numeric sanity check (N=8192, seed 1234, `m` in
+{1,2,4,8,16,32,64,128,256,512}, 9 adjacent-pair slopes) run before
+writing the test: white-FM slopes came out in [-0.804, -0.287] overall,
+but the six segments spanning `m`=1 to 64 -- the range the test suite
+uses -- all landed within 0.08 of the canonical -0.5 (-0.505, -0.500,
+-0.494, -0.508, -0.455, -0.417); the two outliers (-0.804, -0.287) are
+both in the `m`=128-512 tail. Random-walk-FM slopes came out in
+[0.292, 0.516] overall, with the same `m`=1-64 range landing within
+0.20 of canonical +0.5 (0.299, 0.446, 0.499, 0.506, 0.515, 0.516).
+Both tails degrade at the largest `m` values (128-256, 256-512) where
+the overlapping-window count is smallest -- expected estimator
+behavior, documented in the module docstring, and why the test suite
+restricts itself to `m` up to 64 where the window count is still in
+the thousands.
+
+`ruff` and `mypy --strict` clean on both new files (module not added to
+`pyproject.toml`'s exemption list, same as `kuramoto.py`/`pll.py`); full
+related-suite run (`test_allan_deviation.py` + `test_pll.py` +
+`test_analyzer_pll.py` + `test_kuramoto.py`, 106 tests) passes clean.
+
 ## What was deliberately not done
 
-- **No `D` estimator implemented.** Doing this against synthetic data
-  only would repeat the same weakness the existing thresholds already
-  have (tuned against scenarios that may not resemble a real
-  campaign). Per the pattern already used for the PLL module's own
-  "step 1" (`analyzer_pll.py`), this should be measured against a real
-  or replayed campaign's series first.
-- **No Leeson-derived bandwidth selection implemented**, for the same
-  reason.
-- **No Allan-deviation diagnostic implemented.** Straightforward to add
-  as a standalone module (same status as `kuramoto.py`/`pll.py`
-  themselves) once there is a use for distinguishing the three noise
-  regimes; not built speculatively here.
+- **No `D` estimator for the lock threshold, and no Leeson-derived
+  bandwidth selection.** Both still need a real (or replayed) fuzzer
+  campaign's actual exec-time/discovery series to validate against --
+  synthetic-only tuning here would repeat the exact weakness the
+  existing fixed thresholds/gains already have. `allan_deviation.py`
+  itself was safe to build synthetic-only because it makes no claim
+  about the fuzzer's own series (same bar `kuramoto.py`/`pll.py` were
+  held to); a lock threshold or bandwidth choice *does* make such a
+  claim, so it stays gated on real data.
+- **Not wired into `analyzer_pll.py`, `PhaseLockedLoop`, or anything
+  else.** Per the same reasoning `pll.py` and `kuramoto.py` themselves
+  used: ship the diagnostic standalone first, see whether it says
+  anything useful about a real campaign's series before it becomes an
+  input to anything.
 
 ## Next steps (not started)
 
@@ -110,17 +173,20 @@ values currently tuned by hand.
    get lock-state transitions and a Q-channel residual history on at
    least one series (exec-time is the more likely candidate; the
    `analyzer_pll.py` fuzzgoat smoke test noted the discovery series
-   rarely reaches the 256-sample warm-up in a short run).
-2. From that residual history, check whether `Var(q)` under sustained
-   lock actually grows linearly with tick count (the random-walk
-   prediction) rather than staying bounded — this is the empirical
-   gate before estimating `D` for anything.
+   rarely reaches the 256-sample warm-up in a short run). Feed the same
+   series through `allan_deviation.allan_deviation` +
+   `classify_segments` to see which noise regime(s) it actually shows,
+   and at which averaging times.
+2. From the Q-channel residual history, check whether `Var(q)` under
+   sustained lock actually grows linearly with tick count (the
+   random-walk prediction) rather than staying bounded -- this is the
+   empirical gate before estimating `D` for anything.
 3. If step 2 holds, implement the `D`-based lock threshold and/or a
    Leeson-derived bandwidth choice as an opt-in alternative to the
    current fixed constants (same non-default, backward-compatible
    pattern already used for `badness_fn` in `OpKatzScheduler`).
-4. Independently of steps 1-3, an Allan-deviation diagnostic module
-   could be built and tested against synthetic white/flicker/drift
-   series (same bar `pll.py` and `kuramoto.py` themselves were held to
-   before any real-campaign validation) as a read-only addition to
-   `analyzer_pll.py`'s summary.
+4. If step 1 shows a real series in a clean single regime over a wide
+   `tau` range, consider wiring `allan_deviation` into
+   `analyzer_pll.py`'s summary as a read-only addition -- not done
+   here since there is no real-campaign result yet to confirm it says
+   anything the fuzzer doesn't already know.
