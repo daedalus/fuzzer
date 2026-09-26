@@ -176,24 +176,8 @@ def chi_squared_pvalue(x2: float, dof: int) -> float:
     return 1.0 - _reg_lower_incomplete_gamma(a, x2 / 2.0)
 
 
-def chi_squared_critical_value(dof: int, alpha: float = 0.05) -> float:
-    """Inverse survival function: x2 such that P(χ²(dof) > x2) = alpha.
-
-    Binary search on ``chi_squared_pvalue``.  Uses a Wilson–Hilferty
-    approximation to bracket the root for fast convergence.
-    """
-    if dof < 1:
-        return 0.0
-    if alpha <= 0.0:
-        return float("inf")
-    if alpha >= 1.0:
-        return 0.0
-
-    # Wilson–Hilferty approximation for the initial guess:
-    # χ²_α ≈ dof * (1 - 2/(9*dof) + z_α * sqrt(2/(9*dof)))^3
-    # where z_α is the normal quantile.  Crude but good enough for bracketing.
-    import math
-
+def _approx_z(alpha: float) -> float:
+    """Coarse normal quantile for *alpha*, linearly interpolated from a table."""
     # Approximate normal quantile for alpha (coarse)
     z_map = {
         0.995: 2.576,
@@ -227,7 +211,44 @@ def chi_squared_critical_value(dof: int, alpha: float = 0.05) -> float:
             z_low = z_map[sorted_alphas[i]]
             z_high = z_map[sorted_alphas[i + 1]]
             break
-    z_alpha = z_low + (z_high - z_low) * alpha_frac
+    return z_low + (z_high - z_low) * alpha_frac
+
+
+def _expand_bracket(lo: float, hi: float, dof: int, alpha: float) -> tuple[float, float]:
+    """Widen [lo, hi] (<= 20 halvings/doublings) until p(lo) >= alpha >= p(hi)."""
+    p_lo = chi_squared_pvalue(lo, dof)
+    p_hi = chi_squared_pvalue(hi, dof)
+    for _ in range(20):
+        if p_lo >= alpha >= p_hi:
+            break
+        if p_lo < alpha:
+            lo /= 2.0
+            p_lo = chi_squared_pvalue(lo, dof)
+        if p_hi > alpha:
+            hi *= 2.0
+            p_hi = chi_squared_pvalue(hi, dof)
+    return lo, hi
+
+
+def chi_squared_critical_value(dof: int, alpha: float = 0.05) -> float:
+    """Inverse survival function: x2 such that P(χ²(dof) > x2) = alpha.
+
+    Binary search on ``chi_squared_pvalue``.  Uses a Wilson–Hilferty
+    approximation to bracket the root for fast convergence.
+    """
+    if dof < 1:
+        return 0.0
+    if alpha <= 0.0:
+        return float("inf")
+    if alpha >= 1.0:
+        return 0.0
+
+    # Wilson–Hilferty approximation for the initial guess:
+    # χ²_α ≈ dof * (1 - 2/(9*dof) + z_α * sqrt(2/(9*dof)))^3
+    # where z_α is the normal quantile.  Crude but good enough for bracketing.
+    import math
+
+    z_alpha = _approx_z(alpha)
 
     # Wilson–Hilferty approximation
     if dof >= 2:
@@ -240,17 +261,7 @@ def chi_squared_critical_value(dof: int, alpha: float = 0.05) -> float:
     hi = max(1e-5, x_wh * 10.0)
 
     # Expand bracket if needed
-    p_lo = chi_squared_pvalue(lo, dof)
-    p_hi = chi_squared_pvalue(hi, dof)
-    for _ in range(20):
-        if p_lo >= alpha >= p_hi:
-            break
-        if p_lo < alpha:
-            lo /= 2.0
-            p_lo = chi_squared_pvalue(lo, dof)
-        if p_hi > alpha:
-            hi *= 2.0
-            p_hi = chi_squared_pvalue(hi, dof)
+    lo, hi = _expand_bracket(lo, hi, dof, alpha)
 
     # Binary search
     for _ in range(60):

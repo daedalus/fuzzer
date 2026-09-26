@@ -118,52 +118,57 @@ def _preload(soname: str, label: str) -> None:
         print(f"[*] Preloaded {label}: {soname}", file=sys.stdout)
 
 
-def main() -> None:
-    # Pick the target path from the subcommand args.
-    # Expected: fuzzer-tool fuzz <target> [options...]
-    target: str | None = None
-    args = sys.argv[1:]
+# Sanitizer options appended unless the user already set the key.
+_ASAN_DEFAULTS = (
+    "halt_on_error=0",
+    "abort_on_error=0",
+    "verify_asan_link_order=0",
+    "detect_leaks=0",
+    ASAN_RELEASE_TO_OS,
+)
+_UBSAN_DEFAULTS = ("halt_on_error=1", "abort_on_error=1", "print_stacktrace=1")
+
+
+def _fuzz_target(args: list[str]) -> str | None:
+    """Target path after `fuzz` in argv (None when absent or an option)."""
     for i, arg in enumerate(args):
         if arg == "fuzz" and i + 1 < len(args):
             candidate = args[i + 1]
             if not candidate.startswith("-"):
-                target = candidate
-                break
+                return candidate
+    return None
+
+
+def _merge_opts(var: str, defaults: tuple[str, ...]) -> None:
+    """Append *defaults* to env *var* (colon list), keeping user-set keys."""
+    cur = os.environ.get(var, "")
+    opt_parts = [p for p in cur.split(":") if p] if cur else []
+    seen = {p.split("=")[0] for p in opt_parts}
+    for opt in defaults:
+        key = opt.split("=")[0]
+        if key not in seen:
+            opt_parts.append(opt)
+            seen.add(key)
+    os.environ[var] = ":".join(opt_parts)
+
+
+def main() -> None:
+    # Pick the target path from the subcommand args.
+    # Expected: fuzzer-tool fuzz <target> [options...]
+    target = _fuzz_target(sys.argv[1:])
 
     if target and os.path.exists(target):
         if _detect_asan(target):
             libasan = _resolve_asan()
             if libasan:
                 _preload(libasan, "libasan")
-            asan_opts = os.environ.get("ASAN_OPTIONS", "")
-            opt_parts = [p for p in asan_opts.split(":") if p] if asan_opts else []
-            seen = {p.split("=")[0] for p in opt_parts}
-            for opt in (
-                "halt_on_error=0",
-                "abort_on_error=0",
-                "verify_asan_link_order=0",
-                "detect_leaks=0",
-                ASAN_RELEASE_TO_OS,
-            ):
-                key = opt.split("=")[0]
-                if key not in seen:
-                    opt_parts.append(opt)
-                    seen.add(key)
-            os.environ["ASAN_OPTIONS"] = ":".join(opt_parts)
+            _merge_opts("ASAN_OPTIONS", _ASAN_DEFAULTS)
 
         if _detect_ubsan(target):
             libubsan = _resolve_ubsan()
             if libubsan:
                 _preload(libubsan, "libubsan")
-            ubsan_opts = os.environ.get("UBSAN_OPTIONS", "")
-            opt_parts = [p for p in ubsan_opts.split(":") if p] if ubsan_opts else []
-            seen = {p.split("=")[0] for p in opt_parts}
-            for opt in ("halt_on_error=1", "abort_on_error=1", "print_stacktrace=1"):
-                key = opt.split("=")[0]
-                if key not in seen:
-                    opt_parts.append(opt)
-                    seen.add(key)
-            os.environ["UBSAN_OPTIONS"] = ":".join(opt_parts)
+            _merge_opts("UBSAN_OPTIONS", _UBSAN_DEFAULTS)
 
     # Replace this process with the real fuzzer-tool via execvpe
     cmd = [sys.executable, "-m", "fuzzer_tool"] + sys.argv[1:]

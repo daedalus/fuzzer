@@ -332,6 +332,24 @@ def find_offsets(data: bytes, pattern: bytes) -> list[int]:
         start += 1
 
 
+def _applicable_encoders(cmp_size: int, cmp_type: str, operand_a: bytes, operand_b: bytes) -> dict:
+    """First touch of a pair: {encoder: (pattern chunks, None)} for applicable encoders."""
+    # Evaluate every encoder once. Only the applicable
+    # ones are kept — the common case iterates ~10 encoders instead
+    # of all 39, with no per-encoder dict lookups on later calls.
+    enc_cache = {}
+    for enc in BUILTIN_ENCODERS:
+        if not enc.is_applicable(cmp_size, cmp_type, operand_a, operand_b):
+            continue
+        # Encode operand_a to get the pattern chunks to search for.
+        # Replacement variants are computed lazily on the first hit:
+        # most pairs' patterns never appear in the input, and encoding
+        # up to 129 variants is the most expensive step.
+        pattern_chunks = tuple(enc.encode(operand_a))
+        enc_cache[enc] = (pattern_chunks, None)
+    return enc_cache
+
+
 def generate_mutations(
     operand_a: bytes,
     operand_b: bytes,
@@ -383,19 +401,7 @@ def generate_mutations(
     pair_key = (cmp_size, cmp_type, operand_a, operand_b, hammer)
     enc_cache = _cache.get(pair_key)
     if enc_cache is None:
-        # First touch: evaluate every encoder once. Only the applicable
-        # ones are kept — the common case iterates ~10 encoders instead
-        # of all 39, with no per-encoder dict lookups on later calls.
-        enc_cache = {}
-        for enc in BUILTIN_ENCODERS:
-            if not enc.is_applicable(cmp_size, cmp_type, operand_a, operand_b):
-                continue
-            # Encode operand_a to get the pattern chunks to search for.
-            # Replacement variants are computed lazily on the first hit:
-            # most pairs' patterns never appear in the input, and encoding
-            # up to 129 variants is the most expensive step.
-            pattern_chunks = tuple(enc.encode(operand_a))
-            enc_cache[enc] = (pattern_chunks, None)
+        enc_cache = _applicable_encoders(cmp_size, cmp_type, operand_a, operand_b)
         _cache[pair_key] = enc_cache
 
     for enc, (pattern_chunks, repl_variants) in enc_cache.items():

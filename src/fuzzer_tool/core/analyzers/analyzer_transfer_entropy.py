@@ -35,6 +35,23 @@ except ImportError:
     _HAS_NUMPY = False
 
 
+def _edge_hit_totals(edge_bitmaps: list[bytes], map_size: int) -> dict[int, int]:
+    """Sum of hit counts per edge index across all bitmaps (nonzero only)."""
+    total_hits: dict[int, int] = defaultdict(int)
+    if _HAS_NUMPY:
+        for eb in edge_bitmaps:
+            arr = np.frombuffer(eb, dtype=np.uint8)[:map_size]
+            for i in np.flatnonzero(arr):
+                total_hits[i] += int(arr[i])
+        return total_hits
+
+    for eb in edge_bitmaps:
+        for i, v in enumerate(eb[:map_size]):
+            if v > 0:
+                total_hits[i] += v
+    return total_hits
+
+
 class TransferEntropy:
     """Estimate transfer entropy between discrete signals.
 
@@ -370,17 +387,7 @@ class TransferEntropy:
             return {}
 
         # Find top-k edges by total hit count
-        total_hits: dict[int, int] = defaultdict(int)
-        if _HAS_NUMPY:
-            for eb in edge_bitmaps:
-                arr = np.frombuffer(eb, dtype=np.uint8)[:map_size]
-                for i in np.flatnonzero(arr):
-                    total_hits[i] += int(arr[i])
-        else:
-            for eb in edge_bitmaps:
-                for i, v in enumerate(eb[:map_size]):
-                    if v > 0:
-                        total_hits[i] += v
+        total_hits = _edge_hit_totals(edge_bitmaps, map_size)
         top_edges = sorted(total_hits.keys(), key=lambda e: total_hits[e], reverse=True)[:top_k]
 
         if not top_edges:
