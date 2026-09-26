@@ -1134,14 +1134,14 @@ class SeedPicker:
         w *= 0.01 if staleness > stale_threshold else 1.0
         return w, burst_factor
 
-    def _weight_secretary_and_cached(
+    def _weight_cached(
         self, seed_key: str, w: float, classifications: dict | None, f
     ) -> tuple[float, float, float]:
-        """Apply secretary stopping rule and cached edge weights."""
-        if f._secretary and seed_key in f._seed_secretary:
-            stop, _reason = f._seed_secretary[seed_key].should_stop()
-            if stop:
-                w *= 0.01
+        """Apply cached edge weights.
+
+        The secretary rule is display-only (P2-4): its stop fires on a 1/t
+        envelope, so it must not reweight seeds.
+        """
         if seed_key not in f._cached_weights:
             # When saturated, skip the expensive edge-tracker analyses
             # (subsumption, hitcount diversity, Wasserstein, coverage
@@ -1807,7 +1807,7 @@ class SeedPicker:
             sk = seed_keys[i] or f._seed_key(seed)
             w = weights[i]
 
-            w, sub, spa = self._weight_secretary_and_cached(sk, w, classifications, f)
+            w, sub, spa = self._weight_cached(sk, w, classifications, f)
             w = self._weight_edge_penalties(sk, w, fuzz_count, f, recent_counts)
             w = self._weight_entropy_and_distance(
                 seed, sk, meta, w, f, entropy_map, mean_entropy, max_d

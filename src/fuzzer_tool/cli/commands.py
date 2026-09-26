@@ -3134,7 +3134,8 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--secretary",
         action="store_true",
-        help="Enable secretary-problem optimal stopping for seed/operator/corpus scheduling",
+        help="Track secretary-problem stopping ranks for seeds/operators/corpus "
+        "(display only; does not reweight or minimize)",
     )
     fuzz_parser.add_argument(
         "--secretary-window",

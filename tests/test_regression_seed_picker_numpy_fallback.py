@@ -80,7 +80,7 @@ def _picker(f) -> SeedPicker:
     """Phase-2 modifiers stubbed to identity: these tests assert Phase 1,
     which is the pass the numpy branch owns."""
     sp = SeedPicker(f)
-    sp._weight_secretary_and_cached = lambda sk, w, classifications, ff: (w, 1.0, 1.0)
+    sp._weight_cached = lambda sk, w, classifications, ff: (w, 1.0, 1.0)
     sp._weight_edge_penalties = lambda sk, w, fuzz_count, ff, recent_counts=None: w
     sp._weight_entropy_and_distance = lambda seed, sk, meta, w, ff, em, me, md: w
     sp._weight_static_features = lambda seed, cov, w, ff: w

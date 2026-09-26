@@ -3,14 +3,20 @@
 Original 2026-09-02 (base `dc30854`). Pruned 2026-09-26 to open items; full original:
 `git show 1c689e8a^:docs/handover/handover_bandit_stopping_search_2026-09-02.md`
 (measurements, Gittins/Koopman prototypes, rejected alternatives in §10).
-Verified against `4c021daa`. Nothing below is implemented. Tracked as P3-2 / P3-4
+Verified against `4c021daa`. Nothing below is implemented except §1's consumer removal. Tracked as P3-2 / P3-4
 in `handover_pending_2026-09-06.md`.
 
 ---
 
-## 1. `core/secretary.py` is not a stopping rule — and it is live
+## 1. `core/secretary.py` is not a stopping rule
 
-Defect unchanged since the original measurement:
+**Consumers removed 2026-09-26** (`tests/test_regression_secretary_diagnostic_only.py`):
+`seed_picker` no longer cuts a stopped seed's weight 100x (`_weight_secretary_and_cached`
+→ `_weight_cached`), and `save_to_corpus` no longer defers minimization on a stop.
+The P2-4 docstring ("nothing calls `should_stop` to act") is now true; `report.py`
+still calls it for display.
+
+Defect in the rule itself, still open:
 
 - `_rank_of_best()` is bounded by `1/(1-decay) = 20` (`decay = 0.95`);
   `threshold = int(n/e)` reaches 183 at `window_size = 500`. For `n ≥ 58` the
@@ -20,23 +26,14 @@ Defect unchanged since the original measurement:
 - Seed stream (`services/fuzzer.py`, `discovery_rate = len(new) / fuzz_count`,
   cumulative `fuzz_count`) carries a `1/t` envelope: a seed finding a new edge on
   50% of execs is stopped at obs 20 (`min_observations`) and never recovers.
+- `_op_secretary` / `_seed_secretary` / `_corpus_secretary` `observe()` every
+  iteration for a display count. Pure overhead.
 
-Consumers (the class docstring's "display only / nothing calls `should_stop`"
-claim, added in `0fd5f25d` for P2-4, is **false**):
-
-- `services/seed_picker.py::_weight_secretary_and_cached` — `w *= 0.01` on stop.
-  Net effect of `--secretary`: 100× preference for seeds with < 20 observations.
-- `services/corpus_manager.py` — `_corpus_secretary.should_stop()` →
-  `f._defer_minimize()`; `discovery_rate()` decays globally, so it stops permanently.
-- `_op_secretary`: per-op per-iteration `observe()`, read only as a count in
-  `services/stats.py`. Pure overhead.
-
-Action: remove `--secretary` (module, three instances, `w *= 0.01`, defer trigger,
-CLI flags `--secretary*`, stats/report lines), or replace with §2's retirement
-value. Record the falsified hypothesis in `docs/learnings/`. Regression tests
-(exact, Rule 39): strictly increasing 500-point stream → `rank == 20.0`,
-`threshold == 183`; `len(new)/fuzz_count` stream at p=0.5 → `should_stop()` true
-at obs 20. At minimum, fix the false docstring.
+Action: remove `--secretary` (module, three instances, CLI flags `--secretary*`,
+`--elo all` enabling, stats/report lines), or replace with §2's retirement value.
+Record the falsified hypothesis in `docs/learnings/`. Exact tests (Rule 39):
+strictly increasing 500-point stream → `rank == 20.0`, `threshold == 183`;
+`len(new)/fuzz_count` stream at p=0.5 → `should_stop()` true at obs 20.
 
 ## 2. Gittins index — `core/gittins.py` (absent)
 

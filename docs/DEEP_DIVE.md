@@ -535,7 +535,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--elo` | Elo arbitration between operator strategies (bandit/mopt/replicator/cem/exp3/eps_greedy/hierarchical/gp_ucb/bo_gp_ucb/softmax/topk) and seed strategies (ga/qea/weighted/pareto/format/bayesian/markov); `--elo all` also enables every scheduler plus the mutation-stack features (metropolis/shapley/mi-guided/secretary/wfc/lineage/`--schedule fast`), and the convergence report lists only schedulers actually used |
 | `--sensitivity` | Per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting |
 | `--region-profile` | Statistical region profiling for mutation targeting (labels seed windows incompressible/tabular/textual/repetitive) |
-| `--secretary` | Secretary-problem optimal stopping for seed/operator/corpus scheduling |
+| `--secretary` | Secretary-problem stopping ranks for seeds/operators/corpus — display only, does not reweight or minimize |
 | `--bayesian` | Bayesian methods: Thompson-sampled seed selection, hierarchical operator priors, Bayesian coverage growth model |
 | `--ga` | Genetic algorithm lifecycle mode (bounded population, speciation, crossover) |
 | `--qea` | Quantum-inspired evolutionary algorithm (amplitude encoding, rotation gate feedback) |
