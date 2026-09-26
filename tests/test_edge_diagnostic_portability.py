@@ -110,7 +110,7 @@ def test_no_python_tool_hardcodes_a_home_directory():
     debug_repro and the three profile_* scripts chdir'd there."""
     offenders = [
         f"{p.name}:{n}"
-        for p in sorted((ROOT / "tools").glob("*.py"))
+        for p in sorted((ROOT / "tools").glob("**/*.py"))
         for n, line in enumerate(p.read_text(errors="replace").splitlines(), 1)
         if "/home/" in line and not line.lstrip().startswith("#")
     ]

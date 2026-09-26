@@ -2,16 +2,16 @@
 # Systematic feature combination sweep for -n 1k benchmarks.
 # Tests individual features and combinations to find the best configuration.
 #
-# Usage: tools/bench_sweep.sh
+# Usage: tools/lib/bench_sweep.sh
 #
 # For a simple 4-way baseline/enhanced/enhanced+/optimal comparison
-# instead of this exhaustive sweep, use tools/bench.sh.
+# instead of this exhaustive sweep, use tools/lib/bench.sh.
 
 set -euo pipefail
 
 TARGET="targets/png_read"
 ITERS=1000
-BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BASE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 RESULTS_DIR="/tmp/fuzz_sweep_results"
 DICT="-D dictionaries/png.dict"
 GRAMMAR="-g dictionaries/png.gram"

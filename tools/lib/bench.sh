@@ -5,15 +5,15 @@
 # campaign per configuration on one target, so the gap between two configs
 # is mostly the gap between two draws of a stochastic process. Use it to
 # check that a config runs and roughly where it lands. To decide whether an
-# arm is actually better, use tools/bench_paired.py, which runs every arm
+# arm is actually better, use tools/lib/bench_paired.py, which runs every arm
 # over the same locked (target, seed) matrix and reports McNemar on the
 # paired outcomes.
 #
 # Usage:
-#   tools/bench.sh [target] [iterations] [extra_enhanced_flags]
+#   tools/lib/bench.sh [target] [iterations] [extra_enhanced_flags]
 #
 # Defaults: targets/png_read, 5000 iterations
-# Example:  tools/bench.sh targets/png_read 3000 "--sensitivity"
+# Example:  tools/lib/bench.sh targets/png_read 3000 "--sensitivity"
 #
 # Configurations:
 #   baseline:  no features
@@ -26,18 +26,18 @@
 #              Compare against baseline to measure QEA's effectiveness on real targets.
 #
 # For a broad sweep of individual feature/combination effects instead of
-# these five named configurations, use tools/bench_sweep.sh.
+# these five named configurations, use tools/lib/bench_sweep.sh.
 #
 # For differential analysis between any two bench runs (crash signatures,
-# edge overlap, efficiency), use tools/bench_diff.py:
-#   python tools/bench_diff.py -b /tmp/fuzz_bench_baseline.log -t /tmp/fuzz_bench_enhanced.log
+# edge overlap, efficiency), use tools/lib/bench_diff.py:
+#   python tools/lib/bench_diff.py -b /tmp/fuzz_bench_baseline.log -t /tmp/fuzz_bench_enhanced.log
 
 set -euo pipefail
 
 TARGET="${1:-targets/png_read}"
 ITERS="${2:-5000}"
 EXTRA_FLAGS="${3:-}"
-BASE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+BASE_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 BASELINE_DIR="/tmp/fuzz_bench_baseline"
 ENHANCED_DIR="/tmp/fuzz_bench_enhanced"
 ENHANCEDP_DIR="/tmp/fuzz_bench_enhanced+"

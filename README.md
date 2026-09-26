@@ -498,11 +498,10 @@ machine rather than against an absolute pass count.
 ## Benchmarking
 
 ```bash
-# 4-way configuration comparison
-tools/bench.sh targets/png_read 10000
-
-# Exhaustive feature/combination sweep
-tools/bench_sweep.sh
+tools/benchmark.py list                          # every harness, one line each
+tools/benchmark.py smoke targets/png_read 10000  # named-config comparison
+tools/benchmark.py sweep                         # feature/combination sweep
+tools/benchmark.py paired run --arms baseline,cbh-reanchor
 ```
 
 ---

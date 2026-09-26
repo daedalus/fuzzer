@@ -19,7 +19,7 @@ Isolation matters and is easy to get wrong:
     accumulates across trials, so later runs start richer and score higher
     regardless of the setting being tested.
 
-Run: python3 tools/lineage_benchmark.py
+Run: python3 tools/lib/lineage_benchmark.py
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ import tempfile
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 
 def run_worker(

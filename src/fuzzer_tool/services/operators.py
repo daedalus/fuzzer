@@ -27,6 +27,7 @@ import xxhash
 from fuzzer_tool.core.cond_stmt import CondState, CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.gaussian import norm_cdf
+from fuzzer_tool.core.gravity import DONOR_CANDIDATES, pair_terms, pick_index
 from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations import (
@@ -79,6 +80,11 @@ _ELITE_FUSE_MIN_CORPUS = 2
 # degenerate into repeatedly fusing the same pair once one seed pulls far
 # ahead on edge count -- there is still randomness in which two elites meet.
 _ELITE_FUSE_POOL_SIZE = 8
+
+# ── gravity splice donor (--splice-donor gravity) ─────────────────────────
+# (m_base, m_donor, distance) for a pair with unknown coverage: zero donor
+# mass, so it weighs 0 and never outbids a pair the model can measure.
+_INERT_PAIR = (0.0, 0.0, 1.0)
 
 # ── region-profile position weighting ────────────────────────────────────
 # Distinct seeds to keep profiles for. The corpus is far larger than this,
@@ -218,7 +224,7 @@ HAVOC_SUB_OPS = (
 _HAVOC_N = len(HAVOC_SUB_OPS)
 # Sampling is a precomputed inverse-CDF table: 256 slots, each holding a
 # branch index, indexed by the low byte of the draw. Measured against the
-# alternatives at 2M draws (see tools/bench_havoc_subop.py): uniform
+# alternatives at 2M draws (see tools/lib/bench_havoc_subop.py): uniform
 # `r[0] % 11` 89ns, bisect over an 11-float CDF 313ns, this table 202ns --
 # so the table halves the cost of the feature versus the obvious bisect.
 # 256 slots quantize probabilities to 0.39%, well under the explore floor.
@@ -1187,12 +1193,12 @@ class OperatorEngine:
         corpus = self.ctx.corpus
         if not corpus or len(buf) < 3:
             return
-        other = bytes(rng.choice(corpus))
+        other = bytes(self._donor(data, corpus, rng))
         if other is data or other == buf:
             others = [c for c in corpus if c is not data]
             if not others:
                 return
-            other = bytes(rng.choice(others))
+            other = bytes(self._donor(data, others, rng))
         if len(other) < 3:
             return
         split_point = min(len(buf), len(other)) // 2
@@ -2124,28 +2130,63 @@ class OperatorEngine:
             else:
                 return bytearray(self.ctx.mc.cem_sample(rng.randint(1, min(32, self.ctx.max_len))))
 
+    def _donor(self, base: bytes, pool, rng) -> bytes:
+        """Splice partner for ``base``: uniform, or gravity-weighted (--splice-donor)."""
+        gravity = getattr(self.f, "_gravity", None)
+        if gravity is None:
+            return rng.choice(pool)
+        return self._gravity_donor(gravity, base, pool, rng)
+
+    def _gravity_donor(self, gravity, base: bytes, pool, rng) -> bytes:
+        """Gravity-weighted pick among k sampled candidates; staged for the PPML fit.
+
+        Falls back to a uniform pick among the candidates when none carries
+        mass (all clones of ``base``, or coverage unknown).
+        """
+        n = len(pool)
+        if n <= DONOR_CANDIDATES:
+            cands = list(pool)
+        else:
+            cands = [pool[rng.randint(0, n - 1)] for _ in range(DONOR_CANDIDATES)]
+
+        # Masses and distance from MinHash: O(k · num_perm), no set scans.
+        key = self.f._seed_key
+        overlaps = self.f._edge_tracker.seed_overlaps(key(base), [key(c) for c in cands])
+        terms = [pair_terms(*o) if o is not None else _INERT_PAIR for o in overlaps]
+
+        idx = pick_index([gravity.weight(*t) for t in terms], rng)
+        if idx < 0:
+            return rng.choice(cands)
+
+        gravity.stage(*terms[idx])
+        return cands[idx]
+
     def _op_splice(self, buf, _byte_idx, data):
         rng = self.ctx._rng
         if len(self.ctx.corpus) >= 2:
             a = rng.choice(self.ctx.corpus)
-            b = rng.choice(self.ctx.corpus)
+            b = self._donor(a, self.ctx.corpus, rng)
             if a is not data and b is not data:
                 return bytearray(splice(a, b, rng)[: self.ctx.max_len])
             others = [c for c in self.ctx.corpus if c is not data]
             if others:
-                return bytearray(splice(bytes(buf), rng.choice(others), rng)[: self.ctx.max_len])
+                return bytearray(
+                    splice(bytes(buf), self._donor(data, others, rng), rng)[: self.ctx.max_len]
+                )
 
     def _op_splice_diff_located(self, buf, _byte_idx, data):
         rng = self.ctx._rng
         if len(self.ctx.corpus) >= 2:
             a = rng.choice(self.ctx.corpus)
-            b = rng.choice(self.ctx.corpus)
+            b = self._donor(a, self.ctx.corpus, rng)
             if a is not data and b is not data:
                 return bytearray(splice_diff_located(a, b, rng=rng)[: self.ctx.max_len])
             others = [c for c in self.ctx.corpus if c is not data]
             if others:
                 return bytearray(
-                    splice_diff_located(bytes(buf), rng.choice(others), rng=rng)[: self.ctx.max_len]
+                    splice_diff_located(bytes(buf), self._donor(data, others, rng), rng=rng)[
+                        : self.ctx.max_len
+                    ]
                 )
 
     def _op_splice_common_prefix(self, buf, _byte_idx, data):
@@ -2162,7 +2203,7 @@ class OperatorEngine:
         others = [c for c in self.ctx.corpus if c is not data]
         if not others:
             return None
-        donor = rng.choice(others)
+        donor = self._donor(data, others, rng)
         result = splice_common_prefix(base, donor, rng=rng)
         return bytearray(result[: self.ctx.max_len])
 
@@ -2179,7 +2220,7 @@ class OperatorEngine:
         others = [c for c in self.ctx.corpus if c is not data]
         if not others:
             return None
-        donor = rng.choice(others)
+        donor = self._donor(data, others, rng)
         if len(donor) < 4:
             return None
         pos0 = rng.randint(0, len(buf))
@@ -2207,13 +2248,15 @@ class OperatorEngine:
 
         if len(self.ctx.corpus) >= 2 and buf:
             a = rng.choice(self.ctx.corpus)
-            b = rng.choice(self.ctx.corpus)
+            b = self._donor(a, self.ctx.corpus, rng)
             if a is not data and b is not data:
                 return bytearray(crossover(a, b, rng=rng)[: self.ctx.max_len])
             others = [c for c in self.ctx.corpus if c is not data]
             if others:
                 return bytearray(
-                    crossover(bytes(buf), rng.choice(others), rng=rng)[: self.ctx.max_len]
+                    crossover(bytes(buf), self._donor(data, others, rng), rng=rng)[
+                        : self.ctx.max_len
+                    ]
                 )
 
     def _op_type_replace(self, buf, _byte_idx, _data):
@@ -5457,6 +5500,9 @@ class OperatorEngine:
         f._last_ops_with_sites = []
         f._last_mopt_particles = []
         f._last_ops_effective = set()
+        # Gravity pairs staged by a round that never reported a yield.
+        if getattr(f, "_gravity", None) is not None:
+            f._gravity.discard()
         f._last_ops_applicable = set()
         f._last_havoc_subops = 0
         f._last_op_costs = {}
@@ -5515,6 +5561,8 @@ class OperatorEngine:
 
         ops = self.build_ops(data)
         f._last_ops_used = []
+        if getattr(f, "_gravity", None) is not None:
+            f._gravity.discard()
         f._last_ops_with_sites = []
         f._last_mopt_particles = []
         # Operators that actually changed the buffer this round. An operator

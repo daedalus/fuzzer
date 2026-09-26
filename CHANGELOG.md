@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Docker `ffmpeg` stage**: `docker build --target ffmpeg` bakes vendored FFmpeg and
+  `ffmpeg_read_nosan.so`; `docker run -v DIR:/out` runs a resumable campaign. Image now
+  installs compiler-rt (`libclang-rt-dev`), without which every sanitizer link failed.
+
 - **`CorpusFlux.z_score()` / `is_significant_drift()`** (`core/analyzers/analyzer_corpus_flux.py`):
   standardizes the existing net/gross flux counts as `Z_n = net / sqrt(gross)`
   (CLT normal approximation, treating each admission/eviction as an i.i.d.
@@ -167,6 +171,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gains `TestF0DerivedWeight` (3 tests).
 
 ### Fixed
+
+- **`--resume` refused on Katz-capable targets**: `load_state` ran before the Katz
+  channel was built, so the `node_channel` contract always mismatched.
+- **`vendor_ffmpeg.sh` masked configure/make failures** (`pipefail`).
 
 - **Unbounded fuzz-loop growth** (`core/analyzers/analyzer_prng_state_learner.py`, `core/cmplog.py`):
   `_run_history` capped inputs but not their site records (~1.9 MB/input on ffmpeg); now a total budget,

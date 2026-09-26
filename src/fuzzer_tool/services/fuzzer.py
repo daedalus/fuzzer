@@ -46,6 +46,7 @@ from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.elf import SHM_LAYOUT_CURRENT, detect_elf_type, detect_shm_layout
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
+from fuzzer_tool.core.gravity import GravityModel, SpliceDonor
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
 from fuzzer_tool.core.metropolis import accept_prob, path_energy
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
@@ -1349,6 +1350,7 @@ class Fuzzer:
         strata=False,
         pool_drift=False,
         dict_thompson=False,
+        splice_donor=SpliceDonor.UNIFORM,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
         confirm_novelty=False,
@@ -1666,6 +1668,10 @@ class Fuzzer:
         # Dictionary token Thompson sampling (core/dirichlet.py): drawn in
         # OperatorEngine.mutate, credited in fuzz_one on new coverage
         self._dict_picker = DirichletPicker(self._rng) if dict_thompson else None
+
+        # Gravity-model splice donor (core/gravity.py): staged in
+        # OperatorEngine._donor, credited in fuzz_one with the round's yield
+        self._gravity = GravityModel() if splice_donor is SpliceDonor.GRAVITY else None
 
         # Corpus size boost: normal-distribution seed resizing
         self._corpus_boost = corpus_boost
@@ -2209,6 +2215,25 @@ class Fuzzer:
 
             self._alphabeta = AlphaBetaMCTSSeedScheduler(rng=self._rng)
             log.info("Alpha-beta (Thompson descent) seed scheduling enabled")
+
+        # K-Scheduler node channel: mutually exclusive with directed mode
+        # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
+        # directed). Built before _load_corpus(): --resume checks the
+        # node_channel contract and restores Katz state there.
+        self._katz_channel = None
+        if not targets:
+            try:
+                from fuzzer_tool.services.katz_channel import KatzChannel
+
+                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache, debug=self.debug)
+                if ch is not None and ch.upload():
+                    self._katz_channel = ch
+                    print(
+                        f"[*] K-Scheduler node channel: {len(ch.node_of)} probe sites, "
+                        f"{ch.n_nodes} ICFG nodes"
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Katz channel setup failed: %s", e)
 
         self._load_corpus()
         loaded = self.corpus
@@ -3324,24 +3349,6 @@ class Fuzzer:
         self._dist_last_value: float | None = None
         self._distance_trend = ScalingExponentDetector()
 
-        # K-Scheduler node channel: mutually exclusive with directed mode
-        # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
-        # directed).
-        self._katz_channel = None
-        if not targets:
-            try:
-                from fuzzer_tool.services.katz_channel import KatzChannel
-
-                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache, debug=self.debug)
-                if ch is not None and ch.upload():
-                    self._katz_channel = ch
-                    print(
-                        f"[*] K-Scheduler node channel: {len(ch.node_of)} probe sites, "
-                        f"{ch.n_nodes} ICFG nodes"
-                    )
-            except Exception as e:  # noqa: BLE001
-                log.warning("Katz channel setup failed: %s", e)
-
         # Simulated annealing temperature schedule
         self._anneal_budget = anneal_budget  # 0 = no annealing (temperature always 1.0)
         self._temperature = 1.0
@@ -3972,7 +3979,7 @@ class Fuzzer:
         self._state_store.set("strata", state)
 
     def _save_learned(self) -> None:
-        """Persist op_credit, burn-front, PLL, WFC and dict-thompson for ``--resume``."""
+        """Persist op_credit, burn-front, PLL, WFC, dict-thompson and gravity for ``--resume``."""
         from fuzzer_tool.core.wfc_chunks import WFC_MUTATOR
 
         if self._op_credit is not None:
@@ -3986,6 +3993,8 @@ class Fuzzer:
             self._state_store.set("wfc_tables", WFC_MUTATOR.store.to_dict())
         if self._dict_picker is not None:
             self._state_store.set("dict_picker", self._dict_picker.to_dict())
+        if self._gravity is not None:
+            self._state_store.set("gravity", self._gravity.state_dict())
 
     def _load_learned(self) -> None:
         """Restore :meth:`_save_learned` state; fresh runs reset the shared WFC tables.
@@ -4008,6 +4017,8 @@ class Fuzzer:
             WFC_MUTATOR.store.from_dict(self._state_store.get("wfc_tables", {}))
         if self._dict_picker is not None:
             self._dict_picker.from_dict(self._state_store.get("dict_picker", {}))
+        if self._gravity is not None:
+            self._gravity.load_state_dict(self._state_store.get("gravity", {}))
 
     def _load_strata(self) -> None:
         """Restore ledger + seed arm on resume; malformed payloads start fresh."""
@@ -6101,6 +6112,12 @@ class Fuzzer:
             or is_cmp_progress
             or is_new_valid_coverage
         )
+
+        # Gravity splice fit: every splice round is one PPML observation,
+        # zero-yield rounds included -- they are most of the signal. Runs
+        # after record_edges, which is what sets _last_new_edge_count.
+        if self._gravity is not None:
+            self._gravity.observe(self._last_new_edge_count if has_new_coverage else 0)
 
         # Per-operator credit. An operator that was selected but left the
         # buffer unchanged cannot have caused this round's outcome, so it
@@ -8484,6 +8501,8 @@ class Fuzzer:
             groups["Mutation"].append("adaptive-havoc")
         if getattr(self, "_dict_picker", None) is not None:
             groups["Mutation"].append("dict-thompson")
+        if getattr(self, "_gravity", None) is not None:
+            groups["Mutation"].append("splice-donor=gravity")
         if self.enable_x86_mutator:
             groups["Mutation"].append("x86-mutator")
         if self.enable_arm_mutator:

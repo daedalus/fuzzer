@@ -16,7 +16,7 @@ import random as std_random
 import sys
 import time
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from src.fuzzer_tool.core.rand_pool import RandPool
 
 N_ITERS = 2000

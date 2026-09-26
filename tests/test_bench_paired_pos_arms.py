@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "lib"))
 
 from bench_paired import ARM_BASELINES, ARMS, POSITION_ARMS  # noqa: E402
 

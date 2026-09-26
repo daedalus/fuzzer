@@ -22,8 +22,8 @@ analyses the result pairwise:
 Usage::
 
     # define arms in a JSON file, or use the built-in ones
-    tools/bench_paired.py run --arms baseline,cbh-reanchor --set cmplog
-    tools/bench_paired.py analyse results/paired/*.json
+    tools/lib/bench_paired.py run --arms baseline,cbh-reanchor --set cmplog
+    tools/lib/bench_paired.py analyse results/paired/*.json
 
 Raw per-run JSON is written to ``results/paired/`` so an analysis can be
 rerun, or a later arm compared against an earlier arm's recorded cells,
@@ -55,7 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_lock  # noqa: E402
 from eval_set import DEFAULT_ITERS, SEEDS, TARGET_SETS, cells  # noqa: E402
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 RESULTS = REPO / "results" / "paired"
 
 # ── Arms ───────────────────────────────────────────────────────────────
