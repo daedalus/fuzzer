@@ -178,6 +178,15 @@ def summarise(rows: list[dict], name_a: str, name_b: str) -> None:
         by.setdefault((r["target"], r["seed"]), {}).setdefault(r["arm"], []).append(r["edges"])
 
     print(f"\n{'target':<16} {'seed':>4} {name_a:>16} {name_b:>16} {'delta':>7}")
+    deltas = _seed_deltas(by, name_a, name_b)
+    if not deltas:
+        return
+    for target in sorted({t for t, _, _, _, _ in deltas}):
+        _print_wlt(target, [d for t, _, _, _, d in deltas if t == target], name_b)
+
+
+def _seed_deltas(by: dict, name_a: str, name_b: str) -> list[tuple]:
+    """Per-(target, seed) median B-A delta; prints one row each. Skips seeds missing an arm."""
     deltas = []
     for (target, seed), arms in sorted(by.items()):
         a, b = arms.get(name_a, []), arms.get(name_b, [])
@@ -187,18 +196,18 @@ def summarise(rows: list[dict], name_a: str, name_b: str) -> None:
         d = mb - ma
         deltas.append((target, seed, ma, mb, d))
         print(f"{Path(target).name:<16} {seed:>4} {ma:>16.1f} {mb:>16.1f} {d:>+7.1f}")
+    return deltas
 
-    if not deltas:
-        return
-    for target in sorted({t for t, _, _, _, _ in deltas}):
-        sub = [d for t, _, _, _, d in deltas if t == target]
-        wins = sum(1 for d in sub if d > 0)
-        losses = sum(1 for d in sub if d < 0)
-        ties = sum(1 for d in sub if d == 0)
-        print(
-            f"\n{Path(target).name}: {name_b} wins {wins}, loses {losses}, ties {ties}"
-            f" | median delta {statistics.median(sub):+.1f}"
-        )
+
+def _print_wlt(target: str, sub: list, name_b: str) -> None:
+    """Print one target's win/loss/tie tally for arm B."""
+    wins = sum(1 for d in sub if d > 0)
+    losses = sum(1 for d in sub if d < 0)
+    ties = sum(1 for d in sub if d == 0)
+    print(
+        f"\n{Path(target).name}: {name_b} wins {wins}, loses {losses}, ties {ties}"
+        f" | median delta {statistics.median(sub):+.1f}"
+    )
 
 
 if __name__ == "__main__":

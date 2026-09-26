@@ -41,23 +41,8 @@ def run_one(target, cov, ch, path, timeout=5.0):
     return bits
 
 
-def main():
-    disable_aslr()
-
-    ch = KatzChannel.build(TARGET, debug=True)
-    if ch is None:
-        print("KatzChannel.build failed -- target not trace-pc viable?")
-        return 1
-    print(f"ICFG: {ch.icfg.n_nodes} nodes, {len(ch.node_of)} probe-mapped")
-
-    if not ch.upload():
-        print("SHM upload failed")
-        return 1
-
-    inputs = sorted(Path(CORPUS).glob("*"))
-    inputs = [p for p in inputs if p.is_file()]
-    print(f"corpus: {len(inputs)} inputs")
-
+def _visit_corpus(ch, inputs):
+    """OR of node bitmaps over the corpus; releases the SHM segments either way."""
     cov = ShmCoverage(size=MAP_SIZE)
     ever_visited = np.zeros(ch.n_nodes, dtype=bool)
     try:
@@ -70,10 +55,11 @@ def main():
     finally:
         cov.cleanup()
         ch.cleanup()
+    return ever_visited
 
-    print(f"nodes ever visited: {int(ever_visited.sum())}/{ch.n_nodes}")
 
-    icfg = ch.icfg
+def _hidden_branches(icfg, ever_visited):
+    """(src, visited, unvisited) for reached branch points with a never-taken sibling."""
     # branch_src/branch_dst (icfg.py) are real intraprocedural branch/
     # fallthrough edges only -- NOT icfg.src/dst, which also carries
     # caller->callee call edges. A call to a rarely/never-"visited" helper
@@ -94,6 +80,32 @@ def main():
         unvisited = [d for d in dsts if not ever_visited[d]]
         if visited and unvisited:
             hidden.append((s, visited, unvisited))
+    return hidden
+
+
+def main():
+    disable_aslr()
+
+    ch = KatzChannel.build(TARGET, debug=True)
+    if ch is None:
+        print("KatzChannel.build failed -- target not trace-pc viable?")
+        return 1
+    print(f"ICFG: {ch.icfg.n_nodes} nodes, {len(ch.node_of)} probe-mapped")
+
+    if not ch.upload():
+        print("SHM upload failed")
+        return 1
+
+    inputs = sorted(Path(CORPUS).glob("*"))
+    inputs = [p for p in inputs if p.is_file()]
+    print(f"corpus: {len(inputs)} inputs")
+
+    ever_visited = _visit_corpus(ch, inputs)
+
+    print(f"nodes ever visited: {int(ever_visited.sum())}/{ch.n_nodes}")
+
+    icfg = ch.icfg
+    hidden = _hidden_branches(icfg, ever_visited)
 
     print(f"\nreal branches with an un-split sibling: {len(hidden)}")
     for s, visited, unvisited in hidden[:30]:

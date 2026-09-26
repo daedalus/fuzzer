@@ -164,39 +164,53 @@ def _opt_in_bool_dests_from_source() -> set[str]:
         j = section.find(needle, i)
         if j < 0:
             break
-        k = j + len(needle)
-        depth = 1
-        while k < len(section) and depth:
-            if section[k] == "(":
-                depth += 1
-            elif section[k] == ")":
-                depth -= 1
-            k += 1
+        k = _close_paren(section, j + len(needle))
         block = section[j:k]
         i = k
         if "store_true" not in block and "BooleanOptionalAction" not in block:
             continue
-        dest_m = re.search(r'dest\s*=\s*["\'](\w+)["\']', block)
-        if dest_m:
-            dest = dest_m.group(1)
-        else:
-            longs = re.findall(r'["\']--([a-z0-9-]+)["\']', block)
-            pos = [name for name in longs if not name.startswith("no-")]
-            if not pos:
-                continue
-            dest = pos[0].replace("-", "_")
-        default_m = re.search(r"default\s*=\s*([^,\n)]+)", block)
-        if default_m:
-            default_raw = default_m.group(1).strip()
-        elif "store_true" in block:
-            default_raw = "False"
-        else:
-            default_raw = "None"
+        dest = _block_dest(block)
+        if dest is None:
+            continue
         # Skip default-on features (coverage, resize_map_on_stall, ...).
-        if default_raw in ("True", "true"):
+        if _block_default(block) in ("True", "true"):
             continue
         dests.add(dest)
     return dests
+
+
+def _close_paren(text: str, k: int) -> int:
+    """Index just past the ``)`` closing the call whose ``(`` precedes *k*."""
+    depth = 1
+    while k < len(text) and depth:
+        if text[k] == "(":
+            depth += 1
+        elif text[k] == ")":
+            depth -= 1
+        k += 1
+    return k
+
+
+def _block_dest(block: str) -> str | None:
+    """Explicit ``dest=``, else the first non-``--no-`` long flag as a dest; None if neither."""
+    dest_m = re.search(r'dest\s*=\s*["\'](\w+)["\']', block)
+    if dest_m:
+        return dest_m.group(1)
+    longs = re.findall(r'["\']--([a-z0-9-]+)["\']', block)
+    pos = [name for name in longs if not name.startswith("no-")]
+    if not pos:
+        return None
+    return pos[0].replace("-", "_")
+
+
+def _block_default(block: str) -> str:
+    """Raw ``default=`` text; implied "False" for store_true, else "None"."""
+    default_m = re.search(r"default\s*=\s*([^,\n)]+)", block)
+    if default_m:
+        return default_m.group(1).strip()
+    if "store_true" in block:
+        return "False"
+    return "None"
 
 
 class TestHailMaryWiresEveryOptInGate:

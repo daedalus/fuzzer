@@ -49,8 +49,26 @@ def main() -> int:
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     rows = json.loads(out.read_text()) if out.exists() else []
-    have = {(r["target"], r["seed"], r["rep"]) for r in rows}
 
+    _run_cells(args, chosen, seeds, rows, out)
+
+    # ── Report ────────────────────────────────────────────────────────
+    print(f"\n{'cell':<26} {'n':>2} {'edges':<22} {'min':>4} {'max':>4} {'rng':>4} {'sd':>6} {'CV':>6}")
+    by = {}
+    for r in rows:
+        by.setdefault((Path(r["target"]).name, r["seed"]), []).append(r["edges"])
+    for (name, seed), vals in sorted(by.items()):
+        _print_spread(name, seed, sorted(vals))
+
+    _print_discordance(by)
+    return 0
+
+
+def _run_cells(
+    args: argparse.Namespace, chosen: list, seeds: list[int], rows: list, out: Path
+) -> None:
+    """Run every (target, seed, rep) not already in *rows*, checkpointing *out* after each."""
+    have = {(r["target"], r["seed"], r["rep"]) for r in rows}
     total = len(chosen) * len(seeds) * args.reps
     done = 0
     for target, flags in chosen:
@@ -71,22 +89,21 @@ def main() -> int:
                 tmp.write_text(json.dumps(rows, indent=1))
                 tmp.replace(out)
 
-    # ── Report ────────────────────────────────────────────────────────
-    print(f"\n{'cell':<26} {'n':>2} {'edges':<22} {'min':>4} {'max':>4} {'rng':>4} {'sd':>6} {'CV':>6}")
-    by = {}
-    for r in rows:
-        by.setdefault((Path(r["target"]).name, r["seed"]), []).append(r["edges"])
-    for (name, seed), vals in sorted(by.items()):
-        vals = sorted(vals)
-        sd = statistics.stdev(vals) if len(vals) > 1 else 0.0
-        mean = statistics.mean(vals)
-        cv = sd / mean if mean else 0.0
-        rng = vals[-1] - vals[0]
-        print(
-            f"{name + ' s' + str(seed):<26} {len(vals):>2} {str(vals):<22} "
-            f"{vals[0]:>4} {vals[-1]:>4} {rng:>4} {sd:>6.2f} {cv:>6.3f}"
-        )
 
+def _print_spread(name: str, seed: int, vals: list) -> None:
+    """One report row: replicate edge counts (sorted) with range, sd and CV."""
+    sd = statistics.stdev(vals) if len(vals) > 1 else 0.0
+    mean = statistics.mean(vals)
+    cv = sd / mean if mean else 0.0
+    rng = vals[-1] - vals[0]
+    print(
+        f"{name + ' s' + str(seed):<26} {len(vals):>2} {str(vals):<22} "
+        f"{vals[0]:>4} {vals[-1]:>4} {rng:>4} {sd:>6.2f} {cv:>6.3f}"
+    )
+
+
+def _print_discordance(by: dict) -> None:
+    """Print the null discordance rate over same-cell replicate pairs."""
     # The null discordance rate: over all ordered pairs of replicates of the
     # same cell, how often do they disagree at all? Every such disagreement
     # is a discordant pair McNemar would count as evidence if the two
@@ -103,7 +120,6 @@ def main() -> int:
     if n:
         print(f"\nnull discordance over replicate pairs: {disc}/{n} = {disc / n:.1%}")
         print("(a same-arm pair that McNemar would score as a win or a loss)")
-    return 0
 
 
 if __name__ == "__main__":

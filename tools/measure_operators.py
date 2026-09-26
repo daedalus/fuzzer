@@ -327,42 +327,51 @@ def measure(corpus: list[bytes], reps: int, seed: int) -> list[dict]:
             for name in names:
                 if name not in avail:
                     continue
-                s = stats[name]
-                s["offered"] += 1
-                buf = bytearray(inp)
-                idx = len(buf) // 2
-                t0 = time.perf_counter()
-                try:
-                    ret = table[name](buf, idx, bytes(inp))
-                except Exception:
-                    s["errors"] += 1
-                    s["time"] += time.perf_counter() - t0
-                    continue
-                s["time"] += time.perf_counter() - t0
-                if ret is None:
-                    s["none"] += 1
-                out = bytes(ret) if isinstance(ret, (bytes, bytearray)) else bytes(buf)
-                if out != inp:
-                    s["changed"] += 1
-                    s["dlen"] += len(out) - len(inp)
+                _measure_call(table[name], inp, stats[name])
 
     total_slots = reps * len(corpus)
     rows = []
     for name, s in stats.items():
-        off = s["offered"]
-        rows.append({
-            "operator": name,
-            "category": REGISTRY.category_of(name),
-            "offered": off,
-            "avail_pct": 100.0 * off / total_slots if total_slots else 0.0,
-            "changed": s["changed"],
-            "change_pct": 100.0 * s["changed"] / off if off else 0.0,
-            "err_pct": 100.0 * s["errors"] / off if off else 0.0,
-            "none_pct": 100.0 * s["none"] / off if off else 0.0,
-            "mean_dlen": s["dlen"] / s["changed"] if s["changed"] else 0.0,
-            "us_per_call": 1e6 * s["time"] / off if off else 0.0,
-        })
+        rows.append(_summary_row(name, s, total_slots))
     return rows
+
+
+def _measure_call(fn, inp: bytes, s: dict) -> None:
+    """Dispatch one operator on a copy of *inp* at its midpoint; accumulate into *s*."""
+    s["offered"] += 1
+    buf = bytearray(inp)
+    idx = len(buf) // 2
+    t0 = time.perf_counter()
+    try:
+        ret = fn(buf, idx, bytes(inp))
+    except Exception:
+        s["errors"] += 1
+        s["time"] += time.perf_counter() - t0
+        return
+    s["time"] += time.perf_counter() - t0
+    if ret is None:
+        s["none"] += 1
+    out = bytes(ret) if isinstance(ret, (bytes, bytearray)) else bytes(buf)
+    if out != inp:
+        s["changed"] += 1
+        s["dlen"] += len(out) - len(inp)
+
+
+def _summary_row(name: str, s: dict, total_slots: int) -> dict:
+    """Turn one operator's raw counters into the report row (rates guard zero denominators)."""
+    off = s["offered"]
+    return {
+        "operator": name,
+        "category": REGISTRY.category_of(name),
+        "offered": off,
+        "avail_pct": 100.0 * off / total_slots if total_slots else 0.0,
+        "changed": s["changed"],
+        "change_pct": 100.0 * s["changed"] / off if off else 0.0,
+        "err_pct": 100.0 * s["errors"] / off if off else 0.0,
+        "none_pct": 100.0 * s["none"] / off if off else 0.0,
+        "mean_dlen": s["dlen"] / s["changed"] if s["changed"] else 0.0,
+        "us_per_call": 1e6 * s["time"] / off if off else 0.0,
+    }
 
 
 def main() -> int:

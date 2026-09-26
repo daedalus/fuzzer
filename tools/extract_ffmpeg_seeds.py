@@ -416,6 +416,73 @@ def download_fate_seeds(
 # ---------------------------------------------------------------------------
 
 
+def _save_b64_pocs(cve_id: str, b64_matches: list, fmt_dir: str, cache: dict) -> int:
+    """Decode base64 PoC blobs and save those >= MIN_SIZE; returns count saved."""
+    saved = 0
+    for i, b64_data in enumerate(b64_matches):
+        try:
+            data = base64.b64decode(b64_data)
+            if len(data) >= MIN_SIZE:
+                dest = os.path.join(fmt_dir, f"poc_{i}.bin")
+                if not os.path.exists(dest):
+                    with open(dest, "wb") as f:
+                        f.write(data)
+                    cache.setdefault("cve", {})[f"{cve_id}/poc_{i}.bin"] = dest
+                    print(f"  [{cve_id}] saved base64 PoC ({len(data)} bytes)")
+                    saved += 1
+        except Exception as e:
+            print(f"  [warn] failed to decode base64 for {cve_id}: {e}")
+    return saved
+
+
+def _save_inline_scripts(cve_id: str, html: str, fmt_dir: str, cache: dict) -> int:
+    """Save <code> blocks that look like PoC scripts; returns count saved."""
+    saved = 0
+    # Try to find and save the inline poc.py script from advisory HTML
+    script_matches = re.findall(r"<code[^>]*>(.*?)</code>", html, re.DOTALL)
+    for i, script in enumerate(script_matches):
+        if "poc" in script.lower() and (
+            "base64" in script or "exploit" in script.lower() or "def " in script
+        ):
+            dest = os.path.join(fmt_dir, f"poc_{i}.py")
+            if not os.path.exists(dest):
+                with open(dest, "w") as f:
+                    f.write(script)
+                cache.setdefault("cve", {})[f"{cve_id}/poc_{i}.py"] = dest
+                print(f"  [{cve_id}] saved inline script")
+                saved += 1
+    return saved
+
+
+def _fetch_repo_poc(cve_id: str, fmt_dir: str, cache: dict) -> int:
+    """Fetch poc.py from the advisory repo (main, then master); returns count saved."""
+    saved = 0
+    # Also try to fetch poc.py from the GitHub advisory repo path.
+    # For CVE-2022-2566, the GHSA is vhxg-9wfx-7fcj
+    # For CVE-2025-9951, the GHSA is 39q3-f8jq-v6mg
+    ghsa_id = cve_id.split("-")[2]  # e.g. "vhxg" or "39q3"
+    raw_urls = [
+        f"https://raw.githubusercontent.com/google/security-research/main/security/advisories/GHSA-{ghsa_id}/poc.py",
+        f"https://raw.githubusercontent.com/google/security-research/master/security/advisories/GHSA-{ghsa_id}/poc.py",
+    ]
+    for raw_url in raw_urls:
+        req = urllib.request.Request(raw_url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=15) as r:
+                content = r.read()
+            dest = os.path.join(fmt_dir, "poc_from_repo.py")
+            if not os.path.exists(dest):
+                with open(dest, "wb") as f:
+                    f.write(content)
+                cache.setdefault("cve", {})[f"{cve_id}/poc_from_repo.py"] = dest
+                print(f"  [{cve_id}] saved poc.py from {raw_url} ({len(content)} bytes)")
+                saved += 1
+                break  # success, no need to try more URLs
+        except Exception:
+            continue  # try next URL
+    return saved
+
+
 def fetch_google_advisory_poc(cve_id: str, out_dir: str, cache: dict | None = None) -> int:
     """Fetch inline PoC from Google Security Research advisory (base64 or script)."""
     if cache is None:
@@ -451,57 +518,9 @@ def fetch_google_advisory_poc(cve_id: str, out_dir: str, cache: dict | None = No
         # Try finding <code> or <pre> blocks with base64 content
         b64_matches = re.findall(r"<(?:code|pre)[^>]*>([A-Za-z0-9+/=]{100,})</(?:code|pre)>", html)
 
-    for i, b64_data in enumerate(b64_matches):
-        try:
-            data = base64.b64decode(b64_data)
-            if len(data) >= MIN_SIZE:
-                dest = os.path.join(fmt_dir, f"poc_{i}.bin")
-                if not os.path.exists(dest):
-                    with open(dest, "wb") as f:
-                        f.write(data)
-                    cache.setdefault("cve", {})[f"{cve_id}/poc_{i}.bin"] = dest
-                    print(f"  [{cve_id}] saved base64 PoC ({len(data)} bytes)")
-                    saved += 1
-        except Exception as e:
-            print(f"  [warn] failed to decode base64 for {cve_id}: {e}")
-
-    # Try to find and save the inline poc.py script from advisory HTML
-    script_matches = re.findall(r"<code[^>]*>(.*?)</code>", html, re.DOTALL)
-    for i, script in enumerate(script_matches):
-        if "poc" in script.lower() and (
-            "base64" in script or "exploit" in script.lower() or "def " in script
-        ):
-            dest = os.path.join(fmt_dir, f"poc_{i}.py")
-            if not os.path.exists(dest):
-                with open(dest, "w") as f:
-                    f.write(script)
-                cache.setdefault("cve", {})[f"{cve_id}/poc_{i}.py"] = dest
-                print(f"  [{cve_id}] saved inline script")
-                saved += 1
-
-    # Also try to fetch poc.py from the GitHub advisory repo path.
-    # For CVE-2022-2566, the GHSA is vhxg-9wfx-7fcj
-    # For CVE-2025-9951, the GHSA is 39q3-f8jq-v6mg
-    ghsa_id = cve_id.split("-")[2]  # e.g. "vhxg" or "39q3"
-    raw_urls = [
-        f"https://raw.githubusercontent.com/google/security-research/main/security/advisories/GHSA-{ghsa_id}/poc.py",
-        f"https://raw.githubusercontent.com/google/security-research/master/security/advisories/GHSA-{ghsa_id}/poc.py",
-    ]
-    for raw_url in raw_urls:
-        req = urllib.request.Request(raw_url, headers={"User-Agent": "Mozilla/5.0"})
-        try:
-            with urllib.request.urlopen(req, timeout=15) as r:
-                content = r.read()
-            dest = os.path.join(fmt_dir, "poc_from_repo.py")
-            if not os.path.exists(dest):
-                with open(dest, "wb") as f:
-                    f.write(content)
-                cache.setdefault("cve", {})[f"{cve_id}/poc_from_repo.py"] = dest
-                print(f"  [{cve_id}] saved poc.py from {raw_url} ({len(content)} bytes)")
-                saved += 1
-                break  # success, no need to try more URLs
-        except Exception:
-            continue  # try next URL
+    saved += _save_b64_pocs(cve_id, b64_matches, fmt_dir, cache)
+    saved += _save_inline_scripts(cve_id, html, fmt_dir, cache)
+    saved += _fetch_repo_poc(cve_id, fmt_dir, cache)
 
     return saved
 
@@ -573,6 +592,52 @@ def print_inventory() -> int:
 # ---------------------------------------------------------------------------
 
 
+def _fetch_cve_source(cve_id: str, source: dict, fmt_dir: str, cache: dict, max_size: int) -> int:
+    """Fetch README and PoC files for one repo entry of a CVE; returns count saved."""
+    saved = 0
+    repo = source["repo"]
+    path = source.get("path", "")
+    repo_fmt_dir = fmt_dir
+
+    # ReportCVE-style: fetch README (contains base64 PoC) and poc files.
+    readme_url = _github_raw_url(repo, path, "README.md")
+    readme_dest = os.path.join(repo_fmt_dir, "README.md")
+    if not os.path.exists(readme_dest):
+        print(f"  [{cve_id}] downloading README from {repo} ...")
+        if download(readme_url, readme_dest, max_size=max_size):
+            saved += 1
+            cache.setdefault("cve", {})[f"{cve_id}/README.md"] = readme_dest
+
+    # Try to fetch PoC files (typically poc*.bin, poc*.jp2, etc.).
+    saved += _try_poc_files(cve_id, repo, path, repo_fmt_dir, cache, max_size)
+
+    # Other PoC repos (DepthFirstDisclosures, Fi1ix, fa1c4, Vulhub):
+    # try common filenames at repo root or path.
+    if path:
+        saved += _try_poc_files(cve_id, repo, path, repo_fmt_dir, cache, max_size)
+
+    time.sleep(0.2)
+    return saved
+
+
+def _try_poc_files(
+    cve_id: str, repo: str, path: str, fmt_dir: str, cache: dict, max_size: int
+) -> int:
+    """Download the first missing POC_FILENAMES entry that succeeds; returns 0 or 1."""
+    for fname in POC_FILENAMES:
+        if fname == "README.md":
+            continue
+        poc_url = _github_raw_url(repo, path, fname)
+        poc_dest = os.path.join(fmt_dir, fname)
+        if os.path.exists(poc_dest):
+            continue
+        print(f"  [{cve_id}] trying {fname} ...")
+        if download(poc_url, poc_dest, max_size=max_size):
+            cache.setdefault("cve", {})[f"{cve_id}/{fname}"] = poc_dest
+            return 1
+    return 0
+
+
 def download_cve_pocs(
     out_dir: str,
     cves: dict[str, dict] | None = None,
@@ -605,50 +670,7 @@ def download_cve_pocs(
             repos = [info]
 
         for source in repos:
-            repo = source["repo"]
-            path = source.get("path", "")
-            repo_fmt_dir = fmt_dir
-
-            # ReportCVE-style: fetch README (contains base64 PoC) and poc files.
-            readme_url = _github_raw_url(repo, path, "README.md")
-            readme_dest = os.path.join(repo_fmt_dir, "README.md")
-            if not os.path.exists(readme_dest):
-                print(f"  [{cve_id}] downloading README from {repo} ...")
-                if download(readme_url, readme_dest, max_size=max_size):
-                    saved += 1
-                    cache.setdefault("cve", {})[f"{cve_id}/README.md"] = readme_dest
-
-            # Try to fetch PoC files (typically poc*.bin, poc*.jp2, etc.).
-            for fname in POC_FILENAMES:
-                if fname == "README.md":
-                    continue
-                poc_url = _github_raw_url(repo, path, fname)
-                poc_dest = os.path.join(repo_fmt_dir, fname)
-                if os.path.exists(poc_dest):
-                    continue
-                print(f"  [{cve_id}] trying {fname} ...")
-                if download(poc_url, poc_dest, max_size=max_size):
-                    saved += 1
-                    cache.setdefault("cve", {})[f"{cve_id}/{fname}"] = poc_dest
-                    break
-
-            # Other PoC repos (DepthFirstDisclosures, Fi1ix, fa1c4, Vulhub):
-            # try common filenames at repo root or path.
-            if path:
-                for fname in POC_FILENAMES:
-                    if fname == "README.md":
-                        continue
-                    poc_url = _github_raw_url(repo, path, fname)
-                    poc_dest = os.path.join(repo_fmt_dir, fname)
-                    if os.path.exists(poc_dest):
-                        continue
-                    print(f"  [{cve_id}] trying {fname} ...")
-                    if download(poc_url, poc_dest, max_size=max_size):
-                        saved += 1
-                        cache.setdefault("cve", {})[f"{cve_id}/{fname}"] = poc_dest
-                        break
-
-            time.sleep(0.2)
+            saved += _fetch_cve_source(cve_id, source, fmt_dir, cache, max_size)
 
     return saved
 
