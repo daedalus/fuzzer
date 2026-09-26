@@ -3210,6 +3210,15 @@ class OperatorEngine:
                 ]
             )
 
+    def _op_fsm_regen(self, buf, _byte_idx, _data):
+        """Keep a valid FSM prefix, regenerate a valid tail (core/format_fsm.py)."""
+        fsm = self.ctx.fsm
+        if not fsm:
+            return None
+
+        limit = self.ctx.max_len
+        return bytearray(fsm.regenerate(bytes(buf), self.ctx._rng, limit)[:limit])
+
     def _op_grammar_tree_mutate(self, buf, _byte_idx, data):
         if self.ctx.grammar:
             from fuzzer_tool.core.grammar import SubtreePopulation, TreeMutator
