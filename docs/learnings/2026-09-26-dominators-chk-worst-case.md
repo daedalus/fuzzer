@@ -44,8 +44,8 @@ function. Only reached with `--gate-bonus > 0`.
   implies its dominators are covered, so `ptrace_coverage.py` could place
   int3 only on dominator-tree leaves. Not measured.
 
-## Recommendation
+## Outcome
 
-Replace CHK in `compute_idom` with SNCA (same signature, same unreachable
-semantics). Faster on every family measured, linear-ish on the ones that
-stall CHK.
+`compute_idom` is now Semi-NCA (same signature, same unreachable
+semantics). CFG-shaped graphs: 64/512/4096 blocks 0.20/1.58/15.2 ms ->
+0.08/0.77/7.1 ms. Regression: `tests/test_regression_dominators_worst_case.py`.
