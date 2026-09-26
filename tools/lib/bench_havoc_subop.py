@@ -12,11 +12,11 @@ Two measurements:
    selection cost is amortized against whatever the chosen branch does.
 
 The end-to-end delta is the tax the better branch mix has to repay. Run
-``tools/bench.sh`` with and without ``--no-adaptive-havoc`` for the actual
+``tools/lib/bench.sh`` with and without ``--no-adaptive-havoc`` for the actual
 edges-per-hour comparison; this script only measures the mutation loop.
 
 Usage:
-    PYTHONPATH=. python tools/bench_havoc_subop.py
+    PYTHONPATH=. python tools/lib/bench_havoc_subop.py
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ import time
 from array import array
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from tests.test_new_operators import _make_minimal_fuzzer  # noqa: E402
 

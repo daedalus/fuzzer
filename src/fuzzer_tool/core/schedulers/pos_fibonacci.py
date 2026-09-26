@@ -1,8 +1,10 @@
 """PositionFibonacciScheduler: golden-ratio offset sweep.
 
-Stateless sibling of ``core/schedulers/pos_round_robin.py``. Same binning
-(``width = ceil(len(data) / MAX_BINS)``), but bins are visited in
-Fibonacci-hashing order instead of ``index % num_bins``::
+Stateless sibling of ``core/schedulers/pos_round_robin.py``. Same binning,
+but over the live buffer (``width = ceil(buf_len / MAX_BINS)``), not the
+parent seed: earlier operators may have resized it, and seed-sized bins
+clamped to a shrunk buffer piled every overshoot onto its last byte. Bins
+are visited in Fibonacci-hashing order instead of ``index % num_bins``::
 
     bin_n = floor(frac(n / phi) * num_bins)       n = global counter
 
@@ -52,7 +54,8 @@ class PositionFibonacciScheduler:
         if buf_len <= 0:
             return None
 
-        n = len(data)
+        # Live buffer, not the seed: see the module docstring.
+        n = buf_len
         width = max(1, -(-n // MAX_BINS))
         num_bins = max(1, -(-n // width))
 

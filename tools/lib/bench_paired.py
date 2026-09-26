@@ -22,8 +22,8 @@ analyses the result pairwise:
 Usage::
 
     # define arms in a JSON file, or use the built-in ones
-    tools/bench_paired.py run --arms baseline,cbh-reanchor --set cmplog
-    tools/bench_paired.py analyse results/paired/*.json
+    tools/lib/bench_paired.py run --arms baseline,cbh-reanchor --set cmplog
+    tools/lib/bench_paired.py analyse results/paired/*.json
 
 Raw per-run JSON is written to ``results/paired/`` so an analysis can be
 rerun, or a later arm compared against an earlier arm's recorded cells,
@@ -55,7 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_lock  # noqa: E402
 from eval_set import DEFAULT_ITERS, SEEDS, TARGET_SETS, cells  # noqa: E402
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 RESULTS = REPO / "results" / "paired"
 
 # ── Arms ───────────────────────────────────────────────────────────────
@@ -150,6 +150,11 @@ ARMS: dict[str, list[str]] = {
     "strata-a1-elo": ["--confirm-novelty", "--elo", "--mc-bandit"],
     "strata-a3": ["--confirm-novelty", "--elo", "--mc-bandit", "--op-strata"],
     "strata-a4": ["--confirm-novelty", "--elo", "--mc-bandit", "--strata", "--op-strata"],
+    # Standalone position policies, no arena: with no other tracker on, the
+    # scheduler is select_position's only candidate. Pair each against
+    # baseline (uniform offsets) and against each other.
+    "pos-round-robin": ["--pos-round-robin"],
+    "pos-fibonacci": ["--pos-fibonacci"],
     # Gravity splice donor (core/gravity.py). Only the six corpus-crossing
     # operators change; read "Gravity splice: ... hits, refits" in a cell's
     # log before trusting a null -- a closed fit gate means prior exponents.
@@ -169,6 +174,8 @@ STRATA_ARMS = (
 # The arms added for the generation group, in the order the handover lists them.
 GENERATION_ARMS = ("wfc", "elo-mcts", "elo-alphabeta", "bootstrap")
 
+POSITION_ARMS = ("pos-round-robin", "pos-fibonacci")
+
 # Which arm each one is paired against. `analyse --baseline` takes one name;
 # this records the intended pairing so a reviewer does not have to reverse it
 # from comments. Only arms whose baseline is not plain `baseline` need care,
@@ -184,6 +191,8 @@ ARM_BASELINES: dict[str, str] = {
     "strata-a1-elo": "strata-a1",
     "strata-a3": "strata-a1-elo",
     "strata-a4": "strata-a1-elo",
+    "pos-round-robin": "baseline",
+    "pos-fibonacci": "baseline",
     "splice-gravity": "baseline",
 }
 

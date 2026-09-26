@@ -23,7 +23,7 @@ effort estimates are guesses made from the sources; only the status column of
 each original was ever grepped against live code, and that was weeks ago.
 
 **Everything here should land behind an A/B flag** in the `--no-adaptive-havoc`
-shape and be measured through `tools/bench_paired.py`. No item below has a
+shape and be measured through `tools/lib/bench_paired.py`. No item below has a
 measured coverage delta.
 
 ---
@@ -197,7 +197,7 @@ rewired off `fuzz_count` at the same time.
 
 **Still open on this entry:**
 
-- The **A/B for the Boltzmann change** through `tools/bench_paired.py`. It
+- The **A/B for the Boltzmann change** through `tools/lib/bench_paired.py`. It
   changes seed selection and was not benchmarked. Down-weighting expensive
   seeds is down-weighting deep paths on targets where depth costs time, and
   that risk is unmeasured.
@@ -339,7 +339,7 @@ its docstring already states the principle better than the source does: *ground
 truth is known by construction rather than inferred from the target's behaviour,
 which is what makes a false-negative rate measurable at all.* `--blocks`,
 `--unstable N` and the provably-dead byte region are three known-by-construction
-knobs; `tools/bench_havoc_subop.py`, `docs/sweeps/` and
+knobs; `tools/lib/bench_havoc_subop.py`, `docs/sweeps/` and
 `tests/test_bench_paired_stats.py` are the beginnings of the harness. Formalise
 a fixed-profile campaign mode — pinned seed, pinned synthetic target, pinned
 fault profile, N execs — reporting a counter table (execs, unique edges, corpus
@@ -751,7 +751,7 @@ Source quality varies sharply and should govern how much weight each prior gets.
   STADS framework and should be reasoned about together rather than as two
   unrelated estimators. Nobody has.
 - **Still owed, and the excuse is gone:** the adaptive-havoc edges-per-hour
-  comparison against `--no-adaptive-havoc`. `tools/bench_paired.py` exists. It
+  comparison against `--no-adaptive-havoc`. `tools/lib/bench_paired.py` exists. It
   should be the first thing pointed at any of this, before A3 adds an operator
   category that makes scheduler attribution harder.
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Shared helper functions for tools/bench.sh and tools/bench_sweep.sh.
+# Shared helper functions for tools/lib/bench.sh and tools/lib/bench_sweep.sh.
 # Source this file; do not execute it directly.
 
 # ── SHM cleanup ───────────────────────────────────────────────────────

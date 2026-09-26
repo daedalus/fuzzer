@@ -356,9 +356,27 @@ class TestPositionFibonacci:
     def test_empty_buffer_declines(self):
         assert PositionFibonacciScheduler().propose(b"", 0) is None
 
-    def test_empty_seed_with_live_buffer_proposes_zero(self):
+    def test_regression_shrunk_buffer_does_not_pile_on_last_byte(self):
+        # Bins sized from the parent seed, clamped to a shrunk buffer, sent
+        # ~99% of picks to buf_len-1 (paired png run: 5/20 cells collapsed).
         s = PositionFibonacciScheduler()
-        assert [s.propose(b"", 4) for _ in range(3)] == [0, 0, 0]
+        buf_len, k = 10, 100
+        picks = [s.propose(SEED, buf_len) for _ in range(k)]
+        assert set(picks) == set(range(buf_len))
+        assert picks.count(buf_len - 1) <= 2 * k // buf_len
+
+    def test_grown_buffer_reaches_past_the_seed(self):
+        # Adversarial: bins sized from the seed never reach inserted tail bytes.
+        s = PositionFibonacciScheduler()
+        grown = 2 * len(SEED)
+        assert max(s.propose(SEED, grown) for _ in range(16)) >= len(SEED)
+
+    def test_empty_seed_with_live_buffer_proposes_zero(self):
+        # Zero first; bins follow the live buffer, so an empty parent still
+        # sweeps it rather than pinning every pick to 0.
+        s = PositionFibonacciScheduler()
+        picks = [s.propose(b"", 4) for _ in range(3)]
+        assert picks == [int((n * INV_PHI) % 1.0 * 4) for n in range(3)]
 
     def test_record_does_not_perturb_the_sequence(self):
         a, b = PositionFibonacciScheduler(), PositionFibonacciScheduler()
@@ -745,6 +763,25 @@ class TestSelectPositionWiring:
         engine = self._engine(f)
         assert {engine.select_position(bytearray(SEED), SEED) for _ in range(50)} == {22}
 
+    def test_fibonacci_is_the_sole_legacy_candidate(self):
+        # Falsification: dropped from the candidate list, the pick would be
+        # the uniform fallback, not the golden-ratio sequence.
+        f = _Fuzzer()
+        f._pos_fibonacci = PositionFibonacciScheduler()
+        ref = PositionFibonacciScheduler()
+        engine = self._engine(f)
+        drawn = [engine.select_position(bytearray(SEED), SEED) for _ in range(8)]
+        assert drawn == [ref.propose(SEED, len(SEED)) for _ in range(8)]
+
+    def test_fibonacci_shares_the_pick_with_other_trackers(self):
+        # Adversarial: next to TE it is one candidate of two, not a takeover.
+        f = _Fuzzer(te=True)
+        f._pos_fibonacci = PositionFibonacciScheduler()
+        engine = self._engine(f)
+        drawn = {engine.select_position(bytearray(SEED), SEED) for _ in range(200)}
+        assert 22 in drawn
+        assert len(drawn - {22}) >= 2
+
 
 class TestRegistration:
     def test_elo_activation_preregisters_pos_keys(self):
@@ -763,16 +800,18 @@ class TestFuzzerWiring:
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         params = inspect.signature(Fuzzer.__init__).parameters
-        assert list(params)[-4:] == [
+        assert list(params)[-5:] == [
             "burn_front",
             "position_arena",
             "pos_canary",
             "pos_round_robin",
+            "pos_fibonacci",
         ]
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
         assert params["pos_canary"].default is False
         assert params["pos_round_robin"].default is False
+        assert params["pos_fibonacci"].default is False
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
@@ -788,7 +827,13 @@ class TestFuzzerWiring:
             if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "Fuzzer"
         ]
         assert calls
-        expected = {"burn_front", "position_arena", "pos_canary", "pos_round_robin"}
+        expected = {
+            "burn_front",
+            "position_arena",
+            "pos_canary",
+            "pos_round_robin",
+            "pos_fibonacci",
+        }
         for c in calls:
             kw = {k.arg for k in c.keywords}
             assert expected <= kw
@@ -864,6 +909,11 @@ class TestRealConstruction:
         assert isinstance(f._pos_round_robin, PositionRoundRobinScheduler)
         assert f._position_arena is None
 
+    def test_pos_fibonacci_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_fibonacci=True)
+        assert isinstance(f._pos_fibonacci, PositionFibonacciScheduler)
+        assert f._position_arena is None
+
     def test_hail_mary_enables_the_arena_and_burn_front(self, monkeypatch):
         import sys
 
@@ -878,6 +928,7 @@ class TestRealConstruction:
         assert args.burn_front is True
         assert args.pos_canary is True
         assert args.pos_round_robin is True
+        assert args.pos_fibonacci is True
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 
     def test_position_arena_without_elo_warns_and_constructs(self, tmp_path, caplog):

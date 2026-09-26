@@ -2,7 +2,7 @@
 """Benchmark profile cache: compare cold-start vs cached startup times.
 
 Usage:
-    python3 tools/bench_cache.py [target] [corpus] [iterations]
+    python3 tools/lib/bench_cache.py [target] [corpus] [iterations]
 
 Measures wall-clock time from process start until the fuzzing loop begins.
 """
@@ -16,7 +16,7 @@ from pathlib import Path
 TARGET = sys.argv[1] if len(sys.argv) > 1 else "targets/png_read_nosan.so"
 CORPUS = sys.argv[2] if len(sys.argv) > 2 else "corpus/png_read_smt_3"
 ITERS = sys.argv[3] if len(sys.argv) > 3 else "200"
-BASE = str(Path(__file__).resolve().parent.parent)
+BASE = str(Path(__file__).resolve().parents[2])
 
 os.chdir(BASE)
 

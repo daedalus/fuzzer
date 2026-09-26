@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-TOOLS = Path(__file__).resolve().parent.parent / "tools"
+TOOLS = Path(__file__).resolve().parent.parent / "tools" / "lib"
 sys.path.insert(0, str(TOOLS))
 
 bench_lock = pytest.importorskip("bench_lock")

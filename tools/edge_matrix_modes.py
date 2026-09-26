@@ -16,7 +16,7 @@ as the defined replacement. Randomness comes from ``RandPool`` (Hard Rule 16).
 
 Screening tools, not verdicts: ``score_audit`` can retire a seed score, never
 promote one -- observational correlation has been wrong twice on exactly this
-question, so promotion stays with ``tools/bench_paired.py``.
+question, so promotion stays with ``tools/lib/bench_paired.py``.
 """
 
 from __future__ import annotations

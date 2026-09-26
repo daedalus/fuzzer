@@ -124,7 +124,7 @@ fuzzer, not just the target.
 | `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` / `vendor_sqlite.sh` | Fetch vendored library sources into `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/`; legacy `vendor/` via `--in-tree-vendor`); required before building the matching targets |
 | `FUZZ_VENDOR_ROOT=...` / `FUZZ_BUILD_ROOT=...` | Env-var knobs; defaults are `~/fuzzing/vendoring/` (sources) and `~/fuzzing/builds/` (build artifacts). Both have legacy `--in-tree-*` flags. |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
-| `tools/bench.sh` / `tools/bench_sweep.sh` | Config comparison / feature sweep |
+| `tools/benchmark.py list` / `tools/benchmark.py <name> [args]` | All benchmarks behind one entry point (`smoke`, `sweep`, `paired`, `replicated`, …) |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
 | `vulture --min-confidence 80 .` | Find duplicated code |
 | `fuzzer-tool fuzz <target> -d <corpus> -n <iters> --profile-hotpath [--profile-out PATH]` | cProfile hotpath profile of the fuzz run (tottime/cumtime/ncalls tables; dump defaults to `/tmp/fuzzer_hotpath.prof`) |
@@ -148,7 +148,8 @@ src/fuzzer_tool/
 └── cli/          # CLI entry point (commands.py, __main__.py)
 
 tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4/secp256k1/sqlite), corpus_png.py,
-                  #   bench.sh, bench_sweep.sh, release.sh
+                  #   benchmark.py (entry point), release.sh
+tools/lib/        # Benchmark harnesses (bench*.sh/py, noise_probe, lineage_benchmark) + shared helpers
 targets/          # Fuzz target sources (*.c) + built artifacts (.so/.bin) under legacy layout.
                   #   Default build output is $FUZZ_BUILD_ROOT (~/fuzzing/builds/); this in-tree
                   #   `targets/` is the legacy path (use --in-tree-targets for back-compat).

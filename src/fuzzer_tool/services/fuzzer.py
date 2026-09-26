@@ -689,7 +689,7 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("canary")
     if getattr(f, "_pos_round_robin", None) is not None:
         names.append("round-robin")
-    if getattr(f, "_pos_fibonacci", None) is not None and arena_live:
+    if getattr(f, "_pos_fibonacci", None) is not None:
         names.append("fibonacci")
     return names
 
@@ -1381,6 +1381,9 @@ class Fuzzer:
         # Elo arm and, needing no arbiter, directly in select_position's
         # non-arena candidate list alongside burn-front.
         pos_round_robin=False,
+        # Golden-ratio sibling of pos_round_robin (see
+        # core/schedulers/pos_fibonacci.py); same two reaches.
+        pos_fibonacci=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2213,6 +2216,25 @@ class Fuzzer:
             self._alphabeta = AlphaBetaMCTSSeedScheduler(rng=self._rng)
             log.info("Alpha-beta (Thompson descent) seed scheduling enabled")
 
+        # K-Scheduler node channel: mutually exclusive with directed mode
+        # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
+        # directed). Built before _load_corpus(): --resume checks the
+        # node_channel contract and restores Katz state there.
+        self._katz_channel = None
+        if not targets:
+            try:
+                from fuzzer_tool.services.katz_channel import KatzChannel
+
+                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache, debug=self.debug)
+                if ch is not None and ch.upload():
+                    self._katz_channel = ch
+                    print(
+                        f"[*] K-Scheduler node channel: {len(ch.node_of)} probe sites, "
+                        f"{ch.n_nodes} ICFG nodes"
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Katz channel setup failed: %s", e)
+
         self._load_corpus()
         loaded = self.corpus
         self._apply_seed_transforms()
@@ -2483,15 +2505,16 @@ class Fuzzer:
             self._pos_round_robin = PositionRoundRobinScheduler()
             log.info("Position round-robin scheduling enabled")
         # Position-arena fibonacci: golden-ratio sweep with no per-seed
-        # state (see core/schedulers/pos_fibonacci.py). Arena-only, like
-        # the canary: it exists to be rated against round-robin and uniform.
+        # state (see core/schedulers/pos_fibonacci.py). Like round-robin it
+        # is also a non-arena select_position candidate.
         self._pos_fibonacci = None
-        if position_arena:
+        if pos_fibonacci or position_arena:
             from fuzzer_tool.core.schedulers.pos_fibonacci import (
                 PositionFibonacciScheduler,
             )
 
             self._pos_fibonacci = PositionFibonacciScheduler()
+            log.info("Position fibonacci scheduling enabled")
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
@@ -3325,24 +3348,6 @@ class Fuzzer:
         # docs/handover/handover_thermo_stochastic_concepts_2026-09-12.md.
         self._dist_last_value: float | None = None
         self._distance_trend = ScalingExponentDetector()
-
-        # K-Scheduler node channel: mutually exclusive with directed mode
-        # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
-        # directed).
-        self._katz_channel = None
-        if not targets:
-            try:
-                from fuzzer_tool.services.katz_channel import KatzChannel
-
-                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache, debug=self.debug)
-                if ch is not None and ch.upload():
-                    self._katz_channel = ch
-                    print(
-                        f"[*] K-Scheduler node channel: {len(ch.node_of)} probe sites, "
-                        f"{ch.n_nodes} ICFG nodes"
-                    )
-            except Exception as e:  # noqa: BLE001
-                log.warning("Katz channel setup failed: %s", e)
 
         # Simulated annealing temperature schedule
         self._anneal_budget = anneal_budget  # 0 = no annealing (temperature always 1.0)

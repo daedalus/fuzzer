@@ -599,6 +599,7 @@ def cmd_fuzz(args):
         position_arena=getattr(args, "position_arena", False),
         pos_canary=getattr(args, "pos_canary", False),
         pos_round_robin=getattr(args, "pos_round_robin", False),
+        pos_fibonacci=getattr(args, "pos_fibonacci", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -1941,6 +1942,7 @@ _HAIL_MARY_FLAGS = (
     "burn_front",
     "pos_canary",
     "pos_round_robin",
+    "pos_fibonacci",
     "position_arena",
 )
 
@@ -2427,13 +2429,21 @@ def main() -> int:
         "Implied by --position-arena.",
     )
     fuzz_parser.add_argument(
+        "--pos-fibonacci",
+        action="store_true",
+        help="Enable the golden-ratio position scheduler: --pos-round-robin's bins "
+        "visited in Fibonacci-hashing order, no per-seed state. Also a candidate in "
+        "the uniform position pick. Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
         "crash-MI, region, burn-front, canary, round-robin, fibonacci) with uniform as the "
         "baseline arm, under pos_ keys. Needs --elo; a proposer rated at or below "
         "uniform (or, once running, the pos-canary floor) is logged. Implies "
-        "--burn-front, --pos-canary and --pos-round-robin. Enabled by --hail-mary.",
+        "--burn-front, --pos-canary, --pos-round-robin and --pos-fibonacci. "
+        "Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

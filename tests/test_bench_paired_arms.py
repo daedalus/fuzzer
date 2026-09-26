@@ -1,7 +1,7 @@
 """G0: bench arms for the generation group (wfc, mcts, alphabeta, bootstrap).
 
 docs/handover/handover_generators_2026-09-20.md G0: every A/B in that
-handover was blocked on `tools/bench_paired.py` having no arm for any of the
+handover was blocked on `tools/lib/bench_paired.py` having no arm for any of the
 four. An arm is only evidence if (a) its flags reach the real fuzz parser --
 argparse would otherwise accept a typo'd flag as an abbreviation or reject it
 only when the campaign starts, three hours into a matrix -- and (b) it differs
@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "lib"))
 
 from bench_paired import ARM_BASELINES, ARMS, GENERATION_ARMS  # noqa: E402
 

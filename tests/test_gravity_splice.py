@@ -232,7 +232,7 @@ class TestBenchArm:
 
     @pytest.fixture(autouse=True)
     def _tools_path(self, monkeypatch):
-        monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent / "tools"))
+        monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent / "tools" / "lib"))
 
     def test_arm_pairs_against_baseline(self):
         from bench_paired import ARM_BASELINES, ARMS
