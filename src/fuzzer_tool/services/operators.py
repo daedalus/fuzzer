@@ -467,7 +467,6 @@ def _deterministic_mutation_stream(
         )
         _deterministic_mutation_stream.last_truncated = full_cost - max_mutations
 
-    n = 0
     q_bit, q_byte, q_arith, q_interesting = quotas
 
     # Visit order shared by every pass; rotated so truncated passes reach
@@ -482,75 +481,34 @@ def _deterministic_mutation_stream(
     # The bytes(scratch) copy per yield is still required by contract.
     scratch = bytearray(data)
 
-    # bitflip 1/1: flip every bit in turn.
-    pass_n = 0
+    # bitflip 1/1: flip every bit in turn. Inline: 8 of 33 mutants per byte.
+    n = 0
     for byte_idx in order:
-        if pass_n >= q_bit:
+        if n >= q_bit:
             break
         orig = data[byte_idx]
         for bit in range(8):
-            if pass_n >= q_bit:
+            if n >= q_bit:
                 break
             scratch[byte_idx] = orig ^ (1 << bit)
             yield bytes(scratch)
-            pass_n += 1
             n += 1
         scratch[byte_idx] = orig  # restore
 
-    # byte flip 8/8: XOR every byte with 0xFF in turn.
-    #
-    # This is the pass that builds the effector map. Every mutant here is
-    # executed by the normal pipeline anyway; publishing its byte index on
-    # `effector.pending` is the whole cost of learning which bytes the
-    # target reads.
-    pass_n = 0
-    for byte_idx in order:
-        if pass_n >= q_byte:
-            break
-        orig = data[byte_idx]
-        scratch[byte_idx] = orig ^ 0xFF
-        if effector is not None:
-            effector.pending = byte_idx
-        yield bytes(scratch)
-        scratch[byte_idx] = orig  # restore
-        pass_n += 1
-        n += 1
+    n += yield from _det_byteflip(data, scratch, order, q_byte, effector)
 
     # ── effector gate ────────────────────────────────────────────────────
     # By the time the generator is resumed for the first arithmetic mutant,
     # the last byteflip mutant has already been executed and reported: the
     # caller runs and records mutant k before pulling mutant k+1.
-    #
-    # Only positively-inert positions are dropped. Positions the byteflip
-    # pass never reached (quota exhausted) and positions whose mutant was
-    # discarded before execution (_dedup_mutate re-rolls) stay UNKNOWN and
-    # keep their full schedule.
     positions: range | list[int] = order
     if effector is not None:
-        eff = effector.eff
-        live = [i for i in order if eff[i] != _DET_EFF_INERT]
-        # Fail-safe: a map that marks everything inert is evidence of a
-        # broken measurement (unstable path hash, a target that timed out
-        # under byteflips), not of a seed no byte of which is read. Treat it
-        # as absent rather than deleting both remaining passes.
-        if live and len(live) < length:
-            positions = live
-            n_live = len(live)
-            remaining = max(0, max_mutations - n)
-            gated = [n_live * n_arith_deltas * 2, n_live * n_interesting]
-            # Re-split the remaining budget against the gated costs. The
-            # up-front quotas were sized for `length` positions; leaving them
-            # in place would hand these passes an allowance for bytes they
-            # now skip and the budget would go unspent instead of reaching
-            # further into the seed.
-            q_arith, q_interesting = _split_det_quota(gated, remaining)
-            _deterministic_mutation_stream.last_truncated = (
-                (cost_bit - quotas[0])
-                + (cost_byte - quotas[1])
-                + max(0, sum(gated) - q_arith - q_interesting)
-            )
+        gate = _det_effector_gate(effector, order, max_mutations - n, quotas)
+        if gate is not None:
+            positions, q_arith, q_interesting = gate
 
     # arithmetic 8-bit: add/subtract each delta at every live byte position.
+    # Inline: 16 of 33 mutants per byte, the hottest pass.
     pass_n = 0
     for byte_idx in positions:
         if pass_n >= q_arith:
@@ -562,29 +520,88 @@ def _deterministic_mutation_stream(
             scratch[byte_idx] = (orig + delta) & 0xFF
             yield bytes(scratch)
             pass_n += 1
-            n += 1
             if pass_n >= q_arith:
                 scratch[byte_idx] = orig  # restore before break
                 break
             scratch[byte_idx] = (orig - delta) & 0xFF
             yield bytes(scratch)
             pass_n += 1
-            n += 1
         scratch[byte_idx] = orig  # restore
 
-    # interesting values 8-bit: substitute each known-interesting byte.
+    yield from _det_interesting(data, scratch, positions, q_interesting)
+
+
+def _det_byteflip(data, scratch, order, quota, effector):
+    """byte flip 8/8: XOR every byte with 0xFF in turn. Returns mutants yielded.
+
+    This is the pass that builds the effector map. Every mutant here is
+    executed by the normal pipeline anyway; publishing its byte index on
+    `effector.pending` is the whole cost of learning which bytes the
+    target reads.
+    """
+    pass_n = 0
+    for byte_idx in order:
+        if pass_n >= quota:
+            break
+        orig = data[byte_idx]
+        scratch[byte_idx] = orig ^ 0xFF
+        if effector is not None:
+            effector.pending = byte_idx
+        yield bytes(scratch)
+        scratch[byte_idx] = orig  # restore
+        pass_n += 1
+    return pass_n
+
+
+def _det_effector_gate(effector, order, remaining, quotas):
+    """Drop inert positions and re-split the budget; None keeps the ungated plan.
+
+    Only positively-inert positions are dropped. Positions the byteflip
+    pass never reached (quota exhausted) and positions whose mutant was
+    discarded before execution (_dedup_mutate re-rolls) stay UNKNOWN and
+    keep their full schedule.
+    """
+    from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
+
+    length = len(order)
+    eff = effector.eff
+    live = [i for i in order if eff[i] != _DET_EFF_INERT]
+    # Fail-safe: a map that marks everything inert is evidence of a
+    # broken measurement (unstable path hash, a target that timed out
+    # under byteflips), not of a seed no byte of which is read. Treat it
+    # as absent rather than deleting both remaining passes.
+    if not live or len(live) >= length:
+        return None
+    n_live = len(live)
+    gated = [n_live * len(ARITHMETIC_DELTAS) * 2, n_live * len(INTERESTING_UNSIGNED_8)]
+    # Re-split the remaining budget against the gated costs. The
+    # up-front quotas were sized for `length` positions; leaving them
+    # in place would hand these passes an allowance for bytes they
+    # now skip and the budget would go unspent instead of reaching
+    # further into the seed.
+    q_arith, q_interesting = _split_det_quota(gated, max(0, remaining))
+    cost_bit, cost_byte = length * 8, length
+    _deterministic_mutation_stream.last_truncated = (
+        (cost_bit - quotas[0])
+        + (cost_byte - quotas[1])
+        + max(0, sum(gated) - q_arith - q_interesting)
+    )
+    return live, q_arith, q_interesting
+
+
+def _det_interesting(data, scratch, positions, quota):
+    """interesting values 8-bit: substitute each known-interesting byte."""
     pass_n = 0
     for byte_idx in positions:
-        if pass_n >= q_interesting:
+        if pass_n >= quota:
             break
         orig = data[byte_idx]
         for val in INTERESTING_UNSIGNED_8:
-            if pass_n >= q_interesting:
+            if pass_n >= quota:
                 break
             scratch[byte_idx] = val & 0xFF
             yield bytes(scratch)
             pass_n += 1
-            n += 1
         scratch[byte_idx] = orig  # restore
 
 
@@ -768,6 +785,284 @@ def operator_strategy_pool(f) -> list[str]:
     if f._use_topk and f._topk:
         available.append("topk")
     return available
+
+
+def _rq_xor(buf, offset, vb, rng):
+    buf[offset] = (vb ^ rng.randint(1, 255)) & 0xFF
+
+
+def _rq_arith(buf, offset, vb, rng):
+    buf[offset] = (vb - rng.randint(-128, 127)) & 0xFF
+
+
+def _rq_boundary(buf, offset, vb, _rng):
+    buf[offset] = (vb - 1) & 0xFF
+
+
+def _rq_hex(buf, offset, vb, _rng):
+    buf[offset] = b"0123456789abcdef"[vb % 16]
+
+
+def _rq_toupper(buf, offset, vb, _rng):
+    if ord("a") <= buf[offset] <= ord("z"):
+        buf[offset] = buf[offset] - 0x20
+    else:
+        buf[offset] = ord("A") + (vb % 26)
+
+
+def _rq_tolower(buf, offset, vb, _rng):
+    if ord("A") <= buf[offset] <= ord("Z"):
+        buf[offset] = buf[offset] + 0x20
+    else:
+        buf[offset] = ord("a") + (vb % 26)
+
+
+#: RedQueen single-byte fallback transforms (``_rq_byte_fallback``), by name.
+_RQ_BYTE_TRANSFORMS = {
+    "xor": _rq_xor,
+    "arithmetic": _rq_arith,
+    "boundary": _rq_boundary,
+    "hex": _rq_hex,
+    "toupper": _rq_toupper,
+    "tolower": _rq_tolower,
+}
+
+
+# ── _op_line_mutate modes: edit the line list in place (len(parts) >= 2) ──
+
+
+def _line_del(parts, rng):
+    idx = rng.randint(0, len(parts) - 1)
+    del parts[idx]
+
+
+def _line_dup(parts, rng):
+    idx = rng.randint(0, len(parts) - 1)
+    parts.insert(idx + 1, parts[idx])
+
+
+def _line_swap(parts, rng):
+    if len(parts) < 2:
+        return
+    idx = rng.randint(0, len(parts) - 2)
+    parts[idx], parts[idx + 1] = parts[idx + 1], parts[idx]
+
+
+def _line_perm(parts, rng):
+    """Shuffle a subset of lines."""
+    if len(parts) < 3:
+        return
+    start = rng.randint(0, len(parts) - 3)
+    end = min(start + rng.randint(2, 6), len(parts))
+    segment = parts[start:end]
+    rng.shuffle(segment)
+    parts[start:end] = segment
+
+
+def _line_repeat(parts, rng):
+    if len(parts) < 1:
+        return
+    idx = rng.randint(0, len(parts) - 1)
+    n = rng.randint(1, 32)
+    for _ in range(n):
+        parts.insert(idx, parts[idx])
+
+
+def _line_clone(parts, rng):
+    if len(parts) < 2:
+        return
+    src = rng.randint(0, len(parts) - 1)
+    dst = rng.randint(0, len(parts) - 1)
+    parts.insert(dst, parts[src])
+
+
+_LINE_MUTATORS = {
+    "del": _line_del,
+    "dup": _line_dup,
+    "swap": _line_swap,
+    "perm": _line_perm,
+    "repeat": _line_repeat,
+    "clone": _line_clone,
+}
+
+
+def _weizz_repair_len(out, smap, rng, flag) -> bool:
+    """Rewrite one IS_LEN field of *out* in place; True if one was written."""
+    len_spans = smap.flagged_spans(flag)
+    if not len_spans:
+        return False
+    start, end, _cid = rng.choice(len_spans)
+    width = end - start
+    if not (1 <= width <= 8 and end <= len(out)):
+        return False
+    # Region whose size we advertise: from end of length field to
+    # the start of the next field, or EOF.
+    fields = smap.field_spans()
+    next_start = next((fs for fs, _fe, _ in fields if fs >= end), len(out))
+    payload_len = max(0, next_start - end)
+    # Occasionally use off-by-one / double for adversarial value.
+    mode = rng.randint(0, 5)
+    if mode == 0:
+        payload_len = (payload_len + 1) & ((1 << (8 * width)) - 1)
+    elif mode == 1:
+        payload_len = (payload_len * 2) & ((1 << (8 * width)) - 1)
+    elif mode == 2:
+        payload_len = 0
+    endian = "little" if rng.randint(0, 1) == 0 else "big"
+    try:
+        encoded = payload_len.to_bytes(width, endian)
+    except OverflowError:
+        encoded = (payload_len & ((1 << (8 * width)) - 1)).to_bytes(width, endian)
+    out[start:end] = encoded
+    return True
+
+
+def _weizz_repair_crc(out, smap, rng, flag) -> bool:
+    """Rewrite one 4-byte IS_CHECKSUM field with CRC-32 of its prefix."""
+    crc_spans = smap.flagged_spans(flag)
+    if not crc_spans:
+        return False
+    start, end, _cid = rng.choice(crc_spans)
+    if end - start != 4 or end > len(out):
+        return False
+    body = bytes(out[:start])
+    digest = crc32(body) & 0xFFFFFFFF
+    endian = "little" if rng.randint(0, 1) == 0 else "big"
+    out[start:end] = digest.to_bytes(4, endian)
+    return True
+
+
+def _rq_overwrite(buf, off, payload) -> None:
+    """Write *payload* at *off*, dropping bytes past the end of *buf*."""
+    for j, b_val in enumerate(payload):
+        if off + j < len(buf):
+            buf[off + j] = b_val
+
+
+def _rq_replay_matches(buf, matches, rng) -> None:
+    """_op_redqueen: swap op_a for op_b where the recorded match still holds."""
+    for _ in range(rng.randint(1, min(4, len(matches)))):
+        off, op_a, op_b = rng.choice(matches)
+        end = off + len(op_a)
+        if end <= len(buf) and bytes(buf[off:end]) == op_a:
+            _rq_overwrite(buf, off, op_b)
+
+
+def _rq_splice_tokens(buf, offsets, tokens, rng) -> None:
+    """_op_redqueen: write a random cmplog token at a recorded offset."""
+    for _ in range(rng.randint(1, min(4, len(offsets)))):
+        off = rng.choice(offsets)
+        if off < len(buf):
+            _rq_overwrite(buf, off, rng.choice(tokens))
+
+
+def _havoc_rare(buf, op, r, rng, max_len) -> None:
+    """Havoc branches 5-10 of ``_apply_single_mutation`` (split for CCN).
+
+    Same draws ``r`` as inline. *buf* is non-empty, so the old ``and buf``
+    guards on 7-9 were always true and are dropped.
+    """
+    if op == 5 and len(buf) >= 4:  # CRC32 repair
+        pos = r[1] % max(1, len(buf) - 3)
+        buf[pos : pos + 4] = crc32(bytes(buf[:pos])).to_bytes(4, "big")
+    elif op == 6 and len(buf) >= 2:  # swap regions
+        i = r[1] % (len(buf) - 1)
+        j = i + 1 + r[2] % (len(buf) - i - 1)
+        # size must also respect len(buf) - j, or buf[j : j + size] comes
+        # back shorter than `size` and the slice assignments below change
+        # buf's length instead of swapping two equal-sized regions.
+        size = 1 + r[3] % min(j - i, 8, len(buf) - j)
+        a = buf[i : i + size]
+        b = buf[j : j + size]
+        buf[i : i + size] = b
+        buf[j : j + size] = a
+    elif op == 7:  # endianness swap
+        width = 2 if r[1] % 2 == 0 else 4
+        if len(buf) >= width:
+            idx = r[2] % (len(buf) - width + 1)
+            val = int.from_bytes(buf[idx : idx + width], "little")
+            buf[idx : idx + width] = val.to_bytes(width, "big")
+    elif op == 8:  # byte insert
+        if len(buf) < max_len:
+            idx = r[1] % (len(buf) + 1)
+            buf.insert(idx, r[2] % 256)
+    elif op == 9:  # random byte
+        idx = r[1] % len(buf)
+        buf[idx] = r[2] % 256
+    elif op == 10 and len(buf) >= 2:  # shuffle range
+        start = r[1] % (len(buf) - 1)
+        end = min(start + 2 + r[2] % 7, len(buf))
+        region = buf[start:end]
+        rng.shuffle(region)
+        buf[start:end] = region
+
+
+def _byte_entropy_norm(data: bytes) -> float:
+    """Shannon entropy of *data*'s bytes / 8, in [0, 1]; 0.0 when empty."""
+    if not data:
+        return 0.0
+    counts = [0] * 256
+    for byte in data:
+        counts[byte] += 1
+    n = len(data)
+    entropy = 0.0
+    for c in counts:
+        if c:
+            p = c / n
+            entropy -= p * math.log2(p)
+    return entropy / 8.0
+
+
+def _seed_meta_features(f, data: bytes) -> tuple[float, float]:
+    """(edge-coverage fraction, lineage depth / 20) from *data*'s seed meta."""
+    meta = f.seed_meta.get(data) if hasattr(f, "seed_meta") else None
+    edge_tracker = getattr(f, "_edge_tracker", None)
+    map_size = getattr(edge_tracker, "map_size", 0) if edge_tracker else 0
+    edge_count = meta.get("coverage_edges", 0) if meta else 0
+    edge_frac = min(edge_count / map_size, 1.0) if map_size else 0.0
+
+    lineage_depth = meta.get("lineage_depth", 0) if meta else 0
+    return edge_frac, min(lineage_depth / 20.0, 1.0)
+
+
+def _log_liveness(region_idx: int, diff_bits: int, diff_edges: set, map_size: int) -> None:
+    """Append one (region, diff bits) row to $FUZZER_LIVENESS_LOG, if set.
+
+    Temporary env-gated instrumentation for the item 4 real-corpus
+    sensitivity sweep. Logs every (region, diff_bits) observation the
+    production estimator consumes, using the same sparse TSV format as
+    the round-9/10 sweep data. Zero-cost when FUZZER_LIVENESS_LOG is unset.
+    """
+    _liveness_log = os.getenv("FUZZER_LIVENESS_LOG")
+    if not _liveness_log:
+        return
+    if diff_bits == 0:
+        _line = f"{region_idx}\t\n"
+    else:
+        _bits = sorted({e % map_size for e in diff_edges})
+        _line = f"{region_idx}\t{','.join(map(str, _bits))}\n"
+    try:
+        with open(_liveness_log, "a") as _lf:
+            _lf.write(_line)
+    except OSError:
+        pass
+
+
+def _phase_position(f, data: bytes, buf_len: int):
+    """select_position's phase-locked pick from the parent's record stride."""
+    meta = f.seed_meta.get(data)
+    return f._get_phase_weighted_position(buf_len, meta.get("record_stride") if meta else None)
+
+
+def _round_mutations(f) -> int:
+    """Mutations this round: -M scaled by seed energy, floored at 16 in stall recovery."""
+    n_mutations = f.mutations_per_input
+    # Apply seed-level energy multiplier from SeedScorer
+    if hasattr(f, "_last_perf_score") and f._last_perf_score != 100.0:
+        n_mutations = max(1, int(n_mutations * f._last_perf_score / 100.0))
+    if f._stall_recovery_active:
+        n_mutations = max(n_mutations, 16)
+    return n_mutations
 
 
 class OperatorEngine:
@@ -1037,12 +1332,23 @@ class OperatorEngine:
             return
         if not buf or len(buf) < 2:
             return
-        from fuzzer_tool.core.rq_encodings import generate_mutations  # noqa: PLC0415
+        pairs = self._rq_fitting_pairs(len(buf))
+        if not pairs:
+            return
+        _sample_idx = rng.sample(len(pairs), min(3, len(pairs)))
+        sample = [pairs[i] for i in _sample_idx]
+        if self._rq_apply_encoded(buf, sample):
+            return
+        # Fallback: single-byte transforms on a random pair
+        self._rq_byte_fallback(buf, pairs)
 
-        # Sample up to 3 pairs from the cmplog pool, prefering shorter pairs
-        # (they're more likely to be found in the buffer).
-        # Use cached sorted pair list, resorting only when pairs change,
-        # to avoid O(N log N) sort on every invocation.
+    def _rq_fitting_pairs(self, buf_len: int) -> list:
+        """Cmplog pairs with 2 <= len(op_a) <= buf_len, shortest first.
+
+        Shorter pairs are more likely to be found in the buffer. The sorted
+        list is cached and resorted only when the pairs change, to avoid an
+        O(N log N) sort on every invocation.
+        """
         cmplog_pairs = self.ctx.cmplog_pairs
         _version = id(cmplog_pairs) + len(cmplog_pairs)
         if not self._redqueen_sorted_pairs or _version != self._redqueen_sorted_version:
@@ -1054,14 +1360,15 @@ class OperatorEngine:
         # Pairs with 2 <= len(op_a) <= len(buf) form a prefix of the
         # length-sorted list — find the cutoff with a bisect instead of
         # rescanning every pair on every invocation.
-        cutoff = bisect.bisect_right(self._redqueen_pair_lengths, len(buf))
-        pairs = self._redqueen_sorted_pairs[:cutoff]
-        if not pairs:
-            return
-        _sample_idx = rng.sample(len(pairs), min(3, len(pairs)))
-        sample = [pairs[i] for i in _sample_idx]
-        input_bytes = bytes(buf)
+        cutoff = bisect.bisect_right(self._redqueen_pair_lengths, buf_len)
+        return self._redqueen_sorted_pairs[:cutoff]
 
+    def _rq_apply_encoded(self, buf, sample) -> bool:
+        """Apply the first pair the encoding engine can solve; True if one was."""
+        from fuzzer_tool.core.rq_encodings import generate_mutations  # noqa: PLC0415
+
+        rng = self.ctx._rng
+        input_bytes = bytes(buf)
         for op_a, op_b in sample:
             cmp_size = 512 if len(op_a) > 8 or len(op_b) > 8 else max(len(op_a), len(op_b)) * 8
             cmp_type = "STR" if len(op_a) > 8 else "CMP"
@@ -1075,59 +1382,41 @@ class OperatorEngine:
                 hammer=True,
                 is_hash=getattr(self.ctx.cmplog, "is_hash_candidate", None),
             )
-            if mutations:
-                offsets, replacements, enc = rng.choice(mutations)
-                for i, off in enumerate(offsets):
-                    if i < len(replacements):
-                        chunk = replacements[i]
-                        end = off + len(chunk)
-                        if end <= len(buf):
-                            buf[off:end] = chunk
-                return
+            if not mutations:
+                continue
+            offsets, replacements, enc = rng.choice(mutations)
+            for i, off in enumerate(offsets):
+                if i < len(replacements):
+                    chunk = replacements[i]
+                    end = off + len(chunk)
+                    if end <= len(buf):
+                        buf[off:end] = chunk
+            return True
+        return False
 
-        # Fallback: single-byte transforms on a random pair
-        if not pairs:
-            return
+    def _rq_byte_fallback(self, buf, pairs) -> None:
+        """Single-byte transform at one of the first 5 hits of a random operand."""
+        rng = self.ctx._rng
         op_a, _ = rng.choice(pairs)
-        if len(op_a) <= len(buf):
-            pos = 0
-            candidates = []
-            buf_bytes = bytes(buf)
-            while pos <= len(buf_bytes) - len(op_a):
-                idx = buf_bytes.find(op_a, pos)
-                if idx == -1:
-                    break
-                candidates.append(idx)
-                pos = idx + 1
-                if len(candidates) >= 5:
-                    break
-            if candidates:
-                offset = rng.choice(candidates)
-                vb = int.from_bytes(op_a, "little") & 0xFF
-                transform = rng.choice(
-                    ["xor", "arithmetic", "boundary", "hex", "toupper", "tolower"]
-                )
-                if transform == "xor":
-                    const = rng.randint(1, 255)
-                    buf[offset] = (vb ^ const) & 0xFF
-                elif transform == "arithmetic":
-                    delta = rng.randint(-128, 127)
-                    buf[offset] = (vb - delta) & 0xFF
-                elif transform == "boundary":
-                    buf[offset] = (vb - 1) & 0xFF
-                elif transform == "hex":
-                    hex_chars = b"0123456789abcdef"
-                    buf[offset] = hex_chars[vb % 16]
-                elif transform == "toupper":
-                    if ord("a") <= buf[offset] <= ord("z"):
-                        buf[offset] = buf[offset] - 0x20
-                    else:
-                        buf[offset] = ord("A") + (vb % 26)
-                elif transform == "tolower":
-                    if ord("A") <= buf[offset] <= ord("Z"):
-                        buf[offset] = buf[offset] + 0x20
-                    else:
-                        buf[offset] = ord("a") + (vb % 26)
+        if len(op_a) > len(buf):
+            return
+        pos = 0
+        candidates = []
+        buf_bytes = bytes(buf)
+        while pos <= len(buf_bytes) - len(op_a):
+            idx = buf_bytes.find(op_a, pos)
+            if idx == -1:
+                break
+            candidates.append(idx)
+            pos = idx + 1
+            if len(candidates) >= 5:
+                break
+        if not candidates:
+            return
+        offset = rng.choice(candidates)
+        vb = int.from_bytes(op_a, "little") & 0xFF
+        transform = rng.choice(["xor", "arithmetic", "boundary", "hex", "toupper", "tolower"])
+        _RQ_BYTE_TRANSFORMS[transform](buf, offset, vb, rng)
 
     # ── Fuse mutations (from Radamsa) ──────────────────────────────
 
@@ -1382,31 +1671,7 @@ class OperatorEngine:
         if len(parts) < 2:
             return
         mutate = rng.choice(["del", "dup", "swap", "perm", "repeat", "clone"])
-        if mutate == "del":
-            idx = rng.randint(0, len(parts) - 1)
-            del parts[idx]
-        elif mutate == "dup":
-            idx = rng.randint(0, len(parts) - 1)
-            parts.insert(idx + 1, parts[idx])
-        elif mutate == "swap" and len(parts) >= 2:
-            idx = rng.randint(0, len(parts) - 2)
-            parts[idx], parts[idx + 1] = parts[idx + 1], parts[idx]
-        elif mutate == "perm" and len(parts) >= 3:
-            # Shuffle a subset of lines
-            start = rng.randint(0, len(parts) - 3)
-            end = min(start + rng.randint(2, 6), len(parts))
-            segment = parts[start:end]
-            rng.shuffle(segment)
-            parts[start:end] = segment
-        elif mutate == "repeat" and len(parts) >= 1:
-            idx = rng.randint(0, len(parts) - 1)
-            n = rng.randint(1, 32)
-            for _ in range(n):
-                parts.insert(idx, parts[idx])
-        elif mutate == "clone" and len(parts) >= 2:
-            src = rng.randint(0, len(parts) - 1)
-            dst = rng.randint(0, len(parts) - 1)
-            parts.insert(dst, parts[src])
+        _LINE_MUTATORS[mutate](parts, rng)
         result = b"\n".join(parts)
         if len(result) <= (self.ctx.max_len or 65536) and result != bytes(buf):
             buf[:] = result
@@ -3096,51 +3361,9 @@ class OperatorEngine:
             return None
         rng = self.ctx._rng
         out = bytearray(buf)
-        repaired = False
-
-        # ── length fields ──────────────────────────────────────────────
-        len_spans = smap.flagged_spans(TagFlags.IS_LEN)
-        if len_spans:
-            start, end, _cid = rng.choice(len_spans)
-            width = end - start
-            if 1 <= width <= 8 and end <= len(out):
-                # Region whose size we advertise: from end of length field to
-                # the start of the next field, or EOF.
-                fields = smap.field_spans()
-                next_start = len(out)
-                for fs, _fe, _ in fields:
-                    if fs >= end:
-                        next_start = fs
-                        break
-                payload_len = max(0, next_start - end)
-                # Occasionally use off-by-one / double for adversarial value.
-                mode = rng.randint(0, 5)
-                if mode == 0:
-                    payload_len = (payload_len + 1) & ((1 << (8 * width)) - 1)
-                elif mode == 1:
-                    payload_len = (payload_len * 2) & ((1 << (8 * width)) - 1)
-                elif mode == 2:
-                    payload_len = 0
-                endian = "little" if rng.randint(0, 1) == 0 else "big"
-                try:
-                    encoded = payload_len.to_bytes(width, endian)
-                except OverflowError:
-                    encoded = (payload_len & ((1 << (8 * width)) - 1)).to_bytes(width, endian)
-                out[start:end] = encoded
-                repaired = True
-
-        # ── checksum fields ────────────────────────────────────────────
-        crc_spans = smap.flagged_spans(TagFlags.IS_CHECKSUM)
-        if crc_spans and not repaired:
-            start, end, _cid = rng.choice(crc_spans)
-            width = end - start
-            if width == 4 and end <= len(out):
-                body = bytes(out[:start])
-                digest = crc32(body) & 0xFFFFFFFF
-                endian = "little" if rng.randint(0, 1) == 0 else "big"
-                out[start:end] = digest.to_bytes(4, endian)
-                repaired = True
-
+        repaired = _weizz_repair_len(out, smap, rng, TagFlags.IS_LEN)
+        if not repaired:
+            repaired = _weizz_repair_crc(out, smap, rng, TagFlags.IS_CHECKSUM)
         if not repaired:
             return None
         return out[: self.ctx.max_len]
@@ -4013,21 +4236,9 @@ class OperatorEngine:
         matches = parent_meta.get("redqueen_matches", [])
         offsets = parent_meta.get("redqueen_offsets", [])
         if matches:
-            for _ in range(rng.randint(1, min(4, len(matches)))):
-                off, op_a, op_b = rng.choice(matches)
-                end = off + len(op_a)
-                if end <= len(buf) and bytes(buf[off:end]) == op_a:
-                    for j, b_val in enumerate(op_b):
-                        if off + j < len(buf):
-                            buf[off + j] = b_val
+            _rq_replay_matches(buf, matches, rng)
         elif offsets and self.ctx.cmplog_tokens:
-            for _ in range(rng.randint(1, min(4, len(offsets)))):
-                off = rng.choice(offsets)
-                if off < len(buf):
-                    token = rng.choice(self.ctx.cmplog_tokens)
-                    for j, b_val in enumerate(token):
-                        if off + j < len(buf):
-                            buf[off + j] = b_val
+            _rq_splice_tokens(buf, offsets, self.ctx.cmplog_tokens, rng)
         elif offsets:
             for _ in range(rng.randint(1, min(4, len(offsets)))):
                 off = rng.choice(offsets)
@@ -4514,39 +4725,8 @@ class OperatorEngine:
             idx = r[1] % len(buf)
             size = 1 + r[2] % min(len(buf) - 1, len(buf) - idx)
             del buf[idx : idx + size]
-        elif op == 5 and len(buf) >= 4:  # CRC32 repair
-            pos = r[1] % max(1, len(buf) - 3)
-            buf[pos : pos + 4] = crc32(bytes(buf[:pos])).to_bytes(4, "big")
-        elif op == 6 and len(buf) >= 2:  # swap regions
-            i = r[1] % (len(buf) - 1)
-            j = i + 1 + r[2] % (len(buf) - i - 1)
-            # size must also respect len(buf) - j, or buf[j : j + size] comes
-            # back shorter than `size` and the slice assignments below change
-            # buf's length instead of swapping two equal-sized regions.
-            size = 1 + r[3] % min(j - i, 8, len(buf) - j)
-            a = buf[i : i + size]
-            b = buf[j : j + size]
-            buf[i : i + size] = b
-            buf[j : j + size] = a
-        elif op == 7 and buf:  # endianness swap
-            width = 2 if r[1] % 2 == 0 else 4
-            if len(buf) >= width:
-                idx = r[2] % (len(buf) - width + 1)
-                val = int.from_bytes(buf[idx : idx + width], "little")
-                buf[idx : idx + width] = val.to_bytes(width, "big")
-        elif op == 8 and buf:  # byte insert
-            if len(buf) < self.ctx.max_len:
-                idx = r[1] % (len(buf) + 1)
-                buf.insert(idx, r[2] % 256)
-        elif op == 9 and buf:  # random byte
-            idx = r[1] % len(buf)
-            buf[idx] = r[2] % 256
-        elif op == 10 and len(buf) >= 2:  # shuffle range
-            start = r[1] % (len(buf) - 1)
-            end = min(start + 2 + r[2] % 7, len(buf))
-            region = buf[start:end]
-            rng.shuffle(region)
-            buf[start:end] = region
+        elif op >= 5:
+            _havoc_rare(buf, op, r, rng, self.ctx.max_len)
 
     def _rebuild_havoc_table(self) -> None:
         """Rebuild the havoc sub-mutation inverse-CDF table from hit ratios.
@@ -4659,28 +4839,8 @@ class OperatorEngine:
         max_len = max(getattr(f, "max_len", 1), 1)
         log_size = math.log1p(len(data)) / math.log1p(max_len)
 
-        if data:
-            counts = [0] * 256
-            for byte in data:
-                counts[byte] += 1
-            n = len(data)
-            entropy = 0.0
-            for c in counts:
-                if c:
-                    p = c / n
-                    entropy -= p * math.log2(p)
-            entropy_norm = entropy / 8.0
-        else:
-            entropy_norm = 0.0
-
-        meta = f.seed_meta.get(data) if hasattr(f, "seed_meta") else None
-        edge_tracker = getattr(f, "_edge_tracker", None)
-        map_size = getattr(edge_tracker, "map_size", 0) if edge_tracker else 0
-        edge_count = meta.get("coverage_edges", 0) if meta else 0
-        edge_frac = min(edge_count / map_size, 1.0) if map_size else 0.0
-
-        lineage_depth = meta.get("lineage_depth", 0) if meta else 0
-        lineage_norm = min(lineage_depth / 20.0, 1.0)
+        entropy_norm = _byte_entropy_norm(data)
+        edge_frac, lineage_norm = _seed_meta_features(f, data)
 
         cmplog = getattr(f, "_cmplog", None)
         cmplog_exists = 1.0 if (cmplog and getattr(cmplog, "pairs", None)) else 0.0
@@ -5054,22 +5214,7 @@ class OperatorEngine:
             for edge_id in diff_edges:
                 diff_bits |= 1 << (edge_id % map_size)
 
-        # Temporary env-gated instrumentation for the item 4 real-corpus
-        # sensitivity sweep. Logs every (region, diff_bits) observation the
-        # production estimator consumes, using the same sparse TSV format as
-        # the round-9/10 sweep data. Zero-cost when FUZZER_LIVENESS_LOG is unset.
-        _liveness_log = os.getenv("FUZZER_LIVENESS_LOG")
-        if _liveness_log and region_idx is not None:
-            if diff_bits == 0:
-                _line = f"{region_idx}\t\n"
-            else:
-                _bits = sorted({e % map_size for e in diff_edges})
-                _line = f"{region_idx}\t{','.join(map(str, _bits))}\n"
-            try:
-                with open(_liveness_log, "a") as _lf:
-                    _lf.write(_line)
-            except OSError:
-                pass
+        _log_liveness(region_idx, diff_bits, diff_edges, map_size)
 
         est = estimators[region_idx]
         if est is None:
@@ -5312,13 +5457,46 @@ class OperatorEngine:
         # inferred record stride shows those offsets are phase-locked, the
         # same field recurs every `stride` bytes, which reaches the rest of
         # the buffer; `get_phase_weighted_position` returns None otherwise.
-        phase_pos = None
-        if te_pos is not None:
-            meta = f.seed_meta.get(data)
-            phase_pos = f._get_phase_weighted_position(
-                buf_len, meta.get("record_stride") if meta else None
-            )
+        phase_pos = None if te_pos is None else _phase_position(f, data, buf_len)
         mi_pos = f._mi.weighted_position(buf_len) if f._use_mi and f._mi else None
+        sens_pos, crash_mi_pos, region_pos, burn_pos, rr_pos, fib_pos = self._side_positions(
+            data, buf_len
+        )
+        candidates = [
+            p
+            for p in [
+                sens_pos,
+                te_pos,
+                phase_pos,
+                mi_pos,
+                crash_mi_pos,
+                region_pos,
+                burn_pos,
+                rr_pos,
+                fib_pos,
+            ]
+            if p is not None
+        ]
+        if candidates:
+            byte_idx = self.ctx._rng.choice(candidates)
+        else:
+            byte_idx = self.ctx._rng.randint(0, buf_len - 1)
+        if getattr(f, "debug", False):
+            print(
+                f"[select_position] buf_len={buf_len} sens={sens_pos} te={te_pos} "
+                f"phase={phase_pos} "
+                f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} burn={burn_pos} "
+                f"round_robin={rr_pos} fibonacci={fib_pos} "
+                f"candidates={candidates} fallback={not candidates} byte_idx={byte_idx}"
+            )
+        return byte_idx
+
+    def _side_positions(self, data: bytes, buf_len: int) -> tuple:
+        """select_position's sensitivity/crash-MI/region/burn/round-robin/fibonacci picks.
+
+        Split out for CCN; evaluated in the original order, None when off.
+        """
+        f = self.f
         # Sensitivity is a per-seed score cache: when disabled the tracker is
         # never populated, so the call would always return None.  Gate it like
         # MI/TE instead of paying the lookup + branches on every mutation.
@@ -5350,34 +5528,7 @@ class OperatorEngine:
         fib_pos = (
             fib.propose(data, buf_len) if isinstance(fib, PositionFibonacciScheduler) else None
         )
-        candidates = [
-            p
-            for p in [
-                sens_pos,
-                te_pos,
-                phase_pos,
-                mi_pos,
-                crash_mi_pos,
-                region_pos,
-                burn_pos,
-                rr_pos,
-                fib_pos,
-            ]
-            if p is not None
-        ]
-        if candidates:
-            byte_idx = self.ctx._rng.choice(candidates)
-        else:
-            byte_idx = self.ctx._rng.randint(0, buf_len - 1)
-        if getattr(f, "debug", False):
-            print(
-                f"[select_position] buf_len={buf_len} sens={sens_pos} te={te_pos} "
-                f"phase={phase_pos} "
-                f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} burn={burn_pos} "
-                f"round_robin={rr_pos} fibonacci={fib_pos} "
-                f"candidates={candidates} fallback={not candidates} byte_idx={byte_idx}"
-            )
-        return byte_idx
+        return sens_pos, crash_mi_pos, region_pos, burn_pos, rr_pos, fib_pos
 
     # ── Main mutation orchestrator ─────────────────────────────────────
 
@@ -5415,27 +5566,7 @@ class OperatorEngine:
         _dt = time.perf_counter() - _t0
 
         if track_effect:
-            # None means the handler mutated `buf` in place (the dominant
-            # convention here); anything else replaces the buffer.
-            _after = buf if result is None else result
-            if xxhash.xxh3_64_intdigest(memoryview(_after)) != _h_before:
-                f._last_ops_effective.add(op)
-            elif op not in _DECLINE_EXEMPT:
-                # Produced nothing. `_op_declined` covers the handlers
-                # that say so out loud; 41 more detect the same thing
-                # and then drop it -- `_op_sleb128_encode` tests
-                # `if result != bytes(buf)` and falls off the end, so
-                # the failure is known and unrecorded. Counted here
-                # rather than at 41 call sites: one definition of
-                # "produced nothing", and handlers added later are
-                # covered without remembering to.
-                #
-                # Inside the track_effect guard on purpose. The digest
-                # is the only cheap way to know, and a decline *is*
-                # scheduler feedback, so collecting it exactly when the
-                # scheduler consumes feedback is the right scope rather
-                # than a compromise; `Declin` reads n/a otherwise.
-                f._op_declines[op] = f._op_declines.get(op, 0) + 1
+            self._note_op_effect(op, buf, result, _h_before)
         f._last_op_costs[op] = f._last_op_costs.get(op, 0.0) + _dt
         # EMA of per-call cost, seeded on first observation so a single
         # early sample doesn't get dragged toward zero.
@@ -5444,38 +5575,7 @@ class OperatorEngine:
 
         if result is not None:
             if op == "havoc":
-                # Havoc's internal sub-mutations (2-16 per call, see
-                # havoc_mutate) can each touch a different position, so
-                # its frameshift bookkeeping is a full resync
-                # (apply_to_buffer) rather than the single
-                # on_insert/on_delete pair the other branch below uses
-                # for a single-site op.
-                #
-                # This used to `return result` here immediately,
-                # discarding whatever was left of n_mutations for this
-                # round. Since n_mutations is scaled by
-                # _last_perf_score (the seed-energy multiplier from
-                # SeedScorer), a highly-scored seed that earned extra
-                # mutation budget got none of the extra whenever havoc
-                # was drawn early in the loop -- which is often, since
-                # havoc is the most-drawn operator. Falling through to
-                # the shared loop tail instead (same as every other
-                # operator) makes the energy multiplier actually do
-                # something on havoc rounds; the existing loop-end
-                # hamming-distance computation after the for-loop
-                # already covers the havoc-selected case correctly, so
-                # nothing here needs to duplicate it.
-                buf = result if isinstance(result, bytearray) else bytearray(result)
-                if len(buf) > self.ctx.max_len:
-                    # _op_havoc's redundant-mutation retry path calls
-                    # _apply_single_mutation directly, bypassing
-                    # havoc_mutate's own end-of-call clamp -- so this
-                    # can't be assumed already true the way it is for
-                    # havoc_mutate's normal return.
-                    del buf[self.ctx.max_len :]
-                if f._frameshift.relations:
-                    f._frameshift.apply_to_buffer(buf)
-                return buf
+                return self._absorb_havoc(result)
             new_len = min(len(result), self.ctx.max_len)
             if f._frameshift.relations:
                 if new_len > old_len:
@@ -5500,6 +5600,67 @@ class OperatorEngine:
 
         return buf
 
+    def _note_op_effect(self, op: str, buf: bytearray, result, h_before: int) -> None:
+        """Record whether *op* changed the buffer (effective) or declined."""
+        f = self.f
+        # None means the handler mutated `buf` in place (the dominant
+        # convention here); anything else replaces the buffer.
+        _after = buf if result is None else result
+        if xxhash.xxh3_64_intdigest(memoryview(_after)) != h_before:
+            f._last_ops_effective.add(op)
+        elif op not in _DECLINE_EXEMPT:
+            # Produced nothing. `_op_declined` covers the handlers
+            # that say so out loud; 41 more detect the same thing
+            # and then drop it -- `_op_sleb128_encode` tests
+            # `if result != bytes(buf)` and falls off the end, so
+            # the failure is known and unrecorded. Counted here
+            # rather than at 41 call sites: one definition of
+            # "produced nothing", and handlers added later are
+            # covered without remembering to.
+            #
+            # Inside the track_effect guard on purpose. The digest
+            # is the only cheap way to know, and a decline *is*
+            # scheduler feedback, so collecting it exactly when the
+            # scheduler consumes feedback is the right scope rather
+            # than a compromise; `Declin` reads n/a otherwise.
+            f._op_declines[op] = f._op_declines.get(op, 0) + 1
+
+    def _absorb_havoc(self, result) -> bytearray:
+        """Adopt havoc's replacement buffer: clamp to max_len, resync frameshift."""
+        f = self.f
+        # Havoc's internal sub-mutations (2-16 per call, see
+        # havoc_mutate) can each touch a different position, so
+        # its frameshift bookkeeping is a full resync
+        # (apply_to_buffer) rather than the single
+        # on_insert/on_delete pair the other branch below uses
+        # for a single-site op.
+        #
+        # This used to `return result` here immediately,
+        # discarding whatever was left of n_mutations for this
+        # round. Since n_mutations is scaled by
+        # _last_perf_score (the seed-energy multiplier from
+        # SeedScorer), a highly-scored seed that earned extra
+        # mutation budget got none of the extra whenever havoc
+        # was drawn early in the loop -- which is often, since
+        # havoc is the most-drawn operator. Falling through to
+        # the shared loop tail instead (same as every other
+        # operator) makes the energy multiplier actually do
+        # something on havoc rounds; the existing loop-end
+        # hamming-distance computation after the for-loop
+        # already covers the havoc-selected case correctly, so
+        # nothing here needs to duplicate it.
+        buf = result if isinstance(result, bytearray) else bytearray(result)
+        if len(buf) > self.ctx.max_len:
+            # _op_havoc's redundant-mutation retry path calls
+            # _apply_single_mutation directly, bypassing
+            # havoc_mutate's own end-of-call clamp -- so this
+            # can't be assumed already true the way it is for
+            # havoc_mutate's normal return.
+            del buf[self.ctx.max_len :]
+        if f._frameshift.relations:
+            f._frameshift.apply_to_buffer(buf)
+        return buf
+
     def _reset_round_ops(self, data: bytes, mutant: bytes) -> None:
         """Clear this round's operator bookkeeping for a mutant no operator drew."""
         from fuzzer_tool.core.similarity import hamming_distance
@@ -5519,6 +5680,34 @@ class OperatorEngine:
         f._last_hamming_distance = (
             hamming_distance(data, mutant) if len(data) == len(mutant) else -1
         )
+
+    def _tick_havoc_table(self) -> None:
+        """Count one adaptive-havoc round; rebuild the table every _HAVOC_TABLE_REFRESH."""
+        self._havoc_rounds_since_rebuild += 1
+        if self._havoc_rounds_since_rebuild >= _HAVOC_TABLE_REFRESH:
+            self._rebuild_havoc_table()
+
+    def _prefetch_dict(self, n_mutations: int) -> None:
+        """Draw this round's dictionary indices into ``f._dict_scratch``.
+
+        --dict-thompson: one Dirichlet posterior draw per round instead.
+        """
+        f = self.f
+        n_draw = max(n_mutations * 8, 64)
+        picker = getattr(f, "_dict_picker", None)
+        f._dict_scratch = (
+            picker.draw(self.ctx.dictionary, n_draw)
+            if picker is not None
+            else self.ctx._rng.randint_list(0, len(self.ctx.dictionary) - 1, n_draw)
+        )
+        f._dict_scratch_idx = 0
+
+    def _round_context(self, data: bytes) -> list[float] | None:
+        """Shared LinUCB context when contextual or c2ucb is live, else None."""
+        f = self.f
+        if (f._use_contextual and f._contextual) or (f._use_c2ucb and f._c2ucb):
+            return self._build_shared_context(data)
+        return None
 
     def mutate(self, data: bytes) -> bytes:
         from fuzzer_tool.core.similarity import hamming_distance
@@ -5600,9 +5789,7 @@ class OperatorEngine:
         # changes when trials accumulate or a hit lands (which rebuilds
         # directly -- see credit_havoc_subops).
         if f._adaptive_havoc:
-            self._havoc_rounds_since_rebuild += 1
-            if self._havoc_rounds_since_rebuild >= _HAVOC_TABLE_REFRESH:
-                self._rebuild_havoc_table()
+            self._tick_havoc_table()
         # Per-round wall-clock cost per operator, keyed by op name, summed
         # across repeats within this round. Feeds the cost-aware reward:
         # a 10ms operator and a 2us operator shouldn't be scored on the
@@ -5615,36 +5802,19 @@ class OperatorEngine:
         # quality is not optional for it), so it must gate this too --
         # otherwise _context_vector()'s getattr fallback silently hands it
         # an all-zero context whenever contextual itself is disabled.
-        f._current_context_shared = (
-            self._build_shared_context(data)
-            if (f._use_contextual and f._contextual) or (f._use_c2ucb and f._c2ucb)
-            else None
-        )
+        f._current_context_shared = self._round_context(data)
         if not hasattr(f, "_prev_bandit_op"):
             f._prev_bandit_op = None
         f._meta_strategy = None
         f._meta_strategy_cached = None  # reset per-exec elo strategy cache
 
-        n_mutations = f.mutations_per_input
-        # Apply seed-level energy multiplier from SeedScorer
-        if hasattr(f, "_last_perf_score") and f._last_perf_score != 100.0:
-            n_mutations = max(1, int(n_mutations * f._last_perf_score / 100.0))
-        if f._stall_recovery_active:
-            n_mutations = max(n_mutations, 16)
+        n_mutations = _round_mutations(f)
 
         # Pre-fetch dictionary indices for dict-aware operators in one
         # vectorized call, replacing N individual random.choice(self.ctx.dictionary)
         # calls across _op_dict_* methods.
-        # --dict-thompson: one Dirichlet posterior draw per round instead.
         if self.ctx.dictionary:
-            n_draw = max(n_mutations * 8, 64)
-            picker = getattr(f, "_dict_picker", None)
-            f._dict_scratch = (
-                picker.draw(self.ctx.dictionary, n_draw)
-                if picker is not None
-                else self.ctx._rng.randint_list(0, len(self.ctx.dictionary) - 1, n_draw)
-            )
-            f._dict_scratch_idx = 0
+            self._prefetch_dict(n_mutations)
 
         # Pre-generate buffer lengths for select_position fallback.
         # select_position is called once per mutation, and when no
