@@ -14,21 +14,32 @@
 #   docker run --rm -v "$PWD/out:/out" fuzzer-tool \
 #       fuzzer-tool fuzz /work/targets/test_target -d /out/corpus -o /out/crashes
 #
+# FFmpeg campaign (stage `ffmpeg` below):
+#   docker build --target ffmpeg -t fuzzer-tool:ffmpeg .
+#   docker run --rm -v "$HOME/fuzzing/ffmpeg:/out" fuzzer-tool:ffmpeg
+#
 # Ubuntu 24.04 to match the ubuntu-latest runner CI uses, so a failure
 # reproduces here rather than turning out to be a distro difference.
-FROM ubuntu:24.04
+FROM ubuntu:24.04 AS base
 
 # Never prompt during apt; tzdata otherwise blocks the build.
 ENV DEBIAN_FRONTEND=noninteractive
 
 # clang builds the cmplog/tracecmp shims and the instrumented targets;
 # gcc/g++ build the plain and C++ targets (tailslayer_read.cpp);
+# libclang-rt-dev is compiler-rt: Ubuntu's clang omits it, so every
+# -fsanitize=* / -fsanitize-coverage link fails without it;
+# curl + nasm serve vendor_ffmpeg.sh (source fetch, SIMD paths);
 # binutils supplies nm, which cli/ldpreload_wrapper shells out to for
 # sanitizer detection -- without it every target reads as uninstrumented.
 # The -dev libraries back the vendored targets under tools/vendor_*.sh.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         build-essential \
         clang \
+        libclang-rt-dev \
+        curl \
+        ca-certificates \
+        nasm \
         binutils \
         git \
         make \
@@ -86,3 +97,27 @@ if missing:
 PY
 
 CMD ["pytest", "-q"]
+
+# Sanitizer runtimes present: ASAN targets and the vendored libs link.
+RUN echo 'int main(void){return 0;}' > /tmp/probe.c \
+    && clang -fsanitize=address /tmp/probe.c -o /tmp/probe \
+    && clang -fsanitize-coverage=trace-pc-guard -fsanitize=undefined /tmp/probe.c -o /tmp/probe \
+    && rm -f /tmp/probe /tmp/probe.c
+
+# ── FFmpeg campaign ──────────────────────────────────────────────
+# Bakes vendored libav* + harness (full build ~10+ min; pass
+# --build-arg FFMPEG_BUILD_ARGS=--minimal for the audio-only set).
+# /out holds corpus, crashes and report; reruns resume from it.
+# `docker stop` (SIGTERM) still writes the report.
+FROM base AS ffmpeg
+ARG FFMPEG_BUILD_ARGS=""
+RUN tools/build_ffmpeg_ready.sh $FFMPEG_BUILD_ARGS
+CMD mkdir -p /out/corpus \
+    && cp -n corpus_ffmpeg/* /out/corpus/ \
+    && exec fuzzer-tool fuzz targets/ffmpeg_read_nosan.so \
+        --inprocess-direct --inprocess-func fuzz_ffmpeg \
+        -d /out/corpus -o /out/crashes --resume \
+        -c --elo all --lineage-backtrack --report /out/report_ffmpeg.md
+
+# Default target: the test image.
+FROM base AS test

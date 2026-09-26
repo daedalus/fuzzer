@@ -2213,6 +2213,25 @@ class Fuzzer:
             self._alphabeta = AlphaBetaMCTSSeedScheduler(rng=self._rng)
             log.info("Alpha-beta (Thompson descent) seed scheduling enabled")
 
+        # K-Scheduler node channel: mutually exclusive with directed mode
+        # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
+        # directed). Built before _load_corpus(): --resume checks the
+        # node_channel contract and restores Katz state there.
+        self._katz_channel = None
+        if not targets:
+            try:
+                from fuzzer_tool.services.katz_channel import KatzChannel
+
+                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache, debug=self.debug)
+                if ch is not None and ch.upload():
+                    self._katz_channel = ch
+                    print(
+                        f"[*] K-Scheduler node channel: {len(ch.node_of)} probe sites, "
+                        f"{ch.n_nodes} ICFG nodes"
+                    )
+            except Exception as e:  # noqa: BLE001
+                log.warning("Katz channel setup failed: %s", e)
+
         self._load_corpus()
         loaded = self.corpus
         self._apply_seed_transforms()
@@ -3325,24 +3344,6 @@ class Fuzzer:
         # docs/handover/handover_thermo_stochastic_concepts_2026-09-12.md.
         self._dist_last_value: float | None = None
         self._distance_trend = ScalingExponentDetector()
-
-        # K-Scheduler node channel: mutually exclusive with directed mode
-        # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
-        # directed).
-        self._katz_channel = None
-        if not targets:
-            try:
-                from fuzzer_tool.services.katz_channel import KatzChannel
-
-                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache, debug=self.debug)
-                if ch is not None and ch.upload():
-                    self._katz_channel = ch
-                    print(
-                        f"[*] K-Scheduler node channel: {len(ch.node_of)} probe sites, "
-                        f"{ch.n_nodes} ICFG nodes"
-                    )
-            except Exception as e:  # noqa: BLE001
-                log.warning("Katz channel setup failed: %s", e)
 
         # Simulated annealing temperature schedule
         self._anneal_budget = anneal_budget  # 0 = no annealing (temperature always 1.0)
