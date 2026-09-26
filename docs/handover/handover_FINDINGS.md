@@ -377,6 +377,10 @@ replaced, the natural successor is the retirement-value formulation in P3-2.
 
 `core/secretary.py` still exists and is wired into `fuzzer.py`, `seed_picker.py`,
 `corpus_manager.py`, and CLI flags despite handover recommendations to remove it.
+**2026-09-26:** the "decision" was contradicted by code -- `seed_picker` applied
+`w *= 0.01` on `should_stop()` and `corpus_manager` deferred minimization on it
+(`--elo all` enables `--secretary`). Both removed; module removal/replacement
+stays open in `handover_bandit_stopping_search_2026-09-02.md` §1.
 
 #### P2-5. `CoverageRegimeDetector._classify` ignores 3 of its 5 arguments
 **Status: FIXED** (re-verified against live source 2026-09-20)
@@ -611,7 +615,7 @@ its own before/after.
 | 10 | Fractal Voronoi approaches B and C | **PARTIAL** | Approach A in `fractal_voronoi.py:1-338`. Approach C referenced in docstring at line 3; separate module `core/parallel_fractal_partition.py:1-151` exists (labelled "Approach C from docs/handover/handover_done_2026-09-06.md"). No Approach B symbols. Approach B = fractal coverage-space seed prioritisation; Approach C = fractal corpus partitioning for parallel fuzzing. Note interaction with P3-3 item 5: partition stability is what a cost-based split gives up |
 | 11 | skittercreek item G — intermittent `shmat()` failure | **OPEN** | Root cause unknown. Twice in ~50 runs the first `ShmCoverage` in a process read back an empty edge table after a child exited 0; the header `edge_count` was not captured, so it is unknown whether the child failed to attach or the parent raced the read. Stale-view hypothesis (`cleanup()` leaving `from_address` views bound to a detached mapping) is **fixed but not established as the cause**: 0 failures in ~40 runs since, against a pre-fix rate near 1 in 25, which is not conclusive. **Nothing to do proactively.** If drop-counter tests in `tests/test_ctx_and_map_size.py` go intermittently red, pull this thread and capture SHM header (`read_edge_count()`, `read_diag()`) alongside child's exit status. Segment exhaustion ruled out — parent creates and reads segment in same test and `ipcs -m` shows no leak |
 | 12 | skittercreek item H — byte-level timing anomaly attribution | **DEFERRED** | Byte-level attribution of timing anomalies (item 5 × item 7): joining `ExecTimeCalibrator`'s anomaly timestamps to the mutation-event stream would attribute a slow execution to a specific byte/operator instead of "some exec around this time". Both halves exist (`core/temporal_join.py:27` `join_streams`, `core/exec_time_anomaly.py:29` `ExecTimeCalibrator`). `report.py::_temporal_correlation` already uses `join_streams` — but for coverage/discovery snapshot streams, not this. **Kept here so it is not silently reinvented without the context of why it was skipped** |
-| 13 | Combinatorics gaps §10b–10h | **MIXED** | §10b `ExhaustivePool` `allow_bulk` gate is over-conservative (`core/exhaustive_pool.py:60,92,118,126,132,310,313`). §10c `rng.random() < p` coin-flip idiom defeats enumeration (~20 sites). §10d pairwise Markov chain is first-order only (`core/schedulers/op_monte_carlo.py` has `transition_counts[prev][next]` at lines 141-145, no second-order). §10e grammar's full derivation space is unreachable (no `skeleton` concept in `core/grammar.py`). §10g `byte_shuffle` registered but only byte version exists. §10h `core/markov.py` state transfer across runs: `to_dict()`/`from_dict()` at lines 329-350 (single chain) and 584-603 (ensemble); wired into state persistence at `services/fuzzer.py:6551`. §10a, §10a.1 and §10f are done; §10i is a **verified no-op** — do not re-propose |
+| 13 | Combinatorics gaps §10b–10h | **MIXED** | §10b `ExhaustivePool` `allow_bulk` gate is over-conservative (`core/exhaustive_pool.py:60,92,118,126,132,310,313`). §10c `rng.random() < p` coin-flip idiom defeats enumeration (~20 sites). §10d pairwise Markov chain is first-order only (`core/schedulers/op_monte_carlo.py` has `transition_counts[prev][next]` at lines 141-145, no second-order). §10e grammar's full derivation space is unreachable (no `skeleton` concept in `core/grammar.py`). §10g closed by decision (2026-09-26: arms stay separate). §10h done: `core/markov.py` `to_dict()`/`from_dict()` persisted via `_state_store`. §10a, §10a.1 and §10f are done; §10i is a **verified no-op** — do not re-propose |
 | 14 | SJT as brute-force optimality oracle | **MISSING** | Zero matches for `sjt`, `SJT`, `Steinhaus`, `Johnson` in `src/`. For `1||Σf_j` an adjacent interchange at `(i,i+1)` changes only `C_i`, so objective delta is O(1) rather than O(n), and SJT walk is the exchange-argument chain proving SPT/EDD optimal, so a counterexample emerges as a named interchange rather than a bare number. **State the crossover, do not claim it unconditionally:** measured at n=8 over all 8! sequences, incremental version loses at 0.93× with cheap inline arithmetic (because `itertools.permutations` runs in C and delta runs in Python), wins 2.06× once per-job term costs a function call, and 3.88× at ~80 flops/job |
 | 15 | Remaining FFmpeg build items | **MIXED** | F1, F3, F4, F6, F7, N1, N2, N4, N5, N6 fixed. F2 path mismatch (`AGENTS.md` says `~/fuzzing/targets`, code says `~/fuzzing/builds`). F5/N3 declined. F8 hardcoded `/home/dclavijo/tmp` at `tools/build_targets.sh:52-53` (`mkdir -p /home/dclavijo/tmp`) and `:53` (`export TMPDIR=/home/dclavijo/tmp`); also `:210` (`TAILSLAYER` default `/home/dclavijo/code/tailslayer`). F9 ERR trap wording partial. F10 `afl_shim.c` warnings unaddressed. **F8 is the only one that misbehaves on every machine that is not the author's** |
 
@@ -667,3 +671,56 @@ new signal lives on.
 - **Evaluation consistently deferred.** Paired benches, A/B runs, and empirical validation are the most common pending items across all handovers. Only E5 has bench infrastructure; no E-item results are committed.
 - **Stale anchors and missing commits.** Multiple documents cite commits that no longer resolve (`b49441b`, `71f2e02`, `bbb2645`); line-number references have drifted systemically.
 - **New code outside handovers.** `perlin_noise.py` and `parallel_fractal_partition.py` were implemented after the survey but not reflected in any handover doc.
+
+---
+
+## 2026-09-26 restore
+
+The 21 documents `1c689e8a` removed (catalogue survey excluded: re-added in
+`b3d91a7c`) were restored in `4c021daa`, every item re-verified against live
+source by subagents, and each file pruned in place to its open items. Every
+pruned file names its full original: `git show 1c689e8a^:<path>`.
+
+### Outcome per document
+
+| Document | Result | Open |
+|---|---|---|
+| `handover_combinatorics_permutations_2026-09-02.md` | kept | m>2 swap A/B + per-format extension; bulk gate `n<=2`; 94 coin-flip sites; second-order Markov; grammar skeletons |
+| `handover_seventeen_source_survey_2026-09-06.md` | kept | B2 lexicase + homologous crossover; B3 Growing Tree arm; C2 `span_*` A/B; A2 multi-threshold tree; C3 in-place/undo audit; C4 LNS on stall |
+| `handover_bandit_stopping_search_2026-09-02.md` | kept | secretary module removal/replacement; Gittins seed arm; `total_time_sq`; ETC null arm; Koopman; D-UCB cold-start re-measure |
+| `handover_job_scheduling_2026-09-02.md` | kept | `MaintenanceQueue` 3/~14 jobs; `--lst-revisit`/`--job-scheduler` A/Bs; unread `last_truncated`; quota falsifier; SPT calibration |
+| `handover_minimax_implementation_2026-09-01.md` | kept | E3 alphabeta-vs-mcts A/B; Phases 2–5 have no callers |
+| `handover_ffmpeg_build_paths_2026-09-03.md` | kept | F2 (AGENTS.md layout says `targets/`, code uses `builds/`), F3/F4/F5/F7/F8/F9/N6 residuals |
+| `handover_formatfuzzer_integration_2026-09-06.md` | kept | real upstream binaries never exercised; Phase 2/3; in-process `.so`; E2; docs |
+| `handover_skittercreek_tailslayer_port.md` | kept | G (`shmat()` empty table), H (deferred), checksum target for item 1 |
+| `handover_percolation_theory_2026-08-31.md` | kept | Modules 5/6; three falsifier checks |
+| `handover_navier_stokes_coverage_flow_2026-09-05.md` | kept | Re vs regime labels; `continuum` arm A/B; pressure-gradient energy |
+| `handover_garch_volatility_modelling_2026-09-05.md` | kept | squared-delta ACF; `garch` arm A/B; σ̂² placement |
+| `handover_qea_hilbert_space_analysis_2026-08-31.md` | kept | `--qea-correlation`/`--qea-cooling` A/B |
+| `handover_boltzmann_ab_2026-08-30.md` | kept | cost term in `EdgeTracker._maybe_prune` ordering |
+| `handover_persistence_mechanics_2026-08-29.md` | kept | same eviction-cost question; `STALE_SEED_EXEC_EQUIVALENTS` uncalibrated |
+| `fractal-voronoi-integration.md` | kept | sub-operators unwired; `mutate()` ignores rng; A/B; unbounded caches |
+| `handover_weizz_structure_aware_port_2026-08-31.md`, `P1_weizz_tags_README.md` | kept | E1 paired bench |
+| `handover_sjt_adjacent_transpositions_2026-09-04.md` | removed | — (closed, not adopted) |
+| `test_shm_hang_2026-08-14.md` | removed | — (`799a19c5`) |
+| `suite_segfault_z3_finalization_2026-08-16.md` | removed | — (`a537614c`, `a79a7c0e`, `171c472f`) |
+| `handover_minimax_alphabeta_adversarial_search_2026-09-01.md` | removed | — (superseded by the implementation note) |
+
+### Findings
+
+- **`--secretary` acted on a broken rule** (fixed 2026-09-26). P2-4's
+  "display only" decision was contradicted by two consumers: a 100x seed-weight
+  cut and a minimize trigger. Removed; regression
+  `tests/test_regression_secretary_diagnostic_only.py`.
+- **`edge_diagnostic.py op-caches` crashed** (fixed 2026-09-26): it read
+  fractal-voronoi/perlin caches as module globals after `6b3b7c3b` moved them
+  onto the instances. Regression `tests/test_regression_op_caches_mode.py`.
+- **Fractal-voronoi, two new defects (open):** `_register()` builds the mutator
+  without `cell_ops`, so it always falls back to XOR; `mutate()` ignores `rng`,
+  so each seed yields one mutant.
+- **Ledger corrections:** GARCH and QEA were marked closed but their A/Bs never
+  ran; combinatorics 10h is done and 10g closed by decision.
+- **Stale constraints:** `grep_read.c` now links the vendored engines (no
+  `execlp`); `tools/patcher` still hardcodes `/home/dclavijo/...`.
+- **Whittle** shipped as `core/schedulers/op_whittle.py` (`de581c45`) despite
+  its rejection as an operator default in the bandit-stopping survey.
