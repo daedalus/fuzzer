@@ -291,7 +291,16 @@ def _solve_self_referential_crc(data: bytes, field: Field) -> int | None:
     columns = [(crc_with(1 << i) & 0xFFFFFFFF) ^ base for i in range(32)]
 
     # crc_with(x) = base ^ (M . x), and we need crc_with(x) == x, so
-    # (M ^ I) . x = base. Row b holds the coefficients of output bit b.
+    # (M ^ I) . x = base.
+    solution = _gf2_solve(_crc_fixpoint_rows(columns, base))
+    if solution is None:
+        return None
+
+    return solution if crc_with(solution) & 0xFFFFFFFF == solution else None
+
+
+def _crc_fixpoint_rows(columns: list[int], base: int) -> list[list[int]]:
+    """Rows ``[coeff_mask, rhs]`` of ``(M ^ I) . x = base``; row b is output bit b."""
     rows: list[list[int]] = []
     for bit in range(32):
         mask = 0
@@ -300,8 +309,14 @@ def _solve_self_referential_crc(data: bytes, field: Field) -> int | None:
                 mask |= 1 << i
         mask ^= 1 << bit  # the identity term, moved to the left-hand side
         rows.append([mask, (base >> bit) & 1])
+    return rows
 
-    # Gauss-Jordan over GF(2).
+
+def _gf2_solve(rows: list[list[int]]) -> int | None:
+    """Gauss-Jordan over GF(2) on 32 unknowns; None when inconsistent (0 == 1).
+
+    Free variables are set to 0. *rows* is reduced in place.
+    """
     pivot_row = 0
     pivot_of_col: dict[int, int] = {}
     for col in range(32):
@@ -328,8 +343,7 @@ def _solve_self_referential_crc(data: bytes, field: Field) -> int | None:
     for col, r in pivot_of_col.items():
         if rows[r][1]:
             solution |= 1 << col
-
-    return solution if crc_with(solution) & 0xFFFFFFFF == solution else None
+    return solution
 
 
 def _solve_self_referential_sum(data: bytes, field: Field) -> int | None:
@@ -380,6 +394,24 @@ def solve_coupled(
     solver.set("timeout", 200)
     vars_ = [z3.BitVec(f"f{i}", f.width * 8) for i, f in enumerate(fields)]
 
+    _pin_fields(solver, vars_, fields, data)
+    _add_relations(z3, solver, vars_, fields, relations)
+
+    if solver.check() != z3.sat:
+        return None
+
+    model = solver.model()
+    out = bytearray(data)
+    for i, field in enumerate(fields):
+        if field.end > len(out):
+            return None
+        value = model.eval(vars_[i], model_completion=True).as_long()
+        _write(out, field, value)
+    return bytes(out)
+
+
+def _pin_fields(solver, vars_: list, fields: list[Field], data: bytes) -> None:
+    """Pin CONSTANT fields to their value and LENGTH fields to the computed length."""
     for i, field in enumerate(fields):
         if field.kind == CONSTANT and field.value is not None:
             solver.add(vars_[i] == field.value)
@@ -388,6 +420,14 @@ def solve_coupled(
             if expected is not None:
                 solver.add(vars_[i] == (expected & ((1 << (field.width * 8)) - 1)))
 
+
+def _add_relations(
+    z3, solver, vars_: list, fields: list[Field], relations: list[tuple[str, int, int, int]]
+) -> None:
+    """Add ``(op, a, b, const)`` relations; out-of-range indices are skipped.
+
+    Operands are zero-extended to the wider field so mixed widths compare.
+    """
     for op, a, b, const in relations:
         if not (0 <= a < len(vars_) and 0 <= b < len(vars_)):
             continue
@@ -402,18 +442,6 @@ def solve_coupled(
             solver.add(z3.ULE(va, vb))
         elif op == "eq":
             solver.add(va == vb)
-
-    if solver.check() != z3.sat:
-        return None
-
-    model = solver.model()
-    out = bytearray(data)
-    for i, field in enumerate(fields):
-        if field.end > len(out):
-            return None
-        value = model.eval(vars_[i], model_completion=True).as_long()
-        _write(out, field, value)
-    return bytes(out)
 
 
 # ── Format extractors ──────────────────────────────────────────────────

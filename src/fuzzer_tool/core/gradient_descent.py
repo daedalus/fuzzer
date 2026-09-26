@@ -245,6 +245,20 @@ def gradient_descent(
     if site + width > len(best):
         return bytes(best)
 
+    _descend_window(best, site, target, best_score, max_epochs)
+    return bytes(best)
+
+
+def _descend_window(
+    best: bytearray, site: int, target: bytes, best_score: int, max_epochs: int
+) -> None:
+    """Coordinate descent on ``best[site:site+len(target)]``, in place.
+
+    Step pass first; after a stalled epoch, repick from interesting values
+    to escape local minima. Stops at score 0 or _MAX_STUCK stalled epochs.
+    """
+    width = len(target)
+
     # Only the bytes inside the scored window can change the objective.
     window = [site + i for i in range(width)]
 
@@ -262,54 +276,66 @@ def gradient_descent(
     term = [_POPCOUNT[best[site + k] ^ target[k]] for k in range(width)]
 
     for _ in range(max_epochs):
-        improved = False
-
         # Gradient pass: try perturbations at each byte of the window.
-        for k, pos in enumerate(window):
-            orig = best[pos]
-            tb = target[k]
-            for delta in _STEPS:
-                v = orig + delta
-                if v < 0:
-                    v = 0
-                elif v > 255:
-                    v = 255
-                new_term = _POPCOUNT[v ^ tb]
-                score = best_score - term[k] + new_term
-                if score < best_score:
-                    best[pos] = v
-                    term[k] = new_term
-                    best_score = score
-                    improved = True
-                    if best_score == 0:
-                        break
-            if best_score == 0:
-                break
+        prev = best_score
+        best_score = _step_pass(best, window, target, term, best_score)
+        improved = best_score < prev
 
         if not improved:
             stuck += 1
             if stuck >= _MAX_STUCK:
                 break
-
-            # Repick from interesting values to escape local minima.
-            for k, pos in enumerate(window):
-                orig = best[pos]
-                tb = target[k]
-                for v in interesting:
-                    if 0 <= v <= 255 and v != orig:
-                        new_term = _POPCOUNT[v ^ tb]
-                        score = best_score - term[k] + new_term
-                        if score < best_score:
-                            best[pos] = v
-                            term[k] = new_term
-                            best_score = score
-                            improved = True
-                            if best_score == 0:
-                                break
-                if best_score == 0:
-                    break
+            best_score = _repick_pass(best, window, target, term, best_score, interesting)
 
         if best_score == 0:
             break
 
-    return bytes(best)
+
+def _step_pass(
+    best: bytearray, window: list[int], target: bytes, term: list[int], best_score: int
+) -> int:
+    """One +/- _STEPS sweep over the window; returns the new score."""
+    for k, pos in enumerate(window):
+        orig = best[pos]
+        tb = target[k]
+        for delta in _STEPS:
+            v = orig + delta
+            if v < 0:
+                v = 0
+            elif v > 255:
+                v = 255
+            new_term = _POPCOUNT[v ^ tb]
+            score = best_score - term[k] + new_term
+            if score < best_score:
+                best[pos] = v
+                term[k] = new_term
+                best_score = score
+                if best_score == 0:
+                    return 0
+    return best_score
+
+
+def _repick_pass(
+    best: bytearray,
+    window: list[int],
+    target: bytes,
+    term: list[int],
+    best_score: int,
+    interesting: list[int],
+) -> int:
+    """Try each interesting value at each window byte; returns the new score."""
+    for k, pos in enumerate(window):
+        orig = best[pos]
+        tb = target[k]
+        for v in interesting:
+            if not (0 <= v <= 255 and v != orig):
+                continue
+            new_term = _POPCOUNT[v ^ tb]
+            score = best_score - term[k] + new_term
+            if score < best_score:
+                best[pos] = v
+                term[k] = new_term
+                best_score = score
+                if best_score == 0:
+                    return 0
+    return best_score

@@ -602,6 +602,60 @@ class MinHashLSH:
         return _sig_matches(sig, corpus_sig) / self.num_perm
 
 
+def _chao2_var(q1: int, q2: int, a: float, chao2: float) -> float:
+    """Chao (1987) variance of the Chao2 richness estimator."""
+    if q2 > 0:
+        r = q1 / q2
+        return q2 * ((a / 2.0) * r**2 + (a**2) * r**3 + (a**2 / 4.0) * r**4)
+    if not (q1 > 0 and chao2 > 0):
+        return 0.0
+    var = (
+        a * q1 * (q1 - 1) / 2.0
+        + (a**2) * q1 * (2 * q1 - 1) ** 2 / 4.0
+        - (a**2) * q1**4 / (4.0 * chao2)
+    )
+    return max(var, 0.0)
+
+
+def _chao2_ci(s_obs: int, f0: float, var: float, chao2: float) -> tuple[float, float]:
+    """Log-transformed 95% CI (Chao 1987).
+
+    Asymmetric, and never puts the lower bound below the observed edges.
+    """
+    if not (f0 > 0 and var > 0):
+        return float(chao2), float(chao2)
+    k = math.exp(1.96 * math.sqrt(math.log(1.0 + var / (f0 * f0))))
+    return s_obs + f0 / k, s_obs + f0 * k
+
+
+def _incidence_coverage(q1: int, q2: int, m: int, incidences: int) -> float:
+    """Chao & Jost incidence-based sample coverage, clamped to [0, 1]."""
+    denom = (m - 1) * q1 + 2 * q2
+    if incidences > 0 and denom > 0:
+        coverage = 1.0 - (q1 / incidences) * ((m - 1) * q1 / denom)
+    else:
+        coverage = 1.0
+    return min(max(coverage, 0.0), 1.0)
+
+
+def _ci_confidence(ci_low: float, ci_high: float, chao2: float) -> str:
+    """low/medium/high from the CI's width relative to chao2.
+
+    Reflects how tightly the data pins the total; the old N1/N ratio was a proxy.
+    """
+    rel_width = (ci_high - ci_low) / chao2 if chao2 > 0 else float("inf")
+    if rel_width < 0.25:
+        return "high"
+    if rel_width < 1.0:
+        return "medium"
+    return "low"
+
+
+def _int_keyed(raw: dict) -> dict[int, int]:
+    """JSON object -> int-keyed dict (JSON keys arrive as strings)."""
+    return {int(e): c for e, c in raw.items()}
+
+
 class EdgeTracker:
     """Track coverage edges per seed for smarter scheduling.
 
@@ -742,16 +796,9 @@ class EdgeTracker:
         Returns:
             Set of NEW edge indices not previously seen.
         """
-        if stack_depth > 0:
-            self.seed_stack_depth[seed_key] = stack_depth
-        if path_hash != 0:
-            self.seed_path_hash[seed_key] = path_hash
-        if hw_instructions > 0:
-            self.seed_hw_instructions[seed_key] = hw_instructions
-        if hw_branches > 0:
-            self.seed_hw_branches[seed_key] = hw_branches
-        if hw_branch_misses > 0:
-            self.seed_hw_branch_misses[seed_key] = hw_branch_misses
+        self._record_seed_meta(
+            seed_key, stack_depth, path_hash, hw_instructions, hw_branches, hw_branch_misses
+        )
         new_edges = set()
         if seed_key not in self.seed_edges:
             self.seed_edges[seed_key] = set()
@@ -762,41 +809,9 @@ class EdgeTracker:
         # Backward compat: bytes input treated as byte bitmap where
         # non-zero byte positions = edge indices (for ptrace + tests).
         if isinstance(hit_edges, bytes):
-            self._note_key_space("position")
-            bitmap = hit_edges
-            if not morris_mode:
-                bitmap = classify_counts(bitmap)
-            arr = np.frombuffer(bitmap, dtype=np.uint8, count=min(len(bitmap), self.map_size))
-            for i in np.flatnonzero(arr):
-                i = int(i)
-                raw_val = int(arr[i])
-                val = int(round(morris_estimate(raw_val))) if morris_mode else raw_val
-                new_edges.add(i)
-                hc[i] = val
-                self._aggregate_totals[i] = self._aggregate_totals.get(i, 0) + val
-                self._aggregate_total_count += val
-                old_gh = self._global_edge_hits.get(i, 0)
-                self._global_edge_hits[i] = old_gh + val
-                self._spectrum_dirty = True
-                if self._global_edge_hits[i] > self.max_hit_count:
-                    self.max_hit_count = self._global_edge_hits[i]
-
+            self._record_bitmap(hc, hit_edges, morris_mode, new_edges)
         else:
-            # New sparse path: hit_edges is a set of edge IDs
-            self._note_key_space("edge_id")
-            for edge_id in hit_edges:
-                val = hit_counts.get(edge_id, 1) if hit_counts else 1
-                new_edges.add(edge_id)
-                hc[edge_id] = val
-                if self._f0_enabled:
-                    self._f0.update(edge_id)
-                self._aggregate_totals[edge_id] = self._aggregate_totals.get(edge_id, 0) + val
-                self._aggregate_total_count += val
-                old_gh = self._global_edge_hits.get(edge_id, 0)
-                self._global_edge_hits[edge_id] = old_gh + val
-                self._spectrum_dirty = True
-                if self._global_edge_hits[edge_id] > self.max_hit_count:
-                    self.max_hit_count = self._global_edge_hits[edge_id]
+            self._record_sparse(hc, hit_edges, hit_counts, new_edges)
 
         new_contributions = new_edges - self.cumulative_edges
         self.cumulative_edges.update(new_edges)
@@ -822,14 +837,7 @@ class EdgeTracker:
 
         # Per-target tracking
         if target_name:
-            if target_name not in self.target_cumulative_edges:
-                self.target_cumulative_edges[target_name] = set()
-            self.target_cumulative_edges[target_name].update(new_edges)
-            if seed_key not in self.seed_target_edges:
-                self.seed_target_edges[seed_key] = {}
-            if target_name not in self.seed_target_edges[seed_key]:
-                self.seed_target_edges[seed_key][target_name] = set()
-            self.seed_target_edges[seed_key][target_name].update(new_edges)
+            self._record_target(seed_key, target_name, new_edges)
 
         # Update MinHash signature and LSH index
         sig = self._minhash.compute_signature(self.seed_edges[seed_key])
@@ -854,6 +862,87 @@ class EdgeTracker:
             self._f0_history.append((len(self.cumulative_edges), self._f0.estimate()))
 
         return new_contributions
+
+    def _record_seed_meta(
+        self,
+        seed_key: str,
+        stack_depth: int,
+        path_hash: int,
+        hw_instructions: int,
+        hw_branches: int,
+        hw_branch_misses: int,
+    ) -> None:
+        """Store per-seed stack/path/perf metrics; zero means "not measured"."""
+        if stack_depth > 0:
+            self.seed_stack_depth[seed_key] = stack_depth
+        if path_hash != 0:
+            self.seed_path_hash[seed_key] = path_hash
+        if hw_instructions > 0:
+            self.seed_hw_instructions[seed_key] = hw_instructions
+        if hw_branches > 0:
+            self.seed_hw_branches[seed_key] = hw_branches
+        if hw_branch_misses > 0:
+            self.seed_hw_branch_misses[seed_key] = hw_branch_misses
+
+    def _record_bitmap(
+        self, hc: dict[int, int], hit_edges: bytes, morris_mode: bool, new_edges: set[int]
+    ) -> None:
+        """Accumulate a byte bitmap (non-zero position = edge index).
+
+        Backward compat for ptrace + tests; fills *hc* and *new_edges* in place.
+        """
+        self._note_key_space("position")
+        bitmap = hit_edges
+        if not morris_mode:
+            bitmap = classify_counts(bitmap)
+        arr = np.frombuffer(bitmap, dtype=np.uint8, count=min(len(bitmap), self.map_size))
+        for i in np.flatnonzero(arr):
+            i = int(i)
+            raw_val = int(arr[i])
+            val = int(round(morris_estimate(raw_val))) if morris_mode else raw_val
+            new_edges.add(i)
+            hc[i] = val
+            self._aggregate_totals[i] = self._aggregate_totals.get(i, 0) + val
+            self._aggregate_total_count += val
+            old_gh = self._global_edge_hits.get(i, 0)
+            self._global_edge_hits[i] = old_gh + val
+            self._spectrum_dirty = True
+            if self._global_edge_hits[i] > self.max_hit_count:
+                self.max_hit_count = self._global_edge_hits[i]
+
+    def _record_sparse(
+        self,
+        hc: dict[int, int],
+        hit_edges: set[int],
+        hit_counts: dict[int, int] | None,
+        new_edges: set[int],
+    ) -> None:
+        """Accumulate a sparse edge-ID set; fills *hc* and *new_edges* in place."""
+        self._note_key_space("edge_id")
+        for edge_id in hit_edges:
+            val = hit_counts.get(edge_id, 1) if hit_counts else 1
+            new_edges.add(edge_id)
+            hc[edge_id] = val
+            if self._f0_enabled:
+                self._f0.update(edge_id)
+            self._aggregate_totals[edge_id] = self._aggregate_totals.get(edge_id, 0) + val
+            self._aggregate_total_count += val
+            old_gh = self._global_edge_hits.get(edge_id, 0)
+            self._global_edge_hits[edge_id] = old_gh + val
+            self._spectrum_dirty = True
+            if self._global_edge_hits[edge_id] > self.max_hit_count:
+                self.max_hit_count = self._global_edge_hits[edge_id]
+
+    def _record_target(self, seed_key: str, target_name: str, new_edges: set[int]) -> None:
+        """Per-target edge tracking (multi-target runs)."""
+        if target_name not in self.target_cumulative_edges:
+            self.target_cumulative_edges[target_name] = set()
+        self.target_cumulative_edges[target_name].update(new_edges)
+        if seed_key not in self.seed_target_edges:
+            self.seed_target_edges[seed_key] = {}
+        if target_name not in self.seed_target_edges[seed_key]:
+            self.seed_target_edges[seed_key][target_name] = set()
+        self.seed_target_edges[seed_key][target_name].update(new_edges)
 
     def _note_key_space(self, space: str) -> None:
         """Record which key space record_edges() is populating."""
@@ -2411,47 +2500,12 @@ class EdgeTracker:
             f0 = a * (q1 * (q1 - 1)) / (2.0 * (q2 + 1))
         chao2 = s_obs + f0
 
-        # Chao (1987) variance of the richness estimator.
-        if q2 > 0:
-            r = q1 / q2
-            var = q2 * ((a / 2.0) * r**2 + (a**2) * r**3 + (a**2 / 4.0) * r**4)
-        elif q1 > 0 and chao2 > 0:
-            var = (
-                a * q1 * (q1 - 1) / 2.0
-                + (a**2) * q1 * (2 * q1 - 1) ** 2 / 4.0
-                - (a**2) * q1**4 / (4.0 * chao2)
-            )
-            var = max(var, 0.0)
-        else:
-            var = 0.0
-
-        # Log transform (Chao 1987): asymmetric, and never puts the lower bound
-        # below the number of edges actually observed.
-        if f0 > 0 and var > 0:
-            k = math.exp(1.96 * math.sqrt(math.log(1.0 + var / (f0 * f0))))
-            ci_low = s_obs + f0 / k
-            ci_high = s_obs + f0 * k
-        else:
-            ci_low = ci_high = float(chao2)
-
-        # Chao & Jost incidence-based sample coverage.
-        denom = (m - 1) * q1 + 2 * q2
-        if incidences > 0 and denom > 0:
-            coverage = 1.0 - (q1 / incidences) * ((m - 1) * q1 / denom)
-        else:
-            coverage = 1.0
-        coverage = min(max(coverage, 0.0), 1.0)
+        var = _chao2_var(q1, q2, a, chao2)
+        ci_low, ci_high = _chao2_ci(s_obs, f0, var, chao2)
+        coverage = _incidence_coverage(q1, q2, m, incidences)
 
         saturation = s_obs / chao2 if chao2 > 0 else 1.0
-        # Confidence now reflects how tightly the data pins the total, which is
-        # what the word meant all along; the old N1/N ratio was a proxy.
-        rel_width = (ci_high - ci_low) / chao2 if chao2 > 0 else float("inf")
-        if rel_width < 0.25:
-            confidence = "high"
-        elif rel_width < 1.0:
-            confidence = "medium"
-        else:
-            confidence = "low"
+        confidence = _ci_confidence(ci_low, ci_high, chao2)
 
         return {
             "n": n,
@@ -2997,36 +3051,17 @@ class EdgeTracker:
             k: {int(e): c for e, c in hc.items()}
             for k, hc in data.get("seed_hit_counts", {}).items()
         }
-        self._global_edge_hits = {int(e): c for e, c in data.get("global_edge_hits", {}).items()}
+        self._global_edge_hits = _int_keyed(data.get("global_edge_hits", {}))
         self._spectrum_dirty = True
         self._aggregate_cache = None
-        self._aggregate_totals = {int(e): c for e, c in data.get("aggregate_totals", {}).items()}
-        self._aggregate_total_count = data.get("aggregate_total_count", 0)
-        if not self._aggregate_totals and self.seed_hit_counts:
-            for hc in self.seed_hit_counts.values():
-                for edge, count in hc.items():
-                    self._aggregate_totals[edge] = self._aggregate_totals.get(edge, 0) + count
-                    self._aggregate_total_count += count
+        self._restore_aggregates(data)
         self.seed_edge_traces = {
             k: {(e[0], e[1]) for e in v} for k, v in data.get("edge_traces", {}).items()
         }
-        self._edge_first_seen = {int(e): c for e, c in data.get("edge_first_seen", {}).items()}
+        self._edge_first_seen = _int_keyed(data.get("edge_first_seen", {}))
         self._frontier_cache = None
-        self._edge_last_seen = {int(e): c for e, c in data.get("edge_last_seen", {}).items()}
-        tl = data.get("coverage_timeline", [])
-        self._coverage_execs = array("Q", (t[0] for t in tl))
-        self._coverage_edges = array("Q", (t[1] for t in tl))
-        # Entries were pairs before timestamps joined the timeline. A snapshot
-        # written then carries no clock readings, and there is nothing honest
-        # to put in their place -- synthesising them from the current wall
-        # clock would hand _temporal_correlation a fabricated join. Restore
-        # them only when every entry has one, so a partial timeline leaves the
-        # array empty and the report's `if not cov_ts` guard skips the
-        # section rather than correlating against invented times.
-        if tl and all(len(t) >= 3 for t in tl):
-            self._coverage_timestamps = array("d", (float(t[2]) for t in tl))
-        else:
-            self._coverage_timestamps = array("d")
+        self._edge_last_seen = _int_keyed(data.get("edge_last_seen", {}))
+        self._restore_timeline(data.get("coverage_timeline", []))
         corr_data = data.get("correlation_matrix", {})
         self._correlation_matrix = {
             (int(k.split(",")[0]), int(k.split(",")[1])): v for k, v in corr_data.items()
@@ -3041,23 +3076,50 @@ class EdgeTracker:
         # KeyError afterwards -- worst on a snapshot written before this field
         # existed, where seed_edges restores fully against an empty owner map
         # and rare_edge_count() dies on its first edge.
-        self._edge_owner_count = defaultdict(
-            int, {int(e): c for e, c in data.get("edge_owner_count", {}).items()}
-        )
+        self._edge_owner_count = defaultdict(int, _int_keyed(data.get("edge_owner_count", {})))
         self.seed_hw_instructions = data.get("seed_hw_instructions", {})
         self.seed_hw_branches = data.get("seed_hw_branches", {})
         self.seed_hw_branch_misses = data.get("seed_hw_branch_misses", {})
-        # Restore MinHash signatures and rebuild LSH index
-        self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig = None
-        saved_sigs = data.get("minhash_sigs", {})
+        self._restore_minhash(data.get("minhash_sigs", {}))
+
+    def _restore_aggregates(self, data: dict) -> None:
+        """Restore aggregate totals; rebuild from seed_hit_counts on old snapshots."""
+        self._aggregate_totals = _int_keyed(data.get("aggregate_totals", {}))
+        self._aggregate_total_count = data.get("aggregate_total_count", 0)
+        if self._aggregate_totals or not self.seed_hit_counts:
+            return
+        for hc in self.seed_hit_counts.values():
+            for edge, count in hc.items():
+                self._aggregate_totals[edge] = self._aggregate_totals.get(edge, 0) + count
+                self._aggregate_total_count += count
+
+    def _restore_timeline(self, tl: list) -> None:
+        """Restore the (execs, edges[, timestamp]) coverage timeline."""
+        self._coverage_execs = array("Q", (t[0] for t in tl))
+        self._coverage_edges = array("Q", (t[1] for t in tl))
+        # Entries were pairs before timestamps joined the timeline. A snapshot
+        # written then carries no clock readings, and there is nothing honest
+        # to put in their place -- synthesising them from the current wall
+        # clock would hand _temporal_correlation a fabricated join. Restore
+        # them only when every entry has one, so a partial timeline leaves the
+        # array empty and the report's `if not cov_ts` guard skips the
+        # section rather than correlating against invented times.
+        if tl and all(len(t) >= 3 for t in tl):
+            self._coverage_timestamps = array("d", (float(t[2]) for t in tl))
+        else:
+            self._coverage_timestamps = array("d")
+
+    def _restore_minhash(self, saved_sigs: dict) -> None:
+        """Restore MinHash signatures, or recompute them, and rebuild the LSH index."""
+        self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         if saved_sigs:
             for k, sig in saved_sigs.items():
                 self._minhash.add(k, sig)
-        else:
-            for k, edges in self.seed_edges.items():
-                sig = self._minhash.compute_signature(edges)
-                self._minhash.add(k, sig)
+            return
+        for k, edges in self.seed_edges.items():
+            sig = self._minhash.compute_signature(edges)
+            self._minhash.add(k, sig)
 
     def save(self, path: str) -> bool:
         """Save tracker state to JSON (legacy interface)."""

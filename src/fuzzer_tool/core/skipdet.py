@@ -138,14 +138,33 @@ class SkipDetector:
         if seed_trace_mini is None:
             return False
 
-        # Decay threshold over time
-        if self._last_cov_undet_time > 0:
-            elapsed = current_time_ms - self._last_cov_undet_time
-            if elapsed >= THRESHOLD_DEC_TIME_MS and self.undet_bits_threshold >= 2:
-                self.undet_bits_threshold *= 0.75
-                self._last_cov_undet_time = current_time_ms
+        self._decay_threshold(current_time_ms)
 
         # Count new undetermined bits in this seed's trace
+        new_det_bits = self._count_new_bits(seed_trace_mini)
+
+        # Initialize threshold from first seed
+        if not self.undet_bits_threshold:
+            self.undet_bits_threshold = max(1.0, new_det_bits * 0.05)
+
+        if new_det_bits >= self.undet_bits_threshold:
+            self._last_cov_undet_time = current_time_ms
+            self._mark_det_bits(seed_trace_mini)
+            return True
+
+        return False
+
+    def _decay_threshold(self, current_time_ms: float) -> None:
+        """Decay the undetermined-bits threshold by 0.75 per THRESHOLD_DEC_TIME_MS."""
+        if self._last_cov_undet_time <= 0:
+            return
+        elapsed = current_time_ms - self._last_cov_undet_time
+        if elapsed >= THRESHOLD_DEC_TIME_MS and self.undet_bits_threshold >= 2:
+            self.undet_bits_threshold *= 0.75
+            self._last_cov_undet_time = current_time_ms
+
+    def _count_new_bits(self, seed_trace_mini: bytearray) -> int:
+        """Bits set in the seed trace not yet explored by deterministic stages."""
         new_det_bits = 0
         for i in range(min(len(seed_trace_mini) * 8, self.map_size)):
             byte_idx = i >> 3
@@ -156,19 +175,12 @@ class SkipDetector:
                 and not self.virgin_det_bits[i]
             ):
                 new_det_bits += 1
+        return new_det_bits
 
-        # Initialize threshold from first seed
-        if not self.undet_bits_threshold:
-            self.undet_bits_threshold = max(1.0, new_det_bits * 0.05)
-
-        if new_det_bits >= self.undet_bits_threshold:
-            self._last_cov_undet_time = current_time_ms
-            # Mark these bits as deterministically explored
-            for i in range(min(len(seed_trace_mini) * 8, self.map_size)):
-                byte_idx = i >> 3
-                bit_idx = i & 7
-                if byte_idx < len(seed_trace_mini) and (seed_trace_mini[byte_idx] >> bit_idx) & 1:
-                    self.virgin_det_bits[i] = 1
-            return True
-
-        return False
+    def _mark_det_bits(self, seed_trace_mini: bytearray) -> None:
+        """Mark the seed's trace bits as deterministically explored."""
+        for i in range(min(len(seed_trace_mini) * 8, self.map_size)):
+            byte_idx = i >> 3
+            bit_idx = i & 7
+            if byte_idx < len(seed_trace_mini) and (seed_trace_mini[byte_idx] >> bit_idx) & 1:
+                self.virgin_det_bits[i] = 1
