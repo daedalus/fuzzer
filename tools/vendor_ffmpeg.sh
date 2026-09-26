@@ -27,6 +27,8 @@
 # A full instrumented build downloads ~15MB (tarball) and takes ~10 min on 8 cores.
 
 set -e
+# configure/make pipe through `tail`; without pipefail their failures are masked.
+set -o pipefail
 
 # VENDOR_ROOT: where the **source** tree lives.
 #   default: ~/fuzzing/vendoring/   (canonical home; sources are read-only here)
@@ -126,6 +128,7 @@ void __sanitizer_cov_trace_const_cmp4(uint32_t a,uint32_t b){(void)a;(void)b;}
 void __sanitizer_cov_trace_const_cmp8(uint64_t a,uint64_t b){(void)a;(void)b;}
 void __sanitizer_cov_trace_switch(uint64_t v,uint64_t *c){(void)v;(void)c;}
 STUB
+    trap 'rm -f "$STUB_SRC" "$STUB_OBJ"' EXIT
     "$CC" -O1 -c "$STUB_SRC" -o "$STUB_OBJ"
     STUB_LDFLAGS="$STUB_OBJ"
 fi
@@ -238,7 +241,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 apply_patches
 
 # ── Step 3: Configure ────────────────────────────────────────────
-echo "[3/5] Configuring FFmpeg ($MODE${MINIMAL:+, minimal})..."
+echo "[3/5] Configuring FFmpeg ($MODE$([ "$MINIMAL" -eq 1 ] && echo ", minimal"))..."
 (cd "$FFMPEG_DIR" && \
     CC="$CC" CFLAGS="$CFLAGS" \
     ./configure \
@@ -292,8 +295,6 @@ if [ -n "$SCOV_FLAGS" ]; then
         echo "  $lib: $tc trace-cmp call sites"
     done
 fi
-
-[ -n "$STUB_LDFLAGS" ] && rm -f "$STUB_SRC" "$STUB_OBJ"
 
 echo "=== FFmpeg vendored successfully ($MODE) ==="
 echo "Libraries: $FFMPEG_DIR/{libavformat,libavcodec,libavutil,libswresample}/*.a"

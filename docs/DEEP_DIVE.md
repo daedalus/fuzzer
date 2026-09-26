@@ -368,6 +368,21 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 pip install -e ".[dev]"
 ```
 
+### Docker
+
+```bash
+docker build -t fuzzer-tool .                          # test image; `docker run --rm fuzzer-tool` runs pytest
+docker build --target ffmpeg -t fuzzer-tool:ffmpeg .   # + vendored FFmpeg and ffmpeg_read_nosan.so
+docker run --rm -v "$HOME/fuzzing/ffmpeg:/out" fuzzer-tool:ffmpeg
+```
+
+The `ffmpeg` stage runs `tools/build_ffmpeg_ready.sh` at build time
+(`--build-arg FFMPEG_BUILD_ARGS=--minimal` for the fast audio-only set).
+The campaign keeps corpus, crashes and `report_ffmpeg.md` in `/out` and
+resumes from it on rerun; `docker stop` still writes the report. The image
+installs `libclang-rt-dev` because Ubuntu's clang omits compiler-rt, without
+which every `-fsanitize*` link fails; the build probes an ASAN link to catch that.
+
 ## Quick Start
 
 ```bash
