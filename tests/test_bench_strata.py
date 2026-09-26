@@ -1,4 +1,4 @@
-"""Strata A0-A4 arms and pre-registered analysis in tools/bench_paired.py (§6)."""
+"""Strata A0-A4 arms and pre-registered analysis in tools/lib/bench_paired.py (§6)."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools" / "lib"))
 
 from bench_paired import (  # noqa: E402
     ARM_BASELINES,

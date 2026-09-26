@@ -4,7 +4,7 @@
 Why this exists rather than ``bench_paired.py --arms a,b``:
 
 **Replication.** A cell is not a fixed function of its seed. Measured with
-``tools/noise_probe.py`` on the shipped arm: ``png_read.so`` re-runs of the
+``tools/lib/noise_probe.py`` on the shipped arm: ``png_read.so`` re-runs of the
 same cell span 39-66 edges (CV 0.19) and ``jpeg_read.so`` spans 196-209.
 46% of same-arm replicate pairs would be scored a win or a loss. Single-shot
 cells therefore hand McNemar mostly noise, and a null out of that design
@@ -55,7 +55,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bench_lock  # noqa: E402
 from eval_set import TARGET_SETS  # noqa: E402
 
-REPO = Path(__file__).resolve().parent.parent
+REPO = Path(__file__).resolve().parents[2]
 RESULTS = REPO / "results" / "paired"
 
 _EDGES = re.compile(r"Edges discovered:\s+(\d+)")

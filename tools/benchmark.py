@@ -4,13 +4,13 @@
     tools/benchmark.py list
     tools/benchmark.py <name> [args...]     # args forwarded verbatim
 
-Each harness keeps its own flags; this only routes. `<name> --help` shows
+Harnesses live in tools/lib/ and keep their own flags; this only routes. `<name> --help` shows
 the harness's help. Exit code is the harness's.
 
     benchmark.py paired run ...
          |
          v  exec (same pid, same exit code)
-    python tools/bench_paired.py run ...
+    python tools/lib/bench_paired.py run ...
 """
 
 from __future__ import annotations
@@ -19,9 +19,9 @@ import os
 import sys
 from pathlib import Path
 
-TOOLS = Path(__file__).resolve().parent
+LIB = Path(__file__).resolve().parent / "lib"
 
-# name -> (script under tools/, one-line purpose)
+# name -> (script under tools/lib/, one-line purpose)
 _REGISTRY: dict[str, tuple[str, str]] = {
     "smoke": ("bench.sh", "one run per named config (baseline/enhanced/optimal/qea); smoke test"),
     "sweep": ("bench_sweep.sh", "feature combination sweep at -n 1k"),
@@ -71,7 +71,7 @@ def main(argv: list[str]) -> int:
         return 2
 
     # exec, not subprocess: signals, stdin and the exit code stay the harness's.
-    cmd = _argv(TOOLS / script, rest)
+    cmd = _argv(LIB / script, rest)
     os.execvp(cmd[0], cmd)
     return 1  # unreachable: execvp raises on failure
 

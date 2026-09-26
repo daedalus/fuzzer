@@ -182,7 +182,7 @@ _clean_env_cache: dict[str, str] | None = None
 # forkserver alike.
 #
 # This also removes a source of run-to-run variance from every
-# measurement in the tree, including tools/bench_paired.py.
+# measurement in the tree, including tools/lib/bench_paired.py.
 
 ADDR_NO_RANDOMIZE = 0x0040000
 _PERSONALITY_QUERY = 0xFFFFFFFF  # personality(0xffffffff) reads without setting

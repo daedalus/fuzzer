@@ -115,7 +115,7 @@ is exactly the empirical question the diagnostic module's handover left
 open (their "suggested next steps" 1-2): does a real campaign's transition
 graph actually predict anything resembling synchronization, and does that
 correlate with anything the fuzzer cares about? This scheduler makes the
-question answerable by an A/B run (``tools/bench_paired.py``,
+question answerable by an A/B run (``tools/lib/bench_paired.py``,
 ``tests/support/bandit_env.py``'s convergence harness) rather than
 answering it here. Until that run happens this is exactly as unproven as
 ``op_katz``/``op_tang``/``WhittleIndexScheduler`` were before their own

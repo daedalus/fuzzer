@@ -629,7 +629,7 @@ select_png_zlib_libs() {
     fi
 
     # Always announce the choice. Whether vendor/ is populated changes what
-    # a benchmark number means, and tools/eval_set.py pins targets/png_read
+    # a benchmark number means, and tools/lib/eval_set.py pins targets/png_read
     # as a locked cell, so this must not be silent.
     local png_src="system" zlib_src="system"
     [ -f "$vendor_png" ] && [ -f "$vendor_zlib" ] && png_src="vendored"

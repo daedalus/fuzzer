@@ -223,7 +223,7 @@ HAVOC_SUB_OPS = (
 _HAVOC_N = len(HAVOC_SUB_OPS)
 # Sampling is a precomputed inverse-CDF table: 256 slots, each holding a
 # branch index, indexed by the low byte of the draw. Measured against the
-# alternatives at 2M draws (see tools/bench_havoc_subop.py): uniform
+# alternatives at 2M draws (see tools/lib/bench_havoc_subop.py): uniform
 # `r[0] % 11` 89ns, bisect over an 11-float CDF 313ns, this table 202ns --
 # so the table halves the cost of the feature versus the obvious bisect.
 # 256 slots quantize probabilities to 0.39%, well under the explore floor.

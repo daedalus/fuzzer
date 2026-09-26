@@ -6,15 +6,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 TOOLS = Path(__file__).resolve().parent.parent / "tools"
+LIB = TOOLS / "lib"
 ENTRY = TOOLS / "benchmark.py"
 
 sys.path.insert(0, str(TOOLS))
 
 import benchmark  # noqa: E402
 
-# The dispatcher itself and library modules, not runnable benchmarks.
-_NOT_BENCHMARKS = {"benchmark.py", "bench_lock.py"}
+# Shared helpers, not runnable benchmarks.
+_NOT_BENCHMARKS = {"bench_lock.py", "bench_common.sh"}
 
 
 def _run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -27,8 +30,8 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
 
 
 def test_every_bench_script_is_registered():
-    """Drift guard: a new tools/bench_* script must be reachable."""
-    on_disk = {p.name for p in TOOLS.glob("bench*.py")} | {p.name for p in TOOLS.glob("bench*.sh")}
+    """Drift guard: a new tools/lib/bench_* script must be reachable."""
+    on_disk = {p.name for p in LIB.glob("bench*.py")} | {p.name for p in LIB.glob("bench*.sh")}
     registered = {Path(s).name for s in benchmark.BENCHMARKS.values()}
 
     assert on_disk - _NOT_BENCHMARKS <= registered
@@ -36,7 +39,16 @@ def test_every_bench_script_is_registered():
 
 def test_registered_scripts_exist():
     for name, script in benchmark.BENCHMARKS.items():
-        assert (TOOLS / script).is_file(), name
+        assert (LIB / script).is_file(), name
+
+
+def test_no_benchmark_left_in_tools_root():
+    """Falsification: benchmark.py is the only benchmark file under tools/."""
+    stray = {p.name for p in TOOLS.glob("bench*")} - {"benchmark.py"}
+    registered = {Path(s).name for s in benchmark.BENCHMARKS.values()}
+
+    assert stray == set()
+    assert not {p.name for p in TOOLS.iterdir()} & registered
 
 
 def test_list_names_every_benchmark():
@@ -69,3 +81,17 @@ def test_exit_code_propagates():
 
     assert out.returncode == 2
     assert "--baseline" in out.stderr
+
+
+# Harnesses whose --help is side-effect free (argparse). The rest run at import.
+_HELP_SAFE = ("paired", "replicated", "noise", "diff", "lineage")
+
+
+@pytest.mark.parametrize("name", _HELP_SAFE)
+def test_adversarial_harness_imports_resolve(name):
+    """Fresh interpreter: a sibling import left behind in tools/ fails here,
+    even when another test module already put tools/ on sys.path."""
+    out = _run(name, "--help")
+
+    assert out.returncode == 0, out.stderr
+    assert "usage:" in out.stdout

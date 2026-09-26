@@ -4,7 +4,7 @@
 The metric: the fraction of generated inputs that exercised at least one
 previously-unseen edge. The claim from the source this was merged from is
 that it converges much faster than total edge count, so it is a shorter,
-lower-variance cell for `tools/bench_paired.py` than raw coverage.
+lower-variance cell for `tools/lib/bench_paired.py` than raw coverage.
 
 Computed entirely offline from an already-running campaign's coverage log
 (``--coverage-log``, one row per stats tick: elapsed, exec_count,

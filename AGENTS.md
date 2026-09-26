@@ -148,7 +148,8 @@ src/fuzzer_tool/
 └── cli/          # CLI entry point (commands.py, __main__.py)
 
 tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4/secp256k1/sqlite), corpus_png.py,
-                  #   bench.sh, bench_sweep.sh, release.sh
+                  #   benchmark.py (entry point), release.sh
+tools/lib/        # Benchmark harnesses (bench*.sh/py, noise_probe, lineage_benchmark) + shared helpers
 targets/          # Fuzz target sources (*.c) + built artifacts (.so/.bin) under legacy layout.
                   #   Default build output is $FUZZ_BUILD_ROOT (~/fuzzing/builds/); this in-tree
                   #   `targets/` is the legacy path (use --in-tree-targets for back-compat).

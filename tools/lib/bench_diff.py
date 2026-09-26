@@ -5,8 +5,8 @@ Compares crash signatures, edge coverage, and efficiency metrics
 from two bench.sh output logs.
 
 Usage:
-    python tools/bench_diff.py --baseline /tmp/fuzz_baseline.log --treatment /tmp/fuzz_enhanced.log
-    python tools/bench_diff.py --baseline /tmp/b1.log --treatment /tmp/b2.log --verbose
+    python tools/lib/bench_diff.py --baseline /tmp/fuzz_baseline.log --treatment /tmp/fuzz_enhanced.log
+    python tools/lib/bench_diff.py --baseline /tmp/b1.log --treatment /tmp/b2.log --verbose
 
 Output:
     Jaccard similarity of crash signatures and edge sets

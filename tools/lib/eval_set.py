@@ -6,7 +6,7 @@ change -- add a new named set instead of editing an existing one, and say
 in the commit which set a number came from.
 
 Why a fixed matrix rather than "run the bench script again": the existing
-harnesses (``tools/bench.sh``, ``tools/bench_sweep.sh``) run one unseeded
+harnesses (``tools/lib/bench.sh``, ``tools/lib/bench_sweep.sh``) run one unseeded
 campaign per arm on ``targets/png_read`` and compare raw edge counts. That
 is a single sample of a stochastic process, so the difference between two
 arms is mostly the difference between two draws. A locked ``(target, seed)``
