@@ -138,52 +138,107 @@ def serialize_bmp(info: BmpInfo) -> bytes:
     return bytes(info.header) + info.pixel_data
 
 
+def _corrupt_u16(data: bytearray, offset: int, method: int, _r) -> None:
+    """Corrupt an unsigned 16-bit field with *method* (0-4)."""
+    val = struct.unpack("<H", data[offset : offset + 2])[0]
+    if method == 0:
+        val ^= 1 << _r.randint(0, 15)
+    elif method == 1:
+        val = _r.choice([0, 1, 0x7FFF, 0xFFFF])
+    elif method == 2:
+        val = max(0, val + _r.choice([-2, -1, 1, 2, 16, 256]))
+    elif method == 3:
+        val = _r.randint(0, 0xFFFF)
+    else:
+        val = _r.randint(0, 16)
+    struct.pack_into("<H", data, offset, val)
+
+
+def _corrupt_i32(data: bytearray, offset: int, method: int, _r) -> None:
+    """Corrupt a signed 32-bit field with *method* (0-4), clamped to int32."""
+    val = struct.unpack("<i", data[offset : offset + 4])[0]
+    if method == 0:
+        val ^= 1 << _r.randint(0, 31)
+    elif method == 1:
+        val = _r.choice([0, 1, -1, 0x7FFFFFFF, -0x80000000])
+    elif method == 2:
+        val = max(-0x80000000, min(0x7FFFFFFF, val + _r.choice([-2, -1, 1, 2, 256, 65536])))
+    elif method == 3:
+        val = _r.randint(-0x80000000, 0x7FFFFFFF)
+    else:
+        val = _r.randint(0, 256)
+    val = max(-0x80000000, min(0x7FFFFFFF, val))
+    struct.pack_into("<i", data, offset, val)
+
+
+def _corrupt_u32(data: bytearray, offset: int, method: int, _r) -> None:
+    """Corrupt an unsigned 32-bit field with *method* (0-4), clamped to uint32."""
+    val = struct.unpack("<I", data[offset : offset + 4])[0]
+    if method == 0:
+        val ^= 1 << _r.randint(0, 31)
+    elif method == 1:
+        val = _r.choice([0, 1, 0x7FFFFFFF, 0xFFFFFFFF])
+    elif method == 2:
+        val = max(0, min(0xFFFFFFFF, val + _r.choice([-2, -1, 1, 2, 256, 65536])))
+    elif method == 3:
+        val = _r.randint(0, 0xFFFFFFFF)
+    else:
+        val = _r.randint(0, 256)
+    val = max(0, min(0xFFFFFFFF, val))
+    struct.pack_into("<I", data, offset, val)
+
+
 def _corrupt_field(data: bytearray, offset: int, size: int, signed: bool = False, rng=None) -> None:
     """Apply random corruption to a field in the header."""
     _r = rng or random
     method = _r.randint(0, 4)
     if size == 2:
-        val = struct.unpack("<H", data[offset : offset + 2])[0]
-        if method == 0:
-            val ^= 1 << _r.randint(0, 15)
-        elif method == 1:
-            val = _r.choice([0, 1, 0x7FFF, 0xFFFF])
-        elif method == 2:
-            val = max(0, val + _r.choice([-2, -1, 1, 2, 16, 256]))
-        elif method == 3:
-            val = _r.randint(0, 0xFFFF)
-        else:
-            val = _r.randint(0, 16)
-        struct.pack_into("<H", data, offset, val)
+        _corrupt_u16(data, offset, method, _r)
+    elif size == 4 and signed:
+        _corrupt_i32(data, offset, method, _r)
     elif size == 4:
-        val = struct.unpack("<I", data[offset : offset + 4])[0]
-        if signed:
-            val = struct.unpack("<i", data[offset : offset + 4])[0]
-            if method == 0:
-                val ^= 1 << _r.randint(0, 31)
-            elif method == 1:
-                val = _r.choice([0, 1, -1, 0x7FFFFFFF, -0x80000000])
-            elif method == 2:
-                val = max(-0x80000000, min(0x7FFFFFFF, val + _r.choice([-2, -1, 1, 2, 256, 65536])))
-            elif method == 3:
-                val = _r.randint(-0x80000000, 0x7FFFFFFF)
+        _corrupt_u32(data, offset, method, _r)
+
+
+def _count_tiles(pixels: bytes, tiles_per_row: int, sample_bytes: int) -> dict[bytes, int]:
+    """Tile alphabet from the first row: sample bytes -> occurrence count."""
+    unique_tiles: dict[bytes, int] = {}
+    for x in range(tiles_per_row):
+        start = x * sample_bytes
+        sample = pixels[start : start + sample_bytes]
+        unique_tiles[sample] = unique_tiles.get(sample, 0) + 1
+    return unique_tiles
+
+
+def _first_row_adjacency(pixels: bytes, unique_tiles: dict, tiles_per_row: int, sample_bytes: int):
+    """Left->right tile adjacency observed in the first pixel row."""
+    from fuzzer_tool.core.wfc import AdjacencyTable
+
+    adj = AdjacencyTable()
+    for x in range(tiles_per_row - 1):
+        a = pixels[x * sample_bytes : (x + 1) * sample_bytes]
+        b = pixels[(x + 1) * sample_bytes : (x + 2) * sample_bytes]
+        if a in unique_tiles and b in unique_tiles:
+            adj.add_forward(a, b)
+    return adj
+
+
+def _assemble_row(row_result, pixels: bytes, row_y: int, stride: int, sample_bytes: int) -> bytes:
+    """Row bytes from a WFC result (original row on failure), padded/cut to stride."""
+    row_data = bytearray()
+    if row_result and row_result[0]:
+        for tile_name in row_result[0]:
+            if tile_name is not None:
+                row_data.extend(tile_name)
             else:
-                val = _r.randint(0, 256)
-            val = max(-0x80000000, min(0x7FFFFFFF, val))
-            struct.pack_into("<i", data, offset, val)
-        else:
-            if method == 0:
-                val ^= 1 << _r.randint(0, 31)
-            elif method == 1:
-                val = _r.choice([0, 1, 0x7FFFFFFF, 0xFFFFFFFF])
-            elif method == 2:
-                val = max(0, min(0xFFFFFFFF, val + _r.choice([-2, -1, 1, 2, 256, 65536])))
-            elif method == 3:
-                val = _r.randint(0, 0xFFFFFFFF)
-            else:
-                val = _r.randint(0, 256)
-            val = max(0, min(0xFFFFFFFF, val))
-            struct.pack_into("<I", data, offset, val)
+                row_data.extend(pixels[row_y * stride : row_y * stride + sample_bytes])
+    else:
+        # Fallback: copy original row
+        row_data.extend(pixels[row_y * stride : (row_y + 1) * stride])
+    # Pad to stride
+    while len(row_data) < stride:
+        row_data.append(0)
+    return row_data[:stride]
 
 
 class BmpMutator:
@@ -322,15 +377,11 @@ class BmpMutator:
         if tiles_per_row < 2:
             return info
 
-        from fuzzer_tool.core.wfc import AdjacencyTable, Tile, WaveGrid
+        from fuzzer_tool.core.wfc import Tile, WaveGrid
 
         # Build tiles from the first row (used as tile alphabet)
         pixels = info.pixel_data
-        unique_tiles: dict[bytes, int] = {}
-        for x in range(tiles_per_row):
-            start = x * sample_bytes
-            sample = pixels[start : start + sample_bytes]
-            unique_tiles[sample] = unique_tiles.get(sample, 0) + 1
+        unique_tiles = _count_tiles(pixels, tiles_per_row, sample_bytes)
 
         # Cost guard. WFC propagation work scales ~n^2 * n_tiles^2 per row,
         # so a wide row or a large alphabet turns a single pixel mutation
@@ -347,12 +398,7 @@ class BmpMutator:
         tile_list = [Tile(name=t, weight=c) for t, c in unique_tiles.items()]
 
         # Build adjacency from existing pixel data
-        adj = AdjacencyTable()
-        for x in range(tiles_per_row - 1):
-            a = pixels[x * sample_bytes : (x + 1) * sample_bytes]
-            b = pixels[(x + 1) * sample_bytes : (x + 2) * sample_bytes]
-            if a in unique_tiles and b in unique_tiles:
-                adj.add_forward(a, b)
+        adj = _first_row_adjacency(pixels, unique_tiles, tiles_per_row, sample_bytes)
 
         # Generate each row via WFC
         new_pixels = bytearray()
@@ -363,20 +409,7 @@ class BmpMutator:
                 max_restarts=2,
                 ac3_budget=2000,
             )
-            row_data = bytearray()
-            if row_result and row_result[0]:
-                for tile_name in row_result[0]:
-                    if tile_name is not None:
-                        row_data.extend(tile_name)
-                    else:
-                        row_data.extend(pixels[row_y * stride : row_y * stride + sample_bytes])
-            else:
-                # Fallback: copy original row
-                row_data.extend(pixels[row_y * stride : (row_y + 1) * stride])
-            # Pad to stride
-            while len(row_data) < stride:
-                row_data.append(0)
-            new_pixels.extend(row_data[:stride])
+            new_pixels.extend(_assemble_row(row_result, pixels, row_y, stride, sample_bytes))
 
         info.pixel_data = bytes(new_pixels)
         return info

@@ -77,6 +77,39 @@ def _tag_ok(tag: int) -> bool:
     return field_num != 0 and field_num <= MAX_FIELD_NUM and wire <= 5
 
 
+def _find_end_group(data: bytes, pos: int, end: int, end_tag: int) -> int:
+    """Scan varints from *pos* for *end_tag* -> offset past it, or -1."""
+    while pos < end:
+        t, new_pos = _decode_varint(data, pos)
+        if t is None:
+            return -1
+        if t == end_tag:
+            return new_pos
+        pos = new_pos
+    return -1
+
+
+def _read_group(data: bytes, pos: int, end: int, field_num: int, depth: int):
+    """Wire 3: match the end-group tag, parse nested fields -> (Field, pos)."""
+    end_pos = _find_end_group(data, pos, end, (field_num << 3) | 4)
+    if end_pos < 0:
+        return None
+    inner, _ = _parse_fields(data, pos, end_pos, depth + 1, stop_at_end=True)
+    if inner is None:
+        return None
+    return Field(field_num, 3, b"", children=inner), end_pos
+
+
+def _read_field(data: bytes, pos: int, end: int, field_num: int, wire: int, depth: int):
+    """Decode a wire 1/3/5 payload -> (Field, new_pos), or None."""
+    if wire == 3:
+        return _read_group(data, pos, end, field_num, depth)
+    size = 8 if wire == 1 else 4  # wire 1: fixed64, wire 5: fixed32
+    if pos + size > end:
+        return None
+    return Field(field_num, wire, data[pos : pos + size]), pos + size
+
+
 def _parse_fields(
     data: bytes, pos: int, end: int, depth: int = 0, stop_at_end: bool = False
 ) -> tuple[list[Field], list[bytes]] | None:
@@ -94,80 +127,46 @@ def _parse_fields(
     raw_between: list[bytes] = []
     gap_start = pos
 
+    # break = malformed/truncated: stash everything from the gap start
     while pos < end:
         start = pos
         tag, pos = _decode_varint(data, pos)
         if tag is None or not _tag_ok(tag):
-            raw_between.append(data[gap_start:end])
-            return fields, raw_between
+            break
         raw_between.append(data[gap_start:start])
         field_num = tag >> 3
         wire = tag & 7
 
+        # Common wire types (varint, length-delimited) stay inline
         if wire == 0:
             value, new_pos = _decode_varint(data, pos)
             if value is None:
-                raw_between.append(data[gap_start:end])
-                return fields, raw_between
+                break
             fields.append(Field(field_num, wire, data[pos:new_pos]))
             pos = new_pos
-        elif wire == 1:
-            if pos + 8 > end:
-                raw_between.append(data[gap_start:end])
-                return fields, raw_between
-            fields.append(Field(field_num, wire, data[pos : pos + 8]))
-            pos += 8
-        elif wire == 5:
-            if pos + 4 > end:
-                raw_between.append(data[gap_start:end])
-                return fields, raw_between
-            fields.append(Field(field_num, wire, data[pos : pos + 4]))
-            pos += 4
         elif wire == 2:
             length, new_pos = _decode_varint(data, pos)
-            if length is None:
-                raw_between.append(data[gap_start:end])
-                return fields, raw_between
-            pos = new_pos
-            if pos + length > end:
-                # Truncated payload: stash everything from the gap start
-                raw_between.append(data[gap_start:end])
-                return fields, raw_between
-            fields.append(Field(field_num, wire, data[pos : pos + length]))
-            pos += length
-        elif wire == 3:
-            # Group: find the matching end-group tag, then parse nested fields
-            end_tag = (field_num << 3) | 4
-            scan = pos
-            end_pos = -1
-            while scan < end:
-                t, new_pos = _decode_varint(data, scan)
-                if t is None:
-                    break
-                if t == end_tag:
-                    end_pos = new_pos
-                    break
-                scan = new_pos
-            if end_pos < 0:
-                # No matching end tag: stash the rest
-                raw_between.append(data[gap_start:end])
-                return fields, raw_between
-            inner, inner_between = _parse_fields(data, pos, end_pos, depth + 1, stop_at_end=True)
-            if inner is None:
-                raw_between.append(data[gap_start:end])
-                return fields, raw_between
-            fields.append(Field(field_num, wire, b"", children=inner))
-            pos = end_pos
+            if length is None or new_pos + length > end:
+                break
+            pos = new_pos + length
+            fields.append(Field(field_num, wire, data[new_pos:pos]))
         elif wire == 4:
             # End-group tag: stop parsing (caller consumed it when
             # stop_at_end, otherwise it is mid-stream junk).
-            if stop_at_end:
-                return fields, raw_between
-            raw_between.append(data[gap_start:end])
+            if not stop_at_end:
+                raw_between.append(data[gap_start:end])
             return fields, raw_between
-
+        else:
+            got = _read_field(data, pos, end, field_num, wire, depth)
+            if got is None:
+                break
+            field, pos = got
+            fields.append(field)
         gap_start = pos
+    else:
+        return fields, raw_between
 
+    raw_between.append(data[gap_start:end])
     return fields, raw_between
 
 
@@ -264,6 +263,7 @@ class ProtobufMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         self._rng = rng or self._rng
         fields = parse_protobuf(data)
