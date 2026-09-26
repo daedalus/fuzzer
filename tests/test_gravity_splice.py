@@ -225,3 +225,23 @@ def test_fuzz_one_observes_every_splice_round(build):  # noqa: F811
     # the zero _last_new_edge_count holds before recording runs.
     assert new_edges == [len(fresh), 0]
     assert ys == [len(fresh), 0]
+
+
+class TestBenchArm:
+    """tools/bench_paired.py arm: baseline plus exactly --splice-donor gravity."""
+
+    @pytest.fixture(autouse=True)
+    def _tools_path(self, monkeypatch):
+        monkeypatch.syspath_prepend(str(Path(__file__).resolve().parent.parent / "tools" / "lib"))
+
+    def test_arm_pairs_against_baseline(self):
+        from bench_paired import ARM_BASELINES, ARMS
+
+        assert ARM_BASELINES["splice-gravity"] == "baseline"
+        assert ARMS["splice-gravity"] == [*ARMS["baseline"], "--splice-donor", "gravity"]
+
+    def test_arm_flags_reach_the_real_parser(self, monkeypatch):
+        from bench_paired import ARMS
+
+        assert _parse(monkeypatch, *ARMS["splice-gravity"]).splice_donor == "gravity"
+        assert _parse(monkeypatch, *ARMS["baseline"]).splice_donor == "uniform"

@@ -155,6 +155,10 @@ ARMS: dict[str, list[str]] = {
     # baseline (uniform offsets) and against each other.
     "pos-round-robin": ["--pos-round-robin"],
     "pos-fibonacci": ["--pos-fibonacci"],
+    # Gravity splice donor (core/gravity.py). Only the six corpus-crossing
+    # operators change; read "Gravity splice: ... hits, refits" in a cell's
+    # log before trusting a null -- a closed fit gate means prior exponents.
+    "splice-gravity": ["--splice-donor", "gravity"],
 }
 
 STRATA_ARMS = (
@@ -189,6 +193,7 @@ ARM_BASELINES: dict[str, str] = {
     "strata-a4": "strata-a1-elo",
     "pos-round-robin": "baseline",
     "pos-fibonacci": "baseline",
+    "splice-gravity": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
