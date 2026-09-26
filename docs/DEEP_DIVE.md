@@ -884,6 +884,14 @@ ruff format src/ tests/
 
 ## Benchmarking
 
+`tools/benchmark.py` is the single entry point: `benchmark.py list` names
+every harness; `benchmark.py <name> [args...]` execs it with args verbatim
+(`<name> --help` is the harness's help, exit code is the harness's). Names:
+`smoke` (`bench.sh`), `sweep` (`bench_sweep.sh`), `paired`, `replicated`,
+`noise` (`noise_probe.py`), `diff`, `cache`, `lineage`, `randpool`, `havoc`,
+`huffman`. A new `tools/bench*` script must be added to its `_REGISTRY`;
+`tests/test_benchmark_tool.py` fails otherwise.
+
 Compare fuzzer configurations on a target:
 
 ```bash

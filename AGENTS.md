@@ -124,7 +124,7 @@ fuzzer, not just the target.
 | `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` / `vendor_sqlite.sh` | Fetch vendored library sources into `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/`; legacy `vendor/` via `--in-tree-vendor`); required before building the matching targets |
 | `FUZZ_VENDOR_ROOT=...` / `FUZZ_BUILD_ROOT=...` | Env-var knobs; defaults are `~/fuzzing/vendoring/` (sources) and `~/fuzzing/builds/` (build artifacts). Both have legacy `--in-tree-*` flags. |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
-| `tools/bench.sh` / `tools/bench_sweep.sh` | Config comparison / feature sweep |
+| `tools/benchmark.py list` / `tools/benchmark.py <name> [args]` | All benchmarks behind one entry point (`smoke`, `sweep`, `paired`, `replicated`, …) |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
 | `vulture --min-confidence 80 .` | Find duplicated code |
 | `fuzzer-tool fuzz <target> -d <corpus> -n <iters> --profile-hotpath [--profile-out PATH]` | cProfile hotpath profile of the fuzz run (tottime/cumtime/ncalls tables; dump defaults to `/tmp/fuzzer_hotpath.prof`) |

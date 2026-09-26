@@ -62,6 +62,7 @@
 - [ ] **`field_constraints.py` bounded-integer pre-pass** (handover §1, deprioritized) — z3 is already fast on these small bitwidth systems, so the win is thin. Revisit only if the integer-checksum pattern proves out.
 
 ## Testing
+- [ ] **Point in-script cross-references at `tools/benchmark.py`** (2026-09-26) — harness docstrings and `bench.sh`/`bench_sweep.sh` headers still name each other by path (`tools/bench_paired.py`, `tools/bench_diff.py`). Correct, but a reader never learns the entry point from them.
 - [ ] **Three operators are still unexamined by the enumeration harness** (2026-09-12) — `avif_chunk_mutate`, `golomb` and `pgs_chunk_mutate` report `too_deep` once `_walk_operator` samples them in spread order, where the lexicographic walk called them `over_budget` and so hid the fact that they exceed `max_depth=16`. Raising the harness depth admits them; the depth cap exists so a truncated path is reported rather than silently walked, so raise it deliberately and re-measure the census rather than removing it.
 - [ ] **Pre-existing red tests** (2026-09-25) — `test_regression_track_op_effect_coverage::test_every_ballot_name_is_mapped` (no kwargs for `fewa`, `softmax`, `topk`); `test_kruskal_count` / `test_seed_round_robin` `TestFuzzerWiring::test_constructor_flag_is_*last*` (constructor order); `test_regression_no_op_mutations::test_every_selectable_operator_is_reachable`. Red on master before the LRU/bayes-ucb change.
 
