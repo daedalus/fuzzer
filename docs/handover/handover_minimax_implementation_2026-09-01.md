@@ -1,125 +1,58 @@
 # Implementation Note — Minimax Estimator and Algorithm for Fuzzer Enhancement
 
-**Date:** 2026-09-01
-**Status:** IMPLEMENTED — all five phases landed in commit `b49441b`.
-**Supersedes:** `handover_minimax_alphabeta_adversarial_search_2026-09-01.md` (research spire → implementation).
+Original 2026-09-01. Pruned 2026-09-26 to open items; full original:
+`git show 1c689e8a^:docs/handover/handover_minimax_implementation_2026-09-01.md`
+(research companion: `git show 1c689e8a^:docs/handover/handover_minimax_alphabeta_adversarial_search_2026-09-01.md`).
+Verified against `4c021daa`.
 
 ---
 
-## Summary
+## 1. E3 — A/B the `alphabeta` seed arm (unrun)
 
-All five integration points from the research handover are now implemented. This document records what was built, where, and how to validate each piece.
+The arm is no longer minimax: `26b367ab` replaced alpha-beta descent (1 distinct
+seed / 300 picks, root-only) with Thompson descent over the lineage tree. Class
+name, `--alphabeta` flag and state key kept
+(`core/schedulers/seed_mcts.py::AlphaBetaMCTSSeedScheduler`,
+`services/seed_picker.py::_pick_alphabeta_seed`).
 
----
+- Harness exists: `tools/lib/bench_paired.py` arms `elo-alphabeta` vs `elo-mcts`
+  (`analyse --baseline elo-mcts`).
+- Targets: `png_read`, `ffmpeg_read`. Replicated, `--lock-single-thread`.
+- Accept: effect resolved above noise floor (sd ≈ 4.6 edges png) or a bounded null.
 
-## Phase 1: Alpha-Beta Pruning for MCTS Seed Selection (P0)
+## 2. Phases 2–5 — shipped, unreachable, untested
 
-**Files:**
-- `src/fuzzer_tool/core/schedulers/mcts.py` — `AlphaBetaMCTSSeedScheduler` class
-- `src/fuzzer_tool/services/seed_picker.py` — `_pick_mcts_seed()` integration
+Code exists; nothing in the fuzz loop calls it; no falsification/adversarial tests
+(Hard Rule 23). Decide per item: wire behind a flag + test + measure, or delete
+(Hard Rule 7).
 
-**What it does:** Replaces UCT descent with alpha-beta minimax over the lineage tree. The fuzzer is the maximizer (picks which seed to mutate), the target is the minimizer (pessimistic coverage response). Uses iterative deepening with move ordering (best UCT child first) for near-optimal $O(b^{d/2})$ pruning.
+| Phase | Symbol | Gap |
+|---|---|---|
+| 2 risk matrix | `core/analyzers/analyzer_elo.py::EloTracker.select_minimax_scheduler`, `record_match(target=)` | Live fuzzer builds `BayesianEloTracker` (`core/analyzer_registry.py`); `EloTracker(use_minimax=True)` never constructed. No `--use-minimax` CLI flag. Offline half works: `bench_paired.py --risk-matrix`. |
+| 3 comparison wall | `core/smt_solver.py::Z3Solver.solve_comparison_wall` / `_alpha_beta_wall` | No caller. Ordering fixed in `de9b09b4` (tested: `tests/test_regression_alpha_beta_wall_disjunctive.py`). |
+| 4 operator sequencing | `core/schedulers/op_monte_carlo.py::MonteCarloScheduler.select_op_minimax` | No caller, no test. |
+| 5 robust corpus | `services/corpus_manager.py::CorpusManager.minimax_robust_admission` → `core/rate_distortion.py::minimax_robust_corpus_admission` / `minimax_robust_pruning` | No caller, no test. |
 
-**Key methods:**
-- `select(tree, eligible)` — alpha-beta search with iterative deepening
-- `_alpha_beta(tree, key, depth, alpha, beta, maximizing, eligible)` — recursive minimax
+Validation owed if wired:
 
-**Validation:** A/B against the existing `MCTSSeedScheduler` on `targets/png_read` and `targets/ffmpeg_read` using `tools/bench_paired.py`.
+- **Phase 2:** heterogeneous set (png, jpeg, ffmpeg, sqlite). Prediction: lower
+  variance of edge-discovery rate vs Elo mix, 5–15% lower mean. Falsified if
+  indistinguishable from Elo (no scheduler catastrophically bad on any target).
+- **Phase 3:** beats Z3-only on ≥3 sequential walls (PNG signature → IHDR → IDAT
+  CRC → filter). Slower on single comparisons is expected, not a failure.
+- **Phase 4:** vs Thompson on comparison-wall targets; edge rate and
+  time-to-first-crash. Beam/depth cost must not regress EPS (Hard Rule 41).
+- **Phase 5:** vs greedy set-cover on resilience (remove one seed, measure
+  coverage drop).
 
----
+## 3. Open research questions
 
-## Phase 2: Minimax-Robust Scheduler Selection (P1)
+Only meaningful if the matching phase is kept.
 
-**Files:**
-- `src/fuzzer_tool/core/elo.py` — `EloTracker` extended with `risk_matrix` and `select_minimax_scheduler()`
-- `tools/bench_paired.py` — `--risk-matrix` flag for benchmark sweeps
-
-**What it does:** Maintains a risk matrix $R_{i,j}$ = worst-case regret of scheduler $i$ on target class $j$. The minimax scheduler choice is $\arg\min_i \max_j R_{i,j}$. Populated from benchmark sweeps or online match recording with a `target` parameter.
-
-**Key additions:**
-- `EloTracker.__init__(use_minimax=True)` — enables minimax mode
-- `EloTracker.record_match(..., target=None)` — populates risk matrix when target is specified
-- `EloTracker.select_minimax_scheduler(schedulers, targets)` — returns scheduler with minimum maximum regret
-- `bench_paired.py --risk-matrix` — outputs risk matrix from benchmark data
-
-**Validation:** Compare minimax-robust scheduler mix vs. Elo-optimal mix on heterogeneous target set (png, jpeg, ffmpeg, sqlite). Expect lower variance in edge-discovery rate at the cost of 5-15% lower mean.
-
----
-
-## Phase 3: Comparison-Wall Solving as Minimax Game (P1)
-
-**Files:**
-- `src/fuzzer_tool/core/cond_stmt.py` — `solve_comparison_wall_minimax()`
-- `src/fuzzer_tool/core/smt_solver.py` — `Z3Solver.solve_comparison_wall()`
-
-**What it does:** Models a comparison wall (sequence of interdependent comparisons) as a two-player game. The fuzzer (maximizer) chooses byte mutations; the target (minimizer) resists by selecting which comparison to check. Alpha-beta pruning cuts branches where a partial mutation already fails an early comparison.
-
-**Key functions:**
-- `solve_comparison_wall_minimax(wall, max_depth, branching_limit)` — returns `(mutation_sequence, minimax_value)`
-- `Z3Solver.solve_comparison_wall(conditions, max_mutations, max_depth)` — wraps the minimax solver for the Z3 pipeline
-
-**Validation:** Test on targets with 3+ sequential comparison walls (PNG: signature → IHDR → IDAT CRC → filter reconstruction). Compare against Z3-only solving.
-
----
-
-## Phase 4: Adversarial Operator Sequencing (P2)
-
-**Files:**
-- `src/fuzzer_tool/core/schedulers/monte_carlo.py` — `MonteCarloScheduler.select_op_minimax()`
-
-**What it does:** Extends the existing transition matrix into a full game-tree search. The fuzzer (maximizer) picks the next operator; the target (minimizer) models the coverage response. Uses alpha-beta pruning with beam search to keep computation tractable.
-
-**Key method:**
-- `select_op_minimax(operators, depth=3, beam_width=4)` — returns the operator that maximizes the minimax value
-
-**Validation:** Compare operator sequences generated by minimax vs. Thompson sampling on targets with comparison walls. Measure edge-discovery rate and time-to-first-crash.
-
----
-
-## Phase 5: Minimax Robust Corpus Admission (P2)
-
-**Files:**
-- `src/fuzzer_tool/core/rate_distortion.py` — `RateDistortionCorpus.minimax_robust_corpus_admission()` and `minimax_robust_pruning()`
-- `src/fuzzer_tool/services/corpus_manager.py` — `CorpusManager.minimax_robust_admission()`
-
-**What it does:** Applies the minimax estimator framework to corpus admission. Defines the "risk" of a corpus as the maximum edge-coverage loss if any single input is removed. The minimax-robust corpus minimizes this maximum loss: $\min_C \max_{c \in C} \text{coverage}(C \setminus \{c\})$.
-
-**Key methods:**
-- `minimax_robust_corpus_admission(seed_edges, max_seeds)` — selects seeds to minimize maximum regret
-- `minimax_robust_pruning(seed_edges, target_fraction)` — finds the smallest robust corpus preserving target coverage
-- `CorpusManager.minimax_robust_admission(candidate_seeds)` — integration point for new corpus seeds
-
-**Validation:** Compare minimax-robust corpus vs. greedy set-cover on corpus resilience (remove one seed, measure coverage drop).
-
----
-
-## Configuration
-
-| Flag | Effect |
-|------|--------|
-| `--use-minimax` | Enables minimax-robust scheduler selection in EloTracker |
-| `--risk-matrix` (bench_paired.py) | Outputs risk matrix from benchmark sweeps |
-
----
-
-## Relationship to Research Handover
-
-| Research Section | Implementation Status |
-|-----------------|----------------------|
-| 3.1 Minimax-robust scheduler | ✅ Phase 2 — `elo.py` risk_matrix |
-| 3.2 Alpha-beta MCTS | ✅ Phase 1 — `mcts.py` AlphaBetaMCTSSeedScheduler |
-| 3.3 Adversarial operator sequencing | ✅ Phase 4 — `monte_carlo.py` select_op_minimax |
-| 3.4 Comparison-wall minimax | ✅ Phase 3 — `cond_stmt.py` + `smt_solver.py` |
-| 3.5 Minimax robust corpus | ✅ Phase 5 — `rate_distortion.py` + `corpus_manager.py` |
-
----
-
-## Open Questions (from research handover, still open)
-
-1. Can the target model in alpha-beta be learned online?
-2. Is there a transposition table for the operator game tree?
-3. Does the minimax estimator framework extend to the corpus level?
-4. Can alpha-beta pruning be applied to the mutation level?
-5. What is the relationship between spectral gap and minimax value?
-
-These remain as future work. The current implementation uses fixed pessimistic heuristics for the target model; online learning is the natural next step.
+1. Transposition table for the operator game tree (Phase 4): same sequence via
+   different paths; cache minimax values.
+2. Alpha-beta at the mutation level (search mutations within one seed; target
+   response as minimizer) — the direct route to walls (Phase 3).
+3. Spectral gap (`MonteCarloScheduler.spectral_gap()`) vs minimax value: small
+   gap = stuck operator cycle, where lookahead should help most. Testable as a
+   gate for Phase 4.
