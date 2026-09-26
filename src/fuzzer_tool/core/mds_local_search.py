@@ -32,9 +32,9 @@ on large corpora where chasing the exact fixed point isn't worth it.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import combinations
-from typing import Callable
 
 # Brackets the old PoissonDiskAdmission fixed radius (0.25): a corpus of
 # uniform-score seeds maps every radius to the midpoint of this range, so
@@ -97,6 +97,29 @@ class MDSResult:
     swaps: int = 0
 
 
+def _try_swap(
+    pool: list[str],
+    selected: list[str],
+    weight: dict[str, float],
+    radius: dict[str, float],
+    jaccard_fn: Callable[[str, str], float],
+    c: int,
+) -> list[str] | None:
+    """First improving (up to c)-for-conflicts swap: new selection, or None if none gains."""
+    for size in range(1, c + 1):
+        for group in combinations(pool, size):
+            if any(_conflicts(a, b, radius, jaccard_fn) for a, b in combinations(group, 2)):
+                continue  # group isn't itself conflict-free
+            conflicting_selected = {
+                s for s in selected if any(_conflicts(g, s, radius, jaccard_fn) for g in group)
+            }
+            gain = sum(weight.get(g, 0.0) for g in group)
+            cost = sum(weight.get(s, 0.0) for s in conflicting_selected)
+            if gain > cost:
+                return [s for s in selected if s not in conflicting_selected] + list(group)
+    return None
+
+
 def local_search_mds(
     keys: list[str],
     weight: dict[str, float],
@@ -126,28 +149,15 @@ def local_search_mds(
     rounds = 0
     improved = True
     while improved and rounds < max_rounds:
-        improved = False
         rounds += 1
         pool = excluded[:candidate_limit]
-        for size in range(1, c + 1):
-            for group in combinations(pool, size):
-                if any(
-                    _conflicts(a, b, radius, jaccard_fn) for a, b in combinations(group, 2)
-                ):
-                    continue  # group isn't itself conflict-free
-                conflicting_selected = {
-                    s for s in selected if any(_conflicts(g, s, radius, jaccard_fn) for g in group)
-                }
-                gain = sum(weight.get(g, 0.0) for g in group)
-                cost = sum(weight.get(s, 0.0) for s in conflicting_selected)
-                if gain > cost:
-                    selected = [s for s in selected if s not in conflicting_selected] + list(group)
-                    selected_set = set(selected)
-                    excluded = [k for k in order if k not in selected_set]
-                    swaps += 1
-                    improved = True
-                    break
-            if improved:
-                break
+        swapped = _try_swap(pool, selected, weight, radius, jaccard_fn, c)
+        improved = swapped is not None
+        if swapped is None:
+            continue
+        selected = swapped
+        selected_set = set(selected)
+        excluded = [k for k in order if k not in selected_set]
+        swaps += 1
 
     return MDSResult(selected=selected, rounds=rounds, swaps=swaps)

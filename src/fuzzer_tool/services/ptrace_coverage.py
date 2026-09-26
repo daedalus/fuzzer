@@ -112,6 +112,30 @@ class PtraceCoverage:
             return
         shstr_offset = struct.unpack_from("<Q", data, shstr_off + 24)[0]
 
+        sections = self._scan_sections(data, e_shoff, e_shnum, e_shentsize, shstr_offset)
+        if sections is None:
+            return
+        symtab_sec, strtab_sec, dynsym_sec, dynstr_sec, text_start, text_end = sections
+
+        self._parse_symbol_table(data, symtab_sec, strtab_sec, text_start, text_end)
+        if not self.bb_addrs:
+            self._parse_symbol_table(data, dynsym_sec, dynstr_sec, text_start, text_end)
+
+        if self.deep_coverage:
+            for func_va, func_size in self._func_ranges:
+                self._collect_function_bbs(func_va, func_size)
+
+        # Exclude _start (entry point) — stack not set up yet, re-executing
+        # instructions there causes SIGSEGV from push to RSP=0.
+        # Must run after all collection (symbol table + decoder discovery).
+        self.bb_addrs = [a for a in set(self.bb_addrs) if a != self._elf_entry]
+        self.bb_addrs.sort()
+
+    @staticmethod
+    def _scan_sections(
+        data: bytes, e_shoff: int, e_shnum: int, e_shentsize: int, shstr_offset: int
+    ) -> tuple | None:
+        """Locate symtab/strtab/dynsym/dynstr headers and .text bounds; None if truncated."""
         symtab_sec = None
         strtab_sec = None
         dynsym_sec = None
@@ -121,7 +145,7 @@ class PtraceCoverage:
         for i in range(e_shnum):
             sh = e_shoff + i * e_shentsize
             if sh + e_shentsize > len(data):
-                return
+                return None
             sh_type = struct.unpack_from("<I", data, sh + 4)[0]
             sh_name_idx = struct.unpack_from("<I", data, sh)[0]
             name = data[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(
@@ -140,20 +164,7 @@ class PtraceCoverage:
                 text_start = struct.unpack_from("<Q", data, sh + 24)[0]
                 text_size = struct.unpack_from("<Q", data, sh + 32)[0]
                 text_end = text_start + text_size
-
-        self._parse_symbol_table(data, symtab_sec, strtab_sec, text_start, text_end)
-        if not self.bb_addrs:
-            self._parse_symbol_table(data, dynsym_sec, dynstr_sec, text_start, text_end)
-
-        if self.deep_coverage:
-            for func_va, func_size in self._func_ranges:
-                self._collect_function_bbs(func_va, func_size)
-
-        # Exclude _start (entry point) — stack not set up yet, re-executing
-        # instructions there causes SIGSEGV from push to RSP=0.
-        # Must run after all collection (symbol table + decoder discovery).
-        self.bb_addrs = [a for a in set(self.bb_addrs) if a != self._elf_entry]
-        self.bb_addrs.sort()
+        return symtab_sec, strtab_sec, dynsym_sec, dynstr_sec, text_start, text_end
 
     def _parse_symbol_table(
         self,
@@ -318,49 +329,63 @@ class PtraceCoverage:
 
         from fuzzer_tool.core.elf import _GRP_CALL, _GRP_INT, _GRP_JUMP, _GRP_RET, _decode_x86_64
 
+        groups = (_GRP_JUMP, _GRP_CALL, _GRP_RET, _GRP_INT)
         count = 0
         try:
             for insn in _decode_x86_64(func_bytes, scan_start):
                 if count >= max_discover or len(self.original_bytes) >= self.max_bps:
                     break
 
-                is_jump = _GRP_JUMP in insn.groups
-                is_call = _GRP_CALL in insn.groups
-                is_ret = _GRP_RET in insn.groups
-                is_int = _GRP_INT in insn.groups
-
-                new_targets = []
-                if is_jump and insn.op_str.startswith("0x"):
-                    target = int(insn.op_str, 16)
-                    if func_start <= target < func_start + func_size:
-                        new_targets.append(target)
-                    next_addr = insn.address + insn.length
-                    if func_start <= next_addr < func_start + func_size:
-                        new_targets.append(next_addr)
-                elif is_call or is_ret or is_int:
-                    next_addr = insn.address + insn.length
-                    if func_start <= next_addr < func_start + func_size:
-                        new_targets.append(next_addr)
-
+                new_targets = self._bb_targets(insn, groups, func_start, func_size)
                 for target in new_targets:
                     if target in self._discovered_bbs:
                         continue
                     self._discovered_bbs.add(target)
-                    abs_target = self._resolve_addr(target)
-                    try:
-                        val = self._read_memory(pid, abs_target)
-                        orig = val & 0xFF
-                        if orig != INT3:
-                            self.original_bytes[abs_target] = orig
-                            self._write_memory(pid, abs_target, (val & ~0xFF) | INT3)
-                            self.bb_addrs.append(target)
-                            count += 1
-                    except Exception:
-                        log.debug("Failed to install bp at %#x", target, exc_info=True)
+                    count += self._arm_discovered(pid, target)
         except Exception:
             log.debug("Failed to discover BBs from %#x", rel_addr, exc_info=True)
 
         return count
+
+    @staticmethod
+    def _bb_targets(insn, groups: tuple, func_start: int, func_size: int) -> list[int]:
+        """In-function BB starts implied by *insn*: jump target + fallthrough, or
+        the fallthrough after a call/ret/int. *groups* = (jump, call, ret, int) ids.
+        """
+        grp_jump, grp_call, grp_ret, grp_int = groups
+        is_jump = grp_jump in insn.groups
+        is_call = grp_call in insn.groups
+        is_ret = grp_ret in insn.groups
+        is_int = grp_int in insn.groups
+
+        new_targets = []
+        if is_jump and insn.op_str.startswith("0x"):
+            target = int(insn.op_str, 16)
+            if func_start <= target < func_start + func_size:
+                new_targets.append(target)
+            next_addr = insn.address + insn.length
+            if func_start <= next_addr < func_start + func_size:
+                new_targets.append(next_addr)
+        elif is_call or is_ret or is_int:
+            next_addr = insn.address + insn.length
+            if func_start <= next_addr < func_start + func_size:
+                new_targets.append(next_addr)
+        return new_targets
+
+    def _arm_discovered(self, pid: int, target: int) -> int:
+        """Install an INT3 at newly discovered BB *target*; 1 if armed, else 0."""
+        abs_target = self._resolve_addr(target)
+        try:
+            val = self._read_memory(pid, abs_target)
+            orig = val & 0xFF
+            if orig != INT3:
+                self.original_bytes[abs_target] = orig
+                self._write_memory(pid, abs_target, (val & ~0xFF) | INT3)
+                self.bb_addrs.append(target)
+                return 1
+        except Exception:
+            log.debug("Failed to install bp at %#x", target, exc_info=True)
+        return 0
 
     def resolve_base(self, pid: int):
         try:

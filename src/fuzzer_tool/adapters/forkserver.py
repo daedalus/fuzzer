@@ -291,14 +291,7 @@ class ForkserverRunner:
             self._proc.stdin.flush()
         except (BrokenPipeError, OSError):
             self._ready = False
-            if not self._restarting:
-                self._restarting = True
-                try:
-                    if self.start():
-                        return self.run_one(data)
-                finally:
-                    self._restarting = False
-            return -2, ""
+            return self._restart_retry(data, -2)
 
         # Threaded readline with timeout
         result = [None]
@@ -321,16 +314,29 @@ class ForkserverRunner:
                 proc.wait()
             _close_streams(proc)
             self._ready = False
-            if not self._restarting:
-                self._restarting = True
-                try:
-                    if self.start():
-                        return self.run_one(data)
-                finally:
-                    self._restarting = False
-            return -1, ""
+            return self._restart_retry(data, -1)
 
-        header = result[0]
+        return self._read_result(result[0])
+
+    def _restart_retry(self, data: bytes, fail_rc: int) -> tuple[int, str]:
+        """Restart the loader once and rerun *data*; ``(fail_rc, "")`` otherwise.
+
+        ``_restarting`` guards against unbounded recursion when the fresh
+        loader dies too.
+        """
+        if self._restarting:
+            return fail_rc, ""
+
+        self._restarting = True
+        try:
+            if self.start():
+                return self.run_one(data)
+        finally:
+            self._restarting = False
+        return fail_rc, ""
+
+    def _read_result(self, header) -> tuple[int, str]:
+        """Parse the ``RC <rc> <err_len>`` reply and read the stderr payload."""
         if not header:
             return -2, ""
 

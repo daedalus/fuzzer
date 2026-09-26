@@ -562,6 +562,31 @@ class CorpusManager:
         # a moment later and the original lost again. Absent in states written
         # before this was persisted, hence the "" default.
         f.original_invocation = state.get("invocation", "")
+        self._restore_havoc(state)
+        f._operators._rebuild_havoc_table()
+        f._corpus_size_history = array("I", state.get("corpus_size_history", []))
+        self._restore_seed_meta(state)
+        self._restore_subsystems(state)
+        if f.resume:
+            print(
+                f"[*] Resumed: {f.exec_count} execs, {f.crash_count} crashes, {len(f.corpus)} seeds"
+            )
+        sq_data = f._state_store.get("seed_quality")
+        if sq_data is not None and hasattr(f, "_seed_quality"):
+            f._seed_quality.load_state_dict(sq_data)
+        katz_data = f._state_store.get("katz")
+        if katz_data is not None and getattr(f, "_katz_channel", None) is not None:
+            f._katz_channel.load_state_dict(katz_data)
+        log.info(
+            "Fuzzer state loaded: execs=%d, crashes=%d, corpus=%d",
+            f.exec_count,
+            f.crash_count,
+            len(f.corpus),
+        )
+
+    def _restore_havoc(self, state: dict) -> None:
+        """Restore persisted havoc sub-op hit/trial counts (skip corrupt entries)."""
+        f = self.f
         havoc_stats = state.get("havoc_subop_stats") or {}
         for i, name in enumerate(HAVOC_SUB_OPS):
             saved = havoc_stats.get(name)
@@ -574,8 +599,10 @@ class CorpusManager:
             if trials >= 1.0 and hits >= 0.0:
                 f._operators._havoc_hits[i] = int(hits)
                 f._operators._havoc_trials[i] = int(trials)
-        f._operators._rebuild_havoc_table()
-        f._corpus_size_history = array("I", state.get("corpus_size_history", []))
+
+    def _restore_seed_meta(self, state: dict) -> None:
+        """Merge persisted per-seed metadata into f.seed_meta for loaded seeds."""
+        f = self.f
         saved_meta = state.get("seed_meta", {})
         for seed in f.corpus:
             # Hash key first, then the legacy seed.hex() key so state files
@@ -620,6 +647,10 @@ class CorpusManager:
                     f.seed_meta[seed]["redqueen_matches"] = [
                         (m[0], bytes.fromhex(m[1]), bytes.fromhex(m[2])) for m in rm_ser
                     ]
+
+    def _restore_subsystems(self, state: dict) -> None:
+        """Restore edge tracker, regime, checksum/PRNG learners and sensitivity."""
+        f = self.f
         et_data = f._state_store.get("edge_tracker")
         if et_data is not None:
             f._edge_tracker.from_dict(et_data)
@@ -642,31 +673,11 @@ class CorpusManager:
         sens_data = f._state_store.get("sensitivity")
         if sens_data is not None:
             f._sensitivity.load(sens_data)
-        if f.resume:
-            print(
-                f"[*] Resumed: {f.exec_count} execs, {f.crash_count} crashes, {len(f.corpus)} seeds"
-            )
-        sq_data = f._state_store.get("seed_quality")
-        if sq_data is not None and hasattr(f, "_seed_quality"):
-            f._seed_quality.load_state_dict(sq_data)
-        katz_data = f._state_store.get("katz")
-        if katz_data is not None and getattr(f, "_katz_channel", None) is not None:
-            f._katz_channel.load_state_dict(katz_data)
-        log.info(
-            "Fuzzer state loaded: execs=%d, crashes=%d, corpus=%d",
-            f.exec_count,
-            f.crash_count,
-            len(f.corpus),
-        )
 
     def save_crash(self, data: bytes, returncode: int, stderr: str) -> str | None:
         f = self.f
-        from fuzzer_tool.adapters.filesystem import (
-            classify_crash,
-            hash_data,
-            save_crashing_seed,
-        )
-        from fuzzer_tool.core.crash_metadata import CrashMetadata, find_nearest_corpus
+        from fuzzer_tool.adapters.filesystem import classify_crash
+        from fuzzer_tool.core.crash_metadata import CrashMetadata
 
         fault_addr = getattr(f, "_last_fault_addr", None)
 
@@ -703,77 +714,13 @@ class CorpusManager:
         # its own: keying by verdict.signature would leave every fuzzy-matched
         # crash reading a count of zero and so exempt from the bound.
         counted_sig = verdict.matched_signature or verdict.signature
-        if f.corpus_dir and (
-            verdict.novel or f.crash_sigs.get(counted_sig, 0) < CRASHING_SEEDS_PER_SIG
-        ):
-            save_crashing_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
+        self._keep_crashing_seed(data, verdict, counted_sig)
 
-        report = verdict.report
-        if report and report.is_valid() and verdict.signature not in f.crash_frames:
-            f.crash_frames[verdict.signature] = report.frames
+        self._record_frames(verdict)
 
         meta: CrashMetadata | None = None
         if verdict.novel:
-            meta = CrashMetadata()
-            meta.exec_count = f.exec_count
-            meta.corpus_size = len(f.corpus)
-            meta.target = f.target
-            meta.mutation_ops = list(f._last_ops_used)
-            meta.parent_sites = [s for _, s in getattr(f, "_last_ops_with_sites", [])]
-            meta.elapsed = f._stats.format_elapsed()
-
-            if f.corpus:
-                parent = f._last_parent_seed if hasattr(f, "_last_parent_seed") else None
-                if parent:
-                    meta.parent_seed_hash = hash_data(parent)
-
-            if not hasattr(f, "_target_sha256"):
-                try:
-                    f._target_sha256 = hashlib.sha256(Path(f.target).read_bytes()).hexdigest()[:16]
-                except Exception:
-                    f._target_sha256 = "unknown"
-            meta.target_sha256 = f._target_sha256
-
-            if f.corpus:
-                label, sim, diffs, _ = find_nearest_corpus(data, f.corpus)
-                meta.nearest_corpus_file = label
-                meta.nearest_similarity = sim
-                meta.diff_bytes = diffs
-
-            if hasattr(f, "_last_regs") and (f.ptrace_cov or f._last_regs):
-                meta.rip = f._last_regs.get("rip", 0)
-                meta.rsp = f._last_regs.get("rsp", 0)
-                meta.rbp = f._last_regs.get("rbp", 0)
-            if fault_addr is not None:
-                meta.fault_addr = f"0x{fault_addr:x}"
-
-            # Name the crashing input's fields and mark those changed against
-            # the parent seed. Cheap (one alignment) and novel-only; the causal
-            # search that says which field triggers the crash is a later step.
-            # A bug here must not lose the crash, so it is logged, not raised.
-            try:
-                explain_static(
-                    meta,
-                    data,
-                    parent=getattr(f, "_last_parent_seed", None),
-                    parent_hash=meta.parent_seed_hash,
-                    crash_hashes=f.crash_hashes,
-                    corpus_dir=f.corpus_dir,
-                    corpus=f.corpus,
-                    nearest_label=meta.nearest_corpus_file,
-                )
-            except Exception:
-                log.warning("crash field explanation failed", exc_info=True)
-
-            # Populate error_type from return code for subprocess/inprocess
-            # mode where ptrace isn't available and sanitizer reports are absent.
-            if not meta.error_type:
-                sig_name, _sig_num = _returncode_to_signal(returncode)
-                if sig_name is not None:
-                    meta.error_type = sig_name
-
-            # Embed the GDB crash replay in the report sidecar (best-effort).
-            meta.gdb_replay = _gdb_crash_replay(f, data, returncode)
+            meta = self._novel_crash_meta(data, returncode, fault_addr)
 
         result = save_crash(
             data,
@@ -812,21 +759,111 @@ class CorpusManager:
         else:
             f._last_crash_signature = None
         if result and getattr(f, "email_on_crash", None) is not None:
-            try:
-                from fuzzer_tool.services.sendmail import send_crash_email
-
-                send_crash_email(
-                    f.email_on_crash,
-                    target=str(f.target),
-                    base_name=str(result),
-                    crashes_dir=f.crashes_dir,
-                    returncode=returncode,
-                    exec_count=getattr(f, "exec_count", 0),
-                    stderr=stderr or "",
-                )
-            except Exception as exc:  # never let mail failure kill the campaign
-                print(f"[!] crash email failed: {exc}")
+            self._mail_crash(result, returncode, stderr)
         return result
+
+    def _record_frames(self, verdict) -> None:
+        """Remember the first valid stack frames seen for each crash signature."""
+        f = self.f
+        report = verdict.report
+        if report and report.is_valid() and verdict.signature not in f.crash_frames:
+            f.crash_frames[verdict.signature] = report.frames
+
+    def _keep_crashing_seed(self, data: bytes, verdict, counted_sig: str) -> None:
+        """Preserve the crashing input as irreplaceable corpus, bounded per signature."""
+        f = self.f
+        from fuzzer_tool.adapters.filesystem import save_crashing_seed
+
+        if f.corpus_dir and (
+            verdict.novel or f.crash_sigs.get(counted_sig, 0) < CRASHING_SEEDS_PER_SIG
+        ):
+            save_crashing_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
+
+    def _novel_crash_meta(self, data: bytes, returncode: int, fault_addr):
+        """Build the CrashMetadata sidecar for a novel crash (enrichment is novel-only)."""
+        f = self.f
+        from fuzzer_tool.adapters.filesystem import hash_data
+        from fuzzer_tool.core.crash_metadata import CrashMetadata, find_nearest_corpus
+
+        meta = CrashMetadata()
+        meta.exec_count = f.exec_count
+        meta.corpus_size = len(f.corpus)
+        meta.target = f.target
+        meta.mutation_ops = list(f._last_ops_used)
+        meta.parent_sites = [s for _, s in getattr(f, "_last_ops_with_sites", [])]
+        meta.elapsed = f._stats.format_elapsed()
+
+        if f.corpus:
+            parent = f._last_parent_seed if hasattr(f, "_last_parent_seed") else None
+            if parent:
+                meta.parent_seed_hash = hash_data(parent)
+
+        if not hasattr(f, "_target_sha256"):
+            try:
+                f._target_sha256 = hashlib.sha256(Path(f.target).read_bytes()).hexdigest()[:16]
+            except Exception:
+                f._target_sha256 = "unknown"
+        meta.target_sha256 = f._target_sha256
+
+        if f.corpus:
+            label, sim, diffs, _ = find_nearest_corpus(data, f.corpus)
+            meta.nearest_corpus_file = label
+            meta.nearest_similarity = sim
+            meta.diff_bytes = diffs
+
+        if hasattr(f, "_last_regs") and (f.ptrace_cov or f._last_regs):
+            meta.rip = f._last_regs.get("rip", 0)
+            meta.rsp = f._last_regs.get("rsp", 0)
+            meta.rbp = f._last_regs.get("rbp", 0)
+        if fault_addr is not None:
+            meta.fault_addr = f"0x{fault_addr:x}"
+
+        # Name the crashing input's fields and mark those changed against
+        # the parent seed. Cheap (one alignment) and novel-only; the causal
+        # search that says which field triggers the crash is a later step.
+        # A bug here must not lose the crash, so it is logged, not raised.
+        try:
+            explain_static(
+                meta,
+                data,
+                parent=getattr(f, "_last_parent_seed", None),
+                parent_hash=meta.parent_seed_hash,
+                crash_hashes=f.crash_hashes,
+                corpus_dir=f.corpus_dir,
+                corpus=f.corpus,
+                nearest_label=meta.nearest_corpus_file,
+            )
+        except Exception:
+            log.warning("crash field explanation failed", exc_info=True)
+
+        # Populate error_type from return code for subprocess/inprocess
+        # mode where ptrace isn't available and sanitizer reports are absent.
+        if not meta.error_type:
+            sig_name, _sig_num = _returncode_to_signal(returncode)
+            if sig_name is not None:
+                meta.error_type = sig_name
+
+        # Embed the GDB crash replay in the report sidecar (best-effort).
+        meta.gdb_replay = _gdb_crash_replay(f, data, returncode)
+        return meta
+
+    def _mail_crash(self, result, returncode: int, stderr: str) -> None:
+        """Send the crash e-mail; a mail failure never kills the campaign."""
+        f = self.f
+        try:
+            from fuzzer_tool.services.sendmail import send_crash_email
+
+            send_crash_email(
+                f.email_on_crash,
+                target=str(f.target),
+                base_name=str(result),
+                crashes_dir=f.crashes_dir,
+                returncode=returncode,
+                exec_count=getattr(f, "exec_count", 0),
+                stderr=stderr or "",
+            )
+        except Exception as exc:  # never let mail failure kill the campaign
+            print(f"[!] crash email failed: {exc}")
 
     def save_timeout(self, data: bytes) -> None:
         f = self.f
@@ -834,12 +871,7 @@ class CorpusManager:
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
         f = self.f
-        parent_depth = 0
-        if parent is not None:
-            parent_meta = f.seed_meta.get(parent)
-            if parent_meta is not None:
-                parent_depth = parent_meta.get("lineage_depth", 0)
-                parent_meta["child_count"] = parent_meta.get("child_count", 0) + 1
+        parent_depth = self._link_parent(parent)
 
         f._total_corpus_attempts += 1
         # Compute seed_key early: the Poisson-disk admission check (and the
@@ -885,50 +917,19 @@ class CorpusManager:
                 # Runs after the bloom/seen-hash novelty gate but before corpus
                 # insertion and heavy bookkeeping.  This prevents redundant seeds
                 # from entering the pipeline at all.
-                if getattr(f, "_use_poisson_disk_admission", False):
-                    # Lazy-init PoissonDiskAdmission on first use; the _edge_tracker
-                    # ._minhash reference is only valid after fuzzer construction completes.
-                    if f._poisson_admission is None:
-                        f._poisson_admission = PoissonDiskAdmission(f, f._poisson_disk_min_jaccard)
-                    decision = f._poisson_admission.check(data, seed_key)
-                    if decision == PoissonAdmissionDecision.REJECT_NEAR_DUP:
-                        f._duplicate_reject_count += 1
-                        f._poisson_reject_count += 1
-                        f._corpus_flux.record_rejection()
-                        # Record that this seed was rejected for redundancy — but
-                        # don't remove edges already tracked by record_edges; those
-                        # are part of corpus coverage history.  Just skip corpus entry.
-                        return
-                    elif decision == PoissonAdmissionDecision.ADMIT_NEAR_DUP:
-                        # Admit normally but flag as near-duplicate for deprioritized
-                        # weighting.  This preserves the seed's edges while signaling
-                        # it should be weighted lower in seed_key/population selection.
-                        is_near_duplicate = True
-                        f._poisson_near_dup_admit_count += 1
-                        # Drives deprioritize_near_duplicates(): under Poisson
-                        # admission that reactive scan only runs after 50 of
-                        # these, so without the increment it never runs.
-                        f._redundant_admission_count += 1
+                decision = self._poisson_gate(data, seed_key)
+                if decision == PoissonAdmissionDecision.REJECT_NEAR_DUP:
+                    # Record that this seed was rejected for redundancy — but
+                    # don't remove edges already tracked by record_edges; those
+                    # are part of corpus coverage history.  Just skip corpus entry.
+                    return
+                if decision == PoissonAdmissionDecision.ADMIT_NEAR_DUP:
+                    is_near_duplicate = True
 
                 f.corpus.append(data)
                 self._entropy_add(data)
             if f.ga:
-                import hashlib as _hashlib
-
-                from fuzzer_tool.core.ga import Individual
-
-                if _use_xxhash:
-                    seed_key = xxhash.xxh64(data).hexdigest()[:16]
-                else:
-                    seed_key = _hashlib.sha256(data).hexdigest()[:16]
-                edge_count = len(f._edge_tracker.seed_edges.get(seed_key, set()))
-                ind = Individual(
-                    data=data,
-                    edge_count=edge_count,
-                    generation=f.ga.generation,
-                    seed_key=seed_key,
-                )
-                f.ga.add_to_population(ind)
+                seed_key = self._ga_admit(data)
             f.seed_meta[data] = {
                 "fuzz_count": 0,
                 "coverage_edges": 0,  # will update below from edge tracker
@@ -943,35 +944,7 @@ class CorpusManager:
             }
             if is_near_duplicate:
                 f.seed_meta[data]["_is_near_duplicate"] = True
-            # Lineage edge: parent key + the ops/sites that produced this seed.
-            # Only recorded when a real parent exists (interesting/Metropolis
-            # paths in fuzz_one). Every in-tree caller now passes one; the
-            # parentless branch survives because `parent` is optional on the
-            # public Fuzzer.save_to_corpus, so an embedder can still insert a
-            # root. Gated on the flag so default runs stay byte-identical.
-            if f._use_lineage and parent is not None:
-                f.seed_meta[data].update(
-                    {
-                        "parent_key": self.seed_key(parent),
-                        "parent_ops": list(getattr(f, "_last_ops_used", [])),
-                        "parent_sites": [s for _, s in getattr(f, "_last_ops_with_sites", [])],
-                        "new_edge_count": getattr(f, "_last_new_edge_count", 0),
-                        "coverage_edges_baseline": 0,
-                    }
-                )
-            # Weizz P5: derived-tag inheritance. Length-preserving children
-            # reuse the parent StructureMap; length-changing ones inherit
-            # a dirty map so P2/P3 skip until the next collector pass.
-            if getattr(f, "weizz_tags", False) and parent is not None:
-                try:
-                    from fuzzer_tool.core.weizz_tags import inherit_tags_from_parent
-
-                    parent_meta = f.seed_meta.get(parent)
-                    inherited = inherit_tags_from_parent(parent_meta, parent, data)
-                    if inherited:
-                        f.seed_meta[data].update(inherited)
-                except Exception:  # noqa: BLE001 — never block corpus save
-                    pass
+            self._inherit_parent(data, parent)
             # Propagate actual coverage_edges from EdgeTracker — when called
             # from fuzz_one, the seed's edges were already recorded by
             # record_edges before save_to_corpus.  For a parentless insert
@@ -986,60 +959,166 @@ class CorpusManager:
             # stability grounds -- unstable edges get masked, the seed stays.
             if getattr(f, "_calibrate_stability", 0):
                 f._calibrate_seed_stability(data, n_runs=f._calibrate_stability)
-            f.markov.train(data)
-            f.markov_trained = f.markov.is_trained()
-            # Mutator feedback hook (e.g. wfc_reorder_learned's adjacency tables).
-            REGISTRY.notify_new_coverage(data, getattr(f, "_last_new_edge_count", 0))
-            if f.markov.snapshot_and_check_plateau():
-                log.info(
-                    "Markov plateau detected (JS=%.4f) — reducing generation rate",
-                    f.markov.last_js_divergence,
-                )
-            f._corpus_size_history.append(len(data))
-            # The contextual schedulers' corpus-size percentile feature reads
-            # this; nothing fed it before, so its guard (count >= 5) never
-            # passed and the feature was pinned at the neutral 0.5 for entire
-            # runs -- a constant column in a 14-dimensional LinUCB context,
-            # which is a second intercept direction rather than a no-op.
-            log_size_moments = getattr(f, "_corpus_log_size_stats", None)
-            if log_size_moments is not None:
-                log_size_moments.update(math.log1p(len(data)))
-            seed_moments = getattr(f, "_seed_size_moments", None)
-            if seed_moments is not None:
-                seed_moments.update(float(len(data)))
-            # Bloat early-warning on the *location* of recent sizes (seeds
-            # pinned at max_len, or the median doubling across the window).
-            # It used to be seed-size skewness > 2, which reads the shape of
-            # a heavy-tailed distribution rather than growth: it fired on
-            # nearly every check of a stationary lognormal corpus and never
-            # on real bloat, which piles sizes at the cap and skews left.
-            # See core/size_bloat.py. Rate-limited to once per 500 execs.
-            if f.exec_count - f._last_bloat_warn_exec >= 500:
-                reason = seed_size_bloat(f._corpus_size_history, f.max_len)
-                if reason is not None:
-                    f._last_bloat_warn_exec = f.exec_count
-                    log.warning("Corpus bloat warning: %s — minimizing", reason)
-                    f._defer_minimize()
-            if len(f._corpus_size_history) > 1000:
-                f._corpus_size_history = f._corpus_size_history[-500:]
-            # Display-only (P2-4): the report reads the rule, nothing acts on it.
-            if f._corpus_secretary:
-                f._corpus_secretary.observe(f._stats.discovery_rate())
-            if f.max_corpus > 0 and len(f.corpus) > f.max_corpus:
-                f._defer_minimize()
-            if len(f._corpus_size_history) >= 100:
-                sorted_sizes = sorted(f._corpus_size_history)
-                p90 = sorted_sizes[-len(sorted_sizes) // 10]
-                # Track the p90 of recent seed sizes in both directions. This
-                # was max(f.max_len, ...), a one-way ratchet: once a handful of
-                # large seeds pushed p90 up, max_len never came back down, so
-                # mutation kept producing larger seeds, which kept p90 up. That
-                # is a positive feedback loop into exactly the bloat the
-                # warning above (core/size_bloat.py) reports, and minimizing
-                # the corpus could not undo it. The configured max_len is the floor.
-                f.max_len = min(max(p90 * 2, f._max_len_floor), 65536)
+            self._after_admit(data)
         else:
             f._duplicate_reject_count += 1
+
+    def _link_parent(self, parent: bytes | None) -> int:
+        """Bump the parent's child_count; return its lineage depth (0 if unknown)."""
+        f = self.f
+        parent_depth = 0
+        if parent is not None:
+            parent_meta = f.seed_meta.get(parent)
+            if parent_meta is not None:
+                parent_depth = parent_meta.get("lineage_depth", 0)
+                parent_meta["child_count"] = parent_meta.get("child_count", 0) + 1
+        return parent_depth
+
+    def _poisson_gate(self, data: bytes, seed_key: str) -> PoissonAdmissionDecision | None:
+        """Poisson-disk near-duplicate check; updates counters. None when disabled."""
+        f = self.f
+        if not getattr(f, "_use_poisson_disk_admission", False):
+            return None
+
+        # Lazy-init PoissonDiskAdmission on first use; the _edge_tracker
+        # ._minhash reference is only valid after fuzzer construction completes.
+        if f._poisson_admission is None:
+            f._poisson_admission = PoissonDiskAdmission(f, f._poisson_disk_min_jaccard)
+        decision = f._poisson_admission.check(data, seed_key)
+        if decision == PoissonAdmissionDecision.REJECT_NEAR_DUP:
+            f._duplicate_reject_count += 1
+            f._poisson_reject_count += 1
+            f._corpus_flux.record_rejection()
+        elif decision == PoissonAdmissionDecision.ADMIT_NEAR_DUP:
+            # Admit normally but flag as near-duplicate for deprioritized
+            # weighting.  This preserves the seed's edges while signaling
+            # it should be weighted lower in seed_key/population selection.
+            f._poisson_near_dup_admit_count += 1
+            # Drives deprioritize_near_duplicates(): under Poisson
+            # admission that reactive scan only runs after 50 of
+            # these, so without the increment it never runs.
+            f._redundant_admission_count += 1
+        return decision
+
+    def _ga_admit(self, data: bytes) -> str:
+        """Add *data* to the GA population; return the GA seed key used."""
+        f = self.f
+        import hashlib as _hashlib
+
+        from fuzzer_tool.core.ga import Individual
+
+        if _use_xxhash:
+            seed_key = xxhash.xxh64(data).hexdigest()[:16]
+        else:
+            seed_key = _hashlib.sha256(data).hexdigest()[:16]
+        edge_count = len(f._edge_tracker.seed_edges.get(seed_key, set()))
+        ind = Individual(
+            data=data,
+            edge_count=edge_count,
+            generation=f.ga.generation,
+            seed_key=seed_key,
+        )
+        f.ga.add_to_population(ind)
+        return seed_key
+
+    def _inherit_parent(self, data: bytes, parent: bytes | None) -> None:
+        """Record the lineage edge and Weizz tags inherited from *parent*."""
+        f = self.f
+        # Lineage edge: parent key + the ops/sites that produced this seed.
+        # Only recorded when a real parent exists (interesting/Metropolis
+        # paths in fuzz_one). Every in-tree caller now passes one; the
+        # parentless branch survives because `parent` is optional on the
+        # public Fuzzer.save_to_corpus, so an embedder can still insert a
+        # root. Gated on the flag so default runs stay byte-identical.
+        if f._use_lineage and parent is not None:
+            f.seed_meta[data].update(
+                {
+                    "parent_key": self.seed_key(parent),
+                    "parent_ops": list(getattr(f, "_last_ops_used", [])),
+                    "parent_sites": [s for _, s in getattr(f, "_last_ops_with_sites", [])],
+                    "new_edge_count": getattr(f, "_last_new_edge_count", 0),
+                    "coverage_edges_baseline": 0,
+                }
+            )
+        # Weizz P5: derived-tag inheritance. Length-preserving children
+        # reuse the parent StructureMap; length-changing ones inherit
+        # a dirty map so P2/P3 skip until the next collector pass.
+        if getattr(f, "weizz_tags", False) and parent is not None:
+            try:
+                from fuzzer_tool.core.weizz_tags import inherit_tags_from_parent
+
+                parent_meta = f.seed_meta.get(parent)
+                inherited = inherit_tags_from_parent(parent_meta, parent, data)
+                if inherited:
+                    f.seed_meta[data].update(inherited)
+            except Exception:  # noqa: BLE001 — never block corpus save
+                pass
+
+    def _after_admit(self, data: bytes) -> None:
+        """Post-admission bookkeeping: Markov, size stats, bloat and max_len tracking."""
+        f = self.f
+        f.markov.train(data)
+        f.markov_trained = f.markov.is_trained()
+        # Mutator feedback hook (e.g. wfc_reorder_learned's adjacency tables).
+        REGISTRY.notify_new_coverage(data, getattr(f, "_last_new_edge_count", 0))
+        if f.markov.snapshot_and_check_plateau():
+            log.info(
+                "Markov plateau detected (JS=%.4f) — reducing generation rate",
+                f.markov.last_js_divergence,
+            )
+        f._corpus_size_history.append(len(data))
+        # The contextual schedulers' corpus-size percentile feature reads
+        # this; nothing fed it before, so its guard (count >= 5) never
+        # passed and the feature was pinned at the neutral 0.5 for entire
+        # runs -- a constant column in a 14-dimensional LinUCB context,
+        # which is a second intercept direction rather than a no-op.
+        log_size_moments = getattr(f, "_corpus_log_size_stats", None)
+        if log_size_moments is not None:
+            log_size_moments.update(math.log1p(len(data)))
+        seed_moments = getattr(f, "_seed_size_moments", None)
+        if seed_moments is not None:
+            seed_moments.update(float(len(data)))
+        # Bloat early-warning on the *location* of recent sizes (seeds
+        # pinned at max_len, or the median doubling across the window).
+        # It used to be seed-size skewness > 2, which reads the shape of
+        # a heavy-tailed distribution rather than growth: it fired on
+        # nearly every check of a stationary lognormal corpus and never
+        # on real bloat, which piles sizes at the cap and skews left.
+        # See core/size_bloat.py. Rate-limited to once per 500 execs.
+        if f.exec_count - f._last_bloat_warn_exec >= 500:
+            reason = seed_size_bloat(f._corpus_size_history, f.max_len)
+            if reason is not None:
+                f._last_bloat_warn_exec = f.exec_count
+                log.warning("Corpus bloat warning: %s — minimizing", reason)
+                f._defer_minimize()
+        if len(f._corpus_size_history) > 1000:
+            f._corpus_size_history = f._corpus_size_history[-500:]
+        # Display-only (P2-4): the report reads the rule, nothing acts on it.
+        if f._corpus_secretary:
+            f._corpus_secretary.observe(f._stats.discovery_rate())
+        if f.max_corpus > 0 and len(f.corpus) > f.max_corpus:
+            f._defer_minimize()
+        if len(f._corpus_size_history) >= 100:
+            sorted_sizes = sorted(f._corpus_size_history)
+            p90 = sorted_sizes[-len(sorted_sizes) // 10]
+            # Track the p90 of recent seed sizes in both directions. This
+            # was max(f.max_len, ...), a one-way ratchet: once a handful of
+            # large seeds pushed p90 up, max_len never came back down, so
+            # mutation kept producing larger seeds, which kept p90 up. That
+            # is a positive feedback loop into exactly the bloat the
+            # warning above (core/size_bloat.py) reports, and minimizing
+            # the corpus could not undo it. The configured max_len is the floor.
+            f.max_len = min(max(p90 * 2, f._max_len_floor), 65536)
+
+    def _edge_snapshot(self) -> set[int] | None:
+        """Edge ids of the last run from SHM or ptrace; None without coverage."""
+        f = self.f
+        if f.shm_cov:
+            return f.shm_cov.get_edge_ids()
+        if f.ptrace_cov:
+            bm = bytes(f.ptrace_cov.edge_map)
+            return {i for i, v in enumerate(bm) if v}
+        return None
 
     def trim_new_coverage(self, data: bytes, parent: bytes) -> None:
         f = self.f
@@ -1053,12 +1132,8 @@ class CorpusManager:
         if len(data) <= 16:
             return
 
-        if f.shm_cov:
-            current_edges = f.shm_cov.get_edge_ids()
-        elif f.ptrace_cov:
-            bm = bytes(f.ptrace_cov.edge_map)
-            current_edges = {i for i, v in enumerate(bm) if v}
-        else:
+        current_edges = self._edge_snapshot()
+        if current_edges is None:
             return
 
         trimmed = data[: len(data) // 2]
@@ -1066,12 +1141,8 @@ class CorpusManager:
         if rc in (-2, -1):
             return
 
-        if f.shm_cov:
-            trimmed_edges = f.shm_cov.get_edge_ids()
-        elif f.ptrace_cov:
-            bm = bytes(f.ptrace_cov.edge_map)
-            trimmed_edges = {i for i, v in enumerate(bm) if v}
-        else:
+        trimmed_edges = self._edge_snapshot()
+        if trimmed_edges is None:
             return
 
         if not trimmed_edges.issubset(current_edges):
@@ -1215,6 +1286,76 @@ class CorpusManager:
                 unique.append(seed)
         del seen  # free intermediate seed-hash set
 
+        irreplaceable_seeds, fresh_seeds = self._set_aside(unique)
+        stale_ratio = self._stale_ratio(unique)
+        target_size = self._base_target(unique, stale_ratio)
+        mandatory, target_size = self._cover_mandatory(unique, target_size)
+
+        if self._over_budget(unique, target_size):
+            unique = self._select_budget(unique, mandatory, target_size)
+
+        # Save set-cover mandatory seeds to irreplaceable/ so they survive
+        # future pruning cycles. Remove the original from seeds/ to avoid
+        # duplicates on disk.
+        if mandatory and f.corpus_dir:
+            self._promote_mandatory(unique, mandatory)
+
+        # Re-add fresh seeds that were set aside before minimization.
+        # They haven't been fuzzed yet and need a chance to prove their value.
+        if fresh_seeds:
+            unique = fresh_seeds + unique
+
+        # Re-add irreplaceable seeds that were set aside before minimization.
+        # They are never pruned.
+        if irreplaceable_seeds:
+            unique = unique + irreplaceable_seeds
+
+        self._prune_lineage(unique, fresh_seeds + irreplaceable_seeds, mandatory)
+
+        self._recover_uncovered(unique, mandatory)
+
+        # Bootstrap percolation post-pass: capture transitive redundancy that
+        # single-pass greedy set-cover leaves behind. Disabled by default.
+        if getattr(f, "_use_bootstrap", False) and len(unique) > 1:
+            unique = self._bootstrap_pass(unique)
+
+        removed = len(f.corpus) - len(unique)
+        if removed > 0:
+            self._commit_minimize(unique, removed, stale_ratio)
+
+    def _over_budget(self, unique: list[bytes], target_size: int) -> bool:
+        """True when *unique* exceeds the seed-count or byte budget."""
+        f = self.f
+        return len(unique) > target_size or (
+            f.max_corpus_bytes > 0 and sum(len(s) for s in unique) > f.max_corpus_bytes
+        )
+
+    def _promote_mandatory(self, unique: list[bytes], mandatory: set[int]) -> None:
+        """Promote every set-cover mandatory seed in *unique* to irreplaceable/."""
+        for seed in unique:
+            if id(seed) in mandatory:
+                self._promote_seed(seed)
+
+    def _bootstrap_pass(self, unique: list[bytes]) -> list[bytes]:
+        """Bootstrap-percolation minimization of *unique* (transitive redundancy)."""
+        f = self.f
+        from fuzzer_tool.core.percolation import bootstrap_minimize_corpus
+
+        unique, bootstrap_removed = bootstrap_minimize_corpus(
+            unique, f._edge_tracker, k=getattr(f, "_bootstrap_k", 1)
+        )
+        if bootstrap_removed:
+            log.info(
+                "Bootstrap percolation removed %d seeds (transitive redundancy)",
+                len(bootstrap_removed),
+            )
+        return unique
+
+    def _set_aside(self, unique: list[bytes]) -> tuple[list[bytes], list[bytes]]:
+        """Remove never-pruned seeds from *unique*: (irreplaceable, fresh)."""
+        f = self.f
+        from fuzzer_tool.adapters.filesystem import hash_data
+
         # Irreplaceable seeds (loaded from corpus/seeds/irreplaceable/) are never pruned.
         # Separate them from the unique pool before minimization; re-add after.
         irreplaceable_seeds: list[bytes] = []
@@ -1232,7 +1373,11 @@ class CorpusManager:
             if meta and meta["fuzz_count"] == 0:
                 fresh_seeds.append(seed)
                 unique.remove(seed)
+        return irreplaceable_seeds, fresh_seeds
 
+    def _stale_ratio(self, unique: list[bytes]) -> float:
+        """Fraction of seeds judged stale (heuristic, or Bayesian if higher)."""
+        f = self.f
         stale_count = 0
         for seed in unique:
             meta = f.seed_meta.get(seed)
@@ -1251,28 +1396,31 @@ class CorpusManager:
         # For n = fuzz_count and ε = 0.01, this gives a simpler approximation:
         #   P(stale) ≈ 1 - exp(-fuzz_count * 0.01)
         # which matches the Beta CDF asymptotically and avoids the Beta integral.
-        bayesian_stale_ratio = stale_ratio
-        if f._use_bayesian and f._seed_quality:
-            bayesian_stale_count = 0
-            for seed in unique:
-                sk = self.seed_key(seed)
-                meta = f.seed_meta.get(seed)
-                if not meta:
-                    continue
-                fuzz = meta.get("fuzz_count", 0)
-                if fuzz < 5:
-                    continue
-                # P(discovery_prob < 0.01 | 0 discoveries in fuzz_count attempts)
-                # = Beta.cdf(0.01, alpha=1, beta=1+fuzz_count)
-                a, b = 1.0, 1.0 + fuzz
-                # Mean of Beta = a/(a+b). If the posterior mean is below 0.01,
-                # the seed is likely stale.
-                if a / (a + b) < 0.01:
-                    bayesian_stale_count += 1
-            bayesian_stale_ratio = bayesian_stale_count / max(len(unique), 1)
-            # Use whichever stale ratio is higher (more conservative)
-            stale_ratio = max(stale_ratio, bayesian_stale_ratio)
+        if not (f._use_bayesian and f._seed_quality):
+            return stale_ratio
 
+        bayesian_stale_count = 0
+        for seed in unique:
+            meta = f.seed_meta.get(seed)
+            if not meta:
+                continue
+            fuzz = meta.get("fuzz_count", 0)
+            if fuzz < 5:
+                continue
+            # P(discovery_prob < 0.01 | 0 discoveries in fuzz_count attempts)
+            # = Beta.cdf(0.01, alpha=1, beta=1+fuzz_count)
+            a, b = 1.0, 1.0 + fuzz
+            # Mean of Beta = a/(a+b). If the posterior mean is below 0.01,
+            # the seed is likely stale.
+            if a / (a + b) < 0.01:
+                bayesian_stale_count += 1
+        bayesian_stale_ratio = bayesian_stale_count / max(len(unique), 1)
+        # Use whichever stale ratio is higher (more conservative)
+        return max(stale_ratio, bayesian_stale_ratio)
+
+    def _base_target(self, unique: list[bytes], stale_ratio: float) -> int:
+        """Corpus size budget: max_corpus or edge count, shrunk by staleness."""
+        f = self.f
         if f.max_corpus > 0:
             target_size = f.max_corpus
         else:
@@ -1288,7 +1436,11 @@ class CorpusManager:
                 target_size = max(target_size, int(len(unique) * (1.0 - stale_ratio)))
             else:
                 target_size = int(len(unique) * (1.0 - stale_ratio))
+        return target_size
 
+    def _cover_mandatory(self, unique: list[bytes], target_size: int) -> tuple[set[int], int]:
+        """Greedy set-cover ids (by id(seed)) and the target size floored by them."""
+        f = self.f
         # Greedy set-cover is O(n²) against the full seed list, so for large
         # corpora we first reduce the search space to one cheap candidate per
         # edge.  That bounds the inner loop by edge count rather than seed
@@ -1297,7 +1449,6 @@ class CorpusManager:
         all_edges = et.cumulative_edges if et and et.cumulative_edges else set()
         mandatory: set[int] = set()
         if all_edges and et.seed_edges:
-            covered: set[int] = set()
             seed_edge_map: dict[int, set[int]] = {}
             for seed in unique:
                 sk = self.seed_key(seed)
@@ -1305,337 +1456,361 @@ class CorpusManager:
                 if s_edges:
                     seed_edge_map[id(seed)] = s_edges
             if seed_edge_map:
-                # Terminate against what these seeds can actually cover, not
-                # against cumulative_edges. EdgeTracker._prune_tracked_seeds drops
-                # entries from seed_edges once past max_tracked_seeds (200,000
-                # since fe8fd42, up from 200 -- so in practice it no longer
-                # fires at all; see docs/TODO.md) but
-                # never removes their edges from cumulative_edges, so on any run
-                # past 200 seeds all_edges is a strict superset of anything the
-                # loop can reach. `covered != all_edges` was therefore permanently
-                # true: the loop never converged, always ran to best_gain == 0, and
-                # selected every seed holding a unique edge — making `mandatory`,
-                # and the target_size floor derived from it, meaningless.
-                coverable = set().union(*seed_edge_map.values()) if seed_edge_map else set()
-                candidate_ids: set[int] = set(seed_edge_map.keys())
-                if len(candidate_ids) > 5000:
-                    mean_us = f.mean_exec_time() * 1_000_000
-                    edge_to_seeds: dict[int, list[tuple[float, int]]] = {}
-                    for seed in unique:
-                        sid = id(seed)
-                        if sid not in seed_edge_map:
-                            continue
-                        meta = f.seed_meta.get(seed, {})
-                        exec_us = seed_exec_us(meta, mean_us)
-                        input_size = max(1, meta.get("input_size", 1))
-                        cost = exec_us * input_size
-                        for edge in seed_edge_map[sid]:
-                            edge_to_seeds.setdefault(edge, []).append((cost, sid))
-                    candidate_ids = {min(candidates)[1] for candidates in edge_to_seeds.values()}
-                while covered != coverable:
-                    best_seed = None
-                    best_gain = 0
-                    for sid in candidate_ids:
-                        if sid not in seed_edge_map:
-                            continue
-                        gain = len(seed_edge_map[sid] - covered)
-                        if gain > best_gain:
-                            best_gain = gain
-                            best_seed = sid
-                    if best_seed is None:
-                        break
-                    covered |= seed_edge_map[best_seed]
-                    mandatory.add(best_seed)
+                mandatory = self._greedy_cover(unique, seed_edge_map)
                 target_size = max(target_size, len(mandatory))
-                del seed_edge_map  # free edge map after set-cover
         elif all_edges or f.corpus:
             productive = sum(
                 1 for seed in unique if f.seed_meta.get(seed, {}).get("coverage_edges", 0) > 0
             )
             if productive > 0:
                 target_size = max(target_size, productive)
+        return mandatory, target_size
 
-        if len(unique) > target_size or (
-            f.max_corpus_bytes > 0 and sum(len(s) for s in unique) > f.max_corpus_bytes
-        ):
-            # Split into mandatory (set-cover essential) and optional.
-            mandatory_seeds = [s for s in unique if id(s) in mandatory]
-            optional = [s for s in unique if id(s) not in mandatory]
-            scored = []
-            for seed in optional:
-                seed_key = self.seed_key(seed)
-                meta = f.seed_meta.get(seed)
-                fuzz = meta["fuzz_count"] if meta else 0
-                discovered = meta["coverage_edges"] if meta else 0
-
-                # Bayesian seed score: use the posterior mean from
-                # BayesianSeedQuality when available.
-                if f._use_bayesian and f._seed_quality:
-                    seed_key_in_bq = seed_key in f._seed_quality._alpha
-                    if seed_key_in_bq:
-                        mean = f._seed_quality.posterior_mean(seed_key)
-                        # Scale posterior mean to a useful range for scoring:
-                        # posterior mean ~ [0,1]. Multiply by discovered * 10
-                        # to get a score on a comparable scale to the heuristic.
-                        edge_score = mean * 10.0 + (discovered * 5.0 if discovered > 0 else 0.0)
-                    else:
-                        edge_score = discovered * 10
-                        if fuzz > 0 and discovered == 0:
-                            edge_score *= max(0.01, 1.0 / (1.0 + fuzz * 0.01))
-                        else:
-                            edge_score += 1.0 / max(fuzz, 1)
-                else:
-                    edge_score = discovered * 10
-                    if fuzz > 0 and discovered == 0:
-                        edge_score *= max(0.01, 1.0 / (1.0 + fuzz * 0.01))
-                    else:
-                        edge_score += 1.0 / max(fuzz, 1)
-
-                wasserstein_weight = f._edge_tracker.compute_wasserstein_weight(seed_key)
-
-                # PPMD novelty: incompressible seeds are more diverse
-                ppmd_bonus = 1.0
-                if getattr(f, "_ppmd", None) and f._ppmd.enabled:
-                    ppmd_bonus = 1.0 + f._ppmd.compute_seed_novelty(seed) * 0.5
-
-                # Quasiperiodicity novelty: seeds with no short internal
-                # cover are structurally more diverse (see
-                # core/quasiperiodicity.py) -- same shape as the PPMD bonus,
-                # a different and independent redundancy signal.
-                qp_bonus = 1.0
-                if getattr(f, "_qp", None) and f._qp.enabled:
-                    qp_bonus = 1.0 + f._qp.compute_seed_novelty(seed) * 0.5
-
-                score = edge_score * wasserstein_weight * ppmd_bonus * qp_bonus
-                scored.append((score, seed))
-            scored.sort(key=lambda x: x[0], reverse=True)
-            if f.max_corpus_bytes > 0:
-                # Knapsack: sort optional seeds by value/weight density
-                # (value = coverage score, weight = seed byte size).
-                # Greedy density-ordering is a well-known 2-approximation
-                # for 0/1 knapsack.
-                scored.sort(
-                    key=lambda x: x[0] / max(len(x[1]), 1),
-                    reverse=True,
-                )
-                selected = []
-                total_bytes = sum(len(s) for s in mandatory_seeds)
-                for _score, seed in scored:
-                    seed_bytes = len(seed)
-                    if total_bytes + seed_bytes <= f.max_corpus_bytes:
-                        selected.append(seed)
-                        total_bytes += seed_bytes
-                unique = mandatory_seeds + selected
-            elif getattr(f, "_use_mds_select", False) and f._edge_tracker is not None:
-                unique = mandatory_seeds + self._mds_select_optional(
-                    scored, target_size, len(mandatory_seeds)
-                )
-            else:
-                # Count-budget: keep top-K by score (original behavior)
-                budget = target_size - len(mandatory_seeds)
-                keep = min(budget, len(scored))
-                unique = mandatory_seeds + [s for _, s in scored[:keep]]
-            del scored  # free scored list after sorting
-
-        # Save set-cover mandatory seeds to irreplaceable/ so they survive
-        # future pruning cycles. Remove the original from seeds/ to avoid
-        # duplicates on disk.
-        if mandatory and f.corpus_dir:
-            for seed in unique:
-                if id(seed) in mandatory:
-                    h = hash_data(seed)
-                    if h not in f.irreplaceable_hashes:
-                        save_irreplaceable(
-                            seed,
-                            f.corpus_dir,
-                            f.seen_hashes,
-                            f.irreplaceable_hashes,
-                            f.bloom,
-                        )
-                        # Remove the original from seeds/ to avoid duplicate
-                        seeds_sub = f.corpus_dir / "seeds" / h[:2] / f"id_{h}"
-                        if seeds_sub.exists():
-                            seeds_sub.unlink()
-
-        # Re-add fresh seeds that were set aside before minimization.
-        # They haven't been fuzzed yet and need a chance to prove their value.
-        if fresh_seeds:
-            unique = fresh_seeds + unique
-
-        # Re-add irreplaceable seeds that were set aside before minimization.
-        # They are never pruned.
-        if irreplaceable_seeds:
-            unique = unique + irreplaceable_seeds
-
-        # Lineage branch pruning: a dropped seed whose subtree contributed
-        # < 1.0 structural edge-weight and gained no coverage since the last
-        # minimize is an unproductive branch — drop the whole subtree instead
-        # of just the low-scoring seed. Mandatory/fresh/irreplaceable seeds
-        # are protected (they were explicitly kept above).
-        if f._use_lineage and getattr(f, "_lineage", None) is not None:
-            key_to_seed = {self.seed_key(s): s for s in f.corpus}
-            kept_keys = {self.seed_key(s) for s in unique}
-            protected = {id(s) for s in fresh_seeds + irreplaceable_seeds}
-            if mandatory:
-                protected |= {id(s) for s in unique if id(s) in mandatory}
-
-            def _coverage_fn(k: str) -> tuple[int, int]:
-                seed = key_to_seed.get(k)
-                if seed is None:
-                    return (0, 0)
-                meta = f.seed_meta.get(seed, {})
-                return (
-                    meta.get("coverage_edges", 0),
-                    meta.get("coverage_edges_baseline", 0),
-                )
-
-            # subtree_weight is a volume: a wide branch of one-edge children
-            # clears the < 1.0 gate that a narrow branch of high-yield
-            # children fails, so pruning was biased toward keeping the
-            # spray. pagerank_credit divides each child's contribution by
-            # its sibling count, which ranks branches by yield per mutation;
-            # requiring both keeps a branch alive if either measure rates it.
-            credit = f._lineage.pagerank_credit()
-            n_credited = sum(1 for v in credit.values() if v > 0.0)
-            # A share below 1/n of the distributed credit is below what an
-            # average productive node holds.
-            credit_floor = (1.0 / n_credited) if n_credited else 0.0
-
-            subtree_drops: set[str] = set()
-            for seed in f.corpus:
-                sk = self.seed_key(seed)
-                if sk in kept_keys or sk in subtree_drops:
+    def _greedy_cover(self, unique: list[bytes], seed_edge_map: dict[int, set[int]]) -> set[int]:
+        """Greedy max-gain set cover over *seed_edge_map*; returns chosen seed ids."""
+        covered: set[int] = set()
+        mandatory: set[int] = set()
+        # Terminate against what these seeds can actually cover, not
+        # against cumulative_edges. EdgeTracker._prune_tracked_seeds drops
+        # entries from seed_edges once past max_tracked_seeds (200,000
+        # since fe8fd42, up from 200 -- so in practice it no longer
+        # fires at all; see docs/TODO.md) but
+        # never removes their edges from cumulative_edges, so on any run
+        # past 200 seeds all_edges is a strict superset of anything the
+        # loop can reach. `covered != all_edges` was therefore permanently
+        # true: the loop never converged, always ran to best_gain == 0, and
+        # selected every seed holding a unique edge — making `mandatory`,
+        # and the target_size floor derived from it, meaningless.
+        coverable = set().union(*seed_edge_map.values()) if seed_edge_map else set()
+        candidate_ids: set[int] = set(seed_edge_map.keys())
+        if len(candidate_ids) > 5000:
+            candidate_ids = self._cheap_candidates(unique, seed_edge_map)
+        while covered != coverable:
+            best_seed = None
+            best_gain = 0
+            for sid in candidate_ids:
+                if sid not in seed_edge_map:
                     continue
-                if (
-                    f._lineage.recent_credit(sk, _coverage_fn) == 0.0
-                    and f._lineage.subtree_weight(sk) < 1.0
-                    and credit.get(sk, 0.0) < credit_floor
-                ):
-                    for k in f._lineage.subtree_keys(sk):
-                        s = key_to_seed.get(k)
-                        if s is not None and id(s) not in protected and s in unique:
-                            unique.remove(s)
-                        subtree_drops.add(k)
-            # Reset the credit clock: record current coverage per seed so the
-            # next minimize measures the delta gained since this one.
-            for seed in f.corpus:
-                meta = f.seed_meta.get(seed)
-                if meta is not None:
-                    meta["coverage_edges_baseline"] = meta.get("coverage_edges", 0)
+                gain = len(seed_edge_map[sid] - covered)
+                if gain > best_gain:
+                    best_gain = gain
+                    best_seed = sid
+            if best_seed is None:
+                break
+            covered |= seed_edge_map[best_seed]
+            mandatory.add(best_seed)
+        return mandatory
 
-        # Post-pruning coverage verification: recover seeds whose unique edges
-        # were dropped by scoring or lineage pruning.
+    def _cheap_candidates(
+        self, unique: list[bytes], seed_edge_map: dict[int, set[int]]
+    ) -> set[int]:
+        """One lowest-cost (exec_us * size) seed id per edge, to bound set-cover."""
+        f = self.f
+        mean_us = f.mean_exec_time() * 1_000_000
+        edge_to_seeds: dict[int, list[tuple[float, int]]] = {}
+        for seed in unique:
+            sid = id(seed)
+            if sid not in seed_edge_map:
+                continue
+            meta = f.seed_meta.get(seed, {})
+            exec_us = seed_exec_us(meta, mean_us)
+            input_size = max(1, meta.get("input_size", 1))
+            cost = exec_us * input_size
+            for edge in seed_edge_map[sid]:
+                edge_to_seeds.setdefault(edge, []).append((cost, sid))
+        return {min(candidates)[1] for candidates in edge_to_seeds.values()}
+
+    def _select_budget(
+        self, unique: list[bytes], mandatory: set[int], target_size: int
+    ) -> list[bytes]:
+        """Keep mandatory seeds plus the best-scored optional ones within budget."""
+        f = self.f
+        # Split into mandatory (set-cover essential) and optional.
+        mandatory_seeds = [s for s in unique if id(s) in mandatory]
+        optional = [s for s in unique if id(s) not in mandatory]
+        scored = [(self._minimize_score(seed), seed) for seed in optional]
+        scored.sort(key=lambda x: x[0], reverse=True)
+        if f.max_corpus_bytes > 0:
+            # Knapsack: sort optional seeds by value/weight density
+            # (value = coverage score, weight = seed byte size).
+            # Greedy density-ordering is a well-known 2-approximation
+            # for 0/1 knapsack.
+            scored.sort(
+                key=lambda x: x[0] / max(len(x[1]), 1),
+                reverse=True,
+            )
+            selected = []
+            total_bytes = sum(len(s) for s in mandatory_seeds)
+            for _score, seed in scored:
+                seed_bytes = len(seed)
+                if total_bytes + seed_bytes <= f.max_corpus_bytes:
+                    selected.append(seed)
+                    total_bytes += seed_bytes
+            return mandatory_seeds + selected
+        if getattr(f, "_use_mds_select", False) and f._edge_tracker is not None:
+            return mandatory_seeds + self._mds_select_optional(
+                scored, target_size, len(mandatory_seeds)
+            )
+        # Count-budget: keep top-K by score (original behavior)
+        budget = target_size - len(mandatory_seeds)
+        keep = min(budget, len(scored))
+        return mandatory_seeds + [s for _, s in scored[:keep]]
+
+    def _minimize_score(self, seed: bytes) -> float:
+        """Keep-score of an optional seed: edge score x Wasserstein x PPMD x QP."""
+        f = self.f
+        seed_key = self.seed_key(seed)
+        meta = f.seed_meta.get(seed)
+        fuzz = meta["fuzz_count"] if meta else 0
+        discovered = meta["coverage_edges"] if meta else 0
+
+        edge_score = self._edge_score(seed_key, fuzz, discovered)
+        wasserstein_weight = f._edge_tracker.compute_wasserstein_weight(seed_key)
+
+        # PPMD novelty: incompressible seeds are more diverse
+        ppmd_bonus = 1.0
+        if getattr(f, "_ppmd", None) and f._ppmd.enabled:
+            ppmd_bonus = 1.0 + f._ppmd.compute_seed_novelty(seed) * 0.5
+
+        # Quasiperiodicity novelty: seeds with no short internal
+        # cover are structurally more diverse (see
+        # core/quasiperiodicity.py) -- same shape as the PPMD bonus,
+        # a different and independent redundancy signal.
+        qp_bonus = 1.0
+        if getattr(f, "_qp", None) and f._qp.enabled:
+            qp_bonus = 1.0 + f._qp.compute_seed_novelty(seed) * 0.5
+
+        return edge_score * wasserstein_weight * ppmd_bonus * qp_bonus
+
+    def _edge_score(self, seed_key: str, fuzz: int, discovered: int) -> float:
+        """Coverage score; Bayesian posterior mean when the seed has one."""
+        f = self.f
+        # Bayesian seed score: use the posterior mean from
+        # BayesianSeedQuality when available.
+        if f._use_bayesian and f._seed_quality and seed_key in f._seed_quality._alpha:
+            mean = f._seed_quality.posterior_mean(seed_key)
+            # Scale posterior mean to a useful range for scoring:
+            # posterior mean ~ [0,1]. Multiply by discovered * 10
+            # to get a score on a comparable scale to the heuristic.
+            return mean * 10.0 + (discovered * 5.0 if discovered > 0 else 0.0)
+        edge_score = discovered * 10
+        if fuzz > 0 and discovered == 0:
+            edge_score *= max(0.01, 1.0 / (1.0 + fuzz * 0.01))
+        else:
+            edge_score += 1.0 / max(fuzz, 1)
+        return edge_score
+
+    def _promote_seed(self, seed: bytes) -> None:
+        """Move *seed* to irreplaceable/ and drop its seeds/ copy (no-op if already there)."""
+        f = self.f
+        from fuzzer_tool.adapters.filesystem import hash_data
+
+        h = hash_data(seed)
+        if h in f.irreplaceable_hashes:
+            return
+        save_irreplaceable(
+            seed,
+            f.corpus_dir,
+            f.seen_hashes,
+            f.irreplaceable_hashes,
+            f.bloom,
+        )
+        # Remove the original from seeds/ to avoid duplicate
+        seeds_sub = f.corpus_dir / "seeds" / h[:2] / f"id_{h}"
+        if seeds_sub.exists():
+            seeds_sub.unlink()
+
+    def _prune_lineage(self, unique: list[bytes], kept: list[bytes], mandatory: set[int]) -> None:
+        """Drop unproductive lineage subtrees from *unique*; reset the credit clock.
+
+        A dropped seed whose subtree contributed < 1.0 structural edge-weight
+        and gained no coverage since the last minimize is an unproductive
+        branch — drop the whole subtree instead of just the low-scoring seed.
+        Mandatory/fresh/irreplaceable (*kept*) seeds are protected. No-op
+        without --lineage.
+        """
+        f = self.f
+        if not (f._use_lineage and getattr(f, "_lineage", None) is not None):
+            return
+
+        key_to_seed = {self.seed_key(s): s for s in f.corpus}
+        kept_keys = {self.seed_key(s) for s in unique}
+        protected = {id(s) for s in kept}
+        if mandatory:
+            protected |= {id(s) for s in unique if id(s) in mandatory}
+
+        _coverage_fn = self._coverage_reader(key_to_seed)
+
+        # subtree_weight is a volume: a wide branch of one-edge children
+        # clears the < 1.0 gate that a narrow branch of high-yield
+        # children fails, so pruning was biased toward keeping the
+        # spray. pagerank_credit divides each child's contribution by
+        # its sibling count, which ranks branches by yield per mutation;
+        # requiring both keeps a branch alive if either measure rates it.
+        credit = f._lineage.pagerank_credit()
+        credit_floor = self._credit_floor(credit)
+
+        subtree_drops: set[str] = set()
+        for seed in f.corpus:
+            sk = self.seed_key(seed)
+            if sk in kept_keys or sk in subtree_drops:
+                continue
+            if (
+                f._lineage.recent_credit(sk, _coverage_fn) == 0.0
+                and f._lineage.subtree_weight(sk) < 1.0
+                and credit.get(sk, 0.0) < credit_floor
+            ):
+                self._drop_subtree(sk, unique, key_to_seed, protected, subtree_drops)
+        self._reset_credit_clock()
+
+    @staticmethod
+    def _credit_floor(credit: dict[str, float]) -> float:
+        """1/n over nodes holding positive PageRank credit; 0.0 when none do.
+
+        A share below 1/n of the distributed credit is below what an average
+        productive node holds.
+        """
+        n_credited = sum(1 for v in credit.values() if v > 0.0)
+        return (1.0 / n_credited) if n_credited else 0.0
+
+    def _reset_credit_clock(self) -> None:
+        """Record current coverage per seed so the next minimize measures the delta."""
+        f = self.f
+        for seed in f.corpus:
+            meta = f.seed_meta.get(seed)
+            if meta is not None:
+                meta["coverage_edges_baseline"] = meta.get("coverage_edges", 0)
+
+    def _coverage_reader(self, key_to_seed: dict):
+        """Seed key -> (coverage_edges, coverage_edges_baseline); (0, 0) if unknown."""
+        f = self.f
+
+        def _coverage_fn(k: str) -> tuple[int, int]:
+            seed = key_to_seed.get(k)
+            if seed is None:
+                return (0, 0)
+            meta = f.seed_meta.get(seed, {})
+            return (
+                meta.get("coverage_edges", 0),
+                meta.get("coverage_edges_baseline", 0),
+            )
+
+        return _coverage_fn
+
+    def _drop_subtree(
+        self,
+        sk: str,
+        unique: list[bytes],
+        key_to_seed: dict,
+        protected: set[int],
+        subtree_drops: set[str],
+    ) -> None:
+        """Remove every unprotected seed of *sk*'s lineage subtree from *unique*."""
+        for k in self.f._lineage.subtree_keys(sk):
+            s = key_to_seed.get(k)
+            if s is not None and id(s) not in protected and s in unique:
+                unique.remove(s)
+            subtree_drops.add(k)
+
+    def _recover_uncovered(self, unique: list[bytes], mandatory: set[int]) -> None:
+        """Re-add seeds whose unique edges were dropped by scoring or lineage pruning."""
+        f = self.f
         et = f._edge_tracker
+        if not (et and et.cumulative_edges and unique):
+            return
+
+        kept_coverage: set[int] = set()
+        for seed in unique:
+            sk = self.seed_key(seed)
+            kept_coverage.update(et.seed_edges.get(sk, set()))
+        uncovered = et.cumulative_edges - kept_coverage
+        if not uncovered:
+            return
+
         recovered_count = 0
-        if et and et.cumulative_edges and unique:
-            kept_coverage: set[int] = set()
-            for seed in unique:
-                sk = self.seed_key(seed)
-                kept_coverage.update(et.seed_edges.get(sk, set()))
-            uncovered = et.cumulative_edges - kept_coverage
-            if uncovered:
-                for seed in f.corpus:
-                    if seed in unique:
-                        continue
-                    sk = self.seed_key(seed)
-                    seed_edges = et.seed_edges.get(sk, set())
-                    if seed_edges & uncovered:
-                        unique.append(seed)
-                        mandatory.add(id(seed))
-                        if f.corpus_dir:
-                            h = hash_data(seed)
-                            if h not in f.irreplaceable_hashes:
-                                save_irreplaceable(
-                                    seed,
-                                    f.corpus_dir,
-                                    f.seen_hashes,
-                                    f.irreplaceable_hashes,
-                                    f.bloom,
-                                )
-                                seeds_sub = f.corpus_dir / "seeds" / h[:2] / f"id_{h}"
-                                if seeds_sub.exists():
-                                    seeds_sub.unlink()
-                        recovered_count += 1
-                if recovered_count:
-                    log.warning(
-                        "Recovered %d seeds to cover %d uncovered edges after minimization",
-                        recovered_count,
-                        len(uncovered),
-                    )
-
-        # Bootstrap percolation post-pass: capture transitive redundancy that
-        # single-pass greedy set-cover leaves behind. Disabled by default.
-        if getattr(f, "_use_bootstrap", False) and len(unique) > 1:
-            from fuzzer_tool.core.percolation import bootstrap_minimize_corpus
-
-            unique, bootstrap_removed = bootstrap_minimize_corpus(
-                unique, f._edge_tracker, k=getattr(f, "_bootstrap_k", 1)
+        for seed in f.corpus:
+            if seed in unique:
+                continue
+            sk = self.seed_key(seed)
+            seed_edges = et.seed_edges.get(sk, set())
+            if seed_edges & uncovered:
+                unique.append(seed)
+                mandatory.add(id(seed))
+                if f.corpus_dir:
+                    self._promote_seed(seed)
+                recovered_count += 1
+        if recovered_count:
+            log.warning(
+                "Recovered %d seeds to cover %d uncovered edges after minimization",
+                recovered_count,
+                len(uncovered),
             )
-            if bootstrap_removed:
-                log.info(
-                    "Bootstrap percolation removed %d seeds (transitive redundancy)",
-                    len(bootstrap_removed),
-                )
 
-        removed = len(f.corpus) - len(unique)
-        if removed > 0:
-            seeds_dir = f.corpus_dir / "seeds"
-            deltas_dir = f.corpus_dir / "deltas"
-            pruned_dir = seeds_dir / "pruned"
-            pruned_dir.mkdir(parents=True, exist_ok=True)
-            from fuzzer_tool.adapters.filesystem import hash_data as _hash
+    def _commit_minimize(self, unique: list[bytes], removed: int, stale_ratio: float) -> None:
+        """Move pruned files to pruned/ and swap f.corpus/f.seed_meta to *unique*."""
+        f = self.f
+        from fuzzer_tool.adapters.filesystem import hash_data as _hash
 
-            kept_set = {_hash(s) for s in unique}
-            # Prune full seeds — seeds are stored in two-digit hash
-            # subdirectories (seeds/ab/id_abc...), so walk recursively.
-            # Skip the irreplaceable/ subdirectory — those seeds are never pruned.
-            for fh in seeds_dir.rglob("id_*"):
-                if not fh.is_file():
-                    continue
-                # Skip files under seeds/irreplaceable/ (never pruned)
-                if "irreplaceable" in fh.parts:
-                    continue
-                h = fh.name[3:]
-                if h not in kept_set:
-                    sub = pruned_dir / h[:2]
-                    sub.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(fh), str(sub / fh.name))
-            # Prune delta files
-            if deltas_dir.exists():
-                deltas_pruned_dir = deltas_dir / "pruned"
-                for fh in deltas_dir.iterdir():
-                    if not fh.is_file():
-                        continue
-                    if fh.suffix == ".json" and fh.name.startswith("delta_"):
-                        h = fh.name[6:-5]
-                    else:
-                        continue
-                    if h not in kept_set:
-                        sub = deltas_pruned_dir / h[:2]
-                        sub.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(fh), str(sub / fh.name))
-            del kept_set  # free kept hashes after file pruning
+        kept_set = {_hash(s) for s in unique}
+        self._prune_files(kept_set)
+        del kept_set  # free kept hashes after file pruning
 
-            f.corpus = unique
-            self.rebuild_entropy()
-            new_meta = {}
-            for seed in unique:
-                if seed in f.seed_meta:
-                    new_meta[seed] = f.seed_meta[seed]
-            f.seed_meta = new_meta
-            f._agg_cache_valid = False
-            f._weight_cache = None
-            f._cached_weights = {}
-            f._overlap_density_cache = {}
-            f._last_minimize_exec = f.exec_count
-            f._pruned_count += removed
-            f._corpus_flux.record_eviction(removed)
-            log.info(
-                "Auto-minimized corpus: %d -> %d seeds -> pruned/ (stale_ratio=%.1f)",
-                len(f.corpus) + removed,
-                len(f.corpus),
-                stale_ratio,
-            )
+        f.corpus = unique
+        self.rebuild_entropy()
+        new_meta = {}
+        for seed in unique:
+            if seed in f.seed_meta:
+                new_meta[seed] = f.seed_meta[seed]
+        f.seed_meta = new_meta
+        f._agg_cache_valid = False
+        f._weight_cache = None
+        f._cached_weights = {}
+        f._overlap_density_cache = {}
+        f._last_minimize_exec = f.exec_count
+        f._pruned_count += removed
+        f._corpus_flux.record_eviction(removed)
+        log.info(
+            "Auto-minimized corpus: %d -> %d seeds -> pruned/ (stale_ratio=%.1f)",
+            len(f.corpus) + removed,
+            len(f.corpus),
+            stale_ratio,
+        )
+
+    def _prune_files(self, kept_set: set[str]) -> None:
+        """Move seed and delta files whose hash is not in *kept_set* under pruned/."""
+        f = self.f
+        seeds_dir = f.corpus_dir / "seeds"
+        deltas_dir = f.corpus_dir / "deltas"
+        pruned_dir = seeds_dir / "pruned"
+        pruned_dir.mkdir(parents=True, exist_ok=True)
+        # Prune full seeds — seeds are stored in two-digit hash
+        # subdirectories (seeds/ab/id_abc...), so walk recursively.
+        # Skip the irreplaceable/ subdirectory — those seeds are never pruned.
+        for fh in seeds_dir.rglob("id_*"):
+            if not fh.is_file():
+                continue
+            # Skip files under seeds/irreplaceable/ (never pruned)
+            if "irreplaceable" in fh.parts:
+                continue
+            h = fh.name[3:]
+            if h not in kept_set:
+                sub = pruned_dir / h[:2]
+                sub.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(fh), str(sub / fh.name))
+        # Prune delta files
+        if not deltas_dir.exists():
+            return
+        deltas_pruned_dir = deltas_dir / "pruned"
+        for fh in deltas_dir.iterdir():
+            if not fh.is_file():
+                continue
+            if not (fh.suffix == ".json" and fh.name.startswith("delta_")):
+                continue
+            h = fh.name[6:-5]
+            if h not in kept_set:
+                sub = deltas_pruned_dir / h[:2]
+                sub.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(fh), str(sub / fh.name))
 
     def minimax_robust_admission(self, candidate_seeds: list[bytes]) -> list[bytes]:
         """Apply minimax-robust corpus admission using rate-distortion analysis.
@@ -1698,15 +1873,7 @@ class CorpusManager:
 
         to_remove: set[bytes] = set()
         for key_a, key_b, _hdist in near_dupes:
-            seed_a = None
-            seed_b = None
-            for s in f.corpus:
-                if self.seed_key(s) == key_a:
-                    seed_a = s
-                elif self.seed_key(s) == key_b:
-                    seed_b = s
-                if seed_a and seed_b:
-                    break
+            seed_a, seed_b = self._find_pair(key_a, key_b)
             if not seed_a or not seed_b:
                 continue
             if seed_a in to_remove or seed_b in to_remove:
@@ -1723,16 +1890,34 @@ class CorpusManager:
                 to_remove.add(seed_b)
 
         if to_remove:
-            f.corpus = [s for s in f.corpus if s not in to_remove]
-            for s in to_remove:
-                f.seed_meta.pop(s, None)
-                self._entropy_remove(s)
-            f._agg_cache_valid = False
-            f._weight_cache = None
-            f._cached_weights = {}
-            f._overlap_density_cache = {}
-            f._corpus_flux.record_eviction(len(to_remove))
-            log.info(
-                "Deprioritized %d near-duplicate seeds (Hamming <= 0.05 on edge bitmaps)",
-                len(to_remove),
-            )
+            self._evict_dupes(to_remove)
+
+    def _find_pair(self, key_a: str, key_b: str) -> tuple[bytes | None, bytes | None]:
+        """Corpus seeds whose keys are *key_a* / *key_b* (None when absent)."""
+        seed_a = None
+        seed_b = None
+        for s in self.f.corpus:
+            if self.seed_key(s) == key_a:
+                seed_a = s
+            elif self.seed_key(s) == key_b:
+                seed_b = s
+            if seed_a and seed_b:
+                break
+        return seed_a, seed_b
+
+    def _evict_dupes(self, to_remove: set[bytes]) -> None:
+        """Drop *to_remove* from corpus/meta/entropy and invalidate weight caches."""
+        f = self.f
+        f.corpus = [s for s in f.corpus if s not in to_remove]
+        for s in to_remove:
+            f.seed_meta.pop(s, None)
+            self._entropy_remove(s)
+        f._agg_cache_valid = False
+        f._weight_cache = None
+        f._cached_weights = {}
+        f._overlap_density_cache = {}
+        f._corpus_flux.record_eviction(len(to_remove))
+        log.info(
+            "Deprioritized %d near-duplicate seeds (Hamming <= 0.05 on edge bitmaps)",
+            len(to_remove),
+        )

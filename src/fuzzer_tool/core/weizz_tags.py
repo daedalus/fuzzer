@@ -254,6 +254,61 @@ CmpSnapshot = dict[int, list[tuple[bytes, bytes]]]
 ExecFn = Callable[[bytes], tuple[int, CmpSnapshot]]
 
 
+def _flip(buf: bytearray, idx: int, byte_level: bool) -> int:
+    """Flip byte *idx* (all 8 bits) or bit *idx* in *buf*; returns the byte index."""
+    if byte_level:
+        # Flip all 8 bits of the byte (cheap approximation of Weizz
+        # byte-level path that only samples first/last bit of each byte).
+        buf[idx] ^= 0xFF
+        return idx
+    byte_index = idx >> 3
+    bit = idx & 7
+    buf[byte_index] ^= 1 << (7 - bit)
+    return byte_index
+
+
+def _dep_slot(
+    deps: dict[tuple[int, int], tuple[set[int], set[int]]], key: tuple[int, int]
+) -> tuple[set[int], set[int]]:
+    """(v0 deps, v1 deps) for *key*, created empty on first use."""
+    if key not in deps:
+        deps[key] = (set(), set())
+    return deps[key]
+
+
+def _diff_site(
+    deps: dict[tuple[int, int], tuple[set[int], set[int]]],
+    cmp_id: int,
+    pairs: list[tuple[bytes, bytes]],
+    orig_pairs: list[tuple[bytes, bytes]],
+    byte_index: int,
+) -> None:
+    """Mark *byte_index* as a dep of every operand of *cmp_id* that changed."""
+    # Align by hit index; Weizz also handles wrap, we take min length.
+    limit = min(len(pairs), len(orig_pairs)) if orig_pairs else len(pairs)
+    for j in range(limit):
+        v0, v1 = pairs[j]
+        if j < len(orig_pairs):
+            o_v0, o_v1 = orig_pairs[j]
+        else:
+            o_v0, o_v1 = b"", b""
+        key = (cmp_id, j)
+        v0_set, v1_set = _dep_slot(deps, key)
+        if v0 != o_v0:
+            v0_set.add(byte_index)
+        if v1 != o_v1:
+            v1_set.add(byte_index)
+    # New hits that did not exist in the original snapshot.
+    if len(pairs) > len(orig_pairs):
+        for j in range(len(orig_pairs), len(pairs)):
+            v0, v1 = pairs[j]
+            key = (cmp_id, j)
+            v0_set, v1_set = _dep_slot(deps, key)
+            # Both sides "changed" relative to absence.
+            v0_set.add(byte_index)
+            v1_set.add(byte_index)
+
+
 def get_deps(
     data: bytes,
     exec_fn: ExecFn,
@@ -300,11 +355,6 @@ def get_deps(
     # deps[(cmp_id, hit_idx)] → (set of bytes affecting v0, set affecting v1)
     deps: dict[tuple[int, int], tuple[set[int], set[int]]] = {}
 
-    def _ensure(key: tuple[int, int]) -> tuple[set[int], set[int]]:
-        if key not in deps:
-            deps[key] = (set(), set())
-        return deps[key]
-
     # Indices to flip: byte starts, or every bit.
     flip_indices = list(range(n)) if byte_level else list(range(n * 8))
 
@@ -317,16 +367,7 @@ def get_deps(
         if exec_count >= max_execs:
             break
 
-        if byte_level:
-            byte_index = idx
-            # Flip all 8 bits of the byte (cheap approximation of Weizz
-            # byte-level path that only samples first/last bit of each byte).
-            old = buf[byte_index]
-            buf[byte_index] = old ^ 0xFF
-        else:
-            byte_index = idx >> 3
-            bit = idx & 7
-            buf[byte_index] ^= 1 << (7 - bit)
+        byte_index = _flip(buf, idx, byte_level)
 
         try:
             _cksum, snap = exec_fn(bytes(buf))
@@ -342,30 +383,7 @@ def get_deps(
 
         # Diff operand values per cmp_id / hit slot.
         for cmp_id, pairs in snap.items():
-            orig_pairs = orig_snap.get(cmp_id, [])
-            # Align by hit index; Weizz also handles wrap, we take min length.
-            limit = min(len(pairs), len(orig_pairs)) if orig_pairs else len(pairs)
-            for j in range(limit):
-                v0, v1 = pairs[j]
-                if j < len(orig_pairs):
-                    o_v0, o_v1 = orig_pairs[j]
-                else:
-                    o_v0, o_v1 = b"", b""
-                key = (cmp_id, j)
-                v0_set, v1_set = _ensure(key)
-                if v0 != o_v0:
-                    v0_set.add(byte_index)
-                if v1 != o_v1:
-                    v1_set.add(byte_index)
-            # New hits that did not exist in the original snapshot.
-            if len(pairs) > len(orig_pairs):
-                for j in range(len(orig_pairs), len(pairs)):
-                    v0, v1 = pairs[j]
-                    key = (cmp_id, j)
-                    v0_set, v1_set = _ensure(key)
-                    # Both sides "changed" relative to absence.
-                    v0_set.add(byte_index)
-                    v1_set.add(byte_index)
+            _diff_site(deps, cmp_id, pairs, orig_snap.get(cmp_id, []), byte_index)
 
         # Also note path change? Not required for dep recovery; path is for
         # colorization. We keep the flip even if path changes — Weizz does too
@@ -377,6 +395,58 @@ def get_deps(
     smap.exec_count = exec_count
     smap.from_differential = True
     return smap
+
+
+def _byte_cmps(
+    length: int, deps: dict[tuple[int, int], tuple[frozenset[int], frozenset[int]]]
+) -> tuple[list[set[int]], dict[int, int]]:
+    """Per-byte set of dependent cmp_ids, and per-cmp_id hit counter."""
+    byte_to_cmps: list[set[int]] = [set() for _ in range(length)]
+    cmp_counters: dict[int, int] = {}
+
+    for (cmp_id, hit_idx), (v0, v1) in deps.items():
+        cmp_counters[cmp_id] = max(cmp_counters.get(cmp_id, 0), hit_idx + 1)
+        for b in v0 | v1:
+            if 0 <= b < length:
+                byte_to_cmps[b].add(cmp_id)
+    return byte_to_cmps, cmp_counters
+
+
+def _min_spans(
+    deps: dict[tuple[int, int], tuple[frozenset[int], frozenset[int]]],
+) -> dict[int, int]:
+    """Smallest dependency span (max - min + 1) seen per cmp_id."""
+    span_of: dict[int, int] = {}
+    for (cmp_id, _), (v0, v1) in deps.items():
+        members = v0 | v1
+        if not members:
+            continue
+        span = max(members) - min(members) + 1
+        if cmp_id not in span_of or span < span_of[cmp_id]:
+            span_of[cmp_id] = span
+    return span_of
+
+
+def _is_len_dep(
+    deps: dict[tuple[int, int], tuple[frozenset[int], frozenset[int]]],
+    chosen: int,
+    byte_to_cmps: list[set[int]],
+    length: int,
+) -> bool:
+    """Length-field heuristic for *chosen*.
+
+    Its deps span >= 8 bytes while <= 4 bytes are tagged with it, e.g. a
+    2/4-byte run whose dependents cover a much wider window.
+    """
+    members: set[int] = set()
+    for (cid, _), (v0, v1) in deps.items():
+        if cid == chosen:
+            members |= v0 | v1
+    return bool(
+        members
+        and (max(members) - min(members) + 1) >= 8
+        and len([b for b in range(length) if chosen in byte_to_cmps[b]]) <= 4
+    )
 
 
 def place_tags(
@@ -394,25 +464,11 @@ def place_tags(
         return StructureMap(tags=tags, input_len=length, from_differential=bool(deps))
 
     # Aggregate: for each byte, the set of cmp_ids that list it as a dep.
-    byte_to_cmps: list[set[int]] = [set() for _ in range(length)]
-    cmp_counters: dict[int, int] = {}
-
-    for (cmp_id, hit_idx), (v0, v1) in deps.items():
-        cmp_counters[cmp_id] = max(cmp_counters.get(cmp_id, 0), hit_idx + 1)
-        for b in v0 | v1:
-            if 0 <= b < length:
-                byte_to_cmps[b].add(cmp_id)
+    byte_to_cmps, cmp_counters = _byte_cmps(length, deps)
 
     # Prefer the cmp_id with the smallest dependency span for a byte
     # (tighter fields). Fall back to min id for stability.
-    span_of: dict[int, int] = {}
-    for (cmp_id, _), (v0, v1) in deps.items():
-        members = v0 | v1
-        if not members:
-            continue
-        span = max(members) - min(members) + 1
-        if cmp_id not in span_of or span < span_of[cmp_id]:
-            span_of[cmp_id] = span
+    span_of = _min_spans(deps)
 
     last_parent = 0
     ntypes = 0
@@ -435,18 +491,7 @@ def place_tags(
             ntypes += 1
             last_parent = chosen
 
-        # Length heuristic: dependency span looks like a length field if the
-        # dependent region is large relative to the tag itself (single-byte
-        # or 2/4-byte run whose deps cover a much wider window).
-        members: set[int] = set()
-        for (cid, _), (v0, v1) in deps.items():
-            if cid == chosen:
-                members |= v0 | v1
-        if (
-            members
-            and (max(members) - min(members) + 1) >= 8
-            and len([b for b in range(length) if chosen in byte_to_cmps[b]]) <= 4
-        ):
+        if _is_len_dep(deps, chosen, byte_to_cmps, length):
             tags[i].flags |= TagFlags.IS_LEN
 
     return StructureMap(
@@ -559,6 +604,94 @@ class TagCollectorConfig:
     once_per_lineage: bool = True  # caller should honour this
 
 
+def _operand_flags(op_a: bytes, op_b: bytes, n: int) -> TagFlags:
+    """Shape flags for a pair: length or checksum (length wins), plus magic."""
+    flags = TagFlags.NONE
+    if _looks_like_length(op_a, n) or _looks_like_length(op_b, n):
+        flags |= TagFlags.IS_LEN
+    elif _looks_like_checksum(op_a) or _looks_like_checksum(op_b):
+        # IS_LEN takes priority over checksum on the same operand.
+        flags |= TagFlags.IS_CHECKSUM
+    if _looks_like_magic(op_a, op_b):
+        flags |= TagFlags.IS_MAGIC
+    return flags
+
+
+def _claim_span(
+    tags: list[ByteTag],
+    off: int,
+    size: int,
+    cid: int,
+    counter: int,
+    flags: TagFlags,
+    dep_bytes: set[int],
+) -> bool:
+    """Tag still-untagged bytes of [off, off+size); False when none were free."""
+    end = off + size
+    # only claim still-untagged bytes (shorter operands win)
+    any_free = any(tags[i].cmp_id == 0 for i in range(off, end))
+    if not any_free:
+        return False
+    for i in range(off, end):
+        if tags[i].cmp_id == 0:
+            tags[i] = ByteTag(
+                cmp_id=cid,
+                parent=0,
+                counter=counter,
+                flags=flags,
+            )
+            dep_bytes.add(i)
+    return True
+
+
+def _pair_key(p: tuple[bytes, bytes]) -> tuple[int, int]:
+    """Sort key: shorter / more specific operand pairs claim bytes first."""
+    a, b = p
+    return (min(len(a), len(b)) if a and b else max(len(a), len(b)), -max(len(a), len(b)))
+
+
+def _sized_operands(op_a: bytes, op_b: bytes, cfg: TagCollectorConfig) -> list[tuple[bytes, str]]:
+    """Operands within the configured length bounds, tagged with their side."""
+    return [
+        (op, side)
+        for op, side in ((op_a, "a"), (op_b, "b"))
+        if cfg.min_operand_len <= len(op) <= cfg.max_operand_len
+    ]
+
+
+def _claim_pair(
+    tags: list[ByteTag],
+    candidates: list[tuple[bytes, str]],
+    offsets: dict,
+    tag: tuple[int, int, TagFlags],
+    dep_bytes: set[int],
+    first_offset: dict[int, int],
+    prefer_input: bool,
+) -> None:
+    """Claim every in-input occurrence of the pair's operands for tag (cid, counter, flags).
+
+    With *prefer_input*, stop after the first operand that claimed bytes.
+    """
+    cid, counter, flags = tag
+    claimed = False
+    for op, _side in candidates:
+        for off in offsets.get(op, ()):
+            if not _claim_span(tags, off, len(op), cid, counter, flags, dep_bytes):
+                continue
+            if cid not in first_offset:
+                first_offset[cid] = off
+            claimed = True
+        if claimed and prefer_input:
+            break
+
+
+def _tag_stats(tags: list[ByteTag]) -> tuple[int, int]:
+    """(distinct non-zero cmp_ids, max counter) over *tags*."""
+    ntypes = len({t.cmp_id for t in tags if t.cmp_id})
+    max_counter = max((t.counter for t in tags), default=0)
+    return ntypes, max_counter
+
+
 def build_tag_map_from_cmplog(
     data: bytes,
     pairs: Sequence[tuple[bytes, bytes]],
@@ -606,10 +739,6 @@ def build_tag_map_from_cmplog(
     dep_bytes: set[int] = set()
 
     # Sort pairs so shorter / more specific operands claim bytes first
-    def _pair_key(p: tuple[bytes, bytes]) -> tuple[int, int]:
-        a, b = p
-        return (min(len(a), len(b)) if a and b else max(len(a), len(b)), -max(len(a), len(b)))
-
     ordered = sorted(pairs, key=_pair_key)
 
     # Locate every operand in one multi-pattern pass, then consume the results
@@ -624,10 +753,7 @@ def build_tag_map_from_cmplog(
         if not op_a and not op_b:
             continue
         # skip pathological sizes
-        candidates: list[tuple[bytes, str]] = []
-        for op, side in ((op_a, "a"), (op_b, "b")):
-            if cfg.min_operand_len <= len(op) <= cfg.max_operand_len:
-                candidates.append((op, side))
+        candidates = _sized_operands(op_a, op_b, cfg)
         if not candidates:
             continue
 
@@ -637,37 +763,17 @@ def build_tag_map_from_cmplog(
             counter_by_id[cid] = next_counter
             next_counter += 1
 
-        flags = TagFlags.NONE
-        if _looks_like_length(op_a, n) or _looks_like_length(op_b, n):
-            flags |= TagFlags.IS_LEN
-        elif _looks_like_checksum(op_a) or _looks_like_checksum(op_b):
-            # IS_LEN takes priority over checksum on the same operand.
-            flags |= TagFlags.IS_CHECKSUM
-        if _looks_like_magic(op_a, op_b):
-            flags |= TagFlags.IS_MAGIC
+        flags = _operand_flags(op_a, op_b, n)
 
-        claimed = False
-        for op, _side in candidates:
-            for off in offsets.get(op, ()):
-                end = off + len(op)
-                # only claim still-untagged bytes (shorter operands win)
-                any_free = any(tags[i].cmp_id == 0 for i in range(off, end))
-                if not any_free:
-                    continue
-                for i in range(off, end):
-                    if tags[i].cmp_id == 0:
-                        tags[i] = ByteTag(
-                            cmp_id=cid,
-                            parent=0,
-                            counter=counter_by_id[cid],
-                            flags=flags,
-                        )
-                        dep_bytes.add(i)
-                if cid not in first_offset:
-                    first_offset[cid] = off
-                claimed = True
-            if claimed and cfg.prefer_input_operand:
-                break
+        _claim_pair(
+            tags,
+            candidates,
+            offsets,
+            (cid, counter_by_id[cid], flags),
+            dep_bytes,
+            first_offset,
+            cfg.prefer_input_operand,
+        )
 
     # Parent / nesting: a span whose bytes sit strictly inside another
     # already-tagged span inherits that span's cmp_id as parent.
@@ -681,8 +787,7 @@ def build_tag_map_from_cmplog(
         if from_diff:
             _assign_parents(tags)
 
-    ntypes = len({t.cmp_id for t in tags if t.cmp_id})
-    max_counter = max((t.counter for t in tags), default=0)
+    ntypes, max_counter = _tag_stats(tags)
 
     return StructureMap(
         tags=tags,

@@ -27,6 +27,16 @@ _ERROR_RE = re.compile(
 )
 
 
+def _highest_pos(sources, cap: int) -> int:
+    """Largest position key in [0, cap) across *sources*; -1 when none."""
+    highest = -1
+    for source in sources:
+        for pos in source:
+            if 0 <= pos < cap and pos > highest:
+                highest = pos
+    return highest
+
+
 class CrashMITracker:
     """Track mutual information between input bytes and crash outcomes.
 
@@ -351,11 +361,7 @@ class CrashMITracker:
         }
 
         cap = min(self.max_positions, self.DENSE_POSITION_CAP)
-        highest = -1
-        for source in (counts, joint, totals):
-            for pos in source:
-                if 0 <= pos < cap and pos > highest:
-                    highest = pos
+        highest = _highest_pos((counts, joint, totals), cap)
 
         self._rows = 0
         self._byte_total_arr = _np.zeros((0, 256), dtype=_np.uint32)
@@ -366,17 +372,17 @@ class CrashMITracker:
             for pos, c in counts.items():
                 if 0 <= pos < self._rows:
                     self._position_counts_arr[pos] = c
-            for pos, m in totals.items():
-                if 0 <= pos < self._rows:
-                    for bv, c in m.items():
-                        if 0 <= bv < 256:
-                            self._byte_total_arr[pos, bv] = c
-            for pos, m in joint.items():
-                if 0 <= pos < self._rows:
-                    for bv, c in m.items():
-                        if 0 <= bv < 256:
-                            self._joint_crash_arr[pos, bv] = c
+            self._fill_rows(self._byte_total_arr, totals)
+            self._fill_rows(self._joint_crash_arr, joint)
         self._cache_valid = False
+
+    def _fill_rows(self, arr, src: dict[int, dict[int, int]]) -> None:
+        """Copy {pos: {byte: count}} into dense *arr*, dropping out-of-range keys."""
+        for pos, m in src.items():
+            if 0 <= pos < self._rows:
+                for bv, c in m.items():
+                    if 0 <= bv < 256:
+                        arr[pos, bv] = c
 
 
 @dataclass

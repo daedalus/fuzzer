@@ -135,6 +135,15 @@ class ShapleyAttribution:
         op_set = set(operators)
         shapley = {op: 0.0 for op in operators}
 
+        self._add_edge_credit(op_set, shapley)
+
+        total = sum(shapley.values())
+        if total > 0:
+            return {op: v / total for op, v in shapley.items()}
+        return {op: 1.0 / n_ops for op in operators}
+
+    def _add_edge_credit(self, op_set: set[str], shapley: dict[str, float]) -> None:
+        """Add credit(e, op) / |T_e| per edge to *shapley* in place."""
         for _edge, op_counts in self._edge_op_count.items():
             touching = [op for op in op_counts if op in op_set]
             k = len(touching)
@@ -145,11 +154,6 @@ class ShapleyAttribution:
                 continue
             for op in touching:
                 shapley[op] += op_counts[op] / total / k
-
-        total = sum(shapley.values())
-        if total > 0:
-            return {op: v / total for op, v in shapley.items()}
-        return {op: 1.0 / n_ops for op in operators}
 
     def operator_synergy(self, op_a: str, op_b: str) -> float:
         """Compute synergy between two operators.

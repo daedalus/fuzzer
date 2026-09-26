@@ -281,7 +281,40 @@ class SeedPicker:
         f = self.f
         if not f._use_elo or not f._elo:
             return None
-        available = [s for s, cond in [("ga", f.ga), ("qea", f.qea)] if cond]
+        available: list[str] = []
+        self._elo_core_arms(f, available)
+        self._elo_flag_arms(f, available)
+        self._elo_entropy_arms(f, available)
+        self._elo_gated_arms(f, available)
+
+        # Expose the eligible pool so the fuzzer records Elo matches only against
+        # strategies that were actually selectable (no phantom opponents) and so
+        # the convergence report can show only what was really arbitrated.
+        f._seed_strategy_pool = list(available)
+
+        if not available:
+            return None
+        # Select with the seed_<name>-prefixed keys (the keyspace elo.json
+        # rates); strip the prefix so _seed_strategy/_seed_strategy_pool/
+        # strategy_map/the convergence report stay plain-consistent.
+        if len(available) >= 2:
+            selected = f._elo.select_strategy([f"seed_{s}" for s in available])
+            strategy = selected[5:] if selected.startswith("seed_") else selected
+        else:
+            strategy = available[0]
+        f._seed_strategy = strategy
+        f._seed_strategies_used.add(strategy)
+
+        return self._elo_dispatch(f, strategy)
+
+    @staticmethod
+    def _elo_core_arms(f, available: list[str]) -> None:
+        """Append engine/strategy seed arms (ga .. markov), in Elo pool order."""
+        ga, qea = f.ga, f.qea
+        if ga:
+            available.append("ga")
+        if qea:
+            available.append("qea")
         available.append("weighted")
         if getattr(f, "_mcts", None) is not None and getattr(f, "_lineage", None):
             available.append("mcts")
@@ -295,6 +328,10 @@ class SeedPicker:
             available.append("bayesian")
         if f.markov_generate and f.markov_trained:
             available.append("markov")
+
+    @staticmethod
+    def _elo_flag_arms(f, available: list[str]) -> None:
+        """Append flag/model-gated seed arms (boltzmann .. entropy_kl)."""
         if getattr(f, "_use_boltzmann", False):
             available.append("boltzmann")
         if getattr(f, "_use_ecofuzz", False):
@@ -309,6 +346,10 @@ class SeedPicker:
             available.append("kruskal_count")
         if getattr(f, "_entropy_kl", None) is not None and f.corpus:
             available.append("entropy_kl")
+
+    @staticmethod
+    def _elo_entropy_arms(f, available: list[str]) -> None:
+        """Append entropy arms (deviation, loo, gradient, zscore)."""
         if getattr(f, "_entropy_deviation", None) is not None and f.corpus:
             available.append("entropy_deviation")
         if getattr(f, "_entropy_loo", None) is not None and f.corpus:
@@ -329,6 +370,10 @@ class SeedPicker:
         zscore = getattr(f, "_entropy_zscore", None)
         if zscore is not None and f.corpus and (zscore.ready or not zscore.warmed):
             available.append("entropy_zscore")
+
+    @staticmethod
+    def _elo_gated_arms(f, available: list[str]) -> None:
+        """Append availability-gated arms (strata, residual, canary, round_robin)."""
         # Abstains (leaves the pool) while the preflight gate is closed: under
         # per-process ids a rarity-shaped score is scoring noise (F1, F11).
         strata = getattr(f, "_seed_strata", None)
@@ -342,24 +387,14 @@ class SeedPicker:
         if getattr(f, "_use_seed_round_robin", False) and f._seed_round_robin and f.corpus:
             available.append("round_robin")
 
-        # Expose the eligible pool so the fuzzer records Elo matches only against
-        # strategies that were actually selectable (no phantom opponents) and so
-        # the convergence report can show only what was really arbitrated.
-        f._seed_strategy_pool = list(available)
-
-        if not available:
-            return None
-        # Select with the seed_<name>-prefixed keys (the keyspace elo.json
-        # rates); strip the prefix so _seed_strategy/_seed_strategy_pool/
-        # strategy_map/the convergence report stay plain-consistent.
-        if len(available) >= 2:
-            selected = f._elo.select_strategy([f"seed_{s}" for s in available])
-            strategy = selected[5:] if selected.startswith("seed_") else selected
-        else:
-            strategy = available[0]
-        f._seed_strategy = strategy
-        f._seed_strategies_used.add(strategy)
-
+    def _elo_dispatch(self, f, strategy: str) -> bytes | None:
+        """Run the picker for the Elo-selected *strategy*; None if unknown or declined."""
+        # Built once per fuzzer object: the lambdas read f's attributes at call
+        # time, so reusing them is equivalent to rebuilding 24 closures per pick.
+        cached = getattr(self, "_elo_map", None)
+        if cached is not None and cached[0] is f:
+            handler = cached[1].get(strategy)
+            return handler() if handler else None
         strategy_map = {
             "ga": lambda: f.ga.pick_seed() if f.ga else None,
             "qea": lambda: f.qea.pick_seed() if f.qea else None,
@@ -390,6 +425,7 @@ class SeedPicker:
             "canary": lambda: self._pick_seed_canary_seed(),
             "round_robin": lambda: self._pick_seed_round_robin_seed(),
         }
+        self._elo_map = (f, strategy_map)
         handler = strategy_map.get(strategy)
         return handler() if handler else None
 
@@ -781,6 +817,13 @@ class SeedPicker:
         elo_pick = self._pick_seed_elo()
         if elo_pick is not None:
             return elo_pick
+
+        return self._pick_unarbitrated()
+
+    def _pick_unarbitrated(self) -> bytes:
+        """Fixed-priority fallback chain used when Elo does not pick a seed."""
+        f = self.f
+        rng = f._rng
 
         if f.qea:
             return f.qea.pick_seed()
@@ -1304,36 +1347,43 @@ class SeedPicker:
 
         if seed_sh > 0 and len(f._edge_tracker.seed_hit_counts) >= 3:
             # Use pre-computed mean if available, else fall back to cached computation
-            if mean_entropy > 0:
-                effective_mean = mean_entropy
-            else:
-                if not hasattr(self, "_mean_seed_entropy"):
-                    self._mean_seed_entropy = 0.0
-                    self._mean_entropy_cache_key = -1
-                cache_key = len(f._edge_tracker.seed_hit_counts)
-                if cache_key != self._mean_entropy_cache_key:
-                    # Cache per-key results so each seed is computed once; the
-                    # old list-comprehension called shannon_entropy_seed() twice
-                    # per key (filter + value), which dominates weight passes.
-                    hit_counts = f._edge_tracker.seed_hit_counts
-                    ent_map = {k: f._edge_tracker.shannon_entropy_seed(k) for k in hit_counts}
-                    entropies = [v for v in ent_map.values() if v > 0]
-                    self._mean_seed_entropy = sum(entropies) / len(entropies) if entropies else 0.0
-                    self._mean_entropy_cache_key = cache_key
-                effective_mean = self._mean_seed_entropy
+            effective_mean = mean_entropy if mean_entropy > 0 else self._cached_mean_entropy(f)
 
             if effective_mean > 0:
                 deviation = abs(seed_sh - effective_mean) / max(effective_mean, 0.01)
                 w *= 1.0 + min(deviation, 1.0) * 0.5
 
         if f._distance:
-            seed_dist = meta.get("avg_distance", max_d if max_d > 0 else f._distance.max_distance)
-            if max_d <= 0:
-                max_d = f._distance.max_distance
-            norm_dist = min(seed_dist / max_d, 1.0) if max_d > 0 else 0.5
-            alpha = min(f._anneal_progress * 2, 1.0)
-            w *= (1.0 - alpha) + alpha * math.exp(-norm_dist * 5.0 * alpha)
+            w = self._weight_distance(meta, w, f, max_d)
         return w
+
+    @staticmethod
+    def _weight_distance(meta: dict, w: float, f, max_d: float) -> float:
+        """Directed-fuzzing distance weight, annealed from flat to exp(-5*d)."""
+        seed_dist = meta.get("avg_distance", max_d if max_d > 0 else f._distance.max_distance)
+        if max_d <= 0:
+            max_d = f._distance.max_distance
+        norm_dist = min(seed_dist / max_d, 1.0) if max_d > 0 else 0.5
+        alpha = min(f._anneal_progress * 2, 1.0)
+        w *= (1.0 - alpha) + alpha * math.exp(-norm_dist * 5.0 * alpha)
+        return w
+
+    def _cached_mean_entropy(self, f) -> float:
+        """Mean positive per-seed entropy, recomputed only when seed count changes."""
+        if not hasattr(self, "_mean_seed_entropy"):
+            self._mean_seed_entropy = 0.0
+            self._mean_entropy_cache_key = -1
+        cache_key = len(f._edge_tracker.seed_hit_counts)
+        if cache_key != self._mean_entropy_cache_key:
+            # Cache per-key results so each seed is computed once; the
+            # old list-comprehension called shannon_entropy_seed() twice
+            # per key (filter + value), which dominates weight passes.
+            hit_counts = f._edge_tracker.seed_hit_counts
+            ent_map = {k: f._edge_tracker.shannon_entropy_seed(k) for k in hit_counts}
+            entropies = [v for v in ent_map.values() if v > 0]
+            self._mean_seed_entropy = sum(entropies) / len(entropies) if entropies else 0.0
+            self._mean_entropy_cache_key = cache_key
+        return self._mean_seed_entropy
 
     def _weight_static_features(self, seed: bytes, coverage: int, w: float, f) -> float:
         """Apply PPMD novelty and hot function density bonuses."""
@@ -1624,95 +1674,13 @@ class SeedPicker:
         # to uniform random. numpy is a hard dependency, so this was only ever
         # a defensive path, but a defensive path that disables the scheduler
         # without a symptom is worse than no defensive path.
-        has_meta = [False] * n
-        fuzz_arr = None
-        cov_arr = None
-        age_arr = None
-        mom_arr = None
-
-        # Pre-compute seed keys and entropy for all seeds in one pass
-        seed_keys = [None] * n
-        entropy_map = {}
-        entropy_sum = 0.0
-        entropy_count = 0
-
-        fuzz_list = []
-        cov_list = []
-        age_list = []
-        mom_list = []
-        meta_indices = []
-
-        for i, seed in enumerate(corpus):
-            meta = seed_meta.get(seed)
-            if meta is None:
-                continue
-            has_meta[i] = True
-            meta_indices.append(i)
-            fuzz_list.append(max(meta["fuzz_count"], 1))
-            cov_list.append(meta["coverage_edges"])
-            age_list.append(now - meta["added_at"])
-            mom_list.append(meta.get("momentum", 0.0))
-
-            # Pre-compute seed key and entropy in same pass
-            sk = f._seed_key(seed)
-            seed_keys[i] = sk
-            ent = f._edge_tracker.shannon_entropy_seed(sk)
-            if ent > 0:
-                entropy_map[sk] = ent
-                entropy_sum += ent
-                entropy_count += 1
-
+        has_meta, seed_keys, entropy_map, entropy_sum, entropy_count, cols, meta_indices = (
+            self._extract_meta(now)
+        )
         if meta_indices:
-            try:
-                import numpy as _np
+            self._apply_exploit(weights, pareto_scores, meta_indices, cols, T)
 
-                fuzz_arr = _np.array(fuzz_list, dtype=_np.float64)
-                cov_arr = _np.array(cov_list, dtype=_np.float64)
-                age_arr = _np.array(age_list, dtype=_np.float64)
-                mom_arr = _np.array(mom_list, dtype=_np.float64)
-
-                # Vectorized _weight_exploit_parts
-                explore = T * (1.0 / _np.sqrt(fuzz_arr))
-                exploit = (1.0 + cov_arr * 0.5) / (1.0 + age_arr * 0.01)
-                w_vec = explore * exploit
-                w_vec *= 1.0 + mom_arr * 2.0
-                burst_vec = _np.maximum(1.0, 1.0 + T * 4.0 - (age_arr / 60.0) * T)
-                staleness = fuzz_arr / _np.maximum(cov_arr + 1, 1)
-                stale_mask = staleness > 50.0 * T
-                w_vec[stale_mask] *= 0.01
-
-                # Write back vectorized results
-                for j, idx in enumerate(meta_indices):
-                    weights[idx] = float(w_vec[j])
-                    pareto_scores[idx] = (1.0, float(burst_vec[j]), 1.0)
-            except ImportError:
-                # Scalar equivalent, through the same helper the vector math
-                # above mirrors, so the two definitions cannot drift.
-                for j, idx in enumerate(meta_indices):
-                    w_scalar, burst_scalar = self._weight_exploit_parts(
-                        {"momentum": mom_list[j]},
-                        fuzz_list[j],
-                        cov_list[j],
-                        age_list[j],
-                        T,
-                    )
-                    weights[idx] = w_scalar
-                    pareto_scores[idx] = (1.0, burst_scalar, 1.0)
-
-        # Compute FMM-clustered pairwise overlap density if enabled.
-        # This runs before Phase 2 so the per-seed loop can consume it.
-        # Skip when saturated: overlap density mainly helps discovery, and
-        # at >= 99% saturation the corpus is already well-characterised.
-        if not _saturated and getattr(f, "_use_overlap_density", False) and n >= 3:
-            all_keys: list[str] = []
-            for s in corpus:
-                all_keys.append(f._seed_key(s))
-            od_result = f._edge_tracker.compute_overlap_density(
-                all_keys, min_jaccard=getattr(f, "_overlap_min_jaccard", 0.25)
-            )
-            f._overlap_density_cache = od_result[0]
-        else:
-            f._overlap_density_cache = {}
+        self._refresh_overlap(_saturated, n)
 
         # Pre-compute mean entropy once
         mean_entropy = entropy_sum / entropy_count if entropy_count > 0 else 0.0
@@ -1725,77 +1693,12 @@ class SeedPicker:
         # weight boost (mult = 1.0 + 0.5 * diversity, diversity in [0, 1]).
         # Skip when saturated: this pass is O(n) with LCA queries and only
         # helps exploratory scheduling, not exploitation at saturation.
-        lineage_div: dict[str, float] = {}
-        if (
-            not _saturated
-            and f._use_lineage
-            and getattr(f, "_lineage", None) is not None
-            and n >= 2
-        ):
-            tree = f._lineage
-            max_depth = max((node.depth for node in tree.nodes.values()), default=0)
-            if max_depth > 0:
-                # seed_keys was filled by the pre-compute pass above; only
-                # seeds without metadata are still None, so re-hashing the
-                # whole corpus here was redundant.
-                all_sk = [
-                    sk if sk is not None else f._seed_key(s)
-                    # strict=True: seed_keys is built as [None] * len(corpus)
-                    # at the top of this pass, so the lengths are structurally
-                    # equal and a mismatch means the pre-compute pass has been
-                    # broken. Silently truncating to the shorter of the two
-                    # would drop seeds from the diversity pool without a
-                    # symptom.
-                    for sk, s in zip(seed_keys, corpus, strict=True)
-                ]
-                rng = getattr(f, "_rng", None)
-                sample_cap = 64
-                # Draw the peer pool once per pass instead of rebuilding
-                # `[k for k in all_sk if k != sk_i]` for every seed: that was
-                # O(n^2) list construction to keep sample_cap entries of it
-                # (81ms/pass at n=2000). Peers are now shared across seeds
-                # within a pass rather than drawn independently per seed --
-                # this is a diversity heuristic averaged over the pool, and
-                # the pool is redrawn on the next pass, so the estimate stays
-                # unbiased across passes while costing O(n).
-                n_sk = len(all_sk)
-                if rng is not None and n_sk > sample_cap + 1:
-                    pool_idx = rng.sample(n_sk, sample_cap + 1)
-                else:
-                    pool_idx = range(n_sk)
-                pool_idx = list(pool_idx)
-                # One batch_lca_distances() call for every (seed, peer) pair
-                # in the pass instead of n * sample_cap individual
-                # lca_distance() calls: each of those walks up to O(depth)
-                # per pair, and depth grows close to linearly with corpus
-                # size on a realistic mostly-chain mutation lineage (no
-                # rebalancing force keeps it at O(log n) or O(sqrt(n))), so
-                # the per-pair loop was O(n * sample_cap * depth) --
-                # quadratic in corpus size. Tarjan's offline algorithm
-                # answers the whole batch in one O((n + q)*alpha(n)) pass.
-                # See docs/handover/handover_trees.md's "other tree
-                # structures" section for the benchmark (~19x at n=8000
-                # with this exact per-seed x64-sample query shape).
-                all_pairs: list[tuple[str, str]] = []
-                per_seed_samples: list[list[str]] = []
-                for i, sk_i in enumerate(all_sk):
-                    sample = [all_sk[j] for j in pool_idx if j != i][:sample_cap]
-                    per_seed_samples.append(sample)
-                    all_pairs.extend((sk_i, k) for k in sample)
-                batch_dist = tree.batch_lca_distances(all_pairs)
-                for i, sk_i in enumerate(all_sk):
-                    sample = per_seed_samples[i]
-                    valid = [d for d in (batch_dist[(sk_i, k)] for k in sample) if d >= 0]
-                    avg = sum(valid) / len(valid) if valid else 0.0
-                    diversity = min(avg / (2.0 * max_depth), 1.0)
-                    lineage_div[sk_i] = 1.0 + 0.5 * diversity
+        lineage_div = self._lineage_diversity(_saturated, n, seed_keys)
 
         # Phase 2: apply remaining per-seed weight functions (dict lookups, set ops)
         # Built once per pass: lineage backtracking resolves subtree keys back
         # to seeds to read their coverage meta.
-        bt_key_to_seed: dict = {}
-        if getattr(f, "_use_lineage_backtrack", False) and getattr(f, "_lineage", None):
-            bt_key_to_seed = {(seed_keys[i] or f._seed_key(s)): s for i, s in enumerate(corpus)}
+        bt_key_to_seed = self._backtrack_keymap(seed_keys)
         # Window occurrence counts, folded once per pass rather than
         # re-intersected per seed. See _recent_edge_counts.
         recent_counts = self._recent_edge_counts(f)
@@ -1832,13 +1735,211 @@ class SeedPicker:
             else:
                 pareto_scores[i] = (sub, bf, spa)
 
+        self._apply_front_bonus(weights, pareto_scores)
+        return weights
+
+    def _extract_meta(self, now: float) -> tuple:
+        """Phase 1: one pass over the corpus collecting metadata columns and entropy.
+
+        Returns (has_meta, seed_keys, entropy_map, entropy_sum, entropy_count,
+        (fuzz, cov, age, momentum) lists, meta_indices).
+        """
+        f = self.f
+        corpus = f.corpus
+        seed_meta = f.seed_meta
+        n = len(corpus)
+        has_meta = [False] * n
+
+        # Pre-compute seed keys and entropy for all seeds in one pass
+        seed_keys = [None] * n
+        entropy_map = {}
+        entropy_sum = 0.0
+        entropy_count = 0
+
+        fuzz_list = []
+        cov_list = []
+        age_list = []
+        mom_list = []
+        meta_indices = []
+
+        for i, seed in enumerate(corpus):
+            meta = seed_meta.get(seed)
+            if meta is None:
+                continue
+            has_meta[i] = True
+            meta_indices.append(i)
+            fuzz_list.append(max(meta["fuzz_count"], 1))
+            cov_list.append(meta["coverage_edges"])
+            age_list.append(now - meta["added_at"])
+            mom_list.append(meta.get("momentum", 0.0))
+
+            # Pre-compute seed key and entropy in same pass
+            sk = f._seed_key(seed)
+            seed_keys[i] = sk
+            ent = f._edge_tracker.shannon_entropy_seed(sk)
+            if ent > 0:
+                entropy_map[sk] = ent
+                entropy_sum += ent
+                entropy_count += 1
+
+        cols = (fuzz_list, cov_list, age_list, mom_list)
+        return has_meta, seed_keys, entropy_map, entropy_sum, entropy_count, cols, meta_indices
+
+    def _apply_exploit(
+        self,
+        weights: list[float],
+        pareto_scores: list,
+        meta_indices: list[int],
+        cols: tuple,
+        T: float,
+    ) -> None:
+        """Write the vectorized explore/exploit/burst terms into *weights*/*pareto_scores*."""
+        fuzz_list, cov_list, age_list, mom_list = cols
+        try:
+            import numpy as _np
+
+            fuzz_arr = _np.array(fuzz_list, dtype=_np.float64)
+            cov_arr = _np.array(cov_list, dtype=_np.float64)
+            age_arr = _np.array(age_list, dtype=_np.float64)
+            mom_arr = _np.array(mom_list, dtype=_np.float64)
+
+            # Vectorized _weight_exploit_parts
+            explore = T * (1.0 / _np.sqrt(fuzz_arr))
+            exploit = (1.0 + cov_arr * 0.5) / (1.0 + age_arr * 0.01)
+            w_vec = explore * exploit
+            w_vec *= 1.0 + mom_arr * 2.0
+            burst_vec = _np.maximum(1.0, 1.0 + T * 4.0 - (age_arr / 60.0) * T)
+            staleness = fuzz_arr / _np.maximum(cov_arr + 1, 1)
+            stale_mask = staleness > 50.0 * T
+            w_vec[stale_mask] *= 0.01
+
+            # Write back vectorized results
+            for j, idx in enumerate(meta_indices):
+                weights[idx] = float(w_vec[j])
+                pareto_scores[idx] = (1.0, float(burst_vec[j]), 1.0)
+        except ImportError:
+            # Scalar equivalent, through the same helper the vector math
+            # above mirrors, so the two definitions cannot drift.
+            for j, idx in enumerate(meta_indices):
+                w_scalar, burst_scalar = self._weight_exploit_parts(
+                    {"momentum": mom_list[j]},
+                    fuzz_list[j],
+                    cov_list[j],
+                    age_list[j],
+                    T,
+                )
+                weights[idx] = w_scalar
+                pareto_scores[idx] = (1.0, burst_scalar, 1.0)
+
+    def _refresh_overlap(self, saturated: bool, n: int) -> None:
+        """Refresh f._overlap_density_cache (FMM pairwise overlap) before phase 2."""
+        f = self.f
+        corpus = f.corpus
+
+        # Compute FMM-clustered pairwise overlap density if enabled.
+        # This runs before Phase 2 so the per-seed loop can consume it.
+        # Skip when saturated: overlap density mainly helps discovery, and
+        # at >= 99% saturation the corpus is already well-characterised.
+        if not saturated and getattr(f, "_use_overlap_density", False) and n >= 3:
+            all_keys: list[str] = []
+            for s in corpus:
+                all_keys.append(f._seed_key(s))
+            od_result = f._edge_tracker.compute_overlap_density(
+                all_keys, min_jaccard=getattr(f, "_overlap_min_jaccard", 0.25)
+            )
+            f._overlap_density_cache = od_result[0]
+        else:
+            f._overlap_density_cache = {}
+
+    def _lineage_diversity(self, saturated: bool, n: int, seed_keys: list) -> dict[str, float]:
+        """LCA lineage-diversity multiplier per seed key; {} when disabled or saturated."""
+        f = self.f
+        corpus = f.corpus
+        lineage_div: dict[str, float] = {}
+        if saturated or not f._use_lineage or getattr(f, "_lineage", None) is None or n < 2:
+            return lineage_div
+
+        tree = f._lineage
+        max_depth = max((node.depth for node in tree.nodes.values()), default=0)
+        if max_depth <= 0:
+            return lineage_div
+
+        # seed_keys was filled by the pre-compute pass above; only
+        # seeds without metadata are still None, so re-hashing the
+        # whole corpus here was redundant.
+        all_sk = [
+            sk if sk is not None else f._seed_key(s)
+            # strict=True: seed_keys is built as [None] * len(corpus)
+            # at the top of this pass, so the lengths are structurally
+            # equal and a mismatch means the pre-compute pass has been
+            # broken. Silently truncating to the shorter of the two
+            # would drop seeds from the diversity pool without a
+            # symptom.
+            for sk, s in zip(seed_keys, corpus, strict=True)
+        ]
+        return self._lca_diversity(tree, all_sk, max_depth)
+
+    def _lca_diversity(self, tree, all_sk: list[str], max_depth: int) -> dict[str, float]:
+        """Per-seed 1 + 0.5 * normalised mean LCA distance to a shared sampled peer pool."""
+        f = self.f
+        lineage_div: dict[str, float] = {}
+        rng = getattr(f, "_rng", None)
+        sample_cap = 64
+        # Draw the peer pool once per pass instead of rebuilding
+        # `[k for k in all_sk if k != sk_i]` for every seed: that was
+        # O(n^2) list construction to keep sample_cap entries of it
+        # (81ms/pass at n=2000). Peers are now shared across seeds
+        # within a pass rather than drawn independently per seed --
+        # this is a diversity heuristic averaged over the pool, and
+        # the pool is redrawn on the next pass, so the estimate stays
+        # unbiased across passes while costing O(n).
+        n_sk = len(all_sk)
+        if rng is not None and n_sk > sample_cap + 1:
+            pool_idx = rng.sample(n_sk, sample_cap + 1)
+        else:
+            pool_idx = range(n_sk)
+        pool_idx = list(pool_idx)
+        # One batch_lca_distances() call for every (seed, peer) pair
+        # in the pass instead of n * sample_cap individual
+        # lca_distance() calls: each of those walks up to O(depth)
+        # per pair, and depth grows close to linearly with corpus
+        # size on a realistic mostly-chain mutation lineage (no
+        # rebalancing force keeps it at O(log n) or O(sqrt(n))), so
+        # the per-pair loop was O(n * sample_cap * depth) --
+        # quadratic in corpus size. Tarjan's offline algorithm
+        # answers the whole batch in one O((n + q)*alpha(n)) pass.
+        # See docs/handover/handover_trees.md's "other tree
+        # structures" section for the benchmark (~19x at n=8000
+        # with this exact per-seed x64-sample query shape).
+        all_pairs: list[tuple[str, str]] = []
+        per_seed_samples: list[list[str]] = []
+        for i, sk_i in enumerate(all_sk):
+            sample = [all_sk[j] for j in pool_idx if j != i][:sample_cap]
+            per_seed_samples.append(sample)
+            all_pairs.extend((sk_i, k) for k in sample)
+        batch_dist = tree.batch_lca_distances(all_pairs)
+        for i, sk_i in enumerate(all_sk):
+            sample = per_seed_samples[i]
+            valid = [d for d in (batch_dist[(sk_i, k)] for k in sample) if d >= 0]
+            avg = sum(valid) / len(valid) if valid else 0.0
+            diversity = min(avg / (2.0 * max_depth), 1.0)
+            lineage_div[sk_i] = 1.0 + 0.5 * diversity
+        return lineage_div
+
+    def _backtrack_keymap(self, seed_keys: list) -> dict:
+        """Seed-key -> seed map for lineage backtracking; {} when disabled."""
+        f = self.f
+        if getattr(f, "_use_lineage_backtrack", False) and getattr(f, "_lineage", None):
+            return {(seed_keys[i] or f._seed_key(s)): s for i, s in enumerate(f.corpus)}
+        return {}
+
+    def _apply_front_bonus(self, weights: list[float], pareto_scores: list) -> None:
+        """Double weights on the Pareto front, halve the rest."""
         if len(pareto_scores) >= 3:
             front = self._pareto_front(pareto_scores, window=100)
             front_set = front  # already a set
             for i in range(len(weights)):
                 weights[i] *= 2.0 if i in front_set else 0.5
-
-        return weights
 
     @staticmethod
     def _pareto_front(scores: list[tuple[float, ...]], window: int = 100) -> set[int]:
@@ -1946,24 +2047,7 @@ class SeedPicker:
             or f._pareto_cache_key != cache_key
             or due(f.exec_count, 100, "seed_picker.pareto")
         ):
-            pareto_scores: list[tuple[float, ...]] = []
-            for seed in f.corpus:
-                meta = f.seed_meta.get(seed)
-                if meta is None:
-                    pareto_scores.append((1.0, 1.0, 1.0))
-                    continue
-                seed_key = f._seed_key(seed)
-                sub, div, spa, _cov = f._cached_weights.get(seed_key, (1.0, 1.0, 1.0, 0.5))
-                age = now - meta["added_at"]
-                burst = max(1.0, 1.0 + f._temperature * (5.0 - 1.0) - (age / 60.0) * f._temperature)
-                if use_pareto4d:
-                    od = getattr(f, "_overlap_density_cache", {}).get(seed_key, 0.5)
-                    pareto_scores.append((sub, burst, spa, od))
-                else:
-                    pareto_scores.append((sub, burst, spa))
-            f._pareto_cache = pareto_scores
-            f._pareto_cache_key = cache_key
-            f._pareto_front_cache = self._pareto_front(pareto_scores, window=100)
+            self._rebuild_pareto(now, cache_key, use_pareto4d)
 
         front = f._pareto_front_cache
 
@@ -1984,6 +2068,28 @@ class SeedPicker:
             return _cdf_pick(front_seeds, front_weights, f._cdf_cache, "front", f._rng)
         else:
             return _cdf_pick(f.corpus, weights, f._cdf_cache, "corpus", f._rng)
+
+    def _rebuild_pareto(self, now: float, cache_key: int, use_pareto4d: bool) -> None:
+        """Recompute per-seed Pareto scores and the cached front (cold path)."""
+        f = self.f
+        pareto_scores: list[tuple[float, ...]] = []
+        for seed in f.corpus:
+            meta = f.seed_meta.get(seed)
+            if meta is None:
+                pareto_scores.append((1.0, 1.0, 1.0))
+                continue
+            seed_key = f._seed_key(seed)
+            sub, div, spa, _cov = f._cached_weights.get(seed_key, (1.0, 1.0, 1.0, 0.5))
+            age = now - meta["added_at"]
+            burst = max(1.0, 1.0 + f._temperature * (5.0 - 1.0) - (age / 60.0) * f._temperature)
+            if use_pareto4d:
+                od = getattr(f, "_overlap_density_cache", {}).get(seed_key, 0.5)
+                pareto_scores.append((sub, burst, spa, od))
+            else:
+                pareto_scores.append((sub, burst, spa))
+        f._pareto_cache = pareto_scores
+        f._pareto_cache_key = cache_key
+        f._pareto_front_cache = self._pareto_front(pareto_scores, window=100)
 
     def _log_pick_signals(
         self, selected: bytes, now: float, weights: list[float] | None = None

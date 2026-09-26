@@ -31,14 +31,7 @@ def token_shuffle(data: bytes, rng=None) -> bytes:
     if n < 4:
         return data
 
-    # Find token start positions (each token starts after a delimiter)
-    token_starts = [0]
-    for i in range(n):
-        if len(token_starts) >= 64:
-            break
-        if data[i] in _DELIMS and i + 1 < n:
-            token_starts.append(i + 1)
-
+    token_starts = _token_starts(data, n)
     if len(token_starts) < 2:
         return data
 
@@ -46,10 +39,8 @@ def token_shuffle(data: bytes, rng=None) -> bytes:
     idx1 = r.randint(0, len(token_starts) - 2)
     idx2 = r.randint(idx1 + 1, len(token_starts) - 1)
 
-    start1 = token_starts[idx1]
-    end1 = token_starts[idx1 + 1] if idx1 + 1 < len(token_starts) else len(data)
-    start2 = token_starts[idx2]
-    end2 = token_starts[idx2 + 1] if idx2 + 1 < len(token_starts) else len(data)
+    start1, end1 = _token_bounds(token_starts, idx1, n)
+    start2, end2 = _token_bounds(token_starts, idx2, n)
 
     # Extract token content (strip trailing delimiters)
     content1 = data[start1:end1].rstrip(_DELIMS)
@@ -59,8 +50,8 @@ def token_shuffle(data: bytes, rng=None) -> bytes:
         return data
 
     # Find the delimiter that follows each token's content
-    delim1 = data[start1 + len(content1) : end1][:1] if start1 + len(content1) < end1 else b""
-    delim2 = data[start2 + len(content2) : end2][:1] if start2 + len(content2) < end2 else b""
+    delim1 = _trailing_delim(data, start1 + len(content1), end1)
+    delim2 = _trailing_delim(data, start2 + len(content2), end2)
 
     # If neither delimiter exists, use a space as fallback
     if not delim1 and not delim2:
@@ -75,14 +66,27 @@ def token_shuffle(data: bytes, rng=None) -> bytes:
     mid_end = start2
     middle = data[mid_start:mid_end]
 
-    # Build the result
-    parts = [prefix, content2]
-    if delim1:
-        parts.append(delim1)
-    parts.append(middle)
-    parts.append(content1)
-    if delim2:
-        parts.append(delim2)
-    parts.append(suffix)
+    # Build the result (an absent delimiter is b"" and joins to nothing)
+    return b"".join((prefix, content2, delim1, middle, content1, delim2, suffix))
 
-    return b"".join(parts)
+
+def _token_starts(data: bytes, n: int) -> list[int]:
+    """Token start offsets: 0 plus each byte after a delimiter, capped at 64."""
+    token_starts = [0]
+    for i in range(n):
+        if len(token_starts) >= 64:
+            break
+        if data[i] in _DELIMS and i + 1 < n:
+            token_starts.append(i + 1)
+    return token_starts
+
+
+def _token_bounds(token_starts: list[int], idx: int, n: int) -> tuple[int, int]:
+    """[start, end) of token *idx*; the last token runs to end of data."""
+    end = token_starts[idx + 1] if idx + 1 < len(token_starts) else n
+    return token_starts[idx], end
+
+
+def _trailing_delim(data: bytes, content_end: int, end: int) -> bytes:
+    """The one delimiter byte after a token's content, or b"" if none."""
+    return data[content_end:end][:1] if content_end < end else b""

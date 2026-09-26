@@ -82,6 +82,79 @@ def _find_eocd(data: bytes) -> int:
     return -1
 
 
+# CD fixed header: sig, ver_made, ver_need, flags, method, time, date, crc,
+# csize, usize, name_len, extra_len, comment_len, disk, iattr, eattr, lho
+_CD_FIXED = struct.Struct("<IHHHHHHIIIHHHHHII")
+
+
+def _local_payload(
+    data: bytes, lho: int, flags: int, csize: int, eocd_pos: int
+) -> tuple[bytes, int, bytes] | None:
+    """Validate the LFH at *lho* -> (lfh_fixed, data_start, desc), or None."""
+    if lho + 30 > len(data) or data[lho : lho + 4] != b"PK\x03\x04":
+        return None
+    lfh_fixed = data[lho : lho + 30]
+    lname_len = struct.unpack_from("<H", data, lho + 26)[0]
+    lextra_len = struct.unpack_from("<H", data, lho + 28)[0]
+    if lho + 30 + lname_len + lextra_len > len(data):
+        return None
+    data_start = lho + 30 + lname_len + lextra_len
+
+    desc = b""
+    if flags & 0x08:
+        # Data descriptor follows the file data (12 or 16 bytes)
+        if data_start + csize + 12 > len(data) or data_start + csize + 12 > eocd_pos:
+            return None
+        if data[data_start + csize : data_start + csize + 4] == b"PK\x07\x08":
+            desc = data[data_start + csize : data_start + csize + 16]
+        else:
+            desc = data[data_start + csize : data_start + csize + 12]
+    elif data_start + csize > eocd_pos:
+        return None
+    return lfh_fixed, data_start, desc
+
+
+def _parse_cd_entry(data: bytes, pos: int, eocd_pos: int) -> tuple[ZipEntry, int] | None:
+    """Parse one CD record at *pos* + its LFH -> (entry, next_pos), or None."""
+    if pos + 46 > len(data) or data[pos : pos + 4] != b"PK\x01\x02":
+        return None
+    fixed = data[pos : pos + 46]
+    f = _CD_FIXED.unpack(fixed)
+    flags, method, modtime, moddate, crc, csize, usize = f[3:10]
+    name_len, extra_len, comment_len = f[10:13]
+    lho = f[16]
+    if pos + 46 + name_len + extra_len + comment_len > len(data):
+        return None
+    name = data[pos + 46 : pos + 46 + name_len]
+    extra = data[pos + 46 + name_len : pos + 46 + name_len + extra_len]
+    comment = data[pos + 46 + name_len + extra_len : pos + 46 + name_len + extra_len + comment_len]
+    if 0xFFFFFFFF in (csize, usize, lho):
+        return None  # zip64 sentinel — unsupported
+
+    local = _local_payload(data, lho, flags, csize, eocd_pos)
+    if local is None:
+        return None
+    lfh_fixed, data_start, desc = local
+
+    entry = ZipEntry(
+        name=name,
+        extra=extra,
+        comment=comment,
+        method=method,
+        flags=flags,
+        crc32=crc,
+        csize=csize,
+        usize=usize,
+        modtime=modtime,
+        moddate=moddate,
+        data=data[data_start : data_start + csize],
+        desc=desc,
+        lfh_fixed=lfh_fixed,
+        cd_fixed=fixed,
+    )
+    return entry, pos + 46 + name_len + extra_len + comment_len
+
+
 def parse_zip(data: bytes) -> ZipDoc | None:
     """Parse a ZIP archive into a ZipDoc.
 
@@ -103,72 +176,11 @@ def parse_zip(data: bytes) -> ZipDoc | None:
     entries: list[ZipEntry] = []
     pos = cd_offset
     for _ in range(total):
-        if pos + 46 > len(data) or data[pos : pos + 4] != b"PK\x01\x02":
+        parsed = _parse_cd_entry(data, pos, eocd_pos)
+        if parsed is None:
             return None
-        fixed = data[pos : pos + 46]
-        name_len = struct.unpack_from("<H", fixed, 28)[0]
-        extra_len = struct.unpack_from("<H", fixed, 30)[0]
-        comment_len = struct.unpack_from("<H", fixed, 32)[0]
-        if pos + 46 + name_len + extra_len + comment_len > len(data):
-            return None
-        name = data[pos + 46 : pos + 46 + name_len]
-        extra = data[pos + 46 + name_len : pos + 46 + name_len + extra_len]
-        comment = data[
-            pos + 46 + name_len + extra_len : pos + 46 + name_len + extra_len + comment_len
-        ]
-        method = struct.unpack_from("<H", fixed, 10)[0]
-        flags = struct.unpack_from("<H", fixed, 8)[0]
-        crc = struct.unpack_from("<I", fixed, 16)[0]
-        csize = struct.unpack_from("<I", fixed, 20)[0]
-        usize = struct.unpack_from("<I", fixed, 24)[0]
-        modtime = struct.unpack_from("<H", fixed, 12)[0]
-        moddate = struct.unpack_from("<H", fixed, 14)[0]
-        lho = struct.unpack_from("<I", fixed, 42)[0]
-        if 0xFFFFFFFF in (csize, usize, lho):
-            return None  # zip64 sentinel — unsupported
-
-        # Parse the local file header
-        if lho + 30 > len(data) or data[lho : lho + 4] != b"PK\x03\x04":
-            return None
-        lfh_fixed = data[lho : lho + 30]
-        lname_len = struct.unpack_from("<H", data, lho + 26)[0]
-        lextra_len = struct.unpack_from("<H", data, lho + 28)[0]
-        if lho + 30 + lname_len + lextra_len > len(data):
-            return None
-        data_start = lho + 30 + lname_len + lextra_len
-
-        desc = b""
-        if flags & 0x08:
-            # Data descriptor follows the file data (12 or 16 bytes)
-            if data_start + csize + 12 > len(data) or data_start + csize + 12 > eocd_pos:
-                return None
-            if data[data_start + csize : data_start + csize + 4] == b"PK\x07\x08":
-                desc = data[data_start + csize : data_start + csize + 16]
-            else:
-                desc = data[data_start + csize : data_start + csize + 12]
-        elif data_start + csize > eocd_pos:
-            return None
-
-        entry_data = data[data_start : data_start + csize]
-        entries.append(
-            ZipEntry(
-                name=name,
-                extra=extra,
-                comment=comment,
-                method=method,
-                flags=flags,
-                crc32=crc,
-                csize=csize,
-                usize=usize,
-                modtime=modtime,
-                moddate=moddate,
-                data=entry_data,
-                desc=desc,
-                lfh_fixed=lfh_fixed,
-                cd_fixed=fixed,
-            )
-        )
-        pos += 46 + name_len + extra_len + comment_len
+        entry, pos = parsed
+        entries.append(entry)
 
     if pos != eocd_pos:
         return None  # central directory must end exactly at the EOCD
@@ -258,6 +270,7 @@ class ZipMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
         self._rng = rng or self._rng
         doc = parse_zip(data)

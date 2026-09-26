@@ -218,31 +218,12 @@ class FEWAScheduler:
         candidates = set(ops)
 
         if self._exploit_arm is not None:
-            if self._exploit_arm not in candidates:
-                # The committed arm disappeared from the offered set (e.g.
-                # a runtime operator gate flipped) -- abandon the
-                # commitment rather than serve an arm nobody offered.
-                self._exploit_arm = None
-                self._restart_epoch(candidates)
-            elif self._exploit_left > 0:
+            if self._exploit_left > 0 and self._exploit_arm in candidates:
                 self._exploit_left -= 1
                 return self._exploit_arm
-            else:
-                # Commitment budget spent: re-open comparison instead of
-                # exploiting forever, so a since-rotted winner can be
-                # displaced. _restart_epoch already ran when the
-                # commitment was entered (see _enter_exploit), so falling
-                # through re-evaluates from a fresh h=1 immediately.
-                self._exploit_arm = None
+            self._end_exploit(candidates)
 
-        if not (self._active & candidates):
-            # The candidate pool changed out from under the active set --
-            # nothing in the current epoch is even offered anymore, so
-            # there is nothing to compare. Start a fresh epoch scoped to
-            # what is offered now.
-            self._restart_epoch(candidates)
-
-        active_candidates = [op for op in ops if op in self._active] or list(ops)
+        active_candidates = self._offered_active(ops, candidates)
 
         # Warm-up: bring every active candidate up to h pulls before any
         # windowed comparison is meaningful at this rung of the ladder.
@@ -252,7 +233,42 @@ class FEWAScheduler:
             tied = [op for op in active_candidates if counts[op] == floor]
             return tied[0] if len(tied) == 1 else self._rng.choice(tied)
 
-        # Every active candidate has >= h pulls: run the elimination test.
+        return self._eliminate(active_candidates, candidates)
+
+    def _offered_active(self, ops: list[str], candidates: set[str]) -> list[str]:
+        """Active arms among *ops*, in offer order; fresh epoch if none offered."""
+        if not (self._active & candidates):
+            # The candidate pool changed out from under the active set --
+            # nothing in the current epoch is even offered anymore, so
+            # there is nothing to compare. Start a fresh epoch scoped to
+            # what is offered now.
+            self._restart_epoch(candidates)
+
+        return [op for op in ops if op in self._active] or list(ops)
+
+    def _end_exploit(self, candidates: set[str]) -> None:
+        """Leave the commitment phase (arm no longer offered, or budget spent)."""
+        if self._exploit_arm not in candidates:
+            # The committed arm disappeared from the offered set (e.g.
+            # a runtime operator gate flipped) -- abandon the
+            # commitment rather than serve an arm nobody offered.
+            self._exploit_arm = None
+            self._restart_epoch(candidates)
+            return
+
+        # Commitment budget spent: re-open comparison instead of
+        # exploiting forever, so a since-rotted winner can be
+        # displaced. _restart_epoch already ran when the
+        # commitment was entered (see _enter_exploit), so falling
+        # through re-evaluates from a fresh h=1 immediately.
+        self._exploit_arm = None
+
+    def _eliminate(self, active_candidates: list[str], candidates: set[str]) -> str:
+        """Drop arms trailing the best windowed mean by > 2*B(h); pick a survivor.
+
+        Runs once every active candidate has >= h pulls. Commits to the
+        winner when at most one survives or h hit max_window, else doubles h.
+        """
         means = {op: self._windowed_mean(op, self._h) for op in active_candidates}
         bound = self._bound(self._h)
         best_mean = max(means.values())

@@ -296,28 +296,18 @@ def cmd_run(args: argparse.Namespace) -> int:
         return 2
 
     RESULTS.mkdir(parents=True, exist_ok=True)
-    matrix = list(cells(args.set, seeds))
-    if args.targets:
-        want = set(args.targets.split(","))
-        matrix = [c for c in matrix if Path(c[0]).name in want]
-        unknown = want - {Path(c[0]).name for c in list(cells(args.set, seeds))}
-        if unknown:
-            print(f"[!] not in set {args.set}: {', '.join(sorted(unknown))}", file=sys.stderr)
-            return 2
+    matrix = _target_matrix(args, seeds)
+    if matrix is None:
+        return 2
     total = len(matrix) * len(arms) * args.reps
     print(
         f"[*] {len(arms)} arms x {len(matrix)} cells x {args.reps} reps = "
         f"{total} campaigns @ {args.iters} execs"
     )
 
-    missing = sorted({t for t, _, _ in matrix if not (REPO / t).exists()})
-    if missing:
-        # Skipped, not scored zero: a target that failed to build is a hole
-        # in the matrix, and recording it as an outcome would let a build
-        # problem masquerade as an arm difference.
-        print(f"[!] not built, cells skipped: {', '.join(Path(m).name for m in missing)}")
-        print("    build them with tools/build_targets.sh before quoting a result")
-        matrix = [c for c in matrix if c[0] not in set(missing)]
+    built = _drop_unbuilt(matrix)
+    if len(built) != len(matrix):
+        matrix = built
         total = len(matrix) * len(arms) * args.reps
         if not matrix:
             print("[!] no targets available", file=sys.stderr)
@@ -325,47 +315,85 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     done = 0
     for arm in arms:
-        out = RESULTS / f"{args.set}_{arm}.json"
-        # Resume from whatever is already on disk. A full matrix is hours of
-        # compute and the results file used to be written once, after the last
-        # cell of an arm -- so an interrupted run lost every cell it had
-        # completed. Cells are keyed by (target, seed), which is the same key
-        # the pairing uses, so a resumed file is indistinguishable from one
-        # produced in a single pass.
-        rows = []
-        if out.exists() and not args.restart:
-            try:
-                rows = json.loads(out.read_text())
-            except (OSError, json.JSONDecodeError):
-                rows = []
-        have = {(r["target"], r["seed"], r.get("rep", 0)) for r in rows}
-        if have:
-            print(f"[*] {arm}: resuming, {len(have)} cells already recorded in {out.name}")
-
-        for target, flags, seed in matrix:
-            for rep in range(args.reps):
-                done += 1
-                if (target, seed, rep) in have:
-                    continue
-                row = run_cell(arm, target, flags, seed, args.iters, args.timeout, rep)
-                rows.append(row)
-                flag = "" if row["coverage_attached"] else "  [NO COVERAGE]"
-                print(
-                    f"  [{done:>4}/{total}] {arm:<18} {Path(target).name:<18} "
-                    f"seed={seed:<3} rep={rep} edges={row['edges']:<6} "
-                    f"{row['secs']:>6.1f}s{flag}",
-                    flush=True,
-                )
-                # Checkpoint after every cell, via a temp file and an atomic
-                # rename so an interruption mid-write cannot truncate the
-                # results.
-                tmp = out.with_suffix(".json.tmp")
-                tmp.write_text(json.dumps(rows, indent=1))
-                tmp.replace(out)
-        print(f"[*] wrote {out} ({len(rows)} cells)")
+        done = _run_arm(args, arm, matrix, done, total)
     if lock:
         lock.release()
     return 0
+
+
+def _target_matrix(args: argparse.Namespace, seeds: list[int]) -> list | None:
+    """Cells of ``args.set``, narrowed to ``--targets``; None if a name is not in the set."""
+    matrix = list(cells(args.set, seeds))
+    if not args.targets:
+        return matrix
+    want = set(args.targets.split(","))
+    matrix = [c for c in matrix if Path(c[0]).name in want]
+    unknown = want - {Path(c[0]).name for c in list(cells(args.set, seeds))}
+    if unknown:
+        print(f"[!] not in set {args.set}: {', '.join(sorted(unknown))}", file=sys.stderr)
+        return None
+    return matrix
+
+
+def _drop_unbuilt(matrix: list) -> list:
+    """Remove cells whose target binary is missing, reporting them."""
+    missing = sorted({t for t, _, _ in matrix if not (REPO / t).exists()})
+    if not missing:
+        return matrix
+    # Skipped, not scored zero: a target that failed to build is a hole
+    # in the matrix, and recording it as an outcome would let a build
+    # problem masquerade as an arm difference.
+    print(f"[!] not built, cells skipped: {', '.join(Path(m).name for m in missing)}")
+    print("    build them with tools/build_targets.sh before quoting a result")
+    return [c for c in matrix if c[0] not in set(missing)]
+
+
+def _load_rows(out: Path, restart: bool) -> list:
+    """Previously recorded cells from *out*, or [] on restart / unreadable file."""
+    if not out.exists() or restart:
+        return []
+    try:
+        return json.loads(out.read_text())
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
+def _run_arm(args: argparse.Namespace, arm: str, matrix: list, done: int, total: int) -> int:
+    """Run every missing cell of one arm, checkpointing each; returns updated *done*."""
+    out = RESULTS / f"{args.set}_{arm}.json"
+    # Resume from whatever is already on disk. A full matrix is hours of
+    # compute and the results file used to be written once, after the last
+    # cell of an arm -- so an interrupted run lost every cell it had
+    # completed. Cells are keyed by (target, seed), which is the same key
+    # the pairing uses, so a resumed file is indistinguishable from one
+    # produced in a single pass.
+    rows = _load_rows(out, args.restart)
+    have = {(r["target"], r["seed"], r.get("rep", 0)) for r in rows}
+    if have:
+        print(f"[*] {arm}: resuming, {len(have)} cells already recorded in {out.name}")
+
+    for target, flags, seed in matrix:
+        for rep in range(args.reps):
+            done += 1
+            if (target, seed, rep) in have:
+                continue
+            row = run_cell(arm, target, flags, seed, args.iters, args.timeout, rep)
+            rows.append(row)
+            flag = "" if row["coverage_attached"] else "  [NO COVERAGE]"
+            print(
+                f"  [{done:>4}/{total}] {arm:<18} {Path(target).name:<18} "
+                f"seed={seed:<3} rep={rep} edges={row['edges']:<6} "
+                f"{row['secs']:>6.1f}s{flag}",
+                flush=True,
+            )
+            # Checkpoint after every cell, via a temp file and an atomic
+            # rename so an interruption mid-write cannot truncate the
+            # results.
+            tmp = out.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(rows, indent=1))
+            tmp.replace(out)
+    print(f"[*] wrote {out} ({len(rows)} cells)")
+    return done
 
 
 # ── Analysis ───────────────────────────────────────────────────────────
@@ -403,18 +431,7 @@ def _wilcoxon_signed_rank(deltas: list[float]) -> tuple[float, float]:
     if not ranked:
         return 0.0, 1.0
 
-    # Average ranks for tied absolute values so the null is exact under H0.
-    ranks = [0.0] * len(ranked)
-    i = 0
-    while i < len(ranked):
-        j = i
-        while j + 1 < len(ranked) and ranked[j + 1][0] == ranked[i][0]:
-            j += 1
-        avg = (i + 1 + j + 1) / 2.0
-        for k in range(i, j + 1):
-            ranks[k] = avg
-        i = j + 1
-
+    ranks = _tied_ranks(ranked)
     signs = [1.0 if deltas[idx] > 0 else -1.0 for _, idx in ranked]
     w_pos = sum(r for r, s in zip(ranks, signs, strict=False) if s > 0)
     w_neg = sum(r for r, s in zip(ranks, signs, strict=False) if s < 0)
@@ -423,17 +440,7 @@ def _wilcoxon_signed_rank(deltas: list[float]) -> tuple[float, float]:
 
     n = len(ranked)
     if n <= 20:
-        # Enumerate all 2^n sign assignments; W+ under the null is the sum of
-        # a random subset of the ranks, so every assignment is equally likely.
-        count_le = count_ge = 0
-        for signs in product((-1, 1), repeat=n):
-            w = sum(r for r, s in zip(ranks, signs, strict=False) if s > 0)
-            if w <= stat + 1e-12:
-                count_le += 1
-            if w >= total - stat - 1e-12:
-                count_ge += 1
-        p = min(1.0, 2.0 * min(count_le, count_ge) / (2**n))
-        return stat, p
+        return stat, _exact_signed_p(ranks, stat, total)
 
     # Normal approximation with continuity correction.
     mean = n * (n + 1) / 4.0
@@ -444,6 +451,38 @@ def _wilcoxon_signed_rank(deltas: list[float]) -> tuple[float, float]:
     # Standard normal tail via the error function.
     p = math.erfc(z / math.sqrt(2.0))
     return stat, min(1.0, p)
+
+
+def _tied_ranks(ranked: list[tuple[float, int]]) -> list[float]:
+    """1-based ranks of sorted *ranked*, averaging ties so the null is exact under H0."""
+    ranks = [0.0] * len(ranked)
+    i = 0
+    while i < len(ranked):
+        j = i
+        while j + 1 < len(ranked) and ranked[j + 1][0] == ranked[i][0]:
+            j += 1
+        avg = (i + 1 + j + 1) / 2.0
+        for k in range(i, j + 1):
+            ranks[k] = avg
+        i = j + 1
+    return ranks
+
+
+def _exact_signed_p(ranks: list[float], stat: float, total: float) -> float:
+    """Exact two-sided signed-rank p-value by enumerating all 2^n sign assignments.
+
+    W+ under the null is the sum of a random subset of the ranks, so every
+    assignment is equally likely.
+    """
+    n = len(ranks)
+    count_le = count_ge = 0
+    for signs in product((-1, 1), repeat=n):
+        w = sum(r for r, s in zip(ranks, signs, strict=False) if s > 0)
+        if w <= stat + 1e-12:
+            count_le += 1
+        if w >= total - stat - 1e-12:
+            count_ge += 1
+    return min(1.0, 2.0 * min(count_le, count_ge) / (2**n))
 
 
 def _fisher_exact(a: int, b: int, c: int, d: int) -> float:
@@ -505,29 +544,10 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
     t_by = _collapse(test, metric)
     shared = sorted(b_by.keys() & t_by.keys())
 
-    wins = losses = ties = 0
-    deltas = []
-    dropped_base = dropped_test = 0
-    for k in shared:
-        rb, rt = b_by[k], t_by[k]
-        # A cell is only scorable when BOTH arms attached coverage. Which arm
-        # failed is the MCAR/MNAR diagnostic: if the drop rate differs between
-        # base and test, the reported win rate is optimistic for whichever arm
-        # drops less, because McNemar/Wilcoxon are computed on the survivors.
-        if not rb["coverage_attached"]:
-            dropped_base += 1
-        if not rt["coverage_attached"]:
-            dropped_test += 1
-        if not (rb["coverage_attached"] and rt["coverage_attached"]):
-            continue
-        d = rt[metric] - rb[metric]
-        deltas.append(d)
-        if d > 0:
-            wins += 1
-        elif d < 0:
-            losses += 1
-        else:
-            ties += 1
+    deltas, dropped_base, dropped_test = _paired_deltas(b_by, t_by, shared, metric)
+    wins = sum(1 for d in deltas if d > 0)
+    losses = sum(1 for d in deltas if d < 0)
+    ties = len(deltas) - wins - losses
 
     n = wins + losses + ties
     wilcoxon_stat, wilcoxon_p = _wilcoxon_signed_rank(deltas)
@@ -551,17 +571,38 @@ def compare(base: list[dict], test: list[dict], metric: str = "edges") -> dict:
         "wilcoxon_stat": wilcoxon_stat,
         "wilcoxon_p": wilcoxon_p,
         "median_delta": statistics.median(deltas) if deltas else 0,
-        "iqr": (
-            (
-                round(statistics.quantiles(deltas, n=4)[0], 1),
-                round(statistics.quantiles(deltas, n=4)[2], 1),
-            )
-            if len(deltas) >= 4
-            else None
-        ),
+        "iqr": _iqr(deltas),
         "base_total": sum(b_by[k][metric] for k in shared),
         "test_total": sum(t_by[k][metric] for k in shared),
     }
+
+
+def _paired_deltas(b_by: dict, t_by: dict, shared: list, metric: str) -> tuple[list, int, int]:
+    """Test-minus-base deltas over cells where both arms attached coverage, plus per-arm drops."""
+    deltas = []
+    dropped_base = dropped_test = 0
+    for k in shared:
+        rb, rt = b_by[k], t_by[k]
+        # A cell is only scorable when BOTH arms attached coverage. Which arm
+        # failed is the MCAR/MNAR diagnostic: if the drop rate differs between
+        # base and test, the reported win rate is optimistic for whichever arm
+        # drops less, because McNemar/Wilcoxon are computed on the survivors.
+        if not rb["coverage_attached"]:
+            dropped_base += 1
+        if not rt["coverage_attached"]:
+            dropped_test += 1
+        if not (rb["coverage_attached"] and rt["coverage_attached"]):
+            continue
+        deltas.append(rt[metric] - rb[metric])
+    return deltas, dropped_base, dropped_test
+
+
+def _iqr(deltas: list) -> tuple[float, float] | None:
+    """(Q1, Q3) of *deltas* rounded to 0.1; None below 4 samples."""
+    if len(deltas) < 4:
+        return None
+    q = statistics.quantiles(deltas, n=4)
+    return (round(q[0], 1), round(q[2], 1))
 
 
 def holm(ps: list[float]) -> list[float]:
@@ -655,6 +696,49 @@ def cmd_strata(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_pooled(arm: str, r: dict) -> None:
+    """One pooled comparison row, plus the coverage-drop (MCAR) note when cells were dropped."""
+    print(
+        f"{arm:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} {r['losses']:>4} "
+        f"{r['ties']:>4} {r['mcnemar_p']:>9.3g} {r['fisher_p']:>9.3g} "
+        f"{r['median_delta']:>+7.1f} {r['median_spread']:>6.1f}"
+    )
+    if not r["dropped_no_coverage"]:
+        return
+    db, dt = r["dropped_base"], r["dropped_test"]
+    if db == dt:
+        print(f"{'':<20} dropped {r['dropped_no_coverage']} cells: coverage did not attach")
+        return
+    print(
+        f"{'':<20} dropped base {db} / test {dt}: coverage did not attach "
+        f"(MCAR check -- unequal drop rates bias the surviving-cell win rate)"
+    )
+
+
+def _print_by_target(arm: str, baseline: str, base: list, rows: list, metric: str) -> None:
+    """Per-target breakdown of one arm vs baseline; skips targets missing from either arm."""
+    print(f"\nper-target: {arm} vs {baseline}")
+    sub = (
+        f"{'target':<20} {'cells':>5} {'rep':>3} {'W':>4} {'L':>4} {'T':>4} "
+        f"{'McNemar':>9} {'Wilcox':>8} {'med Δ':>7} {'noise':>6}"
+    )
+    print(sub)
+    print("-" * len(sub))
+    targets = sorted({r["target"] for r in base} | {r["target"] for r in rows})
+    for tgt in targets:
+        b = [r for r in base if r["target"] == tgt]
+        t = [r for r in rows if r["target"] == tgt]
+        if not b or not t:
+            continue
+        r = compare(b, t, metric)
+        print(
+            f"{Path(tgt).name:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} "
+            f"{r['losses']:>4} {r['ties']:>4} {r['mcnemar_p']:>9.3g} "
+            f"{r['wilcoxon_p']:>8.3g} {r['median_delta']:>+7.1f} "
+            f"{r['median_spread']:>6.1f}"
+        )
+
+
 def cmd_analyse(args: argparse.Namespace) -> int:
     loaded: dict[str, list[dict]] = {}
     for path in args.files:
@@ -675,21 +759,7 @@ def cmd_analyse(args: argparse.Namespace) -> int:
     print(hdr)
     print("-" * len(hdr))
     for arm, rows in sorted(loaded.items()):
-        r = compare(base, rows, args.metric)
-        print(
-            f"{arm:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} {r['losses']:>4} "
-            f"{r['ties']:>4} {r['mcnemar_p']:>9.3g} {r['fisher_p']:>9.3g} "
-            f"{r['median_delta']:>+7.1f} {r['median_spread']:>6.1f}"
-        )
-        if r["dropped_no_coverage"]:
-            db, dt = r["dropped_base"], r["dropped_test"]
-            if db == dt:
-                print(f"{'':<20} dropped {r['dropped_no_coverage']} cells: coverage did not attach")
-            else:
-                print(
-                    f"{'':<20} dropped base {db} / test {dt}: coverage did not attach "
-                    f"(MCAR check -- unequal drop rates bias the surviving-cell win rate)"
-                )
+        _print_pooled(arm, compare(base, rows, args.metric))
 
     if args.by_target:
         # A pooled row is not enough to read an arm whose effect is expected on
@@ -698,26 +768,7 @@ def cmd_analyse(args: argparse.Namespace) -> int:
         # contributes ties that read as agreement. Break the same pairing out
         # per target so the shape of the result is visible, not just its sum.
         for arm, rows in sorted(loaded.items()):
-            print(f"\nper-target: {arm} vs {args.baseline}")
-            sub = (
-                f"{'target':<20} {'cells':>5} {'rep':>3} {'W':>4} {'L':>4} {'T':>4} "
-                f"{'McNemar':>9} {'Wilcox':>8} {'med Δ':>7} {'noise':>6}"
-            )
-            print(sub)
-            print("-" * len(sub))
-            targets = sorted({r["target"] for r in base} | {r["target"] for r in rows})
-            for tgt in targets:
-                b = [r for r in base if r["target"] == tgt]
-                t = [r for r in rows if r["target"] == tgt]
-                if not b or not t:
-                    continue
-                r = compare(b, t, args.metric)
-                print(
-                    f"{Path(tgt).name:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} "
-                    f"{r['losses']:>4} {r['ties']:>4} {r['mcnemar_p']:>9.3g} "
-                    f"{r['wilcoxon_p']:>8.3g} {r['median_delta']:>+7.1f} "
-                    f"{r['median_spread']:>6.1f}"
-                )
+            _print_by_target(arm, args.baseline, base, rows, args.metric)
 
     # Compute and output risk matrix if requested
     if args.risk_matrix:
@@ -741,6 +792,44 @@ def cmd_analyse(args: argparse.Namespace) -> int:
         "draw cannot show its own spread, not because the cell is reproducible."
     )
     return 0
+
+
+def _target_regrets(loaded: dict, arms: list, target: str) -> dict[str, list[float]]:
+    """Per-arm regrets on *target*, one per seed where at least two arms ran."""
+    # Group results by (arm, seed) for this target
+    arm_seed_results: dict[tuple[str, int], dict] = {}
+    for arm in arms:
+        for result in loaded[arm]:
+            if result["target"] == target:
+                arm_seed_results[(arm, result["seed"])] = result
+
+    out: dict[str, list[float]] = {}
+    seeds = set(seed for (_, seed) in arm_seed_results)
+    for seed in seeds:
+        arm_results = {
+            a: arm_seed_results[(a, seed)] for a in arms if (a, seed) in arm_seed_results
+        }
+        if len(arm_results) < 2:
+            # Need at least two arms to compare
+            continue
+        for arm, regret in _h2h_regrets(arm_results).items():
+            out.setdefault(arm, []).append(regret)
+    return out
+
+
+def _h2h_regrets(arm_results: dict[str, dict]) -> dict[str, float]:
+    """Regret = 1 - mean head-to-head score (win 1, tie 0.5, loss 0 on edges) per arm."""
+    regrets = {}
+    for arm, result in arm_results.items():
+        scores = []
+        for other_arm, other_result in arm_results.items():
+            if arm == other_arm:
+                continue
+            edges_a, edges_b = result["edges"], other_result["edges"]
+            scores.append(1.0 if edges_a > edges_b else 0.0 if edges_a < edges_b else 0.5)
+        if scores:
+            regrets[arm] = 1.0 - sum(scores) / len(scores)
+    return regrets
 
 
 def compute_risk_matrix(loaded: dict[str, list[dict]]) -> dict[str, dict[str, float]]:
@@ -775,59 +864,14 @@ def compute_risk_matrix(loaded: dict[str, list[dict]]) -> dict[str, dict[str, fl
 
     # For each target and seed, collect results from all arms
     for target in targets:
-        # Group results by (arm, seed) for this target
-        arm_seed_results: dict[tuple[str, int], dict] = {}
-        for arm in arms:
-            for result in loaded[arm]:
-                if result["target"] == target:
-                    seed = result["seed"]
-                    arm_seed_results[(arm, seed)] = result
-
-        # For each seed, compute head-to-head performance
-        seeds = set(seed for (_, seed) in arm_seed_results)
-        for seed in seeds:
-            # Get results for all arms on this (target, seed)
-            arm_results: dict[str, dict] = {}
-            for arm in arms:
-                if (arm, seed) in arm_seed_results:
-                    arm_results[arm] = arm_seed_results[(arm, seed)]
-
-            if len(arm_results) < 2:
-                # Need at least two arms to compare
-                continue
-
-            # For each arm, compute its average score against all other arms
-            for arm, result in arm_results.items():
-                scores = []
-                for other_arm, other_result in arm_results.items():
-                    if arm == other_arm:
-                        continue
-                    # Determine who won based on edge count
-                    edges_a = result["edges"]
-                    edges_b = other_result["edges"]
-                    if edges_a > edges_b:
-                        score_a = 1.0  # arm won
-                    elif edges_a < edges_b:
-                        score_a = 0.0  # arm lost
-                    else:
-                        score_a = 0.5  # tie
-                    scores.append(score_a)
-
-                if scores:
-                    avg_score = sum(scores) / len(scores)
-                    regret = 1.0 - avg_score
-                    risk_matrix[arm][target].append(regret)
+        for arm, regrets in _target_regrets(loaded, arms, target).items():
+            risk_matrix[arm][target].extend(regrets)
 
     # Compute worst-case regret (maximum regret across seeds) for each arm-target pair
     worst_case_risk_matrix: dict[str, dict[str, float]] = {}
     for arm in arms:
-        worst_case_risk_matrix[arm] = {}
-        for target in targets:
-            regrets = risk_matrix[arm][target]
-            if regrets:
-                worst_case_risk_matrix[arm][target] = max(regrets)
-            else:
-                worst_case_risk_matrix[arm][target] = 0.0  # No data, assume no regret
+        # No data -> 0.0: assume no regret.
+        worst_case_risk_matrix[arm] = {t: max(risk_matrix[arm][t], default=0.0) for t in targets}
 
     return worst_case_risk_matrix
 

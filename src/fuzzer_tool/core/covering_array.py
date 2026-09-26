@@ -114,6 +114,48 @@ def required_tuple_count(value_sets: Sequence[Sequence[Any]], t: int = 2) -> int
     return total
 
 
+def _best_row(
+    value_sets: Sequence[Sequence[Any]],
+    param_subsets: list,
+    needed: set[RequiredTuple],
+    rng: Any,
+    candidate_pool: int,
+) -> tuple[Row, set[RequiredTuple]] | None:
+    """Greedy pick: random candidate row covering the most still-needed tuples.
+
+    Returns ``(row, covered)``, or None if no candidate covers anything.
+    """
+    best_row: Row | None = None
+    best_covered: set[RequiredTuple] | None = None
+    best_gain = -1
+    # As `needed` shrinks toward its last few tuples, a pool of
+    # independent uniform-random rows has a real chance of missing
+    # all of them (e.g. one specific pair among ~500, each row has
+    # only a few-percent chance of hitting it) -- retry with fresh
+    # candidates rather than settle for whatever this round drew.
+    # Bounded generously; with non-empty domains this always
+    # terminates in practice (each retry is an independent shot at
+    # hitting `needed`, not a repeat of a failed one), the cap only
+    # guards a genuine "stuck" case with a defined stopping point.
+    attempts = 0
+    max_attempts = 200
+    while best_gain <= 0 and attempts < max_attempts:
+        for _ in range(max(1, candidate_pool)):
+            row = tuple(_pick(rng, vs) for vs in value_sets)
+            covered = _row_tuples(row, param_subsets) & needed
+            gain = len(covered)
+            if gain > best_gain:
+                best_gain = gain
+                best_row = row
+                best_covered = covered
+                if best_gain == len(needed):
+                    break
+        attempts += 1
+    if best_row is None or best_covered is None or best_gain <= 0:
+        return None
+    return best_row, best_covered
+
+
 def generate(
     value_sets: Sequence[Sequence[Any]],
     t: int = 2,
@@ -167,38 +209,13 @@ def generate(
     while needed:
         if max_rows is not None and len(rows) >= max_rows:
             break
-        best_row: Row | None = None
-        best_covered: set[RequiredTuple] | None = None
-        best_gain = -1
-        # As `needed` shrinks toward its last few tuples, a pool of
-        # independent uniform-random rows has a real chance of missing
-        # all of them (e.g. one specific pair among ~500, each row has
-        # only a few-percent chance of hitting it) -- retry with fresh
-        # candidates rather than settle for whatever this round drew.
-        # Bounded generously; with non-empty domains this always
-        # terminates in practice (each retry is an independent shot at
-        # hitting `needed`, not a repeat of a failed one), the cap only
-        # guards a genuine "stuck" case with a defined stopping point.
-        attempts = 0
-        max_attempts = 200
-        while best_gain <= 0 and attempts < max_attempts:
-            for _ in range(max(1, candidate_pool)):
-                row = tuple(_pick(rng, vs) for vs in value_sets)
-                covered = _row_tuples(row, param_subsets) & needed
-                gain = len(covered)
-                if gain > best_gain:
-                    best_gain = gain
-                    best_row = row
-                    best_covered = covered
-                    if best_gain == len(needed):
-                        break
-            attempts += 1
-        if best_row is None or best_covered is None or best_gain <= 0:
-            # Exhausted max_attempts without any candidate covering
+        pick = _best_row(value_sets, param_subsets, needed, rng, candidate_pool)
+        if pick is None:
+            # Exhausted the retry budget without any candidate covering
             # anything still `needed`. Unreachable for well-formed
-            # non-empty domains within 200*candidate_pool draws, but
-            # stop rather than loop forever if it ever is.
+            # non-empty domains, but stop rather than loop forever if it ever is.
             break
+        best_row, best_covered = pick
         rows.append(best_row)
         needed -= best_covered
     return rows

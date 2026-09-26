@@ -326,6 +326,23 @@ def ffd_pack(items: list[tuple[object, float]], capacity: float) -> list[list[ob
     return bins
 
 
+def _check_multifit(items: list[tuple[object, float]], m: int) -> None:
+    """Reject bad :func:`multifit` input up front (m < 1, empty, size <= 0)."""
+    if m < 1:
+        raise ValueError(f"m must be >= 1, got {m!r}")
+    if not items:
+        raise ValueError("items must be non-empty")
+    for item_id, size in items:
+        if size <= 0:
+            raise ValueError(f"item {item_id!r} has non-positive size {size!r}")
+
+
+def _bins_makespan(items: list[tuple[object, float]], bins: list[list[object]]) -> float:
+    """Max bin load of *bins*, sizes looked up from *items*."""
+    capacity_by_id = dict(items)
+    return max(sum(capacity_by_id[i] for i in b) for b in bins)
+
+
 def multifit(
     items: list[tuple[object, float]], m: int, iterations: int = 25
 ) -> tuple[list[list[object]], float]:
@@ -368,13 +385,7 @@ def multifit(
         ValueError: ``m < 1``, an empty *items* list, or any size
             violation :func:`ffd_pack` would also reject.
     """
-    if m < 1:
-        raise ValueError(f"m must be >= 1, got {m!r}")
-    if not items:
-        raise ValueError("items must be non-empty")
-    for item_id, size in items:
-        if size <= 0:
-            raise ValueError(f"item {item_id!r} has non-positive size {size!r}")
+    _check_multifit(items, m)
 
     sizes = [size for _, size in items]
     total = sum(sizes)
@@ -394,8 +405,7 @@ def multifit(
             # Track the best *feasible* packing found so far, not just the
             # bound -- the caller wants an actual packing, not only the
             # makespan estimate.
-            capacity_by_id = dict(items)
-            makespan = max(sum(capacity_by_id[i] for i in b) for b in packed)
+            makespan = _bins_makespan(items, packed)
             if best_bins is None or makespan < best_makespan:
                 best_bins = packed
                 best_makespan = makespan
@@ -407,8 +417,7 @@ def multifit(
         # item is <= max(sizes) <= hi, and there are enough "slots" since
         # hi == max(sizes) * len(items) can always hold every item alone).
         best_bins = ffd_pack(items, hi)
-        capacity_by_id = dict(items)
-        best_makespan = max(sum(capacity_by_id[i] for i in b) for b in best_bins)
+        best_makespan = _bins_makespan(items, best_bins)
 
     return best_bins, best_makespan
 

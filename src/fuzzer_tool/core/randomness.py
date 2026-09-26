@@ -854,6 +854,31 @@ def shannon_entropy_test(data: bytes) -> float:
     return chisq_sf(chi2, 255)
 
 
+# Per-test rejection level used by _classify.
+_CLASSIFY_ALPHA = 0.01
+
+
+def _window_stats(pv: dict, window: bytes) -> tuple[float, int, float, float]:
+    """(entropy, distinct bytes, printable fraction, min lag p-value) for *window*."""
+    h = shannon_entropy(window)
+    uniq = len(set(window))
+    printable = float(np.mean([32 <= b < 127 or b in (9, 10, 13) for b in window]))
+    lag_min = min(pv["lag"].values()) if pv["lag"] else 1.0
+    return h, uniq, printable, lag_min
+
+
+def _tabular_score(
+    pv: dict, core: list[float], n_reject: int, h: float, lag_min: float
+) -> float | None:
+    """Tabular confidence when lag/birthday or core-rejection evidence holds, else None."""
+    alpha = _CLASSIFY_ALPHA
+    if (lag_min < alpha and pv["birthday"] < 0.05) or (lag_min < alpha and h < 6.0):
+        return 1.0 - lag_min
+    if n_reject >= 3 and h < 7.5:
+        return 1.0 - min(core)
+    return None
+
+
 def _classify(pv: dict, window: bytes) -> tuple[str, float]:
     """Label a window from the test battery plus two cheap summary stats.
 
@@ -861,14 +886,11 @@ def _classify(pv: dict, window: bytes) -> tuple[str, float]:
     only as a corroborating signal, never alone -- its p-values are heavily
     discretized (see its docstring) so a lone rejection is not trustworthy.
     """
-    alpha = 0.01
+    alpha = _CLASSIFY_ALPHA
     core = [pv["monobit"], pv["runs"], pv["byte_chisq"], pv["serial"], pv["rank"]]
     n_reject = sum(1 for p in core if p < alpha)
 
-    h = shannon_entropy(window)
-    uniq = len(set(window))
-    printable = float(np.mean([32 <= b < 127 or b in (9, 10, 13) for b in window]))
-    lag_min = min(pv["lag"].values()) if pv["lag"] else 1.0
+    h, uniq, printable, lag_min = _window_stats(pv, window)
 
     if h < 1.5 or uniq <= 4:
         return "repetitive", 1.0 - h / 1.5
@@ -876,10 +898,9 @@ def _classify(pv: dict, window: bytes) -> tuple[str, float]:
         return "incompressible", float(np.mean(core))
     if printable > 0.85 and h < 6.5:
         return "textual", printable
-    if (lag_min < alpha and pv["birthday"] < 0.05) or (lag_min < alpha and h < 6.0):
-        return "tabular", 1.0 - lag_min
-    if n_reject >= 3 and h < 7.5:
-        return "tabular", 1.0 - min(core)
+    tab = _tabular_score(pv, core, n_reject, h, lag_min)
+    if tab is not None:
+        return "tabular", tab
     return "mixed", 0.0
 
 

@@ -91,6 +91,32 @@ def _compile_source(source: str, output: str, compiler: str | None = None) -> bo
             os.unlink(src_path)
 
 
+def _nm_symbols(argv: list[str]) -> list[tuple[str, str]]:
+    """Run ``nm`` and return ``(type, name)`` pairs; empty on any failure."""
+    try:
+        r = subprocess.run(argv, capture_output=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return []
+    if r.returncode != 0:
+        return []
+
+    syms = []
+    for line in r.stdout.decode(errors="replace").splitlines():
+        parts = line.split()
+        if len(parts) < 3:
+            continue
+        syms.append((parts[1], parts[2]))
+    return syms
+
+
+def _mark_sancov(info: dict, stype: str, sname: str) -> None:
+    """Flag sancov-init import / counters section symbols in *info*."""
+    if sname == "__sanitizer_cov_8bit_counters_init" and stype == "U":
+        info["has_undefined_sancov_init"] = True
+    if "__start___sancov_cntrs" in sname:
+        info["has_sancov_counters"] = True
+
+
 def _inspect_target(target: str) -> dict:
     """Inspect a target binary to determine its coverage type."""
     info = {
@@ -105,40 +131,18 @@ def _inspect_target(target: str) -> dict:
     tl = target.lower()
     if tl.endswith((".so", ".dylib", ".dll")):
         info["is_shared_lib"] = True
-    try:
-        r = subprocess.run(["nm", "-D", target], capture_output=True, timeout=10)
-        if r.returncode == 0:
-            for line in r.stdout.decode(errors="replace").splitlines():
-                parts = line.split()
-                if len(parts) < 3:
-                    continue
-                _, stype, sname = parts[0], parts[1], parts[2]
-                if sname == "__sanitizer_cov_8bit_counters_init" and stype == "U":
-                    info["has_undefined_sancov_init"] = True
-                if "__start___sancov_cntrs" in sname:
-                    info["has_sancov_counters"] = True
-                # ASAN detection: look for __asan_init or __asan_register_globals
-                if "__asan_init" in sname or "__asan_register_globals" in sname:
-                    info["has_asan"] = True
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+
+    for stype, sname in _nm_symbols(["nm", "-D", target]):
+        _mark_sancov(info, stype, sname)
+        # ASAN detection: look for __asan_init or __asan_register_globals
+        if "__asan_init" in sname or "__asan_register_globals" in sname:
+            info["has_asan"] = True
 
     # Fallback: try nm without -D for static symbols in executables
     if not info["has_sancov_counters"] and not info["has_undefined_sancov_init"]:
-        try:
-            r = subprocess.run(["nm", target], capture_output=True, timeout=10)
-            if r.returncode == 0:
-                for line in r.stdout.decode(errors="replace").splitlines():
-                    parts = line.split()
-                    if len(parts) < 3:
-                        continue
-                    _, stype, sname = parts[0], parts[1], parts[2]
-                    if sname == "__sanitizer_cov_8bit_counters_init" and stype == "U":
-                        info["has_undefined_sancov_init"] = True
-                    if "__start___sancov_cntrs" in sname:
-                        info["has_sancov_counters"] = True
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            pass
+        for stype, sname in _nm_symbols(["nm", target]):
+            _mark_sancov(info, stype, sname)
+
     if info["has_sancov_counters"] or info["has_undefined_sancov_init"]:
         info["coverage_type"] = "inline_8bit"
     return info

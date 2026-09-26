@@ -59,6 +59,21 @@ from fuzzer_tool.services.te_position import (
 log = logging.getLogger(__name__)
 
 
+def _arena_leaders(ranking: list) -> str:
+    """``top_op=..(r) top_seed=..(r)[ top_pos=..(r)]`` from a strategy ranking."""
+    op_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.OPERATOR]
+    seed_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.SEED]
+    pos_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.POSITION]
+    top_op = strategy_display_name(op_ranking[0][0]) if op_ranking else "?"
+    top_op_rating = op_ranking[0][1] if op_ranking else 0
+    top_seed = seed_ranking[0][0] if seed_ranking else "?"
+    top_seed_rating = seed_ranking[0][1] if seed_ranking else 0
+    out = f"top_op={top_op}({top_op_rating:.0f}) top_seed={top_seed}({top_seed_rating:.0f})"
+    if pos_ranking:
+        out += f" top_pos={pos_ranking[0][0]}({pos_ranking[0][1]:.0f})"
+    return out
+
+
 def _elo_status_str(f) -> str:
     """Compact live-stats field for the Elo meta-scheduler; empty when off.
 
@@ -81,20 +96,7 @@ def _elo_status_str(f) -> str:
             # leader per arena rather than a single mixed ranking that
             # would silently hide which arena it came from.
             ranking = elo.get_strategy_ranking()
-            op_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.OPERATOR]
-            seed_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.SEED]
-            pos_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.POSITION]
-            top_op = strategy_display_name(op_ranking[0][0]) if op_ranking else "?"
-            top_op_rating = op_ranking[0][1] if op_ranking else 0
-            top_seed = seed_ranking[0][0] if seed_ranking else "?"
-            top_seed_rating = seed_ranking[0][1] if seed_ranking else 0
-            elo_str = (
-                f" | elo: meta={meta} seed={seed} "
-                f"top_op={top_op}({top_op_rating:.0f}) "
-                f"top_seed={top_seed}({top_seed_rating:.0f})"
-            )
-            if pos_ranking:
-                elo_str += f" top_pos={pos_ranking[0][0]}({pos_ranking[0][1]:.0f})"
+            elo_str = f" | elo: meta={meta} seed={seed} " + _arena_leaders(ranking)
         except (AttributeError, TypeError):
             pass
     return elo_str
@@ -192,6 +194,81 @@ def _entropy_seed_str(f) -> str:
     if isinstance(loo, EntropyLOOSeedStrategy):
         out += f" | ent-loo: mean={loo.stats()['mean_loo']:.3f}"
     return out
+
+
+def _scheduler_stats(f, stats: dict) -> None:
+    """Bandit / CEM / replicator / Shapley / MI entries for dump_stats()."""
+    if f.mc and f.mc_bandit:
+        stats["bandit_stats"] = {
+            k: {"successes": v[0], "failures": v[1]} for k, v in f.mc.bandit_stats().items()
+        }
+    if f.mc and f.mc_cem:
+        stats["cem_elite_size"] = len(f.mc.elite_set)
+        stats["cem_fitted"] = f.mc.cem_fitted
+    if f._use_replicator and f._replicator:
+        stats["replicator"] = {
+            "distribution": f._replicator.population_distribution(),
+            "converged": f._replicator.is_converged(),
+            "dominant": f._replicator.dominant_operator(),
+        }
+    if f._use_shapley and f._shapley:
+        sv = f._shapley.shapley_values()
+        stats["shapley"] = {k: round(v, 4) for k, v in sv.items()}
+    if f._use_mi and f._mi:
+        stats["mi"] = {
+            "observations": f._mi.total_observations,
+            "top_positions": [
+                {"pos": p, "mi_bits": round(v, 4)}
+                for p, v in f._mi.top_positions(k=5, input_length=f.max_len)
+            ],
+        }
+
+
+def _renyi_stats(f, stats: dict) -> None:
+    """Rényi coverage-spectrum entry for dump_stats() (--renyi-weight)."""
+    if f._use_renyi_weight:
+        edge_hits = (
+            dict(f._edge_tracker._global_edge_hits)
+            if hasattr(f._edge_tracker, "_global_edge_hits")
+            else {}
+        )
+        if edge_hits:
+            from fuzzer_tool.core.renyi import CoverageSpectrumAnalyzer, RenyiEntropy
+
+            renyi = RenyiEntropy()
+            spectrum = CoverageSpectrumAnalyzer()
+            analysis = spectrum.analyze(edge_hits)
+            stats["renyi"] = {
+                "uniformity": round(renyi.coverage_uniformity(list(edge_hits.values())), 4),
+                "min_entropy": round(renyi.min_entropy(list(edge_hits.values())), 4),
+                "dominance_ratio": round(analysis["dominance_ratio"], 4),
+                "hot_edge_fraction": round(analysis["hot_edge_fraction"], 4),
+                "spectrum": {
+                    k: round(v, 4)
+                    for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()
+                },
+            }
+
+
+def _differential_stats(f, stats: dict) -> None:
+    """Differential KL drift entry for dump_stats()."""
+    # Nothing outside differential.py read drift_detected, last_kl_* or
+    # get_report(), so even a correct KL had no consumer. Surface it.
+    diff_tracker = getattr(f, "_diff_tracker", None)
+    if diff_tracker is not None:
+        report = diff_tracker.get_report()
+        stats["differential"] = {
+            "target": f._diff_target,
+            "inputs_compared": report["total_inputs"],
+            "divergences": getattr(f, "_diff_divergences", 0),
+            "drift_detected": report["drift_detected"],
+            "kl_returncode": round(report["kl_returncode"], 4),
+            "kl_signature": round(report["kl_signature"], 4),
+            "returncode_dist_a": report["returncode_dist_a"],
+            "returncode_dist_b": report["returncode_dist_b"],
+        }
+        if report["drift_detected"]:
+            stats["differential"]["drift_description"] = report["drift_description"]
 
 
 def _format_count(n: int) -> str:
@@ -657,69 +734,9 @@ class StatsReporter:
             "op_applicable": dict(getattr(f, "op_applicable", None) or {}),
             "op_success_applicable": dict(getattr(f, "op_success_applicable", None) or {}),
         }
-        if f.mc and f.mc_bandit:
-            stats["bandit_stats"] = {
-                k: {"successes": v[0], "failures": v[1]} for k, v in f.mc.bandit_stats().items()
-            }
-        if f.mc and f.mc_cem:
-            stats["cem_elite_size"] = len(f.mc.elite_set)
-            stats["cem_fitted"] = f.mc.cem_fitted
-        if f._use_replicator and f._replicator:
-            stats["replicator"] = {
-                "distribution": f._replicator.population_distribution(),
-                "converged": f._replicator.is_converged(),
-                "dominant": f._replicator.dominant_operator(),
-            }
-        if f._use_shapley and f._shapley:
-            sv = f._shapley.shapley_values()
-            stats["shapley"] = {k: round(v, 4) for k, v in sv.items()}
-        if f._use_mi and f._mi:
-            stats["mi"] = {
-                "observations": f._mi.total_observations,
-                "top_positions": [
-                    {"pos": p, "mi_bits": round(v, 4)}
-                    for p, v in f._mi.top_positions(k=5, input_length=f.max_len)
-                ],
-            }
-        if f._use_renyi_weight:
-            edge_hits = (
-                dict(f._edge_tracker._global_edge_hits)
-                if hasattr(f._edge_tracker, "_global_edge_hits")
-                else {}
-            )
-            if edge_hits:
-                from fuzzer_tool.core.renyi import CoverageSpectrumAnalyzer, RenyiEntropy
-
-                renyi = RenyiEntropy()
-                spectrum = CoverageSpectrumAnalyzer()
-                analysis = spectrum.analyze(edge_hits)
-                stats["renyi"] = {
-                    "uniformity": round(renyi.coverage_uniformity(list(edge_hits.values())), 4),
-                    "min_entropy": round(renyi.min_entropy(list(edge_hits.values())), 4),
-                    "dominance_ratio": round(analysis["dominance_ratio"], 4),
-                    "hot_edge_fraction": round(analysis["hot_edge_fraction"], 4),
-                    "spectrum": {
-                        k: round(v, 4)
-                        for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()
-                    },
-                }
-        # Nothing outside differential.py read drift_detected, last_kl_* or
-        # get_report(), so even a correct KL had no consumer. Surface it.
-        diff_tracker = getattr(f, "_diff_tracker", None)
-        if diff_tracker is not None:
-            report = diff_tracker.get_report()
-            stats["differential"] = {
-                "target": f._diff_target,
-                "inputs_compared": report["total_inputs"],
-                "divergences": getattr(f, "_diff_divergences", 0),
-                "drift_detected": report["drift_detected"],
-                "kl_returncode": round(report["kl_returncode"], 4),
-                "kl_signature": round(report["kl_signature"], 4),
-                "returncode_dist_a": report["returncode_dist_a"],
-                "returncode_dist_b": report["returncode_dist_b"],
-            }
-            if report["drift_detected"]:
-                stats["differential"]["drift_description"] = report["drift_description"]
+        _scheduler_stats(f, stats)
+        _renyi_stats(f, stats)
+        _differential_stats(f, stats)
         if f._use_transfer_entropy:
             stats["transfer_entropy"] = {
                 "history_len": len(f._te_input_history),
@@ -1116,8 +1133,8 @@ class StatsReporter:
             s += f" [SYNC: {reason}]"
         return s
 
-    def print_stats(self):
-        f = self.f
+    def _update_eps(self, f) -> tuple[float, float]:
+        """Raw + Kalman-filtered EPS and the avg-eps window; returns (elapsed, eps)."""
         elapsed = time.time() - f.start_time
         base = getattr(f, "_resume_baseline_exec", 0)
         eps = (f.exec_count - base) / elapsed if elapsed > 0 else 0
@@ -1156,11 +1173,10 @@ class StatsReporter:
         f._eps_history.append(eps)
         if len(f._eps_history) > f._eps_history_max:
             del f._eps_history[: -f._eps_history_max]
+        return elapsed, eps
 
-        dict_str = f" | dict: {len(f.dictionary)}" if f.dictionary else ""
-        markov_str = " | markov: trained" if f.markov_trained else ""
-        markov_str += "+gen" if f.markov_generate else ""
-
+    def _print_stats_cmplog_str(self, f) -> str:
+        """Cmplog token/pair counts, evictions and comparison totals."""
         cmplog_str = ""
         if f._cmplog is not None:
             cmplog_str = f" | cmplog: {len(f._cmplog.tokens)}t {len(f._cmplog.pairs)}p"
@@ -1171,12 +1187,10 @@ class StatsReporter:
             fired, asserted = f._cmplog.total_comparisons()
             if fired:
                 cmplog_str += f" {_format_count(fired)}c/{_format_count(asserted)}a"
+        return cmplog_str
 
-        smt_str = self._print_stats_smt_str(f)
-
-        cov_str = self._print_stats_cov_str(f)
-        ph_str = f" | ph: 0x{f.shm_cov.read_path_hash():x}" if f.shm_cov else ""
-
+    def _print_stats_dist_str(self, f) -> str:
+        """AFLGo directed-distance tail avg + observed min/max."""
         # AFLGo directed-distance stats (live tail average + observed
         # min/max over the run).  Present only in directed mode.
         dist_str = ""
@@ -1204,6 +1218,10 @@ class StatsReporter:
                 dist_str = " | dist: " + " ".join(dist_parts)
             except (AttributeError, OSError):
                 pass
+        return dist_str
+
+    def _print_stats_mc_str(self, f) -> str:
+        """Monte Carlo bandit/CEM flags and optional Floyd cycle check."""
         mc_str = ""
         if f.mc:
             parts = [
@@ -1233,24 +1251,28 @@ class StatsReporter:
                     pass
             if parts:
                 mc_str = " | mc: " + "+".join(parts)
+        return mc_str
 
-        sig_str = f"({len(f.crash_sigs)}sigs)" if f.crash_sigs else ""
-        timeout_pct = f.timeout_count / f.exec_count * 100 if f.exec_count else 0
-        timeout_str = f" | timeouts: {f.timeout_count} ({timeout_pct:.1f}%)"
+    def _print_stats_mem_strs(self, f) -> tuple[str, str]:
+        """Peak RSS and heap trim (trims the heap: side effect)."""
         rss_kb = f._peak_rss
         rss_str = f" | rss: {rss_kb // 1024}MB" if rss_kb >= 1024 else f" | rss: {rss_kb}KB"
 
         # Return freed malloc pages each status tick (glibc keeps them mapped).
         freed_kb = libc_mem.trim_heap() >> 10
         trim_str = f" | trim: {freed_kb >> 10}MB" if freed_kb >= 1024 else f" | trim: {freed_kb}KB"
+        return rss_str, trim_str
 
-        seed_ovh_str = self._print_stats_seed_overhead_str(f)
-
+    def _print_stats_ops_str(self, f) -> str:
+        """Last three distinct operators used."""
         ops_str = ""
         if f._last_ops_used:
             recent = list(dict.fromkeys(reversed(f._last_ops_used)))[:3]
             ops_str = " | ops: " + " ".join(recent)
+        return ops_str
 
+    def _print_stats_div_str(self, f) -> str:
+        """Corpus diversity and mean Jaccard."""
         div_str = (
             f" | div: {f._edge_tracker.compute_corpus_diversity():.0f}"
             if len(f._edge_tracker.seed_hit_counts) >= 2
@@ -1261,19 +1283,10 @@ class StatsReporter:
             if len(f._edge_tracker.seed_hit_counts) >= 2
             else ""
         )
+        return div_str + jac_str
 
-        dr_str = (
-            self._print_stats_dr_str(f)
-            + self._print_stats_garch_str(f)
-            + self._print_stats_dispersion_corrections_str(f)
-            + self._print_stats_continuum_str(f)
-            + self._print_stats_kuramoto_sync_str(f)
-            + self._print_stats_seed_energy_gini_str(f)
-            + self._print_stats_op_gini_str(f)
-        )
-
-        density_str = self._print_stats_density_str(f)
-
+    def _print_stats_repro_str(self, f) -> str:
+        """Mean crash reproducibility over fully replayed crashes."""
         repro_str = ""
         if f._crash_replays:
             done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
@@ -1284,7 +1297,10 @@ class StatsReporter:
                     * 100
                 )
                 repro_str = f" | repro: {avg_repro:.0f}%"
+        return repro_str
 
+    def _print_stats_calib_str(self, f) -> str:
+        """Bandit Brier score and exec-time CRPS."""
         brier_str = (
             f" | brier: {f.mc.brier_score():.3f}"
             if f.mc and f.mc_bandit and f.mc.brier_score() > 0
@@ -1295,7 +1311,10 @@ class StatsReporter:
             if f._exec_time_tracker.count > 20
             else ""
         )
+        return brier_str + crps_str
 
+    def _print_stats_ent_str(self, f) -> str:
+        """Edge-hit entropy/Simpson/Gini and corpus byte entropy."""
         ent_str = simp_str = edge_gini_str = ""
         if f._edge_tracker._global_edge_hits:
             ent_str = f" | ent: {f._edge_tracker.shannon_entropy_global():.2f}"
@@ -1310,7 +1329,10 @@ class StatsReporter:
         corpus_entropy = getattr(f, "_corpus_entropy", None)
         if corpus_entropy is not None and len(corpus_entropy) > 0:
             byte_ent_str = f" | byte-ent: {corpus_entropy.bits():.2f}"
+        return ent_str + simp_str + edge_gini_str + byte_ent_str
 
+    def _print_stats_rate_str(self, f) -> str:
+        """Edge-entropy dS/dt over the last 10 samples."""
         rate_str = ""
         if hasattr(f, "_entropy_execs") and len(f._entropy_execs) >= 2:
             recent = list(zip(f._entropy_execs[-10:], f._entropy_vals[-10:], strict=True))
@@ -1319,13 +1341,19 @@ class StatsReporter:
                 if dt > 0:
                     dS = recent[-1][1] - recent[0][1]
                     rate_str = f" | dS/dt: {dS / dt:+.4f}"
+        return rate_str
 
+    def _print_stats_fmt_str(self, f) -> str:
+        """Format-learner classified/total fields."""
         fmt_str = ""
         fl = getattr(f, "_format_learner", None)
         if fl and fl.hypotheses:
             classified = sum(1 for h in fl.hypotheses if h.field_type != "unknown")
             fmt_str = f" | fmt: {classified}/{len(fl.hypotheses)} fields v{fl.format_model_version}"
+        return fmt_str
 
+    def _print_stats_perf_str(self, f) -> str:
+        """Hardware perf counters."""
         perf_str = ""
         perf_counters = getattr(f, "_perf_counters", None)
         if perf_counters and perf_counters._read_count > 0:
@@ -1336,7 +1364,10 @@ class StatsReporter:
                 f"{stats['total_branch_misses']:,}bm "
                 f"ipc:{stats['ipc']:.2f}"
             )
+        return perf_str
 
+    def _print_stats_pt_str(self, f) -> str:
+        """Intel PT block/trace/lost bytes."""
         pt_str = ""
         pt_cov = getattr(f, "pt_cov", None)
         pt_session = getattr(f, "_pt_session", None)
@@ -1350,7 +1381,10 @@ class StatsReporter:
                 f"{pt['pt_trace_bytes'] >> 10:,}KiB "
                 f"lost:{pt['pt_trace_lost_bytes'] >> 10:,}KiB"
             )
+        return pt_str
 
+    def _print_stats_lbr_str(self, f) -> str:
+        """LBR sampled edges."""
         lbr_str = ""
         branch_cov = getattr(f, "branch_cov", None)
         lbr_session = getattr(f, "_lbr_session", None)
@@ -1362,7 +1396,10 @@ class StatsReporter:
                 f" | lbr(sampled): {br['br_map_entries']:,}e "
                 f"{br['br_samples']:,}s lost:{br['br_lost_records']:,}"
             )
+        return lbr_str
 
+    def _print_stats_qea_str(self, f) -> str:
+        """QEA generation/population."""
         qea_str = ""
         qea = getattr(f, "qea", None)
         if qea:
@@ -1371,17 +1408,19 @@ class StatsReporter:
                     f" | qea: gen={qea.generation} pop={len(qea.population)}"
                     f" spc={qea.species_count} fit={qea.best_fitness:.2f}"
                 )
+        return qea_str
 
+    def _print_stats_mi_str(self, f) -> str:
+        """Mutual-information observations/positions."""
         mi_str = ""
         mi = getattr(f, "_mi", None)
         if mi:
             with contextlib.suppress(AttributeError, TypeError):
                 mi_str = f" | mi: obs={mi.total_observations} pos={len(mi.position_counts)}"
+        return mi_str
 
-        kc_str = _kruskal_str(f) + _entropy_seed_str(f) + _strata_str(f) + _pll_str(f)
-
-        elo_str = _elo_status_str(f)
-
+    def _print_stats_hf_str(self, f) -> str:
+        """Honggfuzz-style boost/penalty counters."""
         hf_str = ""
         if getattr(f, "honggfuzz", False):
             total_hf = (
@@ -1407,7 +1446,10 @@ class StatsReporter:
                 if f._hf_timeout_penalties:
                     parts.append(f"tmo:{f._hf_timeout_penalties}")
                 hf_str = " | hf: " + " ".join(parts)
+        return hf_str
 
+    def _print_stats_ga_str(self, f) -> str:
+        """GA generation/population."""
         ga_str = ""
         ga = getattr(f, "ga", None)
         if ga:
@@ -1416,7 +1458,10 @@ class StatsReporter:
                     f" | ga: gen={ga.generation} pop={len(ga.population)}"
                     f" spc={ga.species_count} fit={ga.best_fitness:.2f}"
                 )
+        return ga_str
 
+    def _print_stats_sens_str(self, f) -> str:
+        """Sensitivity-analysed seed count."""
         sens_str = ""
         sens = getattr(f, "_sensitivity", None)
         if sens:
@@ -1426,7 +1471,10 @@ class StatsReporter:
                     sens_str = f" | sens: {analyzed} seeds"
             except (AttributeError, TypeError):
                 pass
+        return sens_str
 
+    def _print_stats_te_str(self, f) -> str:
+        """Transfer-entropy causal edges."""
         te_str = ""
         if getattr(f, "_use_transfer_entropy", False) and getattr(f, "_te", None):
             try:
@@ -1435,7 +1483,10 @@ class StatsReporter:
                     te_str = f" | te: {causal} edges"
             except (AttributeError, TypeError):
                 pass
+        return te_str
 
+    def _print_stats_sec_str(self, f) -> str:
+        """Secretary-problem tracking count."""
         sec_str = ""
         if getattr(f, "_secretary", False):
             try:
@@ -1446,7 +1497,10 @@ class StatsReporter:
                     sec_str = f" | sec: {n_total} tracking"
             except (AttributeError, TypeError):
                 pass
+        return sec_str
 
+    def _print_stats_shap_str(self, f) -> str:
+        """Shapley-valued operator count."""
         shap_str = ""
         if getattr(f, "_use_shapley", False) and getattr(f, "_shapley", None):
             try:
@@ -1455,7 +1509,10 @@ class StatsReporter:
                     shap_str = f" | shap: {n_ops} ops"
             except (AttributeError, TypeError):
                 pass
+        return shap_str
 
+    def _print_stats_fs_str(self, f) -> str:
+        """Frameshift relation count."""
         fs_str = ""
         fs = getattr(f, "_frameshift", None)
         if fs:
@@ -1465,7 +1522,10 @@ class StatsReporter:
                     fs_str = f" | fs: {n_rel} rel"
             except (AttributeError, TypeError):
                 pass
+        return fs_str
 
+    def _print_stats_misc_str(self, f) -> str:
+        """Pruned / duplicate-reject counts."""
         misc_str = ""
         try:
             parts = []
@@ -1477,7 +1537,10 @@ class StatsReporter:
                 misc_str = " | " + " ".join(parts)
         except (AttributeError, TypeError):
             pass
+        return misc_str
 
+    def _print_stats_poisson_str(self, f) -> str:
+        """Poisson-disk admit/reject counts."""
         # Poisson-disk admission: surface admit/reject counts in the live line.
         poisson_str = ""
         if getattr(f, "_use_poisson_disk_admission", False):
@@ -1489,7 +1552,10 @@ class StatsReporter:
                 poisson_str = f" | poisson: {n_admitted} ad rej:{rej} near:{near} bk:{n_buckets}"
             except (AttributeError, TypeError):
                 pass
+        return poisson_str
 
+    def _print_stats_bayes_str(self, f) -> str:
+        """Bayesian seed-quality counts."""
         bayes_str = ""
         if getattr(f, "_use_bayesian", False) and getattr(f, "_seed_quality", None):
             try:
@@ -1499,7 +1565,10 @@ class StatsReporter:
                     bayes_str = f" | bayes: {n_seeds} seeds {n_obs} obs"
             except (AttributeError, TypeError):
                 pass
+        return bayes_str
 
+    def _print_stats_markov_ctx(self, f) -> str:
+        """Markov contexts seen (`` ctx:N``)."""
         markov_extra = ""
         if f.markov_trained:
             try:
@@ -1510,9 +1579,10 @@ class StatsReporter:
                     markov_extra = f" ctx:{f.markov._contexts_seen}"
             except (AttributeError, TypeError):
                 pass
-        if markov_extra:
-            markov_str += markov_extra
+        return markov_extra
 
+    def _print_stats_rep_str(self, f) -> str:
+        """Replicator dominant operator."""
         rep_str = ""
         if getattr(f, "_use_replicator", False) and getattr(f, "_replicator", None):
             try:
@@ -1522,7 +1592,10 @@ class StatsReporter:
                     rep_str = f" | rep: dom={dom} ops={len(dist)}"
             except (AttributeError, TypeError):
                 pass
+        return rep_str
 
+    def _print_stats_mopt_str(self, f) -> str:
+        """MOpt particle count."""
         mopt_str = ""
         if getattr(f, "_use_mopt", False) and getattr(f, "_mopt", None):
             try:
@@ -1530,20 +1603,11 @@ class StatsReporter:
                 mopt_str = f" | mopt: {n_particles}p"
             except (AttributeError, TypeError):
                 pass
+        return mopt_str
 
-        line = (
-            f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
-            f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
-            f"time: {elapsed:.0f}s{rss_str}{seed_ovh_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
-            f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{kc_str}{elo_str}"
-            f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
-            f"{bayes_str}{misc_str}"
-            f"{poisson_str}"
-            f"{div_str}{jac_str}{dr_str}{density_str}{repro_str}{brier_str}{crps_str}"
-            f"{ent_str}{simp_str}{edge_gini_str}{byte_ent_str}{self._print_stats_drift_str(f)}"
-            f"{rate_str}{fmt_str}{perf_str}{pt_str}{lbr_str}"
-            f"{hf_str}{ops_str}"
-        )
+    def _print_stats_tail_str(self, f) -> str:
+        """Fluctuation, coverage-growth and P(stall) suffix."""
+        line = ""
         fluc_str = ""
         if getattr(f, "_fluctuation", None) is not None:
             try:
@@ -1571,6 +1635,88 @@ class StatsReporter:
         bayes = f._edge_tracker.bayesian_coverage_growth_model()
         if bayes.get("p_stalled") is not None and bayes["p_stalled"] > 0.3:
             line += f" | P(stall): {bayes['p_stalled']:.0%}"
+        return line
+
+    def print_stats(self):
+        f = self.f
+        elapsed, eps = self._update_eps(f)
+
+        dict_str = f" | dict: {len(f.dictionary)}" if f.dictionary else ""
+        markov_str = " | markov: trained" if f.markov_trained else ""
+        markov_str += "+gen" if f.markov_generate else ""
+
+        cmplog_str = self._print_stats_cmplog_str(f)
+        smt_str = self._print_stats_smt_str(f)
+
+        cov_str = self._print_stats_cov_str(f)
+        ph_str = f" | ph: 0x{f.shm_cov.read_path_hash():x}" if f.shm_cov else ""
+
+        dist_str = self._print_stats_dist_str(f)
+        mc_str = self._print_stats_mc_str(f)
+        sig_str = f"({len(f.crash_sigs)}sigs)" if f.crash_sigs else ""
+        timeout_pct = f.timeout_count / f.exec_count * 100 if f.exec_count else 0
+        timeout_str = f" | timeouts: {f.timeout_count} ({timeout_pct:.1f}%)"
+        rss_str, trim_str = self._print_stats_mem_strs(f)
+        seed_ovh_str = self._print_stats_seed_overhead_str(f)
+
+        ops_str = self._print_stats_ops_str(f)
+        div_str = self._print_stats_div_str(f)
+        dr_str = (
+            self._print_stats_dr_str(f)
+            + self._print_stats_garch_str(f)
+            + self._print_stats_dispersion_corrections_str(f)
+            + self._print_stats_continuum_str(f)
+            + self._print_stats_kuramoto_sync_str(f)
+            + self._print_stats_seed_energy_gini_str(f)
+            + self._print_stats_op_gini_str(f)
+        )
+
+        density_str = self._print_stats_density_str(f)
+
+        repro_str = self._print_stats_repro_str(f)
+        calib_str = self._print_stats_calib_str(f)
+        ent_str = self._print_stats_ent_str(f)
+        rate_str = self._print_stats_rate_str(f)
+        fmt_str = self._print_stats_fmt_str(f)
+        perf_str = self._print_stats_perf_str(f)
+        pt_str = self._print_stats_pt_str(f)
+        lbr_str = self._print_stats_lbr_str(f)
+        qea_str = self._print_stats_qea_str(f)
+        mi_str = self._print_stats_mi_str(f)
+        kc_str = _kruskal_str(f) + _entropy_seed_str(f) + _strata_str(f) + _pll_str(f)
+
+        elo_str = _elo_status_str(f)
+
+        hf_str = self._print_stats_hf_str(f)
+        ga_str = self._print_stats_ga_str(f)
+        sens_str = self._print_stats_sens_str(f)
+        te_str = self._print_stats_te_str(f)
+        sec_str = self._print_stats_sec_str(f)
+        shap_str = self._print_stats_shap_str(f)
+        fs_str = self._print_stats_fs_str(f)
+        misc_str = self._print_stats_misc_str(f)
+        poisson_str = self._print_stats_poisson_str(f)
+        bayes_str = self._print_stats_bayes_str(f)
+        markov_extra = self._print_stats_markov_ctx(f)
+        if markov_extra:
+            markov_str += markov_extra
+
+        rep_str = self._print_stats_rep_str(f)
+        mopt_str = self._print_stats_mopt_str(f)
+        line = (
+            f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
+            f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
+            f"time: {elapsed:.0f}s{rss_str}{seed_ovh_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
+            f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{kc_str}{elo_str}"
+            f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
+            f"{bayes_str}{misc_str}"
+            f"{poisson_str}"
+            f"{div_str}{dr_str}{density_str}{repro_str}{calib_str}"
+            f"{ent_str}{self._print_stats_drift_str(f)}"
+            f"{rate_str}{fmt_str}{perf_str}{pt_str}{lbr_str}"
+            f"{hf_str}{ops_str}"
+        )
+        line += self._print_stats_tail_str(f)
         print(line, flush=True)
         self._print_stats_supplementary()
         self._emit_json_stats(elapsed, eps)
@@ -1615,11 +1761,8 @@ class StatsReporter:
         except Exception:  # pragma: no cover - telemetry must never abort a run
             log.debug("failed to record campaign graph snapshot", exc_info=True)
 
-    def _print_stats_supplementary(self) -> None:
-        """Print a second line of supplementary stats that don't fit on the main line."""
-        f = self.f
-        parts = []
-
+    def _supp_counts(self, f, parts: list[str]) -> None:
+        """Pruning / dedup / stall-recovery / corpus-size / replay fragments."""
         # Pruning / dedup / stall recovery / corpus size / replay stats.
         # All of these read fuzzer attributes that may not exist on a
         # mock fuzzer or a freshly constructed one; wrap them so a missing
@@ -1632,28 +1775,34 @@ class StatsReporter:
             if f._stall_recovery_count > 0:
                 parts.append(f"stall-rec:{f._stall_recovery_count}")
 
-            corpus_bytes = sum(len(s) for s in f.corpus)
-            if corpus_bytes > 1024 * 1024:
-                parts.append(f"corpus-mb:{corpus_bytes // (1024 * 1024)}")
-            elif corpus_bytes > 1024:
-                parts.append(f"corpus-kb:{corpus_bytes // 1024}")
-
-            if f.corpus:
-                avg_len = corpus_bytes // len(f.corpus)
-                parts.append(f"avg-len:{avg_len}")
-
-            if f._crash_replays:
-                done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
-                if done:
-                    avg_repro = (
-                        sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
-                        / len(done)
-                        * 100
-                    )
-                    parts.append(f"repro:{avg_repro:.0f}%")
+            self._supp_corpus(f, parts)
         except (AttributeError, TypeError):
             pass
 
+    def _supp_corpus(self, f, parts: list[str]) -> None:
+        """Corpus size, mean seed length and crash reproducibility; may raise."""
+        corpus_bytes = sum(len(s) for s in f.corpus)
+        if corpus_bytes > 1024 * 1024:
+            parts.append(f"corpus-mb:{corpus_bytes // (1024 * 1024)}")
+        elif corpus_bytes > 1024:
+            parts.append(f"corpus-kb:{corpus_bytes // 1024}")
+
+        if f.corpus:
+            avg_len = corpus_bytes // len(f.corpus)
+            parts.append(f"avg-len:{avg_len}")
+
+        if f._crash_replays:
+            done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
+            if done:
+                avg_repro = (
+                    sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
+                    / len(done)
+                    * 100
+                )
+                parts.append(f"repro:{avg_repro:.0f}%")
+
+    def _supp_cmaes(self, f, parts: list[str]) -> None:
+        """CMA-ES generation and sigma."""
         # CMA-ES
         if getattr(f, "_cmaes", None):
             try:
@@ -1662,6 +1811,8 @@ class StatsReporter:
             except (AttributeError, TypeError):
                 pass
 
+    def _supp_sensitivity(self, f, parts: list[str]) -> None:
+        """Sensitivity-analysed seed count."""
         # Sensitivity detailed
         sens = getattr(f, "_sensitivity", None)
         if sens:
@@ -1672,6 +1823,8 @@ class StatsReporter:
             except (AttributeError, TypeError):
                 pass
 
+    def _supp_distance(self, f, parts: list[str]) -> None:
+        """AFLGo tail distance and distance-trend verdict."""
         # AFLGo distance
         if getattr(f, "_distance", None) is not None:
             try:
@@ -1699,6 +1852,8 @@ class StatsReporter:
                 except (AttributeError, TypeError):
                     pass
 
+    def _supp_flux(self, f, parts: list[str]) -> None:
+        """Corpus add/prune/reject flux."""
         # Corpus add/prune/reject flux -- distinguishes a stalled campaign
         # (no churn) from dynamic equilibrium (balanced churn, flat net
         # size). See core/corpus_flux.py.
@@ -1720,6 +1875,8 @@ class StatsReporter:
             except (AttributeError, TypeError):
                 pass
 
+    def _supp_occupation(self, f, parts: list[str]) -> None:
+        """Finite-time occupation support/entropy."""
         # Finite-time occupation (Du, Sec. 3): last run's support size /
         # entropy plus the number of histories folded into longitudinal
         # rarity so far. Purely descriptive -- never gates selection.
@@ -1738,6 +1895,8 @@ class StatsReporter:
             except (AttributeError, TypeError, ValueError):
                 pass
 
+    def _supp_sector(self, f, parts: list[str]) -> None:
+        """Causal-sector graph node/edge counts."""
         # Causal-sector graph (Time-Causal Structure analogue): node/edge
         # counts and the stability gate later RO soft-weighting will read.
         sector = getattr(f, "_causal_sector", None)
@@ -1750,12 +1909,29 @@ class StatsReporter:
             except (AttributeError, TypeError):
                 pass
 
+    def _supp_ro_rd(self, f, parts: list[str]) -> None:
+        """RO vs RD applied-operator edge attribution."""
         # RO vs RD applied-operator edge attribution (classification only,
         # docs/handover/handover_RoRd.md Phase C1). Never read back to gate
         # operator selection.
         ro_rd = getattr(f, "_ro_rd_edge_counts", None)
         if ro_rd and (ro_rd.get("ro", 0.0) or ro_rd.get("rd", 0.0)):
             parts.append(f"ro:{ro_rd.get('ro', 0.0):.0f} rd:{ro_rd.get('rd', 0.0):.0f}")
+
+    def _print_stats_supplementary(self) -> None:
+        """Print a second line of supplementary stats that don't fit on the main line."""
+        f = self.f
+        parts = []
+
+        # Each helper appends its fragments; a missing attribute drops only that one.
+        self._supp_counts(f, parts)
+        self._supp_cmaes(f, parts)
+        self._supp_sensitivity(f, parts)
+        self._supp_distance(f, parts)
+        self._supp_flux(f, parts)
+        self._supp_occupation(f, parts)
+        self._supp_sector(f, parts)
+        self._supp_ro_rd(f, parts)
 
         if parts:
             print("    " + " | ".join(parts), flush=True)

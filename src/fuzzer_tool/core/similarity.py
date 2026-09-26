@@ -454,17 +454,7 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
         return [("match", i, b"") for i in range(len(a))]
 
     n, m = len(a), len(b)
-
-    # Trim common prefix
-    pre = 0
-    min_len = n if n < m else m
-    while pre < min_len and a[pre] == b[pre]:
-        pre += 1
-
-    # Trim common suffix (from the end, after prefix)
-    post = 0
-    while post < n - pre and post < m - pre and a[n - 1 - post] == b[m - 1 - post]:
-        post += 1
+    pre, post = _common_affixes(a, b, n, m)
 
     # If everything matched after trimming, just emit matches
     if pre + post >= n and pre + post >= m:
@@ -478,26 +468,7 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
     # Extract the differing middle parts
     a_mid = a[pre : n - post]
     b_mid = b[pre : m - post]
-    na, nb = len(a_mid), len(b_mid)
-
-    # For very small remaining inputs, use direct Python (no numpy overhead)
-    if na < 64 and nb < 64:
-        mid_ops = _levenshtein_align_small(a_mid, b_mid)
-    else:
-        # The DP is exact and vectorised in C; when its table is affordable it
-        # is simply the better choice, and taking it keeps behaviour identical
-        # to before this change for every input that was already survivable.
-        # Myers is reached only where the DP cannot run at all -- that is the
-        # bug being fixed, not a benchmark being won.
-        table_bytes = (na + 1) * (nb + 1) * 4  # int32
-        if table_bytes <= _DIFF_MYERS_MAX_BYTES:
-            mid_ops = _levenshtein_align_numpy(a_mid, b_mid)
-        else:
-            max_d = _DIFF_MYERS_MAX_D or _myers_max_d(na, nb)
-            myers_ops = _myers_ses(a_mid, b_mid, max_d)
-            # Dissimilar *and* too big for the DP: no exact script is
-            # affordable, so degrade to blocks rather than allocate.
-            mid_ops = myers_ops if myers_ops is not None else _coarse_block_diff(a_mid, b_mid)
+    mid_ops = _align_middle(a_mid, b_mid)
 
     # Reconstruct full script with prefix/suffix offsets
     result: list[tuple[str, int, bytes]] = []
@@ -509,6 +480,45 @@ def levenshtein_align(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
         result.append(("match", i, b""))
 
     return result
+
+
+def _common_affixes(a: bytes, b: bytes, n: int, m: int) -> tuple[int, int]:
+    """Lengths of the common prefix and (non-overlapping) common suffix."""
+    # Trim common prefix
+    pre = 0
+    min_len = n if n < m else m
+    while pre < min_len and a[pre] == b[pre]:
+        pre += 1
+
+    # Trim common suffix (from the end, after prefix)
+    post = 0
+    while post < n - pre and post < m - pre and a[n - 1 - post] == b[m - 1 - post]:
+        post += 1
+    return pre, post
+
+
+def _align_middle(a_mid: bytes, b_mid: bytes) -> list[tuple[str, int, bytes]]:
+    """Edit script for the trimmed middle: small DP, numpy DP, Myers or blocks."""
+    na, nb = len(a_mid), len(b_mid)
+
+    # For very small remaining inputs, use direct Python (no numpy overhead)
+    if na < 64 and nb < 64:
+        return _levenshtein_align_small(a_mid, b_mid)
+
+    # The DP is exact and vectorised in C; when its table is affordable it
+    # is simply the better choice, and taking it keeps behaviour identical
+    # to before this change for every input that was already survivable.
+    # Myers is reached only where the DP cannot run at all -- that is the
+    # bug being fixed, not a benchmark being won.
+    table_bytes = (na + 1) * (nb + 1) * 4  # int32
+    if table_bytes <= _DIFF_MYERS_MAX_BYTES:
+        return _levenshtein_align_numpy(a_mid, b_mid)
+
+    max_d = _DIFF_MYERS_MAX_D or _myers_max_d(na, nb)
+    myers_ops = _myers_ses(a_mid, b_mid, max_d)
+    # Dissimilar *and* too big for the DP: no exact script is
+    # affordable, so degrade to blocks rather than allocate.
+    return myers_ops if myers_ops is not None else _coarse_block_diff(a_mid, b_mid)
 
 
 def _levenshtein_align_small(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
@@ -533,23 +543,14 @@ def _levenshtein_align_small(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]
     ops: list[tuple[str, int, bytes]] = []
     i, j = n, m
     while i > 0 or j > 0:
-        if i > 0 and j > 0 and a[i - 1] == b[j - 1] and dp[j][i] == dp[j - 1][i - 1]:
-            ops.append(("match", i - 1, b""))
-            i -= 1
-            j -= 1
-        elif i > 0 and j > 0 and dp[j][i] == dp[j - 1][i - 1] + 1:
-            ops.append(("replace", i - 1, bytes([b[j - 1]])))
-            i -= 1
-            j -= 1
-        elif j > 0 and i > 0 and dp[j][i] == dp[j][i - 1] + 1:
-            # dp[j][i-1]+1: consume a-char → delete
-            ops.append(("delete", i - 1, b""))
-            i -= 1
-        elif i > 0 and j > 0 and dp[j][i] == dp[j - 1][i] + 1:
-            # dp[j-1][i]+1: add b-char → insert
-            ops.append(("insert", i, bytes([b[j - 1]])))
-            j -= 1
-        elif j > 0:
+        step = _small_step(a, b, dp, i, j) if i > 0 and j > 0 else None
+        if step is not None:
+            op, di, dj = step
+            ops.append(op)
+            i -= di
+            j -= dj
+            continue
+        if j > 0:
             # i == 0, must insert
             ops.append(("insert", 0, bytes([b[j - 1]])))
             j -= 1
@@ -562,6 +563,27 @@ def _levenshtein_align_small(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]
 
     ops.reverse()
     return ops
+
+
+def _small_step(
+    a: bytes, b: bytes, dp: list[list[int]], i: int, j: int
+) -> tuple[tuple[str, int, bytes], int, int] | None:
+    """Traceback step at ``i, j > 0``: ``(op, di, dj)``, or None if no cell fits.
+
+    Preference order: match, replace, delete, insert.
+    """
+    cur = dp[j][i]
+    if a[i - 1] == b[j - 1] and cur == dp[j - 1][i - 1]:
+        return ("match", i - 1, b""), 1, 1
+    if cur == dp[j - 1][i - 1] + 1:
+        return ("replace", i - 1, bytes([b[j - 1]])), 1, 1
+    if cur == dp[j][i - 1] + 1:
+        # dp[j][i-1]+1: consume a-char → delete
+        return ("delete", i - 1, b""), 1, 0
+    if cur == dp[j - 1][i] + 1:
+        # dp[j-1][i]+1: add b-char → insert
+        return ("insert", i, bytes([b[j - 1]])), 0, 1
+    return None
 
 
 def _levenshtein_align_numpy(a: bytes, b: bytes) -> list[tuple[str, int, bytes]]:
@@ -648,25 +670,21 @@ def edit_script_summary(a: bytes, b: bytes) -> str:
 
     parts = []
     if replaces:
-        if len(replaces) <= 3:
-            offsets = ", ".join(f"0x{o:02x}" for o in replaces)
-            parts.append(f"{len(replaces)} substitution(s) at offset [{offsets}]")
-        else:
-            parts.append(f"{len(replaces)} substitutions")
+        parts.append(_summary_part(replaces, "substitution"))
     if inserts:
-        if len(inserts) <= 3:
-            offsets = ", ".join(f"0x{pos:02x}" for pos, _ in inserts)
-            parts.append(f"{len(inserts)} insertion(s) at offset [{offsets}]")
-        else:
-            parts.append(f"{len(inserts)} insertions")
+        parts.append(_summary_part([pos for pos, _ in inserts], "insertion"))
     if deletes:
-        if len(deletes) <= 3:
-            offsets = ", ".join(f"0x{o:02x}" for o in deletes)
-            parts.append(f"{len(deletes)} deletion(s) at offset [{offsets}]")
-        else:
-            parts.append(f"{len(deletes)} deletions")
+        parts.append(_summary_part(deletes, "deletion"))
 
     return "; ".join(parts) if parts else "no edit ops"
+
+
+def _summary_part(offsets: list[int], noun: str) -> str:
+    """``"2 deletion(s) at offset [0x01, 0x05]"``; over 3 ops: ``"7 deletions"``."""
+    if len(offsets) > 3:
+        return f"{len(offsets)} {noun}s"
+    joined = ", ".join(f"0x{o:02x}" for o in offsets)
+    return f"{len(offsets)} {noun}(s) at offset [{joined}]"
 
 
 def levenshtein_diff_offsets(a: bytes, b: bytes, max_ops: int = 30) -> list[int]:

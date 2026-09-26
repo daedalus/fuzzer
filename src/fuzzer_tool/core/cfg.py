@@ -158,7 +158,26 @@ def build_function_cfg(
     func_end = base_addr + len(code)
     cfg = FunctionCFG(name=name, start=base_addr, end=func_end)
 
-    # Pre-scan for decoder-gap fixups: address -> (kind, target, extra_len)
+    fixups = _scan_fixups(code, base_addr)
+    insns = _decode_fixed(code, base_addr, fixups)
+    if not insns:
+        return cfg
+
+    leaders = _find_leaders(insns, base_addr, func_end)
+    blocks = _group_blocks(insns, leaders, base_addr, func_end, resolve_callee)
+
+    cfg.blocks = blocks
+    # Successors must be actual block starts: decoder desync gaps can
+    # leave a fall-through address that was never grouped into a block.
+    for blk in blocks.values():
+        blk.successors = [s for s in blk.successors if s in blocks]
+    if base_addr in blocks:
+        blocks[base_addr].is_entry = True
+    return cfg
+
+
+def _scan_fixups(code: bytes, base_addr: int) -> dict[int, tuple]:
+    """Pre-scan for decoder-gap fixups: address -> (kind, target, extra_len)."""
     fixups: dict[int, tuple] = {}
     for off in range(len(code)):
         b = code[off]
@@ -174,8 +193,14 @@ def build_function_cfg(
             else:
                 target = addr
             fixups[addr] = (_JCC, target, 2)
+    return fixups
 
-    # Decode, applying fixups and dropping bytes consumed by them.
+
+def _decode_fixed(code: bytes, base_addr: int, fixups: dict[int, tuple]) -> list:
+    """Decode, applying fixups and dropping bytes consumed by them.
+
+    Returns [(address, insn, kind, target)], capped at _MAX_INSNS_PER_FUNC.
+    """
     insns = []  # (address, insn, kind, target)
     skip_until = -1
     for insn in _decode_x86_64(code, base_addr):
@@ -186,19 +211,22 @@ def build_function_cfg(
             insn.length = extra_len
             skip_until = insn.address + extra_len
         insns.append((insn.address, insn, kind, target))
+    return insns
 
-    if not insns:
-        return cfg
 
-    # Leaders: function entry, after every terminator, and taken targets.
+def _find_leaders(insns: list, base_addr: int, func_end: int) -> set[int]:
+    """Leaders: function entry, after every terminator, and taken targets."""
     leaders = {base_addr}
     for addr, insn, kind, target in insns:
         if kind in (_JCC, _JMP, _CALL, _RET):
             leaders.add(addr + insn.length)
         if kind in (_JCC, _JMP) and target is not None and base_addr <= target < func_end:
             leaders.add(target)
+    return leaders
 
-    # Group instructions into blocks.
+
+def _group_blocks(insns, leaders, base_addr, func_end, resolve_callee) -> dict[int, BasicBlock]:
+    """Group instructions into blocks split at *leaders*."""
     blocks: dict[int, BasicBlock] = {}
     cur_start = base_addr
     cur_insns: list = []
@@ -212,42 +240,14 @@ def build_function_cfg(
         cur_insns.append((addr, insn, kind, target))
     if cur_insns:
         blocks[cur_start] = _close_block(cur_start, cur_insns, base_addr, func_end, resolve_callee)
-
-    cfg.blocks = blocks
-    # Successors must be actual block starts: decoder desync gaps can
-    # leave a fall-through address that was never grouped into a block.
-    for blk in blocks.values():
-        blk.successors = [s for s in blk.successors if s in blocks]
-    if base_addr in blocks:
-        blocks[base_addr].is_entry = True
-    return cfg
+    return blocks
 
 
 def _close_block(start, insns, base_addr, func_end, resolve_callee) -> BasicBlock:
     """Build a BasicBlock from its instruction list (terminator last)."""
     last_addr, last_insn, kind, target = insns[-1]
     blk = BasicBlock(start=start, end=last_addr + last_insn.length)
-
-    # Callsites: every direct call inside the block names its callee.
-    # A call whose target cannot be resolved (indirect form, or a direct
-    # target outside the known function set) is flagged so callers can
-    # treat it as a CG gap for runtime-edge patching.
-    callees: set[str] = set()
-    for k, tgt in ((i[2], i[3]) for i in insns):
-        if k == _CALL:
-            if tgt is not None and resolve_callee is not None:
-                callee = resolve_callee(tgt)
-                if callee:
-                    callees.add(callee)
-                else:
-                    blk.indirect_call = True
-            elif tgt is None:
-                blk.indirect_call = True
-    if callees:
-        blk.callees = callees
-
-    def _intra(addr: int) -> bool:
-        return base_addr <= addr < func_end
+    _block_callees(blk, insns, resolve_callee)
 
     if kind == _RET:
         blk.is_exit = True
@@ -255,16 +255,39 @@ def _close_block(start, insns, base_addr, func_end, resolve_callee) -> BasicBloc
 
     fall = last_addr + last_insn.length
     if kind == _JCC:
-        if target is not None and _intra(target):
+        if target is not None and base_addr <= target < func_end:
             blk.successors.append(target)
-        if _intra(fall):
+        if base_addr <= fall < func_end:
             blk.successors.append(fall)
     elif kind == _JMP:
         if target is None:
             blk.indirect_jump = True
-        elif _intra(target):
+        elif base_addr <= target < func_end:
             blk.successors.append(target)
     elif kind in (_CALL, _FALL):
-        if _intra(fall):
+        if base_addr <= fall < func_end:
             blk.successors.append(fall)
     return blk
+
+
+def _block_callees(blk: BasicBlock, insns, resolve_callee) -> None:
+    """Callsites: every direct call inside the block names its callee.
+
+    A call whose target cannot be resolved (indirect form, or a direct
+    target outside the known function set) is flagged so callers can
+    treat it as a CG gap for runtime-edge patching.
+    """
+    callees: set[str] = set()
+    for k, tgt in ((i[2], i[3]) for i in insns):
+        if k != _CALL:
+            continue
+        if tgt is None:
+            blk.indirect_call = True
+        elif resolve_callee is not None:
+            callee = resolve_callee(tgt)
+            if callee:
+                callees.add(callee)
+            else:
+                blk.indirect_call = True
+    if callees:
+        blk.callees = callees

@@ -343,6 +343,21 @@ def _crc_candidates(spec: _FieldSpec) -> list[tuple[bytes, str]]:
     return out
 
 
+def _patched_seed(base_seed: bytes, spec: _FieldSpec, patch: bytes, strategy: str) -> GeneratedSeed:
+    """Copy of *base_seed* with *patch* written at the field offset, clipped to length."""
+    buf = bytearray(base_seed)
+    end = min(spec.offset + len(patch), len(buf))
+    buf[spec.offset : end] = patch[: end - spec.offset]
+    return GeneratedSeed(
+        data=bytes(buf),
+        offset=spec.offset,
+        width=spec.width,
+        field_type=spec.field_type,
+        strategy=strategy,
+        score=spec.score(),
+    )
+
+
 class FormatSeedGenerator:
     """Synthesizes candidate seeds from a FormatLearner's field hypotheses."""
 
@@ -389,13 +404,7 @@ class FormatSeedGenerator:
         self.generator_stats["generation_attempt_count"] += 1
 
         # Pre-build the (bytes-patch, strategy-name) options for each field.
-        per_field_options: list[tuple[_FieldSpec, list[tuple[bytes, str]]]] = []
-        for spec in candidates:
-            if spec.width <= 0 or spec.offset < 0 or spec.offset >= len(base_seed):
-                continue
-            opts = self._options_for(spec, base_seed)
-            if opts:
-                per_field_options.append((spec, opts))
+        per_field_options = self._field_options(candidates, base_seed)
 
         out: list[GeneratedSeed] = []
         cursors = [0] * len(per_field_options)
@@ -413,36 +422,39 @@ class FormatSeedGenerator:
                     exhausted[i] = True
                 progressed = True
 
-                buf = bytearray(base_seed)
-                end = min(spec.offset + len(patch), len(buf))
-                buf[spec.offset : end] = patch[: end - spec.offset]
-                out.append(
-                    GeneratedSeed(
-                        data=bytes(buf),
-                        offset=spec.offset,
-                        width=spec.width,
-                        field_type=spec.field_type,
-                        strategy=strategy,
-                        score=spec.score(),
-                    )
-                )
-                # Update per-field stats
-                self.generator_stats["total_seeds_generated"] += 1
-                self.generator_stats["field_confidences"].append(spec.confidence)
-                self.generator_stats["field_types_used"][spec.field_type] = (
-                    self.generator_stats["field_types_used"].get(spec.field_type, 0) + 1
-                )
-                self.generator_stats["strategies_used"][strategy] = (
-                    self.generator_stats["strategies_used"].get(strategy, 0) + 1
-                )
-                self.generator_stats["last_generated_seed_offset"] = spec.offset
-                self.generator_stats["last_generated_seed_width"] = spec.width
-                self.generator_stats["last_generated_field_type"] = spec.field_type
-                self.generator_stats["last_generated_strategy"] = strategy
+                out.append(_patched_seed(base_seed, spec, patch, strategy))
+                self._note_seed(spec, strategy)
             if not progressed:
                 break
         self.generator_stats["successful_attempts"] += len(out)
         return out
+
+    def _field_options(
+        self, candidates: list[_FieldSpec], base_seed: bytes
+    ) -> list[tuple[_FieldSpec, list[tuple[bytes, str]]]]:
+        """Pre-build the (bytes-patch, strategy-name) options for each in-bounds field."""
+        per_field_options: list[tuple[_FieldSpec, list[tuple[bytes, str]]]] = []
+        for spec in candidates:
+            if spec.width <= 0 or spec.offset < 0 or spec.offset >= len(base_seed):
+                continue
+            opts = self._options_for(spec, base_seed)
+            if opts:
+                per_field_options.append((spec, opts))
+        return per_field_options
+
+    def _note_seed(self, spec: _FieldSpec, strategy: str) -> None:
+        """Update per-field stats for one generated seed."""
+        stats = self.generator_stats
+        stats["total_seeds_generated"] += 1
+        stats["field_confidences"].append(spec.confidence)
+        stats["field_types_used"][spec.field_type] = (
+            stats["field_types_used"].get(spec.field_type, 0) + 1
+        )
+        stats["strategies_used"][strategy] = stats["strategies_used"].get(strategy, 0) + 1
+        stats["last_generated_seed_offset"] = spec.offset
+        stats["last_generated_seed_width"] = spec.width
+        stats["last_generated_field_type"] = spec.field_type
+        stats["last_generated_strategy"] = strategy
 
     def _options_for(self, spec: _FieldSpec, base_seed: bytes) -> list[tuple[bytes, str]]:
         if spec.field_type == "length":

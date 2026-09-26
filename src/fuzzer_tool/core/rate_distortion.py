@@ -157,36 +157,7 @@ class RateDistortionCorpus:
         # Second pass: add seeds to minimize maximum regret (coverage loss if removed)
         # This is the minimax-robust criterion: minimize max_{c in selected} coverage(C \ {c})
         while len(selected) < target_count and remaining:
-            # For each remaining seed, compute the maximum coverage loss it would cause
-            # if added to the selected set
-            best_key = None
-            best_max_loss = float("inf")
-            best_new_coverage = 0
-
-            for key, edges in remaining.items():
-                # Simulate adding this seed
-                temp_selected = selected + [key]
-                temp_covered = covered | edges
-
-                # Compute maximum coverage loss if any seed in temp_selected is removed
-                max_loss = 0
-                for candidate_key in temp_selected:
-                    if candidate_key in seed_edges:
-                        candidate_edges = seed_edges[candidate_key]
-                        loss = len(temp_covered - (temp_covered - candidate_edges))
-                        max_loss = max(max_loss, loss)
-
-                # Also compute new coverage
-                new_coverage = len(temp_covered)
-
-                # Choose seed that minimizes maximum loss (minimax criterion)
-                if max_loss < best_max_loss or (
-                    max_loss == best_max_loss and new_coverage > best_new_coverage
-                ):
-                    best_max_loss = max_loss
-                    best_new_coverage = new_coverage
-                    best_key = key
-
+            best_key = self._minimax_pick(seed_edges, selected, covered, remaining)
             if best_key is None:
                 break
 
@@ -335,6 +306,48 @@ class RateDistortionCorpus:
 
         return selected
 
+    @staticmethod
+    def _minimax_pick(
+        seed_edges: dict[str, set[int]],
+        selected: list[str],
+        covered: set[int],
+        remaining: dict[str, set[int]],
+    ) -> str | None:
+        """Remaining seed minimizing the max single-seed coverage loss once added.
+
+        Ties go to the larger resulting coverage; None if *remaining* is empty.
+        """
+        # For each remaining seed, compute the maximum coverage loss it would cause
+        # if added to the selected set
+        best_key = None
+        best_max_loss = float("inf")
+        best_new_coverage = 0
+
+        for key, edges in remaining.items():
+            # Simulate adding this seed
+            temp_selected = selected + [key]
+            temp_covered = covered | edges
+
+            # Compute maximum coverage loss if any seed in temp_selected is removed
+            max_loss = 0
+            for candidate_key in temp_selected:
+                if candidate_key in seed_edges:
+                    candidate_edges = seed_edges[candidate_key]
+                    loss = len(temp_covered - (temp_covered - candidate_edges))
+                    max_loss = max(max_loss, loss)
+
+            # Also compute new coverage
+            new_coverage = len(temp_covered)
+
+            # Choose seed that minimizes maximum loss (minimax criterion)
+            if max_loss < best_max_loss or (
+                max_loss == best_max_loss and new_coverage > best_new_coverage
+            ):
+                best_max_loss = max_loss
+                best_new_coverage = new_coverage
+                best_key = key
+        return best_key
+
     def minimax_robust_corpus_admission(
         self,
         seed_edges: dict[str, set[int]],
@@ -384,36 +397,7 @@ class RateDistortionCorpus:
         # Second pass: add seeds to minimize maximum regret (coverage loss if removed)
         # This is the minimax-robust criterion: minimize max_{c in selected} coverage(C \ {c})
         while len(selected) < max_seeds and remaining:
-            # For each remaining seed, compute the maximum coverage loss it would cause
-            # if added to the selected set
-            best_key = None
-            best_max_loss = float("inf")
-            best_new_coverage = 0
-
-            for key, edges in remaining.items():
-                # Simulate adding this seed
-                temp_selected = selected + [key]
-                temp_covered = covered | edges
-
-                # Compute maximum coverage loss if any seed in temp_selected is removed
-                max_loss = 0
-                for candidate_key in temp_selected:
-                    if candidate_key in seed_edges:
-                        candidate_edges = seed_edges[candidate_key]
-                        loss = len(temp_covered - (temp_covered - candidate_edges))
-                        max_loss = max(max_loss, loss)
-
-                # Also compute new coverage
-                new_coverage = len(temp_covered)
-
-                # Choose seed that minimizes maximum loss (minimax criterion)
-                if max_loss < best_max_loss or (
-                    max_loss == best_max_loss and new_coverage > best_new_coverage
-                ):
-                    best_max_loss = max_loss
-                    best_new_coverage = new_coverage
-                    best_key = key
-
+            best_key = self._minimax_pick(seed_edges, selected, covered, remaining)
             if best_key is None:
                 break
 

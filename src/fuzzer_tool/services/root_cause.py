@@ -51,6 +51,61 @@ def _load_corpus(corpus_dir: str) -> list[tuple[str, bytes]]:
     return seeds
 
 
+def _explicit_baseline(baseline_file: str, is_crash, sig: str) -> tuple[str, bytes] | None:
+    """Load ``--baseline``; reject it if missing or it reproduces ``sig``."""
+    bpath = Path(baseline_file)
+    if not bpath.is_file():
+        print(f"[-] Baseline file not found: {baseline_file}", file=sys.stderr)
+        return None
+    candidate = bpath.read_bytes()
+    if is_crash(candidate, expected_sig=sig) is not None:
+        print(
+            f"[-] Baseline {baseline_file} also reproduces the crash -- it isn't non-crashing",
+            file=sys.stderr,
+        )
+        return None
+    return bpath.name, candidate
+
+
+def _nearest_baseline(
+    corpus_dir: str | None, crash_data: bytes, is_crash, sig: str
+) -> tuple[str, bytes] | None:
+    """Nearest non-crashing corpus seed to ``crash_data``, or None."""
+    if not corpus_dir:
+        print(
+            "[-] Need --baseline or --corpus-dir to find a non-crashing input",
+            file=sys.stderr,
+        )
+        return None
+    corpus = _load_corpus(corpus_dir)
+    if not corpus:
+        print(f"[-] Corpus is empty or missing: {corpus_dir}", file=sys.stderr)
+        return None
+
+    from fuzzer_tool.core.crash_metadata import find_nearest_corpus
+
+    label, sim, _diffs, _summary = find_nearest_corpus(
+        crash_data, [b for _, b in corpus], max_check=len(corpus)
+    )
+    if not label:
+        print("[-] Could not find a nearest corpus seed", file=sys.stderr)
+        return None
+    idx = int(label.rsplit("_", 1)[1])
+    candidate_name, candidate = corpus[idx]
+    print(f"[*] Nearest corpus seed: {candidate_name} (similarity={sim:.2f})")
+
+    # A stale corpus seed can itself crash against a rebuilt target --
+    # confirm it's genuinely non-crashing before trusting it as baseline.
+    if is_crash(candidate, expected_sig=sig) is not None:
+        print(
+            f"[-] Nearest seed {candidate_name} also reproduces this crash "
+            "signature -- pass --baseline explicitly with a confirmed-good input",
+            file=sys.stderr,
+        )
+        return None
+    return candidate_name, candidate
+
+
 def root_cause(
     target: str,
     crash_file: str,
@@ -137,57 +192,14 @@ def root_cause(
         print(f"[*] Reproduced. Original signature: {original_sig}")
 
         # ── Pick the baseline ────────────────────────────────────────
-        baseline_name: str | None = None
-        baseline: bytes | None = None
-
-        if baseline_file:
-            bpath = Path(baseline_file)
-            if not bpath.is_file():
-                print(f"[-] Baseline file not found: {baseline_file}", file=sys.stderr)
-                return None
-            candidate = bpath.read_bytes()
-            if _is_crash(candidate, expected_sig=original_sig) is not None:
-                print(
-                    f"[-] Baseline {baseline_file} also reproduces the crash -- "
-                    "it isn't non-crashing",
-                    file=sys.stderr,
-                )
-                return None
-            baseline_name, baseline = bpath.name, candidate
-        else:
-            if not corpus_dir:
-                print(
-                    "[-] Need --baseline or --corpus-dir to find a non-crashing input",
-                    file=sys.stderr,
-                )
-                return None
-            corpus = _load_corpus(corpus_dir)
-            if not corpus:
-                print(f"[-] Corpus is empty or missing: {corpus_dir}", file=sys.stderr)
-                return None
-
-            from fuzzer_tool.core.crash_metadata import find_nearest_corpus
-
-            label, sim, _diffs, _summary = find_nearest_corpus(
-                crash_data, [b for _, b in corpus], max_check=len(corpus)
-            )
-            if not label:
-                print("[-] Could not find a nearest corpus seed", file=sys.stderr)
-                return None
-            idx = int(label.rsplit("_", 1)[1])
-            candidate_name, candidate = corpus[idx]
-            print(f"[*] Nearest corpus seed: {candidate_name} (similarity={sim:.2f})")
-
-            # A stale corpus seed can itself crash against a rebuilt target --
-            # confirm it's genuinely non-crashing before trusting it as baseline.
-            if _is_crash(candidate, expected_sig=original_sig) is not None:
-                print(
-                    f"[-] Nearest seed {candidate_name} also reproduces this crash "
-                    "signature -- pass --baseline explicitly with a confirmed-good input",
-                    file=sys.stderr,
-                )
-                return None
-            baseline_name, baseline = candidate_name, candidate
+        picked = (
+            _explicit_baseline(baseline_file, _is_crash, original_sig)
+            if baseline_file
+            else _nearest_baseline(corpus_dir, crash_data, _is_crash, original_sig)
+        )
+        if picked is None:
+            return None
+        baseline_name, baseline = picked
 
         if baseline == crash_data:
             print(

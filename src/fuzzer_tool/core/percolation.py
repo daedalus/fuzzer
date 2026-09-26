@@ -125,14 +125,7 @@ def _minimize_preserving_coverage(
     import heapq
 
     n = len(corpus)
-    seed_edges = edge_tracker.seed_edges
-    edges_of: list[frozenset | set] = []
-    owners: dict[int, set[int]] = {}
-    for idx, seed in enumerate(corpus):
-        edges = seed_edges.get(_seed_key(seed), set())
-        edges_of.append(edges)
-        for e in edges:
-            owners.setdefault(e, set()).add(idx)
+    edges_of, owners = _edge_owners(corpus, edge_tracker.seed_edges)
 
     removed_idx: list[int] = []
     alive = [True] * n
@@ -154,16 +147,35 @@ def _minimize_preserving_coverage(
             continue
         alive[idx] = False
         removed_idx.append(idx)
-        for e in edges_of[idx]:
-            own = owners[e]
-            own.discard(idx)
-            if len(own) == 1:
-                (sole,) = own
-                unique[sole] += 1
+        _release_edges(idx, edges_of[idx], owners, unique)
 
     kept = [corpus[i] for i in range(n) if alive[i]]
     removed = [corpus[i] for i in removed_idx]
     return kept, removed
+
+
+def _edge_owners(
+    corpus: list[bytes], seed_edges: dict
+) -> tuple[list[frozenset | set], dict[int, set[int]]]:
+    """Per-seed edge sets and, per edge, the indices of seeds covering it."""
+    edges_of: list[frozenset | set] = []
+    owners: dict[int, set[int]] = {}
+    for idx, seed in enumerate(corpus):
+        edges = seed_edges.get(_seed_key(seed), set())
+        edges_of.append(edges)
+        for e in edges:
+            owners.setdefault(e, set()).add(idx)
+    return edges_of, owners
+
+
+def _release_edges(idx: int, edges, owners: dict[int, set[int]], unique: list[int]) -> None:
+    """Drop seed *idx* as owner; a now-sole owner gains a unique edge."""
+    for e in edges:
+        own = owners[e]
+        own.discard(idx)
+        if len(own) == 1:
+            (sole,) = own
+            unique[sole] += 1
 
 
 def _seed_key(seed: bytes) -> str:

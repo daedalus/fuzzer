@@ -199,16 +199,78 @@ static int mode_pipeline_flags(const unsigned char *buf, size_t size) {
     return 0;
 }
 
+/* Dispatch modes 4-6, which parse their own input layout. */
+static int fgrep_own_layout(const unsigned char *buf, size_t size) {
+    if (buf[0] == 4) return mode_pattern_match(buf, size, NULL);
+    if (buf[0] == 5) return mode_regex_compile(buf, size);
+    return mode_pipeline_flags(buf, size);
+}
+
+/* Pattern kind for fgrep_search_run(); selects edge ids 0x11xx / 0x12xx. */
+enum fz_kind { FZ_FIXED, FZ_REGEX };
+
+/* Modes 0/1: compile pat_buf as fixed string or regex, search text. */
+static void fgrep_search_run(const char *pat_buf, enum fz_kind kind,
+                             const char *text, size_t text_len, FILE *devnull) {
+    bool fixed = kind == FZ_FIXED;
+    unsigned edge = fixed ? 0x1100 : 0x1200;
+    __afl_map_edge(edge);
+    fgrep_options_t opts = {
+        .fixed_string = fixed,
+        .count_only = false,
+        .color = false,
+        .line_number = false,
+        .max_count = 0,
+    };
+    fgrep_pattern_t pat;
+    fgrep_status_t st = fgrep_pattern_compile(&pat, pat_buf, fixed, false);
+    if (st != FGREP_OK) return;
+
+    fgrep_stats_t stats = {0};
+    pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+    fgrep_search_ctx_t ctx = {
+        .opts = &opts,
+        .pattern = &pat,
+        .stats = &stats,
+        .output = devnull,
+        .output_mutex = &mtx,
+    };
+    size_t match_count = 0;
+    search_data(text, text_len, "<fuzz>", &ctx, &match_count);
+    __afl_map_edge(edge + 1);
+    pthread_mutex_destroy(&mtx);
+    fgrep_pattern_destroy(&pat);
+}
+
+/* Mode 2: kwset engine directly, when the pattern fits in the text. */
+static void fgrep_kwset_run(const char *pat_buf, size_t plen,
+                            const char *text, size_t text_len) {
+    __afl_map_edge(0x1300);
+    if (plen == 0 || plen > (int)text_len) return;
+
+    kwset_engine_t ks;
+    kwset_engine_init(&ks, pat_buf, (int)plen);
+    kwset_engine_search(&ks, text, (int)text_len);
+    __afl_map_edge(0x1301);
+    kwset_engine_free(&ks);
+}
+
+/* Modes 0-3: 0 fixed, 1 regex, 2 kwset, 3 all three in that order. */
+static void fgrep_run_mode(unsigned char mode, const char *pat_buf, size_t plen,
+                           const char *text, size_t text_len, FILE *devnull) {
+    if (mode == 0 || mode == 3) fgrep_search_run(pat_buf, FZ_FIXED, text, text_len, devnull);
+    if (mode == 1 || mode == 3) fgrep_search_run(pat_buf, FZ_REGEX, text, text_len, devnull);
+    if (mode == 2 || mode == 3) fgrep_kwset_run(pat_buf, plen, text, text_len);
+}
+
 /* ── Main fuzz entry ────────────────────────────────────────────── */
 
 __attribute__((visibility("default")))
 int fuzz_fgrep(const unsigned char *buf, size_t size) {
     __afl_map_edge(0x1000);
 
-    /* Modes 4 and 5 handle their own input layout */
-    if (size > 0 && buf[0] == 4) return mode_pattern_match(buf, size, NULL);
-    if (size > 0 && buf[0] == 5) return mode_regex_compile(buf, size);
-    if (size > 0 && buf[0] == 6) return mode_pipeline_flags(buf, size);
+    /* Modes 4, 5 and 6 handle their own input layout */
+    if (size > 0 && buf[0] >= 4 && buf[0] <= 6) return fgrep_own_layout(buf, size);
 
     /* Modes 0-3: traditional layout with pattern+text split */
     if (size < 4) { __afl_map_edge(0x1001); return 0; }
@@ -233,74 +295,7 @@ int fuzz_fgrep(const unsigned char *buf, size_t size) {
     FILE *devnull = fopen("/dev/null", "w");
     if (!devnull) devnull = stderr;
 
-    if (mode == 0 || mode == 3) {
-        __afl_map_edge(0x1100);
-        fgrep_options_t opts = {
-            .fixed_string = true,
-            .count_only = false,
-            .color = false,
-            .line_number = false,
-            .max_count = 0,
-        };
-        fgrep_pattern_t pat;
-        fgrep_status_t st = fgrep_pattern_compile(&pat, pat_buf, true, false);
-        if (st == FGREP_OK) {
-            fgrep_stats_t stats = {0};
-            pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
-            fgrep_search_ctx_t ctx = {
-                .opts = &opts,
-                .pattern = &pat,
-                .stats = &stats,
-                .output = devnull,
-                .output_mutex = &mtx,
-            };
-            size_t match_count = 0;
-            search_data(text, text_len, "<fuzz>", &ctx, &match_count);
-            __afl_map_edge(0x1101);
-            pthread_mutex_destroy(&mtx);
-            fgrep_pattern_destroy(&pat);
-        }
-    }
-
-    if (mode == 1 || mode == 3) {
-        __afl_map_edge(0x1200);
-        fgrep_options_t opts = {
-            .fixed_string = false,
-            .count_only = false,
-            .color = false,
-            .line_number = false,
-            .max_count = 0,
-        };
-        fgrep_pattern_t pat;
-        fgrep_status_t st = fgrep_pattern_compile(&pat, pat_buf, false, false);
-        if (st == FGREP_OK) {
-            fgrep_stats_t stats = {0};
-            pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
-            fgrep_search_ctx_t ctx = {
-                .opts = &opts,
-                .pattern = &pat,
-                .stats = &stats,
-                .output = devnull,
-                .output_mutex = &mtx,
-            };
-            size_t match_count = 0;
-            search_data(text, text_len, "<fuzz>", &ctx, &match_count);
-            __afl_map_edge(0x1201);
-            pthread_mutex_destroy(&mtx);
-            fgrep_pattern_destroy(&pat);
-        }
-    }
-
-    if (mode == 2 || mode == 3) {
-        __afl_map_edge(0x1300);
-        if (plen > 0 && plen <= (int)text_len) {
-            kwset_engine_t ks;
-            kwset_engine_init(&ks, pat_buf, (int)plen);
-            kwset_engine_search(&ks, text, (int)text_len);
-            __afl_map_edge(0x1301);
-            kwset_engine_free(&ks);
-        }
-    }
+    fgrep_run_mode(mode, pat_buf, plen, text, text_len, devnull);
 
     if (devnull && devnull != stderr) fclose(devnull);
     return 0;

@@ -2166,26 +2166,86 @@ def _matrix_report(result) -> None:
     )
     print(f"matrix orientation for sections [4]-[7]: {coll['orientation']}")
     if "stability" in result:
-        s = result["stability"]
-        print(
-            f"\n[0] cross-process id stability ({s['repeats']} runs of "
-            f"{s.get('input', 'one input')}, the input with the most live edges)"
-        )
-        print(
-            f"    sizes {s['sizes']}  union {s['union']}  intersection {s['intersection']}  "
-            f"jaccard {s['jaccard']:.3f}"
-        )
-        if s["jaccard"] < 1.0:
-            print("    WARNING: edge ids are not reproducible across processes. Every per-edge")
-            print("    statistic below is aggregating ids that do not denote the same edge.")
-            print("    First suspect: a PIE target under ASLR with __AFL_CTX_SENSITIVE=1.")
-        if not s["first_exec_matches"]:
-            print(
-                f"    first execution (clean table) disagreed with the steady state; "
-                f"{s['first_exec_only']} of its ids never reappear"
-            )
+        _report_stability(result["stability"])
 
-    a = result["axis"]
+    _report_axis(result["axis"])
+
+    y = result["y_marginal"]
+    print(f"\n[2] y marginal: mean {y['mean']:.1f} median {y['median']:.0f} max {y['max']:.0f}")
+    print(
+        f"    Shannon {y['entropy_bits']:.2f} of {y['entropy_max_bits']:.2f} bits "
+        f"-> {y['effective_edges']:.0f} effective edges"
+    )
+    print(
+        f"    Gini {y['gini']:.3f}  top 1% of edges carry {y['top_1pct_share'] * 100:.1f}% of hits"
+    )
+    print(f"    Zipf log-log slope {y['zipf_slope']:+.3f} (residual sd {y['zipf_resid_sd']:.3f})")
+    print(f"    AFL count classes {y['count_classes']}")
+
+    s = result["substituted_axes"]
+    print("\n[3] substituted x axes, Spearman vs total count")
+    print(f"    owner count (incidence)  {s['spearman_owners_vs_total']:+.3f}")
+    print(f"    first-seen index         {s['spearman_first_seen_vs_total']:+.3f}")
+    print(f"    per-edge max count       {s['spearman_peak_vs_total']:+.3f}")
+    print("    distance-table node_idx: not collected here -- needs a __AFL_DISTANCE_MODE build")
+
+    _report_spectrum(result)
+
+    _report_gf2(result)
+
+    if "integer_relations" in result:
+        _report_int_rel(result["integer_relations"])
+
+    if "duplicate_classes" in result:
+        d = result["duplicate_classes"]
+        print(
+            f"\n[7] edge equivalence classes: {d['classes']} distinct profiles for "
+            f"{d['rows']} edges ({d['duplicate_rows']} exact copies)"
+        )
+        print(
+            f"    within one id>>ctx_bits family: {d['within_family_rows']} edges in "
+            f"{d['within_family_classes']} classes -- context tags that never differed"
+        )
+        print(
+            f"    across families: {d['across_family_rows']} edges in "
+            f"{d['across_family_classes']} classes -- straight-line block chains"
+        )
+        print(
+            f"    largest class {d['largest_class']} edges, families {d['largest_class_families']}"
+        )
+
+    if "positions" in result and not _report_positions(result["positions"]):
+        return
+
+    if "ground_truth" in result:
+        _report_ground(result["ground_truth"])
+    if "flow" in result:
+        _flow_report(result["flow"])
+
+
+def _report_stability(s: dict) -> None:
+    """[0] cross-process id stability."""
+    print(
+        f"\n[0] cross-process id stability ({s['repeats']} runs of "
+        f"{s.get('input', 'one input')}, the input with the most live edges)"
+    )
+    print(
+        f"    sizes {s['sizes']}  union {s['union']}  intersection {s['intersection']}  "
+        f"jaccard {s['jaccard']:.3f}"
+    )
+    if s["jaccard"] < 1.0:
+        print("    WARNING: edge ids are not reproducible across processes. Every per-edge")
+        print("    statistic below is aggregating ids that do not denote the same edge.")
+        print("    First suspect: a PIE target under ASLR with __AFL_CTX_SENSITIVE=1.")
+    if not s["first_exec_matches"]:
+        print(
+            f"    first execution (clean table) disagreed with the steady state; "
+            f"{s['first_exec_only']} of its ids never reappear"
+        )
+
+
+def _report_axis(a: dict) -> None:
+    """[1] x-axis (id) structure."""
     print(f"\n[1] x axis: {a['n_edges']} distinct ids in [{a['id_min']}, {a['id_max']}]")
     print(
         f"    ctx_bits {a['ctx_bits']}: {a['families']} context-free families "
@@ -2222,25 +2282,9 @@ def _matrix_report(result) -> None:
         "-- not interpretable as a trend; reported to show it is not zero either"
     )
 
-    y = result["y_marginal"]
-    print(f"\n[2] y marginal: mean {y['mean']:.1f} median {y['median']:.0f} max {y['max']:.0f}")
-    print(
-        f"    Shannon {y['entropy_bits']:.2f} of {y['entropy_max_bits']:.2f} bits "
-        f"-> {y['effective_edges']:.0f} effective edges"
-    )
-    print(
-        f"    Gini {y['gini']:.3f}  top 1% of edges carry {y['top_1pct_share'] * 100:.1f}% of hits"
-    )
-    print(f"    Zipf log-log slope {y['zipf_slope']:+.3f} (residual sd {y['zipf_resid_sd']:.3f})")
-    print(f"    AFL count classes {y['count_classes']}")
 
-    s = result["substituted_axes"]
-    print("\n[3] substituted x axes, Spearman vs total count")
-    print(f"    owner count (incidence)  {s['spearman_owners_vs_total']:+.3f}")
-    print(f"    first-seen index         {s['spearman_first_seen_vs_total']:+.3f}")
-    print(f"    per-edge max count       {s['spearman_peak_vs_total']:+.3f}")
-    print("    distance-table node_idx: not collected here -- needs a __AFL_DISTANCE_MODE build")
-
+def _report_spectrum(result: dict) -> None:
+    """[4] singular spectrum per transform."""
     sp = result["spectrum"]
     print(
         f"\n[4] {result['collection']['orientation']} spectrum "
@@ -2263,6 +2307,9 @@ def _matrix_report(result) -> None:
             print("    WARNING: raw and binary spectra agree to 1e-6. That is a bug upstream")
             print("    of both transforms, not a result -- check the cells are counts.")
 
+
+def _report_gf2(result: dict) -> None:
+    """[5] GF(2) rank and redundancy."""
     g = result["gf2"]
     transposed = result["collection"]["orientation"] == "edge x seed"
     row, col = ("edges", "seeds") if transposed else ("seeds", "edges")
@@ -2286,131 +2333,115 @@ def _matrix_report(result) -> None:
         print("    they degenerate -- every edge sits inside the union of the others, and the")
         print("    cover is the single edge every input reaches.")
 
-    if "integer_relations" in result:
-        r = result["integer_relations"]
-        print(
-            f"\n[6] integer relations over the raw counts ({r['rows']} rows, "
-            f"{r['distinct_rows']} distinct, {r['duplicate_rows']} exact duplicates)"
-        )
-        print(
-            f"    sparse relations, exhaustive: {r['scalar_multiple_pairs']} scalar-multiple "
-            f"pairs, {r['sum_triples']} A=B+C triples"
-        )
-        lll = r["lll"]
-        print(
-            f"    LLL on {lll['rows']}x{lll['cols']} (rank {lll['rank']}, kernel "
-            f"{lll['kernel_dim']}): {lll['relations_found']} exact relations in "
-            f"{lll['seconds']:.1f}s"
-        )
-        if lll["relations_found"]:
-            print(
-                f"    support median {lll['support_median']:.0f} of {lll['rows']}, "
-                f"L1 median {lll['l1_median']:.0f}, max|coeff| median "
-                f"{lll['max_coeff_median']:.0f}"
-            )
-            sparse = lll["support_median"] <= 8 and lll["max_coeff_median"] <= 2
-            if sparse:
-                print("    sparse, near-unit relations -- diagnostic only: on fuzzgoat most")
-                print("    are not node laws (P1-2). --ground-truth --flow says which are.")
-            else:
-                print("    dense relations are not actionable: the only short vectors here")
-                print("    are duplicate-row differences, which the hash above finds in O(m).")
 
-    if "duplicate_classes" in result:
-        d = result["duplicate_classes"]
+def _report_int_rel(r: dict) -> None:
+    """[6] integer relations over raw counts."""
+    print(
+        f"\n[6] integer relations over the raw counts ({r['rows']} rows, "
+        f"{r['distinct_rows']} distinct, {r['duplicate_rows']} exact duplicates)"
+    )
+    print(
+        f"    sparse relations, exhaustive: {r['scalar_multiple_pairs']} scalar-multiple "
+        f"pairs, {r['sum_triples']} A=B+C triples"
+    )
+    lll = r["lll"]
+    print(
+        f"    LLL on {lll['rows']}x{lll['cols']} (rank {lll['rank']}, kernel "
+        f"{lll['kernel_dim']}): {lll['relations_found']} exact relations in "
+        f"{lll['seconds']:.1f}s"
+    )
+    if lll["relations_found"]:
         print(
-            f"\n[7] edge equivalence classes: {d['classes']} distinct profiles for "
-            f"{d['rows']} edges ({d['duplicate_rows']} exact copies)"
+            f"    support median {lll['support_median']:.0f} of {lll['rows']}, "
+            f"L1 median {lll['l1_median']:.0f}, max|coeff| median "
+            f"{lll['max_coeff_median']:.0f}"
         )
-        print(
-            f"    within one id>>ctx_bits family: {d['within_family_rows']} edges in "
-            f"{d['within_family_classes']} classes -- context tags that never differed"
-        )
-        print(
-            f"    across families: {d['across_family_rows']} edges in "
-            f"{d['across_family_classes']} classes -- straight-line block chains"
-        )
-        print(
-            f"    largest class {d['largest_class']} edges, families {d['largest_class_families']}"
-        )
-
-    if "positions" in result:
-        p = result["positions"]
-        print("\n[8] edge_pos placement (SHM slot index), (pos, id, count) matrix")
-        if not p["available"]:
-            print("    unavailable: this collection has no positions -- re-collect with --save")
-            return
-        print(
-            f"    table {p['table_size']} slots; {p['triples']} triples over {p['runs']} runs, "
-            f"{p['unique_ids']} distinct ids"
-        )
-        print(
-            f"    ids at a single position {p['ids_single_position']} "
-            f"({p['ids_single_position_pct']:.1f}%)  -- slots are never reclaimed, so any"
-        )
-        print("    multi-position id contradicts the shim's design (first-fit is final)")
-        print(
-            f"    slots hosting >1 distinct id across runs: {p['slots_multi_id']}"
-            "  (expected: only broken placements)"
-        )
-        print(
-            f"    probe displacement: mean {p['displacement_mean']:.3f}, "
-            f"home hits {p['home_hit_frac'] * 100:.1f}%, "
-            f"beyond PROBE_MAX {p['beyond_probe_max']}  "
-            f"top bins {p['disp_hist_top']}"
-        )
-        obs = p["spearman_disp_count"]
-        print(
-            f"    Spearman(displacement, count) {obs:+.4f}  "
-            f"null {p['spearman_disp_count_null_mean']:+.4f} +/- "
-            f"{p['spearman_disp_count_null_sd']:.4f}  z={p['spearman_disp_count_null_z']:+.2f}"
-        )
-        obs2 = p["spearman_home_disp"]
-        print(
-            f"    Spearman(home, displacement)  {obs2:+.4f}  "
-            f"null {p['spearman_home_disp_null_mean']:+.4f} +/- "
-            f"{p['spearman_home_disp_null_sd']:.4f}  z={p['spearman_home_disp_null_z']:+.2f}"
-        )
-        print(
-            f"    confound: Spearman(disp, first_seen) {p['spearman_disp_first_run']:+.4f}, "
-            f"Spearman(first_seen, count) {p['spearman_first_run_count']:+.4f}"
-        )
-        if "rank_2d" in p:
-            print(
-                f"    first-run (pos x id) matrix rank {p['rank_2d']}; "
-                f"singular spectrum max|rel err| vs the count histogram "
-                f"{p['single_run_sv_max_relerr']:.2e}"
-            )
-            print("    (a fold is a bijection onto its image: the pos x id view is the (id, count)")
-            print("     view re-rendered, per handover F12 -- this measures that, F15)")
-
-    if "ground_truth" in result:
-        g = result["ground_truth"]
-        print("\n[9] ground truth (tools/ground_truth_tracer.c over the same inputs)")
-        print(
-            f"    real context-free edges {g['edges']}, (edge, call site) triples "
-            f"{g['triples']}, ids reported by --target {g['ids']}"
-        )
-        if g["ctx_bits"] == 0:
-            merged = g["edges"] - g["ids"]
-            print(
-                f"    merged by the id function: {merged} of {g['edges']} "
-                f"({merged / max(g['edges'], 1):.1%}) -- exact for a context-free build,\n"
-                "    where each id is a function of (prev, cur) alone"
-            )
-            if merged < 0:
-                print(
-                    "    WARNING: more ids than real edges -- ids are not a function of the\n"
-                    "    edge (unstable ids, or --target and the tracer build differ)"
-                )
+        sparse = lll["support_median"] <= 8 and lll["max_coeff_median"] <= 2
+        if sparse:
+            print("    sparse, near-unit relations -- diagnostic only: on fuzzgoat most")
+            print("    are not node laws (P1-2). --ground-truth --flow says which are.")
         else:
+            print("    dense relations are not actionable: the only short vectors here")
+            print("    are duplicate-row differences, which the hash above finds in O(m).")
+
+
+def _report_positions(p: dict) -> bool:
+    """[8] edge_pos placement; False when positions are unavailable (caller stops)."""
+    print("\n[8] edge_pos placement (SHM slot index), (pos, id, count) matrix")
+    if not p["available"]:
+        print("    unavailable: this collection has no positions -- re-collect with --save")
+        return False
+    print(
+        f"    table {p['table_size']} slots; {p['triples']} triples over {p['runs']} runs, "
+        f"{p['unique_ids']} distinct ids"
+    )
+    print(
+        f"    ids at a single position {p['ids_single_position']} "
+        f"({p['ids_single_position_pct']:.1f}%)  -- slots are never reclaimed, so any"
+    )
+    print("    multi-position id contradicts the shim's design (first-fit is final)")
+    print(
+        f"    slots hosting >1 distinct id across runs: {p['slots_multi_id']}"
+        "  (expected: only broken placements)"
+    )
+    print(
+        f"    probe displacement: mean {p['displacement_mean']:.3f}, "
+        f"home hits {p['home_hit_frac'] * 100:.1f}%, "
+        f"beyond PROBE_MAX {p['beyond_probe_max']}  "
+        f"top bins {p['disp_hist_top']}"
+    )
+    obs = p["spearman_disp_count"]
+    print(
+        f"    Spearman(displacement, count) {obs:+.4f}  "
+        f"null {p['spearman_disp_count_null_mean']:+.4f} +/- "
+        f"{p['spearman_disp_count_null_sd']:.4f}  z={p['spearman_disp_count_null_z']:+.2f}"
+    )
+    obs2 = p["spearman_home_disp"]
+    print(
+        f"    Spearman(home, displacement)  {obs2:+.4f}  "
+        f"null {p['spearman_home_disp_null_mean']:+.4f} +/- "
+        f"{p['spearman_home_disp_null_sd']:.4f}  z={p['spearman_home_disp_null_z']:+.2f}"
+    )
+    print(
+        f"    confound: Spearman(disp, first_seen) {p['spearman_disp_first_run']:+.4f}, "
+        f"Spearman(first_seen, count) {p['spearman_first_run_count']:+.4f}"
+    )
+    if "rank_2d" in p:
+        print(
+            f"    first-run (pos x id) matrix rank {p['rank_2d']}; "
+            f"singular spectrum max|rel err| vs the count histogram "
+            f"{p['single_run_sv_max_relerr']:.2e}"
+        )
+        print("    (a fold is a bijection onto its image: the pos x id view is the (id, count)")
+        print("     view re-rendered, per handover F12 -- this measures that, F15)")
+    return True
+
+
+def _report_ground(g: dict) -> None:
+    """[9] ground-truth tracer comparison."""
+    print("\n[9] ground truth (tools/ground_truth_tracer.c over the same inputs)")
+    print(
+        f"    real context-free edges {g['edges']}, (edge, call site) triples "
+        f"{g['triples']}, ids reported by --target {g['ids']}"
+    )
+    if g["ctx_bits"] == 0:
+        merged = g["edges"] - g["ids"]
+        print(
+            f"    merged by the id function: {merged} of {g['edges']} "
+            f"({merged / max(g['edges'], 1):.1%}) -- exact for a context-free build,\n"
+            "    where each id is a function of (prev, cur) alone"
+        )
+        if merged < 0:
             print(
-                "    context build: the tracer's call sites are its own binary's, so compare\n"
-                "    counts, not triples; ids well below the triple count mean merging, and\n"
-                "    a __AFL_CTX_SENSITIVE=0 target gives the exact figure"
+                "    WARNING: more ids than real edges -- ids are not a function of the\n"
+                "    edge (unstable ids, or --target and the tracer build differ)"
             )
-    if "flow" in result:
-        _flow_report(result["flow"])
+    else:
+        print(
+            "    context build: the tracer's call sites are its own binary's, so compare\n"
+            "    counts, not triples; ids well below the triple count mean merging, and\n"
+            "    a __AFL_CTX_SENSITIVE=0 target gives the exact figure"
+        )
 
 
 def _flow_report(flow: dict) -> None:
@@ -2549,6 +2580,69 @@ def _hail_mary_grow(target: Path, corpus: Path, iters: int, inprocess_func: str)
 
 
 def _matrix_main(argv: list[str] | None = None) -> int:
+    ap = _matrix_parser()
+    args = ap.parse_args(argv)
+
+    _check_matrix_args(ap, args)
+
+    runs_all, sizes, stability, inputs = _collect_or_load(ap, args)
+
+    pos_runs, runs = _split_pos_runs(runs_all)
+    collected_map = saved_map_size(args.load) if args.load is not None else args.map_size
+
+    agg = aggregate(runs)
+    mat = seed_edge_matrix(runs)
+    smat = mat  # sections [11]-[18] always read seed x edge, whatever --transpose does
+    # The spectrum and both ranks are transpose-invariant; everything derived
+    # from them is not. See the handover's F10 for the comparison.
+    if args.transpose:
+        mat = mat.T
+    if len(agg["ids"]) == 0:
+        print("no edges recorded -- is the target instrumented and linked against the shim?")
+        return 1
+
+    live = sorted(len(ids) for ids, _ in runs)
+    result = {
+        "collection": {
+            "inputs": len(runs),
+            "median_live_edges": live[len(live) // 2],
+            "union_edges": int(len(agg["ids"])),
+            "total_hits": int(agg["total"].sum()),
+            "aslr_disabled": (not args.keep_aslr) if args.load is None else None,
+            "orientation": "edge x seed" if args.transpose else "seed x edge",
+        },
+        "axis": axis_structure(agg["ids"], agg["total"], args.ctx_bits, args.perms, args.seed),
+        "y_marginal": y_marginal(agg["total"]),
+        "substituted_axes": substituted_axes(agg),
+        "spectrum": spectrum(mat),
+        "gf2": gf2_structure(mat),
+    }
+    if args.transpose:
+        result["duplicate_classes"] = duplicate_classes(mat, agg["ids"], args.ctx_bits)
+    if args.lll:
+        result["integer_relations"] = integer_relations(mat, args.lll_rows)
+    if args.positions:
+        result["positions"] = positions_structure(pos_runs, collected_map, args.perms, args.seed)
+    if stability is not None:
+        result["stability"] = stability
+    if args.ground_truth is not None:
+        _add_ground_truth(ap, args, result, agg, runs, inputs)
+    if args.flaky:
+        if args.load is not None:
+            ap.error("--flaky needs a live --target/--corpus; it is incompatible with --load")
+        reps = collect_repeats(args.target, inputs, args.flaky, args.map_size, args.timeout)
+        result["flaky"] = emm.flaky_edges(reps)
+    result.update(_offline_sections(args, smat, agg["ids"], sizes))
+    _matrix_report(result)
+    emm.print_sections(result)
+    if args.json is not None:
+        args.json.write_text(json.dumps(result, indent=2, sort_keys=True, default=_np_default))
+        print(f"\nwrote {args.json}")
+    return 0
+
+
+def _matrix_parser() -> argparse.ArgumentParser:
+    """CLI for the matrix analysis (sections [0]-[18])."""
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument(
         "--target", type=Path, help="instrumented target taking an input path in argv[1]"
@@ -2687,8 +2781,11 @@ def _matrix_main(argv: list[str] | None = None) -> int:
         help="target executions for the hail-mary fuzzer campaign (0 = unlimited; "
         "a real --max-execs budget, not -n iterations; keep it bounded)",
     )
-    args = ap.parse_args(argv)
+    return ap
 
+
+def _check_matrix_args(ap: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Reject incompatible flag combinations; resolve --hm-target and --all-offline in place."""
     if args.load is None and (args.target is None or args.corpus is None):
         ap.error("either --load, or both --target and --corpus")
 
@@ -2698,6 +2795,19 @@ def _matrix_main(argv: list[str] | None = None) -> int:
     if args.hail_mary and args.load is not None:
         ap.error("--hail-mary grows a corpus; it is incompatible with --load")
 
+    _resolve_hm_target(ap, args)
+
+    if args.all_offline:
+        args.subsumption = args.admission_replay = args.rarefaction = True
+        args.length_confound = args.prefix_fold = args.score_audit = True
+        args.bootstrap = args.bootstrap or DEFAULT_BOOTSTRAP
+
+    if args.flaky and (args.load is not None or args.flaky < MIN_FLAKY_REPEATS):
+        ap.error(f"--flaky needs a live --target/--corpus and K >= {MIN_FLAKY_REPEATS}")
+
+
+def _resolve_hm_target(ap: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    """Default --hm-target to the target's .so sibling; error when there is none."""
     if args.hail_mary and args.hm_target is None and str(args.target).endswith(".so") is False:
         sibling = _so_sibling(args.target)
         if sibling is not None:
@@ -2710,14 +2820,13 @@ def _matrix_main(argv: list[str] | None = None) -> int:
                 "libasan)"
             )
 
-    if args.all_offline:
-        args.subsumption = args.admission_replay = args.rarefaction = True
-        args.length_confound = args.prefix_fold = args.score_audit = True
-        args.bootstrap = args.bootstrap or DEFAULT_BOOTSTRAP
 
-    if args.flaky and (args.load is not None or args.flaky < MIN_FLAKY_REPEATS):
-        ap.error(f"--flaky needs a live --target/--corpus and K >= {MIN_FLAKY_REPEATS}")
+def _collect_or_load(ap: argparse.ArgumentParser, args: argparse.Namespace) -> tuple:
+    """(runs_all, sizes, stability, inputs) from --load, or by running --target over --corpus.
 
+    inputs is None under --load.
+    """
+    inputs = None
     if args.load is not None:
         runs_all = load_runs(args.load)
         sizes = load_sizes(args.load)
@@ -2750,78 +2859,44 @@ def _matrix_main(argv: list[str] | None = None) -> int:
             stability["input"] = inputs[richest].name
         if args.save is not None:
             save_runs(args.save, runs_all, args.map_size, sizes)
+    return runs_all, sizes, stability, inputs
 
+
+def _split_pos_runs(runs_all: list) -> tuple:
+    """(pos_runs, runs): strip edge positions from 3-column runs; pos_runs is None without them."""
     if runs_all and len(runs_all[0]) == 3:
         pos_runs = runs_all
         runs = [(ids, counts) for _, ids, counts in runs_all]
     else:
         pos_runs = None
         runs = runs_all
-    collected_map = saved_map_size(args.load) if args.load is not None else args.map_size
+    return pos_runs, runs
 
-    agg = aggregate(runs)
-    mat = seed_edge_matrix(runs)
-    smat = mat  # sections [11]-[18] always read seed x edge, whatever --transpose does
-    # The spectrum and both ranks are transpose-invariant; everything derived
-    # from them is not. See the handover's F10 for the comparison.
-    if args.transpose:
-        mat = mat.T
-    if len(agg["ids"]) == 0:
-        print("no edges recorded -- is the target instrumented and linked against the shim?")
-        return 1
 
-    live = sorted(len(ids) for ids, _ in runs)
-    result = {
-        "collection": {
-            "inputs": len(runs),
-            "median_live_edges": live[len(live) // 2],
-            "union_edges": int(len(agg["ids"])),
-            "total_hits": int(agg["total"].sum()),
-            "aslr_disabled": (not args.keep_aslr) if args.load is None else None,
-            "orientation": "edge x seed" if args.transpose else "seed x edge",
-        },
-        "axis": axis_structure(agg["ids"], agg["total"], args.ctx_bits, args.perms, args.seed),
-        "y_marginal": y_marginal(agg["total"]),
-        "substituted_axes": substituted_axes(agg),
-        "spectrum": spectrum(mat),
-        "gf2": gf2_structure(mat),
-    }
-    if args.transpose:
-        result["duplicate_classes"] = duplicate_classes(mat, agg["ids"], args.ctx_bits)
-    if args.lll:
-        result["integer_relations"] = integer_relations(mat, args.lll_rows)
-    if args.positions:
-        result["positions"] = positions_structure(pos_runs, collected_map, args.perms, args.seed)
-    if stability is not None:
-        result["stability"] = stability
-    if args.ground_truth is not None:
-        if args.load is not None:
-            ap.error("--ground-truth needs the inputs; it is incompatible with --load")
-        if not os.access(args.ground_truth, os.X_OK):
-            ap.error(f"--ground-truth {args.ground_truth}: not an executable tracer build")
-        gt_runs = _gt_runs(args.ground_truth, inputs, args.timeout)
-        gt = ground_truth(args.ground_truth, inputs, args.timeout, runs=gt_runs)
-        gt["ids"] = int(len(agg["ids"]))
-        gt["ctx_bits"] = args.ctx_bits
-        result["ground_truth"] = gt
-        if args.flow:
-            result["flow"] = flow_structure(gt_runs, args.lll_rows if args.lll else 0)
-            shim = seed_edge_matrix(runs)
-            result["flow"]["profile_match"] = {
-                k.value: _profile_match(shim, _flow_graph(gt_runs, k)["ac"]) for k in FlowGraph
-            }
-    if args.flaky:
-        if args.load is not None:
-            ap.error("--flaky needs a live --target/--corpus; it is incompatible with --load")
-        reps = collect_repeats(args.target, inputs, args.flaky, args.map_size, args.timeout)
-        result["flaky"] = emm.flaky_edges(reps)
-    result.update(_offline_sections(args, smat, agg["ids"], sizes))
-    _matrix_report(result)
-    emm.print_sections(result)
-    if args.json is not None:
-        args.json.write_text(json.dumps(result, indent=2, sort_keys=True, default=_np_default))
-        print(f"\nwrote {args.json}")
-    return 0
+def _add_ground_truth(
+    ap: argparse.ArgumentParser,
+    args: argparse.Namespace,
+    result: dict,
+    agg: dict,
+    runs: list,
+    inputs,
+) -> None:
+    """Sections [9]/[10]: tracer ground truth and, with --flow, flow conservation."""
+    if args.load is not None:
+        ap.error("--ground-truth needs the inputs; it is incompatible with --load")
+    if not os.access(args.ground_truth, os.X_OK):
+        ap.error(f"--ground-truth {args.ground_truth}: not an executable tracer build")
+    gt_runs = _gt_runs(args.ground_truth, inputs, args.timeout)
+    gt = ground_truth(args.ground_truth, inputs, args.timeout, runs=gt_runs)
+    gt["ids"] = int(len(agg["ids"]))
+    gt["ctx_bits"] = args.ctx_bits
+    result["ground_truth"] = gt
+    if args.flow:
+        result["flow"] = flow_structure(gt_runs, args.lll_rows if args.lll else 0)
+        shim = seed_edge_matrix(runs)
+        result["flow"]["profile_match"] = {
+            k.value: _profile_match(shim, _flow_graph(gt_runs, k)["ac"]) for k in FlowGraph
+        }
 
 
 def _headline(mat):
