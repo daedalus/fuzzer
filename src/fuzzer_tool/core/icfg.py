@@ -292,6 +292,28 @@ def build_interprocedural_cfg(td) -> InterproceduralCFG | None:
     return InterproceduralCFG(packed, node_funcs, src, dst, cfgs, is_call=is_call)
 
 
+def _func_code(td, start: int, end: int) -> bytes | None:
+    """Full code slice of [start, end) inside .text, or None when unusable."""
+    if end <= start or start < td._text_start or end > td._text_end:
+        return None
+    code = td._code_slice(start, end)
+    if code is None or len(code) != end - start:
+        return None
+    return code
+
+
+def _site_block(td, icfg: InterproceduralCFG, name: str, site: int):
+    """Block of *name* containing *site*; falls back to the owning function."""
+    cfg = icfg._cfgs.get(name)
+    blk = cfg.block_containing(site) if cfg else None
+    if blk is not None:
+        return blk
+    # Tail position can land past the slice's own end.
+    alt = td._addr_to_function(site)
+    alt_cfg = icfg._cfgs.get(alt) if alt else None
+    return alt_cfg.block_containing(site) if alt_cfg else None
+
+
 def probe_key_node_table(td, icfg: InterproceduralCFG) -> dict[int, int]:
     """Runtime probe key → ICFG node index for DistanceTableShm upload.
 
@@ -309,10 +331,8 @@ def probe_key_node_table(td, icfg: InterproceduralCFG) -> dict[int, int]:
     base = td._base_addr or 0
     table: dict[int, int] = {}
     for name, (start, end) in td.functions.items():
-        if end <= start or start < td._text_start or end > td._text_end:
-            continue
-        code = td._code_slice(start, end)
-        if code is None or len(code) != end - start:
+        code = _func_code(td, start, end)
+        if code is None:
             continue
         for m in _CALL_RE.finditer(code):
             offset = m.start()
@@ -322,13 +342,7 @@ def probe_key_node_table(td, icfg: InterproceduralCFG) -> dict[int, int]:
             if start + offset + 5 + disp not in targets:
                 continue
             site = start + offset + 5  # return address after the call
-            cfg = icfg._cfgs.get(name)
-            blk = cfg.block_containing(site) if cfg else None
-            if blk is None:
-                # Tail position can land past the slice's own end.
-                alt = td._addr_to_function(site)
-                alt_cfg = icfg._cfgs.get(alt) if alt else None
-                blk = alt_cfg.block_containing(site) if alt_cfg else None
+            blk = _site_block(td, icfg, name, site)
             if blk is None:
                 continue
             nidx = icfg._node_at(blk.start)

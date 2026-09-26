@@ -234,6 +234,36 @@ def set_weak_mod_set(weak: set[int]):
 # ── Solver ──────────────────────────────────────────────────────────────
 
 
+def _scaled_rel(val_a: int, val_b: int, mask: int):
+    """SHIFT (1-7) / MUL (2-100) relation → (replacement, relation, k) or None."""
+    # ── SHIFT (<< / >> by small constant) ──
+    for k in range(1, 8):
+        if ((val_a << k) & mask) == val_b:
+            return val_b, "shl", k
+        if (val_a >> k) == val_b:
+            return val_b, "shr", k
+        if ((val_b << k) & mask) == val_a:
+            return val_a, "shl", k
+        if (val_b >> k) == val_a:
+            return val_a, "shr", k
+
+    # ── MULTIPLY (small constant) ──
+    for k in range(2, 101):
+        if ((val_a * k) & mask) == val_b:
+            return val_b, "mul", k
+        if ((val_b * k) & mask) == val_a:
+            return val_a, "mul", k
+    return None
+
+
+def _or_rel(val_a: int, val_b: int, w: int):
+    """OR (last-resort bitwise: catches patterns bypassed by ADD/XOR/SUB)."""
+    combined = val_a | val_b
+    if combined != val_a and combined != val_b and combined < (1 << w):
+        return combined, "or", combined ^ min(val_a, val_b)
+    return None
+
+
 class Z3Solver:
     """Arithmetic constraint solver for cmplog operand pairs.
 
@@ -386,6 +416,7 @@ class Z3Solver:
         mask = (1 << w) - 1
         max_delta = _MAX_DELTA_FOR_WIDTH.get(width, 65536)
 
+        # ADD / XOR / SUB / AND inline: the common hits stay call-free.
         # ── ADD ──
         delta = (val_b - val_a) & mask
         if 0 < delta < max_delta:
@@ -448,79 +479,28 @@ class Z3Solver:
                     "delta": common,
                 }
 
-        # ── SHIFT (<< / >> by small constant) ──
-        for k in range(1, 8):
-            if ((val_a << k) & mask) == val_b:
-                self.queries_solved += 1
-                self.batch_solved += 1
-                return {
-                    "solved_bytes": val_b.to_bytes(width, "little"),
-                    "width": width,
-                    "relation": "shl",
-                    "delta": k,
-                }
-            if (val_a >> k) == val_b:
-                self.queries_solved += 1
-                self.batch_solved += 1
-                return {
-                    "solved_bytes": val_b.to_bytes(width, "little"),
-                    "width": width,
-                    "relation": "shr",
-                    "delta": k,
-                }
-            if ((val_b << k) & mask) == val_a:
-                self.queries_solved += 1
-                self.batch_solved += 1
-                return {
-                    "solved_bytes": val_a.to_bytes(width, "little"),
-                    "width": width,
-                    "relation": "shl",
-                    "delta": k,
-                }
-            if (val_b >> k) == val_a:
-                self.queries_solved += 1
-                self.batch_solved += 1
-                return {
-                    "solved_bytes": val_a.to_bytes(width, "little"),
-                    "width": width,
-                    "relation": "shr",
-                    "delta": k,
-                }
-
-        # ── MULTIPLY (small constant) ──
-        for k in range(2, 101):
-            if ((val_a * k) & mask) == val_b:
-                self.queries_solved += 1
-                self.batch_solved += 1
-                return {
-                    "solved_bytes": val_b.to_bytes(width, "little"),
-                    "width": width,
-                    "relation": "mul",
-                    "delta": k,
-                }
-            if ((val_b * k) & mask) == val_a:
-                self.queries_solved += 1
-                self.batch_solved += 1
-                return {
-                    "solved_bytes": val_a.to_bytes(width, "little"),
-                    "width": width,
-                    "relation": "mul",
-                    "delta": k,
-                }
-
-        # ── OR (last-resort bitwise: catches patterns bypassed by ADD/XOR/SUB) ──
-        combined = val_a | val_b
-        if combined != val_a and combined != val_b and combined < (1 << w):
+        # SHIFT / MUL, then OR (last resort)
+        rel = _scaled_rel(val_a, val_b, mask) or _or_rel(val_a, val_b, w)
+        if rel is not None:
+            value, relation, delta = rel
             self.queries_solved += 1
             self.batch_solved += 1
-            delta_or = combined ^ min(val_a, val_b)
             return {
-                "solved_bytes": combined.to_bytes(width, "little"),
+                "solved_bytes": value.to_bytes(width, "little"),
                 "width": width,
-                "relation": "or",
-                "delta": delta_or,
+                "relation": relation,
+                "delta": delta,
             }
 
+        mod_result = self._solve_mod(width, val_a, val_b, pc)
+        if mod_result is not None:
+            return mod_result
+
+        self.queries_failed += 1
+        return None
+
+    def _solve_mod(self, width: int, val_a: int, val_b: int, pc: int | None) -> dict | None:
+        """MOD relations: heuristic divisors, then (trace mode) the PC's divisor."""
         # ── MOD: heuristic mode (A) ──
         if self.mod_solving_mode in ("heuristic", "trace"):
             mod_result = self._try_mod_heuristic(width, val_a, val_b)
@@ -528,20 +508,17 @@ class Z3Solver:
                 return mod_result
 
         # ── MOD: trace mode (B) — PC-correlated divisor ──
-        if self.mod_solving_mode == "trace" and pc is not None:
-            divisor = PC_DIVISOR_MAP.get(pc)
-            if divisor is not None and width <= 8:
-                mod_result = self._try_mod_with_divisor(width, val_a, val_b, divisor)
-                if mod_result is not None:
-                    return mod_result
-            # If the PC is in the weak modulus set, the divisor is a runtime
-            # variable — fall back to the heuristic common-divisor set.
-            if pc in PC_WEAK_MOD_SET:
-                mod_result = self._try_mod_heuristic(width, val_a, val_b)
-                if mod_result is not None:
-                    return mod_result
-
-        self.queries_failed += 1
+        if self.mod_solving_mode != "trace" or pc is None:
+            return None
+        divisor = PC_DIVISOR_MAP.get(pc)
+        if divisor is not None and width <= 8:
+            mod_result = self._try_mod_with_divisor(width, val_a, val_b, divisor)
+            if mod_result is not None:
+                return mod_result
+        # If the PC is in the weak modulus set, the divisor is a runtime
+        # variable — fall back to the heuristic common-divisor set.
+        if pc in PC_WEAK_MOD_SET:
+            return self._try_mod_heuristic(width, val_a, val_b)
         return None
 
     # ── MOD heuristics ───────────────────────────────────────────────────

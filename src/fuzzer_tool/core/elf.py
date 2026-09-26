@@ -125,6 +125,378 @@ def _reg_base_pure(reg_id: int) -> str | None:
     return None
 
 
+# Legacy prefixes skipped before REX/opcode (REP, REPNE, opsize, addrsize)
+_LEGACY_PREFIXES = (0xF3, 0xF2, 0x66, 0x67)
+
+# REX prefix bits
+_REX_W = 0x08
+_REX_R = 0x04
+_REX_B = 0x01
+
+# Register-register form kinds (see _RR_SPEC)
+_RR_ALU = 0  # reads both, writes dst
+_RR_CMP = 1  # reads both, flags only
+_RR_MOV = 2  # reads src, writes dst
+
+
+def _imm32(text: bytes, n: int, pc: int) -> tuple[int, int]:
+    """Signed imm32 at pc → (imm, new_pc); (0, pc) when truncated."""
+    if pc + 4 <= n:
+        return struct.unpack_from("<i", text, pc)[0], pc + 4
+    return 0, pc
+
+
+def _imm8s(text: bytes, n: int, pc: int) -> tuple[int, int]:
+    """Signed imm8 at pc → (imm, new_pc); (0, pc) when truncated."""
+    if pc < n:
+        return struct.unpack_from("<b", text, pc)[0], pc + 1
+    return 0, pc
+
+
+def _skip_disp(n: int, pc: int, mod: int, rm_raw: int, sib_base: int) -> int:
+    """Skip the ModR/M displacement; bounds-checked so truncation never overruns.
+
+    mod 1 → disp8; mod 2 → disp32; mod 0 → disp32 only for [disp32]
+    (rm=5, no SIB) or SIB base=5.
+    """
+    if mod == 1:
+        return pc + 1 if pc < n else pc
+    wide = mod == 2 or (mod == 0 and (sib_base if sib_base >= 0 else rm_raw) == 5)
+    if wide and pc + 4 <= n:
+        return pc + 4
+    return pc
+
+
+def _modrm(text: bytes, n: int, pc: int, rex: int):
+    """Decode ModR/M + SIB + disp → (new_pc, mod, reg, rm), or None at EOF."""
+    if pc >= n:
+        return None
+    mrm = text[pc]
+    pc += 1
+    mod = (mrm >> 6) & 3
+    reg = ((mrm >> 3) & 7) | ((rex & _REX_R) << 1)
+    rm_raw = mrm & 7
+    rm = rm_raw | ((rex & _REX_B) << 3)
+
+    # SIB present when mod≠11 and rm_raw==4 (RSP-based); -1 = no SIB
+    sib_base = -1
+    if mod != 3 and rm_raw == 4 and pc < n:
+        sib_base = text[pc] & 7
+        pc += 1
+
+    return _skip_disp(n, pc, mod, rm_raw, sib_base), mod, reg, rm
+
+
+# Opcode handlers: each fills `insn` and returns the new pc. The decoder
+# loop sets insn.length afterwards. Unhandled forms leave _INS_OTHER.
+
+
+def _x_mov_imm(text, n, pc, start, op, rex, insn):
+    """B8+rd — MOV r32, imm32 / MOV r64, imm64 (REX.W)."""
+    rd = (op - 0xB8) | ((rex & _REX_B) << 3)
+    size = 4
+    if rex & _REX_W:
+        size = 8
+        imm = 0
+        if pc + 8 <= n:
+            imm = struct.unpack_from("<q", text, pc)[0]
+            pc += 8
+    else:
+        imm, pc = _imm32(text, n, pc)
+
+    insn.insn_id = _INS_MOV
+    insn.operands = [_Operand(_OP_REG, rd, size=size), _Operand(_OP_IMM, imm=imm, size=size)]
+    insn._regs_write = {rd}
+    insn.bytes = text[start:pc]
+    return pc
+
+
+def _x_ret(text, n, pc, start, op, rex, insn):
+    """C3/CB — RET."""
+    insn.insn_id = _INS_RET
+    insn.groups = {_GRP_RET}
+    return pc
+
+
+def _rel_branch(text, n, pc, start, insn, spec):
+    """Relative branch: spec = (disp width, insn_id, group); op_str = target."""
+    width, insn_id, grp = spec
+    off, pc = _imm8s(text, n, pc) if width == 1 else _imm32(text, n, pc)
+    insn.insn_id = insn_id
+    insn.groups = {grp}
+    insn.op_str = f"0x{insn.address + (pc - start) + off:x}"
+    return pc
+
+
+_JCC32 = (4, _INS_JCC, _GRP_JUMP)
+
+# opcode → relative-branch spec (EB/E9 JMP, E8 CALL, 70-7F Jcc rel8)
+_BRANCH_SPEC = {
+    0xEB: (1, _INS_JMP, _GRP_JUMP),
+    0xE9: (4, _INS_JMP, _GRP_JUMP),
+    0xE8: (4, _INS_CALL, _GRP_CALL),
+    **{op: (1, _INS_JCC, _GRP_JUMP) for op in range(0x70, 0x80)},
+}
+
+
+def _x_branch(text, n, pc, start, op, rex, insn):
+    """JMP/CALL/Jcc with a relative displacement."""
+    return _rel_branch(text, n, pc, start, insn, _BRANCH_SPEC[op])
+
+
+def _x_int(text, n, pc, start, op, rex, insn):
+    """CD ib — INT imm8."""
+    if pc < n:
+        pc += 1
+    insn.groups = {_GRP_INT}
+    return pc
+
+
+# opcode → (insn_id, writes EAX) for accumulator imm32 forms
+_ACC_SPEC = {
+    0x05: (_INS_ADD, True),
+    0x0D: (_INS_OR, True),
+    0x25: (_INS_AND, True),
+    0x2D: (_INS_SUB, True),
+    0xA9: (_INS_TEST, False),
+}
+
+
+def _x_acc_imm(text, n, pc, start, op, rex, insn):
+    """ADD/OR/AND/SUB/TEST EAX, imm32."""
+    insn_id, writes = _ACC_SPEC[op]
+    imm, pc = _imm32(text, n, pc)
+    insn.insn_id = insn_id
+    insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+    insn._regs_read = {0}
+    if writes:
+        insn._regs_write = {0}
+    return pc
+
+
+def _x_two_byte(text, n, pc, start, op, rex, insn):
+    """0F xx — Jcc rel32, NOP/CET (ModRM), CMPXCHG; others skipped."""
+    if pc >= n:
+        return pc
+    op2 = text[pc]
+    pc += 1
+
+    if 0x80 <= op2 <= 0x8F:
+        return _rel_branch(text, n, pc, start, insn, _JCC32)
+
+    if op2 not in (0x1E, 0x1F, 0xB1):
+        return pc
+
+    m = _modrm(text, n, pc, rex)
+    if m is None:
+        return pc
+    pc, mod, reg, rm = m
+
+    # CMPXCHG r/m32, r32 (0F B1) — register form only
+    if op2 == 0xB1 and mod == 3:
+        insn.insn_id = _INS_CMPXCHG
+        insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
+        insn._regs_read = {reg, rm}
+        insn._regs_write = {rm}
+    return pc
+
+
+def _grp3_test(text, n, pc, insn, mod, rm, size):
+    """F6/F7 /0 — TEST r/m, imm (imm8 or imm32)."""
+    if size == 4:
+        imm, pc = _imm32(text, n, pc)
+    else:
+        imm = text[pc] if pc < n else 0
+        pc += 1
+    insn.insn_id = _INS_TEST
+    if mod == 3:
+        insn.operands = [_Operand(_OP_REG, rm, size=size), _Operand(_OP_IMM, imm=imm, size=size)]
+    insn._regs_read = {rm}
+    return pc
+
+
+def _grp3_div(insn, ext, mod, rm, size):
+    """F6/F7 /6 /7 — DIV / IDIV; implicit EAX:EDX in and out."""
+    insn.insn_id = _INS_IDIV if ext == 7 else _INS_DIV
+    if mod == 3:  # register divisor
+        insn.operands = [_Operand(_OP_REG, rm, size=size)]
+        insn._regs_read = {0, 2, rm}
+    else:  # memory divisor
+        insn.operands = [_Operand(_OP_MEM, size=size)]
+        insn._regs_read = {0, 2}
+    insn._regs_write = {0, 2}
+
+
+def _x_grp3(text, n, pc, start, op, rex, insn):
+    """F6/F7 — GRP3 (TEST/DIV/IDIV decoded; NOT/NEG/MUL/IMUL → other)."""
+    m = _modrm(text, n, pc, rex)
+    if m is None:
+        return pc
+    pc, mod, reg_ext, rm = m
+
+    size = 4 if op == 0xF7 else 1
+    ext = reg_ext & 7
+    if ext == 0:
+        return _grp3_test(text, n, pc, insn, mod, rm, size)
+    if ext in (6, 7):
+        _grp3_div(insn, ext, mod, rm, size)
+    return pc
+
+
+# GRP1 /ext → (insn_id, writes r/m)
+_GRP1_OPS = {
+    0: (_INS_ADD, True),
+    1: (_INS_OR, True),
+    4: (_INS_AND, True),
+    5: (_INS_SUB, True),
+    7: (_INS_CMP, False),
+}
+
+
+def _x_grp1(text, n, pc, start, op, rex, insn):
+    """81 /ext imm32, 83 /ext imm8 — register forms of ADD/OR/AND/SUB/CMP."""
+    m = _modrm(text, n, pc, rex)
+    if m is None:
+        return pc
+    pc, mod, reg_ext, rm = m
+
+    imm, pc = _imm32(text, n, pc) if op == 0x81 else _imm8s(text, n, pc)
+    spec = _GRP1_OPS.get(reg_ext & 7)
+    if mod != 3 or spec is None:
+        return pc
+
+    insn.insn_id, writes = spec
+    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+    insn._regs_read = {rm}
+    if writes:
+        insn._regs_write = {rm}
+    return pc
+
+
+# opcode → (insn_id, r/m is first operand, kind) for register-register forms
+_RR_SPEC = {
+    0x01: (_INS_ADD, True, _RR_ALU),
+    0x03: (_INS_ADD, False, _RR_ALU),
+    0x09: (_INS_OR, True, _RR_ALU),
+    0x0B: (_INS_OR, False, _RR_ALU),
+    0x21: (_INS_AND, True, _RR_ALU),
+    0x23: (_INS_AND, False, _RR_ALU),
+    0x29: (_INS_SUB, True, _RR_ALU),
+    0x2B: (_INS_SUB, False, _RR_ALU),
+    0x31: (_INS_XOR, True, _RR_ALU),
+    0x33: (_INS_XOR, False, _RR_ALU),
+    0x39: (_INS_CMP, True, _RR_CMP),
+    0x3B: (_INS_CMP, False, _RR_CMP),
+    0x85: (_INS_TEST, True, _RR_CMP),
+    0x89: (_INS_MOV, True, _RR_MOV),
+    0x8B: (_INS_MOV, False, _RR_MOV),
+}
+
+
+def _x_reg_reg(text, n, pc, start, op, rex, insn):
+    """ALU/CMP/TEST/MOV r/m32, r32 and r32, r/m32 — register form only."""
+    m = _modrm(text, n, pc, rex)
+    if m is None:
+        return pc
+    pc, mod, reg, rm = m
+    if mod != 3:
+        return pc
+
+    insn_id, rm_first, kind = _RR_SPEC[op]
+    dst, src = (rm, reg) if rm_first else (reg, rm)
+    insn.insn_id = insn_id
+    insn.operands = [_Operand(_OP_REG, dst, size=4), _Operand(_OP_REG, src, size=4)]
+    if kind == _RR_MOV:
+        insn._regs_read = {src}
+        insn._regs_write = {dst}
+        return pc
+
+    insn._regs_read = {reg, rm}
+    if kind == _RR_ALU:
+        insn._regs_write = {dst}
+    return pc
+
+
+def _x_mov_rm_imm(text, n, pc, start, op, rex, insn):
+    """C7 /0 — MOV r/m32, imm32 (register form only)."""
+    m = _modrm(text, n, pc, rex)
+    if m is None:
+        return pc
+    pc, mod, reg_ext, rm = m
+
+    imm, pc = _imm32(text, n, pc)
+    if mod == 3 and (reg_ext & 7) == 0:
+        insn.insn_id = _INS_MOV
+        insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
+        insn._regs_write = {rm}
+    return pc
+
+
+def _x_lea(text, n, pc, start, op, rex, insn):
+    """8D — LEA r, m (memory form only)."""
+    m = _modrm(text, n, pc, rex)
+    if m is None:
+        return pc
+    pc, mod, reg, rm = m
+    if mod == 3:
+        return pc
+
+    insn.insn_id = _INS_LEA
+    mem_op = _Operand(_OP_MEM, size=8)
+    mem_op.base = rm
+    insn.operands = [_Operand(_OP_REG, reg, size=8), mem_op]
+    insn._regs_write = {reg}
+    return pc
+
+
+# FF /ext → (insn_id, group) for indirect CALL / JMP
+_FF_OPS = {2: (_INS_CALL, _GRP_CALL), 4: (_INS_JMP, _GRP_JUMP)}
+
+
+def _x_ff(text, n, pc, start, op, rex, insn):
+    """FF /2 CALL r/m, FF /4 JMP r/m."""
+    m = _modrm(text, n, pc, rex)
+    if m is None:
+        return pc
+    pc, mod, reg_ext, rm = m
+
+    spec = _FF_OPS.get(reg_ext & 7)
+    if spec is None:
+        return pc
+    insn.insn_id, grp = spec
+    insn.groups = {grp}
+    if mod == 3:
+        insn.operands = [_Operand(_OP_REG, rm, size=8)]
+        insn._regs_read = {rm}
+    return pc
+
+
+def _build_x86_dispatch() -> list:
+    """256-entry opcode → handler table; None = unrecognized (_INS_OTHER)."""
+    table: list = [None] * 256
+    groups = (
+        (range(0xB8, 0xC0), _x_mov_imm),
+        ((0xC3, 0xCB), _x_ret),
+        (_BRANCH_SPEC, _x_branch),
+        ((0xCD,), _x_int),
+        (_ACC_SPEC, _x_acc_imm),
+        ((0x0F,), _x_two_byte),
+        ((0xF6, 0xF7), _x_grp3),
+        ((0x81, 0x83), _x_grp1),
+        (_RR_SPEC, _x_reg_reg),
+        ((0xC7,), _x_mov_rm_imm),
+        ((0x8D,), _x_lea),
+        ((0xFF,), _x_ff),
+    )
+    for opcodes, handler in groups:
+        for op in opcodes:
+            table[op] = handler
+    return table
+
+
+_X86_DISPATCH = _build_x86_dispatch()
+
+
 def _decode_x86_64(text: bytes, base_addr: int):
     """Pure-Python x86-64 instruction decoder — yields _DisasmInsn objects.
 
@@ -134,824 +506,62 @@ def _decode_x86_64(text: bytes, base_addr: int):
     """
     pc = 0
     n = len(text)
+    dispatch = _X86_DISPATCH
 
     while pc < n:
         start = pc
-        addr = base_addr + pc
 
         # ── Legacy prefixes (F3, F2, 66, 67) ──
-        while pc < n and text[pc] in (0xF3, 0xF2, 0x66, 0x67):
+        while pc < n and text[pc] in _LEGACY_PREFIXES:
             pc += 1
 
         # ── REX prefix (optional) ──
         rex = 0
-        rex_w = False
-        rex_r = False
-        rex_b = False
         if pc < n and 0x40 <= text[pc] <= 0x4F:
             rex = text[pc]
-            rex_w = bool(rex & 0x08)
-            rex_r = bool(rex & 0x04)
-            rex_b = bool(rex & 0x01)
             pc += 1
 
         if pc >= n:
             yield _DisasmInsn(
-                address=addr, length=1, insn_id=_INS_OTHER, bytes=text[start : start + 1]
+                address=base_addr + start,
+                length=1,
+                insn_id=_INS_OTHER,
+                bytes=text[start : start + 1],
             )
             return
 
         opbyte = text[pc]
         pc += 1
 
-        # ── Helper: decode ModR/M + SIB + displacement ──
-        def _decode_modrm(_rex_r=rex_r, _rex_b=rex_b):
-            """Returns (mod, reg, rm, bytes_consumed, has_sib, sib_byte)."""
-            nonlocal pc
-            if pc >= n:
-                return None
-            mrm = text[pc]
-            pc += 1
-            mod = (mrm >> 6) & 3
-            reg = ((mrm >> 3) & 7) | (0x8 if _rex_r else 0)
-            rm_raw = mrm & 7
-            rm = rm_raw | (0x8 if _rex_b else 0)
-
-            has_sib = False
-            sib_byte = 0
-            # SIB present when mod≠11 and rm_raw==4 (RSP-based)
-            if mod != 3 and rm_raw == 4 and pc < n:
-                sib_byte = text[pc]
-                pc += 1
-                has_sib = True
-
-            # Displacement
-            if mod == 1:
-                if pc < n:
-                    pc += 1  # disp8
-            elif mod == 2:
-                if pc + 4 <= n:
-                    pc += 4  # disp32
-            elif mod == 0:
-                if has_sib:
-                    base_raw = sib_byte & 7
-                    if base_raw == 5 and pc + 4 <= n:  # [disp32 + index*scale]
-                        pc += 4
-                elif rm_raw == 5:  # [disp32]
-                    if pc + 4 <= n:
-                        pc += 4
-
-            return mod, reg, rm, has_sib, sib_byte
-
-        insn = _DisasmInsn(address=addr, bytes=text[start:pc])
-
-        # ── Single-byte opcodes ──
-
-        # MOV r32, imm32  (B8+rd)
-        if 0xB8 <= opbyte <= 0xBF:
-            rd = (opbyte - 0xB8) | (0x8 if rex_b else 0)
-            if rex_w:
-                # MOV r64, imm64
-                if pc + 8 <= n:
-                    imm = struct.unpack_from("<q", text, pc)[0]
-                    pc += 8
-                else:
-                    imm = 0
-                insn.insn_id = _INS_MOV
-                insn.operands = [_Operand(_OP_REG, rd, size=8), _Operand(_OP_IMM, imm=imm, size=8)]
-                insn._regs_write = {rd}
-            else:
-                # MOV r32, imm32
-                if pc + 4 <= n:
-                    imm = struct.unpack_from("<i", text, pc)[0]
-                    pc += 4
-                else:
-                    imm = 0
-                insn.insn_id = _INS_MOV
-                insn.operands = [_Operand(_OP_REG, rd, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
-                insn._regs_write = {rd}
-            insn.length = pc - start
-            insn.bytes = text[start:pc]
-            yield insn
-            continue
-
-        # RET
-        if opbyte in (0xC3, 0xCB):
-            insn.insn_id = _INS_RET
-            insn.groups = {_GRP_RET}
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # JMP rel8
-        if opbyte == 0xEB:
-            if pc < n:
-                off = struct.unpack_from("<b", text, pc)[0]
-                pc += 1
-            else:
-                off = 0
-            insn.insn_id = _INS_JMP
-            insn.groups = {_GRP_JUMP}
-            insn.length = pc - start
-            insn.op_str = f"0x{addr + insn.length + off:x}"
-            yield insn
-            continue
-
-        # JMP rel32
-        if opbyte == 0xE9:
-            if pc + 4 <= n:
-                off = struct.unpack_from("<i", text, pc)[0]
-                pc += 4
-            else:
-                off = 0
-            insn.insn_id = _INS_JMP
-            insn.groups = {_GRP_JUMP}
-            insn.length = pc - start
-            insn.op_str = f"0x{addr + insn.length + off:x}"
-            yield insn
-            continue
-
-        # CALL rel32
-        if opbyte == 0xE8:
-            if pc + 4 <= n:
-                off = struct.unpack_from("<i", text, pc)[0]
-                pc += 4
-            else:
-                off = 0
-            insn.insn_id = _INS_CALL
-            insn.groups = {_GRP_CALL}
-            insn.length = pc - start
-            insn.op_str = f"0x{addr + insn.length + off:x}"
-            yield insn
-            continue
-
-        # Jcc rel8 (70-7F)
-        if 0x70 <= opbyte <= 0x7F:
-            if pc < n:
-                off = struct.unpack_from("<b", text, pc)[0]
-                pc += 1
-            else:
-                off = 0
-            insn.insn_id = _INS_JCC
-            insn.groups = {_GRP_JUMP}
-            insn.length = pc - start
-            insn.op_str = f"0x{addr + insn.length + off:x}"
-            yield insn
-            continue
-
-        # INT imm8 (0xCD)
-        if opbyte == 0xCD:
-            if pc < n:
-                pc += 1  # consume imm8
-            insn.groups = {_GRP_INT}
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # ── Accumulator-specific immediate forms ──
-        # ADD EAX, imm32 (0x05)
-        if opbyte == 0x05:
-            if pc + 4 <= n:
-                imm = struct.unpack_from("<i", text, pc)[0]
-                pc += 4
-            else:
-                imm = 0
-            insn.insn_id = _INS_ADD
-            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
-            insn._regs_read = {0}
-            insn._regs_write = {0}
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # OR EAX, imm32 (0x0D)
-        if opbyte == 0x0D:
-            if pc + 4 <= n:
-                imm = struct.unpack_from("<i", text, pc)[0]
-                pc += 4
-            else:
-                imm = 0
-            insn.insn_id = _INS_OR
-            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
-            insn._regs_read = {0}
-            insn._regs_write = {0}
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # AND EAX, imm32 (0x25)
-        if opbyte == 0x25:
-            if pc + 4 <= n:
-                imm = struct.unpack_from("<i", text, pc)[0]
-                pc += 4
-            else:
-                imm = 0
-            insn.insn_id = _INS_AND
-            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
-            insn._regs_read = {0}
-            insn._regs_write = {0}
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # SUB EAX, imm32 (0x2D)
-        if opbyte == 0x2D:
-            if pc + 4 <= n:
-                imm = struct.unpack_from("<i", text, pc)[0]
-                pc += 4
-            else:
-                imm = 0
-            insn.insn_id = _INS_SUB
-            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
-            insn._regs_read = {0}
-            insn._regs_write = {0}
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # TEST EAX, imm32 (0xA9)
-        if opbyte == 0xA9:
-            if pc + 4 <= n:
-                imm = struct.unpack_from("<i", text, pc)[0]
-                pc += 4
-            else:
-                imm = 0
-            insn.insn_id = _INS_TEST
-            insn.operands = [_Operand(_OP_REG, 0, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
-            insn._regs_read = {0}
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # ── Two-byte opcodes (0x0F prefix) ──
-        if opbyte == 0x0F and pc < n:
-            op2 = text[pc]
-            pc += 1
-
-            # Jcc rel32 (0F 80-8F)
-            if 0x80 <= op2 <= 0x8F:
-                if pc + 4 <= n:
-                    off = struct.unpack_from("<i", text, pc)[0]
-                    pc += 4
-                else:
-                    off = 0
-                insn.insn_id = _INS_JCC
-                insn.groups = {_GRP_JUMP}
-                insn.length = pc - start
-                insn.op_str = f"0x{addr + insn.length + off:x}"
-                yield insn
-                continue
-
-            # NOP / CET (0F 1E, 0F 1F) — always has ModRM
-            if op2 in (0x1E, 0x1F):
-                _decode_modrm()  # consume ModRM + optional SIB+disp
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-
-            # CMPXCHG r/m32, r32 (0F B1)
-            if op2 == 0xB1:
-                result = _decode_modrm()
-                if result is not None:
-                    mod, reg, rm, has_sib, sib_byte = result
-                    if mod == 3:
-                        insn.insn_id = _INS_CMPXCHG
-                        insn.operands = [
-                            _Operand(_OP_REG, rm, size=4),
-                            _Operand(_OP_REG, reg, size=4),
-                        ]
-                        insn._regs_read = {reg, rm}
-                        insn._regs_write = {rm}
-                    insn.length = pc - start
-                    yield insn
-                    continue
-                # fall through on decode failure
-
-            # Unknown two-byte opcode — skip
-            insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # ── Multi-byte opcodes with ModR/M ──
-
-        # F7 — GRP3 (TEST/DIV/IDIV/NOT/NEG/MUL/IMUL)
-        if opbyte == 0xF7:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg_ext, rm, has_sib, sib_byte = result
-            ext = reg_ext & 7
-            if ext == 0:  # TEST r/m32, imm32
-                if pc + 4 <= n:
-                    imm = struct.unpack_from("<i", text, pc)[0]
-                    pc += 4
-                else:
-                    imm = 0
-                insn.insn_id = _INS_TEST
-                if mod == 3:
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                insn._regs_read = {rm}
-            elif ext in (6, 7):  # DIV (6) / IDIV (7) — register OR memory operand
-                is_idiv = ext == 7
-                insn.insn_id = _INS_IDIV if is_idiv else _INS_DIV
-                if mod == 3:  # register operand
-                    insn.operands = [_Operand(_OP_REG, rm, size=4)]
-                    insn._regs_read = {0, 2, rm}  # EAX, EDX, divisor reg
-                else:  # memory operand — divisor not a register
-                    insn.operands = [_Operand(_OP_MEM, size=4)]
-                    insn._regs_read = {0, 2}  # EAX, EDX only
-                insn._regs_write = {0, 2}  # EAX, EDX (quotient, remainder)
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # F6 — GRP3 byte-size (TEST r/m8 / DIV / IDIV / NOT / NEG / MUL / IMUL)
-        if opbyte == 0xF6:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg_ext, rm, has_sib, sib_byte = result
-            ext = reg_ext & 7
-            if ext == 0:  # TEST r/m8, imm8
-                imm = text[pc] if pc < n else 0
-                pc += 1
-                insn.insn_id = _INS_TEST
-                if mod == 3:
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=1),
-                        _Operand(_OP_IMM, imm=imm, size=1),
-                    ]
-                insn._regs_read = {rm}
-            elif ext in (6, 7):  # DIV (6) / IDIV (7) — register OR memory operand
-                is_idiv = ext == 7
-                insn.insn_id = _INS_IDIV if is_idiv else _INS_DIV
-                if mod == 3:  # register operand
-                    insn.operands = [_Operand(_OP_REG, rm, size=1)]
-                    insn._regs_read = {0, 2, rm}  # AL/AX, DX, divisor reg
-                else:  # memory operand — divisor not a register
-                    insn.operands = [_Operand(_OP_MEM, size=1)]
-                    insn._regs_read = {0, 2}  # AL/AX, DX only
-                insn._regs_write = {0, 2}  # quotient/remainder
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 81 — GRP1 r/m, imm32
-        if opbyte == 0x81:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg_ext, rm, has_sib, sib_byte = result
-            # Read imm32
-            if pc + 4 <= n:
-                imm = struct.unpack_from("<i", text, pc)[0]
-                pc += 4
-            else:
-                imm = 0
-            if mod == 3:  # register operand
-                ext = reg_ext & 7
-                if ext == 0:  # ADD r/m32, imm32
-                    insn.insn_id = _INS_ADD
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                    insn._regs_write = {rm}
-                elif ext == 1:  # OR r/m32, imm32
-                    insn.insn_id = _INS_OR
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                    insn._regs_write = {rm}
-                elif ext == 4:  # AND r/m32, imm32
-                    insn.insn_id = _INS_AND
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                    insn._regs_write = {rm}
-                elif ext == 5:  # SUB r/m32, imm32
-                    insn.insn_id = _INS_SUB
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                    insn._regs_write = {rm}
-                elif ext == 7:  # CMP r/m32, imm32
-                    insn.insn_id = _INS_CMP
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                else:
-                    insn.insn_id = _INS_OTHER
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 83 — GRP1 r/m, imm8 (sign-extended)
-        if opbyte == 0x83:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg_ext, rm, has_sib, sib_byte = result
-            # Read imm8 (sign-extended to 32-bit)
-            if pc < n:
-                imm = struct.unpack_from("<b", text, pc)[0]
-                pc += 1
-            else:
-                imm = 0
-            if mod == 3:  # register operand
-                ext = reg_ext & 7
-                if ext == 0:  # ADD r/m32, imm8
-                    insn.insn_id = _INS_ADD
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                    insn._regs_write = {rm}
-                elif ext == 1:  # OR r/m32, imm8
-                    insn.insn_id = _INS_OR
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                    insn._regs_write = {rm}
-                elif ext == 4:  # AND r/m32, imm8
-                    insn.insn_id = _INS_AND
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                    insn._regs_write = {rm}
-                elif ext == 5:  # SUB r/m32, imm8
-                    insn.insn_id = _INS_SUB
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                    insn._regs_write = {rm}
-                elif ext == 7:  # CMP r/m32, imm8
-                    insn.insn_id = _INS_CMP
-                    insn.operands = [
-                        _Operand(_OP_REG, rm, size=4),
-                        _Operand(_OP_IMM, imm=imm, size=4),
-                    ]
-                    insn._regs_read = {rm}
-                else:
-                    insn.insn_id = _INS_OTHER
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 39 / 3B — CMP r/m, r / CMP r, r/m
-        if opbyte in (0x39, 0x3B):
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod == 3:  # register-register
-                insn.insn_id = _INS_CMP
-                if opbyte == 0x39:
-                    # CMP r/m32, r32 — reg is source, rm is destination (read)
-                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
-                else:
-                    # CMP r32, r/m32 — reg is destination (read), rm is source (read)
-                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
-                insn._regs_read = {reg, rm}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 33 / 31 — XOR r, r/m / XOR r/m, r
-        if opbyte in (0x33, 0x31):
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod == 3:  # register-register
-                insn.insn_id = _INS_XOR
-                if opbyte == 0x33:
-                    # XOR r32, r/m32 — reg is destination (written)
-                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {reg}
-                else:
-                    # XOR r/m32, r32 — rm is destination (written)
-                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {rm}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 01 / 03 — ADD r/m32, r32 / ADD r32, r/m32
-        if opbyte in (0x01, 0x03):
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod == 3:
-                insn.insn_id = _INS_ADD
-                if opbyte == 0x01:
-                    # ADD r/m32, r32
-                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {rm}
-                else:
-                    # ADD r32, r/m32
-                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {reg}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 09 / 0B — OR r/m32, r32 / OR r32, r/m32
-        if opbyte in (0x09, 0x0B):
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod == 3:
-                insn.insn_id = _INS_OR
-                if opbyte == 0x09:
-                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {rm}
-                else:
-                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {reg}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 21 / 23 — AND r/m32, r32 / AND r32, r/m32
-        if opbyte in (0x21, 0x23):
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod == 3:
-                insn.insn_id = _INS_AND
-                if opbyte == 0x21:
-                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {rm}
-                else:
-                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {reg}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 29 / 2B — SUB r/m32, r32 / SUB r32, r/m32
-        if opbyte in (0x29, 0x2B):
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod == 3:
-                insn.insn_id = _INS_SUB
-                if opbyte == 0x29:
-                    insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {rm}
-                else:
-                    insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
-                    insn._regs_read = {reg, rm}
-                    insn._regs_write = {reg}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 85 — TEST r/m32, r32 (like AND, but read-only — flags only)
-        if opbyte == 0x85:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod == 3:
-                insn.insn_id = _INS_TEST
-                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
-                insn._regs_read = {reg, rm}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # C7 /0 — MOV r/m32, imm32
-        if opbyte == 0xC7:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg_ext, rm, has_sib, sib_byte = result
-            if pc + 4 <= n:
-                imm = struct.unpack_from("<i", text, pc)[0]
-                pc += 4
-            else:
-                imm = 0
-            if mod == 3 and (reg_ext & 7) == 0:  # MOV r/m32, imm32
-                insn.insn_id = _INS_MOV
-                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_IMM, imm=imm, size=4)]
-                insn._regs_write = {rm}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 8D — LEA r, m
-        if opbyte == 0x8D:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod != 3:  # memory operand
-                insn.insn_id = _INS_LEA
-                mem_op = _Operand(_OP_MEM, size=8)
-                mem_op.base = rm if mod != 3 else -1
-                insn.operands = [_Operand(_OP_REG, reg, size=8), mem_op]
-                insn._regs_write = {reg}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # FF — various (CALL r/m, JMP r/m, etc.)
-        if opbyte == 0xFF:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg_ext, rm, has_sib, sib_byte = result
-            ext = reg_ext & 7
-            if ext == 2:  # CALL r/m
-                insn.insn_id = _INS_CALL
-                insn.groups = {_GRP_CALL}
-                if mod == 3:
-                    insn.operands = [_Operand(_OP_REG, rm, size=8)]
-                    insn._regs_read = {rm}
-            elif ext == 4:  # JMP r/m
-                insn.insn_id = _INS_JMP
-                insn.groups = {_GRP_JUMP}
-                if mod == 3:
-                    insn.operands = [_Operand(_OP_REG, rm, size=8)]
-                    insn._regs_read = {rm}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 89 — MOV r/m32, r32 (register-to-register copy)
-        if opbyte == 0x89:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod == 3:  # MOV rm32, r32
-                insn.insn_id = _INS_MOV
-                insn.operands = [_Operand(_OP_REG, rm, size=4), _Operand(_OP_REG, reg, size=4)]
-                insn._regs_read = {reg}
-                insn._regs_write = {rm}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
-        # 8B — MOV r32, r/m32 (register-to-register copy)
-        if opbyte == 0x8B:
-            result = _decode_modrm()
-            if result is None:
-                insn.insn_id = _INS_OTHER
-                insn.length = pc - start
-                yield insn
-                continue
-            mod, reg, rm, has_sib, sib_byte = result
-            if mod == 3:  # MOV reg32, rm32
-                insn.insn_id = _INS_MOV
-                insn.operands = [_Operand(_OP_REG, reg, size=4), _Operand(_OP_REG, rm, size=4)]
-                insn._regs_read = {rm}
-                insn._regs_write = {reg}
-            else:
-                insn.insn_id = _INS_OTHER
-            insn.length = pc - start
-            yield insn
-            continue
-
         # Unrecognized — consume what was actually read (incl. any
         # prefixes).  Hardcoding 1 here misreports REX/legacy-prefixed
         # unknowns (e.g. "41 57" push r15) as length 1, which shifts
         # every subsequent block boundary in CFG analysis.
-        insn.insn_id = _INS_OTHER
+        insn = _DisasmInsn(address=base_addr + start, bytes=text[start:pc])
+        handler = dispatch[opbyte]
+        if handler is not None:
+            pc = handler(text, n, pc, start, opbyte, rex, insn)
         insn.length = pc - start
         yield insn
 
 
-def _symbol_names(target: str) -> list[str]:
-    """Return every name in the ELF .symtab and .dynsym. Empty list when unreadable.
+def _elf64_le(elf: bytes) -> bool:
+    """True for a full-header ELF64 little-endian image."""
+    return len(elf) >= 64 and elf[:4] == b"\x7fELF" and elf[4] == 2 and elf[5] == 1
 
-    Shared by parse_sancov_offsets() and detect_ctx_bits(); both need a
-    symbol-name scan and neither needs anything else from the ELF.
+
+def _sym_sections(elf: bytes) -> tuple | None:
+    """Section-header offsets of (.symtab, .strtab, .dynsym, .dynstr).
+
+    Missing sections are None; returns None when the section table is
+    empty or e_shstrndx is out of range.
     """
-    out: list[str] = []
-    with open(target, "rb") as f:
-        elf = f.read()
-    if len(elf) < 64 or elf[:4] != b"\x7fELF":
-        return out
-    if elf[4] != 2 or elf[5] != 1:  # ELF64, little-endian
-        return out
     e_shoff = struct.unpack_from("<Q", elf, 40)[0]
     e_shnum = struct.unpack_from("<H", elf, 60)[0]
     e_shentsize = struct.unpack_from("<H", elf, 58)[0]
     e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
     if e_shnum == 0 or e_shstrndx >= e_shnum:
-        return out
+        return None
     shstr_off = e_shoff + e_shstrndx * e_shentsize
     shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
     symtab_sec = strtab_sec = dynsym_sec = dynstr_sec = None
@@ -968,38 +578,78 @@ def _symbol_names(target: str) -> list[str]:
             dynsym_sec = sh
         elif sh_type == 3 and name == b".dynstr":
             dynstr_sec = sh
+    return symtab_sec, strtab_sec, dynsym_sec, dynstr_sec
 
-    def _read_names(sym_sec: int | None, str_sec: int | None) -> list[str]:
-        if sym_sec is None or str_sec is None:
-            return []
-        sym_offset = struct.unpack_from("<Q", elf, sym_sec + 24)[0]
-        sym_size = struct.unpack_from("<Q", elf, sym_sec + 32)[0]
-        sym_entsize = struct.unpack_from("<Q", elf, sym_sec + 56)[0]
-        if sym_entsize == 0:
-            return []
-        strtab_offset = struct.unpack_from("<Q", elf, str_sec + 24)[0]
-        names: list[str] = []
-        for i in range(sym_size // sym_entsize):
-            sym = sym_offset + i * sym_entsize
-            st_name_idx = struct.unpack_from("<I", elf, sym)[0]
-            names.append(
-                elf[strtab_offset + st_name_idx : strtab_offset + st_name_idx + 64]
-                .split(b"\x00")[0]
-                .decode(errors="replace")
-            )
-        return names
 
-    static_names = _read_names(symtab_sec, strtab_sec)
-    dynamic_names = _read_names(dynsym_sec, dynstr_sec)
-    out = static_names + dynamic_names
+def _read_sym_names(elf: bytes, sym_sec: int | None, str_sec: int | None) -> list[str]:
+    """Every symbol name in one symbol table; [] when either section is missing."""
+    if sym_sec is None or str_sec is None:
+        return []
+    sym_offset = struct.unpack_from("<Q", elf, sym_sec + 24)[0]
+    sym_size = struct.unpack_from("<Q", elf, sym_sec + 32)[0]
+    sym_entsize = struct.unpack_from("<Q", elf, sym_sec + 56)[0]
+    if sym_entsize == 0:
+        return []
+    strtab_offset = struct.unpack_from("<Q", elf, str_sec + 24)[0]
+    names: list[str] = []
+    for i in range(sym_size // sym_entsize):
+        sym = sym_offset + i * sym_entsize
+        st_name_idx = struct.unpack_from("<I", elf, sym)[0]
+        names.append(
+            elf[strtab_offset + st_name_idx : strtab_offset + st_name_idx + 64]
+            .split(b"\x00")[0]
+            .decode(errors="replace")
+        )
+    return names
+
+
+def _symbol_names(target: str) -> list[str]:
+    """Return every name in the ELF .symtab and .dynsym. Empty list when unreadable.
+
+    Shared by parse_sancov_offsets() and detect_ctx_bits(); both need a
+    symbol-name scan and neither needs anything else from the ELF.
+    """
+    with open(target, "rb") as f:
+        elf = f.read()
+    if not _elf64_le(elf):
+        return []
+    secs = _sym_sections(elf)
+    if secs is None:
+        return []
+    symtab_sec, strtab_sec, dynsym_sec, dynstr_sec = secs
+
+    static_names = _read_sym_names(elf, symtab_sec, strtab_sec)
+    dynamic_names = _read_sym_names(elf, dynsym_sec, dynstr_sec)
     # Deduplicate while preserving order
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for name in out:
-        if name not in seen:
-            seen.add(name)
-            deduped.append(name)
-    return deduped
+    return list(dict.fromkeys(static_names + dynamic_names))
+
+
+def _bounds_in_symtab(elf: bytes, symtab_sec: int, strtab_sec: int, start_sym: str, stop_sym: str):
+    """(start, stop) st_values of the two named symbols; None unless both are > 0."""
+    sym_offset = struct.unpack_from("<Q", elf, symtab_sec + 24)[0]
+    sym_size = struct.unpack_from("<Q", elf, symtab_sec + 32)[0]
+    sym_entsize = struct.unpack_from("<Q", elf, symtab_sec + 56)[0]
+    if sym_entsize == 0:
+        return None
+    sym_count = sym_size // sym_entsize
+    strtab_offset = struct.unpack_from("<Q", elf, strtab_sec + 24)[0]
+    start_addr = stop_addr = None
+    for i in range(sym_count):
+        sym = sym_offset + i * sym_entsize
+        st_value = struct.unpack_from("<Q", elf, sym + 8)[0]
+        st_name_idx = struct.unpack_from("<I", elf, sym)[0]
+        name = (
+            elf[strtab_offset + st_name_idx : strtab_offset + st_name_idx + 64]
+            .split(b"\x00")[0]
+            .decode(errors="replace")
+        )
+        if name == start_sym and st_value > 0:
+            start_addr = st_value
+        elif name == stop_sym and st_value > 0:
+            stop_addr = st_value
+    if start_addr is not None and stop_addr is not None:
+        return (start_addr, stop_addr)
+    return None
 
 
 def _sancov_section_bounds(target: str, section: str) -> tuple[int, int] | None:
@@ -1022,55 +672,12 @@ def _sancov_section_bounds(target: str, section: str) -> tuple[int, int] | None:
     try:
         with open(target, "rb") as f:
             elf = f.read()
-        if len(elf) < 64 or elf[:4] != b"\x7fELF":
+        if not _elf64_le(elf):
             return None
-        if elf[4] != 2 or elf[5] != 1:  # ELF64, little-endian
+        secs = _sym_sections(elf)
+        if secs is None or secs[0] is None or secs[1] is None:
             return None
-        e_shoff = struct.unpack_from("<Q", elf, 40)[0]
-        e_shnum = struct.unpack_from("<H", elf, 60)[0]
-        e_shentsize = struct.unpack_from("<H", elf, 58)[0]
-        e_shstrndx = struct.unpack_from("<H", elf, 62)[0]
-        if e_shnum == 0 or e_shstrndx >= e_shnum:
-            return None
-        shstr_off = e_shoff + e_shstrndx * e_shentsize
-        shstr_offset = struct.unpack_from("<Q", elf, shstr_off + 24)[0]
-        symtab_sec = strtab_sec = None
-        for i in range(e_shnum):
-            sh = e_shoff + i * e_shentsize
-            sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
-            sh_name_idx = struct.unpack_from("<I", elf, sh)[0]
-            name = elf[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(b"\x00")[
-                0
-            ]
-            if sh_type == 2:
-                symtab_sec = sh
-            elif sh_type == 3 and name == b".strtab":
-                strtab_sec = sh
-        if symtab_sec is None or strtab_sec is None:
-            return None
-        sym_offset = struct.unpack_from("<Q", elf, symtab_sec + 24)[0]
-        sym_size = struct.unpack_from("<Q", elf, symtab_sec + 32)[0]
-        sym_entsize = struct.unpack_from("<Q", elf, symtab_sec + 56)[0]
-        if sym_entsize == 0:
-            return None
-        sym_count = sym_size // sym_entsize
-        strtab_offset = struct.unpack_from("<Q", elf, strtab_sec + 24)[0]
-        start_addr = stop_addr = None
-        for i in range(sym_count):
-            sym = sym_offset + i * sym_entsize
-            st_value = struct.unpack_from("<Q", elf, sym + 8)[0]
-            st_name_idx = struct.unpack_from("<I", elf, sym)[0]
-            name = (
-                elf[strtab_offset + st_name_idx : strtab_offset + st_name_idx + 64]
-                .split(b"\x00")[0]
-                .decode(errors="replace")
-            )
-            if name == start_sym and st_value > 0:
-                start_addr = st_value
-            elif name == stop_sym and st_value > 0:
-                stop_addr = st_value
-        if start_addr is not None and stop_addr is not None:
-            return (start_addr, stop_addr)
+        return _bounds_in_symtab(elf, secs[0], secs[1], start_sym, stop_sym)
     except Exception as e:
         log.debug("ELF parse failed: %s", e)
     return None
@@ -1151,6 +758,26 @@ def sancov_guard_status(target: str) -> str:
     return "absent"
 
 
+def _gnu_build_id_note(elf: bytes, pos: int, note_end: int) -> bytes | None:
+    """Scan one PT_NOTE range [pos, note_end) for the GNU build-id descriptor."""
+    # Note triplets are 4-aligned: namesz, descsz, type, name,
+    # desc. Malformed lengths must not loop forever — bound each
+    # step to leave at least the 12-byte header.
+    while pos + 12 <= note_end:
+        namesz = struct.unpack_from("<I", elf, pos)[0]
+        descsz = struct.unpack_from("<I", elf, pos + 4)[0]
+        ntype = struct.unpack_from("<I", elf, pos + 8)[0]
+        name_off = pos + 12
+        desc_off = name_off + (namesz + 3) & ~3
+        next_pos = desc_off + (descsz + 3) & ~3
+        if namesz == 0 or descsz <= 0 or desc_off + descsz > note_end or next_pos <= pos:
+            break
+        if ntype == 3 and elf[name_off : name_off + namesz] == b"GNU\x00":
+            return bytes(elf[desc_off : desc_off + descsz])
+        pos = next_pos
+    return None
+
+
 def build_id(target: str) -> bytes | None:
     """NT_GNU_BUILD_ID note contents, or None when absent/unparseable.
 
@@ -1162,9 +789,7 @@ def build_id(target: str) -> bytes | None:
     try:
         with open(target, "rb") as f:
             elf = f.read()
-        if len(elf) < 64 or elf[:4] != b"\x7fELF":
-            return None
-        if elf[4] != 2 or elf[5] != 1:  # ELF64, little-endian
+        if not _elf64_le(elf):
             return None
         e_phoff = struct.unpack_from("<Q", elf, 32)[0]
         e_phentsize = struct.unpack_from("<H", elf, 54)[0]
@@ -1178,23 +803,9 @@ def build_id(target: str) -> bytes | None:
                 continue
             p_offset = struct.unpack_from("<Q", elf, ph + 8)[0]
             p_filesz = struct.unpack_from("<Q", elf, ph + 32)[0]
-            note_end = min(p_offset + p_filesz, len(elf))
-            pos = p_offset
-            # Note triplets are 4-aligned: namesz, descsz, type, name,
-            # desc. Malformed lengths must not loop forever — bound each
-            # step to leave at least the 12-byte header.
-            while pos + 12 <= note_end:
-                namesz = struct.unpack_from("<I", elf, pos)[0]
-                descsz = struct.unpack_from("<I", elf, pos + 4)[0]
-                ntype = struct.unpack_from("<I", elf, pos + 8)[0]
-                name_off = pos + 12
-                desc_off = name_off + (namesz + 3) & ~3
-                next_pos = desc_off + (descsz + 3) & ~3
-                if namesz == 0 or descsz <= 0 or desc_off + descsz > note_end or next_pos <= pos:
-                    break
-                if ntype == 3 and elf[name_off : name_off + namesz] == b"GNU\x00":
-                    return bytes(elf[desc_off : desc_off + descsz])
-                pos = next_pos
+            desc = _gnu_build_id_note(elf, p_offset, min(p_offset + p_filesz, len(elf)))
+            if desc is not None:
+                return desc
     except OSError as e:
         log.debug("build_id read failed: %s", e)
     return None
@@ -1440,6 +1051,34 @@ def _find_text_section(elf: bytes) -> tuple[bytes, int, int] | None:
     return None
 
 
+def _word_is_noise(value: int, width: int) -> bool:
+    """True when a data word is not worth a dictionary token.
+
+    A 64-bit window that straddles noise u32 words (counters, -1 halves)
+    yields a padded garbage token; keep only words whose two 32-bit halves
+    are individually interesting.
+    """
+    if width == 8:
+        lo, hi = value & 0xFFFFFFFF, value >> 32
+        if lo == 0 or hi == 0:
+            return True
+        return _is_noise_immediate(lo, 4) or _is_noise_immediate(hi, 4)
+    return value == 0 or _is_noise_immediate(value, width)
+
+
+def _collect_words(section: bytes, size: int, words: set[int]) -> None:
+    """Add every aligned non-noise u64 then u32 of *section* to *words* (capped)."""
+    for width in (8, 4):  # u64 first, then u32, like honggfuzz
+        n_words = size // width
+        for i in range(min(n_words, _DATA_WORD_COLLECT_CAP)):
+            value = struct.unpack_from("<Q" if width == 8 else "<I", section, i * width)[0]
+            if _word_is_noise(value, width):
+                continue
+            words.add(value)
+        if len(words) >= _DATA_WORD_COLLECT_CAP:
+            break
+
+
 def extract_data_word_constants(target: str) -> list[bytes]:
     """Extract literal word constants from rodata/.data as little-endian bytes.
 
@@ -1470,25 +1109,7 @@ def extract_data_word_constants(target: str) -> list[bytes]:
             continue
         if size <= 0 or offset > len(elf):
             continue
-        section = elf[offset : offset + size]
-        for width in (8, 4):  # u64 first, then u32, like honggfuzz
-            n_words = size // width
-            for i in range(min(n_words, _DATA_WORD_COLLECT_CAP)):
-                value = struct.unpack_from("<Q" if width == 8 else "<I", section, i * width)[0]
-                if width == 8:
-                    # A 64-bit window that straddles noise u32 words (counters,
-                    # -1 halves) yields a padded garbage token; keep only words
-                    # whose two 32-bit halves are individually interesting.
-                    lo, hi = value & 0xFFFFFFFF, value >> 32
-                    if lo == 0 or hi == 0:
-                        continue
-                    if _is_noise_immediate(lo, 4) or _is_noise_immediate(hi, 4):
-                        continue
-                elif value == 0 or _is_noise_immediate(value, width):
-                    continue
-                words.add(value)
-            if len(words) >= _DATA_WORD_COLLECT_CAP:
-                break
+        _collect_words(elf[offset : offset + size], size, words)
 
     if not words:
         return []
@@ -1621,6 +1242,31 @@ def _next_power_of_2(n: int) -> int:
     return n + 1
 
 
+def _first_imm(insn: _DisasmInsn) -> tuple[int, int] | None:
+    """(value, byte width) of the first immediate operand, or None."""
+    for op in insn.operands:
+        if op.type == _OP_IMM:
+            return op.imm, op.size or _guess_imm_width(op.imm)
+    return None
+
+
+def _add_imm_constants(constants: set[bytes], imm_value: int, imm_size: int) -> None:
+    """Pack an immediate little-endian at its width, plus 2/4-byte sub-words."""
+    unsigned = imm_value & ((1 << (imm_size * 8)) - 1)
+    packed = unsigned.to_bytes(imm_size, "little")
+    if len(packed) >= 2:  # skip single-byte constants (too noisy)
+        _maybe_add_constant(constants, packed)
+
+    # Also add sub-words (2-byte and 4-byte slices) for patterns
+    # that contain embedded ASCII
+    if len(packed) > 4:
+        _maybe_add_constant(constants, packed[:4])
+        _maybe_add_constant(constants, packed[4:])
+    if len(packed) > 2:
+        _maybe_add_constant(constants, packed[:2])
+        _maybe_add_constant(constants, packed[2:4] if len(packed) >= 4 else b"")
+
+
 def extract_constants_pure(target: str) -> list[bytes]:
     """Extract compile-time constants from disassembly using pure-Python decoder.
 
@@ -1667,19 +1313,10 @@ def extract_constants_pure(target: str) -> list[bytes]:
     constants: set[bytes] = set()
 
     for insn in _decode_x86_64(text_data, text_vaddr):
-        has_imm = False
-        imm_value = 0
-        imm_size = 0
-
-        for op in insn.operands:
-            if op.type == _OP_IMM:
-                has_imm = True
-                imm_value = op.imm
-                imm_size = op.size or _guess_imm_width(imm_value)
-                break
-
-        if not has_imm:
+        imm = _first_imm(insn)
+        if imm is None:
             continue
+        imm_value, imm_size = imm
 
         # Skip small/noise immediates
         if imm_size <= 0 or imm_size > 8:
@@ -1690,20 +1327,7 @@ def extract_constants_pure(target: str) -> list[bytes]:
             continue
 
         if insn.insn_id in TARGET_IDS:
-            # Pack as little-endian bytes of the operand width
-            unsigned = imm_value & ((1 << (imm_size * 8)) - 1)
-            packed = unsigned.to_bytes(imm_size, "little")
-            if len(packed) >= 2:  # skip single-byte constants (too noisy)
-                _maybe_add_constant(constants, packed)
-
-            # Also add sub-words (2-byte and 4-byte slices) for patterns
-            # that contain embedded ASCII
-            if len(packed) > 4:
-                _maybe_add_constant(constants, packed[:4])
-                _maybe_add_constant(constants, packed[4:])
-            if len(packed) > 2:
-                _maybe_add_constant(constants, packed[:2])
-                _maybe_add_constant(constants, packed[2:4] if len(packed) >= 4 else b"")
+            _add_imm_constants(constants, imm_value, imm_size)
 
     # Cap at 256 entries to bound dictionary size
     result = list(constants)[:256]
@@ -2336,6 +1960,58 @@ def extract_div_constants(target: str) -> tuple[dict[int, int], set[int]]:
         return {}, set()
 
 
+def _track_rem_regs(insn: _DisasmInsn, regs_write, rem_regs: set[int], dx_family: set[int]):
+    """Propagate the set of registers holding a DIV remainder across *insn*."""
+    # 1) Remove registers overwritten by this instruction (preserve EDX)
+    for r in regs_write:
+        if r not in dx_family:
+            rem_regs.discard(r)
+    # 2) MOV dest, src where src carries the remainder → track dest too
+    if insn.insn_id == _INS_MOV and len(insn.operands) == 2:
+        d, s = insn.operands[0], insn.operands[1]
+        if d.type == _OP_REG and s.type == _OP_REG and s.reg in rem_regs:
+            rem_regs.add(d.reg)
+    # 3) DIV/IDIV puts the remainder in EDX
+    if insn.insn_id in (_INS_DIV, _INS_IDIV):
+        return set(dx_family)
+    return rem_regs
+
+
+def _div_divisor(op: _Operand, recent: list[tuple], reg_alias: dict[int, set[int]]):
+    """Constant divisor of a DIV/IDIV operand, or None when not static."""
+    # Method 1: immediate operand
+    if op.type == _OP_IMM:
+        return op.imm if 0 < op.imm <= 0xFFFFFFFF else None
+    if op.type != _OP_REG:
+        return None
+
+    # Method 2: register operand with backward scan to its last writer
+    div_reg = op.reg
+    div_reg_family = reg_alias.get(div_reg, {div_reg})
+    for prev_insn, prev_writes in reversed(recent[:-1]):
+        if _is_ctrl_flow(prev_insn):
+            return None
+        if prev_writes & div_reg_family:
+            candidate = _extract_imm(prev_insn)
+            if candidate is not None and 0 < candidate <= 0xFFFFFFFF:
+                return candidate
+            return None
+    return None
+
+
+def _mod_cmp_link(insn, recent, known_divs, div_map, weak_mod_pcs) -> None:
+    """Map a CMP on the remainder to the nearest preceding DIV's divisor."""
+    for prev_insn, _ in reversed(recent[:-1]):
+        if prev_insn.insn_id not in (_INS_DIV, _INS_IDIV):
+            continue
+        d = known_divs.get(prev_insn.address)
+        if d is not None:
+            div_map[insn.address] = d
+        else:
+            weak_mod_pcs.add(insn.address)
+        return
+
+
 def _extract_div_pure(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int], set[int]]:
     """extract_div_constants using the pure-Python decoder (no capstone)."""
     # Register alias map — in our pure encoding, each register ID IS its own alias
@@ -2358,18 +2034,7 @@ def _extract_div_pure(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int]
         regs_read, regs_write = insn.regs_access()
 
         # ── Track remainder register propagation ──
-        # 1) Remove registers overwritten by this instruction (preserve EDX)
-        for r in regs_write:
-            if r not in _dx_family:
-                _rem_regs.discard(r)
-        # 2) MOV dest, src where src carries the remainder → track dest too
-        if insn.insn_id == _INS_MOV and len(insn.operands) == 2:
-            d, s = insn.operands[0], insn.operands[1]
-            if d.type == _OP_REG and s.type == _OP_REG and s.reg in _rem_regs:
-                _rem_regs.add(d.reg)
-        # 3) DIV/IDIV puts the remainder in EDX
-        if insn.insn_id in (_INS_DIV, _INS_IDIV):
-            _rem_regs = set(_dx_family)
+        _rem_regs = _track_rem_regs(insn, regs_write, _rem_regs, _dx_family)
 
         recent.append((insn, set(regs_write)))
         if len(recent) > MAX_BACKWARD:
@@ -2377,30 +2042,9 @@ def _extract_div_pure(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int]
 
         # ── DIV/IDIV detection ──
         if insn.insn_id in (_INS_DIV, _INS_IDIV):
-            op = insn.operands[0] if insn.operands else None
-            if op is None:
+            if not insn.operands:
                 continue
-
-            divisor: int | None = None
-
-            # Method 1: immediate operand
-            if op.type == _OP_IMM:
-                if 0 < op.imm <= 0xFFFFFFFF:
-                    divisor = op.imm
-
-            # Method 2: register operand with backward scan
-            elif op.type == _OP_REG:
-                div_reg = op.reg
-                div_reg_family = reg_alias.get(div_reg, {div_reg})
-                for prev_insn, prev_writes in reversed(recent[:-1]):
-                    if _is_ctrl_flow(prev_insn):
-                        break
-                    if prev_writes & div_reg_family:
-                        candidate = _extract_imm(prev_insn)
-                        if candidate is not None and 0 < candidate <= 0xFFFFFFFF:
-                            divisor = candidate
-                        break
-
+            divisor = _div_divisor(insn.operands[0], recent, reg_alias)
             if divisor is not None:
                 div_map[insn.address] = divisor
                 _known_divs[insn.address] = divisor
@@ -2412,14 +2056,7 @@ def _extract_div_pure(text_data: bytes, text_vaddr: int) -> tuple[dict[int, int]
             and len(insn.operands) >= 2
             and any(op.type == _OP_REG and op.reg in _rem_regs for op in insn.operands)
         ):
-            for prev_insn, _ in reversed(recent[:-1]):
-                if prev_insn.insn_id in (_INS_DIV, _INS_IDIV):
-                    d = _known_divs.get(prev_insn.address)
-                    if d is not None:
-                        div_map[insn.address] = d
-                    else:
-                        weak_mod_pcs.add(insn.address)
-                    break
+            _mod_cmp_link(insn, recent, _known_divs, div_map, weak_mod_pcs)
 
     if div_map or weak_mod_pcs:
         log.info(
