@@ -141,7 +141,7 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 | Entropy-KL seeds | `--entropy-kl` | Seeds scored by KL divergence of their byte distribution from the corpus's pooled one |
 | Entropy z-score seeds | `--entropy-zscore` | Byte entropy read as a z-score against the corpus's own spread, self-calibrating instead of fixed thresholds |
 | Metropolis admission | `--metropolis` | Accept non-improving inputs with P = exp(−ΔE/T) |
-| Secretary stopping | `--secretary` | Optimal-stopping rule for seed/operator/corpus switching |
+| Secretary stopping | `--secretary` | Secretary-problem stopping ranks (display only) |
 | honggfuzz power factors | `--honggfuzz` | Novelty decay, freshness, fertility, density, entropy and timeout penalties |
 | AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD/GO/AFLGO/ENTROPIC seed-level energy |
 | AFLGo directed annealing | `--schedule aflgo` | Exact AFLGo power factor — symmetric 32×/1/32× energy by distance-to-target with time-based cooling (`--t-x`, `--aflgo-cooling`) |

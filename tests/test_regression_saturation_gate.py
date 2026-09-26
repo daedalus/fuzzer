@@ -125,7 +125,7 @@ class TestCachedWeightsAreFlushedOnFlip:
 
 class TestGateConsumerReadsTheFlag:
     def test_weight_helper_follows_the_gate_not_the_raw_estimate(self):
-        """_weight_secretary_and_cached used to test f._saturation >= 0.99
+        """_weight_cached used to test f._saturation >= 0.99
         directly, which bypasses both the staleness refresh and the stall
         override."""
         t = _tracker_with(1.0)
@@ -148,7 +148,7 @@ class TestGateConsumerReadsTheFlag:
         p = SeedPicker(f)
 
         assert p._saturation_gate() is False  # stalled: gate off
-        p._weight_secretary_and_cached("sk", 1.0, {}, f)
+        p._weight_cached("sk", 1.0, {}, f)
         assert calls["n"] == 1  # the real analysis ran
 
 
