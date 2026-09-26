@@ -585,6 +585,27 @@ class MinHashLSH:
                     sig[i] = h
         return sig
 
+    def update_signature(self, existing_sig: array | None, new_elements) -> array:
+        """Fold `new_elements` into `existing_sig` (elementwise minimum).
+
+        A MinHash signature is an elementwise min over hashes of set
+        members, so growing a set by `new_elements` only ever needs the
+        min of the current signature and the hashes of those new elements
+        -- never a recompute over the whole (and, for a long-lived seed,
+        much larger) accumulated set. `existing_sig=None` means "no prior
+        signature", equivalent to compute_signature(new_elements) alone.
+        """
+        new_sig = self.compute_signature(set(new_elements))
+        if existing_sig is None:
+            return new_sig
+        if self._coeffs_a_np is not None:
+            import numpy as _np
+
+            a = _np.frombuffer(existing_sig, dtype=_np.uint64)
+            b = _np.frombuffer(new_sig, dtype=_np.uint64)
+            return array("Q", _np.minimum(a, b))
+        return array("Q", (min(x, y) for x, y in zip(existing_sig, new_sig, strict=True)))
+
     def add(self, seed_key: str, sig: list[int] | array):
         """Add a seed's signature to the index."""
         self.signatures[seed_key] = sig if isinstance(sig, array) else array("Q", sig)
@@ -964,9 +985,19 @@ class EdgeTracker:
                 self.seed_target_edges[seed_key][target_name] = set()
             self.seed_target_edges[seed_key][target_name].update(new_edges)
 
-        # Update MinHash signature and LSH index
-        sig = self._minhash.compute_signature(self.seed_edges[seed_key])
-        self._minhash.add(seed_key, sig)
+        # Update MinHash signature and LSH index. Only the edges just added
+        # to this seed's own set can move its signature (elementwise min),
+        # so fold in `new_owners` instead of recomputing over the seed's
+        # whole accumulated edge set on every call -- and skip entirely
+        # when a re-executed seed contributes nothing new to itself.
+        if new_owners:
+            sig = self._minhash.update_signature(
+                self._minhash.signatures.get(seed_key), new_owners
+            )
+            self._minhash.add(seed_key, sig)
+        elif seed_key not in self._minhash.signatures:
+            sig = self._minhash.compute_signature(self.seed_edges[seed_key])
+            self._minhash.add(seed_key, sig)
 
         # Invalidate caches
         self._aggregate_cache = None
