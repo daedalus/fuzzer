@@ -670,7 +670,7 @@ def _active_position_schedulers(f) -> list[str]:
     Same gates as ``PositionArena._add_trackers`` and ``OperatorEngine.
     select_position``'s non-arena candidate list, so this reports
     accurately whether or not ``--position-arena`` itself is running --
-    sensitivity/te/phase/mi/crash_mi/region all reach select_position
+    sensitivity/te/phase/mi/crash_mi/region/field all reach select_position
     directly, arena or not. A plain function, not a Fuzzer method, so the
     startup-banner tests' bare stand-in objects (see
     test_regression_enabled_features_*.py) don't need to define it: every
@@ -690,6 +690,9 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("crash-mi")
     if getattr(f, "_use_region_profile", False):
         names.append("region")
+    fl = getattr(f, "_format_learner", None)
+    if fl and fl.clusters:
+        names.append("field")
     if getattr(f, "_burn_front", None) is not None:
         names.append("burn-front")
     if _pos_canary_live(f):

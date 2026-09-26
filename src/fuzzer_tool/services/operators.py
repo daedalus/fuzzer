@@ -5442,7 +5442,7 @@ class OperatorEngine:
         return mutant
 
     def select_position(self, buf: bytearray, data: bytes) -> int:
-        """Select a byte position for mutation using MI/TE/sensitivity/crash-MI/random."""
+        """Select a byte position using MI/TE/sensitivity/crash-MI/field/random."""
         f = self.f
         if not buf:
             return 0
@@ -5459,8 +5459,8 @@ class OperatorEngine:
         # the buffer; `get_phase_weighted_position` returns None otherwise.
         phase_pos = None if te_pos is None else _phase_position(f, data, buf_len)
         mi_pos = f._mi.weighted_position(buf_len) if f._use_mi and f._mi else None
-        sens_pos, crash_mi_pos, region_pos, burn_pos, rr_pos, fib_pos = self._side_positions(
-            data, buf_len
+        sens_pos, crash_mi_pos, region_pos, field_pos, burn_pos, rr_pos, fib_pos = (
+            self._side_positions(data, buf_len)
         )
         candidates = [
             p
@@ -5471,6 +5471,7 @@ class OperatorEngine:
                 mi_pos,
                 crash_mi_pos,
                 region_pos,
+                field_pos,
                 burn_pos,
                 rr_pos,
                 fib_pos,
@@ -5485,7 +5486,8 @@ class OperatorEngine:
             print(
                 f"[select_position] buf_len={buf_len} sens={sens_pos} te={te_pos} "
                 f"phase={phase_pos} "
-                f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} burn={burn_pos} "
+                f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} field={field_pos} "
+                f"burn={burn_pos} "
                 f"round_robin={rr_pos} fibonacci={fib_pos} "
                 f"candidates={candidates} fallback={not candidates} byte_idx={byte_idx}"
             )
@@ -5513,6 +5515,8 @@ class OperatorEngine:
             if getattr(f, "_use_region_profile", False)
             else None
         )
+        fl = getattr(f, "_format_learner", None)
+        field_pos = fl.weighted_position(data, buf_len) if fl else None
         burn = getattr(f, "_burn_front", None)
         burn_pos = (
             burn.propose(data, buf_len) if isinstance(burn, BurnFrontPositionScheduler) else None
@@ -5528,7 +5532,7 @@ class OperatorEngine:
         fib_pos = (
             fib.propose(data, buf_len) if isinstance(fib, PositionFibonacciScheduler) else None
         )
-        return sens_pos, crash_mi_pos, region_pos, burn_pos, rr_pos, fib_pos
+        return sens_pos, crash_mi_pos, region_pos, field_pos, burn_pos, rr_pos, fib_pos
 
     # ── Main mutation orchestrator ─────────────────────────────────────
 

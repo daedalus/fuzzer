@@ -1,6 +1,25 @@
 """Tests for format structure learner (schema-harness methodology)."""
 
-from fuzzer_tool.core.analyzers.analyzer_format_learner import FieldHypothesis, FormatLearner
+from fuzzer_tool.core.analyzers.analyzer_format_learner import (
+    FieldHypothesis,
+    FormatCluster,
+    FormatLearner,
+)
+
+
+class _StubRng:
+    """Deterministic duck-typed rng: scripted `random()` floats, `randint`
+    always returns the low end. Enough surface for `weighted_position`
+    (`.random()` and `.randint(a, b)`), no real RandPool needed."""
+
+    def __init__(self, values):
+        self._values = list(values)
+
+    def random(self) -> float:
+        return self._values.pop(0)
+
+    def randint(self, a: int, b: int) -> int:
+        return a
 
 
 class TestFormatLearnerInit:
@@ -619,3 +638,84 @@ class TestRecordLiveness:
         val2 = fl2.get_learned_value(0, 1)
         assert val == val2
         assert val == b"\x89"
+
+
+class TestClusterWeightedPosition:
+    def test_no_hypotheses_declines(self):
+        c = FormatCluster(signature="ab")
+        assert c.weighted_position(64, _StubRng([])) is None
+
+    def test_all_zero_confidence_declines(self):
+        c = FormatCluster(signature="ab")
+        c.hypotheses.append(FieldHypothesis(offset=0, width=1, field_type="unknown"))
+        c.hypotheses[0].confidence = 0.0
+        assert c.weighted_position(64, _StubRng([])) is None
+
+    def test_offset_past_buf_len_is_excluded(self):
+        c = FormatCluster(signature="ab")
+        c.hypotheses.append(FieldHypothesis(offset=100, width=4, field_type="unknown"))
+        assert c.weighted_position(64, _StubRng([])) is None
+
+    def test_roulette_picks_the_only_candidate(self):
+        c = FormatCluster(signature="ab")
+        c.hypotheses.append(FieldHypothesis(offset=8, width=4, field_type="length"))
+        c.hypotheses[0].confidence = 0.3
+        # random()=0.5 * total(0.3) = 0.15; r -= 0.3 -> <=0 on the first
+        # (only) candidate. randint always returns the low end (offset 8).
+        assert c.weighted_position(64, _StubRng([0.5])) == 8
+
+    def test_roulette_weights_by_confidence(self):
+        c = FormatCluster(signature="ab")
+        # Low-confidence field first, high-confidence field second.
+        c.hypotheses.append(FieldHypothesis(offset=0, width=1, field_type="unknown"))
+        c.hypotheses[0].confidence = 0.1
+        c.hypotheses.append(FieldHypothesis(offset=20, width=1, field_type="length"))
+        c.hypotheses[1].confidence = 0.9
+        # total = 1.0. random()=0.05 -> r=0.05; r -= 0.1 = -0.05 <= 0 ->
+        # first candidate (offset 0) wins.
+        assert c.weighted_position(64, _StubRng([0.05])) == 0
+        # random()=0.5 -> r=0.5; r -= 0.1 = 0.4 (still > 0, keep going);
+        # r -= 0.9 = -0.5 <= 0 -> second candidate (offset 20) wins.
+        assert c.weighted_position(64, _StubRng([0.5])) == 20
+
+    def test_width_is_clamped_to_the_buffer(self):
+        c = FormatCluster(signature="ab")
+        c.hypotheses.append(FieldHypothesis(offset=60, width=10, field_type="unknown"))
+        c.hypotheses[0].confidence = 0.3
+        # buf_len=64: width clamps from 10 to 4 (64-60), randint(0, 3) -> 0
+        # via the stub's low-end rule, so offset stays 60, not out of range.
+        assert c.weighted_position(64, _StubRng([0.5])) == 60
+
+
+class TestLearnerWeightedPosition:
+    def test_declines_with_no_clusters(self):
+        fl = FormatLearner()
+        assert fl.weighted_position(b"\x89PNG", 64) is None
+
+    def test_routes_to_the_matching_cluster_not_the_primary(self):
+        fl = FormatLearner()
+        fl._rng = _StubRng([0.5, 0.5])
+        primary = FormatCluster(signature="")
+        primary.hypotheses.append(FieldHypothesis(offset=0, width=1, field_type="unknown"))
+        primary.hypotheses[0].confidence = 0.3
+        seed = b"PNG\x00"
+        sig = FormatLearner.format_signature(seed, fl.sig_len)
+        other = FormatCluster(signature=sig)
+        other.hypotheses.append(FieldHypothesis(offset=5, width=1, field_type="length"))
+        other.hypotheses[0].confidence = 0.3
+        fl.clusters[""] = primary
+        fl.clusters[sig] = other
+        # A seed whose signature matches "other" must draw from its
+        # hypotheses, not silently fall back to whichever cluster is
+        # primary_cluster -- otherwise a multi-format target's proposals
+        # would cross-contaminate between unrelated formats.
+        assert fl.weighted_position(seed, 64) == 5
+
+    def test_falls_back_to_primary_cluster_for_an_unknown_signature(self):
+        fl = FormatLearner()
+        fl._rng = _StubRng([0.5])
+        primary = FormatCluster(signature="")
+        primary.hypotheses.append(FieldHypothesis(offset=3, width=1, field_type="unknown"))
+        primary.hypotheses[0].confidence = 0.3
+        fl.clusters[""] = primary
+        assert fl.weighted_position(b"\xff\xff\xff\xff", 64) == 3
