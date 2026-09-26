@@ -356,9 +356,27 @@ class TestPositionFibonacci:
     def test_empty_buffer_declines(self):
         assert PositionFibonacciScheduler().propose(b"", 0) is None
 
-    def test_empty_seed_with_live_buffer_proposes_zero(self):
+    def test_regression_shrunk_buffer_does_not_pile_on_last_byte(self):
+        # Bins sized from the parent seed, clamped to a shrunk buffer, sent
+        # ~99% of picks to buf_len-1 (paired png run: 5/20 cells collapsed).
         s = PositionFibonacciScheduler()
-        assert [s.propose(b"", 4) for _ in range(3)] == [0, 0, 0]
+        buf_len, k = 10, 100
+        picks = [s.propose(SEED, buf_len) for _ in range(k)]
+        assert set(picks) == set(range(buf_len))
+        assert picks.count(buf_len - 1) <= 2 * k // buf_len
+
+    def test_grown_buffer_reaches_past_the_seed(self):
+        # Adversarial: bins sized from the seed never reach inserted tail bytes.
+        s = PositionFibonacciScheduler()
+        grown = 2 * len(SEED)
+        assert max(s.propose(SEED, grown) for _ in range(16)) >= len(SEED)
+
+    def test_empty_seed_with_live_buffer_proposes_zero(self):
+        # Zero first; bins follow the live buffer, so an empty parent still
+        # sweeps it rather than pinning every pick to 0.
+        s = PositionFibonacciScheduler()
+        picks = [s.propose(b"", 4) for _ in range(3)]
+        assert picks == [int((n * INV_PHI) % 1.0 * 4) for n in range(3)]
 
     def test_record_does_not_perturb_the_sequence(self):
         a, b = PositionFibonacciScheduler(), PositionFibonacciScheduler()
