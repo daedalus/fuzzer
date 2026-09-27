@@ -681,6 +681,7 @@ def cmd_fuzz(args):
         op_tang_rank=getattr(args, "op_tang_rank", 10),
         op_tang_refit_interval=getattr(args, "op_tang_refit_interval", 2000),
         op_kruskal_count=getattr(args, "op_kruskal_count", False),
+        op_firefly=getattr(args, "op_firefly", False),
         op_credit=getattr(args, "op_credit", False),
         op_tpe=getattr(args, "op_tpe", False),
         op_strata=getattr(args, "op_strata", False),
@@ -2011,6 +2012,7 @@ _HAIL_MARY_FLAGS = (
     "op_kuramoto",
     "op_tang",
     "op_kruskal_count",
+    "op_firefly",
     "op_credit",
     "op_tpe",
     "op_strata",
@@ -3021,6 +3023,20 @@ def main() -> int:
             "core/schedulers/op_kruskal_count.py for the design and the "
             "same 'unproven arm' caveat op_katz/op_tang carry, before "
             "using this on a real campaign)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-firefly",
+        action="store_true",
+        help=(
+            "Enable the Firefly Algorithm operator scheduler (FA-Fuzz, "
+            "IEEE 2023, ieeexplore.ieee.org/document/10305545): fireflies "
+            "-- candidate operator-probability distributions -- move "
+            "toward brighter neighbours instead of MOpt's PSO "
+            "velocity/inertia (experimental, off by default, Elo-only -- "
+            "see core/schedulers/op_firefly.py for the design and the "
+            "same 'unproven arm' caveat op_katz/op_tang/op_kruskal_count "
+            "carry, before using this on a real campaign)"
         ),
     )
     fuzz_parser.add_argument(

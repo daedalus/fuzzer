@@ -57,6 +57,7 @@ BALLOT_SCHEDULERS = (
     "op_credit",
     "op_katz",
     "op_kuramoto",
+    "op_firefly",
     "op_kruskal_count",
     "op_tang",
     "op_tpe",

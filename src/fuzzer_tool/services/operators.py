@@ -649,9 +649,9 @@ _FALLBACK_PRECEDENCE = (
     "fpl",
     "successive_elim",
     "round_robin",
-    # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_tpe, op_strata, gradient,
-    # whittle, corral are deliberately absent here: they are unproven
-    # exploratory arms
+    # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
+    # op_tpe, op_strata, gradient, whittle, corral are deliberately absent
+    # here: they are unproven exploratory arms
     # (see their module docstrings) that should only ever be reached via
     # Elo explicitly choosing them, not by being the top-precedence live
     # selector whenever someone enables the flag without --elo -- the same
@@ -677,7 +677,11 @@ _FALLBACK_PRECEDENCE = (
     # behave anything like coupled phase oscillators is an open empirical
     # question this arm exists to test, not a settled premise (see
     # core/schedulers/op_kuramoto.py), and it has not been run against the
-    # convergence harness or a real bench_paired A/B at all yet.
+    # convergence harness or a real bench_paired A/B at all yet. op_firefly
+    # carries the same caveat: whether firefly attraction says anything
+    # useful about operator scheduling that MOpt's PSO does not is an open
+    # empirical question (see core/schedulers/op_firefly.py), untested
+    # against the convergence harness or a real bench_paired A/B.
 )
 
 
@@ -778,6 +782,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_tang")
     if f._use_op_kruskal_count and f._op_kruskal_count:
         available.append("op_kruskal_count")
+    if f._use_op_firefly and f._op_firefly:
+        available.append("op_firefly")
     # Leaves the ballot while the preflight gate is closed: under per-process ids
     # every phantom id is a "discovery", and credit for those is noise (F1, F11).
     if f._use_op_credit and f._op_credit and f._op_credit.available():
@@ -5123,6 +5129,15 @@ class OperatorEngine:
         elif strategy == "op_kruskal_count" and f._op_kruskal_count:
             op = f._op_kruskal_count.select_op(ops)
             f._last_mopt_particles.append(None)
+        elif strategy == "op_firefly" and f._op_firefly:
+            # Firefly is the second swarm-style scheduler after mopt: it
+            # also needs the id of the firefly that drew each op, so it
+            # reuses the same polymorphic list mopt does -- only one
+            # swarm-attributed scheduler is ever the active strategy in a
+            # given round, so the list never holds two different meanings
+            # at once.
+            op, fid = f._op_firefly.select_op(ops)
+            f._last_mopt_particles.append(fid)
         elif strategy == "op_credit" and f._op_credit:
             op = f._op_credit.select_op(ops)
             f._last_mopt_particles.append(None)

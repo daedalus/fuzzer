@@ -1238,6 +1238,7 @@ class Fuzzer:
         op_tang_rank=10,
         op_tang_refit_interval=2000,
         op_kruskal_count=False,
+        op_firefly=False,
         op_credit=False,
         op_tpe=False,
         op_strata=False,
@@ -2921,6 +2922,21 @@ class Fuzzer:
             self._op_kruskal_count = OpKruskalCountScheduler(rng=self._rng)
             log.info("op_kruskal_count enabled")
 
+        # Firefly Algorithm over operator probability distributions
+        # (FA-Fuzz, IEEE 2023, document/10305545). Off by default: see
+        # core/schedulers/op_firefly.py's module docstring -- unproven
+        # exploratory arm, same posture as op_katz/op_tang/op_kruskal_count
+        # above, and needs the particle-style attribution MOpt uses (see
+        # the record() dispatch fan-out below), not the plain
+        # record(op, success, weight) signature the schedulers above share.
+        self._use_op_firefly = op_firefly
+        self._op_firefly = None
+        if op_firefly:
+            from fuzzer_tool.core.schedulers.op_firefly import OpFireflyScheduler
+
+            self._op_firefly = OpFireflyScheduler(rng=self._rng)
+            log.info("op_firefly enabled (5 fireflies, window=200)")
+
         # Stratified Thompson over (op, family) cells (strata §3.4). Off by
         # default, Elo-only; see core/schedulers/op_strata.py.
         self._use_op_strata = op_strata
@@ -3428,6 +3444,8 @@ class Fuzzer:
             _register_arms(self.mc, _format_priors)
         if self._mopt:
             _register_arms(self._mopt)
+        if self._op_firefly:
+            _register_arms(self._op_firefly)
         if self._cmaes:
             _register_arms(self._cmaes)
         if self._replicator:
@@ -6277,6 +6295,21 @@ class Fuzzer:
                 if op not in seen and op in rewards_by_op:
                     ok, w = rewards_by_op[op]
                     self._mopt.record(op, ok, particle_id=pid, weight=w)
+                    seen.add(op)
+
+        if self._op_firefly and selector == "op_firefly":
+            # Same reasoning as MOpt just above: firefly needs the id of
+            # the firefly that drew each op, not a broadcast record() over
+            # every firefly, or fitness-proportional selection could never
+            # differentiate them. It reuses the same _last_mopt_particles
+            # list select_op() populated with firefly ids for this round
+            # (see operators.py's dispatch chain).
+            rewards_by_op = {op: (ok, w) for op, ok, w in op_rewards}
+            seen = set()
+            for op, fid in zip(self._last_ops_used, self._last_mopt_particles, strict=False):
+                if op not in seen and op in rewards_by_op:
+                    ok, w = rewards_by_op[op]
+                    self._op_firefly.record(op, ok, firefly_id=fid, weight=w)
                     seen.add(op)
 
         # Schedulers sharing the record(op, success, weight=...) signature.

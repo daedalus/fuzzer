@@ -149,6 +149,7 @@ class _FakeFuzzer:
         "op_kuramoto": ("_use_op_kuramoto", "_op_kuramoto"),
         "op_tang": ("_use_op_tang", "_op_tang"),
         "op_kruskal_count": ("_use_op_kruskal_count", "_op_kruskal_count"),
+        "op_firefly": ("_use_op_firefly", "_op_firefly"),
         "op_credit": ("_use_op_credit", "_op_credit"),
         "op_tpe": ("_use_op_tpe", "_op_tpe"),
         "op_strata": ("_use_op_strata", "_op_strata"),
