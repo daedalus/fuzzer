@@ -4676,6 +4676,35 @@ class Fuzzer:
     def _auto_minimize_corpus(self):
         return self._corpus_manager.auto_minimize_corpus()
 
+    def _maybe_periodic_minimize(self, dedup: bool = False) -> None:
+        """Fire --minimize-every-execs, exactly once per exec_count value.
+
+        Previously this check was duplicated inline at only two of
+        fuzz_one()'s four exit points (the has_new_coverage branch and the
+        final "boring" branch), so the crash-return and the Metropolis-
+        acceptance-return paths silently skipped it -- for that exec_count
+        value, forever, not just for that call. --hail-mary force-enables
+        both --metropolis and a 10000-exec --anneal-budget, which makes the
+        Metropolis path common enough that minimization could go long
+        stretches (or, on a target with a high crash rate, effectively
+        never) without firing. Centralizing the check here and calling it
+        from every exit point makes "every N execs" mean every N execs,
+        independent of what kind of iteration landed on that count.
+
+        ``dedup`` preserves the original behavior of also running
+        _deprioritize_near_duplicates() specifically on the has_new_coverage
+        path (freshly admitted content is when near-duplicate weighting is
+        most worth recomputing); other exit points only minimize.
+        """
+        if (
+            self.minimize_every_execs > 0
+            and (self.exec_count - self._exec_baseline) % self.minimize_every_execs == 0
+            and len(self.corpus) > 1
+        ):
+            self._auto_minimize_corpus()
+            if dedup:
+                self._deprioritize_near_duplicates()
+
     def _defer_minimize(self):
         """Schedule auto_minimize_corpus for the next main-loop iteration.
         This avoids pruning seeds that were just added but not yet fuzzed."""
@@ -6560,6 +6589,7 @@ class Fuzzer:
                     "ubsan": None,
                 }
             self._record_fluctuation_observation("crash", self._get_current_edge_set())
+            self._maybe_periodic_minimize()
             return True
 
         # is_new_max admits too. Without admission the signal cannot compound:
@@ -6636,13 +6666,7 @@ class Fuzzer:
                 self.mc.add_elite(mutated, 2, temperature=self._temperature)
                 self.mc.maybe_refit()
             # Periodic minimization based on edge stats
-            if (
-                self.minimize_every_execs > 0
-                and (self.exec_count - self._exec_baseline) % self.minimize_every_execs == 0
-                and len(self.corpus) > 1
-            ):
-                self._auto_minimize_corpus()
-                self._deprioritize_near_duplicates()
+            self._maybe_periodic_minimize(dedup=True)
             self._record_fluctuation_observation("success", self._get_current_edge_set())
             return True
 
@@ -6659,15 +6683,11 @@ class Fuzzer:
                     self.mc.add_elite(mutated, 1, temperature=self._temperature)
                     self.mc.maybe_refit()
                 self._record_fluctuation_observation("success", mutant_edges)
+                self._maybe_periodic_minimize()
                 return True
 
         # Periodic minimization (also for non-interesting iterations)
-        if (
-            self.minimize_every_execs > 0
-            and (self.exec_count - self._exec_baseline) % self.minimize_every_execs == 0
-            and len(self.corpus) > 1
-        ):
-            self._auto_minimize_corpus()
+        self._maybe_periodic_minimize()
 
         # GA: trigger generation boundary for non-coverage iterations
         if self.ga:
