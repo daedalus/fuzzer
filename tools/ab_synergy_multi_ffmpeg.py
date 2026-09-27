@@ -47,6 +47,7 @@ import tempfile
 import time
 from array import array
 from collections.abc import Callable, Iterable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,6 +69,10 @@ REPLAY_MAP_SIZE = 1 << 18  # campaign auto-sizes ffmpeg to 262,144 entries
 REPLAY_TIMEOUT_S = 5.0  # per input; ASAN ffmpeg decodes are slow
 STARTUP_S = 900  # campaign startup (profile, ICFG) before the first exec
 EXEC_S = 2.0  # generous per-exec wall budget; ~3 eps measured multi-target
+# --jobs gate: a new campaign starts only with this much memory available.
+# Measured multi-target RSS: 1.8 GB at 2k execs, 3.1 GB at 6k, 5.5 GB at 12k.
+MIN_FREE_MB = 4096
+MEM_POLL_S = 5.0
 
 Replay = Callable[[str, Path], Iterable[int]]
 
@@ -236,34 +241,85 @@ def run(
     campaign: Callable[[Cell, Path], Path],
     replayer: Replay,
     manifest: dict,
+    jobs: int = 1,
+    mem_ok: Callable[[], bool] | None = None,
 ) -> dict:
-    """Run every cell not yet in *out*; replay each corpus on every version.
+    """Run every cell not yet in *out*, up to *jobs* at once; replay each corpus on every version.
 
     Saved after each cell, so an interrupted run resumes where it stopped.
     Resuming requires the same *manifest* (versions, budget, binary and seed
-    digests): rows from another experiment are never mixed in. Work dirs are
-    removed once replayed: the corpus is the only product and its edge ids
-    are what is kept.
+    digests): rows from another experiment are never mixed in. A cell starts
+    only while *mem_ok()* holds or nothing else runs, so parallel campaigns
+    cannot exhaust memory. Results are saved by this thread only.
+
+        pending cells ──submit (≤ jobs, mem_ok)──> pool ──(key, ids)──> results ──> out
     """
+    mem_ok = mem_ok or _mem_ok
     results: dict = {}
     if out.exists():
         stored, results = _read(out)
         if stored != manifest:
             raise ValueError(f"{out}: manifest differs from this run; use another --out")
-    for i, cell in enumerate(cells, 1):
-        if cell.key in results:
-            continue
 
-        print(f"[{i}/{len(cells)}] {cell.arm.value} seed={cell.seed} {cell.targets}")
-        workdir = workroot / f"{cell.arm.value}_{cell.seed}_{i}"
-        shutil.rmtree(workdir, ignore_errors=True)
-        corpus = campaign(cell, workdir)
+    todo = [(i, c) for i, c in enumerate(cells, 1) if c.key not in results]
+    errors: list[BaseException] = []
+    pending: set[Future] = set()
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        for i, cell in todo:
+            # Wait for a slot: pool full, or memory short while something still runs.
+            while pending and (len(pending) >= jobs or not mem_ok()):
+                pending = _drain(pending, results, manifest, out, errors, MEM_POLL_S)
+            if errors:
+                break
 
-        # array('I'): 4 B per id, vs ~70 B for a set member (Hard Rule 54).
-        results[cell.key] = {v: array("I", sorted(replayer(v, corpus))) for v in versions}
-        _save(manifest, results, out)
-        shutil.rmtree(workdir, ignore_errors=True)
+            print(
+                f"[{i}/{len(cells)}] {cell.arm.value} seed={cell.seed} {cell.targets}", flush=True
+            )
+            pending.add(pool.submit(_run_cell, i, cell, versions, workroot, campaign, replayer))
+        while pending:
+            pending = _drain(pending, results, manifest, out, errors, None)
+
+    if errors:
+        raise errors[0]
     return results
+
+
+def _run_cell(i: int, cell: Cell, versions, workroot: Path, campaign, replayer) -> tuple:
+    """Campaign + replay for one cell (worker thread); returns its result row."""
+    workdir = workroot / f"{cell.arm.value}_{cell.seed}_{i}"
+    shutil.rmtree(workdir, ignore_errors=True)
+    try:
+        corpus = campaign(cell, workdir)
+        # array('I'): 4 B per id, vs ~70 B for a set member (Hard Rule 54).
+        return cell.key, {v: array("I", sorted(replayer(v, corpus))) for v in versions}
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def _drain(pending: set, results: dict, manifest: dict, out: Path, errors: list, timeout) -> set:
+    """Collect finished cells: save each success, record each failure."""
+    done, rest = wait(pending, timeout=timeout, return_when=FIRST_COMPLETED)
+    for fut in done:
+        exc = fut.exception()
+        if exc is not None:
+            errors.append(exc)
+            continue
+        key, row = fut.result()
+        results[key] = row
+        _save(manifest, results, out)
+    return rest
+
+
+def _mem_ok() -> bool:
+    """MemAvailable >= MIN_FREE_MB (Linux /proc/meminfo; True where unreadable)."""
+    try:
+        with open("/proc/meminfo") as fh:
+            for line in fh:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024 >= MIN_FREE_MB
+    except OSError:
+        return True
+    return True
 
 
 def fingerprint(paths: Iterable[str]) -> dict[str, str]:
@@ -372,6 +428,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     if not versions:
         print(f"no executable {args.glob} under {args.build_root}", file=sys.stderr)
         return 2
+    if args.jobs < 1:
+        print("--jobs must be >= 1", file=sys.stderr)
+        return 2
     if not args.seed_corpus.is_dir():
         print(f"seed corpus not found: {args.seed_corpus}", file=sys.stderr)
         return 2
@@ -391,7 +450,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     }
     print(f"[*] {len(versions)} versions, {len(cells)} campaigns -> {args.out}")
     campaign = make_campaign(args.seed_corpus)
-    run(cells, versions, args.work, args.out, campaign, replay, manifest)
+    run(cells, versions, args.work, args.out, campaign, replay, manifest, jobs=args.jobs)
     return 0
 
 
@@ -425,6 +484,7 @@ def main() -> int:
     )
     r.add_argument("--out", type=Path, default=DEFAULT_OUT)
     r.add_argument("--work", type=Path, default=DEFAULT_WORK)
+    r.add_argument("--jobs", type=int, default=1, help="campaigns in parallel (memory-gated)")
     r.set_defaults(fn=cmd_run)
 
     a = sub.add_parser("analyse", help="paired comparison + A/A control")
