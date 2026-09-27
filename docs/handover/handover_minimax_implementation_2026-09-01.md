@@ -18,8 +18,8 @@ name, `--alphabeta` flag and state key kept
 **png result (2026-09-27, `container_signal`, `png_read_noasan.so`, 20 seeds x
 10k execs):** `elo-alphabeta` vs `elo-mcts` 12W/8L/0T, McNemar p=0.50,
 Wilcoxon p=0.67, median Δ +8 edges. Means 130.6 (sd 27.0) vs 131.0 (sd 20.8).
-Noise: two reps of the same `elo-mcts` cell differ by a median 8 edges (8
-cells: 0-33), so Δ is at the noise floor. Null, not bounded tightly: a ~10pt
+Noise: runs of the same `elo-mcts` cell span a median 10 edges (9 cells:
+0-39), so Δ is inside the noise floor. Null, not bounded tightly: a ~10pt
 win-rate effect needs ~100 cells. Run unlocked, 3 parallel shards (edges at a
 fixed exec budget; eps not comparable). Details:
 `docs/learnings/2026-09-27-alphabeta-vs-mcts-png.md`.
@@ -41,7 +41,7 @@ three fuzz flags are on under `--hail-mary`. Bench arms: `elo-op-minimax`,
 | 4 operator sequencing | `core/schedulers/op_monte_carlo.py::MonteCarloScheduler.select_op_minimax` | No caller, no test. |
 | 5 robust corpus | `services/corpus_manager.py::CorpusManager.minimax_robust_admission` → `core/rate_distortion.py::minimax_robust_corpus_admission` / `minimax_robust_pruning` | No caller, no test. |
 
-Validation owed if wired:
+Validation owed:
 
 - **Phase 2:** heterogeneous set (png, jpeg, ffmpeg, sqlite). Prediction: lower
   variance of edge-discovery rate vs Elo mix, 5–15% lower mean. Falsified if

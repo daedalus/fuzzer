@@ -630,7 +630,7 @@ harness.
 |---|------|--------|----------------------|
 | E1 | Weizz paired bench | **MISSING** | The **only** unticked item on the Weizz acceptance checklist. `tools/bench_paired.py` against a live target. No weizz arm in `tools/bench_paired.py`. No results in `docs/learnings/` or `docs/sweeps/` |
 | E2 | FormatFuzzer paired run | **MISSING** | Acceptance asks for either a coverage gain or a validity gain, with a **throughput regression ≤ 15%** (or automatic Elo de-prioritisation). No formatfuzzer arm in `tools/bench_paired.py`. No results in `docs/learnings/` or `docs/sweeps/` |
-| E3 | Alpha-beta MCTS A/B | **png: null** | 2026-09-27, 20 seeds: 12W/8L, McNemar p=0.50, med Δ +8 edges = within-cell rep noise (median 8). `docs/learnings/2026-09-27-alphabeta-vs-mcts-png.md`. ffmpeg_read unrun |
+| E3 | Alpha-beta MCTS A/B | **png: null** | 2026-09-27, 20 seeds: 12W/8L, McNemar p=0.50, med Δ +8 edges, inside within-cell rep noise (median 10). `docs/learnings/2026-09-27-alphabeta-vs-mcts-png.md`. ffmpeg_read unrun |
 | E4 | Fractal Voronoi A/B | **MISSING** | The operator shipped without one. No fractal_voronoi arm in `tools/bench_paired.py`. No results in `docs/learnings/` or `docs/sweeps/` |
 | E5 | GARCH and `--continuum` | **PARTIAL** | Both shipped opt-in and unmeasured. `--continuum` flag exists in `cli/commands.py:2017`. `garch`/`continuum` arms exist in `tools/bench_paired.py:81-83,89`. No dated result files in `docs/learnings/` for these keywords. `docs/sweeps/` has no matching results. For GARCH specifically, the ACF study needs **snapshots dumped to disk, not live state**: `record_discovery_snapshot` caps history at 500 and trims to 250, one snapshot per tick ≈ 10 s of work, while an MLE GARCH(1,1) wants ~500–1000 observations |
 
