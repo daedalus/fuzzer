@@ -36,6 +36,13 @@
  *     trace_gep)
  *   - __cmplog_reset() / __tracecmp_flush() / __tracecmp_reset()
  *
+ * Also gated by ``-D__AFL_CMPLOG=1`` (no separate build flag) but toggled
+ * at runtime by $__AFL_COMPCOV_LEVEL, COMPCOV folds byte-level comparison
+ * progress directly into the edge map -- no log, no fd, no Python-side
+ * drain -- so it works even when _CMPLOG_OUT is never set. See the
+ * "COMPCOV" comment ahead of __afl_compcov_mark() further down for the
+ * technique and the level semantics.
+ *
  * ── Why the cmplog layer lives here and not in its own .so ────────────
  *
  * It used to be a separate cmplog_shim.c carrying its own copy of the edge
@@ -1510,6 +1517,140 @@ static int    __afl_cmplog_fd  = -1;
 static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
 static size_t __afl_cmplog_pos = 0;
 
+/* ── COMPCOV: partial-match feedback straight into the edge map ────────
+ *
+ * CMPLOG (above) reifies a comparison's operands so redqueen-style
+ * substitution can solve it in one step, at the cost of a record per
+ * fire and a Python-side drain/parse pass. COMPCOV answers a narrower
+ * question -- "did this execution get *closer* to satisfying a wide
+ * comparison than the last one?" -- and answers it for free: it folds
+ * each byte of progress directly into the same edge table CMPLOG already
+ * attaches to, with no log, no fd, no drain. Same technique as AFL++'s
+ * laf-intel/CompareCoverage (split-compares / libcompcov): a comparison
+ * that is all-or-nothing to plain edge coverage (the branch after it is
+ * one bit, taken or not) becomes visible one matching byte at a time, so
+ * novelty search has a gradient to climb instead of a wall to guess past.
+ * Reference: https://github.com/AFLplusplus/AFLplusplus (laf-intel,
+ * libcompcov), and the QEMU-mode writeup this file's byte-walk mirrors:
+ * https://andreafioraldi.github.io/articles/2019/07/20/aflpp-qemu-compcov.html
+ *
+ * Off by default (level 0) even in a __AFL_CMPLOG=1 build -- it rides
+ * the same Layer 1/2 interception CMPLOG already pays for (no separate
+ * compile-time gate, no second libc interposer, no ODR risk from two
+ * memcmp()s under two flags) but is not free at runtime: it turns one
+ * comparison into up to N-1 extra edge-table probe/insert calls. Opt in
+ * per run with $__AFL_COMPCOV_LEVEL:
+ *   0  disabled (default)
+ *   1  constant/immediate comparisons only -- fires from
+ *      __sanitizer_cov_trace_const_cmp*, where the compiler has already
+ *      told us one operand is a compile-time constant. Cheap: this class
+ *      is rare relative to total comparison volume in most targets.
+ *   2  all comparisons -- also fires from the non-const trace_cmp*
+ *      callbacks and from the Layer 1 libc interceptors (memcmp/strcmp/
+ *      strncmp/bcmp and the wide-char and case-insensitive variants).
+ *      There is no runtime-cheap way to tell a "constant" byte buffer
+ *      from a mutated one the way the compiler can for an integer
+ *      immediate, so libc-level comparisons only ever fire at level 2.
+ *
+ * Requires __AFL_EDGE (the target actually attached to an edge map);
+ * under __AFL_PRELOAD_ONLY the level is still parsed but every mark call
+ * is a no-op, matching that build's documented absence of edge
+ * machinery -- see __afl_compcov_mark's __AFL_EDGE=0 stub below.
+ *
+ * A COMPCOV mark is a synthetic edge, same idea and same trade as
+ * __sfuzz_state's transition hash above: __afl_map_loc() folds it into
+ * the real edge_id/prev_loc chain (it perturbs context for whatever
+ * fires next, and a hash collision with a real edge is possible, merely
+ * improbable) rather than a channel of its own, so every existing
+ * coverage consumer -- scoring, scheduling, admission, novelty -- sees
+ * COMPCOV progress with no plumbing added. Marking every byte of a long
+ * match also means a target with wide, hot comparisons wants a bigger
+ * AFL_MAP_SIZE than an edge-only run of the same target, same caveat
+ * upstream documents for laf-intel/CompCov. */
+static int __afl_compcov_level = 0;
+
+/* Longest byte-buffer comparison COMPCOV walks per call, independent of
+ * CMPLOG_MAX_OPERAND: this cap bounds edge-table writes per intercepted
+ * call (up to one per byte of match), not bytes logged, so it is kept
+ * well below CMPLOG_MAX_OPERAND to keep the extra probe/insert cost
+ * bounded even at level 2 on a target with long matching prefixes. */
+#define COMPCOV_MAX_OPERAND 32
+
+/* Forward decl: defined below, ahead of __afl_cmplog_bytes, which needs it
+ * for the same reason -- bounding a byte-walk to memory that is actually
+ * mapped and (for ASAN builds) unpoisoned before reading past a mismatch
+ * that might be the buffer's own end. */
+__AFL_NO_COV static size_t __afl_readable_len(const void *p, size_t want);
+
+#if __AFL_EDGE
+/* Fold one byte (or one power-of-two width step) of comparison progress
+ * into the edge table as a synthetic edge, keyed on the comparison site
+ * (its return address) and how far the match got. Same FNV-1a shape as
+ * __sfuzz_state's hash, salted differently so the two synthetic-edge
+ * channels do not structurally alias each other. */
+__AFL_NO_COV static inline void __afl_compcov_mark(void *pc, uint32_t tag) {
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+    h = (h ^ (uint64_t)(uintptr_t)pc) * 1099511628211ULL;
+    h = (h ^ 0x434f4d5043564356ULL) * 1099511628211ULL; /* "COMPCVCV" salt */
+    h = (h ^ tag) * 1099511628211ULL;
+    __afl_map_loc((uint32_t)(h >> 32) | 0x80000000u);
+}
+
+/* Layer 2: a and b are the raw operands of an n-byte trace-cmp callback
+ * (n in {1,2,4,8}). Walks byte counts 1..n-1 (never n itself -- an
+ * n-byte match is full equality, which already produces a genuine branch
+ * edge right after the callback returns, so marking it here would just
+ * duplicate that edge under a different id) and stops at the first byte
+ * that breaks the low-to-high match, mirroring afl_compcov_log_32's
+ * chained-if shape. is_const selects the level gate: the trace_const_cmp*
+ * callbacks pass 1 (fires from level >= 1), the plain trace_cmp*
+ * callbacks pass 0 (fires from level >= 2 only). */
+__AFL_NO_COV static inline void __afl_compcov_ints(uint64_t a, uint64_t b, size_t n,
+                                                    void *pc, int is_const) {
+    int level = __afl_compcov_level;
+    if (level < (is_const ? 1 : 2)) return;
+    for (size_t i = 1; i < n; i++) {
+        uint64_t mask = (i >= 8) ? ~0ULL : ((1ULL << (i * 8)) - 1);
+        if ((a & mask) != (b & mask)) return;
+        __afl_compcov_mark(pc, (uint32_t)i);
+    }
+}
+
+/* Layer 1: walks two byte buffers from the front, marking each matching
+ * position before the first mismatch (or COMPCOV_MAX_OPERAND, whichever
+ * is shorter) -- the libcompcov __compcov_trace shape. Only ever gated
+ * at level 2: unlike an integer compare, a libc call site gives no
+ * compiler-verified signal that either buffer is a constant. Caller is
+ * responsible for n already being a length safe to read from both a and
+ * b (the same n it already passed to __afl_cmplog_bytes). */
+__AFL_NO_COV static inline void __afl_compcov_bytes(const void *a, const void *b,
+                                                     size_t n, void *pc) {
+    if (__afl_compcov_level < 2 || !a || !b || n == 0) return;
+    size_t k = n > COMPCOV_MAX_OPERAND ? COMPCOV_MAX_OPERAND : n;
+    /* Same readability clamp __afl_cmplog_bytes applies: a caller-supplied
+     * n (strncmp's bound, in particular) is not a promise that all n bytes
+     * are mapped on both sides, only that reading up to the first
+     * difference or terminator is safe. */
+    size_t ka = __afl_readable_len(a, k), kb = __afl_readable_len(b, k);
+    k = ka < kb ? ka : kb;
+    const unsigned char *pa = (const unsigned char *)a;
+    const unsigned char *pb = (const unsigned char *)b;
+    for (size_t i = 0; i < k; i++) {
+        if (pa[i] != pb[i]) return;
+        __afl_compcov_mark(pc, (uint32_t)i);
+    }
+}
+#else /* !__AFL_EDGE: __AFL_PRELOAD_ONLY has no edge map to mark into */
+__AFL_NO_COV static inline void __afl_compcov_ints(uint64_t a, uint64_t b, size_t n,
+                                                    void *pc, int is_const) {
+    (void)a; (void)b; (void)n; (void)pc; (void)is_const;
+}
+__AFL_NO_COV static inline void __afl_compcov_bytes(const void *a, const void *b,
+                                                     size_t n, void *pc) {
+    (void)a; (void)b; (void)n; (void)pc;
+}
+#endif /* __AFL_EDGE */
+
 /* ── Per-callback comparison counters ($_CMPLOG_COUNTS) ───────────────
  *
  * The CMP record stream cannot answer "how many comparisons fired, and
@@ -2180,6 +2321,7 @@ __AFL_NO_COV int memcmp(const void *a, const void *b, size_t n) {
     int result = real_memcmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_MEMCMP, result == 0);
     __afl_cmplog_bytes(a, b, n, result);
+    __afl_compcov_bytes(a, b, n, __builtin_return_address(0));
     return result;
 }
 __AFL_NO_COV int afl_cmp_memcmp(const void *a, const void *b, size_t n)
@@ -2190,7 +2332,10 @@ __AFL_NO_COV int strcmp(const char *a, const char *b) {
     int result = real_strcmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_STRCMP, result == 0);
     size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
-    if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
+    if (n > 0) {
+        __afl_cmplog_bytes(a, b, n + 1, result);
+        __afl_compcov_bytes(a, b, n + 1, __builtin_return_address(0));
+    }
     return result;
 }
 __AFL_NO_COV int afl_cmp_strcmp(const char *a, const char *b)
@@ -2200,7 +2345,10 @@ __AFL_NO_COV int strncmp(const char *a, const char *b, size_t n) {
     __AFL_RESOLVE(real_strncmp, afl_strn_cmp_fn, "strncmp", __afl_fb_strncmp);
     int result = real_strncmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_STRNCMP, result == 0);
-    if (n > 0) __afl_cmplog_bytes(a, b, n, result);
+    if (n > 0) {
+        __afl_cmplog_bytes(a, b, n, result);
+        __afl_compcov_bytes(a, b, n, __builtin_return_address(0));
+    }
     return result;
 }
 __AFL_NO_COV int afl_cmp_strncmp(const char *a, const char *b, size_t n)
@@ -2354,6 +2502,7 @@ __AFL_NO_COV int bcmp(const void *a, const void *b, size_t n) {
     int result = real_bcmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_BCMP, result == 0);
     __afl_cmplog_bytes(a, b, n, result);
+    __afl_compcov_bytes(a, b, n, __builtin_return_address(0));
     return result;
 }
 __AFL_NO_COV int afl_cmp_bcmp(const void *a, const void *b, size_t n)
@@ -2363,10 +2512,14 @@ __AFL_NO_COV int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
     __AFL_RESOLVE(real_wmemcmp, afl_wchar_cmp_fn, "wmemcmp", __afl_fb_wmemcmp);
     int result = real_wmemcmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_WMEMCMP, result == 0);
-    if (__afl_cmplog_fd >= 0 && n > 0) {
+    /* Gated on cmplog-log-active OR compcov-active: compcov has no fd of
+     * its own, so a run with only $__AFL_COMPCOV_LEVEL set (no
+     * _CMPLOG_OUT) must not skip this block the way it did before. */
+    if ((__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) && n > 0) {
         size_t k = n * sizeof(wchar_t);
         if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
         __afl_cmplog_bytes(a, b, k, result);
+        __afl_compcov_bytes(a, b, k, __builtin_return_address(0));
     }
     return result;
 }
@@ -2377,10 +2530,13 @@ __AFL_NO_COV int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
     __AFL_RESOLVE(real_wcsncmp, afl_wchar_cmp_fn, "wcsncmp", __afl_fb_wcsncmp);
     int result = real_wcsncmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_WCSNCMP, result == 0);
-    if (__afl_cmplog_fd >= 0 && n > 0) {
+    if ((__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) && n > 0) {
         size_t k = n * sizeof(wchar_t);
         if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
-        if (k > 0) __afl_cmplog_bytes(a, b, k, result);
+        if (k > 0) {
+            __afl_cmplog_bytes(a, b, k, result);
+            __afl_compcov_bytes(a, b, k, __builtin_return_address(0));
+        }
     }
     return result;
 }
@@ -2391,12 +2547,13 @@ __AFL_NO_COV int wcscmp(const wchar_t *a, const wchar_t *b) {
     __AFL_RESOLVE(real_wcscmp, afl_wchar_cmp_2arg_fn, "wcscmp", __afl_fb_wcscmp);
     int result = real_wcscmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_WCSCMP, result == 0);
-    if (__afl_cmplog_fd >= 0) {
+    if (__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) {
         size_t na = __afl_fb_wcslen(a), nb = __afl_fb_wcslen(b), n = na < nb ? na : nb;
         if (n > 0) {
             size_t k = n * sizeof(wchar_t);
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
             __afl_cmplog_bytes(a, b, k, result);
+            __afl_compcov_bytes(a, b, k, __builtin_return_address(0));
         }
     }
     return result;
@@ -2508,14 +2665,17 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b) {
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp2(uint16_t a, uint16_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP2, a == b);
     __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
+    __afl_compcov_ints(a, b, 2, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp4(uint32_t a, uint32_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP4, a == b);
     __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
+    __afl_compcov_ints(a, b, 4, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp8(uint64_t a, uint64_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP8, a == b);
     __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
+    __afl_compcov_ints(a, b, 8, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp1(uint8_t a, uint8_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP1, a == b);
@@ -2524,14 +2684,17 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp1(uint8_t a, uint8_t b) {
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP2, a == b);
     __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
+    __afl_compcov_ints(a, b, 2, __builtin_return_address(0), 1);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP4, a == b);
     __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
+    __afl_compcov_ints(a, b, 4, __builtin_return_address(0), 1);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP8, a == b);
     __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
+    __afl_compcov_ints(a, b, 8, __builtin_return_address(0), 1);
 }
 
 /* GCC declares this builtin as void(unsigned long, void *) and warns on the
@@ -2623,6 +2786,14 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_gep(uintptr_t idx) {
  * Called from __afl_auto_init (edge builds) or the preload-only
  * constructor below. */
 __AFL_NO_COV static void __afl_cmplog_init(void) {
+    /* COMPCOV level: parsed independently of _CMPLOG_OUT below -- a run
+     * that wants only the edge-map partial-match signal, and none of the
+     * record/counts/sites log machinery, sets this and nothing else. */
+    const char *compcov = getenv("__AFL_COMPCOV_LEVEL");
+    if (compcov && compcov[0]) {
+        int v = atoi(compcov);
+        __afl_compcov_level = v < 0 ? 0 : (v > 2 ? 2 : v);
+    }
     /* Opened before the _CMPLOG_OUT check, and on its own fd: the counters
      * are useful on their own (a target's comparison profile costs no
      * record stream at all), and the record stream gets truncated and

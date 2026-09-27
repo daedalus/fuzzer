@@ -557,6 +557,7 @@ def cmd_fuzz(args):
         or None,  # Will fall back to cachedir in CmplogCollector
         cmplog_fifo_sink=getattr(args, "cmplog_fifo_sink", True),
         cmplog_fifo_sink_size=getattr(args, "cmplog_fifo_sink_size", None),
+        compcov_level=getattr(args, "compcov_level", 0),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -3822,6 +3823,22 @@ def main() -> int:
             "Avoids the init-order bug where the shim's constructor runs before _CMPLOG_OUT "
             "is set, and the unbounded-file growth that comes with high-comparison targets. "
             "Per-drain read counts are logged only with --debug."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--compcov-level",
+        type=int,
+        choices=(0, 1, 2),
+        default=0,
+        help=(
+            "Fold byte-level comparison-progress feedback directly into the edge map "
+            "(AFL++'s laf-intel/CompareCoverage technique, riding the same cmplog shim "
+            "build). 0 (default): off. 1: constant/immediate comparisons only -- cheap, "
+            "rarely fires. 2: all comparisons, including memcmp/strcmp/strncmp/bcmp and "
+            "the wide-char variants -- costs more per comparison than plain edge coverage, "
+            "so a target with wide, hot comparisons may want a bigger --map-size alongside "
+            "it. Writes no log of its own; needs cmplog on (the default) to have a shim to "
+            "ride."
         ),
     )
     fuzz_parser.add_argument(

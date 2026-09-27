@@ -1114,6 +1114,16 @@ class Fuzzer:
         cmplog_workdir=None,
         cmplog_fifo_sink=True,
         cmplog_fifo_sink_size=None,
+        # COMPCOV: 0 (default) leaves the shim's partial-match edge-map
+        # feedback off; 1 marks constant/immediate comparisons only; 2
+        # marks all of them, including libc buffer compares. Off-by-default
+        # like --hail-mary-gated flags below, but not itself gated by
+        # --hail-mary: it costs nothing when unset, unlike e.g. temperature
+        # control or continuum-reward, and the cost it does add at 1/2 is
+        # visible immediately in throughput rather than needing an A/B.
+        # Meaningless without cmplog itself (needs the same shim build);
+        # __init__ warns and leaves it off if cmplog=False.
+        compcov_level=0,
         asan_target=None,
         ubsan_target=None,
         max_corpus=0,
@@ -1765,6 +1775,10 @@ class Fuzzer:
         self._unstable_edges: set[int] = set()
         self._stability_calibrations = 0
         self._cmplog_auto = True  # always auto-detect; no tri-state any more
+        self._compcov_level = 0 if compcov_level < 0 else (2 if compcov_level > 2 else int(compcov_level))
+        if self._compcov_level and not cmplog:
+            print("[!] --compcov-level requires cmplog; ignoring (cmplog is off)")
+            self._compcov_level = 0
         # Cmplog is always on by default; detection runs unconditionally to
         # drive the confirmation message and decide whether to build the shim.
         # cmplog=False is accepted for programmatic callers that need it off.
@@ -1790,6 +1804,7 @@ class Fuzzer:
                 # measured per comparison site, not folded across a family
                 # (P0-3).  The shim cost is one hash probe per comparison.
                 site_counts=True,
+                compcov_level=self._compcov_level,
             )
             if self._cmplog.start():
                 from fuzzer_tool.core.elf import detect_cmplog_functions

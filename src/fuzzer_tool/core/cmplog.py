@@ -308,6 +308,16 @@ class CmplogCollector:
     Args:
         max_tokens: Cap on unique operand tokens (default CMPLOG_TOKENS_MAX).
         max_pairs: Cap on unique operand pairs (default CMPLOG_PAIRS_MAX).
+        compcov_level: 0 (default) leaves $__AFL_COMPCOV_LEVEL unset, so the
+            shim's COMPCOV partial-match feedback never fires. 1 marks only
+            comparisons against a compile-time constant; 2 marks all of
+            them, including the Layer 1 libc interceptors (memcmp/strcmp/
+            strncmp/bcmp and the wide-char variants). Unlike everything
+            else this class owns, COMPCOV writes no log this collector
+            reads back -- it folds straight into the target's own edge
+            map -- so setting it changes what the target's coverage looks
+            like without adding anything to drain() output. See the
+            "COMPCOV" comment in afl_shim.c ahead of __afl_compcov_mark().
     """
 
     def __init__(
@@ -319,6 +329,7 @@ class CmplogCollector:
         fifo_sink: bool = False,
         fifo_max_buffered: int | None = None,
         debug: bool = False,
+        compcov_level: int = 0,
     ):
         self.log_path: str | None = None
         # --cmplog-fifo-sink: _CMPLOG_OUT is a FIFO drained continuously by
@@ -330,6 +341,11 @@ class CmplogCollector:
         self.fifo_max_buffered = fifo_max_buffered
         # Gated per-drain read message; see CmplogCollector(debug=).
         self.debug = bool(debug)
+        # Runtime-only toggle for the shim's COMPCOV layer; clamped the same
+        # way __afl_cmplog_init() clamps $__AFL_COMPCOV_LEVEL so a caller
+        # passing e.g. 5 doesn't silently disagree with what the shim does
+        # with it.
+        self.compcov_level = 0 if compcov_level < 0 else (2 if compcov_level > 2 else compcov_level)
         self._fifo: _FifoDrain | None = None
         # Trailing bytes from the last drain with no terminating '\n' yet
         # -- carried over so a line split across two drains isn't parsed
@@ -600,6 +616,8 @@ class CmplogCollector:
         env["_CMPLOG_COUNTS"] = self.counts_path
         if self.sites_path:
             env["_CMPLOG_SITE_COUNTS"] = self.sites_path
+        if self.compcov_level:
+            env["__AFL_COMPCOV_LEVEL"] = str(self.compcov_level)
 
         # Prepend the unified shim to LD_PRELOAD
         if self._shim_path:
@@ -642,6 +660,7 @@ class CmplogCollector:
                     "_CMPLOG_COUNTS",
                     "_CMPLOG_SITE_COUNTS",
                     "LD_PRELOAD",
+                    "__AFL_COMPCOV_LEVEL",
                 )
             }
 
@@ -652,6 +671,8 @@ class CmplogCollector:
         os.environ["_CMPLOG_COUNTS"] = self.counts_path
         if self.sites_path:
             os.environ["_CMPLOG_SITE_COUNTS"] = self.sites_path
+        if self.compcov_level:
+            os.environ["__AFL_COMPCOV_LEVEL"] = str(self.compcov_level)
 
         if self._shim_path and self._shim_path not in os.environ.get("LD_PRELOAD", ""):
             existing = os.environ.get("LD_PRELOAD", "")
