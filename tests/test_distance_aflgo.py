@@ -88,8 +88,10 @@ class TestFunctionTarget:
         others = [bs for bs in cfg.blocks if bs != start]
         assert others  # the function has a branch
         for bs in others:
-            # harmonic mean of (1 + d) over target blocks >= 1
-            assert td._bb_value.get(bs, -1.0) >= 1.0, hex(bs)
+            # Downstream of the entry target: no CFG path back to it, so
+            # unvalued (reverse BFS) and scored by the CG fallback (>= 1).
+            assert bs not in td._bb_value, hex(bs)
+            assert td.bb_distance(bs) >= 1.0, hex(bs)
 
     def test_seed_distance_valued_blocks_only(self, binaries):
         td = TargetDistance(binaries["exe"], targets=["target_fn"])

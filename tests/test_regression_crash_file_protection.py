@@ -6,6 +6,7 @@ destroys the reproducer. All files written by save_crash() except the shell
 script must be locked to read-only (0o444) so stray writes fail loudly.
 """
 
+import os
 import tempfile
 from pathlib import Path
 
@@ -64,6 +65,11 @@ class TestCrashFileProtection:
         assert mode == 0o755, f".sh is {oct(mode)}, want 0o755"
 
 
+# Root (CAP_DAC_OVERRIDE) writes through 0o444, so the write cannot fail.
+not_root = pytest.mark.skipif(os.geteuid() == 0, reason="root bypasses file mode bits")
+
+
+@not_root
 class TestCrashFileProtectionAdversarial:
     """A write to a protected crash file must fail."""
 

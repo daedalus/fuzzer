@@ -871,9 +871,7 @@ class TargetDistance:
         alternative ``-fsanitize-coverage=`` flavors), but checking both is
         cheap and makes no assumption about which one a given binary used.
         """
-        return {
-            a for a in (self._trace_pc_addr, self._trace_pc_guard_addr) if a is not None
-        }
+        return {a for a in (self._trace_pc_addr, self._trace_pc_guard_addr) if a is not None}
 
     def pc_distance_table(self) -> dict[int, float]:
         """PC→distance table for the SHM-tail channel.
@@ -909,7 +907,9 @@ class TargetDistance:
                 if call_target not in targets:
                     continue
                 site = start + offset + 5  # return address after the call
-                dist = self._bb_value_of(site)
+                # Score the block holding the call: the CFG ends blocks at
+                # calls, so *site* already opens the next block.
+                dist = self._bb_value_of(start + offset)
                 if dist is not None:
                     table[site - base] = dist
         return table

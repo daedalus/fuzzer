@@ -26,9 +26,9 @@ from itertools import repeat
 
 import numpy as np
 
+from fuzzer_tool.core.analyzers.analyzer_distance import _CALL_RE, _MAX_CFG_FUNC_SIZE
 from fuzzer_tool.core.centrality import betweenness_centrality, closeness_centrality
 from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
-from fuzzer_tool.core.analyzers.analyzer_distance import _CALL_RE, _MAX_CFG_FUNC_SIZE
 from fuzzer_tool.core.mincut import min_cut
 
 log = logging.getLogger(__name__)
@@ -68,9 +68,7 @@ class InterproceduralCFG:
         # Defaults to all-False (every edge treated as a branch edge) for
         # callers -- mostly tests -- that build a purely intraprocedural
         # graph and never populated this distinction.
-        self.is_call = (
-            np.zeros(len(src), dtype=bool) if is_call is None else is_call
-        )
+        self.is_call = np.zeros(len(src), dtype=bool) if is_call is None else is_call
 
     def _node_at(self, addr: int) -> int | None:
         """Index of the node starting exactly at *addr*, else None."""
@@ -119,9 +117,7 @@ class InterproceduralCFG:
     def n_edges(self) -> int:
         return len(self.src)
 
-    def bottleneck_edges(
-        self, hit_addrs: set[int], target_addrs: set[int]
-    ) -> set[tuple[int, int]]:
+    def bottleneck_edges(self, hit_addrs: set[int], target_addrs: set[int]) -> set[tuple[int, int]]:
         """Min edge cut (block-address pairs) separating *hit_addrs* from
         *target_addrs* — see ``core/mincut.py`` for the full rationale.
 
@@ -137,7 +133,7 @@ class InterproceduralCFG:
         sources -= sinks
         if not sources or not sinks:
             return set()
-        edges = list(zip(self.src.tolist(), self.dst.tolist()))
+        edges = list(zip(self.src.tolist(), self.dst.tolist(), strict=True))
         _, cut = min_cut(self.n_nodes, edges, sources, sinks)
         return {(self.node_addrs[u], self.node_addrs[v]) for u, v in cut}
 
@@ -151,7 +147,7 @@ class InterproceduralCFG:
         path running through them (leaves, isolated blocks) are present
         in the result with score 0.0, not omitted.
         """
-        edges = list(zip(self.src.tolist(), self.dst.tolist()))
+        edges = list(zip(self.src.tolist(), self.dst.tolist(), strict=True))
         scores = betweenness_centrality(self.n_nodes, edges, normalized=normalized)
         return {self.node_addrs[i]: s for i, s in enumerate(scores)}
 
@@ -161,7 +157,7 @@ class InterproceduralCFG:
         High score: the block reaches much of the ICFG in few hops. See
         ``core/centrality.closeness_centrality``.
         """
-        edges = list(zip(self.src.tolist(), self.dst.tolist()))
+        edges = list(zip(self.src.tolist(), self.dst.tolist(), strict=True))
         scores = closeness_centrality(self.n_nodes, edges)
         return {self.node_addrs[i]: s for i, s in enumerate(scores)}
 
@@ -342,7 +338,8 @@ def probe_key_node_table(td, icfg: InterproceduralCFG) -> dict[int, int]:
             if start + offset + 5 + disp not in targets:
                 continue
             site = start + offset + 5  # return address after the call
-            blk = _site_block(td, icfg, name, site)
+            # Node of the block holding the call, not the return address.
+            blk = _site_block(td, icfg, name, start + offset)
             if blk is None:
                 continue
             nidx = icfg._node_at(blk.start)

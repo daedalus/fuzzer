@@ -44,6 +44,8 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import fuzzer_tool.core.mutations as _mutations
+from fuzzer_tool.core.format_fsm import parse_fsm
+from fuzzer_tool.core.mutations.montgomery import SECP256K1_FIELD_P
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.services.fuzzer import Fuzzer
 
@@ -328,6 +330,12 @@ def _battery() -> list[bytes]:
         b"fLaC" + bytes(40),
         # lz4_read.c frame path: even mode byte, then the LZ4 frame magic.
         b"\x00\x04\x22\x4d\x18\x64\x40\xa7" + bytes(40),
+        # TIFF (LE header, IFD at 8 with 0 entries), Shorten and a secp256k1
+        # field-prime literal: sniffers no other entry satisfies, reached
+        # before only by the 2% bootstrap trickle -- i.e. by RNG luck.
+        b"II*\x00\x08\x00\x00\x00" + bytes(40),
+        b"ajkg" + bytes(40),
+        bytes(8) + SECP256K1_FIELD_P + bytes(24),
         b"12345 6789 -3 0.5 abcdef ghij",
         _minimal_elf64(),
         _binary_stl(),
@@ -653,6 +661,10 @@ class TestStateGatedOperatorsAreNotNoOps:
         self._gate_prng(f)
 
         self._gate_weizz(f)
+
+        # --- afl_det / fsm_regen: gated on --op-afl-det and --fsm -----------
+        f.op_afl_det = True
+        f.fsm = parse_fsm("start A\nfinal D\nA -> B : 'a' | 'b'\nB -> B : 'a'\nB -> D : 'c'\n")
 
         return unreachable
 

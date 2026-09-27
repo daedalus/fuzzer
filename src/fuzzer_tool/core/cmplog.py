@@ -74,6 +74,24 @@ def _get_cmplog_dir() -> str:
 # driving it.
 _CMPLOG_STALE_AGE_S = 24 * 3600
 
+# A shared ASAN runtime (gcc default, clang -shared-libasan) aborts before
+# main when the preloaded shim precedes it: "ASan runtime does not come
+# first in initial library list". Every exec then dies silently.
+_ASAN_LINK_ORDER_KEY = "verify_asan_link_order"
+
+
+def _asan_link_order_off(opts: str | None) -> str:
+    """*opts* with the link-order check off, unless the user set it.
+
+    Example: "detect_leaks=0" -> "detect_leaks=0:verify_asan_link_order=0".
+    """
+    parts = [p for p in (opts or "").split(":") if p]
+    if any(p.split("=")[0] == _ASAN_LINK_ORDER_KEY for p in parts):
+        return ":".join(parts)
+
+    parts.append(f"{_ASAN_LINK_ORDER_KEY}=0")
+    return ":".join(parts)
+
 
 def _cleanup_stale_cmplog_files(max_age_s: float = _CMPLOG_STALE_AGE_S) -> int:
     """Remove cmplog artifacts left behind by runs that never called stop().
@@ -623,6 +641,7 @@ class CmplogCollector:
         if self._shim_path:
             existing = env.get("LD_PRELOAD", "")
             env["LD_PRELOAD"] = f"{self._shim_path}:{existing}" if existing else self._shim_path
+            env["ASAN_OPTIONS"] = _asan_link_order_off(env.get("ASAN_OPTIONS"))
 
         return env
 
@@ -660,6 +679,7 @@ class CmplogCollector:
                     "_CMPLOG_COUNTS",
                     "_CMPLOG_SITE_COUNTS",
                     "LD_PRELOAD",
+                    "ASAN_OPTIONS",
                     "__AFL_COMPCOV_LEVEL",
                 )
             }
@@ -679,6 +699,7 @@ class CmplogCollector:
             os.environ["LD_PRELOAD"] = (
                 f"{self._shim_path}:{existing}" if existing else self._shim_path
             )
+            os.environ["ASAN_OPTIONS"] = _asan_link_order_off(os.environ.get("ASAN_OPTIONS"))
 
     def restore_env(self) -> None:
         """Undo ``setup_env_for_run``'s mutations of ``os.environ``.

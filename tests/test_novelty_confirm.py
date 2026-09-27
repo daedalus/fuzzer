@@ -344,8 +344,8 @@ class TestWiring:
 
         params = inspect.signature(Fuzzer.__init__).parameters
         assert params["confirm_novelty"].default is False
-        # The kruskal-count wiring test pins position_arena as last.
-        assert list(params)[-1] == "position_arena"
+        # The kruskal-count wiring test pins pos_fibonacci as last.
+        assert list(params)[-1] == "pos_fibonacci"
 
     def test_cli_passes_flag_to_every_construction(self):
         import ast

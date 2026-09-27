@@ -59,6 +59,9 @@ _KWARGS = {
     "invasion": {"invasion": True, "mc_bandit": True},
     "canary": {"canary_scheduler": True},
     "exp4": {"exp4": True},
+    "fewa": {"fewa": True},
+    "softmax": {"softmax": True},
+    "topk": {"use_topk": True},
 }
 
 #: On the ballot but learns nothing, so attribution has no consumer.

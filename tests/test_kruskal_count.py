@@ -399,7 +399,7 @@ class TestFuzzerWiring:
 
         params = list(inspect.signature(Fuzzer.__init__).parameters)
         assert "kruskal_count" in params
-        assert params[-1] == "position_arena"
+        assert params[-1] == "pos_fibonacci"
         assert inspect.signature(Fuzzer.__init__).parameters["kruskal_count"].default is False
         assert (
             inspect.signature(Fuzzer.__init__)

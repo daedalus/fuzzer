@@ -372,3 +372,49 @@ class TestWindowedVarianceNeverNegative:
         window = vals[-50:]
         expected = statistics.variance(window)
         assert abs(m.variance - expected) < 1e-8
+
+
+class TestWindowedShiftedSums:
+    """Power sums are kept centred on a window value (see _slide_update)."""
+
+    def test_regression_large_offset_keeps_precision(self):
+        """Adversarial: raw sums of 1e8-scale values lose the 1e-2 spread."""
+        m = RunningMoments(window=20)
+        vals = [1e8 + 0.01 * (i % 7) for i in range(200)]
+        for v in vals:
+            m.update(v)
+        expected = statistics.variance(vals[-20:])
+        assert math.isclose(m.variance, expected, rel_tol=1e-6)
+
+    def test_round_trip_keeps_shift(self):
+        a = RunningMoments(window=5)
+        for v in (3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0):
+            a.update(v)
+        b = RunningMoments(window=5)
+        b.load(a.save())
+        a.update(10.0)
+        b.update(10.0)
+        assert b.mean == a.mean
+        assert b.variance == a.variance
+
+    def test_falsification_legacy_raw_sums_load(self):
+        """A save without "shift" holds raw sums; loading must treat them so."""
+        window = [5.0, 6.0, 7.0]
+        legacy = {
+            "n": 3,
+            "mean": 6.0,
+            "m2": 2.0,
+            "m3": 0.0,
+            "m4": 2.0,
+            "window": 3,
+            "buf": window,
+            "s1": sum(window),
+            "s2": sum(v**2 for v in window),
+            "s3": sum(v**3 for v in window),
+            "s4": sum(v**4 for v in window),
+        }
+        m = RunningMoments(window=3)
+        m.load(legacy)
+        m.update(8.0)
+        assert m.mean == statistics.mean([6.0, 7.0, 8.0])
+        assert math.isclose(m.variance, statistics.variance([6.0, 7.0, 8.0]))
