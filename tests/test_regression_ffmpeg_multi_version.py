@@ -18,6 +18,7 @@ import pytest
 
 SCRIPT = Path(__file__).parent.parent / "tools" / "vendor_ffmpeg.sh"
 BUILD_SCRIPT = SCRIPT.parent / "build_targets.sh"
+BASH = shutil.which("bash") or "bash"
 
 pytestmark = [
     pytest.mark.skipif(shutil.which("clang") is None, reason="clang required"),
@@ -28,15 +29,19 @@ pytestmark = [
 # (a lexical sort would pick 8.0.3).
 TAGS = ["n7.1.5", "n8.0", "n8.0.3", "n8.0.10", "n8.1", "n8.1.3", "n9.0", "n9.0.2", "n9.1-dev"]
 TOP3 = ["9.0.2", "8.1.3", "8.0.10"]
+MIRROR_MARK = "FROM_MIRROR"
 
 
 def _upstream(tmp_path: Path) -> Path:
-    """Local git repo carrying TAGS."""
+    """Local git repo carrying TAGS and a stub configure (clonable as a mirror)."""
     repo = tmp_path / "upstream"
     repo.mkdir()
+    (repo / "configure").write_text("#!/bin/sh\nexit 0\n")
     git = ["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t"]
     subprocess.run([*git, "init", "-q"], check=True)
-    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "x"], check=True)
+    (repo / MIRROR_MARK).write_text("")
+    subprocess.run([*git, "add", "configure", MIRROR_MARK], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "x"], check=True)
     for tag in TAGS:
         subprocess.run([*git, "tag", tag], check=True)
     return repo
@@ -58,7 +63,7 @@ def _run(tmp_path: Path, *args: str, **env: str) -> subprocess.CompletedProcess[
         **env,
     }
     return subprocess.run(
-        ["bash", str(SCRIPT), *args],
+        [BASH, str(SCRIPT), *args],
         env=full_env,
         capture_output=True,
         text=True,
@@ -128,3 +133,37 @@ def test_build_script_links_each_version():
         r'build_target\s+"\$\{TARGETS_SRC:-\$TARGETS\}/ffmpeg_read\.c"\s+"\$TARGETS/ffmpeg_read_\$\{?ver',
         script,
     )
+
+
+def test_top_fetches_from_configured_mirror(tmp_path):
+    """FFMPEG_GIT_URL serves the sources too, not only the tag list."""
+    repo = _upstream(tmp_path)
+
+    r = _run(tmp_path, "--top=1", FFMPEG_GIT_URL=str(repo), FFMPEG_SRC="")
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "vendor" / "ffmpeg-9.0.2" / MIRROR_MARK).is_file()
+
+
+def test_top_mirror_missing_tag_fails(tmp_path):
+    """Adversarial: a mirror without the tag must fail, not fall back to another source."""
+    repo = _upstream(tmp_path)
+
+    r = _run(tmp_path, "--top=1", FFMPEG_GIT_URL=str(repo), FFMPEG_SRC="", FFMPEG_VERSIONS="6.6.6")
+
+    assert r.returncode != 0
+    assert not (tmp_path / "vendor" / "ffmpeg-6.6.6").exists()
+
+
+def test_top_needs_no_compiler(tmp_path):
+    """--top is sources-only: a PATH without clang must still vendor."""
+    _tree(tmp_path / "vendor", "1.0")
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    for tool in ["mkdir", "dirname", "git", "rm", "cat"]:
+        (bindir / tool).symlink_to(shutil.which(tool))
+
+    r = _run(tmp_path, "--top=1", FFMPEG_VERSIONS="1.0", PATH=str(bindir))
+
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "Source present" in r.stdout

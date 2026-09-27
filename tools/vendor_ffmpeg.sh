@@ -50,6 +50,8 @@ fi
 mkdir -p "$VENDOR_DIR"
 
 FFMPEG_VERSION="${FFMPEG_VERSION:-9.0.1}"
+FFMPEG_UPSTREAM="https://github.com/FFmpeg/FFmpeg"
+FFMPEG_GIT_URL="${FFMPEG_GIT_URL:-$FFMPEG_UPSTREAM}"
 # See build_targets.sh: --disable-x86asm was hardcoded because configure
 # aborts without nasm. Probe so machines that have an assembler keep the
 # SIMD paths, which are a large part of what a decoder target exercises.
@@ -100,7 +102,8 @@ case "$MODE" in
         ;;
 esac
 
-if ! command -v "$CC" &>/dev/null; then
+# --top is sources-only: no compiler needed.
+if [ "$TOP" -eq 0 ] && ! command -v "$CC" &>/dev/null; then
     echo "ERROR: $CC not found. Install clang: sudo apt install clang" >&2
     exit 1
 fi
@@ -119,7 +122,7 @@ CFLAGS="-O2 -g -fPIC -fno-omit-frame-pointer $SAN_FLAGS $SCOV_FLAGS"
 # time, and `make` only archives .o into .a (no linking), so we satisfy configure
 # with a throwaway no-op stub passed via --extra-ldflags. It never enters the .a.
 STUB_LDFLAGS=""
-if [ -n "$SCOV_FLAGS" ] && [ -z "$SAN_FLAGS" ]; then
+if [ "$TOP" -eq 0 ] && [ -n "$SCOV_FLAGS" ] && [ -z "$SAN_FLAGS" ]; then
     STUB_SRC="$(mktemp /tmp/sancov_stub.XXXXXX.c)"
     STUB_OBJ="${STUB_SRC%.c}.o"
     cat > "$STUB_SRC" <<'STUB'
@@ -178,6 +181,14 @@ fetch_source() {
             curl -fL -o "$tarball" "$FFMPEG_SRC" && _extract "$tarball" && return 0
         fi
         echo "ERROR: FFMPEG_SRC fetch failed" >&2; return 1
+    fi
+
+    # FFMPEG_GIT_URL mirror: the tag comes from it or nowhere, so a
+    # mirror-resolved version never silently becomes an upstream tree.
+    if [ "$FFMPEG_GIT_URL" != "$FFMPEG_UPSTREAM" ]; then
+        echo "[1/5] Cloning tag n${FFMPEG_VERSION} from $FFMPEG_GIT_URL..."
+        git clone -q --depth 1 --branch "n${FFMPEG_VERSION}" "$FFMPEG_GIT_URL" "$FFMPEG_DIR" && return 0
+        echo "ERROR: mirror fetch failed" >&2; return 1
     fi
 
     # 1. GitHub codeload tarball (works where ffmpeg.org is blocked)
@@ -250,7 +261,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ── Multi-version: newest patch per release line ─────────────────
 # Tags n9.0, n9.0.2, n8.1.3, n9.1-dev -> "9.0.2 8.1.3": dev tags dropped,
 # sort -V so 8.0.10 beats 8.0.3, first (newest) hit per major.minor kept.
-FFMPEG_GIT_URL="${FFMPEG_GIT_URL:-https://github.com/FFmpeg/FFmpeg}"
 top_versions() {
     git ls-remote --tags --refs "$FFMPEG_GIT_URL" 'n*' \
         | sed -n 's#.*refs/tags/n\([0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\)$#\1#p' \
