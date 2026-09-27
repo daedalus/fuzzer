@@ -34,6 +34,11 @@ Wired in PR #20 (2026-09-27) behind `--risk-matrix` (P2), `--wall-order` (P3),
 three fuzz flags are on under `--hail-mary`. Bench arms: `elo-op-minimax`,
 `wall-order`, `minimax-select`. The "Gap" column below is the pre-wiring state.
 
+**png result (2026-09-27, 20 seeds x 10k execs):** P4 `elo-op-minimax` 10W/10L,
+Δ 0; P5 `minimax-select` 10W/10L, Δ -0.5; P3 `wall-order` 6W/14L, McNemar
+p=0.115, Δ -4.5 (negative lean, not significant). P2 unmeasured (needs a
+heterogeneous target set). Details: `docs/learnings/2026-09-27-minimax-phases-png.md`.
+
 | Phase | Symbol | Gap |
 |---|---|---|
 | 2 risk matrix | `core/analyzers/analyzer_elo.py::EloTracker.select_minimax_scheduler`, `record_match(target=)` | Live fuzzer builds `BayesianEloTracker` (`core/analyzer_registry.py`); `EloTracker(use_minimax=True)` never constructed. No `--use-minimax` CLI flag. Offline half works: `bench_paired.py --risk-matrix`. |
