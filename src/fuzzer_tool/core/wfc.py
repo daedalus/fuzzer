@@ -396,15 +396,7 @@ class WaveGrid:
         if sources is None:
             sources = range(self.n)
         for i in sources:
-            if self._budget_exhausted:
-                return
-            if np.count_nonzero(self.superpositions[i]) <= 1:
-                continue
-            self._work_used += 1
-            if self._work_used > work_budget:
-                self._budget_exhausted = True
-                return
-            result = self._prune_cell(i)
+            result = self._prune_step(i, work_budget)
             if result is None:
                 return
             if result:
@@ -420,15 +412,7 @@ class WaveGrid:
             idx = queue.popleft()
 
             for nidx in self._neighbors(idx):
-                if self._budget_exhausted:
-                    return
-                if np.count_nonzero(self.superpositions[nidx]) <= 1:
-                    continue
-                self._work_used += 1
-                if self._work_used > work_budget:
-                    self._budget_exhausted = True
-                    return
-                result = self._prune_cell(nidx)
+                result = self._prune_step(nidx, work_budget)
                 if result is None:
                     return
                 if result:
@@ -436,6 +420,23 @@ class WaveGrid:
 
         if iterations >= budget:
             self._fallback_greedy()
+
+    def _prune_step(self, idx: int, work_budget: int) -> bool | None:
+        """One budgeted AC-3 prune of *idx*.
+
+        Returns None to abort propagation (work budget exhausted or
+        contradiction), False when *idx* is collapsed or unchanged, True
+        when options were removed.
+        """
+        if self._budget_exhausted:
+            return None
+        if np.count_nonzero(self.superpositions[idx]) <= 1:
+            return False
+        self._work_used += 1
+        if self._work_used > work_budget:
+            self._budget_exhausted = True
+            return None
+        return self._prune_cell(idx)
 
     def _prune_cell(self, idx: int) -> bool | None:
         """Remove tile options from cell *idx* that have no compatible neighbor.

@@ -280,36 +280,44 @@ class MonteCarloScheduler:
         # or supplement the Thompson draws so high-variance lottery-ticket
         # arms are down-weighted relative to consistent performers.
         if self._sharpe_kelly_blend > 0:
-            raw_sk: dict[str, float] = {}
-            for op in ops:
-                rm = self._op_reward_moments.get(op)
-                if rm is None or rm.count < 3:
-                    raw_sk[op] = 0.0
-                    continue
-                s = sharpe_ratio(rm.mean, rm.stddev)
-                k = kelly_fraction(rm.mean, rm.variance)
-                raw_sk[op] = s + k
-            sk_min = min(raw_sk.values())
-            sk_max = max(raw_sk.values())
-            if math.isinf(sk_max):
-                # One or more arms have infinite SK (zero variance, positive
-                # mean). Those arms get norm=1; everything else gets 0.
-                sk_norm = {op: (1.0 if math.isinf(v) else 0.0) for op, v in raw_sk.items()}
-            else:
-                rng = sk_max - sk_min
-                if rng > 0.0:
-                    sk_norm = {op: (v - sk_min) / rng for op, v in raw_sk.items()}
-                else:
-                    sk_norm = {op: 0.5 for op in raw_sk}
-            blend = self._sharpe_kelly_blend
-            for op in ops:
-                thompson_vals[op] = blend * sk_norm[op] + (1 - blend) * thompson_vals[op]
+            self._blend_sharpe_kelly(ops, thompson_vals)
 
         # If no pairwise data or blend is zero, use current scores (Thompson
         # or SK-blended) directly.
         if self.pairwise_blend <= 0 or prev_op is None or prev_op not in self.transition_total:
             return max(ops, key=lambda o: thompson_vals[o])
 
+        return self._blend_pairwise(ops, prev_op, thompson_vals)
+
+    def _blend_sharpe_kelly(self, ops: list[str], thompson_vals: dict[str, float]) -> None:
+        """Blend min-max normalized Sharpe+Kelly scores into *thompson_vals* in place."""
+        raw_sk: dict[str, float] = {}
+        for op in ops:
+            rm = self._op_reward_moments.get(op)
+            if rm is None or rm.count < 3:
+                raw_sk[op] = 0.0
+                continue
+            s = sharpe_ratio(rm.mean, rm.stddev)
+            k = kelly_fraction(rm.mean, rm.variance)
+            raw_sk[op] = s + k
+        sk_min = min(raw_sk.values())
+        sk_max = max(raw_sk.values())
+        if math.isinf(sk_max):
+            # One or more arms have infinite SK (zero variance, positive
+            # mean). Those arms get norm=1; everything else gets 0.
+            sk_norm = {op: (1.0 if math.isinf(v) else 0.0) for op, v in raw_sk.items()}
+        else:
+            rng = sk_max - sk_min
+            if rng > 0.0:
+                sk_norm = {op: (v - sk_min) / rng for op, v in raw_sk.items()}
+            else:
+                sk_norm = {op: 0.5 for op in raw_sk}
+        blend = self._sharpe_kelly_blend
+        for op in ops:
+            thompson_vals[op] = blend * sk_norm[op] + (1 - blend) * thompson_vals[op]
+
+    def _blend_pairwise(self, ops: list[str], prev_op: str, thompson_vals: dict[str, float]) -> str:
+        """Blend P(op | prev_op) transition scores into the draws; return argmax."""
         # Pairwise score: Dirichlet-Multinomial over transition counts
         # With uniform prior (alpha=1), score = count + 1
         total = self.transition_total[prev_op]

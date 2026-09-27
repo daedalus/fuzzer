@@ -220,12 +220,7 @@ class Exp4Scheduler:
         if not ops:
             return ""
         if len(ops) == 1:
-            self.init_arm(ops[0])
-            self._last_op = ops[0]
-            self._last_p_arm = 1.0
-            self._last_expert_xi = {_UNIFORM_EXPERT: 1.0}
-            self._last_q = {_UNIFORM_EXPERT: 1.0}
-            return ops[0]
+            return self._select_single(ops[0])
 
         for op in ops:
             self.init_arm(op)
@@ -243,24 +238,7 @@ class Exp4Scheduler:
             q[e] = (1.0 - self.gamma) * (w / total_w) + self.gamma / E
         self._last_q = dict(q)
 
-        # p(a) = Σ_e q_e ξ_e(a)
-        p_arm: dict[str, float] = {op: 0.0 for op in ops}
-        xi_by_expert: dict[str, dict[str, float]] = {}
-        for e in experts:
-            xi = self._expert_xi(e, ops)
-            xi_by_expert[e] = xi
-            qe = q[e]
-            for op in ops:
-                p_arm[op] += qe * xi[op]
-
-        # Numerical floor so roulette never starves an arm that should have mass
-        s = sum(p_arm.values())
-        if s <= 0:
-            u = 1.0 / len(ops)
-            p_arm = {op: u for op in ops}
-            s = 1.0
-        else:
-            p_arm = {op: v / s for op, v in p_arm.items()}
+        p_arm, xi_by_expert = self._mixture_p(experts, q, ops)
 
         r = self._rng.random()
         cumulative = 0.0
@@ -274,10 +252,37 @@ class Exp4Scheduler:
         self._last_op = chosen
         self._last_p_arm = max(p_arm[chosen], 1e-12)
         # ξ_e(chosen) per expert — used in the IW update
-        self._last_expert_xi = {
-            e: xi_by_expert[e].get(chosen, 0.0) for e in experts
-        }
+        self._last_expert_xi = {e: xi_by_expert[e].get(chosen, 0.0) for e in experts}
         return chosen
+
+    def _select_single(self, op: str) -> str:
+        """Trivial draw over one op: all mass on it and the uniform expert."""
+        self.init_arm(op)
+        self._last_op = op
+        self._last_p_arm = 1.0
+        self._last_expert_xi = {_UNIFORM_EXPERT: 1.0}
+        self._last_q = {_UNIFORM_EXPERT: 1.0}
+        return op
+
+    def _mixture_p(
+        self, experts: list[str], q: dict[str, float], ops: list[str]
+    ) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+        """Normalised p(a) = sum_e q_e xi_e(a), plus every expert's xi_e."""
+        p_arm: dict[str, float] = {op: 0.0 for op in ops}
+        xi_by_expert: dict[str, dict[str, float]] = {}
+        for e in experts:
+            xi = self._expert_xi(e, ops)
+            xi_by_expert[e] = xi
+            qe = q[e]
+            for op in ops:
+                p_arm[op] += qe * xi[op]
+
+        # Numerical floor so roulette never starves an arm that should have mass
+        s = sum(p_arm.values())
+        if s <= 0:
+            u = 1.0 / len(ops)
+            return {op: u for op in ops}, xi_by_expert
+        return {op: v / s for op, v in p_arm.items()}, xi_by_expert
 
     def record(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Importance-weighted expert update for the last EXP4 draw.

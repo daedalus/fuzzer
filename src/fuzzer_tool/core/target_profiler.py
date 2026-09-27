@@ -238,6 +238,135 @@ INTERESTING_KEYWORDS = re.compile(
 )
 
 
+def _walk_ptr_array(elf, ptr_offset, ptr_size, max_array_walk, resolve, add_token) -> bool:
+    """Walk consecutive pointers until a NULL entry or a pointer leaving
+    .rodata stops the walk; add each printable target string. True if any."""
+    found_any = False
+    for i in range(max_array_walk):
+        pos = ptr_offset + i * ptr_size
+        if pos + ptr_size > len(elf):
+            break
+        ptr_val = (
+            struct.unpack_from("<Q", elf, pos)[0]
+            if ptr_size == 8
+            else struct.unpack_from("<I", elf, pos)[0]
+        )
+        if ptr_val == 0:
+            break  # NULL terminator
+        s = resolve(ptr_val)
+        if s is None:
+            break  # pointer leaves .rodata
+        # A token table holds printable token names.
+        if not all(32 <= b < 127 for b in s):
+            break
+        add_token(s)
+        found_any = True
+    return found_any
+
+
+def _scan_ptr_tables(rodata, rodata_offset, rodata_end, resolve, seen, tokens, budget) -> None:
+    """Heuristic: scan .rodata for pointer arrays to strings.
+
+    Look for consecutive pointers (4 or 8 bytes each) pointing to strings
+    within .rodata. A valid token table has 5+ consecutive valid pointers.
+    """
+    for ptr_size in (8, 4):
+        fmt = "<Q" if ptr_size == 8 else "<I"
+        stride = ptr_size
+        # Scan with stride alignment, budget-bounded over the whole
+        # section (was hard-capped at 4096 bytes).
+        scan_limit = min(max(0, len(rodata) - stride * 5), budget)
+        if scan_limit != len(rodata) - stride * 5:
+            log.info("Parser-token heuristic scan clamped to budget for large .rodata")
+        for off in range(0, scan_limit, stride):
+            valid_ptrs = 0
+            table_tokens = []
+            for i in range(32):  # max 32 entries per table
+                pos = off + i * stride
+                if pos + ptr_size > len(rodata):
+                    break
+                ptr_val = struct.unpack_from(fmt, rodata, pos)[0]
+                # Check if pointer points to a string in .rodata
+                if not (rodata_offset <= ptr_val < rodata_end):
+                    break
+                s = resolve(ptr_val)
+                if s is None or not all(32 <= b < 127 for b in s):
+                    break
+                valid_ptrs += 1
+                if s not in seen:
+                    table_tokens.append(s)
+                    seen.add(s)
+            # Valid table: 5+ consecutive valid pointers to printable strings
+            if valid_ptrs >= 5:
+                tokens.extend(table_tokens)
+
+
+# Format-specific function names (exact, lowercased-name match), in priority order
+_EXACT_FUNC_FORMATS: tuple[tuple[str, set[str]], ...] = (
+    (
+        "png",
+        {
+            "png_create_read_struct",
+            "png_read_image",
+            "png_init_io",
+            "png_set_sig_bytes",
+            "png_sig_cmp",
+        },
+    ),
+    ("elf", {"elf_begin", "elf_kind"}),
+    ("xml", {"xml_parse", "xml_sax_parse", "xml_read_memory"}),
+    ("json", {"json_parse", "yajl_parse", "cJSON_Parse"}),
+    ("archive", {"gzread", "gzopen", "BZ2_bzDecompress", "uncompress"}),
+)
+
+# Format-specific symbol tokens (gif/webp/webm/zip). Substring match: real
+# parser symbols carry suffixes (DGifOpenFileName).
+_SUBSTR_FUNC_FORMATS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("gif", ("dgifopen", "egifopen", "dgifslurp", "egifput")),
+    ("webp", ("webpgetinfo", "webpdecode", "webpencode")),
+    ("webm", ("mkvparser", "mkvdemux", "webmcreate", "webminfo")),
+    ("zip", ("unzopen", "unzopencurrentfile", "zipopen", "mz_zip_reader")),
+)
+
+
+def _format_from_funcs(func_names_lower: set[str]) -> str | None:
+    """Format implied by function names, or None."""
+    for fmt, names in _EXACT_FUNC_FORMATS:
+        if names & func_names_lower:
+            return fmt
+    for fmt, tokens in _SUBSTR_FUNC_FORMATS:
+        if any(tok in name for name in func_names_lower for tok in tokens):
+            return fmt
+    if "parsefromarray" in func_names_lower:
+        return "protobuf"
+    return None
+
+
+def _format_from_strings(rodata_strings: list[tuple[int, str]]) -> str | None:
+    """Format implied by string constants, or None."""
+    all_strings = " ".join(s for _, s in rodata_strings[:200]).lower()
+    if "png" in all_strings and ("chunk" in all_strings or "ihdr" in all_strings):
+        return "png"
+    if "xml" in all_strings or "doctype" in all_strings:
+        return "xml"
+    if "json" in all_strings:
+        return "json"
+    if "protobuf" in all_strings or "wire_type" in all_strings:
+        return "protobuf"
+    return None
+
+
+def _format_from_magic(magic_bytes: list[bytes]) -> str | None:
+    """Format of the first detected magic signature, or None."""
+    if not magic_bytes:
+        return None
+    sig = magic_bytes[0]
+    for magic, fmt in MAGIC_SIGNATURES:
+        if sig == magic:
+            return fmt
+    return None
+
+
 class TargetProfiler:
     """Static analysis of an ELF target binary.
 
@@ -463,49 +592,12 @@ class TargetProfiler:
             # Fallback: scan entire binary for strings
             rodata = self._elf
 
-        # Extract null-terminated strings (min length 4)
-        strings = []
-        current = []
-        start = 0
-        for i, b in enumerate(rodata):
-            if 32 <= b < 127:  # printable ASCII
-                if not current:
-                    start = i
-                current.append(b)
-            else:
-                if len(current) >= 4:
-                    s = bytes(current).decode("ascii", errors="replace")
-                    strings.append((start, s))
-                current = []
-
-        if len(current) >= 4:
-            s = bytes(current).decode("ascii", errors="replace")
-            strings.append((start, s))
-
+        strings = self._ascii_runs(rodata)
         profile.rodata_strings = strings
 
-        # Filter for interesting strings
-        interesting = []
-        for _offset, s in strings:
-            sb = s.encode("ascii", errors="replace")
-            if (
-                FORMAT_STRING_RE.search(sb)
-                or ERROR_KEYWORDS.search(sb)
-                or INTERESTING_KEYWORDS.search(sb)
-            ):
-                interesting.append(s)
-            elif len(s) >= 8 and not s.startswith(("_", ".")):
-                # Long non-mangled strings are often user-visible
-                interesting.append(s)
-
-        # Deduplicate while preserving order
-        seen = set()
-        unique_interesting = []
-        for s in interesting:
-            if s not in seen:
-                seen.add(s)
-                unique_interesting.append(s)
-        profile.interesting_strings = unique_interesting[:500]
+        # Filter for interesting strings; deduplicate while preserving order
+        interesting = [s for _offset, s in strings if self._is_interesting_str(s)]
+        profile.interesting_strings = list(dict.fromkeys(interesting))[:500]
 
         # Detect magic bytes
         magic = []
@@ -519,6 +611,40 @@ class TargetProfiler:
                 if idx >= 0 and sig not in magic:
                     magic.append(sig)
         profile.magic_bytes = magic
+
+    @staticmethod
+    def _ascii_runs(data: bytes) -> list[tuple[int, str]]:
+        """Printable-ASCII runs of length >= 4 → [(offset, text)]."""
+        strings = []
+        current = []
+        start = 0
+        for i, b in enumerate(data):
+            if 32 <= b < 127:  # printable ASCII
+                if not current:
+                    start = i
+                current.append(b)
+            else:
+                if len(current) >= 4:
+                    s = bytes(current).decode("ascii", errors="replace")
+                    strings.append((start, s))
+                current = []
+
+        if len(current) >= 4:
+            s = bytes(current).decode("ascii", errors="replace")
+            strings.append((start, s))
+        return strings
+
+    @staticmethod
+    def _is_interesting_str(s: str) -> bool:
+        """Format/error/keyword strings, or long non-mangled (user-visible) ones."""
+        sb = s.encode("ascii", errors="replace")
+        if (
+            FORMAT_STRING_RE.search(sb)
+            or ERROR_KEYWORDS.search(sb)
+            or INTERESTING_KEYWORDS.search(sb)
+        ):
+            return True
+        return len(s) >= 8 and not s.startswith(("_", "."))
 
     def _extract_parser_tokens(self, profile: TargetProfile):
         """Extract parser token tables from .rodata (Bison/Yacc yytname, etc.).
@@ -563,87 +689,12 @@ class TargetProfiler:
             return rodata[str_off:end]
 
         # Check for known parser token table symbols
-        known_names = {b"yytname", b"yyTokenName", b"yy_check", b"yytranslate"}
-        for sym_name in known_names:
-            # Find the symbol in the symbol table (_symtab is list of (name, addr, size, type))
-            for sym_name_str, st_value, _st_size, _st_type in self._symtab:
-                if sym_name not in sym_name_str.encode("utf-8", errors="replace"):
-                    continue
-                if st_value == 0:
-                    continue
-                # Find which section contains this address
-                for _sec_name, (_sec_idx, sec_off, sec_addr, _sec_size) in self._sections.items():
-                    if not (sec_addr <= st_value < sec_addr + _sec_size):
-                        continue
-                    # Read pointer from the section
-                    ptr_offset = st_value - sec_addr + sec_off
-                    if ptr_offset + 8 > len(self._elf):
-                        continue
-                    # Try 8-byte pointers first (64-bit), then 4-byte
-                    for ptr_size in (8, 4):
-                        if ptr_offset + ptr_size > len(self._elf):
-                            continue
-                        # Walk the array: consecutive pointers until a NULL
-                        # entry or a pointer leaving .rodata stops the walk.
-                        found_any = False
-                        for i in range(max_array_walk):
-                            pos = ptr_offset + i * ptr_size
-                            if pos + ptr_size > len(self._elf):
-                                break
-                            ptr_val = (
-                                struct.unpack_from("<Q", self._elf, pos)[0]
-                                if ptr_size == 8
-                                else struct.unpack_from("<I", self._elf, pos)[0]
-                            )
-                            if ptr_val == 0:
-                                break  # NULL terminator
-                            s = resolve(ptr_val)
-                            if s is None:
-                                break  # pointer leaves .rodata
-                            # A token table holds printable token names.
-                            if not all(32 <= b < 127 for b in s):
-                                break
-                            add_token(s)
-                            found_any = True
-                        if found_any:
-                            break  # 8-byte walk sufficed; do not re-read as 4-byte
-                    break
+        self._known_token_tables(resolve, add_token, max_array_walk)
 
         # Heuristic: scan .rodata for pointer arrays to strings
-        # Look for consecutive pointers (4 or 8 bytes each) pointing to
-        # strings within .rodata. A valid token table has 5+ consecutive
-        # valid pointers.
-        for ptr_size in (8, 4):
-            fmt = "<Q" if ptr_size == 8 else "<I"
-            stride = ptr_size
-            # Scan with stride alignment, budget-bounded over the whole
-            # section (was hard-capped at 4096 bytes).
-            scan_limit = min(max(0, len(rodata) - stride * 5), heuristic_scan_budget)
-            if scan_limit != len(rodata) - stride * 5:
-                log.info("Parser-token heuristic scan clamped to budget for large .rodata")
-            for off in range(0, scan_limit, stride):
-                valid_ptrs = 0
-                table_tokens = []
-                for i in range(32):  # max 32 entries per table
-                    pos = off + i * stride
-                    if pos + ptr_size > len(rodata):
-                        break
-                    ptr_val = struct.unpack_from(fmt, rodata, pos)[0]
-                    # Check if pointer points to a string in .rodata
-                    if rodata_offset <= ptr_val < rodata_end:
-                        s = resolve(ptr_val)
-                        if s is not None and all(32 <= b < 127 for b in s):
-                            valid_ptrs += 1
-                            if s not in seen:
-                                table_tokens.append(s)
-                                seen.add(s)
-                        else:
-                            break
-                    else:
-                        break
-                # Valid table: 5+ consecutive valid pointers to printable strings
-                if valid_ptrs >= 5:
-                    tokens.extend(table_tokens)
+        _scan_ptr_tables(
+            rodata, rodata_offset, rodata_end, resolve, seen, tokens, heuristic_scan_budget
+        )
 
         # Deduplicate and cap
         profile.parser_tokens = list(dict.fromkeys(tokens))[:256]
@@ -652,6 +703,38 @@ class TargetProfiler:
                 "Extracted %d parser tokens from .rodata",
                 len(profile.parser_tokens),
             )
+
+    def _known_token_tables(self, resolve, add_token, max_array_walk: int) -> None:
+        """Walk pointer arrays at known token-table symbols (yytname, …)."""
+        known_names = {b"yytname", b"yyTokenName", b"yy_check", b"yytranslate"}
+        for sym_name in known_names:
+            # Find the symbol in the symbol table (_symtab is list of (name, addr, size, type))
+            for sym_name_str, st_value, _st_size, _st_type in self._symtab:
+                if sym_name not in sym_name_str.encode("utf-8", errors="replace"):
+                    continue
+                if st_value == 0:
+                    continue
+                self._walk_sym_table(st_value, resolve, add_token, max_array_walk)
+
+    def _walk_sym_table(self, st_value: int, resolve, add_token, max_array_walk: int) -> None:
+        """Read the pointer array at *st_value* from the first section holding it."""
+        # Find which section contains this address
+        for _sec_name, (_sec_idx, sec_off, sec_addr, _sec_size) in self._sections.items():
+            if not (sec_addr <= st_value < sec_addr + _sec_size):
+                continue
+            # Read pointer from the section
+            ptr_offset = st_value - sec_addr + sec_off
+            if ptr_offset + 8 > len(self._elf):
+                continue
+            # Try 8-byte pointers first (64-bit), then 4-byte
+            for ptr_size in (8, 4):
+                if ptr_offset + ptr_size > len(self._elf):
+                    continue
+                if _walk_ptr_array(
+                    self._elf, ptr_offset, ptr_size, max_array_walk, resolve, add_token
+                ):
+                    break  # 8-byte walk sufficed; do not re-read as 4-byte
+            return
 
     def _extract_constants(self, profile: TargetProfile):
         """Extract compile-time constants from disassembly.
@@ -709,8 +792,6 @@ class TargetProfiler:
             _, text_offset, text_vaddr, text_size = self._sections[".text"]
             text_data = self._elf[text_offset : text_offset + text_size]
 
-        from fuzzer_tool.core.elf import _INS_JCC, _decode_x86_64
-
         for name, addr, size, _st_type in self._symtab:
             if size == 0:
                 size = 256  # estimate for symbols without size
@@ -720,23 +801,7 @@ class TargetProfiler:
             # Count conditional branches in this function's code
             branch_density = 0.0
             if text_data and text_vaddr > 0:
-                func_start = addr - text_vaddr
-                func_end = func_start + size
-                if 0 <= func_start < len(text_data) and func_end <= len(text_data):
-                    func_bytes = text_data[func_start:func_end]
-                    cond_branches = 0
-                    try:
-                        for insn in _decode_x86_64(func_bytes, addr):
-                            if insn.insn_id == _INS_JCC:
-                                cond_branches += 1
-                    except Exception:
-                        log.debug(
-                            "Instruction parse failed at %#x in %s",
-                            addr,
-                            name,
-                            exc_info=True,
-                        )
-                    branch_density = (cond_branches / max(size, 1)) * 1024
+                branch_density = self._branch_density(text_data, text_vaddr, name, addr, size)
 
             profile.functions[name] = FunctionInfo(
                 addr=addr,
@@ -764,94 +829,45 @@ class TargetProfiler:
             n_hot = max(3, len(sorted_funcs) // 5)
             profile.hot_functions = [name for name, _ in sorted_funcs[:n_hot]]
 
+    @staticmethod
+    def _branch_density(text_data: bytes, text_vaddr: int, name: str, addr: int, size: int):
+        """Conditional branches per KiB of the function's code (0.0 when out of .text)."""
+        from fuzzer_tool.core.elf import _INS_JCC, _decode_x86_64
+
+        func_start = addr - text_vaddr
+        func_end = func_start + size
+        if not (0 <= func_start < len(text_data) and func_end <= len(text_data)):
+            return 0.0
+        func_bytes = text_data[func_start:func_end]
+        cond_branches = 0
+        try:
+            for insn in _decode_x86_64(func_bytes, addr):
+                if insn.insn_id == _INS_JCC:
+                    cond_branches += 1
+        except Exception:
+            log.debug(
+                "Instruction parse failed at %#x in %s",
+                addr,
+                name,
+                exc_info=True,
+            )
+        return (cond_branches / max(size, 1)) * 1024
+
     def _infer_format(self, profile: TargetProfile):
         """Infer input format from string constants and function names."""
         if self._elf is None:
             return
 
-        # Check for format-specific function names
-        func_names = set(profile.functions.keys())
-        func_names_lower = {n.lower() for n in func_names}
-
-        # PNG detection
-        png_funcs = {
-            "png_create_read_struct",
-            "png_read_image",
-            "png_init_io",
-            "png_set_sig_bytes",
-            "png_sig_cmp",
-        }
-        if png_funcs & func_names_lower:
-            profile.format_signature = "png"
+        # Function names first, then string constants, then magic bytes
+        func_names_lower = {n.lower() for n in profile.functions}
+        fmt = (
+            _format_from_funcs(func_names_lower)
+            or _format_from_strings(profile.rodata_strings)
+            or _format_from_magic(profile.magic_bytes)
+        )
+        if fmt is not None:
+            profile.format_signature = fmt
             return
-
-        # ELF detection
-        if "elf_begin" in func_names_lower or "elf_kind" in func_names_lower:
-            profile.format_signature = "elf"
-            return
-
-        # XML/HTML detection
-        xml_funcs = {"xml_parse", "xml_sax_parse", "xml_read_memory"}
-        if xml_funcs & func_names_lower:
-            profile.format_signature = "xml"
-            return
-
-        # JSON detection
-        json_funcs = {"json_parse", "yajl_parse", "cJSON_Parse"}
-        if json_funcs & func_names_lower:
-            profile.format_signature = "json"
-            return
-
-        # Archive detection
-        archive_funcs = {"gzread", "gzopen", "BZ2_bzDecompress", "uncompress"}
-        if archive_funcs & func_names_lower:
-            profile.format_signature = "archive"
-            return
-
-        # Format-specific symbol detection (gif/webp/webm/zip/protobuf).
-        # Substring match: real parser symbols carry suffixes (DGifOpenFileName).
-        gif_tokens = ("dgifopen", "egifopen", "dgifslurp", "egifput")
-        if any(tok in name for name in func_names_lower for tok in gif_tokens):
-            profile.format_signature = "gif"
-            return
-        webp_tokens = ("webpgetinfo", "webpdecode", "webpencode")
-        if any(tok in name for name in func_names_lower for tok in webp_tokens):
-            profile.format_signature = "webp"
-            return
-        webm_tokens = ("mkvparser", "mkvdemux", "webmcreate", "webminfo")
-        if any(tok in name for name in func_names_lower for tok in webm_tokens):
-            profile.format_signature = "webm"
-            return
-        zip_tokens = ("unzopen", "unzopencurrentfile", "zipopen", "mz_zip_reader")
-        if any(tok in name for name in func_names_lower for tok in zip_tokens):
-            profile.format_signature = "zip"
-            return
-        if "parsefromarray" in func_names_lower:
-            profile.format_signature = "protobuf"
-            return
-
-        # Heuristic: check string constants for format indicators
-        all_strings = " ".join(s for _, s in profile.rodata_strings[:200]).lower()
-        if "png" in all_strings and ("chunk" in all_strings or "ihdr" in all_strings):
-            profile.format_signature = "png"
-            return
-        if "xml" in all_strings or "doctype" in all_strings:
-            profile.format_signature = "xml"
-            return
-        if "json" in all_strings:
-            profile.format_signature = "json"
-            return
-        if "protobuf" in all_strings or "wire_type" in all_strings:
-            profile.format_signature = "protobuf"
-            return
-
-        # Heuristic: check for magic bytes
-        if profile.magic_bytes:
-            sig = profile.magic_bytes[0]
-            for magic, fmt in MAGIC_SIGNATURES:
-                if sig == magic:
-                    profile.format_signature = fmt
-                    return
 
         # Heuristic: check for text-like delimiters
         text_score = 0
@@ -937,27 +953,13 @@ class TargetProfiler:
         for name, addr, _size, _ in self._symtab:
             addr_to_func[addr] = name
 
-        from fuzzer_tool.core.elf import _GRP_CALL, _decode_x86_64
-
         for name, addr, size, _ in self._symtab:
             func_start = addr - text_vaddr
             func_end = func_start + size
             if func_start < 0 or func_end > len(text_data):
                 continue
             func_bytes = text_data[func_start:func_end]
-
-            try:
-                for insn in _decode_x86_64(func_bytes, addr):
-                    if _GRP_CALL in insn.groups and insn.op_str.startswith("0x"):
-                        target_addr = int(insn.op_str, 16)
-                        if target_addr in addr_to_func:
-                            callee = addr_to_func[target_addr]
-                            if name not in profile.call_graph:
-                                profile.call_graph[name] = set()
-                            profile.call_graph[name].add(callee)
-            except Exception:
-                log.debug("Call graph extraction failed for %s", name, exc_info=True)
-                continue
+            self._add_direct_calls(profile, name, func_bytes, addr, addr_to_func)
 
         # Build reverse call graph
         for caller, callees in profile.call_graph.items():
@@ -968,6 +970,24 @@ class TargetProfiler:
 
         # Compute call depth via BFS from entry points
         self._compute_call_depths(profile)
+
+    @staticmethod
+    def _add_direct_calls(profile, name: str, func_bytes: bytes, addr: int, addr_to_func) -> None:
+        """Record *name* → callee for each direct call to a known function."""
+        from fuzzer_tool.core.elf import _GRP_CALL, _decode_x86_64
+
+        try:
+            for insn in _decode_x86_64(func_bytes, addr):
+                if _GRP_CALL not in insn.groups or not insn.op_str.startswith("0x"):
+                    continue
+                target_addr = int(insn.op_str, 16)
+                if target_addr in addr_to_func:
+                    callee = addr_to_func[target_addr]
+                    if name not in profile.call_graph:
+                        profile.call_graph[name] = set()
+                    profile.call_graph[name].add(callee)
+        except Exception:
+            log.debug("Call graph extraction failed for %s", name, exc_info=True)
 
     def _build_call_graph_raw(self, profile, text_data, text_vaddr, addr_to_func):
         """Fallback call graph using raw E8 opcode scanning."""
@@ -1004,21 +1024,7 @@ class TargetProfiler:
 
     def _compute_call_depths(self, profile: TargetProfile):
         """Compute call depth from entry points via BFS."""
-        # Find entry points: functions not called by anyone (roots)
-        all_funcs = set(profile.functions.keys())
-        called_funcs = set()
-        for callees in profile.call_graph.values():
-            called_funcs.update(callees)
-
-        roots = all_funcs - called_funcs
-        if not roots:
-            # Fallback: use main or _start
-            for name in ("main", "_start", "__libc_start_main"):
-                if name in all_funcs:
-                    roots.add(name)
-            if not roots and all_funcs:
-                roots = {min(all_funcs)}
-
+        roots = self._call_roots(profile)
         profile.entry_points = sorted(roots)
 
         # BFS to compute depths
@@ -1041,13 +1047,26 @@ class TargetProfiler:
             if name in live:
                 profile.entry_points.append(name)
         # Deduplicate
-        seen = set()
-        unique = []
-        for p in profile.entry_points:
-            if p not in seen:
-                seen.add(p)
-                unique.append(p)
-        profile.entry_points = unique
+        profile.entry_points = list(dict.fromkeys(profile.entry_points))
+
+    @staticmethod
+    def _call_roots(profile: TargetProfile) -> set[str]:
+        """Entry points: functions not called by anyone; else main/_start, else min name."""
+        all_funcs = set(profile.functions.keys())
+        called_funcs = set()
+        for callees in profile.call_graph.values():
+            called_funcs.update(callees)
+
+        roots = all_funcs - called_funcs
+        if roots:
+            return roots
+        # Fallback: use main or _start
+        for name in ("main", "_start", "__libc_start_main"):
+            if name in all_funcs:
+                roots.add(name)
+        if not roots and all_funcs:
+            roots = {min(all_funcs)}
+        return roots
 
 
 # Format signature -> structure-aware mutation operators that are almost

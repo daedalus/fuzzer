@@ -58,60 +58,11 @@ def gradient_cmp(
             if n < 2 or n > buf_len:
                 continue
 
-            # Candidate windows: offsets where at least one byte of the
-            # comparison value occurs in the input.  Every partial match
-            # must be among these, so zero-overlap values are skipped
-            # entirely instead of scanning every window.
-            candidates = set()
-            for i in range(n):
-                for pos in pos_map.get(cmp_val[i], ()):
-                    off = pos - i
-                    if 0 <= off <= buf_len - n:
-                        candidates.add(off)
-            if not candidates:
+            hit = _partial_match(buf, pos_map, cmp_val)
+            if hit is None:
                 continue
-
-            # First partial match wins (offset ascending, as before).
-            for off in sorted(candidates):
-                # First differing byte; a window with none is a full
-                # match — not a partial match.
-                first_diff = -1
-                for i in range(n):
-                    if buf[off + i] != cmp_val[i]:
-                        first_diff = i
-                        break
-                if first_diff < 0:
-                    continue
-
-                target_off = off + first_diff
-                diff_mask = buf[target_off] ^ cmp_val[first_diff]
-                strategy = r.randint(0, 5)
-
-                if strategy == 0:
-                    # Set to expected value
-                    buf[target_off] = cmp_val[first_diff]
-                elif strategy == 1:
-                    # Flip differing bits
-                    buf[target_off] ^= diff_mask
-                elif strategy == 2:
-                    # Increment toward target
-                    if buf[target_off] < cmp_val[first_diff]:
-                        buf[target_off] = min(buf[target_off] + 1, 255)
-                    else:
-                        buf[target_off] = max(buf[target_off] - 1, 0)
-                elif strategy == 3:
-                    # Binary search toward target
-                    buf[target_off] = (buf[target_off] + cmp_val[first_diff]) // 2
-                elif strategy == 4:
-                    # Overwrite full comparison value
-                    end = min(off + len(cmp_val), len(buf))
-                    buf[off:end] = cmp_val[: end - off]
-                    return bytes(buf)
-                else:
-                    # Flip single bit
-                    buf[target_off] ^= 1 << r.randint(0, 7)
-
-                return bytes(buf)
+            _apply_gradient(buf, hit[0], hit[1], cmp_val, r)
+            return bytes(buf)
 
     # No partial match found — insert first CMP value at random position
     if cmp_values:
@@ -121,3 +72,68 @@ def gradient_cmp(
             return bytes(buf[:pos]) + cmp_val + bytes(buf[pos:])
 
     return bytes(buf)
+
+
+def _windows(pos_map: dict, cmp_val: bytes, buf_len: int) -> set[int]:
+    """In-bounds offsets where at least one byte of *cmp_val* lines up with the input."""
+    n = len(cmp_val)
+    candidates = set()
+    for i in range(n):
+        for pos in pos_map.get(cmp_val[i], ()):
+            off = pos - i
+            if 0 <= off <= buf_len - n:
+                candidates.add(off)
+    return candidates
+
+
+def _partial_match(buf: bytearray, pos_map: dict, cmp_val: bytes) -> tuple[int, int] | None:
+    """Lowest-offset partial match of *cmp_val*: (offset, first differing index), or None."""
+    n = len(cmp_val)
+
+    # Candidate windows: offsets where at least one byte of the
+    # comparison value occurs in the input.  Every partial match
+    # must be among these, so zero-overlap values are skipped
+    # entirely instead of scanning every window.
+    candidates = _windows(pos_map, cmp_val, len(buf))
+    if not candidates:
+        return None
+
+    # First partial match wins (offset ascending, as before).
+    for off in sorted(candidates):
+        # First differing byte; a window with none is a full
+        # match — not a partial match.
+        for i in range(n):
+            if buf[off + i] != cmp_val[i]:
+                return off, i
+    return None
+
+
+def _apply_gradient(buf: bytearray, off: int, first_diff: int, cmp_val: bytes, r) -> None:
+    """Apply one of 6 random gradient strategies to the first differing byte, in place."""
+    target_off = off + first_diff
+    want = cmp_val[first_diff]
+    diff_mask = buf[target_off] ^ want
+    strategy = r.randint(0, 5)
+
+    if strategy == 0:
+        # Set to expected value
+        buf[target_off] = want
+    elif strategy == 1:
+        # Flip differing bits
+        buf[target_off] ^= diff_mask
+    elif strategy == 2:
+        # Increment toward target
+        if buf[target_off] < want:
+            buf[target_off] = min(buf[target_off] + 1, 255)
+        else:
+            buf[target_off] = max(buf[target_off] - 1, 0)
+    elif strategy == 3:
+        # Binary search toward target
+        buf[target_off] = (buf[target_off] + want) // 2
+    elif strategy == 4:
+        # Overwrite full comparison value
+        end = min(off + len(cmp_val), len(buf))
+        buf[off:end] = cmp_val[: end - off]
+    else:
+        # Flip single bit
+        buf[target_off] ^= 1 << r.randint(0, 7)

@@ -452,76 +452,141 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
     return -2;
 }
 
-int main(void) {
+/* Shared library by extension, not execute permission: .so/.dylib files
+   often have +x set but must be loaded via dlopen, not exec. Only truly
+   standalone ELF binaries use the exec path. */
+static int is_shared_lib(const char *path) {
+    size_t tlen = strlen(path);
+    if (tlen >= 3 && strcasecmp(path + tlen - 3, ".so") == 0) return 1;
+    if (tlen >= 6 && strcasecmp(path + tlen - 6, ".dylib") == 0) return 1;
+    if (tlen >= 4 && strcasecmp(path + tlen - 4, ".dll") == 0) return 1;
+    return 0;
+}
+
+/* Exec path: open the staging file, try the forkserver handshake.
+   Returns 0 on fatal error (already reported on stderr). */
+static int setup_exec(void) {
+    input_fd = open(input_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (input_fd < 0) {
+        fprintf(stderr, "open input file failed: %s\n", input_path);
+        return 0;
+    }
+    use_forksrv = start_forkserver();
+    if (!use_forksrv)
+        fprintf(stderr, "forkserver handshake failed, using fork+exec\n");
+    return 1;
+}
+
+/* dlopen path: resolve func_name into target_fn. Returns 0 on failure. */
+static int setup_dlopen(const char *func_name) {
+    void *handle = dlopen(target_path_global, RTLD_NOW);
+    if (!handle) {
+        fprintf(stderr, "dlopen failed: %s\n", dlerror());
+        return 0;
+    }
+    target_fn = (fuzz_fn)dlsym(handle, func_name);
+    if (!target_fn) {
+        fprintf(stderr, "dlsym failed: %s\n", dlerror());
+        return 0;
+    }
+    return 1;
+}
+
+/* TIMEOUT <seconds> reply; non-positive values keep the current deadline. */
+static void retune_timeout(const char *arg) {
+    double t = strtod(arg, NULL);
+    if (t > 0.0) timeout_seconds = t;
+    printf("TIMEOUT_OK %.6f\n", timeout_seconds);
+    fflush(stdout);
+}
+
+/* recv_payload() outcomes. */
+enum { PAYLOAD_OK, PAYLOAD_REJECTED, PAYLOAD_EOF };
+
+/* Error reply for a RUN that cannot be executed. */
+static void reply_reject(void) {
+    printf("RC -2 0\n");
+    fflush(stdout);
+}
+
+/* Read a RUN body of data_len bytes into *data, growing it as needed.
+   REJECTED means a reply was already sent and the pipe is back in sync. */
+static int recv_payload(long data_len, uint8_t **data, size_t *data_cap) {
+    /* A zero-length input is a legitimate test case, and every RUN must
+       produce exactly one reply regardless: `continue` here left the
+       caller blocking on a reply that never came, and it tore the
+       loader down and restarted it on the join timeout. */
+    if (data_len < 0) {
+        reply_reject();
+        return PAYLOAD_REJECTED;
+    }
+    if (data_len > MAX_DATA) {
+        /* Drain the payload anyway, then answer: skipping it silently
+           would leave the body in the pipe and desync every later RUN. */
+        read_bytes(NULL, (size_t)data_len);
+        reply_reject();
+        return PAYLOAD_REJECTED;
+    }
+    if (data_len > 0 && (size_t)data_len > *data_cap) {
+        uint8_t *grown = realloc(*data, (size_t)data_len);
+        if (!grown) {
+            read_bytes(NULL, (size_t)data_len);
+            reply_reject();
+            return PAYLOAD_REJECTED;
+        }
+        *data = grown;
+        *data_cap = (size_t)data_len;
+    }
+    if (data_len > 0 && !read_bytes(*data, (size_t)data_len)) return PAYLOAD_EOF;
+    return PAYLOAD_OK;
+}
+
+/* Direct call with sigsetjmp timeout — no fork overhead.
+   NOTE: SIGSEGV in the target kills fuzz_loader. For crash
+   isolation on .so targets, use the persistent_loader adapter
+   (which forks per-call) or compile with ASAN. The target's
+   stderr is the loader's own stderr here, which the adapter
+   drains separately — nothing to report back inline. */
+static int run_direct(const uint8_t *data, size_t len) {
+    int rc;
+    struct sigaction sa_new, sa_old;
+    sa_new.sa_handler = timeout_handler;
+    sigemptyset(&sa_new.sa_mask);
+    sa_new.sa_flags = 0;
+    sigaction(SIGALRM, &sa_new, &sa_old);
+
+    timed_out = 0;
+    if (sigsetjmp(timeout_jmp, 1) == 0) {
+        arm_timeout(timeout_seconds);
+        rc = target_fn(data, len);
+        disarm_timeout();
+    } else {
+        /* Longjmp from timeout_handler */
+        rc = -1;
+    }
+
+    sigaction(SIGALRM, &sa_old, NULL);
+    return rc;
+}
+
+/* Closing the control pipe makes the forkserver's read() return 0
+   and the target exit on its own. */
+static void stop_forkserver(void) {
+    if (fsrv_ctl_fd >= 0) close(fsrv_ctl_fd);
+    if (forksrv_pid > 0) {
+        kill(forksrv_pid, SIGKILL);
+        waitpid(forksrv_pid, NULL, 0);
+    }
+    if (fsrv_st_fd >= 0) close(fsrv_st_fd);
+    if (fsrv_err_fd >= 0) close(fsrv_err_fd);
+}
+
+/* Command loop: RUN / TIMEOUT until QUIT or EOF on stdin. */
+static void serve(void) {
     char line[512];
     uint8_t *data = NULL;
     size_t data_cap = 0;
     uint8_t err[MAX_ERR];
-
-    /* Disable stdio buffering on stdin — fork() inherits the buffer and
-       _exit() in the child discards the copy, losing read-ahead data. */
-    setvbuf(stdin, NULL, _IONBF, 0);
-
-    if (!read_line(line, sizeof(line))) return 1;
-    char func_name[256];
-    char timeout_str[16] = "5";
-    sscanf(line, "INIT %255s %255s %255s %15s", target_path_global, func_name, input_path,
-           timeout_str);
-    /* strtod, not atoi: the sender may pass a fractional timeout, and atoi
-     * truncated anything under one second to 0 -- which this fallback then
-     * turned into 5s. A requested 0.04s silently became 5s, 125x larger and
-     * the opposite of what tightening the timeout is for. */
-    timeout_seconds = strtod(timeout_str, NULL);
-    if (!(timeout_seconds > 0.0)) timeout_seconds = 5.0;
-
-    /* Detect shared libraries by extension, not execute permission.
-       .so/.dylib files often have +x set but must be loaded via dlopen,
-       not exec. Only truly standalone ELF binaries use the exec path. */
-    {
-        size_t tlen = strlen(target_path_global);
-        is_executable = 1;  /* default: assume executable */
-        if (tlen >= 3 && strcasecmp(target_path_global + tlen - 3, ".so") == 0)
-            is_executable = 0;
-        else if (tlen >= 6 && strcasecmp(target_path_global + tlen - 6, ".dylib") == 0)
-            is_executable = 0;
-        else if (tlen >= 4 && strcasecmp(target_path_global + tlen - 4, ".dll") == 0)
-            is_executable = 0;
-    }
-
-    if (is_executable) {
-        input_fd = open(input_path, O_RDWR | O_CREAT | O_TRUNC, 0600);
-        if (input_fd < 0) {
-            fprintf(stderr, "open input file failed: %s\n", input_path);
-            return 1;
-        }
-        use_forksrv = start_forkserver();
-        if (!use_forksrv)
-            fprintf(stderr, "forkserver handshake failed, using fork+exec\n");
-    } else {
-        void *handle = dlopen(target_path_global, RTLD_NOW);
-        if (!handle) {
-            fprintf(stderr, "dlopen failed: %s\n", dlerror());
-            return 1;
-        }
-        target_fn = (fuzz_fn)dlsym(handle, func_name);
-        if (!target_fn) {
-            fprintf(stderr, "dlsym failed: %s\n", dlerror());
-            return 1;
-        }
-    }
-
-    /* The mode is reported because it is otherwise externally invisible:
-       forkserver and fork+exec produce byte-identical results over this
-       protocol, so a silently-failing handshake degrades throughput with
-       nothing observable to assert on.  The suffix is optional by protocol
-       -- older callers compare the line against "READY" and still match on
-       the first token. */
-    /* Trailing space-separated capability tokens after the mode. Purely
-       additive: callers that only compare the first token, or only read
-       parts[1], are unaffected, and a caller that wants TIMEOUT can detect
-       support instead of guessing from a binary it did not build. */
-    printf("READY %s retune\n", is_executable ? (use_forksrv ? "forkserver" : "exec") : "dlopen");
-    fflush(stdout);
 
     while (1) {
         if (!read_line(line, sizeof(line))) break;
@@ -539,45 +604,16 @@ int main(void) {
            atoi()/alarm() timeout bug was. The caller only sends this when
            READY advertised "retune", and then waits for TIMEOUT_OK. */
         if (strncmp(line, "TIMEOUT ", 8) == 0) {
-            double t = strtod(line + 8, NULL);
-            if (t > 0.0) timeout_seconds = t;
-            printf("TIMEOUT_OK %.6f\n", timeout_seconds);
-            fflush(stdout);
+            retune_timeout(line + 8);
             continue;
         }
 
         if (strncmp(line, "RUN ", 4) != 0) continue;
 
         long data_len = atol(line + 4);
-        /* A zero-length input is a legitimate test case, and every RUN must
-           produce exactly one reply regardless: `continue` here left the
-           caller blocking on a reply that never came, and it tore the
-           loader down and restarted it on the join timeout. */
-        if (data_len < 0) {
-            printf("RC -2 0\n");
-            fflush(stdout);
-            continue;
-        }
-        if (data_len > MAX_DATA) {
-            /* Drain the payload anyway, then answer: skipping it silently
-               would leave the body in the pipe and desync every later RUN. */
-            read_bytes(NULL, (size_t)data_len);
-            printf("RC -2 0\n");
-            fflush(stdout);
-            continue;
-        }
-        if (data_len > 0 && (size_t)data_len > data_cap) {
-            uint8_t *grown = realloc(data, (size_t)data_len);
-            if (!grown) {
-                read_bytes(NULL, (size_t)data_len);
-                printf("RC -2 0\n");
-                fflush(stdout);
-                continue;
-            }
-            data = grown;
-            data_cap = (size_t)data_len;
-        }
-        if (data_len > 0 && !read_bytes(data, (size_t)data_len)) break;
+        int got = recv_payload(data_len, &data, &data_cap);
+        if (got == PAYLOAD_EOF) break;
+        if (got == PAYLOAD_REJECTED) continue;
 
         int rc = -2;
         int err_len = 0;
@@ -586,29 +622,7 @@ int main(void) {
             rc = use_forksrv ? run_forkserver(data, (size_t)data_len, err, &err_len)
                              : run_executable(data, (size_t)data_len, err, &err_len);
         } else if (target_fn) {
-            /* Direct call with sigsetjmp timeout — no fork overhead.
-               NOTE: SIGSEGV in the target kills fuzz_loader. For crash
-               isolation on .so targets, use the persistent_loader adapter
-               (which forks per-call) or compile with ASAN. The target's
-               stderr is the loader's own stderr here, which the adapter
-               drains separately — nothing to report back inline. */
-            struct sigaction sa_new, sa_old;
-            sa_new.sa_handler = timeout_handler;
-            sigemptyset(&sa_new.sa_mask);
-            sa_new.sa_flags = 0;
-            sigaction(SIGALRM, &sa_new, &sa_old);
-
-            timed_out = 0;
-            if (sigsetjmp(timeout_jmp, 1) == 0) {
-                arm_timeout(timeout_seconds);
-                rc = target_fn(data, (size_t)data_len);
-                disarm_timeout();
-            } else {
-                /* Longjmp from timeout_handler */
-                rc = -1;
-            }
-
-            sigaction(SIGALRM, &sa_old, NULL);
+            rc = run_direct(data, (size_t)data_len);
         }
 
         printf("RC %d %d\n", rc, err_len);
@@ -617,17 +631,46 @@ int main(void) {
     }
 
     free(data);
-    if (use_forksrv) {
-        /* Closing the control pipe makes the forkserver's read() return 0
-           and the target exit on its own. */
-        if (fsrv_ctl_fd >= 0) close(fsrv_ctl_fd);
-        if (forksrv_pid > 0) {
-            kill(forksrv_pid, SIGKILL);
-            waitpid(forksrv_pid, NULL, 0);
-        }
-        if (fsrv_st_fd >= 0) close(fsrv_st_fd);
-        if (fsrv_err_fd >= 0) close(fsrv_err_fd);
-    }
+}
+
+int main(void) {
+    char line[512];
+
+    /* Disable stdio buffering on stdin — fork() inherits the buffer and
+       _exit() in the child discards the copy, losing read-ahead data. */
+    setvbuf(stdin, NULL, _IONBF, 0);
+
+    if (!read_line(line, sizeof(line))) return 1;
+    char func_name[256];
+    char timeout_str[16] = "5";
+    sscanf(line, "INIT %255s %255s %255s %15s", target_path_global, func_name, input_path,
+           timeout_str);
+    /* strtod, not atoi: the sender may pass a fractional timeout, and atoi
+     * truncated anything under one second to 0 -- which this fallback then
+     * turned into 5s. A requested 0.04s silently became 5s, 125x larger and
+     * the opposite of what tightening the timeout is for. */
+    timeout_seconds = strtod(timeout_str, NULL);
+    if (!(timeout_seconds > 0.0)) timeout_seconds = 5.0;
+
+    is_executable = !is_shared_lib(target_path_global);
+    if (!(is_executable ? setup_exec() : setup_dlopen(func_name))) return 1;
+
+    /* The mode is reported because it is otherwise externally invisible:
+       forkserver and fork+exec produce byte-identical results over this
+       protocol, so a silently-failing handshake degrades throughput with
+       nothing observable to assert on.  The suffix is optional by protocol
+       -- older callers compare the line against "READY" and still match on
+       the first token. */
+    /* Trailing space-separated capability tokens after the mode. Purely
+       additive: callers that only compare the first token, or only read
+       parts[1], are unaffected, and a caller that wants TIMEOUT can detect
+       support instead of guessing from a binary it did not build. */
+    printf("READY %s retune\n", is_executable ? (use_forksrv ? "forkserver" : "exec") : "dlopen");
+    fflush(stdout);
+
+    serve();
+
+    if (use_forksrv) stop_forkserver();
     if (input_fd >= 0) close(input_fd);
     return 0;
 }

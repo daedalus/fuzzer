@@ -103,6 +103,7 @@ class MutationContext:
         "corpus",
         "crash_mi",
         "dictionary",
+        "fsm",
         "grammar",
         "markov",
         "max_len",
@@ -130,6 +131,7 @@ class MutationContext:
         markov=None,
         mc=None,
         grammar=None,
+        fsm=None,
         crash_mi=None,
         stall_recovery_active: bool = False,
         cmplog=None,
@@ -175,6 +177,8 @@ class MutationContext:
         self.mc = mc
         #: Grammar-based structural mutator, when a grammar is loaded.
         self.grammar = grammar
+        #: Constraint-labelled FSM format (core/format_fsm.py), when loaded.
+        self.fsm = fsm
         #: Crash-guided mutual-information estimator, when populated.
         self.crash_mi = crash_mi
         #: True while the fuzzer's stall-recovery mode is active.
@@ -231,6 +235,7 @@ class MutationContext:
             markov=getattr(fuzzer, "markov", None),
             mc=getattr(fuzzer, "mc", None),
             grammar=getattr(fuzzer, "grammar", None),
+            fsm=getattr(fuzzer, "fsm", None),
             crash_mi=getattr(fuzzer, "_crash_mi", None),
             stall_recovery_active=bool(getattr(fuzzer, "_stall_recovery_active", False)),
             cmplog=cmplog,

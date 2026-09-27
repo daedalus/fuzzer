@@ -439,7 +439,9 @@ REGISTRY.register(
 def _activate_format_learner(f: FuzzerLike) -> None:
     from fuzzer_tool.core.analyzers.analyzer_format_learner import FormatLearner
 
-    f._format_learner = FormatLearner(max_timeline=10000)
+    # Shared RandPool (Hard Rule 16): weighted_position() samples through
+    # it so --seed reproduces a campaign that hits the field arm.
+    f._format_learner = FormatLearner(max_timeline=10000, rng=f._rng)
 
 
 def _deactivate_format_learner(f: FuzzerLike) -> None:

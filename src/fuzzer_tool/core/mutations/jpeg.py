@@ -100,6 +100,70 @@ class JpegMarker:
         return result
 
 
+def _consume_scan(data: bytes, pos: int, markers: list[JpegMarker]) -> tuple[int, bool]:
+    """Attach post-SOS entropy-coded bytes to markers[-1] -> (pos, hit_eoi)."""
+    # In entropy-coded segment: find next 0xFF that's a valid marker
+    scan_start = pos
+    while pos < len(data) - 1:
+        if data[pos] == 0xFF:
+            next_byte = data[pos + 1]
+            if next_byte == 0x00:
+                pos += 2  # skip byte-stuffed 0xFF
+                continue
+            if next_byte == 0xFF:
+                pos += 1  # skip padding, keep scanning
+                continue
+            # Found a real marker — scan data ends BEFORE the 0xFF
+            break
+        pos += 1
+    scan_data = data[scan_start:pos]
+    if markers:
+        markers[-1]._scan_data = scan_data
+
+    # If we stopped exactly at a standalone marker (e.g. EOI at end of file),
+    # handle it directly — the outer loop's padding-skip would drop it
+    if pos < len(data) and data[pos] == 0xFF and pos + 1 < len(data):
+        next_byte = data[pos + 1]
+        if next_byte in STANDALONE_MARKERS:
+            markers.append(JpegMarker(marker=next_byte, data=b""))
+            return pos + 2, next_byte == EOI
+    return pos, False
+
+
+def _read_marker(data: bytes, pos: int, markers: list[JpegMarker]) -> tuple[int, bool, bool]:
+    """Append the marker segment at *pos* -> (pos, stop, entering_scan)."""
+    # Skip padding 0xFF bytes (allowed by spec between markers)
+    while pos < len(data) - 1 and data[pos] == 0xFF:
+        pos += 1
+    if pos >= len(data) - 1:
+        return pos, True, False
+
+    marker_byte = data[pos]
+    pos += 1
+
+    if marker_byte in STANDALONE_MARKERS:
+        markers.append(JpegMarker(marker=marker_byte, data=b""))
+        return pos, marker_byte == EOI, False
+
+    if pos + 1 >= len(data):
+        return pos, True, False
+
+    length = struct.unpack(">H", data[pos : pos + 2])[0]
+    pos += 2
+
+    if length < 2 or pos + length - 2 > len(data):
+        # Truncated segment: keep the remainder as its payload
+        markers.append(JpegMarker(marker=marker_byte, data=data[pos:]))
+        return pos, True, False
+
+    seg_data = data[pos : pos + length - 2]
+    pos += length - 2
+    markers.append(JpegMarker(marker=marker_byte, data=seg_data))
+
+    # After SOS, the next data is entropy-coded scan data
+    return pos, False, marker_byte == SOS
+
+
 def parse_jpeg_markers(data: bytes) -> list[JpegMarker] | None:
     """Parse JPEG data into a list of JpegMarker segments.
 
@@ -116,68 +180,12 @@ def parse_jpeg_markers(data: bytes) -> list[JpegMarker] | None:
 
     while pos < len(data) - 1:
         if in_scan:
-            # In entropy-coded segment: find next 0xFF that's a valid marker
-            scan_start = pos
-            while pos < len(data) - 1:
-                if data[pos] == 0xFF:
-                    next_byte = data[pos + 1]
-                    if next_byte == 0x00:
-                        pos += 2  # skip byte-stuffed 0xFF
-                        continue
-                    if next_byte == 0xFF:
-                        pos += 1  # skip padding, keep scanning
-                        continue
-                    # Found a real marker — scan data ends BEFORE the 0xFF
-                    break
-                pos += 1
-            scan_data = data[scan_start:pos]
-            if markers:
-                markers[-1]._scan_data = scan_data
+            pos, stop = _consume_scan(data, pos, markers)
             in_scan = False
-            # If we stopped exactly at a standalone marker (e.g. EOI at end of file),
-            # handle it directly — the outer loop's padding-skip would drop it
-            if pos < len(data) and data[pos] == 0xFF and pos + 1 < len(data):
-                next_byte = data[pos + 1]
-                if next_byte in STANDALONE_MARKERS:
-                    markers.append(JpegMarker(marker=next_byte, data=b""))
-                    pos += 2
-                    if next_byte == EOI:
-                        break
-            continue
-
-        # Skip padding 0xFF bytes (allowed by spec between markers)
-        while pos < len(data) - 1 and data[pos] == 0xFF:
-            pos += 1
-        if pos >= len(data) - 1:
+        else:
+            pos, stop, in_scan = _read_marker(data, pos, markers)
+        if stop:
             break
-
-        marker_byte = data[pos]
-        pos += 1
-
-        if marker_byte in STANDALONE_MARKERS:
-            markers.append(JpegMarker(marker=marker_byte, data=b""))
-            if marker_byte == EOI:
-                break
-            continue
-
-        if pos + 1 >= len(data):
-            break
-
-        length = struct.unpack(">H", data[pos : pos + 2])[0]
-        pos += 2
-
-        if length < 2 or pos + length - 2 > len(data):
-            seg_data = data[pos:]
-            markers.append(JpegMarker(marker=marker_byte, data=seg_data))
-            break
-
-        seg_data = data[pos : pos + length - 2]
-        pos += length - 2
-        markers.append(JpegMarker(marker=marker_byte, data=seg_data))
-
-        # After SOS, the next data is entropy-coded scan data
-        if marker_byte == SOS:
-            in_scan = True
 
     return markers if len(markers) > 1 else None
 
@@ -205,6 +213,29 @@ def _marker_name(marker: int) -> str:
     return names.get(marker, f"0xFF{marker:02X}")
 
 
+def _place_by_type(names: list[bytes], markers: list[JpegMarker], order: list) -> list[JpegMarker]:
+    """Reattach segments to the WFC tile-type *order*, first-come per type."""
+    by_type: dict[bytes, list[JpegMarker]] = {}
+    for name, m in zip(names, markers, strict=True):
+        by_type.setdefault(name, []).append(m)
+
+    reordered: list[JpegMarker] = []
+    for tile_name in order:
+        if tile_name is None:
+            continue
+        pool = by_type.get(tile_name)
+        if pool:
+            reordered.append(pool.pop(0))
+
+    # Append anything WFC did not place, so no segment is silently lost.
+    # WFC generates a valid sequence of tile *types*, not a permutation of
+    # the markers actually present — it may repeat a type and omit another
+    # — so leftovers are normal rather than exceptional.
+    for pool in by_type.values():
+        reordered.extend(pool)
+    return reordered
+
+
 class JpegMutator:
     """Structure-aware JPEG mutator.
 
@@ -218,6 +249,7 @@ class JpegMutator:
         # default, never the stdlib module (Hard Rule 16).
         rng = RandPool(seed=seed)
         self._rng = rng
+
     use_wfc: bool = False  # set to True by Fuzzer when --wfc is active
 
     def mutate(self, data: bytes, max_len: int = 4096, rng=None) -> bytes:
@@ -448,31 +480,11 @@ class JpegMutator:
                 wave.superpositions[cell][:] = False
                 wave.superpositions[cell][tid] = True
 
-        result = wave.run(
-            seed=self._rng.randint(0, 2**31), max_restarts=3, ac3_budget=2000
-        )
+        result = wave.run(seed=self._rng.randint(0, 2**31), max_restarts=3, ac3_budget=2000)
         if not result or not result[0]:
             return self._random_swap_markers(markers)
 
-        by_type: dict[bytes, list[JpegMarker]] = {}
-        for name, m in zip(names, markers, strict=True):
-            by_type.setdefault(name, []).append(m)
-
-        reordered: list[JpegMarker] = []
-        for tile_name in result[0]:
-            if tile_name is None:
-                continue
-            pool = by_type.get(tile_name)
-            if pool:
-                reordered.append(pool.pop(0))
-
-        # Append anything WFC did not place, so no segment is silently lost.
-        # WFC generates a valid sequence of tile *types*, not a permutation of
-        # the markers actually present — it may repeat a type and omit another
-        # — so leftovers are normal rather than exceptional.
-        for pool in by_type.values():
-            reordered.extend(pool)
-
+        reordered = _place_by_type(names, markers, result[0])
         if not reordered:
             return markers
 
@@ -533,10 +545,7 @@ class JpegMutator:
                 com.data = bytes(data)
         else:
             # Inject a new comment before EOI
-            comment = bytes(
-                self._rng.randint(0x20, 0x7E)
-                for _ in range(self._rng.randint(4, 32))
-            )
+            comment = bytes(self._rng.randint(0x20, 0x7E) for _ in range(self._rng.randint(4, 32)))
             eoi_idx = _find_marker_index(markers, EOI)
             if eoi_idx is not None:
                 markers.insert(eoi_idx, JpegMarker(marker=COM, data=comment))

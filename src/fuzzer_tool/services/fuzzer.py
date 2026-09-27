@@ -650,13 +650,27 @@ _SELECTION_PROB_SOURCES: tuple[str, ...] = ("_exp3",)
 _POS_CANARY_KEY = "pos_canary"
 
 
+def _pos_canary_live(f) -> bool:
+    """Whether the position canary runs.
+
+    Only PositionArena.select reaches the canary, and only with --elo
+    (select_position excludes it on purpose); otherwise it never runs.
+    """
+    arena_live = (
+        getattr(f, "_position_arena", None) is not None
+        and getattr(f, "_use_elo", False)
+        and getattr(f, "_elo", None)
+    )
+    return bool(getattr(f, "_pos_canary", None) is not None and arena_live)
+
+
 def _active_position_schedulers(f) -> list[str]:
     """Position proposers whose feature is on right now (uniform excluded).
 
     Same gates as ``PositionArena._add_trackers`` and ``OperatorEngine.
     select_position``'s non-arena candidate list, so this reports
     accurately whether or not ``--position-arena`` itself is running --
-    sensitivity/te/phase/mi/crash_mi/region all reach select_position
+    sensitivity/te/phase/mi/crash_mi/region/field all reach select_position
     directly, arena or not. A plain function, not a Fuzzer method, so the
     startup-banner tests' bare stand-in objects (see
     test_regression_enabled_features_*.py) don't need to define it: every
@@ -676,22 +690,36 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("crash-mi")
     if getattr(f, "_use_region_profile", False):
         names.append("region")
+    fl = getattr(f, "_format_learner", None)
+    if fl and fl.clusters:
+        names.append("field")
     if getattr(f, "_burn_front", None) is not None:
         names.append("burn-front")
-    # Only PositionArena.select reaches the canary, and only with --elo
-    # (select_position excludes it on purpose); otherwise it never runs.
-    arena_live = (
-        getattr(f, "_position_arena", None) is not None
-        and getattr(f, "_use_elo", False)
-        and getattr(f, "_elo", None)
-    )
-    if getattr(f, "_pos_canary", None) is not None and arena_live:
+    if _pos_canary_live(f):
         names.append("canary")
     if getattr(f, "_pos_round_robin", None) is not None:
         names.append("round-robin")
     if getattr(f, "_pos_fibonacci", None) is not None:
         names.append("fibonacci")
     return names
+
+
+def _slide_windows(seed: bytes, win: int, out: list[bytes], cap: int | None) -> None:
+    """Append *seed*'s *win*-byte sliding windows to *out*, up to *cap* total.
+
+    Seeds no longer than *win* go in whole (e.g. win 4: b"abcdef" ->
+    b"abcd", b"bcde", b"cdef"; b"ab" -> b"ab").
+    """
+    if len(seed) <= win:
+        out.append(seed)
+        return
+    # bytes slicing is already a single C-level memcpy, so
+    # there is nothing for memoryview to save here — it just
+    # adds an extra allocation on the way to the same bytes.
+    for i in range(len(seed) - win + 1):
+        if cap is not None and len(out) >= cap:
+            break
+        out.append(seed[i : i + win])
 
 
 class Fuzzer:
@@ -1067,6 +1095,7 @@ class Fuzzer:
         coverage_log=None,
         stack_heartbeat=None,
         grammar=None,
+        fsm=None,
         persistent=False,
         net_host=None,
         net_port=None,
@@ -1551,6 +1580,7 @@ class Fuzzer:
         if self.coverage_log:
             self.coverage_log.parent.mkdir(parents=True, exist_ok=True)
         self.grammar = grammar
+        self.fsm = fsm
         self.persistent = persistent
         self.net_host = net_host
         self.net_port = net_port
@@ -4104,21 +4134,11 @@ class Fuzzer:
             if self._seed_skip_size and len(seed) > self._seed_skip_size:
                 continue
             if self._seed_slide_size:
-                win = max(1, self._seed_slide_size)
-                if len(seed) <= win:
-                    transformed.append(seed)
-                else:
-                    # bytes slicing is already a single C-level memcpy, so
-                    # there is nothing for memoryview to save here — it just
-                    # adds an extra allocation on the way to the same bytes.
-                    for i in range(len(seed) - win + 1):
-                        if cap is not None and len(transformed) >= cap:
-                            break
-                        transformed.append(seed[i : i + win])
-            else:
-                if self._seed_truncate_size and len(seed) > self._seed_truncate_size:
-                    seed = seed[: self._seed_truncate_size]
-                transformed.append(seed)
+                _slide_windows(seed, max(1, self._seed_slide_size), transformed, cap)
+                continue
+            if self._seed_truncate_size and len(seed) > self._seed_truncate_size:
+                seed = seed[: self._seed_truncate_size]
+            transformed.append(seed)
 
         self.corpus = transformed
 
@@ -6813,9 +6833,6 @@ class Fuzzer:
         Runs in subprocess mode (fork+exec with LD_PRELOAD) because
         ASAN detection doesn't work in-process via ctypes/direct_lite.
         """
-        from fuzzer_tool.adapters.process import run_target_stdin
-        from fuzzer_tool.core.sanitizer import SanitizerReport
-
         t0 = time.monotonic()
         pending = [
             (sig, info)
@@ -6830,46 +6847,48 @@ class Fuzzer:
 
             # Replay on ASAN target
             if self.asan_target and info["asan"] is None:
-                env = os.environ.copy()
-                self._setup_asan_env(env)
-                try:
-                    rc, stderr, _ = run_target_stdin(self.asan_target, data, self.timeout, env=env)
-                    report = SanitizerReport.parse(stderr)
-                    info["asan"] = {
-                        "rc": rc,
-                        "report": report.to_dict() if report and report.is_valid() else None,
-                        "stderr": stderr[:4096],
-                    }
-                except Exception as e:
-                    info["asan"] = {"rc": -2, "error": str(e)}
+                info["asan"] = self._sanitizer_replay(self.asan_target, data, self._setup_asan_env)
 
             # Replay on UBSAN target
             if self.ubsan_target and info["ubsan"] is None:
-                env = os.environ.copy()
-                self._setup_ubsan_env(env)
-                try:
-                    rc, stderr, _ = run_target_stdin(self.ubsan_target, data, self.timeout, env=env)
-                    report = SanitizerReport.parse(stderr)
-                    info["ubsan"] = {
-                        "rc": rc,
-                        "report": report.to_dict() if report and report.is_valid() else None,
-                        "stderr": stderr[:4096],
-                    }
-                except Exception as e:
-                    info["ubsan"] = {"rc": -2, "error": str(e)}
+                info["ubsan"] = self._sanitizer_replay(
+                    self.ubsan_target, data, self._setup_ubsan_env
+                )
 
             # Save reports when both are done (or one is done and the other is absent)
-            if (
-                info["asan"] is not None
-                and info["ubsan"] is not None
-                or self.asan_target
-                and info["asan"] is not None
-                and not self.ubsan_target
-                or self.ubsan_target
-                and info["ubsan"] is not None
-                and not self.asan_target
-            ):
+            if self._sanitizer_replay_done(info):
                 self._save_sanitizer_reports(sig, info)
+
+    def _sanitizer_replay(self, target, data: bytes, setup_env) -> dict:
+        """Run *data* on one sanitizer build; the replay record for that build."""
+        from fuzzer_tool.adapters.process import run_target_stdin
+        from fuzzer_tool.core.sanitizer import SanitizerReport
+
+        env = os.environ.copy()
+        setup_env(env)
+        try:
+            rc, stderr, _ = run_target_stdin(target, data, self.timeout, env=env)
+            report = SanitizerReport.parse(stderr)
+            return {
+                "rc": rc,
+                "report": report.to_dict() if report and report.is_valid() else None,
+                "stderr": stderr[:4096],
+            }
+        except Exception as e:
+            return {"rc": -2, "error": str(e)}
+
+    def _sanitizer_replay_done(self, info: dict) -> bool:
+        """Both replays done, or the one configured sanitizer build is."""
+        return bool(
+            info["asan"] is not None
+            and info["ubsan"] is not None
+            or self.asan_target
+            and info["asan"] is not None
+            and not self.ubsan_target
+            or self.ubsan_target
+            and info["ubsan"] is not None
+            and not self.asan_target
+        )
 
     @staticmethod
     def _setup_asan_env(env: dict) -> None:
@@ -7483,7 +7502,46 @@ class Fuzzer:
         noise = self._structure_fn.noise_type()
         structure_slope = self._structure_fn.noise_slope()
         dispersion = self._structure_fn.dispersion()
+        reason = self._stall_reason(entropy_flat, noise, structure_slope, dispersion)
 
+        # Dispersion index override: a *significantly* overdispersed D
+        # (chi-squared dispersion test, not a fixed cutoff — see
+        # StructureFunctionDetector.is_overdispersed) means clusters of
+        # discoveries with gaps — NOT a stall even if structure-function says stalled.
+        if self._structure_fn.is_overdispersed():
+            return False
+
+        # Noise-type gating and threshold adjustment
+        if noise == "active":
+            # Random exploration is normal — don't stall even if entropy is flat
+            return False
+        if not self._stall_gate_open(noise, execs_since_edge, entropy_flat):
+            return False
+
+        # Check coverage growth model for saturation
+        growth = self._edge_tracker.coverage_growth_model()
+        if growth["confidence"] > 0.3 and growth["current_rate"] < 0.001:
+            reason += " + near-saturation"
+
+        # Where the executions' hits went since coverage last grew, against
+        # the window that ended in that discovery.  A fall with the raw edge
+        # count flat is the collapse this reason had no equivalent of.
+        reason += self._exec_perplexity.reason_suffix()
+
+        self._stall_recovery_enter(reason, execs_since_edge)
+
+        # Optionally reseed the RNGs so recovery explores a different
+        # mutation stream rather than continuing the exhausted one.
+        if self._reseed_on_stall:
+            self._reseed_after_stall()
+
+        # Optionally resize the coverage bitmap to reduce hash collision risk
+        if self._resize_map_on_stall and self.shm_cov:
+            self._stall_resize_map()
+        return True
+
+    def _stall_reason(self, entropy_flat, noise: str, structure_slope, dispersion) -> str:
+        """Human-readable stall reason from the detector signals."""
         reason = "no new edges"
         if entropy_flat:
             reason += " + flat entropy"
@@ -7506,18 +7564,10 @@ class Fuzzer:
             if walls:
                 reason += f" + {walls}"
 
-        # Dispersion index override: a *significantly* overdispersed D
-        # (chi-squared dispersion test, not a fixed cutoff — see
-        # StructureFunctionDetector.is_overdispersed) means clusters of
-        # discoveries with gaps — NOT a stall even if structure-function says stalled.
-        if self._structure_fn.is_overdispersed():
-            return False
+        return reason
 
-        # Noise-type gating and threshold adjustment
-        if noise == "active":
-            # Random exploration is normal — don't stall even if entropy is flat
-            return False
-
+    def _stall_gate_open(self, noise: str, execs_since_edge: int, entropy_flat) -> bool:
+        """Noise-type threshold gate; False means not (yet) a stall."""
         effective_threshold = self._stall_threshold
         if noise == "fatiguing":
             # Pre-stall: discovery rate is trending down.
@@ -7538,66 +7588,47 @@ class Fuzzer:
 
         # Without any detector signal (structure-function unknown + entropy unknown),
         # fall through to original behavior (trigger on no-new-edges alone).
-        if noise not in ("fatiguing", "stalled", "unknown") and entropy_flat is None:
-            return False
+        return not (noise not in ("fatiguing", "stalled", "unknown") and entropy_flat is None)
 
-        # Check coverage growth model for saturation
-        growth = self._edge_tracker.coverage_growth_model()
-        if growth["confidence"] > 0.3 and growth["current_rate"] < 0.001:
-            reason += " + near-saturation"
-
-        # Where the executions' hits went since coverage last grew, against
-        # the window that ended in that discovery.  A fall with the raw edge
-        # count flat is the collapse this reason had no equivalent of.
-        reason += self._exec_perplexity.reason_suffix()
-
-        self._stall_recovery_enter(reason, execs_since_edge)
-
-        # Optionally reseed the RNGs so recovery explores a different
-        # mutation stream rather than continuing the exhausted one.
-        if self._reseed_on_stall:
-            self._reseed_after_stall()
-
-        # Optionally resize the coverage bitmap to reduce hash collision risk
-        if self._resize_map_on_stall and self.shm_cov:
-            # Ask the shim how many edges it had to throw away. Without this
-            # the load factor is computed only from edges that survived, so
-            # a saturated table looks under-full and never triggers a resize
-            # — the exact case this recovery path exists for.
-            dropped = self.shm_cov.read_dropped_edges()
-            new_size = self._edge_tracker.recommended_map_size(dropped_edges=dropped)
-            if dropped:
-                pinned = " (shim counter pinned)" if self.shm_cov.drop_counter_saturated() else ""
-                print(
-                    f"[!] Coverage map saturated: {dropped:,} edges dropped{pinned} — "
-                    f"coverage was lost, not merely delayed"
+    def _stall_resize_map(self) -> None:
+        """Grow the SHM coverage map on stall when the shim reports saturation."""
+        # Ask the shim how many edges it had to throw away. Without this
+        # the load factor is computed only from edges that survived, so
+        # a saturated table looks under-full and never triggers a resize
+        # — the exact case this recovery path exists for.
+        dropped = self.shm_cov.read_dropped_edges()
+        new_size = self._edge_tracker.recommended_map_size(dropped_edges=dropped)
+        if dropped:
+            pinned = " (shim counter pinned)" if self.shm_cov.drop_counter_saturated() else ""
+            print(
+                f"[!] Coverage map saturated: {dropped:,} edges dropped{pinned} — "
+                f"coverage was lost, not merely delayed"
+            )
+        if new_size > self.shm_cov.size:
+            current = self.shm_cov.size
+            print(
+                f"[*] Resizing SHM {current:,} → {new_size:,} entries "
+                f"(stall-triggered, n={len(self._edge_tracker._global_edge_hits)}, "
+                f"dropped={dropped:,})"
+            )
+            self.shm_cov.resize(new_size)
+            self.map_size = new_size
+            # on_resize() sets map_size and clears only what a resize
+            # actually invalidates — nothing, on the SHM path, since
+            # edge IDs do not depend on map_size.
+            self._edge_tracker.on_resize(new_size)
+            # Drops recorded against the old table say nothing about the
+            # new one; clearing keeps the next decision on fresh evidence.
+            self.shm_cov.reset_dropped_edges()
+            self._drop_resize_checked_at = self.exec_count
+            os.environ["__AFL_SHM_ID"] = self.shm_cov.env_id
+            os.environ["AFL_MAP_SIZE"] = str(new_size)
+            if self._inprocess_runner:
+                self._inprocess_runner.update_shm_after_resize(
+                    self.shm_cov._ptr, new_size, self.shm_cov.env_id
                 )
-            if new_size > self.shm_cov.size:
-                current = self.shm_cov.size
-                print(
-                    f"[*] Resizing SHM {current:,} → {new_size:,} entries "
-                    f"(stall-triggered, n={len(self._edge_tracker._global_edge_hits)}, "
-                    f"dropped={dropped:,})"
-                )
-                self.shm_cov.resize(new_size)
-                self.map_size = new_size
-                # on_resize() sets map_size and clears only what a resize
-                # actually invalidates — nothing, on the SHM path, since
-                # edge IDs do not depend on map_size.
-                self._edge_tracker.on_resize(new_size)
-                # Drops recorded against the old table say nothing about the
-                # new one; clearing keeps the next decision on fresh evidence.
-                self.shm_cov.reset_dropped_edges()
-                self._drop_resize_checked_at = self.exec_count
-                os.environ["__AFL_SHM_ID"] = self.shm_cov.env_id
-                os.environ["AFL_MAP_SIZE"] = str(new_size)
-                if self._inprocess_runner:
-                    self._inprocess_runner.update_shm_after_resize(
-                        self.shm_cov._ptr, new_size, self.shm_cov.env_id
-                    )
-                if self._forkserver:
-                    self._forkserver.update_shm_after_resize(self.shm_cov.env_id, new_size)
-        return True
+            if self._forkserver:
+                self._forkserver.update_shm_after_resize(self.shm_cov.env_id, new_size)
 
     def _maybe_resize_on_drops(self) -> None:
         """Grow the map when the shim reports drops, without waiting for a stall.

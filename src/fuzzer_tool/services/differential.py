@@ -59,6 +59,31 @@ def diff_run(
     return diff_run_detailed(target_a, target_b, data, timeout, file_mode, target_args).as_verdict()
 
 
+def _timed_run(target, data, timeout, tmp_dir, target_args, env) -> tuple[int, str, float]:
+    """Run one target (file mode iff ``tmp_dir``); return (rc, stderr, wall s)."""
+    t0 = time.perf_counter()
+    if tmp_dir:
+        rc, stderr, _pid = run_target_file(
+            target, data, timeout, tmp_dir, target_args or [], env=env
+        )
+    else:
+        rc, stderr, _pid = run_target_stdin(target, data, timeout, env=env)
+    return rc, stderr, time.perf_counter() - t0
+
+
+def _sanitizer_reason(report_a, report_b) -> str | None:
+    """Divergence reason from the two sanitizer reports, None if they agree."""
+    valid_a = bool(report_a and report_a.is_valid())
+    valid_b = bool(report_b and report_b.is_valid())
+    if valid_a and not valid_b:
+        return f"A crashes ({report_a.error_type}), B clean"
+    if valid_b and not valid_a:
+        return f"B crashes ({report_b.error_type}), A clean"
+    if valid_a and valid_b and report_a.error_type != report_b.error_type:
+        return f"different errors: {report_a.error_type} vs {report_b.error_type}"
+    return None
+
+
 def diff_run_detailed(
     target_a: str,
     target_b: str,
@@ -77,25 +102,8 @@ def diff_run_detailed(
     tmp_dir = tempfile.mkdtemp(prefix="diff_") if file_mode else None
 
     try:
-        # Run target A
-        _t0 = time.perf_counter()
-        if file_mode:
-            rc_a, stderr_a, _pid_a = run_target_file(
-                target_a, data, timeout, tmp_dir, target_args or [], env=env
-            )
-        else:
-            rc_a, stderr_a, _pid_a = run_target_stdin(target_a, data, timeout, env=env)
-        time_a = time.perf_counter() - _t0
-
-        # Run target B
-        _t0 = time.perf_counter()
-        if file_mode:
-            rc_b, stderr_b, _pid_b = run_target_file(
-                target_b, data, timeout, tmp_dir, target_args or [], env=env
-            )
-        else:
-            rc_b, stderr_b, _pid_b = run_target_stdin(target_b, data, timeout, env=env)
-        time_b = time.perf_counter() - _t0
+        rc_a, stderr_a, time_a = _timed_run(target_a, data, timeout, tmp_dir, target_args, env)
+        rc_b, stderr_b, time_b = _timed_run(target_b, data, timeout, tmp_dir, target_args, env)
     finally:
         if tmp_dir:
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -111,16 +119,10 @@ def diff_run_detailed(
     report_a = SanitizerReport.parse(stderr_a)
     report_b = SanitizerReport.parse(stderr_b)
 
-    if report_a and report_a.is_valid() and not (report_b and report_b.is_valid()):
+    san_reason = _sanitizer_reason(report_a, report_b)
+    if san_reason:
         diverged = True
-        reasons.append(f"A crashes ({report_a.error_type}), B clean")
-    elif report_b and report_b.is_valid() and not (report_a and report_a.is_valid()):
-        diverged = True
-        reasons.append(f"B crashes ({report_b.error_type}), A clean")
-    elif report_a and report_b and report_a.is_valid() and report_b.is_valid():
-        if report_a.error_type != report_b.error_type:
-            diverged = True
-            reasons.append(f"different errors: {report_a.error_type} vs {report_b.error_type}")
+        reasons.append(san_reason)
 
     # The module contract is an exact match on returncode, sanitizer report AND
     # stderr, but this branch only ever appended a reason — `diverged` stayed

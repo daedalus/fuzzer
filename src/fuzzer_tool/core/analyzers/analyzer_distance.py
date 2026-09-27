@@ -172,6 +172,44 @@ def _decode_worker_init(
     _WORKER_CTX = (path, functions, addr_to_func, func_addrs_sorted)
 
 
+def _find_sym_secs(
+    elf_data: bytes, e_shoff: int, e_shentsize: int, e_shnum: int, shstr_offset: int
+):
+    """Header offsets of (SHT_SYMTAB, .strtab); None for a missing one."""
+    symtab_sec = strtab_sec = None
+    for i in range(e_shnum):
+        sh = e_shoff + i * e_shentsize
+        sh_type = struct.unpack_from("<I", elf_data, sh + 4)[0]
+        sh_name_idx = struct.unpack_from("<I", elf_data, sh)[0]
+        name = elf_data[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(
+            b"\x00"
+        )[0]
+        if sh_type == 2:  # SHT_SYMTAB
+            symtab_sec = sh
+        elif sh_type == 3 and name == b".strtab":  # SHT_STRTAB
+            strtab_sec = sh
+    return symtab_sec, strtab_sec
+
+
+def _harmonic_bfs(preds: dict, tbbs: set[int]) -> tuple[dict[int, float], dict[int, int]]:
+    """Reverse BFS from each target block: per block, sum of 1/(1+d) and target count."""
+    sum_inv: dict[int, float] = {}
+    count: dict[int, int] = {}
+    for t in tbbs:
+        visited = {t: 0.0}
+        queue = deque([t])
+        while queue:
+            current = queue.popleft()
+            d = visited[current]
+            sum_inv[current] = sum_inv.get(current, 0.0) + 1.0 / (1.0 + d)
+            count[current] = count.get(current, 0) + 1
+            for pred in preds.get(current, ()):
+                if pred not in visited:
+                    visited[pred] = d + 1.0
+                    queue.append(pred)
+    return sum_inv, count
+
+
 class TargetDistance:
     """Compute call-graph and CFG distances from basic blocks to targets.
 
@@ -316,6 +354,39 @@ class TargetDistance:
         e_shnum = struct.unpack_from("<H", elf_data, 60)[0]
         e_shstrndx = struct.unpack_from("<H", elf_data, 62)[0]
 
+        self._load_segments(elf_data, e_phoff, e_phentsize, e_phnum)
+        self._entry_addr = e_entry
+
+        # Parse symbol table
+        if e_shnum == 0 or e_shstrndx >= e_shnum:
+            return False
+
+        shstr_off = e_shoff + e_shstrndx * e_shentsize
+        shstr_offset = struct.unpack_from("<Q", elf_data, shstr_off + 24)[0]
+
+        symtab_sec, strtab_sec = _find_sym_secs(
+            elf_data, e_shoff, e_shentsize, e_shnum, shstr_offset
+        )
+
+        if symtab_sec is None or strtab_sec is None:
+            return False
+
+        func_addrs = self._read_func_syms(elf_data, symtab_sec, strtab_sec)
+        if func_addrs is None:
+            return False
+
+        # Sort by address for binary search in bb->func mapping
+        func_addrs.sort(key=lambda x: x[1])
+        for name, addr in func_addrs:
+            self.addr_to_func[addr] = name
+
+        log.debug("Parsed %d functions from %s", len(func_addrs), self.target)
+        # Preserve the sorted order for O(log n) callee lookups.
+        self._func_addrs_sorted = [(addr, name) for name, addr in func_addrs]
+        return len(func_addrs) > 0
+
+    def _load_segments(self, elf_data: bytes, e_phoff: int, e_phentsize: int, e_phnum: int):
+        """Set text range, base address and vaddr->offset segments from PT_LOADs."""
         # Find text segment for address range
         for i in range(e_phnum):
             off = e_phoff + i * e_phentsize
@@ -344,36 +415,14 @@ class TargetDistance:
                 if p_vaddr < min_vaddr:
                     min_vaddr = p_vaddr
         self._base_addr = min_vaddr if min_vaddr != float("inf") else 0
-        self._entry_addr = e_entry
 
-        # Parse symbol table
-        if e_shnum == 0 or e_shstrndx >= e_shnum:
-            return False
-
-        shstr_off = e_shoff + e_shstrndx * e_shentsize
-        shstr_offset = struct.unpack_from("<Q", elf_data, shstr_off + 24)[0]
-
-        symtab_sec = strtab_sec = None
-        for i in range(e_shnum):
-            sh = e_shoff + i * e_shentsize
-            sh_type = struct.unpack_from("<I", elf_data, sh + 4)[0]
-            sh_name_idx = struct.unpack_from("<I", elf_data, sh)[0]
-            name = elf_data[shstr_offset + sh_name_idx : shstr_offset + sh_name_idx + 32].split(
-                b"\x00"
-            )[0]
-            if sh_type == 2:  # SHT_SYMTAB
-                symtab_sec = sh
-            elif sh_type == 3 and name == b".strtab":  # SHT_STRTAB
-                strtab_sec = sh
-
-        if symtab_sec is None or strtab_sec is None:
-            return False
-
+    def _read_func_syms(self, elf_data: bytes, symtab_sec: int, strtab_sec: int):
+        """Record STT_FUNC symbols (+ sancov hooks); None when entsize is 0."""
         sym_offset = struct.unpack_from("<Q", elf_data, symtab_sec + 24)[0]
         sym_size = struct.unpack_from("<Q", elf_data, symtab_sec + 32)[0]
         sym_entsize = struct.unpack_from("<Q", elf_data, symtab_sec + 56)[0]
         if sym_entsize == 0:
-            return False
+            return None
         sym_count = sym_size // sym_entsize
         strtab_offset = struct.unpack_from("<Q", elf_data, strtab_sec + 24)[0]
 
@@ -401,16 +450,7 @@ class TargetDistance:
                 end = st_value + st_size if st_size > 0 else st_value + 1
                 func_addrs.append((name, st_value))
                 self.functions[name] = (st_value, end)
-
-        # Sort by address for binary search in bb->func mapping
-        func_addrs.sort(key=lambda x: x[1])
-        for name, addr in func_addrs:
-            self.addr_to_func[addr] = name
-
-        log.debug("Parsed %d functions from %s", len(func_addrs), self.target)
-        # Preserve the sorted order for O(log n) callee lookups.
-        self._func_addrs_sorted = [(addr, name) for name, addr in func_addrs]
-        return len(func_addrs) > 0
+        return func_addrs
 
     def _dwarf_resolver(self):
         """Lazily build the DWARF file:line resolver for this target."""
@@ -635,18 +675,36 @@ class TargetDistance:
             if tfname:
                 target_funcs.add(tfname)
 
+        wanted = sorted(target_funcs)
+        ident = self._seed_cached_cfgs(wanted)
+        specs, total_bytes = self._cfg_specs(wanted)
+
+        if specs and cfg_cache.should_parallelize(total_bytes, len(specs)):
+            decoded = self._decode_parallel(specs)
+        else:
+            decoded = self._decode_serial(specs)
+
+        new_cfgs = {cfg.name: cfg for cfg in decoded}
+        self._cfgs.update(new_cfgs)
+        if ident is not None and new_cfgs:
+            cfg_cache.store(ident, new_cfgs)
+
+    def _seed_cached_cfgs(self, wanted: list[str]):
+        """Fill self._cfgs from the on-disk CFG cache; returns the cache identity."""
         ident = None
         cached: dict = {}
         if self._use_cfg_cache and cfg_cache.env_enabled():
             ident = cfg_cache.identity(self.target)
             if ident is not None:
                 cached = cfg_cache.load(ident) or {}
-        wanted = sorted(target_funcs)
         for name in wanted:
             hit = cached.get(name)
             if hit is not None and name not in self._cfgs:
                 self._cfgs[name] = hit
+        return ident
 
+    def _cfg_specs(self, wanted: list[str]) -> tuple[list[tuple[int, str, int, int]], int]:
+        """(file_off, name, start, end) for uncached, decodable functions + total bytes."""
         specs: list[tuple[int, str, int, int]] = []
         total_bytes = 0
         for name in wanted:
@@ -660,42 +718,42 @@ class TargetDistance:
                 continue
             specs.append((off, name, start, end))
             total_bytes += end - start
+        return specs, total_bytes
 
+    def _decode_parallel(self, specs: list[tuple[int, str, int, int]]) -> list[FunctionCFG]:
+        """Decode CFGs in a forked process pool (large workloads)."""
         decoded: list[FunctionCFG] = []
-        if specs and cfg_cache.should_parallelize(total_bytes, len(specs)):
-            tasks = [(name, off, end - start, start) for off, name, start, end in specs]
-            with ProcessPoolExecutor(
-                max_workers=cfg_cache.MAX_WORKERS,
-                mp_context=multiprocessing.get_context("fork"),
-                initializer=_decode_worker_init,
-                initargs=(
-                    self.target,
-                    self.functions,
-                    self.addr_to_func,
-                    getattr(self, "_func_addrs_sorted", []),
-                ),
-            ) as ex:
-                for (_, _name, _, _), cfg in zip(
-                    specs, ex.map(_decode_cfg_worker, tasks), strict=True
-                ):
-                    if cfg is not None:
-                        decoded.append(cfg)
-        else:
-            for _off, name, start, end in specs:
-                code = self._code_slice(start, end)
-                if code is None or len(code) != end - start:
-                    continue
-                try:
-                    cfg = build_function_cfg(name, code, start, self._resolve_callee_name)
-                    if cfg.blocks:
-                        decoded.append(cfg)
-                except Exception:
-                    log.debug("CFG build failed for %s", name, exc_info=True)
+        tasks = [(name, off, end - start, start) for off, name, start, end in specs]
+        with ProcessPoolExecutor(
+            max_workers=cfg_cache.MAX_WORKERS,
+            mp_context=multiprocessing.get_context("fork"),
+            initializer=_decode_worker_init,
+            initargs=(
+                self.target,
+                self.functions,
+                self.addr_to_func,
+                getattr(self, "_func_addrs_sorted", []),
+            ),
+        ) as ex:
+            for (_, _name, _, _), cfg in zip(specs, ex.map(_decode_cfg_worker, tasks), strict=True):
+                if cfg is not None:
+                    decoded.append(cfg)
+        return decoded
 
-        new_cfgs = {cfg.name: cfg for cfg in decoded}
-        self._cfgs.update(new_cfgs)
-        if ident is not None and new_cfgs:
-            cfg_cache.store(ident, new_cfgs)
+    def _decode_serial(self, specs: list[tuple[int, str, int, int]]) -> list[FunctionCFG]:
+        """Decode CFGs in-process; skips short reads and failed decodes."""
+        decoded: list[FunctionCFG] = []
+        for _off, name, start, end in specs:
+            code = self._code_slice(start, end)
+            if code is None or len(code) != end - start:
+                continue
+            try:
+                cfg = build_function_cfg(name, code, start, self._resolve_callee_name)
+                if cfg.blocks:
+                    decoded.append(cfg)
+            except Exception:
+                log.debug("CFG build failed for %s", name, exc_info=True)
+        return decoded
 
     def _compute_bb_values(self):
         """Compute AFLGo BB-level distances for the target functions.
@@ -720,16 +778,7 @@ class TargetDistance:
         if not self._cfgs:
             return
 
-        # Blocks containing a target address are the target blocks.
-        target_bbs: dict[str, set[int]] = {}
-        for taddr in self.target_addrs:
-            func = self._addr_to_function(taddr)
-            cfg = self._cfgs.get(func) if func else None
-            if cfg is None:
-                continue
-            blk = cfg.block_containing(taddr)
-            if blk:
-                target_bbs.setdefault(func, set()).add(blk.start)
+        target_bbs = self._target_bbs()
 
         for func, cfg in self._cfgs.items():
             tbbs = target_bbs.get(func)
@@ -742,21 +791,7 @@ class TargetDistance:
             # (see the docstring above): for every block b, accumulate
             # 1/(1 + d(b,t)) and the reachable-target count, where d(b,t)
             # is the shortest *forward* path from b to t.
-            preds = predecessors(cfg)
-            sum_inv: dict[int, float] = {}
-            count: dict[int, int] = {}
-            for t in tbbs:
-                visited = {t: 0.0}
-                queue = deque([t])
-                while queue:
-                    current = queue.popleft()
-                    d = visited[current]
-                    sum_inv[current] = sum_inv.get(current, 0.0) + 1.0 / (1.0 + d)
-                    count[current] = count.get(current, 0) + 1
-                    for pred in preds.get(current, ()):
-                        if pred not in visited:
-                            visited[pred] = d + 1.0
-                            queue.append(pred)
+            sum_inv, count = _harmonic_bfs(predecessors(cfg), tbbs)
 
             for bs, blk in cfg.blocks.items():
                 if bs in tbbs:
@@ -766,18 +801,35 @@ class TargetDistance:
                     self._bb_value[bs] = count[bs] / sum_inv[bs]
 
             if self._gate_bonus:
-                # Mandatory control-flow gates for this function's targets
-                # (core/dominators.py). Discount is applied after the BFS
-                # values above are all in place, and only to blocks that
-                # already carry a harmonic-BFS value — a gate outside the
-                # BFS-reachable set (e.g. only reachable via an indirect
-                # jump) has no baseline value to discount and is skipped
-                # rather than invented.
-                gates = gate_blocks(cfg, tbbs)
-                for bs in gates:
-                    if bs in self._bb_value and bs not in tbbs:
-                        self._bb_value[bs] *= 1.0 - self._gate_bonus
-                self._bb_gate.update(gates)
+                self._discount_gates(cfg, tbbs)
+
+    def _target_bbs(self) -> dict[str, set[int]]:
+        """Function name -> start addresses of blocks containing a target."""
+        target_bbs: dict[str, set[int]] = {}
+        for taddr in self.target_addrs:
+            func = self._addr_to_function(taddr)
+            cfg = self._cfgs.get(func) if func else None
+            if cfg is None:
+                continue
+            blk = cfg.block_containing(taddr)
+            if blk:
+                target_bbs.setdefault(func, set()).add(blk.start)
+        return target_bbs
+
+    def _discount_gates(self, cfg, tbbs: set[int]) -> None:
+        """Discount valued mandatory gate blocks by the gate bonus."""
+        # Mandatory control-flow gates for this function's targets
+        # (core/dominators.py). Discount is applied after the BFS
+        # values above are all in place, and only to blocks that
+        # already carry a harmonic-BFS value — a gate outside the
+        # BFS-reachable set (e.g. only reachable via an indirect
+        # jump) has no baseline value to discount and is skipped
+        # rather than invented.
+        gates = gate_blocks(cfg, tbbs)
+        for bs in gates:
+            if bs in self._bb_value and bs not in tbbs:
+                self._bb_value[bs] *= 1.0 - self._gate_bonus
+        self._bb_gate.update(gates)
 
     def bb_distance(self, bb_addr: int) -> float:
         """Get the distance of an address to the nearest target.

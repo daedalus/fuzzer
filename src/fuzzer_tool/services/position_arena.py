@@ -15,6 +15,8 @@ Arms::
     mi           mutual-information map
     crash_mi     crash mutual-information map (after min_observations)
     region       statistical region profile
+    field        FormatLearner field hypotheses (confirmed coverage-causal
+                 offsets, --learn-format; joins once a hypothesis exists)
     burn_front   BurnFrontPositionScheduler (opt-in, --burn-front)
     canary       PositionCanaryScheduler, deliberately worst-in-class floor
                  (opt-in, --pos-canary; see core/schedulers/pos_canary.py)
@@ -65,6 +67,7 @@ POSITION_STRATEGY_NAMES = (
     "mi",
     "crash_mi",
     "region",
+    "field",
     "burn_front",
     "canary",
     "round_robin",
@@ -109,6 +112,10 @@ class PositionArena:
             cm = getattr(f, "_crash_mi", None)
             return bool(cm and cm.total_execs >= cm.min_observations)
 
+        def field_ready() -> bool:
+            fl = getattr(f, "_format_learner", None)
+            return bool(fl and fl.clusters)
+
         def phase(data: bytes, n: int) -> int | None:
             meta = f.seed_meta.get(data)
             return f._get_phase_weighted_position(n, meta.get("record_stride") if meta else None)
@@ -122,6 +129,7 @@ class PositionArena:
             ("mi", lambda d, n: f._mi.weighted_position(n), on("_use_mi", "_mi")),
             ("crash_mi", lambda d, n: f._crash_mi.weighted_position(n), crash_ready),
             ("region", region_fn, lambda: bool(getattr(f, "_use_region_profile", False))),
+            ("field", lambda d, n: f._format_learner.weighted_position(d, n), field_ready),
         ]  # fmt: skip
         for name, fn, gate in specs:
             self._arms[name] = (CallablePosition(name, fn), gate)

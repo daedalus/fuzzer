@@ -910,14 +910,10 @@ static uint32_t __afl_loc_mask = 0xFFFFu;
 
 __AFL_NO_COV static inline uint32_t __afl_guard_mix(uint64_t x);
 
-__attribute__((visibility("default"), always_inline))
-static inline void __afl_map_loc(uint32_t cur_loc) {
-    if (!__afl_area) return;
-
-    uint32_t gen = __afl_generation;
-    if (__afl_gen_word)
-        gen = *__afl_gen_word & __AFL_GEN_MASK;
-
+/* Edge id for cur_loc: n-gram / previous-location hash, optionally
+ * XORed with the caller context. May return 0 -- caller remaps it. */
+__attribute__((always_inline))
+static inline uint32_t __afl_edge_hash(uint32_t cur_loc) {
 #if __AFL_NGRAM_K > 2
     /* FNV-1a over the k−1 ring slots (oldest→newest from __afl_prev_idx)
      * then cur_loc. Order-sensitive and cheap (2 ops/slot); XOR chains go
@@ -930,40 +926,24 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
     h ^= cur_loc;
     h *= 16777619u;
 # if __AFL_CTX_SENSITIVE
-    uint32_t edge_id = __afl_get_caller_ctx() ^ h;
+    return __afl_get_caller_ctx() ^ h;
 # else
-    uint32_t edge_id = h;
+    return h;
 # endif
 #else
 #if __AFL_CTX_SENSITIVE
     uint32_t caller_ctx = __afl_get_caller_ctx();
-    uint32_t edge_id = caller_ctx ^ __afl_prev_loc ^ cur_loc;
+    return caller_ctx ^ __afl_prev_loc ^ cur_loc;
 #else
-    uint32_t edge_id = __afl_prev_loc ^ cur_loc;
+    return __afl_prev_loc ^ cur_loc;
 #endif
 #endif
-    /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
-     * edge that hashes to 0 would be silently dropped and the slot
-     * reclaimed by the next collision. Remap exactly that one value to 1.
-     *
-     * Not `edge_id |= 1`: that forces bit 0 on EVERY id, which erases bit 0
-     * of cur_loc (and of the context tag) for all edges, so (p, 2k) and
-     * (p, 2k+1) -- very often the two successors of one branch -- became
-     * one id. Measured on fuzzgoat: 80 of 344 real edges merged by that
-     * alone. The remap below merges only the id-0 edge with the id-1 edge. */
-    if (!edge_id) edge_id = 1;
-    uint32_t pos     = edge_id % __afl_map_size;
+}
 
-    /* Linear probe, bounded to __AFL_PROBE_MAX slots.
-     *
-     * The bound converts a map_size-iteration worst case into a constant.
-     * It is only correct because insertion is bounded by the same constant:
-     * an edge is therefore always within __AFL_PROBE_MAX of its home slot
-     * or absent, so a bounded lookup can never miss an edge a bounded
-     * insert placed. Do not bound one without the other. */
-    uint32_t window = __AFL_PROBE_MAX;
-    if (window > __afl_map_size) window = __afl_map_size;
-
+/* Record edge_id in the SHM table for generation gen (see __afl_map_loc). */
+__attribute__((always_inline))
+static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
+                                      uint32_t window, uint32_t gen) {
     for (uint32_t i = 0; i < window; i++) {
         uint32_t idx = (pos + i) % __afl_map_size;
         uint32_t eid = __afl_area[idx].edge_id;
@@ -975,13 +955,13 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
             __afl_total_edge_count++;                /* track cumulative across-reset count */
             if (__afl_edge_count)                    /* write CUMULATIVE count live to SHM header */
                 *__afl_edge_count = __afl_total_edge_count;
-            break;
+            return;
         }
         if (eid == edge_id) {                        /* existing edge */
             if ((__afl_area[idx].count >> 24) == gen) {
                 if ((__afl_area[idx].count & 0x00FFFFFFu) < 0x00FFFFFFu)
                     __afl_area[idx].count++;
-                break;
+                return;
             }
             /* Stale entry for this same edge: reclaim IN PLACE.
              *
@@ -1004,7 +984,7 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
              * already owns a slot, so it is not a newly discovered edge. */
             __afl_area[idx].count = (gen << 24) | 1;
             __afl_iter_edge_count++;
-            break;
+            return;
         }
         /* else: hash collision against a live or stale *different* edge —
          * keep probing. A stale different edge is not reclaimed: its slot
@@ -1019,6 +999,51 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
         if (i == window - 1)
             __afl_note_drop();
     }
+}
+
+/* Shift cur_loc into the previous-location state for the next edge. */
+__attribute__((always_inline))
+static inline void __afl_push_prev(uint32_t cur_loc) {
+#if __AFL_NGRAM_K > 2
+    __afl_prev_locs[__afl_prev_idx] = cur_loc >> 1;
+    __afl_prev_idx = (__afl_prev_idx + 1) % (__AFL_NGRAM_K - 1);
+#else
+    __afl_prev_loc = cur_loc >> 1;
+#endif
+}
+
+__attribute__((visibility("default"), always_inline))
+static inline void __afl_map_loc(uint32_t cur_loc) {
+    if (!__afl_area) return;
+
+    uint32_t gen = __afl_generation;
+    if (__afl_gen_word)
+        gen = *__afl_gen_word & __AFL_GEN_MASK;
+
+    uint32_t edge_id = __afl_edge_hash(cur_loc);
+    /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
+     * edge that hashes to 0 would be silently dropped and the slot
+     * reclaimed by the next collision. Remap exactly that one value to 1.
+     *
+     * Not `edge_id |= 1`: that forces bit 0 on EVERY id, which erases bit 0
+     * of cur_loc (and of the context tag) for all edges, so (p, 2k) and
+     * (p, 2k+1) -- very often the two successors of one branch -- became
+     * one id. Measured on fuzzgoat: 80 of 344 real edges merged by that
+     * alone. The remap below merges only the id-0 edge with the id-1 edge. */
+    if (!edge_id) edge_id = 1;
+    uint32_t pos     = edge_id % __afl_map_size;
+
+    /* Linear probe, bounded to __AFL_PROBE_MAX slots.
+     *
+     * The bound converts a map_size-iteration worst case into a constant.
+     * It is only correct because insertion is bounded by the same constant:
+     * an edge is therefore always within __AFL_PROBE_MAX of its home slot
+     * or absent, so a bounded lookup can never miss an edge a bounded
+     * insert placed. Do not bound one without the other. */
+    uint32_t window = __AFL_PROBE_MAX;
+    if (window > __afl_map_size) window = __afl_map_size;
+
+    __afl_probe_insert(edge_id, pos, window, gen);
 
     /* Accumulate rolling path hash: hash = hash * 31 ^ edge_id */
     __afl_path_hash_acc = (__afl_path_hash_acc * 31) ^ edge_id;
@@ -1028,12 +1053,7 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
     __afl_log_fire(edge_id);
 #endif
 
-#if __AFL_NGRAM_K > 2
-    __afl_prev_locs[__afl_prev_idx] = cur_loc >> 1;
-    __afl_prev_idx = (__afl_prev_idx + 1) % (__AFL_NGRAM_K - 1);
-#else
-    __afl_prev_loc = cur_loc >> 1;
-#endif
+    __afl_push_prev(cur_loc);
 }
 
 /* ── Compiler-inserted edge coverage callbacks ────────────────────────

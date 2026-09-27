@@ -492,6 +492,44 @@ def _synthetic_report(cfg: SweepConfig) -> str:
     # deterministic with it off.
     aslr_off = not cfg.keep_aslr
 
+    baseline, stable, dead_seq, live_seq = _synth_collect(cfg, aslr_off)
+
+    dead_nonzero = sum(1 for x in dead_seq if x)
+    live_nonzero = sum(1 for x in live_seq if x)
+
+    lines.append("# Synthetic-target liveness calibration (handover item B)")
+    lines.append("")
+    lines.append(
+        f"- target: {cfg.blocks} blocks, fanout {cfg.fanout}, "
+        f"--unstable {cfg.unstable}; baseline edges {len(baseline)}"
+    )
+    lines.append(f"- dead region {SYNTH_DEAD_REGION}, live region {SYNTH_LIVE_REGION}")
+    lines.append(f"- calibration samples per region: {cfg.calib_samples}")
+    lines.append(f"- ASLR disabled (production condition): {aslr_off}")
+    lines.append(f"- identical-input reruns stable: {stable}")
+    lines.append(f"- dead-region mutations moving coverage: {dead_nonzero}/{cfg.calib_samples}")
+    lines.append(f"- live-region mutations moving coverage: {live_nonzero}/{cfg.calib_samples}")
+    lines.append("")
+
+    lines += _unstable_note(cfg, stable)
+
+    lines.append("## Estimator verdict by switch_after")
+    lines.append("")
+    lines.append(
+        "| switch_after | dead verdict | dead conv@ | live verdict | live mask bits | live leading-zero run |"
+    )
+    lines.append("|---:|---|---:|---|---:|---:|")
+    dead_ok, live_ok = _verdict_rows(cfg, dead_seq, live_seq, lines)
+
+    lines.append("## Verdict")
+    lines.append("")
+    lines += _synth_verdict(stable, dead_ok, live_ok)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _synth_collect(cfg: SweepConfig, aslr_off: bool) -> tuple:
+    """Build the synthetic target; return (baseline, stable, dead_seq, live_seq)."""
     with tempfile.TemporaryDirectory() as td:
         workdir = Path(td)
         exe = _build_synthetic_target(workdir, cfg)
@@ -527,24 +565,12 @@ def _synthetic_report(cfg: SweepConfig) -> str:
             cfg.map_bits,
             aslr_off,
         )
+    return baseline, stable, dead_seq, live_seq
 
-    dead_nonzero = sum(1 for x in dead_seq if x)
-    live_nonzero = sum(1 for x in live_seq if x)
 
-    lines.append("# Synthetic-target liveness calibration (handover item B)")
-    lines.append("")
-    lines.append(
-        f"- target: {cfg.blocks} blocks, fanout {cfg.fanout}, "
-        f"--unstable {cfg.unstable}; baseline edges {len(baseline)}"
-    )
-    lines.append(f"- dead region {SYNTH_DEAD_REGION}, live region {SYNTH_LIVE_REGION}")
-    lines.append(f"- calibration samples per region: {cfg.calib_samples}")
-    lines.append(f"- ASLR disabled (production condition): {aslr_off}")
-    lines.append(f"- identical-input reruns stable: {stable}")
-    lines.append(f"- dead-region mutations moving coverage: {dead_nonzero}/{cfg.calib_samples}")
-    lines.append(f"- live-region mutations moving coverage: {live_nonzero}/{cfg.calib_samples}")
-    lines.append("")
-
+def _unstable_note(cfg: SweepConfig, stable: bool) -> list[str]:
+    """Warning or note lines for --unstable runs; empty when --unstable 0."""
+    lines: list[str] = []
     if cfg.unstable > 0 and not stable:
         lines.append(
             "WARNING: the target is not deterministic, so dead-region "
@@ -564,13 +590,13 @@ def _synthetic_report(cfg: SweepConfig) -> str:
             "calibration rather than a target with the blocks removed."
         )
         lines.append("")
+    return lines
 
-    lines.append("## Estimator verdict by switch_after")
-    lines.append("")
-    lines.append(
-        "| switch_after | dead verdict | dead conv@ | live verdict | live mask bits | live leading-zero run |"
-    )
-    lines.append("|---:|---|---:|---|---:|---:|")
+
+def _verdict_rows(
+    cfg: SweepConfig, dead_seq: list, live_seq: list, lines: list[str]
+) -> tuple[bool, bool]:
+    """Append one table row per switch_after; return (dead_ok, live_ok) vs ground truth."""
     dead_ok = True
     live_ok = True
     for sa in cfg.switch_grid:
@@ -586,9 +612,12 @@ def _synthetic_report(cfg: SweepConfig) -> str:
             f"{live_row['leading_zero_run']} |"
         )
     lines.append("")
+    return dead_ok, live_ok
 
-    lines.append("## Verdict")
-    lines.append("")
+
+def _synth_verdict(stable: bool, dead_ok: bool, live_ok: bool) -> list[str]:
+    """Final verdict paragraph(s): INCONCLUSIVE, CORRECT or MISCLASSIFICATION."""
+    lines: list[str] = []
     if not stable:
         lines.append(
             "INCONCLUSIVE: the target was not deterministic, so a "
@@ -623,8 +652,7 @@ def _synthetic_report(cfg: SweepConfig) -> str:
             "truth for at least one switch_after. Investigate before shipping "
             "any threshold change."
         )
-    lines.append("")
-    return "\n".join(lines)
+    return lines
 
 
 def _stability_report(rows: list[dict]) -> str:

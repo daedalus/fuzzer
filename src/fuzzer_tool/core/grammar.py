@@ -100,6 +100,30 @@ def decode_quoted_literal(text: str) -> bytes:
 GENERATION_BYTE_CAP = 1 << 20  # 1 MiB
 
 
+# Unquoted escapes accepted by ``Grammar._parse_alternative`` (no ``\\0``,
+# unlike quoted literals).
+_UNQUOTED_ESCAPES = {"t": 9, "r": 13, "n": 10}
+
+
+def _unquoted_escape(alt: str, i: int, n: int) -> int | None:
+    """Byte for the unquoted escape at ``alt[i] == "\\"``, else None.
+
+    ``\\x41`` -> 0x41, ``\\n`` -> 10; malformed ``\\xZZ`` -> None.
+    """
+    if i + 1 >= n:
+        return None
+    nxt = alt[i + 1]
+    if nxt != "x":
+        return _UNQUOTED_ESCAPES.get(nxt)
+    if i + 3 >= n:
+        return None
+    try:
+        v = int(alt[i + 2 : i + 4], 16)
+    except ValueError:
+        return None
+    return v if 0 <= v <= 255 else None
+
+
 class Grammar:
     """Simple grammar-based generator and mutator.
 
@@ -224,7 +248,6 @@ class Grammar:
         # Split the alternative at unquoted escapes; everything else goes
         # through the tokenizer unchanged.
         tokens: list = []
-        simple_escapes = {"t": 9, "r": 13, "n": 10}
         seg_start = 0
         in_quote: str | None = None
         i = 0
@@ -244,25 +267,14 @@ class Grammar:
                 in_quote = ch
                 i += 1
                 continue
-            if ch == "\\" and i + 1 < n:
-                nxt = alt[i + 1]
-                byte = None
-                if nxt == "x" and i + 3 < n:
-                    try:
-                        v = int(alt[i + 2 : i + 4], 16)
-                        if 0 <= v <= 255:
-                            byte = v
-                    except ValueError:
-                        byte = None
-                elif nxt in simple_escapes:
-                    byte = simple_escapes[nxt]
-                if byte is not None:
-                    if seg_start < i:
-                        tokens.extend(match_segment(alt[seg_start:i]))
-                    tokens.append(("lit", bytes((byte,))))
-                    i += 4 if nxt == "x" else 2
-                    seg_start = i
-                    continue
+            byte = _unquoted_escape(alt, i, n) if ch == "\\" else None
+            if byte is not None:
+                if seg_start < i:
+                    tokens.extend(match_segment(alt[seg_start:i]))
+                tokens.append(("lit", bytes((byte,))))
+                i += 4 if alt[i + 1] == "x" else 2
+                seg_start = i
+                continue
             i += 1
         if seg_start < n:
             tokens.extend(match_segment(alt[seg_start:]))
@@ -889,9 +901,7 @@ class TreeNode:
             b"N|" + self.rule.encode("utf-8", "surrogateescape") + b"|" + child_hashes
         ).digest()
 
-    def collect_interior_hashes(
-        self, rule: str | None = None
-    ) -> list[tuple["TreeNode", bytes]]:
+    def collect_interior_hashes(self, rule: str | None = None) -> list[tuple["TreeNode", bytes]]:
         """Collect ``(node, canonical_hash)`` pairs for interior nodes.
 
         Hashes every node in this subtree bottom-up in a single O(n) pass

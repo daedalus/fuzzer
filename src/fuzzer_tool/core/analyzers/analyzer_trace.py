@@ -217,6 +217,124 @@ class TraceReport:
         return "\n".join(lines)
 
 
+def _gdb_signal(lines: list[str], report: TraceReport) -> None:
+    """Signal name + description from the first 'Program received signal' line."""
+    for line in lines:
+        m = re.match(r"Program received signal (\w+), (.+)", line)
+        if m:
+            report.signal = m.group(1)
+            report.error_msg = m.group(2)
+            break
+
+
+def _gdb_registers(lines: list[str], report: TraceReport) -> None:
+    """Register dump block from `info registers` (e.g. 'rax  0x0  0')."""
+    reg_lines = []
+    in_regs = False
+    for line in lines:
+        if re.match(r"^\s*(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r\d+|rip|eflags)\s+0x", line):
+            in_regs = True
+        if not in_regs:
+            continue
+        if line.strip() and "0x" in line:
+            reg_lines.append(line.rstrip())
+            m = re.match(r"(\w+)\s+0x([0-9a-f]+)", line)
+            if m:
+                report.reg_values[m.group(1)] = int(m.group(2), 16)
+        elif reg_lines:
+            break
+    if reg_lines:
+        report.registers = "\n".join(reg_lines)
+        if "rip" in report.reg_values:
+            report.crash_rip = hex(report.reg_values["rip"])
+
+
+def _gdb_frame(stripped: str) -> dict | None:
+    """Parse '#0  0xaddr in func (args) at file:line' into a frame dict."""
+    m = re.match(
+        r"#(\d+)\s+0x([0-9a-f]+)\s+in\s+(.+?)(?:\s+\((.+?)\))?"
+        r"(?:\s+at\s+(.+?):(\d+))?",
+        stripped,
+    )
+    if not m:
+        return None
+    frame = {
+        "frame": int(m.group(1)),
+        "addr": f"0x{m.group(2)}",
+        "func": m.group(3).strip(),
+    }
+    if m.group(5):
+        frame["file"] = m.group(5)
+        frame["line"] = int(m.group(6))
+    return frame
+
+
+def _gdb_backtrace(lines: list[str], report: TraceReport) -> None:
+    """Backtrace text and parsed frames from '#N ...' lines."""
+    bt_lines = []
+    in_bt = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            in_bt = True
+            bt_lines.append(line.rstrip())
+            frame = _gdb_frame(stripped)
+            if frame:
+                report.frames.append(frame)
+        elif in_bt and stripped == "":
+            in_bt = False
+
+    if bt_lines:
+        report.backtrace = "\n".join(bt_lines)
+
+
+def _gdb_source(lines: list[str], report: TraceReport) -> None:
+    """Source context (from `list` or bt source lines), capped at 20 lines."""
+    # GDB source lines follow the pattern: linenum  source_code  [filename:line]
+    src_lines = []
+    in_source = False
+    for line in lines:
+        # GDB source context lines start with whitespace + line number + whitespace + code
+        # e.g. "   10   if (x > 0) {"
+        # Avoid matching register output or backtrace lines
+        stripped = line.strip()
+        if not stripped or stripped.startswith(("#", "rax", "0x")):
+            in_source = False
+            continue
+        m = re.match(r"^\s*\d+\s+\S", line)
+        if m and not re.match(r"^\s+(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r\d+|rip|eflags)\s", line):
+            in_source = True
+            src_lines.append(line.rstrip())
+            if len(src_lines) >= 20:
+                break
+        elif in_source:
+            break
+    if src_lines:
+        report.source_context = "\n".join(src_lines[:20])
+
+
+# Substrings that mark a disassembly body line worth keeping.
+_DISASM_TOKENS = ("0x", "push", "call", "mov", "ret", "jmp", "lea", "cmp", "xor")
+
+
+def _gdb_disasm(lines: list[str], report: TraceReport) -> None:
+    """Disassembly blocks between 'Dump of assembler' and its end marker."""
+    disasm_lines = []
+    in_disasm = False
+    for line in lines:
+        if "Dump of assembler" in line:
+            in_disasm = True
+            disasm_lines.append(line.rstrip())
+        elif in_disasm:
+            if line.strip() == "End of assembler dump.":
+                disasm_lines.append(line.rstrip())
+                in_disasm = False
+            elif line.strip() and any(tok in line for tok in _DISASM_TOKENS):
+                disasm_lines.append(line.rstrip())
+    if disasm_lines:
+        report.disassembly = "\n".join(disasm_lines)
+
+
 class CrashTracer:
     """Generate trace reports for crash inputs using GDB/strace.
 
@@ -360,13 +478,7 @@ class CrashTracer:
         """Parse GDB batch output into structured report fields."""
         lines = output.split("\n")
 
-        # Extract signal
-        for line in lines:
-            m = re.match(r"Program received signal (\w+), (.+)", line)
-            if m:
-                report.signal = m.group(1)
-                report.error_msg = m.group(2)
-                break
+        _gdb_signal(lines, report)
 
         # Extract the real faulting address from GDB's $_siginfo. The regex is
         # anchored to the distinct si_addr token so register names (rax, ...)
@@ -375,108 +487,10 @@ class CrashTracer:
         if m:
             report.fault_addr = m.group(1)
 
-        # Extract registers
-        reg_lines = []
-        in_regs = False
-        for line in lines:
-            if re.match(r"^\s*(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r\d+|rip|eflags)\s+0x", line):
-                in_regs = True
-            if in_regs:
-                if line.strip() and "0x" in line:
-                    reg_lines.append(line.rstrip())
-                    m = re.match(r"(\w+)\s+0x([0-9a-f]+)", line)
-                    if m:
-                        report.reg_values[m.group(1)] = int(m.group(2), 16)
-                elif reg_lines:
-                    break
-        if reg_lines:
-            report.registers = "\n".join(reg_lines)
-            if "rip" in report.reg_values:
-                report.crash_rip = hex(report.reg_values["rip"])
-
-        # Extract backtrace frames
-        bt_lines = []
-        in_bt = False
-        for line in lines:
-            stripped = line.strip()
-            if stripped.startswith("#"):
-                in_bt = True
-                bt_lines.append(line.rstrip())
-                # Parse frame: #0  0xaddr in func (args) at file:line
-                m = re.match(
-                    r"#(\d+)\s+0x([0-9a-f]+)\s+in\s+(.+?)(?:\s+\((.+?)\))?"
-                    r"(?:\s+at\s+(.+?):(\d+))?",
-                    stripped,
-                )
-                if m:
-                    frame = {
-                        "frame": int(m.group(1)),
-                        "addr": f"0x{m.group(2)}",
-                        "func": m.group(3).strip(),
-                    }
-                    if m.group(5):
-                        frame["file"] = m.group(5)
-                        frame["line"] = int(m.group(6))
-                    report.frames.append(frame)
-            elif in_bt and stripped == "":
-                in_bt = False
-
-        if bt_lines:
-            report.backtrace = "\n".join(bt_lines)
-
-        # Extract source context (from `list` or bt source lines)
-        # GDB source lines follow the pattern: linenum  source_code  [filename:line]
-        src_lines = []
-        in_source = False
-        for line in lines:
-            # GDB source context lines start with whitespace + line number + whitespace + code
-            # e.g. "   10   if (x > 0) {"
-            # Avoid matching register output or backtrace lines
-            stripped = line.strip()
-            if (
-                not stripped
-                or stripped.startswith("#")
-                or stripped.startswith("rax")
-                or stripped.startswith("0x")
-            ):
-                in_source = False
-                continue
-            m = re.match(r"^\s*\d+\s+\S", line)
-            if m and not re.match(r"^\s+(rax|rbx|rcx|rdx|rsi|rdi|rbp|rsp|r\d+|rip|eflags)\s", line):
-                in_source = True
-                src_lines.append(line.rstrip())
-                if len(src_lines) >= 20:
-                    break
-            elif in_source:
-                break
-        if src_lines:
-            report.source_context = "\n".join(src_lines[:20])
-
-        # Extract disassembly
-        disasm_lines = []
-        in_disasm = False
-        for line in lines:
-            if "Dump of assembler" in line:
-                in_disasm = True
-                disasm_lines.append(line.rstrip())
-            elif in_disasm:
-                if line.strip() == "End of assembler dump.":
-                    disasm_lines.append(line.rstrip())
-                    in_disasm = False
-                elif line.strip() and (
-                    "0x" in line
-                    or "push" in line
-                    or "call" in line
-                    or "mov" in line
-                    or "ret" in line
-                    or "jmp" in line
-                    or "lea" in line
-                    or "cmp" in line
-                    or "xor" in line
-                ):
-                    disasm_lines.append(line.rstrip())
-        if disasm_lines:
-            report.disassembly = "\n".join(disasm_lines)
+        _gdb_registers(lines, report)
+        _gdb_backtrace(lines, report)
+        _gdb_source(lines, report)
+        _gdb_disasm(lines, report)
 
     def _run_strace(self, input_path: str, report: TraceReport):
         """Run strace to capture syscall trace."""

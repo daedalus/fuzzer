@@ -50,26 +50,37 @@ def _dispatch_sites():
         tree = ast.parse(src)
         for cls in [n for n in tree.body if isinstance(n, ast.ClassDef)]:
             for fn in [n for n in cls.body if isinstance(n, ast.FunctionDef)]:
-                entries = None
-                for node in ast.walk(fn):
-                    if (
-                        isinstance(node, ast.Assign)
-                        and isinstance(node.targets[0], ast.Name)
-                        and node.targets[0].id == "mutators"
-                        and isinstance(node.value, ast.List)
-                    ):
-                        entries = node.value.elts
+                entries = _mutators_list(fn)
                 if entries is None:
                     continue
-                for node in ast.walk(fn):
-                    if (
-                        isinstance(node, ast.Call)
-                        and isinstance(node.func, ast.Subscript)
-                        and isinstance(node.func.value, ast.Name)
-                        and node.func.value.id == "mutators"
-                    ):
-                        arg_names = [a.id if isinstance(a, ast.Name) else None for a in node.args]
-                        yield info.name, cls.name, fn.name, entries, arg_names
+                for arg_names in _mutator_calls(fn):
+                    yield info.name, cls.name, fn.name, entries, arg_names
+
+
+def _mutators_list(fn):
+    """Elements of the last ``mutators = [...]`` assignment in *fn*, or None."""
+    entries = None
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and node.targets[0].id == "mutators"
+            and isinstance(node.value, ast.List)
+        ):
+            entries = node.value.elts
+    return entries
+
+
+def _mutator_calls(fn):
+    """Yield positional arg names (None for non-Name args) of each ``mutators[...](...)`` call."""
+    for node in ast.walk(fn):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Subscript)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "mutators"
+        ):
+            yield [a.id if isinstance(a, ast.Name) else None for a in node.args]
 
 
 _SITES = list(_dispatch_sites())

@@ -49,6 +49,104 @@ ENTROPY_STRUCTURED_PCT = 62.0
 ENTROPY_SPARSE_PCT = 25.0
 
 
+# hw ratio -> multiplier bands: (>2.0, >1.5, >1.0, <0.3); else 1x.
+_HW_INSTR_MULTS = (2.0, 1.5, 1.2, 0.5)
+_HW_BRANCH_MULTS = (1.8, 1.4, 1.15, 0.6)
+
+
+def _ratio_mult(ratio: float, mults: tuple[float, float, float, float]) -> float:
+    """Multiplier for a hw-counter ratio vs its running average (see bands above)."""
+    if ratio > 2.0:
+        return mults[0]
+    if ratio > 1.5:
+        return mults[1]
+    if ratio > 1.0:
+        return mults[2]
+    if ratio < 0.3:
+        return mults[3]
+    return 1.0
+
+
+# ── Honggfuzz power factors (each takes and returns the running factor) ──
+# Split out of SeedScorer._honggfuzz_factors in application order; float
+# multiplication is not associative, so the order must not change.
+
+
+def _hf_mid(
+    factor: float,
+    now: float,
+    time_added: float,
+    child_count: int,
+    input_size: int,
+    cmp_progress: int,
+) -> float:
+    """Freshness, size penalty and CMP-progress factors."""
+    # Freshness: time-based boost
+    if now > 0 and time_added > 0:
+        age_secs = now - time_added
+        if age_secs < 60:
+            factor *= 4.0  # <60s: 4x
+        elif age_secs < 300:
+            factor *= 2.0  # <5min: 2x
+        elif age_secs > 3600 and child_count == 0:
+            factor *= 0.5  # >60min with no children: 0.5x
+
+    # Size penalty: larger inputs get logarithmic penalty
+    if input_size > 1024:
+        log_size = int(math.log2(input_size))
+        if log_size > 10:
+            factor /= 2.0 ** min(log_size - 10, 4)
+
+    # CMP progress boost
+    if cmp_progress > 0:
+        cmp_boost = min(cmp_progress // 8, 4)
+        if cmp_boost > 0:
+            factor *= (4 + cmp_boost) / 4.0
+    return factor
+
+
+def _hf_tail(
+    factor: float,
+    rare_edge_count: int,
+    select_count: int,
+    input_entropy: float,
+    timed_out: bool,
+    stack_depth: int,
+) -> float:
+    """Rare-edge, diminishing-returns, entropy, timeout and stack-depth factors."""
+    # Rare edge bonus
+    if rare_edge_count > 0:
+        rare_boost = min(rare_edge_count, 8)
+        factor *= (8 + rare_boost) / 8.0
+
+    # Diminishing returns: inputs selected many times yield less
+    if select_count > 100:
+        penalty = min(int(math.log2(select_count / 100)), 3)
+        factor /= 2.0**penalty
+
+    # Entropy: penalize random blobs and very sparse data
+    if 0 <= input_entropy <= 100:
+        if input_entropy > ENTROPY_RANDOM_PCT:
+            factor *= 0.5  # High entropy (compressed/random)
+        elif input_entropy < ENTROPY_SPARSE_PCT:
+            factor *= 0.5  # Very low entropy (zeros)
+        elif input_entropy < ENTROPY_STRUCTURED_PCT:
+            factor *= 1.5  # Text/structured data boost
+
+    # Timeout: heavy penalty
+    if timed_out:
+        factor /= 32.0
+
+    # Stack depth: deeper execution paths suggest complex logic/recursion
+    if stack_depth > 16 * 1024:  # > 16KB
+        stack_log = int(math.log2(stack_depth / 1024))
+        if stack_log > 4:
+            # Boost factor: 16KB->1x, 32KB->1.5x, 64KB->2x, 1MB->4x
+            boost = min(stack_log - 2, 8) / 2.0
+            factor *= boost
+    return factor
+
+
 class SeedScorer:
     """Compute energy scores for queue entries using various power schedules.
 
@@ -174,65 +272,13 @@ class SeedScorer:
         Returns:
             Energy score (1 to max_mult * 100).
         """
-        perf_score = 100.0
-
-        # Speed adjustment (skip for rare schedule)
-        if self.schedule != "rare" and avg_exec_us > 0:
-            perf_score *= self._speed_factor(exec_us, avg_exec_us)
-
-        # Bitmap size adjustment
-        if avg_bitmap_size > 0:
-            perf_score *= self._bitmap_factor(bitmap_size, avg_bitmap_size)
-
-        # Handicap adjustment
-        if handicap >= 4:
-            perf_score *= 4.0
-        elif handicap > 0:
-            perf_score *= 2.0
-
-        # Depth adjustment
-        perf_score *= self._depth_factor(depth)
+        perf_score = self._base_score(
+            exec_us, avg_exec_us, bitmap_size, avg_bitmap_size, handicap, depth
+        )
 
         # ── Hardware perf factors (apply to ALL schedules) ──────────────
-        if hw_instructions > 0:
-            # Update running average (EMA)
-            if self._avg_hw_instructions == 0:
-                self._avg_hw_instructions = float(hw_instructions)
-            else:
-                self._avg_hw_instructions = (
-                    self._avg_hw_instructions * (1 - self._hw_avg_alpha)
-                    + hw_instructions * self._hw_avg_alpha
-                )
-            # Boost inputs that execute more instructions than average
-            if self._avg_hw_instructions > 0:
-                ratio = hw_instructions / max(1, self._avg_hw_instructions)
-                if ratio > 2.0:
-                    perf_score *= 2.0
-                elif ratio > 1.5:
-                    perf_score *= 1.5
-                elif ratio > 1.0:
-                    perf_score *= 1.2
-                elif ratio < 0.3:
-                    perf_score *= 0.5
-
-        if hw_branches > 0:
-            if self._avg_hw_branches == 0:
-                self._avg_hw_branches = float(hw_branches)
-            else:
-                self._avg_hw_branches = (
-                    self._avg_hw_branches * (1 - self._hw_avg_alpha)
-                    + hw_branches * self._hw_avg_alpha
-                )
-            if self._avg_hw_branches > 0:
-                ratio = hw_branches / max(1, self._avg_hw_branches)
-                if ratio > 2.0:
-                    perf_score *= 1.8
-                elif ratio > 1.5:
-                    perf_score *= 1.4
-                elif ratio > 1.0:
-                    perf_score *= 1.15
-                elif ratio < 0.3:
-                    perf_score *= 0.6
+        if hw_instructions > 0 or hw_branches > 0:
+            perf_score = self._apply_hw(perf_score, hw_instructions, hw_branches)
 
         # Schedule-specific frequency adjustment
         if self.schedule == "rare":
@@ -287,27 +333,91 @@ class SeedScorer:
             perf_score *= 1.0 + norm * (self.max_mult - 1)
 
         # ── Honggfuzz power factors (applied on top of schedule) ────────
+        # Positional: this runs once per seed pick, and a 15-keyword call
+        # costs more than the helper split below it.
         perf_score *= self._honggfuzz_factors(
-            new_edges=new_edges,
-            time_added=time_added,
-            now=now,
-            bitmap_size=bitmap_size,
-            input_size=input_size,
-            child_count=child_count,
-            cmp_progress=cmp_progress,
-            rare_edge_count=rare_edge_count,
-            select_count=select_count,
-            depth=depth,
-            timed_out=timed_out,
-            input_entropy=input_entropy,
-            bitmap_size_avg=avg_bitmap_size,
-            max_cov=max_cov,
-            stack_depth=stack_depth,
+            new_edges,
+            time_added,
+            now,
+            bitmap_size,
+            input_size,
+            child_count,
+            cmp_progress,
+            rare_edge_count,
+            select_count,
+            depth,
+            timed_out,
+            input_entropy,
+            avg_bitmap_size,
+            max_cov,
+            stack_depth,
         )
 
         # Clamp
         perf_score = max(1.0, min(perf_score, self.max_mult * 100.0))
 
+        return perf_score
+
+    def _base_score(
+        self,
+        exec_us: int,
+        avg_exec_us: int,
+        bitmap_size: int,
+        avg_bitmap_size: int,
+        handicap: int,
+        depth: int,
+    ) -> float:
+        """Schedule-independent base energy: 100 x speed x bitmap x handicap x depth."""
+        perf_score = 100.0
+
+        # Speed adjustment (skip for rare schedule)
+        if self.schedule != "rare" and avg_exec_us > 0:
+            perf_score *= self._speed_factor(exec_us, avg_exec_us)
+
+        # Bitmap size adjustment
+        if avg_bitmap_size > 0:
+            perf_score *= self._bitmap_factor(bitmap_size, avg_bitmap_size)
+
+        # Handicap adjustment
+        if handicap >= 4:
+            perf_score *= 4.0
+        elif handicap > 0:
+            perf_score *= 2.0
+
+        # Depth adjustment
+        perf_score *= self._depth_factor(depth)
+        return perf_score
+
+    def _apply_hw(self, perf_score: float, hw_instructions: int, hw_branches: int) -> float:
+        """Scale *perf_score* by hw instruction/branch counts vs their EMA.
+
+        Updates the running averages; a zero count means "not measured".
+        """
+        if hw_instructions > 0:
+            # Update running average (EMA)
+            if self._avg_hw_instructions == 0:
+                self._avg_hw_instructions = float(hw_instructions)
+            else:
+                self._avg_hw_instructions = (
+                    self._avg_hw_instructions * (1 - self._hw_avg_alpha)
+                    + hw_instructions * self._hw_avg_alpha
+                )
+            # Boost inputs that execute more instructions than average
+            if self._avg_hw_instructions > 0:
+                ratio = hw_instructions / max(1, self._avg_hw_instructions)
+                perf_score *= _ratio_mult(ratio, _HW_INSTR_MULTS)
+
+        if hw_branches > 0:
+            if self._avg_hw_branches == 0:
+                self._avg_hw_branches = float(hw_branches)
+            else:
+                self._avg_hw_branches = (
+                    self._avg_hw_branches * (1 - self._hw_avg_alpha)
+                    + hw_branches * self._hw_avg_alpha
+                )
+            if self._avg_hw_branches > 0:
+                ratio = hw_branches / max(1, self._avg_hw_branches)
+                perf_score *= _ratio_mult(ratio, _HW_BRANCH_MULTS)
         return perf_score
 
     def _honggfuzz_factors(
@@ -358,58 +468,10 @@ class SeedScorer:
         if child_count > 0:
             factor *= (8 + min(int(math.log2(child_count + 1)), 8)) / 8.0
 
-        # Freshness: time-based boost
-        if now > 0 and time_added > 0:
-            age_secs = now - time_added
-            if age_secs < 60:
-                factor *= 4.0  # <60s: 4x
-            elif age_secs < 300:
-                factor *= 2.0  # <5min: 2x
-            elif age_secs > 3600 and child_count == 0:
-                factor *= 0.5  # >60min with no children: 0.5x
-
-        # Size penalty: larger inputs get logarithmic penalty
-        if input_size > 1024:
-            log_size = int(math.log2(input_size))
-            if log_size > 10:
-                factor /= 2.0 ** min(log_size - 10, 4)
-
-        # CMP progress boost
-        if cmp_progress > 0:
-            cmp_boost = min(cmp_progress // 8, 4)
-            if cmp_boost > 0:
-                factor *= (4 + cmp_boost) / 4.0
-
-        # Rare edge bonus
-        if rare_edge_count > 0:
-            rare_boost = min(rare_edge_count, 8)
-            factor *= (8 + rare_boost) / 8.0
-
-        # Diminishing returns: inputs selected many times yield less
-        if select_count > 100:
-            penalty = min(int(math.log2(select_count / 100)), 3)
-            factor /= 2.0**penalty
-
-        # Entropy: penalize random blobs and very sparse data
-        if 0 <= input_entropy <= 100:
-            if input_entropy > ENTROPY_RANDOM_PCT:
-                factor *= 0.5  # High entropy (compressed/random)
-            elif input_entropy < ENTROPY_SPARSE_PCT:
-                factor *= 0.5  # Very low entropy (zeros)
-            elif input_entropy < ENTROPY_STRUCTURED_PCT:
-                factor *= 1.5  # Text/structured data boost
-
-        # Timeout: heavy penalty
-        if timed_out:
-            factor /= 32.0
-
-        # Stack depth: deeper execution paths suggest complex logic/recursion
-        if stack_depth > 16 * 1024:  # > 16KB
-            stack_log = int(math.log2(stack_depth / 1024))
-            if stack_log > 4:
-                # Boost factor: 16KB->1x, 32KB->1.5x, 64KB->2x, 1MB->4x
-                boost = min(stack_log - 2, 8) / 2.0
-                factor *= boost
+        factor = _hf_mid(factor, now, time_added, child_count, input_size, cmp_progress)
+        factor = _hf_tail(
+            factor, rare_edge_count, select_count, input_entropy, timed_out, stack_depth
+        )
 
         return max(0.01, factor)
 

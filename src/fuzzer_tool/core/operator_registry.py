@@ -267,6 +267,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "regex_bomb",
         "grammar_mutate",
         "grammar_tree_mutate",
+        "fsm_regen",
         "crc_learn",
         "prng_predict",
     },
@@ -663,6 +664,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     ),
     "grammar_mutate": lambda f, _d: bool(getattr(f, "grammar", None)),
     "grammar_tree_mutate": lambda f, _d: bool(getattr(f, "grammar", None)),
+    "fsm_regen": lambda f, _d: bool(getattr(f, "fsm", None)),
     # Needs a parent region profile to confine itself to; _REGION_MIN_LEN in
     # services/operators.py is the same 512, kept as a literal here so the
     # registry stays free of a services import.

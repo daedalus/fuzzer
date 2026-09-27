@@ -191,14 +191,7 @@ def solve_coupled_sections(
             solver.add(z3.ULE(offsets[i], offsets[i + 1]))
 
     if non_overlapping:
-        for i in range(count - 1):
-            # Zero-extend before adding: in modular arithmetic a wrapping sum
-            # satisfies ULE(off + size, next_off) vacuously (0x1000 +
-            # 0xFFFFF000 wraps to 0, which is <= anything), so the constraint
-            # would permit exactly the overlap it exists to forbid. Widening
-            # makes the sum a true integer.
-            wide_a = z3.ZeroExt(bits, offsets[i]) + z3.ZeroExt(bits, sizes[i])
-            solver.add(z3.ULE(wide_a, z3.ZeroExt(bits, offsets[i + 1])))
+        _add_no_overlap(z3, solver, offsets, sizes, bits)
 
     if wrap_index is not None and 0 <= wrap_index < count:
         # The sum must wrap: off + size < off in modular arithmetic.
@@ -217,6 +210,18 @@ def solve_coupled_sections(
         size = model.eval(sizes[i], model_completion=True).as_long() % modulus
         out.append((off, size))
     return out
+
+
+def _add_no_overlap(z3, solver, offsets: list, sizes: list, bits: int) -> None:
+    """Require each section to end at or before the next one starts."""
+    for i in range(len(offsets) - 1):
+        # Zero-extend before adding: in modular arithmetic a wrapping sum
+        # satisfies ULE(off + size, next_off) vacuously (0x1000 +
+        # 0xFFFFF000 wraps to 0, which is <= anything), so the constraint
+        # would permit exactly the overlap it exists to forbid. Widening
+        # makes the sum a true integer.
+        wide_a = z3.ZeroExt(bits, offsets[i]) + z3.ZeroExt(bits, sizes[i])
+        solver.add(z3.ULE(wide_a, z3.ZeroExt(bits, offsets[i + 1])))
 
 
 # ── TLV nesting ────────────────────────────────────────────────────────

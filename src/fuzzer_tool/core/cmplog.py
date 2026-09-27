@@ -942,18 +942,7 @@ class CmplogCollector:
         # and the PC field, and this is the one place the raw lines exist.
         conds = conds_from_cmplog_text(new_lines)
         self.last_conds = conds
-        for c in conds:
-            pair = (c.base.op_a, c.base.op_b)
-            if pair not in self._pair_set:
-                self._pair_set.add(pair)
-                new_pairs.append(pair)
-                if c.base.pc is not None:
-                    self._pair_pc[pair] = c.base.pc
-                if c.base.result is not None and c.base.width is not None:
-                    self._pair_cmp[pair] = (c.base.result, c.base.width)
-            batch_pairs[pair] = None
-            tokens[c.base.op_a] = None
-            tokens[c.base.op_b] = None
+        self._ingest_conds(conds, tokens, new_pairs, batch_pairs)
 
         for pair in pairs_from_operand_records(new_lines):
             if pair not in self._pair_set:
@@ -977,7 +966,26 @@ class CmplogCollector:
 
         self._evict_tokens()
         self._evict_pairs()
+        self._after_batch(new_tokens, new_pairs)
+        return new_tokens
 
+    def _ingest_conds(self, conds, tokens: dict, new_pairs: list, batch_pairs: dict) -> None:
+        """Record each comparison's operand pair (+ PC / result) and tokens."""
+        for c in conds:
+            pair = (c.base.op_a, c.base.op_b)
+            if pair not in self._pair_set:
+                self._pair_set.add(pair)
+                new_pairs.append(pair)
+                if c.base.pc is not None:
+                    self._pair_pc[pair] = c.base.pc
+                if c.base.result is not None and c.base.width is not None:
+                    self._pair_cmp[pair] = (c.base.result, c.base.width)
+            batch_pairs[pair] = None
+            tokens[c.base.op_a] = None
+            tokens[c.base.op_b] = None
+
+    def _after_batch(self, new_tokens: list[bytes], new_pairs: list) -> None:
+        """Log the batch and flag hash-like pairs that survived eviction."""
         if new_tokens:
             log.info(
                 "Cmplog: found %d new tokens, %d new pairs (total: %d tokens, %d pairs)",
@@ -994,8 +1002,6 @@ class CmplogCollector:
             n_hash = self.detect_hash_candidates(held)
             if n_hash:
                 log.info("Cmplog: flagged %d hash-like pairs (skipped by encoder)", n_hash)
-
-        return new_tokens
 
     def _evict_tokens(self) -> None:
         """Trim the token pool back to its cap, oldest-and-least-valued first.
@@ -1175,23 +1181,8 @@ class CmplogCollector:
         """
         if not self.sites_path or not os.path.exists(self.sites_path):
             return
-        try:
-            if os.path.getsize(self.sites_path) > CMPLOG_SITES_MAX_BYTES:
-                with open(self.sites_path, "r+b") as fh:
-                    fh.truncate(0)
-                self._sites_offset = 0
-                log.debug("Cmplog: truncated oversized sites file %s", self.sites_path)
-                return
-        except OSError:
-            pass
-
-        try:
-            with open(self.sites_path) as fh:
-                fh.seek(self._sites_offset)
-                new_lines = fh.readlines()
-                self._sites_offset = fh.tell()
-        except OSError as e:
-            log.debug("Failed to read cmplog sites file: %s", e)
+        new_lines = self._read_site_lines()
+        if new_lines is None:
             return
 
         for line in new_lines:
@@ -1199,18 +1190,7 @@ class CmplogCollector:
             if not parts:
                 continue
             if parts[0] == "CND" and len(parts) == 2:
-                with contextlib.suppress(ValueError):
-                    dropped = int(parts[1])
-                    self.site_dropped += dropped
-                    if dropped:
-                        if not self.sites_saturated:
-                            log.warning(
-                                "Cmplog: per-site counter table is full "
-                                "(%d insertion(s) refused); per-site figures "
-                                "are a subset from here on",
-                                self.site_dropped,
-                            )
-                        self.sites_saturated = True
+                self._note_site_drops(parts[1])
                 continue
             if parts[0] != "CNS" or len(parts) != 5:
                 continue
@@ -1227,6 +1207,46 @@ class CmplogCollector:
                 self.last_site_fired[key] = self.last_site_fired.get(key, 0) + fired
             if asserted:
                 self.last_site_asserted[key] = self.last_site_asserted.get(key, 0) + asserted
+
+    def _read_site_lines(self) -> list[str] | None:
+        """New lines of the sites file since the last drain; None when unread.
+
+        An oversized file is truncated (and None returned) instead of read.
+        """
+        try:
+            if os.path.getsize(self.sites_path) > CMPLOG_SITES_MAX_BYTES:
+                with open(self.sites_path, "r+b") as fh:
+                    fh.truncate(0)
+                self._sites_offset = 0
+                log.debug("Cmplog: truncated oversized sites file %s", self.sites_path)
+                return None
+        except OSError:
+            pass
+
+        try:
+            with open(self.sites_path) as fh:
+                fh.seek(self._sites_offset)
+                new_lines = fh.readlines()
+                self._sites_offset = fh.tell()
+        except OSError as e:
+            log.debug("Failed to read cmplog sites file: %s", e)
+            return None
+        return new_lines
+
+    def _note_site_drops(self, count: str) -> None:
+        """Fold a ``CND <n>`` refused-insertion count; warn once on saturation."""
+        with contextlib.suppress(ValueError):
+            dropped = int(count)
+            self.site_dropped += dropped
+            if dropped:
+                if not self.sites_saturated:
+                    log.warning(
+                        "Cmplog: per-site counter table is full "
+                        "(%d insertion(s) refused); per-site figures "
+                        "are a subset from here on",
+                        self.site_dropped,
+                    )
+                self.sites_saturated = True
 
     def site_walls(
         self,

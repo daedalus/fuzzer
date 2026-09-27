@@ -58,6 +58,48 @@ def sign_test_power(sd_cell: float, reps: int, n_cells: int, effect: float) -> f
     )
 
 
+def _target_deltas(by: dict, target: str) -> tuple[list, list]:
+    """Per-seed median B-A deltas on *target* and the replicate sds; prints one row per seed."""
+    ds, sds = [], []
+    for (t, s), arms in sorted(by.items()):
+        if t != target:
+            continue
+        a, b = sorted(arms.get(A, [])), sorted(arms.get(B, []))
+        if len(a) < 2 or len(b) < 2:
+            continue
+        d = statistics.median(b) - statistics.median(a)
+        ds.append(d)
+        sds += [statistics.stdev(a), statistics.stdev(b)]
+        print(f"{s:>4} {str(a):>18} {str(b):>18} {d:>+7.1f}")
+    return ds, sds
+
+
+def _wlt(ds: list) -> tuple[int, int, int]:
+    """(wins, losses, ties) of B over A from signed deltas."""
+    w = sum(1 for d in ds if d > 0)
+    loss = sum(1 for d in ds if d < 0)
+    tie = sum(1 for d in ds if d == 0)
+    return w, loss, tie
+
+
+def _report_target(ds: list, sds: list) -> None:
+    """Print one target's W/L/T, McNemar p, noise and sign-test power table."""
+    w, loss, tie = _wlt(ds)
+    p = mcnemar(w, loss)
+    sd = statistics.mean(sds)
+    print(
+        f"\n  cost wins {w}, loses {loss}, ties {tie}"
+        f" | median Δ {statistics.median(ds):+.1f}"
+        f" | McNemar p = {p:.3f}"
+    )
+    print(f"  within-cell sd {sd:.1f} edges; per-cell comparison se {sd * math.sqrt(2 / 3):.1f}")
+    line = "  detectable (80% power): "
+    for eff in (2, 5, 10, 20):
+        pw = sign_test_power(sd, 3, len(ds), eff)
+        line += f"{eff}e:{pw:.0%}  "
+    print(line)
+
+
 def main() -> int:
     path = sys.argv[1] if len(sys.argv) > 1 else "results/paired/boltzmann_replicated.json"
     rows = json.load(open(path))
@@ -74,41 +116,13 @@ def main() -> int:
     for target in sorted({t for t, _ in by}):
         print(f"\n{'=' * 66}\n{Path(target).name}\n{'=' * 66}")
         print(f"{'seed':>4} {'count':>18} {'cost':>18} {'med Δ':>7}")
-        ds, sds = [], []
-        for (t, s), arms in sorted(by.items()):
-            if t != target:
-                continue
-            a, b = sorted(arms.get(A, [])), sorted(arms.get(B, []))
-            if len(a) < 2 or len(b) < 2:
-                continue
-            d = statistics.median(b) - statistics.median(a)
-            ds.append(d)
-            sds += [statistics.stdev(a), statistics.stdev(b)]
-            print(f"{s:>4} {str(a):>18} {str(b):>18} {d:>+7.1f}")
-
+        ds, sds = _target_deltas(by, target)
         if not ds:
             continue
         all_d += ds
-        w = sum(1 for d in ds if d > 0)
-        loss = sum(1 for d in ds if d < 0)
-        tie = sum(1 for d in ds if d == 0)
-        p = mcnemar(w, loss)
-        sd = statistics.mean(sds)
-        print(
-            f"\n  cost wins {w}, loses {loss}, ties {tie}"
-            f" | median Δ {statistics.median(ds):+.1f}"
-            f" | McNemar p = {p:.3f}"
-        )
-        print(f"  within-cell sd {sd:.1f} edges; per-cell comparison se {sd * math.sqrt(2 / 3):.1f}")
-        line = "  detectable (80% power): "
-        for eff in (2, 5, 10, 20):
-            pw = sign_test_power(sd, 3, len(ds), eff)
-            line += f"{eff}e:{pw:.0%}  "
-        print(line)
+        _report_target(ds, sds)
 
-    w = sum(1 for d in all_d if d > 0)
-    loss = sum(1 for d in all_d if d < 0)
-    tie = sum(1 for d in all_d if d == 0)
+    w, loss, tie = _wlt(all_d)
     print(f"\n{'=' * 66}\npooled (for reference only -- scales differ)")
     print(
         f"  cost wins {w}, loses {loss}, ties {tie}"

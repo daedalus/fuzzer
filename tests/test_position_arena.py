@@ -431,6 +431,11 @@ class _Fuzzer:
         self._mi = SimpleNamespace(weighted_position=lambda n: 33)
         self._crash_mi = None
         self._use_region_profile = enabled.get("region", False)
+        self._format_learner = (
+            SimpleNamespace(clusters={"x": object()}, weighted_position=lambda d, n: 77)
+            if enabled.get("field", False)
+            else None
+        )
         self.phase_calls = []
 
     def _get_te_weighted_position(self, _n):
@@ -532,8 +537,22 @@ class TestPool:
         _, arena = _arena(fibonacci=PositionFibonacciScheduler())
         assert "fibonacci" in arena.pool()
 
+    def test_field_waits_for_a_hypothesis_cluster(self):
+        # FALSIFICATION: a static pool would list the arm the moment
+        # --learn-format is on, before the learner has anything to propose.
+        f = _Fuzzer()
+        f._format_learner = SimpleNamespace(clusters={}, weighted_position=lambda d, n: 1)
+        _, arena = _arena(f)
+        assert "field" not in arena.pool()
+        f._format_learner.clusters["x"] = object()
+        assert "field" in arena.pool()
+
+    def test_field_absent_without_format_learner(self):
+        _, arena = _arena(_Fuzzer())
+        assert "field" not in arena.pool()
+
     def test_every_pool_name_is_registered(self):
-        f = _Fuzzer(sensitivity=True, te=True, mi=True, region=True)
+        f = _Fuzzer(sensitivity=True, te=True, mi=True, region=True, field=True)
         f._crash_mi = SimpleNamespace(
             total_execs=9, min_observations=1, weighted_position=lambda n: 1
         )
@@ -552,6 +571,12 @@ class TestSelect:
         f, arena = _arena()
         _force(f, "sensitivity")
         assert arena.select(SEED, len(SEED)) == 11
+
+    def test_field_arm_selects_through_the_format_learner(self):
+        f = _Fuzzer(field=True)
+        _, arena = _arena(f)
+        _force(f, "field")
+        assert arena.select(SEED, len(SEED)) == 77
 
     def test_elo_is_offered_prefixed_keys(self):
         f, arena = _arena()
@@ -781,6 +806,30 @@ class TestSelectPositionWiring:
         drawn = {engine.select_position(bytearray(SEED), SEED) for _ in range(200)}
         assert 22 in drawn
         assert len(drawn - {22}) >= 2
+
+
+    def test_field_is_a_legacy_candidate(self):
+        # FALSIFICATION: if field_pos were computed but dropped from the
+        # candidate list, the format learner's offset could never be
+        # returned by the non-arena (uniform-choice) path.
+        f = _Fuzzer(te=True, field=True)
+        f._format_learner.weighted_position = lambda d, n: 100
+        engine = self._engine(f)
+        drawn = {engine.select_position(bytearray(SEED), SEED) for _ in range(200)}
+        assert 100 in drawn
+        assert 22 in drawn
+
+    def test_cold_field_learner_adds_no_candidate(self):
+        f = _Fuzzer(te=True, field=True)
+        f._format_learner.weighted_position = lambda d, n: None
+        engine = self._engine(f)
+        assert {engine.select_position(bytearray(SEED), SEED) for _ in range(50)} == {22}
+
+    def test_field_absent_without_format_learner_legacy_path(self):
+        # No _format_learner attribute at all (feature off) must not raise.
+        f = _Fuzzer(te=True)
+        engine = self._engine(f)
+        assert {engine.select_position(bytearray(SEED), SEED) for _ in range(20)} == {22}
 
 
 class TestRegistration:

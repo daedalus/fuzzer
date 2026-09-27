@@ -1611,6 +1611,68 @@ def bpe(data: bytes, rng) -> bytes:
     return _splice(data, offset, bytes(restored[:length]))
 
 
+def _pad_random(restored: bytearray, ridx: int, rng) -> None:
+    """Fill restored[ridx:] with random bytes (decoder ran out of codewords)."""
+    length = len(restored)
+    while ridx < length:
+        restored[ridx] = rng.randint(0, 255)
+        ridx += 1
+
+
+def _rice_encode(block: bytearray, k: int) -> bytearray:
+    """Golomb-Rice bits: unary quotient (1s then 0), then k-bit LSB-first remainder."""
+    mask = (1 << k) - 1
+    bits = bytearray()
+    for b in block:
+        q = b >> k
+        r = b & mask
+        # quotient in unary: q ones followed by a zero.
+        bits.extend([1] * q + [0])
+        # remainder in k bits, LSB-first.
+        for i in range(k):
+            bits.append((r >> i) & 1)
+    return bits
+
+
+def _rice_edit(bits: bytearray, length: int, rng) -> None:
+    """Mutate the bitstream: flip/toggle/insert/delete bits."""
+    n_mut = rng.randint(1, min(8, len(bits) // 2 + 1))
+    for _ in range(n_mut):
+        action = rng.randint(0, 3)
+        pos = rng.randint(0, len(bits) - 1)
+        if action == 0:
+            bits[pos] ^= 1
+        elif action == 1 and len(bits) < length * 16:
+            bits.insert(pos, rng.randint(0, 1))
+        elif action == 2 and len(bits) > length // 2:
+            del bits[pos]
+        elif action == 3:
+            bits[pos] = 1 if bits[pos] == 0 else 0
+
+
+def _rice_decode(bits: bytearray, k: int, length: int) -> tuple[bytearray, int]:
+    """Decode up to *length* Rice codewords -> (restored, bytes decoded)."""
+    restored = bytearray(length)
+    ridx = 0
+    bidx = 0
+    while ridx < length and bidx < len(bits):
+        q = 0
+        while bidx < len(bits) and bits[bidx] == 1:
+            q += 1
+            bidx += 1
+        if bidx >= len(bits):
+            break
+        bidx += 1  # skip the terminating 0.
+        r = 0
+        for i in range(k):
+            if bidx + i < len(bits):
+                r |= bits[bidx + i] << i
+        restored[ridx] = ((q << k) | r) & 0xFF
+        ridx += 1
+        bidx += k
+    return restored, ridx
+
+
 def golomb(data: bytes, rng) -> bytes:
     """Golomb/Rice code a region, edit codewords, decode back.
 
@@ -1643,55 +1705,15 @@ def golomb(data: bytes, rng) -> bytes:
         return data
     block = bytearray(data[offset : offset + length])
     k = rng.choice((2, 3, 4, 5, 6))
-    mask = (1 << k) - 1
     # Encode to Golomb-Rice bitstream (LSB-first quotient, then remainder).
-    bits = bytearray()
-    for b in block:
-        q = b >> k
-        r = b & mask
-        # quotient in unary: q ones followed by a zero.
-        bits.extend([1] * q + [0])
-        # remainder in k bits, LSB-first.
-        for i in range(k):
-            bits.append((r >> i) & 1)
+    bits = _rice_encode(block, k)
     if not bits:
         return data
-    # Mutate the bitstream: flip/toggle/insert/delete bits.
-    n_mut = rng.randint(1, min(8, len(bits) // 2 + 1))
-    for _ in range(n_mut):
-        action = rng.randint(0, 3)
-        pos = rng.randint(0, len(bits) - 1)
-        if action == 0:
-            bits[pos] ^= 1
-        elif action == 1 and len(bits) < length * 16:
-            bits.insert(pos, rng.randint(0, 1))
-        elif action == 2 and len(bits) > length // 2:
-            del bits[pos]
-        elif action == 3:
-            bits[pos] = 1 if bits[pos] == 0 else 0
-    # Decode back: read unary quotient then k-bit remainder.
-    restored = bytearray(length)
-    ridx = 0
-    bidx = 0
-    while ridx < length and bidx < len(bits):
-        q = 0
-        while bidx < len(bits) and bits[bidx] == 1:
-            q += 1
-            bidx += 1
-        if bidx >= len(bits):
-            break
-        bidx += 1  # skip the terminating 0.
-        r = 0
-        for i in range(k):
-            if bidx + i < len(bits):
-                r |= bits[bidx + i] << i
-        restored[ridx] = ((q << k) | r) & 0xFF
-        ridx += 1
-        bidx += k
+    _rice_edit(bits, length, rng)
+    restored, ridx = _rice_decode(bits, k, length)
     # Pad any remaining bytes with random values to keep length fixed.
-    while ridx < length:
-        restored[ridx] = rng.randint(0, 255)
-        ridx += 1
+    _pad_random(restored, ridx, rng)
+    return _splice(data, offset, bytes(restored[:length]))
     return _splice(data, offset, bytes(restored[:length]))
 
 
@@ -2028,6 +2050,55 @@ def length_miscalculate(data: bytes, rng) -> bytes:
     return bytes(out)
 
 
+def _gamma_encode(block: bytes) -> bytearray:
+    """Elias gamma bits of each byte+1: log2 zeros, then N in binary."""
+    bits = bytearray()
+    for b in block:
+        n = b + 1
+        log2 = n.bit_length() - 1
+        bits.extend([0] * log2)
+        bits.extend(int(x) for x in format(n, f"0{log2 + 1}b"))
+    return bits
+
+
+def _edit_codebits(bits: bytearray, length: int, rng) -> None:
+    """Insert/delete/flip up to 6 bits of an Elias codeword stream."""
+    n_mut = rng.randint(1, min(6, len(bits) // 2 + 1))
+    for _ in range(n_mut):
+        pos = rng.randint(0, len(bits) - 1)
+        if rng.random() < 0.5 and len(bits) < length * 16:
+            bits.insert(pos, rng.randint(0, 1))
+        elif len(bits) > length // 2:
+            del bits[pos]
+        else:
+            bits[pos] ^= 1
+
+
+def _gamma_decode(bits: bytearray, length: int) -> tuple[bytearray, int]:
+    """Decode up to *length* gamma codewords -> (restored, bytes decoded)."""
+    restored = bytearray(length)
+    ridx = 0
+    bidx = 0
+    while ridx < length and bidx < len(bits):
+        # Count leading zeros.
+        log2 = 0
+        while bidx < len(bits) and bits[bidx] == 0:
+            log2 += 1
+            bidx += 1
+        if bidx >= len(bits) or log2 == 0:
+            break
+        total_bits = log2 + 1
+        if bidx + total_bits > len(bits):
+            break
+        val = 0
+        for i in range(total_bits):
+            val = (val << 1) | bits[bidx + i]
+        restored[ridx] = (val - 1) & 0xFF
+        ridx += 1
+        bidx += total_bits
+    return restored, ridx
+
+
 def elias_gamma(data: bytes, rng) -> bytes:
     """Elias gamma encode a region, edit codewords, decode back.
 
@@ -2056,49 +2127,73 @@ def elias_gamma(data: bytes, rng) -> bytes:
         return data
     block = data[offset : offset + length]
     # Encode each byte as Elias gamma (1-indexed: byte+1).
+    bits = _gamma_encode(block)
+    if not bits:
+        return data
+    _edit_codebits(bits, length, rng)
+    restored, ridx = _gamma_decode(bits, length)
+    _pad_random(restored, ridx, rng)
+    return _splice(data, offset, bytes(restored[:length]))
+    return _splice(data, offset, bytes(restored[:length]))
+
+
+def _delta_encode(block: bytes) -> bytearray:
+    """Elias delta bits of each byte+1: gamma(log2 + 1), then low log2 bits."""
     bits = bytearray()
     for b in block:
         n = b + 1
         log2 = n.bit_length() - 1
-        bits.extend([0] * log2)
-        bits.extend(int(x) for x in format(n, f"0{log2 + 1}b"))
-    if not bits:
-        return data
-    # Mutate the bitstream.
-    n_mut = rng.randint(1, min(6, len(bits) // 2 + 1))
-    for _ in range(n_mut):
-        pos = rng.randint(0, len(bits) - 1)
-        if rng.random() < 0.5 and len(bits) < length * 16:
-            bits.insert(pos, rng.randint(0, 1))
-        elif len(bits) > length // 2:
-            del bits[pos]
-        else:
-            bits[pos] ^= 1
-    # Decode back.
+        # Gamma code of log2 + 1.
+        gamma = log2 + 1
+        g_log2 = gamma.bit_length() - 1
+        bits.extend([0] * g_log2)
+        bits.extend(int(x) for x in format(gamma, f"0{g_log2 + 1}b"))
+        # Remainder: binary of n without leading 1, length = log2 bits.
+        if log2 > 0:
+            bits.extend(int(x) for x in format(n & ((1 << log2) - 1), f"0{log2}b"))
+    return bits
+
+
+def _read_gamma(bits: bytearray, bidx: int) -> tuple[int, int]:
+    """Read a gamma-coded value at *bidx* -> (value, new bidx), value -1 on failure."""
+    g_log2 = 0
+    while bidx < len(bits) and bits[bidx] == 0:
+        g_log2 += 1
+        bidx += 1
+    if bidx >= len(bits) or g_log2 == 0:
+        return -1, bidx
+    gamma_bits = g_log2 + 1
+    if bidx + gamma_bits > len(bits):
+        return -1, bidx
+    gamma = 0
+    for i in range(gamma_bits):
+        gamma = (gamma << 1) | bits[bidx + i]
+    return gamma, bidx + gamma_bits
+
+
+def _delta_decode(bits: bytearray, length: int) -> tuple[bytearray, int]:
+    """Decode up to *length* delta codewords -> (restored, bytes decoded)."""
     restored = bytearray(length)
     ridx = 0
     bidx = 0
     while ridx < length and bidx < len(bits):
-        # Count leading zeros.
-        log2 = 0
-        while bidx < len(bits) and bits[bidx] == 0:
-            log2 += 1
-            bidx += 1
-        if bidx >= len(bits) or log2 == 0:
+        # Read gamma-coded length prefix.
+        gamma, bidx = _read_gamma(bits, bidx)
+        if gamma < 0:
             break
-        total_bits = log2 + 1
+        log2 = gamma - 1
+        if log2 < 0:
+            break
+        total_bits = log2
         if bidx + total_bits > len(bits):
             break
-        val = 0
+        val = 1 << log2
         for i in range(total_bits):
             val = (val << 1) | bits[bidx + i]
         restored[ridx] = (val - 1) & 0xFF
         ridx += 1
         bidx += total_bits
-    while ridx < length:
-        restored[ridx] = rng.randint(0, 255)
-        ridx += 1
-    return _splice(data, offset, bytes(restored[:length]))
+    return restored, ridx
 
 
 def elias_delta(data: bytes, rng) -> bytes:
@@ -2130,64 +2225,13 @@ def elias_delta(data: bytes, rng) -> bytes:
         return data
     block = data[offset : offset + length]
     # Encode each byte+1 with Elias delta.
-    bits = bytearray()
-    for b in block:
-        n = b + 1
-        log2 = n.bit_length() - 1
-        # Gamma code of log2 + 1.
-        gamma = log2 + 1
-        g_log2 = gamma.bit_length() - 1
-        bits.extend([0] * g_log2)
-        bits.extend(int(x) for x in format(gamma, f"0{g_log2 + 1}b"))
-        # Remainder: binary of n without leading 1, length = log2 bits.
-        if log2 > 0:
-            bits.extend(int(x) for x in format(n & ((1 << log2) - 1), f"0{log2}b"))
+    bits = _delta_encode(block)
     if not bits:
         return data
-    # Mutate.
-    n_mut = rng.randint(1, min(6, len(bits) // 2 + 1))
-    for _ in range(n_mut):
-        pos = rng.randint(0, len(bits) - 1)
-        if rng.random() < 0.5 and len(bits) < length * 16:
-            bits.insert(pos, rng.randint(0, 1))
-        elif len(bits) > length // 2:
-            del bits[pos]
-        else:
-            bits[pos] ^= 1
-    # Decode.
-    restored = bytearray(length)
-    ridx = 0
-    bidx = 0
-    while ridx < length and bidx < len(bits):
-        # Read gamma-coded length prefix.
-        g_log2 = 0
-        while bidx < len(bits) and bits[bidx] == 0:
-            g_log2 += 1
-            bidx += 1
-        if bidx >= len(bits) or g_log2 == 0:
-            break
-        gamma_bits = g_log2 + 1
-        if bidx + gamma_bits > len(bits):
-            break
-        gamma = 0
-        for i in range(gamma_bits):
-            gamma = (gamma << 1) | bits[bidx + i]
-        bidx += gamma_bits
-        log2 = gamma - 1
-        if log2 < 0:
-            break
-        total_bits = log2
-        if bidx + total_bits > len(bits):
-            break
-        val = 1 << log2
-        for i in range(total_bits):
-            val = (val << 1) | bits[bidx + i]
-        restored[ridx] = (val - 1) & 0xFF
-        ridx += 1
-        bidx += total_bits
-    while ridx < length:
-        restored[ridx] = rng.randint(0, 255)
-        ridx += 1
+    _edit_codebits(bits, length, rng)
+    restored, ridx = _delta_decode(bits, length)
+    _pad_random(restored, ridx, rng)
+    return _splice(data, offset, bytes(restored[:length]))
     return _splice(data, offset, bytes(restored[:length]))
 
 
@@ -2331,6 +2375,79 @@ def gray_code(data: bytes, rng) -> bytes:
     return _splice(data, offset, bytes(restored))
 
 
+def _lz_tokenize(block: bytearray, min_match: int, max_match: int) -> list[tuple]:
+    """Greedy LZ77 parse into ("lit", byte) / ("ref", dist, len) tokens."""
+    tokens: list[tuple] = []
+    i = 0
+    while i < len(block):
+        best_dist, best_len = 0, 0
+        search_start = max(0, i - 32768)
+        for j in range(search_start, i):
+            match_len = 0
+            while (
+                match_len < max_match
+                and i + match_len < len(block)
+                and block[j + match_len] == block[i + match_len]
+            ):
+                match_len += 1
+            if match_len > best_len:
+                best_dist = i - j
+                best_len = match_len
+        if best_len >= min_match:
+            tokens.append(("ref", best_dist, best_len))
+            i += best_len
+        else:
+            tokens.append(("lit", block[i]))
+            i += 1
+    return tokens
+
+
+def _lz_edit(tokens: list, block: bytearray, min_match: int, max_match: int, rng) -> None:
+    """Flip lit<->ref or nudge a ref's distance/length, in place."""
+    n_mut = rng.randint(1, min(4, len(tokens)))
+    for _ in range(n_mut):
+        pos = rng.randint(0, len(tokens) - 1)
+        tok = tokens[pos]
+        if tok[0] == "lit":
+            dist = rng.randint(1, min(32768, pos))
+            run_len = rng.randint(min_match, min(max_match, len(block) - pos))
+            tokens[pos] = ("ref", dist, run_len)
+            continue
+        action = rng.randint(0, 2)
+        if action == 0:
+            new_dist = max(1, min(32768, tok[1] + rng.randint(-16, 16)))
+            tokens[pos] = ("ref", new_dist, tok[2])
+        elif action == 1:
+            new_len = max(min_match, min(max_match, tok[2] + rng.randint(-2, 2)))
+            tokens[pos] = ("ref", tok[1], new_len)
+        else:
+            lit_pos = min(pos, len(block) - 1)
+            tokens[pos] = ("lit", block[lit_pos])
+
+
+def _lz_replay(tokens: list, length: int, rng) -> tuple[bytearray, int]:
+    """Decompress tokens into *length* bytes; out-of-window refs draw random bytes."""
+    restored = bytearray(length)
+    ridx = 0
+    for tok in tokens:
+        if tok[0] == "lit":
+            if ridx < length:
+                restored[ridx] = tok[1]
+                ridx += 1
+            continue
+        _, dist, run_len = tok
+        for _ in range(run_len):
+            if ridx >= length:
+                break
+            src_idx = ridx - dist
+            if 0 <= src_idx < length:
+                restored[ridx] = restored[src_idx]
+            else:
+                restored[ridx] = rng.randint(0, 255)
+            ridx += 1
+    return restored, ridx
+
+
 def lz_dict_mutate(data: bytes, rng) -> bytes:
     """Mutate an LZ77-style dictionary/literal pair in a region.
 
@@ -2363,73 +2480,64 @@ def lz_dict_mutate(data: bytes, rng) -> bytes:
     if length < 8:
         return data
     block = bytearray(data[offset : offset + length])
-    tokens = []
-    i = 0
     min_match = 3
     max_match = min(64, length - 1)
-    while i < len(block):
-        best_dist, best_len = 0, 0
-        search_start = max(0, i - 32768)
-        for j in range(search_start, i):
-            match_len = 0
-            while (
-                match_len < max_match
-                and i + match_len < len(block)
-                and block[j + match_len] == block[i + match_len]
-            ):
-                match_len += 1
-            if match_len > best_len:
-                best_dist = i - j
-                best_len = match_len
-        if best_len >= min_match:
-            tokens.append(("ref", best_dist, best_len))
-            i += best_len
-        else:
-            tokens.append(("lit", block[i]))
-            i += 1
+    tokens = _lz_tokenize(block, min_match, max_match)
     if not tokens:
         return data
-    n_mut = rng.randint(1, min(4, len(tokens)))
-    for _ in range(n_mut):
-        pos = rng.randint(0, len(tokens) - 1)
-        tok = tokens[pos]
-        if tok[0] == "lit":
-            dist = rng.randint(1, min(32768, pos))
-            run_len = rng.randint(min_match, min(max_match, len(block) - pos))
-            tokens[pos] = ("ref", dist, run_len)
-        else:
-            action = rng.randint(0, 2)
-            if action == 0:
-                new_dist = max(1, min(32768, tok[1] + rng.randint(-16, 16)))
-                tokens[pos] = ("ref", new_dist, tok[2])
-            elif action == 1:
-                new_len = max(min_match, min(max_match, tok[2] + rng.randint(-2, 2)))
-                tokens[pos] = ("ref", tok[1], new_len)
-            else:
-                lit_pos = min(pos, len(block) - 1)
-                tokens[pos] = ("lit", block[lit_pos])
+    _lz_edit(tokens, block, min_match, max_match, rng)
+    restored, ridx = _lz_replay(tokens, length, rng)
+    _pad_random(restored, ridx, rng)
+    return _splice(data, offset, bytes(restored[:length]))
+
+
+def _rank_codes(freq: list[int], symbols: list[int]) -> tuple[list[int], list[int]]:
+    """Rank-ordered prefix codes: rank r gets a bit_length(r)-bit code."""
+    codes = [0] * 256
+    lengths = [0] * 256
+    code = 0
+    prev_len = 0
+    for rank, sym in enumerate(symbols):
+        if freq[sym] == 0:
+            continue
+        bit_len = max(1, rank.bit_length())
+        if rank > 0 and bit_len > prev_len:
+            code <<= bit_len - prev_len
+        codes[sym] = code
+        lengths[sym] = bit_len
+        code += 1
+        prev_len = bit_len
+    return codes, lengths
+
+
+def _huff_decode(
+    bits: bytearray, codes: list[int], lengths: list[int], length: int
+) -> tuple[bytearray, int]:
+    """Greedy shortest-match decode (<=16-bit codes) -> (restored, bytes decoded)."""
+    decode_table = {}
+    for sym in range(256):
+        if lengths[sym] == 0:
+            continue
+        decode_table[(codes[sym], lengths[sym])] = sym
     restored = bytearray(length)
     ridx = 0
-    for tok in tokens:
-        if tok[0] == "lit":
-            if ridx < length:
-                restored[ridx] = tok[1]
+    bidx = 0
+    while ridx < length and bidx < len(bits):
+        for bit_len in range(1, 17):
+            if bidx + bit_len > len(bits):
+                break
+            prefix = 0
+            for i in range(bit_len):
+                prefix = (prefix << 1) | bits[bidx + i]
+            key = (prefix, bit_len)
+            if key in decode_table:
+                restored[ridx] = decode_table[key]
                 ridx += 1
+                bidx += bit_len
+                break
         else:
-            _, dist, run_len = tok
-            for _ in range(run_len):
-                if ridx >= length:
-                    break
-                src_idx = ridx - dist
-                if 0 <= src_idx < length:
-                    restored[ridx] = restored[src_idx]
-                else:
-                    restored[ridx] = rng.randint(0, 255)
-                ridx += 1
-    while ridx < length:
-        restored[ridx] = rng.randint(0, 255)
-        ridx += 1
-    return _splice(data, offset, bytes(restored[:length]))
+            break
+    return restored, ridx
 
 
 def huffman_tree_mutate(data: bytes, rng) -> bytes:
@@ -2464,20 +2572,7 @@ def huffman_tree_mutate(data: bytes, rng) -> bytes:
     for b in block:
         freq[b] += 1
     symbols = sorted(range(256), key=lambda s: (freq[s], s))
-    codes = [0] * 256
-    lengths = [0] * 256
-    code = 0
-    prev_len = 0
-    for rank, sym in enumerate(symbols):
-        if freq[sym] == 0:
-            continue
-        bit_len = max(1, rank.bit_length())
-        if rank > 0 and bit_len > prev_len:
-            code <<= bit_len - prev_len
-        codes[sym] = code
-        lengths[sym] = bit_len
-        code += 1
-        prev_len = bit_len
+    codes, lengths = _rank_codes(freq, symbols)
     non_zero = [s for s in symbols if freq[s] > 0]
     if len(non_zero) < 2:
         return data
@@ -2490,32 +2585,8 @@ def huffman_tree_mutate(data: bytes, rng) -> bytes:
         sym_len = lengths[b]
         for i in range(sym_len - 1, -1, -1):
             bits.append((sym_code >> i) & 1)
-    decode_table = {}
-    for sym in range(256):
-        if lengths[sym] == 0:
-            continue
-        decode_table[(codes[sym], lengths[sym])] = sym
-    restored = bytearray(length)
-    ridx = 0
-    bidx = 0
-    while ridx < length and bidx < len(bits):
-        for bit_len in range(1, 17):
-            if bidx + bit_len > len(bits):
-                break
-            prefix = 0
-            for i in range(bit_len):
-                prefix = (prefix << 1) | bits[bidx + i]
-            key = (prefix, bit_len)
-            if key in decode_table:
-                restored[ridx] = decode_table[key]
-                ridx += 1
-                bidx += bit_len
-                break
-        else:
-            break
-    while ridx < length:
-        restored[ridx] = rng.randint(0, 255)
-        ridx += 1
+    restored, ridx = _huff_decode(bits, codes, lengths, length)
+    _pad_random(restored, ridx, rng)
     return _splice(data, offset, bytes(restored[:length]))
 
 

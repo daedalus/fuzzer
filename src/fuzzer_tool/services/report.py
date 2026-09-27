@@ -185,6 +185,57 @@ def _target_exec_line(f) -> str:
     return " ".join(parts)
 
 
+def _input_mode(f) -> str:
+    """How the target receives input: in-process, file or stdin."""
+    if getattr(f, "_inprocess_runner", None) is not None:
+        direct = bool(getattr(f._inprocess_runner, "direct", False))
+        return "in-process (direct/SHM)" if direct else "in-process"
+    if getattr(f, "file_mode", False):
+        return "file"
+    return "stdin"
+
+
+def _rng_health_line(f) -> str:
+    """Run-summary RNG health row (quick statistical check of f._rng)."""
+    if not (hasattr(f, "_rng") and f._rng is not None):
+        return "  RNG health:      Not checked"
+
+    from fuzzer_tool.core.rng_health import quick_health_check
+
+    try:
+        result = quick_health_check(f._rng)
+        return f"  RNG health:      {result.summary()}"
+    except Exception:
+        return "  RNG health:      ERROR (health check failed)"
+
+
+def _poisson_summary_lines(f) -> list[str]:
+    """Poisson-disk admission counters; empty when the feature is off."""
+    if not getattr(f, "_use_poisson_disk_admission", False):
+        return []
+    rej = getattr(f, "_poisson_reject_count", 0)
+    near = getattr(f, "_poisson_near_dup_admit_count", 0)
+    n_admitted = len(getattr(f, "_admitted_keys", set()) or ())
+    n_buckets = len(getattr(f, "_poisson_occupied_buckets", set()) or ())
+    return [
+        "  Poisson disk:     enabled",
+        f"  Admitted seeds:   {n_admitted}",
+        f"  Poisson rejects:  {rej} (near-dup admitted: {near})",
+        f"  Occupied buckets: {n_buckets}",
+    ]
+
+
+def _smt_enabled(f) -> bool:
+    """SMT on iff enabled AND a solver exists; bypasses __getattr__ proxies."""
+    smt_enabled = False
+    with contextlib.suppress(AttributeError):
+        smt_enabled = (
+            object.__getattribute__(f, "_enable_smt_z3")
+            and object.__getattribute__(f, "_smt_solver") is not None
+        )
+    return smt_enabled
+
+
 def _run_summary(f) -> str:
     execs = f.exec_count
     crashes = f.crash_count
@@ -207,14 +258,7 @@ def _run_summary(f) -> str:
     # In-process runners hand the buffer to the target function directly (via
     # shared memory for --inprocess-direct); neither stdin nor an input file is
     # involved, so reporting "stdin" there described a path the run never took.
-    if getattr(f, "_inprocess_runner", None) is not None:
-        direct = bool(getattr(f._inprocess_runner, "direct", False))
-        input_mode = "in-process (direct/SHM)" if direct else "in-process"
-    elif getattr(f, "file_mode", False):
-        input_mode = "file"
-    else:
-        input_mode = "stdin"
-    lines.append(f"  Input mode:      {input_mode}")
+    lines.append(f"  Input mode:      {_input_mode(f)}")
     if getattr(f, "target_args", None):
         lines.append(f"  Target args:     {' '.join(f.target_args)}")
     lines.extend(
@@ -231,16 +275,7 @@ def _run_summary(f) -> str:
     )
 
     # Add RNG health check to final report
-    if hasattr(f, "_rng") and f._rng is not None:
-        from fuzzer_tool.core.rng_health import quick_health_check
-
-        try:
-            result = quick_health_check(f._rng)
-            lines.append(f"  RNG health:      {result.summary()}")
-        except Exception:
-            lines.append("  RNG health:      ERROR (health check failed)")
-    else:
-        lines.append("  RNG health:      Not checked")
+    lines.append(_rng_health_line(f))
 
     if f._cmplog is not None:
         n_tok = len(f._cmplog.tokens)
@@ -248,22 +283,8 @@ def _run_summary(f) -> str:
         lines.append(f"  Cmplog:          enabled ({n_tok}t {n_prs}p)")
     else:
         lines.append("  Cmplog:          disabled")
-    if getattr(f, "_use_poisson_disk_admission", False):
-        rej = getattr(f, "_poisson_reject_count", 0)
-        near = getattr(f, "_poisson_near_dup_admit_count", 0)
-        n_admitted = len(getattr(f, "_admitted_keys", set()) or ())
-        n_buckets = len(getattr(f, "_poisson_occupied_buckets", set()) or ())
-        lines.append("  Poisson disk:     enabled")
-        lines.append(f"  Admitted seeds:   {n_admitted}")
-        lines.append(f"  Poisson rejects:  {rej} (near-dup admitted: {near})")
-        lines.append(f"  Occupied buckets: {n_buckets}")
-    smt_enabled = False
-    with contextlib.suppress(AttributeError):
-        smt_enabled = (
-            object.__getattribute__(f, "_enable_smt_z3")
-            and object.__getattribute__(f, "_smt_solver") is not None
-        )
-    lines.append(f"  SMT:             {'enabled' if smt_enabled else 'disabled'}")
+    lines.extend(_poisson_summary_lines(f))
+    lines.append(f"  SMT:             {'enabled' if _smt_enabled(f) else 'disabled'}")
     if execs > 0:
         lines.append(f"  Crash rate:      {_format_proportion(execs, crashes)}")
         lines.append(f"  Timeout rate:    {_format_proportion(execs, timeouts)}")
@@ -315,6 +336,52 @@ def _configuration(f) -> str:
     return "\n".join([""] + ["--- Configuration ---"] + rows)
 
 
+def _sig_cluster_lines(sigs: dict, frames: dict) -> list[str]:
+    """Stack-similarity clusters, crash-cluster Gini and CHAINED warnings."""
+    from fuzzer_tool.core.crash_metadata import cluster_crashes, detect_chained_clusters
+
+    lines: list[str] = []
+    sig_list = list(sigs.keys())
+    frame_lists = [frames.get(s, []) for s in sig_list]
+    clusters = cluster_crashes(sig_list, frame_lists=frame_lists)
+    chained = detect_chained_clusters(clusters, sig_list, frame_lists=frame_lists)
+    multi = [(idx, c) for idx, c in enumerate(clusters) if len(c) > 1]
+    # Gini over each cluster's total crash *occurrence* count (not its
+    # signature count) -- a triage read of whether crashes concentrate
+    # on a couple of root causes or spread across many, independent of
+    # whether any given cluster happened to merge multiple signatures.
+    # Computed over every cluster, including singletons: an all-
+    # singleton corpus is itself a meaningful (possibly even) point on
+    # the same scale. See core/gini.py.
+    if len(clusters) >= 2:
+        from fuzzer_tool.core.gini import gini as _gini
+
+        cluster_totals = [sum(sigs[sig_list[i]] for i in c) for c in clusters]
+        g = _gini(cluster_totals)
+        if g is not None:
+            lines.append(
+                f"  Crash-cluster Gini: {g:.2f} ({len(clusters)} distinct "
+                "bug(s), by occurrence count)"
+            )
+    if multi:
+        lines.append("")
+        lines.append(
+            f"  Clustered by stack similarity: {len(sigs)} signature(s) -> "
+            f"{len(clusters)} likely distinct bug(s)"
+        )
+        for idx, cluster in sorted(multi, key=lambda p: len(p[1]), reverse=True):
+            total = sum(sigs[sig_list[i]] for i in cluster)
+            members = ", ".join(sig_list[i] for i in cluster)
+            note = ""
+            if idx in chained:
+                note = (
+                    f"  [CHAINED -- min pairwise similarity "
+                    f"{chained[idx]:.2f}, verify this is one bug]"
+                )
+            lines.append(f"    [{total:>4d}x] {members}{note}")
+    return lines
+
+
 def _crash_signatures(f) -> str:
     """Crash signature histogram from f.crash_sigs (SanitizerReport signatures).
 
@@ -342,48 +409,63 @@ def _crash_signatures(f) -> str:
         lines.append(line)
 
     if len(sigs) > 1:
-        from fuzzer_tool.core.crash_metadata import cluster_crashes, detect_chained_clusters
-
-        sig_list = list(sigs.keys())
-        frame_lists = [frames.get(s, []) for s in sig_list]
-        clusters = cluster_crashes(sig_list, frame_lists=frame_lists)
-        chained = detect_chained_clusters(clusters, sig_list, frame_lists=frame_lists)
-        multi = [(idx, c) for idx, c in enumerate(clusters) if len(c) > 1]
-        # Gini over each cluster's total crash *occurrence* count (not its
-        # signature count) -- a triage read of whether crashes concentrate
-        # on a couple of root causes or spread across many, independent of
-        # whether any given cluster happened to merge multiple signatures.
-        # Computed over every cluster, including singletons: an all-
-        # singleton corpus is itself a meaningful (possibly even) point on
-        # the same scale. See core/gini.py.
-        if len(clusters) >= 2:
-            from fuzzer_tool.core.gini import gini as _gini
-
-            cluster_totals = [sum(sigs[sig_list[i]] for i in c) for c in clusters]
-            g = _gini(cluster_totals)
-            if g is not None:
-                lines.append(
-                    f"  Crash-cluster Gini: {g:.2f} ({len(clusters)} distinct "
-                    "bug(s), by occurrence count)"
-                )
-        if multi:
-            lines.append("")
-            lines.append(
-                f"  Clustered by stack similarity: {len(sigs)} signature(s) -> "
-                f"{len(clusters)} likely distinct bug(s)"
-            )
-            for idx, cluster in sorted(multi, key=lambda p: len(p[1]), reverse=True):
-                total = sum(sigs[sig_list[i]] for i in cluster)
-                members = ", ".join(sig_list[i] for i in cluster)
-                note = ""
-                if idx in chained:
-                    note = (
-                        f"  [CHAINED -- min pairwise similarity "
-                        f"{chained[idx]:.2f}, verify this is one bug]"
-                    )
-                lines.append(f"    [{total:>4d}x] {members}{note}")
+        lines.extend(_sig_cluster_lines(sigs, frames))
 
     return "\n".join(lines)
+
+
+def _edge_buckets(cov) -> Counter:
+    """Cluster analysis: group edges into 256-byte buckets from bitmap.
+
+    Empty when the coverage object does not expose the raw bitmap.
+    """
+    buckets = Counter()
+    seen = getattr(cov, "_seen", None)
+    if seen is None:
+        return buckets
+    if _HAS_NUMPY:
+        seen_arr = np.frombuffer(seen, dtype=np.uint8)
+        bucket_indices = np.flatnonzero(seen_arr) // 256
+        for b in bucket_indices:
+            buckets[b] += 1
+        return buckets
+    for i in range(cov.size):
+        if seen[i]:
+            buckets[i // 256] += 1
+    return buckets
+
+
+def _growth_lines(timeline: list[tuple[int, int]]) -> list[str]:
+    """Coverage-growth rows at MILESTONES plus one final row."""
+    out: list[str] = []
+    timeline.sort(key=lambda p: p[0])
+    final_exec, final_edges = timeline[-1]
+    rows: list[tuple[int, int]] = []
+    for m in MILESTONES:
+        if m > final_exec:
+            break  # never reached; do not invent a data point for it
+        # Last snapshot at or before the milestone.
+        edges_at = None
+        for exec_c, edge_c in timeline:
+            if exec_c <= m:
+                edges_at = edge_c
+            else:
+                break
+        if edges_at is not None:
+            rows.append((m, edges_at))
+    rows.append((final_exec, final_edges))
+
+    # Dedupe on iteration, keeping the last value seen for it, and emit the
+    # final marker exactly once. The old loop appended the final row from
+    # inside the milestone loop, so it repeated once per milestone.
+    seen: dict[int, int] = {}
+    for it, ed in rows:
+        seen[it] = ed
+    out.append("  Coverage growth:")
+    for it in sorted(seen):
+        marker = " (final)" if it == final_exec else ""
+        out.append(f"    iter {it:>6,d}: {seen[it]:>6,d} edges{marker}")
+    return out
 
 
 def _coverage_analysis(f) -> str:
@@ -393,20 +475,7 @@ def _coverage_analysis(f) -> str:
     total_seen = cov.cumulative_edges
     density = total_seen / cov.size * 100 if cov.size else 0
 
-    # Cluster analysis: group edges into 256-byte buckets from bitmap.
-    # Skip if the coverage object does not expose the raw bitmap.
-    buckets = Counter()
-    seen = getattr(cov, "_seen", None)
-    if seen is not None:
-        if _HAS_NUMPY:
-            seen_arr = np.frombuffer(seen, dtype=np.uint8)
-            bucket_indices = np.flatnonzero(seen_arr) // 256
-            for b in bucket_indices:
-                buckets[b] += 1
-        else:
-            for i in range(cov.size):
-                if seen[i]:
-                    buckets[i // 256] += 1
+    buckets = _edge_buckets(cov)
 
     lines = [
         "",
@@ -443,33 +512,7 @@ def _coverage_analysis(f) -> str:
         if len(pt) >= 2
     ]
     if timeline:
-        timeline.sort(key=lambda p: p[0])
-        final_exec, final_edges = timeline[-1]
-        rows: list[tuple[int, int]] = []
-        for m in MILESTONES:
-            if m > final_exec:
-                break  # never reached; do not invent a data point for it
-            # Last snapshot at or before the milestone.
-            edges_at = None
-            for exec_c, edge_c in timeline:
-                if exec_c <= m:
-                    edges_at = edge_c
-                else:
-                    break
-            if edges_at is not None:
-                rows.append((m, edges_at))
-        rows.append((final_exec, final_edges))
-
-        # Dedupe on iteration, keeping the last value seen for it, and emit the
-        # final marker exactly once. The old loop appended the final row from
-        # inside the milestone loop, so it repeated once per milestone.
-        seen: dict[int, int] = {}
-        for it, ed in rows:
-            seen[it] = ed
-        lines.append("  Coverage growth:")
-        for it in sorted(seen):
-            marker = " (final)" if it == final_exec else ""
-            lines.append(f"    iter {it:>6,d}: {seen[it]:>6,d} edges{marker}")
+        lines.extend(_growth_lines(timeline))
 
     return "\n".join(lines)
 
@@ -799,6 +842,57 @@ def _smt_solver_activity(f) -> str:
     return "\n".join(lines)
 
 
+def _gen_source_lines(f) -> list[str]:
+    """Per-generator (GA/QEA/Markov/CMA-ES) rows; stops at first bad stats."""
+    gen_lines: list[str] = []
+    try:
+        if f.ga:
+            gs = f.ga.generator_stats
+            gen_lines.append(
+                f"  GA generated: {gs['population_size']} individuals (gen {gs['generation']})"
+            )
+        if f.qea:
+            gs = f.qea.generator_stats
+            gen_lines.append(
+                f"  QEA generated: {gs['population_size']} individuals (gen {gs['generation']})"
+            )
+        if f.markov_trained:
+            gs = f.markov.generator_stats
+            gen_lines.append(
+                f"  Markov: contexts_seen={gs['contexts_seen']}, trained={gs['is_trained']}"
+            )
+        if getattr(f, "_cmaes", None) is not None:
+            gs = f._cmaes.generator_stats
+            gen_lines.append(
+                f"  CMA-ES: pop={gs['pop_size']}, sigma={gs['sigma']:.3f} (gen {gs['generation']})"
+            )
+    except (KeyError, TypeError, AttributeError):
+        return gen_lines
+    return gen_lines
+
+
+def _format_seed_gen_lines(f) -> list[str]:
+    """FormatSeedGenerator contribution; empty when absent or idle."""
+    fsg = getattr(f, "_format_seed_generator", None)
+    if fsg is None:
+        fsg = getattr(f, "format_seed_generator", None)
+    if fsg is None:
+        return []
+    try:
+        stats = fsg.generator_stats
+        if not stats["total_seeds_generated"] > 0:
+            return []
+        return [
+            "",
+            "  Format Seed Generator:",
+            f"    Total seeds generated: {stats['total_seeds_generated']}",
+            f"    Generation attempts:   {stats['generation_attempt_count']}",
+            f"    Successful:            {stats['successful_attempts']}",
+        ]
+    except (TypeError, AttributeError):
+        return []
+
+
 def _seed_contribution(f) -> str:
     if not f.seed_meta:
         return ""
@@ -833,52 +927,13 @@ def _seed_contribution(f) -> str:
     lines.append(f"\n  {total_cov_seeds} of {len(f.corpus)} seeds contributed new coverage")
 
     # Seed generation contribution breakdown
-    gen_lines = []
-    try:
-        if f.ga:
-            gs = f.ga.generator_stats
-            gen_lines.append(
-                f"  GA generated: {gs['population_size']} individuals (gen {gs['generation']})"
-            )
-        if f.qea:
-            gs = f.qea.generator_stats
-            gen_lines.append(
-                f"  QEA generated: {gs['population_size']} individuals (gen {gs['generation']})"
-            )
-        if f.markov_trained:
-            gs = f.markov.generator_stats
-            gen_lines.append(
-                f"  Markov: contexts_seen={gs['contexts_seen']}, trained={gs['is_trained']}"
-            )
-        if getattr(f, "_cmaes", None) is not None:
-            gs = f._cmaes.generator_stats
-            gen_lines.append(
-                f"  CMA-ES: pop={gs['pop_size']}, sigma={gs['sigma']:.3f} (gen {gs['generation']})"
-            )
-    except (KeyError, TypeError, AttributeError):
-        pass
-
+    gen_lines = _gen_source_lines(f)
     if gen_lines:
         lines.append("")
         lines.append("  Seed Generation Sources:")
         lines.extend(gen_lines)
 
-    # FormatSeedGenerator contribution
-    fsg = getattr(f, "_format_seed_generator", None)
-    if fsg is None:
-        fsg = getattr(f, "format_seed_generator", None)
-    if fsg is not None:
-        try:
-            stats = fsg.generator_stats
-            if stats["total_seeds_generated"] > 0:
-                lines.append("")
-                lines.append("  Format Seed Generator:")
-                lines.append(f"    Total seeds generated: {stats['total_seeds_generated']}")
-                lines.append(f"    Generation attempts:   {stats['generation_attempt_count']}")
-                lines.append(f"    Successful:            {stats['successful_attempts']}")
-        except (TypeError, AttributeError):
-            pass
-
+    lines.extend(_format_seed_gen_lines(f))
     return "\n".join(lines)
 
 
@@ -1155,12 +1210,10 @@ def _execution_time_analysis(f) -> str:
     return "\n".join(lines)
 
 
-def _distribution_diagnostics(f) -> str:
-    """Distribution diagnostics: stddev, skewness, kurtosis for key signal sources."""
-    lines = ["", "--- Distribution Diagnostics ---"]
-    has_data = False
-
+def _dd_exec_time(f, lines: list[str]) -> bool:
+    """Exec-time moments (+ TAIL_RISK flag)."""
     # Execution time moments
+    has_data = False
     try:
         tracker = f._exec_time_tracker
         if tracker and int(tracker.count) >= 3:
@@ -1174,9 +1227,14 @@ def _distribution_diagnostics(f) -> str:
             if tracker.tail_risk:
                 lines.append("                    TAIL_RISK: heavy right skew detected")
     except (TypeError, AttributeError):
-        pass
+        return has_data
+    return has_data
 
+
+def _dd_discovery(f, lines: list[str]) -> bool:
+    """Discovery-rate moments from the CSD detector history."""
     # Discovery rate moments (from CSD detector)
+    has_data = False
     try:
         csd = f._csd
         if csd and hasattr(csd, "_history") and len(csd._history) >= 3:
@@ -1192,10 +1250,15 @@ def _distribution_diagnostics(f) -> str:
                 f"skew={dr_moments.skewness:.2f}  kurt={dr_moments.kurtosis:.2f}"
             )
     except (TypeError, AttributeError):
-        pass
+        return has_data
+    return has_data
 
+
+def _dd_kuramoto(f, lines: list[str]) -> bool:
+    """Kuramoto order-parameter r(t) moments (+ SYNC WARNING)."""
     # Kuramoto order-parameter r(t) moments (from KuramotoSyncMonitor,
     # only present when op_kuramoto is enabled)
+    has_data = False
     try:
         sync = f._kuramoto_sync
         if sync and hasattr(sync, "_csd") and len(sync._csd._history) >= 3:
@@ -1217,9 +1280,14 @@ def _distribution_diagnostics(f) -> str:
             if detected:
                 lines.append(f"                    SYNC WARNING: {reason}")
     except (TypeError, AttributeError):
-        pass
+        return has_data
+    return has_data
 
+
+def _dd_op_rewards(f, lines: list[str]) -> bool:
+    """Per-operator reward moments from the Elo tracker."""
     # Per-operator reward moments (from Elo tracker)
+    has_data = False
     try:
         elo = f._elo
         if elo and hasattr(elo, "_reward_moments") and elo._reward_moments:
@@ -1233,9 +1301,14 @@ def _distribution_diagnostics(f) -> str:
                         f"skew={rm.skewness:.2f}  kurt={rm.kurtosis:.2f}"
                     )
     except (TypeError, AttributeError):
-        pass
+        return has_data
+    return has_data
 
+
+def _dd_seed_sizes(f, lines: list[str]) -> bool:
+    """Seed-size moments (+ BLOAT WARNING)."""
     # Seed size moments (corpus bloat indicator)
+    has_data = False
     try:
         seed_moments = f._seed_size_moments
         if seed_moments and int(seed_moments.count) >= 10:
@@ -1252,7 +1325,22 @@ def _distribution_diagnostics(f) -> str:
             if bloat is not None:
                 lines.append(f"                    BLOAT WARNING: {bloat}")
     except (TypeError, AttributeError):
-        pass
+        return has_data
+    return has_data
+
+
+def _distribution_diagnostics(f) -> str:
+    """Distribution diagnostics: stddev, skewness, kurtosis for key signal sources.
+
+    Each ``_dd_*`` helper appends its rows to ``lines`` and returns True iff
+    its source had data (even if formatting then failed part-way).
+    """
+    lines = ["", "--- Distribution Diagnostics ---"]
+    has_data = False
+
+    # One helper per signal source; every helper runs (no short-circuit).
+    for section in (_dd_exec_time, _dd_discovery, _dd_kuramoto, _dd_op_rewards, _dd_seed_sizes):
+        has_data = section(f, lines) or has_data
 
     if not has_data:
         return ""
@@ -1273,6 +1361,74 @@ def _peak_intervals(series: list[float]) -> list[float]:
     return intervals
 
 
+def _periodic_lines(vals: list[float], label: str, unit: str, note: str, lines: list[str]) -> None:
+    """Append PERIODIC verdict (+ harmonic confirmation) for one series.
+
+    The AR order says how much drift had to be removed before the g-test's
+    white-noise null applied. Worth showing: on a drifting series the
+    residual false-positive rate is ~0.10 and not the nominal 0.05, so this
+    verdict is a lead rather than a finding. See
+    core/periodicity.detect_periodicity.
+    """
+    from fuzzer_tool.core.periodicity import (
+        classify_periodicity,
+        detect_periodicity,
+        harmonic_fraction,
+    )
+
+    res = detect_periodicity(vals, min_samples=50)
+    if not res.significant:
+        lines.append(f"  {label} no significant periodic component")
+        return
+    bg = f" after removing AR({res.ar_order}) drift" if res.ar_order else ""
+    lines.append(
+        f"  {label} PERIODIC — dominant period {res.dominant_period:.1f} "
+        f"{unit} (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin "
+        f"{res.peak_bin}){bg}{note}"
+    )
+    if res.dominant_period is None:
+        return
+    intervals = _peak_intervals(vals)
+    if len(intervals) >= 2:
+        fracs = harmonic_fraction(intervals, res.dominant_period)
+        verdict = classify_periodicity(fracs["total"])
+        lines.append(
+            f"  {label} Harmonic confirmation — {fracs['total']:.0%} of "
+            f"peak intervals on harmonics of {res.dominant_period:.1f} ({verdict})"
+        )
+
+
+def _spec_exec_time(f, lines: list[str]) -> bool:
+    """Exec-time series (one sample per recorded execution)."""
+    has_data = False
+    try:
+        tracker = f._exec_time_tracker
+        times = list(getattr(tracker, "_times", []) or [])
+        if len(times) >= 50:
+            has_data = True
+            vals = [float(t) for t in times]
+            _periodic_lines(vals, "Exec time:     ", "samples", "", lines)
+    except (TypeError, AttributeError):
+        return has_data
+    return has_data
+
+
+def _spec_discovery(f, lines: list[str]) -> bool:
+    """Discovery-rate series: first-differences of cumulative edges per sync interval."""
+    has_data = False
+    try:
+        edges_series = f._discovery_edges
+        if len(edges_series) >= 51:
+            has_data = True
+            deltas = [b - a for a, b in zip(edges_series[:-1], edges_series[1:], strict=True)]
+            vals = [float(d) for d in deltas]
+            note = "; possible corpus-sync artifact"
+            _periodic_lines(vals, "Discovery rate:", "sync intervals", note, lines)
+    except (TypeError, AttributeError):
+        return has_data
+    return has_data
+
+
 def _spectral_diagnostics(f) -> str:
     """Spectral (FFT) diagnostics: periodic components in key time series.
 
@@ -1285,75 +1441,10 @@ def _spectral_diagnostics(f) -> str:
     """
     if not _HAS_NUMPY:
         return ""
-    from fuzzer_tool.core.periodicity import (
-        classify_periodicity,
-        detect_periodicity,
-        harmonic_fraction,
-    )
 
     lines = ["", "--- Spectral Diagnostics ---"]
-    has_data = False
-
-    # Execution-time series (samples = one per recorded execution)
-    try:
-        tracker = f._exec_time_tracker
-        times = list(getattr(tracker, "_times", []) or [])
-        if len(times) >= 50:
-            has_data = True
-            res = detect_periodicity([float(t) for t in times], min_samples=50)
-            if res.significant:
-                bg = f" after removing AR({res.ar_order}) drift" if res.ar_order else ""
-                lines.append(
-                    f"  Exec time:      PERIODIC — dominant period {res.dominant_period:.1f} "
-                    f"samples (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin "
-                    f"{res.peak_bin}){bg}"
-                )
-                if res.dominant_period is not None:
-                    intervals = _peak_intervals([float(t) for t in times])
-                    if len(intervals) >= 2:
-                        fracs = harmonic_fraction(intervals, res.dominant_period)
-                        verdict = classify_periodicity(fracs["total"])
-                        lines.append(
-                            f"  Exec time:      Harmonic confirmation — {fracs['total']:.0%} of "
-                            f"peak intervals on harmonics of {res.dominant_period:.1f} ({verdict})"
-                        )
-            else:
-                lines.append("  Exec time:      no significant periodic component")
-    except (TypeError, AttributeError):
-        pass
-
-    # Discovery-rate series: first-differences of cumulative edges per sync interval
-    try:
-        edges_series = f._discovery_edges
-        if len(edges_series) >= 51:
-            has_data = True
-            deltas = [b - a for a, b in zip(edges_series[:-1], edges_series[1:], strict=True)]
-            res = detect_periodicity([float(d) for d in deltas], min_samples=50)
-            if res.significant:
-                # The AR order says how much drift had to be removed before
-                # the g-test's white-noise null applied. Worth showing: on a
-                # drifting series the residual false-positive rate is ~0.10
-                # and not the nominal 0.05, so this verdict is a lead rather
-                # than a finding. See core/periodicity.detect_periodicity.
-                bg = f" after removing AR({res.ar_order}) drift" if res.ar_order else ""
-                lines.append(
-                    f"  Discovery rate: PERIODIC — dominant period {res.dominant_period:.1f} "
-                    f"sync intervals (g={res.peak_strength:.3f}, p={res.p_value:.2e} at bin "
-                    f"{res.peak_bin}){bg}; possible corpus-sync artifact"
-                )
-                if res.dominant_period is not None:
-                    intervals = _peak_intervals([float(d) for d in deltas])
-                    if len(intervals) >= 2:
-                        fracs = harmonic_fraction(intervals, res.dominant_period)
-                        verdict = classify_periodicity(fracs["total"])
-                        lines.append(
-                            f"  Discovery rate: Harmonic confirmation — {fracs['total']:.0%} of "
-                            f"peak intervals on harmonics of {res.dominant_period:.1f} ({verdict})"
-                        )
-            else:
-                lines.append("  Discovery rate: no significant periodic component")
-    except (TypeError, AttributeError):
-        pass
+    has_data = _spec_exec_time(f, lines)
+    has_data = _spec_discovery(f, lines) or has_data
 
     pll_lines = _pll_lines(f)
     lines.extend(pll_lines)
@@ -1660,12 +1751,8 @@ def _operator_diversity(f) -> str:
     return "\n".join(lines)
 
 
-def _entropy_metrics(f) -> str:
-    """Entropy and diversity metrics for coverage and corpus analysis."""
-    import math
-
-    lines = ["", "--- Entropy & Diversity Metrics ---"]
-
+def _edge_entropy_lines(f, lines: list[str]) -> None:
+    """Edge-hit Shannon/Simpson rows and Rényi coverage uniformity."""
     # Shannon entropy of edge hits
     if f._edge_tracker and f._edge_tracker._global_edge_hits:
         try:
@@ -1696,7 +1783,9 @@ def _entropy_metrics(f) -> str:
         except (TypeError, ValueError):
             pass
 
-    # Entropy rate of change
+
+def _entropy_rate_lines(f, lines: list[str]) -> None:
+    """Edge-entropy dS/dt over the last 10 samples."""
     if hasattr(f, "_entropy_execs") and len(f._entropy_execs) >= 2:
         try:
             recent = list(zip(f._entropy_execs[-10:], f._entropy_vals[-10:], strict=True))
@@ -1715,15 +1804,9 @@ def _entropy_metrics(f) -> str:
     else:
         lines.append("  Entropy rate:     n/a (insufficient samples)")
 
-    # Byte entropy of corpus (same helper as Corpus Health -- one metric, one value)
-    if f.corpus and isinstance(f.corpus, list):
-        _ent = _cumulative_corpus_byte_entropy(f)
-        if _ent is None:
-            _ent = _corpus_byte_entropy(f.corpus)
-        if _ent is not None:
-            lines.append(f"  Corpus byte entropy: {_ent:.2f} bits (max=8.0)")
 
-    # Live pool vs frozen seed set (core/pool_drift.py)
+def _pool_drift_lines(f, lines: list[str]) -> None:
+    """Live pool vs frozen seed set (core/pool_drift.py)."""
     drift = getattr(f, "_pool_drift", None)
     if isinstance(drift, PoolDrift):
         drift.sync(f.corpus)
@@ -1735,108 +1818,109 @@ def _entropy_metrics(f) -> str:
             )
             lines.append(f"  Inter-seed diversity: I(seed; byte)={r.mutual_info:.3f} bits")
 
+
+def _entropy_metrics(f) -> str:
+    """Entropy and diversity metrics for coverage and corpus analysis."""
+    lines = ["", "--- Entropy & Diversity Metrics ---"]
+    _edge_entropy_lines(f, lines)
+    _entropy_rate_lines(f, lines)
+
+    # Byte entropy of corpus (same helper as Corpus Health -- one metric, one value)
+    if f.corpus and isinstance(f.corpus, list):
+        _ent = _cumulative_corpus_byte_entropy(f)
+        if _ent is None:
+            _ent = _corpus_byte_entropy(f.corpus)
+        if _ent is not None:
+            lines.append(f"  Corpus byte entropy: {_ent:.2f} bits (max=8.0)")
+
+    _pool_drift_lines(f, lines)
+
     return "\n".join(lines)
 
 
-def _format_learning(f) -> str:
-    """Format structure learning results (schema-harness methodology)."""
-    fl = getattr(f, "_format_learner", None)
-    if fl is None:
-        return ""
-
-    lines = ["", "--- Format Structure Learning ---"]
-
-    try:
-        if not fl.hypotheses and not fl.timeline:
-            lines.append("  Status:          not enabled or no data collected")
-            return "\n".join(lines)
-    except (TypeError, AttributeError):
-        lines.append("  Status:          not available (mock object)")
-        return "\n".join(lines)
-
-    try:
-        # Overview
-        summary = fl.get_format_summary()
-        format_count = summary.get("format_count", 1)
-        if format_count > 1:
-            lines.append(
-                f"  Formats tracked: {format_count} concurrent hypotheses "
-                f"(showing the primary one below)"
-            )
-            others = ", ".join(
-                f"{c['signature'] or '<default>'} ({c['sample_count']} obs)"
-                for c in summary.get("formats", [])[1:]
-            )
-            if others:
-                lines.append(f"  Other formats:   {others}")
-        lines.append(f"  Timeline:        {summary['timeline_size']} transitions recorded")
+def _fl_overview(summary: dict, lines: list[str]) -> None:
+    """Format-learner overview, learned magic and backtest verdict."""
+    format_count = summary.get("format_count", 1)
+    if format_count > 1:
         lines.append(
-            f"  Hypotheses:      {summary['hypotheses']} total, {summary['classified']} classified"
+            f"  Formats tracked: {format_count} concurrent hypotheses "
+            f"(showing the primary one below)"
         )
-        lines.append(f"  Model version:   {summary['model_version']}")
+        others = ", ".join(
+            f"{c['signature'] or '<default>'} ({c['sample_count']} obs)"
+            for c in summary.get("formats", [])[1:]
+        )
+        if others:
+            lines.append(f"  Other formats:   {others}")
+    lines.append(f"  Timeline:        {summary['timeline_size']} transitions recorded")
+    lines.append(
+        f"  Hypotheses:      {summary['hypotheses']} total, {summary['classified']} classified"
+    )
+    lines.append(f"  Model version:   {summary['model_version']}")
+    lines.append(
+        f"  Backtest:        {summary['backtest_passes']} passes, {summary['backtest_fails']} fails"
+    )
+
+    # Learned format (magic at offset 0)
+    magic_fields = [f for f in summary["fields"] if f.get("type") == "magic"]
+    if magic_fields:
+        magic = magic_fields[0]
+        lines.append(f"  Learned format:  {magic['width']}-byte identifier at offset 0")
+
+    # Backtest verdict
+    passes = int(summary["backtest_passes"])
+    fails = int(summary["backtest_fails"])
+    if passes > 0 and fails == 0:
+        lines.append("  Model status:    CERTIFIED (all backtests passed)")
+    elif fails > 0:
+        lines.append("  Model status:    UNCERTIFIED (backtest failures detected)")
+    else:
+        lines.append("  Model status:    PENDING (no backtest run yet)")
+
+
+def _fl_field_map(summary: dict, lines: list[str]) -> None:
+    """Inferred field table plus field-type legend."""
+    if summary["fields"]:
+        lines.append("")
+        lines.append("  Inferred format fields:")
         lines.append(
-            f"  Backtest:        {summary['backtest_passes']} passes, {summary['backtest_fails']} fails"
+            f"    {'Offset':>8s}  {'Width':>5s}  {'Type':>10s}  {'Conf':>5s}  {'Obs':>4s}  {'Edges':>6s}  {'Sensitive ops'}"
         )
-
-        # Learned format (magic at offset 0)
-        magic_fields = [f for f in summary["fields"] if f.get("type") == "magic"]
-        if magic_fields:
-            magic = magic_fields[0]
-            lines.append(f"  Learned format:  {magic['width']}-byte identifier at offset 0")
-
-        # Backtest verdict
-        passes = int(summary["backtest_passes"])
-        fails = int(summary["backtest_fails"])
-        if passes > 0 and fails == 0:
-            lines.append("  Model status:    CERTIFIED (all backtests passed)")
-        elif fails > 0:
-            lines.append("  Model status:    UNCERTIFIED (backtest failures detected)")
-        else:
-            lines.append("  Model status:    PENDING (no backtest run yet)")
-
-        # Field map
-        if summary["fields"]:
-            lines.append("")
-            lines.append("  Inferred format fields:")
+        lines.append(
+            f"    {'------':>8s}  {'-----':>5s}  {'----':>10s}  {'----':>5s}  {'---':>4s}  {'-----':>6s}  {'-------------'}"
+        )
+        for field in summary["fields"]:
+            ops = ", ".join(sorted(field["sensitive_ops"].keys())[:4])
+            if len(field["sensitive_ops"]) > 4:
+                ops += f" +{len(field['sensitive_ops']) - 4}"
             lines.append(
-                f"    {'Offset':>8s}  {'Width':>5s}  {'Type':>10s}  {'Conf':>5s}  {'Obs':>4s}  {'Edges':>6s}  {'Sensitive ops'}"
+                f"    {field['offset']:>8d}  {field['width']:>5d}  {field['type']:>10s}  "
+                f"{field['confidence']:>5.2f}  {field['observations']:>4d}  {field['controlled_edges']:>6d}  {ops}"
             )
-            lines.append(
-                f"    {'------':>8s}  {'-----':>5s}  {'----':>10s}  {'----':>5s}  {'---':>4s}  {'-----':>6s}  {'-------------'}"
-            )
-            for field in summary["fields"]:
-                ops = ", ".join(sorted(field["sensitive_ops"].keys())[:4])
-                if len(field["sensitive_ops"]) > 4:
-                    ops += f" +{len(field['sensitive_ops']) - 4}"
-                lines.append(
-                    f"    {field['offset']:>8d}  {field['width']:>5d}  {field['type']:>10s}  "
-                    f"{field['confidence']:>5.2f}  {field['observations']:>4d}  {field['controlled_edges']:>6d}  {ops}"
-                )
 
-            # Field type legend
-            lines.append("")
-            lines.append("  Field types:")
-            lines.append("    magic    — file identifier / signature bytes (offset 0)")
-            lines.append("    length   — size/length field (changing it alters coverage patterns)")
-            lines.append("    crc      — checksum / integrity field (broad coverage sensitivity)")
-            lines.append("    data     — payload or content bytes (many observations)")
-            lines.append("    unknown  — structure detected, type not yet classified")
+        # Field type legend
+        lines.append("")
+        lines.append("  Field types:")
+        lines.append("    magic    — file identifier / signature bytes (offset 0)")
+        lines.append("    length   — size/length field (changing it alters coverage patterns)")
+        lines.append("    crc      — checksum / integrity field (broad coverage sensitivity)")
+        lines.append("    data     — payload or content bytes (many observations)")
+        lines.append("    unknown  — structure detected, type not yet classified")
 
-        # Discriminating probe suggestion
-        try:
-            probe = fl.suggest_discriminating_mutation(
-                list(f.op_counts.keys()) if f.op_counts else []
-            )
-            if probe and isinstance(probe, tuple) and len(probe) == 2:
-                op, offset = probe
-                lines.append(f"\n  Suggested probe: {op} at offset {offset}")
-        except (TypeError, AttributeError, ValueError):
-            pass
 
-    except (TypeError, AttributeError):
-        lines.append("  Status:          not available")
+def _fl_probe(f, fl, lines: list[str]) -> None:
+    """Discriminating probe suggestion."""
+    try:
+        probe = fl.suggest_discriminating_mutation(list(f.op_counts.keys()) if f.op_counts else [])
+        if probe and isinstance(probe, tuple) and len(probe) == 2:
+            op, offset = probe
+            lines.append(f"\n  Suggested probe: {op} at offset {offset}")
+    except (TypeError, AttributeError, ValueError):
+        pass
 
-    # PPMD corpus compression stats
+
+def _ppmd_lines(f, lines: list[str]) -> None:
+    """PPMD corpus compression stats."""
     ppmd = getattr(f, "_ppmd", None)
     if ppmd and getattr(ppmd, "enabled", False) and f.corpus:
         try:
@@ -1853,7 +1937,9 @@ def _format_learning(f) -> str:
         except (TypeError, AttributeError):
             pass
 
-    # FormatSeedGenerator stats
+
+def _fl_seed_gen_lines(f, lines: list[str]) -> None:
+    """FormatSeedGenerator stats (format-learning view)."""
     fsg = getattr(f, "_format_seed_generator", None)
     if fsg is None:
         fsg = getattr(f, "format_seed_generator", None)
@@ -1882,15 +1968,38 @@ def _format_learning(f) -> str:
         except (TypeError, AttributeError):
             pass
 
+
+def _format_learning(f) -> str:
+    """Format structure learning results (schema-harness methodology)."""
+    fl = getattr(f, "_format_learner", None)
+    if fl is None:
+        return ""
+
+    lines = ["", "--- Format Structure Learning ---"]
+
+    try:
+        if not fl.hypotheses and not fl.timeline:
+            lines.append("  Status:          not enabled or no data collected")
+            return "\n".join(lines)
+    except (TypeError, AttributeError):
+        lines.append("  Status:          not available (mock object)")
+        return "\n".join(lines)
+
+    try:
+        summary = fl.get_format_summary()
+        _fl_overview(summary, lines)
+        _fl_field_map(summary, lines)
+        _fl_probe(f, fl, lines)
+    except (TypeError, AttributeError):
+        lines.append("  Status:          not available")
+
+    _ppmd_lines(f, lines)
+    _fl_seed_gen_lines(f, lines)
     return "\n".join(lines)
 
 
-def _fuzzing_strategy(f) -> str:
-    """Active scheduling strategies and their states."""
-    lines = ["", "--- Fuzzing Strategy ---"]
-
-    strategies = []
-
+def _mc_strategy_lines(f, strategies: list[str]) -> None:
+    """Monte Carlo bandit / CEM / Floyd cycle-detect rows."""
     # MC bandit
     if f.mc and f.mc_bandit:
         strategies.append(f"  MC Bandit:        Thompson sampling, {len(f.mc.arm_alpha)} arms")
@@ -1919,22 +2028,9 @@ def _fuzzing_strategy(f) -> str:
                 f"    Period:         last={stats['last_period']}, max={stats['max_period']}"
             )
 
-    # MOpt
-    if f._mopt:
-        strategies.append(
-            f"  MOpt PSO:         {f._mopt.n_particles} particles, window={f._mopt.window_size}"
-        )
 
-    # Replicator
-    if f._replicator:
-        strategies.append(
-            f"  Replicator:       window={f._replicator.window_size}, eta={f._replicator.eta}"
-        )
-
-    strategies.extend(_kruskal_lines(f))
-    strategies.extend(_entropy_seed_lines(f))
-    strategies.extend(_strata_lines(f))
-
+def _markov_strategy_lines(f, strategies: list[str]) -> None:
+    """Markov chain/ensemble rows."""
     # Markov
     if f.markov_trained:
         if hasattr(f.markov, "chains"):
@@ -1954,6 +2050,9 @@ def _fuzzing_strategy(f) -> str:
             except (KeyError, TypeError, AttributeError):
                 pass
 
+
+def _evo_strategy_lines(f, strategies: list[str]) -> None:
+    """GA / QEA / CMA-ES seed-generator rows."""
     # Evolutionary seed generators
     try:
         if f.ga and getattr(f.ga, "generator_stats", None):
@@ -1996,6 +2095,9 @@ def _fuzzing_strategy(f) -> str:
     except (KeyError, TypeError, AttributeError):
         pass
 
+
+def _misc_strategy_lines(f, strategies: list[str]) -> None:
+    """MI, transfer-entropy, secretary and annealing rows."""
     # MI guided
     if f._use_mi and f._mi:
         strategies.append(f"  MI-guided:        max_positions={f._mi.max_positions}")
@@ -2020,6 +2122,36 @@ def _fuzzing_strategy(f) -> str:
         strategies.append(
             f"  Annealing:        budget={f._anneal_budget}, progress={f._anneal_progress:.1%}"
         )
+
+
+def _fuzzing_strategy(f) -> str:
+    """Active scheduling strategies and their states."""
+    lines = ["", "--- Fuzzing Strategy ---"]
+
+    strategies = []
+
+    _mc_strategy_lines(f, strategies)
+
+    # MOpt
+    if f._mopt:
+        strategies.append(
+            f"  MOpt PSO:         {f._mopt.n_particles} particles, window={f._mopt.window_size}"
+        )
+
+    # Replicator
+    if f._replicator:
+        strategies.append(
+            f"  Replicator:       window={f._replicator.window_size}, eta={f._replicator.eta}"
+        )
+
+    strategies.extend(_kruskal_lines(f))
+    strategies.extend(_entropy_seed_lines(f))
+    strategies.extend(_strata_lines(f))
+
+    _markov_strategy_lines(f, strategies)
+    _evo_strategy_lines(f, strategies)
+
+    _misc_strategy_lines(f, strategies)
 
     # Grammar
     if f.grammar:
@@ -2289,23 +2421,8 @@ def strategy_table_lines(elo, keys: list[str], indent: str = "  ") -> list[str]:
     return out
 
 
-def _elo_ratings(f) -> str:
-    """Elo operator rankings and comparison with bandit rankings."""
-    if not f._use_elo or not f._elo:
-        return ""
-    ranking = f._elo.get_ranking()
-    if not ranking:
-        return ""
-
-    # BayesianEloTracker has no k_factor/decay -- it has beta (rating scale)
-    # and tau (per-match system noise), and its learning rate is the adaptive
-    # _effective_k(). Printing beta=200 under the label "K-factor" invited the
-    # reading that a single match could move a rating by 100 points.
-    unrated = f._elo.get_unrated()
-    lines = [
-        "",
-        "--- Elo Operator Ratings ---",
-    ]
+def _elo_model_lines(f, lines: list[str]) -> None:
+    """Tracker parameters: K/decay (EloTracker) or beta/tau (Bayesian)."""
     if hasattr(f._elo, "k_factor"):
         lines.append(f"  K-factor:        {f._elo.k_factor}")
         lines.append(f"  Decay:           {f._elo.decay}")
@@ -2316,94 +2433,92 @@ def _elo_ratings(f) -> str:
         lines.append(f"  Tau (noise):     {getattr(f._elo, 'tau', '?')}")
         if eff_k is not None:
             lines.append(f"  Effective K:     {eff_k:.1f} (adaptive)")
-    lines += [
-        f"  Min matches:     {f._elo.min_matches}",
-        f"  Total matches:   {sum(f._elo._match_count.values()) // 2}",
-        f"  Rated:           {len(ranking)} operators",
-        f"  Unrated:         {len(unrated)} operators (< {f._elo.min_matches} matches)",
-    ]
 
-    # Top 10 and bottom 5 of rated operators
-    if ranking:
-        # Stddev, Rpi (Rating Performance Index), and K-factor are derived
-        # per-row alongside Rating rather than tracked as separate state.
-        #
-        # K-factor is the tracker's current learning rate. EloTracker uses a
-        # fixed k_factor; BayesianEloTracker's _effective_k() is adaptive
-        # (based on recent prediction error) but is a tracker-wide value, not
-        # per-operator, so every row shows the same figure at report time.
-        if hasattr(f._elo, "k_factor"):
-            row_k = f._elo.k_factor
-        elif hasattr(f._elo, "_effective_k"):
-            row_k = f._elo._effective_k()
-        else:
-            row_k = None
 
-        # Rpi: expected score (as a percentage) against an average-rated
-        # opponent from the same pool, i.e. how this operator's rating
-        # translates into a head-to-head win rate against the field.
-        # `ranking` is truthy-but-len()-0 for a bare MagicMock in tests
-        # that stub f._elo without a real get_ranking(), so guard the
-        # division rather than assuming len(ranking) > 0 here.
-        _n = len(ranking)
-        pool_mean = (sum(r for _, r in ranking) / _n) if _n else 0.0
+def _elo_table_lines(f, ranking: list, lines: list[str]) -> None:
+    """Rank table: top 10, bottom 5, with Stddev/Sigmas/Rpi/K columns."""
+    # Stddev, Rpi (Rating Performance Index), and K-factor are derived
+    # per-row alongside Rating rather than tracked as separate state.
+    #
+    # K-factor is the tracker's current learning rate. EloTracker uses a
+    # fixed k_factor; BayesianEloTracker's _effective_k() is adaptive
+    # (based on recent prediction error) but is a tracker-wide value, not
+    # per-operator, so every row shows the same figure at report time.
+    if hasattr(f._elo, "k_factor"):
+        row_k = f._elo.k_factor
+    elif hasattr(f._elo, "_effective_k"):
+        row_k = f._elo._effective_k()
+    else:
+        row_k = None
 
-        def _rpi(rating: float) -> float:
-            return 100.0 / (1.0 + 10.0 ** ((pool_mean - rating) / 400.0))
+    # Rpi: expected score (as a percentage) against an average-rated
+    # opponent from the same pool, i.e. how this operator's rating
+    # translates into a head-to-head win rate against the field.
+    # `ranking` is truthy-but-len()-0 for a bare MagicMock in tests
+    # that stub f._elo without a real get_ranking(), so guard the
+    # division rather than assuming len(ranking) > 0 here.
+    _n = len(ranking)
+    pool_mean = (sum(r for _, r in ranking) / _n) if _n else 0.0
 
-        # Stddev: EloTracker has no posterior, so the closest per-operator
-        # spread is the stddev of its recorded match scores (reward
-        # moments, 0-1 scale). BayesianEloTracker tracks an actual rating
-        # posterior N(mu, sigma^2), so its stddev is sqrt(sigma_sq) in Elo
-        # points -- a different scale/meaning, noted below the table.
-        has_reward_moments = hasattr(f._elo, "get_reward_moments")
-        has_sigma_sq = hasattr(f._elo, "sigma_sq")
+    def _rpi(rating: float) -> float:
+        return 100.0 / (1.0 + 10.0 ** ((pool_mean - rating) / 400.0))
 
-        def _stddev(op: str) -> float | None:
-            if has_sigma_sq:
-                return math.sqrt(f._elo.sigma_sq.get(op, 0.0))
-            if has_reward_moments:
-                moments = f._elo.get_reward_moments(op)
-                if moments and moments.count > 1:
-                    return moments.stddev
-            return None
+    # Stddev: EloTracker has no posterior, so the closest per-operator
+    # spread is the stddev of its recorded match scores (reward
+    # moments, 0-1 scale). BayesianEloTracker tracks an actual rating
+    # posterior N(mu, sigma^2), so its stddev is sqrt(sigma_sq) in Elo
+    # points -- a different scale/meaning, noted below the table.
+    has_reward_moments = hasattr(f._elo, "get_reward_moments")
+    has_sigma_sq = hasattr(f._elo, "sigma_sq")
 
-        def _fmt_row(i: int, op: str, rating: float) -> str:
-            matches = f._elo._match_count.get(op, 0)
-            sd = _stddev(op)
-            sd_str = f"{sd:.1f}" if sd is not None else "-"
-            # Only a posterior sigma is in Elo points. EloTracker's fallback
-            # stddev is the spread of 0-1 match scores; dividing a rating
-            # delta by it would print a number with no meaning.
-            z = _sigmas(rating - pool_mean, sd) if has_sigma_sq else None
-            z_str = f"{z:+.2f}" if z is not None else "-"
-            k_str = f"{row_k:.1f}" if row_k is not None else "-"
-            return (
-                f"  {i:<6d} {op:<22s} {rating:>8.0f} {sd_str:>8s} {z_str:>8s} "
-                f"{_rpi(rating):>7.1f}% {k_str:>8s} {matches:>8d}"
-            )
-
-        lines.append(
-            f"  {'Rank':<6s} {'Operator':<22s} {'Rating':>8s} {'Stddev':>8s} "
-            f"{'Sigmas':>8s} {'Rpi':>8s} {'K-fctr':>8s} {'Matches':>8s}"
-        )
-        lines.append(
-            f"  {'-' * 6} {'-' * 22} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}"
-        )
-        for i, (op, rating) in enumerate(ranking[:10], 1):
-            lines.append(_fmt_row(i, op, rating))
-        if len(ranking) > 10:
-            lines.append(f"  {'...':<6s}")
-            for i, (op, rating) in enumerate(ranking[-5:], len(ranking) - 4):
-                lines.append(_fmt_row(i, op, rating))
+    def _stddev(op: str) -> float | None:
         if has_sigma_sq:
-            lines.append(
-                "  (Stddev = posterior rating sigma; Sigmas = (rating - pool mean) / Stddev;"
-                " Rpi = expected score vs pool mean)"
-            )
-        elif has_reward_moments:
-            lines.append("  (Stddev = match-score stddev [0-1]; Rpi = expected score vs pool mean)")
+            return math.sqrt(f._elo.sigma_sq.get(op, 0.0))
+        if has_reward_moments:
+            moments = f._elo.get_reward_moments(op)
+            if moments and moments.count > 1:
+                return moments.stddev
+        return None
 
+    def _fmt_row(i: int, op: str, rating: float) -> str:
+        matches = f._elo._match_count.get(op, 0)
+        sd = _stddev(op)
+        sd_str = f"{sd:.1f}" if sd is not None else "-"
+        # Only a posterior sigma is in Elo points. EloTracker's fallback
+        # stddev is the spread of 0-1 match scores; dividing a rating
+        # delta by it would print a number with no meaning.
+        z = _sigmas(rating - pool_mean, sd) if has_sigma_sq else None
+        z_str = f"{z:+.2f}" if z is not None else "-"
+        k_str = f"{row_k:.1f}" if row_k is not None else "-"
+        return (
+            f"  {i:<6d} {op:<22s} {rating:>8.0f} {sd_str:>8s} {z_str:>8s} "
+            f"{_rpi(rating):>7.1f}% {k_str:>8s} {matches:>8d}"
+        )
+
+    lines.append(
+        f"  {'Rank':<6s} {'Operator':<22s} {'Rating':>8s} {'Stddev':>8s} "
+        f"{'Sigmas':>8s} {'Rpi':>8s} {'K-fctr':>8s} {'Matches':>8s}"
+    )
+    lines.append(
+        f"  {'-' * 6} {'-' * 22} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8} {'-' * 8}"
+    )
+    for i, (op, rating) in enumerate(ranking[:10], 1):
+        lines.append(_fmt_row(i, op, rating))
+    if len(ranking) > 10:
+        lines.append(f"  {'...':<6s}")
+        for i, (op, rating) in enumerate(ranking[-5:], len(ranking) - 4):
+            lines.append(_fmt_row(i, op, rating))
+    if has_sigma_sq:
+        lines.append(
+            "  (Stddev = posterior rating sigma; Sigmas = (rating - pool mean) / Stddev;"
+            " Rpi = expected score vs pool mean)"
+        )
+    elif has_reward_moments:
+        lines.append("  (Stddev = match-score stddev [0-1]; Rpi = expected score vs pool mean)")
+
+
+def _elo_unrated_lines(unrated: list, lines: list[str]) -> None:
+    """Sample of not-yet-rated operators."""
     # Unrated operators
     if unrated:
         lines.append("")
@@ -2413,6 +2528,9 @@ def _elo_ratings(f) -> str:
         if len(unrated) > 8:
             lines.append(f"    ... and {len(unrated) - 8} more")
 
+
+def _elo_crash_lines(f, lines: list[str]) -> None:
+    """Crash-specific Elo top 5, when the tracker keeps one."""
     # Crash-specific Elo if available (EloTracker only; BayesianEloTracker
     # does not maintain separate crash posteriors)
     if hasattr(f._elo, "crash_track") and f._elo.crash_track:
@@ -2428,6 +2546,9 @@ def _elo_ratings(f) -> str:
                 sign = "+" if delta >= 0 else ""
                 lines.append(f"    {i}. {op:<20s} {rating:>7.0f} ({sign}{delta:.0f})")
 
+
+def _elo_strategy_lines(f, lines: list[str]) -> None:
+    """Meta-scheduler strategy tables, one per arena."""
     # Meta-scheduler strategy ranking — operator (plain keys) and seed
     # (seed_* keys) strategies are disjoint keyspaces; show them separately
     # so they don't look like one group.
@@ -2461,6 +2582,9 @@ def _elo_ratings(f) -> str:
             if pos_strategies:
                 _strategy_block("Position strategies (Elo):", pos_strategies)
 
+
+def _elo_bandit_lines(f, ranking: list, lines: list[str]) -> None:
+    """Elo vs bandit rank agreement over the shared operators."""
     # Compare with bandit if available
     if f.mc and f.mc_bandit and f.mc.arm_alpha:
         bandit_ranking = sorted(
@@ -2489,6 +2613,41 @@ def _elo_ratings(f) -> str:
                     f"  Elo vs Bandit:    avg rank diff={avg_diff:.1f}, "
                     f"max={max_diff} (over {len(common)} operators ranked by both)"
                 )
+
+
+def _elo_ratings(f) -> str:
+    """Elo operator rankings and comparison with bandit rankings."""
+    if not f._use_elo or not f._elo:
+        return ""
+    ranking = f._elo.get_ranking()
+    if not ranking:
+        return ""
+
+    # BayesianEloTracker has no k_factor/decay -- it has beta (rating scale)
+    # and tau (per-match system noise), and its learning rate is the adaptive
+    # _effective_k(). Printing beta=200 under the label "K-factor" invited the
+    # reading that a single match could move a rating by 100 points.
+    unrated = f._elo.get_unrated()
+    lines = [
+        "",
+        "--- Elo Operator Ratings ---",
+    ]
+    _elo_model_lines(f, lines)
+    lines += [
+        f"  Min matches:     {f._elo.min_matches}",
+        f"  Total matches:   {sum(f._elo._match_count.values()) // 2}",
+        f"  Rated:           {len(ranking)} operators",
+        f"  Unrated:         {len(unrated)} operators (< {f._elo.min_matches} matches)",
+    ]
+
+    # Top 10 and bottom 5 of rated operators
+    if ranking:
+        _elo_table_lines(f, ranking, lines)
+
+    _elo_unrated_lines(unrated, lines)
+    _elo_crash_lines(f, lines)
+    _elo_strategy_lines(f, lines)
+    _elo_bandit_lines(f, ranking, lines)
 
     return "\n".join(lines)
 

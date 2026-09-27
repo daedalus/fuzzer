@@ -43,6 +43,7 @@ import logging
 from array import array
 from dataclasses import dataclass, field
 
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import RunningMoments
 
 log = logging.getLogger(__name__)
@@ -57,6 +58,7 @@ _FENWICK_INIT_SIZE = 64  # initial byte-offset capacity; doubles on demand
 
 
 _MIN_CLASSIFY_OBS = 3  # observations before a field is typed or stride-boosted
+_MIN_PROPOSAL_CONFIDENCE = 0.0  # a hypothesis must clear this to be proposed as a position
 
 
 def _rank_value(items: list[tuple[float, int]], rank: int) -> float:
@@ -627,6 +629,42 @@ class FormatCluster:
                 result.append(most_common)
         return bytes(result)
 
+    def weighted_position(self, buf_len: int, rng: RandPool) -> int | None:
+        """Sample an offset from this cluster's learned field hypotheses.
+
+        Roulette-wheel over `hypotheses`, weighted by `confidence` — the
+        per-offset causal record `_update_hypotheses` builds from confirmed
+        coverage-changing mutations (``sensitive_ops``/``controlled_edges``),
+        not the aggregate statistics MI/TE/sensitivity read. A field the
+        learner has never confirmed as coverage-relevant, or one whose
+        confidence has decayed to the floor from repeated no-effect
+        observations, does not compete. Declines (returns None) when no
+        hypothesis qualifies, matching every other tracker's
+        ``weighted_position``/``get_weighted_position``.
+        """
+        candidates = [
+            h
+            for h in self.hypotheses
+            if h.confidence > _MIN_PROPOSAL_CONFIDENCE and h.offset < buf_len
+        ]
+        if not candidates:
+            return None
+
+        total = sum(h.confidence for h in candidates)
+        if total <= 0:
+            return None
+
+        r = rng.random() * total
+        for h in candidates:
+            r -= h.confidence
+            if r <= 0:
+                width = max(1, min(h.width, buf_len - h.offset))
+                return h.offset + rng.randint(0, width - 1)
+        # Floating-point roundoff: fall back to the last candidate.
+        h = candidates[-1]
+        width = max(1, min(h.width, buf_len - h.offset))
+        return h.offset + rng.randint(0, width - 1)
+
     def get_state(self) -> dict:
         """Serialize this cluster for persistence."""
         return {
@@ -742,12 +780,14 @@ class FormatLearner:
         max_formats: int = DEFAULT_MAX_FORMATS,
         sig_len: int = DEFAULT_SIG_LEN,
         promote_threshold: int = DEFAULT_PROMOTE_THRESHOLD,
+        rng: RandPool | None = None,
     ):
         self.max_timeline = max_timeline
         self.z_score_threshold = z_score_threshold
         self.max_formats = max_formats
         self.sig_len = sig_len
         self.promote_threshold = promote_threshold
+        self._rng = rng or get_default_rand_pool()
         self.clusters: dict[str, FormatCluster] = {}
         # Signature of the most recently recorded transition — used as the
         # routing target for calls (like record_liveness) that don't carry
@@ -1059,6 +1099,22 @@ class FormatLearner:
         if cluster is None:
             return None
         return cluster.get_learned_value(offset, width)
+
+    def weighted_position(self, input_bytes: bytes, buf_len: int) -> int | None:
+        """Sample an offset from the field hypotheses learned for this seed's
+        format cluster (see `FormatCluster.weighted_position`).
+
+        Routed by `input_bytes`'s signature, same as `get_learned_value`,
+        so a multi-format target's clusters don't cross-contaminate each
+        other's proposals.
+        """
+        sig = self._signature_for(input_bytes)
+        cluster = self.clusters.get(sig) if sig is not None else None
+        if cluster is None:
+            cluster = self.primary_cluster
+        if cluster is None:
+            return None
+        return cluster.weighted_position(buf_len, self._rng)
 
     def get_state(self) -> dict:
         """Serialize for persistence.

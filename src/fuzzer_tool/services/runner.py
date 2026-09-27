@@ -103,6 +103,16 @@ def _ptrace_report_timeout(pid: int) -> tuple[int, str]:
     return -1, "timeout"
 
 
+def _ptrace_wait_until(pid: int, deadline: float) -> int | None:
+    """Poll the tracee for its next event until *deadline*; its status, or None."""
+    while time.time() < deadline:
+        waited, st = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+        if waited != 0:
+            return st
+        time.sleep(0.0005)
+    return None
+
+
 def _write_and_close(fd: int, data: bytes) -> None:
     """Write *data* to *fd* then close it — designed to run in a thread."""
     try:
@@ -230,6 +240,11 @@ class TargetRunner:
                 f._last_perf_deltas = f._perf_counters.read_and_reset()
             return rc, err
 
+        return self._run_other(data, shm)
+
+    def _run_other(self, data: bytes, shm) -> tuple[int, str]:
+        """Non-in-process backends: persistent, network, ptrace, forkserver, spawn."""
+        f = self.f
         if f._persistent_runner:
             rc, err = f._persistent_runner.run_one(data)
             if f._perf_counters:
@@ -268,6 +283,11 @@ class TargetRunner:
                 shm.reset_edge_map()
             return f._forkserver.run_one(data)
 
+        return self._run_spawn(data, shm)
+
+    def _run_spawn(self, data: bytes, shm) -> tuple[int, str]:
+        """Fresh-process execution: reset maps, build env, spawn via stdin/file/fast path."""
+        f = self.f
         if shm:
             shm.reset_edge_map()
         # The decoder carries a reference IP across reads; leaving it set
@@ -278,6 +298,19 @@ class TargetRunner:
         if f.branch_cov:
             f.branch_cov.reset_edge_map()
 
+        env = self._spawn_env(shm)
+
+        # Fast path: posix_spawn + temp file (no threads, no watchdog)
+        if not f.file_mode and not f._cmplog:
+            return self._run_fast(data, env)
+
+        if f.file_mode:
+            return self._run_file(data, env)
+        return self._run_stdin(data, env)
+
+    def _spawn_env(self, shm) -> dict:
+        """Child environment: AFL map size, SHM id, cmplog variables."""
+        f = self.f
         env = os.environ.copy()
         if f.use_coverage:
             env["AFL_MAP_SIZE"] = str(f.map_size)
@@ -285,47 +318,55 @@ class TargetRunner:
             env["__AFL_SHM_ID"] = shm.env_id
         if f._cmplog:
             env = f._cmplog.setup_env(env)
+        return env
 
-        # Fast path: posix_spawn + temp file (no threads, no watchdog)
-        if not f.file_mode and not f._cmplog:
-            rc, stderr, pid = run_target_fast(
-                f.target,
-                data,
-                env=env,
-                perf_counters=f._perf_counters,
-                pt_session=f._pt_session,
-                lbr_session=f._lbr_session,
-                timeout=f.timeout,
-            )
-            f._last_child_pid = pid
-            if f._perf_counters:
-                f._last_perf_deltas = f._perf_counters.read_and_reset()
-            if f._pt_session:
-                f._pt_session.drain()
-            if f._lbr_session:
-                f._lbr_session.drain()
-            return rc, stderr
+    def _run_fast(self, data: bytes, env: dict) -> tuple[int, str]:
+        """posix_spawn + temp file; no threads, no watchdog."""
+        f = self.f
+        rc, stderr, pid = run_target_fast(
+            f.target,
+            data,
+            env=env,
+            perf_counters=f._perf_counters,
+            pt_session=f._pt_session,
+            lbr_session=f._lbr_session,
+            timeout=f.timeout,
+        )
+        f._last_child_pid = pid
+        if f._perf_counters:
+            f._last_perf_deltas = f._perf_counters.read_and_reset()
+        if f._pt_session:
+            f._pt_session.drain()
+        if f._lbr_session:
+            f._lbr_session.drain()
+        return rc, stderr
 
-        if f.file_mode:
-            rc, stderr, pid = run_target_file(
-                f.target,
-                data,
-                f.timeout,
-                str(f._tmp_dir),
-                f.target_args,
-                env=env,
-                perf_counters=f._perf_counters,
-                pt_session=f._pt_session,
-                lbr_session=f._lbr_session,
-            )
-            f._last_child_pid = pid
-            if f._perf_counters:
-                f._last_perf_deltas = f._perf_counters.read_and_reset()
-            if f._pt_session:
-                f._pt_session.drain()
-            if f._lbr_session:
-                f._lbr_session.drain()
-            return rc, stderr
+    def _run_file(self, data: bytes, env: dict) -> tuple[int, str]:
+        """Spawn with the input passed as a file argument."""
+        f = self.f
+        rc, stderr, pid = run_target_file(
+            f.target,
+            data,
+            f.timeout,
+            str(f._tmp_dir),
+            f.target_args,
+            env=env,
+            perf_counters=f._perf_counters,
+            pt_session=f._pt_session,
+            lbr_session=f._lbr_session,
+        )
+        f._last_child_pid = pid
+        if f._perf_counters:
+            f._last_perf_deltas = f._perf_counters.read_and_reset()
+        if f._pt_session:
+            f._pt_session.drain()
+        if f._lbr_session:
+            f._lbr_session.drain()
+        return rc, stderr
+
+    def _run_stdin(self, data: bytes, env: dict) -> tuple[int, str]:
+        """Spawn with the input piped on stdin."""
+        f = self.f
         rc, stderr, pid = run_target_stdin(
             f.target,
             data,
@@ -400,188 +441,22 @@ class TargetRunner:
         pid = os.fork()
         f._last_child_pid = pid
         if pid == 0:
-            # Everything here runs in the forked child, which shares the
-            # parent's entire Python stack (pytest included). If execv
-            # raises without being caught, the exception unwinds back into
-            # that inherited stack instead of exiting — the child then keeps
-            # running as a second, orphaned copy of the parent process.
-            # os._exit() must be unconditionally reached on any failure here.
-            try:
-                os.setsid()
-                os.dup2(stdin_r, 0)
-                os.close(stdin_r)
-                os.close(stdin_w)
-                devnull = os.open(os.devnull, os.O_WRONLY)
-                os.dup2(devnull, 1)
-                os.dup2(devnull, 2)
-                os.close(devnull)
-                ld_preload = os.environ.get("LD_PRELOAD", "")
-                if ld_preload:
-                    cleaned = [p for p in ld_preload.split(":") if "ksm_preload" not in p]
-                    if cleaned:
-                        os.environ["LD_PRELOAD"] = ":".join(cleaned)
-                    else:
-                        os.environ.pop("LD_PRELOAD", None)
-                libc.ptrace(PTRACE_TRACEME, 0, None, None)
-                signal.signal(signal.SIGTRAP, signal.SIG_IGN)
-                os.execv(f.target, [f.target])
-            except BaseException:
-                os._exit(127)
-            os._exit(127)
+            self._ptrace_child(stdin_r, stdin_w, libc, f.target)
 
         os.close(stdin_r)
         writer = threading.Thread(target=_write_and_close, args=(stdin_w, data))
         writer.start()
 
         try:
-            # Bounded wait for the initial ptrace stop. A blocking waitpid()
-            # here can hang forever: os.fork() clones only the calling thread,
-            # so if another thread (e.g. a prior run's _write_and_close writer)
-            # holds the malloc or dynamic-loader lock at fork time, the child
-            # can deadlock before reaching execv and never deliver SIGTRAP.
-            # Poll against a deadline instead and treat expiry as a killed run.
-            # (Deeper fix: posix_spawn / a pre-forked server so we never fork
-            # from a multi-threaded process at all.)
-            #
-            # Bound this wait *separately* from the run loop below, which
-            # starts its own full f.timeout. Charging f.timeout twice makes
-            # the worst case per exec 2x the configured budget. Reaching the
-            # first ptrace stop is fork+execv only — milliseconds — so a
-            # one-second ceiling closes the hang without costing throughput
-            # on a slow or overloaded box.
-            initial_deadline = time.time() + min(f.timeout, _INITIAL_STOP_TIMEOUT)
-            status = None
-            while True:
-                waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-                if waited != 0:
-                    break
-                if time.time() >= initial_deadline:
-                    with contextlib.suppress(ProcessLookupError, ChildProcessError):
-                        os.kill(pid, signal.SIGKILL)
-                        os.waitpid(pid, 0)
-                    return -2, "exec timeout"
-                time.sleep(0.0005)  # same poll interval as the loop below
-            if os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGTRAP:
-                pass
-            elif os.WIFSTOPPED(status):
-                sig = os.WSTOPSIG(status)
-                _capture_crash_state(pid, libc, f)
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-                return -sig, ""
-            elif os.WIFSIGNALED(status):
-                return -os.WTERMSIG(status), ""
-            elif os.WIFEXITED(status):
-                return os.WEXITSTATUS(status), ""
-            else:
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-                return -2, "exec failed"
+            early = self._ptrace_first_stop(pid, libc)
+            if early is not None:
+                return early
 
             cov.install_breakpoints(pid)
             libc.ptrace(PTRACE_CONT, pid, None, None)
 
             deadline = time.time() + f.timeout
-
-            last_action = None
-            last_sig = 0
-            returncode = 0
-            child_reaped = False
-            # Deadline expiry is tracked explicitly rather than inferred
-            # after the fact. `status` holds the LAST CONSUMED event, which
-            # on expiry is whatever stop the tracee was last seen in -- so
-            # the post-loop reconstruction below read a timeout as a crash:
-            # with >=1 breakpoint handled, the stale SIGTRAP stop yielded
-            # rc -5 ("crash signal 5"); with none, the SIGKILL path yielded
-            # rc -9. `is_timeout` tests rc == -1, so it could never fire in
-            # ptrace mode, and every slow input landed in crashes/ and took
-            # a slot in signature dedup.
-            timed_out = False
-            while True:
-                if time.time() >= deadline:
-                    timed_out = True
-                    break
-                waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-                # Check the PID, not just status: waitpid returns (0, 0) for
-                # "no event" but (pid, 0) for a clean exit with rc=0 — both
-                # have status == 0. Discarding the pid made every clean exit
-                # look like "no event", then the next poll hit ECHILD and the
-                # run was misreported as -2 ("exec failed").
-                if waited == 0:
-                    time.sleep(0.0005)
-                    continue
-
-                if os.WIFEXITED(status):
-                    returncode = os.WEXITSTATUS(status)
-                    child_reaped = True
-                    break
-                if os.WIFSIGNALED(status):
-                    returncode = -os.WTERMSIG(status)
-                    child_reaped = True
-                    break
-
-                if os.WIFSTOPPED(status):
-                    sig = os.WSTOPSIG(status)
-                    last_sig = sig
-                    if sig == signal.SIGTRAP:
-                        regs_buf = (ctypes.c_char * (27 * 8))()
-                        if self._ptrace_handle_breakpoint(pid, libc, cov, regs_buf):
-                            last_action = "cont"
-                        else:
-                            break
-                    else:
-                        # Fatal-signal stop (SIGSEGV/SIGBUS/...): capture the
-                        # faulting address + registers before the tracee is
-                        # reaped, since si_addr is unrecoverable after death.
-                        _capture_crash_state(pid, libc, f)
-                        break
-
-            if timed_out:
-                return _ptrace_report_timeout(pid)
-
-            if child_reaped:
-                pass
-            elif last_action == "cont" and last_sig == signal.SIGTRAP:
-                waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-                if waited != 0 and os.WIFSTOPPED(status):
-                    libc.ptrace(PTRACE_CONT, pid, None, None)
-                    # Bounded, not blocking. The tracee was just resumed with
-                    # a blind PTRACE_CONT after its breakpoint handler failed;
-                    # it may never stop again. `os.waitpid(pid, 0)` here hung
-                    # the fuzzer indefinitely on such a target, past a
-                    # deadline that had already been checked -- and swallowed
-                    # any fatal signal delivered while it blocked.
-                    resumed = False
-                    while time.time() < deadline:
-                        waited, st = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
-                        if waited != 0:
-                            status = st
-                            resumed = True
-                            break
-                        time.sleep(0.0005)
-                    if not resumed:
-                        return _ptrace_report_timeout(pid)
-                elif waited != 0:
-                    if os.WIFSIGNALED(status):
-                        returncode = -os.WTERMSIG(status)
-                    elif os.WIFEXITED(status):
-                        returncode = os.WEXITSTATUS(status)
-            else:
-                os.kill(pid, signal.SIGKILL)
-                os.waitpid(pid, 0)
-
-            if returncode == 0 and not child_reaped:
-                if os.WIFSIGNALED(status):
-                    returncode = -os.WTERMSIG(status)
-                elif os.WIFEXITED(status):
-                    returncode = os.WEXITSTATUS(status)
-                elif os.WIFSTOPPED(status):
-                    returncode = -os.WSTOPSIG(status)
-                    _capture_crash_state(pid, libc, f)
-                    with contextlib.suppress(ProcessLookupError):
-                        os.kill(pid, signal.SIGKILL)
-                        os.waitpid(pid, 0)
-            return returncode, ""
+            return self._ptrace_trace(pid, libc, cov, deadline)
 
         except ChildProcessError:
             return -2, ""
@@ -595,6 +470,197 @@ class TargetRunner:
         finally:
             if writer is not None:
                 writer.join(timeout=f.timeout)
+
+    @staticmethod
+    def _ptrace_child(stdin_r: int, stdin_w: int, libc, target: str) -> None:
+        """Forked child: wire stdin, silence output, PTRACE_TRACEME, exec. Never returns."""
+        # Everything here runs in the forked child, which shares the
+        # parent's entire Python stack (pytest included). If execv
+        # raises without being caught, the exception unwinds back into
+        # that inherited stack instead of exiting — the child then keeps
+        # running as a second, orphaned copy of the parent process.
+        # os._exit() must be unconditionally reached on any failure here.
+        try:
+            os.setsid()
+            os.dup2(stdin_r, 0)
+            os.close(stdin_r)
+            os.close(stdin_w)
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, 1)
+            os.dup2(devnull, 2)
+            os.close(devnull)
+            ld_preload = os.environ.get("LD_PRELOAD", "")
+            if ld_preload:
+                cleaned = [p for p in ld_preload.split(":") if "ksm_preload" not in p]
+                if cleaned:
+                    os.environ["LD_PRELOAD"] = ":".join(cleaned)
+                else:
+                    os.environ.pop("LD_PRELOAD", None)
+            libc.ptrace(PTRACE_TRACEME, 0, None, None)
+            signal.signal(signal.SIGTRAP, signal.SIG_IGN)
+            os.execv(target, [target])
+        except BaseException:
+            os._exit(127)
+        os._exit(127)
+
+    def _ptrace_first_stop(self, pid: int, libc) -> tuple[int, str] | None:
+        """Wait (bounded) for the post-exec SIGTRAP stop; a result tuple if the run ended."""
+        f = self.f
+        # Bounded wait for the initial ptrace stop. A blocking waitpid()
+        # here can hang forever: os.fork() clones only the calling thread,
+        # so if another thread (e.g. a prior run's _write_and_close writer)
+        # holds the malloc or dynamic-loader lock at fork time, the child
+        # can deadlock before reaching execv and never deliver SIGTRAP.
+        # Poll against a deadline instead and treat expiry as a killed run.
+        # (Deeper fix: posix_spawn / a pre-forked server so we never fork
+        # from a multi-threaded process at all.)
+        #
+        # Bound this wait *separately* from the run loop below, which
+        # starts its own full f.timeout. Charging f.timeout twice makes
+        # the worst case per exec 2x the configured budget. Reaching the
+        # first ptrace stop is fork+execv only — milliseconds — so a
+        # one-second ceiling closes the hang without costing throughput
+        # on a slow or overloaded box.
+        initial_deadline = time.time() + min(f.timeout, _INITIAL_STOP_TIMEOUT)
+        status = None
+        while True:
+            waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+            if waited != 0:
+                break
+            if time.time() >= initial_deadline:
+                with contextlib.suppress(ProcessLookupError, ChildProcessError):
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+                return -2, "exec timeout"
+            time.sleep(0.0005)  # same poll interval as the loop below
+        if os.WIFSTOPPED(status) and os.WSTOPSIG(status) == signal.SIGTRAP:
+            return None
+        if os.WIFSTOPPED(status):
+            sig = os.WSTOPSIG(status)
+            _capture_crash_state(pid, libc, f)
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+            return -sig, ""
+        if os.WIFSIGNALED(status):
+            return -os.WTERMSIG(status), ""
+        if os.WIFEXITED(status):
+            return os.WEXITSTATUS(status), ""
+        os.kill(pid, signal.SIGKILL)
+        os.waitpid(pid, 0)
+        return -2, "exec failed"
+
+    def _ptrace_trace(self, pid: int, libc, cov: PtraceCoverage, deadline: float):
+        """Run the traced child to exit, crash or *deadline*; returns (rc, err)."""
+        f = self.f
+        last_action = None
+        last_sig = 0
+        returncode = 0
+        child_reaped = False
+        # Deadline expiry is tracked explicitly rather than inferred
+        # after the fact. `status` holds the LAST CONSUMED event, which
+        # on expiry is whatever stop the tracee was last seen in -- so
+        # the post-loop reconstruction below read a timeout as a crash:
+        # with >=1 breakpoint handled, the stale SIGTRAP stop yielded
+        # rc -5 ("crash signal 5"); with none, the SIGKILL path yielded
+        # rc -9. `is_timeout` tests rc == -1, so it could never fire in
+        # ptrace mode, and every slow input landed in crashes/ and took
+        # a slot in signature dedup.
+        timed_out = False
+        status = 0
+        while True:
+            if time.time() >= deadline:
+                timed_out = True
+                break
+            waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+            # Check the PID, not just status: waitpid returns (0, 0) for
+            # "no event" but (pid, 0) for a clean exit with rc=0 — both
+            # have status == 0. Discarding the pid made every clean exit
+            # look like "no event", then the next poll hit ECHILD and the
+            # run was misreported as -2 ("exec failed").
+            if waited == 0:
+                time.sleep(0.0005)
+                continue
+
+            if os.WIFEXITED(status):
+                returncode = os.WEXITSTATUS(status)
+                child_reaped = True
+                break
+            if os.WIFSIGNALED(status):
+                returncode = -os.WTERMSIG(status)
+                child_reaped = True
+                break
+
+            if not os.WIFSTOPPED(status):
+                continue
+            sig = os.WSTOPSIG(status)
+            last_sig = sig
+            if sig != signal.SIGTRAP:
+                # Fatal-signal stop (SIGSEGV/SIGBUS/...): capture the
+                # faulting address + registers before the tracee is
+                # reaped, since si_addr is unrecoverable after death.
+                _capture_crash_state(pid, libc, f)
+                break
+            regs_buf = (ctypes.c_char * (27 * 8))()
+            if not self._ptrace_handle_breakpoint(pid, libc, cov, regs_buf):
+                break
+            last_action = "cont"
+
+        if timed_out:
+            return _ptrace_report_timeout(pid)
+
+        return self._ptrace_settle(
+            pid, libc, deadline, status, returncode, child_reaped, last_action, last_sig
+        )
+
+    def _ptrace_settle(
+        self,
+        pid: int,
+        libc,
+        deadline: float,
+        status: int,
+        returncode: int,
+        child_reaped: bool,
+        last_action: str | None,
+        last_sig: int,
+    ) -> tuple[int, str]:
+        """Reap or kill the tracee after the loop and derive the final return code."""
+        f = self.f
+        if child_reaped:
+            pass
+        elif last_action == "cont" and last_sig == signal.SIGTRAP:
+            waited, status = os.waitpid(pid, os.WNOHANG | os.WUNTRACED)
+            if waited != 0 and os.WIFSTOPPED(status):
+                libc.ptrace(PTRACE_CONT, pid, None, None)
+                # Bounded, not blocking. The tracee was just resumed with
+                # a blind PTRACE_CONT after its breakpoint handler failed;
+                # it may never stop again. `os.waitpid(pid, 0)` here hung
+                # the fuzzer indefinitely on such a target, past a
+                # deadline that had already been checked -- and swallowed
+                # any fatal signal delivered while it blocked.
+                status = _ptrace_wait_until(pid, deadline)
+                if status is None:
+                    return _ptrace_report_timeout(pid)
+            elif waited != 0:
+                if os.WIFSIGNALED(status):
+                    returncode = -os.WTERMSIG(status)
+                elif os.WIFEXITED(status):
+                    returncode = os.WEXITSTATUS(status)
+        else:
+            os.kill(pid, signal.SIGKILL)
+            os.waitpid(pid, 0)
+
+        if returncode == 0 and not child_reaped:
+            if os.WIFSIGNALED(status):
+                returncode = -os.WTERMSIG(status)
+            elif os.WIFEXITED(status):
+                returncode = os.WEXITSTATUS(status)
+            elif os.WIFSTOPPED(status):
+                returncode = -os.WSTOPSIG(status)
+                _capture_crash_state(pid, libc, f)
+                with contextlib.suppress(ProcessLookupError):
+                    os.kill(pid, signal.SIGKILL)
+                    os.waitpid(pid, 0)
+        return returncode, ""
 
     def _run_triage_ptrace(self, data: bytes) -> tuple[int, str]:
         """Re-run *data* through a ptrace-attached loader script for crash triage.

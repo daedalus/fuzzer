@@ -22,6 +22,7 @@ import logging
 import struct
 import zlib
 from pathlib import Path
+from typing import NamedTuple
 
 log = logging.getLogger(__name__)
 
@@ -181,6 +182,159 @@ def _elf_sections(elf_data: bytes) -> dict[bytes, tuple[int, int, int]]:
 # ── CU DIE parsing (for stmt_list / comp_dir / addr_size) ─────────────
 
 
+def _str_at(sections: dict[bytes, bytes], sec: bytes, strp: int) -> str:
+    """NUL-terminated string at *strp* in section *sec*; "" when out of range."""
+    dbg_str = sections.get(sec, b"")
+    if strp < len(dbg_str):
+        return dbg_str[strp:].split(b"\x00", 1)[0].decode(errors="replace")
+    return ""
+
+
+# Attribute readers: (sections, data, off, addr_size, str_base) → (value, new_off).
+# Truncated input raises (IndexError / struct.error / ValueError) like the
+# underlying reads; callers catch.
+
+
+def _rd_string(sections, data, off, addr_size, str_base):
+    s, off = _cstr(data, off)
+    return s.decode(errors="replace"), off
+
+
+def _rd_strp(sections, data, off, addr_size, str_base):
+    strp = struct.unpack_from("<I", data, off)[0]
+    return _str_at(sections, b".debug_str", strp), off + 4
+
+
+def _rd_line_strp(sections, data, off, addr_size, str_base):
+    strp = struct.unpack_from("<I", data, off)[0]
+    return _str_at(sections, b".debug_line_str", strp), off + 4
+
+
+# DW_FORM_strx* index readers: (data, off) → (index, new_off)
+_STRX_INDEX = {
+    _DW_FORM_strx: _uleb,
+    _DW_FORM_strx1: lambda data, off: (data[off], off + 1),
+    _DW_FORM_strx2: lambda data, off: (struct.unpack_from("<H", data, off)[0], off + 2),
+    _DW_FORM_strx3: lambda data, off: (int.from_bytes(data[off : off + 3], "little"), off + 3),
+    _DW_FORM_strx4: lambda data, off: (struct.unpack_from("<I", data, off)[0], off + 4),
+}
+
+
+def _rd_strx(sections, data, off, addr_size, str_base, form=_DW_FORM_strx):
+    """Indexed string: index into .debug_str_offsets → .debug_str."""
+    idx, off = _STRX_INDEX[form](data, off)
+    str_offsets = sections.get(b".debug_str_offsets", b"")
+    entry = str_base + idx * 4
+    if entry + 4 > len(str_offsets):
+        return "", off
+    strp = struct.unpack_from("<I", str_offsets, entry)[0]
+    return _str_at(sections, b".debug_str", strp), off
+
+
+def _rd_uleb(sections, data, off, addr_size, str_base):
+    return _uleb(data, off)
+
+
+def _rd_sleb(sections, data, off, addr_size, str_base):
+    return _sleb(data, off)
+
+
+def _rd_flag_present(sections, data, off, addr_size, str_base):
+    return True, off
+
+
+def _rd_flag(sections, data, off, addr_size, str_base):
+    return bool(data[off]), off + 1
+
+
+def _rd_u8(sections, data, off, addr_size, str_base):
+    return data[off], off + 1
+
+
+def _rd_u16(sections, data, off, addr_size, str_base):
+    return struct.unpack_from("<H", data, off)[0], off + 2
+
+
+def _rd_u32(sections, data, off, addr_size, str_base):
+    return struct.unpack_from("<I", data, off)[0], off + 4
+
+
+def _rd_u64(sections, data, off, addr_size, str_base):
+    return struct.unpack_from("<Q", data, off)[0], off + 8
+
+
+def _rd_uleb_block(sections, data, off, addr_size, str_base):
+    length, off = _uleb(data, off)
+    return None, off + length
+
+
+def _rd_block1(sections, data, off, addr_size, str_base):
+    return None, off + 1 + data[off]
+
+
+def _rd_block2(sections, data, off, addr_size, str_base):
+    return None, off + 2 + struct.unpack_from("<H", data, off)[0]
+
+
+def _rd_block4(sections, data, off, addr_size, str_base):
+    return None, off + 4 + struct.unpack_from("<I", data, off)[0]
+
+
+def _rd_data16(sections, data, off, addr_size, str_base):
+    return data[off : off + 16], off + 16
+
+
+def _rd_addr(sections, data, off, addr_size, str_base):
+    return int.from_bytes(data[off : off + addr_size], "little"), off + addr_size
+
+
+def _rd_implicit(sections, data, off, addr_size, str_base):
+    # value lives in the abbrev table; consumes no DIE bytes
+    return None, off
+
+
+def _strx_reader(form: int):
+    """Bind *form* into _rd_strx so the table keeps one reader signature."""
+    return lambda sections, data, off, addr_size, str_base: _rd_strx(
+        sections, data, off, addr_size, str_base, form
+    )
+
+
+# DW_FORM → reader
+_FORM_READERS = {
+    _DW_FORM_string: _rd_string,
+    _DW_FORM_strp: _rd_strp,
+    _DW_FORM_line_strp: _rd_line_strp,
+    **{form: _strx_reader(form) for form in _STRX_INDEX},
+    _DW_FORM_udata: _rd_uleb,
+    _DW_FORM_addrx: _rd_uleb,
+    _DW_FORM_ref_udata: _rd_uleb,
+    _DW_FORM_sdata: _rd_sleb,
+    _DW_FORM_flag_present: _rd_flag_present,
+    _DW_FORM_flag: _rd_flag,
+    _DW_FORM_data1: _rd_u8,
+    _DW_FORM_addrx1: _rd_u8,
+    _DW_FORM_ref1: _rd_u8,
+    _DW_FORM_data2: _rd_u16,
+    _DW_FORM_ref2: _rd_u16,
+    _DW_FORM_data4: _rd_u32,
+    _DW_FORM_ref4: _rd_u32,
+    _DW_FORM_ref_addr: _rd_u32,
+    _DW_FORM_sec_offset: _rd_u32,
+    _DW_FORM_data8: _rd_u64,
+    _DW_FORM_ref8: _rd_u64,
+    _DW_FORM_ref_sig8: _rd_u64,
+    _DW_FORM_exprloc: _rd_uleb_block,
+    _DW_FORM_block: _rd_uleb_block,
+    _DW_FORM_block1: _rd_block1,
+    _DW_FORM_block2: _rd_block2,
+    _DW_FORM_block4: _rd_block4,
+    _DW_FORM_data16: _rd_data16,
+    _DW_FORM_addr: _rd_addr,
+    _DW_FORM_implicit_const: _rd_implicit,
+}
+
+
 def _read_attr(
     sections: dict[bytes, bytes],
     form: int,
@@ -194,92 +348,56 @@ def _read_attr(
     *str_base* is the offset into ``.debug_str_offsets`` used by the
     DW_FORM_strx* indexed-string forms (per DWARF5, default 8).
     """
-    if form == _DW_FORM_string:
-        s, off = _cstr(data, off)
-        return s.decode(errors="replace"), off
-    if form == _DW_FORM_strp:
-        strp, off = struct.unpack_from("<I", data, off), off + 4
-        dbg_str = sections.get(b".debug_str", b"")
-        if strp[0] < len(dbg_str):
-            s = dbg_str[strp[0] :].split(b"\x00", 1)[0]
-            return s.decode(errors="replace"), off
-        return "", off
-    if form == _DW_FORM_line_strp:
-        strp, off = struct.unpack_from("<I", data, off), off + 4
-        dbg_str = sections.get(b".debug_line_str", b"")
-        if strp[0] < len(dbg_str):
-            s = dbg_str[strp[0] :].split(b"\x00", 1)[0]
-            return s.decode(errors="replace"), off
-        return "", off
-    if form in (_DW_FORM_strx, _DW_FORM_strx1, _DW_FORM_strx2, _DW_FORM_strx3, _DW_FORM_strx4):
-        # indexed string: index into .debug_str_offsets → .debug_str
-        if form == _DW_FORM_strx:
-            idx, off = _uleb(data, off)
-        elif form == _DW_FORM_strx1:
-            idx, off = data[off], off + 1
-        elif form == _DW_FORM_strx2:
-            idx, off = struct.unpack_from("<H", data, off)[0], off + 2
-        elif form == _DW_FORM_strx3:
-            idx, off = int.from_bytes(data[off : off + 3], "little"), off + 3
-        else:
-            idx, off = struct.unpack_from("<I", data, off)[0], off + 4
-        str_offsets = sections.get(b".debug_str_offsets", b"")
-        entry = str_base + idx * 4
-        if entry + 4 <= len(str_offsets):
-            strp = struct.unpack_from("<I", str_offsets, entry)[0]
-            dbg_str = sections.get(b".debug_str", b"")
-            if strp < len(dbg_str):
-                s = dbg_str[strp:].split(b"\x00", 1)[0]
-                return s.decode(errors="replace"), off
-        return "", off
-    if form == _DW_FORM_udata:
-        v, off = _uleb(data, off)
-        return v, off
-    if form == _DW_FORM_addrx:
-        v, off = _uleb(data, off)
-        return v, off
-    if form == _DW_FORM_sdata:
-        v, off = _sleb(data, off)
-        return v, off
-    if form == _DW_FORM_flag_present:
-        return True, off
-    if form == _DW_FORM_flag:
-        return bool(data[off]), off + 1
-    if form in (_DW_FORM_data1, _DW_FORM_addrx1):
-        return data[off], off + 1
-    if form in (_DW_FORM_data2, _DW_FORM_ref2):
-        return struct.unpack_from("<H", data, off)[0], off + 2
-    if form in (_DW_FORM_data4, _DW_FORM_ref4, _DW_FORM_ref_addr):
-        return struct.unpack_from("<I", data, off)[0], off + 4
-    if form in (_DW_FORM_data8, _DW_FORM_ref8, _DW_FORM_ref_sig8):
-        return struct.unpack_from("<Q", data, off)[0], off + 8
-    if form in (_DW_FORM_ref1,):
-        return data[off], off + 1
-    if form == _DW_FORM_ref_udata:
-        v, off = _uleb(data, off)
-        return v, off
-    if form in (_DW_FORM_sec_offset,):
-        return struct.unpack_from("<I", data, off)[0], off + 4
-    if form == _DW_FORM_exprloc:
-        length, off = _uleb(data, off)
-        return None, off + length
-    if form in (_DW_FORM_block,):
-        length, off = _uleb(data, off)
-        return None, off + length
-    if form in (_DW_FORM_block1,):
-        return None, off + 1 + data[off]
-    if form in (_DW_FORM_block2,):
-        return None, off + 2 + struct.unpack_from("<H", data, off)[0]
-    if form in (_DW_FORM_block4,):
-        return None, off + 4 + struct.unpack_from("<I", data, off)[0]
-    if form == _DW_FORM_data16:
-        return data[off : off + 16], off + 16
-    if form == _DW_FORM_addr:
-        return int.from_bytes(data[off : off + addr_size], "little"), off + addr_size
-    if form == _DW_FORM_implicit_const:
-        # value lives in the abbrev table; consumes no DIE bytes
-        return None, off
-    raise ValueError(f"unsupported form 0x{form:x}")
+    reader = _FORM_READERS.get(form)
+    if reader is None:
+        raise ValueError(f"unsupported form 0x{form:x}")
+    return reader(sections, data, off, addr_size, str_base)
+
+
+def _find_abbrev(abbrev: bytes, off: int, code: int):
+    """Scan the abbrev table at *off* for *code* → (tag, [(name, form)]).
+
+    Returns (None, []) when the table ends before *code* is found.
+    """
+    while True:
+        acode, off = _uleb(abbrev, off)
+        if acode == 0:
+            return None, []
+        atag, off = _uleb(abbrev, off)
+        off += 1  # has-children flag
+        aspecs = []
+        while True:
+            name, off = _uleb(abbrev, off)
+            form, off = _uleb(abbrev, off)
+            if name == 0 and form == 0:
+                break
+            aspecs.append((name, form))
+            if form == _DW_FORM_implicit_const:
+                # value embedded in the abbrev table, not the DIE
+                _v, off = _sleb(abbrev, off)
+        if acode == code:
+            return atag, aspecs
+
+
+def _cu_attrs(sections, info: bytes, die_off: int, specs, addr_size: int):
+    """Read the CU DIE's attributes → (stmt_list, comp_dir, name)."""
+    stmt_list = None
+    comp_dir = None
+    name = None
+    str_base = 8  # DWARF5 default when DW_AT_str_offsets_base is absent
+    for attr_name, form in specs:
+        value, die_off = _read_attr(
+            sections, form, info, die_off, addr_size=addr_size, str_base=str_base
+        )
+        if attr_name == _DW_AT_stmt_list:
+            stmt_list = value
+        elif attr_name == _DW_AT_comp_dir:
+            comp_dir = value if isinstance(value, str) else None
+        elif attr_name == _DW_AT_name:
+            name = value if isinstance(value, str) else None
+        elif attr_name == 0x74 and isinstance(value, int):  # DW_AT_str_offsets_base
+            str_base = value
+    return stmt_list, comp_dir, name
 
 
 def _parse_cu_die(sections: dict[bytes, bytes], info: bytes, cu_off: int):
@@ -310,46 +428,10 @@ def _parse_cu_die(sections: dict[bytes, bytes], info: bytes, cu_off: int):
         code, die_off = _uleb(info, die_off)
         if code == 0:
             return None
-        tag = None
-        specs = []
-        off = abbrev_off
-        while True:
-            acode, off = _uleb(abbrev, off)
-            if acode == 0:
-                break
-            atag, off = _uleb(abbrev, off)
-            off += 1  # has-children flag
-            aspecs = []
-            while True:
-                name, off = _uleb(abbrev, off)
-                form, off = _uleb(abbrev, off)
-                if name == 0 and form == 0:
-                    break
-                aspecs.append((name, form))
-                if form == _DW_FORM_implicit_const:
-                    # value embedded in the abbrev table, not the DIE
-                    _v, off = _sleb(abbrev, off)
-            if acode == code:
-                tag, specs = atag, aspecs
-                break
+        tag, specs = _find_abbrev(abbrev, abbrev_off, code)
         if tag not in (_DW_TAG_compile_unit, _DW_TAG_skeleton_unit):
             return None
-        stmt_list = None
-        comp_dir = None
-        name = None
-        str_base = 8  # DWARF5 default when DW_AT_str_offsets_base is absent
-        for attr_name, form in specs:
-            value, die_off = _read_attr(
-                sections, form, info, die_off, addr_size=addr_size, str_base=str_base
-            )
-            if attr_name == _DW_AT_stmt_list:
-                stmt_list = value
-            elif attr_name == _DW_AT_comp_dir:
-                comp_dir = value if isinstance(value, str) else None
-            elif attr_name == _DW_AT_name:
-                name = value if isinstance(value, str) else None
-            elif attr_name == 0x74 and isinstance(value, int):  # DW_AT_str_offsets_base
-                str_base = value
+        stmt_list, comp_dir, name = _cu_attrs(sections, info, die_off, specs, addr_size)
         return stmt_list, comp_dir, name, addr_size
     except Exception:
         log.debug("CU DIE parse failed", exc_info=True)
@@ -390,6 +472,215 @@ def _read_v5_entry(data: bytes, off: int, formats, sections: dict[bytes, bytes])
         value, off = _read_attr(sections, form, data, off)
         fields[ct] = value
     return fields, off
+
+
+class _LineHdr(NamedTuple):
+    """Fixed .debug_line header fields after header_length."""
+
+    min_inst_length: int
+    max_ops: int
+    default_is_stmt: int
+    line_base: int
+    line_range: int
+    opcode_base: int
+    std_opcode_lengths: list[int]
+
+
+def _line_header(data: bytes, p: int, version: int) -> tuple[_LineHdr, int]:
+    """Read min_inst_length … standard_opcode_lengths → (hdr, new_p)."""
+    min_inst_length = data[p]
+    p += 1
+    if version >= 4:
+        max_ops = data[p]
+        p += 1
+    else:
+        max_ops = 1
+    default_is_stmt = data[p]
+    p += 1
+    line_base = struct.unpack_from("<b", data, p)[0]
+    p += 1
+    line_range = data[p]
+    p += 1
+    opcode_base = data[p]
+    p += 1
+    std_opcode_lengths = list(data[p : p + opcode_base - 1])
+    p += opcode_base - 1
+    hdr = _LineHdr(
+        min_inst_length,
+        max_ops,
+        default_is_stmt,
+        line_base,
+        line_range,
+        opcode_base,
+        std_opcode_lengths,
+    )
+    return hdr, p
+
+
+def _line_file_tables(data, p, header_end, version, comp_dir, sections):
+    """Directory and file tables → (dirs, files[(name, dir index)]).
+
+    v5: directory index 0 is the compilation directory. v4: index 0
+    means "no directory" (name is relative to the CU's comp dir).
+    """
+    dirs: list[str] = [""]
+    files: list[tuple[str, int]] = []  # (display name, dir index)
+    if version >= 5:
+        dirs[0] = comp_dir or ""
+        dir_entries, p = _read_v5_table(data, p, sections)
+        for fields in dir_entries:
+            dirs.append(str(fields.get(_DW_LNCT_path, "")))
+        file_entries, p = _read_v5_table(data, p, sections)
+        for fields in file_entries:
+            files.append(
+                (
+                    str(fields.get(_DW_LNCT_path, "")),
+                    int(fields.get(_DW_LNCT_directory_index, 0)),
+                )
+            )
+        return dirs, files
+
+    while p < header_end and data[p] != 0:
+        name, p = _cstr(data, p)
+        dirs.append(name.decode(errors="replace"))
+    p += 1  # trailing null
+    while p < header_end and data[p] != 0:
+        name, p = _cstr(data, p)
+        dir_idx, p = _uleb(data, p)
+        _mtime, p = _uleb(data, p)
+        _size, p = _uleb(data, p)
+        files.append((name.decode(errors="replace"), dir_idx))
+    return dirs, files
+
+
+def _line_display(version: int, files: list, dirs: list[str]):
+    """File-number → "dir/name" resolver.
+
+    v5 file numbers are 0-based (entry 0 is the root file); v2-4 are
+    1-based. *files* is shared, so DW_LNE_define_file additions are seen.
+    """
+    first = 0 if version >= 5 else 1
+
+    def _display(file_idx: int) -> str:
+        if not first <= file_idx < len(files) + first:
+            return ""
+        fname, dir_idx = files[file_idx - first]
+        if dir_idx < len(dirs) and dirs[dir_idx]:
+            return f"{dirs[dir_idx]}/{fname}"
+        return fname
+
+    return _display
+
+
+class _LineProgram:
+    """DWARF line-number state machine over one program's opcodes."""
+
+    def __init__(self, data, end, hdr: _LineHdr, version, addr_size, files, display):
+        self.data = data
+        self.end = end
+        self.hdr = hdr
+        self.version = version
+        self.addr_size = addr_size
+        self.files = files
+        self.display = display
+        self._reset()
+
+    def _reset(self) -> None:
+        """Initial register state (start of program / after end_sequence)."""
+        self.address = 0
+        self.file_idx = 1
+        self.line_no = 1
+        self.is_stmt = bool(self.hdr.default_is_stmt)
+
+    def _row(self) -> tuple[str, int, int]:
+        return (self.display(self.file_idx), self.line_no, self.address)
+
+    def run(self, p: int) -> list[tuple[str, int, int]]:
+        """Execute opcodes from *p* to end → rows (display, line, address)."""
+        data, end, hdr = self.data, self.end, self.hdr
+        rows: list[tuple[str, int, int]] = []
+        while p < end:
+            opcode = data[p]
+            p += 1
+            if opcode == 0:  # extended
+                p = self._extended(p)
+                if p is None:
+                    break
+                continue
+            if opcode >= hdr.opcode_base:  # special opcode
+                adjusted = opcode - hdr.opcode_base
+                self.address += (adjusted // hdr.line_range) * hdr.min_inst_length * hdr.max_ops
+                self.line_no += hdr.line_base + (adjusted % hdr.line_range)
+                rows.append(self._row())
+                continue
+            if opcode == _DW_LNS_copy:
+                rows.append(self._row())
+                continue
+            p = self._standard(opcode, p)
+        return rows
+
+    def _extended(self, p: int) -> int | None:
+        """Execute one extended opcode; None when its length overruns the unit."""
+        data, end = self.data, self.end
+        ext_len, p = _uleb(data, p)
+        ext_end = p + ext_len
+        if ext_end > end:
+            return None
+        if p >= end:
+            return ext_end
+        sub = data[p]
+        p += 1
+        if sub == _DW_LNE_end_sequence:
+            # The end_sequence row marks the address one past the
+            # last instruction of the sequence; per DWARF it does
+            # not belong to any source line. Emitting it with the
+            # stale line_no attributed the end-of-function address
+            # to that function's last line, so a file:line target
+            # could resolve to an address past the function body.
+            self._reset()
+        elif sub == _DW_LNE_set_address:
+            if p + self.addr_size <= ext_end:
+                self.address = int.from_bytes(data[p : p + self.addr_size], "little")
+        elif sub == _DW_LNE_define_file and self.version < 5:
+            fname, p2 = _cstr(data, p)
+            dir_idx, p2 = _uleb(data, p2)
+            _mtime, p2 = _uleb(data, p2)
+            _size, p2 = _uleb(data, p2)
+            self.files.append((fname.decode(errors="replace"), dir_idx))
+        # set_discriminator and unknown sub-opcodes: skip
+        return ext_end
+
+    def _standard(self, opcode: int, p: int) -> int:
+        """Execute one standard opcode (other than DW_LNS_copy) → new p."""
+        data, hdr = self.data, self.hdr
+        if opcode == _DW_LNS_advance_pc:
+            adv, p = _uleb(data, p)
+            self.address += adv * hdr.min_inst_length * hdr.max_ops
+        elif opcode == _DW_LNS_advance_line:
+            adv, p = _sleb(data, p)
+            self.line_no += adv
+        elif opcode == _DW_LNS_set_file:
+            self.file_idx, p = _uleb(data, p)
+        elif opcode == _DW_LNS_set_column:
+            _col, p = _uleb(data, p)
+        elif opcode == _DW_LNS_negate_stmt:
+            self.is_stmt = not self.is_stmt
+        elif opcode == _DW_LNS_set_basic_block:
+            pass
+        elif opcode == _DW_LNS_const_add_pc:
+            self.address += (
+                ((255 - hdr.opcode_base) // hdr.line_range) * hdr.min_inst_length * hdr.max_ops
+            )
+        elif opcode == _DW_LNS_fixed_advance_pc:
+            if p + 2 <= self.end:
+                self.address += struct.unpack_from("<H", data, p)[0]
+                p += 2
+        else:  # prologue_end, epilogue_begin, set_isa, unknown
+            n = opcode - 1
+            if 0 <= n < len(hdr.std_opcode_lengths):
+                for _ in range(hdr.std_opcode_lengths[n]):
+                    _v, p = _uleb(data, p)
+        return p
 
 
 class DwarfLineResolver:
@@ -479,154 +770,15 @@ class DwarfLineResolver:
         if header_end > end:
             return
 
-        min_inst_length = data[p]
-        p += 1
-        if version >= 4:
-            max_ops = data[p]
-            p += 1
-        else:
-            max_ops = 1
-        default_is_stmt = data[p]
-        p += 1
-        line_base = struct.unpack_from("<b", data, p)[0]
-        p += 1
-        line_range = data[p]
-        p += 1
-        opcode_base = data[p]
-        p += 1
-        std_opcode_lengths = list(data[p : p + opcode_base - 1])
-        p += opcode_base - 1
+        hdr, p = _line_header(data, p, version)
+        dirs, files = _line_file_tables(data, p, header_end, version, comp_dir, sections)
+        display = _line_display(version, files, dirs)
+        prog = _LineProgram(data, end, hdr, version, addr_size, files, display)
+        self._index_line_rows(prog.run(header_end))
 
-        # File tables.
-        # v5: directory index 0 is the compilation directory. v4: index 0
-        # means "no directory" (name is relative to the CU's comp dir).
-        dirs: list[str] = [""]
-        if version >= 5:
-            dirs[0] = comp_dir or ""
-            dir_entries, p = _read_v5_table(data, p, sections)
-            for fields in dir_entries:
-                dirs.append(str(fields.get(_DW_LNCT_path, "")))
-            file_entries, p = _read_v5_table(data, p, sections)
-            files: list[tuple[str, int]] = []
-            for fields in file_entries:
-                files.append(
-                    (
-                        str(fields.get(_DW_LNCT_path, "")),
-                        int(fields.get(_DW_LNCT_directory_index, 0)),
-                    )
-                )
-        else:
-            files: list[tuple[str, int]] = []  # (display name, dir index)
-            while p < header_end and data[p] != 0:
-                name, p = _cstr(data, p)
-                dirs.append(name.decode(errors="replace"))
-            p += 1  # trailing null
-            while p < header_end and data[p] != 0:
-                name, p = _cstr(data, p)
-                dir_idx, p = _uleb(data, p)
-                _mtime, p = _uleb(data, p)
-                _size, p = _uleb(data, p)
-                files.append((name.decode(errors="replace"), dir_idx))
-
-        # v5 file numbers are 0-based (entry 0 is the root file); v2-4
-        # are 1-based.
-        if version >= 5:
-
-            def _display(file_idx: int) -> str:
-                if 0 <= file_idx < len(files):
-                    fname, dir_idx = files[file_idx]
-                    if dir_idx < len(dirs) and dirs[dir_idx]:
-                        return f"{dirs[dir_idx]}/{fname}"
-                    return fname
-                return ""
-        else:
-
-            def _display(file_idx: int) -> str:
-                if 1 <= file_idx <= len(files):
-                    fname, dir_idx = files[file_idx - 1]
-                    if dir_idx < len(dirs) and dirs[dir_idx]:
-                        return f"{dirs[dir_idx]}/{fname}"
-                    return fname
-                return ""
-
-        # Line program.
-        address = 0
-        file_idx = 1
-        line_no = 1
-        is_stmt = bool(default_is_stmt)
-        p = header_end
-        rows: list[tuple[str, int, int]] = []  # (display, line, address)
-        while p < end:
-            opcode = data[p]
-            p += 1
-            if opcode == 0:  # extended
-                ext_len, p = _uleb(data, p)
-                ext_end = p + ext_len
-                if ext_end > end:
-                    break
-                if p < end:
-                    sub = data[p]
-                    p += 1
-                    if sub == _DW_LNE_end_sequence:
-                        # The end_sequence row marks the address one past the
-                        # last instruction of the sequence; per DWARF it does
-                        # not belong to any source line. Emitting it with the
-                        # stale line_no attributed the end-of-function address
-                        # to that function's last line, so a file:line target
-                        # could resolve to an address past the function body.
-                        address = 0
-                        file_idx = 1
-                        line_no = 1
-                        is_stmt = bool(default_is_stmt)
-                    elif sub == _DW_LNE_set_address:
-                        if p + addr_size <= ext_end:
-                            address = int.from_bytes(data[p : p + addr_size], "little")
-                    elif sub == _DW_LNE_define_file and version < 5:
-                        fname, p2 = _cstr(data, p)
-                        dir_idx, p2 = _uleb(data, p2)
-                        _mtime, p2 = _uleb(data, p2)
-                        _size, p2 = _uleb(data, p2)
-                        files.append((fname.decode(errors="replace"), dir_idx))
-                    # set_discriminator and unknown sub-opcodes: skip
-                p = ext_end
-                continue
-            if opcode >= opcode_base:  # special opcode
-                adjusted = opcode - opcode_base
-                address += (adjusted // line_range) * min_inst_length * max_ops
-                line_no += line_base + (adjusted % line_range)
-                rows.append((_display(file_idx), line_no, address))
-                continue
-            # standard opcode
-            if opcode == _DW_LNS_copy:
-                rows.append((_display(file_idx), line_no, address))
-            elif opcode == _DW_LNS_advance_pc:
-                adv, p = _uleb(data, p)
-                address += adv * min_inst_length * max_ops
-            elif opcode == _DW_LNS_advance_line:
-                adv, p = _sleb(data, p)
-                line_no += adv
-            elif opcode == _DW_LNS_set_file:
-                file_idx, p = _uleb(data, p)
-            elif opcode == _DW_LNS_set_column:
-                _col, p = _uleb(data, p)
-            elif opcode == _DW_LNS_negate_stmt:
-                is_stmt = not is_stmt
-            elif opcode == _DW_LNS_set_basic_block:
-                pass
-            elif opcode == _DW_LNS_const_add_pc:
-                address += ((255 - opcode_base) // line_range) * min_inst_length * max_ops
-            elif opcode == _DW_LNS_fixed_advance_pc:
-                if p + 2 <= end:
-                    address += struct.unpack_from("<H", data, p)[0]
-                    p += 2
-            else:  # prologue_end, epilogue_begin, set_isa, unknown
-                n = opcode - 1
-                if 0 <= n < len(std_opcode_lengths):
-                    for _ in range(std_opcode_lengths[n]):
-                        _v, p = _uleb(data, p)
-
-        # Index rows by basename → line → addresses (dedup, first address
-        # of each contiguous run wins via sorted dedup below).
+    def _index_line_rows(self, rows: list[tuple[str, int, int]]) -> None:
+        """Index rows by basename → line → addresses (dedup, first address
+        of each contiguous run wins via sorted dedup below)."""
         seen: set[tuple[str, int, int]] = set()
         for display, ln, addr in rows:
             if addr <= 0 or not display:

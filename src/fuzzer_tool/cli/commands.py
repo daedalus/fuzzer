@@ -406,6 +406,13 @@ def cmd_fuzz(args):
                 print(f"[*] Merged grammar from {path} (total rules: {len(grammar.rules)})")
         grammar.boltzmann_mutate = args.grammar_boltzmann
 
+    # Constraint-labelled FSM format (core/format_fsm.py): fsm_regen op.
+    fsm = None
+    if getattr(args, "fsm", None):
+        fsm = _load_fsm_arg(args.fsm)
+        if fsm is None:
+            return 1
+
     plot_graph_path = None
     coverage_log_arg = args.coverage_log
     if getattr(args, "plot_graph", None) is not None:
@@ -535,6 +542,7 @@ def cmd_fuzz(args):
             else getattr(args, "stack_heartbeat", None)
         ),
         grammar=grammar,
+        fsm=fsm,
         persistent=args.persistent,
         net_host=getattr(args, "net_host", None),
         net_port=getattr(args, "net_port", None),
@@ -1025,6 +1033,44 @@ def cmd_root_cause(args):
     return 0
 
 
+def _load_fsm_arg(path: str):
+    """Load an --fsm spec; print the error and return None if it is bad."""
+    from fuzzer_tool.core.format_fsm import load_fsm
+
+    try:
+        fsm = load_fsm(path)
+    except (OSError, ValueError) as e:
+        print(f"[-] --fsm {path}: {e}")
+        return None
+    print(f"[*] FSM loaded: {len(fsm.edges)} transitions from {path}")
+    return fsm
+
+
+def _genseed_fsm(args) -> int:
+    """genseed --fsm: messages from a constraint-labelled FSM (StateLifter §6.3)."""
+    from fuzzer_tool.adapters.filesystem import hash_data
+    from fuzzer_tool.core.rand_pool import RandPool
+    from fuzzer_tool.services.import_corpus import _write_seed
+
+    fsm = _load_fsm_arg(args.fsm)
+    if fsm is None:
+        return 1
+
+    dest = Path(args.corpus)
+    rng = RandPool(seed=args.seed)
+    seen: set[str] = set()
+    for _ in range(args.count):
+        data = fsm.generate(rng, args.max_len)[: args.max_len]
+        h = hash_data(data)
+        if not data or h in seen:
+            continue
+        seen.add(h)
+        _write_seed(dest, data, h)
+
+    print(f"[+] Wrote {len(seen)} FSM seed(s) to {dest}/seeds/")
+    return 0
+
+
 def cmd_genseed(args):
     """Write from-scratch seeds for one or more formats into a corpus dir.
 
@@ -1038,6 +1084,9 @@ def cmd_genseed(args):
     from fuzzer_tool.core.format_generators import FORMATS, generate
     from fuzzer_tool.core.rand_pool import RandPool
     from fuzzer_tool.services.import_corpus import _write_seed
+
+    if args.fsm:
+        return _genseed_fsm(args)
 
     fmts = list(FORMATS) if args.format == "all" else [args.format]
     unknown = [f for f in fmts if f not in FORMATS]
@@ -1091,6 +1140,55 @@ def cmd_minimize(args):
     return 0
 
 
+def _verify_exec(args, data):
+    """Run one crash input against the ASAN target; returns (rc, stderr)."""
+    from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
+
+    if not args.file_mode:
+        returncode, stderr, _ = run_target_stdin(
+            target=args.asan_target,
+            data=data,
+            timeout=args.timeout,
+            env=os.environ.copy(),
+        )
+        return returncode, stderr
+
+    tmp_dir = Path("/tmp") / f"verify_{os.getpid()}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        returncode, stderr, _pid = run_target_file(
+            target=args.asan_target,
+            data=data,
+            timeout=args.timeout,
+            tmp_dir=str(tmp_dir),
+            target_args=getattr(args, "target_args", None) or [],
+            env=os.environ.copy(),
+        )
+    finally:
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+    return returncode, stderr
+
+
+def _verify_verdict(name, returncode, stderr) -> bool:
+    """Print the verdict for one crash; True when the crash reproduced."""
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES
+    from fuzzer_tool.core.sanitizer import SanitizerReport
+
+    report = SanitizerReport.parse(stderr)
+    if report and report.is_valid():
+        print(f"  [+] {name}: {report.sanitizer}:{report.error_type}")
+        return True
+    if returncode in SIGNAL_CRASH_CODES or returncode < 0:
+        print(f"  [+] {name}: signal {abs(returncode)}")
+        return True
+    if returncode == -1 and stderr == "timeout":
+        print(f"  [-] {name}: timeout (not a crash)")
+        return False
+    print(f"  [-] {name}: no crash (rc={returncode})")
+    return False
+
+
 def cmd_verify(args):
     """Re-run crashes with ASAN target to confirm memory bugs.
 
@@ -1114,9 +1212,6 @@ def cmd_verify(args):
 
     print(f"[*] Verifying {len(crash_files)} crashes against {args.asan_target}")
 
-    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
-    from fuzzer_tool.core.sanitizer import SanitizerReport
-
     confirmed = 0
     failed = 0
     errors = 0
@@ -1127,69 +1222,25 @@ def cmd_verify(args):
             continue
 
         try:
-            if args.file_mode:
-                tmp_dir = Path("/tmp") / f"verify_{os.getpid()}"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    returncode, stderr, _pid = run_target_file(
-                        target=args.asan_target,
-                        data=data,
-                        timeout=args.timeout,
-                        tmp_dir=str(tmp_dir),
-                        target_args=getattr(args, "target_args", None) or [],
-                        env=os.environ.copy(),
-                    )
-                finally:
-                    import shutil
-
-                    if tmp_dir.exists():
-                        shutil.rmtree(tmp_dir, ignore_errors=True)
-            else:
-                returncode, stderr, _ = run_target_stdin(
-                    target=args.asan_target,
-                    data=data,
-                    timeout=args.timeout,
-                    env=os.environ.copy(),
-                )
+            returncode, stderr = _verify_exec(args, data)
         except Exception as e:
             print(f"  [!] {crash_file.name}: execution error: {e}")
             errors += 1
             continue
 
-        report = SanitizerReport.parse(stderr)
-        if report and report.is_valid():
-            print(f"  [+] {crash_file.name}: {report.sanitizer}:{report.error_type}")
+        if _verify_verdict(crash_file.name, returncode, stderr):
             confirmed += 1
-        elif returncode in SIGNAL_CRASH_CODES or returncode < 0:
-            print(f"  [+] {crash_file.name}: signal {abs(returncode)}")
-            confirmed += 1
-        elif returncode == -1 and stderr == "timeout":
-            print(f"  [-] {crash_file.name}: timeout (not a crash)")
-            failed += 1
         else:
-            print(f"  [-] {crash_file.name}: no crash (rc={returncode})")
             failed += 1
 
     print(f"\n[*] Results: {confirmed} confirmed, {failed} not reproduced, {errors} errors")
     return 0 if confirmed > 0 else 1
 
 
-def cmd_replay(args):
-    """Replay a crash input against the target."""
-    _validate_target(args.target)
+def _replay_exec(args, data, env):
+    """Run the crash input once (file or stdin mode); returns (rc, stderr)."""
+    from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
 
-    crash_path = Path(args.crash_file)
-    if not crash_path.is_file():
-        print(f"[-] Crash file not found: {args.crash_file}", file=sys.stderr)
-        return 1
-
-    data = crash_path.read_bytes()
-    print(f"[*] Replaying {len(data)} bytes from {args.crash_file}")
-
-    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
-    from fuzzer_tool.core.sanitizer import SanitizerReport
-
-    env = os.environ.copy()
     tmp_dir = None
     try:
         if args.file_mode:
@@ -1210,6 +1261,26 @@ def cmd_replay(args):
     finally:
         if tmp_dir and tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
+    return returncode, stderr
+
+
+def cmd_replay(args):
+    """Replay a crash input against the target."""
+    _validate_target(args.target)
+
+    crash_path = Path(args.crash_file)
+    if not crash_path.is_file():
+        print(f"[-] Crash file not found: {args.crash_file}", file=sys.stderr)
+        return 1
+
+    data = crash_path.read_bytes()
+    print(f"[*] Replaying {len(data)} bytes from {args.crash_file}")
+
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES
+    from fuzzer_tool.core.sanitizer import SanitizerReport
+
+    env = os.environ.copy()
+    returncode, stderr = _replay_exec(args, data, env)
 
     if returncode == -1 and stderr == "timeout":
         print(f"[*] Target timed out after {args.timeout}s")
@@ -1233,6 +1304,53 @@ def cmd_replay(args):
     if stderr.strip():
         print(f"    stderr: {stderr[:200]}")
     return 1
+
+
+def _rank_saved_meta(saved, corpus, now, seed_key_for):
+    """Per-seed meta from saved state; zeroed entry for seeds not in it."""
+    seed_meta = {}
+    for seed in corpus:
+        # Same key scheme as CorpusManager.save_state: content hash,
+        # falling back to the legacy seed.hex() key for older states.
+        key = seed_key_for(seed)
+        if key not in saved:
+            legacy = seed.hex()
+            if legacy in saved:
+                key = legacy
+        if key in saved:
+            sm = saved[key]
+            seed_meta[seed] = {
+                "fuzz_count": sm.get("fuzz_count", 0),
+                "coverage_edges": sm.get("coverage_edges", 0),
+                "added_at": sm.get("added_at", now),
+            }
+        else:
+            seed_meta[seed] = {"fuzz_count": 0, "coverage_edges": 0, "added_at": now}
+    return seed_meta
+
+
+def _rank_preview(seed):
+    """Text preview for printable seeds, hex otherwise; '...' when truncated."""
+    raw = seed[:32]
+    printable = sum(1 for b in raw if 32 <= b < 127)
+    text = printable > len(raw) * 0.7
+    pstr = raw.decode("ascii", errors="replace") if text else raw.hex()
+    if len(seed) > 32:
+        pstr += "..."
+    return pstr
+
+
+def _rank_dump(out, scored, n):
+    """Write top-n seeds to `out` and to per-seed `out.<i>` files."""
+    with open(out, "w") as f:
+        for i, (_score, seed) in enumerate(scored[:n]):
+            f.write(seed)
+            print(f"  wrote seed #{i + 1} ({len(seed)} bytes) -> {out}.{i}")
+    # Also write each seed to a separate file
+    for i, (_score, seed) in enumerate(scored[:n]):
+        seed_path = out.parent / f"{out.name}.{i}"
+        seed_path.write_bytes(seed)
+    print(f"[*] Dumped top {n} seeds to {out}.{0}..{n - 1}")
 
 
 def cmd_rank(args):
@@ -1275,24 +1393,7 @@ def cmd_rank(args):
     now = time.time()
     state = store.get("corpus")
     if state:
-        saved = state.get("seed_meta", {})
-        for seed in corpus:
-            # Same key scheme as CorpusManager.save_state: content hash,
-            # falling back to the legacy seed.hex() key for older states.
-            key = seed_key_for(seed)
-            if key not in saved:
-                legacy = seed.hex()
-                if legacy in saved:
-                    key = legacy
-            if key in saved:
-                sm = saved[key]
-                seed_meta[seed] = {
-                    "fuzz_count": sm.get("fuzz_count", 0),
-                    "coverage_edges": sm.get("coverage_edges", 0),
-                    "added_at": sm.get("added_at", now),
-                }
-            else:
-                seed_meta[seed] = {"fuzz_count": 0, "coverage_edges": 0, "added_at": now}
+        seed_meta = _rank_saved_meta(state.get("seed_meta", {}), corpus, now, seed_key_for)
 
     if not seed_meta:
         for seed in corpus:
@@ -1351,17 +1452,7 @@ def cmd_rank(args):
 
     for i, (s, seed) in enumerate(scored[:n]):
         h = hashlib.sha256(seed).hexdigest()[:16]
-        # Show hex preview for binary, text preview for printable
-        raw = seed[:32]
-        printable = sum(1 for b in raw if 32 <= b < 127)
-        if printable > len(raw) * 0.7:
-            pstr = raw.decode("ascii", errors="replace")
-            if len(seed) > 32:
-                pstr += "..."
-        else:
-            pstr = raw.hex()
-            if len(seed) > 32:
-                pstr += "..."
+        pstr = _rank_preview(seed)
         print(
             f"{i + 1:>4}  {s['score']:>7.2f}  {s['edges']:>5}  {s['rare']:>4}  "
             f"{s['fuzz_count']:>5}  {s['subsumption']:>5.2f}  "
@@ -1369,17 +1460,7 @@ def cmd_rank(args):
         )
 
     if args.dump:
-        out = Path(args.dump)
-        with open(out, "w") as f:
-            for i, (_score, seed) in enumerate(scored[:n]):
-                h = hashlib.sha256(seed).hexdigest()[:16]
-                f.write(seed)
-                print(f"  wrote seed #{i + 1} ({len(seed)} bytes) -> {out}.{i}")
-        # Also write each seed to a separate file
-        for i, (_score, seed) in enumerate(scored[:n]):
-            seed_path = out.parent / f"{out.name}.{i}"
-            seed_path.write_bytes(seed)
-        print(f"[*] Dumped top {n} seeds to {out}.{0}..{n - 1}")
+        _rank_dump(Path(args.dump), scored, n)
 
     return 0
 
@@ -1631,6 +1712,54 @@ def _run_so_target(so_path: str, data: bytes, timeout: float) -> tuple[int, str,
         return -2, str(e), 0
 
 
+def _sweep_exec(args, seed, target_is_so):
+    """Run one seed via .so ctypes, file, or stdin mode; returns (rc, stderr)."""
+    from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
+
+    if target_is_so:
+        returncode, stderr, _ = _run_so_target(args.target, seed, timeout=args.timeout)
+        return returncode, stderr
+
+    if not args.file_mode:
+        returncode, stderr, _ = run_target_stdin(
+            target=args.target,
+            data=seed,
+            timeout=args.timeout,
+            env=os.environ.copy(),
+        )
+        return returncode, stderr
+
+    tmp_dir = Path("/tmp") / f"sweep_{os.getpid()}"
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        returncode, stderr, _ = run_target_file(
+            target=args.target,
+            data=seed,
+            timeout=args.timeout,
+            tmp_dir=str(tmp_dir),
+            target_args=args.target_args or [],
+            env=os.environ.copy(),
+        )
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    return returncode, stderr
+
+
+# Crash markers in stderr for targets without a sanitizer report.
+_SWEEP_CRASH_MARKERS = ("SIGSEGV", "SIGABRT", "Segmentation fault", "Aborted")
+
+
+def _sweep_is_crash(report, returncode, stderr) -> bool:
+    """Crash = valid sanitizer report, crash signal, negative rc, or stderr marker."""
+    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES
+
+    if report and report.is_valid():
+        return True
+    if abs(returncode) in SIGNAL_CRASH_CODES or returncode < 0:
+        return True
+    return any(sig in stderr for sig in _SWEEP_CRASH_MARKERS)
+
+
 def cmd_sweep(args):
     """Linearly scan corpus seeds for missed crashes.
 
@@ -1666,11 +1795,6 @@ def cmd_sweep(args):
 
     import time as _time
 
-    from fuzzer_tool.adapters.process import (
-        SIGNAL_CRASH_CODES,
-        run_target_file,
-        run_target_stdin,
-    )
     from fuzzer_tool.core.sanitizer import SanitizerReport
 
     found = 0
@@ -1684,60 +1808,24 @@ def cmd_sweep(args):
             sys.stderr.flush()
 
         try:
-            if target_is_so:
-                returncode, stderr, _ = _run_so_target(args.target, seed, timeout=args.timeout)
-            elif args.file_mode:
-                tmp_dir = Path("/tmp") / f"sweep_{os.getpid()}"
-                tmp_dir.mkdir(parents=True, exist_ok=True)
-                try:
-                    returncode, stderr, _ = run_target_file(
-                        target=args.target,
-                        data=seed,
-                        timeout=args.timeout,
-                        tmp_dir=str(tmp_dir),
-                        target_args=args.target_args or [],
-                        env=os.environ.copy(),
-                    )
-                finally:
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
-            else:
-                returncode, stderr, _ = run_target_stdin(
-                    target=args.target,
-                    data=seed,
-                    timeout=args.timeout,
-                    env=os.environ.copy(),
-                )
+            returncode, stderr = _sweep_exec(args, seed, target_is_so)
         except Exception as e:
             print(f"\n  [!] Error on seed {i + 1}/{total}: {e}", file=sys.stderr)
             continue
 
         # Check for crash
         report = SanitizerReport.parse(stderr)
-        is_crash = bool(report and report.is_valid())
-        if not is_crash:
-            is_crash = abs(returncode) in SIGNAL_CRASH_CODES
-        if not is_crash:
-            is_crash = returncode < 0
-        if not is_crash:
-            is_crash = any(
-                sig in stderr
-                for sig in [
-                    "SIGSEGV",
-                    "SIGABRT",
-                    "Segmentation fault",
-                    "Aborted",
-                ]
-            )
+        if not _sweep_is_crash(report, returncode, stderr):
+            continue
 
-        if is_crash:
-            found += 1
-            h = hash_data(seed)
-            sig = report.signature if report and report.is_valid() else f"signal{abs(returncode)}"
-            crash_name = f"crash_{h[:12]}_{sig}"
-            crash_path = crashes_dir / crash_name
-            if not crash_path.exists():
-                crash_path.write_bytes(seed)
-            print(f"\n  [+] Crash: rc={returncode}, hash={h[:12]} -> {crash_name}")
+        found += 1
+        h = hash_data(seed)
+        sig = report.signature if report and report.is_valid() else f"signal{abs(returncode)}"
+        crash_name = f"crash_{h[:12]}_{sig}"
+        crash_path = crashes_dir / crash_name
+        if not crash_path.exists():
+            crash_path.write_bytes(seed)
+        print(f"\n  [+] Crash: rc={returncode}, hash={h[:12]} -> {crash_name}")
 
     _elapsed = _time.monotonic() - _sweep_start
     _eps = total / _elapsed if _elapsed > 0 else 0
@@ -4050,6 +4138,13 @@ def main() -> int:
         help="Grammar file(s) (built-in: json, http_request, elf) or path to .gram file",
     )
     fuzz_parser.add_argument(
+        "--fsm",
+        default=None,
+        metavar="FILE",
+        help="Constraint-labelled FSM spec (see core/format_fsm.py); enables the "
+        "fsm_regen op: keep an input's longest valid prefix, regenerate a valid tail",
+    )
+    fuzz_parser.add_argument(
         "--grammar-boltzmann",
         action="store_true",
         help="Grammar.mutate()'s replacement-generation paths (extend/insert/"
@@ -4542,6 +4637,12 @@ def main() -> int:
     )
     genseed_parser.add_argument(
         "--seed", type=int, default=None, help="RNG seed for reproducible generation"
+    )
+    genseed_parser.add_argument(
+        "--fsm",
+        default=None,
+        metavar="FILE",
+        help="Generate from a constraint-labelled FSM spec instead of a format",
     )
     genseed_parser.set_defaults(func=cmd_genseed)
 

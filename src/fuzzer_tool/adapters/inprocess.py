@@ -237,128 +237,146 @@ class InProcessRunner:
                 log.warning("Shim build failed: %s", self._shim.compile_error)
 
         if self.direct or self.direct_lite:
-            # Direct mode: load shim with RTLD_GLOBAL, then load target
-            shim_loaded = False
-            if self._shim and self._shim.shim_path and self._shim.needs_preload:
-                self._shim_handle = load_shim(self._shim.shim_path, mode="direct")
-                shim_loaded = True
-            # Set __AFL_SHM_ID and AFL_MAP_SIZE BEFORE loading library so
-            # the instrumented code can attach to SHM during initialization
-            # with the correct size. Without AFL_MAP_SIZE, the compiled-in
-            # shim defaults to 65536 which mismatches the auto-sized SHM
-            # and causes OOB writes that hang or corrupt memory.
-            if self.coverage_env_id:
-                os.environ["__AFL_SHM_ID"] = self.coverage_env_id
-                os.environ["AFL_MAP_SIZE"] = str(self.shm_size)
-            if cov and not self._bitmap_out:
-                fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
-                os.close(fd)
-            try:
-                self._lib = ctypes.CDLL(self.target)
-                # The constructor __afl_auto_init may not fire during
-                # ctypes.CDLL loading (getenv() may not see os.environ
-                # updates at constructor time). Check if __afl_area was
-                # attached; if not, call __afl_map_shm() manually.
-                try:
-                    afl_area = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
-                    if self.debug:
-                        print(
-                            f"  [debug] __afl_area={afl_area.value}, "
-                            f"__AFL_SHM_ID={os.environ.get('__AFL_SHM_ID')}, "
-                            f"AFL_MAP_SIZE={os.environ.get('AFL_MAP_SIZE')}",
-                            flush=True,
-                        )
-                    if not afl_area.value and self.coverage_env_id:
-                        getattr(self._lib, "__afl_map_shm")()
-                        if self.debug:
-                            afl_area2 = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
-                            print(
-                                f"  [debug] After manual __afl_map_shm: __afl_area={afl_area2.value}",
-                                flush=True,
-                            )
-                except (OSError, AttributeError, ValueError):
-                    pass
-                fn_ptr = getattr(self._lib, self.function_name)
-                fn_ptr.restype = ctypes.c_int
-                fn_ptr.argtypes = [
-                    ctypes.POINTER(ctypes.c_uint8),
-                    ctypes.c_size_t,
-                ]
-                self._func_ptr = fn_ptr  # cache the resolved symbol
-            except OSError as e:
-                if shim_loaded:
-                    log.warning("Direct mode failed (%s), falling back to subprocess", e)
-                    self.direct = False
-                    self._lib = None
-                else:
-                    raise
+            self._start_direct()
 
         if not self.direct and not self.direct_lite:
-            # Set __AFL_SHM_ID and AFL_MAP_SIZE in process env so
-            # subprocess loaders and forkserver inherit the correct values.
-            # Without AFL_MAP_SIZE, the forkserver defaults to 65536 which
-            # mismatches the auto-sized SHM and causes OOB writes.
-            if self.coverage_env_id:
-                os.environ["__AFL_SHM_ID"] = self.coverage_env_id
-                os.environ["AFL_MAP_SIZE"] = str(self.shm_size)
-
-            # Try persistent subprocess first (faster: one process, many calls).
-            # Also use for .so targets without coverage — provides crash isolation
-            # via fork-per-call (SIGSEGV from ctypes kills the process).
-            is_so = self.target.lower().endswith((".so", ".dylib", ".dll"))
-            if cov or is_so:
-                from fuzzer_tool.adapters.persistent_subprocess import PersistentLoader
-
-                self._persistent = PersistentLoader(
-                    target=self.target,
-                    function_name=self.function_name,
-                    timeout=self.timeout,
-                    use_ptrace=self.use_ptrace,
-                )
-                if not self._persistent.start():
-                    log.warning("Persistent loader failed, falling back to per-call")
-                    self._persistent = None
-
-            # Try forkserver (C binary) for standalone executables only.
-            if not self._persistent and not is_so:
-                from fuzzer_tool.adapters.forkserver import ForkserverRunner
-
-                self._forkserver = ForkserverRunner(
-                    target=self.target,
-                    function_name=self.function_name,
-                    timeout=self.timeout,
-                )
-                if self._forkserver.start():
-                    log.info("Forkserver: using C binary for %s", self.target)
-                else:
-                    self._forkserver = None
-
-            if not self._persistent and not self._forkserver:
-                # Per-call subprocess mode (fallback)
-                fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_loader_")
-                os.write(fd, _LOADER_SCRIPT.encode())
-                os.close(fd)
-                if cov:
-                    fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
-                    os.close(fd)
+            self._start_loaders()
 
         self._is_c = True
-        if self._forkserver:
-            loader_type = "forkserver"
-        elif self._persistent:
-            loader_type = "persistent"
-        elif self._loader_path:
-            loader_type = "loader"
-        else:
-            loader_type = "none"
         log.info(
             "In-process C target: %s::%s (mode=%s, coverage=%s, loader=%s)",
             self.target,
             self.function_name,
             mode,
             self._shim.coverage_type if self._shim else "none",
-            loader_type,
+            self._loader_type(),
         )
+
+    def _start_direct(self) -> None:
+        """Load shim + target via ctypes; fall back to subprocess on OSError."""
+        cov = bool(self.coverage_env_id)
+
+        # Direct mode: load shim with RTLD_GLOBAL, then load target
+        shim_loaded = False
+        if self._shim and self._shim.shim_path and self._shim.needs_preload:
+            self._shim_handle = load_shim(self._shim.shim_path, mode="direct")
+            shim_loaded = True
+        # Set __AFL_SHM_ID and AFL_MAP_SIZE BEFORE loading library so
+        # the instrumented code can attach to SHM during initialization
+        # with the correct size. Without AFL_MAP_SIZE, the compiled-in
+        # shim defaults to 65536 which mismatches the auto-sized SHM
+        # and causes OOB writes that hang or corrupt memory.
+        if self.coverage_env_id:
+            os.environ["__AFL_SHM_ID"] = self.coverage_env_id
+            os.environ["AFL_MAP_SIZE"] = str(self.shm_size)
+        if cov and not self._bitmap_out:
+            fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
+            os.close(fd)
+        try:
+            self._lib = ctypes.CDLL(self.target)
+            # The constructor __afl_auto_init may not fire during
+            # ctypes.CDLL loading (getenv() may not see os.environ
+            # updates at constructor time). Check if __afl_area was
+            # attached; if not, call __afl_map_shm() manually.
+            self._attach_afl_area()
+            fn_ptr = getattr(self._lib, self.function_name)
+            fn_ptr.restype = ctypes.c_int
+            fn_ptr.argtypes = [
+                ctypes.POINTER(ctypes.c_uint8),
+                ctypes.c_size_t,
+            ]
+            self._func_ptr = fn_ptr  # cache the resolved symbol
+        except OSError as e:
+            if shim_loaded:
+                log.warning("Direct mode failed (%s), falling back to subprocess", e)
+                self.direct = False
+                self._lib = None
+            else:
+                raise
+
+    def _attach_afl_area(self) -> None:
+        """Map SHM by hand when the ``__afl_auto_init`` constructor missed it."""
+        try:
+            afl_area = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
+            if self.debug:
+                print(
+                    f"  [debug] __afl_area={afl_area.value}, "
+                    f"__AFL_SHM_ID={os.environ.get('__AFL_SHM_ID')}, "
+                    f"AFL_MAP_SIZE={os.environ.get('AFL_MAP_SIZE')}",
+                    flush=True,
+                )
+            if not afl_area.value and self.coverage_env_id:
+                getattr(self._lib, "__afl_map_shm")()
+                if self.debug:
+                    afl_area2 = ctypes.c_void_p.in_dll(self._lib, "__afl_area")
+                    print(
+                        f"  [debug] After manual __afl_map_shm: __afl_area={afl_area2.value}",
+                        flush=True,
+                    )
+        except (OSError, AttributeError, ValueError):
+            pass
+
+    def _start_loaders(self) -> None:
+        """Pick persistent loader, forkserver, or per-call loader, in that order."""
+        cov = bool(self.coverage_env_id)
+
+        # Set __AFL_SHM_ID and AFL_MAP_SIZE in process env so
+        # subprocess loaders and forkserver inherit the correct values.
+        # Without AFL_MAP_SIZE, the forkserver defaults to 65536 which
+        # mismatches the auto-sized SHM and causes OOB writes.
+        if self.coverage_env_id:
+            os.environ["__AFL_SHM_ID"] = self.coverage_env_id
+            os.environ["AFL_MAP_SIZE"] = str(self.shm_size)
+
+        # Try persistent subprocess first (faster: one process, many calls).
+        # Also use for .so targets without coverage — provides crash isolation
+        # via fork-per-call (SIGSEGV from ctypes kills the process).
+        is_so = self.target.lower().endswith((".so", ".dylib", ".dll"))
+        if cov or is_so:
+            from fuzzer_tool.adapters.persistent_subprocess import PersistentLoader
+
+            self._persistent = PersistentLoader(
+                target=self.target,
+                function_name=self.function_name,
+                timeout=self.timeout,
+                use_ptrace=self.use_ptrace,
+            )
+            if not self._persistent.start():
+                log.warning("Persistent loader failed, falling back to per-call")
+                self._persistent = None
+
+        # Try forkserver (C binary) for standalone executables only.
+        if not self._persistent and not is_so:
+            from fuzzer_tool.adapters.forkserver import ForkserverRunner
+
+            self._forkserver = ForkserverRunner(
+                target=self.target,
+                function_name=self.function_name,
+                timeout=self.timeout,
+            )
+            if self._forkserver.start():
+                log.info("Forkserver: using C binary for %s", self.target)
+            else:
+                self._forkserver = None
+
+        if not self._persistent and not self._forkserver:
+            # Per-call subprocess mode (fallback)
+            fd, self._loader_path = tempfile.mkstemp(suffix=".py", prefix="fuzz_loader_")
+            os.write(fd, _LOADER_SCRIPT.encode())
+            os.close(fd)
+            if cov:
+                fd, self._bitmap_out = tempfile.mkstemp(suffix=".cov", prefix="fuzz_cov_")
+                os.close(fd)
+
+    def _loader_type(self) -> str:
+        """Name of the active loader, for logging."""
+        if self._forkserver:
+            return "forkserver"
+        if self._persistent:
+            return "persistent"
+        if self._loader_path:
+            return "loader"
+        return "none"
 
     def _start_python(self):
         mod_path, _, func_name = self.target.rpartition(":")

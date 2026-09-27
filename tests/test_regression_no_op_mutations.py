@@ -586,18 +586,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         pool._pair_pc = {(b"IHDR", b"IDAT"): 0x401000, (b"ftyp", b"isom"): 0x401020}
         f._cmplog = pool
 
-        # --- redqueen ------------------------------------------------------
-        # Entries are (offset, operand_a, operand_b), and the offset must
-        # point at a real occurrence of operand_a or the operator's own
-        # guard declines.
-        f.seed_meta = {}
-        for inp in _battery():
-            matches = [
-                (inp.find(a), a, b)
-                for a, b in ((b"IHDR", b"IDAT"), (b"RIFF", b"RIFX"), (b"\x7fELF", b"\x7felf"))
-                if inp.find(a) != -1
-            ]
-            f.seed_meta[inp] = {"redqueen_matches": matches, "redqueen_offsets": [0, 4]}
+        self._gate_redqueen(f)
 
         # --- grammar band --------------------------------------------------
         from fuzzer_tool.core.grammar import Grammar
@@ -623,36 +612,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.mc_cem = True
         f.markov_trained = True
 
-        # --- invariant_break -----------------------------------------------
-        # corpus_invariants() needs >= 16 samples before it will call an
-        # offset invariant, but size alone is not enough: the mask is
-        # ``&= ~(first ^ current)`` across entries, so a corpus with no shared
-        # structure yields an all-zero mask and the operator has nothing to
-        # break. `_battery()` is deliberately diverse and produces exactly
-        # that (33 samples, zero invariant bytes), which reads as a no-op but
-        # is a property of the corpus. A real fuzzing corpus concentrates on
-        # one format, so add entries that share a header.
-        #
-        # Those entries are also the *longest* in the corpus, deliberately.
-        # invariant_mask spans the largest prefix at least 16 entries reach,
-        # and only those entries contribute -- so making the shared-header
-        # block longer than every battery sample means it alone defines the
-        # mask. Sizing them at 64 bytes instead left the qualifying set full
-        # of random battery entries, with the mask surviving on a single
-        # lucky bit that any newly added battery sample could extinguish.
-        shared_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
-        tail = max(len(inp) for inp in _battery()) + 64 - len(shared_header)
-        f.corpus = [bytearray(inp) for inp in _battery()]
-        f.corpus += [
-            bytearray(shared_header + bytes((i * 37 + j) & 0xFF for j in range(tail)))
-            for i in range(20)
-        ]
-        from fuzzer_tool.core.randomness import corpus_invariants
-
-        assert any(corpus_invariants([bytes(c) for c in f.corpus]).mask), (
-            "fixture corpus has no invariant bits, so invariant_break would "
-            "measure as a no-op for a reason that is not about the operator"
-        )
+        self._gate_invariants(f)
 
         # --- checksum learner (crc_learn) ------------------------------------
         # An XOR-bitmask model with no GF(2) and no integer model is the exact
@@ -688,6 +648,67 @@ class TestStateGatedOperatorsAreNotNoOps:
         assert learner.ensure_model(), "fixture failed to reach the XOR-only model state"
         f.checksum_learner = learner
 
+        self._gate_path_negate(f, unreachable)
+
+        self._gate_prng(f)
+
+        self._gate_weizz(f)
+
+        return unreachable
+
+    @staticmethod
+    def _gate_redqueen(f: Fuzzer) -> None:
+        """Seed redqueen matches pointing at real operand_a occurrences."""
+        # --- redqueen ------------------------------------------------------
+        # Entries are (offset, operand_a, operand_b), and the offset must
+        # point at a real occurrence of operand_a or the operator's own
+        # guard declines.
+        f.seed_meta = {}
+        for inp in _battery():
+            matches = [
+                (inp.find(a), a, b)
+                for a, b in ((b"IHDR", b"IDAT"), (b"RIFF", b"RIFX"), (b"\x7fELF", b"\x7felf"))
+                if inp.find(a) != -1
+            ]
+            f.seed_meta[inp] = {"redqueen_matches": matches, "redqueen_offsets": [0, 4]}
+
+    @staticmethod
+    def _gate_invariants(f: Fuzzer) -> None:
+        """Corpus with a shared long header so invariant_break has bits to break."""
+        # --- invariant_break -----------------------------------------------
+        # corpus_invariants() needs >= 16 samples before it will call an
+        # offset invariant, but size alone is not enough: the mask is
+        # ``&= ~(first ^ current)`` across entries, so a corpus with no shared
+        # structure yields an all-zero mask and the operator has nothing to
+        # break. `_battery()` is deliberately diverse and produces exactly
+        # that (33 samples, zero invariant bytes), which reads as a no-op but
+        # is a property of the corpus. A real fuzzing corpus concentrates on
+        # one format, so add entries that share a header.
+        #
+        # Those entries are also the *longest* in the corpus, deliberately.
+        # invariant_mask spans the largest prefix at least 16 entries reach,
+        # and only those entries contribute -- so making the shared-header
+        # block longer than every battery sample means it alone defines the
+        # mask. Sizing them at 64 bytes instead left the qualifying set full
+        # of random battery entries, with the mask surviving on a single
+        # lucky bit that any newly added battery sample could extinguish.
+        shared_header = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR"
+        tail = max(len(inp) for inp in _battery()) + 64 - len(shared_header)
+        f.corpus = [bytearray(inp) for inp in _battery()]
+        f.corpus += [
+            bytearray(shared_header + bytes((i * 37 + j) & 0xFF for j in range(tail)))
+            for i in range(20)
+        ]
+        from fuzzer_tool.core.randomness import corpus_invariants
+
+        assert any(corpus_invariants([bytes(c) for c in f.corpus]).mask), (
+            "fixture corpus has no invariant bits, so invariant_break would "
+            "measure as a no-op for a reason that is not about the operator"
+        )
+
+    @staticmethod
+    def _gate_path_negate(f: Fuzzer, unreachable: set[str]) -> None:
+        """Enable the z3 path solver, or mark path_negate unreachable."""
         # --- path_negate ----------------------------------------------------
         # Needs recorded outcomes *and* an enabled solver. Without z3 the
         # fuzzer leaves _path_solver as None and the operator is genuinely
@@ -703,6 +724,9 @@ class TestStateGatedOperatorsAreNotNoOps:
         if f._path_solver is None:
             unreachable.add("path_negate")
 
+    @staticmethod
+    def _gate_prng(f: Fuzzer) -> None:
+        """Install a PRNG learner with a recovered taus88 state."""
         # --- prng_predict ----------------------------------------------------
         # Gated on a recovered, verified taus88 state. Built by feeding the
         # learner a real stream through the same path production uses -- an
@@ -744,6 +768,9 @@ class TestStateGatedOperatorsAreNotNoOps:
         )
         f.prng_state_learner = prng_learner
 
+    @staticmethod
+    def _gate_weizz(f: Fuzzer) -> None:
+        """Attach hand-built weizz StructureMaps to battery seeds."""
         # Placed last on purpose: several bands above assign
         # `f.seed_meta[inp] = {...}` wholesale, so tags written earlier
         # were being replaced by the redqueen band and the gate saw an
@@ -779,8 +806,6 @@ class TestStateGatedOperatorsAreNotNoOps:
             )
             smap = StructureMap(tags=tags, ntypes=3, input_len=len(inp), from_cmplog=True)
             f.seed_meta[inp] = attach_tags_to_meta(f.seed_meta.get(inp, {}), smap)
-
-        return unreachable
 
     def _make_gated_fuzzer(self) -> tuple[Fuzzer, set[str]]:
         f = _make_fuzzer()

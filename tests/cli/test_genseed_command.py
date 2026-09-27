@@ -6,7 +6,7 @@ from fuzzer_tool.cli.commands import cmd_genseed
 
 
 def _args(**kw):
-    defaults = dict(format="all", corpus=None, count=1, max_len=4096, seed=None)
+    defaults = dict(format="all", corpus=None, count=1, max_len=4096, seed=None, fsm=None)
     defaults.update(kw)
     return argparse.Namespace(**defaults)
 

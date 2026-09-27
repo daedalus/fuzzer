@@ -159,6 +159,37 @@ class KatzResult:
         return float(self.scores[self.n_u + self.seed_names.index(name)])
 
 
+def _resolve_beta_u(beta, hit_counts, n_u: int) -> np.ndarray:
+    """Per-U-node beta: explicit *beta*, else rarity from *hit_counts*, else 1.
+
+    Raises ValueError when either input is not length ``n_u``.
+    """
+    if beta is not None:
+        beta_u = np.asarray(beta, dtype=np.float64)
+        if beta_u.shape != (n_u,):
+            raise ValueError(f"beta must be per-U-node (length {n_u}), got {beta_u.shape}")
+    elif hit_counts is None:
+        beta_u = np.ones(n_u, dtype=np.float64)
+    else:
+        hits = np.asarray(hit_counts, dtype=np.float64)
+        if hits.shape != (n_u,):
+            raise ValueError(
+                f"hit_counts must be per-U-node (length {n_u}), got "
+                f"{hits.shape}; ICFG-indexed counts need build_beta() to "
+                f"translate through horizon.u_icfg_index"
+            )
+        total = hits.sum()
+        if total <= 0:
+            beta_u = np.ones(n_u, dtype=np.float64)
+        else:
+            beta_u = 1.0 - hits / total
+            # All-equal nonzero hits collapse to uniform, matching the
+            # no-information case exactly.
+            if np.allclose(beta_u, beta_u[0]):
+                beta_u = np.ones(n_u, dtype=np.float64)
+    return beta_u
+
+
 def katz_scores(
     horizon: HorizonGraph,
     hit_counts: np.ndarray | None = None,
@@ -204,29 +235,7 @@ def katz_scores(
 
     depth = _dag_depth(src, dst, n_total)
 
-    if beta is not None:
-        beta_u = np.asarray(beta, dtype=np.float64)
-        if beta_u.shape != (n_u,):
-            raise ValueError(f"beta must be per-U-node (length {n_u}), got {beta_u.shape}")
-    elif hit_counts is None:
-        beta_u = np.ones(n_u, dtype=np.float64)
-    else:
-        hits = np.asarray(hit_counts, dtype=np.float64)
-        if hits.shape != (n_u,):
-            raise ValueError(
-                f"hit_counts must be per-U-node (length {n_u}), got "
-                f"{hits.shape}; ICFG-indexed counts need build_beta() to "
-                f"translate through horizon.u_icfg_index"
-            )
-        total = hits.sum()
-        if total <= 0:
-            beta_u = np.ones(n_u, dtype=np.float64)
-        else:
-            beta_u = 1.0 - hits / total
-            # All-equal nonzero hits collapse to uniform, matching the
-            # no-information case exactly.
-            if np.allclose(beta_u, beta_u[0]):
-                beta_u = np.ones(n_u, dtype=np.float64)
+    beta_u = _resolve_beta_u(beta, hit_counts, n_u)
     beta = np.concatenate([beta_u, np.zeros(n_seeds, dtype=np.float64)])
 
     # Rounds needed for exactness is the depth: round k has propagated

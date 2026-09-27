@@ -397,6 +397,75 @@ def _decode_tokens(reader: BitReader, litlen_decode, dist_decode, litlen_lengths
             raise DeflateError("invalid literal/length symbol")
 
 
+def _parse_stored(reader: BitReader, bfinal: int) -> dict:
+    """BTYPE 00: byte-aligned LEN/NLEN + raw bytes."""
+    reader.align()
+    length = reader.read(16)
+    nlength = reader.read(16)
+    if length > _MAX_STORED_LEN:
+        raise DeflateError("stored block too large")
+    stored = reader.read_bytes(length)
+    return {
+        "bfinal": bfinal,
+        "btype": 0,
+        "stored_bytes": stored,
+        "nlen_ok": (~length & 0xFFFF) == nlength,
+    }
+
+
+def _read_code_lengths(reader: BitReader, cl_decode, target: int) -> list[int]:
+    """Decode *target* litlen+dist code lengths (RFC 1951 16/17/18 runs)."""
+    lengths: list[int] = []
+    prev = 0
+    while len(lengths) < target:
+        sym = reader.decode_huffman(cl_decode)
+        if sym <= 15:
+            lengths.append(sym)
+            prev = sym
+        elif sym == 16:
+            if not lengths:
+                raise DeflateError("repeat-previous with nothing to repeat")
+            lengths.extend([prev] * (reader.read(2) + 3))
+        elif sym == 17:
+            lengths.extend([0] * (reader.read(3) + 3))
+        elif sym == 18:
+            lengths.extend([0] * (reader.read(7) + 11))
+        else:
+            raise DeflateError("invalid code-length symbol")
+    if len(lengths) != target:
+        raise DeflateError("code-length run overshot HLIT+HDIST")
+    return lengths
+
+
+def _parse_dynamic(reader: BitReader, bfinal: int) -> dict:
+    """BTYPE 10: HLIT/HDIST/HCLEN header, code lengths, then tokens."""
+    hlit = reader.read(5) + 257
+    hdist = reader.read(5) + 1
+    hclen = reader.read(4) + 4
+    clcl = [0] * 19
+    for i in range(hclen):
+        clcl[CLCL_ORDER[i]] = reader.read(3)
+    cl_decode = build_decode_table(clcl)
+    if not cl_decode:
+        raise DeflateError("empty code-length alphabet")
+
+    lengths = _read_code_lengths(reader, cl_decode, hlit + hdist)
+    litlen_lengths = lengths[:hlit]
+    dist_lengths = lengths[hlit:]
+    litlen_decode = build_decode_table(litlen_lengths)
+    dist_decode = build_decode_table(dist_lengths) if any(dist_lengths) else None
+    tokens = _decode_tokens(reader, litlen_decode, dist_decode, litlen_lengths)
+    return {
+        "bfinal": bfinal,
+        "btype": 2,
+        "hlit": hlit,
+        "hdist": hdist,
+        "litlen_lengths": litlen_lengths,
+        "dist_lengths": dist_lengths,
+        "tokens": tokens,
+    }
+
+
 def parse_deflate(data: bytes) -> list[dict]:
     """Parse a raw (headerless) DEFLATE stream into a list of block dicts.
 
@@ -412,71 +481,14 @@ def parse_deflate(data: bytes) -> list[dict]:
         bfinal = reader.read(1)
         btype = reader.read(2)
         if btype == 0:
-            reader.align()
-            length = reader.read(16)
-            nlength = reader.read(16)
-            if length > _MAX_STORED_LEN:
-                raise DeflateError("stored block too large")
-            stored = reader.read_bytes(length)
-            blocks.append(
-                {
-                    "bfinal": bfinal,
-                    "btype": 0,
-                    "stored_bytes": stored,
-                    "nlen_ok": (~length & 0xFFFF) == nlength,
-                }
-            )
+            blocks.append(_parse_stored(reader, bfinal))
         elif btype == 1:
             tokens = _decode_tokens(
                 reader, _FIXED_LITLEN_DECODE, _FIXED_DIST_DECODE, FIXED_LITLEN_LENGTHS
             )
             blocks.append({"bfinal": bfinal, "btype": 1, "tokens": tokens})
         elif btype == 2:
-            hlit = reader.read(5) + 257
-            hdist = reader.read(5) + 1
-            hclen = reader.read(4) + 4
-            clcl = [0] * 19
-            for i in range(hclen):
-                clcl[CLCL_ORDER[i]] = reader.read(3)
-            cl_decode = build_decode_table(clcl)
-            if not cl_decode:
-                raise DeflateError("empty code-length alphabet")
-            lengths: list[int] = []
-            prev = 0
-            target = hlit + hdist
-            while len(lengths) < target:
-                sym = reader.decode_huffman(cl_decode)
-                if sym <= 15:
-                    lengths.append(sym)
-                    prev = sym
-                elif sym == 16:
-                    if not lengths:
-                        raise DeflateError("repeat-previous with nothing to repeat")
-                    lengths.extend([prev] * (reader.read(2) + 3))
-                elif sym == 17:
-                    lengths.extend([0] * (reader.read(3) + 3))
-                elif sym == 18:
-                    lengths.extend([0] * (reader.read(7) + 11))
-                else:
-                    raise DeflateError("invalid code-length symbol")
-            if len(lengths) != target:
-                raise DeflateError("code-length run overshot HLIT+HDIST")
-            litlen_lengths = lengths[:hlit]
-            dist_lengths = lengths[hlit:]
-            litlen_decode = build_decode_table(litlen_lengths)
-            dist_decode = build_decode_table(dist_lengths) if any(dist_lengths) else None
-            tokens = _decode_tokens(reader, litlen_decode, dist_decode, litlen_lengths)
-            blocks.append(
-                {
-                    "bfinal": bfinal,
-                    "btype": 2,
-                    "hlit": hlit,
-                    "hdist": hdist,
-                    "litlen_lengths": litlen_lengths,
-                    "dist_lengths": dist_lengths,
-                    "tokens": tokens,
-                }
-            )
+            blocks.append(_parse_dynamic(reader, bfinal))
         else:
             raise DeflateError("reserved block type (11)")
         if bfinal:

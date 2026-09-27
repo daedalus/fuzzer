@@ -136,35 +136,24 @@ def parse_jpeg2000_codestream(data: bytes) -> list[Jpeg2000Marker] | None:
                 break
             continue
 
+        # Known and unknown markers alike carry a length field; only
+        # known ones are recorded, unknown ones are skipped
+        if pos + 2 > n:
+            break
+        length = struct.unpack_from(">H", data, pos)[0]
+        pos += 2
+        if length < 2:
+            # Invalid length
+            break
+        data_len = length - 2
+        if pos + data_len > n:
+            break
         if marker_code in LENGTH_MARKERS:
-            if pos + 2 > n:
-                break
-            length = struct.unpack_from(">H", data, pos)[0]
-            pos += 2
-            if length < 2:
-                # Invalid length
-                break
-            data_len = length - 2
-            if pos + data_len > n:
-                break
             seg_data = data[pos : pos + data_len]
-            pos += data_len
             markers.append(
                 Jpeg2000Marker(marker_type=marker_code, length=length, data=seg_data, offset=offset)
             )
-        else:
-            # Unknown marker - skip if it has length?
-            # Assume it might have length
-            if pos + 2 > n:
-                break
-            length = struct.unpack_from(">H", data, pos)[0]
-            pos += 2
-            if length < 2:
-                break
-            data_len = length - 2
-            if pos + data_len > n:
-                break
-            pos += data_len
+        pos += data_len
 
     return markers if markers else None
 

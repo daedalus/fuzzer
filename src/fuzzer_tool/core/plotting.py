@@ -146,20 +146,8 @@ def _svg_bar_chart(title, bars, width=700, height=200):
     )
 
 
-def generate_html_report(fuzzer, coverage_log_path, output_path):
-    """Generate a self-contained HTML report with SVG charts."""
-    log.debug("generate_html_report: start path=%s output=%s", coverage_log_path, output_path)
-    rows = read_coverage_log(coverage_log_path)
-
-    # Exec rate
-    rate_points = _derive_exec_rate(rows)
-
-    # Extract series
-    edge_points = [(r["elapsed"], r["cumulative_edges"]) for r in rows]
-    corpus_points = [(r["elapsed"], r["corpus_size"]) for r in rows]
-    crash_points = [(r["elapsed"], r["crash_count"]) for r in rows]
-
-    # Operator success rates
+def _op_bars(fuzzer) -> tuple[list, list]:
+    """Top-15 operators: (success rate bars, usage share bars)."""
     op_counts = getattr(fuzzer, "op_counts", {})
     op_success = getattr(fuzzer, "op_success", {})
     op_bars = []
@@ -175,21 +163,77 @@ def generate_html_report(fuzzer, coverage_log_path, output_path):
         total_ops = sum(op_counts.values()) or 1
         for op in sorted(op_counts, key=op_counts.get, reverse=True)[:15]:
             op_usage_bars.append((op, op_counts[op] / total_ops))
+    return op_bars, op_usage_bars
 
-    # Build HTML
-    charts = []
-    if edge_points:
-        charts.append(_svg_line_chart("Edges Discovered", "time (s)", "edges", edge_points))
-    if rate_points:
-        charts.append(_svg_line_chart("Execution Rate", "time (s)", "execs/sec", rate_points))
-    if corpus_points:
-        charts.append(_svg_line_chart("Corpus Size", "time (s)", "seeds", corpus_points))
-    if crash_points:
-        charts.append(_svg_line_chart("Crashes", "time (s)", "crashes", crash_points))
+
+def _report_charts(fuzzer, rows: list) -> list[str]:
+    """SVG charts for every non-empty series: edges, exec rate, corpus, crashes, ops."""
+    rate_points = _derive_exec_rate(rows)
+    edge_points = [(r["elapsed"], r["cumulative_edges"]) for r in rows]
+    corpus_points = [(r["elapsed"], r["corpus_size"]) for r in rows]
+    crash_points = [(r["elapsed"], r["crash_count"]) for r in rows]
+    op_bars, op_usage_bars = _op_bars(fuzzer)
+
+    lines = [
+        ("Edges Discovered", "edges", edge_points),
+        ("Execution Rate", "execs/sec", rate_points),
+        ("Corpus Size", "seeds", corpus_points),
+        ("Crashes", "crashes", crash_points),
+    ]
+    charts = [_svg_line_chart(t, "time (s)", y, pts) for t, y, pts in lines if pts]
     if op_bars:
         charts.append(_svg_bar_chart("Operator Success Rate", op_bars))
     if op_usage_bars:
         charts.append(_svg_bar_chart("Operator Usage", op_usage_bars))
+    return charts
+
+
+def _exec_line(fuzzer, target) -> str:
+    """Reported command line; file mode shows ``@@`` for the input path."""
+    exec_line = getattr(fuzzer, "exec_line", None)
+    if exec_line is not None:
+        return exec_line
+    args = list(getattr(fuzzer, "target_args", None) or [])
+    if getattr(fuzzer, "file_mode", False):
+        parts = [str(target)] + ([a.replace("{file}", "@@") for a in args] if args else ["@@"])
+    else:
+        parts = [str(target)] + args
+    return " ".join(parts)
+
+
+def _details_html(fuzzer, target) -> str:
+    """Run-configuration rows of the report's details box."""
+    html = f"  <b>Target:</b> {_esc(target)}<br>\n"
+    html += f"  <b>Exec line:</b> <code>{_esc(_exec_line(fuzzer, target))}</code><br>\n"
+    inv = getattr(fuzzer, "invocation", "")
+    if inv:
+        html += f"  <b>Invocation:</b> <code>{_esc(inv)}</code><br>\n"
+    orig = getattr(fuzzer, "original_invocation", "")
+    if orig and orig != inv:
+        html += f"  <b>Started as:</b> <code>{_esc(orig)}</code><br>\n"
+    mode = "file" if getattr(fuzzer, "file_mode", False) else "stdin"
+    html += f"  <b>Input mode:</b> {_esc(mode)}<br>\n"
+    cov_mode = (
+        "SHM bitmap"
+        if getattr(fuzzer, "shm_cov", None)
+        else "ptrace"
+        if getattr(fuzzer, "ptrace_cov", None)
+        else "none"
+    )
+    html += f"  <b>Coverage:</b> {_esc(cov_mode)} &nbsp;|&nbsp; "
+    html += f"<b>Max len:</b> {getattr(fuzzer, 'max_len', 0)} &nbsp;|&nbsp; "
+    html += f"<b>Timeout:</b> {getattr(fuzzer, 'timeout', 0)}s<br>\n"
+    cmplog = getattr(fuzzer, "_cmplog", None)
+    html += f"  <b>Cmplog:</b> {'enabled' if cmplog is not None else 'disabled'}<br>\n"
+    return html
+
+
+def generate_html_report(fuzzer, coverage_log_path, output_path):
+    """Generate a self-contained HTML report with SVG charts."""
+    log.debug("generate_html_report: start path=%s output=%s", coverage_log_path, output_path)
+    rows = read_coverage_log(coverage_log_path)
+
+    charts = _report_charts(fuzzer, rows)
 
     exec_count = getattr(fuzzer, "exec_count", 0)
     crash_count = getattr(fuzzer, "crash_count", 0)
@@ -219,36 +263,7 @@ footer {{ color: #888; font-size: 0.85em; margin-top: 2em; }}
 </div>
 <div class="details">
 """
-    exec_line = getattr(fuzzer, "exec_line", None)
-    if exec_line is None:
-        args = list(getattr(fuzzer, "target_args", None) or [])
-        if getattr(fuzzer, "file_mode", False):
-            parts = [str(target)] + ([a.replace("{file}", "@@") for a in args] if args else ["@@"])
-        else:
-            parts = [str(target)] + args
-        exec_line = " ".join(parts)
-    html += f"  <b>Target:</b> {_esc(target)}<br>\n"
-    html += f"  <b>Exec line:</b> <code>{_esc(exec_line)}</code><br>\n"
-    inv = getattr(fuzzer, "invocation", "")
-    if inv:
-        html += f"  <b>Invocation:</b> <code>{_esc(inv)}</code><br>\n"
-    orig = getattr(fuzzer, "original_invocation", "")
-    if orig and orig != inv:
-        html += f"  <b>Started as:</b> <code>{_esc(orig)}</code><br>\n"
-    mode = "file" if getattr(fuzzer, "file_mode", False) else "stdin"
-    html += f"  <b>Input mode:</b> {_esc(mode)}<br>\n"
-    cov_mode = (
-        "SHM bitmap"
-        if getattr(fuzzer, "shm_cov", None)
-        else "ptrace"
-        if getattr(fuzzer, "ptrace_cov", None)
-        else "none"
-    )
-    html += f"  <b>Coverage:</b> {_esc(cov_mode)} &nbsp;|&nbsp; "
-    html += f"<b>Max len:</b> {getattr(fuzzer, 'max_len', 0)} &nbsp;|&nbsp; "
-    html += f"<b>Timeout:</b> {getattr(fuzzer, 'timeout', 0)}s<br>\n"
-    cmplog = getattr(fuzzer, "_cmplog", None)
-    html += f"  <b>Cmplog:</b> {'enabled' if cmplog is not None else 'disabled'}<br>\n"
+    html += _details_html(fuzzer, target)
     html += "</div>\n"
     for chart in charts:
         html += f'<div class="chart">{chart}</div>\n'

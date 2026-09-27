@@ -48,6 +48,28 @@ def discovery_rate(discovery_history: tuple[array, array, array]) -> float:
     return edge_delta / exec_delta * 1000
 
 
+def _scan_crash_file(crashes_dir, sig: str, seed_key_fn):
+    """Fallback: first crash file whose content hash equals ``sig``."""
+    for f in crashes_dir.iterdir():
+        if f.is_file() and not f.name.endswith((".json", ".txt")):
+            try:
+                if seed_key_fn(f.read_bytes()) == sig:
+                    return f
+            except Exception:
+                continue
+    return None
+
+
+def _find_crash_file(crashes_dir, sig: str, crash_files, seed_key_fn):
+    """Recorded ``save_crash()`` file for ``sig``, else content-hash scan."""
+    base_name = (crash_files or {}).get(sig)
+    if base_name:
+        candidate = crashes_dir / f"{base_name}.bin"
+        if candidate.is_file():
+            return candidate
+    return _scan_crash_file(crashes_dir, sig, seed_key_fn)
+
+
 def run_crash_replays(
     crashes_dir,
     target: str,
@@ -87,21 +109,7 @@ def run_crash_replays(
     for sig, replays in pending:
         if (time.monotonic() - t0) * 1000 > budget_ms:
             break
-        crash_file = None
-        base_name = (crash_files or {}).get(sig)
-        if base_name:
-            candidate = crashes_dir / f"{base_name}.bin"
-            if candidate.is_file():
-                crash_file = candidate
-        if crash_file is None:
-            for f in crashes_dir.iterdir():
-                if f.is_file() and not f.name.endswith((".json", ".txt")):
-                    try:
-                        if seed_key_fn(f.read_bytes()) == sig:
-                            crash_file = f
-                            break
-                    except Exception:
-                        continue
+        crash_file = _find_crash_file(crashes_dir, sig, crash_files, seed_key_fn)
         if crash_file is None:
             replays.append(-3)
             continue

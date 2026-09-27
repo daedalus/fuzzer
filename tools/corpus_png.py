@@ -142,6 +142,20 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
     seeds = []
     rng = random.Random(42)
 
+    _zlib_raw_levels(seeds, rng)
+    _complex_pngs(seeds, rng)
+    _split_idat_pngs(seeds, rng)
+    _ancillary_pngs(seeds)
+    _minimal_pngs(seeds)
+    _interlaced_pngs(seeds, rng)
+    _zlib_wrapped(seeds, rng)
+    _palette_pngs(seeds, rng)
+
+    return seeds
+
+
+def _zlib_raw_levels(seeds: list, rng: random.Random) -> None:
+    """Raw zlib streams at levels 0-9 and four sizes."""
     # Raw zlib streams at various compression levels and sizes
     for level in range(0, 10):
         for size in [64, 256, 1024, 4096]:
@@ -149,6 +163,9 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
             compressed = zlib.compress(raw, level)
             seeds.append((f"zlib_L{level}_s{size}.bin", compressed))
 
+
+def _complex_pngs(seeds: list, rng: random.Random) -> None:
+    """PNGs with random pixel data over sizes x colour types."""
     # PNGs with complex (random) pixel data
     for w, h in [(1, 1), (8, 8), (32, 32), (64, 64), (128, 128)]:
         for ct, bd in [(0, 8), (2, 8), (3, 8), (4, 8), (6, 8)]:
@@ -175,6 +192,9 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
                 )
             )
 
+
+def _split_idat_pngs(seeds: list, rng: random.Random) -> None:
+    """PNGs whose compressed data spans two IDAT chunks."""
     # PNGs with multiple IDAT chunks (split compressed data)
     for w, h in [(16, 16), (32, 32), (64, 64)]:
         raw = bytes(rng.randint(0, 255) for _ in range(w * h * 3))
@@ -187,6 +207,9 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
         iend = make_chunk(b"IEND", b"")
         seeds.append((f"split_idat_{w}x{h}.png", sig + ihdr + idat1 + idat2 + iend))
 
+
+def _ancillary_pngs(seeds: list) -> None:
+    """8x8 PNGs each carrying one ancillary chunk."""
     # PNGs with ancillary chunks
     for chunk_name, chunk_data in [
         (b"tEXt", b"Key=Value"),
@@ -208,6 +231,9 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
             )
         )
 
+
+def _minimal_pngs(seeds: list) -> None:
+    """1x1 PNGs for every valid colour_type x bit_depth combo."""
     # Minimal valid PNGs for all color_type × bit_depth combos
     for ct, bd in [
         (0, 1),
@@ -243,6 +269,9 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
             )
         )
 
+
+def _interlaced_pngs(seeds: list, rng: random.Random) -> None:
+    """Adam7-interlaced PNGs with random pixels."""
     # Interlaced PNGs
     for w, h in [(16, 16), (32, 32)]:
         seeds.append(
@@ -259,6 +288,9 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
             )
         )
 
+
+def _zlib_wrapped(seeds: list, rng: random.Random) -> None:
+    """Zlib streams of structured payloads at levels 0/6/9."""
     # Zlib-wrapped raw data (for decompression testing)
     for data_name, raw in [
         ("zeros", b"\x00" * 1024),
@@ -270,6 +302,9 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
             compressed = zlib.compress(raw, level)
             seeds.append((f"zlib_{data_name}_L{level}.bin", compressed))
 
+
+def _palette_pngs(seeds: list, rng: random.Random) -> None:
+    """Palette PNGs with random PLTE and indices."""
     # PNGs with palette data
     for palette_size in [2, 4, 16, 256]:
         w, h = 16, 16
@@ -285,8 +320,6 @@ def make_zlib_variants() -> list[tuple[str, bytes]]:
         idat = make_chunk(b"IDAT", compressed)
         iend = make_chunk(b"IEND", b"")
         seeds.append((f"palette_{palette_size}.png", sig + ihdr + plte + idat + iend))
-
-    return seeds
 
 
 DOWNLOAD_URLS = [

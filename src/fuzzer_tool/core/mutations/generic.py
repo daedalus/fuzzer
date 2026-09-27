@@ -366,6 +366,63 @@ class LiteralAccumulator:
         return self.int_lits, self.str_lits
 
 
+def _build_run_specs() -> tuple:
+    """Per-byte run spec (class mask, min length, is_int), or None.
+
+    Priority mirrors the scan: digit run, then alpha run, then symbol run
+    ('_' is both alpha and symbol and starts an alpha run).
+    """
+    specs = []
+    for flags in _LIT_CLASS:
+        if flags & _LIT_DIGIT:
+            specs.append((_LIT_DIGIT, 2, True))
+        elif flags & _LIT_ALPHA:
+            specs.append((_LIT_ALPHA, 3, False))
+        elif flags & _LIT_SYMBOL:
+            specs.append((_LIT_SYMBOL, 3, False))
+        else:
+            specs.append(None)
+    return tuple(specs)
+
+
+_RUN_SPECS = _build_run_specs()
+# '-' + >=2 digits: an integer literal, always long enough to record
+_NEG_INT_SPEC = (_LIT_DIGIT, 0, True)
+
+
+def _scan_literals(raw: bytes, acc: LiteralAccumulator) -> None:
+    """Fold one seed's int/str literal runs into *acc* (see extract_corpus_literals)."""
+    classes = _LIT_CLASS
+    n = len(raw)
+    i = 0
+    while i < n:
+        # Integer literal: optional '-', then >=2 digits; digit runs and
+        # the remaining classes come from the per-byte spec table.
+        if (
+            raw[i] == 45
+            and i + 2 < n
+            and classes[raw[i + 1]] & _LIT_DIGIT
+            and classes[raw[i + 2]] & _LIT_DIGIT
+        ):
+            spec = _NEG_INT_SPEC
+        else:
+            spec = _RUN_SPECS[raw[i]]
+            if spec is None:
+                i += 1
+                continue
+        mask, min_len, is_int = spec
+        j = i + 1
+        while j < n and classes[raw[j]] & mask:
+            j += 1
+        if j - i >= min_len:
+            lit = raw[i:j]
+            seen, out = (acc.seen_int, acc.int_lits) if is_int else (acc.seen_str, acc.str_lits)
+            if lit not in seen:
+                seen.add(lit)
+                out.append(lit)
+        i = j
+
+
 def extract_corpus_literals(
     corpus: list[bytes],
     accumulator: LiteralAccumulator | None = None,
@@ -381,11 +438,6 @@ def extract_corpus_literals(
     is how a caller avoids rescanning seeds it has already seen.
     """
     acc = accumulator if accumulator is not None else LiteralAccumulator()
-    int_lits = acc.int_lits
-    str_lits = acc.str_lits
-    seen_int = acc.seen_int
-    seen_str = acc.seen_str
-    classes = _LIT_CLASS
     for raw in corpus:
         # Coerce to bytes. The annotation says list[bytes], but the live
         # corpus holds bytearray -- Fuzzer.corpus is bytearray from startup
@@ -393,66 +445,9 @@ def extract_corpus_literals(
         # unhashable. The `lit not in seen_int` membership test below then
         # raises TypeError on the very first literal found, so this function
         # never returned anything on a real corpus.
-        raw = bytes(raw)
-        n = len(raw)
-        i = 0
-        while i < n:
-            cls = classes[raw[i]]
-            # Digit runs take priority over everything else.
-            if cls & _LIT_DIGIT:
-                j = i + 1
-                while j < n and classes[raw[j]] & _LIT_DIGIT:
-                    j += 1
-                if j - i >= 2:
-                    lit = raw[i:j]
-                    if lit not in seen_int:
-                        seen_int.add(lit)
-                        int_lits.append(lit)
-                i = j
-                continue
-            # Integer literal: optional '-', then >=2 digits.
-            if (
-                raw[i] == 45
-                and i + 2 < n
-                and classes[raw[i + 1]] & _LIT_DIGIT
-                and classes[raw[i + 2]] & _LIT_DIGIT
-            ):
-                j = i + 1
-                while j < n and classes[raw[j]] & _LIT_DIGIT:
-                    j += 1
-                lit = raw[i:j]
-                if lit not in seen_int:
-                    seen_int.add(lit)
-                    int_lits.append(lit)
-                i = j
-                continue
-            # Alpha run: letters and underscore, length >= 3.
-            if cls & _LIT_ALPHA:
-                j = i + 1
-                while j < n and classes[raw[j]] & _LIT_ALPHA:
-                    j += 1
-                if j - i >= 3:
-                    lit = raw[i:j]
-                    if lit not in seen_str:
-                        seen_str.add(lit)
-                        str_lits.append(lit)
-                i = j
-                continue
-            # Symbol run: printable non-alphanum, length >= 3.
-            if cls & _LIT_SYMBOL:
-                j = i + 1
-                while j < n and classes[raw[j]] & _LIT_SYMBOL:
-                    j += 1
-                if j - i >= 3:
-                    lit = raw[i:j]
-                    if lit not in seen_str:
-                        seen_str.add(lit)
-                        str_lits.append(lit)
-                i = j
-                continue
-            i += 1
+        _scan_literals(bytes(raw), acc)
     acc.scanned += len(corpus)
-    return int_lits, str_lits
+    return acc.int_lits, acc.str_lits
 
 
 def splice_common_prefix(a: bytes, b: bytes, rng) -> bytes:
@@ -1413,6 +1408,28 @@ def could_be_bitflip(xor_val: int) -> bool:
     return v in (0xFF, 0xFFFF, 0xFFFFFFFF)
 
 
+def _word_arith(old_val: int, new_val: int, blen: int) -> bool:
+    """One differing aligned word within +/-ARITH_MAX, LE or BE."""
+    diffs = 0
+    ov = nv = 0
+    for i in range(blen // 2):
+        a = (old_val >> (16 * i)) & 0xFFFF
+        b = (new_val >> (16 * i)) & 0xFFFF
+        if a != b:
+            diffs += 1
+            ov, nv = a, b
+    if diffs != 1:
+        return False
+
+    # Little-endian check
+    if ((ov - nv) & 0xFFFF) <= ARITH_MAX or ((nv - ov) & 0xFFFF) <= ARITH_MAX:
+        return True
+    # Big-endian check (byte-swap)
+    ov_be = ((ov & 0xFF) << 8) | ((ov >> 8) & 0xFF)
+    nv_be = ((nv & 0xFF) << 8) | ((nv >> 8) & 0xFF)
+    return ((ov_be - nv_be) & 0xFFFF) <= ARITH_MAX or ((nv_be - ov_be) & 0xFFFF) <= ARITH_MAX
+
+
 def could_be_arith(old_val: int, new_val: int, blen: int) -> bool:
     """Check if a value change could be produced by an arithmetic stage.
 
@@ -1446,25 +1463,8 @@ def could_be_arith(old_val: int, new_val: int, blen: int) -> bool:
 
     if blen == 1:
         return False
-
-    # Check two-byte (word) adjustments
-    diffs = 0
-    for i in range(blen // 2):
-        a = (old_val >> (16 * i)) & 0xFFFF
-        b = (new_val >> (16 * i)) & 0xFFFF
-        if a != b:
-            diffs += 1
-            ov, nv = a, b
-
-    if diffs == 1:
-        # Little-endian check
-        if ((ov - nv) & 0xFFFF) <= ARITH_MAX or ((nv - ov) & 0xFFFF) <= ARITH_MAX:
-            return True
-        # Big-endian check (byte-swap)
-        ov_be = ((ov & 0xFF) << 8) | ((ov >> 8) & 0xFF)
-        nv_be = ((nv & 0xFF) << 8) | ((nv >> 8) & 0xFF)
-        if ((ov_be - nv_be) & 0xFFFF) <= ARITH_MAX or ((nv_be - ov_be) & 0xFFFF) <= ARITH_MAX:
-            return True
+    if _word_arith(old_val, new_val, blen):
+        return True
 
     # Check dword adjustments
     if blen != 4:
@@ -1472,6 +1472,22 @@ def could_be_arith(old_val: int, new_val: int, blen: int) -> bool:
     return ((old_val - new_val) & 0xFFFFFFFF) <= ARITH_MAX or (
         (new_val - old_val) & 0xFFFFFFFF
     ) <= ARITH_MAX
+
+
+def _word_interest(old_val: int, new_val: int, blen: int) -> bool:
+    """INTERESTING_16 word (BE too when blen > 2) at any byte offset gives new_val."""
+    for i in range(blen - 1):
+        for j in range(len(INTERESTING_16)):
+            tval = (old_val & ~(0xFFFF << (8 * i))) | ((INTERESTING_16[j] & 0xFFFF) << (8 * i))
+            if new_val == tval:
+                return True
+            if blen > 2:
+                # Big-endian variant
+                swapped = ((INTERESTING_16[j] & 0xFF) << 8) | ((INTERESTING_16[j] >> 8) & 0xFF)
+                tval = (old_val & ~(0xFFFF << (8 * i))) | (swapped << (8 * i))
+                if new_val == tval:
+                    return True
+    return False
 
 
 def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = True) -> bool:
@@ -1504,17 +1520,8 @@ def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = Tr
         return False
 
     # Check two-byte (word) insertions
-    for i in range(blen - 1):
-        for j in range(len(INTERESTING_16)):
-            tval = (old_val & ~(0xFFFF << (8 * i))) | ((INTERESTING_16[j] & 0xFFFF) << (8 * i))
-            if new_val == tval:
-                return True
-            if blen > 2:
-                # Big-endian variant
-                swapped = ((INTERESTING_16[j] & 0xFF) << 8) | ((INTERESTING_16[j] >> 8) & 0xFF)
-                tval = (old_val & ~(0xFFFF << (8 * i))) | (swapped << (8 * i))
-                if new_val == tval:
-                    return True
+    if _word_interest(old_val, new_val, blen):
+        return True
 
     if blen == 4 and check_le:
         for j in range(len(INTERESTING_32)):
@@ -1545,19 +1552,8 @@ def _big_int_squared(rng, cap: int = (1 << 30) - 1) -> int:
     return int(rng.random() ** 2 * cap * cap)
 
 
-def ascii_num_replace(data: bytes, rng) -> bytes:
-    """Replace a whole multi-digit ASCII number with a random numeric value.
-
-    Ported from go-fuzz case 15.  Finds runs of digits (optionally prefixed
-    with '-') of length >= 2 and replaces the whole token with a random
-    value chosen from: small int [0, 999], big int, big-int squared, or
-    negative big int.  If the original token was negative, the replacement
-    is also mostly negative.
-    """
-    if len(data) < 2:
-        return data
-
-    # Collect candidate number spans.
+def _digit_spans(data: bytes) -> list[tuple[int, int]]:
+    """[start, end) spans of ASCII digit runs of length >= 2."""
     numbers: list[tuple[int, int]] = []
     start = -1
     for i, v in enumerate(data):
@@ -1571,6 +1567,35 @@ def ascii_num_replace(data: bytes, rng) -> bytes:
             start = -1
     if start != -1 and len(data) - start > 1:
         numbers.append((start, len(data)))
+    return numbers
+
+
+def _random_num(rng) -> int:
+    """Replacement value: small int, big int, big-int squared, or negative big."""
+    strategy = rng.randint(0, 3)
+    if strategy == 0:
+        return rng.randint(0, 999)
+    if strategy == 1:
+        return rng.randint(0, (1 << 30) - 1)
+    if strategy == 2:
+        return _big_int_squared(rng)
+    return -rng.randint(0, (1 << 30) - 1)
+
+
+def ascii_num_replace(data: bytes, rng) -> bytes:
+    """Replace a whole multi-digit ASCII number with a random numeric value.
+
+    Ported from go-fuzz case 15.  Finds runs of digits (optionally prefixed
+    with '-') of length >= 2 and replaces the whole token with a random
+    value chosen from: small int [0, 999], big int, big-int squared, or
+    negative big int.  If the original token was negative, the replacement
+    is also mostly negative.
+    """
+    if len(data) < 2:
+        return data
+
+    # Collect candidate number spans.
+    numbers = _digit_spans(data)
 
     if not numbers:
         return data
@@ -1583,16 +1608,7 @@ def ascii_num_replace(data: bytes, rng) -> bytes:
     if any(not (0x30 <= b <= 0x39) for b in raw):
         return data
 
-    strategy = rng.randint(0, 3)
-    if strategy == 0:
-        v = rng.randint(0, 999)
-    elif strategy == 1:
-        v = rng.randint(0, (1 << 30) - 1)
-    elif strategy == 2:
-        v = _big_int_squared(rng)
-    else:
-        v = -rng.randint(0, (1 << 30) - 1)
-
+    v = _random_num(rng)
     if neg:
         v = -v
     repl = str(v).encode("ascii")
@@ -2720,6 +2736,28 @@ def _build_verse(data, rng):
     return v
 
 
+# _tokenize byte classes / states: 0=control, 1=ws, 2=alpha, 3=num
+_TOK_CLASS = bytes(
+    2
+    if (0x61 <= b <= 0x7A) or (0x41 <= b <= 0x5A) or b == 0x5F
+    else 3
+    if 0x30 <= b <= 0x39
+    else 1
+    if b in (0x20, 0x09)
+    else 0
+    for b in range(256)
+)
+
+
+def _tok_node(state, chunk):
+    """Node for a finished run in *state* (1=ws, 2=alpha, 3=num)."""
+    if state == 1:
+        return _WsNode([chunk])
+    if state == 2:
+        return _AlphaNumNode([chunk])
+    return _NumNode([chunk], hex=False)
+
+
 def _tokenize(data):
     nodes = []
     i = 0
@@ -2727,55 +2765,26 @@ def _tokenize(data):
     start = 0
     while i < len(data):
         b = data[i]
-        is_alpha = (0x61 <= b <= 0x7A) or (0x41 <= b <= 0x5A) or b == 0x5F
-        is_digit = 0x30 <= b <= 0x39
-        is_ws = b in (0x20, 0x09)
-        if is_alpha:
-            if state == 0:
-                start = i
-                state = 2
-            elif state == 1:
-                nodes.append(_WsNode([data[start:i]]))
-                start = i
-                state = 2
-            elif state == 3:
-                state = 2
-        elif is_digit:
-            if state == 0:
-                start = i
-                state = 3
-            elif state == 1:
-                nodes.append(_WsNode([data[start:i]]))
-                start = i
-                state = 3
-            elif state == 2:
-                pass
-        elif is_ws:
-            if state == 0:
-                start = i
-                state = 1
-            elif state == 2:
-                nodes.append(_AlphaNumNode([data[start:i]]))
-                start = i
-                state = 1
-            elif state == 3:
-                nodes.append(_NumNode([data[start:i]], hex=False))
-                start = i
-                state = 1
-        else:
-            if state == 1:
-                nodes.append(_WsNode([data[start:i]]))
-            elif state == 2:
-                nodes.append(_AlphaNumNode([data[start:i]]))
-            elif state == 3:
-                nodes.append(_NumNode([data[start:i]], hex=False))
+        cls = _TOK_CLASS[b]
+        if cls == 0:
+            # Control byte: flush the open run, emit the byte itself
+            if state:
+                nodes.append(_tok_node(state, data[start:i]))
             state = 0
             nodes.append(_ControlNode(b))
+        elif state == 2 and cls == 3:
+            pass  # digit continues an alpha run
+        elif state == 3 and cls == 2:
+            state = 2  # letter turns a number run into an alpha run
+        elif state != cls:
+            if state:
+                nodes.append(_tok_node(state, data[start:i]))
+            start = i
+            state = cls
         i += 1
-    if state == 2:
-        nodes.append(_AlphaNumNode([data[start:]]))
-    elif state == 3:
-        nodes.append(_NumNode([data[start:]], hex=False))
+    # A trailing whitespace run is dropped
+    if state in (2, 3):
+        nodes.append(_tok_node(state, data[start:]))
     return nodes
 
 
@@ -2788,44 +2797,52 @@ def _structure(nodes):
     return nodes
 
 
+def _alnum_to_num(n):
+    """Single-sample alnum that is hex (0x..) or exponent (NeM) -> _NumNode."""
+    if not isinstance(n, _AlphaNumNode) or len(n._samples) != 1:
+        return None
+    v = n._samples[0]
+    if len(v) >= 3 and v[0:2] == b"0x" and _is_hex(v[2:]):
+        return _NumNode([v], hex=True)
+    e = v.find(b"e")
+    if e != -1 and _is_dec(v[:e]) and _is_dec(v[e + 1 :]):
+        return _NumNode([v], hex=False)
+    return None
+
+
+def _is_neg_sign(nodes, i):
+    """'-' before a number, unless it follows an exponent ('1e' '-' '5')."""
+    n = nodes[i]
+    if not (
+        isinstance(n, _ControlNode)
+        and n._ch == 45
+        and i + 1 < len(nodes)
+        and isinstance(nodes[i + 1], _NumNode)
+    ):
+        return False
+    prev = nodes[i - 1] if i > 0 else None
+    return (
+        not isinstance(prev, _AlphaNumNode)
+        or len(prev._samples[0]) <= 1
+        or prev._samples[0][-1:] != b"e"
+    )
+
+
 def _extract_numbers(nodes):
     changed = True
     while changed:
         changed = False
         i = 0
         while i < len(nodes):
-            n = nodes[i]
-            if isinstance(n, _AlphaNumNode) and len(n._samples) == 1:
-                v = n._samples[0]
-                if len(v) >= 3 and v[0:2] == b"0x" and _is_hex(v[2:]):
-                    nodes[i] = _NumNode([v], hex=True)
-                    changed = True
-                    i += 1
-                    continue
-                e = v.find(b"e")
-                if e != -1 and _is_dec(v[:e]) and _is_dec(v[e + 1 :]):
-                    nodes[i] = _NumNode([v], hex=False)
-                    changed = True
-                    i += 1
-                    continue
-            if (
-                isinstance(n, _ControlNode)
-                and n._ch == 45
-                and i + 1 < len(nodes)
-                and isinstance(nodes[i + 1], _NumNode)
-            ):
+            num = _alnum_to_num(nodes[i])
+            if num is not None:
+                nodes[i] = num
+                changed = True
+            elif _is_neg_sign(nodes, i):
                 num = nodes[i + 1]
-                prev = nodes[i - 1] if i > 0 else None
-                if (
-                    not isinstance(prev, _AlphaNumNode)
-                    or len(prev._samples[0]) <= 1
-                    or prev._samples[0][-1:] != b"e"
-                ):
-                    num._samples = [b"-" + num._samples[0]]
-                    nodes = nodes[:i] + nodes[i + 1 :]
-                    changed = True
-                    i += 1
-                    continue
+                num._samples = [b"-" + num._samples[0]]
+                nodes = nodes[:i] + nodes[i + 1 :]
+                changed = True
             i += 1
     return nodes
 
@@ -2876,6 +2893,50 @@ def _structure_keyvalue(nodes):
     return nodes
 
 
+def _note_tokens(node, ch, tokens):
+    """Add *node*'s control char (unless delimiter *ch*) or bracket pair."""
+    if isinstance(node, _ControlNode) and node._ch != ch:
+        tokens.add(node._ch)
+    if isinstance(node, _BracketNode):
+        tokens.add(node._open[0])
+        tokens.add(node._close[0])
+
+
+def _list_span(nodes, i, ch):
+    """Widen (left, right) around delimiter i until both sides hold the same tokens."""
+    left = i - 1
+    right = i + 1
+    left_tokens = set()
+    right_tokens = set()
+    while True:
+        left_done = left < 0
+        right_done = right >= len(nodes)
+        if left_done and right_done:
+            break
+        if not left_done:
+            _note_tokens(nodes[left], ch, left_tokens)
+        if not right_done:
+            _note_tokens(nodes[right], ch, right_tokens)
+        if left_tokens == right_tokens:
+            break
+        left -= 1
+        right += 1
+    return left, right
+
+
+def _split_blocks(nodes, left, right, ch):
+    """Split nodes (left, right) on control char *ch* into _BlockNodes."""
+    blocks = []
+    j = left + 1
+    while j < right:
+        k = j
+        while k < right and not (isinstance(nodes[k], _ControlNode) and nodes[k]._ch == ch):
+            k += 1
+        blocks.append(_BlockNode(nodes[j:k]))
+        j = k + 1
+    return blocks
+
+
 def _structure_lists(nodes):
     delims = {0x2C, 0x3B}
     for n in nodes:
@@ -2885,50 +2946,9 @@ def _structure_lists(nodes):
     while i >= 0:
         n = nodes[i]
         if isinstance(n, _ControlNode) and n._ch in delims:
-            left = i - 1
-            right = i + 1
-            left_tokens = set()
-            right_tokens = set()
-            while True:
-                left_done = left < 0
-                right_done = right >= len(nodes)
-                if left_done and right_done:
-                    break
-                if not left_done:
-                    ctrl = nodes[left]
-                    if isinstance(ctrl, _ControlNode):
-                        if ctrl._ch == n._ch:
-                            left_done = True
-                        else:
-                            left_tokens.add(ctrl._ch)
-                    if isinstance(ctrl, _BracketNode):
-                        left_tokens.add(ctrl._open[0])
-                        left_tokens.add(ctrl._close[0])
-                if not right_done:
-                    ctrl = nodes[right]
-                    if isinstance(ctrl, _ControlNode):
-                        if ctrl._ch == n._ch:
-                            right_done = True
-                        else:
-                            right_tokens.add(ctrl._ch)
-                    if isinstance(ctrl, _BracketNode):
-                        right_tokens.add(ctrl._open[0])
-                        right_tokens.add(ctrl._close[0])
-                if left_tokens == right_tokens:
-                    break
-                left -= 1
-                right += 1
+            left, right = _list_span(nodes, i, n._ch)
             # Simple list: collect elements between matching delimiters
-            blocks = []
-            j = left + 1
-            while j < right:
-                k = j
-                while k < right and not (
-                    isinstance(nodes[k], _ControlNode) and nodes[k]._ch == n._ch
-                ):
-                    k += 1
-                blocks.append(_BlockNode(nodes[j:k]))
-                j = k + 1
+            blocks = _split_blocks(nodes, left, right, n._ch)
             if len(blocks) >= 2:
                 nodes = nodes[: left + 1] + [_ListNode(n._ch, blocks)] + nodes[right:]
                 i = left + 1

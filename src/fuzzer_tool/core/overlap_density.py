@@ -220,6 +220,51 @@ def _query_relative_proxy_error(
     return max_dev
 
 
+def _pairwise_acc(
+    total: float,
+    count: int,
+    i: int,
+    members: list[int],
+    seed_keys: list[str],
+    minhash: MinHashLSH,
+) -> tuple[float, int]:
+    """Add exact Jaccard(i, j) for each member j to the running (total, count)."""
+    for j in members:
+        total += minhash.approximate_jaccard(seed_keys[i], seed_keys[j])
+        count += 1
+    return total, count
+
+
+def _far_acc(
+    total: float,
+    count: int,
+    i: int,
+    sig_self: list[int],
+    members: list[int],
+    centroid: list[int],
+    seed_keys: list[str],
+    minhash: MinHashLSH,
+    proxy_error_threshold: float,
+) -> tuple[float, int]:
+    """Accumulate one cohesive far cluster: centroid proxy, else exact pairwise.
+
+    Phase 2: query-relative proxy error check. A cluster that passes global
+    cohesion may still have members whose overlap with THIS specific query
+    seed diverges from the centroid's overlap (e.g. members share a large
+    common base but overlap the query in disjoint slices).
+    """
+    proxy_err = _query_relative_proxy_error(sig_self, members, seed_keys, minhash, centroid)
+    if proxy_err > proxy_error_threshold:
+        # Phase 2 failed: query-relative proxy error too large.
+        # Fall back to exact pairwise to avoid overestimate.
+        return _pairwise_acc(total, count, i, members, seed_keys, minhash)
+
+    # Centroid approximation (fast path): treat all members as
+    # having the same similarity to the query as the centroid.
+    inter_j = _sig_jaccard(sig_self, centroid)
+    return total + inter_j * len(members), count + len(members)
+
+
 def compute_corpus_overlap_density(
     seed_keys: list[str],
     minhash: MinHashLSH,
@@ -306,34 +351,23 @@ def compute_corpus_overlap_density(
                 continue
 
             if cohesion[ocidx] >= cohesion_threshold:
-                # Phase 1: global cohesion check passed.
-                # Phase 2: query-relative proxy error check.
-                # A cluster that passes global cohesion may still have members
-                # whose overlap with THIS specific query seed diverges from
-                # the centroid's overlap (e.g. members share a large common
-                # base but overlap the query in disjoint slices).
-                proxy_err = _query_relative_proxy_error(
-                    sig_self, members, seed_keys, minhash, centroids[ocidx]
+                # Phase 1: global cohesion check passed; Phase 2 in _far_acc.
+                total, count = _far_acc(
+                    total,
+                    count,
+                    i,
+                    sig_self,
+                    members,
+                    centroids[ocidx],
+                    seed_keys,
+                    minhash,
+                    proxy_error_threshold,
                 )
-                if proxy_err <= proxy_error_threshold:
-                    # Centroid approximation (fast path): treat all members as
-                    # having the same similarity to the query as the centroid.
-                    inter_j = _sig_jaccard(sig_self, centroids[ocidx])
-                    total += inter_j * len(members)
-                    count += len(members)
-                else:
-                    # Phase 2 failed: query-relative proxy error too large.
-                    # Fall back to exact pairwise to avoid overestimate.
-                    for j in members:
-                        total += minhash.approximate_jaccard(seed_keys[i], seed_keys[j])
-                        count += 1
             else:
                 # Phase 1 failed: global cohesion too low.
                 # Fall back to exact pairwise for low-cohesion clusters
                 # to avoid overestimating overlap when members are diverse.
-                for j in members:
-                    total += minhash.approximate_jaccard(seed_keys[i], seed_keys[j])
-                    count += 1
+                total, count = _pairwise_acc(total, count, i, members, seed_keys, minhash)
 
         densities[sk] = total / count if count else 0.0
 

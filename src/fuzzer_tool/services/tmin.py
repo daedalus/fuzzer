@@ -10,6 +10,33 @@ from fuzzer_tool.core.mutations import minimize_bytes
 from fuzzer_tool.core.state_store import StateStore
 
 
+def _sidecar_parent(crash_path: Path) -> str | None:
+    """Read ``parent_seed`` hash from the crash's ``.txt`` sidecar."""
+    sidecar = crash_path.with_suffix(".txt")
+    if not sidecar.is_file():
+        return None
+    for line in sidecar.read_text().splitlines():
+        if line.startswith("parent_seed:"):
+            return line.split(":", 1)[1].strip()
+    return None
+
+
+def _lineage_chain(parent_hash: str, seed_meta: dict) -> list[tuple[str, list[str], list[int]]]:
+    """Walk parent_key chain leaf-ward (cycle-safe, capped), return root-first."""
+    chain: list[tuple[str, list[str], list[int]]] = []
+    cur = parent_hash
+    seen: set[str] = set()
+    while cur and cur not in seen and len(chain) <= 64:
+        seen.add(cur)
+        sm = seed_meta.get(cur)
+        ops = sm.get("parent_ops", []) if isinstance(sm, dict) else []
+        sites = sm.get("parent_sites", []) if isinstance(sm, dict) else []
+        chain.append((cur, ops, sites))
+        cur = sm.get("parent_key") if isinstance(sm, dict) else None
+    chain.reverse()
+    return chain
+
+
 def _lineage_candidate(
     crash_path: Path,
     corpus_dir: str | None,
@@ -28,13 +55,7 @@ def _lineage_candidate(
     """
     if not corpus_dir:
         return None
-    sidecar = crash_path.with_suffix(".txt")
-    parent_hash = None
-    if sidecar.is_file():
-        for line in sidecar.read_text().splitlines():
-            if line.startswith("parent_seed:"):
-                parent_hash = line.split(":", 1)[1].strip()
-                break
+    parent_hash = _sidecar_parent(crash_path)
     if not parent_hash:
         return None
 
@@ -46,20 +67,7 @@ def _lineage_candidate(
     if not isinstance(seed_meta, dict):
         return None
 
-    # Walk parent_key chain leaf-ward, then reverse to root-first.
-    chain: list[tuple[str, list[str], list[int]]] = []
-    cur = parent_hash
-    seen: set[str] = set()
-    while cur and cur not in seen and len(chain) <= 64:
-        seen.add(cur)
-        sm = seed_meta.get(cur)
-        ops = sm.get("parent_ops", []) if isinstance(sm, dict) else []
-        sites = sm.get("parent_sites", []) if isinstance(sm, dict) else []
-        chain.append((cur, ops, sites))
-        cur = sm.get("parent_key") if isinstance(sm, dict) else None
-    chain.reverse()
-
-    for h, _ops, _sites in chain:
+    for h, _ops, _sites in _lineage_chain(parent_hash, seed_meta):
         data = rehydrate_by_hash(h, corpus_dir)
         if data is None:
             continue

@@ -12,11 +12,15 @@ block *b* if every path from the function's entry to *b* passes through
 "mandatory gates" for reaching it — the branches worth prioritizing over
 and above whatever their raw BFS distance says.
 
-Algorithm: Cooper, Harvey & Kennedy, "A Simple, Fast Dominance Algorithm"
-(2001) — a reverse-postorder dataflow fixed point with a finger-search
-intersect, rather than Lengauer-Tarjan's link-eval forest. Near-linear in
-practice on CFGs (few predecessors per block); revisit only if profiling
-shows this hot on very large functions.
+Algorithm: Semi-NCA (Georgiadis, *Linear-Time Algorithms for Dominators
+and Related Problems*, PhD thesis 2005, Fig. 2.8): Lengauer-Tarjan
+semidominators via path-compressed eval, then idom = nearest common
+ancestor of parent and semidominator in the partial dominator tree.
+O(m log n) worst case. Replaced Cooper-Harvey-Kennedy's iterative fixed
+point, which needs k+1 passes on irreducible CFGs: a 4096-block
+``idfsquad`` took ~40 s vs ~20 ms here (see
+``docs/learnings/2026-09-26-dominators-chk-worst-case.md``). Target
+binaries are attacker-shaped input, so the worst case matters.
 
 Scope: intra-procedural only, matching ``cfg.py``'s FunctionCFG. Blocks
 unreachable from the chosen entry (dead code, or a block only reachable
@@ -27,38 +31,84 @@ not assume every block in ``cfg.blocks`` has an idom entry.
 
 from __future__ import annotations
 
+from array import array
+
 from fuzzer_tool.core.cfg import FunctionCFG
 
+_NO_ANCESTOR = -1  # Semi-NCA forest root marker
 
-def _reverse_postorder(cfg: FunctionCFG, entry: int) -> list[int]:
-    """Iterative DFS postorder from *entry* over successors, then reversed.
 
-    Iterative (explicit stack) rather than recursive: function CFGs from
-    real binaries can be deep enough to blow the default recursion limit.
-    Blocks not reachable from entry (and any successor address that
-    didn't survive into ``cfg.blocks`` — a decoder desync gap) are
-    silently excluded, matching ``build_function_cfg``'s own successor
-    filtering.
+def _dfs_preorder(cfg: FunctionCFG, entry: int) -> tuple[list[int], array]:
+    """Iterative DFS preorder from *entry*; returns (order, parent).
+
+    ``order[i]`` is the block with preorder number i; ``parent[i]`` is
+    the preorder number of its DFS-tree parent (``parent[0] == 0``).
+    Iterative (explicit stack): real CFGs can exceed the recursion
+    limit. Unreachable blocks and successor addresses missing from
+    ``cfg.blocks`` (decoder desync gap) are excluded, matching
+    ``build_function_cfg``'s own successor filtering.
     """
-    if entry not in cfg.blocks:
-        return []
-    visited = {entry}
-    order: list[int] = []
-    stack: list[tuple[int, iter]] = [(entry, iter(cfg.blocks[entry].successors))]
+    blocks = cfg.blocks
+    num = {entry: 0}
+    order = [entry]
+    parent = array("i", [0])
+    stack = [(0, iter(blocks[entry].successors))]
+
     while stack:
-        node, it = stack[-1]
-        advanced = False
-        for succ in it:
-            if succ in cfg.blocks and succ not in visited:
-                visited.add(succ)
-                stack.append((succ, iter(cfg.blocks[succ].successors)))
-                advanced = True
-                break
-        if not advanced:
-            order.append(node)
+        u, it = stack[-1]
+        for s in it:
+            if s in num or s not in blocks:
+                continue
+            num[s] = len(order)
+            order.append(s)
+            parent.append(u)
+            stack.append((num[s], iter(blocks[s].successors)))
+            break
+        else:
             stack.pop()
-    order.reverse()
-    return order
+    return order, parent
+
+
+def _compress(v: int, anc: array, label: array) -> None:
+    """Path-compress *v*'s ancestor chain, pulling the minimum label down.
+
+    Iterative form of LT's recursive ``compress``: collect the chain up
+    to the forest root's child, then fold labels top-down.
+    """
+    path = []
+    while anc[anc[v]] != _NO_ANCESTOR:
+        path.append(v)
+        v = anc[v]
+
+    for w in reversed(path):
+        a = anc[w]
+        if label[a] < label[w]:
+            label[w] = label[a]
+        anc[w] = anc[a]
+
+
+def _semidominators(pred_nums: list[list[int]], parent: array) -> array:
+    """Semidominator preorder number of every vertex (LT step 2).
+
+    Vertices are processed in reverse preorder; a predecessor with a
+    smaller number is a tree ancestor-candidate and contributes itself,
+    otherwise ``eval`` returns the minimum semi on its linked path.
+    """
+    n = len(parent)
+    semi = array("i", range(n))
+    label = array("i", range(n))
+    anc = array("i", [_NO_ANCESTOR]) * n
+
+    for w in range(n - 1, 0, -1):
+        for v in pred_nums[w]:
+            if v > w and anc[v] != _NO_ANCESTOR:
+                _compress(v, anc, label)
+            u = label[v] if v > w else v
+            if u < semi[w]:
+                semi[w] = u
+        label[w] = semi[w]
+        anc[w] = parent[w]
+    return semi
 
 
 def predecessors(cfg: FunctionCFG) -> dict[int, list[int]]:
@@ -82,65 +132,58 @@ def predecessors(cfg: FunctionCFG) -> dict[int, list[int]]:
 _predecessors = predecessors
 
 
-def _intersect(a: int, b: int, idom: dict[int, int], rpo_number: dict[int, int]) -> int:
-    """CHK's finger algorithm: walk both chains up to their common ancestor.
+def _resolve_entry(cfg: FunctionCFG, entry: int | None) -> int | None:
+    """*entry*, else the ``is_entry`` block, else the lowest start; None if absent."""
+    if entry is None:
+        entry = next((b for b, blk in cfg.blocks.items() if blk.is_entry), None)
+    if entry is None and cfg.blocks:
+        entry = min(cfg.blocks)
+    if entry not in cfg.blocks:
+        return None
+    return entry
 
-    Relies on the invariant that within one fixed-point pass, both *a*
-    and *b* already have a (possibly provisional) idom, and that a
-    node's reverse-postorder number is always greater than any of its
-    dominators' (true for any node processed after its idom in RPO
-    order, which the outer loop guarantees).
-    """
-    while a != b:
-        while rpo_number[a] > rpo_number[b]:
-            a = idom[a]
-        while rpo_number[b] > rpo_number[a]:
-            b = idom[b]
-    return a
+
+def _pred_numbers(cfg: FunctionCFG, order: list[int], num: dict[int, int]) -> list[list[int]]:
+    """Predecessors in preorder numbers; unreachable predecessors dropped."""
+    pred_nums: list[list[int]] = [[] for _ in order]
+    for u, b in enumerate(order):
+        for s in cfg.blocks[b].successors:
+            w = num.get(s)
+            if w is not None:
+                pred_nums[w].append(u)
+    return pred_nums
 
 
 def compute_idom(cfg: FunctionCFG, entry: int | None = None) -> dict[int, int]:
     """Immediate-dominator map for every block reachable from *entry*.
 
-    ``idom[entry] == entry`` by convention (matches the CHK paper — the
-    entry is its own dominator, and the sentinel makes ``dominator_chain``
-    terminate without a special case). *entry* defaults to the block
-    flagged ``is_entry``; if none is flagged (e.g. a hand-built CFG in a
-    test) it falls back to the lowest block start.
+    ``idom[entry] == entry`` by convention (the sentinel makes
+    ``dominator_chain`` terminate without a special case). *entry*
+    defaults to the block flagged ``is_entry``; if none is flagged (e.g.
+    a hand-built CFG in a test) it falls back to the lowest block start.
 
     Unreachable blocks are absent from the result.
     """
+    entry = _resolve_entry(cfg, entry)
     if entry is None:
-        entry = next((b for b, blk in cfg.blocks.items() if blk.is_entry), None)
-        if entry is None and cfg.blocks:
-            entry = min(cfg.blocks)
-    if entry is None or entry not in cfg.blocks:
         return {}
 
-    rpo = _reverse_postorder(cfg, entry)
-    if not rpo:
-        return {}
-    rpo_number = {b: i for i, b in enumerate(rpo)}
-    preds = predecessors(cfg)
+    order, parent = _dfs_preorder(cfg, entry)
+    num = {b: i for i, b in enumerate(order)}
 
-    idom: dict[int, int] = {entry: entry}
-    changed = True
-    while changed:
-        changed = False
-        for b in rpo:
-            if b == entry:
-                continue
-            processed_preds = [p for p in preds[b] if p in idom]
-            if not processed_preds:
-                continue
-            new_idom = processed_preds[0]
-            for p in processed_preds[1:]:
-                if p in idom:
-                    new_idom = _intersect(new_idom, p, idom, rpo_number)
-            if idom.get(b) != new_idom:
-                idom[b] = new_idom
-                changed = True
-    return idom
+    pred_nums = _pred_numbers(cfg, order, num)
+    semi = _semidominators(pred_nums, parent)
+
+    # NCA step: climb from the parent until at or above semi(w).
+    # idom[] of every vertex numbered < w is already final.
+    idom_num = array("i", parent)
+    for w in range(1, len(order)):
+        x = idom_num[w]
+        while x > semi[w]:
+            x = idom_num[x]
+        idom_num[w] = x
+
+    return {b: order[idom_num[i]] for i, b in enumerate(order)}
 
 
 def dominates(idom: dict[int, int], a: int, b: int) -> bool:

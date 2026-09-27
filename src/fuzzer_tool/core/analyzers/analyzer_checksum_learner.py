@@ -436,36 +436,7 @@ class ChecksumLearner:
         # data-length dependency) still sees the full set.
         gcd_pairs = [p for p in unique if len(p[0]) <= _GCD_MAX_PAIR_DATA_BYTES]
 
-        # GCD-of-syndromes first: works for independent (data, checksum)
-        # pairs (different files/chunks).  Recovers in the non-reflected
-        # domain (normal-form polynomial).
-        poly = recover_polynomial_gcd(gcd_pairs, width=self._poly_width)
-        if poly and poly != 0 and self._verify(poly, unique, reflect=False):
-            self._reflect = False
-            self._set_model(poly)
-            return
-
-        # Reflected GCD-of-syndromes: same technique, but for the
-        # reflected (LSB-first) shift convention used by virtually every
-        # real-world CRC-32 — zlib, gzip, PNG, ZIP, Ethernet. This is the
-        # common case in practice, so it's tried before the BM fallback,
-        # which needs sequential register states independent pairs rarely
-        # provide.
-        poly = recover_polynomial_gcd(gcd_pairs, width=self._poly_width, reflected=True)
-        if poly and poly != 0 and self._verify(poly, unique, reflect=True):
-            self._reflect = True
-            self._set_model(poly)
-            return
-
-        # BM fallback: recovers sequential LFSR output streams (reflected
-        # domain, reversed-form polynomial).  Requires the checksum values
-        # to be one-step-apart register states, which realistic corpora
-        # rarely provide — hence the strict verification below.
-        checksums = sorted({c for _, c in unique})
-        poly = recover_lfsr(checksums, width=self._poly_width)
-        if poly and poly != 0 and self._verify(poly, unique, reflect=True):
-            self._reflect = True
-            self._set_model(poly)
+        if self._recover_gf2(unique, gcd_pairs):
             return
 
         # Integer-modulus path (Adler-32, Fletcher, weighted sums). Attempted
@@ -494,6 +465,41 @@ class ChecksumLearner:
         xor_model = recover_xor_model(unique)
         if xor_model is not None and self._verify_xor(xor_model, unique):
             self._set_xor_model(xor_model)
+
+    def _recover_gf2(self, unique: list[tuple[bytes, int]], gcd_pairs: list) -> bool:
+        """Try the GF(2) CRC paths (GCD, reflected GCD, BM); True once one verifies."""
+        # GCD-of-syndromes first: works for independent (data, checksum)
+        # pairs (different files/chunks).  Recovers in the non-reflected
+        # domain (normal-form polynomial).
+        poly = recover_polynomial_gcd(gcd_pairs, width=self._poly_width)
+        if poly and poly != 0 and self._verify(poly, unique, reflect=False):
+            self._reflect = False
+            self._set_model(poly)
+            return True
+
+        # Reflected GCD-of-syndromes: same technique, but for the
+        # reflected (LSB-first) shift convention used by virtually every
+        # real-world CRC-32 — zlib, gzip, PNG, ZIP, Ethernet. This is the
+        # common case in practice, so it's tried before the BM fallback,
+        # which needs sequential register states independent pairs rarely
+        # provide.
+        poly = recover_polynomial_gcd(gcd_pairs, width=self._poly_width, reflected=True)
+        if poly and poly != 0 and self._verify(poly, unique, reflect=True):
+            self._reflect = True
+            self._set_model(poly)
+            return True
+
+        # BM fallback: recovers sequential LFSR output streams (reflected
+        # domain, reversed-form polynomial).  Requires the checksum values
+        # to be one-step-apart register states, which realistic corpora
+        # rarely provide — hence the strict verification below.
+        checksums = sorted({c for _, c in unique})
+        poly = recover_lfsr(checksums, width=self._poly_width)
+        if poly and poly != 0 and self._verify(poly, unique, reflect=True):
+            self._reflect = True
+            self._set_model(poly)
+            return True
+        return False
 
     def _verify_int(self, model: IntModel, pairs: list[tuple[bytes, int]]) -> bool:
         """True when *model* reproduces the checksum of >= 2 distinct pairs.

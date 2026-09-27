@@ -53,6 +53,25 @@ def configure_crash_cluster(threshold: float = 0.7, core_threshold: float = 0.5)
     _CRASH_CLUSTER_CORE_THRESHOLD = float(core_threshold)
 
 
+def _append_frames(lines: list[str], title: str, frames: list, cap: int) -> None:
+    """Append a titled, numbered stack section (first *cap* frames); skip when empty."""
+    if not frames:
+        return
+    lines.append(f"=== {title} ===")
+    for i, frame in enumerate(frames[:cap]):
+        lines.append(f"  #{i} {frame}")
+    lines.append("")
+
+
+def _append_block(lines: list[str], title: str, body: str) -> None:
+    """Append a titled free-text section; skip when empty."""
+    if not body:
+        return
+    lines.append(f"=== {title} ===")
+    lines.append(body)
+    lines.append("")
+
+
 @dataclass
 class CrashMetadata:
     """All context needed for rich crash triage output.
@@ -171,7 +190,36 @@ class CrashMetadata:
         lines.append(f"target_sha256: {self.target_sha256}")
         lines.append("")
 
-        # Sanitizer info
+        self._sidecar_fault(lines)
+        self._sidecar_mutation(lines)
+
+        # Stack trace, then allocation/deallocation stacks
+        _append_frames(lines, "stack trace", self.frames, 16)
+        _append_frames(lines, "allocated by", self.alloc_frames, 8)
+        _append_frames(lines, "freed by", self.dealloc_frames, 8)
+
+        self._sidecar_registers(lines)
+
+        # GDB crash replay (backtrace/registers/fault) — part of the report
+        if self.gdb_replay:
+            lines.append(self.gdb_replay)
+            lines.append("")
+
+        self._sidecar_nearest(lines)
+
+        if self.fields:
+            lines.extend(self._format_fields())
+            lines.append("")
+
+        # Raw stderr (ASAN diagnostics with file:line), input hexdump, input text
+        _append_block(lines, "raw stderr", self.raw_stderr)
+        _append_block(lines, "input hexdump", self.input_hexdump)
+        _append_block(lines, "input text", self.input_text_repr)
+
+        return "\n".join(lines)
+
+    def _sidecar_fault(self, lines: list[str]) -> None:
+        """Sanitizer diagnosis, or returncode/signal info for plain crashes."""
         if self.sanitizer:
             lines.append(f"sanitizer:     {self.sanitizer}")
             lines.append(f"error_type:    {self.error_type}")
@@ -182,18 +230,21 @@ class CrashMetadata:
                 lines.append(f"shadow:        {self.shadow_info}")
             lines.append(f"exploitability: {self.exploitability}")
             lines.append(f"cluster_id:    {self.cluster_id}")
+            lines.append("")
+            return
+
+        if self.returncode is not None:
+            lines.append(f"returncode:    {self.returncode}")
         else:
-            if self.returncode is not None:
-                lines.append(f"returncode:    {self.returncode}")
-            else:
-                lines.append("returncode:    signal (see raw stderr)")
-            if self.error_type:
-                lines.append(f"error_type:    {self.error_type}")
-            if self.fault_addr:
-                lines.append(f"fault_addr:    {self.fault_addr}")
+            lines.append("returncode:    signal (see raw stderr)")
+        if self.error_type:
+            lines.append(f"error_type:    {self.error_type}")
+        if self.fault_addr:
+            lines.append(f"fault_addr:    {self.fault_addr}")
         lines.append("")
 
-        # Mutation info
+    def _sidecar_mutation(self, lines: list[str]) -> None:
+        """Parent seed and mutation ops/sites that produced the crash."""
         if self.parent_seed_hash:
             lines.append(f"parent_seed:   {self.parent_seed_hash}")
         if self.mutation_ops:
@@ -202,78 +253,32 @@ class CrashMetadata:
             lines.append(f"mutation_sites: {', '.join(str(s) for s in self.parent_sites)}")
         lines.append("")
 
-        # Stack trace
-        if self.frames:
-            lines.append("=== stack trace ===")
-            for i, frame in enumerate(self.frames[:16]):
-                lines.append(f"  #{i} {frame}")
-            lines.append("")
-
-        # Allocation/deallocation stacks
-        if self.alloc_frames:
-            lines.append("=== allocated by ===")
-            for i, frame in enumerate(self.alloc_frames[:8]):
-                lines.append(f"  #{i} {frame}")
-            lines.append("")
-
-        if self.dealloc_frames:
-            lines.append("=== freed by ===")
-            for i, frame in enumerate(self.dealloc_frames[:8]):
-                lines.append(f"  #{i} {frame}")
-            lines.append("")
-
-        # Register state. Gate on ANY register being nonzero (not just RIP):
+    def _sidecar_registers(self, lines: list[str]) -> None:
+        """Register state section."""
+        # Gate on ANY register being nonzero (not just RIP):
         # a NULL-jump crash has rip == 0 (the faulting address IS 0) but a
         # meaningful rsp/rbp that would otherwise be dropped from the sidecar.
-        if self.rip or self.rsp or self.rbp:
-            lines.append("=== registers ===")
-            lines.append(f"  RIP: {self.rip:#x}")
-            lines.append(f"  RSP: {self.rsp:#x}")
-            lines.append(f"  RBP: {self.rbp:#x}")
-            if self.instruction_bytes:
-                lines.append(f"  instruction: {self.instruction_bytes}")
-            lines.append("")
+        if not (self.rip or self.rsp or self.rbp):
+            return
+        lines.append("=== registers ===")
+        lines.append(f"  RIP: {self.rip:#x}")
+        lines.append(f"  RSP: {self.rsp:#x}")
+        lines.append(f"  RBP: {self.rbp:#x}")
+        if self.instruction_bytes:
+            lines.append(f"  instruction: {self.instruction_bytes}")
+        lines.append("")
 
-        # GDB crash replay (backtrace/registers/fault) — part of the report
-        if self.gdb_replay:
-            lines.append(self.gdb_replay)
-            lines.append("")
-
-        # Nearest corpus
-        if self.nearest_corpus_file:
-            lines.append(
-                f"nearest_corpus: {self.nearest_corpus_file} (similarity: {self.nearest_similarity:.2f})"
-            )
-            if self.diff_bytes:
-                offsets = ", ".join(f"0x{o:02x}" for o in self.diff_bytes[:20])
-                lines.append(
-                    f"diff_bytes: {len(self.diff_bytes)} bytes differ at offsets [{offsets}]"
-                )
-            lines.append("")
-
-        if self.fields:
-            lines.extend(self._format_fields())
-            lines.append("")
-
-        # Raw stderr (ASAN diagnostics with file:line)
-        if self.raw_stderr:
-            lines.append("=== raw stderr ===")
-            lines.append(self.raw_stderr)
-            lines.append("")
-
-        # Input hexdump
-        if self.input_hexdump:
-            lines.append("=== input hexdump ===")
-            lines.append(self.input_hexdump)
-            lines.append("")
-
-        # Input text
-        if self.input_text_repr:
-            lines.append("=== input text ===")
-            lines.append(self.input_text_repr)
-            lines.append("")
-
-        return "\n".join(lines)
+    def _sidecar_nearest(self, lines: list[str]) -> None:
+        """Nearest corpus file and differing byte offsets."""
+        if not self.nearest_corpus_file:
+            return
+        lines.append(
+            f"nearest_corpus: {self.nearest_corpus_file} (similarity: {self.nearest_similarity:.2f})"
+        )
+        if self.diff_bytes:
+            offsets = ", ".join(f"0x{o:02x}" for o in self.diff_bytes[:20])
+            lines.append(f"diff_bytes: {len(self.diff_bytes)} bytes differ at offsets [{offsets}]")
+        lines.append("")
 
     @staticmethod
     def _field_line(row: dict, mark: str) -> str:
@@ -467,6 +472,34 @@ def find_nearest_corpus(
     return label, sim, diff[:30], edit_summary
 
 
+def _crash_keys(
+    signatures: list[str], frame_lists: list[list[str]] | None
+) -> tuple[bool, int, list[list[str]], list[bytes]]:
+    """Normalized comparison keys: (framed, n_framed, frame tokens, signature bytes).
+
+    Frames are truncated to 8, matching frame_sequence_similarity.
+    """
+    framed = frame_lists is not None and len(frame_lists) > 0
+    n_framed = len(frame_lists) if framed else 0
+
+    tok_keys: list[list[str]] = []
+    if framed:
+        tok_keys = [[normalize_frame(f) for f in frames[:8]] for frames in frame_lists]
+    sig_keys = [normalize_frame(sig).encode() for sig in signatures]
+    return framed, n_framed, tok_keys, sig_keys
+
+
+def _worst_pair(members: list[int], pair_sim) -> float:
+    """Minimum pairwise similarity among *members* (1.0 floor)."""
+    worst = 1.0
+    for a in range(len(members)):
+        for b in range(a + 1, len(members)):
+            sim = pair_sim(members[a], members[b])
+            if sim < worst:
+                worst = sim
+    return worst
+
+
 def cluster_crashes(
     signatures: list[str],
     frame_lists: list[list[str]] | None = None,
@@ -544,13 +577,7 @@ def cluster_crashes(
     # crash_signature_similarity is by definition
     # levenshtein_similarity(normalize_frame(x).encode(), ...) and
     # frame_sequence_similarity already truncates at 8 frames.
-    framed = frame_lists is not None and len(frame_lists) > 0
-    n_framed = len(frame_lists) if framed else 0
-
-    tok_keys: list[list[str]] = []
-    if framed:
-        tok_keys = [[normalize_frame(f) for f in frames[:8]] for frames in frame_lists]
-    sig_keys = [normalize_frame(sig).encode() for sig in signatures]
+    framed, n_framed, tok_keys, sig_keys = _crash_keys(signatures, frame_lists)
 
     def _pass(idxs, keys, sim_fn, skip_both) -> None:
         if len(idxs) < 2:
@@ -663,13 +690,7 @@ def detect_chained_clusters(
     if max_diagnostic_size is None:
         max_diagnostic_size = _CRASH_CLUSTER_DIAG_MAX_SIZE
 
-    framed = frame_lists is not None and len(frame_lists) > 0
-    n_framed = len(frame_lists) if framed else 0
-
-    tok_keys: list[list[str]] = []
-    if framed:
-        tok_keys = [[normalize_frame(f) for f in frames[:8]] for frames in frame_lists]
-    sig_keys = [normalize_frame(sig).encode() for sig in signatures]
+    framed, n_framed, tok_keys, sig_keys = _crash_keys(signatures, frame_lists)
 
     def pair_sim(i: int, j: int) -> float:
         if framed and i < n_framed and j < n_framed:
@@ -680,12 +701,7 @@ def detect_chained_clusters(
     for cluster_idx, members in enumerate(clusters):
         if len(members) < 2 or len(members) > max_diagnostic_size:
             continue
-        worst = 1.0
-        for a in range(len(members)):
-            for b in range(a + 1, len(members)):
-                sim = pair_sim(members[a], members[b])
-                if sim < worst:
-                    worst = sim
+        worst = _worst_pair(members, pair_sim)
         if worst < core_threshold:
             flagged[cluster_idx] = worst
 

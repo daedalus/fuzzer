@@ -26,8 +26,8 @@ capacity flow network — O(V*E^2) worst case but at most E augmentations
 (unit capacities bound total flow by min(out-degree(sources),
 in-degree(sinks))), and this is a diagnostic/opt-in query intended to run
 on demand, not per-iteration. Simplicity over asymptotic optimality
-(Dinic's, push-relabel), same tradeoff already made for
-``dominators.py``'s CHK over Lengauer-Tarjan.
+(Dinic's, push-relabel); revisit if adversarial ICFGs make it hot, as
+``dominators.py`` did (CHK -> Semi-NCA).
 
 Multi-source/multi-sink is handled via a super-source/super-sink with
 capacity effectively infinite (``len(edges) + 1``, provably larger than
@@ -89,39 +89,58 @@ def min_cut(
 
     flow = 0
     while True:
-        parent: dict[int, int] = {super_source: super_source}
-        queue = deque([super_source])
-        while queue:
-            u = queue.popleft()
-            if u == super_sink:
-                break
-            for v, c in cap.get(u, {}).items():
-                if c > 0 and v not in parent:
-                    parent[v] = u
-                    queue.append(v)
+        parent = _bfs_parents(cap, super_source, super_sink)
         if super_sink not in parent:
             break
-        bottleneck = inf
-        v = super_sink
-        path: list[Edge] = []
-        while v != super_source:
-            u = parent[v]
-            bottleneck = min(bottleneck, cap[u][v])
-            path.append((u, v))
-            v = u
-        for u, v in path:
-            cap[u][v] -= bottleneck
-            cap[v][u] += bottleneck
-        flow += bottleneck
+        flow += _augment(cap, parent, super_source, super_sink, inf)
 
-    reachable = {super_source}
-    queue = deque([super_source])
+    reachable = _residual_reach(cap, super_source)
+
+    cut_edges = {(u, v) for u, v in edges if u in reachable and v not in reachable}
+    return flow, cut_edges
+
+
+def _bfs_parents(cap: dict[int, dict[int, int]], src: int, sink: int) -> dict[int, int]:
+    """BFS over positive-residual edges; parent map stops growing once *sink* is dequeued."""
+    parent: dict[int, int] = {src: src}
+    queue = deque([src])
+    while queue:
+        u = queue.popleft()
+        if u == sink:
+            break
+        for v, c in cap.get(u, {}).items():
+            if c > 0 and v not in parent:
+                parent[v] = u
+                queue.append(v)
+    return parent
+
+
+def _augment(
+    cap: dict[int, dict[int, int]], parent: dict[int, int], src: int, sink: int, inf: int
+) -> int:
+    """Push the bottleneck along the parent path; return the pushed amount."""
+    bottleneck = inf
+    v = sink
+    path: list[Edge] = []
+    while v != src:
+        u = parent[v]
+        bottleneck = min(bottleneck, cap[u][v])
+        path.append((u, v))
+        v = u
+    for u, v in path:
+        cap[u][v] -= bottleneck
+        cap[v][u] += bottleneck
+    return bottleneck
+
+
+def _residual_reach(cap: dict[int, dict[int, int]], src: int) -> set[int]:
+    """Nodes reachable from *src* in the residual graph (source side of the cut)."""
+    reachable = {src}
+    queue = deque([src])
     while queue:
         u = queue.popleft()
         for v, c in cap.get(u, {}).items():
             if c > 0 and v not in reachable:
                 reachable.add(v)
                 queue.append(v)
-
-    cut_edges = {(u, v) for u, v in edges if u in reachable and v not in reachable}
-    return flow, cut_edges
+    return reachable

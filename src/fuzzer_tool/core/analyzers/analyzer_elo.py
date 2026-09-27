@@ -183,87 +183,101 @@ class RoundRecorderMixin:
         # the `elif` unreachable.
         if losers and winners:
             # Normal case: winners beat losers
-            if edge_counts and len(winners) > 1:
-                # Proportional scoring among winners. The share must be
-                # mapped into (0.5, 1.0]: a raw edges/max_edges ratio puts a
-                # winner that found a tenth of the edges at 0.1, which Elo
-                # reads as *losing* to an operator that found nothing at all.
-                # Every winner outperformed every loser; the ratio only sets
-                # by how much. This branch was unreachable from the fuzzer,
-                # so the sign error never surfaced.
-                max_edges = max(edge_counts.get(w, 0.0) for w in winners) or 1.0
-                for w in winners:
-                    share = min(1.0, max(0.0, edge_counts.get(w, 0.0) / max_edges))
-                    score = 0.5 + 0.5 * share
-                    for loser in losers:
-                        self.record_match(w, loser, score_a=score, crash=crash)
-            else:
-                for w in winners:
-                    for loser in losers:
-                        self.record_match(w, loser, score_a=1.0, crash=crash)
+            self._record_winners(winners, losers, edge_counts, crash)
 
         elif operators and self._prev_operators:
-            # One operator per round is a legitimate round shape, not a
-            # degenerate one: SLOPT applies a single operator 2**t times, so
-            # every one of its rounds has exactly one unique operator. This
-            # guard used to be `len(operators) >= 2`, which under --slopt
-            # (and so under --hail-mary) recorded zero operator matches for
-            # the whole run -- BayesianEloTracker's _prediction_errors stayed
-            # empty and _effective_k() sat at _base_k forever. A single-op
-            # round against a different single-op round is the cleanest
-            # contrast this branch ever sees: nothing else shares the credit.
-            # All winners or all losers: no within-round signal, so compare
-            # this round against the previous one.
-            #
-            # This comparison must be outcome-aware. It used to score the
-            # current round at 0.7 on success and the previous round at 0.7
-            # on failure, unconditionally -- so two consecutive failed rounds
-            # (the overwhelmingly common case) recorded the earlier round's
-            # operators as beating the later round's, which is not evidence
-            # of anything. That injected a directional update proportional to
-            # how often one operator happened to precede another.
-            #
-            # Equal outcomes are draws. A draw is still a real Elo update --
-            # it pulls a low-rated operator up and a high-rated one down --
-            # so learning during a stall is preserved, without the spurious
-            # direction.
-            # Only operators unique to one side carry information. An
-            # operator present in both rounds appears on both sides of the
-            # match; the old code paired it with itself (record_match(a, a),
-            # which updates one rating twice in opposite directions) and
-            # paired every shared operator symmetrically, so the two updates
-            # cancelled up to the adaptive-k difference between them. That
-            # residue was noise, not signal.
-            prev_set = set(self._prev_operators)
-            cur_set = set(operators)
-            cur_only = [op for op in operators if op not in prev_set]
-            prev_only = [op for op in self._prev_operators if op not in cur_set]
-            # Only a *contrast* is informative. Two rounds with the same
-            # outcome carry no relative signal: Elo is a relative scale, so
-            # "both failed" says nothing about which operator set is better.
-            #
-            # The old code scored the previous round at 0.7 over the current
-            # one on every failure regardless of what the previous round did.
-            # Since ~95% of rounds fail, that made the dominant update
-            # "whichever operators happened to run first win", proportional
-            # to adjacency rather than to merit.
-            #
-            # Recording those as draws instead is no better: measured over a
-            # 2500-exec run, 171742 of 171972 matches were failure-vs-failure
-            # draws against 24 genuine wins. A draw between differently-rated
-            # operators pulls them together, so at that ratio the draws erase
-            # every real result. Skipping them keeps failed rounds
-            # contributing -- a failure still scores 0.3 against a previous
-            # round that succeeded -- and drops the quadratic cost of this
-            # branch to near zero outside outcome transitions.
-            if cur_only and prev_only and success != self._prev_success:
-                score = 0.7 if success else 0.3
-                for cur in cur_only:
-                    for prev in prev_only:
-                        self.record_match(cur, prev, score_a=score, crash=crash)
+            self._record_vs_prev(operators, success, crash)
 
         self._prev_operators = operators
         self._prev_success = success
+
+    def _record_winners(
+        self,
+        winners: set[str],
+        losers: list[str],
+        edge_counts: dict[str, float] | None,
+        crash: bool,
+    ) -> None:
+        """Every winner beats every loser; edge share scales multi-winner scores."""
+        if edge_counts and len(winners) > 1:
+            # Proportional scoring among winners. The share must be
+            # mapped into (0.5, 1.0]: a raw edges/max_edges ratio puts a
+            # winner that found a tenth of the edges at 0.1, which Elo
+            # reads as *losing* to an operator that found nothing at all.
+            # Every winner outperformed every loser; the ratio only sets
+            # by how much. This branch was unreachable from the fuzzer,
+            # so the sign error never surfaced.
+            max_edges = max(edge_counts.get(w, 0.0) for w in winners) or 1.0
+            for w in winners:
+                share = min(1.0, max(0.0, edge_counts.get(w, 0.0) / max_edges))
+                score = 0.5 + 0.5 * share
+                for loser in losers:
+                    self.record_match(w, loser, score_a=score, crash=crash)
+        else:
+            for w in winners:
+                for loser in losers:
+                    self.record_match(w, loser, score_a=1.0, crash=crash)
+
+    def _record_vs_prev(self, operators: list[str], success: bool, crash: bool) -> None:
+        """All-win/all-lose round: contrast unique ops against the previous round."""
+        # One operator per round is a legitimate round shape, not a
+        # degenerate one: SLOPT applies a single operator 2**t times, so
+        # every one of its rounds has exactly one unique operator. This
+        # guard used to be `len(operators) >= 2`, which under --slopt
+        # (and so under --hail-mary) recorded zero operator matches for
+        # the whole run -- BayesianEloTracker's _prediction_errors stayed
+        # empty and _effective_k() sat at _base_k forever. A single-op
+        # round against a different single-op round is the cleanest
+        # contrast this branch ever sees: nothing else shares the credit.
+        # All winners or all losers: no within-round signal, so compare
+        # this round against the previous one.
+        #
+        # This comparison must be outcome-aware. It used to score the
+        # current round at 0.7 on success and the previous round at 0.7
+        # on failure, unconditionally -- so two consecutive failed rounds
+        # (the overwhelmingly common case) recorded the earlier round's
+        # operators as beating the later round's, which is not evidence
+        # of anything. That injected a directional update proportional to
+        # how often one operator happened to precede another.
+        #
+        # Equal outcomes are draws. A draw is still a real Elo update --
+        # it pulls a low-rated operator up and a high-rated one down --
+        # so learning during a stall is preserved, without the spurious
+        # direction.
+        # Only operators unique to one side carry information. An
+        # operator present in both rounds appears on both sides of the
+        # match; the old code paired it with itself (record_match(a, a),
+        # which updates one rating twice in opposite directions) and
+        # paired every shared operator symmetrically, so the two updates
+        # cancelled up to the adaptive-k difference between them. That
+        # residue was noise, not signal.
+        prev_set = set(self._prev_operators)
+        cur_set = set(operators)
+        cur_only = [op for op in operators if op not in prev_set]
+        prev_only = [op for op in self._prev_operators if op not in cur_set]
+        # Only a *contrast* is informative. Two rounds with the same
+        # outcome carry no relative signal: Elo is a relative scale, so
+        # "both failed" says nothing about which operator set is better.
+        #
+        # The old code scored the previous round at 0.7 over the current
+        # one on every failure regardless of what the previous round did.
+        # Since ~95% of rounds fail, that made the dominant update
+        # "whichever operators happened to run first win", proportional
+        # to adjacency rather than to merit.
+        #
+        # Recording those as draws instead is no better: measured over a
+        # 2500-exec run, 171742 of 171972 matches were failure-vs-failure
+        # draws against 24 genuine wins. A draw between differently-rated
+        # operators pulls them together, so at that ratio the draws erase
+        # every real result. Skipping them keeps failed rounds
+        # contributing -- a failure still scores 0.3 against a previous
+        # round that succeeded -- and drops the quadratic cost of this
+        # branch to near zero outside outcome transitions.
+        if cur_only and prev_only and success != self._prev_success:
+            score = 0.7 if success else 0.3
+            for cur in cur_only:
+                for prev in prev_only:
+                    self.record_match(cur, prev, score_a=score, crash=crash)
 
 
 class EloTracker(RoundRecorderMixin):
@@ -369,20 +383,7 @@ class EloTracker(RoundRecorderMixin):
 
         # Separate operators into two groups to avoid scale mismatch
         # between raw Elo (~1500) and UCB scores (~0–1).
-        ucb_ready: list[tuple[str, float]] = []
-        elo_only: list[str] = []
-        for op in operators:
-            moments = self._reward_moments.get(op)
-            if moments is None or moments.count < 3:
-                elo_only.append(op)
-                continue
-            kurt = moments.kurtosis
-            min_samples = _UCB_MIN_SAMPLES_BASE * max(1.0, 1.0 + kurt * 0.1)
-            if moments.count < min_samples:
-                elo_only.append(op)
-                continue
-            score = moments.mean + exploration_weight * moments.stddev
-            ucb_ready.append((op, score))
+        ucb_ready, elo_only = self._split_ucb(operators, exploration_weight)
 
         # Pure UCB selection
         if ucb_ready and not elo_only:
@@ -404,6 +405,30 @@ class EloTracker(RoundRecorderMixin):
         else:
             scored = [(op, self.ratings.get(op, self.default_rating)) for op in elo_only]
             return _softmax_select(scored, temperature, self._rng)
+
+    def _split_ucb(
+        self, operators: list[str], exploration_weight: float
+    ) -> tuple[list[tuple[str, float]], list[str]]:
+        """Split into (op, mean + k*stddev) UCB-ready ops and Elo-fallback ops.
+
+        An op is UCB-ready once it has >= 3 rewards and enough samples for
+        its kurtosis (heavy tails need more before the stddev is trusted).
+        """
+        ucb_ready: list[tuple[str, float]] = []
+        elo_only: list[str] = []
+        for op in operators:
+            moments = self._reward_moments.get(op)
+            if moments is None or moments.count < 3:
+                elo_only.append(op)
+                continue
+            kurt = moments.kurtosis
+            min_samples = _UCB_MIN_SAMPLES_BASE * max(1.0, 1.0 + kurt * 0.1)
+            if moments.count < min_samples:
+                elo_only.append(op)
+                continue
+            score = moments.mean + exploration_weight * moments.stddev
+            ucb_ready.append((op, score))
+        return ucb_ready, elo_only
 
     def get_reward_moments(self, op: str) -> RunningMoments | None:
         """Get reward statistics for an operator (for diagnostics)."""
