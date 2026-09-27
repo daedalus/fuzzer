@@ -254,6 +254,9 @@ def run(
 
         pending cells ──submit (≤ jobs, mem_ok)──> pool ──(key, ids)──> results ──> out
     """
+    if jobs < 1:
+        raise ValueError(f"jobs must be >= 1, got {jobs}")
+
     mem_ok = mem_ok or _mem_ok
     results: dict = {}
     if out.exists():
