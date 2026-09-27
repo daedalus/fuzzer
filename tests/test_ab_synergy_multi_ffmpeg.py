@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
 import ab_synergy_multi_ffmpeg as ab  # noqa: E402
 
 V = ["v8.0", "v8.1", "v9.0"]
+MANIFEST = {"versions": V, "budget": 300}
 
 
 # ── plan ──────────────────────────────────────────────────────────────
@@ -48,9 +49,9 @@ def test_plan_full_and_control_arms():
     assert all(c.run_seed == 3 for c in split)
 
 
-@pytest.mark.parametrize(("versions", "budget"), [([], 900), (V, 2), (V, 0)])
+@pytest.mark.parametrize(("versions", "budget"), [([], 900), (V, 2), (V, 0), (V, 5000)])
 def test_plan_rejects_degenerate(versions, budget):
-    """Adversarial: no targets, or a budget that leaves a version zero execs."""
+    """Adversarial: no targets, zero execs per version, or a budget V does not divide."""
     with pytest.raises(ValueError):
         ab.plan(versions, seeds=[0], budget=budget)
 
@@ -182,11 +183,81 @@ def test_run_resumes_done_cells(tmp_path):
 
     out = tmp_path / "rows.pkl"
     cells = ab.plan(V, seeds=[0], budget=300)
-    ab.run(cells, V, tmp_path / "work", out, fake_campaign, fake_replay)
+    ab.run(cells, V, tmp_path / "work", out, fake_campaign, fake_replay, MANIFEST)
     first = len(calls)
-    ab.run(cells, V, tmp_path / "work", out, fake_campaign, fake_replay)
+    ab.run(cells, V, tmp_path / "work", out, fake_campaign, fake_replay, MANIFEST)
 
     assert first == len(cells)
     assert len(calls) == first
     assert len(ab.load(out)) == len(cells)
     assert not (tmp_path / "work").exists() or not any((tmp_path / "work").iterdir())
+
+
+def _fake_replay(target, corpus):
+    return frozenset({1})
+
+
+def _fake_campaign(cell, workdir):
+    corpus = workdir / "corpus"
+    corpus.mkdir(parents=True)
+    return corpus
+
+
+def test_resume_rejects_other_manifest(tmp_path):
+    """Adversarial: rows from another budget / binary set are never mixed in."""
+    out = tmp_path / "rows.pkl"
+    cells = ab.plan(V, seeds=[0], budget=300)
+    ab.run(cells, V, tmp_path / "w", out, _fake_campaign, _fake_replay, MANIFEST)
+
+    with pytest.raises(ValueError, match="manifest"):
+        ab.run(
+            cells, V, tmp_path / "w", out, _fake_campaign, _fake_replay, {**MANIFEST, "budget": 600}
+        )
+
+
+def test_fingerprint_tracks_binary_content(tmp_path):
+    """A rebuilt binary at the same path changes the manifest."""
+    b = tmp_path / "ffmpeg_read_1.0_asan"
+    b.write_bytes(b"old")
+    before = ab.fingerprint([str(b)])
+    b.write_bytes(b"new")
+
+    assert ab.fingerprint([str(b)]) != before
+    assert ab.fingerprint([str(b)]) == ab.fingerprint([str(b)])
+
+
+def test_failed_campaign_not_recorded(tmp_path, monkeypatch):
+    """Adversarial: a non-zero fuzzer exit aborts before replay; the cell stays undone."""
+    seeds = tmp_path / "seeds"
+    seeds.mkdir()
+    (seeds / "a.bin").write_bytes(b"x")
+    monkeypatch.setattr(
+        ab.subprocess,
+        "run",
+        lambda *a, **k: ab.subprocess.CompletedProcess(a, 1, "", "boom"),
+    )
+    out = tmp_path / "rows.pkl"
+    cells = ab.plan(V, seeds=[0], budget=300)
+
+    with pytest.raises(ab.CampaignError):
+        ab.run(cells, V, tmp_path / "w", out, ab.make_campaign(seeds), _fake_replay, MANIFEST)
+    assert not out.exists() or not ab.load(out)
+
+
+def test_cli_no_versions_exits_2(tmp_path):
+    """Adversarial: an empty --glob match is a clean exit 2, not a traceback."""
+    import argparse
+
+    seeds = tmp_path / "seeds"
+    seeds.mkdir()
+    args = argparse.Namespace(
+        build_root=tmp_path,
+        glob="nothing_*",
+        seed_corpus=seeds,
+        seeds=1,
+        budget=300,
+        out=tmp_path / "r.pkl",
+        work=tmp_path / "w",
+    )
+
+    assert ab.cmd_run(args) == 2

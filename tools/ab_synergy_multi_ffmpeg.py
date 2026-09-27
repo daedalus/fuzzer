@@ -25,10 +25,11 @@ control means the comparison is broken, and analyse exits 2.
 Usage::
 
     tools/ab_synergy_multi_ffmpeg.py run --seed-corpus ~/fuzzing/ab_synergy/seeds \\
-        --seeds 10 --budget 5000
+        --seeds 10 --budget 6000
     tools/ab_synergy_multi_ffmpeg.py analyse ~/fuzzing/ab_synergy/rows.pkl
 
-Cost: seeds x (1 + 3V) campaigns; at ~3 eps, 10 seeds x 5k execs is ~18 h.
+Cost: seeds x (1 + 3V) campaigns; at ~3 eps, 10 seeds x 6k execs is ~22 h.
+Budget must divide by V so SPLIT's total equals MULTI's exactly.
 """
 
 from __future__ import annotations
@@ -59,7 +60,7 @@ DEFAULT_OUT = FUZZ_ROOT / "ab_synergy" / "rows.pkl"
 DEFAULT_WORK = FUZZ_ROOT / "ab_synergy" / "work"
 DEFAULT_GLOB = "ffmpeg_read_*_asan"
 DEFAULT_SEEDS = 10
-DEFAULT_BUDGET = 5000
+DEFAULT_BUDGET = 6000  # divisible by 2, 3, 4 and 6 versions
 
 CONTROL_SEED_OFFSET = 10_000  # CONTROL seeds never collide with SPLIT seeds
 ALPHA = 0.05
@@ -69,6 +70,10 @@ STARTUP_S = 900  # campaign startup (profile, ICFG) before the first exec
 EXEC_S = 2.0  # generous per-exec wall budget; ~3 eps measured multi-target
 
 Replay = Callable[[str, Path], Iterable[int]]
+
+
+class CampaignError(RuntimeError):
+    """A campaign exited non-zero: its corpus is not a valid cell."""
 
 
 class Arm(enum.Enum):
@@ -125,6 +130,8 @@ def plan(versions: list[str], seeds: Iterable[int], budget: int) -> list[Cell]:
     share = budget // len(versions)
     if share < 1:
         raise ValueError(f"budget {budget} leaves no execs per version ({len(versions)} versions)")
+    if budget % len(versions):
+        raise ValueError(f"budget {budget} not divisible by {len(versions)} versions")
 
     cells = []
     for s in seeds:
@@ -176,6 +183,7 @@ def make_campaign(seed_corpus: Path) -> Callable[[Cell, Path], Path]:
         print(f"    {cell.arm.value} seed={cell.seed} rc={proc.returncode} {time.time() - t0:.0f}s")
         if proc.returncode != 0:
             print(proc.stderr[-2000:], file=sys.stderr)
+            raise CampaignError(f"{cell.arm.value} seed={cell.seed} exited {proc.returncode}")
         return corpus
 
     return campaign
@@ -227,14 +235,21 @@ def run(
     out: Path,
     campaign: Callable[[Cell, Path], Path],
     replayer: Replay,
+    manifest: dict,
 ) -> dict:
     """Run every cell not yet in *out*; replay each corpus on every version.
 
     Saved after each cell, so an interrupted run resumes where it stopped.
-    Work dirs are removed once replayed: the corpus is the only product and
-    its edge ids are what is kept.
+    Resuming requires the same *manifest* (versions, budget, binary and seed
+    digests): rows from another experiment are never mixed in. Work dirs are
+    removed once replayed: the corpus is the only product and its edge ids
+    are what is kept.
     """
-    results = load(out) if out.exists() else {}
+    results: dict = {}
+    if out.exists():
+        stored, results = _read(out)
+        if stored != manifest:
+            raise ValueError(f"{out}: manifest differs from this run; use another --out")
     for i, cell in enumerate(cells, 1):
         if cell.key in results:
             continue
@@ -246,20 +261,34 @@ def run(
 
         # array('I'): 4 B per id, vs ~70 B for a set member (Hard Rule 54).
         results[cell.key] = {v: array("I", sorted(replayer(v, corpus))) for v in versions}
-        _save(results, out)
+        _save(manifest, results, out)
         shutil.rmtree(workdir, ignore_errors=True)
     return results
 
 
-def _save(results: dict, out: Path) -> None:
+def fingerprint(paths: Iterable[str]) -> dict[str, str]:
+    """Content digest per file: a rebuilt binary at the same path is a new experiment."""
+    from fuzzer_tool.adapters.filesystem import hash_data
+
+    return {p: hash_data(Path(p).read_bytes()) for p in paths}
+
+
+def _save(manifest: dict, results: dict, out: Path) -> None:
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".tmp")
-    tmp.write_bytes(pickle.dumps(results, protocol=pickle.HIGHEST_PROTOCOL))
+    blob = {"manifest": manifest, "cells": results}
+    tmp.write_bytes(pickle.dumps(blob, protocol=pickle.HIGHEST_PROTOCOL))
     tmp.replace(out)
 
 
+def _read(path: Path) -> tuple[dict, dict]:
+    blob = pickle.loads(path.read_bytes())
+    return blob["manifest"], blob["cells"]
+
+
 def load(path: Path) -> dict:
-    return pickle.loads(path.read_bytes())
+    """Recorded cells: {(arm, seed, owner): {version: edge ids}}."""
+    return _read(path)[1]
 
 
 # ── Analysis ──────────────────────────────────────────────────────────
@@ -340,13 +369,29 @@ def _versions(build_root: Path, pattern: str) -> list[str]:
 
 def cmd_run(args: argparse.Namespace) -> int:
     versions = _versions(args.build_root, args.glob)
+    if not versions:
+        print(f"no executable {args.glob} under {args.build_root}", file=sys.stderr)
+        return 2
     if not args.seed_corpus.is_dir():
         print(f"seed corpus not found: {args.seed_corpus}", file=sys.stderr)
         return 2
 
-    cells = plan(versions, range(args.seeds), args.budget)
+    try:
+        cells = plan(versions, range(args.seeds), args.budget)
+    except ValueError as exc:
+        print(exc, file=sys.stderr)
+        return 2
+
+    seeds = sorted(str(p) for p in args.seed_corpus.iterdir() if p.is_file())
+    manifest = {
+        "versions": versions,
+        "budget": args.budget,
+        "binaries": fingerprint(versions),
+        "seed_corpus": fingerprint(seeds),
+    }
     print(f"[*] {len(versions)} versions, {len(cells)} campaigns -> {args.out}")
-    run(cells, versions, args.work, args.out, make_campaign(args.seed_corpus), replay)
+    campaign = make_campaign(args.seed_corpus)
+    run(cells, versions, args.work, args.out, campaign, replay, manifest)
     return 0
 
 

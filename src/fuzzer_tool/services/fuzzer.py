@@ -1395,7 +1395,6 @@ class Fuzzer:
         pool_drift=False,
         dict_thompson=False,
         splice_donor=SpliceDonor.UNIFORM,
-        target_schedule=TargetSchedule.WEIGHTED,
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
         confirm_novelty=False,
@@ -1429,6 +1428,8 @@ class Fuzzer:
         # Golden-ratio sibling of pos_round_robin (see
         # core/schedulers/pos_fibonacci.py); same two reaches.
         pos_fibonacci=False,
+        # Appended: positional signature (see region_profile above).
+        target_schedule=TargetSchedule.WEIGHTED,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -1457,6 +1458,7 @@ class Fuzzer:
         self.multi_targets = multi_targets  # None for single-target
         self._active_target_idx = 0  # round-robin index
         self._target_schedule = target_schedule
+        self._rr_turn = 0  # ROUND_ROBIN: execs scheduled so far, so exec 0 -> target 0
         self._target_shm_covs = {}  # target_path -> ShmCoverage (per-target)
         self._target_profiles = {}  # target_path -> TargetProfile
         # Pin the address-space layout BEFORE anything spawns, dlopens, or
@@ -4912,8 +4914,10 @@ class Fuzzer:
             return
         # Weighted round-robin: prefer targets with fewer total edges discovered.
         # --target-schedule round-robin skips it: every exec takes the next target.
-        weighted = self._target_schedule is TargetSchedule.WEIGHTED
-        if weighted and len(self.multi_targets) > 1 and self.exec_count > 100:
+        if self._target_schedule is TargetSchedule.ROUND_ROBIN:
+            self._active_target_idx = self._rr_turn % len(self.multi_targets)
+            self._rr_turn += 1
+        elif len(self.multi_targets) > 1 and self.exec_count > 100:
             # Weight by inverse of cumulative edges (less-covered targets get more execs)
             weights = []
             for t in self.multi_targets:

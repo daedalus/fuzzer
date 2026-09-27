@@ -20,6 +20,7 @@ def _stub(schedule, edges, randoms=()):
     f = Fuzzer.__new__(Fuzzer)
     f.multi_targets = list(TARGETS)
     f._active_target_idx = 0
+    f._rr_turn = 0
     f.exec_count = PAST_WARMUP
     f._target_shm_covs = {
         t: SimpleNamespace(cumulative_edges=e) for t, e in zip(TARGETS, edges, strict=True)
@@ -42,7 +43,7 @@ def test_round_robin_cycles_every_exec():
     """Falsification: each exec goes to the next target, past warm-up, in order."""
     f = _stub(TargetSchedule.ROUND_ROBIN, edges=[10, 10, 10])
 
-    assert _picks(f, 7) == [TARGETS[(i + 1) % 3] for i in range(7)]
+    assert _picks(f, 7) == [TARGETS[i % 3] for i in range(7)]
 
 
 def test_round_robin_ignores_weights_and_rng():
@@ -80,3 +81,18 @@ def test_cli_rejects_unknown(monkeypatch):
 
 def test_cmd_fuzz_forwards():
     assert all("target_schedule" in k for k in _fuzzer_call_kwargs())
+
+
+def test_round_robin_first_exec_is_first_target():
+    """Adversarial: the first exec must not skip target 0 (N execs -> each target once)."""
+    f = _stub(TargetSchedule.ROUND_ROBIN, edges=[10, 10, 10])
+
+    assert _picks(f, 3) == TARGETS
+
+
+def test_target_schedule_appended_last():
+    """Fuzzer.__init__ is positional: a new parameter must go last."""
+    import inspect
+
+    params = list(inspect.signature(Fuzzer.__init__).parameters)
+    assert params[-1] == "target_schedule"
