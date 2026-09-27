@@ -8,7 +8,7 @@ the FSM to fuzzers by solving transition constraints into valid messages.
 
 This module is that consumer half: parse an FSM spec, generate messages by
 walking it (each label sampled exactly, no rejection), and re-walk an input
-to keep its longest valid prefix and regenerate the tail. The inference
+to keep a valid prefix and regenerate the tail. The inference
 half (static loop analysis over LLVM bitcode) is not here; a spec comes from
 StateLifter's output or is written by hand.
 
@@ -24,7 +24,7 @@ Walk::
 
     start ──label──► s1 ──label──► ... ──► final   (stop, or continue)
              │
-             └─ past max_len: shortest path to a final, no RNG draws
+             └─ only labels whose cheapest completion still fits max_len
 
 Not modelled: StateLifter's induction states (``A_k``, "loop k times") and
 constraints across transitions (a length field sizing a later payload).
@@ -32,8 +32,8 @@ constraints across transitions (a length field sizing a later payload).
 
 from __future__ import annotations
 
+import heapq
 import re
-from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -86,6 +86,8 @@ class ByteSet:
     # 256-entry membership table: O(1) match instead of scanning values.
     mask: bytes = b""
 
+    width = 1
+
     def __post_init__(self):
         table = bytearray(BYTE_VALUES)
         for v in self.values:
@@ -109,6 +111,10 @@ class Literal:
     """A fixed byte string."""
 
     value: bytes
+
+    @property
+    def width(self) -> int:
+        return len(self.value)
 
     def sample(self, _rng) -> bytes:
         return self.value
@@ -172,60 +178,63 @@ class FormatFsm:
         for t in edges:
             self._out.setdefault(t.src, []).append(t)
 
-        self._dist = self._distances()
-        self._live = {s: [t for t in ts if t.dst in self._dist] for s, ts in self._out.items()}
-        self._starts_live = [s for s in starts if s in self._dist]
+        self._cost = self._costs()
+        self._live = {s: [t for t in ts if t.dst in self._cost] for s, ts in self._out.items()}
+        self._starts_live = [s for s in starts if s in self._cost]
+        # Largest "label + cheapest completion" per state: with that much
+        # room every live label fits and the per-step filter is skipped.
+        self._max_need = {
+            s: max((t.label.width + self._cost[t.dst] for t in ts), default=0)
+            for s, ts in self._live.items()
+        }
         if not self._starts_live:
             raise ValueError("no start state reaches a final state")
 
-    def _distances(self) -> dict[str, int]:
-        """Transitions to the nearest final state; absent = dead state."""
-        back: dict[str, list[str]] = {}
+    def _costs(self) -> dict[str, int]:
+        """Fewest bytes from each state to a final (Dijkstra on reversed
+        edges, weight = label width); absent = dead state."""
+        back: dict[str, list[Transition]] = {}
         for t in self.edges:
-            back.setdefault(t.dst, []).append(t.src)
+            back.setdefault(t.dst, []).append(t)
 
-        dist = dict.fromkeys(self.finals, 0)
-        todo = deque(self.finals)
-        while todo:
-            s = todo.popleft()
-            for p in back.get(s, ()):
-                if p in dist:
-                    continue
-                dist[p] = dist[s] + 1
-                todo.append(p)
-        return dist
+        cost: dict[str, int] = {}
+        heap = [(0, f) for f in self.finals]
+        while heap:
+            c, s = heapq.heappop(heap)
+            if s in cost:
+                continue
+            cost[s] = c
+            for t in back.get(s, ()):
+                if t.src not in cost:
+                    heapq.heappush(heap, (c + t.label.width, t.src))
+        return cost
 
-    def generate(self, rng, max_len: int) -> bytes:
-        """One message from a start state.
-
-        Stops extending at ``max_len``; the forced shortest completion after
-        that can overrun it by the length of that path.
-        """
-        start = _pick(self._starts_live, rng)
-        return self._walk(start, bytearray(), rng, max_len)
+    def generate(self, rng, max_len: int) -> bytes | None:
+        """One message of at most ``max_len`` bytes; None if none fits."""
+        starts = [s for s in self._starts_live if self._cost[s] <= max_len]
+        if not starts:
+            return None
+        return self._walk(_pick(starts, rng), bytearray(), rng, max_len)
 
     def _walk(self, s: str, out: bytearray, rng, max_len: int) -> bytes:
-        while True:
-            live = self._live.get(s, [])
-            is_final = s in self.finals
+        """Walk to a final state without overrunning ``max_len``.
 
-            # Past the budget: descend the distance gradient, no draws.
-            if len(out) >= max_len:
-                if is_final:
-                    return bytes(out)
-                t = next(t for t in live if self._dist[t.dst] < self._dist[s])
-                out += t.label.sample(rng)
-                s = t.dst
-                continue
+        Caller guarantees ``len(out) + cost[s] <= max_len``. Only labels
+        whose cheapest completion still fits are offered, so the invariant
+        holds every step and a non-final state always has an option.
+        """
+        while True:
+            room = max_len - len(out)
+            fits = self._live.get(s, [])
+            if room < self._max_need.get(s, 0):
+                fits = [t for t in fits if t.label.width + self._cost[t.dst] <= room]
 
             # A final state offers "stop" as one more option.
-            n = len(live) + (1 if is_final else 0)
-            if is_final and not live:
-                return bytes(out)
+            n = len(fits) + (1 if s in self.finals else 0)
             k = _index(n, rng)
-            if k == len(live):
+            if k == len(fits):
                 return bytes(out)
-            t = live[k]
+            t = fits[k]
             out += t.label.sample(rng)
             s = t.dst
 
@@ -259,13 +268,19 @@ class FormatFsm:
         n = len(data)
         return any(p == n and s in self.finals for p, s in self.prefix_states(data))
 
-    def regenerate(self, data: bytes, rng, max_len: int) -> bytes:
-        """Keep a valid prefix of ``data``, regenerate a valid tail.
+    def regenerate(self, data: bytes, rng, max_len: int) -> bytes | None:
+        """Keep a random valid prefix of ``data``, regenerate a valid tail.
 
-        Dead pairs (a state that cannot reach a final) are skipped; if none
-        is live, the whole message is generated from scratch.
+        The prefix is picked uniformly, not the longest: always taking the
+        longest only ever appends to a valid message. Pairs that are dead,
+        or whose cheapest completion overruns ``max_len``, are skipped; if
+        none is left the message is generated from scratch (None if even
+        that cannot fit).
         """
-        pairs = [(p, s) for p, s in self.prefix_states(data) if s in self._dist]
+        cost = self._cost
+        pairs = [
+            (p, s) for p, s in self.prefix_states(data) if s in cost and p + cost[s] <= max_len
+        ]
         if not pairs:
             return self.generate(rng, max_len)
 
@@ -296,6 +311,10 @@ def _parse_set(text: str) -> ByteSet:
             raise ValueError(f"bad byte set: {text!r}")
         pos = m.end()
 
+        # A trailing '|' with nothing after it is a syntax error.
+        if m.group(4) == "|" and pos >= n:
+            raise ValueError(f"dangling '|': {text!r}")
+
         if m.group(1):
             seen[:] = b"\x01" * BYTE_VALUES
             continue
@@ -304,10 +323,6 @@ def _parse_set(text: str) -> ByteSet:
         if lo > hi:
             raise ValueError(f"inverted range: {m.group(0).strip()}")
         seen[lo : hi + 1] = b"\x01" * (hi - lo + 1)
-
-        # A trailing '|' with nothing after it is a syntax error.
-        if m.group(4) == "|" and pos >= n:
-            raise ValueError(f"dangling '|': {text!r}")
 
     values = bytes(i for i in range(BYTE_VALUES) if seen[i])
     if not values:
@@ -347,6 +362,24 @@ def _parse_label(text: str) -> Label:
     return _parse_set(text)
 
 
+def _strip_comment(line: str) -> str:
+    """Cut at the first ``#`` outside quotes: ``'#'`` and ``"a#b"`` stay."""
+    quote = ""
+    i = 0
+    n = len(line)
+    while i < n:
+        c = line[i]
+        if quote and c == "\\":
+            i += 2
+            continue
+        if c in "'\"" and (not quote or c == quote):
+            quote = "" if quote else c
+        elif c == "#" and not quote:
+            return line[:i]
+        i += 1
+    return line
+
+
 def parse_fsm(spec: str) -> FormatFsm:
     """Parse the spec format described in the module docstring."""
     starts: list[str] = []
@@ -354,8 +387,8 @@ def parse_fsm(spec: str) -> FormatFsm:
     edges: list[Transition] = []
 
     for raw in spec.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+        line = _strip_comment(raw).strip()
+        if not line:
             continue
 
         head, _, rest = line.partition(" ")

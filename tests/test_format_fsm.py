@@ -94,9 +94,33 @@ class TestMatch:
 
 class TestAdversarial:
     def test_budget_forces_shortest_completion(self):
-        # An RNG that would loop forever is never consulted past the budget.
+        # At max_len 1 the 'x' loop cannot fit with a completion after it:
+        # the only fitting option is forced, so no draw happens.
         fsm = parse_fsm("start A\nfinal B\nA -> A : 'x'\nA -> B : 'y'\n")
-        assert fsm.generate(ScriptedRng(), max_len=0) == b"y"
+        assert fsm.generate(ScriptedRng(), max_len=1) == b"y"
+
+    def test_regression_generation_never_exceeds_max_len(self):
+        # Clipping a finished message can split a label (C1/C5): every
+        # message must fit the budget and stay accepted instead.
+        fsm = parse_fsm('start A\nfinal C\nA -> A : "xyz"\nA -> B : "LONG"\nB -> C : u16le[0,9]\n')
+        rng = RandPool(seed=4)
+        for budget in range(6, 20):
+            out = fsm.generate(rng, max_len=budget)
+            assert len(out) <= budget
+            assert fsm.accepts(out)
+
+    def test_regression_infeasible_budget_returns_none(self):
+        fsm = parse_fsm('start A\nfinal B\nA -> B : "LONGWORD"\n')
+        assert fsm.generate(ScriptedRng(), max_len=7) is None
+        assert fsm.regenerate(b"", ScriptedRng(), max_len=7) is None
+
+    def test_regression_regenerate_respects_budget(self):
+        # Prefix pairs whose cheapest completion overruns are not picked.
+        fsm = parse_fsm(AB_C)
+        rng = RandPool(seed=6)
+        for _ in range(50):
+            out = fsm.regenerate(b"abab", rng, max_len=4)
+            assert len(out) <= 4 and AB_C_RE.fullmatch(out)
 
     def test_dead_states_never_entered(self):
         # C cannot reach a final state: generation must never take A -> C.
@@ -111,6 +135,17 @@ class TestAdversarial:
         junk = RandPool(seed=1).randbytes(4096)
         for _ in range(50):
             assert AB_C_RE.fullmatch(fsm.regenerate(junk, rng, max_len=64))
+
+    def test_regression_inline_comments(self):
+        spec = (
+            "start A  # entry\n"
+            "final C\n"
+            "A -> B : '#' | 'a'  # quoted hash is a byte\n"
+            'B -> C : "x#y"  # hash inside a literal\n'
+        )
+        fsm = parse_fsm(spec)
+        assert fsm.accepts(b"#x#y") and fsm.accepts(b"ax#y")
+        assert not fsm.accepts(b"ax")
 
     def test_quoted_pipe_is_a_byte(self):
         fsm = parse_fsm("start A\nfinal B\nA -> B : '|' | 0x7e\n")
@@ -131,6 +166,7 @@ class TestAdversarial:
             "start A\nfinal B\nA -> B : 'z'-'a'\n",  # inverted range
             "start A\nfinal B\nA -> B : 'a' junk\n",  # trailing garbage
             "start A\nfinal B\nA => B : 'a'\n",  # bad arrow
+            "start A\nfinal B\nA -> B : any |\n",  # dangling pipe after any
         ],
     )
     def test_rejects_bad_spec(self, spec):

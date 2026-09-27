@@ -56,12 +56,18 @@ class TestHandler:
         engine = OperatorEngine(_Ctx(None, None))
         assert engine._op_fsm_regen(bytearray(b"ab"), 0, b"ab") is None
 
-    def test_output_capped_at_max_len(self):
-        # The forced completion may overrun max_len; the handler clips it.
+    def test_regression_declines_when_nothing_fits(self):
+        # Clipping would split the label (C5): decline instead.
         fsm = parse_fsm('start A\nfinal B\nA -> B : "LONGWORD"\n')
         ctx = _Ctx(fsm, ScriptedRng(), max_len=4)
+        assert OperatorEngine(ctx)._op_fsm_regen(bytearray(b""), 0, b"") is None
+
+    def test_regression_zero_max_len_is_uncapped(self):
+        # MutationContext: max_len 0 means uncapped (S3).
+        fsm = parse_fsm('start A\nfinal B\nA -> B : "LONGWORD"\n')
+        ctx = _Ctx(fsm, ScriptedRng(), max_len=0)
         out = OperatorEngine(ctx)._op_fsm_regen(bytearray(b""), 0, b"")
-        assert out == bytearray(b"LONG")
+        assert out == bytearray(b"LONGWORD")
 
 
 class TestGenseed:
@@ -76,6 +82,15 @@ class TestGenseed:
         assert len(files) > 1
         for f in files:
             assert AB_C_RE.fullmatch(f.read_bytes())
+
+    def test_regression_never_writes_clipped_seed(self, tmp_path):
+        # Budget below the only message: nothing written (C1).
+        spec = tmp_path / "long.fsm"
+        spec.write_text('start A\nfinal B\nA -> B : "LONGWORD"\n')
+        corpus = tmp_path / "corpus"
+        rc = cmd_genseed(_genseed_args(fsm=str(spec), corpus=str(corpus), max_len=4, seed=1))
+        assert rc == 0
+        assert not list(corpus.rglob("id_*"))
 
     def test_bad_spec_fails(self, tmp_path):
         spec = tmp_path / "bad.fsm"
