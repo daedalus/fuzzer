@@ -1308,8 +1308,11 @@ pass cannot clobber another variant's object before its link.
 #### Other SanitizerCoverage modes
 
 The shim defines the runtime callbacks for every sancov mode clang emits.
-Builds without them fail to link. `tools/build_targets.sh` still emits
-`trace-pc-guard` only (see `docs/TODO.md`).
+Builds without them fail to link. Select modes with
+`tools/build_targets.sh --sancov=inline-8bit-counters,pc-table` (implies
+`--clang-scov`; default `trace-pc-guard`). The script rejects modes the shim
+lacks and sets with no edge mode (`trace-pc-guard`, `inline-8bit-counters`,
+`inline-bool-flag`); `verify_sancov` accepts all three sections.
 
 | Mode | Shim behavior |
 |------|---------------|

@@ -200,3 +200,89 @@ class TestElfRecognition:
         est = estimate_map_size_detail(exe)
         assert est.source == "sancov_bools"
         assert est.exact
+
+
+# ── tools/build_targets.sh: --sancov=MODES ─────────────────────────────
+
+BUILD_SCRIPT = Path(__file__).parent.parent / "tools" / "build_targets.sh"
+
+
+def _bash_fn(name):
+    """One function's source, cut from the build script by its column-0 braces."""
+    text = BUILD_SCRIPT.read_text()
+    start = text.index(f"{name}() {{")
+    end = text.index("\n}\n", start) + 3
+    return text[start:end]
+
+
+def _validate(modes):
+    script = f"{_bash_fn('validate_sancov_modes')}\nvalidate_sancov_modes '{modes}'"
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True).returncode
+
+
+class TestBuildScriptModes:
+    @pytest.mark.parametrize(
+        "modes", ["trace-pc-guard", f"{COUNTERS},pc-table", f"{BOOLS},trace-loads"]
+    )
+    def test_supported_modes_pass(self, modes):
+        assert _validate(modes) == 0
+
+    def test_no_edge_mode_rejected(self):
+        """Falsification: pc-table/loads alone build a target that records no edges."""
+        assert _validate("pc-table,trace-loads") != 0
+
+    @pytest.mark.parametrize("modes", ["trace-lods", "trace-pc-guard,indirect-calls", ""])
+    def test_unsupported_mode_rejected(self, modes):
+        """Adversarial: a typo or a mode the shim lacks callbacks for fails the link late."""
+        assert _validate(modes) != 0
+
+    def test_flag_parsed(self):
+        text = BUILD_SCRIPT.read_text()
+        assert "--sancov=*)" in text
+        assert 'validate_sancov_modes "$SANCOV_MODES"' in text
+
+    @requires_clang
+    def test_object_follows_modes(self, tmp_path):
+        """compile_fuzzgoat_object must honour $SANCOV_FLAG, not hardcode guards."""
+        vendor = tmp_path / "vendor" / "fuzzgoat"
+        vendor.mkdir(parents=True)
+        (vendor / "fuzzgoat.c").write_text("int f(int x){return x>3?x*2:x-1;}\n")
+        suffix = f"_sancovtest{os.getpid()}"
+        obj = Path(f"/tmp/fuzzgoat{suffix}.o")
+        script = (
+            f"VENDOR={tmp_path / 'vendor'}\nBUILD_LOG={tmp_path / 'log'}\n"
+            f"SANCOV_FLAG=-fsanitize-coverage={COUNTERS}\n"
+            f"{_bash_fn('compile_fuzzgoat_object')}\ncompile_fuzzgoat_object {suffix} '' clang"
+        )
+        try:
+            r = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+            assert r.returncode == 0, r.stderr
+            sections = subprocess.run(
+                ["readelf", "-S", str(obj)], capture_output=True, text=True
+            ).stdout
+            assert "__sancov_cntrs" in sections
+            assert "__sancov_guards" not in sections
+        finally:
+            obj.unlink(missing_ok=True)
+
+    @requires_clang
+    @pytest.mark.parametrize("mode", [COUNTERS, BOOLS])
+    def test_verify_accepts_inline_modes(self, tmp_path, mode):
+        """verify_sancov must not warn "ZERO edges" on a counters/bools .so."""
+        src = tmp_path / "t.c"
+        src.write_text(
+            "int fuzz_shm_run(const unsigned char *d, unsigned long n){return n && d[0];}\n"
+        )
+        obj = tmp_path / "t.o"
+        so = tmp_path / "t.so"
+        cc = ["clang", "-fPIC", f"-fsanitize-coverage={mode}", "-c", str(src), "-o", str(obj)]
+        subprocess.run(cc, check=True)
+        subprocess.run(["clang", "-shared", str(obj), "-o", str(so)], check=True)
+
+        script = (
+            'ok() { echo "OK: $1"; }\nwarn() { echo "WARN: $1"; }\n'
+            f"WITH_CLANG_SCOV=1\nTARGETS={tmp_path}\n{_bash_fn('verify_sancov')}\nverify_sancov"
+        )
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True).stdout
+        assert "OK: 1 .so targets" in out
+        assert "WARN" not in out
