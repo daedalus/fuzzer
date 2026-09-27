@@ -1035,7 +1035,8 @@ better than separate ones at equal compute? Arms per seed: MULTI (all versions, 
 (each alone, N/V), FULL (each alone, N), CONTROL (SPLIT on a disjoint seed, A/A). Every final corpus
 is replayed on every binary (edge ids are per binary); primary comparison MULTI vs SPLIT_UNION (the
 V split corpora pooled). Wilcoxon per version, Holm-adjusted; `analyse` exits 2 when CONTROL differs
-from SPLIT. Replay A/A on 9.0.2: 12 of 6,327 ids differ between two replays. Resumable
+from SPLIT. Replay A/A on 9.0.2: 12 of 6,327 ids differ between two replays. `--jobs N` runs N campaigns
+in parallel, starting one only while MemAvailable >= 4 GB (RSS ~3.1 GB at 6k execs). Resumable
 (`rows.pkl`, edge ids as `array('I')`). Test: `tests/test_ab_synergy_multi_ffmpeg.py`.
 
 ### Vendored libsecp256k1 target (secp256k1_read)

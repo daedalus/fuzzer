@@ -258,6 +258,142 @@ def test_cli_no_versions_exits_2(tmp_path):
         budget=300,
         out=tmp_path / "r.pkl",
         work=tmp_path / "w",
+        jobs=1,
     )
 
     assert ab.cmd_run(args) == 2
+
+
+def _barrier_campaign(barrier):
+    """Fake campaign that only returns once *barrier.parties* cells run at once."""
+
+    def campaign(cell, workdir):
+        barrier.wait(timeout=10)
+        return _fake_campaign(cell, workdir)
+
+    return campaign
+
+
+def test_jobs_run_concurrently(tmp_path):
+    """Falsification: jobs=3 runs 3 cells at once (a serial runner breaks the barrier)."""
+    import threading
+
+    cells = ab.plan(V, seeds=[0], budget=300)[:3]
+    out = tmp_path / "rows.pkl"
+    ab.run(
+        cells,
+        V,
+        tmp_path / "w",
+        out,
+        _barrier_campaign(threading.Barrier(3)),
+        _fake_replay,
+        MANIFEST,
+        jobs=3,
+        mem_ok=lambda: True,
+    )
+
+    assert set(ab.load(out)) == {c.key for c in cells}
+
+
+def test_jobs_gated_by_memory(tmp_path):
+    """Adversarial: no free memory -> one cell at a time even with jobs=3."""
+    import threading
+
+    live, peak = [0], [0]
+    lock = threading.Lock()
+
+    def campaign(cell, workdir):
+        with lock:
+            live[0] += 1
+            peak[0] = max(peak[0], live[0])
+        corpus = _fake_campaign(cell, workdir)
+        with lock:
+            live[0] -= 1
+        return corpus
+
+    cells = ab.plan(V, seeds=[0], budget=300)
+    ab.run(
+        cells,
+        V,
+        tmp_path / "w",
+        tmp_path / "r.pkl",
+        campaign,
+        _fake_replay,
+        MANIFEST,
+        jobs=3,
+        mem_ok=lambda: False,
+    )
+
+    assert peak[0] == 1
+
+
+def test_jobs_failure_keeps_finished_cells(tmp_path):
+    """Adversarial: one failing cell raises, but cells that finished are saved."""
+    cells = ab.plan(V, seeds=[0], budget=300)
+    bad = cells[-1].key
+
+    def campaign(cell, workdir):
+        if cell.key == bad:
+            raise ab.CampaignError("boom")
+        return _fake_campaign(cell, workdir)
+
+    out = tmp_path / "r.pkl"
+    with pytest.raises(ab.CampaignError):
+        ab.run(
+            cells,
+            V,
+            tmp_path / "w",
+            out,
+            campaign,
+            _fake_replay,
+            MANIFEST,
+            jobs=2,
+            mem_ok=lambda: True,
+        )
+
+    done = ab.load(out)
+    assert bad not in done
+    assert len(done) == len(cells) - 1
+
+
+@pytest.mark.parametrize("jobs", [0, -1])
+def test_run_rejects_bad_jobs(tmp_path, jobs):
+    """Adversarial: run() validates jobs itself, not only the CLI."""
+    cells = ab.plan(V, seeds=[0], budget=300)
+
+    with pytest.raises(ValueError, match="jobs"):
+        ab.run(
+            cells,
+            V,
+            tmp_path / "w",
+            tmp_path / "r.pkl",
+            _fake_campaign,
+            _fake_replay,
+            MANIFEST,
+            jobs=jobs,
+        )
+
+
+@pytest.mark.parametrize("jobs", [0, -2])
+def test_cli_bad_jobs_exits_2(tmp_path, jobs):
+    """Adversarial: a real executable matches, --jobs < 1 -> exit 2 before any work."""
+    import argparse
+
+    exe = tmp_path / "ffmpeg_read_1.0_asan"
+    exe.write_bytes(b"#!/bin/sh\n")
+    exe.chmod(0o755)
+    seeds = tmp_path / "seeds"
+    seeds.mkdir()
+    args = argparse.Namespace(
+        build_root=tmp_path,
+        glob="ffmpeg_read_*_asan",
+        seed_corpus=seeds,
+        seeds=1,
+        budget=300,
+        out=tmp_path / "r.pkl",
+        work=tmp_path / "w",
+        jobs=jobs,
+    )
+
+    assert ab.cmd_run(args) == 2
+    assert not (tmp_path / "r.pkl").exists()
