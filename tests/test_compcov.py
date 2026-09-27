@@ -181,3 +181,130 @@ class TestCompcovEdgeSignal:
         r = subprocess.run([str(target)], env=env, capture_output=True, timeout=30)
         assert r.returncode in (0, 1)
         assert shm.edge_count() == 0
+
+
+# ── Regressions: exec-stable, NUL-bounded, context-neutral marks ─────
+
+needs_clang = pytest.mark.skipif(shutil.which("clang") is None, reason="no clang")
+
+# Prints its own load address so a test can tell ASLR actually moved it.
+_ASLR_TARGET = """
+#include <stdio.h>
+#include <string.h>
+int main(void) {
+    char buf[16];
+    memcpy(buf, "MAGICHDXXXXXXXXX", 16);
+    volatile int r = memcmp(buf, "MAGICHDR", 8);
+    printf("%p\\n", (void *)main);
+    return r == 12345;
+}
+"""
+
+# a and b agree up to and including the NUL; bytes after it are argv[1][0]
+# in a, 'Q' in b. strncmp must not see past the NUL.
+_STRNCMP_TARGET = """
+#include <string.h>
+int main(int argc, char **argv) {
+    char a[16], b[16];
+    memset(a, argc > 1 ? argv[1][0] : 'Q', sizeof a);
+    memset(b, 'Q', sizeof b);
+    memcpy(a, "AB", 3);
+    memcpy(b, "AB", 3);
+    volatile int r = strncmp(a, b, sizeof a);
+    return r == 12345;
+}
+"""
+
+# Real edges after a partial memcmp: their ids must not depend on COMPCOV.
+_CTX_TARGET = """
+#include <string.h>
+int main(void) {
+    char buf[16];
+    memcpy(buf, "MAGICHDXXXXXXXXX", 16);
+    int r = memcmp(buf, "MAGICHDR", 8);
+    if (r > 0) return 1;
+    return 0;
+}
+"""
+
+_CLANG_FLAGS = ["-O0", "-fPIE", "-pie", "-fno-omit-frame-pointer", "-D__AFL_CMPLOG=1", *NOBUILTIN]
+
+
+def _clang(*args):
+    r = subprocess.run(["clang", *args], capture_output=True, timeout=180)
+    assert r.returncode == 0, r.stderr.decode()[:600]
+
+
+def _clang_shim_target(tmp_path, name, source, *cov):
+    """Build target + shim as separate objects.
+
+    The shim is its own TU so ``cov`` flags (trace-pc-guard) instrument
+    only the target, and the final link carries no coverage flag, so clang
+    asks for no compiler-rt runtime.
+    """
+    src = tmp_path / f"{name}.c"
+    src.write_text(source)
+    obj, shim_obj, out = tmp_path / f"{name}.o", tmp_path / f"{name}_shim.o", tmp_path / name
+    _clang(*_CLANG_FLAGS, *cov, "-c", str(src), "-o", str(obj))
+    _clang(*_CLANG_FLAGS, "-c", str(SHIM), "-o", str(shim_obj))
+    _clang("-pie", str(obj), str(shim_obj), "-o", str(out), "-ldl")
+    return out
+
+
+def _edge_ids(target, level, *args):
+    """Run once on a fresh segment; return (edge-id set, stdout)."""
+    s = _Shm()
+    try:
+        env = s.env(__AFL_COMPCOV_LEVEL=level, FUZZER_KEEP_ASLR="1")
+        r = subprocess.run([str(target), *args], env=env, capture_output=True, timeout=30)
+        assert r.returncode in (0, 1), r.stderr.decode()[:600]
+        addr = s._libc.shmat(s.shm_id, None, 0)
+        raw = bytes((ctypes.c_ubyte * (MAP_ENTRIES * 8)).from_address(addr + SHM_HEADER))
+        s._libc.shmdt(ctypes.c_void_p(addr))
+    finally:
+        s.close()
+    ids = {struct.unpack_from("<I", raw, i * 8)[0] for i in range(MAP_ENTRIES)} - {0}
+    return ids, r.stdout
+
+
+@needs_clang
+class TestCompcovRegressions:
+    def test_regression_compcov_ids_survive_aslr(self, tmp_path):
+        target = _clang_shim_target(tmp_path, "compcov_aslr", _ASLR_TARGET)
+        ids_a, out_a = _edge_ids(target, "2")
+        ids_b, out_b = _edge_ids(target, "2")
+        if out_a == out_b:
+            pytest.skip("ASLR off: load base did not move")
+
+        assert ids_a
+        assert ids_a == ids_b
+
+    def test_regression_compcov_strncmp_stops_at_nul(self, tmp_path):
+        target = _clang_shim_target(tmp_path, "compcov_strncmp", _STRNCMP_TARGET)
+
+        # Control: same input twice must mint the same number of marks.
+        same_a, _ = _edge_ids(target, "2", "Q")
+        same_b, _ = _edge_ids(target, "2", "Q")
+        assert len(same_a) == len(same_b)
+        assert same_a
+
+        # Bytes after the NUL differ: strncmp's result is identical, so
+        # COMPCOV's view must be too.
+        diff, _ = _edge_ids(target, "2", "Z")
+        assert len(same_a) == len(diff)
+
+    def test_regression_compcov_keeps_real_edge_ids(self, tmp_path):
+        target = _clang_shim_target(
+            tmp_path, "compcov_ctx", _CTX_TARGET, "-fsanitize-coverage=trace-pc-guard"
+        )
+
+        # Control: two level-0 runs agree exactly.
+        off_a, _ = _edge_ids(target, "0")
+        off_b, _ = _edge_ids(target, "0")
+        assert off_a == off_b
+        assert off_a
+
+        # Marks may only add ids, never rename the real edges after them.
+        on, _ = _edge_ids(target, "2")
+        assert off_a <= on
+        assert len(on) > len(off_a)
