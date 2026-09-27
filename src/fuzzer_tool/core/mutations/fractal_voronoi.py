@@ -113,6 +113,47 @@ def _root(depth: int, cell: tuple[int, int]) -> tuple[int, int]:
     return cell
 
 
+# Default per-cell sub-operators: single-byte bijections, so every cell keeps
+# the buffer length and no byte value is unreachable. Registered instance only;
+# a bare FractalVoronoiMutator() keeps the XOR fallback for standalone use.
+def _invert(b: bytes) -> bytes:
+    return bytes([b[0] ^ 0xFF])
+
+
+def _increment(b: bytes) -> bytes:
+    return bytes([(b[0] + 1) & 0xFF])
+
+
+def _decrement(b: bytes) -> bytes:
+    return bytes([(b[0] - 1) & 0xFF])
+
+
+def _swap_nibbles(b: bytes) -> bytes:
+    return bytes([((b[0] << 4) | (b[0] >> 4)) & 0xFF])
+
+
+def _flip_msb(b: bytes) -> bytes:
+    return bytes([b[0] ^ 0x80])
+
+
+def _rotate_left(b: bytes) -> bytes:
+    return bytes([((b[0] << 1) | (b[0] >> 7)) & 0xFF])
+
+
+DEFAULT_CELL_OPS: tuple[Callable[[bytes], bytes], ...] = (
+    _invert,
+    _increment,
+    _decrement,
+    _swap_nibbles,
+    _flip_msb,
+    _rotate_left,
+)
+
+#: Per-call salt range: mixed into every hash-driven choice so a re-picked
+#: seed yields a different mutant. Salt 0 reproduces the unsalted output.
+_SALT_MAX = 0xFFFFFFFF
+
+
 class FractalVoronoiMutator(MutatorBase):
     """Spatial meta-operator using fractal jittered Voronoi partitions.
 
@@ -280,6 +321,10 @@ class FractalVoronoiMutator(MutatorBase):
         if len(data) < 16:
             return None
 
+        # Salt every hash-driven choice (op, byte gate, XOR value, boundary
+        # jitter); geometry stays cached. rng=None keeps the legacy output.
+        salt = rng.randint(0, _SALT_MAX) if rng is not None else 0
+
         # Map 1D buffer to roughly-square 2D grid
         n = len(data)
         side = max(1, int(math.sqrt(n)))
@@ -288,6 +333,7 @@ class FractalVoronoiMutator(MutatorBase):
         n_ops = len(cell_ops)
 
         for idx, (root_hash, on_boundary, root, px, py) in enumerate(self._plan(side, n)):
+            root_hash ^= salt
             if n_ops:
                 # Select sub-operator deterministically
                 op = cell_ops[root_hash % n_ops]
@@ -308,7 +354,7 @@ class FractalVoronoiMutator(MutatorBase):
 
             # Boundary bonus: if on a fractal coastline, add extra jitter
             if on_boundary:
-                boundary_hash = int(
+                boundary_hash = salt ^ int(
                     hashlib.sha256(f"boundary:{root}:{px:.6f}:{py:.6f}".encode()).hexdigest(),
                     16,
                 )
@@ -329,7 +375,7 @@ class FractalVoronoiMutator(MutatorBase):
 def _register() -> None:
     from fuzzer_tool.core.operator_registry import REGISTRY
 
-    m = FractalVoronoiMutator()
+    m = FractalVoronoiMutator(cell_ops=list(DEFAULT_CELL_OPS))
     if m.name not in REGISTRY.names():
         REGISTRY.register_mutator(m)
 
