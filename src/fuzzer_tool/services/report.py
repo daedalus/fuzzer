@@ -15,6 +15,7 @@ from fuzzer_tool.core.analyzers.analyzer_elo import Arena, strategy_arena, strat
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.core.temporal_join import join_streams
+from fuzzer_tool.core.zipf import HeapsFit, TailLaw, ZipfFit
 
 try:
     import numpy as np
@@ -135,6 +136,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_configuration(fuzzer))
     sections.append(_runtime_performance(fuzzer))
     sections.append(_good_turing(fuzzer))
+    sections.append(_zipf_tail(fuzzer))
     sections.append(_coverage_analysis(fuzzer))
     sections.append(_mutation_effectiveness(fuzzer))
     sections.append(_mutation_edge_attribution(fuzzer))
@@ -1087,6 +1089,34 @@ def _good_turing(f) -> str:
             lines.append(f"  Dropped edges:       {dropped:,}")
     if f.discovery_rate() > 0:
         lines.append(f"  Discovery rate:       {f.discovery_rate():.1f} edges/1k execs")
+    return "\n".join(lines)
+
+
+def _zipf_tail(f) -> str:
+    """Power-law fit of the seeds-per-edge spectrum, next to Chao2."""
+    tracker = getattr(f, "_edge_tracker", None)
+    if tracker is None:
+        return ""
+    fit = tracker.zipf_estimate()
+    if not isinstance(fit, ZipfFit) or fit.law is TailLaw.INSUFFICIENT:
+        return ""
+
+    lines = [
+        "",
+        "--- Zipf Tail (seeds per edge) ---",
+        f"  Law:                 {fit.law.value}",
+        f"  Exponent:            alpha={fit.alpha:.3f}  s={fit.s:.3f} (rank-frequency)",
+        f"  Tail:                xmin={fit.xmin}, {fit.n_tail} edges ({fit.tail_frac:.0%})",
+        f"  Fit:                 KS={fit.ks:.4f}, Vuong z={fit.vuong:.2f} vs geometric",
+    ]
+
+    # Heaps elasticity: how much a doubled budget still buys.
+    heaps = tracker.heaps_estimate()
+    if isinstance(heaps, HeapsFit):
+        lines.append(
+            f"  Heaps beta:          {heaps.beta:.3f} (R2={heaps.r2:.3f}), "
+            f"2x execs -> +{heaps.doubling_gain:.1%} edges"
+        )
     return "\n".join(lines)
 
 
