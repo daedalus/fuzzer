@@ -20,6 +20,7 @@
 #   tools/vendor_lz4.sh       -> $FUZZ_VENDOR_ROOT/lz4        (lz4_read / lz4_read.so)
 #   tools/vendor_grep.sh      -> $FUZZ_VENDOR_ROOT/grep
 #   tools/vendor_ffmpeg.sh    -> $FUZZ_VENDOR_ROOT/ffmpeg
+#   tools/vendor_ffmpeg.sh --top=3 -> $FUZZ_VENDOR_ROOT/ffmpeg-<ver>  (ffmpeg_read_<ver>_asan)
 #   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
 #   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
 #
@@ -618,8 +619,11 @@ ffmpeg_extralibs() {
     for probe in $libs; do
         case "$probe" in
             -l*)
+                # Unquoted: DEFAULT_CC is "ccache clang" when ccache exists;
+                # quoted, it is no command and every library was dropped.
+                # shellcheck disable=SC2086
                 if echo 'int main(void){return 0;}' \
-                   | "${DEFAULT_CC:-cc}" -x c - "$probe" -o /dev/null 2>/dev/null; then
+                   | ${DEFAULT_CC:-cc} -x c - "$probe" -o /dev/null 2>/dev/null; then
                     out="$out $probe"
                 fi
                 ;;
@@ -1186,13 +1190,15 @@ build_sanitizer_targets() {
 # $FUZZ_BUILD_ROOT so the read-only vendoring tree is never modified.
 # FFmpeg's configure needs a stub for __sanitizer_cov_trace_pc_guard
 # since those symbols are provided by cmplog_shim.o at final link.
+# $2 names the vendored tree: "ffmpeg" (default) or "ffmpeg-<ver>" (--top=N).
 build_vendored_ffmpeg_sancov() {
     local asan_suffix="${1:-}"  # "" or "_asan"
+    local src_name="${2:-ffmpeg}"
     [ "$WITH_FFMPEG_SANCOV" -eq 0 ] && return 0
-    local SRC_DIR="$VENDOR/ffmpeg"
+    local SRC_DIR="$VENDOR/$src_name"
     [ -d "$SRC_DIR" ] || return 0
-    # Build dir: $FUZZ_BUILD_ROOT/ffmpeg[_asan]/ — sources staged here, never in vendoring.
-    local BUILD_DIR="$FUZZ_BUILD_ROOT/ffmpeg${asan_suffix}"
+    # Build dir: $FUZZ_BUILD_ROOT/<src_name>[_asan]/ — sources staged here, never in vendoring.
+    local BUILD_DIR="$FUZZ_BUILD_ROOT/${src_name}${asan_suffix}"
     mkdir -p "$BUILD_DIR"
     # Stage the source. This is the only place FFmpeg is actually built;
     # the read-only $VENDOR/ffmpeg tree is never touched.
@@ -1261,6 +1267,7 @@ build_vendored_ffmpeg_sancov() {
     fi
 
     local label="${asan_suffix:-" (nosan)"}"
+    [ "$src_name" = "ffmpeg" ] || label=" ${src_name#ffmpeg-}$label"
     echo "Building vendored FFmpeg${label} with sancov coverage..."
     # FFmpeg's configure runs a link test that does not pass through ccache
     # cleanly (configure invokes "ccache clang" as if it were a cross-compiler
@@ -1403,6 +1410,34 @@ STUBEOF
         warn_failed "vendored FFmpeg${label} configure"
     fi
     rm -rf "$stub_dir"
+}
+
+# ── Multi-version FFmpeg (tools/vendor_ffmpeg.sh --top=N) ─────────
+# One ASAN executable per vendored $VENDOR/ffmpeg-<ver> tree:
+#   ffmpeg-9.0.2 -> $FUZZ_BUILD_ROOT/ffmpeg-9.0.2_asan/*.a -> ffmpeg_read_9.0.2_asan
+# Executables, not .so: three dlopen'd libav* copies in one process share one
+# symbol namespace. Multi-target mode runs each in its own process and SHM map,
+# so one corpus exercises every version.
+build_ffmpeg_versions() {
+    local dir ver root libs
+    for dir in "$VENDOR"/ffmpeg-*/; do
+        [ -f "$dir/configure" ] || continue
+        ver="$(basename "$dir")"
+        ver="${ver#ffmpeg-}"
+        build_vendored_ffmpeg_sancov "_asan" "ffmpeg-$ver"
+
+        # Stale archives are the previous build's code: link nothing, and drop
+        # the old binary so a campaign cannot pick it up as current.
+        root="$FUZZ_BUILD_ROOT/ffmpeg-${ver}_asan"
+        if [ ! -f "$root/libavformat/libavformat.a" ] || [ -f "$root/.stale" ]; then
+            rm -f "$TARGETS/ffmpeg_read_${ver}_asan"
+            warn_failed "ffmpeg_read_${ver}_asan: no current archives in $root"
+            continue
+        fi
+
+        libs="$root/libavformat/libavformat.a $root/libavcodec/libavcodec.a $root/libavutil/libavutil.a $root/libswresample/libswresample.a $(ffmpeg_extralibs "$root")"
+        build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}_asan" "$libs" "-fsanitize=address" "$DEFAULT_CC" "-I$root"
+    done
 }
 
 # ── Build simple .so targets ────────────────────────────────────
@@ -2415,6 +2450,10 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "distance" "$state" "AFLGo SHM-tail distance .so targets (clang)"
     state=$([ "$WITH_FFMPEG_SANCOV" -eq 1 ] && echo "ON (default)" || echo "OFF")
     printf '  %-20s %-12s %s\n' "ffmpeg-sancov" "$state" "auto-rebuild vendored FFmpeg with coverage"
+    local ffvers
+    ffvers=$(cd "$VENDOR" 2>/dev/null && ls -d ffmpeg-*/ 2>/dev/null | tr -d / | tr '\n' ' ')
+    state=$([ -n "$ffvers" ] && [ "$BUILD_ASAN" -eq 1 ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "ffmpeg versions" "$state" "${ffvers:-none, run tools/vendor_ffmpeg.sh --top=3} (ASAN exe)"
 
     state=$([ "$BUILD_ASAN" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "ASAN variants" "$state" "executables + .so targets"
@@ -2479,6 +2518,7 @@ if [ "$BUILD_ASAN" -eq 1 ]; then
     fi
     build_vendored_ffmpeg_sancov "_asan"
     build_simple_targets "_asan" "-fsanitize=address" "ASAN"
+    build_ffmpeg_versions
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "-fsanitize=address" "ASAN"
     build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
     build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
