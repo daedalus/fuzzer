@@ -17,8 +17,8 @@ import math
 
 import numpy as np
 import pytest
-from scipy import stats
 
+from fuzzer_tool.core.edge_tracker import ks_two_sample
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.op_cmaes import CMAESScheduler
 
@@ -62,7 +62,9 @@ def test_is_standard_normal():
 
     assert draws.mean() == pytest.approx(0.0, abs=0.01)
     assert draws.std() == pytest.approx(1.0, abs=0.01)
-    assert stats.kurtosis(draws) == pytest.approx(0.0, abs=0.05)
+    centred = draws - draws.mean()
+    excess_kurtosis = (centred**4).mean() / (centred**2).mean() ** 2 - 3.0  # Fisher, biased
+    assert excess_kurtosis == pytest.approx(0.0, abs=0.05)
 
 
 def test_matches_a_reference_normal_with_a_control():
@@ -73,8 +75,8 @@ def test_matches_a_reference_normal_with_a_control():
     ref = gen.standard_normal(sample.size)
     control = gen.standard_normal(sample.size)
 
-    _, p_control = stats.ks_2samp(ref, control)
-    _, p_sample = stats.ks_2samp(ref, sample)
+    _, p_control = ks_two_sample(ref.tolist(), control.tolist())
+    _, p_sample = ks_two_sample(ref.tolist(), sample.tolist())
 
     assert p_control > 0.001, "control failed — the oracle itself is broken"
     assert p_sample > 0.001

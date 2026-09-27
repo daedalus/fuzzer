@@ -38,12 +38,17 @@ def script() -> str:
     return BUILD_SCRIPT.read_text()
 
 
+# Sources resolve via ${TARGETS_SRC:-$TARGETS} since the out-of-tree
+# $FUZZ_BUILD_ROOT split; bare $TARGETS is the legacy form.
+_SRC_DIR = r"(?:\$\{TARGETS_SRC:-\$TARGETS\}|\$TARGETS)"
+
+
 def _build_lines(script: str, target: str) -> list[str]:
     """Every build_target / build_so_target invocation for *target*."""
     return [
         line.strip()
         for line in script.splitlines()
-        if re.search(rf"build_(so_)?target\s+\"\$TARGETS/{target}\.c\"", line)
+        if re.search(rf"build_(so_)?target\s+\"{_SRC_DIR}/{target}\.c\"", line)
     ]
 
 

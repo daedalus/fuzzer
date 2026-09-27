@@ -273,6 +273,39 @@ class TestSampleFloor:
         assert not learner.has_state()
 
 
+class TestOneDrawPerDrain:
+    """A live target draws once per execution, so windows fill one value at a
+    time. Sliding on every failed attempt pinned a 4-byte window at
+    xorshift32's floor (2) and taus88 (4) was never tried."""
+
+    def _feed(self, learner, words: list[int]) -> bool:
+        found = False
+        for w in words:
+            learner.f._cmplog.last_conds = _conds([w])
+            found = learner.observe_execution(PAYLOAD)
+        return found
+
+    def test_regression_prng_window_slides_below_family_floor(self):
+        from fuzzer_tool.core.prng_state_recovery import confident_samples, family
+
+        need = confident_samples(family("taus88"))
+        words = _stream(need + 2)
+        learner = _learner()
+        assert self._feed(learner, words[:need]) is True
+        assert learner.predict(2) == words[need:]
+
+    def test_adversarial_noise_window_stays_bounded(self):
+        """Non-stream draws never recover, and the window slides once full
+        rather than growing without bound."""
+        from fuzzer_tool.core.analyzers import analyzer_prng_state_learner as mod
+
+        noise = [(0x9E3779B9 * (i + 1)) & 0xFFFFFFFF for i in range(3 * mod._MAX_SAMPLES)]
+        learner = _learner()
+        assert self._feed(learner, noise) is False
+        assert not learner.has_state()
+        assert max(len(w) for w in learner._pending.values()) <= mod._FULL_SAMPLES[4]
+
+
 def _generic_stream(n: int, spec, state: tuple[int, ...]) -> list[int]:
     """The first *n* outputs of *spec*'s stream started at *state*, matching
     the same "output is taken after stepping" convention as ``_stream``."""
@@ -852,7 +885,9 @@ def live_session(token_so):
             "learner": learner,
             "iterations": iterations,
             "recovered": learner.has_state(),
-            "pending": {hex(pc or 0): len(run) for pc, run in learner._pending.items()},
+            "pending": {
+                f"{pc or 0:#x}/{width}": len(run) for (pc, width), run in learner._pending.items()
+            },
             "predicted": None,
             "observed": set(),
         }

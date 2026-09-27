@@ -36,6 +36,7 @@ from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
+from fuzzer_tool.core.zipf import TailLaw
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate as _discovery_rate,
 )
@@ -248,6 +249,28 @@ def _renyi_stats(f, stats: dict) -> None:
                     for k, v in renyi.entropy_spectrum(list(edge_hits.values())).items()
                 },
             }
+
+
+def _zipf_stats(f, stats: dict) -> None:
+    """Zipf tail and Heaps fit entry for dump_stats()."""
+    fit = f._edge_tracker.zipf_estimate()
+    if fit.law is TailLaw.INSUFFICIENT:
+        return
+
+    entry = {
+        "law": fit.law.value,
+        "alpha": round(fit.alpha, 4),
+        "s": round(fit.s, 4),
+        "xmin": fit.xmin,
+        "tail_frac": round(fit.tail_frac, 4),
+        "ks": round(fit.ks, 4),
+        "vuong": round(fit.vuong, 2),
+    }
+    heaps = f._edge_tracker.heaps_estimate()
+    if heaps is not None:
+        entry["heaps_beta"] = round(heaps.beta, 4)
+        entry["heaps_r2"] = round(heaps.r2, 4)
+    stats["zipf"] = entry
 
 
 def _differential_stats(f, stats: dict) -> None:
@@ -537,7 +560,20 @@ class StatsReporter:
                 f"P(growth): {1 - bayes['p_stalled']:.1%}"
                 f" {'[STALLED]' if bayes['p_stalled'] > 0.5 else ''}"
             )
+        self._print_summary_zipf(f)
         self._print_summary_confirm(f)
+
+    def _print_summary_zipf(self, f) -> None:
+        """Print the Zipf tail and Heaps growth lines."""
+        fit = f._edge_tracker.zipf_estimate()
+        if fit.law is not TailLaw.INSUFFICIENT:
+            print(f"  Zipf tail:         s={fit.s:.2f} (alpha={fit.alpha:.2f}, {fit.law.value})")
+
+        heaps = f._edge_tracker.heaps_estimate()
+        if heaps is not None:
+            print(
+                f"  Heaps:             beta={heaps.beta:.2f}, 2x execs -> +{heaps.doubling_gain:.1%} edges"
+            )
 
     def _print_summary_gravity(self, f) -> None:
         """Fitted gravity exponents: γ ≈ 0 means distance carries no signal."""
@@ -736,6 +772,7 @@ class StatsReporter:
         }
         _scheduler_stats(f, stats)
         _renyi_stats(f, stats)
+        _zipf_stats(f, stats)
         _differential_stats(f, stats)
         if f._use_transfer_entropy:
             stats["transfer_entropy"] = {

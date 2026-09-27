@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <unistd.h>
+#include <wchar.h>
 
 /* ── Compare-then-return: each path adds to the return value so the
  *    fuzzer sees different coverage / exit codes based on which

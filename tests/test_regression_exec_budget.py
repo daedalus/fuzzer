@@ -13,11 +13,22 @@ misreporting iterations as executions.
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
+
 from tests import test_regression_end_of_run_persistence as end_of_run
+
+
+@pytest.fixture
+def tmp_root():
+    """Temp root with an empty corpus/ the tests seed before _make_fuzzer."""
+    with tempfile.TemporaryDirectory(prefix="fuzz_budget_") as d:
+        (Path(d) / "corpus").mkdir()
+        yield Path(d)
 
 
 class TestRunHonorsExecBudget:
