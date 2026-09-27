@@ -115,6 +115,7 @@ class MutationContext:
         "weizz_tags_enabled",
         "wfc_enabled",
         "formatfuzzer_enabled",
+        "wall_order_enabled",
     )
 
     def __init__(
@@ -140,6 +141,7 @@ class MutationContext:
         path_solver=None,
         wfc_enabled: bool = False,
         formatfuzzer_enabled: bool = False,
+        wall_order_enabled: bool = False,
     ) -> None:
         #: Length cap for the returned buffer; 0 means uncapped.
         self.max_len = max_len
@@ -211,6 +213,9 @@ class MutationContext:
         self.wfc_enabled = wfc_enabled
         #: True when ``--formatfuzzer`` is set (FormatFuzzer structural ops).
         self.formatfuzzer_enabled = formatfuzzer_enabled
+        #: True when ``--wall-order`` is set: condstmt_solve takes the head
+        #: of the minimax comparison-wall order instead of a random branch.
+        self.wall_order_enabled = wall_order_enabled
 
     @classmethod
     def from_fuzzer(cls, fuzzer) -> MutationContext:
@@ -244,6 +249,7 @@ class MutationContext:
             path_solver=getattr(fuzzer, "_path_solver", None),
             wfc_enabled=bool(getattr(fuzzer, "_wfc_enabled", False)),
             formatfuzzer_enabled=bool(getattr(fuzzer, "formatfuzzer", False)),
+            wall_order_enabled=bool(getattr(fuzzer, "_use_wall_order", False)),
         )
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid

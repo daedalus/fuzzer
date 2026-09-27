@@ -21,6 +21,7 @@ Provides:
 """
 
 import math
+from collections.abc import Callable
 
 
 class RateDistortionCorpus:
@@ -121,7 +122,6 @@ class RateDistortionCorpus:
         if not seed_edges:
             return [], 0.0
 
-        # Compute total coverage
         all_edges: set[int] = set()
         for edges in seed_edges.values():
             all_edges.update(edges)
@@ -131,43 +131,13 @@ class RateDistortionCorpus:
         if target_count == 0:
             return [], 1.0
 
-        # Build minimax-robust corpus: select seeds to minimize maximum coverage loss
-        # when any single seed is removed
-        covered: set[int] = set()
-        selected: list[str] = []
+        # Cover to target, then back up the seeds whose loss hurts most.
+        cover = _RobustCover(seed_edges)
         remaining = dict(seed_edges)
+        _greedy_cover(cover, remaining, lambda: len(cover.covered) >= target_count)
+        _robust_fill(cover, remaining, lambda: False)
 
-        # First pass: select seeds that cover unique edges (maximize coverage)
-        while covered < all_edges and len(covered) < target_count and remaining:
-            # Pick seed covering the most uncovered edges
-            best_key = max(
-                remaining,
-                key=lambda k: len(remaining[k] - covered),
-            )
-            best_edges = remaining[best_key]
-            new_edges = best_edges - covered
-
-            if not new_edges:
-                break  # diminishing returns
-
-            covered.update(new_edges)
-            selected.append(best_key)
-            del remaining[best_key]
-
-        # Second pass: add seeds to minimize maximum regret (coverage loss if removed)
-        # This is the minimax-robust criterion: minimize max_{c in selected} coverage(C \ {c})
-        while len(selected) < target_count and remaining:
-            best_key = self._minimax_pick(seed_edges, selected, covered, remaining)
-            if best_key is None:
-                break
-
-            # Add the best seed
-            selected.append(best_key)
-            covered.update(seed_edges[best_key])
-            del remaining[best_key]
-
-        actual_frac = len(covered) / total if total > 0 else 0.0
-        return selected, actual_frac
+        return cover.selected, len(cover.covered) / total
 
     def optimal_pruning(
         self,
@@ -306,107 +276,43 @@ class RateDistortionCorpus:
 
         return selected
 
-    @staticmethod
-    def _minimax_pick(
-        seed_edges: dict[str, set[int]],
-        selected: list[str],
-        covered: set[int],
-        remaining: dict[str, set[int]],
-    ) -> str | None:
-        """Remaining seed minimizing the max single-seed coverage loss once added.
-
-        Ties go to the larger resulting coverage; None if *remaining* is empty.
-        """
-        # For each remaining seed, compute the maximum coverage loss it would cause
-        # if added to the selected set
-        best_key = None
-        best_max_loss = float("inf")
-        best_new_coverage = 0
-
-        for key, edges in remaining.items():
-            # Simulate adding this seed
-            temp_selected = selected + [key]
-            temp_covered = covered | edges
-
-            # Compute maximum coverage loss if any seed in temp_selected is removed
-            max_loss = 0
-            for candidate_key in temp_selected:
-                if candidate_key in seed_edges:
-                    candidate_edges = seed_edges[candidate_key]
-                    loss = len(temp_covered - (temp_covered - candidate_edges))
-                    max_loss = max(max_loss, loss)
-
-            # Also compute new coverage
-            new_coverage = len(temp_covered)
-
-            # Choose seed that minimizes maximum loss (minimax criterion)
-            if max_loss < best_max_loss or (
-                max_loss == best_max_loss and new_coverage > best_new_coverage
-            ):
-                best_max_loss = max_loss
-                best_new_coverage = new_coverage
-                best_key = key
-        return best_key
-
     def minimax_robust_corpus_admission(
         self,
         seed_edges: dict[str, set[int]],
         max_seeds: int,
+        preselected: list[str] | tuple[str, ...] = (),
     ) -> list[str]:
-        """Apply minimax-robust corpus admission: select seeds to minimize maximum coverage loss
-        if any single seed is removed.
+        """Select seeds to minimize the maximum coverage loss if any single seed
+        is removed.
 
         This is the direct analog of the minimax estimator's "least favorable prior" —
         the corpus that is robust to the worst-case loss of any single seed.
 
         Args:
             seed_edges: Dict mapping seed_key -> set of edge indices.
-            max_seeds: Maximum number of seeds to select.
+            max_seeds: Maximum number of seeds to add.
+            preselected: Keys already kept (e.g. set-cover mandatory seeds);
+                counted for robustness, never returned.
 
         Returns:
-            List of selected seed keys, ordered by selection (best first).
+            Added seed keys, ordered by selection (best first).
         """
         if not seed_edges or max_seeds <= 0:
             return []
 
-        all_edges: set[int] = set()
-        for edges in seed_edges.values():
-            all_edges.update(edges)
+        cover = _RobustCover(seed_edges)
+        for key in preselected:
+            if key in seed_edges:
+                cover.add(key)
+        base = len(cover.selected)
+        remaining = {k: e for k, e in seed_edges.items() if k not in cover.selected}
 
-        covered: set[int] = set()
-        selected: list[str] = []
-        remaining = dict(seed_edges)
+        def full() -> bool:
+            return len(cover.selected) - base >= max_seeds
 
-        # First pass: select seeds that cover unique edges (maximize coverage)
-        while len(selected) < max_seeds and remaining:
-            # Pick seed covering the most uncovered edges
-            best_key = max(
-                remaining,
-                key=lambda k: len(remaining[k] - covered),
-            )
-            best_edges = remaining[best_key]
-            new_edges = best_edges - covered
-
-            if not new_edges:
-                break  # diminishing returns
-
-            covered.update(new_edges)
-            selected.append(best_key)
-            del remaining[best_key]
-
-        # Second pass: add seeds to minimize maximum regret (coverage loss if removed)
-        # This is the minimax-robust criterion: minimize max_{c in selected} coverage(C \ {c})
-        while len(selected) < max_seeds and remaining:
-            best_key = self._minimax_pick(seed_edges, selected, covered, remaining)
-            if best_key is None:
-                break
-
-            # Add the best seed
-            selected.append(best_key)
-            covered.update(seed_edges[best_key])
-            del remaining[best_key]
-
-        return selected
+        _greedy_cover(cover, remaining, full)
+        _robust_fill(cover, remaining, full)
+        return cover.selected[base:]
 
     def compression_ratio(
         self,
@@ -437,3 +343,120 @@ class RateDistortionCorpus:
             "ratio": ratio,
             "coverage_preserved": preserved,
         }
+
+
+class _RobustCover:
+    """Incremental single-seed-loss bookkeeping for minimax-robust selection.
+
+    A seed's loss is the edges only it covers: dropping it loses exactly
+    those. ``owner[e]`` is the one selected seed covering edge ``e``;
+    shared edges have no owner. Risk is ``(max loss, seeds at that max)``,
+    compared lexicographically, so backing up one of two tied worst seeds
+    still counts as progress.
+
+        A={1,2,5} B={3,4,5}  ->  owner {1:A,2:A,3:B,4:B}  risk (2, 2)
+        add A2={1,2}         ->  owner {3:B,4:B}          risk (2, 1)
+    """
+
+    def __init__(self, seed_edges: dict[str, set[int]]):
+        self._edges = seed_edges
+        self.covered: set[int] = set()
+        self.selected: list[str] = []
+        self._owner: dict[int, str] = {}
+        self._uniq: dict[str, int] = {}
+
+    def add(self, key: str) -> None:
+        """Select *key*: its fresh edges become its own, owned ones shared."""
+        self._uniq[key] = 0
+        for e in self._edges[key]:
+            if e not in self.covered:
+                self.covered.add(e)
+                self._owner[e] = key
+                self._uniq[key] += 1
+                continue
+
+            prev = self._owner.pop(e, None)
+            if prev is not None:
+                self._uniq[prev] -= 1
+        self.selected.append(key)
+
+    def risk(self) -> tuple[int, int]:
+        """Current ``(max loss, count at max)``; ``(0, 0)`` when nothing is at risk."""
+        top = max(self._uniq.values(), default=0)
+        if top == 0:
+            return 0, 0
+        return top, sum(1 for u in self._uniq.values() if u == top)
+
+    def ranked(self) -> tuple[list[tuple[str, int]], dict[int, int]]:
+        """Selected seeds by loss, descending, plus a loss histogram (per round)."""
+        order = sorted(self._uniq.items(), key=lambda kv: kv[1], reverse=True)
+        hist: dict[int, int] = {}
+        for _, u in order:
+            hist[u] = hist.get(u, 0) + 1
+        return order, hist
+
+    def risk_with(
+        self, key: str, order: list[tuple[str, int]], hist: dict[int, int]
+    ) -> tuple[int, int]:
+        """Risk after adding *key*, in O(|edges(key)|) instead of O(|selected|)."""
+        dec: dict[str, int] = {}
+        own = 0
+        for e in self._edges[key]:
+            o = self._owner.get(e)
+            if o is not None:
+                dec[o] = dec.get(o, 0) + 1
+            elif e not in self.covered:
+                own += 1
+
+        # Untouched seeds keep their loss: the largest is the first one
+        # in *order* that *key* does not overlap.
+        top = next((u for k, u in order if k not in dec), 0)
+        touched = [self._uniq[k] - d for k, d in dec.items()]
+        touched.append(own)
+        worst = max(top, max(touched))
+        if worst == 0:
+            return 0, 0
+
+        count = sum(1 for v in touched if v == worst)
+        if top == worst:
+            count += hist[worst] - sum(1 for k in dec if self._uniq[k] == worst)
+        return worst, count
+
+
+def _greedy_cover(
+    cover: _RobustCover, remaining: dict[str, set[int]], done: Callable[[], bool]
+) -> None:
+    """Greedy set-cover: add the seed with most uncovered edges until *done*."""
+    while remaining and not done():
+        best = max(remaining, key=lambda k: len(remaining[k] - cover.covered))
+        if not remaining[best] - cover.covered:
+            return
+        cover.add(best)
+        del remaining[best]
+
+
+def _robust_fill(
+    cover: _RobustCover, remaining: dict[str, set[int]], done: Callable[[], bool]
+) -> None:
+    """Add the seed that most lowers the risk; stop when none strictly does.
+
+    Strict lexicographic decrease bounds the loop and keeps seeds that
+    protect nothing (e.g. ones touching only shared edges) out.
+    Ties go to the larger resulting coverage.
+    """
+    while remaining and not done():
+        current = cover.risk()
+        if current == (0, 0):
+            return
+
+        order, hist = cover.ranked()
+        best, best_key = None, (current, 0)
+        for key, edges in remaining.items():
+            cand = (cover.risk_with(key, order, hist), -len(edges - cover.covered))
+            if cand < best_key:
+                best, best_key = key, cand
+
+        if best is None or best_key[0] >= current:
+            return
+        cover.add(best)
+        del remaining[best]

@@ -106,6 +106,12 @@ _EXCLUDED_OPT_IN = frozenset(
         # --hail-mary means "every plausible strategy", not "every strategy
         # whose selection-quality tradeoff is still a guess".
         "mds_select",
+        # Minimax Phases 3-5 (docs/handover/handover_minimax_implementation_
+        # 2026-09-01.md): wired, not yet A/B-measured. minimax_select also
+        # swaps the same top-K selection as mds_select.
+        "minimax_select",
+        "op_minimax",
+        "wall_order",
         # Its seed-selection counterpart (see --seed-canary-scheduler help):
         # same deliberately-worst-in-class floor role, same reasoning, one
         # tournament over.

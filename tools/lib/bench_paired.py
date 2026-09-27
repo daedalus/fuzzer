@@ -159,6 +159,14 @@ ARMS: dict[str, list[str]] = {
     # operators change; read "Gravity splice: ... hits, refits" in a cell's
     # log before trusting a null -- a closed fit gate means prior exponents.
     "splice-gravity": ["--splice-donor", "gravity"],
+    # Minimax Phases 3-5 (docs/handover/handover_minimax_implementation_
+    # 2026-09-01.md). op-minimax only replaces the bandit's pick, so it pairs
+    # against "elo". minimax-select only acts inside auto_minimize_corpus,
+    # which is off unless scheduled, hence its own minimizing baseline.
+    "elo-op-minimax": ["--elo", "--mc-bandit", "--op-minimax"],
+    "wall-order": ["--wall-order"],
+    "minimize-2k": ["--minimize-every-execs", "2000"],
+    "minimax-select": ["--minimize-every-execs", "2000", "--minimax-select"],
 }
 
 STRATA_ARMS = (
@@ -194,6 +202,9 @@ ARM_BASELINES: dict[str, str] = {
     "pos-round-robin": "baseline",
     "pos-fibonacci": "baseline",
     "splice-gravity": "baseline",
+    "elo-op-minimax": "elo",
+    "wall-order": "baseline",
+    "minimax-select": "minimize-2k",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
@@ -772,11 +783,12 @@ def cmd_analyse(args: argparse.Namespace) -> int:
 
     # Compute and output risk matrix if requested
     if args.risk_matrix:
-        risk_matrix = compute_risk_matrix(loaded)
+        risk_matrix = compute_risk_matrix({**loaded, args.baseline: base})
         print("\nRisk Matrix (for minimax-robust scheduler selection):")
-        print("Format: {scheduler: {target: worst_case_regret}}")
+        print("Format: {scheduler: {target: mean_regret}}")
         print(json.dumps(risk_matrix, indent=2))
-        print("\nThis can be used to update the EloTracker's risk matrix.")
+        arm, regret = minimax_arm(risk_matrix)
+        print(f"\nminimax-robust arm: {arm} (worst-target regret {regret:.3f})")
 
     print(
         "\nMcNemar is the test to read: the matrix is paired by construction. "
@@ -835,45 +847,45 @@ def _h2h_regrets(arm_results: dict[str, dict]) -> dict[str, float]:
 def compute_risk_matrix(loaded: dict[str, list[dict]]) -> dict[str, dict[str, float]]:
     """Compute risk matrix from benchmark results.
 
-    For each arm (scheduler) and target, compute the worst-case regret across seeds.
     Regret = 1.0 - average_score, where average_score is the arm's average performance
     in head-to-head matchups against other arms on the same (target, seed) cell.
-    Worst-case regret = maximum regret across seeds for that target.
+    Each (arm, target) entry is the mean regret over seeds: the adversary a
+    minimax pick guards against is the target, not seed noise (with two arms
+    a per-seed regret is 0, 0.5 or 1, so a max over seeds is ~1.0 for every
+    arm). An arm with no cell on a target gets regret 1.0: no evidence is
+    the least favourable case, not a perfect score.
     """
-    if not loaded:
+    arms = list(loaded)
+    targets = sorted({r["target"] for rows in loaded.values() for r in rows})
+    if not arms or not targets:
         return {}
 
-    # Get all arms and targets
-    arms = list(loaded.keys())
-    if not arms:
-        return {}
+    regrets: dict[str, dict[str, list[float]]] = {arm: {t: [] for t in targets} for arm in arms}
+    for target in targets:
+        for arm, per_seed in _target_regrets(loaded, arms, target).items():
+            regrets[arm][target].extend(per_seed)
 
-    # Get all targets from the first arm's results
-    first_arm_results = loaded[arms[0]]
-    if not first_arm_results:
-        return {}
-
-    targets = sorted(set(r["target"] for r in first_arm_results))
-    if not targets:
-        return {}
-
-    # Initialize risk matrix: arm -> target -> list of regrets per seed
-    risk_matrix: dict[str, dict[str, list[float]]] = {
-        arm: {target: [] for target in targets} for arm in arms
+    return {
+        arm: {t: statistics.fmean(v) if v else 1.0 for t, v in regrets[arm].items()} for arm in arms
     }
 
-    # For each target and seed, collect results from all arms
-    for target in targets:
-        for arm, regrets in _target_regrets(loaded, arms, target).items():
-            risk_matrix[arm][target].extend(regrets)
 
-    # Compute worst-case regret (maximum regret across seeds) for each arm-target pair
-    worst_case_risk_matrix: dict[str, dict[str, float]] = {}
-    for arm in arms:
-        # No data -> 0.0: assume no regret.
-        worst_case_risk_matrix[arm] = {t: max(risk_matrix[arm][t], default=0.0) for t in targets}
+def minimax_arm(risk_matrix: dict[str, dict[str, float]]) -> tuple[str, float]:
+    """Arm minimizing its worst-target regret, and that regret ("", 0.0 if empty).
 
-    return worst_case_risk_matrix
+    Delegates to ``EloTracker.select_minimax_scheduler`` (argmin_i max_j R_ij)
+    so the offline pick and the tracker share one definition.
+    """
+    if not risk_matrix:
+        return "", 0.0
+
+    from fuzzer_tool.core.analyzers.analyzer_elo import EloTracker
+
+    tracker = EloTracker()
+    tracker.from_dict({"use_minimax": True, "risk_matrix": risk_matrix})
+    targets = sorted({t for row in risk_matrix.values() for t in row})
+    arm = tracker.select_minimax_scheduler(list(risk_matrix), targets)
+    return arm, max(risk_matrix[arm].values())
 
 
 def main() -> int:

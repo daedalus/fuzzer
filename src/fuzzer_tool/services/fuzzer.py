@@ -1266,6 +1266,9 @@ class Fuzzer:
         lineage=False,
         lineage_backtrack=False,
         mds_select=False,
+        minimax_select=False,
+        op_minimax=False,
+        wall_order=False,
         mcts=False,
         alphabeta=False,
         sensitivity=False,
@@ -2212,6 +2215,12 @@ class Fuzzer:
         # core/mds_local_search.py). Only affects the count-budget path
         # (max_corpus_bytes uses its own knapsack).
         self._use_mds_select = mds_select
+        # Minimax Phases 3-5: --minimax-select (robust backups in
+        # auto_minimize_corpus), --op-minimax (bandit lookahead),
+        # --wall-order (condstmt_solve wall order).
+        self._use_minimax_select = bool(minimax_select)
+        self._use_op_minimax = bool(op_minimax)
+        self._use_wall_order = bool(wall_order)
         # MCTS seed scheduling walks the lineage genealogy, so it is
         # meaningless without the tree; --mcts implies --lineage.
         self._use_mcts = bool(mcts)
@@ -2305,6 +2314,8 @@ class Fuzzer:
         self._det_execs: int = 0
 
         self.mc_bandit = mc_bandit
+        if self._use_op_minimax and not mc_bandit:
+            print("[!] --op-minimax needs --mc-bandit (it drives the bandit) — no effect")
         self._sharpe_kelly_blend = sharpe_kelly_blend
         # Bootstrap percolation corpus minimization
         self._use_bootstrap = bootstrap

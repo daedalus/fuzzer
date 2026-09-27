@@ -235,6 +235,12 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Shapley value** (`--shapley`): per-edge frequency-weighted operator attribution — credit distributed proportional to co-occurrence frequency, not naive full credit to all stacked operators
 - **Replicator dynamics** (`--replicator`): evolutionary game theory scheduling — operators grow proportionally to fitness, converging to evolutionarily stable strategies
 - **MOpt PSO** (`--mopt`): particle swarm optimization over operator distributions (alternative to Thompson sampling)
+- **Minimax, Phases 2-5** (all opt-in, unmeasured; `docs/handover/handover_minimax_implementation_2026-09-01.md`):
+  - `--op-minimax` (needs `--mc-bandit`): the bandit picks by alpha-beta over its Thompson draws; the target ply blocks the best op (`MonteCarloScheduler.select_op_minimax`, beam 4, depth 3). ~+40 µs per pick over `select_op` at 260 ops.
+  - `--wall-order`: `condstmt_solve` solves the head of `Z3Solver.solve_comparison_wall` over the next 5 unsolved cmplog branches (taint from operand matches; widest component first) instead of a random one. Worst case 0.54 ms/call.
+  - `--minimax-select`: `auto_minimize_corpus` fills the optional budget first with backups for the kept seeds whose removal loses most edges, then top-K. Risk = (max single-seed unique-edge loss, count at max), strictly decreasing.
+  - `bench_paired.py analyse --risk-matrix`: mean regret per (arm, target), no data = 1.0; prints the arm minimizing worst-target regret (`EloTracker.select_minimax_scheduler`).
+  - Bench arms: `elo-op-minimax` (vs `elo`), `wall-order` (vs `baseline`), `minimax-select` (vs `minimize-2k`).
 
 ### Genetic Algorithm Lifecycle (`--ga`)
 - **Finite population**: replaces monotonically growing corpus with bounded, evolving population (`--ga-pop-size`)
@@ -866,6 +872,9 @@ fuzzer-tool minimize ./target -d corpus -c
 
 # Rate-distortion optimal pruning (preserves coverage diversity)
 fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
+
+# Set-cover plus backups for the seeds whose loss would cost most edges
+fuzzer-tool minimize ./target -d corpus -c --minimax-robust --target-frac 1.0
 ```
 
 ### Irreplaceable Seeds

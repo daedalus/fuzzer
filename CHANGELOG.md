@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Minimax Phases 2-5 wired** (were dead code): `fuzz --op-minimax`, `--wall-order`,
+  `--minimax-select`; `minimize --minimax-robust`; `bench_paired.py analyse --risk-matrix`
+  prints the minimax-robust arm. Bench arms `elo-op-minimax`, `wall-order`, `minimax-select`.
+  Fixed on the way: `select_op_minimax` root searched the first 4 ops in list order and
+  scored by posterior mean (no exploration); `_minimax_pick` scored seed size, not unique
+  loss; `minimax_robust_pruning` compared seed count to edge count; the risk matrix took
+  the worst seed (≈1.0 for every arm), read missing data as zero regret, and dropped the
+  baseline arm.
+
 - **Docker `ffmpeg` stage**: `docker build --target ffmpeg` bakes vendored FFmpeg and
   `ffmpeg_read_nosan.so`; `docker run -v DIR:/out` runs a resumable campaign. Image now
   installs compiler-rt (`libclang-rt-dev`), without which every sanitizer link failed.

@@ -98,6 +98,12 @@ _REGION_MISS = object()
 # profile to weight by.
 _REGION_MIN_LEN = 512
 
+# --wall-order: unsolved branches searched per condstmt_solve call. The
+# alpha-beta wall search is factorial in one overlap component, so the
+# window, not the wall, bounds it: worst case (one component) measured
+# 0.29 / 0.54 / 1.27 ms per call at 4 / 5 / 6.
+_WALL_WINDOW = 5
+
 # _op_afl_det: parents whose sweep position is remembered (LRU beyond this),
 # and how many consecutive no-op variants one call may skip before declining.
 _AFL_DET_CURSOR_CAP = 4096
@@ -1177,6 +1183,9 @@ class OperatorEngine:
         # `ctx`'s docstring for why (measured ~19% round-latency cost from
         # rebuilding per-access).
         self._ctx_cache: MutationContext | None = None
+        # _op_condstmt_solve under --wall-order: owns only the (z3-free)
+        # comparison-wall search, built on first use.
+        self._wall_solver = None
 
     @property
     def ctx(self) -> MutationContext:
@@ -2938,7 +2947,10 @@ class OperatorEngine:
         # solved/unsolvable/timeout so the operator still produces a useful
         # operand-substitution mutation.
         unsolved = [c for c in conds if c.state is CondState.UNSOLVED]
-        target = rng.choice(unsolved) if unsolved else rng.choice(conds)
+        if unsolved and self.ctx.wall_order_enabled:
+            target = self._wall_head(unsolved, bytes(buf))
+        else:
+            target = rng.choice(unsolved) if unsolved else rng.choice(conds)
 
         data = bytes(buf)
         target_value = target.base.op_b if rng.random() < 0.5 else target.base.op_a
@@ -2972,6 +2984,24 @@ class OperatorEngine:
 
         target.mark_unsolvable()
         return self._op_declined("condstmt_solve", buf)
+
+    def _wall_head(self, unsolved: list[CondStmt], data: bytes) -> CondStmt:
+        """First branch of the minimax wall order over the next unsolved window.
+
+        cmplog order approximates execution order, so the window is the
+        next few comparisons of the wall; taint offsets come from operand
+        matches in *data* and decide which of them conflict.
+        """
+        window = unsolved[:_WALL_WINDOW]
+        for c in window:
+            c.update_from_input(data)
+
+        if self._wall_solver is None:
+            from fuzzer_tool.core.smt_solver import Z3Solver
+
+            self._wall_solver = Z3Solver()
+        order = self._wall_solver.solve_comparison_wall(window, max_depth=_WALL_WINDOW)
+        return order[0] if order else window[0]
 
     def _get_cond_stmts(self) -> list[CondStmt]:
         """Lazily build and cache the CondStmt list from cmplog pairs."""
@@ -4963,7 +4993,11 @@ class OperatorEngine:
             op, pid = f._mopt.select_op(ops)
             f._last_mopt_particles.append(pid)
         elif strategy == "bandit" and f.mc and f.mc_bandit:
-            op = f.mc.select_op(ops, prev_op=f._prev_bandit_op)
+            # --op-minimax: alpha-beta lookahead over the same Thompson draws.
+            if getattr(f, "_use_op_minimax", False):
+                op = f.mc.select_op_minimax(ops)
+            else:
+                op = f.mc.select_op(ops, prev_op=f._prev_bandit_op)
             f._prev_bandit_op = op
             f._last_mopt_particles.append(None)
         elif strategy == "cem" and f.mc and f.mc_cem:

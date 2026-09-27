@@ -424,6 +424,7 @@ class TestMutationContext:
             "path_solver",
             "wfc_enabled",
             "formatfuzzer_enabled",
+            "wall_order_enabled",
         }
         assert not hasattr(ctx, "__dict__")
         with pytest.raises(AttributeError):

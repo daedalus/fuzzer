@@ -729,6 +729,9 @@ def cmd_fuzz(args):
         lineage=getattr(args, "lineage", False),
         lineage_backtrack=getattr(args, "lineage_backtrack", False),
         mds_select=getattr(args, "mds_select", False),
+        minimax_select=getattr(args, "minimax_select", False),
+        op_minimax=getattr(args, "op_minimax", False),
+        wall_order=getattr(args, "wall_order", False),
         secretary=getattr(args, "secretary", False),
         secretary_window=getattr(args, "secretary_window", 500),
         secretary_exploration=getattr(args, "secretary_exploration", 0.368),
@@ -1123,7 +1126,13 @@ def cmd_genseed(args):
 def cmd_minimize(args):
     """Corpus minimization subcommand."""
     _validate_target(args.target)
-    from fuzzer_tool.services.minimize import minimize_corpus
+    from fuzzer_tool.services.minimize import PruneMode, minimize_corpus
+
+    prune = PruneMode.SET_COVER
+    if getattr(args, "rate_distortion", False):
+        prune = PruneMode.RATE_DISTORTION
+    if getattr(args, "minimax_robust", False):
+        prune = PruneMode.MINIMAX_ROBUST
 
     kept, removed = minimize_corpus(
         target=args.target,
@@ -1133,8 +1142,8 @@ def cmd_minimize(args):
         target_args=args.target_args,
         use_coverage=args.coverage,
         output_dir=args.output,
-        rate_distortion=getattr(args, "rate_distortion", False),
         target_frac=getattr(args, "target_frac", 0.95),
+        prune=prune,
     )
 
     if removed == 0:
@@ -1906,6 +1915,10 @@ def cmd_sweep(args):
 # top-K path it replaces. --hail-mary means "every plausible strategy", not
 # "every strategy whose selection-quality tradeoff is still a guess".
 #
+# wall_order / op_minimax / minimax_select (--wall-order, --op-minimax,
+# --minimax-select) are excluded like mds_select: minimax Phases 3-5, wired
+# but unmeasured (docs/handover/handover_minimax_implementation_2026-09-01.md).
+#
 # fpl, op_span_reverse and op_span_relocate were missing from the tuple
 # below while every other scheduler (exp3 .. cusum_ucb, c2ucb) and every
 # other operator gate (wfc, weizz_tags, formatfuzzer) was in it -- three
@@ -2386,6 +2399,26 @@ def main() -> int:
         "space: high-scoring seeds get a smaller exclusion radius (pack densely), "
         "low-scoring seeds get a larger one (need more clearance to keep a slot). "
         "Only affects the count-budget path, not --max-corpus-bytes.",
+    )
+    fuzz_parser.add_argument(
+        "--minimax-select",
+        action="store_true",
+        help="In auto_minimize_corpus, fill the optional budget first with backups "
+        "for the kept seeds whose removal would lose the most edges (minimax "
+        "single-seed loss), then top-K by score. Count-budget path only.",
+    )
+    fuzz_parser.add_argument(
+        "--op-minimax",
+        action="store_true",
+        help="The bandit (--mc-bandit) picks operators by alpha-beta lookahead over "
+        "its Thompson draws instead of the single best draw",
+    )
+    fuzz_parser.add_argument(
+        "--wall-order",
+        action="store_true",
+        help="condstmt_solve solves the next cmplog comparison in minimax wall "
+        "order (widest taint first, conflicts searched by alpha-beta) instead "
+        "of a random unsolved one",
     )
     fuzz_parser.add_argument(
         "--exp3", action="store_true", help="Enable EXP3 adversarial bandit operator scheduling"
@@ -4609,6 +4642,13 @@ def main() -> int:
         "--rate-distortion",
         action="store_true",
         help="Use rate-distortion optimal pruning (preserves coverage diversity)",
+    )
+    min_parser.add_argument(
+        "--minimax-robust",
+        action="store_true",
+        help="Set-cover to --target-frac, then add backups for the seeds whose "
+        "removal would lose the most edges (minimax single-seed loss). "
+        "Overrides --rate-distortion.",
     )
     min_parser.add_argument(
         "--target-frac",

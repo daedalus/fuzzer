@@ -1551,10 +1551,27 @@ class CorpusManager:
             return mandatory_seeds + self._mds_select_optional(
                 scored, target_size, len(mandatory_seeds)
             )
+        if getattr(f, "_use_minimax_select", False):
+            return mandatory_seeds + self._minimax_select_optional(
+                scored, target_size - len(mandatory_seeds), mandatory_seeds
+            )
         # Count-budget: keep top-K by score (original behavior)
         budget = target_size - len(mandatory_seeds)
         keep = min(budget, len(scored))
         return mandatory_seeds + [s for _, s in scored[:keep]]
+
+    def _minimax_select_optional(
+        self, scored: list[tuple[float, bytes]], budget: int, kept: list[bytes]
+    ) -> list[bytes]:
+        """Robust backups first, then top-K by score for the slots left."""
+        ranked = [s for _, s in scored]
+        picked = self.minimax_robust_admission(ranked, budget, kept)
+
+        # Robustness stops once no seed lowers the worst single-seed loss;
+        # the rest of the budget goes to the plain top-K order.
+        taken = {id(s) for s in picked}
+        rest = [s for s in ranked if id(s) not in taken]
+        return picked + rest[: max(0, budget - len(picked))]
 
     def _minimize_score(self, seed: bytes) -> float:
         """Keep-score of an optional seed: edge score x Wasserstein x PPMD x QP."""
@@ -1812,47 +1829,45 @@ class CorpusManager:
                 sub.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(fh), str(sub / fh.name))
 
-    def minimax_robust_admission(self, candidate_seeds: list[bytes]) -> list[bytes]:
-        """Apply minimax-robust corpus admission using rate-distortion analysis.
+    def minimax_robust_admission(
+        self,
+        candidate_seeds: list[bytes],
+        budget: int | None = None,
+        kept: list[bytes] | None = None,
+    ) -> list[bytes]:
+        """Pick up to *budget* candidates that minimize the max single-seed loss.
 
-        This selects seeds to minimize maximum coverage loss if any single seed
-        is removed — the minimax-robust version of corpus admission.
+        *kept* seeds (set-cover mandatory) count toward robustness but are
+        never returned: a candidate is worth a slot when it backs up the
+        kept seed whose removal would lose the most edges.
 
         Args:
-            candidate_seeds: List of seed bytes to consider for admission.
+            candidate_seeds: Optional seeds to consider.
+            budget: Maximum number of candidates to admit (default: all).
+            kept: Seeds already kept (default: none).
 
         Returns:
-            List of seeds to admit (in selection order).
+            Admitted candidates, in selection order.
         """
-        f = self.f
-        et = f._edge_tracker
+        budget = len(candidate_seeds) if budget is None else budget
+        kept = kept or []
+        et = self.f._edge_tracker
+        if budget <= 0 or not candidate_seeds or et is None:
+            return []
 
-        if not candidate_seeds or not et or not et.seed_edges:
-            return candidate_seeds
-
-        # Build seed_edges dict for the candidates
         seed_edges: dict[str, set[int]] = {}
-        for seed in candidate_seeds:
+        key_to_seed: dict[str, bytes] = {}
+        for seed in candidate_seeds + kept:
             sk = self.seed_key(seed)
-            edges = et.seed_edges.get(sk, set())
+            edges = et.seed_edges.get(sk)
             if edges:
                 seed_edges[sk] = edges
+                key_to_seed[sk] = seed
 
-        if not seed_edges:
-            return candidate_seeds[:1] if candidate_seeds else []
-
-        # Use the rate-distortion module's minimax-robust selection
+        kept_keys = [self.seed_key(s) for s in kept]
         rd = RateDistortionCorpus()
-        max_seeds = getattr(f, "_minimax_corpus_size", len(candidate_seeds))
-        selected_keys = rd.minimax_robust_corpus_admission(seed_edges, max_seeds)
-
-        # Map back to seeds
-        key_to_seed: dict[str, bytes] = {}
-        for seed in candidate_seeds:
-            key_to_seed[self.seed_key(seed)] = seed
-
-        result = [key_to_seed[k] for k in selected_keys if k in key_to_seed]
-        return result
+        picked = rd.minimax_robust_corpus_admission(seed_edges, budget, kept_keys)
+        return [key_to_seed[k] for k in picked]
 
     def deprioritize_near_duplicates(self):
         f = self.f
