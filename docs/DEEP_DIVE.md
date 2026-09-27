@@ -1325,6 +1325,24 @@ lacks and sets with no edge mode (`trace-pc-guard`, `inline-8bit-counters`,
 `elf.sancov_guard_status` and `estimate_map_size_detail` (`"sancov_bools"`)
 recognise `__sancov_bools`. Tests: `tests/test_sancov_modes.py`.
 
+**Measured (2026-09-27, fuzzgoat_read_asan.so, in-process, 10 paired seeds ×
+5k execs, 3 concurrent).** Coverage scored by replaying each final corpus
+through the `trace-pc-guard` nosan build (native ids are not comparable across
+modes). Δ is vs `trace-pc-guard`; W/L = seeds won/lost; p = exact McNemar.
+
+| Mode | Oracle edges med | Δ med | W/L | p | exec/s ratio |
+|------|------------------|-------|-----|---|--------------|
+| `trace-pc-guard` (A/A copy) | 266.5 | +8 | 5/5 | 1.00 | 0.98 |
+| `inline-8bit-counters` | 231 | −23.5 | 1/8 | 0.04 | 1.05 |
+| `inline-bool-flag` | 229 | −38.5 | 1/9 | 0.02 | 1.14 |
+| `+trace-loads,trace-stores` | 272 | +6.5 | 6/4 | 0.75 | 1.02 |
+| `+pc-table` | 274.5 | +10.5 | 7/3 | 0.34 | 1.00 |
+
+Inline modes lose coverage: block ids carry no edge or call-context signal, and
+the ≤14% speed gain does not pay for it at this budget. Keep `trace-pc-guard`
+as default. Data-flow and pc-table are indistinguishable from the A/A spread
+(IQR ±27 edges) at n=10.
+
 ### Intel PT Hardware Trace Coverage (`--intel-pt`)
 
 Coverage for binaries that cannot be rebuilt, with no instrumentation in the
