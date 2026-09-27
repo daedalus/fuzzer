@@ -10,35 +10,28 @@ Jittered Voronoi Partitions*, 2026-08-29.
 
 ---
 
-## 1. Sub-operator composition is not live
+## 1. Sub-operators act per byte, not per cell span
 
-The premise — each Voronoi cell runs a different sub-operator, boundaries blend
-them — is not what ships. `_register()` builds `FractalVoronoiMutator()` with no
-`cell_ops`, so `mutate()` always takes the XOR fallback (`(root_hash + idx) % 5`).
-The `cell_ops` branch is reached only in tests
-(`tests/test_fractal_voronoi_plan_cache.py`), and even there applies the
-sub-op to one byte at a time (the "A full integration would pass a sub-region"
-comment in `mutate()`).
+**Wiring fixed 2026-09-27:** `_register()` passes `DEFAULT_CELL_OPS` (six
+single-byte bijections: invert, ±1, nibble swap, MSB flip, rotate); the bare
+constructor keeps the XOR fallback. Test:
+`tests/test_regression_fractal_voronoi_wiring.py`.
 
-- **Do:** pass sub-operators at registration (bit/byte/block band), and hand
-  each cell's byte span to its sub-op rather than single bytes.
-- **Open:** registry has no `get_operators(bands)`; sub-ops are `OperatorEngine`
-  `_op_*` handlers with `(buf, byte_idx, data)` signatures, not `bytes -> bytes`.
-  Needs an adapter at the services layer (Hard Rule 36: no layer punching).
-- **Accept:** registered instance has non-empty `cell_ops`; test shows two cells
-  with different roots mutated by different sub-ops.
+Still open: each sub-op sees one byte (`op(bytes([data[idx]]))`), not the cell's
+byte span, and the ops are core-local rather than the engine's `_op_*`
+handlers (those take `(buf, byte_idx, data)`; an adapter belongs in the
+services layer, Hard Rule 36).
 
-## 2. `mutate()` ignores `rng`
+- **Do:** hand each cell's gathered bytes to its sub-op, scatter back
+  length-preserved; optionally adapt engine handlers via services.
+- **Accept:** test shows a multi-byte op (e.g. reverse) applied to a whole cell.
 
-Output is a pure function of `data` (plan keyed on `(side, n, max_depth)`,
-every choice from SHA-256 of root/boundary). Each seed yields exactly one
-mutant; every re-selection re-executes the same input.
+## 2. `mutate()` ignored `rng` — fixed 2026-09-27
 
-- **Do:** draw a per-call salt from `rng` / `context.rand_pool` (Hard Rule 16)
-  and mix it into cell→op choice and apply mask. Keep geometry (`_plan`) cached.
-- **Accept:** scripted RNG (`tests/support/scripted_rng.py`) drives two
-  different salts → two different, exactly-asserted outputs; same salt →
-  identical output.
+One `rng.randint(0, 0xFFFFFFFF)` salt per call XORs into every hash-driven
+choice (op, byte gate, XOR value, boundary jitter); `_plan` geometry stays
+cached. `rng=None` or salt 0 reproduces the legacy output. Tested with
+`ScriptedRng` in `tests/test_regression_fractal_voronoi_wiring.py`.
 
 ## 3. A/B never run (pending §E4)
 
@@ -48,7 +41,7 @@ seam) first.
 
 - **Do:** paired run (`tools/benchmark.py paired`) on a structured target
   (`png_read`, `ffmpeg_read`), on vs off. Metric: new edges, Elo/op-stats share,
-  exec/s. Do after §1–§2, or the result measures the XOR fallback.
+  exec/s. Wiring and salt (§1–§2) landed 2026-09-27; measure on or after that.
 - **Accept:** result recorded under `docs/sweeps/`.
 
 ## 4. Depth tuning (contingent on §3)

@@ -172,6 +172,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`fractal_voronoi` ran without sub-operators and ignored `rng`**: the registered
+  instance had no `cell_ops`, so it always XOR-fell-back, and output was a pure
+  function of the input, so a re-picked seed replayed one mutant. Registration now
+  passes six single-byte bijections (`DEFAULT_CELL_OPS`); each call draws one salt
+  from `rng` and mixes it into every choice. `rng=None` keeps the legacy output.
+
 - **`--secretary` no longer reweights seeds or triggers minimization**: its stop rule
   fires on a `1/t` discovery-rate envelope (rank capped at 20 vs threshold `n/e`), so a
   seed was cut 100x after 20 observations and never recovered; `--elo all` enabled it.

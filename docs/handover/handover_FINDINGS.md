@@ -715,9 +715,10 @@ pruned file names its full original: `git show 1c689e8a^:<path>`.
 - **`edge_diagnostic.py op-caches` crashed** (fixed 2026-09-26): it read
   fractal-voronoi/perlin caches as module globals after `6b3b7c3b` moved them
   onto the instances. Regression `tests/test_regression_op_caches_mode.py`.
-- **Fractal-voronoi, two new defects (open):** `_register()` builds the mutator
-  without `cell_ops`, so it always falls back to XOR; `mutate()` ignores `rng`,
-  so each seed yields one mutant.
+- **Fractal-voronoi, two defects (fixed 2026-09-27):** `_register()` built the
+  mutator without `cell_ops`, so it always fell back to XOR; `mutate()` ignored
+  `rng`, so each seed yielded one mutant. Now wired with `DEFAULT_CELL_OPS` and
+  a per-call salt. Per-cell-span sub-ops remain open.
 - **Ledger corrections:** GARCH and QEA were marked closed but their A/Bs never
   ran; combinatorics 10h is done and 10g closed by decision.
 - **Stale constraints:** `grep_read.c` now links the vendored engines (no
