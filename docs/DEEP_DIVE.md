@@ -1029,6 +1029,14 @@ fuzzer-tool fuzz ~/fuzzing/builds/ffmpeg_read_*_asan -d <corpus>        (multi-t
 links executables only: one process per version, one SHM map each, shared corpus. A crash
 unique to one version is a regression or a silent fix. Test: `tests/test_regression_ffmpeg_multi_version.py`.
 
+**Synergy A/B** (`tools/ab_synergy_multi_ffmpeg.py`): does the joint campaign cover a version
+better than separate ones at equal compute? Arms per seed: MULTI (all versions, N execs), SPLIT
+(each alone, N/V), FULL (each alone, N), CONTROL (SPLIT on a disjoint seed, A/A). Every final corpus
+is replayed on every binary (edge ids are per binary); primary comparison MULTI vs SPLIT_UNION (the
+V split corpora pooled). Wilcoxon per version, Holm-adjusted; `analyse` exits 2 when CONTROL differs
+from SPLIT. Replay A/A on 9.0.2: 12 of 6,327 ids differ between two replays. Resumable
+(`rows.pkl`, edge ids as `array('I')`). Test: `tests/test_ab_synergy_multi_ffmpeg.py`.
+
 ### Vendored libsecp256k1 target (secp256k1_read)
 
 `targets/secp256k1_read.so` wraps the vendored libsecp256k1 v0.8.0
