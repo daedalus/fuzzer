@@ -57,6 +57,7 @@ _LOADS = r"""
 int table[64];
 int main(int argc, char **argv) {
     int i = argc > 1 ? atoi(argv[1]) : 0;
+    __afl_map_edge(0x1100); /* inlined shim-state access, as harness wrappers do */
 #ifdef USE_STACK
     int local[64] = {0};
     volatile int *p = &local[i & 63];
@@ -69,7 +70,13 @@ int main(int argc, char **argv) {
 """
 
 
-def _build(tmp_path, name, source, mode, *defines):
+@pytest.fixture(params=["-O0", "-O1", "-O2"])
+def opt(request):
+    """Inlining and the vector fold both change with the optimisation level."""
+    return request.param
+
+
+def _build(tmp_path, name, source, mode, *defines, opt="-O1"):
     src = tmp_path / f"{name}.c"
     src.write_text(source)
     obj = tmp_path / f"{name}.o"
@@ -78,7 +85,7 @@ def _build(tmp_path, name, source, mode, *defines):
     # Compile with the coverage flag, link without it (see module docstring).
     cc = [
         "clang",
-        "-O1",
+        opt,
         "-fno-omit-frame-pointer",
         "-D__AFL_CTX_SENSITIVE=0",
         *defines,
@@ -115,8 +122,8 @@ class TestLinks:
         "mode",
         [COUNTERS, BOOLS, f"{COUNTERS},pc-table", "trace-pc-guard,pc-table", DATAFLOW],
     )
-    def test_mode_links_and_runs(self, tmp_path, mode):
-        exe = _build(tmp_path, "t", _LOADS, mode)
+    def test_mode_links_and_runs(self, tmp_path, mode, opt):
+        exe = _build(tmp_path, "t", _LOADS, mode, opt=opt)
         rc, edges = _edges(exe, "3")
         assert rc == 0
         assert edges
@@ -125,23 +132,23 @@ class TestLinks:
 @requires_clang
 class TestInlineFold:
     @pytest.mark.parametrize("mode", [COUNTERS, BOOLS])
-    def test_branch_changes_blocks(self, tmp_path, mode):
+    def test_branch_changes_blocks(self, tmp_path, mode, opt):
         """Falsification: an unfolded map is identical for both inputs."""
-        exe = _build(tmp_path, "b", _BRANCHY, mode)
+        exe = _build(tmp_path, "b", _BRANCHY, mode, opt=opt)
         _, taken = _edges(exe, "X")
         _, skipped = _edges(exe, "Y")
         assert taken and skipped
         assert taken != skipped
 
     @pytest.mark.parametrize("mode", [COUNTERS, BOOLS])
-    def test_crash_still_folds(self, tmp_path, mode):
+    def test_crash_still_folds(self, tmp_path, mode, opt):
         """Adversarial: the crash path siglongjmps past the normal return."""
-        exe = _build(tmp_path, "c", _BRANCHY, mode)
+        exe = _build(tmp_path, "c", _BRANCHY, mode, opt=opt)
         _, crashed = _edges(exe, "C")
         _, clean = _edges(exe, "Y")
         assert crashed - clean
 
-    def test_fold_clears_counters(self, tmp_path):
+    def test_fold_clears_counters(self, tmp_path, opt):
         """Adversarial: stale counts would credit old blocks to the next exec."""
         # Walks the shim's own region table (same TU). Declaring the
         # __start___sancov_cntrs bounds here would shadow clang's hidden
@@ -160,33 +167,68 @@ class TestInlineFold:
             "int main("
         )
         src = _BRANCHY.replace("int main(", counter).replace("_exit(0);", "_exit(live());")
-        exe = _build(tmp_path, "z", src, COUNTERS)
+        exe = _build(tmp_path, "z", src, COUNTERS, opt=opt)
         rc, _ = _edges(exe, "X")
         assert rc == 0
 
 
+def _calls_in(exe, fn):
+    """Call targets inside one function's disassembly (objdump, local symbols)."""
+    out = subprocess.run(
+        ["objdump", "-d", "--no-show-raw-insn", f"--disassemble={fn}", exe],
+        capture_output=True,
+        text=True,
+    ).stdout
+    return [line.split("<", 1)[-1].rstrip(">") for line in out.splitlines() if "\tcall" in line]
+
+
+@requires_clang
+class TestFoldSignalSafety:
+    def test_fold_calls_no_libc(self, tmp_path, opt):
+        """The crash handler runs the fold, so it must not call memset or friends.
+
+        Adversarial: a crash inside malloc followed by a libc call from the
+        handler can deadlock. Only the fold's own helpers may appear.
+        """
+        exe = _build(tmp_path, "s", _BRANCHY, COUNTERS, opt=opt)
+        calls = _calls_in(exe, "__afl_sancov_fold") + _calls_in(exe, "__afl_sancov_fold_region")
+        assert all(c.startswith("__afl_sancov_") for c in calls), calls
+
+
 @requires_clang
 class TestDataflow:
-    def test_global_offset_is_a_feature(self, tmp_path):
+    def test_global_offset_is_a_feature(self, tmp_path, opt):
         """Falsification: control flow is identical, only the offset differs."""
-        exe = _build(tmp_path, "g", _LOADS, DATAFLOW)
+        exe = _build(tmp_path, "g", _LOADS, DATAFLOW, opt=opt)
         _, a = _edges(exe, "3")
         _, b = _edges(exe, "9")
         assert a != b
 
-    def test_same_offset_is_stable(self, tmp_path):
+    def test_same_offset_is_stable(self, tmp_path, opt):
         """Control: two runs on one input must agree, or the check above is noise."""
-        exe = _build(tmp_path, "s", _LOADS, DATAFLOW)
+        exe = _build(tmp_path, "s", _LOADS, DATAFLOW, opt=opt)
         _, a = _edges(exe, "3")
         _, b = _edges(exe, "3")
         assert a == b
 
-    def test_stack_addresses_are_ignored(self, tmp_path):
+    def test_stack_addresses_are_ignored(self, tmp_path, opt):
         """Adversarial: stack/heap addresses move with ASLR; they must mint nothing."""
-        exe = _build(tmp_path, "l", _LOADS, DATAFLOW, "-DUSE_STACK")
+        exe = _build(tmp_path, "l", _LOADS, DATAFLOW, "-DUSE_STACK", opt=opt)
         _, a = _edges(exe, "3")
         _, b = _edges(exe, "9")
         assert a == b
+
+    def test_shim_state_is_not_a_feature(self, tmp_path, opt):
+        """Adversarial: the shim's own globals share the TU, so they are in range.
+
+        With only stack accesses in the target, a data-flow build must record
+        exactly the guard-only build's edges; any extra id is shim bookkeeping.
+        """
+        flow = _build(tmp_path, "f", _LOADS, DATAFLOW, "-DUSE_STACK", opt=opt)
+        plain = _build(tmp_path, "p", _LOADS, "trace-pc-guard", "-DUSE_STACK", opt=opt)
+        _, with_flow = _edges(flow, "3")
+        _, without = _edges(plain, "3")
+        assert with_flow == without
 
 
 @requires_clang

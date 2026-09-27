@@ -172,6 +172,20 @@
 #  define __AFL_NO_COV
 #endif
 
+/* ── Shim state lives in its own sections ─────────────────────────────
+ *
+ * The shim is -include'd into the target TU, so its writable globals share
+ * the target's .data/.bss -- the span trace-loads/trace-stores features are
+ * keyed on. Every shim access (reset, the inlined __afl_map_edge in harness
+ * wrappers, exit-time tail writes) would then mint data-flow ids for shim
+ * bookkeeping. Placing shim globals in afl_shim_{data,bss} lets
+ * __afl_dataflow skip them by linker-defined bounds. Code and guard order
+ * are untouched, so edge ids do not move. Reset at the end of this file.
+ * gcc has no such pragma and no trace-loads either. */
+#if defined(__clang__)
+#pragma clang section data="afl_shim_data" bss="afl_shim_bss"
+#endif
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1334,7 +1348,9 @@ __AFL_NO_COV static void __afl_sancov_fold_region(const struct __afl_sancov_regi
 
         for (uint32_t j = i; j < i + 64; j++)
             if (p[j]) __afl_sancov_mark(r, j);
-        memset(p + i, 0, 64);
+        /* One vector store, not memset: this runs in the crash handler,
+         * and -O0 lowers memset to a libc call. */
+        *(__afl_v64 *)(p + i) = (__afl_v64){0};
     }
 
     for (; i < n; i++) {
@@ -1378,6 +1394,20 @@ static uintptr_t __afl_data_lo;
 static uintptr_t __afl_data_hi;
 static uintptr_t __afl_data_base;
 
+/* Linker-defined bounds of the shim's own state (see the section pragma at
+ * the top). Weak: absent under gcc, where both ranges read as empty. */
+extern char __start_afl_shim_data[] __attribute__((weak, visibility("hidden")));
+extern char __stop_afl_shim_data[] __attribute__((weak, visibility("hidden")));
+extern char __start_afl_shim_bss[] __attribute__((weak, visibility("hidden")));
+extern char __stop_afl_shim_bss[] __attribute__((weak, visibility("hidden")));
+
+__AFL_NO_COV static inline int __afl_is_shim_state(uintptr_t a) {
+    if (a - (uintptr_t)__start_afl_shim_bss <
+        (uintptr_t)__stop_afl_shim_bss - (uintptr_t)__start_afl_shim_bss) return 1;
+    return a - (uintptr_t)__start_afl_shim_data <
+           (uintptr_t)__stop_afl_shim_data - (uintptr_t)__start_afl_shim_data;
+}
+
 /* dl_iterate_phdr callback: find the object holding `self`, record the
  * union of its writable PT_LOAD segments. Returns 1 to stop the walk. */
 __AFL_NO_COV static int __afl_data_phdr(struct dl_phdr_info *info, size_t size, void *self) {
@@ -1412,6 +1442,7 @@ __AFL_NO_COV static void __afl_map_data_range(void) {
 __AFL_NO_COV static inline void __afl_dataflow(void *addr, void *pc) {
     uintptr_t off = (uintptr_t)addr - __afl_data_lo;
     if (off >= __afl_data_hi - __afl_data_lo) return;  /* also lo == hi == 0 */
+    if (__afl_is_shim_state((uintptr_t)addr)) return;
     if (!__afl_area) return;
 
     uint64_t h = 1469598103934665603ULL; /* FNV-1a, as __afl_compcov_mark */
@@ -3475,3 +3506,7 @@ __AFL_NO_COV static void __afl_preload_init(void) {
     sigaction(SIGFPE,  &sa, &__afl_pre_old_fpe);
 }
 #endif /* !__AFL_EDGE && __AFL_CMPLOG */
+
+#if defined(__clang__)
+#pragma clang section data="" bss=""
+#endif

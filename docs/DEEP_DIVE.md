@@ -1307,8 +1307,10 @@ pass cannot clobber another variant's object before its link.
 
 #### Other SanitizerCoverage modes
 
-The shim defines the runtime callbacks for every sancov mode clang emits.
-Builds without them fail to link. Select modes with
+The shim defines the runtime callbacks for the modes below; without them a
+build fails to link. `stack-depth` is not among them (the sanitizer
+runtimes own `__sancov_lowest_stack`), nor are `indirect-calls` / `trace-pc`
+outside distance builds. Select modes with
 `tools/build_targets.sh --sancov=inline-8bit-counters,pc-table` (implies
 `--clang-scov`; default `trace-pc-guard`). The script rejects modes the shim
 lacks and sets with no edge mode (`trace-pc-guard`, `inline-8bit-counters`,
@@ -1318,7 +1320,7 @@ lacks and sets with no edge mode (`trace-pc-guard`, `inline-8bit-counters`,
 |------|---------------|
 | `inline-8bit-counters`, `inline-bool-flag` | `*_init` registers the byte array (≤64 modules). `__afl_sancov_fold()` turns each nonzero byte into one block id (guard-style hash of its index) and clears it. Fold points: `__afl_guarded_call` return, crash handler, process exit. Block ids, not edges. |
 | `pc-table` | `__sanitizer_cov_pcs_init` is a no-op; the edge map needs no PCs. |
-| `trace-loads`, `trace-stores` | Data-flow feature: `(site, offset)` for accesses inside the module's writable `PT_LOAD` span (`.data`/`.bss`). Stack/heap addresses are dropped (ASLR noise). Keys are base-relative. |
+| `trace-loads`, `trace-stores` | Data-flow feature: `(site, offset)` for accesses inside the module's writable `PT_LOAD` span (`.data`/`.bss`). Stack/heap addresses are dropped (ASLR noise), and so is the shim's own state (clang places it in `afl_shim_{data,bss}`). Keys are base-relative. |
 
 `elf.sancov_guard_status` and `estimate_map_size_detail` (`"sancov_bools"`)
 recognise `__sancov_bools`. Tests: `tests/test_sancov_modes.py`.
