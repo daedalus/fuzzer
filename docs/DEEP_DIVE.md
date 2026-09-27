@@ -277,6 +277,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Glob expansion**: `targets/fuzz_*` expands to all matching executables, automatically skips non-binaries (`.c`, `.py`, `.sh`, etc.)
 - **Per-target SHM**: each target gets its own shared memory region for independent edge tracking
 - **Weighted round-robin**: targets with fewer discovered edges get proportionally more execution time
+- **`--target-schedule round-robin`**: target changes every exec, in order (exec i -> target i mod N), exactly equal shares; default `weighted` = strict RR for 100 execs, then a per-exec draw weighted by 1/edges (`core/target_schedule.py`, test `tests/test_target_schedule.py`)
 - **Cross-target seed scoring**: seeds productive for the least-covered target get boosted in selection
 - **Per-target stats**: startup shows `[AFL]`/`[no-AFL]` detection, branch density per target; live stats show edge counts per target
 - **AFL detection**: binary checked for `__afl_area`/`__afl_map_shm` symbols via `nm` at startup

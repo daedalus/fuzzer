@@ -14,6 +14,7 @@ from pathlib import Path
 from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
+from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.fuzzer import Fuzzer
 
 _original_print = builtins.print
@@ -709,6 +710,9 @@ def cmd_fuzz(args):
         markov_blend=getattr(args, "markov_blend", False),
         dirichlet_alpha=AlphaMode(getattr(args, "dirichlet_alpha", AlphaMode.FIXED.value)),
         splice_donor=SpliceDonor(getattr(args, "splice_donor", SpliceDonor.UNIFORM.value)),
+        target_schedule=TargetSchedule(
+            getattr(args, "target_schedule", TargetSchedule.WEIGHTED.value)
+        ),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
         bo_gp_length_scale=getattr(args, "bo_gp_length_scale", 1.0),
@@ -2111,6 +2115,13 @@ def main() -> int:
     # --- fuzz (default) ---
     fuzz_parser = subparsers.add_parser("fuzz", help="Run coverage-guided fuzzing")
     fuzz_parser.add_argument("targets", nargs="+", help="Path(s) to target binary(ies)")
+    fuzz_parser.add_argument(
+        "--target-schedule",
+        choices=[m.value for m in TargetSchedule],
+        default=TargetSchedule.WEIGHTED.value,
+        help="Multi-target: per-exec target pick. 'weighted' (1/edges draw after 100 execs) "
+        "or 'round-robin' (exec i -> target i mod N). Default: weighted.",
+    )
     fuzz_parser.add_argument(
         "-d", "--corpus", default=None, help="Corpus directory (default: ~/fuzzing/<target>/corpus)"
     )
