@@ -277,6 +277,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Glob expansion**: `targets/fuzz_*` expands to all matching executables, automatically skips non-binaries (`.c`, `.py`, `.sh`, etc.)
 - **Per-target SHM**: each target gets its own shared memory region for independent edge tracking
 - **Weighted round-robin**: targets with fewer discovered edges get proportionally more execution time
+- **`--target-schedule round-robin`**: target changes every exec, in order (exec i -> target i mod N), exactly equal shares; default `weighted` = strict RR for 100 execs, then a per-exec draw weighted by 1/edges (`core/target_schedule.py`, test `tests/test_target_schedule.py`)
 - **Cross-target seed scoring**: seeds productive for the least-covered target get boosted in selection
 - **Per-target stats**: startup shows `[AFL]`/`[no-AFL]` detection, branch density per target; live stats show edge counts per target
 - **AFL detection**: binary checked for `__afl_area`/`__afl_map_shm` symbols via `nm` at startup
@@ -1028,6 +1029,14 @@ fuzzer-tool fuzz ~/fuzzing/builds/ffmpeg_read_*_asan -d <corpus>        (multi-t
 `build_ffmpeg_versions` reuses `build_vendored_ffmpeg_sancov` (its 2nd arg names the tree) and
 links executables only: one process per version, one SHM map each, shared corpus. A crash
 unique to one version is a regression or a silent fix. Test: `tests/test_regression_ffmpeg_multi_version.py`.
+
+**Synergy A/B** (`tools/ab_synergy_multi_ffmpeg.py`): does the joint campaign cover a version
+better than separate ones at equal compute? Arms per seed: MULTI (all versions, N execs), SPLIT
+(each alone, N/V), FULL (each alone, N), CONTROL (SPLIT on a disjoint seed, A/A). Every final corpus
+is replayed on every binary (edge ids are per binary); primary comparison MULTI vs SPLIT_UNION (the
+V split corpora pooled). Wilcoxon per version, Holm-adjusted; `analyse` exits 2 when CONTROL differs
+from SPLIT. Replay A/A on 9.0.2: 12 of 6,327 ids differ between two replays. Resumable
+(`rows.pkl`, edge ids as `array('I')`). Test: `tests/test_ab_synergy_multi_ffmpeg.py`.
 
 ### Vendored libsecp256k1 target (secp256k1_read)
 

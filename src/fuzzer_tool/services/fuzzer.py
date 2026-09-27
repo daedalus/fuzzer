@@ -104,6 +104,7 @@ from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.shapley import ShapleyAttribution
 from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
+from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import Validity, ValidityChannel
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.maintenance import MaintenanceJob, MaintenanceQueue
@@ -1427,6 +1428,8 @@ class Fuzzer:
         # Golden-ratio sibling of pos_round_robin (see
         # core/schedulers/pos_fibonacci.py); same two reaches.
         pos_fibonacci=False,
+        # Appended: positional signature (see region_profile above).
+        target_schedule=TargetSchedule.WEIGHTED,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -1454,6 +1457,8 @@ class Fuzzer:
         # Multi-target support: list of target binaries to fuzz with shared corpus
         self.multi_targets = multi_targets  # None for single-target
         self._active_target_idx = 0  # round-robin index
+        self._target_schedule = target_schedule
+        self._rr_turn = 0  # ROUND_ROBIN: execs scheduled so far, so exec 0 -> target 0
         self._target_shm_covs = {}  # target_path -> ShmCoverage (per-target)
         self._target_profiles = {}  # target_path -> TargetProfile
         # Pin the address-space layout BEFORE anything spawns, dlopens, or
@@ -1775,7 +1780,9 @@ class Fuzzer:
         self._unstable_edges: set[int] = set()
         self._stability_calibrations = 0
         self._cmplog_auto = True  # always auto-detect; no tri-state any more
-        self._compcov_level = 0 if compcov_level < 0 else (2 if compcov_level > 2 else int(compcov_level))
+        self._compcov_level = (
+            0 if compcov_level < 0 else (2 if compcov_level > 2 else int(compcov_level))
+        )
         if self._compcov_level and not cmplog:
             print("[!] --compcov-level requires cmplog; ignoring (cmplog is off)")
             self._compcov_level = 0
@@ -4905,8 +4912,12 @@ class Fuzzer:
         """Select the next target for multi-target round-robin fuzzing."""
         if not self.multi_targets:
             return
-        # Weighted round-robin: prefer targets with fewer total edges discovered
-        if len(self.multi_targets) > 1 and self.exec_count > 100:
+        # Weighted round-robin: prefer targets with fewer total edges discovered.
+        # --target-schedule round-robin skips it: every exec takes the next target.
+        if self._target_schedule is TargetSchedule.ROUND_ROBIN:
+            self._active_target_idx = self._rr_turn % len(self.multi_targets)
+            self._rr_turn += 1
+        elif len(self.multi_targets) > 1 and self.exec_count > 100:
             # Weight by inverse of cumulative edges (less-covered targets get more execs)
             weights = []
             for t in self.multi_targets:
@@ -8698,7 +8709,10 @@ class Fuzzer:
     def run(self, iterations=0, max_execs=0):
         self._start_stack_heartbeat()
         if self.multi_targets:
-            print(f"[*] Multi-target: {len(self.multi_targets)} targets, shared corpus")
+            print(
+                f"[*] Multi-target: {len(self.multi_targets)} targets, shared corpus, "
+                f"schedule={self._target_schedule.value}"
+            )
             uninstrumented = []
             for i, t in enumerate(self.multi_targets):
                 status = afl_instrumentation_status(t)
