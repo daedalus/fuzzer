@@ -1305,6 +1305,21 @@ saw 179-196 ids on the same corpus; `nm` showed the `.so` with 88
 PIE. The object is also keyed per suffix (`/tmp/fuzzgoat${suffix}.o`) so one
 pass cannot clobber another variant's object before its link.
 
+#### Other SanitizerCoverage modes
+
+The shim defines the runtime callbacks for every sancov mode clang emits.
+Builds without them fail to link. `tools/build_targets.sh` still emits
+`trace-pc-guard` only (see `docs/TODO.md`).
+
+| Mode | Shim behavior |
+|------|---------------|
+| `inline-8bit-counters`, `inline-bool-flag` | `*_init` registers the byte array (≤64 modules). `__afl_sancov_fold()` turns each nonzero byte into one block id (guard-style hash of its index) and clears it. Fold points: `__afl_guarded_call` return, crash handler, process exit. Block ids, not edges. |
+| `pc-table` | `__sanitizer_cov_pcs_init` is a no-op; the edge map needs no PCs. |
+| `trace-loads`, `trace-stores` | Data-flow feature: `(site, offset)` for accesses inside the module's writable `PT_LOAD` span (`.data`/`.bss`). Stack/heap addresses are dropped (ASLR noise). Keys are base-relative. |
+
+`elf.sancov_guard_status` and `estimate_map_size_detail` (`"sancov_bools"`)
+recognise `__sancov_bools`. Tests: `tests/test_sancov_modes.py`.
+
 ### Intel PT Hardware Trace Coverage (`--intel-pt`)
 
 Coverage for binaries that cannot be rebuilt, with no instrumentation in the
