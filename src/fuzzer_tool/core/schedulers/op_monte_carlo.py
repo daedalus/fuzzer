@@ -8,12 +8,14 @@ Also tracks Brier score (binary CRPS) for bandit calibration diagnostics.
 """
 
 import collections
+import heapq
 import logging
 import math
 import time
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
+from itertools import islice
 from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_structure_function import DispersionIndex
@@ -43,6 +45,11 @@ MIN_BETA_PARAM = 1e-6
 
 # Categories of the CEM per-position byte distribution.
 _BYTE_VALUES = 256
+
+# select_op_minimax: per-ply discount, and the fraction of an op's score
+# the target's block removes.
+_MINIMAX_DISCOUNT = 0.5
+_MINIMAX_BLOCK = 0.3
 
 
 @dataclass(frozen=True)
@@ -256,11 +263,30 @@ class MonteCarloScheduler:
         Returns:
             Name of the selected operator.
         """
-        # Unconditional Thompson sample for each op. Draws are cached per
-        # arm and reused while the effective posterior params are unchanged,
-        # so a selection doesn't re-pay 83 betavariate draws when the
-        # posterior is piecewise-constant. Periodically all arms are forced
-        # to redraw to prevent a frozen stale draw from dominating forever.
+        thompson_vals = self._thompson_vals(ops)
+
+        # Sharpe/Kelly blend: when enabled, risk-normalized scores replace
+        # or supplement the Thompson draws so high-variance lottery-ticket
+        # arms are down-weighted relative to consistent performers.
+        if self._sharpe_kelly_blend > 0:
+            self._blend_sharpe_kelly(ops, thompson_vals)
+
+        # If no pairwise data or blend is zero, use current scores (Thompson
+        # or SK-blended) directly.
+        if self.pairwise_blend <= 0 or prev_op is None or prev_op not in self.transition_total:
+            return max(ops, key=lambda o: thompson_vals[o])
+
+        return self._blend_pairwise(ops, prev_op, thompson_vals)
+
+    def _thompson_vals(self, ops: list[str]) -> dict[str, float]:
+        """One Thompson sample per op.
+
+        Draws are cached per arm and reused while the effective posterior
+        params are unchanged, so a selection doesn't re-pay 83 betavariate
+        draws when the posterior is piecewise-constant. Periodically all arms
+        are forced to redraw to prevent a frozen stale draw from dominating
+        forever.
+        """
         self._selects_since_refresh += 1
         force_refresh = self._selects_since_refresh >= self._draw_refresh_interval
         if force_refresh:
@@ -275,19 +301,7 @@ class MonteCarloScheduler:
                 draw = self._rng.betavariate(a, b)
                 self._thompson_draw_cache[op] = (a, b, draw)
                 thompson_vals[op] = draw
-
-        # Sharpe/Kelly blend: when enabled, risk-normalized scores replace
-        # or supplement the Thompson draws so high-variance lottery-ticket
-        # arms are down-weighted relative to consistent performers.
-        if self._sharpe_kelly_blend > 0:
-            self._blend_sharpe_kelly(ops, thompson_vals)
-
-        # If no pairwise data or blend is zero, use current scores (Thompson
-        # or SK-blended) directly.
-        if self.pairwise_blend <= 0 or prev_op is None or prev_op not in self.transition_total:
-            return max(ops, key=lambda o: thompson_vals[o])
-
-        return self._blend_pairwise(ops, prev_op, thompson_vals)
+        return thompson_vals
 
     def _blend_sharpe_kelly(self, ops: list[str], thompson_vals: dict[str, float]) -> None:
         """Blend min-max normalized Sharpe+Kelly scores into *thompson_vals* in place."""
@@ -1774,11 +1788,12 @@ class MonteCarloScheduler:
 
         Models operator selection as a two-player game:
         - Fuzzer (maximizer): chooses the next operator to apply
-        - Target (minimizer): the target's coverage response resists progress
+        - Target (minimizer): blocks the operator that would help most
 
-        Uses alpha-beta pruning over a game tree where each ply alternates
-        between fuzzer and target moves. The evaluation function estimates
-        the expected edge-discovery rate from a sequence of operators.
+        Alpha-beta over the beam of top-scored ops; each op is scored by one
+        Thompson sample, so selection still explores like ``select_op``.
+
+            max: o5 (0.9) + 0.5 * [min: block o1 (-0.3*0.2) + 0.5 * [max: ...]]
 
         Args:
             operators: Candidate operators to choose from.
@@ -1793,16 +1808,14 @@ class MonteCarloScheduler:
         if len(operators) == 1:
             return operators[0]
 
-        # Get current operator statistics
-        alphas = self.arm_alpha
-        betas = self.arm_beta
+        score = self._thompson_vals(operators)
+        # A node skips at most depth visited ops, so its beam lies within the
+        # top beam+depth: partial selection instead of a full sort.
+        ranked = heapq.nlargest(beam_width + depth, operators, key=score.__getitem__)
 
         def evaluate(op: str) -> float:
-            """Estimate expected reward for an operator using Thompson sample."""
-            a = alphas.get(op, 1.0)
-            b = betas.get(op, 1.0)
-            # Use mean of Beta distribution as point estimate
-            return a / (a + b) if (a + b) > 0 else 0.5
+            """One Thompson sample: a posterior mean would never explore."""
+            return score[op]
 
         def minimax(
             ops: list[str],
@@ -1812,55 +1825,38 @@ class MonteCarloScheduler:
             maximizing: bool,
             visited: set[str],
         ) -> float:
-            """Alpha-beta minimax over operator sequences."""
-            if d == 0 or not ops:
+            """Alpha-beta value of the unvisited *ops* (score-descending)."""
+            if d <= 0:
                 return 0.0
 
-            # Beam search: only consider top candidates
-            scored_ops = sorted(ops, key=evaluate, reverse=True)
-            beam = scored_ops[:beam_width]
+            # Beam: top unvisited ops, found lazily instead of copying *ops*.
+            beam = list(islice((o for o in ops if o not in visited), beam_width))
+            if not beam:
+                return 0.0
 
-            if maximizing:
-                best = -float("inf")
-                for op in beam:
-                    # Fuzzer's move: apply operator, get reward
-                    reward = evaluate(op)
-                    # Simulate: after applying op, target responds
-                    remaining = [o for o in ops if o != op]
-                    val = reward + 0.5 * minimax(
-                        remaining, d - 1, alpha, beta, False, visited | {op}
-                    )
+            # Fuzzer earns the op's score; the target blocks it at a cost.
+            sign = 1.0 if maximizing else -_MINIMAX_BLOCK
+            best = -math.inf if maximizing else math.inf
+            for op in beam:
+                val = sign * evaluate(op) + _MINIMAX_DISCOUNT * minimax(
+                    ops, d - 1, alpha, beta, not maximizing, visited | {op}
+                )
+                if maximizing:
                     best = max(best, val)
                     alpha = max(alpha, best)
-                    if beta <= alpha:
-                        break  # Beta cutoff
-                return best
-            else:
-                # Target's move: minimize fuzzer's reward
-                worst = float("inf")
-                for op in beam:
-                    # Target "blocks" this operator (reduces its effectiveness)
-                    penalty = evaluate(op) * 0.3
-                    remaining = [o for o in ops if o != op]
-                    val = -penalty + 0.5 * minimax(
-                        remaining, d - 1, alpha, beta, True, visited | {op}
-                    )
-                    worst = min(worst, val)
-                    beta = min(beta, worst)
-                    if beta <= alpha:
-                        break  # Alpha cutoff
-                return worst
+                else:
+                    best = min(best, val)
+                    beta = min(beta, best)
+                if beta <= alpha:
+                    break
+            return best
 
-        # Find the operator that maximizes the minimax value
-        best_op = operators[0]
-        best_val = -float("inf")
-        for op in operators[:beam_width]:
-            reward = evaluate(op)
-            remaining = [o for o in operators if o != op]
-            val = reward + 0.5 * minimax(
-                remaining, depth - 1, -float("inf"), float("inf"), False, {op}
+        # Root: the fuzzer's move over the top-scored beam, not list order.
+        best_op, best_val = ranked[0], -math.inf
+        for op in ranked[:beam_width]:
+            val = evaluate(op) + _MINIMAX_DISCOUNT * minimax(
+                ranked, depth - 1, -math.inf, math.inf, False, {op}
             )
             if val > best_val:
-                best_val = val
-                best_op = op
+                best_op, best_val = op, val
         return best_op

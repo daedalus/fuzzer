@@ -13,11 +13,20 @@ import os
 import shutil
 import sys
 import tempfile
+from enum import Enum
 from pathlib import Path
-
 
 from fuzzer_tool.adapters import libc_shm
 from fuzzer_tool.adapters.shm import ShmCoverage
+
+
+class PruneMode(Enum):
+    """Coverage-mode pruning criterion."""
+
+    SET_COVER = "set_cover"
+    RATE_DISTORTION = "rate_distortion"
+    # Set-cover plus backups for the seeds whose removal loses most edges.
+    MINIMAX_ROBUST = "minimax_robust"
 
 
 def _read_shm_edges(shm_id: str, size: int = 65536) -> bytearray:
@@ -94,6 +103,7 @@ def minimize_corpus(
     rate_distortion: bool = False,
     target_frac: float = 0.95,
     fuzzy_dedup: int = 0,
+    prune: PruneMode = PruneMode.SET_COVER,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -109,11 +119,12 @@ def minimize_corpus(
         target_args: Target arguments ({file} placeholder).
         use_coverage: Enable SHM coverage (passed to env).
         output_dir: Output directory for minimized corpus. If None, overwrites in-place.
-        rate_distortion: Use rate-distortion optimal pruning instead of greedy set-cover.
+        rate_distortion: Legacy alias for ``prune=PruneMode.RATE_DISTORTION``.
         target_frac: Target coverage fraction for rate-distortion (default: 0.95).
         fuzzy_dedup: Maximum Hamming distance for near-duplicate detection.
             0 disables fuzzy dedup. Only used without coverage mode.
             e.g. fuzzy_dedup=3 removes seeds that differ by <=3 bytes.
+        prune: Coverage-mode pruning criterion.
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -139,7 +150,7 @@ def minimize_corpus(
             target_args,
             output_dir,
             corpus_path,
-            rate_distortion=rate_distortion,
+            prune=PruneMode.RATE_DISTORTION if rate_distortion else prune,
             target_frac=target_frac,
         )
     else:
@@ -157,10 +168,10 @@ def _minimize_with_coverage(
     target_args: list[str] | None,
     output_dir: str | None,
     corpus_path: Path,
-    rate_distortion: bool = False,
+    prune: PruneMode = PruneMode.SET_COVER,
     target_frac: float = 0.95,
 ) -> tuple[int, int]:
-    """Greedy set-cover or rate-distortion optimal pruning over SHM edge bitmaps."""
+    """Greedy set-cover, rate-distortion or minimax-robust pruning over SHM edge bitmaps."""
     from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
 
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
@@ -234,7 +245,18 @@ def _minimize_with_coverage(
         )
         return len(corpus_files), 0
 
-    if rate_distortion:
+    if prune is PruneMode.MINIMAX_ROBUST:
+        from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
+
+        rd = RateDistortionCorpus(map_size=map_entries)
+        covered_files, actual_frac = rd.minimax_robust_pruning(
+            seed_edges, target_fraction=target_frac
+        )
+        print(
+            f"[*] Minimax-robust: kept {len(covered_files)}/{len(corpus_files)} "
+            f"files ({actual_frac:.1%} coverage)"
+        )
+    elif prune is PruneMode.RATE_DISTORTION:
         print("[*] Using rate-distortion optimal pruning...")
         from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 
