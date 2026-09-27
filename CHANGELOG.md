@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **SanitizerCoverage modes**: shim callbacks for `inline-8bit-counters`, `inline-bool-flag`,
+  `pc-table`, `trace-loads`/`trace-stores` (previously failed to link). Counters/flags fold into
+  the edge map; loads/stores of globals become data-flow features. ELF helpers recognise
+  `__sancov_bools`. `tools/build_targets.sh --sancov=MODES` selects them (validated;
+  `verify_sancov` accepts counter/bool sections).
 - **Minimax Phases 2-5 wired** (were dead code): `fuzz --op-minimax`, `--wall-order`,
   `--minimax-select`; `minimize --minimax-robust`; `bench_paired.py analyse --risk-matrix`
   prints the minimax-robust arm. Bench arms `elo-op-minimax`, `wall-order`, `minimax-select`.

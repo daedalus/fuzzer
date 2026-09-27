@@ -8,6 +8,7 @@
 #   tools/build_targets.sh --cmplog                   # Include cmplog in .so targets (default: on; explicit for clarity)
 #   tools/build_targets.sh --asan --cmplog            # Same as default
 #   tools/build_targets.sh --clang-scov               # Clang + compiler-inserted edge coverage (sancov)
+#   tools/build_targets.sh --sancov=inline-8bit-counters,pc-table  # Other sancov modes (implies --clang-scov)
 #   tools/build_targets.sh --tracecmp                 # Clang + compiler-IR comparison tracing
 #   tools/build_targets.sh --vendor-tracecmp          # Vendored libpng+zlib + trace-cmp targets
 #   tools/build_targets.sh --vendor-tracecmp --asan   # Same with ASAN
@@ -335,6 +336,7 @@ WITH_MSAN=0
 WITH_TSAN=0
 WITH_FFMPEG_SANCOV=1  # auto-rebuild vendored FFmpeg with coverage if needed
 USE_CLANG=0
+SANCOV_MODES="trace-pc-guard"  # --sancov=MODES; comma list for -fsanitize-coverage=
 
 # Parse flags (can appear anywhere)
 for arg in "$@"; do
@@ -349,7 +351,31 @@ for arg in "$@"; do
     [ "$arg" = "--ngram" ] && WITH_NGRAM=1
     [ "$arg" = "--msan" ] && WITH_MSAN=1
     [ "$arg" = "--tsan" ] && WITH_TSAN=1
+    case "$arg" in
+        --sancov=*) SANCOV_MODES="${arg#--sancov=}" && WITH_CLANG_SCOV=1 ;;
+    esac
 done
+
+# Reject --sancov modes afl_shim.c has no callbacks for: the target would
+# fail to link, and only after every library object was compiled. At least
+# one mode must produce edges -- pc-table / trace-loads alone record none.
+# trace-cmp/div/gep stay with --tracecmp (their callbacks need cmplog).
+validate_sancov_modes() {
+    local edge="trace-pc-guard inline-8bit-counters inline-bool-flag"
+    local extra="pc-table trace-loads trace-stores"
+    local m has_edge=0
+    for m in ${1//,/ }; do
+        case " $edge " in *" $m "*) has_edge=1; continue ;; esac
+        case " $extra " in *" $m "*) continue ;; esac
+        echo "unsupported --sancov mode: $m (supported: $edge $extra)" >&2
+        return 1
+    done
+    [ "$has_edge" -eq 1 ] && return 0
+    echo "--sancov needs one edge mode: $edge" >&2
+    return 1
+}
+validate_sancov_modes "$SANCOV_MODES" || exit 1
+SANCOV_FLAG="-fsanitize-coverage=$SANCOV_MODES"
 
 # Colors
 GREEN='\033[0;32m'
@@ -762,9 +788,9 @@ compile_grep_objects() {
     local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
     [ -f "$GREP_SRC/lib/libgreputils.a" ] || return 1
     echo "Compiling grep objects${suffix:+ ($suffix)}..."
-    local cov_flag="-fsanitize-coverage=trace-pc-guard"
+    local cov_flag="${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"
     case "$cc" in
-        *clang*) cov_flag="-fsanitize-coverage=trace-pc-guard" ;;
+        *clang*) ;;
         *) cov_flag="" ;;   # gcc has no trace-pc-guard; see _pick_cc
     esac
     local rc=0
@@ -810,7 +836,7 @@ compile_secp256k1_objects() {
     # emitting __afl_map_shm / __afl_area (those stay in the wrapper only via
     # -include $SHIM). This gives real library-level coverage without the
     # multiple-definition errors that -include $SHIM would cause.
-    local cov_flag="-fsanitize-coverage=trace-pc-guard"
+    local cov_flag="${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"
     for src in secp256k1 precomputed_ecmult precomputed_ecmult_gen; do
         $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $module_flags \
             -I"$SECP256K1/src" -I"$SECP256K1/include" \
@@ -865,7 +891,7 @@ compile_sqlite_objects() {
     # target beats a skipped one.
     local cov_flag=""
     case "$cc" in
-        *clang*) cov_flag="-fsanitize-coverage=trace-pc-guard" ;;
+        *clang*) cov_flag="${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}" ;;
     esac
     $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $SQLITE_DEFINES -I"$SQLITE" \
         -c "$SQLITE/sqlite3.c" -o "/tmp/sqlite3${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
@@ -894,9 +920,9 @@ compile_fuzzgoat_object() {
     # the .so was silently uninstrumented (88 trace refs, 0 in json_parse_ex)
     # while its PIE sibling had 198.  Per-suffix path so one pass's object
     # cannot clobber another's before its link.
-    local cov_flag="-fsanitize-coverage=trace-pc-guard"
+    local cov_flag="${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"
     case "$cc" in
-        *clang*) cov_flag="-fsanitize-coverage=trace-pc-guard" ;;
+        *clang*) ;;
         *) cov_flag="" ;;   # gcc has no trace-pc-guard; see _pick_cc
     esac
     $cc $flags $cov_flag -O2 -g $extra_cflags -I"$VENDOR/fuzzgoat" \
@@ -1755,11 +1781,12 @@ verify_sancov() {
         # present either way -- measured: an uninstrumented .so and an
         # instrumented one both report 12 of them to nm. Only the guard
         # section is emitted by -fsanitize-coverage=trace-pc-guard, and it is
-        # the array the instrumented call sites index into.
-        if readelf -S "$f" 2>/dev/null | grep -q "__sancov_guards"; then
+        # the array the instrumented call sites index into. --sancov builds
+        # carry __sancov_cntrs / __sancov_bools instead (inline modes).
+        if readelf -S "$f" 2>/dev/null | grep -qE "__sancov_(guards|cntrs|bools)"; then
             ok_count=$((ok_count + 1))
         else
-            warn "$(basename "$f"): no __sancov_guards — in-process modes record ZERO edges"
+            warn "$(basename "$f"): no __sancov_{guards,cntrs,bools} — in-process modes record ZERO edges"
             fail_count=$((fail_count + 1))
         fi
     done
@@ -2490,7 +2517,7 @@ if [ "$WITH_CLANG_SCOV" -eq 1 ]; then
     if ! command -v clang &>/dev/null; then
         warn "clang not found — --clang-scov requires clang"
     else
-        SCOV_FLAGS="-fsanitize-coverage=trace-pc-guard"
+        SCOV_FLAGS="$SANCOV_FLAG"
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address" "$SCOV_CC" "$SCOV_FLAGS"
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" "" "$SCOV_CC" "$SCOV_FLAGS"
         compile_vendored_libs "$SCOV_CC" "$SCOV_FLAGS" "_asan"

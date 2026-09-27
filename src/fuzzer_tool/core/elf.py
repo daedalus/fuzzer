@@ -729,8 +729,8 @@ def sancov_guard_status(target: str) -> str:
     available before a campaign rather than only at build time, and reading
     the ELF directly rather than shelling out to ``readelf``.
 
-    ``inline-8bit-counters`` counts too: it is a different section with a
-    different element width, but a target carrying it is likewise
+    ``inline-8bit-counters`` and ``inline-bool-flag`` count too: different
+    sections and element widths, but a target carrying either is likewise
     compiler-instrumented.
 
     The third state matters for the same reason it does in
@@ -751,7 +751,7 @@ def sancov_guard_status(target: str) -> str:
         # "symbol table removed". A false alarm on a stripped-but-working
         # target is the fastest way to teach someone to ignore the warning.
         return "unknown"
-    for section in ("guards", "cntrs"):
+    for section in ("guards", "cntrs", "bools"):
         bounds = _sancov_section_bounds(target, section)
         if bounds is not None and bounds[1] > bounds[0]:
             return "present"
@@ -1712,11 +1712,12 @@ class MapSizeEstimate(NamedTuple):
 
     - ``"sancov_guards"`` — exact, ``__sancov_guards`` (trace-pc-guard).
     - ``"sancov_cntrs"``  — exact, ``__sancov_cntrs`` (inline-8bit-counters).
+    - ``"sancov_bools"``  — exact, ``__sancov_bools`` (inline-bool-flag).
     - ``"profile"``       — TargetProfile.total_branches.
     - ``"branch_density"`` — disassembly estimate. Approximate.
     - ``"default"``       — nothing worked; MAP_SIZE_DEFAULT.
 
-    The first two are measurements and the rest are guesses, and the gap
+    The first three are measurements and the rest are guesses, and the gap
     between them is wide: on this tree's targets, branch density ran 4-16x
     above the true guard count. A caller that cannot tell which it got
     cannot tell a sized map from a guessed one -- which is exactly how
@@ -1735,7 +1736,7 @@ class MapSizeEstimate(NamedTuple):
     @property
     def exact(self) -> bool:
         """True when `blocks` was read out of the binary, not estimated."""
-        return self.source in ("sancov_guards", "sancov_cntrs")
+        return self.source in ("sancov_guards", "sancov_cntrs", "sancov_bools")
 
 
 def estimate_map_size_detail(target: str, profile: object | None = None) -> MapSizeEstimate:
@@ -1758,6 +1759,7 @@ def estimate_map_size_detail(target: str, profile: object | None = None) -> MapS
     #    (__sancov_guards) first: it is what build_targets.sh emits.
     #    inline-8bit-counters (__sancov_cntrs) after, for externally built
     #    targets -- one *byte* per block there, not one uint32.
+    #    inline-bool-flag (__sancov_bools) last, also one byte per block.
     guards = parse_sancov_guard_count(target)
     if guards:
         blocks, source = guards, "sancov_guards"
@@ -1765,6 +1767,10 @@ def estimate_map_size_detail(target: str, profile: object | None = None) -> MapS
         offsets = parse_sancov_offsets(target)
         if offsets and offsets[1] > offsets[0]:
             blocks, source = offsets[1] - offsets[0], "sancov_cntrs"
+    if not blocks:
+        bools = _sancov_section_bounds(target, "bools")
+        if bools and bools[1] > bools[0]:
+            blocks, source = bools[1] - bools[0], "sancov_bools"
 
     # 2. Cached profile data — avoids a full-text disassembly.
     #    total_branches is a branch count, and _size_from_blocks applies

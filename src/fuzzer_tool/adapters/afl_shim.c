@@ -172,6 +172,20 @@
 #  define __AFL_NO_COV
 #endif
 
+/* ── Shim state lives in its own sections ─────────────────────────────
+ *
+ * The shim is -include'd into the target TU, so its writable globals share
+ * the target's .data/.bss -- the span trace-loads/trace-stores features are
+ * keyed on. Every shim access (reset, the inlined __afl_map_edge in harness
+ * wrappers, exit-time tail writes) would then mint data-flow ids for shim
+ * bookkeeping. Placing shim globals in afl_shim_{data,bss} lets
+ * __afl_dataflow skip them by linker-defined bounds. Code and guard order
+ * are untouched, so edge ids do not move. Reset at the end of this file.
+ * gcc has no such pragma and no trace-loads either. */
+#if defined(__clang__)
+#pragma clang section data="afl_shim_data" bss="afl_shim_bss"
+#endif
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1214,24 +1228,246 @@ __AFL_NO_COV static inline uint32_t __afl_guard_mix(uint64_t x) {
     return (uint32_t)(x ^ (x >> 31));
 }
 
-__attribute__((visibility("hidden")))
-void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
-    static uint32_t guard_counter;
-    if (start == stop || *start) return;
-    uint64_t n = (uint64_t)(stop - start) + guard_counter;
+/* Id width for n blocks seen so far: ceil(log2(n)) + slack, capped. Widens
+ * __afl_loc_mask to match. Shared by guards and inline counters. */
+__AFL_NO_COV static uint32_t __afl_guard_width(uint64_t n) {
     unsigned bits = 1;
     while (bits < 32 && (1ULL << bits) <= n) bits++;
     bits += __AFL_GUARD_SLACK_BITS;
     if (bits > __AFL_GUARD_MAX_BITS) bits = __AFL_GUARD_MAX_BITS;
     uint32_t mask = (uint32_t)((1ULL << bits) - 1);
     if (mask > __afl_loc_mask) __afl_loc_mask = mask;
-    uint64_t salt = (uint64_t)(stop - start) * 0xd1b54a32d192ed03ULL;
+    return mask;
+}
+
+#define __AFL_GUARD_SALT 0xd1b54a32d192ed03ULL
+
+__attribute__((visibility("hidden")))
+void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
+    static uint32_t guard_counter;
+    if (start == stop || *start) return;
+    uint32_t mask = __afl_guard_width((uint64_t)(stop - start) + guard_counter);
+    uint64_t salt = (uint64_t)(stop - start) * __AFL_GUARD_SALT;
     for (uint32_t *g = start; g < stop; g++) {
         /* 0 means "disabled guard" to __sanitizer_cov_trace_pc_guard. */
         uint32_t v = __afl_guard_mix(salt ^ ++guard_counter) & mask;
         *g = v ? v : 1;
     }
 }
+
+/* ── Inline counters, bool flags, pc-table ────────────────────────────
+ *
+ * inline-8bit-counters / inline-bool-flag bump one byte per block in place
+ * and never call back, so nothing reaches the edge table until someone
+ * reads the bytes. __afl_sancov_fold() does: each nonzero byte becomes one
+ * block id, minted like a guard id (module-salted hash of its running
+ * index, masked by __afl_guard_width), and the byte is cleared for the
+ * next execution. Block ids, not edges: a byte array has no prev_loc order.
+ *
+ * Fold points -- Python reads the map only after one of them:
+ *   __afl_guarded_call return   direct_lite / persistent loops
+ *   __afl_crash_handler         crash inside that call
+ *   destructor                  one-shot subprocess / forkserver child
+ *
+ *   module ctor ── init(start, stop) ──> region[i] = {start, stop, first, mask, salt}
+ *   exec ── bytes bump ──> fold ── byte != 0 ──> __afl_map_id(mix(salt ^ (first + j)))
+ *
+ * pc-table maps each block to its PC for symbolizers; the edge map needs
+ * none of it, so __sanitizer_cov_pcs_init only has to exist.
+ *
+ * Hidden visibility on all init callbacks: libasan ships weak no-op stubs
+ * that would otherwise interpose over PLT calls (see guard callbacks). */
+#define __AFL_SANCOV_MAX_REGIONS 64
+
+struct __afl_sancov_region {
+    uint8_t *start;
+    uint8_t *stop;
+    uint32_t first;  /* running index of start[0] across regions */
+    uint32_t mask;
+    uint64_t salt;
+};
+
+static struct __afl_sancov_region __afl_sancov_regions[__AFL_SANCOV_MAX_REGIONS];
+static uint32_t __afl_sancov_nregions;
+
+/* Bounded table: regions past the cap are left unread (one per module,
+ * so 64 instrumented modules in one process before anything is lost). */
+__AFL_NO_COV static void __afl_sancov_register(uint8_t *start, uint8_t *stop) {
+    static uint32_t counter;
+    if (start >= stop || __afl_sancov_nregions == __AFL_SANCOV_MAX_REGIONS) return;
+
+    /* A module ctor can run twice (dlopen after static init); keep one. */
+    for (uint32_t i = 0; i < __afl_sancov_nregions; i++)
+        if (__afl_sancov_regions[i].start == start) return;
+
+    uint64_t n = (uint64_t)(stop - start);
+    struct __afl_sancov_region *r = &__afl_sancov_regions[__afl_sancov_nregions++];
+    r->start = start;
+    r->stop  = stop;
+    r->first = counter;
+    r->mask  = __afl_guard_width(n + counter);
+    r->salt  = n * __AFL_GUARD_SALT;
+    counter += (uint32_t)n;
+}
+
+__attribute__((visibility("hidden")))
+void __sanitizer_cov_8bit_counters_init(uint8_t *start, uint8_t *stop) {
+    __afl_sancov_register(start, stop);
+}
+
+__attribute__((visibility("hidden")))
+void __sanitizer_cov_bool_flag_init(uint8_t *start, uint8_t *stop) {
+    __afl_sancov_register(start, stop);
+}
+
+__attribute__((visibility("hidden")))
+void __sanitizer_cov_pcs_init(const uintptr_t *start, const uintptr_t *stop) {
+    (void)start;
+    (void)stop;
+}
+
+__AFL_NO_COV static inline void __afl_sancov_mark(const struct __afl_sancov_region *r,
+                                                   uint32_t idx) {
+    uint32_t v = __afl_guard_mix(r->salt ^ (r->first + idx + 1)) & r->mask;
+    __afl_map_id(v ? v : 1);
+}
+
+/* One region. Most blocks stay cold, so test 64 bytes per vector load and
+ * only walk chunks that carry a hit. Measured on 1M cold counters (clang):
+ * 27us at -O1 / 18us at -O2, against 83 / 66us for a u64 stride. */
+typedef uint64_t __afl_v64 __attribute__((vector_size(64), aligned(1)));
+
+__AFL_NO_COV static void __afl_sancov_fold_region(const struct __afl_sancov_region *r) {
+    uint8_t *p = r->start;
+    uint32_t n = (uint32_t)(r->stop - r->start);
+    uint32_t i = 0;
+
+    for (; i + 64 <= n; i += 64) {
+        __afl_v64 w = *(const __afl_v64 *)(p + i);
+        if (!(w[0] | w[1] | w[2] | w[3] | w[4] | w[5] | w[6] | w[7])) continue;
+
+        for (uint32_t j = i; j < i + 64; j++)
+            if (p[j]) __afl_sancov_mark(r, j);
+        /* One vector store, not memset: this runs in the crash handler,
+         * and -O0 lowers memset to a libc call. */
+        *(__afl_v64 *)(p + i) = (__afl_v64){0};
+    }
+
+    for (; i < n; i++) {
+        if (!p[i]) continue;
+        __afl_sancov_mark(r, i);
+        p[i] = 0;
+    }
+}
+
+/* Async-signal-safe: plain loads/stores into already-mapped memory.
+ * noinline: inlined into an instrumented caller (__afl_guarded_call), the
+ * body inherits the caller's counters and re-ticks them after clearing. */
+__attribute__((noinline))
+__AFL_NO_COV static void __afl_sancov_fold(void) {
+    if (!__afl_area) return;
+    for (uint32_t i = 0; i < __afl_sancov_nregions; i++)
+        __afl_sancov_fold_region(&__afl_sancov_regions[i]);
+}
+
+__attribute__((destructor))
+__AFL_NO_COV static void __afl_sancov_fold_exit(void) {
+    __afl_sancov_fold();
+}
+
+/* ── Data-flow features (trace-loads / trace-stores) ──────────────────
+ *
+ * Every instrumented load/store calls here with its address. A (site,
+ * offset) pair becomes one synthetic edge when the address lies in this
+ * module's writable PT_LOAD span (.data/.bss): which global slot an
+ * instruction touched is state edges cannot see -- table[3] and table[9]
+ * run the same blocks. Stack and heap addresses move with ASLR, so they
+ * are dropped; keying on them would make every run look new. Same filter
+ * as Centipede's data-flow features.
+ *
+ * Both keys are base-relative, so ids are stable across ASLR. The span
+ * is resolved in __afl_auto_init; accesses before that see lo == hi == 0
+ * and return on the first compare. */
+#include <link.h>
+
+static uintptr_t __afl_data_lo;
+static uintptr_t __afl_data_hi;
+static uintptr_t __afl_data_base;
+
+/* Linker-defined bounds of the shim's own state (see the section pragma at
+ * the top). Weak: absent under gcc, where both ranges read as empty. */
+extern char __start_afl_shim_data[] __attribute__((weak, visibility("hidden")));
+extern char __stop_afl_shim_data[] __attribute__((weak, visibility("hidden")));
+extern char __start_afl_shim_bss[] __attribute__((weak, visibility("hidden")));
+extern char __stop_afl_shim_bss[] __attribute__((weak, visibility("hidden")));
+
+__AFL_NO_COV static inline int __afl_is_shim_state(uintptr_t a) {
+    if (a - (uintptr_t)__start_afl_shim_bss <
+        (uintptr_t)__stop_afl_shim_bss - (uintptr_t)__start_afl_shim_bss) return 1;
+    return a - (uintptr_t)__start_afl_shim_data <
+           (uintptr_t)__stop_afl_shim_data - (uintptr_t)__start_afl_shim_data;
+}
+
+/* dl_iterate_phdr callback: find the object holding `self`, record the
+ * union of its writable PT_LOAD segments. Returns 1 to stop the walk. */
+__AFL_NO_COV static int __afl_data_phdr(struct dl_phdr_info *info, size_t size, void *self) {
+    (void)size;
+    uintptr_t addr = (uintptr_t)self;
+    uintptr_t lo = UINTPTR_MAX, hi = 0;
+    int owns = 0;
+
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD) continue;
+
+        uintptr_t s = info->dlpi_addr + ph->p_vaddr;
+        uintptr_t e = s + ph->p_memsz;
+        if (addr >= s && addr < e) owns = 1;
+        if (!(ph->p_flags & PF_W)) continue;
+        if (s < lo) lo = s;
+        if (e > hi) hi = e;
+    }
+    if (!owns || hi <= lo) return 0;
+
+    __afl_data_base = info->dlpi_addr;
+    __afl_data_lo = lo;
+    __afl_data_hi = hi;
+    return 1;
+}
+
+__AFL_NO_COV static void __afl_map_data_range(void) {
+    dl_iterate_phdr(__afl_data_phdr, &__afl_data_lo);
+}
+
+__AFL_NO_COV static inline void __afl_dataflow(void *addr, void *pc) {
+    uintptr_t off = (uintptr_t)addr - __afl_data_lo;
+    if (off >= __afl_data_hi - __afl_data_lo) return;  /* also lo == hi == 0 */
+    if (__afl_is_shim_state((uintptr_t)addr)) return;
+    if (!__afl_area) return;
+
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a, as __afl_compcov_mark */
+    h = (h ^ ((uintptr_t)pc - __afl_data_base)) * 1099511628211ULL;
+    h = (h ^ 0x44415441464c4f57ULL) * 1099511628211ULL; /* "DATAFLOW" salt */
+    h = (h ^ off) * 1099511628211ULL;
+    __afl_map_id((uint32_t)(h >> 32) | 0x80000000u);
+}
+
+/* The return address must be taken in the callback's own body. */
+#define __AFL_DATAFLOW_CB(name)                                     \
+    __attribute__((visibility("hidden"))) void name(void *addr) {   \
+        __afl_dataflow(addr, __builtin_return_address(0));          \
+    }
+
+__AFL_DATAFLOW_CB(__sanitizer_cov_load1)
+__AFL_DATAFLOW_CB(__sanitizer_cov_load2)
+__AFL_DATAFLOW_CB(__sanitizer_cov_load4)
+__AFL_DATAFLOW_CB(__sanitizer_cov_load8)
+__AFL_DATAFLOW_CB(__sanitizer_cov_load16)
+__AFL_DATAFLOW_CB(__sanitizer_cov_store1)
+__AFL_DATAFLOW_CB(__sanitizer_cov_store2)
+__AFL_DATAFLOW_CB(__sanitizer_cov_store4)
+__AFL_DATAFLOW_CB(__sanitizer_cov_store8)
+__AFL_DATAFLOW_CB(__sanitizer_cov_store16)
 
 /* ── AFLGo distance channel (__AFL_DISTANCE_MODE builds only) ─────────
  *
@@ -2982,6 +3218,7 @@ static void __afl_crash_handler(int sig) {
     __afl_cmp_dump_counts();
     __afl_cmp_dump_sites();
 #endif
+    __afl_sancov_fold();
     siglongjmp(__afl_jmp_buf, sig);
 }
 
@@ -3010,9 +3247,13 @@ __attribute__((visibility("default")))
 int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
                        const uint8_t *data, size_t size) {
     int sig;
-    if ((sig = sigsetjmp(__afl_jmp_buf, 1)) == 0)
-        return entry(data, size);
-    /* sig = signal number from __afl_crash_handler's siglongjmp */
+    if ((sig = sigsetjmp(__afl_jmp_buf, 1)) == 0) {
+        int rc = entry(data, size);
+        __afl_sancov_fold();
+        return rc;
+    }
+    /* sig = signal number from __afl_crash_handler's siglongjmp; that
+     * handler already folded the inline counters. */
     return -(int)sig;
 }
 
@@ -3193,6 +3434,7 @@ static void __afl_auto_init(void) {
      * map_shm/install_crash_handlers). suppress ctx until done. */
     __afl_mapping = 1;
     __afl_map_shm();
+    __afl_map_data_range();
 #if __AFL_CMPLOG
     /* One constructor, one attachment. cmplog_shim.c had its own, which
      * re-entered __afl_map_shm and shmat'd the segment a second time --
@@ -3264,3 +3506,7 @@ __AFL_NO_COV static void __afl_preload_init(void) {
     sigaction(SIGFPE,  &sa, &__afl_pre_old_fpe);
 }
 #endif /* !__AFL_EDGE && __AFL_CMPLOG */
+
+#if defined(__clang__)
+#pragma clang section data="" bss=""
+#endif
