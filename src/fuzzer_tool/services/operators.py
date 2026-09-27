@@ -650,7 +650,7 @@ _FALLBACK_PRECEDENCE = (
     "successive_elim",
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
-    # op_tpe, op_strata, gradient, whittle, corral are deliberately absent
+    # op_tpe, op_strata, gradient, whittle, corral, softmax, topk are deliberately absent
     # here: they are unproven exploratory arms
     # (see their module docstrings) that should only ever be reached via
     # Elo explicitly choosing them, not by being the top-precedence live
@@ -5146,6 +5146,12 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "op_strata" and f._op_strata:
             op = f._op_strata.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "softmax" and f._softmax:
+            op = f._softmax.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "topk" and f._topk:
+            op = f._topk.select_op(ops)
             f._last_mopt_particles.append(None)
         else:
             op = self.ctx._rng.choice(ops)
