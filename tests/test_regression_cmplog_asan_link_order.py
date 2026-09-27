@@ -21,8 +21,11 @@ LINK_ORDER_OFF = "verify_asan_link_order=0"
 
 
 @pytest.fixture
-def collector():
-    """Collector with a fake shim; stop() removes its log and env edits."""
+def collector(monkeypatch):
+    """Collector with a fake shim; stop() removes its log and env edits.
+
+    Requests monkeypatch so stop() tears down before monkeypatch's undo.
+    """
     c = CmplogCollector()
     c._shim_path = "/tmp/fake_shim.so"
     yield c

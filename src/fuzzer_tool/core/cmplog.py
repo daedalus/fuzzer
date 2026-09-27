@@ -1654,6 +1654,11 @@ class CmplogCollector:
             with contextlib.suppress(OSError):
                 os.unlink(self.sites_path)
         self.sites_path = None
+        # Stop the drain thread and close its fds; it also unlinks the FIFO.
+        if self._fifo:
+            self._fifo.close()
+            self._fifo = None
+            self.log_path = None
         if self.log_path and os.path.exists(self.log_path):
             with contextlib.suppress(OSError):
                 os.unlink(self.log_path)
