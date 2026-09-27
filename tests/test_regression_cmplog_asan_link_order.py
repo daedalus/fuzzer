@@ -20,24 +20,27 @@ ASAN_SRC = Path(__file__).parent.parent / "targets" / "asan_target.c"
 LINK_ORDER_OFF = "verify_asan_link_order=0"
 
 
-def _collector() -> CmplogCollector:
+@pytest.fixture
+def collector():
+    """Collector with a fake shim; stop() removes its log and env edits."""
     c = CmplogCollector()
     c._shim_path = "/tmp/fake_shim.so"
-    return c
+    yield c
+    c.stop()
 
 
 class TestSetupEnv:
-    def test_regression_link_order_check_disabled(self):
-        env = _collector().setup_env({"PATH": "/usr/bin"})
+    def test_regression_link_order_check_disabled(self, collector):
+        env = collector.setup_env({"PATH": "/usr/bin"})
         assert LINK_ORDER_OFF in env["ASAN_OPTIONS"].split(":")
 
-    def test_existing_options_kept(self):
-        env = _collector().setup_env({"ASAN_OPTIONS": "detect_leaks=0"})
+    def test_existing_options_kept(self, collector):
+        env = collector.setup_env({"ASAN_OPTIONS": "detect_leaks=0"})
         assert env["ASAN_OPTIONS"].split(":") == ["detect_leaks=0", LINK_ORDER_OFF]
 
-    def test_adversarial_user_choice_not_overridden(self):
+    def test_adversarial_user_choice_not_overridden(self, collector):
         """An explicit verify_asan_link_order is the user's call."""
-        env = _collector().setup_env({"ASAN_OPTIONS": "verify_asan_link_order=1"})
+        env = collector.setup_env({"ASAN_OPTIONS": "verify_asan_link_order=1"})
         assert env["ASAN_OPTIONS"] == "verify_asan_link_order=1"
 
     def test_falsification_no_shim_no_change(self):
@@ -47,25 +50,31 @@ class TestSetupEnv:
 
 
 class TestSetupEnvForRun:
-    def test_set_then_restored(self, monkeypatch):
+    def test_set_then_restored(self, collector, monkeypatch):
         monkeypatch.setenv("ASAN_OPTIONS", "detect_leaks=0")
-        c = _collector()
+        c = collector
         c.setup_env_for_run()
         assert LINK_ORDER_OFF in os.environ["ASAN_OPTIONS"].split(":")
 
         c.restore_env()
         assert os.environ["ASAN_OPTIONS"] == "detect_leaks=0"
-        if c.log_path:
-            Path(c.log_path).unlink(missing_ok=True)
 
-    def test_absent_key_restored_as_absent(self, monkeypatch):
+    def test_regression_shim_already_preloaded(self, collector, monkeypatch):
+        """A caller that preloaded the shim itself still gets the option."""
+        c = collector
+        monkeypatch.setenv("LD_PRELOAD", c._shim_path)
         monkeypatch.delenv("ASAN_OPTIONS", raising=False)
-        c = _collector()
+        c.setup_env_for_run()
+        assert LINK_ORDER_OFF in os.environ["ASAN_OPTIONS"].split(":")
+
+        c.restore_env()
+
+    def test_absent_key_restored_as_absent(self, collector, monkeypatch):
+        monkeypatch.delenv("ASAN_OPTIONS", raising=False)
+        c = collector
         c.setup_env_for_run()
         c.restore_env()
         assert "ASAN_OPTIONS" not in os.environ
-        if c.log_path:
-            Path(c.log_path).unlink(missing_ok=True)
 
 
 def _shared_asan_target(out: Path) -> Path:

@@ -694,12 +694,16 @@ class CmplogCollector:
         if self.compcov_level:
             os.environ["__AFL_COMPCOV_LEVEL"] = str(self.compcov_level)
 
-        if self._shim_path and self._shim_path not in os.environ.get("LD_PRELOAD", ""):
+        if not self._shim_path:
+            return
+
+        # Shim may already be preloaded by the caller; the option still applies.
+        os.environ["ASAN_OPTIONS"] = _asan_link_order_off(os.environ.get("ASAN_OPTIONS"))
+        if self._shim_path not in os.environ.get("LD_PRELOAD", ""):
             existing = os.environ.get("LD_PRELOAD", "")
             os.environ["LD_PRELOAD"] = (
                 f"{self._shim_path}:{existing}" if existing else self._shim_path
             )
-            os.environ["ASAN_OPTIONS"] = _asan_link_order_off(os.environ.get("ASAN_OPTIONS"))
 
     def restore_env(self) -> None:
         """Undo ``setup_env_for_run``'s mutations of ``os.environ``.
