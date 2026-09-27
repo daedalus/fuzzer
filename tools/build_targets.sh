@@ -619,8 +619,11 @@ ffmpeg_extralibs() {
     for probe in $libs; do
         case "$probe" in
             -l*)
+                # Unquoted: DEFAULT_CC is "ccache clang" when ccache exists;
+                # quoted, it is no command and every library was dropped.
+                # shellcheck disable=SC2086
                 if echo 'int main(void){return 0;}' \
-                   | "${DEFAULT_CC:-cc}" -x c - "$probe" -o /dev/null 2>/dev/null; then
+                   | ${DEFAULT_CC:-cc} -x c - "$probe" -o /dev/null 2>/dev/null; then
                     out="$out $probe"
                 fi
                 ;;
@@ -1423,14 +1426,16 @@ build_ffmpeg_versions() {
         ver="${ver#ffmpeg-}"
         build_vendored_ffmpeg_sancov "_asan" "ffmpeg-$ver"
 
-        # Stale archives are the previous build's code; do not link them.
+        # Stale archives are the previous build's code: link nothing, and drop
+        # the old binary so a campaign cannot pick it up as current.
         root="$FUZZ_BUILD_ROOT/ffmpeg-${ver}_asan"
         if [ ! -f "$root/libavformat/libavformat.a" ] || [ -f "$root/.stale" ]; then
+            rm -f "$TARGETS/ffmpeg_read_${ver}_asan"
             warn_failed "ffmpeg_read_${ver}_asan: no current archives in $root"
             continue
         fi
 
-        libs="$root/libavformat/libavformat.a $root/libavcodec/libavcodec.a $root/libavutil/libavutil.a $root/libswresample/libswresample.a -lm -llzma -latomic -lX11 -lz -lbz2 $(ffmpeg_extralibs "$root")"
+        libs="$root/libavformat/libavformat.a $root/libavcodec/libavcodec.a $root/libavutil/libavutil.a $root/libswresample/libswresample.a $(ffmpeg_extralibs "$root")"
         build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}_asan" "$libs" "-fsanitize=address" "$DEFAULT_CC" "-I$root"
     done
 }
@@ -2447,7 +2452,7 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "ffmpeg-sancov" "$state" "auto-rebuild vendored FFmpeg with coverage"
     local ffvers
     ffvers=$(cd "$VENDOR" 2>/dev/null && ls -d ffmpeg-*/ 2>/dev/null | tr -d / | tr '\n' ' ')
-    state=$([ -n "$ffvers" ] && echo "BUILD" || echo "SKIP")
+    state=$([ -n "$ffvers" ] && [ "$BUILD_ASAN" -eq 1 ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "ffmpeg versions" "$state" "${ffvers:-none, run tools/vendor_ffmpeg.sh --top=3} (ASAN exe)"
 
     state=$([ "$BUILD_ASAN" -eq 1 ] && echo "ON" || echo "OFF")

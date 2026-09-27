@@ -167,3 +167,44 @@ def test_top_needs_no_compiler(tmp_path):
 
     assert r.returncode == 0, r.stdout + r.stderr
     assert "Source present" in r.stdout
+
+
+def test_version_link_line_derives_extralibs():
+    """Adversarial: no hardcoded -llzma/-lX11 on the per-version link; ffmpeg_extralibs decides."""
+    body = BUILD_SCRIPT.read_text().split("build_ffmpeg_versions() {", 1)[1].split("\n}\n", 1)[0]
+
+    assert "ffmpeg_extralibs" in body
+    assert not re.search(r"-l(lzma|X11|atomic|bz2)\b", body)
+
+
+def _extralibs(tmp_path: Path, cc: str) -> str:
+    """Run build_targets.sh's ffmpeg_extralibs on a fake tree needing -lm -lz."""
+    mak = tmp_path / "root" / "ffbuild" / "config.mak"
+    mak.parent.mkdir(parents=True)
+    mak.write_text("EXTRALIBS-avutil=-lm -lz\n")
+    fn = re.search(r"^ffmpeg_extralibs\(\) \{.*?^\}", BUILD_SCRIPT.read_text(), re.M | re.S)
+    assert fn
+    script = f'{fn.group(0)}\nDEFAULT_CC="{cc}"\nffmpeg_extralibs "{tmp_path}/root"\n'
+    r = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60)
+    return r.stdout
+
+
+def test_regression_extralibs_multiword_cc(tmp_path):
+    """DEFAULT_CC="ccache clang" made every link probe fail: all libs silently dropped."""
+    out = _extralibs(tmp_path, "env clang")
+
+    assert "-lm" in out.split()
+    assert "-lz" in out.split()
+
+
+def test_regression_extralibs_bogus_lib_dropped(tmp_path):
+    """Adversarial: the probe still drops a library that does not exist."""
+    mak = tmp_path / "x" / "ffbuild" / "config.mak"
+    mak.parent.mkdir(parents=True)
+    mak.write_text("EXTRALIBS-avutil=-lm -lnosuchlib_fuzz\n")
+    fn = re.search(r"^ffmpeg_extralibs\(\) \{.*?^\}", BUILD_SCRIPT.read_text(), re.M | re.S)
+    script = f'{fn.group(0)}\nDEFAULT_CC="env clang"\nffmpeg_extralibs "{tmp_path}/x"\n'
+    r = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60)
+
+    assert "-lm" in r.stdout.split()
+    assert "-lnosuchlib_fuzz" not in r.stdout
