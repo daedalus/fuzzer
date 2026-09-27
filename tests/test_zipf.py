@@ -12,6 +12,8 @@ import pytest
 
 from fuzzer_tool.core.zipf import (
     ALPHA_HI,
+    ALPHA_LO,
+    KS_95,
     MIN_TAIL,
     TailLaw,
     fit_heaps,
@@ -117,6 +119,51 @@ class TestFitZipfFalsification:
     def test_lognormal_small_tail_is_not_power_law(self):
         fit = fit_zipf(_lognormal_counts(1.0, 1.2))
         assert fit.law is TailLaw.NOT_POWER_LAW
+
+
+def _hot_core_counts(seeds: int, core: int) -> list[int]:
+    """png_read's owner spectrum: a decaying head plus edges nearly every seed owns.
+
+    Measured on png_read_noasan.so (vendored libpng, 30k execs, 139 seeds):
+    counts fall from 188 edges at 1 seed to ~20 at 12, then 95 edges sit at
+    137 -- the parse path every input takes. Not a power law.
+    """
+    head: list[int] = []
+    for k in range(1, 21):
+        head.extend([k] * round(190 * k**-1.2))
+    return head + [seeds - 2] * core
+
+
+class TestRegressionZipfMisfit:
+    """A misfit was classified POWER_LAW: only Vuong and alpha-at-ALPHA_HI were checked."""
+
+    def test_regression_zipf_ks_misfit_rejected(self):
+        # Alpha lands inside the bracket, but the KS distance is several
+        # times the 95% critical value.
+        fit = fit_zipf(_hot_core_counts(139, 95), xmax=139)
+        assert ALPHA_LO + 0.1 < fit.alpha < ALPHA_HI
+        assert fit.ks > KS_95 / math.sqrt(fit.n_tail)
+        assert fit.law is TailLaw.NOT_POWER_LAW
+
+    def test_regression_zipf_alpha_pinned_low_rejected(self):
+        # A capped law with true alpha < 1: the MLE pins at ALPHA_LO, where
+        # s = 1 / (alpha - 1) is meaningless.
+        cap = 139
+        norm = sum(k**-0.6 for k in range(1, cap + 1))
+        data: list[int] = []
+        for k in range(1, cap + 1):
+            data.extend([k] * round(5000 * k**-0.6 / norm))
+        fit = fit_zipf(data, xmax=cap)
+        assert fit.alpha == pytest.approx(ALPHA_LO, abs=1e-3)
+        assert fit.law is TailLaw.NOT_POWER_LAW
+
+    def test_true_power_law_passes_ks_guard(self):
+        # Falsification of an over-strict guard: exact fixtures must pass.
+        for alpha in (1.5, 2.0, 3.0):
+            data = _zipf_counts(alpha)
+            fit = fit_zipf(data, xmax=max(data))
+            assert fit.ks < KS_95 / math.sqrt(fit.n_tail)
+            assert fit.law is TailLaw.POWER_LAW
 
 
 class TestFitZipfAdversarial:

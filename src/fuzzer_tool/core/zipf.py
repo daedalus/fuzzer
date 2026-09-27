@@ -11,7 +11,7 @@ and is a lower bound under it; this module measures the tail itself.
                                           KS distance on observed support
                                        │  keep min-KS xmin
                                        ▼
-                 Vuong LR vs geometric + tail-fraction guard ──► TailLaw
+                 KS misfit + Vuong LR vs geometric + tail guard ──► TailLaw
 
     coverage timeline ──► log D = log K + beta * log N ──► HeapsFit
 
@@ -45,6 +45,9 @@ MAX_XMIN = 32  # bounded xmin scan (Hard Rule 54)
 MIN_TAIL = 50  # tail points needed before any verdict
 MIN_TAIL_FRAC = 0.2  # lognormal guard: the power law must describe most data
 Z_95 = 1.96  # two-sided 95% standard-normal quantile
+# Kolmogorov 95% critical value: reject when KS > KS_95 / sqrt(n). Fitted
+# parameters shrink the true KS distribution, so this errs toward accepting.
+KS_95 = 1.36
 
 # ── Heaps fit ──────────────────────────────────────────────────────────────
 HEAPS_TAIL = 0.5  # fit the most recent half of the timeline
@@ -285,11 +288,19 @@ def _vuong(vals: _Ints, mult: _Ints, alpha: float, xmin: int, xmax: int) -> floa
 
 
 def _classify(alpha: float, xmin: int, n_tail: int, total: int, ks: float, vuong: float) -> ZipfFit:
-    """Reject a pinned alpha, a minority tail, or a lost Vuong test."""
+    """Reject a pinned alpha, a KS misfit, a minority tail, or a lost Vuong test.
+
+    Vuong only says the power law beats a geometric; a spectrum that is
+    neither (png_read: decaying head plus a hot core every seed owns) still
+    wins it, so the absolute KS fit is checked too.
+    """
     frac = n_tail / total
-    pinned = alpha >= ALPHA_HI - AT_BOUND
+    pinned = alpha >= ALPHA_HI - AT_BOUND or alpha <= ALPHA_LO + AT_BOUND
+    # xmin is the min-KS candidate of up to MAX_XMIN, which biases KS low:
+    # another reason the guard errs toward accepting, never toward rejecting.
+    misfit = ks > KS_95 / math.sqrt(n_tail)
     law = TailLaw.POWER_LAW
-    if pinned or frac < MIN_TAIL_FRAC or vuong < Z_95:
+    if pinned or misfit or frac < MIN_TAIL_FRAC or vuong < Z_95:
         law = TailLaw.NOT_POWER_LAW
     return ZipfFit(alpha, xmin, n_tail, frac, ks, vuong, law)
 
