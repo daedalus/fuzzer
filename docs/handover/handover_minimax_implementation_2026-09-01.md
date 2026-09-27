@@ -24,7 +24,7 @@ win-rate effect needs ~100 cells. Run unlocked, 3 parallel shards (edges at a
 fixed exec budget; eps not comparable). Details:
 `docs/learnings/2026-09-27-alphabeta-vs-mcts-png.md`.
 
-Open: `ffmpeg_read` (needs `tools/vendor_ffmpeg.sh`). Keep `--alphabeta` only
+Open: `ffmpeg_read` (needs `tools/vendor_ffmpeg.sh`, and a new target set in `tools/lib/eval_set.py`: none contains ffmpeg). Keep `--alphabeta` only
 if ffmpeg shows an effect; png gives no reason to prefer it over `--mcts`.
 
 ## 2. Phases 2–5 — wired, tested, unmeasured
