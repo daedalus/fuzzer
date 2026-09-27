@@ -1112,8 +1112,8 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
  * (frame 0 there is the instrumented call site) -- never from inside
  * another function, or the wrong frame gets captured. Same rule
  * __afl_get_caller_ctx() already documents for __afl_map_edge(). */
-static uint64_t __afl_pc_key(uintptr_t pc);
-static void __afl_probe_distance(uint64_t key);
+__AFL_NO_COV static uint64_t __afl_pc_key(uintptr_t pc);
+__AFL_NO_COV static void __afl_probe_distance(uint64_t key);
 #endif
 
 __attribute__((visibility("hidden")))
@@ -1305,7 +1305,7 @@ static void __afl_map_dist_shm(void) {
  * the specific PC within it). Shared by __sanitizer_cov_trace_pc() and
  * __sanitizer_cov_trace_pc_guard(); matches the forward declaration above
  * so the guard callback, defined earlier in this file, can call it. */
-static uint64_t __afl_pc_key(uintptr_t pc) {
+__AFL_NO_COV static uint64_t __afl_pc_key(uintptr_t pc) {
     if (__afl_base == 0) {
         Dl_info info;
         if (dladdr((void *)pc, &info) && info.dli_fbase)
@@ -1322,7 +1322,7 @@ static uint64_t __afl_pc_key(uintptr_t pc) {
  * builds) — the AFLGo distance / K-Scheduler node-bitmap channel works
  * under either coverage flavor as long as icfg.py's probe-key scan looks
  * for calls to whichever of the two symbols the build actually calls. */
-static void __afl_probe_distance(uint64_t key) {
+__AFL_NO_COV static void __afl_probe_distance(uint64_t key) {
     if (!__afl_dist_table || !__afl_dist_count) return;
     uint32_t size = *__afl_dist_count;
     if (size == 0) return;

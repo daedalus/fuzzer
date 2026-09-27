@@ -52,6 +52,10 @@ class ScriptedRng:
         return self._randoms.pop(0) if self._randoms else NO_SPARK
 
     def randint(self, a, b):
+        # The spark coin is randint(0, 9) < 1; route it through the scripted
+        # random() so NO_SPARK / SPARK_RATE / 2 keep their meaning.
+        if (a, b) == (0, 9):
+            return int(self.random() * 10)
         return a
 
     def weighted_choice(self, seq, weights):

@@ -131,6 +131,17 @@ def runner(target):
 
 
 @requires_clang
+def test_regression_guard_callback_helpers_not_instrumented(target):
+    """An -O0 guard build must not recurse through its own shim helpers.
+
+    __afl_pc_key was coverage-instrumented, so each guard callback called
+    itself again until the stack overflowed before main.
+    """
+    r = subprocess.run([target], input=b"aaaa", capture_output=True, timeout=10)
+    assert r.returncode == 0, r.stderr[:300]
+
+
+@requires_clang
 def test_regression_forkserver_coverage_reaches_parent_shm(runner):
     """The exec'd child must write edges into the parent's SHM directly.
 

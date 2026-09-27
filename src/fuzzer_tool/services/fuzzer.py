@@ -3305,6 +3305,8 @@ class Fuzzer:
             or self._whittle
             or self._successive_elim
             or self._canary
+            or self._softmax
+            or self._topk
             or self._use_shapley
         )
 
@@ -3491,6 +3493,10 @@ class Fuzzer:
             _register_arms(self._cusum_ucb)
         if self._fewa:
             _register_arms(self._fewa)
+        if self._softmax:
+            _register_arms(self._softmax)
+        if self._topk:
+            _register_arms(self._topk)
         if self._fpl:
             _register_arms(self._fpl)
         if self._corral:
@@ -6392,6 +6398,8 @@ class Fuzzer:
             self._op_credit,
             self._op_tpe,
             self._op_strata,
+            self._softmax,
+            self._topk,
         ):
             if scheduler is None:
                 continue

@@ -76,6 +76,7 @@ from fuzzer_tool.core.elf import (  # noqa: E402
     MAP_SIZE_DEFAULT,
     _map_size_max,
 )
+from fuzzer_tool.core.zipf import HeapsFit, ZipfFit, fit_heaps, fit_zipf  # noqa: E402
 
 
 class _DenseEdgeCounter:
@@ -861,6 +862,11 @@ class EdgeTracker:
         # Not serialized: from_dict resets it so a restore cannot be answered
         # from a stamp computed against a different map.
         self._frontier_cache: tuple[int, set[int] | None] | None = None
+        # zipf_estimate() memo, keyed on (_owner_version, seeds): the version
+        # is bumped on every owner-count change, the seed count is the fit's
+        # cap. Not serialized: from_dict resets it.
+        self._owner_version = 0
+        self._zipf_cache: tuple[tuple[int, int], ZipfFit] | None = None
         # Edge discovery time-series: list of (exec_count, cumulative_edge_count)
         self._coverage_execs: array = array("Q")  # exec_count per coverage snapshot
         self._coverage_edges: array = array("Q")  # cumulative edges per snapshot
@@ -945,6 +951,8 @@ class EdgeTracker:
         # ownership share.
         already_owned = self.seed_edges[seed_key]
         new_owners = new_edges - already_owned
+        if new_owners:
+            self._owner_version += 1
         if isinstance(self._edge_owner_count, _DenseEdgeCounter):
             if new_owners:
                 owner_idx = np.fromiter(new_owners, dtype=np.int64, count=len(new_owners))
@@ -1336,6 +1344,7 @@ class EdgeTracker:
         # defaultdict, so keeping them would grow the map with edges no seed
         # owns.
         if keys_to_prune:
+            self._owner_version += 1
             rebuilt: defaultdict[int, int] = defaultdict(int)
             for e, n in edge_owners.items():
                 if n > 0:
@@ -2896,6 +2905,28 @@ class EdgeTracker:
         """
         return self._edge_owner_count.get(edge_id, 0)
 
+    def zipf_estimate(self) -> ZipfFit:
+        """Power-law fit of the seeds-per-edge spectrum (see core/zipf.py).
+
+        Same input as good_turing_estimate(): owner counts, capped at m
+        seeds. Memoized on (_owner_version, seeds), not on totals: a prune
+        plus a new seed can leave (seeds, incidences, edges) unchanged while
+        the spectrum moves.
+        """
+        m = len(self.seed_edges)
+        key = (self._owner_version, m)
+        cache = self._zipf_cache
+        if cache is not None and cache[0] == key:
+            return cache[1]
+
+        fit = fit_zipf((self._edge_owner_count or {}).values(), xmax=m)
+        self._zipf_cache = (key, fit)
+        return fit
+
+    def heaps_estimate(self) -> HeapsFit | None:
+        """Heaps' law fit of the coverage timeline, D(N) = k * N^beta."""
+        return fit_heaps(self._coverage_execs, self._coverage_edges)
+
     def edge_rarity_stats(self) -> dict:
         """Compute per-edge rarity statistics, in units of *seeds*.
 
@@ -3273,6 +3304,7 @@ class EdgeTracker:
         }
         self._edge_first_seen = _int_keyed(data.get("edge_first_seen", {}))
         self._frontier_cache = None
+        self._zipf_cache = None
         self._edge_last_seen = _int_keyed(data.get("edge_last_seen", {}))
         self._restore_timeline(data.get("coverage_timeline", []))
         corr_data = data.get("correlation_matrix", {})

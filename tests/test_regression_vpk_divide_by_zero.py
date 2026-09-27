@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -58,7 +60,8 @@ class TestVPKDivideByZeroGuards:
         if not staging.is_file():
             # Fall back to vendoring tree
             staging = Path.home() / "fuzzing" / "vendoring" / "ffmpeg" / "libavformat" / "vpk.c"
-        assert staging.is_file(), f"Vendor source not found: {staging}"
+        if not staging.is_file():
+            pytest.skip(f"Vendor source not found: {staging} (run tools/vendor_ffmpeg.sh)")
         content = staging.read_text()
         assert (
             "if (par->ch_layout.nb_channels <= 0)\n            return AVERROR_INVALIDDATA;"
@@ -72,7 +75,8 @@ class TestVPKDivideByZeroGuards:
         )
         if not staging.is_file():
             staging = Path.home() / "fuzzing" / "vendoring" / "ffmpeg" / "libavformat" / "demux.c"
-        assert staging.is_file(), f"Vendor source not found: {staging}"
+        if not staging.is_file():
+            pytest.skip(f"Vendor source not found: {staging} (run tools/vendor_ffmpeg.sh)")
         content = staging.read_text()
         assert (
             "if (par_tmp->ch_layout.nb_channels > 0 && !par->ch_layout.nb_channels)" in content
@@ -99,7 +103,8 @@ class TestVPKDivideByZeroGuards:
             staging = (
                 Path.home() / "fuzzing" / "vendoring" / "ffmpeg_asan" / "libavformat" / "vpk.c"
             )
-        assert staging.is_file(), f"ASAN vendor source not found: {staging}"
+        if not staging.is_file():
+            pytest.skip(f"ASAN vendor source not found: {staging} (run tools/vendor_ffmpeg.sh)")
         content = staging.read_text()
         assert (
             "if (par->ch_layout.nb_channels <= 0)\n            return AVERROR_INVALIDDATA;"
