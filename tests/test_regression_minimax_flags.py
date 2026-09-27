@@ -80,3 +80,11 @@ def test_bench_arm_is_baseline_plus_flag(monkeypatch, arm, dest):
     assert ARMS[arm][: len(base)] == base
     assert len(added) == 1
     assert getattr(_parse(monkeypatch, ARMS[arm]), dest) is True
+
+
+def test_hail_mary_enables_minimax_flags(monkeypatch, tmp_path):
+    # op_minimax is inert without mc_bandit; hail-mary must set both.
+    kw = _fuzz_kwargs(monkeypatch, tmp_path, ["--hail-mary"])
+
+    assert all(kw[name] is True for _, name, _ in FLAGS)
+    assert kw["mc_bandit"] is True

@@ -1915,10 +1915,6 @@ def cmd_sweep(args):
 # top-K path it replaces. --hail-mary means "every plausible strategy", not
 # "every strategy whose selection-quality tradeoff is still a guess".
 #
-# wall_order / op_minimax / minimax_select (--wall-order, --op-minimax,
-# --minimax-select) are excluded like mds_select: minimax Phases 3-5, wired
-# but unmeasured (docs/handover/handover_minimax_implementation_2026-09-01.md).
-#
 # fpl, op_span_reverse and op_span_relocate were missing from the tuple
 # below while every other scheduler (exp3 .. cusum_ucb, c2ucb) and every
 # other operator gate (wfc, weizz_tags, formatfuzzer) was in it -- three
@@ -1934,6 +1930,11 @@ _HAIL_MARY_FLAGS = (
     "markov_gen",
     "markov_blend",
     "mc_bandit",
+    # Minimax Phases 3-5: op_minimax drives mc_bandit above; minimax_select
+    # acts in the hail-mary minimize cycle.
+    "op_minimax",
+    "wall_order",
+    "minimax_select",
     "mc_cem",
     "mopt",
     "cma_es",

@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Minimax Phases 2-5 wired** (were dead code): `fuzz --op-minimax`, `--wall-order`,
   `--minimax-select`; `minimize --minimax-robust`; `bench_paired.py analyse --risk-matrix`
   prints the minimax-robust arm. Bench arms `elo-op-minimax`, `wall-order`, `minimax-select`.
+  `--hail-mary` enables the three fuzz flags.
   Fixed on the way: `select_op_minimax` root searched the first 4 ops in list order and
   scored by posterior mean (no exploration); `_minimax_pick` scored seed size, not unique
   loss; `minimax_robust_pruning` compared seed count to edge count; the risk matrix took
