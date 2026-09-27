@@ -1717,7 +1717,7 @@ class MapSizeEstimate(NamedTuple):
     - ``"branch_density"`` — disassembly estimate. Approximate.
     - ``"default"``       — nothing worked; MAP_SIZE_DEFAULT.
 
-    The first two are measurements and the rest are guesses, and the gap
+    The first three are measurements and the rest are guesses, and the gap
     between them is wide: on this tree's targets, branch density ran 4-16x
     above the true guard count. A caller that cannot tell which it got
     cannot tell a sized map from a guessed one -- which is exactly how
