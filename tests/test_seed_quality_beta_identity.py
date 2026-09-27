@@ -25,8 +25,8 @@ the distinction the migration turns on.
 
 import numpy as np
 import pytest
-from scipy import stats
 
+from fuzzer_tool.core.edge_tracker import ks_two_sample
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality, _beta_sample
 
@@ -98,8 +98,8 @@ def test_matches_betavariate_in_distribution(a, b):
     control = [rng.betavariate(a, b) for _ in range(n)]
     identity = [_beta_sample(a, b, rng) for _ in range(n)]
 
-    _, p_control = stats.ks_2samp(ref, control)
-    _, p_identity = stats.ks_2samp(ref, identity)
+    _, p_control = ks_two_sample(ref, control)
+    _, p_identity = ks_two_sample(ref, identity)
 
     assert p_control > 0.001, "control failed — the oracle itself is broken"
     assert p_identity > 0.001

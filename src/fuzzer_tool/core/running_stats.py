@@ -59,10 +59,15 @@ class RunningMoments:
         if self._window is not None and self._n >= self._window:
             # Lazy-initialize power sums on first slide transition.
             if self._sums_stale:
-                self._s1 = sum(self._buf)
-                self._s2 = sum(v * v for v in self._buf)
-                self._s3 = sum(v**3 for v in self._buf)
-                self._s4 = sum(v**4 for v in self._buf)
+                # Sums of (v - shift)**p: centring on a window value keeps
+                # S2 - S1**2/n from cancelling to ULP noise, e.g. a constant
+                # stream sums exact zeros and its variance is exactly 0.
+                self._shift = self._buf[0]
+                d = [v - self._shift for v in self._buf]
+                self._s1 = sum(d)
+                self._s2 = sum(v * v for v in d)
+                self._s3 = sum(v**3 for v in d)
+                self._s4 = sum(v**4 for v in d)
                 self._sums_stale = False
             x_old = self._buf[0]
             self._buf.popleft()
@@ -98,16 +103,17 @@ class RunningMoments:
         recomputation on every call.
         """
         n = self._window
+        x_new -= self._shift
+        x_old -= self._shift
         # Evict old, insert new in the power sums.
         self._s1 += x_new - x_old
         self._s2 += x_new * x_new - x_old * x_old
         self._s3 += x_new * x_new * x_new - x_old * x_old * x_old
         self._s4 += (x_new**4) - (x_old**4)
 
-        self._mean = self._s1 / n
-        # Central moments (population, not sample).
-        # m1 = mean (already computed as self._mean)
-        m1 = self._mean
+        # Central moments (population, not sample), shift-invariant.
+        m1 = self._s1 / n
+        self._mean = self._shift + m1
         m2 = self._s2 / n - m1 * m1
         m3 = self._s3 / n - 3 * m1 * self._s2 / n + 2 * m1 * m1 * m1
         m4 = (
@@ -220,6 +226,7 @@ class RunningMoments:
             data["s2"] = self._s2
             data["s3"] = self._s3
             data["s4"] = self._s4
+            data["shift"] = self._shift
         return data
 
     def load(self, data: dict) -> None:
@@ -239,6 +246,8 @@ class RunningMoments:
                 self._s2 = data["s2"]
                 self._s3 = data["s3"]
                 self._s4 = data["s4"]
+                # Pre-shift saves hold raw sums, i.e. shift 0.
+                self._shift = data.get("shift", 0.0)
                 self._sums_stale = False
             else:
                 self._sums_stale = True

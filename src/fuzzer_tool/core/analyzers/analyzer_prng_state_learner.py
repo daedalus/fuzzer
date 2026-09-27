@@ -148,6 +148,17 @@ _MIN_SAMPLES: dict[int, int] = {
     for width in _OPERAND_WIDTHS
 }
 _MAX_SAMPLES = 16  # cap on candidates fed to one recovery attempt
+# Per width, the window length at which every family of that width has been
+# tried. A failed window shorter than this keeps growing instead of sliding:
+# one draw per drain would otherwise pin a 4-byte window at xorshift32's 2
+# and taus88 (4) would never be attempted.
+_FULL_SAMPLES: dict[int, int] = {
+    width: min(
+        _MAX_SAMPLES,
+        max(_confident(spec) for spec in _CANDIDATE_FAMILIES if spec.out_bytes == width),
+    )
+    for width in _OPERAND_WIDTHS
+}
 # How far ahead of the cached frontier to look for a later drain's samples.
 # Bounds the cost of continuation (one step is a few integer ops) while
 # tolerating draws the target made without comparing them.
@@ -277,7 +288,8 @@ class PRNGStateLearner:
         # never was one, or it straddles a reseed. Slide it by one rather
         # than clearing, so a window that merely starts in the wrong place
         # recovers on the next draw instead of waiting for a whole new one.
-        del window[0]
+        if len(window) >= _FULL_SAMPLES[width]:
+            del window[0]
         # A cached state that fresh evidence contradicts is worse than none:
         # every prediction it serves is known-wrong.
         self._clear_state()

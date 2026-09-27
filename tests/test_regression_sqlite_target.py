@@ -107,7 +107,7 @@ class TestBuildWiring:
         assert "vendor/sqlite" in text or 'SQLITE_DIR="$VENDOR_DIR/sqlite"' in text
 
     def test_build_script_defines_paths(self, build_src):
-        assert 'SQLITE="${SQLITE_DIR:-vendor/sqlite}"' in build_src
+        assert 'SQLITE="${SQLITE_DIR:-$VENDOR/sqlite}"' in build_src
         assert "SQLITE_DEFINES=" in build_src
 
     def test_amalgamation_compiled_without_the_shim(self, build_src):
@@ -128,7 +128,7 @@ class TestBuildWiring:
         assert 'SQLITE_INC="-I$SQLITE $SQLITE_DEFINES"' in build_src
 
     def test_target_is_built_and_verified(self, build_src):
-        assert 'build_so_target "$TARGETS/sqlite_read.c"' in build_src
+        assert 'build_so_target "${TARGETS_SRC:-$TARGETS}/sqlite_read.c"' in build_src
         assert '"$TARGETS"/sqlite_read.so' in build_src, (
             "sqlite_read.so missing from the AFL-symbol verify pass"
         )
