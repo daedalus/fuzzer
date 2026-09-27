@@ -722,7 +722,9 @@ void __afl_map_shm(void) {
  * govern whether you should turn this on are documented immediately
  * above. */
 
-#if __AFL_CTX_SENSITIVE
+/* COMPCOV (cmplog builds) reuses the base-relative helpers below for its
+ * site keys, so they are compiled in for either channel. */
+#if __AFL_CTX_SENSITIVE || __AFL_CMPLOG
 /* dladdr()/Dl_info, for __afl_ctx_resolve_base() below. Included here
  * (rather than assumed from the __AFL_DISTANCE_MODE include further up)
  * because CTX_SENSITIVE and DISTANCE_MODE are independently-gated default-on
@@ -775,7 +777,9 @@ __AFL_NO_COV static inline int __afl_ctx_use_relative(void) {
     }
     return __afl_ctx_relative_mode;
 }
+#endif /* __AFL_CTX_SENSITIVE || __AFL_CMPLOG */
 
+#if __AFL_CTX_SENSITIVE
 /* Frame-slot load ASAN cannot see. The walk's one unvalidated hop can pass
  * the range check yet land in a stack redzone; an instrumented load then
  * aborts the whole in-process fuzzer. no_sanitize("address") on the walk
@@ -1019,26 +1023,17 @@ static inline void __afl_push_prev(uint32_t cur_loc) {
 #endif
 }
 
-__attribute__((visibility("default"), always_inline))
-static inline void __afl_map_loc(uint32_t cur_loc) {
-    if (!__afl_area) return;
-
+/* Insert a final, non-zero edge id for the current generation. No
+ * prev_loc hashing and no prev_loc push: synthetic channels that must not
+ * rename the real edge after them (COMPCOV) call this directly;
+ * __afl_map_loc() is this plus the edge-chain bookkeeping. */
+__attribute__((always_inline))
+static inline void __afl_map_id(uint32_t edge_id) {
     uint32_t gen = __afl_generation;
     if (__afl_gen_word)
         gen = *__afl_gen_word & __AFL_GEN_MASK;
 
-    uint32_t edge_id = __afl_edge_hash(cur_loc);
-    /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
-     * edge that hashes to 0 would be silently dropped and the slot
-     * reclaimed by the next collision. Remap exactly that one value to 1.
-     *
-     * Not `edge_id |= 1`: that forces bit 0 on EVERY id, which erases bit 0
-     * of cur_loc (and of the context tag) for all edges, so (p, 2k) and
-     * (p, 2k+1) -- very often the two successors of one branch -- became
-     * one id. Measured on fuzzgoat: 80 of 344 real edges merged by that
-     * alone. The remap below merges only the id-0 edge with the id-1 edge. */
-    if (!edge_id) edge_id = 1;
-    uint32_t pos     = edge_id % __afl_map_size;
+    uint32_t pos = edge_id % __afl_map_size;
 
     /* Linear probe, bounded to __AFL_PROBE_MAX slots.
      *
@@ -1051,6 +1046,24 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
     if (window > __afl_map_size) window = __afl_map_size;
 
     __afl_probe_insert(edge_id, pos, window, gen);
+}
+
+__attribute__((visibility("default"), always_inline))
+static inline void __afl_map_loc(uint32_t cur_loc) {
+    if (!__afl_area) return;
+
+    uint32_t edge_id = __afl_edge_hash(cur_loc);
+    /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
+     * edge that hashes to 0 would be silently dropped and the slot
+     * reclaimed by the next collision. Remap exactly that one value to 1.
+     *
+     * Not `edge_id |= 1`: that forces bit 0 on EVERY id, which erases bit 0
+     * of cur_loc (and of the context tag) for all edges, so (p, 2k) and
+     * (p, 2k+1) -- very often the two successors of one branch -- became
+     * one id. Measured on fuzzgoat: 80 of 344 real edges merged by that
+     * alone. The remap below merges only the id-0 edge with the id-1 edge. */
+    if (!edge_id) edge_id = 1;
+    __afl_map_id(edge_id);
 
     /* Accumulate rolling path hash: hash = hash * 31 ^ edge_id */
     __afl_path_hash_acc = (__afl_path_hash_acc * 31) ^ edge_id;
@@ -1558,10 +1571,10 @@ static size_t __afl_cmplog_pos = 0;
  * machinery -- see __afl_compcov_mark's __AFL_EDGE=0 stub below.
  *
  * A COMPCOV mark is a synthetic edge, same idea and same trade as
- * __sfuzz_state's transition hash above: __afl_map_loc() folds it into
- * the real edge_id/prev_loc chain (it perturbs context for whatever
- * fires next, and a hash collision with a real edge is possible, merely
- * improbable) rather than a channel of its own, so every existing
+ * __sfuzz_state's transition hash above, but inserted via __afl_map_id():
+ * it bypasses the prev_loc chain, so the real edge after a comparison
+ * keeps one id however far the match got (a hash collision with a real
+ * edge is possible, merely improbable). No channel of its own, so every existing
  * coverage consumer -- scoring, scheduling, admission, novelty -- sees
  * COMPCOV progress with no plumbing added. Marking every byte of a long
  * match also means a target with wide, hot comparisons wants a bigger
@@ -1582,18 +1595,41 @@ static int __afl_compcov_level = 0;
  * that might be the buffer's own end. */
 __AFL_NO_COV static size_t __afl_readable_len(const void *p, size_t want);
 
+/* Where a byte walk stops. The value is the element width whose all-zero
+ * match ends a string: bytes past the terminator are never compared (and
+ * may be uninitialised), so marking them mints input-independent noise.
+ *   strncmp("AB\0QQ", "AB\0QQ", 6) -> STR marks 0..2, MEM would mark 0..5 */
+enum __afl_compcov_kind {
+    COMPCOV_MEM  = 0,               /* memcmp/bcmp/wmemcmp: full length */
+    COMPCOV_STR  = 1,               /* strcmp/strncmp: stop after '\0' */
+    COMPCOV_WSTR = sizeof(wchar_t), /* wcscmp/wcsncmp: stop after L'\0' */
+};
+
 #if __AFL_EDGE
+/* Exec-stable site key: the raw return address moves with ASLR, so a
+ * target run with FUZZER_KEEP_ASLR=1 keys on the load-base-relative
+ * offset instead -- same rule as __afl_get_caller_ctx(). */
+__AFL_NO_COV static inline uint64_t __afl_compcov_site(void *pc) {
+    uintptr_t addr = (uintptr_t)pc;
+    if (!__afl_ctx_use_relative()) return addr;
+
+    uintptr_t base = __afl_ctx_resolve_base(pc);
+    return base ? addr - base : addr;
+}
+
 /* Fold one byte (or one power-of-two width step) of comparison progress
  * into the edge table as a synthetic edge, keyed on the comparison site
- * (its return address) and how far the match got. Same FNV-1a shape as
+ * (__afl_compcov_site) and how far the match got. Same FNV-1a shape as
  * __sfuzz_state's hash, salted differently so the two synthetic-edge
  * channels do not structurally alias each other. */
-__AFL_NO_COV static inline void __afl_compcov_mark(void *pc, uint32_t tag) {
+__AFL_NO_COV static inline void __afl_compcov_mark(uint64_t site, uint32_t tag) {
+    if (!__afl_area) return;
+
     uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
-    h = (h ^ (uint64_t)(uintptr_t)pc) * 1099511628211ULL;
+    h = (h ^ site) * 1099511628211ULL;
     h = (h ^ 0x434f4d5043564356ULL) * 1099511628211ULL; /* "COMPCVCV" salt */
     h = (h ^ tag) * 1099511628211ULL;
-    __afl_map_loc((uint32_t)(h >> 32) | 0x80000000u);
+    __afl_map_id((uint32_t)(h >> 32) | 0x80000000u);
 }
 
 /* Layer 2: a and b are the raw operands of an n-byte trace-cmp callback
@@ -1609,10 +1645,13 @@ __AFL_NO_COV static inline void __afl_compcov_ints(uint64_t a, uint64_t b, size_
                                                     void *pc, int is_const) {
     int level = __afl_compcov_level;
     if (level < (is_const ? 1 : 2)) return;
+    if ((a & 0xFF) != (b & 0xFF)) return; /* no progress: skip the site lookup */
+
+    uint64_t site = __afl_compcov_site(pc);
     for (size_t i = 1; i < n; i++) {
         uint64_t mask = (i >= 8) ? ~0ULL : ((1ULL << (i * 8)) - 1);
         if ((a & mask) != (b & mask)) return;
-        __afl_compcov_mark(pc, (uint32_t)i);
+        __afl_compcov_mark(site, (uint32_t)i);
     }
 }
 
@@ -1622,9 +1661,10 @@ __AFL_NO_COV static inline void __afl_compcov_ints(uint64_t a, uint64_t b, size_
  * at level 2: unlike an integer compare, a libc call site gives no
  * compiler-verified signal that either buffer is a constant. Caller is
  * responsible for n already being a length safe to read from both a and
- * b (the same n it already passed to __afl_cmplog_bytes). */
-__AFL_NO_COV static inline void __afl_compcov_bytes(const void *a, const void *b,
-                                                     size_t n, void *pc) {
+ * b (the same n it already passed to __afl_cmplog_bytes). kind says
+ * whether a matched terminator ends the walk (see enum __afl_compcov_kind). */
+__AFL_NO_COV static inline void __afl_compcov_bytes(const void *a, const void *b, size_t n,
+                                                     void *pc, enum __afl_compcov_kind kind) {
     if (__afl_compcov_level < 2 || !a || !b || n == 0) return;
     size_t k = n > COMPCOV_MAX_OPERAND ? COMPCOV_MAX_OPERAND : n;
     /* Same readability clamp __afl_cmplog_bytes applies: a caller-supplied
@@ -1635,9 +1675,19 @@ __AFL_NO_COV static inline void __afl_compcov_bytes(const void *a, const void *b
     k = ka < kb ? ka : kb;
     const unsigned char *pa = (const unsigned char *)a;
     const unsigned char *pb = (const unsigned char *)b;
+    if (k == 0 || pa[0] != pb[0]) return; /* no progress: skip the site lookup */
+
+    uint64_t site = __afl_compcov_site(pc);
+    size_t w = (size_t)kind;
     for (size_t i = 0; i < k; i++) {
         if (pa[i] != pb[i]) return;
-        __afl_compcov_mark(pc, (uint32_t)i);
+        __afl_compcov_mark(site, (uint32_t)i);
+
+        /* Matched a whole element: stop if it was the terminator. */
+        if (w == 0 || (i + 1) % w != 0) continue;
+        size_t z = 0;
+        while (z < w && pa[i + 1 - w + z] == 0) z++;
+        if (z == w) return;
     }
 }
 #else /* !__AFL_EDGE: __AFL_PRELOAD_ONLY has no edge map to mark into */
@@ -1645,9 +1695,9 @@ __AFL_NO_COV static inline void __afl_compcov_ints(uint64_t a, uint64_t b, size_
                                                     void *pc, int is_const) {
     (void)a; (void)b; (void)n; (void)pc; (void)is_const;
 }
-__AFL_NO_COV static inline void __afl_compcov_bytes(const void *a, const void *b,
-                                                     size_t n, void *pc) {
-    (void)a; (void)b; (void)n; (void)pc;
+__AFL_NO_COV static inline void __afl_compcov_bytes(const void *a, const void *b, size_t n,
+                                                     void *pc, enum __afl_compcov_kind kind) {
+    (void)a; (void)b; (void)n; (void)pc; (void)kind;
 }
 #endif /* __AFL_EDGE */
 
@@ -2321,7 +2371,7 @@ __AFL_NO_COV int memcmp(const void *a, const void *b, size_t n) {
     int result = real_memcmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_MEMCMP, result == 0);
     __afl_cmplog_bytes(a, b, n, result);
-    __afl_compcov_bytes(a, b, n, __builtin_return_address(0));
+    __afl_compcov_bytes(a, b, n, __builtin_return_address(0), COMPCOV_MEM);
     return result;
 }
 __AFL_NO_COV int afl_cmp_memcmp(const void *a, const void *b, size_t n)
@@ -2334,7 +2384,7 @@ __AFL_NO_COV int strcmp(const char *a, const char *b) {
     size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
     if (n > 0) {
         __afl_cmplog_bytes(a, b, n + 1, result);
-        __afl_compcov_bytes(a, b, n + 1, __builtin_return_address(0));
+        __afl_compcov_bytes(a, b, n + 1, __builtin_return_address(0), COMPCOV_STR);
     }
     return result;
 }
@@ -2347,7 +2397,7 @@ __AFL_NO_COV int strncmp(const char *a, const char *b, size_t n) {
     __AFL_CMP_COUNT(__AFL_CMP_STRNCMP, result == 0);
     if (n > 0) {
         __afl_cmplog_bytes(a, b, n, result);
-        __afl_compcov_bytes(a, b, n, __builtin_return_address(0));
+        __afl_compcov_bytes(a, b, n, __builtin_return_address(0), COMPCOV_STR);
     }
     return result;
 }
@@ -2502,7 +2552,7 @@ __AFL_NO_COV int bcmp(const void *a, const void *b, size_t n) {
     int result = real_bcmp(a, b, n);
     __AFL_CMP_COUNT(__AFL_CMP_BCMP, result == 0);
     __afl_cmplog_bytes(a, b, n, result);
-    __afl_compcov_bytes(a, b, n, __builtin_return_address(0));
+    __afl_compcov_bytes(a, b, n, __builtin_return_address(0), COMPCOV_MEM);
     return result;
 }
 __AFL_NO_COV int afl_cmp_bcmp(const void *a, const void *b, size_t n)
@@ -2519,7 +2569,7 @@ __AFL_NO_COV int wmemcmp(const wchar_t *a, const wchar_t *b, size_t n) {
         size_t k = n * sizeof(wchar_t);
         if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
         __afl_cmplog_bytes(a, b, k, result);
-        __afl_compcov_bytes(a, b, k, __builtin_return_address(0));
+        __afl_compcov_bytes(a, b, k, __builtin_return_address(0), COMPCOV_MEM);
     }
     return result;
 }
@@ -2535,7 +2585,7 @@ __AFL_NO_COV int wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
         if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
         if (k > 0) {
             __afl_cmplog_bytes(a, b, k, result);
-            __afl_compcov_bytes(a, b, k, __builtin_return_address(0));
+            __afl_compcov_bytes(a, b, k, __builtin_return_address(0), COMPCOV_WSTR);
         }
     }
     return result;
@@ -2553,7 +2603,7 @@ __AFL_NO_COV int wcscmp(const wchar_t *a, const wchar_t *b) {
             size_t k = n * sizeof(wchar_t);
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
             __afl_cmplog_bytes(a, b, k, result);
-            __afl_compcov_bytes(a, b, k, __builtin_return_address(0));
+            __afl_compcov_bytes(a, b, k, __builtin_return_address(0), COMPCOV_WSTR);
         }
     }
     return result;
