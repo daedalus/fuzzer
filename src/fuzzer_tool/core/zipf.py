@@ -296,6 +296,8 @@ def _classify(alpha: float, xmin: int, n_tail: int, total: int, ks: float, vuong
     """
     frac = n_tail / total
     pinned = alpha >= ALPHA_HI - AT_BOUND or alpha <= ALPHA_LO + AT_BOUND
+    # xmin is the min-KS candidate of up to MAX_XMIN, which biases KS low:
+    # another reason the guard errs toward accepting, never toward rejecting.
     misfit = ks > KS_95 / math.sqrt(n_tail)
     law = TailLaw.POWER_LAW
     if pinned or misfit or frac < MIN_TAIL_FRAC or vuong < Z_95:

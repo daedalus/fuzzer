@@ -213,3 +213,41 @@ class TestStats:
         out = buf.getvalue()
         assert "Heaps" in out
         assert "Zipf tail" in out
+
+
+def _misfit_tracker():
+    """Tracker stub whose fit is rejected: alpha pinned at ALPHA_LO."""
+    fit = ZipfFit(1.01, 1, 1501, 1.0, 0.169, 24.3, TailLaw.NOT_POWER_LAW)
+    return types.SimpleNamespace(zipf_estimate=lambda: fit, heaps_estimate=lambda: None)
+
+
+class TestRegressionZipfExponentOnMisfit:
+    """s = 1/(alpha - 1) was printed for rejected fits (s=99.96 on png_read)."""
+
+    def test_regression_zipf_summary_omits_s(self):
+        from fuzzer_tool.services.stats import StatsReporter
+
+        reporter = StatsReporter.__new__(StatsReporter)
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            reporter._print_summary_zipf(_f_with(_misfit_tracker()))
+        out = buf.getvalue()
+        assert "not_power_law" in out
+        assert "s=" not in out
+
+    def test_regression_zipf_report_omits_s(self):
+        text = _zipf_tail(_f_with(_misfit_tracker()))
+        assert "not_power_law" in text
+        assert "s=" not in text
+
+    def test_regression_zipf_stats_omit_s(self):
+        stats: dict = {}
+        _zipf_stats(_f_with(_misfit_tracker()), stats)
+        assert stats["zipf"]["law"] == "not_power_law"
+        assert "s" not in stats["zipf"]
+
+    def test_power_law_keeps_s(self):
+        # Falsification: an accepted fit still reports its exponent.
+        stats: dict = {}
+        _zipf_stats(_f_with(_zipf_tracker()), stats)
+        assert "s" in stats["zipf"]

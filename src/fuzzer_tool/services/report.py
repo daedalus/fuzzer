@@ -1105,7 +1105,7 @@ def _zipf_tail(f) -> str:
         "",
         "--- Zipf Tail (seeds per edge) ---",
         f"  Law:                 {fit.law.value}",
-        f"  Exponent:            alpha={fit.alpha:.3f}  s={fit.s:.3f} (rank-frequency)",
+        f"  Exponent:            {_zipf_exponent(fit)}",
         f"  Tail:                xmin={fit.xmin}, {fit.n_tail} edges ({fit.tail_frac:.0%})",
         f"  Fit:                 KS={fit.ks:.4f}, Vuong z={fit.vuong:.2f} vs geometric",
     ]
@@ -1118,6 +1118,13 @@ def _zipf_tail(f) -> str:
             f"2x execs -> +{heaps.doubling_gain:.1%} edges"
         )
     return "\n".join(lines)
+
+
+def _zipf_exponent(fit: ZipfFit) -> str:
+    """alpha, plus s = 1/(alpha - 1) only when the tail is a power law."""
+    if fit.law is TailLaw.POWER_LAW:
+        return f"alpha={fit.alpha:.3f}  s={fit.s:.3f} (rank-frequency)"
+    return f"alpha={fit.alpha:.3f} (rejected fit; no exponent)"
 
 
 def _crash_reproducibility(f) -> str:

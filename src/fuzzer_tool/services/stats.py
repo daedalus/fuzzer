@@ -260,12 +260,14 @@ def _zipf_stats(f, stats: dict) -> None:
     entry = {
         "law": fit.law.value,
         "alpha": round(fit.alpha, 4),
-        "s": round(fit.s, 4),
         "xmin": fit.xmin,
         "tail_frac": round(fit.tail_frac, 4),
         "ks": round(fit.ks, 4),
         "vuong": round(fit.vuong, 2),
     }
+    # s = 1/(alpha - 1) is only an exponent when the tail is a power law.
+    if fit.law is TailLaw.POWER_LAW:
+        entry["s"] = round(fit.s, 4)
     heaps = f._edge_tracker.heaps_estimate()
     if heaps is not None:
         entry["heaps_beta"] = round(heaps.beta, 4)
@@ -566,8 +568,10 @@ class StatsReporter:
     def _print_summary_zipf(self, f) -> None:
         """Print the Zipf tail and Heaps growth lines."""
         fit = f._edge_tracker.zipf_estimate()
-        if fit.law is not TailLaw.INSUFFICIENT:
+        if fit.law is TailLaw.POWER_LAW:
             print(f"  Zipf tail:         s={fit.s:.2f} (alpha={fit.alpha:.2f}, {fit.law.value})")
+        elif fit.law is TailLaw.NOT_POWER_LAW:
+            print(f"  Zipf tail:         {fit.law.value} (alpha={fit.alpha:.2f}, KS={fit.ks:.3f})")
 
         heaps = f._edge_tracker.heaps_estimate()
         if heaps is not None:
