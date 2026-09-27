@@ -51,6 +51,7 @@ int main(int argc, char **argv) {
 """
 
 SHIM = "src/fuzzer_tool/adapters/afl_shim.c"
+REL32_CALL_LEN = 5  # e8 + disp32
 
 
 @pytest.fixture(scope="module")
@@ -185,13 +186,26 @@ class TestDistanceChannel:
 
     def test_uploaded_table_matches_targetdistance(self, distance_target):
         # Every uploaded site's distance equals TargetDistance's valued
-        # block distance for the containing block (single source of truth).
+        # block distance for the block holding the call (single source of truth).
         td = TargetDistance(distance_target, targets=["target_fn"])
         assert td.load()
         table = td.pc_distance_table()
         assert table
         for pc, dist in table.items():
-            assert dist == td._bb_value_of(pc)
+            assert dist == td._bb_value_of(pc - REL32_CALL_LEN)
+
+    def test_regression_site_scored_by_calling_block(self, distance_target):
+        # The CFG ends a block at each call, so the probe PC (return
+        # address) opens the *next* block. The site must carry the
+        # distance of the block holding the call: target_fn's entry → 0.0.
+        td = TargetDistance(distance_target, targets=["target_fn"])
+        assert td.load()
+        cfg = td._cfgs["target_fn"]
+        entry = cfg.block_containing(td.functions["target_fn"][0])
+        assert entry.callees == {"__sanitizer_cov_trace_pc"}
+
+        site = entry.end - (td._base_addr or 0)
+        assert td.pc_distance_table().get(site) == 0.0
 
 
 class TestDirectLiteChannel:

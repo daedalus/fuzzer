@@ -15,6 +15,8 @@ import pytest
 from fuzzer_tool.core.analyzers.analyzer_distance import TargetDistance
 from fuzzer_tool.core.icfg import build_interprocedural_cfg, probe_key_node_table
 
+REL32_CALL_LEN = 5  # e8 rel32
+
 SRC = """\
 #include <stdint.h>
 #include <stddef.h>
@@ -111,16 +113,19 @@ class TestRuntimeKeyTable:
         for idx in table.values():
             assert 0 <= idx < icfg.n_nodes
 
-    def test_keys_land_inside_their_node(self, tp_icfg):
+    def test_regression_key_maps_to_calling_block(self, tp_icfg):
+        """Key is the return address, but the node is the block holding
+        the call; the CFG ends blocks at calls, so the return address
+        already opens the next block."""
         td, icfg = tp_icfg
         base = td._base_addr or 0
         table = probe_key_node_table(td, icfg)
         starts = icfg.node_addrs
         for key, idx in table.items():
-            site = base + key
+            call = base + key - REL32_CALL_LEN
             lo = starts[idx]
             hi = starts[idx + 1] if idx + 1 < len(starts) else lo + 0x1000
-            assert lo <= site < hi
+            assert lo <= call < hi
 
     def test_some_site_maps_into_the_target_function(self, tp_icfg):
         td, icfg = tp_icfg
