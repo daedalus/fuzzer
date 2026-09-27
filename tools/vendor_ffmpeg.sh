@@ -9,6 +9,10 @@
 #                                       #   -> vendor/ffmpeg_asan (linked by _asan targets)
 #   tools/vendor_ffmpeg.sh --fast       # gcc, no instrumentation (fastest build, no coverage)
 #                                       #   -> vendor/ffmpeg_fast
+#   tools/vendor_ffmpeg.sh --top=3      # sources only, newest patch of the 3 newest release
+#                                       #   lines -> vendor/ffmpeg-<ver> (e.g. 9.0.2, 8.1.3, 8.0.3);
+#                                       #   build_targets.sh builds ffmpeg_read_<ver>_asan from each.
+#                                       #   FFMPEG_VERSIONS="9.0.2 8.1.3" skips tag resolution.
 #
 # Component set:
 #   default            = full (all demuxers/decoders/parsers/bsfs) — matches upstream fuzzing
@@ -59,12 +63,16 @@ fi
 # ── Parse flags ──────────────────────────────────────────────────
 MODE="nosan"          # nosan | asan | fast
 MINIMAL=0
+TOP=0                 # --top=N: fetch N release lines, no build
 for arg in "$@"; do
     case "$arg" in
         --nosan) MODE="nosan" ;;
         --asan)  MODE="asan" ;;
         --fast)  MODE="fast" ;;
         --minimal) MINIMAL=1 ;;
+        --top=*)
+            TOP="${arg#--top=}"
+            [[ "$TOP" =~ ^[1-9][0-9]*$ ]] || { echo "--top needs a positive count: $arg" >&2; exit 2; } ;;
         --in-tree-vendor) IN_TREE_VENDOR=1; VENDOR_DIR="$(cd "$(dirname "$0")/.." && pwd)/vendor" ;;
         *) echo "unknown arg: $arg" >&2; exit 2 ;;
     esac
@@ -209,7 +217,7 @@ _extract() {
     [ -z "$top" ] && { echo "ERROR: unexpected archive layout" >&2; return 1; }
     rm -rf "$FFMPEG_DIR"; mv "$top" "$FFMPEG_DIR"
 }
-fetch_source
+[ "$TOP" -gt 0 ] || fetch_source
 
 # Apply patches after fetching source
 apply_patches() {
@@ -238,6 +246,38 @@ apply_patches() {
 }
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+
+# ── Multi-version: newest patch per release line ─────────────────
+# Tags n9.0, n9.0.2, n8.1.3, n9.1-dev -> "9.0.2 8.1.3": dev tags dropped,
+# sort -V so 8.0.10 beats 8.0.3, first (newest) hit per major.minor kept.
+FFMPEG_GIT_URL="${FFMPEG_GIT_URL:-https://github.com/FFmpeg/FFmpeg}"
+top_versions() {
+    git ls-remote --tags --refs "$FFMPEG_GIT_URL" 'n*' \
+        | sed -n 's#.*refs/tags/n\([0-9][0-9]*\.[0-9][0-9]*\(\.[0-9][0-9]*\)\{0,1\}\)$#\1#p' \
+        | sort -V -r | awk -F. '!seen[$1 "." $2]++' | head -n "$1"
+}
+
+# Sources only: each tree is staged and built by build_targets.sh, so a
+# configure/make here would be a second, unused build per version.
+vendor_top() {
+    local versions="${FFMPEG_VERSIONS:-$(top_versions "$1")}"
+    [ -n "$versions" ] || { echo "ERROR: no FFmpeg release tags at $FFMPEG_GIT_URL" >&2; return 1; }
+
+    local ver
+    for ver in $versions; do
+        FFMPEG_VERSION="$ver"
+        FFMPEG_DIR="$VENDOR_DIR/ffmpeg-$ver"
+        fetch_source || { echo "ERROR: fetch failed for $FFMPEG_DIR" >&2; return 1; }
+        apply_patches
+    done
+    echo "=== FFmpeg sources vendored: $(echo $versions) ==="
+    echo "Next:      tools/build_targets.sh --asan   (builds ffmpeg_read_<ver>_asan per version)"
+}
+if [ "$TOP" -gt 0 ]; then
+    vendor_top "$TOP"
+    exit 0
+fi
+
 apply_patches
 
 # ── Step 3: Configure ────────────────────────────────────────────

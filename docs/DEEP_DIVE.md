@@ -1015,6 +1015,20 @@ with `-fsanitize=address`. `build_simple_so_targets` selects the correct path ba
 on the `$suffix` parameter (`_asan` → `vendor/ffmpeg_asan/`, otherwise
 `vendor/ffmpeg/`).
 
+**Multi-version FFmpeg** (differential campaign across release lines):
+
+```
+vendor_ffmpeg.sh --top=3   ->  $FUZZ_VENDOR_ROOT/ffmpeg-{9.0.2,8.1.3,8.0.3}   (sources only)
+build_targets.sh --asan    ->  $FUZZ_BUILD_ROOT/ffmpeg-<ver>_asan/*.a -> ffmpeg_read_<ver>_asan
+fuzzer-tool fuzz ~/fuzzing/builds/ffmpeg_read_*_asan -d <corpus>        (multi-target)
+```
+
+`--top=N` resolves the newest patch of the N newest `major.minor` lines from upstream tags
+(`FFMPEG_GIT_URL`; dev tags dropped, `sort -V`). `FFMPEG_VERSIONS="a b c"` skips resolution.
+`build_ffmpeg_versions` reuses `build_vendored_ffmpeg_sancov` (its 2nd arg names the tree) and
+links executables only: one process per version, one SHM map each, shared corpus. A crash
+unique to one version is a regression or a silent fix. Test: `tests/test_regression_ffmpeg_multi_version.py`.
+
 ### Vendored libsecp256k1 target (secp256k1_read)
 
 `targets/secp256k1_read.so` wraps the vendored libsecp256k1 v0.8.0
