@@ -88,7 +88,7 @@ digraph fuzzer_tool {
     subgraph cluster_fb {
         label="4 · Feedback   —   what came back";
         color="#b9cbd8"; fillcolor="#f2f7fa"; fontcolor="#37596e";
-        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM bitmap · hit buckets · per-edge max counts (PerfFuzz)\ledge_owner_count → rarity · Chao2 richness · first-seen\l",
+        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM bitmap · hit buckets · per-edge max counts (PerfFuzz)\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];
         cmplog [label="core/cmplog.py\lpairs + tokens · fired/asserted\lper callback and per call site (PC)\lwalls · progress reward\l",
                 fillcolor="#c6dcea", fontcolor="#22475c"];

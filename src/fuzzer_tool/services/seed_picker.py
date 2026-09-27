@@ -26,6 +26,7 @@ from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
+from fuzzer_tool.core.zipf import TailLaw
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,12 @@ SATURATION_STALL_EXECS = 20000
 # estimate says.
 SATURATION_MAX_GATED_EXECS = 5000
 SATURATION_MIN_UNGATED_EXECS = 1000
+# Zipf veto: Chao2 is a lower bound under a power-law tail, so "saturated"
+# is not trusted while the tail is Zipf and the Heaps elasticity
+# d(log edges)/d(log execs) is at least this (0.05: doubling execs still
+# adds ~3.5% edges), with a fit at least this tight.
+ZIPF_GROWTH_BETA = 0.05
+ZIPF_GROWTH_R2 = 0.9
 
 # ── Invasion percolation operator selection (percolation handover Module 4) ─
 # Resistance at or above which an operator counts as stuck: success_rate <=
@@ -1599,6 +1606,9 @@ class SeedPicker:
            before it may re-engage. Note this is deliberately *not* ordinary
            hysteresis; see the constants for why release-below-engage is the
            wrong shape for a loop with this sign.
+        5. Chao2 undercounts a power-law tail. While the seeds-per-edge
+           spectrum fits Zipf and the Heaps elasticity is at least
+           ``ZIPF_GROWTH_BETA``, the gate does not engage.
 
         Returns:
             True when the expensive per-seed analyses should be skipped.
@@ -1612,13 +1622,16 @@ class SeedPicker:
             sat = gt.get("saturation", 0.0)
             f._saturation = sat
             f._saturation_exec = exec_count
+            # Fit only when the gate would engage: early runs refresh on
+            # every new edge and pay nothing.
+            f._saturation_growing = sat >= SATURATION_GATE and self._zipf_growing()
 
         was_gated = getattr(f, "_saturation_gated", False)
         # None until the gate has flipped at least once, so the off-time floor
         # below cannot delay the FIRST engagement (there is nothing to protect
         # yet, and exec_count starts at 0).
         flipped_at = getattr(f, "_saturation_gate_exec", None)
-        gated = sat >= SATURATION_GATE
+        gated = sat >= SATURATION_GATE and not getattr(f, "_saturation_growing", False)
         if gated:
             since_edge = exec_count - getattr(f, "_last_new_edge_exec", 0)
             if since_edge >= SATURATION_STALL_EXECS:
@@ -1647,6 +1660,15 @@ class SeedPicker:
             f._saturation_gated = gated
             f._saturation_gate_exec = exec_count
         return gated
+
+    def _zipf_growing(self) -> bool:
+        """True while the edge tail is Zipf and discovery still grows (Heaps)."""
+        tracker = self.f._edge_tracker
+        if tracker.zipf_estimate().law is not TailLaw.POWER_LAW:
+            return False
+
+        heaps = tracker.heaps_estimate()
+        return heaps is not None and heaps.beta >= ZIPF_GROWTH_BETA and heaps.r2 >= ZIPF_GROWTH_R2
 
     def _compute_weights(self, now: float) -> list[float]:
         f = self.f
