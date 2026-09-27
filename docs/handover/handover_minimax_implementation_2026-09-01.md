@@ -7,7 +7,7 @@ Verified against `4c021daa`.
 
 ---
 
-## 1. E3 — A/B the `alphabeta` seed arm (unrun)
+## 1. E3 — A/B the `alphabeta` seed arm (png: null; ffmpeg: unrun)
 
 The arm is no longer minimax: `26b367ab` replaced alpha-beta descent (1 distinct
 seed / 300 picks, root-only) with Thompson descent over the lineage tree. Class
@@ -15,16 +15,24 @@ name, `--alphabeta` flag and state key kept
 (`core/schedulers/seed_mcts.py::AlphaBetaMCTSSeedScheduler`,
 `services/seed_picker.py::_pick_alphabeta_seed`).
 
-- Harness exists: `tools/lib/bench_paired.py` arms `elo-alphabeta` vs `elo-mcts`
-  (`analyse --baseline elo-mcts`).
-- Targets: `png_read`, `ffmpeg_read`. Replicated, `--lock-single-thread`.
-- Accept: effect resolved above noise floor (sd ≈ 4.6 edges png) or a bounded null.
+**png result (2026-09-27, `container_signal`, `png_read_noasan.so`, 20 seeds x
+10k execs):** `elo-alphabeta` vs `elo-mcts` 12W/8L/0T, McNemar p=0.50,
+Wilcoxon p=0.67, median Δ +8 edges. Means 130.6 (sd 27.0) vs 131.0 (sd 20.8).
+Noise: runs of the same `elo-mcts` cell span a median 10 edges (9 cells:
+0-39), so Δ is inside the noise floor. Null, not bounded tightly: a ~10pt
+win-rate effect needs ~100 cells. Run unlocked, 3 parallel shards (edges at a
+fixed exec budget; eps not comparable). Details:
+`docs/learnings/2026-09-27-alphabeta-vs-mcts-png.md`.
 
-## 2. Phases 2–5 — shipped, unreachable, untested
+Open: `ffmpeg_read` (needs `tools/vendor_ffmpeg.sh`, and a new target set in `tools/lib/eval_set.py`: none contains ffmpeg). Keep `--alphabeta` only
+if ffmpeg shows an effect; png gives no reason to prefer it over `--mcts`.
 
-Code exists; nothing in the fuzz loop calls it; no falsification/adversarial tests
-(Hard Rule 23). Decide per item: wire behind a flag + test + measure, or delete
-(Hard Rule 7).
+## 2. Phases 2–5 — wired, tested, unmeasured
+
+Wired in PR #20 (2026-09-27) behind `--risk-matrix` (P2), `--wall-order` (P3),
+`--op-minimax` (P4), `--minimax-select` / `minimize --minimax-robust` (P5); the
+three fuzz flags are on under `--hail-mary`. Bench arms: `elo-op-minimax`,
+`wall-order`, `minimax-select`. The "Gap" column below is the pre-wiring state.
 
 | Phase | Symbol | Gap |
 |---|---|---|
@@ -33,7 +41,7 @@ Code exists; nothing in the fuzz loop calls it; no falsification/adversarial tes
 | 4 operator sequencing | `core/schedulers/op_monte_carlo.py::MonteCarloScheduler.select_op_minimax` | No caller, no test. |
 | 5 robust corpus | `services/corpus_manager.py::CorpusManager.minimax_robust_admission` → `core/rate_distortion.py::minimax_robust_corpus_admission` / `minimax_robust_pruning` | No caller, no test. |
 
-Validation owed if wired:
+Validation owed:
 
 - **Phase 2:** heterogeneous set (png, jpeg, ffmpeg, sqlite). Prediction: lower
   variance of edge-discovery rate vs Elo mix, 5–15% lower mean. Falsified if

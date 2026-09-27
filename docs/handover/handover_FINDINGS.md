@@ -630,7 +630,7 @@ harness.
 |---|------|--------|----------------------|
 | E1 | Weizz paired bench | **MISSING** | The **only** unticked item on the Weizz acceptance checklist. `tools/bench_paired.py` against a live target. No weizz arm in `tools/bench_paired.py`. No results in `docs/learnings/` or `docs/sweeps/` |
 | E2 | FormatFuzzer paired run | **MISSING** | Acceptance asks for either a coverage gain or a validity gain, with a **throughput regression ≤ 15%** (or automatic Elo de-prioritisation). No formatfuzzer arm in `tools/bench_paired.py`. No results in `docs/learnings/` or `docs/sweeps/` |
-| E3 | Alpha-beta MCTS A/B | **MISSING** | Against the plain `MCTSSeedScheduler` on `targets/png_read` and `targets/ffmpeg_read`. No alphabeta/mcts arm in `tools/bench_paired.py`. No results in `docs/learnings/` or `docs/sweeps/` |
+| E3 | Alpha-beta MCTS A/B | **png: null** | 2026-09-27, 20 seeds: 12W/8L, McNemar p=0.50, med Δ +8 edges, inside within-cell rep noise (median 10). `docs/learnings/2026-09-27-alphabeta-vs-mcts-png.md`. ffmpeg_read unrun |
 | E4 | Fractal Voronoi A/B | **MISSING** | The operator shipped without one. No fractal_voronoi arm in `tools/bench_paired.py`. No results in `docs/learnings/` or `docs/sweeps/` |
 | E5 | GARCH and `--continuum` | **PARTIAL** | Both shipped opt-in and unmeasured. `--continuum` flag exists in `cli/commands.py:2017`. `garch`/`continuum` arms exist in `tools/bench_paired.py:81-83,89`. No dated result files in `docs/learnings/` for these keywords. `docs/sweeps/` has no matching results. For GARCH specifically, the ACF study needs **snapshots dumped to disk, not live state**: `record_discovery_snapshot` caps history at 500 and trims to 250, one snapshot per tick ≈ 10 s of work, while an MLE GARCH(1,1) wants ~500–1000 observations |
 
@@ -689,7 +689,7 @@ pruned file names its full original: `git show 1c689e8a^:<path>`.
 | `handover_seventeen_source_survey_2026-09-06.md` | kept | B2 lexicase + homologous crossover; B3 Growing Tree arm; C2 `span_*` A/B; A2 multi-threshold tree; C3 in-place/undo audit; C4 LNS on stall |
 | `handover_bandit_stopping_search_2026-09-02.md` | kept | secretary module removal/replacement; Gittins seed arm; `total_time_sq`; ETC null arm; Koopman; D-UCB cold-start re-measure |
 | `handover_job_scheduling_2026-09-02.md` | kept | `MaintenanceQueue` 3/~14 jobs; `--lst-revisit`/`--job-scheduler` A/Bs; unread `last_truncated`; quota falsifier; SPT calibration |
-| `handover_minimax_implementation_2026-09-01.md` | kept | E3 alphabeta-vs-mcts A/B; Phases 2–5 have no callers |
+| `handover_minimax_implementation_2026-09-01.md` | kept | E3 png null, ffmpeg open; Phases 2–5 wired (PR #20), unmeasured |
 | `handover_ffmpeg_build_paths_2026-09-03.md` | kept | F2 (AGENTS.md layout says `targets/`, code uses `builds/`), F3/F4/F5/F7/F8/F9/N6 residuals |
 | `handover_formatfuzzer_integration_2026-09-06.md` | kept | real upstream binaries never exercised; Phase 2/3; in-process `.so`; E2; docs |
 | `handover_skittercreek_tailslayer_port.md` | kept | G (`shmat()` empty table), H (deferred), checksum target for item 1 |
