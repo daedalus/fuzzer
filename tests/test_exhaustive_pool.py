@@ -199,12 +199,15 @@ class TestRefusals:
             call(pool)
 
     def test_continuous_error_names_the_cheap_fix(self):
-        """Most of these are coin flips, not real continuous draws.
+        """Most of these were coin flips, not real continuous draws.
 
-        21 operators are unenumerable purely because a branch is written
-        ``rng.random() < 0.5`` instead of ``rng.randint(0, 1)``. The
-        message says so, since the person who hits it is the person who
-        can change it.
+        As of 2026-09-02, 21 operators were unenumerable purely because a
+        branch was written ``rng.random() < 0.5`` instead of
+        ``rng.randint(0, 1)``. Fixed 2026-09-26 for every fixed-probability
+        site (``TestCoinFlipRewrite``); the message stays as a guide for
+        the ~13 remaining ``rng.random() < <runtime value>`` sites and any
+        new ones, since the person who hits it is the person who can
+        change it.
         """
         pool = ExhaustivePool()
         with pytest.raises(ContinuousDrawError, match="coin flip"):
@@ -215,20 +218,88 @@ class TestRefusals:
         [
             lambda p: p.randbytes(4),
             lambda p: p.randint_list(0, 255, 4),
-            lambda p: p.randrange_list(10, 4),
-            lambda p: p.choice_list("abc", 4),
-            lambda p: p.weighted_choice_list("abc", [1, 1, 1], 4),
-            lambda p: p.categorical([1.0, 1.0, 1.0], 4),
+            lambda p: p.randrange_list(10, 5),
+            lambda p: p.choice_list("abc", 11),
+            lambda p: p.weighted_choice_list("abc", [1, 1, 1], 11),
+            lambda p: p.categorical([1.0, 1.0, 1.0], 11),
         ],
     )
-    def test_bulk_draws_refuse_by_default(self, call):
+    def test_bulk_draws_refuse_when_over_cap(self, call):
+        """Each call here exceeds the 65,536-path auto-enumerate cap alone."""
         pool = ExhaustivePool()
-        with pytest.raises(BulkDrawError):
+        with pytest.raises(BulkDrawError, match="auto-enumerate cap"):
             call(pool)
+
+    @pytest.mark.parametrize(
+        "call,expected_paths",
+        [
+            (lambda p: p.randbytes(2), 256**2),
+            (lambda p: p.randint_list(0, 255, 2), 256**2),
+            (lambda p: p.randrange_list(10, 4), 10**4),
+            (lambda p: p.choice_list("abc", 4), 3**4),
+            (lambda p: p.weighted_choice_list("abc", [1, 1, 1], 4), 3**4),
+            (lambda p: p.categorical([1.0, 1.0, 1.0], 4), 3**4),
+        ],
+    )
+    def test_bulk_draws_auto_enumerate_under_cap(self, call, expected_paths):
+        """A call within the per-call cap needs no ``allow_bulk`` opt-in."""
+        pool = ExhaustivePool()
+        seen = set()
+        for _ in pool.runs():
+            result = call(pool)
+            seen.add(tuple(result) if isinstance(result, list) else result)
+        assert pool.exhausted
+        assert len(seen) == expected_paths
 
     def test_bulk_draws_enumerate_when_opted_into(self):
         pool = ExhaustivePool(allow_bulk=True)
         seen = {pool.randbytes(2) for _ in pool.runs()}
+        assert pool.exhausted
+        assert len(seen) == 256 * 256
+
+    def test_bulk_calls_combine_past_per_run_cap(self):
+        """Two calls that each fit alone can still exceed the cap combined.
+
+        ``randbytes(2)`` alone is exactly the 65,536-path cap; a second one
+        in the same run multiplies that to 65,536**2, which must still
+        require ``allow_bulk=True`` even though neither call is refused in
+        isolation -- the risk the handover flagged for a per-call-only cap.
+        """
+        pool = ExhaustivePool()
+        with pytest.raises(BulkDrawError, match="combined bulk-draw space"):
+            for _ in pool.runs():
+                pool.randbytes(2)
+                pool.randbytes(2)
+
+    def test_bulk_calls_combine_within_cap(self):
+        """Two small calls whose product still fits the cap both succeed."""
+        pool = ExhaustivePool()
+        seen = set()
+        for _ in pool.runs():
+            seen.add((pool.randbytes(1), pool.randbytes(1)))
+        assert pool.exhausted
+        assert len(seen) == 256 * 256
+
+    def test_bulk_path_budget_resets_each_run(self):
+        """The per-run product must not accumulate across separate runs."""
+        pool = ExhaustivePool()
+        seen = set()
+        for _ in pool.runs():
+            seen.add(pool.randbytes(2))
+        assert pool.exhausted
+        assert len(seen) == 256**2
+
+    def test_max_bulk_paths_per_call_is_configurable(self):
+        pool = ExhaustivePool(max_bulk_paths_per_call=100)
+        with pytest.raises(BulkDrawError, match="auto-enumerate cap"):
+            pool.randbytes(1)  # 256 paths, over the lowered 100-path cap
+
+    def test_bulk_draws_still_enumerate_when_opted_into_over_the_cap(self):
+        """``allow_bulk=True`` bypasses both the per-call and per-run cap."""
+        pool = ExhaustivePool(allow_bulk=True, max_bulk_paths_per_call=1)
+        seen = set()
+        for _ in pool.runs():
+            seen.add((pool.randbytes(1), pool.randbytes(1)))
         assert pool.exhausted
         assert len(seen) == 256 * 256
 
@@ -523,7 +594,10 @@ class TestOperatorEnumeration:
         4 too deep, 25 over budget. Re-measured 2026-09-12 as the table
         grew to 208: 129 enumerable, 34 continuous, 8 bulk, 10 too deep,
         27 over budget -- the last group is the one ``_walk_operator``
-        now samples rather than skips. The floor exists to catch the
+        now samples rather than skips. Re-measured 2026-09-26 after the
+        coin-flip rewrite (``TestCoinFlipRewrite``): 157 enumerable, only
+        2 continuous, 7 bulk, 15 too deep, 46 over budget -- the floor
+        below is raised to match, and still exists to catch the
         regression where the pool stops intercepting something and
         everything silently reclassifies.
         """
@@ -532,7 +606,7 @@ class TestOperatorEnumeration:
         enumerated = [
             n for n in names if _enumerate_operator(n, self.SEED, self.MAX_LEN)[0] == "enumerated"
         ]
-        assert len(enumerated) >= 55, (
+        assert len(enumerated) >= 150, (
             f"only {len(enumerated)} of {len(names)} operators enumerable; "
             f"the pool may have stopped intercepting a draw method"
         )
@@ -608,6 +682,99 @@ class TestOperatorEnumeration:
                 pytest.fail(f"{name}: {exc}")
             except ExhaustivePoolError:
                 pass
+
+
+class TestCoinFlipRewrite:
+    """Operators freed from ``ContinuousDrawError`` by the coin-flip rewrite.
+
+    Each of these called ``rng.random() < <literal>`` somewhere on its path
+    to a fixed probability (0.5, 0.3, 0.75, ...); rewritten as
+    ``rng.randint(0, N-1) < K`` for the minimal ``N`` exact for that
+    literal, the branch is a bounded draw and the operator is fully
+    enumerable rather than refused. See
+    ``docs/handover/handover_coin_flip_bulk_budget_2026-09-26.md`` for the
+    full site census, including the ~13 sites left as ``rng.random() < p``
+    because ``p`` is a runtime value (a scheduler's ``epsilon``, a solver's
+    acceptance ratio) rather than a fixed literal, and the two genuine
+    continuous draws (``expovariate``, a raw float packed into WEBM bytes)
+    that are not coin flips and were correctly left alone.
+    """
+
+    SEED = TestOperatorEnumeration.SEED
+    MAX_LEN = TestOperatorEnumeration.MAX_LEN
+
+    NEWLY_ENUMERABLE = [
+        "arithmetic",
+        "bitcast_float",
+        "bitcast_int32",
+        "corpus_literal_insert",
+        "count_overflow",
+        "cycle_lock",
+        "float_squeeze",
+        "interesting_16",
+        "interesting_32",
+        "interesting_8",
+        "perm_lock",
+        "radamsa_num",
+        "size_field_overflow",
+        "spectral_peak",
+        "type_promote",
+        "varsize",
+        "webp_chunk_mutate",
+    ]
+
+    @pytest.mark.parametrize("name", NEWLY_ENUMERABLE)
+    def test_operator_is_now_fully_enumerable(self, name):
+        status, _ = _enumerate_operator(name, self.SEED, self.MAX_LEN)
+        assert status == "enumerated", (
+            f"{name} was expected to be enumerable after the coin-flip "
+            f"rewrite but reported {status!r}"
+        )
+
+    NEWLY_REACHABLE = [
+        # Moved from "continuous" (silently unreachable) to a status the
+        # existing invariant tests (TestOperatorEnumeration) do check --
+        # over_budget is sampled via the spread fallback, too_deep and bulk
+        # are honest classifications rather than a masked refusal.
+        "birthday_collide",
+        "degenerate_geometry",
+        "elias_delta",
+        "elias_gamma",
+        "gcd_worst_case",
+        "length_miscalculate",
+        "monotone_fill",
+        "protobuf_chunk_mutate",
+        "swap_bytes",
+        "der_len_mutate",
+        "der_tag_mutate",
+        "der_tlv_insert",
+        "der_tlv_reorder",
+        "rle",
+        "kmer_starve",
+    ]
+
+    @pytest.mark.parametrize("name", NEWLY_REACHABLE)
+    def test_operator_is_no_longer_masked_as_continuous(self, name):
+        status, _ = _enumerate_operator(name, self.SEED, self.MAX_LEN)
+        assert status != "continuous", (
+            f"{name} still reports 'continuous' after the coin-flip "
+            f"rewrite -- a bounded draw further down its path may have "
+            f"been missed"
+        )
+
+    def test_only_two_operators_remain_genuinely_continuous(self):
+        """Regression floor: a coin flip reappearing here should fail loudly.
+
+        ``block_shuffle_variable`` draws real ``expovariate`` gap lengths
+        and ``webm_chunk_mutate`` packs ``random() * 10`` into an IEEE
+        double for a WEBM float field -- both are genuine continuous
+        values, not probability thresholds, so neither is rewritten.
+        """
+        names = _operator_names()
+        continuous = [
+            n for n in names if _enumerate_operator(n, self.SEED, self.MAX_LEN)[0] == "continuous"
+        ]
+        assert set(continuous) == {"block_shuffle_variable", "webm_chunk_mutate"}
 
 
 class TestMaxLenEscapes:

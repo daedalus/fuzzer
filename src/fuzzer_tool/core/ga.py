@@ -333,7 +333,7 @@ class GALifecycle:
         If speciation is active, selects within species with 50% probability,
         otherwise selects globally. Uses tournament selection.
         """
-        if self._speciation and self._rng.random() < 0.5:
+        if self._speciation and self._rng.randint(0, 1) == 0:
             # Intra-species selection
             species_map = self._get_species_map()
             eligible = [s for s in species_map.values() if len(s) >= 2]
@@ -427,7 +427,7 @@ class GALifecycle:
 
     def _crossover(self, a: bytes, b: bytes) -> bytes:
         """Two-point crossover using existing mutations.crossover."""
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             return crossover(a, b, self._rng)
         return splice(a, b, self._rng)
 

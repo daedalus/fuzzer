@@ -1838,26 +1838,26 @@ class OperatorEngine:
     def _op_interesting_8(self, buf, byte_idx, _data):
         rng = self.ctx._rng
         if buf:
-            if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.random() < 0.3:
+            if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.randint(0, 9) < 3:
                 crash_vals = self.ctx.crash_mi.top_values(byte_idx, k=5)
                 if crash_vals:
                     buf[byte_idx] = rng.choice(crash_vals) & 0xFF
                     return
-            vals = INTERESTING_UNSIGNED_8 if rng.random() < 0.5 else INTERESTING_8
+            vals = INTERESTING_UNSIGNED_8 if rng.randint(0, 1) == 0 else INTERESTING_8
             buf[byte_idx] = rng.choice(vals) & 0xFF
 
     def _op_interesting_16(self, buf, _byte_idx, _data):
         rng = self.ctx._rng
         if len(buf) >= 2:
             idx = rng.randint(0, len(buf) - 2)
-            if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.random() < 0.3:
+            if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.randint(0, 9) < 3:
                 crash_vals = self.ctx.crash_mi.top_values(idx, k=5)
                 if crash_vals:
                     v = rng.choice(crash_vals)
                     fmt = "<H" if v > 32767 or v < -32768 else "<h"
                     struct.pack_into(fmt, buf, idx, v)
                     return
-            use_unsigned = rng.random() < 0.5
+            use_unsigned = rng.randint(0, 1) == 0
             vals = INTERESTING_UNSIGNED_16 if use_unsigned else INTERESTING_16
             v = rng.choice(vals)
             fmt = "<H" if v > 32767 or v < -32768 else "<h"
@@ -1867,14 +1867,14 @@ class OperatorEngine:
         rng = self.ctx._rng
         if len(buf) >= 4:
             idx = rng.randint(0, len(buf) - 4)
-            if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.random() < 0.3:
+            if self.ctx.crash_mi and self.ctx.crash_mi.total_execs >= 50 and rng.randint(0, 9) < 3:
                 crash_vals = self.ctx.crash_mi.top_values(idx, k=5)
                 if crash_vals:
                     v = rng.choice(crash_vals)
                     fmt = "<I" if v > 2147483647 or v < -2147483648 else "<i"
                     struct.pack_into(fmt, buf, idx, v)
                     return
-            use_unsigned = rng.random() < 0.5
+            use_unsigned = rng.randint(0, 1) == 0
             vals = INTERESTING_UNSIGNED_32 if use_unsigned else INTERESTING_32
             v = rng.choice(vals)
             fmt = "<I" if v > 2147483647 or v < -2147483648 else "<i"
@@ -1889,12 +1889,12 @@ class OperatorEngine:
             max_start = len(buf) - width
             idx = (rng.randint(0, max_start) // width) * width
             delta = rng.choice(ARITHMETIC_DELTAS)
-            if rng.random() < 0.5:
+            if rng.randint(0, 1) == 0:
                 delta = -delta
             if width == 1:
                 buf[idx] = (buf[idx] + delta) & 0xFF
             elif width == 2:
-                le = rng.random() < 0.5
+                le = rng.randint(0, 1) == 0
                 if le:
                     val = (struct.unpack_from("<H", buf, idx)[0] + delta) & 0xFFFF
                     struct.pack_into("<H", buf, idx, val)
@@ -1902,7 +1902,7 @@ class OperatorEngine:
                     val = (struct.unpack_from(">H", buf, idx)[0] + delta) & 0xFFFF
                     struct.pack_into(">H", buf, idx, val)
             elif width == 4:
-                le = rng.random() < 0.5
+                le = rng.randint(0, 1) == 0
                 if le:
                     val = (struct.unpack_from("<I", buf, idx)[0] + delta) & 0xFFFFFFFF
                     struct.pack_into("<I", buf, idx, val)
@@ -1910,7 +1910,7 @@ class OperatorEngine:
                     val = (struct.unpack_from(">I", buf, idx)[0] + delta) & 0xFFFFFFFF
                     struct.pack_into(">I", buf, idx, val)
             elif width == 8:
-                le = rng.random() < 0.5
+                le = rng.randint(0, 1) == 0
                 if le:
                     val = (struct.unpack_from("<Q", buf, idx)[0] + delta) & 0xFFFFFFFFFFFFFFFF
                     struct.pack_into("<Q", buf, idx, val)
@@ -1934,7 +1934,7 @@ class OperatorEngine:
             return
 
         # Randomly choose insert (True) or delete (False)
-        if rng.random() < 0.5:
+        if rng.randint(0, 1) == 0:
             # Insert mode
             if len(buf) >= self.ctx.max_len:
                 return
@@ -2072,7 +2072,7 @@ class OperatorEngine:
         if not int_lits and not str_lits:
             return None
         rng = self.ctx._rng
-        if rng.random() < 0.5 and int_lits:
+        if rng.randint(0, 1) == 0 and int_lits:
             lit = rng.choice(int_lits)
         elif str_lits:
             lit = rng.choice(str_lits)
@@ -2080,7 +2080,7 @@ class OperatorEngine:
             lit = rng.choice(int_lits)
         if len(lit) >= len(buf):
             return None
-        if rng.random() < 0.5:
+        if rng.randint(0, 1) == 0:
             pos = rng.randint(0, len(buf) - len(lit))
             buf[pos : pos + len(lit)] = lit
         else:
@@ -2727,7 +2727,7 @@ class OperatorEngine:
             buf.extend(rng.randint(0, 255) for _ in range(rng.randint(1, 32)))
             return
         # 30% chance: bias toward lengths that historically discovered edges
-        if hasattr(self.f, "_length_tracker") and self.f._length_tracker and rng.random() < 0.3:
+        if hasattr(self.f, "_length_tracker") and self.f._length_tracker and rng.randint(0, 9) < 3:
             recs = self.f._length_tracker.recommended_lengths(k=5)
             if recs:
                 target_len = rng.choice(recs)
@@ -2809,8 +2809,8 @@ class OperatorEngine:
         if n < 2:
             return
         # Prefer the pair arm; only occasionally take a longer cycle.
-        if n >= 4 and rng.random() < 0.15:
-            m = 4 if n < 8 else (5 if rng.random() < 0.5 else 4)
+        if n >= 4 and rng.randint(0, 19) < 3:
+            m = 4 if n < 8 else (5 if rng.randint(0, 1) == 0 else 4)
             m = min(m, n)
             result = _swap_tuple(n, rng, m)
             if result is not None:
@@ -2953,7 +2953,7 @@ class OperatorEngine:
             target = rng.choice(unsolved) if unsolved else rng.choice(conds)
 
         data = bytes(buf)
-        target_value = target.base.op_b if rng.random() < 0.5 else target.base.op_a
+        target_value = target.base.op_b if rng.randint(0, 1) == 0 else target.base.op_a
         source_value = target.base.op_a if target_value is target.base.op_b else target.base.op_b
         width = target.base.width
 
@@ -3101,7 +3101,7 @@ class OperatorEngine:
             rng = self.ctx._rng
             parent_meta = self.ctx.seed_meta.get(data)
             stride = None
-            if parent_meta and rng.random() < 0.5:
+            if parent_meta and rng.randint(0, 1) == 0:
                 stride = parent_meta.get("record_stride")
             return bytearray(chunk_shuffle(bytes(buf), rng=rng, stride=stride)[: self.ctx.max_len])
 

@@ -329,7 +329,7 @@ class WebmMutator:
 
     def _nest_unnest(self, elements: list[Element], max_len: int) -> list[Element]:
         """Nest a leaf into a new container, or unnest a container's children."""
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             leaves = _find_leaves(elements)
             if not leaves:
                 return elements

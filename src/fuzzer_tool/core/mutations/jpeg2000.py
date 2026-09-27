@@ -304,7 +304,7 @@ class Jpeg2000Mutator:
                 if len(data) > 1:
                     # Corrupt some quantization parameters
                     for i in range(1, min(len(data), 10)):
-                        if self._rng.random() < 0.3:
+                        if self._rng.randint(0, 9) < 3:
                             data[i] = self._rng.randint(0, 255)
                 m.data = bytes(data)
                 break

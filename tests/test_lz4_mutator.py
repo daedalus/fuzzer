@@ -323,13 +323,13 @@ def test_block_size_toggle_uncompressed_bit():
 
 # ── branch: checksum repair / corrupt ─────────────────────────────────────
 
-_REPAIR = 0.0
-_CORRUPT = 0.99
+_REPAIR = 0  # randint(0, 3) < 3 -> True (repair)
+_CORRUPT = 3  # randint(0, 3) < 3 -> False (corrupt)
 
 
 def test_block_checksum_repair():
     out = _mut(
-        _sample(FLG_B_INDEP), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, 0], randoms=[_REPAIR]
+        _sample(FLG_B_INDEP), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, _REPAIR, 0]
     )
     frame = parse_lz4(out)
     assert out[_HDR_START] & FLG_B_CHECKSUM
@@ -342,14 +342,14 @@ def test_block_checksum_repair_fixes_bad_input():
     frame = parse_lz4(bytes(data))
     cs_off = _HDR_START + 2 + 8 + 1 + 4 + len(frame.blocks[0].data)
     data[cs_off] ^= 0xFF
-    out = _mut(bytes(data), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, 0], randoms=[_REPAIR])
+    out = _mut(bytes(data), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, _REPAIR, 0])
     assert out == _sample()
 
 
 def test_block_checksum_corrupt():
     bit = 5
     out = _mut(
-        _sample(), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, 1, bit], randoms=[_CORRUPT]
+        _sample(), randints=[Lz4Op.CHECKSUM, ChecksumTarget.BLOCK, _CORRUPT, 1, bit]
     )
     blk = parse_lz4(out).blocks[1]
     assert blk.checksum == _ref_xxh32(_P2) ^ (1 << bit)
@@ -358,14 +358,14 @@ def test_block_checksum_corrupt():
 def test_content_checksum_corrupt():
     bit = 3
     out = _mut(
-        _sample(), randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, bit], randoms=[_CORRUPT]
+        _sample(), randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, _CORRUPT, bit]
     )
     assert struct.unpack_from("<I", out, len(out) - 4)[0] == _ref_xxh32(_CONTENT) ^ (1 << bit)
 
 
 def test_content_checksum_repair_enables_flag():
     out = _mut(
-        _sample(FLG_B_INDEP), randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT], randoms=[_REPAIR]
+        _sample(FLG_B_INDEP), randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, _REPAIR]
     )
     assert out[_HDR_START] & FLG_C_CHECKSUM
     assert struct.unpack_from("<I", out, len(out) - 4)[0] == _ref_xxh32(_CONTENT)
@@ -375,7 +375,7 @@ def test_content_checksum_repair_enables_flag():
 def test_header_checksum_corrupt():
     bit = 2
     data = _sample()
-    out = _mut(data, randints=[Lz4Op.CHECKSUM, ChecksumTarget.HEADER, bit], randoms=[_CORRUPT])
+    out = _mut(data, randints=[Lz4Op.CHECKSUM, ChecksumTarget.HEADER, _CORRUPT, bit])
     hc_off = _HDR_START + _desc_len(data[_HDR_START])
     assert out[hc_off] == data[hc_off] ^ (1 << bit)
 
@@ -450,8 +450,8 @@ def test_falsification_repair_decodes_corrupt_rejects():
     that computed checksums wrong, or ignored the corrupt path, fails one side.
     Also: mode byte parity preserved and output differs from input."""
     data = bytes([_MODE]) + _sample(FLG_B_INDEP)[1:]
-    ok = _mut(data, randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT], randoms=[_REPAIR])
-    bad = _mut(data, randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, 0], randoms=[_CORRUPT])
+    ok = _mut(data, randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, _REPAIR])
+    bad = _mut(data, randints=[Lz4Op.CHECKSUM, ChecksumTarget.CONTENT, _CORRUPT, 0])
     assert ok != data and bad != data
     assert ok[0] == bad[0] == _MODE
     assert _lz4f_decode(ok[1:]) == _CONTENT

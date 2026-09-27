@@ -395,7 +395,7 @@ class IsobmffMutator:
                     # Corrupt major brand (offset 0-3) or a compatible brand
                     pos = (
                         0
-                        if self._rng.random() < 0.5
+                        if self._rng.randint(0, 1) == 0
                         else self._rng.randint(8, max(8, len(data) - 4))
                     )
                     data[pos : pos + 4] = self._rng.choice(
@@ -464,7 +464,7 @@ class IsobmffMutator:
                 entry_count = struct.unpack_from(">I", data, 4)[0]
                 if entry_count > 0:
                     # Corrupt entry_count to trigger overflow
-                    if self._rng.random() < 0.5:
+                    if self._rng.randint(0, 1) == 0:
                         new_count = 0xFFFFFFFF
                         struct.pack_into(">I", data, 4, new_count)
                     else:

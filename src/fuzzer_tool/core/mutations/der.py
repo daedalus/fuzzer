@@ -393,7 +393,7 @@ class DerMutator:
         def gen(depth: int) -> bytes:
             # 0.35, not 0.5: at even odds two of every three nodes were a
             # leaf and the trees came out with a median around 8 bytes.
-            if depth <= 0 or rng.random() < 0.35:
+            if depth <= 0 or rng.randint(0, 19) < 7:
                 return primitives[rng.randint(0, len(primitives) - 1)]
             inner = b"".join(gen(depth - 1) for _ in range(rng.randint(2, 4)))
             return b"\x30" + _encode_length(len(inner)) + inner

@@ -236,7 +236,7 @@ class GzipMutator:
 
     def _mutate_xfl_os(self, info: GzipInfo, max_len: int) -> GzipInfo:
         """Corrupt XFL or OS fields."""
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             info.header[8] = self._rng.randint(0, 255)  # XFL
         else:
             info.header[9] = self._rng.randint(0, 255)  # OS
@@ -265,7 +265,7 @@ class GzipMutator:
 
     def _corrupt_trailer(self, info: GzipInfo, max_len: int) -> GzipInfo:
         """Corrupt the CRC32 or original size in the trailer."""
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             info.original_crc = self._rng.randint(0, 0xFFFFFFFF)
         else:
             info.original_size = self._rng.randint(0, 0xFFFFFFFF)

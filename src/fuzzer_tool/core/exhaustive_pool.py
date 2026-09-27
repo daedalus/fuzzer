@@ -80,9 +80,14 @@ quietly skips a draw is worse than one that refuses: it still reports
   ``ContinuousDrawError``.
 * **Bulk draws** -- ``randbytes``, ``randrange_list``, ``randint_list``,
   ``choice_list``, ``weighted_choice_list``. Finite but combinatorial:
-  ``randbytes(4)`` alone is 2**32 paths. Available under
-  ``allow_bulk=True`` for callers who have checked the arithmetic.
-  ``BulkDrawError``.
+  ``randbytes(4)`` alone is 2**32 paths. A single call is auto-enumerated
+  when its own path count is within ``max_bulk_paths_per_call`` (default
+  65,536 -- ``randbytes(2)``'s worth), and the same cap also bounds the
+  *product* of every bulk call's paths within one run, so two calls that
+  each fit alone can still combine past the cap. Either limit raises
+  ``BulkDrawError`` naming the number, with ``allow_bulk=True`` as the
+  explicit opt-in past both -- for callers who have checked the
+  arithmetic themselves.
 
 Note that the continuous exclusion is sharper than it looks. Several
 byte-level operators are unenumerable *only* because a fair coin is
@@ -102,6 +107,14 @@ DEFAULT_MAX_DEPTH = 24
 #: Default cap on total runs. Reaching it clears ``exhausted``, so a test
 #: asserting ``pool.exhausted`` cannot pass on a partial walk.
 DEFAULT_MAX_RUNS = 1_000_000
+
+#: Default cap, in paths, on (a) any single bulk-draw call made without
+#: ``allow_bulk=True`` and (b) the running product of every such call's
+#: paths within one run. ``256**2`` -- a lone ``randbytes(2)`` -- so a
+#: 2-byte bulk draw needs no opt-in, but two of them in the same run do,
+#: since ``256**2 * 256**2`` clears the cap even though each call alone
+#: does not.
+DEFAULT_MAX_BULK_PATHS_PER_CALL = 65_536
 
 #: Odometer order: increment the last draw, carry left. Exhaustive when the
 #: budget allows it, and a *prefix of the space* when it does not.
@@ -182,8 +195,13 @@ class ExhaustivePool:
             ``DepthExceededError`` rather than silently returning 0.
         max_runs: Cap on total runs. Reaching it stops iteration with
             ``exhausted`` false and ``budget_exhausted`` true.
-        allow_bulk: Permit the ``*_list`` and ``randbytes`` draws. Off by
-            default because their trees are combinatorial.
+        allow_bulk: Bypass ``max_bulk_paths_per_call`` entirely, permitting
+            any size of ``*_list``/``randbytes`` call and any combination
+            of them in one run. Off by default; without it, bulk calls are
+            still allowed as long as they stay under the cap below.
+        max_bulk_paths_per_call: Cap, in paths, on a single bulk-draw call
+            and on the running product of every bulk call's paths within
+            one run. Ignored when ``allow_bulk=True``.
         order: ``ORDER_LEXICOGRAPHIC`` (default) walks the odometer.
             ``ORDER_SPREAD`` walks the same space by coprime stride *only
             when the space exceeds* ``max_runs``, so a truncated walk
@@ -197,6 +215,7 @@ class ExhaustivePool:
         max_depth: int = DEFAULT_MAX_DEPTH,
         max_runs: int = DEFAULT_MAX_RUNS,
         allow_bulk: bool = False,
+        max_bulk_paths_per_call: int = DEFAULT_MAX_BULK_PATHS_PER_CALL,
         order: str = ORDER_LEXICOGRAPHIC,
     ) -> None:
         if order not in (ORDER_LEXICOGRAPHIC, ORDER_SPREAD):
@@ -206,6 +225,8 @@ class ExhaustivePool:
         self._max_depth = max_depth
         self._max_runs = max_runs
         self._allow_bulk = allow_bulk
+        self._max_bulk_paths_per_call = max_bulk_paths_per_call
+        self._bulk_paths_this_run = 1
         self._order = order
         self._runs = 0
         self._exhausted = False
@@ -234,6 +255,7 @@ class ExhaustivePool:
                 self._budget_exhausted = True
                 return
             self._p = 0
+            self._bulk_paths_this_run = 1
             yield self._runs
             self._runs += 1
             self._max_depth_seen = max(self._max_depth_seen, len(self._v))
@@ -547,12 +569,25 @@ class ExhaustivePool:
     # ── Bulk draws: finite, but combinatorial ────────────────────────
 
     def _bulk_guard(self, what: str, paths: int) -> None:
-        if not self._allow_bulk:
+        if self._allow_bulk:
+            return
+        cap = self._max_bulk_paths_per_call
+        if paths > cap:
             raise BulkDrawError(
-                f"{what} would branch {paths} ways per call; pass "
-                f"allow_bulk=True if that is intended, or restrict the "
-                f"enumeration to operators that draw scalars"
+                f"{what} would branch {paths} ways per call, over the "
+                f"{cap}-path auto-enumerate cap; pass allow_bulk=True if "
+                f"that is intended, or restrict the enumeration to "
+                f"operators that draw scalars"
             )
+        projected = self._bulk_paths_this_run * paths
+        if projected > cap:
+            raise BulkDrawError(
+                f"{what} would bring this run's combined bulk-draw space "
+                f"to {projected} paths, over the {cap}-path per-run cap, "
+                f"even though the call alone fits under it; pass "
+                f"allow_bulk=True if that is intended"
+            )
+        self._bulk_paths_this_run = projected
 
     def randbytes(self, n: int) -> bytes:
         if n <= 0:

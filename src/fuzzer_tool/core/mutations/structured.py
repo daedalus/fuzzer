@@ -219,7 +219,7 @@ def fibonacci_pairs(data: bytes, rng) -> bytes:
     offset, length = _region(len(data), rng, min_len=pair_size, align=width)
     if length < pair_size:
         return data
-    big_endian = rng.random() < 0.5
+    big_endian = rng.randint(0, 1) == 0
 
     top = _FIB_TOP[width]
     # Back off a few indices at random so the operator explores a range of
@@ -227,7 +227,7 @@ def fibonacci_pairs(data: bytes, rng) -> bytes:
     start = max(1, top - rng.randint(0, min(8, top - 1)))
 
     multiplier = 1
-    if rng.random() < 0.5:
+    if rng.randint(0, 1) == 0:
         headroom = (1 << (width * 8)) // max(1, _FIB[start + 1])
         if headroom > 1:
             multiplier = rng.randint(2, min(headroom, 256))
@@ -266,13 +266,13 @@ def monotone_fill(data: bytes, rng) -> bytes:
     offset, length = _region(len(data), rng, min_len=width * 2, align=width)
     if length < width * 2:
         return data
-    big_endian = rng.random() < 0.5
+    big_endian = rng.randint(0, 1) == 0
 
     n = length // width
     ceiling = 1 << (width * 8)
     stride = rng.choice(_STRIDES)
     span = stride * (n - 1)
-    if rng.random() < 0.5:
+    if rng.randint(0, 1) == 0:
         start = min(ceiling - 1, span)
         values = [start - i * stride for i in range(n)]
     else:
@@ -400,7 +400,7 @@ def kmer_starve(data: bytes, rng) -> bytes:
     if length < 8:
         return data
     n_symbols = rng.randint(2, 4)
-    if data and rng.random() < 0.7:
+    if data and rng.randint(0, 9) < 7:
         alphabet = bytes(data[rng.randint(0, len(data) - 1)] for _ in range(n_symbols))
     else:
         alphabet = bytes(rng.randint(0, 255) for _ in range(n_symbols))
@@ -598,7 +598,7 @@ def perm_lock(data: bytes, rng) -> bytes:
     offset, length = _region(len(data), rng, min_len=width * 4, align=width)
     if length < width * 4:
         return data
-    big_endian = rng.random() < 0.5
+    big_endian = rng.randint(0, 1) == 0
     n = length // width
     values = _sorted_shape(n, rng.choice(_PERM_MODES))
     return _splice(data, offset, _pack_words(values, width, big_endian))
@@ -641,7 +641,7 @@ def cycle_lock(data: bytes, rng) -> bytes:
     offset, length = _region(len(data), rng, min_len=width * 4, align=width)
     if length < width * 4:
         return data
-    big_endian = rng.random() < 0.5
+    big_endian = rng.randint(0, 1) == 0
     n = length // width
     if rng.choice(_CYCLE_MODES) == "single_cycle":
         values = [(i + 1) % n for i in range(n)]
@@ -719,7 +719,7 @@ def spectral_peak(data: bytes, rng) -> bytes:
     if mode == "dc":
         block = bytes([rng.choice(_DC_LEVELS)]) * length
     elif mode == "nyquist":
-        pair = (0x00, 0xFF) if rng.random() < 0.5 else (0x80, 0x7F)
+        pair = (0x00, 0xFF) if rng.randint(0, 1) == 0 else (0x80, 0x7F)
         block = bytes(pair[i & 1] for i in range(length))
     elif mode == "impulse":
         arr = bytearray(length)
@@ -794,10 +794,10 @@ def birthday_collide(data: bytes, rng) -> bytes:
     offset, length = _region(len(data), rng, min_len=width * 4, align=width)
     if length < width * 4:
         return data
-    big_endian = rng.random() < 0.5
+    big_endian = rng.randint(0, 1) == 0
     n = length // width
     base = rng.randint(0, (1 << (width * 8)) - 1)
-    if rng.random() < 0.25:
+    if rng.randint(0, 3) < 1:
         values = [base] * n
     else:
         delta = rng.choice(_BIRTHDAY_DELTAS)
@@ -867,7 +867,7 @@ def invariant_break(data: bytes, invariants, rng) -> bytes:
     n_hits = min(len(sites), rng.randint(1, 8))
     out = bytearray(data)
     for idx, mask in rng.sample(sites, n_hits):
-        value = rng.choice(_HEADER_VALUES) if rng.random() < 0.75 else rng.randint(0, 255)
+        value = rng.choice(_HEADER_VALUES) if rng.randint(0, 3) < 3 else rng.randint(0, 255)
         out[idx] = (out[idx] & ~mask & 0xFF) | (value & mask)
     return bytes(out)
 
@@ -907,7 +907,7 @@ def degenerate_geometry(data: bytes, rng) -> bytes:
     offset, length = _region(len(data), rng, min_len=point_size * 2, align=point_size)
     if length < point_size * 2:
         return data
-    big_endian = rng.random() < 0.5
+    big_endian = rng.randint(0, 1) == 0
     mode = rng.choice(_GEOMETRY_MODES)
 
     if mode == "origin":
@@ -968,7 +968,7 @@ def float_squeeze(data: bytes, rng) -> bytes:
     offset, length = _region(len(data), rng, min_len=width, align=width)
     if length < width:
         return data
-    big_endian = rng.random() < 0.5
+    big_endian = rng.randint(0, 1) == 0
     idx = 1 if width == 4 else 0
     values = [rng.choice(_FLOAT_PATTERNS)[idx] for _ in range(length // width)]
     return _splice(data, offset, _pack_words(values, width, big_endian))
@@ -1244,7 +1244,7 @@ def rle(data: bytes, rng) -> bytes:
     n_mut = rng.randint(1, min(3, len(runs)))
     for _ in range(n_mut):
         pos = rng.randint(0, len(runs) - 1)
-        if rng.random() < 0.6:
+        if rng.randint(0, 4) < 3:
             # Mutate run value.
             runs[pos] = (rng.randint(0, 255), runs[pos][1])
         else:
@@ -1387,7 +1387,7 @@ def bitcast_float(data: bytes, rng) -> bytes:
     if len(data) < width:
         return data
     offset = rng.randint(0, len(data) - width)
-    endian = "<" if rng.random() < 0.5 else ">"
+    endian = "<" if rng.randint(0, 1) == 0 else ">"
     fmt = f"{endian}f" if width == 4 else f"{endian}d"
     try:
         value = struct.unpack(fmt, data[offset : offset + width])[0]
@@ -1439,7 +1439,7 @@ def bitcast_int32(data: bytes, rng) -> bytes:
     if len(data) < width:
         return data
     offset = rng.randint(0, len(data) - width)
-    endian = "<" if rng.random() < 0.5 else ">"
+    endian = "<" if rng.randint(0, 1) == 0 else ">"
     if width == 2:
         signed_fmt = f"{endian}h"
     elif width == 4:
@@ -1515,7 +1515,7 @@ def size_field_overflow(data: bytes, rng) -> bytes:
         offset = rng.randint(0, max_offset)
     else:
         offset = candidates[rng.randint(0, len(candidates) - 1)]
-    endian = "<" if rng.random() < 0.5 else ">"
+    endian = "<" if rng.randint(0, 1) == 0 else ">"
     fmt = f"{endian}H" if width == 2 else f"{endian}I"
     max_signed = (1 << (width * 8 - 1)) - 1
     max_unsigned = (1 << (width * 8)) - 1
@@ -1803,7 +1803,7 @@ def count_overflow(data: bytes, rng) -> bytes:
         offset = rng.randint(0, max_offset)
     else:
         offset = candidates[rng.randint(0, len(candidates) - 1)]
-    endian = "<" if rng.random() < 0.5 else ">"
+    endian = "<" if rng.randint(0, 1) == 0 else ">"
     fmt = f"{endian}H" if width == 2 else f"{endian}I"
     max_signed = (1 << (width * 8 - 1)) - 1
     max_unsigned = (1 << (width * 8)) - 1
@@ -1977,7 +1977,7 @@ def type_promote(data: bytes, rng) -> bytes:
     else:
         # Truncate-as-promote: write max_signed or 0 regardless of input.
         new_val = rng.choice((0, max_signed, max_val))
-    endian = "<" if rng.random() < 0.5 else ">"
+    endian = "<" if rng.randint(0, 1) == 0 else ">"
     fmt = f"{endian}H" if width == 2 else f"{endian}I"
     if width == 1:
         packed = bytes([new_val & 0xFF])
@@ -2034,7 +2034,7 @@ def length_miscalculate(data: bytes, rng) -> bytes:
         offset = rng.randint(0, max_offset)
     else:
         offset = candidates[rng.randint(0, len(candidates) - 1)]
-    endian = "<" if rng.random() < 0.5 else ">"
+    endian = "<" if rng.randint(0, 1) == 0 else ">"
     fmt = f"{endian}H" if width == 2 else f"{endian}I"
     max_unsigned = (1 << (width * 8)) - 1
     # Contradictory lengths: 0, -1, MAX, or larger than actual remaining payload.
@@ -2066,7 +2066,7 @@ def _edit_codebits(bits: bytearray, length: int, rng) -> None:
     n_mut = rng.randint(1, min(6, len(bits) // 2 + 1))
     for _ in range(n_mut):
         pos = rng.randint(0, len(bits) - 1)
-        if rng.random() < 0.5 and len(bits) < length * 16:
+        if rng.randint(0, 1) == 0 and len(bits) < length * 16:
             bits.insert(pos, rng.randint(0, 1))
         elif len(bits) > length // 2:
             del bits[pos]

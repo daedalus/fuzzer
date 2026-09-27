@@ -140,12 +140,12 @@ class TestRadamsaMutateNumInjectedRng:
                 return next(self._randoms)
 
         # op=9 (random scaling): randint(0,9)->9, randint(1,128)->9,
-        # random()->0.9 selects the "val - n" branch. If the sign draw
-        # silently fell back to the global `random` module instead of this
-        # fake, it would not consume the sentinel and the call would raise
-        # StopIteration on the second next().
+        # randint(0,1)->1 selects the "val - n" branch (only 0 means +n).
+        # If the sign draw silently fell back to the global `random` module
+        # instead of this fake, it would not consume the sentinel and the
+        # call would raise StopIteration on the third next().
         n = _log2_ceil(9)
-        rng = _FakeRng(randints=[9, 9], randoms=[0.9])
+        rng = _FakeRng(randints=[9, 9, 1], randoms=[])
         assert radamsa_mutate_num(100, rng=rng) == 100 - n
 
 

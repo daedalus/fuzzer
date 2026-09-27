@@ -410,6 +410,6 @@ class ProtobufMutator:
         result = ProtoFields(fields)
         result.raw_between = [b""] * (len(fields) + 1)
         message = serialize_protobuf(result)
-        if self._rng.random() < 0.3:
+        if self._rng.randint(0, 9) < 3:
             message += self._rng.randbytes(self._rng.randint(0, 8))
         return message[:max_len]

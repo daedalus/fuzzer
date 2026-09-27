@@ -93,7 +93,7 @@ class WeizzFieldMutator(MutatorBase):
         # constantly clobbering them wastes the tag signal this operator
         # exists to exploit.
         non_magic = [s for s in spans if not (smap.tags[s[0]].flags & TagFlags.IS_MAGIC)]
-        pool = non_magic if non_magic and rng.random() < 0.8 else spans
+        pool = non_magic if non_magic and rng.randint(0, 4) < 4 else spans
         start, end, _cmp_id = pool[rng.randint(0, len(pool) - 1)]
         width = end - start
 
@@ -117,13 +117,13 @@ class WeizzFieldMutator(MutatorBase):
     @staticmethod
     def _arith_bump(buf: bytearray, start: int, width: int, rng) -> None:
         delta = rng.choice(ARITHMETIC_DELTAS)
-        if rng.random() < 0.5:
+        if rng.randint(0, 1) == 0:
             delta = -delta
         if width == 1:
             buf[start] = (buf[start] + delta) & 0xFF
             return
         fmt_char = _ARITH_FMT[width]
-        endian = "<" if rng.random() < 0.5 else ">"
+        endian = "<" if rng.randint(0, 1) == 0 else ">"
         fmt = endian + fmt_char
         mask = (1 << (width * 8)) - 1
         val = (struct.unpack_from(fmt, buf, start)[0] + delta) & mask
@@ -150,7 +150,7 @@ class WeizzChunkMutator(MutatorBase):
 
         buf = bytearray(data)
 
-        if len(chunks) >= 2 and rng.random() < 0.34:
+        if len(chunks) >= 2 and rng.randint(0, 49) < 17:
             result = self._swap(buf, chunks, rng)
         else:
             result = self._duplicate_or_delete(buf, chunks, rng, max_len)

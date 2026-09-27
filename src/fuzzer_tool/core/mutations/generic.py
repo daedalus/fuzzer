@@ -2256,7 +2256,7 @@ def radamsa_mutate_num(val: int, rng) -> int:
     # op == 9: random scaling
     n = rng.randint(1, 128)
     n = _log2_ceil(n)
-    return val + n if rng.random() < 0.5 else val - n
+    return val + n if rng.randint(0, 1) == 0 else val - n
 
 
 def _log2_ceil(n: int) -> int:
@@ -2622,7 +2622,7 @@ class _KeyValNode(_VerseNode):
 
     def Generate(self, v, buf):
         self._key.Generate(v, buf)
-        buf += bytes([0x3A if v._rng.random() < 0.5 else 0x3D])
+        buf += bytes([0x3A if v._rng.randint(0, 1) == 0 else 0x3D])
         self._value.Generate(v, buf)
 
 

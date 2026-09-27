@@ -551,7 +551,7 @@ class Lz4Mutator:
     def _mut_checksum(self, frame: Lz4Frame) -> None:
         """Repair (recompute) or corrupt the header / a block / the content checksum."""
         target = self._rng.randint(0, len(ChecksumTarget) - 1)
-        repair = self._rng.random() < _REPAIR_PROB
+        repair = self._rng.randint(0, 3) < 3  # _REPAIR_PROB = 0.75
         if target == ChecksumTarget.HEADER:
             self._fix_hc(frame, repair)
             return

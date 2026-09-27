@@ -249,7 +249,7 @@ class GifMutator:
         if lsd is None:
             return nodes
         f = lsd.fields
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             f["width"] = self._rng.choice(DIM_VALUES + [self._rng.randint(0, max_len)])
         else:
             f["height"] = self._rng.choice(DIM_VALUES + [self._rng.randint(0, max_len)])

@@ -330,7 +330,7 @@ class FormatFuzzerMutator(MutatorBase):
             idx = rng.randrange(n)
             # Small deltas keep the choice near the original alternative;
             # a full random byte is the occasional larger jump.
-            if rng.random() < 0.75:
+            if rng.randint(0, 3) < 3:
                 dec[idx] = (dec[idx] + rng.choice((-2, -1, 1, 2))) & 0xFF
             else:
                 dec[idx] = rng.randrange(256)

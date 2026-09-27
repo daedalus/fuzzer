@@ -472,7 +472,7 @@ class SqliteMutator:
         if idx < 0:
             return doc
         end = min(len(page), idx + 256)
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             token = self._rng.choice(SQL_TOKENS)
             page[idx : idx + len(token)] = token[: max(0, end - idx)]
         else:

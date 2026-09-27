@@ -137,7 +137,10 @@ def test_down_sample_can_return_none_when_still_full():
     # swapping it patched nothing and the draws came from the real pool.
     class KeepAll:
         def random(self):
-            return 0.0  # always admit AND always keep in down-sample
+            return 0.0  # always admit
+
+        def randint(self, a, b):
+            return a  # always keep in down-sample
 
     f0 = F0Estimator(eps=0.5, delta=0.25, m=100, rng=KeepAll())
     f0.thresh = 2

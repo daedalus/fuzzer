@@ -344,7 +344,7 @@ class TestCycleLock:
         monkeypatch.setattr(S, "_CYCLE_MODES", ("single_cycle",))
         monkeypatch.setattr(S, "_WIDTHS", (4,))
         monkeypatch.setattr(S, "_region", lambda *a, **k: (8, 64))
-        monkeypatch.setattr(type(rp), "random", lambda self: 0.9)  # force little-endian
+        monkeypatch.setattr(type(rp), "randint", lambda self, a, b: 1)  # force little-endian
         base = bytes(256)
         out = S.cycle_lock(base, rng=rp)
         assert len(out) == len(base)
@@ -358,7 +358,7 @@ class TestCycleLock:
         monkeypatch.setattr(S, "_CYCLE_MODES", ("fixed_points",))
         monkeypatch.setattr(S, "_WIDTHS", (4,))
         monkeypatch.setattr(S, "_region", lambda *a, **k: (8, 64))
-        monkeypatch.setattr(type(rp), "random", lambda self: 0.9)  # force little-endian
+        monkeypatch.setattr(type(rp), "randint", lambda self, a, b: 1)  # force little-endian
         base = os.urandom(256)
         out = S.cycle_lock(base, rng=rp)
         assert len(out) == len(base)

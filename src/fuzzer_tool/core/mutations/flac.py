@@ -256,7 +256,7 @@ class FlacMutator:
         raw = bytearray(target.data)
         if len(raw) < 18:
             return blocks
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             raw[10:18] = b"\xff" * 8  # max sample_rate/channels/bps/total_samples
         else:
             for i in range(10, 18):

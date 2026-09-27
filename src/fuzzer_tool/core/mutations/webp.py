@@ -188,7 +188,7 @@ class WebpMutator:
         if len(payload) < 14:
             return chunks
         # [3B tag][u32le frame size][9D 01 2A][u16le w-1][u16le h-1]
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             payload[3:7] = struct.pack(
                 "<I",
                 self._rng.choice(
@@ -211,7 +211,7 @@ class WebpMutator:
         payload = bytearray(target.payload)
         if len(payload) < 5:
             return chunks
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             # Toggle the alpha-is-used bit (bit 28)
             bits = struct.unpack_from("<I", payload, 1)[0]
             bits ^= 1 << 28
@@ -220,7 +220,7 @@ class WebpMutator:
             bits = struct.unpack_from("<I", payload, 1)[0]
             w1 = bits & 0x3FFF
             h1 = (bits >> 14) & 0x3FFF
-            if self._rng.random() < 0.5:
+            if self._rng.randint(0, 1) == 0:
                 w1 = self._rng.choice([0, 1, 2, 0x3FFF, self._rng.randint(0, 0x3FFF)])
             else:
                 h1 = self._rng.choice([0, 1, 2, 0x3FFF, self._rng.randint(0, 0x3FFF)])
@@ -237,7 +237,7 @@ class WebpMutator:
         payload = bytearray(target.payload)
         if len(payload) < 10:
             return chunks
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             payload[0] = self._rng.choice(VP8X_FLAG_VALUES + [self._rng.randint(0, 0xFF)])
         else:
             off = self._rng.choice([1, 4])
@@ -323,7 +323,7 @@ class WebpMutator:
         vp8l = Chunk(b"VP8L", len(vp8l_payload), vp8l_payload)
 
         chunks = [vp8x, vp8l]
-        if self._rng.random() < 0.3:
+        if self._rng.randint(0, 9) < 3:
             anmf_payload = (
                 struct.pack("<I", 0)[:3]
                 + struct.pack("<I", 0)[:3]

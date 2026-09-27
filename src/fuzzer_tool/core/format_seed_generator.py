@@ -292,7 +292,7 @@ def cold_start_seed(
             continue
         defaults = SEED_TYPE_DEFAULTS.get(spec.field_type, [])
         value_byte = spec.most_common_value
-        if defaults and rng.random() < 0.3:
+        if defaults and rng.randint(0, 9) < 3:
             value_byte = rng.choice(defaults) & 0xFF
         end = min(spec.offset + spec.width, seed_len)
         for i in range(spec.offset, end):

@@ -322,7 +322,7 @@ class AvifMutator:
         if ftyp is None or len(ftyp.data) < 8:
             return doc
         raw = bytearray(ftyp.data)
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             raw[0:4] = self._rng.choice([b for b in AVIF_BRANDS] + WEIRD_FOURCCS)
         else:
             if len(raw) > 8:
@@ -370,7 +370,7 @@ class AvifMutator:
             box.data = bytes([0x81, self._rng.randint(0, 0xFF), self._rng.randint(0, 0xFF), 0])
             return doc
         pos = self._rng.randint(0, min(3, len(raw) - 1))
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             raw[pos] ^= 1 << self._rng.randint(0, 7)
         else:
             raw[pos] = self._rng.choice([0x00, 0x7F, 0x80, 0xFF])
@@ -387,7 +387,7 @@ class AvifMutator:
         raw = bytearray(box.data)
         if len(raw) < 5:
             return doc
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             raw[4] = self._rng.choice([0, 1, 2, 3, 8, 255])  # num_channels
         else:
             ch_off = 5 + self._rng.randint(0, max(0, len(raw) - 6))
@@ -426,7 +426,7 @@ class AvifMutator:
             return doc
         raw = bytearray(box.data)
         item = self._rng.choice(items)
-        if item["extents"] and self._rng.random() < 0.7:
+        if item["extents"] and self._rng.randint(0, 9) < 7:
             extent = self._rng.choice(item["extents"])
             field_name = self._rng.choice(["offset", "length"])
             off, size = extent[f"{field_name}_off"], extent[f"{field_name}_size"]
@@ -518,7 +518,7 @@ class AvifMutator:
         raw = bytearray(doc.meta_version_flags)
         if len(raw) < 4:
             return doc
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             raw[0] = self._rng.choice([0, 1, 2, 0x7F, 0xFF])
         else:
             _write_be(raw, 1, 3, self._rng.choice(INT_VALUES))

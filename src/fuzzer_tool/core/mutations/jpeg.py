@@ -320,7 +320,7 @@ class JpegMutator:
             return markers
 
         data = bytearray(dht.data)
-        if self._rng.random() < 0.3:
+        if self._rng.randint(0, 9) < 3:
             # Corrupt the class/type byte
             data[0] ^= self._rng.randint(1, 0xFF)
         else:
@@ -339,7 +339,7 @@ class JpegMutator:
             return markers
 
         data = bytearray(dqt.data)
-        if self._rng.random() < 0.3:
+        if self._rng.randint(0, 9) < 3:
             # Corrupt the precision/table ID byte
             data[0] ^= self._rng.randint(1, 0xFF)
         else:

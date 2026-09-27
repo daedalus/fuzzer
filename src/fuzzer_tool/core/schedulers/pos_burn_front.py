@@ -85,7 +85,7 @@ class BurnFrontPositionScheduler:
             return None
 
         last = buf_len - 1
-        if self._rng.random() < SPARK_RATE:
+        if self._rng.randint(0, 9) < 1:  # SPARK_RATE = 0.10
             return self._rng.randint(0, last)
 
         bins = list(front.heat)

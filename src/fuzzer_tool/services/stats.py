@@ -341,7 +341,7 @@ class StatsReporter:
 
         while exec_count < max_execs:
             seed = self._rng.choice(seeds)
-            if self._rng.random() < 0.5:
+            if self._rng.randint(0, 1) == 0:
                 mutated = bytearray(seed)
                 if mutated:
                     mutated[self._rng.randint(0, len(mutated) - 1)] ^= 1 << self._rng.randint(0, 7)

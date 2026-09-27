@@ -75,7 +75,7 @@ class F0Estimator:
         if len(self.X) == self.thresh:
             new_X: set[Hashable] = set()
             for x in self.X:
-                if self._rng.random() < 0.5:
+                if self._rng.randint(0, 1) == 0:
                     new_X.add(x)
             self.X = new_X
             self.p /= 2.0

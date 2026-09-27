@@ -34,31 +34,29 @@ diameter); `ExhaustivePool` enumerates `n!/(n−m)!` — n=20, m=5 exceeds
 **Acceptance:** fuzzgoat + one offset-table target, paired runs, edges/exec for
 m>2-enabled vs m=2-only, control-vs-self per Hard Rule 46.
 
-## 2. `ExhaustivePool` bulk gate is all-or-nothing (orig. §10b)
+## 2. `ExhaustivePool` bulk gate is all-or-nothing (orig. §10b) — CLOSED 2026-09-26
 
-**Where:** `core/exhaustive_pool.py` `_bulk_guard` / `randbytes`. Any
-`randbytes(n>0)` raises `BulkDrawError` unless `allow_bulk=True`.
+Per-call *and* per-run path budget implemented (`max_bulk_paths_per_call`,
+default 65,536); `allow_bulk=True` still bypasses both for larger cases.
+Full writeup: `docs/handover/handover_coin_flip_bulk_budget_2026-09-26.md`
+§1.
 
-**Proposal:** per-call budget — `randbytes(n)` enumerable for `n <= 2` by
-default (65,536 paths), larger `n` only with explicit opt-in. Lets
-`spectral_peak`, `de_bruijn_fill` (`core/mutations/structured.py`) be
-exhaustively tested.
+## 3. Coin-flip idiom blocks enumeration (orig. §10c) — mostly CLOSED 2026-09-26
 
-**Risk:** several `randbytes` calls in one path multiply; the cap must be per
-path, not per call, or `max_runs` truncates silently.
+All 80 fixed-literal-probability sites (of 93 total) rewritten to bounded
+draws; operator table's `"continuous"` count dropped 34 → 2 (both genuine
+continuous draws, not coin flips). 13 runtime-probability sites (a
+scheduler's `epsilon`, a GA's `crossover_rate`, etc.) left open — no
+decision made yet on discretizing a runtime float without reopening the
+bulk-budget problem item 2 just closed for explicit bulk calls. Full
+writeup, including the operator-by-operator before/after and the fallout
+in tests that monkeypatched `.random()` directly:
+`docs/handover/handover_coin_flip_bulk_budget_2026-09-26.md` §2.
 
-## 3. Coin-flip idiom blocks enumeration (orig. §10c)
-
-**Where:** `rng.random() < p` — 94 sites under `src/fuzzer_tool/` (incl.
-`_op_swap_bytes` above). `tests/test_exhaustive_pool.py::test_continuous_error_names_the_cheap_fix`
-records 21 operators unenumerable only for this reason.
-
-**Proposal:** rewrite as bounded draws (`rng.randint(0, 1)`, or
-`randint(0, N-1) < p*N`). One line each; each touched operator needs a test
-asserting `ExhaustivePool.exhausted`.
-
-**Open:** produce the census list (which operators, which sites); check that
-the bounded-draw rewrite keeps the RandPool fast path (Hard Rule 41).
+Hard Rule 41 (no speed regression) not separately profiled this pass —
+`randint(0, N-1) < K` and `random() < p` are both single calls into
+`RandPool`'s own bounded-draw fast path (`randint` doesn't delegate to
+`random`), so no regression is expected, but this wasn't benchmarked.
 
 ## 4. Operator Markov chain is first-order only (orig. §10d)
 

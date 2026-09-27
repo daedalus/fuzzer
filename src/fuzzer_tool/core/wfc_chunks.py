@@ -854,7 +854,7 @@ class WfcChunkMutator(MutatorBase):
             if len(chunks) < 3:
                 return None
             table = self.store.table_for(fmt_name)
-            mode = "violate" if rng.random() < VIOLATE_RATE else "strict"
+            mode = "violate" if rng.randint(0, 9) < 3 else "strict"  # VIOLATE_RATE = 0.3
             try:
                 out = wfc_reorder_chunks(
                     fmt, chunks, table, rng, mode=mode, max_len=max_len or None

@@ -34,7 +34,7 @@ def _solved(engine: OperatorEngine) -> list[bytes]:
 def test_regression_wall_order_solves_widest_first():
     # Falsification: rng.choice is never scripted, so a random pick raises
     # StopIteration; the wall head (4-byte taint) must be solved.
-    engine = _engine([NARROW, WIDE], wall=True, rng=ScriptedRng(randoms=[0.1]))
+    engine = _engine([NARROW, WIDE], wall=True, rng=ScriptedRng(randints=[0]))
     buf = bytearray(DATA)
 
     out = engine._op_condstmt_solve(buf, 0, DATA)
@@ -45,7 +45,7 @@ def test_regression_wall_order_solves_widest_first():
 
 def test_wall_order_control_off():
     # Control: without the flag the scripted choice (index 0) wins.
-    engine = _engine([NARROW, WIDE], wall=False, rng=ScriptedRng(randoms=[0.1], choice_idxs=[0]))
+    engine = _engine([NARROW, WIDE], wall=False, rng=ScriptedRng(randints=[0], choice_idxs=[0]))
 
     engine._op_condstmt_solve(bytearray(DATA), 0, DATA)
 
@@ -64,7 +64,7 @@ def test_adversarial_wide_wall_is_windowed(monkeypatch):
 
     monkeypatch.setattr(Z3Solver, "solve_comparison_wall", spy)
     pairs = [(b"-", bytes([i])) for i in range(1, 201)]
-    engine = _engine(pairs, wall=True, rng=ScriptedRng(randoms=[0.1]))
+    engine = _engine(pairs, wall=True, rng=ScriptedRng(randints=[0]))
 
     engine._op_condstmt_solve(bytearray(DATA), 0, DATA)
 
@@ -76,7 +76,7 @@ def test_adversarial_untainted_wall_keeps_input_order():
     # No operand occurs in the input: no offsets, all singletons, so the
     # order is the cmplog order and the first unsolved branch is the head.
     pairs = [(b"\x01\x02", b"\x03\x04"), (b"\x05\x06", b"\x07\x08")]
-    engine = _engine(pairs, wall=True, rng=ScriptedRng(randoms=[0.1], randints=[0]))
+    engine = _engine(pairs, wall=True, rng=ScriptedRng(randints=[0, 0]))
 
     engine._op_condstmt_solve(bytearray(DATA), 0, DATA)
 

@@ -217,7 +217,7 @@ class ArmMutator:
         candidates = [w for w in words if w.kind == "a32"]
         if candidates:
             target = self._rng.choice(candidates)
-            if self._rng.random() < 0.5:
+            if self._rng.randint(0, 1) == 0:
                 _set_value(target, target.value ^ (self._rng.randint(0, 7) << 16))
             else:
                 _set_value(target, target.value ^ self._rng.randint(0, 7))
@@ -257,7 +257,7 @@ class ArmMutator:
         if not t16:
             return words
         target = self._rng.choice(t16)
-        if self._rng.random() < 0.5:
+        if self._rng.randint(0, 1) == 0:
             # Conditional branch range: 0xD0-0xDF
             _set_value(target, (self._rng.choice(T16_COND) << 8) | (target.value & 0xFF))
         else:
