@@ -1060,9 +1060,11 @@ def _genseed_fsm(args) -> int:
     rng = RandPool(seed=args.seed)
     seen: set[str] = set()
     for _ in range(args.count):
-        data = fsm.generate(rng, args.max_len)[: args.max_len]
+        data = fsm.generate(rng, args.max_len)
+        if not data:
+            continue
         h = hash_data(data)
-        if not data or h in seen:
+        if h in seen:
             continue
         seen.add(h)
         _write_seed(dest, data, h)
@@ -4142,7 +4144,7 @@ def main() -> int:
         default=None,
         metavar="FILE",
         help="Constraint-labelled FSM spec (see core/format_fsm.py); enables the "
-        "fsm_regen op: keep an input's longest valid prefix, regenerate a valid tail",
+        "fsm_regen op: keep a random valid prefix of an input, regenerate a valid tail",
     )
     fuzz_parser.add_argument(
         "--grammar-boltzmann",

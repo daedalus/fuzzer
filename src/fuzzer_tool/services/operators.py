@@ -3439,8 +3439,10 @@ class OperatorEngine:
         if not fsm:
             return None
 
-        limit = self.ctx.max_len
-        return bytearray(fsm.regenerate(bytes(buf), self.ctx._rng, limit)[:limit])
+        # 0 means uncapped (MutationContext); the FSM never overruns, and
+        # declines (None) rather than split a label to fit.
+        out = fsm.regenerate(bytes(buf), self.ctx._rng, self.ctx.max_len or 65536)
+        return None if out is None else bytearray(out)
 
     def _op_grammar_tree_mutate(self, buf, _byte_idx, data):
         if self.ctx.grammar:
