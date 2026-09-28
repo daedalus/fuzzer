@@ -5,8 +5,9 @@ Base: `daedalus/fuzzer` HEAD `c48d5a1d` (PositionFractalScheduler, on top of
 
 **Update:** arms 2 (`lineage`, section 5.2) and 3 (`cmplog`, section 5.3) are now implemented
 (`pos_lineage.py`, `pos_cmplog.py`); `fractal` and `kl_ducb` landed earlier. Arm 1 (`context`, section 5.1) is implemented (`pos_context.py`, `_bytecls.py`, off-policy extra as specified). Arm 5 (`levy`, section 5.5) is implemented (`pos_levy.py`, off-policy extra as specified; deviations
-listed in the paragraph below). Still unbuilt: 0
-(benchmark prerequisite), 4 `boundary`. `_bytecls.py` now exists for `boundary` to reuse. `lineage` deviates from 5.2 in one
+listed in the paragraph below). Arm 4 (`boundary`, section 5.4) is implemented (`pos_boundary.py`, off-policy extra as specified; it
+reuses `_bytecls.py`). Still unbuilt: 0
+(benchmark prerequisite). `lineage` deviates from 5.2 in one
 place: it is wired tracker-style (gate = `--lineage` on) instead of as an off-policy extra,
 because `parent_sites` is recorded only under `--lineage`; without it the arm would be a pure
 decliner and get flagged by the uniform-floor inspection. `record()` stays a no-op, so the
@@ -423,6 +424,8 @@ already biases "boundary bytes" toward parser transitions inside the
 operator. If it exposes (or can trivially expose) a boundary detector, reuse
 it instead of duplicating. Confirm by reading the file; I did not inspect it
 in this session.
+
+**Reuse check result (done).** `fractal_voronoi.py`'s `_is_boundary` is the boundary of a hash-driven Voronoi partition of the index space, not a byte-content detector; nothing to reuse, so the detector lives in `pos_boundary.py` (`score_boundaries`, `top_boundaries`). Deviations from 5.4: the delimiter term requires `b[i] != b[i-1]` (otherwise a NUL/space padding run filled the whole top-K with ties); the entropy window must fit the scanned prefix (no entropy term in the first and last 16 bytes); candidates past a shrunken buffer are dropped rather than clamped; the unscored tail of a seed longer than 64 KiB is drawn uniformly with probability equal to its share. Unmeasured.
 
 **Flag.** `--pos-boundary`; implied by `--position-arena` (cheap, cached);
 in `--hail-mary`.

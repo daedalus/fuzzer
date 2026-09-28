@@ -706,6 +706,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("context")
     if getattr(f, "_pos_levy", None) is not None:
         names.append("levy")
+    if getattr(f, "_pos_boundary", None) is not None:
+        names.append("boundary")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
     if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
@@ -1477,6 +1479,11 @@ class Fuzzer:
         # Arena arm subset (see PositionArena / --pos-arena-arms): None = every
         # arm whose feature is on; else only these names, uniform always kept.
         pos_arena_arms=None,
+        # Position arena's boundary proposer: content-derived field boundaries
+        # (class changes, delimiters, entropy steps, run edges; see
+        # core/schedulers/pos_boundary.py). Stateless; the arena always fields
+        # it too.
+        pos_boundary=False,
         # Appended: positional signature (see region_profile above).
         target_schedule=TargetSchedule.WEIGHTED,
         # Cuckoo filter for pruned seed dedup (gated by --cuckoo-seed-filter).
@@ -2733,6 +2740,14 @@ class Fuzzer:
 
             self._pos_levy = PositionLevyScheduler(self._rng)
             log.info("Position levy scheduling enabled")
+        # Position-arena boundary: content-only field-boundary prior, no
+        # feedback and no persisted state (see core/schedulers/pos_boundary.py).
+        self._pos_boundary = None
+        if pos_boundary or position_arena:
+            from fuzzer_tool.core.schedulers.pos_boundary import PositionBoundaryScheduler
+
+            self._pos_boundary = PositionBoundaryScheduler(self._rng)
+            log.info("Position boundary scheduling enabled")
         self._use_position_arena = position_arena
         self._position_arena = None
         if pos_arena_arms is not None and not position_arena:
@@ -2754,6 +2769,7 @@ class Fuzzer:
                 fractal=self._pos_fractal,
                 context=self._pos_context,
                 levy=self._pos_levy,
+                boundary=self._pos_boundary,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
                 arms=pos_arena_arms,

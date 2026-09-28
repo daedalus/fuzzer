@@ -618,6 +618,7 @@ def cmd_fuzz(args):
         pos_context=getattr(args, "pos_context", False),
         pos_levy=getattr(args, "pos_levy", False),
         pos_arena_arms=getattr(args, "pos_arena_arms", None),
+        pos_boundary=getattr(args, "pos_boundary", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -2069,6 +2070,7 @@ _HAIL_MARY_FLAGS = (
     "pos_lineage",
     "pos_context",
     "pos_levy",
+    "pos_boundary",
     "position_arena",
 )
 
@@ -2648,15 +2650,24 @@ def main() -> int:
         "always fields it as an arm.",
     )
     fuzz_parser.add_argument(
+        "--pos-boundary",
+        action="store_true",
+        help="Enable the position-arena boundary scheduler: proposes offsets at "
+        "content-derived field boundaries (byte-class changes, delimiter starts, "
+        "entropy steps, run edges), a prior that works from a seed's first pick. "
+        "Stateless (learns nothing from outcomes). Implied by --position-arena, "
+        "which always fields it as an arm.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
-        "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context, levy) with "
+        "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context, levy, boundary) with "
         "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
-        "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage, --pos-context and "
-        "--pos-levy. Enabled by --hail-mary.",
+        "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage, --pos-context, "
+        "--pos-levy and --pos-boundary. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--pos-arena-arms",

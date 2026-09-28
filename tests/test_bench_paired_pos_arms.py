@@ -121,7 +121,7 @@ def test_arena_arms_do_not_turn_on_other_position_flags(monkeypatch):
     # also set them, or the arm stops being the only variable.
     for arm in POSITION_ARENA_ARMS:
         args = _parse(monkeypatch, ARMS[arm])
-        for dest in ("pos_fractal", "pos_levy", "pos_kl_ducb", "burn_front", "pos_context"):
+        for dest in ("pos_fractal", "pos_levy", "pos_kl_ducb", "burn_front", "pos_context", "pos_boundary"):
             assert getattr(args, dest) is False, (arm, dest)
 
 

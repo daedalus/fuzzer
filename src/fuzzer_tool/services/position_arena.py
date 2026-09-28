@@ -52,6 +52,10 @@ Arms::
     levy         PositionLevyScheduler, a heavy-tailed jump around the
                  seed's last gain offset (opt-in, --pos-levy; see
                  core/schedulers/pos_levy.py)
+    boundary     PositionBoundaryScheduler, content-derived field
+                 boundaries (class changes, delimiters, entropy steps,
+                 run edges), no state and no feedback signal (opt-in,
+                 --pos-boundary; see core/schedulers/pos_boundary.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
 matches. ``arms`` (``--pos-arena-arms``) narrows the pool further to a named
@@ -72,8 +76,8 @@ served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
 ``burn_front``, ``kl_ducb``, ``canary``, ``round_robin``, ``fibonacci``,
-``fractal``, ``context`` and ``levy`` are each credited off-policy on every settled
-round, whoever served the positions, like ``seed_canary`` on the seed side.
+``fractal``, ``context``, ``levy`` and ``boundary`` are each credited off-policy on every
+settled round, whoever served the positions, like ``seed_canary`` on the seed side.
 """
 
 from __future__ import annotations
@@ -108,6 +112,7 @@ POSITION_STRATEGY_NAMES = (
     "lineage",
     "context",
     "levy",
+    "boundary",
 )
 
 
@@ -151,6 +156,7 @@ class PositionArena:
         context: PositionScheduler | None = None,
         levy: PositionScheduler | None = None,
         arms: Iterable[str] | None = None,
+        boundary: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         # None = every arm whose feature is on; otherwise only these (+ uniform).
@@ -170,6 +176,7 @@ class PositionArena:
         self._lineage = lineage if self.allows("lineage") else None
         self._context = context if self.allows("context") else None
         self._levy = levy if self.allows("levy") else None
+        self._boundary = boundary if self.allows("boundary") else None
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
         # Off-policy arms: fed every settled round whoever served. Single list
@@ -185,6 +192,7 @@ class PositionArena:
                 self._fractal,
                 self._context,
                 self._levy,
+                self._boundary,
             )
             if e is not None
         )

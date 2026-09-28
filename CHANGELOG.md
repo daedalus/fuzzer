@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Position-arena `boundary` arm** (`--pos-boundary`, implied by `--position-arena` and
+  `--hail-mary`): a content-only prior that proposes field boundaries. Each gap between two bytes
+  scores +1 for a byte-class change, +1 for the byte after a delimiter (not inside a delimiter
+  run), up to +1 for the entropy step between the 16-byte windows either side, +0.5 at the edge of
+  a run of >= 4 equal bytes and +0.25 at 4-byte alignment; the 256 best per seed are kept and one is
+  drawn in proportion to its score with a jitter of -1/0/+1. Sites past a shrunken buffer are
+  dropped, not clamped. Only the first 64 KiB is scored (the unscored tail of a longer seed gets its
+  share of uniform draws); 15% of draws decline to uniform. Stateless (`record` is a no-op), the
+  per-seed table is an LRU of 256 derived entries and is not persisted. Off-policy extra, so
+  `--pos-arena-arms uniform,boundary` and the new `pos-arena-boundary` bench arm isolate it.
+  Reuses `_bytecls.py`. `fractal_voronoi.py`'s `_is_boundary` is a hash-driven partition of the
+  index space, not a content detector, so nothing was reusable from it. Unmeasured (arena-only).
+
 - **`--pos-arena-arms ARM[,ARM...]`**: restrict `--position-arena` to a named subset of arms
   (uniform is always kept; hyphens accepted; unknown names are a usage error). A dropped arm is
   neither proposed from nor credited off-policy, plays no Elo matches, and is left out of the

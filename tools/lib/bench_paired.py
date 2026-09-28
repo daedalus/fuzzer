@@ -70,6 +70,7 @@ ARENA_TESTABLE = (
     "fractal",
     "context",
     "levy",
+    "boundary",
     "round_robin",
     "fibonacci",
 )

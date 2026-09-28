@@ -22,6 +22,7 @@ from fuzzer_tool.core.schedulers.pos_base import (
     PositionScheduler,
     UniformPosition,
 )
+from fuzzer_tool.core.schedulers.pos_boundary import PositionBoundaryScheduler
 from fuzzer_tool.core.schedulers.pos_burn_front import (
     COOL_EVERY,
     FUEL_FLOOR,
@@ -568,6 +569,7 @@ def _arena(
     lineage=None,
     context=None,
     levy=None,
+    boundary=None,
     region=lambda d, n: 55,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
@@ -584,6 +586,7 @@ def _arena(
         lineage=lineage,
         context=context,
         levy=levy,
+        boundary=boundary,
     )
 
 
@@ -658,6 +661,14 @@ class TestPool:
     def test_levy_joins_when_supplied(self):
         _, arena = _arena(levy=PositionLevyScheduler(RandPool(seed=1)))
         assert "levy" in arena.pool()
+
+    def test_boundary_joins_when_supplied(self):
+        _, arena = _arena(boundary=PositionBoundaryScheduler(RandPool(seed=1)))
+        assert "boundary" in arena.pool()
+
+    def test_boundary_absent_when_not_supplied(self):
+        _, arena = _arena()
+        assert "boundary" not in arena.pool()
 
     def test_levy_absent_when_not_supplied(self):
         _, arena = _arena()
@@ -816,6 +827,7 @@ class TestPool:
             lineage=PositionLineageScheduler(RandPool(seed=1), meta_of=lambda d: None),
             context=PositionContextScheduler(RandPool(seed=1)),
             levy=PositionLevyScheduler(RandPool(seed=1)),
+            boundary=PositionBoundaryScheduler(RandPool(seed=1)),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -973,6 +985,19 @@ class TestSettle:
         arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
         assert bf.hot_bins(SEED)
         assert f._elo._strategy_match_count == {}
+
+    def test_boundary_is_credited_off_policy(self):
+        # record() is a documented no-op: settle must feed it without
+        # raising or changing what it proposes for the same seed.
+        seed = b"ab,cd" * 20
+        bnd = PositionBoundaryScheduler(RandPool(seed=1))
+        ref = PositionBoundaryScheduler(RandPool(seed=1))
+        f, arena = self._played(boundary=bnd)
+        picks = []
+        bnd.record = lambda *a, **k: picks.append(a)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert len(picks) == 1
+        assert bnd.propose(seed, len(seed)) == ref.propose(seed, len(seed))
 
     def test_levy_is_credited_off_policy(self):
         # The picker was sensitivity, not levy; its anchor still moves.
@@ -1153,7 +1178,7 @@ class TestFuzzerWiring:
         # Contiguous block; later params (e.g. target_schedule) may follow.
         names = list(params)
         start = names.index("burn_front")
-        assert names[start : start + 11] == [
+        assert names[start : start + 13] == [
             "burn_front",
             "position_arena",
             "pos_canary",
@@ -1165,6 +1190,8 @@ class TestFuzzerWiring:
             "pos_lineage",
             "pos_context",
             "pos_levy",
+            "pos_arena_arms",
+            "pos_boundary",
         ]
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
@@ -1177,6 +1204,7 @@ class TestFuzzerWiring:
         assert params["pos_lineage"].default is False
         assert params["pos_context"].default is False
         assert params["pos_levy"].default is False
+        assert params["pos_boundary"].default is False
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
@@ -1204,6 +1232,7 @@ class TestFuzzerWiring:
             "pos_lineage",
             "pos_context",
             "pos_levy",
+            "pos_boundary",
         }
         for c in calls:
             kw = {k.arg for k in c.keywords}
@@ -1284,6 +1313,16 @@ class TestRealConstruction:
         f = self._build(tmp_path, elo="all", position_arena=True)
         assert isinstance(f._pos_levy, PositionLevyScheduler)
         assert "levy" in f._position_arena.pool()
+
+    def test_position_arena_implies_boundary(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_boundary, PositionBoundaryScheduler)
+        assert "boundary" in f._position_arena.pool()
+
+    def test_pos_boundary_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_boundary=True)
+        assert isinstance(f._pos_boundary, PositionBoundaryScheduler)
+        assert f._position_arena is None
 
     def test_pos_levy_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, pos_levy=True)
@@ -1448,6 +1487,7 @@ class TestRealConstruction:
         assert args.pos_lineage is True
         assert args.pos_context is True
         assert args.pos_levy is True
+        assert args.pos_boundary is True
         assert args.lineage is True  # the lineage arm needs the metadata it records
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 
@@ -1487,6 +1527,18 @@ class TestArenaArmSubset:
         arena, _ = self._all(["fractal"])
         assert arena.pool() == ["uniform", "fractal"]
         assert arena.enabled_arms == {"uniform", "fractal"}
+
+    def test_boundary_can_be_isolated_by_subset(self):
+        f = _Fuzzer()
+        spy = _Spy("boundary")
+        other = _Spy("levy")
+        arena = PositionArena(
+            f, region_fn=lambda d, n: 55, arms=["uniform", "boundary"], boundary=spy, levy=other
+        )
+        assert arena.pool() == ["uniform", "boundary"]
+        arena.select(SEED, len(SEED))
+        arena.settle(SEED, [3], Outcome.GAIN, 1.0, 1.0)
+        assert (spy.recorded, other.recorded) == (1, 0)
 
     def test_uniform_only_is_a_single_member_pool(self):
         arena, _ = self._all(["uniform"])
