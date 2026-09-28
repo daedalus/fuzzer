@@ -106,6 +106,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   input-to-state) as landing sites for every operator. Passive, no persisted state; joins the
   pool only while cmplog is live. Unmeasured (arena-only, like `kl_ducb`/`fractal`).
 
+- **Bach spectral KL estimator** (`core/spectral_kl.py`, `EntropyKLSeedStrategy.spectral_scores()`,
+  `miller_madow_scores()`): closed-form lower bound on KL via one generalized eigendecomposition,
+  measured as a baseline next to the calibrated `entropy_kl` score (AUC 0.83 vs 0.97; not wired
+  into selection).
+
+
 - **SanitizerCoverage modes**: shim callbacks for `inline-8bit-counters`, `inline-bool-flag`,
   `pc-table`, `trace-loads`/`trace-stores` (previously failed to link). Counters/flags fold into
   the edge map; loads/stores of globals become data-flow features. ELF helpers recognise

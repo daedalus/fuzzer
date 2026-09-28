@@ -45,6 +45,26 @@ empty, so K_hat is far below the K the bias scales with. Kept as a measured base
 into selection. `tests/test_entropy_kl_miller_madow.py` holds the AUC helper (rank-based, with a
 control on uninformative labels) and asserts raw < Miller-Madow < calibrated.
 
+## Bach spectral estimator (added same day)
+
+`core/spectral_kl.py` implements the closed form from the article (Eq. 7 collapsed by one
+generalized eigendecomposition): `F = sum_i ((mu_p - mu_q)^T v_i)^2 f(lambda_i)/(lambda_i - 1)^2`,
+`f(t) = t ln t - t + 1`, with ridge `1e-3` on both covariances and 32 nibble features (one-hot high
+nibble + one-hot low nibble). A batch of seeds against one pool is one stacked `eigh`.
+`EntropyKLSeedStrategy.spectral_scores()` exposes it in bits.
+
+Checked against: quadrature of Eq. (7) with a linear solve per node (rel 1e-6, with a
+self-comparison control); exact reduction to plug-in KL for one-hot features; `F <= KL` over 20
+random pairs; `F = 0` at `p = q`; degenerate pools (unseen bins, point mass).
+
+Measured over 6 mixed-length corpora: AUC raw 0.72, Miller-Madow 0.75, **spectral 0.83**,
+calibrated z 0.97. Spearman(score, length) on single-distribution corpora: raw -0.994, spectral
+-0.988. So the spectral bound separates diverging seeds better than plug-in KL but does **not**
+remove the length bias with these features and ridge; it stays a baseline, not the scheduling
+score. `spectral_scores()` on 2000 seeds takes ~240 ms, fine for offline comparison, too slow to
+run on every pick. Not tried: a larger ridge, richer features, or applying the null calibration to
+the spectral score itself.
+
 ## Costs and limits
 
 - Pick after an admission into a 2000-seed corpus: ~13 ms (was 1.0 ms). `E0` is rebuilt on each

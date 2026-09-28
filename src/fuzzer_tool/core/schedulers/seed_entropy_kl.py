@@ -74,6 +74,7 @@ from fuzzer_tool.core.byte_entropy import (
     byte_histogram,
     entropy_bits_from_counts,
 )
+from fuzzer_tool.core.spectral_kl import nibble_features, spectral_kl_rows_bits
 
 #: Floor added to every weight so a seed matching the pool exactly (KL 0)
 #: is rare rather than unreachable. Matches seed_kruskal_count.
@@ -102,6 +103,8 @@ NULL_MC_SEED = 0x4B4C
 NULL_MIN_SD = 1e-6
 
 _LN2 = math.log(2.0)
+
+_NIBBLES = nibble_features()
 
 
 def null_kl_bits(q: Any, n: int) -> float:
@@ -225,6 +228,25 @@ class EntropyKLSeedStrategy:
         """Uncalibrated plug-in KL (biased upward for short seeds)."""
         self.scores(seeds)
         return [self._raw_kl.get(s, 0.0) for s in seeds]
+
+    def spectral_scores(self, seeds: list[bytes]) -> list[float]:
+        """Bach's spectral lower bound on KL(P_s || Q), in bits, nibble features.
+
+        See :mod:`fuzzer_tool.core.spectral_kl`. Shares strength across byte
+        values through 32 nibble features instead of 256 free bins, which
+        damps the sampling noise of a short seed's histogram. It is a
+        different divergence (KL restricted to what the features see), not a
+        drop-in for the plug-in number, and it still carries a length bias
+        -- a baseline measured against :meth:`scores`, not the scheduling
+        score.
+        """
+        self.raw_scores(seeds)
+        used = len(self._keys)
+        if not used:
+            return [0.0] * len(seeds)
+        q = np.asarray(self._pool.freq_dist(), dtype=np.float64)
+        bits = spectral_kl_rows_bits(self._probs[:used], q, _NIBBLES)
+        return [float(bits[self._index[seed]]) if seed in self._index else 0.0 for seed in seeds]
 
     def miller_madow_scores(self, seeds: list[bytes]) -> list[float]:
         """Plug-in KL minus the Miller-Madow bias, ``(K_hat - 1) / (2 n ln 2)`` bits.
