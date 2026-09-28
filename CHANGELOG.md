@@ -49,6 +49,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     3.7 us -> 1.6 us, `add` 4-6 us -> ~3 us.
   - Tests: `tests/test_cuckoo_load_scaling.py`.
 
+- **`entropy_kl` seed scores tracked seed length.** Plug-in KL is biased upward by ~(K-1)/(2n)
+  nats, so short seeds out-scored long seeds that truly diverged (Spearman(score, length) = -0.99
+  on single-distribution corpora; seeds <= 64 B drew 2.25x their share of selection weight).
+  `scores()` is now the KL's excess over the exact length-dependent null in null standard
+  deviations (capped at 8); `raw_scores()` keeps the old number. Cost: the pick after a corpus
+  admission is ~13 ms instead of ~1 ms.
+
 ### Added
 
 - **Position-arena `boundary` arm** (`--pos-boundary`, implied by `--position-arena` and

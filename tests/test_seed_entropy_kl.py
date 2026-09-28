@@ -74,8 +74,10 @@ def _strategy(rng=None) -> EntropyKLSeedStrategy:
 
 class TestScoreMath:
     def test_matches_the_scalar_reference(self):
+        # raw_scores is the plug-in KL this oracle spells out; scores() is
+        # that number length-calibrated (tests/test_regression_entropy_kl_length_bias.py).
         corpus = [PAIR_A, PAIR_B, TEXT]
-        got = _strategy().scores(corpus)
+        got = _strategy().raw_scores(corpus)
         want = [_reference_kl(s, corpus) for s in corpus]
         assert got == pytest.approx(want, abs=1e-9)
 
