@@ -34,6 +34,7 @@ from fuzzer_tool.core.schedulers.pos_burn_front import (
 )
 from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
+from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, PositionArena
@@ -218,6 +219,100 @@ class TestBurnFront:
         heat = s.hot_bins(wide)
         assert len(heat) <= MAX_HOT_BINS
         assert 0 in heat
+
+
+class TestPositionKLDUCB:
+    def _s(self, rng=None):
+        return PositionKLDUCBScheduler(rng or RandPool(seed=7))
+
+    def test_satisfies_the_protocol(self):
+        assert isinstance(self._s(), PositionScheduler)
+
+    def test_name_is_kl_ducb(self):
+        assert self._s().name == "kl_ducb"
+
+    def test_empty_buffer_declines(self):
+        assert self._s().propose(b"", 0) is None
+
+    def test_cold_seed_proposes_a_bin_start(self):
+        # No evidence yet -> every bin is "unpulled"; whichever the (seeded,
+        # deterministic) rng opens first, the offset lands on a bin start.
+        s = self._s()
+        pos = s.propose(SEED, len(SEED))
+        assert pos is not None
+        assert 0 <= pos < len(SEED)
+
+    def test_empty_offsets_is_a_no_op(self):
+        s = self._s()
+        s.record(SEED, [], Outcome.GAIN)
+        assert s.bandit_stats(SEED) == {}
+
+    def test_negative_offsets_are_ignored(self):
+        s = self._s()
+        s.record(SEED, [-5], Outcome.GAIN)
+        assert s.bandit_stats(SEED) == {}
+
+    def test_a_bin_with_more_gains_is_preferred_once_every_bin_is_open(self):
+        # FALSIFICATION: select_op opens every never-pulled arm first, so
+        # with any bin still unpulled a reinforced bin could never win by
+        # chance alone. Open all 4 bins of a small seed first, then load
+        # bin 0 with gains: it must be reachable afterwards.
+        small = bytes(4)  # width 1 under MAX_BINS -> 4 bins
+        s = self._s()
+        for b in range(4):
+            s.record(small, [b], Outcome.MISS)
+        for _ in range(30):
+            s.record(small, [0], Outcome.GAIN)
+        picks = {s.propose(small, len(small)) for _ in range(20)}
+        assert 0 in picks
+
+    def test_repeated_misses_do_not_outrank_a_gaining_bin(self):
+        small = bytes(4)
+        s = self._s()
+        for b in range(4):
+            s.record(small, [b], Outcome.MISS)
+        for _ in range(30):
+            s.record(small, [0], Outcome.GAIN)
+            s.record(small, [1], Outcome.MISS)
+        picks = [s.propose(small, len(small)) for _ in range(50)]
+        assert picks.count(0) >= picks.count(1)
+
+    def test_weight_is_shared_across_offsets_as_separate_pulls(self):
+        # Each offset in a round is its own bandit pull with a fractional
+        # (weight-shared) reward, not a fractional pull -- pinning that
+        # convention so a future change doesn't silently alter it.
+        one, two = self._s(), self._s()
+        one.record(SEED, [100], Outcome.GAIN, weight=1.0)
+        two.record(SEED, [100, 500], Outcome.GAIN, weight=1.0)
+        assert one.bandit_stats(SEED)["kl_ducb_pulls"] == 1
+        assert one.bandit_stats(SEED)["kl_ducb_arms"] == 1
+        assert two.bandit_stats(SEED)["kl_ducb_pulls"] == 2
+        assert two.bandit_stats(SEED)["kl_ducb_arms"] == 2
+
+    def test_offsets_past_the_seed_end_are_clamped_to_the_last_bin(self):
+        # ADVERSARIAL: the buffer may have grown past the parent seed.
+        s = self._s()
+        s.record(SEED, [len(SEED) + 500], Outcome.GAIN)
+        assert s.bandit_stats(SEED)["kl_ducb_arms"] == 1
+
+    def test_position_is_clamped_to_a_shrunken_buffer(self):
+        s = self._s()
+        s.record(SEED, [900], Outcome.GAIN)
+        for _ in range(50):
+            pos = s.propose(SEED, 10)
+            assert pos is None or 0 <= pos < 10
+
+    def test_seed_table_is_lru_bounded(self):
+        from fuzzer_tool.core.schedulers.pos_kl_ducb import MAX_SEEDS as KLD_MAX_SEEDS
+
+        s = self._s()
+        for i in range(KLD_MAX_SEEDS + 50):
+            s.record(i.to_bytes(4, "big") * 4, [1], Outcome.GAIN)
+        assert s.seed_count() == KLD_MAX_SEEDS
+        assert s.bandit_stats((0).to_bytes(4, "big") * 4) == {}  # oldest evicted
+
+    def test_bandit_stats_unknown_seed_is_empty(self):
+        assert self._s().bandit_stats(SEED) == {}
 
 
 class TestPositionCanary:
@@ -453,6 +548,7 @@ class _Fuzzer:
 def _arena(
     f=None,
     burn_front=None,
+    kl_ducb=None,
     canary=None,
     round_robin=None,
     fibonacci=None,
@@ -463,6 +559,7 @@ def _arena(
         f,
         region_fn=region,
         burn_front=burn_front,
+        kl_ducb=kl_ducb,
         canary=canary,
         round_robin=round_robin,
         fibonacci=fibonacci,
@@ -529,6 +626,10 @@ class TestPool:
         _, arena = _arena(burn_front=_bf())
         assert "burn_front" in arena.pool()
 
+    def test_kl_ducb_joins_when_supplied(self):
+        _, arena = _arena(kl_ducb=PositionKLDUCBScheduler(RandPool(seed=1)))
+        assert "kl_ducb" in arena.pool()
+
     def test_canary_joins_when_supplied(self):
         _, arena = _arena(canary=PositionCanaryScheduler())
         assert "canary" in arena.pool()
@@ -563,6 +664,7 @@ class TestPool:
         _, arena = _arena(
             f,
             burn_front=_bf(),
+            kl_ducb=PositionKLDUCBScheduler(RandPool(seed=1)),
             canary=PositionCanaryScheduler(),
             round_robin=PositionRoundRobinScheduler(),
             fibonacci=PositionFibonacciScheduler(),
@@ -724,6 +826,13 @@ class TestSettle:
         assert bf.hot_bins(SEED)
         assert f._elo._strategy_match_count == {}
 
+    def test_kl_ducb_is_credited_off_policy(self):
+        # The picker was sensitivity, not kl_ducb; its bandit still learns.
+        kld = PositionKLDUCBScheduler(RandPool(seed=1))
+        f, arena = self._played(kl_ducb=kld)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert kld.bandit_stats(SEED)["kl_ducb_pulls"] == 1
+
     def test_canary_is_credited_off_policy(self):
         # The picker was sensitivity, not canary; canary's posterior still learns.
         canary = PositionCanaryScheduler()
@@ -853,18 +962,23 @@ class TestFuzzerWiring:
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         params = inspect.signature(Fuzzer.__init__).parameters
-        assert list(params)[-5:] == [
+        # Contiguous block; later params (e.g. target_schedule) may follow.
+        names = list(params)
+        start = names.index("burn_front")
+        assert names[start : start + 6] == [
             "burn_front",
             "position_arena",
             "pos_canary",
             "pos_round_robin",
             "pos_fibonacci",
+            "pos_kl_ducb",
         ]
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
         assert params["pos_canary"].default is False
         assert params["pos_round_robin"].default is False
         assert params["pos_fibonacci"].default is False
+        assert params["pos_kl_ducb"].default is False
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
@@ -886,6 +1000,7 @@ class TestFuzzerWiring:
             "pos_canary",
             "pos_round_robin",
             "pos_fibonacci",
+            "pos_kl_ducb",
         }
         for c in calls:
             kw = {k.arg for k in c.keywords}
@@ -947,6 +1062,11 @@ class TestRealConstruction:
         assert isinstance(f._pos_fibonacci, PositionFibonacciScheduler)
         assert "fibonacci" in f._position_arena.pool()
 
+    def test_position_arena_implies_kl_ducb(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_kl_ducb, PositionKLDUCBScheduler)
+        assert "kl_ducb" in f._position_arena.pool()
+
     def test_burn_front_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, burn_front=True)
         assert isinstance(f._burn_front, BurnFrontPositionScheduler)
@@ -967,6 +1087,11 @@ class TestRealConstruction:
         assert isinstance(f._pos_fibonacci, PositionFibonacciScheduler)
         assert f._position_arena is None
 
+    def test_pos_kl_ducb_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_kl_ducb=True)
+        assert isinstance(f._pos_kl_ducb, PositionKLDUCBScheduler)
+        assert f._position_arena is None
+
     def test_hail_mary_enables_the_arena_and_burn_front(self, monkeypatch):
         import sys
 
@@ -982,6 +1107,7 @@ class TestRealConstruction:
         assert args.pos_canary is True
         assert args.pos_round_robin is True
         assert args.pos_fibonacci is True
+        assert args.pos_kl_ducb is True
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 
     def test_position_arena_without_elo_warns_and_constructs(self, tmp_path, caplog):

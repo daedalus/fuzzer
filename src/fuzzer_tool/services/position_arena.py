@@ -18,6 +18,10 @@ Arms::
     field        FormatLearner field hypotheses (confirmed coverage-causal
                  offsets, --learn-format; joins once a hypothesis exists)
     burn_front   BurnFrontPositionScheduler (opt-in, --burn-front)
+    kl_ducb      PositionKLDUCBScheduler, discounted KL-UCB over a seed's
+                 offset bins -- a theoretically-grounded rival to
+                 burn-front's heuristic (opt-in, --pos-kl-ducb; see
+                 core/schedulers/pos_kl_ducb.py)
     canary       PositionCanaryScheduler, deliberately worst-in-class floor
                  (opt-in, --pos-canary; see core/schedulers/pos_canary.py)
     round_robin  PositionRoundRobinScheduler, deterministic cycling
@@ -41,9 +45,9 @@ Matches: a round's operators may land several positions. Every arm that
 served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
-``burn_front``, ``canary``, ``round_robin`` and ``fibonacci`` are each credited
-off-policy on every settled round, whoever served the positions, like
-``seed_canary`` on the seed side.
+``burn_front``, ``kl_ducb``, ``canary``, ``round_robin`` and ``fibonacci`` are
+each credited off-policy on every settled round, whoever served the
+positions, like ``seed_canary`` on the seed side.
 """
 
 from __future__ import annotations
@@ -69,6 +73,7 @@ POSITION_STRATEGY_NAMES = (
     "region",
     "field",
     "burn_front",
+    "kl_ducb",
     "canary",
     "round_robin",
     "fibonacci",
@@ -84,6 +89,7 @@ class PositionArena:
         f,
         region_fn,
         burn_front: PositionScheduler | None = None,
+        kl_ducb: PositionScheduler | None = None,
         canary: PositionScheduler | None = None,
         round_robin: PositionScheduler | None = None,
         fibonacci: PositionScheduler | None = None,
@@ -91,12 +97,13 @@ class PositionArena:
         self._f = f
         self._uniform = UniformPosition(f._rng)
         self._burn_front = burn_front
+        self._kl_ducb = kl_ducb
         self._canary = canary
         self._round_robin = round_robin
         self._fibonacci = fibonacci
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
-        for extra in (burn_front, canary, round_robin, fibonacci):
+        for extra in (burn_front, kl_ducb, canary, round_robin, fibonacci):
             if extra is not None:
                 self._arms[extra.name] = (extra, lambda: True)
         self._used: list[str] = []
@@ -186,7 +193,13 @@ class PositionArena:
         score: float,
     ) -> None:
         """End of round: feed the off-policy arms, then play the Elo matches."""
-        extras = (self._burn_front, self._canary, self._round_robin, self._fibonacci)
+        extras = (
+            self._burn_front,
+            self._kl_ducb,
+            self._canary,
+            self._round_robin,
+            self._fibonacci,
+        )
         for extra in extras:
             if extra is not None:
                 extra.record(data, offsets, outcome, weight)

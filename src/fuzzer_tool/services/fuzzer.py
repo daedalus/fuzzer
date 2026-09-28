@@ -696,6 +696,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("field")
     if getattr(f, "_burn_front", None) is not None:
         names.append("burn-front")
+    if getattr(f, "_pos_kl_ducb", None) is not None:
+        names.append("kl-ducb")
     if _pos_canary_live(f):
         names.append("canary")
     if getattr(f, "_pos_round_robin", None) is not None:
@@ -1428,6 +1430,11 @@ class Fuzzer:
         # Golden-ratio sibling of pos_round_robin (see
         # core/schedulers/pos_fibonacci.py); same two reaches.
         pos_fibonacci=False,
+        # Position arena's discounted-KL-UCB proposer: a theoretically-
+        # grounded rival to burn-front's heuristic on the same axis (see
+        # core/schedulers/pos_kl_ducb.py). The arena always fields it too,
+        # same as burn_front, since it exists to be measured against it.
+        pos_kl_ducb=False,
         # Appended: positional signature (see region_profile above).
         target_schedule=TargetSchedule.WEIGHTED,
     ):
@@ -2579,6 +2586,17 @@ class Fuzzer:
 
             self._pos_fibonacci = PositionFibonacciScheduler()
             log.info("Position fibonacci scheduling enabled")
+        # Position-arena KL-D-UCB: discounted KL-UCB bandit over a seed's
+        # offset bins, the position-selection counterpart of --kl-ducb
+        # (see core/schedulers/pos_kl_ducb.py). Like burn_front it is a
+        # real learning proposer meant to be measured, so --position-arena
+        # always fields it too.
+        self._pos_kl_ducb = None
+        if pos_kl_ducb or position_arena:
+            from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
+
+            self._pos_kl_ducb = PositionKLDUCBScheduler(self._rng)
+            log.info("Position KL-D-UCB scheduling enabled")
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
@@ -2591,6 +2609,7 @@ class Fuzzer:
                 self,
                 region_fn=self._operators._region_weighted_position,
                 burn_front=self._burn_front,
+                kl_ducb=self._pos_kl_ducb,
                 canary=self._pos_canary,
                 round_robin=self._pos_round_robin,
                 fibonacci=self._pos_fibonacci,

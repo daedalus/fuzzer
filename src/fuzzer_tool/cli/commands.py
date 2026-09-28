@@ -610,6 +610,7 @@ def cmd_fuzz(args):
         pos_canary=getattr(args, "pos_canary", False),
         pos_round_robin=getattr(args, "pos_round_robin", False),
         pos_fibonacci=getattr(args, "pos_fibonacci", False),
+        pos_kl_ducb=getattr(args, "pos_kl_ducb", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -2054,6 +2055,7 @@ _HAIL_MARY_FLAGS = (
     "pos_canary",
     "pos_round_robin",
     "pos_fibonacci",
+    "pos_kl_ducb",
     "position_arena",
 )
 
@@ -2574,14 +2576,22 @@ def main() -> int:
         "the uniform position pick. Implied by --position-arena.",
     )
     fuzz_parser.add_argument(
+        "--pos-kl-ducb",
+        action="store_true",
+        help="Enable the position-arena KL-D-UCB scheduler: the position-selection "
+        "counterpart of --kl-ducb, a discounted KL-UCB bandit treating a seed's offset "
+        "bins as arms. A theoretically-grounded rival to --burn-front's heuristic for "
+        "the same role. Implied by --position-arena, which always fields it as an arm.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
-        "crash-MI, region, burn-front, canary, round-robin, fibonacci) with uniform as the "
-        "baseline arm, under pos_ keys. Needs --elo; a proposer rated at or below "
-        "uniform (or, once running, the pos-canary floor) is logged. Implies "
-        "--burn-front, --pos-canary, --pos-round-robin and --pos-fibonacci. "
-        "Enabled by --hail-mary.",
+        "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci) with "
+        "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
+        "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
+        "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin and "
+        "--pos-fibonacci. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",
