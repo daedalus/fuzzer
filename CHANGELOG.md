@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Position-arena `lineage` arm** (`--pos-lineage`, implied by `--position-arena` and
+  `--hail-mary`): proposes offsets near the mutation sites that produced a seed
+  (`seed_meta[...]["parent_sites"]`, delocalised operators' sites dropped when `parent_ops` is
+  aligned) with two-sided geometric jitter (mean 8 bytes), reflected at the buffer edges, as a
+  cold-start prior for the seed's descendants. Passive, no persisted state; joins the pool only
+  while `--lineage` is on, the only mode that records the sites. Unmeasured (arena-only).
+
 - **Position-arena `cmplog` arm** (`--pos-cmplog`, implied by `--position-arena` and
   `--hail-mary`): proposes redqueen offsets and Weizz-flagged spans (length, magic, checksum,
   input-to-state) as landing sites for every operator. Passive, no persisted state; joins the

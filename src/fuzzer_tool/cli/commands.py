@@ -613,6 +613,7 @@ def cmd_fuzz(args):
         pos_kl_ducb=getattr(args, "pos_kl_ducb", False),
         pos_fractal=getattr(args, "pos_fractal", False),
         pos_cmplog=getattr(args, "pos_cmplog", False),
+        pos_lineage=getattr(args, "pos_lineage", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -2060,6 +2061,7 @@ _HAIL_MARY_FLAGS = (
     "pos_kl_ducb",
     "pos_fractal",
     "pos_cmplog",
+    "pos_lineage",
     "position_arena",
 )
 
@@ -2605,6 +2607,15 @@ def main() -> int:
         "--position-arena.",
     )
     fuzz_parser.add_argument(
+        "--pos-lineage",
+        action="store_true",
+        help="Enable the position-arena lineage scheduler: proposes offsets near the "
+        "mutation sites that produced the seed (parent_sites, with geometric jitter), "
+        "a cold-start prior for the seed's own descendants. Passive (learns nothing) "
+        "and only joins the arena pool while --lineage is on. Implied by "
+        "--position-arena.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
@@ -2612,7 +2623,8 @@ def main() -> int:
         "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
-        "--pos-fibonacci, --pos-fractal and --pos-cmplog. Enabled by --hail-mary.",
+        "--pos-fibonacci, --pos-fractal, --pos-cmplog and --pos-lineage. Enabled by "
+        "--hail-mary.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

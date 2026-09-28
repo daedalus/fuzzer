@@ -39,6 +39,12 @@ Arms::
                  arm: joins the pool only while cmplog is live, never an
                  off-policy extra (opt-in, --pos-cmplog; see
                  core/schedulers/pos_cmplog.py)
+    lineage      PositionLineageScheduler, the mutation sites recorded in
+                 ``parent_sites`` seed metadata (+ geometric jitter).
+                 Tracker-style arm: joins the pool only while ``--lineage``
+                 is on (no other run records the sites), never an
+                 off-policy extra (opt-in, --pos-lineage; see
+                 core/schedulers/pos_lineage.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
 matches. An arm that declines gets a uniform offset but is *charged under
@@ -88,6 +94,7 @@ POSITION_STRATEGY_NAMES = (
     "fibonacci",
     "fractal",
     "cmplog",
+    "lineage",
 )
 
 Gate = Callable[[], bool]
@@ -106,6 +113,7 @@ class PositionArena:
         fibonacci: PositionScheduler | None = None,
         fractal: PositionScheduler | None = None,
         cmplog: PositionScheduler | None = None,
+        lineage: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         self._uniform = UniformPosition(f._rng)
@@ -116,6 +124,7 @@ class PositionArena:
         self._fibonacci = fibonacci
         self._fractal = fractal
         self._cmplog = cmplog
+        self._lineage = lineage
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
         for extra in (burn_front, kl_ducb, canary, round_robin, fibonacci, fractal):
@@ -138,6 +147,10 @@ class PositionArena:
             # Passive arm: only meaningful while cmplog is collecting.
             return getattr(f, "_cmplog", None) is not None
 
+        def lineage_ready() -> bool:
+            # Passive arm: parent_sites exist only when lineage tracking is on.
+            return bool(getattr(f, "_use_lineage", False))
+
         def field_ready() -> bool:
             fl = getattr(f, "_format_learner", None)
             return bool(fl and fl.clusters)
@@ -159,6 +172,8 @@ class PositionArena:
         ]  # fmt: skip
         if self._cmplog is not None:
             specs.append(("cmplog", self._cmplog.propose, cmplog_ready))
+        if self._lineage is not None:
+            specs.append(("lineage", self._lineage.propose, lineage_ready))
         for name, fn, gate in specs:
             self._arms[name] = (CallablePosition(name, fn), gate)
 

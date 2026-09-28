@@ -702,6 +702,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("fractal")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
+    if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
+        names.append("lineage")
     if _pos_canary_live(f):
         names.append("canary")
     if getattr(f, "_pos_round_robin", None) is not None:
@@ -1448,6 +1450,11 @@ class Fuzzer:
         # core/schedulers/pos_cmplog.py). Joins the pool only while cmplog is
         # live; the arena fields it whenever it is on.
         pos_cmplog=False,
+        # Position arena's lineage proposer: the mutation sites that produced
+        # a seed (``parent_sites``), with geometric jitter (see
+        # core/schedulers/pos_lineage.py). Joins the pool only while lineage
+        # tracking is on; the arena fields it whenever it is on.
+        pos_lineage=False,
         # Appended: positional signature (see region_profile above).
         target_schedule=TargetSchedule.WEIGHTED,
     ):
@@ -2633,6 +2640,24 @@ class Fuzzer:
             log.info("Position cmplog scheduling enabled")
             if pos_cmplog and not cmplog:
                 log.warning("--pos-cmplog needs cmplog, which is off: the arm stays out of the pool")
+        # Position-arena lineage: the mutation sites that produced a seed, as
+        # its own landing prior (see core/schedulers/pos_lineage.py).
+        # Tracker-style: the arena gates it on --lineage, the only mode that
+        # records ``parent_sites``.
+        self._pos_lineage = None
+        if pos_lineage or position_arena:
+            from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
+
+            self._pos_lineage = PositionLineageScheduler(
+                self._rng,
+                meta_of=lambda d: self.seed_meta.get(d),
+                delocalised=_DELOCALISED_OPS,
+            )
+            log.info("Position lineage scheduling enabled")
+            if pos_lineage and not lineage:
+                log.warning(
+                    "--pos-lineage needs --lineage, which is off: the arm stays out of the pool"
+                )
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
@@ -2651,6 +2676,7 @@ class Fuzzer:
                 fibonacci=self._pos_fibonacci,
                 fractal=self._pos_fractal,
                 cmplog=self._pos_cmplog,
+                lineage=self._pos_lineage,
             )
             log.info("Position arena enabled (Elo over pos_ strategies)")
         self._use_ecofuzz = ecofuzz

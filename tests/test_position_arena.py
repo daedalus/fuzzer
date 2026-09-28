@@ -37,6 +37,7 @@ from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_cmplog import PositionCmplogScheduler
 from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
+from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, PositionArena
@@ -538,6 +539,7 @@ class _Fuzzer:
             else None
         )
         self._cmplog = object() if enabled.get("cmplog", False) else None
+        self._use_lineage = enabled.get("lineage", False)
         self.phase_calls = []
 
     def _get_te_weighted_position(self, _n):
@@ -557,6 +559,7 @@ def _arena(
     fibonacci=None,
     fractal=None,
     cmplog=None,
+    lineage=None,
     region=lambda d, n: 55,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
@@ -570,6 +573,7 @@ def _arena(
         fibonacci=fibonacci,
         fractal=fractal,
         cmplog=cmplog,
+        lineage=lineage,
     )
 
 
@@ -689,6 +693,52 @@ class TestPool:
         arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
         assert seen == []
 
+    def _lineage_arm(self, meta, rng=None):
+        f = _Fuzzer(lineage=True)
+        f.seed_meta = {SEED: meta}
+        sched = PositionLineageScheduler(
+            rng or RandPool(seed=1), meta_of=f.seed_meta.get, delocalised=()
+        )
+        return f, sched
+
+    def test_lineage_joins_only_while_lineage_is_on(self):
+        f, sched = self._lineage_arm({"parent_sites": [40]})
+        _, arena = _arena(f, lineage=sched)
+        assert "lineage" in arena.pool()
+        f._use_lineage = False  # no --lineage: nothing records parent_sites
+        assert "lineage" not in arena.pool()
+
+    def test_lineage_absent_when_not_supplied(self):
+        _, arena = _arena(_Fuzzer(lineage=True))
+        assert "lineage" not in arena.pool()
+
+    def test_lineage_serves_a_parent_site(self):
+        class _NoEscapeNoJitter:  # never the escape, jitter magnitude 0
+            random = staticmethod(lambda: 0.99)
+            randint = staticmethod(lambda a, b: a)
+
+        f, sched = self._lineage_arm({"parent_sites": [40]}, rng=_NoEscapeNoJitter())
+        _, arena = _arena(f, lineage=sched)
+        _force(f, "lineage")
+        assert arena.select(SEED, len(SEED)) == 40
+        assert arena.used() == ["lineage"]
+
+    def test_lineage_declines_to_uniform_but_stays_charged(self):
+        f, sched = self._lineage_arm({})  # initial-corpus seed: no parent_sites
+        _, arena = _arena(f, lineage=sched)
+        _force(f, "lineage")
+        assert 0 <= arena.select(SEED, len(SEED)) < len(SEED)
+        assert arena.used() == ["lineage"]
+
+    def test_lineage_is_not_an_off_policy_extra(self):
+        # Passive tracker-style arm: settle() must not feed it.
+        f, sched = self._lineage_arm({"parent_sites": [40]})
+        seen = []
+        sched.record = lambda *a, **k: seen.append(a)
+        _, arena = _arena(f, lineage=sched)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert seen == []
+
     def test_kl_ducb_joins_when_supplied(self):
         _, arena = _arena(kl_ducb=PositionKLDUCBScheduler(RandPool(seed=1)))
         assert "kl_ducb" in arena.pool()
@@ -720,7 +770,9 @@ class TestPool:
         assert "field" not in arena.pool()
 
     def test_every_pool_name_is_registered(self):
-        f = _Fuzzer(sensitivity=True, te=True, mi=True, region=True, field=True, cmplog=True)
+        f = _Fuzzer(
+            sensitivity=True, te=True, mi=True, region=True, field=True, cmplog=True, lineage=True
+        )
         f._crash_mi = SimpleNamespace(
             total_execs=9, min_observations=1, weighted_position=lambda n: 1
         )
@@ -735,6 +787,7 @@ class TestPool:
             cmplog=PositionCmplogScheduler(
                 RandPool(seed=1), meta_of=lambda d: None, smap_of=lambda d: None
             ),
+            lineage=PositionLineageScheduler(RandPool(seed=1), meta_of=lambda d: None),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -1038,7 +1091,7 @@ class TestFuzzerWiring:
         # Contiguous block; later params (e.g. target_schedule) may follow.
         names = list(params)
         start = names.index("burn_front")
-        assert names[start : start + 8] == [
+        assert names[start : start + 9] == [
             "burn_front",
             "position_arena",
             "pos_canary",
@@ -1047,6 +1100,7 @@ class TestFuzzerWiring:
             "pos_kl_ducb",
             "pos_fractal",
             "pos_cmplog",
+            "pos_lineage",
         ]
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
@@ -1056,6 +1110,7 @@ class TestFuzzerWiring:
         assert params["pos_kl_ducb"].default is False
         assert params["pos_fractal"].default is False
         assert params["pos_cmplog"].default is False
+        assert params["pos_lineage"].default is False
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
@@ -1080,6 +1135,7 @@ class TestFuzzerWiring:
             "pos_kl_ducb",
             "pos_fractal",
             "pos_cmplog",
+            "pos_lineage",
         }
         for c in calls:
             kw = {k.arg for k in c.keywords}
@@ -1184,6 +1240,43 @@ class TestRealConstruction:
         f._cmplog = None
         assert "cmplog" not in f._position_arena.pool()
 
+    def test_position_arena_implies_lineage_scheduler(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_lineage, PositionLineageScheduler)
+        # Pooled exactly when lineage tracking is on (it is off here).
+        assert "lineage" not in f._position_arena.pool()
+        (tmp_path / "l").mkdir()
+        f = self._build(tmp_path / "l", elo="all", position_arena=True, lineage=True)
+        assert "lineage" in f._position_arena.pool()
+
+    def test_lineage_arm_end_to_end_on_a_real_fuzzer(self, tmp_path):
+        # Real Fuzzer, real _DELOCALISED_OPS injection: the arm lands near a
+        # recorded site and ignores a delocalised operator's site.
+        f = self._build(tmp_path, elo="all", position_arena=True, lineage=True)
+        seed = bytes(range(256)) * 2
+        f.seed_meta[seed] = {
+            "parent_ops": ["byte_shuffle", "bitflip"],
+            "parent_sites": [30, 400],
+            "lineage_depth": 2,
+        }
+        assert "lineage" in f._position_arena.pool()
+        assert "lineage" in __import__(
+            "fuzzer_tool.services.fuzzer", fromlist=["x"]
+        )._active_position_schedulers(f)
+        _force(f, "lineage")
+        hits = [f._position_arena.select(seed, len(seed)) for _ in range(400)]
+        near = sum(abs(h - 400) <= 40 for h in hits)
+        # ~80% served near site 400 (20% uniform escape, jitter mean 8 bytes);
+        # uniform alone gives ~16%. Site 30 is byte_shuffle's, so excluded.
+        assert near > 250
+        f._use_lineage = False
+        assert "lineage" not in f._position_arena.pool()
+
+    def test_pos_lineage_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_lineage=True)
+        assert isinstance(f._pos_lineage, PositionLineageScheduler)
+        assert f._position_arena is None
+
     def test_pos_cmplog_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, pos_cmplog=True)
         assert isinstance(f._pos_cmplog, PositionCmplogScheduler)
@@ -1237,6 +1330,8 @@ class TestRealConstruction:
         assert args.pos_kl_ducb is True
         assert args.pos_fractal is True
         assert args.pos_cmplog is True
+        assert args.pos_lineage is True
+        assert args.lineage is True  # the lineage arm needs the metadata it records
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 
     def test_position_arena_without_elo_warns_and_constructs(self, tmp_path, caplog):
