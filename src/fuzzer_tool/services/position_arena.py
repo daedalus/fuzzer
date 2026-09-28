@@ -45,6 +45,10 @@ Arms::
                  is on (no other run records the sites), never an
                  off-policy extra (opt-in, --pos-lineage; see
                  core/schedulers/pos_lineage.py)
+    context      PositionContextScheduler, cross-seed byte-context rates
+                 (class, previous class, position decile) -- warm on a
+                 brand-new seed of a familiar format (opt-in,
+                 --pos-context; see core/schedulers/pos_context.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
 matches. An arm that declines gets a uniform offset but is *charged under
@@ -61,7 +65,7 @@ served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
 ``burn_front``, ``kl_ducb``, ``canary``, ``round_robin``, ``fibonacci`` and
-``fractal`` are each credited off-policy on every settled round, whoever served the
+``fractal`` and ``context`` are each credited off-policy on every settled round, whoever served the
 positions, like ``seed_canary`` on the seed side.
 """
 
@@ -95,6 +99,7 @@ POSITION_STRATEGY_NAMES = (
     "fractal",
     "cmplog",
     "lineage",
+    "context",
 )
 
 Gate = Callable[[], bool]
@@ -114,6 +119,7 @@ class PositionArena:
         fractal: PositionScheduler | None = None,
         cmplog: PositionScheduler | None = None,
         lineage: PositionScheduler | None = None,
+        context: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         self._uniform = UniformPosition(f._rng)
@@ -125,9 +131,10 @@ class PositionArena:
         self._fractal = fractal
         self._cmplog = cmplog
         self._lineage = lineage
+        self._context = context
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
-        for extra in (burn_front, kl_ducb, canary, round_robin, fibonacci, fractal):
+        for extra in (burn_front, kl_ducb, canary, round_robin, fibonacci, fractal, context):
             if extra is not None:
                 self._arms[extra.name] = (extra, lambda: True)
         self._used: list[str] = []
@@ -236,6 +243,7 @@ class PositionArena:
             self._round_robin,
             self._fibonacci,
             self._fractal,
+            self._context,
         )
         for extra in extras:
             if extra is not None:

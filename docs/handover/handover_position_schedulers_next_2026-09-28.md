@@ -4,8 +4,8 @@ Base: `daedalus/fuzzer` HEAD `c48d5a1d` (PositionFractalScheduler, on top of
 `99800db4` kl_ducb, `92cb37eb` ffmpeg multi-version vendoring).
 
 **Update:** arms 2 (`lineage`, section 5.2) and 3 (`cmplog`, section 5.3) are now implemented
-(`pos_lineage.py`, `pos_cmplog.py`); `fractal` and `kl_ducb` landed earlier. Still unbuilt: 0
-(benchmark prerequisite), 4 `boundary`, 5 `levy`, 1 `context`. `lineage` deviates from 5.2 in one
+(`pos_lineage.py`, `pos_cmplog.py`); `fractal` and `kl_ducb` landed earlier. Arm 1 (`context`, section 5.1) is implemented (`pos_context.py`, `_bytecls.py`, off-policy extra as specified). Still unbuilt: 0
+(benchmark prerequisite), 4 `boundary`, 5 `levy`. `_bytecls.py` now exists for `boundary` to reuse. `lineage` deviates from 5.2 in one
 place: it is wired tracker-style (gate = `--lineage` on) instead of as an off-policy extra,
 because `parent_sites` is recorded only under `--lineage`; without it the arm would be a pure
 decliner and get flagged by the uniform-floor inspection. `record()` stays a no-op, so the

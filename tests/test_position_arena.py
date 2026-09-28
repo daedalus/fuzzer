@@ -33,8 +33,9 @@ from fuzzer_tool.core.schedulers.pos_burn_front import (
     BurnFrontPositionScheduler,
 )
 from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
-from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_cmplog import PositionCmplogScheduler
+from fuzzer_tool.core.schedulers.pos_context import PositionContextScheduler
+from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
@@ -560,6 +561,7 @@ def _arena(
     fractal=None,
     cmplog=None,
     lineage=None,
+    context=None,
     region=lambda d, n: 55,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
@@ -574,6 +576,7 @@ def _arena(
         fractal=fractal,
         cmplog=cmplog,
         lineage=lineage,
+        context=context,
     )
 
 
@@ -636,6 +639,14 @@ class TestPool:
     def test_burn_front_joins_when_supplied(self):
         _, arena = _arena(burn_front=_bf())
         assert "burn_front" in arena.pool()
+
+    def test_context_joins_when_supplied(self):
+        _, arena = _arena(context=PositionContextScheduler(RandPool(seed=1)))
+        assert "context" in arena.pool()
+
+    def test_context_absent_when_not_supplied(self):
+        _, arena = _arena()
+        assert "context" not in arena.pool()
 
     def test_fractal_joins_when_supplied(self):
         _, arena = _arena(fractal=PositionFractalScheduler(RandPool(seed=1)))
@@ -788,6 +799,7 @@ class TestPool:
                 RandPool(seed=1), meta_of=lambda d: None, smap_of=lambda d: None
             ),
             lineage=PositionLineageScheduler(RandPool(seed=1), meta_of=lambda d: None),
+            context=PositionContextScheduler(RandPool(seed=1)),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -946,6 +958,21 @@ class TestSettle:
         assert bf.hot_bins(SEED)
         assert f._elo._strategy_match_count == {}
 
+    def test_context_is_credited_off_policy(self):
+        # The picker was sensitivity, not context; its table still learns.
+        ctx = PositionContextScheduler(RandPool(seed=1))
+        f, arena = self._played(context=ctx)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert ctx.obs == 1
+        assert ctx.context_counts(SEED, 100) == (1.0, 0.0)
+
+    def test_context_miss_is_credited_as_a_fail(self):
+        # FALSIFICATION: MISS rounds must reach the table as failures.
+        ctx = PositionContextScheduler(RandPool(seed=1))
+        f, arena = self._played(context=ctx)
+        arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        assert ctx.context_counts(SEED, 100) == (0.0, 1.0)
+
     def test_fractal_is_credited_off_policy(self):
         # The picker was sensitivity, not fractal; its tree still heats.
         frac = PositionFractalScheduler(RandPool(seed=1))
@@ -1091,7 +1118,7 @@ class TestFuzzerWiring:
         # Contiguous block; later params (e.g. target_schedule) may follow.
         names = list(params)
         start = names.index("burn_front")
-        assert names[start : start + 9] == [
+        assert names[start : start + 10] == [
             "burn_front",
             "position_arena",
             "pos_canary",
@@ -1101,6 +1128,7 @@ class TestFuzzerWiring:
             "pos_fractal",
             "pos_cmplog",
             "pos_lineage",
+            "pos_context",
         ]
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
@@ -1111,6 +1139,7 @@ class TestFuzzerWiring:
         assert params["pos_fractal"].default is False
         assert params["pos_cmplog"].default is False
         assert params["pos_lineage"].default is False
+        assert params["pos_context"].default is False
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
@@ -1136,6 +1165,7 @@ class TestFuzzerWiring:
             "pos_fractal",
             "pos_cmplog",
             "pos_lineage",
+            "pos_context",
         }
         for c in calls:
             kw = {k.arg for k in c.keywords}
@@ -1206,6 +1236,29 @@ class TestRealConstruction:
         f = self._build(tmp_path, elo="all", position_arena=True)
         assert isinstance(f._pos_fractal, PositionFractalScheduler)
         assert "fractal" in f._position_arena.pool()
+
+    def test_position_arena_implies_context(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_context, PositionContextScheduler)
+        assert "context" in f._position_arena.pool()
+
+    def test_pos_context_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_context=True)
+        assert isinstance(f._pos_context, PositionContextScheduler)
+        assert f._position_arena is None
+
+    def test_context_state_survives_save_and_load(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        for _ in range(3):
+            f._pos_context.record(SEED, [100], Outcome.GAIN)
+        f._save_learned()
+        (tmp_path / "g").mkdir()
+        g = self._build(tmp_path / "g", elo="all", position_arena=True)
+        g._state_store = f._state_store
+        g.resume = True  # _load_learned is a no-op on a fresh run
+        g._load_learned()
+        assert f._pos_context.obs == 3
+        assert g._pos_context.to_dict() == f._pos_context.to_dict()
 
     def test_position_arena_implies_cmplog_scheduler(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True)
@@ -1331,6 +1384,7 @@ class TestRealConstruction:
         assert args.pos_fractal is True
         assert args.pos_cmplog is True
         assert args.pos_lineage is True
+        assert args.pos_context is True
         assert args.lineage is True  # the lineage arm needs the metadata it records
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 

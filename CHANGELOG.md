@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Position-arena `context` arm** (`--pos-context`, implied by `--position-arena` and
+  `--hail-mary`): learns which byte contexts (byte class, previous class, position decile; 560
+  cells) precede coverage gains, pooled across all seeds so a new seed starts warm. Draws 16
+  uniform offsets and picks one by clamped rate ratio (`[0.25, 4]`); declines below 200 credited
+  offsets. Off-policy credited every round, persisted for `--resume`. Shares `_bytecls.py` with the
+  future `boundary` arm. Unmeasured (arena-only).
+
 - **Position-arena `lineage` arm** (`--pos-lineage`, implied by `--position-arena` and
   `--hail-mary`): proposes offsets near the mutation sites that produced a seed
   (`seed_meta[...]["parent_sites"]`, delocalised operators' sites dropped when `parent_ops` is

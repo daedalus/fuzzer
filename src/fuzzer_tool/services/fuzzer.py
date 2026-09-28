@@ -700,6 +700,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("kl-ducb")
     if getattr(f, "_pos_fractal", None) is not None:
         names.append("fractal")
+    if getattr(f, "_pos_context", None) is not None:
+        names.append("context")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
     if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
@@ -1455,6 +1457,10 @@ class Fuzzer:
         # core/schedulers/pos_lineage.py). Joins the pool only while lineage
         # tracking is on; the arena fields it whenever it is on.
         pos_lineage=False,
+        # Position arena's byte-context proposer: cross-seed rates over
+        # (byte class, previous class, decile) (see
+        # core/schedulers/pos_context.py). The arena always fields it too.
+        pos_context=False,
         # Appended: positional signature (see region_profile above).
         target_schedule=TargetSchedule.WEIGHTED,
     ):
@@ -2658,6 +2664,14 @@ class Fuzzer:
                 log.warning(
                     "--pos-lineage needs --lineage, which is off: the arm stays out of the pool"
                 )
+        # Position-arena context: byte-context rates pooled across seeds
+        # (see core/schedulers/pos_context.py). Off-policy extra, persisted.
+        self._pos_context = None
+        if pos_context or position_arena:
+            from fuzzer_tool.core.schedulers.pos_context import PositionContextScheduler
+
+            self._pos_context = PositionContextScheduler(self._rng)
+            log.info("Position context scheduling enabled")
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
@@ -2675,6 +2689,7 @@ class Fuzzer:
                 round_robin=self._pos_round_robin,
                 fibonacci=self._pos_fibonacci,
                 fractal=self._pos_fractal,
+                context=self._pos_context,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
             )
@@ -4158,6 +4173,8 @@ class Fuzzer:
             self._state_store.set("burn_front", self._burn_front.to_dict())
         if getattr(self, "_pos_fractal", None) is not None:
             self._state_store.set("pos_fractal", self._pos_fractal.to_dict())
+        if getattr(self, "_pos_context", None) is not None:
+            self._state_store.set("pos_context", self._pos_context.to_dict())
         pll = getattr(self, "_pll", None)
         if pll is not None:
             self._state_store.set("pll", pll.save())
@@ -4187,6 +4204,8 @@ class Fuzzer:
             self._burn_front.from_dict(self._state_store.get("burn_front", {}))
         if getattr(self, "_pos_fractal", None) is not None:
             self._pos_fractal.from_dict(self._state_store.get("pos_fractal", {}))
+        if getattr(self, "_pos_context", None) is not None:
+            self._pos_context.from_dict(self._state_store.get("pos_context", {}))
         if self._wfc_enabled:
             WFC_MUTATOR.store.from_dict(self._state_store.get("wfc_tables", {}))
         if self._dict_picker is not None:

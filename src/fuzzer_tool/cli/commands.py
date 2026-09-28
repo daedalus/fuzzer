@@ -614,6 +614,7 @@ def cmd_fuzz(args):
         pos_fractal=getattr(args, "pos_fractal", False),
         pos_cmplog=getattr(args, "pos_cmplog", False),
         pos_lineage=getattr(args, "pos_lineage", False),
+        pos_context=getattr(args, "pos_context", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -2062,6 +2063,7 @@ _HAIL_MARY_FLAGS = (
     "pos_fractal",
     "pos_cmplog",
     "pos_lineage",
+    "pos_context",
     "position_arena",
 )
 
@@ -2616,15 +2618,23 @@ def main() -> int:
         "--position-arena.",
     )
     fuzz_parser.add_argument(
+        "--pos-context",
+        action="store_true",
+        help="Enable the position-arena context scheduler: learns which byte contexts "
+        "(byte class, previous class, position decile) precede coverage gains, pooled "
+        "across all seeds so a new seed starts warm. Implied by --position-arena, which "
+        "always fields it as an arm.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
-        "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal) with "
+        "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context) with "
         "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
-        "--pos-fibonacci, --pos-fractal, --pos-cmplog and --pos-lineage. Enabled by "
-        "--hail-mary.",
+        "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage and --pos-context. "
+        "Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",
