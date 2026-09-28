@@ -103,5 +103,15 @@ spectral rows across calls, larger ridge, richer features.
 - Bach's spectral estimator (feature-based, closed form): with one-hot features it reduces exactly
   to plug-in KL; with nibble features it cut the bias 2-8x but left ranking length-dependent.
   Untested idea: shared operator features in `op_tpe` if its per-operator counts are too sparse.
-- The sibling seed arms (`seed_entropy_zscore`, `seed_entropy_loo`) were not audited for the same
-  bias.
+- Sibling arms **audited, not fixed** (6 runs, 400 seeds each, all drawn from one distribution,
+  lengths 16-4096, so no seed is truly more interesting than another):
+  - `seed_entropy_zscore`: Spearman(score, length) +0.10; seeds <= 64 B get 0.62x their uniform
+    weight share (range 0.58-0.70). Plug-in entropy reads low on short samples, so they sit
+    farther from the corpus mean and lose gaussian weight. Mild, opposite sign to `entropy_kl`.
+  - `seed_entropy_loo`: Spearman +0.03, but weights are `max(delta, 0)` and 49 % of seeds have
+    delta > 0; seeds <= 64 B get 0.26x their share (0.17-0.35). Removing a short seed barely moves
+    the pool's entropy, so delta scales with size. Partly the intended "pool leans on this seed"
+    signal, but here it is size, not content.
+  - `seed_entropy_deviation`: Spearman -0.10, short-seed share 1.04x. No action.
+  Whether zscore/loo need a fix depends on whether that size preference is wanted; the Elo
+  arbitration between arms bounds the damage either way. Synthetic seeds only.
