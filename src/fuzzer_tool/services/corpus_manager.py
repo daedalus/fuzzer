@@ -1755,10 +1755,10 @@ class CorpusManager:
                 mandatory.add(id(seed))
                 if f.corpus_dir:
                     self._promote_seed(seed)
-                # Remove recovered seed from cuckoo filter if present
+                # Mark seed as recovered so mutations are not skipped from it
                 if f.cuckoo_seed_filter is not None:
                     h = self.seed_key(seed)
-                    f.cuckoo_seed_filter.remove(h)
+                    f._cuckoo_recovered.add(h)
                 recovered_count += 1
         if recovered_count:
             log.warning(
@@ -1780,8 +1780,10 @@ class CorpusManager:
         if f.cuckoo_seed_filter is not None:
             for seed in f.corpus:
                 if seed not in unique:
-                    h = _hash(seed)
+                    h = self.seed_key(seed)
                     f.cuckoo_seed_filter.add(h)
+                    # Discard recovered exemption so re-pruned seeds are filtered again
+                    f._cuckoo_recovered.discard(h)
 
         f.corpus = unique
         self.rebuild_entropy()

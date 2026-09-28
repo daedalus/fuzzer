@@ -1352,12 +1352,6 @@ class Fuzzer:
         # reset_on_full) contract that _dedup_mutate drives, so the
         # branch lives in one place: here, at construction.
         exec_dedup_backend="bloom",
-        # Cuckoo filter for pruned seed dedup. When enabled, seeds under
-        # corpus/seeds/pruned/ are loaded at startup and their hashes added
-        # to the filter. When a seed is pruned during minimization, its hash
-        # is added. In _dedup_mutate(), if a mutation's hash is in the
-        # filter, the mutation is skipped (original data returned).
-        cuckoo_seed_filter=False,
         fluctuation=False,
         fluctuation_beta=1.0,
         fluctuation_window=1000,
@@ -1475,6 +1469,9 @@ class Fuzzer:
         pos_levy=False,
         # Appended: positional signature (see region_profile above).
         target_schedule=TargetSchedule.WEIGHTED,
+        # Cuckoo filter for pruned seed dedup (gated by --cuckoo-seed-filter).
+        # Appended at end so positional callers are not shifted.
+        cuckoo_seed_filter=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2034,12 +2031,10 @@ class Fuzzer:
         # CuckooFilter tracks all pruned seeds so their mutations
         # are skipped in _dedup_mutate(). None when disabled.
         self.cuckoo_seed_filter: CuckooFilter | None = None
+        self._cuckoo_recovered: set[str] = set()
         if cuckoo_seed_filter:
             from fuzzer_tool.core.cuckoo import CuckooFilter
 
-            # Sized at 10x the corpus; minimum 100_000 to match
-            # the exec bloom default.
-            self.cuckoo_seed_filter = CuckooFilter(capacity=max(10 * len(self.corpus), 100_000))
         self._dedup_hits = 0
         self._dedup_gaveup = 0
         # Performance novelty (per-edge max hit count). Separate from the
@@ -2356,7 +2351,25 @@ class Fuzzer:
         loaded = self.corpus
 
         # Load pruned seeds into cuckoo filter if enabled
-        if self.cuckoo_seed_filter is not None and self.corpus_dir is not None:
+        # Sized at 10x the corpus + persisted pruned entries; minimum 100_000.
+        if self.cuckoo_seed_filter is None and cuckoo_seed_filter and self.corpus_dir is not None:
+            from fuzzer_tool.core.cuckoo import CuckooFilter
+
+            # Count persisted pruned entries for sizing.
+            pruned_dir = self.corpus_dir / "seeds" / "pruned"
+            pruned_count = 0
+            if pruned_dir.exists():
+                pruned_count = sum(
+                    1 for fh in pruned_dir.rglob("id_*") if fh.is_file() and not fh.is_symlink()
+                )
+            # Also count pruned delta records.
+            deltas_pruned_dir = self.corpus_dir / "deltas" / "pruned"
+            if deltas_pruned_dir.exists():
+                pruned_count += sum(
+                    1 for fh in deltas_pruned_dir.rglob("delta_*.json") if fh.is_file() and not fh.is_symlink()
+                )
+            capacity = max(10 * len(self.corpus) + pruned_count, 100_000)
+            self.cuckoo_seed_filter = CuckooFilter(capacity=capacity)
             self._load_pruned_seeds_into_cuckoo()
 
         self._apply_seed_transforms()
@@ -4151,7 +4164,14 @@ class Fuzzer:
             return
         count = 0
         for fh in pruned_dir.rglob("id_*"):
-            if not fh.is_file():
+            # Reject symlinks and paths escaping the pruned root.
+            if not fh.is_file() or fh.is_symlink():
+                continue
+            # Use path components instead of string prefix to avoid sibling-prefix attacks.
+            try:
+                if not fh.is_relative_to(pruned_dir.resolve()):
+                    continue
+            except ValueError:
                 continue
             try:
                 data = fh.read_bytes()
@@ -4545,10 +4565,11 @@ class Fuzzer:
         re-discovering it is pure waste.
         """
         # Pruned-seed filter check: if the parent seed was previously
-        # pruned, skip the mutation entirely and return the original data.
+        # pruned and not recovered, skip the mutation entirely and return
+        # the original data.
         if self.cuckoo_seed_filter is not None:
             h = self._seed_key(data)
-            if self.cuckoo_seed_filter.contains(h):
+            if self.cuckoo_seed_filter.contains(h) and h not in self._cuckoo_recovered:
                 self._dedup_hits += 1
                 return data
         mutated = self.mutate(data)
