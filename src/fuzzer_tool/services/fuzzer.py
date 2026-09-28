@@ -702,6 +702,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("fractal")
     if getattr(f, "_pos_context", None) is not None:
         names.append("context")
+    if getattr(f, "_pos_levy", None) is not None:
+        names.append("levy")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
     if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
@@ -1461,6 +1463,10 @@ class Fuzzer:
         # (byte class, previous class, decile) (see
         # core/schedulers/pos_context.py). The arena always fields it too.
         pos_context=False,
+        # Position arena's heavy-tailed proposer: a Levy-flight jump around
+        # the seed's last gain offset (see core/schedulers/pos_levy.py). The
+        # arena always fields it too.
+        pos_levy=False,
         # Appended: positional signature (see region_profile above).
         target_schedule=TargetSchedule.WEIGHTED,
     ):
@@ -2672,6 +2678,15 @@ class Fuzzer:
 
             self._pos_context = PositionContextScheduler(self._rng)
             log.info("Position context scheduling enabled")
+        # Position-arena Levy flight: one anchor per seed (its last gain),
+        # heavy-tailed jumps around it (see core/schedulers/pos_levy.py).
+        # Off-policy extra, persisted.
+        self._pos_levy = None
+        if pos_levy or position_arena:
+            from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
+
+            self._pos_levy = PositionLevyScheduler(self._rng)
+            log.info("Position levy scheduling enabled")
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
@@ -2690,6 +2705,7 @@ class Fuzzer:
                 fibonacci=self._pos_fibonacci,
                 fractal=self._pos_fractal,
                 context=self._pos_context,
+                levy=self._pos_levy,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
             )
@@ -4175,6 +4191,8 @@ class Fuzzer:
             self._state_store.set("pos_fractal", self._pos_fractal.to_dict())
         if getattr(self, "_pos_context", None) is not None:
             self._state_store.set("pos_context", self._pos_context.to_dict())
+        if getattr(self, "_pos_levy", None) is not None:
+            self._state_store.set("pos_levy", self._pos_levy.to_dict())
         pll = getattr(self, "_pll", None)
         if pll is not None:
             self._state_store.set("pll", pll.save())
@@ -4206,6 +4224,8 @@ class Fuzzer:
             self._pos_fractal.from_dict(self._state_store.get("pos_fractal", {}))
         if getattr(self, "_pos_context", None) is not None:
             self._pos_context.from_dict(self._state_store.get("pos_context", {}))
+        if getattr(self, "_pos_levy", None) is not None:
+            self._pos_levy.from_dict(self._state_store.get("pos_levy", {}))
         if self._wfc_enabled:
             WFC_MUTATOR.store.from_dict(self._state_store.get("wfc_tables", {}))
         if self._dict_picker is not None:

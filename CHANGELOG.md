@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Position-arena `levy` arm** (`--pos-levy`, implied by `--position-arena` and `--hail-mary`):
+  keeps one anchor per seed (the offset of its last gain) and proposes the anchor plus a
+  heavy-tailed Lomax step (`floor(1/u - 1)`, so half the draws hit the anchor byte, one in six a
+  byte away, `P(step >= k) = 1/(k+1)`), reflected at the buffer edges; 5% uniform sparks. A run of
+  32 consecutive misses on the seed drops the anchor and the arm declines until the next gain.
+  Off-policy credited every round, LRU-bounded (256 seeds), persisted for `--resume`. Unmeasured
+  (arena-only).
+
 - **Position-arena `context` arm** (`--pos-context`, implied by `--position-arena` and
   `--hail-mary`): learns which byte contexts (byte class, previous class, position decile; 560
   cells) precede coverage gains, pooled across all seeds so a new seed starts warm. Draws 16

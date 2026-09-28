@@ -38,6 +38,7 @@ from fuzzer_tool.core.schedulers.pos_context import PositionContextScheduler
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
+from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.services.operators import OperatorEngine
@@ -562,6 +563,7 @@ def _arena(
     cmplog=None,
     lineage=None,
     context=None,
+    levy=None,
     region=lambda d, n: 55,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
@@ -577,6 +579,7 @@ def _arena(
         cmplog=cmplog,
         lineage=lineage,
         context=context,
+        levy=levy,
     )
 
 
@@ -647,6 +650,14 @@ class TestPool:
     def test_context_absent_when_not_supplied(self):
         _, arena = _arena()
         assert "context" not in arena.pool()
+
+    def test_levy_joins_when_supplied(self):
+        _, arena = _arena(levy=PositionLevyScheduler(RandPool(seed=1)))
+        assert "levy" in arena.pool()
+
+    def test_levy_absent_when_not_supplied(self):
+        _, arena = _arena()
+        assert "levy" not in arena.pool()
 
     def test_fractal_joins_when_supplied(self):
         _, arena = _arena(fractal=PositionFractalScheduler(RandPool(seed=1)))
@@ -800,6 +811,7 @@ class TestPool:
             ),
             lineage=PositionLineageScheduler(RandPool(seed=1), meta_of=lambda d: None),
             context=PositionContextScheduler(RandPool(seed=1)),
+            levy=PositionLevyScheduler(RandPool(seed=1)),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -957,6 +969,25 @@ class TestSettle:
         arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
         assert bf.hot_bins(SEED)
         assert f._elo._strategy_match_count == {}
+
+    def test_levy_is_credited_off_policy(self):
+        # The picker was sensitivity, not levy; its anchor still moves.
+        levy = PositionLevyScheduler(RandPool(seed=1))
+        f, arena = self._played(levy=levy)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert levy.anchor(SEED) == 100
+
+    def test_levy_misses_are_credited_and_age_the_anchor(self):
+        # FALSIFICATION: MISS rounds must reach the arm, or the anchor never
+        # goes stale and levy orbits a dead site forever.
+        from fuzzer_tool.core.schedulers.pos_levy import STALE
+
+        levy = PositionLevyScheduler(RandPool(seed=1))
+        f, arena = self._played(levy=levy)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        for _ in range(STALE):
+            arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        assert levy.anchor(SEED) is None
 
     def test_context_is_credited_off_policy(self):
         # The picker was sensitivity, not context; its table still learns.
@@ -1118,7 +1149,7 @@ class TestFuzzerWiring:
         # Contiguous block; later params (e.g. target_schedule) may follow.
         names = list(params)
         start = names.index("burn_front")
-        assert names[start : start + 10] == [
+        assert names[start : start + 11] == [
             "burn_front",
             "position_arena",
             "pos_canary",
@@ -1129,6 +1160,7 @@ class TestFuzzerWiring:
             "pos_cmplog",
             "pos_lineage",
             "pos_context",
+            "pos_levy",
         ]
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
@@ -1140,6 +1172,7 @@ class TestFuzzerWiring:
         assert params["pos_cmplog"].default is False
         assert params["pos_lineage"].default is False
         assert params["pos_context"].default is False
+        assert params["pos_levy"].default is False
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
@@ -1166,6 +1199,7 @@ class TestFuzzerWiring:
             "pos_cmplog",
             "pos_lineage",
             "pos_context",
+            "pos_levy",
         }
         for c in calls:
             kw = {k.arg for k in c.keywords}
@@ -1241,6 +1275,30 @@ class TestRealConstruction:
         f = self._build(tmp_path, elo="all", position_arena=True)
         assert isinstance(f._pos_context, PositionContextScheduler)
         assert "context" in f._position_arena.pool()
+
+    def test_position_arena_implies_levy(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_levy, PositionLevyScheduler)
+        assert "levy" in f._position_arena.pool()
+
+    def test_pos_levy_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_levy=True)
+        assert isinstance(f._pos_levy, PositionLevyScheduler)
+        assert f._position_arena is None
+
+    def test_levy_state_survives_save_and_load(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        f._pos_levy.record(SEED, [100], Outcome.GAIN)
+        f._pos_levy.record(SEED, [260], Outcome.GAIN)
+        f._save_learned()
+        (tmp_path / "g").mkdir()
+        g = self._build(tmp_path / "g", elo="all", position_arena=True)
+        g._state_store = f._state_store
+        g.resume = True  # _load_learned is a no-op on a fresh run
+        g._load_learned()
+        assert f._pos_levy.anchor(SEED) == 260
+        assert g._pos_levy.to_dict() == f._pos_levy.to_dict()
+        assert g._pos_levy.walk_state(SEED) == (260, 0, [160])
 
     def test_pos_context_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, pos_context=True)
@@ -1385,6 +1443,7 @@ class TestRealConstruction:
         assert args.pos_cmplog is True
         assert args.pos_lineage is True
         assert args.pos_context is True
+        assert args.pos_levy is True
         assert args.lineage is True  # the lineage arm needs the metadata it records
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 

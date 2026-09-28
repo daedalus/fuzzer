@@ -4,8 +4,9 @@ Base: `daedalus/fuzzer` HEAD `c48d5a1d` (PositionFractalScheduler, on top of
 `99800db4` kl_ducb, `92cb37eb` ffmpeg multi-version vendoring).
 
 **Update:** arms 2 (`lineage`, section 5.2) and 3 (`cmplog`, section 5.3) are now implemented
-(`pos_lineage.py`, `pos_cmplog.py`); `fractal` and `kl_ducb` landed earlier. Arm 1 (`context`, section 5.1) is implemented (`pos_context.py`, `_bytecls.py`, off-policy extra as specified). Still unbuilt: 0
-(benchmark prerequisite), 4 `boundary`, 5 `levy`. `_bytecls.py` now exists for `boundary` to reuse. `lineage` deviates from 5.2 in one
+(`pos_lineage.py`, `pos_cmplog.py`); `fractal` and `kl_ducb` landed earlier. Arm 1 (`context`, section 5.1) is implemented (`pos_context.py`, `_bytecls.py`, off-policy extra as specified). Arm 5 (`levy`, section 5.5) is implemented (`pos_levy.py`, off-policy extra as specified; deviations
+listed in the paragraph below). Still unbuilt: 0
+(benchmark prerequisite), 4 `boundary`. `_bytecls.py` now exists for `boundary` to reuse. `lineage` deviates from 5.2 in one
 place: it is wired tracker-style (gate = `--lineage` on) instead of as an off-policy extra,
 because `parent_sites` is recorded only under `--lineage`; without it the arm would be a pure
 decliner and get flagged by the uniform-floor inspection. `record()` stays a no-op, so the
@@ -458,16 +459,26 @@ consecutive gain sites (diagnostic/v2).
 
 **`propose(data, buf_len)`.**
 1. No walk or `anchor is None` -> `None`.
-2. `u = max(rng.random(), 1e-12)`; step `s = floor(X_MIN * u ** (-1/(ALPHA-1)))`
-   with `X_MIN = 1`, `ALPHA = 2.0` (Pareto tail; median about 2 bytes, unbounded
-   tail); `s = min(s, buf_len)`; sign uniform.
-3. `pos = anchor + sign * s`; **reflect** at the edges (avoid piling on ends),
-   then clamp.
+2. `u = max(rng.random(), 1e-12)`; step `s = floor(X_MIN * (u ** (-1/(ALPHA-1)) - 1))`
+   with `X_MIN = 1`, `ALPHA = 2.0` (Lomax / Pareto II tail; unbounded tail);
+   `s = min(s, buf_len)`; sign uniform. **As implemented, the `- 1` is a
+   deviation from the first draft of this spec**, which had the plain Pareto
+   `floor(X_MIN * u ** (-1/(ALPHA-1)))` ("median about 2 bytes"): that has a
+   minimum step of 1, so the byte that gained could never be re-proposed. With
+   the shift, `P(s = 0) = 1/2`, `P(s = 1) = 1/6`, `P(s >= k) = 1/(k+1)`.
+3. `pos = anchor + sign * s`; **reflect** at the edges (triangle-wave fold,
+   not a clamp, which would pile overshoots on byte 0 / the last byte). An
+   anchor past a shrunken buffer is clamped to the last byte before the step.
+4. Before step 2, `SPARK_RATE = 0.05` of draws are a uniform offset (the
+   section 4 "keep a uniform escape" rule; this section's first draft did not
+   list it). Draw order is spark, `u`, sign.
 
 **`record(data, offsets, outcome, weight)`.**
 - GAIN: `anchor = a uniformly chosen valid offset from offsets` (all
   offsets of a gain round are equally credited, matching the weight split
-  convention); append distance to the previous anchor into `gaps`; reset
+  convention); append distance to the previous anchor into `gaps` (only when
+  the previous anchor was still live: none is recorded after a stale drop);
+  `weight` is accepted for protocol parity and unused; reset
   `misses = 0`.
 - MISS: `misses += 1`; at `STALE = 32` consecutive misses set `anchor = None`
   (drop the walk to the uniform floor rather than orbit a dead site).

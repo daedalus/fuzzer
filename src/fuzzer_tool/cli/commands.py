@@ -615,6 +615,7 @@ def cmd_fuzz(args):
         pos_cmplog=getattr(args, "pos_cmplog", False),
         pos_lineage=getattr(args, "pos_lineage", False),
         pos_context=getattr(args, "pos_context", False),
+        pos_levy=getattr(args, "pos_levy", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -2064,6 +2065,7 @@ _HAIL_MARY_FLAGS = (
     "pos_cmplog",
     "pos_lineage",
     "pos_context",
+    "pos_levy",
     "position_arena",
 )
 
@@ -2626,15 +2628,24 @@ def main() -> int:
         "always fields it as an arm.",
     )
     fuzz_parser.add_argument(
+        "--pos-levy",
+        action="store_true",
+        help="Enable the position-arena Levy scheduler: one anchor per seed (the offset of "
+        "its last gain) and a heavy-tailed jump around it, so most mutations stay within "
+        "a few bytes of the last gain and a few land far away, with no fixed scale. The "
+        "anchor is dropped after a run of misses. Implied by --position-arena, which "
+        "always fields it as an arm.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
-        "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context) with "
+        "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context, levy) with "
         "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
-        "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage and --pos-context. "
-        "Enabled by --hail-mary.",
+        "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage, --pos-context and "
+        "--pos-levy. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",
