@@ -607,7 +607,4 @@ caused by this work.
   `POSITION_STRATEGY_NAMES` or lists them by hand.
 - `lineage` v2 needs a parent-bytes accessor from `parent_key`.
 - `docs/architecture.dot` remains stale from 2026-09-24.
-- The 2026-09-24 handover lists "burn-front state is not persisted across
-  resume" as not done, but `pos_burn_front.py` at HEAD has `to_dict/from_dict`
-  and its docstring says it persists through `state_store`. That handover
-  item looks stale; confirm and correct it when convenient.
+- ~~The 2026-09-24 handover's "burn-front not persisted" item is stale.~~ Confirmed and corrected 2026-09-28 (persistence is wired via `_state_store` in `services/fuzzer.py`).

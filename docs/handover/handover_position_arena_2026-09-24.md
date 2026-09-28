@@ -39,5 +39,5 @@ operator, so `pos_` keys would have been flagged against the op canary.
 
 ## Not done
 - No paired benchmark; effect unknown. Plan in DEEP_DIVE.
-- Burn-front state is not persisted across resume.
+- ~~Burn-front state is not persisted across resume.~~ **Done**: `pos_burn_front.py` has `to_dict`/`from_dict`, wired via `_state_store` ("burn_front") in `services/fuzzer.py`. Verified 2026-09-28.
 - `docs/architecture.dot` not changed (no new node).

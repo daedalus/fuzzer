@@ -127,9 +127,10 @@ arm's typical-entropy preference should change without a real-corpus A/B.
 
 ## Not done
 
-- Bach's spectral estimator (feature-based, closed form): with one-hot features it reduces exactly
-  to plug-in KL; with nibble features it cut the bias 2-8x but left ranking length-dependent.
-  Untested idea: shared operator features in `op_tpe` if its per-operator counts are too sparse.
+- ~~Bach's spectral estimator~~ **Done** (see "Bach spectral estimator" above and the null-calibrated
+  variant): `core/spectral_kl.py`, `spectral_scores()` cached per pool version. Offline baseline only,
+  not wired into selection. Still open: larger ridge / richer features, real-corpus benchmark.
+- Untested idea: shared operator features in `op_tpe` if its per-operator counts are too sparse.
 - Sibling arms **audited, not fixed** (6 runs, 400 seeds each, all drawn from one distribution,
   lengths 16-4096, so no seed is truly more interesting than another):
   - `seed_entropy_zscore` (now has an opt-in fix, see above): Spearman(score, length) +0.10; seeds <= 64 B get 0.62x their uniform

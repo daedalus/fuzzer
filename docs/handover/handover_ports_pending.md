@@ -47,7 +47,7 @@ No immediate win remains from dieharder that isn't already in the tree.
 | Space‑UCB and other bandit schedulers | Scheduler | Already implemented in `core/schedulers/*`. |
 | CInfect / edge‑tracking extensions | Analyzer | Covered by `core/edge_tracker.py`. |
 | **Cegolf** (binary equivalence oracle) | Analyzer | **Not yet identified** – would require a new module; low priority. |
-| AFL++ `varsize` & `value` mutators | Operators | Not yet ported. See "Summary of Action Items" for the medium‑priority task. |
+| AFL++ `varsize` & `value` mutators | Operators | **Done** (aa6425d3, 2026-09-11): `_op_varsize` / `_op_value` in `services/operators.py`, registered in `core/operator_registry.py`, 23 tests in `tests/test_new_operators.py`. |
 
 *Action:* Re‑run the AFL and AFL++ surveys with a narrower prompt (e.g. "list operators that do not exist in `operator_registry.py`") if you need the missing items.
 
@@ -119,7 +119,7 @@ If needed, we can retry.
 | Priority | Area | Concrete task |
 |----------|------|----------------|
 | **High** | AFLGo | Implement the LLVM distance‑instrumentation pass (`--aflgo-pass`). |
-| **Medium** | AFL++ | Implement missing `varsize` and `value` mutators (if needed). |
+| ~~Medium~~ | AFL++ | ~~Implement missing `varsize` and `value` mutators.~~ **Done** (aa6425d3). |
 | **Low** | go‑fuzz & Hongfuzz | Re‑run surveys or manually add Go‑identifier and PT‑based operators if they become a priority. |
 | **Low** | Angora | Review survey output once finished; add any missing address‑canonicalization mutators. |
 
