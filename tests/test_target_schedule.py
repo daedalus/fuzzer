@@ -91,8 +91,8 @@ def test_round_robin_first_exec_is_first_target():
 
 
 def test_target_schedule_appended_last():
-    """Fuzzer.__init__ is positional: a new parameter must go last."""
+    """Fuzzer.__init__ is positional: new parameters go at the end."""
     import inspect
 
     params = list(inspect.signature(Fuzzer.__init__).parameters)
-    assert params[-1] == "target_schedule"
+    assert params[-1] == "cuckoo_seed_filter"

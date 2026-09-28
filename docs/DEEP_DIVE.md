@@ -291,8 +291,8 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 
 ### Pruned Seed Cuckoo Filter (`--cuckoo-seed-filter`)
 - **Purpose**: When enabled, tracks seeds that have been pruned during corpus minimization so their mutations are skipped during fuzzing, preventing re-discovery of low-value seeds.
-- **Lifecycle**: At startup, all seeds under `corpus/seeds/pruned/` are loaded into the filter. When a seed is pruned during minimization, its hash is added. When a pruned seed is recovered (re-admitted), it is tracked separately in `_cuckoo_recovered` set to prevent false negatives from CuckooFilter's 8-bit fingerprint collisions.
-- **Filter sizing**: capacity = `max(10 * len(corpus), 100_000)`, set after corpus is loaded.
+- **Lifecycle**: At startup, all seeds under `corpus/seeds/pruned/` and `corpus/deltas/pruned/` are loaded into the filter. When a seed is pruned during minimization, its hash is added. When a pruned seed is recovered (re-admitted), it is tracked in `_cuckoo_recovered` allow-list set — NOT removed from the filter (CuckooFilter uses 8-bit fingerprints, and `remove()` can delete a different key colliding in the same bucket). The allow-list exemption is discarded if the seed is pruned again in a later minimize cycle.
+- **Filter sizing**: capacity = `max(10 * len(corpus) + persisted_pruned_count, 100_000)`, set after corpus is loaded. Persisted pruned entries (seeds and deltas) are counted for sizing.
 - **Persisted state**: Pruned seeds survive restarts; running `minimize --commit` writes pruned seeds to `corpus/seeds/pruned/` and `corpus/deltas/pruned/`. The filter is rebuilt from these persisted seeds on resume.
 - **Dedup check**: In `_dedup_mutate()`, before the exec bloom check, if the parent seed's hash is in the filter AND not in `_cuckoo_recovered`, the mutation is skipped (returns original data).
 

@@ -1782,6 +1782,8 @@ class CorpusManager:
                 if seed not in unique:
                     h = self.seed_key(seed)
                     f.cuckoo_seed_filter.add(h)
+                    # Discard recovered exemption so re-pruned seeds are filtered again
+                    f._cuckoo_recovered.discard(h)
 
         f.corpus = unique
         self.rebuild_entropy()

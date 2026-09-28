@@ -2351,12 +2351,25 @@ class Fuzzer:
         loaded = self.corpus
 
         # Load pruned seeds into cuckoo filter if enabled
-        # Sized at 10x the corpus; minimum 100_000 to match
-        # the exec bloom default.
+        # Sized at 10x the corpus + persisted pruned entries; minimum 100_000.
         if self.cuckoo_seed_filter is None and cuckoo_seed_filter and self.corpus_dir is not None:
             from fuzzer_tool.core.cuckoo import CuckooFilter
 
-            self.cuckoo_seed_filter = CuckooFilter(capacity=max(10 * len(self.corpus), 100_000))
+            # Count persisted pruned entries for sizing.
+            pruned_dir = self.corpus_dir / "seeds" / "pruned"
+            pruned_count = 0
+            if pruned_dir.exists():
+                pruned_count = sum(
+                    1 for fh in pruned_dir.rglob("id_*") if fh.is_file() and not fh.is_symlink()
+                )
+            # Also count pruned delta records.
+            deltas_pruned_dir = self.corpus_dir / "deltas" / "pruned"
+            if deltas_pruned_dir.exists():
+                pruned_count += sum(
+                    1 for fh in deltas_pruned_dir.glob("delta_*.json") if fh.is_file()
+                )
+            capacity = max(10 * len(self.corpus) + pruned_count, 100_000)
+            self.cuckoo_seed_filter = CuckooFilter(capacity=capacity)
             self._load_pruned_seeds_into_cuckoo()
 
         self._apply_seed_transforms()
@@ -4154,10 +4167,13 @@ class Fuzzer:
             # Reject symlinks and paths escaping the pruned root.
             if not fh.is_file() or fh.is_symlink():
                 continue
+            # Use path components instead of string prefix to avoid sibling-prefix attacks.
             try:
-                resolved = fh.resolve()
-                if not str(resolved).startswith(str(pruned_dir.resolve())):
+                if not fh.is_relative_to(pruned_dir.resolve()):
                     continue
+            except ValueError:
+                continue
+            try:
                 data = fh.read_bytes()
                 h = self._seed_key(data)
                 self.cuckoo_seed_filter.add(h)

@@ -4049,12 +4049,16 @@ def main() -> int:
         help=(
             "Track pruned seeds in a CuckooFilter so their mutations are "
             "skipped at dedup time. At startup, all seeds under corpus/seeds/pruned/ "
-            "are loaded into the filter. When a seed is pruned during minimization, "
-            "its hash is added to the filter. When a pruned seed is recovered "
-            "(re-admitted to the corpus), it is removed from the filter. "
-            "The filter is sized to max(10 * corpus size, 100_000) and persists "
-            "across restarts (pruned seeds under corpus/seeds/pruned/ are reloaded). "
-            "Uses hash_data() as the key scheme. Disabled by default."
+            "and corpus/deltas/pruned/ are loaded into the filter. The filter is sized "
+            "to max(10 * corpus_size + persisted_pruned_count, 100_000). When a seed "
+            "is pruned during minimization, its hash is added to the filter. When a "
+            "pruned seed is recovered, it is tracked as an allow-list entry so it can "
+            "be admitted again without being re-mutated -- the exemption is discarded "
+            "if the seed is pruned again. In _dedup_mutate(), if a parent seed's hash "
+            "is in the filter AND not in the exemption set, the mutation is skipped "
+            "(original data returned). The filter persists across restarts; pruned seeds "
+            "under corpus/seeds/pruned/ and corpus/deltas/pruned/ are reloaded on resume. "
+            "Uses seed_key() as the key scheme. Disabled by default."
         ),
     )
     fuzz_parser.add_argument(
