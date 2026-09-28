@@ -4071,8 +4071,8 @@ def main() -> int:
         help=(
             "Which structure backs the exec-dedup gate. 'bloom' (default) is "
             "the historic BloomFilter with generational reset; 'cuckoo' swaps "
-            "in a CuckooFilter, which supports deletions and a lower realised "
-            "false-positive rate per bit. Both expose the same update_bytes "
+            "in a CuckooFilter (16-bit fingerprints, ~1e-4 realised false-positive "
+            "rate at full load, transactional inserts). Both expose the same update_bytes "
             "contract, so the choice is opt-in and the default is unchanged."
         ),
     )

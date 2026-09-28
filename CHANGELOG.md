@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`CuckooFilter` load scaling** (`core/cuckoo.py`):
+  - Bucket count is now sized against `MAX_LOAD = 0.90` (was `capacity // bucket_size` rounded up
+    to a power of two, which put capacities like 500_000 and every power of two at 0.95-1.00 load,
+    past the ~0.96 kick-failure cliff; 18.7k failed adds at capacity 1_048_576).
+  - A failed `add()` is now transactional: the kick chain is journalled and rolled back, so a
+    rejected insert no longer drops an already-stored fingerprint (previously ~17.7k false
+    negatives in that run). New `n_failed` counter; `update_bytes(reset_on_full=True)` starts a new
+    generation when an add fails instead of silently not tracking the key.
+  - Kicking uses a private `random.Random` (`rng_seed`), no longer consuming the global stream
+    that `--seed` makes reproducible.
+  - Default `fingerprint_size` 8 -> 16: realised FPR ~3% -> ~1e-4 (the bloom exec backend is 1e-3),
+    making the `--exec-dedup-backend cuckoo` help text true. `expected_fpr` property added.
+    Trade-off: exec-dedup at capacity 500_000 uses ~45 MB (was ~13 MB) because of the larger table.
+  - Fingerprint mapping no longer folds 0 onto 1 (P(fp=1) was 2x uniform).
+  - One item digest per operation instead of two, plus a memoised alt-index hash: `contains`
+    3.7 us -> 1.6 us, `add` 4-6 us -> ~3 us.
+  - Tests: `tests/test_cuckoo_load_scaling.py`.
+
 ### Added
 
 - **Position-arena `boundary` arm** (`--pos-boundary`, implied by `--position-arena` and
