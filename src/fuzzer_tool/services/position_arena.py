@@ -30,6 +30,10 @@ Arms::
     fibonacci    PositionFibonacciScheduler, golden-ratio sweep, no
                  per-seed state (implied by --position-arena; see
                  core/schedulers/pos_fibonacci.py)
+    fractal      PositionFractalScheduler, adaptive-resolution binary
+                 tree that only refines where coverage-gain heat
+                 justifies it (opt-in, --pos-fractal; see
+                 core/schedulers/pos_fractal.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
 matches. An arm that declines gets a uniform offset but is *charged under
@@ -45,8 +49,8 @@ Matches: a round's operators may land several positions. Every arm that
 served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
-``burn_front``, ``kl_ducb``, ``canary``, ``round_robin`` and ``fibonacci`` are
-each credited off-policy on every settled round, whoever served the
+``burn_front``, ``kl_ducb``, ``canary``, ``round_robin``, ``fibonacci`` and
+``fractal`` are each credited off-policy on every settled round, whoever served the
 positions, like ``seed_canary`` on the seed side.
 """
 
@@ -77,6 +81,7 @@ POSITION_STRATEGY_NAMES = (
     "canary",
     "round_robin",
     "fibonacci",
+    "fractal",
 )
 
 Gate = Callable[[], bool]
@@ -93,6 +98,7 @@ class PositionArena:
         canary: PositionScheduler | None = None,
         round_robin: PositionScheduler | None = None,
         fibonacci: PositionScheduler | None = None,
+        fractal: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         self._uniform = UniformPosition(f._rng)
@@ -101,9 +107,10 @@ class PositionArena:
         self._canary = canary
         self._round_robin = round_robin
         self._fibonacci = fibonacci
+        self._fractal = fractal
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
-        for extra in (burn_front, kl_ducb, canary, round_robin, fibonacci):
+        for extra in (burn_front, kl_ducb, canary, round_robin, fibonacci, fractal):
             if extra is not None:
                 self._arms[extra.name] = (extra, lambda: True)
         self._used: list[str] = []
@@ -199,6 +206,7 @@ class PositionArena:
             self._canary,
             self._round_robin,
             self._fibonacci,
+            self._fractal,
         )
         for extra in extras:
             if extra is not None:

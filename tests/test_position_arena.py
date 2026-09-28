@@ -34,6 +34,7 @@ from fuzzer_tool.core.schedulers.pos_burn_front import (
 )
 from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
+from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.services.operators import OperatorEngine
@@ -552,6 +553,7 @@ def _arena(
     canary=None,
     round_robin=None,
     fibonacci=None,
+    fractal=None,
     region=lambda d, n: 55,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
@@ -563,6 +565,7 @@ def _arena(
         canary=canary,
         round_robin=round_robin,
         fibonacci=fibonacci,
+        fractal=fractal,
     )
 
 
@@ -626,6 +629,10 @@ class TestPool:
         _, arena = _arena(burn_front=_bf())
         assert "burn_front" in arena.pool()
 
+    def test_fractal_joins_when_supplied(self):
+        _, arena = _arena(fractal=PositionFractalScheduler(RandPool(seed=1)))
+        assert "fractal" in arena.pool()
+
     def test_kl_ducb_joins_when_supplied(self):
         _, arena = _arena(kl_ducb=PositionKLDUCBScheduler(RandPool(seed=1)))
         assert "kl_ducb" in arena.pool()
@@ -668,6 +675,7 @@ class TestPool:
             canary=PositionCanaryScheduler(),
             round_robin=PositionRoundRobinScheduler(),
             fibonacci=PositionFibonacciScheduler(),
+            fractal=PositionFractalScheduler(RandPool(seed=1)),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -826,6 +834,13 @@ class TestSettle:
         assert bf.hot_bins(SEED)
         assert f._elo._strategy_match_count == {}
 
+    def test_fractal_is_credited_off_policy(self):
+        # The picker was sensitivity, not fractal; its tree still heats.
+        frac = PositionFractalScheduler(RandPool(seed=1))
+        f, arena = self._played(fractal=frac)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert frac.cell_state(SEED)[0] == 1.0
+
     def test_kl_ducb_is_credited_off_policy(self):
         # The picker was sensitivity, not kl_ducb; its bandit still learns.
         kld = PositionKLDUCBScheduler(RandPool(seed=1))
@@ -920,7 +935,6 @@ class TestSelectPositionWiring:
         assert 22 in drawn
         assert len(drawn - {22}) >= 2
 
-
     def test_field_is_a_legacy_candidate(self):
         # FALSIFICATION: if field_pos were computed but dropped from the
         # candidate list, the format learner's offset could never be
@@ -965,13 +979,14 @@ class TestFuzzerWiring:
         # Contiguous block; later params (e.g. target_schedule) may follow.
         names = list(params)
         start = names.index("burn_front")
-        assert names[start : start + 6] == [
+        assert names[start : start + 7] == [
             "burn_front",
             "position_arena",
             "pos_canary",
             "pos_round_robin",
             "pos_fibonacci",
             "pos_kl_ducb",
+            "pos_fractal",
         ]
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
@@ -979,6 +994,7 @@ class TestFuzzerWiring:
         assert params["pos_round_robin"].default is False
         assert params["pos_fibonacci"].default is False
         assert params["pos_kl_ducb"].default is False
+        assert params["pos_fractal"].default is False
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
@@ -1001,6 +1017,7 @@ class TestFuzzerWiring:
             "pos_round_robin",
             "pos_fibonacci",
             "pos_kl_ducb",
+            "pos_fractal",
         }
         for c in calls:
             kw = {k.arg for k in c.keywords}
@@ -1067,6 +1084,16 @@ class TestRealConstruction:
         assert isinstance(f._pos_kl_ducb, PositionKLDUCBScheduler)
         assert "kl_ducb" in f._position_arena.pool()
 
+    def test_position_arena_implies_fractal(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_fractal, PositionFractalScheduler)
+        assert "fractal" in f._position_arena.pool()
+
+    def test_pos_fractal_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_fractal=True)
+        assert isinstance(f._pos_fractal, PositionFractalScheduler)
+        assert f._position_arena is None
+
     def test_burn_front_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, burn_front=True)
         assert isinstance(f._burn_front, BurnFrontPositionScheduler)
@@ -1108,6 +1135,7 @@ class TestRealConstruction:
         assert args.pos_round_robin is True
         assert args.pos_fibonacci is True
         assert args.pos_kl_ducb is True
+        assert args.pos_fractal is True
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 
     def test_position_arena_without_elo_warns_and_constructs(self, tmp_path, caplog):

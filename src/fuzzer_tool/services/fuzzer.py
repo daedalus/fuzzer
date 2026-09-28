@@ -698,6 +698,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("burn-front")
     if getattr(f, "_pos_kl_ducb", None) is not None:
         names.append("kl-ducb")
+    if getattr(f, "_pos_fractal", None) is not None:
+        names.append("fractal")
     if _pos_canary_live(f):
         names.append("canary")
     if getattr(f, "_pos_round_robin", None) is not None:
@@ -1435,6 +1437,10 @@ class Fuzzer:
         # core/schedulers/pos_kl_ducb.py). The arena always fields it too,
         # same as burn_front, since it exists to be measured against it.
         pos_kl_ducb=False,
+        # Position arena's adaptive-resolution proposer: a binary interval
+        # tree that refines only where gain heat concentrates (see
+        # core/schedulers/pos_fractal.py). The arena always fields it too.
+        pos_fractal=False,
         # Appended: positional signature (see region_profile above).
         target_schedule=TargetSchedule.WEIGHTED,
     ):
@@ -2597,6 +2603,14 @@ class Fuzzer:
 
             self._pos_kl_ducb = PositionKLDUCBScheduler(self._rng)
             log.info("Position KL-D-UCB scheduling enabled")
+        # Position-arena fractal: adaptive-resolution tree, refines only
+        # where gain heat justifies it (see core/schedulers/pos_fractal.py).
+        self._pos_fractal = None
+        if pos_fractal or position_arena:
+            from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
+
+            self._pos_fractal = PositionFractalScheduler(self._rng)
+            log.info("Position fractal scheduling enabled")
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
@@ -2613,6 +2627,7 @@ class Fuzzer:
                 canary=self._pos_canary,
                 round_robin=self._pos_round_robin,
                 fibonacci=self._pos_fibonacci,
+                fractal=self._pos_fractal,
             )
             log.info("Position arena enabled (Elo over pos_ strategies)")
         self._use_ecofuzz = ecofuzz
@@ -4092,6 +4107,8 @@ class Fuzzer:
             self._state_store.set("op_credit", self._op_credit.to_dict())
         if self._burn_front is not None:
             self._state_store.set("burn_front", self._burn_front.to_dict())
+        if getattr(self, "_pos_fractal", None) is not None:
+            self._state_store.set("pos_fractal", self._pos_fractal.to_dict())
         pll = getattr(self, "_pll", None)
         if pll is not None:
             self._state_store.set("pll", pll.save())
@@ -4119,6 +4136,8 @@ class Fuzzer:
             self._op_credit.from_dict(self._state_store.get("op_credit", {}))
         if self._burn_front is not None:
             self._burn_front.from_dict(self._state_store.get("burn_front", {}))
+        if getattr(self, "_pos_fractal", None) is not None:
+            self._pos_fractal.from_dict(self._state_store.get("pos_fractal", {}))
         if self._wfc_enabled:
             WFC_MUTATOR.store.from_dict(self._state_store.get("wfc_tables", {}))
         if self._dict_picker is not None:
