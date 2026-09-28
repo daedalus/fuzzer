@@ -662,7 +662,9 @@ def _pos_canary_live(f) -> bool:
         and getattr(f, "_use_elo", False)
         and getattr(f, "_elo", None)
     )
-    return bool(getattr(f, "_pos_canary", None) is not None and arena_live)
+    arena = getattr(f, "_position_arena", None)
+    allowed = arena.allows("canary") if hasattr(arena, "allows") else True
+    return bool(getattr(f, "_pos_canary", None) is not None and arena_live and allowed)
 
 
 def _active_position_schedulers(f) -> list[str]:
@@ -714,6 +716,11 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("round-robin")
     if getattr(f, "_pos_fibonacci", None) is not None:
         names.append("fibonacci")
+    # --pos-arena-arms: an arm the arena dropped is not in play, so the banner
+    # must not list it (names here use hyphens, the arena's use underscores).
+    arena = getattr(f, "_position_arena", None)
+    if arena is not None and hasattr(arena, "allows"):
+        names = [n for n in names if arena.allows(n.replace("-", "_"))]
     return names
 
 
@@ -1467,6 +1474,9 @@ class Fuzzer:
         # the seed's last gain offset (see core/schedulers/pos_levy.py). The
         # arena always fields it too.
         pos_levy=False,
+        # Arena arm subset (see PositionArena / --pos-arena-arms): None = every
+        # arm whose feature is on; else only these names, uniform always kept.
+        pos_arena_arms=None,
         # Appended: positional signature (see region_profile above).
         target_schedule=TargetSchedule.WEIGHTED,
         # Cuckoo filter for pruned seed dedup (gated by --cuckoo-seed-filter).
@@ -2725,6 +2735,8 @@ class Fuzzer:
             log.info("Position levy scheduling enabled")
         self._use_position_arena = position_arena
         self._position_arena = None
+        if pos_arena_arms is not None and not position_arena:
+            log.warning("--pos-arena-arms has no effect without --position-arena")
         if position_arena:
             # The ctor parameter, not self._use_elo: that attribute is only
             # assigned ~500 lines further down, so reading it here raised
@@ -2744,8 +2756,14 @@ class Fuzzer:
                 levy=self._pos_levy,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
+                arms=pos_arena_arms,
             )
             log.info("Position arena enabled (Elo over pos_ strategies)")
+            if self._position_arena.enabled_arms is not None:
+                log.info(
+                    "Position arena restricted to: %s",
+                    ", ".join(sorted(self._position_arena.enabled_arms)),
+                )
         self._use_ecofuzz = ecofuzz
         self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
         self._metropolis = metropolis
@@ -8137,7 +8155,7 @@ class Fuzzer:
         # the pos_ counterpart of the operator/seed canary checks around
         # this one. A real proposer at or below pos_canary is a stronger
         # signal than merely tying uniform.
-        if getattr(self, "_pos_canary", None) is not None:
+        if _pos_canary_live(self):
             pos_flagged = self._elo.strategies_below_canary(_POS_CANARY_KEY)
             for strategy, mu, canary_mu in pos_flagged:
                 log.warning(

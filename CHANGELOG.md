@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--pos-arena-arms ARM[,ARM...]`**: restrict `--position-arena` to a named subset of arms
+  (uniform is always kept; hyphens accepted; unknown names are a usage error). A dropped arm is
+  neither proposed from nor credited off-policy, plays no Elo matches, and is left out of the
+  startup banner and the pos-canary inspection. Makes a single arm A/B-able inside the arena.
+  New bench arms `pos-arena-uniform` (control), `pos-arena-<arm>` for burn-front, kl-ducb,
+  fractal, context, levy, round-robin and fibonacci, and `pos-arena-all`
+  (`tools/lib/bench_paired.py`). Unmeasured.
+
 - **Position-arena `levy` arm** (`--pos-levy`, implied by `--position-arena` and `--hail-mary`):
   keeps one anchor per seed (the offset of its last gain) and proposes the anchor plus a
   heavy-tailed Lomax step (`floor(1/u - 1)`, so half the draws hit the anchor byte, one in six a

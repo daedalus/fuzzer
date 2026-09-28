@@ -16,6 +16,7 @@ from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.fuzzer import Fuzzer
+from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
 
 _original_print = builtins.print
 _patched_print = builtins.print
@@ -616,6 +617,7 @@ def cmd_fuzz(args):
         pos_lineage=getattr(args, "pos_lineage", False),
         pos_context=getattr(args, "pos_context", False),
         pos_levy=getattr(args, "pos_levy", False),
+        pos_arena_arms=getattr(args, "pos_arena_arms", None),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -2071,6 +2073,14 @@ _HAIL_MARY_FLAGS = (
 )
 
 
+def _pos_arena_arms_arg(value: str) -> tuple[str, ...]:
+    """argparse ``type=`` for --pos-arena-arms; a bad name is a usage error."""
+    try:
+        return parse_arena_arms(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
 def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentParser) -> None:
     """Force-enable every opt-in fuzzing flag left at its default value."""
     for dest in _HAIL_MARY_FLAGS:
@@ -2647,6 +2657,19 @@ def main() -> int:
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
         "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage, --pos-context and "
         "--pos-levy. Enabled by --hail-mary.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-arena-arms",
+        type=_pos_arena_arms_arg,
+        default=None,
+        metavar="ARM[,ARM...]",
+        help="Restrict --position-arena to these arms (comma-separated; uniform is always "
+        "kept). An arm left out is neither proposed from nor credited, so "
+        "'--pos-arena-arms uniform,fractal' is a paired A/B of fractal against uniform, and "
+        "listing every arm but one is its leave-one-out ablation. Names: "
+        + ", ".join(POSITION_STRATEGY_NAMES)
+        + " (hyphens accepted). Default: every arm whose feature is on. "
+        "Needs --position-arena and --elo; not touched by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

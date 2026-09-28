@@ -63,6 +63,18 @@ RESULTS = REPO / "results" / "paired"
 # single-variable against the baseline: an arm that changes two things
 # cannot attribute its result to either.
 
+# Arena arms that can be A/B'd against uniform with no extra feature flag.
+ARENA_TESTABLE = (
+    "burn_front",
+    "kl_ducb",
+    "fractal",
+    "context",
+    "levy",
+    "round_robin",
+    "fibonacci",
+)
+_ARENA = ["--elo", "--mc-bandit", "--position-arena"]
+
 ARMS: dict[str, list[str]] = {
     "baseline": [],
     # Ports under test. Each differs from baseline in exactly one knob.
@@ -155,6 +167,20 @@ ARMS: dict[str, list[str]] = {
     # baseline (uniform offsets) and against each other.
     "pos-round-robin": ["--pos-round-robin"],
     "pos-fibonacci": ["--pos-fibonacci"],
+    # Arena arm subsets (--pos-arena-arms). The control is the arena with
+    # uniform as its only member: same Elo/bandit stack and same arena
+    # bookkeeping as every arm below, no proposer. Each pos-arena-<x> is that
+    # control plus one arm, so it isolates <x> from the arena machinery;
+    # pos-arena-all is the full pool (the ensemble question). cmplog, lineage
+    # and the tracker arms (sensitivity/te/mi/...) are left out on purpose:
+    # they join only while their own feature is on, so an arm here would have
+    # to carry that flag and no longer differ from the control by one knob.
+    "pos-arena-uniform": _ARENA + ["--pos-arena-arms", "uniform"],
+    **{
+        f"pos-arena-{a.replace('_', '-')}": _ARENA + ["--pos-arena-arms", f"uniform,{a}"]
+        for a in ARENA_TESTABLE
+    },
+    "pos-arena-all": _ARENA,
     # Gravity splice donor (core/gravity.py). Only the six corpus-crossing
     # operators change; read "Gravity splice: ... hits, refits" in a cell's
     # log before trusting a null -- a closed fit gate means prior exponents.
@@ -184,6 +210,13 @@ GENERATION_ARMS = ("wfc", "elo-mcts", "elo-alphabeta", "bootstrap")
 
 POSITION_ARMS = ("pos-round-robin", "pos-fibonacci")
 
+# Arena subset group (pos-arena-uniform is the control the rest pair against).
+POSITION_ARENA_ARMS = (
+    "pos-arena-uniform",
+    *(f"pos-arena-{a.replace('_', '-')}" for a in ARENA_TESTABLE),
+    "pos-arena-all",
+)
+
 # Which arm each one is paired against. `analyse --baseline` takes one name;
 # this records the intended pairing so a reviewer does not have to reverse it
 # from comments. Only arms whose baseline is not plain `baseline` need care,
@@ -201,6 +234,9 @@ ARM_BASELINES: dict[str, str] = {
     "strata-a4": "strata-a1-elo",
     "pos-round-robin": "baseline",
     "pos-fibonacci": "baseline",
+    "pos-arena-uniform": "elo",
+    **{f"pos-arena-{a.replace('_', '-')}": "pos-arena-uniform" for a in ARENA_TESTABLE},
+    "pos-arena-all": "pos-arena-uniform",
     "splice-gravity": "baseline",
     "elo-op-minimax": "elo",
     "wall-order": "baseline",

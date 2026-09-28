@@ -54,7 +54,11 @@ Arms::
                  core/schedulers/pos_levy.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
-matches. An arm that declines gets a uniform offset but is *charged under
+matches. ``arms`` (``--pos-arena-arms``) narrows the pool further to a named
+subset (uniform is always kept): an arm left out is neither proposed from nor
+credited off-policy, so ``arena{uniform}`` vs ``arena{uniform, X}`` is a paired
+A/B of one arm and ``arena{all}`` vs ``arena{all minus X}`` is its leave-one-out
+ablation (``tools/lib/bench_paired.py``, ``pos-arena-*``). An arm that declines gets a uniform offset but is *charged under
 its own name*: Elo picked it, so the round is its round. Charging the
 decline to uniform instead made a declining arm unbeatable -- it never
 served, so it only ever played as an opponent, and in a miss-dominated
@@ -74,7 +78,7 @@ round, whoever served the positions, like ``seed_canary`` on the seed side.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX
 from fuzzer_tool.core.schedulers.pos_base import (
@@ -106,6 +110,27 @@ POSITION_STRATEGY_NAMES = (
     "levy",
 )
 
+
+def parse_arena_arms(spec: str) -> tuple[str, ...]:
+    """``"uniform,fractal"`` -> ``("uniform", "fractal")``; ``ValueError`` on a bad name.
+
+    Order-preserving, de-duplicated. An empty spec is an error: ``None`` (flag
+    absent) is how "every arm" is spelled, and an empty list silently meaning
+    the same would hide a typo. Underscores and hyphens are interchangeable
+    (``kl-ducb`` == ``kl_ducb``) to match the flag names.
+    """
+    names = [n.strip().replace("-", "_") for n in spec.split(",") if n.strip()]
+    if not names:
+        raise ValueError("--pos-arena-arms needs at least one arm name")
+    unknown = [n for n in names if n not in POSITION_STRATEGY_NAMES]
+    if unknown:
+        raise ValueError(
+            f"unknown position arena arm(s) {', '.join(unknown)}; "
+            f"choose from {', '.join(POSITION_STRATEGY_NAMES)}"
+        )
+    return tuple(dict.fromkeys(names))
+
+
 Gate = Callable[[], bool]
 Arm = tuple[PositionScheduler, Gate]
 
@@ -125,35 +150,57 @@ class PositionArena:
         lineage: PositionScheduler | None = None,
         context: PositionScheduler | None = None,
         levy: PositionScheduler | None = None,
+        arms: Iterable[str] | None = None,
     ) -> None:
         self._f = f
+        # None = every arm whose feature is on; otherwise only these (+ uniform).
+        self._enabled: frozenset[str] | None = (
+            None if arms is None else frozenset(parse_arena_arms(",".join(arms))) | {UNIFORM}
+        )
         self._uniform = UniformPosition(f._rng)
-        self._burn_front = burn_front
-        self._kl_ducb = kl_ducb
-        self._canary = canary
-        self._round_robin = round_robin
-        self._fibonacci = fibonacci
-        self._fractal = fractal
-        self._cmplog = cmplog
-        self._lineage = lineage
-        self._context = context
-        self._levy = levy
+        # An arm left out of the subset is dropped here, once: it is neither
+        # proposed from nor credited, so no later site can reach it.
+        self._burn_front = burn_front if self.allows("burn_front") else None
+        self._kl_ducb = kl_ducb if self.allows("kl_ducb") else None
+        self._canary = canary if self.allows("canary") else None
+        self._round_robin = round_robin if self.allows("round_robin") else None
+        self._fibonacci = fibonacci if self.allows("fibonacci") else None
+        self._fractal = fractal if self.allows("fractal") else None
+        self._cmplog = cmplog if self.allows("cmplog") else None
+        self._lineage = lineage if self.allows("lineage") else None
+        self._context = context if self.allows("context") else None
+        self._levy = levy if self.allows("levy") else None
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
-        for extra in (
-            burn_front,
-            kl_ducb,
-            canary,
-            round_robin,
-            fibonacci,
-            fractal,
-            context,
-            levy,
-        ):
-            if extra is not None:
-                self._arms[extra.name] = (extra, lambda: True)
+        # Off-policy arms: fed every settled round whoever served. Single list
+        # for the pool and for settle(), so a new arm cannot miss one of them.
+        self._extras: tuple[PositionScheduler, ...] = tuple(
+            e
+            for e in (
+                self._burn_front,
+                self._kl_ducb,
+                self._canary,
+                self._round_robin,
+                self._fibonacci,
+                self._fractal,
+                self._context,
+                self._levy,
+            )
+            if e is not None
+        )
+        for extra in self._extras:
+            self._arms[extra.name] = (extra, lambda: True)
         self._used: list[str] = []
         self._seen_pool: list[str] = []
+
+    def allows(self, name: str) -> bool:
+        """Whether *name* may join the pool under ``arms`` (uniform always may)."""
+        return self._enabled is None or name in self._enabled
+
+    @property
+    def enabled_arms(self) -> frozenset[str] | None:
+        """The ``arms`` subset (uniform included), or None when unrestricted."""
+        return self._enabled
 
     def _add_trackers(self, region_fn: Callable[[bytes, int], int | None]) -> None:
         f = self._f
@@ -197,7 +244,8 @@ class PositionArena:
         if self._lineage is not None:
             specs.append(("lineage", self._lineage.propose, lineage_ready))
         for name, fn, gate in specs:
-            self._arms[name] = (CallablePosition(name, fn), gate)
+            if self.allows(name):
+                self._arms[name] = (CallablePosition(name, fn), gate)
 
     def pool(self) -> list[str]:
         """Names of arms whose feature is on now; uniform first."""
@@ -251,19 +299,8 @@ class PositionArena:
         score: float,
     ) -> None:
         """End of round: feed the off-policy arms, then play the Elo matches."""
-        extras = (
-            self._burn_front,
-            self._kl_ducb,
-            self._canary,
-            self._round_robin,
-            self._fibonacci,
-            self._fractal,
-            self._context,
-            self._levy,
-        )
-        for extra in extras:
-            if extra is not None:
-                extra.record(data, offsets, outcome, weight)
+        for extra in self._extras:
+            extra.record(data, offsets, outcome, weight)
 
         served = list(dict.fromkeys(self._used))
         pool = self._seen_pool

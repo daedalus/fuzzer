@@ -42,7 +42,11 @@ from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.services.operators import OperatorEngine
-from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, PositionArena
+from fuzzer_tool.services.position_arena import (
+    POSITION_STRATEGY_NAMES,
+    PositionArena,
+    parse_arena_arms,
+)
 
 SEED = bytes(1000)
 NO_SPARK = 0.99  # random() draw above SPARK_RATE
@@ -1451,3 +1455,111 @@ class TestRealConstruction:
         f = self._build(tmp_path, position_arena=True)
         assert "no effect without --elo" in caplog.text
         assert isinstance(f._position_arena, PositionArena)
+
+
+class _Spy(PositionScheduler):
+    """Off-policy arm that counts what it is fed and always proposes 5."""
+
+    def __init__(self, name):
+        self.name = name
+        self.recorded = 0
+
+    def propose(self, data, buf_len):
+        return 5
+
+    def record(self, data, offsets, outcome, weight=1.0):
+        self.recorded += 1
+
+
+class TestArenaArmSubset:
+    def _all(self, arms):
+        f = _Fuzzer(sensitivity=True, te=True, mi=True, region=True, field=True)
+        spies = {n: _Spy(n) for n in ("burn_front", "kl_ducb", "fractal", "levy", "canary")}
+        arena = PositionArena(f, region_fn=lambda d, n: 55, arms=arms, **spies)
+        return arena, spies
+
+    def test_none_means_every_armed_feature(self):
+        arena, _ = self._all(None)
+        assert arena.enabled_arms is None
+        assert {"uniform", "sensitivity", "burn_front", "fractal", "canary"} <= set(arena.pool())
+
+    def test_subset_keeps_only_named_arms_plus_uniform(self):
+        arena, _ = self._all(["fractal"])
+        assert arena.pool() == ["uniform", "fractal"]
+        assert arena.enabled_arms == {"uniform", "fractal"}
+
+    def test_uniform_only_is_a_single_member_pool(self):
+        arena, _ = self._all(["uniform"])
+        assert arena.pool() == ["uniform"]
+
+    def test_tracker_arms_are_filtered_too(self):
+        arena, _ = self._all(["mi"])
+        assert arena.pool() == ["uniform", "mi"]
+
+    def test_excluded_arm_is_never_selected_or_credited(self):
+        # Adversarial: an excluded off-policy arm must not be fed settled
+        # rounds; it would accrue state it can never be rated on.
+        arena, spies = self._all(["fractal"])
+        for _ in range(20):
+            arena.select(SEED, len(SEED))
+            arena.settle(SEED, [3], Outcome.GAIN, 1.0, 1.0)
+        assert spies["fractal"].recorded == 20
+        assert all(s.recorded == 0 for n, s in spies.items() if n != "fractal")
+        assert {n for n in arena.used()} == set()  # settled
+
+    def test_excluded_arm_never_plays_elo_matches(self):
+        arena, spies = self._all(["fractal"])
+        f = arena._f
+        for _ in range(60):
+            arena.select(SEED, len(SEED))
+            arena.settle(SEED, [3], Outcome.GAIN, 1.0, 1.0)
+        rated = {k for k in f._elo._strategy_match_count if f._elo._strategy_match_count[k]}
+        assert rated <= {"pos_uniform", "pos_fractal"}
+
+    def test_ungated_arm_in_subset_still_waits_for_its_feature(self):
+        # cmplog named but cmplog not live: subset must not force it in.
+        f = _Fuzzer()
+        arena = PositionArena(
+            f, region_fn=lambda d, n: 55, cmplog=_Spy("cmplog"), arms=["uniform", "cmplog"]
+        )
+        assert arena.pool() == ["uniform"]
+
+    def test_unknown_arm_raises(self):
+        with pytest.raises(ValueError, match="bogus"):
+            PositionArena(_Fuzzer(), region_fn=lambda d, n: 1, arms=["uniform", "bogus"])
+
+
+class TestParseArenaArms:
+    def test_parses_dedupes_and_normalises_hyphens(self):
+        assert parse_arena_arms("uniform, kl-ducb,fractal,uniform") == (
+            "uniform",
+            "kl_ducb",
+            "fractal",
+        )
+
+    @pytest.mark.parametrize("bad", ["", " , ", "nope", "uniform,nope"])
+    def test_rejects_empty_and_unknown(self, bad):
+        with pytest.raises(ValueError):
+            parse_arena_arms(bad)
+
+    def test_every_registered_name_parses(self):
+        assert parse_arena_arms(",".join(POSITION_STRATEGY_NAMES)) == POSITION_STRATEGY_NAMES
+
+
+class TestBannerHonoursSubset:
+    def test_dropped_arms_are_not_listed(self):
+        from fuzzer_tool.services.fuzzer import _active_position_schedulers
+
+        f = _Fuzzer()
+        f._burn_front, f._pos_kl_ducb, f._pos_fractal = _Spy("b"), _Spy("k"), _Spy("f")
+        f._position_arena = PositionArena(
+            f,
+            region_fn=lambda d, n: 1,
+            burn_front=f._burn_front,
+            kl_ducb=f._pos_kl_ducb,
+            fractal=f._pos_fractal,
+            arms=["uniform", "kl-ducb"],
+        )
+        assert _active_position_schedulers(f) == ["kl-ducb"]
+        f._position_arena = None
+        assert _active_position_schedulers(f) == ["burn-front", "kl-ducb", "fractal"]

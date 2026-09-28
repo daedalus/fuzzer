@@ -520,7 +520,18 @@ offset.
 
 ---
 
-## 7. Benchmark plan (prerequisite: unresolved)
+## 7. Benchmark plan (prerequisite: option A built; nothing measured yet)
+
+> **Status.** Option A is implemented: `--pos-arena-arms` (`PositionArena(arms=...)`)
+> and bench arms `pos-arena-uniform` (control, baseline `elo`),
+> `pos-arena-{burn-front,kl-ducb,fractal,context,levy,round-robin,fibonacci}`
+> (baseline `pos-arena-uniform`) and `pos-arena-all` (`ARENA_TESTABLE`,
+> `POSITION_ARENA_ARMS` in `bench_paired.py`). Named `pos-arena-<n>`, not the
+> `pos-arena-only-<n>` proposed below. `cmplog`, `lineage` and the tracker arms
+> are not testable by subset alone (each joins only while its own feature is on;
+> an arm would need that flag and stop being a one-knob change). The
+> leave-one-out ablation (`arena{all minus X}`) is available from the flag but
+> has no registered arms yet. Runs on fuzzgoat/png/ffmpeg are still to do.
 
 **Existing gap.** No learned arm (`burn_front`, `kl_ducb`, `fractal`) has
 an A/B measurement. `tools/lib/bench_paired.py` currently defines only
