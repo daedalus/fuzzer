@@ -2366,7 +2366,7 @@ class Fuzzer:
             deltas_pruned_dir = self.corpus_dir / "deltas" / "pruned"
             if deltas_pruned_dir.exists():
                 pruned_count += sum(
-                    1 for fh in deltas_pruned_dir.glob("delta_*.json") if fh.is_file()
+                    1 for fh in deltas_pruned_dir.rglob("delta_*.json") if fh.is_file() and not fh.is_symlink()
                 )
             capacity = max(10 * len(self.corpus) + pruned_count, 100_000)
             self.cuckoo_seed_filter = CuckooFilter(capacity=capacity)
