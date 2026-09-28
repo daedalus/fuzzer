@@ -1755,6 +1755,10 @@ class CorpusManager:
                 mandatory.add(id(seed))
                 if f.corpus_dir:
                     self._promote_seed(seed)
+                # Remove recovered seed from cuckoo filter if present
+                if f.cuckoo_seed_filter is not None:
+                    h = self.seed_key(seed)
+                    f.cuckoo_seed_filter.remove(h)
                 recovered_count += 1
         if recovered_count:
             log.warning(
@@ -1771,6 +1775,13 @@ class CorpusManager:
         kept_set = {_hash(s) for s in unique}
         self._prune_files(kept_set)
         del kept_set  # free kept hashes after file pruning
+
+        # Add pruned seeds to the cuckoo seed filter if enabled
+        if f.cuckoo_seed_filter is not None:
+            for seed in f.corpus:
+                if seed not in unique:
+                    h = _hash(seed)
+                    f.cuckoo_seed_filter.add(h)
 
         f.corpus = unique
         self.rebuild_entropy()
