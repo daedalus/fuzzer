@@ -830,6 +830,7 @@ def cmd_fuzz(args):
         dedup_execs=not getattr(args, "no_dedup_execs", False),
         seed_calibration=not getattr(args, "no_calibration", False),
         exec_dedup_backend=getattr(args, "exec_dedup_backend", "bloom"),
+        cuckoo_seed_filter=getattr(args, "cuckoo_seed_filter", False),
         perf_novelty=not getattr(args, "no_perf_novelty", False),
         reject_code=getattr(args, "reject_code", None),
         op_span_reverse=getattr(args, "op_span_reverse", False),
@@ -4039,6 +4040,19 @@ def main() -> int:
             "in a CuckooFilter, which supports deletions and a lower realised "
             "false-positive rate per bit. Both expose the same update_bytes "
             "contract, so the choice is opt-in and the default is unchanged."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--cuckoo-seed-filter",
+        action="store_true",
+        default=False,
+        help=(
+            "Track pruned seeds in a CuckooFilter so their mutations are "
+            "skipped at dedup time. At startup, all seeds under corpus/seeds/pruned/ "
+            "are added to the filter. When a seed is pruned during minimization, "
+            "its hash is added. In _dedup_mutate(), if a mutation's hash matches "
+            "a pruned seed, the mutation is skipped (original data returned). "
+            "Disabled by default."
         ),
     )
     fuzz_parser.add_argument(
