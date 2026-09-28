@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Position-arena `cmplog` arm** (`--pos-cmplog`, implied by `--position-arena` and
+  `--hail-mary`): proposes redqueen offsets and Weizz-flagged spans (length, magic, checksum,
+  input-to-state) as landing sites for every operator. Passive, no persisted state; joins the
+  pool only while cmplog is live. Unmeasured (arena-only, like `kl_ducb`/`fractal`).
+
 - **SanitizerCoverage modes**: shim callbacks for `inline-8bit-counters`, `inline-bool-flag`,
   `pc-table`, `trace-loads`/`trace-stores` (previously failed to link). Counters/flags fold into
   the edge map; loads/stores of globals become data-flow features. ELF helpers recognise

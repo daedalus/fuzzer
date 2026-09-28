@@ -612,6 +612,7 @@ def cmd_fuzz(args):
         pos_fibonacci=getattr(args, "pos_fibonacci", False),
         pos_kl_ducb=getattr(args, "pos_kl_ducb", False),
         pos_fractal=getattr(args, "pos_fractal", False),
+        pos_cmplog=getattr(args, "pos_cmplog", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -2058,6 +2059,7 @@ _HAIL_MARY_FLAGS = (
     "pos_fibonacci",
     "pos_kl_ducb",
     "pos_fractal",
+    "pos_cmplog",
     "position_arena",
 )
 
@@ -2594,6 +2596,15 @@ def main() -> int:
         "fixed bin width. Implied by --position-arena, which always fields it as an arm.",
     )
     fuzz_parser.add_argument(
+        "--pos-cmplog",
+        action="store_true",
+        help="Enable the position-arena cmplog scheduler: proposes offsets on redqueen "
+        "comparison operands and Weizz-flagged spans (length, magic, checksum, "
+        "input-to-state) for every operator, not just redqueen. Passive (learns "
+        "nothing) and only joins the arena pool while --cmplog is live. Implied by "
+        "--position-arena.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
@@ -2601,7 +2612,7 @@ def main() -> int:
         "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
-        "--pos-fibonacci and --pos-fractal. Enabled by --hail-mary.",
+        "--pos-fibonacci, --pos-fractal and --pos-cmplog. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--exp3-gamma",

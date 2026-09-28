@@ -700,6 +700,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("kl-ducb")
     if getattr(f, "_pos_fractal", None) is not None:
         names.append("fractal")
+    if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
+        names.append("cmplog")
     if _pos_canary_live(f):
         names.append("canary")
     if getattr(f, "_pos_round_robin", None) is not None:
@@ -1441,6 +1443,11 @@ class Fuzzer:
         # tree that refines only where gain heat concentrates (see
         # core/schedulers/pos_fractal.py). The arena always fields it too.
         pos_fractal=False,
+        # Position arena's comparison-operand proposer: redqueen offsets and
+        # Weizz-flagged spans, for every operator (see
+        # core/schedulers/pos_cmplog.py). Joins the pool only while cmplog is
+        # live; the arena fields it whenever it is on.
+        pos_cmplog=False,
         # Appended: positional signature (see region_profile above).
         target_schedule=TargetSchedule.WEIGHTED,
     ):
@@ -2611,6 +2618,21 @@ class Fuzzer:
 
             self._pos_fractal = PositionFractalScheduler(self._rng)
             log.info("Position fractal scheduling enabled")
+        # Position-arena cmplog: redqueen offsets + Weizz-flagged spans as
+        # targets for any operator (see core/schedulers/pos_cmplog.py).
+        # Tracker-style: the arena gates it on cmplog being live.
+        self._pos_cmplog = None
+        if pos_cmplog or position_arena:
+            from fuzzer_tool.core.schedulers.pos_cmplog import PositionCmplogScheduler
+
+            self._pos_cmplog = PositionCmplogScheduler(
+                self._rng,
+                meta_of=lambda d: self.seed_meta.get(d),
+                smap_of=self._operators._weizz_structure_map,
+            )
+            log.info("Position cmplog scheduling enabled")
+            if pos_cmplog and not cmplog:
+                log.warning("--pos-cmplog needs cmplog, which is off: the arm stays out of the pool")
         self._use_position_arena = position_arena
         self._position_arena = None
         if position_arena:
@@ -2628,6 +2650,7 @@ class Fuzzer:
                 round_robin=self._pos_round_robin,
                 fibonacci=self._pos_fibonacci,
                 fractal=self._pos_fractal,
+                cmplog=self._pos_cmplog,
             )
             log.info("Position arena enabled (Elo over pos_ strategies)")
         self._use_ecofuzz = ecofuzz

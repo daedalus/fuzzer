@@ -34,6 +34,7 @@ from fuzzer_tool.core.schedulers.pos_burn_front import (
 )
 from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
+from fuzzer_tool.core.schedulers.pos_cmplog import PositionCmplogScheduler
 from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
@@ -536,6 +537,7 @@ class _Fuzzer:
             if enabled.get("field", False)
             else None
         )
+        self._cmplog = object() if enabled.get("cmplog", False) else None
         self.phase_calls = []
 
     def _get_te_weighted_position(self, _n):
@@ -554,6 +556,7 @@ def _arena(
     round_robin=None,
     fibonacci=None,
     fractal=None,
+    cmplog=None,
     region=lambda d, n: 55,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
@@ -566,6 +569,7 @@ def _arena(
         round_robin=round_robin,
         fibonacci=fibonacci,
         fractal=fractal,
+        cmplog=cmplog,
     )
 
 
@@ -633,6 +637,58 @@ class TestPool:
         _, arena = _arena(fractal=PositionFractalScheduler(RandPool(seed=1)))
         assert "fractal" in arena.pool()
 
+    def _cmplog_arm(self, meta):
+        f = _Fuzzer(cmplog=True)
+        f.seed_meta = {SEED: meta}
+        sched = PositionCmplogScheduler(
+            RandPool(seed=1), meta_of=f.seed_meta.get, smap_of=lambda d: None
+        )
+        return f, sched
+
+    def test_cmplog_joins_only_while_cmplog_is_live(self):
+        f, sched = self._cmplog_arm({"redqueen_offsets": [40]})
+        _, arena = _arena(f, cmplog=sched)
+        assert "cmplog" in arena.pool()
+        f._cmplog = None  # collector gone (start failed / cmplog off)
+        assert "cmplog" not in arena.pool()
+
+    def test_cmplog_absent_when_not_supplied(self):
+        _, arena = _arena(_Fuzzer(cmplog=True))
+        assert "cmplog" not in arena.pool()
+
+    def test_cmplog_serves_a_redqueen_offset(self):
+        f, _ = self._cmplog_arm({})
+        f.seed_meta = {SEED: {"redqueen_offsets": [40]}}
+
+        class _NoEscape:  # never the uniform escape, no jitter
+            random = staticmethod(lambda: 0.99)
+            randint = staticmethod(lambda a, b: 0 if a <= 0 <= b else a)
+            weighted_choice = staticmethod(lambda seq, w: seq[0])
+
+        sched = PositionCmplogScheduler(
+            _NoEscape(), meta_of=f.seed_meta.get, smap_of=lambda d: None
+        )
+        _, arena = _arena(f, cmplog=sched)
+        _force(f, "cmplog")
+        assert arena.select(SEED, len(SEED)) == 40
+        assert arena.used() == ["cmplog"]
+
+    def test_cmplog_declines_to_uniform_but_stays_charged(self):
+        f, sched = self._cmplog_arm({})  # no cmplog data on this seed
+        _, arena = _arena(f, cmplog=sched)
+        _force(f, "cmplog")
+        assert 0 <= arena.select(SEED, len(SEED)) < len(SEED)
+        assert arena.used() == ["cmplog"]
+
+    def test_cmplog_is_not_an_off_policy_extra(self):
+        # Passive tracker-style arm: settle() must not feed it.
+        f, sched = self._cmplog_arm({"redqueen_offsets": [40]})
+        seen = []
+        sched.record = lambda *a, **k: seen.append(a)
+        _, arena = _arena(f, cmplog=sched)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert seen == []
+
     def test_kl_ducb_joins_when_supplied(self):
         _, arena = _arena(kl_ducb=PositionKLDUCBScheduler(RandPool(seed=1)))
         assert "kl_ducb" in arena.pool()
@@ -664,7 +720,7 @@ class TestPool:
         assert "field" not in arena.pool()
 
     def test_every_pool_name_is_registered(self):
-        f = _Fuzzer(sensitivity=True, te=True, mi=True, region=True, field=True)
+        f = _Fuzzer(sensitivity=True, te=True, mi=True, region=True, field=True, cmplog=True)
         f._crash_mi = SimpleNamespace(
             total_execs=9, min_observations=1, weighted_position=lambda n: 1
         )
@@ -676,6 +732,9 @@ class TestPool:
             round_robin=PositionRoundRobinScheduler(),
             fibonacci=PositionFibonacciScheduler(),
             fractal=PositionFractalScheduler(RandPool(seed=1)),
+            cmplog=PositionCmplogScheduler(
+                RandPool(seed=1), meta_of=lambda d: None, smap_of=lambda d: None
+            ),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -979,7 +1038,7 @@ class TestFuzzerWiring:
         # Contiguous block; later params (e.g. target_schedule) may follow.
         names = list(params)
         start = names.index("burn_front")
-        assert names[start : start + 7] == [
+        assert names[start : start + 8] == [
             "burn_front",
             "position_arena",
             "pos_canary",
@@ -987,6 +1046,7 @@ class TestFuzzerWiring:
             "pos_fibonacci",
             "pos_kl_ducb",
             "pos_fractal",
+            "pos_cmplog",
         ]
         assert params["burn_front"].default is False
         assert params["position_arena"].default is False
@@ -995,6 +1055,7 @@ class TestFuzzerWiring:
         assert params["pos_fibonacci"].default is False
         assert params["pos_kl_ducb"].default is False
         assert params["pos_fractal"].default is False
+        assert params["pos_cmplog"].default is False
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
@@ -1018,6 +1079,7 @@ class TestFuzzerWiring:
             "pos_fibonacci",
             "pos_kl_ducb",
             "pos_fractal",
+            "pos_cmplog",
         }
         for c in calls:
             kw = {k.arg for k in c.keywords}
@@ -1089,6 +1151,44 @@ class TestRealConstruction:
         assert isinstance(f._pos_fractal, PositionFractalScheduler)
         assert "fractal" in f._position_arena.pool()
 
+    def test_position_arena_implies_cmplog_scheduler(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_cmplog, PositionCmplogScheduler)
+        # In the pool exactly when the cmplog collector is live.
+        assert ("cmplog" in f._position_arena.pool()) == (f._cmplog is not None)
+
+    def test_cmplog_arm_end_to_end_on_a_real_fuzzer(self, tmp_path):
+        # Real Fuzzer, real OperatorEngine._weizz_structure_map, real
+        # StructureMap RLE round trip: the arm serves a flagged span.
+        from fuzzer_tool.core.weizz_tags import ByteTag, StructureMap, TagFlags
+
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        seed = bytes(range(64))
+        tags = [ByteTag() for _ in range(64)]
+        for i in range(20, 24):
+            tags[i] = ByteTag(cmp_id=1, flags=TagFlags.IS_LEN)
+        f.seed_meta[seed] = {
+            "weizz_tags_rle": StructureMap(tags=tags).to_rle(),
+            "weizz_tags_len": 64,
+        }
+        f._cmplog = object()  # collector live (real start needs the shim)
+        assert "cmplog" in f._position_arena.pool()
+        assert "cmplog" in __import__(
+            "fuzzer_tool.services.fuzzer", fromlist=["x"]
+        )._active_position_schedulers(f)
+        _force(f, "cmplog")
+        hits = [f._position_arena.select(seed, 64) for _ in range(400)]
+        in_span = sum(20 <= h < 24 for h in hits)
+        # ~90% served from the span (10% uniform escape); uniform alone gives ~6%.
+        assert in_span > 300
+        f._cmplog = None
+        assert "cmplog" not in f._position_arena.pool()
+
+    def test_pos_cmplog_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_cmplog=True)
+        assert isinstance(f._pos_cmplog, PositionCmplogScheduler)
+        assert f._position_arena is None
+
     def test_pos_fractal_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, pos_fractal=True)
         assert isinstance(f._pos_fractal, PositionFractalScheduler)
@@ -1136,6 +1236,7 @@ class TestRealConstruction:
         assert args.pos_fibonacci is True
         assert args.pos_kl_ducb is True
         assert args.pos_fractal is True
+        assert args.pos_cmplog is True
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 
     def test_position_arena_without_elo_warns_and_constructs(self, tmp_path, caplog):

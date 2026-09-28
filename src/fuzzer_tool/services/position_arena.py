@@ -34,6 +34,11 @@ Arms::
                  tree that only refines where coverage-gain heat
                  justifies it (opt-in, --pos-fractal; see
                  core/schedulers/pos_fractal.py)
+    cmplog       PositionCmplogScheduler, redqueen offsets + Weizz-flagged
+                 spans (len/magic/checksum/input-to-state). Tracker-style
+                 arm: joins the pool only while cmplog is live, never an
+                 off-policy extra (opt-in, --pos-cmplog; see
+                 core/schedulers/pos_cmplog.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
 matches. An arm that declines gets a uniform offset but is *charged under
@@ -82,6 +87,7 @@ POSITION_STRATEGY_NAMES = (
     "round_robin",
     "fibonacci",
     "fractal",
+    "cmplog",
 )
 
 Gate = Callable[[], bool]
@@ -99,6 +105,7 @@ class PositionArena:
         round_robin: PositionScheduler | None = None,
         fibonacci: PositionScheduler | None = None,
         fractal: PositionScheduler | None = None,
+        cmplog: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         self._uniform = UniformPosition(f._rng)
@@ -108,6 +115,7 @@ class PositionArena:
         self._round_robin = round_robin
         self._fibonacci = fibonacci
         self._fractal = fractal
+        self._cmplog = cmplog
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
         for extra in (burn_front, kl_ducb, canary, round_robin, fibonacci, fractal):
@@ -125,6 +133,10 @@ class PositionArena:
         def crash_ready() -> bool:
             cm = getattr(f, "_crash_mi", None)
             return bool(cm and cm.total_execs >= cm.min_observations)
+
+        def cmplog_ready() -> bool:
+            # Passive arm: only meaningful while cmplog is collecting.
+            return getattr(f, "_cmplog", None) is not None
 
         def field_ready() -> bool:
             fl = getattr(f, "_format_learner", None)
@@ -145,6 +157,8 @@ class PositionArena:
             ("region", region_fn, lambda: bool(getattr(f, "_use_region_profile", False))),
             ("field", lambda d, n: f._format_learner.weighted_position(d, n), field_ready),
         ]  # fmt: skip
+        if self._cmplog is not None:
+            specs.append(("cmplog", self._cmplog.propose, cmplog_ready))
         for name, fn, gate in specs:
             self._arms[name] = (CallablePosition(name, fn), gate)
 
