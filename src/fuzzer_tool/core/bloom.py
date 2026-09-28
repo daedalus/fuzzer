@@ -9,76 +9,136 @@ from collections import deque
 
 from fuzzer_tool.core.similarity import hamming_distance
 
+_M128 = (1 << 128) - 1
+
 
 class BloomFilter:
     """Bloom filter backed by a :class:`bytearray`.
 
-    Uses a single SHA-256 hash with bit-variable slicing to produce *k*
-    independent index positions from the 256-bit digest.  The filter size *m*
-    is rounded up to a power of two so that fast bitwise masking (``& (m-1)``)
-    can replace modulo.
+    One SHA-256 digest per key supplies all *k* bit positions.  The filter
+    size *m* is rounded up to a power of two so that bitwise masking
+    (``& (m-1)``) can replace modulo.  The rounding is a deliberate speed
+    trade-off: it can hand out up to 2x the memory the requested
+    ``error_rate`` needs, in which case the realised rate is *better* than
+    requested (never worse).  See :attr:`expected_fpr` / :attr:`memory_bytes`.
+
+    Position derivation:
+
+    * **Sliced** (``k * log2(m) <= 256``): position *i* is the *i*-th
+      ``log2(m)``-bit slice of the digest.  Fully independent probes.
+    * **Double hashing** (otherwise): Kirsch-Mitzenmacher,
+      ``pos_i = (h1 + i * h2) & mask`` with ``h1``/``h2`` the two 128-bit
+      digest halves and ``h2`` forced odd (full period on a power-of-two
+      table).  Same asymptotic false-positive rate as *k* independent
+      hashes, so tight ``error_rate`` values (~1e-5 and below) are honoured
+      instead of silently clamping *k* to what 256 bits can slice.
 
     Each position *p* is mapped to a byte in the backing array and a bit
     within that byte::
 
-        byte_idx = (p & mask) >> 3
-        bit_idx  = (p & mask) & 7
+        byte_idx = p >> 3
+        bit_idx  = p & 7
+
+    Overfilling (``n_added > capacity``) only degrades the filter towards
+    "always maybe"; it never produces a false negative.  Callers that pair
+    it with an exact set (``adapters/filesystem.py``) stay correct, so the
+    corpus filter deliberately has no reset: forgetting keys there would
+    turn into false negatives.  Use ``update_bytes(reset_on_full=True)`` for
+    a bounded generational filter.
     """
 
-    #: Width of the single backing digest.  ``k * bits_per_slice`` must not
-    #: exceed this or the tail slices address position 0 for every key.
+    #: Width of the single backing digest.  Sliced mode requires
+    #: ``k * bits_per_slice <= DIGEST_BITS``; beyond that, double hashing.
     DIGEST_BITS = 256
 
     def __init__(self, capacity: int, error_rate: float = 0.01) -> None:
-        n = max(capacity, 1)
+        if capacity < 1:
+            raise ValueError("capacity must be >= 1")
+        if not (0.0 < error_rate < 1.0):
+            raise ValueError("error_rate must be in the open interval (0, 1)")
+        n = capacity
         self.capacity = n
+        self.error_rate = error_rate
         m_ideal = -n * math.log(error_rate) / (math.log(2) ** 2)
         # Smallest power of two >= m_ideal.  ``int(x).bit_length()`` overshoots
         # by a full doubling whenever m_ideal is already a power of two.
         self.m = 1 << max(1, (max(int(m_ideal), 1) - 1).bit_length())
         self._mask = self.m - 1
         self._bits_per_slice = self.m.bit_length() - 1
-        k_ideal = max(1, round(self.m / n * math.log(2)))
-        # A single SHA-256 supplies only 256 bits.  Past
-        # ``256 // bits_per_slice`` slices the shift register is exhausted and
-        # every further position collapses to 0, so the extra "hashes" are a
-        # constant probe that inflates the realised false-positive rate above
-        # the requested one.  Clamp instead of silently over-promising.
-        self._k_ideal = k_ideal
-        self._k = max(1, min(k_ideal, self.DIGEST_BITS // self._bits_per_slice))
+        self._k_ideal = max(1, round(self.m / n * math.log(2)))
+        # Independent slicing is only possible while all k slices fit in one
+        # digest; otherwise fall back to double hashing rather than shrinking
+        # k (which used to inflate the realised rate above the requested one).
+        self._double = self._k_ideal * self._bits_per_slice > self.DIGEST_BITS
+        self._k = self._k_ideal
 
         self._byte_len = (self.m + 7) // 8
         self._bits = bytearray(self._byte_len)
         self.n_added = 0
+        self._recent_keys: deque[bytes] | None = None
 
     @property
     def digest_limited(self) -> bool:
-        """True when *k* had to be clamped to fit in the 256-bit digest."""
-        return self._k < self._k_ideal
+        """True when *k* is too large to slice from one digest, so double
+        hashing is in use.  (*k* itself is never reduced.)"""
+        return self._double
+
+    @property
+    def memory_bytes(self) -> int:
+        return self._byte_len
+
+    @property
+    def over_capacity(self) -> bool:
+        """True once more than ``capacity`` keys have been absorbed."""
+        return self.n_added > self.capacity
+
+    @property
+    def expected_fpr(self) -> float:
+        """Estimated false-positive rate at the current ``n_added``."""
+        return (1.0 - math.exp(-self._k * self.n_added / self.m)) ** self._k
 
     @staticmethod
     def _digest(key: str) -> int:
         return int.from_bytes(hashlib.sha256(key.encode("utf-8")).digest(), "big")
 
     def _check(self, value: int) -> bool:
+        bits = self._bits
+        mask = self._mask
+        if self._double:
+            h = value & _M128
+            step = (value >> 128) | 1
+            for _ in range(self._k):
+                pos = h & mask
+                if not (bits[pos >> 3] & (1 << (pos & 7))):
+                    return False
+                h += step
+            return True
         v = value
+        shift = self._bits_per_slice
         for _ in range(self._k):
-            pos = v & self._mask
-            byte_idx = pos >> 3
-            bit_idx = pos & 7
-            if not (self._bits[byte_idx] & (1 << bit_idx)):
+            pos = v & mask
+            if not (bits[pos >> 3] & (1 << (pos & 7))):
                 return False
-            v >>= self._bits_per_slice
+            v >>= shift
         return True
 
     def _set(self, value: int) -> None:
-        v = value
-        for _ in range(self._k):
-            pos = v & self._mask
-            byte_idx = pos >> 3
-            bit_idx = pos & 7
-            self._bits[byte_idx] |= 1 << bit_idx
-            v >>= self._bits_per_slice
+        bits = self._bits
+        mask = self._mask
+        if self._double:
+            h = value & _M128
+            step = (value >> 128) | 1
+            for _ in range(self._k):
+                pos = h & mask
+                bits[pos >> 3] |= 1 << (pos & 7)
+                h += step
+        else:
+            v = value
+            shift = self._bits_per_slice
+            for _ in range(self._k):
+                pos = v & mask
+                bits[pos >> 3] |= 1 << (pos & 7)
+                v >>= shift
         self.n_added += 1
 
     def add(self, key: str) -> None:
@@ -120,62 +180,51 @@ class BloomFilter:
     @property
     def load_factor(self) -> float:
         """Fraction of bits set to 1."""
-        bits_set = sum(b.bit_count() for b in self._bits)
-        return bits_set / self.m
+        return int.from_bytes(self._bits, "little").bit_count() / self.m
 
     def clear(self) -> None:
         self._bits = bytearray(self._byte_len)
         self.n_added = 0
+        if self._recent_keys is not None:
+            self._recent_keys.clear()
 
     def add_bytes(self, key: bytes, max_hamming: int = 0) -> bool:
-        """Add bytes as a key, optionally checking for near-duplicates via Hamming distance.
+        """Add raw bytes, optionally rejecting near-duplicates by Hamming distance.
 
-        When max_hamming > 0, checks the most recent N keys (where N = max_hamming's
-        reciprocal heuristic, capped at 200) before adding. Returns True if a
-        near-duplicate was found (key NOT added), False if unique (key added).
+        Uses the same keyspace as :meth:`update_bytes` (SHA-256 of the raw
+        bytes), so the two APIs agree on membership.  The str API
+        (:meth:`add` / :meth:`query` / :meth:`update`) is a separate keyspace.
 
-        Args:
-            key: Raw bytes to add.
-            max_hamming: Maximum Hamming distance to consider a near-duplicate.
-                0 disables fuzzy checking (exact-only, same as add()).
+        With ``max_hamming > 0`` the key is also compared against the most
+        recently added keys of the *same length* (up to the ``max_recent``
+        given to :meth:`init_fuzzy`, default 200); the buffer is created on
+        first use if :meth:`init_fuzzy` was not called.
 
         Returns:
-            True if a near-duplicate was found and key was skipped.
+            True if the key was an exact or near duplicate (NOT added),
+            False if it was unique (added).
         """
-        if not hasattr(self, "_recent_keys"):
-            self.add(key.hex())
-            return False
-
-        key_hex = key.hex()
-        if self._check(self._digest(key_hex)):
+        value = int.from_bytes(hashlib.sha256(key).digest(), "big")
+        if self._check(value):
             return True  # exact match already in filter
 
-        if max_hamming <= 0:
-            self._set(self._digest(key_hex))
-            self._recent_keys.append(key)
-            if len(self._recent_keys) > 200:
-                self._recent_keys.popleft()
-            return False
-
-        for recent in self._recent_keys:
-            try:
-                if hamming_distance(key, recent) <= max_hamming:
+        if max_hamming > 0:
+            if self._recent_keys is None:
+                self.init_fuzzy()
+            klen = len(key)
+            for recent in self._recent_keys:  # type: ignore[union-attr]
+                if len(recent) == klen and hamming_distance(key, recent) <= max_hamming:
                     return True
-            except ValueError:
-                continue
 
-        self._set(self._digest(key_hex))
-        self._recent_keys.append(key)
-        if len(self._recent_keys) > 200:
-            self._recent_keys.popleft()
+        self._set(value)
+        if self._recent_keys is not None:
+            self._recent_keys.append(key)
         return False
 
     def init_fuzzy(self, max_recent: int = 200) -> None:
-        """Initialize recent-keys buffer for fuzzy Hamming dedup.
-
-        Must be called before add_bytes() with max_hamming > 0.
+        """Initialize (or reset) the recent-keys buffer for fuzzy Hamming dedup.
 
         Args:
             max_recent: Maximum recent keys to track for Hamming comparison.
         """
-        self._recent_keys: deque[bytes] = deque(maxlen=max_recent)
+        self._recent_keys = deque(maxlen=max_recent)

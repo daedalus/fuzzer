@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`BloomFilter` scaling and API consistency** (`core/bloom.py`):
+  - Tight `error_rate` values are now honoured. When `k * log2(m)` exceeds the 256-bit digest,
+    positions come from Kirsch-Mitzenmacher double hashing (`h1 + i*h2`, `h2` odd) instead of
+    clamping *k* (which made 1M@1e-6 realise 1.29e-6 and 2M@1e-9 realise 7.7e-9). Configs that fit
+    in one digest keep their exact historic slice positions. The exec-dedup filter (500k@1e-3) now
+    uses the full k=12 (was clamped to 11). `digest_limited` now means "double hashing in use".
+  - Constructor validates arguments: `capacity >= 1`, `0 < error_rate < 1` (was a bare
+    `math domain error`, or silent nonsense for `error_rate >= 1` / `capacity <= 0`).
+  - `add_bytes` now deduplicates without `init_fuzzy()` (it used to return False forever), hashes
+    the raw bytes so it shares a keyspace with `update_bytes` (was the hex string), skips
+    different-length keys before calling `hamming_distance` instead of catching `ValueError`
+    (mixed-length fuzzy add 573 us -> 30 us), auto-creates the recent-keys buffer, and `clear()`
+    drops it.
+  - `load_factor` uses `int.bit_count()` on the whole array: 36 ms -> 1.4 ms at 8M bits.
+  - New introspection: `expected_fpr`, `over_capacity`, `memory_bytes`; docstring documents the
+    power-of-two rounding trade-off (up to 2x memory, realised rate never worse than requested)
+    and that overfilling degrades to "always maybe" without false negatives. The corpus filter
+    intentionally gets no reset: `adapters/filesystem.py` treats a bloom miss as "new", so
+    forgetting keys would cause duplicate saves.
+  - Tests: `tests/test_bloom_scaling.py`; `tests/test_bloom_exec_dedup.py` digest-budget tests
+    updated for double hashing.
+
 - **`CuckooFilter` load scaling** (`core/cuckoo.py`):
   - Bucket count is now sized against `MAX_LOAD = 0.90` (was `capacity // bucket_size` rounded up
     to a power of two, which put capacities like 500_000 and every power of two at 0.95-1.00 load,

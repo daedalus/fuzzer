@@ -11,7 +11,8 @@ from fuzzer_tool.services.fuzzer import EXEC_DEDUP_RETRIES, Fuzzer
 class TestDigestBudget:
     def test_k_never_exceeds_digest_width(self):
         # Tight error rates push the ideal k past what a single SHA-256 can
-        # supply. Every configuration must still fit inside 256 bits.
+        # slice. Such configurations must switch to double hashing (k kept)
+        # instead of running out of digest bits.
         for capacity, error_rate in [
             (1_000, 1e-3),
             (10_000, 1e-4),
@@ -20,8 +21,10 @@ class TestDigestBudget:
             (5_000_000, 1e-9),
         ]:
             bf = BloomFilter(capacity=capacity, error_rate=error_rate)
-            assert bf._k * bf._bits_per_slice <= BloomFilter.DIGEST_BITS
             assert bf._k >= 1
+            assert bf._k == bf._k_ideal
+            if not bf.digest_limited:
+                assert bf._k * bf._bits_per_slice <= BloomFilter.DIGEST_BITS
 
     def test_digest_limited_flag_reports_clamping(self):
         loose = BloomFilter(capacity=100_000, error_rate=0.01)
@@ -30,7 +33,7 @@ class TestDigestBudget:
 
         tight = BloomFilter(capacity=1_000_000, error_rate=1e-6)
         assert tight.digest_limited
-        assert tight._k < tight._k_ideal
+        assert tight._k == tight._k_ideal  # k is no longer clamped
 
     def test_clamped_filter_still_honours_error_rate(self):
         bf = BloomFilter(capacity=10_000, error_rate=1e-4)
