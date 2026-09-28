@@ -65,6 +65,26 @@ score. `spectral_scores()` on 2000 seeds takes ~240 ms, fine for offline compari
 run on every pick. Not tried: a larger ridge, richer features, or applying the null calibration to
 the spectral score itself.
 
+## Null calibration applied to the spectral score (added same day)
+
+`calibrated_spectral_scores()` = `clip((F - mean0(n)) / sd0(n), 0, Z_CAP)`, the same construction as
+`scores()`. F has no closed-form null, so `mean0` and `sd0` are Monte-Carlo (200 draws per grid
+point, fixed-seed private generator, `null_spectral_curve`) on the same power-of-two grid,
+log-log interpolated, rebuilt when the pool drifts 2 % in L1.
+
+Over 6 runs: Spearman(score, length) on single-distribution corpora -0.988 -> **-0.043**
+(range -0.09..-0.01); <= 64 B weight share 0.92-1.18x uniform (mean 1.09). Mean AUC diverging vs
+matching, mixed lengths: raw plug-in 0.72, Miller-Madow 0.75, raw spectral 0.83, **calibrated
+spectral 0.94**, **calibrated plug-in 0.97** (range 0.95-0.99). So calibration removes the length
+bias from the spectral score and lifts it 0.83 -> 0.94, but it still trails the calibrated
+plug-in on this benchmark; the shift here is a high-byte mass move that the nibble features only
+partly express, so a benchmark whose divergence lives in shared structure may rank them
+differently. Not measured on real corpora.
+
+Cost: null-curve rebuild ~310 ms, and `spectral_scores()` is recomputed on every call (~240 ms for
+2000 seeds), so this is an offline comparison, not a per-pick score. Not tried: caching the
+spectral rows across calls, larger ridge, richer features.
+
 ## Costs and limits
 
 - Pick after an admission into a 2000-seed corpus: ~13 ms (was 1.0 ms). `E0` is rebuilt on each

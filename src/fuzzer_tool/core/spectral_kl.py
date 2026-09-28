@@ -129,3 +129,31 @@ def spectral_kl_rows_bits(
     out = _spectral_stack(mu_p, sigma_p, mu_q, sigma_q, ridge) / _LN2
     out[~rows.any(axis=1)] = 0.0
     return out
+
+
+def null_spectral_curve(
+    q: np.ndarray,
+    grid: object,
+    draws: int = 200,
+    seed: int = 0,
+    phi: np.ndarray | None = None,
+    ridge: float = DEFAULT_RIDGE,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Mean and std-dev, in bits, of F for n draws from ``q``, for each n in ``grid``.
+
+    The spectral score has no closed-form null (unlike plug-in KL), so both
+    moments are Monte-Carlo over ``draws`` multinomial samples per n from a
+    private fixed-seed generator: a calibration table, never a scheduling
+    decision, and reproducible.
+    """
+    probs = np.asarray(q, dtype=np.float64)
+    probs = probs / probs.sum()
+    gen = np.random.Generator(np.random.PCG64(seed))
+    means: list[float] = []
+    sds: list[float] = []
+    for n in np.asarray(grid, dtype=np.int64):
+        rows = gen.multinomial(int(n), probs, size=draws).astype(np.float64) / n
+        bits = spectral_kl_rows_bits(rows, probs, phi, ridge)
+        means.append(float(bits.mean()))
+        sds.append(float(bits.std(ddof=1)))
+    return np.asarray(means), np.asarray(sds)

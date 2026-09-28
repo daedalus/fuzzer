@@ -74,7 +74,11 @@ from fuzzer_tool.core.byte_entropy import (
     byte_histogram,
     entropy_bits_from_counts,
 )
-from fuzzer_tool.core.spectral_kl import nibble_features, spectral_kl_rows_bits
+from fuzzer_tool.core.spectral_kl import (
+    nibble_features,
+    null_spectral_curve,
+    spectral_kl_rows_bits,
+)
 
 #: Floor added to every weight so a seed matching the pool exactly (KL 0)
 #: is rare rather than unreachable. Matches seed_kruskal_count.
@@ -205,6 +209,10 @@ class EntropyKLSeedStrategy:
         self._null_log_n = np.log(_null_grid(cap))
         self._null_log_v = np.zeros_like(self._null_log_n)
         self._null_log_sd = np.zeros_like(self._null_log_n)
+        # Null mean / spread of the *spectral* score, same grid, own pool ref.
+        self._spec_null_q: np.ndarray | None = None
+        self._spec_null_mean = np.zeros_like(self._null_log_n)
+        self._spec_null_sd = np.ones_like(self._null_log_n)
         # Bumped on every fold/unfold; _kl is stale while it disagrees with
         # _scored_at, which is cheaper than diffing 256 pooled bins.
         self._pool_version = 0
@@ -247,6 +255,45 @@ class EntropyKLSeedStrategy:
         q = np.asarray(self._pool.freq_dist(), dtype=np.float64)
         bits = spectral_kl_rows_bits(self._probs[:used], q, _NIBBLES)
         return [float(bits[self._index[seed]]) if seed in self._index else 0.0 for seed in seeds]
+
+    def calibrated_spectral_scores(self, seeds: list[bytes]) -> list[float]:
+        """Length-calibrated spectral score: ``clip((F - mean0(n)) / sd0(n), 0, Z_CAP)``.
+
+        Same construction as :meth:`scores`, applied to :meth:`spectral_scores`
+        because the raw spectral bound keeps the length bias (Spearman -0.99
+        against seed length on single-distribution corpora). F has no
+        closed-form null, so ``mean0`` and ``sd0`` are Monte-Carlo on the
+        power-of-two grid (:func:`null_spectral_curve`), log-log interpolated,
+        and rebuilt when the pool has drifted :data:`NULL_STALE_L1`.
+        """
+        raw = np.asarray(self.spectral_scores(seeds), dtype=np.float64)
+        if not len(seeds):
+            return []
+        q = np.asarray(self._pool.freq_dist(), dtype=np.float64)
+        self._refresh_spectral_null(q)
+        lengths = np.array(
+            [int(self._n[self._index[s]]) if s in self._index else 0 for s in seeds],
+            dtype=np.int64,
+        )
+        log_len = np.log(np.maximum(lengths, 1))
+        mean0 = np.interp(log_len, self._null_log_n, self._spec_null_mean)
+        sd0 = np.interp(log_len, self._null_log_n, self._spec_null_sd)
+        z = np.clip((raw - mean0) / sd0, 0.0, Z_CAP)
+        z[lengths < 1] = 0.0
+        out: list[float] = z.tolist()
+        return out
+
+    def _refresh_spectral_null(self, q: np.ndarray) -> None:
+        ref = self._spec_null_q
+        if ref is not None and float(np.abs(q - ref).sum()) <= NULL_STALE_L1:
+            return
+        grid = np.exp(self._null_log_n).round()
+        mean, sd = null_spectral_curve(
+            q, grid, draws=NULL_MC_DRAWS, seed=NULL_MC_SEED, phi=_NIBBLES
+        )
+        self._spec_null_mean = mean
+        self._spec_null_sd = np.maximum(sd, NULL_MIN_SD)
+        self._spec_null_q = q
 
     def miller_madow_scores(self, seeds: list[bytes]) -> list[float]:
         """Plug-in KL minus the Miller-Madow bias, ``(K_hat - 1) / (2 n ln 2)`` bits.
