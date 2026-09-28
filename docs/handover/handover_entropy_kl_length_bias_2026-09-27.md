@@ -81,9 +81,18 @@ plug-in on this benchmark; the shift here is a high-byte mass move that the nibb
 partly express, so a benchmark whose divergence lives in shared structure may rank them
 differently. Not measured on real corpora.
 
-Cost: null-curve rebuild ~310 ms, and `spectral_scores()` is recomputed on every call (~240 ms for
-2000 seeds), so this is an offline comparison, not a per-pick score. Not tried: caching the
-spectral rows across calls, larger ridge, richer features.
+Cost: null-curve rebuild ~310 ms. `spectral_scores()` rows are now cached per pool version (see
+below); not tried: larger ridge, richer features.
+
+**Row cache (added same day).** Profile at N = 2000: `eigh` 197 ms, `rows @ outer` 20 ms, congruence
+14 ms (total 232 ms). The eigendecomposition depends on the pool (through Sigma_q), so only the
+result can be cached, not the intermediates: `_spec_bits` is valid until `_pool_version` moves
+(fold and unfold both bump it) and is recomputed as one batch on demand. Measured: repeat call
+232 ms -> 0.5 ms (calibrated 237 ms -> 1.2 ms); the first call and the call after a corpus
+admission or eviction are unchanged (~250 ms). So it is now cheap per pick between admissions and
+costs a quarter of a second at each corpus change, which is acceptable for a baseline but is why
+it is still not wired into selection. Caching `rows @ outer` (16 MB at N = 2000) would save 20 ms of
+that 250 ms and was not worth it.
 
 ## Null calibration applied to `entropy_zscore` (opt-in, added same day)
 

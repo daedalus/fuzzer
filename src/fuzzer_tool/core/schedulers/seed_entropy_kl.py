@@ -213,6 +213,11 @@ class EntropyKLSeedStrategy:
         self._spec_null_q: np.ndarray | None = None
         self._spec_null_mean = np.zeros_like(self._null_log_n)
         self._spec_null_sd = np.ones_like(self._null_log_n)
+        # Spectral bits per seed for the pool at ``_spec_at``: a row depends
+        # on its own histogram and on the pool, so it is valid until the pool
+        # moves and is recomputed as a batch (one stacked eigh) on demand.
+        self._spec_bits: dict[bytes, float] = {}
+        self._spec_at = -1
         # Bumped on every fold/unfold; _kl is stale while it disagrees with
         # _scored_at, which is cheaper than diffing 256 pooled bins.
         self._pool_version = 0
@@ -242,7 +247,10 @@ class EntropyKLSeedStrategy:
 
         See :mod:`fuzzer_tool.core.spectral_kl`. Shares strength across byte
         values through 32 nibble features instead of 256 free bins, which
-        damps the sampling noise of a short seed's histogram. It is a
+        damps the sampling noise of a short seed's histogram. Rows are cached
+        per pool version (a repeat call is a dict lookup; an admission or
+        eviction recomputes the batch, ~230 ms at 2000 seeds, 85 % of it the
+        eigendecomposition, which depends on the pool). It is a
         different divergence (KL restricted to what the features see), not a
         drop-in for the plug-in number, and it still carries a length bias
         -- a baseline measured against :meth:`scores`, not the scheduling
@@ -252,9 +260,12 @@ class EntropyKLSeedStrategy:
         used = len(self._keys)
         if not used:
             return [0.0] * len(seeds)
-        q = np.asarray(self._pool.freq_dist(), dtype=np.float64)
-        bits = spectral_kl_rows_bits(self._probs[:used], q, _NIBBLES)
-        return [float(bits[self._index[seed]]) if seed in self._index else 0.0 for seed in seeds]
+        if self._spec_at != self._pool_version:
+            q = np.asarray(self._pool.freq_dist(), dtype=np.float64)
+            bits = spectral_kl_rows_bits(self._probs[:used], q, _NIBBLES)
+            self._spec_bits = dict(zip(self._keys, bits.tolist(), strict=True))
+            self._spec_at = self._pool_version
+        return [self._spec_bits.get(seed, 0.0) for seed in seeds]
 
     def calibrated_spectral_scores(self, seeds: list[bytes]) -> list[float]:
         """Length-calibrated spectral score: ``clip((F - mean0(n)) / sd0(n), 0, Z_CAP)``.
@@ -373,6 +384,7 @@ class EntropyKLSeedStrategy:
         self._keys.pop()
         self._kl.pop(seed, None)
         self._raw_kl.pop(seed, None)
+        self._spec_bits.pop(seed, None)
         if not seed[: self._cap]:
             return
 
