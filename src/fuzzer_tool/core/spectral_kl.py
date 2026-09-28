@@ -100,7 +100,8 @@ def _spectral_stack(
     d_tilde = (mu_p - mu_q[None, :]) @ chol_inv.T
     coef = np.einsum("nm,nmk->nk", d_tilde, vecs)
     total: np.ndarray = np.sum(coef * coef * _kl_weight(lam), axis=1)
-    return np.maximum(total, 0.0)
+    clipped: np.ndarray = np.maximum(total, 0.0)
+    return clipped
 
 
 def spectral_kl_rows_bits(
