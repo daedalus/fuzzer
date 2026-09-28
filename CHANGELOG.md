@@ -112,6 +112,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   into selection). `calibrated_spectral_scores()` applies the same null calibration to it
   (Spearman with seed length -0.99 -> -0.04; AUC 0.83 -> 0.94, still below the calibrated
   plug-in's 0.97).
+- **`entropy_zscore` opt-in length calibration** (`EntropyZScoreSeedStrategy(calibrate_length=True)`,
+  `EntropyLengthNull`): adds back the exact small-sample entropy bias and standardises by the null
+  spread; seeds <= 64 B go from 0.62x to 0.98x of their fair weight share on synthetic
+  single-distribution corpora. Default off, no CLI flag.
 
 
 - **SanitizerCoverage modes**: shim callbacks for `inline-8bit-counters`, `inline-bool-flag`,

@@ -37,8 +37,21 @@ from typing import Any
 
 import numpy as np
 
-from fuzzer_tool.core.byte_entropy import byte_entropy_pct
+from fuzzer_tool.core.byte_entropy import (
+    ENTROPY_SAMPLE_CAP,
+    POOL_SMOOTHING,
+    byte_entropy_pct,
+    byte_histogram,
+)
 from fuzzer_tool.core.running_stats import RunningMoments
+from fuzzer_tool.core.schedulers.seed_entropy_kl import (
+    NULL_MC_DRAWS,
+    NULL_MC_SEED,
+    NULL_MIN_SD,
+    NULL_STALE_L1,
+    _null_grid,
+    null_kl_bits,
+)
 
 #: Distinct seeds before the corpus's spread is worth calibrating against.
 #: Same gate value as CriticalSlowingDown.min_observations.
@@ -71,6 +84,63 @@ def _valid_state(data: Any) -> bool:
     return all(type(data.get(key, 0.0)) in (int, float) for key in ("target_z", "width"))
 
 
+_PCT_PER_BIT = 100.0 / 8.0
+
+
+class EntropyLengthNull:
+    """Plug-in entropy of an n-byte sample drawn from the pool: bias and spread.
+
+    For draws from ``q``, ``E[H(P_hat_n)] = H(q) - E[KL(P_hat_n || q)]``, so
+    the plug-in entropy reads low by exactly the KL null mean
+    (:func:`null_kl_bits`, exact). The spread has no cheap closed form in
+    the sparse regime and is Monte-Carlo from a private fixed-seed generator
+    (a calibration table, never a scheduling decision). Both are on the
+    power-of-two grid up to the sample cap, log-log interpolated, in entropy
+    percent. The bias is rebuilt on every :meth:`fit` (exact, 1-17 ms); the
+    spread is reused until the pool has drifted :data:`NULL_STALE_L1`.
+    """
+
+    def __init__(self, draws: int = NULL_MC_DRAWS, seed: int = NULL_MC_SEED) -> None:
+        self._draws = draws
+        self._seed = seed
+        self._grid = _null_grid(ENTROPY_SAMPLE_CAP)
+        self._log_n = np.log(self._grid)
+        self._log_bias = np.zeros_like(self._log_n)
+        self._log_sd = np.zeros_like(self._log_n)
+        self._ref: np.ndarray | None = None
+
+    def fit(self, q: Any) -> None:
+        probs = np.asarray(q, dtype=np.float64)
+        probs = probs / probs.sum()
+        bias = [null_kl_bits(probs, int(n)) * _PCT_PER_BIT for n in self._grid]
+        self._log_bias = np.log(np.maximum(bias, 1e-12))
+        ref = self._ref
+        if ref is not None and float(np.abs(probs - ref).sum()) <= NULL_STALE_L1:
+            return
+        gen = np.random.Generator(np.random.PCG64(self._seed))
+        sd: list[float] = []
+        for n in self._grid.astype(np.int64):
+            freq = gen.multinomial(int(n), probs, size=self._draws).astype(np.float64) / n
+            with np.errstate(divide="ignore", invalid="ignore"):
+                bits = -np.where(freq > 0, freq * np.log2(freq), 0.0).sum(axis=1)
+            sd.append(float(bits.std(ddof=1)) * _PCT_PER_BIT)
+        self._log_sd = np.log(np.maximum(sd, NULL_MIN_SD))
+        self._ref = probs
+
+    def bias_pct(self, lengths: Any) -> np.ndarray:
+        """Expected downward bias, entropy percent; 0 for an empty sample."""
+        n = np.asarray(lengths, dtype=np.float64)
+        out: np.ndarray = np.exp(np.interp(np.log(np.maximum(n, 1.0)), self._log_n, self._log_bias))
+        out[n < 1] = 0.0
+        return out
+
+    def sd_pct(self, lengths: Any) -> np.ndarray:
+        """Null standard deviation, entropy percent; floored above zero."""
+        n = np.asarray(lengths, dtype=np.float64)
+        out: np.ndarray = np.exp(np.interp(np.log(np.maximum(n, 1.0)), self._log_n, self._log_sd))
+        return out
+
+
 class EntropyZScoreSeedStrategy:
     """Elo-arbitrated ``entropy_zscore`` seed arm (``--entropy-zscore``)."""
 
@@ -81,8 +151,16 @@ class EntropyZScoreSeedStrategy:
         width: float = 1.0,
         window: int = MOMENT_WINDOW,
         min_observations: int = MIN_OBSERVATIONS,
+        calibrate_length: bool = False,
     ) -> None:
         self._rng = rng
+        self._calibrate = bool(calibrate_length)
+        self._null = EntropyLengthNull()
+        self._counts: dict[bytes, Any] = {}
+        self._lengths: dict[bytes, int] = {}
+        self._pool = np.zeros(256, dtype=np.int64)
+        self._pool_version = 0
+        self._fit_version = -1
         self._target = float(target_z)
         self._width = float(width) if width > 0 else 1.0
         self._min_observations = min_observations
@@ -107,6 +185,9 @@ class EntropyZScoreSeedStrategy:
         if not seeds:
             return []
 
+        if self._calibrate:
+            return self._calibrated_weights(seeds)
+
         entropy = np.fromiter((self._entropy[s] for s in seeds), np.float64, len(seeds))
         stddev = self._moments.stddev
         if stddev <= MIN_SPREAD_PCT:
@@ -114,6 +195,31 @@ class EntropyZScoreSeedStrategy:
 
         offset = ((entropy - self._moments.mean) / stddev - self._target) / self._width
         weights: list[float] = (np.exp(-0.5 * offset * offset) + MIN_WEIGHT).tolist()
+        return weights
+
+    def _calibrated_weights(self, seeds: list[bytes]) -> list[float]:
+        """Gaussian weight on the length-calibrated z-score.
+
+        ``z_i = (H_i + bias(n_i) - mean) / sqrt(between^2 + sd0(n_i)^2)`` with
+        ``between^2 = max(var - mean(sd0^2), 0)``: entropy is first put back
+        on the pool's scale, then each seed is judged against its own null
+        spread on top of the corpus's true between-seed spread. Adding the
+        bias alone made short seeds scatter into the tails and did worse
+        than nothing (Spearman +0.53).
+        """
+        if self._fit_version != self._pool_version:
+            pool = self._pool + POOL_SMOOTHING
+            self._null.fit(pool / pool.sum())
+            self._fit_version = self._pool_version
+        lengths = np.fromiter((self._lengths[s] for s in seeds), np.float64, len(seeds))
+        entropy = np.fromiter((self._entropy[s] for s in seeds), np.float64, len(seeds))
+        corrected = entropy + self._null.bias_pct(lengths)
+        sd0 = np.maximum(self._null.sd_pct(lengths), NULL_MIN_SD)
+        between = max(float(corrected.var()) - float(np.mean(sd0 * sd0)), 0.0)
+        z = (
+            (corrected - corrected.mean()) / np.sqrt(between + sd0 * sd0) - self._target
+        ) / self._width
+        weights: list[float] = (np.exp(-0.5 * z * z) + MIN_WEIGHT).tolist()
         return weights
 
     def select(self, seeds: list[bytes]) -> bytes | None:
@@ -145,8 +251,17 @@ class EntropyZScoreSeedStrategy:
             self._entropy[seed] = entropy
             self._moments.update(entropy)
             self._observed += 1
+            counts, total = byte_histogram(seed)
+            self._counts[seed] = np.asarray(counts, dtype=np.int64)
+            self._lengths[seed] = int(total)
+            self._pool += self._counts[seed]
+            self._pool_version += 1
 
         if len(self._entropy) > len(live):
+            for seed in set(self._entropy).difference(live):
+                self._pool -= self._counts.pop(seed)
+                del self._lengths[seed]
+                self._pool_version += 1
             self._entropy = {k: v for k, v in self._entropy.items() if k in live}
 
     def stats(self) -> dict[str, Any]:
@@ -157,6 +272,7 @@ class EntropyZScoreSeedStrategy:
             "ready": self.ready,
             "target_z": self._target,
             "width": self._width,
+            "calibrate_length": self._calibrate,
             "mean_entropy": self._moments.mean,
             "stddev_entropy": self._moments.stddev,
         }

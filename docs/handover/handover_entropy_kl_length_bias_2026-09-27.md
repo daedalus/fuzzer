@@ -85,6 +85,24 @@ Cost: null-curve rebuild ~310 ms, and `spectral_scores()` is recomputed on every
 2000 seeds), so this is an offline comparison, not a per-pick score. Not tried: caching the
 spectral rows across calls, larger ridge, richer features.
 
+## Null calibration applied to `entropy_zscore` (opt-in, added same day)
+
+`EntropyZScoreSeedStrategy(calibrate_length=True)` (default `False`: behaviour unchanged, not wired
+to a CLI flag). Plug-in entropy of an n-byte sample reads low by exactly the KL null mean
+(`E[H] = H(q) - E[KL]`), so `EntropyLengthNull` adds the exact bias back and standardises each seed
+by its own Monte-Carlo null spread: `z = (H + bias(n) - mean) / sqrt(between^2 + sd0(n)^2)`,
+`between^2 = max(var - mean(sd0^2), 0)`. The pool is the live corpus's byte counts (kept
+incrementally, evictions subtract). **Adding the bias alone is worse** (Spearman +0.53: short seeds
+scatter into the Gaussian's tails); the per-seed spread is what fixes it.
+
+Over 6 single-distribution corpora, raw -> calibrated: Spearman(weight, length) +0.10 -> +0.08
+(range 0.00..0.24); <= 64 B weight share 0.62x -> 0.98x (0.90-1.02). Cost with calibration on:
+first call on 2000 seeds ~70 ms, repeat ~0.6 ms, after one admission ~12 ms (null refit only when
+the corpus changes); off: unchanged (~0.4 ms). Limits: `ready`/warm-up still gate on the raw
+windowed moments; the calibrated z uses the live corpus's mean and variance, not the window;
+synthetic seeds only. Not enabled by default because the raw bias is mild and it is unclear the
+arm's typical-entropy preference should change without a real-corpus A/B.
+
 ## Costs and limits
 
 - Pick after an admission into a 2000-seed corpus: ~13 ms (was 1.0 ms). `E0` is rebuilt on each
@@ -105,7 +123,7 @@ spectral rows across calls, larger ridge, richer features.
   Untested idea: shared operator features in `op_tpe` if its per-operator counts are too sparse.
 - Sibling arms **audited, not fixed** (6 runs, 400 seeds each, all drawn from one distribution,
   lengths 16-4096, so no seed is truly more interesting than another):
-  - `seed_entropy_zscore`: Spearman(score, length) +0.10; seeds <= 64 B get 0.62x their uniform
+  - `seed_entropy_zscore` (now has an opt-in fix, see above): Spearman(score, length) +0.10; seeds <= 64 B get 0.62x their uniform
     weight share (range 0.58-0.70). Plug-in entropy reads low on short samples, so they sit
     farther from the corpus mean and lose gaussian weight. Mild, opposite sign to `entropy_kl`.
   - `seed_entropy_loo`: Spearman +0.03, but weights are `max(delta, 0)` and 49 % of seeds have
