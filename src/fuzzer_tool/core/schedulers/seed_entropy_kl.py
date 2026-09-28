@@ -226,6 +226,26 @@ class EntropyKLSeedStrategy:
         self.scores(seeds)
         return [self._raw_kl.get(s, 0.0) for s in seeds]
 
+    def miller_madow_scores(self, seeds: list[bytes]) -> list[float]:
+        """Plug-in KL minus the Miller-Madow bias, ``(K_hat - 1) / (2 n ln 2)`` bits.
+
+        ``K_hat`` is the number of distinct byte values in the seed's sample.
+        Only a first-order correction: in the sparse regime (n < K) most bins
+        are empty, ``K_hat`` is far below the K the bias actually scales
+        with, and it under-corrects -- kept as the cheap baseline that
+        :meth:`scores` is measured against, not as the scheduling score.
+        """
+        raw = np.asarray(self.raw_scores(seeds), dtype=np.float64)
+        rows = [self._index.get(seed, -1) for seed in seeds]
+        out = np.zeros(len(seeds), dtype=np.float64)
+        for i, row in enumerate(rows):
+            n = int(self._n[row]) if row >= 0 else 0
+            if n < 1:
+                continue
+            distinct = int(np.count_nonzero(self._probs[row]))
+            out[i] = max(raw[i] - (distinct - 1) / (2.0 * n * _LN2), 0.0)
+        return out.tolist()
+
     def _null_bits(self, n: int) -> float:
         """E0(n) from the cached curve, log-log interpolated; 0 for n < 1."""
         if n < 1:

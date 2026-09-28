@@ -36,6 +36,15 @@ Measured (6 runs), raw -> calibrated: Spearman(score, len) -0.99 -> +0.01; <= 64
 (AUC 0.95) but short seeds are far noisier, so weight proportional to the clipped excess left
 them at 2.3-3.0x their share, no better than raw. Dividing by the null spread fixed that.
 
+## Miller-Madow baseline (added same day)
+
+`miller_madow_scores()` subtracts `(K_hat - 1) / (2 n ln 2)` bits, K_hat = distinct byte values in
+the sample. Mean AUC over 6 mixed-length corpora (diverging vs matching seeds): raw 0.72,
+Miller-Madow 0.75, calibrated z 0.97. It only removes a sliver because for n < K most bins are
+empty, so K_hat is far below the K the bias scales with. Kept as a measured baseline, not wired
+into selection. `tests/test_entropy_kl_miller_madow.py` holds the AUC helper (rank-based, with a
+control on uninformative labels) and asserts raw < Miller-Madow < calibrated.
+
 ## Costs and limits
 
 - Pick after an admission into a 2000-seed corpus: ~13 ms (was 1.0 ms). `E0` is rebuilt on each
