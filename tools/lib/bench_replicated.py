@@ -68,15 +68,31 @@ def run_one(src: str, target: str, flags: str, seed: int, iters: int, timeout: i
     env = dict(os.environ)
     env["PYTHONPATH"] = src
     cmd = [
-        sys.executable, "-m", "fuzzer_tool", "fuzz", target,
-        "-d", str(workdir), "-c", "-n", str(iters), "-s", str(seed),
-        *flags.split(), "--boltzmann",
+        sys.executable,
+        "-m",
+        "fuzzer_tool",
+        "fuzz",
+        target,
+        "-d",
+        str(workdir),
+        "-c",
+        "-n",
+        str(iters),
+        "-s",
+        str(seed),
+        *flags.split(),
+        "--boltzmann",
     ]
     t0 = time.time()
     try:
         proc = subprocess.run(
-            cmd, cwd=REPO, capture_output=True, text=True,
-            timeout=timeout, check=False, env=env,
+            cmd,
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+            env=env,
         )
         log = proc.stdout + proc.stderr
         rc = proc.returncode
@@ -115,6 +131,12 @@ def main() -> int:
     ap.add_argument("--name-a", default="boltzmann-count")
     ap.add_argument("--name-b", default="boltzmann-cost")
     ap.add_argument("--out", default="results/paired/replicated.json")
+    ap.add_argument(
+        "--seed-delta",
+        action="store_true",
+        default=False,
+        help="Show per-seed delta between arms (default: off)",
+    )
     bench_lock.add_argument(ap)
     args = ap.parse_args()
 
@@ -166,19 +188,21 @@ def main() -> int:
                     tmp.replace(out)
 
     print(f"\n[*] wrote {out} ({len(rows)} runs)")
-    summarise(rows, args.name_a, args.name_b)
+    summarise(rows, args.name_a, args.name_b, show_delta=args.seed_delta)
     if lock:
         lock.release()
     return 0
 
 
-def summarise(rows: list[dict], name_a: str, name_b: str) -> None:
+def summarise(rows: list[dict], name_a: str, name_b: str, show_delta: bool = True) -> None:
     by: dict = {}
     for r in rows:
         by.setdefault((r["target"], r["seed"]), {}).setdefault(r["arm"], []).append(r["edges"])
 
-    print(f"\n{'target':<16} {'seed':>4} {name_a:>16} {name_b:>16} {'delta':>7}")
-    deltas = _seed_deltas(by, name_a, name_b)
+    deltas: list = []
+    if show_delta:
+        print(f"\n{'target':<16} {'seed':>4} {name_a:>16} {name_b:>16} {'delta':>7}")
+        deltas = _seed_deltas(by, name_a, name_b)
     if not deltas:
         return
     for target in sorted({t for t, _, _, _, _ in deltas}):
