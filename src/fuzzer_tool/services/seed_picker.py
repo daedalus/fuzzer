@@ -25,6 +25,7 @@ from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
 from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.schedulers.seed_drr import FAVORED_WEIGHT
 from fuzzer_tool.core.validity import VALID_SEED_BONUS
 from fuzzer_tool.core.zipf import TailLaw
 
@@ -393,6 +394,8 @@ class SeedPicker:
             available.append("canary")
         if getattr(f, "_use_seed_round_robin", False) and f._seed_round_robin and f.corpus:
             available.append("round_robin")
+        if getattr(f, "_use_seed_drr", False) and f._seed_drr and f.corpus:
+            available.append("drr")
 
     def _elo_dispatch(self, f, strategy: str) -> bytes | None:
         """Run the picker for the Elo-selected *strategy*; None if unknown or declined."""
@@ -431,6 +434,7 @@ class SeedPicker:
             "strata": lambda: self._pick_strata_seed(),
             "canary": lambda: self._pick_seed_canary_seed(),
             "round_robin": lambda: self._pick_seed_round_robin_seed(),
+            "drr": lambda: self._pick_seed_drr_seed(),
         }
         self._elo_map = (f, strategy_map)
         handler = strategy_map.get(strategy)
@@ -704,6 +708,37 @@ class SeedPicker:
         selected = scheduler.select_seed(list(key_to_seed))
         return key_to_seed.get(selected)
 
+    def _pick_seed_drr_seed(self) -> bytes | None:
+        """Deficit round robin -- the seed-arena 'drr' arm.
+
+        Cost-aware sibling of :meth:`_pick_seed_round_robin_seed` (see
+        ``core/schedulers/seed_drr.py``): every seed gets the same share of
+        target *time*, not of visits. Cost is the seed's mean exec time
+        from the cost ledger relative to the corpus mean, so 1.0 is an
+        average seed; an unmeasured seed or an empty ledger is neutral 1.0
+        (unmeasured is not free). Favored seeds weigh ``FAVORED_WEIGHT``.
+
+        Returns None on an empty corpus or when disabled.
+        """
+        f = self.f
+        scheduler = getattr(f, "_seed_drr", None)
+        if scheduler is None or not f.corpus:
+            return None
+        key_to_seed = {f._seed_key(s): s for s in f.corpus}
+        mean = f.mean_exec_time()
+
+        def cost(key: str) -> float:
+            meta = f.seed_meta.get(key_to_seed[key])
+            if meta is None or mean <= 0.0:
+                return 1.0
+            return seed_exec_time(meta, mean) / mean
+
+        def weight(key: str) -> float:
+            return FAVORED_WEIGHT if key in f._favored else 1.0
+
+        selected = scheduler.select_seed(list(key_to_seed), cost, weight)
+        return key_to_seed.get(selected)
+
     def _pick_aflgo_seed(self) -> bytes | None:
         """Distance-pure seed picker — the Elo-arbitrated 'aflgo' arm.
 
@@ -849,6 +884,7 @@ class SeedPicker:
             self._pick_entropy_loo_seed,
             self._pick_residual_seed,
             self._pick_strata_seed,
+            self._pick_seed_drr_seed,
             self._pick_seed_round_robin_seed,
         ):
             chosen = pick()

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.fuzzer import Fuzzer
 from tests.support.scripted_rng import ScriptedRng
@@ -28,6 +29,10 @@ def _stub(schedule, edges, randoms=()):
     f._rng = ScriptedRng(randoms=randoms)
     f._target_schedule = schedule
     f.target = TARGETS[0]
+    f._target_wrr = SmoothWRR()
+    f._target_wfq = WeightedFairQueue()
+    f._fq_last_t = None
+    f._fq_clock = lambda: 0.0
     return f
 
 
@@ -95,4 +100,101 @@ def test_target_schedule_appended_last():
     import inspect
 
     params = list(inspect.signature(Fuzzer.__init__).parameters)
-    assert params[-1] == "cuckoo_seed_filter"
+    assert params[-1] == "seed_drr_scheduler"
+
+
+def _clocked(f):
+    """Drive WFQ's clock so each iteration takes the scripted per-target cost."""
+    state = {"t": 0.0, "i": 0}
+
+    def clock():
+        return state["t"]
+
+    f._fq_clock = clock
+    return state
+
+
+def _wfq_picks(f, state, costs, n):
+    out = []
+    for _ in range(n):
+        Fuzzer._select_next_target(f)
+        out.append(f.target)
+        state["t"] += costs[f.target]  # the iteration just started runs on f.target
+    return out
+
+
+def test_wrr_share_follows_inverse_edges():
+    """Falsification: edges 1:2:4 -> weights 4:2:1 -> exactly 4/2/1 per 7 picks, no RNG."""
+    f = _stub(TargetSchedule.WRR, edges=[1, 2, 4], randoms=())
+
+    picks = _picks(f, 70)
+
+    assert [picks.count(t) for t in TARGETS] == [40, 20, 10]
+
+
+def test_wrr_engages_before_warmup():
+    """Adversarial: no exec-count gate -- WRR is on from exec 0."""
+    f = _stub(TargetSchedule.WRR, edges=[1, 1000, 1000])
+    f.exec_count = 0
+
+    picks = _picks(f, 20)
+
+    assert picks.count("t0") > picks.count("t1")
+
+
+def test_wrr_zero_edges_is_not_a_division_error():
+    """Adversarial: a target with no edges yet weighs 1.0, not inf."""
+    f = _stub(TargetSchedule.WRR, edges=[0, 0, 0])
+
+    assert _picks(f, 6) == TARGETS * 2
+
+
+def test_wfq_charges_time_not_execs():
+    """Equal edges, t1 iterations cost 3x: t1 gets a third of the picks, equal wall time."""
+    costs = {"t0": 1.0, "t1": 3.0, "t2": 1.0}
+    f = _stub(TargetSchedule.WFQ, edges=[10, 10, 10])
+    state = _clocked(f)
+
+    picks = _wfq_picks(f, state, costs, 500)
+    time = {t: picks.count(t) * costs[t] for t in TARGETS}
+
+    assert max(time.values()) - min(time.values()) <= max(costs.values())
+    assert picks.count("t1") < picks.count("t0")
+
+
+def test_wfq_first_select_charges_nothing():
+    """Adversarial: no previous target on the first call, so no bogus elapsed charge."""
+    f = _stub(TargetSchedule.WFQ, edges=[10, 10, 10])
+    f._fq_clock = lambda: 1e9
+
+    Fuzzer._select_next_target(f)
+
+    assert f._target_wfq.virtual_time == 0.0
+
+
+def test_wfq_backwards_clock_does_not_poison():
+    """Adversarial: a clock step back yields a neutral charge, never a negative one."""
+    f = _stub(TargetSchedule.WFQ, edges=[10, 10, 10])
+    ticks = iter([100.0, 50.0, 60.0, 70.0])
+    f._fq_clock = lambda: next(ticks)
+
+    picks = _picks(f, 4)
+
+    assert len(picks) == 4
+    assert f._target_wfq.virtual_time >= 0.0
+
+
+def test_cli_accepts_wrr_and_wfq(monkeypatch):
+    assert _parse(monkeypatch, "--target-schedule", "wrr").target_schedule == "wrr"
+    assert _parse(monkeypatch, "--target-schedule", "wfq").target_schedule == "wfq"
+
+
+def test_weighted_default_still_draws_rng():
+    """Regression: the shared weight helper must not change the default's RNG use."""
+    edges = [1, 1000, 1000]
+    f = _stub(TargetSchedule.WEIGHTED, edges=edges, randoms=[0.0])
+
+    _picks(f, 1)
+
+    with pytest.raises(StopIteration):  # one scripted draw per pick, then exhausted
+        _picks(f, 1)

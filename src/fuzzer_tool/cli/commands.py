@@ -606,6 +606,7 @@ def cmd_fuzz(args):
         canary_scheduler=getattr(args, "canary_scheduler", False),
         seed_canary_scheduler=getattr(args, "seed_canary_scheduler", False),
         seed_round_robin_scheduler=getattr(args, "seed_round_robin_scheduler", False),
+        seed_drr_scheduler=getattr(args, "seed_drr_scheduler", False),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
         position_arena=getattr(args, "position_arena", False),
@@ -1991,6 +1992,7 @@ _HAIL_MARY_FLAGS = (
     "canary_scheduler",
     "seed_canary_scheduler",
     "seed_round_robin_scheduler",
+    "seed_drr_scheduler",
     "softmax",
     "topk",
     "consolidated",
@@ -2573,6 +2575,15 @@ def main() -> int:
         "--round-robin, deterministic cycling through the corpus in registration order. "
         "Unlike --seed-canary-scheduler this is a real strategy, not a floor, so it needs no "
         "--elo to run: it is also reachable directly whenever no arbiter picks a seed first.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-drr-scheduler",
+        action="store_true",
+        help="Enable the seed-arena deficit-round-robin scheduler: like "
+        "--seed-round-robin-scheduler but every seed gets the same share of target "
+        "*time* (visits are weighted by 1/exec cost, favored seeds by 2x), so a slow seed "
+        "cannot eat the wall clock. Identical to round robin when exec cost is flat. "
+        "Needs no --elo to run.",
     )
     fuzz_parser.add_argument(
         "--lst-revisit",

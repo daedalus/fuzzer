@@ -45,6 +45,7 @@ from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.elf import SHM_LAYOUT_CURRENT, detect_elf_type, detect_shm_layout
+from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
 from fuzzer_tool.core.gravity import GravityModel, SpliceDonor
 from fuzzer_tool.core.markov import MarkovChain, MarkovEnsemble
@@ -181,6 +182,7 @@ _SEED_STRATEGY_NAMES = (
     "residual",
     "strata",
     "round_robin",
+    "drr",
 )
 
 
@@ -1491,6 +1493,11 @@ class Fuzzer:
         # Cuckoo filter for pruned seed dedup (gated by --cuckoo-seed-filter).
         # Appended at end so positional callers are not shifted.
         cuckoo_seed_filter=False,
+        # Seed-arena deficit round robin (core/schedulers/seed_drr.py): the
+        # cost-aware sibling of seed_round_robin_scheduler -- equal share of
+        # target time per seed instead of equal visits. Elo arm and no-elo
+        # fallback, like round_robin.
+        seed_drr_scheduler=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -1520,6 +1527,13 @@ class Fuzzer:
         self._active_target_idx = 0  # round-robin index
         self._target_schedule = target_schedule
         self._rr_turn = 0  # ROUND_ROBIN: execs scheduled so far, so exec 0 -> target 0
+        # WRR / WFQ target schedules (core/fair_queue.py). WFQ charges the wall
+        # time between two selects to the target that ran; _fq_clock is the
+        # test seam. Not persisted: the queues rebuild in a few iterations.
+        self._target_wrr = SmoothWRR()
+        self._target_wfq = WeightedFairQueue()
+        self._fq_last_t: float | None = None
+        self._fq_clock = time.monotonic
         self._target_shm_covs = {}  # target_path -> ShmCoverage (per-target)
         self._target_profiles = {}  # target_path -> TargetProfile
         # Pin the address-space layout BEFORE anything spawns, dlopens, or
@@ -2624,6 +2638,14 @@ class Fuzzer:
 
             self._seed_round_robin = SeedRoundRobinScheduler()
             log.info("Seed round-robin scheduling enabled")
+        # Seed-arena deficit round robin (see core/schedulers/seed_drr.py).
+        self._use_seed_drr = seed_drr_scheduler
+        self._seed_drr = None
+        if seed_drr_scheduler:
+            from fuzzer_tool.core.schedulers.seed_drr import SeedDRRScheduler
+
+            self._seed_drr = SeedDRRScheduler()
+            log.info("Seed deficit-round-robin scheduling enabled")
         # LST override: no seed waits more than lst_revisit seconds between
         # picks (SeedPicker._pick_lst_seed); last_picked is stamped in _pick_seed.
         self._lst_revisit = max(0.0, float(lst_revisit))
@@ -5150,6 +5172,31 @@ class Fuzzer:
             if after < before:
                 print(f"\n[*] CORPUS PRUNE: {before} → {after} seeds (target_size={target_size})")
 
+    def _inv_edge_weights(self) -> list[float]:
+        """1/edges per target: least covered weighs most; no edges yet weighs 1."""
+        weights = []
+        for t in self.multi_targets:
+            shm = self._target_shm_covs.get(t)
+            edges = shm.cumulative_edges if shm else 0
+            weights.append(1.0 / max(edges, 1))
+        return weights
+
+    def _pick_wfq_target(self) -> int:
+        """WFQ pick. Charges the time since the last select to the target that ran.
+
+        The charge is the whole iteration (seed pick + mutation + exec), so a
+        target that is slow to run *or* slow to mutate for pays for it. Skipped
+        on the first call: nothing has run yet. A clock that stepped back
+        gives a non-positive cost, which the queue treats as neutral.
+        """
+        weights = dict(enumerate(self._inv_edge_weights()))
+        now = self._fq_clock()
+        if self._fq_last_t is not None:
+            idx = self._active_target_idx
+            self._target_wfq.charge(idx, now - self._fq_last_t, weights[idx])
+        self._fq_last_t = now
+        return self._target_wfq.pick(weights)
+
     def _select_next_target(self):
         """Select the next target for multi-target round-robin fuzzing."""
         if not self.multi_targets:
@@ -5159,13 +5206,14 @@ class Fuzzer:
         if self._target_schedule is TargetSchedule.ROUND_ROBIN:
             self._active_target_idx = self._rr_turn % len(self.multi_targets)
             self._rr_turn += 1
+        elif self._target_schedule is TargetSchedule.WRR:
+            weights = dict(enumerate(self._inv_edge_weights()))
+            self._active_target_idx = self._target_wrr.pick(weights)
+        elif self._target_schedule is TargetSchedule.WFQ:
+            self._active_target_idx = self._pick_wfq_target()
         elif len(self.multi_targets) > 1 and self.exec_count > 100:
             # Weight by inverse of cumulative edges (less-covered targets get more execs)
-            weights = []
-            for t in self.multi_targets:
-                shm = self._target_shm_covs.get(t)
-                edges = shm.cumulative_edges if shm else 0
-                weights.append(1.0 / max(edges, 1))
+            weights = self._inv_edge_weights()
             total = sum(weights)
             r = self._rng.random() * total
             cumulative = 0.0
@@ -6122,7 +6170,7 @@ class Fuzzer:
         # each remaining discovery is rare, so the weight rises toward 1.
         # The weight is bounded above by 1.0, so the F0 signal never inflates
         # a posterior beyond the default -- it only ever re-weights.
-        if self._seed_quality or self._seed_canary or self._seed_round_robin:
+        if self._seed_quality or self._seed_canary or self._seed_round_robin or self._seed_drr:
             parent_key = self._seed_key(data)
             weight = 1.0
             f0_est = self._edge_tracker.estimate_distinct_edges_f0()
@@ -6154,6 +6202,8 @@ class Fuzzer:
                 self._seed_round_robin.record(
                     parent_key, success=bool(has_new_coverage), weight=weight
                 )
+            if self._seed_drr:
+                self._seed_drr.record(parent_key, success=bool(has_new_coverage), weight=weight)
 
         # Credit the cmplog operands this gain is attributable to: the
         # input-to-state matches found in the input, which are the operands
