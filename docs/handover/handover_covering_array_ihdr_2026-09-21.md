@@ -116,3 +116,6 @@ regression test (`test_full_coverage_across_many_seeds_png_ihdr_domains`).
   of the four G0 was built for). Per the doc's own literature caveat,
   this is expected to matter more at longer campaign horizons than at
   5 minutes; no campaign has been run to check.
+- Follow-ups ranked 2026-09-29 (FIC-style failing-combination isolation,
+  second formats, t=3, forbidden combinations): see
+  `handover_combinatorics_permutations_2026-09-02.md` section 6.

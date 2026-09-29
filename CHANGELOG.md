@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **Combinatorics gap analysis** (`docs/handover/handover_combinatorics_permutations_2026-09-02.md` section 6): ranked remaining candidates (FIC-style isolation over covering-array rows, covering-array extensions, orthogonal designs, rank/unrank, group testing) and what to skip. Docs only.
+
 ### Fixed
 
 - **`BloomFilter` scaling and API consistency** (`core/bloom.py`):

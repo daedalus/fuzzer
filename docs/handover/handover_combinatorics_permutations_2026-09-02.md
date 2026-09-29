@@ -78,3 +78,32 @@ seeding has not.
 
 **Open:** needs a finite canonical-form projection, which not every grammar
 has. Decide whether bootstrap coverage justifies it given Boltzmann sampling.
+
+---
+
+## 6. Gap analysis of remaining combinatorics candidates (2026-09-29, read-only)
+
+**Verified against:** `37caa730`. Code and handover reading only; nothing was
+implemented or measured. Ranked against the litmus test at the top.
+
+**Already in tree (do not re-propose):** t=2 covering array
+(`core/covering_array.py`, used only by `covering_array_ihdr`), de Bruijn
+(`structured.py`, `debruijn_cache.py`), Feistel, `_swap_tuple`,
+`ExhaustivePool`, Kruskal count, greedy set cover (`minimize.py`,
+`corpus_manager.py`), weighted MDS local search, Moser-Tardos
+(`wfc_chunks`, opt-in `resample=mt|hybrid`), combinatorial bandits
+(`op_cucb`, `op_c2ucb`, `op_topk`).
+
+| # | Candidate | Litmus | Status |
+|---|-----------|--------|--------|
+| 1 | Failure-inducing combination search over covering-array rows (FIC-style): after a crashing row, run follow-up rows to isolate the minimal field pair/triple | 1, feeds `root_cause` | Not started. Nothing equivalent exists; stdlib-only. |
+| 2 | Covering-array extensions: (a) second formats (ISO-BMFF `tkhd`/`ftyp`, RIFF `VP8X` flags, gzip/zip flags); (b) t=3 for small k; (c) forbidden-combination constraints | 1 | Not started. Measure whether the IHDR arm earns any selection share first (open in `handover_covering_array_ihdr_2026-09-21.md`). For (c), Moser-Tardos-style repair only pays once constraints exist (`handover_moser_tardos_2026-09-28.md`). |
+| 3 | Orthogonal / fractional-factorial designs (12-16 runs) instead of grid sweeps for open hyperparameters (PLL `kp`/`ki`, lock thresholds, `explore_floor`) | benchmark tooling, not core | Not started. |
+| 4 | Rank/unrank (Lehmer code, combinadics) for m-tuple swaps: deterministic non-repeating enumeration and uniform sampling without replacement | 3 | Not started. Depends on item 1 above (m>2 yield unmeasured). |
+| 5 | Group testing (d-disjunct matrices) for which-bytes-matter inference, non-adaptive and parallel, vs ddmin in `tmin` / colorizer | 1 | Speculative. Benchmark against ddmin first. |
+
+**Do not pursue:** Moser-Tardos beyond the shipped option (lost to restart
+below ~0.88 table density); Ramsey, Sperner, Burnside, Prufer, Lyndon,
+Steiner systems (fail the litmus test); combinatorial bandits (already
+present).
+
