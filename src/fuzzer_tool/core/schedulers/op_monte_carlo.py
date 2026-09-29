@@ -21,6 +21,7 @@ from pathlib import Path
 from fuzzer_tool.core.analyzers.analyzer_structure_function import DispersionIndex
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
 from fuzzer_tool.core.dirichlet import dm_alpha
+from fuzzer_tool.core.op_chain2 import SecondOrderChain
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import (
     RunningMoments,
@@ -123,6 +124,7 @@ class MonteCarloScheduler:
         hierarchical_pooling: float = 0.0,
         cem_dirichlet_concentration: float = 0.0,
         rng: RandPool | None = None,
+        second_order_blend: float = 0.0,
     ):
         self._rng = rng if rng is not None else get_default_rand_pool()
         self._hierarchical_pooling = max(0.0, min(1.0, hierarchical_pooling))
@@ -159,6 +161,11 @@ class MonteCarloScheduler:
         self._prev_op: str | None = None
         # Blend factor: 0.0 = pure Thompson, 1.0 = pure pairwise
         self.pairwise_blend = pairwise_blend
+        # Second-order P(next | prev2, prev): sparse, backs off to first order
+        # when the (prev2, prev) context is unseen. 0.0 = off.
+        self.second_order_blend = max(0.0, min(1.0, second_order_blend))
+        self._chain2 = SecondOrderChain()
+        self._prev_op2: str | None = None
 
         # Thompson draw cache: op -> (a, b, draw). A cached draw is valid
         # while the arm's effective posterior params are unchanged; record()
@@ -271,6 +278,9 @@ class MonteCarloScheduler:
         if self._sharpe_kelly_blend > 0:
             self._blend_sharpe_kelly(ops, thompson_vals)
 
+        if self._blend_second_order(ops, thompson_vals):
+            return max(ops, key=lambda o: thompson_vals[o])
+
         # If no pairwise data or blend is zero, use current scores (Thompson
         # or SK-blended) directly.
         if self.pairwise_blend <= 0 or prev_op is None or prev_op not in self.transition_total:
@@ -329,6 +339,20 @@ class MonteCarloScheduler:
         blend = self._sharpe_kelly_blend
         for op in ops:
             thompson_vals[op] = blend * sk_norm[op] + (1 - blend) * thompson_vals[op]
+
+    def _blend_second_order(self, ops: list[str], thompson_vals: dict[str, float]) -> bool:
+        """Blend P(op | prev2, prev) into the draws; False if off or context unseen."""
+        if self.second_order_blend <= 0 or self._prev_op is None or self._prev_op2 is None:
+            return False
+
+        scores = self._chain2.scores(ops, self._prev_op2, self._prev_op)
+        if scores is None:
+            return False
+
+        w = self.second_order_blend
+        for op in ops:
+            thompson_vals[op] = w * scores[op] + (1 - w) * thompson_vals[op]
+        return True
 
     def _blend_pairwise(self, ops: list[str], prev_op: str, thompson_vals: dict[str, float]) -> str:
         """Blend P(op | prev_op) transition scores into the draws; return argmax."""
@@ -411,6 +435,9 @@ class MonteCarloScheduler:
         if success and self._prev_op is not None and self._prev_op != name:
             self.transition_counts[self._prev_op][name] += 1
             self.transition_total[self._prev_op] += 1
+        if self.second_order_blend > 0:
+            self._chain2.record(self._prev_op2, self._prev_op, name, success=success)
+            self._prev_op2 = self._prev_op
         self._prev_op = name
 
     def record_brier(self, name: str, success: bool, weight: float = 1.0) -> None:

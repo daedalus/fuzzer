@@ -533,6 +533,7 @@ def cmd_fuzz(args):
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
         pairwise_blend=getattr(args, "pairwise_blend", 0.0),
+        second_order_blend=getattr(args, "second_order_blend", 0.0),
         sharpe_kelly_blend=getattr(args, "sharpe_kelly_blend", 0.0),
         stats_file=args.stats_file,
         stats_interval=args.stats_interval,
@@ -2286,6 +2287,14 @@ def main() -> int:
         type=float,
         default=0.0,
         help="Blend factor for pairwise operator transitions (0.0=pure Thompson, 1.0=pure pairwise)",
+    )
+    fuzz_parser.add_argument(
+        "--second-order-blend",
+        type=float,
+        default=0.0,
+        metavar="W",
+        help="Blend factor for second-order operator transitions P(next | prev2, prev); "
+        "backs off to --pairwise-blend when the context is unseen (0.0=off)",
     )
     fuzz_parser.add_argument(
         "--sharpe-kelly-blend",

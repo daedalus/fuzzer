@@ -511,6 +511,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--markov-gen` | Markov-generated seeds (rate adapts to model quality via perplexity) |
 | `--mc-bandit` | Thompson sampling operator selection (Brier score calibration) |
 | `--mc-cem` | Cross-Entropy Method byte distribution |
+| `--second-order-blend W` | With `--mc-bandit`: blend `P(next op \| prev2, prev)` (sparse, 4096-context cap) into selection; backs off to `--pairwise-blend` on unseen contexts. Default 0 (off, no overhead). Synthetic A/B only, no real-target measurement. |
 | `--mopt` | MOpt PSO operator scheduling (alternative to bandit) |
 | `--replicator` | Replicator dynamics operator scheduling (evolutionary game theory) |
 | `--exp3` | EXP3 adversarial bandit operator scheduling (non-stationary rewards) |

@@ -314,7 +314,9 @@ class TestGlobalRegistryUnaffected:
         core/mutations/perlin_noise.py) is the fourth; ``wfc_reorder_learned``
         (learned-adjacency chunk reordering, core/wfc_chunks.py) is the fifth;
         ``covering_array_ihdr`` (pairwise-covering PNG IHDR field mutation,
-        core/mutations/covering_array_mutate.py) is the sixth.
+        core/mutations/covering_array_mutate.py) is the sixth;
+        ``covering_array_gzip`` (same for the gzip member header,
+        core/mutations/covering_array_gzip.py) is the seventh.
         Anything else here is a surprise.
 
         Note the ``ff_*`` entries are registered at import, unconditionally,
@@ -327,6 +329,7 @@ class TestGlobalRegistryUnaffected:
 
         names = sorted(m.name for m in REGISTRY.mutators())
         assert names == [
+            "covering_array_gzip",
             "covering_array_ihdr",
             "ff_isobmff",
             "ff_jpeg",

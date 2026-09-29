@@ -35,13 +35,17 @@ from __future__ import annotations
 
 import itertools
 import random
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 # One row: a value per parameter, in parameter order.
 Row = tuple[Any, ...]
 # A (parameter-index-subset, value-combo) pair -- one required interaction.
 RequiredTuple = tuple[tuple[int, ...], tuple[Any, ...]]
+# A forbidden partial assignment as callers give it: {param_index: value}.
+Forbidden = Mapping[int, Any]
+# The same, normalised: sorted ((param_index, value), ...).
+_Constraint = tuple[tuple[int, Any], ...]
 
 # Random-candidate rows to sample per row-selection round. Higher finds
 # a better (more tuples covered) row per round at proportional cost;
@@ -49,6 +53,14 @@ RequiredTuple = tuple[tuple[int, ...], tuple[Any, ...]]
 # appreciably on the PNG IHDR domains this was built for (see
 # test_covering_array.py's row-count regression bound).
 _DEFAULT_CANDIDATE_POOL = 50
+
+# Sentinel: a parameter a tuple does not assign.
+_MISSING = object()
+
+# Moser-Tardos resampling steps to repair one candidate row that matches a
+# forbidden assignment before the candidate is dropped. Each step redraws only
+# the violated parameters; sparse constraints converge in a handful of steps.
+_REPAIR_BUDGET = 100
 
 
 def _pick(rng: Any, values: Sequence[Any]) -> Any:
@@ -65,12 +77,66 @@ def _pick(rng: Any, values: Sequence[Any]) -> Any:
     return values[rng.randint(0, len(values) - 1)]  # pragma: no cover - fallback
 
 
+def _normalise_forbidden(
+    value_sets: Sequence[Sequence[Any]], forbidden: Sequence[Forbidden] | None
+) -> tuple[list[list[Any]], list[_Constraint]]:
+    """Validate *forbidden*; fold single-parameter bans into the domains.
+
+    Returns ``(allowed_sets, constraints)``: *value_sets* minus every value a
+    one-parameter assignment bans, and the remaining multi-parameter
+    constraints as sorted ``((param, value), ...)`` tuples.
+    """
+    allowed = [list(vs) for vs in value_sets]
+    constraints: list[_Constraint] = []
+    for assignment in forbidden or ():
+        if not assignment:
+            raise ValueError("empty forbidden assignment matches every row")
+        for i, v in assignment.items():
+            if not 0 <= i < len(value_sets):
+                raise ValueError(f"forbidden param {i} outside 0..{len(value_sets) - 1}")
+            if v not in value_sets[i]:
+                raise ValueError(f"forbidden value {v!r} not in value_sets[{i}]")
+        pairs = tuple(sorted(assignment.items()))
+        if len(pairs) > 1:
+            constraints.append(pairs)
+            continue
+        ((i, v),) = pairs
+        allowed[i] = [x for x in allowed[i] if x != v]
+        if not allowed[i]:
+            raise ValueError(f"forbidden assignments leave no value for param {i}")
+    return allowed, constraints
+
+
+def _violated(row: Sequence[Any], constraints: Sequence[_Constraint]) -> _Constraint | None:
+    """First constraint *row* matches, or None."""
+    for c in constraints:
+        if all(row[i] == v for i, v in c):
+            return c
+    return None
+
+
+def _draw_row(
+    value_sets: Sequence[Sequence[Any]], constraints: Sequence[_Constraint], rng: Any
+) -> Row | None:
+    """Random row avoiding *constraints* (Moser-Tardos repair), or None."""
+    row = [_pick(rng, vs) for vs in value_sets]
+    for _ in range(_REPAIR_BUDGET):
+        bad = _violated(row, constraints)
+        if bad is None:
+            return tuple(row)
+        for i, _v in bad:
+            row[i] = _pick(rng, value_sets[i])
+    return None
+
+
 def _param_subsets(k: int, t: int) -> list[tuple[int, ...]]:
     return list(itertools.combinations(range(k), t))
 
 
 def _required_tuples(
-    value_sets: Sequence[Sequence[Any]], param_subsets: Sequence[tuple[int, ...]]
+    value_sets: Sequence[Sequence[Any]],
+    param_subsets: Sequence[tuple[int, ...]],
+    constraints: Sequence[_Constraint] = (),
 ) -> set[RequiredTuple]:
     if not value_sets:
         # itertools.combinations(range(0), 0) yields one empty subset, and
@@ -81,6 +147,10 @@ def _required_tuples(
     needed: set[RequiredTuple] = set()
     for subset in param_subsets:
         for combo in itertools.product(*(value_sets[i] for i in subset)):
+            # A tuple that contains a forbidden assignment can never appear.
+            assigned = dict(zip(subset, combo, strict=True))
+            if any(all(assigned.get(i, _MISSING) == v for i, v in c) for c in constraints):
+                continue
             needed.add((subset, combo))
     return needed
 
@@ -95,7 +165,9 @@ def _effective_t(k: int, t: int) -> int:
     return max(1, min(t, k))
 
 
-def required_tuple_count(value_sets: Sequence[Sequence[Any]], t: int = 2) -> int:
+def required_tuple_count(
+    value_sets: Sequence[Sequence[Any]], t: int = 2, forbidden: Sequence[Forbidden] | None = None
+) -> int:
     """How many distinct ``(parameter subset, value combo)`` tuples *t*-way
     coverage of *value_sets* requires -- the size of the set a fully
     covering array must hit. Useful for sizing/logging, not needed to
@@ -105,6 +177,9 @@ def required_tuple_count(value_sets: Sequence[Sequence[Any]], t: int = 2) -> int
     if k == 0:
         return 0
     t = _effective_t(k, t)
+    if forbidden:
+        allowed, constraints = _normalise_forbidden(value_sets, forbidden)
+        return len(_required_tuples(allowed, _param_subsets(k, t), constraints))
     total = 0
     for subset in _param_subsets(k, t):
         prod = 1
@@ -120,6 +195,7 @@ def _best_row(
     needed: set[RequiredTuple],
     rng: Any,
     candidate_pool: int,
+    constraints: Sequence[_Constraint] = (),
 ) -> tuple[Row, set[RequiredTuple]] | None:
     """Greedy pick: random candidate row covering the most still-needed tuples.
 
@@ -141,7 +217,13 @@ def _best_row(
     max_attempts = 200
     while best_gain <= 0 and attempts < max_attempts:
         for _ in range(max(1, candidate_pool)):
-            row = tuple(_pick(rng, vs) for vs in value_sets)
+            if constraints:
+                drawn = _draw_row(value_sets, constraints, rng)
+                if drawn is None:
+                    continue
+                row = drawn
+            else:
+                row = tuple(_pick(rng, vs) for vs in value_sets)
             covered = _row_tuples(row, param_subsets) & needed
             gain = len(covered)
             if gain > best_gain:
@@ -162,6 +244,7 @@ def generate(
     rng: Any = None,
     candidate_pool: int = _DEFAULT_CANDIDATE_POOL,
     max_rows: int | None = None,
+    forbidden: Sequence[Forbidden] | None = None,
 ) -> list[Row]:
     """Build a *t*-way covering array over *value_sets*.
 
@@ -184,6 +267,13 @@ def generate(
             for the small domains this module targets that is cheap,
             and a truncated array silently under-covers, which the
             operator built on top of this has no way to detect later.
+        forbidden: partial assignments ``{param_index: value}`` no row may
+            match (e.g. ``{0: 1, 1: 1}`` bans that pair). Tuples containing
+            one are not required. A one-parameter assignment removes that
+            value from the domain. Rows are repaired by Moser-Tardos
+            resampling; a tuple whose every completion is forbidden by
+            constraints of size > 1 stays uncovered, which
+            ``missing_tuples(..., forbidden=...)`` reports.
 
     Returns:
         Rows covering every required tuple (unless ``max_rows`` cut
@@ -199,17 +289,18 @@ def generate(
         if not vs:
             raise ValueError(f"value_sets[{i}] is empty -- no value to cover it with")
 
+    value_sets, constraints = _normalise_forbidden(value_sets, forbidden)
     t = _effective_t(k, t)
     rng = rng if rng is not None else random.Random()
 
     param_subsets = _param_subsets(k, t)
-    needed = _required_tuples(value_sets, param_subsets)
+    needed = _required_tuples(value_sets, param_subsets, constraints)
 
     rows: list[Row] = []
     while needed:
         if max_rows is not None and len(rows) >= max_rows:
             break
-        pick = _best_row(value_sets, param_subsets, needed, rng, candidate_pool)
+        pick = _best_row(value_sets, param_subsets, needed, rng, candidate_pool, constraints)
         if pick is None:
             # Exhausted the retry budget without any candidate covering
             # anything still `needed`. Unreachable for well-formed
@@ -221,19 +312,28 @@ def generate(
     return rows
 
 
-def verify_coverage(rows: Sequence[Row], value_sets: Sequence[Sequence[Any]], t: int = 2) -> bool:
+def verify_coverage(
+    rows: Sequence[Row],
+    value_sets: Sequence[Sequence[Any]],
+    t: int = 2,
+    forbidden: Sequence[Forbidden] | None = None,
+) -> bool:
     """True iff every required *t*-way tuple is hit by some row in *rows*."""
-    return len(missing_tuples(rows, value_sets, t)) == 0
+    return len(missing_tuples(rows, value_sets, t, forbidden)) == 0
 
 
 def missing_tuples(
-    rows: Sequence[Row], value_sets: Sequence[Sequence[Any]], t: int = 2
+    rows: Sequence[Row],
+    value_sets: Sequence[Sequence[Any]],
+    t: int = 2,
+    forbidden: Sequence[Forbidden] | None = None,
 ) -> set[RequiredTuple]:
     """Required tuples *rows* fails to cover -- empty iff fully covering."""
     k = len(value_sets)
+    value_sets, constraints = _normalise_forbidden(value_sets, forbidden)
     t = _effective_t(k, t)
     param_subsets = _param_subsets(k, t)
-    needed = _required_tuples(value_sets, param_subsets)
+    needed = _required_tuples(value_sets, param_subsets, constraints)
     covered: set[RequiredTuple] = set()
     for row in rows:
         covered |= _row_tuples(row, param_subsets)

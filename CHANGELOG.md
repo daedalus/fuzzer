@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Failure-inducing combination isolation** (`core/failure_inducing.py`): given a failing parameter row and an oracle, finds the minimal set of parameter values that cause the failure (FIC-style, ~k probes, memoized, budget-capped, optional sufficiency check). PNG IHDR adapter `isolate_png_ihdr_failure` and `root_cause --isolate-png-ihdr`, which adds the responsible IHDR fields to the report. Tested against mocked oracles only.
 - **Generic field adapter** (`core/field_spec.py`, `root_cause --isolate-fields SPEC`): declare fixed-offset integer fields (`NAME@OFFSET:SIZE[be|le][=V|V...]`) for any format; boundary-value domains by width, plus the baseline's value at each offset, feed `failure_inducing.isolate`. Result under `custom_field_schema`. Live-tested against `targets/test_target.c`.
 
+- **`core/combinadic.py`**: Lehmer/combinadic rank and unrank for m-permutations and m-combinations (lexicographic, big-int safe), plus uniform without-replacement sampling in O(count) memory. Not wired into a mutator: m>2 swap yield is still unmeasured.
+- **Covering-array constraints and t=3**: `covering_array.generate/verify_coverage/missing_tuples/required_tuple_count` take `forbidden=[{param: value}, ...]` (Moser-Tardos repair; one-parameter bans shrink domains); t=3 covered by tests.
+- **`covering_array_gzip`** operator (`core/mutations/covering_array_gzip.py`): pairwise sweep of the RFC 1952 header fields (CM, FLG, MTIME, XFL, OS); available only on gzip magic. Selection share on a real gzip target unmeasured.
+- **`tools/lib/factorial_design.py`**: Plackett-Burman screening designs (`design_matrix`, `fold_over`, `main_effects`, `screen`) for ranking hyperparameters in 12-16 runs instead of a grid.
+- **`core/group_testing.py`** + `tools/bench_group_testing.py`: non-adaptive pooled which-items-matter inference (COMP/DD, exact for any d) and a binary-splitting baseline. Not wired into `tmin`/colorizer (see handover section 6.5 result).
+- **`--second-order-blend W`** (default 0 = off): second-order operator chain `P(next | prev2, prev)` in `MonteCarloScheduler` (`core/op_chain2.py`, sparse, capped at 4096 contexts), backing off to `--pairwise-blend` on unseen contexts. Synthetic A/B only; real-target A/B not run.
+
 ### Documentation
 
 - **Combinatorics gap analysis** (`docs/handover/handover_combinatorics_permutations_2026-09-02.md` section 6): ranked remaining candidates (FIC-style isolation over covering-array rows, covering-array extensions, orthogonal designs, rank/unrank, group testing) and what to skip. Docs only.

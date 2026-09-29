@@ -145,3 +145,99 @@ class TestVerifyCoverageAndMissingTuples:
         rows = [(0, 0), (0, 1), (1, 0), (1, 1)]
         assert ca.verify_coverage(rows, value_sets, t=2)
         assert ca.missing_tuples(rows, value_sets, t=2) == set()
+
+
+class TestForbidden:
+    """Forbidden partial assignments: never in a row, never required."""
+
+    VS = [[0, 1, 2], [0, 1, 2], [0, 1]]
+
+    def test_rows_never_match_a_forbidden_combo(self):
+        forbidden = [{0: 1, 1: 1}, {2: 1, 0: 2}]
+        rows = ca.generate(self.VS, t=2, rng=random.Random(5), forbidden=forbidden)
+        for r in rows:
+            assert not (r[0] == 1 and r[1] == 1)
+            assert not (r[2] == 1 and r[0] == 2)
+
+    def test_full_coverage_of_permitted_tuples(self):
+        forbidden = [{0: 1, 1: 1}]
+        rows = ca.generate(self.VS, t=2, rng=random.Random(6), forbidden=forbidden)
+        assert ca.verify_coverage(rows, self.VS, t=2, forbidden=forbidden)
+        assert ca.missing_tuples(rows, self.VS, t=2, forbidden=forbidden) == set()
+
+    def test_forbidden_tuple_is_not_required(self):
+        forbidden = [{0: 1, 1: 1}]
+        free = ca.required_tuple_count(self.VS, t=2)
+        assert ca.required_tuple_count(self.VS, t=2, forbidden=forbidden) == free - 1
+
+    def test_no_forbidden_is_unchanged_default(self):
+        a = ca.generate(self.VS, t=2, rng=random.Random(8))
+        b = ca.generate(self.VS, t=2, rng=random.Random(8), forbidden=[])
+        assert a == b
+
+    def test_single_value_forbidden_removes_it_everywhere(self):
+        # {0: 2} alone forbids value 2 on param 0.
+        rows = ca.generate(self.VS, t=2, rng=random.Random(9), forbidden=[{0: 2}])
+        assert all(r[0] != 2 for r in rows)
+        assert ca.verify_coverage(rows, self.VS, t=2, forbidden=[{0: 2}])
+
+    def test_control_unconstrained_rows_do_violate(self):
+        # Falsification: the forbidden combo is reachable without the filter,
+        # so the constraint test above is not vacuous.
+        rows = ca.generate(self.VS, t=2, rng=random.Random(5))
+        assert any(r[0] == 1 and r[1] == 1 for r in rows)
+
+    def test_rejects_out_of_range_param(self):
+        with pytest.raises(ValueError):
+            ca.generate(self.VS, t=2, forbidden=[{7: 0}])
+
+    def test_rejects_value_outside_domain(self):
+        with pytest.raises(ValueError):
+            ca.generate(self.VS, t=2, forbidden=[{0: 99}])
+
+    def test_rejects_empty_forbidden_assignment(self):
+        # An empty assignment matches every row: nothing could ever be emitted.
+        with pytest.raises(ValueError):
+            ca.generate(self.VS, t=2, forbidden=[{}])
+
+    def test_adversarial_whole_domain_forbidden_raises(self):
+        with pytest.raises(ValueError):
+            ca.generate([[0, 1], [0]], t=2, forbidden=[{0: 0}, {0: 1}])
+
+    def test_adversarial_dense_constraints_still_terminate(self):
+        # ~80% of pairs on (0,1) forbidden; rows must still cover the rest.
+        vs = [[0, 1, 2, 3, 4], [0, 1, 2, 3, 4], [0, 1]]
+        forbidden = [{0: a, 1: b} for a in range(5) for b in range(5) if a != b]
+        rows = ca.generate(vs, t=2, rng=random.Random(3), forbidden=forbidden)
+        assert ca.verify_coverage(rows, vs, t=2, forbidden=forbidden)
+
+
+class TestStrengthThree:
+    def test_t3_covers_every_triple(self):
+        vs = [[0, 1], [0, 1, 2], [0, 1], [0, 1, 2]]
+        rows = ca.generate(vs, t=3, rng=random.Random(4))
+        assert ca.verify_coverage(rows, vs, t=3)
+
+    def test_t3_needs_more_rows_than_t2(self):
+        vs = [[0, 1, 2]] * 5
+        r2 = ca.generate(vs, t=2, rng=random.Random(1))
+        r3 = ca.generate(vs, t=3, rng=random.Random(1))
+        assert len(r3) > len(r2)
+
+    def test_t3_row_count_bounded_by_cross_product(self):
+        vs = [[0, 1, 2]] * 4
+        rows = ca.generate(vs, t=3, rng=random.Random(2))
+        assert len(rows) <= 3**4
+
+    def test_t2_rows_do_not_cover_t3(self):
+        # Falsification: verify_coverage must be able to say False.
+        vs = [[0, 1, 2]] * 5
+        r2 = ca.generate(vs, t=2, rng=random.Random(1))
+        assert not ca.verify_coverage(r2, vs, t=3)
+
+    def test_t3_with_forbidden(self):
+        vs = [[0, 1], [0, 1], [0, 1], [0, 1]]
+        forbidden = [{0: 1, 1: 1, 2: 1}]
+        rows = ca.generate(vs, t=3, rng=random.Random(7), forbidden=forbidden)
+        assert ca.verify_coverage(rows, vs, t=3, forbidden=forbidden)
+        assert not any(r[0] == r[1] == r[2] == 1 for r in rows)

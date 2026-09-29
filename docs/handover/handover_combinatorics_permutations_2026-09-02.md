@@ -97,10 +97,10 @@ implemented or measured. Ranked against the litmus test at the top.
 | # | Candidate | Litmus | Status |
 |---|-----------|--------|--------|
 | 1 | Failure-inducing combination search over covering-array rows (FIC-style): after a crashing row, run follow-up rows to isolate the minimal field pair/triple | 1, feeds `root_cause` | **Implemented 2026-09-29** (`core/failure_inducing.py`; PNG IHDR adapter in `covering_array_mutate.py`; `root_cause --isolate-png-ihdr`). Unit-tested against mocked oracles only; never run against a real crashing target or measured for usefulness. See section 7. |
-| 2 | Covering-array extensions: (a) second formats (ISO-BMFF `tkhd`/`ftyp`, RIFF `VP8X` flags, gzip/zip flags); (b) t=3 for small k; (c) forbidden-combination constraints | 1 | Not started. Measure whether the IHDR arm earns any selection share first (open in `handover_covering_array_ihdr_2026-09-21.md`). For (c), Moser-Tardos-style repair only pays once constraints exist (`handover_moser_tardos_2026-09-28.md`). |
-| 3 | Orthogonal / fractional-factorial designs (12-16 runs) instead of grid sweeps for open hyperparameters (PLL `kp`/`ki`, lock thresholds, `explore_floor`) | benchmark tooling, not core | Not started. |
-| 4 | Rank/unrank (Lehmer code, combinadics) for m-tuple swaps: deterministic non-repeating enumeration and uniform sampling without replacement | 3 | Not started. Depends on item 1 above (m>2 yield unmeasured). |
-| 5 | Group testing (d-disjunct matrices) for which-bytes-matter inference, non-adaptive and parallel, vs ddmin in `tmin` / colorizer | 1 | Speculative. Benchmark against ddmin first. |
+| 2 | Covering-array extensions: (a) second formats (ISO-BMFF `tkhd`/`ftyp`, RIFF `VP8X` flags, gzip/zip flags); (b) t=3 for small k; (c) forbidden-combination constraints | 1 | **Partly implemented 2026-09-29** (see section 8): (a) gzip only, (b) tested, (c) done. Not started: ISO-BMFF, RIFF, ZIP. Measure whether the IHDR arm earns any selection share first (open in `handover_covering_array_ihdr_2026-09-21.md`). For (c), Moser-Tardos-style repair only pays once constraints exist (`handover_moser_tardos_2026-09-28.md`). |
+| 3 | Orthogonal / fractional-factorial designs (12-16 runs) instead of grid sweeps for open hyperparameters (PLL `kp`/`ki`, lock thresholds, `explore_floor`) | benchmark tooling, not core | **Implemented 2026-09-29** as `tools/lib/factorial_design.py`; no sweep has been converted to use it yet (section 8). |
+| 4 | Rank/unrank (Lehmer code, combinadics) for m-tuple swaps: deterministic non-repeating enumeration and uniform sampling without replacement | 3 | **Library implemented 2026-09-29** (`core/combinadic.py`); not wired to `_swap_tuple` (m>2 yield still unmeasured, section 1). |
+| 5 | Group testing (d-disjunct matrices) for which-bytes-matter inference, non-adaptive and parallel, vs ddmin in `tmin` / colorizer | 1 | **Implemented and benchmarked 2026-09-29**; not wired. Uses ~1.7-2.3x the oracle calls of binary splitting for 1-2 rounds instead of 9-13 (section 8). |
 
 **Do not pursue:** Moser-Tardos beyond the shipped option (lost to restart
 below ~0.88 table density); Ramsey, Sperner, Burnside, Prufer, Lyndon,
@@ -141,3 +141,24 @@ present).
   (98 pass together with `test_covering_array.py`). The rest of the suite
   was not run.
 
+## 8. Items implemented 2026-09-29 (second pass)
+
+- **Rank/unrank** (`core/combinadic.py`, `tests/test_combinadic.py`): lexicographic `unrank_perm/rank_perm/unrank_comb/rank_comb`, `sample_indices` (Floyd over big ints, 32-bit limbs plus 64 bias bits, because `RandPool.randrange` is one 32-bit draw and cannot reach a 3e16-sized space), `sample_perms/sample_combs`. Nothing calls it yet.
+- **Covering array** (`core/covering_array.py`): `forbidden=[{param: value}]` on `generate/verify_coverage/missing_tuples/required_tuple_count`. Tuples containing a forbidden assignment are not required; single-parameter bans shrink the domain; rows are repaired by Moser-Tardos resampling (100-step budget, then the candidate is dropped). A tuple whose every completion is forbidden by multi-parameter constraints stays reported as missing rather than looping. t=3 is covered by tests (`TestStrengthThree`); row counts were not tuned.
+- **`covering_array_gzip`** (`core/mutations/covering_array_gzip.py`): CM, FLG, MTIME, XFL, OS; 5 fields, gated on the gzip magic. Same open question as the IHDR arm: selection share never measured. ISO-BMFF, RIFF `VP8X` and ZIP not done.
+- **`tools/lib/factorial_design.py`**: Hadamard designs (Sylvester, Paley I, doubling; orders 4-64 that are constructible, 28 is skipped), `fold_over`, `main_effects`, `screen`. Main effects only; no interactions. No existing sweep script was rewritten to use it.
+- **`core/group_testing.py`**, `tools/bench_group_testing.py`. OR oracle. Result of `python tools/bench_group_testing.py --trials 100` (mean oracle calls / sequential rounds, group testing vs level-order splitting):
+
+  | n | d | GT tests | GT rounds | split tests | split rounds |
+  |---|---|---|---|---|---|
+  | 256 | 1 | 39.0 | 1.00 | 17.0 | 9 |
+  | 256 | 4 | 98.1 | 1.05 | 50.3 | 9 |
+  | 256 | 16 | 330.1 | 1.12 | 137.9 | 9 |
+  | 4096 | 1 | 59.0 | 1.00 | 25.0 | 13 |
+  | 4096 | 4 | 146.0 | 1.02 | 81.9 | 13 |
+  | 4096 | 16 | 495.1 | 1.07 | 260.6 | 13 |
+
+  It only pays when executions parallelise more than ~2x and latency is the cost. The baseline is binary splitting under an OR oracle, **not** the repo's `ddmin_edits`, whose oracle is conjunctive ("this subset still crashes"); the two are not directly comparable and no comparison against `tmin`/colorizer was made. A soundness bug was found and fixed while testing: an item in no pool survives COMP with no evidence, so every non-certain candidate is now tested individually.
+- **Second-order operator chain** (section 4): `core/op_chain2.py` (sparse, 4096-context cap, evicts least-observed) and `MonteCarloScheduler(second_order_blend=)` / `--second-order-blend`. Off by default and bookkeeping-free when off (an always-on version measured ~10% slower per `record()`). Synthetic A/B (order-2 environment, 5 seeds, `pairwise_blend=0.5` baseline, control-vs-self checked): success rate 0.45 (range 0.09-0.67) baseline vs 0.57 (0.50-0.67) with second order; memoryless environment 1.0 vs 1.0. **No real-target A/B was run**, so the handover's condition for adoption is unmet. Not persisted across runs (the first-order matrix is not either, outside `save_transitions`).
+
+**Still open:** section 1 (m>2 swap A/B on fuzzgoat plus an offset-table target); section 3's 13 runtime-probability sites; section 5 (grammar skeleton set); the remaining covering-array formats.
