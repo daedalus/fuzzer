@@ -364,3 +364,50 @@ class TestFormatReportWithScrambledField:
         minimal_indices = edit_indices(script)
         report = format_root_cause_report(base, crash, script, minimal_indices)
         assert "scrambled field" not in report
+
+
+class TestRootCausePngIhdrFields:
+    def test_field_schema_reported_when_requested(self, tmp_path):
+        import struct
+
+        from fuzzer_tool.core.mutations.png import PngChunk
+
+        def png(w, bd, ct):
+            ihdr = struct.pack(">IIBBBBB", w, 1, bd, ct, 0, 0, 0)
+            body = b"".join(
+                c.serialize() for c in (PngChunk(b"IHDR", ihdr), PngChunk(b"IEND", b""))
+            )
+            return b"\x89PNG\r\n\x1a\n" + body
+
+        crash = tmp_path / "crash.png"
+        crash.write_bytes(png(640, 16, 3))
+        baseline = tmp_path / "base.png"
+        baseline.write_bytes(png(640, 8, 2))
+
+        def fake_run(target, data, timeout, env=None):
+            # crash iff bit_depth==16 and color_type==3 (IHDR bytes 24 / 25)
+            if data[24] == 16 and data[25] == 3:
+                return (-11, "", 1)
+            return (0, "", 1)
+
+        with patch("fuzzer_tool.adapters.process.run_target_stdin", side_effect=fake_run):
+            result = root_cause(
+                "/bin/true", str(crash), baseline_file=str(baseline), isolate_png_ihdr=True
+            )
+
+        assert result is not None
+        assert result["field_schema"] == {"bit_depth": 16, "color_type": 3}
+        assert "IHDR fields responsible: bit_depth=16 & color_type=3" in result["report"]
+
+    def test_field_schema_absent_by_default(self, tmp_path):
+        crash = tmp_path / "c.bin"
+        crash.write_bytes(b"abXd")
+        baseline = tmp_path / "b.bin"
+        baseline.write_bytes(b"abcd")
+
+        def fake_run(target, data, timeout, env=None):
+            return (-11, "", 1) if data[2:3] == b"X" else (0, "", 1)
+
+        with patch("fuzzer_tool.adapters.process.run_target_stdin", side_effect=fake_run):
+            result = root_cause("/bin/true", str(crash), baseline_file=str(baseline))
+        assert result is not None and "field_schema" not in result

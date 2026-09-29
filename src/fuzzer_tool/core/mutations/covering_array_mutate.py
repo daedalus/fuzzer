@@ -35,9 +35,10 @@ build/round-robin operator body) if this earns its keep.
 from __future__ import annotations
 
 import struct
+from collections.abc import Callable
 from typing import Any
 
-from fuzzer_tool.core import covering_array
+from fuzzer_tool.core import covering_array, failure_inducing
 from fuzzer_tool.core.mutations.png import parse_png_chunks, serialize_png_chunks
 from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
 
@@ -90,6 +91,55 @@ def _apply_row(ihdr_data: bytes, row: tuple[int, ...]) -> bytes:
         else:
             data[offset] = value
     return bytes(data)
+
+
+def ihdr_row(ihdr_data: bytes) -> tuple[int, ...] | None:
+    """Read an IHDR's field values as a covering-array row (inverse of ``_apply_row``).
+
+    None if *ihdr_data* is shorter than the 13-byte spec length.
+    """
+    if len(ihdr_data) < IHDR_LEN:
+        return None
+    return tuple(
+        struct.unpack_from(">I", ihdr_data, off)[0]
+        if name in ("width", "height")
+        else ihdr_data[off]
+        for name, off, _values in _FIELDS
+    )
+
+
+def isolate_png_ihdr_failure(
+    data: bytes,
+    fails: Callable[[bytes], bool],
+    *,
+    rng: Any = None,
+    **kw: Any,
+) -> failure_inducing.FailureSchema | None:
+    """Which IHDR fields (and values) of a failing PNG *data* cause *fails*?
+
+    Field-level counterpart of ``core/root_cause`` for PNG headers: rebuilds
+    the PNG with alternative IHDR values (boundary values from the same
+    domains ``covering_array_ihdr`` sweeps) and asks *fails* on each. Extra
+    keyword arguments go to ``failure_inducing.isolate``. Returns None when
+    *data* is not a PNG with a full-length IHDR.
+    """
+    chunks = parse_png_chunks(data) if data[:8] == _PNG_MAGIC else None
+    ihdr = next((c for c in chunks if c.chunk_type == b"IHDR"), None) if chunks else None
+    row = ihdr_row(ihdr.data) if ihdr is not None else None
+    if chunks is None or ihdr is None or row is None:
+        return None
+    base = ihdr.data
+
+    def oracle(candidate: tuple[int, ...]) -> bool:
+        ihdr.data = _apply_row(base, candidate)
+        return fails(serialize_png_chunks(chunks))
+
+    return failure_inducing.isolate(row, _VALUE_SETS, oracle, rng=rng, **kw)
+
+
+def format_ihdr_schema(schema: failure_inducing.FailureSchema) -> str:
+    """``failure_inducing.format_schema`` with IHDR field names."""
+    return failure_inducing.format_schema(schema, [n for n, _o, _v in _FIELDS])
 
 
 class PngCoveringArrayMutator(MutatorBase):

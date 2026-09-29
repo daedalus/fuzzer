@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Failure-inducing combination isolation** (`core/failure_inducing.py`): given a failing parameter row and an oracle, finds the minimal set of parameter values that cause the failure (FIC-style, ~k probes, memoized, budget-capped, optional sufficiency check). PNG IHDR adapter `isolate_png_ihdr_failure` and `root_cause --isolate-png-ihdr`, which adds the responsible IHDR fields to the report. Tested against mocked oracles only.
+
 ### Documentation
 
 - **Combinatorics gap analysis** (`docs/handover/handover_combinatorics_permutations_2026-09-02.md` section 6): ranked remaining candidates (FIC-style isolation over covering-array rows, covering-array extensions, orthogonal designs, rank/unrank, group testing) and what to skip. Docs only.

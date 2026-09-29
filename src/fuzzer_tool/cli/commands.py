@@ -1040,6 +1040,7 @@ def cmd_root_cause(args):
         target_args=args.target_args,
         use_coverage=args.coverage,
         max_stages=args.max_stages,
+        isolate_png_ihdr=getattr(args, "isolate_png_ihdr", False),
     )
 
     if result is None:
@@ -4775,6 +4776,11 @@ def main() -> int:
     )
     rc_parser.add_argument(
         "--max-stages", type=int, default=200, help="Max ddmin stages (default: 200)"
+    )
+    rc_parser.add_argument(
+        "--isolate-png-ihdr",
+        action="store_true",
+        help="Also isolate which PNG IHDR fields (and values) cause the crash",
     )
     rc_parser.add_argument(
         "-O", "--output", default=None, help="Save the root-cause report to a file"

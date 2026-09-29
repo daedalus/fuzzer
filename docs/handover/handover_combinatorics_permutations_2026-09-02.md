@@ -96,7 +96,7 @@ implemented or measured. Ranked against the litmus test at the top.
 
 | # | Candidate | Litmus | Status |
 |---|-----------|--------|--------|
-| 1 | Failure-inducing combination search over covering-array rows (FIC-style): after a crashing row, run follow-up rows to isolate the minimal field pair/triple | 1, feeds `root_cause` | Not started. Nothing equivalent exists; stdlib-only. |
+| 1 | Failure-inducing combination search over covering-array rows (FIC-style): after a crashing row, run follow-up rows to isolate the minimal field pair/triple | 1, feeds `root_cause` | **Implemented 2026-09-29** (`core/failure_inducing.py`; PNG IHDR adapter in `covering_array_mutate.py`; `root_cause --isolate-png-ihdr`). Unit-tested against mocked oracles only; never run against a real crashing target or measured for usefulness. See section 7. |
 | 2 | Covering-array extensions: (a) second formats (ISO-BMFF `tkhd`/`ftyp`, RIFF `VP8X` flags, gzip/zip flags); (b) t=3 for small k; (c) forbidden-combination constraints | 1 | Not started. Measure whether the IHDR arm earns any selection share first (open in `handover_covering_array_ihdr_2026-09-21.md`). For (c), Moser-Tardos-style repair only pays once constraints exist (`handover_moser_tardos_2026-09-28.md`). |
 | 3 | Orthogonal / fractional-factorial designs (12-16 runs) instead of grid sweeps for open hyperparameters (PLL `kp`/`ki`, lock thresholds, `explore_floor`) | benchmark tooling, not core | Not started. |
 | 4 | Rank/unrank (Lehmer code, combinadics) for m-tuple swaps: deterministic non-repeating enumeration and uniform sampling without replacement | 3 | Not started. Depends on item 1 above (m>2 yield unmeasured). |
@@ -106,4 +106,38 @@ implemented or measured. Ranked against the litmus test at the top.
 below ~0.88 table density); Ramsey, Sperner, Burnside, Prufer, Lyndon,
 Steiner systems (fail the litmus test); combinatorial bandits (already
 present).
+
+## 7. Failure-inducing combination isolation (item 1, implemented 2026-09-29)
+
+- **What:** `failure_inducing.isolate(fail_row, value_sets, fails)` finds an
+  inclusion-minimal set of parameters (with values) of a failing row that
+  still triggers the failure. It finds a passing companion that differs on
+  every movable parameter, then does chunked greedy removal over
+  `hybrid(S)` (failing values on `S`, companion's elsewhere) to a 1-minimal
+  fixed point: about `k` probes for `k` parameters, memoized, budget-capped
+  (`max_probes`, default 500). `FailureIsolator` holds the state (AGENTS
+  rule 55); `isolate()` is the thin wrapper.
+- **Outcomes:** `isolated`, `unconditional` (no passing companion in
+  `companion_tries`: parameters do not explain the failure),
+  `truncated` (budget hit; schema still fails but may be non-minimal),
+  `not_failing` (row did not fail on replay).
+- **Assumption, not enforced:** failure is monotone in `S` and the
+  companion does not trigger a second failure (no masking). Set
+  `verify_samples` to probe random rows containing the schema; `verified`
+  False plus a `counterexample` row means the schema is not sufficient.
+- **Wiring:** `isolate_png_ihdr_failure(data, fails)` rebuilds the PNG with
+  alternative IHDR values from the `covering_array_ihdr` domains (CRCs
+  recomputed by `serialize_png_chunks`). `root_cause --isolate-png-ihdr`
+  (service kwarg `isolate_png_ihdr`) runs it after the byte-level ddmin,
+  reusing the same same-signature crash oracle, adds `field_schema` to the
+  result and an "IHDR fields responsible" line to the report.
+- **Not done / caveats:** only PNG IHDR has an adapter; a second format is
+  one `_FIELDS`-shaped table plus a serializer. It is a post-hoc analysis
+  tool, not a fuzz-time operator, so the litmus test is "feeds
+  root_cause", not selection share. Not validated on a real crash
+  (fuzzgoat has no PNG path); no campaign or A/B was run.
+- **Tests:** `tests/test_failure_inducing.py`, additions to
+  `tests/test_covering_array_mutate.py` and `tests/test_root_cause.py`
+  (98 pass together with `test_covering_array.py`). The rest of the suite
+  was not run.
 

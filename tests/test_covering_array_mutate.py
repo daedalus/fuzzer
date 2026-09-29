@@ -292,3 +292,43 @@ class TestFieldDomains:
         rows = ca.generate(_VALUE_SETS, t=2, rng=random.Random(0))
         assert ca.verify_coverage(rows, _VALUE_SETS, t=2)
         assert len(rows) < 500
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ihdr_row / isolate_png_ihdr_failure (failure-inducing combination)
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestIsolatePngIhdrFailure:
+    def test_ihdr_row_inverts_apply_row(self):
+        from fuzzer_tool.core.mutations.covering_array_mutate import ihdr_row
+
+        row = (640, 480, 8, 3, 0, 0, 1)
+        assert ihdr_row(_apply_row(bytes(IHDR_LEN), row)) == row
+        assert ihdr_row(b"short") is None
+
+    def test_isolates_planted_pair(self):
+        from fuzzer_tool.core.mutations.covering_array_mutate import (
+            format_ihdr_schema,
+            ihdr_row,
+            isolate_png_ihdr_failure,
+        )
+
+        data = _make_png(_apply_row(bytes(IHDR_LEN), (640, 480, 16, 3, 0, 0, 1)))
+
+        def fails(png: bytes) -> bool:  # "decoder" bug: indexed color with 16-bit depth
+            chunks = parse_png_chunks(png)
+            row = ihdr_row(chunks[0].data)
+            return row[2] == 16 and row[3] == 3
+
+        res = isolate_png_ihdr_failure(data, fails, verify_samples=10)
+        assert res is not None and res.status == "isolated"
+        assert res.params == {2: 16, 3: 3}
+        assert res.verified is True
+        assert format_ihdr_schema(res).startswith("bit_depth=16 & color_type=3")
+
+    def test_non_png_returns_none(self):
+        from fuzzer_tool.core.mutations.covering_array_mutate import isolate_png_ihdr_failure
+
+        assert isolate_png_ihdr_failure(b"not a png at all", lambda b: True) is None
+        assert isolate_png_ihdr_failure(_PNG_MAGIC, lambda b: True) is None

@@ -106,6 +106,23 @@ def _nearest_baseline(
     return candidate_name, candidate
 
 
+def _png_ihdr_section(crash_data: bytes, interesting) -> tuple[dict | None, str]:
+    """Field-level (PNG IHDR) failure-inducing combination, as (schema dict, report text)."""
+    from fuzzer_tool.core.mutations.covering_array_mutate import (
+        _FIELDS,
+        format_ihdr_schema,
+        isolate_png_ihdr_failure,
+    )
+
+    schema = isolate_png_ihdr_failure(crash_data, interesting, verify_samples=8)
+    if schema is None:
+        return None, "[*] IHDR field isolation: input is not a PNG with a full IHDR"
+    if not schema.params:
+        return None, f"[*] IHDR field isolation: {format_ihdr_schema(schema)}"
+    named = {_FIELDS[i][0]: v for i, v in sorted(schema.params.items())}
+    return named, f"[+] IHDR fields responsible: {format_ihdr_schema(schema)}"
+
+
 def root_cause(
     target: str,
     crash_file: str,
@@ -116,6 +133,7 @@ def root_cause(
     target_args: list[str] | None = None,
     use_coverage: bool = False,
     max_stages: int = 200,
+    isolate_png_ihdr: bool = False,
 ) -> dict | None:
     """Isolate the minimal byte diff, relative to a non-crashing baseline,
     that is responsible for triggering the crash in *crash_file*.
@@ -125,7 +143,8 @@ def root_cause(
 
     Returns a dict with keys ``baseline_name``, ``baseline``, ``crash``,
     ``script``, ``minimal_indices``, ``minimal_bytes``, ``signature``,
-    ``report`` -- or ``None`` if the crash couldn't be reproduced or no
+    ``report`` (plus ``field_schema`` when *isolate_png_ihdr* is set: the
+    IHDR fields that cause the crash, as ``{name: value}``, or ``None``) -- or ``None`` if the crash couldn't be reproduced or no
     valid non-crashing baseline was available.
     """
     crash_path = Path(crash_file)
@@ -248,7 +267,13 @@ def root_cause(
         print(f"[+] Isolated {len(minimal_indices)}/{len(changes)} edit(s) as root cause")
         print(report)
 
-        return {
+        field_schema = None
+        if isolate_png_ihdr:
+            field_schema, section = _png_ihdr_section(crash_data, _interesting)
+            print(section)
+            report += "\n" + section
+
+        result = {
             "baseline_name": baseline_name,
             "baseline": baseline,
             "crash": crash_data,
@@ -258,6 +283,9 @@ def root_cause(
             "signature": original_sig,
             "report": report,
         }
+        if isolate_png_ihdr:
+            result["field_schema"] = field_schema
+        return result
     finally:
         if file_mode and tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -276,6 +304,7 @@ def main():
     parser.add_argument("-d", "--corpus-dir", default=None)
     parser.add_argument("-b", "--baseline", default=None)
     parser.add_argument("--max-stages", type=int, default=200)
+    parser.add_argument("--isolate-png-ihdr", action="store_true")
     parser.add_argument("-O", "--output", default=None)
     args = parser.parse_args()
 
@@ -289,6 +318,7 @@ def main():
         target_args=args.target_args,
         use_coverage=args.coverage,
         max_stages=args.max_stages,
+        isolate_png_ihdr=args.isolate_png_ihdr,
     )
     if result is None:
         sys.exit(1)
