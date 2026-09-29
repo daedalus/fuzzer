@@ -253,3 +253,58 @@ class TestFuzzerWiring:
         assert all("seed_drr_scheduler" in {k.arg for k in c.keywords} for c in calls)
         assert "seed_drr_scheduler" in _fuzz_parser_dests(ast.parse(inspect.getsource(commands)))
         assert "seed_drr_scheduler" in commands._HAIL_MARY_FLAGS
+
+
+SEED_D = b"\x04" * 4
+
+
+def _counting_fuzzer(corpus=(SEED_A, SEED_B, SEED_C)):
+    """Wiring-test fuzzer whose _seed_key counts calls."""
+    helper = TestSeedPickerWiring()
+    f = helper._fuzzer(corpus=corpus)
+    calls = []
+
+    def counted(data):
+        calls.append(data)
+        return data
+
+    f._seed_key = counted
+    return helper._picker(f), f, calls
+
+
+class TestKeyMapCache:
+    """The seed-key map is rebuilt when the corpus changes, not per pick."""
+
+    def test_key_map_built_once_while_corpus_is_unchanged(self):
+        """Falsification: 10 picks over 3 seeds hash 3 seeds, not 30."""
+        sp, _f, calls = _counting_fuzzer()
+
+        for _ in range(10):
+            sp._pick_seed_drr_seed()
+
+        assert len(calls) == 3
+
+    def test_same_length_replacement_invalidates(self):
+        """Adversarial: prune+add keeps len(); the removed seed must never be served."""
+        sp, f, _calls = _counting_fuzzer()
+        for _ in range(3):
+            sp._pick_seed_drr_seed()
+
+        f.corpus[1] = SEED_D
+        picks = [sp._pick_seed_drr_seed() for _ in range(9)]
+
+        assert SEED_B not in picks
+        assert SEED_D in picks
+
+    def test_growth_and_shrink_invalidate(self):
+        """Adversarial: append then pop are both seen on the next pick."""
+        sp, f, _calls = _counting_fuzzer()
+        sp._pick_seed_drr_seed()
+
+        f.corpus.append(SEED_D)
+        grown = {sp._pick_seed_drr_seed() for _ in range(12)}
+        f.corpus.remove(SEED_A)
+        shrunk = {sp._pick_seed_drr_seed() for _ in range(12)}
+
+        assert SEED_D in grown
+        assert SEED_A not in shrunk

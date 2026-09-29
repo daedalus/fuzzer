@@ -708,6 +708,26 @@ class SeedPicker:
         selected = scheduler.select_seed(list(key_to_seed))
         return key_to_seed.get(selected)
 
+    def _drr_keys(self) -> tuple[dict[str, bytes], list[str]]:
+        """Seed-key map and key list for the DRR arm, rebuilt only on corpus change.
+
+        Hashing the whole corpus per pick costs ~1 ms at 5000 seeds; the
+        corpus changes once per hundreds of picks. Validity is a snapshot
+        compare: list equality short-circuits on identity per element, so an
+        unchanged corpus costs a pointer scan, and any add, remove or
+        same-length replacement misses. Reusing the key list also lets
+        DeficitRR's own flow-set check hit on identity.
+        """
+        f = self.f
+        cached = getattr(self, "_drr_map", None)
+        if cached is not None and cached[0] == f.corpus:
+            return cached[1], cached[2]
+
+        key_to_seed = {f._seed_key(s): s for s in f.corpus}
+        keys = list(key_to_seed)
+        self._drr_map = (list(f.corpus), key_to_seed, keys)
+        return key_to_seed, keys
+
     def _pick_seed_drr_seed(self) -> bytes | None:
         """Deficit round robin -- the seed-arena 'drr' arm.
 
@@ -724,7 +744,7 @@ class SeedPicker:
         scheduler = getattr(f, "_seed_drr", None)
         if scheduler is None or not f.corpus:
             return None
-        key_to_seed = {f._seed_key(s): s for s in f.corpus}
+        key_to_seed, keys = self._drr_keys()
         mean = f.mean_exec_time()
 
         def cost(key: str) -> float:
@@ -736,7 +756,7 @@ class SeedPicker:
         def weight(key: str) -> float:
             return FAVORED_WEIGHT if key in f._favored else 1.0
 
-        selected = scheduler.select_seed(list(key_to_seed), cost, weight)
+        selected = scheduler.select_seed(keys, cost, weight)
         return key_to_seed.get(selected)
 
     def _pick_aflgo_seed(self) -> bytes | None:
