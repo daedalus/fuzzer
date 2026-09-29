@@ -1592,12 +1592,16 @@ class EdgeTracker:
         # Confidence based on timeline length
         confidence = min(1.0, n / 5)
 
+        gt = self.german_tank_estimate()
+
         return {
             "current_rate": current_rate,
             "projected_total": int(projected_total),
             "time_to_plateau": execs_to_plateau,
             "plateau_detected": plateau_detected,
             "confidence": confidence,
+            "german_tank": gt["estimate"],
+            "german_tank_efficiency": gt["efficiency"],
         }
 
     def bayesian_coverage_growth_model(self) -> dict:
@@ -2744,6 +2748,76 @@ class EdgeTracker:
             "discovery_probability": 1.0 - coverage,
             "ci_low": ci_low,
             "ci_high": ci_high,
+            "confidence": confidence,
+        }
+
+    def german_tank_estimate(self) -> dict:
+        """Estimate total edge space using the German tank problem estimator.
+
+        The classic minimum-variance unbiased estimator for a uniform
+        distribution on {0, 1, ..., N} from a sample of size k:
+
+            N̂ = M + (M - m)/k - 1
+
+        where M = max observed, m = min observed, k = sample size.
+
+        In fuzzing, edge IDs are uniformly distributed across the coverage
+        map (AFL SHM uses edge_id % map_size with linear probing), so the
+        maximum observed edge ID provides an unbiased estimate of the total
+        edge space. This complements Chao2 (incidence-based richness) and
+        the Bayesian growth model (saturation curve fitting).
+
+        Returns dict with:
+            - estimate: German tank estimate of total edges
+            - observed_max: maximum edge ID seen
+            - observed_min: minimum edge ID seen
+            - sample_size: number of distinct edges observed
+            - efficiency: fraction of estimated space actually discovered (capped at 1.0)
+            - confidence: low/medium/high based on sample size
+        """
+        n = len(self.cumulative_edges)
+        empty = {
+            "estimate": 0,
+            "observed_max": 0,
+            "observed_min": 0,
+            "sample_size": 0,
+            "efficiency": 0.0,
+            "confidence": "low",
+        }
+        if n == 0:
+            return empty
+
+        edge_ids = list(self.cumulative_edges)
+        m = min(edge_ids)
+        M = max(edge_ids)
+        k = n
+
+        # German tank estimator: N̂ = M + (M - m)/k - 1
+        # For AFL bitmaps, m is typically 0, so this simplifies to
+        # N̂ = M + M/k - 1 ≈ M * (1 + 1/k)
+        if k <= 0:
+            return empty
+
+        estimate = M + (M - m) / k - 1
+
+        # Efficiency: fraction of estimated space actually discovered
+        # Cap at 1.0 since estimator can underestimate for small samples
+        efficiency = min(1.0, k / estimate) if estimate > 0 else 0.0
+
+        # Confidence based on sample size
+        if k < 10:
+            confidence = "low"
+        elif k < 100:
+            confidence = "medium"
+        else:
+            confidence = "high"
+
+        return {
+            "estimate": estimate,
+            "observed_max": M,
+            "observed_min": m,
+            "sample_size": k,
+            "efficiency": efficiency,
             "confidence": confidence,
         }
 

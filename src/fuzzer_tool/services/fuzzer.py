@@ -2383,7 +2383,9 @@ class Fuzzer:
             deltas_pruned_dir = self.corpus_dir / "deltas" / "pruned"
             if deltas_pruned_dir.exists():
                 pruned_count += sum(
-                    1 for fh in deltas_pruned_dir.rglob("delta_*.json") if fh.is_file() and not fh.is_symlink()
+                    1
+                    for fh in deltas_pruned_dir.rglob("delta_*.json")
+                    if fh.is_file() and not fh.is_symlink()
                 )
             capacity = max(10 * len(self.corpus) + pruned_count, 100_000)
             self.cuckoo_seed_filter = CuckooFilter(capacity=capacity)
@@ -7856,6 +7858,11 @@ class Fuzzer:
         growth = self._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.3 and growth["current_rate"] < 0.001:
             reason += " + near-saturation"
+
+        # Check German tank efficiency for additional saturation signal
+        gt = self._edge_tracker.german_tank_estimate()
+        if gt["efficiency"] < 0.05:  # < 5% of estimated edge space discovered
+            reason += " + efficient_german_tank"
 
         # Where the executions' hits went since coverage last grew, against
         # the window that ended in that discovery.  A fall with the raw edge

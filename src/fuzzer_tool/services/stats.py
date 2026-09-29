@@ -1672,6 +1672,9 @@ class StatsReporter:
         growth = f._edge_tracker.coverage_growth_model()
         if growth["confidence"] > 0.1:
             line += f" | gr: {growth['current_rate']:.3f}e/x proj: {growth['projected_total']} plateau: ~{growth['time_to_plateau']:,}"
+        gt = growth.get("german_tank")
+        if gt and gt > 0 and growth.get("german_tank_efficiency", 1) < 0.5:
+            line += f" | gt: {gt:.0f} (eff={growth['german_tank_efficiency']:.1%})"
         # Bayesian stall probability when available
         bayes = f._edge_tracker.bayesian_coverage_growth_model()
         if bayes.get("p_stalled") is not None and bayes["p_stalled"] > 0.3:
