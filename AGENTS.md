@@ -73,6 +73,7 @@ fuzzer, not just the target.
 52. Always run calibrations against fuzzgoat target and make sure it's built with clang.
 53. For every layout update in `afl_shim.c` then increment `__AFL_SHM_LAYOUT` +1.
 54. Always keep memory usage bounded.
+55. For cleanlines and maintainability: A big class with a lot of members and reentrancy is preferable than a big procedure.
 
 ## Corpus Rules
 
