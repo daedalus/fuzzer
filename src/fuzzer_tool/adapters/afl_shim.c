@@ -1037,6 +1037,41 @@ static inline void __afl_push_prev(uint32_t cur_loc) {
 #endif
 }
 
+/* Id-space split, active only when COMPCOV is requested.
+ *
+ * Bit 31 belongs to synthetic channels (COMPCOV, DATAFLOW): they set it. With
+ * $__AFL_COMPCOV_LEVEL > 0, real edge ids never carry it, so a COMPCOV mark
+ * can never equal a real id and a reader can tell the two apart from the id
+ * alone. With COMPCOV off, __afl_map_loc leaves ids exactly as they always
+ * were (keep = all ones, tag = 0), so saved corpora/state stay valid.
+ *
+ * Real ids are already below 2^24 with the default k=2 hashing (see
+ * __AFL_GUARD_MAX_BITS), so the reservation is a no-op there. It matters for
+ * __AFL_NGRAM_K > 2, whose FNV-1a edge hash is a full 32 bits (measured on
+ * compcov_gates at k=3: 27 of 52 real ids had bit 31 set unmasked).
+ *
+ * Chosen once, at the top of __afl_auto_init, before the coverage area is
+ * attached -- __afl_area is NULL until then, so no edge can be mapped under
+ * the wrong scheme, and one run never mixes the two. Parsed from the same env
+ * var as __afl_compcov_level but independently of it: this block precedes the
+ * cmplog section. Every synthetic caller passes through __AFL_SYNTH_ID(). */
+#define __AFL_SYNTH_ID_BIT 0x80000000u
+#define __AFL_REAL_ID_MASK 0x7FFFFFFFu
+#define __AFL_SYNTH_ID(h32) ((uint32_t)(h32) | __AFL_SYNTH_ID_BIT)
+
+static uint32_t __afl_id_keep = 0xFFFFFFFFu; /* AND-mask applied to real ids  */
+static uint32_t __afl_id_tag  = 0;           /* bits of cur_loc carried over   */
+
+__AFL_NO_COV static void __afl_id_scheme_init(void) {
+#if __AFL_CMPLOG
+    const char *c = getenv("__AFL_COMPCOV_LEVEL");
+    if (c && c[0] && atoi(c) > 0) {
+        __afl_id_keep = __AFL_REAL_ID_MASK;
+        __afl_id_tag  = __AFL_SYNTH_ID_BIT;
+    }
+#endif
+}
+
 /* Insert a final, non-zero edge id for the current generation. No
  * prev_loc hashing and no prev_loc push: synthetic channels that must not
  * rename the real edge after them (COMPCOV) call this directly;
@@ -1066,7 +1101,12 @@ __attribute__((visibility("default"), always_inline))
 static inline void __afl_map_loc(uint32_t cur_loc) {
     if (!__afl_area) return;
 
-    uint32_t edge_id = __afl_edge_hash(cur_loc);
+    /* COMPCOV on: clear bit 31 of the hash, then carry bit 31 over from
+     * cur_loc. Real callers never set it, so their ids never carry it; the one
+     * synthetic caller that routes through here (__sfuzz_state, which also
+     * wants the prev_loc chain) sets it on cur_loc and keeps its tag whatever
+     * the hash width. COMPCOV off: keep = ~0, tag = 0, the hash is untouched. */
+    uint32_t edge_id = (__afl_edge_hash(cur_loc) & __afl_id_keep) | (cur_loc & __afl_id_tag);
     /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
      * edge that hashes to 0 would be silently dropped and the slot
      * reclaimed by the next collision. Remap exactly that one value to 1.
@@ -1183,7 +1223,7 @@ void __sfuzz_state(unsigned var_id, unsigned long long value) {
     h = (h ^ prev) * 1099511628211ULL;
     h = (h ^ (uint64_t)value) * 1099511628211ULL;
 
-    __afl_map_loc((uint32_t)(h >> 32) | 0x80000000u);
+    __afl_map_loc(__AFL_SYNTH_ID(h >> 32));
 }
 
 /* ── Guard numbering ──────────────────────────────────────────────────
@@ -1449,7 +1489,7 @@ __AFL_NO_COV static inline void __afl_dataflow(void *addr, void *pc) {
     h = (h ^ ((uintptr_t)pc - __afl_data_base)) * 1099511628211ULL;
     h = (h ^ 0x44415441464c4f57ULL) * 1099511628211ULL; /* "DATAFLOW" salt */
     h = (h ^ off) * 1099511628211ULL;
-    __afl_map_id((uint32_t)(h >> 32) | 0x80000000u);
+    __afl_map_id(__AFL_SYNTH_ID(h >> 32));
 }
 
 /* The return address must be taken in the callback's own body. */
@@ -1809,8 +1849,10 @@ static size_t __afl_cmplog_pos = 0;
  * A COMPCOV mark is a synthetic edge, same idea and same trade as
  * __sfuzz_state's transition hash above, but inserted via __afl_map_id():
  * it bypasses the prev_loc chain, so the real edge after a comparison
- * keeps one id however far the match got (a hash collision with a real
- * edge is possible, merely improbable). No channel of its own, so every existing
+ * keeps one id however far the match got. Bit 31 is set on every mark, and
+ * whenever COMPCOV is on it is masked off every real id (see the id-space
+ * note at __AFL_SYNTH_ID_BIT), so a mark can never equal a real edge id; it
+ * can still collide with another synthetic channel. No channel of its own, so every existing
  * coverage consumer -- scoring, scheduling, admission, novelty -- sees
  * COMPCOV progress with no plumbing added. Marking every byte of a long
  * match also means a target with wide, hot comparisons wants a bigger
@@ -1865,7 +1907,7 @@ __AFL_NO_COV static inline void __afl_compcov_mark(uint64_t site, uint32_t tag) 
     h = (h ^ site) * 1099511628211ULL;
     h = (h ^ 0x434f4d5043564356ULL) * 1099511628211ULL; /* "COMPCVCV" salt */
     h = (h ^ tag) * 1099511628211ULL;
-    __afl_map_id((uint32_t)(h >> 32) | 0x80000000u);
+    __afl_map_id(__AFL_SYNTH_ID(h >> 32));
 }
 
 /* Layer 2: a and b are the raw operands of an n-byte trace-cmp callback
@@ -3432,6 +3474,7 @@ static void __afl_auto_init(void) {
      * constructor), which the caller-context frame walk cannot survive in
      * every build (-O1/-O2 omit frame pointers; observed SEGV in
      * map_shm/install_crash_handlers). suppress ctx until done. */
+    __afl_id_scheme_init(); /* before __afl_map_shm: see the id-space note */
     __afl_mapping = 1;
     __afl_map_shm();
     __afl_map_data_range();

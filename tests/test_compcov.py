@@ -308,3 +308,84 @@ class TestCompcovRegressions:
         on, _ = _edge_ids(target, "2")
         assert off_a <= on
         assert len(on) > len(off_a)
+
+
+# ── Regression: bit 31 is reserved for synthetic ids iff COMPCOV is on ─
+#
+# COMPCOV/DATAFLOW ids set bit 31. With $__AFL_COMPCOV_LEVEL > 0 real edge ids
+# must never carry it, or a reader cannot tell a mark from a real edge and a
+# mark can equal a real id. With COMPCOV off ids must be exactly the legacy
+# ones: k=2 ids are < 2^24 by construction; k>=3 uses a full 32-bit FNV hash,
+# where 27 of 52 real ids on compcov_gates carry bit 31, and saved corpora
+# built from those ids must stay valid.
+
+_LOOP_TARGET = """
+#include <string.h>
+int main(int argc, char **argv) {
+    char buf[16];
+    memcpy(buf, "MAGICHDXXXXXXXXX", 16);
+    int acc = 0;
+    for (int i = 0; i < 16; i++) {
+        if (buf[i] > 'M') acc += 1; else if (buf[i] == 'X') acc += 2; else acc += 3;
+        if (argc > 5) acc ^= i;
+    }
+    volatile int r = memcmp(buf, "MAGICHDR", 8);
+    return (r == 12345) + (acc == -1);
+}
+"""
+
+_MASK31 = 0x7FFFFFFF
+
+
+def _ngram_target(tmp_path, k):
+    src = tmp_path / f"loop_k{k}.c"
+    src.write_text(_LOOP_TARGET)
+    out = tmp_path / f"loop_k{k}"
+    flags = [
+        "-O2", "-fPIE", "-pie", "-fno-omit-frame-pointer", "-D__AFL_CMPLOG=1",
+        f"-D__AFL_NGRAM_K={k}", *NOBUILTIN, "-fsanitize-coverage=trace-pc-guard",
+        "-include", str(SHIM),
+    ]
+    _clang(*flags, "-o", str(out), str(src), "-ldl")
+    return out
+
+
+@needs_clang
+class TestSyntheticIdBit:
+    @pytest.mark.parametrize("k", [2, 3])
+    @pytest.mark.parametrize("level", ["1", "2"])
+    def test_regression_real_ids_never_carry_bit31_when_compcov_on(self, tmp_path, k, level):
+        target = _ngram_target(tmp_path, k)
+        on, _ = _edge_ids(target, level)
+        assert len(on) >= 10, "target too small to be a meaningful census"
+        marks = {i for i in on if i >> 31}
+        real = on - marks
+        off, _ = _edge_ids(target, "0")
+        # Reserving the bit changes nothing about a real id except that bit:
+        # the same set of real edges, minus bit 31.
+        assert real == {i & _MASK31 for i in off}, f"k={k} level={level}: real ids moved"
+
+    @pytest.mark.parametrize("k", [2, 3])
+    def test_regression_compcov_marks_are_tagged_and_disjoint(self, tmp_path, k):
+        target = _ngram_target(tmp_path, k)
+        off, _ = _edge_ids(target, "0")
+        on, _ = _edge_ids(target, "2")
+        marks = {i for i in on if i >> 31} - {i for i in off if i >> 31}
+        real_on = {i for i in on if not i >> 31}
+        assert marks, "level 2 minted no COMPCOV marks"
+        assert not (real_on & marks), "a real id equals a COMPCOV mark"
+        assert len(on) >= len(real_on) + len(marks)
+
+    def test_regression_compcov_off_leaves_ngram_ids_unmasked(self, tmp_path):
+        """Off means legacy: the k=3 FNV hash keeps its full 32 bits."""
+        target = _ngram_target(tmp_path, 3)
+        off, _ = _edge_ids(target, "0")
+        assert any(i >> 31 for i in off), (
+            "k=3 ids never carry bit 31 with COMPCOV off -- either the hash "
+            "changed width or the reservation leaked into the off path"
+        )
+
+    def test_regression_compcov_off_k2_ids_unchanged(self, tmp_path):
+        target = _ngram_target(tmp_path, 2)
+        off, _ = _edge_ids(target, "0")
+        assert off and all(i < (1 << 24) for i in off)
