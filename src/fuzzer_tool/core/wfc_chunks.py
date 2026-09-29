@@ -314,6 +314,71 @@ def _illegal_adjacencies(fmt: ChunkFormat, order: list[Any], table: AdjacencyTab
     )
 
 
+# Moser-Tardos repair (permutation variant; docs/handover/handover_moser_tardos_2026-09-28.md).
+# Bad event A_i = "the adjacency at positions (i, i+1) is unobserved in the work
+# table". Event i shares a position with events i-1 and i+1 only, so the
+# dependency degree is d <= 2 and the symmetric Lovasz Local Lemma condition
+# is p * e * (d + 1) <= 1 (p ~ fraction of kind pairs the table lacks, so the
+# table must be ~88% dense for the guarantee). Real tables are usually
+# sparser: the lemma is not what justifies this, it is a local-repair
+# heuristic with the lemma's structure. Because the output must stay a
+# permutation of the input (multiset preserved), a resample is a *swap* of an
+# event's position with a random other movable position, not a fresh draw.
+_MT_STEPS_BASE = 64
+_MT_STEPS_PER_CELL = 8
+RESAMPLE_MODES = ("restart", "mt", "hybrid")
+
+
+def _mt_repair(
+    fmt: ChunkFormat,
+    order: list[Any],
+    table: AdjacencyTable,
+    frozen: set[int],
+    rng,
+) -> list[Any]:
+    """Swap-resample chunks of violated adjacencies until none remain or the
+    step budget runs out. Returns a permutation of *order*; never worse than
+    *order* itself. Positions in *frozen* (pins, a forced violate pair) are
+    never moved."""
+    n = len(order)
+    movable = [i for i in range(n) if i not in frozen]
+    if len(movable) < 2:
+        return list(order)
+    kinds = [fmt.kind(c) for c in order]
+
+    def bad(i: int) -> bool:
+        return 0 <= i < n - 1 and not table.compatible(kinds[i], kinds[i + 1], "right")
+
+    violated = {i for i in range(n - 1) if bad(i)}
+    # A violated event with both endpoints frozen can never be repaired.
+    violated = {i for i in violated if i not in frozen or i + 1 not in frozen}
+    if not violated:
+        return list(order)
+    start_order = list(order)
+    start_count = len(violated)
+    cur = list(order)
+    steps = _MT_STEPS_BASE + _MT_STEPS_PER_CELL * n
+    for _ in range(steps):
+        if not violated:
+            break
+        ev = rng.choice(tuple(violated))
+        cand = [p for p in (ev, ev + 1) if p not in frozen]
+        a = cand[rng.randint(0, len(cand) - 1)]
+        b = movable[rng.randint(0, len(movable) - 1)]
+        if a == b:
+            continue
+        cur[a], cur[b] = cur[b], cur[a]
+        kinds[a], kinds[b] = kinds[b], kinds[a]
+        for e in (a - 1, a, b - 1, b):
+            if not 0 <= e < n - 1:
+                continue
+            if bad(e) and (e not in frozen or e + 1 not in frozen):
+                violated.add(e)
+            else:
+                violated.discard(e)
+    return cur if len(violated) <= start_count else start_order
+
+
 def _collapse_cells(
     fmt: ChunkFormat,
     chunks: list[Any],
@@ -392,8 +457,16 @@ def wfc_reorder_chunks(
     rng,
     mode: str = "strict",
     max_len: int | None = None,
+    resample: str = "restart",
 ) -> bytes:
     """Reorder *chunks* (as parsed by ``fmt.parse``) using a learned WFC table.
+
+    *resample* picks how residual illegal adjacencies are fixed: ``"restart"``
+    (default) re-collapses up to ``_COLLAPSE_ATTEMPTS`` times and keeps the
+    best; ``"mt"`` takes one collapse (or a shuffle if it fails) and repairs it
+    with swap-based Moser-Tardos resampling (``_mt_repair``); ``"hybrid"`` is
+    the restart loop followed by ``_mt_repair`` on its best result when that
+    still has illegal adjacencies (never worse than ``"restart"``).
 
     Falls back to a pin-respecting shuffle when *table* has nothing useful
     for these kinds, when *chunks* is too large to afford (per the cost-law
@@ -416,6 +489,30 @@ def wfc_reorder_chunks(
     if mode == "violate":
         work_table, violated_pair = _add_one_unobserved_pair(table, kinds_present, rng)
 
+    if resample not in RESAMPLE_MODES:
+        raise ValueError(f"resample must be one of {RESAMPLE_MODES}, got {resample!r}")
+    def frozen_positions(order: list[Any]) -> set[int]:
+        frozen: set[int] = set()
+        if fmt.pin_first:
+            frozen.add(0)
+        if fmt.pin_last:
+            frozen.add(len(order) - 1)
+        if violated_pair is not None:
+            # Keep the deliberately unobserved pair (legal only in work_table).
+            for i in range(len(order) - 1):
+                if (fmt.kind(order[i]), fmt.kind(order[i + 1])) == violated_pair:
+                    frozen.update((i, i + 1))
+                    break
+        return frozen
+
+    if resample == "mt":
+        cells = _collapse_cells(fmt, chunks, kinds_present, work_table, violated_pair, rng)
+        if cells is not None:
+            order = _map_cells(fmt, chunks, cells, work_table, rng)
+        else:
+            order = _shuffle_fallback(fmt, chunks, rng)
+        return finish(_mt_repair(fmt, order, work_table, frozen_positions(order), rng))
+
     best: tuple[list[Any], int] | None = None
     for _ in range(_COLLAPSE_ATTEMPTS):
         cells = _collapse_cells(fmt, chunks, kinds_present, work_table, violated_pair, rng)
@@ -428,7 +525,12 @@ def wfc_reorder_chunks(
         if illegal == 0:
             break
     if best is None:
+        if resample == "hybrid":
+            order = _shuffle_fallback(fmt, chunks, rng)
+            return finish(_mt_repair(fmt, order, work_table, frozen_positions(order), rng))
         return finish(_shuffle_fallback(fmt, chunks, rng))
+    if resample == "hybrid" and best[1] > 0:
+        return finish(_mt_repair(fmt, best[0], work_table, frozen_positions(best[0]), rng))
     return finish(best[0])
 
 

@@ -17,6 +17,7 @@ from __future__ import annotations
 import dataclasses
 import io
 import struct
+import pytest
 import time
 import zipfile
 from typing import Any
@@ -873,3 +874,107 @@ class TestLeftoverPlacement:
             out = wfc_reorder_chunks(fmt, chunks, table, RandPool(seed=seed), mode="strict")
             assert sorted(out[i : i + 2] for i in range(0, len(out), 2)) == sorted(chunks), seed
             assert out[-2:] == b"E1", seed
+
+
+# ═══════════════════════════════════════════════════════════════════
+# resample="mt": swap-based Moser-Tardos repair
+# (docs/handover/handover_moser_tardos_2026-09-28.md; "LLL" there is the
+# Lovász Local Lemma, not lattice reduction)
+# ═══════════════════════════════════════════════════════════════════
+
+from fuzzer_tool.core.wfc_chunks import _illegal_adjacencies, _mt_repair  # noqa: E402
+
+
+class TestMoserTardosRepair:
+    def test_rejects_unknown_resample_mode(self):
+        fmt = _toy_format()
+        table = _toy_table((b"A", b"B"), (b"B", b"C"))
+        with pytest.raises(ValueError):
+            wfc_reorder_chunks(fmt, [b"A1", b"B1", b"C1"], table, RandPool(seed=0), resample="x")
+
+    def test_output_is_permutation_and_reparses(self):
+        """Same bar as the restart path: output reparses, and length is that
+        of the input (a permutation adds/drops no chunk). Kind multisets are
+        not compared after re-parsing: gif's parser reads reordered blocks
+        differently, for restart and mt alike."""
+        rng = RandPool(seed=11)
+        for name, data, try_parse, fmt in _FORMATS_UNDER_TEST:
+            store = WfcChunkTableStore()
+            _train(store, fmt, data)
+            table = store.table_for(name)
+            chunks = fmt.parse(data)
+            for mode in ("strict", "violate"):
+                for _ in range(10):
+                    out = wfc_reorder_chunks(fmt, chunks, table, rng, mode=mode, resample="mt")
+                    assert try_parse(out) is not None, f"{name}/{mode}"
+                    assert len(out) == len(fmt.serialize(chunks)), f"{name}/{mode}"
+
+    def test_repair_keeps_pins(self):
+        fmt = _toy_format(pin_first=True, pin_last=True)
+        chunks = [b"H1", b"A1", b"B1", b"C1", b"D1", b"T1"]
+        table = _toy_table(
+            (b"H", b"A"), (b"A", b"B"), (b"B", b"C"), (b"C", b"D"), (b"D", b"T"),
+            (b"H", b"C"), (b"C", b"A"), (b"B", b"D"), (b"A", b"T"),
+        )
+        for seed in range(200):
+            out = wfc_reorder_chunks(fmt, chunks, table, RandPool(seed=seed), resample="mt")
+            assert out[:2] == b"H1" and out[-2:] == b"T1", seed
+
+    def test_repair_never_worse_and_usually_fixes(self):
+        fmt = _toy_format(pin_first=False, pin_last=False)
+        kinds = [b"A", b"B", b"C", b"D", b"E", b"F"]
+        chunks = [k + b"1" for k in kinds]
+        # Ring table: any legal order is a rotation-like path; a shuffled start is bad.
+        table = _toy_table(*[(kinds[i], kinds[(i + 1) % 6]) for i in range(6)])
+        fixed = 0
+        for seed in range(200):
+            rng = RandPool(seed=seed)
+            start = list(chunks)
+            rng.shuffle(start)
+            before = _illegal_adjacencies(fmt, start, table)
+            out = _mt_repair(fmt, start, table, set(), rng)
+            after = _illegal_adjacencies(fmt, out, table)
+            assert sorted(out) == sorted(chunks)
+            assert after <= before
+            fixed += after == 0
+        assert fixed >= 150, fixed
+
+    def test_frozen_positions_never_move(self):
+        fmt = _toy_format(pin_first=False, pin_last=False)
+        order = [b"A1", b"B1", b"C1", b"D1", b"E1"]
+        table = _toy_table((b"A", b"C"), (b"C", b"E"))
+        for seed in range(100):
+            out = _mt_repair(fmt, order, table, {0, 4}, RandPool(seed=seed))
+            assert out[0] == b"A1" and out[4] == b"E1"
+
+    def test_violate_mode_keeps_forced_pair_at_least_as_often_as_restart(self):
+        fmt = _toy_format(pin_first=False, pin_last=False)
+        kinds = [b"A", b"B", b"C", b"D", b"E"]
+        chunks = [k + b"1" for k in kinds]
+        table = _toy_table(*[(kinds[i], kinds[i + 1]) for i in range(4)])
+
+        def held(resample: str) -> int:
+            n = 0
+            for seed in range(200):
+                out = wfc_reorder_chunks(
+                    fmt, chunks, table, RandPool(seed=seed), mode="violate", resample=resample
+                )
+                ks = [out[i : i + 1] for i in range(0, len(out), 2)]
+                n += any(not table.compatible(a, b, "right") for a, b in zip(ks, ks[1:]))
+            return n
+
+        assert held("mt") >= held("restart") - 10
+
+    def test_hybrid_is_never_worse_than_restart_on_same_stream(self):
+        fmt = _toy_format(pin_first=False, pin_last=False)
+        kinds = [b"A", b"B", b"C", b"D", b"E", b"F", b"G"]
+        chunks = [k + b"1" for k in kinds] * 2
+        table = _toy_table(*[(kinds[i], kinds[(i + 1) % 7]) for i in range(7)], (b"A", b"C"))
+        worse = 0
+        for seed in range(100):
+            r = wfc_reorder_chunks(fmt, chunks, table, RandPool(seed=seed), resample="restart")
+            h = wfc_reorder_chunks(fmt, chunks, table, RandPool(seed=seed), resample="hybrid")
+            assert sorted(h[i : i + 2] for i in range(0, len(h), 2)) == sorted(chunks)
+            ill = lambda o: _illegal_adjacencies(fmt, fmt.parse(o), table)  # noqa: E731
+            worse += ill(h) > ill(r)
+        assert worse == 0

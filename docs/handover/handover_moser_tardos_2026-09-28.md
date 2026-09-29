@@ -1,6 +1,6 @@
 # Handover: Moser-Tardos in the fuzzer
 
-> **Status (2026-09-28): analysis only. Nothing implemented.** Repo HEAD at time of analysis: `bf4ada86`.
+> **Status (2026-09-29): implemented, off by default.** `wfc_reorder_chunks(..., resample="restart"|"mt"|"hybrid")` (default `"restart"` = unchanged behaviour), `_mt_repair` swap-based repair, 7 tests in `tests/test_wfc_chunks.py::TestMoserTardosRepair`, benchmark `tools/wfc_resample_bench.py`. Not wired into `WfcChunkMutator` (still uses the default). `covering_array.py` intentionally untouched (no forbidden-combination rows exist). Analysis HEAD was `bf4ada86`.
 
 ## Terminology (read first)
 
@@ -69,3 +69,21 @@ Only worth touching if rows gain forbidden value combinations (e.g. PNG IHDR `co
 
 - Actual per-format table density from real corpora (unmeasured).
 - Whether swap-based repair beats best-of-8 restart on time at equal illegal-adjacency rate.
+
+## Results (2026-09-29)
+
+Run: `PYTHONPATH=src:tests python tools/wfc_resample_bench.py --n 100` (real-format fixtures; density = fraction of observed pairs kept) and `--synthetic` (larger/sparser toy alphabets). Illegal = unobserved adjacencies per output under the table.
+
+- **Real-format fixtures (11 formats, density 1.0/0.9/0.7/0.5):** both modes give ~0 illegal adjacencies almost everywhere; fixtures are tiny (few chunks, few kinds), so this does not separate them. `mt` is ~1.2-3x faster at 0.5 density (ogg 3.6 -> 2.0 ms, asf 6.8 -> 2.3 ms). Exception: asf at 0.5, `mt` leaves 0.59 illegal/out vs 0.08 for `restart`.
+- **Synthetic, table density >= 0.9 (above the ~0.88 local lemma threshold):** identical quality, `mt` slightly faster.
+- **Synthetic, density 0.5 and 0.25:** `mt` is 4-8x faster (K=16, N=80: 62 ms vs 425 ms) but worse: 4.6 vs 1.6 illegal/out at 0.5; 7.4 vs 4.0 at 0.25. Consistent with the analysis: below the threshold the uniform-swap random walk has no guarantee and stalls.
+- **`hybrid`** (restart loop, then `_mt_repair` on the best): quality and time ~ `restart` in every case; the repair almost never removes what the restart loop could not. No benefit, keep as an option only.
+
+**Conclusion:** `mt` is a speed/quality trade, not a strict win. Default stays `restart`. Reasonable use: dense tables or a time-boxed mutator where 5-8x on large sparse inputs matters more than a few residual illegal adjacencies. Not wired into `WfcChunkMutator`; enabling needs an A/B on real campaigns (fuzzer posture: off by default until measured).
+
+## Not done / caveats
+
+- Repair uses uniform random swaps (pure permutation Moser-Tardos). A guided swap (prefer a partner whose neighbours make both new adjacencies legal) would likely close the quality gap; untested.
+- `violate` mode: forced pair is frozen when present in the order; it can be absent when the collapse fell back to a shuffle (same as `restart`, measured: mt holds it at least as often).
+- Synthetic sweep capped at K=16, N=80: N=300 exceeded a 5-minute single-command limit because the restart path (WFC collapse) dominates.
+- Reported timings are single-process, noisy (+-20%).
