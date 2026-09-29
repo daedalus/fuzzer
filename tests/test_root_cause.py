@@ -411,3 +411,36 @@ class TestRootCausePngIhdrFields:
         with patch("fuzzer_tool.adapters.process.run_target_stdin", side_effect=fake_run):
             result = root_cause("/bin/true", str(crash), baseline_file=str(baseline))
         assert result is not None and "field_schema" not in result
+
+
+class TestRootCauseCustomFields:
+    def _run(self, tmp_path, spec):
+        crash = tmp_path / "c.bin"
+        crash.write_bytes(b"\x01\x02\x03\x04\x05\x06")
+        baseline = tmp_path / "b.bin"
+        baseline.write_bytes(b"\x00\x00\x00\x00\x00\x00")
+
+        def fake_run(target, data, timeout, env=None):
+            # crash iff byte 1 == 2 and byte 4 == 5
+            return (-11, "", 1) if data[1] == 2 and data[4] == 5 else (0, "", 1)
+
+        with patch("fuzzer_tool.adapters.process.run_target_stdin", side_effect=fake_run):
+            return root_cause(
+                "/bin/true", str(crash), baseline_file=str(baseline), isolate_fields=spec
+            )
+
+    def test_custom_schema_reported(self, tmp_path):
+        result = self._run(tmp_path, "w@0:1,x@1:1,y@2:2,z@4:1")
+        assert result is not None
+        assert result["custom_field_schema"] == {"x": 2, "z": 5}
+        assert "Fields responsible: x=2 & z=5" in result["report"]
+        assert "field_schema" not in result  # PNG key untouched
+
+    def test_bad_spec_reported_not_raised(self, tmp_path):
+        result = self._run(tmp_path, "nonsense")
+        assert result is not None and result["custom_field_schema"] is None
+        assert "Field isolation: bad field spec" in result["report"]
+
+    def test_absent_by_default(self, tmp_path):
+        result = self._run(tmp_path, None)
+        assert result is not None and "custom_field_schema" not in result

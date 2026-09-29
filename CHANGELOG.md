@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Failure-inducing combination isolation** (`core/failure_inducing.py`): given a failing parameter row and an oracle, finds the minimal set of parameter values that cause the failure (FIC-style, ~k probes, memoized, budget-capped, optional sufficiency check). PNG IHDR adapter `isolate_png_ihdr_failure` and `root_cause --isolate-png-ihdr`, which adds the responsible IHDR fields to the report. Tested against mocked oracles only.
+- **Generic field adapter** (`core/field_spec.py`, `root_cause --isolate-fields SPEC`): declare fixed-offset integer fields (`NAME@OFFSET:SIZE[be|le][=V|V...]`) for any format; boundary-value domains by width, plus the baseline's value at each offset, feed `failure_inducing.isolate`. Result under `custom_field_schema`. Live-tested against `targets/test_target.c`.
 
 ### Documentation
 

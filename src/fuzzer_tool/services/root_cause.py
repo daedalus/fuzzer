@@ -123,6 +123,28 @@ def _png_ihdr_section(crash_data: bytes, interesting) -> tuple[dict | None, str]
     return named, f"[+] IHDR fields responsible: {format_ihdr_schema(schema)}"
 
 
+def _custom_fields_section(
+    crash_data: bytes, interesting, spec: str, baseline: bytes | None
+) -> tuple[dict | None, str]:
+    """Field-level failure-inducing combination for a user-declared field spec."""
+    from fuzzer_tool.core import field_spec
+
+    try:
+        fields = field_spec.parse_spec(spec)
+    except ValueError as e:
+        return None, f"[-] Field isolation: {e}"
+    schema = field_spec.isolate_fields_failure(
+        crash_data, interesting, fields, baseline=baseline, verify_samples=8
+    )
+    if schema is None:
+        return None, "[*] Field isolation: input is too short to contain every declared field"
+    text = field_spec.format_fields_schema(schema, fields)
+    if not schema.params:
+        return None, f"[*] Field isolation: {text}"
+    named = {fields[i].name: v for i, v in sorted(schema.params.items())}
+    return named, f"[+] Fields responsible: {text}"
+
+
 def root_cause(
     target: str,
     crash_file: str,
@@ -134,6 +156,7 @@ def root_cause(
     use_coverage: bool = False,
     max_stages: int = 200,
     isolate_png_ihdr: bool = False,
+    isolate_fields: str | None = None,
 ) -> dict | None:
     """Isolate the minimal byte diff, relative to a non-crashing baseline,
     that is responsible for triggering the crash in *crash_file*.
@@ -144,7 +167,9 @@ def root_cause(
     Returns a dict with keys ``baseline_name``, ``baseline``, ``crash``,
     ``script``, ``minimal_indices``, ``minimal_bytes``, ``signature``,
     ``report`` (plus ``field_schema`` when *isolate_png_ihdr* is set: the
-    IHDR fields that cause the crash, as ``{name: value}``, or ``None``) -- or ``None`` if the crash couldn't be reproduced or no
+    IHDR fields that cause the crash, as ``{name: value}``, or ``None``;
+    ``custom_field_schema`` likewise when *isolate_fields* (a
+    ``core/field_spec`` spec string) is set) -- or ``None`` if the crash couldn't be reproduced or no
     valid non-crashing baseline was available.
     """
     crash_path = Path(crash_file)
@@ -273,6 +298,14 @@ def root_cause(
             print(section)
             report += "\n" + section
 
+        custom_schema = None
+        if isolate_fields:
+            custom_schema, section = _custom_fields_section(
+                crash_data, _interesting, isolate_fields, baseline
+            )
+            print(section)
+            report += "\n" + section
+
         result = {
             "baseline_name": baseline_name,
             "baseline": baseline,
@@ -285,6 +318,8 @@ def root_cause(
         }
         if isolate_png_ihdr:
             result["field_schema"] = field_schema
+        if isolate_fields:
+            result["custom_field_schema"] = custom_schema
         return result
     finally:
         if file_mode and tmp_dir.exists():
@@ -305,6 +340,7 @@ def main():
     parser.add_argument("-b", "--baseline", default=None)
     parser.add_argument("--max-stages", type=int, default=200)
     parser.add_argument("--isolate-png-ihdr", action="store_true")
+    parser.add_argument("--isolate-fields", default=None, metavar="SPEC")
     parser.add_argument("-O", "--output", default=None)
     args = parser.parse_args()
 
@@ -319,6 +355,7 @@ def main():
         use_coverage=args.coverage,
         max_stages=args.max_stages,
         isolate_png_ihdr=args.isolate_png_ihdr,
+        isolate_fields=args.isolate_fields,
     )
     if result is None:
         sys.exit(1)

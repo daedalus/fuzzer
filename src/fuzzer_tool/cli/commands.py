@@ -1041,6 +1041,7 @@ def cmd_root_cause(args):
         use_coverage=args.coverage,
         max_stages=args.max_stages,
         isolate_png_ihdr=getattr(args, "isolate_png_ihdr", False),
+        isolate_fields=getattr(args, "isolate_fields", None),
     )
 
     if result is None:
@@ -4781,6 +4782,13 @@ def main() -> int:
         "--isolate-png-ihdr",
         action="store_true",
         help="Also isolate which PNG IHDR fields (and values) cause the crash",
+    )
+    rc_parser.add_argument(
+        "--isolate-fields",
+        default=None,
+        metavar="SPEC",
+        help="Also isolate which fixed-offset fields cause the crash; "
+        "SPEC = NAME@OFFSET:SIZE[be|le][=V|V...],... (see core/field_spec.py)",
     )
     rc_parser.add_argument(
         "-O", "--output", default=None, help="Save the root-cause report to a file"
