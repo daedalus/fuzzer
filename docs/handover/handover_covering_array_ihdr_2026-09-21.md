@@ -107,9 +107,9 @@ regression test (`test_full_coverage_across_many_seeds_png_ihdr_domains`).
 
 ## Not done / open
 
-- PNG only. A second format (candidates: ISO-BMFF `ftyp`/`tkhd` fields,
-  RIFF/WEBP `VP8X` flags) follows the same pattern but wasn't built --
-  no format-specific field table exists yet for anything but PNG IHDR.
+- Other formats: gzip, WebP `VP8X`, ISO-BMFF `ftyp` and ZIP local header
+  now exist (`covering_array_gzip.py`, `covering_array_container.py`).
+  Still not built: ISO-BMFF `tkhd` (variable depth).
 - No campaign-level measurement of whether this operator's arm actually
   earns selection share under the Elo/bandit scheduler (the G0 bench
   arms added yesterday don't cover it either -- it's a new arm, not one

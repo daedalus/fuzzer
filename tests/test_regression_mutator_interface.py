@@ -316,7 +316,9 @@ class TestGlobalRegistryUnaffected:
         ``covering_array_ihdr`` (pairwise-covering PNG IHDR field mutation,
         core/mutations/covering_array_mutate.py) is the sixth;
         ``covering_array_gzip`` (same for the gzip member header,
-        core/mutations/covering_array_gzip.py) is the seventh.
+        core/mutations/covering_array_gzip.py) is the seventh;
+        ``covering_array_webp`` / ``_isobmff`` / ``_zip``
+        (core/mutations/covering_array_container.py) are the eighth to tenth.
         Anything else here is a surprise.
 
         Note the ``ff_*`` entries are registered at import, unconditionally,
@@ -331,6 +333,9 @@ class TestGlobalRegistryUnaffected:
         assert names == [
             "covering_array_gzip",
             "covering_array_ihdr",
+            "covering_array_isobmff",
+            "covering_array_webp",
+            "covering_array_zip",
             "ff_isobmff",
             "ff_jpeg",
             "ff_png",

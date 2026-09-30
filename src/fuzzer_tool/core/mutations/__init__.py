@@ -4,6 +4,13 @@ This module re-exports all public names from :mod:`fuzzer_tool.core.mutations.ge
 so that existing imports of ``fuzzer_tool.core.mutations`` continue to work.
 """
 
+# Pairwise covering-array WebP/ISO-BMFF/ZIP header field mutation (self-registers)
+from fuzzer_tool.core.mutations.covering_array_container import (  # noqa: F401
+    IsobmffCoveringArrayMutator,
+    WebpCoveringArrayMutator,
+    ZipCoveringArrayMutator,
+)
+
 # Pairwise covering-array gzip header field mutation (self-registers)
 from fuzzer_tool.core.mutations.covering_array_gzip import (  # noqa: F401
     GzipCoveringArrayMutator,
