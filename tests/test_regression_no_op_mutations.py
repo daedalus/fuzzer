@@ -35,10 +35,12 @@ to reach it fails there rather than silently reopening the blind spot.
 
 from __future__ import annotations
 
+import io
 import os
 import random
 import struct
 import tempfile
+import zipfile
 import zlib
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -275,6 +277,48 @@ def _riff_multi() -> bytes:
     return b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WAVE" + body
 
 
+def _avi() -> bytes:
+    """RIFF/AVI with LIST hdrl + avih: the walker behind covering_array_avi."""
+
+    def chunk(fourcc: bytes, payload: bytes) -> bytes:
+        return fourcc + struct.pack("<I", len(payload)) + payload
+
+    avih = struct.pack("<10I", 33333, 1000, 0, 0x10, 240, 0, 1, 65536, 320, 200) + bytes(16)
+    body = chunk(b"LIST", b"hdrl" + chunk(b"avih", avih)) + chunk(b"LIST", b"movi")
+    return b"RIFF" + struct.pack("<I", 4 + len(body)) + b"AVI " + body
+
+
+def _vp8l() -> bytes:
+    """Lossless WebP (VP8L signature + packed size word)."""
+    payload = b"\x2f" + struct.pack("<I", 639 | (479 << 14)) + bytes(6)
+    body = b"VP8L" + struct.pack("<I", len(payload)) + payload
+    return b"RIFF" + struct.pack("<I", 4 + len(body)) + b"WEBP" + body
+
+
+def _mp4_tkhd() -> bytes:
+    """ftyp + moov/trak/tkhd (v0): the walker behind covering_array_isobmff_tkhd."""
+
+    def box(kind: bytes, payload: bytes) -> bytes:
+        return struct.pack(">I", 8 + len(payload)) + kind + payload
+
+    tkhd = struct.pack(">B3sIIIII8x", 0, b"\x00\x00\x07", 1, 2, 1, 0, 1000)
+    tkhd += (
+        struct.pack(">hhhh", 0, 0, 0x0100, 0) + bytes(36) + struct.pack(">II", 640 << 16, 480 << 16)
+    )
+    return box(b"ftyp", b"isom" + bytes(4) + b"isom") + box(
+        b"moov", box(b"trak", box(b"tkhd", tkhd))
+    )
+
+
+def _zip_multi() -> bytes:
+    """Two-entry ZIP: local headers, central directory and EOCD for the zip_* walkers."""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("a.txt", b"hello world" * 8)
+        z.writestr("bb.txt", b"goodbye" * 8)
+    return buf.getvalue()
+
+
 def _sqlite() -> bytes:
     """Minimal SQLite database: the 100-byte file header plus one empty
     leaf page. Enough for the sniffer (which requires a full header) and
@@ -354,6 +398,10 @@ def _battery() -> list[bytes]:
         _gif_multi(),
         _webp_multi(),
         _riff_multi(),
+        _avi(),
+        _vp8l(),
+        _mp4_tkhd(),
+        _zip_multi(),
         # zlib stream: covers zlib_chunk_mutate and recompress_zlib, whose
         # sniffers check the CMF/FLG header rather than a magic string.
         zlib.compress(b"the quick brown fox jumps over the lazy dog" * 3, 6),

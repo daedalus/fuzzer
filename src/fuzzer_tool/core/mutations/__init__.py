@@ -21,6 +21,19 @@ from fuzzer_tool.core.mutations.covering_array_mutate import (  # noqa: F401
     PngCoveringArrayMutator,
 )
 
+# Pairwise covering-array walker operators: ISO-BMFF tkhd, WAV, AVI, WebP VP8/VP8L,
+# ZIP EOCD/central directory/later entries (self-registers)
+from fuzzer_tool.core.mutations.covering_array_walk import (  # noqa: F401
+    AviCoveringArrayMutator,
+    IsobmffTkhdCoveringArrayMutator,
+    WavCoveringArrayMutator,
+    WebpVp8CoveringArrayMutator,
+    WebpVp8lCoveringArrayMutator,
+    ZipCdCoveringArrayMutator,
+    ZipEntryCoveringArrayMutator,
+    ZipEocdCoveringArrayMutator,
+)
+
 # Fractal jittered Voronoi spatial meta-mutator (self-registers on import)
 from fuzzer_tool.core.mutations.fractal_voronoi import FractalVoronoiMutator  # noqa: F401
 from fuzzer_tool.core.mutations.generic import *  # noqa: F401,F403
