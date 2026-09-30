@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
@@ -803,6 +804,8 @@ def cmd_fuzz(args):
         enable_regex_bomb=getattr(args, "enable_regex_bomb_mutations", False),
         colorize=getattr(args, "colorize", False),
         colorize_max_execs=getattr(args, "colorize_max_execs", 512),
+        colorize_mode=getattr(args, "colorize_mode", "bisect"),
+        swap_walk=getattr(args, "swap_walk", False),
         weizz_tags=getattr(args, "weizz_tags", False),
         weizz_tags_max_len=getattr(args, "weizz_tags_max_len", 8192),
         formatfuzzer=getattr(args, "formatfuzzer", False),
@@ -4598,6 +4601,23 @@ def main() -> int:
         default=512,
         metavar="N",
         help="Per-seed execution budget for --colorize (default: 512)",
+    )
+    fuzz_parser.add_argument(
+        "--colorize-mode",
+        choices=[m.value for m in ColorMode],
+        default=ColorMode.BISECT.value,
+        help=(
+            "--colorize search: bisect (fewest execs) or pooled (group testing, "
+            "non-adaptive; loses when many bytes are live). Default: bisect"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--swap-walk",
+        action="store_true",
+        help=(
+            "Draw m>2 byte-swap tuples from a non-repeating walk over all ordered "
+            "tuples instead of independent samples. Off by default (yield unmeasured)"
+        ),
     )
     fuzz_parser.add_argument(
         "--weizz-tags",

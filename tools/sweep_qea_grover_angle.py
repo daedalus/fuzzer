@@ -11,8 +11,13 @@ from __future__ import annotations
 
 import argparse
 import statistics
+import sys
+from pathlib import Path
 
 import numpy as np
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from factorial_design import screen  # noqa: E402
 
 from fuzzer_tool.core.qea import _uniform_amplitudes, collapse, rotation_gate
 from fuzzer_tool.core.qea_grover import LiveFractionTracker
@@ -48,13 +53,45 @@ def run(n_bytes: int, m_live: int, mode: str, delta: float, seed: int, cap: int)
     return None
 
 
+# Two-level ranges for --screen; response is median evals-to-solve.
+_SCREEN_FACTORS = {
+    "delta": (0.02, 0.20),
+    "n_bytes": (16, 64),
+    "m_live": (2, 32),
+}
+
+
+def _median_evals(cfg: dict[str, float], mode: str, trials: int, cap: int) -> float:
+    runs = [
+        run(int(cfg["n_bytes"]), int(cfg["m_live"]), mode, cfg["delta"], s, cap)
+        for s in range(trials)
+    ]
+    return statistics.median(cap if r is None else r for r in runs)
+
+
+def screen_report(mode: str, trials: int, cap: int) -> str:
+    """Rank delta / n_bytes / m_live by main effect on median evals (Plackett-Burman)."""
+    ranked = screen(_SCREEN_FACTORS, lambda c: _median_evals(c, mode, trials, cap))
+    lines = [f"screen mode={mode} trials={trials} cap={cap} (effect = high - low, evals)"]
+    lines += [f"{e.name:>8} {e.effect:>+10.0f}" for e in ranked]
+    return "\n".join(lines)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--n-bytes", type=int, default=32)
     ap.add_argument("--trials", type=int, default=20)
     ap.add_argument("--cap", type=int, default=20000)
     ap.add_argument("--m-live", type=int, nargs="+", default=[2, 8, 32, 128])
+    ap.add_argument(
+        "--screen",
+        choices=("c", "grover"),
+        help="rank delta/n_bytes/m_live by main effect (4 runs) instead of the grid",
+    )
     a = ap.parse_args()
+    if a.screen:
+        print(screen_report(a.screen, a.trials, a.cap))
+        return
     n = a.n_bytes * 8
     print(f"n_bits={n} trials={a.trials} cap={a.cap} (median evals to solve; fail=cap)")
     print(

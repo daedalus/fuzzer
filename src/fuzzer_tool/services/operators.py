@@ -2818,7 +2818,7 @@ class OperatorEngine:
         if n >= 4 and rng.randint(0, 19) < 3:
             m = 4 if n < 8 else (5 if rng.randint(0, 1) == 0 else 4)
             m = min(m, n)
-            result = _swap_tuple(n, rng, m)
+            result = _swap_tuple(n, rng, m, walk=getattr(self.f, "swap_walk", None))
             if result is not None:
                 picked, permuted = result
                 # Snapshot values at the *source* indices, then write.

@@ -69,7 +69,7 @@ def _non_identity_permutations(m: int) -> tuple[tuple[int, ...], ...]:
     return tuple(p for p in itertools.permutations(identity) if p != identity)
 
 
-def _swap_tuple(domain, rng, m, *, start=0):
+def _swap_tuple(domain, rng, m, *, start=0, walk=None):
     """Pick ``m`` distinct indices/elements from ``domain`` and return a
     non-identity rearrangement of them — the C(n,2) ``_swap_pair``
     primitive generalized to C(n,m), per the combinatorics survey's
@@ -120,6 +120,9 @@ def _swap_tuple(domain, rng, m, *, start=0):
             keep going through ``_swap_pair`` directly rather than here.
         start: for the int-domain case, the inclusive lower bound of the
             eligible range. Ignored when ``domain`` is a sequence.
+        walk: optional ``TupleWalk``; int domains then draw ``picked`` from
+            a non-repeating walk instead of ``rng.sample``. Ignored for
+            sequence domains.
 
     Returns:
         A tuple ``(picked, permuted)`` of two ``m``-tuples holding the
@@ -136,7 +139,11 @@ def _swap_tuple(domain, rng, m, *, start=0):
     if isinstance(domain, int):
         if domain - start < m:
             return None
-        picked = tuple(rng.sample(list(range(start, domain)), m))
+        if walk is not None:
+            drawn = walk.draw(domain - start, m, rng)
+            picked = tuple(start + i for i in drawn)
+        else:
+            picked = tuple(rng.sample(list(range(start, domain)), m))
     else:
         candidates = domain
         if len(candidates) < m:

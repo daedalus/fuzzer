@@ -11,7 +11,8 @@ integer in ``[0, total)`` and back, so callers can:
 Order is lexicographic, matching ``itertools.permutations`` /
 ``itertools.combinations`` over ``range(n)``.
 
-Not wired into a mutator yet: whether m>2 swaps pay at all is unmeasured
+Wired via ``core/tuple_walk.py`` (``--swap-walk``, off by default): whether m>2
+swaps pay at all is unmeasured
 (``docs/handover/handover_combinatorics_permutations_2026-09-02.md`` §1).
 """
 

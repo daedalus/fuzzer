@@ -18,7 +18,9 @@ import time
 from collections.abc import Collection
 from typing import TYPE_CHECKING
 
+from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.tuple_walk import TupleWalk
 
 if TYPE_CHECKING:
     from fuzzer_tool.services.corpus_manager import PoissonDiskAdmission as _PoissonDiskAdmission
@@ -1343,6 +1345,8 @@ class Fuzzer:
         enable_regex_bomb=False,
         colorize=False,
         colorize_max_execs=512,
+        colorize_mode="bisect",
+        swap_walk=False,
         enable_x86_mutator=False,
         enable_arm_mutator=False,
         enable_smt_z3=False,
@@ -1687,8 +1691,11 @@ class Fuzzer:
         # buys redqueen precision, so it needs a per-target A/B first.
         self.colorize = colorize
         self.colorize_max_execs = colorize_max_execs
+        self.colorize_mode = ColorMode(colorize_mode)
         self._colorize_taint_cache: dict[int, object] = {}
         self._colorize_execs = 0
+        # --swap-walk: non-repeating m>2 byte swaps. Off: yield unmeasured.
+        self.swap_walk = TupleWalk() if swap_walk else None
         # Weizz structure tags (--weizz-tags): off by default. Passive
         # collector consumes existing cmplog pairs; field/chunk operators
         # only fire when a seed carries a StructureMap in seed_meta.
@@ -7433,6 +7440,7 @@ class Fuzzer:
                 use_type_aware=True,
                 max_execs=min(2 * len(data), self.colorize_max_execs),
                 rng=self._rng,
+                mode=self.colorize_mode,
             )
         except Exception:
             log.debug("colorization failed for a seed; continuing unfiltered", exc_info=True)

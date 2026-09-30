@@ -17,9 +17,11 @@ diverse comparison values.
 
 import logging
 from dataclasses import dataclass, field
+from enum import Enum
 
 import numpy as np
 
+from fuzzer_tool.core import group_testing
 from fuzzer_tool.core.rand_pool import RandPool
 
 log = logging.getLogger(__name__)
@@ -27,6 +29,22 @@ log = logging.getLogger(__name__)
 # Offset that would map a byte back onto itself under the shift below, so
 # it is the one draw the replacement has to reject.
 _SELF_OFFSET = 0xFF
+
+
+class ColorMode(Enum):
+    """How the path-preserving byte set is searched for."""
+
+    BISECT = "bisect"  # AFL++ range bisection: sequential, fewest execs
+    POOLED = "pooled"  # non-adaptive group testing: one parallel round
+
+
+# Pool inclusion is p = 1/(_POOL_D + 1) = 1/4 = two random bits == 0, so a
+# byte of entropy decides 4 pool slots with no modulo bias. Soundness of the
+# result does not depend on this; only how many bytes get proven dead does.
+_POOL_D = 3
+_POOL_MASK = 0b11
+# Baseline run + final verification run, on top of the pool runs.
+_FIXED_EXECS = 2
 
 
 def _diverse_copy(data: bytes, rng: RandPool) -> bytearray:
@@ -59,6 +77,85 @@ def _diverse_copy(data: bytes, rng: RandPool) -> bytearray:
     return bytearray(shifted.tobytes())
 
 
+def _bisect_safe(data, changed, exec_fn, original_checksum, max_execs):
+    """Binary search: largest range first, split on path change."""
+    length = len(data)
+    exec_count = 1
+    ranges: list[list[int]] = [[0, length - 1]]
+    safe_ranges: list[list[int]] = []
+
+    while ranges and exec_count < max_execs:
+        ranges.sort(key=lambda r: r[1] - r[0], reverse=True)
+        start, end = ranges.pop(0)
+        size = end - start + 1
+
+        test = bytearray(data)
+        test[start : end + 1] = changed[start : end + 1]
+
+        cksum = exec_fn(bytes(test))
+        exec_count += 1
+
+        if cksum == original_checksum:
+            safe_ranges.append([start, end])
+        elif size > 1:
+            mid = start + size // 2
+            ranges.append([start, mid - 1])
+            ranges.append([mid, end])
+
+    return safe_ranges, exec_count
+
+
+def _pooled_safe(data, changed, exec_fn, original_checksum, max_execs, rng):
+    """Group testing: a byte in any path-preserving pool is path-irrelevant.
+
+    Pools are fixed up front (independent executions, so they could run in
+    parallel; the fuzzer still runs them serially). Replace one random pool
+    at a time in the original; if the path holds, every byte in it is dead
+    (COMP, ``group_testing.comp``: items in no negative pool are the only
+    candidates for "matters"). Dead = union of surviving pools.
+
+        pool 1: x . x . . x      path same  -> bytes 0,2,5 dead
+        pool 2: . x . x . .      path moved -> no conclusion
+        pool 3: . . . . x x      path same  -> bytes 4,5 dead
+
+    Bytes in no surviving pool stay live (conservative), so a short budget
+    only under-taints. The union is then executed once: interacting bytes
+    that are individually dead but jointly live would break the path, in
+    which case nothing is claimed.
+    """
+    length = len(data)
+    budget = max_execs - _FIXED_EXECS
+    tests = min(group_testing.tests_needed(length, _POOL_D), budget)
+    if tests < 1:
+        return [], 1
+
+    orig = np.frombuffer(data, dtype=np.uint8)
+    diverse = np.frombuffer(bytes(changed), dtype=np.uint8)
+    pools, outcomes = [], []
+    for _ in range(tests):
+        bits = np.frombuffer(rng.randbytes(length), dtype=np.uint8) & _POOL_MASK
+        idx = np.flatnonzero(bits == 0)
+        test = orig.copy()
+        test[idx] = diverse[idx]
+
+        pools.append(frozenset(idx.tolist()))
+        outcomes.append(exec_fn(test.tobytes()) != original_checksum)
+
+    exec_count = 1 + tests
+    live = group_testing.comp(length, pools, outcomes)
+    dead = sorted(set(range(length)) - live)
+    if not dead:
+        return [], exec_count
+
+    verify = orig.copy()
+    verify[dead] = diverse[dead]
+    exec_count += 1
+    if exec_fn(verify.tobytes()) != original_checksum:
+        return [], exec_count
+
+    return [[i, i] for i in dead], exec_count
+
+
 @dataclass
 class TaintRegion:
     """A contiguous range of bytes that can be safely diversified."""
@@ -88,6 +185,7 @@ def colorize(
     max_execs: int = 0,
     *,
     rng: RandPool,
+    mode: ColorMode = ColorMode.BISECT,
 ) -> ColorizationResult:
     """Colorize an input for CmpLog comparison tracing.
 
@@ -104,6 +202,7 @@ def colorize(
         rng: The pool every replacement byte is drawn from. Required and
             keyword-only: both branches below draw, and a default would put
             them back on the stdlib global (Hard Rule 16).
+        mode: ``BISECT`` (default) or ``POOLED`` (see ``_pooled_safe``).
 
     Returns:
         ColorizationResult with the colorized input and taint regions.
@@ -128,35 +227,12 @@ def colorize(
     else:
         changed = _diverse_copy(data, rng)
 
-    # Initialize with one range covering the entire input
-    ranges: list[list[int]] = [[0, length - 1]]  # [start, end] inclusive
-    safe_ranges: list[list[int]] = []  # ranges that can be diversified
-
-    # Binary search over ranges
-    while ranges and exec_count < max_execs:
-        # Pick the largest range
-        ranges.sort(key=lambda r: r[1] - r[0], reverse=True)
-        rng = ranges.pop(0)
-
-        start, end = rng
-        size = end - start + 1
-
-        # Replace this range in the original with changed values
-        test = bytearray(data)
-        test[start : end + 1] = changed[start : end + 1]
-
-        cksum = exec_fn(bytes(test))
-        exec_count += 1
-
-        if cksum == original_checksum:
-            # Path preserved — this range is safe to diversify
-            safe_ranges.append([start, end])
-        else:
-            # Path changed — split and try smaller pieces
-            if size > 1:
-                mid = start + size // 2
-                ranges.append([start, mid - 1])
-                ranges.append([mid, end])
+    if mode is ColorMode.POOLED:
+        safe_ranges, exec_count = _pooled_safe(
+            data, changed, exec_fn, original_checksum, max_execs, rng
+        )
+    else:
+        safe_ranges, exec_count = _bisect_safe(data, changed, exec_fn, original_checksum, max_execs)
 
     # Build colorized output: apply safe ranges
     colorized = bytearray(data)

@@ -1532,3 +1532,10 @@ Bugs discovered by fuzzing with this tool are documented in `docs/FINDINGS/`:
 ## License
 
 MIT
+
+
+### Swap walk, pooled colorization, screening (2026-09-30)
+
+- `--swap-walk`: m>2 byte swaps (`_op_swap_bytes`) draw from `TupleWalk` (`core/tuple_walk.py`): affine walk `(start + step*k) mod total` over all ordered tuples, each visited once per period, O(1) state per (n, m), 256 shapes max. Off by default; yield unmeasured.
+- `--colorize-mode {bisect,pooled}`: `pooled` runs fixed random pools (p=1/4) and marks bytes in any path-preserving pool dead (`group_testing.comp`), then verifies the union once. Sound, may under-taint; loses to bisect when many bytes are live. Default `bisect`.
+- `tools/sweep_qea_grover_angle.py --screen {c,grover}`: Plackett-Burman main effects (`tools/lib/factorial_design.py`) instead of the grid.

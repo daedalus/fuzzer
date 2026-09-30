@@ -18,8 +18,9 @@ Decoding (Bernoulli design, p = 1/(d+1)):
           for *any* d; a wrong ``d`` only costs extra tests (COMP survivors
           that are not defective are few when the design is sized for d).
 
-Not wired into ``tmin`` / the colorizer: benchmark first
-(``tools/bench_group_testing.py``); see
+Wired into ``colorize(mode=POOLED)`` via ``comp`` (``--colorize-mode pooled``).
+Not into ``tmin``: its oracle is conjunctive, not OR. See
+``tools/bench_group_testing.py`` and
 ``docs/handover/handover_combinatorics_permutations_2026-09-02.md`` §6.
 """
 
