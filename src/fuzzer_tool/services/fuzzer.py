@@ -7244,7 +7244,13 @@ class Fuzzer:
         asan_opts = env.get("ASAN_OPTIONS", "")
         opt_parts = [p for p in asan_opts.split(":") if p] if asan_opts else []
         seen = {p.split("=")[0] for p in opt_parts}
-        for opt in ("halt_on_error=0", "abort_on_error=0", "detect_leaks=0", ASAN_RELEASE_TO_OS):
+        for opt in (
+            "halt_on_error=0",
+            "abort_on_error=0",
+            "detect_leaks=0",
+            "detect_odr_violation=0",
+            ASAN_RELEASE_TO_OS,
+        ):
             key = opt.split("=")[0]
             if key not in seen:
                 opt_parts.append(opt)
@@ -7263,6 +7269,17 @@ class Fuzzer:
                 opt_parts.append(opt)
                 seen.add(key)
         env["UBSAN_OPTIONS"] = ":".join(opt_parts)
+
+    @staticmethod
+    def _setup_msan_env(env: dict) -> None:
+        """Set MSAN_OPTIONS for an MSan-instrumented target (OSS-Fuzz defaults)."""
+        from fuzzer_tool.cli.ldpreload_wrapper import _MSAN_DEFAULTS
+
+        msan_opts = env.get("MSAN_OPTIONS", "")
+        opt_parts = [p for p in msan_opts.split(":") if p] if msan_opts else []
+        seen = {p.split("=")[0] for p in opt_parts}
+        opt_parts += [o for o in _MSAN_DEFAULTS if o.split("=")[0] not in seen]
+        env["MSAN_OPTIONS"] = ":".join(opt_parts)
 
     def _save_sanitizer_reports(self, sig: str, info: dict) -> None:
         """Write ASAN/UBSAN reports as JSON alongside the crash file."""

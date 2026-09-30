@@ -1,6 +1,6 @@
 """LD_PRELOAD wrapper entry point for sanitizer runtimes.
 
-Detects target instrumentation (ASAN, UBSAN) from the fuzz subcommand
+Detects target instrumentation (ASAN, UBSAN, MSAN) from the fuzz subcommand
 arguments and preloads the corresponding runtime via LD_PRELOAD before
 exec'ing the real fuzzer-tool via execvpe.
 
@@ -70,6 +70,22 @@ def _detect_ubsan(target: str) -> bool:
     return _has_undefined_symbol(target, b"__ubsan_handle")
 
 
+def _detect_msan(target: str) -> bool:
+    """Check if *target* is MSan-instrumented (defines/imports __msan_init).
+
+    No preload is needed: the MSan runtime is always linked into the target,
+    so any `nm` hit (defined or undefined, static or dynamic) counts.
+    """
+    for flags in ([], ["-D"]):
+        try:
+            r = subprocess.run(["nm", *flags, target], capture_output=True, timeout=10)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        if r.returncode == 0 and b"__msan_init" in r.stdout:
+            return True
+    return False
+
+
 def _resolve_asan() -> str | None:
     candidates = [
         "/usr/lib/x86_64-linux-gnu/libasan.so.8",
@@ -124,9 +140,13 @@ _ASAN_DEFAULTS = (
     "abort_on_error=0",
     "verify_asan_link_order=0",
     "detect_leaks=0",
+    "detect_odr_violation=0",
     ASAN_RELEASE_TO_OS,
 )
 _UBSAN_DEFAULTS = ("halt_on_error=1", "abort_on_error=1", "print_stacktrace=1")
+# MSan aborts via exit(), not abort(): a distinct exit code (OSS-Fuzz uses 86)
+# separates a use-of-uninitialized-value report from a normal target exit.
+_MSAN_DEFAULTS = ("exit_code=86", "symbolize=0")
 
 
 def _fuzz_target(args: list[str]) -> str | None:
@@ -169,6 +189,9 @@ def main() -> None:
             if libubsan:
                 _preload(libubsan, "libubsan")
             _merge_opts("UBSAN_OPTIONS", _UBSAN_DEFAULTS)
+
+        if _detect_msan(target):
+            _merge_opts("MSAN_OPTIONS", _MSAN_DEFAULTS)
 
     # Replace this process with the real fuzzer-tool via execvpe
     cmd = [sys.executable, "-m", "fuzzer_tool"] + sys.argv[1:]

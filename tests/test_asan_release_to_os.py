@@ -73,3 +73,27 @@ def test_target_env_keeps_user_value():
     opts = env["ASAN_OPTIONS"].split(":")
     assert _USER in opts
     assert _keys(opts).count(_OPT) == 1
+
+
+def test_wrapper_msan_defaults(monkeypatch, tmp_path):
+    target = tmp_path / "t.bin"
+    target.write_bytes(b"")
+    monkeypatch.setattr(wrapper.sys, "argv", ["fuzzer-tool", "fuzz", str(target)])
+    monkeypatch.setattr(wrapper, "_detect_asan", lambda t: False)
+    monkeypatch.setattr(wrapper, "_detect_ubsan", lambda t: False)
+    monkeypatch.setattr(wrapper, "_detect_msan", lambda t: True)
+    monkeypatch.setattr(wrapper.os, "execvpe", lambda *a: (_ for _ in ()).throw(_Exec()))
+    monkeypatch.setenv("MSAN_OPTIONS", "symbolize=1")
+    with pytest.raises(_Exec):
+        wrapper.main()
+    opts = wrapper.os.environ["MSAN_OPTIONS"].split(":")
+    assert "exit_code=86" in opts
+    assert "symbolize=1" in opts and "symbolize=0" not in opts  # user key wins
+
+
+def test_setup_msan_env_and_odr():
+    env: dict = {}
+    Fuzzer._setup_msan_env(env)
+    assert env["MSAN_OPTIONS"].split(":") == ["exit_code=86", "symbolize=0"]
+    Fuzzer._setup_asan_env(env)
+    assert "detect_odr_violation=0" in env["ASAN_OPTIONS"].split(":")
