@@ -1060,6 +1060,34 @@ def cmd_root_cause(args):
     return 0
 
 
+def cmd_crash_bisect(args):
+    """Bisect git history for the commit that introduces (or fixes) a crash."""
+    from fuzzer_tool.services.crash_bisect import BisectMode, SigMatch, crash_bisect
+
+    result = crash_bisect(
+        repo=args.repo,
+        good=args.good,
+        bad=args.bad,
+        target=args.target,
+        crash_file=args.crash_file,
+        build_cmd=args.build_cmd,
+        timeout=args.timeout,
+        file_mode=args.file_mode,
+        target_args=args.target_args,
+        mode=BisectMode.FIXED if args.fixed else BisectMode.INTRODUCED,
+        match=SigMatch(args.match),
+        build_timeout=args.build_timeout,
+    )
+    if result is None:
+        return 1
+
+    if args.output:
+        Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+        Path(args.output).write_text(result.report())
+        print(f"[+] Report saved to {args.output}")
+    return 0
+
+
 def _load_fsm_arg(path: str):
     """Load an --fsm spec; print the error and return None if it is bad."""
     from fuzzer_tool.core.format_fsm import load_fsm
@@ -4843,6 +4871,48 @@ def main() -> int:
         "-O", "--output", default=None, help="Save the root-cause report to a file"
     )
     rc_parser.set_defaults(func=cmd_root_cause)
+
+    # --- crash-bisect ---
+    cb_parser = subparsers.add_parser(
+        "crash-bisect",
+        help="Bisect git history for the commit that introduces (or fixes) a crash",
+    )
+    cb_parser.add_argument("repo", help="Path to the git repository")
+    cb_parser.add_argument("crash_file", help="Path to crashing input file")
+    cb_parser.add_argument("--good", required=True, help="Known-good revision (no crash)")
+    cb_parser.add_argument("--bad", default="HEAD", help="Known-bad revision (default: HEAD)")
+    cb_parser.add_argument(
+        "--target", required=True, help="Target binary path, relative to the repo root"
+    )
+    cb_parser.add_argument(
+        "--build-cmd", required=True, help="Shell command that builds the target at each commit"
+    )
+    cb_parser.add_argument("-t", "--timeout", type=float, default=1, help="Run timeout (s)")
+    cb_parser.add_argument(
+        "--build-timeout", type=float, default=1800, help="Build timeout per commit (s)"
+    )
+    cb_parser.add_argument(
+        "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
+    )
+    cb_parser.add_argument(
+        "-A",
+        "--target-args",
+        nargs=argparse.REMAINDER,
+        help="Target arguments ({file} placeholder)",
+    )
+    cb_parser.add_argument(
+        "--fixed",
+        action="store_true",
+        help="Find the commit that FIXED the crash (--good crashes, --bad does not)",
+    )
+    cb_parser.add_argument(
+        "--match",
+        choices=["class", "exact", "any"],
+        default="class",
+        help="Crash identity: sanitizer+error type (default), full stack signature, or any crash",
+    )
+    cb_parser.add_argument("-O", "--output", default=None, help="Save the report to a file")
+    cb_parser.set_defaults(func=cmd_crash_bisect)
 
     # --- minimize ---
     min_parser = subparsers.add_parser(
