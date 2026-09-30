@@ -4,6 +4,7 @@ from fuzzer_tool.core.edge_tracker import EdgeTracker
 from fuzzer_tool.core.percolation import (
     CoverageRegime,
     bootstrap_minimize_corpus,
+    estimate_time_to_next_discovery,
 )
 
 
@@ -166,3 +167,137 @@ class TestBootstrapPercolation:
         assert CoverageRegime.SUBCRITICAL.value == "subcritical"
         assert CoverageRegime.CRITICAL.value == "critical"
         assert CoverageRegime.SUPERCRITICAL.value == "supercritical"
+
+
+
+class _FakeTracker:
+    """Minimal stand-in for EdgeTracker.cumulative_edges."""
+
+    def __init__(self, n_edges: int):
+        self.cumulative_edges = set(range(n_edges))
+
+
+class TestEstimateTimeToNextDiscovery:
+    def test_already_reached_returns_zero(self):
+        et = _FakeTracker(10)
+        assert estimate_time_to_next_discovery(et, target_size=5) == 0.0
+        assert estimate_time_to_next_discovery(et, target_size=10) == 0.0
+
+    def test_no_phi_regime_ordering(self):
+        # Subcritical should predict more executions than supercritical
+        # for the same delta.
+        et = _FakeTracker(0)
+        sub = estimate_time_to_next_discovery(
+            et, coverage_regime=CoverageRegime.SUBCRITICAL, target_delta=1
+        )
+        crit = estimate_time_to_next_discovery(
+            et, coverage_regime=CoverageRegime.CRITICAL, target_delta=1
+        )
+        super_ = estimate_time_to_next_discovery(
+            et, coverage_regime=CoverageRegime.SUPERCRITICAL, target_delta=1
+        )
+        assert sub > crit > super_ > 0
+
+    def test_phi_profile_inverse_of_growth_curve_shape(self):
+        # Larger Φ → faster growth → fewer executions to advance one edge.
+        et = _FakeTracker(1)
+        low_phi = {1: 1, 2: 1, 5: 1, 10: 1}
+        high_phi = {1: 10, 2: 10, 5: 10, 10: 10}
+        n_low = estimate_time_to_next_discovery(
+            et,
+            coverage_regime=CoverageRegime.CRITICAL,
+            phi_profile=low_phi,
+            target_delta=1,
+            c=1.0,
+        )
+        n_high = estimate_time_to_next_discovery(
+            et,
+            coverage_regime=CoverageRegime.CRITICAL,
+            phi_profile=high_phi,
+            target_delta=1,
+            c=1.0,
+        )
+        assert n_low > n_high > 0
+
+    def test_operator_stats_scales_inversely(self):
+        et = _FakeTracker(0)
+        full = estimate_time_to_next_discovery(
+            et, operator_stats=1.0, coverage_regime=CoverageRegime.CRITICAL, target_delta=1
+        )
+        half = estimate_time_to_next_discovery(
+            et, operator_stats=0.5, coverage_regime=CoverageRegime.CRITICAL, target_delta=1
+        )
+        assert abs(half - 2.0 * full) < 1e-6
+
+    def test_operator_stats_dict_pooled(self):
+        et = _FakeTracker(0)
+        stats = {
+            "bit_flip": {"successes": 1, "trials": 10},
+            "havoc": {"successes": 1, "trials": 10},
+        }
+        # pooled rate = 0.1 → 10× stretch vs rate=1
+        base = estimate_time_to_next_discovery(
+            et, operator_stats=1.0, coverage_regime=CoverageRegime.CRITICAL, target_delta=1
+        )
+        scaled = estimate_time_to_next_discovery(
+            et, operator_stats=stats, coverage_regime=CoverageRegime.CRITICAL, target_delta=1
+        )
+        assert abs(scaled - 10.0 * base) < 1e-6
+
+    def test_target_delta_scales_linearly_without_phi(self):
+        et = _FakeTracker(0)
+        one = estimate_time_to_next_discovery(
+            et, coverage_regime=CoverageRegime.CRITICAL, target_delta=1
+        )
+        five = estimate_time_to_next_discovery(
+            et, coverage_regime=CoverageRegime.CRITICAL, target_delta=5
+        )
+        assert abs(five - 5.0 * one) < 1e-6
+
+    def test_max_n_ceiling(self):
+        et = _FakeTracker(0)
+        # Tiny Φ + large delta hits the ceiling quickly.
+        n = estimate_time_to_next_discovery(
+            et,
+            coverage_regime=CoverageRegime.SUBCRITICAL,
+            phi_profile={1: 0},  # forces min_phi guard
+            target_delta=100,
+            max_n=50.0,
+        )
+        assert n == 50.0
+
+    def test_default_regime_is_critical(self):
+        et = _FakeTracker(0)
+        default = estimate_time_to_next_discovery(et, target_delta=1)
+        explicit = estimate_time_to_next_discovery(
+            et, coverage_regime=CoverageRegime.CRITICAL, target_delta=1
+        )
+        assert default == explicit
+
+    def test_empty_tracker(self):
+        class Empty:
+            cumulative_edges = set()
+
+        n = estimate_time_to_next_discovery(Empty(), target_delta=1)
+        assert n > 0
+
+    def test_phi_cross_check_supercritical_compounds(self):
+        # Handover cross-check: Φ(x) ≳ x should predict compounding (fast)
+        # growth consistent with SUPERCRITICAL being cheaper than CRITICAL
+        # at the same profile.
+        et = _FakeTracker(5)
+        # Φ(n) = n  (≳ linear)
+        phi = {n: n for n in range(1, 50)}
+        n_super = estimate_time_to_next_discovery(
+            et,
+            coverage_regime=CoverageRegime.SUPERCRITICAL,
+            phi_profile=phi,
+            target_delta=5,
+        )
+        n_crit = estimate_time_to_next_discovery(
+            et,
+            coverage_regime=CoverageRegime.CRITICAL,
+            phi_profile=phi,
+            target_delta=5,
+        )
+        assert 0 < n_super < n_crit

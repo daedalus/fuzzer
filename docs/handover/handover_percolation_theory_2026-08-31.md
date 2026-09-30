@@ -9,19 +9,26 @@ Module 3 (`core/target_difficulty.py`) closed as diagnostic-only by decision (P2
 
 ---
 
-## Module 5. First-passage percolation for time budgeting — absent
+## Module 5. First-passage percolation for time budgeting — implemented (unwired)
 
 **What.** Estimate executions to the next uncovered region; allocate time per
 target in multi-target fuzzing.
 
-**Design.** Add `estimate_time_to_next_discovery(edge_tracker, operator_stats,
-coverage_regime)` to `core/percolation.py`. Prior from Diskin et al.
-(arXiv:2603.03257) Thm 3: invert `∫[|S|→v_n] 1/(c·Φ(t)) dt = n` using the `Φ`
-profile from `target_difficulty.estimate_isoperimetric_profile`. Cross-check:
-`Φ(x) ≳ x` should predict compounding growth, matching SUPERCRITICAL.
+**Status (2026-09-30).** `estimate_time_to_next_discovery(edge_tracker,
+operator_stats, coverage_regime, *, phi_profile=..., target_delta=..., c=...,
+max_n=...)` lives in `core/percolation.py`. Inverts Diskin et al.
+(arXiv:2603.03257) Thm 3 via stepwise integration of `1/(c·Φ(t))` from current
+`|cumulative_edges|` to a target size. Regime scales and operator success-rate
+stretch are applied after the integral. When `phi_profile` is omitted, falls
+back to a pure regime prior (`_REGIME_FALLBACK_EXEC_PER_EDGE`). Unit tests in
+`tests/test_percolation.py::TestEstimateTimeToNextDiscovery` (10 cases),
+including the handover cross-check that `Φ(x) ≳ x` + SUPERCRITICAL is cheaper
+than CRITICAL.
 
-**Blocker.** Needs a production consumer for `Φ`; `target_difficulty` is
-diagnostic-only, so wiring Module 5 means reopening that decision.
+**Still open.** No production consumer yet. `target_difficulty` remains
+diagnostic-only (P2-1); callers that already hold a Φ profile (offline reports,
+future multi-target budgeters) pass it explicitly. Wiring into the campaign
+loop / multi-target time allocation still means reopening the P2-1 decision.
 
 ## Module 6. Universality → strategy transfer — absent
 
