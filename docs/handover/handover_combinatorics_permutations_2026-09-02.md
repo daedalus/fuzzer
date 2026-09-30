@@ -96,7 +96,7 @@ implemented or measured. Ranked against the litmus test at the top.
 
 | # | Candidate | Litmus | Status |
 |---|-----------|--------|--------|
-| 1 | Failure-inducing combination search over covering-array rows (FIC-style): after a crashing row, run follow-up rows to isolate the minimal field pair/triple | 1, feeds `root_cause` | **Implemented 2026-09-29** (`core/failure_inducing.py`; PNG IHDR adapter in `covering_array_mutate.py`; `root_cause --isolate-png-ihdr`). Unit-tested against mocked oracles only; never run against a real crashing target or measured for usefulness. See section 7. |
+| 1 | Failure-inducing combination search over covering-array rows (FIC-style): after a crashing row, run follow-up rows to isolate the minimal field pair/triple | 1, feeds `root_cause` | **Implemented 2026-09-29** (`core/failure_inducing.py`; PNG IHDR adapter in `covering_array_mutate.py`; `root_cause --isolate-png-ihdr`). Unit-tested with mocked oracles and validated against `targets/proto_target.c` (real ASAN crashes, see section 7); usefulness on a real campaign not measured. See section 7. |
 | 2 | Covering-array extensions: (a) second formats (ISO-BMFF `tkhd`/`ftyp`, RIFF `VP8X` flags, gzip/zip flags); (b) t=3 for small k; (c) forbidden-combination constraints | 1 | **Partly implemented 2026-09-29** (see section 8): (a) gzip only, (b) tested, (c) done. Not started: ISO-BMFF, RIFF, ZIP. Measure whether the IHDR arm earns any selection share first (open in `handover_covering_array_ihdr_2026-09-21.md`). For (c), Moser-Tardos-style repair only pays once constraints exist (`handover_moser_tardos_2026-09-28.md`). |
 | 3 | Orthogonal / fractional-factorial designs (12-16 runs) instead of grid sweeps for open hyperparameters (PLL `kp`/`ki`, lock thresholds, `explore_floor`) | benchmark tooling, not core | **Implemented 2026-09-29** as `tools/lib/factorial_design.py`; no sweep has been converted to use it yet (section 8). |
 | 4 | Rank/unrank (Lehmer code, combinadics) for m-tuple swaps: deterministic non-repeating enumeration and uniform sampling without replacement | 3 | **Library implemented 2026-09-29** (`core/combinadic.py`); not wired to `_swap_tuple` (m>2 yield still unmeasured, section 1). |
@@ -134,8 +134,24 @@ present).
 - **Not done / caveats:** only PNG IHDR has an adapter; a second format is
   one `_FIELDS`-shaped table plus a serializer. It is a post-hoc analysis
   tool, not a fuzz-time operator, so the litmus test is "feeds
-  root_cause", not selection share. Not validated on a real crash
-  (fuzzgoat has no PNG path); no campaign or A/B was run.
+  root_cause", not selection share. The PNG IHDR adapter has no crashing
+  PNG target in tree (`png_read` fails via libpng error exit 1, which
+  `root_cause` does not count as a crash); no campaign or A/B was run.
+- **Validated against a real crashing target (2026-09-29):**
+  `targets/proto_target.c` built with `gcc -O0 -fsanitize=address` (its
+  own `main`, stdin). Its four crash families have ground truth by
+  construction; `root_cause --isolate-fields` returned exactly the needed
+  fields in 16-23 probes each, with irrelevant fields excluded and
+  `verified` True:
+  `OPENVRLE`+0xDEAD (null deref) -> magic, ver, cmd, a, b, word;
+  `OPENVWX` (heap overflow) -> magic, ver, cmd, a only (b, word, tail
+  dropped); `OPENVSUM`+0xCAFEBABE (stack overflow) -> magic, ver, cmd, a,
+  b, cs; `CLOSED` (abort) -> magic, ver, cmd. A non-crashing input
+  reports "Crash not reproduced"; a spec longer than the input reports
+  "too short". Locked in by `tests/test_isolate_fields_proto_target.py`
+  (skips without gcc/ASAN). This checks correctness on monotone
+  single-schema crashes; masking and multi-schema crashes are covered
+  only by the mock-oracle unit tests.
 - **Tests:** `tests/test_failure_inducing.py`, additions to
   `tests/test_covering_array_mutate.py` and `tests/test_root_cause.py`
   (98 pass together with `test_covering_array.py`). The rest of the suite

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- **Field isolation validated on a real crashing target** (`tests/test_isolate_fields_proto_target.py`): builds `targets/proto_target.c` with ASAN and checks `isolate_fields_failure` / `root_cause --isolate-fields` return exactly the header fields each of its four crashes needs (null deref, heap overflow, stack overflow, abort), excluding irrelevant fields. Skips without gcc/ASAN.
+
 ### Added
 
 - **Failure-inducing combination isolation** (`core/failure_inducing.py`): given a failing parameter row and an oracle, finds the minimal set of parameter values that cause the failure (FIC-style, ~k probes, memoized, budget-capped, optional sufficiency check). PNG IHDR adapter `isolate_png_ihdr_failure` and `root_cause --isolate-png-ihdr`, which adds the responsible IHDR fields to the report. Tested against mocked oracles only.
