@@ -1,9 +1,12 @@
 """Static pre-fuzz difficulty estimation via the isoperimetric function.
 
-**Status (P2-1):** diagnostic only.  Nothing in the production fuzz loop
-imports this module — it does not drive time budget, initial corpus size,
-or operator preselection.  Call it from analysis tools or offline reports;
-do not assume a scheduling role until that wiring is designed and reviewed.
+**Status (P2-1):** gated production consumer via ``--target-schedule phi``.
+Default schedules (weighted / round-robin / wrr / wfq) do **not** import this
+module. When the operator opts into ``phi``, ``Fuzzer.set_phi_profile`` may be
+seeded with ``estimate_isoperimetric_profile`` output; the campaign loop then
+weights multi-target picks by ``estimate_time_to_next_discovery`` (Module 5).
+Without a seeded profile the estimator uses its regime prior only. Offline
+reports may still call this module directly.
 
 Percolation handover Module 3 (docs/handover/handover_pending_2026-09-06.md),
 revised per Diskin, Easo, Radhakrishnan, Sudakov, Tassion, "Supercritical

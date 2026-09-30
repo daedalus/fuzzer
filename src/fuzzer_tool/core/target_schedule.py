@@ -16,9 +16,16 @@ class TargetSchedule(Enum):
                  variance). Shares are of iterations, not of time.
     WFQ:         weighted fair queuing on 1 / cumulative edges: shares are of
                  wall time, so a slow target cannot take more than its share.
+    PHI:         gated first-passage / isoperimetric schedule (Module 5 + P2-1).
+                 Weights ∝ estimate_time_to_next_discovery per target so lagging
+                 / harder-looking targets get more share. Uses a cached Φ
+                 profile when one has been supplied; otherwise the regime prior
+                 inside estimate_time_to_next_discovery. Off unless chosen —
+                 default schedule is unchanged.
     """
 
     WEIGHTED = "weighted"
     ROUND_ROBIN = "round-robin"
     WRR = "wrr"
     WFQ = "wfq"
+    PHI = "phi"

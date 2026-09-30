@@ -1536,6 +1536,12 @@ class Fuzzer:
         # test seam. Not persisted: the queues rebuild in a few iterations.
         self._target_wrr = SmoothWRR()
         self._target_wfq = WeightedFairQueue()
+        # Gated Φ / first-passage schedule state (--target-schedule phi).
+        # Profiles are optional: when empty, estimate_time_to_next_discovery
+        # falls back to its regime prior. Callers may pre-seed via
+        # set_phi_profile(target, profile) after an offline ICFG probe.
+        self._phi_profiles: dict[str, dict[int, int]] = {}
+        self._phi_c: float = 1.0
         self._fq_last_t: float | None = None
         self._fq_clock = time.monotonic
         self._target_shm_covs = {}  # target_path -> ShmCoverage (per-target)
@@ -5204,6 +5210,75 @@ class Fuzzer:
         self._fq_last_t = now
         return self._target_wfq.pick(weights)
 
+    def set_phi_profile(self, target: str, profile: dict[int, int]) -> None:
+        """Seed or replace the Φ profile used by ``--target-schedule phi``.
+
+        ``profile`` is ``{n: approx Φ(n)}`` from
+        ``target_difficulty.estimate_isoperimetric_profile``. Empty / missing
+        profiles are fine: the estimator falls back to its regime prior.
+        Gated — only consulted when the schedule is PHI.
+        """
+        self._phi_profiles[target] = dict(profile)
+
+    def _phi_tracker_for(self, target: str):
+        """Minimal cumulative-edge view for one multi-target binary."""
+        # Prefer per-target SHM edge count reconstructed as a set of ids when
+        # the edge tracker has target-scoped cumulative edges; else approximate
+        # with range(n) so len() matches the SHM counter.
+        et = getattr(self, "_edge_tracker", None)
+        if et is not None:
+            tce = getattr(et, "target_cumulative_edges", None) or {}
+            name = __import__("os").path.basename(target)
+            if name in tce:
+                return type("_T", (), {"cumulative_edges": tce[name]})()
+            if target in tce:
+                return type("_T", (), {"cumulative_edges": tce[target]})()
+        shm = (getattr(self, "_target_shm_covs", None) or {}).get(target)
+        n = int(getattr(shm, "cumulative_edges", 0) or 0) if shm is not None else 0
+        return type("_T", (), {"cumulative_edges": set(range(n))})()
+
+    def _phi_regime(self):
+        """Current CoverageRegime if the detector is live, else CRITICAL."""
+        from fuzzer_tool.core.percolation import CoverageRegime
+
+        reg = getattr(self, "_regime", None)
+        if reg is not None:
+            r = getattr(reg, "regime", None)
+            if isinstance(r, CoverageRegime):
+                return r
+            if isinstance(r, str):
+                try:
+                    return CoverageRegime(r)
+                except ValueError:
+                    pass
+        return CoverageRegime.CRITICAL
+
+    def _phi_weights(self) -> list[float]:
+        """Per-target weights ∝ first-passage time-to-next-discovery.
+
+        Higher estimate → more share (help lagging / harder targets), matching
+        the spirit of ``_inv_edge_weights``. Gated behind TargetSchedule.PHI.
+        """
+        from fuzzer_tool.core.percolation import estimate_time_to_next_discovery
+
+        regime = self._phi_regime()
+        weights: list[float] = []
+        for t in self.multi_targets:
+            tracker = self._phi_tracker_for(t)
+            profile = self._phi_profiles.get(t) or self._phi_profiles.get(
+                __import__("os").path.basename(t)
+            )
+            est = estimate_time_to_next_discovery(
+                tracker,
+                operator_stats=None,
+                coverage_regime=regime,
+                phi_profile=profile,
+                target_delta=1,
+                c=self._phi_c,
+            )
+            weights.append(max(float(est), 1e-6))
+        return weights
+
     def _select_next_target(self):
         """Select the next target for multi-target round-robin fuzzing."""
         if not self.multi_targets:
@@ -5218,6 +5293,11 @@ class Fuzzer:
             self._active_target_idx = self._target_wrr.pick(weights)
         elif self._target_schedule is TargetSchedule.WFQ:
             self._active_target_idx = self._pick_wfq_target()
+        elif self._target_schedule is TargetSchedule.PHI:
+            # Gated Φ / first-passage schedule (P2-1 + Module 5). Uses WRR
+            # over phi-weights so the long-run share is deterministic.
+            weights = dict(enumerate(self._phi_weights()))
+            self._active_target_idx = self._target_wrr.pick(weights)
         elif len(self.multi_targets) > 1 and self.exec_count > 100:
             # Weight by inverse of cumulative edges (less-covered targets get more execs)
             weights = self._inv_edge_weights()

@@ -2182,8 +2182,10 @@ def main() -> int:
         "--target-schedule",
         choices=[m.value for m in TargetSchedule],
         default=TargetSchedule.WEIGHTED.value,
-        help="Multi-target: per-exec target pick. 'weighted' (1/edges draw after 100 execs) "
-        "or 'round-robin' (exec i -> target i mod N). Default: weighted.",
+        help="Multi-target: per-exec target pick. 'weighted' (1/edges draw after 100 execs), "
+        "'round-robin' (exec i -> target i mod N), 'wrr'/'wfq' (deterministic fair shares), "
+        "or 'phi' (gated first-passage / Φ schedule — Module 5; off unless chosen). "
+        "Default: weighted.",
     )
     fuzz_parser.add_argument(
         "-d", "--corpus", default=None, help="Corpus directory (default: ~/fuzzing/<target>/corpus)"

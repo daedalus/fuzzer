@@ -25,10 +25,12 @@ back to a pure regime prior (`_REGIME_FALLBACK_EXEC_PER_EDGE`). Unit tests in
 including the handover cross-check that `Φ(x) ≳ x` + SUPERCRITICAL is cheaper
 than CRITICAL.
 
-**Still open.** No production consumer yet. `target_difficulty` remains
-diagnostic-only (P2-1); callers that already hold a Φ profile (offline reports,
-future multi-target budgeters) pass it explicitly. Wiring into the campaign
-loop / multi-target time allocation still means reopening the P2-1 decision.
+**Production (gated, 2026-09-30).** Opt-in via `--target-schedule phi`.
+`Fuzzer._phi_weights` calls `estimate_time_to_next_discovery` per target;
+`Fuzzer.set_phi_profile(target, profile)` seeds Φ from
+`target_difficulty.estimate_isoperimetric_profile`. Default schedules are
+unchanged. Without a seeded profile the estimator uses its regime prior.
+P2-1 is reopened only under the explicit `phi` gate — not for the default path.
 
 ## Module 6. Universality → strategy transfer — absent
 
