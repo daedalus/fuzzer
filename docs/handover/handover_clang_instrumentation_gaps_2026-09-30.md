@@ -1,11 +1,13 @@
 # Handover: missing clang instrumentation (sancov)
 
-> **Status (2026-09-30): G1, G2 fixed; G3-G6 open.** Baseline: `fa7c9fc3`.
+> **Status (2026-09-30): G1, G2, G3 fixed; G4-G6 open.** Baseline: `fa7c9fc3`.
 >
 > **G1 (implemented):** `__sanitizer_cov_trace_pc_indir()` in `afl_shim.c`: FNV-1a over `(site, callee)`, base-relative, into `__AFL_SYNTH_ID` via `__afl_map_id`. Callees outside the module image are dropped (ASLR-dependent). Build: `--indir-cov` / `--sancov=...,indirect-calls` (`validate_sancov_modes`, `add_indir_mode`). Tests: `tests/test_shim_indir_cov.py` (8, incl. direct-call, no-mode, libc-callee, ASAN), `tests/test_sancov_modes.py`. Not done: CTX-hash mixing (kept separate to avoid renaming real edges), a Python-side runtime gate, Rust (G6), effect on discovery and map pressure (unmeasured).
 >
 > **G2 (implemented):** `__afl_note_stack()` in `afl_shim.c`, called from `__afl_map_loc`. First sample after reset pins the base frame; deepest later frame is published live to SHM offset 0. Samples above the base or over `__AFL_STACK_WINDOW` (64 MiB) below it are other threads' stacks and ignored. Tests: `tests/test_shim_stack_depth.py` (5: deep, monotonic, shallow falsification, second-thread adversarial, ASAN); the 3 positive ones failed before the fix (depth 0). Per-edge cost: within noise on a 60M-iteration loop (min 0.505s old vs 0.491s new; run-to-run variance was larger than the difference). Effect of the boost on discovery is untested.
 
+> **G3 (implemented):** `validate_sancov_modes` groups modes as edge / extra / cmp; `sancov_cmp_modes` (`tools/build_targets.sh`) is the one list, also feeding `sancov_trace_flags` for both `--tracecmp` vendored builds (flag string unchanged byte for byte). `--sancov=trace-pc-guard,trace-cmp,trace-div,trace-gep` now validates and sets `WITH_CMPLOG=1`. `WITH_CMPLOG` already defaults to 1 with no off switch, so that line only guards a future one. `SANCOV_FLAG` reaches library objects only, never the wrapper, so the G5 concern does not arise. `stack-depth`, `trace-pc`, `no-prune` stay rejected. MSAN/TSAN: `build_wants_cmplog` adds the cmplog layer to those executables only when `--sancov` names a cmp mode; the default (no cmp mode) is unchanged. Measured with clang 18: without it the link still succeeds, because the sanitizer runtimes ship weak no-op `__sanitizer_cov_trace_cmp*/div*` stubs (`nm` shows `W`), so requested compare tracing was silently dead; with it the shim's own callbacks link in (`t`). Tests: `tests/test_sancov_modes.py` (86 pass with clang, including `TestLinks`). Not done: no fuzzing run with cmp modes under MSAN/TSAN, so the shim's cmp layer there is verified to link and execute a small target, not measured for overhead or false reports.
+>
 ## Goal
 List `-fsanitize-coverage` features the build scripts or `afl_shim.c` do not support, ranked by expected value.
 
@@ -36,7 +38,7 @@ List `-fsanitize-coverage` features the build scripts or `afl_shim.c` do not sup
 - Fix options: (a) enable `-fsanitize-coverage=stack-depth`, read `__sancov_lowest_stack` (TLS, runtimes own the definition per shim header l.24, so needs a decision on linking); (b) sample frame address in the guard callback via `__builtin_frame_address(0)` vs a per-exec base.
 - Confirmed: SHM value was 0 on a 400-frame recursive target. Fixed via option (b). Not covered: `inline-8bit-counters` / `inline-bool-flag` builds have no per-edge callback and still report 0.
 
-### G3. `--sancov` mode gating — P2
+### G3. `--sancov` mode gating — P2 (FIXED 2026-09-30)
 - `validate_sancov_modes` rejects `trace-cmp`, `trace-div`, `trace-gep`, `trace-pc`, `trace-pc-indir`, `stack-depth`, `no-prune`.
 - No single-call build of `trace-pc-guard,trace-cmp,trace-div,trace-gep`; compare tracing requires `--tracecmp` (and thus cmplog).
 - Fix: one place, per AGENTS.md rule 1. Split "needs cmplog" modes from "shim-only" modes in the validator.
@@ -62,7 +64,7 @@ List `-fsanitize-coverage` features the build scripts or `afl_shim.c` do not sup
 ## Suggested order
 1. ~~G2~~ done.
 2. ~~G1~~ done.
-3. G3 validator split.
+3. ~~G3~~ done.
 4. G4 allowlist.
 
 ## Files

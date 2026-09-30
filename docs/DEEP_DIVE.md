@@ -1355,7 +1355,12 @@ builds. Select modes with
 `indirect-calls` to whatever was chosen, in either flag order. The script
 rejects modes the shim lacks and sets with no edge mode (`trace-pc-guard`,
 `inline-8bit-counters`, `inline-bool-flag`); `verify_sancov` accepts all
-three sections.
+three sections. `trace-cmp`, `trace-div` and `trace-gep` are accepted too, on
+top of an edge mode (`--sancov=trace-pc-guard,trace-cmp,trace-div,trace-gep`);
+they imply the shim's cmplog layer (including in `--msan`/`--tsan` executables, where otherwise the sanitizer runtime's no-op stubs would silently win). `--sancov` applies to library objects
+only, never the target wrapper, so this does not change where compares are
+traced (G5). `sancov_cmp_modes` in the script is the single list both this
+path and `--tracecmp` read.
 
 | Mode | Shim behavior |
 |------|---------------|

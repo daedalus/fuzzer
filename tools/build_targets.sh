@@ -369,19 +369,42 @@ add_indir_mode() {
 }
 [ "${WITH_INDIR_COV:-0}" -eq 1 ] && SANCOV_MODES=$(add_indir_mode "$SANCOV_MODES")
 
-# Reject --sancov modes afl_shim.c has no callbacks for: the target would
-# fail to link, and only after every library object was compiled. At least
-# one mode must produce edges -- pc-table / trace-loads / indirect-calls alone
-# record none.
-# trace-cmp/div/gep stay with --tracecmp (their callbacks need cmplog).
+# Modes are grouped by what they need at build/link time -- this is the one
+# place that knows, so --sancov= and the --tracecmp vendored builds agree:
+#   edge   produce edges; at least one is required (extras alone record none)
+#   extra  shim-only add-ons; need nothing beyond afl_shim.c
+#   cmp    comparison / divisor / index tracing; their callbacks live in the
+#          shim's cmplog layer (-D__AFL_CMPLOG=1), so they imply WITH_CMPLOG.
+#          trace-div/trace-gep are modifiers: alone in a flag clang emits no
+#          call sites for them, so they ride along with an edge mode.
+# Anything else is rejected: the target would fail to link, and only after
+# every library object was compiled.
+sancov_cmp_modes() { echo "trace-cmp trace-div trace-gep"; }
+
+# The -fsanitize-coverage= flag the --tracecmp / --vendor-tracecmp builds use.
+sancov_trace_flags() {
+    echo "-fsanitize-coverage=$(sancov_cmp_modes | tr ' ' ','),trace-pc-guard"
+}
+
+# True when any mode in the comma list needs the shim's cmplog layer.
+sancov_needs_cmplog() {
+    local m cmp
+    cmp=$(sancov_cmp_modes)
+    for m in ${1//,/ }; do
+        case " $cmp " in *" $m "*) return 0 ;; esac
+    done
+    return 1
+}
+
 validate_sancov_modes() {
     local edge="trace-pc-guard inline-8bit-counters inline-bool-flag"
     local extra="pc-table trace-loads trace-stores indirect-calls"
-    local m has_edge=0
+    local cmp m has_edge=0
+    cmp=$(sancov_cmp_modes)
     for m in ${1//,/ }; do
         case " $edge " in *" $m "*) has_edge=1; continue ;; esac
-        case " $extra " in *" $m "*) continue ;; esac
-        echo "unsupported --sancov mode: $m (supported: $edge $extra)" >&2
+        case " $extra $cmp " in *" $m "*) continue ;; esac
+        echo "unsupported --sancov mode: $m (supported: $edge $extra $cmp)" >&2
         return 1
     done
     [ "$has_edge" -eq 1 ] && return 0
@@ -389,6 +412,7 @@ validate_sancov_modes() {
     return 1
 }
 validate_sancov_modes "$SANCOV_MODES" || exit 1
+sancov_needs_cmplog "$SANCOV_MODES" && WITH_CMPLOG=1
 SANCOV_FLAG="-fsanitize-coverage=$SANCOV_MODES"
 
 # Colors
@@ -947,6 +971,20 @@ compile_fuzzgoat_object() {
 }
 
 # ── Build a target ────────────────────────────────────────────────
+# Should build_target add the shim's cmplog layer for these compiler flags?
+# MSAN/TSAN executables stay excluded by default (the in-TU layer was never
+# measured there). They are included when --sancov names a cmp mode, because
+# skipping it does not fail the link: the sanitizer runtimes ship weak no-op
+# __sanitizer_cov_trace_cmp*/div*/gep stubs that win, so the requested compare
+# tracing is silently dead.
+build_wants_cmplog() {
+    [ "$WITH_CMPLOG" -eq 1 ] || return 1
+    case "$1" in
+        *-fsanitize=memory* | *-fsanitize=thread*) sancov_needs_cmplog "$SANCOV_MODES" ;;
+        *) return 0 ;;
+    esac
+}
+
 build_target() {
     local src="$1" out="$2" libs="$3" extra_flags="$4" cc="${5:-$DEFAULT_CC}" extra_cflags="${6:-}"
     if [ ! -f "$src" ]; then
@@ -957,12 +995,9 @@ build_target() {
     # Vendored libraries (libpng/zlib/ffmpeg) are compiled with comparison
     # tracing, so their objects reference __sanitizer_cov_trace_const_cmp*;
     # an executable link needs a provider for those (a .so link tolerates
-    # undefined symbols). Mirror build_so_target. Still excluded for
-    # MSAN/TSAN: leaving the previous behaviour alone rather than assuming
-    # the in-TU layer is safe there without measuring it.
-    if [ "$WITH_CMPLOG" -eq 1 ] \
-        && [[ "$extra_flags" != *-fsanitize=memory* ]] \
-        && [[ "$extra_flags" != *-fsanitize=thread* ]]; then
+    # undefined symbols). Mirror build_so_target. See build_wants_cmplog
+    # for the MSAN/TSAN rule.
+    if build_wants_cmplog "$extra_flags"; then
         cmplog_cflags="$CMPLOG_CFLAGS"
         cmplog_libs="$CMPLOG_LIBS"
     fi
@@ -2180,7 +2215,8 @@ build_vendored_tracecmp_targets() {
     # (divisors, GEP indices). They are modifiers, not levels: alone in a
     # -fsanitize-coverage= flag clang emits no call sites for them, so they
     # ride along with trace-pc-guard rather than standing on their own.
-    local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-div,trace-gep,trace-pc-guard"
+    local TRACE_FLAGS
+    TRACE_FLAGS=$(sancov_trace_flags)
     # Caller-context edge hashing is default-on inside afl_shim.c, which only
     # the target TUs include; the libs here never see the define. What the
     # whole linked chain DOES need is frame pointers: the context walk
@@ -2369,7 +2405,8 @@ build_tracecmp_targets() {
     # (divisors, GEP indices). They are modifiers, not levels: alone in a
     # -fsanitize-coverage= flag clang emits no call sites for them, so they
     # ride along with trace-pc-guard rather than standing on their own.
-    local TRACE_FLAGS="-fsanitize-coverage=trace-cmp,trace-div,trace-gep,trace-pc-guard"
+    local TRACE_FLAGS
+    TRACE_FLAGS=$(sancov_trace_flags)
 
     # The callbacks must be COMPILED IN, not LD_PRELOADed.
     #

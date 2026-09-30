@@ -258,9 +258,16 @@ def _bash_fn(name):
     return text[start:end]
 
 
+def _run_fns(body, *names):
+    """Run *body* in bash after loading the named functions from the build script."""
+    script = "\n".join([*(_bash_fn(n) for n in names), body])
+    return subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+
+
 def _validate(modes):
-    script = f"{_bash_fn('validate_sancov_modes')}\nvalidate_sancov_modes '{modes}'"
-    return subprocess.run(["bash", "-c", script], capture_output=True, text=True).returncode
+    return _run_fns(
+        f"validate_sancov_modes '{modes}'", "sancov_cmp_modes", "validate_sancov_modes"
+    ).returncode
 
 
 class TestBuildScriptModes:
@@ -271,14 +278,18 @@ class TestBuildScriptModes:
             f"{COUNTERS},pc-table",
             f"{BOOLS},trace-loads",
             f"trace-pc-guard,{INDIR}",
+            "trace-pc-guard,trace-cmp,trace-div,trace-gep",
+            f"{COUNTERS},trace-cmp",
         ],
     )
     def test_supported_modes_pass(self, modes):
         assert _validate(modes) == 0
 
-    @pytest.mark.parametrize("modes", ["pc-table,trace-loads", INDIR])
+    @pytest.mark.parametrize(
+        "modes", ["pc-table,trace-loads", INDIR, "trace-cmp", "trace-cmp,trace-div,trace-gep"]
+    )
     def test_no_edge_mode_rejected(self, modes):
-        """Falsification: pc-table/loads/indirect-calls alone record no edges."""
+        """Falsification: pc-table/loads/indirect-calls/trace-cmp alone record no edges."""
         assert _validate(modes) != 0
 
     @pytest.mark.parametrize("modes", ["trace-lods", "trace-pc-guard,stack-depth", ""])
@@ -293,6 +304,84 @@ class TestBuildScriptModes:
 
     def test_indir_flag_parsed(self):
         assert "--indir-cov" in BUILD_SCRIPT.read_text()
+
+    @pytest.mark.parametrize(
+        ("modes", "want"),
+        [
+            ("trace-pc-guard", 1),
+            (f"trace-pc-guard,{INDIR},trace-loads", 1),
+            ("trace-pc-guard,trace-cmp", 0),
+            ("trace-pc-guard,trace-div", 0),
+            (f"{COUNTERS},trace-gep", 0),
+        ],
+    )
+    def test_needs_cmplog_only_for_cmp_modes(self, modes, want):
+        """A cmp/div/gep mode needs the shim's cmplog layer; nothing else does."""
+        r = _run_fns(f"sancov_needs_cmplog '{modes}'", "sancov_cmp_modes", "sancov_needs_cmplog")
+        assert r.returncode == want
+
+    def test_needs_cmplog_not_matched_by_prefix(self):
+        """Adversarial: a longer name containing a cmp token is not that token."""
+        r = _run_fns(
+            "sancov_needs_cmplog 'trace-pc-guard,xtrace-cmp'",
+            "sancov_cmp_modes",
+            "sancov_needs_cmplog",
+        )
+        assert r.returncode == 1
+
+    def test_vendored_trace_flags_unchanged(self):
+        """Control: deriving the flag from the table must not move a single byte,
+        or every vendored object would rebuild and saved edge ids would shift."""
+        r = _run_fns("sancov_trace_flags", "sancov_cmp_modes", "sancov_trace_flags")
+        assert r.stdout.strip() == (
+            "-fsanitize-coverage=trace-cmp,trace-div,trace-gep,trace-pc-guard"
+        )
+
+    def test_no_hardcoded_cmp_flag_left(self):
+        """One place per AGENTS.md rule 1: builds must call sancov_trace_flags."""
+        text = BUILD_SCRIPT.read_text()
+        code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+        assert not [ln for ln in code if "trace-cmp,trace-div,trace-gep" in ln]
+        assert text.count("TRACE_FLAGS=$(sancov_trace_flags)") == 2
+
+    @pytest.mark.parametrize(
+        ("flags", "modes", "cmplog", "want"),
+        [
+            ("-fsanitize=memory", "trace-pc-guard,trace-cmp", 1, 0),
+            ("-fsanitize=thread", "trace-pc-guard,trace-div", 1, 0),
+            # Default behaviour unchanged: no cmp mode -> MSAN/TSAN stay excluded.
+            ("-fsanitize=memory", "trace-pc-guard", 1, 1),
+            ("-fsanitize=thread", "trace-pc-guard", 1, 1),
+            # Non-MSAN/TSAN builds are unaffected by the modes.
+            ("-fsanitize=address", "trace-pc-guard", 1, 0),
+            ("", "trace-pc-guard", 1, 0),
+            # WITH_CMPLOG off always wins.
+            ("-fsanitize=memory", "trace-pc-guard,trace-cmp", 0, 1),
+            ("", "trace-pc-guard,trace-cmp", 0, 1),
+        ],
+    )
+    def test_build_wants_cmplog(self, flags, modes, cmplog, want):
+        """MSAN/TSAN executables get the cmplog layer only when a cmp mode is asked
+        for: otherwise the sanitizer runtime's weak no-op stubs silently win."""
+        r = _run_fns(
+            f"WITH_CMPLOG={cmplog}; SANCOV_MODES='{modes}'; build_wants_cmplog '{flags}'",
+            "sancov_cmp_modes",
+            "sancov_needs_cmplog",
+            "build_wants_cmplog",
+        )
+        assert r.returncode == want
+
+    def test_cmp_mode_turns_cmplog_on(self):
+        """The build script must set WITH_CMPLOG for a --sancov cmp mode, even if
+        it was off, so the shim callbacks the objects reference get compiled in."""
+        r = _run_fns(
+            'WITH_CMPLOG=0; SANCOV_MODES="trace-pc-guard,trace-cmp"\n'
+            'sancov_needs_cmplog "$SANCOV_MODES" && WITH_CMPLOG=1; echo $WITH_CMPLOG',
+            "sancov_cmp_modes",
+            "sancov_needs_cmplog",
+        )
+        assert r.stdout.strip() == "1"
+        assert 'sancov_needs_cmplog "$SANCOV_MODES" && WITH_CMPLOG=1' in BUILD_SCRIPT.read_text()
 
     @pytest.mark.parametrize(
         ("given", "want"),
