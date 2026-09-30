@@ -397,3 +397,33 @@ def test_cli_bad_jobs_exits_2(tmp_path, jobs):
 
     assert ab.cmd_run(args) == 2
     assert not (tmp_path / "r.pkl").exists()
+
+
+def test_regression_rows_pickle_has_no_classes(tmp_path):
+    """Rows written by the script run as __main__ must load from any importer."""
+    out = tmp_path / "r.pkl"
+    cells = ab.plan(V, seeds=[0], budget=300)[:1]
+    ab.run(cells, V, tmp_path / "w", out, _fake_campaign, _fake_replay, MANIFEST)
+
+    blob = out.read_bytes()
+    assert b"Arm" not in blob
+    assert b"__main__" not in blob
+    assert set(ab.load(out)) == {c.key for c in cells}
+
+
+def test_regression_reads_legacy_main_pickle(tmp_path, monkeypatch):
+    """Adversarial: files already written with __main__.Arm keys still load."""
+    import pickle
+
+    main = sys.modules["__main__"]
+    monkeypatch.setattr(ab.Arm, "__module__", "__main__")
+    monkeypatch.setattr(main, "Arm", ab.Arm, raising=False)
+    key = (ab.Arm.SPLIT, 0, "v8.0")
+    blob = pickle.dumps({"manifest": MANIFEST, "cells": {key: {"v8.0": [1]}}})
+    monkeypatch.undo()
+    assert b"__main__" in blob
+
+    out = tmp_path / "legacy.pkl"
+    out.write_bytes(blob)
+
+    assert list(ab.load(out)) == [key]

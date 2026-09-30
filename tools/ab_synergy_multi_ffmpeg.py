@@ -333,16 +333,30 @@ def fingerprint(paths: Iterable[str]) -> dict[str, str]:
 
 
 def _save(manifest: dict, results: dict, out: Path) -> None:
+    # Keys as plain values: run as a script, Arm pickles as __main__.Arm and
+    # nothing but the script itself could load the file.
     out.parent.mkdir(parents=True, exist_ok=True)
     tmp = out.with_suffix(".tmp")
-    blob = {"manifest": manifest, "cells": results}
+    cells = {(arm.value, seed, owner): row for (arm, seed, owner), row in results.items()}
+    blob = {"manifest": manifest, "cells": cells}
     tmp.write_bytes(pickle.dumps(blob, protocol=pickle.HIGHEST_PROTOCOL))
     tmp.replace(out)
 
 
+class _RowsUnpickler(pickle.Unpickler):
+    """Maps legacy __main__.Arm (files written before plain keys) to Arm."""
+
+    def find_class(self, module: str, name: str):
+        if (module, name) == ("__main__", "Arm"):
+            return Arm
+        return super().find_class(module, name)
+
+
 def _read(path: Path) -> tuple[dict, dict]:
-    blob = pickle.loads(path.read_bytes())
-    return blob["manifest"], blob["cells"]
+    with path.open("rb") as fh:
+        blob = _RowsUnpickler(fh).load()
+    cells = {(Arm(arm), seed, owner): row for (arm, seed, owner), row in blob["cells"].items()}
+    return blob["manifest"], cells
 
 
 def load(path: Path) -> dict:
