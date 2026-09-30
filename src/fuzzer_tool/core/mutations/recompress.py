@@ -28,6 +28,7 @@ from __future__ import annotations
 import binascii
 import struct
 import zlib
+from dataclasses import replace
 
 # Bounds chosen so a single call stays in the sub-millisecond range for
 # typical seeds and cannot blow up on adversarial input.
@@ -262,3 +263,108 @@ def recompress_gzip(data: bytes, max_len: int = 4096, *, rng) -> bytes | None:
     plain = plain[:_MAX_PLAIN_WORK]
     mutated = _mutate_plain(plain, _MAX_PLAIN_WORK, rng=rng)
     return _fit(mutated, deflate_gzip, max_len)
+
+
+# ── LZ4 frame and PNG IDAT round-trips ─────────────────────────────────
+
+_LZ4_COMPRESSED = 0
+# A literal-only block adds one length byte per 255 plus the token; shrink
+# the chunk so the encoded block still fits the frame's block maximum.
+_LZ4_LEN_EXT = 255
+_LZ4_TOKEN_SLACK = 2
+
+
+def _lz4_rebuild(frame, plain: bytes, store: int) -> bytes:
+    """Serialize *frame* carrying *plain*, every checksum and size recomputed.
+
+    Blocks are literal-only compressed (``store`` 0) or stored raw (1); both
+    decode everywhere, and literal runs exercise the sequence decoder.
+    """
+    from fuzzer_tool.core.mutations.lz4 import (  # noqa: PLC0415
+        BLOCK_UNCOMPRESSED,
+        Lz4Block,
+        _block_max,
+        _encode_literals,
+        serialize_lz4,
+    )
+
+    step = _block_max(frame.bd)
+    if store == _LZ4_COMPRESSED:
+        step -= step // _LZ4_LEN_EXT + _LZ4_TOKEN_SLACK
+
+    blocks = []
+    for i in range(0, len(plain), step):
+        chunk = plain[i : i + step]
+        if store == _LZ4_COMPRESSED:
+            enc = _encode_literals(chunk)
+            blocks.append(Lz4Block(len(enc), enc))
+            continue
+        blocks.append(Lz4Block(len(chunk) | BLOCK_UNCOMPRESSED, chunk))
+
+    return serialize_lz4(
+        replace(
+            frame, blocks=blocks, content_size=None, content_checksum=None, hc=None, end_mark=True
+        )
+    )
+
+
+def recompress_lz4(data: bytes, max_len: int = 4096, *, rng) -> bytes | None:
+    """Decode an LZ4 frame, mutate the plaintext, re-encode with valid checksums.
+
+    ``lz4_chunk_mutate`` edits frame fields; the frame decoder then rejects
+    most outputs before ``lz4_read.c`` sees the content. Returns None when
+    *data* is not a decodable ``mode + frame`` or holds no content.
+    """
+    from fuzzer_tool.core.mutations.lz4 import _decode_content, parse_lz4  # noqa: PLC0415
+
+    frame = parse_lz4(data)
+    if frame is None:
+        return None
+
+    plain = _decode_content(frame)
+    if not plain:
+        return None
+
+    mutated = _mutate_plain(plain[:_MAX_PLAIN_WORK], _MAX_PLAIN_WORK, rng=rng)
+    store = rng.randint(0, 1)
+    out = _fit(mutated, lambda p: _lz4_rebuild(frame, p, store), max_len)
+    return out if len(out) <= max_len else None
+
+
+def recompress_idat(data: bytes, max_len: int = 4096, *, rng) -> bytes | None:
+    """Inflate a PNG's IDAT stream, mutate the scanlines, re-deflate.
+
+    ``png_chunk_mutate`` flips compressed IDAT bytes, which breaks inflate
+    or the Adler-32, so the filter/unfilter code behind it is rarely reached.
+    Here all IDATs merge into one at the first IDAT's position, with a fresh
+    zlib stream (valid Adler-32) and chunk CRC. Returns None when *data* is
+    not a PNG with an inflatable IDAT stream.
+    """
+    from fuzzer_tool.core.mutations.png import (  # noqa: PLC0415
+        PngChunk,
+        parse_png_chunks,
+        serialize_png_chunks,
+    )
+
+    chunks = parse_png_chunks(data)
+    if not chunks:
+        return None
+
+    idat = [i for i, c in enumerate(chunks) if c.chunk_type == b"IDAT"]
+    if not idat:
+        return None
+
+    plain = inflate_zlib(b"".join(chunks[i].data for i in idat))
+    if plain is None:
+        return None
+
+    # The first IDAT's index equals the count of non-IDAT chunks before it.
+    rest = [c for c in chunks if c.chunk_type != b"IDAT"]
+    head, tail = rest[: idat[0]], rest[idat[0] :]
+
+    def build(p: bytes) -> bytes:
+        return serialize_png_chunks([*head, PngChunk(b"IDAT", deflate_zlib(p)), *tail])
+
+    mutated = _mutate_plain(plain[:_MAX_PLAIN_WORK], _MAX_PLAIN_WORK, rng=rng)
+    out = _fit(mutated, build, max_len)
+    return out if len(out) <= max_len else None

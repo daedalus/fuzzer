@@ -343,6 +343,32 @@ def _sqlite() -> bytes:
     return bytes(page)
 
 
+def _lz4_frame() -> bytes:
+    """lz4_read.c frame path with one stored block, so recompress_lz4 has content."""
+    from fuzzer_tool.core.mutations.lz4 import header_checksum
+
+    desc = b"\x60\x40"  # version 01 + block independence, 64 KiB blocks
+    body = b"hello lz4 frame content"
+    block = (len(body) | 0x80000000).to_bytes(4, "little") + body
+    return b"\x00\x04\x22\x4d\x18" + desc + bytes((header_checksum(desc),)) + block + bytes(4)
+
+
+def _png_idat() -> bytes:
+    """1x1 grey PNG with a real IDAT stream for recompress_png_idat."""
+
+    def chunk(fourcc: bytes, payload: bytes) -> bytes:
+        crc = zlib.crc32(fourcc + payload).to_bytes(4, "big")
+        return len(payload).to_bytes(4, "big") + fourcc + payload + crc
+
+    ihdr = (1).to_bytes(4, "big") * 2 + bytes((8, 0, 0, 0, 0))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(b"\x00\x7f"))
+        + chunk(b"IEND", b"")
+    )
+
+
 def _battery() -> list[bytes]:
     """Fixed input battery: random inputs of several lengths (deterministic via
     a local seed) plus magic-prefixed samples so format-aware operators become
@@ -405,6 +431,15 @@ def _battery() -> list[bytes]:
         # zlib stream: covers zlib_chunk_mutate and recompress_zlib, whose
         # sniffers check the CMF/FLG header rather than a magic string.
         zlib.compress(b"the quick brown fox jumps over the lazy dog" * 3, 6),
+        # json_mutate / sql_mutate / ecdsa_field_mutate sniff text or a
+        # secp256k1_read.c payload lead; random bytes never satisfy them.
+        b'{"k": [1, 2.5, "s\\n"], "n": null}',
+        b"SELECT a, 'x' FROM t WHERE b = 1;",
+        b"\x02\x00\x02" + SECP256K1_FIELD_P + bytes(32),
+        _lz4_frame(),
+        _png_idat(),
+        # MagicYUV (BMH5 at offset 8): reached before only by the 2% trickle.
+        bytes(8) + b"BMH5" + bytes(40),
     ]
     return inputs
 
@@ -818,8 +853,7 @@ class TestStateGatedOperatorsAreNotNoOps:
             _inprocess_runner=object(),
             _cmplog=SimpleNamespace(
                 last_conds=[
-                    _Cond(w.to_bytes(4, "little"), b"\x00\x00\x00\x00", 0x4000)
-                    for w in words
+                    _Cond(w.to_bytes(4, "little"), b"\x00\x00\x00\x00", 0x4000) for w in words
                 ]
             ),
         )

@@ -102,6 +102,7 @@ class _MockFuzzer:
         self.enable_arm_mutator = False
         self.seed_meta = {}
         self.corpus = []
+        self._op_declines = {}
 
 
 class _CmplogWithPairs:
@@ -976,6 +977,11 @@ class TestTargetFormatOperators:
     OPS = {
         "lz4_chunk_mutate": (b"\x00\x04\x22\x4d\x18\x64\x40\xa7" + bytes(8), b"\x04\x22\x4d\x18"),
         "rar_chunk_mutate": (b"Rar!\x1a\x07\x01\x00" + bytes(8), b"PK\x03\x04" + bytes(8)),
+        "json_mutate": (b' \n{"a": 1}', b"hello {}"),
+        "sql_mutate": (b"  select 1", b"selection 1"),
+        "ecdsa_field_mutate": (b"\x10\x00\x02" + bytes(40), b"\x40\x00\x02" + bytes(40)),
+        "recompress_lz4": (b"\x00\x04\x22\x4d\x18\x64\x40\xa7" + bytes(8), b"\x04\x22\x4d\x18"),
+        "recompress_png_idat": (b"\x89PNG\r\n\x1a\n" + bytes(8), b"GIF89a" + bytes(8)),
     }
 
     def test_registered_in_format_band(self):
@@ -1008,3 +1014,55 @@ class TestTargetFormatOperators:
             out = dispatch[op](buf, 0, bytes(hit))
             result = buf if out is None else out
             assert len(result) <= fuzzer.max_len, op
+
+    def test_regression_sql_sniffer_rejects_database_image(self):
+        """sqlite_read.c routes a DB image to the file reader, not the SQL parser."""
+        image = b"SQLite format 3\x00" + bytes(100)
+        assert format_gate_matches("sql_mutate", image) is False
+        assert format_gate_matches("sqlite_chunk_mutate", image) is True
+
+
+class TestTextLayerOperators:
+    """Ungated text-layer operators plus the delimiter-gated nest_bomb."""
+
+    BANDS = {
+        "encoding_wrap": "structural",
+        "escape_mutate": "structural",
+        "ascii_float": "structural",
+        "utf16_transcode": "radamsa",
+        "nest_bomb": "radamsa",
+    }
+
+    def test_registered_in_band(self):
+        for op, band in self.BANDS.items():
+            assert REGISTRY.category_of(op) == band, op
+
+    def test_ungated_ops_always_available(self):
+        names = set(REGISTRY.available(_MockFuzzer(), b"\x01\x02"))
+        assert {"encoding_wrap", "escape_mutate", "ascii_float", "utf16_transcode"} <= names
+
+    def test_nest_bomb_gated_on_bracket(self):
+        fuzzer = _MockFuzzer()
+        assert "nest_bomb" in REGISTRY.available(fuzzer, b"a[1]")
+        assert "nest_bomb" not in REGISTRY.available(fuzzer, b"plain")
+
+    def test_decline_leaves_buffer_untouched(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 4096
+        fuzzer._rng = RandPool(seed=3)
+        dispatch = REGISTRY.dispatch(OperatorEngine(fuzzer))
+        buf = bytearray(b"no digits here")
+        out = dispatch["ascii_float"](buf, 0, bytes(buf))
+        assert bytes(buf if out is None else out) == b"no digits here"
+
+    def test_handlers_respect_max_len(self):
+        fuzzer = _MockFuzzer()
+        fuzzer.max_len = 24
+        dispatch = REGISTRY.dispatch(OperatorEngine(fuzzer))
+        seed = b'{"a": [1.5, "x\\n"]}'
+        for op in self.BANDS:
+            for n in range(20):
+                fuzzer._rng = RandPool(seed=n)
+                buf = bytearray(seed)
+                out = dispatch[op](buf, n % len(seed), seed)
+                assert len(buf if out is None else out) <= fuzzer.max_len, op

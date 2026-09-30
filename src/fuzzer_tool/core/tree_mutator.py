@@ -8,6 +8,10 @@ Unlike ``grammar.py``, this requires no grammar definition — it heuristically
 detects structure from delimiter usage alone.
 """
 
+import re
+
+import numpy as np
+
 # ── Delimiter pairs ───────────────────────────────────────────────────
 
 # Maps opening byte -> closing byte
@@ -333,7 +337,11 @@ def _weighted_index(weights: list[int], rng=None) -> int:
     """
     total = sum(weights)
     if total <= 0:
-        idx = rng.randrange(len(weights)) if rng is not None else __import__("random").randrange(len(weights))
+        idx = (
+            rng.randrange(len(weights))
+            if rng is not None
+            else __import__("random").randrange(len(weights))
+        )
         return idx
     r = rng.randrange(total) if rng is not None else __import__("random").randrange(total)
     acc = 0
@@ -667,6 +675,83 @@ def cycle_lemma_dyck_bytes(n_pairs: int, rng=None) -> bytes:
     return bytes(out)
 
 
+# ── Nesting bomb ──────────────────────────────────────────────────────
+
+# Extra nesting levels to try. Recursive-descent parsers commonly overflow
+# the stack somewhere in 1k-100k levels; budget caps the realized depth.
+NEST_DEPTHS = (64, 256, 1024, 4096, 16384)
+_NEST_BALANCED = 0
+_GEN_CLOSE = dict(_GEN_PAIRS)
+
+
+_OPENER = re.compile(rb"[(\[{]")
+# Below this many bytes the Python scan beats numpy's fixed call overhead
+# (measured crossover ~150 B; 20 KB: loop 956us, cumsum 175us).
+_NUMPY_SCAN_MIN = 256
+
+
+def _first_opener(data: bytes, pos: int) -> int | None:
+    """First ``() [] {}`` opener at or after *pos*, wrapping to 0."""
+    m = _OPENER.search(data, pos) or _OPENER.search(data, 0, pos)
+    return m.start() if m else None
+
+
+def _matching_close(data: bytes, start: int) -> int | None:
+    """Index of the delimiter closing data[start], counting same-kind pairs."""
+    o = data[start]
+    c = _GEN_CLOSE[o]
+    if len(data) - start >= _NUMPY_SCAN_MIN:
+        arr = np.frombuffer(data, dtype=np.uint8, offset=start)
+        depth = np.cumsum((arr == o).astype(np.int32) - (arr == c))
+        hit = np.flatnonzero(depth == 0)
+        return start + int(hit[0]) if hit.size else None
+
+    depth = 0
+    for i in range(start, len(data)):
+        b = data[i]
+        depth += (b == o) - (b == c)
+        if depth == 0:
+            return i
+    return None
+
+
+def nest_bomb(data: bytes, byte_idx: int, rng, max_len: int) -> bytes | None:
+    """Wrap the delimited node near *byte_idx* in thousands of copies of itself.
+
+    ``tree_mutate``'s stutter repeats siblings and ``tree_generate`` draws at
+    most 8 pairs, so neither reaches the depth that exhausts a recursive
+    parser's stack. Two shapes:
+
+        balanced  x[1]y -> x[[[...[1]...]]]y   (deep but valid)
+        unclosed  x[1]y -> x[[[...[1]y         (deep, EOF inside)
+
+    An opener with no match falls back to unclosed. Returns None when the
+    buffer has no opener or no room for one more level.
+    """
+    if not data:
+        return None
+
+    start = _first_opener(data, byte_idx % len(data))
+    if start is None:
+        return None
+
+    depth = rng.choice(NEST_DEPTHS)
+    end = _matching_close(data, start) if rng.randint(0, 1) == _NEST_BALANCED else None
+
+    o = data[start : start + 1]
+    budget = max_len - len(data)
+    if end is None:
+        depth = min(depth, budget)
+        return data[:start] + o * depth + data[start:] if depth > 0 else None
+
+    depth = min(depth, budget // 2)
+    if depth < 1:
+        return None
+
+    c = data[end : end + 1]
+    return data[:start] + o * depth + data[start : end + 1] + c * depth + data[end + 1 :]
+
+
 __all__ = [
     "partial_parse",
     "lightweight_tree_mutate",
@@ -676,4 +761,5 @@ __all__ = [
     "mutate_tree_stutter",
     "has_bracket_delimiter",
     "cycle_lemma_dyck_bytes",
+    "nest_bomb",
 ]
