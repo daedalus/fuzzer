@@ -405,6 +405,10 @@ class ShmCoverage:
         """
         return set(self._active_edge_ids().tolist())
 
+    def has_edge(self, edge_id: int) -> bool:
+        """Whether *edge_id* fired in the current table (no set built)."""
+        return bool((self._active_edge_ids() == edge_id).any())
+
     def reject_phantoms(self, edge_ids) -> int:
         """Withdraw ids this scan counted as new but a rerun did not reproduce.
 

@@ -622,6 +622,11 @@ def cmd_fuzz(args):
         pos_levy=getattr(args, "pos_levy", False),
         pos_arena_arms=getattr(args, "pos_arena_arms", None),
         pos_boundary=getattr(args, "pos_boundary", False),
+        pos_effector=getattr(args, "pos_effector", False),
+        pos_token=getattr(args, "pos_token", False),
+        pos_chunk=getattr(args, "pos_chunk", False),
+        pos_changed=getattr(args, "pos_changed", False),
+        pos_rare_mask=getattr(args, "pos_rare_mask", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -2110,6 +2115,11 @@ _HAIL_MARY_FLAGS = (
     "pos_context",
     "pos_levy",
     "pos_boundary",
+    "pos_effector",
+    "pos_token",
+    "pos_chunk",
+    "pos_changed",
+    "pos_rare_mask",
     "position_arena",
     "target_arena",
 )
@@ -2732,15 +2742,51 @@ def main() -> int:
         "which always fields it as an arm.",
     )
     fuzz_parser.add_argument(
+        "--pos-effector",
+        action="store_true",
+        help="Enable the position-arena effector scheduler: proposes bytes the "
+        "deterministic byteflip pass saw move the trace (needs --deterministic). "
+        "Passive. Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-token",
+        action="store_true",
+        help="Enable the position-arena token scheduler: proposes bytes inside "
+        "dictionary-token occurrences in the seed. Passive; joins the pool while the "
+        "dictionary is non-empty. Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-chunk",
+        action="store_true",
+        help="Enable the position-arena chunk scheduler: proposes bytes around "
+        "container chunk headers (PNG, RIFF, ISO-BMFF, ...) found by the format "
+        "parsers. Passive. Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-changed",
+        action="store_true",
+        help="Enable the position-arena changed scheduler: pooled group testing on "
+        "whether a round moved the execution trace, so inert bytes lose weight. "
+        "Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-rare-mask",
+        action="store_true",
+        help="Enable the position-arena rare-mask scheduler (FairFuzz): favours bytes "
+        "whose mutation keeps the seed's rarest edge hit. Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
-        "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context, levy, boundary) with "
+        "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context, levy, boundary, "
+        "effector, token, chunk, changed, rare-mask) with "
         "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
         "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage, --pos-context, "
-        "--pos-levy and --pos-boundary. Enabled by --hail-mary.",
+        "--pos-levy, --pos-boundary, --pos-effector, --pos-token, --pos-chunk, "
+        "--pos-changed and --pos-rare-mask. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--pos-arena-arms",

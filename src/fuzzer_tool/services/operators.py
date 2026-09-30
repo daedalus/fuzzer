@@ -22,6 +22,7 @@ import struct
 import time
 from array import array
 
+import numpy as np
 import xxhash
 
 from fuzzer_tool.core.cond_stmt import CondState, CondStmt
@@ -306,6 +307,9 @@ CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
 _DET_EFF_UNKNOWN = 0
 _DET_EFF_INERT = 1
 _DET_EFF_LIVE = 2
+# Finished effector maps kept for the position arena's ``effector`` arm
+# (core/schedulers/pos_effector.py), as sorted LIVE offsets per seed key.
+MAX_EFF_SEEDS = 256
 
 
 class DeterministicEffectorMap:
@@ -1184,6 +1188,9 @@ class OperatorEngine:
         # mutants and execute only the last, and the ones it drops must be
         # left unprobed rather than silently recorded as inert.
         self._det_pending: tuple[str, int] | None = None
+        # LIVE offsets of drained effector maps, kept for the position arena
+        # (see effector_live). ~2k offsets per seed at MAX_DET_MUTATIONS.
+        self._det_live: LRUCache = LRUCache(MAX_EFF_SEEDS)
         # Cache backing the `ctx` property below: refreshed once per
         # mutate() round rather than rebuilt on every ctx access. See
         # `ctx`'s docstring for why (measured ~19% round-latency cost from
@@ -5384,13 +5391,31 @@ class OperatorEngine:
             mutant = next(q)
         except StopIteration:
             del self._det_queues[seed_key]
-            self._det_eff.pop(seed_key, None)
+            done = self._det_eff.pop(seed_key, None)
+            if done is not None:
+                self._keep_effector(seed_key, done.eff)
             return None
         effector = self._det_eff.get(seed_key)
         if effector is not None and effector.pending >= 0:
             self._det_pending = (seed_key, effector.pending)
             effector.pending = -1
         return mutant
+
+    def _keep_effector(self, seed_key: str, eff: bytearray) -> None:
+        """Store a drained map's LIVE offsets (sorted) under *seed_key*."""
+        # numpy beats a bytes.find loop 3x (2 KiB) to 28x (64 KiB, half live).
+        idx = np.flatnonzero(np.frombuffer(eff, np.uint8) == _DET_EFF_LIVE)
+        self._det_live[seed_key] = array("I", idx.astype(np.uint32).tobytes())
+
+    def effector_live(self, data: bytes) -> array | None:
+        """Sorted byteflip-LIVE offsets of *data*, or None before its map drains."""
+        if not self._det_live:
+            return None
+        return self._det_live.get(self.f._seed_key(data))
+
+    def has_effector_maps(self) -> bool:
+        """Whether any drained effector map is kept (the arm's arena gate)."""
+        return bool(self._det_live)
 
     def pending_det_seed_key(self) -> str | None:
         """Seed key of the byteflip mutant awaiting an effector verdict.

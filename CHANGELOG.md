@@ -92,6 +92,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Position-arena `effector`, `token`, `chunk`, `changed`, `rare_mask` arms** (`--pos-effector`,
+  `--pos-token`, `--pos-chunk`, `--pos-changed`, `--pos-rare-mask`; implied by `--position-arena` and
+  `--hail-mary`). `effector`: byteflip-LIVE bytes, kept after the deterministic queue drains.
+  `token`: dictionary-token occurrences. `chunk`: container chunk headers from the format parsers.
+  `changed`: pooled group testing on trace movement. `rare_mask`: FairFuzz branch mask on the seed's
+  rarest edge. New helpers: `OperatorEngine.effector_live`, `wfc_chunks.detect_chunks`,
+  `ShmCoverage.has_edge`. Unmeasured.
 - **Position-arena `boundary` arm** (`--pos-boundary`, implied by `--position-arena` and
   `--hail-mary`): a content-only prior that proposes field boundaries. Each gap between two bytes
   scores +1 for a byte-class change, +1 for the byte after a delimiter (not inside a delimiter

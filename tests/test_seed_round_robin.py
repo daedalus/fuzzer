@@ -229,7 +229,7 @@ class TestFuzzerWiring:
         from fuzzer_tool.services.fuzzer import Fuzzer
 
         params = inspect.signature(Fuzzer.__init__).parameters
-        assert list(params)[-1] == "pos_fibonacci"
+        assert "seed_round_robin_scheduler" in params
         assert params["seed_round_robin_scheduler"].default is False
 
     def test_cli_passes_flag_to_the_fuzzer_construction(self):
@@ -257,7 +257,9 @@ class TestFuzzerWiring:
         from fuzzer_tool.cli import commands
         from tests.test_regression_cli_fuzzer_kwargs import _fuzz_parser_dests
 
-        assert "seed_round_robin_scheduler" in _fuzz_parser_dests(ast.parse(inspect.getsource(commands)))
+        assert "seed_round_robin_scheduler" in _fuzz_parser_dests(
+            ast.parse(inspect.getsource(commands))
+        )
 
     def test_constructor_enables_scheduler(self):
         from fuzzer_tool.core.schedulers.seed_round_robin import SeedRoundRobinScheduler

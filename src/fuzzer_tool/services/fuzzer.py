@@ -713,6 +713,14 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("levy")
     if getattr(f, "_pos_boundary", None) is not None:
         names.append("boundary")
+    for arm in ("effector", "token", "chunk"):
+        sched = getattr(f, f"_pos_{arm}", None)
+        if sched is not None and sched.active():
+            names.append(arm)
+    if getattr(f, "_pos_changed", None) is not None:
+        names.append("changed")
+    if getattr(f, "_pos_rare_mask", None) is not None:
+        names.append("rare-mask")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
     if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
@@ -1506,6 +1514,13 @@ class Fuzzer:
         # Elo over target schedulers + Gale-Shapley (services/target_arena.py).
         # Multi-target and --elo only. Appended: positional signature.
         target_arena=False,
+        # Position-arena arms (core/schedulers/pos_<name>.py), appended so
+        # positional callers are not shifted. The arena always fields them.
+        pos_effector=False,
+        pos_token=False,
+        pos_chunk=False,
+        pos_changed=False,
+        pos_rare_mask=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2793,6 +2808,17 @@ class Fuzzer:
 
             self._pos_boundary = PositionBoundaryScheduler(self._rng)
             log.info("Position boundary scheduling enabled")
+        flags = {
+            "effector": pos_effector,
+            "token": pos_token,
+            "chunk": pos_chunk,
+            "changed": pos_changed,
+            "rare_mask": pos_rare_mask,
+        }
+        self._build_new_pos_arms(
+            frozenset(n for n, on in flags.items() if on or position_arena),
+            asked=frozenset(n for n, on in flags.items() if on),
+        )
         self._use_position_arena = position_arena
         self._position_arena = None
         if pos_arena_arms is not None and not position_arena:
@@ -2815,6 +2841,11 @@ class Fuzzer:
                 context=self._pos_context,
                 levy=self._pos_levy,
                 boundary=self._pos_boundary,
+                effector=self._pos_effector,
+                token=self._pos_token,
+                chunk=self._pos_chunk,
+                changed=self._pos_changed,
+                rare_mask=self._pos_rare_mask,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
                 arms=pos_arena_arms,
@@ -5657,6 +5688,86 @@ class Fuzzer:
                 (self._continuum_reward_factor_sum / n) if n else None
             ),
         }
+
+    def _build_new_pos_arms(self, enabled: frozenset[str], asked: frozenset[str]) -> None:
+        """Construct the effector/token/chunk/changed/rare_mask position arms.
+
+        *enabled*: arms to build (their flag or ``--position-arena``); *asked*:
+        arms whose own flag is on (only those warn about a missing
+        prerequisite). The arena fields them (see services/position_arena.py).
+        Probes are bound here so ``core`` never reaches into services or
+        adapters.
+        """
+        from fuzzer_tool.core.schedulers.pos_changed import PositionChangedScheduler
+        from fuzzer_tool.core.schedulers.pos_chunk import PositionChunkScheduler
+        from fuzzer_tool.core.schedulers.pos_effector import PositionEffectorScheduler
+        from fuzzer_tool.core.schedulers.pos_rare_mask import PositionRareMaskScheduler
+        from fuzzer_tool.core.schedulers.pos_token import PositionTokenScheduler
+
+        ops = self._operators
+        tracker = self._edge_tracker
+        self._pos_effector = self._pos_token = self._pos_chunk = None
+        self._pos_changed = self._pos_rare_mask = None
+
+        # Byteflip-LIVE bytes from drained deterministic stages.
+        if "effector" in enabled:
+            self._pos_effector = PositionEffectorScheduler(
+                self._rng, live_of=ops.effector_live, ready=ops.has_effector_maps
+            )
+            log.info("Position effector scheduling enabled")
+            if "effector" in asked and not getattr(self, "_skip_detector", None):
+                log.warning("--pos-effector needs --deterministic: the arm stays out of the pool")
+
+        # Dictionary-token occurrences; the list is re-read (it is replaced on prune).
+        if "token" in enabled:
+            self._pos_token = PositionTokenScheduler(self._rng, tokens_of=lambda: self.dictionary)
+            log.info("Position token scheduling enabled")
+
+        # Container chunk headers from the format parsers.
+        if "chunk" in enabled:
+            self._pos_chunk = PositionChunkScheduler(self._rng)
+            log.info("Position chunk scheduling enabled")
+
+        # Group testing on trace movement.
+        if "changed" in enabled:
+            self._pos_changed = PositionChangedScheduler(self._rng, moved=self._path_moved)
+            log.info("Position changed scheduling enabled")
+
+        # FairFuzz rare-branch mask.
+        if "rare_mask" in enabled:
+            self._pos_rare_mask = PositionRareMaskScheduler(
+                self._rng,
+                edges_of=lambda d: tracker.seed_edges.get(self._seed_key(d)),
+                owner_count=tracker.edge_owner_count,
+                hit=self._edge_hit,
+            )
+            log.info("Position rare-mask scheduling enabled")
+
+    def _path_moved(self, parent: bytes) -> bool | None:
+        """Did this exec's trace differ from *parent*'s? None when unmeasurable.
+
+        Same criterion as the effector map (see _note_det_effector): rolling
+        path hash against the parent's recorded one.
+        """
+        shm = self.shm_cov
+        if shm is None:
+            return None
+
+        baseline = self._edge_tracker.get_seed_path_hash(self._seed_key(parent))
+        if baseline == 0:
+            return None
+
+        current = shm.read_path_hash()
+        if current == 0:
+            return None
+        return current != baseline
+
+    def _edge_hit(self, edge_id: int) -> bool | None:
+        """Whether *edge_id* fired in this exec; None without SHM."""
+        shm = self.shm_cov
+        if shm is None:
+            return None
+        return shm.has_edge(edge_id)
 
     def _note_det_effector(self) -> None:
         """Tell the operator engine whether the byteflip just run moved the trace.

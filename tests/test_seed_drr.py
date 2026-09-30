@@ -233,7 +233,8 @@ class TestFuzzerWiring:
 
         params = inspect.signature(Fuzzer.__init__).parameters
 
-        assert list(params)[-1] == "seed_drr_scheduler"
+        names = list(params)
+        assert names.index("cuckoo_seed_filter") < names.index("seed_drr_scheduler")
         assert params["seed_drr_scheduler"].default is False
 
     def test_cli_passes_flag_and_parser_declares_it(self):

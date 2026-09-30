@@ -56,6 +56,23 @@ Arms::
                  boundaries (class changes, delimiters, entropy steps,
                  run edges), no state and no feedback signal (opt-in,
                  --pos-boundary; see core/schedulers/pos_boundary.py)
+    effector     PositionEffectorScheduler, bytes the deterministic
+                 byteflip pass saw move the trace. Tracker-style: joins
+                 once a drained effector map exists (opt-in,
+                 --pos-effector; see core/schedulers/pos_effector.py)
+    token        PositionTokenScheduler, occurrences of dictionary tokens
+                 in the seed. Tracker-style: joins while the dictionary is
+                 non-empty (opt-in, --pos-token; see
+                 core/schedulers/pos_token.py)
+    chunk        PositionChunkScheduler, container chunk headers from the
+                 format parsers. Tracker-style: joins once a seed parsed
+                 (opt-in, --pos-chunk; see core/schedulers/pos_chunk.py)
+    changed      PositionChangedScheduler, pooled group testing on "did
+                 the trace move?" -- sinks inert bytes (opt-in,
+                 --pos-changed; see core/schedulers/pos_changed.py)
+    rare_mask    PositionRareMaskScheduler, FairFuzz branch mask: bins
+                 whose mutation keeps the seed's rarest edge (opt-in,
+                 --pos-rare-mask; see core/schedulers/pos_rare_mask.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
 matches. ``arms`` (``--pos-arena-arms``) narrows the pool further to a named
@@ -76,8 +93,9 @@ served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
 ``burn_front``, ``kl_ducb``, ``canary``, ``round_robin``, ``fibonacci``,
-``fractal``, ``context``, ``levy`` and ``boundary`` are each credited off-policy on every
-settled round, whoever served the positions, like ``seed_canary`` on the seed side.
+``fractal``, ``context``, ``levy``, ``boundary``, ``changed`` and ``rare_mask`` are each
+credited off-policy on every settled round, whoever served the positions, like
+``seed_canary`` on the seed side.
 """
 
 from __future__ import annotations
@@ -113,6 +131,11 @@ POSITION_STRATEGY_NAMES = (
     "context",
     "levy",
     "boundary",
+    "effector",
+    "token",
+    "chunk",
+    "changed",
+    "rare_mask",
 )
 
 
@@ -157,6 +180,11 @@ class PositionArena:
         levy: PositionScheduler | None = None,
         arms: Iterable[str] | None = None,
         boundary: PositionScheduler | None = None,
+        effector: PositionScheduler | None = None,
+        token: PositionScheduler | None = None,
+        chunk: PositionScheduler | None = None,
+        changed: PositionScheduler | None = None,
+        rare_mask: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         # None = every arm whose feature is on; otherwise only these (+ uniform).
@@ -177,6 +205,12 @@ class PositionArena:
         self._context = context if self.allows("context") else None
         self._levy = levy if self.allows("levy") else None
         self._boundary = boundary if self.allows("boundary") else None
+        # Passive arms gated on their own active(): wired in _add_trackers.
+        self._gated: tuple[PositionScheduler, ...] = tuple(
+            a for a in (effector, token, chunk) if a is not None and self.allows(a.name)
+        )
+        self._changed = changed if self.allows("changed") else None
+        self._rare_mask = rare_mask if self.allows("rare_mask") else None
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
         # Off-policy arms: fed every settled round whoever served. Single list
@@ -193,6 +227,8 @@ class PositionArena:
                 self._context,
                 self._levy,
                 self._boundary,
+                self._changed,
+                self._rare_mask,
             )
             if e is not None
         )
@@ -254,6 +290,9 @@ class PositionArena:
         for name, fn, gate in specs:
             if self.allows(name):
                 self._arms[name] = (CallablePosition(name, fn), gate)
+        # effector / token / chunk: passive, each knows when it has data.
+        for arm in self._gated:
+            self._arms[arm.name] = (arm, arm.active)
 
     def pool(self) -> list[str]:
         """Names of arms whose feature is on now; uniform first."""

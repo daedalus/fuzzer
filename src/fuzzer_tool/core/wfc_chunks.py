@@ -42,8 +42,9 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Any
 
 from fuzzer_tool.core.mutations.asf import (
     HEADER_OBJECT_GUID,
@@ -57,8 +58,8 @@ from fuzzer_tool.core.mutations.mpegts import parse_ts_packets, serialize_ts_pac
 from fuzzer_tool.core.mutations.nal import parse_nal_units, serialize_nal_units
 from fuzzer_tool.core.mutations.ogg import parse_ogg_pages, serialize_ogg_pages
 from fuzzer_tool.core.mutations.riff import parse_riff_chunks, serialize_riff
-from fuzzer_tool.core.mutations.webp import parse_webp, serialize_webp
 from fuzzer_tool.core.mutations.webm import Element, _encode_size_vint, parse_webm, serialize_webm
+from fuzzer_tool.core.mutations.webp import parse_webp, serialize_webp
 from fuzzer_tool.core.mutations.zip import ZipDoc, parse_zip, serialize_zip
 from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
 from fuzzer_tool.core.wfc import AdjacencyTable, Tile, WaveGrid
@@ -138,7 +139,7 @@ class WfcChunkTableStore:
             return
         table = self.table_for(fmt.name)
         known = self._known[fmt.name]
-        for a, b in zip(kinds, kinds[1:]):
+        for a, b in zip(kinds, kinds[1:], strict=False):
             if len(known) >= MAX_TILES and (a not in known or b not in known):
                 continue
             table.add_forward(a, b)
@@ -170,12 +171,7 @@ class WfcChunkTableStore:
 
 def _table_pairs(table: AdjacencyTable, kinds: list[bytes]) -> set[tuple[bytes, bytes]]:
     """All observed forward pairs (a, b) among *kinds* in *table*."""
-    return {
-        (a, b)
-        for a in kinds
-        for b in kinds
-        if a != b and table.compatible(a, b, "right")
-    }
+    return {(a, b) for a in kinds for b in kinds if a != b and table.compatible(a, b, "right")}
 
 
 def _add_one_unobserved_pair(
@@ -188,9 +184,7 @@ def _add_one_unobserved_pair(
     *kinds* is already observed.
     """
     observed = _table_pairs(table, kinds)
-    candidates = [
-        (a, b) for a in kinds for b in kinds if a != b and (a, b) not in observed
-    ]
+    candidates = [(a, b) for a in kinds for b in kinds if a != b and (a, b) not in observed]
     new_table = AdjacencyTable()
     for a, b in observed:
         new_table.add_forward(a, b)
@@ -309,7 +303,7 @@ def _illegal_adjacencies(fmt: ChunkFormat, order: list[Any], table: AdjacencyTab
     """Count consecutive chunk pairs in *order* that *table* has not observed."""
     return sum(
         1
-        for a, b in zip(order, order[1:])
+        for a, b in zip(order, order[1:], strict=False)
         if not table.compatible(fmt.kind(a), fmt.kind(b), "right")
     )
 
@@ -491,6 +485,7 @@ def wfc_reorder_chunks(
 
     if resample not in RESAMPLE_MODES:
         raise ValueError(f"resample must be one of {RESAMPLE_MODES}, got {resample!r}")
+
     def frozen_positions(order: list[Any]) -> set[int]:
         frozen: set[int] = set()
         if fmt.pin_first:
@@ -906,6 +901,17 @@ _FORMATS: list[tuple[str, Callable[[bytes], bool], Callable[[bytes], Any]]] = [
 ]
 
 
+def detect_chunks(data: bytes) -> tuple[ChunkFormat, list[Any]] | None:
+    """First sniffed format's (adapter, top-level chunks), or None.
+
+    Used by the position arena's ``chunk`` arm (core/schedulers/pos_chunk.py).
+    """
+    for _name, sniff, try_parse in _FORMATS:
+        if sniff(data):
+            return try_parse(data)
+    return None
+
+
 # Fraction of applicable calls that use "violate" mode over "strict".
 VIOLATE_RATE = 0.3
 
@@ -970,7 +976,7 @@ class WfcChunkMutator(MutatorBase):
         # Off means free: the NAL sniffer is a per-byte Python scan.
         if not self.use_wfc or not seed:
             return
-        for fmt_name, sniff, try_parse in _FORMATS:
+        for _fmt_name, sniff, try_parse in _FORMATS:
             if not sniff(seed):
                 continue
             parsed = try_parse(seed)
