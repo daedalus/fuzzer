@@ -2203,8 +2203,9 @@ def main() -> int:
         "--target-arena",
         action="store_true",
         help="Multi-target: Elo arbitration (tgt_ keys) over every --target-schedule policy "
-        "plus gale-shapley, which stable-matches seeds to targets per epoch and also picks "
-        "the seed. Needs --elo. Overrides --target-schedule. Enabled by --hail-mary.",
+        "plus gale-shapley (stable match) and auction (max-weight match on Thompson yield "
+        "draws), which pair seeds with targets per epoch and also pick the seed. Needs --elo. "
+        "Overrides --target-schedule. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "-d", "--corpus", default=None, help="Corpus directory (default: ~/fuzzing/<target>/corpus)"

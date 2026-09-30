@@ -60,7 +60,7 @@ digraph fuzzer_tool {
                 fillcolor="#d8eade", fontcolor="#1f4433"];
         bandit [label="core/schedulers/ (16)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy mcts katz\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
-        tarena [label="services/target_arena.py  (multi-target)\lElo over tgt_ arms: weighted round_robin wrr wfq phi\lgale_shapley (core/stable_matching.py)\l",
+        tarena [label="services/target_arena.py  (multi-target)\lElo over tgt_ arms: weighted round_robin wrr wfq phi\lgale_shapley (core/stable_matching.py)\lauction (core/assignment.py)\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
     }
 

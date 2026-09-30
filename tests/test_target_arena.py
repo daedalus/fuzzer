@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 
 from fuzzer_tool.cli import commands
@@ -16,6 +17,7 @@ from fuzzer_tool.core.analyzers.analyzer_elo import (
 )
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.pos_base import Outcome
+from fuzzer_tool.core.schedulers.tgt_auction import AuctionTarget
 from fuzzer_tool.core.schedulers.tgt_base import (
     WARMUP_EXECS,
     RoundRobinTarget,
@@ -30,6 +32,7 @@ from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.seed_picker import TARGET_MATCH
 from fuzzer_tool.services.stats import _arena_leaders
 from fuzzer_tool.services.target_arena import (
+    AUCTION,
     GALE_SHAPLEY,
     TARGET_STRATEGY_NAMES,
     TargetArena,
@@ -211,6 +214,83 @@ def test_seat_quotas_bad_weights_fall_back_to_equal():
     assert seat_quotas(4, [-1.0, math.inf]) == [2, 2]
 
 
+# --- auction arm ----------------------------------------------------------------
+
+
+class DrawRng:
+    """Scripted Thompson step: returns ``draws`` and records the Beta parameters."""
+
+    def __init__(self, draws):
+        self._draws = np.array(draws, dtype=float)
+        self.params = []
+
+    def betavariate_array(self, alphas, betas):
+        self.params.append((np.array(alphas), np.array(betas)))
+        return self._draws
+
+
+def _auc(seeds, draws, weights=(1.0, 1.0)):
+    rng = DrawRng(draws)
+    arm = AuctionTarget(
+        rng, len(weights), lambda k: list(seeds)[:k], lambda: list(weights), lambda d: d
+    )
+    return arm, rng
+
+
+def _plan(arm, n, rounds):
+    out = {}
+    for _ in range(rounds):
+        idx = arm.pick(n)
+        out[arm.take_hint()] = idx
+    return out
+
+
+def test_auction_maximizes_total_draw():
+    """Falsification: seed-greedy would give A t0 (0.9 + 0.1); the optimum is 0.8 + 0.85."""
+    arm, _ = _auc([A, B], [[0.9, 0.8], [0.85, 0.1]])
+
+    assert _plan(arm, 2, 2) == {A: 1, B: 0}
+
+
+def test_auction_draws_from_yield_posterior():
+    """Beta(gains+1, misses+1) per (seed, target), derived from the fed rounds."""
+    arm, rng = _auc([A, B], [[0.5, 0.5], [0.5, 0.5]])
+    _feed(arm, A, 0, gains=2, tries=5)
+    _feed(arm, B, 1, gains=1, tries=1)
+
+    arm.pick(2)
+    alphas, betas = rng.params[0]
+
+    assert alphas.tolist() == [[2 + 1, 0 + 1], [0 + 1, 1 + 1]]
+    assert betas.tolist() == [[3 + 1, 0 + 1], [0 + 1, 0 + 1]]
+
+
+def test_auction_empty_corpus_declines():
+    """Adversarial: no seeds -> a valid index, no hint, no draw."""
+    arm, rng = _auc([], [])
+
+    assert arm.pick(2) in (0, 1)
+    assert arm.take_hint() is None
+    assert rng.params == []
+
+
+def test_auction_nan_draw_still_plans():
+    """Adversarial: a broken draw must not crash or drop a seed from the plan."""
+    arm, _ = _auc([A, B], [[np.nan, 0.2], [np.inf, 0.3]])
+
+    assert set(_plan(arm, 2, 2)) == {A, B}
+
+
+def test_auction_memory_bounded():
+    """Adversarial: rows stay LRU-bounded like Gale-Shapley's."""
+    rng = DrawRng([])
+    arm = AuctionTarget(rng, 1, lambda k: [], lambda: [1.0], lambda d: d, max_seeds=4)
+    for i in range(10):
+        arm.record(_rnd(bytes([i]), 0, Outcome.GAIN))
+
+    assert arm.tracked <= 4
+
+
 # --- arena ----------------------------------------------------------------------
 
 
@@ -251,7 +331,7 @@ def _key(name):
 def test_pool_is_every_schedule_plus_gale_shapley():
     """Derived from the enum: a new TargetSchedule joins the arena or this fails."""
     arena, _ = _arena()
-    expected = [s.value.replace("-", "_") for s in TargetSchedule] + [GALE_SHAPLEY]
+    expected = [s.value.replace("-", "_") for s in TargetSchedule] + [GALE_SHAPLEY, AUCTION]
 
     assert arena.pool() == expected == list(TARGET_STRATEGY_NAMES)
     assert arena.pool()[0] == TargetSchedule.WEIGHTED.value  # cold-start pick = old default
@@ -308,6 +388,14 @@ def test_seed_hint_only_when_gale_shapley_served():
 
     assert hint in (A, B)
     assert arena.seed_hint() is None
+
+
+def test_seed_hint_when_auction_served():
+    arena, _ = _arena(picks=[_key(AUCTION)])
+    arena.select()
+
+    assert arena.seed_hint() in (A, B)
+    assert arena.seed_hint() is None  # consumed once
 
 
 def test_round_cost_is_select_to_settle():

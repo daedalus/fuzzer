@@ -72,8 +72,8 @@ def strategy_arena(key: str) -> Arena:
 # Stall recovery sets _meta_strategy / _seed_strategy to this marker. It is
 # not a scheduler (no module, never recorded in the Elo pool), so it is shown
 # as-is rather than dressed up as op_random_stall / seed_random_stall.
-# ``target_match`` marks a seed handed over by the target arena's
-# Gale-Shapley arm (services/seed_picker.py); same treatment.
+# ``target_match`` marks a seed handed over by a target-arena matching
+# arm (services/seed_picker.py); same treatment.
 _UNPREFIXED_STRATEGY_NAMES = frozenset({"random_stall", "target_match"})
 
 
