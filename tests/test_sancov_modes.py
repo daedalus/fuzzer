@@ -28,6 +28,7 @@ MAP_ENTRIES = 8192
 COUNTERS = "inline-8bit-counters"
 BOOLS = "inline-bool-flag"
 DATAFLOW = "trace-pc-guard,trace-loads,trace-stores"
+INDIR = "indirect-calls"
 
 # Branch on argv[1][0]; 'X' reaches a block no other input reaches.
 _BRANCHY = r"""
@@ -264,16 +265,23 @@ def _validate(modes):
 
 class TestBuildScriptModes:
     @pytest.mark.parametrize(
-        "modes", ["trace-pc-guard", f"{COUNTERS},pc-table", f"{BOOLS},trace-loads"]
+        "modes",
+        [
+            "trace-pc-guard",
+            f"{COUNTERS},pc-table",
+            f"{BOOLS},trace-loads",
+            f"trace-pc-guard,{INDIR}",
+        ],
     )
     def test_supported_modes_pass(self, modes):
         assert _validate(modes) == 0
 
-    def test_no_edge_mode_rejected(self):
-        """Falsification: pc-table/loads alone build a target that records no edges."""
-        assert _validate("pc-table,trace-loads") != 0
+    @pytest.mark.parametrize("modes", ["pc-table,trace-loads", INDIR])
+    def test_no_edge_mode_rejected(self, modes):
+        """Falsification: pc-table/loads/indirect-calls alone record no edges."""
+        assert _validate(modes) != 0
 
-    @pytest.mark.parametrize("modes", ["trace-lods", "trace-pc-guard,indirect-calls", ""])
+    @pytest.mark.parametrize("modes", ["trace-lods", "trace-pc-guard,stack-depth", ""])
     def test_unsupported_mode_rejected(self, modes):
         """Adversarial: a typo or a mode the shim lacks callbacks for fails the link late."""
         assert _validate(modes) != 0
@@ -282,6 +290,30 @@ class TestBuildScriptModes:
         text = BUILD_SCRIPT.read_text()
         assert "--sancov=*)" in text
         assert 'validate_sancov_modes "$SANCOV_MODES"' in text
+
+    def test_indir_flag_parsed(self):
+        assert "--indir-cov" in BUILD_SCRIPT.read_text()
+
+    @pytest.mark.parametrize(
+        ("given", "want"),
+        [
+            ("trace-pc-guard", f"trace-pc-guard,{INDIR}"),
+            (f"{COUNTERS},pc-table", f"{COUNTERS},pc-table,{INDIR}"),
+            (f"trace-pc-guard,{INDIR}", f"trace-pc-guard,{INDIR}"),
+        ],
+    )
+    def test_indir_mode_added_once(self, given, want):
+        """--indir-cov extends whatever --sancov chose, and never twice."""
+        script = f"{_bash_fn('add_indir_mode')}\nadd_indir_mode '{given}'"
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        assert out.stdout.strip() == want
+
+    def test_indir_mode_not_matched_by_prefix(self):
+        """Adversarial: a longer mode name containing the token is not the token."""
+        script = f"{_bash_fn('add_indir_mode')}\nadd_indir_mode 'trace-pc-guard,x{INDIR}'"
+        out = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+        assert out.stdout.strip().endswith(f",{INDIR}")
+        assert out.stdout.strip().count(INDIR) == 2
 
     @requires_clang
     def test_object_follows_modes(self, tmp_path):

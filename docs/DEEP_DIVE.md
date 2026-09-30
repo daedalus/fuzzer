@@ -1347,18 +1347,21 @@ pass cannot clobber another variant's object before its link.
 
 The shim defines the runtime callbacks for the modes below; without them a
 build fails to link. `stack-depth` is not among them (the sanitizer
-runtimes own `__sancov_lowest_stack`), nor are `indirect-calls` / `trace-pc`
-outside distance builds. Select modes with
+runtimes own `__sancov_lowest_stack`), nor is `trace-pc` outside distance
+builds. Select modes with
 `tools/build_targets.sh --sancov=inline-8bit-counters,pc-table` (implies
-`--clang-scov`; default `trace-pc-guard`). The script rejects modes the shim
-lacks and sets with no edge mode (`trace-pc-guard`, `inline-8bit-counters`,
-`inline-bool-flag`); `verify_sancov` accepts all three sections.
+`--clang-scov`; default `trace-pc-guard`); `--indir-cov` appends
+`indirect-calls` to whatever was chosen, in either flag order. The script
+rejects modes the shim lacks and sets with no edge mode (`trace-pc-guard`,
+`inline-8bit-counters`, `inline-bool-flag`); `verify_sancov` accepts all
+three sections.
 
 | Mode | Shim behavior |
 |------|---------------|
 | `inline-8bit-counters`, `inline-bool-flag` | `*_init` registers the byte array (≤64 modules). `__afl_sancov_fold()` turns each nonzero byte into one block id (guard-style hash of its index) and clears it. Fold points: `__afl_guarded_call` return, crash handler, process exit. Block ids, not edges. |
 | `pc-table` | `__sanitizer_cov_pcs_init` is a no-op; the edge map needs no PCs. |
 | `trace-loads`, `trace-stores` | Data-flow feature: `(site, offset)` for accesses inside the module's writable `PT_LOAD` span (`.data`/`.bss`). Stack/heap addresses are dropped (ASLR noise), and so is the shim's own state (clang places it in `afl_shim_{data,bss}`). Keys are base-relative. |
+| `indirect-calls` | Synthetic channel (bit 31): `__sanitizer_cov_trace_pc_indir(callee)` hashes `(call site, callee)`, both base-relative, into one id via `__afl_map_id` (no `prev_loc` rename, like DATAFLOW/COMPCOV). Edge coverage sees the callee's entry block but not the pair, so vtable / function-pointer dispatch from a new site or to a new slot is a new id. Callees outside the module's `PT_LOAD` span (libc, other DSOs) are dropped: their offset moves with ASLR. Hidden visibility, so a sanitizer runtime's weak stub cannot win. Opt-in at build time: no instrumented call, no callback, no map pressure. Not mixed into the call-stack (CTX) hash. Tests: `tests/test_shim_indir_cov.py`. |
 
 `elf.sancov_guard_status` and `estimate_map_size_detail` (`"sancov_bools"`)
 recognise `__sancov_bools`. Tests: `tests/test_sancov_modes.py`.

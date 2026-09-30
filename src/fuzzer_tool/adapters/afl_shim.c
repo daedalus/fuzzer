@@ -1473,6 +1473,8 @@ __AFL_NO_COV static void __afl_sancov_fold_exit(void) {
 static uintptr_t __afl_data_lo;
 static uintptr_t __afl_data_hi;
 static uintptr_t __afl_data_base;
+static uintptr_t __afl_img_lo;  /* whole module span, all PT_LOADs */
+static uintptr_t __afl_img_hi;
 
 /* Linker-defined bounds of the shim's own state (see the section pragma at
  * the top). Weak: absent under gcc, where both ranges read as empty. */
@@ -1494,6 +1496,7 @@ __AFL_NO_COV static int __afl_data_phdr(struct dl_phdr_info *info, size_t size, 
     (void)size;
     uintptr_t addr = (uintptr_t)self;
     uintptr_t lo = UINTPTR_MAX, hi = 0;
+    uintptr_t img_lo = UINTPTR_MAX, img_hi = 0;
     int owns = 0;
 
     for (int i = 0; i < info->dlpi_phnum; i++) {
@@ -1503,6 +1506,8 @@ __AFL_NO_COV static int __afl_data_phdr(struct dl_phdr_info *info, size_t size, 
         uintptr_t s = info->dlpi_addr + ph->p_vaddr;
         uintptr_t e = s + ph->p_memsz;
         if (addr >= s && addr < e) owns = 1;
+        if (s < img_lo) img_lo = s;
+        if (e > img_hi) img_hi = e;
         if (!(ph->p_flags & PF_W)) continue;
         if (s < lo) lo = s;
         if (e > hi) hi = e;
@@ -1512,6 +1517,8 @@ __AFL_NO_COV static int __afl_data_phdr(struct dl_phdr_info *info, size_t size, 
     __afl_data_base = info->dlpi_addr;
     __afl_data_lo = lo;
     __afl_data_hi = hi;
+    __afl_img_lo = img_lo;
+    __afl_img_hi = img_hi;
     return 1;
 }
 
@@ -1548,6 +1555,37 @@ __AFL_DATAFLOW_CB(__sanitizer_cov_store2)
 __AFL_DATAFLOW_CB(__sanitizer_cov_store4)
 __AFL_DATAFLOW_CB(__sanitizer_cov_store8)
 __AFL_DATAFLOW_CB(__sanitizer_cov_store16)
+
+/* ── Indirect calls (indirect-calls) ─────────────────────────────────
+ *
+ * clang calls this with the callee address before every indirect call. Edge
+ * coverage sees the callee's entry block but not the (site, callee) pair:
+ * a vtable or function-pointer table dispatches the same blocks from many
+ * sites, and one site reaching a new table slot is a new behaviour.
+ *
+ *     call site (return address) --.
+ *                                  +--> hash --> synthetic id
+ *     callee    (this call)     ---'
+ *
+ * Both keys are base-relative, so ids are stable across ASLR. A callee
+ * outside this module (libc, another DSO) has an offset that moves every
+ * run, so it is dropped, like stack/heap addresses in __afl_dataflow.
+ * Opt-in at build time (--indir-cov / --sancov=...,indirect-calls): no
+ * instrumented call, no callback, no map pressure.
+ *
+ * The return address must be taken in the callback's own body. */
+__attribute__((visibility("hidden"))) __AFL_NO_COV
+void __sanitizer_cov_trace_pc_indir(uintptr_t callee) {
+    if (callee - __afl_img_lo >= __afl_img_hi - __afl_img_lo) return;  /* also lo == hi == 0 */
+    if (!__afl_area) return;
+
+    uintptr_t site = (uintptr_t)__builtin_return_address(0);
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a, as __afl_dataflow */
+    h = (h ^ (site - __afl_data_base)) * 1099511628211ULL;
+    h = (h ^ 0x494e444952454354ULL) * 1099511628211ULL; /* "INDIRECT" salt */
+    h = (h ^ (callee - __afl_data_base)) * 1099511628211ULL;
+    __afl_map_id(__AFL_SYNTH_ID(h >> 32));
+}
 
 /* ── AFLGo distance channel (__AFL_DISTANCE_MODE builds only) ─────────
  *

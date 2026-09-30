@@ -1,6 +1,8 @@
 # Handover: missing clang instrumentation (sancov)
 
-> **Status (2026-09-30): G2 fixed; G1, G3-G6 open.** Baseline: `fa7c9fc3`.
+> **Status (2026-09-30): G1, G2 fixed; G3-G6 open.** Baseline: `fa7c9fc3`.
+>
+> **G1 (implemented):** `__sanitizer_cov_trace_pc_indir()` in `afl_shim.c`: FNV-1a over `(site, callee)`, base-relative, into `__AFL_SYNTH_ID` via `__afl_map_id`. Callees outside the module image are dropped (ASLR-dependent). Build: `--indir-cov` / `--sancov=...,indirect-calls` (`validate_sancov_modes`, `add_indir_mode`). Tests: `tests/test_shim_indir_cov.py` (8, incl. direct-call, no-mode, libc-callee, ASAN), `tests/test_sancov_modes.py`. Not done: CTX-hash mixing (kept separate to avoid renaming real edges), a Python-side runtime gate, Rust (G6), effect on discovery and map pressure (unmeasured).
 >
 > **G2 (implemented):** `__afl_note_stack()` in `afl_shim.c`, called from `__afl_map_loc`. First sample after reset pins the base frame; deepest later frame is published live to SHM offset 0. Samples above the base or over `__AFL_STACK_WINDOW` (64 MiB) below it are other threads' stacks and ignored. Tests: `tests/test_shim_stack_depth.py` (5: deep, monotonic, shallow falsification, second-thread adversarial, ASAN); the 3 positive ones failed before the fix (depth 0). Per-edge cost: within noise on a 60M-iteration loop (min 0.505s old vs 0.491s new; run-to-run variance was larger than the difference). Effect of the boost on discovery is untested.
 
@@ -19,7 +21,7 @@ List `-fsanitize-coverage` features the build scripts or `afl_shim.c` do not sup
 
 ## Gaps
 
-### G1. `indirect-calls` (`__sanitizer_cov_trace_pc_indir`) — P1
+### G1. `indirect-calls` (`__sanitizer_cov_trace_pc_indir`) — P1 (FIXED 2026-09-30)
 - No callback in `afl_shim.c`; mode absent from `validate_sancov_modes` (`tools/build_targets.sh:364`).
 - Callback gets `(callee)` at each indirect call site. Edge coverage sees only the callee entry block, not which site reached it.
 - Value: C++ vtables, function-pointer tables (FFmpeg `AVInputFormat`/codec tables), callback-heavy parsers.
@@ -59,7 +61,7 @@ List `-fsanitize-coverage` features the build scripts or `afl_shim.c` do not sup
 
 ## Suggested order
 1. ~~G2~~ done.
-2. G1 with test-first per AGENTS.md rules 23, 37-38: failing test, callback, `validate_sancov_modes` entry, flag, wiring, `docs/DEEP_DIVE.md`.
+2. ~~G1~~ done.
 3. G3 validator split.
 4. G4 allowlist.
 

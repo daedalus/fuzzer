@@ -9,6 +9,7 @@
 #   tools/build_targets.sh --asan --cmplog            # Same as default
 #   tools/build_targets.sh --clang-scov               # Clang + compiler-inserted edge coverage (sancov)
 #   tools/build_targets.sh --sancov=inline-8bit-counters,pc-table  # Other sancov modes (implies --clang-scov)
+#   tools/build_targets.sh --indir-cov                # Add indirect-call (site, callee) coverage (implies --clang-scov)
 #   tools/build_targets.sh --tracecmp                 # Clang + compiler-IR comparison tracing
 #   tools/build_targets.sh --vendor-tracecmp          # Vendored libpng+zlib + trace-cmp targets
 #   tools/build_targets.sh --vendor-tracecmp --asan   # Same with ASAN
@@ -347,6 +348,7 @@ for arg in "$@"; do
     [ "$arg" = "--no-tracecmp" ] && WITH_TRACECMP=0
     [ "$arg" = "--vendor-tracecmp" ] && WITH_VENDOR_TRACECMP=1
     [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
+    [ "$arg" = "--indir-cov" ] && WITH_INDIR_COV=1 && WITH_CLANG_SCOV=1
     [ "$arg" = "--ffmpeg-sancov" ] && WITH_FFMPEG_SANCOV=1
     [ "$arg" = "--distance" ] && WITH_DISTANCE=1
     [ "$arg" = "--ngram" ] && WITH_NGRAM=1
@@ -357,13 +359,24 @@ for arg in "$@"; do
     esac
 done
 
+# --indir-cov extends whatever --sancov chose (flag order must not matter);
+# a mode already present is not repeated.
+add_indir_mode() {
+    case ",$1," in
+        *,indirect-calls,*) echo "$1" ;;
+        *) echo "$1,indirect-calls" ;;
+    esac
+}
+[ "${WITH_INDIR_COV:-0}" -eq 1 ] && SANCOV_MODES=$(add_indir_mode "$SANCOV_MODES")
+
 # Reject --sancov modes afl_shim.c has no callbacks for: the target would
 # fail to link, and only after every library object was compiled. At least
-# one mode must produce edges -- pc-table / trace-loads alone record none.
+# one mode must produce edges -- pc-table / trace-loads / indirect-calls alone
+# record none.
 # trace-cmp/div/gep stay with --tracecmp (their callbacks need cmplog).
 validate_sancov_modes() {
     local edge="trace-pc-guard inline-8bit-counters inline-bool-flag"
-    local extra="pc-table trace-loads trace-stores"
+    local extra="pc-table trace-loads trace-stores indirect-calls"
     local m has_edge=0
     for m in ${1//,/ }; do
         case " $edge " in *" $m "*) has_edge=1; continue ;; esac
