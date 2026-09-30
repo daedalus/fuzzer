@@ -119,6 +119,7 @@ from fuzzer_tool.services.ptrace_coverage import (
 from fuzzer_tool.services.runner import TargetRunner, ptrace_available
 from fuzzer_tool.services.seed_picker import SeedPicker
 from fuzzer_tool.services.stats import StatsReporter
+from fuzzer_tool.services.target_arena import TargetArena
 
 log = logging.getLogger(__name__)
 
@@ -1502,6 +1503,9 @@ class Fuzzer:
         # target time per seed instead of equal visits. Elo arm and no-elo
         # fallback, like round_robin.
         seed_drr_scheduler=False,
+        # Elo over target schedulers + Gale-Shapley (services/target_arena.py).
+        # Multi-target and --elo only. Appended: positional signature.
+        target_arena=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2821,6 +2825,13 @@ class Fuzzer:
                     "Position arena restricted to: %s",
                     ", ".join(sorted(self._position_arena.enabled_arms)),
                 )
+        # Target arena: needs >1 target and Elo (the ctor flag; see above).
+        self._target_arena = None
+        if target_arena and not (multi_targets and elo):
+            log.warning("--target-arena needs --elo and more than one target; ignored")
+        elif target_arena:
+            self._target_arena = TargetArena(self)
+            log.info("Target arena enabled (Elo over tgt_ strategies)")
         self._use_ecofuzz = ecofuzz
         self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
         self._metropolis = metropolis
@@ -5283,6 +5294,12 @@ class Fuzzer:
         """Select the next target for multi-target round-robin fuzzing."""
         if not self.multi_targets:
             return
+        # --target-arena: Elo picks which scheduler chooses.
+        arena = getattr(self, "_target_arena", None)
+        if arena is not None:
+            self._active_target_idx = arena.select()
+            self.target = self.multi_targets[self._active_target_idx]
+            return
         # Weighted round-robin: prefer targets with fewer total edges discovered.
         # --target-schedule round-robin skips it: every exec takes the next target.
         if self._target_schedule is TargetSchedule.ROUND_ROBIN:
@@ -6915,6 +6932,7 @@ class Fuzzer:
 
         # Position arena matches and burn-front credit
         self._settle_positions(Outcome.GAIN if success else Outcome.MISS, surprisal_weight)
+        self._settle_targets(success, surprisal_weight)
 
         if self._use_shapley and self._shapley:
             new_edges = self._get_current_edge_set()
@@ -8279,6 +8297,14 @@ class Fuzzer:
         score = weight if outcome is Outcome.GAIN else 0.0
         arena.settle(self._last_parent_seed, sites, outcome, weight, score)
 
+    def _settle_targets(self, success: bool, weight: float) -> None:
+        """Close the target arena's round: the target that ran, with this outcome."""
+        arena = getattr(self, "_target_arena", None)
+        if arena is None:
+            return
+        outcome = Outcome.GAIN if success else Outcome.MISS
+        arena.settle(self._last_parent_seed, self._active_target_idx, outcome, weight)
+
     def _record_operator_strategy_matches(self, score: float) -> None:
         """Record the active operator scheduler's Elo match against every other
         enabled scheduler. Only schedulers actually selected this run
@@ -9113,7 +9139,7 @@ class Fuzzer:
         if self.multi_targets:
             print(
                 f"[*] Multi-target: {len(self.multi_targets)} targets, shared corpus, "
-                f"schedule={self._target_schedule.value}"
+                f"schedule={'arena' if self._target_arena else self._target_schedule.value}"
             )
             uninstrumented = []
             for i, t in enumerate(self.multi_targets):

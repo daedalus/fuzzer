@@ -61,10 +61,11 @@ log = logging.getLogger(__name__)
 
 
 def _arena_leaders(ranking: list) -> str:
-    """``top_op=..(r) top_seed=..(r)[ top_pos=..(r)]`` from a strategy ranking."""
+    """``top_op=..(r) top_seed=..(r)[ top_pos=..(r)][ top_tgt=..(r)]`` from a strategy ranking."""
     op_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.OPERATOR]
     seed_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.SEED]
     pos_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.POSITION]
+    tgt_ranking = [p for p in ranking if strategy_arena(p[0]) is Arena.TARGET]
     top_op = strategy_display_name(op_ranking[0][0]) if op_ranking else "?"
     top_op_rating = op_ranking[0][1] if op_ranking else 0
     top_seed = seed_ranking[0][0] if seed_ranking else "?"
@@ -72,6 +73,8 @@ def _arena_leaders(ranking: list) -> str:
     out = f"top_op={top_op}({top_op_rating:.0f}) top_seed={top_seed}({top_seed_rating:.0f})"
     if pos_ranking:
         out += f" top_pos={pos_ranking[0][0]}({pos_ranking[0][1]:.0f})"
+    if tgt_ranking:
+        out += f" top_tgt={tgt_ranking[0][0]}({tgt_ranking[0][1]:.0f})"
     return out
 
 

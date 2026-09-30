@@ -2596,6 +2596,7 @@ def _elo_strategy_lines(f, lines: list[str]) -> None:
             op_strategies = [p for p in strategy_ranking if strategy_arena(p[0]) is Arena.OPERATOR]
             seed_strategies = [p for p in strategy_ranking if strategy_arena(p[0]) is Arena.SEED]
             pos_strategies = [p for p in strategy_ranking if strategy_arena(p[0]) is Arena.POSITION]
+            tgt_strategies = [p for p in strategy_ranking if strategy_arena(p[0]) is Arena.TARGET]
 
             def _strategy_block(title, group):
                 # Deltas and Rpi are measured against the pool mean, not the
@@ -2618,6 +2619,8 @@ def _elo_strategy_lines(f, lines: list[str]) -> None:
                 _strategy_block("Seed strategies (Elo):", seed_strategies)
             if pos_strategies:
                 _strategy_block("Position strategies (Elo):", pos_strategies)
+            if tgt_strategies:
+                _strategy_block("Target strategies (Elo):", tgt_strategies)
 
 
 def _elo_bandit_lines(f, ranking: list, lines: list[str]) -> None:

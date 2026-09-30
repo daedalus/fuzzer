@@ -725,6 +725,7 @@ def cmd_fuzz(args):
         target_schedule=TargetSchedule(
             getattr(args, "target_schedule", TargetSchedule.WEIGHTED.value)
         ),
+        target_arena=getattr(args, "target_arena", False),
         gp_length_scale=getattr(args, "gp_length_scale", 1.0),
         gp_beta=getattr(args, "gp_beta", 2.0),
         bo_gp_length_scale=getattr(args, "bo_gp_length_scale", 1.0),
@@ -2110,6 +2111,7 @@ _HAIL_MARY_FLAGS = (
     "pos_levy",
     "pos_boundary",
     "position_arena",
+    "target_arena",
 )
 
 
@@ -2186,6 +2188,13 @@ def main() -> int:
         "'round-robin' (exec i -> target i mod N), 'wrr'/'wfq' (deterministic fair shares), "
         "or 'phi' (gated first-passage / Φ schedule — Module 5; off unless chosen). "
         "Default: weighted.",
+    )
+    fuzz_parser.add_argument(
+        "--target-arena",
+        action="store_true",
+        help="Multi-target: Elo arbitration (tgt_ keys) over every --target-schedule policy "
+        "plus gale-shapley, which stable-matches seeds to targets per epoch and also picks "
+        "the seed. Needs --elo. Overrides --target-schedule. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "-d", "--corpus", default=None, help="Corpus directory (default: ~/fuzzing/<target>/corpus)"

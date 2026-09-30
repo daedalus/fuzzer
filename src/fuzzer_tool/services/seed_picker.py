@@ -81,6 +81,10 @@ SATURATION_MIN_UNGATED_EXECS = 1000
 ZIPF_GROWTH_BETA = 0.05
 ZIPF_GROWTH_R2 = 0.9
 
+# _seed_strategy for a seed handed over by the target arena's Gale-Shapley
+# arm. Never in _seed_strategy_pool, so the seed arena plays no match for it.
+TARGET_MATCH = "target_match"
+
 # ── Invasion percolation operator selection (percolation handover Module 4) ─
 # Resistance at or above which an operator counts as stuck: success_rate <=
 # 1/INVASION_STUCK_THRESHOLD, i.e. 10% here. Chosen to match the existing
@@ -871,6 +875,13 @@ class SeedPicker:
         if f._stall_recovery_active and f.corpus:
             f._seed_strategy = "random_stall"
             return rng.choice(f.corpus)
+
+        # Target arena: Gale-Shapley picked the (seed, target) pair together.
+        arena = getattr(f, "_target_arena", None)
+        hint = arena.seed_hint() if arena is not None else None
+        if hint is not None:
+            f._seed_strategy = TARGET_MATCH
+            return hint
 
         overdue = self._pick_lst_seed(time.time())
         if overdue is not None:
