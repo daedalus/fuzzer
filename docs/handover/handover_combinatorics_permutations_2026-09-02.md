@@ -41,14 +41,16 @@ default 65,536); `allow_bulk=True` still bypasses both for larger cases.
 Full writeup: `docs/handover/handover_coin_flip_bulk_budget_2026-09-26.md`
 §1.
 
-## 3. Coin-flip idiom blocks enumeration (orig. §10c) — mostly CLOSED 2026-09-26
+## 3. Coin-flip idiom blocks enumeration (orig. §10c) — CLOSED 2026-09-30
 
 All 80 fixed-literal-probability sites (of 93 total) rewritten to bounded
 draws; operator table's `"continuous"` count dropped 34 → 2 (both genuine
-continuous draws, not coin flips). 13 runtime-probability sites (a
-scheduler's `epsilon`, a GA's `crossover_rate`, etc.) left open — no
-decision made yet on discretizing a runtime float without reopening the
-bulk-budget problem item 2 just closed for explicit bulk calls. Full
+continuous draws, not coin flips). Remaining runtime-probability sites (a
+scheduler's `epsilon`, a GA's `crossover_rate`, etc.) closed as out of
+scope 2026-09-30: `ExhaustivePool` enumerates only `OperatorEngine`
+dispatch paths, and none reach them. Rule: coin-flip rewrites apply only to
+code reachable from operator dispatch; `TestCoinFlipRewrite`'s `continuous`
+floor enforces it. Census and rationale: coin-flip handover §2 "Closed". Full
 writeup, including the operator-by-operator before/after and the fallout
 in tests that monkeypatched `.random()` directly:
 `docs/handover/handover_coin_flip_bulk_budget_2026-09-26.md` §2.
@@ -189,7 +191,7 @@ present).
   - `tests/test_regression_no_op_mutations.py` battery gained an AVI, a VP8L WebP, an MP4 with `tkhd` and a two-entry ZIP, or the sweep reports the new operators as never offered.
   - **Not done:** ZIP64 (EOCD64, extra fields), ZIP CRC-32, ISO-BMFF boxes other than `tkhd` (`mvhd`, `stsz`, `mdhd`), RIFF chunks other than fmt/data/avih/VP8/VP8L (`ALPH`, `ANMF`, AVI `strh`/`strf`). **Not measured:** selection share of any covering-array arm on a real target, and whether any finds a bug byte-level operators miss.
 
-**Still open:** section 1 (m>2 swap A/B on fuzzgoat plus an offset-table target); section 3's 13 runtime-probability sites; section 5 (grammar skeleton set); the remaining covering-array boxes and chunks listed above.
+**Still open:** section 1 (m>2 swap A/B on fuzzgoat plus an offset-table target); section 5 (grammar skeleton set); the remaining covering-array boxes and chunks listed above.
 
 ### Wiring pass 2026-09-30
 
