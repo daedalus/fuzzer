@@ -232,10 +232,30 @@ the pre-existing fallout above (`randoms=[0.1]` → `randints=[0]`, since
 
 ### Still open
 
-- The 13 runtime-probability `.random() < p` sites (listed above) — need
-  a decision on how to discretize a runtime float before they can be
-  rewritten; doing it naively reopens the bulk-budget problem item 1
-  fixed for explicit bulk calls, one draw at a time instead.
+- ~~The 13 runtime-probability `.random() < p` sites~~ — closed, see below.
 - `kmer_starve` now reaches item 1's bulk gate rather than the coin-flip
   refusal; not investigated in this pass — its own bulk call may now be
   worth auto-enumerating if it is small (not measured here).
+
+### Closed 2026-09-30: runtime-probability sites out of scope
+
+`ExhaustivePool` is built only in tests and enumerates only
+`OperatorEngine` dispatch paths. No open site is on one;
+`TestCoinFlipRewrite`'s floor (`continuous` == the 2 genuine operators)
+passes on `e02546b`. Rewriting would bias probabilities
+(`round(p*N)/N`), add per-draw cost on hot paths (Whittle drift loop,
+Metropolis step) and shift the RNG stream under scripted tests, for no
+enumeration gain. **Rule:** coin-flip rewrites apply only to code reachable
+from operator dispatch.
+
+Census on `e02546b` (`grep -rnE "\.random\(\)\s*<"`, 20 sites):
+
+- Runtime `p`, original set (11 found; 2 of the 13 no longer match):
+  `seed_picker.py:953`, `fuzzer.py:7090`, `ga.py:410,415`,
+  `seed_tang.py:165`, `op_epsilon_greedy.py:62`, `op_whittle.py:391,406`,
+  `op_monte_carlo.py:566`, `analyzer_elo.py:403`, `cvm.py:71`.
+- Runtime `p`, schedulers added 2026-09-28: `op_credit.py:159`,
+  `seed_residual.py:135`, `pos_boundary.py:193`.
+- Fixed literal, added 2026-09-28: `pos_boundary.py:188`,
+  `pos_cmplog.py:182`, `pos_levy.py:96,102`, `pos_lineage.py:134,142`.
+  Also off operator paths; left as is.
