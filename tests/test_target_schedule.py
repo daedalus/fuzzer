@@ -100,7 +100,7 @@ def test_target_schedule_appended_last():
     import inspect
 
     params = list(inspect.signature(Fuzzer.__init__).parameters)
-    assert params[-1] == "seed_drr_scheduler"
+    assert params[-1] == "target_arena"
 
 
 def _clocked(f):

@@ -96,6 +96,17 @@ surprisal-weighted score (`PositionArena.settle`, called from
 `Fuzzer._settle_positions`). `--burn-front` adds the burn-front arm and is
 credited off-policy on every round, delocalised operators excluded.
 
+### Target arena (fourth Elo tournament)
+
+`--target-arena` (needs `--elo` and >1 target) arbitrates which binary runs
+under `tgt_<name>` keys (`services/target_arena.py`). Pool = every
+`TargetSchedule` policy (`core/schedulers/tgt_base.py`) + `gale_shapley`
+(`tgt_gale_shapley.py`, stable seed->target matching via
+`core/stable_matching.py`); `weighted` first. `_select_next_target` ->
+`TargetArena.select`; `SeedPicker.pick_seed` takes Gale-Shapley's matched seed
+(`target_match`, unscored); `Fuzzer._settle_targets` (from `fuzz_one`) feeds
+every arm and plays served-vs-rest matches.
+
 ### Recording (`.record()` fan-out, fuzzer.py:2418–2478)
 
 Every enabled scheduler records shadow stats per run, with the same success +

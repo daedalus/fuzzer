@@ -60,6 +60,8 @@ digraph fuzzer_tool {
                 fillcolor="#d8eade", fontcolor="#1f4433"];
         bandit [label="core/schedulers/ (16)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy mcts katz\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
+        tarena [label="services/target_arena.py  (multi-target)\lElo over tgt_ arms: weighted round_robin wrr wfq phi\lgale_shapley (core/stable_matching.py)\l",
+                fillcolor="#d8eade", fontcolor="#1f4433"];
     }
 
     // --------------------------------------------------------- mutation
@@ -134,6 +136,8 @@ digraph fuzzer_tool {
 
     // within-stage
     bandit -> ops [label="  operator"];
+    fuzzer -> tarena [label="  pick target"];
+    tarena -> picker [style=dashed, label="  matched seed"];
     lib -> ops [dir=none, style=dotted];
     shim -> target [dir=none, style=dotted, label="  linked in"];
 
@@ -167,7 +171,7 @@ digraph fuzzer_tool {
     cmplog -> bandit [constraint=false, style=dashed, color="#22688c",
                       label="walls / stall  ", fontcolor="#22688c"];
 
-    { rank=same; picker; bandit; }
+    { rank=same; picker; bandit; tarena; }
     { rank=same; ops; lib; }
     { rank=same; cov; cmplog; }
 }
