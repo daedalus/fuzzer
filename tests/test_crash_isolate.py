@@ -119,10 +119,52 @@ class TestForFuzzer:
             ci.isolate_for_fuzzer(self._f(file_mode=True), meta, data, -6)
         assert m.called and meta.failure_schema_status == "isolated"
 
-    def test_inprocess_runner_skipped(self):
+    def test_inprocess_uses_private_runner_and_its_own_return_codes(self):
+        # direct mode reports 128+signal; replay backend must be calibrated, not assumed
+        class FakeRunner:
+            def run_one(self, d):
+                return (134, "") if _crashes(d) else (0, "")
+
         meta = CrashMetadata()
-        ci.isolate_for_fuzzer(self._f(_inprocess_runner=object()), meta, _png(), -6)
-        assert meta.failure_schema_status == "unsupported_runner" and not meta.failure_schema
+        f = self._f(_inprocess_runner=object(), _isolate_runner=FakeRunner())
+        ci.isolate_for_fuzzer(f, meta, _png(depth=16, ctype=3), 134)
+        assert meta.failure_schema_status == "isolated"
+        assert meta.failure_schema == {"IHDR[0].bit_depth": 16, "IHDR[0].color_type": 3}
+
+    def test_builds_subprocess_runner_without_touching_source_runner(self):
+        built = {}
+
+        class Src:
+            target, function_name = "/x.so", "LLVMFuzzerTestOneInput"
+
+        class FakeIPR:
+            def __init__(self, target, **kw):
+                built.update(target=target, **kw)
+
+            def run_one(self, d):
+                return (-11, "") if _crashes(d) else (0, "")
+
+        meta = CrashMetadata()
+        f = self._f(_inprocess_runner=Src())
+        with patch("fuzzer_tool.adapters.inprocess.InProcessRunner", FakeIPR):
+            ci.isolate_for_fuzzer(f, meta, _png(depth=16, ctype=3), 139)
+        assert built["direct"] is False and built["cov"] is False
+        assert built["function_name"] == "LLVMFuzzerTestOneInput"
+        assert meta.failure_schema_status == "isolated" and f._isolate_runner is not None
+
+    def test_not_reproduced_when_replay_backend_does_not_crash(self):
+        meta = CrashMetadata()
+        with patch(
+            "fuzzer_tool.adapters.process.run_target_stdin",
+            side_effect=lambda t, d, to, env=None: (0, "", 1),
+        ):
+            ci.isolate_for_fuzzer(self._f(), meta, _png(depth=16, ctype=3), -6)
+        assert meta.failure_schema_status == "not_reproduced" and not meta.failure_schema
+
+    def test_unrecognised_format_reports_no_fields(self):
+        meta = CrashMetadata()
+        ci.isolate_for_fuzzer(self._f(), meta, b"plain text", -6)
+        assert meta.failure_schema_status == "no_fields"
 
     def test_errors_never_propagate(self):
         meta = CrashMetadata()

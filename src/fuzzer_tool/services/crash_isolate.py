@@ -98,28 +98,70 @@ def isolate_crash(
     return named, str(getattr(schema.status, "value", schema.status))
 
 
+def _isolated_inprocess_runner(f: Any) -> Any:
+    """A private, coverage-free, process-isolated runner for an in-process target.
+
+    Replaying through ``f._inprocess_runner`` would reset its coverage bitmap
+    and fault/register relay (both read again after ``save_crash``), and in
+    ``--inprocess-direct`` mode a wild replay could kill the fuzzer. A
+    subprocess-loader runner of the same target/function has neither problem.
+    Built once and cached on the fuzzer.
+    """
+    runner = getattr(f, "_isolate_runner", None)
+    if runner is None:
+        from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+        src = f._inprocess_runner
+        runner = InProcessRunner(
+            src.target,
+            function_name=src.function_name,
+            timeout=f.timeout,
+            direct=False,
+            cov=False,
+        )
+        f._isolate_runner = runner
+    return runner
+
+
 def isolate_for_fuzzer(f: Any, meta: Any, data: bytes, returncode: int) -> None:
-    """Fill ``meta.failure_schema*`` for a novel crash; never raises into the crash path."""
+    """Fill ``meta.failure_schema*`` for a novel crash; never raises into the crash path.
+
+    The reference failure is re-measured with the replay backend itself
+    (return codes differ between backends: direct in-process reports
+    ``128 + signal``, a subprocess reports ``-signal``). If the crash does not
+    reproduce there, the status is ``not_reproduced`` and nothing is isolated.
+    """
     try:
-        if getattr(f, "_inprocess_runner", None) is not None:
-            meta.failure_schema_status = "unsupported_runner"
-            return
         fields = fields_from_spans(map_fields(data).spans)
+        if not fields:
+            meta.failure_schema_status = "no_fields"
+            return
         env = os.environ.copy()
 
-        def replay(candidate: bytes) -> tuple[int, str]:
-            from fuzzer_tool.adapters import process
+        if getattr(f, "_inprocess_runner", None) is not None:
+            replay = _isolated_inprocess_runner(f).run_one
+        else:
 
-            if f.file_mode:
-                rc, err, _ = process.run_target_file(
-                    f.target, candidate, f.timeout, str(f._tmp_dir), f.target_args, env=env
-                )
-            else:
-                rc, err, _ = process.run_target_stdin(f.target, candidate, f.timeout, env=env)
-            return rc, err
+            def replay(candidate: bytes) -> tuple[int, str]:
+                from fuzzer_tool.adapters import process
 
+                if f.file_mode:
+                    rc, err, _ = process.run_target_file(
+                        f.target, candidate, f.timeout, str(f._tmp_dir), f.target_args, env=env
+                    )
+                else:
+                    rc, err, _ = process.run_target_stdin(f.target, candidate, f.timeout, env=env)
+                return rc, err
+
+        ref_rc, ref_err = replay(data)
+        if ref_rc == 0:
+            meta.failure_schema_status = "not_reproduced"
+            return
+        sanitizer = getattr(meta, "sanitizer", "") or ""
+        if sanitizer.lower() not in ref_err.lower():
+            sanitizer = ""
         meta.failure_schema, meta.failure_schema_status = isolate_crash(
-            data, fields, replay, returncode, sanitizer=getattr(meta, "sanitizer", "") or ""
+            data, fields, replay, ref_rc, sanitizer=sanitizer
         )
     except Exception:
         log.warning("crash failure isolation failed", exc_info=True)
