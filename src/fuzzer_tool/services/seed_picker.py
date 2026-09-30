@@ -81,8 +81,8 @@ SATURATION_MIN_UNGATED_EXECS = 1000
 ZIPF_GROWTH_BETA = 0.05
 ZIPF_GROWTH_R2 = 0.9
 
-# _seed_strategy for a seed handed over by the target arena's Gale-Shapley
-# arm. Never in _seed_strategy_pool, so the seed arena plays no match for it.
+# _seed_strategy for a seed handed over by a target-arena matching arm
+# (gale_shapley, auction). Never in _seed_strategy_pool, so the seed arena plays no match for it.
 TARGET_MATCH = "target_match"
 
 # ── Invasion percolation operator selection (percolation handover Module 4) ─
@@ -876,7 +876,7 @@ class SeedPicker:
             f._seed_strategy = "random_stall"
             return rng.choice(f.corpus)
 
-        # Target arena: Gale-Shapley picked the (seed, target) pair together.
+        # Target arena: a matching arm picked the (seed, target) pair together.
         arena = getattr(f, "_target_arena", None)
         hint = arena.seed_hint() if arena is not None else None
         if hint is not None:

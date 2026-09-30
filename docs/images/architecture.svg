@@ -118,16 +118,17 @@
 <!-- tarena -->
 <g id="node6" class="node">
 <title>tarena</title>
-<path fill="#d8eade" stroke="transparent" stroke-width="0" d="M1183.5,-773.5C1183.5,-773.5 924.5,-773.5 924.5,-773.5 918.5,-773.5 912.5,-767.5 912.5,-761.5 912.5,-761.5 912.5,-736.5 912.5,-736.5 912.5,-730.5 918.5,-724.5 924.5,-724.5 924.5,-724.5 1183.5,-724.5 1183.5,-724.5 1189.5,-724.5 1195.5,-730.5 1195.5,-736.5 1195.5,-736.5 1195.5,-761.5 1195.5,-761.5 1195.5,-767.5 1189.5,-773.5 1183.5,-773.5"/>
-<text text-anchor="start" x="924.5" y="-757.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">services/target_arena.py &#160;(multi&#45;target)</text>
-<text text-anchor="start" x="924.5" y="-746.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">Elo over tgt_ arms: weighted round_robin wrr wfq phi</text>
-<text text-anchor="start" x="924.5" y="-735.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">gale_shapley (core/stable_matching.py)</text>
+<path fill="#d8eade" stroke="transparent" stroke-width="0" d="M1183.5,-779C1183.5,-779 924.5,-779 924.5,-779 918.5,-779 912.5,-773 912.5,-767 912.5,-767 912.5,-731 912.5,-731 912.5,-725 918.5,-719 924.5,-719 924.5,-719 1183.5,-719 1183.5,-719 1189.5,-719 1195.5,-725 1195.5,-731 1195.5,-731 1195.5,-767 1195.5,-767 1195.5,-773 1189.5,-779 1183.5,-779"/>
+<text text-anchor="start" x="924.5" y="-763" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">services/target_arena.py &#160;(multi&#45;target)</text>
+<text text-anchor="start" x="924.5" y="-752" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">Elo over tgt_ arms: weighted round_robin wrr wfq phi</text>
+<text text-anchor="start" x="924.5" y="-741" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">gale_shapley (core/stable_matching.py)</text>
+<text text-anchor="start" x="924.5" y="-730" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#1f4433">auction (core/assignment.py)</text>
 </g>
 <!-- fuzzer&#45;&gt;tarena -->
 <g id="edge10" class="edge">
 <title>fuzzer&#45;&gt;tarena</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" d="M842.55,-851.48C884.02,-831.57 951.22,-799.33 998.71,-776.53"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="999.89,-778.61 1004.99,-773.52 997.83,-774.32 999.89,-778.61"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" d="M842.55,-851.48C880.77,-833.13 940.84,-804.31 987.21,-782.06"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="988.26,-784.19 993.37,-779.1 986.2,-779.9 988.26,-784.19"/>
 <text text-anchor="middle" x="940" y="-817.2" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;pick target</text>
 </g>
 <!-- picker&#45;&gt;ops -->
