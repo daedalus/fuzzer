@@ -7,10 +7,17 @@ target_dec_fate.list), FATE suite baseline samples, and PoC files
 from known CVE repositories. Seeds land in <out>/seeds/ so the
 fuzzer's load_corpus can consume them directly.
 
+After a FATE download, optional ``--group`` runs the OSS-Fuzz
+``group_seed_corpus`` matching logic (ported in
+``tools/group_seed_corpus.py``) to redistribute samples into
+per-fuzzer directories under ``<out>/seeds/<fuzzer>/``.
+
 Usage:
     python tools/extract_ffmpeg_seeds.py [--out DIR] [--source oss-fuzz|fate|cve|all]
     python tools/extract_ffmpeg_seeds.py --source oss-fuzz --max 50   # test with N crashes
     python tools/extract_ffmpeg_seeds.py --source fate --codecs h264,png,jpeg
+    python tools/extract_ffmpeg_seeds.py --source fate --group \\
+        --fuzzers-from-names ffmpeg_AV_CODEC_ID_H264_fuzzer,ffmpeg_DEMUXER_fuzzer
     python tools/extract_ffmpeg_seeds.py --source all --analyze
 
 Seeds are fetched via urllib (no external deps). A pickle cache at
@@ -25,6 +32,7 @@ import re
 import sys
 import time
 import urllib.request
+from pathlib import Path
 from urllib.parse import urljoin, urlparse
 
 # ---------------------------------------------------------------------------
@@ -715,6 +723,29 @@ def main() -> int:
     parser.add_argument(
         "--list-cves", action="store_true", help="List FFmpeg CVEs and PoC availability"
     )
+    parser.add_argument(
+        "--group",
+        action="store_true",
+        help=(
+            "After fetch, run tools/group_seed_corpus.py matching (OSS-Fuzz port) "
+            "to redistribute samples into <out>/seeds/<fuzzer>/"
+        ),
+    )
+    parser.add_argument(
+        "--fuzzers-from-names",
+        default=None,
+        help="With --group: comma-separated fuzzer basenames to group onto",
+    )
+    parser.add_argument(
+        "--fuzzers-file",
+        default=None,
+        help="With --group: path to a file listing fuzzer basenames (one per line)",
+    )
+    parser.add_argument(
+        "--group-zip",
+        action="store_true",
+        help="With --group: also write <fuzzer>_seed_corpus.zip (OSS-Fuzz layout)",
+    )
     args = parser.parse_args()
 
     if args.list_cves:
@@ -784,6 +815,48 @@ def main() -> int:
             print("   Sample entries:")
             for _i, (key, path) in enumerate(list(cve_cache.items())[:5]):
                 print(f"     - {key} -> {path}")
+
+    if args.group:
+        print("=" * 60)
+        print("[*] Grouping samples onto per-fuzzer dirs (OSS-Fuzz port)")
+        print("=" * 60)
+        if not args.fuzzers_from_names and not args.fuzzers_file:
+            print(
+                "[!] --group requires --fuzzers-from-names and/or --fuzzers-file",
+                file=sys.stderr,
+            )
+            return 1
+        # Import lazily so the extract path stays dependency-light when
+        # grouping is not requested.
+        tools_dir = os.path.dirname(os.path.abspath(__file__))
+        if tools_dir not in sys.path:
+            sys.path.insert(0, tools_dir)
+        import group_seed_corpus as gsc  # noqa: WPS433
+
+        fuzzers = gsc.parse_fuzzers_arg(
+            args.fuzzers_from_names,
+            Path(args.fuzzers_file) if args.fuzzers_file else None,
+            None,
+        )
+        corpus_root = Path(args.out) / "seeds"
+        if not corpus_root.is_dir():
+            corpus_root = Path(args.out)
+        corpus_files = gsc.parse_corpus(corpus_root)
+        if not corpus_files:
+            print(f"[!] No samples under {corpus_root} to group", file=sys.stderr)
+            return 1
+        counts = gsc.write_grouped(
+            corpus_files,
+            fuzzers,
+            Path(args.out),
+            do_zip=args.group_zip,
+        )
+        total = sum(counts.values())
+        nonempty = sum(1 for n in counts.values() if n > 0)
+        print(
+            f"[*] Grouped {total} sample placements across "
+            f"{nonempty}/{len(fuzzers)} fuzzers under {Path(args.out) / 'seeds'}/"
+        )
 
     return 0
 
