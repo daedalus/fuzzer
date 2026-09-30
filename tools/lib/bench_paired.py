@@ -73,6 +73,10 @@ ARENA_TESTABLE = (
     "boundary",
     "round_robin",
     "fibonacci",
+    "token",
+    "chunk",
+    "changed",
+    "rare_mask",
 )
 _ARENA = ["--elo", "--mc-bandit", "--position-arena"]
 

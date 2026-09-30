@@ -34,14 +34,19 @@ from fuzzer_tool.core.schedulers.pos_burn_front import (
     BurnFrontPositionScheduler,
 )
 from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
+from fuzzer_tool.core.schedulers.pos_changed import PositionChangedScheduler
+from fuzzer_tool.core.schedulers.pos_chunk import PositionChunkScheduler
 from fuzzer_tool.core.schedulers.pos_cmplog import PositionCmplogScheduler
 from fuzzer_tool.core.schedulers.pos_context import PositionContextScheduler
+from fuzzer_tool.core.schedulers.pos_effector import PositionEffectorScheduler
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
 from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
+from fuzzer_tool.core.schedulers.pos_rare_mask import PositionRareMaskScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
+from fuzzer_tool.core.schedulers.pos_token import PositionTokenScheduler
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.position_arena import (
     POSITION_STRATEGY_NAMES,
@@ -50,6 +55,7 @@ from fuzzer_tool.services.position_arena import (
 )
 
 SEED = bytes(1000)
+NEW_ARM_FLAGS = ["pos_effector", "pos_token", "pos_chunk", "pos_changed", "pos_rare_mask"]
 NO_SPARK = 0.99  # random() draw above SPARK_RATE
 
 
@@ -571,6 +577,11 @@ def _arena(
     levy=None,
     boundary=None,
     region=lambda d, n: 55,
+    effector=None,
+    token=None,
+    chunk=None,
+    changed=None,
+    rare_mask=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
@@ -587,6 +598,37 @@ def _arena(
         context=context,
         levy=levy,
         boundary=boundary,
+        effector=effector,
+        token=token,
+        chunk=chunk,
+        changed=changed,
+        rare_mask=rare_mask,
+    )
+
+
+def _effector(ready=True, live=(40,)):
+    box = {"ready": ready}
+    arm = PositionEffectorScheduler(
+        RandPool(seed=1), live_of=lambda d: list(live), ready=lambda: box["ready"]
+    )
+    return arm, box
+
+
+def _token(tokens=(b"ab",)):
+    box = {"t": list(tokens)}
+    return PositionTokenScheduler(RandPool(seed=1), tokens_of=lambda: box["t"]), box
+
+
+def _changed(moved=True):
+    return PositionChangedScheduler(RandPool(seed=1), moved=lambda d: moved)
+
+
+def _rare_mask(hit=True):
+    return PositionRareMaskScheduler(
+        RandPool(seed=1),
+        edges_of=lambda d: {7},
+        owner_count=lambda e: 1,
+        hit=lambda e: hit,
     )
 
 
@@ -806,6 +848,61 @@ class TestPool:
         _, arena = _arena(_Fuzzer())
         assert "field" not in arena.pool()
 
+    def test_effector_joins_only_while_a_map_exists(self):
+        arm, box = _effector(ready=False)
+        _, arena = _arena(effector=arm)
+        assert "effector" not in arena.pool()
+        box["ready"] = True
+        assert "effector" in arena.pool()
+
+    def test_token_joins_only_while_the_dictionary_is_non_empty(self):
+        arm, box = _token(tokens=())
+        _, arena = _arena(token=arm)
+        assert "token" not in arena.pool()
+        box["t"].append(b"IHDR")
+        assert "token" in arena.pool()
+
+    def test_chunk_joins_after_the_first_parsed_seed(self):
+        from fuzzer_tool.core.mutations.png import PngChunk, serialize_png_chunks
+
+        arm = PositionChunkScheduler(RandPool(seed=1))
+        _, arena = _arena(chunk=arm)
+        assert "chunk" not in arena.pool()
+        png = serialize_png_chunks([PngChunk(b"IHDR", bytes(13))])
+        arm.propose(png, len(png))
+        assert "chunk" in arena.pool()
+
+    def test_new_arms_absent_when_not_supplied(self):
+        _, arena = _arena()
+        for name in ("effector", "token", "chunk", "changed", "rare_mask"):
+            assert name not in arena.pool()
+
+    def test_changed_and_rare_mask_join_when_supplied(self):
+        _, arena = _arena(changed=_changed(), rare_mask=_rare_mask())
+        assert {"changed", "rare_mask"} <= set(arena.pool())
+
+    def test_passive_new_arms_are_not_off_policy_extras(self):
+        seen = []
+        eff, _ = _effector()
+        tok, _ = _token()
+        chk = PositionChunkScheduler(RandPool(seed=1))
+        for arm in (eff, tok, chk):
+            arm.record = lambda *a, **k: seen.append(a)
+        _, arena = _arena(effector=eff, token=tok, chunk=chk)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert seen == []
+
+    def test_effector_serves_a_live_offset(self):
+        class _NoEscape:
+            random = staticmethod(lambda: 0.99)
+            randint = staticmethod(lambda a, b: a)
+
+        arm = PositionEffectorScheduler(_NoEscape(), live_of=lambda d: [40], ready=lambda: True)
+        f, arena = _arena(effector=arm)
+        _force(f, "effector")
+        assert arena.select(SEED, len(SEED)) == 40
+        assert arena.used() == ["effector"]
+
     def test_every_pool_name_is_registered(self):
         f = _Fuzzer(
             sensitivity=True, te=True, mi=True, region=True, field=True, cmplog=True, lineage=True
@@ -813,6 +910,11 @@ class TestPool:
         f._crash_mi = SimpleNamespace(
             total_execs=9, min_observations=1, weighted_position=lambda n: 1
         )
+        from fuzzer_tool.core.mutations.png import PngChunk, serialize_png_chunks
+
+        chunk = PositionChunkScheduler(RandPool(seed=1))
+        png = serialize_png_chunks([PngChunk(b"IHDR", bytes(13))])
+        chunk.propose(png, len(png))  # a parsed seed turns the gate on
         _, arena = _arena(
             f,
             burn_front=_bf(),
@@ -828,6 +930,11 @@ class TestPool:
             context=PositionContextScheduler(RandPool(seed=1)),
             levy=PositionLevyScheduler(RandPool(seed=1)),
             boundary=PositionBoundaryScheduler(RandPool(seed=1)),
+            effector=_effector()[0],
+            token=_token()[0],
+            chunk=chunk,
+            changed=_changed(),
+            rare_mask=_rare_mask(),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -998,6 +1105,20 @@ class TestSettle:
         arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
         assert len(picks) == 1
         assert bnd.propose(seed, len(seed)) == ref.propose(seed, len(seed))
+
+    def test_changed_is_credited_off_policy(self):
+        arm = _changed(moved=False)
+        f, arena = self._played(changed=arm)
+        arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        w = arm.weights(SEED, len(SEED))
+        assert w[100] < w[0]  # an unchanged round marks the byte inert-ish
+
+    def test_rare_mask_is_credited_off_policy(self):
+        arm = _rare_mask(hit=True)
+        f, arena = self._played(rare_mask=arm)
+        arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        w = arm.weights(SEED, len(SEED))
+        assert w[100] > w[0]
 
     def test_levy_is_credited_off_policy(self):
         # The picker was sensitivity, not levy; its anchor still moves.
@@ -1206,6 +1327,18 @@ class TestFuzzerWiring:
         assert params["pos_levy"].default is False
         assert params["pos_boundary"].default is False
 
+    def test_new_arm_flags_are_appended_last(self):
+        import inspect
+
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        params = inspect.signature(Fuzzer.__init__).parameters
+        names = list(params)
+        start = names.index("pos_effector")
+        assert start > names.index("seed_drr_scheduler")  # positional callers unshifted
+        assert names[start : start + 5] == NEW_ARM_FLAGS
+        assert all(params[n].default is False for n in NEW_ARM_FLAGS)
+
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
         import ast
         import inspect
@@ -1233,6 +1366,7 @@ class TestFuzzerWiring:
             "pos_context",
             "pos_levy",
             "pos_boundary",
+            *NEW_ARM_FLAGS,
         }
         for c in calls:
             kw = {k.arg for k in c.keywords}
@@ -1318,6 +1452,49 @@ class TestRealConstruction:
         f = self._build(tmp_path, elo="all", position_arena=True)
         assert isinstance(f._pos_boundary, PositionBoundaryScheduler)
         assert "boundary" in f._position_arena.pool()
+
+    def test_position_arena_implies_the_new_arms(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_effector, PositionEffectorScheduler)
+        assert isinstance(f._pos_token, PositionTokenScheduler)
+        assert isinstance(f._pos_chunk, PositionChunkScheduler)
+        assert isinstance(f._pos_changed, PositionChangedScheduler)
+        assert isinstance(f._pos_rare_mask, PositionRareMaskScheduler)
+        pool = f._position_arena.pool()
+        assert {"changed", "rare_mask"} <= set(pool)
+        # Gated: no drained map, no parsed seed yet; token follows the dictionary.
+        assert not {"effector", "chunk"} & set(pool)
+        assert ("token" in pool) == bool(f.dictionary)
+
+    def test_new_flags_alone_do_not_build_an_arena(self, tmp_path):
+        for i, flag in enumerate(NEW_ARM_FLAGS):
+            (tmp_path / str(i)).mkdir()
+            f = self._build(tmp_path / str(i), **{flag: True})
+            assert getattr(f, "_" + flag) is not None
+            assert f._position_arena is None
+
+    def test_probes_are_silent_without_shm(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        f.shm_cov = None
+        assert f._path_moved(SEED) is None
+        assert f._edge_hit(7) is None
+
+    def test_path_moved_compares_against_the_parent_hash(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        key = f._seed_key(SEED)
+        f._edge_tracker.seed_path_hash[key] = 111
+        f.shm_cov = SimpleNamespace(read_path_hash=lambda: 111)
+        assert f._path_moved(SEED) is False
+        f.shm_cov = SimpleNamespace(read_path_hash=lambda: 222)
+        assert f._path_moved(SEED) is True
+        f.shm_cov = SimpleNamespace(read_path_hash=lambda: 0)  # shim without the hash
+        assert f._path_moved(SEED) is None
+
+    def test_edge_hit_reads_this_exec(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        f.shm_cov = SimpleNamespace(has_edge=lambda e: e in {7, 9})
+        assert f._edge_hit(7) is True
+        assert f._edge_hit(8) is False
 
     def test_pos_boundary_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, pos_boundary=True)
@@ -1488,6 +1665,8 @@ class TestRealConstruction:
         assert args.pos_context is True
         assert args.pos_levy is True
         assert args.pos_boundary is True
+        for flag in NEW_ARM_FLAGS:
+            assert getattr(args, flag) is True, flag
         assert args.lineage is True  # the lineage arm needs the metadata it records
         assert args.elo == "all"  # the arena needs it; hail-mary sets it
 

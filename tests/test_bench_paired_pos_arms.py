@@ -121,7 +121,18 @@ def test_arena_arms_do_not_turn_on_other_position_flags(monkeypatch):
     # also set them, or the arm stops being the only variable.
     for arm in POSITION_ARENA_ARMS:
         args = _parse(monkeypatch, ARMS[arm])
-        for dest in ("pos_fractal", "pos_levy", "pos_kl_ducb", "burn_front", "pos_context", "pos_boundary"):
+        for dest in (
+            "pos_fractal",
+            "pos_levy",
+            "pos_kl_ducb",
+            "burn_front",
+            "pos_context",
+            "pos_boundary",
+            "pos_token",
+            "pos_chunk",
+            "pos_changed",
+            "pos_rare_mask",
+        ):
             assert getattr(args, dest) is False, (arm, dest)
 
 
@@ -130,4 +141,4 @@ def test_arena_testable_arms_need_no_extra_feature_flag():
 
     assert set(ARENA_TESTABLE) <= set(POSITION_STRATEGY_NAMES)
     # gated on their own feature, so they cannot be A/B'd by subset alone
-    assert not {"cmplog", "lineage"} & set(ARENA_TESTABLE)
+    assert not {"cmplog", "lineage", "effector"} & set(ARENA_TESTABLE)

@@ -100,7 +100,8 @@ def test_target_schedule_appended_last():
     import inspect
 
     params = list(inspect.signature(Fuzzer.__init__).parameters)
-    assert params[-1] == "seed_drr_scheduler"
+    # Appended block: every later flag follows it (the last one moves on each append).
+    assert params.index("target_schedule") < params.index("seed_drr_scheduler")
 
 
 def _clocked(f):
