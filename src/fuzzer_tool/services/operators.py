@@ -4237,6 +4237,83 @@ class OperatorEngine:
             return self._op_declined("recompress_gzip", buf)
         return bytearray(out[: self.ctx.max_len])
 
+    def _op_recompress_lz4(self, buf, _byte_idx, _data):
+        """Decode an LZ4 frame, mutate the content, re-encode with valid checksums."""
+        from fuzzer_tool.core.mutations.recompress import recompress_lz4  # noqa: PLC0415
+
+        out = recompress_lz4(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("recompress_lz4", out, buf)
+
+    def _op_recompress_png_idat(self, buf, _byte_idx, _data):
+        """Inflate PNG IDAT, mutate scanlines, re-deflate with fresh Adler/CRC."""
+        from fuzzer_tool.core.mutations.recompress import recompress_idat  # noqa: PLC0415
+
+        out = recompress_idat(bytes(buf), max_len=self._max_len(), rng=self.ctx._rng)
+        return self._or_declined("recompress_png_idat", out, buf)
+
+    # ── Token-level text formats (core/mutations/{json_struct,sql_text}) ──
+
+    def _op_json_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.json_struct import json_mutate  # noqa: PLC0415
+
+        out = json_mutate(bytes(buf), self.ctx._rng, self._max_len())
+        return self._or_declined("json_mutate", out, buf)
+
+    def _op_sql_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.sql_text import sql_mutate  # noqa: PLC0415
+
+        out = sql_mutate(bytes(buf), self.ctx._rng, self._max_len())
+        return self._or_declined("sql_mutate", out, buf)
+
+    def _op_ecdsa_field_mutate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.secp_fields import ecdsa_field_mutate  # noqa: PLC0415
+
+        out = ecdsa_field_mutate(bytes(buf), self.ctx._rng, self._max_len())
+        return self._or_declined("ecdsa_field_mutate", out, buf)
+
+    # ── Text-layer decoders (core/mutations/text_codec, tree_mutator) ──
+    # byte_idx anchors the edit so the published mutation offset stays true.
+
+    def _op_encoding_wrap(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.text_codec import encoding_wrap  # noqa: PLC0415
+
+        out = encoding_wrap(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
+        return self._or_declined("encoding_wrap", out, buf)
+
+    def _op_escape_mutate(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.text_codec import escape_mutate  # noqa: PLC0415
+
+        out = escape_mutate(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
+        return self._or_declined("escape_mutate", out, buf)
+
+    def _op_ascii_float(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.text_codec import ascii_float  # noqa: PLC0415
+
+        out = ascii_float(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
+        return self._or_declined("ascii_float", out, buf)
+
+    def _op_utf16_transcode(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.text_codec import utf16_transcode  # noqa: PLC0415
+
+        out = utf16_transcode(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
+        return self._or_declined("utf16_transcode", out, buf)
+
+    def _op_nest_bomb(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.tree_mutator import nest_bomb  # noqa: PLC0415
+
+        out = nest_bomb(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
+        return self._or_declined("nest_bomb", out, buf)
+
+    def _max_len(self) -> int:
+        """Output ceiling; an unset max_len means the engine-wide 64 KiB."""
+        return self.ctx.max_len or 65536
+
+    def _or_declined(self, op: str, out, buf):
+        """Wrap a module result: None becomes a recorded decline."""
+        if out is None:
+            return self._op_declined(op, buf)
+        return bytearray(out)
+
     def _op_deflate_struct_mutate(self, buf, byte_idx, data):
         """Mutate the DEFLATE bitstream's own structure inside a zlib/gzip
         container -- block headers, the dynamic-Huffman code tables, and
