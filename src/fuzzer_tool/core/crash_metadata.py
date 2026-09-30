@@ -126,6 +126,12 @@ class CrashMetadata:
     field_format: str = ""
     fields: list[dict] = field(default_factory=list)
 
+    # Fields (name -> value) the crash needs, from FIC replay over the field
+    # map (--isolate-crash-fields; services.crash_isolate). Empty + a status
+    # string when nothing was isolated or the pass did not run.
+    failure_schema: dict[str, int] = field(default_factory=dict)
+    failure_schema_status: str = ""
+
     # Register state (ptrace)
     rip: int = 0
     rsp: int = 0
@@ -209,6 +215,11 @@ class CrashMetadata:
 
         if self.fields:
             lines.extend(self._format_fields())
+            lines.append("")
+
+        if self.failure_schema_status:
+            lines.append(f"=== failure-inducing fields ({self.failure_schema_status}) ===")
+            lines.extend(f"  {k} = {v} (0x{v:x})" for k, v in self.failure_schema.items())
             lines.append("")
 
         # Raw stderr (ASAN diagnostics with file:line), input hexdump, input text
@@ -405,6 +416,8 @@ class CrashMetadata:
             "baseline": {"source": self.baseline_source, "hash": self.baseline_hash},
             "field_format": self.field_format,
             "fields": list(self.fields),
+            "failure_schema": dict(self.failure_schema),
+            "failure_schema_status": self.failure_schema_status,
             "raw_stderr": self.raw_stderr,
             "input_hexdump": self.input_hexdump,
             "input_text_repr": self.input_text_repr,

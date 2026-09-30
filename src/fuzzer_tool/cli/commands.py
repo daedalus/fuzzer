@@ -789,6 +789,7 @@ def cmd_fuzz(args):
         qea_cooling_decay=getattr(args, "qea_cooling_decay", 0.98),
         qea_cooling_min_angle=getattr(args, "qea_cooling_min_angle", 0.005),
         continue_until_crash=getattr(args, "continue_until_crash", False),
+        isolate_crash_fields=getattr(args, "isolate_crash_fields", False),
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
         stall_release_edges=getattr(args, "stall_release_edges", 1),
@@ -1941,6 +1942,7 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py.
 _HAIL_MARY_FLAGS = (
     "continue_until_crash",
+    "isolate_crash_fields",
     "deep_coverage",
     "ptrace",
     "adaptive_timeout",
@@ -2176,6 +2178,13 @@ def main() -> int:
         "--continue-until-crash",
         action="store_true",
         help="Ignore -n, fuzz until the first crash is found",
+    )
+    fuzz_parser.add_argument(
+        "--isolate-crash-fields",
+        action="store_true",
+        help="For each novel crash, replay the target (<= 64 execs) to isolate which "
+        "recognised header fields (PNG, gzip, ...) the crash needs; recorded in the "
+        "crash sidecar as failure_schema. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--hail-mary",

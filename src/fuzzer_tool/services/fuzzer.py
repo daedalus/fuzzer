@@ -1335,6 +1335,7 @@ class Fuzzer:
         map_size=0,
         max_collision_risk=30,
         continue_until_crash=False,
+        isolate_crash_fields=False,
         multi_targets=None,
         debug=False,
         enable_regex_bomb=False,
@@ -1604,6 +1605,7 @@ class Fuzzer:
         self.use_coverage = use_coverage
         self.dictionary = dictionary or []
         self.file_mode = file_mode
+        self.isolate_crash_fields = isolate_crash_fields
         self.target_args = target_args or []
         self.max_corpus = max_corpus
         self.max_corpus_bytes = max_corpus_bytes

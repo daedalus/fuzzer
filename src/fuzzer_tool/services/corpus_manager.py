@@ -836,6 +836,13 @@ class CorpusManager:
         except Exception:
             log.warning("crash field explanation failed", exc_info=True)
 
+        # Which of those fields the crash needs (FIC replay, <= 64 execs, novel
+        # crashes only). Opt-in; isolate_for_fuzzer swallows its own errors.
+        if getattr(f, "isolate_crash_fields", False):
+            from fuzzer_tool.services.crash_isolate import isolate_for_fuzzer
+
+            isolate_for_fuzzer(f, meta, data, returncode)
+
         # Populate error_type from return code for subprocess/inprocess
         # mode where ptrace isn't available and sanitizer reports are absent.
         if not meta.error_type:
