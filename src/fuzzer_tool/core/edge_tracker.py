@@ -907,7 +907,7 @@ class EdgeTracker:
             hit_counts: Optional {edge_id: count} map. When provided (e.g. sparse
                 SHM entries with 32-bit saturating counters) these are used for
                 hit-count diversity scoring. Defaults to count=1 per edge.
-            stack_depth: Max stack depth in bytes (from __sancov_lowest_stack).
+            stack_depth: Max stack depth in bytes (from the shim's frame sampling).
             path_hash: Rolling 64-bit path hash from edge IDs.
             hw_instructions: Hardware instruction count delta (from perf_event_open).
             hw_branches: Hardware branch count delta (from perf_event_open).

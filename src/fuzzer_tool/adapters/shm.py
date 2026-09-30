@@ -684,8 +684,9 @@ class ShmCoverage:
     def read_stack_depth(self) -> int:
         """Read the stack depth value from the SHM front header (offset 0).
 
-        The C shim writes the max stack depth (in bytes) here when
-        __sancov_lowest_stack is available. Returns 0 when unavailable.
+        The C shim writes the max stack depth (in bytes) here from the
+        frame address at each edge callback. Returns 0 for builds with no
+        per-edge callback (inline-8bit-counters, inline-bool-flag).
         """
         return ctypes.c_uint32.from_address(self._ptr).value
 

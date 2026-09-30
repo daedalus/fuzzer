@@ -567,6 +567,7 @@ static inline void __afl_note_drop(void) {
 /* Per-iteration state */
 static uint64_t  __afl_path_hash_acc = 0;       /* rolling path hash accumulator */
 static uint32_t  __afl_max_stack_depth = 0;     /* max stack depth this iteration */
+static uintptr_t __afl_stack_base = 0;          /* frame address of first sample this iteration */
 static uint64_t  __afl_iter_edge_count = 0;     /* new-slot insertions this iteration */
 static uint64_t  __afl_total_edge_count = 0;    /* cumulative, never reset across iterations */
 static uint8_t   __afl_generation = 0;          /* generation counter for tag-based reset */
@@ -1097,9 +1098,48 @@ static inline void __afl_map_id(uint32_t edge_id) {
     __afl_probe_insert(edge_id, pos, window, gen);
 }
 
+/* ── Stack depth ──────────────────────────────────────────────────────
+ *
+ * The first coverage point after a reset pins the base frame; later ones
+ * measure how far below it they sit:
+ *
+ *     high  | base        <- first sample            depth = base - fp
+ *           | ...
+ *     low   | fp          <- deepest sample so far   (stack grows down)
+ *
+ * Frame addresses instead of -fsanitize-coverage=stack-depth: the runtimes
+ * own __sancov_lowest_stack, so no build flag or link change is needed.
+ * Samples at or above the base, or more than __AFL_STACK_WINDOW below it,
+ * belong to another thread's stack and are ignored. Published live, like
+ * path_hash, so a one-shot run that never calls __afl_map_reset still
+ * reports it. Inline-8bit-counters/bool-flag builds have no per-edge
+ * callback and report 0. */
+#ifndef __AFL_STACK_WINDOW
+#  define __AFL_STACK_WINDOW ((uintptr_t)1 << 26)  /* 64 MiB */
+#endif
+
+__attribute__((always_inline))
+static inline void __afl_note_stack(void) {
+    uintptr_t fp = (uintptr_t)__builtin_frame_address(0);
+
+    if (!__afl_stack_base) {
+        __afl_stack_base = fp;
+        if (__afl_stack_depth) *__afl_stack_depth = 0;
+        return;
+    }
+    if (fp >= __afl_stack_base) return;
+
+    uintptr_t depth = __afl_stack_base - fp;
+    if (depth > __AFL_STACK_WINDOW || depth <= __afl_max_stack_depth) return;
+
+    __afl_max_stack_depth = (uint32_t)depth;
+    if (__afl_stack_depth) *__afl_stack_depth = __afl_max_stack_depth;
+}
+
 __attribute__((visibility("default"), always_inline))
 static inline void __afl_map_loc(uint32_t cur_loc) {
     if (!__afl_area) return;
+    __afl_note_stack();
 
     /* COMPCOV on: clear bit 31 of the hash, then carry bit 31 over from
      * cur_loc. Real callers never set it, so their ids never carry it; the one
@@ -1733,6 +1773,7 @@ void __afl_map_reset(void) {
 #endif
     __afl_path_hash_acc = 0;
     __afl_max_stack_depth = 0;
+    __afl_stack_base = 0;
     __afl_iter_edge_count = 0;
 #if __AFL_DISTANCE_MODE
     __afl_dist_sum = 0;

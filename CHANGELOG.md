@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Stack depth was always 0** (`adapters/afl_shim.c`): `__afl_max_stack_depth` was reset and copied to SHM offset 0 but never assigned, so `read_stack_depth()` returned 0 and the stack-depth boost in `core/schedules.py` never fired. The shim now samples the frame address in `__afl_map_loc` (base = first sample after reset, live write). Tests: `tests/test_shim_stack_depth.py`. Per-edge cost unmeasured; boost effect on discovery untested.
+
 ### Tests
 
 - **Field isolation validated on a real crashing target** (`tests/test_isolate_fields_proto_target.py`): builds `targets/proto_target.c` with ASAN and checks `isolate_fields_failure` / `root_cause --isolate-fields` return exactly the header fields each of its four crashes needs (null deref, heap overflow, stack overflow, abort), excluding irrelevant fields. Skips without gcc/ASAN.
