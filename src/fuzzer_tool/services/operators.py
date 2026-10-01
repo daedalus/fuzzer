@@ -652,6 +652,7 @@ _FALLBACK_PRECEDENCE = (
     "bayes_ucb",
     "fpl",
     "successive_elim",
+    "las_vegas",
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
     # op_tpe, op_strata, op_stride, op_p2c, gradient, whittle, corral, softmax, topk are deliberately absent
@@ -5195,6 +5196,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "successive_elim" and f._successive_elim:
             op = f._successive_elim.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "las_vegas" and f._las_vegas:
+            op = f._las_vegas.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "corral" and f._corral:
             op = f._corral.select_op(ops)

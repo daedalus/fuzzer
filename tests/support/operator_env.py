@@ -72,6 +72,7 @@ BALLOT_SCHEDULERS = (
     "tang",
     "topk",
     "whittle",
+    "las_vegas",
 )
 
 

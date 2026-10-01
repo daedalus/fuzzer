@@ -84,6 +84,7 @@ from fuzzer_tool.core.schedulers import (
     HierarchicalBanditScheduler,
     KL_DUCBScheduler,
     KL_SWUCBScheduler,
+    LasVegasScheduler,
     MonteCarloScheduler,
     MOptScheduler,
     MOSSScheduler,
@@ -171,6 +172,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "invasion",
     "round_robin",
     "canary",
+    "las_vegas",
 )
 _SEED_STRATEGY_NAMES = (
     "ga",
@@ -1437,6 +1439,11 @@ class Fuzzer:
         successive_elim_delta=0.1,
         successive_elim_min_pulls=3,
         successive_elim_reopen=0,
+        # Las Vegas bandit: confidence-bound elimination with guaranteed convergence.
+        las_vegas=False,
+        las_vegas_delta=0.05,
+        las_vegas_min_pulls=3,
+        las_vegas_reopen=0,
         kruskal_count=False,
         # Byte-entropy seed arms (see handover_entropy_seed_schedulers).
         entropy_kl=False,
@@ -3199,6 +3206,23 @@ class Fuzzer:
                 successive_elim_reopen,
             )
 
+        # Las Vegas bandit: confidence-bound elimination with guaranteed convergence
+        self._use_las_vegas = las_vegas
+        self._las_vegas = None
+        if las_vegas:
+            self._las_vegas = LasVegasScheduler(
+                delta=las_vegas_delta,
+                min_pulls=las_vegas_min_pulls,
+                reopen_interval=las_vegas_reopen,
+                rng=self._rng,
+            )
+            log.info(
+                "Las Vegas enabled (delta=%.3f, min_pulls=%d, reopen=%d)",
+                las_vegas_delta,
+                las_vegas_min_pulls,
+                las_vegas_reopen,
+            )
+
         # Katz centrality over the operator discovery-transition graph.
         # Off by default: see core/schedulers/op_katz.py's module docstring
         # for the empirical caveat before enabling this on a real campaign.
@@ -3859,6 +3883,8 @@ class Fuzzer:
             _register_arms(self._whittle)
         if self._successive_elim:
             _register_arms(self._successive_elim)
+        if self._las_vegas:
+            _register_arms(self._las_vegas, _format_priors)
         if self._op_kuramoto:
             _register_arms(self._op_kuramoto)
         if self._consolidated:

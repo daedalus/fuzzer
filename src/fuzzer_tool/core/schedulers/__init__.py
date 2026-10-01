@@ -21,6 +21,7 @@ from fuzzer_tool.core.schedulers.op_gradient import GradientBanditScheduler
 from fuzzer_tool.core.schedulers.op_hierarchical import HierarchicalBanditScheduler
 from fuzzer_tool.core.schedulers.op_kl_ducb import KL_DUCBScheduler
 from fuzzer_tool.core.schedulers.op_kl_swucb import KL_SWUCBScheduler
+from fuzzer_tool.core.schedulers.op_las_vegas import LasVegasScheduler
 from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
 from fuzzer_tool.core.schedulers.op_mopt import MOptScheduler
 from fuzzer_tool.core.schedulers.op_moss import MOSSScheduler
@@ -54,6 +55,7 @@ __all__ = [
     "EpsilonGreedyScheduler",
     "GradientBanditScheduler",
     "HierarchicalBanditScheduler",
+    "LasVegasScheduler",
     "BOGPUCBScheduler",
     "GPUCBScheduler",
     "MCTSSeedScheduler",

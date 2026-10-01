@@ -455,6 +455,7 @@ def cmd_fuzz(args):
         args.whittle = True
         args.corral = True
         args.successive_elim = True
+        args.las_vegas = True
         args.canary_scheduler = True
         args.consolidated = True
         args.moss = True
@@ -696,6 +697,10 @@ def cmd_fuzz(args):
         successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
         successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
         successive_elim_reopen=getattr(args, "successive_elim_reopen", 0),
+        las_vegas=getattr(args, "las_vegas", False),
+        las_vegas_delta=getattr(args, "las_vegas_delta", 0.05),
+        las_vegas_min_pulls=getattr(args, "las_vegas_min_pulls", 3),
+        las_vegas_reopen=getattr(args, "las_vegas_reopen", 0),
         op_katz=getattr(args, "op_katz", False),
         op_katz_alpha_fraction=getattr(args, "op_katz_alpha_fraction", 0.85),
         op_kuramoto=getattr(args, "op_kuramoto", False),
@@ -2036,6 +2041,7 @@ _HAIL_MARY_FLAGS = (
     "gradient",
     "whittle",
     "successive_elim",
+    "las_vegas",
     "canary_scheduler",
     "seed_canary_scheduler",
     "seed_round_robin_scheduler",
@@ -3235,6 +3241,30 @@ def main() -> int:
     )
     fuzz_parser.add_argument(
         "--successive-elim-reopen",
+        type=int,
+        default=0,
+        help="Re-admit eliminated arms every N pulls; 0 = never (default: 0)",
+    )
+    fuzz_parser.add_argument(
+        "--las-vegas",
+        action="store_true",
+        default=False,
+        help="Enable Las Vegas bandit scheduler with confidence-bound elimination",
+    )
+    fuzz_parser.add_argument(
+        "--las-vegas-delta",
+        type=float,
+        default=0.05,
+        help="Failure probability for Hoeffding bounds (default: 0.05 = 95% confidence)",
+    )
+    fuzz_parser.add_argument(
+        "--las-vegas-min-pulls",
+        type=int,
+        default=3,
+        help="Minimum pulls before an arm is eligible for elimination (default: 3)",
+    )
+    fuzz_parser.add_argument(
+        "--las-vegas-reopen",
         type=int,
         default=0,
         help="Re-admit eliminated arms every N pulls; 0 = never (default: 0)",
