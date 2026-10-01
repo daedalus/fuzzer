@@ -282,6 +282,34 @@ class TestFuzzer:
         for arm in f._seed_os_arms:
             assert arm.bandit_stats() == {key: (1.0, 0.0)}
 
+    def test_regression_parent_replaced_in_place_not_recorded(self, tmp_path):
+        """Falsification (PR #47 review): same-length in-place replacement retires the parent."""
+        kwargs = {kw: True for kw, _a, _c in SEED_ARMS.values()}
+        f = _real_fuzzer(tmp_path, **kwargs)
+        f.corpus.append(SEED_A)
+        f._record_seed_os_arms(SEED_A, success=True, weight=1.0)
+
+        f.corpus[f.corpus.index(SEED_A)] = SEED_B
+        f._record_seed_os_arms(SEED_A, success=True, weight=1.0)
+
+        key = f._seed_key(SEED_A)
+        for arm in f._seed_os_arms:
+            assert arm.bandit_stats()[key] == (1.0, 0.0)
+
+    def test_adversarial_parent_kept_across_corpus_rebuild(self, tmp_path):
+        """A rebuilt corpus list that still holds the parent keeps recording it."""
+        kwargs = {kw: True for kw, _a, _c in SEED_ARMS.values()}
+        f = _real_fuzzer(tmp_path, **kwargs)
+        f.corpus.append(SEED_A)
+        f._record_seed_os_arms(SEED_A, success=True, weight=1.0)
+
+        f.corpus = [SEED_C, SEED_A]
+        f._record_seed_os_arms(SEED_A, success=True, weight=1.0)
+
+        key = f._seed_key(SEED_A)
+        for arm in f._seed_os_arms:
+            assert arm.bandit_stats()[key] == (2.0, 0.0)
+
     def test_op_arms_get_priors_registration_and_records(self):
         """The op arms sit in _register_arms and in fuzz_one's shared record loop."""
         from fuzzer_tool.services import fuzzer as fz

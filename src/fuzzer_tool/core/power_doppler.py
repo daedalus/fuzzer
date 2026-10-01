@@ -40,7 +40,8 @@ DEFAULT_MAX_EDGES = 2048
 DEFAULT_MAX_SCORES = 4096
 # Flow-edge ids kept across all scores: 8 B each bounds them at 8 MiB.
 DEFAULT_MAX_FLOW_IDS = 1 << 20
-# Open frame untouched for this many full frames of samples is abandoned.
+# Open frame untouched for this many full frames of samples is abandoned
+# (initial horizon; doubles whenever a dropped seed comes back).
 STALE_FRAMES = 4
 # CFAR false-alarm probability per edge.
 FALSE_ALARM = 1e-3
@@ -235,6 +236,8 @@ class PowerDoppler:
         self._max_scores = max_scores
         self._max_flow_ids = max_flow_ids
         self._stale_after = max_seeds * ensemble * STALE_FRAMES
+        # Keys whose frames were dropped as abandoned; bounded like _open.
+        self._dropped_keys: LRUCache = LRUCache(max_seeds)
         # Insertion order is recency order; capacity is enforced by hand
         # (_admit, _trim) so evicted frames can be scored / ids uncounted.
         self._open: dict[str, _Ensemble] = {}
@@ -257,6 +260,7 @@ class PowerDoppler:
         self._ticks += 1
         ens = self._open.pop(seed_key, None)
         if ens is None:
+            self._revisit(seed_key)
             ens = self._admit()
         if ens is None:
             self._refused += 1
@@ -279,6 +283,19 @@ class PowerDoppler:
         del self._open[seed_key]
         self._close(seed_key, ens)
 
+    def _revisit(self, seed_key: str) -> None:
+        """A dropped seed came back: it was slow, not gone. Widen the horizon.
+
+        A fixed horizon thrashes once the corpus cycle outlasts it, e.g. 13
+        seeds in turn vs a 12-tick horizon: every frame is dropped one tick
+        before its seed returns. Doubling converges past the revisit time.
+        """
+        if seed_key not in self._dropped_keys:
+            return
+
+        del self._dropped_keys[seed_key]
+        self._stale_after *= 2
+
     def _admit(self) -> _Ensemble | None:
         """Fresh frame if a slot is free or the oldest frame is abandoned.
 
@@ -294,6 +311,7 @@ class PowerDoppler:
 
             # Abandoned: score what it has rather than throw it away.
             del self._open[key]
+            self._dropped_keys[key] = True
             if old.n >= _MIN_ENSEMBLE:
                 self._close(key, old)
         return _Ensemble(self._ensemble, self._max_edges)
@@ -356,5 +374,6 @@ class PowerDoppler:
             "dropped_edges": self._dropped,
             "refused": self._refused,
             "flow_ids": self._flow_ids,
+            "stale_after": self._stale_after,
             "max_power": self._peak(),
         }

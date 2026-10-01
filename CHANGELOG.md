@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Doppler horizon thrashed on slow corpus cycles** (`core/power_doppler.py`): a cycle longer than the fixed abandon horizon dropped every frame one tick before its seed returned. The horizon now doubles when a dropped seed comes back.
+- **Stale corpus-membership memo** (`services/fuzzer.py`): keyed on corpus length, so an in-place trim of the parent kept a "member" verdict. Hits are now re-validated by slot identity; misses are not memoized.
+
 - **`--mod-solving trace` clobbered `targets`** (`services/fuzzer.py`): the trace block reassigned the directed-targets parameter, disabling the Katz channel and directing at the fuzz target. Renamed the local.
 - **Doppler never scored corpora > 64 seeds picked in turn** (`core/power_doppler.py`): LRU evicted every partial frame. New seeds now wait for a slot; abandoned frames are scored early and freed. Flow-edge ids are int64 arrays under a global cap (frozensets could reach hundreds of MiB).
 - **Doppler mixed targets' edges** (`services/fuzzer.py`): multi-target frames are keyed per target. Without SHM, `--schedule doppler` now falls back to `base` with a warning instead of reporting enabled.
