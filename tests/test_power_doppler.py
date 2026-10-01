@@ -214,10 +214,24 @@ class TestPowerDoppler:
 
         assert pd.stats()["ensembles"] > 0
 
+    def test_regression_many_returns_do_not_compound_horizon(self):
+        # Falsification (PR #48 review): every returning dropped key doubled
+        # one shared horizon, so N returns inflated it by 2^N and abandonment
+        # never fired again. It must track the revisit gap, not the count.
+        cap, ens, n_seeds = 4, 3, 200
+        pd = PowerDoppler(ensemble=ens, max_seeds=cap)
+        ids = list(range(PATH))
+        for _ in range(ens * 6):
+            for k in range(n_seeds):
+                _feed(pd, f"s{k}", _static(n=1), ids)
+
+        assert pd.stats()["stale_after"] <= 4 * n_seeds
+        assert pd.stats()["ensembles"] > 0
+
     def test_adversarial_abandoned_keys_do_not_grow_horizon(self):
         # Keys that never return keep the horizon; the dropped-key memory stays bounded.
         cap = 2
-        pd = PowerDoppler(ensemble=N, max_seeds=cap)
+        pd = PowerDoppler(ensemble=N, max_seeds=cap, max_dropped=cap)
         horizon = pd.stats()["stale_after"]
         ids = list(range(PATH))
         for k in range(cap * 8):
@@ -269,6 +283,8 @@ class TestPowerDoppler:
             PowerDoppler(max_edges=0)
         with pytest.raises(ValueError):
             PowerDoppler(max_flow_ids=-1)
+        with pytest.raises(ValueError):
+            PowerDoppler(max_dropped=0)
 
 
 class TestDopplerSchedule:
