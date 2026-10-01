@@ -14,6 +14,7 @@ from pathlib import Path
 from fuzzer_tool.core.analyzers.analyzer_elo import Arena, strategy_arena, strategy_display_name
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.pool_drift import PoolDrift
+from fuzzer_tool.core.shim_health import Attach, health_issues
 from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.core.temporal_join import join_streams
 from fuzzer_tool.core.zipf import HeapsFit, TailLaw, ZipfFit
@@ -165,6 +166,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_crash_rate_trend(fuzzer))
     sections.append(_disk_footprint(corpus_dir))
     sections.append(_edge_map_analysis(fuzzer))
+    sections.append(_shim_health(fuzzer))
     return "\n".join(s for s in sections if s)
 
 
@@ -1676,6 +1678,20 @@ def _edge_map_analysis(f) -> str:
         lines.append(f"    0x{s:04x}-0x{e:04x}: {filled}/{span} bytes ({pct:.1f}% filled)")
 
     return "\n".join(lines)
+
+
+def _shim_health(f) -> str:
+    """Failures the shim survived silently; empty when healthy or unreadable."""
+    runner = getattr(f, "_inprocess_runner", None)
+    counters = runner.shim_health() if runner is not None else None
+    if counters is None:
+        return ""
+
+    attach = Attach.EXPECTED if getattr(f, "use_coverage", False) else Attach.NOT_EXPECTED
+    issues = health_issues(counters, attach)
+    if not issues:
+        return ""
+    return "\n".join(["", "--- Shim Health ---", *(f"  [!] {x}" for x in issues)])
 
 
 def _runtime_performance(f) -> str:

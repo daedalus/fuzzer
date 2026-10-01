@@ -898,7 +898,17 @@ Automatically detects ASAN-instrumented targets by checking for `__asan_init` sy
 **Layer 2 resolved**: ASAN-generated crash reports are captured via stderr pipe redirection in direct_lite mode, with `halt_on_error=0` preventing ASAN from aborting the process. The existing `SanitizerReport.parse()` pipeline detects crashes from the captured ASAN report text. This is enabled automatically for all ASAN-instrumented `.so` targets.
 
 ### AFL shim crash handlers (`afl_shim.c`)
-The coverage shim compiled into every fuzz target now installs C-level signal handlers for `SIGSEGV` and `SIGABRT` that call `_exit(128 + sig)`. This ensures the process exits with a meaningful signal-indicating exit code when the target crashes, even when Python-level signal handlers cannot fire (e.g. during a `ctypes` call). The persistent subprocess loader detects these exit codes and converts them to negative signal codes (`-6` for SIGABRT, `-11` for SIGSEGV), enabling proper crash reporting in all execution modes.
+`__afl_auto_init` hooks `SIGSEGV SIGABRT SIGFPE SIGBUS SIGILL SIGSYS` (not `SIGPIPE`). Every crash flushes cmplog and folds inline counters first. Inside `__afl_guarded_call` the handler `siglongjmp`s back and the call returns `-sig`. Outside it (one-shot, forkserver, a ctypes host after the call returned) the handler restores the previous dispositions and hands the signal back: hardware faults re-execute with their real `si_addr`, sent signals are re-raised. So a sanitizer runtime still prints its report, `SIGFPE` stays `SIGFPE`, and Python keeps `SIGPIPE` ignored. The next guarded call re-installs the handlers. Marker: `__afl_scoped_crash_handler`. Tests: `tests/test_regression_shim_audit.py`.
+
+### Shim health checks
+Failures the shim survives but the fuzzer cannot otherwise see.
+
+| Check | Source | Surfaced |
+|---|---|---|
+| Stale shim (no `__afl_scoped_crash_handler`) | `core/elf.py::detect_scoped_crash_handler` | startup warning (`Fuzzer._warn_stale_shim`) |
+| Runtime counters | `__afl_shim_health(uint64_t *out, uint32_t n)` → `adapters/inprocess.py::read_shim_health` | `--- Shim Health ---` report section (in-process runs, only when an issue exists) |
+
+Counters (`core/shim_health.py::ShimField`, append-only ABI): `ATTACHED`, `MAP_ENTRIES`, `SEG_REJECTED` (bad `AFL_MAP_SIZE`, segment smaller than header + table + tail, distance/node header overrunning its segment; each also logged to stderr or refused), `CMPLOG_DROPPED` (record lost to writer contention or a failed write; the record buffer is guarded by a non-blocking try-lock), `STRAY_SIGNALS`. Tests: `tests/test_shim_health.py`.
 
 ### Hybrid abort interception
 In non-ASAN builds, `afl_shim.c` intercepts `abort()` calls via a preprocessor macro, redirecting them to a static helper that writes `[shim] abort() intercepted` to stderr and returns (instead of killing the process). This prevents false crash detections from library assertion failures (e.g. FFmpeg's ~1600 `av_assert0` call sites). In ASAN builds (`__SANITIZE_ADDRESS__`), the override is excluded so `abort()` raises `SIGABRT`, which the signal handler chains to ASAN's own handler — letting ASAN produce diagnostic output before termination. The macro approach avoids the GCC "noreturn function does return" warning by never re-declaring `abort()` directly, and works correctly in both standalone binary and `.so` (ctypes/in-process) contexts.

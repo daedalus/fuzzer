@@ -80,7 +80,7 @@ digraph fuzzer_tool {
         color="#d9c2c2"; fillcolor="#fbf4f4"; fontcolor="#7a4a4a";
         runner [label="services/runner.py  +  adapters/\lforkserver · process · inprocess\lpersistent_signal · network · ptrace\l",
                 fillcolor="#f2dcdc", fontcolor="#5c3232"];
-        shim [label="adapters/afl_shim.c\ledge map · forkserver\lcmplog interceptors (18 libc + 9 IR)\l",
+        shim [label="adapters/afl_shim.c\ledge map · forkserver\lcmplog interceptors (18 libc + 9 IR)\lhealth counters (core/shim_health.py)\l",
               fillcolor="#e8c9c9", fontcolor="#5c3232"];
         target [label="TARGET", fillcolor="#5c3232", fontcolor="white",
                 shape=box, style="filled", margin="0.24,0.14"];

@@ -15,15 +15,11 @@ established) exposed a real pre-existing quirk in afl_shim.c's crash
 handler -- __afl_crash_handler always siglongjmp's to __afl_jmp_buf, and
 if nothing has set that buffer up yet (true for main()'s SIGILL/SIGSEGV
 path when nothing calls __afl_guarded_call first) the jump target is
-whatever garbage was last on the stack. Confirmed to be pre-existing and
-not specific to this target: targets/test_target.c's own 'S' trigger
-(a NULL function-pointer call), built and run the same standalone way,
-crashes the same way for the same reason. Documented here rather than
-"fixed" because afl_shim.c is explicitly out of scope for this pass (see
-docs/handover/handover_rust_target_2026-09-15.md) and because it does not
-affect either real execution mode: a subprocess's exit status is a signal
-either way, and __afl_guarded_call is unaffected since it always runs with
-its jmp buf already set up before the target executes.
+whatever garbage was last on the stack. Fixed since (see
+tests/test_regression_shim_audit.py): an unguarded signal now goes back to
+its previous owner. Here that is the sanitizer runtime sancov links in, so
+the subprocess path reports a sanitizer SEGV and exits 1 rather than dying
+by signal -- still a crash by ExecutionRunner.is_crash's rules.
 
 This suite also had a real bug of its own, now fixed: an earlier version
 built targets/rust_target.c with gcc. It linked, ran, and every
@@ -54,6 +50,8 @@ import shutil
 import subprocess
 
 import pytest
+
+from fuzzer_tool.core.sanitizer import SanitizerReport
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CRATE_DIR = os.path.join(ROOT, "rust", "buggy_target")
@@ -202,18 +200,18 @@ def test_subprocess_mode_detects_crash_via_exit_status(rust_target_exe):
 
     No __afl_guarded_call involved here -- this is exactly how
     persistent_subprocess.py's non-persistent fallback and any one-shot
-    execution path observe a crash: os.waitpid() on a child that received
-    a fatal signal. Confirms the crash still surfaces correctly even
-    though (per the module docstring) the *particular* signal number seen
-    by this path can differ from __afl_guarded_call's for the same input,
-    because __afl_crash_handler's siglongjmp has nothing to jump to before
-    main() ever calls __afl_guarded_call itself.
+    execution path observe a crash: a fatal signal in the wait status, or
+    a sanitizer report when a sanitizer runtime owns the signal (see the
+    module docstring).
     """
     proc = subprocess.run(
         [rust_target_exe], input=b"RUSTS", stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
     )
-    assert proc.returncode < 0, "expected the child to die by signal"
+    report = SanitizerReport.parse(proc.stderr.decode(errors="replace"))
+    assert proc.returncode < 0 or (report and report.is_valid()), (
+        "expected a signal death or a sanitizer report"
+    )
 
     proc = subprocess.run(
         [rust_target_exe], input=b"benign, no trigger here",
@@ -448,7 +446,7 @@ def test_asan_catches_small_overflows(rust_target_exe_asan_nightly):
     fully symbolicated "AddressSanitizer: heap-buffer-overflow" report
     pointing at the actual Rust source line — not just a raw crash.
     """
-    for trigger, direction in [(b"RUSTO\x0a", "READ"), (b"RUSTW\x0a", "WRITE")]:
+    for trigger, _direction in [(b"RUSTO\x0a", "READ"), (b"RUSTW\x0a", "WRITE")]:
         proc = subprocess.run(
             [rust_target_exe_asan_nightly], input=trigger, capture_output=True,
         )
