@@ -161,6 +161,7 @@ class FuzzRound:
         self._classify()
         self._scan_coverage()
         self._observe()
+        self._gate_explore()
         self._credit_seed()
         self._feed_models()
         self._record_edges()
@@ -170,6 +171,7 @@ class FuzzRound:
         self._credit_ops()
 
         if self._is_crash:
+            self._queue_variant()
             return self._on_crash()
         if self._admits():
             return self._admit()
@@ -704,6 +706,16 @@ class FuzzRound:
             or (f.pt_cov and f.pt_cov.is_new_coverage())
             or (f.branch_cov and f.branch_cov.is_new_coverage())
         )
+
+    def _gate_explore(self) -> None:
+        # Crash exploration (--crash-explore): the only signal is a crash on
+        # a new crash path. Everything else reads as boring.
+        explorer = self._f._crash_explorer
+        if explorer is None:
+            return
+        self._is_crash = self._is_crash and explorer.observe(self._edges_now())
+        self._is_interesting = self._has_new_coverage = self._is_new_max = False
+        self._is_cmp_progress = self._is_new_valid_coverage = self._is_slow = False
 
     # ── Side signals ─────────────────────────────────────────────────
 
@@ -1672,6 +1684,16 @@ class FuzzRound:
         f._record_fluctuation_observation("crash", f._get_current_edge_set())
         f._maybe_periodic_minimize()
         return True
+
+    def _queue_variant(self) -> None:
+        # Crash exploration: a surviving variant is also a seed, so the next
+        # mutants start from it.
+        f = self._f
+        if f._crash_explorer is None:
+            return
+        before = len(f.corpus)
+        f.save_to_corpus(self._mutated, parent=self._data)
+        f._record_lineage_insert(self._mutated, self._data, before)
 
     def _triage_crash(self) -> None:
         # direct_lite crashes carry no fault address (no ptrace, and the

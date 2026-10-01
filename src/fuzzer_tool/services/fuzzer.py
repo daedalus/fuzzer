@@ -51,6 +51,7 @@ from fuzzer_tool.core.coverage_noise import (
     classify_noise,
     tail_variants,
 )
+from fuzzer_tool.core.crash_explore import CrashExplorer
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.elf import (
     SHM_LAYOUT_CURRENT,
@@ -1145,6 +1146,7 @@ class Fuzzer:
         ecofuzz=False,
         ecofuzz_mc_penalty_multiplier=None,
         metropolis=False,
+        crash_explore=False,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         mc_decay_interval=100,
@@ -2999,6 +3001,8 @@ class Fuzzer:
         self._use_ecofuzz = ecofuzz
         self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
         self._metropolis = metropolis
+        # --crash-explore (AFL -C): keep only crashes on new crash paths.
+        self._crash_explorer = CrashExplorer() if crash_explore else None
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:
@@ -6122,7 +6126,7 @@ class Fuzzer:
             # exactly this case -- so it would be a second real scan on every
             # byteflip. Not worth it to gate one pass; leave the map unfilled.
             return
-        engine.note_deterministic_result(current != baseline)
+        engine.note_deterministic_result(current != baseline, current)
 
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.
@@ -7689,6 +7693,7 @@ class Fuzzer:
             returncode, stderr = self._run_target(seed)
             if self._is_crash(returncode, stderr):
                 self.crash_count += 1
+                self._seed_crash_path()
                 continue
             if returncode == -1:  # timeout sentinel
                 self.timeout_count += 1
@@ -7726,9 +7731,20 @@ class Fuzzer:
                 f"{baseline_edges} baseline edges "
                 f"({time.monotonic() - t0:.2f}s)"
             )
+        explorer = getattr(self, "_crash_explorer", None)
+        if explorer is not None and not explorer.variants:
+            print("[!] --crash-explore: no seed crashed; nothing to explore")
         self._report_comparison_reach(len(self.corpus))
         self._report_edge_id_stability(probe_seed)
         self._report_coverage_noise(probe_seed)
+
+    def _seed_crash_path(self) -> None:
+        """Crash exploration: a crashing seed's path is already explored."""
+        explorer = getattr(self, "_crash_explorer", None)
+        if explorer is None:
+            return
+        _, edge_ids = self.shm_cov.is_new_coverage_with_edges()
+        explorer.observe(edge_ids)
 
     def _report_edge_id_stability(self, seed: bytes | None, n_runs: int = 3) -> None:
         """Say whether edge ids reproduce across processes.

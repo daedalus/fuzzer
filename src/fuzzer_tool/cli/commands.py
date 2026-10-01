@@ -533,6 +533,7 @@ def cmd_fuzz(args):
         ecofuzz=getattr(args, "ecofuzz", False),
         ecofuzz_mc_penalty_multiplier=getattr(args, "ecofuzz_mc_penalty_multiplier", None),
         metropolis=getattr(args, "metropolis", False),
+        crash_explore=getattr(args, "crash_explore", False),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
@@ -4103,6 +4104,14 @@ def main() -> int:
         default=False,
         help="Metropolis corpus admission: accept non-improving inputs with P=exp(-ΔE/T). "
         "Requires --anneal-budget > 0.",
+    )
+    fuzz_parser.add_argument(
+        "--crash-explore",
+        action="store_true",
+        default=False,
+        help="Crash exploration (AFL -C): seed with crashing inputs; keep only "
+        "mutants that still crash on a new path. Compare variants' fault addresses "
+        "to judge exploitability.",
     )
     fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"

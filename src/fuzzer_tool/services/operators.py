@@ -25,6 +25,7 @@ from functools import partial
 import numpy as np
 import xxhash
 
+from fuzzer_tool.core.auto_dict import NO_HASH, harvest_tokens
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cond_stmt import CondState, CondStmt
 from fuzzer_tool.core.crc32 import crc32
@@ -309,6 +310,9 @@ CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
 _DET_EFF_UNKNOWN = 0
 _DET_EFF_INERT = 1
 _DET_EFF_LIVE = 2
+
+# AFL's MAX_AUTO_EXTRAS: total tokens the auto-dictionary may add per run.
+AUTO_DICT_CAP = 500
 # Finished effector maps kept for the position arena's ``effector`` arm
 # (core/schedulers/pos_effector.py), as sorted LIVE offsets per seed key.
 MAX_EFF_SEEDS = 256
@@ -334,10 +338,12 @@ class DeterministicEffectorMap:
     rather than keeping it as evidence.
     """
 
-    __slots__ = ("eff", "pending")
+    __slots__ = ("eff", "hashes", "pending")
 
     def __init__(self, length: int):
         self.eff = bytearray(length)
+        # Path hash per flipped byte, NO_HASH if unchanged: auto-dict input.
+        self.hashes = array("Q", bytes(8 * length))
         self.pending = -1
 
 
@@ -1315,6 +1321,8 @@ class OperatorEngine:
         # mutants and execute only the last, and the ones it drops must be
         # left unprobed rather than silently recorded as inert.
         self._det_pending: tuple[str, int] | None = None
+        # Tokens the auto-dictionary has added this run (bounded by AUTO_DICT_CAP).
+        self._auto_tokens = 0
         # LIVE offsets of drained effector maps, kept for the position arena
         # (see effector_live). ~2k offsets per seed at MAX_DET_MUTATIONS.
         self._det_live: LRUCache = LRUCache(MAX_EFF_SEEDS)
@@ -5622,6 +5630,7 @@ class OperatorEngine:
             done = self._det_eff.pop(seed_key, None)
             if done is not None:
                 self._keep_effector(seed_key, done.eff)
+                self._learn_auto_tokens(data, done.hashes)
             return None
         effector = self._det_eff.get(seed_key)
         if effector is not None and effector.pending >= 0:
@@ -5634,6 +5643,19 @@ class OperatorEngine:
         # numpy beats a bytes.find loop 3x (2 KiB) to 28x (64 KiB, half live).
         idx = np.flatnonzero(np.frombuffer(eff, np.uint8) == _DET_EFF_LIVE)
         self._det_live[seed_key] = array("I", idx.astype(np.uint32).tobytes())
+
+    def _learn_auto_tokens(self, data: bytes, hashes: array) -> None:
+        """Add the drained map's atomic tokens to the dictionary, capped."""
+        f = self.f
+        known = set(f.dictionary)
+        for tok in harvest_tokens(data, hashes):
+            if self._auto_tokens >= AUTO_DICT_CAP:
+                return
+            if tok in known:
+                continue
+            f.dictionary.append(tok)
+            known.add(tok)
+            self._auto_tokens += 1
 
     def effector_live(self, data: bytes) -> array | None:
         """Sorted byteflip-LIVE offsets of *data*, or None before its map drains."""
@@ -5655,7 +5677,7 @@ class OperatorEngine:
         pending = self._det_pending
         return pending[0] if pending is not None else None
 
-    def note_deterministic_result(self, changed: bool) -> None:
+    def note_deterministic_result(self, changed: bool, path_hash: int = NO_HASH) -> None:
         """Record whether the pending byteflip mutant changed the trace.
 
         *changed* is AFL's criterion -- the execution trace differs from the
@@ -5668,6 +5690,8 @@ class OperatorEngine:
         Not calling this at all leaves the position UNKNOWN, which keeps its
         full schedule. Every path that cannot measure the trace takes that
         branch rather than guessing.
+
+        *path_hash* is the changed trace's hash, kept for the auto-dictionary.
         """
         pending = self._det_pending
         self._det_pending = None
@@ -5678,6 +5702,8 @@ class OperatorEngine:
         if effector is None or not 0 <= idx < len(effector.eff):
             return
         effector.eff[idx] = _DET_EFF_LIVE if changed else _DET_EFF_INERT
+        if changed:
+            effector.hashes[idx] = path_hash
 
     def maybe_deterministic_mutation(self, data: bytes) -> bytes | None:
         """Return the next deterministic-stage mutant for *data*, or None.

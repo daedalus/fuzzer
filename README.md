@@ -239,6 +239,7 @@ What the counters buy:
 - Levenshtein crash clustering, stack-hash dedup, exploitability tiers
 - Crash minimization (delta-debugging with signature pinning)
 - Blocklist/allowlist and smaller-crash replacement
+- **Crash exploration** (`--crash-explore`, AFL `-C`): from crashing seeds, keep mutants that still crash on a new path
 - **Root-cause isolation** (`root-cause` subcommand): binary-search the minimal byte diff
   between a passing input and the crashing one, with lineage-guided replay under `--lineage`
 
