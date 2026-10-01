@@ -300,6 +300,11 @@ static int start_forkserver(void) {
            the dlopen() path below enter the forkserver loop and hang the
            loader, and would do the same to every run_executable() child. */
         setenv("__AFL_FORKSRV", "1", 1);
+        /* Resolve every PLT slot once, before the fork loop, so children
+           inherit bound slots instead of each re-resolving lazily. Child
+           only: the fork+exec fallback would pay it on every exec. A
+           caller's own value wins (overwrite = 0). */
+        setenv("LD_BIND_NOW", "1", 0);
         dup2(ctl[0], AFL_FORKSRV_FD);
         dup2(st[1], AFL_FORKSRV_FD + 1);
         close(ctl[0]); close(ctl[1]);

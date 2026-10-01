@@ -1754,6 +1754,7 @@ class FuzzRound:
         f._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
         self._feed_population()
         self._analyze_sensitivity()
+        self._probe_uninit()
         # Coverage-guided trimming: try to minimize inputs that hit new edges
         if self._has_new_coverage and len(mutated) > 10:
             f._trim_new_coverage(mutated, data)
@@ -1764,6 +1765,13 @@ class FuzzRound:
         f._maybe_periodic_minimize(dedup=True)
         f._record_fluctuation_observation("success", f._get_current_edge_set())
         return True
+
+    def _probe_uninit(self) -> None:
+        # --uninit-probe: new coverage is where a fresh decoder path may emit
+        # heap bytes it never wrote. Three extra execs per admission.
+        probe = self._f._uninit_probe
+        if probe is not None:
+            probe.check(self._mutated)
 
     def _last_seed_edges(self) -> int:
         tracker = self._f._edge_tracker

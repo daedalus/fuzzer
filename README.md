@@ -240,6 +240,7 @@ What the counters buy:
 - Crash minimization (delta-debugging with signature pinning)
 - Blocklist/allowlist and smaller-crash replacement
 - **Crash exploration** (`--crash-explore`, AFL `-C`): from crashing seeds, keep mutants that still crash on a new path
+- **Uninitialized-memory probe** (`--uninit-probe`): new corpus entries re-run under two heap fill bytes; fill-dependent output is saved as a leak
 - **Root-cause isolation** (`root-cause` subcommand): binary-search the minimal byte diff
   between a passing input and the crashing one, with lineage-guided replay under `--lineage`
 

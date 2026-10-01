@@ -534,6 +534,7 @@ def cmd_fuzz(args):
         ecofuzz_mc_penalty_multiplier=getattr(args, "ecofuzz_mc_penalty_multiplier", None),
         metropolis=getattr(args, "metropolis", False),
         crash_explore=getattr(args, "crash_explore", False),
+        uninit_probe=getattr(args, "uninit_probe", False),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
@@ -4112,6 +4113,15 @@ def main() -> int:
         help="Crash exploration (AFL -C): seed with crashing inputs; keep only "
         "mutants that still crash on a new path. Compare variants' fault addresses "
         "to judge exploitability.",
+    )
+    fuzz_parser.add_argument(
+        "--uninit-probe",
+        action="store_true",
+        default=False,
+        help="Re-run each new corpus entry under two heap fill bytes (ASAN "
+        "malloc_fill_byte + glibc MALLOC_PERTURB_); output that differs is an "
+        "uninitialized-memory leak, saved as crashes/uninit_<hash>. 3 extra execs "
+        "per admission; executables only.",
     )
     fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"

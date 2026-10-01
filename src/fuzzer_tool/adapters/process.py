@@ -10,6 +10,7 @@ Also supports optional hardware performance counter tracking on child processes.
 """
 
 import contextlib
+import hashlib
 import logging
 import os
 import select
@@ -510,6 +511,63 @@ def run_target_stdin(
     except Exception as e:
         real_pid = proc.pid if proc is not None else 0
         return -2, str(e), real_pid
+
+
+# ── Output capture ──────────────────────────────────────────────────────
+
+# Read size for streaming stdout into the digest: memory stays bounded no
+# matter how much the target prints.
+_DIGEST_CHUNK = 65536
+
+
+def run_target_digest(
+    cmd: list[str],
+    data: bytes,
+    timeout: float,
+    env: dict[str, str],
+) -> tuple[int, bytes]:
+    """Run *cmd* once with *data* on stdin; return (returncode, stdout digest).
+
+    Slow path for output comparison (the uninit probe), not the fuzz loop.
+    Returncode follows the other runners: -signum on a signal, -1 timeout,
+    -2 spawn failure.
+    """
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env=_clean_env(env),
+            start_new_session=True,
+        )
+    except OSError:
+        return -2, b""
+    _track(proc.pid)
+
+    # Feed stdin and enforce the timeout off-thread; stream stdout here.
+    writer = threading.Thread(target=_write_and_close, args=(proc.stdin, data), daemon=True)
+    writer.start()
+    timed_out = threading.Event()
+    killer = threading.Timer(timeout, _kill_on_timeout, args=(proc.pid, timed_out))
+    killer.start()
+
+    digest = hashlib.blake2b(digest_size=16)
+    while chunk := proc.stdout.read(_DIGEST_CHUNK):
+        digest.update(chunk)
+    proc.stdout.close()
+    rc = proc.wait()
+    killer.cancel()
+    _untrack(proc.pid)
+
+    if timed_out.is_set():
+        return -1, b""
+    return rc, digest.digest()
+
+
+def _kill_on_timeout(pid: int, flag: threading.Event) -> None:
+    flag.set()
+    _kill_process_group(pid)
 
 
 # ── File mode ───────────────────────────────────────────────────────────

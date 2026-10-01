@@ -111,7 +111,7 @@ digraph fuzzer_tool {
     subgraph cluster_crash {
         label="Crash pipeline";
         color="#d8c4b0"; fillcolor="#fbf6f1"; fontcolor="#7a5638";
-        crash [label="core/sanitizer.py → crash_metadata.py\lASAN MSAN TSAN LSAN UBSAN · dedup · tiers\lservices/tmin · minimize · root_cause · differential\lcore/reducer (C-Reduce passes · fixpoint · cache)\lcore/crash_explore (--crash-explore, AFL -C)\l",
+        crash [label="core/sanitizer.py → crash_metadata.py\lASAN MSAN TSAN LSAN UBSAN · dedup · tiers\lservices/tmin · minimize · root_cause · differential\lcore/reducer (C-Reduce passes · fixpoint · cache)\lcore/crash_explore (--crash-explore, AFL -C)\lservices/uninit_probe (--uninit-probe, heap fill diff)\l",
                fillcolor="#f0dfcd", fontcolor="#5c4227"];
     }
 

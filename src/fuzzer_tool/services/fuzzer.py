@@ -152,6 +152,7 @@ from fuzzer_tool.services.runner import TargetRunner
 from fuzzer_tool.services.seed_picker import SeedPicker
 from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.target_arena import TargetArena
+from fuzzer_tool.services.uninit_probe import UninitProbe
 
 log = logging.getLogger(__name__)
 
@@ -1147,6 +1148,7 @@ class Fuzzer:
         ecofuzz_mc_penalty_multiplier=None,
         metropolis=False,
         crash_explore=False,
+        uninit_probe=False,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         mc_decay_interval=100,
@@ -3003,6 +3005,8 @@ class Fuzzer:
         self._metropolis = metropolis
         # --crash-explore (AFL -C): keep only crashes on new crash paths.
         self._crash_explorer = CrashExplorer() if crash_explore else None
+        # --uninit-probe: re-run admitted inputs under two heap fills.
+        self._uninit_probe = self._build_uninit_probe() if uninit_probe else None
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:
@@ -7737,6 +7741,16 @@ class Fuzzer:
         self._report_comparison_reach(len(self.corpus))
         self._report_edge_id_stability(probe_seed)
         self._report_coverage_noise(probe_seed)
+
+    def _build_uninit_probe(self) -> UninitProbe:
+        """Probe bound to this target's argv shape and crash directory."""
+        if str(self.target).lower().endswith((".so", ".dylib", ".dll")):
+            log.warning("--uninit-probe needs an executable target; probing is off")
+        args = None
+        if self.file_mode:
+            # run_target_file passes the input path alone when args are empty.
+            args = self.target_args or ["{file}"]
+        return UninitProbe(self.target, self.timeout, self.crashes_dir, target_args=args)
 
     def _seed_crash_path(self) -> None:
         """Crash exploration: a crashing seed's path is already explored."""
