@@ -55,7 +55,7 @@ from pathlib import Path
 
 import pytest
 
-from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE
+from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SHM_TAIL_SIZE
 
 REPO = Path(__file__).parent.parent
 SHIM = REPO / "src" / "fuzzer_tool" / "adapters" / "afl_shim.c"
@@ -79,7 +79,7 @@ MAP_ENTRIES = 8192
 # actually writes at (layout 2 onward): a silent out-of-bounds write past
 # the segment, not merely a stale comment.
 SHM_HEADER = SHM_METADATA_SIZE
-SHM_BYTES = MAP_ENTRIES * 8 + SHM_HEADER
+SHM_BYTES = MAP_ENTRIES * 8 + SHM_HEADER + SHM_TAIL_SIZE  # shim writes the distance tail
 
 _TARGET_SO = """
 #include <stdint.h>

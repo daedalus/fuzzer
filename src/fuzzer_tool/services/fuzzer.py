@@ -778,6 +778,7 @@ class Fuzzer:
             print("[*] AFL instrumentation: detected")
             self._warn_no_compiler_coverage(self.target)
             self._check_shm_layout(self.target)
+            self._warn_stale_shim(self.target)
         elif status == "absent":
             self._warn_uninstrumented([self.target])
         # "unknown" (stripped binary, or no nm): say nothing rather than
@@ -841,6 +842,19 @@ class Fuzzer:
             "adapters/afl_shim.c (tools/build_targets.sh), or run with "
             "--no-coverage to fuzz it blind."
         )
+
+    def _warn_stale_shim(self, target: str) -> None:
+        """Warn when the target's shim predates the scoped crash handler.
+
+        Warn-only: coverage still works, but crash signals are misreported
+        and an in-process host can die on SIGPIPE. Callers have already
+        established that the shim is present.
+        """
+        from fuzzer_tool.core.shim_health import stale_shim_issues
+
+        for msg in stale_shim_issues(target):
+            log.warning(msg)
+            print(f"[!] WARNING: {msg}")
 
     def _warn_uninstrumented(self, targets: list[str]) -> None:
         """Warn that coverage is on but the target(s) cannot report edges.

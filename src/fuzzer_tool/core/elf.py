@@ -1580,6 +1580,30 @@ def detect_edge_id_scheme(target: str) -> int | None:
     return 2 if "__afl_edge_ids_v2" in names else 1
 
 
+def detect_scoped_crash_handler(target: str) -> bool | None:
+    """Say whether *target*'s shim scopes its crash handler to the guard.
+
+    Older shims jumped to ``__afl_guarded_call``'s sigjmp_buf on every
+    crash signal, guarded or not: one-shot and forkserver crashes surfaced
+    as SIGSEGV whatever the real signal, ASAN's SEGV report was lost, and a
+    ctypes host died on its own broken pipe. ``__afl_scoped_crash_handler``
+    marks a shim that hands unguarded signals back.
+
+    Returns:
+        True when the marker is present; False when the symbol table was
+        read and it is absent (older shim, or no shim -- the caller decides
+        whether a shim is there at all); None when no names could be read.
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("crash-handler scope detection failed for %s: %s", target, e)
+        return None
+    if not names:
+        return None
+    return "__afl_scoped_crash_handler" in names
+
+
 #: Segment layout the Python side is built for. Must equal
 #: __AFL_SHM_LAYOUT in adapters/afl_shim.c.
 SHM_LAYOUT_CURRENT = 3

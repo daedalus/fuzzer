@@ -97,7 +97,7 @@
  *                 __AFL_DISTANCE_MODE builds
  *
  * Compile target with:
- *   gcc -O2 -g -shared -fPIC -include afl_shim.c -o target.so target.c -lpng -lz
+ *   clang -O2 -g -shared -fPIC -include afl_shim.c -o target.so target.c -lpng -lz
  *
  * Call-stack-sensitive edge hashing (default, see __afl_get_caller_ctx()
  * below) walks one real stack frame via the saved frame pointer, so
@@ -224,6 +224,26 @@ static void __afl_map_dist_shm(void);
 static void __afl_map_node_shm(void);
 #endif
 
+/* ── Health counters ──────────────────────────────────────────────────
+ *
+ * Failures the shim survives but the fuzzer cannot otherwise see. Read via
+ * __afl_shim_health() (edge builds); index order is the ABI, append only.
+ *   ATTACHED       1 when the edge table is attached
+ *   MAP_ENTRIES    edge-table entries in effect
+ *   SEG_REJECTED   SHM segments refused (bad id, size, or header)
+ *   CMPLOG_DROPPED cmplog records lost (writer contention, failed write)
+ *   STRAY_SIGNALS  crash signals outside __afl_guarded_call
+ * Non-atomic: magnitudes, never accounting records. */
+enum {
+    __AFL_HEALTH_ATTACHED = 0,
+    __AFL_HEALTH_MAP_ENTRIES,
+    __AFL_HEALTH_SEG_REJECTED,
+    __AFL_HEALTH_CMPLOG_DROPPED,
+    __AFL_HEALTH_STRAY_SIGNALS,
+    __AFL_HEALTH_FIELDS
+};
+static uint64_t __afl_health[__AFL_HEALTH_FIELDS];
+
 #if __AFL_EDGE
 
 /* ── 8-byte hash table entry ──────────────────────────────────────────
@@ -343,6 +363,15 @@ const uint32_t __afl_ctx_relative_capable = 1;
  * elf.detect_edge_id_scheme(). */
 __attribute__((visibility("default"), used))
 const uint32_t __afl_edge_ids_v2 = 2;
+
+/* Crash-handler scope marker. Present means the crash handler only jumps
+ * inside __afl_guarded_call and hands every other signal back to its
+ * previous owner, SIGPIPE is not hooked, and __afl_shim_health() exists.
+ * Absent means an older shim: crashes outside the guard (one-shot and
+ * forkserver runs) are reported as SIGSEGV, and a ctypes host dies on a
+ * broken pipe. Presence-only. See elf.detect_scoped_crash_handler(). */
+__attribute__((visibility("default"), used))
+const uint32_t __afl_scoped_crash_handler = 1;
 
 /* ── n-gram history depth ─────────────────────────────────────────────
  *
@@ -633,11 +662,24 @@ void __afl_map_shm(void) {
      * hash table entries (not bytes).  The Python side allocates SHM as
      * SHM_TABLE_OFFSET + AFL_MAP_SIZE * sizeof(struct __afl_entry) bytes,
      * plus the 16-byte distance tail.                                      */
+    /* Strict parse: atoi("-5") became a 4-billion-entry map and every
+     * probe wrote past the segment. Unset, "" and "0" keep the default. */
     char *size_str = getenv("AFL_MAP_SIZE");
-    if (size_str) {
-        uint32_t s = (uint32_t)atoi(size_str);
+    if (size_str && size_str[0]) {
+        errno = 0;
+        char *size_end = NULL;
+        unsigned long long s = strtoull(size_str, &size_end, 10);
+        if (size_str[0] == '-' || *size_end != '\0' || errno == ERANGE || s > UINT32_MAX) {
+            char msg[128];
+            int n = snprintf(msg, sizeof(msg),
+                             "__afl_shim: AFL_MAP_SIZE=%.32s is not a valid entry count"
+                             " -- coverage disabled\n", size_str);
+            if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+            __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+            return;
+        }
         if (s > 0)
-            __afl_map_size = s;
+            __afl_map_size = (uint32_t)s;
     }
 
     /* SHM was allocated as header bytes + table bytes */
@@ -648,6 +690,26 @@ void __afl_map_shm(void) {
                          "__afl_shim: shmat(%d) failed: %.64s"
                          " -- coverage disabled\n", shmid, strerror(errno));
         if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return;
+    }
+
+    /* The segment must hold the table AFL_MAP_SIZE promises. A mismatch
+     * (bytes passed for entries, a foreign segment) otherwise writes past
+     * the end: a SIGSEGV blamed on the input, or silent corruption.
+     * IPC_STAT failing is not evidence either way, so it is skipped. */
+    struct shmid_ds ds;
+    size_t need = SHM_TABLE_OFFSET + (size_t)__afl_map_size * sizeof(struct __afl_entry)
+                + (__AFL_DISTANCE_MODE ? 2 * sizeof(uint64_t) : 0);
+    if (shmctl(shmid, IPC_STAT, &ds) == 0 && (size_t)ds.shm_segsz < need) {
+        char msg[192];
+        int n = snprintf(msg, sizeof(msg),
+                         "__afl_shim: segment %d is %zu bytes, %u entries need %zu"
+                         " -- too small, coverage disabled\n",
+                         shmid, (size_t)ds.shm_segsz, __afl_map_size, need);
+        if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
         return;
     }
 
@@ -683,6 +745,18 @@ void __afl_map_shm(void) {
     __afl_map_node_shm();
     __afl_mapping = 0;
 #endif
+}
+
+/* Copy up to n health counters (see __AFL_HEALTH_*) into out; returns the
+ * number of fields this shim has, so a caller can detect a newer shim
+ * with more fields than it asked for. out may be NULL when n == 0. */
+__attribute__((visibility("default")))
+uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
+    __afl_health[__AFL_HEALTH_ATTACHED] = __afl_area != NULL;
+    __afl_health[__AFL_HEALTH_MAP_ENTRIES] = __afl_map_size;
+    for (uint32_t i = 0; i < n && i < __AFL_HEALTH_FIELDS; i++)
+        out[i] = __afl_health[i];
+    return __AFL_HEALTH_FIELDS;
 }
 
 /* ── Call-stack-sensitive context ───────────────────────────────────────
@@ -1630,26 +1704,43 @@ static uint64_t   __afl_dist_hits = 0;
 static uint8_t   *__afl_node_bitmap = NULL;
 static uint32_t   __afl_node_bitmap_bytes = 0;
 
-static void __afl_map_node_shm(void) {
-    char *id = getenv("__AFL_NODE_BITMAP_ID");
-    if (!id) return;
+/* Attach an auxiliary segment whose u32 header sizes its payload, and
+ * refuse it when header + payload overruns the segment: both headers are
+ * trusted as loop bounds on the hot path. Returns NULL on any failure. */
+static void *__afl_attach_sized(const char *env, uint64_t entry_bytes) {
+    char *id = getenv(env);
+    if (!id) return NULL;
     int shmid = atoi(id);
-    if (shmid < 0) return;
+    if (shmid < 0) return NULL;
     void *p = shmat(shmid, NULL, 0);
-    if (p == (void *)-1) return;
+    if (p == (void *)-1) {
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return NULL;
+    }
+
+    struct shmid_ds ds;
+    uint64_t head = *(uint32_t *)p;
+    uint64_t need = 4 + head * entry_bytes;
+    if (head == 0 || (shmctl(shmid, IPC_STAT, &ds) == 0 && (uint64_t)ds.shm_segsz < need)) {
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return NULL;
+    }
+    return p;
+}
+
+static void __afl_map_node_shm(void) {
+    void *p = __afl_attach_sized("__AFL_NODE_BITMAP_ID", 1);
+    if (!p) return;
     uint32_t bytes = *(uint32_t *)p;
-    if (bytes == 0 || bytes > (1u << 28)) return;  /* insane header: ignore */
+    if (bytes > (1u << 28)) return;  /* insane header: ignore */
     __afl_node_bitmap_bytes = bytes;
     __afl_node_bitmap = (uint8_t *)((uint8_t *)p + 4);
 }
 
 static void __afl_map_dist_shm(void) {
-    char *id = getenv("__AFL_DIST_SHM_ID");
-    if (!id) return;
-    int shmid = atoi(id);
-    if (shmid < 0) return;
-    void *p = shmat(shmid, NULL, 0);
-    if (p == (void *)-1) return;
+    void *p = __afl_attach_sized("__AFL_DIST_SHM_ID", sizeof(struct __afl_dist_entry));
+    if (!p) return;
     __afl_dist_count = (uint32_t *)p;
     __afl_dist_table = (struct __afl_dist_entry *)((uint8_t *)p + 4);
 }
@@ -1884,6 +1975,31 @@ static void __afl_write_distance_tail_exit(void) {
 static int    __afl_cmplog_fd  = -1;
 static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
 static size_t __afl_cmplog_pos = 0;
+
+/* One owner of buf/pos at a time. Without it two threads could both pass
+ * the room check, one advance pos, and the other write a whole record past
+ * the buffer end. Try-lock, never wait: a contended record is dropped and
+ * counted (__AFL_HEALTH_CMPLOG_DROPPED), so a signal handler or the
+ * re-entrant trace-cmp path can never deadlock on it. */
+static volatile int __afl_cmplog_lock = 0;
+/* This thread owns the lock: a crash handler interrupting our own writer
+ * may flush (pos only advances once a record is complete) and must
+ * release, or siglongjmp leaves the lock held for good. */
+static __thread int __afl_cmplog_held = 0;
+
+__AFL_NO_COV static inline int __afl_cmplog_acquire(void) {
+    if (!__atomic_exchange_n(&__afl_cmplog_lock, 1, __ATOMIC_ACQUIRE)) {
+        __afl_cmplog_held = 1;
+        return 1;
+    }
+    __afl_health[__AFL_HEALTH_CMPLOG_DROPPED]++;
+    return 0;
+}
+
+__AFL_NO_COV static inline void __afl_cmplog_release(void) {
+    __afl_cmplog_held = 0;
+    __atomic_store_n(&__afl_cmplog_lock, 0, __ATOMIC_RELEASE);
+}
 
 /* ── COMPCOV: partial-match feedback straight into the edge map ────────
  *
@@ -2235,7 +2351,8 @@ __AFL_NO_COV static void __afl_cmp_site_count(uint32_t id, int satisfied, void *
         }                                                                \
     } while (0)
 
-__AFL_NO_COV static void __afl_cmplog_flush(void) {
+/* Caller holds __afl_cmplog_lock. */
+__AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
     if (__afl_cmplog_pos == 0) {
         return;
     }
@@ -2272,10 +2389,24 @@ __AFL_NO_COV static void __afl_cmplog_flush(void) {
          * this batch and move on, never block or spin. On a regular file
          * this is unreachable in practice; on a FIFO it is the expected
          * steady-state path whenever the collector falls behind. */
-        if (w <= 0) break;
+        if (w <= 0) {
+            __afl_health[__AFL_HEALTH_CMPLOG_DROPPED]++;
+            break;
+        }
         off += (size_t)w;
     }
     __afl_cmplog_pos = 0;
+}
+
+/* Skipped, not waited for, while another thread owns the buffer. */
+__AFL_NO_COV static void __afl_cmplog_flush(void) {
+    if (__afl_cmplog_held) {   /* signal landed inside our own writer */
+        __afl_cmplog_flush_locked();
+        return;
+    }
+    if (!__afl_cmplog_acquire()) return;
+    __afl_cmplog_flush_locked();
+    __afl_cmplog_release();
 }
 
 /* ── Async-signal-safe integer formatting ─────────────────────────────
@@ -2465,8 +2596,9 @@ __AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t
     size_t ka = __afl_readable_len(a, k), kb = __afl_readable_len(b, k);
     k = ka < kb ? ka : kb;
     if (k == 0) return;
+    if (!__afl_cmplog_acquire()) return;
     if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
-        __afl_cmplog_flush();
+        __afl_cmplog_flush_locked();
     char *p = __afl_cmplog_buf + __afl_cmplog_pos;
     *p++ = 'C'; *p++ = 'M'; *p++ = 'P'; *p++ = ' ';
     p = __afl_put_hexbytes(p, (const unsigned char *)a, k);
@@ -2478,22 +2610,22 @@ __AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t
     p = __afl_put_i64(p, (int64_t)n);
     *p++ = '\n';
     __afl_cmplog_pos = (size_t)(p - __afl_cmplog_buf);
+    __afl_cmplog_release();
 }
 
 /* ── Layer 2 record: two integers plus the comparison site ────────────
  * pc is __builtin_return_address(0) from the callback: the instruction
  * after the call, i.e. the comparison site itself once inlined. */
-static __thread int __afl_cmplog_busy = 0;
 
 __AFL_NO_COV static inline void __afl_cmplog_ints(uint64_t a, uint64_t b, size_t n, void *pc) {
     if (__afl_cmplog_fd < 0) return;
-    /* Backstop for toolchains where __AFL_NO_COV expands to nothing: an
-     * instrumented record writer re-enters through its own trace-cmp
-     * callbacks and recurses until the stack is gone. Costs one TLS read. */
-    if (__afl_cmplog_busy) return;
-    __afl_cmplog_busy = 1;
+    /* The lock is also the backstop for toolchains where __AFL_NO_COV
+     * expands to nothing: an instrumented record writer re-enters through
+     * its own trace-cmp callbacks, finds the lock held, and returns
+     * instead of recursing until the stack is gone. */
+    if (!__afl_cmplog_acquire()) return;
     if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
-        __afl_cmplog_flush();
+        __afl_cmplog_flush_locked();
     unsigned char ab[8], bb[8];
     for (size_t i = 0; i < n; i++) {
         ab[i] = (unsigned char)(a >> (i * 8));
@@ -2512,7 +2644,7 @@ __AFL_NO_COV static inline void __afl_cmplog_ints(uint64_t a, uint64_t b, size_t
     p = __afl_put_hex64(p, (uint64_t)(uintptr_t)pc);
     *p++ = '\n';
     __afl_cmplog_pos = (size_t)(p - __afl_cmplog_buf);
-    __afl_cmplog_busy = 0;
+    __afl_cmplog_release();
 }
 
 /* ── Layer 1: libc interposition ──────────────────────────────────────
@@ -2738,6 +2870,7 @@ __AFL_NO_COV int strcmp(const char *a, const char *b) {
     __AFL_RESOLVE(real_strcmp, afl_str_cmp_fn, "strcmp", __afl_fb_strcmp);
     int result = real_strcmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_STRCMP, result == 0);
+    if (__afl_cmplog_fd < 0 && __afl_compcov_level < 2) return result;
     size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
     if (n > 0) {
         __afl_cmplog_bytes(a, b, n + 1, result);
@@ -2787,6 +2920,7 @@ __AFL_NO_COV int strcasecmp(const char *a, const char *b) {
     __AFL_RESOLVE(real_strcasecmp, afl_str_cmp_fn, "strcasecmp", __afl_fb_strcasecmp);
     int result = real_strcasecmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_STRCASECMP, result == 0);
+    if (__afl_cmplog_fd < 0) return result;
     size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
     if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
     return result;
@@ -2989,7 +3123,7 @@ __AFL_NO_COV char *strpbrk(const char *s, const char *accept) {
     __AFL_RESOLVE(real_strpbrk, afl_strpbrk_fn, "strpbrk", __afl_fb_strpbrk);
     char *result = real_strpbrk(s, accept);
     __AFL_CMP_COUNT(__AFL_CMP_STRPBRK, result != NULL);
-    if (__afl_cmplog_fd >= 0 && s && accept) {
+    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(s) && __afl_launder_ptr(accept)) {
         size_t sl = __afl_fb_len(s), al = __afl_fb_len(accept);
         if (sl > 0 && al > 0) {
             size_t k = sl < al ? sl : al;
@@ -3006,12 +3140,12 @@ __AFL_NO_COV size_t strspn(const char *s, const char *accept) {
     __AFL_RESOLVE(real_strspn, afl_strspn_fn, "strspn", __afl_fb_strspn);
     size_t result = real_strspn(s, accept);
     __AFL_CMP_COUNT(__AFL_CMP_STRSPN, result != 0);
-    if (__afl_cmplog_fd >= 0 && s && accept) {
+    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(s) && __afl_launder_ptr(accept)) {
         size_t sl = __afl_fb_len(s), al = __afl_fb_len(accept);
         if (sl > 0 && al > 0) {
             size_t k = sl < al ? sl : al;
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
-            __afl_cmplog_bytes(s, accept, k, result ? (result > 0 ? 1 : 0) : 0);
+            __afl_cmplog_bytes(s, accept, k, result ? 0 : -1);  /* drop solved */
         }
     }
     return result;
@@ -3023,12 +3157,12 @@ __AFL_NO_COV size_t strcspn(const char *s, const char *reject) {
     __AFL_RESOLVE(real_strcspn, afl_strcspn_fn, "strcspn", __afl_fb_strcspn);
     size_t result = real_strcspn(s, reject);
     __AFL_CMP_COUNT(__AFL_CMP_STRCSPN, result != 0);
-    if (__afl_cmplog_fd >= 0 && s && reject) {
+    if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(s) && __afl_launder_ptr(reject)) {
         size_t sl = __afl_fb_len(s), rl = __afl_fb_len(reject);
         if (sl > 0 && rl > 0) {
             size_t k = sl < rl ? sl : rl;
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
-            __afl_cmplog_bytes(s, reject, k, result ? (result > 0 ? 1 : 0) : 0);
+            __afl_cmplog_bytes(s, reject, k, result ? 0 : -1);  /* drop solved */
         }
     }
     return result;
@@ -3125,8 +3259,12 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
             if (val == ref[2 + i]) { matched = 1; break; }
         __AFL_CMP_COUNT(__AFL_CMP_TRACE_SWITCH, matched);
     }
+    /* ref[1] is the case width in bits. Logging a 1-byte switch at 8
+     * bytes pads the operand with zeros the input never contains. */
+    size_t width = (size_t)(ref[1] / 8);
+    if (width != 1 && width != 2 && width != 4) width = 8;
     for (int64_t i = 0; i < count; i++)
-        __afl_cmplog_ints(val, ref[2 + i], 8, pc);
+        __afl_cmplog_ints(val, ref[2 + i], width, pc);
 }
 
 /* ── Layer 3: single operands (-fsanitize-coverage=trace-div,trace-gep) ─
@@ -3156,11 +3294,10 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
 __AFL_NO_COV static inline void __afl_cmplog_operand(const char *kind, uint64_t v,
                                                      size_t n, void *pc) {
     if (__afl_cmplog_fd < 0 || v < CMPLOG_OPERAND_MIN) return;
-    if (__afl_cmplog_busy) return;
-    __afl_cmplog_busy = 1;
+    if (!__afl_cmplog_acquire()) return;
 
     if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
-        __afl_cmplog_flush();
+        __afl_cmplog_flush_locked();
 
     unsigned char vb[8];
     for (size_t i = 0; i < n; i++) vb[i] = (unsigned char)(v >> (i * 8));
@@ -3175,7 +3312,7 @@ __AFL_NO_COV static inline void __afl_cmplog_operand(const char *kind, uint64_t 
     *p++ = '\n';
     __afl_cmplog_pos = (size_t)(p - __afl_cmplog_buf);
 
-    __afl_cmplog_busy = 0;
+    __afl_cmplog_release();
 }
 
 __AFL_CMP_VIS void __sanitizer_cov_trace_div4(uint32_t val) {
@@ -3319,13 +3456,30 @@ __AFL_NO_COV static void __afl_cmplog_fini_dtor(void) { __afl_cmplog_fini(); }
 
 static sigjmp_buf __afl_jmp_buf;
 static struct sigaction __afl_old_handlers[8];
+/* No SIGPIPE: its default (and Python's SIG_IGN) is not a crash, and a
+ * host interpreter writing to a closed pipe must get EPIPE, not a jump. */
 static int __afl_guard_signals[] = {
-    SIGSEGV, SIGABRT, SIGFPE, SIGBUS, SIGILL, SIGPIPE, SIGSYS,
+    SIGSEGV, SIGABRT, SIGFPE, SIGBUS, SIGILL, SIGSYS,
 };
 #define __afl_NUM_GUARD_SIGNALS \
     (int)(sizeof(__afl_guard_signals) / sizeof(__afl_guard_signals[0]))
 
-static void __afl_crash_handler(int sig) {
+/* __afl_jmp_buf is only valid while __afl_guarded_call is on the stack.
+ * Jumping to it anywhere else -- one-shot and forkserver children, which
+ * never call it, or a host process after the call returned -- resumes a
+ * dead frame: SIGFPE surfaced as SIGSEGV, ASAN's SEGV report was lost,
+ * and a ctypes host died on its own broken pipe. */
+static volatile sig_atomic_t __afl_guard_armed = 0;
+static volatile sig_atomic_t __afl_handlers_live = 0;
+
+static void __afl_restore_crash_handlers(void) {
+    for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
+        sigaction(__afl_guard_signals[i], &__afl_old_handlers[i], NULL);
+    __afl_handlers_live = 0;
+}
+
+static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
+    (void)uc;
 #if __AFL_CMPLOG
     /* Flush before escaping. cmplog_shim.c installed a second handler for
      * this and restored the previous disposition from inside it, so the
@@ -3334,22 +3488,37 @@ static void __afl_crash_handler(int sig) {
      * Folding it in here runs it on every crash, and __afl_cmplog_flush is
      * write(2)-based precisely so it is legal at this point. */
     __afl_cmplog_flush();
+    if (__afl_cmplog_held) __afl_cmplog_release();
     /* Same reasoning for the counters: a crashing execution's comparison
      * profile is the one most worth having, and the dump is write(2)-only. */
     __afl_cmp_dump_counts();
     __afl_cmp_dump_sites();
 #endif
     __afl_sancov_fold();
-    siglongjmp(__afl_jmp_buf, sig);
+    if (__afl_guard_armed) {
+        __afl_guard_armed = 0;
+        siglongjmp(__afl_jmp_buf, sig);
+    }
+
+    /* Not ours to recover: hand the signal back to whoever owned it.
+     * A hardware fault (si_code > 0) re-executes and faults again with its
+     * real si_addr; a sent signal (kill, abort) is re-raised and delivered
+     * once this handler returns. __afl_guarded_call re-arms later. */
+    __afl_health[__AFL_HEALTH_STRAY_SIGNALS]++;
+    __afl_restore_crash_handlers();
+    if (si && si->si_code > 0 && sig != SIGABRT)
+        return;
+    raise(sig);
 }
 
 static void __afl_install_crash_handlers(void) {
     struct sigaction sa;
-    sa.sa_handler = __afl_crash_handler;
+    sa.sa_sigaction = __afl_crash_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
+    sa.sa_flags = SA_SIGINFO;
     for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
         sigaction(__afl_guard_signals[i], &sa, &__afl_old_handlers[i]);
+    __afl_handlers_live = 1;
 }
 
 /* ── Guarded call wrapper ─────────────────────────────────────────────
@@ -3367,14 +3536,20 @@ static void __afl_install_crash_handlers(void) {
 __attribute__((visibility("default")))
 int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
                        const uint8_t *data, size_t size) {
+    /* A stray signal handed the dispositions back; take them again. */
+    if (!__afl_handlers_live)
+        __afl_install_crash_handlers();
+
     int sig;
     if ((sig = sigsetjmp(__afl_jmp_buf, 1)) == 0) {
+        __afl_guard_armed = 1;
         int rc = entry(data, size);
+        __afl_guard_armed = 0;
         __afl_sancov_fold();
         return rc;
     }
     /* sig = signal number from __afl_crash_handler's siglongjmp; that
-     * handler already folded the inline counters. */
+     * handler already folded the inline counters and disarmed. */
     return -(int)sig;
 }
 
@@ -3519,6 +3694,15 @@ static void __afl_start_forkserver(void) {
     __afl_cmp_site_dropped = 0;
 #endif
 
+    /* An ignored SIGCHLD auto-reaps children, so waitpid() below fails
+     * with ECHILD and the status is lost. Reap here with the default
+     * disposition; each child gets the target's own setting back. */
+    struct sigaction chld_dfl, chld_old;
+    chld_dfl.sa_handler = SIG_DFL;
+    sigemptyset(&chld_dfl.sa_mask);
+    chld_dfl.sa_flags = 0;
+    sigaction(SIGCHLD, &chld_dfl, &chld_old);
+
     while (1) {
         char cmd[4];
         if (read(AFL_FORKSRV_FD, cmd, 4) != 4) _exit(0);
@@ -3530,6 +3714,7 @@ static void __afl_start_forkserver(void) {
             /* Child: restore recording, drop the control pipe, and fall
              * through into main(). */
             __afl_area = saved_area;
+            sigaction(SIGCHLD, &chld_old, NULL);
             close(AFL_FORKSRV_FD);
             close(AFL_FORKSRV_FD + 1);
             return;
@@ -3539,7 +3724,10 @@ static void __afl_start_forkserver(void) {
 
         int status = 0;
         while (waitpid(child, &status, 0) < 0) {
-            /* EINTR only — a stray signal must not be read as a crash. */
+            /* Retry EINTR only — a stray signal must not be read as a
+             * crash. Anything else would spin forever; end the server so
+             * the loader sees EOF instead of a hang. */
+            if (errno != EINTR) _exit(1);
         }
 
         if (write(AFL_FORKSRV_FD + 1, &status, 4) != 4) _exit(0);

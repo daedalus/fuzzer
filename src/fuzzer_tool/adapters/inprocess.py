@@ -157,6 +157,24 @@ sys.exit(max(0, min(rc, 125)))
 """
 
 
+def read_shim_health(lib: ctypes.CDLL) -> tuple[int, ...] | None:
+    """Snapshot of ``__afl_shim_health()`` counters, or None for an older shim.
+
+    Field order is ``core.shim_health.ShimField``; the shim reports its own
+    field count, so a newer shim's extra fields come back too.
+    """
+    fn = getattr(lib, "__afl_shim_health", None)
+    if fn is None:
+        return None
+    fn.restype = ctypes.c_uint32
+    fn.argtypes = [ctypes.POINTER(ctypes.c_uint64), ctypes.c_uint32]
+
+    n = fn(None, 0)
+    buf = (ctypes.c_uint64 * n)()
+    fn(buf, n)
+    return tuple(buf)
+
+
 class InProcessRunner:
     """Call target function with minimal overhead.
 
@@ -293,6 +311,12 @@ class InProcessRunner:
                 self._lib = None
             else:
                 raise
+
+    def shim_health(self) -> tuple[int, ...] | None:
+        """Shim counters of the directly loaded target; None when unavailable."""
+        if self._lib is None:
+            return None
+        return read_shim_health(self._lib)
 
     def _attach_afl_area(self) -> None:
         """Map SHM by hand when the ``__afl_auto_init`` constructor missed it."""

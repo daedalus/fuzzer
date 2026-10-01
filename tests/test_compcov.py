@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE
+from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SHM_TAIL_SIZE
 
 REPO = Path(__file__).parent.parent
 SHIM = REPO / "src" / "fuzzer_tool" / "adapters" / "afl_shim.c"
@@ -40,7 +40,7 @@ NOBUILTIN = [
 
 MAP_ENTRIES = 8192
 SHM_HEADER = SHM_METADATA_SIZE
-SHM_BYTES = MAP_ENTRIES * 8 + SHM_HEADER
+SHM_BYTES = MAP_ENTRIES * 8 + SHM_HEADER + SHM_TAIL_SIZE  # shim writes the distance tail
 
 # Layer 1 (memcmp): 6 of 8 bytes match ("MAGICHD" vs "MAGICHDR"'s prefix,
 # broken at index 6). Layer 2 (trace_cmp4, called directly since no clang
