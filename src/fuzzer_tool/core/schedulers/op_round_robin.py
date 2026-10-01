@@ -29,7 +29,9 @@ class RoundRobinScheduler:
             return ops[0]
 
         # Filter to only registered operators in preferred order
-        available = [op for op in self._operator_order if op in ops]
+        # Set membership: `in ops` on the list was O(n^2) per pick.
+        live = set(ops)
+        available = [op for op in self._operator_order if op in live]
         if not available:
             # Fallback to registration order if none match available
             available = [op for op in ops if op in self._operator_counts]

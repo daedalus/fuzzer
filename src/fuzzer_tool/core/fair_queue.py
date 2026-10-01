@@ -13,7 +13,10 @@ infinite. Nothing here raises on bad numbers, hangs, or divides by zero.
     DeficitRR          cost     O(n)/pick   carries unspent credit, seeds
     WeightedFairQueue  cost     O(n)/pick   tightest fairness, targets
     Stride             counts   O(log n)    deterministic tickets, seeds/ops
-    EEVDF              cost     O(log n)    lag-bounded, new flows join at V
+    EEVDF              cost     O(log n)*   lag-bounded, new flows join at V
+
+(*) amortized: each flow crosses from the ve heap to the deadline heap once
+per service.
 
 Picks are O(n) because callers hand over the live flow set every call; the
 flow sets here (targets, corpus) are rebuilt per pick by the caller anyway.
@@ -332,13 +335,26 @@ class EEVDF:
     Unlike WFQ a flow ahead of the clock is never served early; unlike DRR
     a new flow joins at ``V`` (lag 0), so it neither catches up nor waits.
     Flat cost and weight are plain round robin.
+
+    Two heaps keep a pick amortized O(log n): deadline order is not
+    eligibility order, so one deadline heap would pop every ineligible flow
+    with an earlier deadline. ``pending`` holds flows by ``ve``; those that
+    fall at or below ``V`` move to ``ready``, ordered by deadline::
+
+        pending (ve)  --ve <= V-->  ready (deadline)  --pop-->  serve
+              ^                                                  |
+              +------------------ charge: ve += cost / w --------+
+
+    Each flow moves once per service. ``V`` only drops when a weight
+    changes or a flow leaves; a ready flow left ineligible is sent back.
     """
 
     def __init__(self, slice_: float = NEUTRAL_COST) -> None:
         self._slice = neutral(slice_)
         self._ve: dict[Hashable, float] = {}
         self._w: dict[Hashable, float] = {}
-        self._heap: list[tuple[float, int, Hashable]] = []
+        self._pending: list[tuple[float, int, Hashable]] = []  # (ve, seq, flow)
+        self._ready: list[tuple[float, int, Hashable]] = []  # (deadline, seq, flow)
         self._seq = 0
         self._sum_wve = 0.0
         self._sum_w = 0.0
@@ -370,28 +386,28 @@ class EEVDF:
         return self._seq
 
     def _pop_eligible(self) -> Hashable:
-        """Pop the earliest-deadline flow with ve <= V; ineligible ones go back.
+        """Promote flows with ve <= V, then pop the earliest eligible deadline.
 
-        The lowest ``ve`` is always <= the weighted mean, so the scan ends;
-        if float drift ever says otherwise, the lowest ``ve`` is served.
+        The lowest ``ve`` is always <= the weighted mean, so ``ready`` is
+        non-empty; if float drift ever says otherwise, the lowest ``ve`` is
+        served.
         """
         vt = self.virtual_time
-        slack = 1e-9 * max(1.0, abs(vt))
-        stash = []
-        entry = None
-        while self._heap:
-            head = heapq.heappop(self._heap)
-            if self._ve[head[2]] <= vt + slack:
-                entry = head
-                break
-            stash.append(head)
+        limit = vt + 1e-9 * max(1.0, abs(vt))
 
-        if entry is None:
-            entry = min(stash, key=lambda e: self._ve[e[2]])
-            stash.remove(entry)
-        for held in stash:
-            heapq.heappush(self._heap, held)
-        return entry[2]
+        # pending -> ready: flows whose eligible time the clock has reached.
+        while self._pending and self._pending[0][0] <= limit:
+            ve, seq, flow = heapq.heappop(self._pending)
+            heapq.heappush(self._ready, (ve + self._slice / self._w[flow], seq, flow))
+
+        while self._ready:
+            _, seq, flow = heapq.heappop(self._ready)
+            if self._ve[flow] <= limit:
+                return flow
+            # V dropped (weight change) since promotion: back to pending.
+            heapq.heappush(self._pending, (self._ve[flow], seq, flow))
+
+        return heapq.heappop(self._pending)[2]
 
     def _charge(self, flow: Hashable, cost: float, w: float) -> None:
         """Advance ``ve`` by cost / w; a changed weight re-enters the sums."""
@@ -403,7 +419,7 @@ class EEVDF:
         ve += cost / w
         self._ve[flow] = ve
         self._w[flow] = w
-        heapq.heappush(self._heap, (ve + self._slice / w, self._tick(), flow))
+        heapq.heappush(self._pending, (ve, self._tick(), flow))
 
     def _rebuild(self, flows: Sequence[Hashable], weight: Callable[[Hashable], float]) -> None:
         """Drop departed flows, then join new ones at the surviving clock."""
@@ -423,9 +439,9 @@ class EEVDF:
             self._sum_w += w
             self._sum_wve += w * vt
 
-        seqs = {k: s for _, s, k in self._heap}
-        self._heap = [
-            (self._ve[k] + self._slice / self._w[k], seqs.get(k) or self._tick(), k) for k in flows
-        ]
-        heapq.heapify(self._heap)
+        # Everything restarts in pending; the next pick promotes the eligible.
+        seqs = {k: s for _, s, k in self._pending + self._ready}
+        self._pending = [(self._ve[k], seqs.get(k) or self._tick(), k) for k in flows]
+        heapq.heapify(self._pending)
+        self._ready = []
         self._seen = list(flows)

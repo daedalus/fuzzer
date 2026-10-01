@@ -34,4 +34,5 @@ class SeedStrideScheduler(ArmCounts):
         self._stride = Stride()
 
     def select_seed(self, seed_ids: list[str], weight_fn: Callable[[str], float] = _unit) -> str:
+        self._trim(seed_ids)
         return self._stride.pick(seed_ids, weight_fn)

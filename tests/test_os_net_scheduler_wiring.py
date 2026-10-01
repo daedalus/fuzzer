@@ -237,13 +237,24 @@ class TestFuzzer:
         assert len(f._seed_os_arms) == len(SEED_ARMS)
 
     def test_seed_outcome_reaches_every_arm(self, tmp_path):
-        """Falsification: one recorded outcome lands in each enabled arm's ledger."""
+        """Falsification: one recorded corpus outcome lands in each enabled arm's ledger."""
         kwargs = {kw: True for kw, _a, _c in SEED_ARMS.values()}
         f = _real_fuzzer(tmp_path, **kwargs)
-        f._record_seed_os_arms("k", success=True, weight=1.0)
+        f.seed_meta[SEED_A] = {}
+        f._record_seed_os_arms(SEED_A, success=True, weight=1.0)
+
+        key = f._seed_key(SEED_A)
+        for arm in f._seed_os_arms:
+            assert arm.bandit_stats() == {key: (1.0, 0.0)}
+
+    def test_regression_non_corpus_parent_not_recorded(self, tmp_path):
+        """Adversarial (PR #44 review): synthetic parents (Markov) never enter the ledgers."""
+        kwargs = {kw: True for kw, _a, _c in SEED_ARMS.values()}
+        f = _real_fuzzer(tmp_path, **kwargs)
+        f._record_seed_os_arms(b"not-in-corpus", success=True, weight=1.0)
 
         for arm in f._seed_os_arms:
-            assert arm.bandit_stats() == {"k": (1.0, 0.0)}
+            assert arm.bandit_stats() == {}
 
     def test_op_arms_get_priors_registration_and_records(self):
         """The op arms sit in _register_arms and in fuzz_one's shared record loop."""

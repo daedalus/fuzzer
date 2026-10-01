@@ -1763,7 +1763,7 @@ class CorpusManager:
                 if f.corpus_dir:
                     self._promote_seed(seed)
                 # Mark seed as recovered so mutations are not skipped from it
-                if f.cuckoo_seed_filter is not None:
+                if getattr(f, "cuckoo_seed_filter", None) is not None:
                     h = self.seed_key(seed)
                     f._cuckoo_recovered.add(h)
                 recovered_count += 1
@@ -1784,7 +1784,7 @@ class CorpusManager:
         del kept_set  # free kept hashes after file pruning
 
         # Add pruned seeds to the cuckoo seed filter if enabled
-        if f.cuckoo_seed_filter is not None:
+        if getattr(f, "cuckoo_seed_filter", None) is not None:
             for seed in f.corpus:
                 if seed not in unique:
                     h = self.seed_key(seed)

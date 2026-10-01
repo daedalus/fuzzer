@@ -57,6 +57,7 @@ class SeedCoDelScheduler(ArmCounts):
     def select_seed(self, seed_ids: list[str]) -> str:
         if not seed_ids:
             return ""
+        self._trim(seed_ids)
         if len(seed_ids) == 1:
             return seed_ids[0]
         if seed_ids != self._order:

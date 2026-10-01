@@ -65,6 +65,7 @@ class SeedBFQScheduler(ArmCounts):
     def select_seed(self, seed_ids: list[str], weight_fn: Callable[[str], float] = _unit) -> str:
         if not seed_ids:
             return ""
+        self._trim(seed_ids)
         if len(seed_ids) == 1:
             return seed_ids[0]
         if self._seen is None or seed_ids != self._seen:

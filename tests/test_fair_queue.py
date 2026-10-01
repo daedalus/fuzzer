@@ -405,3 +405,28 @@ def test_eevdf_no_eligible_flow_serves_lowest_ve():
     q._sum_wve = -1e9  # V far below every ve: nobody eligible
 
     assert q.pick(["a", "b"], _unit, _unit) == "b"
+
+
+def test_eevdf_pick_does_not_scan_ineligible_flows(monkeypatch):
+    """Adversarial (PR #44 review): deadline order != eligibility order.
+
+    One flow at ve=0 (w=1) and 4999 at ve=0.49 (w=2): V ~= 0.48995, so only
+    the first is eligible while the others hold earlier deadlines. A pick
+    must not pop every ineligible flow on the way (O(n log n)).
+    """
+    import fuzzer_tool.core.fair_queue as fq
+
+    flows = ["a"] + [f"f{i}" for i in range(4999)]
+    weight = {k: 2.0 for k in flows}
+    weight["a"] = 1.0
+    q = EEVDF()  # slice 1: deadlines a=1.0, others=0.99 -- the ineligible ones first
+    q._ve = {k: 0.49 for k in flows}
+    q._ve["a"] = 0.0
+    q._w = dict(weight)
+
+    pops = []
+    real_pop = fq.heapq.heappop
+    monkeypatch.setattr(fq.heapq, "heappop", lambda h: pops.append(1) or real_pop(h))
+
+    assert q.pick(flows, _unit, weight.get) == "a"
+    assert len(pops) <= 8

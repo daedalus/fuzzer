@@ -4518,15 +4518,22 @@ class Fuzzer:
             self._seed_key(d): float(m.get("coverage_edges", 0)) for d, m in self.seed_meta.items()
         }
 
-    def _record_seed_os_arms(self, parent_key: str, success: bool, weight: float) -> None:
-        """Feed one parent outcome to every enabled OS / network seed arm.
+    def _record_seed_os_arms(self, parent: bytes, success: bool, weight: float) -> None:
+        """Feed one corpus parent's outcome to every enabled OS / network seed arm.
+
+        Parents outside the corpus (Markov-generated inputs) are skipped: they
+        are never candidates, and each would leave a permanent ledger entry.
 
         Off-policy like the canary feed: every arm sees every parent, whichever
         strategy picked it, since MLFQ demotion, CoDel staleness and AIMD
         windows are properties of the seed, not of the picker.
         """
+        if not self._seed_os_arms or parent not in self.seed_meta:
+            return
+
+        key = self._seed_key(parent)
         for arm in self._seed_os_arms:
-            arm.record(parent_key, success=success, weight=weight)
+            arm.record(key, success=success, weight=weight)
 
     def _seed_key(self, data: bytes) -> str:
         """Return content hash for *data*."""
@@ -6519,7 +6526,7 @@ class Fuzzer:
                 )
             if self._seed_drr:
                 self._seed_drr.record(parent_key, success=bool(has_new_coverage), weight=weight)
-            self._record_seed_os_arms(parent_key, bool(has_new_coverage), weight)
+            self._record_seed_os_arms(data, bool(has_new_coverage), weight)
 
         # Credit the cmplog operands this gain is attributable to: the
         # input-to-state matches found in the input, which are the operands

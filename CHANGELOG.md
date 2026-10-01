@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **EEVDF pick scanned ineligible flows** (`core/fair_queue.py`): one deadline heap popped every flow with an earlier deadline but `ve > V` (5000 pops at 5000 flows). Now a `ve` heap feeds a deadline heap; amortized O(log n). Test: `test_eevdf_pick_does_not_scan_ineligible_flows`.
+- **Seed-arm ledgers grew without bound**: non-corpus (Markov) parents were recorded, and departed seeds never left `ArmCounts`. Only corpus parents are recorded now; ledgers trim to 2x the live corpus.
+- **Round robin was O(n^2) per pick** (`seed_round_robin`, `op_round_robin`): `x in list` per registered arm. Set membership now: 103 ms -> 0.7 ms per pick at 5000 seeds.
+- **`cuckoo_seed_filter` broke 12 corpus-minimization / lineage tests** (`services/corpus_manager.py` read it unguarded) and was missing, with `swap_walk`, from `_HAIL_MARY_FLAGS`.
 - **Stack depth was always 0** (`adapters/afl_shim.c`): `__afl_max_stack_depth` was reset and copied to SHM offset 0 but never assigned, so `read_stack_depth()` returned 0 and the stack-depth boost in `core/schedules.py` never fired. The shim now samples the frame address in `__afl_map_loc` (base = first sample after reset, live write). Tests: `tests/test_shim_stack_depth.py`. Per-edge cost unmeasured; boost effect on discovery untested.
 
 ### Added (sancov)

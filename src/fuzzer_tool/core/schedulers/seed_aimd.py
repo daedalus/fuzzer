@@ -57,6 +57,7 @@ class SeedAIMDScheduler(ArmCounts):
     def select_seed(self, seed_ids: list[str]) -> str:
         if len(self._window) > PRUNE_FACTOR * len(seed_ids) + PRUNE_SLACK:
             self._prune(set(seed_ids))
+        self._trim(seed_ids)
         return self._stride.pick(seed_ids, self._tickets)
 
     def record(self, seed_id: str, success: bool, weight: float = 1.0) -> None:

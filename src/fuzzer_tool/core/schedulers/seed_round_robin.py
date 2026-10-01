@@ -72,7 +72,9 @@ class SeedRoundRobinScheduler:
 
         # Filter to only registered seeds in preferred (registration)
         # order, same fallback chain as RoundRobinScheduler.select_op.
-        available = [s for s in self._seed_order if s in seed_ids]
+        # Set membership: `in seed_ids` on the list was O(n^2) per pick.
+        live = set(seed_ids)
+        available = [s for s in self._seed_order if s in live]
         if not available:
             available = [s for s in seed_ids if s in self._seed_counts]
         if not available:
