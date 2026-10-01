@@ -698,6 +698,7 @@ def cmd_fuzz(args):
         dict_thompson=getattr(args, "dict_thompson", False),
         seed_residual=getattr(args, "seed_residual", False),
         confirm_novelty=getattr(args, "confirm_novelty", False),
+        antifuzz_evade=getattr(args, "antifuzz_evade", False),
         successive_elim=getattr(args, "successive_elim", False),
         successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
         successive_elim_min_pulls=getattr(args, "successive_elim_min_pulls", 3),
@@ -2115,6 +2116,7 @@ _HAIL_MARY_FLAGS = (
     "strata",
     "pll",
     "confirm_novelty",
+    "antifuzz_evade",
     "ecofuzz",
     "metropolis",
     "auto_timeout",
@@ -4062,6 +4064,18 @@ def main() -> int:
             "operator reward reads them. Costs one extra execution per new-coverage event. OFF by "
             "default; not yet A/B validated -- see docs/handover/"
             "handover_strata_schedulers_2026-09-19.md and core/novelty_confirm.py."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--antifuzz-evade",
+        action="store_true",
+        default=False,
+        help=(
+            "LD_PRELOAD a shim that neutralises AntiFuzz (USENIX Sec '19) hardening on "
+            "binary-only targets: fakes the self-ptrace anti-debug check (§4.2) so the "
+            "target does not exit under the fuzzer's own tracer, and drops sleep/usleep/"
+            "nanosleep delays on malformed inputs (§4.3). Per-behaviour opt-out via "
+            "ANTIFUZZ_EVADE_PTRACE=0 / ANTIFUZZ_EVADE_SLEEP=0. OFF by default."
         ),
     )
     fuzz_parser.add_argument(

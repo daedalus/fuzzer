@@ -25,6 +25,26 @@ log = logging.getLogger(__name__)
 # Signal numbers that indicate a crash (not a clean exit)
 SIGNAL_CRASH_CODES = {134, 135, 136, 139, -6, -7, -8, -11}  # SIGABRT/SIGBUS/SIGFPE/SIGSEGV
 
+# Fault names a shell, libc or sanitizer prints when a process dies.
+CRASH_STDERR_MARKERS = ("SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS", "Segmentation fault", "Aborted")
+
+# Adapter sentinels: -1 timeout, -2 infrastructure failure.
+_SENTINEL_CODES = (-1, -2)
+
+
+def stderr_crash_marker(returncode: int, stderr: str) -> str | None:
+    """First crash marker in *stderr*, or None when the exit vouches against it.
+
+    The target writes its own stderr: a process that prints "Segmentation
+    fault" and exits 0 (an AntiFuzz handler swallowing the fault) is
+    claiming a crash, not having one. Markers only corroborate a failing exit.
+    """
+    if returncode == 0 or returncode in _SENTINEL_CODES:
+        return None
+
+    return next((m for m in CRASH_STDERR_MARKERS if m in stderr), None)
+
+
 # ── Shared child-process machinery ──────────────────────────────────────
 #
 # Used by all three execution modes. This lived under "Stdin mode" while only

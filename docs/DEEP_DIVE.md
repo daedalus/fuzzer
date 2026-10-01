@@ -1567,6 +1567,28 @@ Shipped families, with the counts derived (not assumed) from each one's own equa
 
 **The family is not assumed, and neither is word size.** Recovery tries every shipped family whose output word matches the operand width in hand, cheapest elimination first, and keeps whichever verifies. Candidate runs are accumulated per `(comparison PC, operand width)`: a 64-bit generator's draws arrive through `__sanitizer_cov_trace_cmp8`, which the shim logs at full 8 bytes, and the same PC comparing both widths is two streams. `prng_predict` writes the prediction at the recovered family's own width.
 
+## Anti-Fuzzing Resistance
+
+Targets can be deliberately hardened against fuzzing. AntiFuzz (Güler et al.,
+USENIX Security '19) breaks four fuzzer assumptions; the tool answers each:
+
+| AntiFuzz technique | Assumption attacked | Defeat in this tool |
+|--------------------|---------------------|---------------------|
+| Hash-keyed fake edges (§4.1) | Coverage ⇒ new behaviour | Calibration probe flips the seed's last byte `NOISE_PROBE_VARIANTS` times; all-distinct edge sets ⇒ warn. Runtime `AdmissionMonitor` warns when admissions approach one per exec. (`core/coverage_noise.py`) |
+| Crash masking (§4.2) | Crashes are detectable | Crash oracle no longer trusts a stderr marker on a clean exit — only a non-zero exit, a fatal signal, or a parsed sanitizer report. (`stderr_crash_marker`, `adapters/process.py`) |
+| Self-ptrace anti-debug (§4.2) | — | `--antifuzz-evade` LD_PRELOADs a shim whose `ptrace(PTRACE_TRACEME)` returns success, so the target believes it is untraced. |
+| Delay on malformed input (§4.3) | Many execs/sec | Same shim no-ops `sleep`/`usleep`/`nanosleep`/`clock_nanosleep`. Per-behaviour opt-out: `ANTIFUZZ_EVADE_PTRACE=0`, `ANTIFUZZ_EVADE_SLEEP=0`. |
+
+```bash
+# Fuzz a binary-only target hardened with AntiFuzz
+fuzzer-tool fuzz ./hardened --antifuzz-evade -d ~/corpus
+```
+
+The coverage-noise probe and the hardened oracle are always on and need no
+flag. `targets/antifuzz_demo.c` is a benchmark target that implements all four
+techniques (each gated by `AF_COVERAGE`/`AF_CRASH`/`AF_SPEED`/`AF_PTRACE`) around
+one real heap-buffer-overflow, for measuring each defeat in isolation.
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)

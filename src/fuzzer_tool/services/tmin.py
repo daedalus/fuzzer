@@ -205,7 +205,12 @@ def tmin(
 
     print(f"[*] Crash input: {len(data)} bytes, hash={hash_data(data)}")
 
-    from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
+    from fuzzer_tool.adapters.process import (
+        SIGNAL_CRASH_CODES,
+        run_target_file,
+        run_target_stdin,
+        stderr_crash_marker,
+    )
     from fuzzer_tool.core.sanitizer import SanitizerReport
 
     tmp_dir = Path("/tmp") / f"tmin_{os.getpid()}"
@@ -235,10 +240,8 @@ def tmin(
                 return report.signature
             if returncode in SIGNAL_CRASH_CODES or returncode < 0:
                 return f"signal:{abs(returncode)}"
-            for sig in ["SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS", "Segmentation fault", "Aborted"]:
-                if sig in stderr:
-                    return f"signal:{sig}"
-            return None
+            marker = stderr_crash_marker(returncode, stderr)
+            return f"signal:{marker}" if marker else None
 
         def _probe(data_bytes: bytes) -> tuple[str | None, int, str]:
             returncode, stderr = _run_target(data_bytes)

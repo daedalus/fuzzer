@@ -56,6 +56,7 @@ def _fuzzer(seeds: list[bytes], edges: set[int], *, multi: bool = False) -> Fuzz
     f._seed_key = seed_key
     f._report_comparison_reach = lambda n: None
     f._report_edge_id_stability = lambda seed: None
+    f._report_coverage_noise = lambda seed: None
     return f
 
 
