@@ -19,6 +19,7 @@ from itertools import islice
 from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_structure_function import DispersionIndex
+from fuzzer_tool.core.clock import WALL_CLOCK, Clock
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
 from fuzzer_tool.core.dirichlet import dm_alpha
 from fuzzer_tool.core.op_chain2 import SecondOrderChain
@@ -54,6 +55,9 @@ _BYTE_VALUES = 256
 # the target's block removes.
 _MINIMAX_DISCOUNT = 0.5
 _MINIMAX_BLOCK = 0.3
+
+# Upper bound for the permutation-null Generator seed drawn from RandPool.
+_NULL_SEED_MAX = 2**31 - 1
 
 
 @dataclass(frozen=True)
@@ -128,8 +132,11 @@ class MonteCarloScheduler:
         cem_dirichlet_concentration: float = 0.0,
         rng: RandPool | None = None,
         second_order_blend: float = 0.0,
+        clock: Clock = WALL_CLOCK,
     ):
         self._rng = rng if rng is not None else get_default_rand_pool()
+        # Decision clock: the null-replicate budget sets how many replicates run.
+        self._clock = clock
         self._hierarchical_pooling = max(0.0, min(1.0, hierarchical_pooling))
         self._cem_dirichlet_concentration = cem_dirichlet_concentration
         self.arm_alpha: dict[str, float] = {}
@@ -742,13 +749,15 @@ class MonteCarloScheduler:
         if not pooled:
             return dict.fromkeys(alphas, 0.0)
 
-        deadline = time.monotonic() + self._JS_NULL_BUDGET_SECONDS
+        deadline = self._clock.monotonic() + self._JS_NULL_BUDGET_SECONDS
         if _HAS_NUMPY:
             samples = self._null_js_samples_numpy(
                 pooled,
                 self._JS_NULL_REPLICATES,
                 deadline=deadline,
                 min_replicates=self._JS_NULL_MIN_REPLICATES,
+                seed=self._rng.randint(0, _NULL_SEED_MAX),
+                now=self._clock.monotonic,
             )
         else:
             samples = self._null_js_samples_python(
@@ -757,6 +766,7 @@ class MonteCarloScheduler:
                 self._rng,
                 deadline=deadline,
                 min_replicates=min(self._JS_NULL_MIN_REPLICATES, 4),
+                now=self._clock.monotonic,
             )
         if not samples:
             return dict.fromkeys(alphas, 0.0)
@@ -770,7 +780,12 @@ class MonteCarloScheduler:
 
     @staticmethod
     def _null_js_samples_numpy(
-        pooled, replicates: int, deadline: float | None = None, min_replicates: int = 8
+        pooled,
+        replicates: int,
+        deadline: float | None = None,
+        min_replicates: int = 8,
+        seed: int | None = None,
+        now=time.monotonic,
     ) -> list[float]:
         """Permutation null, vectorised across positions.
 
@@ -779,7 +794,9 @@ class MonteCarloScheduler:
         instead costs 1.85 s per refit at 1024-byte inputs with 100 elites,
         which is not affordable even off the execution path.
         """
-        rng = np.random.default_rng()
+        # Seeded from the run's RandPool: an unseeded Generator made --seed
+        # runs diverge through the refit interval this null feeds.
+        rng = np.random.default_rng(seed)
         groups: dict[tuple[int, int], list[np.ndarray]] = {}
         for counts, n1, n2 in pooled:
             total = sum(counts.values())
@@ -840,7 +857,7 @@ class MonteCarloScheduler:
                     + np.sum(q * np.log(ratio_q, out=np.zeros_like(q), where=ratio_q > 0))
                 )
             out.append(acc / n_positions)
-            if deadline is not None and len(out) >= min_replicates and time.monotonic() > deadline:
+            if deadline is not None and len(out) >= min_replicates and now() > deadline:
                 break
         return out
 
@@ -851,6 +868,7 @@ class MonteCarloScheduler:
         rng: RandPool,
         deadline: float | None = None,
         min_replicates: int = 4,
+        now=time.monotonic,
     ) -> list[float]:
         per_pos = []
         for counts, n1, n2 in pooled:
@@ -885,7 +903,7 @@ class MonteCarloScheduler:
                 q = {k: v / n2 for k, v in b.items()}
                 acc += MonteCarloScheduler._js_two(p, q)
             out.append(acc / len(per_pos))
-            if deadline is not None and len(out) >= min_replicates and time.monotonic() > deadline:
+            if deadline is not None and len(out) >= min_replicates and now() > deadline:
                 break
         return out
 

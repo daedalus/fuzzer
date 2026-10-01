@@ -41,6 +41,7 @@ from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
+from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.elf import (
@@ -739,6 +740,9 @@ def _slide_windows(seed: bytes, win: int, out: list[bytes], cap: int | None) -> 
 
 
 class Fuzzer:
+    # Decision clock; __init__ replaces it. Default for __new__-built test fuzzers.
+    _clock: Clock = WALL_CLOCK
+
     def _warn_no_coverage(self) -> None:
         """Warn that an in-process target is running without coverage.
 
@@ -1528,7 +1532,11 @@ class Fuzzer:
         # pos_consolidated.py). Appended: positional signature.
         seed_consolidated_scheduler=False,
         pos_consolidated=False,
+        clock=ClockMode.WALL,
     ):
+        # Decision clock (--clock). Built first: start_time, the WFQ clock and
+        # several schedulers read it during construction.
+        self._clock = Clock(clock)
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
         # UBSAN_OPTIONS into it, so run() can hand the process environment
@@ -1574,7 +1582,7 @@ class Fuzzer:
         self._phi_profiles: dict[str, dict[int, int]] = {}
         self._phi_c: float = 1.0
         self._fq_last_t: float | None = None
-        self._fq_clock = time.monotonic
+        self._fq_clock = self._clock.monotonic
         self._target_shm_covs = {}  # target_path -> ShmCoverage (per-target)
         self._target_profiles = {}  # target_path -> TargetProfile
         # Pin the address-space layout BEFORE anything spawns, dlopens, or
@@ -1920,6 +1928,13 @@ class Fuzzer:
                 )
             from fuzzer_tool.core.cmplog import CmplogCollector
 
+            # The FIFO is drained by a background thread, so which records a
+            # collect sees depends on thread timing. The file sink is read
+            # synchronously: the only sink a virtual-clock replay can trust.
+            if self._clock.mode is ClockMode.VIRTUAL and cmplog_fifo_sink:
+                log.info("--clock virtual: cmplog uses the file sink, not the FIFO")
+                cmplog_fifo_sink = False
+
             self._cmplog = CmplogCollector(
                 max_tokens=cmplog_max_tokens,
                 max_pairs=cmplog_max_pairs,
@@ -2152,7 +2167,7 @@ class Fuzzer:
         self.exec_count = 0
         self.crash_count = 0
         self.timeout_count = 0
-        self.start_time = time.time()
+        self.start_time = self._clock.time()
         self.last_report: SanitizerReport | None = None
         self.op_counts: dict[str, int] = {}
         self.op_success: dict[str, int] = {}
@@ -2427,7 +2442,9 @@ class Fuzzer:
             try:
                 from fuzzer_tool.services.katz_channel import KatzChannel
 
-                ch = KatzChannel.build(target, use_cfg_cache=use_cfg_cache, debug=self.debug)
+                ch = KatzChannel.build(
+                    target, use_cfg_cache=use_cfg_cache, debug=self.debug, clock=self._clock
+                )
                 if ch is not None and ch.upload():
                     self._katz_channel = ch
                     print(
@@ -2528,6 +2545,7 @@ class Fuzzer:
                     _CEM_ALPHA_FALLBACK if dirichlet_alpha is AlphaMode.LEARNED else 0.0
                 ),
                 rng=self._rng,
+                clock=self._clock,
             )
             if (mc_bandit or mc_cem or mopt)
             else None
@@ -2929,7 +2947,7 @@ class Fuzzer:
         if target_arena and not (multi_targets and elo):
             log.warning("--target-arena needs --elo and more than one target; ignored")
         elif target_arena:
-            self._target_arena = TargetArena(self)
+            self._target_arena = TargetArena(self, clock=self._clock.monotonic)
             log.info("Target arena enabled (Elo over tgt_ strategies)")
         self._use_ecofuzz = ecofuzz
         self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
@@ -5519,7 +5537,7 @@ class Fuzzer:
         # last_picked: revisit clock for the --lst-revisit override (P3-3 step 6)
         meta = self.seed_meta.get(seed)
         if meta is not None:
-            meta["last_picked"] = time.time()
+            meta["last_picked"] = clock_of(self).time()
         return seed
 
     def _pick_markov_seed(self):
@@ -6433,7 +6451,7 @@ class Fuzzer:
                     "momentum": 0.0,
                     "edge_bitmap": bytearray(0),
                     "redqueen_offsets": [],
-                    "added_at": time.time(),
+                    "added_at": clock_of(self).time(),
                     "record_stride": None,
                     "seed_passed_det": False,
                 }
@@ -6534,7 +6552,7 @@ class Fuzzer:
         used (the first samples are too unstable to trust).
         """
         if not self._eps_history:
-            elapsed = max(time.time() - self.start_time, 1e-9)
+            elapsed = max(clock_of(self).time() - self.start_time, 1e-9)
             eps_now = (self.exec_count - self._resume_baseline_exec) / elapsed
             if eps_now <= 0:
                 return self.stats_interval
@@ -8359,7 +8377,7 @@ class Fuzzer:
                                     others.update(se)
                             new_edges = len(seed_e - others)
                         time_added = meta.get("added_at", 0.0)
-                        now = time.time()
+                        now = clock_of(self).time()
                         child_count = meta.get("child_count", 0)
                         select_count = fuzz_level
                         timed_out = meta.get("timed_out", False)
@@ -8419,7 +8437,7 @@ class Fuzzer:
                         ),
                         anneal_progress=self._anneal_progress,
                         min_distance=self._dist_min_observed or 0.0,
-                        elapsed_sec=time.time() - self.start_time,
+                        elapsed_sec=clock_of(self).time() - self.start_time,
                         t_x_minutes=self._seed_scorer.t_x_minutes,
                         katz_energy=(
                             self._katz_channel.seed_energy(seed_key)

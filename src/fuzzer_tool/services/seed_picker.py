@@ -16,12 +16,12 @@ import functools
 import itertools
 import logging
 import math
-import time
 from collections import Counter
 
 import numpy as np
 
 from fuzzer_tool.core.cadence import bucket, due
+from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
 from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
@@ -943,7 +943,7 @@ class SeedPicker:
             f._seed_strategy = TARGET_MATCH
             return hint
 
-        overdue = self._pick_lst_seed(time.time())
+        overdue = self._pick_lst_seed(clock_of(self.f).time())
         if overdue is not None:
             return overdue
 
@@ -1151,7 +1151,7 @@ class SeedPicker:
         f = self.f
         if len(f.corpus) < 3 or not f.seed_meta:
             return f._rng.choice(f.corpus)
-        now = time.time()
+        now = clock_of(self.f).time()
         weights = [1.0] * len(f.corpus)
         return self._pick_from_pareto_front(weights, now)
 
@@ -2315,7 +2315,7 @@ class SeedPicker:
 
     def weighted_pick_seed(self) -> bytes:
         f = self.f
-        now = time.time()
+        now = clock_of(self.f).time()
 
         if not hasattr(f, "_recent_seed_edges"):
             f._recent_seed_edges: list[set[int]] = []

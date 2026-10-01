@@ -1,6 +1,8 @@
 """core/clock.py: wall vs virtual time for reproducible seeded runs."""
 
 import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -10,6 +12,7 @@ from fuzzer_tool.core.clock import (
     WALL_CLOCK,
     Clock,
     ClockMode,
+    clock_of,
 )
 
 _TICKS = 7
@@ -69,3 +72,14 @@ def test_default_is_wall():
 def test_rejects_stray_state():
     with pytest.raises(AttributeError):
         Clock().undeclared = 1
+
+
+def test_clock_of_returns_owner_clock():
+    clock = Clock(ClockMode.VIRTUAL)
+    assert clock_of(SimpleNamespace(_clock=clock)) is clock
+
+
+def test_clock_of_falls_back_for_partial_owners():
+    """Adversarial: mocks and bare namespaces must not leak a fake clock."""
+    assert clock_of(SimpleNamespace()) is WALL_CLOCK
+    assert clock_of(MagicMock()) is WALL_CLOCK

@@ -24,6 +24,7 @@ import time
 
 import numpy as np
 
+from fuzzer_tool.core.clock import WALL_CLOCK, Clock
 from fuzzer_tool.core.horizon import HorizonGraph, build_horizon_graph
 from fuzzer_tool.core.icfg import (
     InterproceduralCFG,
@@ -53,8 +54,12 @@ _COST_GATE_FLOOR = 0.005
 class KatzChannel:
     """Per-campaign K-Scheduler state and SHM plumbing."""
 
-    def __init__(self, icfg: InterproceduralCFG, node_of: dict[int, int]):
+    def __init__(
+        self, icfg: InterproceduralCFG, node_of: dict[int, int], clock: Clock = WALL_CLOCK
+    ):
         self.icfg = icfg
+        # Decision clock: the recompute budget gates when Katz energy refreshes.
+        self._clock = clock
         self.node_of = node_of
         self.n_nodes = icfg.n_nodes
         self.hit_counts = np.zeros(self.n_nodes, dtype=np.float64)
@@ -69,14 +74,18 @@ class KatzChannel:
         # means "never measured", which lets the first recompute through on
         # the exec gate alone.
         self._last_cost = 0.0
-        self._last_recompute_wall = time.perf_counter()
+        self._last_recompute_wall = self._clock.monotonic()
         self.exec_count = 0  # caller updates so the interval gate works
 
     # ── setup ────────────────────────────────────────────────────────
 
     @classmethod
     def build(
-        cls, target: str, use_cfg_cache: bool = True, debug: bool = False
+        cls,
+        target: str,
+        use_cfg_cache: bool = True,
+        debug: bool = False,
+        clock: Clock = WALL_CLOCK,
     ) -> "KatzChannel | None":
         """Detect viability and build the ICFG; None when not applicable.
 
@@ -130,7 +139,7 @@ class KatzChannel:
 
         # The probe table was the last reader of the per-function CFGs.
         icfg.release_cfgs()
-        ch = cls(icfg, node_of)
+        ch = cls(icfg, node_of, clock)
         ch._td = td
         return ch
 
@@ -204,10 +213,10 @@ class KatzChannel:
             # throughput at 1/cost * 50 regardless of how fast the target
             # runs. Also require that the last recompute's cost amortize
             # below _MAX_RECOMPUTE_OVERHEAD of the wall time since it ran.
-            elapsed = time.perf_counter() - self._last_recompute_wall
+            elapsed = self._clock.monotonic() - self._last_recompute_wall
             due = elapsed * _MAX_RECOMPUTE_OVERHEAD >= self._last_cost
         if self._scores is None or (self._dirty and due) or force:
-            t0 = time.perf_counter()
+            t0 = self._clock.monotonic()
             masks = {k: v for k, v in self._masks.items() if len(v) * 8 >= self.n_nodes}
             self._horizon = build_horizon_graph(self.icfg, masks)
             # hit_counts is ICFG-indexed; build_beta translates through the
@@ -215,8 +224,8 @@ class KatzChannel:
             # the sum of per-node counts.
             beta = build_beta(self._horizon, self.hit_counts, float(self.exec_count))
             self._scores = katz_scores(self._horizon, beta=beta)
-            self._last_cost = time.perf_counter() - t0
-            self._last_recompute_wall = time.perf_counter()
+            self._last_cost = self._clock.monotonic() - t0
+            self._last_recompute_wall = self._clock.monotonic()
             self._dirty = False
             self._last_recompute_exec = self.exec_count
         return self._scores
@@ -262,7 +271,7 @@ class KatzChannel:
         # Resume must refresh promptly rather than wait out either gate.
         self._last_recompute_exec = -_RECOMPUTE_MIN_INTERVAL
         self._last_cost = 0.0
-        self._last_recompute_wall = time.perf_counter()
+        self._last_recompute_wall = self._clock.monotonic()
 
 
 def _target_has_trace_pc(target: str) -> bool:
