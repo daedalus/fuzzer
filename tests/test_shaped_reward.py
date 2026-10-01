@@ -24,7 +24,8 @@ import pytest
 from fuzzer_tool.core.edge_matrix import MatrixSubstrate
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.op_credit import OpCreditScheduler, shaped_weight
-from fuzzer_tool.services.fuzzer import Fuzzer, _apply_reward_shape
+from fuzzer_tool.services.fuzz_round import FuzzRound, _apply_reward_shape
+from fuzzer_tool.services.fuzzer import Fuzzer
 
 
 @pytest.fixture(autouse=True)
@@ -240,5 +241,5 @@ class TestTheFactorReachesTheRewardList:
         # _credit_reward_shape's answer to _apply_reward_shape, not a literal.
         import inspect
 
-        src = inspect.getsource(Fuzzer.fuzz_one)
-        assert "_apply_reward_shape(op_rewards, self._credit_reward_shape())" in src
+        src = inspect.getsource(FuzzRound)
+        assert "_apply_reward_shape(op_rewards, f._credit_reward_shape())" in src

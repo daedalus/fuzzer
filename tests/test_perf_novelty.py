@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
-from fuzzer_tool.services import fuzzer as fuzzer_mod
+from fuzzer_tool.services.fuzz_round import FuzzRound
 
 
 class _FakeShm(ShmCoverage):
@@ -143,8 +143,8 @@ class TestSignalSeparation:
 
 class TestTimingWindow:
     def test_mutation_is_outside_the_timing_window(self):
-        src = inspect.getsource(fuzzer_mod.Fuzzer.fuzz_one)
-        mutate_at = src.index("mutated = self._dedup_mutate(data)")
+        src = inspect.getsource(FuzzRound)
+        mutate_at = src.index("self._mutated = f._dedup_mutate(self._data)")
         start_at = src.index("t_start = time.monotonic()")
         assert start_at > mutate_at, (
             "t_start must open after _dedup_mutate, or Python mutation cost "
@@ -152,11 +152,11 @@ class TestTimingWindow:
         )
 
     def test_only_run_target_is_inside_the_window(self):
-        src = inspect.getsource(fuzzer_mod.Fuzzer.fuzz_one)
+        src = inspect.getsource(FuzzRound)
         start_at = src.index("t_start = time.monotonic()")
         end_at = src.index("t_elapsed = time.monotonic() - t_start")
         body = src[start_at:end_at]
-        assert "self._run_target(mutated)" in body
+        assert "f._run_target(self._mutated)" in body
         assert "_dedup_mutate" not in body
 
     def test_perf_novelty_reaches_success_and_admission(self):
@@ -174,12 +174,12 @@ class TestTimingWindow:
         line limit ruff wrapped it, and a line-oriented scrape found no
         line starting with the ``if``.
         """
-        src = inspect.getsource(fuzzer_mod.Fuzzer.fuzz_one)
+        src = inspect.getsource(FuzzRound)
 
         success_expr = src.split("success = bool(")[1].split(")")[0]
         assert "is_new_max" in success_expr, "is_new_max must reach the bandits"
 
-        head = src[: src.index("self.save_to_corpus")]
+        head = src[: src.index("f.save_to_corpus")]
         admission = head[head.rindex("is_interesting") :]
         assert "is_new_max" in admission, (
             "performance-novel inputs must be admitted, or the signal cannot "
@@ -188,8 +188,10 @@ class TestTimingWindow:
 
     def test_crash_and_timeout_suppress_the_signal(self):
         """A truncated execution's counts are short, not extreme."""
-        src = inspect.getsource(fuzzer_mod.Fuzzer.fuzz_one)
-        assert "not is_timeout and not is_crash" in src.split("new_max_edges = 0")[1]
+        src = inspect.getsource(FuzzRound)
+        cond = src.split("new_max_edges = 0")[1].split("new_max_edges = scanned_shm")[0]
+        assert "not self._is_timeout" in cond
+        assert "not self._is_crash" in cond
 
 
 @pytest.mark.parametrize("flag", ["--no-perf-novelty"])

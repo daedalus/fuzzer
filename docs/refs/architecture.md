@@ -107,7 +107,7 @@ under `tgt_<name>` keys (`services/target_arena.py`). Pool = every
 (`target_match`, unscored); `Fuzzer._settle_targets` (from `fuzz_one`) feeds
 every arm and plays served-vs-rest matches.
 
-### Recording (`.record()` fan-out, fuzzer.py:2418–2478)
+### Recording (`.record()` fan-out, `fuzz_round.py::FuzzRound._credit_ops`)
 
 Every enabled scheduler records shadow stats per run, with the same success +
 surprisal weight regardless of which scheduler was consulted:

@@ -89,7 +89,7 @@ class TestTimeoutContract:
 
         import fuzzer_tool
 
-        src = (Path(fuzzer_tool.__file__).parent / "services" / "fuzzer.py").read_text()
-        assert "is_timeout = returncode == -1" in src, (
+        src = (Path(fuzzer_tool.__file__).parent / "services" / "fuzz_round.py").read_text()
+        assert "self._is_timeout = self._returncode == -1" in src, (
             "the timeout sentinel moved; _ptrace_report_timeout must follow it"
         )

@@ -24,7 +24,7 @@ import types
 from fuzzer_tool.core.colorization import TaintRegion, colorize
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.services.fuzzer import _in_taint
+from fuzzer_tool.services.fuzz_round import _in_taint
 
 
 class TestInTaint:

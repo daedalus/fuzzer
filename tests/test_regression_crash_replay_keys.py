@@ -175,9 +175,9 @@ class TestSchedulerKeySpace:
     def test_replay_key_is_a_signature_not_a_filename(self):
         import inspect
 
-        from fuzzer_tool.services import fuzzer as fuzzer_mod
+        from fuzzer_tool.services.fuzz_round import FuzzRound
 
-        src = inspect.getsource(fuzzer_mod.Fuzzer.fuzz_one)
+        src = inspect.getsource(FuzzRound)
         # Comments in the fix quote the old expression, so scan code only.
         code = "\n".join(line for line in src.splitlines() if not line.lstrip().startswith("#"))
         assert "crash_sigs.get(crash_name" not in code, (

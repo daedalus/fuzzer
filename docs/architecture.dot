@@ -48,7 +48,7 @@ digraph fuzzer_tool {
                   fillcolor="#e3e7ec", fontcolor="#242a31"];
     }
 
-    fuzzer [label="services/fuzzer.py   —   fuzz_one() campaign loop",
+    fuzzer [label="services/fuzzer.py   —   fuzz_one() campaign loop\nservices/fuzz_round.py   —   FuzzRound: one per iteration",
             fillcolor="#3f4a58", fontcolor="white", fontsize=12.5,
             margin="0.28,0.16"];
 

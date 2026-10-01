@@ -18,9 +18,9 @@ from fuzzer_tool.adapters import lbr_trace, process
 from fuzzer_tool.cli import commands
 from fuzzer_tool.core import branch_record
 from fuzzer_tool.core.branch_record import BranchCoverage
-from fuzzer_tool.services import corpus_manager
+from fuzzer_tool.services import corpus_manager, runner, stats
 from fuzzer_tool.services import fuzzer as fuzzer_mod
-from fuzzer_tool.services import runner, stats
+from fuzzer_tool.services.fuzz_round import FuzzRound
 
 FLAGS = ("lbr", "lbr_period")
 
@@ -77,8 +77,8 @@ class TestExecPathCallSites:
         assert inspect.getsource(runner).count("f.branch_cov.reset_edge_map()") == 2
 
     def test_novelty_disjunction_consults_the_branch_map(self):
-        src = inspect.getsource(fuzzer_mod)
-        assert src.count("self.branch_cov and self.branch_cov.is_new_coverage()") == 2
+        src = inspect.getsource(FuzzRound)
+        assert src.count("f.branch_cov and f.branch_cov.is_new_coverage()") == 2
 
     def test_forkserver_is_skipped_when_lbr_is_active(self):
         assert "or self._lbr_session" in inspect.getsource(fuzzer_mod)
