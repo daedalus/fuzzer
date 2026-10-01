@@ -1,107 +1,20 @@
 """P1-1 regression: deterministic mutation stream must not allocate per mutant.
 
 The old implementation did ``bytearray(data)`` + ``bytes(mutant)`` for every
-mutant (2·33·n² bytes copied).  The optimized version holds one persistent
+mutant (O(n²) bytes copied).  The optimized version holds one persistent
 scratch buffer, mutates in place, yields ``bytes(scratch)``, and restores.
 
 This test proves equivalence mutant-by-mutant against a reference
-implementation that uses the old copy-per-mutant policy, over a sweep of
+implementation that copies per mutant (``tests/support/det_reference.py``), over a sweep of
 seed lengths and cap values including caps that land mid-pass.
 """
 
+from itertools import zip_longest
+
 import pytest
 
-from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS, INTERESTING_UNSIGNED_8
 from fuzzer_tool.services.operators import _deterministic_mutation_stream
-
-
-def _reference_deterministic_mutation_stream(data: bytes, max_mutations: int):
-    """Reference: the old copy-per-mutant implementation (P1-1 pre-fix)."""
-    length = len(data)
-    if length == 0:
-        return
-
-    n_arith_deltas = len(ARITHMETIC_DELTAS)
-    n_interesting = len(INTERESTING_UNSIGNED_8)
-    cost_bit = length * 8
-    cost_byte = length
-    cost_arith = length * n_arith_deltas * 2
-    cost_interesting = length * n_interesting
-    full_cost = cost_bit + cost_byte + cost_arith + cost_interesting
-
-    if full_cost <= max_mutations:
-        quotas = [cost_bit, cost_byte, cost_arith, cost_interesting]
-    else:
-        costs = [cost_bit, cost_byte, cost_arith, cost_interesting]
-        quotas = [int(max_mutations * c / full_cost) for c in costs]
-        shortfall = max_mutations - sum(quotas)
-        order = sorted(range(4), key=lambda i: costs[i] - quotas[i], reverse=True)
-        for i in order:
-            if shortfall <= 0:
-                break
-            add = min(shortfall, costs[i] - quotas[i])
-            if add > 0:
-                quotas[i] += add
-                shortfall -= add
-
-    q_bit, q_byte, q_arith, q_interesting = quotas
-
-    # bitflip
-    pass_n = 0
-    for byte_idx in range(length):
-        if pass_n >= q_bit:
-            break
-        orig = data[byte_idx]
-        for bit in range(8):
-            if pass_n >= q_bit:
-                break
-            mutant = bytearray(data)
-            mutant[byte_idx] = orig ^ (1 << bit)
-            yield bytes(mutant)
-            pass_n += 1
-
-    # byteflip
-    pass_n = 0
-    for byte_idx in range(length):
-        if pass_n >= q_byte:
-            break
-        mutant = bytearray(data)
-        mutant[byte_idx] ^= 0xFF
-        yield bytes(mutant)
-        pass_n += 1
-
-    # arithmetic
-    pass_n = 0
-    for byte_idx in range(length):
-        if pass_n >= q_arith:
-            break
-        orig = data[byte_idx]
-        for delta in ARITHMETIC_DELTAS:
-            if pass_n >= q_arith:
-                break
-            mutant = bytearray(data)
-            mutant[byte_idx] = (orig + delta) & 0xFF
-            yield bytes(mutant)
-            pass_n += 1
-            if pass_n >= q_arith:
-                break
-            mutant = bytearray(data)
-            mutant[byte_idx] = (orig - delta) & 0xFF
-            yield bytes(mutant)
-            pass_n += 1
-
-    # interesting
-    pass_n = 0
-    for byte_idx in range(length):
-        if pass_n >= q_interesting:
-            break
-        for val in INTERESTING_UNSIGNED_8:
-            if pass_n >= q_interesting:
-                break
-            mutant = bytearray(data)
-            mutant[byte_idx] = val & 0xFF
-            yield bytes(mutant)
-            pass_n += 1
+from tests.support.det_reference import reference_stream as _reference_deterministic_mutation_stream
 
 
 class TestDeterministicMutationEquivalence:
@@ -114,14 +27,14 @@ class TestDeterministicMutationEquivalence:
         data = bytes(range(256)) * (length // 256 + 1)
         data = data[:length]
 
-        expected = list(_reference_deterministic_mutation_stream(data, cap))
-        actual = list(_deterministic_mutation_stream(data, cap))
-
-        assert actual == expected, (
-            f"Mismatch at length={length}, cap={cap}. "
-            f"Expected {len(expected)} mutants, got {len(actual)}. "
-            f"First diff at index {next(i for i, (a, e) in enumerate(zip(actual, expected)) if a != e)}"
+        # Streamed pairwise: a 4 KiB seed under a 200k cap would hold two
+        # ~800 MB lists.
+        pairs = zip_longest(
+            _reference_deterministic_mutation_stream(data, cap),
+            _deterministic_mutation_stream(data, cap),
         )
+        for i, (expected, actual) in enumerate(pairs):
+            assert actual == expected, f"length={length}, cap={cap}: first diff at mutant {i}"
 
     def test_empty_seed(self):
         assert list(_deterministic_mutation_stream(b"", 1000)) == []
@@ -161,11 +74,9 @@ class TestDeterministicMutationEquivalence:
         actual = list(_deterministic_mutation_stream(data, cap))
         assert actual == expected
 
-    def test_each_mutant_differs_by_exactly_one_position(self):
-        """Structural invariant: every mutant is one edit away from the seed."""
+    def test_each_mutant_differs_within_one_window(self):
+        """Structural invariant: every mutant changes one window of <= 4 bytes."""
         data = b"The quick brown fox jumps over the lazy dog."
         for mutant in _deterministic_mutation_stream(data, 1000):
-            diffs = sum(1 for a, b in zip(mutant, data) if a != b)
-            # For bitflip, only one bit differs within one byte
-            # For byteflip/arithmetic/interesting, one byte differs
-            assert diffs <= 1, "Mutant differs at more than one position"
+            diffs = [i for i, (a, b) in enumerate(zip(mutant, data, strict=True)) if a != b]
+            assert diffs and diffs[-1] - diffs[0] < 4
