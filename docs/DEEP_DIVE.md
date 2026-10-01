@@ -907,9 +907,14 @@ Failures the shim survives but the fuzzer cannot otherwise see.
 | Check | Source | Surfaced |
 |---|---|---|
 | Stale shim (no `__afl_scoped_crash_handler`) | `core/elf.py::detect_scoped_crash_handler` | startup warning (`Fuzzer._warn_stale_shim`) |
-| Runtime counters | `__afl_shim_health(uint64_t *out, uint32_t n)` → `adapters/inprocess.py::read_shim_health` | `--- Shim Health ---` report section (in-process runs, only when an issue exists) |
+| Stale shim, multi-target | same, per target (`Fuzzer._check_target_shims`, also refuses a wrong SHM layout) | startup warning / error |
+| Startup self-test | one execution of 64 zero bytes per instrumented target (`Fuzzer._shim_self_test`); zero edges → `core/shim_health.py::self_test_issues` | startup warning, else `[*] Shim self-test: N target(s) OK` |
+| Shim stderr | `__afl_shim:` lines in any execution's stderr (`Fuzzer._run_target`) | warning, once per distinct line |
+| Runtime counters | `__afl_shim_health(uint64_t *out, uint32_t n)` → `adapters/inprocess.py::read_shim_health` | every `SHIM_HEALTH_PERIOD` (1000) execs in direct in-process mode, warning once per field; `--- Shim Health ---` report section at the end |
 
-Counters (`core/shim_health.py::ShimField`, append-only ABI): `ATTACHED`, `MAP_ENTRIES`, `SEG_REJECTED` (bad `AFL_MAP_SIZE`, segment smaller than header + table + tail, distance/node header overrunning its segment; each also logged to stderr or refused), `CMPLOG_DROPPED` (record lost to writer contention or a failed write; the record buffer is guarded by a non-blocking try-lock), `STRAY_SIGNALS`. Tests: `tests/test_shim_health.py`.
+`ShimWatch` dedups so a fault repeating on every execution warns once; per-exec cost ≈ 47 ns.
+
+Counters (`core/shim_health.py::ShimField`, append-only ABI): `ATTACHED`, `MAP_ENTRIES`, `SEG_REJECTED` (bad `AFL_MAP_SIZE`, segment smaller than header + table + tail, distance/node header overrunning its segment; each also logged to stderr or refused), `CMPLOG_DROPPED` (record lost to writer contention or a failed write; the record buffer is guarded by a non-blocking try-lock), `STRAY_SIGNALS`. Tests: `tests/test_shim_health.py`, `tests/test_shim_self_check.py`.
 
 ### Hybrid abort interception
 In non-ASAN builds, `afl_shim.c` intercepts `abort()` calls via a preprocessor macro, redirecting them to a static helper that writes `[shim] abort() intercepted` to stderr and returns (instead of killing the process). This prevents false crash detections from library assertion failures (e.g. FFmpeg's ~1600 `av_assert0` call sites). In ASAN builds (`__SANITIZE_ADDRESS__`), the override is excluded so `abort()` raises `SIGABRT`, which the signal handler chains to ASAN's own handler — letting ASAN produce diagnostic output before termination. The macro approach avoids the GCC "noreturn function does return" warning by never re-declaring `abort()` directly, and works correctly in both standalone binary and `.so` (ctypes/in-process) contexts.
