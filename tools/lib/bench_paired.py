@@ -77,6 +77,7 @@ ARENA_TESTABLE = (
     "chunk",
     "changed",
     "rare_mask",
+    "consolidated",
 )
 _ARENA = ["--elo", "--mc-bandit", "--position-arena"]
 

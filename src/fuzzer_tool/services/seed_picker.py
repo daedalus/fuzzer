@@ -90,6 +90,7 @@ TARGET_MATCH = "target_match"
 # fuzzer attribute holding it, and the per-pick signals its select_seed takes
 # after the key list (see _pick_os_seed). Arms absent here take none.
 _OS_SEED_ARMS = {
+    "consolidated": "_seed_consolidated",
     "mlfq": "_seed_mlfq",
     "stride": "_seed_stride",
     "eevdf": "_seed_eevdf",
@@ -104,6 +105,7 @@ _OS_SEED_SIGNALS = {
     "eevdf": ("cost", "weight"),
     "bfq": ("weight",),
     "sfq": ("flow",),
+    "consolidated": ("cost", "weight", "flow"),
 }
 
 # ── Invasion percolation operator selection (percolation handover Module 4) ─

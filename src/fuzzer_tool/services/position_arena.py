@@ -73,6 +73,10 @@ Arms::
     rare_mask    PositionRareMaskScheduler, FairFuzz branch mask: bins
                  whose mutation keeps the seed's rarest edge (opt-in,
                  --pos-rare-mask; see core/schedulers/pos_rare_mask.py)
+    consolidated PositionConsolidatedScheduler, uniform/boundary/levy/bin
+                 candidates scored by context x per-seed bin rates
+                 (opt-in, --pos-consolidated; see
+                 core/schedulers/pos_consolidated.py)
 
 Only arms whose feature is on join the pool, so nobody accrues phantom
 matches. ``arms`` (``--pos-arena-arms``) narrows the pool further to a named
@@ -93,7 +97,7 @@ served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
 ``burn_front``, ``kl_ducb``, ``canary``, ``round_robin``, ``fibonacci``,
-``fractal``, ``context``, ``levy``, ``boundary``, ``changed`` and ``rare_mask`` are each
+``fractal``, ``context``, ``levy``, ``boundary``, ``changed``, ``rare_mask`` and ``consolidated`` are each
 credited off-policy on every settled round, whoever served the positions, like
 ``seed_canary`` on the seed side.
 """
@@ -136,6 +140,7 @@ POSITION_STRATEGY_NAMES = (
     "chunk",
     "changed",
     "rare_mask",
+    "consolidated",
 )
 
 
@@ -185,6 +190,7 @@ class PositionArena:
         chunk: PositionScheduler | None = None,
         changed: PositionScheduler | None = None,
         rare_mask: PositionScheduler | None = None,
+        consolidated: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         # None = every arm whose feature is on; otherwise only these (+ uniform).
@@ -211,6 +217,7 @@ class PositionArena:
         )
         self._changed = changed if self.allows("changed") else None
         self._rare_mask = rare_mask if self.allows("rare_mask") else None
+        self._consolidated = consolidated if self.allows("consolidated") else None
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
         # Off-policy arms: fed every settled round whoever served. Single list
@@ -229,6 +236,7 @@ class PositionArena:
                 self._boundary,
                 self._changed,
                 self._rare_mask,
+                self._consolidated,
             )
             if e is not None
         )

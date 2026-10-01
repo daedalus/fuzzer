@@ -618,6 +618,8 @@ def cmd_fuzz(args):
         seed_codel_scheduler=getattr(args, "seed_codel_scheduler", False),
         seed_aimd_scheduler=getattr(args, "seed_aimd_scheduler", False),
         seed_p2c_scheduler=getattr(args, "seed_p2c_scheduler", False),
+        seed_consolidated_scheduler=getattr(args, "seed_consolidated_scheduler", False),
+        pos_consolidated=getattr(args, "pos_consolidated", False),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
         position_arena=getattr(args, "position_arena", False),
@@ -2058,6 +2060,7 @@ _HAIL_MARY_FLAGS = (
     "seed_codel_scheduler",
     "seed_aimd_scheduler",
     "seed_p2c_scheduler",
+    "seed_consolidated_scheduler",
     "softmax",
     "topk",
     "consolidated_v1",
@@ -2151,6 +2154,7 @@ _HAIL_MARY_FLAGS = (
     "pos_chunk",
     "pos_changed",
     "pos_rare_mask",
+    "pos_consolidated",
     "position_arena",
     "target_arena",
 )
@@ -2726,6 +2730,14 @@ def main() -> int:
         "(core/schedulers/seed_p2c.py).",
     )
     fuzz_parser.add_argument(
+        "--seed-consolidated-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'consolidated': the OS/network arms in one picker: p2c over lineage"
+        " flows, posterior yield per cost (x favored weight), AIMD decay of stale seeds, "
+        "round-robin sweep every 16th pick. Elo arm; also the no-elo pick when enabled "
+        "(core/schedulers/seed_consolidated.py).",
+    )
+    fuzz_parser.add_argument(
         "--lst-revisit",
         type=float,
         default=0.0,
@@ -2864,17 +2876,24 @@ def main() -> int:
         "whose mutation keeps the seed's rarest edge hit. Implied by --position-arena.",
     )
     fuzz_parser.add_argument(
+        "--pos-consolidated",
+        action="store_true",
+        help="Enable the position-arena consolidated scheduler: uniform, boundary, levy and "
+        "per-seed bin candidates scored by cross-seed context x per-seed bin rates "
+        "(core/schedulers/pos_consolidated.py). Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
         "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context, levy, boundary, "
-        "effector, token, chunk, changed, rare-mask) with "
+        "effector, token, chunk, changed, rare-mask, consolidated) with "
         "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
         "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage, --pos-context, "
         "--pos-levy, --pos-boundary, --pos-effector, --pos-token, --pos-chunk, "
-        "--pos-changed and --pos-rare-mask. Enabled by --hail-mary.",
+        "--pos-changed, --pos-rare-mask and --pos-consolidated. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--pos-arena-arms",
@@ -3258,7 +3277,7 @@ def main() -> int:
         "--las-vegas-delta",
         type=float,
         default=0.05,
-        help="Failure probability for Hoeffding bounds (default: 0.05 = 95% confidence)",
+        help="Failure probability for Hoeffding bounds (default: 0.05 = 95%% confidence)",
     )
     fuzz_parser.add_argument(
         "--las-vegas-min-pulls",

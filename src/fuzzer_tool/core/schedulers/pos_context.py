@@ -154,6 +154,12 @@ class PositionContextScheduler:
         idx = ctx_index(data, offset)
         return (self._succ[idx], self._fail[idx])
 
+    def tilt(self, data: bytes, offset: int) -> float:
+        """Clamped context-rate tilt of ``offset``; 1.0 while cold or out of range."""
+        if self._obs < MIN_OBS or not 0 <= offset < len(data):
+            return 1.0
+        return self._weight(ctx_index(data, offset), _rate(self._succ_total, self._fail_total))
+
     def top_contexts(self, n: int) -> list[ContextStat]:
         """The ``n`` best-rated seen contexts, best first."""
         return self._ranked()[: max(0, n)]

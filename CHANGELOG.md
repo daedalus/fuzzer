@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Consolidated seed and position arms** (`--seed-consolidated-scheduler`, `--pos-consolidated`): `seed_consolidated` merges the OS/network seed arms (p2c over sfq flows, eevdf/drr cost, stride favored weight, aimd decay, round-robin sweep); `pos_consolidated` merges the learning position arms (uniform/boundary/levy/bin candidates scored by context x per-seed bin rates).
 - **`--consolidated-v2`** (`core/schedulers/op_consolidated_v2.py`): consolidated v1 scored by an optimistic, tempered Thompson draw. +1.3-1.8% over v1 on all four `bandit_env` environments (20 paired seeds). Leads no-Elo precedence.
 - **Power Doppler schedule** (`--schedule doppler`, `core/power_doppler.py`): per-seed ensembles of mutant hit counts; mean + SVD wall filter, CFAR χ² flow detection; flow power scales seed energy to `[1, max_mult]`.
 - **OS / network scheduler ports**: seed arms `mlfq`, `stride`, `eevdf`, `bfq`, `sfq`, `codel`, `aimd`, `p2c` (`--seed-<name>-scheduler`) and op arms `op_stride`, `op_p2c` (`--op-stride`, `--op-p2c`); `core/fair_queue.py` gains `Stride` and `EEVDF`. Elo arms, in `--hail-mary`; seed arms also run without `--elo`. Falsification and adversarial tests. No paired benchmark yet.
