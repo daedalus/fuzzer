@@ -67,6 +67,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "varsize",
         "value",
         "vu64_encode",
+        "zigzag_encode",
+        "float16_edge",
     },
     "block": {
         "block_insert",

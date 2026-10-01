@@ -12,12 +12,14 @@ Usage:
         # apply replacement at offsets
 """
 
+import base64
 import logging
 import struct
 from collections.abc import Callable
 from itertools import product
 
 from fuzzer_tool.core.lru import LRUCache
+from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
 
 log = logging.getLogger(__name__)
 
@@ -70,6 +72,10 @@ class Encoder:
         multi-byte variants return multiple discontiguous chunks.
         """
         return [val]
+
+    def pattern(self, val: bytes) -> list[bytes]:
+        """Chunks to search for; ``encode`` unless trailing output is ambiguous."""
+        return self.encode(val)
 
     def size(self) -> int:
         """Return the number of discontiguous chunks produced by ``encode``."""
@@ -277,6 +283,135 @@ class SplitEncoder(Encoder):
         return f"split_{'r' if self.reverse else 'p'}"
 
 
+# ── Decoder-layer encoders ─────────────────────────────────────────────
+#
+# The target decodes the input before comparing: cmplog sees the decoded
+# operand, the input holds its encoded form. Encoding operand_a finds it,
+# encoding operand_b writes the solved form back. E.g. base64:
+#
+#   input   "aGVsbG8gd29ybGQh"  --decode-->  "hello world!"  ==  "HELLO_WORLD"
+#   search   b64("hello world")              cmplog operands
+#   write    b64("HELLO_WORLD")
+
+_B64_MIN = 3  # one full quantum; shorter patterns match by accident
+_HEX_MIN = 2
+_UTF16_MIN = 4  # two code units
+
+
+class Base64Encoder(Encoder):
+    """Base64 text decoded before a string compare."""
+
+    def __init__(self, urlsafe: bool = False):
+        self.urlsafe = urlsafe
+        self._b64 = base64.urlsafe_b64encode if urlsafe else base64.b64encode
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        return cmp_type == "STR" and len(lhs) >= _B64_MIN
+
+    def encode(self, val):
+        return [self._b64(val).rstrip(b"=")]
+
+    def pattern(self, val):
+        # Only chars fully set by *val*: the last partial one carries bits
+        # of the next input byte. 11 bytes = 88 bits -> 14 full chars.
+        return [self.encode(val)[0][: len(val) * 8 // 6]]
+
+    def name(self):
+        return f"b64_{'url' if self.urlsafe else 'std'}"
+
+
+class HexEncoder(Encoder):
+    """Hex string decoded before a memory compare."""
+
+    def __init__(self, upper: bool = False):
+        self.upper = upper
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        return cmp_type == "STR" and len(lhs) >= _HEX_MIN
+
+    def encode(self, val):
+        h = val.hex().encode()
+        return [h.upper() if self.upper else h]
+
+    def name(self):
+        return f"hex_{'u' if self.upper else 'l'}"
+
+
+class Utf16Encoder(Encoder):
+    """UTF-16 input narrowed to bytes before a string compare."""
+
+    def __init__(self, big_endian: bool = False):
+        self.codec = "utf-16-be" if big_endian else "utf-16-le"
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        return cmp_type == "STR"
+
+    def encode(self, val):
+        return [val.decode("latin-1").encode(self.codec)]
+
+    def name(self):
+        return f"utf16_{self.codec[-2:]}"
+
+
+def _is_wide_ascii(val: bytes) -> bool:
+    """UTF-16LE of non-NUL Latin-1: b"a\\0b\\0"."""
+    if len(val) < _UTF16_MIN or len(val) % 2:
+        return False
+    return not any(val[1::2]) and all(val[0::2])
+
+
+class Utf16NarrowEncoder(Encoder):
+    """Narrow input widened to UTF-16LE before a wide compare (wcscmp)."""
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        return cmp_type == "STR" and _is_wide_ascii(lhs) and _is_wide_ascii(rhs)
+
+    def encode(self, val):
+        return [val[0::2]]
+
+    def name(self):
+        return "utf16_narrow"
+
+
+class CaseEncoder(Encoder):
+    """Input case-folded (tolower/toupper) before a string compare."""
+
+    def __init__(self, upper: bool = False):
+        self.upper = upper
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        return cmp_type == "STR" and self.encode(lhs)[0] != lhs
+
+    def encode(self, val):
+        return [val.upper() if self.upper else val.lower()]
+
+    def name(self):
+        return f"case_{'u' if self.upper else 'l'}"
+
+
+class Leb128Encoder(Encoder):
+    """LEB128 varint decoded before an integer compare (DWARF, wasm, dex)."""
+
+    def __init__(self, signed: bool = False):
+        self.signed = signed
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        if cmp_type == "STR":
+            return False
+
+        # One-byte unsigned varints are plain bytes, already zext_1's job.
+        value = _to_int(lhs, self.signed)
+        return value < 0 if self.signed else value > 0x7F
+
+    def encode(self, val):
+        if self.signed:
+            return [encode_sleb128(_to_int(val, signed=True))]
+        return [encode_uleb128(_to_int(val))]
+
+    def name(self):
+        return "sleb128" if self.signed else "uleb128"
+
+
 # ── Engine ─────────────────────────────────────────────────────────────
 
 
@@ -304,6 +439,15 @@ for length in range(4, 16):
 
 for length in range(0, 4):
     BUILTIN_ENCODERS.append(CStrChrEncoder(length))
+
+# Decoder-layer encoders (not in Redqueen).
+for flag in (False, True):
+    BUILTIN_ENCODERS.append(Base64Encoder(flag))
+    BUILTIN_ENCODERS.append(HexEncoder(flag))
+    BUILTIN_ENCODERS.append(Utf16Encoder(flag))
+    BUILTIN_ENCODERS.append(CaseEncoder(flag))
+    BUILTIN_ENCODERS.append(Leb128Encoder(flag))
+BUILTIN_ENCODERS.append(Utf16NarrowEncoder())
 
 MAX_MUTATIONS_PER_PAIR = 256
 
@@ -345,7 +489,7 @@ def _applicable_encoders(cmp_size: int, cmp_type: str, operand_a: bytes, operand
         # Replacement variants are computed lazily on the first hit:
         # most pairs' patterns never appear in the input, and encoding
         # up to 129 variants is the most expensive step.
-        pattern_chunks = tuple(enc.encode(operand_a))
+        pattern_chunks = tuple(enc.pattern(operand_a))
         enc_cache[enc] = (pattern_chunks, None)
     return enc_cache
 

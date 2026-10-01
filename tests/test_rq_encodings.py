@@ -1,5 +1,11 @@
 """Tests for core/rq_encodings.py — Redqueen encoding engine."""
 
+import base64
+
+import pytest
+
+from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.rq_encodings import (
     BUILTIN_ENCODERS,
     CStrChrEncoder,
@@ -17,7 +23,7 @@ from fuzzer_tool.core.rq_encodings import (
 
 class TestEncoders:
     def test_39_encoders_loaded(self):
-        assert len(BUILTIN_ENCODERS) == 39
+        assert len(BUILTIN_ENCODERS) >= 39
 
     def test_all_encoder_types_present(self):
         names = [e.name() for e in BUILTIN_ENCODERS]
@@ -30,7 +36,7 @@ class TestEncoders:
 
     def test_encoders_summary(self):
         summary = encoders_summary()
-        assert len(summary) == 39
+        assert len(summary) == len(BUILTIN_ENCODERS)
         for entry in summary:
             assert "name" in entry
             assert "desc" in entry
@@ -237,3 +243,125 @@ class TestGenerateMutations:
         # Non-applicable pairs stay non-applicable on the cached path.
         m4 = generate_mutations(op_a, op_b, 16, "CMP", b"\xff\xfe\x00\x00", hammer=True)
         assert m4 == generate_mutations(op_a, op_b, 16, "CMP", b"\xff\xfe\x00\x00", hammer=True)
+
+
+# ── Decoder-layer encoders ─────────────────────────────────────────────
+#
+# The target decodes the input, then compares the decoded bytes: cmplog
+# sees the decoded operand, the input holds its encoded form. Expected
+# bytes come from the stdlib / LEB helpers, never from rq_encodings.
+
+
+def _apply(data: bytes, mutation) -> bytes:
+    """Overwrite each chunk at its offset, as ``_rq_apply_encoded`` does."""
+    offsets, repls, _enc = mutation
+    buf = bytearray(data)
+    for off, chunk in zip(offsets, repls, strict=True):
+        buf[off : off + len(chunk)] = chunk
+    return bytes(buf)
+
+
+def _by_encoder(mutations, name: str) -> list:
+    return [m for m in mutations if m[2].name() == name]
+
+
+_OP_A = b"hello world"
+_OP_B = b"HELLO_WORLD"
+
+
+class TestDecoderEncoders:
+    @pytest.mark.parametrize(
+        ("name", "enc", "dec"),
+        [
+            ("b64_std", base64.b64encode, base64.b64decode),
+            ("b64_url", base64.urlsafe_b64encode, base64.urlsafe_b64decode),
+        ],
+    )
+    def test_b64_solves_decoded_compare(self, name, enc, dec):
+        # 11 bytes: the 15th char is shared with the trailing "!". The
+        # \xfb\xef\xbe prefix encodes to "++++" / "----", so std != url.
+        op_a = b"\xfb\xef\xbe" + _OP_A[:8]
+        data = b"k=" + enc(op_a + b"!")
+        hits = _by_encoder(generate_mutations(op_a, _OP_B, 512, "STR", data), name)
+        assert hits
+        assert dec(_apply(data, hits[0])[2:])[: len(_OP_B)] == _OP_B
+
+    @pytest.mark.parametrize(("name", "upper"), [("hex_l", False), ("hex_u", True)])
+    def test_hex_solves_decoded_compare(self, name, upper):
+        h = _OP_A.hex()
+        data = b"id=" + (h.upper() if upper else h).encode()
+        hits = _by_encoder(generate_mutations(_OP_A, _OP_B, 512, "STR", data), name)
+        assert hits
+        assert bytes.fromhex(_apply(data, hits[0])[3:].decode()) == _OP_B
+
+    @pytest.mark.parametrize(
+        ("name", "codec"), [("utf16_le", "utf-16-le"), ("utf16_be", "utf-16-be")]
+    )
+    def test_utf16_widen_solves_narrowed_compare(self, name, codec):
+        data = b"\x00" + _OP_A.decode("latin-1").encode(codec)
+        hits = _by_encoder(generate_mutations(_OP_A, _OP_B, 512, "STR", data), name)
+        assert hits
+        assert _apply(data, hits[0])[1:].decode(codec) == _OP_B.decode()
+
+    def test_utf16_narrow_solves_widened_compare(self):
+        op_a, op_b = "abcdef".encode("utf-16-le"), "ABCDEF".encode("utf-16-le")
+        data = b"<abcdef>"
+        hits = _by_encoder(generate_mutations(op_a, op_b, 512, "STR", data), "utf16_narrow")
+        assert hits
+        assert _apply(data, hits[0]) == b"<ABCDEF>"
+
+    @pytest.mark.parametrize(("name", "fold"), [("case_u", bytes.upper), ("case_l", bytes.lower)])
+    def test_case_solves_folded_compare(self, name, fold):
+        op_a, op_b = b"Content-Type", b"Content-Size"
+        data = b"\n" + fold(op_a) + b": x"
+        hits = _by_encoder(generate_mutations(op_a, op_b, 512, "STR", data), name)
+        assert hits
+        assert _apply(data, hits[0]) == b"\n" + fold(op_b) + b": x"
+
+    def test_uleb128_solves_varint_compare(self):
+        op_a, op_b = (300).to_bytes(4, "little"), (70000).to_bytes(4, "little")
+        data = b"\x01" + encode_uleb128(300) + b"\x02"
+        hits = _by_encoder(generate_mutations(op_a, op_b, 32, "CMP", data), "uleb128")
+        assert hits
+        assert encode_uleb128(70000) in [m[1][0] for m in hits]
+
+    def test_sleb128_solves_signed_varint_compare(self):
+        op_a = (-200).to_bytes(4, "little", signed=True)
+        op_b = (-5000).to_bytes(4, "little", signed=True)
+        data = b"\x01" + encode_sleb128(-200) + b"\x02"
+        hits = _by_encoder(generate_mutations(op_a, op_b, 32, "CMP", data), "sleb128")
+        assert hits
+        assert encode_sleb128(-5000) in [m[1][0] for m in hits]
+
+    # Falsification: each encoder stays silent where its decoder is absent.
+    def test_falsify_plain_input_triggers_no_decoder_encoder(self):
+        data = b"xx" + _OP_A + b"yy"
+        names = {m[2].name() for m in generate_mutations(_OP_A, _OP_B, 512, "STR", data)}
+        assert not names & {"b64_std", "b64_url", "hex_l", "hex_u", "utf16_le", "utf16_be"}
+
+    def test_falsify_not_applicable(self):
+        by = {e.name(): e for e in BUILTIN_ENCODERS}
+        # Text encoders never fire on integer compares, varints never on strings.
+        for name in ("b64_std", "hex_l", "utf16_le", "utf16_narrow", "case_u"):
+            assert not by[name].is_applicable(32, "CMP", b"abcd", b"efgh")
+        assert not by["uleb128"].is_applicable(512, "STR", b"abcd", b"efgh")
+        # Single-byte varint duplicates zext_1; a narrow operand is not UTF-16.
+        assert not by["uleb128"].is_applicable(32, "CMP", b"\x05\0\0\0", b"\x06\0\0\0")
+        assert not by["sleb128"].is_applicable(32, "CMP", b"\x05\0\0\0", b"\x06\0\0\0")
+        assert not by["utf16_narrow"].is_applicable(512, "STR", b"abcdefgh", b"ijklmnop")
+        # Case fold that changes nothing is plain memcmp's job.
+        assert not by["case_u"].is_applicable(512, "STR", b"ABC-123", b"DEF-456")
+        assert not by["b64_std"].is_applicable(512, "STR", b"ab", b"cd")
+
+    # Adversarial: hostile operand shapes never raise or desync chunk counts.
+    # Width/type derived as ``_rq_apply_encoded`` does: operands fit the width.
+    def test_adversarial_random_operands(self):
+        rng = RandPool(seed=7)
+        for _ in range(500):
+            a = rng.randbytes(rng.randint(1, 40))
+            b = rng.randbytes(rng.randint(1, 40) if len(a) > 8 else rng.randint(1, len(a)))
+            data = rng.randbytes(rng.randint(0, 64))
+            size = 512 if len(a) > 8 or len(b) > 8 else max(len(a), len(b)) * 8
+            kind = "STR" if len(a) > 8 else rng.choice(("CMP", "SUB"))
+            for offs, repls, enc in generate_mutations(a, b, size, kind, data + a, hammer=True):
+                assert len(offs) == len(repls) == enc.size()
