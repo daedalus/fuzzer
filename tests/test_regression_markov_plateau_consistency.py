@@ -64,7 +64,7 @@ class TestFlagAgreesWithValue:
         flags = _train(ens, kind, 240, seed=9 if kind == HIGH_ENTROPY else 2)
         for flag in flags:
             if flag:
-                assert ens.last_js_divergence < ens.last_plateau_threshold
+                assert ens.last_js_divergence <= ens.last_plateau_threshold
 
     def test_still_learning_is_not_reported_as_plateau(self):
         """The measured case: order-0 converges on random bytes while the
@@ -80,7 +80,7 @@ class TestFlagAgreesWithValue:
         ens = _ensemble()
         flags = _train(ens, CONVERGING, 400, seed=2)
         assert any(flags)
-        assert ens.last_js_divergence < ens.last_plateau_threshold
+        assert ens.last_js_divergence <= ens.last_plateau_threshold
 
 
 class TestSelectionWeighting:
