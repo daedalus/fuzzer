@@ -1,4 +1,4 @@
-"""Fair-queue primitives: smooth WRR, DRR, WFQ.
+"""Fair-queue primitives: smooth WRR, DRR, WFQ, stride, EEVDF.
 
 Sequencers, not bandits: no arm to reward, so they live here and not in
 ``core/schedulers/`` (same split as ``core/job_scheduling.py``). A flow is
@@ -12,6 +12,8 @@ infinite. Nothing here raises on bad numbers, hangs, or divides by zero.
     SmoothWRR          counts   O(n)/pick   deterministic, no cost signal
     DeficitRR          cost     O(n)/pick   carries unspent credit, seeds
     WeightedFairQueue  cost     O(n)/pick   tightest fairness, targets
+    Stride             counts   O(log n)    deterministic tickets, seeds/ops
+    EEVDF              cost     O(log n)    lag-bounded, new flows join at V
 
 Picks are O(n) because callers hand over the live flow set every call; the
 flow sets here (targets, corpus) are rebuilt per pick by the caller anyway.
@@ -19,10 +21,11 @@ flow sets here (targets, corpus) are rebuilt per pick by the caller anyway.
 
 from __future__ import annotations
 
+import heapq
 import math
 from collections.abc import Callable, Hashable, Mapping, Sequence
 
-__all__ = ["DeficitRR", "SmoothWRR", "WeightedFairQueue"]
+__all__ = ["EEVDF", "DeficitRR", "SmoothWRR", "Stride", "WeightedFairQueue"]
 
 NEUTRAL_WEIGHT = 1.0
 NEUTRAL_COST = 1.0
@@ -35,6 +38,11 @@ DRR_PRUNE_SLACK = 8
 
 def _valid(x: float) -> bool:
     return math.isfinite(x) and x > 0.0
+
+
+def neutral(x: float) -> float:
+    """Garbage weight or cost counts as 1: never free, never infinite."""
+    return float(x) if _valid(x) else NEUTRAL_WEIGHT
 
 
 def _positive(weights: Mapping[Hashable, float]) -> dict[Hashable, float]:
@@ -262,3 +270,162 @@ class WeightedFairQueue:
         if total_n:
             return sum(self._sum.values()) / total_n
         return NEUTRAL_COST
+
+
+class Stride:
+    """Stride scheduling (Waldspurger 1995): deterministic proportional share.
+
+    Each flow holds tickets (its weight) and a *pass*. A pick serves the
+    lowest pass and advances it by the stride ``1 / tickets``::
+
+        tickets a=3 b=1:   a a a b a a a b ...
+
+    Equal tickets are plain round robin in list order. A joining flow starts
+    at the lowest live pass: no banked credit, no penalty. A heap keeps a
+    pick O(log n); a membership change rebuilds it in O(n).
+    """
+
+    def __init__(self) -> None:
+        self._heap: list[tuple[float, int, Hashable]] = []
+        self._seq = 0
+        self._seen: list[Hashable] | None = None
+
+    def pick(self, flows: Sequence[Hashable], weight: Callable[[Hashable], float]):
+        if not flows:
+            return ""
+        if len(flows) == 1:
+            return flows[0]
+        if self._seen is None or flows != self._seen:
+            self._rebuild(flows)
+
+        pass_, _, flow = self._heap[0]
+        stride = 1.0 / neutral(weight(flow))
+        heapq.heapreplace(self._heap, (pass_ + stride, self._tick(), flow))
+        return flow
+
+    def _tick(self) -> int:
+        self._seq += 1
+        return self._seq
+
+    def _rebuild(self, flows: Sequence[Hashable]) -> None:
+        """Drop departed flows; joiners start at the lowest surviving pass."""
+        old = {k: (p, s) for p, s, k in self._heap}
+        live = [old[k][0] for k in flows if k in old]
+        floor = min(live) if live else 0.0
+
+        self._heap = [old[k] + (k,) if k in old else (floor, self._tick(), k) for k in flows]
+        heapq.heapify(self._heap)
+        self._seen = list(flows)
+
+
+class EEVDF:
+    """Earliest eligible virtual deadline first (Stoica 1995; Linux >= 6.6).
+
+    Each flow has a virtual eligible time ``ve`` and a weight ``w``; the
+    clock ``V`` is the weighted mean of live ``ve``. A flow is *eligible*
+    when ``ve <= V`` (lag >= 0: it got no more than its share). Among
+    eligible flows the earliest deadline ``ve + slice / w`` wins, and the
+    pick is charged at once: ``ve += cost / w``::
+
+        cost a=1 b=8:   a b a a a a a a a ...   (b waits out its lag)
+
+    Unlike WFQ a flow ahead of the clock is never served early; unlike DRR
+    a new flow joins at ``V`` (lag 0), so it neither catches up nor waits.
+    Flat cost and weight are plain round robin.
+    """
+
+    def __init__(self, slice_: float = NEUTRAL_COST) -> None:
+        self._slice = neutral(slice_)
+        self._ve: dict[Hashable, float] = {}
+        self._w: dict[Hashable, float] = {}
+        self._heap: list[tuple[float, int, Hashable]] = []
+        self._seq = 0
+        self._sum_wve = 0.0
+        self._sum_w = 0.0
+        self._seen: list[Hashable] | None = None
+
+    @property
+    def virtual_time(self) -> float:
+        return self._sum_wve / self._sum_w if self._sum_w else 0.0
+
+    def pick(
+        self,
+        flows: Sequence[Hashable],
+        cost: Callable[[Hashable], float],
+        weight: Callable[[Hashable], float],
+    ):
+        if not flows:
+            return ""
+        if len(flows) == 1:
+            return flows[0]
+        if self._seen is None or flows != self._seen:
+            self._rebuild(flows, weight)
+
+        flow = self._pop_eligible()
+        self._charge(flow, neutral(cost(flow)), neutral(weight(flow)))
+        return flow
+
+    def _tick(self) -> int:
+        self._seq += 1
+        return self._seq
+
+    def _pop_eligible(self) -> Hashable:
+        """Pop the earliest-deadline flow with ve <= V; ineligible ones go back.
+
+        The lowest ``ve`` is always <= the weighted mean, so the scan ends;
+        if float drift ever says otherwise, the lowest ``ve`` is served.
+        """
+        vt = self.virtual_time
+        slack = 1e-9 * max(1.0, abs(vt))
+        stash = []
+        entry = None
+        while self._heap:
+            head = heapq.heappop(self._heap)
+            if self._ve[head[2]] <= vt + slack:
+                entry = head
+                break
+            stash.append(head)
+
+        if entry is None:
+            entry = min(stash, key=lambda e: self._ve[e[2]])
+            stash.remove(entry)
+        for held in stash:
+            heapq.heappush(self._heap, held)
+        return entry[2]
+
+    def _charge(self, flow: Hashable, cost: float, w: float) -> None:
+        """Advance ``ve`` by cost / w; a changed weight re-enters the sums."""
+        old_w = self._w[flow]
+        ve = self._ve[flow]
+        self._sum_w += w - old_w
+        self._sum_wve += (w - old_w) * ve + cost
+
+        ve += cost / w
+        self._ve[flow] = ve
+        self._w[flow] = w
+        heapq.heappush(self._heap, (ve + self._slice / w, self._tick(), flow))
+
+    def _rebuild(self, flows: Sequence[Hashable], weight: Callable[[Hashable], float]) -> None:
+        """Drop departed flows, then join new ones at the surviving clock."""
+        live = set(flows)
+        self._ve = {k: v for k, v in self._ve.items() if k in live}
+        self._w = {k: w for k, w in self._w.items() if k in live}
+        self._sum_w = sum(self._w.values())
+        self._sum_wve = sum(self._w[k] * v for k, v in self._ve.items())
+
+        vt = self.virtual_time
+        for k in flows:
+            if k in self._ve:
+                continue
+            w = neutral(weight(k))
+            self._ve[k] = vt
+            self._w[k] = w
+            self._sum_w += w
+            self._sum_wve += w * vt
+
+        seqs = {k: s for _, s, k in self._heap}
+        self._heap = [
+            (self._ve[k] + self._slice / self._w[k], seqs.get(k) or self._tick(), k) for k in flows
+        ]
+        heapq.heapify(self._heap)
+        self._seen = list(flows)
