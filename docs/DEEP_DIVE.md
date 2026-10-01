@@ -1589,6 +1589,13 @@ flag. `targets/antifuzz_demo.c` is a benchmark target that implements all four
 techniques (each gated by `AF_COVERAGE`/`AF_CRASH`/`AF_SPEED`/`AF_PTRACE`) around
 one real heap-buffer-overflow, for measuring each defeat in isolation.
 
+Fuzzification (Jung et al., USENIX Security '19) adds two more:
+
+| Fuzzification technique | Defeat in this tool |
+|-------------------------|---------------------|
+| BranchTrap fake paths (§4.1) | `fake_novelty_factor` (`core/coverage_noise.py`): a seed whose mutants are admitted at `AdmissionMonitor.FLOOD_RATE` or more (`child_count / fuzz_count`) after `FAKE_NOVELTY_MIN_FUZZ` execs gets weight × `FAKE_NOVELTY_PENALTY` in `SeedPicker._compute_weights`. Deterministic fake ids pass the phantom rerun, so admission rate is the signal. |
+| AntiHybrid `crc32(x) == C` (§5) | `crc32_p`/`crc32_r` Redqueen encoders invert CRC-32 over a 4-byte field (affine bijection over GF(2)): search the preimage of the observed operand, write the preimage of the constant. Only when both operands are ≥ 2^24, so small-int compares skip the two extra scans. |
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)

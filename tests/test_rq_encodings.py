@@ -1,6 +1,7 @@
 """Tests for core/rq_encodings.py — Redqueen encoding engine."""
 
 import base64
+import zlib
 
 import pytest
 
@@ -8,6 +9,7 @@ from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.rq_encodings import (
     BUILTIN_ENCODERS,
+    Crc32Encoder,
     CStrChrEncoder,
     CStringEncoder,
     MemEncoder,
@@ -365,3 +367,53 @@ class TestDecoderEncoders:
             kind = "STR" if len(a) > 8 else rng.choice(("CMP", "SUB"))
             for offs, repls, enc in generate_mutations(a, b, size, kind, data + a, hammer=True):
                 assert len(offs) == len(repls) == enc.size()
+
+
+def _crc_le(data: bytes) -> bytes:
+    """zlib CRC-32 of *data* as a little-endian cmplog operand."""
+    return zlib.crc32(data).to_bytes(4, "little")
+
+
+class TestCrc32Encoder:
+    """Fuzzification AntiHybrid: ``if (CRC_LOOP(value) == OUTPUT_CRC)``."""
+
+    def test_crc32_solves_hashed_compare(self):
+        x, want = (12345).to_bytes(4, "little"), (0xDEADBEEF).to_bytes(4, "little")
+        data = b"AB" + x + b"CD"
+        hits = _by_encoder(
+            generate_mutations(_crc_le(x), _crc_le(want), 32, "CMP", data), "crc32_p"
+        )
+        assert [m[0] for m in hits][0] == (2,)
+        assert want in [m[1][0] for m in hits]
+
+    def test_crc32_reversed_field(self):
+        x = bytes.fromhex("01020304")
+        data = x[::-1] + b"zz"
+        want = b"\x00\x00\x30\x39"
+        hits = _by_encoder(
+            generate_mutations(_crc_le(x), _crc_le(want), 32, "CMP", data), "crc32_r"
+        )
+        assert want[::-1] in [m[1][0] for m in hits]
+
+    # Falsification: no preimage in the input, wrong width, or strings -> silent.
+    def test_falsify_crc32(self):
+        x = (777).to_bytes(4, "little")
+        assert not _by_encoder(
+            generate_mutations(_crc_le(x), _crc_le(b"zzzz"), 32, "CMP", b"\x00" * 16), "crc32_p"
+        )
+        enc = Crc32Encoder(reverse=False)
+        assert not enc.is_applicable(64, "CMP", b"\x01" * 8, b"\x02" * 8)
+        assert not enc.is_applicable(512, "STR", b"abcd", b"efgh")
+        assert not enc.is_applicable(16, "CMP", b"\x01\x02", b"\x03\x04")
+        # Small-int compare (len == 12): neither side looks like a CRC.
+        assert not enc.is_applicable(
+            32, "CMP", (12).to_bytes(4, "little"), (13).to_bytes(4, "little")
+        )
+
+    # Adversarial: every 32-bit preimage round-trips, incl. all-zero / all-ones.
+    def test_adversarial_crc32_roundtrip(self):
+        enc = Crc32Encoder(reverse=False)
+        rng = RandPool(seed=11)
+        xs = [b"\x00" * 4, b"\xff" * 4] + [rng.randbytes(4) for _ in range(300)]
+        for x in xs:
+            assert enc.encode(_crc_le(x)) == [x]

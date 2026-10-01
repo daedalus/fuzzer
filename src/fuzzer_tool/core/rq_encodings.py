@@ -15,9 +15,11 @@ Usage:
 import base64
 import logging
 import struct
+import zlib
 from collections.abc import Callable
 from itertools import product
 
+from fuzzer_tool.core.gf2_common import apply_bitmask_map, invert_bitmask_map
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
 
@@ -412,6 +414,56 @@ class Leb128Encoder(Encoder):
         return "sleb128" if self.signed else "uleb128"
 
 
+# CRC-32 over a 4-byte field is affine over GF(2): crc(x) = L·x ^ crc(0).
+# L is invertible, so every 32-bit compare operand has exactly one preimage.
+_CRC_FIELD_BYTES = 4
+_CRC_BITS = 8 * _CRC_FIELD_BYTES
+_CRC_ZERO = zlib.crc32(bytes(_CRC_FIELD_BYTES))
+
+# A CRC output fits 24 bits with p=1/256; small-int compares (len == 12) always do.
+# Skipping them keeps the two extra input scans off the common pair.
+_CRC_MIN_OPERAND = 1 << 24
+
+
+def _crc_inverse_rows() -> list[int]:
+    """Rows of L^-1; row j selects the crc bits that make input bit j."""
+    cols = [
+        zlib.crc32((1 << i).to_bytes(_CRC_FIELD_BYTES, "little")) ^ _CRC_ZERO
+        for i in range(_CRC_BITS)
+    ]
+    rows = [sum(((cols[i] >> j) & 1) << i for i in range(_CRC_BITS)) for j in range(_CRC_BITS)]
+    inv = invert_bitmask_map(rows, _CRC_BITS)
+    assert inv is not None, "CRC-32 4-byte map is a bijection"
+    return inv
+
+
+_CRC_INV_ROWS = _crc_inverse_rows()
+
+
+class Crc32Encoder(Encoder):
+    """CRC-32 of a 4-byte field compared to a constant (Fuzzification AntiHybrid).
+
+    ``if (crc32(value) == OUTPUT_CRC)``: the operand is crc(x), not x, so the
+    pattern searched for is the preimage x and the replacement is the
+    preimage of the constant.
+    """
+
+    def __init__(self, reverse: bool = False):
+        self.reverse = reverse
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        if cmp_type == "STR" or cmp_size != _CRC_BITS:
+            return False
+        return _to_int(lhs) >= _CRC_MIN_OPERAND and _to_int(rhs) >= _CRC_MIN_OPERAND
+
+    def encode(self, val):
+        x = apply_bitmask_map(_CRC_INV_ROWS, _to_int(val) ^ _CRC_ZERO)
+        return [_reverse_if(x.to_bytes(_CRC_FIELD_BYTES, "little"), self.reverse)]
+
+    def name(self):
+        return f"crc32_{'r' if self.reverse else 'p'}"
+
+
 # ── Engine ─────────────────────────────────────────────────────────────
 
 
@@ -448,6 +500,8 @@ for flag in (False, True):
     BUILTIN_ENCODERS.append(CaseEncoder(flag))
     BUILTIN_ENCODERS.append(Leb128Encoder(flag))
 BUILTIN_ENCODERS.append(Utf16NarrowEncoder())
+for rev in (False, True):
+    BUILTIN_ENCODERS.append(Crc32Encoder(rev))
 
 MAX_MUTATIONS_PER_PAIR = 256
 
