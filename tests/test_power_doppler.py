@@ -15,7 +15,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from fuzzer_tool.core.power_doppler import PowerDoppler, _components, doppler_power
+from fuzzer_tool.core.power_doppler import (
+    STALE_FRAMES,
+    PowerDoppler,
+    _components,
+    doppler_power,
+)
 from fuzzer_tool.core.schedules import SeedScorer
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -170,6 +175,67 @@ class TestPowerDoppler:
 
         assert pd.stats()["dropped_edges"] == PATH - cap
 
+    def test_regression_cyclic_corpus_beyond_seed_cap_closes_frames(self):
+        # Falsification: 3x more seeds than open slots, one mutant per pick.
+        # LRU eviction of partial frames left every seed unscored forever.
+        cap, n_seeds = 4, 12
+        pd = PowerDoppler(ensemble=N, max_seeds=cap)
+        ids = list(range(PATH))
+        for _ in range(N):
+            for k in range(n_seeds):
+                _feed(pd, f"s{k}", _static(n=1), ids)
+
+        assert pd.stats()["ensembles"] >= cap
+        assert pd.stats()["open"] <= cap
+
+    def test_regression_abandoned_frame_yields_its_slot(self):
+        # Adversarial: a seed never picked again must not pin its slot; its
+        # partial frame (>= 3 samples) is scored on the way out.
+        pd = PowerDoppler(ensemble=N, max_seeds=1)
+        ids = list(range(PATH + 1))
+        flow = _with_flow(_static(), _toggle())
+        _feed(pd, "gone", flow[:3], ids)
+        stale = N * STALE_FRAMES
+
+        _feed(pd, "next", _static(n=stale + N), ids[:PATH])
+
+        assert pd.flow_edges("gone") == frozenset({PATH})
+        assert pd.stats()["ensembles"] == 2
+
+    def test_adversarial_tiny_partial_frame_not_scored(self):
+        # Fewer samples than a valid ensemble: dropped, never scored.
+        pd = PowerDoppler(ensemble=N, max_seeds=1)
+        ids = list(range(PATH))
+        _feed(pd, "gone", _static(n=2), ids)
+
+        _feed(pd, "next", _static(n=N * STALE_FRAMES + N), ids)
+
+        assert pd.stats()["ensembles"] == 1
+        assert pd.energy("gone") == 0.0
+
+    def test_regression_flow_ids_bounded_in_total(self):
+        # Falsification: retained flow-edge ids stay under the global budget,
+        # however many seeds are scored.
+        budget = 3
+        pd = PowerDoppler(ensemble=N, max_flow_ids=budget)
+        rows = np.column_stack([_static(m=PATH)] + [_toggle()] * 2)
+        ids = list(range(PATH + 2))
+        for k in range(5):
+            _feed(pd, f"s{k}", rows, ids)
+
+        assert pd.stats()["flow_ids"] <= budget
+        assert pd.flow_edges("s4") == frozenset({PATH, PATH + 1})
+
+    def test_adversarial_rescore_does_not_leak_flow_budget(self):
+        # Re-closing the same seed replaces, not adds to, its retained ids.
+        pd = PowerDoppler(ensemble=N)
+        rows = _with_flow(_static(), _toggle())
+        ids = list(range(PATH + 1))
+        for _ in range(4):
+            _feed(pd, "s", rows, ids)
+
+        assert pd.stats()["flow_ids"] == 1
+
     def test_bad_parameters_rejected(self):
         with pytest.raises(ValueError):
             PowerDoppler(ensemble=2)
@@ -177,6 +243,8 @@ class TestPowerDoppler:
             PowerDoppler(max_seeds=0)
         with pytest.raises(ValueError):
             PowerDoppler(max_edges=0)
+        with pytest.raises(ValueError):
+            PowerDoppler(max_flow_ids=-1)
 
 
 class TestDopplerSchedule:
@@ -236,8 +304,8 @@ def test_fuzz_loop_feeds_doppler(tmp_path):
         capture_output=True,
         text=True,
     )
-    if r.returncode != 0:
-        pytest.skip(f"driver failed to build: {r.stderr[:300]}")
+    # clang presence is the skipif above; a failed build is a shim regression.
+    assert r.returncode == 0, r.stderr[:300]
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     (corpus / "a").write_bytes(b"hello world")
@@ -259,5 +327,64 @@ def test_fuzz_loop_feeds_doppler(tmp_path):
     f.run(iterations=100_000, max_execs=600)
 
     stats = f._doppler.stats()
-    assert stats["samples"] >= 500
+    # Every execution reaches Doppler: accepted, or waiting for a free slot.
+    assert stats["samples"] + stats["refused"] >= 500
     assert stats["ensembles"] > 0
+
+
+def _fuzzer_no_target(tmp_path, **kw):
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    corpus, crashes = tmp_path / "c", tmp_path / "k"
+    corpus.mkdir()
+    crashes.mkdir()
+    return Fuzzer(
+        target="targets/test_target",
+        corpus_dir=str(corpus),
+        crashes_dir=str(crashes),
+        max_len=64,
+        schedule="doppler",
+        **kw,
+    )
+
+
+def test_regression_doppler_without_shm_is_disabled(tmp_path, capsys):
+    """Falsification: no SHM means no samples; disable and say so."""
+    f = _fuzzer_no_target(tmp_path, use_coverage=False)
+
+    assert f._doppler is None
+    assert f._seed_scorer.schedule == "base"
+    assert "doppler" in capsys.readouterr().out.lower()
+
+
+def test_doppler_with_shm_stays_enabled(tmp_path, monkeypatch):
+    """Adversarial: the gate must not disable Doppler when SHM is live."""
+    monkeypatch.setattr("fuzzer_tool.core.elf.sancov_guard_status", lambda _t: "present")
+    monkeypatch.setattr("fuzzer_tool.core.elf.detect_ctx_bits", lambda _t: 4)
+    f = _fuzzer_no_target(tmp_path, use_coverage=True)
+
+    assert f.shm_cov is not None
+    assert f._doppler is not None
+    assert f._seed_scorer.schedule == "doppler"
+
+
+def _key_of(target, multi):
+    from types import SimpleNamespace
+
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    owner = SimpleNamespace(target=target, multi_targets=multi)
+    return Fuzzer._doppler_key(owner, "seed")
+
+
+def test_regression_doppler_key_namespaced_per_target():
+    """Falsification: SHM edge ids are per target; one seed, two targets, two frames."""
+    multi = ["a.bin", "b.bin"]
+
+    assert _key_of("a.bin", multi) != _key_of("b.bin", multi)
+    assert _key_of("a.bin", multi) == _key_of("a.bin", multi)
+
+
+def test_doppler_key_single_target_is_seed_key():
+    """Adversarial: single-target runs keep the plain seed key."""
+    assert _key_of("a.bin", None) == "seed"
