@@ -4306,6 +4306,18 @@ class OperatorEngine:
         out = utf16_transcode(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
         return self._or_declined("utf16_transcode", out, buf)
 
+    def _op_zigzag_encode(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.zigzag import zigzag_encode  # noqa: PLC0415
+
+        out = zigzag_encode(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
+        return self._or_declined("zigzag_encode", out, buf)
+
+    def _op_float16_edge(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.float16 import float16_edge  # noqa: PLC0415
+
+        out = float16_edge(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
+        return self._or_declined("float16_edge", out, buf)
+
     def _op_nest_bomb(self, buf, byte_idx, _data):
         from fuzzer_tool.core.tree_mutator import nest_bomb  # noqa: PLC0415
 

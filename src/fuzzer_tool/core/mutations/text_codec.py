@@ -1,14 +1,16 @@
-"""Text-layer mutations: transport encodings, escapes, float spellings, UTF-16.
+"""Text-layer mutations: transport encodings, escapes, float spellings, UTF-16/32.
 
 Four operators, each aimed at a decoder layer the byte-level operators only
 reach by luck:
 
     operator         layer it attacks
     ---------------  ------------------------------------------------------
-    encoding_wrap    base64 / hex / percent decoders (en- or de-code a span)
+    encoding_wrap    base64/32/85 / hex / percent / quoted-printable / HTML
+                     entity / Modified UTF-8 decoders (en- or de-code a span)
     escape_mutate    string-escape lexers (bad escapes, broken quoting)
     ascii_float      strtod-style parsers (denormals, overflow, 17 digits)
-    utf16_transcode  wide-char paths (BOMs, odd length, lone surrogates)
+    utf16_transcode  wide-char paths (UTF-16/32 BOMs, odd length, lone
+                     surrogates, code units past U+10FFFF)
 
 All functions take ``(data, byte_idx, rng, max_len)`` and return the new
 bytes, or None to decline: nothing to work on, or the result would not fit.
@@ -21,6 +23,7 @@ Only ``rng.randint`` / ``rng.choice`` are drawn, so ``ScriptedRng`` and
 
 import base64
 import binascii
+import html
 import re
 import urllib.parse
 
@@ -75,7 +78,127 @@ def pct_double(span: bytes) -> bytes | None:
     return pct_encode(span).replace(b"%", b"%25")
 
 
-CODECS = (b64_encode, b64_decode, hex_encode, hex_decode, pct_encode, pct_decode, pct_double)
+_B32_ALPHABET = re.compile(rb"[^A-Z2-7]")
+_B32_QUANTUM = 8
+_A85_FRAME = (b"<~", b"~>")
+# Named, decimal or hex character reference: &lt; &#65; &#x42;
+_HTML_ENTITY = re.compile(rb"&(?:[A-Za-z][A-Za-z0-9]*|#[0-9]+|#[xX][0-9A-Fa-f]+);")
+
+
+def b32_encode(span: bytes) -> bytes | None:
+    return base64.b32encode(span)
+
+
+def b32_decode(span: bytes) -> bytes | None:
+    """Decode the alphabet bytes of *span*, re-padded; None if not base32."""
+    core = _B32_ALPHABET.sub(b"", span)
+    if not core:
+        return None
+
+    core += b"=" * (-len(core) % _B32_QUANTUM)
+    try:
+        return base64.b32decode(core)
+    except binascii.Error:
+        return None
+
+
+def b85_encode(span: bytes) -> bytes | None:
+    """RFC 1924 / git-style base85."""
+    return base64.b85encode(span)
+
+
+def a85_encode(span: bytes) -> bytes | None:
+    """Adobe Ascii85, <~ ~> framed (PDF, PostScript)."""
+    return base64.a85encode(span, adobe=True)
+
+
+def a85_decode(span: bytes) -> bytes | None:
+    """Ascii85, framed or bare; None if not Ascii85."""
+    adobe = span.startswith(_A85_FRAME[0]) and span.endswith(_A85_FRAME[1])
+    try:
+        out = base64.a85decode(span, adobe=adobe)
+    except ValueError:
+        return None
+    return out or None
+
+
+def qp_encode(span: bytes) -> bytes | None:
+    """Encode every byte, printable ones too: b"a=" -> b"=61=3D"."""
+    return b"".join(b"=%02X" % b for b in span)
+
+
+def qp_decode(span: bytes) -> bytes | None:
+    return binascii.a2b_qp(span)
+
+
+def html_encode(span: bytes) -> bytes | None:
+    """Hex character references for every byte: b"a" -> b"&#x61;"."""
+    return b"".join(b"&#x%X;" % b for b in span)
+
+
+def _unescape(m: re.Match) -> bytes:
+    return html.unescape(m.group().decode()).encode("utf-8", "surrogatepass")
+
+
+def html_decode(span: bytes) -> bytes | None:
+    """Resolve character references; None if *span* holds none."""
+    out, n = _HTML_ENTITY.subn(_unescape, span)
+    return out if n else None
+
+
+# Modified UTF-8 (Java/JNI, DEX): NUL as C0 80, astral as a CESU-8 pair.
+_MUTF8_NUL = b"\xc0\x80"
+_UTF8_ASTRAL = re.compile(rb"[\xf0-\xf4][\x80-\xbf]{3}")
+_CESU_PAIR = re.compile(rb"\xed[\xa0-\xaf][\x80-\xbf]\xed[\xb0-\xbf][\x80-\xbf]")
+_ASTRAL_BASE = 0x10000
+
+
+def _to_cesu(m: re.Match) -> bytes:
+    """F0 9F 98 80 (U+1F600) -> ED A0 BD ED B8 80; invalid leads stay."""
+    try:
+        cp = ord(m.group().decode("utf-8"))
+    except UnicodeDecodeError:
+        return m.group()
+
+    rest = cp - _ASTRAL_BASE
+    hi, lo = chr(0xD800 + (rest >> 10)), chr(0xDC00 + (rest & 0x3FF))
+    return (hi + lo).encode("utf-8", "surrogatepass")
+
+
+def _from_cesu(m: re.Match) -> bytes:
+    pair = m.group().decode("utf-8", "surrogatepass")
+    return pair.encode("utf-16-le", "surrogatepass").decode("utf-16-le").encode()
+
+
+def mutf8_encode(span: bytes) -> bytes | None:
+    return _UTF8_ASTRAL.sub(_to_cesu, span.replace(b"\x00", _MUTF8_NUL))
+
+
+def mutf8_decode(span: bytes) -> bytes | None:
+    return _CESU_PAIR.sub(_from_cesu, span.replace(_MUTF8_NUL, b"\x00"))
+
+
+# Append only: tests and replay index this tuple by position.
+CODECS = (
+    b64_encode,
+    b64_decode,
+    hex_encode,
+    hex_decode,
+    pct_encode,
+    pct_decode,
+    pct_double,
+    b32_encode,
+    b32_decode,
+    b85_encode,
+    a85_encode,
+    a85_decode,
+    qp_encode,
+    qp_decode,
+    html_encode,
+    html_decode,
+    mutf8_encode,
+    mutf8_decode,
+)
 
 
 def _splice(data: bytes, start: int, end: int, repl: bytes, max_len: int) -> bytes | None:
@@ -242,6 +365,9 @@ def ascii_float(data: bytes, byte_idx: int, rng, max_len: int) -> bytes | None:
 _BOM_LE = b"\xff\xfe"
 _BOM_BE = b"\xfe\xff"
 _LONE_HIGH_SURROGATE_LE = b"\x00\xd8"  # U+D800, little-endian
+_BOM32_LE = b"\xff\xfe\x00\x00"
+_BOM32_BE = b"\x00\x00\xfe\xff"
+_PAST_MAX_CP_LE = (0x110000).to_bytes(4, "little")  # one past U+10FFFF
 
 
 def _to_utf16(raw: bytes, encoding: str) -> bytes:
@@ -277,7 +403,32 @@ def lone_surrogate(data: bytes, pos: int, _rng, max_len: int) -> bytes | None:
     return _splice(data, pos, pos, _LONE_HIGH_SURROGATE_LE, max_len)
 
 
-UTF16_MODES = (span_le, span_be, whole_le, odd_trunc, lone_surrogate)
+def utf32_span_le(data: bytes, pos: int, rng, max_len: int) -> bytes | None:
+    s, e = _span(data, pos, rng)
+    return _splice(data, s, e, _BOM32_LE + _to_utf16(data[s:e], "utf-32-le"), max_len)
+
+
+def utf32_span_be(data: bytes, pos: int, rng, max_len: int) -> bytes | None:
+    s, e = _span(data, pos, rng)
+    return _splice(data, s, e, _BOM32_BE + _to_utf16(data[s:e], "utf-32-be"), max_len)
+
+
+def utf32_oob(data: bytes, pos: int, _rng, max_len: int) -> bytes | None:
+    """UTF-32 unit past U+10FFFF: the range check UTF-16 cannot reach."""
+    return _splice(data, pos, pos, _PAST_MAX_CP_LE, max_len)
+
+
+# Append only: tests and replay index this tuple by position.
+UTF16_MODES = (
+    span_le,
+    span_be,
+    whole_le,
+    odd_trunc,
+    lone_surrogate,
+    utf32_span_le,
+    utf32_span_be,
+    utf32_oob,
+)
 
 
 def utf16_transcode(data: bytes, byte_idx: int, rng, max_len: int) -> bytes | None:
