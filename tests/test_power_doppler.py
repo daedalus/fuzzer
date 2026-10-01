@@ -10,12 +10,12 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-import zlib
 from pathlib import Path
 
 import numpy as np
 import pytest
 
+from fuzzer_tool.core.crc32 import crc32_ieee
 from fuzzer_tool.core.power_doppler import (
     STALE_FRAMES,
     PowerDoppler,
@@ -243,18 +243,43 @@ class TestPowerDoppler:
         assert pd.stats()["stale_after"] <= 4 * n_seeds
         assert len(pd._dropped_keys) <= 8
 
-    def test_adversarial_drop_memory_halving_keeps_hash_subset(self):
-        # Overflow halves the sample: memory stays bounded and holds exactly
-        # the keys whose crc32 low bits are zero, so they cannot be churned out.
+    def test_regression_masked_out_cycle_keeps_a_witness(self):
+        # Falsification (PR #51 review): every key has an odd crc32, so the
+        # first halving emptied the threshold subset and no revisit was
+        # ever seen again. Bottom-k always keeps the k smallest crcs.
+        cap, ens, n_seeds = 4, 3, 200
+        keys = [k for k in (f"s{i}" for i in range(4 * n_seeds)) if crc32_ieee(k.encode()) & 1]
+        keys = keys[:n_seeds]
+        pd = PowerDoppler(ensemble=ens, max_seeds=cap, max_dropped=2)
+        ids = list(range(PATH))
+        for _ in range(ens * 6):
+            for k in keys:
+                _feed(pd, k, _static(n=1), ids)
+
+        assert pd.stats()["ensembles"] > 0
+
+    def test_adversarial_drop_memory_is_bottom_k_crc(self):
+        # Overflow keeps exactly the k smallest crcs: bounded, never empty.
+        cap = 3
+        pd = PowerDoppler(ensemble=N, max_dropped=cap)
+        keys = [f"k{i}" for i in range(100)]
+        for t, k in enumerate(keys):
+            pd._remember(k, t)
+
+        expected = sorted(keys, key=lambda k: crc32_ieee(k.encode()))[:cap]
+        assert set(pd._dropped_keys) == set(expected)
+
+    def test_adversarial_redropped_key_keeps_heap_bounded(self):
+        # Drop -> revisit -> drop of one key, many times: heap stays O(k).
         cap = 2
         pd = PowerDoppler(ensemble=N, max_dropped=cap)
-        for k in range(100):
-            pd._remember(f"k{k}", k)
+        for t in range(100):
+            pd._remember("a", t)
+            pd._remember("b", t)
+            pd._revisit("a")
 
-        mask = (1 << pd._sample_bits) - 1
-        assert len(pd._dropped_keys) <= cap
-        assert pd._sample_bits > 0
-        assert all(not zlib.crc32(k.encode()) & mask for k in pd._dropped_keys)
+        assert len(pd._crc_heap) <= 2 * cap
+        assert set(pd._dropped_keys) == {"b"}
 
     def test_adversarial_abandoned_keys_do_not_grow_horizon(self):
         # Keys that never return keep the horizon; the dropped-key memory stays bounded.

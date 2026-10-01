@@ -22,13 +22,14 @@ mutants change nothing, or only fail parsing en bloc, do not.
 from __future__ import annotations
 
 import functools
+import heapq
 import math
-import zlib
 from collections.abc import Mapping
 
 import numpy as np
 
 from fuzzer_tool.core.chi_squared import chi_squared_critical_value
+from fuzzer_tool.core.crc32 import crc32_ieee
 from fuzzer_tool.core.lru import LRUCache
 
 # Mutants per ensemble (pulses per Doppler frame).
@@ -46,8 +47,8 @@ DEFAULT_MAX_FLOW_IDS = 1 << 20
 STALE_FRAMES = 4
 # Horizon headroom over the slowest observed revisit gap.
 REVISIT_MARGIN = 2
-# Dropped keys remembered (key -> last-touch tick), a hash-sampled subset
-# so any corpus cycle is observable. ~150 B each bounds it near 5 MiB.
+# Dropped keys remembered (key -> last-touch tick): the bottom-k by crc32,
+# so any corpus cycle keeps witnesses. ~150 B each bounds it near 5 MiB.
 DEFAULT_MAX_DROPPED = 1 << 15
 # CFAR false-alarm probability per edge.
 FALSE_ALARM = 1e-3
@@ -64,7 +65,6 @@ SV_EPS = 1e-9
 # First column allocation; grows by doubling up to max_edges.
 INITIAL_COLS = 64
 
-_CRC_BITS = 32
 _MIN_ENSEMBLE = 3  # mean removal + one clutter rank still leaves a dof
 
 
@@ -217,8 +217,8 @@ class PowerDoppler:
         max_edges: Edge columns per ensemble; extra edges are dropped.
         max_scores: Closed-ensemble scores kept (LRU).
         max_flow_ids: Flow-edge ids kept across all scores (LRU).
-        max_dropped: Dropped-frame keys remembered (hash-sampled) to measure
-            revisit gaps.
+        max_dropped: Dropped-frame keys remembered (bottom-k crc32) to
+            measure revisit gaps.
     """
 
     def __init__(
@@ -251,7 +251,8 @@ class PowerDoppler:
         # Dropped-as-abandoned key -> its frame's last-touch tick.
         self._dropped_keys: dict[str, int] = {}
         self._max_dropped = max_dropped
-        self._sample_bits = 0  # remember keys with crc32 % 2**bits == 0
+        # Max-heap (-crc, key) over remembered keys; stale entries lazily skipped.
+        self._crc_heap: list[tuple[int, str]] = []
         # Insertion order is recency order; capacity is enforced by hand
         # (_admit, _trim) so evicted frames can be scored / ids uncounted.
         self._open: dict[str, _Ensemble] = {}
@@ -313,31 +314,44 @@ class PowerDoppler:
         gap = self._ticks - touched
         self._stale_after = max(self._stale_after, REVISIT_MARGIN * gap)
 
-    def _sampled(self, key: str) -> bool:
-        """Key is in the remembered subset: low *sample_bits* of crc32 zero."""
-        mask = (1 << self._sample_bits) - 1
-        return not zlib.crc32(key.encode()) & mask
-
     def _remember(self, key: str, touched: int) -> None:
-        """Record a dropped key, halving the sample when memory is full.
+        """Record a dropped key; keep the *max_dropped* smallest crc32s.
 
-        LRU memory forgot every key once the corpus cycle outgrew it (32k+
-        seeds in turn: each key evicted just before it returned). A hash
-        subset is never churned out, so its keys survive any cycle length::
+        LRU memory forgot every key once the corpus cycle outgrew it, and a
+        crc threshold subset could empty out (all-odd crcs after one halving).
+        Bottom-k is a fixed subset of any cycle, never churned, never empty::
 
-            bits 0: all keys    bits 1: crc even    bits 2: crc % 4 == 0 ...
+            drops (crc): a(9) b(2) c(7) d(1), k=2  ->  remember {d, b}
         """
-        if not self._sampled(key):
+        if key in self._dropped_keys:
+            self._dropped_keys[key] = touched
             return
 
-        self._dropped_keys[key] = touched
-        while len(self._dropped_keys) > self._max_dropped and self._sample_bits < _CRC_BITS:
-            self._sample_bits += 1
-            self._dropped_keys = {k: t for k, t in self._dropped_keys.items() if self._sampled(k)}
+        crc = crc32_ieee(key.encode())
+        heap = self._crc_heap
+        if len(self._dropped_keys) >= self._max_dropped:
+            top = self._heap_top()
+            if crc >= -top[0]:
+                return
 
-        # Only crc32 == 0 keys left and still over: keep the bound, drop this one.
-        if len(self._dropped_keys) > self._max_dropped:
-            self._dropped_keys.pop(key, None)
+            heapq.heappop(heap)
+            del self._dropped_keys[top[1]]
+
+        self._dropped_keys[key] = touched
+        heapq.heappush(heap, (-crc, key))
+        # Revisits leave stale (and, on re-drop, duplicate) entries: rebuild
+        # one live entry per key once the heap doubles past the bound.
+        if len(heap) > 2 * self._max_dropped:
+            live = {e[1]: e for e in heap if e[1] in self._dropped_keys}
+            self._crc_heap = list(live.values())
+            heapq.heapify(self._crc_heap)
+
+    def _heap_top(self) -> tuple[int, str]:
+        """Largest-crc live entry; pops entries of keys already revisited."""
+        heap = self._crc_heap
+        while heap[0][1] not in self._dropped_keys:
+            heapq.heappop(heap)
+        return heap[0]
 
     def _admit(self) -> _Ensemble | None:
         """Fresh frame if a slot is free or the oldest frame is abandoned.
