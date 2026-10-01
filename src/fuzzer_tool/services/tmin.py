@@ -5,9 +5,81 @@ import shutil
 import sys
 from pathlib import Path
 
-from fuzzer_tool.adapters.filesystem import hash_data, rehydrate_by_hash
-from fuzzer_tool.core.mutations import minimize_bytes
+from fuzzer_tool.adapters.filesystem import hash_data, rehydrate_by_hash, save_crash
+from fuzzer_tool.core.reducer import ChunkPass, Oracle, Phase, Reducer, Verdict
 from fuzzer_tool.core.state_store import StateStore
+
+# Distinct other-bug signatures kept per run (Hard Rule 54).
+MAX_ALSO_SIGS = 64
+# Grammar shrink budget: a quarter of the stages, at most 32 rounds.
+_TREE_ROUND_CAP = 32
+
+
+class _CrashJudge:
+    """Classify candidates against the pinned crash (C-Reduce
+    ``--also-interesting``): same signature → PASS, another crash → ALSO,
+    keeping the smallest input per other signature."""
+
+    def __init__(self, probe, original_sig: str):
+        self._probe = probe
+        self._sig = original_sig
+        self._last: tuple[str, int, str] | None = None
+        self.also: dict[str, tuple[bytes, int, str]] = {}
+
+    def verdict(self, data: bytes) -> Verdict:
+        sig, rc, stderr = self._probe(data)
+        self._last = (sig, rc, stderr) if sig is not None else None
+        if sig is None:
+            return Verdict.FAIL
+        return Verdict.PASS if sig == self._sig else Verdict.ALSO
+
+    def keep(self, data: bytes) -> None:
+        """``on_also`` hook: called right after ``verdict`` returned ALSO."""
+        sig, rc, stderr = self._last
+        old = self.also.get(sig)
+        if old is None and len(self.also) >= MAX_ALSO_SIGS:
+            return
+        if old is not None and len(old[0]) <= len(data):
+            return
+        self.also[sig] = (data, rc, stderr)
+
+    def save(self, out_dir: Path) -> int:
+        """Write kept inputs as regular crash artifacts; return count."""
+        out_dir.mkdir(parents=True, exist_ok=True)
+        hashes: set[str] = set()
+        sigs: dict[str, int] = {}
+        return sum(
+            bool(save_crash(d, rc, err, out_dir, hashes, sigs)) for d, rc, err in self.also.values()
+        )
+
+
+def _report_also(judge: _CrashJudge, out_dir: Path) -> None:
+    """Save other-signature crashes, if any were met."""
+    if not judge.also:
+        return
+    print(f"[+] Also-interesting: {judge.save(out_dir)} new crash(es) -> {out_dir}")
+
+
+class _GrammarPass:
+    """Tree-level shrink as a one-shot reducer pass, re-run each MAIN sweep."""
+
+    def __init__(self, grammar, oracle: Oracle, rounds: int):
+        from fuzzer_tool.core.grammar import TreeMutator
+
+        self._tree = TreeMutator(grammar)
+        self._oracle = oracle
+        self._rounds = rounds
+
+    def new(self, data: bytes) -> bool:
+        return False
+
+    def transform(self, data: bytes, done: bool) -> tuple[bytes, bool] | None:
+        if done:
+            return None
+        return self._tree.hierarchical_shrink(data, self._oracle, max_rounds=self._rounds), True
+
+    def advance(self, data: bytes, done: bool) -> bool:
+        return True
 
 
 def _sidecar_parent(crash_path: Path) -> str | None:
@@ -87,6 +159,7 @@ def tmin(
     grammar=None,
     lineage: bool = False,
     corpus_dir: str | None = None,
+    also_dir: str | None = None,
 ) -> bytes | None:
     """Minimize a crash input to find the smallest reproducer.
 
@@ -96,10 +169,10 @@ def tmin(
     error type + top frame, or raw signal number) to prevent drift to an
     unrelated bug.
 
-    When a grammar is provided, first attempts hierarchical tree-level
-    shrinking (removing whole nonterminal subtrees) before falling back
-    to byte-level delta debugging. This produces minimal reproducers that
-    are structurally meaningful and human-readable.
+    Reduction runs C-Reduce-style (``core/reducer.py``): grammar tree
+    shrinking (when a grammar is given) and byte-chunk deletion repeat to a
+    fixpoint over a memoized oracle. Candidates that crash with a different
+    signature are saved as new crashes (``--also-interesting``).
 
     Args:
         target: Path to the target binary.
@@ -115,6 +188,7 @@ def tmin(
             debugging.
         corpus_dir: Corpus directory to rehydrate pruned intermediate seeds
             during lineage replay.
+        also_dir: Where other-signature crashes go (default: crash file's dir).
 
     Returns:
         Minimized bytes, or None if the crash could not be reproduced.
@@ -166,10 +240,13 @@ def tmin(
                     return f"signal:{sig}"
             return None
 
+        def _probe(data_bytes: bytes) -> tuple[str | None, int, str]:
+            returncode, stderr = _run_target(data_bytes)
+            return _crash_signature(returncode, stderr), returncode, stderr
+
         def _is_crash(data_bytes: bytes, expected_sig: str | None = None) -> str | None:
             """Run target and return matching crash signature, or None."""
-            returncode, stderr = _run_target(data_bytes)
-            sig = _crash_signature(returncode, stderr)
+            sig = _probe(data_bytes)[0]
             if sig is None:
                 return None
             if expected_sig is not None and sig != expected_sig:
@@ -185,22 +262,7 @@ def tmin(
         print(f"[*] Reproduced. Original signature: {original_sig}")
         print(f"[*] Starting minimization (max {max_stages} stages)...")
 
-        # Phase 1: Hierarchical tree-level shrinking (if grammar available)
-        if grammar is not None:
-            from fuzzer_tool.core.grammar import TreeMutator
-
-            tree_mutator = TreeMutator(grammar)
-            tree_rounds = min(max_stages // 4, 32)
-            tree_result = tree_mutator.hierarchical_shrink(
-                data,
-                lambda d: _is_crash(d, original_sig) is not None,
-                max_rounds=tree_rounds,
-            )
-            if len(tree_result) < len(data):
-                print(f"[+] Tree shrink: {len(data)} -> {len(tree_result)} bytes")
-                data = tree_result
-
-        # Phase 1.5: Lineage replay — walk the mutation chain from the
+        # Phase 1: Lineage replay — walk the mutation chain from the
         # parent seed and rehydrate pruned intermediates by hash. A
         # root-most ancestor that still triggers the pinned crash is a
         # much smaller starting point for delta debugging.
@@ -219,11 +281,17 @@ def tmin(
                 )
                 data = candidate
 
-        # Phase 2: Byte-level delta debugging
-        def _signature_matches(data_bytes: bytes) -> bool:
-            return _is_crash(data_bytes, expected_sig=original_sig) is not None
+        # Phase 2: grammar + byte passes to a fixpoint over a cached oracle.
+        judge = _CrashJudge(_probe, original_sig)
+        oracle = Oracle(judge.verdict, on_also=judge.keep)
+        passes = [(Phase.MAIN, ChunkPass())]
+        if grammar is not None:
+            rounds = min(max_stages // 4, _TREE_ROUND_CAP)
+            passes.insert(0, (Phase.MAIN, _GrammarPass(grammar, oracle, rounds)))
+        minimized = Reducer(oracle, passes, max_steps=max_stages).run(data)
+        print(f"[*] Oracle: {oracle.runs} runs, {oracle.hits} cache hits")
 
-        minimized = minimize_bytes(data, _signature_matches, max_stages=max_stages)
+        _report_also(judge, Path(also_dir or crash_path.parent))
 
         print(
             f"[+] Minimized: {len(data)} -> {len(minimized)} bytes "
