@@ -208,3 +208,82 @@ def test_regression_extralibs_bogus_lib_dropped(tmp_path):
 
     assert "-lm" in r.stdout.split()
     assert "-lnosuchlib_fuzz" not in r.stdout
+
+
+def _versions(tmp_path: Path, variant: str, stale: str = "") -> list[str]:
+    """Run build_ffmpeg_versions for one variant against stubbed builders; return their calls."""
+    vendor, build = tmp_path / "vendor", tmp_path / "build"
+    _tree(vendor, "9.0.2")
+    for root in ["ffmpeg-9.0.2", "ffmpeg-9.0.2_asan"]:
+        (build / root / "libavformat").mkdir(parents=True)
+        (build / root / "libavformat" / "libavformat.a").write_text("")
+    if stale:
+        (build / stale / ".stale").write_text("")
+
+    fn = re.search(r"^build_ffmpeg_versions\(\) \{.*?^\}", BUILD_SCRIPT.read_text(), re.M | re.S)
+    assert fn
+    stubs = "\n".join(
+        f'{name}() {{ echo "{name} $*"; }}'
+        for name in [
+            "build_vendored_ffmpeg_sancov",
+            "build_target",
+            "build_so_target",
+            "warn_failed",
+        ]
+    )
+    script = (
+        f"{stubs}\nffmpeg_extralibs() {{ :; }}\n{fn.group(0)}\n"
+        f'VENDOR="{vendor}"; FUZZ_BUILD_ROOT="{build}"; TARGETS="{build}"; DEFAULT_CC=clang\n'
+        f"build_ffmpeg_versions {variant}\n"
+    )
+    r = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    return r.stdout.splitlines()
+
+
+def test_regression_versions_build_noasan_and_so(tmp_path):
+    """Per-version build emitted only the ASAN exe: no _noasan exe, no .so."""
+    asan = "\n".join(_versions(tmp_path / "a", '"_asan" "-fsanitize=address"'))
+    noasan = "\n".join(_versions(tmp_path / "n", '"_noasan" ""'))
+
+    assert "build_vendored_ffmpeg_sancov _asan ffmpeg-9.0.2" in asan
+    assert re.search(
+        r"build_target \S+ \S+/ffmpeg_read_9\.0\.2_asan .*-I\S+/ffmpeg-9\.0\.2_asan", asan
+    )
+    assert re.search(
+        r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_asan\.so .*-I\S+/ffmpeg-9\.0\.2_asan", asan
+    )
+
+    assert "build_vendored_ffmpeg_sancov  ffmpeg-9.0.2" in noasan
+    assert re.search(
+        r"build_target \S+ \S+/ffmpeg_read_9\.0\.2_noasan .*-I\S+/ffmpeg-9\.0\.2$", noasan, re.M
+    )
+    assert re.search(
+        r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_noasan\.so .*-I\S+/ffmpeg-9\.0\.2$",
+        noasan,
+        re.M,
+    )
+    assert "_asan" not in noasan
+    assert "-fsanitize" not in noasan
+
+
+def test_regression_versions_noasan_stale_links_nothing(tmp_path):
+    """Adversarial: stale nosan archives -> no noasan link, old binaries removed."""
+    old = [tmp_path / "build" / f"ffmpeg_read_9.0.2_noasan{ext}" for ext in ["", ".so"]]
+    for f in old:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("old")
+
+    calls = _versions(tmp_path, '"_noasan" ""', stale="ffmpeg-9.0.2")
+
+    assert not any(c.startswith(("build_target", "build_so_target")) for c in calls)
+    assert any(c.startswith("warn_failed") for c in calls)
+    assert not any(f.exists() for f in old)
+
+
+def test_regression_versions_wired_into_both_passes():
+    """build_ffmpeg_versions runs in the ASAN and the no-ASAN pass."""
+    main = BUILD_SCRIPT.read_text().split("# ── Main ──", 1)[1]
+
+    assert re.search(r'build_ffmpeg_versions "_asan" "-fsanitize=address"', main)
+    assert re.search(r'build_ffmpeg_versions "_noasan" ""', main)

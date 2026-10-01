@@ -21,7 +21,7 @@
 #   tools/vendor_lz4.sh       -> $FUZZ_VENDOR_ROOT/lz4        (lz4_read / lz4_read.so)
 #   tools/vendor_grep.sh      -> $FUZZ_VENDOR_ROOT/grep
 #   tools/vendor_ffmpeg.sh    -> $FUZZ_VENDOR_ROOT/ffmpeg
-#   tools/vendor_ffmpeg.sh --top=3 -> $FUZZ_VENDOR_ROOT/ffmpeg-<ver>  (ffmpeg_read_<ver>_asan)
+#   tools/vendor_ffmpeg.sh --top=3 -> $FUZZ_VENDOR_ROOT/ffmpeg-<ver>  (ffmpeg_read_<ver>_{asan,noasan}{,.so})
 #   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
 #   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
 #
@@ -1461,30 +1461,34 @@ STUBEOF
 }
 
 # ── Multi-version FFmpeg (tools/vendor_ffmpeg.sh --top=N) ─────────
-# One ASAN executable per vendored $VENDOR/ffmpeg-<ver> tree:
-#   ffmpeg-9.0.2 -> $FUZZ_BUILD_ROOT/ffmpeg-9.0.2_asan/*.a -> ffmpeg_read_9.0.2_asan
-# Executables, not .so: three dlopen'd libav* copies in one process share one
-# symbol namespace. Multi-target mode runs each in its own process and SHM map,
+# One executable + one .so per vendored $VENDOR/ffmpeg-<ver> tree and variant:
+#   _asan   : ffmpeg-<ver>_asan/*.a -> ffmpeg_read_<ver>_asan{,.so}
+#   _noasan : ffmpeg-<ver>/*.a      -> ffmpeg_read_<ver>_noasan{,.so}
+# Load one version's .so per process: two libav* copies share one symbol
+# namespace. Multi-target mode runs each in its own process and SHM map,
 # so one corpus exercises every version.
 build_ffmpeg_versions() {
-    local dir ver root libs
+    local suffix="$1" flags="$2"
+    local tree_suffix="" dir ver root libs
+    [ "$suffix" = "_asan" ] && tree_suffix="_asan"
     for dir in "$VENDOR"/ffmpeg-*/; do
         [ -f "$dir/configure" ] || continue
         ver="$(basename "$dir")"
         ver="${ver#ffmpeg-}"
-        build_vendored_ffmpeg_sancov "_asan" "ffmpeg-$ver"
+        build_vendored_ffmpeg_sancov "$tree_suffix" "ffmpeg-$ver"
 
         # Stale archives are the previous build's code: link nothing, and drop
-        # the old binary so a campaign cannot pick it up as current.
-        root="$FUZZ_BUILD_ROOT/ffmpeg-${ver}_asan"
+        # the old binaries so a campaign cannot pick them up as current.
+        root="$FUZZ_BUILD_ROOT/ffmpeg-${ver}${tree_suffix}"
         if [ ! -f "$root/libavformat/libavformat.a" ] || [ -f "$root/.stale" ]; then
-            rm -f "$TARGETS/ffmpeg_read_${ver}_asan"
-            warn_failed "ffmpeg_read_${ver}_asan: no current archives in $root"
+            rm -f "$TARGETS/ffmpeg_read_${ver}${suffix}" "$TARGETS/ffmpeg_read_${ver}${suffix}.so"
+            warn_failed "ffmpeg_read_${ver}${suffix}: no current archives in $root"
             continue
         fi
 
         libs="$root/libavformat/libavformat.a $root/libavcodec/libavcodec.a $root/libavutil/libavutil.a $root/libswresample/libswresample.a $(ffmpeg_extralibs "$root")"
-        build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}_asan" "$libs" "-fsanitize=address" "$DEFAULT_CC" "-I$root"
+        build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}${suffix}" "$libs" "$flags" "$DEFAULT_CC" "-I$root"
+        build_so_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}${suffix}.so" "$libs" "$flags" "$DEFAULT_CC" "-I$root"
     done
 }
 
@@ -2502,8 +2506,8 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "ffmpeg-sancov" "$state" "auto-rebuild vendored FFmpeg with coverage"
     local ffvers
     ffvers=$(cd "$VENDOR" 2>/dev/null && ls -d ffmpeg-*/ 2>/dev/null | tr -d / | tr '\n' ' ')
-    state=$([ -n "$ffvers" ] && [ "$BUILD_ASAN" -eq 1 ] && echo "BUILD" || echo "SKIP")
-    printf '  %-20s %-12s %s\n' "ffmpeg versions" "$state" "${ffvers:-none, run tools/vendor_ffmpeg.sh --top=3} (ASAN exe)"
+    state=$([ -n "$ffvers" ] && [ $((BUILD_ASAN + BUILD_NOSAN)) -gt 0 ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "ffmpeg versions" "$state" "${ffvers:-none, run tools/vendor_ffmpeg.sh --top=3} (exe + .so, _asan/_noasan)"
 
     state=$([ "$BUILD_ASAN" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "ASAN variants" "$state" "executables + .so targets"
@@ -2568,7 +2572,7 @@ if [ "$BUILD_ASAN" -eq 1 ]; then
     fi
     build_vendored_ffmpeg_sancov "_asan"
     build_simple_targets "_asan" "-fsanitize=address" "ASAN"
-    build_ffmpeg_versions
+    build_ffmpeg_versions "_asan" "-fsanitize=address"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "-fsanitize=address" "ASAN"
     build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
     build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
@@ -2599,6 +2603,7 @@ if [ "$BUILD_NOSAN" -eq 1 ]; then
     build_simple_targets "_nosan" "" "No-ASAN"
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan_tcg" "" "No-ASAN"
     build_vendored_ffmpeg_sancov ""
+    build_ffmpeg_versions "_noasan" ""
     build_simple_so_targets "_nosan" "" "No-ASAN"
     build_standalone_so_targets "_nosan" "" "No-ASAN"
 fi
