@@ -143,7 +143,7 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 | Metropolis admission | `--metropolis` | Accept non-improving inputs with P = exp(−ΔE/T) |
 | Secretary stopping | `--secretary` | Secretary-problem stopping ranks (display only) |
 | honggfuzz power factors | `--honggfuzz` | Novelty decay, freshness, fertility, density, entropy and timeout penalties |
-| AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD/GO/AFLGO/ENTROPIC seed-level energy |
+| AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD/GO/AFLGO/ENTROPIC/DOPPLER seed-level energy |
 | AFLGo directed annealing | `--schedule aflgo` | Exact AFLGo power factor — symmetric 32×/1/32× energy by distance-to-target with time-based cooling (`--t-x`, `--aflgo-cooling`) |
 | Entropic power schedule | `--schedule entropic` | libFuzzer `-entropic`: energy ∝ log(1 + rare-feature count) from already-tracked rare-edge ownership |
 | **K-Scheduler Katz centrality** | auto | On trace-pc targets: whole-program ICFG → horizon graph (contracted visited deletion, DAG) → out-degree Katz with β from node-hit counts; Elo-rated `katz` seed arm plus a clamped `--schedule katz` energy |
