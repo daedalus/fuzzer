@@ -654,7 +654,7 @@ _FALLBACK_PRECEDENCE = (
     "successive_elim",
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
-    # op_tpe, op_strata, gradient, whittle, corral, softmax, topk are deliberately absent
+    # op_tpe, op_strata, op_stride, op_p2c, gradient, whittle, corral, softmax, topk are deliberately absent
     # here: they are unproven exploratory arms
     # (see their module docstrings) that should only ever be reached via
     # Elo explicitly choosing them, not by being the top-precedence live
@@ -796,6 +796,10 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_tpe")
     if f._use_op_strata and f._op_strata:
         available.append("op_strata")
+    if f._use_op_stride and f._op_stride:
+        available.append("op_stride")
+    if f._use_op_p2c and f._op_p2c:
+        available.append("op_p2c")
     if f._use_softmax and f._softmax:
         available.append("softmax")
     if f._use_topk and f._topk:
@@ -5230,6 +5234,12 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "op_strata" and f._op_strata:
             op = f._op_strata.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "op_stride" and f._op_stride:
+            op = f._op_stride.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "op_p2c" and f._op_p2c:
+            op = f._op_p2c.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "softmax" and f._softmax:
             op = f._softmax.select_op(ops)
