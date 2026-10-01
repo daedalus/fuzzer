@@ -17,6 +17,7 @@ on ``OperatorEngine`` — nothing else.
 
 import contextlib
 import logging
+import re
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -124,6 +125,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "weizz_chunk_delete",
         "weizz_chunk_swap",
         "weizz_tag_repair",
+        # Text-layer decoders: transport encodings, escapes, strtod
+        "encoding_wrap",
+        "escape_mutate",
+        "ascii_float",
     },
     "radamsa": {
         "fuse_this",
@@ -135,6 +140,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "utf8_widen",
         "utf8_insert",
         "utf8_seq_mutate",
+        "utf16_transcode",
+        "nest_bomb",
     },
     "format": {
         "png_chunk_mutate",
@@ -187,6 +194,11 @@ _CATEGORIES: dict[str, set[str]] = {
         "montgomery_mutate",
         "lz4_chunk_mutate",
         "rar_chunk_mutate",
+        "json_mutate",
+        "sql_mutate",
+        "ecdsa_field_mutate",
+        "recompress_lz4",
+        "recompress_png_idat",
     },
     # Constructive inverses of the diehard/dieharder statistical tests: each
     # one builds a buffer whose test statistic sits in a tail the uniform
@@ -379,6 +391,44 @@ def _sniff_rar(d: bytes) -> bool:
     return d[:6] == b"Rar!\x1a\x07"
 
 
+def _sniff_lz4_frame(d: bytes) -> bool:
+    """lz4_read.c: even mode byte 0 selects the frame path, magic at 1."""
+    return len(d) >= 8 and not d[0] & 1 and d[1:5] == b"\x04\x22\x4d\x18"
+
+
+# JSON documents open with an object or array after optional whitespace.
+_JSON_SNIFF_WINDOW = 64
+
+
+def _sniff_json(d: bytes) -> bool:
+    return d[:_JSON_SNIFF_WINDOW].lstrip()[:1] in (b"{", b"[")
+
+
+# sqlite_read.c feeds any non-image input to the SQL parser; claim it only
+# when it starts like a statement ("selection" must not match "select").
+_SQL_LEAD = re.compile(
+    rb"\s*(?:SELECT|INSERT|UPDATE|DELETE|CREATE|DROP|ALTER|WITH|PRAGMA|BEGIN|"
+    rb"VALUES|EXPLAIN|ATTACH|REPLACE|ANALYZE|VACUUM|REINDEX|COMMIT|SAVEPOINT)\b",
+    re.I,
+)
+_SQLITE_IMAGE_MAGIC = b"SQLite format 3\x00"
+
+
+def _sniff_sql(d: bytes) -> bool:
+    return not d.startswith(_SQLITE_IMAGE_MAGIC) and _SQL_LEAD.match(d) is not None
+
+
+# secp256k1_read.c: byte 0 arms surfaces (bits 0-4), payload at byte 2
+# opens with a pubkey prefix (02/03/04/06/07) or a DER SEQUENCE (0x30).
+_SECP_MODE_MASK = 0x1F
+_SECP_PAYLOAD_LEADS = frozenset((0x02, 0x03, 0x04, 0x06, 0x07, 0x30))
+_SECP_MIN_LEN = 34
+
+
+def _sniff_secp_payload(d: bytes) -> bool:
+    return len(d) >= _SECP_MIN_LEN and 0 < d[0] <= _SECP_MODE_MASK and d[2] in _SECP_PAYLOAD_LEADS
+
+
 def _sniff_avif(d: bytes) -> bool:
     """Leading ftyp box declaring an AVIF-family brand.
 
@@ -530,8 +580,13 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     "ffconcat_chunk_mutate": lambda d: b"ffconcat" in d[:256].lower(),
     # lz4_read.c spends byte 0 on a mode selector (even = frame decode), so
     # the frame magic sits at offset 1.
-    "lz4_chunk_mutate": lambda d: len(d) >= 8 and not d[0] & 1 and d[1:5] == b"\x04\x22\x4d\x18",
+    "lz4_chunk_mutate": _sniff_lz4_frame,
     "rar_chunk_mutate": _sniff_rar,
+    "recompress_lz4": _sniff_lz4_frame,
+    "recompress_png_idat": lambda d: d[:8] == b"\x89PNG\r\n\x1a\n",
+    "json_mutate": _sniff_json,
+    "sql_mutate": _sniff_sql,
+    "ecdsa_field_mutate": _sniff_secp_payload,
     # secp256k1 field prime or curve order as a BE 32-byte literal.
     "montgomery_mutate": lambda d: (
         b"\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff"
@@ -735,6 +790,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # delimiters to blend in with. See P2-2,
     # docs/handover/handover_generators_2026-09-20.md.
     "tree_generate": lambda _f, d: _tree_mutator_has_delims(d),
+    "nest_bomb": lambda _f, d: _tree_mutator_has_delims(d),
 }
 
 
