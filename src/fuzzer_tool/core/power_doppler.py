@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import functools
 import math
+import zlib
 from collections.abc import Mapping
 
 import numpy as np
@@ -45,8 +46,8 @@ DEFAULT_MAX_FLOW_IDS = 1 << 20
 STALE_FRAMES = 4
 # Horizon headroom over the slowest observed revisit gap.
 REVISIT_MARGIN = 2
-# Dropped keys remembered (key -> last-touch tick); must outlast a corpus
-# cycle's worth of drops. ~150 B each bounds it near 5 MiB.
+# Dropped keys remembered (key -> last-touch tick), a hash-sampled subset
+# so any corpus cycle is observable. ~150 B each bounds it near 5 MiB.
 DEFAULT_MAX_DROPPED = 1 << 15
 # CFAR false-alarm probability per edge.
 FALSE_ALARM = 1e-3
@@ -63,6 +64,7 @@ SV_EPS = 1e-9
 # First column allocation; grows by doubling up to max_edges.
 INITIAL_COLS = 64
 
+_CRC_BITS = 32
 _MIN_ENSEMBLE = 3  # mean removal + one clutter rank still leaves a dof
 
 
@@ -215,7 +217,8 @@ class PowerDoppler:
         max_edges: Edge columns per ensemble; extra edges are dropped.
         max_scores: Closed-ensemble scores kept (LRU).
         max_flow_ids: Flow-edge ids kept across all scores (LRU).
-        max_dropped: Dropped-frame keys remembered (LRU) to measure revisit gaps.
+        max_dropped: Dropped-frame keys remembered (hash-sampled) to measure
+            revisit gaps.
     """
 
     def __init__(
@@ -246,7 +249,9 @@ class PowerDoppler:
         self._max_flow_ids = max_flow_ids
         self._stale_after = max_seeds * ensemble * STALE_FRAMES
         # Dropped-as-abandoned key -> its frame's last-touch tick.
-        self._dropped_keys: LRUCache = LRUCache(max_dropped)
+        self._dropped_keys: dict[str, int] = {}
+        self._max_dropped = max_dropped
+        self._sample_bits = 0  # remember keys with crc32 % 2**bits == 0
         # Insertion order is recency order; capacity is enforced by hand
         # (_admit, _trim) so evicted frames can be scored / ids uncounted.
         self._open: dict[str, _Ensemble] = {}
@@ -308,6 +313,32 @@ class PowerDoppler:
         gap = self._ticks - touched
         self._stale_after = max(self._stale_after, REVISIT_MARGIN * gap)
 
+    def _sampled(self, key: str) -> bool:
+        """Key is in the remembered subset: low *sample_bits* of crc32 zero."""
+        mask = (1 << self._sample_bits) - 1
+        return not zlib.crc32(key.encode()) & mask
+
+    def _remember(self, key: str, touched: int) -> None:
+        """Record a dropped key, halving the sample when memory is full.
+
+        LRU memory forgot every key once the corpus cycle outgrew it (32k+
+        seeds in turn: each key evicted just before it returned). A hash
+        subset is never churned out, so its keys survive any cycle length::
+
+            bits 0: all keys    bits 1: crc even    bits 2: crc % 4 == 0 ...
+        """
+        if not self._sampled(key):
+            return
+
+        self._dropped_keys[key] = touched
+        while len(self._dropped_keys) > self._max_dropped and self._sample_bits < _CRC_BITS:
+            self._sample_bits += 1
+            self._dropped_keys = {k: t for k, t in self._dropped_keys.items() if self._sampled(k)}
+
+        # Only crc32 == 0 keys left and still over: keep the bound, drop this one.
+        if len(self._dropped_keys) > self._max_dropped:
+            self._dropped_keys.pop(key, None)
+
     def _admit(self) -> _Ensemble | None:
         """Fresh frame if a slot is free or the oldest frame is abandoned.
 
@@ -323,7 +354,7 @@ class PowerDoppler:
 
             # Abandoned: score what it has rather than throw it away.
             del self._open[key]
-            self._dropped_keys[key] = old.touched
+            self._remember(key, old.touched)
             if old.n >= _MIN_ENSEMBLE:
                 self._close(key, old)
         return _Ensemble(self._ensemble, self._max_edges)

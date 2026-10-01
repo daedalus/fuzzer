@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Doppler drop memory churned on huge corpora** (`core/power_doppler.py`): the 2¹⁵-key LRU forgot every dropped key before a larger cycle returned, so the horizon never widened. Now a crc32-sampled subset (halved on overflow) is kept, which survives any cycle length within the same bound.
+
 - **Doppler horizon compounded per returning seed** (`core/power_doppler.py`): each return doubled one shared horizon (N returns → 2^N), disabling abandonment; and the dropped-key memory (`max_seeds` keys) forgot keys before large corpora cycled back. Horizon is now `max(horizon, 2 × measured gap)`; memory is 2¹⁵ keys.
 
 - **Doppler horizon thrashed on slow corpus cycles** (`core/power_doppler.py`): a cycle longer than the fixed abandon horizon dropped every frame one tick before its seed returned. The horizon now doubles when a dropped seed comes back.

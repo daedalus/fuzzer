@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import zlib
 from pathlib import Path
 
 import numpy as np
@@ -227,6 +228,33 @@ class TestPowerDoppler:
 
         assert pd.stats()["stale_after"] <= 4 * n_seeds
         assert pd.stats()["ensembles"] > 0
+
+    def test_regression_cycle_beyond_drop_memory_still_scores(self):
+        # Falsification (PR #50 review): 200 seeds in turn vs 8 remembered
+        # drops. LRU memory forgot every key just before it returned.
+        cap, ens, n_seeds = 4, 3, 200
+        pd = PowerDoppler(ensemble=ens, max_seeds=cap, max_dropped=8)
+        ids = list(range(PATH))
+        for _ in range(ens * 6):
+            for k in range(n_seeds):
+                _feed(pd, f"s{k}", _static(n=1), ids)
+
+        assert pd.stats()["ensembles"] > 0
+        assert pd.stats()["stale_after"] <= 4 * n_seeds
+        assert len(pd._dropped_keys) <= 8
+
+    def test_adversarial_drop_memory_halving_keeps_hash_subset(self):
+        # Overflow halves the sample: memory stays bounded and holds exactly
+        # the keys whose crc32 low bits are zero, so they cannot be churned out.
+        cap = 2
+        pd = PowerDoppler(ensemble=N, max_dropped=cap)
+        for k in range(100):
+            pd._remember(f"k{k}", k)
+
+        mask = (1 << pd._sample_bits) - 1
+        assert len(pd._dropped_keys) <= cap
+        assert pd._sample_bits > 0
+        assert all(not zlib.crc32(k.encode()) & mask for k in pd._dropped_keys)
 
     def test_adversarial_abandoned_keys_do_not_grow_horizon(self):
         # Keys that never return keep the horizon; the dropped-key memory stays bounded.
