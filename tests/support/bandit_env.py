@@ -34,7 +34,7 @@ Four environments:
   count, not the global round. Separates rested (per-arm) forgetters from
   round-indexed ones; DecayingBest cannot.
 * :class:`Fatigue150` -- 150 arms, rare heavy-tailed yields, fatigue on
-  success, periodic unlocks: the environment ``op_consolidated.py`` was tuned
+  success, periodic unlocks: the environment ``op_consolidated_v1.py`` was tuned
   on, reconstructed.
 
 Stateful environments (the last two) expose ``reset()`` and

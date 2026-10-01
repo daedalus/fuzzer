@@ -14,7 +14,7 @@ import random
 
 from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker
 from fuzzer_tool.core.schedulers.op_canary import CanaryScheduler
-from fuzzer_tool.core.schedulers.op_consolidated import ConsolidatedScheduler
+from fuzzer_tool.core.schedulers.op_consolidated_v1 import ConsolidatedV1Scheduler
 
 ARMS = ["bit_flip", "byte_flip", "havoc"]
 
@@ -130,7 +130,7 @@ class TestAdversarialFloor:
         canary_reward = run(canary.select_op, canary.record)
 
         rng = random.Random(1234)  # same draw stream for a fair comparison
-        consolidated = ConsolidatedScheduler()
+        consolidated = ConsolidatedV1Scheduler()
         consolidated_reward = run(consolidated.select_op, consolidated.record)
 
         assert canary_reward < consolidated_reward

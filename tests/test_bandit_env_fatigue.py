@@ -2,7 +2,7 @@
 
 RottingArms decays an arm by its *own* pulls, so it separates rested
 forgetters from round-indexed ones, which DecayingBest cannot.
-Fatigue150 reconstructs op_consolidated.py's 150-arm environment.
+Fatigue150 reconstructs op_consolidated_v1.py's 150-arm environment.
 """
 
 from __future__ import annotations

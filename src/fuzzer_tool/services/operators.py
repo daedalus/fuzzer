@@ -623,13 +623,14 @@ _deterministic_mutation_stream.last_truncated = 0
 #: No-Elo selection order, highest first: with Elo off, the first enabled
 #: scheduler here selects every operator. ``cem`` and ``invasion`` are
 #: absent on purpose -- both ride on ``f.mc`` and ``mc_bandit``, which the
-#: ``bandit`` entry already claims ahead of them. ``consolidated`` leads:
-#: it is the scheduler built to be the one that runs (see
-#: core/schedulers/op_consolidated.py), so enabling it alongside others without
-#: Elo means it selects. Pinned by
+#: ``bandit`` entry already claims ahead of them. ``consolidated_v2`` leads,
+#: then ``consolidated_v1``: they are the schedulers built to be the one that
+#: runs (see core/schedulers/op_consolidated_v1.py, op_consolidated_v2.py), so
+#: enabling one alongside others without Elo means it selects. Pinned by
 #: test_regression_scheduler_fallback_precedence.
 _FALLBACK_PRECEDENCE = (
-    "consolidated",
+    "consolidated_v2",
+    "consolidated_v1",
     "replicator",
     "mopt",
     "bandit",
@@ -709,8 +710,10 @@ def operator_strategy_pool(f) -> list[str]:
     while nothing is rated yet, so it is not cosmetic.
     """
     available = []
-    if f._use_consolidated and f._consolidated:
-        available.append("consolidated")
+    if f._use_consolidated_v2 and f._consolidated_v2:
+        available.append("consolidated_v2")
+    if f._use_consolidated_v1 and f._consolidated_v1:
+        available.append("consolidated_v1")
     if f._use_replicator and f._replicator:
         available.append("replicator")
     if f.mc and f.mc_bandit:
@@ -5078,8 +5081,11 @@ class OperatorEngine:
         if f._use_elo and f._elo and strategy:
             f._meta_strategy_used.add(strategy)
 
-        if strategy == "consolidated" and f._consolidated:
-            op = f._consolidated.select_op(ops)
+        if strategy == "consolidated_v2" and f._consolidated_v2:
+            op = f._consolidated_v2.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "consolidated_v1" and f._consolidated_v1:
+            op = f._consolidated_v1.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "replicator" and f._replicator:
             op = f._replicator.select_op(ops)

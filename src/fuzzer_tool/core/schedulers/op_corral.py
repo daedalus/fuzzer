@@ -14,7 +14,7 @@ Why this is a family the tree does not already have
 The existing twenty schedulers are UCB confidence widths (``ucb_common``,
 ``ducb``, ``swucb``, ``kl_*``, ``cucb``, ``c2ucb``, ``moss``, ``gp_ucb``,
 ``cusum_ucb``, ``contextual``), posterior sampling (``monte_carlo``,
-``consolidated``), exponential weights (``exp3``, ``fpl``), population
+``consolidated_v1``), exponential weights (``exp3``, ``fpl``), population
 methods (``cmaes``, ``mopt``, ``replicator``) and tree search (``mcts``).
 Log-barrier OMD is none of those, and the difference is not cosmetic:
 
@@ -57,7 +57,7 @@ value near ``1/p`` -- at uniform over 155 arms that is ~155 -- *every*
 round. Whoever played is punished hardest, which is churn, not learning,
 and it is the same pathology that makes the Elo fan-out prefer whoever
 played least recently (measured in
-``core/schedulers/op_consolidated.py``). Unbiasedness does not save it; the
+``core/schedulers/op_consolidated_v1.py``). Unbiasedness does not save it; the
 variance is what does the damage.
 
 The fix is the standard loss shift. With running mean loss ``b``,
