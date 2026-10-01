@@ -51,6 +51,7 @@ from fuzzer_tool.core.coverage_noise import (
     classify_noise,
     tail_variants,
 )
+from fuzzer_tool.core.crash_explore import CrashExplorer
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.elf import (
     SHM_LAYOUT_CURRENT,
@@ -151,6 +152,7 @@ from fuzzer_tool.services.runner import TargetRunner
 from fuzzer_tool.services.seed_picker import SeedPicker
 from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.target_arena import TargetArena
+from fuzzer_tool.services.uninit_probe import UninitProbe
 
 log = logging.getLogger(__name__)
 
@@ -1145,6 +1147,8 @@ class Fuzzer:
         ecofuzz=False,
         ecofuzz_mc_penalty_multiplier=None,
         metropolis=False,
+        crash_explore=False,
+        uninit_probe=False,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         mc_decay_interval=100,
@@ -2999,6 +3003,10 @@ class Fuzzer:
         self._use_ecofuzz = ecofuzz
         self._ecofuzz_mc_penalty_multiplier = ecofuzz_mc_penalty_multiplier
         self._metropolis = metropolis
+        # --crash-explore (AFL -C): keep only crashes on new crash paths.
+        self._crash_explorer = CrashExplorer() if crash_explore else None
+        # --uninit-probe: re-run admitted inputs under two heap fills.
+        self._uninit_probe = self._build_uninit_probe() if uninit_probe else None
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:
@@ -6122,7 +6130,7 @@ class Fuzzer:
             # exactly this case -- so it would be a second real scan on every
             # byteflip. Not worth it to gate one pass; leave the map unfilled.
             return
-        engine.note_deterministic_result(current != baseline)
+        engine.note_deterministic_result(current != baseline, current)
 
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.
@@ -7689,6 +7697,7 @@ class Fuzzer:
             returncode, stderr = self._run_target(seed)
             if self._is_crash(returncode, stderr):
                 self.crash_count += 1
+                self._seed_crash_path()
                 continue
             if returncode == -1:  # timeout sentinel
                 self.timeout_count += 1
@@ -7726,9 +7735,30 @@ class Fuzzer:
                 f"{baseline_edges} baseline edges "
                 f"({time.monotonic() - t0:.2f}s)"
             )
+        explorer = getattr(self, "_crash_explorer", None)
+        if explorer is not None and not explorer.variants:
+            print("[!] --crash-explore: no seed crashed; nothing to explore")
         self._report_comparison_reach(len(self.corpus))
         self._report_edge_id_stability(probe_seed)
         self._report_coverage_noise(probe_seed)
+
+    def _build_uninit_probe(self) -> UninitProbe:
+        """Probe bound to this target's argv shape and crash directory."""
+        if str(self.target).lower().endswith((".so", ".dylib", ".dll")):
+            log.warning("--uninit-probe needs an executable target; probing is off")
+        args = None
+        if self.file_mode:
+            # run_target_file passes the input path alone when args are empty.
+            args = self.target_args or ["{file}"]
+        return UninitProbe(self.target, self.timeout, self.crashes_dir, target_args=args)
+
+    def _seed_crash_path(self) -> None:
+        """Crash exploration: a crashing seed's path is already explored."""
+        explorer = getattr(self, "_crash_explorer", None)
+        if explorer is None:
+            return
+        _, edge_ids = self.shm_cov.is_new_coverage_with_edges()
+        explorer.observe(edge_ids)
 
     def _report_edge_id_stability(self, seed: bytes | None, n_runs: int = 3) -> None:
         """Say whether edge ids reproduce across processes.

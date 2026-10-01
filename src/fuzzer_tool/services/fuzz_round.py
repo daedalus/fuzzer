@@ -161,6 +161,7 @@ class FuzzRound:
         self._classify()
         self._scan_coverage()
         self._observe()
+        self._gate_explore()
         self._credit_seed()
         self._feed_models()
         self._record_edges()
@@ -170,6 +171,7 @@ class FuzzRound:
         self._credit_ops()
 
         if self._is_crash:
+            self._queue_variant()
             return self._on_crash()
         if self._admits():
             return self._admit()
@@ -704,6 +706,16 @@ class FuzzRound:
             or (f.pt_cov and f.pt_cov.is_new_coverage())
             or (f.branch_cov and f.branch_cov.is_new_coverage())
         )
+
+    def _gate_explore(self) -> None:
+        # Crash exploration (--crash-explore): the only signal is a crash on
+        # a new crash path. Everything else reads as boring.
+        explorer = self._f._crash_explorer
+        if explorer is None:
+            return
+        self._is_crash = self._is_crash and explorer.observe(self._edges_now())
+        self._is_interesting = self._has_new_coverage = self._is_new_max = False
+        self._is_cmp_progress = self._is_new_valid_coverage = self._is_slow = False
 
     # ── Side signals ─────────────────────────────────────────────────
 
@@ -1673,6 +1685,16 @@ class FuzzRound:
         f._maybe_periodic_minimize()
         return True
 
+    def _queue_variant(self) -> None:
+        # Crash exploration: a surviving variant is also a seed, so the next
+        # mutants start from it.
+        f = self._f
+        if f._crash_explorer is None:
+            return
+        before = len(f.corpus)
+        f.save_to_corpus(self._mutated, parent=self._data)
+        f._record_lineage_insert(self._mutated, self._data, before)
+
     def _triage_crash(self) -> None:
         # direct_lite crashes carry no fault address (no ptrace, and the
         # guarded call reports only the signal). Re-run the input once
@@ -1732,6 +1754,7 @@ class FuzzRound:
         f._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
         self._feed_population()
         self._analyze_sensitivity()
+        self._probe_uninit()
         # Coverage-guided trimming: try to minimize inputs that hit new edges
         if self._has_new_coverage and len(mutated) > 10:
             f._trim_new_coverage(mutated, data)
@@ -1742,6 +1765,13 @@ class FuzzRound:
         f._maybe_periodic_minimize(dedup=True)
         f._record_fluctuation_observation("success", f._get_current_edge_set())
         return True
+
+    def _probe_uninit(self) -> None:
+        # --uninit-probe: new coverage is where a fresh decoder path may emit
+        # heap bytes it never wrote. Three extra execs per admission.
+        probe = self._f._uninit_probe
+        if probe is not None:
+            probe.check(self._mutated)
 
     def _last_seed_edges(self) -> int:
         tracker = self._f._edge_tracker
