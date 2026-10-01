@@ -2313,6 +2313,12 @@ class Fuzzer:
         )
         self._power_schedule = schedule
         self._last_perf_score = 100.0  # default multiplier (1x)
+        # Power Doppler flow energy: fed per execution, read per pick.
+        self._doppler = None
+        if schedule == "doppler":
+            from fuzzer_tool.core.power_doppler import PowerDoppler
+
+            self._doppler = PowerDoppler()
 
         # Seed key: computed on demand from corpus manager.  Caching the
         # full bytes object as a dict key pinned every unique mutation in
@@ -6278,6 +6284,16 @@ class Fuzzer:
         ):
             self._exec_perplexity.observe(scanned_shm.get_edge_counts())
 
+        # Power Doppler slow-time sample: this mutant's hit counts, filed
+        # under its parent seed. Truncated executions skipped as above.
+        if (
+            self._doppler is not None
+            and scanned_shm is not None
+            and not is_crash
+            and not is_timeout
+        ):
+            self._doppler.observe(self._seed_key(data), scanned_shm.get_edge_counts())
+
         # Performance novelty: an edge whose trip count grew substantially
         # past anything seen before. The hit-count buckets saturate (129 and
         # 10^6 are the same bucket), so this is the only signal that stays
@@ -9139,6 +9155,8 @@ class Fuzzer:
             groups["Seed selection"].append("aflgo")
         if getattr(self, "_katz_channel", None) is not None:
             groups["Seed selection"].append("katz")
+        if getattr(self, "_doppler", None) is not None:
+            groups["Seed selection"].append("doppler")
         if getattr(self, "_tang", None) is not None:
             groups["Seed selection"].append("tang")
         if getattr(self, "_kruskal_count", None) is not None:
@@ -9685,6 +9703,9 @@ class Fuzzer:
                             self._katz_channel.seed_energy(seed_key)
                             if getattr(self, "_katz_channel", None) is not None
                             else 0.0
+                        ),
+                        doppler_energy=(
+                            self._doppler.energy(seed_key) if self._doppler is not None else 0.0
                         ),
                         **hf_kwargs,
                     )

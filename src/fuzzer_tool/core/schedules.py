@@ -24,6 +24,9 @@ Schedules:
   scoring. Seeds touching more rare/undersampled features get
   proportionally more mutation budget; seeds with no rare features get
   the schedule-neutral 1.0x factor.
+- DOPPLER: power Doppler flow energy (core/power_doppler.py) — seeds whose
+  mutants steer many edges locally get up to max_mult; unscored or
+  static seeds stay at 1.0x.
 
 Honggfuzz factors (applied multiplicatively on top of schedule scoring):
 - Novelty decay: new-edge bonus that decays over 10 minutes
@@ -175,6 +178,7 @@ class SeedScorer:
         "aflgo",
         "entropic",
         "katz",
+        "doppler",
     )
     COOLING = ("exp", "log", "lin", "quad")
 
@@ -239,6 +243,8 @@ class SeedScorer:
         # K-Scheduler centrality (normalized 0-1 from the katz arm)
         katz_energy: float = 0.0,
         stack_depth: int = 0,
+        # Power Doppler flow energy (normalized 0-1 from PowerDoppler)
+        doppler_energy: float = 0.0,
     ) -> float:
         """Compute the energy score for a queue entry.
 
@@ -330,6 +336,10 @@ class SeedScorer:
             # [1, max_mult]: one high-centrality seed cannot starve the
             # queue (same clamp rationale as the paper's AFL integration).
             norm = min(max(katz_energy, 0.0), 1.0)
+            perf_score *= 1.0 + norm * (self.max_mult - 1)
+        elif self.schedule == "doppler":
+            # Same [1, max_mult] clamp as katz.
+            norm = min(max(doppler_energy, 0.0), 1.0)
             perf_score *= 1.0 + norm * (self.max_mult - 1)
 
         # ── Honggfuzz power factors (applied on top of schedule) ────────

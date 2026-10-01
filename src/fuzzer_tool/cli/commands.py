@@ -4424,10 +4424,23 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--schedule",
         default="base",
-        choices=("base", "fast", "coe", "rare", "mopt", "lin", "quad", "go", "aflgo", "entropic"),
-        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic "
+        choices=(
+            "base",
+            "fast",
+            "coe",
+            "rare",
+            "mopt",
+            "lin",
+            "quad",
+            "go",
+            "aflgo",
+            "entropic",
+            "doppler",
+        ),
+        help="Power schedule: base|fast|coe|rare|mopt|lin|quad|go|aflgo|entropic|doppler "
         "(aflgo = exact AFLGo distance annealing, see --t-x; "
-        "entropic = libFuzzer -entropic, log-scaled rare-feature energy)",
+        "entropic = libFuzzer -entropic, log-scaled rare-feature energy; "
+        "doppler = power Doppler flow energy, SHM coverage only)",
     )
     fuzz_parser.add_argument(
         "--aflgo-cooling",
