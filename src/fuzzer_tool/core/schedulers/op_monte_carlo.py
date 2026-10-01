@@ -417,6 +417,11 @@ class MonteCarloScheduler:
             for k in arm_beta:
                 pb = prior.get(k, _UNIFORM_PRIOR)[1]
                 arm_beta[k] = pb + (arm_beta[k] - pb) * d
+            # Pooled counts feed hierarchical shrinkage; they must forget at
+            # the same rate (as in seed_quality), else every arm stays anchored
+            # to pre-decay evidence.
+            self._pooled_successes *= d
+            self._pooled_failures *= d
 
         # Fractional Bernoulli: a success worth w is w of a hit and 1 - w of
         # a miss, so alpha / (alpha + beta) converges to E[reward]. Adding

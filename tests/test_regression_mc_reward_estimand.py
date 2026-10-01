@@ -106,3 +106,26 @@ class TestDecayTowardPrior:
         for _ in range(100):
             mc.record("other", success=False)
         assert mc.arm_alpha["ghost"] == pytest.approx(1.0)
+
+
+def test_regression_decay_forgets_pooled_counts():
+    """With hierarchical pooling, undecayed pooled counts kept every arm's
+    effective posterior anchored to pre-decay evidence."""
+    mc = MonteCarloScheduler(arm_decay=0.5, decay_interval=1, hierarchical_pooling=1.0)
+    mc.init_arm("A")
+    for _ in range(100):
+        mc.record("A", success=True, weight=1.0)
+    for _ in range(100):
+        mc.record("A", success=False)
+    # Independent derivation: decay fires before each update.
+    succ = fail = 0.0
+    for k in range(200):
+        succ, fail = succ * 0.5, fail * 0.5
+        if k < 100:
+            succ += 1.0
+        else:
+            fail += 1.0
+    a, b = mc._get_effective_params("fresh")
+    assert (a, b) == pytest.approx((1.0 + succ, 1.0 + fail))
+    # Undecayed pools sat at 101 / 202 = 0.5; recent evidence is all misses.
+    assert a / (a + b) < 0.3

@@ -397,22 +397,27 @@ def drop_sparse_rows(
 ) -> list[list[float]]:
     """Rows whose expected cells all reach *min_expected*.
 
-    Expected = row_total * col_total / grand_total on the full table. A row
-    below the minimum (e.g. an operator run once at a 1% base rate: expected
-    successes 0.01) contributes chi2 ~ 1/expected from noise alone.
+    Expected = row_total * col_total / grand_total. A row below the minimum
+    (e.g. an operator run once at a 1% base rate: expected successes 0.01)
+    contributes chi2 ~ 1/expected from noise alone. Dropping rows shifts the
+    marginals, so filter until no row is dropped (at most len(table) passes).
 
     Example: [[10, 990], [1, 0], [12, 988]] -> rows 0 and 2.
     """
-    if not table:
-        return []
+    kept = table
+    while kept:
+        col_totals = [sum(col) for col in zip(*kept, strict=True)]
+        grand = sum(col_totals)
+        if grand <= 0:
+            return []
 
-    col_totals = [sum(col) for col in zip(*table, strict=True)]
-    grand = sum(col_totals)
-    if grand <= 0:
-        return []
+        min_share = min(col_totals) / grand
+        survivors = [row for row in kept if sum(row) * min_share >= min_expected]
+        if len(survivors) == len(kept):
+            return kept
+        kept = survivors
 
-    min_share = min(col_totals) / grand
-    return [row for row in table if sum(row) * min_share >= min_expected]
+    return []
 
 
 # ── effect size ────────────────────────────────────────────────────────

@@ -74,3 +74,13 @@ def test_all_sparse_runs_no_test(caplog, n):
     with caplog.at_level(logging.DEBUG):
         Fuzzer._run_chi2_operator_test(f)
     assert "op heterogeneity" not in caplog.text
+
+
+def test_regression_filter_recomputes_marginals():
+    """Dropping rows shifts the marginals: rows valid against the full table
+    can fall below the minimum against the survivors. Filter to a fixpoint."""
+    table = [[0.0, 100.0], [1.0, 999.0], [9.0, 9991.0]] + [[1.0, 0.0]] * 600
+    kept = drop_sparse_rows(table)
+    for r in range(len(kept)):
+        for c in range(2):
+            assert _expected(kept, r, c) >= COCHRAN_MIN_EXPECTED
