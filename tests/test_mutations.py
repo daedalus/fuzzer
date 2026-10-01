@@ -189,6 +189,15 @@ class TestMinimizeBytes:
         result = minimize_bytes(data, lambda x: True, max_stages=1)
         assert len(result) <= len(data)
 
+    def test_duplicate_candidates_run_once(self):
+        """Homogeneous input: every offset of a chunk size yields the same
+        candidate, so only one run per size reaches the target."""
+        data = b"A" * 32
+        seen = []
+        minimize_bytes(data, lambda x: seen.append(x) or x == data)
+        assert seen.count(data) == 1
+        assert len(seen) - 1 == len(_divisor_sizes(len(data)))
+
 
 class TestRadamsaMutateNum:
     def test_returns_integer(self):

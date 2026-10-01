@@ -163,6 +163,19 @@ class TestCmdTmin:
         with pytest.raises(SystemExit):
             cmd_tmin(args)
 
+    def test_also_interesting_reaches_tmin(self, tmp_path, monkeypatch):
+        """--also-interesting DIR is wired through to tmin(also_dir=...)."""
+        from fuzzer_tool.cli.commands import main
+
+        seen = {}
+        monkeypatch.setattr("fuzzer_tool.services.tmin.tmin", lambda **kw: seen.update(kw) or b"x")
+        argv = ["fuzzer-tool", "tmin", "/bin/true", str(tmp_path / "c.bin")]
+        argv += ["--also-interesting", str(tmp_path), "-O", str(tmp_path / "out.bin")]
+        monkeypatch.setattr(sys, "argv", argv)
+
+        assert main() == 0
+        assert seen["also_dir"] == str(tmp_path)
+
 
 class TestCmdReplay:
     def test_replay_validates_target(self, tmp_path):

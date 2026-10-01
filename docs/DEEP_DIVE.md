@@ -333,11 +333,11 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Causal crash-path replay** (`tmin --lineage --corpus-dir DIR`): walks the parent-key chain from the crash sidecar's `parent_seed` through `state.pkl.gz` (via `StateStore.get("corpus")`) seed_meta, rehydrates each ancestor from disk (full seeds, pruned seeds, and delta records via `rehydrate_by_hash`), and uses the smallest rehydrated ancestor that still triggers the pinned crash signature as the delta-debugging start
 - **LCA-based diversity scoring**: `_compute_weights` boosts seeds whose lineage subtree is far from a sampled set of peers (mult = `1.0 + 0.5 * diversity`, diversity = mean LCA distance over a 64-seed sample normalized by tree depth)
 - **Persistence**: lineage fields (`parent_key`, `parent_ops`, `parent_sites`, `new_edge_count`, `coverage_edges_baseline`) round-trip through `state.pkl.gz` (via `StateStore`); the tree is rebuilt idempotently from `seed_meta` on resume — never re-derived from runs, so no double-counting
-- **Trim carries lineage**: coverage-guided trimming replaces a seed with the half-length cut inheriting the original's parent edge plus a synthetic `("trim", cut_point)` op, keeping crash chains intact across the trim point
+- **Trim carries lineage**: coverage-guided trimming replaces a seed with the half-length cut (kept only when its edge set equals the original's) inheriting the original's parent edge plus a synthetic `("trim", cut_point)` op, keeping crash chains intact across the trim point
 
 ### Crash Analysis
 - **Sanitizer detection**: automatic ASAN/MSAN/TSAN/LSAN/UBSAN crash classification
-- **Crash minimization**: delta-debugging with signature-matching to prevent drift to unrelated bugs
+- **Crash minimization** (`tmin`): C-Reduce-style reducer (`core/reducer.py`). Stateful passes (`new`/`transform`/`advance`) keep their cursor on success instead of restarting ddmin; FIRST/MAIN/LAST phases, MAIN (grammar tree shrink + byte-chunk deletion) repeats to a fixpoint. Verdicts are memoized (blake2b-keyed LRU, 64K entries). Signature pinning prevents drift; a candidate crashing with a *different* signature is saved as a regular crash (smallest per signature, ≤64) to `--also-interesting DIR` (default: the crash file's directory). `minimize_bytes` uses the same engine; `--max-stages` caps accepted reductions. Measured: same result size, 2–10× fewer target runs when >1 byte matters.
 - **Corpus minimization**: greedy set-cover over SHM edge bitmaps (`minimize` subcommand)
 - **Crash exploitability tiers**: ASAN_EXPLOITABILITY classification in reports
 - **Levenshtein crash clustering**: groups crashes with similar stack traces (same root cause, different offsets)

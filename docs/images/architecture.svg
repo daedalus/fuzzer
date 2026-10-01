@@ -41,8 +41,8 @@
 </g>
 <g id="clust7" class="cluster">
 <title>cluster_crash</title>
-<path fill="#fbf6f1" stroke="#d8c4b0" stroke-width="1.3" d="M867,-237.5C867,-237.5 1129,-237.5 1129,-237.5 1135,-237.5 1141,-243.5 1141,-249.5 1141,-249.5 1141,-310.5 1141,-310.5 1141,-316.5 1135,-322.5 1129,-322.5 1129,-322.5 867,-322.5 867,-322.5 861,-322.5 855,-316.5 855,-310.5 855,-310.5 855,-249.5 855,-249.5 855,-243.5 861,-237.5 867,-237.5"/>
-<text text-anchor="middle" x="901" y="-309.7" font-family="Helvetica Bold" font-size="11.00" fill="#7a5638">Crash pipeline</text>
+<path fill="#fbf6f1" stroke="#d8c4b0" stroke-width="1.3" d="M867,-232C867,-232 1129,-232 1129,-232 1135,-232 1141,-238 1141,-244 1141,-244 1141,-316 1141,-316 1141,-322 1135,-328 1129,-328 1129,-328 867,-328 867,-328 861,-328 855,-322 855,-316 855,-316 855,-244 855,-244 855,-238 861,-232 867,-232"/>
+<text text-anchor="middle" x="901" y="-315.2" font-family="Helvetica Bold" font-size="11.00" fill="#7a5638">Crash pipeline</text>
 </g>
 <g id="clust8" class="cluster">
 <title>cluster_obs</title>
@@ -259,16 +259,17 @@
 <!-- crash -->
 <g id="node17" class="node">
 <title>crash</title>
-<path fill="#f0dfcd" stroke="transparent" stroke-width="0" d="M1121,-294.5C1121,-294.5 875,-294.5 875,-294.5 869,-294.5 863,-288.5 863,-282.5 863,-282.5 863,-257.5 863,-257.5 863,-251.5 869,-245.5 875,-245.5 875,-245.5 1121,-245.5 1121,-245.5 1127,-245.5 1133,-251.5 1133,-257.5 1133,-257.5 1133,-282.5 1133,-282.5 1133,-288.5 1127,-294.5 1121,-294.5"/>
-<text text-anchor="start" x="875" y="-278.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c4227">core/sanitizer.py → crash_metadata.py</text>
-<text text-anchor="start" x="875" y="-267.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c4227">ASAN MSAN TSAN LSAN UBSAN · dedup · tiers</text>
-<text text-anchor="start" x="875" y="-256.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c4227">services/tmin · minimize · root_cause · differential</text>
+<path fill="#f0dfcd" stroke="transparent" stroke-width="0" d="M1121,-300C1121,-300 875,-300 875,-300 869,-300 863,-294 863,-288 863,-288 863,-252 863,-252 863,-246 869,-240 875,-240 875,-240 1121,-240 1121,-240 1127,-240 1133,-246 1133,-252 1133,-252 1133,-288 1133,-288 1133,-294 1127,-300 1121,-300"/>
+<text text-anchor="start" x="875" y="-284" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c4227">core/sanitizer.py → crash_metadata.py</text>
+<text text-anchor="start" x="875" y="-273" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c4227">ASAN MSAN TSAN LSAN UBSAN · dedup · tiers</text>
+<text text-anchor="start" x="875" y="-262" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c4227">services/tmin · minimize · root_cause · differential</text>
+<text text-anchor="start" x="875" y="-251" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#5c4227">core/reducer (C&#45;Reduce passes · fixpoint · cache)</text>
 </g>
 <!-- target&#45;&gt;crash -->
 <g id="edge15" class="edge">
 <title>target&#45;&gt;crash</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" d="M540.73,-375.6C613.33,-358.99 777.76,-321.38 888.34,-296.08"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="889.12,-298.35 895.21,-294.51 888.05,-293.71 889.12,-298.35"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" d="M540.73,-375.6C608.24,-360.16 755.14,-326.55 864.33,-301.58"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="865.04,-303.86 871.14,-300.02 863.98,-299.22 865.04,-303.86"/>
 <text text-anchor="middle" x="738.5" y="-338.2" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;signal / stderr</text>
 </g>
 <!-- cov&#45;&gt;picker -->
@@ -333,7 +334,7 @@
 <!-- cov&#45;&gt;obs -->
 <g id="edge23" class="edge">
 <title>cov&#45;&gt;obs</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M351.91,-245.42C272.79,-231.74 189.86,-214.58 177,-201 141.15,-163.13 143.35,-96.94 147.82,-60.98"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M382.78,-245.44C291.25,-227.39 180.72,-204.93 177,-201 141.15,-163.13 143.35,-96.94 147.82,-60.98"/>
 <polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="150.18,-61.26 148.74,-54.21 145.47,-60.63 150.18,-61.26"/>
 </g>
 <!-- cmplog&#45;&gt;bandit -->
@@ -354,7 +355,7 @@
 <!-- cmplog&#45;&gt;corpus -->
 <g id="edge21" class="edge">
 <title>cmplog&#45;&gt;corpus</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" d="M295.27,-240C299.22,-239.1 303.14,-238.26 307,-237.5 432.34,-212.86 465.73,-219.97 593,-209 641.84,-204.79 655.63,-213.58 703,-201 724.38,-195.32 746.55,-185.82 765.89,-176.18"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" d="M276.76,-239.95C286.82,-236.86 297.08,-234.09 307,-232 431.77,-205.66 465.85,-218.74 593,-209 641.87,-205.26 655.63,-213.58 703,-201 724.38,-195.32 746.55,-185.82 765.89,-176.18"/>
 <polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="767.07,-178.25 772.06,-173.06 764.92,-174.01 767.07,-178.25"/>
 <text text-anchor="middle" x="625" y="-211.2" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;cmp progress</text>
 </g>
@@ -373,14 +374,14 @@
 <!-- ledger&#45;&gt;picker -->
 <g id="edge18" class="edge">
 <title>ledger&#45;&gt;picker</title>
-<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M557.3,-167.66C541.19,-182.88 527.38,-202.62 541,-218 564.75,-244.82 672.52,-215.77 701,-237.5 742.04,-268.82 703.21,-314.69 745,-345 779.63,-370.12 899.41,-338.58 937,-359 1033.18,-411.25 989.43,-489.88 1064,-570 1140.6,-652.29 1353.88,-626.92 1276,-708 1262.64,-721.91 948.22,-720.28 929,-722 905.46,-724.1 880.82,-726.81 856.42,-729.81"/>
+<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M557.12,-167.82C540.95,-183.1 527.12,-202.85 541,-218 565.11,-244.31 672.44,-210.59 701,-232 744.12,-264.33 701.65,-312.98 745,-345 779.41,-370.42 899.41,-338.58 937,-359 1033.18,-411.25 989.43,-489.88 1064,-570 1140.6,-652.29 1353.88,-626.92 1276,-708 1262.64,-721.91 948.22,-720.28 929,-722 905.46,-724.1 880.82,-726.81 856.42,-729.81"/>
 <polygon fill="#2f7d5a" stroke="#2f7d5a" stroke-width="1.1" points="856,-727.47 849.55,-730.67 856.59,-732.19 856,-727.47"/>
 <text text-anchor="middle" x="1020.5" y="-431.7" font-family="Helvetica,sans-Serif" font-size="8.50">strata &#160;</text>
 </g>
 <!-- ledger&#45;&gt;bandit -->
 <g id="edge19" class="edge">
 <title>ledger&#45;&gt;bandit</title>
-<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M573.89,-167.7C566.38,-183.72 560.92,-204.36 573,-218 596.9,-244.97 703.4,-218.45 734,-237.5 774.76,-262.87 761.27,-291.97 793,-328 800.71,-336.76 802.23,-340.52 813,-345 881.77,-373.6 911.03,-330.88 980,-359 1033.74,-380.91 1332.95,-643.12 1432.09,-730.72"/>
+<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M573.75,-167.83C566.17,-183.91 560.69,-204.57 573,-218 597.27,-244.47 703.44,-213.13 734,-232 776.61,-258.31 760.41,-289.98 793,-328 800.59,-336.86 802.23,-340.52 813,-345 881.77,-373.6 911.03,-330.88 980,-359 1033.74,-380.91 1332.95,-643.12 1432.09,-730.72"/>
 <polygon fill="#2f7d5a" stroke="#2f7d5a" stroke-width="1.1" points="1430.54,-732.53 1437.21,-735.25 1433.7,-728.96 1430.54,-732.53"/>
 <text text-anchor="middle" x="1115" y="-431.7" font-family="Helvetica,sans-Serif" font-size="8.50">stratum &#160;</text>
 </g>
@@ -394,8 +395,8 @@
 <!-- crash&#45;&gt;corpus -->
 <g id="edge22" class="edge">
 <title>crash&#45;&gt;corpus</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M964.9,-245.49C937.71,-226.18 898.89,-198.61 868.57,-177.07"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="869.93,-175.12 863.01,-173.13 867.18,-179 869.93,-175.12"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M956.74,-239.69C930.37,-220.96 896.11,-196.63 868.74,-177.19"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="869.93,-175.12 863.01,-173.12 867.17,-179 869.93,-175.12"/>
 <text text-anchor="middle" x="950" y="-211.2" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;minimized</text>
 </g>
 </g>

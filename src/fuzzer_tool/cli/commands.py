@@ -1043,6 +1043,7 @@ def cmd_tmin(args):
         grammar=grammar,
         lineage=getattr(args, "lineage", False),
         corpus_dir=getattr(args, "corpus_dir", None),
+        also_dir=getattr(args, "also_interesting", None),
     )
 
     if minimized is None:
@@ -5054,6 +5055,13 @@ def main() -> int:
         "--corpus-dir",
         default=None,
         help="Corpus directory for lineage rehydration of pruned intermediates",
+    )
+    tmin_parser.add_argument(
+        "--also-interesting",
+        default=None,
+        metavar="DIR",
+        help="Save other-signature crashes met during reduction here "
+        "(default: the crash file's directory)",
     )
     tmin_parser.set_defaults(func=cmd_tmin)
 
