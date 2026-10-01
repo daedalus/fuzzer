@@ -41,8 +41,13 @@ DEFAULT_MAX_SCORES = 4096
 # Flow-edge ids kept across all scores: 8 B each bounds them at 8 MiB.
 DEFAULT_MAX_FLOW_IDS = 1 << 20
 # Open frame untouched for this many full frames of samples is abandoned
-# (initial horizon; doubles whenever a dropped seed comes back).
+# (initial horizon; widened to REVISIT_MARGIN x any gap a dropped seed proves).
 STALE_FRAMES = 4
+# Horizon headroom over the slowest observed revisit gap.
+REVISIT_MARGIN = 2
+# Dropped keys remembered (key -> last-touch tick); must outlast a corpus
+# cycle's worth of drops. ~150 B each bounds it near 5 MiB.
+DEFAULT_MAX_DROPPED = 1 << 15
 # CFAR false-alarm probability per edge.
 FALSE_ALARM = 1e-3
 # A component spread over at least this share of the seed's edges is a flash.
@@ -210,6 +215,7 @@ class PowerDoppler:
         max_edges: Edge columns per ensemble; extra edges are dropped.
         max_scores: Closed-ensemble scores kept (LRU).
         max_flow_ids: Flow-edge ids kept across all scores (LRU).
+        max_dropped: Dropped-frame keys remembered (LRU) to measure revisit gaps.
     """
 
     def __init__(
@@ -219,6 +225,7 @@ class PowerDoppler:
         max_edges: int = DEFAULT_MAX_EDGES,
         max_scores: int = DEFAULT_MAX_SCORES,
         max_flow_ids: int = DEFAULT_MAX_FLOW_IDS,
+        max_dropped: int = DEFAULT_MAX_DROPPED,
     ) -> None:
         if ensemble < _MIN_ENSEMBLE:
             raise ValueError(f"ensemble must be >= {_MIN_ENSEMBLE}, got {ensemble}")
@@ -230,14 +237,16 @@ class PowerDoppler:
             raise ValueError(f"max_scores must be >= 1, got {max_scores}")
         if max_flow_ids < 0:
             raise ValueError(f"max_flow_ids must be >= 0, got {max_flow_ids}")
+        if max_dropped < 1:
+            raise ValueError(f"max_dropped must be >= 1, got {max_dropped}")
         self._ensemble = ensemble
         self._max_seeds = max_seeds
         self._max_edges = max_edges
         self._max_scores = max_scores
         self._max_flow_ids = max_flow_ids
         self._stale_after = max_seeds * ensemble * STALE_FRAMES
-        # Keys whose frames were dropped as abandoned; bounded like _open.
-        self._dropped_keys: LRUCache = LRUCache(max_seeds)
+        # Dropped-as-abandoned key -> its frame's last-touch tick.
+        self._dropped_keys: LRUCache = LRUCache(max_dropped)
         # Insertion order is recency order; capacity is enforced by hand
         # (_admit, _trim) so evicted frames can be scored / ids uncounted.
         self._open: dict[str, _Ensemble] = {}
@@ -288,13 +297,16 @@ class PowerDoppler:
 
         A fixed horizon thrashes once the corpus cycle outlasts it, e.g. 13
         seeds in turn vs a 12-tick horizon: every frame is dropped one tick
-        before its seed returns. Doubling converges past the revisit time.
+        before its seed returns. The horizon rises to a margin over the
+        measured gap, never per return: 64 returns of a 200-tick cycle give
+        400, where doubling per key gave 2^64.
         """
-        if seed_key not in self._dropped_keys:
+        touched = self._dropped_keys.pop(seed_key, None)
+        if touched is None:
             return
 
-        del self._dropped_keys[seed_key]
-        self._stale_after *= 2
+        gap = self._ticks - touched
+        self._stale_after = max(self._stale_after, REVISIT_MARGIN * gap)
 
     def _admit(self) -> _Ensemble | None:
         """Fresh frame if a slot is free or the oldest frame is abandoned.
@@ -311,7 +323,7 @@ class PowerDoppler:
 
             # Abandoned: score what it has rather than throw it away.
             del self._open[key]
-            self._dropped_keys[key] = True
+            self._dropped_keys[key] = old.touched
             if old.n >= _MIN_ENSEMBLE:
                 self._close(key, old)
         return _Ensemble(self._ensemble, self._max_edges)

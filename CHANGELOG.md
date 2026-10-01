@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Doppler horizon compounded per returning seed** (`core/power_doppler.py`): each return doubled one shared horizon (N returns → 2^N), disabling abandonment; and the dropped-key memory (`max_seeds` keys) forgot keys before large corpora cycled back. Horizon is now `max(horizon, 2 × measured gap)`; memory is 2¹⁵ keys.
+
 - **Doppler horizon thrashed on slow corpus cycles** (`core/power_doppler.py`): a cycle longer than the fixed abandon horizon dropped every frame one tick before its seed returned. The horizon now doubles when a dropped seed comes back.
 - **Stale corpus-membership memo** (`services/fuzzer.py`): keyed on corpus length, so an in-place trim of the parent kept a "member" verdict. Hits are now re-validated by slot identity; misses are not memoized.
 
