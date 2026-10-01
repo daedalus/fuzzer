@@ -336,13 +336,20 @@ class FuzzRound:
         # that truncation. Call __cmplog_reset() so the next execution
         # writes at offset 0 instead of a stale position, which would
         # create a sparse file and inflate RSS.
+        # Only after a collect: the shim truncates, and on skipped rounds the
+        # records are still waiting to be read.
         runner = self._f._inprocess_runner
-        if runner and runner.direct_lite and runner._lib:
-            try:
-                if hasattr(runner._lib, "__cmplog_reset"):
-                    runner._lib.__cmplog_reset()
-            except (AttributeError, OSError):
-                pass
+        if not (self._collect_now and runner and runner.direct_lite and runner._lib):
+            return
+        # getattr, not `runner._lib.__cmplog_reset`: inside a class body that
+        # attribute is name-mangled to `_FuzzRound__cmplog_reset` and never resolves.
+        reset = getattr(runner._lib, "__cmplog_reset", None)
+        if reset is None:
+            return
+        try:
+            reset()
+        except OSError as e:
+            log.debug("__cmplog_reset failed: %s", e)
 
     def _feed_learners(self) -> None:
         f = self._f
@@ -503,16 +510,18 @@ class FuzzRound:
             smt_counter += 1
             pc = f._cmplog.pair_pc(op_a, op_b)
             result = solver.solve_cmplog_pair(op_a, op_b, pc=pc)
-            self._smt_found = False
             if result is None:
                 continue
             solved = result["solved_bytes"]
+            # Per-pair flag: a later miss must not erase an earlier hit.
+            found = False
             for candidate in (op_a, op_b):
                 if len(candidate) < 2:
                     continue
-                self._smt_found = self._scan_operand(candidate, solved, matches, seen, None)
-                if self._smt_found or len(matches) >= MATCH_CAP:
+                found = self._scan_operand(candidate, solved, matches, seen, None)
+                if found or len(matches) >= MATCH_CAP:
                     break
+            self._smt_found = self._smt_found or found
             if len(matches) >= MATCH_CAP:
                 break
 

@@ -5671,12 +5671,17 @@ class Fuzzer:
 
         # Flush the target .so's compiled-in shim buffer
         runner = self._inprocess_runner
-        if runner and runner.direct_lite and runner._lib:
-            try:
-                if hasattr(runner._lib, "__tracecmp_flush"):
-                    runner._lib.__tracecmp_flush()
-            except (AttributeError, OSError):
-                pass
+        if not (runner and runner.direct_lite and runner._lib):
+            return
+        # getattr, not `runner._lib.__tracecmp_flush`: inside a class body that
+        # attribute is name-mangled to `_Fuzzer__tracecmp_flush` and never resolves.
+        flush = getattr(runner._lib, "__tracecmp_flush", None)
+        if flush is None:
+            return
+        try:
+            flush()
+        except OSError as e:
+            log.debug("__tracecmp_flush failed: %s", e)
 
     def _record_cmp_progress(self, *vectors: dict) -> bool:
         """Fold one execution's asserted counts into the per-site maxima.
