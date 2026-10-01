@@ -1076,6 +1076,20 @@ from SPLIT. Replay A/A on 9.0.2: 12 of 6,327 ids differ between two replays. `--
 in parallel, starting one only while MemAvailable >= 4 GB (RSS ~3.1 GB at 6k execs). Resumable
 (`rows.pkl`, edge ids as `array('I')`). Test: `tests/test_ab_synergy_multi_ffmpeg.py`.
 
+Result (2026-10-01; FFmpeg 9.0.2/8.1.3/8.0.3 ASAN, 10 seeds, 6k execs, 23 hand-made seeds, `--jobs 4`):
+**no synergy.** Median edges per version, MULTI minus:
+
+| base | 8.0.3 | 8.1.3 | 9.0.2 | W/L | Holm p |
+|---|---|---|---|---|---|
+| SPLIT_UNION (equal total compute) | −1,921 | −1,992 | −2,071 | 0/30 | 0.018 |
+| FULL_OWN (one version, all compute) | −2,448 | −2,206 | −2,438 | 0/30 | 0.018 |
+| SPLIT_OWN (one version, 1/3 compute) | +1,693 | +1,463 | +1,689 | 25/5 | ≤0.027 |
+
+CONTROL passes (p 0.23 / 0.13 / 0.43; per-run noise ±1k edges, up to ±3k). It failed once mid-run
+(8.1.3, 7 seeds, p=0.047) and recovered; the check is uncorrected across 3 versions (~14% false alarm).
+Joint fuzzing costs ~15% coverage per version vs separate campaigns merged afterwards; it only pays
+for cross-version crash diffing in one run.
+
 ### Vendored libsecp256k1 target (secp256k1_read)
 
 `targets/secp256k1_read.so` wraps the vendored libsecp256k1 v0.8.0
