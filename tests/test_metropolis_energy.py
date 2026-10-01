@@ -127,8 +127,8 @@ def test_untracked_parent_gets_floor(tmp_path):
 def test_fuzz_one_uses_energy_not_constant():
     import inspect
 
-    from fuzzer_tool.services.fuzzer import Fuzzer
+    from fuzzer_tool.services.fuzz_round import FuzzRound
 
-    src = inspect.getsource(Fuzzer.fuzz_one)
+    src = inspect.getsource(FuzzRound)
     assert "_metropolis_accept_p(" in src
-    assert "math.exp(-1.0 / max(self._temperature" not in src
+    assert "math.exp(-1.0 / max(f._temperature" not in src

@@ -413,8 +413,10 @@ class TestCallSitesRerunTheInputThatRan:
         import inspect
 
         from fuzzer_tool.services import fuzzer as mod
+        from fuzzer_tool.services.fuzz_round import FuzzRound
 
-        fn = getattr(mod.Fuzzer, fn_name)
+        owner = FuzzRound if fn_name.startswith("FuzzRound.") else mod.Fuzzer
+        fn = getattr(owner, fn_name.removeprefix("FuzzRound."))
         tree = ast.parse(__import__("textwrap").dedent(inspect.getsource(fn)))
         return [
             n
@@ -429,11 +431,11 @@ class TestCallSitesRerunTheInputThatRan:
         return ast.unparse(call.args[0])
 
     def test_fuzz_one_reruns_the_mutated_input(self):
-        runs = self._calls("fuzz_one", "_run_target")
-        confirms = self._calls("fuzz_one", "_confirm_new_coverage")
+        runs = self._calls("FuzzRound._execute", "_run_target")
+        confirms = self._calls("FuzzRound._scan_coverage", "_confirm_new_coverage")
         assert len(confirms) == 1
         executed = self._first_arg(runs[0])
-        assert executed == "mutated"
+        assert executed == "self._mutated"
         assert self._first_arg(confirms[0]) == executed
 
     def test_calibration_reruns_the_seed_that_ran(self):

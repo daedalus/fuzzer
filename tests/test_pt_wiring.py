@@ -19,6 +19,7 @@ from fuzzer_tool.cli import commands
 from fuzzer_tool.core.intel_pt import PtCoverage, PtMapMode
 from fuzzer_tool.services import fuzzer as fuzzer_mod
 from fuzzer_tool.services import runner, stats
+from fuzzer_tool.services.fuzz_round import FuzzRound
 
 FLAGS = ("intel_pt", "intel_pt_mode")
 
@@ -82,8 +83,8 @@ class TestExecPathCallSites:
         assert inspect.getsource(runner).count("f.pt_cov.reset_edge_map()") == 2
 
     def test_novelty_disjunction_consults_the_pt_map(self):
-        src = inspect.getsource(fuzzer_mod)
-        assert src.count("self.pt_cov and self.pt_cov.is_new_coverage()") == 2
+        src = inspect.getsource(FuzzRound)
+        assert src.count("f.pt_cov and f.pt_cov.is_new_coverage()") == 2
 
     def test_forkserver_is_skipped_when_pt_is_active(self):
         """The forkserver path never reaches the attach sites, so a PT run

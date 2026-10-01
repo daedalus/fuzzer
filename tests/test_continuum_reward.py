@@ -21,7 +21,8 @@ from types import SimpleNamespace
 import pytest
 
 from fuzzer_tool.core.analyzers.analyzer_navier_stokes import frontier_weight
-from fuzzer_tool.services.fuzzer import Fuzzer, _apply_reward_shape
+from fuzzer_tool.services.fuzz_round import FuzzRound, _apply_reward_shape
+from fuzzer_tool.services.fuzzer import Fuzzer
 from tests.test_bench_paired_arms import _parse
 
 N_SEEDS = 3
@@ -225,21 +226,21 @@ class TestWiring:
     """Assertions with teeth: guard and arithmetic can be right while ``fuzz_one`` does nothing."""
 
     def test_fuzz_one_applies_the_shape(self):
-        src = inspect.getsource(Fuzzer.fuzz_one)
-        assert "_apply_reward_shape(op_rewards, self._continuum_reward_shape())" in src
+        src = inspect.getsource(FuzzRound)
+        assert "_apply_reward_shape(op_rewards, f._continuum_reward_shape())" in src
 
     def test_fuzz_one_keeps_the_class_credit_shape(self):
-        src = inspect.getsource(Fuzzer.fuzz_one)
-        assert "_apply_reward_shape(op_rewards, self._credit_reward_shape())" in src
+        src = inspect.getsource(FuzzRound)
+        assert "_apply_reward_shape(op_rewards, f._credit_reward_shape())" in src
 
     def test_fuzz_one_captures_the_trace_beside_the_new_edge_ids(self):
-        src = inspect.getsource(Fuzzer.fuzz_one)
-        assert "self._last_new_edge_ids = list(new)" in src
-        assert "self._last_trace_edges = hit_edges" in src
+        src = inspect.getsource(FuzzRound)
+        assert "f._last_new_edge_ids = list(new)" in src
+        assert "f._last_trace_edges = hit_edges" in src
 
     def test_fuzz_one_resets_the_trace_every_round(self):
-        src = inspect.getsource(Fuzzer.fuzz_one)
-        assert "self._last_trace_edges: Collection[int] = ()" in src
+        src = inspect.getsource(FuzzRound)
+        assert "f._last_trace_edges = ()" in src
 
     def test_fuzzer_takes_both_knobs_with_inert_defaults(self):
         params = inspect.signature(Fuzzer.__init__).parameters

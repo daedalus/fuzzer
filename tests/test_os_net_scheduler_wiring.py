@@ -317,11 +317,13 @@ class TestFuzzer:
         src = inspect.getsource(fz.Fuzzer)
         for attr in ("self._op_stride", "self._op_p2c"):
             assert f"_register_arms({attr})" in src
-        record_loop = inspect.getsource(fz.Fuzzer.fuzz_one)
+        from fuzzer_tool.services.fuzz_round import FuzzRound
+
+        record_loop = inspect.getsource(FuzzRound)
         tuple_src = record_loop[record_loop.index("for scheduler in (") :]
         tuple_src = tuple_src[: tuple_src.index("):")]
-        assert "self._op_stride" in tuple_src
-        assert "self._op_p2c" in tuple_src
+        assert "f._op_stride" in tuple_src
+        assert "f._op_p2c" in tuple_src
 
 
 # --- Operator ballot --------------------------------------------------------
