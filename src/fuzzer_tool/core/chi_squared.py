@@ -404,18 +404,21 @@ def drop_sparse_rows(
 
     Example: [[10, 990], [1, 0], [12, 988]] -> rows 0 and 2.
     """
-    kept = table
-    while kept:
-        col_totals = [sum(col) for col in zip(*kept, strict=True)]
+    if not table:
+        return []
+
+    rows = table
+    while rows:
+        col_totals = [sum(col) for col in zip(*rows, strict=True)]
         grand = sum(col_totals)
         if grand <= 0:
             return []
 
         min_share = min(col_totals) / grand
-        survivors = [row for row in kept if sum(row) * min_share >= min_expected]
-        if len(survivors) == len(kept):
+        kept = [row for row in rows if sum(row) * min_share >= min_expected]
+        if len(kept) == len(rows):
             return kept
-        kept = survivors
+        rows = kept
 
     return []
 
