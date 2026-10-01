@@ -2745,8 +2745,8 @@ class Fuzzer:
             )
             if arm is not None
         )
-        # (parent, corpus size, in corpus?): one membership test per pick.
-        self._parent_memo: tuple[bytes, int, bool] | None = None
+        # (parent, corpus list, slot, seed there): one membership test per pick.
+        self._parent_memo: tuple[bytes, list[bytes], int, bytes] | None = None
         if self._seed_os_arms:
             log.info("OS/network seed arms enabled: %d", len(self._seed_os_arms))
         # LST override: no seed waits more than lst_revisit seconds between
@@ -4548,18 +4548,27 @@ class Fuzzer:
         """Live-corpus membership of *parent*, memoized across its executions.
 
         Checked against the seed picker's cached key map (rebuilt only on
-        corpus change), not ``seed_meta``. The memo is keyed on corpus size
-        too, so a parent admitted mid-pick is seen.
+        corpus change), not ``seed_meta``. A hit is memoized with the slot it
+        sits in and re-validated by identity, O(1): an in-place replacement
+        (trim) or a rebuilt list misses. A miss is never memoized, so a
+        parent admitted mid-pick is seen.
         """
-        n = len(self.corpus)
+        corpus = self.corpus
         memo = self._parent_memo
-        if memo is not None and memo[0] is parent and memo[1] == n:
-            return memo[2]
+        if memo is not None and memo[0] is parent and memo[1] is corpus:
+            slot = memo[2]
+            if slot < len(corpus) and corpus[slot] is memo[3]:
+                return True
 
         key_to_seed, _ = self._seed_picker._corpus_keys()
-        hit = self._seed_key(parent) in key_to_seed
-        self._parent_memo = (parent, n, hit)
-        return hit
+        seed = key_to_seed.get(self._seed_key(parent))
+        if seed is None:
+            self._parent_memo = None
+            return False
+
+        slot = corpus.index(seed)
+        self._parent_memo = (parent, corpus, slot, corpus[slot])
+        return True
 
     def _seed_key(self, data: bytes) -> str:
         """Return content hash for *data*."""

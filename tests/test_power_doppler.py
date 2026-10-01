@@ -202,6 +202,30 @@ class TestPowerDoppler:
         assert pd.flow_edges("gone") == frozenset({PATH})
         assert pd.stats()["ensembles"] == 2
 
+    def test_regression_slow_cycle_beyond_horizon_still_scores(self):
+        # Falsification (PR #47 review): 13 seeds in turn, 1 slot, 12-tick
+        # horizon. Each frame was dropped just before its seed came back.
+        ens, n_seeds = 3, 13
+        pd = PowerDoppler(ensemble=ens, max_seeds=1)
+        ids = list(range(PATH))
+        for _ in range(ens * 4):
+            for k in range(n_seeds):
+                _feed(pd, f"s{k}", _static(n=1), ids)
+
+        assert pd.stats()["ensembles"] > 0
+
+    def test_adversarial_abandoned_keys_do_not_grow_horizon(self):
+        # Keys that never return keep the horizon; the dropped-key memory stays bounded.
+        cap = 2
+        pd = PowerDoppler(ensemble=N, max_seeds=cap)
+        horizon = pd.stats()["stale_after"]
+        ids = list(range(PATH))
+        for k in range(cap * 8):
+            _feed(pd, f"gone{k}", _static(n=horizon + 1), ids)
+
+        assert pd.stats()["stale_after"] == horizon
+        assert len(pd._dropped_keys) <= cap
+
     def test_adversarial_tiny_partial_frame_not_scored(self):
         # Fewer samples than a valid ensemble: dropped, never scored.
         pd = PowerDoppler(ensemble=N, max_seeds=1)
