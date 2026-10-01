@@ -11,9 +11,13 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from fuzzer_tool.services.operators import _det_start, _deterministic_mutation_stream
+from fuzzer_tool.services.operators import (
+    _det_cost_per_byte,
+    _det_start,
+    _deterministic_mutation_stream,
+)
 
-PER_BYTE = 33
+PER_BYTE = _det_cost_per_byte()
 TARGET = str(Path(__file__).resolve().parent.parent / "targets" / "test_target")
 
 
@@ -105,7 +109,7 @@ def test_engine_rotates_by_seed_fuzz_count(tmp_path):
     from fuzzer_tool.core.skipdet import MAX_DET_MUTATIONS
     from fuzzer_tool.services.fuzzer import Fuzzer
 
-    data = _seed(4000)  # 33 * 4000 > MAX_DET_MUTATIONS: truncated
+    data = _seed(4000)  # PER_BYTE * 4000 > MAX_DET_MUTATIONS: truncated
     corpus = tmp_path / "corpus"
     (corpus / "seeds").mkdir(parents=True)
     (tmp_path / "crashes").mkdir()

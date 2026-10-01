@@ -14,7 +14,7 @@ passes, and was dropped with the queue. The engine now keeps the LIVE offsets
 Zero extra executions: the evidence was already paid for.
 
 Only bytes the pass covered are known. A long seed's deterministic stage
-covers ``MAX_DET_MUTATIONS // 33`` bytes (rotated by ``fuzz_count``), so the
+covers ``MAX_DET_MUTATIONS // _det_cost_per_byte()`` bytes (rotated by ``fuzz_count``), so the
 rest of it is never proposed except through the ``EPSILON`` escape.
 
 Passive: ``record()`` is a no-op and nothing is persisted. Declines (``None``,

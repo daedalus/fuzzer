@@ -60,6 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Deterministic stage: arith ±1..35 and 16/32-bit passes** (`services/operators.py::_deterministic_mutation_stream`): arith deltas were powers of two (half repeated a bitflip, none hit small length offsets). Now AFL's schedule minus flip 2/4/16/32: arith 8/16/32 ±1..`ARITH_MAX` and interesting 8/16/32, LE and BE, with AFL dedup — the stream holds no duplicate or seed copy. Upper-bound cost 485 mutants/byte (was 33), so a capped stage covers fewer bytes per run.
+
 - **`--consolidated` → `--consolidated-v1`** (`op_consolidated.py` → `op_consolidated_v1.py`, `ConsolidatedScheduler` → `ConsolidatedV1Scheduler`, strategy `consolidated` → `consolidated_v1`, stats keys `consolidated_v1_*`). `--consolidated` kept as an alias. Elo ratings saved under `consolidated` do not carry over.
 
 ### Documentation

@@ -20,6 +20,7 @@ import math
 import os
 import struct
 from array import array
+from functools import partial
 
 import numpy as np
 import xxhash
@@ -32,6 +33,7 @@ from fuzzer_tool.core.gravity import DONOR_CANDIDATES, pair_terms, pick_index
 from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations import (
+    ARITH_MAX,
     INTERESTING_8,
     INTERESTING_16,
     INTERESTING_32,
@@ -303,7 +305,7 @@ CONTEXT_DIM = 6 + len(_CONTEXT_FORMAT_CATEGORIES) + 1
 # never flipped" must not collapse: the byteflip pass can stop early under
 # its quota, and _dedup_mutate can discard a mutant before it is executed,
 # and in both cases a boolean map would read the position as inert and
-# delete 24 of its 33 mutants on no evidence at all.
+# delete all but 9 of its mutants on no evidence at all.
 _DET_EFF_UNKNOWN = 0
 _DET_EFF_INERT = 1
 _DET_EFF_LIVE = 2
@@ -317,7 +319,7 @@ class DeterministicEffectorMap:
 
     AFL builds this during the byteflip 8/8 pass, which it has already paid
     for, and uses it to skip the arithmetic and interesting-value passes on
-    bytes the target does not read. This tree ran all 33 mutants per byte
+    bytes the target does not read. This tree ran every mutant per byte
     unconditionally while observing, on every one of those executions, the
     coverage that answers the question -- ``maybe_deterministic_mutation``
     routes deterministic mutants through the same execution path as every
@@ -375,19 +377,185 @@ def _split_det_quota(costs: list[int], budget: int) -> list[int]:
 # interesting value, in order.
 
 
-def _det_cost_per_byte() -> int:
-    """Mutants per byte of the full schedule: 8 + 1 + 2*deltas + interesting (33)."""
-    from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
+def _det_flip_seen(xor: int) -> bool:
+    """Single-byte XOR the bitflip 1/1 or byteflip 8/8 pass already made."""
+    return xor & (xor - 1) == 0 or xor == 0xFF
 
-    return 8 + 1 + 2 * len(ARITHMETIC_DELTAS) + len(INTERESTING_UNSIGNED_8)
+
+def _det_arith_near(old: int, new: int) -> bool:
+    """*new* is *old* +/- 1..ARITH_MAX (mod 256): arith8's reach."""
+    return min((new - old) & 0xFF, (old - new) & 0xFF) <= ARITH_MAX
+
+
+def _det_byte_tables() -> tuple[tuple, tuple, bytes]:
+    """Per-byte arith8 and interest8 rows plus the 8-bit coverage map.
+
+    AFL's dedup: a pass skips what an earlier one made. Rows hold new byte
+    values for an original byte, e.g. orig 0x00 -> arith8 drops +1, +2, +4
+    (single-bit flips). ``seen[old << 8 | new]`` is 1 when any 8-bit pass
+    (or no change) produces that byte, so wide passes skip it.
+    """
+    arith, interest = [], []
+    seen = bytearray(1 << 16)
+    for old in range(256):
+        row = []
+        for j in range(1, ARITH_MAX + 1):
+            row += [v for v in ((old + j) & 0xFF, (old - j) & 0xFF) if not _det_flip_seen(old ^ v)]
+        arith.append(tuple(row))
+
+        interest.append(
+            tuple(
+                v
+                for v in INTERESTING_UNSIGNED_8
+                if v != old and not _det_flip_seen(old ^ v) and not _det_arith_near(old, v)
+            )
+        )
+
+        # Mark only what the 8-bit passes reach: ~90 of 256 per row.
+        base = old << 8
+        reach = [old, old ^ 0xFF, *(old ^ (1 << b) for b in range(8)), *INTERESTING_UNSIGNED_8]
+        reach += [(old + j) & 0xFF for j in range(-ARITH_MAX, ARITH_MAX + 1)]
+        for new in reach:
+            seen[base | (new & 0xFF)] = 1
+    return tuple(arith), tuple(interest), bytes(seen)
+
+
+_DET_ARITH8, _DET_INTEREST8, _DET_SEEN8 = _det_byte_tables()
+
+# AFL widens interesting_16/32 with the narrower tables; masked, first kept.
+_DET_WIDE_VALUES = {
+    2: tuple(dict.fromkeys(v & 0xFFFF for v in INTERESTING_8 + INTERESTING_16)),
+    4: tuple(
+        dict.fromkeys(v & 0xFFFFFFFF for v in INTERESTING_8 + INTERESTING_16 + INTERESTING_32)
+    ),
+}
+_DET_ENDIANS = ("little", "big")
+
+
+def _det_arith_wide(old: bytes, width: int):
+    """arith16/32 windows: LE then BE, + then -, carry past the low half only.
+
+    A change that stays inside the low half is a narrower pass's mutant
+    (AFL's rule), e.g. LE 0x41FF + 1 -> 0x4200 kept, 0x4100 + 1 skipped.
+    """
+    mask = (1 << (8 * width)) - 1
+    low_mask = (1 << (4 * width)) - 1
+    for endian in _DET_ENDIANS:
+        v = int.from_bytes(old, endian)
+        low = v & low_mask
+        for j in range(low_mask - low + 1, ARITH_MAX + 1):
+            yield ((v + j) & mask).to_bytes(width, endian)
+        for j in range(low + 1, ARITH_MAX + 1):
+            yield ((v - j) & mask).to_bytes(width, endian)
+
+
+def _det_interest_wide(old: bytes, width: int):
+    """interest16/32 windows: each value LE then BE."""
+    for v in _DET_WIDE_VALUES[width]:
+        for endian in _DET_ENDIANS:
+            yield v.to_bytes(width, endian)
+
+
+def _det_novel(ov: int, new: bytes, site: int, seen: set[int]) -> bool:
+    """Whether a wide-pass window is new; records it in *seen* when so.
+
+    *ov* is the old window as a big-endian int. Single-byte changes the
+    8-bit passes reach are theirs. The rest are keyed exactly -- (first
+    diff, span, changed bytes) packed into one int -- so LE/BE twins,
+    value collisions (-129 LE == 32767 BE on 0x01FF) and overlapping
+    32-bit windows yield once.
+    """
+    nv = int.from_bytes(new, "big")
+    x = ov ^ nv
+    if not x:
+        return False
+
+    # Byte offsets from the window's end: top = first diff, bottom = last.
+    top = (x.bit_length() - 1) >> 3
+    bottom = ((x & -x).bit_length() - 1) >> 3
+    if top == bottom:
+        shift = 8 * top
+        if _DET_SEEN8[((ov >> shift) & 0xFF) << 8 | ((nv >> shift) & 0xFF)]:
+            return False
+
+    span = top - bottom
+    first = site + len(new) - 1 - top
+    key = (first << 35) | (span << 32) | ((nv >> (8 * bottom)) & ((1 << (8 * span + 8)) - 1))
+    if key in seen:
+        return False
+    seen.add(key)
+    return True
+
+
+def _det_byte_pass(table, data, scratch, sites, quota, _seen):
+    """arith8 / interest8: write each row value of *table* at every site."""
+    n = 0
+    for i in sites:
+        if n >= quota:
+            break
+        orig = data[i]
+        for new in table[orig]:
+            if n >= quota:
+                break
+            scratch[i] = new
+            yield bytes(scratch)
+            n += 1
+        scratch[i] = orig  # restore
+    return n
+
+
+def _det_wide_pass(width, candidates, data, scratch, sites, quota, seen):
+    """arith16/32 / interest16/32: write each novel window at every site."""
+    n = 0
+    for i in sites:
+        if n >= quota:
+            break
+        old = data[i : i + width]
+        ov = int.from_bytes(old, "big")
+        for new in candidates(old, width):
+            if n >= quota:
+                break
+            if not _det_novel(ov, new, i, seen):
+                continue
+            scratch[i : i + width] = new
+            yield bytes(scratch)
+            n += 1
+        scratch[i : i + width] = old  # restore
+    return n
+
+
+# Passes after byteflip, in AFL order: (width, upper-bound mutants per site, walk).
+_DET_TAIL = (
+    (1, 2 * ARITH_MAX, partial(_det_byte_pass, _DET_ARITH8)),
+    (2, 4 * ARITH_MAX, partial(_det_wide_pass, 2, _det_arith_wide)),
+    (4, 4 * ARITH_MAX, partial(_det_wide_pass, 4, _det_arith_wide)),
+    (1, len(INTERESTING_UNSIGNED_8), partial(_det_byte_pass, _DET_INTEREST8)),
+    (2, 2 * len(_DET_WIDE_VALUES[2]), partial(_det_wide_pass, 2, _det_interest_wide)),
+    (4, 2 * len(_DET_WIDE_VALUES[4]), partial(_det_wide_pass, 4, _det_interest_wide)),
+)
+
+
+def _det_sites(order, length: int, width: int, eff: bytearray | None = None):
+    """Window starts in visit order; with *eff*, only windows holding a non-inert byte."""
+    last = length - width
+    if eff is None:
+        return order if width == 1 else [i for i in order if i <= last]
+    return [
+        i for i in order if i <= last and any(eff[k] != _DET_EFF_INERT for k in range(i, i + width))
+    ]
+
+
+def _det_cost_per_byte() -> int:
+    """Upper-bound mutants per byte of the full schedule (dedup only lowers it)."""
+    return 8 + 1 + sum(per for _w, per, _walk in _DET_TAIL)
 
 
 def _det_start(length: int, fuzz_count: int, max_mutations: int = MAX_DET_MUTATIONS) -> int:
     """Start offset for a seed's deterministic stage.
 
-    A truncated schedule covers ``span = max_mutations // 33`` bytes per
-    pass, so rotating by ``fuzz_count * span`` tiles the seed across runs
-    (e.g. len 4000, span 1985: runs start at 0, 1985, 3970 -> 1955, ...).
+    A truncated schedule covers ``span = max_mutations // _det_cost_per_byte()``
+    bytes per pass, so rotating by ``fuzz_count * span`` tiles the seed
+    across runs (e.g. len 4000, span 100: runs start at 0, 100, 200, ...).
     0 when the whole schedule fits: nothing to rotate toward.
     """
     per_byte = _det_cost_per_byte()
@@ -405,31 +573,32 @@ def _deterministic_mutation_stream(
 ):
     """Yield mutants from AFL's classic deterministic schedule, in order.
 
-    Walks bitflip 1/1, byte flip 8/8, 8-bit arithmetic, and 8-bit
-    interesting-value substitution across every position in *data* in turn.
-    Each mutant differs from *data* at exactly one position (or one bit),
+    Walks bitflip 1/1, byte flip 8/8, arith 8/16/32 (+/-1..ARITH_MAX, LE
+    then BE) and interesting 8/16/32 (LE then BE) across every position in
+    *data* in turn. Each mutant changes one window of at most 4 bytes,
     which is what lets a deterministic stage attribute a coverage gain to a
     specific offset -- unlike havoc, which changes several positions in one
     round and can only credit the mutation as a whole.
 
-    Deliberately narrower than AFL++'s full schedule (no 2/1, 4/1, 16-bit or
-    32-bit walks): those add coverage at steeply diminishing returns per
-    exec once 1/1 and 8/8 have run. Extending the schedule is a matter of
-    adding more passes below; the gating and queueing around it doesn't
-    change.
+    Passes after byteflip skip what an earlier pass made (AFL's dedup), so
+    the stream holds no duplicate and no copy of the seed::
 
-    When *max_mutations* is smaller than the full schedule cost (33 mutants
-    per byte), the budget is split as a **per-pass quota** rather than a
-    flat prefix.  A prefix cap would silently delete entire later passes
-    (interesting-value at len≥2621, arithmetic at len≥7281, byte-flip at
-    len≥8192).  Proportional per-pass quotas keep every operator family
-    running on large seeds and consume the full budget.  The number of mutants that would have been
-    produced beyond the cap is recorded on
+        orig 0x00: arith8 drops +1 (bit flip); arith16 LE 0x4100 + 1 is
+        arith8's, so only carries (0x41FF + 1) run.
+
+    Deliberately narrower than AFL++'s full schedule (no 2/1, 4/1, 16/8 or
+    32/8 walks): those add coverage at steeply diminishing returns per exec.
+
+    When *max_mutations* is smaller than the full schedule cost, the budget
+    is split as a **per-pass quota** by upper-bound cost rather than a flat
+    prefix, which would silently delete entire later passes. Dedup makes a
+    pass yield fewer than its quota; the rest rolls into the next pass. The
+    upper-bound overshoot is recorded on
     ``_deterministic_mutation_stream.last_truncated`` for stats.
 
     Args:
         data: The seed to generate a deterministic schedule for. Not
-            mutated -- each yielded mutant is a fresh bytearray.
+            mutated -- each yielded mutant is a fresh bytes object.
         max_mutations: Hard cap on total mutants yielded, so one huge seed
             can't turn a single deterministic pass into an unbounded stall.
             Distributed as a per-pass quota when the full schedule exceeds
@@ -437,47 +606,19 @@ def _deterministic_mutation_stream(
         effector: Optional :class:`DeterministicEffectorMap`. When given,
             the byteflip 8/8 pass publishes each mutant's byte index on
             ``effector.pending`` so the caller can record whether the
-            execution changed the trace, and the arithmetic and
-            interesting-value passes then skip every position positively
-            marked inert. ``None`` reproduces the ungated schedule mutant
-            for mutant, so a seeded run without an effector is byte-identical
-            to one from before this parameter existed.
+            execution changed the trace, and the later passes then skip
+            every window whose bytes are all positively marked inert.
+            ``None`` reproduces the ungated schedule mutant for mutant.
         start: Byte offset every pass begins at, wrapping past the end
             (see :func:`_det_start`). 0 is the original order.
 
     Yields:
-        bytes mutants, each one mutation away from *data*.
+        bytes mutants, each one window away from *data*.
     """
-    from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
-
     length = len(data)
     if length == 0:
         _deterministic_mutation_stream.last_truncated = 0
         return
-
-    # Natural schedule costs (mutants per byte): bitflip=8, byteflip=1,
-    # arithmetic=16 (8 deltas × ±), interesting=8.  Total 33.
-    n_arith_deltas = len(ARITHMETIC_DELTAS)
-    n_interesting = len(INTERESTING_UNSIGNED_8)
-    cost_bit = length * 8
-    cost_byte = length
-    cost_arith = length * n_arith_deltas * 2
-    cost_interesting = length * n_interesting
-    full_cost = cost_bit + cost_byte + cost_arith + cost_interesting
-
-    if full_cost <= max_mutations:
-        quotas = [cost_bit, cost_byte, cost_arith, cost_interesting]
-        _deterministic_mutation_stream.last_truncated = 0
-    else:
-        # Proportional per-pass quotas (by natural cost).  A flat prefix
-        # would delete later passes entirely on large seeds; proportional
-        # shares keep every family running and consume the full budget.
-        quotas = _split_det_quota(
-            [cost_bit, cost_byte, cost_arith, cost_interesting], max_mutations
-        )
-        _deterministic_mutation_stream.last_truncated = full_cost - max_mutations
-
-    q_bit, q_byte, q_arith, q_interesting = quotas
 
     # Visit order shared by every pass; rotated so truncated passes reach
     # the tail on later runs (e.g. len 5, start 3 -> 3, 4, 0, 1, 2).
@@ -486,12 +627,26 @@ def _deterministic_mutation_stream(
         range(length) if start == 0 else [*range(start, length), *range(start)]
     )
 
+    # Upper-bound costs: bitflip 8/byte, byteflip 1/byte, then the tail.
+    tail_sites = [_det_sites(order, length, width) for width, _per, _walk in _DET_TAIL]
+    costs = [length * 8, length] + [
+        len(sites) * per for sites, (_w, per, _walk) in zip(tail_sites, _DET_TAIL, strict=True)
+    ]
+    full_cost = sum(costs)
+    if full_cost <= max_mutations:
+        quotas = costs
+        _deterministic_mutation_stream.last_truncated = 0
+    else:
+        quotas = _split_det_quota(costs, max_mutations)
+        _deterministic_mutation_stream.last_truncated = full_cost - max_mutations
+
     # --- Persistent scratch buffer: mutate in place, yield, restore ---
     # Avoids O(n) bytearray(data) allocation per mutant (P1-1).
     # The bytes(scratch) copy per yield is still required by contract.
     scratch = bytearray(data)
 
-    # bitflip 1/1: flip every bit in turn. Inline: 8 of 33 mutants per byte.
+    # bitflip 1/1: flip every bit in turn.
+    q_bit = quotas[0]
     n = 0
     for byte_idx in order:
         if n >= q_bit:
@@ -505,40 +660,24 @@ def _deterministic_mutation_stream(
             n += 1
         scratch[byte_idx] = orig  # restore
 
-    n += yield from _det_byteflip(data, scratch, order, q_byte, effector)
+    n += yield from _det_byteflip(data, scratch, order, quotas[1], effector)
 
     # ── effector gate ────────────────────────────────────────────────────
     # By the time the generator is resumed for the first arithmetic mutant,
     # the last byteflip mutant has already been executed and reported: the
     # caller runs and records mutant k before pulling mutant k+1.
-    positions: range | list[int] = order
+    tail_quotas = quotas[2:]
     if effector is not None:
         gate = _det_effector_gate(effector, order, max_mutations - n, quotas)
         if gate is not None:
-            positions, q_arith, q_interesting = gate
+            tail_sites, tail_quotas = gate
 
-    # arithmetic 8-bit: add/subtract each delta at every live byte position.
-    # Inline: 16 of 33 mutants per byte, the hottest pass.
-    pass_n = 0
-    for byte_idx in positions:
-        if pass_n >= q_arith:
-            break
-        orig = data[byte_idx]
-        for delta in ARITHMETIC_DELTAS:
-            if pass_n >= q_arith:
-                break
-            scratch[byte_idx] = (orig + delta) & 0xFF
-            yield bytes(scratch)
-            pass_n += 1
-            if pass_n >= q_arith:
-                scratch[byte_idx] = orig  # restore before break
-                break
-            scratch[byte_idx] = (orig - delta) & 0xFF
-            yield bytes(scratch)
-            pass_n += 1
-        scratch[byte_idx] = orig  # restore
-
-    yield from _det_interesting(data, scratch, positions, q_interesting)
+    # Tail passes; unspent quota (dedup skips) rolls forward.
+    seen: set[int] = set()
+    spare = 0
+    for (_w, _per, walk), sites, quota in zip(_DET_TAIL, tail_sites, tail_quotas, strict=True):
+        budget = quota + spare
+        spare = budget - (yield from walk(data, scratch, sites, budget, seen))
 
 
 def _det_byteflip(data, scratch, order, quota, effector):
@@ -564,55 +703,35 @@ def _det_byteflip(data, scratch, order, quota, effector):
 
 
 def _det_effector_gate(effector, order, remaining, quotas):
-    """Drop inert positions and re-split the budget; None keeps the ungated plan.
+    """Drop inert windows and re-split the budget; None keeps the ungated plan.
 
-    Only positively-inert positions are dropped. Positions the byteflip
-    pass never reached (quota exhausted) and positions whose mutant was
-    discarded before execution (_dedup_mutate re-rolls) stay UNKNOWN and
-    keep their full schedule.
+    Only positively-inert positions are dropped; a window runs if any of
+    its bytes is not inert. Positions the byteflip pass never reached
+    (quota exhausted) and positions whose mutant was discarded before
+    execution (_dedup_mutate re-rolls) stay UNKNOWN and keep their full
+    schedule.
     """
-    from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS
-
     length = len(order)
     eff = effector.eff
     live = [i for i in order if eff[i] != _DET_EFF_INERT]
     # Fail-safe: a map that marks everything inert is evidence of a
     # broken measurement (unstable path hash, a target that timed out
     # under byteflips), not of a seed no byte of which is read. Treat it
-    # as absent rather than deleting both remaining passes.
+    # as absent rather than deleting every remaining pass.
     if not live or len(live) >= length:
         return None
-    n_live = len(live)
-    gated = [n_live * len(ARITHMETIC_DELTAS) * 2, n_live * len(INTERESTING_UNSIGNED_8)]
+    tail_sites = [_det_sites(order, length, width, eff) for width, _per, _walk in _DET_TAIL]
+    gated = [len(s) * per for s, (_w, per, _walk) in zip(tail_sites, _DET_TAIL, strict=True)]
     # Re-split the remaining budget against the gated costs. The
-    # up-front quotas were sized for `length` positions; leaving them
-    # in place would hand these passes an allowance for bytes they
-    # now skip and the budget would go unspent instead of reaching
-    # further into the seed.
-    q_arith, q_interesting = _split_det_quota(gated, max(0, remaining))
-    cost_bit, cost_byte = length * 8, length
+    # up-front quotas were sized for every position; leaving them in
+    # place would hand these passes an allowance for windows they now
+    # skip and the budget would go unspent instead of reaching further
+    # into the seed.
+    tail_quotas = _split_det_quota(gated, max(0, remaining))
     _deterministic_mutation_stream.last_truncated = (
-        (cost_bit - quotas[0])
-        + (cost_byte - quotas[1])
-        + max(0, sum(gated) - q_arith - q_interesting)
+        (length * 8 - quotas[0]) + (length - quotas[1]) + max(0, sum(gated) - sum(tail_quotas))
     )
-    return live, q_arith, q_interesting
-
-
-def _det_interesting(data, scratch, positions, quota):
-    """interesting values 8-bit: substitute each known-interesting byte."""
-    pass_n = 0
-    for byte_idx in positions:
-        if pass_n >= quota:
-            break
-        orig = data[byte_idx]
-        for val in INTERESTING_UNSIGNED_8:
-            if pass_n >= quota:
-                break
-            scratch[byte_idx] = val & 0xFF
-            yield bytes(scratch)
-            pass_n += 1
-        scratch[byte_idx] = orig  # restore
+    return tail_sites, tail_quotas
 
 
 # Mutants the most recent call would have produced beyond max_mutations.

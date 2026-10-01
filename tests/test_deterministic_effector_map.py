@@ -1,8 +1,8 @@
 """The byteflip 8/8 pass must build an effector map, and it must fail open.
 
-AFL gates the arithmetic and interesting-value passes -- 24 of the 33 mutants
+AFL gates the arithmetic and interesting-value passes -- all but 9 mutants
 per byte -- on a map built during the byteflip pass it has already paid for.
-This tree ran all 33 unconditionally while observing, on every one of those
+This tree ran them unconditionally while observing, on every one of those
 executions, the coverage that answers the question.
 
 The dangerous failure here is not under-skipping, it is over-skipping: a map
@@ -14,22 +14,34 @@ that direction.
 import tempfile
 from pathlib import Path
 
-from fuzzer_tool.core.mutations import ARITHMETIC_DELTAS, INTERESTING_UNSIGNED_8
+from fuzzer_tool.core.mutations import ARITH_MAX, INTERESTING_UNSIGNED_8
 from fuzzer_tool.services.operators import (
     _DET_EFF_INERT,
     _DET_EFF_LIVE,
     _DET_EFF_UNKNOWN,
     DeterministicEffectorMap,
+    _det_cost_per_byte,
     _deterministic_mutation_stream,
 )
+from tests.support.det_reference import reference_stream
 
-N_ARITH = len(ARITHMETIC_DELTAS) * 2
-N_INTERESTING = len(INTERESTING_UNSIGNED_8)
-PER_BYTE = 8 + 1 + N_ARITH + N_INTERESTING  # 33
+PER_BYTE = _det_cost_per_byte()  # upper bound; dedup yields fewer
+
+
+def _tail_len(data: bytes, live: set[int] | None = None) -> int:
+    """Mutants after byteflip, per the reference; 9 per byte come before."""
+    return sum(1 for _ in reference_stream(data, live=live)) - 9 * len(data)
+
+
+def _windows(data: bytes, mutants) -> list[list[int]]:
+    """Changed offsets of each mutant."""
+    return [[i for i, (a, b) in enumerate(zip(data, m, strict=True)) if a != b] for m in mutants]
+
 
 # Bytes chosen so that no mutant can coincide with the original: 0x41..0x41+n
 # is disjoint from INTERESTING_UNSIGNED_8, and every arithmetic delta is
 # non-zero, so "the index where mutant differs from data" is always defined.
+# _diff_index is the first changed offset; 16/32-bit mutants change more.
 def _seed(length: int) -> bytes:
     return bytes((0x41 + i) & 0xFF for i in range(length))
 
@@ -76,16 +88,19 @@ class TestGating:
         data = _seed(64)
         live = {3, 17, 40}
         _mutants, tail, _eff = _drive(data, live)
-        assert {_diff_index(data, m) for m in tail} == live
+        windows = _windows(data, tail)
+        assert {w[0] for w in windows if len(w) == 1} == live
+        # A 16/32-bit window runs when any of its bytes is live.
+        assert all(any(all(abs(x - i) < 4 for i in w) for x in live) for w in windows)
 
     def test_total_cost_is_exactly_nine_per_byte_plus_gated_tail(self):
         data = _seed(64)
         live = {3, 17, 40}
         mutants, _tail, _eff = _drive(data, live)
-        expected = (8 + 1) * len(data) + (N_ARITH + N_INTERESTING) * len(live)
+        expected = (8 + 1) * len(data) + _tail_len(data, live)
         assert len(mutants) == expected
-        # For reference: the ungated schedule is 33 per byte.
-        assert len(list(_deterministic_mutation_stream(data))) == PER_BYTE * len(data)
+        ungated = len(list(_deterministic_mutation_stream(data)))
+        assert ungated == 9 * len(data) + _tail_len(data) > expected
 
     def test_map_records_both_verdicts(self):
         data = _seed(16)
@@ -122,7 +137,7 @@ class TestFailsOpen:
         # remaining passes on that basis is the expensive mistake.
         data = _seed(32)
         mutants, _tail, _eff = _drive(data, live=set())
-        assert len(mutants) == PER_BYTE * len(data)
+        assert len(mutants) == 9 * len(data) + _tail_len(data)
 
     def test_positions_dropped_before_execution_keep_their_schedule(self):
         # _dedup_mutate draws a mutant, finds it in the exec bloom, and draws
@@ -133,7 +148,8 @@ class TestFailsOpen:
         dropped = {9, 21}
         _mutants, tail, eff = _drive(data, live, drop=dropped)
         assert all(eff.eff[i] == _DET_EFF_UNKNOWN for i in dropped)
-        assert {_diff_index(data, m) for m in tail} == live | dropped
+        single = {w[0] for w in _windows(data, tail) if len(w) == 1}
+        assert single == live | dropped
 
     def test_positions_the_byteflip_quota_never_reached_keep_their_schedule(self):
         # With a cap that stops the byteflip pass early, the unprobed tail of
@@ -155,9 +171,11 @@ class TestFailsOpen:
         probed = [i for i, v in enumerate(effector.eff) if v != _DET_EFF_UNKNOWN]
         assert probed  # the pass did run, partially
         assert len(probed) < len(data)  # and did not finish
-        touched = {_diff_index(data, m) for m in tail}
-        assert touched  # the gated passes still ran
-        assert not touched & set(probed)  # only on bytes never probed
+        windows = _windows(data, tail)
+        assert windows  # the gated passes still ran
+        # Only windows holding a byte never probed.
+        assert all(any(i not in probed for i in range(w[0], w[0] + 4)) for w in windows)
+        assert not {w[0] for w in windows if len(w) == 1} & set(probed)
 
 
 class TestBudget:
@@ -179,7 +197,7 @@ class TestBudget:
         # UNKNOWN. Only the arithmetic / interesting split is re-decided.
         data = _seed(96)
         live = set(range(0, 96, 8))
-        gated_total = 9 * len(data) + (N_ARITH + N_INTERESTING) * len(live)
+        gated_total = 9 * len(data) + _tail_len(data, live)
         cap = gated_total + 200  # comfortably fits the gated schedule
         assert cap < PER_BYTE * len(data)  # but not the ungated one
         mutants, _tail, eff = _drive(data, live, cap=cap)
@@ -193,13 +211,13 @@ class TestBudget:
         live = set(range(0, 96, 8))
         cap = 8 * 96 + 96 + 40
         _mutants, tail, _eff = _drive(data, live, cap=cap)
-        deltas = set(ARITHMETIC_DELTAS)
+        single = [m for m, w in zip(tail, _windows(data, tail), strict=True) if len(w) == 1]
         saw_arith = any(
-            (m[_diff_index(data, m)] - data[_diff_index(data, m)]) & 0xFF in deltas
-            or (data[_diff_index(data, m)] - m[_diff_index(data, m)]) & 0xFF in deltas
-            for m in tail
+            min((m[i] - data[i]) & 0xFF, (data[i] - m[i]) & 0xFF) <= ARITH_MAX
+            for m in single
+            for i in [_diff_index(data, m)]
         )
-        saw_interesting = any(m[_diff_index(data, m)] in INTERESTING_UNSIGNED_8 for m in tail)
+        saw_interesting = any(m[_diff_index(data, m)] in INTERESTING_UNSIGNED_8 for m in single)
         assert saw_arith
         assert saw_interesting
 
@@ -248,7 +266,7 @@ class TestEnginePlumbing:
             pending = f._operators._det_pending
             if pending is not None:
                 f._operators.note_deterministic_result(pending[1] in live)
-        assert len(mutants) == 9 * len(data) + (N_ARITH + N_INTERESTING) * len(live)
+        assert len(mutants) == 9 * len(data) + _tail_len(data, live)
 
     def test_a_second_draw_reassigns_the_pending_slot(self):
         # _dedup_mutate draws again when the exec bloom fires; only the last

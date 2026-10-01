@@ -11,8 +11,8 @@ and let a bandit decide how often that is worth it::
 ``A = ARITH_MAX`` (+1, -1, +2, -2, ...), ``Ix`` = len of the repo's
 ``INTERESTING_x``; 16/32-bit stages do little-endian then big-endian.
 Bit order is AFL's: bit 0 is the MSB of byte 0. The in-loop deterministic
-stage (``services/operators._deterministic_mutation_stream``) only has
-flip1, flip8, arith8 and interest8; this is the full-width sweep.
+stage (``services/operators._deterministic_mutation_stream``) has no
+flip4/flip32; this is the full-width sweep.
 """
 
 from __future__ import annotations
