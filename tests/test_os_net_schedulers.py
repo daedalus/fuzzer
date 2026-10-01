@@ -92,6 +92,15 @@ class TestSeedInterface:
 
         assert "b" not in _run(s, ["a", "c"], 30)
 
+    def test_regression_ledger_bounded_by_corpus(self, name):
+        """Adversarial (PR #44 review): churned-out keys do not stay in the ledger."""
+        s = SEED_FACTORIES[name]()
+        for i in range(1000):
+            s.record(f"gone{i}", success=bool(i % 2))
+        s.select_seed(IDS)
+
+        assert len(s.bandit_stats()) <= 2 * len(IDS) + 8
+
     def test_every_seed_served(self, name):
         """No starvation: all live seeds appear, even when all always fail."""
         s = SEED_FACTORIES[name]()

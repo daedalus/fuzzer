@@ -2040,6 +2040,8 @@ _HAIL_MARY_FLAGS = (
     "seed_canary_scheduler",
     "seed_round_robin_scheduler",
     "seed_drr_scheduler",
+    "cuckoo_seed_filter",
+    "swap_walk",
     "seed_mlfq_scheduler",
     "seed_stride_scheduler",
     "seed_eevdf_scheduler",

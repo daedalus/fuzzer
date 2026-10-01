@@ -10,6 +10,12 @@ ten ports (``seed_mlfq`` ... ``op_p2c``) share one copy instead of ten.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
+#: The ledger is trimmed to the live corpus once it tracks this many times it.
+PRUNE_FACTOR = 2
+PRUNE_SLACK = 8
+
 
 def reward(success: bool, weight: float) -> float:
     """Clamp a weighted success into [0, 1]; NaN and failures are 0."""
@@ -39,6 +45,16 @@ class ArmCounts:
         """Beta(1, 1) posterior mean; 0.5 for an unseen arm."""
         s, f = self._counts.get(name, (0.0, 0.0))
         return (s + 1.0) / (s + f + 2.0)
+
+    def _trim(self, live_ids: Sequence[str]) -> None:
+        """Bound the ledger by the live candidate set: departed keys are dropped.
+
+        O(1) per call until the ledger outgrows the corpus, then one O(n) pass.
+        """
+        if len(self._counts) <= PRUNE_FACTOR * len(live_ids) + PRUNE_SLACK:
+            return
+        live = set(live_ids)
+        self._counts = {k: v for k, v in self._counts.items() if k in live}
 
     def bandit_stats(self) -> dict[str, tuple[float, float]]:
         return {k: (s, f) for k, (s, f) in sorted(self._counts.items())}

@@ -40,4 +40,5 @@ class SeedEEVDFScheduler(ArmCounts):
         cost_fn: Callable[[str], float] = _unit,
         weight_fn: Callable[[str], float] = _unit,
     ) -> str:
+        self._trim(seed_ids)
         return self._eevdf.pick(seed_ids, cost_fn, weight_fn)
