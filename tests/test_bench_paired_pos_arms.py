@@ -132,6 +132,7 @@ def test_arena_arms_do_not_turn_on_other_position_flags(monkeypatch):
             "pos_chunk",
             "pos_changed",
             "pos_rare_mask",
+            "pos_consolidated",
         ):
             assert getattr(args, dest) is False, (arm, dest)
 

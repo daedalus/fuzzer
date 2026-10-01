@@ -15,6 +15,7 @@ from fuzzer_tool.core.schedulers.op_stride import OpStrideScheduler
 from fuzzer_tool.core.schedulers.seed_aimd import SeedAIMDScheduler
 from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
 from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
+from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
 from fuzzer_tool.core.schedulers.seed_mlfq import BASE_ALLOTMENT, SeedMLFQScheduler
 from fuzzer_tool.core.schedulers.seed_p2c import SeedP2CScheduler
@@ -49,6 +50,7 @@ SEED_FACTORIES = {
     "codel": SeedCoDelScheduler,
     "aimd": SeedAIMDScheduler,
     "p2c": lambda: SeedP2CScheduler(rng=RandPool(seed=1)),
+    "consolidated": lambda: SeedConsolidatedScheduler(rng=RandPool(seed=1)),
 }
 OP_FACTORIES = {
     "op_stride": OpStrideScheduler,

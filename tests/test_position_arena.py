@@ -37,6 +37,7 @@ from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
 from fuzzer_tool.core.schedulers.pos_changed import PositionChangedScheduler
 from fuzzer_tool.core.schedulers.pos_chunk import PositionChunkScheduler
 from fuzzer_tool.core.schedulers.pos_cmplog import PositionCmplogScheduler
+from fuzzer_tool.core.schedulers.pos_consolidated import PositionConsolidatedScheduler
 from fuzzer_tool.core.schedulers.pos_context import PositionContextScheduler
 from fuzzer_tool.core.schedulers.pos_effector import PositionEffectorScheduler
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
@@ -582,6 +583,7 @@ def _arena(
     chunk=None,
     changed=None,
     rare_mask=None,
+    consolidated=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
@@ -603,6 +605,7 @@ def _arena(
         chunk=chunk,
         changed=changed,
         rare_mask=rare_mask,
+        consolidated=consolidated,
     )
 
 
@@ -715,6 +718,20 @@ class TestPool:
     def test_levy_absent_when_not_supplied(self):
         _, arena = _arena()
         assert "levy" not in arena.pool()
+
+    def test_consolidated_joins_when_supplied(self):
+        _, arena = _arena(consolidated=PositionConsolidatedScheduler(RandPool(seed=1)))
+        assert "consolidated" in arena.pool()
+
+    def test_consolidated_absent_when_not_supplied(self):
+        _, arena = _arena()
+        assert "consolidated" not in arena.pool()
+
+    def test_consolidated_dropped_by_arms_subset(self):
+        arm = PositionConsolidatedScheduler(RandPool(seed=1))
+        f = _Fuzzer(sensitivity=True, te=True)
+        arena = PositionArena(f, region_fn=lambda d, n: 55, consolidated=arm, arms=["sensitivity"])
+        assert "consolidated" not in arena.pool()
 
     def test_fractal_joins_when_supplied(self):
         _, arena = _arena(fractal=PositionFractalScheduler(RandPool(seed=1)))
@@ -935,6 +952,7 @@ class TestPool:
             chunk=chunk,
             changed=_changed(),
             rare_mask=_rare_mask(),
+            consolidated=PositionConsolidatedScheduler(RandPool(seed=1)),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -1126,6 +1144,15 @@ class TestSettle:
         f, arena = self._played(levy=levy)
         arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
         assert levy.anchor(SEED) == 100
+
+    def test_consolidated_is_credited_off_policy(self):
+        # The picker was sensitivity; every consolidated learner still moves.
+        arm = PositionConsolidatedScheduler(RandPool(seed=1))
+        f, arena = self._played(consolidated=arm)
+        arena.settle(SEED, [100], Outcome.GAIN, weight=1.0, score=1.0)
+        assert arm.anchor(SEED) == 100
+        assert arm.context_obs == 1
+        assert arm.seed_count() == 1
 
     def test_levy_misses_are_credited_and_age_the_anchor(self):
         # FALSIFICATION: MISS rounds must reach the arm, or the anchor never
@@ -1500,6 +1527,28 @@ class TestRealConstruction:
         f = self._build(tmp_path, pos_boundary=True)
         assert isinstance(f._pos_boundary, PositionBoundaryScheduler)
         assert f._position_arena is None
+
+    def test_position_arena_implies_consolidated(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_consolidated, PositionConsolidatedScheduler)
+        assert "consolidated" in f._position_arena.pool()
+
+    def test_pos_consolidated_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_consolidated=True)
+        assert isinstance(f._pos_consolidated, PositionConsolidatedScheduler)
+        assert f._position_arena is None
+
+    def test_consolidated_state_survives_save_and_load(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        f._pos_consolidated.record(SEED, [100], Outcome.GAIN)
+        f._save_learned()
+        (tmp_path / "g").mkdir()
+        g = self._build(tmp_path / "g", elo="all", position_arena=True)
+        g._state_store = f._state_store
+        g.resume = True  # _load_learned is a no-op on a fresh run
+        g._load_learned()
+        assert g._pos_consolidated.to_dict() == f._pos_consolidated.to_dict()
+        assert g._pos_consolidated.anchor(SEED) == 100
 
     def test_pos_levy_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, pos_levy=True)

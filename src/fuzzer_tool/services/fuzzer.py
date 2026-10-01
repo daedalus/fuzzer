@@ -103,6 +103,7 @@ from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.schedulers.seed_aimd import SeedAIMDScheduler
 from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
 from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
+from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
 from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
 from fuzzer_tool.core.schedulers.seed_p2c import SeedP2CScheduler
@@ -209,6 +210,7 @@ _SEED_STRATEGY_NAMES = (
     "codel",
     "aimd",
     "p2c",
+    "consolidated",
 )
 
 
@@ -698,6 +700,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("changed")
     if getattr(f, "_pos_rare_mask", None) is not None:
         names.append("rare-mask")
+    if getattr(f, "_pos_consolidated", None) is not None:
+        names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
         names.append("cmplog")
     if getattr(f, "_pos_lineage", None) is not None and getattr(f, "_use_lineage", False):
@@ -1520,6 +1524,10 @@ class Fuzzer:
         # pre-v2 name of v1. Appended: positional signature.
         consolidated_v1=False,
         consolidated_v2=False,
+        # Consolidated seed / position arms (core/schedulers/seed_consolidated.py,
+        # pos_consolidated.py). Appended: positional signature.
+        seed_consolidated_scheduler=False,
+        pos_consolidated=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2704,9 +2712,13 @@ class Fuzzer:
         self._seed_codel = SeedCoDelScheduler() if seed_codel_scheduler else None
         self._seed_aimd = SeedAIMDScheduler() if seed_aimd_scheduler else None
         self._seed_p2c = SeedP2CScheduler(rng=self._rng) if seed_p2c_scheduler else None
+        self._seed_consolidated = (
+            SeedConsolidatedScheduler(rng=self._rng) if seed_consolidated_scheduler else None
+        )
         self._seed_os_arms = tuple(
             arm
             for arm in (
+                self._seed_consolidated,
                 self._seed_mlfq,
                 self._seed_stride,
                 self._seed_eevdf,
@@ -2852,6 +2864,17 @@ class Fuzzer:
 
             self._pos_boundary = PositionBoundaryScheduler(self._rng)
             log.info("Position boundary scheduling enabled")
+        # Position-arena consolidated: the learning arms' features in one
+        # proposer (see core/schedulers/pos_consolidated.py). Off-policy
+        # extra, persisted.
+        self._pos_consolidated = None
+        if pos_consolidated or position_arena:
+            from fuzzer_tool.core.schedulers.pos_consolidated import (
+                PositionConsolidatedScheduler,
+            )
+
+            self._pos_consolidated = PositionConsolidatedScheduler(self._rng)
+            log.info("Position consolidated scheduling enabled")
         flags = {
             "effector": pos_effector,
             "token": pos_token,
@@ -2890,6 +2913,7 @@ class Fuzzer:
                 chunk=self._pos_chunk,
                 changed=self._pos_changed,
                 rare_mask=self._pos_rare_mask,
+                consolidated=self._pos_consolidated,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
                 arms=pos_arena_arms,
@@ -4442,6 +4466,8 @@ class Fuzzer:
             self._state_store.set("pos_context", self._pos_context.to_dict())
         if getattr(self, "_pos_levy", None) is not None:
             self._state_store.set("pos_levy", self._pos_levy.to_dict())
+        if getattr(self, "_pos_consolidated", None) is not None:
+            self._state_store.set("pos_consolidated", self._pos_consolidated.to_dict())
         pll = getattr(self, "_pll", None)
         if pll is not None:
             self._state_store.set("pll", pll.save())
@@ -4475,6 +4501,8 @@ class Fuzzer:
             self._pos_context.from_dict(self._state_store.get("pos_context", {}))
         if getattr(self, "_pos_levy", None) is not None:
             self._pos_levy.from_dict(self._state_store.get("pos_levy", {}))
+        if getattr(self, "_pos_consolidated", None) is not None:
+            self._pos_consolidated.from_dict(self._state_store.get("pos_consolidated", {}))
         if self._wfc_enabled:
             WFC_MUTATOR.store.from_dict(self._state_store.get("wfc_tables", {}))
         if self._dict_picker is not None:
