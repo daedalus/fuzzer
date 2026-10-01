@@ -46,6 +46,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "bit_swap_16",
         "bit_swap_32",
         "bit_swap_64",
+        "rev_circuit",
     },
     "byte": {
         "byte_flip",

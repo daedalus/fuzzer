@@ -2793,25 +2793,41 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import bit_swap
 
         if buf:
-            return bytearray(bit_swap(bytes(buf), self.ctx._rng)[: self.ctx.max_len])
+            return bytearray(bit_swap(bytes(buf), self.ctx._rng, 1)[: self.ctx.max_len])
 
     def _op_bit_swap_16(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_swap
 
         if len(buf) >= 2:
-            return bytearray(bit_swap(bytes(buf), self.ctx._rng)[: self.ctx.max_len])
+            return bytearray(bit_swap(bytes(buf), self.ctx._rng, 2)[: self.ctx.max_len])
 
     def _op_bit_swap_32(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_swap
 
         if len(buf) >= 4:
-            return bytearray(bit_swap(bytes(buf), self.ctx._rng)[: self.ctx.max_len])
+            return bytearray(bit_swap(bytes(buf), self.ctx._rng, 4)[: self.ctx.max_len])
 
     def _op_bit_swap_64(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import bit_swap
 
         if len(buf) >= 8:
-            return bytearray(bit_swap(bytes(buf), self.ctx._rng)[: self.ctx.max_len])
+            return bytearray(bit_swap(bytes(buf), self.ctx._rng, 8)[: self.ctx.max_len])
+
+    def _op_rev_circuit(self, buf, _byte_idx, data):
+        from fuzzer_tool.core.mutations.reversible import rev_circuit
+
+        if not buf:
+            return None
+
+        # Controls from Weizz-tagged bytes when the seed has a map: gates
+        # then fire on structural flags, not arbitrary bits.
+        ctrl_bytes: tuple[int, ...] = ()
+        smap = self._weizz_structure_map(data)
+        if smap is not None:
+            n = len(buf)
+            ctrl_bytes = tuple(i for s, e, _cid in smap.field_spans() for i in range(s, min(e, n)))
+
+        return bytearray(rev_circuit(bytes(buf), self.ctx._rng, ctrl_bytes)[: self.ctx.max_len])
 
     def _op_span_invert(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import span_invert

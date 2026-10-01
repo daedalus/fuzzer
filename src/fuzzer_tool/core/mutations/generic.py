@@ -1832,8 +1832,8 @@ _INVERT_TABLE = bytes(b ^ 0xFF for b in range(256))
 _DEGENERATE_RETRIES = 4
 
 
-def bit_swap(data: bytes, rng) -> bytes:
-    """Swap two randomly selected bit positions within a word-sized window.
+def bit_swap(data: bytes, rng, width: int) -> bytes:
+    """Swap two randomly selected bit positions within a *width*-byte window.
 
     Unlike bit_transpose which swaps 2-4 random bit pairs, this swaps exactly
     one pair of bits for more granular mutation control. Preserves popcount
@@ -1842,6 +1842,8 @@ def bit_swap(data: bytes, rng) -> bytes:
     Args:
         data: Input bytes.
         rng: Optional RNG; defaults to the module-level `random`.
+        width: Window size in bytes (1, 2, 4 or 8); caller ensures
+            ``len(data) >= width``.
 
     Returns:
         Bytes with two bits swapped, or input unchanged if no swap occurred.
@@ -1849,7 +1851,6 @@ def bit_swap(data: bytes, rng) -> bytes:
     if not data:
         return data
     r = rng
-    width = r.choice(tuple(w for w in (1, 1, 1, 2, 2, 4, 4, 8) if w <= len(data)))
     total_bits = 8 * width
     max_start = len(data) - width
 
