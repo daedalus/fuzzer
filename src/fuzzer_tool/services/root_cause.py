@@ -192,6 +192,7 @@ def root_cause(
             SIGNAL_CRASH_CODES,
             run_target_file,
             run_target_stdin,
+            stderr_crash_marker,
         )
         from fuzzer_tool.core.sanitizer import SanitizerReport
 
@@ -215,10 +216,8 @@ def root_cause(
                 return report.signature
             if returncode in SIGNAL_CRASH_CODES or returncode < 0:
                 return f"signal:{abs(returncode)}"
-            for sig in ["SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS", "Segmentation fault", "Aborted"]:
-                if sig in stderr:
-                    return f"signal:{sig}"
-            return None
+            marker = stderr_crash_marker(returncode, stderr)
+            return f"signal:{marker}" if marker else None
 
         def _is_crash(data_bytes: bytes, expected_sig: str | None = None) -> str | None:
             returncode, stderr = _run_target(data_bytes)

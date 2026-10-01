@@ -26,6 +26,7 @@ from fuzzer_tool.adapters.process import (
     run_target_fast,
     run_target_file,
     run_target_stdin,
+    stderr_crash_marker,
 )
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE
 from fuzzer_tool.core.sanitizer import SanitizerReport
@@ -773,9 +774,7 @@ class TargetRunner:
             return True
         if returncode in (-1, 0) and ("ASAN" in stderr or "AddressSanitizer" in stderr):
             return True
-        if "Segmentation fault" in stderr:
-            return True
-        return "Aborted" in stderr
+        return stderr_crash_marker(returncode, stderr) is not None
 
     def is_crash(self, returncode: int, stderr: str) -> bool:
         f = self.f
@@ -792,14 +791,4 @@ class TargetRunner:
             return True
         if returncode < 0:
             return True
-        return any(
-            sig in stderr
-            for sig in [
-                "SIGSEGV",
-                "SIGABRT",
-                "SIGFPE",
-                "SIGBUS",
-                "Segmentation fault",
-                "Aborted",
-            ]
-        )
+        return stderr_crash_marker(returncode, stderr) is not None

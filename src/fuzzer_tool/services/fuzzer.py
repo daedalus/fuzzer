@@ -44,6 +44,13 @@ from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import phase_of
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
+from fuzzer_tool.core.coverage_noise import (
+    NOISE_PROBE_VARIANTS,
+    AdmissionMonitor,
+    NoiseVerdict,
+    classify_noise,
+    tail_variants,
+)
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.elf import (
     SHM_LAYOUT_CURRENT,
@@ -1459,6 +1466,7 @@ class Fuzzer:
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
         confirm_novelty=False,
+        antifuzz_evade=False,
         seed_canary_scheduler=False,
         # Seed arena's deterministic baseline (see
         # core/schedulers/seed_round_robin.py). The seed_ counterpart of
@@ -1936,6 +1944,8 @@ class Fuzzer:
         # F2: rerun an execution that reported new coverage and keep only what
         # reproduces. See _confirm_new_coverage.
         self._confirm_novelty = bool(confirm_novelty)
+        # AntiFuzz §4.2/§4.3: LD_PRELOAD shim faking self-ptrace + dropping delays.
+        self._antifuzz_evade = bool(antifuzz_evade)
         self._confirmed_edges: frozenset[int] | None = None
         self._confirm_stats = {"reruns": 0, "withdrawn": 0, "phantom_ids": 0}
         self._unstable_edges: set[int] = set()
@@ -2228,6 +2238,9 @@ class Fuzzer:
         self._crash_rate_counts: array = array("Q")  # crash_count per sample
         self._duplicate_reject_count = 0
         self._total_corpus_attempts = 0
+        # AntiFuzz §4.1 hash-keyed coverage: calibration probe + runtime alarm.
+        self._coverage_noise = NoiseVerdict.UNMEASURED
+        self._admission_monitor = AdmissionMonitor()
         self._pruned_count = 0
         self._exec_baseline = 0
         self._peak_eps = 0.0
@@ -4288,6 +4301,27 @@ class Fuzzer:
 
         if forkserver:
             self._setup_forkserver()
+
+        self._install_antifuzz_evade()
+
+    def _install_antifuzz_evade(self) -> None:
+        """Prepend the AntiFuzz-evasion preload to the target env (§4.2/§4.3).
+
+        Appended after libasan so ASAN keeps its required first slot. No-op
+        unless --antifuzz-evade is set; best-effort if the shim cannot build.
+        """
+        if not self._antifuzz_evade:
+            return
+
+        from fuzzer_tool.adapters.evade_shim import evade_ld_preload
+
+        updated = evade_ld_preload(os.environ.get("LD_PRELOAD", ""))
+        if updated is None:
+            print("[!] --antifuzz-evade: shim did not build; continuing without it")
+            return
+
+        os.environ["LD_PRELOAD"] = updated
+        print("[*] AntiFuzz evasion: self-ptrace faked, input delays dropped (LD_PRELOAD)")
 
     def _setup_forkserver(self) -> None:
         """Start the C fuzz_loader for the default (spawn-per-exec) path.
@@ -7694,6 +7728,7 @@ class Fuzzer:
             )
         self._report_comparison_reach(len(self.corpus))
         self._report_edge_id_stability(probe_seed)
+        self._report_coverage_noise(probe_seed)
 
     def _report_edge_id_stability(self, seed: bytes | None, n_runs: int = 3) -> None:
         """Say whether edge ids reproduce across processes.
@@ -7806,6 +7841,57 @@ class Fuzzer:
                 "time, or uninitialised memory in the target; "
                 "--calibrate-stability masks such edges per seed."
             )
+
+    def _report_coverage_noise(self, seed: bytes | None) -> None:
+        """Warn when coverage looks keyed on an input hash (AntiFuzz §4.1).
+
+        Runs the seed twice and :data:`NOISE_PROBE_VARIANTS` one-byte tail
+        variants once each. Warn-only: nothing separates fake edges from
+        real ones once the corpus is flooded, so this reports, not masks.
+        """
+        if seed is None or self.shm_cov is None:
+            return
+
+        measured = self._repeat_edge_sets(seed, 2)
+        if measured is None:
+            return
+        base_runs, _hashes, dropped = measured
+
+        variant_sets: list[set[int]] = []
+        for variant in tail_variants(seed, NOISE_PROBE_VARIANTS):
+            self._run_target(variant)
+            variant_sets.append(self.shm_cov.get_edge_ids())
+            dropped += self.shm_cov.dropped_edges_delta()
+
+        # A full map drops edges by arrival order: divergence means nothing.
+        if dropped:
+            return
+
+        self._coverage_noise = classify_noise(base_runs, variant_sets)
+        if self._coverage_noise is not NoiseVerdict.SUSPECTED:
+            return
+
+        msg = (
+            f"Coverage noise: {NOISE_PROBE_VARIANTS} one-byte tail variants of a seed "
+            "hit as many distinct edge sets — coverage looks input-hash-keyed "
+            "(AntiFuzz-style fake edges); new-coverage feedback is unreliable"
+        )
+        log.warning(msg)
+        print(f"[!] WARNING: {msg}")
+
+    def _check_admission_rate(self) -> None:
+        """Warn once when corpus admissions approach one per execution."""
+        execs, admits = self.exec_count, self._total_corpus_attempts
+        if not self._admission_monitor.observe(execs, admits):
+            return
+
+        rate = self._admission_monitor.rate(execs, admits)
+        msg = (
+            f"Coverage noise: corpus admission on {rate:.0%} of executions — "
+            "coverage is likely input-hash-keyed (AntiFuzz-style fake edges)"
+        )
+        log.warning(msg)
+        print(f"[!] WARNING: {msg}")
 
     def _report_comparison_reach(self, n_execs: int) -> None:
         """Say whether the comparison instrumentation reached the target.
@@ -8663,6 +8749,7 @@ class Fuzzer:
                         self.print_stats()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
+                    self._check_admission_rate()
                     # Feed the regime detector with all observed signals.
                     # The CriticalSlowingDown detector is already fed from
                     # _print_stats_dr_str (stats.py:583); we only read its

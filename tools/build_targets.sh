@@ -1154,6 +1154,7 @@ build_simple_targets() {
     select_png_zlib_libs
 
     build_target "${TARGETS_SRC:-$TARGETS}/asan_target.c" "$TARGETS/asan_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
+    build_target "${TARGETS_SRC:-$TARGETS}/antifuzz_demo.c" "$TARGETS/antifuzz_demo${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
     build_target "${TARGETS_SRC:-$TARGETS}/test_target.c" "$TARGETS/test_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
     build_target "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target${out_suffix}" "" "$flags" "$cc" "$extra_cflags"
     build_target "${TARGETS_SRC:-$TARGETS}/png_read.c" "$TARGETS/png_read${out_suffix}" "$PNG_LIBS" "$flags" "$cc" "$extra_cflags $PNG_INC"
@@ -1209,6 +1210,7 @@ build_sanitizer_targets() {
     # sanitizer.py parses; -fPIE/-pie is required by MSAN.
     local common="$flags -fno-omit-frame-pointer -fPIE -pie"
     build_target "${TARGETS_SRC:-$TARGETS}/asan_target.c" "$TARGETS/asan_target${suffix}" "" "$common" "clang"
+    build_target "${TARGETS_SRC:-$TARGETS}/antifuzz_demo.c" "$TARGETS/antifuzz_demo${suffix}" "" "$common" "clang"
     build_target "${TARGETS_SRC:-$TARGETS}/test_target.c" "$TARGETS/test_target${suffix}" "" "$common" "clang"
     build_target "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target${suffix}" "" "$common" "clang"
     build_target "${TARGETS_SRC:-$TARGETS}/grep_read.c" "$TARGETS/grep_read${suffix}" "" "$common" "clang"
@@ -1539,6 +1541,7 @@ build_simple_so_targets() {
     fi
 
     build_so_target "${TARGETS_SRC:-$TARGETS}/asan_target.c" "$TARGETS/asan_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
+    build_so_target "${TARGETS_SRC:-$TARGETS}/antifuzz_demo.c" "$TARGETS/antifuzz_demo${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
     build_so_target "${TARGETS_SRC:-$TARGETS}/test_target.c" "$TARGETS/test_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
     build_so_target "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
     build_so_target "${TARGETS_SRC:-$TARGETS}/png_read.c" "$TARGETS/png_read${out_suffix}.so" "$PNG_LIBS" "$flags" "$cc" "$extra_cflags $PNG_INC"
@@ -1781,6 +1784,7 @@ verify_afl() {
     for f in "$TARGETS"/fuzz_* "$TARGETS"/fgrep_read "$TARGETS"/fgrep_read_nosan \
              "$TARGETS"/fgrep_read.so "$TARGETS"/fgrep_read_nosan.so \
              "$TARGETS"/asan_target "$TARGETS"/asan_target_nosan "$TARGETS"/asan_target.so "$TARGETS"/asan_target_nosan.so \
+             "$TARGETS"/antifuzz_demo "$TARGETS"/antifuzz_demo_nosan "$TARGETS"/antifuzz_demo.so "$TARGETS"/antifuzz_demo_nosan.so \
              "$TARGETS"/png_read "$TARGETS"/png_read_nosan "$TARGETS"/png_read.so "$TARGETS"/png_read_nosan.so \
              "$TARGETS"/zlib_read "$TARGETS"/zlib_read_nosan "$TARGETS"/zlib_read.so "$TARGETS"/zlib_read_nosan.so \
              "$TARGETS"/gzip_read "$TARGETS"/gzip_read_nosan "$TARGETS"/gzip_read.so "$TARGETS"/gzip_read_nosan.so \
@@ -1797,6 +1801,7 @@ verify_afl() {
              "$TARGETS"/fuzzgoat_read "$TARGETS"/fuzzgoat_read_nosan "$TARGETS"/fuzzgoat_read.so "$TARGETS"/fuzzgoat_read_nosan.so \
              "$TARGETS"/grep_read_ng2.so "$TARGETS"/grep_read_ng3.so \
              "$TARGETS"/asan_target_ng2.so "$TARGETS"/asan_target_ng3.so \
+             "$TARGETS"/antifuzz_demo_ng2.so "$TARGETS"/antifuzz_demo_ng3.so \
              "$TARGETS"/test_target_ng2.so "$TARGETS"/test_target_ng3.so \
              "$TARGETS"/proto_target_ng2.so "$TARGETS"/proto_target_ng3.so \
              "$TARGETS"/png_read_ng2.so "$TARGETS"/png_read_ng3.so \
@@ -2111,6 +2116,7 @@ build_ngram_so_targets() {
 
         # Simple .so targets without vendored libs
         build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/asan_target.c" "$TARGETS/asan_target_ng${k}.so" "" "" "" "" "$k"
+        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/antifuzz_demo.c" "$TARGETS/antifuzz_demo_ng${k}.so" "" "" "" "" "$k"
         build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/test_target.c" "$TARGETS/test_target_ng${k}.so" "" "" "" "" "$k"
         build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/proto_target.c" "$TARGETS/proto_target_ng${k}.so" "" "" "" "" "$k"
         build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/nop_target.c" "$TARGETS/nop_target_ng${k}.so" "" "" "" "" "$k"
