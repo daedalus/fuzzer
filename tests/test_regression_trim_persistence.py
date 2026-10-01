@@ -27,7 +27,7 @@ from fuzzer_tool.services.corpus_manager import CorpusManager, _retire_seed_file
 
 
 class _FakeShm:
-    """Returns a fixed edge set; the trimmed run must be a subset to be kept."""
+    """Returns a fixed edge set; the trimmed run must match it to be kept."""
 
     def __init__(self, edges):
         self._edges = set(edges)
@@ -193,3 +193,17 @@ class TestRetireHelper:
 
     def test_no_corpus_dir_is_a_noop(self):
         assert _retire_seed_file(None, "0" * 16) is False
+
+
+def test_regression_trim_rejects_lost_edges(fuzzer):
+    """Trimmed run dropping edge 3 was accepted: the check was inverted
+    (trimmed ⊆ current), so coverage loss passed. AFL keeps a trim only when
+    the trace is unchanged."""
+    _seed_the_corpus(fuzzer)
+    traces = iter([{1, 2, 3}, {1, 2}])
+    fuzzer.shm_cov.get_edge_ids = lambda: next(traces)
+
+    CorpusManager(fuzzer).trim_new_coverage(ORIGINAL, ORIGINAL)
+
+    assert fuzzer.corpus == [ORIGINAL]
+    assert rehydrate_by_hash(hash_data(TRIMMED), fuzzer.corpus_dir) is None

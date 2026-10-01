@@ -1152,7 +1152,8 @@ class CorpusManager:
         if trimmed_edges is None:
             return
 
-        if not trimmed_edges.issubset(current_edges):
+        # AFL rule: keep the trim only if the trace is unchanged.
+        if trimmed_edges != current_edges:
             return
 
         seed_key = self.seed_key(data)

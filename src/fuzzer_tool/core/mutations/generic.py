@@ -3,6 +3,8 @@
 import itertools
 from functools import cache
 
+from fuzzer_tool.core.reducer import ChunkPass, Oracle, Phase, Reducer, Verdict
+
 
 def _swap_pair(domain, rng, *, start=0):
     """Pick two distinct indices/elements to swap — the C(n,2) primitive
@@ -1208,7 +1210,7 @@ def minimize_bytes(data: bytes, interesting_fn, max_stages: int = 128) -> bytes:
     Args:
         data: The original input to minimize.
         interesting_fn: Callable(bytes) -> bool, returns True if input is still interesting.
-        max_stages: Maximum number of reduction stages before stopping.
+        max_stages: Maximum number of accepted reductions before stopping.
 
     Returns:
         Minimized input that still triggers the same behavior.
@@ -1216,31 +1218,9 @@ def minimize_bytes(data: bytes, interesting_fn, max_stages: int = 128) -> bytes:
     if not data or not interesting_fn(data):
         return data
 
-    best = bytearray(data)
-    stage = 0
-
-    while stage < max_stages and len(best) > 1:
-        improved = False
-
-        for chunk_size in _divisor_sizes(len(best)):
-            if chunk_size > len(best):
-                continue
-            offset = 0
-            while offset + chunk_size <= len(best):
-                candidate = best[:offset] + best[offset + chunk_size :]
-                if candidate and interesting_fn(bytes(candidate)):
-                    best = candidate
-                    improved = True
-                    break
-                offset += chunk_size
-            if improved:
-                break
-
-        if not improved:
-            break
-        stage += 1
-
-    return bytes(best)
+    # C-Reduce pass manager: cursor kept on success, verdicts memoized.
+    oracle = Oracle(lambda d: Verdict.PASS if interesting_fn(d) else Verdict.FAIL)
+    return Reducer(oracle, [(Phase.MAIN, ChunkPass())], max_steps=max_stages).run(data)
 
 
 def _divisor_sizes(n: int) -> list[int]:
