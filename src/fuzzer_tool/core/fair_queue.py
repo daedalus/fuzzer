@@ -15,8 +15,9 @@ infinite. Nothing here raises on bad numbers, hangs, or divides by zero.
     Stride             counts   O(log n)    deterministic tickets, seeds/ops
     EEVDF              cost     O(log n)*   lag-bounded, new flows join at V
 
-(*) amortized: each flow crosses from the ve heap to the deadline heap once
-per service.
+(*) heap work only, amortized: each flow crosses from the ve heap to the
+deadline heap once per service. The whole pick is O(n + log n): it also
+compares the caller's flow list against the last one.
 
 Picks are O(n) because callers hand over the live flow set every call; the
 flow sets here (targets, corpus) are rebuilt per pick by the caller anyway.
@@ -336,7 +337,8 @@ class EEVDF:
     a new flow joins at ``V`` (lag 0), so it neither catches up nor waits.
     Flat cost and weight are plain round robin.
 
-    Two heaps keep a pick amortized O(log n): deadline order is not
+    Two heaps keep a pick's heap work amortized O(log n) (the pick itself
+    stays O(n + log n), see module note): deadline order is not
     eligibility order, so one deadline heap would pop every ineligible flow
     with an earlier deadline. ``pending`` holds flows by ``ve``; those that
     fall at or below ``V`` move to ``ready``, ordered by deadline::

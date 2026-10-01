@@ -2001,10 +2001,10 @@ class Fuzzer:
                 if mod_solving == "trace":
                     from fuzzer_tool.core.elf import extract_div_constants
 
-                    targets = multi_targets or [target]
+                    div_targets = multi_targets or [target]
                     div_map: dict[int, int] = {}
                     weak_set: set[int] = set()
-                    for t in targets:
+                    for t in div_targets:
                         try:
                             d, w = extract_div_constants(t)
                             div_map.update(d)
@@ -2335,6 +2335,12 @@ class Fuzzer:
                 log.warning("Hardware perf counters not available (needs CAP_PERFMON or root)")
                 self._perf_counters = None
                 self.hw_perf = False
+
+        # Doppler samples SHM hit counts only: without SHM it would score
+        # nothing and silently act as 'base' while reported as enabled.
+        if schedule == "doppler" and self.shm_cov is None:
+            print("[!] Doppler schedule: needs AFL SHM coverage; falling back to 'base'")
+            schedule = "base"
 
         # Seed-level energy multiplier: scales mutations_per_input per seed
         self._seed_scorer = SeedScorer(
@@ -2739,6 +2745,8 @@ class Fuzzer:
             )
             if arm is not None
         )
+        # (parent, corpus size, in corpus?): one membership test per pick.
+        self._parent_memo: tuple[bytes, int, bool] | None = None
         if self._seed_os_arms:
             log.info("OS/network seed arms enabled: %d", len(self._seed_os_arms))
         # LST override: no seed waits more than lst_revisit seconds between
@@ -4521,23 +4529,51 @@ class Fuzzer:
     def _record_seed_os_arms(self, parent: bytes, success: bool, weight: float) -> None:
         """Feed one corpus parent's outcome to every enabled OS / network seed arm.
 
-        Parents outside the corpus (Markov-generated inputs) are skipped: they
-        are never candidates, and each would leave a permanent ledger entry.
+        Parents outside the corpus (Markov-generated inputs, standalone-QEA
+        collapses that live only in seed_meta) are skipped: they are never
+        candidates, and each would leave a permanent ledger entry.
 
         Off-policy like the canary feed: every arm sees every parent, whichever
         strategy picked it, since MLFQ demotion, CoDel staleness and AIMD
         windows are properties of the seed, not of the picker.
         """
-        if not self._seed_os_arms or parent not in self.seed_meta:
+        if not self._seed_os_arms or not self._in_corpus(parent):
             return
 
         key = self._seed_key(parent)
         for arm in self._seed_os_arms:
             arm.record(key, success=success, weight=weight)
 
+    def _in_corpus(self, parent: bytes) -> bool:
+        """Live-corpus membership of *parent*, memoized across its executions.
+
+        Checked against the seed picker's cached key map (rebuilt only on
+        corpus change), not ``seed_meta``. The memo is keyed on corpus size
+        too, so a parent admitted mid-pick is seen.
+        """
+        n = len(self.corpus)
+        memo = self._parent_memo
+        if memo is not None and memo[0] is parent and memo[1] == n:
+            return memo[2]
+
+        key_to_seed, _ = self._seed_picker._corpus_keys()
+        hit = self._seed_key(parent) in key_to_seed
+        self._parent_memo = (parent, n, hit)
+        return hit
+
     def _seed_key(self, data: bytes) -> str:
         """Return content hash for *data*."""
         return self._corpus_manager.seed_key(data)
+
+    def _doppler_key(self, seed_key: str) -> str:
+        """Doppler frame key: SHM edge ids are per target, so namespace them.
+
+        Multi-target: ``"a.bin\0<hash>"`` and ``"b.bin\0<hash>"`` are two
+        frames; mixing them would merge unrelated edges sharing an id.
+        """
+        if not self.multi_targets:
+            return seed_key
+        return f"{self.target}\0{seed_key}"
 
     def _boost_corpus_sizes(self) -> None:
         """Resize each corpus seed to a target size drawn from N(boost_mean, boost_std),
@@ -6377,7 +6413,9 @@ class Fuzzer:
             and not is_crash
             and not is_timeout
         ):
-            self._doppler.observe(self._seed_key(data), scanned_shm.get_edge_counts())
+            self._doppler.observe(
+                self._doppler_key(self._seed_key(data)), scanned_shm.get_edge_counts()
+            )
 
         # Performance novelty: an edge whose trip count grew substantially
         # past anything seen before. The hit-count buckets saturate (129 and
@@ -9799,7 +9837,9 @@ class Fuzzer:
                             else 0.0
                         ),
                         doppler_energy=(
-                            self._doppler.energy(seed_key) if self._doppler is not None else 0.0
+                            self._doppler.energy(self._doppler_key(seed_key))
+                            if self._doppler is not None
+                            else 0.0
                         ),
                         **hf_kwargs,
                     )

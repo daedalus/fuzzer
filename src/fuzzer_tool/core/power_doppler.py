@@ -36,8 +36,12 @@ DEFAULT_ENSEMBLE = 32
 DEFAULT_MAX_SEEDS = 64
 # Edge columns per ensemble; 64 x 32 x 2048 x 4 B bounds the matrices at 16 MiB.
 DEFAULT_MAX_EDGES = 2048
-# Closed-ensemble scores kept (two floats and a frozenset each).
+# Closed-ensemble scores kept (power and flow-edge ids each).
 DEFAULT_MAX_SCORES = 4096
+# Flow-edge ids kept across all scores: 8 B each bounds them at 8 MiB.
+DEFAULT_MAX_FLOW_IDS = 1 << 20
+# Open frame untouched for this many full frames of samples is abandoned.
+STALE_FRAMES = 4
 # CFAR false-alarm probability per edge.
 FALSE_ALARM = 1e-3
 # A component spread over at least this share of the seed's edges is a flash.
@@ -126,7 +130,7 @@ def doppler_power(x: np.ndarray) -> tuple[float, np.ndarray, int]:
 class _Ensemble:
     """One seed's open slow-time matrix with an edge-id -> column map."""
 
-    __slots__ = ("x", "n", "m", "cap", "ids", "skeys", "sslots", "last")
+    __slots__ = ("x", "n", "m", "cap", "ids", "skeys", "sslots", "last", "touched")
 
     def __init__(self, length: int, cap: int) -> None:
         cols = min(INITIAL_COLS, cap)
@@ -140,6 +144,7 @@ class _Ensemble:
         # Previous sample's (ids, columns, kept): mutants mostly replay the
         # seed's path in the same SHM order, so the lookup is usually reused.
         self.last: tuple[np.ndarray, np.ndarray, np.ndarray] | None = None
+        self.touched = 0  # PowerDoppler tick of the last sample
 
     def _grow(self, need: int) -> None:
         cols = self.x.shape[1]
@@ -198,9 +203,12 @@ class PowerDoppler:
 
     Args:
         ensemble: Mutants per closed ensemble.
-        max_seeds: Open ensembles kept (LRU).
+        max_seeds: Open ensembles kept. When full, new seeds wait for a
+            slot rather than evict partial frames: LRU eviction never closed
+            a frame once more than max_seeds seeds were picked in turn.
         max_edges: Edge columns per ensemble; extra edges are dropped.
         max_scores: Closed-ensemble scores kept (LRU).
+        max_flow_ids: Flow-edge ids kept across all scores (LRU).
     """
 
     def __init__(
@@ -209,23 +217,36 @@ class PowerDoppler:
         max_seeds: int = DEFAULT_MAX_SEEDS,
         max_edges: int = DEFAULT_MAX_EDGES,
         max_scores: int = DEFAULT_MAX_SCORES,
+        max_flow_ids: int = DEFAULT_MAX_FLOW_IDS,
     ) -> None:
         if ensemble < _MIN_ENSEMBLE:
             raise ValueError(f"ensemble must be >= {_MIN_ENSEMBLE}, got {ensemble}")
+        if max_seeds < 1:
+            raise ValueError(f"max_seeds must be >= 1, got {max_seeds}")
         if max_edges < 1:
             raise ValueError(f"max_edges must be >= 1, got {max_edges}")
+        if max_scores < 1:
+            raise ValueError(f"max_scores must be >= 1, got {max_scores}")
+        if max_flow_ids < 0:
+            raise ValueError(f"max_flow_ids must be >= 0, got {max_flow_ids}")
         self._ensemble = ensemble
+        self._max_seeds = max_seeds
         self._max_edges = max_edges
-        self._open: LRUCache = LRUCache(max_seeds)
-        self._scores: LRUCache = LRUCache(max_scores, on_evict=self._evicted)
+        self._max_scores = max_scores
+        self._max_flow_ids = max_flow_ids
+        self._stale_after = max_seeds * ensemble * STALE_FRAMES
+        # Insertion order is recency order; capacity is enforced by hand
+        # (_admit, _trim) so evicted frames can be scored / ids uncounted.
+        self._open: dict[str, _Ensemble] = {}
+        self._scores: LRUCache = LRUCache(max_scores + 1)
+        self._flow_ids = 0
         self._max_power = 0.0
         self._max_stale = False
         self._closed = 0
         self._dropped = 0
+        self._refused = 0
         self._samples = 0
-
-    def _evicted(self, _key) -> None:
-        self._max_stale = True
+        self._ticks = 0
 
     def observe(self, seed_key: str, hits: Mapping[int, int]) -> None:
         """Add one mutant execution of *seed_key*: ``{edge_id: hit count}``."""
@@ -233,13 +254,19 @@ class PowerDoppler:
         if not n:
             return
 
+        self._ticks += 1
+        ens = self._open.pop(seed_key, None)
+        if ens is None:
+            ens = self._admit()
+        if ens is None:
+            self._refused += 1
+            return
+
+        # Re-insert: most recent last.
+        self._open[seed_key] = ens
+        ens.touched = self._ticks
         ids = np.fromiter(hits.keys(), dtype=np.int64, count=n)
         counts = np.fromiter(hits.values(), dtype=np.int64, count=n)
-        ens = self._open.get(seed_key)
-        if ens is None:
-            ens = _Ensemble(self._ensemble, self._max_edges)
-            self._open[seed_key] = ens
-
         cols, kept = ens.columns(ids)
         self._dropped += int(ids.size - cols.size)
         ens.x[ens.n, cols] = np.log2(1.0 + counts[kept])
@@ -252,14 +279,53 @@ class PowerDoppler:
         del self._open[seed_key]
         self._close(seed_key, ens)
 
+    def _admit(self) -> _Ensemble | None:
+        """Fresh frame if a slot is free or the oldest frame is abandoned.
+
+        Waiting instead of evicting keeps open frames progressing whatever
+        the corpus size, e.g. 200 seeds picked in turn into 64 slots: the
+        first 64 fill and close, then the next 64 get their slots.
+        """
+        if len(self._open) >= self._max_seeds:
+            key = next(iter(self._open))
+            old = self._open[key]
+            if self._ticks - old.touched < self._stale_after:
+                return None
+
+            # Abandoned: score what it has rather than throw it away.
+            del self._open[key]
+            if old.n >= _MIN_ENSEMBLE:
+                self._close(key, old)
+        return _Ensemble(self._ensemble, self._max_edges)
+
     def _close(self, seed_key: str, ens: _Ensemble) -> None:
-        power, flow, _ = doppler_power(ens.x[:, : ens.m].astype(np.float64))
-        old = self._scores.get(seed_key)
-        if old is not None and old[0] >= self._max_power:
-            self._max_stale = True
-        self._scores[seed_key] = (power, frozenset(ens.ids[: ens.m][flow].tolist()))
+        power, flow, _ = doppler_power(ens.x[: ens.n, : ens.m].astype(np.float64))
+        old = self._scores.pop(seed_key, None)
+        if old is not None:
+            self._drop(old)
+        flow_ids = np.sort(ens.ids[: ens.m][flow])
+        self._scores[seed_key] = (power, flow_ids)
+        self._flow_ids += flow_ids.size
         self._max_power = max(self._max_power, power)
         self._closed += 1
+        self._trim()
+
+    def _drop(self, score: tuple[float, np.ndarray]) -> None:
+        """Forget *score*'s ids; the peak is recomputed if it was the max."""
+        self._flow_ids -= score[1].size
+        if score[0] >= self._max_power:
+            self._max_stale = True
+
+    def _trim(self) -> None:
+        """Evict LRU scores past the count or flow-id budget.
+
+        Flow ids live in compact int64 arrays (8 B per id; a frozenset of
+        ints costs ~70 B), and their total is capped as well as the count.
+        """
+        scores = self._scores
+        while len(scores) > self._max_scores or self._flow_ids > self._max_flow_ids:
+            _, score = scores.popitem(last=False)
+            self._drop(score)
 
     def _peak(self) -> float:
         if self._max_stale:
@@ -278,7 +344,7 @@ class PowerDoppler:
     def flow_edges(self, seed_key: str) -> frozenset[int]:
         """Input-sensitive edges of the seed's last closed ensemble."""
         score = self._scores.get(seed_key)
-        return frozenset() if score is None else score[1]
+        return frozenset() if score is None else frozenset(score[1].tolist())
 
     def stats(self) -> dict[str, float]:
         """Diagnostics for reports."""
@@ -288,5 +354,7 @@ class PowerDoppler:
             "scored": len(self._scores),
             "ensembles": self._closed,
             "dropped_edges": self._dropped,
+            "refused": self._refused,
+            "flow_ids": self._flow_ids,
             "max_power": self._peak(),
         }

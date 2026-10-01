@@ -82,3 +82,40 @@ def test_regression_resume_without_katz_refused(tmp_path, monkeypatch):
     _with_katz(monkeypatch, None)
     with pytest.raises(RuntimeError, match="node_channel"):
         _fuzzer(tmp_path, resume=True)
+
+
+class _FakeZ3:
+    """Stands in for Z3Solver: no z3 install needed."""
+
+    _available = True
+
+    def __init__(self, **_kw):
+        pass
+
+
+def _trace_mode(monkeypatch) -> None:
+    monkeypatch.setattr("fuzzer_tool.core.smt_solver.Z3Solver", _FakeZ3)
+    monkeypatch.setattr("fuzzer_tool.core.elf.extract_div_constants", lambda _t: ({}, set()))
+
+
+def test_regression_trace_mode_keeps_katz(tmp_path, monkeypatch):
+    """Falsification: --mod-solving trace must not clobber `targets` and drop Katz."""
+    _trace_mode(monkeypatch)
+    _with_katz(monkeypatch, _FakeKatz())
+
+    f = _fuzzer(tmp_path, enable_smt_z3=True, mod_solving="trace")
+
+    assert f._katz_channel is not None
+    assert f._distance_targets is None
+
+
+def test_regression_trace_mode_keeps_directed(tmp_path, monkeypatch):
+    """Adversarial: directed targets survive trace mode and still exclude Katz."""
+    _trace_mode(monkeypatch)
+    _with_katz(monkeypatch, _FakeKatz())
+    directed = ["0x401000"]
+
+    f = _fuzzer(tmp_path, enable_smt_z3=True, mod_solving="trace", targets=directed)
+
+    assert f._katz_channel is None
+    assert f._distance_targets == directed

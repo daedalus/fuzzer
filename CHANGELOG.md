@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`--mod-solving trace` clobbered `targets`** (`services/fuzzer.py`): the trace block reassigned the directed-targets parameter, disabling the Katz channel and directing at the fuzz target. Renamed the local.
+- **Doppler never scored corpora > 64 seeds picked in turn** (`core/power_doppler.py`): LRU evicted every partial frame. New seeds now wait for a slot; abandoned frames are scored early and freed. Flow-edge ids are int64 arrays under a global cap (frozensets could reach hundreds of MiB).
+- **Doppler mixed targets' edges** (`services/fuzzer.py`): multi-target frames are keyed per target. Without SHM, `--schedule doppler` now falls back to `base` with a warning instead of reporting enabled.
+- **Seed-arm ledgers recorded standalone-QEA parents**: `seed_meta` is not corpus membership. Gated on the seed picker's cached corpus key map, memoized per parent.
+
 - **EEVDF pick scanned ineligible flows** (`core/fair_queue.py`): one deadline heap popped every flow with an earlier deadline but `ve > V` (5000 pops at 5000 flows). Now a `ve` heap feeds a deadline heap; amortized O(log n). Test: `test_eevdf_pick_does_not_scan_ineligible_flows`.
 - **Seed-arm ledgers grew without bound**: non-corpus (Markov) parents were recorded, and departed seeds never left `ArmCounts`. Only corpus parents are recorded now; ledgers trim to 2x the live corpus.
 - **Round robin was O(n^2) per pick** (`seed_round_robin`, `op_round_robin`): `x in list` per registered arm. Set membership now: 103 ms -> 0.7 ms per pick at 5000 seeds.
