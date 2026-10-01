@@ -22,12 +22,14 @@ mutants change nothing, or only fail parsing en bloc, do not.
 from __future__ import annotations
 
 import functools
+import heapq
 import math
 from collections.abc import Mapping
 
 import numpy as np
 
 from fuzzer_tool.core.chi_squared import chi_squared_critical_value
+from fuzzer_tool.core.crc32 import crc32_ieee
 from fuzzer_tool.core.lru import LRUCache
 
 # Mutants per ensemble (pulses per Doppler frame).
@@ -45,8 +47,8 @@ DEFAULT_MAX_FLOW_IDS = 1 << 20
 STALE_FRAMES = 4
 # Horizon headroom over the slowest observed revisit gap.
 REVISIT_MARGIN = 2
-# Dropped keys remembered (key -> last-touch tick); must outlast a corpus
-# cycle's worth of drops. ~150 B each bounds it near 5 MiB.
+# Dropped keys remembered (key -> last-touch tick): the bottom-k by crc32,
+# so any corpus cycle keeps witnesses. ~150 B each bounds it near 5 MiB.
 DEFAULT_MAX_DROPPED = 1 << 15
 # CFAR false-alarm probability per edge.
 FALSE_ALARM = 1e-3
@@ -215,7 +217,8 @@ class PowerDoppler:
         max_edges: Edge columns per ensemble; extra edges are dropped.
         max_scores: Closed-ensemble scores kept (LRU).
         max_flow_ids: Flow-edge ids kept across all scores (LRU).
-        max_dropped: Dropped-frame keys remembered (LRU) to measure revisit gaps.
+        max_dropped: Dropped-frame keys remembered (bottom-k crc32) to
+            measure revisit gaps.
     """
 
     def __init__(
@@ -246,7 +249,10 @@ class PowerDoppler:
         self._max_flow_ids = max_flow_ids
         self._stale_after = max_seeds * ensemble * STALE_FRAMES
         # Dropped-as-abandoned key -> its frame's last-touch tick.
-        self._dropped_keys: LRUCache = LRUCache(max_dropped)
+        self._dropped_keys: dict[str, int] = {}
+        self._max_dropped = max_dropped
+        # Max-heap (-crc, key) over remembered keys; stale entries lazily skipped.
+        self._crc_heap: list[tuple[int, str]] = []
         # Insertion order is recency order; capacity is enforced by hand
         # (_admit, _trim) so evicted frames can be scored / ids uncounted.
         self._open: dict[str, _Ensemble] = {}
@@ -308,6 +314,45 @@ class PowerDoppler:
         gap = self._ticks - touched
         self._stale_after = max(self._stale_after, REVISIT_MARGIN * gap)
 
+    def _remember(self, key: str, touched: int) -> None:
+        """Record a dropped key; keep the *max_dropped* smallest crc32s.
+
+        LRU memory forgot every key once the corpus cycle outgrew it, and a
+        crc threshold subset could empty out (all-odd crcs after one halving).
+        Bottom-k is a fixed subset of any cycle, never churned, never empty::
+
+            drops (crc): a(9) b(2) c(7) d(1), k=2  ->  remember {d, b}
+        """
+        if key in self._dropped_keys:
+            self._dropped_keys[key] = touched
+            return
+
+        crc = crc32_ieee(key.encode())
+        heap = self._crc_heap
+        if len(self._dropped_keys) >= self._max_dropped:
+            top = self._heap_top()
+            if crc >= -top[0]:
+                return
+
+            heapq.heappop(heap)
+            del self._dropped_keys[top[1]]
+
+        self._dropped_keys[key] = touched
+        heapq.heappush(heap, (-crc, key))
+        # Revisits leave stale (and, on re-drop, duplicate) entries: rebuild
+        # one live entry per key once the heap doubles past the bound.
+        if len(heap) > 2 * self._max_dropped:
+            live = {e[1]: e for e in heap if e[1] in self._dropped_keys}
+            self._crc_heap = list(live.values())
+            heapq.heapify(self._crc_heap)
+
+    def _heap_top(self) -> tuple[int, str]:
+        """Largest-crc live entry; pops entries of keys already revisited."""
+        heap = self._crc_heap
+        while heap[0][1] not in self._dropped_keys:
+            heapq.heappop(heap)
+        return heap[0]
+
     def _admit(self) -> _Ensemble | None:
         """Fresh frame if a slot is free or the oldest frame is abandoned.
 
@@ -323,7 +368,7 @@ class PowerDoppler:
 
             # Abandoned: score what it has rather than throw it away.
             del self._open[key]
-            self._dropped_keys[key] = old.touched
+            self._remember(key, old.touched)
             if old.n >= _MIN_ENSEMBLE:
                 self._close(key, old)
         return _Ensemble(self._ensemble, self._max_edges)
