@@ -127,6 +127,9 @@ class TestMonteCarloScheduler:
         mc = MonteCarloScheduler(arm_decay=0.5, decay_interval=1)
         mc.init_arm("A")
         mc.init_arm("B")
+        # Evidence off the prior: decay pulls toward the prior, so an arm
+        # sitting exactly at it has an unchanged posterior to decay.
+        mc.record("B", success=False)
 
         draws = _count_betavariate(mc)
 
@@ -235,11 +238,12 @@ class TestMonteCarloScheduler:
         for _ in range(n):
             mc.record("A", success=False)
         # Independent derivation: each failure adds 1 to beta; every 100th
-        # record decays all arms by 0.5 BEFORE the update is applied.
+        # record decays all arms halfway to the Beta(1, 1) prior BEFORE the
+        # update is applied.
         beta = 1.0
         for k in range(1, n + 1):
             if k % 100 == 0:
-                beta *= 0.5
+                beta = 1.0 + (beta - 1.0) * 0.5
             beta += 1.0
         assert abs(mc.arm_beta["A"] - beta) < 1e-9
 

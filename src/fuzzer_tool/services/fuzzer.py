@@ -8512,7 +8512,11 @@ class Fuzzer:
         tests the null hypothesis that all operators share the same success
         probability.  Results are logged at ``info`` when significant.
         """
-        from fuzzer_tool.core.chi_squared import chi_squared_independence, cramers_v
+        from fuzzer_tool.core.chi_squared import (
+            chi_squared_independence,
+            cramers_v,
+            drop_sparse_rows,
+        )
 
         ops = sorted(set(self.op_counts.keys()) | set(self.op_success.keys()))
         if len(ops) < 2:
@@ -8526,6 +8530,9 @@ class Fuzzer:
                 continue
             table.append([float(success), float(total - success)])
 
+        # Rarely-run operators have expected cells << 5; their chi2 terms are
+        # noise (one 1-for-1 op at a 1% base rate alone adds ~100).
+        table = drop_sparse_rows(table)
         if len(table) < 2:
             return
         if not any(row[1] > 0 for row in table):

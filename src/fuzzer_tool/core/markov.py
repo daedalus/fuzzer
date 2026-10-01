@@ -12,7 +12,6 @@ import math
 from array import array
 
 from fuzzer_tool.core.dirichlet import AlphaMode, dm_alpha
-from fuzzer_tool.core.edge_tracker import ks_significance_threshold
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 log = logging.getLogger(__name__)
@@ -25,6 +24,9 @@ MAX_TRANSITIONS = 200_000
 
 # Categories of the next-byte distribution.
 _BYTE_VALUES = 256
+
+# One-sided 95% standard normal quantile: plateau null upper bound.
+_Z95 = 1.6448536269514722
 
 
 class MarkovChain:
@@ -68,6 +70,7 @@ class MarkovChain:
         # of recomputing one from a different sample size.
         self.last_plateau_threshold = 0.0
         self._prev_snapshot: dict[bytes, dict[int, float]] | None = None
+        self._prev_totals: dict[bytes, int] = {}
         self.last_js_divergence: float = 0.0
         self._snapshot_interval: int = 50  # snapshot every N train_corpus calls
         self._trains_since_snapshot: int = 0
@@ -313,22 +316,62 @@ class MarkovChain:
         prev = self._prev_snapshot
         self._prev_snapshot = None  # allow old snapshot to be GC'd before building new one
         snapshot = self._build_snapshot()  # only one large dict in memory at a time
+        totals = {ctx: sum(self.transitions[ctx].values()) for ctx in snapshot}
+        threshold = 0.0
         if has_previous and prev is not None:
             self.last_js_divergence = self._js_between_snapshots(prev, snapshot)
+            threshold = self._js_null_threshold(self._prev_totals, totals, snapshot)
         self._prev_snapshot = snapshot
+        self._prev_totals = totals
 
-        # Plateau: JS divergence is below what noise alone would produce
-        # at this sample size — the distribution isn't meaningfully changing.
-        # Requires a previous snapshot to compare against (not the first one).
-        threshold = ks_significance_threshold(self._contexts_seen, alpha=0.05)
+        # Plateau: JS divergence is within what sampling noise alone would
+        # produce — the distribution isn't meaningfully changing. Requires a
+        # previous snapshot to compare against (not the first one). '<=' so a
+        # deterministic model (null 0, JS 0) can plateau.
         self.last_plateau_threshold = threshold
         self.generator_stats["last_js_divergence"] = self.last_js_divergence
         self.generator_stats["last_plateau_threshold"] = threshold
         return (
             has_previous
-            and self.last_js_divergence < threshold
+            and self.last_js_divergence <= threshold
             and self._contexts_seen > self._snapshot_interval * 2
         )
+
+    @staticmethod
+    def _js_null_threshold(
+        prev_totals: dict[bytes, int],
+        totals: dict[bytes, int],
+        snapshot: dict[bytes, dict[int, float]],
+    ) -> float:
+        """Upper 95% of mean per-context JS under "no change in the source".
+
+        Adding m draws to n in a K-symbol context moves the empirical
+        distribution by sampling noise alone; to second order
+        JS ~ chi2(K-1) * m / (8 n N), N = n + m. Averaged over the same
+        contexts _js_between_snapshots averages, then mean + z95 * sd (CLT).
+        New contexts (n = 0) and shrunk ones (pruned, m <= 0) add no null
+        mass: their JS is real learning, not noise.
+
+        Example: n=4, m=2, K=2 -> scale 1/96, threshold (1 + 1.645 * sqrt 2) / 96.
+        """
+        n_ctx = len(set(prev_totals) | set(snapshot))
+        if n_ctx == 0:
+            return 0.0
+
+        mean = 0.0
+        var = 0.0
+        for ctx, dist in snapshot.items():
+            n = prev_totals.get(ctx, 0)
+            big_n = totals.get(ctx, 0)
+            m = big_n - n
+            if n <= 0 or m <= 0:
+                continue
+            dof = len(dist) - 1
+            scale = m / (8.0 * n * big_n)
+            mean += dof * scale
+            var += 2.0 * dof * scale * scale
+
+        return (mean + _Z95 * math.sqrt(var)) / n_ctx
 
     def _build_snapshot(self) -> dict[bytes, dict[int, float]]:
         """Build a normalized snapshot of current transition distributions."""
@@ -640,9 +683,9 @@ class MarkovEnsemble:
             weights[order] * self.chains[order].last_plateau_threshold for order in self.orders
         )
         # A chain that has not yet judged itself (no previous snapshot) carries
-        # threshold 0.0, which correctly makes the weighted threshold
-        # unreachable until enough of the selection mass has something to say.
-        return any(results.values()) and self.last_js_divergence < self.last_plateau_threshold
+        # threshold 0.0; any() still requires at least one chain to have
+        # judged itself a plateau. '<=' so a deterministic ensemble can.
+        return any(results.values()) and self.last_js_divergence <= self.last_plateau_threshold
 
     def to_dict(self) -> dict:
         """Serialize all chains to a dict (for StateStore pickle)."""

@@ -387,6 +387,34 @@ def _chi_squared_table(table: list[list[float]]) -> tuple[float, float, int]:
     return chi2, p, dof
 
 
+# Cochran's rule: the chi2 approximation needs every expected cell >= 5.
+COCHRAN_MIN_EXPECTED = 5.0
+
+
+def drop_sparse_rows(
+    table: list[list[float]],
+    min_expected: float = COCHRAN_MIN_EXPECTED,
+) -> list[list[float]]:
+    """Rows whose expected cells all reach *min_expected*.
+
+    Expected = row_total * col_total / grand_total on the full table. A row
+    below the minimum (e.g. an operator run once at a 1% base rate: expected
+    successes 0.01) contributes chi2 ~ 1/expected from noise alone.
+
+    Example: [[10, 990], [1, 0], [12, 988]] -> rows 0 and 2.
+    """
+    if not table:
+        return []
+
+    col_totals = [sum(col) for col in zip(*table, strict=True)]
+    grand = sum(col_totals)
+    if grand <= 0:
+        return []
+
+    min_share = min(col_totals) / grand
+    return [row for row in table if sum(row) * min_share >= min_expected]
+
+
 # ── effect size ────────────────────────────────────────────────────────
 
 

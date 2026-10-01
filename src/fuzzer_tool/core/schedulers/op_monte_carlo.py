@@ -44,6 +44,9 @@ log = logging.getLogger(__name__)
 # intentionally weak-but-valid priors above this threshold.
 MIN_BETA_PARAM = 1e-6
 
+# Beta(1, 1): decay target for arms never registered through init_arm().
+_UNIFORM_PRIOR = (1.0, 1.0)
+
 # Categories of the CEM per-position byte distribution.
 _BYTE_VALUES = 256
 
@@ -131,6 +134,8 @@ class MonteCarloScheduler:
         self._cem_dirichlet_concentration = cem_dirichlet_concentration
         self.arm_alpha: dict[str, float] = {}
         self.arm_beta: dict[str, float] = {}
+        # Decay target per arm; arms first seen in record() use Beta(1, 1).
+        self._arm_prior: dict[str, tuple[float, float]] = {}
         self._pooled_successes = 0.0
         self._pooled_failures = 0.0
         self.arm_decay = arm_decay
@@ -237,6 +242,7 @@ class MonteCarloScheduler:
         if name not in self.arm_alpha:
             self.arm_alpha[name] = max(prior_alpha, MIN_BETA_PARAM)
             self.arm_beta[name] = max(prior_beta, MIN_BETA_PARAM)
+            self._arm_prior[name] = (self.arm_alpha[name], self.arm_beta[name])
 
     def _get_effective_params(self, op: str) -> tuple[float, float]:
         """Get posterior parameters with optional hierarchical shrinkage."""
@@ -396,20 +402,31 @@ class MonteCarloScheduler:
         arm_alpha = self.arm_alpha
         arm_beta = self.arm_beta
 
-        # Decay periodically to avoid zeroing out alpha/beta
+        # Decay periodically toward each arm's prior, not toward 0: forgotten
+        # evidence must read "unknown" (the prior), not Beta(eps, eps).
         if (
             self.arm_decay < 1.0
             and self.decay_interval > 0
             and self._record_count % self.decay_interval == 0
         ):
+            d = self.arm_decay
+            prior = self._arm_prior
             for k in arm_alpha:
-                arm_alpha[k] *= self.arm_decay
+                pa = prior.get(k, _UNIFORM_PRIOR)[0]
+                arm_alpha[k] = pa + (arm_alpha[k] - pa) * d
             for k in arm_beta:
-                arm_beta[k] *= self.arm_decay
+                pb = prior.get(k, _UNIFORM_PRIOR)[1]
+                arm_beta[k] = pb + (arm_beta[k] - pb) * d
 
+        # Fractional Bernoulli: a success worth w is w of a hit and 1 - w of
+        # a miss, so alpha / (alpha + beta) converges to E[reward]. Adding
+        # only w to alpha converged to p*E[w] / (p*E[w] + 1 - p) instead.
         if success:
+            miss = max(0.0, 1.0 - weight)
             arm_alpha[name] = arm_alpha.get(name, 1.0) + weight
+            arm_beta[name] = arm_beta.get(name, 1.0) + miss
             self._pooled_successes += weight
+            self._pooled_failures += miss
         else:
             arm_beta[name] = arm_beta.get(name, 1.0) + 1
             self._pooled_failures += 1.0
