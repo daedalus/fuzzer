@@ -41,6 +41,7 @@ from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
+from fuzzer_tool.core.cadence import phase_of
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
@@ -119,6 +120,14 @@ from fuzzer_tool.core.schedules import (
 from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
 from fuzzer_tool.core.shapley import ShapleyAttribution
+from fuzzer_tool.core.shim_health import (
+    SELF_TEST_INPUT,
+    SHIM_HEALTH_PERIOD,
+    SHIM_STDERR_TAG,
+    Attach,
+    ShimWatch,
+    self_test_issues,
+)
 from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.target_schedule import TargetSchedule
@@ -764,6 +773,13 @@ class Fuzzer:
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
 
+    def _self_test_targets(self) -> list[str]:
+        """Targets the startup shim self-test runs: coverage on, shim present."""
+        if not self.use_coverage:
+            return []
+        targets = self.multi_targets or [self.target]
+        return [t for t in targets if afl_instrumentation_status(t) == "present"]
+
     def _report_instrumentation(self) -> None:
         """Print the target's instrumentation state, and warn if it has none.
 
@@ -828,7 +844,10 @@ class Fuzzer:
         Only reached when the target is known to carry shim instrumentation,
         so an uninstrumented or stripped binary cannot trip it.
         """
-        if not self.use_coverage or getattr(self, "shm_cov", None) is None:
+        has_shm = getattr(self, "shm_cov", None) is not None or getattr(
+            self, "_target_shm_covs", None
+        )
+        if not self.use_coverage or not has_shm:
             return
 
         found = detect_shm_layout(target)
@@ -2178,6 +2197,7 @@ class Fuzzer:
         # Lazy probe: whether ptrace crash triage (re-running direct_lite
         # crashes through the ptrace-attached loader) is usable here.
         self._triage_ok: bool | None = None
+        self._init_shim_watch()
         self.exec_count = 0
         self.crash_count = 0
         self.timeout_count = 0
@@ -4786,7 +4806,80 @@ class Fuzzer:
         f.observe(record)
 
     def _run_target(self, data: bytes):
-        return self._runner.run_target(data)
+        result = self._runner.run_target(data)
+
+        # Shim health, inlined: this runs on every execution. Empty stderr
+        # short-circuits; counters are read once per SHIM_HEALTH_PERIOD.
+        stderr = result[1]
+        if stderr and isinstance(stderr, str) and SHIM_STDERR_TAG in stderr:
+            self._warn_shim(self._shim_watch.stderr(stderr))
+        self._shim_countdown -= 1
+        if self._shim_countdown <= 0:
+            self._shim_countdown = SHIM_HEALTH_PERIOD
+            self._read_shim_counters()
+        return result
+
+    def _init_shim_watch(self) -> None:
+        """Per-run shim health state: issue dedup and the counter-read clock.
+
+        The countdown replaces a per-exec ``cadence.due()`` call with one
+        decrement, keeping the hot path at the cost of an int compare.
+        """
+        self._shim_watch = ShimWatch()
+        phase = phase_of("fuzzer.shim_health", SHIM_HEALTH_PERIOD)
+        self._shim_countdown = (SHIM_HEALTH_PERIOD - phase) or SHIM_HEALTH_PERIOD
+
+    def _read_shim_counters(self) -> None:
+        """Warn on counters that turned bad (direct in-process mode only)."""
+        runner = getattr(self, "_inprocess_runner", None)
+        counters = runner.shim_health() if runner is not None else None
+        if counters is None:
+            return
+        attach = Attach.EXPECTED if self.use_coverage else Attach.NOT_EXPECTED
+        self._warn_shim(self._shim_watch.counters(counters, attach))
+
+    def _warn_shim(self, issues: list[str]) -> None:
+        for msg in issues:
+            log.warning("shim health: %s", msg)
+            print(f"[!] WARNING: shim health: {msg}")
+
+    def _shim_self_test(self, targets: list[str]) -> None:
+        """One execution per instrumented target before fuzzing.
+
+        Catches what no static check can: a shim that attached nothing (bad
+        segment, wrong size, foreign environment) in any execution mode.
+        The stderr of the execution goes through _run_target's scan.
+        """
+        attach = Attach.EXPECTED if self.use_coverage else Attach.NOT_EXPECTED
+        active = self.target
+        failed = 0
+        try:
+            for t in targets:
+                self.target = t
+                shm = (
+                    self._target_shm_covs.get(t, self.shm_cov)
+                    if self.multi_targets
+                    else self.shm_cov
+                )
+                if shm is not None:
+                    shm.reset_edge_map()
+                self._run_target(SELF_TEST_INPUT)
+                edges = len(shm.get_edge_ids()) if shm is not None else None
+                issues = self_test_issues(t, edges, attach)
+                failed += bool(issues)
+                self._warn_shim(issues)
+        finally:
+            self.target = active
+
+        self._read_shim_counters()
+        if targets and not failed:
+            print(f"[*] Shim self-test: {len(targets)} target(s) OK")
+
+    def _check_target_shims(self, targets: list[str]) -> None:
+        """Static shim checks for each target of a multi-target run."""
+        for t in targets:
+            self._check_shm_layout(t)
+            self._warn_stale_shim(t)
 
     def _check_differential(self, data: bytes):
         """Run data on differential target and track divergence.
@@ -8025,17 +8118,21 @@ class Fuzzer:
                 f"schedule={'arena' if self._target_arena else self._target_schedule.value}"
             )
             uninstrumented = []
+            shimmed = []
             for i, t in enumerate(self.multi_targets):
                 status = afl_instrumentation_status(t)
                 tag = {"present": " [AFL]", "absent": " [no-AFL]", "unknown": " [AFL?]"}[status]
                 if status == "absent":
                     uninstrumented.append(t)
+                if status == "present":
+                    shimmed.append(t)
                 dist = _detect_distance(t)
                 if dist:
                     tag += " [DIST]"
                 print(f"  [{i}] {t}{tag}")
             if uninstrumented:
                 self._warn_uninstrumented(uninstrumented)
+            self._check_target_shims(shimmed)
         else:
             print(f"[*] Target: {self.target}")
             self._report_instrumentation()
@@ -8149,6 +8246,8 @@ class Fuzzer:
         )
         print(f"[*] Boot ticks start: {boot_start:.3f}")
 
+        self._shim_self_test(self._self_test_targets())
+
         # Quick raw-target-speed measurement before the main loop
         try:
             _probe = b"\x00" * 64
@@ -8170,16 +8269,6 @@ class Fuzzer:
                 returncode, stderr = self._run_target(seed)
                 if self._diff_tracker:
                     self._check_differential(seed)
-                # Validate AFL shim on first execution
-                if not getattr(self, "_shim_checked", False):
-                    self._shim_checked = True
-                    if "[shim]" in stderr:
-                        log.info("AFL shim: %s", stderr.strip())
-                        if "area=(nil)" in stderr and self.shm_cov:
-                            log.warning(
-                                "AFL shim area is NULL — SHM not attached. "
-                                "Coverage data will be empty."
-                            )
                 self.exec_count += 1
                 # Mark seed as having been executed (even though not via
                 # fuzz_one's mutate path).  This ensures loaded seeds don't

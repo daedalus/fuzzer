@@ -1,9 +1,15 @@
 """Shim health: interpret afl_shim.c's markers and runtime counters.
 
-Two sources, one vocabulary of human-readable issues:
+Three sources, one vocabulary of human-readable issues:
 
     target ELF ── marker scan ──> stale_shim_issues()   (before any exec)
-    loaded .so ── __afl_shim_health() ──> health_issues() (after a run)
+    first exec ── edge count ───> self_test_issues()    (startup self-test)
+    every exec ── stderr ───────> ShimWatch.stderr()    (any mode)
+    loaded .so ── __afl_shim_health() ──> ShimWatch.counters() (periodic,
+                                          direct mode) / health_issues() (report)
+
+ShimWatch reports each issue once per run, so a fault that repeats on every
+execution produces one warning, not a stream.
 
 Reading the counters needs a loaded library, which is an adapter concern
 (``adapters.inprocess.read_shim_health``); this module only judges them.
@@ -15,6 +21,20 @@ from collections.abc import Sequence
 from enum import Enum, IntEnum
 
 from fuzzer_tool.core.elf import detect_scoped_crash_handler
+
+#: Prefix of every diagnostic afl_shim.c writes to stderr (attach failures,
+#: refused segments). Fixed by the C source; never printed by a healthy run.
+SHIM_STDERR_TAG = "__afl_shim:"
+
+#: Executions between reads of ``__afl_shim_health()`` in direct mode.
+SHIM_HEALTH_PERIOD = 1000
+
+#: Distinct stderr lines remembered for dedup; keeps memory bounded when a
+#: target prints a fresh line on every execution.
+STDERR_SEEN_MAX = 64
+
+#: Input of the startup self-test execution (same shape as the speed probe).
+SELF_TEST_INPUT = b"\x00" * 64
 
 
 class ShimField(IntEnum):
@@ -82,3 +102,80 @@ def health_issues(counters: Sequence[int], attach: Attach) -> list[str]:
         issues.append(f"{stray} crash signal(s) outside __afl_guarded_call, handed back")
 
     return issues
+
+
+def shim_stderr_lines(stderr: str) -> list[str]:
+    """Lines of *stderr* that are shim diagnostics (tag at line start)."""
+    lines = []
+    for line in stderr.splitlines():
+        text = line.strip()
+        if text.startswith(SHIM_STDERR_TAG):
+            lines.append(text)
+    return lines
+
+
+def self_test_issues(target: str, edges: int | None, attach: Attach) -> list[str]:
+    """Verdict of the startup self-test execution.
+
+    *edges* is None when the mode cannot measure them (no SHM segment:
+    ptrace, --no-shm), which is not evidence of a fault.
+    """
+    if attach is not Attach.EXPECTED or edges is None or edges > 0:
+        return []
+    return [
+        f"self-test: {target} recorded no edges on its first execution "
+        "-- the coverage map is not reaching the fuzzer (see any __afl_shim: "
+        "line above); coverage guidance is inactive"
+    ]
+
+
+class ShimWatch:
+    """Run-long dedup of shim issues from stderr and health counters.
+
+    Example: the same ``__afl_shim: ... too small`` line on every execution
+    yields one warning; CMPLOG_DROPPED going 0 -> 3 -> 900 yields one.
+    """
+
+    def __init__(self) -> None:
+        self._seen_lines: set[str] = set()
+        self._reported: set[ShimField] = set()
+
+    def seen_count(self) -> int:
+        """Distinct stderr lines remembered (bounded by STDERR_SEEN_MAX)."""
+        return len(self._seen_lines)
+
+    def stderr(self, text: str) -> list[str]:
+        """New shim lines in *text*; each distinct line is returned once."""
+        fresh = []
+        for line in shim_stderr_lines(text):
+            if line in self._seen_lines or len(self._seen_lines) >= STDERR_SEEN_MAX:
+                continue
+            self._seen_lines.add(line)
+            fresh.append(line)
+        return fresh
+
+    def counters(self, counters: Sequence[int], attach: Attach) -> list[str]:
+        """Issues for fields that turned bad since the last call, once each."""
+        fresh = []
+        for field in (ShimField.ATTACHED, *_PROBLEM_FIELDS):
+            if field in self._reported:
+                continue
+            issue = _field_issue(counters, field, attach)
+            if issue is None:
+                continue
+            self._reported.add(field)
+            fresh.append(issue)
+        return fresh
+
+
+_PROBLEM_FIELDS = (ShimField.SEG_REJECTED, ShimField.CMPLOG_DROPPED, ShimField.STRAY_SIGNALS)
+
+
+def _field_issue(counters: Sequence[int], field: ShimField, attach: Attach) -> str | None:
+    """health_issues() restricted to one field; None when it is healthy."""
+    only = [0] * len(ShimField)
+    only[ShimField.ATTACHED] = 1
+    if field < len(counters):
+        only[field] = counters[field]
+    issues = health_issues(only, attach)
+    return issues[0] if issues else None
