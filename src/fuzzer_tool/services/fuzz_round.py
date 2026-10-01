@@ -26,11 +26,11 @@ round. Long-lived state stays on the Fuzzer (``self._f``).
 import logging
 import os
 import resource
-import time
 from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
 from fuzzer_tool.core.cadence import due
+from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.ro_rd import classify_operator_name
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.secretary import SecretaryStopping
@@ -232,9 +232,13 @@ class FuzzRound:
         # times, so the contamination carried a multiplier driven by bloom
         # saturation rather than by anything the target did.
         self._mutated = f._dedup_mutate(self._data)
-        t_start = time.monotonic()
+        clock = clock_of(f)
+        t_start = clock.monotonic()
         self._returncode, self._stderr = f._run_target(self._mutated)
-        t_elapsed = time.monotonic() - t_start
+        # One tick per execution: under --clock virtual this is the whole
+        # of time's progress, so every exec reads as VIRTUAL_EXEC_S.
+        clock.tick()
+        t_elapsed = clock.monotonic() - t_start
         self._t_elapsed = t_elapsed
         f.exec_count += 1
         # Effector map: read the trace hash while it is still this
@@ -380,7 +384,7 @@ class FuzzRound:
         # Window: last 500 iterations. Range: [64, 1024].
         window = 500
         if f.exec_count > 0 and due(f.exec_count, 100, "fuzzer.dict_eps"):
-            elapsed = time.time() - f.start_time
+            elapsed = clock_of(f).time() - f.start_time
             eps = (f.exec_count - f._resume_baseline_exec) / elapsed if elapsed > 0 else 0
             f._dict_eps_window.append(eps)
             if len(f._dict_eps_window) > 10:
@@ -577,7 +581,7 @@ class FuzzRound:
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         if rss > f._peak_rss:
             f._peak_rss = rss
-        elapsed = time.time() - f.start_time
+        elapsed = clock_of(f).time() - f.start_time
         eps = (f.exec_count - f._resume_baseline_exec) / elapsed if elapsed > 0 else 0
         if eps > f._peak_eps:
             f._peak_eps = eps

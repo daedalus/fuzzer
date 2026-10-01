@@ -203,14 +203,16 @@ def test_regression_alias_is_exported():
 
 def test_regression_fuzzer_signature_keeps_positional_slots():
     """`consolidated` keeps its pre-v2 slot (just before `moss`); the
-    versioned flags are appended, so positional callers are not shifted."""
+    versioned flags, then `clock`, are appended, so positional callers are not shifted."""
     import inspect
 
     from fuzzer_tool.services.fuzzer import Fuzzer
 
     params = list(inspect.signature(Fuzzer.__init__).parameters)
     assert params.index("moss") == params.index("consolidated") + 1
-    assert params[-2:] == ["consolidated_v1", "consolidated_v2"]
+    assert params.index("consolidated_v2") == params.index("consolidated_v1") + 1
+    assert params.index("consolidated_v1") > params.index("op_p2c")
+    assert params[-1] == "clock"
 
 
 @pytest.mark.skipif(not _TARGET.exists(), reason="targets/test_target not built")

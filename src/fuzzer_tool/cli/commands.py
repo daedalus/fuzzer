@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from fuzzer_tool.core.clock import ClockMode
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.gravity import SpliceDonor
@@ -583,6 +584,7 @@ def cmd_fuzz(args):
         inprocess_direct=args.inprocess_direct,
         inprocess_func=args.inprocess_func,
         seed=args.seed,
+        clock=ClockMode(getattr(args, "clock", ClockMode.WALL.value)),
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
         asan_target=getattr(args, "asan_target", None),
@@ -4696,6 +4698,14 @@ def main() -> int:
         type=int,
         default=42,
         help="RNG seed for reproducibility (default: 42)",
+    )
+    fuzz_parser.add_argument(
+        "--clock",
+        choices=[m.value for m in ClockMode],
+        default=ClockMode.WALL.value,
+        help="Decision clock: 'wall' (host time) or 'virtual' (1 ms per exec), "
+        "which makes --seed runs replay exactly. Timeouts stay on host time. "
+        "Default: wall.",
     )
     fuzz_parser.add_argument(
         "--plot-graph",

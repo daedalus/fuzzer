@@ -12,6 +12,7 @@ from collections import Counter
 from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_elo import Arena, strategy_arena, strategy_display_name
+from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.core.temporal_join import join_streams
@@ -1679,9 +1680,7 @@ def _edge_map_analysis(f) -> str:
 
 def _runtime_performance(f) -> str:
     """Wall-clock time, memory, throughput, and corpus growth."""
-    import time
-
-    elapsed = time.time() - f.start_time
+    elapsed = clock_of(f).time() - f.start_time
     eps = f.exec_count / elapsed if elapsed > 0 else 0
     rss_kb = f._peak_rss
     rss_str = f"{rss_kb // 1024}MB" if rss_kb >= 1024 else f"{rss_kb}KB"

@@ -31,6 +31,7 @@ from fuzzer_tool.core.analyzers.analyzer_elo import (
     strategy_display_name,
 )
 from fuzzer_tool.core.circular_stats import PhaseConcentration
+from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.pool_drift import PoolDrift
@@ -712,7 +713,7 @@ class StatsReporter:
 
     def print_run_summary(self):
         f = self.f
-        elapsed = time.time() - f.start_time
+        elapsed = clock_of(f).time() - f.start_time
         eps = f.exec_count / elapsed if elapsed > 0 else 0
         print(f"\n{'=' * 60}")
         print("  RUN SUMMARY")
@@ -759,7 +760,7 @@ class StatsReporter:
         f = self.f
         if not f.stats_file:
             return
-        elapsed = time.time() - f.start_time
+        elapsed = clock_of(f).time() - f.start_time
         eps = f.exec_count / elapsed if elapsed > 0 else 0
         stats = {
             "timestamp": time.time(),
@@ -856,7 +857,7 @@ class StatsReporter:
             cumulative = f.ptrace_cov.cumulative_edges
         elif hasattr(f, "_edge_tracker"):
             cumulative = f._edge_tracker.get_cumulative_edge_count()
-        elapsed = time.time() - f.start_time
+        elapsed = clock_of(f).time() - f.start_time
         line = (
             f"{elapsed:.1f},{f.exec_count},{cumulative},{len(f.corpus)},"
             f"{f.crash_count},{f._novel_input_count}\n"
@@ -917,7 +918,7 @@ class StatsReporter:
         return set()
 
     def format_elapsed(self) -> str:
-        return _format_elapsed_fn(self.f.start_time)
+        return _format_elapsed_fn(self.f.start_time, clock_of(self.f).time())
 
     def _print_stats_cov_str(self, f) -> str:
         """Format coverage string."""
@@ -1179,7 +1180,7 @@ class StatsReporter:
 
     def _update_eps(self, f) -> tuple[float, float]:
         """Raw + Kalman-filtered EPS and the avg-eps window; returns (elapsed, eps)."""
-        elapsed = time.time() - f.start_time
+        elapsed = clock_of(f).time() - f.start_time
         base = getattr(f, "_resume_baseline_exec", 0)
         eps = (f.exec_count - base) / elapsed if elapsed > 0 else 0
         f._eps = eps

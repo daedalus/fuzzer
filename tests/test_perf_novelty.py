@@ -145,7 +145,7 @@ class TestTimingWindow:
     def test_mutation_is_outside_the_timing_window(self):
         src = inspect.getsource(FuzzRound)
         mutate_at = src.index("self._mutated = f._dedup_mutate(self._data)")
-        start_at = src.index("t_start = time.monotonic()")
+        start_at = src.index("t_start = clock.monotonic()")
         assert start_at > mutate_at, (
             "t_start must open after _dedup_mutate, or Python mutation cost "
             "contaminates the anomaly detector, exec_us and the timeout"
@@ -153,8 +153,8 @@ class TestTimingWindow:
 
     def test_only_run_target_is_inside_the_window(self):
         src = inspect.getsource(FuzzRound)
-        start_at = src.index("t_start = time.monotonic()")
-        end_at = src.index("t_elapsed = time.monotonic() - t_start")
+        start_at = src.index("t_start = clock.monotonic()")
+        end_at = src.index("t_elapsed = clock.monotonic() - t_start")
         body = src[start_at:end_at]
         assert "f._run_target(self._mutated)" in body
         assert "_dedup_mutate" not in body

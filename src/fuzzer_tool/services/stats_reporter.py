@@ -4,8 +4,9 @@ import time
 from array import array
 
 
-def format_elapsed(start_time: float) -> str:
-    elapsed = time.time() - start_time
+def format_elapsed(start_time: float, now: float | None = None) -> str:
+    # `now` from the run's decision clock, so --clock virtual reads consistently.
+    elapsed = (time.time() if now is None else now) - start_time
     h, rem = divmod(int(elapsed), 3600)
     m, s = divmod(rem, 60)
     return f"{h:02d}:{m:02d}:{s:02d}"

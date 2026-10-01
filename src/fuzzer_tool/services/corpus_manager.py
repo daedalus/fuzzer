@@ -18,7 +18,6 @@ import math
 import os
 import shutil
 import struct
-import time
 from array import array
 from enum import Enum
 from pathlib import Path
@@ -33,6 +32,7 @@ from fuzzer_tool.adapters.filesystem import (
     save_to_corpus,
 )
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
+from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.periodicity import estimate_record_size
@@ -384,7 +384,7 @@ class CorpusManager:
 
     def init_seed_metadata(self):
         f = self.f
-        now = time.time()
+        now = clock_of(f).time()
         f.seed_meta: dict[bytes, dict] = {}
         for seed in f.corpus:
             f.seed_meta[seed] = {
@@ -943,7 +943,7 @@ class CorpusManager:
                 "momentum": 0.0,
                 "edge_bitmap": bytearray(0),
                 "redqueen_offsets": [],
-                "added_at": time.time(),
+                "added_at": clock_of(f).time(),
                 "lineage_depth": parent_depth + 1 if parent else 0,
                 "hamming_distance": f._last_hamming_distance,
                 "record_stride": estimate_record_size(data),
@@ -1191,7 +1191,7 @@ class CorpusManager:
                 "momentum": 0.0,
                 "edge_bitmap": bytearray(0),
                 "redqueen_offsets": [],
-                "added_at": time.time(),
+                "added_at": clock_of(f).time(),
                 "lineage_depth": orig_meta.get("lineage_depth", 0) + 1,
             }
             # The trimmed seed inherits the original's lineage edge so the

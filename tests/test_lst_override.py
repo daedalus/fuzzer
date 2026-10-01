@@ -10,6 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from fuzzer_tool.core.clock import VIRTUAL_EPOCH, Clock, ClockMode
 from fuzzer_tool.core.job_scheduling import Job, lst_pick
 
 SEED_A = b"\x01" * 4
@@ -151,21 +152,23 @@ def test_pick_seed_consults_lst_first(monkeypatch):
     sp = _picker(f)
     monkeypatch.setattr(SeedPicker, "_update_temperature", lambda self: 1.0)
     monkeypatch.setattr(SeedPicker, "_pick_seed_elo", lambda self: pytest.fail("LST must win"))
-    monkeypatch.setattr("fuzzer_tool.services.seed_picker.time.time", lambda: START + 2 * REVISIT)
+    # Virtual time starts at VIRTUAL_EPOCH, far past START + REVISIT: overdue.
+    assert START + REVISIT < VIRTUAL_EPOCH
+    f._clock = Clock(ClockMode.VIRTUAL)
     assert sp.pick_seed() == SEED_A
 
 
-def test_regression_fuzzer_pick_seed_stamps_last_picked(monkeypatch):
+def test_regression_fuzzer_pick_seed_stamps_last_picked():
     from fuzzer_tool.services.fuzzer import Fuzzer
 
     meta = {"added_at": START}
     f = SimpleNamespace(
         seed_meta={SEED_A: meta},
         _seed_picker=SimpleNamespace(pick_seed=lambda: SEED_A),
+        _clock=Clock(ClockMode.VIRTUAL),
     )
-    monkeypatch.setattr("fuzzer_tool.services.fuzzer.time.time", lambda: START + 7.0)
     assert Fuzzer._pick_seed(f) == SEED_A
-    assert meta["last_picked"] == START + 7.0
+    assert meta["last_picked"] == f._clock.time()
 
 
 # --------------------------------------------------------------------------

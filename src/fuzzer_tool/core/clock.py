@@ -68,3 +68,14 @@ class Clock:
 
 # Shared host clock: the default for objects built without one.
 WALL_CLOCK = Clock()
+
+
+def clock_of(owner) -> Clock:
+    """*owner*'s decision clock, or the host clock when it has none.
+
+    Services reach the clock through the Fuzzer they hold. Partial fuzzers
+    (``__new__``-built, ``SimpleNamespace``, mocks) carry no real ``Clock``;
+    they get wall time, which is what they had before the clock existed.
+    """
+    clock = getattr(owner, "_clock", None)
+    return clock if isinstance(clock, Clock) else WALL_CLOCK

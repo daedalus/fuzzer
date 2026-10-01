@@ -19,12 +19,12 @@ import logging
 import math
 import os
 import struct
-import time
 from array import array
 
 import numpy as np
 import xxhash
 
+from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cond_stmt import CondState, CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.gaussian import norm_cdf
@@ -5606,7 +5606,7 @@ class OperatorEngine:
             seed_trace_mini=trace_mini,
             seed_favored=favored,
             seed_passed_det=False,
-            current_time_ms=time.monotonic() * 1000.0,
+            current_time_ms=clock_of(f).monotonic() * 1000.0,
         )
         if not should_run:
             # AFL marks a skipped seed as "done" too -- otherwise the same
@@ -5744,9 +5744,12 @@ class OperatorEngine:
             f._last_ops_applicable.add(op)
 
         f._op_attempts[op] = f._op_attempts.get(op, 0) + 1
-        _t0 = time.perf_counter()
+        # Decision clock: this cost scales the op's bandit reward. Virtual
+        # time does not move inside a round, so every op costs 0 there.
+        clock = clock_of(f)
+        _t0 = clock.monotonic()
         result = f._op_dispatch[op](buf, byte_idx, data)
-        _dt = time.perf_counter() - _t0
+        _dt = clock.monotonic() - _t0
 
         if track_effect:
             self._note_op_effect(op, buf, result, _h_before)
