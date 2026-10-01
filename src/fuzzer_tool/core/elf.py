@@ -1607,6 +1607,46 @@ def detect_elf_type(target: str) -> int | None:
         return None
 
 
+_ET_EXEC = 2
+_ET_DYN = 3
+_PT_INTERP = 3
+_E_PHOFF = 32  # u64
+_E_PHENTSIZE = 54  # u16, followed by e_phnum u16
+
+
+def is_elf_executable(target: str) -> bool:
+    """True when *target* is an ELF executable, PIE or not.
+
+    ET_EXEC is always one. ET_DYN is either a PIE executable or a shared
+    object; only the executable asks for a loader (PT_INTERP). Neither
+    kind of executable can be dlopen'd, so in-process modes must not take it.
+    """
+    e_type = detect_elf_type(target)
+    if e_type == _ET_EXEC:
+        return True
+    if e_type != _ET_DYN:
+        return False
+
+    # Read only the program header table: targets run to 100+ MB (ffmpeg).
+    try:
+        with open(target, "rb") as f:
+            head = f.read(64)
+            (phoff,) = struct.unpack_from("<Q", head, _E_PHOFF)
+            phentsize, phnum = struct.unpack_from("<HH", head, _E_PHENTSIZE)
+            f.seek(phoff)
+            phdrs = f.read(phentsize * phnum)
+    except OSError:
+        return False
+
+    n = len(phdrs)
+    for off in range(0, phentsize * phnum, phentsize or 1):
+        if off + 4 > n:
+            return False
+        if struct.unpack_from("<I", phdrs, off)[0] == _PT_INTERP:
+            return True
+    return False
+
+
 def detect_shm_layout(target: str) -> int:
     """Read __AFL_SHM_LAYOUT out of a target's symbol table.
 

@@ -43,7 +43,11 @@ from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
-from fuzzer_tool.core.elf import SHM_LAYOUT_CURRENT, detect_elf_type, detect_shm_layout
+from fuzzer_tool.core.elf import (
+    SHM_LAYOUT_CURRENT,
+    detect_shm_layout,
+    is_elf_executable,
+)
 from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
 from fuzzer_tool.core.gravity import GravityModel, SpliceDonor
@@ -1522,6 +1526,11 @@ class Fuzzer:
         # UBSAN_OPTIONS into it, so run() can hand the process environment
         # back afterwards. See _restore_environ()/finding #10.
         _snapshot_environ_once()
+        # In-process modes dlopen the target; an executable cannot be.
+        # Run it in exec mode instead (--hail-mary forces in-process).
+        if (inprocess or inprocess_direct) and is_elf_executable(target):
+            print(f"[*] {target} is an executable: exec mode, not in-process")
+            inprocess = inprocess_direct = False
         self.target = target
         self.debug = debug
         # Persistent-loader ptrace self-trace for fault-address/register
@@ -4146,22 +4155,6 @@ class Fuzzer:
             # --inprocess-direct, so try direct regardless — ASAN-detected bugs
             # may abort the process, but that's the user's accepted tradeoff.
             direct_ok = inprocess_direct
-            # Refuse PIE executables in direct ctypes mode: the OS refuses to
-            # dlopen a position-independent executable with the same cryptic
-            # OSError, but the failure is silent and easy to miss. Check the
-            # ELF type up front so the error message names the real problem
-            # instead of leaking the OS errno through.
-            if (
-                direct_ok
-                and not self.target.lower().endswith((".so", ".dylib", ".dll"))
-                and detect_elf_type(self.target) == 3
-            ):  # ET_DYN
-                raise RuntimeError(
-                    f"target {self.target!r} is a PIE executable (ET_DYN), "
-                    "which cannot be loaded via ctypes.CDLL in direct mode. "
-                    "Use a shared library (.so/.dylib/.dll) target, or drop "
-                    "--inprocess-direct and let the subprocess loader handle it."
-                )
             # Cmplog: mirror the auto-detect .so branch's env/shim setup
             # (see above). This branch is taken whenever --inprocess is
             # explicit -- including via --hail-mary, which force-enables
