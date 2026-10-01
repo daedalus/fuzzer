@@ -5,7 +5,8 @@ from fuzzer_tool.core.schedulers.op_bo_gp_ucb import BOGPUCBScheduler
 from fuzzer_tool.core.schedulers.op_c2ucb import C2UCBScheduler
 from fuzzer_tool.core.schedulers.op_canary import CanaryScheduler
 from fuzzer_tool.core.schedulers.op_cmaes import CMAESScheduler
-from fuzzer_tool.core.schedulers.op_consolidated import ConsolidatedScheduler
+from fuzzer_tool.core.schedulers.op_consolidated_v1 import ConsolidatedV1Scheduler
+from fuzzer_tool.core.schedulers.op_consolidated_v2 import ConsolidatedV2Scheduler
 from fuzzer_tool.core.schedulers.op_contextual import ContextualLinUCBScheduler
 from fuzzer_tool.core.schedulers.op_corral import CorralScheduler
 from fuzzer_tool.core.schedulers.op_cucb import CUCBScheduler
@@ -43,7 +44,8 @@ __all__ = [
     "WhittleIndexScheduler",
     "FPLScheduler",
     "CMAESScheduler",
-    "ConsolidatedScheduler",
+    "ConsolidatedV1Scheduler",
+    "ConsolidatedV2Scheduler",
     "C2UCBScheduler",
     "MonteCarloScheduler",
     "MOptScheduler",

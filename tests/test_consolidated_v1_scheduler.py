@@ -1,4 +1,4 @@
-"""ConsolidatedScheduler: the properties it is made of, one at a time.
+"""ConsolidatedV1Scheduler: the properties it is made of, one at a time.
 
 Convergence and decay recovery live in test_scheduler_convergence (RELIABLE
 and RECOVERS). These pin the mechanisms: category sharing reaches unsampled
@@ -15,7 +15,7 @@ import pytest
 
 from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES, category_of
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers import ConsolidatedScheduler
+from fuzzer_tool.core.schedulers import ConsolidatedV1Scheduler
 
 
 def _two_categories():
@@ -31,7 +31,7 @@ def test_unsampled_arm_inherits_its_categorys_rate():
     """The point of the shrinkage prior: evidence on two operators of a
     category moves the third, never pulled, above an arm of a dead one."""
     (a1, a2, a_unseen), b = _two_categories()
-    s = ConsolidatedScheduler(rng=RandPool(1))
+    s = ConsolidatedV1Scheduler(rng=RandPool(1))
     for op in (a1, a2, a_unseen, b):
         s.init_arm(op)
     for _ in range(100):
@@ -46,7 +46,7 @@ def test_unsampled_arm_inherits_its_categorys_rate():
 
 def test_without_prior_strength_categories_are_ignored():
     (a1, a2, a_unseen), _ = _two_categories()
-    s = ConsolidatedScheduler(prior_strength=0.0, rng=RandPool(1))
+    s = ConsolidatedV1Scheduler(prior_strength=0.0, rng=RandPool(1))
     for _ in range(100):
         s.record(a1, True)
         s.record(a2, True)
@@ -54,7 +54,7 @@ def test_without_prior_strength_categories_are_ignored():
 
 
 def test_cap_bounds_evidence_and_keeps_the_mean():
-    s = ConsolidatedScheduler(max_pseudocount=50.0, rng=RandPool(1))
+    s = ConsolidatedV1Scheduler(max_pseudocount=50.0, rng=RandPool(1))
     op = "bit_flip"
     for i in range(1000):
         s.record(op, i % 4 == 0)
@@ -66,7 +66,7 @@ def test_cap_bounds_evidence_and_keeps_the_mean():
 def test_cap_lets_a_dead_arm_be_left():
     """After the cap, 200 failures move the mean most of the way down --
     an uncapped posterior with 5000 prior successes would barely move."""
-    s = ConsolidatedScheduler(rng=RandPool(1))
+    s = ConsolidatedV1Scheduler(rng=RandPool(1))
     op = "bit_flip"
     for _ in range(5000):
         s.record(op, True)
@@ -76,7 +76,7 @@ def test_cap_lets_a_dead_arm_be_left():
 
 
 def test_format_prior_is_a_one_time_nudge():
-    s = ConsolidatedScheduler(rng=RandPool(1))
+    s = ConsolidatedV1Scheduler(rng=RandPool(1))
     s.init_arm("bit_flip", 2.0, 1.0)
     aid = s._index["bit_flip"]
     assert (s._alpha[aid], s._beta[aid]) == (1.0, 0.0)
@@ -90,7 +90,7 @@ def test_format_prior_is_a_one_time_nudge():
     ("success", "weight", "alpha"), [(True, 15.0, 1.0), (True, 0.25, 0.25), (False, 1.0, 0.0)]
 )
 def test_one_record_is_one_bounded_observation(success, weight, alpha):
-    s = ConsolidatedScheduler(rng=RandPool(1))
+    s = ConsolidatedV1Scheduler(rng=RandPool(1))
     s.record("bit_flip", success, weight=weight)
     aid = s._index["bit_flip"]
     assert s._alpha[aid] == pytest.approx(alpha)
@@ -101,7 +101,7 @@ def test_seeded_rng_reproduces_the_campaign():
     ops = ["bit_flip", "byte_flip", "arith_inc", "havoc"]
 
     def campaign(seed):
-        s = ConsolidatedScheduler(rng=RandPool(seed))
+        s = ConsolidatedV1Scheduler(rng=RandPool(seed))
         out = []
         for i in range(300):
             op = s.select_op(ops)
@@ -114,30 +114,30 @@ def test_seeded_rng_reproduces_the_campaign():
 
 
 def test_degenerate_candidate_lists():
-    s = ConsolidatedScheduler(rng=RandPool(1))
+    s = ConsolidatedV1Scheduler(rng=RandPool(1))
     assert s.select_op([]) == ""
     assert s.select_op(["havoc"]) == "havoc"
 
 
 def test_unknown_operator_is_registered_lazily():
-    s = ConsolidatedScheduler(rng=RandPool(1))
+    s = ConsolidatedV1Scheduler(rng=RandPool(1))
     assert s.select_op(["not_a_real_op", "bit_flip"]) in ("not_a_real_op", "bit_flip")
     s.record("also_unknown", True)
     assert "also_unknown" in s._index
 
 
 def test_bandit_stats_shape():
-    s = ConsolidatedScheduler(rng=RandPool(1))
+    s = ConsolidatedV1Scheduler(rng=RandPool(1))
     s.record("bit_flip", True)
     stats = s.bandit_stats()
-    assert stats["consolidated_pulls"] == 1
-    assert stats["consolidated_top"][0][0] == "bit_flip"
+    assert stats["consolidated_v1_pulls"] == 1
+    assert stats["consolidated_v1_top"][0][0] == "bit_flip"
 
 
 @pytest.mark.parametrize("kwargs", [{"prior_strength": -1.0}, {"max_pseudocount": 0.0}])
 def test_rejects_invalid_parameters(kwargs):
     with pytest.raises(ValueError):
-        ConsolidatedScheduler(**kwargs)
+        ConsolidatedV1Scheduler(**kwargs)
 
 
 _TARGET = Path(__file__).resolve().parent.parent / "targets" / "test_target"
@@ -159,10 +159,10 @@ def test_fuzzer_wiring_selects_and_learns(tmp_path):
         crashes_dir=str(crashes),
         max_len=4096,
         use_coverage=True,
-        consolidated=True,
+        consolidated_v1=True,
         mc_bandit=True,
     )
-    assert isinstance(f._consolidated, ConsolidatedScheduler)
+    assert isinstance(f._consolidated_v1, ConsolidatedV1Scheduler)
     assert f._track_op_effect
 
     def bandit_mass():
@@ -173,7 +173,7 @@ def test_fuzzer_wiring_selects_and_learns(tmp_path):
     for i in range(40):
         f.fuzz_one(bytes([65 + i % 26]) * 16)
         selectors.add(f._op_selector)
-    assert "consolidated" in selectors
+    assert "consolidated_v1" in selectors
     assert "bandit" not in selectors
-    assert f._consolidated.bandit_stats()["consolidated_pulls"] > 0
+    assert f._consolidated_v1.bandit_stats()["consolidated_v1_pulls"] > 0
     assert bandit_mass() > before, "the bandit stopped learning from rounds it did not select"

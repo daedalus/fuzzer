@@ -132,10 +132,16 @@ def _all_operator_schedulers():
         ("CUCBScheduler", cucb, cucb.select_op, cucb.record),
         ("CUSUM_UCBScheduler", cusum := S.CUSUM_UCBScheduler(), cusum.select_op, cusum.record),
         (
-            "ConsolidatedScheduler",
-            consolidated := S.ConsolidatedScheduler(),
+            "ConsolidatedV1Scheduler",
+            consolidated := S.ConsolidatedV1Scheduler(),
             consolidated.select_op,
             consolidated.record,
+        ),
+        (
+            "ConsolidatedV2Scheduler",
+            consolidated_v2 := S.ConsolidatedV2Scheduler(),
+            consolidated_v2.select_op,
+            consolidated_v2.record,
         ),
         ("MOSSScheduler", moss := S.MOSSScheduler(), moss.select_op, moss.record),
         ("BayesUCBScheduler", bayes := S.BayesUCBScheduler(), bayes.select_op, bayes.record),

@@ -62,7 +62,8 @@ import pytest
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers import (
     CMAESScheduler,
-    ConsolidatedScheduler,
+    ConsolidatedV1Scheduler,
+    ConsolidatedV2Scheduler,
     ContextualLinUCBScheduler,
     CorralScheduler,
     CUCBScheduler,
@@ -110,7 +111,12 @@ ROUNDS = 6_000
 RELIABLE = {
     # Floors below the observed minimum over 40 seeds at ROUNDS: share
     # 0.947, slope max 0.611 (median 0.267).
-    "Consolidated": (lambda seed: ConsolidatedScheduler(rng=RandPool(seed)), 0.90, 0.70),
+    "Consolidated": (lambda seed: ConsolidatedV1Scheduler(rng=RandPool(seed)), 0.90, 0.70),
+    # Over 40 seeds: share min 0.968, slope median 0.184, max 0.947 on seed
+    # 12 -- whose total regret (33) is the lowest of the 40, so its slope is
+    # fitted on near-zero increments. The highest-regret seeds have the
+    # lowest slopes (<0.02). At FIXED_SEED: 0.996 / 0.107.
+    "ConsolidatedV2": (lambda seed: ConsolidatedV2Scheduler(rng=RandPool(seed)), 0.93, 0.70),
     "ContextualLinUCB": (lambda seed: ContextualLinUCBScheduler(dim=4), 0.90, 0.40),
     "EpsilonGreedy": (lambda seed: EpsilonGreedyScheduler(), 0.85, 0.45),
     "Exp3": (lambda seed: Exp3Scheduler(), 0.78, 0.70),
@@ -362,7 +368,9 @@ RECOVERS = {
     "Hierarchical": (HierarchicalBanditScheduler, 0.90),
     # Minimum over 20 seeds 0.946: the same pseudocount cap as Hierarchical,
     # without its category-first starvation.
-    "Consolidated": (lambda: ConsolidatedScheduler(rng=RandPool(FIXED_SEED)), 0.90),
+    "Consolidated": (lambda: ConsolidatedV1Scheduler(rng=RandPool(FIXED_SEED)), 0.90),
+    # Minimum over 20 seeds 0.984 (v1: 0.946).
+    "ConsolidatedV2": (lambda: ConsolidatedV2Scheduler(rng=RandPool(FIXED_SEED)), 0.95),
     # The three schedulers built for this regime. Floors sit below the
     # observed minimum over 20 seeds at 20k rounds: D-UCB 0.739,
     # SW-UCB 0.806, CUCB 0.910.

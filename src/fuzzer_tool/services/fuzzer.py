@@ -68,7 +68,8 @@ from fuzzer_tool.core.schedulers import (
     C2UCBScheduler,
     CanaryScheduler,
     CMAESScheduler,
-    ConsolidatedScheduler,
+    ConsolidatedV1Scheduler,
+    ConsolidatedV2Scheduler,
     ContextualLinUCBScheduler,
     CorralScheduler,
     CUCBScheduler,
@@ -142,7 +143,8 @@ _CEM_ALPHA_FALLBACK = 1.0
 # Strategy names pre-registered with the Elo tracker (single source of truth
 # for the pre-registration loop and the meta-scheduler log line).
 _OPERATOR_STRATEGY_NAMES = (
-    "consolidated",
+    "consolidated_v2",
+    "consolidated_v1",
     "replicator",
     "bandit",
     "mopt",
@@ -1312,7 +1314,8 @@ class Fuzzer:
         shaped_reward_floor=0.0,
         continuum_reward=False,
         continuum_reward_floor=0.0,
-        consolidated=False,
+        consolidated_v1=False,
+        consolidated_v2=False,
         moss=False,
         moss_gamma=1.0,
         bayes_ucb=False,
@@ -3396,12 +3399,20 @@ class Fuzzer:
 
         # Consolidated: flat Thompson with a category-shrunk prior and capped
         # evidence -- the single learner meant to replace the Elo portfolio
-        # (see core/schedulers/op_consolidated.py for the measurements).
-        self._use_consolidated = consolidated
-        self._consolidated = None
-        if consolidated:
-            self._consolidated = ConsolidatedScheduler(rng=self._rng)
+        # (see core/schedulers/op_consolidated_v1.py for the measurements).
+        self._use_consolidated_v1 = consolidated_v1
+        self._consolidated_v1 = None
+        if consolidated_v1:
+            self._consolidated_v1 = ConsolidatedV1Scheduler(rng=self._rng)
             log.info("Consolidated operator scheduler enabled")
+
+        # Consolidated v2: v1 scored by an optimistic, tempered Thompson draw
+        # (see core/schedulers/op_consolidated_v2.py for the measurements).
+        self._use_consolidated_v2 = consolidated_v2
+        self._consolidated_v2 = None
+        if consolidated_v2:
+            self._consolidated_v2 = ConsolidatedV2Scheduler(rng=self._rng)
+            log.info("Consolidated v2 operator scheduler enabled")
 
         # MOSS: UCB whose exploration bonus ends at an arm's fair share t/K,
         # built for many low-yield operators (see core/schedulers/op_moss.py).
@@ -3670,7 +3681,8 @@ class Fuzzer:
             or self._kl_ducb
             or self._corral
             or self._kl_swucb
-            or self._consolidated
+            or self._consolidated_v1
+            or self._consolidated_v2
             or self._moss
             or self._bayes_ucb
             or self._cucb
@@ -3887,8 +3899,10 @@ class Fuzzer:
             _register_arms(self._las_vegas, _format_priors)
         if self._op_kuramoto:
             _register_arms(self._op_kuramoto)
-        if self._consolidated:
-            _register_arms(self._consolidated, _format_priors)
+        if self._consolidated_v1:
+            _register_arms(self._consolidated_v1, _format_priors)
+        if self._consolidated_v2:
+            _register_arms(self._consolidated_v2, _format_priors)
         if self._moss:
             _register_arms(self._moss)
         if self._bayes_ucb:
@@ -7086,7 +7100,8 @@ class Fuzzer:
             self._gradient,
             self._whittle,
             self._successive_elim,
-            self._consolidated,
+            self._consolidated_v1,
+            self._consolidated_v2,
             self._moss,
             self._bayes_ucb,
             self._canary,
@@ -8785,8 +8800,10 @@ class Fuzzer:
             parts.append(f"power={self._power_schedule}")
 
         ops = []
-        if getattr(self, "_consolidated", False):
-            ops.append("consolidated")
+        if getattr(self, "_consolidated_v2", False):
+            ops.append("consolidated_v2")
+        if getattr(self, "_consolidated_v1", False):
+            ops.append("consolidated_v1")
         if self.mc_bandit:
             ops.append("bandit")
         if self.mc_cem:
@@ -9215,8 +9232,10 @@ class Fuzzer:
             groups["Scheduling"].append(f"power-schedule={sched_pol}")
 
         ops = []
-        if getattr(self, "_consolidated", False):
-            ops.append("consolidated")
+        if getattr(self, "_consolidated_v2", False):
+            ops.append("consolidated_v2")
+        if getattr(self, "_consolidated_v1", False):
+            ops.append("consolidated_v1")
         if self.mc_bandit:
             ops.append("bandit")
         if self.mc_cem:

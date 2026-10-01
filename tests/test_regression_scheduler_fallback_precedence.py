@@ -30,7 +30,8 @@ from fuzzer_tool.services.report import _elo_ratings
 # Fallback precedence, highest first. "random" is the terminal fallback (the
 # chain's else-branch, represented by _rng.choice, not a scheduler).
 _FALLBACK_PRECEDENCE = [
-    "consolidated",
+    "consolidated_v2",
+    "consolidated_v1",
     "replicator",
     "mopt",
     "bandit",
@@ -53,6 +54,7 @@ _FALLBACK_PRECEDENCE = [
     "bayes_ucb",
     "fpl",
     "successive_elim",
+    "las_vegas",
     "round_robin",
 ]
 
@@ -116,7 +118,8 @@ class _FakeFuzzer:
     """Minimal fuzzer stand-in exposing exactly the attrs select_op() reads."""
 
     _SCHEDULER_ATTRS = {
-        "consolidated": ("_use_consolidated", "_consolidated"),
+        "consolidated_v2": ("_use_consolidated_v2", "_consolidated_v2"),
+        "consolidated_v1": ("_use_consolidated_v1", "_consolidated_v1"),
         "replicator": ("_use_replicator", "_replicator"),
         "mopt": ("_use_mopt", "_mopt"),
         "exp3": ("_use_exp3", "_exp3"),
@@ -138,6 +141,7 @@ class _FakeFuzzer:
         "fpl": ("_use_fpl", "_fpl"),
         "exp4": ("_use_exp4", "_exp4"),
         "successive_elim": ("_use_successive_elim", "_successive_elim"),
+        "las_vegas": ("_use_las_vegas", "_las_vegas"),
         "round_robin": ("_use_round_robin", "_round_robin"),
         # canary, op_katz, op_kuramoto, op_tang, gradient, whittle, corral
         # are deliberately absent from _FALLBACK_PRECEDENCE (see
@@ -231,10 +235,19 @@ class TestFallbackPrecedence:
             if name != first:
                 assert fake.calls == 0, f"{name} consulted despite {first} enabled"
 
+    def test_v2_absent_falls_to_v1(self):
+        """consolidated_v2 leads; without it consolidated_v1 selects."""
+        f = _FakeFuzzer()
+        fakes = {name: f.enable(name) for name in _FALLBACK_PRECEDENCE if name != "consolidated_v2"}
+        assert OperatorEngine(f).select_op(["bit_flip", "byte_flip"]) == "op_consolidated_v1"
+        assert fakes["consolidated_v1"].calls == 1
+        assert fakes["replicator"].calls == 0
+
     def test_everything_but_consolidated_falls_to_replicator(self):
         """The pre-consolidated order is unchanged underneath it."""
         f = _FakeFuzzer()
-        fakes = {name: f.enable(name) for name in _FALLBACK_PRECEDENCE if name != "consolidated"}
+        consolidated = ("consolidated_v1", "consolidated_v2")
+        fakes = {name: f.enable(name) for name in _FALLBACK_PRECEDENCE if name not in consolidated}
         assert OperatorEngine(f).select_op(["bit_flip", "byte_flip"]) == "op_replicator"
         assert fakes["replicator"].calls == 1
 

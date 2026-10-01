@@ -1,4 +1,4 @@
-"""ConsolidatedScheduler: one operator scheduler built from what measured best.
+"""ConsolidatedV1Scheduler: one operator scheduler built from what measured best.
 
 Why one scheduler and not a portfolio
 -------------------------------------
@@ -94,7 +94,7 @@ from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 _MIN_PARAM = 1e-3
 
 
-class ConsolidatedScheduler:
+class ConsolidatedV1Scheduler:
     """Flat Thompson sampling with a category-shrunk prior and capped evidence.
 
     Args:
@@ -114,6 +114,9 @@ class ConsolidatedScheduler:
     #: init_arm() accepts (prior_alpha, prior_beta) overrides from
     #: target_profiler.format_operator_priors(); see init_arm.
     supports_priors = True
+
+    #: bandit_stats() key prefix; subclasses report under their own name.
+    _STATS_PREFIX = "consolidated_v1"
 
     def __init__(
         self,
@@ -275,9 +278,10 @@ class ConsolidatedScheduler:
             means = a / np.maximum(a + b, _MIN_PARAM)
             order = np.argsort(-means)[:5]
             top = [(self._names[i], round(float(means[i]), 4)) for i in order]
+        p = self._STATS_PREFIX
         return {
-            "consolidated_pulls": self._total_pulls,
-            "consolidated_successes": round(self._total_successes, 3),
-            "consolidated_arms": len(self._names),
-            "consolidated_top": top,
+            f"{p}_pulls": self._total_pulls,
+            f"{p}_successes": round(self._total_successes, 3),
+            f"{p}_arms": len(self._names),
+            f"{p}_top": top,
         }

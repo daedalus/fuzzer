@@ -457,7 +457,8 @@ def cmd_fuzz(args):
         args.successive_elim = True
         args.las_vegas = True
         args.canary_scheduler = True
-        args.consolidated = True
+        args.consolidated_v1 = True
+        args.consolidated_v2 = True
         args.moss = True
         args.bayes_ucb = True
         args.contextual = True
@@ -724,7 +725,8 @@ def cmd_fuzz(args):
         shaped_reward_floor=getattr(args, "shaped_reward_floor", 0.0),
         continuum_reward=getattr(args, "continuum_reward", False),
         continuum_reward_floor=getattr(args, "continuum_reward_floor", 0.0),
-        consolidated=getattr(args, "consolidated", False),
+        consolidated_v1=getattr(args, "consolidated_v1", False),
+        consolidated_v2=getattr(args, "consolidated_v2", False),
         moss=getattr(args, "moss", False),
         moss_gamma=getattr(args, "moss_gamma", 1.0),
         bayes_ucb=getattr(args, "bayes_ucb", False),
@@ -2058,7 +2060,8 @@ _HAIL_MARY_FLAGS = (
     "seed_p2c_scheduler",
     "softmax",
     "topk",
-    "consolidated",
+    "consolidated_v1",
+    "consolidated_v2",
     "moss",
     "bayes_ucb",
     "contextual",
@@ -3452,12 +3455,22 @@ def main() -> int:
         ),
     )
     fuzz_parser.add_argument(
+        "--consolidated-v1",
         "--consolidated",
         action="store_true",
         help=(
-            "Enable the consolidated operator scheduler: Thompson sampling with "
+            "Enable the consolidated_v1 operator scheduler: Thompson sampling with "
             "a category-shrunk prior and capped evidence. Takes precedence over "
-            "every other operator scheduler when Elo is off"
+            "every other operator scheduler but consolidated_v2 when Elo is off"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--consolidated-v2",
+        action="store_true",
+        help=(
+            "Enable the consolidated_v2 operator scheduler: consolidated_v1 scored "
+            "by an optimistic, tempered Thompson draw. Takes precedence over every "
+            "other operator scheduler when Elo is off"
         ),
     )
     fuzz_parser.add_argument(

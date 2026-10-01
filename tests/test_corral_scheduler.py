@@ -273,7 +273,7 @@ def test_a_productive_operator_gains_probability():
 def test_concentrates_at_fuzzing_realistic_rates():
     """10% against 1% -- the regime where the loss shift matters.
 
-    ``core/schedulers/op_consolidated.py`` records that the Elo fan-out gave a
+    ``core/schedulers/op_consolidated_v1.py`` records that the Elo fan-out gave a
     ten-times-more-productive arm only 54% of the picks. This is the bar
     that motivated the family.
     """

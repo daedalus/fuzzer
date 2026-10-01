@@ -37,6 +37,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--consolidated-v2`** (`core/schedulers/op_consolidated_v2.py`): consolidated v1 scored by an optimistic, tempered Thompson draw. +1.3-1.8% over v1 on all four `bandit_env` environments (20 paired seeds). Leads no-Elo precedence.
 - **Power Doppler schedule** (`--schedule doppler`, `core/power_doppler.py`): per-seed ensembles of mutant hit counts; mean + SVD wall filter, CFAR χ² flow detection; flow power scales seed energy to `[1, max_mult]`.
 - **OS / network scheduler ports**: seed arms `mlfq`, `stride`, `eevdf`, `bfq`, `sfq`, `codel`, `aimd`, `p2c` (`--seed-<name>-scheduler`) and op arms `op_stride`, `op_p2c` (`--op-stride`, `--op-p2c`); `core/fair_queue.py` gains `Stride` and `EEVDF`. Elo arms, in `--hail-mary`; seed arms also run without `--elo`. Falsification and adversarial tests. No paired benchmark yet.
 - **Ten op mutators** for in-tree targets and text decoders: `json_mutate` (fuzzgoat), `sql_mutate` (sqlite SQL path), `ecdsa_field_mutate` (secp256k1), `recompress_lz4`, `recompress_png_idat` (format band, sniffer-gated); `encoding_wrap`, `escape_mutate`, `ascii_float` (structural); `utf16_transcode`, `nest_bomb` (radamsa). Tests: `tests/test_{json_mutate,sql_mutate,ecdsa_field_mutate,recompress_roundtrip,text_codec,nest_bomb}.py`. Discovery effect on fuzzgoat unmeasured.
@@ -55,6 +56,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`tools/lib/factorial_design.py`**: Plackett-Burman screening designs (`design_matrix`, `fold_over`, `main_effects`, `screen`) for ranking hyperparameters in 12-16 runs instead of a grid.
 - **`core/group_testing.py`** + `tools/bench_group_testing.py`: non-adaptive pooled which-items-matter inference (COMP/DD, exact for any d) and a binary-splitting baseline. Not wired into `tmin`/colorizer (see handover section 6.5 result).
 - **`--second-order-blend W`** (default 0 = off): second-order operator chain `P(next | prev2, prev)` in `MonteCarloScheduler` (`core/op_chain2.py`, sparse, capped at 4096 contexts), backing off to `--pairwise-blend` on unseen contexts. Synthetic A/B only; real-target A/B not run.
+
+### Changed
+
+- **`--consolidated` → `--consolidated-v1`** (`op_consolidated.py` → `op_consolidated_v1.py`, `ConsolidatedScheduler` → `ConsolidatedV1Scheduler`, strategy `consolidated` → `consolidated_v1`, stats keys `consolidated_v1_*`). `--consolidated` kept as an alias. Elo ratings saved under `consolidated` do not carry over.
 
 ### Documentation
 
