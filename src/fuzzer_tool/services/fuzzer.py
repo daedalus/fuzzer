@@ -1314,8 +1314,7 @@ class Fuzzer:
         shaped_reward_floor=0.0,
         continuum_reward=False,
         continuum_reward_floor=0.0,
-        consolidated_v1=False,
-        consolidated_v2=False,
+        consolidated=False,
         moss=False,
         moss_gamma=1.0,
         bayes_ucb=False,
@@ -1562,6 +1561,10 @@ class Fuzzer:
         seed_p2c_scheduler=False,
         op_stride=False,
         op_p2c=False,
+        # Versioned consolidated schedulers; `consolidated` above is the
+        # pre-v2 name of v1. Appended: positional signature.
+        consolidated_v1=False,
+        consolidated_v2=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -3400,6 +3403,7 @@ class Fuzzer:
         # Consolidated: flat Thompson with a category-shrunk prior and capped
         # evidence -- the single learner meant to replace the Elo portfolio
         # (see core/schedulers/op_consolidated_v1.py for the measurements).
+        consolidated_v1 = consolidated_v1 or consolidated
         self._use_consolidated_v1 = consolidated_v1
         self._consolidated_v1 = None
         if consolidated_v1:

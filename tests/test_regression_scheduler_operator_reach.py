@@ -138,6 +138,12 @@ def _all_operator_schedulers():
             consolidated.record,
         ),
         (
+            "ConsolidatedScheduler",
+            consolidated_legacy := S.ConsolidatedScheduler(),
+            consolidated_legacy.select_op,
+            consolidated_legacy.record,
+        ),
+        (
             "ConsolidatedV2Scheduler",
             consolidated_v2 := S.ConsolidatedV2Scheduler(),
             consolidated_v2.select_op,

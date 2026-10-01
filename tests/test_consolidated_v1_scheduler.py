@@ -177,3 +177,51 @@ def test_fuzzer_wiring_selects_and_learns(tmp_path):
     assert "bandit" not in selectors
     assert f._consolidated_v1.bandit_stats()["consolidated_v1_pulls"] > 0
     assert bandit_mass() > before, "the bandit stopped learning from rounds it did not select"
+
+
+# -- pre-v2 compatibility (Copilot review on daedalus/fuzzer#53) -------------
+
+
+def test_regression_alias_keeps_legacy_stats_keys():
+    """ConsolidatedScheduler behaves as v1 but reports its pre-v2 keys."""
+    from fuzzer_tool.core.schedulers import ConsolidatedScheduler
+
+    s = ConsolidatedScheduler(rng=RandPool(1))
+    assert isinstance(s, ConsolidatedV1Scheduler)
+    s.record("bit_flip", True)
+    stats = s.bandit_stats()
+    assert stats["consolidated_pulls"] == 1
+    assert stats["consolidated_top"][0][0] == "bit_flip"
+    assert not any(k.startswith("consolidated_v1") for k in stats)
+
+
+def test_regression_alias_is_exported():
+    import fuzzer_tool.core.schedulers as S
+
+    assert "ConsolidatedScheduler" in S.__all__
+
+
+def test_regression_fuzzer_signature_keeps_positional_slots():
+    """`consolidated` keeps its pre-v2 slot (just before `moss`); the
+    versioned flags are appended, so positional callers are not shifted."""
+    import inspect
+
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    params = list(inspect.signature(Fuzzer.__init__).parameters)
+    assert params.index("moss") == params.index("consolidated") + 1
+    assert params[-2:] == ["consolidated_v1", "consolidated_v2"]
+
+
+@pytest.mark.skipif(not _TARGET.exists(), reason="targets/test_target not built")
+def test_regression_legacy_consolidated_kwarg_builds_v1(tmp_path):
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    corpus, crashes = tmp_path / "c", tmp_path / "k"
+    corpus.mkdir()
+    crashes.mkdir()
+    f = Fuzzer(
+        target=str(_TARGET), corpus_dir=str(corpus), crashes_dir=str(crashes), consolidated=True
+    )
+    assert isinstance(f._consolidated_v1, ConsolidatedV1Scheduler)
+    assert f._use_consolidated_v1
