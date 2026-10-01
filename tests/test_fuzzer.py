@@ -301,30 +301,28 @@ class TestFuzzerUnit:
         f = self._make_fuzzer()
         assert f._inprocess_runner is None
 
-    def test_inprocess_direct_pie_target_raises(self):
-        """inprocess-direct with a PIE target raises RuntimeError up-front,
-        instead of crashing deep in ctypes.CDLL with a cryptic OSError.
-        /bin/true is a PIE executable (ET_DYN); /bin/ls is typically a static
-        or position-dependent executable so it should NOT raise.
+    def test_inprocess_pie_target_uses_exec_mode(self):
+        """In-process flags on a PIE executable run it in exec mode instead
+        of crashing in ctypes.CDLL. /bin/true is a PIE executable (ET_DYN).
         """
         tmpdir = tempfile.mkdtemp(prefix="fuzz_test_")
         with (
             patch("os.path.isfile", return_value=True),
             patch("os.access", return_value=True),
         ):
-            # inprocess_direct=True + PIE target → RuntimeError
-            with pytest.raises(RuntimeError, match="PIE executable"):
-                Fuzzer(
-                    target="/bin/true",
-                    corpus_dir=f"{tmpdir}/corpus",
-                    crashes_dir=f"{tmpdir}/crashes",
-                    inprocess=True,
-                    inprocess_direct=True,
-                    max_len=256,
-                    timeout=1,
-                    mutations_per_input=2,
-                )
-            # inprocess=True, inprocess_direct=False + PIE target → ok (subprocess loader)
+            # inprocess_direct=True + PIE target → exec mode
+            f = Fuzzer(
+                target="/bin/true",
+                corpus_dir=f"{tmpdir}/corpus",
+                crashes_dir=f"{tmpdir}/crashes",
+                inprocess=True,
+                inprocess_direct=True,
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+            )
+            assert f._inprocess_runner is None
+            # inprocess=True, inprocess_direct=False + PIE target → exec mode
             f = Fuzzer(
                 target="/bin/true",
                 corpus_dir=f"{tmpdir}/corpus",
@@ -335,7 +333,7 @@ class TestFuzzerUnit:
                 timeout=1,
                 mutations_per_input=2,
             )
-            assert f._inprocess_runner is not None
+            assert f._inprocess_runner is None
 
 
 class TestInProcessRunner:
@@ -545,7 +543,9 @@ class TestInProcessFuzzer:
         from fuzzer_tool.adapters.inprocess import InProcessRunner
 
         with patch.object(InProcessRunner, "_start"):
+            # /bin/true is an ELF executable, which runs in exec mode.
             f = self._make_fuzzer(
+                target="/nonexistent/inprocess_target",
                 inprocess=True,
                 inprocess_func="my_func",
             )

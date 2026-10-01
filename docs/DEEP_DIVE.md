@@ -883,6 +883,7 @@ print('Weak modulus PCs:', w)
 
 ### Direct ctypes (`--inprocess-direct`)
 Calls target function directly via `ctypes.CDLL`. Catches SIGSEGV/SIGABRT via signal handler. ~2k–34k eps.
+Both in-process loaders dlopen the target, which an executable cannot be. An ELF executable (`ET_EXEC`, or `ET_DYN` with `PT_INTERP`; `core/elf.py::is_elf_executable`) passed with `--inprocess`/`--inprocess-direct`/`--hail-mary` runs in exec mode instead. Test: `tests/test_regression_inprocess_exe_target.py`.
 
 ### Persistent subprocess (`--inprocess`)
 Keeps one Python subprocess alive. Fork-per-call with `os.setsid()` for process group isolation. Timeout enforced via outer threaded readline. Auto-restarts on subprocess death. Throughput monitoring detects sustained slowdowns (below 10% of calibrated baseline) and auto-restarts the loader. ~65–120 eps.
