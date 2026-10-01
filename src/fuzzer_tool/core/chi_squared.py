@@ -406,13 +406,20 @@ def drop_sparse_rows(
     if not table:
         return []
 
-    col_totals = [sum(col) for col in zip(*table, strict=True)]
-    grand = sum(col_totals)
-    if grand <= 0:
-        return []
+    rows = table
+    while rows:
+        col_totals = [sum(col) for col in zip(*rows, strict=True)]
+        grand = sum(col_totals)
+        if grand <= 0:
+            return []
 
-    min_share = min(col_totals) / grand
-    return [row for row in table if sum(row) * min_share >= min_expected]
+        min_share = min(col_totals) / grand
+        kept = [row for row in rows if sum(row) * min_share >= min_expected]
+        if len(kept) == len(rows):
+            return kept
+        rows = kept
+
+    return []
 
 
 # ── effect size ────────────────────────────────────────────────────────
