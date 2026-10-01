@@ -95,7 +95,17 @@ from fuzzer_tool.core.schedulers import (
     TopKScheduler,
     WhittleIndexScheduler,
 )
+from fuzzer_tool.core.schedulers.op_p2c import OpP2CScheduler
+from fuzzer_tool.core.schedulers.op_stride import OpStrideScheduler
 from fuzzer_tool.core.schedulers.pos_base import Outcome
+from fuzzer_tool.core.schedulers.seed_aimd import SeedAIMDScheduler
+from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
+from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
+from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
+from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
+from fuzzer_tool.core.schedulers.seed_p2c import SeedP2CScheduler
+from fuzzer_tool.core.schedulers.seed_sfq import SeedSFQScheduler
+from fuzzer_tool.core.schedulers.seed_stride import SeedStrideScheduler
 from fuzzer_tool.core.schedules import (
     ENTROPY_RANDOM_PCT,
     ENTROPY_SPARSE_PCT,
@@ -186,6 +196,14 @@ _SEED_STRATEGY_NAMES = (
     "strata",
     "round_robin",
     "drr",
+    "mlfq",
+    "stride",
+    "eevdf",
+    "bfq",
+    "sfq",
+    "codel",
+    "aimd",
+    "p2c",
 )
 
 
@@ -1521,6 +1539,19 @@ class Fuzzer:
         pos_chunk=False,
         pos_changed=False,
         pos_rare_mask=False,
+        # OS / network scheduler ports (core/schedulers/seed_<name>.py,
+        # op_<name>.py). Seed arms: Elo arms and no-elo fallbacks, like drr.
+        # Op arms: Elo-only. Appended: positional signature.
+        seed_mlfq_scheduler=False,
+        seed_stride_scheduler=False,
+        seed_eevdf_scheduler=False,
+        seed_bfq_scheduler=False,
+        seed_sfq_scheduler=False,
+        seed_codel_scheduler=False,
+        seed_aimd_scheduler=False,
+        seed_p2c_scheduler=False,
+        op_stride=False,
+        op_p2c=False,
     ):
         # Snapshot os.environ before anything below (or later in run()) can
         # write __AFL_DIST_SHM_ID / __AFL_SHM_ID / AFL_MAP_SIZE / LD_PRELOAD /
@@ -2684,6 +2715,32 @@ class Fuzzer:
 
             self._seed_drr = SeedDRRScheduler()
             log.info("Seed deficit-round-robin scheduling enabled")
+        # OS / network seed arms. _seed_os_arms is the live subset the
+        # outcome record site feeds (_record_seed_os_arms).
+        self._seed_mlfq = SeedMLFQScheduler() if seed_mlfq_scheduler else None
+        self._seed_stride = SeedStrideScheduler() if seed_stride_scheduler else None
+        self._seed_eevdf = SeedEEVDFScheduler() if seed_eevdf_scheduler else None
+        self._seed_bfq = SeedBFQScheduler() if seed_bfq_scheduler else None
+        self._seed_sfq = SeedSFQScheduler(rng=self._rng) if seed_sfq_scheduler else None
+        self._seed_codel = SeedCoDelScheduler() if seed_codel_scheduler else None
+        self._seed_aimd = SeedAIMDScheduler() if seed_aimd_scheduler else None
+        self._seed_p2c = SeedP2CScheduler(rng=self._rng) if seed_p2c_scheduler else None
+        self._seed_os_arms = tuple(
+            arm
+            for arm in (
+                self._seed_mlfq,
+                self._seed_stride,
+                self._seed_eevdf,
+                self._seed_bfq,
+                self._seed_sfq,
+                self._seed_codel,
+                self._seed_aimd,
+                self._seed_p2c,
+            )
+            if arm is not None
+        )
+        if self._seed_os_arms:
+            log.info("OS/network seed arms enabled: %d", len(self._seed_os_arms))
         # LST override: no seed waits more than lst_revisit seconds between
         # picks (SeedPicker._pick_lst_seed); last_picked is stamped in _pick_seed.
         self._lst_revisit = max(0.0, float(lst_revisit))
@@ -3241,6 +3298,13 @@ class Fuzzer:
 
             self._op_strata = OpStrataScheduler(rng=self._rng)
             log.info("op_strata enabled")
+
+        # Stride (posterior-mean tickets) and power-of-two-choices operator
+        # arms. Off by default, Elo-only; see core/schedulers/op_stride.py.
+        self._use_op_stride = op_stride
+        self._op_stride = OpStrideScheduler() if op_stride else None
+        self._use_op_p2c = op_p2c
+        self._op_p2c = OpP2CScheduler(rng=self._rng) if op_p2c else None
 
         # Categorical TPE (BO-3): l/g density ratio over operators. Off by
         # default, Elo-only; see core/schedulers/op_tpe.py.
@@ -3807,6 +3871,10 @@ class Fuzzer:
             _register_arms(self._op_tpe, _format_priors)
         if self._op_strata:
             _register_arms(self._op_strata)
+        if self._op_stride:
+            _register_arms(self._op_stride)
+        if self._op_p2c:
+            _register_arms(self._op_p2c)
         if self._elo:
             _register_arms(self._elo)
         del _format_priors  # free priors dict after arm registration
@@ -4449,6 +4517,16 @@ class Fuzzer:
         return {
             self._seed_key(d): float(m.get("coverage_edges", 0)) for d, m in self.seed_meta.items()
         }
+
+    def _record_seed_os_arms(self, parent_key: str, success: bool, weight: float) -> None:
+        """Feed one parent outcome to every enabled OS / network seed arm.
+
+        Off-policy like the canary feed: every arm sees every parent, whichever
+        strategy picked it, since MLFQ demotion, CoDel staleness and AIMD
+        windows are properties of the seed, not of the picker.
+        """
+        for arm in self._seed_os_arms:
+            arm.record(parent_key, success=success, weight=weight)
 
     def _seed_key(self, data: bytes) -> str:
         """Return content hash for *data*."""
@@ -6401,7 +6479,13 @@ class Fuzzer:
         # each remaining discovery is rare, so the weight rises toward 1.
         # The weight is bounded above by 1.0, so the F0 signal never inflates
         # a posterior beyond the default -- it only ever re-weights.
-        if self._seed_quality or self._seed_canary or self._seed_round_robin or self._seed_drr:
+        if (
+            self._seed_quality
+            or self._seed_canary
+            or self._seed_round_robin
+            or self._seed_drr
+            or self._seed_os_arms
+        ):
             parent_key = self._seed_key(data)
             weight = 1.0
             f0_est = self._edge_tracker.estimate_distinct_edges_f0()
@@ -6435,6 +6519,7 @@ class Fuzzer:
                 )
             if self._seed_drr:
                 self._seed_drr.record(parent_key, success=bool(has_new_coverage), weight=weight)
+            self._record_seed_os_arms(parent_key, bool(has_new_coverage), weight)
 
         # Credit the cmplog operands this gain is attributable to: the
         # input-to-state matches found in the input, which are the operands
@@ -6932,6 +7017,8 @@ class Fuzzer:
             self._op_credit,
             self._op_tpe,
             self._op_strata,
+            self._op_stride,
+            self._op_p2c,
             self._softmax,
             self._topk,
         ):

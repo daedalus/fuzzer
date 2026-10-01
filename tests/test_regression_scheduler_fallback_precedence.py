@@ -153,6 +153,8 @@ class _FakeFuzzer:
         "op_credit": ("_use_op_credit", "_op_credit"),
         "op_tpe": ("_use_op_tpe", "_op_tpe"),
         "op_strata": ("_use_op_strata", "_op_strata"),
+        "op_stride": ("_use_op_stride", "_op_stride"),
+        "op_p2c": ("_use_op_p2c", "_op_p2c"),
         "corral": ("_use_corral", "_corral"),
         "gradient": ("_use_gradient", "_gradient"),
         "whittle": ("_use_whittle", "_whittle"),

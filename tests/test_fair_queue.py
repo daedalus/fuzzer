@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from fuzzer_tool.core.fair_queue import DeficitRR, SmoothWRR, WeightedFairQueue
+from fuzzer_tool.core.fair_queue import EEVDF, DeficitRR, SmoothWRR, Stride, WeightedFairQueue
 
 NAN = float("nan")
 INF = float("inf")
@@ -265,3 +265,143 @@ def test_wfq_unseen_cost_estimate_falls_back():
     q = WeightedFairQueue()
 
     assert q.pick({"a": 1.0, "b": 1.0}) in {"a", "b"}
+
+
+# --- Stride -----------------------------------------------------------------
+
+
+def _unit(_k):
+    return 1.0
+
+
+def test_stride_flat_weight_is_round_robin():
+    """Falsification: equal tickets reduce stride to plain cycling in list order."""
+    q = Stride()
+
+    assert [q.pick(["a", "b", "c"], _unit) for _ in range(6)] == ["a", "b", "c"] * 2
+
+
+def test_stride_share_matches_weights():
+    """3:1 tickets -> 3:1 picks, exact over whole periods (deterministic)."""
+    w = {"a": 3.0, "b": 1.0}
+    q = Stride()
+    picks = [q.pick(["a", "b"], w.get) for _ in range(400)]
+
+    assert picks.count("a") == pytest.approx(300, abs=1)
+
+
+def test_stride_late_joiner_banks_no_credit():
+    """Adversarial: a flow joining late starts at the current pass, not at zero."""
+    q = Stride()
+    for _ in range(100):
+        q.pick(["a", "b"], _unit)
+    picks = [q.pick(["a", "b", "c"], _unit) for _ in range(30)]
+
+    assert _counts(picks) == {"a": 10, "b": 10, "c": 10}
+
+
+def test_stride_departed_flow_never_picked():
+    q = Stride()
+    for _ in range(5):
+        q.pick(["a", "b", "c"], _unit)
+
+    assert "b" not in [q.pick(["a", "c"], _unit) for _ in range(20)]
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, NAN, INF])
+def test_stride_bad_weight_is_neutral(bad):
+    """Adversarial: garbage tickets count as 1, never divide by zero or starve."""
+    w = {"a": bad, "b": 1.0}
+    q = Stride()
+    picks = [q.pick(["a", "b"], w.get) for _ in range(20)]
+
+    assert _counts(picks) == {"a": 10, "b": 10}
+
+
+def test_stride_empty_and_single():
+    assert Stride().pick([], _unit) == ""
+    assert Stride().pick(["x"], _unit) == "x"
+
+
+# --- EEVDF ------------------------------------------------------------------
+
+
+def test_eevdf_flat_is_round_robin():
+    """Falsification: unit cost and weight reduce EEVDF to plain cycling."""
+    q = EEVDF()
+
+    assert [q.pick(["a", "b", "c"], _unit, _unit) for _ in range(6)] == ["a", "b", "c"] * 2
+
+
+def test_eevdf_equal_time_for_unequal_cost():
+    """Cost 4 vs 1 at equal weight: the slow flow gets a quarter of the picks."""
+    cost = {"fast": 1.0, "slow": 4.0}
+    q = EEVDF()
+    picks = [q.pick(["fast", "slow"], cost.get, _unit) for _ in range(500)]
+
+    assert picks.count("fast") == pytest.approx(4 * picks.count("slow"), abs=4)
+
+
+def test_eevdf_weight_scales_share():
+    w = {"a": 2.0, "b": 1.0}
+    q = EEVDF()
+    picks = [q.pick(["a", "b"], _unit, w.get) for _ in range(300)]
+
+    assert picks.count("a") == pytest.approx(2 * picks.count("b"), abs=2)
+
+
+def test_eevdf_late_joiner_gets_fair_share_not_catch_up():
+    """Adversarial: a new flow joins at lag 0 (V), so it cannot monopolise."""
+    q = EEVDF()
+    for _ in range(100):
+        q.pick(["a", "b"], _unit, _unit)
+    picks = [q.pick(["a", "b", "c"], _unit, _unit) for _ in range(30)]
+
+    assert _counts(picks) == {"a": 10, "b": 10, "c": 10}
+
+
+def test_eevdf_flow_ahead_of_clock_is_ineligible():
+    """An expensive service puts b ahead of V; it waits until the clock catches up.
+
+    a=cost 1, b=cost 8, equal weight: after a, b the lag of b is -7, so a
+    runs 7 times in a row (its ve climbs 1..8 while V = (ve_a + 8) / 2).
+    """
+    cost = {"a": 1.0, "b": 8.0}
+    q = EEVDF()
+    head = [q.pick(["a", "b"], cost.get, _unit) for _ in range(2)]
+
+    assert head == ["a", "b"]
+    assert [q.pick(["a", "b"], cost.get, _unit) for _ in range(7)] == ["a"] * 7
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, NAN, INF])
+def test_eevdf_bad_cost_and_weight_are_neutral(bad):
+    """Adversarial: garbage from a corrupted ledger is neutral, never a hang or NaN clock."""
+    q = EEVDF()
+    bad_fn = {"a": bad, "b": 1.0}.get
+    picks = [q.pick(["a", "b"], bad_fn, bad_fn) for _ in range(20)]
+
+    assert _counts(picks) == {"a": 10, "b": 10}
+    assert math.isfinite(q.virtual_time)
+
+
+def test_eevdf_departed_flow_never_picked():
+    q = EEVDF()
+    for _ in range(5):
+        q.pick(["a", "b", "c"], _unit, _unit)
+
+    assert "b" not in [q.pick(["a", "c"], _unit, _unit) for _ in range(20)]
+
+
+def test_eevdf_empty_and_single():
+    assert EEVDF().pick([], _unit, _unit) == ""
+    assert EEVDF().pick(["x"], _unit, _unit) == "x"
+
+
+def test_eevdf_no_eligible_flow_serves_lowest_ve():
+    """Adversarial: a clock corrupted past every flow still serves, never IndexError."""
+    q = EEVDF()
+    q.pick(["a", "b"], _unit, _unit)
+    q._sum_wve = -1e9  # V far below every ve: nobody eligible
+
+    assert q.pick(["a", "b"], _unit, _unit) == "b"

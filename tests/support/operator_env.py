@@ -62,6 +62,8 @@ BALLOT_SCHEDULERS = (
     "op_tang",
     "op_tpe",
     "op_strata",
+    "op_stride",
+    "op_p2c",
     "replicator",
     "round_robin",
     "softmax",

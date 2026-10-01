@@ -12,6 +12,7 @@ Extracted from Fuzzer class (~lines 2232-2735). Contains:
 """
 
 import bisect as _bisect_mod
+import functools
 import itertools
 import logging
 import math
@@ -84,6 +85,26 @@ ZIPF_GROWTH_R2 = 0.9
 # _seed_strategy for a seed handed over by a target-arena matching arm
 # (gale_shapley, auction). Never in _seed_strategy_pool, so the seed arena plays no match for it.
 TARGET_MATCH = "target_match"
+
+# OS / network seed arms (core/schedulers/seed_<name>.py): Elo name -> the
+# fuzzer attribute holding it, and the per-pick signals its select_seed takes
+# after the key list (see _pick_os_seed). Arms absent here take none.
+_OS_SEED_ARMS = {
+    "mlfq": "_seed_mlfq",
+    "stride": "_seed_stride",
+    "eevdf": "_seed_eevdf",
+    "bfq": "_seed_bfq",
+    "sfq": "_seed_sfq",
+    "codel": "_seed_codel",
+    "aimd": "_seed_aimd",
+    "p2c": "_seed_p2c",
+}
+_OS_SEED_SIGNALS = {
+    "stride": ("weight",),
+    "eevdf": ("cost", "weight"),
+    "bfq": ("weight",),
+    "sfq": ("flow",),
+}
 
 # ── Invasion percolation operator selection (percolation handover Module 4) ─
 # Resistance at or above which an operator counts as stuck: success_rate <=
@@ -400,6 +421,9 @@ class SeedPicker:
             available.append("round_robin")
         if getattr(f, "_use_seed_drr", False) and f._seed_drr and f.corpus:
             available.append("drr")
+        for name, attr in _OS_SEED_ARMS.items():
+            if getattr(f, attr, None) is not None and f.corpus:
+                available.append(name)
 
     def _elo_dispatch(self, f, strategy: str) -> bytes | None:
         """Run the picker for the Elo-selected *strategy*; None if unknown or declined."""
@@ -439,6 +463,7 @@ class SeedPicker:
             "canary": lambda: self._pick_seed_canary_seed(),
             "round_robin": lambda: self._pick_seed_round_robin_seed(),
             "drr": lambda: self._pick_seed_drr_seed(),
+            **{name: functools.partial(self._pick_os_seed, name) for name in _OS_SEED_ARMS},
         }
         self._elo_map = (f, strategy_map)
         handler = strategy_map.get(strategy)
@@ -712,8 +737,8 @@ class SeedPicker:
         selected = scheduler.select_seed(list(key_to_seed))
         return key_to_seed.get(selected)
 
-    def _drr_keys(self) -> tuple[dict[str, bytes], list[str]]:
-        """Seed-key map and key list for the DRR arm, rebuilt only on corpus change.
+    def _corpus_keys(self) -> tuple[dict[str, bytes], list[str]]:
+        """Seed-key map and key list for the fair-queue arms, rebuilt on corpus change.
 
         Hashing the whole corpus per pick costs ~1 ms at 5000 seeds; the
         corpus changes once per hundreds of picks. Validity is a snapshot
@@ -723,13 +748,13 @@ class SeedPicker:
         DeficitRR's own flow-set check hit on identity.
         """
         f = self.f
-        cached = getattr(self, "_drr_map", None)
+        cached = getattr(self, "_keys_map", None)
         if cached is not None and cached[0] == f.corpus:
             return cached[1], cached[2]
 
         key_to_seed = {f._seed_key(s): s for s in f.corpus}
         keys = list(key_to_seed)
-        self._drr_map = (list(f.corpus), key_to_seed, keys)
+        self._keys_map = (list(f.corpus), key_to_seed, keys)
         return key_to_seed, keys
 
     def _pick_seed_drr_seed(self) -> bytes | None:
@@ -748,7 +773,20 @@ class SeedPicker:
         scheduler = getattr(f, "_seed_drr", None)
         if scheduler is None or not f.corpus:
             return None
-        key_to_seed, keys = self._drr_keys()
+        key_to_seed, keys = self._corpus_keys()
+        signals = self._seed_signals(key_to_seed)
+        selected = scheduler.select_seed(keys, signals["cost"], signals["weight"])
+        return key_to_seed.get(selected)
+
+    def _seed_signals(self, key_to_seed: dict[str, bytes]) -> dict:
+        """Per-key callables the fair-queue arms read: cost, weight, flow.
+
+        cost: mean exec time from the cost ledger relative to the corpus
+        mean (1.0 = average; unmeasured or empty ledger = neutral 1.0).
+        weight: ``FAVORED_WEIGHT`` for AFL-favored seeds, else 1.0.
+        flow: the lineage parent (``--lineage``), else None (the seed itself).
+        """
+        f = self.f
         mean = f.mean_exec_time()
 
         def cost(key: str) -> float:
@@ -760,7 +798,27 @@ class SeedPicker:
         def weight(key: str) -> float:
             return FAVORED_WEIGHT if key in f._favored else 1.0
 
-        selected = scheduler.select_seed(keys, cost, weight)
+        def flow(key: str):
+            meta = f.seed_meta.get(key_to_seed[key])
+            return meta.get("parent_key") if meta else None
+
+        return {"cost": cost, "weight": weight, "flow": flow}
+
+    def _pick_os_seed(self, name: str) -> bytes | None:
+        """Run the OS / network seed arm *name*; None when disabled or empty.
+
+        Each arm takes the cached key list plus the signals it declares in
+        ``_OS_SEED_SIGNALS`` (e.g. EEVDF: cost and weight).
+        """
+        f = self.f
+        scheduler = getattr(f, _OS_SEED_ARMS[name], None)
+        if scheduler is None or not f.corpus:
+            return None
+
+        key_to_seed, keys = self._corpus_keys()
+        wanted = _OS_SEED_SIGNALS.get(name, ())
+        signals = self._seed_signals(key_to_seed) if wanted else {}
+        selected = scheduler.select_seed(keys, *(signals[s] for s in wanted))
         return key_to_seed.get(selected)
 
     def _pick_aflgo_seed(self) -> bytes | None:
@@ -915,6 +973,7 @@ class SeedPicker:
             self._pick_entropy_loo_seed,
             self._pick_residual_seed,
             self._pick_strata_seed,
+            *(functools.partial(self._pick_os_seed, name) for name in _OS_SEED_ARMS),
             self._pick_seed_drr_seed,
             self._pick_seed_round_robin_seed,
         ):

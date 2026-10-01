@@ -608,6 +608,14 @@ def cmd_fuzz(args):
         seed_canary_scheduler=getattr(args, "seed_canary_scheduler", False),
         seed_round_robin_scheduler=getattr(args, "seed_round_robin_scheduler", False),
         seed_drr_scheduler=getattr(args, "seed_drr_scheduler", False),
+        seed_mlfq_scheduler=getattr(args, "seed_mlfq_scheduler", False),
+        seed_stride_scheduler=getattr(args, "seed_stride_scheduler", False),
+        seed_eevdf_scheduler=getattr(args, "seed_eevdf_scheduler", False),
+        seed_bfq_scheduler=getattr(args, "seed_bfq_scheduler", False),
+        seed_sfq_scheduler=getattr(args, "seed_sfq_scheduler", False),
+        seed_codel_scheduler=getattr(args, "seed_codel_scheduler", False),
+        seed_aimd_scheduler=getattr(args, "seed_aimd_scheduler", False),
+        seed_p2c_scheduler=getattr(args, "seed_p2c_scheduler", False),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
         position_arena=getattr(args, "position_arena", False),
@@ -704,6 +712,8 @@ def cmd_fuzz(args):
         op_credit=getattr(args, "op_credit", False),
         op_tpe=getattr(args, "op_tpe", False),
         op_strata=getattr(args, "op_strata", False),
+        op_stride=getattr(args, "op_stride", False),
+        op_p2c=getattr(args, "op_p2c", False),
         strata=getattr(args, "strata", False),
         shaped_reward=getattr(args, "shaped_reward", False),
         shaped_reward_floor=getattr(args, "shaped_reward_floor", 0.0),
@@ -2030,6 +2040,14 @@ _HAIL_MARY_FLAGS = (
     "seed_canary_scheduler",
     "seed_round_robin_scheduler",
     "seed_drr_scheduler",
+    "seed_mlfq_scheduler",
+    "seed_stride_scheduler",
+    "seed_eevdf_scheduler",
+    "seed_bfq_scheduler",
+    "seed_sfq_scheduler",
+    "seed_codel_scheduler",
+    "seed_aimd_scheduler",
+    "seed_p2c_scheduler",
     "softmax",
     "topk",
     "consolidated",
@@ -2075,6 +2093,8 @@ _HAIL_MARY_FLAGS = (
     "op_credit",
     "op_tpe",
     "op_strata",
+    "op_stride",
+    "op_p2c",
     "strata",
     "pll",
     "confirm_novelty",
@@ -2637,6 +2657,62 @@ def main() -> int:
         "*time* (visits are weighted by 1/exec cost, favored seeds by 2x), so a slow seed "
         "cannot eat the wall clock. Identical to round robin when exec cost is flat. "
         "Needs no --elo to run.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-mlfq-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'mlfq': multi-level feedback queue: fresh seeds first, a seed demoted"
+        " after a run of fruitless visits, periodic boost back to the top. Elo arm; also the "
+        "no-elo pick when enabled (core/schedulers/seed_mlfq.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-stride-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'stride': stride scheduling: deterministic proportional share, "
+        "favored seeds 2x tickets. Elo arm; also the no-elo pick when enabled "
+        "(core/schedulers/seed_stride.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-eevdf-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'eevdf': EEVDF (Linux >= 6.6): equal share of target time per seed; a"
+        " seed ahead of the virtual clock waits. Elo arm; also the no-elo pick when enabled "
+        "(core/schedulers/seed_eevdf.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-bfq-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'bfq': budget fair queueing: a seed keeps the service for a budget of"
+        " picks, doubled when it finds coverage, halved when not. Elo arm; also the no-elo "
+        "pick when enabled (core/schedulers/seed_bfq.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-sfq-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'sfq': stochastic fair queueing: seeds hashed by lineage parent "
+        "(--lineage) into buckets served round robin, so one parent's children share one "
+        "slot. Elo arm; also the no-elo pick when enabled (core/schedulers/seed_sfq.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-codel-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'codel': CoDel: round robin that skips stale seeds (long fruitless "
+        "runs) on a sqrt control law; never removes them. Elo arm; also the no-elo pick when "
+        "enabled (core/schedulers/seed_codel.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-aimd-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'aimd': AIMD (TCP): per-seed window +1 on a find, halved after 8 "
+        "fruitless visits; stride share by window. Elo arm; also the no-elo pick when enabled"
+        " (core/schedulers/seed_aimd.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-p2c-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'p2c': power of two choices: two uniform draws, higher posterior mean"
+        " of finds wins. Elo arm; also the no-elo pick when enabled "
+        "(core/schedulers/seed_p2c.py).",
     )
     fuzz_parser.add_argument(
         "--lst-revisit",
@@ -3881,6 +3957,20 @@ def main() -> int:
         default=False,
         help="Stratified Thompson operator arm over (op, edge family) cells, partially pooled "
         "per operator (experimental, Elo-only -- see core/schedulers/op_strata.py).",
+    )
+    fuzz_parser.add_argument(
+        "--op-stride",
+        action="store_true",
+        default=False,
+        help="Stride operator arm: deterministic share by posterior mean of success "
+        "(experimental, Elo-only -- see core/schedulers/op_stride.py).",
+    )
+    fuzz_parser.add_argument(
+        "--op-p2c",
+        action="store_true",
+        default=False,
+        help="Power-of-two-choices operator arm: two uniform draws, higher posterior mean "
+        "wins (experimental, Elo-only -- see core/schedulers/op_p2c.py).",
     )
     fuzz_parser.add_argument(
         "--seed-residual",
