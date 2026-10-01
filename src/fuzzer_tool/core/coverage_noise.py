@@ -11,7 +11,10 @@ garbage:
     seed + b"\\x08" ─┘
 
 :class:`AdmissionMonitor` is the runtime sibling: a campaign that asks to
-admit most of its executions is being fed noise.
+admit most of its executions is being fed noise. :func:`fake_novelty_factor`
+is the per-seed one (Fuzzification BranchTrap, USENIX Sec '19 §4.1): returns
+routed through input-selected gadgets make most mutants of a trapped seed
+look new, and those deterministic ids pass the phantom rerun.
 
 Pure: no I/O, no shared memory. The caller runs the target.
 """
@@ -24,6 +27,12 @@ from enum import Enum
 # One-byte tail variants per probe. Eight values that all land on distinct
 # edge sets is a byte-value dispatch on trailing garbage or a hash.
 NOISE_PROBE_VARIANTS = 8
+
+
+# Mutants of a seed executed before its admission rate is judged.
+FAKE_NOVELTY_MIN_FUZZ = 256
+# Seed-selection weight multiplier for a seed whose mutants flood the corpus.
+FAKE_NOVELTY_PENALTY = 0.1
 
 
 class NoiseVerdict(Enum):
@@ -94,3 +103,17 @@ class AdmissionMonitor:
             return 0.0
 
         return (admissions - self._base[1]) / (execs - self._base[0])
+
+
+def fake_novelty_factor(fuzz_count: int, children_admitted: int) -> float:
+    """Seed weight multiplier: FAKE_NOVELTY_PENALTY if its mutants flood.
+
+    E.g. 256 mutants, 200 admitted -> 0.1; 2560 mutants, 25 admitted -> 1.0.
+    """
+    if fuzz_count < FAKE_NOVELTY_MIN_FUZZ:
+        return 1.0
+
+    if children_admitted / fuzz_count < AdmissionMonitor.FLOOD_RATE:
+        return 1.0
+
+    return FAKE_NOVELTY_PENALTY

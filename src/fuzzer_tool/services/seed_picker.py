@@ -23,6 +23,7 @@ import numpy as np
 from fuzzer_tool.core.cadence import bucket, due
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
+from fuzzer_tool.core.coverage_noise import fake_novelty_factor
 from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
@@ -1637,6 +1638,10 @@ class SeedPicker:
             return w
         return w * VALID_SEED_BONUS
 
+    def _weight_fake_novelty(self, meta: dict, w: float) -> float:
+        """Demote seeds whose mutants flood the corpus (BranchTrap fake paths)."""
+        return w * fake_novelty_factor(meta["fuzz_count"], meta.get("child_count", 0))
+
     def _weight_lineage_backtrack(
         self, seed_key: str, w: float, fuzz_count: int, f, key_to_seed: dict
     ) -> float:
@@ -1861,6 +1866,7 @@ class SeedPicker:
             w = self._weight_overlap_density(sk, w, f)
             w = self._weight_fractal_diversity(seed, w, f)
             w = self._weight_validity(meta, w, f)
+            w = self._weight_fake_novelty(meta, w)
             w *= lineage_div.get(sk, 1.0)
             w = self._weight_lineage_backtrack(sk, w, fuzz_count, f, bt_key_to_seed)
 
