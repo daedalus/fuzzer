@@ -303,8 +303,9 @@ class MarkovChain:
         after initial high values) signals the model has stopped learning.
 
         Returns:
-            True if plateau detected (JS divergence < 0.01 after at least
-            2 snapshots), False otherwise.
+            True if a previous snapshot exists, more than 2 snapshot
+            intervals of bytes were seen, and JS <= its sampling-noise null
+            (see _js_null_threshold); False otherwise.
         """
         self._trains_since_snapshot += 1
         if self._trains_since_snapshot < self._snapshot_interval:

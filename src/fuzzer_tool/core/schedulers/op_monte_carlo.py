@@ -465,25 +465,20 @@ class MonteCarloScheduler:
     def record_brier(self, name: str, success: bool, weight: float = 1.0) -> None:
         """Record a prediction-outcome pair for Brier score diagnostics.
 
-        The predicted probability is the Beta distribution mean for this arm
-        at the time of selection. The outcome is *binary*: the event being
-        predicted is "did this operator succeed", and the Beta mean is a
-        probability for exactly that event.
+        The prediction is the Beta mean for this arm at the time of
+        selection. record() updates it as a fractional Bernoulli, so it
+        estimates E[reward]; the outcome is therefore the reward itself:
+        `weight` on success, 0 on failure, clamped to [0, 1].
 
-        `weight` is accepted for call-site symmetry with record() but is
-        deliberately not used as the outcome. It carries the surprisal- and
-        cost-adjusted reward, which was unbounded above until fuzz_one began
-        clamping it to [0, 1]; feeding it in here produced outcomes far
-        outside [0, 1] and a "Brier score" in the tens (35.57 on the
-        ffmpeg_read_nosan run) for a statistic bounded by 1. Even bounded it
-        is a reward, not the outcome of the event the Beta mean predicts.
+        Clamping keeps the score bounded by 1: an unclamped weight once
+        produced a "Brier score" of 35.57 on the ffmpeg_read_nosan run.
 
         Brier score = mean((predicted - actual)²) — lower is better.
         """
         a = self.arm_alpha.get(name, 1.0)
         b = self.arm_beta.get(name, 1.0)
-        predicted = a / (a + b)  # Beta mean = expected success probability
-        outcome = 1.0 if success else 0.0
+        predicted = a / (a + b)  # Beta mean = expected reward
+        outcome = min(1.0, max(0.0, weight)) if success else 0.0
         self._brier_predictions.append((predicted, outcome))
 
     def brier_score(self) -> float:

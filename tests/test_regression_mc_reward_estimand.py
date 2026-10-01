@@ -129,3 +129,34 @@ def test_regression_decay_forgets_pooled_counts():
     assert (a, b) == pytest.approx((1.0 + succ, 1.0 + fail))
     # Undecayed pools sat at 101 / 202 = 0.5; recent evidence is all misses.
     assert a / (a + b) < 0.3
+
+
+class TestBrierScoresTheEstimand:
+    """The Beta mean now predicts the fractional reward; Brier must score it
+    against that reward, not against a binary hit."""
+
+    def test_regression_outcome_is_fractional_reward(self):
+        mc = MonteCarloScheduler(arm_decay=NO_DECAY)
+        mc.init_arm("A")
+        mc.record_brier("A", success=True, weight=0.3)
+        assert mc._brier_predictions[-1] == pytest.approx((0.5, 0.3))
+
+    def test_calibrated_arm_scores_its_reward_variance(self):
+        """Falsification: an arm at its exact E[reward] scores the reward's
+        variance. Binary scoring of w=0.4 hits at p=0.5 inflated it."""
+        mc = MonteCarloScheduler(arm_decay=NO_DECAY)
+        mc.init_arm("A")
+        w, n = 0.4, 4000
+        for i in range(n):
+            mc.record("A", success=i % 2 == 0, weight=w)
+        for i in range(500):
+            mc.record_brier("A", success=i % 2 == 0, weight=w)
+        mean = 0.5 * w
+        variance = 0.5 * (w - mean) ** 2 + 0.5 * mean**2
+        assert mc.brier_score() == pytest.approx(variance, abs=1e-3)
+
+    def test_overweight_outcome_is_clamped(self):
+        """Adversarial: weight > 1 must not push the score past its bound."""
+        mc = MonteCarloScheduler(arm_decay=NO_DECAY)
+        mc.record_brier("A", success=True, weight=8.7)
+        assert mc._brier_predictions[-1][1] == 1.0
