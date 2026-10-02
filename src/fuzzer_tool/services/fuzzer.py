@@ -711,7 +711,7 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("levy")
     if getattr(f, "_pos_boundary", None) is not None:
         names.append("boundary")
-    for arm in ("effector", "token", "chunk"):
+    for arm in ("effector", "finch", "token", "chunk"):
         sched = getattr(f, f"_pos_{arm}", None)
         if sched is not None and sched.active():
             names.append(arm)
@@ -1556,6 +1556,7 @@ class Fuzzer:
         pos_chunk=False,
         pos_changed=False,
         pos_rare_mask=False,
+        pos_finch=False,
         # OS / network scheduler ports (core/schedulers/seed_<name>.py,
         # op_<name>.py). Seed arms: Elo arms and no-elo fallbacks, like drr.
         # Op arms: Elo-only. Appended: positional signature.
@@ -2950,6 +2951,7 @@ class Fuzzer:
             "chunk": pos_chunk,
             "changed": pos_changed,
             "rare_mask": pos_rare_mask,
+            "finch": pos_finch,
         }
         self._build_new_pos_arms(
             frozenset(n for n, on in flags.items() if on or position_arena),
@@ -2983,6 +2985,7 @@ class Fuzzer:
                 changed=self._pos_changed,
                 rare_mask=self._pos_rare_mask,
                 consolidated=self._pos_consolidated,
+                finch=self._pos_finch,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
                 arms=pos_arena_arms,
@@ -6020,7 +6023,7 @@ class Fuzzer:
         }
 
     def _build_new_pos_arms(self, enabled: frozenset[str], asked: frozenset[str]) -> None:
-        """Construct the effector/token/chunk/changed/rare_mask position arms.
+        """Construct the effector/finch/token/chunk/changed/rare_mask position arms.
 
         *enabled*: arms to build (their flag or ``--position-arena``); *asked*:
         arms whose own flag is on (only those warn about a missing
@@ -6031,13 +6034,14 @@ class Fuzzer:
         from fuzzer_tool.core.schedulers.pos_changed import PositionChangedScheduler
         from fuzzer_tool.core.schedulers.pos_chunk import PositionChunkScheduler
         from fuzzer_tool.core.schedulers.pos_effector import PositionEffectorScheduler
+        from fuzzer_tool.core.schedulers.pos_finch import PositionFinchScheduler
         from fuzzer_tool.core.schedulers.pos_rare_mask import PositionRareMaskScheduler
         from fuzzer_tool.core.schedulers.pos_token import PositionTokenScheduler
 
         ops = self._operators
         tracker = self._edge_tracker
         self._pos_effector = self._pos_token = self._pos_chunk = None
-        self._pos_changed = self._pos_rare_mask = None
+        self._pos_changed = self._pos_rare_mask = self._pos_finch = None
 
         # Byteflip-LIVE bytes from drained deterministic stages.
         if "effector" in enabled:
@@ -6047,6 +6051,18 @@ class Fuzzer:
             log.info("Position effector scheduling enabled")
             if "effector" in asked and not getattr(self, "_skip_detector", None):
                 log.warning("--pos-effector needs --deterministic: the arm stays out of the pool")
+
+        # Byteflip magnitudes from drained deterministic stages, plus gain bonus.
+        if "finch" in enabled:
+            self._pos_finch = PositionFinchScheduler(
+                self._rng,
+                heat_of=ops.effector_heat,
+                ready=ops.has_effector_maps,
+                key_of=self._seed_key,
+            )
+            log.info("Position finch scheduling enabled")
+            if "finch" in asked and not getattr(self, "_skip_detector", None):
+                log.warning("--pos-finch needs --deterministic: the arm stays out of the pool")
 
         # Dictionary-token occurrences; the list is re-read (it is replaced on prune).
         if "token" in enabled:
@@ -6136,7 +6152,14 @@ class Fuzzer:
             # exactly this case -- so it would be a second real scan on every
             # byteflip. Not worth it to gate one pass; leave the map unfilled.
             return
-        engine.note_deterministic_result(current != baseline, current)
+        changed = current != baseline
+        # Magnitude for the Finch arm: the per-exec distinct-edge count. The
+        # header edge_count is cumulative across executions, so it cannot be
+        # compared against a baseline. Optional: a coverage source without
+        # the method leaves every live byte at magnitude 1.
+        count = getattr(self.shm_cov, "active_edge_count", None)
+        magnitude = engine.det_magnitude(seed_key, changed, count() if count else 0)
+        engine.note_deterministic_result(changed, current, magnitude)
 
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.

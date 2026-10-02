@@ -56,7 +56,14 @@ from fuzzer_tool.services.position_arena import (
 )
 
 SEED = bytes(1000)
-NEW_ARM_FLAGS = ["pos_effector", "pos_token", "pos_chunk", "pos_changed", "pos_rare_mask"]
+NEW_ARM_FLAGS = [
+    "pos_effector",
+    "pos_token",
+    "pos_chunk",
+    "pos_changed",
+    "pos_rare_mask",
+    "pos_finch",
+]
 NO_SPARK = 0.99  # random() draw above SPARK_RATE
 
 
@@ -584,6 +591,7 @@ def _arena(
     changed=None,
     rare_mask=None,
     consolidated=None,
+    finch=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
@@ -606,7 +614,24 @@ def _arena(
         changed=changed,
         rare_mask=rare_mask,
         consolidated=consolidated,
+        finch=finch,
     )
+
+
+def _finch(ready=True, heat=None):
+    from array import array
+
+    from fuzzer_tool.core.schedulers.pos_finch import PositionFinchScheduler
+
+    heat = heat or (array("I", [40]), array("H", [3]))
+    box = {"ready": ready}
+    arm = PositionFinchScheduler(
+        RandPool(seed=1),
+        heat_of=lambda d: heat,
+        ready=lambda: box["ready"],
+        key_of=lambda d: bytes(d[:4]).hex(),
+    )
+    return arm, box
 
 
 def _effector(ready=True, live=(40,)):
@@ -953,6 +978,7 @@ class TestPool:
             changed=_changed(),
             rare_mask=_rare_mask(),
             consolidated=PositionConsolidatedScheduler(RandPool(seed=1)),
+            finch=_finch()[0],
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -1363,7 +1389,7 @@ class TestFuzzerWiring:
         names = list(params)
         start = names.index("pos_effector")
         assert start > names.index("seed_drr_scheduler")  # positional callers unshifted
-        assert names[start : start + 5] == NEW_ARM_FLAGS
+        assert names[start : start + len(NEW_ARM_FLAGS)] == NEW_ARM_FLAGS
         assert all(params[n].default is False for n in NEW_ARM_FLAGS)
 
     def test_cli_passes_flags_and_lists_them_for_hail_mary(self):
@@ -1843,3 +1869,93 @@ class TestBannerHonoursSubset:
         assert _active_position_schedulers(f) == ["kl-ducb"]
         f._position_arena = None
         assert _active_position_schedulers(f) == ["burn-front", "kl-ducb", "fractal"]
+
+
+class TestFinchArm:
+    """The finch arm is gated on its own map yet learns from every settled round."""
+
+    def test_gated_on_its_own_active(self):
+        arm, box = _finch(ready=False)
+        _, arena = _arena(finch=arm)
+        assert "finch" not in arena.pool()
+        box["ready"] = True
+        assert "finch" in arena.pool()
+
+    def test_settle_feeds_record_even_when_another_arm_served(self):
+        from fuzzer_tool.core.schedulers.pos_base import Outcome
+
+        arm, _ = _finch()
+        _, arena = _arena(finch=arm)
+        data = bytes(range(64))
+        arena.settle(data, [7], Outcome.GAIN, 1.0, 1.0)
+        assert arm.bonus_size(data) == 1
+
+    def test_left_out_of_the_arm_subset_it_is_dropped(self):
+        arm, _ = _finch()
+        f = _Fuzzer(sensitivity=True, te=True)
+        arena = PositionArena(f, region_fn=lambda d, n: 1, finch=arm, arms=["uniform", "fractal"])
+        assert "finch" not in arena.pool()
+
+
+class TestDetMagnitude:
+    """Baseline edge count is learned from inert flips; live flips are |delta|."""
+
+    @staticmethod
+    def _engine(tmp_path):
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        corpus = tmp_path / "corpus"
+        (corpus / "seeds").mkdir(parents=True)
+        (tmp_path / "crashes").mkdir()
+        (corpus / "seeds" / "s").write_bytes(b"A" * 8)
+        f = Fuzzer(
+            "/bin/true",
+            corpus_dir=str(corpus),
+            crashes_dir=str(tmp_path / "crashes"),
+            max_len=64,
+            deterministic=True,
+        )
+        eng = f._operators
+        from fuzzer_tool.services.operators import DeterministicEffectorMap
+
+        eng._det_eff["k"] = DeterministicEffectorMap(8)
+        return eng
+
+    def test_unknown_before_any_inert_flip(self, tmp_path):
+        eng = self._engine(tmp_path)
+        assert eng.det_magnitude("k", True, 50) is None
+
+    def test_inert_sets_baseline_then_live_is_the_delta(self, tmp_path):
+        eng = self._engine(tmp_path)
+        assert eng.det_magnitude("k", False, 40) is None
+        assert eng.det_magnitude("k", True, 47) == 7
+        assert eng.det_magnitude("k", True, 38) == 2  # fewer edges also counts
+
+    def test_same_count_but_moved_path_is_at_least_one(self, tmp_path):
+        eng = self._engine(tmp_path)
+        eng.det_magnitude("k", False, 40)
+        assert eng.det_magnitude("k", True, 40) == 1
+
+    def test_unmeasurable_returns_none(self, tmp_path):
+        eng = self._engine(tmp_path)
+        assert eng.det_magnitude("k", True, 0) is None
+        assert eng.det_magnitude("missing", True, 5) is None
+
+
+def test_active_edge_count_is_per_execution_not_cumulative():
+    """The Finch magnitude needs a per-exec count; the header edge_count only grows."""
+    from fuzzer_tool.adapters.shm import ShmCoverage
+
+    shm = ShmCoverage()
+    try:
+        for e in (11, 22, 33):
+            shm.record_edge(e)
+        assert shm.active_edge_count() == 3
+        shm.reset_edge_map()  # new execution: stale generation is filtered
+        assert shm.active_edge_count() == 0
+        for e in (44, 55):
+            shm.record_edge(e)
+        assert shm.active_edge_count() == 2
+        assert shm.read_edge_count() == 5  # header keeps growing
+    finally:
+        shm.cleanup()

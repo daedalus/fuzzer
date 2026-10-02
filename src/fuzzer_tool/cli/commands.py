@@ -643,6 +643,7 @@ def cmd_fuzz(args):
         pos_chunk=getattr(args, "pos_chunk", False),
         pos_changed=getattr(args, "pos_changed", False),
         pos_rare_mask=getattr(args, "pos_rare_mask", False),
+        pos_finch=getattr(args, "pos_finch", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
@@ -2161,6 +2162,7 @@ _HAIL_MARY_FLAGS = (
     "pos_chunk",
     "pos_changed",
     "pos_rare_mask",
+    "pos_finch",
     "pos_consolidated",
     "position_arena",
     "target_arena",
@@ -2856,6 +2858,13 @@ def main() -> int:
         "Passive. Implied by --position-arena.",
     )
     fuzz_parser.add_argument(
+        "--pos-finch",
+        action="store_true",
+        help="Enable the position-arena finch scheduler: like --pos-effector but weights "
+        "each byte by how many edges its byteflip moved, plus a per-seed bonus learned "
+        "from gain rounds (needs --deterministic). Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
         "--pos-token",
         action="store_true",
         help="Enable the position-arena token scheduler: proposes bytes inside "
@@ -2899,7 +2908,7 @@ def main() -> int:
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
         "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage, --pos-context, "
-        "--pos-levy, --pos-boundary, --pos-effector, --pos-token, --pos-chunk, "
+        "--pos-levy, --pos-boundary, --pos-effector, --pos-finch, --pos-token, --pos-chunk, "
         "--pos-changed, --pos-rare-mask and --pos-consolidated. Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(

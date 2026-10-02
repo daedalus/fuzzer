@@ -60,6 +60,11 @@ Arms::
                  byteflip pass saw move the trace. Tracker-style: joins
                  once a drained effector map exists (opt-in,
                  --pos-effector; see core/schedulers/pos_effector.py)
+    finch        PositionFinchScheduler, bytes weighted by how many edges the
+                 byteflip pass saw them move, plus a per-seed bonus learned
+                 from gain rounds. Tracker-style like effector, but also fed
+                 every settled round (opt-in, --pos-finch; see
+                 core/schedulers/pos_finch.py)
     token        PositionTokenScheduler, occurrences of dictionary tokens
                  in the seed. Tracker-style: joins while the dictionary is
                  non-empty (opt-in, --pos-token; see
@@ -136,6 +141,7 @@ POSITION_STRATEGY_NAMES = (
     "levy",
     "boundary",
     "effector",
+    "finch",
     "token",
     "chunk",
     "changed",
@@ -191,6 +197,7 @@ class PositionArena:
         changed: PositionScheduler | None = None,
         rare_mask: PositionScheduler | None = None,
         consolidated: PositionScheduler | None = None,
+        finch: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         # None = every arm whose feature is on; otherwise only these (+ uniform).
@@ -213,8 +220,10 @@ class PositionArena:
         self._boundary = boundary if self.allows("boundary") else None
         # Passive arms gated on their own active(): wired in _add_trackers.
         self._gated: tuple[PositionScheduler, ...] = tuple(
-            a for a in (effector, token, chunk) if a is not None and self.allows(a.name)
+            a for a in (effector, finch, token, chunk) if a is not None and self.allows(a.name)
         )
+        # Gated arms that learn from outcomes: fed every settled round too.
+        self._finch = finch if self.allows("finch") else None
         self._changed = changed if self.allows("changed") else None
         self._rare_mask = rare_mask if self.allows("rare_mask") else None
         self._consolidated = consolidated if self.allows("consolidated") else None
@@ -298,7 +307,7 @@ class PositionArena:
         for name, fn, gate in specs:
             if self.allows(name):
                 self._arms[name] = (CallablePosition(name, fn), gate)
-        # effector / token / chunk: passive, each knows when it has data.
+        # effector / finch / token / chunk: each knows when it has data.
         for arm in self._gated:
             self._arms[arm.name] = (arm, arm.active)
 
@@ -356,6 +365,8 @@ class PositionArena:
         """End of round: feed the off-policy arms, then play the Elo matches."""
         for extra in self._extras:
             extra.record(data, offsets, outcome, weight)
+        if self._finch is not None:
+            self._finch.record(data, offsets, outcome, weight)
 
         served = list(dict.fromkeys(self._used))
         pool = self._seen_pool

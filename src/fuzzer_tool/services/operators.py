@@ -338,10 +338,16 @@ class DeterministicEffectorMap:
     rather than keeping it as evidence.
     """
 
-    __slots__ = ("eff", "hashes", "pending")
+    __slots__ = ("eff", "hashes", "pending", "mags", "base_count")
 
     def __init__(self, length: int):
         self.eff = bytearray(length)
+        # Edges the flip moved per byte (0 = inert/unmeasured), saturating at
+        # the uint16 ceiling: the quantitative half of the map (Finch arm).
+        self.mags = array("H", bytes(2 * length))
+        # Distinct-edge count of this seed's own trace, learned from the first
+        # inert flip (same path hash as the seed => same trace). 0 = unknown.
+        self.base_count = 0
         # Path hash per flipped byte, NO_HASH if unchanged: auto-dict input.
         self.hashes = array("Q", bytes(8 * length))
         self.pending = -1
@@ -1326,6 +1332,9 @@ class OperatorEngine:
         # LIVE offsets of drained effector maps, kept for the position arena
         # (see effector_live). ~2k offsets per seed at MAX_DET_MUTATIONS.
         self._det_live: LRUCache = LRUCache(MAX_EFF_SEEDS)
+        # Same seeds, with the per-byte flip magnitudes: (offsets, magnitudes)
+        # of the bytes that moved the trace, for the position arena's Finch arm.
+        self._det_heat: LRUCache = LRUCache(MAX_EFF_SEEDS)
         # Cache backing the `ctx` property below: refreshed once per
         # mutate() round rather than rebuilt on every ctx access. See
         # `ctx`'s docstring for why (measured ~19% round-latency cost from
@@ -5645,7 +5654,7 @@ class OperatorEngine:
             del self._det_queues[seed_key]
             done = self._det_eff.pop(seed_key, None)
             if done is not None:
-                self._keep_effector(seed_key, done.eff)
+                self._keep_effector(seed_key, done.eff, done.mags)
                 self._learn_auto_tokens(data, done.hashes)
             return None
         effector = self._det_eff.get(seed_key)
@@ -5654,11 +5663,22 @@ class OperatorEngine:
             effector.pending = -1
         return mutant
 
-    def _keep_effector(self, seed_key: str, eff: bytearray) -> None:
-        """Store a drained map's LIVE offsets (sorted) under *seed_key*."""
+    def _keep_effector(self, seed_key: str, eff: bytearray, mags: array | None = None) -> None:
+        """Store a drained map's LIVE offsets (sorted) under *seed_key*.
+
+        With *mags* also stores the byteflip magnitudes of the bytes that moved
+        the trace, as parallel (offsets, magnitudes) arrays.
+        """
         # numpy beats a bytes.find loop 3x (2 KiB) to 28x (64 KiB, half live).
         idx = np.flatnonzero(np.frombuffer(eff, np.uint8) == _DET_EFF_LIVE)
         self._det_live[seed_key] = array("I", idx.astype(np.uint32).tobytes())
+        if mags is not None:
+            m = np.frombuffer(mags, np.uint16)
+            hot = np.flatnonzero(m)
+            self._det_heat[seed_key] = (
+                array("I", hot.astype(np.uint32).tobytes()),
+                array("H", m[hot].tobytes()),
+            )
 
     def _learn_auto_tokens(self, data: bytes, hashes: array) -> None:
         """Add the drained map's atomic tokens to the dictionary, capped."""
@@ -5679,6 +5699,17 @@ class OperatorEngine:
             return None
         return self._det_live.get(self.f._seed_key(data))
 
+    def effector_heat(self, data: bytes) -> tuple[array, array] | None:
+        """(offsets, magnitudes) of *data*'s bytes that moved the trace, or None.
+
+        Offsets are sorted; magnitudes are the edges the byteflip moved,
+        saturating at 65535. Empty arrays (not None) mean the pass finished and
+        no byte mattered. None means the map has not drained (or was evicted).
+        """
+        if not self._det_heat:
+            return None
+        return self._det_heat.get(self.f._seed_key(data))
+
     def has_effector_maps(self) -> bool:
         """Whether any drained effector map is kept (the arm's arena gate)."""
         return bool(self._det_live)
@@ -5693,7 +5724,27 @@ class OperatorEngine:
         pending = self._det_pending
         return pending[0] if pending is not None else None
 
-    def note_deterministic_result(self, changed: bool, path_hash: int = NO_HASH) -> None:
+    def det_magnitude(self, seed_key: str, changed: bool, edge_count: int) -> int | None:
+        """Edges the pending byteflip moved, or None when not measurable.
+
+        An inert flip leaves the trace unchanged, so its distinct-edge count is
+        the seed's own: it becomes the baseline. A live flip is measured as
+        ``|count - baseline|`` (at least 1); before any inert flip has been seen
+        the baseline is unknown and the byte counts as 1.
+        """
+        effector = self._det_eff.get(seed_key)
+        if effector is None or edge_count <= 0:
+            return None
+        if not changed:
+            effector.base_count = edge_count
+            return None
+        if effector.base_count <= 0:
+            return None
+        return max(1, abs(edge_count - effector.base_count))
+
+    def note_deterministic_result(
+        self, changed: bool, path_hash: int = NO_HASH, magnitude: int | None = None
+    ) -> None:
         """Record whether the pending byteflip mutant changed the trace.
 
         *changed* is AFL's criterion -- the execution trace differs from the
@@ -5708,6 +5759,8 @@ class OperatorEngine:
         branch rather than guessing.
 
         *path_hash* is the changed trace's hash, kept for the auto-dictionary.
+        *magnitude* is how many edges the flip moved (see ``det_magnitude``);
+        a changed byte without one counts 1, and is saturated at uint16.
         """
         pending = self._det_pending
         self._det_pending = None
@@ -5720,6 +5773,8 @@ class OperatorEngine:
         effector.eff[idx] = _DET_EFF_LIVE if changed else _DET_EFF_INERT
         if changed:
             effector.hashes[idx] = path_hash
+            mag = 1 if magnitude is None else int(magnitude)
+            effector.mags[idx] = min(max(mag, 1), 0xFFFF)
 
     def maybe_deterministic_mutation(self, data: bytes) -> bytes | None:
         """Return the next deterministic-stage mutant for *data*, or None.

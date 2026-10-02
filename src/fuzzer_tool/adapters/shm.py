@@ -711,6 +711,14 @@ class ShmCoverage:
         """
         return ctypes.c_uint64.from_address(self._ptr + 16).value
 
+    def active_edge_count(self) -> int:
+        """Distinct edges live in the current execution's table.
+
+        Unlike ``read_edge_count`` (header, cumulative across executions) this
+        is per-execution: stale generations are filtered out.
+        """
+        return int(self._active_edge_ids().size)
+
     def read_metadata(self) -> tuple[int, int, int]:
         """Read all metadata from the front header.
 
