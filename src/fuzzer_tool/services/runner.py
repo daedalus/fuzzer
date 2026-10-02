@@ -46,6 +46,17 @@ log = logging.getLogger(__name__)
 # full; see _run_ptrace_coverage.
 _INITIAL_STOP_TIMEOUT = 1.0
 
+# Hang confirmation (AFL's hang_tmout idea): a timed-out input is re-run once
+# at this multiple of the deadline. A masked crash whose wrapper waits on a
+# slow child only reports after the deadline (Chalmers "Escaping the Fuzz"
+# §5.3.1); without the re-run it is filed as a hang in every mode.
+HANG_CONFIRM_FACTOR = 4.0
+# Budget: HANG_CONFIRM_FREE re-runs, then one per HANG_CONFIRM_EVERY
+# executions, so an always-hanging target costs at most
+# FACTOR * timeout / EVERY per execution.
+HANG_CONFIRM_FREE = 16
+HANG_CONFIRM_EVERY = 1000
+
 
 def _get_fault_addr(pid: int, libc) -> int | None:
     """Return the faulting address (si_addr) for the current ptrace stop.
@@ -166,6 +177,39 @@ class TargetRunner:
 
     def __init__(self, fuzzer):
         self.f = fuzzer
+        self._hang_reruns = 0
+
+    def confirm_hang(self, data: bytes) -> tuple[int, str] | None:
+        """Re-run timed-out *data* once at HANG_CONFIRM_FACTOR x the deadline.
+
+        Returns the re-run's (rc, stderr), or None when skipped: budget spent,
+        or a backend whose deadline is fixed at start-up (in-process,
+        persistent, network). The deadline is restored even if the run raises.
+        """
+        f = self.f
+        if f._inprocess_runner or f._persistent_runner or f._network_runner:
+            return None
+
+        allowed = HANG_CONFIRM_FREE + f.exec_count // HANG_CONFIRM_EVERY
+        if self._hang_reruns >= allowed:
+            return None
+
+        # f.timeout drives spawn and ptrace; the loader holds its own copy.
+        base = f.timeout
+        fs = f._forkserver if f._forkserver and f._forkserver._ready else None
+        fs_base = fs.timeout if fs else None
+        f.timeout = base * HANG_CONFIRM_FACTOR
+        if fs and not fs.set_timeout(f.timeout):
+            f.timeout = base
+            return None
+
+        self._hang_reruns += 1
+        try:
+            return self.run_target(data)
+        finally:
+            f.timeout = base
+            if fs:
+                fs.set_timeout(fs_base)
 
     def run_target(self, data: bytes) -> tuple[int, str]:
         f = self.f
@@ -779,13 +823,20 @@ class TargetRunner:
     def is_crash(self, returncode: int, stderr: str) -> bool:
         f = self.f
         f.last_report = None
-        if returncode in (-2, -1):
+        if returncode == -2:
             return False
 
+        # Parsed before the timeout check: a report that reached stderr
+        # before the deadline is a crash, not a hang (a masked crash whose
+        # wrapper outlived the deadline -- Chalmers "Escaping the Fuzz"
+        # §5.3.1 saw these as AFL hangs).
         report = SanitizerReport.parse(stderr)
         if report and report.is_valid():
             f.last_report = report
             return True
+
+        if returncode == -1:
+            return False
 
         if returncode in SIGNAL_CRASH_CODES or returncode in f.extra_crash_codes:
             return True

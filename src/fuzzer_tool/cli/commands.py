@@ -1274,12 +1274,14 @@ def _verify_verdict(name, returncode, stderr) -> bool:
     if report and report.is_valid():
         print(f"  [+] {name}: {report.sanitizer}:{report.error_type}")
         return True
+    # Before the signal check: -1 is the timeout sentinel, not signal 1.
+    # stderr may hold partial output, so rc alone decides.
+    if returncode == -1:
+        print(f"  [-] {name}: timeout (not a crash)")
+        return False
     if returncode in SIGNAL_CRASH_CODES or returncode < 0:
         print(f"  [+] {name}: signal {abs(returncode)}")
         return True
-    if returncode == -1 and stderr == "timeout":
-        print(f"  [-] {name}: timeout (not a crash)")
-        return False
     print(f"  [-] {name}: no crash (rc={returncode})")
     return False
 
@@ -1377,11 +1379,11 @@ def cmd_replay(args):
     env = os.environ.copy()
     returncode, stderr = _replay_exec(args, data, env)
 
-    if returncode == -1 and stderr == "timeout":
+    report = SanitizerReport.parse(stderr)
+    if returncode == -1 and not (report and report.is_valid()):
         print(f"[*] Target timed out after {args.timeout}s")
         return 1
 
-    report = SanitizerReport.parse(stderr)
     if report and report.is_valid():
         print(f"[+] Crash reproduced: {report.sanitizer}:{report.error_type}")
         print(f"    Fault address: {report.fault_addr}")

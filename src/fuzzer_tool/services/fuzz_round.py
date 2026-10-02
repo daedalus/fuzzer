@@ -243,6 +243,14 @@ class FuzzRound:
         t_elapsed = clock.monotonic() - t_start
         self._t_elapsed = t_elapsed
         f.exec_count += 1
+
+        # A timeout may be a crash that reports late (fork-wrapped main);
+        # re-run once at a longer deadline. Outside t_elapsed: the re-run
+        # is the fuzzer's cost, not the target's speed.
+        if self._returncode == -1:
+            confirmed = f._confirm_hang(self._mutated)
+            if confirmed is not None:
+                self._returncode, self._stderr = confirmed
         # Effector map: read the trace hash while it is still this
         # execution's. One ctypes word read, and only when the mutant just
         # executed came from the byteflip 8/8 pass.
@@ -629,10 +637,12 @@ class FuzzRound:
 
     def _classify(self) -> None:
         f = self._f
+        self._is_crash = f._is_crash(self._returncode, self._stderr)
         # -1 is the cross-backend timeout sentinel. stderr is not part of the
         # contract: forkserver reports loader hangs as (-1, "") after its
         # restart retry, so keying on the stderr text missed every one.
-        self._is_timeout = self._returncode == -1
+        # A timeout carrying a sanitizer report is the crash, not a hang.
+        self._is_timeout = self._returncode == -1 and not self._is_crash
         if self._is_timeout:
             f.timeout_count += 1
             # Mark the parent seed as timeout-causing for power schedule
@@ -641,7 +651,6 @@ class FuzzRound:
                 parent_meta["timed_out"] = True
             f._corpus_manager.save_timeout(self._mutated)
 
-        self._is_crash = f._is_crash(self._returncode, self._stderr)
         self._is_interesting = f._is_interesting(self._returncode, self._stderr)
         if not self._is_timeout and not self._is_crash:
             thresh = f._exec_time_anomaly.threshold()

@@ -375,7 +375,10 @@ every crash from AFL and was the only technique that worked against it
 without any signal handler.
 
 *Today:* `stderr_crash_marker` ignores `exit 0`; the ASAN rule recovers it
-only if the child's report reached the parent's stderr.
+only if the child's report reached the parent's stderr. Slow children are
+handled: timeouts kill the process group, a report on a timeout is a crash,
+and timed-out inputs are re-run at 4x the deadline
+(`tests/test_regression_masked_crash_timeout.py`).
 
 *Design:* in the same evade `.so`, interpose `waitpid`, `wait4`, `waitid`
 (and `wait`). When the returned status has `WIFSIGNALED` with a crash

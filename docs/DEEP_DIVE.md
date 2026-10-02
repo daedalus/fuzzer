@@ -1593,6 +1593,21 @@ USENIX Security '19) breaks four fuzzer assumptions; the tool answers each:
 fuzzer-tool fuzz ./hardened --antifuzz-evade -d ~/corpus
 ```
 
+**Fork-wrapped `main`** (Göransson & Edholm, "Escaping the Fuzz", Chalmers
+2016, Listing 5: run `main` in a child, `exit 0` if it was signalled). A slow
+child's crash reports after the deadline and read as a hang. Answers, always on:
+
+- Every target run leads its own process group (`fuzz_loader.c` `kill_tree`,
+  shim forkserver child, spawn paths); a timeout kills the whole tree, so the
+  deadline holds and no grandchild leaks.
+- A sanitizer report that arrives with a timeout is a crash (`is_crash`
+  parses stderr before the `-1` check); spawn paths keep partial stderr on
+  timeout (`"timeout"` only when silent).
+- Hang confirmation: a timed-out input is re-run once at
+  `HANG_CONFIRM_FACTOR` (4x) the deadline (`TargetRunner.confirm_hang`).
+  Budget: `HANG_CONFIRM_FREE` (16) re-runs, then one per `HANG_CONFIRM_EVERY`
+  (1000) execs. Skipped for in-process, persistent and network backends.
+
 The coverage-noise probe and the hardened oracle are always on and need no
 flag. `targets/antifuzz_demo.c` is a benchmark target that implements all four
 techniques (each gated by `AF_COVERAGE`/`AF_CRASH`/`AF_SPEED`/`AF_PTRACE`) around

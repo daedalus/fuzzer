@@ -4125,8 +4125,11 @@ static void __afl_start_forkserver(void) {
         if (child < 0) _exit(1);
 
         if (child == 0) {
-            /* Child: restore recording, drop the control pipe, and fall
-             * through into main(). */
+            /* Child: lead its own process group, so the loader's timeout
+             * kill reaches whatever the target forks (fuzz_loader.c
+             * kill_tree); restore recording, drop the control pipe, and
+             * fall through into main(). */
+            setpgid(0, 0);
             __afl_area = saved_area;
             sigaction(SIGCHLD, &chld_old, NULL);
             close(AFL_FORKSRV_FD);
@@ -4134,6 +4137,9 @@ static void __afl_start_forkserver(void) {
             return;
         }
 
+        /* Both sides, before the pid is published: the loader may kill
+         * the group as soon as it reads it. */
+        setpgid(child, child);
         if (write(AFL_FORKSRV_FD + 1, &child, 4) != 4) _exit(0);
 
         int status = 0;
