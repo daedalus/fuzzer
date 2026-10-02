@@ -464,6 +464,106 @@ class Crc32Encoder(Encoder):
         return f"crc32_{'r' if self.reverse else 'p'}"
 
 
+# FNV-1a over a 4-byte field is a bijection on {0..2^32-1}, but mixes XOR
+# with multiplication so there is no GF(2) matrix inverse the way CRC-32 has.
+# Meet-in-the-middle recovers the 4-byte preimage in ~2^16 steps per side;
+# results are cached per hash so the per-input cost stays bounded.
+_FNV_FIELD_BYTES = 4
+_FNV_BITS = 8 * _FNV_FIELD_BYTES
+_FNV_OFFSET = 2166136261
+_FNV_PRIME = 16777619
+# Same small-int filter as CRC: skip compares whose operands fit in 24 bits.
+_FNV_MIN_OPERAND = 1 << 24
+# Modular inverse of FNV_PRIME mod 2^32 (odd => invertible).
+_FNV_PRIME_INV = pow(_FNV_PRIME, -1, 1 << 32)
+
+# Per-hash preimage cache (hash_int -> 4-byte little-endian preimage).
+# Bounded independently of the mutations LRU so encode() stays O(1) after
+# the first inversion of a given operand.
+_FNV_INV_CACHE_MAX = 4096
+_fnv_inv_cache: LRUCache = LRUCache(_FNV_INV_CACHE_MAX)
+
+
+def _fnv1a(data: bytes) -> int:
+    """Independent reference FNV-1a (32-bit), matching antifuzz_demo.c."""
+    h = _FNV_OFFSET
+    for b in data:
+        h ^= b
+        h = (h * _FNV_PRIME) & 0xFFFFFFFF
+    return h
+
+
+def _fnv1a_fwd_table() -> dict[int, list[int]]:
+    """Map intermediate hash after 2 bytes -> list of those two bytes (packed LE)."""
+    fwd: dict[int, list[int]] = {}
+    for ab in range(1 << 16):
+        h = _FNV_OFFSET
+        h = ((h ^ (ab & 0xFF)) * _FNV_PRIME) & 0xFFFFFFFF
+        h = ((h ^ ((ab >> 8) & 0xFF)) * _FNV_PRIME) & 0xFFFFFFFF
+        fwd.setdefault(h, []).append(ab)
+    return fwd
+
+
+_FNV_FWD: dict[int, list[int]] | None = None
+
+
+def _fnv1a_invert_all(target: int) -> list[bytes]:
+    """Recover all 4-byte little-endian preimages of *target* under FNV-1a.
+
+    FNV-1a over a fixed 4-byte field is not a bijection (~2–6 preimages on
+    average). Meet-in-the-middle enumerates them all in ~2^16 steps per side.
+    Results are cached per hash.
+    """
+    cached = _fnv_inv_cache.get(target)
+    if cached is not None:
+        return cached
+
+    global _FNV_FWD
+    if _FNV_FWD is None:
+        _FNV_FWD = _fnv1a_fwd_table()
+    fwd = _FNV_FWD
+
+    out: list[bytes] = []
+    for cd in range(1 << 16):
+        h = target
+        b3 = (cd >> 8) & 0xFF
+        h = ((h * _FNV_PRIME_INV) & 0xFFFFFFFF) ^ b3
+        b2 = cd & 0xFF
+        h = ((h * _FNV_PRIME_INV) & 0xFFFFFFFF) ^ b2
+        for ab in fwd.get(h, ()):
+            out.append(bytes((ab & 0xFF, (ab >> 8) & 0xFF, b2, b3)))
+
+    # Not surjective: some 32-bit values have no 4-byte preimage.
+    _fnv_inv_cache[target] = out
+    return out
+
+
+class Fnv1aEncoder(Encoder):
+    """FNV-1a of a 4-byte field compared to a constant (AntiFuzz §4.4).
+
+    ``if (fnv1a(value) == OUTPUT_HASH)``: the operand is the hash, not the
+    field, so the pattern searched for is the preimage and the replacement
+    is the preimage of the constant.  Defeats the hashed magic check in
+    ``targets/antifuzz_demo.c`` (``fnv1a(input[0:4]) == fnv1a("crsh")``).
+    """
+
+    def __init__(self, reverse: bool = False):
+        self.reverse = reverse
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        if cmp_type == "STR" or cmp_size != _FNV_BITS:
+            return False
+        return _to_int(lhs) >= _FNV_MIN_OPERAND and _to_int(rhs) >= _FNV_MIN_OPERAND
+
+    def encode(self, val):
+        # All preimages: engine expands size()==1 multi-result as alternatives.
+        return [_reverse_if(p, self.reverse) for p in _fnv1a_invert_all(_to_int(val))]
+
+    def name(self):
+        return f"fnv1a_{'r' if self.reverse else 'p'}"
+
+
+
 # ── Engine ─────────────────────────────────────────────────────────────
 
 
@@ -502,6 +602,8 @@ for flag in (False, True):
 BUILTIN_ENCODERS.append(Utf16NarrowEncoder())
 for rev in (False, True):
     BUILTIN_ENCODERS.append(Crc32Encoder(rev))
+for rev in (False, True):
+    BUILTIN_ENCODERS.append(Fnv1aEncoder(rev))
 
 MAX_MUTATIONS_PER_PAIR = 256
 
@@ -543,8 +645,15 @@ def _applicable_encoders(cmp_size: int, cmp_type: str, operand_a: bytes, operand
         # Replacement variants are computed lazily on the first hit:
         # most pairs' patterns never appear in the input, and encoding
         # up to 129 variants is the most expensive step.
-        pattern_chunks = tuple(enc.pattern(operand_a))
-        enc_cache[enc] = (pattern_chunks, None)
+        encoded = enc.pattern(operand_a)
+        # size()==1 with multiple encode results = alternative single-chunk
+        # patterns (FNV-1a has ~2–6 preimages).  Multi-chunk encoders
+        # (SplitEncoder) keep size()>1 and a single concurrent pattern.
+        if enc.size() == 1 and len(encoded) != 1:
+            pattern_alts = [tuple([c]) for c in encoded if c]
+        else:
+            pattern_alts = [tuple(encoded)] if encoded and all(encoded) else []
+        enc_cache[enc] = (pattern_alts, None)
     return enc_cache
 
 
@@ -602,43 +711,47 @@ def generate_mutations(
         enc_cache = _applicable_encoders(cmp_size, cmp_type, operand_a, operand_b)
         _cache[pair_key] = enc_cache
 
-    for enc, (pattern_chunks, repl_variants) in enc_cache.items():
-        if not pattern_chunks:
-            continue
-
-        # Find offsets for each pattern chunk.
-        offset_lists = []
-        all_found = True
-        for chunk in pattern_chunks:
-            offsets = _find_offsets(input_data, chunk)
-            if not offsets:
-                all_found = False
-                break
-            offset_lists.append(offsets)
-
-        if not all_found:
+    for enc, (pattern_alts, repl_variants) in enc_cache.items():
+        if not pattern_alts:
             continue
 
         if repl_variants is None:
             # Generate replacement variants from operand_b THROUGH the same
-            # encoder, only now that the pattern was actually found.
+            # encoder, only now that we are about to search (lazy).
             repl_variants = tuple(_get_encoded(enc, cmp_type, cmp_size, operand_b, hammer))
-            enc_cache[enc] = (pattern_chunks, repl_variants)
+            enc_cache[enc] = (pattern_alts, repl_variants)
 
-        pattern_key = pattern_chunks
-
-        # Generate up to MAX permutations
         count = 0
-        for offset_combo in _product(*offset_lists):
-            if count >= MAX:
+        for pattern_chunks in pattern_alts:
+            if not pattern_chunks or count >= MAX:
                 break
-            for repl in repl_variants:
-                if pattern_key != repl:
-                    k = (offset_combo, repl)
-                    if k not in seen:
-                        seen.add(k)
-                        mutations.append((offset_combo, repl, enc))
-                        count += 1
+
+            # Find offsets for each pattern chunk.
+            offset_lists = []
+            all_found = True
+            for chunk in pattern_chunks:
+                offsets = _find_offsets(input_data, chunk)
+                if not offsets:
+                    all_found = False
+                    break
+                offset_lists.append(offsets)
+
+            if not all_found:
+                continue
+
+            pattern_key = pattern_chunks
+
+            # Generate up to MAX permutations
+            for offset_combo in _product(*offset_lists):
+                if count >= MAX:
+                    break
+                for repl in repl_variants:
+                    if pattern_key != repl:
+                        k = (offset_combo, repl)
+                        if k not in seen:
+                            seen.add(k)
+                            mutations.append((offset_combo, repl, enc))
+                            count += 1
 
     return mutations
 
@@ -691,14 +804,29 @@ def _get_encoded_variants(
                 raw_variants[idx] = _struct_pack(">" + key, (base_val + i) % (max_val + 1))  # type: ignore[assignment]
                 raw_variants[idx + 1] = _struct_pack(">" + key, (base_val - i) % (max_val + 1))  # type: ignore[assignment]
 
-    # Encode each raw variant through the encoder and deduplicate
+    # Encode each raw variant through the encoder and deduplicate.
+    # size()==1 with multiple encode results = alternative single-chunk
+    # replacements (FNV-1a preimages), not concurrent multi-chunk.
     seen: set[tuple] = set()
     result: list[tuple[bytes, ...]] = []
+    multi_alt = enc.size() == 1
     for rv in raw_variants:
-        encoded = tuple(_enc_encode(rv))
-        if encoded not in seen:
-            seen.add(encoded)
-            result.append(encoded)
+        parts = _enc_encode(rv)
+        if multi_alt and len(parts) != 1:
+            for p in parts:
+                if not p:
+                    continue
+                encoded = (p,)
+                if encoded not in seen:
+                    seen.add(encoded)
+                    result.append(encoded)
+        else:
+            if not parts or any(not p for p in parts):
+                continue
+            encoded = tuple(parts)
+            if encoded not in seen:
+                seen.add(encoded)
+                result.append(encoded)
     return result
 
 

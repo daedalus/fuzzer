@@ -12,11 +12,13 @@ from fuzzer_tool.core.rq_encodings import (
     Crc32Encoder,
     CStrChrEncoder,
     CStringEncoder,
+    Fnv1aEncoder,
     MemEncoder,
     PlainEncoder,
     SextEncoder,
     SplitEncoder,
     ZextEncoder,
+    _fnv1a,
     encoders_summary,
     find_offsets,
     generate_mutations,
@@ -417,3 +419,71 @@ class TestCrc32Encoder:
         xs = [b"\x00" * 4, b"\xff" * 4] + [rng.randbytes(4) for _ in range(300)]
         for x in xs:
             assert enc.encode(_crc_le(x)) == [x]
+
+
+def _fnv_le(data: bytes) -> bytes:
+    """FNV-1a of *data* as a little-endian cmplog operand."""
+    return _fnv1a(data).to_bytes(4, "little")
+
+
+class TestFnv1aEncoder:
+    """AntiFuzz §4.4: ``if (fnv1a(value) == OUTPUT_HASH)`` — antifuzz_demo.c."""
+
+    def test_fnv1a_solves_hashed_compare(self):
+        """Encoder produces crsh when given the demo's two hash values."""
+        garbage, want = b"xxxx", b"crsh"
+        data = b"AA" + garbage + b"BB"
+        hits = _by_encoder(
+            generate_mutations(_fnv_le(garbage), _fnv_le(want), 32, "CMP", data),
+            "fnv1a_p",
+        )
+        assert any(m[0] == (2,) for m in hits)
+        assert any(m[1] == (want,) for m in hits)
+
+    def test_fnv1a_reversed_field(self):
+        x = bytes.fromhex("01020304")
+        data = x[::-1] + b"zz"
+        want = b"crsh"
+        hits = _by_encoder(
+            generate_mutations(_fnv_le(x), _fnv_le(want), 32, "CMP", data), "fnv1a_r"
+        )
+        assert any(m[1] == (want[::-1],) for m in hits)
+
+    def test_falsify_fnv1a(self):
+        """Independent reference: fnv1a(encode(C)) == C; wrong widths/types silent."""
+        enc = Fnv1aEncoder(reverse=False)
+        rng = RandPool(seed=42)
+        for _ in range(50):
+            x = rng.randbytes(4)
+            c = _fnv_le(x)
+            for pre in enc.encode(c):
+                assert _fnv1a(pre) == _fnv1a(x)
+        # No preimage in the input -> no mutation
+        x = (777).to_bytes(4, "little")
+        assert not _by_encoder(
+            generate_mutations(_fnv_le(x), _fnv_le(b"zzzz"), 32, "CMP", b"\x00" * 16),
+            "fnv1a_p",
+        )
+        assert not enc.is_applicable(64, "CMP", b"\x01" * 8, b"\x02" * 8)
+        assert not enc.is_applicable(512, "STR", b"abcd", b"efgh")
+        assert not enc.is_applicable(16, "CMP", b"\x01\x02", b"\x03\x04")
+
+    def test_adversarial_small_integer_skipped(self):
+        """Small-integer compares (both < 2^24) are not scanned as FNV."""
+        enc = Fnv1aEncoder(reverse=False)
+        assert not enc.is_applicable(
+            32, "CMP", (12).to_bytes(4, "little"), (13).to_bytes(4, "little")
+        )
+        # One side large is still skipped (both must look hash-like).
+        assert not enc.is_applicable(
+            32, "CMP", (12).to_bytes(4, "little"), (1 << 28).to_bytes(4, "little")
+        )
+
+    def test_adversarial_fnv1a_roundtrip(self):
+        enc = Fnv1aEncoder(reverse=False)
+        rng = RandPool(seed=11)
+        xs = [b"\x00" * 4, b"\xff" * 4, b"crsh"] + [rng.randbytes(4) for _ in range(100)]
+        for x in xs:
+            pres = enc.encode(_fnv_le(x))
+            assert x in pres
+            assert all(_fnv1a(p) == _fnv1a(x) for p in pres)
