@@ -246,6 +246,7 @@ static void __afl_map_node_shm(void);
  *   HANDLERS_DISPLACED  health reads that found another crash handler
  *                       installed over the shim's (re-armed on the next
  *                       guarded call)
+ *   WGUARD         edge-table write guard in effect (__AFL_WGUARD_*)
  * Non-atomic: magnitudes, never accounting records. */
 enum {
     __AFL_HEALTH_ATTACHED = 0,
@@ -255,6 +256,7 @@ enum {
     __AFL_HEALTH_STRAY_SIGNALS,
     __AFL_HEALTH_ABORTS_INTERCEPTED,
     __AFL_HEALTH_HANDLERS_DISPLACED,
+    __AFL_HEALTH_WGUARD,
     __AFL_HEALTH_FIELDS
 };
 static uint64_t __afl_health[__AFL_HEALTH_FIELDS];
@@ -608,6 +610,158 @@ static inline void __afl_note_drop(void) {
     if (v != __AFL_DROP_MAX) *__afl_dropped = v + 1;
 }
 
+/* ── Write guard ───────────────────────────────────────────────────────
+ *
+ * The target runs attacker-chosen input in this address space, so a wild
+ * store from a memory bug can plant or erase edges in the segment. The
+ * guard write-locks the shim's mapping and unlocks it only around the
+ * shim's own stores:
+ *
+ *     target code ── store ──> segment          SIGSEGV (locked)
+ *     shim hook   ── open ── store ── close     ok
+ *
+ *   PKEY      x86 protection key, WD bit set in PKRU. open/close are
+ *             RDPKRU/WRPKRU (userspace, no syscall). PKRU is per thread:
+ *             threads that existed before attach stay unlocked.
+ *   MPROTECT  same brackets via mprotect, two syscalls per edge: proves
+ *             every write site is bracketed on hosts without PKU.
+ *   OFF       default; also when pkey_alloc is refused (no PKU).
+ *
+ * Opt-in: __AFL_WGUARD=pkey|mprotect, set by --shm-write-guard.
+ *
+ * open() returns the previous PKRU and close() restores it, so nesting
+ * and signal handlers (which run with the kernel's default PKRU) restore
+ * the state they found. Reads stay allowed while locked.
+ *
+ * Not covered: the fuzzer's own mapping of the segment in in-process
+ * modes, which shares this address space and stays writable. */
+enum { __AFL_WGUARD_OFF, __AFL_WGUARD_PKEY, __AFL_WGUARD_MPROTECT };
+
+static int      __afl_wguard_mode  = __AFL_WGUARD_OFF;
+static int      __afl_wguard_pkey  = -1;
+static uint32_t __afl_wguard_bits  = 0;      /* AD|WD bits of our key in PKRU */
+static void    *__afl_wguard_base  = NULL;   /* MPROTECT: locked region */
+static size_t   __afl_wguard_len   = 0;
+static uint32_t __afl_wguard_depth = 0;      /* MPROTECT: open nesting */
+
+#if defined(__x86_64__)
+__AFL_NO_COV __attribute__((always_inline))
+static inline uint32_t __afl_rdpkru(void) {
+    uint32_t eax, edx;
+    __asm__ volatile(".byte 0x0f,0x01,0xee" : "=a"(eax), "=d"(edx) : "c"(0));
+    return eax;
+}
+
+__AFL_NO_COV __attribute__((always_inline))
+static inline void __afl_wrpkru(uint32_t v) {
+    __asm__ volatile(".byte 0x0f,0x01,0xef" : : "a"(v), "c"(0), "d"(0) : "memory");
+}
+#endif
+
+/* MPROTECT slow path. Out of line and uninstrumented: inlined into an
+ * instrumented caller, a coverage callback lands between the depth bump
+ * and the mprotect and writes into a still-locked mapping. */
+__attribute__((noinline, cold))
+__AFL_NO_COV static void __afl_wguard_mp_open(void) {
+    if (__afl_wguard_depth++ == 0)
+        mprotect(__afl_wguard_base, __afl_wguard_len, PROT_READ | PROT_WRITE);
+}
+
+__attribute__((noinline, cold))
+__AFL_NO_COV static void __afl_wguard_mp_close(void) {
+    if (--__afl_wguard_depth == 0)
+        mprotect(__afl_wguard_base, __afl_wguard_len, PROT_READ);
+}
+
+/* open() token: 0 = nothing to undo, so close() tests a register instead
+ * of reloading the mode. PKEY carries the saved PKRU in the low 32 bits. */
+typedef uint64_t __afl_wtok_t;
+#define __AFL_WTOK_PKEY     (1ull << 32)
+#define __AFL_WTOK_MPROTECT (1ull << 33)
+
+__AFL_NO_COV __attribute__((always_inline))
+static inline __afl_wtok_t __afl_wguard_open(void) {
+    if (__builtin_expect(__afl_wguard_mode == __AFL_WGUARD_OFF, 1)) return 0;
+#if defined(__x86_64__)
+    if (__afl_wguard_mode == __AFL_WGUARD_PKEY) {
+        uint32_t saved = __afl_rdpkru();
+        __afl_wrpkru(saved & ~__afl_wguard_bits);
+        return __AFL_WTOK_PKEY | saved;
+    }
+#endif
+    __afl_wguard_mp_open();
+    return __AFL_WTOK_MPROTECT;
+}
+
+__AFL_NO_COV __attribute__((always_inline))
+static inline void __afl_wguard_close(__afl_wtok_t tok) {
+    if (__builtin_expect(!tok, 1)) return;
+#if defined(__x86_64__)
+    if (tok & __AFL_WTOK_PKEY) {
+        __afl_wrpkru((uint32_t)tok);
+        return;
+    }
+#endif
+    __afl_wguard_mp_close();
+}
+
+/* Out-of-line brackets for cold instrumented callers (reset, distance
+ * tail). Inlined there, the mode branches become coverage edges that
+ * differ between guard modes. */
+__attribute__((noinline))
+__AFL_NO_COV static __afl_wtok_t __afl_wguard_open_cold(void) {
+    return __afl_wguard_open();
+}
+
+__attribute__((noinline))
+__AFL_NO_COV static void __afl_wguard_close_cold(__afl_wtok_t tok) {
+    __afl_wguard_close(tok);
+}
+
+/* Lock [p, p+len) with protection key; 0 on success. The key is allocated
+ * once and reused by a re-attach. pkey_alloc sets WD in this thread's PKRU,
+ * and threads created later inherit it. */
+__attribute__((noinline))
+__AFL_NO_COV static int __afl_wguard_pkey_arm(void *p, size_t len) {
+#if defined(__x86_64__) && defined(SYS_pkey_alloc) && defined(SYS_pkey_mprotect)
+    if (__afl_wguard_pkey < 0) {
+        long k = syscall(SYS_pkey_alloc, 0, PKEY_DISABLE_WRITE);
+        if (k < 0) return -1;
+        __afl_wguard_pkey = (int)k;
+        __afl_wguard_bits = 3u << (2 * (unsigned)k);
+    }
+    return (int)syscall(SYS_pkey_mprotect, p, len, PROT_READ | PROT_WRITE, __afl_wguard_pkey);
+#else
+    (void)p; (void)len;
+    return -1;
+#endif
+}
+
+/* Arm the guard on a freshly attached segment. Opt-in via __AFL_WGUARD
+ * (fuzzer-tool --shm-write-guard): "pkey" or "mprotect"; unset or anything
+ * else leaves it off. */
+__attribute__((noinline))
+__AFL_NO_COV static void __afl_wguard_arm(void *p, size_t len) {
+    long page = sysconf(_SC_PAGESIZE);
+    if (page > 0) len = (len + (size_t)page - 1) & ~((size_t)page - 1);
+
+    const char *want = getenv("__AFL_WGUARD");
+    __afl_wguard_mode = __AFL_WGUARD_OFF;
+    if (!want) return;
+
+    if (strcmp(want, "mprotect") == 0) {
+        if (mprotect(p, len, PROT_READ) != 0) return;
+        __afl_wguard_base  = p;
+        __afl_wguard_len   = len;
+        __afl_wguard_depth = 0;
+        __afl_wguard_mode  = __AFL_WGUARD_MPROTECT;
+        return;
+    }
+
+    if (strcmp(want, "pkey") == 0 && __afl_wguard_pkey_arm(p, len) == 0)
+        __afl_wguard_mode = __AFL_WGUARD_PKEY;
+}
+
 /* Per-iteration state */
 static uint64_t  __afl_path_hash_acc = 0;       /* rolling path hash accumulator */
 static uint32_t  __afl_max_stack_depth = 0;     /* max stack depth this iteration */
@@ -760,6 +914,11 @@ void __afl_map_shm(void) {
     __afl_edge_count  = (uint64_t *)(base + SHM_EDGE_COUNT_OFFSET);
     __afl_dropped     = (uint64_t *)(base + SHM_DROP_OFFSET);
 
+    /* Write-lock the mapping; shim stores go through open/close. */
+    size_t seg_len = need;
+    if (shmctl(shmid, IPC_STAT, &ds) == 0) seg_len = (size_t)ds.shm_segsz;
+    __afl_wguard_arm(p, seg_len);
+
     /* Nothing is published here. Attach used to write the ctx width into
      * the segment, and the mask it used to do so zeroed the fuzzer's
      * generation tag on every execution. The write is gone rather than
@@ -793,6 +952,7 @@ uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
     __afl_check_crash_handlers();
     __afl_health[__AFL_HEALTH_ATTACHED] = __afl_area != NULL;
     __afl_health[__AFL_HEALTH_MAP_ENTRIES] = __afl_map_size;
+    __afl_health[__AFL_HEALTH_WGUARD] = (uint64_t)__afl_wguard_mode;
     for (uint32_t i = 0; i < n && i < __AFL_HEALTH_FIELDS; i++)
         out[i] = __afl_health[i];
     return __AFL_HEALTH_FIELDS;
@@ -1191,7 +1351,7 @@ __AFL_NO_COV static void __afl_id_scheme_init(void) {
  * rename the real edge after them (COMPCOV) call this directly;
  * __afl_map_loc() is this plus the edge-chain bookkeeping. */
 __attribute__((always_inline))
-static inline void __afl_map_id(uint32_t edge_id) {
+static inline void __afl_map_id_raw(uint32_t edge_id) {
     uint32_t gen = __afl_generation;
     if (__afl_gen_word)
         gen = *__afl_gen_word & __AFL_GEN_MASK;
@@ -1209,6 +1369,14 @@ static inline void __afl_map_id(uint32_t edge_id) {
     if (window > __afl_map_size) window = __afl_map_size;
 
     __afl_probe_insert(edge_id, pos, window, gen);
+}
+
+/* __afl_map_id_raw() inside the write guard. */
+__attribute__((always_inline))
+static inline void __afl_map_id(uint32_t edge_id) {
+    __afl_wtok_t wk = __afl_wguard_open();
+    __afl_map_id_raw(edge_id);
+    __afl_wguard_close(wk);
 }
 
 /* ── Stack depth ──────────────────────────────────────────────────────
@@ -1252,6 +1420,7 @@ static inline void __afl_note_stack(void) {
 __attribute__((visibility("default"), always_inline))
 static inline void __afl_map_loc(uint32_t cur_loc) {
     if (!__afl_area) return;
+    __afl_wtok_t wk = __afl_wguard_open();
     __afl_note_stack();
 
     /* COMPCOV on: clear bit 31 of the hash, then carry bit 31 over from
@@ -1270,7 +1439,7 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
      * one id. Measured on fuzzgoat: 80 of 344 real edges merged by that
      * alone. The remap below merges only the id-0 edge with the id-1 edge. */
     if (!edge_id) edge_id = 1;
-    __afl_map_id(edge_id);
+    __afl_map_id_raw(edge_id);
 
     /* Accumulate rolling path hash: hash = hash * 31 ^ edge_id */
     __afl_path_hash_acc = (__afl_path_hash_acc * 31) ^ edge_id;
@@ -1279,6 +1448,7 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
 #if __AFL_TRACE_FIRES
     __afl_log_fire(edge_id);
 #endif
+    __afl_wguard_close(wk);
 
     __afl_push_prev(cur_loc);
 }
@@ -1852,8 +2022,10 @@ static void __afl_write_distance_tail(void) {
     if (__afl_area) {
         uint64_t *dist_sum = (uint64_t *)((uint8_t *)__afl_area +
                                           __afl_map_size * sizeof(struct __afl_entry));
+        __afl_wtok_t wk = __afl_wguard_open_cold();
         *dist_sum = __afl_dist_sum;
         *(dist_sum + 1) = __afl_dist_hits;
+        __afl_wguard_close_cold(wk);
     }
 }
 #endif /* __AFL_DISTANCE_MODE */
@@ -1890,6 +2062,7 @@ void __afl_map_reset(void) {
         if (__afl_gen_word)
             gen = *__afl_gen_word & __AFL_GEN_MASK;
         __afl_generation = (gen + 1) & __AFL_GEN_MASK;
+        __afl_wtok_t wk = __afl_wguard_open_cold();
 
         /* Generation tags are 8 bits, so they repeat every 256 resets. An
          * entry keeps the tag of the last execution in which its edge
@@ -1935,6 +2108,7 @@ void __afl_map_reset(void) {
 #if __AFL_DISTANCE_MODE
         __afl_write_distance_tail();
 #endif
+        __afl_wguard_close_cold(wk);
     }
 #if __AFL_NGRAM_K > 2
     memset(__afl_prev_locs, 0, sizeof(__afl_prev_locs));

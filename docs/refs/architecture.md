@@ -52,6 +52,10 @@ struct __afl_entry { uint32_t edge_id; uint32_t count; };
 - Count is a 32-bit saturating counter (no Morris probability needed)
 - Python API: `ShmCoverage.get_edge_ids()`, `.get_edge_counts()`, `.read_entries()`
 - `EdgeTracker.record_edges()` accepts `set[int]` (sparse) or `bytes` (legacy byte-bitmap)
+- Write guard (`--shm-write-guard`, opt-in): every shim store to the segment goes
+  through `__afl_wguard_open()`/`__afl_wguard_close()`. A new write site outside
+  them faults under the guard; `tests/test_shim_write_guard.py` runs every path
+  in `mprotect` mode to catch that.
 
 ## Markov Persistence
 

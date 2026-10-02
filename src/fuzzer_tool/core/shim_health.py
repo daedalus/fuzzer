@@ -17,6 +17,7 @@ Reading the counters needs a loaded library, which is an adapter concern
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from enum import Enum, IntEnum
 
@@ -36,6 +37,9 @@ STDERR_SEEN_MAX = 64
 #: Input of the startup self-test execution (same shape as the speed probe).
 SELF_TEST_INPUT = b"\x00" * 64
 
+# Read by the shim at attach; selects the edge-table write guard.
+WGUARD_ENV = "__AFL_WGUARD"
+
 
 class ShimField(IntEnum):
     """Index of each counter in ``__afl_shim_health()``'s output (C ABI)."""
@@ -47,6 +51,25 @@ class ShimField(IntEnum):
     STRAY_SIGNALS = 4
     ABORTS_INTERCEPTED = 5
     HANDLERS_DISPLACED = 6
+    WGUARD = 7
+
+
+class WriteGuard(IntEnum):
+    """``ShimField.WGUARD`` value: how the edge table is write-locked."""
+
+    OFF = 0
+    PKEY = 1
+    MPROTECT = 2
+
+
+def export_wguard(mode: WriteGuard) -> None:
+    """Ask the shim for *mode* in every target started after this call.
+
+    Off sets nothing: the shim arms no guard when the variable is unset.
+    """
+    if mode is WriteGuard.OFF:
+        return
+    os.environ[WGUARD_ENV] = mode.name.lower()
 
 
 class Attach(Enum):
