@@ -1462,6 +1462,7 @@ class FuzzRound:
             f._tsallis if selector == "tsallis" else None,
             f._kalman_ts,
             f._ids,
+            f._phe,
             f._gradient,
             f._whittle,
             f._successive_elim,

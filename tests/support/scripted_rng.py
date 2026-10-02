@@ -35,6 +35,8 @@ class ScriptedRng:
             sigma and count ignored).
         beta_arrays: Arrays returned one per ``betavariate_array()`` call
             (parameters ignored).
+        binomial_arrays: Arrays returned one per ``binomial_array()`` call
+            (counts and p ignored).
     """
 
     def __init__(
@@ -47,6 +49,7 @@ class ScriptedRng:
         randbytes=(),
         gauss_lists=(),
         beta_arrays=(),
+        binomial_arrays=(),
     ):
         self._randints = iter(randints)
         self._randoms = iter(randoms)
@@ -56,6 +59,7 @@ class ScriptedRng:
         self._randbytes = iter(randbytes)
         self._gauss_lists = iter(gauss_lists)
         self._beta_arrays = iter(beta_arrays)
+        self._binomial_arrays = iter(binomial_arrays)
 
     def randint(self, _a, _b):
         return next(self._randints)
@@ -79,6 +83,9 @@ class ScriptedRng:
 
     def betavariate_array(self, _alphas, _betas):
         return next(self._beta_arrays)
+
+    def binomial_array(self, _counts, _p):
+        return next(self._binomial_arrays)
 
     def shuffle(self, seq):
         seq.reverse()

@@ -54,6 +54,7 @@ class TestEloAllEnablesAllSchedulers:
             "tsallis",
             "kalman_ts",
             "ids",
+            "phe",
             "consolidated_v1",
             "consolidated_v2",
             "moss",

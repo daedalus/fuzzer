@@ -61,6 +61,7 @@ _KWARGS = {
     "tsallis": {"tsallis": True},
     "kalman_ts": {"kalman_ts": True},
     "ids": {"ids": True},
+    "phe": {"phe": True},
     "invasion": {"invasion": True, "mc_bandit": True},
     "canary": {"canary_scheduler": True},
     "exp4": {"exp4": True},

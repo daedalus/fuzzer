@@ -569,6 +569,14 @@ class RandPool:
         """
         return self._rng.beta(alphas, betas)
 
+    def binomial_array(self, counts, p: float) -> np.ndarray:
+        """Return one Binomial(counts[i], *p*) draw per element, as an array.
+
+        One C-level numpy call: the per-arm pseudo-reward draw of
+        perturbed-history exploration over K arms.
+        """
+        return self._rng.binomial(counts, p)
+
     def dirichlet(self, alphas) -> np.ndarray:
         """Return one point on the simplex drawn from Dirichlet(*alphas*).
 

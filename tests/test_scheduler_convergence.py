@@ -79,6 +79,7 @@ from fuzzer_tool.core.schedulers import (
     MonteCarloScheduler,
     MOptScheduler,
     MOSSScheduler,
+    PHEScheduler,
     ReplicatorScheduler,
     SWUCBScheduler,
     TsallisINFScheduler,
@@ -167,6 +168,10 @@ RELIABLE = {
     # Undecayed Beta posteriors: DecayingBest late share min 0.254, median
     # 0.462, so in neither RECOVERS nor STUCK.
     "IDS": (lambda seed: IDSScheduler(rng=RandPool(seed)), 0.90, 0.50),
+    # Over 12 seeds: share min 0.968, slope max 0.271. FIXED_SEED 0.980 / 0.240.
+    # No forgetting: DecayingBest late share min 0.167, median 0.391, so in
+    # neither RECOVERS nor STUCK.
+    "PHE": (lambda seed: PHEScheduler(rng=RandPool(seed)), 0.90, 0.40),
 }
 
 

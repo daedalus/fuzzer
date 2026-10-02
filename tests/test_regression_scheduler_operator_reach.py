@@ -92,6 +92,7 @@ def _all_operator_schedulers():
     tsallis = S.TsallisINFScheduler()
     kalman_ts = S.KalmanTSScheduler()
     ids = S.IDSScheduler()
+    phe = S.PHEScheduler()
     fewa = S.FEWAScheduler()
     softmax = S.SoftmaxScheduler()
 
@@ -185,6 +186,7 @@ def _all_operator_schedulers():
         ("TsallisINFScheduler", tsallis, tsallis.select_op, tsallis.record),
         ("KalmanTSScheduler", kalman_ts, kalman_ts.select_op, kalman_ts.record),
         ("IDSScheduler", ids, ids.select_op, ids.record),
+        ("PHEScheduler", phe, phe.select_op, phe.record),
         ("FEWAScheduler", fewa, fewa.select_op, fewa.record),
         ("SoftmaxScheduler", softmax, softmax.select_op, softmax.record),
     ]

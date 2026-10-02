@@ -1,5 +1,6 @@
 """Tests for RandPool — numpy-accelerated batched random number pool."""
 
+import numpy as np
 import pytest
 
 from fuzzer_tool.core.rand_pool import _POOL_ENTRIES, RandPool
@@ -591,6 +592,25 @@ class TestContinuousDistributions:
 
     def test_lognormvariate_list_zero_count(self):
         assert RandPool().lognormvariate_list(0, 1, 0) == []
+
+    def test_binomial_array_bounds(self):
+        counts = np.array([0, 1, 7, 1000])
+        draws = RandPool(seed=3).binomial_array(counts, 0.5)
+        assert draws.shape == counts.shape
+        assert np.all((draws >= 0) & (draws <= counts))
+        assert draws[0] == 0
+
+    def test_binomial_array_is_seeded(self):
+        counts = np.arange(50)
+        a = RandPool(seed=9).binomial_array(counts, 0.5)
+        b = RandPool(seed=9).binomial_array(counts, 0.5)
+        assert np.array_equal(a, b)
+
+    def test_binomial_array_mean(self):
+        """n = 10^6 at p = 0.3: the draw sits within 6 sd of n p."""
+        n, p = 10**6, 0.3
+        draw = int(RandPool(seed=1).binomial_array(np.array([n]), p)[0])
+        assert abs(draw - n * p) < 6 * (n * p * (1 - p)) ** 0.5
 
 
 # ── Random list edge cases ─────────────────────────────────────────────
