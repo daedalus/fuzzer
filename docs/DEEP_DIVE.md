@@ -930,9 +930,9 @@ Opt-in, default `off`, not set by `--hail-mary`. Write-locks the shim's mapping 
 
 | Mode | Mechanism | Cost |
 |---|---|---|
-| `off` | none | one load + branch per edge (~0.3 ns, hook-only microbench) |
+| `off` | none | one load + branch per edge: ~0.3 ns hook-only; fuzzgoat ASAN in-process 13.7 vs 13.2 µs/exec (control 13.4), end-to-end 43.9 vs 42.2 eps — within noise |
 | `pkey` | x86 protection key, PKRU WD bit; RDPKRU/WRPKRU around each shim write (no syscall). Falls back to `off` without PKU | not measured (no PKU host available) |
-| `mprotect` | same brackets via `mprotect` | two syscalls per edge; debug/testing only |
+| `mprotect` | same brackets via `mprotect` | two syscalls per edge, ~84x slower on fuzzgoat; debug/testing only |
 
 The fuzzer exports `__AFL_WGUARD` (`core/shim_health.export_wguard`); the shim arms at attach. Limits: PKRU is per thread, so threads alive before attach stay unlocked; in in-process modes the fuzzer's own mapping of the segment stays writable. Tests: `tests/test_shim_write_guard.py`.
 
