@@ -197,12 +197,14 @@
 #include <unistd.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 
 #if __AFL_CMPLOG
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <strings.h>
 #include <wchar.h>
 static void __afl_cmplog_flush(void);
@@ -233,6 +235,10 @@ static void __afl_map_node_shm(void);
  *   SEG_REJECTED   SHM segments refused (bad id, size, or header)
  *   CMPLOG_DROPPED cmplog records lost (writer contention, failed write)
  *   STRAY_SIGNALS  crash signals outside __afl_guarded_call
+ *   ABORTS_INTERCEPTED  abort() calls the shim's override turned into returns
+ *   HANDLERS_DISPLACED  health reads that found another crash handler
+ *                       installed over the shim's (re-armed on the next
+ *                       guarded call)
  * Non-atomic: magnitudes, never accounting records. */
 enum {
     __AFL_HEALTH_ATTACHED = 0,
@@ -240,6 +246,8 @@ enum {
     __AFL_HEALTH_SEG_REJECTED,
     __AFL_HEALTH_CMPLOG_DROPPED,
     __AFL_HEALTH_STRAY_SIGNALS,
+    __AFL_HEALTH_ABORTS_INTERCEPTED,
+    __AFL_HEALTH_HANDLERS_DISPLACED,
     __AFL_HEALTH_FIELDS
 };
 static uint64_t __afl_health[__AFL_HEALTH_FIELDS];
@@ -603,10 +611,22 @@ static uint8_t   __afl_generation = 0;          /* generation counter for tag-ba
 
 /* ── SHM attachment ──────────────────────────────────────────────────── */
 
+/* Set once a segment has been refused. adapters/inprocess.py retries
+ * __afl_map_shm() when __afl_area is still NULL after load (for the case
+ * where the environment arrived late); a refusal is final, so the retry
+ * must not print and count it again. */
+static int __afl_shm_refused = 0;
+
+static void __afl_refuse_shm(void) {
+    __afl_shm_refused = 1;
+    __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+}
+
 __attribute__((visibility("default")))
 void __afl_map_shm(void) {
     char *id = getenv("__AFL_SHM_ID");
     if (!id) return;   /* not under the fuzzer — silence is correct here */
+    if (__afl_shm_refused) return;
 
     /* Past this point the fuzzer has explicitly asked for coverage, so a
      * failure must not be silent. It used to be: all three early returns
@@ -654,6 +674,7 @@ void __afl_map_shm(void) {
                          "__afl_shim: __AFL_SHM_ID=%.32s is not a valid segment id"
                          " -- coverage disabled\n", id);
         if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+        __afl_refuse_shm();
         return;
     }
     int shmid = (int)parsed;
@@ -675,7 +696,7 @@ void __afl_map_shm(void) {
                              "__afl_shim: AFL_MAP_SIZE=%.32s is not a valid entry count"
                              " -- coverage disabled\n", size_str);
             if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
-            __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+            __afl_refuse_shm();
             return;
         }
         if (s > 0)
@@ -690,7 +711,7 @@ void __afl_map_shm(void) {
                          "__afl_shim: shmat(%d) failed: %.64s"
                          " -- coverage disabled\n", shmid, strerror(errno));
         if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
-        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        __afl_refuse_shm();
         return;
     }
 
@@ -709,7 +730,7 @@ void __afl_map_shm(void) {
                          shmid, (size_t)ds.shm_segsz, __afl_map_size, need);
         if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
         shmdt(p);
-        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        __afl_refuse_shm();
         return;
     }
 
@@ -750,8 +771,11 @@ void __afl_map_shm(void) {
 /* Copy up to n health counters (see __AFL_HEALTH_*) into out; returns the
  * number of fields this shim has, so a caller can detect a newer shim
  * with more fields than it asked for. out may be NULL when n == 0. */
+static void __afl_check_crash_handlers(void);
+
 __attribute__((visibility("default")))
 uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
+    __afl_check_crash_handlers();
     __afl_health[__AFL_HEALTH_ATTACHED] = __afl_area != NULL;
     __afl_health[__AFL_HEALTH_MAP_ENTRIES] = __afl_map_size;
     for (uint32_t i = 0; i < n && i < __AFL_HEALTH_FIELDS; i++)
@@ -3175,9 +3199,13 @@ __AFL_NO_COV void *memrchr(const void *s, int c, size_t n) {
     void *result = real_memrchr(s, c, n);
     __AFL_CMP_COUNT(__AFL_CMP_MEMRCHR, result != NULL);
     if (__afl_cmplog_fd >= 0 && n > 0 && !result) {
+        /* memrchr scans from the end, so the bytes it compared first are
+         * the tail; logging the head anchored the pair on bytes it may
+         * never have reached. */
         unsigned char needle[CMPLOG_MAX_OPERAND];
         for (size_t i = 0; i < CMPLOG_MAX_OPERAND; i++) needle[i] = (unsigned char)c;
-        __afl_cmplog_bytes(s, needle, n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n, -1);
+        size_t k = n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n;
+        __afl_cmplog_bytes((const unsigned char *)s + (n - k), needle, k, -1);
     }
     return result;
 }
@@ -3326,10 +3354,37 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_gep(uintptr_t idx) {
                          __builtin_return_address(0));
 }
 
+/* Zero the per-callback and per-site counters, keeping site keys (a site
+ * the parent already inserted costs a child no probe). Shared by the fork
+ * hook below and the forkserver. */
+__AFL_NO_COV static void __afl_cmp_counts_zero(void) {
+    for (int i = 0; i < __AFL_CMP_SITES; i++) {
+        __afl_cmp_fired[i] = 0;
+        __afl_cmp_hit[i]   = 0;
+    }
+    for (unsigned i = 0; i < __AFL_CMP_SITE_SLOTS; i++) {
+        __afl_cmp_sites[i].fired = 0;
+        __afl_cmp_sites[i].hit   = 0;
+    }
+    __afl_cmp_site_dropped = 0;
+}
+
+/* fork() child: the record buffer, its lock and the counters are the
+ * parent's. A lock held by another parent thread has no owner here, so
+ * every child record was dropped; records the parent had buffered were
+ * flushed twice, once per process. Start the child clean. */
+__AFL_NO_COV static void __afl_cmplog_atfork_child(void) {
+    __afl_cmplog_pos = 0;
+    __afl_cmplog_held = 0;
+    __atomic_store_n(&__afl_cmplog_lock, 0, __ATOMIC_RELEASE);
+    __afl_cmp_counts_zero();
+}
+
 /* ── Lifecycle ────────────────────────────────────────────────────────
  * Called from __afl_auto_init (edge builds) or the preload-only
  * constructor below. */
 __AFL_NO_COV static void __afl_cmplog_init(void) {
+    pthread_atfork(NULL, NULL, __afl_cmplog_atfork_child);
     /* COMPCOV level: parsed independently of _CMPLOG_OUT below -- a run
      * that wants only the edge-map partial-match signal, and none of the
      * record/counts/sites log machinery, sets this and nothing else. */
@@ -3468,9 +3523,48 @@ static int __afl_guard_signals[] = {
  * Jumping to it anywhere else -- one-shot and forkserver children, which
  * never call it, or a host process after the call returned -- resumes a
  * dead frame: SIGFPE surfaced as SIGSEGV, ASAN's SEGV report was lost,
- * and a ctypes host died on its own broken pipe. */
-static volatile sig_atomic_t __afl_guard_armed = 0;
+ * and a ctypes host died on its own broken pipe.
+ *
+ * Armed per thread: a fault on a worker thread the entry spawned must not
+ * jump onto the guarded thread's stack. Measured before this was __thread:
+ * the jump "returned" -11 to Python, which then ran on the worker's OS
+ * thread while the real main thread sat in pthread_join, and the process
+ * hung at exit. A worker fault is not recoverable in-process; handing it
+ * back kills the process with its real signal instead. */
+static __thread volatile sig_atomic_t __afl_guard_armed = 0;
 static volatile sig_atomic_t __afl_handlers_live = 0;
+
+/* Only a hardware fault re-executes into the same fault. Returning from
+ * anything else loses the signal: a seccomp SIGSYS (si_code SYS_SECCOMP,
+ * > 0) resumed past the trapped syscall and the violation vanished. */
+static int __afl_is_hw_fault(int sig, const siginfo_t *si) {
+    if (!si || si->si_code <= 0) return 0;
+    return sig == SIGSEGV || sig == SIGBUS || sig == SIGFPE || sig == SIGILL;
+}
+
+/* Alternate signal stack for threads that call __afl_guarded_call. A stack
+ * overflow leaves no room to run the handler on the faulting stack, so the
+ * kernel killed the whole process -- the fuzzer itself in direct mode.
+ * One mapping per guarded thread, never freed (bounded by thread count);
+ * an existing alternate stack (ASAN's, the host's) is kept. */
+#define __AFL_ALTSTACK_SIZE (64 * 1024)
+static __thread int __afl_altstack_ready = 0;
+
+static void __afl_install_altstack(void) {
+    __afl_altstack_ready = 1;
+
+    stack_t cur;
+    if (sigaltstack(NULL, &cur) == 0 && !(cur.ss_flags & SS_DISABLE)) return;
+
+    void *mem = mmap(NULL, __AFL_ALTSTACK_SIZE, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mem == MAP_FAILED) return;
+    stack_t ss;
+    ss.ss_sp = mem;
+    ss.ss_size = __AFL_ALTSTACK_SIZE;
+    ss.ss_flags = 0;
+    if (sigaltstack(&ss, NULL) != 0) munmap(mem, __AFL_ALTSTACK_SIZE);
+}
 
 static void __afl_restore_crash_handlers(void) {
     for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
@@ -3501,12 +3595,12 @@ static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
     }
 
     /* Not ours to recover: hand the signal back to whoever owned it.
-     * A hardware fault (si_code > 0) re-executes and faults again with its
-     * real si_addr; a sent signal (kill, abort) is re-raised and delivered
-     * once this handler returns. __afl_guarded_call re-arms later. */
+     * A hardware fault re-executes and faults again with its real si_addr;
+     * anything else (kill, abort, seccomp) is re-raised and delivered once
+     * this handler returns. __afl_guarded_call re-arms later. */
     __afl_health[__AFL_HEALTH_STRAY_SIGNALS]++;
     __afl_restore_crash_handlers();
-    if (si && si->si_code > 0 && sig != SIGABRT)
+    if (__afl_is_hw_fault(sig, si))
         return;
     raise(sig);
 }
@@ -3515,10 +3609,27 @@ static void __afl_install_crash_handlers(void) {
     struct sigaction sa;
     sa.sa_sigaction = __afl_crash_handler;
     sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_SIGINFO;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
     for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
         sigaction(__afl_guard_signals[i], &sa, &__afl_old_handlers[i]);
     __afl_handlers_live = 1;
+}
+
+/* Called from __afl_shim_health(): a host that installs its own handler
+ * after load (Python's signal module, faulthandler) leaves the guard
+ * unable to recover -- the host's handler returns, the fault re-executes,
+ * forever. Count it and let the next guarded call take the signals back;
+ * the host's handler becomes the "previous owner" stray signals go to. */
+static void __afl_check_crash_handlers(void) {
+    if (!__afl_handlers_live) return;
+    struct sigaction cur;
+    for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++) {
+        if (sigaction(__afl_guard_signals[i], NULL, &cur) != 0) continue;
+        if ((cur.sa_flags & SA_SIGINFO) && cur.sa_sigaction == __afl_crash_handler) continue;
+        __afl_health[__AFL_HEALTH_HANDLERS_DISPLACED]++;
+        __afl_handlers_live = 0;
+        return;
+    }
 }
 
 /* ── Guarded call wrapper ─────────────────────────────────────────────
@@ -3536,9 +3647,12 @@ static void __afl_install_crash_handlers(void) {
 __attribute__((visibility("default")))
 int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
                        const uint8_t *data, size_t size) {
-    /* A stray signal handed the dispositions back; take them again. */
+    /* A stray signal handed the dispositions back, or a health read found
+     * them displaced; take them again. */
     if (!__afl_handlers_live)
         __afl_install_crash_handlers();
+    if (!__afl_altstack_ready)
+        __afl_install_altstack();
 
     int sig;
     if ((sig = sigsetjmp(__afl_jmp_buf, 1)) == 0) {
@@ -3585,6 +3699,7 @@ int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
  * sees the declaration mismatch.                                           */
 static void __afl_shim_abort(void) {
     static const char msg[] = "[shim] abort() intercepted\n";
+    __afl_health[__AFL_HEALTH_ABORTS_INTERCEPTED]++;
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
 }
 #define abort() __afl_shim_abort()
@@ -3677,21 +3792,13 @@ static void __afl_start_forkserver(void) {
      * no per-execution signal.
      *
      * Totals were usable without this; per-execution vectors were not,
-     * since each carried a constant offset. */
-    for (int i = 0; i < __AFL_CMP_SITES; i++) {
-        __afl_cmp_fired[i] = 0;
-        __afl_cmp_hit[i]   = 0;
-    }
-    /* The site table inherits identically -- the opt-in strcmp above has a
+     * since each carried a constant offset.
+     *
+     * The site table inherits identically -- the opt-in strcmp above has a
      * call site like any other, so without this it becomes a permanent
      * phantom entry reporting one satisfied comparison per execution, at a
-     * PC inside the shim. Counters only: the keys are worth keeping, since
-     * a site the parent already inserted costs the children no probe. */
-    for (unsigned i = 0; i < __AFL_CMP_SITE_SLOTS; i++) {
-        __afl_cmp_sites[i].fired = 0;
-        __afl_cmp_sites[i].hit   = 0;
-    }
-    __afl_cmp_site_dropped = 0;
+     * PC inside the shim. Counters only: the keys are worth keeping. */
+    __afl_cmp_counts_zero();
 #endif
 
     /* An ignored SIGCHLD auto-reaps children, so waitpid() below fails
