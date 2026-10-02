@@ -199,7 +199,14 @@
 #include <sys/shm.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
+#include <dlfcn.h>
+#include <err.h>
+#include <error.h>
+#include <pthread.h>
+#include <stdarg.h>
+#include <time.h>
 
 #if __AFL_CMPLOG
 #include <dlfcn.h>
@@ -611,6 +618,17 @@ static uint8_t   __afl_generation = 0;          /* generation counter for tag-ba
 
 /* ── SHM attachment ──────────────────────────────────────────────────── */
 
+/* Parse a SysV segment id from the environment: decimal, non-negative,
+ * fits an int, nothing trailing. -1 otherwise. atoi() could not fail:
+ * "123junk" attached segment 123 and "banana" attached segment 0. */
+static int __afl_parse_shmid(const char *s) {
+    errno = 0;
+    char *end = NULL;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || errno == ERANGE || v < 0 || v > INT_MAX) return -1;
+    return (int)v;
+}
+
 /* Set once a segment has been refused. adapters/inprocess.py retries
  * __afl_map_shm() when __afl_area is still NULL after load (for the case
  * where the environment arrived late); a refusal is final, so the retry
@@ -665,10 +683,8 @@ void __afl_map_shm(void) {
      * the kernel can hand one out (ipc ids start at seq 0), so refusing it
      * would trade this bug for a rarer one. A bogus 0 still fails loudly,
      * one line down, at shmat. */
-    errno = 0;
-    char *end = NULL;
-    long parsed = strtol(id, &end, 10);
-    if (end == id || *end != '\0' || errno == ERANGE || parsed < 0 || parsed > INT_MAX) {
+    int shmid = __afl_parse_shmid(id);
+    if (shmid < 0) {
         char msg[128];
         int n = snprintf(msg, sizeof(msg),
                          "__afl_shim: __AFL_SHM_ID=%.32s is not a valid segment id"
@@ -677,7 +693,6 @@ void __afl_map_shm(void) {
         __afl_refuse_shm();
         return;
     }
-    int shmid = (int)parsed;
 
     /* Read map size from environment.  AFL_MAP_SIZE is the number of
      * hash table entries (not bytes).  The Python side allocates SHM as
@@ -1734,8 +1749,11 @@ static uint32_t   __afl_node_bitmap_bytes = 0;
 static void *__afl_attach_sized(const char *env, uint64_t entry_bytes) {
     char *id = getenv(env);
     if (!id) return NULL;
-    int shmid = atoi(id);
-    if (shmid < 0) return NULL;
+    int shmid = __afl_parse_shmid(id);
+    if (shmid < 0) {
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return NULL;
+    }
     void *p = shmat(shmid, NULL, 0);
     if (p == (void *)-1) {
         __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
@@ -1999,6 +2017,48 @@ static void __afl_write_distance_tail_exit(void) {
 static int    __afl_cmplog_fd  = -1;
 static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
 static size_t __afl_cmplog_pos = 0;
+
+/* ── Log descriptors the target can steal ─────────────────────────────
+ *
+ * The shim's log fds live in the target's fd table. A target that closes
+ * every descriptor (daemon-style closefrom) and opens its own file gets
+ * the same number back, and the shim's records went into the target's
+ * file: measured, a target's output file held our CMP lines and the log
+ * held nothing. Remember what each fd was opened on and check it before
+ * writing; a stolen number is dropped (never closed -- it is the
+ * target's now) and the path reopened. O_CLOEXEC: programs the target
+ * execs never needed them. */
+struct __afl_fd_id {
+    dev_t dev;
+    ino_t ino;
+};
+
+static struct __afl_fd_id __afl_cmplog_fd_id;
+
+__AFL_NO_COV static int __afl_log_open(const char *path, int extra_flags, struct __afl_fd_id *id) {
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC | extra_flags, 0644);
+    struct stat st;
+    if (fd >= 0 && fstat(fd, &st) == 0) {
+        id->dev = st.st_dev;
+        id->ino = st.st_ino;
+    }
+    return fd;
+}
+
+/* 1 when fd still refers to the file it was opened on. fstat(2) is
+ * async-signal-safe, so the crash-handler flush may call this. */
+__AFL_NO_COV static int __afl_log_fd_ours(int fd, const struct __afl_fd_id *id) {
+    struct stat st;
+    return fd >= 0 && fstat(fd, &st) == 0 && st.st_dev == id->dev && st.st_ino == id->ino;
+}
+
+/* Before a write: drop a stolen fd and reopen the path from *env*. */
+__AFL_NO_COV static void __afl_log_keep(int *fd, struct __afl_fd_id *id, const char *env,
+                                        int extra_flags) {
+    if (*fd < 0 || __afl_log_fd_ours(*fd, id)) return;
+    const char *path = getenv(env);
+    *fd = (path && path[0]) ? __afl_log_open(path, extra_flags, id) : -1;
+}
 
 /* One owner of buf/pos at a time. Without it two threads could both pass
  * the room check, one advance pos, and the other write a whole record past
@@ -2281,6 +2341,7 @@ static const char *const __afl_cmp_names[__AFL_CMP_SITES] = {
 static uint64_t __afl_cmp_fired[__AFL_CMP_SITES];
 static uint64_t __afl_cmp_hit[__AFL_CMP_SITES];
 static int      __afl_cmp_counts_fd = -1;
+static struct __afl_fd_id __afl_cmp_counts_fd_id;
 
 /* ── Per-SITE comparison counters ($_CMPLOG_SITE_COUNTS) ──────────────
  *
@@ -2327,6 +2388,7 @@ struct __afl_cmp_site {
 static struct __afl_cmp_site __afl_cmp_sites[__AFL_CMP_SITE_SLOTS];
 static uint64_t __afl_cmp_site_dropped;   /* insertions the table refused */
 static int      __afl_cmp_sites_fd = -1;
+static struct __afl_fd_id __afl_cmp_sites_fd_id;
 
 /* splitmix64's finalizer. The low bits of a return address are nearly
  * constant across sites in one function, so the index has to come from
@@ -2394,10 +2456,11 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
      * the *next* flush fires, not before this one. No-op for a regular
      * file: O_NONBLOCK only changes open(2)/write(2) semantics for FIFOs
      * and some device nodes. */
+    __afl_log_keep(&__afl_cmplog_fd, &__afl_cmplog_fd_id, "_CMPLOG_OUT", O_NONBLOCK);
     if (__afl_cmplog_fd < 0) {
         const char *path = getenv("_CMPLOG_OUT");
         if (path && path[0]) {
-            __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NONBLOCK, 0644);
+            __afl_cmplog_fd = __afl_log_open(path, O_NONBLOCK, &__afl_cmplog_fd_id);
         }
         if (__afl_cmplog_fd < 0) {
             __afl_cmplog_pos = 0;
@@ -2477,6 +2540,7 @@ static char *__afl_put_hexbytes(char *p, const unsigned char *b, size_t n) {
  * "CNT " + 16 name + 2 * 20 digits + 2 separators + newline = 63 bytes,
  * so the 64-byte headroom check below cannot under-reserve. */
 __AFL_NO_COV static void __afl_cmp_dump_counts(void) {
+    __afl_log_keep(&__afl_cmp_counts_fd, &__afl_cmp_counts_fd_id, "_CMPLOG_COUNTS", 0);
     if (__afl_cmp_counts_fd < 0) return;
     char buf[2048];
     char *p = buf;
@@ -2516,6 +2580,7 @@ __AFL_NO_COV static void __afl_cmp_write_all(int fd, const char *buf, size_t len
  * its insertion probe once for the life of the process rather than once
  * per sync point. */
 __AFL_NO_COV static void __afl_cmp_dump_sites(void) {
+    __afl_log_keep(&__afl_cmp_sites_fd, &__afl_cmp_sites_fd_id, "_CMPLOG_SITE_COUNTS", 0);
     if (__afl_cmp_sites_fd < 0) return;
     char buf[4096];
     char *p = buf;
@@ -3399,14 +3464,14 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
      * rotated on a schedule the counts must not share. */
     const char *counts = getenv("_CMPLOG_COUNTS");
     if (counts && counts[0])
-        __afl_cmp_counts_fd = open(counts, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        __afl_cmp_counts_fd = __afl_log_open(counts, 0, &__afl_cmp_counts_fd_id);
     /* Separate switch, not a mode of the one above: per-site counting is a
      * hash and a probe per comparison against two array increments, and
      * memcmp is hot enough in most targets that it is not something to opt
      * everyone into. */
     const char *sites = getenv("_CMPLOG_SITE_COUNTS");
     if (sites && sites[0])
-        __afl_cmp_sites_fd = open(sites, O_WRONLY | O_CREAT | O_APPEND, 0644);
+        __afl_cmp_sites_fd = __afl_log_open(sites, 0, &__afl_cmp_sites_fd_id);
     const char *path = getenv("_CMPLOG_OUT");
     if (!path || !path[0]) return;
     /* O_NONBLOCK: see the matching comment in __afl_cmplog_flush. Without
@@ -3414,7 +3479,7 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
      * before the forkserver hello -- the loader would then be waiting on
      * a hello that never arrives, with nothing in the logs to explain
      * why. */
-    __afl_cmplog_fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_NONBLOCK, 0644);
+    __afl_cmplog_fd = __afl_log_open(path, O_NONBLOCK, &__afl_cmplog_fd_id);
 }
 
 __AFL_NO_COV static void __afl_cmplog_fini(void) {
@@ -3509,7 +3574,6 @@ __AFL_NO_COV static void __afl_cmplog_fini_dtor(void) { __afl_cmplog_fini(); }
  * bypasses the abort() preprocessor override below.  The override covers
  * the target's own source (FFmpeg av_assert0, etc.).                         */
 
-static sigjmp_buf __afl_jmp_buf;
 static struct sigaction __afl_old_handlers[8];
 /* No SIGPIPE: its default (and Python's SIG_IGN) is not a crash, and a
  * host interpreter writing to a closed pipe must get EPIPE, not a jump. */
@@ -3519,20 +3583,33 @@ static int __afl_guard_signals[] = {
 #define __afl_NUM_GUARD_SIGNALS \
     (int)(sizeof(__afl_guard_signals) / sizeof(__afl_guard_signals[0]))
 
-/* __afl_jmp_buf is only valid while __afl_guarded_call is on the stack.
- * Jumping to it anywhere else -- one-shot and forkserver children, which
- * never call it, or a host process after the call returned -- resumes a
- * dead frame: SIGFPE surfaced as SIGSEGV, ASAN's SEGV report was lost,
- * and a ctypes host died on its own broken pipe.
+/* The active guard frame of this thread: the jump buffer of the innermost
+ * __afl_guarded_call on its stack, or NULL when nothing is guarded.
  *
- * Armed per thread: a fault on a worker thread the entry spawned must not
- * jump onto the guarded thread's stack. Measured before this was __thread:
- * the jump "returned" -11 to Python, which then ran on the worker's OS
- * thread while the real main thread sat in pthread_join, and the process
- * hung at exit. A worker fault is not recoverable in-process; handing it
- * back kills the process with its real signal instead. */
-static __thread volatile sig_atomic_t __afl_guard_armed = 0;
+ * Only valid while that call is on the stack. Jumping anywhere else --
+ * one-shot and forkserver children, which never call it, or a host
+ * process after the call returned -- resumes a dead frame: SIGFPE
+ * surfaced as SIGSEGV, ASAN's SEGV report was lost, and a ctypes host died
+ * on its own broken pipe.
+ *
+ * Per thread: a fault on a worker thread the entry spawned must not jump
+ * onto the guarded thread's stack (the host then ran on the worker's OS
+ * thread and hung at exit). Per frame: a nested guarded call saves the
+ * outer frame and restores it, so a crash after the inner call returned
+ * still lands in the outer one (a single global buffer killed the host).
+ * Cleared in a fork() child, whose copy of the guarded frame belongs to a
+ * copy of the host. */
+static __thread sigjmp_buf *volatile __afl_guard_jmp = NULL;
 static volatile sig_atomic_t __afl_handlers_live = 0;
+
+/* siglongjmp values: a signal number, or one of these escape codes. */
+#define __AFL_JMP_EXIT     0x100   /* | (status & 0xFF): exit()/_exit() in the guard */
+#define __AFL_JMP_TIMEOUT  0x200   /* the guard's timer expired */
+
+/* What __afl_guarded_call_timeout returns when the budget runs out. -1 is
+ * free: guard signals are >= SIGILL (4), so -sig is never -1, and it is
+ * the fuzzer's cross-backend timeout sentinel. */
+#define __AFL_GUARD_TIMEOUT_RC (-1)
 
 /* Only a hardware fault re-executes into the same fault. Returning from
  * anything else loses the signal: a seccomp SIGSYS (si_code SYS_SECCOMP,
@@ -3589,10 +3666,9 @@ static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
     __afl_cmp_dump_sites();
 #endif
     __afl_sancov_fold();
-    if (__afl_guard_armed) {
-        __afl_guard_armed = 0;
-        siglongjmp(__afl_jmp_buf, sig);
-    }
+    sigjmp_buf *jb = __afl_guard_jmp;
+    if (jb)
+        siglongjmp(*jb, sig);
 
     /* Not ours to recover: hand the signal back to whoever owned it.
      * A hardware fault re-executes and faults again with its real si_addr;
@@ -3632,39 +3708,270 @@ static void __afl_check_crash_handlers(void) {
     }
 }
 
-/* ── Guarded call wrapper ─────────────────────────────────────────────
- * InProcessRunner's direct_lite mode calls this instead of calling the
- * fuzz entry function directly.  __afl_guarded_call sets up a sigsetjmp
- * buffer, calls the entry function, and returns normally.  If a signal
- * (SIGSEGV/SIGABRT) fires during the call, __afl_crash_handler does
- * siglongjmp back here, and we return a negative signal-indicating value.
+/* ── Guard timer ──────────────────────────────────────────────────────
  *
- * Returns the entry function's return value on success, or -sig (negated
- * signal number, e.g. -6 for SIGABRT, -11 for SIGSEGV) on crash.  This
- * matches the signal-indicating exit code convention used throughout the
- * fuzzer (run_target_stdin etc. return -sig on signal).                      */
+ * A C infinite loop never returns to the host, so the host's own SIGALRM
+ * handler (a Python one only sets a flag between bytecodes) cannot end it:
+ * direct mode hung forever. A per-thread POSIX timer delivers a real-time
+ * signal to the guarded thread only; its handler leaves through the guard.
+ *
+ * Arming and disarming a one-shot timer per call cost two syscalls,
+ * measured +455 ns per call -- about 12% of the cheapest direct-mode
+ * execution. Instead the timer ticks periodically at a quarter of the
+ * budget and is only reprogrammed when the budget changes; every timed
+ * call bumps an epoch, and a tick ends the call once the same epoch has
+ * spanned __AFL_TIMEOUT_TICKS more ticks:
+ *
+ *     call starts      tick 1        tick 2  ...  tick 5
+ *     |----------------|- - - -|- - - -|- - - -|- - -X   timeout
+ *     ^ epoch e         saw e, 1      2              > 4 -> jump
+ *
+ * so a hang is cut between the budget and 1.25x it, with no syscall in the
+ * steady state. The period is floored at 1 ms (finer budgets round up).
+ * Ticks outside a timed frame are ignored. Cost: the guarded thread takes
+ * one signal per period while the timer runs; SA_RESTART restarts most
+ * syscalls, but sleep()/poll() inside a timed entry can return early with
+ * EINTR. One timer per guarded thread, never deleted (bounded). */
+#define __AFL_TIMEOUT_SIG        (SIGRTMIN + 5)
+#define __AFL_TIMEOUT_TICKS      4
+#define __AFL_TIMEOUT_MIN_TICK_US 1000u
 
-__attribute__((visibility("default")))
-int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
-                       const uint8_t *data, size_t size) {
+static __thread int __afl_timer_state = 0;       /* 0 unset, 1 ready, -1 unavailable */
+static __thread timer_t __afl_timer;
+static __thread uint64_t __afl_timer_budget_us = 0;  /* budget the period was set for */
+static __thread volatile sig_atomic_t __afl_guard_timed = 0;  /* active frame is timed */
+static __thread volatile uint64_t __afl_guard_epoch = 0;      /* bumped per timed call */
+static __thread uint64_t __afl_tick_epoch = 0;
+static __thread uint32_t __afl_tick_count = 0;
+static int __afl_timeout_handler_live = 0;
+
+static void __afl_timeout_handler(int sig, siginfo_t *si, void *uc) {
+    (void)sig; (void)uc;
+    sigjmp_buf *jb = __afl_guard_jmp;
+    if (!jb || !__afl_guard_timed || !si || si->si_code != SI_TIMER) return;
+
+    if (__afl_tick_epoch != __afl_guard_epoch) {
+        __afl_tick_epoch = __afl_guard_epoch;
+        __afl_tick_count = 0;
+    }
+    if (++__afl_tick_count > __AFL_TIMEOUT_TICKS)
+        siglongjmp(*jb, __AFL_JMP_TIMEOUT);
+}
+
+static int __afl_timer_ready(void) {
+    if (__afl_timer_state) return __afl_timer_state > 0;
+    __afl_timer_state = -1;
+
+    if (!__afl_timeout_handler_live) {
+        struct sigaction sa;
+        sa.sa_sigaction = __afl_timeout_handler;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+        if (sigaction(__AFL_TIMEOUT_SIG, &sa, NULL) != 0) return 0;
+        __afl_timeout_handler_live = 1;
+    }
+
+    struct sigevent sev;
+    memset(&sev, 0, sizeof(sev));
+    sev.sigev_notify = SIGEV_THREAD_ID;
+    sev.sigev_signo = __AFL_TIMEOUT_SIG;
+    sev._sigev_un._tid = (pid_t)syscall(SYS_gettid);
+    if (timer_create(CLOCK_MONOTONIC, &sev, &__afl_timer) != 0) return 0;
+    __afl_timer_state = 1;
+    return 1;
+}
+
+/* Reprogram the periodic tick for a new budget; a no-op when unchanged. */
+static void __afl_timer_budget(uint64_t budget_us) {
+    if (budget_us == __afl_timer_budget_us) return;
+    __afl_timer_budget_us = budget_us;
+
+    uint64_t tick = budget_us / __AFL_TIMEOUT_TICKS;
+    if (tick < __AFL_TIMEOUT_MIN_TICK_US) tick = __AFL_TIMEOUT_MIN_TICK_US;
+    struct itimerspec its;
+    its.it_value.tv_sec = (time_t)(tick / 1000000u);
+    its.it_value.tv_nsec = (long)(tick % 1000000u) * 1000;
+    its.it_interval = its.it_value;
+    timer_settime(__afl_timer, 0, &its, NULL);
+}
+
+/* ── Guarded call wrapper ─────────────────────────────────────────────
+ *
+ * InProcessRunner's direct_lite mode calls this instead of the fuzz entry.
+ * It sets up a sigsetjmp frame, calls the entry, and returns normally;
+ * a crash, exit or timeout inside the entry siglongjmps back here.
+ *
+ * Returns the entry's own return value, or:
+ *   -sig     a crash signal on the guarded thread (-6 SIGABRT, -11 SIGSEGV)
+ *   status   exit(status) / _exit(status) inside the entry (see below)
+ *   -1       the timeout expired (__afl_guarded_call_timeout only)
+ * Matches the subprocess convention (run_target_stdin returns -sig, an
+ * exit status, or -1 for a timeout). */
+static int __afl_guard_run(int (*entry)(const uint8_t *, size_t),
+                           const uint8_t *data, size_t size, uint64_t timeout_us) {
     /* A stray signal handed the dispositions back, or a health read found
      * them displaced; take them again. */
     if (!__afl_handlers_live)
         __afl_install_crash_handlers();
     if (!__afl_altstack_ready)
         __afl_install_altstack();
+    int timed = timeout_us && __afl_timer_ready();
+    if (timed) __afl_timer_budget(timeout_us);
 
-    int sig;
-    if ((sig = sigsetjmp(__afl_jmp_buf, 1)) == 0) {
-        __afl_guard_armed = 1;
+    sigjmp_buf jb;
+    sigjmp_buf *prev = __afl_guard_jmp;
+    sig_atomic_t prev_timed = __afl_guard_timed;
+    int code = sigsetjmp(jb, 1);
+    if (code == 0) {
+        /* A frame nested in a timed one stays under the outer budget: a
+         * plain inner call used to switch timing off and its hang survived.
+         * The budget's clock starts at the outermost timed frame. */
+        if (timed && !prev_timed) __afl_guard_epoch++;
+        __afl_guard_timed = timed || prev_timed;
+        __afl_guard_jmp = &jb;
         int rc = entry(data, size);
-        __afl_guard_armed = 0;
+        __afl_guard_jmp = prev;
+        __afl_guard_timed = prev_timed;
         __afl_sancov_fold();
         return rc;
     }
-    /* sig = signal number from __afl_crash_handler's siglongjmp; that
-     * handler already folded the inline counters and disarmed. */
-    return -(int)sig;
+
+    __afl_guard_jmp = prev;
+    __afl_guard_timed = prev_timed;
+    __afl_sancov_fold();
+    if (code == __AFL_JMP_TIMEOUT) return __AFL_GUARD_TIMEOUT_RC;
+    if (code & __AFL_JMP_EXIT) return code & 0xFF;
+    return -code;
+}
+
+__attribute__((visibility("default")))
+int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
+                       const uint8_t *data, size_t size) {
+    return __afl_guard_run(entry, data, size, 0);
+}
+
+/* As __afl_guarded_call, but ends a hang after timeout_us microseconds
+ * (0 = no limit) and returns -1. The target is abandoned mid-execution,
+ * exactly as on a crash: whatever it held (locks, half-built heap state)
+ * stays as it was. */
+__attribute__((visibility("default")))
+int __afl_guarded_call_timeout(int (*entry)(const uint8_t *, size_t),
+                               const uint8_t *data, size_t size, uint64_t timeout_us) {
+    return __afl_guard_run(entry, data, size, timeout_us);
+}
+
+/* fork() inside a guarded entry: the child's copy of the guard frame
+ * belongs to a copy of the host. Left armed, a crash in the child jumped
+ * there and the child went on running the fuzzer. */
+static void __afl_guard_atfork_child(void) {
+    __afl_guard_jmp = NULL;
+    __afl_guard_timed = 0;
+    __afl_timer_state = 0;      /* POSIX timers are not inherited */
+    __afl_timer_budget_us = 0;
+}
+
+/* ── exit() / _exit() inside a guarded call ──────────────────────────
+ *
+ * A target that exits on bad input (libjpeg's default error_exit, CLI-style
+ * libraries) ended the host process in direct mode -- the fuzzer itself.
+ * Inside a guard they now leave through it and return the status, as a
+ * subprocess's exit status would. Outside a guard they are the real calls,
+ * so one-shot targets and forked children exit exactly as before.
+ *
+ * Hidden visibility binds every call in this module (the wrapper and any
+ * library objects linked into it) without interposing on the host, the
+ * same pattern as the trace-pc-guard callbacks. Other shared libraries
+ * keep libc's exit. */
+static void __afl_guard_escape(int status) {
+    sigjmp_buf *jb = __afl_guard_jmp;
+    if (jb)
+        siglongjmp(*jb, __AFL_JMP_EXIT | (status & 0xFF));
+}
+
+__attribute__((visibility("hidden"), noreturn))
+void _exit(int status) {
+    __afl_guard_escape(status);
+    syscall(SYS_exit_group, status);
+    __builtin_unreachable();
+}
+
+__attribute__((visibility("hidden"), noreturn))
+void _Exit(int status) {
+    _exit(status);
+}
+
+/* libc's own error-and-exit helpers reach exit() through an internal
+ * alias, past the hidden definition below, so errx(4, ...) inside a guard
+ * still ended the host. Reimplemented on top of it: the message goes to
+ * stderr as libc would print it, then exit() leaves through the guard.
+ * gnulib error() (grep) and BSD err() are the common callers. */
+__attribute__((visibility("hidden"), noreturn))
+void exit(int status);
+
+__attribute__((visibility("hidden"), noreturn))
+void verr(int status, const char *fmt, va_list ap) {
+    vwarn(fmt, ap);
+    exit(status);
+}
+
+__attribute__((visibility("hidden"), noreturn))
+void verrx(int status, const char *fmt, va_list ap) {
+    vwarnx(fmt, ap);
+    exit(status);
+}
+
+__attribute__((visibility("hidden"), noreturn))
+void err(int status, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    verr(status, fmt, ap);
+}
+
+__attribute__((visibility("hidden"), noreturn))
+void errx(int status, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    verrx(status, fmt, ap);
+}
+
+/* glibc error(): "prog: message[: strerror(errnum)]\n" after flushing
+ * stdout; exits only for a nonzero status. */
+static void __afl_verror(int status, int errnum, const char *where, unsigned line,
+                         const char *fmt, va_list ap) {
+    fflush(stdout);
+    fprintf(stderr, "%s:", program_invocation_name);
+    if (where) fprintf(stderr, "%s:%u:", where, line);
+    fputc(' ', stderr);
+    vfprintf(stderr, fmt, ap);
+    if (errnum) fprintf(stderr, ": %s", strerror(errnum));
+    fputc('\n', stderr);
+    if (status) exit(status);
+}
+
+__attribute__((visibility("hidden")))
+void error(int status, int errnum, const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    __afl_verror(status, errnum, NULL, 0, fmt, ap);
+    va_end(ap);
+}
+
+__attribute__((visibility("hidden")))
+void error_at_line(int status, int errnum, const char *file, unsigned line,
+                   const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    __afl_verror(status, errnum, file, line, fmt, ap);
+    va_end(ap);
+}
+
+__attribute__((visibility("hidden"), noreturn))
+void exit(int status) {
+    __afl_guard_escape(status);
+    void (*real_exit)(int) = (void (*)(int))dlsym(RTLD_NEXT, "exit");
+    if (real_exit)
+        real_exit(status);
+    _exit(status);   /* no libc exit reachable: at least end the process */
 }
 
 /* ── abort() override (all builds) ───────────────────────────────────
@@ -3859,6 +4166,7 @@ static void __afl_auto_init(void) {
     __afl_cmplog_init();
 #endif
     __afl_install_crash_handlers();
+    pthread_atfork(NULL, NULL, __afl_guard_atfork_child);
     __afl_mapping = 0;
     /* Last: the crash handlers must already be installed in the parent so
      * every forked child inherits them. */

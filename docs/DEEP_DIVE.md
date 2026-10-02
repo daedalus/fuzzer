@@ -908,6 +908,8 @@ Automatically detects ASAN-instrumented targets by checking for `__asan_init` sy
 ### AFL shim crash handlers (`afl_shim.c`)
 `__afl_auto_init` hooks `SIGSEGV SIGABRT SIGFPE SIGBUS SIGILL SIGSYS` (not `SIGPIPE`) with `SA_ONSTACK`. Every crash flushes cmplog and folds inline counters first. The guard is armed per thread: only a fault on the thread inside `__afl_guarded_call` `siglongjmp`s back (`-sig`); `__afl_guarded_call` also gives its thread a 64 KiB alternate signal stack (unless one exists), so a stack overflow is recovered instead of killing the host. Every other signal goes back to its previous owner: hardware faults (SEGV/BUS/FPE/ILL) re-execute with their real `si_addr`, everything else (kill, abort, seccomp `SIGSYS`) is re-raised. A worker-thread fault therefore kills the process with its real signal rather than hijacking the guarded thread. The next guarded call re-installs the handlers, as does a health read that finds them displaced. Marker: `__afl_scoped_crash_handler`. Tests: `tests/test_regression_shim_audit.py`, `tests/test_regression_shim_second_pass.py`.
 
+Inside a guarded call the shim also catches what would end the host: `exit`/`_exit`/`_Exit`, and libc's `err`/`errx`/`verr`/`verrx`/`error`/`error_at_line` (hidden-visibility definitions bound to this module, so other libraries keep libc's) return the exit status instead; outside a guard they are the real calls. Guard frames are per call and per thread: nested guarded calls restore the outer frame, a nested plain call stays under an outer timeout, and a `fork()` child starts unguarded. Limits: `exit()` from a worker thread, a target that blocks the crash signal before faulting, and a crash handler the target installs mid-call still end the host (the last one is repaired on the next health read). Cmplog/count log fds are `O_CLOEXEC` and re-checked by inode before each write; a number the target closed and reused is dropped and the path reopened. SHM ids are parsed strictly for every segment.
+
 ### Shim health checks
 Failures the shim survives but the fuzzer cannot otherwise see.
 
@@ -930,7 +932,7 @@ Counters (`core/shim_health.py::ShimField`, append-only ABI): `ATTACHED`, `MAP_E
 When collision risk exceeds the threshold, the bitmap SHM is resized. In inprocess mode, this patches the target's `__afl_area` pointer to the new SHM segment and invalidates the cached SHM attachment, so coverage writes don't go to freed memory. The target's compiled-in `__afl_map_mask` is not updated (static variable), so the target underutilizes the new bitmap — but writes remain in-bounds.
 
 ### Timeout in direct mode
-`--inprocess-direct` and direct_lite mode enforce timeout via `SIGALRM` + `setitimer`. Previously these modes had no timeout protection — a hanging target would freeze the fuzzer.
+`--inprocess-direct` and direct_lite call `__afl_guarded_call_timeout(entry, data, size, timeout_us)` when the shim exports it (`InProcessRunner._call_guarded`). A per-thread POSIX timer ticks every budget/4 (floor 1 ms) on a real-time signal; a call that spans more than four ticks leaves through the guard and returns `-1`, reported as `(-1, "timeout")`, so a hang is cut between the budget and 1.25× it with no syscall per call. The Python `SIGALRM` + `setitimer` path remains for targets without the shim; it only sets a flag between bytecodes and cannot interrupt a C loop. A timed-out target is abandoned mid-execution, as on a crash. Tests: `tests/test_regression_shim_hardening.py`.
 
 ## Corpus Minimization
 
