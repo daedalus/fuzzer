@@ -158,6 +158,12 @@ while True:
             # Child: own process group, run target function, write rc
             os.close(read_pipe)
             os.setsid()
+            # fd 1 is the RC protocol channel; target output there prefixed
+            # the reply header and the run read as -2 (fuzz_loader.c:
+            # redirect_stdout_to_null does the same).
+            _devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(_devnull, 1)
+            os.close(_devnull)
 
             # Best-effort ptrace self-trace so P1 (our direct parent) can read
             # the fault address + registers at the fatal-signal stop. Opt-in
@@ -255,7 +261,12 @@ while True:
                 rc = -(os.WEXITSTATUS(status) - 128)
             else:
                 rc_byte = os.read(read_pipe, 1)
-                rc = rc_byte[0] if rc_byte else -2
+                # No rc byte: the child exited mid-call (a non-recoverable
+                # sanitizer report _exit(1)s with abort_on_error=0, or the
+                # target called exit()). Relay its status so the report
+                # decides -- -2 is the infrastructure sentinel and is_crash
+                # drops it unread.
+                rc = rc_byte[0] if rc_byte else os.WEXITSTATUS(status)
         except ChildProcessError:
             rc = -2
         os.close(read_pipe)
