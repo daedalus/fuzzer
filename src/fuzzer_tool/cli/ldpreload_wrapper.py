@@ -141,6 +141,9 @@ _ASAN_DEFAULTS = (
     "verify_asan_link_order=0",
     "detect_leaks=0",
     "detect_odr_violation=0",
+    # Recover mode reports each bug PC once per process by default; an
+    # in-process run is one process, so repeats came back report-less.
+    "suppress_equal_pcs=0",
     ASAN_RELEASE_TO_OS,
 )
 _UBSAN_DEFAULTS = ("halt_on_error=1", "abort_on_error=1", "print_stacktrace=1")

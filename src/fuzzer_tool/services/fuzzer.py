@@ -631,6 +631,39 @@ def _detect_asan(target_path: str) -> bool:
     return False
 
 
+# Plain ASAN report entries; recover-mode sites call the *_noabort variants.
+_ASAN_REPORT_PREFIXES = (b"__asan_report_load", b"__asan_report_store")
+_NOABORT_SUFFIX = b"_noabort"
+
+
+def _asan_fatal_in_process(target_path: str) -> bool:
+    """True when *target_path* has ASAN checks that end the process on report.
+
+    A strong import (`U`) of a plain report entry is a check site compiled
+    without -fsanitize-recover=address; in a recover build those names stay
+    weak (`w`). In-process (direct_lite) needs every check recoverable: a
+    fatal one runs ASAN's Die() inside the fuzzer, and halt_on_error=0
+    cannot stop it.
+    """
+    import subprocess
+
+    try:
+        r = subprocess.run(["nm", "-D", target_path], capture_output=True, timeout=10)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    if r.returncode != 0:
+        return False
+
+    for line in r.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2 or parts[0] != b"U":
+            continue
+        name = parts[1]
+        if name.startswith(_ASAN_REPORT_PREFIXES) and not name.endswith(_NOABORT_SUFFIX):
+            return True
+    return False
+
+
 def _detect_ubsan(target_path: str) -> bool:
     """Detect if a binary is UBSAN-instrumented by checking for __ubsan_handle_* symbols."""
     import subprocess
@@ -4229,6 +4262,14 @@ class Fuzzer:
                 capture_stderr=target_is_asan or target_is_ubsan,
                 use_ptrace=self.use_ptrace,
             )
+            if use_direct_lite and target_is_asan and _asan_fatal_in_process(self.target):
+                # A plain ASAN check runs Die() inside this process: the first
+                # report ends the run, silently (stderr is a capture pipe).
+                print(
+                    f"[!] {self.target}: ASAN built without -fsanitize-recover=address; "
+                    "the first ASAN report will end this in-process run. "
+                    "Rebuild with tools/build_targets.sh."
+                )
             if use_direct_lite:
                 mode = "direct_lite"
             elif self._inprocess_runner._persistent:
