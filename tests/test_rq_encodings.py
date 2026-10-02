@@ -560,10 +560,47 @@ class TestFnv1aPreimages:
         assert 0 in counts
 
     def test_two_byte_table_is_injective(self):
-        """Adversarial: no collisions, so values are ints, not lists."""
-        fwd = _fnv1a_fwd_table()
-        assert len(fwd) == 1 << 16
-        assert all(isinstance(v, int) for v in fwd.values())
+        """Adversarial: no collisions, so a sorted key array is a valid lookup."""
+        keys, packed = _fnv1a_fwd_table()
+        assert len(set(keys.tolist())) == len(keys) == 1 << 16
+        assert sorted(packed.tolist()) == list(range(1 << 16))
+
+    def test_vectorized_matches_reference(self, monkeypatch):
+        """Vectorized inversion == pure-Python MITM; reference checked against itself first."""
+        monkeypatch.setattr(rq_encodings, "_fnv_inv_cache", rq_encodings.LRUCache(64))
+        rng = RandPool(seed=9)
+        targets = [_fnv1a(b"crsh"), 0] + [
+            int.from_bytes(rng.randbytes(4), "little") for _ in range(6)
+        ]
+        assert [_ref_invert(t) for t in targets] == [_ref_invert(t) for t in targets]
+        for t in targets:
+            assert sorted(_fnv1a_invert_all(t)) == _ref_invert(t)
+
+    def test_cmplog_does_not_flag_fnv_pair(self):
+        """Real call site passes is_hash_candidate; 4-byte FNV pairs must reach the encoder."""
+        from fuzzer_tool.core.cmplog import CmplogCollector  # noqa: PLC0415
+
+        c = CmplogCollector()
+        a, b = _fnv_le(b"xxxx"), _fnv_le(b"crsh")
+        c.detect_hash_candidates([(a, b)])
+        muts = generate_mutations(
+            a, b, 32, "CMP", b"AAxxxxBB", hammer=True, is_hash=c.is_hash_candidate
+        )
+        assert ((2,), (b"crsh",)) in [(m[0], m[1]) for m in _by_encoder(muts, "fnv1a_p")]
+
+
+def _ref_invert(target: int) -> list[bytes]:
+    """Independent pure-Python MITM: dict forward table, scalar backward loop."""
+    mask, inv = 0xFFFFFFFF, pow(16777619, -1, 1 << 32)
+    fwd = {_fnv1a(bytes((a, b))): (a, b) for a in range(256) for b in range(256)}
+    out = []
+    for c in range(256):
+        for d in range(256):
+            h3 = ((target * inv) & mask) ^ d
+            h = ((h3 * inv) & mask) ^ c
+            if h in fwd:
+                out.append(bytes((*fwd[h], c, d)))
+    return sorted(out)
 
     def test_table_built_once(self):
         assert _fnv1a_fwd_table() is _fnv1a_fwd_table()
