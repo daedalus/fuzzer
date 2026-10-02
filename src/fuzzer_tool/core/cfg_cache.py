@@ -96,19 +96,24 @@ def decoder_fingerprint() -> str:
     return h.hexdigest()[:16]
 
 
+def binary_digest(path: str) -> str:
+    """ELF build-id hex, else sha256 of the file. Raises OSError if unreadable."""
+    bid = _elf_mod.build_id(path)
+    if bid is not None:
+        return bid.hex()
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def identity(path: str) -> str | None:
     """Cache key for *path*, or None when the file cannot be identified."""
     try:
-        bid = _elf_mod.build_id(path)
         st_size = os.path.getsize(path)
-        if bid is not None:
-            binary_part = bid.hex()
-        else:
-            h = hashlib.sha256()
-            with open(path, "rb") as f:
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    h.update(chunk)
-            binary_part = h.hexdigest()
+        binary_part = binary_digest(path)
     except OSError as e:
         log.debug("cfg-cache identity unavailable for %s: %s", path, e)
         return None

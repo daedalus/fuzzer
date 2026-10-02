@@ -19,6 +19,7 @@ from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.shim_health import WriteGuard
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.fuzzer import Fuzzer
+from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
 
 _original_print = builtins.print
@@ -925,6 +926,9 @@ def cmd_fuzz(args):
                 output_graph_path,
                 target_label=", ".join(getattr(args, "targets", []) or []),
             )
+
+    if getattr(args, "ledger_preset", None) is not None:
+        _record_ledger(args, fuzzer)
 
     if args.report is not None:
         from fuzzer_tool.services.report import generate_report
@@ -2227,6 +2231,59 @@ def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentPar
     )
 
 
+# --preset-ledger ballot; mirrors tools/lib/bench.sh's arms. Order matters:
+# untried presets run first, in this order.
+_LEDGER_PRESETS: dict[str, tuple[str, ...]] = {
+    "baseline": (),
+    "enhanced": ("--elo", "--mc-bandit", "--mopt"),
+    "optimal": (
+        "--elo",
+        "--mopt",
+        "--replicator",
+        "--markov",
+        "--markov-gen",
+        "--markov-order",
+        "0,1,2,3",
+    ),
+    "qea": ("--qea",),
+}
+
+
+def _apply_preset_ledger(args: argparse.Namespace, fuzz_parser: argparse.ArgumentParser) -> None:
+    """Pick this campaign's preset from the target's ledger; explicit flags win."""
+    if len(args.targets) != 1:
+        print("[ledger] --preset-ledger needs exactly one target; ignored")
+        return
+
+    target = args.targets[0]
+    session = LedgerSession(target)
+    name = session.choose(list(_LEDGER_PRESETS))
+
+    # Same rule as --hail-mary: only options still at their default change.
+    preset = fuzz_parser.parse_args([target, *_LEDGER_PRESETS[name]])
+    for dest, value in vars(preset).items():
+        default = fuzz_parser.get_default(dest)
+        if value == default or getattr(args, dest, default) != default:
+            continue
+        setattr(args, dest, value)
+
+    if args.stall == fuzz_parser.get_default("stall"):
+        args.stall = session.stall_prior(args.stall)
+
+    args.ledger_preset = name
+    print(f"[ledger] preset={name} build={session.build} stall={args.stall}")
+
+
+def _record_ledger(args: argparse.Namespace, fuzzer) -> None:
+    """Record a finished fresh campaign; resumed ones inherit coverage, so skip."""
+    if args.resume:
+        print("[ledger] --resume campaign not recorded")
+        return
+
+    if not LedgerSession(args.targets[0]).finish(fuzzer, args.ledger_preset):
+        print("[ledger] no SHM edge count; campaign not recorded")
+
+
 def main() -> int:
     sys.stdout.reconfigure(line_buffering=True)
     sys.stderr.reconfigure(line_buffering=True)
@@ -2305,6 +2362,15 @@ def main() -> int:
         "options still at their default get force-enabled. Very slow, very "
         "noisy, exploratory last resort -- not a normal run mode.",
     )
+    fuzz_parser.add_argument(
+        "--preset-ledger",
+        action="store_true",
+        help="Pick a config preset per campaign by UCB1 over this target's past "
+        "campaigns (~/fuzzing/<target>/ledger), and derive --stall from their "
+        "longest broken silences. Explicit flags win. Fresh campaigns only are "
+        "recorded (not --resume); score is cumulative SHM edges.",
+    )
+    fuzz_parser.set_defaults(ledger_preset=None)
     fuzz_parser.add_argument("-M", "--mutations", type=int, default=8, help="Mutations per input")
     fuzz_parser.add_argument(
         "-c",
@@ -5433,5 +5499,8 @@ def main() -> int:
 
     if args.command == "fuzz" and getattr(args, "hail_mary", False):
         _apply_hail_mary(args, fuzz_parser)
+
+    if args.command == "fuzz" and getattr(args, "preset_ledger", False):
+        _apply_preset_ledger(args, fuzz_parser)
 
     return args.func(args)

@@ -1705,6 +1705,8 @@ class Fuzzer:
         self._reseed_on_stall = reseed_on_stall
         self._max_collision_risk = max_collision_risk
         self._last_new_edge_exec = 0
+        # Longest broken silence (execs between discoveries); --preset-ledger's stall prior.
+        self._max_edge_gap = 0
         # Effective edges of the executions between discoveries, for the
         # stall reason (P2-1).  Sparse SHM path only; empty elsewhere.
         from fuzzer_tool.core.scheduler_substrate import ExecutionPerplexity

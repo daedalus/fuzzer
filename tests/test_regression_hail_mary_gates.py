@@ -106,6 +106,9 @@ _EXCLUDED_OPT_IN = frozenset(
         # --hail-mary means "every plausible strategy", not "every strategy
         # whose selection-quality tradeoff is still a guess".
         "mds_select",
+        # Picks a config preset, not a strategy: a kitchen-sink run is no
+        # preset, and recording it would skew the target's ledger.
+        "preset_ledger",
         # Its seed-selection counterpart (see --seed-canary-scheduler help):
         # same deliberately-worst-in-class floor role, same reasoning, one
         # tournament over.
