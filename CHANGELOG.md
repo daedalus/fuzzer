@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Documentation
+
+- **paper_collection survey handover** (`docs/handover/handover_paper_collection_survey_2026-10-02.md`): maps ~814 papers to existing fuzzer features; ranks six gaps (hot bytes, checksum repair, binary rewriting, resource feedback, Grimoire, evaluation stats). Analysis only.
+
 ### Fixed
 
 - **`fnv1a_p`/`fnv1a_r` slowed every Redqueen pair** (`core/rq_encodings.py`): replacement variants were built before the input search, 400 non-matching pairs 0.009 s → 0.51 s. Restored lazy build after a pattern hit (0.010 s). FNV-1a now inverts only the constant, not ±64 neighbours: match found 2.18 s → 0.05 s per pair. 2-byte table is `dict[int, int]` (injective), built once via `functools.cache`. Comments no longer call FNV-1a a bijection (measured: ~1 preimage on average, none for ~1/3). Encodings with an empty chunk are dropped on both sides.
