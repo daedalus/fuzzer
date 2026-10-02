@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 
 _SRC = os.path.join(os.path.dirname(__file__), "antifuzz_evade.c")
 
+# Basename fragments of the ASAN runtime (gcc libasan, clang libclang_rt.asan).
+_ASAN_TAGS = ("libasan", "libclang_rt.asan")
+
 # Built once per process; the .so is pure code with no per-target state.
 _cached_so: str | None = None
 
@@ -63,7 +66,9 @@ def build_evade_shim(cc: str = "clang") -> str | None:
 
 
 def evade_ld_preload(existing: str | None = None, cc: str = "clang") -> str | None:
-    """``LD_PRELOAD`` value that prepends the evasion shim to *existing*.
+    """``LD_PRELOAD`` value adding the evasion shim to *existing*.
+
+    First entry, or right after the ASAN runtime when one is preloaded.
 
     Returns None (caller leaves LD_PRELOAD untouched) when the shim cannot
     be built, so evasion is best-effort and never breaks a run.
@@ -75,4 +80,16 @@ def evade_ld_preload(existing: str | None = None, cc: str = "clang") -> str | No
     if not existing:
         return so
 
-    return f"{so}:{existing}" if so not in existing.split(":") else existing
+    parts = existing.split(":")
+    if so in parts:
+        return existing
+
+    # ASAN aborts unless its runtime is first: insert after the last one.
+    #   "libasan.so:x.so" -> "libasan.so:<shim>:x.so"
+    at = 0
+    for i, p in enumerate(parts):
+        if any(tag in os.path.basename(p) for tag in _ASAN_TAGS):
+            at = i + 1
+
+    parts.insert(at, so)
+    return ":".join(parts)

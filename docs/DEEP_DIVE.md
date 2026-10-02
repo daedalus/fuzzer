@@ -1600,6 +1600,8 @@ one real heap-buffer-overflow, for measuring each defeat in isolation.
 `AF_HASHCMP=0` swaps the hashed magic compare for `memcmp`, so cmplog can reach
 the bug. `AF_CRASH`/`AF_PTRACE` run once in `main()` only; the `.so` skips them.
 `--antifuzz-evade` is ignored in in-process mode (`LD_PRELOAD` cannot reach it).
+It is installed before the forkserver starts (the loader snapshots its env once)
+and placed after any preloaded ASAN runtime, which must stay first.
 
 Fuzzification (Jung et al., USENIX Security '19) adds two more:
 

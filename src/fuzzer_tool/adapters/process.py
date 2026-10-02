@@ -180,6 +180,12 @@ def _clean_env(env: dict[str, str] | None = None) -> dict[str, str]:
 _clean_env_cache: dict[str, str] | None = None
 
 
+def reset_env_cache() -> None:
+    """Drop the cached parent env; call after mutating os.environ."""
+    global _clean_env_cache
+    _clean_env_cache = None
+
+
 # ── ASLR control ────────────────────────────────────────────────────────
 #
 # Every coverage identity in this fuzzer is compared ACROSS target

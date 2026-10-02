@@ -139,3 +139,19 @@ def test_evade_installed_out_of_process(monkeypatch) -> None:
     _evade_fuzzer(None)._install_antifuzz_evade()
 
     assert os.environ["LD_PRELOAD"] == "evade.so:keep.so"
+
+
+def test_regression_evade_refreshes_env_cache(monkeypatch) -> None:
+    # A _clean_env(None) snapshot taken before install must not hide the shim.
+    from fuzzer_tool.adapters import process
+
+    monkeypatch.setattr(
+        "fuzzer_tool.adapters.evade_shim.evade_ld_preload", lambda cur: f"evade.so:{cur}"
+    )
+    monkeypatch.setenv("LD_PRELOAD", "keep.so")
+    monkeypatch.setattr(process, "_clean_env_cache", None)
+    process._clean_env(None)
+
+    _evade_fuzzer(None)._install_antifuzz_evade()
+
+    assert process._clean_env(None)["LD_PRELOAD"] == "evade.so:keep.so"
