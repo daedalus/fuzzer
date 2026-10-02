@@ -93,6 +93,38 @@ def _kill_process_group(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
+def _timeout_stderr(data: bytes) -> str:
+    """stderr for a timed-out run: what the target wrote, else the sentinel.
+
+    A sanitizer report written before the deadline is a crash
+    (``TargetRunner.is_crash``); replacing it with "timeout" filed it as
+    a hang. Silent runs keep the "timeout" text callers print.
+    """
+    return data.decode(errors="replace") if data else "timeout"
+
+
+def _read_partial(stream) -> bytes:
+    """Read what a killed target left in *stream*, without blocking.
+
+    The process group is dead, but a descendant that escaped it (setsid)
+    may still hold the write end; a blocking read would wait on it.
+    """
+    fd = stream.fileno()
+    os.set_blocking(fd, False)
+    chunks: list[bytes] = []
+    total = 0
+    while total < _STDERR_CAP:
+        try:
+            chunk = os.read(fd, _STDERR_CAP - total)
+        except BlockingIOError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return b"".join(chunks)
+
+
 def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
     """Read *fd* until EOF or *timeout*, returning (data, timed_out).
 
@@ -392,7 +424,7 @@ def run_target_fast(
         _untrack(pid)
 
         if timed_out:
-            return -1, "timeout", pid
+            return -1, _timeout_stderr(stderr_data), pid
 
         if os.WIFEXITED(status):
             rc = os.WEXITSTATUS(status)
@@ -510,7 +542,7 @@ def run_target_stdin(
         _untrack(proc.pid)
 
         if timed_out.is_set():
-            return -1, "timeout", proc.pid
+            return -1, _timeout_stderr(_read_partial(proc.stderr)), proc.pid
 
         stderr = proc.stderr.read()
         return proc.returncode, stderr.decode(errors="replace"), proc.pid
@@ -667,7 +699,7 @@ def run_target_file(
             tmp_file.unlink()
 
         if timed_out.is_set():
-            return -1, "timeout", proc.pid
+            return -1, _timeout_stderr(_read_partial(proc.stderr)), proc.pid
 
         stderr = proc.stderr.read()
         return proc.returncode, stderr.decode(errors="replace"), proc.pid

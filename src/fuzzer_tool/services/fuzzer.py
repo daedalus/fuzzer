@@ -4995,6 +4995,9 @@ class Fuzzer:
     def _is_crash(self, returncode: int, stderr: str):
         return self._runner.is_crash(returncode, stderr)
 
+    def _confirm_hang(self, data: bytes):
+        return self._runner.confirm_hang(data)
+
     def mutate(self, data: bytes):
         return self._operators.mutate(data)
 

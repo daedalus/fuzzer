@@ -155,14 +155,27 @@ static void timeout_handler(int sig) {
     siglongjmp(timeout_jmp, 1);
 }
 
-/* SIGALRM handler for fork/exec path — kills the child, then waitpid reaps */
+/* SIGKILL *pid*'s process group, else *pid* alone. Async-signal-safe.
+
+   Every child leads its own group (setpgid in the child and the parent), so
+   the group reaches what the target spawned. Killing only the pid let a
+   Chalmers "Escaping the Fuzz" Listing 5 wrapper (main in a forked child)
+   leave the grandchild running: it held the stderr pipe past the deadline
+   and leaked. A target built against an older shim keeps its run children
+   in the forkserver's group; -pid then fails with ESRCH and the fallback
+   kills the child only, never the server. */
+static void kill_tree(pid_t pid) {
+    if (kill(-pid, SIGKILL) < 0) kill(pid, SIGKILL);
+}
+
+/* SIGALRM handler for fork/exec path — kills the child's tree, then waitpid reaps */
 static pid_t exec_child_pid = -1;
 
 static void exec_alarm_handler(int sig) {
     (void)sig;
     timed_out = 1;
     if (exec_child_pid > 0) {
-        kill(exec_child_pid, SIGKILL);
+        kill_tree(exec_child_pid);
     }
 }
 
@@ -305,6 +318,7 @@ static int start_forkserver(void) {
            only: the fork+exec fallback would pay it on every exec. A
            caller's own value wins (overwrite = 0). */
         setenv("LD_BIND_NOW", "1", 0);
+        setpgid(0, 0);
         dup2(ctl[0], AFL_FORKSRV_FD);
         dup2(st[1], AFL_FORKSRV_FD + 1);
         close(ctl[0]); close(ctl[1]);
@@ -321,6 +335,7 @@ static int start_forkserver(void) {
     }
 
     close(ctl[0]); close(st[1]); close(errp[1]);
+    setpgid(pid, pid);   /* both sides: no window where kill_tree misses */
 
     /* Bound the handshake: a target without the forkserver runs to
        completion instead of answering, and we must not hang on it. */
@@ -340,7 +355,7 @@ static int start_forkserver(void) {
     signal(SIGALRM, SIG_DFL);
 
     if (!ok) {
-        kill(pid, SIGKILL);
+        kill_tree(pid);
         waitpid(pid, NULL, 0);
         close(ctl[1]); close(st[0]); close(errp[0]);
         return 0;
@@ -406,6 +421,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
     if (pid < 0) { close(errfd[0]); close(errfd[1]); return -2; }
 
     if (pid == 0) {
+        setpgid(0, 0);
         close(errfd[0]);
         dup2(input_fd, STDIN_FILENO);
         dup2(errfd[1], STDERR_FILENO);
@@ -420,6 +436,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
     }
 
     close(errfd[1]);
+    setpgid(pid, pid);
 
     exec_child_pid = pid;
     timed_out = 0;
@@ -447,7 +464,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
         /* The handler SIGKILL'd the child; reap it and report the timeout as
            -1. Reporting -SIGKILL instead would land in the crash codes and
            file every slow input as a fatal signal. */
-        kill(pid, SIGKILL);
+        kill_tree(pid);
         waitpid(pid, NULL, 0);
         return -1;
     }
