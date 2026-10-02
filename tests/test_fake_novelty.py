@@ -113,3 +113,116 @@ def test_compute_weights_demotes_flooding_seed(fuzzer) -> None:
     flooded = fuzzer._compute_weights(now)[0]
 
     assert flooded == pytest.approx(base * FAKE_NOVELTY_PENALTY)
+
+
+# ── End to end: simulated BranchTrap through the real fuzz loop ──────────
+# The target is modelled in Python behind a minimal SHM stand-in, so
+# admission, the phantom rerun and edge tracking run unpatched. Only
+# execution and mutation are scripted (no RNG).
+
+_REAL_EDGES = (1, 2, 3)
+_GADGET_BASE = 1000  # fake edge ids start here
+
+
+def _branchtrap(data: bytes) -> set[int]:
+    """Real edges plus one gadget edge picked by the last two input bytes."""
+    return {*_REAL_EDGES, _GADGET_BASE + int.from_bytes(data[-2:], "little")}
+
+
+_SMALL_POOL = 8  # gadgets per trapped return in a cheap trap
+
+
+def _honest(data: bytes) -> set[int]:
+    """Real edges plus one branch on the low bit of the mutated byte."""
+    return {*_REAL_EDGES, 10 + (data[-2] & 1)}
+
+
+def _small_trap(data: bytes) -> set[int]:
+    """BranchTrap with few gadgets: XOR of the input bytes picks one of 8."""
+    xor = 0
+    for b in data:
+        xor ^= b
+    return {*_REAL_EDGES, _GADGET_BASE + xor % _SMALL_POOL}
+
+
+class _ModelShm:
+    """SHM stand-in: the last executed input's edges under *model*."""
+
+    last_old_bucket_novel = False
+    new_max_edges = 0  # no hit-count maxima here
+
+    def __init__(self, model) -> None:
+        self._model = model
+        self._edges: set[int] = set()
+        self._seen: set[int] = set()
+        self.last_new_ids: frozenset[int] = frozenset()
+
+    def run(self, data: bytes):
+        self._edges = self._model(data)
+        return 0, ""
+
+    def is_new_coverage_with_edges(self):
+        self.last_new_ids = frozenset(self._edges - self._seen)
+        self._seen |= self._edges
+        return bool(self.last_new_ids), set(self._edges)
+
+    def get_edge_ids(self) -> set[int]:
+        return set(self._edges)
+
+    def get_edge_counts(self) -> dict[int, int]:
+        return dict.fromkeys(self._edges, 1)
+
+    def reject_phantoms(self, phantoms) -> None:
+        self._seen -= set(phantoms)
+
+    def read_stack_depth(self) -> int:
+        return 0
+
+    def read_path_hash(self) -> int:
+        return hash(frozenset(self._edges)) or 1
+
+
+def _campaign(fuzzer, model) -> dict:
+    """Run FAKE_NOVELTY_MIN_FUZZ rounds on one parent; return its meta."""
+    shm = _ModelShm(model)
+    fuzzer.shm_cov = shm
+    parent = fuzzer.corpus[0]
+
+    # Mutant i carries i in its last two bytes (LE).
+    # Short mutants keep coverage trimming (len > 10) out of the loop.
+    mutants = iter(b"M" + i.to_bytes(2, "little") for i in range(FAKE_NOVELTY_MIN_FUZZ))
+    with (
+        patch.object(fuzzer, "_dedup_mutate", side_effect=lambda _d: next(mutants)),
+        patch.object(fuzzer, "_run_target", side_effect=shm.run),
+        patch.object(fuzzer, "_is_crash", return_value=False),
+        patch.object(fuzzer, "_is_interesting", return_value=False),
+    ):
+        for _ in range(FAKE_NOVELTY_MIN_FUZZ):
+            fuzzer.fuzz_one(parent)
+
+    return fuzzer.seed_meta[parent]
+
+
+def test_branchtrap_parent_is_demoted(fuzzer) -> None:
+    meta = _campaign(fuzzer, _branchtrap)
+
+    assert meta["child_count"] / meta["fuzz_count"] >= AdmissionMonitor.FLOOD_RATE
+    assert _weight(meta) == pytest.approx(FAKE_NOVELTY_PENALTY)
+
+
+def test_honest_parent_keeps_weight(fuzzer) -> None:
+    # Falsification: two real outcomes admit at most two children.
+    meta = _campaign(fuzzer, _honest)
+
+    assert meta.get("child_count", 0) <= len({10, 11})
+    assert _weight(meta) == 1.0
+
+
+def test_small_gadget_pool_exhausts_without_penalty(fuzzer) -> None:
+    # Adversarial: a trap with N gadgets yields at most N fake ids, then
+    # stops flooding. Its parent is not demoted: the cost it imposes is
+    # bounded by N admissions, not by the campaign length.
+    meta = _campaign(fuzzer, _small_trap)
+
+    assert meta.get("child_count", 0) <= _SMALL_POOL
+    assert _weight(meta) == 1.0
