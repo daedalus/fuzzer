@@ -93,6 +93,10 @@ def _all_operator_schedulers():
     kalman_ts = S.KalmanTSScheduler()
     ids = S.IDSScheduler()
     phe = S.PHEScheduler()
+    exp3_ix = S.EXP3IXScheduler()
+    regret_matching = S.RegretMatchingScheduler()
+    automaton = S.LearningAutomatonScheduler()
+    ant_colony = S.AntColonyScheduler()
     fewa = S.FEWAScheduler()
     softmax = S.SoftmaxScheduler()
 
@@ -187,6 +191,15 @@ def _all_operator_schedulers():
         ("KalmanTSScheduler", kalman_ts, kalman_ts.select_op, kalman_ts.record),
         ("IDSScheduler", ids, ids.select_op, ids.record),
         ("PHEScheduler", phe, phe.select_op, phe.record),
+        ("EXP3IXScheduler", exp3_ix, exp3_ix.select_op, exp3_ix.record),
+        (
+            "RegretMatchingScheduler",
+            regret_matching,
+            regret_matching.select_op,
+            regret_matching.record,
+        ),
+        ("LearningAutomatonScheduler", automaton, automaton.select_op, automaton.record),
+        ("AntColonyScheduler", ant_colony, ant_colony.select_op, ant_colony.record),
         ("FEWAScheduler", fewa, fewa.select_op, fewa.record),
         ("SoftmaxScheduler", softmax, softmax.select_op, softmax.record),
     ]

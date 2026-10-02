@@ -76,6 +76,7 @@ from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
 from fuzzer_tool.core.schedulers import (
+    AntColonyScheduler,
     BayesUCBScheduler,
     BOGPUCBScheduler,
     C2UCBScheduler,
@@ -89,6 +90,7 @@ from fuzzer_tool.core.schedulers import (
     CUSUM_UCBScheduler,
     DUCBScheduler,
     EpsilonGreedyScheduler,
+    EXP3IXScheduler,
     Exp3Scheduler,
     Exp4Scheduler,
     FEWAScheduler,
@@ -101,10 +103,12 @@ from fuzzer_tool.core.schedulers import (
     KL_DUCBScheduler,
     KL_SWUCBScheduler,
     LasVegasScheduler,
+    LearningAutomatonScheduler,
     MonteCarloScheduler,
     MOptScheduler,
     MOSSScheduler,
     PHEScheduler,
+    RegretMatchingScheduler,
     ReplicatorScheduler,
     RoundRobinScheduler,
     SoftmaxScheduler,
@@ -205,6 +209,10 @@ _OPERATOR_STRATEGY_NAMES = (
     "kalman_ts",
     "ids",
     "phe",
+    "exp3_ix",
+    "regret_matching",
+    "automaton",
+    "ant_colony",
     "invasion",
     "round_robin",
     "canary",
@@ -1353,6 +1361,14 @@ class Fuzzer:
         ids_samples=128,
         phe=False,
         phe_a=1.1,
+        exp3_ix=False,
+        exp3_ix_eta_scale=1.0,
+        regret_matching=False,
+        regret_matching_mix=0.1,
+        automaton=False,
+        automaton_rate=0.03,
+        ant_colony=False,
+        ant_colony_rho=0.05,
         whittle=False,
         whittle_n_states=5,
         whittle_gamma=0.95,
@@ -3321,6 +3337,28 @@ class Fuzzer:
         if phe:
             self._phe = PHEScheduler(a=phe_a, rng=self._rng)
             log.info("PHE enabled (a=%.2f)", phe_a)
+        # EXP3-IX, regret matching+, L_R-I automaton, ant colony: Elo-only for
+        # the same reason; the first three are on-policy (see fuzz_round).
+        self._use_exp3_ix = exp3_ix
+        self._exp3_ix = None
+        if exp3_ix:
+            self._exp3_ix = EXP3IXScheduler(eta_scale=exp3_ix_eta_scale, rng=self._rng)
+            log.info("EXP3-IX enabled (eta_scale=%.2f)", exp3_ix_eta_scale)
+        self._use_regret_matching = regret_matching
+        self._regret_matching = None
+        if regret_matching:
+            self._regret_matching = RegretMatchingScheduler(mix=regret_matching_mix, rng=self._rng)
+            log.info("Regret matching+ enabled (mix=%.2f)", regret_matching_mix)
+        self._use_automaton = automaton
+        self._automaton = None
+        if automaton:
+            self._automaton = LearningAutomatonScheduler(rate=automaton_rate, rng=self._rng)
+            log.info("L_R-I automaton enabled (rate=%.3f)", automaton_rate)
+        self._use_ant_colony = ant_colony
+        self._ant_colony = None
+        if ant_colony:
+            self._ant_colony = AntColonyScheduler(rho=ant_colony_rho, rng=self._rng)
+            log.info("Ant colony enabled (rho=%.3f)", ant_colony_rho)
 
         # Whittle index (restless-bandit index policy). Off by default and
         # Elo-only (see core/schedulers/op_whittle.py's module docstring): the
@@ -3844,6 +3882,10 @@ class Fuzzer:
             or self._kalman_ts
             or self._ids
             or self._phe
+            or self._exp3_ix
+            or self._regret_matching
+            or self._automaton
+            or self._ant_colony
             or self._kl_swucb
             or self._consolidated_v1
             or self._consolidated_v2
@@ -4062,6 +4104,14 @@ class Fuzzer:
             _register_arms(self._ids, _format_priors)
         if self._phe:
             _register_arms(self._phe, _format_priors)
+        if self._exp3_ix:
+            _register_arms(self._exp3_ix)
+        if self._regret_matching:
+            _register_arms(self._regret_matching)
+        if self._automaton:
+            _register_arms(self._automaton)
+        if self._ant_colony:
+            _register_arms(self._ant_colony, _format_priors)
         if self._gradient:
             _register_arms(self._gradient)
         if self._whittle:
@@ -7714,8 +7764,9 @@ class Fuzzer:
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        # corral, tsallis, kalman_ts, ids and phe are deliberately absent
-        # from this banner too, same reason,
+        # corral, tsallis, kalman_ts, ids, phe, exp3_ix, regret_matching,
+        # automaton and ant_colony are deliberately absent from this banner
+        # too, same reason,
         # see core/schedulers/op_corral.py.
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/op_gradient.py.
@@ -8214,8 +8265,9 @@ class Fuzzer:
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        # corral, tsallis, kalman_ts, ids and phe are deliberately absent
-        # from this banner too, same reason,
+        # corral, tsallis, kalman_ts, ids, phe, exp3_ix, regret_matching,
+        # automaton and ant_colony are deliberately absent from this banner
+        # too, same reason,
         # see core/schedulers/op_corral.py.
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/op_gradient.py.

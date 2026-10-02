@@ -46,6 +46,7 @@ import math
 import numpy as np
 
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.schedulers._reward import unit_reward
 
 #: Largest variance of a random variable on [0, 1]; the predict cap.
 VAR_MAX = 0.25
@@ -54,13 +55,6 @@ VAR_MAX = 0.25
 #: in ~10 rounds; Q_MIN keeps a quiet arm's variance from freezing.
 Q_MIN = 1e-8
 Q_MAX = 1e-2
-
-
-def _reward(success: bool, weight: float) -> float:
-    """Reward in [0, 1]; NaN counts as 0, infinities clamp to the bounds."""
-    if not success or math.isnan(weight):
-        return 0.0
-    return min(1.0, max(0.0, weight))
 
 
 class KalmanTSScheduler:
@@ -171,7 +165,7 @@ class KalmanTSScheduler:
         self.init_arm(name)
         self._t += 1
         j = self._idx[name]
-        y = _reward(success, weight)
+        y = unit_reward(success, weight)
 
         # Predict over the rounds elapsed since this arm's last update.
         m = float(self._meanv[j])
