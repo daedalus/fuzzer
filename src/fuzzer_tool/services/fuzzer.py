@@ -4047,6 +4047,7 @@ class Fuzzer:
         # explicit --inprocess/--inprocess-direct path, or ASAN aborts on first call
         # with "ASan runtime does not come first" instead of running the target.
         target_is_asan = False
+        target_is_ubsan = False
         if self.target.lower().endswith((".so", ".dylib", ".dll")):
             target_is_asan = _detect_asan(self.target)
             if target_is_asan:
@@ -4308,6 +4309,9 @@ class Fuzzer:
                 coverage_env_id=cov_env_id,
                 cov=bool(cov_env_id),
                 debug=self.debug,
+                # Same as the auto-detect branch: without it the sanitizer
+                # report never reaches is_crash.
+                capture_stderr=target_is_asan or target_is_ubsan,
                 use_ptrace=self.use_ptrace,
             )
             mode = "direct ctypes" if direct_ok else "subprocess loader"

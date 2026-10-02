@@ -756,8 +756,8 @@ on measurement: 73.9 eps against 587 for the SHM path on the same binary, an
 |------|------|-----------|-------|
 | SHM bitmap + forkserver | *(default)* | 0.5k–1.4k eps | For AFL-instrumented targets; target exec'd once, fork per input |
 | SHM bitmap, spawn per exec | `--no-forkserver` | 65–500 eps | Fallback; full ELF load + linker + libc init every execution |
-| In-process | `--inprocess` | 65–120 eps | Persistent loader with crash recovery |
-| In-process direct | `--inprocess-direct` | 2k–34k eps | No crash isolation; afl_shim crash handler gives _exit(128+sig) exit codes |
+| In-process | `--inprocess` | 65–120 eps | Persistent loader with crash recovery; a child that exits mid-call (non-recoverable ASAN `_exit(1)`) relays its status, so the report decides; child stdout → `/dev/null` (fd 1 is the RC protocol) |
+| In-process direct | `--inprocess-direct` | 2k–34k eps | No crash isolation; afl_shim crash handler gives _exit(128+sig) exit codes. Needs `--inprocess` too: alone, an ASAN `.so` falls through to the persistent loader |
 | Ptrace basic | `--no-shm` | ~20 eps | Function-entry breakpoints |
 | Ptrace deep | `--no-shm --deep-coverage` | ~18 eps | Capstone BB discovery |
 | Blind | `--no-coverage` | as target allows | No edge bitmap; crashes and timeouts still detected |
