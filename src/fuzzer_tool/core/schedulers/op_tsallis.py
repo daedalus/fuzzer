@@ -45,6 +45,7 @@ from typing import Any
 import numpy as np
 
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.schedulers._reward import unit_reward
 
 #: Newton steps for the normaliser. Started where the smallest term alone is
 #: 1, the iteration descends monotonically (convex, increasing residual) and
@@ -79,13 +80,6 @@ def tsallis_probs(losses: np.ndarray, eta: float) -> np.ndarray:
         gap += f / (eta * float((w * np.sqrt(w)).sum()))
     w = 4.0 / (eta * (u0 + gap)) ** 2
     return w / w.sum()
-
-
-def _reward(success: bool, weight: float) -> float:
-    """Reward in [0, 1]; non-finite weights count as 0 (NaN) or the bound."""
-    if not success or math.isnan(weight):
-        return 0.0
-    return min(1.0, max(0.0, weight))
 
 
 class TsallisINFScheduler:
@@ -184,7 +178,7 @@ class TsallisINFScheduler:
         j = self._idx[name]
 
         # Reduced-variance shift: 1/2 once p clears eta^2 (Zimmert & Seldin).
-        reward = _reward(success, weight)
+        reward = unit_reward(success, weight)
         eta = self.learning_rate()
         b = _HALF_SHIFT if p_drawn >= eta * eta else 0.0
         self._lossv[j] += (1.0 - reward - b) / p_drawn

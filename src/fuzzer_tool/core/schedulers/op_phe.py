@@ -32,16 +32,10 @@ import math
 import numpy as np
 
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.schedulers._reward import unit_reward
 
 #: Probability of each pseudo-reward: the midpoint of [0, 1] (the paper).
 _PSEUDO_P = 0.5
-
-
-def _reward(success: bool, weight: float) -> float:
-    """Reward in [0, 1]; NaN counts as 0, infinities clamp to the bounds."""
-    if not success or math.isnan(weight):
-        return 0.0
-    return min(1.0, max(0.0, weight))
 
 
 class PHEScheduler:
@@ -114,7 +108,7 @@ class PHEScheduler:
         self.init_arm(name)
         j = self._idx[name]
         self._pullv[j] += 1.0
-        self._rewv[j] += _reward(success, weight)
+        self._rewv[j] += unit_reward(success, weight)
         self._records += 1
 
     def bandit_stats(self) -> dict:

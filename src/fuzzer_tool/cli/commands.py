@@ -461,6 +461,10 @@ def cmd_fuzz(args):
         args.kalman_ts = True
         args.ids = True
         args.phe = True
+        args.exp3_ix = True
+        args.regret_matching = True
+        args.automaton = True
+        args.ant_colony = True
         args.successive_elim = True
         args.las_vegas = True
         args.canary_scheduler = True
@@ -698,6 +702,14 @@ def cmd_fuzz(args):
         ids_samples=getattr(args, "ids_samples", 128),
         phe=getattr(args, "phe", False),
         phe_a=getattr(args, "phe_a", 1.1),
+        exp3_ix=getattr(args, "exp3_ix", False),
+        exp3_ix_eta_scale=getattr(args, "exp3_ix_eta_scale", 1.0),
+        regret_matching=getattr(args, "regret_matching", False),
+        regret_matching_mix=getattr(args, "regret_matching_mix", 0.1),
+        automaton=getattr(args, "automaton", False),
+        automaton_rate=getattr(args, "automaton_rate", 0.03),
+        ant_colony=getattr(args, "ant_colony", False),
+        ant_colony_rho=getattr(args, "ant_colony_rho", 0.05),
         whittle=getattr(args, "whittle", False),
         whittle_n_states=getattr(args, "whittle_n_states", 5),
         whittle_gamma=getattr(args, "whittle_gamma", 0.95),
@@ -2084,6 +2096,10 @@ _HAIL_MARY_FLAGS = (
     "kalman_ts",
     "ids",
     "phe",
+    "exp3_ix",
+    "regret_matching",
+    "automaton",
+    "ant_colony",
     "gradient",
     "whittle",
     "successive_elim",
@@ -3306,6 +3322,56 @@ def main() -> int:
         type=float,
         default=1.1,
         help="PHE pseudo-pulls per real pull; regret bound needs > 1 (default: 1.1)",
+    )
+    fuzz_parser.add_argument(
+        "--exp3-ix",
+        action="store_true",
+        help="Enable EXP3-IX: exponential weights with implicit exploration "
+        "(loss / (p + gamma)). Elo-only, so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--exp3-ix-eta-scale",
+        type=float,
+        default=1.0,
+        help="EXP3-IX multiplier on Neu's anytime rate; larger is worse at fuzzing yields "
+        "(default: 1.0)",
+    )
+    fuzz_parser.add_argument(
+        "--regret-matching",
+        action="store_true",
+        help="Enable bandit regret matching+: play operators in proportion to "
+        "positive clipped regret. Elo-only, so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--regret-matching-mix",
+        type=float,
+        default=0.1,
+        help="Regret matching uniform floor, 0 to below 0.5; under 0.05 it oscillates "
+        "(default: 0.1)",
+    )
+    fuzz_parser.add_argument(
+        "--automaton",
+        action="store_true",
+        help="Enable a linear reward-inaction learning automaton over operators. "
+        "Elo-only, so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--automaton-rate",
+        type=float,
+        default=0.03,
+        help="L_R-I learning step, above 0 and at most 1 (default: 0.03)",
+    )
+    fuzz_parser.add_argument(
+        "--ant-colony",
+        action="store_true",
+        help="Enable MAX-MIN ant colony scheduling: pheromone on operator -> "
+        "operator transitions. Elo-only, so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--ant-colony-rho",
+        type=float,
+        default=0.05,
+        help="Ant colony pheromone evaporation per record, in (0, 1) (default: 0.05)",
     )
     fuzz_parser.add_argument(
         "--fpl-epsilon",

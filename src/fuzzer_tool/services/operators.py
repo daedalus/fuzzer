@@ -788,7 +788,8 @@ _FALLBACK_PRECEDENCE = (
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
     # op_tpe, op_strata, op_stride, op_p2c, gradient, whittle, corral, softmax, topk,
-    # tsallis, kalman_ts, ids, phe are deliberately absent
+    # tsallis, kalman_ts, ids, phe, exp3_ix, regret_matching, automaton,
+    # ant_colony are deliberately absent
     # here: they are unproven exploratory arms
     # (see their module docstrings) that should only ever be reached via
     # Elo explicitly choosing them, not by being the top-precedence live
@@ -912,6 +913,14 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("ids")
     if f._use_phe and f._phe:
         available.append("phe")
+    if f._use_exp3_ix and f._exp3_ix:
+        available.append("exp3_ix")
+    if f._use_regret_matching and f._regret_matching:
+        available.append("regret_matching")
+    if f._use_automaton and f._automaton:
+        available.append("automaton")
+    if f._use_ant_colony and f._ant_colony:
+        available.append("ant_colony")
     if f._use_gradient and f._gradient:
         available.append("gradient")
     if f._use_whittle and f._whittle:
@@ -5395,6 +5404,18 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "phe" and f._phe:
             op = f._phe.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "exp3_ix" and f._exp3_ix:
+            op = f._exp3_ix.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "regret_matching" and f._regret_matching:
+            op = f._regret_matching.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "automaton" and f._automaton:
+            op = f._automaton.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "ant_colony" and f._ant_colony:
+            op = f._ant_colony.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "round_robin" and f._round_robin:
             op = f._round_robin.select_op(ops)

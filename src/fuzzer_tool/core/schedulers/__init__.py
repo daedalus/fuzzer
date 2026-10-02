@@ -1,5 +1,7 @@
 """Operator-selection schedulers (bandit algorithms) and seed-selection schedulers."""
 
+from fuzzer_tool.core.schedulers.op_ant_colony import AntColonyScheduler
+from fuzzer_tool.core.schedulers.op_automaton import LearningAutomatonScheduler
 from fuzzer_tool.core.schedulers.op_bayes_ucb import BayesUCBScheduler
 from fuzzer_tool.core.schedulers.op_bo_gp_ucb import BOGPUCBScheduler
 from fuzzer_tool.core.schedulers.op_c2ucb import C2UCBScheduler
@@ -15,6 +17,7 @@ from fuzzer_tool.core.schedulers.op_cusum_ucb import CUSUM_UCBScheduler
 from fuzzer_tool.core.schedulers.op_ducb import DUCBScheduler
 from fuzzer_tool.core.schedulers.op_epsilon_greedy import EpsilonGreedyScheduler
 from fuzzer_tool.core.schedulers.op_exp3 import Exp3Scheduler
+from fuzzer_tool.core.schedulers.op_exp3_ix import EXP3IXScheduler
 from fuzzer_tool.core.schedulers.op_exp4 import Exp4Scheduler
 from fuzzer_tool.core.schedulers.op_fewa import FEWAScheduler
 from fuzzer_tool.core.schedulers.op_fpl import FPLScheduler
@@ -30,6 +33,7 @@ from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
 from fuzzer_tool.core.schedulers.op_mopt import MOptScheduler
 from fuzzer_tool.core.schedulers.op_moss import MOSSScheduler
 from fuzzer_tool.core.schedulers.op_phe import PHEScheduler
+from fuzzer_tool.core.schedulers.op_regret_matching import RegretMatchingScheduler
 from fuzzer_tool.core.schedulers.op_replicator import ReplicatorScheduler
 from fuzzer_tool.core.schedulers.op_round_robin import RoundRobinScheduler
 from fuzzer_tool.core.schedulers.op_softmax import SoftmaxScheduler
@@ -50,6 +54,10 @@ __all__ = [
     "KalmanTSScheduler",
     "IDSScheduler",
     "PHEScheduler",
+    "AntColonyScheduler",
+    "LearningAutomatonScheduler",
+    "RegretMatchingScheduler",
+    "EXP3IXScheduler",
     "WhittleIndexScheduler",
     "FPLScheduler",
     "CMAESScheduler",

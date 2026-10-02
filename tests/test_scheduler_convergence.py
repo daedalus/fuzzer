@@ -61,6 +61,7 @@ import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers import (
+    AntColonyScheduler,
     CMAESScheduler,
     ConsolidatedV1Scheduler,
     ConsolidatedV2Scheduler,
@@ -69,6 +70,7 @@ from fuzzer_tool.core.schedulers import (
     CUCBScheduler,
     DUCBScheduler,
     EpsilonGreedyScheduler,
+    EXP3IXScheduler,
     Exp3Scheduler,
     FPLScheduler,
     GPUCBScheduler,
@@ -76,10 +78,12 @@ from fuzzer_tool.core.schedulers import (
     HierarchicalBanditScheduler,
     IDSScheduler,
     KalmanTSScheduler,
+    LearningAutomatonScheduler,
     MonteCarloScheduler,
     MOptScheduler,
     MOSSScheduler,
     PHEScheduler,
+    RegretMatchingScheduler,
     ReplicatorScheduler,
     SWUCBScheduler,
     TsallisINFScheduler,
@@ -172,6 +176,21 @@ RELIABLE = {
     # No forgetting: DecayingBest late share min 0.167, median 0.391, so in
     # neither RECOVERS nor STUCK.
     "PHE": (lambda seed: PHEScheduler(rng=RandPool(seed)), 0.90, 0.40),
+    # The four below are weak-to-strong measured arms, floored below their
+    # observed minimum over 12 seeds at ROUNDS. EXP3-IX: share 0.712, slope
+    # 0.702 (FIXED_SEED 0.841 / 0.382) -- see op_exp3_ix.py for why the
+    # loss form is slow at fuzzing yields.
+    "EXP3IX": (lambda seed: EXP3IXScheduler(rng=RandPool(seed)), 0.65, 0.80),
+    # Regret matching+: share 0.649, slope 0.891 (FIXED_SEED 0.718 / 0.809).
+    # The current iterate oscillates under stochastic rewards; Elo-only.
+    "RegretMatching": (lambda seed: RegretMatchingScheduler(rng=RandPool(seed)), 0.60, 0.95),
+    # L_R-I automaton: share 0.926, slope 0.481 (FIXED_SEED 0.902 / 0.487).
+    # The mix floor caps share near 1 - mix (K - 1) / K.
+    "Automaton": (lambda seed: LearningAutomatonScheduler(rng=RandPool(seed)), 0.86, 0.60),
+    # Ant colony: share 0.962, slope 0.355 (FIXED_SEED 0.992 / 0.255).
+    # DecayingBest late share min 0.704, median 0.794 over 12 seeds but 0.583
+    # at FIXED_SEED, so in neither RECOVERS nor STUCK.
+    "AntColony": (lambda seed: AntColonyScheduler(rng=RandPool(seed)), 0.93, 0.45),
 }
 
 
@@ -399,6 +418,9 @@ RECOVERS = {
     "CUCB": (lambda: CUCBScheduler(rng=RandPool(FIXED_SEED)), 0.80),
     # Learned per-arm drift. Minimum over 12 seeds 0.946; FIXED_SEED 0.984.
     "KalmanTS": (lambda: KalmanTSScheduler(rng=RandPool(FIXED_SEED)), 0.85),
+    # The mix floor keeps a dead arm's replacement reachable. Over 12 seeds:
+    # min 0.928, median 0.934; FIXED_SEED 0.939.
+    "Automaton": (lambda: LearningAutomatonScheduler(rng=RandPool(FIXED_SEED)), 0.85),
 }
 
 
