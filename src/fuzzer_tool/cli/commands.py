@@ -457,6 +457,9 @@ def cmd_fuzz(args):
         args.gradient = True
         args.whittle = True
         args.corral = True
+        args.tsallis = True
+        args.kalman_ts = True
+        args.ids = True
         args.successive_elim = True
         args.las_vegas = True
         args.canary_scheduler = True
@@ -686,6 +689,12 @@ def cmd_fuzz(args):
         gradient_floor=getattr(args, "gradient_floor", 0.05),
         corral=getattr(args, "corral", False),
         corral_eta=getattr(args, "corral_eta", 0.6),
+        tsallis=getattr(args, "tsallis", False),
+        tsallis_eta=getattr(args, "tsallis_eta", 2.0),
+        kalman_ts=getattr(args, "kalman_ts", False),
+        kalman_ts_q0=getattr(args, "kalman_ts_q0", 1e-8),
+        ids=getattr(args, "ids", False),
+        ids_samples=getattr(args, "ids_samples", 128),
         whittle=getattr(args, "whittle", False),
         whittle_n_states=getattr(args, "whittle_n_states", 5),
         whittle_gamma=getattr(args, "whittle_gamma", 0.95),
@@ -2068,6 +2077,9 @@ _HAIL_MARY_FLAGS = (
     "fewa",
     "fpl",
     "corral",
+    "tsallis",
+    "kalman_ts",
+    "ids",
     "gradient",
     "whittle",
     "successive_elim",
@@ -3240,6 +3252,44 @@ def main() -> int:
         help="Corral base learning rate. 0.6 is the measured joint optimum "
         "over 12 and 155 arms; above it the distribution locks onto a single "
         "arm at high arm counts (default: 0.6)",
+    )
+    fuzz_parser.add_argument(
+        "--tsallis",
+        action="store_true",
+        help="Enable 1/2-Tsallis-INF operator scheduling: best-of-both-worlds "
+        "FTRL over importance-weighted losses. Elo-only, so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--tsallis-eta",
+        type=float,
+        default=2.0,
+        help="Tsallis-INF learning-rate scale; round t uses eta/sqrt(t). "
+        "4.0 locks onto a wrong arm on some seeds (default: 2.0)",
+    )
+    fuzz_parser.add_argument(
+        "--kalman-ts",
+        action="store_true",
+        help="Enable Kalman-filter Thompson sampling: per-operator drifting "
+        "yield with a learned drift rate. Elo-only, so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--kalman-ts-q0",
+        type=float,
+        default=1e-8,
+        help="Kalman-TS initial drift variance per round; larger re-explores "
+        "neglected operators sooner (default: 1e-8)",
+    )
+    fuzz_parser.add_argument(
+        "--ids",
+        action="store_true",
+        help="Enable Information-Directed Sampling: explores operators by what "
+        "a pull teaches, not by P(optimal). Elo-only, so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--ids-samples",
+        type=int,
+        default=128,
+        help="IDS posterior samples per policy solve (default: 128)",
     )
     fuzz_parser.add_argument(
         "--fpl-epsilon",

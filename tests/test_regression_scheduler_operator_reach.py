@@ -89,6 +89,9 @@ def _all_operator_schedulers():
     successive_elim = S.SuccessiveEliminationScheduler()
     whittle = S.WhittleIndexScheduler()
     corral = S.CorralScheduler()
+    tsallis = S.TsallisINFScheduler()
+    kalman_ts = S.KalmanTSScheduler()
+    ids = S.IDSScheduler()
     fewa = S.FEWAScheduler()
     softmax = S.SoftmaxScheduler()
 
@@ -179,6 +182,9 @@ def _all_operator_schedulers():
             whittle.record,
         ),
         ("CorralScheduler", corral, corral.select_op, corral.record),
+        ("TsallisINFScheduler", tsallis, tsallis.select_op, tsallis.record),
+        ("KalmanTSScheduler", kalman_ts, kalman_ts.select_op, kalman_ts.record),
+        ("IDSScheduler", ids, ids.select_op, ids.record),
         ("FEWAScheduler", fewa, fewa.select_op, fewa.record),
         ("SoftmaxScheduler", softmax, softmax.select_op, softmax.record),
     ]

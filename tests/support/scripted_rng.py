@@ -31,6 +31,10 @@ class ScriptedRng:
             requested length is ignored like every other bound here, so a
             blob of the wrong size is a scripting error the consumer will
             surface rather than something this class papers over.
+        gauss_lists: Lists returned one per ``gauss_list()`` call (mu,
+            sigma and count ignored).
+        beta_arrays: Arrays returned one per ``betavariate_array()`` call
+            (parameters ignored).
     """
 
     def __init__(
@@ -41,6 +45,8 @@ class ScriptedRng:
         counts=(),
         batch_value=0,
         randbytes=(),
+        gauss_lists=(),
+        beta_arrays=(),
     ):
         self._randints = iter(randints)
         self._randoms = iter(randoms)
@@ -48,6 +54,8 @@ class ScriptedRng:
         self._counts = iter(counts)
         self._batch_value = batch_value
         self._randbytes = iter(randbytes)
+        self._gauss_lists = iter(gauss_lists)
+        self._beta_arrays = iter(beta_arrays)
 
     def randint(self, _a, _b):
         return next(self._randints)
@@ -65,6 +73,12 @@ class ScriptedRng:
 
     def randbytes(self, _n):
         return next(self._randbytes)
+
+    def gauss_list(self, _mu, _sigma, _count):
+        return next(self._gauss_lists)
+
+    def betavariate_array(self, _alphas, _betas):
+        return next(self._beta_arrays)
 
     def shuffle(self, seq):
         seq.reverse()
