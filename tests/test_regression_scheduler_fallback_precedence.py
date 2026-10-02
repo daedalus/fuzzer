@@ -143,8 +143,8 @@ class _FakeFuzzer:
         "successive_elim": ("_use_successive_elim", "_successive_elim"),
         "las_vegas": ("_use_las_vegas", "_las_vegas"),
         "round_robin": ("_use_round_robin", "_round_robin"),
-        # canary, op_katz, op_kuramoto, op_tang, gradient, whittle, corral
-        # are deliberately absent from _FALLBACK_PRECEDENCE (see
+        # canary, op_katz, op_kuramoto, op_tang, gradient, whittle, corral,
+        # tsallis, kalman_ts, ids are deliberately absent from _FALLBACK_PRECEDENCE (see
         # operators.py) -- they still need entries here so
         # operator_strategy_pool()'s attribute read doesn't crash, but
         # `enable(...)` for them is never exercised by the precedence tests.
@@ -160,6 +160,9 @@ class _FakeFuzzer:
         "op_stride": ("_use_op_stride", "_op_stride"),
         "op_p2c": ("_use_op_p2c", "_op_p2c"),
         "corral": ("_use_corral", "_corral"),
+        "tsallis": ("_use_tsallis", "_tsallis"),
+        "kalman_ts": ("_use_kalman_ts", "_kalman_ts"),
+        "ids": ("_use_ids", "_ids"),
         "gradient": ("_use_gradient", "_gradient"),
         "whittle": ("_use_whittle", "_whittle"),
         "fewa": ("_use_fewa", "_fewa"),

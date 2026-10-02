@@ -96,6 +96,8 @@ from fuzzer_tool.core.schedulers import (
     GPUCBScheduler,
     GradientBanditScheduler,
     HierarchicalBanditScheduler,
+    IDSScheduler,
+    KalmanTSScheduler,
     KL_DUCBScheduler,
     KL_SWUCBScheduler,
     LasVegasScheduler,
@@ -108,6 +110,7 @@ from fuzzer_tool.core.schedulers import (
     SuccessiveEliminationScheduler,
     SWUCBScheduler,
     TopKScheduler,
+    TsallisINFScheduler,
     WhittleIndexScheduler,
 )
 from fuzzer_tool.core.schedulers.op_p2c import OpP2CScheduler
@@ -197,6 +200,9 @@ _OPERATOR_STRATEGY_NAMES = (
     "c2ucb",
     "fpl",
     "corral",
+    "tsallis",
+    "kalman_ts",
+    "ids",
     "invasion",
     "round_robin",
     "canary",
@@ -1337,6 +1343,12 @@ class Fuzzer:
         gradient_floor=0.05,
         corral=False,
         corral_eta=0.6,
+        tsallis=False,
+        tsallis_eta=2.0,
+        kalman_ts=False,
+        kalman_ts_q0=1e-8,
+        ids=False,
+        ids_samples=128,
         whittle=False,
         whittle_n_states=5,
         whittle_gamma=0.95,
@@ -3281,6 +3293,25 @@ class Fuzzer:
             self._corral = CorralScheduler(eta=corral_eta, rng=self._rng)
             log.info("Corral (log-barrier OMD) enabled (eta=%.2f)", corral_eta)
 
+        # Tsallis-INF, Kalman-TS, IDS: non-UCB arms, Elo-only like corral
+        # until measured on real targets (see their module docstrings).
+        # Tsallis-INF is importance-weighted, so it is recorded on-policy.
+        self._use_tsallis = tsallis
+        self._tsallis = None
+        if tsallis:
+            self._tsallis = TsallisINFScheduler(eta=tsallis_eta, rng=self._rng)
+            log.info("Tsallis-INF enabled (eta=%.2f)", tsallis_eta)
+        self._use_kalman_ts = kalman_ts
+        self._kalman_ts = None
+        if kalman_ts:
+            self._kalman_ts = KalmanTSScheduler(q0=kalman_ts_q0, rng=self._rng)
+            log.info("Kalman-TS enabled (q0=%.1e)", kalman_ts_q0)
+        self._use_ids = ids
+        self._ids = None
+        if ids:
+            self._ids = IDSScheduler(samples=ids_samples, rng=self._rng)
+            log.info("IDS enabled (samples=%d)", ids_samples)
+
         # Whittle index (restless-bandit index policy). Off by default and
         # Elo-only (see core/schedulers/op_whittle.py's module docstring): the
         # passive_decay restless-drift assumption is an unmeasured guess
@@ -3799,6 +3830,9 @@ class Fuzzer:
             # were credited with the round's success.
             or self._kl_ducb
             or self._corral
+            or self._tsallis
+            or self._kalman_ts
+            or self._ids
             or self._kl_swucb
             or self._consolidated_v1
             or self._consolidated_v2
@@ -4009,6 +4043,12 @@ class Fuzzer:
             _register_arms(self._fpl)
         if self._corral:
             _register_arms(self._corral)
+        if self._tsallis:
+            _register_arms(self._tsallis)
+        if self._kalman_ts:
+            _register_arms(self._kalman_ts, _format_priors)
+        if self._ids:
+            _register_arms(self._ids, _format_priors)
         if self._gradient:
             _register_arms(self._gradient)
         if self._whittle:
@@ -7661,7 +7701,8 @@ class Fuzzer:
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        # corral is deliberately absent from this banner too, same reason,
+        # corral, tsallis, kalman_ts and ids are deliberately absent from
+        # this banner too, same reason,
         # see core/schedulers/op_corral.py.
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/op_gradient.py.
@@ -8160,7 +8201,8 @@ class Fuzzer:
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        # corral is deliberately absent from this banner too, same reason,
+        # corral, tsallis, kalman_ts and ids are deliberately absent from
+        # this banner too, same reason,
         # see core/schedulers/op_corral.py.
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/op_gradient.py.

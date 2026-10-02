@@ -1459,6 +1459,9 @@ class FuzzRound:
             # unbiased against the distribution that produced the draw, so a
             # round another scheduler selected must not reach it.
             f._corral if selector == "corral" else None,
+            f._tsallis if selector == "tsallis" else None,
+            f._kalman_ts,
+            f._ids,
             f._gradient,
             f._whittle,
             f._successive_elim,

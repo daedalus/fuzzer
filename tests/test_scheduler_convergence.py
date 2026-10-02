@@ -74,11 +74,14 @@ from fuzzer_tool.core.schedulers import (
     GPUCBScheduler,
     GradientBanditScheduler,
     HierarchicalBanditScheduler,
+    IDSScheduler,
+    KalmanTSScheduler,
     MonteCarloScheduler,
     MOptScheduler,
     MOSSScheduler,
     ReplicatorScheduler,
     SWUCBScheduler,
+    TsallisINFScheduler,
 )
 from tests.support.bandit_env import (
     DecayingBest,
@@ -152,6 +155,18 @@ RELIABLE = {
     # on whether the mixing floor happens to sample it early enough after
     # the switch. That fragility is why the scheduler is Elo-only.
     "Corral": (lambda seed: CorralScheduler(rng=RandPool(seed)), 0.90, 0.65),
+    # Floors below the observed minimum over 12 seeds at ROUNDS: share
+    # 0.932, slope max 0.482. At FIXED_SEED: 0.953 / 0.395. In neither
+    # RECOVERS nor STUCK: DecayingBest late share min 0.015, median 0.846
+    # over 12 seeds (bimodal; 0.001 at FIXED_SEED) -- the anytime
+    # eta/sqrt(t) has shrunk by the switch.
+    "TsallisINF": (lambda seed: TsallisINFScheduler(rng=RandPool(seed)), 0.90, 0.55),
+    # Over 12 seeds: share min 0.974, slope max 0.292. FIXED_SEED 0.995 / 0.105.
+    "KalmanTS": (lambda seed: KalmanTSScheduler(rng=RandPool(seed)), 0.93, 0.40),
+    # Over 12 seeds: share min 0.944, slope max 0.425. FIXED_SEED 1.000 / 0.277.
+    # Undecayed Beta posteriors: DecayingBest late share min 0.254, median
+    # 0.462, so in neither RECOVERS nor STUCK.
+    "IDS": (lambda seed: IDSScheduler(rng=RandPool(seed)), 0.90, 0.50),
 }
 
 
@@ -377,6 +392,8 @@ RECOVERS = {
     "DUCB": (lambda: DUCBScheduler(rng=RandPool(FIXED_SEED)), 0.60),
     "SWUCB": (lambda: SWUCBScheduler(rng=RandPool(FIXED_SEED)), 0.65),
     "CUCB": (lambda: CUCBScheduler(rng=RandPool(FIXED_SEED)), 0.80),
+    # Learned per-arm drift. Minimum over 12 seeds 0.946; FIXED_SEED 0.984.
+    "KalmanTS": (lambda: KalmanTSScheduler(rng=RandPool(FIXED_SEED)), 0.85),
 }
 
 

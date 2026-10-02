@@ -21,6 +21,8 @@ from fuzzer_tool.core.schedulers.op_fpl import FPLScheduler
 from fuzzer_tool.core.schedulers.op_gp_ucb import GPUCBScheduler
 from fuzzer_tool.core.schedulers.op_gradient import GradientBanditScheduler
 from fuzzer_tool.core.schedulers.op_hierarchical import HierarchicalBanditScheduler
+from fuzzer_tool.core.schedulers.op_ids import IDSScheduler
+from fuzzer_tool.core.schedulers.op_kalman_ts import KalmanTSScheduler
 from fuzzer_tool.core.schedulers.op_kl_ducb import KL_DUCBScheduler
 from fuzzer_tool.core.schedulers.op_kl_swucb import KL_SWUCBScheduler
 from fuzzer_tool.core.schedulers.op_las_vegas import LasVegasScheduler
@@ -33,6 +35,7 @@ from fuzzer_tool.core.schedulers.op_softmax import SoftmaxScheduler
 from fuzzer_tool.core.schedulers.op_successive_elim import SuccessiveEliminationScheduler
 from fuzzer_tool.core.schedulers.op_swucb import SWUCBScheduler
 from fuzzer_tool.core.schedulers.op_topk import TopKScheduler
+from fuzzer_tool.core.schedulers.op_tsallis import TsallisINFScheduler
 from fuzzer_tool.core.schedulers.op_whittle import WhittleIndexScheduler
 from fuzzer_tool.core.schedulers.seed_canary import SeedCanaryScheduler
 from fuzzer_tool.core.schedulers.seed_kruskal_count import KruskalCountSeedStrategy
@@ -42,6 +45,9 @@ from fuzzer_tool.core.schedulers.seed_tang import TangRecommendationScheduler
 
 __all__ = [
     "CorralScheduler",
+    "TsallisINFScheduler",
+    "KalmanTSScheduler",
+    "IDSScheduler",
     "WhittleIndexScheduler",
     "FPLScheduler",
     "CMAESScheduler",

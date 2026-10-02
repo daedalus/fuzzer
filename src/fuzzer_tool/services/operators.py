@@ -787,7 +787,8 @@ _FALLBACK_PRECEDENCE = (
     "las_vegas",
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
-    # op_tpe, op_strata, op_stride, op_p2c, gradient, whittle, corral, softmax, topk are deliberately absent
+    # op_tpe, op_strata, op_stride, op_p2c, gradient, whittle, corral, softmax, topk,
+    # tsallis, kalman_ts, ids are deliberately absent
     # here: they are unproven exploratory arms
     # (see their module docstrings) that should only ever be reached via
     # Elo explicitly choosing them, not by being the top-precedence live
@@ -903,6 +904,12 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("fpl")
     if f._use_corral and f._corral:
         available.append("corral")
+    if f._use_tsallis and f._tsallis:
+        available.append("tsallis")
+    if f._use_kalman_ts and f._kalman_ts:
+        available.append("kalman_ts")
+    if f._use_ids and f._ids:
+        available.append("ids")
     if f._use_gradient and f._gradient:
         available.append("gradient")
     if f._use_whittle and f._whittle:
@@ -5374,6 +5381,15 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "corral" and f._corral:
             op = f._corral.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "tsallis" and f._tsallis:
+            op = f._tsallis.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "kalman_ts" and f._kalman_ts:
+            op = f._kalman_ts.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "ids" and f._ids:
+            op = f._ids.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "round_robin" and f._round_robin:
             op = f._round_robin.select_op(ops)
