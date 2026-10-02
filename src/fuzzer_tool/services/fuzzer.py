@@ -135,6 +135,8 @@ from fuzzer_tool.core.shim_health import (
     SHIM_STDERR_TAG,
     Attach,
     ShimWatch,
+    WriteGuard,
+    export_wguard,
     self_test_issues,
 )
 from fuzzer_tool.core.skipdet import SkipDetector
@@ -1617,6 +1619,7 @@ class Fuzzer:
         seed_consolidated_scheduler=False,
         pos_consolidated=False,
         clock=ClockMode.WALL,
+        shm_write_guard=WriteGuard.OFF,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -1626,6 +1629,9 @@ class Fuzzer:
         # UBSAN_OPTIONS into it, so run() can hand the process environment
         # back afterwards. See _restore_environ()/finding #10.
         _snapshot_environ_once()
+        # Opt-in edge-table write guard (--shm-write-guard); the shim reads
+        # it at attach, so it must precede every target start.
+        export_wguard(shm_write_guard)
         # In-process modes dlopen the target; an executable cannot be.
         # Run it in exec mode instead (--hail-mary forces in-process).
         if (inprocess or inprocess_direct) and is_elf_executable(target):

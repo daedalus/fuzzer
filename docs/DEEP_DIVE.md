@@ -923,7 +923,18 @@ Failures the shim survives but the fuzzer cannot otherwise see.
 
 `ShimWatch` dedups so a fault repeating on every execution warns once; per-exec cost ≈ 47 ns.
 
-Counters (`core/shim_health.py::ShimField`, append-only ABI): `ATTACHED`, `MAP_ENTRIES`, `SEG_REJECTED` (bad `AFL_MAP_SIZE`, segment smaller than header + table + tail, distance/node header overrunning its segment; each also logged to stderr or refused), `CMPLOG_DROPPED` (record lost to writer contention or a failed write; the record buffer is guarded by a non-blocking try-lock), `STRAY_SIGNALS`, `ABORTS_INTERCEPTED` (`abort()` calls the override returned from), `HANDLERS_DISPLACED` (a health read found another handler over the shim's; repaired on the next guarded call). Tests: `tests/test_shim_health.py`, `tests/test_shim_self_check.py`.
+Counters (`core/shim_health.py::ShimField`, append-only ABI): `ATTACHED`, `MAP_ENTRIES`, `SEG_REJECTED` (bad `AFL_MAP_SIZE`, segment smaller than header + table + tail, distance/node header overrunning its segment; each also logged to stderr or refused), `CMPLOG_DROPPED` (record lost to writer contention or a failed write; the record buffer is guarded by a non-blocking try-lock), `STRAY_SIGNALS`, `ABORTS_INTERCEPTED` (`abort()` calls the override returned from), `HANDLERS_DISPLACED` (a health read found another handler over the shim's; repaired on the next guarded call), `WGUARD` (write-guard mode in effect, `WriteGuard`). Tests: `tests/test_shim_health.py`, `tests/test_shim_self_check.py`.
+
+### SHM write guard (`--shm-write-guard`)
+Opt-in, default `off`, not set by `--hail-mary`. Write-locks the shim's mapping of the coverage segment so only the shim's own stores land; a stray store from target code (memory bug, wild pointer) faults with `SIGSEGV` and is reported as a crash instead of planting or erasing edges.
+
+| Mode | Mechanism | Cost |
+|---|---|---|
+| `off` | none | one load + branch per edge (~0.3 ns, hook-only microbench) |
+| `pkey` | x86 protection key, PKRU WD bit; RDPKRU/WRPKRU around each shim write (no syscall). Falls back to `off` without PKU | not measured (no PKU host available) |
+| `mprotect` | same brackets via `mprotect` | two syscalls per edge; debug/testing only |
+
+The fuzzer exports `__AFL_WGUARD` (`core/shim_health.export_wguard`); the shim arms at attach. Limits: PKRU is per thread, so threads alive before attach stay unlocked; in in-process modes the fuzzer's own mapping of the segment stays writable. Tests: `tests/test_shim_write_guard.py`.
 
 ### Hybrid abort interception
 `afl_shim.c` replaces `abort()` in every build (ASAN included) with a macro calling `__afl_shim_abort()`, which writes `[shim] abort() intercepted` to stderr, counts it (`ABORTS_INTERCEPTED`) and returns. This keeps library assertion failures (FFmpeg's ~1600 `av_assert0` sites) from flooding the crash set; the cost is that the target runs on past the failed assertion. Only code compiled with the shim is affected: `abort()` inside precompiled libraries (libc `assert`, ASAN) still raises `SIGABRT`, which the crash handler recovers inside the guard or hands back outside it. ASAN errors are reported via stderr (`halt_on_error=0:abort_on_error=0`) and parsed by `SanitizerReport`.

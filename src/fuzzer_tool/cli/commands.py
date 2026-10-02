@@ -16,6 +16,7 @@ from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
+from fuzzer_tool.core.shim_health import WriteGuard
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
@@ -587,6 +588,7 @@ def cmd_fuzz(args):
         inprocess_func=args.inprocess_func,
         seed=args.seed,
         clock=ClockMode(getattr(args, "clock", ClockMode.WALL.value)),
+        shm_write_guard=WriteGuard[getattr(args, "shm_write_guard", "off").upper()],
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
         asan_target=getattr(args, "asan_target", None),
@@ -1966,6 +1968,11 @@ def cmd_sweep(args):
 # run would stop being comparable to any other run of the same seed for no
 # behavioural gain.
 #
+# shm_write_guard (--shm-write-guard) is excluded: a hardening knob, not a
+# strategy, and its mprotect mode costs two syscalls per edge. It is a
+# choices dest, so the True-flip loop never sees it; documented so it stays
+# out if it ever grows a boolean form.
+#
 # job_scheduler (--job-scheduler) is excluded because it changes
 # maintenance-tick *cadence* (crash/sanitizer replays and gc.collect move
 # from an i % 500 gate to the stats-interval cadence memory pruning
@@ -2323,6 +2330,15 @@ def main() -> int:
         "--no-shm",
         action="store_true",
         help="Skip AFL SHM coverage, use ptrace instead (for uninstrumented binaries)",
+    )
+    fuzz_parser.add_argument(
+        "--shm-write-guard",
+        choices=[m.name.lower() for m in WriteGuard],
+        default=WriteGuard.OFF.name.lower(),
+        help="Write-lock the shim's edge table so only instrumentation can write it; "
+        "a stray store from the target faults (SIGSEGV). 'pkey': x86 protection "
+        "keys, needs PKU, else falls back to off. 'mprotect': any host, two "
+        "syscalls per edge (debug only). Default: off.",
     )
     fuzz_parser.add_argument(
         "--no-cfg-cache",
