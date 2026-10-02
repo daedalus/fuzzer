@@ -4321,6 +4321,12 @@ class Fuzzer:
         if not self._antifuzz_evade:
             return
 
+        # LD_PRELOAD only reaches processes spawned after this; the in-process
+        # host (and its loader) already runs without it.
+        if self._inprocess_runner is not None:
+            print("[!] --antifuzz-evade: no effect in in-process mode; ignored")
+            return
+
         from fuzzer_tool.adapters.evade_shim import evade_ld_preload
 
         updated = evade_ld_preload(os.environ.get("LD_PRELOAD", ""))
