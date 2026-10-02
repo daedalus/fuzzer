@@ -29,6 +29,7 @@ import resource
 from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
+from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.ro_rd import classify_operator_name
@@ -169,6 +170,7 @@ class FuzzRound:
         self._track_edges()
         self._judge()
         self._credit_ops()
+        self._push_recurrence()
 
         if self._is_crash:
             self._queue_variant()
@@ -665,6 +667,18 @@ class FuzzRound:
         if f._current_edges_cache is not None:
             return f._current_edges_cache
         return f._get_current_edge_set()
+
+    def _push_recurrence(self) -> None:
+        # --recurrence: one hash(seed, path) symbol per exec. Path hash is the
+        # shim header's rolling hash; 0 off the SHM path (seed channel only).
+        rec = getattr(self._f, "_recurrence", None)
+        if rec is None:
+            return
+
+        shm = self._scanned_shm
+        path = shm.read_path_hash() if shm is not None else 0
+        novelty = Novelty.NEW if self._has_new_coverage else Novelty.NONE
+        rec.push(hash((self._data, path)), novelty)
 
     def _scan_coverage(self) -> None:
         f = self._f

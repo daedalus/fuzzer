@@ -7,6 +7,7 @@ space rather than each operator's marginal success rate.
 import collections
 from collections import defaultdict
 
+from fuzzer_tool.core.chaos import InertiaMode, make_chaos
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
@@ -103,6 +104,8 @@ class MOptScheduler:
             rising without waiting for its within-window mean to reflect
             it. ``None`` (the default) disables this entirely -- existing
             behavior is unchanged either way.
+        inertia: ``CHAOTIC`` replaces ``w`` each window with a logistic-map
+            draw in ``[W_MIN, W_MAX]`` (``core/chaos.py``).
     """
 
     # Declares that init_arm() does NOT accept informative priors (PSO
@@ -122,8 +125,10 @@ class MOptScheduler:
         gbest_decay: float = 0.95,
         rng: RandPool | None = None,
         marginal_cost_stop_multiplier: float | None = None,
+        inertia: InertiaMode = InertiaMode.CONSTANT,
     ):
         self._rng = rng if rng is not None else get_default_rand_pool()
+        self._chaos = make_chaos(inertia, self._rng)
         self.n_particles = n_particles
         self.window_size = window_size
         self.w = w
@@ -398,6 +403,9 @@ class MOptScheduler:
 
         eff = self._efficiency_distribution(n)
 
+        # One inertia per window; chaotic mode draws it from the logistic map.
+        w = self.w if self._chaos is None else self._chaos.inertia()
+
         for p in self.particles:
             # v = w*v + c1*r1*(pbest - pos) + c2*r2*(gbest - pos)
             #         + c3*r3*(efficiency - pos)
@@ -408,7 +416,7 @@ class MOptScheduler:
                 cognitive = self.c1 * r1 * (p.pbest_pos[i] - p.pos[i])
                 social = self.c2 * r2 * (self.global_best_pos[i] - p.pos[i])
                 measured = self.c3 * r3 * (eff[i] - p.pos[i])
-                p.vel[i] = self.w * p.vel[i] + cognitive + social + measured
+                p.vel[i] = w * p.vel[i] + cognitive + social + measured
                 # Clamp velocity
                 p.vel[i] = max(-self.max_vel, min(self.max_vel, p.vel[i]))
 

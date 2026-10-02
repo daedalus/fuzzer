@@ -1486,13 +1486,34 @@ def _spectral_diagnostics(f) -> str:
     has_data = _spec_exec_time(f, lines)
     has_data = _spec_discovery(f, lines) or has_data
 
-    pll_lines = _pll_lines(f)
+    pll_lines = _pll_lines(f) + _recurrence_lines(f)
     lines.extend(pll_lines)
     has_data = has_data or bool(pll_lines)
 
     if not has_data:
         return ""
     return "\n".join(lines)
+
+
+def _recurrence_lines(f) -> list[str]:
+    """Limit-cycle reading of the exec stream (--recurrence). Example::
+
+    Recurrence:      trapped, period 7, DET 0.99, RR 0.14, 3 trapped readings
+    """
+    from fuzzer_tool.core.analyzers.analyzer_recurrence import RecurrenceMonitor
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    rec = getattr(f, "_recurrence", None)
+    if not isinstance(rec, RecurrenceMonitor):
+        return []
+
+    r = rec.reading()
+    if r is None:
+        return ["  Recurrence:      no full window yet"]
+    return [
+        f"  Recurrence:      {rec.verdict.value}, period {r.period}, DET {r.det:.2f}, "
+        f"RR {r.rr:.2f}, {rec.trapped_count} trapped readings"
+    ]
 
 
 def _pll_lines(f) -> list[str]:
