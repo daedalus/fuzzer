@@ -32,6 +32,7 @@ _KWARGS = {
     "consolidated_v1": {"consolidated_v1": True},
     "consolidated_v2": {"consolidated_v2": True},
     "moss": {"moss": True},
+    "las_vegas": {"las_vegas": True},
     "bayes_ucb": {"bayes_ucb": True},
     "replicator": {"replicator": True},
     "bandit": {"mc_bandit": True},

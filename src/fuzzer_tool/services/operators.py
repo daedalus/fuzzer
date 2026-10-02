@@ -895,6 +895,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("fewa")
     if f._use_moss and f._moss:
         available.append("moss")
+    if f._use_las_vegas and f._las_vegas:
+        available.append("las_vegas")
     if f._use_bayes_ucb and f._bayes_ucb:
         available.append("bayes_ucb")
     if f._use_fpl and f._fpl:

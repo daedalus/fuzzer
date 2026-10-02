@@ -1455,6 +1455,7 @@ class FuzzRound:
             f._consolidated_v1,
             f._consolidated_v2,
             f._moss,
+            f._las_vegas,
             f._bayes_ucb,
             f._canary,
             f._op_katz,

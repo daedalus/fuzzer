@@ -3748,6 +3748,7 @@ class Fuzzer:
             or self._consolidated_v1
             or self._consolidated_v2
             or self._moss
+            or self._las_vegas
             or self._bayes_ucb
             or self._cucb
             or self._cusum_ucb
@@ -7577,6 +7578,8 @@ class Fuzzer:
             ops.append("fewa")
         if getattr(self, "_moss", False):
             ops.append("moss")
+        if getattr(self, "_las_vegas", False):
+            ops.append("las_vegas")
         if getattr(self, "_bayes_ucb", False):
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
@@ -8074,6 +8077,8 @@ class Fuzzer:
             ops.append("fewa")
         if getattr(self, "_moss", False):
             ops.append("moss")
+        if getattr(self, "_las_vegas", False):
+            ops.append("las_vegas")
         if getattr(self, "_bayes_ucb", False):
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):

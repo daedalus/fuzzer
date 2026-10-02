@@ -150,6 +150,12 @@ def _all_operator_schedulers():
             consolidated_v2.record,
         ),
         ("MOSSScheduler", moss := S.MOSSScheduler(), moss.select_op, moss.record),
+        (
+            "LasVegasScheduler",
+            las_vegas := S.LasVegasScheduler(),
+            las_vegas.select_op,
+            las_vegas.record,
+        ),
         ("BayesUCBScheduler", bayes := S.BayesUCBScheduler(), bayes.select_op, bayes.record),
         # RoundRobin is stateless in terms of rewards; record() is no-op.
         (
