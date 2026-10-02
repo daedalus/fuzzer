@@ -157,6 +157,12 @@ sys.exit(max(0, min(rc, 125)))
 """
 
 
+#: What ``__afl_guarded_call_timeout`` returns when the budget runs out
+#: (afl_shim.c ``__AFL_GUARD_TIMEOUT_RC``).
+GUARD_TIMEOUT_RC = -1
+_US_PER_S = 1_000_000
+
+
 def read_shim_health(lib: ctypes.CDLL) -> tuple[int, ...] | None:
     """Snapshot of ``__afl_shim_health()`` counters, or None for an older shim.
 
@@ -311,6 +317,38 @@ class InProcessRunner:
                 self._lib = None
             else:
                 raise
+
+    def _call_guarded(self, buf, n: int) -> int | None:
+        """Run the entry through the shim's guard; None when the target has none.
+
+        Prefers ``__afl_guarded_call_timeout``: a C infinite loop never
+        returns to Python, so the SIGALRM handler (which only sets a flag)
+        cannot end it, and direct mode hung forever. The shim's own timer
+        leaves through the guard and the call returns GUARD_TIMEOUT_RC.
+        Sets ``self._guard_timed_out``.
+        """
+        self._guard_timed_out = False
+        ptr = ctypes.cast(self._func_ptr, ctypes.c_void_p)
+
+        timed = getattr(self._lib, "__afl_guarded_call_timeout", None)
+        if timed is not None:
+            timed.restype = ctypes.c_int
+            timed.argtypes = [
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_uint8),
+                ctypes.c_size_t,
+                ctypes.c_uint64,
+            ]
+            rc = timed(ptr, buf, n, int(self.timeout * _US_PER_S))
+            self._guard_timed_out = rc == GUARD_TIMEOUT_RC
+            return rc
+
+        guarded = getattr(self._lib, "__afl_guarded_call", None)
+        if guarded is None:
+            return None
+        guarded.restype = ctypes.c_int
+        guarded.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
+        return guarded(ptr, buf, n)
 
     def shim_health(self) -> tuple[int, ...] | None:
         """Shim counters of the directly loaded target; None when unavailable."""
@@ -597,23 +635,15 @@ class InProcessRunner:
             os.close(write_fd)
 
             buf = (ctypes.c_uint8 * len(data))(*data)
-            _guarded = getattr(self._lib, "__afl_guarded_call", None)
-            if _guarded is not None:
-                _guarded.restype = ctypes.c_int
-                _guarded.argtypes = [
-                    ctypes.c_void_p,
-                    ctypes.POINTER(ctypes.c_uint8),
-                    ctypes.c_size_t,
-                ]
-                _func_ptr_raw = ctypes.cast(self._func_ptr, ctypes.c_void_p)
-                rc = _guarded(_func_ptr_raw, buf, len(data))
-                # rc < 0 means a signal crashed us; __afl_guarded_call
-                # siglongjmp'd back with -sig. Convert to the 128+sig
-                # convention used elsewhere in this module.
-                if rc < 0:
-                    rc = 128 + (-rc)
-            else:
+            rc = self._call_guarded(buf, len(data))
+            if rc is None:
                 rc = self._func_ptr(buf, len(data))
+            elif self._guard_timed_out:
+                timed_out = True
+            elif rc < 0:
+                # __afl_guarded_call siglongjmp'd back with -sig. Convert to
+                # the 128+sig convention used elsewhere in this module.
+                rc = 128 + (-rc)
 
             # Restore stderr and read any captured output
             os.dup2(old_stderr_fd, 2)
@@ -691,21 +721,14 @@ class InProcessRunner:
             # via afl_shim.c).  It uses sigsetjmp/siglongjmp to survive
             # abort() in pre-compiled libraries (libasan, etc.) by escaping
             # the signal handler before glibc re-raises SIGABRT as SIG_DFL.
-            _guarded = getattr(self._lib, "__afl_guarded_call", None)
-            if _guarded is not None:
-                _guarded.restype = ctypes.c_int
-                _guarded.argtypes = [
-                    ctypes.c_void_p,
-                    ctypes.POINTER(ctypes.c_uint8),
-                    ctypes.c_size_t,
-                ]
-                _func_ptr_raw = ctypes.cast(self._func_ptr, ctypes.c_void_p)
-                rc = _guarded(_func_ptr_raw, self._c_buf, n)
-                # rc < 0 and rc > -128 means a signal crashed us; siglongjmp'd
-                # back with -sig (e.g. -6 for SIGABRT).  Already in the right
-                # format — matches how run_target_stdin returns signal codes.
-            else:
+            # rc < 0 means a signal crashed us; siglongjmp'd back with -sig
+            # (e.g. -6 for SIGABRT). Already in the right format — matches
+            # how run_target_stdin returns signal codes.
+            rc = self._call_guarded(self._c_buf, n)
+            if rc is None:
                 rc = self._func_ptr(self._c_buf, n)
+            elif self._guard_timed_out:
+                self._timed_out = True
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             if self.capture_stderr and _saved_stderr is not None and _read_fd is not None:
