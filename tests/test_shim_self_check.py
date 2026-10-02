@@ -332,3 +332,17 @@ def test_fuzz_run_flags_shim_that_attached_nothing(tmp_path):
     assert "recorded no edges" in r.stdout
     assert r.stdout.count("AFL_MAP_SIZE=-5 is not a valid entry count") == 1
     assert "Shim self-test: 1 target(s) OK" not in r.stdout
+
+
+def test_self_test_skipped_in_network_mode(monkeypatch):
+    """Network coverage arrives asynchronously after a settle window; one
+    send says nothing about attachment, so no self-test (no false alarm)."""
+    import fuzzer_tool.services.fuzzer as fuzzer_mod
+
+    monkeypatch.setattr(fuzzer_mod, "afl_instrumentation_status", lambda t: "present")
+    f = _bare_fuzzer()
+    f._network_runner = None
+    assert f._self_test_targets() == ["tgt"]  # control: an instrumented target is tested
+
+    f._network_runner = object()
+    assert f._self_test_targets() == []

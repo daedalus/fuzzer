@@ -783,8 +783,12 @@ class Fuzzer:
         print(f"[!] WARNING: {msg}")
 
     def _self_test_targets(self) -> list[str]:
-        """Targets the startup shim self-test runs: coverage on, shim present."""
-        if not self.use_coverage:
+        """Targets the startup shim self-test runs: coverage on, shim present.
+
+        Not network mode: coverage arrives asynchronously after a settle
+        window, so one send says nothing about whether the map attached.
+        """
+        if not self.use_coverage or getattr(self, "_network_runner", None) is not None:
             return []
         targets = self.multi_targets or [self.target]
         return [t for t in targets if afl_instrumentation_status(t) == "present"]

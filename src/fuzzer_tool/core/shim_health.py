@@ -45,6 +45,8 @@ class ShimField(IntEnum):
     SEG_REJECTED = 2
     CMPLOG_DROPPED = 3
     STRAY_SIGNALS = 4
+    ABORTS_INTERCEPTED = 5
+    HANDLERS_DISPLACED = 6
 
 
 class Attach(Enum):
@@ -100,6 +102,20 @@ def health_issues(counters: Sequence[int], attach: Attach) -> list[str]:
     stray = _field(counters, ShimField.STRAY_SIGNALS)
     if stray:
         issues.append(f"{stray} crash signal(s) outside __afl_guarded_call, handed back")
+
+    aborts = _field(counters, ShimField.ABORTS_INTERCEPTED)
+    if aborts:
+        issues.append(
+            f"{aborts} abort() call(s) intercepted and returned; the target ran on "
+            "past a failed assertion"
+        )
+
+    displaced = _field(counters, ShimField.HANDLERS_DISPLACED)
+    if displaced:
+        issues.append(
+            "another crash handler was installed over the shim's; re-armed, but "
+            "crashes before the re-arm could not be recovered"
+        )
 
     return issues
 
@@ -168,7 +184,13 @@ class ShimWatch:
         return fresh
 
 
-_PROBLEM_FIELDS = (ShimField.SEG_REJECTED, ShimField.CMPLOG_DROPPED, ShimField.STRAY_SIGNALS)
+_PROBLEM_FIELDS = (
+    ShimField.SEG_REJECTED,
+    ShimField.CMPLOG_DROPPED,
+    ShimField.STRAY_SIGNALS,
+    ShimField.ABORTS_INTERCEPTED,
+    ShimField.HANDLERS_DISPLACED,
+)
 
 
 def _field_issue(counters: Sequence[int], field: ShimField, attach: Attach) -> str | None:
