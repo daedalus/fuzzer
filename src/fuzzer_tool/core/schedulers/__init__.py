@@ -29,6 +29,7 @@ from fuzzer_tool.core.schedulers.op_las_vegas import LasVegasScheduler
 from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
 from fuzzer_tool.core.schedulers.op_mopt import MOptScheduler
 from fuzzer_tool.core.schedulers.op_moss import MOSSScheduler
+from fuzzer_tool.core.schedulers.op_phe import PHEScheduler
 from fuzzer_tool.core.schedulers.op_replicator import ReplicatorScheduler
 from fuzzer_tool.core.schedulers.op_round_robin import RoundRobinScheduler
 from fuzzer_tool.core.schedulers.op_softmax import SoftmaxScheduler
@@ -48,6 +49,7 @@ __all__ = [
     "TsallisINFScheduler",
     "KalmanTSScheduler",
     "IDSScheduler",
+    "PHEScheduler",
     "WhittleIndexScheduler",
     "FPLScheduler",
     "CMAESScheduler",

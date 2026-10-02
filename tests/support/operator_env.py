@@ -51,6 +51,7 @@ BALLOT_SCHEDULERS = (
     "tsallis",
     "kalman_ts",
     "ids",
+    "phe",
     "gradient",
     "gp_ucb",
     "hierarchical",

@@ -1,4 +1,4 @@
-"""Wiring for the Tsallis-INF, Kalman-TS and IDS operator schedulers.
+"""Wiring for the Tsallis-INF, Kalman-TS, IDS and PHE operator schedulers.
 
 Each must be reachable end to end: flag -> construction on the fuzzer's
 RandPool -> arms registered -> ballot -> select_op dispatch -> record
@@ -7,7 +7,12 @@ fan-out. Tsallis-INF is importance-weighted, so it is fed on-policy only.
 
 import pytest
 
-from fuzzer_tool.core.schedulers import IDSScheduler, KalmanTSScheduler, TsallisINFScheduler
+from fuzzer_tool.core.schedulers import (
+    IDSScheduler,
+    KalmanTSScheduler,
+    PHEScheduler,
+    TsallisINFScheduler,
+)
 from fuzzer_tool.services.fuzz_round import FuzzRound
 from fuzzer_tool.services.fuzzer import _OPERATOR_STRATEGY_NAMES
 from fuzzer_tool.services.operators import _FALLBACK_PRECEDENCE, operator_strategy_pool
@@ -22,6 +27,7 @@ _CASES = {
         {"kalman_ts_q0": 1e-6},
     ),
     "ids": (IDSScheduler, ["--ids", "--ids-samples", "64"], {"ids_samples": 64}),
+    "phe": (PHEScheduler, ["--phe", "--phe-a", "2.5"], {"phe_a": 2.5}),
 }
 
 
@@ -96,6 +102,7 @@ def test_select_op_dispatches_to_it(tmp_path, name):
         ("tsallis", "bandit", False),  # on-policy: another selector's round
         ("kalman_ts", "bandit", True),  # off-policy safe: every round
         ("ids", "bandit", True),
+        ("phe", "bandit", True),
     ],
 )
 def test_record_fan_out(tmp_path, name, selector, fed):

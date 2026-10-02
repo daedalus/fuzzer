@@ -460,6 +460,7 @@ def cmd_fuzz(args):
         args.tsallis = True
         args.kalman_ts = True
         args.ids = True
+        args.phe = True
         args.successive_elim = True
         args.las_vegas = True
         args.canary_scheduler = True
@@ -695,6 +696,8 @@ def cmd_fuzz(args):
         kalman_ts_q0=getattr(args, "kalman_ts_q0", 1e-8),
         ids=getattr(args, "ids", False),
         ids_samples=getattr(args, "ids_samples", 128),
+        phe=getattr(args, "phe", False),
+        phe_a=getattr(args, "phe_a", 1.1),
         whittle=getattr(args, "whittle", False),
         whittle_n_states=getattr(args, "whittle_n_states", 5),
         whittle_gamma=getattr(args, "whittle_gamma", 0.95),
@@ -2080,6 +2083,7 @@ _HAIL_MARY_FLAGS = (
     "tsallis",
     "kalman_ts",
     "ids",
+    "phe",
     "gradient",
     "whittle",
     "successive_elim",
@@ -3290,6 +3294,18 @@ def main() -> int:
         type=int,
         default=128,
         help="IDS posterior samples per policy solve (default: 128)",
+    )
+    fuzz_parser.add_argument(
+        "--phe",
+        action="store_true",
+        help="Enable Perturbed-History Exploration: argmax of each operator's "
+        "mean after adding Binomial pseudo-rewards. Elo-only, so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--phe-a",
+        type=float,
+        default=1.1,
+        help="PHE pseudo-pulls per real pull; regret bound needs > 1 (default: 1.1)",
     )
     fuzz_parser.add_argument(
         "--fpl-epsilon",

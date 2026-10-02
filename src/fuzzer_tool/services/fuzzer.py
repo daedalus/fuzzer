@@ -104,6 +104,7 @@ from fuzzer_tool.core.schedulers import (
     MonteCarloScheduler,
     MOptScheduler,
     MOSSScheduler,
+    PHEScheduler,
     ReplicatorScheduler,
     RoundRobinScheduler,
     SoftmaxScheduler,
@@ -203,6 +204,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "tsallis",
     "kalman_ts",
     "ids",
+    "phe",
     "invasion",
     "round_robin",
     "canary",
@@ -1349,6 +1351,8 @@ class Fuzzer:
         kalman_ts_q0=1e-8,
         ids=False,
         ids_samples=128,
+        phe=False,
+        phe_a=1.1,
         whittle=False,
         whittle_n_states=5,
         whittle_gamma=0.95,
@@ -3311,6 +3315,12 @@ class Fuzzer:
         if ids:
             self._ids = IDSScheduler(samples=ids_samples, rng=self._rng)
             log.info("IDS enabled (samples=%d)", ids_samples)
+        # PHE: perturbed-history exploration, Elo-only for the same reason.
+        self._use_phe = phe
+        self._phe = None
+        if phe:
+            self._phe = PHEScheduler(a=phe_a, rng=self._rng)
+            log.info("PHE enabled (a=%.2f)", phe_a)
 
         # Whittle index (restless-bandit index policy). Off by default and
         # Elo-only (see core/schedulers/op_whittle.py's module docstring): the
@@ -3833,6 +3843,7 @@ class Fuzzer:
             or self._tsallis
             or self._kalman_ts
             or self._ids
+            or self._phe
             or self._kl_swucb
             or self._consolidated_v1
             or self._consolidated_v2
@@ -4049,6 +4060,8 @@ class Fuzzer:
             _register_arms(self._kalman_ts, _format_priors)
         if self._ids:
             _register_arms(self._ids, _format_priors)
+        if self._phe:
+            _register_arms(self._phe, _format_priors)
         if self._gradient:
             _register_arms(self._gradient)
         if self._whittle:
@@ -7701,8 +7714,8 @@ class Fuzzer:
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        # corral, tsallis, kalman_ts and ids are deliberately absent from
-        # this banner too, same reason,
+        # corral, tsallis, kalman_ts, ids and phe are deliberately absent
+        # from this banner too, same reason,
         # see core/schedulers/op_corral.py.
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/op_gradient.py.
@@ -8201,8 +8214,8 @@ class Fuzzer:
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        # corral, tsallis, kalman_ts and ids are deliberately absent from
-        # this banner too, same reason,
+        # corral, tsallis, kalman_ts, ids and phe are deliberately absent
+        # from this banner too, same reason,
         # see core/schedulers/op_corral.py.
         # gradient is deliberately absent from this banner, matching
         # op_katz/op_tang: it is Elo-only, see core/schedulers/op_gradient.py.

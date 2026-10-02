@@ -788,7 +788,7 @@ _FALLBACK_PRECEDENCE = (
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
     # op_tpe, op_strata, op_stride, op_p2c, gradient, whittle, corral, softmax, topk,
-    # tsallis, kalman_ts, ids are deliberately absent
+    # tsallis, kalman_ts, ids, phe are deliberately absent
     # here: they are unproven exploratory arms
     # (see their module docstrings) that should only ever be reached via
     # Elo explicitly choosing them, not by being the top-precedence live
@@ -910,6 +910,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("kalman_ts")
     if f._use_ids and f._ids:
         available.append("ids")
+    if f._use_phe and f._phe:
+        available.append("phe")
     if f._use_gradient and f._gradient:
         available.append("gradient")
     if f._use_whittle and f._whittle:
@@ -5390,6 +5392,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "ids" and f._ids:
             op = f._ids.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "phe" and f._phe:
+            op = f._phe.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "round_robin" and f._round_robin:
             op = f._round_robin.select_op(ops)
