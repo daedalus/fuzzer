@@ -878,6 +878,7 @@ def cmd_fuzz(args):
         op_span_reverse=getattr(args, "op_span_reverse", False),
         op_afl_det=getattr(args, "op_afl_det", False),
         op_span_relocate=getattr(args, "op_span_relocate", False),
+        zip_seed_corpus=getattr(args, "zip_seed_corpus", False),
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
     # and printed as the command that reproduces the run, so an argument
@@ -1998,6 +1999,10 @@ def cmd_sweep(args):
 #
 # lst_revisit (--lst-revisit) is excluded: a float dest like gate_bonus,
 # and unmeasured -- P3-3 step 6 still owes its replicated A/B.
+#
+# zip_seed_corpus (--zip-seed-corpus) is excluded: a storage layout, not a
+# strategy. Force-enabling it would move the user's corpus writes into
+# seeds.zip, which a later run without the flag does not load.
 #
 # mds_select (--mds-select) is excluded for the same reason as gate_bonus's
 # second point: it is explicitly unvalidated. It swaps
@@ -4412,6 +4417,17 @@ def main() -> int:
             "in a CuckooFilter (16-bit fingerprints, ~1e-4 realised false-positive "
             "rate at full load, transactional inserts). Both expose the same update_bytes "
             "contract, so the choice is opt-in and the default is unchanged."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--zip-seed-corpus",
+        action="store_true",
+        default=False,
+        help=(
+            "Write new seeds only to corpus/seeds.zip (deflate level 9, appended in "
+            "blocks); read seeds from both corpus/seeds/ and seeds.zip. Deltas stay "
+            "in corpus/deltas/. Without this flag an existing seeds.zip is ignored "
+            "(with a warning)"
         ),
     )
     fuzz_parser.add_argument(

@@ -24,6 +24,7 @@ from pathlib import Path
 
 import xxhash
 
+from fuzzer_tool.adapters import seed_zip
 from fuzzer_tool.adapters.filesystem import (
     load_corpus,
     save_crash,
@@ -315,6 +316,10 @@ def _retire_seed_file(corpus_dir: Path, h: str) -> bool:
             shutil.move(str(delta), str(dest / delta.name))
             moved = True
 
+    store = seed_zip.lookup(corpus_dir)
+    if store is not None and store.retire(h):
+        moved = True
+
     return moved
 
 
@@ -513,6 +518,8 @@ class CorpusManager:
                 "coverage_edges_baseline": meta.get("coverage_edges_baseline", 0),
                 "record_stride": meta.get("record_stride", None),
             }
+        # Seeds before state: state must never name seeds not yet on disk.
+        seed_zip.flush_all()
         store = f._state_store
         store.set("corpus", state)
         store.set("edge_tracker", f._edge_tracker.to_dict())
@@ -1835,6 +1842,10 @@ class CorpusManager:
                 sub = pruned_dir / h[:2]
                 sub.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(fh), str(sub / fh.name))
+        # Zip-resident seeds: a member cannot move, so tombstone it.
+        store = seed_zip.lookup(f.corpus_dir)
+        for h in store.main_hashes() - kept_set if store is not None else ():
+            store.retire(h)
         # Prune delta files
         if not deltas_dir.exists():
             return

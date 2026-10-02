@@ -33,11 +33,13 @@ try:
 except ImportError:
     _HAS_NUMPY = False
 
+from fuzzer_tool.adapters import seed_zip
 from fuzzer_tool.adapters.process import (
     _child_pids,
     disable_aslr,
     reset_env_cache,
 )
+from fuzzer_tool.adapters.seed_zip import ZipMode
 from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
@@ -1620,6 +1622,8 @@ class Fuzzer:
         pos_consolidated=False,
         clock=ClockMode.WALL,
         shm_write_guard=WriteGuard.OFF,
+        # --zip-seed-corpus (adapters/seed_zip.py). Appended: positional signature.
+        zip_seed_corpus=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2170,6 +2174,8 @@ class Fuzzer:
 
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
+        # Always set, so a previous Fuzzer on this dir cannot leak its mode.
+        seed_zip.configure(self.corpus_dir, ZipMode.ON if zip_seed_corpus else ZipMode.OFF)
 
         # Single-file state store (replaces per-component JSON files).
         # Loaded eagerly so all components can fetch their section via get().
@@ -2573,6 +2579,9 @@ class Fuzzer:
                     for fh in deltas_pruned_dir.rglob("delta_*.json")
                     if fh.is_file() and not fh.is_symlink()
                 )
+            store = seed_zip.lookup(self.corpus_dir)
+            if store is not None:
+                pruned_count += store.pruned_count()
             capacity = max(10 * len(self.corpus) + pruned_count, 100_000)
             self.cuckoo_seed_filter = CuckooFilter(capacity=capacity)
             self._load_pruned_seeds_into_cuckoo()
@@ -4535,10 +4544,9 @@ class Fuzzer:
     def _load_pruned_seeds_into_cuckoo(self):
         """Add all pruned seeds to the cuckoo filter at startup."""
         pruned_dir = self.corpus_dir / "seeds" / "pruned"
-        if not pruned_dir.exists():
-            return
         count = 0
-        for fh in pruned_dir.rglob("id_*"):
+        files = pruned_dir.rglob("id_*") if pruned_dir.exists() else ()
+        for fh in files:
             # Reject symlinks and paths escaping the pruned root.
             if not fh.is_file() or fh.is_symlink():
                 continue
@@ -4555,6 +4563,10 @@ class Fuzzer:
                 count += 1
             except OSError:
                 continue
+        store = seed_zip.lookup(self.corpus_dir)
+        for data in store.pruned() if store is not None else ():
+            self.cuckoo_seed_filter.add(self._seed_key(data))
+            count += 1
         if count:
             log.info("Loaded %d pruned seeds into cuckoo seed filter", count)
 

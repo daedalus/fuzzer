@@ -17,6 +17,8 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
+from fuzzer_tool.adapters import seed_zip
+from fuzzer_tool.adapters.seed_zip import SeedTree
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.crash_metadata import CrashMetadata
@@ -306,6 +308,9 @@ def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None
         full = corpus_dir / base / h[:2] / f"id_{h}"
         if full.is_file():
             return full.read_bytes()
+    zipped = _zip_get(corpus_dir, h)
+    if zipped is not None:
+        return zipped
     for delta_file in _delta_candidates(corpus_dir, h):
         if not delta_file.is_file():
             continue
@@ -321,6 +326,17 @@ def rehydrate_by_hash(h: str, corpus_dir: Path, _depth: int = 0) -> bytes | None
             return apply_delta_v2(parent, diff)
         return apply_delta(parent, diff)
     return None
+
+
+def _zip_get(corpus_dir: Path, h: str) -> bytes | None:
+    """*h* from seeds.zip under --zip-seed-corpus; content must match the name."""
+    store = seed_zip.lookup(corpus_dir)
+    if store is None:
+        return None
+    data = store.get(h)
+    if data is None or hash_data(data) != h:
+        return None
+    return data
 
 
 def hash_data(data: bytes) -> str:
@@ -557,6 +573,8 @@ def load_corpus(
         if base.is_dir():
             _load_full_from_dir(base, mark_irreplaceable=False)
 
+    _load_full_from_zip(corpus_dir, full_files, irreplaceable_hashes, load_irreplaceable)
+
     # Deltas live in corpus/deltas/, a *sibling* of seeds/ (see save_to_corpus),
     # so scanning seeds/ alone silently drops every delta-encoded entry.
     for rel in _CORPUS_DELTA_ROOTS:
@@ -577,6 +595,39 @@ def load_corpus(
     if not corpus and add_default:
         corpus.append(b"AAAAAAAA")
     return corpus, seen, irreplaceable_hashes
+
+
+def _load_full_from_zip(
+    corpus_dir: Path,
+    full_files: dict[str, bytes],
+    irreplaceable_hashes: set[str],
+    load_irreplaceable: bool,
+) -> None:
+    """Union seeds.zip into *full_files* (keyed by content, as files are)."""
+    store = seed_zip.lookup(corpus_dir)
+    if store is None:
+        if (corpus_dir / seed_zip.ZIP_NAME).is_file():
+            log.warning("%s ignored: pass --zip-seed-corpus to load it", seed_zip.ZIP_NAME)
+        return
+
+    for data, protected in store.live():
+        h = hash_data(data)
+        full_files.setdefault(h, data)
+        if protected and load_irreplaceable:
+            irreplaceable_hashes.add(h)
+
+
+def _has_seed(store, tree: SeedTree, h: str, dest: Path) -> bool:
+    return store.has(tree, h) if store is not None else dest.is_file()
+
+
+def _put_seed(store, tree: SeedTree, h: str, dest: Path, data: bytes) -> None:
+    """Write a full seed: seeds.zip under --zip-seed-corpus, else *dest*."""
+    if store is not None:
+        store.put(tree, h, data)
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(data)
 
 
 def save_to_corpus(
@@ -649,10 +700,8 @@ def save_to_corpus(
     else:
         # Store seeds in two-digit hash subdirectories to avoid too many
         # files in a single directory.
-        sub_dir = seeds_dir / h[:2]
-        sub_dir.mkdir(parents=True, exist_ok=True)
-        corpus_file = sub_dir / f"id_{h}"
-        corpus_file.write_bytes(data)
+        dest = seeds_dir / h[:2] / f"id_{h}"
+        _put_seed(seed_zip.lookup(corpus_dir), SeedTree.MAIN, h, dest, data)
     return True
 
 
@@ -693,12 +742,8 @@ def save_irreplaceable(
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
 
-    irep_dir = corpus_dir / "seeds" / "irreplaceable"
-    irep_dir.mkdir(parents=True, exist_ok=True)
-    sub_dir = irep_dir / h[:2]
-    sub_dir.mkdir(parents=True, exist_ok=True)
-    corpus_file = sub_dir / f"id_{h}"
-    corpus_file.write_bytes(data)
+    dest = corpus_dir / "seeds" / "irreplaceable" / h[:2] / f"id_{h}"
+    _put_seed(seed_zip.lookup(corpus_dir), SeedTree.IRREPLACEABLE, h, dest, data)
     return True
 
 
@@ -733,9 +778,9 @@ def save_crashing_seed(
         True if this input was new to seen_hashes, False if already known.
     """
     h = hash_data(data)
-    dest_dir = corpus_dir / "seeds" / "crashing" / h[:2]
-    dest = dest_dir / f"id_{h}"
-    if h in irreplaceable_hashes and dest.is_file():
+    dest = corpus_dir / "seeds" / "crashing" / h[:2] / f"id_{h}"
+    store = seed_zip.lookup(corpus_dir)
+    if h in irreplaceable_hashes and _has_seed(store, SeedTree.CRASHING, h, dest):
         return False
 
     is_new = True
@@ -752,8 +797,7 @@ def save_crashing_seed(
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
+    _put_seed(store, SeedTree.CRASHING, h, dest, data)
     return is_new
 
 
@@ -770,9 +814,9 @@ def save_timeout_seed(
     so they survive corpus minimization and can be triaged after the run.
     """
     h = hash_data(data)
-    dest_dir = corpus_dir / "seeds" / "timeouts" / h[:2]
-    dest = dest_dir / f"id_{h}"
-    if h in irreplaceable_hashes and dest.is_file():
+    dest = corpus_dir / "seeds" / "timeouts" / h[:2] / f"id_{h}"
+    store = seed_zip.lookup(corpus_dir)
+    if h in irreplaceable_hashes and _has_seed(store, SeedTree.TIMEOUTS, h, dest):
         return False
 
     is_new = True
@@ -789,8 +833,7 @@ def save_timeout_seed(
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
 
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest.write_bytes(data)
+    _put_seed(store, SeedTree.TIMEOUTS, h, dest, data)
     return is_new
 
 
