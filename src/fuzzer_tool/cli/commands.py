@@ -2006,6 +2006,7 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py.
 _HAIL_MARY_FLAGS = (
     "continue_until_crash",
+    "crash_explore",
     "isolate_crash_fields",
     "deep_coverage",
     "ptrace",
