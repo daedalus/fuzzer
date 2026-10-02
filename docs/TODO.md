@@ -99,11 +99,13 @@
 - [ ] **`field_constraints.py` bounded-integer pre-pass** (handover §1, deprioritized) — z3 is already fast on these small bitwidth systems, so the win is thin. Revisit only if the integer-checksum pattern proves out.
 
 ## Operators
+- [ ] **A/B `rev_circuit` and fixed-width `bit_swap_*` on fuzzgoat** (2026-10-01) — unit-tested only. Open: (a) paired `bench_paired.py` vs previous commit (Hard Rule 52); (b) on zero-heavy inputs controls rarely fire, so decline rate may be high — check `Declin` in the report; (c) `--weizz-tags` run to see whether tagged controls beat uniform ones.
 - [ ] **A/B the ten new op mutators on fuzzgoat** (2026-09-30) — `json_mutate`, `nest_bomb`, `ascii_float`, `escape_mutate`, `encoding_wrap`, `utf16_transcode` (text), `sql_mutate`, `ecdsa_field_mutate`, `recompress_lz4`, `recompress_png_idat` (targets). Unit-tested only; no clang build in the authoring sandbox (Hard Rule 52). Paired run with each op masked vs live; check per-op decline rate (`_op_declines`) and selection share.
 - [ ] **`recompress_lz4` emits literal-only blocks** — valid but never exercises match copies/overlapping offsets. A real LZ4 match finder would reach `_copy_match`-style decoder paths.
 - [ ] **`sql_mutate` sniffer misses leading comments** — `-- x\nSELECT 1` is SQL but not claimed; the 2% bootstrap trickle is its only path there.
 
 ## Testing
+- [ ] **`test_every_exported_scheduler_is_covered` red on main** (2026-10-01) — `LasVegasScheduler` is exported but missing from `tests/test_regression_scheduler_operator_reach.py`'s coverage set.
 - [ ] **`test_converges_on_random_seed[FPL]` fails on some random seeds** (2026-09-30) — seen once in a 610-test run, green on rerun; synthetic env, no registry coupling. Log the seed (`0x...` in the message) and pin it as a regression case.
 - [ ] **Lizard CCN>15: 13 left** (2026-09-26) — `lizard --CCN 15 -w .`. Giants: `Fuzzer.__init__`, `fuzz_one`, `run`, `_print_enabled_features`, `_selected_schedulers_str`, `OperatorEngine.select_op`, `cli.main`, `cmd_fuzz`. `operator_strategy_pool`: every split slowed `select_op` 6–26%. Frozen test oracles (`_old_*`, `_reference_*`, `legacy`) stay as is.
 - [ ] **x86 `_decode_insns` never decodes 0x0F** (2026-09-26) — `mutations/x86.py`: the 0x00–0x3F ALU range check precedes the 0x0F check, so two-byte opcodes (rel32 `jcc` used by `_swap_jcc`) decode as ALU+modrm. Dead branch kept as `_decode_0f`; wire it at op 0x0F with a regression test.
