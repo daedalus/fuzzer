@@ -333,6 +333,26 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Load scaling**: the table is sized so `capacity` items fill at most 90% of the slots (`CuckooFilter.MAX_LOAD`); a failed insert is rolled back (`n_failed` counts them), so a rejected add never evicts a stored seed; kicking uses a private RNG. Realised false-positive rate is ~2*b*load/2^f (~1e-4 at 16-bit fingerprints).
 - **Dedup check**: In `_dedup_mutate()`, before the exec bloom check, if the parent seed's hash is in the filter AND not in `_cuckoo_recovered`, the mutation is skipped (returns original data).
 
+### Zip Seed Corpus (`--zip-seed-corpus`)
+
+Off by default. New full seeds (`seeds/`, `irreplaceable/`, `crashing/`, `timeouts/`) go only to `corpus/seeds.zip`, deflate level 9; loading unions `seeds/**` with the zip. Deltas stay in `deltas/`. Code: `adapters/seed_zip.py`.
+
+- **Members** mirror the file tree (`ab/id_<h>`, `crashing/ab/id_<h>`). A member cannot move, so prune/retire appends an empty tombstone `.pruned/ab/id_<h>`; archive order decides, so a re-admitted seed is live again. Data is never dropped: `rehydrate_by_hash` and `--cuckoo-seed-filter` still see pruned seeds.
+- **Block mode**: saves buffer and append `max(64, entries/16)` seeds or 8 MiB at a time, plus on every state save and at exit. One append handle stays open; each block ends by rewriting the central directory in place, so the file is a valid zip after every flush. Fixed blocks make directory writes O(N²); one seed per block is 3.4x slower at N=1000.
+- **Crash safety**: a kill mid-block tears the directory, and `zipfile` "a" mode would then start a new archive and hide every old seed. The store salvages first by walking local headers; the original is kept as `seeds.zip.corrupt.N`. Up to one block of unsaved seeds is lost.
+- **Without the flag** an existing `seeds.zip` is ignored with a warning. Offline commands (`minimize`, `root_cause`, `import`, `report`) read files only.
+- **Measured** (`tools/bench_seed_zip.py`, 1 core, 5 reps, median; cold = after `drop_caches`):
+
+| N | arm | write | read warm | read cold | on disk |
+|---|---|---|---|---|---|
+| 1k | files | 93 ms | 101 ms | 342 ms | 10.4 MiB |
+| 1k | zip | 958 ms | 132 ms | 184 ms | 4.3 MiB |
+| 10k | files | 1947 ms | 756 ms | 1720 ms | 104.6 MiB |
+| 10k | zip | 5335 ms | 677 ms | 979 ms | 40.7 MiB |
+
+  Raw input was 6.9 / 70.6 MiB. Level-9 deflate alone is 4.2 s of the 10k zip write (79%); level 6 is 1.8x faster for +0.1% size. The files arm's A/A control spread is up to 2.6x, so the write gap at 1k is real but its size is not precise. Default-off cost: 69 ns per save.
+
+
 ### Mutation Lineage Tree (`--lineage`)
 - **Weighted parent-pointer forest** keyed by seed hash: every corpus seed records its parent seed key, the mutation operators + byte sites that produced it (edge weight = operator attribution), and its node weight = new coverage edges contributed at insertion
 - **Branch-level pruning**: `auto-minimize` drops an entire unproductive subtree when `recent_credit == 0` (no coverage gained since the last minimize) and `subtree_weight < 1.0` (structural γ-discounted edge weight), instead of pruning just the low-scoring seed; mandatory/fresh/irreplaceable seeds are protected from branch drops
