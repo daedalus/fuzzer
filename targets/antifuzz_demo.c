@@ -10,6 +10,10 @@
  *   AF_CRASH=0      no crash masking                (defeat: hardened oracle + ASAN)
  *   AF_SPEED=0      no delay on malformed input     (defeat: --antifuzz-evade sleep)
  *   AF_PTRACE=0     no self-ptrace anti-debug       (defeat: --antifuzz-evade ptrace)
+ *   AF_HASHCMP=0    magic via memcmp, not a hash    (defeat: cmplog)
+ *
+ * AF_CRASH and AF_PTRACE are process-wide, so only the executable applies
+ * them; the .so (direct_lite) runs AF_COVERAGE/AF_SPEED/AF_HASHCMP only.
  *
  * The bug: input beginning with the 4-byte magic "crsh" overflows a stack
  * buffer (ASAN stack-buffer-overflow). The magic is checked §4.4-style via a
@@ -130,20 +134,20 @@ __attribute__((noinline)) static void crash(const unsigned char *buf, size_t len
     free(p);
 }
 
+static int magic_ok(const unsigned char *buf) {
+    if (!env_on("AF_HASHCMP")) return memcmp(buf, MAGIC, MAGIC_LEN) == 0;
+
+    return byte_hash(buf, MAGIC_LEN) == byte_hash((const unsigned char *)MAGIC, MAGIC_LEN);
+}
+
 __attribute__((visibility("default")))
 int fuzz_shm_run(const unsigned char *buf, size_t len) {
-    if (env_on("AF_PTRACE") && ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
-        _exit(0);  /* being traced -> refuse to run (anti-debug) */
-    }
-
-    if (env_on("AF_CRASH")) mask_crashes();
-
     uint32_t h = byte_hash(buf, len);
     if (env_on("AF_COVERAGE")) fake_coverage(h);
 
-    /* §4.4: magic compared by hash, not bytes. */
-    int valid = len >= MAGIC_LEN && byte_hash(buf, MAGIC_LEN) == byte_hash(
-                                        (const unsigned char *)MAGIC, MAGIC_LEN);
+    /* §4.4: magic compared by hash, not bytes. AF_HASHCMP=0 exposes it to
+     * cmplog via memcmp, so the bug stays reachable for the other gates. */
+    int valid = len >= MAGIC_LEN && magic_ok(buf);
     if (!valid) {
         if (env_on("AF_SPEED")) delay_malformed();
         return 0;
@@ -153,7 +157,16 @@ int fuzz_shm_run(const unsigned char *buf, size_t len) {
     return 0;
 }
 
+/* Process-wide anti-debug and crash masking run once, at startup, as in
+ * AntiFuzz. Kept out of fuzz_shm_run: in direct_lite that would trace and
+ * re-handle the fuzzer's own process on every call.                       */
 int main(void) {
+    if (env_on("AF_PTRACE") && ptrace(PTRACE_TRACEME, 0, NULL, NULL) == -1) {
+        _exit(0);  /* being traced -> refuse to run (anti-debug) */
+    }
+
+    if (env_on("AF_CRASH")) mask_crashes();
+
     unsigned char buf[256];
     ssize_t n = read(0, buf, sizeof(buf));
     if (n <= 0) return 0;

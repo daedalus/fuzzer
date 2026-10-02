@@ -144,9 +144,15 @@ Wraps a single real ASAN bug in all four techniques, each env-gated
 | `AF_CRASH=0` | crash masking | hardened oracle + ASAN |
 | `AF_SPEED=0` | delay on malformed input | `--antifuzz-evade` sleep |
 | `AF_PTRACE=0` | self-ptrace anti-debug | `--antifuzz-evade` ptrace |
+| `AF_HASHCMP=0` | hashed magic compare -> `memcmp` | cmplog |
+
+`AF_CRASH`/`AF_PTRACE` run once in `main()`; the `.so` skips them (in
+`direct_lite` they traced and re-handled the fuzzer's own process).
+`--antifuzz-evade` is ignored in in-process mode: `LD_PRELOAD` cannot reach
+an already-running host.
 
 Bug: input starting with 4-byte magic `crsh` overflows a stack buffer; the
-magic is checked via a byte hash (§4.4-style), not a direct compare. Wired in
+magic is checked via a byte hash (§4.4-style) unless `AF_HASHCMP=0`. Wired in
 `tools/build_targets.sh` (ASAN + `afl_shim`, plus a `fuzz_shm_run` `.so` for
 `direct_lite`), modelled on `asan_target.c`.
 
