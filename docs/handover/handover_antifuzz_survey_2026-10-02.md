@@ -59,7 +59,10 @@ was not re-verified and is dropped below.
   mentioned in the three texts.
 - **Stale TODO.** "Hash-compare constants: no counter beyond cmplog digests"
   is out of date: `Fnv1aEncoder` (commit `6f69c174`) now covers the demo's
-  hashed magic. SHA-512 remains uncountered; see AF-7.
+  hashed magic. SHA-512 remains uncountered; see AF-7. A follow-up fix
+  restored lazy replacement building (the commit slowed every pair ~57x),
+  limited FNV-1a to the constant (no +-64 neighbours) and corrected the
+  preimage claim (not a bijection: see section 5).
 
 ## Taxonomy
 
@@ -159,7 +162,7 @@ because of the performance cost.
 Five countermeasures, one per AntiFuzz technique plus the hash encoders, and
 a benchmark target. Tests: `tests/test_coverage_noise.py` (11),
 `test_regression_stderr_crash_spoof.py` (14), `test_rq_encodings.py -k fnv`
-(5) pass in a clean clone; `test_antifuzz_evade.py` and
+(11) pass in a clean clone; `test_antifuzz_evade.py` and
 `test_regression_antifuzz_demo.py` skip 7 of 9 tests here (they need clang /
 an ASAN build).
 
@@ -267,8 +270,16 @@ overflows a stack buffer; the magic is checked via a byte hash unless
 (`fnv1a_p`/`fnv1a_r`, 4-byte fields compared against a constant) invert the
 hash to all preimages, so a cmplog pair of two hash values yields input
 patches. `_FNV_MIN_OPERAND` filters operand pairs too small to be hashes.
-16 encoders total; none models an additive or XOR constant on both operands
+54 encoders total; none models an additive or XOR constant on both operands
 (the case Fuzzification says fools RedQueen).
+
+FNV-1a over 4 bytes is not a bijection: about 1 preimage on average, none
+for roughly a third of hashes, so those compares stay unsolved. One
+meet-in-the-middle inversion costs about 12 ms in pure Python (cached per
+hash). `Encoder.value_only` makes `Fnv1aEncoder` invert only the constant,
+never its +-i neighbours (their preimages are unrelated). Replacement
+variants are built only after the pattern is found in the input (Hard Rule
+41): 400 non-matching pairs take 0.010 s.
 
 ## Proposals (not implemented)
 
@@ -491,13 +502,13 @@ loops and implicit data-flow copies.
 
 | Tier | Case | Counter |
 |---|---|---|
-| 1 | Invertible or short hash (CRC32, FNV-1a) | Shipped: `Crc32Encoder`, `Fnv1aEncoder` |
-| 2 | Non-invertible hash on a small field | Hash-site detection from cmplog (operands ≥ 8 bytes, high-entropy, lhs changes on any single-bit input flip, rhs constant), then bounded brute force over the field (≤ 4 bytes = 2^32 candidates) with a native implementation of the hash. Throughput is unmeasured: benchmark FNV first and extrapolate per hash |
+| 1 | Invertible or short hash (CRC32, FNV-1a) | Shipped: `Crc32Encoder`, `Fnv1aEncoder` (4-byte fields only; ~1/3 of FNV hashes have no preimage) |
+| 2 | Non-invertible hash on a small field | Hash-site detection from cmplog (operands ≥ 8 bytes, high-entropy, lhs changes on any single-bit input flip, rhs constant), then bounded brute force over the field (≤ 4 bytes = 2^32 candidates) with a native implementation of the hash. Throughput is unmeasured for brute force; the FNV-1a meet-in-the-middle cost is measured (~12 ms per inversion) |
 | 3 | Seed already contains the value | AntiFuzz itself notes concolic engines continue from such a seed; prefer valid seed corpora over synthetic ones for hash-guarded formats |
 | 4 | SHA-512 on larger fields, AES-ECB identity | No counter; document it. Fuzzification admits a hash-guarded branch can still be hit "rarely" |
 
 Separately, add an additive/XOR-constant encoder (Fuzzification's note that
-`(a+c) == (b+c)` defeats RedQueen-style matching; the repo's 16 encoders have
+`(a+c) == (b+c)` defeats RedQueen-style matching; the repo's 54 encoders have
 none): infer `c` by flipping an input byte and watching the logged operand
 delta, then synthesise patches for `a` and `b`.
 
@@ -528,6 +539,8 @@ Effort: M. Needs clang and an ASAN runtime, absent in the authoring sandbox.
 - [ ] AF-1 … AF-8 above: none implemented. Suggested order: AF-3 (small, only
   the shim), AF-4 (small, flag-gated), AF-1 (needs a stdout digest), then
   AF-2, AF-6, AF-5, AF-7.
+- [ ] `Fnv1aEncoder` is unit-tested only: not run through `fuzz_one` on
+  `antifuzz_demo` with `is_hash_candidate` live (tracked in `docs/TODO.md`).
 - [ ] SHA-512 / AES-ECB compares: no counter (AF-7 tier 4).
 - [ ] Obtain the No-Fuzz, CatchFuzz, SAFTE and IEEE papers (paywalled); until
   then their numbers here are abstract-level and the techniques are

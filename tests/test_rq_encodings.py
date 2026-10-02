@@ -5,6 +5,7 @@ import zlib
 
 import pytest
 
+from fuzzer_tool.core import rq_encodings
 from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.rq_encodings import (
@@ -12,6 +13,7 @@ from fuzzer_tool.core.rq_encodings import (
     Crc32Encoder,
     CStrChrEncoder,
     CStringEncoder,
+    Encoder,
     Fnv1aEncoder,
     MemEncoder,
     PlainEncoder,
@@ -19,6 +21,8 @@ from fuzzer_tool.core.rq_encodings import (
     SplitEncoder,
     ZextEncoder,
     _fnv1a,
+    _fnv1a_fwd_table,
+    _fnv1a_invert_all,
     encoders_summary,
     find_offsets,
     generate_mutations,
@@ -437,8 +441,7 @@ class TestFnv1aEncoder:
             generate_mutations(_fnv_le(garbage), _fnv_le(want), 32, "CMP", data),
             "fnv1a_p",
         )
-        assert any(m[0] == (2,) for m in hits)
-        assert any(m[1] == (want,) for m in hits)
+        assert ((2,), (want,)) in [(m[0], m[1]) for m in hits]
 
     def test_fnv1a_reversed_field(self):
         x = bytes.fromhex("01020304")
@@ -487,3 +490,80 @@ class TestFnv1aEncoder:
             pres = enc.encode(_fnv_le(x))
             assert x in pres
             assert all(_fnv1a(p) == _fnv1a(x) for p in pres)
+
+
+class TestFnv1aCost:
+    """Hard Rule 41: FNV-1a must not slow the pairs it cannot solve."""
+
+    def test_no_match_never_encodes_replacements(self, monkeypatch):
+        """Pattern absent from the input -> replacement variants are not built."""
+        calls = []
+        real = rq_encodings._get_encoded_variants
+        monkeypatch.setattr(
+            rq_encodings, "_get_encoded_variants", lambda *a: calls.append(a) or real(*a)
+        )
+        rng = RandPool(seed=3)
+        data = b"\x00" * 64
+        for n in (2, 8):
+            for _ in range(20):
+                a, b = rng.randbytes(n), rng.randbytes(n)
+                size = 64 if n == 8 else 8 * n
+                generate_mutations(a, b, size, "CMP", data, hammer=True)
+        assert calls == []
+
+    def test_hammer_inverts_only_the_constant(self, monkeypatch):
+        """hammer=True must not invert the constant +-64: hash neighbours are useless."""
+        calls = []
+        real = rq_encodings._fnv1a_invert_all
+        monkeypatch.setattr(rq_encodings, "_fnv1a_invert_all", lambda t: calls.append(t) or real(t))
+        garbage, want = b"qqqq", b"crsh"
+        data = b"AA" + garbage + b"BB"
+        hits = _by_encoder(
+            generate_mutations(
+                _fnv_le(garbage),
+                _fnv_le(want),
+                32,
+                "CMP",
+                data,
+                hammer=True,
+                is_hash=lambda a, b: False,
+            ),
+            "fnv1a_p",
+        )
+        assert ((2,), (want,)) in [(m[0], m[1]) for m in hits]
+        assert len(set(calls)) <= 2  # operand + constant; fnv1a_p/_r share the cache
+        assert {m[1] for m in hits} == {(p,) for p in real(_fnv1a(want))}
+
+    def test_empty_chunks_dropped(self, monkeypatch):
+        """An encoding that yields an empty chunk is dropped on both sides."""
+
+        class Empty(Encoder):
+            def encode(self, val):
+                return [b""]
+
+        enc = Empty()
+        assert rq_encodings._get_encoded_variants(enc, "CMP", 32, b"\x01\x00\x00\x00", False) == []
+        monkeypatch.setattr(rq_encodings, "BUILTIN_ENCODERS", [enc])
+        assert generate_mutations(b"\x01\x00", b"\x02\x00", 16, "CMP", b"\x01\x00\x01\x00") == []
+
+
+class TestFnv1aPreimages:
+    def test_not_a_bijection(self):
+        """Falsification: some 32-bit hashes have no 4-byte preimage; all found ones are exact."""
+        rng = RandPool(seed=5)
+        counts = []
+        for _ in range(20):
+            target = int.from_bytes(rng.randbytes(4), "little")
+            pres = _fnv1a_invert_all(target)
+            assert all(_fnv1a(p) == target for p in pres)
+            counts.append(len(pres))
+        assert 0 in counts
+
+    def test_two_byte_table_is_injective(self):
+        """Adversarial: no collisions, so values are ints, not lists."""
+        fwd = _fnv1a_fwd_table()
+        assert len(fwd) == 1 << 16
+        assert all(isinstance(v, int) for v in fwd.values())
+
+    def test_table_built_once(self):
+        assert _fnv1a_fwd_table() is _fnv1a_fwd_table()

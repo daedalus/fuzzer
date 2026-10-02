@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`fnv1a_p`/`fnv1a_r` slowed every Redqueen pair** (`core/rq_encodings.py`): replacement variants were built before the input search, 400 non-matching pairs 0.009 s → 0.51 s. Restored lazy build after a pattern hit (0.010 s). FNV-1a now inverts only the constant, not ±64 neighbours: match found 2.18 s → 0.05 s per pair. 2-byte table is `dict[int, int]` (injective), built once via `functools.cache`. Comments no longer call FNV-1a a bijection (measured: ~1 preimage on average, none for ~1/3). Encodings with an empty chunk are dropped on both sides.
 - **Doppler drop memory churned on huge corpora** (`core/power_doppler.py`): the 2¹⁵-key LRU forgot every dropped key before a larger cycle returned, so the horizon never widened. Now the bottom-k keys by `crc32_ieee` are kept: a fixed, never-empty subset of any cycle within the same bound (a halving crc threshold could empty out on all-odd crcs).
 
 - **Doppler horizon compounded per returning seed** (`core/power_doppler.py`): each return doubled one shared horizon (N returns → 2^N), disabling abandonment; and the dropped-key memory (`max_seeds` keys) forgot keys before large corpora cycled back. Horizon is now `max(horizon, 2 × measured gap)`; memory is 2¹⁵ keys.
