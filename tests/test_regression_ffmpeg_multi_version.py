@@ -285,5 +285,5 @@ def test_regression_versions_wired_into_both_passes():
     """build_ffmpeg_versions runs in the ASAN and the no-ASAN pass."""
     main = BUILD_SCRIPT.read_text().split("# ── Main ──", 1)[1]
 
-    assert re.search(r'build_ffmpeg_versions "_asan" "-fsanitize=address"', main)
+    assert re.search(r'build_ffmpeg_versions "_asan" "\$ASAN_CFLAGS"', main)
     assert re.search(r'build_ffmpeg_versions "_noasan" ""', main)

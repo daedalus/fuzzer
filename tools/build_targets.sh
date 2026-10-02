@@ -330,6 +330,15 @@ NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcspn -fno-builtin-memrchr"
 # stack traces walkable for the crash reports (see build_c_targets).
 FRAME_POINTER="-fno-omit-frame-pointer"
 
+# ASAN flags for every target and library pass. Recover mode is required by
+# in-process (direct_lite): the wrapper runs it with halt_on_error=0, which
+# only a -fsanitize-recover=address check site honours. A plain site runs
+# ASAN's Die() inside the fuzzer -- fuzzgoat_read_asan.so killed it on the
+# first injected bug. It is per call site, so a library built without it
+# stays fatal under a recover wrapper. Executables are unaffected: their
+# runtime default is still halt_on_error=1.
+ASAN_CFLAGS="-fsanitize=address -fsanitize-recover=address"
+
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
 WITH_DISTANCE=0
@@ -1350,7 +1359,7 @@ STUBEOF
     local LINK_FLAGS=""
     local EXTRA_LIBS="-lsancov_stub"
     if [ "$asan_suffix" = "_asan" ]; then
-        COV_FLAGS="-fsanitize=address $COV_FLAGS"
+        COV_FLAGS="$ASAN_CFLAGS $COV_FLAGS"
         LINK_FLAGS="-fsanitize=address"
         EXTRA_LIBS="-lsancov_stub"
     fi
@@ -1994,7 +2003,7 @@ build_distance_so_targets() {
         return 1
     fi
     echo "Building distance .so targets (trace-pc + AFLGo channel + cmplog)..."
-    for variant in "nosan:-O2" "asan:-O2 -fsanitize=address -lasan"; do
+    for variant in "nosan:-O2" "asan:-O2 $ASAN_CFLAGS -lasan"; do
         local label="${variant%%:*}"
         local extra_flags="${variant#*:}"
         local out_suffix="_dist"
@@ -2235,7 +2244,7 @@ build_vendored_tracecmp_targets() {
     local CTX_FLAGS="$FRAME_POINTER"
     local ASAN_FLAGS=""
     for arg in "$@"; do
-        [ "$arg" = "--asan" ] && ASAN_FLAGS="-fsanitize=address"
+        [ "$arg" = "--asan" ] && ASAN_FLAGS="$ASAN_CFLAGS"
     done
 
     echo "Building vendored trace-cmp targets ($CC)..."
@@ -2568,20 +2577,20 @@ esac
 print_feature_matrix
 
 if [ "$BUILD_ASAN" -eq 1 ]; then
-    [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address"
-    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "ASAN"
+    [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "$ASAN_CFLAGS"
+    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "$ASAN_CFLAGS" "ASAN"
     if command -v clang &>/dev/null; then
-        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan_tcg" "-fsanitize=address" "clang" "-fsanitize-coverage=trace-pc-guard"
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan_tcg" "$ASAN_CFLAGS" "clang" "-fsanitize-coverage=trace-pc-guard"
     else
         warn "clang not found — .so targets will lack auto edge coverage (manual __afl_map_edge only)"
-        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan_tcg" "-fsanitize=address"
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan_tcg" "$ASAN_CFLAGS"
     fi
     build_vendored_ffmpeg_sancov "_asan"
-    build_simple_targets "_asan" "-fsanitize=address" "ASAN"
-    build_ffmpeg_versions "_asan" "-fsanitize=address"
-    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "-fsanitize=address" "ASAN"
-    build_simple_so_targets "_asan" "-fsanitize=address" "ASAN"
-    build_standalone_so_targets "_asan" "-fsanitize=address" "ASAN"
+    build_simple_targets "_asan" "$ASAN_CFLAGS" "ASAN"
+    build_ffmpeg_versions "_asan" "$ASAN_CFLAGS"
+    [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "$ASAN_CFLAGS" "ASAN"
+    build_simple_so_targets "_asan" "$ASAN_CFLAGS" "ASAN"
+    build_standalone_so_targets "_asan" "$ASAN_CFLAGS" "ASAN"
 fi
 # UBSAN targets: compiled with -fsanitize=undefined (runtime built in)
 # Uses nosan (coverage-only) FFmpeg libs — UBSAN doesn't need ASAN instrumentation.
@@ -2619,12 +2628,12 @@ if [ "$WITH_CLANG_SCOV" -eq 1 ]; then
         warn "clang not found — --clang-scov requires clang"
     else
         SCOV_FLAGS="$SANCOV_FLAG"
-        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "-fsanitize=address" "$SCOV_CC" "$SCOV_FLAGS"
+        [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_asan" "$ASAN_CFLAGS" "$SCOV_CC" "$SCOV_FLAGS"
         [ "$HAS_FGREP" -eq 1 ] && compile_fgrep_objects "_nosan" "" "$SCOV_CC" "$SCOV_FLAGS"
         compile_vendored_libs "$SCOV_CC" "$SCOV_FLAGS" "_asan"
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "-fsanitize=address" "Clang-scov"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_asan" "$ASAN_CFLAGS" "Clang-scov"
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_targets "_nosan" "" "Clang-scov"
-        build_simple_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        build_simple_targets "_asan" "$ASAN_CFLAGS" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_simple_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         # The .so targets need this pass just as much as the executables do,
         # and used to be left out of it entirely: build_simple_so_targets was
@@ -2636,13 +2645,13 @@ if [ "$WITH_CLANG_SCOV" -eq 1 ]; then
         # returned 0, so every in-process campaign reported `shm: 0` and
         # `Edges discovered: 0` while still calling itself coverage-guided.
         # verify_sancov below now says so out loud.
-        build_simple_so_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        build_simple_so_targets "_asan" "$ASAN_CFLAGS" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_simple_so_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
-        build_vendored_so_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        build_vendored_so_targets "_asan" "$ASAN_CFLAGS" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_vendored_so_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
-        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "-fsanitize=address" "Clang-scov"
+        [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan" "$ASAN_CFLAGS" "Clang-scov"
         [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_nosan" "" "Clang-scov"
-        build_standalone_so_targets "_asan" "-fsanitize=address" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        build_standalone_so_targets "_asan" "$ASAN_CFLAGS" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         build_standalone_so_targets "_nosan" "" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
         # UBSAN .so targets are built in their own pass above and were the
         # last variant left uninstrumented -- verify_sancov flagged all nine

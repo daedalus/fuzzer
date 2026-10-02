@@ -1,7 +1,16 @@
 # ASAN Direct-Lite Limitation
 
 **Date**: 2026-07-29
-**Status**: Layer 1 root cause identified (mid-process shadow offset mismatch); Layer 2 resolved (non-fatal reporting)
+**Status**: Layer 1 root cause identified (mid-process shadow offset mismatch); Layer 2 resolved (non-fatal reporting); Layer 3 resolved (recover-mode builds, 2026-10-02)
+
+## Layer 3: fatal check sites (2026-10-02)
+
+Path: the `fuzzer-tool` wrapper preloads libasan at process start with `halt_on_error=0`; direct_lite runs the `.so` in the fuzzer process. Layers 1-2 do not apply.
+
+- **Symptom**: `fuzzer-tool fuzz fuzzgoat_read_asan.so` exited 1 on the first crashing seed, no report, no stats.
+- **Cause**: `halt_on_error=0` is honoured only by check sites built with `-fsanitize-recover=address`. A plain site runs ASAN's `Die()` → `_exit(1)` inside the fuzzer; its report went to the stderr capture pipe and died with it. With `abort_on_error=1` the guard's `siglongjmp` escapes `Die()` still holding ASAN's report lock, so the next report exits as a nested bug.
+- **Fix**: `tools/build_targets.sh` builds every ASAN pass with `ASAN_CFLAGS` (`-fsanitize=address -fsanitize-recover=address`, also `vendor_ffmpeg.sh --asan`); the wrapper adds `suppress_equal_pcs=0` so a long in-process run reports repeat sites. A `.so` that still strongly imports a plain `__asan_report_{load,store}*` (`_asan_fatal_in_process`) gets a startup error. Recover is per site: a recover wrapper over a plain library stays fatal.
+- **Result**: 1,507 execs, 11 crashes / 2 signatures, all reproducible; per-call cost within noise of the plain build (7.2-7.8 µs both).
 
 ## Executive Summary
 

@@ -90,7 +90,9 @@ case "$MODE" in
         ;;
     asan)
         CC="clang"
-        SAN_FLAGS="-fsanitize=address"
+        # Recover mode: these archives are linked into in-process .so
+        # targets; see ASAN_CFLAGS in tools/build_targets.sh.
+        SAN_FLAGS="-fsanitize=address -fsanitize-recover=address"
         SCOV_FLAGS="-fsanitize-coverage=trace-cmp,trace-pc-guard"
         FFMPEG_DIR="${FFMPEG_DIR:-$VENDOR_DIR/ffmpeg_asan}"
         ;;
