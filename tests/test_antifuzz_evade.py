@@ -122,3 +122,50 @@ def test_evade_ld_preload_prepends_once() -> None:
     assert evade_ld_preload("x.so").split(":")[0] == so
     # Idempotent: already present -> unchanged.
     assert evade_ld_preload(f"{so}:x.so") == f"{so}:x.so"
+
+
+def test_regression_evade_after_asan_runtime() -> None:
+    # ASAN aborts unless its runtime is the first LD_PRELOAD entry.
+    so = build_evade_shim()
+    if so is None:
+        pytest.skip("evade shim did not build")
+
+    asan = "/usr/lib/libclang_rt.asan-x86_64.so"
+    assert evade_ld_preload(f"{asan}:x.so").split(":") == [asan, so, "x.so"]
+    assert evade_ld_preload(f"/lib/libasan.so.8:{so}") == f"/lib/libasan.so.8:{so}"
+
+
+def test_regression_evade_reaches_forkserver(probe: Path, shim: str, tmp_path, monkeypatch) -> None:
+    # The forkserver snapshots its env at start; the preload must precede it.
+    from fuzzer_tool.adapters import process
+    from fuzzer_tool.adapters.forkserver import _ensure_compiled
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    if _ensure_compiled() is None:
+        pytest.skip("fuzz_loader failed to compile")
+    monkeypatch.delenv("LD_PRELOAD", raising=False)
+    monkeypatch.setattr(process, "_clean_env_cache", None)
+    (tmp_path / "corpus").mkdir()
+
+    f = Fuzzer(
+        target=str(probe),
+        corpus_dir=str(tmp_path / "corpus"),
+        crashes_dir=str(tmp_path / "crashes"),
+        timeout=5,
+        antifuzz_evade=True,
+        cmplog=False,  # cmplog claims the exec path; forkserver owns it only here
+    )
+    try:
+        if f._forkserver is None:
+            pytest.skip("forkserver unavailable")
+        start = time.monotonic()
+        rc, _ = f._forkserver.run_one(b"x")
+        elapsed = time.monotonic() - start
+    finally:
+        if f._forkserver is not None:
+            f._forkserver.stop()
+        if f.shm_cov is not None:
+            f.shm_cov.cleanup()
+
+    assert rc == 0
+    assert elapsed < 1.0, "sleep(2) ran under the forkserver"

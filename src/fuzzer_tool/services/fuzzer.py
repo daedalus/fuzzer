@@ -36,6 +36,7 @@ except ImportError:
 from fuzzer_tool.adapters.process import (
     _child_pids,
     disable_aslr,
+    reset_env_cache,
 )
 from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
@@ -4315,16 +4316,18 @@ class Fuzzer:
             if self._inprocess_runner._persistent:
                 print("[*] Persistent loader: enabled (1 process, many calls)")
 
+        # Before the forkserver: it snapshots LD_PRELOAD once at start.
+        self._install_antifuzz_evade()
+
         if forkserver:
             self._setup_forkserver()
 
-        self._install_antifuzz_evade()
-
     def _install_antifuzz_evade(self) -> None:
-        """Prepend the AntiFuzz-evasion preload to the target env (§4.2/§4.3).
+        """Add the AntiFuzz-evasion preload to the target env (§4.2/§4.3).
 
-        Appended after libasan so ASAN keeps its required first slot. No-op
-        unless --antifuzz-evade is set; best-effort if the shim cannot build.
+        Placed after any ASAN runtime so ASAN keeps its required first slot.
+        No-op unless --antifuzz-evade is set; best-effort if the shim cannot
+        build.
         """
         if not self._antifuzz_evade:
             return
@@ -4343,6 +4346,8 @@ class Fuzzer:
             return
 
         os.environ["LD_PRELOAD"] = updated
+        # _clean_env(None) caches os.environ; a pre-install snapshot would drop the shim.
+        reset_env_cache()
         print("[*] AntiFuzz evasion: self-ptrace faked, input delays dropped (LD_PRELOAD)")
 
     def _setup_forkserver(self) -> None:
