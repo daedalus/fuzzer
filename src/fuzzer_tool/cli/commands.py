@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.dirichlet import AlphaMode
@@ -527,6 +528,7 @@ def cmd_fuzz(args):
         mc_cycle_detect=getattr(args, "mc_cycle_detect", False),
         mopt=getattr(args, "mopt", False),
         mopt_mc_stop_multiplier=getattr(args, "mopt_mc_stop_multiplier", None),
+        swarm_inertia=InertiaMode(getattr(args, "swarm_inertia", InertiaMode.CONSTANT.value)),
         cmaes=getattr(args, "cma_es", False),
         cmaes_pop_size=getattr(args, "cmaes_pop_size", 8),
         cmaes_generation_size=getattr(args, "cmaes_generation_size", 200),
@@ -658,6 +660,7 @@ def cmd_fuzz(args):
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
         pll=getattr(args, "pll", False),
+        recurrence=getattr(args, "recurrence", False),
         exp3_gamma=getattr(args, "exp3_gamma", 0.1),
         exp4_gamma=getattr(args, "exp4_gamma", 0.1),
         eps_greedy=getattr(args, "eps_greedy", False),
@@ -2169,6 +2172,7 @@ _HAIL_MARY_FLAGS = (
     "op_p2c",
     "strata",
     "pll",
+    "recurrence",
     "confirm_novelty",
     "antifuzz_evade",
     "ecofuzz",
@@ -2561,6 +2565,13 @@ def main() -> int:
         "cost. Unset by default -- --mopt alone is unaffected either way.",
     )
     fuzz_parser.add_argument(
+        "--swarm-inertia",
+        choices=[m.value for m in InertiaMode],
+        default=InertiaMode.CONSTANT.value,
+        help="MOpt inertia / firefly step per window: 'constant' or 'chaotic' "
+        "(logistic map, core/chaos.py). Default: constant.",
+    )
+    fuzz_parser.add_argument(
         "--cma-es",
         action="store_true",
         help="Enable CMA-ES operator scheduling (covariance-adapted continuous optimization)",
@@ -2734,6 +2745,13 @@ def main() -> int:
         help="Track exec-time and discovery-rate periodicity online with a phase-locked "
         "loop; logs lock/unlock transitions against stall recovery. Diagnostic only "
         "(see core/analyzers/analyzer_pll.py).",
+    )
+    fuzz_parser.add_argument(
+        "--recurrence",
+        action="store_true",
+        help="Recurrence analysis of the (seed, path) exec stream; a limit cycle "
+        "without finds forces the saturation gate off "
+        "(see core/analyzers/analyzer_recurrence.py).",
     )
     fuzz_parser.add_argument(
         "--continuum",

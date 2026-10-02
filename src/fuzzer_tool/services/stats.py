@@ -107,6 +107,25 @@ def _elo_status_str(f) -> str:
     return elo_str
 
 
+def _recurrence_str(f) -> str:
+    """Limit-cycle verdict (--recurrence).
+
+    Example: `` | rqa: trapped p=7 det=0.99`` -- the exec stream repeats
+    every 7 execs without finds.
+    """
+    from fuzzer_tool.core.analyzers.analyzer_recurrence import RecurrenceMonitor
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    rec = getattr(f, "_recurrence", None)
+    if not isinstance(rec, RecurrenceMonitor):
+        return ""
+
+    r = rec.reading()
+    if r is None:
+        return f" | rqa: {rec.verdict.value}"
+    return f" | rqa: {rec.verdict.value} p={r.period} det={r.det:.2f}"
+
+
 def _pll_str(f) -> str:
     """Feed new discovery deltas, flush the PLL monitor, format lock state.
 
@@ -1731,7 +1750,13 @@ class StatsReporter:
         lbr_str = self._print_stats_lbr_str(f)
         qea_str = self._print_stats_qea_str(f)
         mi_str = self._print_stats_mi_str(f)
-        kc_str = _kruskal_str(f) + _entropy_seed_str(f) + _strata_str(f) + _pll_str(f)
+        kc_str = (
+            _kruskal_str(f)
+            + _entropy_seed_str(f)
+            + _strata_str(f)
+            + _pll_str(f)
+            + _recurrence_str(f)
+        )
 
         elo_str = _elo_status_str(f)
 

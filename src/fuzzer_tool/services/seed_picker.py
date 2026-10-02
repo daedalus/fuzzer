@@ -20,6 +20,7 @@ from collections import Counter
 
 import numpy as np
 
+from fuzzer_tool.core.analyzers.analyzer_recurrence import Recurrence
 from fuzzer_tool.core.cadence import bucket, due
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
@@ -1733,6 +1734,9 @@ class SeedPicker:
         5. Chao2 undercounts a power-law tail. While the seeds-per-edge
            spectrum fits Zipf and the Heaps elasticity is at least
            ``ZIPF_GROWTH_BETA``, the gate does not engage.
+        6. Under ``--recurrence`` a TRAPPED verdict (the exec stream replays a
+           limit cycle without finds) is a loop, not saturation: the gate is
+           forced off at once instead of waiting ``SATURATION_STALL_EXECS``.
 
         Returns:
             True when the expensive per-seed analyses should be skipped.
@@ -1758,7 +1762,7 @@ class SeedPicker:
         gated = sat >= SATURATION_GATE and not getattr(f, "_saturation_growing", False)
         if gated:
             since_edge = exec_count - getattr(f, "_last_new_edge_exec", 0)
-            if since_edge >= SATURATION_STALL_EXECS:
+            if since_edge >= SATURATION_STALL_EXECS or self._trapped():
                 gated = False
             elif (
                 was_gated
@@ -1784,6 +1788,11 @@ class SeedPicker:
             f._saturation_gated = gated
             f._saturation_gate_exec = exec_count
         return gated
+
+    def _trapped(self) -> bool:
+        """True when --recurrence reads the exec stream as a limit cycle."""
+        rec = getattr(self.f, "_recurrence", None)
+        return getattr(rec, "verdict", None) is Recurrence.TRAPPED
 
     def _zipf_growing(self) -> bool:
         """True while the edge tail is Zipf and discovery still grows (Heaps)."""

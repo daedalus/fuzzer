@@ -78,6 +78,7 @@ A/B yet.
 import collections
 import math
 
+from fuzzer_tool.core.chaos import InertiaMode, make_chaos
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 #: Fractional jitter applied to initial firefly positions. Same rationale
@@ -145,6 +146,8 @@ class OpFireflyScheduler:
             probability ``1/n`` -- identical semantics to
             ``MOptScheduler.min_prob_frac``.
         rng: Shared RandPool. Falls back to the process-wide default pool.
+        inertia: ``CHAOTIC`` scales each window's random step by a
+            logistic-map factor of mean 1 (``core/chaos.py``).
     """
 
     # Declares that init_arm() does NOT accept informative priors (the
@@ -162,8 +165,10 @@ class OpFireflyScheduler:
         alpha_decay: float = 0.97,
         min_prob_frac: float = 0.1,
         rng: RandPool | None = None,
+        inertia: InertiaMode = InertiaMode.CONSTANT,
     ):
         self._rng = rng if rng is not None else get_default_rand_pool()
+        self._chaos = make_chaos(inertia, self._rng)
         self.n_fireflies = n_fireflies
         self.window_size = window_size
         self.beta0 = beta0
@@ -331,6 +336,9 @@ class OpFireflyScheduler:
         old_pos = [list(fly.pos) for fly in self.fireflies]
         old_fitness = [fly.fitness for fly in self.fireflies]
 
+        # One step size per window; chaotic mode scales it by a mean-1 factor.
+        alpha = self.alpha if self._chaos is None else self.alpha * self._chaos.alpha_factor()
+
         for i, fly in enumerate(self.fireflies):
             new_pos = list(old_pos[i])
             for j in range(len(self.fireflies)):
@@ -345,7 +353,7 @@ class OpFireflyScheduler:
             # old_fitness[i], so the loop above is a no-op for it and this
             # term is its only source of movement) -- per the model.
             for k in range(n):
-                new_pos[k] += self.alpha * (self._rng.random() * 2.0 - 1.0)
+                new_pos[k] += alpha * (self._rng.random() * 2.0 - 1.0)
             fly.pos = new_pos
             self._normalize_to_simplex(fly)
             fly.execs_in_window = 0

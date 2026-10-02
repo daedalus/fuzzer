@@ -69,6 +69,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "enable_regex_bomb_mutations",  # experimental, untested
         "send_mail_require_tls",  # email config, not a strategy
         "mc_cycle_detect",  # MC diagnostic, not a strategy; has real per-tick overhead
+        "uninit_probe",  # 3 execs per admission; executables only, hail-mary often runs .so
         # Not a strategy: a second implementation of RandPool.sample for
         # k>=3. Explores nothing new and moves the draw stream, so
         # enabling it would make a --hail-mary run incomparable to any

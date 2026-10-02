@@ -50,6 +50,7 @@ _FLAG_GATED = {
     "temperature_control",
     "kuramoto_sync",
     "pll",
+    "recurrence",
 }
 _ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner", "prng_state_learner"}
 

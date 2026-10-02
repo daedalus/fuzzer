@@ -887,3 +887,26 @@ REGISTRY.register(
         deactivate=_deactivate_pll,
     )
 )
+
+
+def _activate_recurrence(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.analyzers.analyzer_recurrence import RecurrenceMonitor
+
+    f._recurrence = RecurrenceMonitor()
+
+
+def _deactivate_recurrence(f: FuzzerLike) -> None:
+    f._recurrence = None
+
+
+# Limit-cycle detector over the (seed, path) exec stream. --recurrence only:
+# one ring write per exec plus a 0.4 ms RQA every 256 execs.
+REGISTRY.register(
+    AnalyzerSpec(
+        name="recurrence",
+        category="regime_detection",
+        available=lambda f: bool(getattr(f, "_use_recurrence", False)),
+        activate=_activate_recurrence,
+        deactivate=_deactivate_recurrence,
+    )
+)

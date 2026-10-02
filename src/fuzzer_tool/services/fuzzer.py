@@ -45,6 +45,7 @@ from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strateg
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import phase_of
+from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.coverage_noise import (
@@ -1191,6 +1192,7 @@ class Fuzzer:
         mc_cycle_detect=False,
         mopt=False,
         mopt_mc_stop_multiplier=None,
+        swarm_inertia=InertiaMode.CONSTANT,
         cmaes=False,
         cmaes_pop_size=8,
         cmaes_generation_size=200,
@@ -1303,6 +1305,7 @@ class Fuzzer:
         garch=False,
         continuum=False,
         pll=False,
+        recurrence=False,
         temp_control=False,
         temp_setpoint_fraction=0.5,
         temp_reference_rate=None,
@@ -2698,6 +2701,7 @@ class Fuzzer:
                 window_size=200,
                 rng=self._rng,
                 marginal_cost_stop_multiplier=mopt_mc_stop_multiplier,
+                inertia=swarm_inertia,
             )
             if mopt_mc_stop_multiplier is not None:
                 log.info(
@@ -3518,7 +3522,7 @@ class Fuzzer:
         if op_firefly:
             from fuzzer_tool.core.schedulers.op_firefly import OpFireflyScheduler
 
-            self._op_firefly = OpFireflyScheduler(rng=self._rng)
+            self._op_firefly = OpFireflyScheduler(rng=self._rng, inertia=swarm_inertia)
             log.info("op_firefly enabled (5 fireflies, window=200)")
 
         # Stratified Thompson over (op, family) cells (strata §3.4). Off by
@@ -3735,6 +3739,7 @@ class Fuzzer:
         self._use_garch = garch
         self._use_continuum = continuum
         self._use_pll = pll
+        self._use_recurrence = recurrence
         # Closed-loop temperature control (--temperature-control). Read by
         # the analyzer registry's temperature_control spec, which builds
         # self._temp_controller. Off by default: the sign and magnitude of
@@ -8385,6 +8390,8 @@ class Fuzzer:
             groups["Analysis"].append("mi-guided")
         if getattr(self, "_pool_drift", None) is not None:
             groups["Analysis"].append("pool-drift")
+        if getattr(self, "_recurrence", None) is not None:
+            groups["Analysis"].append("recurrence")
         if getattr(self, "_use_renyi_weight", False):
             groups["Analysis"].append("renyi")
         if getattr(self, "_use_transfer_entropy", False):
