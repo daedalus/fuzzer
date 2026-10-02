@@ -857,6 +857,23 @@ State files:
 
   Use `--no-save-state` to skip writing the file entirely.
 
+### Cross-campaign ledger (`--preset-ledger`)
+
+Per-target memory across campaigns, ported from Stardust's opening selection
+(`Opponent::selectOpeningUCB1` / `minValueInPreviousGames`). Opponent → target,
+opening → preset, game result → campaign edges, map → target build.
+
+```bash
+fuzzer-tool fuzz ./target --preset-ledger -n 100000   # run repeatedly, fresh corpus each time
+```
+
+- **Store:** `~/fuzzing/<target>/ledger/state.pkl.gz` (`StateStore`, sanitized pickle), last 256 campaigns.
+- **Presets:** `_LEDGER_PRESETS` in `cli/commands.py` (`baseline`, `enhanced`, `optimal`, `qea`; mirrors `tools/lib/bench.sh`). Applied like `--hail-mary`: explicit flags win.
+- **Choice (`core/campaign_ledger.py:select`):** presets under `min_trials` first, in ballot order; then UCB1 `mean + sqrt(2 ln(max(total,1)) / potential)`. Each past campaign weighs `exp(-0.05·(age+1))`, ×2 on the same build (ELF build-id, else sha256). Scores are normalized by the best in history. Deterministic.
+- **Stall prior:** each campaign records `max_gap`, its longest silence (execs) that still ended in a new edge (`FuzzRound._on_new_edges`). With `--stall` at its default and ≥3 recent campaigns, `--stall` = min of their `max_gap`, clamped to [100, 1e6]. A campaign with no discovery omits the key, which ends the scan (falls back to the default).
+- **Recorded:** fresh campaigns with SHM coverage only. `--resume` inherits coverage, so it is not scored.
+- **Limits:** needs ≥4 campaigns before UCB1 compares anything; scores assume similar budgets (`-n`); short campaigns give small `max_gap`, so an aggressive stall prior.
+
 ## Kalman Filter Online Estimation
 
 The fuzzer includes a self-contained Kalman filter implementation (`src/fuzzer_tool/core/kalman.py`) for online denoising and uncertainty quantification of noisy scalar signals.  Available in 1D (value-only) and 2D (constant-velocity: value + derivative) variants, plus a `RobustKF` subclass with Huber innovation gating and adaptive measurement-noise estimation.

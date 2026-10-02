@@ -1050,6 +1050,7 @@ class FuzzRound:
 
     def _on_new_edges(self, new, hit_edges) -> None:
         f = self._f
+        f._max_edge_gap = max(f._max_edge_gap, f.exec_count - f._last_new_edge_exec)
         f._last_new_edge_exec = f.exec_count
         f._exec_perplexity.note_new_edge()
         f._last_new_edge_count = len(new)

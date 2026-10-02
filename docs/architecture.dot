@@ -46,6 +46,8 @@ digraph fuzzer_tool {
              fillcolor="#e3e7ec", fontcolor="#242a31"];
         profiler [label="core/target_profiler.py   +   cfg · icfg · dwarf\lELF strings · magic bytes · DIV constants\lcall graph · CFG · DWARF line tables\l",
                   fillcolor="#e3e7ec", fontcolor="#242a31"];
+        cledger [label="services/ledger.py  +  core/campaign_ledger.py\l--preset-ledger: UCB1 preset · --stall prior\l~/fuzzing/<target>/ledger (across campaigns)\l",
+                 fillcolor="#e3e7ec", fontcolor="#242a31"];
     }
 
     fuzzer [label="services/fuzzer.py   —   fuzz_one() campaign loop\nservices/fuzz_round.py   —   FuzzRound: one per iteration",
@@ -133,6 +135,8 @@ digraph fuzzer_tool {
     // startup feeds
     profiler -> ops [style=dashed, label="dictionary tokens  "];
     profiler -> picker [style=dashed, label="distance · boundary markers  "];
+    cledger -> cli [style=dashed, label="preset · stall  "];
+    fuzzer -> cledger [constraint=false, style=dashed, label="  edges · max gap"];
 
     // within-stage
     bandit -> ops [label="  operator"];
