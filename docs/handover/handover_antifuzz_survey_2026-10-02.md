@@ -71,6 +71,85 @@ hardened crash oracle (`stderr_crash_marker`), coverage-noise probe
 `afl_shim.c` still exposes the detection signals above (`__AFL_SHM_ID`,
 `AFL_MAP_SIZE`, fork-server fds).
 
+## Implementation details (shipped defeats)
+
+Four countermeasures, one per AntiFuzz technique, plus a benchmark target.
+Each maps to the attack it answers.
+
+### 1. Hardened crash oracle — `adapters/process.py`
+
+`stderr_crash_marker(returncode, stderr)` answers crash masking (crash
+rewritten to `exit 0` or a timeout). A marker in stderr only corroborates a
+*failing* exit:
+
+- Returns `None` when `returncode == 0` or is a sentinel (`-1`, `-2`), so a
+  target that prints "Segmentation fault" then exits 0 is treated as **not**
+  crashed — it is claiming a crash, not having one.
+- Otherwise returns the first of `CRASH_STDERR_MARKERS` (`SIGSEGV`,
+  `SIGABRT`, `SIGFPE`, `SIGBUS`, `Segmentation fault`, `Aborted`) found.
+
+Callers: `services/runner.py` (`_is_crash`), `root_cause.py`, `tmin.py`.
+ASAN's own report remains the primary oracle; this closes the exit-code gap.
+
+### 2. Coverage-noise probe — `core/coverage_noise.py`
+
+Answers hash-keyed fake coverage (AntiFuzz §4.1 / Fuzzification BranchTrap).
+Pure module, no I/O; the caller runs the target. Three pieces:
+
+- **`classify_noise(base_runs, variant_sets)`** — offline probe. Appends one
+  byte (values `1..NOISE_PROBE_VARIANTS`, default 8; `tail_variants`) to a
+  seed. If the base seed's repeated runs disagree the verdict is
+  `UNMEASURED` (nondeterminism is not the input's fault). If all 8 tail
+  variants land on **distinct** edge sets → `SUSPECTED` (byte-value dispatch
+  on trailing garbage or a hash); else `CLEAN`. Wired at
+  `fuzzer.py:_report_coverage_noise`, warn-only.
+- **`AdmissionMonitor`** — runtime sibling. Fires once when admissions reach
+  `FLOOD_RATE` (0.5) per execution after `MIN_EXECS` (5000) — a campaign
+  admitting most executions is being fed noise. Healthy campaigns admit
+  well under 1% past the first seconds.
+- **`fake_novelty_factor(fuzz_count, children_admitted)`** — per-seed weight.
+  After `FAKE_NOVELTY_MIN_FUZZ` (256) mutants, a seed whose children flood
+  the corpus gets weight `FAKE_NOVELTY_PENALTY` (0.1), else 1.0. Applied in
+  `seed_picker.py:_weight_fake_novelty`.
+
+### 3. `--antifuzz-evade` LD_PRELOAD shim — `adapters/antifuzz_evade.c` + `evade_shim.py`
+
+Answers self-ptrace anti-debug (§4.2) and delay-on-malformed (§4.3) from
+outside the target, no source access, so binary-only modes (ptrace coverage,
+Intel-PT, `--no-shm`) keep working:
+
+- `ptrace(PTRACE_TRACEME, …)` → returns 0 (pretend nobody is tracing). Every
+  other ptrace request forwards to real libc, so the fuzzer's own
+  ptrace-based coverage is untouched.
+- `sleep` / `usleep` / `nanosleep` / `clock_nanosleep` → return success
+  immediately.
+- Per-behaviour opt-out env: `ANTIFUZZ_EVADE_PTRACE=0`, `ANTIFUZZ_EVADE_SLEEP=0`.
+
+`evade_shim.py` is the driver (layer boundary: callers work in "evade" terms,
+not compiler flags): compiles the `.so` once per process (`clang -shared
+-fPIC -O2 … -ldl`, scrubbing `ASAN_OPTIONS`/`LSAN_OPTIONS`/`LD_PRELOAD` from
+the compile env) and composes the `LD_PRELOAD` value. CLI flag
+`--antifuzz-evade` (OFF by default, `commands.py:4072`) →
+`fuzzer.py:_install_antifuzz_evade`; best-effort, prints a notice and
+continues if the shim will not build.
+
+### 4. Benchmark target — `targets/antifuzz_demo.c`
+
+Wraps a single real ASAN bug in all four techniques, each env-gated
+(default on) so a benchmark can isolate them:
+
+| Env | Technique | Defeat exercised |
+|---|---|---|
+| `AF_COVERAGE=0` | hash-keyed fake edges (table of 64, bounded per Hard Rule 54) | coverage-noise probe |
+| `AF_CRASH=0` | crash masking | hardened oracle + ASAN |
+| `AF_SPEED=0` | delay on malformed input | `--antifuzz-evade` sleep |
+| `AF_PTRACE=0` | self-ptrace anti-debug | `--antifuzz-evade` ptrace |
+
+Bug: input starting with 4-byte magic `crsh` overflows a stack buffer; the
+magic is checked via a byte hash (§4.4-style), not a direct compare. Wired in
+`tools/build_targets.sh` (ASAN + `afl_shim`, plus a `fuzz_shm_run` `.so` for
+`direct_lite`), modelled on `asan_target.c`.
+
 ## Open / TODO
 
 - [ ] ASAN-build validation of the shipped defeats — tracked in `docs/TODO.md`.
