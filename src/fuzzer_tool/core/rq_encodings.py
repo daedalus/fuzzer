@@ -20,6 +20,8 @@ import zlib
 from collections.abc import Callable
 from itertools import product
 
+import numpy as np
+
 from fuzzer_tool.core.gf2_common import apply_bitmask_map, invert_bitmask_map
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
@@ -471,7 +473,7 @@ class Crc32Encoder(Encoder):
 
 # FNV-1a mixes XOR with multiplication, so there is no GF(2) matrix inverse
 # the way CRC-32 has.  Meet-in-the-middle recovers the 4-byte preimages in
-# ~2^16 steps per side (~12 ms in pure Python); results are cached per hash.
+# 2^16 steps per side (~1.5 ms vectorized); results are cached per hash.
 # 4 bytes -> 32 bits is NOT a bijection: ~1 preimage on average, but about a
 # third of targets have none and the rest have 1-5.
 _FNV_FIELD_BYTES = 4
@@ -482,6 +484,11 @@ _FNV_PRIME = 16777619
 _FNV_MIN_OPERAND = 1 << 24
 # Modular inverse of FNV_PRIME mod 2^32 (odd => invertible).
 _FNV_PRIME_INV = pow(_FNV_PRIME, -1, 1 << 32)
+# Meet-in-the-middle half: 2 bytes per side.
+_FNV_HALF = 1 << 16
+_FNV_BYTE = np.uint64(0xFF)
+_FNV_PRIME_U64 = np.uint64(_FNV_PRIME)
+_FNV_MASK_U64 = np.uint64(0xFFFFFFFF)
 
 # Per-hash preimage cache (hash_int -> list of 4-byte little-endian preimages).
 # Bounded independently of the mutations LRU so encode() stays O(1) after
@@ -500,40 +507,47 @@ def _fnv1a(data: bytes) -> int:
 
 
 @functools.cache
-def _fnv1a_fwd_table() -> dict[int, int]:
-    """Map hash after 2 bytes -> those two bytes (packed LE); injective, no collisions."""
-    fwd: dict[int, int] = {}
-    for ab in range(1 << 16):
-        h = _FNV_OFFSET
-        h = ((h ^ (ab & 0xFF)) * _FNV_PRIME) & 0xFFFFFFFF
-        h = ((h ^ ((ab >> 8) & 0xFF)) * _FNV_PRIME) & 0xFFFFFFFF
-        fwd[h] = ab
-    return fwd
+def _fnv1a_fwd_table() -> tuple[np.ndarray, np.ndarray]:
+    """Sorted (hash after bytes a, b) keys and their packed ``a | b << 8``.
+
+    The 2-byte map is injective, so searchsorted on the keys replaces a dict.
+    """
+    ab = np.arange(_FNV_HALF, dtype=np.uint64)
+    h = ((np.uint64(_FNV_OFFSET) ^ (ab & _FNV_BYTE)) * _FNV_PRIME_U64) & _FNV_MASK_U64
+    h = ((h ^ (ab >> np.uint64(8))) * _FNV_PRIME_U64) & _FNV_MASK_U64
+    order = np.argsort(h)
+    return h[order], ab[order]
 
 
 def _fnv1a_invert_all(target: int) -> list[bytes]:
     """Recover all 4-byte little-endian preimages of *target* under FNV-1a.
 
     Not a bijection: ~1 preimage on average, none for about a third of
-    targets.  Meet-in-the-middle enumerates them all in ~2^16 steps per side.
-    Results are cached per hash.
+    targets.  Undoes the last two rounds for all 2^16 (c, d) at once, then
+    meets the first two rounds in the forward table.  Cached per hash.
+    Example: ``_fnv1a_invert_all(_fnv1a(b"crsh"))`` contains ``b"crsh"``.
     """
     cached = _fnv_inv_cache.get(target)
     if cached is not None:
         return cached
 
-    fwd = _fnv1a_fwd_table()
+    keys, packed = _fnv1a_fwd_table()
 
-    out: list[bytes] = []
-    for cd in range(1 << 16):
-        h = target
-        b3 = (cd >> 8) & 0xFF
-        h = ((h * _FNV_PRIME_INV) & 0xFFFFFFFF) ^ b3
-        b2 = cd & 0xFF
-        h = ((h * _FNV_PRIME_INV) & 0xFFFFFFFF) ^ b2
-        ab = fwd.get(h)
-        if ab is not None:
-            out.append(bytes((ab & 0xFF, (ab >> 8) & 0xFF, b2, b3)))
+    # Backward: h3 = h4 * P^-1 ^ d ; h2 = h3 * P^-1 ^ c.  Products < 2^64.
+    cd = np.arange(_FNV_HALF, dtype=np.uint64)
+    c = cd & _FNV_BYTE
+    d = cd >> np.uint64(8)
+    h = np.uint64((target * _FNV_PRIME_INV) & 0xFFFFFFFF) ^ d
+    h = ((h * np.uint64(_FNV_PRIME_INV)) & _FNV_MASK_U64) ^ c
+
+    # Meet in the middle: keep (c, d) whose h2 the first two bytes reach.
+    idx = np.minimum(np.searchsorted(keys, h), _FNV_HALF - 1)
+    hit = keys[idx] == h
+    ab = packed[idx[hit]].tolist()
+    out = [
+        bytes((x & 0xFF, x >> 8, y, z))
+        for x, y, z in zip(ab, c[hit].tolist(), d[hit].tolist(), strict=True)
+    ]
 
     # Not surjective: some 32-bit values have no 4-byte preimage.
     _fnv_inv_cache[target] = out
