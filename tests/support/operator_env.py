@@ -246,6 +246,7 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_._use_slopt = False
             self_._slopt = None
             self_._last_slopt_arm = None
+            self_._one_fifth = None
             install_scheduler_surface(self_)
             if pool is not None:
                 self_._rng = pool

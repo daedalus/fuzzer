@@ -17,6 +17,7 @@ from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
+from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.shim_health import WriteGuard
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.fuzzer import Fuzzer
@@ -524,6 +525,8 @@ def cmd_fuzz(args):
         markov_generate=args.markov_gen,
         mc_bandit=args.mc_bandit,
         slopt=getattr(args, "slopt", False),
+        one_fifth=getattr(args, "one_fifth", False),
+        one_fifth_target=getattr(args, "one_fifth_target", ONE_FIFTH_TARGET),
         mc_cem=args.mc_cem,
         mc_cycle_detect=getattr(args, "mc_cycle_detect", False),
         mopt=getattr(args, "mopt", False),
@@ -2050,6 +2053,9 @@ def cmd_sweep(args):
 # omissions of the kind this list exists to prevent, caught by
 # tests/test_regression_hail_mary_gates.py.
 #
+# one_fifth (--one-fifth) is excluded: it scales -M, which --slopt (in this
+# tuple) replaces, so under --hail-mary it would be a silent no-op.
+#
 # crash_explore (--crash-explore) is excluded: a mode switch (AFL -C), not a
 # strategy. It zeroes has_new_coverage on every non-crashing round, so under
 # --hail-mary nothing was admitted and the EdgeTracker froze.
@@ -2727,6 +2733,20 @@ def main() -> int:
             "per seed-size group and operator (Thompson sampling); replaces -M "
             "and perf-score stacking"
         ),
+    )
+    fuzz_parser.add_argument(
+        "--one-fifth",
+        action="store_true",
+        help=(
+            "1/5 success rule: scale the round's mutation count by its new-coverage "
+            "rate (more when above --one-fifth-target, fewer below); no-op with --slopt"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--one-fifth-target",
+        type=float,
+        default=ONE_FIFTH_TARGET,
+        help=f"Target new-coverage rate per round for --one-fifth (default: {ONE_FIFTH_TARGET})",
     )
     fuzz_parser.add_argument(
         "--invasion",

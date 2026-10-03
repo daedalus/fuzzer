@@ -126,6 +126,24 @@ def _recurrence_str(f) -> str:
     return f" | rqa: {rec.verdict.value} p={r.period} det={r.det:.2f}"
 
 
+def _one_fifth_str(f) -> str:
+    """Mutation-count multiplier and lifetime hit rate (--one-fifth).
+
+    Example: `` | 1/5: x0.42 hit=3.1%`` -- rounds find coverage below
+    target, so each stacks 0.42 x -M operators.
+    """
+    from fuzzer_tool.core.one_fifth import OneFifthRule
+
+    # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
+    rule = getattr(f, "_one_fifth", None)
+    if not isinstance(rule, OneFifthRule):
+        return ""
+
+    s = rule.stats()
+    rate = s["one_fifth_hits"] / max(1, s["one_fifth_rounds"])
+    return f" | 1/5: x{s['one_fifth_scale']:.2f} hit={rate:.1%}"
+
+
 def _pll_str(f) -> str:
     """Feed new discovery deltas, flush the PLL monitor, format lock state.
 
@@ -1756,6 +1774,7 @@ class StatsReporter:
             + _strata_str(f)
             + _pll_str(f)
             + _recurrence_str(f)
+            + _one_fifth_str(f)
         )
 
         elo_str = _elo_status_str(f)

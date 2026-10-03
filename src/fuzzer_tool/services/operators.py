@@ -1230,11 +1230,14 @@ def _phase_position(f, data: bytes, buf_len: int):
 
 
 def _round_mutations(f) -> int:
-    """Mutations this round: -M scaled by seed energy, floored at 16 in stall recovery."""
+    """Mutations this round: -M scaled by seed energy and the 1/5 rule, floored at 16 in stall recovery."""
     n_mutations = f.mutations_per_input
     # Apply seed-level energy multiplier from SeedScorer
     if hasattr(f, "_last_perf_score") and f._last_perf_score != 100.0:
         n_mutations = max(1, int(n_mutations * f._last_perf_score / 100.0))
+    # 1/5 rule: stack more when rounds keep finding coverage, fewer when not.
+    if f._one_fifth is not None:
+        n_mutations = max(1, round(n_mutations * f._one_fifth.scale()))
     if f._stall_recovery_active:
         n_mutations = max(n_mutations, 16)
     return n_mutations
