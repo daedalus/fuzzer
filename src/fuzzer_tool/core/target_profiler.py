@@ -43,6 +43,9 @@ MAGIC_SIGNATURES: list[tuple[bytes, str]] = [
 # Delimiters and separators found in string constants
 DELIMITER_CHARS = set(b":/\n\r\t,;=&?#[]{}<>\\\"'!@$%^*()+|~`")
 
+# Cache key whose absence marks a profile saved before it was computed.
+_BRANCH_DENSITY_KEY = "text_branch_density"
+
 
 @dataclass
 class FunctionInfo:
@@ -104,6 +107,9 @@ class TargetProfile:
     # ELF layout (used by estimate_map_size to avoid redundant decode)
     text_size: int = 0
     total_branches: int = 0
+    # Whole-.text Jcc per KiB (elf.branch_density); cached, it is a 66 s
+    # pure-Python decode on ffmpeg. None when .text could not be decoded.
+    text_branch_density: float | None = None
 
     # Input format hints
     input_parsers: list[str] = field(default_factory=list)
@@ -134,6 +140,7 @@ class TargetProfile:
             "reverse_calls": {k: sorted(v) for k, v in self.reverse_calls.items()},
             "text_size": self.text_size,
             "total_branches": self.total_branches,
+            _BRANCH_DENSITY_KEY: self.text_branch_density,
         }
 
     @staticmethod
@@ -155,6 +162,7 @@ class TargetProfile:
             reverse_calls={k: set(v) for k, v in d.get("reverse_calls", {}).items()},
             text_size=d.get("text_size", 0),
             total_branches=d.get("total_branches", 0),
+            text_branch_density=d.get(_BRANCH_DENSITY_KEY),
         )
         return p
 
@@ -179,6 +187,11 @@ class TargetProfile:
         try:
             d = json.loads(Path(path).read_text())
         except (OSError, json.JSONDecodeError):
+            return None
+
+        # Predates text_branch_density: re-analyse once rather than make
+        # every run decode .text again.
+        if _BRANCH_DENSITY_KEY not in d:
             return None
 
         stored_hash = d.get("_target_binary_hash")
@@ -404,6 +417,9 @@ class TargetProfiler:
         # Expose .text section size for estimate_map_size to consume
         if ".text" in self._sections:
             profile.text_size = self._sections[".text"][3]
+        from fuzzer_tool.core.elf import branch_density
+
+        profile.text_branch_density = branch_density(self.target)
 
         # 1. String extraction
         self._extract_strings(profile)

@@ -1,8 +1,11 @@
 """Tests for core/target_profiler.py — static target analysis."""
 
+import json
 import math
 import os
+import shutil
 import struct
+import subprocess
 import tempfile
 
 import pytest
@@ -453,3 +456,42 @@ class TestRoDataWordConstantsProfile:
         profile = TargetProfile()
         profiler._extract_data_word_constants(profile)
         assert profile.rodata_word_constants == []
+
+
+class TestTextBranchDensityCached:
+    """Whole-.text branch density rides the profile cache.
+
+    It was recomputed by Fuzzer.run on every start: 66 s of pure-Python
+    decode on ffmpeg, for one printed line.
+    """
+
+    def test_roundtrip(self):
+        d = TargetProfile(text_branch_density=22.9).to_dict()
+        assert TargetProfile.from_dict(d).text_branch_density == 22.9
+
+    def test_regression_cache_without_field_is_stale(self, tmp_path):
+        """Falsification: an old cache must re-analyse, not load None."""
+        path = tmp_path / "p.json"
+        TargetProfile(text_branch_density=1.0).save(path)
+        d = json.loads(path.read_text())
+        del d["text_branch_density"]
+        path.write_text(json.dumps(d))
+        assert TargetProfile.load(path) is None
+
+    def test_profiler_matches_elf_branch_density(self, tmp_path):
+        """Adversarial: the cached value is the same linear-sweep metric."""
+        from fuzzer_tool.core.elf import branch_density
+
+        if shutil.which("clang") is None:
+            pytest.skip("clang not installed")
+        src = tmp_path / "t.c"
+        src.write_text(
+            "int f(int x){if(x>3)return 1;if(x<-2)return 2;return 0;}\n"
+            "int main(int c,char**v){return f(c)+f(v[0][0]);}\n"
+        )
+        exe = tmp_path / "t"
+        subprocess.run(["clang", "-O0", str(src), "-o", str(exe)], check=True)
+
+        profile = TargetProfiler(str(exe)).profile()
+        assert profile.text_branch_density is not None
+        assert profile.text_branch_density == branch_density(str(exe))

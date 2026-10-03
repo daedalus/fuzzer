@@ -174,6 +174,14 @@ class TestOrderedPerPCExtraction:
         assert learner.observe_execution(PAYLOAD) is True
         assert learner._confirmed_samples == words
 
+    def test_same_value_at_two_sites_is_kept_in_both(self):
+        """Adversarial: dedup is per (pc, width) site, not drain-wide."""
+        words = _stream(4)
+        records = _conds(words, pc=0x2000) + _conds(words + words, pc=0x1000)
+        by_site = _learner(records)._extract_by_site(PAYLOAD)
+        assert by_site[(0x2000, 4)] == words
+        assert by_site[(0x1000, 4)] == words
+
     def test_operand_present_in_input_is_excluded(self):
         words = _stream(4)
         payload = ZERO_FIELD + b"".join(w.to_bytes(4, "little") for w in words)

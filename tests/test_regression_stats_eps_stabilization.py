@@ -80,3 +80,35 @@ def test_stats_line_prints_with_full_window():
         reporter.print_stats()
         assert mock_print.call_count == 1
         assert "[*] execs:" in mock_print.call_args[0][0]
+
+
+def _quiet_fuzzer(quiet: bool) -> Fuzzer:
+    """Stub Fuzzer whose stats tick goes through a real StatsReporter."""
+    f = _stub_fuzzer(array("d"))
+    f.quiet_stats = quiet
+    f._stats = StatsReporter(_mock_fuzzer(_eps_history=f._eps_history, exec_count=500))
+    return f
+
+
+def test_regression_quiet_stats_still_samples_eps():
+    """--profile-hotpath sets quiet_stats; the eps window must still fill.
+
+    It used to skip print_stats() and with it the only eps sample, so the
+    window stayed empty, the interval collapsed to 1x a startup-depressed
+    eps (< 1 on ffmpeg) and every exec ran the stats tick -- _cull_queue
+    included. The profile then measured that artifact.
+    """
+    f = _quiet_fuzzer(quiet=True)
+    with patch("builtins.print") as mock_print:
+        f._stats_tick_report()
+    assert len(f._eps_history) == 1
+    assert mock_print.call_count == 0
+
+
+def test_stats_tick_report_prints_when_not_quiet():
+    """Adversarial: the default path still prints and samples once."""
+    f = _quiet_fuzzer(quiet=False)
+    with patch("builtins.print") as mock_print:
+        f._stats_tick_report()
+    assert len(f._eps_history) == 1
+    assert mock_print.call_count == 1
