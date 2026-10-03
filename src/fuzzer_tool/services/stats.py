@@ -1728,6 +1728,10 @@ class StatsReporter:
             line += f" | P(stall): {bayes['p_stalled']:.0%}"
         return line
 
+    def sample_eps(self) -> None:
+        """Update the eps estimates and window without printing."""
+        self._update_eps(self.f)
+
     def print_stats(self):
         f = self.f
         elapsed, eps = self._update_eps(f)

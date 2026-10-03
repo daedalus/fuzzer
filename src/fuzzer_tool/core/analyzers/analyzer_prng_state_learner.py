@@ -339,6 +339,8 @@ class PRNGStateLearner:
 
         history = self._note_input(input_data)
         by_site: dict[_Site, list[int]] = {}
+        # Per-site membership; `value in bucket` scanned the list (O(n^2)).
+        seen: set[tuple[_Site, int]] = set()
         for cond in conds:
             base = cond.base
             for op in (base.op_a, base.op_b):
@@ -346,13 +348,15 @@ class PRNGStateLearner:
                 if width not in _OPERAND_WIDTHS or input_data.find(op) >= 0:
                     continue
                 value = int.from_bytes(op, "little")
-                bucket = by_site.setdefault((base.pc, width), [])
-                if value in bucket:
+                site = (base.pc, width)
+                bucket = by_site.setdefault(site, [])
+                if (site, value) in seen:
                     # A repeat inside one drain is not the next draw: a
                     # generator returning the same word twice running is
                     # indistinguishable from one comparison logged twice, and
                     # the latter is overwhelmingly more likely.
                     continue
+                seen.add((site, value))
                 bucket.append(value)
         for site, values in by_site.items():
             if site[0] is None:

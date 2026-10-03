@@ -393,7 +393,7 @@ Off by default. New full seeds (`seeds/`, `irreplaceable/`, `crashing/`, `timeou
 
 ### Observability
 - **Schedule ablation CSV** (`--schedule-ablation FILE`): one row per execution — seed-pick signals, `new_coverage`, `new_crash`, and `operator` (the round's op stack joined by `+`, e.g. `bit_flip+havoc`). The `operator` column is what per-operator reward vs own-pull-count (fatigue) is measured from.
-- **Branch density**: per-target static analysis at startup (`cond branches/KB`) with average across targets
+- **Branch density**: per-target static analysis at startup (`cond branches/KB`) with average across targets; the single-target value is cached in the target profile (`text_branch_density`)
 - **Per-target coverage stats**: live display shows `targets: name1:N name2:N name3:N` (edge counts per target)
 - **AFL detection**: binary checked for `__afl_area`/`__afl_map_shm` symbols via `nm` — shows `[AFL]`/`[no-AFL]` per target
 - **GA/QEA lifecycle stats** (`--ga`/`--qea`): stat line shows `ga: gen=3 pop=200 spc=5 fit=0.42` (or `qea:`) — generation number, population size, species count, best fitness
@@ -628,7 +628,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--causal-sector` | Causal sector graph from top-k TE edge flows; requires `--transfer-entropy` |
 | `--inprocess` | Persistent subprocess mode (auto-restart on crash) |
 | `--resume` | Resume from saved state |
-| `--profile-hotpath` | Profile the fuzz run with cProfile; prints tottime/cumtime/ncalls tables and dumps stats (suppresses the periodic `[*] execs:` status line for clean output) |
+| `--profile-hotpath` | Profile the fuzz run with cProfile; prints tottime/cumtime/ncalls tables and dumps stats (suppresses the periodic `[*] execs:` status line for clean output; eps is still sampled, so the stats-tick spacing matches an unprofiled run) |
 | `--profile-out PATH` | cProfile dump path for `--profile-hotpath` (default `/tmp/fuzzer_hotpath.prof`) |
 | `--crash-codes N` | Additional exit codes to treat as crashes |
 | `--elo` | Elo arbitration between operator strategies (bandit/mopt/replicator/cem/exp3/eps_greedy/hierarchical/gp_ucb/bo_gp_ucb/softmax/topk) and seed strategies (ga/qea/weighted/pareto/format/bayesian/markov); `--elo all` also enables every scheduler plus the mutation-stack features (metropolis/shapley/mi-guided/secretary/wfc/lineage/`--schedule fast`), and the convergence report lists only schedulers actually used |

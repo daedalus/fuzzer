@@ -211,10 +211,18 @@ def conds_from_cmplog_text(lines: Iterable[str]) -> list[CondStmt]:
     the cmplog shim writes, so no separate track file is needed.
     """
     out: list[CondStmt] = []
+    # Content keys, not CondStmt.key: that one carries the fresh cmpid, so it
+    # never matched and every repeat (~200k lines per ffmpeg drain) became an
+    # object. Repeats add nothing downstream; first occurrence keeps order.
+    seen_lines: set[str] = set()
     seen: set[tuple] = set()
     cmpid = 0
     for line in lines:
         line = line.strip()
+        if line in seen_lines:
+            continue
+
+        seen_lines.add(line)
         if not line.startswith("CMP "):
             continue
         parts = line[4:].split()
@@ -230,12 +238,12 @@ def conds_from_cmplog_text(lines: Iterable[str]) -> list[CondStmt]:
             continue
         if not op_a and not op_b:
             continue
-        c = CondStmt.from_cmplog_pair(cmpid, op_a, op_b, width, result=result, pc=pc)
-        k = c.key
+        k = (op_a, op_b, width, result, pc)
         if k in seen:
             continue
+
         seen.add(k)
-        out.append(c)
+        out.append(CondStmt.from_cmplog_pair(cmpid, op_a, op_b, width, result=result, pc=pc))
         cmpid += 1
     log.debug("conds_from_cmplog_text: parsed %d CondStmt from input lines", len(out))
     return out

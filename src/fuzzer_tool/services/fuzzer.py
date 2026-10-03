@@ -6978,6 +6978,41 @@ class Fuzzer:
     def print_stats(self):
         return self._stats.print_stats()
 
+    def _print_branch_density(self) -> None:
+        """Static branch density: conditional branches per KB of .text."""
+        from fuzzer_tool.core.elf import branch_density
+
+        if not self.multi_targets:
+            # From the cached profile: decoding .text is 66 s on ffmpeg.
+            bd = self._profile.text_branch_density
+            if bd is not None:
+                print(f"[*] Branch density: {bd:.1f} cond branches/KB")
+            return
+
+        bd_total = 0
+        bd_count = 0
+        for t in self.multi_targets:
+            bd = branch_density(t)
+            if bd is not None:
+                name = os.path.basename(t)
+                print(f"[*] Branch density: {name} {bd:.1f} cond branches/KB")
+                bd_total += bd
+                bd_count += 1
+        if bd_count > 1:
+            print(f"[*] Branch density: avg {bd_total / bd_count:.1f} cond branches/KB")
+
+    def _stats_tick_report(self) -> None:
+        """Print the stats line, or under quiet_stats only sample eps.
+
+        The eps window backs _stats_effective_interval; skipping the sample
+        with the print left it empty and ran the tick on every exec.
+        """
+        if self.quiet_stats:
+            self._stats.sample_eps()
+            return
+
+        self.print_stats()
+
     def _last_avg_eps(self) -> float:
         """Mean of the last `_eps_history_max` avg-eps samples.
 
@@ -8576,25 +8611,7 @@ class Fuzzer:
         print(f"[*] Ngram: k={detect_ngram_k(self.target)}")
         if self._validity.enabled:
             print(f"[*] Validity channel: reject-code {self._validity.reject_code}")
-        # Static branch density: conditional branches per KB of .text
-        from fuzzer_tool.core.elf import branch_density
-
-        if self.multi_targets:
-            bd_total = 0
-            bd_count = 0
-            for t in self.multi_targets:
-                bd = branch_density(t)
-                if bd is not None:
-                    name = os.path.basename(t)
-                    print(f"[*] Branch density: {name} {bd:.1f} cond branches/KB")
-                    bd_total += bd
-                    bd_count += 1
-            if bd_count > 1:
-                print(f"[*] Branch density: avg {bd_total / bd_count:.1f} cond branches/KB")
-        else:
-            bd = branch_density(self.target)
-            if bd is not None:
-                print(f"[*] Branch density: {bd:.1f} cond branches/KB")
+        self._print_branch_density()
         print(f"[*] Edge bitmap: {self.map_size:,} entries (auto-sized)")
         self._report_map_cache_residency()
         print(f"[*] Corpus: {self.corpus_dir} ({len(self.corpus)} seeds)")
@@ -9086,8 +9103,7 @@ class Fuzzer:
                     # Record coverage snapshot for temporal analysis
                     self._edge_tracker.record_coverage_snapshot(self.exec_count)
                     self._maybe_resize_on_drops()
-                    if not self.quiet_stats:
-                        self.print_stats()
+                    self._stats_tick_report()
                     self._append_coverage_log()
                     self._record_discovery_snapshot()
                     self._check_admission_rate()

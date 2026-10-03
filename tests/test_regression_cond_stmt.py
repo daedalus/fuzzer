@@ -250,6 +250,30 @@ class TestTrackParser:
         assert conds[1].base.result == -1
         assert conds[1].base.pc == 0x1000
 
+    def test_regression_conds_dedup_repeated_records(self):
+        """A record repeated in one drain yields one CondStmt.
+
+        The dedup key carried the fresh cmpid, so it never matched: on
+        ffmpeg every one of ~200k lines per drain became an object.
+        """
+        line = "CMP 0001 ffff -1 2 1000"
+        conds = conds_from_cmplog_text([line, line, " " + line + "\n"])
+        assert len(conds) == 1
+        assert [c.base.cmpid for c in conds] == [0]
+
+    def test_conds_dedup_keeps_distinct_fields_in_order(self):
+        """Adversarial: records differing in result or pc stay, in order."""
+        lines = [
+            "CMP 0001 ffff -1 2 1000",
+            "CMP 0001 ffff 1 2 1000",
+            "CMP 0001 ffff -1 2 1000",
+            "CMP 0001 ffff -1 2 2000",
+        ]
+        conds = conds_from_cmplog_text(lines)
+        got = [(c.base.result, c.base.pc) for c in conds]
+        assert got == [(-1, 0x1000), (1, 0x1000), (-1, 0x2000)]
+        assert [c.base.cmpid for c in conds] == list(range(len(got)))
+
     def test_iter_track_lines(self, tmp_path):
         p = tmp_path / "t.txt"
         p.write_text("a\nb\n\nc\n")

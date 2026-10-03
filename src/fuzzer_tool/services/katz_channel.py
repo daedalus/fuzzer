@@ -178,15 +178,19 @@ class KatzChannel:
         if self.bmp is None:
             return None
         buf = self.bmp.read_and_clear()
+        # view, not astype: unpackbits already yields 0/1 bytes; the copy
+        # cost ~5 ms per exec at ffmpeg's 3M nodes.
         bits = np.unpackbits(np.frombuffer(buf, dtype=np.uint8), bitorder="little")[
             : self.n_nodes
-        ].astype(bool)
+        ].view(bool)
         return bits
 
     def record(self, bits: np.ndarray, seed_key: str | None = None):
         """Accumulate one execution: global hits always, per-seed mask only
         for inputs that earned corpus membership (has_new_coverage)."""
-        self.hit_counts += bits.astype(np.float64)
+        # Touch only the visited nodes: a full float64 add over every ICFG
+        # node (3M on ffmpeg) cost ~25 ms per exec for ~1% set bits.
+        self.hit_counts[np.flatnonzero(bits)] += 1.0
         if seed_key is not None:
             packed = np.packbits(bits, bitorder="little").tobytes()
             old = self._masks.get(seed_key)
