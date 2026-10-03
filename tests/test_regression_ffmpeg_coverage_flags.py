@@ -9,6 +9,7 @@ lives in tools/lib/ffmpeg_config.sh.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -109,3 +110,77 @@ def test_absent_deps_dropped(tmp_path):
     assert flags == ["--disable-autodetect"]
     for dep in DEP_FLAGS:
         assert dep.removeprefix("--enable-") in r.stderr
+
+
+# ── Versioned trees (ffmpeg-<ver>, vendor_ffmpeg.sh --top=N) ───────────
+
+CONFIGURE_STUB = """#!/bin/sh
+echo "$@" >> "$CONF_LOG"
+mkdir -p ffbuild && : > ffbuild/config.mak
+printf 'all:\\n\\tmkdir -p libavformat libavcodec libavutil libswresample\\n' > Makefile
+printf '\\tfor l in libavformat libavcodec libavutil libswresample; do : > $$l/$$l.a; done\\n' >> Makefile
+"""
+
+
+def _sancov(tmp_path: Path, features: str) -> list[str]:
+    """Run build_vendored_ffmpeg_sancov on a stub ffmpeg-9.0.2 tree; return configure calls."""
+    vendor = tmp_path / "vendor" / "ffmpeg-9.0.2"
+    vendor.mkdir(parents=True, exist_ok=True)
+    conf = vendor / "configure"
+    conf.write_text(CONFIGURE_STUB)
+    conf.chmod(0o755)
+    log = tmp_path / "configure.log"
+
+    fn = re.search(r"^build_vendored_ffmpeg_sancov\(\) \{.*?^\}", BUILD.read_text(), re.M | re.S)
+    assert fn
+    script = (
+        "warn() { :; }; ok() { :; }; warn_failed() { echo FAILED; }; log_section() { :; }\n"
+        f"{fn.group(0)}\n"
+        f'VENDOR="{tmp_path}/vendor"; FUZZ_BUILD_ROOT="{tmp_path}/build"; REPO_ROOT="{ROOT}"\n'
+        f'BUILD_LOG="{tmp_path}/build.log"; WITH_FFMPEG_SANCOV=1; FORCE_REBUILD=0; USE_CCACHE=0\n'
+        f'ASAN_CFLAGS="-fsanitize=address"; FFMPEG_ASM_FLAG=--disable-asm\n'
+        f'FFMPEG_FEATURE_FLAGS="{features}"\n'
+        'build_vendored_ffmpeg_sancov "" ffmpeg-9.0.2\n'
+    )
+    r = subprocess.run(
+        ["bash", "-c", script],
+        env={**os.environ, "CONF_LOG": str(log)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "FAILED" not in r.stdout
+    return log.read_text().splitlines() if log.exists() else []
+
+
+needs_build_tools = pytest.mark.skipif(
+    not (shutil.which("clang") and shutil.which("rsync") and shutil.which("make")),
+    reason="clang, rsync and make required",
+)
+
+
+@needs_build_tools
+def test_versioned_tree_gets_shared_flags(tmp_path):
+    """Falsification: a versioned tree's configure sees asm off and the feature flags."""
+    calls = _sancov(tmp_path, "--disable-autodetect --enable-zlib")
+    args = calls[0].split()
+
+    assert len(calls) == 1
+    assert "--disable-asm" in args
+    assert "--disable-autodetect" in args
+    assert "--enable-zlib" in args
+    assert "--disable-parsers" not in args
+    assert "--disable-bsfs" not in args
+
+
+@needs_build_tools
+def test_versioned_tree_reconfigures_on_flag_change(tmp_path):
+    """Adversarial: same flags reuse the tree; a new dep forces a reconfigure."""
+    _sancov(tmp_path, "--disable-autodetect")
+    same = _sancov(tmp_path, "--disable-autodetect")
+    changed = _sancov(tmp_path, "--disable-autodetect --enable-libxml2")
+
+    assert len(same) == 1
+    assert len(changed) == 2
+    assert "--enable-libxml2" in changed[-1].split()
