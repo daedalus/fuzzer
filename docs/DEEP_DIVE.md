@@ -1174,6 +1174,7 @@ on the `$suffix` parameter (`_asan` → `vendor/ffmpeg_asan/`, otherwise
 
 A dep whose header/lib (or `pkg-config libxml-2.0`) is missing is dropped with a note;
 the flag set is part of the config stamp, so installing a dev package triggers a reconfigure.
+Versioned trees (`ffmpeg-<ver>`, `--top=N`) build through the same function and get the same flags.
 
 **Multi-version FFmpeg** (differential campaign across release lines):
 
