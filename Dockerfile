@@ -29,7 +29,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 # gcc/g++ build the plain and C++ targets (tailslayer_read.cpp);
 # libclang-rt-dev is compiler-rt: Ubuntu's clang omits it, so every
 # -fsanitize=* / -fsanitize-coverage link fails without it;
-# curl + nasm serve vendor_ffmpeg.sh (source fetch, SIMD paths);
+# curl serves vendor_ffmpeg.sh source fetch; rsync stages its build;
+# bz2/lzma/xml2 + pkg-config back tools/lib/ffmpeg_config.sh deps;
 # binutils supplies nm, which cli/ldpreload_wrapper shells out to for
 # sanitizer detection -- without it every target reads as uninstrumented.
 # The -dev libraries back the vendored targets under tools/vendor_*.sh.
@@ -39,7 +40,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libclang-rt-dev \
         curl \
         ca-certificates \
-        nasm \
+        rsync \
+        pkg-config \
         binutils \
         git \
         make \
@@ -47,6 +49,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3-pip \
         python3-venv \
         zlib1g-dev \
+        libbz2-dev \
+        liblzma-dev \
+        libxml2-dev \
         libpng-dev \
         libjpeg-dev \
         liblz4-dev \
