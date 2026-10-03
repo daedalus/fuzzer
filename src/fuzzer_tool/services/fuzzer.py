@@ -2052,6 +2052,7 @@ class Fuzzer:
         # cmplog=False is accepted for programmatic callers that need it off.
         if cmplog:
             has_cmplog = _detect_cmplog(self.target)
+            is_lib = self.target.lower().endswith((".so", ".dylib", ".dll"))
             if has_cmplog:
                 print("[*] Cmplog: target is instrumented, enabling comparison tracing")
             else:
@@ -2059,7 +2060,7 @@ class Fuzzer:
                     "[!] Cmplog: target does not appear to be instrumented; "
                     "shim compilation will be attempted"
                 )
-            from fuzzer_tool.core.cmplog import CmplogCollector
+            from fuzzer_tool.core.cmplog import CmplogCollector, Preload
 
             # The FIFO is drained by a background thread, so which records a
             # collect sees depends on thread timing. The file sink is read
@@ -2080,6 +2081,9 @@ class Fuzzer:
                 # (P0-3).  The shim cost is one hash probe per comparison.
                 site_counts=True,
                 compcov_level=self._compcov_level,
+                # An executable with the shim compiled in already intercepts
+                # libc; a preloaded copy would count every call twice.
+                preload=Preload.NONE if has_cmplog and not is_lib else Preload.SHIM,
             )
             if self._cmplog.start():
                 from fuzzer_tool.core.elf import detect_cmplog_functions
