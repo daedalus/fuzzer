@@ -50,6 +50,7 @@ experimental until measured against a real target.
 """
 
 import bisect
+import enum
 import logging
 import multiprocessing
 import re
@@ -72,6 +73,19 @@ _CALL_RE = re.compile(rb"\xe8")  # REL32 call opcode
 
 # Caps on the CFG-based analysis (bounds load time on huge functions).
 _MAX_CFG_FUNC_SIZE = 256 * 1024  # skip functions larger than 256 KiB
+
+
+class CfgPool(enum.Enum):
+    """Whether a CFG decode may fork a process pool.
+
+    NEVER from a threaded caller: forked children deadlock on locks other
+    threads held at fork time.
+    """
+
+    AUTO = "auto"
+    NEVER = "never"
+
+
 _MAX_CFG_BLOCKS = 4096  # skip harmonic distance for huge CFGs
 _MAX_TARGET_BLOCKS = 512  # cap target-block count for the harmonic BFS
 
@@ -675,14 +689,22 @@ class TargetDistance:
             if tfname:
                 target_funcs.add(tfname)
 
-        wanted = sorted(target_funcs)
+        self._decode_cfgs(sorted(target_funcs))
+
+    def _decode_cfgs(self, wanted: list[str], pool: CfgPool = CfgPool.AUTO) -> None:
+        """Fill self._cfgs for *wanted*: cache hits, then decode + store misses."""
+        if not wanted:
+            return
+
         ident = self._seed_cached_cfgs(wanted)
         specs, total_bytes = self._cfg_specs(wanted)
 
-        if specs and cfg_cache.should_parallelize(total_bytes, len(specs)):
-            decoded = self._decode_parallel(specs)
-        else:
-            decoded = self._decode_serial(specs)
+        parallel = (
+            pool is CfgPool.AUTO
+            and bool(specs)
+            and cfg_cache.should_parallelize(total_bytes, len(specs))
+        )
+        decoded = self._decode_parallel(specs) if parallel else self._decode_serial(specs)
 
         new_cfgs = {cfg.name: cfg for cfg in decoded}
         self._cfgs.update(new_cfgs)

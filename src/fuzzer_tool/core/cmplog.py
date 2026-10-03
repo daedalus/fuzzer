@@ -232,6 +232,16 @@ _HASH_MIN_BYTES = 8  # minimum operand length to consider as hash-like
 _HASH_MAX_MATCH_BYTES = 2  # max matching byte positions for a hash-like pair
 
 
+def _first_lines(data: bytes, n: int) -> bytes:
+    """Byte prefix holding the first *n* lines of *data* (all of it if fewer)."""
+    pos = 0
+    for _ in range(n):
+        pos = data.find(b"\n", pos) + 1
+        if pos == 0:
+            return data
+    return data[:pos]
+
+
 class _FifoDrain:
     """Background reader for a FIFO-backed cmplog sink.
 
@@ -328,6 +338,16 @@ class Preload(enum.Enum):
 
     SHIM = "shim"
     NONE = "none"
+
+
+class CmplogRecords(enum.Enum):
+    """Whether the in-process shim emits CMP/DIV/GEP records.
+
+    OFF on rounds whose records are never parsed (``__cmplog_pause``).
+    """
+
+    ON = 0
+    OFF = 1
 
 
 class CmplogCollector:
@@ -993,6 +1013,8 @@ class CmplogCollector:
         else:
             self._fifo_partial = b""
 
+        # Same cap as the file path: the remainder is dropped, not deferred.
+        data = _first_lines(data, CMPLOG_MAX_LINES_PER_READ)
         new_lines = data.decode("latin-1").splitlines()
         return self._parse_lines(new_lines)
 

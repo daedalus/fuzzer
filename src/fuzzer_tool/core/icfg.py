@@ -26,10 +26,11 @@ from itertools import repeat
 
 import numpy as np
 
-from fuzzer_tool.core.analyzers.analyzer_distance import _CALL_RE, _MAX_CFG_FUNC_SIZE
+from fuzzer_tool.core.analyzers.analyzer_distance import _CALL_RE, CfgPool
 from fuzzer_tool.core.centrality import betweenness_centrality, closeness_centrality
-from fuzzer_tool.core.cfg import FunctionCFG, build_function_cfg
+from fuzzer_tool.core.cfg import FunctionCFG
 from fuzzer_tool.core.mincut import min_cut
+from fuzzer_tool.core.np_sets import sorted_isin, sorted_unique
 
 log = logging.getLogger(__name__)
 
@@ -163,26 +164,22 @@ class InterproceduralCFG:
 
 
 def _decode_all_cfgs(td) -> dict[str, FunctionCFG]:
-    """Decode every function the symtab knows, reusing td's cache."""
+    """Decode every function the symtab knows, through td's on-disk CFG cache.
+
+    Uncached, ffmpeg's 14M instructions cost 163 s of every startup. Serial:
+    callers are threaded (fuzzer init), and the pool gained 3 s of 163.
+    """
     cfgs: dict[str, FunctionCFG] = dict(td._cfgs)
-    total = 0
-    for name, (start, end) in sorted(td.functions.items()):
-        if name in cfgs:
+    names = sorted(td.functions)
+    td._decode_cfgs(names, CfgPool.NEVER)
+
+    # td's order first, then symtab order: _node_table's owner pick reads it.
+    for name in names:
+        cfg = td._cfgs.get(name)
+        if name in cfgs or cfg is None or not cfg.blocks:
             continue
-        if end <= start or end - start > _MAX_CFG_FUNC_SIZE:
-            continue
-        code = td._code_slice(start, end)
-        if code is None or len(code) != end - start:
-            continue
-        try:
-            cfg = build_function_cfg(name, code, start, td._resolve_callee_name)
-        except Exception:
-            log.debug("CFG build failed for %s", name, exc_info=True)
-            continue
-        if cfg.blocks:
-            cfgs[name] = cfg
-            total += end - start
-    log.info("icfg: %d functions decoded (%d bytes)", len(cfgs), total)
+        cfgs[name] = cfg
+    log.info("icfg: %d functions decoded", len(cfgs))
     return cfgs
 
 
@@ -251,12 +248,12 @@ def _edge_keys(addrs: np.ndarray, bu, bv, cu, cv) -> tuple[np.ndarray, np.ndarra
     """
     u, _ = _lookup(addrs, bu)
     v, is_node = _lookup(addrs, bv)
-    branch = np.unique((u[is_node] << _KEY_SHIFT) | v[is_node])
+    branch = sorted_unique((u[is_node] << _KEY_SHIFT) | v[is_node])
 
     u, _ = _lookup(addrs, cu)
     v, _ = _lookup(addrs, cv)
     distinct = u != v
-    call = np.unique((u[distinct] << _KEY_SHIFT) | v[distinct])
+    call = sorted_unique((u[distinct] << _KEY_SHIFT) | v[distinct])
     return branch, call
 
 
@@ -278,10 +275,10 @@ def build_interprocedural_cfg(td) -> InterproceduralCFG | None:
     # but a tail-position call whose fallthrough block starts exactly at the
     # callee is possible in theory), and a real branch must win that tie --
     # see InterproceduralCFG.is_call. Keys sort as (u, v).
-    keys = np.union1d(branch, call)
+    keys = sorted_unique(np.concatenate([branch, call]))
     src = keys >> _KEY_SHIFT
     dst = keys & _KEY_MASK
-    is_call = ~np.isin(keys, branch)
+    is_call = ~sorted_isin(keys, branch)
 
     packed = array("Q")
     packed.frombytes(node_addrs.tobytes())

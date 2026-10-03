@@ -33,6 +33,7 @@ from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
 from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.clock import clock_of
+from fuzzer_tool.core.cmplog import CmplogRecords
 from fuzzer_tool.core.one_fifth import Outcome as FifthOutcome
 from fuzzer_tool.core.ro_rd import classify_operator_name
 from fuzzer_tool.core.schedulers.pos_base import Outcome
@@ -248,6 +249,7 @@ class FuzzRound:
         # times, so the contamination carried a multiplier driven by bloom
         # saturation rather than by anything the target did.
         self._mutated = f._dedup_mutate(self._data)
+        self._gate_records()
         clock = clock_of(f)
         t_start = clock.monotonic()
         self._returncode, self._stderr = f._run_target(self._mutated)
@@ -337,10 +339,8 @@ class FuzzRound:
         # with 5000 pairs); running it every iteration when the pool is
         # already saturated destroys throughput.  Adaptive: eager while
         # building the pool, then sample every N iterations.
-        pr_count = len(f._cmplog.pairs)
-        _interval = 1 if pr_count < 500 else (5 if pr_count < 2000 else 20)
+        self._collect_now = self._collect_due()
         f._cmplog_skip_counter += 1
-        self._collect_now = f._cmplog_skip_counter >= _interval
         if self._collect_now:
             f._cmplog_skip_counter = 0
             new_tokens = f._cmplog.collect_tokens()
@@ -349,6 +349,21 @@ class FuzzRound:
         self._cmplog_found = bool(new_tokens)
         self._rewind_shim()
         f._add_dict_tokens(new_tokens)
+
+    def _collect_due(self) -> bool:
+        # Whether this round's _collect_tokens will drain the records.
+        f = self._f
+        pr_count = len(f._cmplog.pairs)
+        interval = 1 if pr_count < 500 else (5 if pr_count < 2000 else 20)
+        return f._cmplog_skip_counter + 1 >= interval
+
+    def _gate_records(self) -> None:
+        # Records nobody parses cost the target 3.1x on ffmpeg: emit them
+        # only on rounds that collect.
+        f = self._f
+        if not f._cmplog:
+            return
+        f._cmplog_records(CmplogRecords.ON if self._collect_due() else CmplogRecords.OFF)
 
     def _rewind_shim(self) -> None:
         # In direct_lite mode the compiled-in shim keeps the cmplog file
@@ -986,7 +1001,7 @@ class FuzzRound:
         if strategy is None:
             return
         edges = self._edges_now()
-        strategy.observe(self._data, edges if isinstance(edges, (set, frozenset)) else ())
+        strategy.observe(self._data, edges if isinstance(edges, set | frozenset) else ())
 
     # ── Per-seed edges ───────────────────────────────────────────────
 

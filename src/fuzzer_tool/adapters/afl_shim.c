@@ -2191,6 +2191,10 @@ static void __afl_write_distance_tail_exit(void) {
 static int    __afl_cmplog_fd  = -1;
 static char   __afl_cmplog_buf[CMPLOG_BUFFER_SIZE];
 static size_t __afl_cmplog_pos = 0;
+/* Record emission off (__cmplog_pause): the collector parses one round in
+ * twenty, and ffmpeg emits ~400k records per run (3.1x the target's cost).
+ * Counts/sites channels keep running. */
+static int    __afl_cmplog_paused = 0;
 
 /* ── Log descriptors the target can steal ─────────────────────────────
  *
@@ -2852,7 +2856,7 @@ __AFL_NO_COV static size_t __afl_readable_len(const void *p, size_t want) {
  * result == 0 is dropped: an already-satisfied comparison is exactly the
  * "looks unsolved but is solved" pollution the pair pool must not carry. */
 __AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t n, int result) {
-    if (__afl_cmplog_fd < 0 || !a || !b || n == 0 || result == 0) return;
+    if (__afl_cmplog_fd < 0 || __afl_cmplog_paused || !a || !b || n == 0 || result == 0) return;
     size_t k = n > CMPLOG_MAX_OPERAND ? CMPLOG_MAX_OPERAND : n;
     /* Both operands are hexdumped at the same width, so the record can only
      * be as wide as the shorter readable side. */
@@ -2881,7 +2885,7 @@ __AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t
  * after the call, i.e. the comparison site itself once inlined. */
 
 __AFL_NO_COV static inline void __afl_cmplog_ints(uint64_t a, uint64_t b, size_t n, void *pc) {
-    if (__afl_cmplog_fd < 0) return;
+    if (__afl_cmplog_fd < 0 || __afl_cmplog_paused) return;
     /* The lock is also the backstop for toolchains where __AFL_NO_COV
      * expands to nothing: an instrumented record writer re-enters through
      * its own trace-cmp callbacks, finds the lock held, and returns
@@ -3560,7 +3564,7 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
 
 __AFL_NO_COV static inline void __afl_cmplog_operand(const char *kind, uint64_t v,
                                                      size_t n, void *pc) {
-    if (__afl_cmplog_fd < 0 || v < CMPLOG_OPERAND_MIN) return;
+    if (__afl_cmplog_fd < 0 || __afl_cmplog_paused || v < CMPLOG_OPERAND_MIN) return;
     if (!__afl_cmplog_acquire()) return;
 
     if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
@@ -3704,6 +3708,10 @@ void __cmplog_reset(void) {
         }
     }
 }
+
+/* paused != 0: drop CMP/DIV/GEP records until called again with 0. */
+__AFL_NO_COV __attribute__((visibility("default")))
+void __cmplog_pause(int paused) { __afl_cmplog_paused = paused != 0; }
 
 __AFL_NO_COV __attribute__((visibility("default")))
 void __cmplog_close(void) {
