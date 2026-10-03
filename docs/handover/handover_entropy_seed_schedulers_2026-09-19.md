@@ -307,6 +307,21 @@ rate is actually large enough to matter for minimization decisions.
 bits). Open: measure the disagreement rate on real corpora before building
 permutation Shapley; wiring the score into minimization is not done.
 
+**Status 2026-10-03: permutation Shapley + measurement shipped, not wired.**
+`core/schedulers/seed_entropy_shapley.py` (`shapley_entropy`: vectorised
+cumsum over the count slab, antithetic reverse pairs, per-seed stderr;
+efficiency `sum(phi) == H(pool)` pinned in `tests/test_seed_entropy_shapley.py`)
+and `tools/entropy_shapley_vs_loo.py`. Measured at 2048 permutations against
+the Shapley-vs-Shapley noise floor (bottom-25% "retire" set overlap):
+stand-in real corpus (500 system files, not a fuzz corpus) LOO-vs-Shapley 0.75
+vs floor 0.70, rho 0.84 -> no ranking disagreement beyond Monte-Carlo noise.
+Exact-histogram cliques are the only place LOO misprices (it scores them ~0;
+72-100% of members below 10% of Shapley credit). At 64-512 permutations the
+apparent disagreement is mostly sampling noise (stderr exceeded the per-seed
+signal), so do not read low-permutation runs. Verdict per this section's own
+rule: keep LOO, do not wire permutation Shapley into selection/minimization
+unless `--corpus <real fuzz corpus>` shows overlap clearly below its floor.
+
 ---
 
 ## 6. `seed_entropy_contribution.py` — EWMA parent-credit scheduler
