@@ -14,8 +14,8 @@ At hit rate == target the expected step is zero, so ``s`` hovers there.
 itself (not just the output) is what stops windup: after a long dry spell
 the first hit moves ``s`` off the floor at once.
 
-Rechenberg's 1/5 is wrong for fuzzing: new coverage is rare and bursty, so
-``DEFAULT_TARGET`` is calibrated on fuzzgoat instead (docs/DEEP_DIVE.md).
+Fuzzgoat rounds find coverage ~2-3% of the time, so any target >= 0.03 pins
+``s`` at SCALE_MIN: the rule then acts as ``-M 1`` (docs/DEEP_DIVE.md).
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from __future__ import annotations
 import enum
 import math
 
-#: Calibrated target hit rate (fuzzgoat sweep, docs/DEEP_DIVE.md §1/5 rule).
+#: Target hit rate. Rechenberg's; fuzzgoat sweep found no better one (DEEP_DIVE.md).
 DEFAULT_TARGET = 0.2
 
 #: Rounds of averaging per e-fold: a hit at target 0.2 multiplies s by e^(1/(d*0.8)).
