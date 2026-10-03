@@ -78,6 +78,8 @@ _EXCLUDED_OPT_IN = frozenset(
         # Storage layout, not a strategy: would move corpus writes into
         # seeds.zip, which a later run without the flag does not load.
         "zip_seed_corpus",
+        # Scales -M, which --slopt (on under --hail-mary) replaces: a no-op there.
+        "one_fifth",
         # Changes maintenance-tick cadence (crash/sanitizer replays and
         # gc.collect move off i % 500 onto the stats-interval cadence),
         # not a fuzzing strategy. --hail-mary force-enabling it would

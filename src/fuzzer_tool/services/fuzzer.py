@@ -70,6 +70,8 @@ from fuzzer_tool.core.metropolis import accept_prob, path_energy
 from fuzzer_tool.core.mi import MI_MAX_POSITIONS, MutualInformationTracker
 from fuzzer_tool.core.multiple_testing import collect_and_correct
 from fuzzer_tool.core.novelty_confirm import confirm
+from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
+from fuzzer_tool.core.one_fifth import OneFifthRule
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.rng_health import quick_health_check
@@ -1314,6 +1316,8 @@ class Fuzzer:
         exp4=False,
         exp4_gamma=0.1,
         slopt=False,
+        one_fifth=False,
+        one_fifth_target=ONE_FIFTH_TARGET,
         eps_greedy=False,
         eps_greedy_epsilon0=1.0,
         eps_greedy_decay=0.9995,
@@ -3137,6 +3141,9 @@ class Fuzzer:
         # (op, seed_len, exponent) drawn this round; None when no arm was
         # pulled (deterministic stage, SLOPT off).
         self._last_slopt_arm = None
+        # 1/5 success rule (core/one_fifth.py): scales the round's mutation
+        # count by its new-coverage rate. No-op under SLOPT, which ignores -M.
+        self._one_fifth = OneFifthRule(target=one_fifth_target) if one_fifth else None
         # Epsilon-greedy with annealing
         self._use_eps_greedy = eps_greedy
         self._eps_greedy = None

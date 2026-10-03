@@ -32,6 +32,7 @@ from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
 from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.clock import clock_of
+from fuzzer_tool.core.one_fifth import Outcome as FifthOutcome
 from fuzzer_tool.core.ro_rd import classify_operator_name
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.secretary import SecretaryStopping
@@ -1287,6 +1288,7 @@ class FuzzRound:
         self._count_successes()
         op_rewards = self._op_rewards()
         self._record_slopt(op_rewards)
+        self._record_one_fifth()
         self._record_mc(op_rewards)
         self._record_particles(op_rewards)
         self._record_schedulers(op_rewards)
@@ -1374,6 +1376,13 @@ class FuzzRound:
             if op == s_op:
                 f._slopt.record(s_op, s_len, s_exp, ok, weight=w)
                 break
+
+    def _record_one_fifth(self) -> None:
+        # 1/5 rule: a round "beats its parent" when it finds new coverage.
+        f = self._f
+        if f._one_fifth is None:
+            return
+        f._one_fifth.record(FifthOutcome.HIT if self._has_new_coverage else FifthOutcome.MISS)
 
     def _record_mc(self, op_rewards) -> None:
         f = self._f
