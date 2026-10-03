@@ -52,15 +52,9 @@ mkdir -p "$VENDOR_DIR"
 FFMPEG_VERSION="${FFMPEG_VERSION:-9.0.1}"
 FFMPEG_UPSTREAM="https://github.com/FFmpeg/FFmpeg"
 FFMPEG_GIT_URL="${FFMPEG_GIT_URL:-$FFMPEG_UPSTREAM}"
-# See build_targets.sh: --disable-x86asm was hardcoded because configure
-# aborts without nasm. Probe so machines that have an assembler keep the
-# SIMD paths, which are a large part of what a decoder target exercises.
-if command -v nasm >/dev/null 2>&1 || command -v yasm >/dev/null 2>&1; then
-    FFMPEG_ASM_FLAG=""
-else
-    FFMPEG_ASM_FLAG="--disable-x86asm"
-    echo "note: no nasm/yasm found — configuring with --disable-x86asm (no SIMD)"
-fi
+# Configure flags shared with build_targets.sh (asm off, explicit deps).
+. "$(dirname "$0")/lib/ffmpeg_config.sh"
+FFMPEG_FEATURE_FLAGS=$(ffmpeg_feature_flags)
 
 # ── Parse flags ──────────────────────────────────────────────────
 MODE="nosan"          # nosan | asan | fast
@@ -158,7 +152,7 @@ elif [ "$MINIMAL" -eq 1 ]; then
 else
     COMPONENTS="--enable-demuxers --enable-decoders --enable-parsers --enable-bsfs \
         --disable-encoders --disable-muxers --disable-filters --disable-protocols \
-        --enable-protocol=file --disable-network --disable-autodetect"
+        --enable-protocol=file --disable-network"
 fi
 
 
@@ -309,7 +303,7 @@ echo "[3/5] Configuring FFmpeg ($MODE$([ "$MINIMAL" -eq 1 ] && echo ", minimal")
         --disable-txtpages \
         --disable-programs \
         --disable-debug \
-        $FFMPEG_ASM_FLAG \
+        $FFMPEG_ASM_FLAG $FFMPEG_FEATURE_FLAGS \
         --extra-cflags="$CFLAGS" \
         --extra-ldflags="$SAN_FLAGS $SCOV_FLAGS $STUB_LDFLAGS" \
     2>&1 | tail -5) || {

@@ -1162,6 +1162,19 @@ with `-fsanitize=address`. `build_simple_so_targets` selects the correct path ba
 on the `$suffix` parameter (`_asan` → `vendor/ffmpeg_asan/`, otherwise
 `vendor/ffmpeg/`).
 
+**FFmpeg configure flags** (`tools/lib/ffmpeg_config.sh`, sourced by both
+`vendor_ffmpeg.sh` and `build_vendored_ffmpeg_sancov`), chosen for edge coverage:
+
+| Flag | Why |
+|------|-----|
+| parsers + bsfs on | frame raw/ts/ps/flv/avi streams for decoders; 9.0.1: parsers 14 -> 67, bsfs 4 -> 50 |
+| `--disable-asm` | sancov cannot instrument asm; C DSP runs instead, and x86 inline asm (cabac) no longer hides loads from ASAN |
+| `--disable-autodetect` + explicit zlib/bzlib/lzma | host-independent; png/exr/zmbv/tiff-deflate/mov cmov/mkv zlib |
+| `--enable-libxml2` | dash + imf demuxers |
+
+A dep whose header/lib (or `pkg-config libxml-2.0`) is missing is dropped with a note;
+the flag set is part of the config stamp, so installing a dev package triggers a reconfigure.
+
 **Multi-version FFmpeg** (differential campaign across release lines):
 
 ```
