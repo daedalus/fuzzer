@@ -437,7 +437,11 @@ bins, the Chao2-crosses-0.99 calibration target, any `bench_paired.py` A/B.
 `core/schedulers/op_good_turing.py` (`--op-good-turing`, prior shared with
 `--good-turing-prior`). Credit smears across stacked operators (every operator
 in `_last_ops_used` gets the mutant's edges). Unit and wiring tests only; no
-A/B. Open: per-position bin, calibration, `bench_paired.py` arm.
+A/B. Open: per-position bin, calibration, A/B run.
+
+**Status 2026-10-03 (later still): bench arms shipped** in `tools/lib/bench_paired.py`:
+`elo-good-turing-seed`, `elo-op-good-turing`, both paired against `elo`
+(`tests/test_bench_paired_good_turing_arms.py`). Not run.
 
 ### 7.2 Mutual information between operator/position and the edge set
 
@@ -489,9 +493,11 @@ Not done: trace capture from the shim, admission wiring next to `--pool-drift`, 
 
 `coverage_growth_model()` assumes exponential saturation, which contradicts the
 Zipf tail (already in `docs/TODO.md`, Zipf gate item). Compare projections from
-it and from the Heaps fit on real runs, or select by MDL. Also open: the
-`byte-ent` status field is frozen because `_corpus_entropy` is fed only by
-`load_corpus()`.
+it and from the Heaps fit on real runs, or select by MDL. ~~The `byte-ent`
+status field is frozen because `_corpus_entropy` is fed only by
+`load_corpus()`.~~ Stale: already fixed. `CorpusManager._entropy_add/_entropy_remove/
+rebuild_entropy` fold admissions, evictions and trims
+(`tests/test_regression_corpus_entropy_live.py`).
 
 ### 7.6 Priority
 

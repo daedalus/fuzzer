@@ -173,6 +173,11 @@ ARMS: dict[str, list[str]] = {
     # baseline (uniform offsets) and against each other.
     "pos-round-robin": ["--pos-round-robin"],
     "pos-fibonacci": ["--pos-fibonacci"],
+    # Good-Turing discovery-probability arms (handover entropy §7.1). Both are
+    # Elo arms, so they pair against `elo`, not `baseline`. Prior left at its
+    # default: the sweep is a separate A/B.
+    "elo-good-turing-seed": ["--elo", "--mc-bandit", "--good-turing-seed"],
+    "elo-op-good-turing": ["--elo", "--mc-bandit", "--op-good-turing"],
     # Arena arm subsets (--pos-arena-arms). The control is the arena with
     # uniform as its only member: same Elo/bandit stack and same arena
     # bookkeeping as every arm below, no proposer. Each pos-arena-<x> is that
@@ -216,6 +221,8 @@ GENERATION_ARMS = ("wfc", "elo-mcts", "elo-alphabeta", "bootstrap")
 
 POSITION_ARMS = ("pos-round-robin", "pos-fibonacci")
 
+GOOD_TURING_ARMS = ("elo-good-turing-seed", "elo-op-good-turing")
+
 # Arena subset group (pos-arena-uniform is the control the rest pair against).
 POSITION_ARENA_ARMS = (
     "pos-arena-uniform",
@@ -240,6 +247,8 @@ ARM_BASELINES: dict[str, str] = {
     "strata-a4": "strata-a1-elo",
     "pos-round-robin": "baseline",
     "pos-fibonacci": "baseline",
+    "elo-good-turing-seed": "elo",
+    "elo-op-good-turing": "elo",
     "pos-arena-uniform": "elo",
     **{f"pos-arena-{a.replace('_', '-')}": "pos-arena-uniform" for a in ARENA_TESTABLE},
     "pos-arena-all": "pos-arena-uniform",
