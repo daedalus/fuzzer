@@ -961,6 +961,7 @@ class FuzzRound:
         self._feed_katz()
         self._feed_entropic()
         self._feed_good_turing()
+        self._feed_op_good_turing()
 
         # Tang low-rank refit. Gated on the interval inside maybe_refit, and
         # placed here rather than on the pick path because the SVD plus the
@@ -1011,6 +1012,17 @@ class FuzzRound:
             return
         edges = self._edges_now()
         strategy.observe(self._data, edges if isinstance(edges, set | frozenset) else ())
+
+    def _feed_op_good_turing(self) -> None:
+        # Every exec: each distinct operator in the stack is credited with
+        # the mutant's edges (see op_good_turing.py for the smear caveat).
+        strategy = getattr(self._f, "_op_good_turing", None)
+        if strategy is None:
+            return
+        edges = self._edges_now()
+        strategy.observe(
+            self._f._last_ops_used, edges if isinstance(edges, set | frozenset) else ()
+        )
 
     # ── Per-seed edges ───────────────────────────────────────────────
 
@@ -1536,6 +1548,7 @@ class FuzzRound:
             f._op_strata,
             f._op_stride,
             f._op_p2c,
+            f._op_good_turing,
             f._softmax,
             f._topk,
         ):

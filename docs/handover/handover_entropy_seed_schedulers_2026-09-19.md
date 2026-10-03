@@ -430,8 +430,14 @@ decisions.
 (`--good-turing-seed`, `--good-turing-prior`). Per-seed Q1/T shrunk toward the
 campaign rate (K=20); `residual_risk()` is the STADS number. Verified: closed
 forms, incremental Q1/Q2 vs brute force, planted-rate recovery (p=0.2 -> 0.2
-+-0.03), wiring, and a live smoke run. Not done: the per-operator / per-position
++-0.03), wiring, and a live smoke run. Not done: the per-position
 bins, the Chao2-crosses-0.99 calibration target, any `bench_paired.py` A/B.
+
+**Status 2026-10-03 (later): per-operator bin shipped** as
+`core/schedulers/op_good_turing.py` (`--op-good-turing`, prior shared with
+`--good-turing-prior`). Credit smears across stacked operators (every operator
+in `_last_ops_used` gets the mutant's edges). Unit and wiring tests only; no
+A/B. Open: per-position bin, calibration, `bench_paired.py` arm.
 
 ### 7.2 Mutual information between operator/position and the edge set
 

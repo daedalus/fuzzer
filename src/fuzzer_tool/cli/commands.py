@@ -766,6 +766,7 @@ def cmd_fuzz(args):
         op_strata=getattr(args, "op_strata", False),
         op_stride=getattr(args, "op_stride", False),
         op_p2c=getattr(args, "op_p2c", False),
+        op_good_turing=getattr(args, "op_good_turing", False),
         strata=getattr(args, "strata", False),
         shaped_reward=getattr(args, "shaped_reward", False),
         shaped_reward_floor=getattr(args, "shaped_reward_floor", 0.0),
@@ -2187,6 +2188,7 @@ _HAIL_MARY_FLAGS = (
     "op_strata",
     "op_stride",
     "op_p2c",
+    "op_good_turing",
     "strata",
     "pll",
     "recurrence",
@@ -4348,6 +4350,15 @@ def main() -> int:
         default=False,
         help="Power-of-two-choices operator arm: two uniform draws, higher posterior mean "
         "wins (experimental, Elo-only -- see core/schedulers/op_p2c.py).",
+    )
+    fuzz_parser.add_argument(
+        "--op-good-turing",
+        action="store_true",
+        default=False,
+        help="Per-operator Good-Turing operator arm: picks by shrunk Q1/T, the chance an "
+        "operator's next execution hits an edge none of its earlier ones hit; prior shared "
+        "with --good-turing-prior (experimental, Elo-only -- see "
+        "core/schedulers/op_good_turing.py).",
     )
     fuzz_parser.add_argument(
         "--seed-residual",

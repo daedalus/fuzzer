@@ -1674,6 +1674,9 @@ class Fuzzer:
         shm_write_guard=WriteGuard.OFF,
         # --zip-seed-corpus (adapters/seed_zip.py). Appended: positional signature.
         zip_seed_corpus=False,
+        # --op-good-turing (core/schedulers/op_good_turing.py), prior shared with
+        # good_turing_prior. Appended: positional signature.
+        op_good_turing=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3583,6 +3586,18 @@ class Fuzzer:
         self._use_op_p2c = op_p2c
         self._op_p2c = OpP2CScheduler(rng=self._rng) if op_p2c else None
 
+        # Per-operator Good-Turing discovery probability. Off by default,
+        # Elo-only; see core/schedulers/op_good_turing.py.
+        self._use_op_good_turing = op_good_turing
+        self._op_good_turing = None
+        if op_good_turing:
+            from fuzzer_tool.core.schedulers.op_good_turing import OpGoodTuringScheduler
+
+            self._op_good_turing = OpGoodTuringScheduler(
+                rng=self._rng, prior_strength=good_turing_prior
+            )
+            log.info("op_good_turing enabled")
+
         # Categorical TPE (BO-3): l/g density ratio over operators. Off by
         # default, Elo-only; see core/schedulers/op_tpe.py.
         self._use_op_tpe = op_tpe
@@ -4192,6 +4207,8 @@ class Fuzzer:
             _register_arms(self._op_stride)
         if self._op_p2c:
             _register_arms(self._op_p2c)
+        if self._op_good_turing:
+            _register_arms(self._op_good_turing)
         if self._elo:
             _register_arms(self._elo)
         del _format_priors  # free priors dict after arm registration

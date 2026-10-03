@@ -787,7 +787,7 @@ _FALLBACK_PRECEDENCE = (
     "las_vegas",
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
-    # op_tpe, op_strata, op_stride, op_p2c, gradient, whittle, corral, softmax, topk,
+    # op_tpe, op_strata, op_stride, op_p2c, op_good_turing, gradient, whittle, corral, softmax, topk,
     # tsallis, kalman_ts, ids, phe, exp3_ix, regret_matching, automaton,
     # ant_colony are deliberately absent
     # here: they are unproven exploratory arms
@@ -955,6 +955,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("op_stride")
     if f._use_op_p2c and f._op_p2c:
         available.append("op_p2c")
+    if f._use_op_good_turing and f._op_good_turing:
+        available.append("op_good_turing")
     if f._use_softmax and f._softmax:
         available.append("softmax")
     if f._use_topk and f._topk:
@@ -5488,6 +5490,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "op_p2c" and f._op_p2c:
             op = f._op_p2c.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "op_good_turing" and f._op_good_turing:
+            op = f._op_good_turing.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "softmax" and f._softmax:
             op = f._softmax.select_op(ops)

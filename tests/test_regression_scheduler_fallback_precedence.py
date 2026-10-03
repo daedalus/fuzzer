@@ -160,6 +160,7 @@ class _FakeFuzzer:
         "op_strata": ("_use_op_strata", "_op_strata"),
         "op_stride": ("_use_op_stride", "_op_stride"),
         "op_p2c": ("_use_op_p2c", "_op_p2c"),
+        "op_good_turing": ("_use_op_good_turing", "_op_good_turing"),
         "corral": ("_use_corral", "_corral"),
         "tsallis": ("_use_tsallis", "_tsallis"),
         "kalman_ts": ("_use_kalman_ts", "_kalman_ts"),

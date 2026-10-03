@@ -73,6 +73,7 @@ BALLOT_SCHEDULERS = (
     "op_strata",
     "op_stride",
     "op_p2c",
+    "op_good_turing",
     "replicator",
     "round_robin",
     "softmax",
