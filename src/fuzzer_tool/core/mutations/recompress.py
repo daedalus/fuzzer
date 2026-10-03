@@ -30,6 +30,8 @@ import struct
 import zlib
 from dataclasses import replace
 
+from fuzzer_tool.core.int_checksum import ADLER32, IntModel
+
 # Bounds chosen so a single call stays in the sub-millisecond range for
 # typical seeds and cannot blow up on adversarial input.
 _MAX_COMPRESSED_IN = 1 << 20  # 1 MiB of compressed input
@@ -368,3 +370,124 @@ def recompress_idat(data: bytes, max_len: int = 4096, *, rng) -> bytes | None:
     mutated = _mutate_plain(plain[:_MAX_PLAIN_WORK], _MAX_PLAIN_WORK, rng=rng)
     out = _fit(mutated, build, max_len)
     return out if len(out) <= max_len else None
+
+
+# ── Adler-32 trailer patcher ───────────────────────────────────────────
+#
+# A byte-level mutation that leaves DEFLATE decodable still breaks the
+# zlib trailer, and the target rejects the stream on the Adler-32 before
+# its parser runs. Unlike recompress_*, this keeps the compressed bytes
+# and rewrites only the checksum(s) that went stale:
+#
+#   zlib:  [CMF FLG] [DEFLATE ............] [ADLER32]   <- adler of plaintext
+#   PNG:   ... IDAT(len,"IDAT",data,CRC32) ...          <- trailer ends the
+#              joined IDAT data; chunk CRC is CRC-32 by spec
+#
+# The model only gates *when* to patch: the format fixes the algorithm,
+# so only the recovered Adler-32 model qualifies (see ``_op_crc_learn``).
+
+_PNG_SIG = b"\x89PNG\r\n\x1a\n"
+_PNG_HEAD_LEN = 8  # length(4) + type(4)
+_PNG_CRC_LEN = 4
+_ZLIB_HDR_LEN = 2
+_ZLIB_FDICT = 0x20
+_ZLIB_DICT_ID_LEN = 4
+_ADLER_LEN = 4
+_RAW_DEFLATE = -15
+
+
+def _zlib_trailer(stream: bytes) -> tuple[int, int] | None:
+    """Return ``(trailer offset, Adler-32 of the inflated data)`` or None.
+
+    Inflates raw DEFLATE, which never checks the trailer, so a stale one
+    does not matter. None when the stream is truncated, corrupt, over the
+    inflate bound, or has no room for a 4-byte trailer.
+    """
+    if len(stream) > _MAX_COMPRESSED_IN or not sniff_zlib(stream):
+        return None
+
+    start = _ZLIB_HDR_LEN
+    if stream[1] & _ZLIB_FDICT:
+        start += _ZLIB_DICT_ID_LEN
+
+    obj = zlib.decompressobj(_RAW_DEFLATE)
+    try:
+        plain = obj.decompress(stream[start:], _MAX_INFLATE)
+    except zlib.error:
+        return None
+    if not obj.eof:
+        return None
+
+    end = len(stream) - len(obj.unused_data)
+    if end + _ADLER_LEN > len(stream):
+        return None
+    return end, zlib.adler32(plain)
+
+
+def _patch_zlib(stream: bytes) -> bytes | None:
+    """Rewrite a zlib stream's Adler-32 trailer; None when not a stream."""
+    found = _zlib_trailer(stream)
+    if found is None:
+        return None
+    end, adler = found
+    return stream[:end] + struct.pack(">I", adler) + stream[end + _ADLER_LEN :]
+
+
+def _idat_spans(data: bytes) -> list[tuple[int, int]]:
+    """``(payload offset, length)`` of every complete IDAT chunk."""
+    spans = []
+    pos = len(_PNG_SIG)
+    while pos + _PNG_HEAD_LEN + _PNG_CRC_LEN <= len(data):
+        (length,) = struct.unpack_from(">I", data, pos)
+        kind = data[pos + 4 : pos + _PNG_HEAD_LEN]
+        body = pos + _PNG_HEAD_LEN
+        if body + length + _PNG_CRC_LEN > len(data):
+            break
+        if kind == b"IDAT":
+            spans.append((body, length))
+        if kind == b"IEND":
+            break
+        pos = body + length + _PNG_CRC_LEN
+    return spans
+
+
+def _patch_png(data: bytes) -> bytes:
+    """Repair the zlib Adler-32 across a PNG's IDATs and their chunk CRCs.
+
+    When there is no complete IDAT, or the joined data is not a patchable
+    stream, the PNG is returned as is: it is still a PNG, and the generic
+    trailing patch would overwrite the IEND CRC.
+    """
+    spans = _idat_spans(data)
+    if not spans:
+        return data
+
+    stream = b"".join(data[off : off + n] for off, n in spans)
+    patched = _patch_zlib(stream)
+    if patched is None or patched == stream:
+        return data
+
+    out = bytearray(data)
+    done = 0
+    for off, n in spans:
+        new = patched[done : done + n]
+        if new != stream[done : done + n]:
+            out[off : off + n] = new
+            crc = binascii.crc32(out[off - 4 : off + n]) & 0xFFFFFFFF
+            struct.pack_into(">I", out, off + n, crc)
+        done += n
+    return bytes(out)
+
+
+def patch_adler(data: bytes, model: IntModel) -> bytes | None:
+    """Repair the Adler-32 of a bare zlib stream or a PNG's IDAT stream.
+
+    Returns the patched bytes (same length), or None when *model* is not
+    the zlib Adler-32 or *data* is neither a PNG nor a zlib stream, so the
+    caller can fall through to the generic trailing-field patch.
+    """
+    if model != ADLER32:
+        return None
+    if data[: len(_PNG_SIG)] == _PNG_SIG:
+        return _patch_png(data)
+    return _patch_zlib(data)

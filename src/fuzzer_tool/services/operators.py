@@ -2297,9 +2297,10 @@ class OperatorEngine:
         The format-aware patchers stay on the GF(2) polynomial: PNG chunk
         CRCs and ZIP CRCs are CRC-32 *by specification*, so a recovered
         integer model (typically the Adler-32 living one layer below, inside
-        the IDAT zlib stream) must never be written into those fields. An
-        integer model drives only the generic trailing-field patch, and an
-        XOR-bitmask model likewise -- the three families are disjoint and
+        the IDAT zlib stream) must never be written into those fields. The
+        Adler-32 model instead repairs the zlib/IDAT trailer itself
+        (``recompress.patch_adler``); any other integer model drives only the
+        generic trailing-field patch, and an XOR-bitmask model likewise -- the three families are disjoint and
         substituting one for another silently corrupts the field.
 
         All three must be handled here, because availability gates on
@@ -2332,6 +2333,11 @@ class OperatorEngine:
 
         model = learner.ensure_int_model()
         if model is not None:
+            patched = self._try_format_int_patch(buf, model)
+            if patched is not None:
+                buf[:] = patched
+                return
+
             # Width comes from the model: a Fletcher-16 field is 2 bytes, and
             # zero-padding it into 4 would clobber two bytes of real data.
             nbytes = model.nbytes
@@ -2523,6 +2529,12 @@ class OperatorEngine:
         if len(data) >= 30 and data[:4] == b"PK\x03\x04":
             return self._patch_zip_crc(data, learner, rng)
         return None
+
+    def _try_format_int_patch(self, buf, model):
+        """Format-aware integer patch (zlib/IDAT Adler-32); bytes or None."""
+        from fuzzer_tool.core.mutations.recompress import patch_adler  # noqa: PLC0415
+
+        return patch_adler(bytes(buf), model)
 
     def _patch_png_crc(self, data, learner):
         """Recompute all PNG chunk CRCs using the recovered polynomial."""
