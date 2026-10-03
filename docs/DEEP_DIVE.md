@@ -825,9 +825,12 @@ before each run and reads it after, exactly as in `direct_lite` mode. The child'
 **stderr** does travel (`RC <rc> <err_len>\n<err>`), because ASAN exits 1 and
 `SanitizerReport.parse(stderr)` is the only crash signal `is_crash()` has there.
 
-Enabled only for the set `run_target_fast` already handled. In-process, persistent,
-network, ptrace, cmplog, perf-counter, `file_mode`, `target_args` and multi-target
-runs are untouched — each either owns the child itself or needs per-execution setup a
+Enabled only for the set `run_target_fast` already handled, plus cmplog on the FIFO
+sink (the default; the CLI always turns cmplog on, so before this every CLI run was
+off the forkserver). Its env is run-invariant and the shim zeroes its counters before
+forking; per-exec vectors match the spawn path (`tests/test_regression_cmplog_forkserver.py`).
+In-process, persistent, network, ptrace, cmplog on the file sink (truncates per run),
+perf-counter, `file_mode`, `target_args` and multi-target runs are untouched — each either owns the child itself or needs per-execution setup a
 fixed environment cannot express. A target built against an older shim fails the
 handshake and the loader silently falls back to fork+exec, so **targets must be
 rebuilt** (`tools/build_targets.sh`) to see any of the above.

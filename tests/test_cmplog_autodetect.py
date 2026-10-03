@@ -34,6 +34,8 @@ def _make_fuzzer(monkeypatch, cmplog_arg, detected: bool):
     monkeypatch.setattr(fuzzer_mod, "_detect_cmplog", lambda path: detected)
 
     class _StubCollector:
+        fifo_sink = False  # keeps _setup_forkserver off the stub's env
+
         def __init__(self, *a, **k):
             pass
 
