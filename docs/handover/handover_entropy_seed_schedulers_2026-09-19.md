@@ -443,6 +443,14 @@ A/B. Open: per-position bin, calibration, A/B run.
 `elo-good-turing-seed`, `elo-op-good-turing`, both paired against `elo`
 (`tests/test_bench_paired_good_turing_arms.py`). Not run.
 
+**Status 2026-10-03 (later still): per-position bin shipped** as
+`core/schedulers/pos_good_turing.py` (`--pos-good-turing`, implied by `--position-arena`; bench arm
+`pos-arena-good-turing`). Bins of `ceil(len/64)` bytes, `M_bin` shrunk toward the seed rate, which is
+shrunk toward the campaign rate. Credit smears across bins a round touched. 25 unit + wiring tests; no
+A/B, no clang run. Still open in §7.1: Chao2-crosses-0.99 calibration, `bench_paired.py` A/B runs.
+Still open elsewhere: §7.2 stable-id tensor feed, §7.3 `--weizz-tags` feed, §7.4 shim trace capture
+(each needs a clang build or shim work, not done); §7.5 is a measurement.
+
 ### 7.2 Mutual information between operator/position and the edge set
 
 `te_position.update_te_causal_map` reduces each execution's coverage to

@@ -42,6 +42,7 @@ from fuzzer_tool.core.schedulers.pos_context import PositionContextScheduler
 from fuzzer_tool.core.schedulers.pos_effector import PositionEffectorScheduler
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
+from fuzzer_tool.core.schedulers.pos_good_turing import PositionGoodTuringScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
 from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
@@ -592,6 +593,7 @@ def _arena(
     rare_mask=None,
     consolidated=None,
     finch=None,
+    good_turing=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
@@ -615,6 +617,7 @@ def _arena(
         rare_mask=rare_mask,
         consolidated=consolidated,
         finch=finch,
+        good_turing=good_turing,
     )
 
 
@@ -979,6 +982,7 @@ class TestPool:
             rare_mask=_rare_mask(),
             consolidated=PositionConsolidatedScheduler(RandPool(seed=1)),
             finch=_finch()[0],
+            good_turing=PositionGoodTuringScheduler(RandPool(seed=1)),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -1156,6 +1160,22 @@ class TestSettle:
         arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
         w = arm.weights(SEED, len(SEED))
         assert w[100] < w[0]  # an unchanged round marks the byte inert-ish
+
+    def test_good_turing_is_credited_off_policy(self):
+        # The picker was sensitivity, not good_turing; its bins still move.
+        arm = PositionGoodTuringScheduler(RandPool(seed=1), min_observations=1)
+        f, arena = self._played(good_turing=arm)
+        arm.observe({1, 2})
+        arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        assert arm.executions(SEED, 100 // arm._seeds[arm._key(SEED)].width) == 1
+
+    def test_good_turing_left_out_of_subset_is_not_credited(self):
+        arm = PositionGoodTuringScheduler(RandPool(seed=1), min_observations=1)
+        f, arena = _arena(good_turing=arm)
+        arena2 = PositionArena(f, region_fn=lambda d, n: 55, good_turing=arm, arms=["uniform"])
+        arm.observe({1})
+        arena2.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        assert arm.seed_count() == 0
 
     def test_rare_mask_is_credited_off_policy(self):
         arm = _rare_mask(hit=True)
@@ -1553,6 +1573,20 @@ class TestRealConstruction:
         f = self._build(tmp_path, pos_boundary=True)
         assert isinstance(f._pos_boundary, PositionBoundaryScheduler)
         assert f._position_arena is None
+
+    def test_position_arena_implies_good_turing(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert isinstance(f._pos_good_turing, PositionGoodTuringScheduler)
+        assert "good_turing" in f._position_arena.pool()
+
+    def test_pos_good_turing_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_good_turing=True)
+        assert f._pos_good_turing is not None
+        assert f._position_arena is None
+
+    def test_good_turing_prior_reaches_the_arm(self, tmp_path):
+        f = self._build(tmp_path, pos_good_turing=True, good_turing_prior=7.0)
+        assert f._pos_good_turing._k == 7.0
 
     def test_position_arena_implies_consolidated(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True)

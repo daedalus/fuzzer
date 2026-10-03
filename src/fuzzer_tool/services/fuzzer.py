@@ -780,6 +780,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("changed")
     if getattr(f, "_pos_rare_mask", None) is not None:
         names.append("rare-mask")
+    if getattr(f, "_pos_good_turing", None) is not None:
+        names.append("good-turing")
     if getattr(f, "_pos_consolidated", None) is not None:
         names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
@@ -1677,6 +1679,9 @@ class Fuzzer:
         # --op-good-turing (core/schedulers/op_good_turing.py), prior shared with
         # good_turing_prior. Appended: positional signature.
         op_good_turing=False,
+        # Position-arena Good-Turing arm (core/schedulers/pos_good_turing.py).
+        # Appended: positional signature.
+        pos_good_turing=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3062,6 +3067,20 @@ class Fuzzer:
 
             self._pos_boundary = PositionBoundaryScheduler(self._rng)
             log.info("Position boundary scheduling enabled")
+        # Position-arena Good-Turing: per-offset-bin discovery probability over
+        # edge identity (see core/schedulers/pos_good_turing.py). Off-policy
+        # extra, fed every execution by FuzzRound; prior shared with
+        # --good-turing-prior. Not persisted.
+        self._pos_good_turing = None
+        if pos_good_turing or position_arena:
+            from fuzzer_tool.core.schedulers.pos_good_turing import (
+                PositionGoodTuringScheduler,
+            )
+
+            self._pos_good_turing = PositionGoodTuringScheduler(
+                self._rng, prior_strength=good_turing_prior
+            )
+            log.info("Position Good-Turing scheduling enabled")
         # Position-arena consolidated: the learning arms' features in one
         # proposer (see core/schedulers/pos_consolidated.py). Off-policy
         # extra, persisted.
@@ -3113,6 +3132,7 @@ class Fuzzer:
                 changed=self._pos_changed,
                 rare_mask=self._pos_rare_mask,
                 consolidated=self._pos_consolidated,
+                good_turing=self._pos_good_turing,
                 finch=self._pos_finch,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,

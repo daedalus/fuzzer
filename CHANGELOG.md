@@ -40,8 +40,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Field isolation validated on a real crashing target** (`tests/test_isolate_fields_proto_target.py`): builds `targets/proto_target.c` with ASAN and checks `isolate_fields_failure` / `root_cause --isolate-fields` return exactly the header fields each of its four crashes needs (null deref, heap overflow, stack overflow, abort), excluding irrelevant fields. Skips without gcc/ASAN.
 
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+### Documentation
+
+- **paper_collection survey handover** (`docs/handover/handover_paper_collection_survey_2026-10-02.md`): maps ~814 papers to existing fuzzer features; ranks six gaps (hot bytes, checksum repair, binary rewriting, resource feedback, Grimoire, evaluation stats). Analysis only.
+
+### Fixed
+
+- **`fnv1a_p`/`fnv1a_r` slowed every Redqueen pair** (`core/rq_encodings.py`): replacement variants were built before the input search, 400 non-matching pairs 0.009 s → 0.51 s. Restored lazy build after a pattern hit (0.010 s). FNV-1a now inverts only the constant, not ±64 neighbours: match found 2.18 s → 0.05 s per pair. 2-byte table is `dict[int, int]` (injective), built once via `functools.cache`. Comments no longer call FNV-1a a bijection (measured: ~1 preimage on average, none for ~1/3). Encodings with an empty chunk are dropped on both sides.
+- **Doppler drop memory churned on huge corpora** (`core/power_doppler.py`): the 2¹⁵-key LRU forgot every dropped key before a larger cycle returned, so the horizon never widened. Now the bottom-k keys by `crc32_ieee` are kept: a fixed, never-empty subset of any cycle within the same bound (a halving crc threshold could empty out on all-odd crcs).
+
+- **Doppler horizon compounded per returning seed** (`core/power_doppler.py`): each return doubled one shared horizon (N returns → 2^N), disabling abandonment; and the dropped-key memory (`max_seeds` keys) forgot keys before large corpora cycled back. Horizon is now `max(horizon, 2 × measured gap)`; memory is 2¹⁵ keys.
+
+- **Doppler horizon thrashed on slow corpus cycles** (`core/power_doppler.py`): a cycle longer than the fixed abandon horizon dropped every frame one tick before its seed returned. The horizon now doubles when a dropped seed comes back.
+- **Stale corpus-membership memo** (`services/fuzzer.py`): keyed on corpus length, so an in-place trim of the parent kept a "member" verdict. Hits are now re-validated by slot identity; misses are not memoized.
+
+- **`--mod-solving trace` clobbered `targets`** (`services/fuzzer.py`): the trace block reassigned the directed-targets parameter, disabling the Katz channel and directing at the fuzz target. Renamed the local.
+- **Doppler never scored corpora > 64 seeds picked in turn** (`core/power_doppler.py`): LRU evicted every partial frame. New seeds now wait for a slot; abandoned frames are scored early and freed. Flow-edge ids are int64 arrays under a global cap (frozensets could reach hundreds of MiB).
+- **Doppler mixed targets' edges** (`services/fuzzer.py`): multi-target frames are keyed per target. Without SHM, `--schedule doppler` now falls back to `base` with a warning instead of reporting enabled.
+- **Seed-arm ledgers recorded standalone-QEA parents**: `seed_meta` is not corpus membership. Gated on the seed picker's cached corpus key map, memoized per parent.
+
+- **EEVDF pick scanned ineligible flows** (`core/fair_queue.py`): one deadline heap popped every flow with an earlier deadline but `ve > V` (5000 pops at 5000 flows). Now a `ve` heap feeds a deadline heap; amortized O(log n). Test: `test_eevdf_pick_does_not_scan_ineligible_flows`.
+- **Seed-arm ledgers grew without bound**: non-corpus (Markov) parents were recorded, and departed seeds never left `ArmCounts`. Only corpus parents are recorded now; ledgers trim to 2x the live corpus.
+- **Round robin was O(n^2) per pick** (`seed_round_robin`, `op_round_robin`): `x in list` per registered arm. Set membership now: 103 ms -> 0.7 ms per pick at 5000 seeds.
+- **`cuckoo_seed_filter` broke 12 corpus-minimization / lineage tests** (`services/corpus_manager.py` read it unguarded) and was missing, with `swap_walk`, from `_HAIL_MARY_FLAGS`.
+- **Stack depth was always 0** (`adapters/afl_shim.c`): `__afl_max_stack_depth` was reset and copied to SHM offset 0 but never assigned, so `read_stack_depth()` returned 0 and the stack-depth boost in `core/schedules.py` never fired. The shim now samples the frame address in `__afl_map_loc` (base = first sample after reset, live write). Tests: `tests/test_shim_stack_depth.py`. Per-edge cost unmeasured; boost effect on discovery untested.
+
+### Added (sancov)
+
+- **`indirect-calls` coverage** (`adapters/afl_shim.c`, `tools/build_targets.sh`): `__sanitizer_cov_trace_pc_indir` hashes `(call site, callee)` into a synthetic id (bit 31, base-relative). Callees outside the module are dropped. Build with `--indir-cov` or `--sancov=...,indirect-calls`. Tests: `tests/test_shim_indir_cov.py`, `tests/test_sancov_modes.py`. Discovery effect and map pressure unmeasured.
+
+### Tests
+
+- **Field isolation validated on a real crashing target** (`tests/test_isolate_fields_proto_target.py`): builds `targets/proto_target.c` with ASAN and checks `isolate_fields_failure` / `root_cause --isolate-fields` return exactly the header fields each of its four crashes needs (null deref, heap overflow, stack overflow, abort), excluding irrelevant fields. Skips without gcc/ASAN.
+
 ### Added
 
+- **Per-position Good-Turing arm** (`--pos-good-turing`, `core/schedulers/pos_good_turing.py`): position-arena proposer drawing a seed's offset bin by Good-Turing discovery probability over edge identity (entropy handover §7.1). Implied by `--position-arena`; bench arm `pos-arena-good-turing`. Unmeasured.
 - **Format-aware Adler-32 patcher** (`core/mutations/recompress.py::patch_adler`, wired into `_op_crc_learn`): with a recovered Adler-32 model, a bare zlib stream or a PNG's joined IDAT data gets its trailer rewritten over the inflated plaintext (raw inflate, so a stale trailer is irrelevant); touched IDAT chunk CRCs are recomputed as CRC-32, every other byte is kept. Before, the generic path wrote Adler-32 of `buf[:-4]` over the IEND CRC. Other int models, non-container input, and non-inflatable streams keep the old behaviour; a PNG with no patchable stream is returned unchanged.
 - **Consolidated seed and position arms** (`--seed-consolidated-scheduler`, `--pos-consolidated`): `seed_consolidated` merges the OS/network seed arms (p2c over sfq flows, eevdf/drr cost, stride favored weight, aimd decay, round-robin sweep); `pos_consolidated` merges the learning position arms (uniform/boundary/levy/bin candidates scored by context x per-seed bin rates).
 - **`--consolidated-v2`** (`core/schedulers/op_consolidated_v2.py`): consolidated v1 scored by an optimistic, tempered Thompson draw. +1.3-1.8% over v1 on all four `bandit_env` environments (20 paired seeds). Leads no-Elo precedence.

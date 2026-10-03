@@ -642,6 +642,7 @@ def cmd_fuzz(args):
         seed_p2c_scheduler=getattr(args, "seed_p2c_scheduler", False),
         seed_consolidated_scheduler=getattr(args, "seed_consolidated_scheduler", False),
         pos_consolidated=getattr(args, "pos_consolidated", False),
+        pos_good_turing=getattr(args, "pos_good_turing", False),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
         position_arena=getattr(args, "position_arena", False),
@@ -2239,6 +2240,7 @@ _HAIL_MARY_FLAGS = (
     "pos_rare_mask",
     "pos_finch",
     "pos_consolidated",
+    "pos_good_turing",
     "position_arena",
     "target_arena",
 )
@@ -3073,17 +3075,26 @@ def main() -> int:
         "(core/schedulers/pos_consolidated.py). Implied by --position-arena.",
     )
     fuzz_parser.add_argument(
+        "--pos-good-turing",
+        action="store_true",
+        help="Enable the position-arena Good-Turing scheduler: draws a seed's offset bin by "
+        "its Good-Turing discovery probability over edge identity "
+        "(core/schedulers/pos_good_turing.py; --good-turing-prior sets the shrinkage). "
+        "Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
         "--position-arena",
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
         "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context, levy, boundary, "
-        "effector, token, chunk, changed, rare-mask, consolidated) with "
+        "effector, token, chunk, changed, rare-mask, good-turing, consolidated) with "
         "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
         "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage, --pos-context, "
         "--pos-levy, --pos-boundary, --pos-effector, --pos-finch, --pos-token, --pos-chunk, "
-        "--pos-changed, --pos-rare-mask and --pos-consolidated. Enabled by --hail-mary.",
+        "--pos-changed, --pos-rare-mask, --pos-good-turing and --pos-consolidated. "
+        "Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--pos-arena-arms",
