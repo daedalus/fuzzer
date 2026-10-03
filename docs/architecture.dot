@@ -170,7 +170,7 @@ digraph fuzzer_tool {
     ops -> bandit [constraint=false, style=dashed, color="#2f7d5a",
                    label="reward  ", fontcolor="#2f7d5a"];
     cmplog -> ops [constraint=false, color="#22688c", penwidth=1.4,
-                   label="  redqueen · colorize\l  SMT · magic bytes\l",
+                   label="  redqueen · colorize · i2s fixpoint\l  SMT · magic bytes\l",
                    fontcolor="#22688c"];
     cmplog -> bandit [constraint=false, style=dashed, color="#22688c",
                       label="walls / stall  ", fontcolor="#22688c"];

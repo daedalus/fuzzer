@@ -401,6 +401,9 @@ class CmplogCollector:
         # needs exactly the order and the PC that `pairs` discards.
         # Replaced wholesale each drain, so it never grows unbounded.
         self.last_conds: list[CondStmt] = []
+        # This drain's operand pairs (conds + operand records), encounter
+        # order, deduplicated. Replaced each drain; read by --i2s-fixpoint.
+        self.last_pairs: list[tuple[bytes, bytes]] = []
         # Occurrence count: how many times each pair has been observed across
         # runs. Higher counts = more reliable comparison signals. Pruned with
         # _pair_set at the eviction site, so it stays bounded by _max_pairs.
@@ -911,6 +914,8 @@ class CmplogCollector:
         # writes no layer-1 records at all, yet is exactly the target whose
         # asserted counts you want to see).
         self.collect_counts()
+        # Early returns below mean "this drain saw nothing", not "same as last".
+        self.last_pairs = []
 
         if self.fifo_sink:
             return self._collect_tokens_fifo()
@@ -1015,6 +1020,7 @@ class CmplogCollector:
 
         for pair in batch_pairs:
             self._pair_occurrence[pair] = self._pair_occurrence.get(pair, 0) + 1
+        self.last_pairs = list(batch_pairs)
 
         new_tokens = [t for t in tokens if t not in self._token_set]
         self._token_set.update(tokens)

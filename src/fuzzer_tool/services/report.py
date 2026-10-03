@@ -939,7 +939,22 @@ def _seed_contribution(f) -> str:
         lines.extend(gen_lines)
 
     lines.extend(_format_seed_gen_lines(f))
+    lines.extend(_i2s_fixpoint_lines(f))
     return "\n".join(lines)
+
+
+def _i2s_fixpoint_lines(f) -> list[str]:
+    """--i2s-fixpoint search outcomes; empty when off."""
+    fixpoint = getattr(f, "_i2s_fixpoint", None)
+    if fixpoint is None:
+        return []
+    stats = fixpoint.stats
+    outcomes = ", ".join(f"{k}={v}" for k, v in stats.items() if k != "execs")
+    return [
+        "",
+        f"  I2S fixpoint: {stats['execs']} execs, {outcomes or 'no searches'}, "
+        f"{fixpoint.queued} queued",
+    ]
 
 
 def _scan_corpus_files(corpus_dir) -> list[Path]:
