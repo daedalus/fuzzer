@@ -5,6 +5,9 @@ time`), on top of upstream `4af8a07`.
 **Status: §2 and §3 IMPLEMENTED (2026-09-19). §1, §4, §5, §6 still analysis
 only.** See `docs/DEEP_DIVE.md` (Byte-entropy seed arms) for what shipped;
 the corrections the build forced on this doc are recorded inline below.
+**Addendum 2026-10-03 (§7, base `b99890d`):** gap analysis of what information
+theory the tree still lacks for finding *novel edges* (as opposed to ranking
+seeds by byte/coverage entropy). Analysis only, nothing built.
 
 Asked what seed schedulers could harness the two Shannon-entropy signals now
 available (per-seed byte entropy, and the corpus-wide cumulative tracker from
@@ -359,3 +362,96 @@ otherwise have to invent from scratch anyway.
 question (mean vs pooled) is a question about which metric §2 already
 answers properly, and shipping both would have conflated them exactly as
 this doc warned. §4, §5 and §6 are untouched.
+
+---
+
+## 7. Information-theoretic gaps for novel-edge discovery (added 2026-10-03)
+
+**Base:** `b99890d` (`Format-aware Adler-32 patcher for zlib/IDAT`). Asked what
+the fuzzer still needs from information theory to find novel edges. Everything
+above ranks seeds by entropy of bytes or of coverage hits; none of it estimates
+*where the next unseen edge is*. Analysis only; no code written, nothing run.
+
+### 7.0 Already in the tree (do not rebuild)
+
+- Entropic seed arm, `core/schedulers/seed_entropic.py` (Böhme et al., FSE'20):
+  Shannon entropy of a seed's own rare-edge hits, add-one smoothed. A/B on
+  fuzzgoat is null (9W/7L, p=0.80); see `docs/TODO.md` and `docs/DEEP_DIVE.md`.
+- Chao2 lower bound on total edges (`core/edge_tracker.py`, `_chao2_var`,
+  `_chao2_ci`); Zipf tail fit and Heaps fit (`core/zipf.py`).
+- Transfer entropy byte→edge (`core/analyzers/analyzer_transfer_entropy.py`,
+  `services/te_position.py`); Rényi/Tsallis (`core/renyi.py`); JS divergence
+  (`edge_tracker._js_divergence`); pool drift (`core/pool_drift.py`);
+  rate-distortion for minimization (`core/rate_distortion.py`).
+- Entropy-KL with null calibration and the Bach spectral estimator (§2 and
+  `handover_entropy_kl_length_bias_2026-09-27.md`).
+
+A grep over `src/` finds no Good-Turing / missing-mass / discovery-probability
+estimator, no mutual-information or channel-capacity code, no compression-based
+(NCD / LZ) complexity, and no MDL model comparison. That is the gap list.
+
+### 7.1 Good-Turing / Good-Toulmin discovery probability (build first)
+
+Chao2 estimates *how many* edges exist; nothing estimates *the probability that
+the next execution hits an unseen edge*: `M0 ≈ N1 / N`, with `N1` the edges
+seen exactly once and `N` the observations. Compute it per arm (seed, operator,
+position bin) from singleton counts the trackers already keep, and use it as a
+bandit reward or prior in place of Entropic's add-one smoothing. Same quantity
+gives a STADS-style residual-risk number for stopping and for restart
+decisions.
+
+- Variance: use the Good-Turing variance or a bootstrap over seeds; arms with
+  small `N` need a shrinkage prior, or the estimate is 1.0 by construction (the
+  same failure `docs/TODO.md` notes for Chao2 at execs 1-8 where m < 2).
+- Check before trusting: `TODO.md` records that Chao2 never reaches 0.99 on
+  fuzzgoat or png_read, so the saturation veto is inert there. Test the new
+  estimator on a target whose estimate crosses a high value, with
+  `--rarefaction --ground-truth` style calibration (`tools/edge_matrix_modes.py`)
+  before wiring it into scheduling.
+- Verification needs a real clang build (Hard Rule 52); synthetic tests only
+  show the estimator is wired correctly, not its bias on shim data.
+
+### 7.2 Mutual information between operator/position and the edge set
+
+`te_position.update_te_causal_map` reduces each execution's coverage to
+`max(edge_set)`, so a whole coverage vector becomes one scalar and most of the
+signal is discarded. Candidate replacements:
+
+- `I(byte_pos ; edge_id)` over the per-edge presence matrix (the F14/F15
+  stable-id tensor in `handover_edge_id_axis_2026-09-18.md` makes this
+  possible).
+- `I(op ; new_edge)`, i.e. per-operator channel capacity (Blahut-Arimoto), as a
+  principled op-scheduler reward.
+- Bias: the analytic TE bias correction was evaluated and rejected (residual
+  1.7-3.4 bits, `core/analyzers/analyzer_transfer_entropy.py`), so use a
+  permutation-null z-score as `seed_entropy_kl` does, not an analytic term.
+
+### 7.3 Conditional entropy of coverage given input structure
+
+`H(edges | tag/prefix)` separates input regions that fully determine the path
+(magic numbers, checksums) from regions that still carry entropy, which is
+where novel edges are likely. Natural pairing with `--weizz-tags` and the
+format-aware Adler patcher: spend no energy on determined regions.
+
+### 7.4 Compression-based novelty on path traces
+
+Edge sets are order-blind. NCD or LZ complexity of the edge *sequence* detects
+a novel ordering with no new edge. Cheap proxy for behavioral novelty the map
+cannot see; candidate admission signal next to `--pool-drift`.
+
+### 7.5 Saturation model choice
+
+`coverage_growth_model()` assumes exponential saturation, which contradicts the
+Zipf tail (already in `docs/TODO.md`, Zipf gate item). Compare projections from
+it and from the Heaps fit on real runs, or select by MDL. Also open: the
+`byte-ent` status field is frozen because `_corpus_entropy` is fed only by
+`load_corpus()`.
+
+### 7.6 Priority
+
+7.1 first: closed form, uses counts already tracked, drops into the existing
+bandit schedulers. 7.2 is the larger research payoff but needs null calibration
+first. 7.3 and 7.4 are independent and cheaper to prototype standalone. 7.5 is a
+measurement, not a build. Each follows the usual order: pure-function scorer
+with synthetic ground truth, then wiring, then paired `bench_paired.py` A/B on a
+real clang build.
