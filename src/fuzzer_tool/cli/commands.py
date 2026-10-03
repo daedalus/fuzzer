@@ -732,6 +732,7 @@ def cmd_fuzz(args):
         entropy_gradient=getattr(args, "entropy_gradient", False),
         entropy_gradient_decay=getattr(args, "entropy_gradient_decay", 0.98),
         entropy_loo=getattr(args, "entropy_loo", False),
+        entropic_seed=getattr(args, "entropic_seed", False),
         pool_drift=getattr(args, "pool_drift", False),
         dict_thompson=getattr(args, "dict_thompson", False),
         seed_residual=getattr(args, "seed_residual", False),
@@ -2169,6 +2170,7 @@ _HAIL_MARY_FLAGS = (
     "entropy_deviation",
     "entropy_gradient",
     "entropy_loo",
+    "entropic_seed",
     "pool_drift",
     "dict_thompson",
     "seed_residual",
@@ -4239,6 +4241,15 @@ def main() -> int:
         default=0.0,
         help="Z-score the --entropy-zscore arm peaks at (default 0.0, seeds typical for "
         "this corpus). Positive chases the high-entropy tail, negative the sparse one.",
+    )
+    fuzz_parser.add_argument(
+        "--entropic-seed",
+        action="store_true",
+        default=False,
+        help="libFuzzer -entropic seed scheduling: adds an 'entropic' Elo seed arm "
+        "(first in the fallback chain without --elo) weighting each seed by the "
+        "smoothed entropy of the rare edges its mutants hit. Not --schedule entropic. "
+        "OFF by default.",
     )
     fuzz_parser.add_argument(
         "--entropy-deviation",

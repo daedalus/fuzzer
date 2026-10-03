@@ -944,6 +944,7 @@ class FuzzRound:
             f._write_ablation_row(self._has_new_coverage, self._is_crash)
 
         self._feed_katz()
+        self._feed_entropic()
 
         # Tang low-rank refit. Gated on the interval inside maybe_refit, and
         # placed here rather than on the pick path because the SVD plus the
@@ -977,6 +978,15 @@ class FuzzRound:
         if bits is not None and bits.any():
             katz_key = f._seed_key(self._data) if self._has_new_coverage else None
             f._katz_channel.record(bits, seed_key=katz_key)
+
+    def _feed_entropic(self) -> None:
+        # Every exec, crashes and timeouts included: each mutant spends the
+        # parent's budget whatever it hit (libFuzzer NumExecutedMutations).
+        strategy = getattr(self._f, "_entropic_seed", None)
+        if strategy is None:
+            return
+        edges = self._edges_now()
+        strategy.observe(self._data, edges if isinstance(edges, (set, frozenset)) else ())
 
     # ── Per-seed edges ───────────────────────────────────────────────
 

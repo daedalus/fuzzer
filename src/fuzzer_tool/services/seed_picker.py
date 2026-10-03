@@ -389,6 +389,11 @@ class SeedPicker:
         """Append entropy arms (deviation, loo, gradient, zscore)."""
         if getattr(f, "_entropy_deviation", None) is not None and f.corpus:
             available.append("entropy_deviation")
+        # Listed once an edge is rare: before that every energy is 0 and
+        # the arm declines, a phantom opponent.
+        entropic = getattr(f, "_entropic_seed", None)
+        if entropic is not None and f.corpus and entropic.rare_count:
+            available.append("entropic")
         if getattr(f, "_entropy_loo", None) is not None and f.corpus:
             available.append("entropy_loo")
         # Unlike its siblings, this arm warms up passively (it observes every
@@ -460,6 +465,7 @@ class SeedPicker:
             "entropy_kl": lambda: self._pick_entropy_kl_seed(),
             "entropy_zscore": lambda: self._pick_entropy_zscore_seed(),
             "entropy_deviation": lambda: self._pick_entropy_deviation_seed(),
+            "entropic": lambda: self._pick_entropic_seed(),
             "entropy_gradient": lambda: self._pick_entropy_gradient_seed(),
             "entropy_loo": lambda: self._pick_entropy_loo_seed(),
             "residual": lambda: self._pick_residual_seed(),
@@ -671,6 +677,17 @@ class SeedPicker:
         """
         f = self.f
         strategy = getattr(f, "_entropy_deviation", None)
+        if strategy is None or not f.corpus:
+            return None
+        return strategy.select(f.corpus)
+
+    def _pick_entropic_seed(self) -> bytes | None:
+        """libFuzzer -entropic arm: weight by local rare-edge entropy.
+
+        None on an empty corpus or before any edge is rare.
+        """
+        f = self.f
+        strategy = getattr(f, "_entropic_seed", None)
         if strategy is None or not f.corpus:
             return None
         return strategy.select(f.corpus)
@@ -973,6 +990,7 @@ class SeedPicker:
             self._pick_entropy_kl_seed,
             self._pick_entropy_zscore_seed,
             self._pick_entropy_deviation_seed,
+            self._pick_entropic_seed,
             self._pick_entropy_gradient_seed,
             self._pick_entropy_loo_seed,
             self._pick_residual_seed,

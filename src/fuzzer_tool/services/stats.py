@@ -207,6 +207,7 @@ def _kruskal_str(f) -> str:
 
 def _entropy_seed_str(f) -> str:
     """Compact live-stats field for the byte-entropy seed arms; empty when off."""
+    from fuzzer_tool.core.schedulers.seed_entropic import EntropicSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_deviation import EntropyDeviationSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_gradient import EntropyGradientSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
@@ -235,6 +236,11 @@ def _entropy_seed_str(f) -> str:
     loo = getattr(f, "_entropy_loo", None)
     if isinstance(loo, EntropyLOOSeedStrategy):
         out += f" | ent-loo: mean={loo.stats()['mean_loo']:.3f}"
+
+    ent = getattr(f, "_entropic_seed", None)
+    if isinstance(ent, EntropicSeedStrategy):
+        st = ent.stats()
+        out += f" | entropic: rare={st['rare']} picks={st['selected']}"
     return out
 
 

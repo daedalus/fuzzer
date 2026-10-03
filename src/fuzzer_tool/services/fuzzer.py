@@ -242,6 +242,7 @@ _SEED_STRATEGY_NAMES = (
     "entropy_deviation",
     "entropy_gradient",
     "entropy_loo",
+    "entropic",
     "residual",
     "strata",
     "round_robin",
@@ -1546,6 +1547,8 @@ class Fuzzer:
         entropy_gradient=False,
         entropy_gradient_decay=0.98,
         entropy_loo=False,
+        # libFuzzer -entropic seed arm (core/schedulers/seed_entropic.py).
+        entropic_seed=False,
         seed_residual=False,
         strata=False,
         pool_drift=False,
@@ -2792,6 +2795,12 @@ class Fuzzer:
             )
 
             self._entropy_deviation = EntropyDeviationSeedStrategy(self._rng)
+        # Entropic: pick seeds by the entropy of their mutants' rare edges.
+        self._entropic_seed = None
+        if entropic_seed:
+            from fuzzer_tool.core.schedulers.seed_entropic import EntropicSeedStrategy
+
+            self._entropic_seed = EntropicSeedStrategy(self._rng)
         # Leave-one-out pooled-entropy arm (entropy §5, first step)
         self._entropy_loo = None
         if entropy_loo:
@@ -7887,6 +7896,8 @@ class Fuzzer:
         # sibling banner was not covered by that fix).
         if getattr(self, "_entropy_deviation", None) is not None:
             seeds.append("entropy-deviation")
+        if getattr(self, "_entropic_seed", None) is not None:
+            seeds.append("entropic")
         if getattr(self, "_entropy_gradient", None) is not None:
             seeds.append("entropy-gradient")
         if getattr(self, "_entropy_loo", None) is not None:
@@ -8426,6 +8437,8 @@ class Fuzzer:
             groups["Seed selection"].append("entropy-zscore")
         if getattr(self, "_entropy_deviation", None) is not None:
             groups["Seed selection"].append("entropy-deviation")
+        if getattr(self, "_entropic_seed", None) is not None:
+            groups["Seed selection"].append("entropic")
         if getattr(self, "_entropy_gradient", None) is not None:
             groups["Seed selection"].append("entropy-gradient")
         if getattr(self, "_entropy_loo", None) is not None:
