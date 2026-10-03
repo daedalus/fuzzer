@@ -47,6 +47,7 @@ from fuzzer_tool.core.byte_entropy import byte_entropy_pct
 from fuzzer_tool.core.cadence import phase_of
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
+from fuzzer_tool.core.cmplog import CmplogRecords
 from fuzzer_tool.core.cost_ledger import cost_samples, seed_exec_us
 from fuzzer_tool.core.coverage_noise import (
     NOISE_PROBE_VARIANTS,
@@ -2033,6 +2034,7 @@ class Fuzzer:
         self._last_cmp_fired: dict[str, int] = {}
         self._last_cmp_asserted: dict[str, int] = {}
         self._cmplog_skip_counter = 0  # adaptive cmplog collection skip
+        self._cmplog_records_mode = CmplogRecords.ON  # shim record emission
         # Tri-state: None = auto-detect, True = forced on, False = forced off.
         # Auto-detect resolves here rather than at the direct_lite decision
         # further down, because that site only runs when self._cmplog is
@@ -6825,6 +6827,21 @@ class Fuzzer:
         except OSError as e:
             log.debug("__cmplog_reset failed: %s", e)
 
+    def _cmplog_records(self, mode: CmplogRecords) -> None:
+        """Switch the direct_lite shim's record emission; no-op on old builds."""
+        if mode is self._cmplog_records_mode:
+            return
+        runner = self._inprocess_runner
+        if not (runner and runner.direct_lite and runner._lib):
+            return
+        # getattr: name mangling, see _rewind_cmplog_shim.
+        pause = getattr(runner._lib, "__cmplog_pause", None)
+        if pause is None:
+            return
+
+        pause(mode.value)
+        self._cmplog_records_mode = mode
+
     def _add_dict_tokens(self, tokens: list[bytes]) -> None:
         """Append unseen cmplog tokens to the dictionary."""
         if not hasattr(self, "_dict_set"):
@@ -6850,6 +6867,7 @@ class Fuzzer:
         # Drained tokens are marked known by cmplog; the dictionary must get them.
         self._add_dict_tokens(cmplog.collect_tokens())
         self._rewind_cmplog_shim()
+        self._cmplog_records(CmplogRecords.ON)
         self._runner.run_target(data)
         self.exec_count += 1
         self._reset_cmplog()

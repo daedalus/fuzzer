@@ -132,6 +132,10 @@ def compute_delta_v2(parent: bytes, child: bytes) -> list[list] | None:
     """
     from fuzzer_tool.core.similarity import levenshtein_align
 
+    # Edit distance >= length gap: past the cutoff below, skip the O(n*m) align.
+    if parent and abs(len(parent) - len(child)) > len(child) // 2:
+        return None
+
     script = levenshtein_align(parent, child)
 
     # Count non-match ops

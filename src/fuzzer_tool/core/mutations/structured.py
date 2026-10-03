@@ -2375,24 +2375,44 @@ def gray_code(data: bytes, rng) -> bytes:
     return _splice(data, offset, bytes(restored))
 
 
+_LZ_WINDOW = 32768
+
+
 def _lz_tokenize(block: bytearray, min_match: int, max_match: int) -> list[tuple]:
-    """Greedy LZ77 parse into ("lit", byte) / ("ref", dist, len) tokens."""
+    """Greedy LZ77 parse into ("lit", byte) / ("ref", dist, len) tokens.
+
+    Candidates come from a hash chain on the first *min_match* bytes: a
+    position sharing fewer can only yield a literal, so skipping it leaves
+    the parse unchanged. Earliest longest match wins, as in a full scan.
+    """
     tokens: list[tuple] = []
+    chains: dict[bytes, list[int]] = {}
+    n = len(block)
+    data = bytes(block)
     i = 0
-    while i < len(block):
+    indexed = 0
+
+    while i < n:
+        # Index every position left of i, including those a ref jumped over.
+        while indexed < i:
+            chains.setdefault(data[indexed : indexed + min_match], []).append(indexed)
+            indexed += 1
+
         best_dist, best_len = 0, 0
-        search_start = max(0, i - 32768)
-        for j in range(search_start, i):
-            match_len = 0
-            while (
-                match_len < max_match
-                and i + match_len < len(block)
-                and block[j + match_len] == block[i + match_len]
-            ):
+        limit = min(max_match, n - i)
+        key = data[i : i + min_match]
+        chain = chains.get(key) if len(key) == min_match else None
+        for j in chain or ():
+            if j < i - _LZ_WINDOW:
+                continue
+            match_len = min_match
+            while match_len < limit and data[j + match_len] == data[i + match_len]:
                 match_len += 1
             if match_len > best_len:
-                best_dist = i - j
-                best_len = match_len
+                best_dist, best_len = i - j, match_len
+                if best_len == limit:
+                    break
+
         if best_len >= min_match:
             tokens.append(("ref", best_dist, best_len))
             i += best_len

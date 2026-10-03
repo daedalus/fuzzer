@@ -33,6 +33,7 @@ from itertools import repeat
 import numpy as np
 
 from fuzzer_tool.core.icfg import InterproceduralCFG
+from fuzzer_tool.core.np_sets import sorted_unique
 
 # Edge (s, d) packed as s << 32 | d: one int64 that sorts as the tuple did.
 _KEY_SHIFT = 32
@@ -274,7 +275,7 @@ def _contracted_edges(
 ) -> tuple[np.ndarray, np.ndarray]:
     """U -> U edges after deleting V: direct edges plus shortcuts, sorted."""
     direct = ~v_mask[src] & ~v_mask[dst] & (src != dst)
-    keys = np.unique(
+    keys = sorted_unique(
         np.concatenate([(src[direct] << _KEY_SHIFT) | dst[direct], _shortcuts(src, dst, v_mask)])
     )
     return keys >> _KEY_SHIFT, keys & _KEY_MASK

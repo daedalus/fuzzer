@@ -1200,6 +1200,21 @@ def _seed_meta_features(f, data: bytes) -> tuple[float, float]:
     return edge_frac, min(lineage_depth / 20.0, 1.0)
 
 
+def _fold_bits(edges: set, map_size: int) -> int:
+    """``OR`` of ``1 << (e % map_size)`` over *edges*, in one pass.
+
+    A per-edge ``|=`` reallocates the map-wide int each time: 42 ms per
+    call on ffmpeg's few-thousand-edge diffs.
+    """
+    if not edges:
+        return 0
+
+    ids = np.fromiter(edges, dtype=np.uint64, count=len(edges)) % np.uint64(map_size)
+    mask = np.zeros(map_size, dtype=bool)
+    mask[ids] = True
+    return int.from_bytes(np.packbits(mask, bitorder="little").tobytes(), "little")
+
+
 def _log_liveness(region_idx: int, diff_bits: int, diff_edges: set, map_size: int) -> None:
     """Append one (region, diff bits) row to $FUZZER_LIVENESS_LOG, if set.
 
@@ -5579,12 +5594,7 @@ class OperatorEngine:
         estimators = self._region_liveness.setdefault(key, [None] * len(bounds))
 
         diff_edges = baseline_edges ^ mutant_edges
-        if not diff_edges:
-            diff_bits = 0
-        else:
-            diff_bits = 0
-            for edge_id in diff_edges:
-                diff_bits |= 1 << (edge_id % map_size)
+        diff_bits = _fold_bits(diff_edges, map_size)
 
         _log_liveness(region_idx, diff_bits, diff_edges, map_size)
 
