@@ -33,6 +33,8 @@ def _runner(lib, direct_lite: bool = True) -> SimpleNamespace:
 
 
 def _rewind(f, collected: bool) -> None:
+    # The shim call lives on Fuzzer; bind it to the stand-in.
+    f._rewind_cmplog_shim = lambda: Fuzzer._rewind_cmplog_shim(f)
     rnd = FuzzRound(f, b"seed")
     rnd._collect_now = collected
     rnd._rewind_shim()

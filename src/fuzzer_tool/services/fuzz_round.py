@@ -6,6 +6,7 @@ round. Long-lived state stays on the Fuzzer (``self._f``).
 
     run()
      ├─ _begin           reset the Fuzzer's per-round fields
+ ├─ _search_fixpoint --i2s-fixpoint, seed's first round only
      ├─ _execute         mutate, timed target run, cmp counters
      ├─ _mine_cmplog     tokens, learners, dictionary cap, redqueen/SMT
      ├─ _periodic        RSS / EPS / crash-rate bookkeeping
@@ -156,6 +157,7 @@ class FuzzRound:
     def run(self) -> bool:
         """Run the round; True when the mutant crashed or was admitted."""
         self._begin()
+        self._search_fixpoint()
         self._execute()
         self._mine_cmplog()
         self._periodic()
@@ -181,6 +183,15 @@ class FuzzRound:
         return self._on_boring()
 
     # ── Setup and execution ──────────────────────────────────────────
+
+    def _search_fixpoint(self) -> None:
+        # --i2s-fixpoint: once per seed, on its first round (_begin counted
+        # it), so initial, admitted and resumed seeds all get one search.
+        # Before _execute: the search's runs must not overwrite this round's.
+        fixpoint = getattr(self._f, "_i2s_fixpoint", None)
+        if fixpoint is None or self._meta is None or self._meta["fuzz_count"] != 1:
+            return
+        fixpoint.search(self._data)
 
     def _begin(self) -> None:
         f = self._f
@@ -337,14 +348,7 @@ class FuzzRound:
             new_tokens = []
         self._cmplog_found = bool(new_tokens)
         self._rewind_shim()
-        if not hasattr(f, "_dict_set"):
-            f._dict_set = set(f.dictionary)
-            f._dict_eps_window = []
-            f._dict_last_prune = 0
-        for token in new_tokens:
-            if token and token not in f._dict_set:
-                f.dictionary.append(token)
-                f._dict_set.add(token)
+        f._add_dict_tokens(new_tokens)
 
     def _rewind_shim(self) -> None:
         # In direct_lite mode the compiled-in shim keeps the cmplog file
@@ -355,18 +359,8 @@ class FuzzRound:
         # create a sparse file and inflate RSS.
         # Only after a collect: the shim truncates, and on skipped rounds the
         # records are still waiting to be read.
-        runner = self._f._inprocess_runner
-        if not (self._collect_now and runner and runner.direct_lite and runner._lib):
-            return
-        # getattr, not `runner._lib.__cmplog_reset`: inside a class body that
-        # attribute is name-mangled to `_FuzzRound__cmplog_reset` and never resolves.
-        reset = getattr(runner._lib, "__cmplog_reset", None)
-        if reset is None:
-            return
-        try:
-            reset()
-        except OSError as e:
-            log.debug("__cmplog_reset failed: %s", e)
+        if self._collect_now:
+            self._f._rewind_cmplog_shim()
 
     def _feed_learners(self) -> None:
         f = self._f

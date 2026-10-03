@@ -158,6 +158,7 @@ from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.fuzz_round import FuzzRound
+from fuzzer_tool.services.i2s_fixpoint import I2SFixpoint
 from fuzzer_tool.services.maintenance import MaintenanceJob, MaintenanceQueue
 from fuzzer_tool.services.operators import _DELOCALISED_OPS, OperatorEngine, operator_strategy_pool
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, PositionArena
@@ -1211,6 +1212,8 @@ class Fuzzer:
         metropolis=False,
         crash_explore=False,
         uninit_probe=False,
+        i2s_fixpoint=False,
+        i2s_fixpoint_iters=8,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         mc_decay_interval=100,
@@ -3109,6 +3112,10 @@ class Fuzzer:
         self._crash_explorer = CrashExplorer() if crash_explore else None
         # --uninit-probe: re-run admitted inputs under two heap fills.
         self._uninit_probe = self._build_uninit_probe() if uninit_probe else None
+        # --i2s-fixpoint: iterate Redqueen on admitted inputs to self-consistency.
+        self._i2s_fixpoint = (
+            I2SFixpoint(self._i2s_probe, i2s_fixpoint_iters) if i2s_fixpoint else None
+        )
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:
@@ -6793,6 +6800,53 @@ class Fuzzer:
             cache.clear()
         cache[key] = taints
         return taints
+
+    def _rewind_cmplog_shim(self) -> None:
+        """Rewind the direct_lite shim's cmplog offset after a collect."""
+        runner = self._inprocess_runner
+        if not (runner and runner.direct_lite and runner._lib):
+            return
+        # getattr, not `runner._lib.__cmplog_reset`: inside a class body that
+        # attribute is name-mangled to `_Fuzzer__cmplog_reset` and never resolves.
+        reset = getattr(runner._lib, "__cmplog_reset", None)
+        if reset is None:
+            return
+        try:
+            reset()
+        except OSError as e:
+            log.debug("__cmplog_reset failed: %s", e)
+
+    def _add_dict_tokens(self, tokens: list[bytes]) -> None:
+        """Append unseen cmplog tokens to the dictionary."""
+        if not hasattr(self, "_dict_set"):
+            self._dict_set = set(self.dictionary)
+            self._dict_eps_window = []
+            self._dict_last_prune = 0
+        for token in tokens:
+            if token and token not in self._dict_set:
+                self.dictionary.append(token)
+                self._dict_set.add(token)
+
+    def _i2s_probe(self, data: bytes) -> list[tuple[bytes, bytes]] | None:
+        """Compare pairs from one cmplog run of *data*; None without cmplog.
+
+        Drains first so records from earlier runs are not attributed to
+        *data*. FIFO sink caveat: records the drain thread has not yet read
+        land in the next drain, so a probe can come back short.
+        """
+        cmplog = self._cmplog
+        if cmplog is None:
+            return None
+
+        # Drained tokens are marked known by cmplog; the dictionary must get them.
+        self._add_dict_tokens(cmplog.collect_tokens())
+        self._rewind_cmplog_shim()
+        self._runner.run_target(data)
+        self.exec_count += 1
+        self._reset_cmplog()
+        self._add_dict_tokens(cmplog.collect_tokens())
+        self._rewind_cmplog_shim()
+        return list(cmplog.last_pairs)
 
     def _maybe_collect_weizz_tags(self, data: bytes) -> None:
         """Passive Weizz structure-tag collection for one coverage-gaining seed.

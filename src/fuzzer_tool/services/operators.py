@@ -6214,6 +6214,13 @@ class OperatorEngine:
             self._reset_round_ops(data, format_seed)
             return format_seed
 
+        # --i2s-fixpoint candidates (FuzzRound._search_fixpoint): same path.
+        fixpoint = getattr(f, "_i2s_fixpoint", None)
+        candidate = fixpoint.pop() if fixpoint is not None else None
+        if candidate is not None:
+            self._reset_round_ops(data, candidate)
+            return candidate
+
         buf = bytearray(data)
         if not buf:
             buf = bytearray(b"\x00" * self.ctx._rng.randint_list(1, 32, 1)[0])

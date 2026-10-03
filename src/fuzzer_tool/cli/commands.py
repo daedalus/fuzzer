@@ -550,6 +550,8 @@ def cmd_fuzz(args):
         metropolis=getattr(args, "metropolis", False),
         crash_explore=getattr(args, "crash_explore", False),
         uninit_probe=getattr(args, "uninit_probe", False),
+        i2s_fixpoint=getattr(args, "i2s_fixpoint", False),
+        i2s_fixpoint_iters=getattr(args, "i2s_fixpoint_iters", 8),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
@@ -2202,6 +2204,7 @@ _HAIL_MARY_FLAGS = (
     "intel_pt",
     "lbr",
     "colorize",
+    "i2s_fixpoint",
     "weizz_tags",
     "formatfuzzer",
     "op_span_reverse",
@@ -4395,6 +4398,23 @@ def main() -> int:
         "malloc_fill_byte + glibc MALLOC_PERTURB_); output that differs is an "
         "uninitialized-memory leak, saved as crashes/uninit_<hash>. 3 extra execs "
         "per admission; executables only.",
+    )
+    fuzz_parser.add_argument(
+        "--i2s-fixpoint",
+        action="store_true",
+        default=False,
+        help="Iterate input-to-state patching on each new corpus entry until the "
+        "input is self-consistent (fixed point) or cycles; queue the fixed point "
+        "or every cycle member. Solves chained/self-covering checksum and length "
+        "fields one Redqueen patch cannot. Up to --i2s-fixpoint-iters execs per "
+        "admission; needs cmplog.",
+    )
+    fuzz_parser.add_argument(
+        "--i2s-fixpoint-iters",
+        type=int,
+        default=8,
+        metavar="N",
+        help="Probe budget per --i2s-fixpoint search (default: 8).",
     )
     fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"
