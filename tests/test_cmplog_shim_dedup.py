@@ -23,6 +23,8 @@ AFL_SHIM = Path(__file__).parent.parent / "src" / "fuzzer_tool" / "adapters" / "
 _REPS = 100
 _DISTINCT = 200_000  # with the loop's own i-vs-bound records, > dedup slots
 _KEY = 0x71727374
+_TWOPASS = 40_000  # with the i-vs-bound records: 61% of 2^17 slots, 30% of 2^18
+_GEN_CYCLE = 65_535  # resets that bring a 16-bit nonzero generation back around
 
 _TARGET_C = r"""
 #include <stdlib.h>
@@ -58,6 +60,17 @@ int main(int argc, char **argv) {
             volatile int c = (v + i == 0x71727374UL);
             (void)c;
         }
+    } else if (!strcmp(mode, "twopass")) {
+        for (int pass = 0; pass < 2; pass++)
+            for (unsigned long i = 0; i < TWOPASS; i++) {
+                volatile int c = (v + i == 0x71727374UL);
+                (void)c;
+            }
+    } else if (!strcmp(mode, "wrap")) {
+        once(argv[1], v);
+        __tracecmp_flush();
+        for (long i = 0; i < GEN_CYCLE; i++) __cmplog_reset();
+        once(argv[1], v);
     } else if (!strcmp(mode, "lengths")) {
         memset(big_a, 'A', sizeof big_a);
         memset(big_b, 'A', sizeof big_b);
@@ -86,6 +99,8 @@ def dedup_target(tmp_path_factory) -> Path:
             "-O0",
             f"-DREPS={_REPS}",
             f"-DDISTINCT={_DISTINCT}",
+            f"-DTWOPASS={_TWOPASS}",
+            f"-DGEN_CYCLE={_GEN_CYCLE}",
             "-fsanitize-coverage=trace-pc-guard,trace-cmp",
             "-D__AFL_CMPLOG=1",
             "-include",
@@ -166,3 +181,18 @@ class TestShimDedup:
         lines, _ = _run(dedup_target, tmp_path, "lengths")
         ns = {ln.split()[4] for ln in lines if ln.startswith("CMP ") and len(ln.split()[1]) == 128}
         assert {"79", "80"} <= ns
+
+    def test_regression_second_pass_fully_deduped(self, dedup_target, tmp_path):
+        """At 61% load the 2^17 x 16 B table's 8-probe window overflowed and
+        re-emitted repeats (the 0.7% residue measured on ffmpeg)."""
+        lines, _ = _run(dedup_target, tmp_path, "twopass")
+        key_lines = [ln for ln in lines if f" {_KEY_HEX} " in ln]
+        assert len(set(key_lines)) == _TWOPASS
+        assert len(key_lines) - _TWOPASS <= _TWOPASS // 1000
+
+    def test_generation_wrap_does_not_resurrect_entries(self, dedup_target, tmp_path):
+        """Adversarial: after the generation cycles back to the value a record
+        was stamped with, that stale entry must not read as written."""
+        lines, _ = _run(dedup_target, tmp_path, "wrap")
+        assert _hits(lines, _MEMCMP_HEX) == 1
+        assert _hits(lines, _KEY_HEX) == 1

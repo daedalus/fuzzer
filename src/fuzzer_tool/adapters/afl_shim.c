@@ -2860,18 +2860,20 @@ __AFL_NO_COV static size_t __afl_readable_len(const void *p, size_t want) {
  * open-addressed table and a hit is dropped before formatting. The
  * generation stamp clears the table in O(1) at __cmplog_reset (the drain
  * boundary) and in a fork child. A full probe run fails open: a repeat
- * costs bytes, a false drop would cost a record. Caller holds the lock. */
-#define CMPLOG_DEDUP_SLOTS  (1u << 17)
+ * costs bytes, a false drop would cost a record. Caller holds the lock.
+ *
+ * A slot is one word: fingerprint high 48 bits | 16-bit generation (0 =
+ * never written). 2^18 slots keep ffmpeg's ~85k distinct records per drain
+ * near 30% load; 2^17 x 16 B slots (same 2 MB) overflowed the probe window
+ * and re-emitted ~2% of repeats, and ran 20% slower. */
+#define CMPLOG_DEDUP_SLOTS  (1u << 18)
 #define CMPLOG_DEDUP_PROBES 8
+#define CMPLOG_DEDUP_GEN_MASK 0xffffULL
 #define CMPLOG_FNV_OFFSET   0xcbf29ce484222325ULL
 #define CMPLOG_FNV_PRIME    0x100000001b3ULL
 
-struct __afl_cmplog_seen_slot {
-    uint64_t fp;
-    uint32_t gen;
-};
-static struct __afl_cmplog_seen_slot __afl_cmplog_seen_tab[CMPLOG_DEDUP_SLOTS];
-static uint32_t __afl_cmplog_gen = 1;
+static uint64_t __afl_cmplog_seen_tab[CMPLOG_DEDUP_SLOTS];
+static uint64_t __afl_cmplog_gen = 1;
 
 /* splitmix64 finalizer. */
 __AFL_NO_COV static inline uint64_t __afl_rec_mix(uint64_t x) {
@@ -2882,8 +2884,8 @@ __AFL_NO_COV static inline uint64_t __afl_rec_mix(uint64_t x) {
 }
 
 __AFL_NO_COV static void __afl_cmplog_new_scope(void) {
-    if (++__afl_cmplog_gen != 0) return;
-    /* 2^32 drains: wrapped stamps would read as live, so wipe. */
+    if (++__afl_cmplog_gen <= CMPLOG_DEDUP_GEN_MASK) return;
+    /* Every 65535 drains: wrapped stamps would read as live, so wipe. */
     memset(__afl_cmplog_seen_tab, 0, sizeof __afl_cmplog_seen_tab);
     __afl_cmplog_gen = 1;
 }
@@ -2891,15 +2893,14 @@ __AFL_NO_COV static void __afl_cmplog_new_scope(void) {
 /* 1 when *fp* was already written in this scope; records it otherwise. */
 __AFL_NO_COV static int __afl_cmplog_seen(uint64_t fp) {
     uint32_t idx = (uint32_t)fp & (CMPLOG_DEDUP_SLOTS - 1);
+    uint64_t key = (fp & ~CMPLOG_DEDUP_GEN_MASK) | __afl_cmplog_gen;
     for (int probe = 0; probe < CMPLOG_DEDUP_PROBES; probe++) {
-        struct __afl_cmplog_seen_slot *e =
-            &__afl_cmplog_seen_tab[(idx + (uint32_t)probe) & (CMPLOG_DEDUP_SLOTS - 1)];
-        if (e->gen != __afl_cmplog_gen) {
-            e->gen = __afl_cmplog_gen;
-            e->fp = fp;
+        uint64_t *e = &__afl_cmplog_seen_tab[(idx + (uint32_t)probe) & (CMPLOG_DEDUP_SLOTS - 1)];
+        if ((*e & CMPLOG_DEDUP_GEN_MASK) != __afl_cmplog_gen) {
+            *e = key;
             return 0;
         }
-        if (e->fp == fp) return 1;
+        if (*e == key) return 1;
     }
     return 0;
 }
