@@ -12,7 +12,7 @@ vectorized version must drop exactly the same arms in the same order.
 from __future__ import annotations
 
 import math
-import time
+import sys
 
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.op_las_vegas import LasVegasScheduler
@@ -81,23 +81,43 @@ def test_regression_lv_growth_past_capacity():
         assert got._eliminated == ref._eliminated
 
 
+def _loaded(cls: type[LasVegasScheduler], n_arms: int) -> LasVegasScheduler:
+    """Every arm eligible, equal means: _eliminate() scans all, drops none."""
+    sched = cls()
+    for i in range(n_arms):
+        for _ in range(sched.min_pulls):
+            sched.record(f"op{i}", False)
+    return sched
+
+
+def _py_calls(sched: LasVegasScheduler) -> int:
+    """Python-level calls made by one _eliminate(); C calls are not counted."""
+    calls = 0
+
+    def _count(_frame, event, _arg):
+        nonlocal calls
+        calls += event == "call"
+
+    sys.setprofile(_count)
+    try:
+        sched._eliminate()
+    finally:
+        sys.setprofile(None)
+    return calls
+
+
+def test_regression_lv_eliminate_cost_control():
+    """Control: the scalar oracle's Python call count grows with arm count."""
+    assert _py_calls(_loaded(_ScalarOracle, 400)) > _py_calls(_loaded(_ScalarOracle, 40))
+
+
 def test_regression_lv_eliminate_cost():
-    """record() must not pay a Python loop per arm. Measured ~20x; assert 3x."""
-    ref = _ScalarOracle()
-    got = LasVegasScheduler()
-    ops = [f"op{i}" for i in range(400)]
-    for sched in (ref, got):
-        for op in ops:
-            for _ in range(sched.min_pulls):
-                sched.record(op, False)
+    """record() must not pay a Python call per arm: cost independent of K.
 
-    def _cost(sched: LasVegasScheduler) -> float:
-        t0 = time.perf_counter()
-        for _ in range(300):
-            sched._eliminate()
-        return time.perf_counter() - t0
-
-    assert _cost(got) * 3 < _cost(ref)
+    Counts calls instead of timing them, so CI load cannot flake it.
+    """
+    small = _py_calls(_loaded(LasVegasScheduler, 40))
+    assert _py_calls(_loaded(LasVegasScheduler, 400)) == small
 
 
 def test_regression_lv_growth_via_select():
