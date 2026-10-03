@@ -448,6 +448,15 @@ signal is discarded. Candidate replacements:
   1.7-3.4 bits, `core/analyzers/analyzer_transfer_entropy.py`), so use a
   permutation-null z-score as `seed_entropy_kl` does, not an analytic term.
 
+**Status 2026-10-03: pure scorer shipped** as `core/mutual_info.py`
+(plug-in MI, permutation-null z-score, per-edge presence MI, Blahut-Arimoto).
+Verified against BSC and Z-channel closed forms and a planted-edge ranking
+(`tests/test_information_theory_scorers.py`). Finding: the capacity-achieving
+operator mix favours the most *distinguishable* operator (e.g. a never-hits
+one), so it is an upper bound on what operator choice can reveal, not a
+scheduler weight. Not done: the F14/F15 stable-id tensor feed, null
+calibration on a real clang build, any wiring or A/B.
+
 ### 7.3 Conditional entropy of coverage given input structure
 
 `H(edges | tag/prefix)` separates input regions that fully determine the path
@@ -455,11 +464,20 @@ signal is discarded. Candidate replacements:
 where novel edges are likely. Natural pairing with `--weizz-tags` and the
 format-aware Adler patcher: spend no energy on determined regions.
 
+**Status 2026-10-03: pure scorer shipped** as `core/cond_entropy.py`
+(Miller-Madow `H(path|context)`, per-context determined/open/undetermined,
+energy weights, prefix context). Sparse contexts are `undetermined`, never
+`determined`. Not done: feeding it `--weizz-tags` / the Adler patcher, wiring, A/B.
+
 ### 7.4 Compression-based novelty on path traces
 
 Edge sets are order-blind. NCD or LZ complexity of the edge *sequence* detects
 a novel ordering with no new edge. Cheap proxy for behavioral novelty the map
 cannot see; candidate admission signal next to `--pool-drift`.
+
+**Status 2026-10-03: pure scorer shipped** as `core/path_novelty.py`
+(LZ76, NCD, `PathNovelty.order_novelty` = same edge set, new ordering).
+Not done: trace capture from the shim, admission wiring next to `--pool-drift`, A/B.
 
 ### 7.5 Saturation model choice
 
