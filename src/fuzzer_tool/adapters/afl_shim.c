@@ -2852,6 +2852,68 @@ __AFL_NO_COV static size_t __afl_readable_len(const void *p, size_t want) {
     return want;
 }
 
+/* ── Per-drain record dedup ───────────────────────────────────────────
+ * 79% of ffmpeg's records repeat one already written since the last drain
+ * (format probes and av_opt_set_defaults2 in loops); the collector dedups
+ * each drain anyway, so a repeat only costs formatting, write(2) and room
+ * under the 10k-line read cap. Each record's fingerprint goes into an
+ * open-addressed table and a hit is dropped before formatting. The
+ * generation stamp clears the table in O(1) at __cmplog_reset (the drain
+ * boundary) and in a fork child. A full probe run fails open: a repeat
+ * costs bytes, a false drop would cost a record. Caller holds the lock. */
+#define CMPLOG_DEDUP_SLOTS  (1u << 17)
+#define CMPLOG_DEDUP_PROBES 8
+#define CMPLOG_FNV_OFFSET   0xcbf29ce484222325ULL
+#define CMPLOG_FNV_PRIME    0x100000001b3ULL
+
+struct __afl_cmplog_seen_slot {
+    uint64_t fp;
+    uint32_t gen;
+};
+static struct __afl_cmplog_seen_slot __afl_cmplog_seen_tab[CMPLOG_DEDUP_SLOTS];
+static uint32_t __afl_cmplog_gen = 1;
+
+/* splitmix64 finalizer. */
+__AFL_NO_COV static inline uint64_t __afl_rec_mix(uint64_t x) {
+    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
+    x ^= x >> 31;
+    return x;
+}
+
+__AFL_NO_COV static void __afl_cmplog_new_scope(void) {
+    if (++__afl_cmplog_gen != 0) return;
+    /* 2^32 drains: wrapped stamps would read as live, so wipe. */
+    memset(__afl_cmplog_seen_tab, 0, sizeof __afl_cmplog_seen_tab);
+    __afl_cmplog_gen = 1;
+}
+
+/* 1 when *fp* was already written in this scope; records it otherwise. */
+__AFL_NO_COV static int __afl_cmplog_seen(uint64_t fp) {
+    uint32_t idx = (uint32_t)fp & (CMPLOG_DEDUP_SLOTS - 1);
+    for (int probe = 0; probe < CMPLOG_DEDUP_PROBES; probe++) {
+        struct __afl_cmplog_seen_slot *e =
+            &__afl_cmplog_seen_tab[(idx + (uint32_t)probe) & (CMPLOG_DEDUP_SLOTS - 1)];
+        if (e->gen != __afl_cmplog_gen) {
+            e->gen = __afl_cmplog_gen;
+            e->fp = fp;
+            return 0;
+        }
+        if (e->fp == fp) return 1;
+    }
+    return 0;
+}
+
+/* Fingerprint of a layer-1 record: every field its line prints. */
+__AFL_NO_COV static uint64_t __afl_bytes_fp(const unsigned char *a, const unsigned char *b,
+                                            size_t k, size_t n, int result) {
+    uint64_t h = CMPLOG_FNV_OFFSET;
+    for (size_t i = 0; i < k; i++) h = (h ^ a[i]) * CMPLOG_FNV_PRIME;
+    for (size_t i = 0; i < k; i++) h = (h ^ b[i]) * CMPLOG_FNV_PRIME;
+    h = __afl_rec_mix(h ^ (uint64_t)n);
+    return __afl_rec_mix(h ^ (uint64_t)(int64_t)result ^ ((uint64_t)k << 56));
+}
+
 /* ── Layer 1 record: two byte buffers ─────────────────────────────────
  * result == 0 is dropped: an already-satisfied comparison is exactly the
  * "looks unsolved but is solved" pollution the pair pool must not carry. */
@@ -2863,7 +2925,12 @@ __AFL_NO_COV static void __afl_cmplog_bytes(const void *a, const void *b, size_t
     size_t ka = __afl_readable_len(a, k), kb = __afl_readable_len(b, k);
     k = ka < kb ? ka : kb;
     if (k == 0) return;
+    uint64_t fp = __afl_bytes_fp((const unsigned char *)a, (const unsigned char *)b, k, n, result);
     if (!__afl_cmplog_acquire()) return;
+    if (__afl_cmplog_seen(fp)) {
+        __afl_cmplog_release();
+        return;
+    }
     if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
         __afl_cmplog_flush_locked();
     char *p = __afl_cmplog_buf + __afl_cmplog_pos;
@@ -2891,6 +2958,12 @@ __AFL_NO_COV static inline void __afl_cmplog_ints(uint64_t a, uint64_t b, size_t
      * its own trace-cmp callbacks, finds the lock held, and returns
      * instead of recursing until the stack is gone. */
     if (!__afl_cmplog_acquire()) return;
+    /* a and b fix the printed sign field; 'I' keeps it apart from operands. */
+    uint64_t fp = __afl_rec_mix(__afl_rec_mix(a ^ 'I') ^ b);
+    if (__afl_cmplog_seen(__afl_rec_mix(fp ^ ((uint64_t)n << 56) ^ (uint64_t)(uintptr_t)pc))) {
+        __afl_cmplog_release();
+        return;
+    }
     if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
         __afl_cmplog_flush_locked();
     unsigned char ab[8], bb[8];
@@ -3566,6 +3639,11 @@ __AFL_NO_COV static inline void __afl_cmplog_operand(const char *kind, uint64_t 
                                                      size_t n, void *pc) {
     if (__afl_cmplog_fd < 0 || __afl_cmplog_paused || v < CMPLOG_OPERAND_MIN) return;
     if (!__afl_cmplog_acquire()) return;
+    uint64_t fp = __afl_rec_mix(v ^ (uint64_t)(unsigned char)kind[0]);
+    if (__afl_cmplog_seen(__afl_rec_mix(fp ^ ((uint64_t)n << 56) ^ (uint64_t)(uintptr_t)pc))) {
+        __afl_cmplog_release();
+        return;
+    }
 
     if (__afl_cmplog_pos + CMPLOG_MAX_RECORD > CMPLOG_BUFFER_SIZE)
         __afl_cmplog_flush_locked();
@@ -3621,6 +3699,7 @@ __AFL_NO_COV static void __afl_cmplog_atfork_child(void) {
     __afl_cmplog_held = 0;
     __atomic_store_n(&__afl_cmplog_lock, 0, __ATOMIC_RELEASE);
     __afl_cmp_counts_zero();
+    __afl_cmplog_new_scope();
 }
 
 /* ── Lifecycle ────────────────────────────────────────────────────────
@@ -3687,6 +3766,7 @@ __AFL_NO_COV static void __afl_cmplog_fini(void) {
 __AFL_NO_COV __attribute__((visibility("default")))
 void __cmplog_reset(void) {
     __afl_cmplog_flush();
+    __afl_cmplog_new_scope();
     /* The per-iteration sync point in direct_lite/persistent modes. Dumping
      * here (not from __afl_cmplog_flush, which also runs on buffer-full in
      * the hot path) keeps the counts channel off the fast path. */
