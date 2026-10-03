@@ -137,6 +137,9 @@ _EXCLUDED_OPT_IN = frozenset(
         # docs/learnings/ once that run lands -- so there is no result to
         # cite the way shaped_reward's exclusion can.
         "continuum_reward",
+        # Mode switch (AFL -C), not a strategy: zeroes has_new_coverage on
+        # every non-crashing round, so nothing is ever admitted.
+        "crash_explore",
     }
 )
 
@@ -296,3 +299,38 @@ class TestHailMaryWiresEveryOptInGate:
         # hand.
         assert args.ga is True
         assert args.qea is True
+
+
+def _hail_mary_args(monkeypatch, *extra: str):
+    """Parse ``fuzz /bin/true --hail-mary *extra`` through the real CLI."""
+    captured: dict[str, object] = {}
+
+    def _spy(args):
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(commands, "cmd_fuzz", _spy)
+    argv = ["fuzzer-tool", "fuzz", "/bin/true", "--hail-mary", *extra]
+    monkeypatch.setattr(sys, "argv", argv)
+    assert commands.main() == 0
+    return captured["args"]
+
+
+def test_regression_hail_mary_keeps_crash_explore_off(monkeypatch):
+    """--hail-mary must not switch on crash exploration.
+
+    Crash exploration (AFL -C) zeroes has_new_coverage on every round, so a
+    --hail-mary campaign admitted nothing: corpus stuck at the seed count,
+    EdgeTracker frozen ("shm: 7879 max: 23 sat: 100%").
+    """
+    args = _hail_mary_args(monkeypatch)
+
+    assert args.crash_explore is False
+    assert "crash_explore" in _EXCLUDED_OPT_IN
+
+
+def test_regression_hail_mary_explicit_crash_explore(monkeypatch):
+    """Adversarial: an explicit --crash-explore still wins under --hail-mary."""
+    args = _hail_mary_args(monkeypatch, "--crash-explore")
+
+    assert args.crash_explore is True

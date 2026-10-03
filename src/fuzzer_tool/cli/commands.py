@@ -2049,9 +2049,13 @@ def cmd_sweep(args):
 # other operator gate (wfc, weizz_tags, formatfuzzer) was in it -- three
 # omissions of the kind this list exists to prevent, caught by
 # tests/test_regression_hail_mary_gates.py.
+#
+# crash_explore (--crash-explore) is excluded: a mode switch (AFL -C), not a
+# strategy. It zeroes has_new_coverage on every non-crashing round, so under
+# --hail-mary nothing was admitted and the EdgeTracker froze.
+#
 _HAIL_MARY_FLAGS = (
     "continue_until_crash",
-    "crash_explore",
     "isolate_crash_fields",
     "deep_coverage",
     "ptrace",
