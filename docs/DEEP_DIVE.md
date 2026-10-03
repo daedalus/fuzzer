@@ -825,9 +825,17 @@ before each run and reads it after, exactly as in `direct_lite` mode. The child'
 **stderr** does travel (`RC <rc> <err_len>\n<err>`), because ASAN exits 1 and
 `SanitizerReport.parse(stderr)` is the only crash signal `is_crash()` has there.
 
-Enabled only for the set `run_target_fast` already handled. In-process, persistent,
-network, ptrace, cmplog, perf-counter, `file_mode`, `target_args` and multi-target
-runs are untouched — each either owns the child itself or needs per-execution setup a
+Enabled only for the set `run_target_fast` already handled, plus cmplog on the FIFO
+sink (the default; the CLI always turns cmplog on, so before this every CLI run was
+off the forkserver). Its env is run-invariant and the shim zeroes its counters before
+forking; per-exec vectors match the spawn path (`tests/test_regression_cmplog_forkserver.py`).
+Paired A/B vs `--no-forkserver` (clang ASAN fuzzgoat, 10 seeds x 90 s, arms concurrent,
+launch order alternated; edges past seed calibration): **10W/0L**, sign test p=0.002,
+median +53 edges, execs 2.30x (81-96 vs 34-43 eps). A/A control (6 seeds): 2W/4L,
+p=0.69, edge spread +/-43. An executable with cmplog compiled in no longer gets the
+shim preloaded (`Preload.NONE`): both copies counted, so one `memcmp` read as two.
+In-process, persistent, network, ptrace, cmplog on the file sink (truncates per run),
+perf-counter, `file_mode`, `target_args` and multi-target runs are untouched — each either owns the child itself or needs per-execution setup a
 fixed environment cannot express. A target built against an older shim fails the
 handshake and the loader silently falls back to fork+exec, so **targets must be
 rebuilt** (`tools/build_targets.sh`) to see any of the above.

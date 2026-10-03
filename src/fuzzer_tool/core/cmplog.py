@@ -24,6 +24,7 @@ machinery at all, so it cannot preempt an instrumented target's
 """
 
 import contextlib
+import enum
 import errno
 import hashlib
 import logging
@@ -317,6 +318,18 @@ class _FifoDrain:
             os.unlink(self.path)
 
 
+class Preload(enum.Enum):
+    """Whether child processes get the cmplog shim on LD_PRELOAD.
+
+    NONE for an executable with the shim compiled in: its interceptors
+    forward through dlsym(RTLD_NEXT) into a preloaded copy, and both copies
+    count, so one memcmp reads as two.
+    """
+
+    SHIM = "shim"
+    NONE = "none"
+
+
 class CmplogCollector:
     """Collect and process comparison tracing data from the cmplog shim.
 
@@ -336,6 +349,7 @@ class CmplogCollector:
             map -- so setting it changes what the target's coverage looks
             like without adding anything to drain() output. See the
             "COMPCOV" comment in afl_shim.c ahead of __afl_compcov_mark().
+        preload: Preload.NONE keeps the shim off LD_PRELOAD (see Preload).
     """
 
     def __init__(
@@ -348,8 +362,10 @@ class CmplogCollector:
         fifo_max_buffered: int | None = None,
         debug: bool = False,
         compcov_level: int = 0,
+        preload: Preload = Preload.SHIM,
     ):
         self.log_path: str | None = None
+        self.preload = preload
         # --cmplog-fifo-sink: _CMPLOG_OUT is a FIFO drained continuously by
         # a background thread (_FifoDrain) instead of a regular file read
         # with seek/truncate. See _FifoDrain's docstring for why.
@@ -638,7 +654,7 @@ class CmplogCollector:
             env["__AFL_COMPCOV_LEVEL"] = str(self.compcov_level)
 
         # Prepend the unified shim to LD_PRELOAD
-        if self._shim_path:
+        if self._shim_path and self.preload is Preload.SHIM:
             existing = env.get("LD_PRELOAD", "")
             env["LD_PRELOAD"] = f"{self._shim_path}:{existing}" if existing else self._shim_path
             env["ASAN_OPTIONS"] = _asan_link_order_off(env.get("ASAN_OPTIONS"))
@@ -694,7 +710,7 @@ class CmplogCollector:
         if self.compcov_level:
             os.environ["__AFL_COMPCOV_LEVEL"] = str(self.compcov_level)
 
-        if not self._shim_path:
+        if not self._shim_path or self.preload is Preload.NONE:
             return
 
         # Shim may already be preloaded by the caller; the option still applies.

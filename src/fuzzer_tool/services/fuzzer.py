@@ -2052,6 +2052,7 @@ class Fuzzer:
         # cmplog=False is accepted for programmatic callers that need it off.
         if cmplog:
             has_cmplog = _detect_cmplog(self.target)
+            is_lib = self.target.lower().endswith((".so", ".dylib", ".dll"))
             if has_cmplog:
                 print("[*] Cmplog: target is instrumented, enabling comparison tracing")
             else:
@@ -2059,7 +2060,7 @@ class Fuzzer:
                     "[!] Cmplog: target does not appear to be instrumented; "
                     "shim compilation will be attempted"
                 )
-            from fuzzer_tool.core.cmplog import CmplogCollector
+            from fuzzer_tool.core.cmplog import CmplogCollector, Preload
 
             # The FIFO is drained by a background thread, so which records a
             # collect sees depends on thread timing. The file sink is read
@@ -2080,6 +2081,9 @@ class Fuzzer:
                 # (P0-3).  The shim cost is one hash probe per comparison.
                 site_counts=True,
                 compcov_level=self._compcov_level,
+                # An executable with the shim compiled in already intercepts
+                # libc; a preloaded copy would count every call twice.
+                preload=Preload.NONE if has_cmplog and not is_lib else Preload.SHIM,
             )
             if self._cmplog.start():
                 from fuzzer_tool.core.elf import detect_cmplog_functions
@@ -4532,8 +4536,10 @@ class Fuzzer:
         Only claims the exact set of runs `run_target_fast` handles today:
         every other mode either owns the child itself (in-process,
         persistent, network, ptrace) or needs per-execution setup the
-        loader's environment is fixed against (cmplog truncates its log per
-        run; perf counters must be opened on the child pid we never see;
+        loader's environment is fixed against (cmplog's file sink truncates
+        its log per run; the FIFO sink is run-invariant, and the shim zeroes
+        its counters before forking; perf counters must be opened on the
+        child pid we never see;
         file_mode/target_args build their own argv; multi-target needs more
         than one binary).
         """
@@ -4545,7 +4551,7 @@ class Fuzzer:
             or self.multi_targets
             or self.file_mode
             or self.target_args
-            or self._cmplog
+            or (self._cmplog and not self._cmplog.fifo_sink)
             or self._perf_counters
             or self._pt_session
             or self._lbr_session
@@ -4559,6 +4565,12 @@ class Fuzzer:
             env["AFL_MAP_SIZE"] = str(self.map_size)
         if self.shm_cov:
             env["__AFL_SHM_ID"] = self.shm_cov.env_id
+
+        # Cmplog paths + shim preload go to the loader only. setup_env_for_run
+        # would put the shim on os.environ, and every tool spawned before the
+        # first exec (nm, clang) would then dump counts as the target's.
+        if self._cmplog:
+            env = self._cmplog.setup_env({**os.environ, **env})
 
         runner = ForkserverRunner(self.target, timeout=self.timeout, env=env)
         if runner.start():
