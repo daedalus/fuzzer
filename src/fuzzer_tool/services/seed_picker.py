@@ -394,6 +394,11 @@ class SeedPicker:
         entropic = getattr(f, "_entropic_seed", None)
         if entropic is not None and f.corpus and entropic.rare_count:
             available.append("entropic")
+        # Listed once ready: before MIN_OBSERVATIONS executions the global
+        # rate is noise and the arm declines every pick, a phantom opponent.
+        good_turing = getattr(f, "_good_turing_seed", None)
+        if good_turing is not None and f.corpus and good_turing.ready:
+            available.append("good_turing")
         if getattr(f, "_entropy_loo", None) is not None and f.corpus:
             available.append("entropy_loo")
         # Unlike its siblings, this arm warms up passively (it observes every
@@ -466,6 +471,7 @@ class SeedPicker:
             "entropy_zscore": lambda: self._pick_entropy_zscore_seed(),
             "entropy_deviation": lambda: self._pick_entropy_deviation_seed(),
             "entropic": lambda: self._pick_entropic_seed(),
+            "good_turing": lambda: self._pick_good_turing_seed(),
             "entropy_gradient": lambda: self._pick_entropy_gradient_seed(),
             "entropy_loo": lambda: self._pick_entropy_loo_seed(),
             "residual": lambda: self._pick_residual_seed(),
@@ -688,6 +694,18 @@ class SeedPicker:
         """
         f = self.f
         strategy = getattr(f, "_entropic_seed", None)
+        if strategy is None or not f.corpus:
+            return None
+        return strategy.select(f.corpus)
+
+    def _pick_good_turing_seed(self) -> bytes | None:
+        """Good-Turing arm: weight by each seed's shrunk missing mass.
+
+        None on an empty corpus or until the campaign has MIN_OBSERVATIONS
+        executions (see core/schedulers/seed_good_turing.py).
+        """
+        f = self.f
+        strategy = getattr(f, "_good_turing_seed", None)
         if strategy is None or not f.corpus:
             return None
         return strategy.select(f.corpus)
@@ -991,6 +1009,7 @@ class SeedPicker:
             self._pick_entropy_zscore_seed,
             self._pick_entropy_deviation_seed,
             self._pick_entropic_seed,
+            self._pick_good_turing_seed,
             self._pick_entropy_gradient_seed,
             self._pick_entropy_loo_seed,
             self._pick_residual_seed,

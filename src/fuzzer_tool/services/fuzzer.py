@@ -244,6 +244,7 @@ _SEED_STRATEGY_NAMES = (
     "entropy_gradient",
     "entropy_loo",
     "entropic",
+    "good_turing",
     "residual",
     "strata",
     "round_robin",
@@ -1550,6 +1551,9 @@ class Fuzzer:
         entropy_loo=False,
         # libFuzzer -entropic seed arm (core/schedulers/seed_entropic.py).
         entropic_seed=False,
+        # Good-Turing discovery-probability seed arm (core/schedulers/seed_good_turing.py).
+        good_turing_seed=False,
+        good_turing_prior=20.0,
         seed_residual=False,
         strata=False,
         pool_drift=False,
@@ -2803,6 +2807,14 @@ class Fuzzer:
             from fuzzer_tool.core.schedulers.seed_entropic import EntropicSeedStrategy
 
             self._entropic_seed = EntropicSeedStrategy(self._rng)
+        # Good-Turing: pick seeds by the missing mass of their own mutants.
+        self._good_turing_seed = None
+        if good_turing_seed:
+            from fuzzer_tool.core.schedulers.seed_good_turing import GoodTuringSeedStrategy
+
+            self._good_turing_seed = GoodTuringSeedStrategy(
+                self._rng, prior_strength=good_turing_prior
+            )
         # Leave-one-out pooled-entropy arm (entropy §5, first step)
         self._entropy_loo = None
         if entropy_loo:
@@ -7951,6 +7963,8 @@ class Fuzzer:
             seeds.append("entropy-deviation")
         if getattr(self, "_entropic_seed", None) is not None:
             seeds.append("entropic")
+        if getattr(self, "_good_turing_seed", None) is not None:
+            seeds.append("good-turing")
         if getattr(self, "_entropy_gradient", None) is not None:
             seeds.append("entropy-gradient")
         if getattr(self, "_entropy_loo", None) is not None:
@@ -8492,6 +8506,8 @@ class Fuzzer:
             groups["Seed selection"].append("entropy-deviation")
         if getattr(self, "_entropic_seed", None) is not None:
             groups["Seed selection"].append("entropic")
+        if getattr(self, "_good_turing_seed", None) is not None:
+            groups["Seed selection"].append("good-turing")
         if getattr(self, "_entropy_gradient", None) is not None:
             groups["Seed selection"].append("entropy-gradient")
         if getattr(self, "_entropy_loo", None) is not None:

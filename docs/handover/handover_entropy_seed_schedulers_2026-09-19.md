@@ -411,6 +411,13 @@ decisions.
 - Verification needs a real clang build (Hard Rule 52); synthetic tests only
   show the estimator is wired correctly, not its bias on shim data.
 
+**Status 2026-10-03: seed-arm step shipped** as `core/schedulers/seed_good_turing.py`
+(`--good-turing-seed`, `--good-turing-prior`). Per-seed Q1/T shrunk toward the
+campaign rate (K=20); `residual_risk()` is the STADS number. Verified: closed
+forms, incremental Q1/Q2 vs brute force, planted-rate recovery (p=0.2 -> 0.2
++-0.03), wiring, and a live smoke run. Not done: the per-operator / per-position
+bins, the Chao2-crosses-0.99 calibration target, any `bench_paired.py` A/B.
+
 ### 7.2 Mutual information between operator/position and the edge set
 
 `te_position.update_te_causal_map` reduces each execution's coverage to

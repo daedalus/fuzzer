@@ -960,6 +960,7 @@ class FuzzRound:
 
         self._feed_katz()
         self._feed_entropic()
+        self._feed_good_turing()
 
         # Tang low-rank refit. Gated on the interval inside maybe_refit, and
         # placed here rather than on the pick path because the SVD plus the
@@ -998,6 +999,14 @@ class FuzzRound:
         # Every exec, crashes and timeouts included: each mutant spends the
         # parent's budget whatever it hit (libFuzzer NumExecutedMutations).
         strategy = getattr(self._f, "_entropic_seed", None)
+        if strategy is None:
+            return
+        edges = self._edges_now()
+        strategy.observe(self._data, edges if isinstance(edges, set | frozenset) else ())
+
+    def _feed_good_turing(self) -> None:
+        # Every exec, like entropic: the sample is the parent's mutants.
+        strategy = getattr(self._f, "_good_turing_seed", None)
         if strategy is None:
             return
         edges = self._edges_now()

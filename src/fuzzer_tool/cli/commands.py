@@ -733,6 +733,8 @@ def cmd_fuzz(args):
         entropy_gradient_decay=getattr(args, "entropy_gradient_decay", 0.98),
         entropy_loo=getattr(args, "entropy_loo", False),
         entropic_seed=getattr(args, "entropic_seed", False),
+        good_turing_seed=getattr(args, "good_turing_seed", False),
+        good_turing_prior=getattr(args, "good_turing_prior", 20.0),
         pool_drift=getattr(args, "pool_drift", False),
         dict_thompson=getattr(args, "dict_thompson", False),
         seed_residual=getattr(args, "seed_residual", False),
@@ -2171,6 +2173,7 @@ _HAIL_MARY_FLAGS = (
     "entropy_gradient",
     "entropy_loo",
     "entropic_seed",
+    "good_turing_seed",
     "pool_drift",
     "dict_thompson",
     "seed_residual",
@@ -4250,6 +4253,22 @@ def main() -> int:
         "(first in the fallback chain without --elo) weighting each seed by the "
         "smoothed entropy of the rare edges its mutants hit. Not --schedule entropic. "
         "OFF by default.",
+    )
+    fuzz_parser.add_argument(
+        "--good-turing-seed",
+        action="store_true",
+        default=False,
+        help="Good-Turing seed scheduling: adds a 'good_turing' Elo seed arm (after "
+        "'entropic' in the fallback chain without --elo) weighting each seed by the "
+        "estimated probability its next mutant hits an edge none of its earlier mutants "
+        "hit (Q1/T, shrunk toward the campaign rate). OFF by default.",
+    )
+    fuzz_parser.add_argument(
+        "--good-turing-prior",
+        type=float,
+        default=20.0,
+        help="Pseudo-executions pulling each --good-turing-seed estimate toward the "
+        "campaign-wide rate (default 20).",
     )
     fuzz_parser.add_argument(
         "--entropy-deviation",
