@@ -138,6 +138,15 @@ def test_arena_arms_do_not_turn_on_other_position_flags(monkeypatch):
             assert getattr(args, dest) is False, (arm, dest)
 
 
+def test_saliency_arm_differs_from_control_by_its_flag_and_subset_only(monkeypatch):
+    ctl = vars(_parse(monkeypatch, ARMS["pos-arena-uniform"]))
+    test = vars(_parse(monkeypatch, ARMS["pos-arena-saliency"]))
+    changed = {k for k in ctl if k != "func" and ctl[k] != test[k]}
+    assert changed == {"pos_arena_arms", "pos_saliency"}
+    assert test["pos_arena_arms"] == ("uniform", "saliency")
+    assert ARM_BASELINES["pos-arena-saliency"] == "pos-arena-uniform"
+
+
 def test_arena_testable_arms_need_no_extra_feature_flag():
     from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES
 

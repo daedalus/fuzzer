@@ -75,6 +75,9 @@ _EXCLUDED_OPT_IN = frozenset(
         # enabling it would make a --hail-mary run incomparable to any
         # other run of the same seed for no behavioural gain.
         "rand_floyd_sample",
+        # Unmeasured learned arm (NEUZZ-style net, refit cost): off until a paired
+        # bench (pos-arena-saliency) shows a win, as the Navier-Stokes scheduler was.
+        "pos_saliency",
         # Storage layout, not a strategy: would move corpus writes into
         # seeds.zip, which a later run without the flag does not load.
         "zip_seed_corpus",

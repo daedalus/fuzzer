@@ -643,6 +643,7 @@ def cmd_fuzz(args):
         seed_consolidated_scheduler=getattr(args, "seed_consolidated_scheduler", False),
         pos_consolidated=getattr(args, "pos_consolidated", False),
         pos_good_turing=getattr(args, "pos_good_turing", False),
+        pos_saliency=getattr(args, "pos_saliency", False),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
         position_arena=getattr(args, "position_arena", False),
@@ -2003,6 +2004,11 @@ def cmd_sweep(args):
 # stats tick when enabled -- real overhead that --hail-mary (already the
 # heaviest preset) shouldn't add silently on everyone's behalf.
 #
+# pos_saliency (--pos-saliency) is excluded until measured: it fits a numpy net
+# on the corpus (core/schedulers/pos_saliency.py), the repo's record for learned
+# schedulers is mostly negative, and a pending A/B (bench arm pos-arena-saliency)
+# decides whether it earns a place. It is also not implied by --position-arena.
+#
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
 # RandPool.sample for k>=3. It explores nothing --hail-mary is not already
@@ -3081,6 +3087,15 @@ def main() -> int:
         "its Good-Turing discovery probability over edge identity "
         "(core/schedulers/pos_good_turing.py; --good-turing-prior sets the shrinkage). "
         "Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-saliency",
+        action="store_true",
+        help="Enable the position-arena saliency scheduler: a small numpy net fitted corpus "
+        "bytes -> edges, offsets drawn by the input gradient of rare-edge targets "
+        "(NEUZZ-style; core/schedulers/pos_saliency.py). Opt-in: NOT implied by "
+        "--position-arena or --hail-mary (unmeasured). Joins the arena pool when "
+        "--position-arena is on.",
     )
     fuzz_parser.add_argument(
         "--position-arena",

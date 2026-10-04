@@ -782,6 +782,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("rare-mask")
     if getattr(f, "_pos_good_turing", None) is not None:
         names.append("good-turing")
+    if getattr(f, "_pos_saliency", None) is not None:
+        names.append("saliency")
     if getattr(f, "_pos_consolidated", None) is not None:
         names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
@@ -1682,6 +1684,10 @@ class Fuzzer:
         # Position-arena Good-Turing arm (core/schedulers/pos_good_turing.py).
         # Appended: positional signature.
         pos_good_turing=False,
+        # Position-arena saliency arm (core/schedulers/pos_saliency.py): opt-in,
+        # not implied by position_arena or --hail-mary. Appended: positional
+        # signature.
+        pos_saliency=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3081,6 +3087,15 @@ class Fuzzer:
                 self._rng, prior_strength=good_turing_prior
             )
             log.info("Position Good-Turing scheduling enabled")
+        # Position-arena saliency: NEUZZ-style learned byte importance. Opt-in only
+        # (unmeasured, fit cost): neither position_arena nor --hail-mary builds it.
+        # Trains on the corpus + EdgeTracker.seed_edges. Off-policy extra, not persisted.
+        self._pos_saliency = None
+        if pos_saliency:
+            from fuzzer_tool.core.schedulers.pos_saliency import PositionSaliencyScheduler
+
+            self._pos_saliency = PositionSaliencyScheduler(self._rng, self._saliency_samples)
+            log.info("Position saliency scheduling enabled")
         # Position-arena consolidated: the learning arms' features in one
         # proposer (see core/schedulers/pos_consolidated.py). Off-policy
         # extra, persisted.
@@ -3133,6 +3148,7 @@ class Fuzzer:
                 rare_mask=self._pos_rare_mask,
                 consolidated=self._pos_consolidated,
                 good_turing=self._pos_good_turing,
+                saliency=self._pos_saliency,
                 finch=self._pos_finch,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
@@ -4957,6 +4973,16 @@ class Fuzzer:
         slot = corpus.index(seed)
         self._parent_memo = (parent, corpus, slot, corpus[slot])
         return True
+
+    def _saliency_samples(self) -> list[tuple[bytes, set[int]]]:
+        """(seed, its edges) for the newest corpus entries: the saliency net's training set."""
+        edges_of = self._edge_tracker.seed_edges
+        out = []
+        for d in self.corpus[-1024:]:
+            e = edges_of.get(self._seed_key(d))
+            if e:
+                out.append((d, e))
+        return out
 
     def _seed_key(self, data: bytes) -> str:
         """Return content hash for *data*."""

@@ -48,6 +48,7 @@ from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
 from fuzzer_tool.core.schedulers.pos_rare_mask import PositionRareMaskScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
+from fuzzer_tool.core.schedulers.pos_saliency import PositionSaliencyScheduler
 from fuzzer_tool.core.schedulers.pos_token import PositionTokenScheduler
 from fuzzer_tool.services.operators import OperatorEngine
 from fuzzer_tool.services.position_arena import (
@@ -594,6 +595,7 @@ def _arena(
     consolidated=None,
     finch=None,
     good_turing=None,
+    saliency=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
@@ -618,6 +620,7 @@ def _arena(
         consolidated=consolidated,
         finch=finch,
         good_turing=good_turing,
+        saliency=saliency,
     )
 
 
@@ -983,6 +986,7 @@ class TestPool:
             consolidated=PositionConsolidatedScheduler(RandPool(seed=1)),
             finch=_finch()[0],
             good_turing=PositionGoodTuringScheduler(RandPool(seed=1)),
+            saliency=PositionSaliencyScheduler(RandPool(seed=1), lambda: []),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -1168,6 +1172,20 @@ class TestSettle:
         arm.observe({1, 2})
         arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
         assert arm.executions(SEED, 100 // arm._seeds[arm._key(SEED)].width) == 1
+
+    def test_saliency_is_credited_off_policy(self):
+        arm = PositionSaliencyScheduler(RandPool(seed=1), lambda: [])
+        f, arena = self._played(saliency=arm)
+        before = arm._ticks
+        arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        assert arm._ticks == before + 1
+
+    def test_saliency_left_out_of_subset_is_not_credited(self):
+        arm = PositionSaliencyScheduler(RandPool(seed=1), lambda: [])
+        f, _ = _arena(saliency=arm)
+        arena2 = PositionArena(f, region_fn=lambda d, n: 55, saliency=arm, arms=["uniform"])
+        arena2.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        assert arm._ticks == 0
 
     def test_good_turing_left_out_of_subset_is_not_credited(self):
         arm = PositionGoodTuringScheduler(RandPool(seed=1), min_observations=1)
@@ -1578,6 +1596,24 @@ class TestRealConstruction:
         f = self._build(tmp_path, elo="all", position_arena=True)
         assert isinstance(f._pos_good_turing, PositionGoodTuringScheduler)
         assert "good_turing" in f._position_arena.pool()
+
+    def test_position_arena_does_not_imply_saliency(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert f._pos_saliency is None
+        assert "saliency" not in f._position_arena.pool()
+
+    def test_pos_saliency_builds_and_joins_the_arena(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_saliency=True)
+        assert isinstance(f._pos_saliency, PositionSaliencyScheduler)
+        assert "saliency" in f._position_arena.pool()
+
+    def test_saliency_samples_pair_corpus_with_edges(self, tmp_path):
+        f = self._build(tmp_path, pos_saliency=True)
+        a, b, c = b"aaaa", b"bbbb", b"cccc"
+        f.corpus[:] = [a, b, c]
+        f._edge_tracker.seed_edges[f._seed_key(a)] = {1, 2}
+        f._edge_tracker.seed_edges[f._seed_key(c)] = {3}
+        assert f._saliency_samples() == [(a, {1, 2}), (c, {3})]  # b has no edges: dropped
 
     def test_pos_good_turing_alone_does_not_build_an_arena(self, tmp_path):
         f = self._build(tmp_path, pos_good_turing=True)
