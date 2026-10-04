@@ -301,3 +301,40 @@ class TestFuzzerWiring:
 
         with pytest.raises(ValueError):
             W()._build(tmp_path, pos_saliency=True, saliency_targets="bogus")
+
+
+class TestFuzzerCadenceWiring:
+    def _fuzzer(self, tmp_path, **kw):
+        from tests.test_position_arena import TestRealConstruction as W
+
+        return W._build(tmp_path, pos_saliency=True, **kw)
+
+    def test_scheduler_runs_on_the_fuzzers_execution_clock(self, tmp_path):
+        f = self._fuzzer(tmp_path)
+        sal = f._pos_saliency
+        f.exec_count = 12345
+        assert sal._now() == 12345
+        assert sal._exec_count_fn is not None  # driven mode: no lazy fitting from propose
+
+    def test_discovery_hook_drives_maybe_refit(self, tmp_path):
+        from fuzzer_tool.services import fuzz_round
+
+        with open(fuzz_round.__file__, encoding="utf-8") as fh:
+            src = fh.read()
+        assert "saliency.maybe_refit(f.exec_count)" in src  # next to the substrate's call
+
+    def test_trust_follows_the_substrate_when_one_exists(self, tmp_path):
+        f = self._fuzzer(tmp_path, seed_residual=True)
+        assert f._matrix_substrate is not None
+        assert f._saliency_trusted() is f._matrix_substrate.trusted
+        # coverage_trust short-circuits to True for an uninstrumented/no-coverage fixture
+        # target, so force the verdict: the point is that the arm DELEGATES to the substrate.
+        f._matrix_substrate._trusted = False
+        assert f._saliency_trusted() is False
+        assert f._pos_saliency.warm() is False
+
+    def test_trust_without_a_substrate_follows_the_stability_probe(self, tmp_path):
+        f = self._fuzzer(tmp_path)
+        assert f._matrix_substrate is None and f._saliency_trusted() is True
+        f._saliency_trust = (False, "ids moving")
+        assert f._saliency_trusted() is False

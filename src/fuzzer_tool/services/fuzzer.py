@@ -3114,6 +3114,7 @@ class Fuzzer:
         # (unmeasured, fit cost): neither position_arena nor --hail-mary builds it.
         # Trains on the corpus + EdgeTracker.seed_edges. Off-policy extra, not persisted.
         self._pos_saliency = None
+        self._saliency_trust: tuple[bool, str | None] = (True, None)
         if pos_saliency:
             from fuzzer_tool.core.schedulers.pos_saliency import (
                 PositionSaliencyScheduler,
@@ -3122,10 +3123,20 @@ class Fuzzer:
 
             if saliency_targets not in ("gt", "support"):
                 raise ValueError(f"saliency_targets must be 'gt' or 'support', got {saliency_targets!r}")
+            from fuzzer_tool.core.scheduler_substrate import coverage_trust
+
+            self._saliency_trust = coverage_trust(
+                getattr(self, "target", None),
+                use_coverage=getattr(self, "use_coverage", True),
+                ptrace=getattr(self, "ptrace_cov", None) is not None
+                or bool(getattr(self, "use_ptrace", False)),
+            )
             self._pos_saliency = PositionSaliencyScheduler(
                 self._rng,
                 self._saliency_samples,
                 target_selector=gt_rarity_selector if saliency_targets == "gt" else None,
+                exec_count_fn=lambda: self.exec_count,
+                trust_fn=self._saliency_trusted,
             )
             log.info("Position saliency scheduling enabled")
         # Position-arena consolidated: the learning arms' features in one
@@ -5008,6 +5019,15 @@ class Fuzzer:
         slot = corpus.index(seed)
         self._parent_memo = (parent, corpus, slot, corpus[slot])
         return True
+
+    def _saliency_trusted(self) -> bool:
+        """The matrix arms' preflight gate, shared: unstable edge ids make every label noise.
+
+        Uses the substrate's verdict when one exists (it is fed the F1 stability probe);
+        otherwise the same ``coverage_trust`` decision, refreshed by the probe below.
+        """
+        sub = self._matrix_substrate
+        return sub.trusted if sub is not None else self._saliency_trust[0]
 
     def _saliency_samples(self) -> list[tuple[bytes, set[int]]]:
         """(seed, its edges) for the newest corpus entries: the saliency net's training set."""
@@ -8279,6 +8299,18 @@ class Fuzzer:
         substrate = getattr(self, "_matrix_substrate", None)
         if substrate is not None:
             substrate.set_stability(jaccard)
+        elif getattr(self, "_pos_saliency", None) is not None:
+            from fuzzer_tool.core.scheduler_substrate import coverage_trust
+
+            self._saliency_trust = coverage_trust(
+                getattr(self, "target", None),
+                use_coverage=getattr(self, "use_coverage", True),
+                ptrace=getattr(self, "ptrace_cov", None) is not None
+                or bool(getattr(self, "use_ptrace", False)),
+                id_stability=jaccard,
+            )
+            if not self._saliency_trust[0]:
+                log.warning("saliency arm abstaining: %s", self._saliency_trust[1])
         if getattr(self, "_edge_ledger", None) is not None:
             self._strata_set_stability(jaccard)
         if jaccard == 1.0:

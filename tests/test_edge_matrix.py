@@ -280,3 +280,48 @@ class TestClassCredit:
         s = MatrixSubstrate()
         s.derived = frozenset({11})
         assert s.class_credit({10, 11}) == 1
+
+
+class TestRefitCadence:
+    """The policy MatrixSubstrate paid for, extracted so other corpus-fitted arms share it."""
+
+    def test_first_attempt_is_immediate_then_the_interval_applies(self):
+        from fuzzer_tool.core.edge_matrix import RefitCadence
+
+        c = RefitCadence(interval=100, min_seeds=3)
+        assert c.due(5, 20, exec_count=0) == (True, None)
+        c.commit(5, 20, 0)
+        assert c.due(6, 30, 99) == (False, None)  # interval not elapsed: silent
+        assert c.due(6, 30, 100) == (True, None)
+
+    def test_too_few_seeds_is_refused_before_the_clock_is_stamped(self):
+        from fuzzer_tool.core.edge_matrix import RefitCadence
+
+        c = RefitCadence(interval=1000, min_seeds=3)
+        assert c.due(2, 5, 10) == (False, "fewer than 3 seeds")
+        # nothing was committed, so the very next discovery may retry at once
+        assert c.due(3, 9, 11) == (True, None)
+
+    def test_unchanged_stamp_is_skipped_unless_forced(self):
+        from fuzzer_tool.core.edge_matrix import RefitCadence
+
+        c = RefitCadence(interval=10, min_seeds=3)
+        c.commit(4, 12, 0)
+        assert c.unchanged(4, 12) and not c.unchanged(5, 12)
+        assert c.due(4, 12, 500) == (False, None)
+        assert c.due(4, 12, 500, force=True) == (True, None)
+        assert c.due(4, 13, 500) == (True, None)
+
+    def test_ready_is_a_pure_interval_check(self):
+        from fuzzer_tool.core.edge_matrix import RefitCadence
+
+        c = RefitCadence(interval=50)
+        assert c.ready(0)
+        c.commit(9, 9, 10)
+        assert not c.ready(59) and c.ready(60)
+
+    def test_substrate_uses_the_shared_cadence(self):
+        from fuzzer_tool.core.edge_matrix import MatrixSubstrate, RefitCadence
+
+        sub = MatrixSubstrate(use_coverage=False, refit_interval=7)
+        assert isinstance(sub.cadence, RefitCadence) and sub.refit_interval == 7

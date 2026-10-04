@@ -201,6 +201,53 @@ def _fold_classes(profiles, canon: EdgeCanonicalizer, derived):
     return per_seed, owners, mass
 
 
+class RefitCadence:
+    """When a learned model over the corpus may be rebuilt: the substrate's policy, reusable.
+
+    ``MatrixSubstrate.maybe_refit`` grew three rules the hard way; any arm that refits on
+    the corpus should obey the same ones instead of inventing a clock:
+
+    * **Executions, not calls.** At least ``interval`` executions since the last refit.
+    * **Too few seeds is refused BEFORE the clock is stamped.** A campaign's first
+      discovery arrives with one or two seeds; stamping first barred every retry for a
+      whole interval and left the model empty for the first ``interval`` execs.
+    * **Nothing grew, nothing to do.** The stamp ``(seeds, edges)`` must differ from the
+      last refit's.
+
+    ``due`` is a pure check; ``commit`` stamps. A caller that decides after ``due`` that it
+    cannot fit (e.g. no informative edges) simply does not commit, so it retries on the
+    next discovery for free (the check is a ``len``).
+    """
+
+    def __init__(self, interval: int = DEFAULT_REFIT_INTERVAL, min_seeds: int = MIN_SEEDS):
+        self.interval = max(1, int(interval))
+        self.min_seeds = max(1, int(min_seeds))
+        self.last_exec = -(1 << 60)
+        self.stamp: tuple[int, int] | None = None
+
+    def ready(self, exec_count: int) -> bool:
+        """Has the interval elapsed? Cheap: lets a caller skip walking its corpus."""
+        return exec_count - self.last_exec >= self.interval
+
+    def unchanged(self, n_seeds: int, n_edges: int) -> bool:
+        return (n_seeds, n_edges) == self.stamp
+
+    def due(
+        self, n_seeds: int, n_edges: int, exec_count: int, force: bool = False
+    ) -> tuple[bool, str | None]:
+        """``(go, skip_reason)``: whether to refit now, else why not (None = just not yet)."""
+        if not force and not self.ready(exec_count):
+            return False, None
+        if n_seeds < self.min_seeds:
+            return False, f"fewer than {self.min_seeds} seeds"
+        if not force and (n_seeds, n_edges) == self.stamp:
+            return False, None
+        return True, None
+
+    def commit(self, n_seeds: int, n_edges: int, exec_count: int) -> None:
+        self.last_exec, self.stamp = exec_count, (n_seeds, n_edges)
+
+
 class MatrixSubstrate:
     """Fold, refit cadence and preflight gate, shared by both arms.
 
@@ -221,15 +268,14 @@ class MatrixSubstrate:
         self._target = target
         self._use_coverage = use_coverage
         self._ptrace = ptrace
-        self.refit_interval = max(1, int(refit_interval))
+        self.cadence = RefitCadence(refit_interval, MIN_SEEDS)
+        self.refit_interval = self.cadence.interval
         self.canon = EdgeCanonicalizer()
         self.derived: frozenset[int] = frozenset()
         self.fold: MatrixFold | None = None
         self.version = 0
         self.skip_reason = "not fitted"
         self.stability: float | None = None
-        self._last_exec = -(1 << 60)
-        self._stamp: tuple[int, int] | None = None
         self._history: deque[tuple[int, float]] = deque(maxlen=SATURATION_WINDOW)
         self._trusted, self._reason = self._decide()
 
@@ -265,28 +311,17 @@ class MatrixSubstrate:
     # ── Refit ─────────────────────────────────────────────────────────────
     def maybe_refit(self, tracker, exec_count: int, force: bool = False) -> bool:
         """Rebuild the fold if the cadence allows and the tracker has grown."""
-        if not force and exec_count - self._last_exec < self.refit_interval:
+        # Policy (and the reason the seed-count check precedes the stamp) lives in
+        # RefitCadence so other corpus-fitted arms can share it.
+        n_seeds = len(getattr(tracker, "seed_edges", {}) or {})
+        n_edges = len(getattr(tracker, "cumulative_edges", ()))
+        go, why = self.cadence.due(n_seeds, n_edges, exec_count, force)
+        if why is not None:
+            self.skip_reason = why
+        if not go:
             return False
-        # Too few seeds is refused before the cadence clock is stamped.  It
-        # used to stamp first: a campaign's first discovery usually arrives
-        # with one or two seeds, build_fold refused ("fewer than 3 seeds"),
-        # and the stamp then barred every retry for refit_interval (2000)
-        # execs -- so the fold, the canonical classes and both arms reading
-        # them stayed empty for the first 2000 execs of every run started
-        # from a small corpus.  seed_residual never entered the Elo pool and
-        # shaped_weight paid 1.0 (every edge its own class) throughout, i.e.
-        # a 2000-exec A/B of either arm was an A/A.  The check is a len();
-        # retrying it on every discovery costs nothing.
-        if len(getattr(tracker, "seed_edges", {}) or {}) < MIN_SEEDS:
-            self.skip_reason = f"fewer than {MIN_SEEDS} seeds"
-            return False
-        stamp = (
-            len(getattr(tracker, "seed_edges", {})),
-            len(getattr(tracker, "cumulative_edges", ())),
-        )
-        if not force and stamp == self._stamp:
-            return False
-        self._last_exec, self._stamp = exec_count, stamp
+        stamp = (n_seeds, n_edges)
+        self.cadence.commit(n_seeds, n_edges, exec_count)
         fold, reason = build_fold(profiles_from_tracker(tracker), self.canon, self.derived)
         self.skip_reason = reason
         if fold is None:

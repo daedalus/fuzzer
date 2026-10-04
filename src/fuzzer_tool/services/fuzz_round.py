@@ -1129,6 +1129,11 @@ class FuzzRound:
         # whenever new edges (hence new seed rows) have appeared.
         if f._matrix_substrate is not None:
             f._matrix_substrate.maybe_refit(f._edge_tracker, f.exec_count)
+        # The saliency net rides the same discovery hook and the same RefitCadence
+        # policy (executions, min seeds before stamping, skip if nothing grew).
+        saliency = getattr(f, "_pos_saliency", None)
+        if saliency is not None:
+            saliency.maybe_refit(f.exec_count)
         # Separate counter for cmplog-involved edge discoveries
         # (cumulative with the op attribution above — cmplog is a
         #  signal source, not a mutation op, so it can overlap).

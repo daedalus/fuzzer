@@ -24,9 +24,17 @@ counts, which separate singletons from doubletons more sharply than the raw coun
 
 Bytes past ``INPUT_CAP`` have no saliency; they keep their uniform share (a draw
 lands there with probability ``(buf_len - cap) / buf_len``). Declines (``None``)
-until a fit succeeds. Refit on a cadence of ``refit_interval`` calls, skipped while
-the sample is unchanged. Off-policy extra: ``record`` only counts ticks, the model
-learns from the corpus, not from round outcomes. Not persisted.
+until a fit succeeds. Off-policy extra: ``record`` only counts ticks, the model learns
+from the corpus, not from round outcomes. Not persisted.
+
+Refit cadence is NOT NEUZZ's retrain trigger (a fixed seed-count/time schedule with its own
+clock): it is ``core.edge_matrix.RefitCadence``, the policy ``MatrixSubstrate`` already
+paid for -- measured in EXECUTIONS, too few seeds refused before the clock is stamped,
+nothing refitted when no seed or edge was added. The fuzzer drives ``maybe_refit`` from the
+same discovery hook that drives the substrate and passes ``trust_fn`` (the substrate's
+``coverage_trust`` gate: unstable edge ids make every per-edge label noise), so the arm
+abstains exactly when the matrix arms do. Without ``exec_count_fn`` (unit tests, tools) it
+falls back to counting its own calls and fits lazily from ``propose``/``record``/``warm``.
 
 Cost: one fit is ``epochs`` full-batch passes over ``<= MAX_SEEDS x input_cap``
 floats; ``stats()['fit_seconds']`` reports it. A proposal is one forward pass and
@@ -42,6 +50,7 @@ from typing import Any
 
 import numpy as np
 
+from fuzzer_tool.core.edge_matrix import DEFAULT_REFIT_INTERVAL, RefitCadence
 from fuzzer_tool.core.nn_saliency import TinyMLP, encode_inputs
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 
@@ -58,8 +67,8 @@ N_TARGETS = 8  # target columns averaged per proposal
 EPOCHS = 150
 LR = 3e-2
 EXPLORE = 0.2  # uniform mixture so no byte is ever starved
-REFIT_INTERVAL = 2000
-RETRY_INTERVAL = 200  # while no model yet
+REFIT_INTERVAL = DEFAULT_REFIT_INTERVAL  # executions, shared with MatrixSubstrate
+LAZY_RETRY = 200  # standalone mode only: calls between refused refit attempts
 
 #: Per-edge Good-Turing rarity floor so the cumulative draw never
 #: sees an all-zero vector (saturated: Q1 = 0).
@@ -150,6 +159,8 @@ class PositionSaliencyScheduler:
         n_targets: int = N_TARGETS,
         explore: float = EXPLORE,
         target_selector: TargetSelector | None = None,
+        exec_count_fn: Callable[[], int] | None = None,
+        trust_fn: Callable[[], bool] | None = None,
     ) -> None:
         if rng is None:
             raise ValueError("PositionSaliencyScheduler requires a RandPool (Hard Rule 16)")
@@ -162,7 +173,9 @@ class PositionSaliencyScheduler:
         self._cap = input_cap
         self._hidden = hidden
         self._epochs = epochs
-        self._interval = max(1, refit_interval)
+        self._cadence = RefitCadence(refit_interval, MIN_SEEDS)
+        self._exec_count_fn = exec_count_fn
+        self._trust_fn = trust_fn
         self._n_targets = n_targets
         self._explore = explore
         self._target_selector = target_selector
@@ -170,9 +183,8 @@ class PositionSaliencyScheduler:
         self._model: TinyMLP | None = None
         self._width = 0
         self._cum_support: np.ndarray | None = None  # cumulative target weights, one per column
-        self._ticks = 0
-        self._last_try = -(1 << 60)
-        self._stamp: tuple[int, int] | None = None
+        self._ticks = 0  # own clock, used only when no exec_count_fn is given
+        self._lazy_next = 0
         self._fits = 0
         self._fit_seconds = 0.0
         self._last_loss = float("nan")
@@ -185,11 +197,12 @@ class PositionSaliencyScheduler:
     ) -> None:
         """Counts a tick toward the refit cadence; the net learns from the corpus.
 
-        Also gives a first / due refit its chance, so the model exists even when the
-        arena rarely draws this arm (the saliency_ladder operator needs it too).
+        Standalone mode (no ``exec_count_fn``) also gives a first / due refit its chance, so
+        the model exists even when the arena rarely draws this arm; when the fuzzer drives
+        ``maybe_refit`` from its discovery hook this is only a tick.
         """
         self._ticks += 1
-        self._maybe_fit()
+        self._lazy_fit()
 
     # -- proposal ---------------------------------------------------------------
 
@@ -198,9 +211,9 @@ class PositionSaliencyScheduler:
         if buf_len <= 0 or not data:
             return None
         self._ticks += 1
-        self._maybe_fit()
+        self._lazy_fit()
         model = self._model
-        if model is None:
+        if model is None or not self._trusted():
             return None
 
         head = min(len(data), buf_len, self._cap)
@@ -218,10 +231,13 @@ class PositionSaliencyScheduler:
         return min(i, head - 1)
 
     def warm(self) -> bool:
-        """Tick, give a due refit its chance, and say whether a model exists (operator gate)."""
+        """Tick, give a standalone refit its chance, and say whether the model is usable.
+
+        The operator gate: a fitted model AND trusted edge ids.
+        """
         self._ticks += 1
-        self._maybe_fit()
-        return self._model is not None
+        self._lazy_fit()
+        return self._model is not None and self._trusted()
 
     def gradient_info(self, data: bytes, top: int = 32) -> tuple[np.ndarray, np.ndarray] | None:
         """Signed gradient of ONE drawn target edge: (offsets by |grad| desc, signs).
@@ -231,7 +247,7 @@ class PositionSaliencyScheduler:
         None without a model or when the gradient is identically zero.
         """
         model, cum = self._model, self._cum_support
-        if model is None or cum is None or not data:
+        if model is None or cum is None or not data or not self._trusted():
             return None
         x = encode_inputs([data], self._width)[0]
         k = self._draw_targets(cum)[0]
@@ -258,26 +274,61 @@ class PositionSaliencyScheduler:
 
     # -- fit --------------------------------------------------------------------
 
-    def _maybe_fit(self) -> None:
-        wait = self._interval if self._model is not None else RETRY_INTERVAL
-        if self._ticks - self._last_try < wait:
-            return
-        self._last_try = self._ticks
+    def _now(self, exec_count: int | None = None) -> int:
+        if exec_count is not None:
+            return int(exec_count)
+        if self._exec_count_fn is not None:
+            return int(self._exec_count_fn())
+        return self._ticks
+
+    def _trusted(self) -> bool:
+        if self._trust_fn is None:
+            return True
         try:
-            self.refit()
+            return bool(self._trust_fn())
+        except (
+            Exception
+        ):  # a broken gate must not take the campaign down; fail open like coverage_trust
+            return True
+
+    def _lazy_fit(self) -> None:
+        """Standalone mode only: the fuzzer's discovery hook calls ``maybe_refit`` otherwise."""
+        if (
+            self._exec_count_fn is None
+            and self._ticks >= self._lazy_next
+            and not self.maybe_refit()
+        ):
+            # A refused attempt walks the corpus again; space the retries out.
+            self._lazy_next = self._ticks + LAZY_RETRY
+
+    def maybe_refit(self, exec_count: int | None = None, force: bool = False) -> bool:
+        """Refit if ``RefitCadence`` allows. Never raises; False if skipped (see ``stats``)."""
+        now = self._now(exec_count)
+        if not force and not self._cadence.ready(now):  # cheap: no corpus walk
+            return False
+        try:
+            return self._refit(now, force)
         except Exception:  # a refit must never take the campaign down
             log.exception("saliency refit failed")
             self._skip_reason = "refit raised"
+            return False
 
     def refit(self, force: bool = False) -> bool:
-        """Rebuild the net from the current samples. False if skipped (see ``stats``)."""
-        samples = [(d, e) for d, e in self._samples_fn() if d and e]
-        stamp = (len(samples), sum(len(e) for _, e in samples))
-        if len(samples) < MIN_SEEDS:
-            self._skip_reason = f"fewer than {MIN_SEEDS} seeds"
+        """Rebuild the net now (cadence still applies unless *force*); raises on a bad fit."""
+        return self._refit(self._now(), force)
+
+    def _refit(self, now: int, force: bool) -> bool:
+        if not force and not self._trusted():
+            self._skip_reason = "untrusted coverage ids"
             return False
-        if not force and stamp == self._stamp and self._model is not None:
-            self._skip_reason = "sample unchanged"
+        samples = [(d, e) for d, e in self._samples_fn() if d and e]
+        n_seeds, n_edges = len(samples), sum(len(e) for _, e in samples)
+        go, why = self._cadence.due(n_seeds, n_edges, now, force)
+        if not go:
+            if why is not None:
+                self._skip_reason = why
+            elif self._cadence.unchanged(n_seeds, n_edges) and self._model is not None:
+                self._skip_reason = "sample unchanged"
             return False
         samples = samples[-MAX_SEEDS:]
 
@@ -330,7 +381,8 @@ class PositionSaliencyScheduler:
 
         self._model, self._width = model, width
         self._cum_support = np.cumsum(weights)  # with the model: a failed fit leaves both old
-        self._stamp = stamp
+        # Stamp only on success (RefitCadence rule): a refused/failed attempt retries free.
+        self._cadence.commit(n_seeds, n_edges, now)
         self._fits += 1
         self._last_loss = loss
         self._skip_reason = "ok"

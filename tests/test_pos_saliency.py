@@ -288,3 +288,151 @@ class TestTargetSelector:
         with pytest.raises(RuntimeError):
             a.refit(force=True)
         assert np.array_equal(a._cum_support, cum) and a.stats()["fits"] == fits
+
+
+class TestSharedCadence:
+    """Refit policy is core.edge_matrix.RefitCadence: executions, not calls."""
+
+    def _driven(self, samples, clock, **kw):
+        return PositionSaliencyScheduler(
+            RandPool(seed=1), lambda: samples, exec_count_fn=lambda: clock[0], **kw
+        )
+
+    def test_uses_refit_cadence_with_substrate_defaults(self):
+        from fuzzer_tool.core.edge_matrix import DEFAULT_REFIT_INTERVAL, RefitCadence
+        from fuzzer_tool.core.schedulers.pos_saliency import REFIT_INTERVAL
+
+        a = _arm([])
+        assert isinstance(a._cadence, RefitCadence)
+        assert REFIT_INTERVAL == DEFAULT_REFIT_INTERVAL == 2000
+
+    def test_driven_mode_never_fits_lazily_from_propose_record_or_warm(self):
+        _, samples = _corpus()
+        a = self._driven(samples, [0])
+        for _ in range(300):
+            assert a.propose(samples[0][0], 100) is None
+            a.record(b"x", [0], Outcome.MISS, 1.0)
+            assert a.warm() is False
+        assert not a.ready  # only maybe_refit (the discovery hook) builds it
+
+    def test_interval_is_counted_in_executions(self):
+        _, samples = _corpus()
+        clock = [0]
+        a = self._driven(samples, clock, refit_interval=1000)
+        assert a.maybe_refit() is True
+        samples.append((b"\x07" * 100, {0, 1, 99}))  # corpus grew
+        clock[0] = 999
+        assert a.maybe_refit() is False  # interval not elapsed
+        clock[0] = 1000
+        assert a.maybe_refit() is True and a.stats()["fits"] == 2
+
+    def test_cheap_precheck_does_not_walk_the_corpus(self):
+        calls = []
+        _, samples = _corpus()
+
+        def spy():
+            calls.append(1)
+            return samples
+
+        clock = [0]
+        a = PositionSaliencyScheduler(RandPool(seed=1), spy, exec_count_fn=lambda: clock[0])
+        a.maybe_refit()
+        n = len(calls)
+        for t in range(1, 50):
+            clock[0] = t
+            a.maybe_refit()
+        assert len(calls) == n
+
+    def test_too_few_seeds_does_not_stamp_the_clock(self):
+        _, full = _corpus()
+        live = full[: MIN_SEEDS - 1]
+        clock = [0]
+        a = self._driven(live, clock, refit_interval=5000)
+        assert a.maybe_refit() is False
+        assert "fewer than" in a.stats()["skip_reason"]
+        live.extend(full[MIN_SEEDS - 1 : MIN_SEEDS + 5])  # first real discovery batch
+        clock[0] = 1  # far inside the interval: a stamped clock would bar this
+        assert a.maybe_refit() is True
+
+    def test_unchanged_corpus_is_not_refit_even_when_due(self):
+        _, samples = _corpus()
+        clock = [0]
+        a = self._driven(samples, clock, refit_interval=10)
+        a.maybe_refit()
+        clock[0] = 10_000
+        assert a.maybe_refit() is False
+        assert a.stats()["skip_reason"] == "sample unchanged" and a.stats()["fits"] == 1
+
+    def test_failed_attempt_is_not_stamped(self):
+        # all seeds hit the same single edge: no informative column, no fit
+        seeds = [bytes([i]) * 8 for i in range(12)]
+        live = [(s, {1}) for s in seeds]
+        clock = [0]
+        a = self._driven(live, clock, refit_interval=5000)
+        assert a.maybe_refit() is False
+        assert a.stats()["skip_reason"] == "no informative edges"
+        live[:] = [(s, {1, 2 + (s[0] % 2)}) for s in seeds]
+        clock[0] = 1
+        assert a.maybe_refit() is True  # retried at once: nothing was stamped
+
+    def test_maybe_refit_swallows_errors_refit_does_not(self):
+        def boom():
+            raise RuntimeError("x")
+
+        a = PositionSaliencyScheduler(RandPool(seed=1), boom, exec_count_fn=lambda: 0)
+        assert a.maybe_refit() is False and a.stats()["skip_reason"] == "refit raised"
+        with pytest.raises(RuntimeError):
+            a.refit()
+
+    def test_standalone_retries_are_spaced_out(self):
+        calls = []
+
+        def spy():
+            calls.append(1)
+            return []
+
+        a = PositionSaliencyScheduler(RandPool(seed=1), spy)
+        for _ in range(450):
+            a.propose(b"abcdefgh", 8)
+        assert len(calls) <= 4  # not one corpus walk per proposal
+
+
+class TestTrustGate:
+    """Same preflight as the matrix arms: unstable edge ids -> abstain."""
+
+    def _gated(self, trusted):
+        _, samples = _corpus()
+        flag = [trusted]
+        a = PositionSaliencyScheduler(
+            RandPool(seed=1), lambda: samples, trust_fn=lambda: flag[0], refit_interval=10
+        )
+        return samples, flag, a
+
+    def test_untrusted_refuses_to_fit(self):
+        _, _, a = self._gated(False)
+        assert a.refit() is False
+        assert a.stats()["skip_reason"] == "untrusted coverage ids" and not a.ready
+
+    def test_model_fitted_while_trusted_abstains_once_distrusted(self):
+        samples, flag, a = self._gated(True)
+        assert a.refit()
+        assert a.propose(samples[0][0], 100) is not None
+        assert a.warm() is True and a.gradient_info(samples[0][0]) is not None
+        flag[0] = False  # the stability probe found moving ids
+        assert a.propose(samples[0][0], 100) is None
+        assert a.warm() is False and a.gradient_info(samples[0][0]) is None
+        flag[0] = True
+        assert a.propose(samples[0][0], 100) is not None  # recovers; model was kept
+
+    def test_broken_trust_fn_fails_open(self):
+        _, samples = _corpus()
+
+        def boom():
+            raise RuntimeError("x")
+
+        a = PositionSaliencyScheduler(RandPool(seed=1), lambda: samples, trust_fn=boom)
+        assert a.refit() and a.warm()
+
+    def test_force_overrides_the_gate_for_tools(self):
+        _, _, a = self._gated(False)
+        assert a.refit(force=True) is True
