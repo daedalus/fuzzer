@@ -1558,6 +1558,8 @@ class Fuzzer:
         # Good-Turing discovery-probability seed arm (core/schedulers/seed_good_turing.py).
         good_turing_seed=False,
         good_turing_prior=20.0,
+        good_turing_estimator="gt",
+        good_turing_horizon=0.5,
         seed_residual=False,
         strata=False,
         pool_drift=False,
@@ -2827,7 +2829,10 @@ class Fuzzer:
             from fuzzer_tool.core.schedulers.seed_good_turing import GoodTuringSeedStrategy
 
             self._good_turing_seed = GoodTuringSeedStrategy(
-                self._rng, prior_strength=good_turing_prior
+                self._rng,
+                prior_strength=good_turing_prior,
+                estimator=good_turing_estimator,
+                horizon=good_turing_horizon,
             )
         # Leave-one-out pooled-entropy arm (entropy §5, first step)
         self._entropy_loo = None

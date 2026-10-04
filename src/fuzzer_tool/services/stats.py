@@ -246,7 +246,8 @@ def _entropy_seed_str(f) -> str:
     gt = getattr(f, "_good_turing_seed", None)
     if isinstance(gt, GoodTuringSeedStrategy):
         st = gt.stats()
-        out += f" | good-turing: m0={st['residual_risk']:.3f} q1={st['q1']} picks={st['selected']}"
+        label = "rate" if st["estimator"] == "gtoul" else "m0"
+        out += f" | good-turing: {label}={st['residual_risk']:.3f} q1={st['q1']} picks={st['selected']}"
     return out
 
 

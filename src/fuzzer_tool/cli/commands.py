@@ -18,6 +18,8 @@ from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
+from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
+from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
 from fuzzer_tool.core.shim_health import WriteGuard
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.fuzzer import Fuzzer
@@ -737,6 +739,8 @@ def cmd_fuzz(args):
         entropic_seed=getattr(args, "entropic_seed", False),
         good_turing_seed=getattr(args, "good_turing_seed", False),
         good_turing_prior=getattr(args, "good_turing_prior", 20.0),
+        good_turing_estimator=getattr(args, "good_turing_estimator", "gt"),
+        good_turing_horizon=getattr(args, "good_turing_horizon", GOOD_TOULMIN_HORIZON),
         pool_drift=getattr(args, "pool_drift", False),
         dict_thompson=getattr(args, "dict_thompson", False),
         seed_residual=getattr(args, "seed_residual", False),
@@ -4297,6 +4301,22 @@ def main() -> int:
         default=20.0,
         help="Pseudo-executions pulling each --good-turing-seed estimate toward the "
         "campaign-wide rate (default 20).",
+    )
+    fuzz_parser.add_argument(
+        "--good-turing-estimator",
+        choices=GOOD_TURING_ESTIMATORS,
+        default="gt",
+        help="Estimator behind --good-turing-seed: gt = Q1/T missing mass (default), chao = "
+        "Chao-Jost bias-corrected, gtoul = Good-Toulmin forecast of new edges per exec over "
+        "the next --good-turing-horizon * T execs from Q1..Q8 (not a probability; "
+        "discounts doubletons). See core/schedulers/seed_good_turing.py.",
+    )
+    fuzz_parser.add_argument(
+        "--good-turing-horizon",
+        type=float,
+        default=GOOD_TOULMIN_HORIZON,
+        help="Forecast span of --good-turing-estimator gtoul as a fraction of a seed's "
+        "executions, above 0 and at most 1 (default 0.5; the series oscillates at 1).",
     )
     fuzz_parser.add_argument(
         "--entropy-deviation",

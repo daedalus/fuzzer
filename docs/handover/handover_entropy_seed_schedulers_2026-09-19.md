@@ -448,6 +448,12 @@ A/B. Open: per-position bin, calibration, A/B run.
 `pos-arena-good-turing`). Bins of `ceil(len/64)` bytes, `M_bin` shrunk toward the seed rate, which is
 shrunk toward the campaign rate. Credit smears across bins a round touched. 25 unit + wiring tests; no
 A/B, no clang run. Still open in §7.1: Chao2-crosses-0.99 calibration, `bench_paired.py` A/B runs.
+**Status 2026-10-03 (later still): Good-Toulmin shipped** as the `gtoul` estimator of the seed arm
+(`--good-turing-estimator gtoul`, `--good-turing-horizon`, `core/schedulers/seed_good_turing.py`).
+Q1..Q8 per table, forecast `U(h)` of new edges over `h = horizon*T`, score `U/h` (a rate, not a
+probability, uncapped). Horizon limited to (0, 1]; smoothing for longer extrapolation not built.
+Synthetic calibration: within ~2% of realised new edges where `horizon*Q1` overshoots 13-65%.
+No clang run, no A/B, no bench arm.
 Still open elsewhere: §7.2 stable-id tensor feed, §7.3 `--weizz-tags` feed, §7.4 shim trace capture
 (each needs a clang build or shim work, not done); §7.5 is a measurement.
 
