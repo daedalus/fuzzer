@@ -82,3 +82,38 @@ def test_regression_persistent_started_keeps_flag(tmp_path):
 
     assert f.persistent is True
     assert f._persistent_runner is not None
+
+
+def test_regression_auto_tune_timeout_never_execs_so(tmp_path):
+    """--auto-timeout (forced on by --hail-mary) must not exec a shared object.
+
+    _auto_tune_timeout ran the target 10 times through run_target_file/stdin;
+    on a .so each run died on an NX fetch at the mapping base and the tuned
+    "timeout" was just the time-to-crash (the 0.05s floor).
+    """
+    from fuzzer_tool.cli import commands
+
+    so = _cc(tmp_path, "t.so", SRC, "-shared", "-fPIC")
+
+    with (
+        mock.patch("fuzzer_tool.adapters.process.run_target_file") as rf,
+        mock.patch("fuzzer_tool.adapters.process.run_target_stdin") as rs,
+    ):
+        assert commands._auto_tune_timeout(str(so), file_mode=True) is None
+        assert commands._auto_tune_timeout(str(so), file_mode=False) is None
+
+    rf.assert_not_called()
+    rs.assert_not_called()
+
+
+def test_regression_auto_tune_timeout_still_tunes_executables(tmp_path):
+    """Adversarial: a real executable is still measured."""
+    from fuzzer_tool.cli import commands
+
+    exe = _cc(tmp_path, "t", SRC + MAIN, "-fPIE", "-pie")
+
+    with mock.patch("fuzzer_tool.adapters.process.run_target_stdin") as rs:
+        got = commands._auto_tune_timeout(str(exe), file_mode=False, runs=3)
+
+    assert rs.call_count == 3
+    assert got == pytest.approx(0.05, abs=1.0)

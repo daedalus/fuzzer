@@ -381,8 +381,15 @@ def cmd_fuzz(args):
     # Auto-tune timeout if requested
     timeout = args.timeout
     if args.auto_timeout:
-        timeout = _auto_tune_timeout(args.target, args.file_mode, args.target_args)
-        print(f"[*] Auto-tuned timeout: {timeout:.2f}s")
+        tuned = _auto_tune_timeout(args.target, args.file_mode, args.target_args)
+        if tuned is None:
+            print(
+                f"[*] Auto-timeout skipped: {args.target} is a shared object "
+                f"(cannot be exec'd); keeping --timeout {timeout}s"
+            )
+        else:
+            timeout = tuned
+            print(f"[*] Auto-tuned timeout: {timeout:.2f}s")
 
     # Load grammar if specified
     grammar = None
@@ -995,10 +1002,20 @@ def cmd_fuzz(args):
 
 
 def _auto_tune_timeout(target, file_mode=False, target_args=None, runs=10):
-    """Run the target N times on empty input and set timeout to 5x median."""
+    """Run the target N times on empty input and set timeout to 5x median.
+
+    Returns None when the target is a shared object: it is exec'd by every
+    probe below, and a .so has no entry point (e_entry 0), so each run would
+    segfault on an NX fetch at its own base (error 0x15, logged by the
+    kernel) and the "median" would be the time-to-crash, not target time.
+    """
     import time as _time
 
     from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
+    from fuzzer_tool.core.elf import detect_elf_type, is_elf_executable
+
+    if detect_elf_type(target) == 3 and not is_elf_executable(target):
+        return None
 
     tmp_dir = Path("/tmp") / f"tune_{os.getpid()}"
     if file_mode:
