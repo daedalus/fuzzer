@@ -47,9 +47,10 @@ def _sched(rng=None, heat=(OFFS, MAGS), ready=True):
     )
 
 
-def _pick(sched, u, buf_len=len(SEED), data=SEED):
+def _pick(sched, u, buf_len=None, data=SEED):
     """Propose with a scripted CDF point *u* in [0, 1)."""
     sched._rng = ScriptedRng([NO_ESCAPE, u])
+    buf_len = len(data) if buf_len is None else buf_len
     return sched.propose(data, buf_len)
 
 
