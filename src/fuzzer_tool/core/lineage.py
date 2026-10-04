@@ -35,6 +35,7 @@ computation over coverage deltas at minimize time.
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from typing import NamedTuple
 
 GAMMA = 0.9
 """Discount factor per tree edge for structural subtree weights."""
@@ -44,6 +45,16 @@ _PROPAGATE_EPS = 1e-6
 
 _MAX_INACTIVE_DEFAULT = 100_000
 """Cap on soft-deleted (pruned) nodes kept in the tree."""
+
+
+class LineageShape(NamedTuple):
+    """Topology fingerprint of the live lineage forest (see ``LineageTree.shape``)."""
+
+    live: int
+    leaf_frac: float
+    corridor_frac: float
+    max_depth: int
+    mean_chain: float
 
 
 class LineageNode:
@@ -495,6 +506,67 @@ class LineageTree:
             return total
 
         return dfs(key)
+
+    def shape(self) -> LineageShape:
+        """Maze-style topology metrics over the live (active) forest.
+
+        Which Growing Tree policy did the effective seed picker behave as?
+        Each pick that yields a child extends the tree under the picked
+        seed, so the picker leaves its policy in the shape::
+
+            newest (DFS)         oldest / random (bushy)
+            k0-k1-k2-k3-k4       k0-+-k1-+-k3
+                                      |   +-k4
+                                      +-k2
+
+        - ``leaf_frac``: live nodes with no live child / live nodes
+          (dead-end %).
+        - ``corridor_frac``: live nodes with exactly one live child / live
+          nodes (loosely the river factor; high = long DFS-like chains).
+        - ``max_depth``: deepest live node (diameter proxy).
+        - ``mean_chain``: mean length of maximal unary runs (corridor
+          nodes linked parent to only child); 0.0 when there are none.
+
+        Pure topology: independent of edge counts and weights. Iterative,
+        so a chain far past the recursion limit is fine. An empty forest is
+        all zeros.
+        """
+        live = {k: n for k, n in self.nodes.items() if n.active}
+        if not live:
+            return LineageShape(0, 0.0, 0.0, 0, 0.0)
+
+        only_child: dict[str, str] = {}
+        leaves = 0
+        for key in live:
+            kids = [c for c in self._children.get(key, ()) if c in live]
+            if not kids:
+                leaves += 1
+            elif len(kids) == 1:
+                only_child[key] = kids[0]
+
+        runs = [
+            self._run_length(key, only_child)
+            for key, node in live.items()
+            if key in only_child and node.parent_key not in only_child
+        ]
+        n = len(live)
+        return LineageShape(
+            live=n,
+            leaf_frac=leaves / n,
+            corridor_frac=len(only_child) / n,
+            max_depth=max(node.depth for node in live.values()),
+            mean_chain=sum(runs) / len(runs) if runs else 0.0,
+        )
+
+    @staticmethod
+    def _run_length(start: str, only_child: dict[str, str]) -> int:
+        """Corridor nodes in the unary run beginning at *start*."""
+        length = 0
+        key: str | None = start
+        while key in only_child:
+            length += 1
+            key = only_child[key]
+        return length
 
     def strahler(self, key: str) -> int:
         """Strahler (Horton-Strahler) number of the subtree rooted at *key*.

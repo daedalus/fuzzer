@@ -28,6 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Growing Tree seed arm + lineage shape** (handover `docs/handover/handover_maze_algorithms_2026-09-24.md` items 1-3): `LineageTree.shape()` (leaf / corridor fraction, max depth, mean unary-chain length; printed in the run summary); `--seed-newest-scheduler` / `--seed-newest-p` (Elo arm `seed_newest`: newest seed with probability p, else uniform; off by default, not in `--hail-mary`); `bench_paired` arms `seed-round-robin`, `seed-newest-p{0,30,60,100}`. Unmeasured: no paired benchmark yet.
 - **`--checksum-sites`: TaintScope-style checksum repair** (`core/checksum_sites.py`; survey gap 2): on each seed, finds fields equal to CRC-32 / Adler-32 / CRC-16 / Fletcher-16 / 16-bit sum of a region, then recomputes them in every mutant (end of `OperatorEngine.mutate`, `REPAIR_P=0.9`). Covers header and mid-file fields (PNG-like chunks), not only a trailer. Off by default; in `--hail-mary`.
 - **`--pos-finch`: Finch hot-byte position arm** (`core/schedulers/pos_finch.py`; handover `docs/handover/handover_paper_collection_survey_2026-10-02.md` gap 1): weights a byte by how many edges its byteflip moved (`OperatorEngine.effector_heat`), not just live/inert like `effector`, plus a bounded per-seed gain bonus. Needs `--deterministic`; implied by `--position-arena`.
 

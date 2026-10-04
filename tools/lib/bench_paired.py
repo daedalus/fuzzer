@@ -82,6 +82,11 @@ ARENA_TESTABLE = (
 )
 _ARENA = ["--elo", "--mc-bandit", "--position-arena"]
 
+# Growing Tree sweep (docs/handover/handover_maze_algorithms_2026-09-24.md items
+# 2-3): p_newest in percent, 0 = uniform random (Prim), 100 = pure newest (DFS).
+# Percent integers keep arm names free of dots.
+SEED_NEWEST_PCTS = (0, 30, 60, 100)
+
 ARMS: dict[str, list[str]] = {
     "baseline": [],
     # Ports under test. Each differs from baseline in exactly one knob.
@@ -174,6 +179,13 @@ ARMS: dict[str, list[str]] = {
     # baseline (uniform offsets) and against each other.
     "pos-round-robin": ["--pos-round-robin"],
     "pos-fibonacci": ["--pos-fibonacci"],
+    # Growing Tree seed arms (see SEED_NEWEST_PCTS). No --elo: the arm is the
+    # sole seed strategy, so each differs from `baseline` by that one picker.
+    "seed-round-robin": ["--seed-round-robin-scheduler"],
+    **{
+        f"seed-newest-p{pct}": ["--seed-newest-scheduler", "--seed-newest-p", str(pct / 100)]
+        for pct in SEED_NEWEST_PCTS
+    },
     # Good-Turing discovery-probability arms (handover entropy §7.1). Both are
     # Elo arms, so they pair against `elo`, not `baseline`. Prior left at its
     # default: the sweep is a separate A/B.
@@ -226,6 +238,14 @@ GENERATION_ARMS = ("wfc", "elo-mcts", "elo-alphabeta", "bootstrap")
 
 POSITION_ARMS = ("pos-round-robin", "pos-fibonacci")
 
+# Growing Tree sweep arms, in the order the handover lists them. Each pairs
+# against `baseline` (default weighted picker, ARM_BASELINES); to pair one
+# against round robin instead, run `analyse --baseline seed-round-robin`.
+GROWING_TREE_ARMS = (
+    "seed-round-robin",
+    *(f"seed-newest-p{pct}" for pct in SEED_NEWEST_PCTS),
+)
+
 GOOD_TURING_ARMS = ("elo-good-turing-seed", "elo-op-good-turing")
 
 # Arena subset group (pos-arena-uniform is the control the rest pair against).
@@ -252,6 +272,7 @@ ARM_BASELINES: dict[str, str] = {
     "strata-a4": "strata-a1-elo",
     "pos-round-robin": "baseline",
     "pos-fibonacci": "baseline",
+    **{arm: "baseline" for arm in GROWING_TREE_ARMS},
     "elo-good-turing-seed": "elo",
     "elo-op-good-turing": "elo",
     "pos-arena-uniform": "elo",

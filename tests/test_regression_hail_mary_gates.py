@@ -80,6 +80,10 @@ _EXCLUDED_OPT_IN = frozenset(
         "zip_seed_corpus",
         # Scales -M, which --slopt (on under --hail-mary) replaces: a no-op there.
         "one_fifth",
+        # Unmeasured: the Growing Tree 'newest' arm stays out until it wins
+        # its own A/B (bench_paired seed-newest-p* arms), same criterion as
+        # gate_bonus / temperature_control.
+        "seed_newest_scheduler",
         # Changes maintenance-tick cadence (crash/sanitizer replays and
         # gc.collect move off i % 500 onto the stats-interval cadence),
         # not a fuzzing strategy. --hail-mary force-enabling it would

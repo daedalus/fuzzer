@@ -101,6 +101,7 @@ _OS_SEED_ARMS = {
     "codel": "_seed_codel",
     "aimd": "_seed_aimd",
     "p2c": "_seed_p2c",
+    "newest": "_seed_newest",
 }
 _OS_SEED_SIGNALS = {
     "stride": ("weight",),

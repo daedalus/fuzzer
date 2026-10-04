@@ -133,6 +133,7 @@ from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
 from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
+from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST, SeedNewestScheduler
 from fuzzer_tool.core.schedulers.seed_p2c import SeedP2CScheduler
 from fuzzer_tool.core.schedulers.seed_sfq import SeedSFQScheduler
 from fuzzer_tool.core.schedulers.seed_stride import SeedStrideScheduler
@@ -259,6 +260,7 @@ _SEED_STRATEGY_NAMES = (
     "codel",
     "aimd",
     "p2c",
+    "newest",
     "consolidated",
 )
 
@@ -1697,6 +1699,12 @@ class Fuzzer:
         # Target-edge weighting for the saliency net: "gt" (Simple Good-Turing rarity,
         # default) or "support" (plain 1/support). Appended: positional signature.
         saliency_targets="gt",
+        # Seed-arena Growing Tree 'newest' arm (core/schedulers/seed_newest.py):
+        # newest live seed with probability seed_newest_p, else uniform. Off by
+        # default and out of --hail-mary until measured. Appended: positional
+        # signature.
+        seed_newest_scheduler=False,
+        seed_newest_p=DEFAULT_P_NEWEST,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2944,6 +2952,11 @@ class Fuzzer:
         self._seed_codel = SeedCoDelScheduler() if seed_codel_scheduler else None
         self._seed_aimd = SeedAIMDScheduler() if seed_aimd_scheduler else None
         self._seed_p2c = SeedP2CScheduler(rng=self._rng) if seed_p2c_scheduler else None
+        self._seed_newest = (
+            SeedNewestScheduler(rng=self._rng, p_newest=seed_newest_p)
+            if seed_newest_scheduler
+            else None
+        )
         self._seed_consolidated = (
             SeedConsolidatedScheduler(rng=self._rng) if seed_consolidated_scheduler else None
         )
@@ -2959,6 +2972,7 @@ class Fuzzer:
                 self._seed_codel,
                 self._seed_aimd,
                 self._seed_p2c,
+                self._seed_newest,
             )
             if arm is not None
         )

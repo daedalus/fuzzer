@@ -34,6 +34,7 @@ from fuzzer_tool.core.circular_stats import PhaseConcentration
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
 from fuzzer_tool.core.kalman import RobustKF
+from fuzzer_tool.core.lineage import LineageTree
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
@@ -655,6 +656,31 @@ class StatsReporter:
             f"withdrawn, {st['phantom_ids']} phantom ids rejected"
         )
 
+    def _print_lineage_shape(self, f) -> None:
+        """Print the lineage topology fingerprint (corridor-heavy = newest-like).
+
+        Uses the live tree under --lineage, else a throwaway one rebuilt from
+        ``seed_meta`` parent pointers, so any run has a fingerprint. Silent
+        when no seed has a parent: every node a root says nothing.
+        """
+        tree = getattr(f, "_lineage", None)
+        if tree is None:
+            seed_key = getattr(f, "_seed_key", None)
+            if seed_key is None:
+                return
+            tree = LineageTree()
+            tree.rebuild_from_meta(f.seed_meta, seed_key)
+
+        if len(tree.roots()) >= len(tree):
+            return
+
+        shape = tree.shape()
+        print(
+            f"  Lineage shape:     leaf {shape.leaf_frac:.2f}, corridor "
+            f"{shape.corridor_frac:.2f}, max depth {shape.max_depth}, "
+            f"mean chain {shape.mean_chain:.1f}"
+        )
+
     def _print_summary_seeds(self, f) -> None:
         """Print seed-related summary lines."""
         if not f.seed_meta:
@@ -663,6 +689,7 @@ class StatsReporter:
         if depths:
             print(f"  Max lineage depth: {max(depths)}")
             print(f"  Avg lineage depth: {sum(depths) / len(depths):.1f}")
+        self._print_lineage_shape(f)
 
         edges_per_seed = [m.get("coverage_edges", 0) for m in f.seed_meta.values()]
         productive = sum(1 for e in edges_per_seed if e > 0)

@@ -20,6 +20,7 @@ from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
 from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
+from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST
 from fuzzer_tool.core.shim_health import WriteGuard
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.fuzzer import Fuzzer
@@ -654,6 +655,8 @@ def cmd_fuzz(args):
         pos_good_turing=getattr(args, "pos_good_turing", False),
         pos_saliency=getattr(args, "pos_saliency", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
+        seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
+        seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
         position_arena=getattr(args, "position_arena", False),
@@ -2948,6 +2951,22 @@ def main() -> int:
         help="Seed-arena arm 'p2c': power of two choices: two uniform draws, higher posterior mean"
         " of finds wins. Elo arm; also the no-elo pick when enabled "
         "(core/schedulers/seed_p2c.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-newest-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'newest': Growing Tree mixture: the most recently added seed with "
+        "probability --seed-newest-p, else a uniform seed (DFS-like corridors vs bushy). Elo arm; "
+        "also the no-elo pick when enabled (core/schedulers/seed_newest.py). Not in --hail-mary "
+        "until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-newest-p",
+        type=float,
+        default=DEFAULT_P_NEWEST,
+        metavar="P",
+        help="With --seed-newest-scheduler: probability of picking the newest seed, in [0, 1]. "
+        "0 is uniform random, 1 is pure newest (locks onto the latest seed). Default %(default)s.",
     )
     fuzz_parser.add_argument(
         "--seed-consolidated-scheduler",

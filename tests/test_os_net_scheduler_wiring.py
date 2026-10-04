@@ -17,6 +17,7 @@ from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
 from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
+from fuzzer_tool.core.schedulers.seed_newest import SeedNewestScheduler
 from fuzzer_tool.core.schedulers.seed_p2c import SeedP2CScheduler
 from fuzzer_tool.core.schedulers.seed_sfq import SFQ_BUCKETS, SeedSFQScheduler, bucket_of
 from fuzzer_tool.core.schedulers.seed_stride import SeedStrideScheduler
@@ -38,12 +39,15 @@ SEED_ARMS = {
     "codel": ("seed_codel_scheduler", "_seed_codel", SeedCoDelScheduler),
     "aimd": ("seed_aimd_scheduler", "_seed_aimd", SeedAIMDScheduler),
     "p2c": ("seed_p2c_scheduler", "_seed_p2c", SeedP2CScheduler),
+    "newest": ("seed_newest_scheduler", "_seed_newest", SeedNewestScheduler),
     "consolidated": (
         "seed_consolidated_scheduler",
         "_seed_consolidated",
         SeedConsolidatedScheduler,
     ),
 }
+# Out of --hail-mary until each wins its own A/B (same criterion as gate_bonus).
+UNMEASURED_ARMS = frozenset({"seed_newest_scheduler"})
 OP_ARMS = {
     "op_stride": OpStrideScheduler,
     "op_p2c": OpP2CScheduler,
@@ -377,4 +381,7 @@ def test_cli_flags_reach_fuzzer_and_hail_mary():
     for kw in [kw for kw, _a, _c in SEED_ARMS.values()] + list(OP_ARMS):
         assert all(kw in {k.arg for k in c.keywords} for c in calls)
         assert kw in dests
+        if kw in UNMEASURED_ARMS:
+            assert kw not in commands._HAIL_MARY_FLAGS
+            continue
         assert kw in commands._HAIL_MARY_FLAGS
