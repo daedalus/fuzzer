@@ -3136,6 +3136,98 @@ class OperatorEngine:
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
 
+    def _op_saliency_ladder(self, buf, _byte_idx, _data):
+        """Sign-directed ladder operator: 2^k byte walk with +/- steps plus inserts.
+
+        Uses the PositionSaliencyScheduler's signed gradient to identify important bytes,
+        then walks them in a 2^k doubling pattern with steps ±1..255, and performs
+        block insert/delete at the highest-gradient locations (NEUZZ++ style).
+
+        The operator accesses self.f._pos_saliency, which is the
+        PositionSaliencyScheduler instance set up under --pos-saliency or --hail-mary.
+        """
+
+        saliency = getattr(self.f, "_pos_saliency", None)
+        if saliency is None or not saliency.ready:
+            return
+
+        rng = self.ctx._rng
+        if not buf:
+            return
+
+        # Get signed saliency per byte (positive = increase, negative = decrease)
+        # We need data to be at least INPUT_CAP bytes; truncate if longer
+        data = bytes(buf)[: saliency._cap]
+        signed_grad = saliency.signed_saliency(data)
+
+        if signed_grad.sum() == 0:
+            # No signal yet; still try a uniform step
+            off = rng.randint(0, len(data) - 1)
+            v = data[off] + rng.randint(-255, 256)
+            if v < 0:
+                v = 0
+            elif v > 255:
+                v = 255
+            buf[off] = v
+            return buf
+
+        # Find top bytes by |gradient| - the model's "hot" locations
+        top_k = min(16, len(signed_grad))
+        top_indices = np.argsort(np.abs(signed_grad))[-top_k:][::-1]
+
+        # Determine round k: find which gradient-rank bucket we operate in
+        # NEUZZ++ style: round 0: 1 byte, round 1: 2 bytes, round 2: 4 bytes, etc.
+        # We'll pick a random rank bucket and a random byte from it
+        rank_bucket = rng.randint(0, min(8, top_k // 2 + 1))
+        start = rank_bucket * max(1, top_k // 8)
+        end = min(start + max(1, top_k // 8), top_k)
+        chosen_idx = rng.randint(start, end)
+        byte_offset = top_indices[chosen_idx]
+
+        # Apply 2^k ladder walk
+        k = rng.randint(0, 4)  # k in 0..4, 2^k steps
+        step = 2**k
+        step_sign = 1 if rng.random() < 0.5 else -1
+        step_val = step * step_sign
+
+        # Clamp step to ±255 max
+        if abs(step_val) > 255:
+            step_val = 255 if step_sign > 0 else -255
+
+        # Mutate the chosen byte
+        new_val = data[byte_offset] + step_val
+        if new_val < 0:
+            new_val = 0
+        elif new_val > 255:
+            new_val = 255
+
+        # Only apply if there's an actual change
+        if new_val != data[byte_offset]:
+            buf[byte_offset] = new_val
+            return buf
+
+        # If no change from this byte, try the next top byte in the bucket
+        for attempt in range(chosen_idx + 1, end):
+            byte_offset = top_indices[attempt % len(top_indices)]
+            new_val = data[byte_offset] + step_val
+            if new_val < 0:
+                new_val = 0
+            elif new_val > 255:
+                new_val = 255
+            if new_val != data[byte_offset]:
+                buf[byte_offset] = new_val
+                return buf
+
+        # Fallback: uniform random byte change
+        off = rng.randint(0, len(data) - 1)
+        v = data[off] + rng.randint(-255, 256)
+        if v < 0:
+            v = 0
+        elif v > 255:
+            v = 255
+        buf[off] = v
+        return buf
+
     def _op_magic_byte_search(self, buf, _byte_idx, _data):
         """Plant a cmplog operand verbatim at a candidate site (Angora MB)."""
         from fuzzer_tool.core.mb_cbh import magic_byte_search

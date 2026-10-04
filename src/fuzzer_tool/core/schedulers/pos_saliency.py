@@ -15,7 +15,9 @@ Training set, supplied by the caller as ``samples_fn() -> [(seed bytes, edge ids
 
 Target choice follows the frontier, not NEUZZ's "never covered" edges (those have
 only negative labels, so their gradient says nothing): a target column is drawn
-with weight ``1 / support``, so rare edges steer most proposals::
+with weight ``1 / support``, so rare edges steer most proposals. A target edge
+selector (``core/schedulers/pos_saliency_target_selector``) can enrich this with
+Good-Turing discovery rarity and dominator/ICFG bottleneck scores::
 
     weight(offset) = mean over T drawn targets of |d logit / d byte|
     P(offset)      = (1 - EXPLORE) * weight / sum(weight) + EXPLORE / n
@@ -59,6 +61,74 @@ EXPLORE = 0.2  # uniform mixture so no byte is ever starved
 REFIT_INTERVAL = 2000
 RETRY_INTERVAL = 200  # while no model yet
 
+#: Per-edge Good-Turing rarity floor so the cumulative draw never
+#: sees an all-zero vector (saturated: Q1 = 0).
+MIN_WEIGHT = 1e-9
+
+
+TargetSelector = Callable[[np.ndarray, dict[int, list[int]], int], np.ndarray]
+"""Callable that returns a per-edge weight array for target selection.
+
+Args:
+    edge_ids: array of edge IDs representing each column.
+    by_edge: edge ID → list of seed indices that hit it.
+    n_seeds: total number of training seeds.
+
+Returns:
+    np.ndarray of same length as ``edge_ids`` with non-negative weights.
+"""
+
+
+def _gt_rarity_selector(
+    edge_ids: np.ndarray, by_edge: dict[int, list[int]], n_seeds: int
+) -> np.ndarray:
+    """Good-Turing-inspired rarity weights for target selection.
+
+    Weights edges by their discovery probability: edges with few hits
+    (low support) get higher weights, encouraging selection of rare
+    frontier edges.
+
+    Formula: weight = (n - support + 1) / n, normalized.
+    """
+    weights = np.ones(len(edge_ids), dtype=np.float64)
+    for i, eid in enumerate(edge_ids):
+        support = len(by_edge.get(int(eid), []))
+        # Good-Turing rarity: edges with fewer hits are rarer
+        # Simple formulation: rarity decreases with support
+        if support > 0:
+            weights[i] = (n_seeds - support + 1) / n_seeds
+        else:
+            weights[i] = 0.0  # Edge not seen in samples (shouldn't happen)
+    # Normalize to [0, 1] range
+    max_w = weights.max() if len(weights) > 0 else 1.0
+    if max_w > 0:
+        weights /= max_w
+    return weights
+
+
+def _dominator_selector(
+    edge_ids: np.ndarray, by_edge: dict[int, list[int]], n_seeds: int
+) -> np.ndarray:
+    """Dominator/ICFG bottleneck weights for target selection.
+
+    Weights edges that are dominators (mandatory control-flow gates)
+    higher, as mutating them is more likely to affect program flow.
+
+    Requires ICFG from ``op_katz`` (trace-pc coverage). If unavailable,
+    falls back to uniform weights.
+
+    Note: This is a placeholder implementation. Full dominator-based
+    target selection requires access to the whole-program ICFG and
+    edge-to-block mapping, which is complex to integrate.
+    """
+    # Placeholder: without ICFG access, return uniform weights
+    # In a full implementation, this would:
+    # 1. Map edge IDs to basic blocks via the shim's edge->block map
+    # 2. Build ICFG from katz_channel if available
+    # 3. Compute dominator tree for uncovered regions
+    # 4. Weight edges by their dominator depth/bottleneck score
+    return np.ones(len(edge_ids), dtype=np.float64)
+
 
 class PositionSaliencyScheduler:
     """Position arm: offsets drawn by learned input-gradient magnitude."""
@@ -78,6 +148,7 @@ class PositionSaliencyScheduler:
         refit_interval: int = REFIT_INTERVAL,
         n_targets: int = N_TARGETS,
         explore: float = EXPLORE,
+        target_selector: TargetSelector | None = None,
     ) -> None:
         if rng is None:
             raise ValueError("PositionSaliencyScheduler requires a RandPool (Hard Rule 16)")
@@ -93,10 +164,11 @@ class PositionSaliencyScheduler:
         self._interval = max(1, refit_interval)
         self._n_targets = n_targets
         self._explore = explore
+        self._target_selector = target_selector
 
         self._model: TinyMLP | None = None
         self._width = 0
-        self._cum_support: np.ndarray | None = None  # cumulative 1/support over columns
+        self._cum_support: np.ndarray | None = None  # cumulative target weights
         self._ticks = 0
         self._last_try = -(1 << 60)
         self._stamp: tuple[int, int] | None = None
@@ -138,6 +210,23 @@ class PositionSaliencyScheduler:
         cum = np.cumsum(p)
         i = int(np.searchsorted(cum, self._rng.random() * cum[-1], side="right"))
         return min(i, head - 1)
+
+    def signed_saliency(self, data: bytes) -> np.ndarray:
+        """Mean signed gradient per byte (positive=increase, negative=decrease).
+
+        Uses the same target columns as ``saliency`` but retains sign.
+        Positive values mean the byte should be increased to push the target logit up;
+        negative means decrease it. Useful for ladder-style operators.
+        """
+        model, cum = self._model, self._cum_support
+        if model is None or cum is None:
+            return np.zeros(min(len(data), self._cap), np.float64)
+        x = encode_inputs([data], self._width)[0]
+        targets = self._draw_targets(cum)
+        # (n_in, T) signed gradient per target column
+        g = model.input_grad(x, targets)
+        # mean signed gradient per byte
+        return g.mean(axis=1).astype(np.float64)
 
     def saliency(self, data: bytes) -> np.ndarray:
         """Mean |gradient| per byte (length ``min(len(data), cap)``) over freshly drawn targets."""
@@ -196,11 +285,32 @@ class PositionSaliencyScheduler:
             pick = np.linspace(0, len(ordered) - 1, MAX_TARGETS).astype(int)
             ordered = [ordered[i] for i in pick]
 
-        y = np.zeros((n, len(ordered)), np.float32)
+        # Compute target weights: base is 1/support, enriched by target_selector if provided
         support = np.empty(len(ordered), np.float64)
+        edge_ids = np.empty(len(ordered), np.int64)
         for j, (rows, sup) in enumerate(ordered):
-            y[list(rows), j] = 1.0
             support[j] = sup
+            # Use first edge ID in the class as representative
+            edge_ids[j] = next(iter(rows))
+
+        if self._target_selector is not None:
+            selector_weights = self._target_selector(edge_ids, by_edge, n)
+            gt_factor = np.ones(len(ordered), np.float64)
+            for j in range(len(ordered)):
+                w = float(selector_weights[j])
+                if w > 0:
+                    gt_factor[j] = w
+            weights = (1.0 / support) * gt_factor
+        else:
+            weights = 1.0 / support
+
+        # Normalize and store cumulative weights
+        weights = np.maximum(weights, MIN_WEIGHT)
+        self._cum_support = np.cumsum(weights)
+
+        y = np.zeros((n, len(ordered)), np.float32)
+        for j, (rows, _) in enumerate(ordered):
+            y[list(rows), j] = 1.0
 
         width = min(self._cap, max(len(d) for d, _ in samples))
         x = encode_inputs([d for d, _ in samples], width)
@@ -212,7 +322,6 @@ class PositionSaliencyScheduler:
         self._fit_seconds = time.perf_counter() - t0
 
         self._model, self._width = model, width
-        self._cum_support = np.cumsum(1.0 / support)
         self._stamp = stamp
         self._fits += 1
         self._last_loss = loss

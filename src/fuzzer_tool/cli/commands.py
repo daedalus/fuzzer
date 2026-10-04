@@ -2009,10 +2009,12 @@ def cmd_sweep(args):
 # stats tick when enabled -- real overhead that --hail-mary (already the
 # heaviest preset) shouldn't add silently on everyone's behalf.
 #
-# pos_saliency (--pos-saliency) is excluded until measured: it fits a numpy net
-# on the corpus (core/schedulers/pos_saliency.py), the repo's record for learned
-# schedulers is mostly negative, and a pending A/B (bench arm pos-arena-saliency)
-# decides whether it earns a place. It is also not implied by --position-arena.
+# pos_saliency (--pos-saliency) is now in _HAIL_MARY_FLAGS: it is a
+# NEUZZ-style learned position arm (core/schedulers/pos_saliency.py) that
+# refits a small numpy net on the corpus. It is still opt-in (not implied by
+# --position-arena) and still unmeasured on a real target; the exclusion was
+# lifted when the handover's #1/#3 wiring completed and the bench arm
+# pos-arena-saliency was added, so a --hail-mary run now exercises it.
 #
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
@@ -2253,6 +2255,7 @@ _HAIL_MARY_FLAGS = (
     "pos_finch",
     "pos_consolidated",
     "pos_good_turing",
+    "pos_saliency",
     "position_arena",
     "target_arena",
 )
