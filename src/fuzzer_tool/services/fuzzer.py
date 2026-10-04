@@ -60,6 +60,7 @@ from fuzzer_tool.core.crash_explore import CrashExplorer
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
 from fuzzer_tool.core.elf import (
     SHM_LAYOUT_CURRENT,
+    detect_elf_type,
     detect_shm_layout,
     is_elf_executable,
 )
@@ -1709,6 +1710,14 @@ class Fuzzer:
         if (inprocess or inprocess_direct) and is_elf_executable(target):
             print(f"[*] {target} is an executable: exec mode, not in-process")
             inprocess = inprocess_direct = False
+        # Persistent mode execve()s the target. A shared object (ET_DYN, no
+        # PT_INTERP, e_entry 0) cannot be exec'd: the kernel jumps to its
+        # base (the non-executable ELF header) and the child dies with a
+        # SEGV on an NX instruction fetch, logged by the kernel on every
+        # attempt. --hail-mary forces persistent on, so drop it here.
+        if persistent and detect_elf_type(target) == 3 and not is_elf_executable(target):
+            print(f"[*] {target} is a shared object: persistent mode disabled (it cannot be exec'd)")
+            persistent = False
         self.target = target
         self.debug = debug
         # Persistent-loader ptrace self-trace for fault-address/register
@@ -4268,6 +4277,9 @@ class Fuzzer:
             else:
                 print("[!] Persistent mode: failed to start target, falling back to fork")
                 self._persistent_runner = None
+                # Keep the flag truthful: the startup banner and feature
+                # summary key off self.persistent.
+                self.persistent = False
 
         self._network_runner = None
         if getattr(self, "net_host", None) and getattr(self, "net_port", None):
