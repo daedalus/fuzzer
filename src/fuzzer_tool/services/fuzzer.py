@@ -1693,6 +1693,9 @@ class Fuzzer:
         # not implied by position_arena or --hail-mary. Appended: positional
         # signature.
         pos_saliency=False,
+        # Target-edge weighting for the saliency net: "gt" (Simple Good-Turing rarity,
+        # default) or "support" (plain 1/support). Appended: positional signature.
+        saliency_targets="gt",
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3110,9 +3113,18 @@ class Fuzzer:
         # Trains on the corpus + EdgeTracker.seed_edges. Off-policy extra, not persisted.
         self._pos_saliency = None
         if pos_saliency:
-            from fuzzer_tool.core.schedulers.pos_saliency import PositionSaliencyScheduler
+            from fuzzer_tool.core.schedulers.pos_saliency import (
+                PositionSaliencyScheduler,
+                gt_rarity_selector,
+            )
 
-            self._pos_saliency = PositionSaliencyScheduler(self._rng, self._saliency_samples)
+            if saliency_targets not in ("gt", "support"):
+                raise ValueError(f"saliency_targets must be 'gt' or 'support', got {saliency_targets!r}")
+            self._pos_saliency = PositionSaliencyScheduler(
+                self._rng,
+                self._saliency_samples,
+                target_selector=gt_rarity_selector if saliency_targets == "gt" else None,
+            )
             log.info("Position saliency scheduling enabled")
         # Position-arena consolidated: the learning arms' features in one
         # proposer (see core/schedulers/pos_consolidated.py). Off-policy

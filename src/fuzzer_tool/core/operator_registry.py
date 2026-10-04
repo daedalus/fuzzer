@@ -755,10 +755,12 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "prng_predict": lambda f, _d: bool(
         getattr(f, "prng_state_learner", None) and f.prng_state_learner.has_state()
     ),
-    # NEUZZ-style sign-directed ladder: needs the learned saliency model
-    # (core/schedulers/pos_saliency.py). Declines silently when the model
-    # is absent or not yet fitted.
-    "saliency_ladder": lambda f, _d: bool(getattr(f, "_pos_saliency", None)),
+    # NEUZZ-style sign-directed ladder: needs a FITTED saliency model
+    # (core/schedulers/pos_saliency.py). warm() also gives a first refit its chance,
+    # so the operator can come alive even if the position arena rarely draws the arm.
+    "saliency_ladder": lambda f, _d: bool(
+        getattr(f, "_pos_saliency", None) is not None and f._pos_saliency.warm()
+    ),
     # flag-gated base op
     "regex_bomb": lambda f, _d: bool(getattr(f, "enable_regex_bomb", False)),
     "x86_chunk_mutate": lambda f, _d: bool(getattr(f, "enable_x86_mutator", False)),

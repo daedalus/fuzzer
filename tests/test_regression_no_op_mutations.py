@@ -743,6 +743,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         self._gate_path_negate(f, unreachable)
 
         self._gate_prng(f)
+        self._gate_saliency(f)
 
         self._gate_weizz(f)
 
@@ -862,6 +863,24 @@ class TestStateGatedOperatorsAreNotNoOps:
             "fixture failed to recover a taus88 state"
         )
         f.prng_state_learner = prng_learner
+
+    @staticmethod
+    def _gate_saliency(f: Fuzzer) -> None:
+        """Install a fitted PositionSaliencyScheduler (the saliency_ladder gate)."""
+        # --- saliency_ladder -------------------------------------------------
+        # Gated on a FITTED net. A real scheduler fitted on a synthetic corpus with a
+        # planted byte -> edge dependency, the same shape the fuzzer feeds it.
+        import numpy as np
+
+        from fuzzer_tool.core.rand_pool import RandPool
+        from fuzzer_tool.core.schedulers.pos_saliency import PositionSaliencyScheduler
+
+        r = np.random.default_rng(0)
+        seeds = [bytes(r.integers(0, 256, 64, dtype=np.uint8)) for _ in range(32)]
+        samples = [(s, {1, 2 + (s[3] > 128), 4 + (s[9] < 60)}) for s in seeds]
+        sal = PositionSaliencyScheduler(RandPool(seed=7), lambda: samples)
+        assert sal.refit(), "fixture failed to fit the saliency net"
+        f._pos_saliency = sal
 
     @staticmethod
     def _gate_weizz(f: Fuzzer) -> None:

@@ -653,6 +653,7 @@ def cmd_fuzz(args):
         pos_consolidated=getattr(args, "pos_consolidated", False),
         pos_good_turing=getattr(args, "pos_good_turing", False),
         pos_saliency=getattr(args, "pos_saliency", False),
+        saliency_targets=getattr(args, "saliency_targets", "gt"),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
         position_arena=getattr(args, "position_arena", False),
@@ -3122,6 +3123,13 @@ def main() -> int:
         "(NEUZZ-style; core/schedulers/pos_saliency.py). Opt-in: NOT implied by "
         "--position-arena or --hail-mary (unmeasured). Joins the arena pool when "
         "--position-arena is on.",
+    )
+    fuzz_parser.add_argument(
+        "--saliency-targets",
+        choices=("gt", "support"),
+        default="gt",
+        help="With --pos-saliency: how the net's target edges are weighted. gt = Simple "
+        "Good-Turing adjusted-count rarity (default); support = plain 1/support.",
     )
     fuzz_parser.add_argument(
         "--position-arena",

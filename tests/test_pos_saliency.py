@@ -10,8 +10,8 @@ from fuzzer_tool.core.schedulers.pos_base import Outcome, PositionScheduler
 from fuzzer_tool.core.schedulers.pos_saliency import (
     MIN_SEEDS,
     PositionSaliencyScheduler,
-    _dominator_selector,
-    _gt_rarity_selector,
+    _adjusted_counts,
+    gt_rarity_selector,
 )
 
 
@@ -190,59 +190,101 @@ class TestCadence:
 
 
 class TestTargetSelector:
-    def test_gt_rarity_selector_rare_edges_get_higher_weights(self):
-        """Good-Turing rarity weights: few hits → high weight."""
-        from fuzzer_tool.core.schedulers.pos_saliency import _gt_rarity_selector
+    @staticmethod
+    def _spectrum(by_edge):
+        sp = {}
+        for rows in by_edge.values():
+            sp[len(rows)] = sp.get(len(rows), 0) + 1
+        return sp
 
-        edge_ids = np.array([1, 2, 3, 4, 5], dtype=np.int64)
-        by_edge = {
-            1: [0],  # hit by 1 seed
-            2: [0, 1],  # hit by 2 seeds
-            3: list(range(20)),  # hit by all
-            4: [0, 1, 2],
-            5: [0, 1],
-        }
-        n_seeds = 20
-        w = _gt_rarity_selector(edge_ids, by_edge, n_seeds)
-        # support 1 → (20-1+1)/20 = 1.0 (after normalization, max)
-        assert w[0] >= w[1] and w[1] >= w[3]  # rare first
-        assert w[0] > w[2]  # singleton more rare than the universal edge
-        assert len(w) == 5
+    def test_gt_weights_fall_with_support(self):
+        # supports 1,1,2,2,3,5,8,13 over 20 seeds: a plausible heavy-tailed spectrum
+        sup = [1, 1, 1, 2, 2, 3, 5, 8, 13]
+        by_edge = {100 + i: list(range(c)) for i, c in enumerate(sup)}
+        ids = np.array(sorted(by_edge), dtype=np.int64)
+        w = gt_rarity_selector(ids, by_edge, 20)
+        assert len(w) == len(sup) and (w > 0).all()
+        order = np.argsort(sup, kind="stable")
+        assert (np.diff(w[order]) <= 1e-12).all()  # never inverts the rarity order
 
-    def test_dominator_selector_returns_uniform(self):
-        """Dominator selector without ICFG falls back to uniform weights."""
-        edge_ids = np.array([1, 2, 3], dtype=np.int64)
-        by_edge = {1: [0], 2: [0, 1], 3: list(range(20))}
-        w = _dominator_selector(edge_ids, by_edge, 20)
-        assert np.allclose(w, 1.0)
-        assert len(w) == 3
+    def test_gt_uses_real_edge_ids(self):
+        # ids far from 0..n: a selector indexing by position instead of id sees zero support
+        by_edge = {1000: [0], 1001: [0, 1], 2000: list(range(10))}
+        w = gt_rarity_selector(np.array([1000, 1001, 2000], dtype=np.int64), by_edge, 10)
+        assert (w > 0).all() and w[0] > w[2]
 
-    def test_target_selector_biases_target_draws(self):
-        """With a GT selector, refit cumulative weights are skewed toward rare edges."""
-        seeds = [bytes([i]) * 100 for i in range(20)]
-        # edge 5 hit by 1 seed, edge 6 hit by 2 seeds, edge 7 hit by all
-        samples = [(s, {5} if s[0] == 0 else ({6} if s[0] == 1 else {7})) for s in seeds]
+    def test_gt_singletons_stand_out_more_than_one_over_support(self):
+        sup = [1] * 6 + [2] * 3 + [3, 4, 6, 9]
+        by_edge = {i: list(range(c)) for i, c in enumerate(sup)}
+        ids = np.array(sorted(by_edge), dtype=np.int64)
+        w = gt_rarity_selector(ids, by_edge, 20)
+        s = np.array(sup, dtype=np.float64)
+        # relative singleton:doubleton weight is sharper than the raw-count 2:1
+        assert (w[0] / w[6]) > (1 / s[0]) / (1 / s[6])
 
-        a = PositionSaliencyScheduler(RandPool(seed=1), lambda: samples, refit_interval=10)
+    def test_adjusted_counts_fall_back_when_slope_is_flat(self):
+        sp = {1: 3, 2: 3, 3: 3}  # flat spectrum: slope ~ 0 > -1, no adjustment
+        c = _adjusted_counts(np.array([1, 2, 3]), sp)
+        assert np.array_equal(c, [1.0, 2.0, 3.0])
+
+    def test_gt_empty_and_unseen(self):
+        assert len(gt_rarity_selector(np.array([], dtype=np.int64), {}, 20)) == 0
+        w = gt_rarity_selector(np.array([5], dtype=np.int64), {}, 20)
+        assert w.tolist() == [0.0]  # an edge no seed hit has no weight
+
+    def test_selector_receives_representative_edge_ids(self):
+        seen = {}
+
+        def spy(edge_ids, by_edge, n):
+            seen["ids"], seen["keys"] = edge_ids.tolist(), set(by_edge)
+            return np.ones(len(edge_ids))
+
+        seeds = [bytes([i]) * 8 for i in range(20)]
+        samples = [(s, {1000, 1001 + s[0] % 3, 2000 + s[0]}) for s in seeds]
+        a = PositionSaliencyScheduler(RandPool(seed=1), lambda: samples, target_selector=spy)
+        assert a.refit()
+        assert seen["ids"] and set(seen["ids"]) <= seen["keys"]  # real ids, not seed indices
+
+    def test_selector_weights_replace_one_over_support(self):
+        seeds = [bytes([i]) * 8 for i in range(20)]
+        samples = [(s, {5} if s[0] < 4 else {6}) for s in seeds]  # supports 4 and 16
+
+        def heavy_common(ids, by_edge, n):
+            return np.array([1.0 if len(by_edge[int(e)]) == 16 else 1e-6 for e in ids])
+
+        a = PositionSaliencyScheduler(
+            RandPool(seed=1), lambda: samples, target_selector=heavy_common
+        )
         a.refit()
-        w = a.stats()
-        assert a.ready and w["targets"] >= 1
-        # Rare edge class (support 1) should carry a large share of cum_support
         cum = a._cum_support
-        assert np.all(np.diff(cum) > 0)  # weights are positive, cumulative increasing
+        assert cum[0] < 1e-3 and cum[-1] > 0.99  # the 16-seed column carries ~all the mass
 
-    def test_no_target_selector_falls_back_to_support(self):
-        """Backward compatibility: without selector, weight is exactly 1/support."""
-        seeds = [bytes([i]) * 100 for i in range(20)]
-        samples = [(s, {5} if s[0] < 10 else {6}) for s in seeds]
-        a = PositionSaliencyScheduler(RandPool(seed=1), lambda: samples, refit_interval=10)
+    def test_default_weight_is_exactly_one_over_support(self):
+        seeds = [bytes([i]) * 8 for i in range(20)]
+        samples = [(s, {5} if s[0] < 4 else {6}) for s in seeds]
+        a = PositionSaliencyScheduler(RandPool(seed=1), lambda: samples)
         a.refit()
-        w = a.stats()
-        assert a.ready and w["targets"] >= 1
+        assert np.allclose(np.diff(np.concatenate(([0.0], a._cum_support))), [1 / 4, 1 / 16])
 
-    def test_gt_rarity_selector_empty(self):
-        """Selector returns uniform weights for empty input."""
-        edge_ids = np.array([], dtype=np.int64)
-        w = _gt_rarity_selector(edge_ids, {}, 20)
-        assert len(w) == 0
-        assert np.all(w == 1.0)
+    @pytest.mark.parametrize(
+        "bad", [lambda *a: np.ones(1), lambda *a: -np.ones(len(a[0])), lambda *a: 1 / 0]
+    )
+    def test_bad_selector_falls_back_without_stopping_the_fit(self, bad):
+        seeds = [bytes([i]) * 8 for i in range(20)]
+        samples = [(s, {5} if s[0] < 4 else {6, 7}) for s in seeds]
+        a = PositionSaliencyScheduler(RandPool(seed=1), lambda: samples, target_selector=bad)
+        assert a.refit() and a.ready
+        assert np.allclose(np.diff(np.concatenate(([0.0], a._cum_support))), [1 / 4, 1 / 16])
+
+    def test_failed_fit_leaves_model_and_weights_in_step(self, monkeypatch):
+        _, samples = _corpus()
+        a = _arm(samples)
+        a.refit()
+        cum, fits = a._cum_support.copy(), a.stats()["fits"]
+        monkeypatch.setattr(
+            "fuzzer_tool.core.schedulers.pos_saliency.TinyMLP.fit",
+            lambda *x, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        with pytest.raises(RuntimeError):
+            a.refit(force=True)
+        assert np.array_equal(a._cum_support, cum) and a.stats()["fits"] == fits

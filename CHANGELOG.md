@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`saliency_ladder` operator crashed, ignored the gradient sign and never resized** (review of `410a481`). `rng.randint(start, end)` is inclusive, so the rank-bucket pick indexed one past `top_indices` (`IndexError` on ~14% of calls at 100 B, ~100% at 5 B); the step direction was a coin flip (measured agreement with the true gradient sign 0.51); the docstring promised NEUZZ's insert/delete but there was none; and ranking used the MEAN of signed gradients over several targets, which cancel. Now `core/saliency_ladder.py` (pure, NEUZZ tiers 2/2/4/8.., log-uniform 1..255 steps, follows the sign with P=0.75, 20% block delete/insert at hot offsets) driven by `PositionSaliencyScheduler.gradient_info` (signed gradient of ONE drawn target edge). The registry gate now requires a FITTED model (`warm()`), and `record()` gives a due refit its chance so the model exists even when the arena rarely draws the arm. The operator returns a new buffer instead of mutating its input.
+- **Saliency `target_selector` was dead and fed wrong ids.** It was never passed by `Fuzzer`, and `refit()` handed it a seed index (`next(iter(rows))`) as the "edge id", so every weight came back 0 and was silently ignored. It now gets the smallest real edge id of each column class, its weights REPLACE `1/support` (they were multiplied, counting rarity twice), a bad selector falls back to `1/support` instead of aborting the fit, and the cumulative target weights are installed together with the model (a failed fit used to leave new weights with an old net).
+
+### Changed
+
+- `--saliency-targets {gt,support}` (default `gt`): `gt` weights target edges by the inverse Simple Good-Turing adjusted count (`gt_rarity_selector`, log-log smoothed, never inverts the rarity order), `support` keeps plain `1/support`.
+- `--pos-saliency` is part of `--hail-mary` (it was excluded as unmeasured; upstream lifted that).
+
+### Removed
+
+- `_dominator_selector`: a stub returning all-ones while its commit message claimed ICFG/dominator weighting. A real one needs the shim's edge-id -> basic-block map, which the fuzzer does not hold at runtime (see `docs/TODO.md`).
+- `PositionSaliencyScheduler.signed_saliency` (mean of signed gradients: not meaningful).
+
 ### Added
 
 - **`--pos-finch`: Finch hot-byte position arm** (`core/schedulers/pos_finch.py`; handover `docs/handover/handover_paper_collection_survey_2026-10-02.md` gap 1): weights a byte by how many edges its byteflip moved (`OperatorEngine.effector_heat`), not just live/inert like `effector`, plus a bounded per-seed gain bonus. Needs `--deterministic`; implied by `--position-arena`.
