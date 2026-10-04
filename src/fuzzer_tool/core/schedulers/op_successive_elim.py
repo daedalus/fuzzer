@@ -27,7 +27,12 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
+
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+
+# Initial capacity of the numpy mirrors; doubled by _grow() when exceeded.
+_INIT_CAP = 64
 
 
 class SuccessiveEliminationScheduler:
@@ -75,25 +80,44 @@ class SuccessiveEliminationScheduler:
         self._total_pulls: int = 0
         self._last_reopen_at: int = 0
 
+        # Numpy mirrors of _mean / _n / _active, indexed like _order, so
+        # _eliminate() runs in C instead of a Python loop per arm per record.
+        self._idx: dict[str, int] = {}
+        self._mu = np.zeros(_INIT_CAP)
+        self._pulls = np.zeros(_INIT_CAP)
+        self._live = np.zeros(_INIT_CAP, dtype=bool)
+
     def init_arm(self, name: str) -> None:
         """Register an operator; starts active with zero counts."""
         if name in self._mean:
             return
         self._mean[name] = 0.0
         self._n[name] = 0
-        self._active.add(name)
         self._order.append(name)
+        self._grow()
+        self._idx[name] = len(self._idx)
+        self._revive(name)
 
-    def _radius(self, n: int) -> float:
-        """Hoeffding radius for an arm with n pulls."""
-        if n <= 0:
-            return 1.0
-        # log(t K / δ); use total pulls and known arm count
-        k = max(len(self._mean), 1)
-        t = max(self._total_pulls, 1)
-        # clamp argument of log to avoid log(0)
-        arg = max(t * k / self.delta, 1.0)
-        return math.sqrt(math.log(arg) / (2.0 * n))
+    def _grow(self) -> None:
+        """Double the numpy mirrors when the next arm would overflow them."""
+        cap = len(self._mu)
+        if len(self._idx) < cap:
+            return
+        self._mu = np.concatenate((self._mu, np.zeros(cap)))
+        self._pulls = np.concatenate((self._pulls, np.zeros(cap)))
+        self._live = np.concatenate((self._live, np.zeros(cap, dtype=bool)))
+
+    def _revive(self, name: str) -> None:
+        """Move *name* to _active, keeping _live in sync."""
+        self._live[self._idx[name]] = True
+        self._active.add(name)
+        self._eliminated.discard(name)
+
+    def _retire(self, name: str) -> None:
+        """Move *name* to _eliminated, keeping _live in sync."""
+        self._live[self._idx[name]] = False
+        self._active.discard(name)
+        self._eliminated.add(name)
 
     def _maybe_reopen(self) -> None:
         if self.reopen_interval <= 0:
@@ -104,37 +128,34 @@ class SuccessiveEliminationScheduler:
             self._last_reopen_at = self._total_pulls
             return
         # Re-admit everyone; keep counts (warm start)
-        self._active |= self._eliminated
-        self._eliminated.clear()
+        for name in list(self._eliminated):
+            self._revive(name)
         self._last_reopen_at = self._total_pulls
 
     def _eliminate(self) -> None:
-        """Drop active arms whose UCB is below the best LCB."""
+        """Drop active arms whose UCB is below the best LCB.
+
+        Vectorized over the numpy mirrors (a per-arm Python loop here cost
+        ~258us per record at 264 arms). Radius per module docstring:
+        sqrt(log(max(t K / delta, 1)) / (2 n)).
+        """
         if len(self._active) <= 1:
             return
 
         # Only arms with enough pulls participate in the bound comparison
-        eligible = [a for a in self._active if self._n.get(a, 0) >= self.min_pulls]
+        k = len(self._idx)
+        pulls = self._pulls[:k]
+        eligible = np.flatnonzero(self._live[:k] & (pulls >= self.min_pulls))
         if len(eligible) < 2:
             return
 
-        best_lcb = -math.inf
-        for a in eligible:
-            n = self._n[a]
-            lcb = self._mean[a] - self._radius(n)
-            if lcb > best_lcb:
-                best_lcb = lcb
+        log_term = math.log(max(max(self._total_pulls, 1) * k / self.delta, 1.0))
+        rad = np.sqrt(log_term / (2.0 * pulls[eligible]))
+        mu = self._mu[eligible]
+        best_lcb = (mu - rad).max()
 
-        to_drop = []
-        for a in eligible:
-            n = self._n[a]
-            ucb = self._mean[a] + self._radius(n)
-            if ucb < best_lcb:
-                to_drop.append(a)
-
-        for a in to_drop:
-            self._active.discard(a)
-            self._eliminated.add(a)
+        for i in eligible[mu + rad < best_lcb]:
+            self._retire(self._order[i])
 
     def select_op(self, ops: list[str]) -> str:
         """Round-robin among active arms that appear in *ops*."""
@@ -156,8 +177,7 @@ class SuccessiveEliminationScheduler:
             # Everything offered is eliminated — reopen them for this call
             for op in ops:
                 if op in self._eliminated:
-                    self._eliminated.discard(op)
-                    self._active.add(op)
+                    self._revive(op)
             active_offered = [a for a in self._order if a in offered]
             if not active_offered:
                 active_offered = list(ops)
@@ -182,6 +202,9 @@ class SuccessiveEliminationScheduler:
         mu = self._mean[name]
         self._mean[name] = mu + (reward - mu) / (n + 1)
         self._n[name] = n + 1
+        i = self._idx[name]
+        self._mu[i] = self._mean[name]
+        self._pulls[i] = n + 1
 
         self._eliminate()
 
