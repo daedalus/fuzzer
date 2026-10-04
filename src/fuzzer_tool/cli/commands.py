@@ -930,6 +930,7 @@ def cmd_fuzz(args):
         op_afl_det=getattr(args, "op_afl_det", False),
         op_span_relocate=getattr(args, "op_span_relocate", False),
         op_append=getattr(args, "op_append", False),
+        checksum_sites=getattr(args, "checksum_sites", False),
         zip_seed_corpus=getattr(args, "zip_seed_corpus", False),
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
@@ -2249,6 +2250,7 @@ _HAIL_MARY_FLAGS = (
     "op_span_reverse",
     "op_span_relocate",
     "op_append",
+    "checksum_sites",
     "op_afl_det",
     "grammar_boltzmann",
     "cmplog_fifo_sink",
@@ -5459,6 +5461,15 @@ def main() -> int:
         help=(
             "Enable tail_append mutation operator (append random bytes at the "
             "end only; for linear instruction inputs). Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--checksum-sites",
+        action="store_true",
+        help=(
+            "Locate checksum fields (CRC-32, Adler-32, CRC-16, Fletcher-16, "
+            "16-bit sum) on each seed and recompute them in every mutant "
+            "(TaintScope-style repair). Off by default."
         ),
     )
     fuzz_parser.add_argument(

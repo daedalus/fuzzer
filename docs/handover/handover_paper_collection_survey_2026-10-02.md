@@ -36,6 +36,7 @@ collection.
 2. **TaintScope-style checksum repair.** Only format-specific CRC handling
    (PNG, gzip) and int-checksum solvers found. A generic "find the check,
    re-patch after mutation" step is missing.
+   *Status 2026-10-04: implemented as `--checksum-sites` (`core/checksum_sites.py`); correction: `ChecksumLearner`/`crc_learn` already recovered unknown models but patched only a trailing field.*
 3. **Binary-only rewriting** (StochFuzz, E9AFL, "Same Coverage, Less Bloat",
    Breaking Through Binaries). No stripped-binary instrumentation beyond
    ptrace/PT. Largest capability gap for binary fuzzing and the costliest.

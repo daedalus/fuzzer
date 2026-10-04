@@ -51,6 +51,7 @@ _FLAG_GATED = {
     "kuramoto_sync",
     "pll",
     "recurrence",
+    "checksum_sites",
 }
 _ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner", "prng_state_learner"}
 
@@ -168,6 +169,7 @@ class TestFlagGatedAnalyzers:
         assert f._garch is None
         assert f._continuum is None
         assert f._kuramoto_sync is None
+        assert f._cksum_sites is None
         # checksum_learner has no gating flag (always attempted) -- its
         # off-path is the swallow_errors path, covered separately below.
 
@@ -261,6 +263,10 @@ class TestFlagGatedAnalyzers:
         f = _build_fuzzer()
         assert f._op_kuramoto is None
         assert f._kuramoto_sync is None
+
+    def test_checksum_sites_on_when_requested(self):
+        f = _build_fuzzer(checksum_sites=True)
+        assert type(f._cksum_sites).__name__ == "SiteBook"
 
     def test_pll_on_when_requested(self):
         f = _build_fuzzer(pll=True)

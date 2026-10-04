@@ -26,6 +26,7 @@ import numpy as np
 import xxhash
 
 from fuzzer_tool.core.auto_dict import NO_HASH, harvest_tokens
+from fuzzer_tool.core.checksum_sites import hint_operands
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cond_stmt import CondState, CondStmt
 from fuzzer_tool.core.crc32 import crc32
@@ -6145,6 +6146,9 @@ class OperatorEngine:
             # than a compromise; `Declin` reads n/a otherwise.
             f._op_declines[op] = f._op_declines.get(op, 0) + 1
 
+    def _cksum_hints(self) -> list[bytes]:
+        return hint_operands(self.ctx.cmplog_pairs)
+
     def _absorb_havoc(self, result) -> bytearray:
         """Adopt havoc's replacement buffer: clamp to max_len, resync frameshift."""
         f = self.f
@@ -6368,6 +6372,10 @@ class OperatorEngine:
 
         if f._frameshift.relations:
             f._frameshift.apply_to_buffer(buf)
+        # Last, so the checksum covers every edit this round made.
+        sites = getattr(f, "_cksum_sites", None)
+        if sites is not None:
+            sites.apply(data, buf, self.ctx._rng, self._cksum_hints)
 
         result = bytes(buf)
         f._last_hamming_distance = (

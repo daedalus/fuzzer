@@ -1531,6 +1531,7 @@ class Fuzzer:
         op_span_reverse=False,
         op_span_relocate=False,
         op_append=False,
+        checksum_sites=False,
         # AFL deterministic sweep as an arbitrated arm (T1-1, core/mutations/afl_det.py)
         op_afl_det=False,
         # FormatFuzzer structural mutators (see handover_formatfuzzer_integration).
@@ -1952,6 +1953,7 @@ class Fuzzer:
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate
         self.op_append = op_append
+        self.checksum_sites = checksum_sites
         self.op_afl_det = op_afl_det
         # MailConfig | None — novel-crash email notification (see services/sendmail.py)
         self.email_on_crash = email_on_crash

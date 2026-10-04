@@ -671,6 +671,27 @@ REGISTRY.register(
 )
 
 
+def _activate_checksum_sites(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.checksum_sites import SiteBook
+
+    f._cksum_sites = SiteBook()
+
+
+def _deactivate_checksum_sites(f: FuzzerLike) -> None:
+    f._cksum_sites = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="checksum_sites",
+        category="format_recovery",
+        activate=_activate_checksum_sites,
+        deactivate=_deactivate_checksum_sites,
+        available=lambda f: bool(getattr(f, "checksum_sites", False)),
+    )
+)
+
+
 def _activate_prng_state_learner(f: FuzzerLike) -> None:
     from fuzzer_tool.core.analyzers.analyzer_prng_state_learner import PRNGStateLearner
 
