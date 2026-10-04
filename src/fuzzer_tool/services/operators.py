@@ -183,12 +183,14 @@ _LIVENESS_DEAD_WEIGHT = 0.1
 # `_byte_idx`" (139 of 156 do). A single-site operator that picks its own
 # position is still misattributed, but it *has* a true offset to report; the
 # fix there is to let handlers report one, which is a wider change than this.
-# These four have no true offset to report at all.
+# These five have no true offset to report at all. `tail_append` always
+# edits at len(parent); the offset it is handed is never read.
 _DELOCALISED_OPS = frozenset(
     {
         "block_shuffle_variable",
         "byte_shuffle",
         "chunk_shuffle",
+        "tail_append",
         "token_shuffle",
     }
 )

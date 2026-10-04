@@ -72,3 +72,18 @@ def test_empty_input_gets_bytes():
 def test_degenerate_max_len(max_len):
     out = tail_append(b"", max_len, rng=ScriptedRng(randints=[0, 1], randbytes=[b"\x09"]))
     assert len(out) <= max_len
+
+
+def test_delocalised_so_position_arms_are_not_credited():
+    """tail_append never reads the offset it is handed.
+
+    Left out of _DELOCALISED_OPS, position arms, burn-front and the liveness
+    estimator would be credited a random byte for an edit made at len(parent).
+    """
+    import inspect
+
+    from fuzzer_tool.services.operators import _DELOCALISED_OPS, OperatorEngine
+
+    assert "tail_append" in _DELOCALISED_OPS
+    params = list(inspect.signature(OperatorEngine._op_tail_append).parameters)
+    assert params[2].startswith("_")
