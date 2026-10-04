@@ -75,6 +75,7 @@ from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.one_fifth import OneFifthRule
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.percolation import CoverageRegime
+from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
@@ -1528,6 +1529,7 @@ class Fuzzer:
         # TSP neighbourhood operators (Phase 1 / C2). Appended at the end.
         op_span_reverse=False,
         op_span_relocate=False,
+        op_append=False,
         # AFL deterministic sweep as an arbitrated arm (T1-1, core/mutations/afl_det.py)
         op_afl_det=False,
         # FormatFuzzer structural mutators (see handover_formatfuzzer_integration).
@@ -1937,6 +1939,7 @@ class Fuzzer:
         # TSP neighbourhood operators (Phase 1 / C2) — gated availability.
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate
+        self.op_append = op_append
         self.op_afl_det = op_afl_det
         # MailConfig | None — novel-crash email notification (see services/sendmail.py)
         self.email_on_crash = email_on_crash
@@ -2310,6 +2313,7 @@ class Fuzzer:
         # map. Inert without --reject-code -- see core/validity.py.
         self._validity = ValidityChannel(reject_code)
         self._validity_admits = 0
+        self._reject_stats = RejectStats()
         # Comparison progress (per-callback max asserted count in a single
         # execution). The same shape as the per-edge maxima above, one
         # channel over: an input that satisfies more comparisons of some

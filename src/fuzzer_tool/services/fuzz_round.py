@@ -836,6 +836,7 @@ class FuzzRound:
         if not f._validity.enabled or self._is_timeout or self._is_crash:
             return
         self._validity = f._validity.classify(self._returncode)
+        f._reject_stats.record(f._last_ops_used, self._data, self._mutated, self._validity)
         self._is_new_valid_coverage = f._validity.record(self._validity, self._edges_now())
         if self._is_new_valid_coverage:
             f._validity_admits += 1

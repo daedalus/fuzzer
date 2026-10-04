@@ -1688,6 +1688,35 @@ def byte_insert(data: bytes, max_len: int = 65536, *, rng) -> bytes:
     return data[:idx] + bytes([val]) + data[idx:]
 
 
+#: Longest run ``tail_append`` adds; ``choose_len`` still favours 1-8.
+_TAIL_APPEND_MAX = 32
+
+
+def tail_append(data: bytes, max_len: int, *, rng) -> bytes:
+    """Append random bytes at the end; the existing prefix is never touched.
+
+    On a linear instruction input (one record per move or call) an insert
+    in the middle changes the state every later record runs against, so
+    most inserts are rejected. Appending leaves the executed prefix alone.
+
+    Opt-in via ``--op-append`` (gated in the operator registry).
+
+    Args:
+        data: Input bytes.
+        max_len: Maximum output length.
+        rng: RNG.
+
+    Returns:
+        ``data`` plus 1..32 random bytes, or ``data`` when full.
+    """
+    room = max_len - len(data)
+    if room <= 0:
+        return data
+
+    size = min(choose_len(min(_TAIL_APPEND_MAX, room), rng), room)
+    return data + rng.randbytes(size)[:size]
+
+
 def splice_diff_located(a: bytes, b: bytes, rng) -> bytes:
     """Splice two inputs at optimal cut points found via diff locating.
 

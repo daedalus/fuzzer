@@ -638,6 +638,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         # exactly the "never offered, never checked" hole this class guards.
         f.op_span_reverse = True
         f.op_span_relocate = True
+        f.op_append = True
         # wfc_reorder_learned (core/wfc_chunks.py): same flag the existing
         # PNG/JPEG/BMP WFC reorder ops gate on.
         f._wfc_enabled = True

@@ -73,6 +73,7 @@ _CATEGORIES: dict[str, set[str]] = {
     },
     "block": {
         "block_insert",
+        "tail_append",
         "block_delete",
         "block_duplicate",
         "swap_regions",
@@ -762,6 +763,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # AFL deterministic sweep as an arbitrated arm (T1-1); --op-afl-det
     "afl_det": lambda f, d: bool(d) and bool(getattr(f, "op_afl_det", False)),
     "span_relocate": lambda f, _d: bool(getattr(f, "op_span_relocate", False)),
+    # Append-only insert for linear instruction inputs; --op-append
+    "tail_append": lambda f, _d: bool(getattr(f, "op_append", False)),
     # dispatch-only, never selectable
     # colorization: gated on cmplog pairs. The handler is a byte randomizer
     # that prefers offsets appearing in comparison operands (CmplogColorizer),

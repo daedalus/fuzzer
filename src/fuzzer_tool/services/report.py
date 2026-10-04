@@ -142,6 +142,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_coverage_analysis(fuzzer))
     sections.append(_mutation_effectiveness(fuzzer))
     sections.append(_mutation_edge_attribution(fuzzer))
+    sections.append(_reject_report(fuzzer))
     sections.append(_operator_diversity(fuzzer))
     sections.append(_entropy_metrics(fuzzer))
     sections.append(_format_learning(fuzzer))
@@ -688,6 +689,37 @@ def _comparison_profile(f) -> str:
         lines.append("  trend is its fire rate: rising means the campaign still reaches it and")
         lines.append("  keeps failing; falling means it stopped reaching it. Family, not site --")
         lines.append("  two call sites share one bucket.")
+    return "\n".join(lines)
+
+
+#: Operator rows printed in the rejection report.
+_REJECT_TOP_OPS = 20
+
+
+def _reject_report(f) -> str:
+    """Reject rate by operator and by where the mutant first differs.
+
+    Needs ``--reject-code``. Position is the first changed byte as a share
+    of the parent length (bin label = bin start), so an append lands in the
+    last bin and a front edit in the first.
+    """
+    stats = getattr(f, "_reject_stats", None)
+    if stats is None or not f._validity.enabled:
+        return ""
+
+    ops = stats.op_rows()
+    bins = stats.bin_rows()
+    if not ops and not bins:
+        return ""
+
+    lines = ["", "--- Rejection by Operator / Position ---"]
+    lines.append(f"  {'Operator':<22s} {'Valid':>7s} {'Invalid':>7s} {'Reject':>7s}")
+    for r in ops[:_REJECT_TOP_OPS]:
+        lines.append(f"  {r.name:<22s} {r.valid:>7d} {r.invalid:>7d} {r.reject_rate * 100:>6.1f}%")
+
+    lines.append(f"  {'Position':<22s} {'Valid':>7s} {'Invalid':>7s} {'Reject':>7s}")
+    for r in bins:
+        lines.append(f"  {r.name:<22s} {r.valid:>7d} {r.invalid:>7d} {r.reject_rate * 100:>6.1f}%")
     return "\n".join(lines)
 
 

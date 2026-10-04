@@ -198,3 +198,4 @@ reproduces the EBADF by exiting a subprocess child without calling `stop()`.
   450 pairs.
   The session recipe simply never enabled it — `-c` is `--coverage`, and
   `--cmplog` has no short form. Add `--cmplog` explicitly to the FFmpeg recipe.
+- [ ] **A/B `--op-append`** (2026-10-03) — shipped unmeasured. Needs a linear-instruction target (one record per call/move); compare reject rate (`--reject-code`, Rejection by Operator / Position) and edges with the arm on vs off. No such target exists in `targets/` yet.

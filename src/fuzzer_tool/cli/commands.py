@@ -921,6 +921,7 @@ def cmd_fuzz(args):
         op_span_reverse=getattr(args, "op_span_reverse", False),
         op_afl_det=getattr(args, "op_afl_det", False),
         op_span_relocate=getattr(args, "op_span_relocate", False),
+        op_append=getattr(args, "op_append", False),
         zip_seed_corpus=getattr(args, "zip_seed_corpus", False),
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
@@ -2227,6 +2228,7 @@ _HAIL_MARY_FLAGS = (
     "formatfuzzer",
     "op_span_reverse",
     "op_span_relocate",
+    "op_append",
     "op_afl_det",
     "grammar_boltzmann",
     "cmplog_fifo_sink",
@@ -5421,6 +5423,14 @@ def main() -> int:
         help=(
             "Enable span_reverse mutation operator (TSP 2-opt: reverse a "
             "contiguous byte span). Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-append",
+        action="store_true",
+        help=(
+            "Enable tail_append mutation operator (append random bytes at the "
+            "end only; for linear instruction inputs). Off by default."
         ),
     )
     fuzz_parser.add_argument(

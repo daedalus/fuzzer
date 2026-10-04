@@ -2791,6 +2791,14 @@ class OperatorEngine:
                 byte_insert(bytes(buf), self.ctx.max_len, rng=self.ctx._rng)[: self.ctx.max_len]
             )
 
+    def _op_tail_append(self, buf, _byte_idx, _data):
+        """Append random bytes at the end (--op-append)."""
+        from fuzzer_tool.core.mutations.generic import tail_append
+
+        n = len(buf)
+        out = tail_append(bytes(buf), self.ctx.max_len, rng=self.ctx._rng)
+        buf[n:] = out[n:]
+
     def _op_insert_ascii_num(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import insert_ascii_num
 
