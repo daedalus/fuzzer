@@ -47,6 +47,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "bit_swap_32",
         "bit_swap_64",
         "rev_circuit",
+        "rightmost_clear",
+        "rightmost_isolate",
+        "rightmost_propagate",
+        "rightmost_run_clear",
     },
     "byte": {
         "byte_flip",
@@ -265,6 +269,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "crc_advanced",
         "murmurhash3",
         "swar_lane",
+        "same_popcount_next",
+        "same_popcount_prev",
     },
     "adaptive": {
         "markov_bytes",

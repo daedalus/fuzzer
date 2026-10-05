@@ -4873,6 +4873,37 @@ class OperatorEngine:
 
         return self._regularity(swar_lane, buf)
 
+    # ── Hacker's Delight rightmost-bit + Gosper same-popcount (2026-10-05) ──
+    def _op_rightmost_clear(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.hackers_delight import rightmost_clear
+
+        return self._regularity(rightmost_clear, buf)
+
+    def _op_rightmost_isolate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.hackers_delight import rightmost_isolate
+
+        return self._regularity(rightmost_isolate, buf)
+
+    def _op_rightmost_propagate(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.hackers_delight import rightmost_propagate
+
+        return self._regularity(rightmost_propagate, buf)
+
+    def _op_rightmost_run_clear(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.hackers_delight import rightmost_run_clear
+
+        return self._regularity(rightmost_run_clear, buf)
+
+    def _op_same_popcount_next(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.hackers_delight import same_popcount_next
+
+        return self._regularity(same_popcount_next, buf)
+
+    def _op_same_popcount_prev(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.hackers_delight import same_popcount_prev
+
+        return self._regularity(same_popcount_prev, buf)
+
     def _op_lz_dict_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import lz_dict_mutate
 
