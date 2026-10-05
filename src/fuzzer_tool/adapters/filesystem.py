@@ -22,6 +22,7 @@ from fuzzer_tool.adapters.seed_zip import SeedTree
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.crash_metadata import CrashMetadata
+from fuzzer_tool.core.ltl import violation_signature
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.similarity import crash_signature_similarity
 
@@ -906,7 +907,7 @@ def classify_crash(
     """
     h = hash_data(data)
     report = SanitizerReport.parse(stderr)
-    sig = _crash_sig(report, returncode, fault_addr)
+    sig = violation_signature(stderr) or _crash_sig(report, returncode, fault_addr)
     stack_h = report.stack_hash() if report else ""
 
     if h in crash_hashes:

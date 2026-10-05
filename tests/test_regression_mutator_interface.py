@@ -435,6 +435,7 @@ class TestMutationContext:
             "mc",
             "grammar",
             "fsm",
+            "ltl",
             "crash_mi",
             "stall_recovery_active",
             "cmplog",

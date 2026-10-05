@@ -1535,11 +1535,25 @@ void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
 
 static __thread uint64_t __sfuzz_prev[SFUZZ_MAX_VARS];
 
+/* Order-free digest of every state variable's current value, kept
+ * incrementally (xor out the old (slot, value), xor in the new). 0 means no
+ * variable has moved. --ltl reads it with each event to spot a repeated
+ * program state. A never-set slot and a slot set to 0 are the same. */
+static __thread uint64_t __sfuzz_digest = 0;
+
+__AFL_NO_COV static inline uint64_t __sfuzz_mix(unsigned slot, uint64_t v) {
+    uint64_t x = (v ^ ((uint64_t)slot << 56)) + 0x9E3779B97F4A7C15ULL;
+    x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
+    x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;
+    return x ^ (x >> 31);
+}
+
 __attribute__((visibility("default")))
 void __sfuzz_state(unsigned var_id, unsigned long long value) {
     unsigned slot = var_id % SFUZZ_MAX_VARS;
     uint64_t prev = __sfuzz_prev[slot];
     __sfuzz_prev[slot] = (uint64_t)value;
+    __sfuzz_digest ^= __sfuzz_mix(slot, prev) ^ __sfuzz_mix(slot, (uint64_t)value);
 
     /* FNV-1a over (id, previous, current). The high bit is set so the
      * result can never be 0, which __afl_map_edge reads as an empty
@@ -1550,6 +1564,57 @@ void __sfuzz_state(unsigned var_id, unsigned long long value) {
     h = (h ^ (uint64_t)value) * 1099511628211ULL;
 
     __afl_map_loc(__AFL_SYNTH_ID(h >> 32));
+}
+
+/* ── LTL events (--ltl) ────────────────────────────────────────────────
+ *
+ * The target marks property-relevant points with __fuzz_event(id), or
+ * __fuzz_event_at(id, offset) when it knows how many input bytes it has
+ * consumed (the offset lets the fuzzer keep that prefix and mutate only the
+ * tail). Each call does two things:
+ *
+ *   1. folds (previous event, this event) into the edge map, like
+ *      __sfuzz_state, so a new event ORDER is coverage with no new plumbing;
+ *   2. appends one 12-byte record {id, offset, digest} to $__LTL_EVENTS_OUT,
+ *      where core/ltl.py reads it. `digest` is __sfuzz_digest, 0 when no
+ *      state variable has moved. Unset or unopenable path: no logging.
+ *
+ * No-op in an uninstrumented target -- nothing calls it. */
+#include <fcntl.h>
+
+#define LTL_NO_OFFSET 0xFFFFFFFFu
+
+static int __ltl_fd = -2;  /* -2 not yet opened, -1 off */
+static __thread uint32_t __ltl_prev_event = LTL_NO_OFFSET;
+
+__AFL_NO_COV static void __ltl_emit(uint32_t id, uint32_t offset) {
+    if (__ltl_fd == -2) {
+        const char *p = getenv("__LTL_EVENTS_OUT");
+        __ltl_fd = (p && p[0]) ? open(p, O_WRONLY | O_CREAT | O_APPEND, 0644) : -1;
+    }
+    if (__ltl_fd < 0) return;
+
+    uint64_t d = __sfuzz_digest;
+    uint32_t digest = d ? (uint32_t)((d >> 32) ^ d) | 1u : 0;
+    uint32_t rec[3] = {id, offset, digest};
+    ssize_t w = write(__ltl_fd, rec, sizeof rec);
+    (void)w;
+}
+
+__attribute__((visibility("default")))
+void __fuzz_event_at(unsigned id, unsigned offset) {
+    uint64_t h = 1469598103934665603ULL;
+    h = (h ^ __ltl_prev_event) * 1099511628211ULL;
+    h = (h ^ id) * 1099511628211ULL;
+    __ltl_prev_event = id;
+
+    __afl_map_loc(__AFL_SYNTH_ID(h >> 32));
+    __ltl_emit(id, offset);
+}
+
+__attribute__((visibility("default")))
+void __fuzz_event(unsigned id) {
+    __fuzz_event_at(id, LTL_NO_OFFSET);
 }
 
 /* ── Guard numbering ──────────────────────────────────────────────────
@@ -2119,6 +2184,7 @@ void __afl_map_reset(void) {
 #else
     __afl_prev_loc = 0;
 #endif
+    __ltl_prev_event = LTL_NO_OFFSET;
     __afl_path_hash_acc = 0;
     __afl_max_stack_depth = 0;
     __afl_stack_base = 0;

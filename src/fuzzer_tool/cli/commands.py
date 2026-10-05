@@ -431,6 +431,13 @@ def cmd_fuzz(args):
         if fsm is None:
             return 1
 
+    # LTL property monitor (core/ltl.py): ltl_prefix op, violation crashes.
+    ltl = None
+    if getattr(args, "ltl", None):
+        ltl = _load_ltl_arg(args.ltl)
+        if ltl is None:
+            return 1
+
     plot_graph_path = None
     coverage_log_arg = args.coverage_log
     if getattr(args, "plot_graph", None) is not None:
@@ -579,6 +586,7 @@ def cmd_fuzz(args):
         ),
         grammar=grammar,
         fsm=fsm,
+        ltl=ltl,
         persistent=args.persistent,
         net_host=getattr(args, "net_host", None),
         net_port=getattr(args, "net_port", None),
@@ -1205,6 +1213,36 @@ def _load_fsm_arg(path: str):
         return None
     print(f"[*] FSM loaded: {len(fsm.edges)} transitions from {path}")
     return fsm
+
+
+def _load_ltl_arg(path: str):
+    """Load an --ltl automaton and open the event file the shim writes.
+
+    Prints the error and returns None if the automaton is bad. The event
+    file path goes into ``__LTL_EVENTS_OUT`` so every target process (and an
+    in-process .so) inherits it.
+    """
+    import atexit
+    import tempfile
+
+    from fuzzer_tool.core.ltl import LtlChannel
+
+    fd, events = tempfile.mkstemp(prefix="fuzzer_ltl_", suffix=".ev")
+    os.close(fd)
+    atexit.register(_unlink_quiet, events)
+    try:
+        ch = LtlChannel.from_file(path, events)
+    except (OSError, ValueError) as e:
+        print(f"[-] --ltl {path}: {e}")
+        return None
+    os.environ["__LTL_EVENTS_OUT"] = events
+    print(f"[*] LTL automaton loaded from {path}; events -> {events}")
+    return ch
+
+
+def _unlink_quiet(path: str) -> None:
+    if os.path.exists(path):
+        os.unlink(path)
 
 
 def _genseed_fsm(args) -> int:
@@ -5128,6 +5166,16 @@ def main() -> int:
         metavar="FILE",
         help="Constraint-labelled FSM spec (see core/format_fsm.py); enables the "
         "fsm_regen op: keep a random valid prefix of an input, regenerate a valid tail",
+    )
+    fuzz_parser.add_argument(
+        "--ltl",
+        default=None,
+        metavar="HOA",
+        help="LTL property monitor: HOA automaton of the NEGATED property "
+        "(ltl2tgba -B -H; APs named eN or N = event ids). The target calls "
+        "__fuzz_event(id) / __fuzz_event_at(id, offset). A violation is saved "
+        "as a crash (ltl:trap | ltl:lasso); the ltl_prefix op keeps the shortest "
+        "prefix that reached each automaton state and mutates the tail",
     )
     fuzz_parser.add_argument(
         "--grammar-boltzmann",

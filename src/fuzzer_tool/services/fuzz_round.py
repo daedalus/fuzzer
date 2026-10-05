@@ -123,6 +123,7 @@ class FuzzRound:
         "_is_new_max",
         "_is_cmp_progress",
         "_is_new_valid_coverage",
+        "_ltl_new",
         "_validity",
         "_success",
         "_effective",
@@ -150,6 +151,7 @@ class FuzzRound:
         self._is_new_max = False
         self._is_cmp_progress = False
         self._is_new_valid_coverage = False
+        self._ltl_new = False
         self._validity = Validity.UNKNOWN
         self._success = False
         self._effective = None
@@ -164,6 +166,7 @@ class FuzzRound:
         self._periodic()
         self._count_ops()
         self._classify()
+        self._ltl_observe()
         self._scan_coverage()
         self._observe()
         self._gate_explore()
@@ -250,6 +253,7 @@ class FuzzRound:
         # saturation rather than by anything the target did.
         self._mutated = f._dedup_mutate(self._data)
         self._gate_records()
+        self._ltl_clear()
         clock = clock_of(f)
         t_start = clock.monotonic()
         self._returncode, self._stderr = f._run_target(self._mutated)
@@ -668,6 +672,32 @@ class FuzzRound:
             thresh = f._exec_time_anomaly.threshold()
             if thresh is not None and self._t_elapsed > thresh:
                 self._is_slow = True
+
+    # ── LTL (--ltl) ──────────────────────────────────────────────────
+
+    def _ltl_clear(self) -> None:
+        # Empty the event file so it holds exactly this execution's trace.
+        ch = getattr(self._f, "ltl", None)
+        if ch is not None:
+            ch.clear()
+
+    def _ltl_observe(self) -> None:
+        # Run the monitor over this execution's events. A fired transition
+        # no run has fired before admits the mutant; a violation is a crash
+        # (unless the target already crashed: its own report keeps the
+        # signature). A timeout's trace is partial and may be doubled by the
+        # hang-confirm re-run, so it is skipped.
+        ch = getattr(self._f, "ltl", None)
+        if ch is None or self._is_timeout:
+            return
+
+        obs = ch.collect(self._mutated)
+        self._ltl_new = obs.novel
+        if obs.violation is None or self._is_crash:
+            return
+
+        self._is_crash = True
+        self._stderr += f"\n{obs.marker}\n"
 
     # ── Coverage ─────────────────────────────────────────────────────
 
@@ -1834,6 +1864,7 @@ class FuzzRound:
             or self._is_new_max
             or self._is_cmp_progress
             or self._is_new_valid_coverage
+            or self._ltl_new
         )
 
     def _admit(self) -> bool:

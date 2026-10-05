@@ -191,6 +191,7 @@ _DELOCALISED_OPS = frozenset(
         "block_shuffle_variable",
         "byte_shuffle",
         "chunk_shuffle",
+        "ltl_prefix",
         "tail_append",
         "token_shuffle",
     }
@@ -2801,6 +2802,15 @@ class OperatorEngine:
         n = len(buf)
         out = tail_append(bytes(buf), self.ctx.max_len, rng=self.ctx._rng)
         buf[n:] = out[n:]
+
+    def _op_ltl_prefix(self, _buf, _byte_idx, _data):
+        """Stored prefix of an unexplored automaton state + fresh tail (--ltl)."""
+        ltl = self.ctx.ltl
+        if ltl is None:
+            return None
+
+        out = ltl.splice(self.ctx._rng, self.ctx.max_len or 65536)
+        return None if out is None else bytearray(out)
 
     def _op_insert_ascii_num(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import insert_ascii_num

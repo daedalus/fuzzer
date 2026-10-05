@@ -104,6 +104,7 @@ class MutationContext:
         "crash_mi",
         "dictionary",
         "fsm",
+        "ltl",
         "grammar",
         "markov",
         "max_len",
@@ -133,6 +134,7 @@ class MutationContext:
         mc=None,
         grammar=None,
         fsm=None,
+        ltl=None,
         crash_mi=None,
         stall_recovery_active: bool = False,
         cmplog=None,
@@ -181,6 +183,8 @@ class MutationContext:
         self.grammar = grammar
         #: Constraint-labelled FSM format (core/format_fsm.py), when loaded.
         self.fsm = fsm
+        #: LTL channel (core/ltl.py) under --ltl: the ltl_prefix op reads it.
+        self.ltl = ltl
         #: Crash-guided mutual-information estimator, when populated.
         self.crash_mi = crash_mi
         #: True while the fuzzer's stall-recovery mode is active.
@@ -241,6 +245,7 @@ class MutationContext:
             mc=getattr(fuzzer, "mc", None),
             grammar=getattr(fuzzer, "grammar", None),
             fsm=getattr(fuzzer, "fsm", None),
+            ltl=getattr(fuzzer, "ltl", None),
             crash_mi=getattr(fuzzer, "_crash_mi", None),
             stall_recovery_active=bool(getattr(fuzzer, "_stall_recovery_active", False)),
             cmplog=cmplog,

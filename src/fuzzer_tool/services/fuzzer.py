@@ -1237,6 +1237,7 @@ class Fuzzer:
         stack_heartbeat=None,
         grammar=None,
         fsm=None,
+        ltl=None,
         persistent=False,
         net_host=None,
         net_port=None,
@@ -1924,6 +1925,7 @@ class Fuzzer:
             self.coverage_log.parent.mkdir(parents=True, exist_ok=True)
         self.grammar = grammar
         self.fsm = fsm
+        self.ltl = ltl
         self.persistent = persistent
         self.net_host = net_host
         self.net_port = net_port
