@@ -1,15 +1,33 @@
 # Handover: Hacker's Delight Rightmost-Bit Family + Gosper Same-Popcount Ports
 
-**Date**: 2026-10-05  
-**Source**: Henry S. Warren, Jr. — *Hacker's Delight* (Addison-Wesley, 2002), primarily Chapter 2 §2-1 “Manipulating Rightmost Bits” and the Gosper / snoob algorithm (Fig. 2-1 and surrounding text).  
+**Date**: 2026-10-05 (updated evening of the same day)  
+**Primary source**: Henry S. Warren, Jr. — *Hacker's Delight* (Addison-Wesley, 2002), primarily Chapter 2 §2-1 “Manipulating Rightmost Bits” and the Gosper / snoob algorithm (Fig. 2-1 and surrounding text).  
 **Related prior work**: `docs/handover/handover_bithacks_ports_2026-10-05.md` (Stanford bithacks.html triage). That document already flagged Gosper’s hack as “Speculative – Needs a use-site audit first”. This handover completes the audit and ships the concrete operators.
+
+**Cross-references (this update cycle)**:
+- Wikipedia [Find first set](https://en.wikipedia.org/wiki/Find_first_set) (ffs / ctz / clz / nlz).
+- Antti Laaksonen — *Competitive Programmer’s Handbook* (Draft July 2018), Chapters 5 (Complete search) and 10 (Bit manipulation).
+- Jörg Arndt — *Matters Computational* (“FXT book”), Chapter 1 “Bit wizardry” and the combinatorial generators that rest on the same primitives.
 
 **Scope**:  
 - New regularity / bit operators derived directly from the book’s formulas.  
 - Registration, tests, and documentation changes required to make them live under Hard Rule 12 (registry is the single source of truth).  
 - No changes to AFL shim, coverage bitmap layout, or scheduler math (those were already evaluated as “no value in Python” or already present).
 
-**Status of this handover**: Ready for implementation. All formulas are taken verbatim from the supplied PDF pages and verified against the classic C implementations.
+**Status of this handover** (2026-10-05 evening, post-resync):
+
+| Item | Status |
+|------|--------|
+| `src/fuzzer_tool/core/mutations/hackers_delight.py` | ✅ landed (`42a3028`) |
+| `tests/test_regression_hackers_delight.py` (17 cases) | ✅ landed (`42a3028`) |
+| Registration in `operator_registry.py` | ✅ landed (`2a231fa`) |
+| `_op_*` handlers in `services/operators.py` | ✅ landed (`2a231fa`) |
+| Handover document (this revision) | ⏳ this commit – adds FFS / Laaksonen / FXT cross-refs and marks registration complete |
+| DEEP_DIVE.md one-liner | optional follow-up |
+
+Upstream commits:
+- `42a3028` – module, tests, original handover
+- `2a231fa` – registry + OperatorEngine wiring
 
 ---
 
@@ -24,7 +42,13 @@
    Length fields, flags, power-of-two sizes, alignment padding, and “lowest set bit” heuristics appear constantly in binary formats (ELF, ISO-BMFF, Protobuf, SQLite pages, etc.). Being able to surgically isolate / clear / propagate the rightmost 1 or 0 is more precise than random bit-flips.
 
 3. **Branch-free & word-parallel**  
-   The book’s formulas use only `+ - & | ^ ~` and shifts. They map cleanly onto Python’s arbitrary-precision integers and stay branch-free, which is valuable for the operator hot path.
+   The formulas use only `+ - & | ^ ~` and shifts. They map cleanly onto Python’s arbitrary-precision integers and stay branch-free, which is valuable for the operator hot path.
+
+4. **Standard systems / competitive-programming / combinatorial toolbox**  
+   The same formulas appear in:
+   - Laaksonen Ch. 10 (set representation, Hamming optimisations, bit DP),
+   - Wikipedia “Find first set” (hardware mapping of ctz/clz/ffs),
+   - Arndt *Matters Computational* Ch. 1 (production C implementations under the names `lowest_one`, `clear_lowest_one`, …) and the constant-weight / subset generators that rest on them.
 
 ### Use-site audit (Gosper)
 
@@ -39,11 +63,11 @@ Conclusion: the audit is positive. The operator is useful both as a stand-alone 
 
 ---
 
-## 2. Formulas (verbatim from the book)
+## 2. Formulas and cross-source mapping
 
-All examples use the book’s 32-bit illustration style; the Python code works for arbitrary width (Python `int`).
+All examples use the classic 32-bit illustration style; the Python code works for arbitrary width (Python `int`).
 
-### 2.1 Rightmost-bit family (Chapter 2-1)
+### 2.1 Rightmost-bit family (*Hacker’s Delight* §2-1)
 
 ```text
 Turn off the rightmost 1-bit          x & (x - 1)
@@ -88,208 +112,191 @@ def snoob(x: int) -> int:
 
 A previous-number variant is obtained by applying the dual or by a short loop that walks downward.
 
+### 2.3 Relation to “Find first set” (Wikipedia)
+
+| Operation | Definition | Relation to our formulas |
+|-----------|------------|--------------------------|
+| **ffs** (POSIX, 1-based) | index of least-significant 1-bit | `ffs(x) = ctz(x) + 1` |
+| **ctz / ntz** | number of trailing zeros | `ctz(x) = (x & -x).bit_length() - 1` (x ≠ 0) |
+| **clz / nlz** | number of leading zeros | word-size dependent |
+| **log₂ / msb index** | position of most-significant 1 | `w - 1 - clz(x)` |
+
+The isolation step `x & -x` is exactly the classic “lowest set bit” primitive used to implement `ctz`/`ffs` on machines that only expose `clz`/`bsr`:
+
+```text
+ctz(x) = log₂(x & -x)
+ffs(x) = w − clz(x & -x)
+```
+
+Zero-input behaviour is the main source of subtle bugs (POSIX `ffs(0)=0`; hardware often returns word width or leaves the result undefined). Our Python implementations return a defined value for the zero case.
+
+### 2.4 Relation to *Competitive Programmer’s Handbook* (Laaksonen, Ch. 10)
+
+Laaksonen presents the same primitives as the standard competitive-programming toolkit:
+
+- Compiler intrinsics: `__builtin_ctz`, `__builtin_clz`, `__builtin_popcount`.
+- Set representation: every subset of `{0…n-1}` ↔ an n-bit integer; set algebra becomes `& | ~`.
+- Iteration patterns that complement our operators:
+
+```cpp
+// all non-empty subsets of a given set x  (Gosper-style)
+int b = 0;
+do { /* process b */ } while (b = (b - x) & x);
+
+// subsets of exact weight k
+if (__builtin_popcount(b) == k) …
+```
+
+- Hamming-distance optimisation: `popcount(a ^ b)`.
+- Bit DP (Held–Karp style) whose states are exactly the constant-weight masks that `same_popcount_next` enumerates.
+
+### 2.5 Relation to *Matters Computational* (Arndt / FXT, Ch. 1 “Bit wizardry”)
+
+Arndt supplies production-ready C implementations of the identical primitives, under slightly different names, together with multiple algorithms, edge-case handling, assembler variants and demos:
+
+| Arndt (FXT) | *Hacker’s Delight* / our operators | Notes |
+|-------------|-------------------------------------|-------|
+| `lowest_one(x)` = `x & -x` | `isolate_rightmost_1` | Exact match |
+| `clear_lowest_one(x)` = `x & (x-1)` | `rightmost_clear` | Exact match |
+| `set_lowest_zero(x)` = `x \| (x+1)` | dual of clear | Already sketched |
+| `low_zeros` / `low_ones` | trailing-zero / trailing-one masks | Same building blocks |
+| `lowest_block(x)` | isolate lowest contiguous run of 1s | Close to `rightmost_run_clear` |
+| `lowest_one_idx` / `asm_bsf` | ctz / zero-based ffs | De Bruijn, parallel, or hardware BSF |
+| `highest_one` / `asm_bsr` | clz / log₂ | Parallel-prefix or hardware BSR |
+| `bit_count` (SWAR, sparse, table) | popcount | Sparse = Kernighan loop |
+
+Beyond the basic formulas Arndt also provides:
+
+- **Constant-weight generators** (colex, lex, minimal-change / Gray, shifts-order) — the sequential dual of Gosper’s `snoob`.
+- **Bit-subset iteration** of a given mask (`bit_subset`, `bit_subset_gray`) — the classic `(b-x)&x` loop and Gray-coded variants.
+- Bit-reversal (revbin), bit-zip/unzip, Gray code & inverse, sequency, Reed–Muller transforms.
+
+These are the highest-value reference implementations for the follow-up operators listed in §5.
+
+### 2.6 The four-source stack
+
+| Layer | Source | Role |
+|-------|--------|------|
+| Definitions & hardware | Wikipedia “Find first set” | Formal ffs/ctz/clz, ISA mapping |
+| Classic formulas | *Hacker’s Delight* | Concise, proven identities |
+| Algorithmic applications | Laaksonen | Set ops, Hamming, bit DP |
+| Production source & generators | Arndt / FXT | Inline C, demos, combinatorial generators |
+
+Everything we shipped sits at the intersection of all four.
+
 ---
 
-## 3. Implementation Plan
+## 3. Implementation (landed)
 
-### 3.1 New operators
+### 3.1 Operators
 
 | Operator name          | Category   | Description |
 |------------------------|------------|-------------|
-| `rightmost_clear`      | bit / regularity | Apply `x & (x-1)` to a randomly chosen word-sized window |
+| `rightmost_clear`      | bit        | Apply `x & (x-1)` to a randomly chosen word-sized window |
 | `rightmost_isolate`    | bit        | Replace window with `x & -x` (keep only the lowest set bit) |
 | `rightmost_propagate`  | bit        | Apply `x | (x-1)` (fill trailing zeros with 1s) |
 | `rightmost_run_clear`  | bit        | Clear the lowest contiguous run of 1s |
 | `same_popcount_next`   | regularity | Replace a word with its Gosper next constant-weight neighbour |
-| `same_popcount_prev`   | regularity | Symmetric previous neighbour (optional, can be derived) |
+| `same_popcount_prev`   | regularity | Symmetric previous neighbour |
 
 All operators follow the existing structured-mutation pattern:
 
-- Choose a random aligned or unaligned window of width 1/2/4/8 bytes (or a full Python int for very large windows).
-- Interpret the window as a big-endian or little-endian unsigned integer (configurable).
+- Choose a random window of width 1/2/4/8 bytes.
+- Interpret as little-endian unsigned integer.
 - Apply the formula.
-- Write the result back, preserving overall buffer length (or using FrameShift if the operator is allowed to change size – these ones do not).
+- Write back, preserving buffer length.
 
 ### 3.2 File layout (Hard Rule 12 compliant)
 
 ```
-src/fuzzer_tool/core/mutations/structured.py   # add the pure functions + operator bodies
-src/fuzzer_tool/core/operator_registry.py      # register names under "bit" and "regularity"
-src/fuzzer_tool/services/operators.py          # thin wrappers that call the structured helpers
-tests/test_regression_hackers_delight.py       # new regression file (oracle + registration)
-docs/DEEP_DIVE.md                              # one-line bullets under bit / regularity
-docs/handover/handover_hackers_delight_...md   # this document
+src/fuzzer_tool/core/mutations/hackers_delight.py   # pure formulas + windowed operators  (✅)
+src/fuzzer_tool/core/operator_registry.py           # names under "bit" and "regularity"   (✅)
+src/fuzzer_tool/services/operators.py               # thin _op_* wrappers                   (✅)
+tests/test_regression_hackers_delight.py            # 17 regression cases                   (✅)
+docs/handover/handover_hackers_delight_...md        # this document
+docs/DEEP_DIVE.md                                   # optional one-line bullets
 ```
 
-Do **not** touch the legacy `mutations/generic.py` `MUTATIONS` list.
-
-### 3.3 Concrete code (drop-in)
+### 3.3 Registration (already on master)
 
 ```python
-# ------------------------------------------------------------------
-# core/mutations/structured.py  (additions)
-# ------------------------------------------------------------------
-
-from __future__ import annotations
-import random
-from typing import Callable
-
-# ---- pure formulas (branch-free, arbitrary width) -----------------
-
-def _clear_rightmost_1(x: int) -> int:
-    return x & (x - 1)
-
-def _isolate_rightmost_1(x: int) -> int:
-    return x & -x
-
-def _isolate_rightmost_0(x: int) -> int:
-    return (~x) & (x + 1)
-
-def _mask_trailing_zeros(x: int) -> int:
-    return (~x) & (x - 1)
-
-def _right_propagate_1(x: int) -> int:
-    return x | (x - 1)
-
-def _clear_rightmost_run(x: int) -> int:
-    return ((x | (x - 1)) + 1) & x
-
-def snoob(x: int) -> int:
-    """Next higher integer with the same population count (Gosper).
-    Returns 0 when x == 0 (no successor).
-    """
-    if x == 0:
-        return 0
-    smallest = x & -x
-    ripple = x + smallest
-    ones = x ^ ripple
-    # number of trailing zeros of smallest is smallest.bit_length()-1
-    shift = (smallest.bit_length() - 1) + 2
-    return ripple | (ones >> shift)
-
-def snoob_prev(x: int) -> int:
-    """Previous integer with the same population count.
-    Simple linear search; for production a dual formula can be derived.
-    """
-    if x == 0:
-        return 0
-    w = x.bit_count()
-    y = x - 1
-    while y and y.bit_count() != w:
-        y -= 1
-    return y
-
-# ---- operator bodies (windowed) -----------------------------------
-
-_WORD_WIDTHS = (1, 2, 4, 8)
-
-def _pick_window(data: bytes, rng: random.Random, min_len: int = 1):
-    if len(data) < min_len:
-        return 0, 0
-    width = rng.choice([w for w in _WORD_WIDTHS if w <= len(data)])
-    offset = rng.randrange(0, len(data) - width + 1)
-    return offset, width
-
-def _apply_word_op(data: bytes, rng: random.Random, op: Callable[[int], int],
-                   endian: str = "little") -> bytes:
-    offset, width = _pick_window(data, rng)
-    if width == 0:
-        return data
-    chunk = data[offset:offset + width]
-    x = int.from_bytes(chunk, endian)
-    y = op(x)
-    # keep the same byte width (mask to width*8 bits)
-    y &= (1 << (width * 8)) - 1
-    new_chunk = y.to_bytes(width, endian)
-    return data[:offset] + new_chunk + data[offset + width:]
-
-def rightmost_clear(data: bytes, rng: random.Random) -> bytes:
-    return _apply_word_op(data, rng, _clear_rightmost_1)
-
-def rightmost_isolate(data: bytes, rng: random.Random) -> bytes:
-    return _apply_word_op(data, rng, _isolate_rightmost_1)
-
-def rightmost_propagate(data: bytes, rng: random.Random) -> bytes:
-    return _apply_word_op(data, rng, _right_propagate_1)
-
-def rightmost_run_clear(data: bytes, rng: random.Random) -> bytes:
-    return _apply_word_op(data, rng, _clear_rightmost_run)
-
-def same_popcount_next(data: bytes, rng: random.Random) -> bytes:
-    return _apply_word_op(data, rng, snoob)
-
-def same_popcount_prev(data: bytes, rng: random.Random) -> bytes:
-    return _apply_word_op(data, rng, snoob_prev)
-```
-
-### 3.4 Registration (exact locations)
-
-```python
-# core/operator_registry.py  – inside _CATEGORIES
-"bit": [
-    ...,
+# core/operator_registry.py
+"bit": {
+    …,
     "rightmost_clear",
     "rightmost_isolate",
     "rightmost_propagate",
     "rightmost_run_clear",
-],
-"regularity": [
-    ...,
+},
+"regularity": {
+    …,
     "same_popcount_next",
     "same_popcount_prev",
-],
+},
 ```
 
 ```python
 # services/operators.py
-def _op_rightmost_clear(self, buf: bytes) -> bytes:
-    return self._regularity(rightmost_clear, buf)   # or _bit(...) according to category
-
-# (analogous one-liners for the other five)
+def _op_rightmost_clear(self, buf, _byte_idx, _data):
+    from fuzzer_tool.core.mutations.hackers_delight import rightmost_clear
+    return self._regularity(rightmost_clear, buf)
+# (analogous for the other five)
 ```
 
-### 3.5 Tests
+### 3.4 Tests
 
-Create `tests/test_regression_hackers_delight.py` following the style of `test_regression_bithacks.py`:
+`tests/test_regression_hackers_delight.py` – 17 cases:
 
-- Registration / category membership.
-- Exact oracle tests for every pure formula on a set of hand-chosen 32/64-bit values (including 0, 1, all-1s, powers of two, alternating patterns).
-- Round-trip / identity on empty and short buffers (no draws consumed).
+- Exact oracle tests for every pure formula (0, 1, all-1s, powers of two, alternating patterns).
+- Round-trip / identity on empty and short buffers.
 - `same_popcount_next` preserves `bit_count()`.
-- Property: after `k` successive `same_popcount_next` the popcount stays constant and the values are strictly increasing until the maximum constant-weight number is reached.
-
-### 3.6 Documentation
-
-Add one-line bullets under the bit and regularity sections of `docs/DEEP_DIVE.md` and a short entry in `CHANGELOG.md`.
+- Successive next-values stay strictly increasing at constant weight.
 
 ---
 
 ## 4. Verification Checklist
 
-- [ ] All six operators appear in `fuzzer-tool --help` / operator list.
-- [ ] `pytest tests/test_regression_hackers_delight.py -q` passes.
-- [ ] `pytest tests/test_regression_operator_registry.py` still passes (names added to the expected sets).
-- [ ] No change in behaviour of existing operators (regression suite green).
-- [ ] Manual smoke: `fuzzer-tool fuzz --one-fifth /path/to/target` shows the new names in the operator histogram.
+- [x] Module + tests present on upstream master (`42a3028`).
+- [x] Registration + `_op_*` handlers present (`2a231fa`).
+- [x] Names appear under `bit` / `regularity` in `operator_registry.py`.
+- [ ] `pytest tests/test_regression_hackers_delight.py -q` (17 green) – re-run after any local edit.
+- [ ] Operator-registry / smoke suites still green.
+- [ ] Manual smoke: operator histogram shows the new names.
+- [ ] Optional: one-line bullets in `docs/DEEP_DIVE.md`.
 
 ---
 
 ## 5. Future / Optional Follow-ups
 
-- Dual formulas for the 0-bit family (already sketched).
-- 128-bit / multi-word Gosper for domains larger than 64 bits (currently limited by Python `int` performance on very wide windows).
-- Integration of `snoob` into the combinatorial seed generators (`covering_array`, etc.) once those modules are next touched.
-- Branch-free `doz` / `max` / `min` helpers for the energy / ranking paths (book Chapter 2) – lower priority because the Python layer already uses numpy / built-ins.
+Priority order informed by the four-source stack:
+
+1. **Subset-iteration operator** based on the classic loop `(b - x) & x`  
+   (Laaksonen Ch. 10; Arndt `bit_subset` / `bit_subset_gray`). Highest-value missing combinatorial mutator.
+
+2. Dual formulas for the 0-bit family (already sketched; Arndt `set_lowest_zero`, `lowest_zero`).
+
+3. Integration of `snoob` into the combinatorial seed generators (`covering_array`, etc.).
+
+4. Bit-zip / interleave refinements (Arndt §1.15; partially covered by existing `bit_interleave`).
+
+5. 128-bit / multi-word Gosper for domains larger than 64 bits.
+
+6. Branch-free `doz` / `max` / `min` helpers for energy / ranking paths (*Hacker’s Delight* Ch. 2) — lower priority because the Python layer already uses built-ins.
+
+7. Thin `ctz` / `clz` helpers if any internal coverage or scoring path would benefit (Python already supplies `bit_length` / `bit_count`).
 
 ---
 
 ## 6. References
 
 - Warren, Henry S., Jr. *Hacker’s Delight*. Addison-Wesley, 2002. Chapter 2, especially §2-1 and Figure 2-1.
+- Wikipedia. “Find first set”. https://en.wikipedia.org/wiki/Find_first_set (ffs, ctz, clz, hardware mapping, software algorithms).
+- Laaksonen, Antti. *Competitive Programmer’s Handbook* (Draft July 2018). Chapters 5 (Complete search) and 10 (Bit manipulation).
+- Arndt, Jörg. *Matters Computational: Ideas, Algorithms, Source Code* (“FXT book”). Chapter 1 “Bit wizardry” (lowest/highest bit isolation, bit-count, Gray codes, bit-zip, constant-weight and subset generators) and the combinatorial chapters that rest on those primitives. Source: https://www.jjj.de/fxt/
 - Existing internal note: `docs/handover/handover_bithacks_ports_2026-10-05.md` (Gosper flagged as speculative).
-- Classic C reference implementations: http://www.hackersdelight.org/ (original package) and the many open-source ports (e.g. `hcs0/Hackers-Delight` on GitHub).
+- Classic C reference implementations: http://www.hackersdelight.org/ and open-source ports.
 
 ---
 
-**Author of this handover**: Grok (xAI) – derived from the supplied PDF pages of the 2002 edition and the live fuzzer-tool tree.  
-**Ready for**: direct implementation by any developer following Hard Rule 12.
+**Author of this handover**: Grok (xAI) – derived from the supplied PDF pages of the 2002 *Hacker’s Delight* edition, the live fuzzer-tool tree, the Find-first-set Wikipedia page, the Competitive Programmer’s Handbook, and *Matters Computational*.  
+**Ready for**: optional DEEP_DIVE.md one-liner; otherwise the feature is fully integrated on master.
