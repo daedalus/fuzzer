@@ -210,7 +210,9 @@ def test_regression_extralibs_bogus_lib_dropped(tmp_path):
     assert "-lnosuchlib_fuzz" not in r.stdout
 
 
-def _versions(tmp_path: Path, variant: str, stale: str = "") -> list[str]:
+def _versions(
+    tmp_path: Path, variant: str, stale: str = "", opts: str = ""
+) -> list[str]:
     """Run build_ffmpeg_versions for one variant against stubbed builders; return their calls."""
     vendor, build = tmp_path / "vendor", tmp_path / "build"
     _tree(vendor, "9.0.2")
@@ -220,8 +222,10 @@ def _versions(tmp_path: Path, variant: str, stale: str = "") -> list[str]:
     if stale:
         (build / stale / ".stale").write_text("")
 
-    fn = re.search(r"^build_ffmpeg_versions\(\) \{.*?^\}", BUILD_SCRIPT.read_text(), re.M | re.S)
-    assert fn
+    text = BUILD_SCRIPT.read_text()
+    fn = re.search(r"^build_ffmpeg_versions\(\) \{.*?^\}", text, re.M | re.S)
+    want = re.search(r"^ffmpeg_opt_wanted\(\) \{.*?^\}", text, re.M | re.S)
+    assert fn and want
     stubs = "\n".join(
         f'{name}() {{ echo "{name} $*"; }}'
         for name in [
@@ -232,8 +236,9 @@ def _versions(tmp_path: Path, variant: str, stale: str = "") -> list[str]:
         ]
     )
     script = (
-        f"{stubs}\nffmpeg_extralibs() {{ :; }}\n{fn.group(0)}\n"
+        f"{stubs}\nffmpeg_extralibs() {{ :; }}\n{want.group(0)}\n{fn.group(0)}\n"
         f'VENDOR="{vendor}"; FUZZ_BUILD_ROOT="{build}"; TARGETS="{build}"; DEFAULT_CC=clang\n'
+        f'FFMPEG_OPTS="{opts}"\n'
         f"build_ffmpeg_versions {variant}\n"
     )
     r = subprocess.run([BASH, "-c", script], capture_output=True, text=True, timeout=60)
@@ -287,3 +292,46 @@ def test_regression_versions_wired_into_both_passes():
 
     assert re.search(r'build_ffmpeg_versions "_asan" "\$ASAN_CFLAGS"', main)
     assert re.search(r'build_ffmpeg_versions "_noasan" ""', main)
+
+
+def test_regression_versions_ubsan_and_ngram_variants(tmp_path):
+    """ubsan / ng<k> link the coverage-only tree and carry their own flags, exe and .so."""
+    ubsan = "\n".join(_versions(tmp_path / "u", '"_ubsan" "-fsanitize=undefined" "clang"'))
+    ng = "\n".join(
+        _versions(
+            tmp_path / "g",
+            '"_ng2" "-D__AFL_NGRAM_K=2 -fsanitize-coverage=trace-pc" "clang"',
+        )
+    )
+
+    # coverage-only tree (no _asan suffix): ASAN archives would leave __asan_* undefined
+    assert "build_vendored_ffmpeg_sancov  ffmpeg-9.0.2" in ubsan
+    assert re.search(
+        r"build_target \S+ \S+/ffmpeg_read_9\.0\.2_ubsan .*-fsanitize=undefined clang -I\S+/ffmpeg-9\.0\.2$",
+        ubsan,
+        re.M,
+    )
+    assert re.search(r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_ubsan\.so ", ubsan)
+
+    assert re.search(r"build_target \S+ \S+/ffmpeg_read_9\.0\.2_ng2 .*__AFL_NGRAM_K=2", ng)
+    assert re.search(r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_ng2\.so .*__AFL_NGRAM_K=2", ng)
+    assert "_asan" not in ng
+
+
+def test_regression_versions_opts_filter_skips_unlisted(tmp_path):
+    """Adversarial: FFMPEG_OPTS excludes a variant -> no tree build, no link; a listed one still runs."""
+    skipped = _versions(tmp_path / "s", '"_noasan" ""', opts="asan,ng2")
+    kept = _versions(tmp_path / "k", '"_noasan" ""', opts="asan,noasan")
+
+    assert skipped == []
+    assert any(c.startswith("build_target") for c in kept)
+
+
+def test_regression_versions_matrix_wired_in_main():
+    """ubsan rides the ASAN pass, ng<k> the --ngram pass; --ffmpeg-opts= is parsed."""
+    text = BUILD_SCRIPT.read_text()
+    main = text.split("# ── Main ──", 1)[1]
+
+    assert re.search(r'build_ffmpeg_versions "_asan" "\$ASAN_CFLAGS"\n\s+build_ffmpeg_version_ubsan', main)
+    assert re.search(r"build_ngram_so_targets\n\s+build_ffmpeg_version_ngram", main)
+    assert "--ffmpeg-opts=*) FFMPEG_OPTS=" in text

@@ -21,7 +21,7 @@
 #   tools/vendor_lz4.sh       -> $FUZZ_VENDOR_ROOT/lz4        (lz4_read / lz4_read.so)
 #   tools/vendor_grep.sh      -> $FUZZ_VENDOR_ROOT/grep
 #   tools/vendor_ffmpeg.sh    -> $FUZZ_VENDOR_ROOT/ffmpeg
-#   tools/vendor_ffmpeg.sh --top=3 -> $FUZZ_VENDOR_ROOT/ffmpeg-<ver>  (ffmpeg_read_<ver>_{asan,noasan}{,.so})
+#   tools/vendor_ffmpeg.sh --top=3 -> $FUZZ_VENDOR_ROOT/ffmpeg-<ver>  (ffmpeg_read_<ver>_{asan,noasan,ubsan,ng2,ng3}{,.so})
 #   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
 #   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
 #
@@ -355,6 +355,7 @@ for arg in "$@"; do
     [ "$arg" = "--tsan" ] && WITH_TSAN=1
     case "$arg" in
         --sancov=*) SANCOV_MODES="${arg#--sancov=}" && WITH_CLANG_SCOV=1 ;;
+        --ffmpeg-opts=*) FFMPEG_OPTS="${arg#--ffmpeg-opts=}" ;;
     esac
 done
 
@@ -1461,16 +1462,36 @@ STUBEOF
 }
 
 # ── Multi-version FFmpeg (tools/vendor_ffmpeg.sh --top=N) ─────────
-# One executable + one .so per vendored $VENDOR/ffmpeg-<ver> tree and variant:
-#   _asan   : ffmpeg-<ver>_asan/*.a -> ffmpeg_read_<ver>_asan{,.so}
-#   _noasan : ffmpeg-<ver>/*.a      -> ffmpeg_read_<ver>_noasan{,.so}
+# One executable + one .so per vendored $VENDOR/ffmpeg-<ver> tree and OPTS
+# variant:  ffmpeg_read_<ver>_<OPTS>  and  ffmpeg_read_<ver>_<OPTS>.so
+#
+#   OPTS     libs linked                 flags                       gate
+#   asan     ffmpeg-<ver>_asan/*.a       -fsanitize=address          ASAN pass
+#   noasan   ffmpeg-<ver>/*.a            (coverage only)             no-ASAN pass
+#   ubsan    ffmpeg-<ver>/*.a            -fsanitize=undefined        ASAN pass
+#   ng2/ng3  ffmpeg-<ver>/*.a            trace-pc + __AFL_NGRAM_K=k  --ngram
+#
+# ubsan and ng* reuse the coverage-only tree: UBSAN needs no ASAN-instrumented
+# archives (linking them without -fsanitize=address leaves __asan_* undefined),
+# and the unversioned ffmpeg_read_ng{2,3}.so does the same. Only asan and
+# noasan therefore cost a configure+make per version.
+# FFMPEG_OPTS=asan,ng2 (or --ffmpeg-opts=asan,ng2) restricts the matrix; unset
+# means every variant whose pass is running.
 # Load one version's .so per process: two libav* copies share one symbol
 # namespace. Multi-target mode runs each in its own process and SHM map,
 # so one corpus exercises every version.
+ffmpeg_opt_wanted() {
+    [ -z "${FFMPEG_OPTS:-}" ] && return 0
+    case ",$FFMPEG_OPTS," in *",$1,"*) return 0 ;; esac
+    return 1
+}
+
+# $1 suffix (_asan|_noasan|_ubsan|_ng<k>)  $2 flags  [$3 cc]  [$4 extra cflags]
 build_ffmpeg_versions() {
-    local suffix="$1" flags="$2"
-    local tree_suffix="" dir ver root libs
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    local tree_suffix="" dir ver root libs inc
     [ "$suffix" = "_asan" ] && tree_suffix="_asan"
+    ffmpeg_opt_wanted "${suffix#_}" || return 0
     for dir in "$VENDOR"/ffmpeg-*/; do
         [ -f "$dir/configure" ] || continue
         ver="$(basename "$dir")"
@@ -1487,8 +1508,26 @@ build_ffmpeg_versions() {
         fi
 
         libs="$root/libavformat/libavformat.a $root/libavcodec/libavcodec.a $root/libavutil/libavutil.a $root/libswresample/libswresample.a $(ffmpeg_extralibs "$root")"
-        build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}${suffix}" "$libs" "$flags" "$DEFAULT_CC" "-I$root"
-        build_so_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}${suffix}.so" "$libs" "$flags" "$DEFAULT_CC" "-I$root"
+        inc="-I$root${extra_cflags:+ $extra_cflags}"
+        build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}${suffix}" "$libs" "$flags" "$cc" "$inc"
+        build_so_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}${suffix}.so" "$libs" "$flags" "$cc" "$inc"
+    done
+}
+
+# The variants beyond asan/noasan, in one place so the main passes stay short.
+# ubsan rides the ASAN pass (as the unversioned _ubsan targets do); ng* needs
+# clang for -fsanitize-coverage=trace-pc and runs only under --ngram.
+build_ffmpeg_version_ubsan() {
+    command -v clang &>/dev/null || { warn "clang not found — skipping ffmpeg_read_<ver>_ubsan"; return 0; }
+    build_ffmpeg_versions "_ubsan" "-fsanitize=undefined" "clang"
+}
+build_ffmpeg_version_ngram() {
+    [ "$WITH_NGRAM" -eq 1 ] || return 0
+    command -v clang &>/dev/null || { warn "clang not found — skipping ffmpeg_read_<ver>_ng<k>"; return 0; }
+    local k
+    for k in 2 3; do
+        build_ffmpeg_versions "_ng$k" \
+            "-D__AFL_DISTANCE_MODE -D__AFL_NGRAM_K=$k -fsanitize-coverage=trace-pc" "clang"
     done
 }
 
@@ -2577,6 +2616,7 @@ if [ "$BUILD_ASAN" -eq 1 ]; then
     build_vendored_ffmpeg_sancov "_asan"
     build_simple_targets "_asan" "$ASAN_CFLAGS" "ASAN"
     build_ffmpeg_versions "_asan" "$ASAN_CFLAGS"
+    build_ffmpeg_version_ubsan
     [ "$HAS_FGREP" -eq 1 ] && build_fgrep_so_targets "_asan_tcg" "$ASAN_CFLAGS" "ASAN"
     build_simple_so_targets "_asan" "$ASAN_CFLAGS" "ASAN"
     build_standalone_so_targets "_asan" "$ASAN_CFLAGS" "ASAN"
@@ -2663,6 +2703,7 @@ if [ "$WITH_DISTANCE" -eq 1 ]; then
 fi
 if [ "$WITH_NGRAM" -eq 1 ]; then
     build_ngram_so_targets
+    build_ffmpeg_version_ngram
 fi
 
 # ── Compile perf_shim.so (utility library, not a fuzz target) ────

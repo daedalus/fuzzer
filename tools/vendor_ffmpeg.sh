@@ -11,7 +11,7 @@
 #                                       #   -> vendor/ffmpeg_fast
 #   tools/vendor_ffmpeg.sh --top=3      # sources only, newest patch of the 3 newest release
 #                                       #   lines -> vendor/ffmpeg-<ver> (e.g. 9.0.2, 8.1.3, 8.0.3);
-#                                       #   build_targets.sh builds ffmpeg_read_<ver>_asan from each.
+#                                       #   build_targets.sh builds ffmpeg_read_<ver>_{asan,noasan,ubsan,ng2,ng3}{,.so} from each.
 #                                       #   FFMPEG_VERSIONS="9.0.2 8.1.3" skips tag resolution.
 #
 # Component set:
@@ -277,7 +277,7 @@ vendor_top() {
         apply_patches
     done
     echo "=== FFmpeg sources vendored: $(echo $versions) ==="
-    echo "Next:      tools/build_targets.sh --asan   (builds ffmpeg_read_<ver>_asan per version)"
+    echo "Next:      tools/build_targets.sh --asan   (builds ffmpeg_read_<ver>_asan{,.so} per version; see --ffmpeg-opts=)"
 }
 if [ "$TOP" -gt 0 ]; then
     vendor_top "$TOP"
