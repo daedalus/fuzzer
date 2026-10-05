@@ -1108,6 +1108,11 @@ static inline uint32_t __afl_get_caller_ctx(void) {
     uintptr_t cur = (uintptr_t)fp;
     void **caller_fp = (void **)__afl_raw_load(fp);   /* saved FP of the frame above */
     uintptr_t cfp = (uintptr_t)caller_fp;
+    /* Reject non-canonical addresses on x86-64: valid user-space addresses
+     * have bits 63:47 all-zero; kernel-space addresses have all-one.
+     * Non-canonical values (e.g. 0x800000010000) fall in the gap between
+     * user and kernel space and cause SIGSEGV on the second-hop dereference. */
+    if (cfp >> 47) return 0;
     /* The stack grows down, so a genuine older frame sits at a higher
      * address than ours and within a sane single-hop span (4 MiB covers
      * any realistic frame without risking a wild read).  Anything outside
