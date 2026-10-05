@@ -453,19 +453,65 @@ def test_salvage_drops_torn_last_member(zcorpus):
 
 
 def test_hostile_member_names_ignored(zcorpus):
+    """Traversal and absolute names are never corpus data; other names are
+    foreign members and load by content (see test_foreign_members_*)."""
     corpus, _ = zcorpus
     seed_zip.configure(corpus, ZipMode.OFF)
     good = hash_data(b"ok")
     with zipfile.ZipFile(corpus / seed_zip.ZIP_NAME, "w") as zf:
         zf.writestr("../../etc/id_" + "a" * 16, b"evil1")
-        zf.writestr("zz/id_nothex", b"evil2")
-        zf.writestr("pruned/ab/id_" + "ab" * 8, b"evil3")  # not a zip subtree
         zf.writestr("/abs/id_" + "b" * 16, b"evil4")
+        zf.writestr("dir/", b"")
         zf.writestr(f"{good[:2]}/id_{good}", b"ok")
     seed_zip.configure(corpus, ZipMode.ON)
 
     got, _, _ = load_corpus(corpus, add_default=False)
     assert got == [b"ok"]
+
+
+def _foreign_zip(corpus: Path) -> list[bytes]:
+    """seeds.zip as a third party builds it: arbitrary flat/nested names."""
+    datas = [b"RIFF-one" * 4, b"OggS-two" * 4, b"\x1aE\xdf\xa3mkv" * 4]
+    corpus.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(corpus / seed_zip.ZIP_NAME, "w") as zf:
+        zf.writestr("a.avi", datas[0])
+        zf.writestr("sub/b.ogg", datas[1])
+        zf.writestr("zz/id_nothex", datas[2])
+        zf.writestr("a_copy.avi", datas[0])  # duplicate content
+    return datas
+
+
+def test_foreign_members_load_readonly(tmp_path):
+    corpus = tmp_path / "c"
+    datas = _foreign_zip(corpus)
+    before = (corpus / seed_zip.ZIP_NAME).read_bytes()
+
+    got, seen, _ = load_corpus(corpus, add_default=False)
+    assert sorted(got) == sorted(datas)
+    assert seen == {hash_data(d) for d in datas}
+    assert (corpus / seed_zip.ZIP_NAME).read_bytes() == before
+
+
+def test_foreign_members_adopted_under_zip_mode(tmp_path):
+    corpus = tmp_path / "c"
+    datas = _foreign_zip(corpus)
+    store = seed_zip.configure(corpus, ZipMode.ON)
+    try:
+        got, _, _ = load_corpus(corpus, add_default=False)
+        assert sorted(got) == sorted(datas)
+        store.flush()
+        names = _members(corpus)
+        for d in datas:
+            h = hash_data(d)
+            assert f"{h[:2]}/id_{h}" in names  # canonical, so prune can retire it
+
+        h0 = hash_data(datas[0])
+        assert store.retire(h0)
+        store.flush()
+        got, _, _ = load_corpus(corpus, add_default=False)
+        assert sorted(got) == sorted(datas[1:])  # pruned stays pruned across loads
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)
 
 
 def test_misnamed_member_keyed_by_content(zcorpus):

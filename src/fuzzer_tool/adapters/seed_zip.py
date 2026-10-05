@@ -110,6 +110,18 @@ def _parse(name: str) -> tuple[str, str] | None:
     return tree, h
 
 
+def _is_foreign(name: str) -> bool:
+    """A plain file member with an arbitrary name (a third-party seed zip).
+
+    Names are only ever used as archive keys, never joined onto a path, so
+    only directories, absolute names, traversal and our tombstone namespace
+    are refused.
+    """
+    if not name or name.endswith("/") or name.startswith(("/", f"{_TOMB}/")):
+        return False
+    return ".." not in name.split("/")
+
+
 def _salvage(path: Path) -> None:
     """Rebuild *path* from its local headers; keep the original as .corrupt.
 
@@ -187,7 +199,16 @@ def _write_all(zf: zipfile.ZipFile, entries) -> None:
 class SeedZip:
     """Append-only seed archive for one corpus directory."""
 
-    def __init__(self, corpus_dir: Path, block_seeds: int, block_bytes: int, growth: int):
+    def __init__(
+        self,
+        corpus_dir: Path,
+        block_seeds: int,
+        block_bytes: int,
+        growth: int,
+        readonly: bool = False,
+    ):
+        self._readonly = readonly
+        self._foreign: list[str] = []  # members not named ab/id_<hash>
         self._path = Path(corpus_dir) / ZIP_NAME
         self._block_seeds = block_seeds
         self._block_bytes = block_bytes
@@ -229,7 +250,10 @@ class SeedZip:
         """Apply one member, in archive order, to the in-memory view."""
         parsed = _parse(name)
         if parsed is None:
-            log.debug("seeds.zip: ignoring member %r", name)
+            if _is_foreign(name):
+                self._foreign.append(name)
+            else:
+                log.debug("seeds.zip: ignoring member %r", name)
             return
 
         tree, h = parsed
@@ -323,13 +347,42 @@ class SeedZip:
         """``(data, protected)`` for every live seed; flushes first."""
         self.flush()
         self._index()
+        foreign = self._read_foreign()
+        if foreign and not self._readonly:
+            self._adopt(foreign)
+            foreign = {}
         protected = {h for _, h in self._protected}
         wanted = self._main_live | protected
-        if not wanted:
-            return
+        if wanted:
+            with zipfile.ZipFile(self._path) as zf:
+                for h in sorted(wanted):
+                    yield zf.read(self._where[h]), h in protected
+        # Read-only: foreign members are served by content, never rewritten.
+        for data in foreign.values():
+            yield data, False
+
+    def _read_foreign(self) -> dict[str, bytes]:
+        """``{content hash: data}`` of foreign members not already canonical."""
+        if not self._foreign:
+            return {}
+        from fuzzer_tool.adapters.filesystem import hash_data  # noqa: PLC0415
+
+        out: dict[str, bytes] = {}
         with zipfile.ZipFile(self._path) as zf:
-            for h in sorted(wanted):
-                yield zf.read(self._where[h]), h in protected
+            for name in self._foreign:
+                data = zf.read(name)
+                h = hash_data(data)
+                if h not in self._main_seen:  # pruned or already adopted: skip
+                    out.setdefault(h, data)
+        return out
+
+    def _adopt(self, foreign: dict[str, bytes]) -> None:
+        """Re-add foreign seeds as canonical members so prune can tombstone them."""
+        for h, data in foreign.items():
+            self.put(SeedTree.MAIN, h, data)
+        self._foreign = []
+        self.flush()
+        log.info("seeds.zip: adopted %d foreign members as seeds", len(foreign))
 
     def main_hashes(self) -> set[str]:
         self._index()
@@ -375,7 +428,7 @@ def configure(
 
 def open_readonly(corpus_dir: str | Path) -> SeedZip:
     """Unregistered store for reading *corpus_dir*/seeds.zip; callers never write."""
-    return SeedZip(Path(corpus_dir), BLOCK_SEEDS, BLOCK_BYTES, BLOCK_GROWTH)
+    return SeedZip(Path(corpus_dir), BLOCK_SEEDS, BLOCK_BYTES, BLOCK_GROWTH, readonly=True)
 
 
 def lookup(corpus_dir: str | Path) -> SeedZip | None:
