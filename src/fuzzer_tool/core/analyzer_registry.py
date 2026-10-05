@@ -692,6 +692,27 @@ REGISTRY.register(
 )
 
 
+def _activate_grimoire(f: FuzzerLike) -> None:
+    from fuzzer_tool.services.grimoire import GrimoireStage
+
+    f._grimoire = GrimoireStage(f._grimoire_run, f.grimoire_max_execs, f.max_len)
+
+
+def _deactivate_grimoire(f: FuzzerLike) -> None:
+    f._grimoire = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="grimoire",
+        category="format_recovery",
+        activate=_activate_grimoire,
+        deactivate=_deactivate_grimoire,
+        available=lambda f: bool(getattr(f, "grimoire", False)),
+    )
+)
+
+
 def _activate_prng_state_learner(f: FuzzerLike) -> None:
     from fuzzer_tool.core.analyzers.analyzer_prng_state_learner import PRNGStateLearner
 

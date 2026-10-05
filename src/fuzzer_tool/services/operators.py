@@ -191,6 +191,9 @@ _DELOCALISED_OPS = frozenset(
         "block_shuffle_variable",
         "byte_shuffle",
         "chunk_shuffle",
+        "grimoire_extend",
+        "grimoire_recurse",
+        "grimoire_string",
         "ltl_prefix",
         "tail_append",
         "token_shuffle",
@@ -2802,6 +2805,24 @@ class OperatorEngine:
         n = len(buf)
         out = tail_append(bytes(buf), self.ctx.max_len, rng=self.ctx._rng)
         buf[n:] = out[n:]
+
+    def _op_grimoire_extend(self, buf, _byte_idx, _data):
+        """Add another generalized input's tokens to either side (--grimoire)."""
+        out = self.f._grimoire.book.extend(bytes(buf), self.ctx._rng)
+        if out is not None:
+            return bytearray(out)
+
+    def _op_grimoire_recurse(self, _buf, _byte_idx, data):
+        """Fill the parent's GAPs with other generalized inputs (--grimoire)."""
+        out = self.f._grimoire.book.recurse(bytes(data), self.ctx._rng)
+        if out is not None:
+            return bytearray(out)
+
+    def _op_grimoire_string(self, buf, _byte_idx, _data):
+        """Swap a pooled token present in the input for another (--grimoire)."""
+        out = self.f._grimoire.book.replace(bytes(buf), self.ctx._rng)
+        if out is not None:
+            return bytearray(out)
 
     def _op_ltl_prefix(self, _buf, _byte_idx, _data):
         """Stored prefix of an unexplored automaton state + fresh tail (--ltl)."""

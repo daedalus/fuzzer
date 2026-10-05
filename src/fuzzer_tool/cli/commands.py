@@ -944,6 +944,8 @@ def cmd_fuzz(args):
         op_span_relocate=getattr(args, "op_span_relocate", False),
         op_append=getattr(args, "op_append", False),
         checksum_sites=getattr(args, "checksum_sites", False),
+        grimoire=getattr(args, "grimoire", False),
+        grimoire_max_execs=getattr(args, "grimoire_max_execs", 512),
         zip_seed_corpus=getattr(args, "zip_seed_corpus", False),
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
@@ -2295,6 +2297,7 @@ _HAIL_MARY_FLAGS = (
     "op_span_relocate",
     "op_append",
     "checksum_sites",
+    "grimoire",
     "op_afl_det",
     "grammar_boltzmann",
     "cmplog_fifo_sink",
@@ -5560,6 +5563,24 @@ def main() -> int:
             "16-bit sum) on each seed and recompute them in every mutant "
             "(TaintScope-style repair). Off by default."
         ),
+    )
+    fuzz_parser.add_argument(
+        "--grimoire",
+        action="store_true",
+        help=(
+            "Grimoire: infer structure without a grammar. Each admitted seed is "
+            "re-run once with spans removed; spans whose removal keeps the new "
+            "coverage become gaps. Three operators recombine the remaining tokens "
+            "across seeds (extend, recursive gap fill, token swap). Costs up to "
+            "--grimoire-max-execs executions per seed. Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--grimoire-max-execs",
+        type=int,
+        default=512,
+        metavar="N",
+        help="Per-seed execution budget for --grimoire (default: 512)",
     )
     fuzz_parser.add_argument(
         "--op-afl-det",

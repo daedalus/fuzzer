@@ -33,7 +33,7 @@ measured coverage delta.
 Four proposals for one gap. Ranked by plumbing already in place, which is not
 the order any single source gave.
 
-**A1. Grimoire-style generalization** (`I.4`, LibAFL `GeneralizationStage`) —
+**A1. Grimoire-style generalization (implemented 2026-10-04, `--grimoire`, unmeasured)** (`I.4`, LibAFL `GeneralizationStage`) —
 blank spans of an input, re-execute, keep the spans whose removal does not
 change coverage. Yields structure and recombinable tokens with **no grammar
 supplied**, which is exactly where the ~155 hand-written format mutators have

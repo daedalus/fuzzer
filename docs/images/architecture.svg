@@ -400,7 +400,7 @@
 <path fill="none" stroke="#22688c" stroke-width="1.4" d="M225.97,-356.89C245.59,-377.6 274.91,-403.67 307,-415.5 338.02,-426.93 869.01,-421.36 902,-423.5 936.38,-425.73 944.61,-430.33 979,-432.5 999.6,-433.8 2450.47,-431.84 2465,-446.5 2478.76,-460.39 2474.1,-473.19 2465,-490.5 2456.97,-505.77 2441.03,-497.23 2433,-512.5 2429.28,-519.58 2428.46,-523.92 2433,-530.5 2448.66,-553.19 2475.34,-529.81 2491,-552.5 2503.37,-570.42 2504.76,-584.62 2491,-601.5 2480.17,-614.77 2356.95,-630.06 2340,-632.5 2150.99,-659.71 1930.18,-675.14 1793.95,-682.78"/>
 <polygon fill="#22688c" stroke="#22688c" stroke-width="1.4" points="1793.78,-680.4 1787.13,-683.16 1794.05,-685.16 1793.78,-680.4"/>
 <text text-anchor="start" x="2433" y="-523.7" font-family="Helvetica,sans-Serif" font-size="8.50" fill="#22688c"> &#160;redqueen · colorize · i2s fixpoint</text>
-<text text-anchor="start" x="2433" y="-514.7" font-family="Helvetica,sans-Serif" font-size="8.50" fill="#22688c"> &#160;SMT · magic bytes</text>
+<text text-anchor="start" x="2433" y="-514.7" font-family="Helvetica,sans-Serif" font-size="8.50" fill="#22688c"> &#160;grimoire · SMT · magic bytes</text>
 </g>
 <!-- cmplog&#45;&gt;corpus -->
 <g id="edge25" class="edge">

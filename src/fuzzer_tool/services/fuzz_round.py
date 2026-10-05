@@ -161,6 +161,7 @@ class FuzzRound:
         """Run the round; True when the mutant crashed or was admitted."""
         self._begin()
         self._search_fixpoint()
+        self._generalize()
         self._execute()
         self._mine_cmplog()
         self._periodic()
@@ -196,6 +197,17 @@ class FuzzRound:
         if fixpoint is None or self._meta is None or self._meta["fuzz_count"] != 1:
             return
         fixpoint.search(self._data)
+
+    def _generalize(self) -> None:
+        # --grimoire: the stage generalizes each tracked seed once. Not gated
+        # on fuzz_count: other paths bump it before a first round, which
+        # would leave those seeds ungeneralized forever. Before _execute for
+        # the same reason as _search_fixpoint: the stage's runs must not
+        # overwrite this round's coverage.
+        stage = getattr(self._f, "_grimoire", None)
+        if stage is None or self._meta is None:
+            return
+        stage.generalize(self._data)
 
     def _begin(self) -> None:
         f = self._f
@@ -1881,6 +1893,7 @@ class FuzzRound:
             if meta is not None:
                 meta["valid"] = self._validity is Validity.VALID
         f._record_lineage_insert(mutated, data, _corpus_len_before)
+        self._note_novelty()
         f._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
         self._feed_population()
         self._analyze_sensitivity()
@@ -1895,6 +1908,13 @@ class FuzzRound:
         f._maybe_periodic_minimize(dedup=True)
         f._record_fluctuation_observation("success", f._get_current_edge_set())
         return True
+
+    def _note_novelty(self) -> None:
+        # --grimoire: the edges this input was admitted for are what
+        # generalization must preserve (consumed on its first round).
+        stage = getattr(self._f, "_grimoire", None)
+        if stage is not None and self._has_new_coverage:
+            stage.note(self._mutated, self._f._last_new_edge_ids)
 
     def _probe_uninit(self) -> None:
         # --uninit-probe: new coverage is where a fresh decoder path may emit

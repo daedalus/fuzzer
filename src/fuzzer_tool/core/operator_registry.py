@@ -134,6 +134,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "encoding_wrap",
         "escape_mutate",
         "ascii_float",
+        # Grimoire (--grimoire): token recombination from generalized inputs
+        "grimoire_extend",
+        "grimoire_recurse",
+        "grimoire_string",
     },
     "radamsa": {
         "fuse_this",
@@ -703,6 +707,11 @@ def _weizz_tags_available(f, data: bytes) -> bool:
     return bool(entry.get("weizz_tags_rle"))
 
 
+def _grimoire_book(f):
+    stage = getattr(f, "_grimoire", None)
+    return None if stage is None else stage.book
+
+
 # Availability predicates mirror the historic build_ops() conditions.
 _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # format ops — gated on the format being relevant to this target
@@ -773,6 +782,15 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "span_relocate": lambda f, _d: bool(getattr(f, "op_span_relocate", False)),
     # Append-only insert for linear instruction inputs; --op-append
     "tail_append": lambda f, _d: bool(getattr(f, "op_append", False)),
+    # Grimoire (--grimoire): extend/string need generalized inputs in the book;
+    # recurse also needs this parent to be one of them.
+    "grimoire_extend": lambda f, _d: _grimoire_book(f) is not None and _grimoire_book(f).seeds > 0,
+    "grimoire_string": lambda f, _d: (
+        _grimoire_book(f) is not None and _grimoire_book(f).string_count >= 2
+    ),
+    "grimoire_recurse": lambda f, d: (
+        _grimoire_book(f) is not None and _grimoire_book(f).items_of(d) is not None
+    ),
     # Keep the prefix that reached an automaton frontier state; --ltl
     "ltl_prefix": lambda f, _d: bool(getattr(f, "ltl", None)),
     # dispatch-only, never selectable

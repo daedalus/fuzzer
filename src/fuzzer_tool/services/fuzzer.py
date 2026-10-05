@@ -1539,6 +1539,8 @@ class Fuzzer:
         op_span_relocate=False,
         op_append=False,
         checksum_sites=False,
+        grimoire=False,
+        grimoire_max_execs=512,
         # AFL deterministic sweep as an arbitrated arm (T1-1, core/mutations/afl_det.py)
         op_afl_det=False,
         # FormatFuzzer structural mutators (see handover_formatfuzzer_integration).
@@ -1733,7 +1735,9 @@ class Fuzzer:
         # SEGV on an NX instruction fetch, logged by the kernel on every
         # attempt. --hail-mary forces persistent on, so drop it here.
         if persistent and detect_elf_type(target) == 3 and not is_elf_executable(target):
-            print(f"[*] {target} is a shared object: persistent mode disabled (it cannot be exec'd)")
+            print(
+                f"[*] {target} is a shared object: persistent mode disabled (it cannot be exec'd)"
+            )
             persistent = False
         self.target = target
         self.debug = debug
@@ -1978,6 +1982,8 @@ class Fuzzer:
         self.op_span_relocate = op_span_relocate
         self.op_append = op_append
         self.checksum_sites = checksum_sites
+        self.grimoire = grimoire
+        self.grimoire_max_execs = grimoire_max_execs
         self.op_afl_det = op_afl_det
         # MailConfig | None — novel-crash email notification (see services/sendmail.py)
         self.email_on_crash = email_on_crash
@@ -3156,7 +3162,9 @@ class Fuzzer:
             )
 
             if saliency_targets not in ("gt", "support"):
-                raise ValueError(f"saliency_targets must be 'gt' or 'support', got {saliency_targets!r}")
+                raise ValueError(
+                    f"saliency_targets must be 'gt' or 'support', got {saliency_targets!r}"
+                )
             from fuzzer_tool.core.scheduler_substrate import coverage_trust
 
             self._saliency_trust = coverage_trust(
@@ -7039,6 +7047,12 @@ class Fuzzer:
         self._rewind_cmplog_shim()
         return list(cmplog.last_pairs)
 
+    def _grimoire_run(self, data: bytes) -> set[int]:
+        """Edge ids reached by one run of *data* (--grimoire probe)."""
+        self._run_target(data)
+        self.exec_count += 1
+        return self._get_current_edge_set()
+
     def _maybe_collect_weizz_tags(self, data: bytes) -> None:
         """Passive Weizz structure-tag collection for one coverage-gaining seed.
 
@@ -9072,6 +9086,7 @@ class Fuzzer:
 
             self._print_enabled_features()
             print("[*] Starting fuzzing...\n")
+            print("=" * 60)
 
             while not _shutdown:
                 if iterations and i >= iterations:

@@ -132,6 +132,8 @@
 
 - [ ] **A/B `--checksum-sites`** (2026-10-04) — shipped unmeasured on a real target. Needs a target that rejects bad CRCs (png/zlib/gzip decoder): paired run vs previous commit, compare edges behind the check and the share of mutants passing it. Also open: 8-bit sum/XOR fields, nested/size-dependent regions, hints on later locates, sites for `FrameShift`-style length edits before a HEAD+PREFIX field.
 
+- [ ] **A/B `--grimoire`** (2026-10-04) — shipped unmeasured. Needs a paired run (`tools/lib/bench_paired.py` arm) on a text/structured target (grep/sqlite/js-like) vs previous commit; also persist the book across `--resume`, and a grammar export (backlog P3-6) for the Boltzmann sampler.
+
 ## Testing
 - [ ] **`test_converges_on_random_seed[FPL]` fails on some random seeds** (2026-09-30) — seen once in a 610-test run, green on rerun; synthetic env, no registry coupling. Log the seed (`0x...` in the message) and pin it as a regression case.
 - [ ] **Lizard CCN>15: 13 left** (2026-09-26) — `lizard --CCN 15 -w .`. Giants: `Fuzzer.__init__`, `fuzz_one`, `run`, `_print_enabled_features`, `_selected_schedulers_str`, `OperatorEngine.select_op`, `cli.main`, `cmd_fuzz`. `operator_strategy_pool`: every split slowed `select_op` 6–26%. Frozen test oracles (`_old_*`, `_reference_*`, `legacy`) stay as is.
