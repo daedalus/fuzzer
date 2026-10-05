@@ -346,6 +346,7 @@ class TestRegularityOperators:
             "excursion_square_wave",
             "crc_advanced",
             "murmurhash3",
+            "swar_lane",
         }
     )
 

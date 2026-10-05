@@ -4868,6 +4868,11 @@ class OperatorEngine:
 
         return self._regularity(gray_code, buf)
 
+    def _op_swar_lane(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import swar_lane
+
+        return self._regularity(swar_lane, buf)
+
     def _op_lz_dict_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import lz_dict_mutate
 

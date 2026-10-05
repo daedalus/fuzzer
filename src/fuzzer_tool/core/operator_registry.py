@@ -264,6 +264,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "excursion_square_wave",
         "crc_advanced",
         "murmurhash3",
+        "swar_lane",
     },
     "adaptive": {
         "markov_bytes",

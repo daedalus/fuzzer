@@ -2275,6 +2275,54 @@ def simd_shuffle(data: bytes, rng) -> bytes:
     return _splice(data, aligned_offset, bytes(block))
 
 
+@lru_cache(maxsize=1)
+def _interleave_bit_tables() -> tuple[bytes, ...]:
+    """One translate table per bit plane: byte -> that plane's single bit.
+
+    ``bit_interleave``'s forward half reads bit ``7 - j`` of every 8th source
+    byte and writes it as a whole destination byte, i.e. it collapses each
+    source byte into 8 zero/one bytes.  That is a gather, not a permutation --
+    a 64x64 bit-matrix transpose (the 3-delta-swap form on bithacks.html) can
+    therefore never reproduce it.  What it *can* be is one strided slice plus
+    one C-level translate per plane, so the 8x8 nested loop becomes 8 calls.
+    """
+    return tuple(bytes((b >> (7 - j)) & 1 for b in range(256)) for j in range(8))
+
+
+_INTERLEAVE_BITS = _interleave_bit_tables()
+
+# Repack 8 zero/one bytes into one byte: bit j of the result is byte j's value.
+#
+# Read little-endian, so byte j sits at bit 8j and only its bit 0 can be set.
+# Multiplied by this constant, bit 8j lands at bit 70-j, i.e. every plane is
+# gathered into the top byte of the product with no two planes colliding there;
+# everything else falls outside the window the shift isolates.
+_PACK_8_LANES = sum(1 << (70 - 9 * j) for j in range(8))
+_PACK_SHIFT = 63
+
+
+def _interleave_gather(chunk: bytes) -> bytearray:
+    """Bit-plane gather over one 64-byte chunk: 64 Python iterations -> 8."""
+    dst = bytearray(_SWAR_ALIGNMENTS * 8)
+    for j in range(_SWAR_ALIGNMENTS):
+        dst[j * 8 : j * 8 + 8] = chunk[j::8].translate(_INTERLEAVE_BITS[j])
+    return dst
+
+
+def _interleave_pack(dst: bytes) -> bytearray:
+    """Inverse gather: pack each run of 8 zero/one bytes back into one byte.
+
+    Only indices 0..7 are written.  The chunk tail stays zero, which is what
+    the original loop did (it allocated a 64-byte ``out`` and filled 8), and
+    changing that would move every seeded run's output.
+    """
+    out = bytearray(_SWAR_ALIGNMENTS * 8)
+    for g in range(_SWAR_ALIGNMENTS):
+        run = dst[g * 8 : g * 8 + 8]
+        out[g] = ((int.from_bytes(run, "little") * _PACK_8_LANES) >> _PACK_SHIFT) & 0xFF
+    return out
+
+
 def bit_interleave(data: bytes, rng) -> bytes:
     """Interleave or deinterleave bit planes in a region.
 
@@ -2300,32 +2348,46 @@ def bit_interleave(data: bytes, rng) -> bytes:
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    if len(data) < 64:
+    if len(data) < _SWAR_SWEEP:
         return data
     # Bit-plane interleave needs regions that are a multiple of 64 bytes
     # (8 groups of 8 bytes each).  Round the length to that granularity.
-    offset, length = _region(len(data), rng, min_len=64, max_len=64)
-    if length < 64:
+    offset, length = _region(len(data), rng, min_len=_SWAR_SWEEP, max_len=_SWAR_SWEEP)
+    if length < _SWAR_SWEEP:
         return data
     block = bytearray(data[offset : offset + length])
     # Each 64-byte chunk: 8 groups of 8 bytes.  Extract one bit from
     # each byte at position j (MSB-first) to form each destination byte,
     # then shuffle the 64 destination bytes and reverse.
-    for chunk_start in range(0, length, 64):
-        grp = block[chunk_start : chunk_start + 64]
-        dst = bytearray(64)
-        for j in range(8):
-            for g in range(8):
-                dst[j * 8 + g] = (grp[g * 8 + j] >> (7 - j)) & 1
+    for chunk_start in range(0, length, _SWAR_SWEEP):
+        chunk = bytes(block[chunk_start : chunk_start + _SWAR_SWEEP])
+        dst = _interleave_gather(chunk)
         rng.shuffle(dst)
-        out = bytearray(64)
-        for g in range(8):
-            b = 0
-            for j in range(8):
-                b |= dst[g * 8 + j] << (7 - j)
-            out[g] = b
-        block[chunk_start : chunk_start + 64] = out
+        block[chunk_start : chunk_start + _SWAR_SWEEP] = _interleave_pack(bytes(dst))
     return _splice(data, offset, bytes(block))
+
+
+@lru_cache(maxsize=1)
+def _gray_decode_table() -> bytes:
+    """256-entry translate table inverting the Gray encode ``b ^ (b >> 1)``.
+
+    The inverse is a prefix XOR, and the original spelling walked it one
+    shift at a time per byte (``while k: b ^= k; k >>= 1``) -- up to 7 Python
+    iterations per byte, on the only per-byte loop this operator has.  The
+    whole map fits in 256 bytes, so the decode becomes one C-level translate.
+    """
+    out = bytearray(256)
+    for g in range(256):
+        b = g
+        k = g >> 1
+        while k:
+            b ^= k
+            k >>= 1
+        out[g] = b & 0xFF
+    return bytes(out)
+
+
+_GRAY_DECODE = _gray_decode_table()
 
 
 def gray_code(data: bytes, rng) -> bytes:
@@ -2364,15 +2426,116 @@ def gray_code(data: bytes, rng) -> bytes:
         pos = rng.randint(0, length - 1)
         bit = rng.randint(0, 7)
         gray[pos] ^= 1 << bit
-    restored = bytearray(length)
-    for i, g in enumerate(gray):
-        b = g
-        k = g >> 1
-        while k:
-            b ^= k
-            k >>= 1
-        restored[i] = b & 0xFF
+    restored = bytearray(gray).translate(_GRAY_DECODE)
     return _splice(data, offset, bytes(restored))
+
+
+# Lane-boundary bytes for word-at-a-time scanners.  These seven values are
+# exactly where the SWAR idioms stop being exact:
+#
+#   haszero(v)  = (v - 0x0101..) & ~v & 0x8080..   false-positives when a lane
+#                 is 0x80: ~v has bit 7 set there, so a borrow out of the lane
+#                 below reads as a zero that is not there.
+#   hasless(v, n)  <= n per lane                   exact only while n <= 128,
+#                 so a lane of 0x80+ beside 0x00/0x01 breaks it.
+#   hasmore(v, n)  >= n per lane                   same 0x80 boundary.
+#   hasbetween(v, m, n)                            needs m <= 127, n <= 128.
+#
+# A scanner treating a lane as an ordinary byte sees nothing special about any
+# of these, so the only inputs that reach the boundary are windows in which
+# *every* lane holds one of them.
+_SWAR_LANES = (0x00, 0x01, 0x7F, 0x80, 0x81, 0xFE, 0xFF)
+
+# The borrow that haszero mistakes for a zero always runs downwards, so the
+# window needs a 0x80 lane above a 0x00 lane for the phantom to appear.
+_SWAR_ZERO = 0x00
+_SWAR_SIGN = 0x80
+
+# Word widths a scan is likely to use.  The minimum is the narrowest scan worth
+# attacking: below one 32-bit word there are not two lanes to interact.
+_SWAR_WIDTHS = (4, 8)
+
+_SWAR_UNIFORM = "uniform"
+_SWAR_MIXED = "mixed"
+_SWAR_STRIDED = "strided"
+_SWAR_MODES = (_SWAR_UNIFORM, _SWAR_MIXED, _SWAR_STRIDED)
+
+# 'strided' plants an 8-byte lane pattern at one byte-offset inside a 64-byte
+# window, so the same construction is retried at each of the alignments a
+# scanner might be using.
+_SWAR_SWEEP = 64
+_SWAR_ALIGNMENTS = 8
+
+
+def _swar_uniform(rng, n: int) -> bytearray:
+    """Whole window one critical value -- the literal 0x80808080 vector."""
+    return bytearray([rng.choice(_SWAR_LANES)]) * n
+
+
+def _swar_mixed(rng, n: int) -> bytearray:
+    """Every lane drawn independently, with the borrow/zero pair forced."""
+    out = bytearray(rng.choice(_SWAR_LANES) for _ in range(n))
+    out[0] = _SWAR_ZERO
+    out[n - 1] = _SWAR_SIGN
+    return out
+
+
+def swar_lane(data: bytes, rng) -> bytes:
+    """Write a window whose every byte sits on a SWAR lane boundary.
+
+    Word-at-a-time scanners test several bytes per operation by carrying
+    per-lane arithmetic inside one machine word.  The carries are the weak
+    point: ``haszero`` reports a zero byte that is not there when a lane holds
+    0x80, and ``hasless``/``hasmore``/``hasbetween`` are only exact for
+    thresholds that fit in a signed lane.  None of that is reachable from
+    random bytes, because the offending lane values are a handful out of 256
+    and have to line up across neighbouring lanes as well.
+
+    This operator constructs the alignment: a region is overwritten with bytes
+    drawn only from the seven critical values, in one of three shapes --
+    a single value repeated (the uniform 0x80808080 / 0x7f7f7f7f /
+    0x01010101 vectors), an independent draw per lane with a 0x80 above a
+    0x00, or an 8-byte pattern planted at one byte-offset of a 64-byte window
+    so that every alignment a scanner might use gets tried in turn.
+
+    Targets that scan for a byte, a delimiter, or a numeric threshold over an
+    index into a buffer are the ones this reaches: a parser's over-read
+    detection, its "is there a NUL in this page" loop, its bounds check built
+    on ``hasless``, and any SIMD memchr replacement.
+
+    Args:
+        data: Input bytes.
+        rng: Draw source, required. A ``RandPool`` or anything with
+            the same API (tests inject ``ScriptedRng``).
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    if len(data) < _SWAR_WIDTHS[0]:
+        return data
+
+    mode = rng.choice(_SWAR_MODES)
+
+    if mode == _SWAR_STRIDED:
+        offset, length = _region(len(data), rng, min_len=_SWAR_SWEEP, max_len=_SWAR_SWEEP)
+        if length < _SWAR_SWEEP:
+            return data
+        shift = rng.randint(0, _SWAR_ALIGNMENTS - 1)
+        # The untouched lanes stay zero, which is itself a critical value, so
+        # the whole window remains a valid lane pattern.
+        window = bytearray(length)
+        window[shift : shift + _SWAR_ALIGNMENTS] = bytes(
+            rng.choice(_SWAR_LANES) for _ in range(_SWAR_ALIGNMENTS)
+        )
+        return _splice(data, offset, bytes(window))
+
+    width = rng.choice(_SWAR_WIDTHS)
+    offset, length = _region(len(data), rng, min_len=width)
+    if length < width:
+        return data
+
+    window = _swar_uniform(rng, length) if mode == _SWAR_UNIFORM else _swar_mixed(rng, length)
+    return _splice(data, offset, bytes(window))
 
 
 _LZ_WINDOW = 32768

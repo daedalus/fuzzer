@@ -31,19 +31,36 @@ from fuzzer_tool.core.gf2_common import poly_gcd
 # recover_polynomial_gcd's reflected-domain support, below).
 # ---------------------------------------------------------------------------
 
+# Reverse the 8 bits of a byte.  ``recover_polynomial_gcd`` reflected a whole
+# message buffer through this one value at a time, so the per-byte loop became
+# a single C-level translate; a 256-entry table is the whole map.
+_REV8 = bytes(int(format(b, "08b")[::-1], 2) for b in range(256))
+
 
 def _reverse_bits(x: int, width: int) -> int:
-    """Reverse the low *width* bits of *x*."""
-    result = 0
-    for _ in range(width):
-        result = (result << 1) | (x & 1)
-        x >>= 1
-    return result
+    """Reverse the low *width* bits of *x*.
+
+    Bits above *width* are discarded, not reversed in -- the loop this replaces
+    only ever read the low *width* bits.  For a byte-aligned width that is a
+    byte-order flip plus a table lookup per byte; any other width falls back to
+    the shift loop, since no table covers the ragged tail.
+    """
+    if width % 8 or width < 8:
+        result = 0
+        for _ in range(width):
+            result = (result << 1) | (x & 1)
+            x >>= 1
+        return result
+
+    nbytes = width // 8
+    return int.from_bytes(
+        (x & ((1 << width) - 1)).to_bytes(nbytes, "big").translate(_REV8), "little"
+    )
 
 
 def _reverse_byte(b: int) -> int:
     """Reverse the bits of a single byte (0-255)."""
-    return _reverse_bits(b, 8)
+    return _REV8[b]
 
 
 # ---------------------------------------------------------------------------
@@ -354,10 +371,7 @@ def recover_polynomial_gcd(
         return None
 
     if reflected:
-        transformed = [
-            (bytes(_reverse_byte(b) for b in data), _reverse_bits(crc, width))
-            for data, crc in pairs
-        ]
+        transformed = [(data.translate(_REV8), _reverse_bits(crc, width)) for data, crc in pairs]
         poly = recover_polynomial_gcd(
             transformed,
             width=width,
