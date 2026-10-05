@@ -209,12 +209,12 @@ def _kruskal_str(f) -> str:
 def _entropy_seed_str(f) -> str:
     """Compact live-stats field for the byte-entropy seed arms; empty when off."""
     from fuzzer_tool.core.schedulers.seed_entropic import EntropicSeedStrategy
-    from fuzzer_tool.core.schedulers.seed_good_turing import GoodTuringSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_deviation import EntropyDeviationSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_gradient import EntropyGradientSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_loo import EntropyLOOSeedStrategy
     from fuzzer_tool.core.schedulers.seed_entropy_zscore import EntropyZScoreSeedStrategy
+    from fuzzer_tool.core.schedulers.seed_good_turing import GoodTuringSeedStrategy
 
     # isinstance, not None-check: report/stats consumers pass MagicMock fuzzers.
     out = ""
@@ -1839,7 +1839,9 @@ class StatsReporter:
 
         rep_str = self._print_stats_rep_str(f)
         mopt_str = self._print_stats_mopt_str(f)
-        line = (
+        line = "-" * 60
+        line += "\n"
+        line += (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
             f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
             f"time: {elapsed:.0f}s{rss_str}{seed_ovh_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
