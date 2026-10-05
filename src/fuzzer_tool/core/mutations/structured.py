@@ -2480,6 +2480,48 @@ def _swar_mixed(rng, n: int) -> bytearray:
     return out
 
 
+# Signed-division overflow: ``MIN / -1`` and ``MIN % -1`` do not fit the signed
+# range, so x86 ``idiv`` raises SIGFPE and Rust/Swift panic.  Widths 1/2 are
+# included because languages that do not promote small ints trap there too.
+_DIV_WIDTHS = (1, 2, 4, 8)
+_DIV_ENDIANS = ("little", "big")
+# A parser may read the dividend first or the divisor first.
+_DIV_DIVIDEND_FIRST = "dividend_first"
+_DIV_DIVISOR_FIRST = "divisor_first"
+_DIV_ORDERS = (_DIV_DIVIDEND_FIRST, _DIV_DIVISOR_FIRST)
+
+
+def div_trap(data: bytes, rng) -> bytes:
+    """Plant the signed-division overflow pair ``(MIN, -1)`` in adjacent fields.
+
+    Both values are already in the interesting-value tables, but one field at a
+    time; the trap needs them in *neighbouring* fields, which no single-field
+    operator can produce.  Picks a width that fits twice, a random offset, a
+    byte order and an order (dividend first or divisor first), and overwrites
+    exactly ``2 * width`` bytes.  Length-preserving.
+
+    Args:
+        data: Input bytes.
+        rng: Draw source, required. A ``RandPool`` or anything with the same
+            API (tests inject ``ScriptedRng``).
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    widths = [w for w in _DIV_WIDTHS if 2 * w <= len(data)]
+    if not widths:
+        return data
+    width = rng.choice(widths)
+    offset = rng.randint(0, len(data) - 2 * width)
+    endian = rng.choice(_DIV_ENDIANS)
+    order = rng.choice(_DIV_ORDERS)
+    bits = 8 * width
+    minimum = (1 << (bits - 1)).to_bytes(width, endian)
+    minus_one = ((1 << bits) - 1).to_bytes(width, endian)
+    pair = minimum + minus_one if order == _DIV_DIVIDEND_FIRST else minus_one + minimum
+    return _splice(data, offset, pair)
+
+
 def swar_lane(data: bytes, rng) -> bytes:
     """Write a window whose every byte sits on a SWAR lane boundary.
 

@@ -269,6 +269,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "crc_advanced",
         "murmurhash3",
         "swar_lane",
+        "div_trap",
         "same_popcount_next",
         "same_popcount_prev",
     },

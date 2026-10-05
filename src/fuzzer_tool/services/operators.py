@@ -4873,6 +4873,11 @@ class OperatorEngine:
 
         return self._regularity(swar_lane, buf)
 
+    def _op_div_trap(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import div_trap
+
+        return self._regularity(div_trap, buf)
+
     # ── Hacker's Delight rightmost-bit + Gosper same-popcount (2026-10-05) ──
     def _op_rightmost_clear(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.hackers_delight import rightmost_clear

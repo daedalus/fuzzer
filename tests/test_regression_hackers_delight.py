@@ -129,3 +129,31 @@ def test_same_popcount_next_preserves_weight_on_buffer():
         # (we cannot assert global popcount because only a sub-window is mutated)
         assert len(out) == len(data)
         data = out
+
+
+# ── RandPool compatibility ────────────────────────────────────────────────
+# The operators first drew through ``random.Random.randrange(a, b)``, which
+# ``RandPool.randrange(n)`` does not accept, so every handler raised TypeError
+# in a real run while the ``random.Random`` tests above stayed green.  Mutation
+# code draws through the RandPool API (``randint``/``choice``).
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "rightmost_clear",
+        "rightmost_isolate",
+        "rightmost_propagate",
+        "rightmost_run_clear",
+        "same_popcount_next",
+        "same_popcount_prev",
+    ],
+)
+@pytest.mark.parametrize("seed", range(8))
+def test_operators_run_on_randpool(name, seed):
+    import fuzzer_tool.core.mutations.hackers_delight as hd
+    from fuzzer_tool.core.rand_pool import RandPool
+
+    data = bytes((i * 29 + seed) & 0xFF for i in range(32))
+    out = getattr(hd, name)(data, RandPool(seed=seed))
+    assert len(out) == len(data)

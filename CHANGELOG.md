@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`div_trap` regularity operator**: plants `(MIN, -1)` in two adjacent fields (width 1/2/4/8, little/big endian, either order) to reach signed-division overflow (SIGFPE on x86 `idiv`, panic in Rust/Swift). No single-field operator can produce the pair. Handover `docs/handover/handover_div_trap_2026-10-05.md`; tests `tests/test_regression_div_trap.py`.
+
 ### Changed
 
 - **Edge table slot math is divide-free** (`afl_shim.c`): `edge_id % __afl_map_size` and the probe wrap `(pos + i) % __afl_map_size` ran a runtime 32-bit divide per edge and per probe step. Home slot is now a mask for power-of-two sizes and Lemire fastmod otherwise; probe wraps by subtraction, written to avoid `pos + i` overflow. Placement identical to `%` (fastmod checked against `%` on 16M cases), so no `__AFL_SHM_LAYOUT` bump. Microbench (50M edges, 2000 distinct): 4.2 -> 3.1 ns/edge at 8192, 4.2 -> 3.4 ns at 8000. Distance-table probe untouched. Tests: `tests/test_shim_map_slot.py`.
@@ -15,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Hacker's Delight operators raised `TypeError` on `RandPool`** (`rightmost_*`, `same_popcount_*`): `_pick_window` drew `rng.randrange(0, n)`, but `RandPool.randrange` takes one argument, so every handler failed in a real run while the `random.Random` tests passed. Now `rng.randint`. Registry test `REGULARITY_OPS` also lacked `same_popcount_next/prev`. Regression: `test_operators_run_on_randpool`.
 - **`seeds/` and `seeds.zip` are one pool; a seed is never stored in both**. Under `--zip-seed-corpus`, `_put_seed` checked only the zip, so a seed already held as a loose `seeds/` file (canonical `seeds/ab/id_<h>` or the flat `seeds/id_<h>` that load normalises to) was written again into `seeds.zip` whenever something re-offered it (seen-hash eviction, trim, a second tracker). It now skips the write when either location holds a live copy, for every tree (main, irreplaceable, crashing, timeouts). With the flag off, an existing `seeds.zip` is consulted the same way (cached read-only `seed_zip.peek`, keyed by mtime+size) so a zip seed is not copied out to a file. A tombstoned (pruned) seed is not 'held' and is still re-admitted. Duplicates already present are not removed.
 - **`seeds.zip` members with arbitrary names are loaded as seeds**. `SeedZip` only recognised members named `ab/id_<hash>`; a zip built elsewhere (flat or nested names such as `a.avi`, `sub/b.ogg`) was indexed as empty, so `--zip-seed-corpus` loaded nothing from it even with the flag set. Foreign file members are now treated like the loose files `load_corpus` already accepts: keyed by content, duplicates collapsed. Under `--zip-seed-corpus` they are re-added once as canonical `ab/id_<hash>` members (so prune/retire can tombstone them and a pruned seed is not re-adopted); read-only loads serve them without touching the archive. Directories, absolute and `..` names stay refused.
 - **`corpus/seeds.zip` is loaded without `--zip-seed-corpus`**. Only `seeds/` was read unless the flag was set; an existing `seeds.zip` was skipped with a warning. `load_corpus` now reads it through an unregistered read-only `SeedZip` (`seed_zip.open_readonly`): tombstones and protected trees (`crashing/`, `irreplaceable/`, `timeouts/`) are honoured, writes still go to files, the archive is not appended to. Limit: without the flag a zip-resident seed cannot be tombstoned on prune.

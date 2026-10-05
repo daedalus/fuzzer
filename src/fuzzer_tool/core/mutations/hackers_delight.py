@@ -88,7 +88,7 @@ def _pick_window(data: bytes, rng: random.Random, min_len: int = 1) -> tuple[int
     if not candidates:
         return 0, 0
     width = rng.choice(candidates)
-    offset = rng.randrange(0, len(data) - width + 1)
+    offset = rng.randint(0, len(data) - width)
     return offset, width
 
 
