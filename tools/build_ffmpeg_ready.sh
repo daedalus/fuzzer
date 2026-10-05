@@ -66,7 +66,7 @@ command -v clang &>/dev/null || { echo "ERROR: clang required" >&2; exit 1; }
 # Probe each and include only those the linker can actually find.
 _opt_libs() {
     local out=""
-    for l in z lzma bz2; do
+    for l in xml2 z lzma bz2; do
         if echo 'int main(void){return 0;}' | clang -x c - "-l$l" -o /dev/null 2>/dev/null; then
             out="$out -l$l"
         fi
