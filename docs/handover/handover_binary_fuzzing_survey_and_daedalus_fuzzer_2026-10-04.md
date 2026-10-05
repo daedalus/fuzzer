@@ -1,8 +1,8 @@
 # Handover — Binary Fuzzing Survey + daedalus/fuzzer Snapshot
 
 **Date**: 2026-10-04  
-**Author**: Grok (survey + clone attempt)  
-**Status**: Complete survey; partial clone only (environment timeouts on large repo)  
+**Author**: Grok (survey + clone attempt); Claude (clone verification + FuzzBench port analysis, section 5)  
+**Status**: Complete survey; full clone verified and FuzzBench port analysis added (section 5)  
 **Related**: `https://github.com/daedalus/fuzzer` (master, ~2.3k commits, MIT)
 
 > Standing note: This document records an external survey of recent binary-only fuzzing techniques and a first-pass inspection of the daedalus/fuzzer (fuzzer-tool) repository. It is written in the style of the existing `docs/handover/` series so it can be dropped into the tree without format friction.
@@ -28,8 +28,8 @@ Probably the most complex fuzzer from an information-theory standpoint, and also
 
 Architecture is a campaign loop with three feedback colours: coverage/operator reward (green), comparison signal (blue), corpus/seed selection (purple). Source of truth for layering lives in `docs/ARCHITECTURE.md` + `docs/architecture.dot`.
 
-**Clone status in this environment**:  
-Shallow clones repeatedly timed out or left incomplete trees (only top-level docs + `.git` remnants survived). Full source under `src/fuzzer_tool/` was never fully materialised. All technical claims above are taken from the public README and GitHub tree listing.
+**Clone status**:  
+The earlier shallow-clone timeouts no longer reproduce: `git clone --depth 1` and `git pull` of `daedalus/fuzzer` completed cleanly (checked at `2b51500`, then pulled to `36c85b0`), and `src/fuzzer_tool/` is fully materialised. The capability table above still comes from the README; section 5 was checked against the source.
 
 ---
 
@@ -99,7 +99,7 @@ Focus: binary-only / COTS techniques that improve on classic QEMU/FRIDA/ZAFL bas
 
 ## 3. Open Questions / Follow-ups for daedalus/fuzzer
 
-1. Full shallow clone still needed (environment was timing out at ~1.6 k files).  
+1. ~~Full shallow clone still needed~~ Resolved 2026-10-04, see Clone status.  
 2. How many of the 16+ bandit modules are actually exercised under the default Elo arbitrator on real targets (png, grep, FFmpeg, fuzzgoat)?  
 3. Measured overhead of the regularity / statistical operators vs classic havoc.  
 4. Whether syscall-pattern feedback (SPFuzz) or def-use reconstruction (FuzzRDUCC) can be bolted on as additional channels without destroying the existing Elo reward model.  
@@ -115,6 +115,48 @@ Focus: binary-only / COTS techniques that improve on classic QEMU/FRIDA/ZAFL bas
 - FuzzRDUCC — arXiv:2509.04967  
 - Bin2Wrong — USENIX ATC 2025, Yang & Nagy  
 - AFL++ binary-only guide (current recommendations)
+
+---
+
+---
+
+## 5. FuzzBench Port Analysis (2026-10-04)
+
+Compared `google/fuzzbench` (72 fuzzer definitions under `fuzzers/`) and the upstream sources of the less common ones (Pythia, TortoiseFuzz, LearnPerfFuzz, WingFuzz, FaFuzz, DARWIN, AFL randomized_top_rated) against `src/fuzzer_tool/`. Method: keyword grep over `src/`, plus reading the upstream diffs. This is a technique comparison, not a line-by-line audit.
+
+### 5.1 Already covered (do not port)
+
+| FuzzBench fuzzer | Where it lives here |
+|---|---|
+| FairFuzz | `core/schedulers/pos_rare_mask.py` |
+| AFLFast / lin / quad / coe | `core/schedules.py` (`SeedScorer`) |
+| MOpt, EcoFuzz, Weizz, Neuzz | `op_*` / `seed_*` / `pos_*` schedulers, `core/weizz_tags.py` |
+| Redqueen / cmplog / laf-intel (CompCov) | `core/cmplog.py`, `afl_shim.c` |
+| Centipede data-flow features | `afl_shim.c` trace-loads/stores, `tools/build_targets.sh` |
+| Pythia (residual risk) | Good-Turing in `report.py` / `stats.py` |
+| DARWIN (evolving operator distribution) | `core/schedulers/op_cmaes.py` (assumed; DARWIN's own algorithm was not read) |
+| PerfFuzz / LearnPerfFuzz max-hit maxima | `core/edge_tracker.py` (`max_hit_count`), `services/fuzzer.py` `_perf_novelty`, `services/fuzz_round.py` |
+| AFL virgin map / count classes | `core/count_class.py`, `adapters/shm.py` |
+
+**Correction**: an earlier pass of this analysis listed per-edge max hit counts (PerfFuzz) as missing. That was wrong; it is implemented and gated by `--perf-novelty`. The first grep missed it because the code says "performance novelty", not "PerfFuzz".
+
+### 5.2 Candidates to port, in priority order
+
+1. **TortoiseFuzz coverage accounting.** Weights each edge by security impact (calls to `memcpy`/`memmove`/`memset`/`memcmp`, allocators, memory ops) and favours seeds that reach new high-impact edges. Upstream: `func_metric/` and `bb_metric/` LLVM passes. Here only the format learner tracks `sensitive_ops`; nothing weights edges or the favored set by impact. Feasible with the existing sancov pc-table plus trace-loads/stores.
+2. **WingFuzz compare filtering.** `instrument/LoadCmpTracer.cc` drops compares on loop back-edges (dominator-tree test) and outside 8-64 bit integer widths, and splits var/ord/const operands. The build already uses trace-cmp; filtering would cut cmplog noise. No back-edge or width filter was found in `afl_shim.c` or `tools/`.
+3. **Randomized top_rated.** Upstream (`Practical-Formal-Methods/AFL-public`, branch `randomized_top_rated`) breaks ties for the favored set with a per-seed random number instead of a fixed cost. `_compute_favored` in `services/fuzzer.py` is deterministic (`exec_us * input_size`, then edge id), so the same seed always wins a given edge. A few-line change; effect on coverage is unmeasured here.
+
+### 5.3 Not worth porting
+
+- `aflplusplus_um_*`: needs source-level mutants (`mutate`, `prioritize_mutants`), C/C++ only.
+- KLEE, SymCC, SymSAN, SymQEMU: overlap with `core/smt_solver.py` and `core/path_constraints.py`.
+
+### 5.4 Not verified
+
+- DARWIN's algorithm (README has no description; the `op_cmaes` equivalence is an assumption).
+- FaFuzz's custom havoc stage (`fa_havoc_fuzzing_one`) and `aflpp_random_wrs*` were not read.
+- HasteFuzz upstream is a README-only snapshot.
+- None of the three candidates was prototyped or benchmarked.
 
 ---
 
