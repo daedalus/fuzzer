@@ -8,7 +8,6 @@ an archive whose central directory was lost mid-append, and the CLI gate.
 
 from __future__ import annotations
 
-import logging
 import zipfile
 import zlib
 from pathlib import Path
@@ -353,20 +352,37 @@ def test_retire_unknown_hash_is_noop(zcorpus):
 # ── mode gate ────────────────────────────────────────────────────────
 
 
-def test_mode_off_writes_files_and_ignores_zip(tmp_path, caplog):
+def test_mode_off_writes_files_but_still_loads_zip(tmp_path):
+    """Without --zip-seed-corpus an existing seeds.zip is read, never written."""
     corpus = tmp_path / "c"
     store = seed_zip.configure(corpus, ZipMode.ON)
     save_to_corpus(b"zipped", corpus, set())
     store.flush()
     assert seed_zip.configure(corpus, ZipMode.OFF) is None
+    before = (corpus / seed_zip.ZIP_NAME).read_bytes()
 
     save_to_corpus(b"loose", corpus, set())
-    assert len(_seed_files(corpus)) == 1
+    assert len(_seed_files(corpus)) == 1  # writes still go to files
 
-    with caplog.at_level(logging.WARNING):
-        got, _, _ = load_corpus(corpus, add_default=False)
-    assert got == [b"loose"]
-    assert "--zip-seed-corpus" in caplog.text
+    got, _, _ = load_corpus(corpus, add_default=False)
+    assert sorted(got) == [b"loose", b"zipped"]
+    assert seed_zip.lookup(corpus) is None  # read-only: no store registered
+    assert (corpus / seed_zip.ZIP_NAME).read_bytes() == before
+
+
+def test_mode_off_zip_respects_tombstones_and_protection(tmp_path):
+    corpus = tmp_path / "c"
+    store = seed_zip.configure(corpus, ZipMode.ON)
+    save_to_corpus(b"keep" * 8, corpus, set())
+    gone = b"gone" * 8
+    save_to_corpus(gone, corpus, set())
+    store.retire(hash_data(gone))
+    store.put(SeedTree.CRASHING, hash_data(b"crash" * 8), b"crash" * 8)
+    seed_zip.configure(corpus, ZipMode.OFF)
+
+    got, _, irr = load_corpus(corpus, add_default=False)
+    assert sorted(got) == sorted([b"keep" * 8, b"crash" * 8])
+    assert hash_data(b"crash" * 8) in irr
 
 
 def test_configure_off_flushes_pending(tmp_path):

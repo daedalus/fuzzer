@@ -357,12 +357,12 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 
 ### Zip Seed Corpus (`--zip-seed-corpus`)
 
-Off by default. New full seeds (`seeds/`, `irreplaceable/`, `crashing/`, `timeouts/`) go only to `corpus/seeds.zip`, deflate level 9; loading unions `seeds/**` with the zip. Deltas stay in `deltas/`. Code: `adapters/seed_zip.py`.
+Off by default (loading is not: see below). New full seeds (`seeds/`, `irreplaceable/`, `crashing/`, `timeouts/`) go only to `corpus/seeds.zip`, deflate level 9; loading unions `seeds/**` with the zip. Deltas stay in `deltas/`. Code: `adapters/seed_zip.py`.
 
 - **Members** mirror the file tree (`ab/id_<h>`, `crashing/ab/id_<h>`). A member cannot move, so prune/retire appends an empty tombstone `.pruned/ab/id_<h>`; archive order decides, so a re-admitted seed is live again. Data is never dropped: `rehydrate_by_hash` and `--cuckoo-seed-filter` still see pruned seeds.
 - **Block mode**: saves buffer and append `max(64, entries/16)` seeds or 8 MiB at a time, plus on every state save and at exit. One append handle stays open; each block ends by rewriting the central directory in place, so the file is a valid zip after every flush. Fixed blocks make directory writes O(N²); one seed per block is 3.4x slower at N=1000.
 - **Crash safety**: a kill mid-block tears the directory, and `zipfile` "a" mode would then start a new archive and hide every old seed. The store salvages first by walking local headers; the original is kept as `seeds.zip.corrupt.N`. Up to one block of unsaved seeds is lost.
-- **Without the flag** an existing `seeds.zip` is ignored with a warning. Offline commands (`minimize`, `root_cause`, `import`, `report`) read files only.
+- **Without the flag** an existing `seeds.zip` is still loaded, read-only (`seed_zip.open_readonly`, unregistered, so nothing is appended); new seeds go to `seeds/`. Pruning cannot tombstone zip members in this mode, so a seed pruned from a zip-resident corpus reappears next load. Offline commands (`minimize`, `root_cause`, `import`, `report`) read files only.
 - **Measured** (`tools/bench_seed_zip.py`, 1 core, 5 reps, median; cold = after `drop_caches`):
 
 | N | arm | write | read warm | read cold | on disk |

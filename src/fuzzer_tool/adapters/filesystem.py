@@ -611,9 +611,12 @@ def _load_full_from_zip(
     """Union seeds.zip into *full_files* (keyed by content, as files are)."""
     store = seed_zip.lookup(corpus_dir)
     if store is None:
-        if (corpus_dir / seed_zip.ZIP_NAME).is_file():
-            log.warning("%s ignored: pass --zip-seed-corpus to load it", seed_zip.ZIP_NAME)
-        return
+        # Zip mode off: still read an existing seeds.zip, through an
+        # unregistered store, so writes keep going to files and the archive
+        # is never appended to.
+        if not (corpus_dir / seed_zip.ZIP_NAME).is_file():
+            return
+        store = seed_zip.open_readonly(corpus_dir)
 
     for data, protected in store.live():
         h = hash_data(data)

@@ -373,6 +373,11 @@ def configure(
     return store
 
 
+def open_readonly(corpus_dir: str | Path) -> SeedZip:
+    """Unregistered store for reading *corpus_dir*/seeds.zip; callers never write."""
+    return SeedZip(Path(corpus_dir), BLOCK_SEEDS, BLOCK_BYTES, BLOCK_GROWTH)
+
+
 def lookup(corpus_dir: str | Path) -> SeedZip | None:
     """Store for *corpus_dir* in zip mode, else None. Free when unused."""
     if not _STORES:

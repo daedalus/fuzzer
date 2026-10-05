@@ -2120,7 +2120,7 @@ def cmd_sweep(args):
 #
 # zip_seed_corpus (--zip-seed-corpus) is excluded: a storage layout, not a
 # strategy. Force-enabling it would move the user's corpus writes into
-# seeds.zip, which a later run without the flag does not load.
+# seeds.zip (a later run without the flag still reads it, but writes files).
 #
 # mds_select (--mds-select) is excluded for the same reason as gate_bonus's
 # second point: it is explicitly unvalidated. It swaps
@@ -4887,8 +4887,8 @@ def main() -> int:
         help=(
             "Write new seeds only to corpus/seeds.zip (deflate level 9, appended in "
             "blocks); read seeds from both corpus/seeds/ and seeds.zip. Deltas stay "
-            "in corpus/deltas/. Without this flag an existing seeds.zip is ignored "
-            "(with a warning)"
+            "in corpus/deltas/. Without this flag an existing seeds.zip is still "
+            "loaded (read-only); new seeds go to corpus/seeds/"
         ),
     )
     fuzz_parser.add_argument(
