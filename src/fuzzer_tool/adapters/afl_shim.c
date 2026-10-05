@@ -493,6 +493,11 @@ const uint32_t __AFL_CAT(__afl_shm_layout_, __AFL_SHM_LAYOUT) = __AFL_SHM_LAYOUT
  * __afl_map_size (number of entries, not bytes).  Default 8192 entries:
  * edge table = 8192 × 8 = 65536 bytes, front region = 32 bytes. */
 static uint32_t __afl_map_size  = 8192;
+/* Divide-free edge_id modulo map size (see __afl_home_slot): mask is
+ * size-1 for a power-of-two size, else 0; fastmod is Lemire's reciprocal
+ * UINT64_MAX / size + 1 (exact for all 32-bit operands). */
+static uint32_t __afl_map_mask    = 8192 - 1;
+static uint64_t __afl_map_fastmod = UINT64_MAX / 8192 + 1;
 
 struct __afl_entry *__afl_area   = NULL;
 #if __AFL_NGRAM_K == 2
@@ -871,8 +876,11 @@ void __afl_map_shm(void) {
             __afl_refuse_shm();
             return;
         }
-        if (s > 0)
+        if (s > 0) {
             __afl_map_size = (uint32_t)s;
+            __afl_map_mask = (s & (s - 1)) ? 0 : (uint32_t)(s - 1);
+            __afl_map_fastmod = UINT64_MAX / s + 1;
+        }
     }
 
     /* SHM was allocated as header bytes + table bytes */
@@ -1282,12 +1290,27 @@ static inline uint32_t __afl_edge_hash(uint32_t cur_loc) {
 #endif
 }
 
+/* Home slot: edge_id modulo map size, with no hardware divide per edge.
+ * Power-of-two size: mask. Otherwise Lemire fastmod, two multiplies:
+ *   low = fastmod * edge_id (mod 2^64);  slot = (low * size) >> 64
+ * Size 1 wraps fastmod to 0, which yields slot 0 -- also correct. */
+__attribute__((always_inline))
+static inline uint32_t __afl_home_slot(uint32_t edge_id) {
+    if (__afl_map_mask)
+        return edge_id & __afl_map_mask;
+
+    uint64_t low = __afl_map_fastmod * edge_id;
+    return (uint32_t)(((__uint128_t)low * __afl_map_size) >> 64);
+}
+
 /* Record edge_id in the SHM table for generation gen (see __afl_map_loc). */
 __attribute__((always_inline))
 static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
                                       uint32_t window, uint32_t gen) {
     for (uint32_t i = 0; i < window; i++) {
-        uint32_t idx = (pos + i) % __afl_map_size;
+        /* pos < size and i < size: wrap by subtraction. Written as
+         * i < size - pos so pos + i cannot overflow uint32. */
+        uint32_t idx = (i < __afl_map_size - pos) ? pos + i : i - (__afl_map_size - pos);
         uint32_t eid = __afl_area[idx].edge_id;
 
         if (eid == 0) {                              /* empty slot — claim */
@@ -1399,7 +1422,7 @@ static inline void __afl_map_id_raw(uint32_t edge_id) {
     if (__afl_gen_word)
         gen = *__afl_gen_word & __AFL_GEN_MASK;
 
-    uint32_t pos = edge_id % __afl_map_size;
+    uint32_t pos = __afl_home_slot(edge_id);
 
     /* Linear probe, bounded to __AFL_PROBE_MAX slots.
      *
