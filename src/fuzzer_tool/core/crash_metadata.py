@@ -215,9 +215,13 @@ class CrashMetadata:
                 + ") ==="
             )
             lines.append(f"  signal={sym.get('signal')} pc={sym.get('pc')} fault={sym.get('fault_addr')}")
-            for fr in sym.get("frames", []):
-                loc = f"{fr['file']}:{fr['line']}" if fr.get("file") else "?"
-                lines.append(f"  {fr.get('function') or '??'} {loc}")
+            for i, fr in enumerate(sym.get("frames", [])[:24]):
+                where = fr.get("file") or ""
+                if where and fr.get("line"):
+                    where += f":{fr['line']}"
+                mod = os.path.basename(fr.get("module") or "")
+                bits = [fr.get("function") or "??", where or (f"({mod})" if mod else "")]
+                lines.append(f"  #{i} {fr.get('pc', '')} " + " ".join(b for b in bits if b))
             lines.append("")
 
         self._sidecar_registers(lines)

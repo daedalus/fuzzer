@@ -194,6 +194,7 @@
 #include <limits.h>
 #include <signal.h>
 #include <ucontext.h>
+#include <execinfo.h>
 #include <fcntl.h>
 #include <setjmp.h>
 #include <unistd.h>
@@ -3991,10 +3992,13 @@ __AFL_NO_COV static void __afl_sym_write_all(int fd, const char *buf, size_t len
     }
 }
 
+#define __AFL_SYM_MAX_FRAMES 24
 struct __afl_sym_pending {
     int sig;
     uintptr_t pc;
     uintptr_t addr;
+    int nframes;
+    uintptr_t frames[__AFL_SYM_MAX_FRAMES];   /* frames[0] == pc */
 };
 static __thread struct __afl_sym_pending __afl_sym_pend;
 static __thread int __afl_sym_have = 0;
@@ -4012,7 +4016,17 @@ __AFL_NO_COV static uintptr_t __afl_sym_pc_of(void *uc) {
 #endif
 }
 
-/* Async-signal-safe: stores three words. */
+/* backtrace() lazily dlopens libgcc_s on first use (malloc, locks): do that
+ * once at load, never first inside a signal handler. */
+__attribute__((constructor)) static void __afl_sym_prime(void) {
+    void *tmp[2];
+    (void)backtrace(tmp, 2);
+}
+
+/* Stores the PC and a bounded backtrace. For SIGABRT and friends the
+ * faulting PC is inside libc (abort -> pthread_kill), so the PC alone names
+ * nothing of the target; the callers do. backtrace() unwinds across the
+ * signal trampoline, and we drop everything above the interrupted frame. */
 __AFL_NO_COV static void __afl_sym_capture(int sig, siginfo_t *si, void *uc) {
     if (__afl_sym_busy) return;           /* the symbolizer itself faulted */
     const char *out = getenv("__AFL_CRASH_SYM_OUT");
@@ -4020,6 +4034,23 @@ __AFL_NO_COV static void __afl_sym_capture(int sig, siginfo_t *si, void *uc) {
     __afl_sym_pend.sig = sig;
     __afl_sym_pend.pc = __afl_sym_pc_of(uc);
     __afl_sym_pend.addr = si ? (uintptr_t)si->si_addr : 0;
+    __afl_sym_pend.nframes = 0;
+
+    void *bt[__AFL_SYM_MAX_FRAMES + 8];
+    int n = backtrace(bt, (int)(sizeof(bt) / sizeof(bt[0])));
+    int start = -1;
+    for (int i = 0; i < n && __afl_sym_pend.pc; i++)
+        if ((uintptr_t)bt[i] == __afl_sym_pend.pc) { start = i; break; }
+    if (start < 0) {
+        /* PC not found in the unwind (or unknown arch): keep what we have. */
+        if (__afl_sym_pend.pc) {
+            __afl_sym_pend.frames[0] = __afl_sym_pend.pc;
+            __afl_sym_pend.nframes = 1;
+        }
+    } else {
+        for (int i = start; i < n && __afl_sym_pend.nframes < __AFL_SYM_MAX_FRAMES; i++)
+            __afl_sym_pend.frames[__afl_sym_pend.nframes++] = (uintptr_t)bt[i];
+    }
     __afl_sym_have = 1;
 }
 
@@ -4032,21 +4063,7 @@ __AFL_NO_COV static void __afl_sym_emit(void) {
     const char *path = getenv("__AFL_CRASH_SYM_OUT");
     if (!path || !path[0]) return;
 
-    char text[768];
-    text[0] = '-'; text[1] = 0;
-    if (__sanitizer_symbolize_pc && __afl_sym_pend.pc) {
-        __afl_sym_busy = 1;
-        text[0] = 0;
-        __sanitizer_symbolize_pc((void *)__afl_sym_pend.pc, "%f|%s|%l|%m|%o",
-                                 text, sizeof(text));
-        __afl_sym_busy = 0;
-        text[sizeof(text) - 1] = 0;
-        for (char *q = text; *q; q++)
-            if (*q == '\n') *q = ';';
-        if (!text[0]) { text[0] = '-'; text[1] = 0; }
-    }
-
-    char buf[1024];
+    char buf[8192];
     char *p = buf;
     *p++ = 'S'; *p++ = 'Y'; *p++ = 'M'; *p++ = ' ';
     p = __afl_sym_put_dec(p, __afl_sym_pend.sig);
@@ -4055,7 +4072,34 @@ __AFL_NO_COV static void __afl_sym_emit(void) {
     *p++ = ' ';
     p = __afl_sym_put_hex(p, (uint64_t)__afl_sym_pend.addr);
     *p++ = ' ';
-    for (const char *t = text; *t && p < buf + sizeof(buf) - 2; t++) *p++ = *t;
+
+    /* <pc-hex>:<text> entries joined by '@'; text is '-' without a runtime.
+     * Callers' saved PCs point after the call, so symbolize pc-1 for them
+     * (a noreturn call at the end of a function would otherwise land in
+     * the next one). */
+    int nf = __afl_sym_pend.nframes ? __afl_sym_pend.nframes : 1;
+    for (int i = 0; i < nf; i++) {
+        uintptr_t pc = __afl_sym_pend.nframes ? __afl_sym_pend.frames[i] : __afl_sym_pend.pc;
+        char text[384];
+        text[0] = '-'; text[1] = 0;
+        if (__sanitizer_symbolize_pc && pc) {
+            __afl_sym_busy = 1;
+            text[0] = 0;
+            __sanitizer_symbolize_pc((void *)(i ? pc - 1 : pc), "%f|%s|%l|%m|%o",
+                                     text, sizeof(text));
+            __afl_sym_busy = 0;
+            text[sizeof(text) - 1] = 0;
+            for (char *q = text; *q; q++)
+                if (*q == '\n') *q = ';';
+                else if (*q == '@' || *q == ' ') *q = '_';
+            if (!text[0]) { text[0] = '-'; text[1] = 0; }
+        }
+        if (p + 2 * 18 + sizeof(text) + 4 > buf + sizeof(buf) - 2) break;
+        if (i) *p++ = '@';
+        p = __afl_sym_put_hex(p, (uint64_t)pc);
+        *p++ = ':';
+        for (const char *t = text; *t; t++) *p++ = *t;
+    }
     *p++ = '\n';
 
     int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
