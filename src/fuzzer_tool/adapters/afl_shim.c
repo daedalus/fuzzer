@@ -3232,6 +3232,31 @@ __AFL_NO_COV static size_t __afl_fb_wcslen(const wchar_t *s) {
     return (size_t)(p - s);
 }
 
+/* strlen / wcslen for an operand the REAL call has only proven readable up to
+ * its first mismatch (or first match, for the set scans), never to its NUL.
+ * strcmp("AAAA", "Z") returns at byte 0, so an unterminated buffer ending at a
+ * page boundary is fine for libc -- glibc's strcmp never crosses a page it does
+ * not need -- but an unbounded __afl_fb_len() afterwards runs off the mapping
+ * and the shim itself faults (a SIGSEGV with our frame on top, reported as a
+ * target crash). Stop at the end of the page holding s[0] (and at the first
+ * ASAN-poisoned byte, via __afl_readable_len): the caller read s[0], so that
+ * much is safe. A terminated string is measured exactly; one that spans pages
+ * is reported as its first-page prefix, which cmplog/compcov (<= 64 bytes) never
+ * look past. */
+__AFL_NO_COV static size_t __afl_safe_len(const char *s) {
+    size_t cap = __afl_readable_len(s, (size_t)-1);
+    size_t i = 0;
+    while (i < cap && s[i]) i++;
+    return i;
+}
+
+__AFL_NO_COV static size_t __afl_safe_wcslen(const wchar_t *s) {
+    size_t cap = __afl_readable_len(s, (size_t)-1) / sizeof(wchar_t);
+    size_t i = 0;
+    while (i < cap && s[i]) i++;
+    return i;
+}
+
 __AFL_NO_COV static int __afl_fb_wcsncmp(const wchar_t *a, const wchar_t *b, size_t n) {
     for (size_t i = 0; i < n; i++) {
         wchar_t x = a[i], y = b[i];
@@ -3321,7 +3346,7 @@ __AFL_NO_COV int strcmp(const char *a, const char *b) {
     int result = real_strcmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_STRCMP, result == 0);
     if (__afl_cmplog_fd < 0 && __afl_compcov_level < 2) return result;
-    size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
+    size_t na = __afl_safe_len(a), nb = __afl_safe_len(b), n = na < nb ? na : nb;
     if (n > 0) {
         __afl_cmplog_bytes(a, b, n + 1, result);
         __afl_compcov_bytes(a, b, n + 1, __builtin_return_address(0), COMPCOV_STR);
@@ -3371,7 +3396,7 @@ __AFL_NO_COV int strcasecmp(const char *a, const char *b) {
     int result = real_strcasecmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_STRCASECMP, result == 0);
     if (__afl_cmplog_fd < 0) return result;
-    size_t na = __afl_fb_len(a), nb = __afl_fb_len(b), n = na < nb ? na : nb;
+    size_t na = __afl_safe_len(a), nb = __afl_safe_len(b), n = na < nb ? na : nb;
     if (n > 0) __afl_cmplog_bytes(a, b, n + 1, result);
     return result;
 }
@@ -3539,7 +3564,7 @@ __AFL_NO_COV int wcscmp(const wchar_t *a, const wchar_t *b) {
     int result = real_wcscmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_WCSCMP, result == 0);
     if (__afl_cmplog_fd >= 0 || __afl_compcov_level >= 2) {
-        size_t na = __afl_fb_wcslen(a), nb = __afl_fb_wcslen(b), n = na < nb ? na : nb;
+        size_t na = __afl_safe_wcslen(a), nb = __afl_safe_wcslen(b), n = na < nb ? na : nb;
         if (n > 0) {
             size_t k = n * sizeof(wchar_t);
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
@@ -3557,7 +3582,7 @@ __AFL_NO_COV int wcscasecmp(const wchar_t *a, const wchar_t *b) {
     int result = real_wcscasecmp(a, b);
     __AFL_CMP_COUNT(__AFL_CMP_WCSCASECMP, result == 0);
     if (__afl_cmplog_fd >= 0) {
-        size_t na = __afl_fb_wcslen(a), nb = __afl_fb_wcslen(b), n = na < nb ? na : nb;
+        size_t na = __afl_safe_wcslen(a), nb = __afl_safe_wcslen(b), n = na < nb ? na : nb;
         if (n > 0) {
             size_t k = n * sizeof(wchar_t);
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
@@ -3574,7 +3599,7 @@ __AFL_NO_COV char *strpbrk(const char *s, const char *accept) {
     char *result = real_strpbrk(s, accept);
     __AFL_CMP_COUNT(__AFL_CMP_STRPBRK, result != NULL);
     if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(s) && __afl_launder_ptr(accept)) {
-        size_t sl = __afl_fb_len(s), al = __afl_fb_len(accept);
+        size_t sl = __afl_safe_len(s), al = __afl_safe_len(accept);
         if (sl > 0 && al > 0) {
             size_t k = sl < al ? sl : al;
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
@@ -3591,7 +3616,7 @@ __AFL_NO_COV size_t strspn(const char *s, const char *accept) {
     size_t result = real_strspn(s, accept);
     __AFL_CMP_COUNT(__AFL_CMP_STRSPN, result != 0);
     if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(s) && __afl_launder_ptr(accept)) {
-        size_t sl = __afl_fb_len(s), al = __afl_fb_len(accept);
+        size_t sl = __afl_safe_len(s), al = __afl_safe_len(accept);
         if (sl > 0 && al > 0) {
             size_t k = sl < al ? sl : al;
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
@@ -3608,7 +3633,7 @@ __AFL_NO_COV size_t strcspn(const char *s, const char *reject) {
     size_t result = real_strcspn(s, reject);
     __AFL_CMP_COUNT(__AFL_CMP_STRCSPN, result != 0);
     if (__afl_cmplog_fd >= 0 && __afl_launder_ptr(s) && __afl_launder_ptr(reject)) {
-        size_t sl = __afl_fb_len(s), rl = __afl_fb_len(reject);
+        size_t sl = __afl_safe_len(s), rl = __afl_safe_len(reject);
         if (sl > 0 && rl > 0) {
             size_t k = sl < rl ? sl : rl;
             if (k > CMPLOG_MAX_OPERAND) k = CMPLOG_MAX_OPERAND;
