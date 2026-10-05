@@ -3542,6 +3542,25 @@ __AFL_NO_COV void * afl_cmp_memrchr(const void *s, int c, size_t n)
 #  define __AFL_CMP_VIS __AFL_NO_COV __attribute__((visibility("default")))
 #endif
 
+/* WingFuzz few-bits-set pruning (LoadCmpTracer.cc, instrumentConst).
+ * A constant with < 2 bits set or < 2 bits clear in its compare width
+ * (0, 1, -1, 0x80, 0x7f...) gives input-to-state nothing to replace with,
+ * so its record is dropped. Record filter only: counters and COMPCOV still
+ * see the compare. Off unless $__AFL_CMP_PRUNE_CONST is a non-zero number.
+ *
+ *   x == 0x7f      pruned (1 clear bit)       x == 0x41      kept
+ *   x == 0x80000000 pruned (1 set bit)         x == 0x71727374 kept */
+static int __afl_prune_const;
+
+__AFL_NO_COV static inline int __afl_const_pruned(uint64_t c, size_t n) {
+    if (!__afl_prune_const) return 0;
+
+    unsigned bits = (unsigned)(n * 8);
+    uint64_t mask = n >= 8 ? ~0ULL : ((1ULL << bits) - 1);
+    unsigned set = (unsigned)__builtin_popcountll(c & mask);
+    return set < 2 || bits - set < 2;
+}
+
 #define MAX_SWITCH_CASES 256
 
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b) {
@@ -3565,21 +3584,25 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_cmp8(uint64_t a, uint64_t b) {
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp1(uint8_t a, uint8_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP1, a == b);
-    __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
+    if (!__afl_const_pruned(a, 1))
+        __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP2, a == b);
-    __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
+    if (!__afl_const_pruned(a, 2))
+        __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 2, __builtin_return_address(0), 1);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP4, a == b);
-    __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
+    if (!__afl_const_pruned(a, 4))
+        __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 4, __builtin_return_address(0), 1);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) {
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP8, a == b);
-    __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
+    if (!__afl_const_pruned(a, 8))
+        __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 8, __builtin_return_address(0), 1);
 }
 
@@ -3716,6 +3739,8 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
         int v = atoi(compcov);
         __afl_compcov_level = v < 0 ? 0 : (v > 2 ? 2 : v);
     }
+    const char *prune = getenv("__AFL_CMP_PRUNE_CONST");
+    __afl_prune_const = prune && prune[0] && atoi(prune) != 0;
     /* Opened before the _CMPLOG_OUT check, and on its own fd: the counters
      * are useful on their own (a target's comparison profile costs no
      * record stream at all), and the record stream gets truncated and

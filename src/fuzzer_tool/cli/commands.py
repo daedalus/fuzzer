@@ -594,6 +594,7 @@ def cmd_fuzz(args):
         cmplog_fifo_sink=getattr(args, "cmplog_fifo_sink", True),
         cmplog_fifo_sink_size=getattr(args, "cmplog_fifo_sink_size", None),
         compcov_level=getattr(args, "compcov_level", 0),
+        cmp_prune_const=getattr(args, "cmp_prune_const", False),
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
@@ -4690,6 +4691,16 @@ def main() -> int:
             "so a target with wide, hot comparisons may want a bigger --map-size alongside "
             "it. Writes no log of its own; needs cmplog on (the default) to have a shim to "
             "ride."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--cmp-prune-const",
+        action="store_true",
+        help=(
+            "WingFuzz compare filtering: drop cmplog records of compares against a constant "
+            "with fewer than 2 bits set or 2 bits clear (0, 1, -1, 0x80, 0x7f, ...), which "
+            "give input-to-state nothing to replace with. Counters and COMPCOV are unchanged. "
+            "Off by default; needs cmplog."
         ),
     )
     fuzz_parser.add_argument(

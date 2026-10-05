@@ -1265,6 +1265,9 @@ class Fuzzer:
         # Meaningless without cmplog itself (needs the same shim build);
         # __init__ warns and leaves it off if cmplog=False.
         compcov_level=0,
+        # WingFuzz: drop cmplog records of compares against constants with
+        # < 2 bits set or clear. Record filter only; needs cmplog.
+        cmp_prune_const=False,
         asan_target=None,
         ubsan_target=None,
         max_corpus=0,
@@ -2104,6 +2107,9 @@ class Fuzzer:
         if self._compcov_level and not cmplog:
             print("[!] --compcov-level requires cmplog; ignoring (cmplog is off)")
             self._compcov_level = 0
+        if cmp_prune_const and not cmplog:
+            print("[!] --cmp-prune-const requires cmplog; ignoring (cmplog is off)")
+            cmp_prune_const = False
         # Cmplog is always on by default; detection runs unconditionally to
         # drive the confirmation message and decide whether to build the shim.
         # cmplog=False is accepted for programmatic callers that need it off.
@@ -2138,6 +2144,7 @@ class Fuzzer:
                 # (P0-3).  The shim cost is one hash probe per comparison.
                 site_counts=True,
                 compcov_level=self._compcov_level,
+                prune_const=cmp_prune_const,
                 # An executable with the shim compiled in already intercepts
                 # libc; a preloaded copy would count every call twice.
                 preload=Preload.NONE if has_cmplog and not is_lib else Preload.SHIM,

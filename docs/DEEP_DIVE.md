@@ -1295,6 +1295,17 @@ progress-handler opcode budget, and `sqlite3_hard_heap_limit64`. A corrupt
 file returning `SQLITE_CORRUPT`/`SQLITE_NOTADB` is the expected outcome and
 not a finding; a segfault or an assertion failure is.
 
+### Constant-Compare Pruning (`--cmp-prune-const`)
+
+Port of WingFuzz's `LoadCmpTracer` few-bits-set rule. With the flag, the shim
+(`$__AFL_CMP_PRUNE_CONST=1`) drops the cmplog *record* of a `trace_const_cmp{1,2,4,8}`
+whose constant has fewer than 2 bits set or fewer than 2 bits clear in the compare width
+(`0`, `1`, `-1`, `0x80`, `0x7f`, `0x80000000`): input-to-state has nothing to substitute.
+Counters and COMPCOV still see the compare; variable-vs-variable and `trace_switch` are not
+pruned. Off by default, not in `--hail-mary`: no A/B measured. Not ported: WingFuzz's
+loop back-edge filter (a compile-time dominator test; no equivalent at callback level).
+Tests: `tests/test_cmplog_const_prune.py`, `tests/test_cmplog_prune_env.py`.
+
 ### Build-time Cmplog for .so Targets
 
 By default, `--cmplog` uses `LD_PRELOAD` to intercept comparison functions, which requires a process boundary (fork+exec). For `.so` targets in `direct_lite` mode, this doesn't work — no exec occurs.

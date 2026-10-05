@@ -139,6 +139,9 @@ def _cleanup_stale_cmplog_files(max_age_s: float = _CMPLOG_STALE_AGE_S) -> int:
 # digest change alone retires them through the existing prune path.
 _LEGACY_SHIM_NAME = "fuzz_cmplog_shim.so"
 
+# Shim switch for WingFuzz few-bits-set constant pruning (afl_shim.c).
+_PRUNE_CONST_ENV = "__AFL_CMP_PRUNE_CONST"
+
 
 def _prune_stale_shims(cmplog_dir: str, keep: str) -> int:
     """Delete cached shim objects other than *keep*.
@@ -369,6 +372,9 @@ class CmplogCollector:
             map -- so setting it changes what the target's coverage looks
             like without adding anything to drain() output. See the
             "COMPCOV" comment in afl_shim.c ahead of __afl_compcov_mark().
+        prune_const: Sets $__AFL_CMP_PRUNE_CONST so the shim drops cmplog
+            records of compares against a constant with < 2 bits set or
+            < 2 bits clear (WingFuzz). Counters and COMPCOV are unaffected.
         preload: Preload.NONE keeps the shim off LD_PRELOAD (see Preload).
     """
 
@@ -383,6 +389,7 @@ class CmplogCollector:
         debug: bool = False,
         compcov_level: int = 0,
         preload: Preload = Preload.SHIM,
+        prune_const: bool = False,
     ):
         self.log_path: str | None = None
         self.preload = preload
@@ -400,6 +407,7 @@ class CmplogCollector:
         # passing e.g. 5 doesn't silently disagree with what the shim does
         # with it.
         self.compcov_level = 0 if compcov_level < 0 else (2 if compcov_level > 2 else compcov_level)
+        self.prune_const = bool(prune_const)
         self._fifo: _FifoDrain | None = None
         # Trailing bytes from the last drain with no terminating '\n' yet
         # -- carried over so a line split across two drains isn't parsed
@@ -675,6 +683,8 @@ class CmplogCollector:
             env["_CMPLOG_SITE_COUNTS"] = self.sites_path
         if self.compcov_level:
             env["__AFL_COMPCOV_LEVEL"] = str(self.compcov_level)
+        if self.prune_const:
+            env[_PRUNE_CONST_ENV] = "1"
 
         # Prepend the unified shim to LD_PRELOAD
         if self._shim_path and self.preload is Preload.SHIM:
@@ -720,6 +730,7 @@ class CmplogCollector:
                     "LD_PRELOAD",
                     "ASAN_OPTIONS",
                     "__AFL_COMPCOV_LEVEL",
+                    _PRUNE_CONST_ENV,
                 )
             }
 
@@ -732,6 +743,8 @@ class CmplogCollector:
             os.environ["_CMPLOG_SITE_COUNTS"] = self.sites_path
         if self.compcov_level:
             os.environ["__AFL_COMPCOV_LEVEL"] = str(self.compcov_level)
+        if self.prune_const:
+            os.environ[_PRUNE_CONST_ENV] = "1"
 
         if not self._shim_path or self.preload is Preload.NONE:
             return
