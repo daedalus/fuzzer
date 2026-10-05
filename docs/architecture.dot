@@ -82,7 +82,7 @@ digraph fuzzer_tool {
         color="#d9c2c2"; fillcolor="#fbf4f4"; fontcolor="#7a4a4a";
         runner [label="services/runner.py  +  adapters/\lforkserver · process · inprocess\lpersistent_signal · network · ptrace\l",
                 fillcolor="#f2dcdc", fontcolor="#5c3232"];
-        shim [label="adapters/afl_shim.c\ledge map · forkserver\lcmplog interceptors (18 libc + 9 IR)\lhealth counters (core/shim_health.py)\l",
+        shim [label="adapters/afl_shim.c\ledge map · forkserver\lcmplog interceptors (18 libc + 9 IR)\lhealth counters (core/shim_health.py)\l__fuzz_event[_at] -> $__LTL_EVENTS_OUT (--ltl)\l",
               fillcolor="#e8c9c9", fontcolor="#5c3232"];
         target [label="TARGET", fillcolor="#5c3232", fontcolor="white",
                 shape=box, style="filled", margin="0.24,0.14"];
@@ -93,6 +93,8 @@ digraph fuzzer_tool {
         label="4 · Feedback   —   what came back";
         color="#b9cbd8"; fillcolor="#f2f7fa"; fontcolor="#37596e";
         cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM bitmap · hit buckets · per-edge max counts (PerfFuzz)\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\l",
+             fillcolor="#c6dcea", fontcolor="#22475c"];
+        ltl [label="core/ltl.py  (--ltl)\lBuchi monitor over event trace\lltl:trap / ltl:lasso crash · frontier prefix\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];
         cmplog [label="core/cmplog.py\lpairs + tokens · fired/asserted\lper callback and per call site (PC)\lwalls · progress reward\l",
                 fillcolor="#c6dcea", fontcolor="#22475c"];
@@ -144,6 +146,8 @@ digraph fuzzer_tool {
     tarena -> picker [style=dashed, label="  matched seed"];
     lib -> ops [dir=none, style=dotted];
     shim -> target [dir=none, style=dotted, label="  linked in"];
+    shim -> ltl [style=dotted, label="  events"];
+    ltl -> lib [style=dotted, label="  ltl_prefix"];
 
     // target outputs
     target -> cmplog [label="  cmp channels"];

@@ -25,4 +25,4 @@ Violation = crash with signature `ltl:trap` | `ltl:lasso` (`classify_crash`). Ne
 - Not measured: a real target, spot-generated automata, A/B vs plain coverage, speed cost (one `write(2)` per event).
 
 ## Open
-- Lasso with a real spot HOA; directed runs (item 4); `architecture.dot` not updated.
+- Lasso with a real spot HOA; directed runs (item 4).
