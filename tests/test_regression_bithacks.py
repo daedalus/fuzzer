@@ -395,3 +395,32 @@ class TestReverseBitsTranslate:
     def test_reverse_byte_still_callable(self):
         assert bm._reverse_byte(0b00000001) == 0b10000000
         assert bm._reverse_byte(0b10110010) == 0b01001101
+
+
+class TestGrayEncodeTable:
+    """gray_code encode side is a translate table, identical to ``b ^ (b >> 1)``."""
+
+    def test_encode_table_matches_formula_and_inverts_with_decode(self):
+        from fuzzer_tool.core.mutations import structured as S
+
+        assert all(S._GRAY_ENCODE[b] == b ^ (b >> 1) for b in range(256))
+        assert all(S._GRAY_DECODE[S._GRAY_ENCODE[b]] == b for b in range(256))
+
+    def test_seeded_output_unchanged(self):
+        import random
+
+        from fuzzer_tool.core.mutations import structured as S
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        def ref(data, rng):
+            offset, length = S._region(len(data), rng, min_len=2)
+            gray = [b ^ (b >> 1) for b in data[offset : offset + length]]
+            for _ in range(rng.randint(1, min(3, length))):
+                gray[rng.randint(0, length - 1)] ^= 1 << rng.randint(0, 7)
+            restored = bytes(bytearray(gray).translate(S._GRAY_DECODE))
+            return S._splice(data, offset, restored)
+
+        for size in (2, 17, 300, 4097):
+            for seed in range(40):
+                d = random.Random(seed + size).randbytes(size)
+                assert S.gray_code(d, RandPool(seed)) == ref(d, RandPool(seed))

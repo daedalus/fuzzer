@@ -2388,6 +2388,9 @@ def _gray_decode_table() -> bytes:
 
 
 _GRAY_DECODE = _gray_decode_table()
+# Forward map ``b ^ (b >> 1)`` as a translate table too: the encode side was a
+# per-byte Python comprehension, the last per-byte loop left in gray_code.
+_GRAY_ENCODE = bytes(b ^ (b >> 1) for b in range(256))
 
 
 def gray_code(data: bytes, rng) -> bytes:
@@ -2419,14 +2422,13 @@ def gray_code(data: bytes, rng) -> bytes:
     offset, length = _region(len(data), rng, min_len=2)
     if length < 2:
         return data
-    block = bytearray(data[offset : offset + length])
-    gray = [b ^ (b >> 1) for b in block]
+    gray = bytearray(data[offset : offset + length]).translate(_GRAY_ENCODE)
     n_flip = rng.randint(1, min(3, length))
     for _ in range(n_flip):
         pos = rng.randint(0, length - 1)
         bit = rng.randint(0, 7)
         gray[pos] ^= 1 << bit
-    restored = bytearray(gray).translate(_GRAY_DECODE)
+    restored = gray.translate(_GRAY_DECODE)
     return _splice(data, offset, bytes(restored))
 
 
