@@ -1090,6 +1090,34 @@ static inline void *__afl_raw_load(void *const *p) {
     return v;
 }
 
+/* Upper bound (exclusive) of the calling thread's stack, resolved once per
+ * thread. 0 = unresolved, 1 = resolution failed (walk disabled for the thread).
+ * The 4 MiB span check below only bounds the HOP LENGTH; it says nothing about
+ * whether the target of the hop is still on the stack. Near the top of a stack
+ * (main thread, shallow call depth, ASLR off: only a few KiB below 0x7ffffffff000)
+ * a junk saved-FP value just above `cur` passes the span check yet points past the
+ * stack end -- unmapped, or non-canonical (0x800000010000), where the load raises
+ * #GP / SIGSEGV from inside the coverage callback. The junk comes from any frame
+ * compiled without frame pointers, where rbp is a general-purpose register
+ * (ffmpeg's s337m_probe held 0x800000010000 in it). */
+static __thread uintptr_t __afl_ctx_stack_hi = 0;
+
+__AFL_NO_COV __attribute__((noinline))
+static uintptr_t __afl_ctx_resolve_stack_hi(void) {
+    uintptr_t hi = 1;
+    __afl_ctx_stack_hi = 1;   /* re-entrancy: pthread_getattr_np may malloc */
+    pthread_attr_t a;
+    if (pthread_getattr_np(pthread_self(), &a) == 0) {
+        void *lo = NULL;
+        size_t sz = 0;
+        if (pthread_attr_getstack(&a, &lo, &sz) == 0 && sz)
+            hi = (uintptr_t)lo + sz;
+        pthread_attr_destroy(&a);
+    }
+    __afl_ctx_stack_hi = hi;
+    return hi;
+}
+
 __attribute__((visibility("default"), always_inline))
 static inline uint32_t __afl_get_caller_ctx(void) {
     if (__afl_mapping) return 0;
@@ -1112,12 +1140,19 @@ static inline uint32_t __afl_get_caller_ctx(void) {
      * have bits 63:47 all-zero; kernel-space addresses have all-one.
      * Non-canonical values (e.g. 0x800000010000) fall in the gap between
      * user and kernel space and cause SIGSEGV on the second-hop dereference. */
-    if (cfp >> 47) return 0;
+    if (cfp >> 47) return 0;   /* cheap early reject; the stack-bound check below is the real guard */
     /* The stack grows down, so a genuine older frame sits at a higher
      * address than ours and within a sane single-hop span (4 MiB covers
      * any realistic frame without risking a wild read).  Anything outside
      * that window is an unlinked/garbage frame — skip context for it. */
     if (cfp <= cur || cfp - cur > (4u << 20)) return 0;
+    uintptr_t hi = __afl_ctx_stack_hi;
+    if (!hi) hi = __afl_ctx_resolve_stack_hi();
+    /* caller_fp[0..1] (16 bytes) must lie wholly inside this thread's stack and
+     * the slot must be 8-aligned; otherwise it is junk from a frame-pointer-less
+     * callee and loading it can fault. Also rejects a walk made on a sigaltstack
+     * (cur is outside the thread stack, so cfp lands above `hi`). */
+    if (hi <= 1 || (cfp & 7u) || cfp > hi - 16) return 0;
     void *ra = __afl_raw_load(caller_fp + 1);   /* return addr into caller's caller */
     if (!ra) return 0;
 
