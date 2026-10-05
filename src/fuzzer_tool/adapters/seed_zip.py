@@ -431,6 +431,30 @@ def open_readonly(corpus_dir: str | Path) -> SeedZip:
     return SeedZip(Path(corpus_dir), BLOCK_SEEDS, BLOCK_BYTES, BLOCK_GROWTH, readonly=True)
 
 
+_PEEK: dict[Path, tuple[tuple[int, int], SeedZip]] = {}
+
+
+def peek(corpus_dir: str | Path) -> SeedZip | None:
+    """Cached read-only view of an existing seeds.zip (zip mode off).
+
+    Zip mode off never writes the archive, so its (mtime, size) is a sound
+    cache key: the index is built once, not once per saved seed.
+    """
+    path = Path(corpus_dir) / ZIP_NAME
+    try:
+        st = path.stat()
+    except OSError:
+        _PEEK.pop(path, None)
+        return None
+    sig = (st.st_mtime_ns, st.st_size)
+    hit = _PEEK.get(path)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
+    store = open_readonly(corpus_dir)
+    _PEEK[path] = (sig, store)
+    return store
+
+
 def lookup(corpus_dir: str | Path) -> SeedZip | None:
     """Store for *corpus_dir* in zip mode, else None. Free when unused."""
     if not _STORES:

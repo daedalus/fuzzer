@@ -529,6 +529,65 @@ def test_misnamed_member_keyed_by_content(zcorpus):
     assert rehydrate_by_hash(h, corpus) is None  # never hand back wrong bytes
 
 
+def _zip_names(corpus: Path) -> list[str]:
+    path = corpus / seed_zip.ZIP_NAME
+    if not path.is_file():
+        return []
+    with zipfile.ZipFile(path) as zf:
+        return sorted(zf.namelist())
+
+
+def test_zip_mode_does_not_copy_loose_seed_into_zip(tmp_path):
+    """seeds/ and seeds.zip are one pool: a seed in either is already held."""
+    corpus = tmp_path / "c"
+    nested, flat = b"loose-nested" * 3, b"loose-flat" * 3
+    hn, hf = hash_data(nested), hash_data(flat)
+    (corpus / "seeds" / hn[:2]).mkdir(parents=True)
+    (corpus / "seeds" / hn[:2] / f"id_{hn}").write_bytes(nested)
+    (corpus / "seeds" / f"id_{hf}").write_bytes(flat)  # what load normalises to
+    store = seed_zip.configure(corpus, ZipMode.ON)
+    try:
+        # fresh seen set: models eviction / a second tracker re-offering them
+        assert save_to_corpus(nested, corpus, set())
+        assert save_to_corpus(flat, corpus, set())
+        store.flush()
+        assert _zip_names(corpus) == []
+        got, _, _ = load_corpus(corpus, add_default=False)
+        assert sorted(got) == sorted([nested, flat])
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)
+
+
+def test_zip_mode_off_does_not_copy_zip_seed_to_files(tmp_path):
+    corpus = tmp_path / "c"
+    data = b"zip-resident" * 3
+    store = seed_zip.configure(corpus, ZipMode.ON)
+    save_to_corpus(data, corpus, set())
+    store.flush()
+    seed_zip.configure(corpus, ZipMode.OFF)
+
+    assert save_to_corpus(data, corpus, set())
+    assert _seed_files(corpus) == []
+    got, _, _ = load_corpus(corpus, add_default=False)
+    assert got == [data]
+
+
+def test_zip_mode_readmits_pruned_zip_seed(tmp_path):
+    """Present means live: a tombstoned seed is still re-admitted."""
+    corpus = tmp_path / "c"
+    data = b"pruned-then-back" * 3
+    store = seed_zip.configure(corpus, ZipMode.ON)
+    try:
+        save_to_corpus(data, corpus, set())
+        store.retire(hash_data(data))
+        save_to_corpus(data, corpus, set())
+        store.flush()
+        got, _, _ = load_corpus(corpus, add_default=False)
+        assert got == [data]
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)
+
+
 # ── CLI ──────────────────────────────────────────────────────────────
 
 

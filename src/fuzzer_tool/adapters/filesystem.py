@@ -625,14 +625,31 @@ def _load_full_from_zip(
             irreplaceable_hashes.add(h)
 
 
+def _loose_has(dest: Path) -> bool:
+    """A loose full seed, at its canonical path or where load normalises it."""
+    return dest.is_file() or (dest.parent.parent / dest.name).is_file()
+
+
 def _has_seed(store, tree: SeedTree, h: str, dest: Path) -> bool:
-    return store.has(tree, h) if store is not None else dest.is_file()
+    return (store is not None and store.has(tree, h)) or _loose_has(dest)
 
 
-def _put_seed(store, tree: SeedTree, h: str, dest: Path, data: bytes) -> None:
-    """Write a full seed: seeds.zip under --zip-seed-corpus, else *dest*."""
+def _put_seed(corpus_dir: Path, tree: SeedTree, h: str, dest: Path, data: bytes) -> None:
+    """Write a full seed unless the pool already holds it.
+
+    seeds/ and seeds.zip are one pool, whichever mode is on: a live copy in
+    either counts, so a seed is never duplicated across them. New seeds go to
+    seeds.zip under --zip-seed-corpus, else to *dest*.
+    """
+    store = seed_zip.lookup(corpus_dir)
+    if _loose_has(dest):
+        return
     if store is not None:
-        store.put(tree, h, data)
+        if not store.has(tree, h):
+            store.put(tree, h, data)
+        return
+    held = seed_zip.peek(corpus_dir)  # mode off: an existing zip still counts
+    if held is not None and held.has(tree, h):
         return
     dest.parent.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(data)
@@ -709,7 +726,7 @@ def save_to_corpus(
         # Store seeds in two-digit hash subdirectories to avoid too many
         # files in a single directory.
         dest = seeds_dir / h[:2] / f"id_{h}"
-        _put_seed(seed_zip.lookup(corpus_dir), SeedTree.MAIN, h, dest, data)
+        _put_seed(corpus_dir, SeedTree.MAIN, h, dest, data)
     return True
 
 
@@ -751,7 +768,7 @@ def save_irreplaceable(
     _bound_seen_hashes(seen_hashes)
 
     dest = corpus_dir / "seeds" / "irreplaceable" / h[:2] / f"id_{h}"
-    _put_seed(seed_zip.lookup(corpus_dir), SeedTree.IRREPLACEABLE, h, dest, data)
+    _put_seed(corpus_dir, SeedTree.IRREPLACEABLE, h, dest, data)
     return True
 
 
@@ -805,7 +822,7 @@ def save_crashing_seed(
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
 
-    _put_seed(store, SeedTree.CRASHING, h, dest, data)
+    _put_seed(corpus_dir, SeedTree.CRASHING, h, dest, data)
     return is_new
 
 
@@ -841,7 +858,7 @@ def save_timeout_seed(
     irreplaceable_hashes.add(h)
     _bound_seen_hashes(seen_hashes)
 
-    _put_seed(store, SeedTree.TIMEOUTS, h, dest, data)
+    _put_seed(corpus_dir, SeedTree.TIMEOUTS, h, dest, data)
     return is_new
 
 
