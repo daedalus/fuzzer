@@ -1476,6 +1476,7 @@ class Fuzzer:
         max_collision_risk=30,
         continue_until_crash=False,
         isolate_crash_fields=False,
+        crash_symbolize=False,
         multi_targets=None,
         debug=False,
         enable_regex_bomb=False,
@@ -1857,6 +1858,16 @@ class Fuzzer:
         self.dictionary = dictionary or []
         self.file_mode = file_mode
         self.isolate_crash_fields = isolate_crash_fields
+        # --crash-symbolize: the shim symbolizes the faulting PC on a crash and
+        # appends it to a sink file; save_crash() drains it into the sidecar.
+        # os.environ was snapshotted above, so _restore_environ() removes it.
+        self.crash_symbolize = crash_symbolize
+        self._crash_sym_sink = None
+        if crash_symbolize:
+            from fuzzer_tool.core.crash_symbols import CrashSymbolSink
+
+            self._crash_sym_sink = CrashSymbolSink()
+            self._crash_sym_sink.enable()
         self.target_args = target_args or []
         self.max_corpus = max_corpus
         self.max_corpus_bytes = max_corpus_bytes
@@ -9554,6 +9565,8 @@ class Fuzzer:
         # embedding Fuzzer -- would silently find no crashes.
         if self._cmplog is not None:
             self._cmplog.restore_env()
+        if getattr(self, "_crash_sym_sink", None) is not None:
+            self._crash_sym_sink.close()
         # cmplog's restore_env() above only ever undid its own LD_PRELOAD
         # edit. __AFL_DIST_SHM_ID, __AFL_SHM_ID, AFL_MAP_SIZE, the ASAN
         # LD_PRELOAD injection and UBSAN_OPTIONS were never restored, so

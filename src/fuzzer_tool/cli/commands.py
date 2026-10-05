@@ -880,6 +880,7 @@ def cmd_fuzz(args):
         qea_cooling_min_angle=getattr(args, "qea_cooling_min_angle", 0.005),
         continue_until_crash=getattr(args, "continue_until_crash", False),
         isolate_crash_fields=getattr(args, "isolate_crash_fields", False),
+        crash_symbolize=getattr(args, "crash_symbolize", False),
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
         stall_release_edges=getattr(args, "stall_release_edges", 1),
@@ -2106,6 +2107,7 @@ def cmd_sweep(args):
 _HAIL_MARY_FLAGS = (
     "continue_until_crash",
     "isolate_crash_fields",
+    "crash_symbolize",
     "deep_coverage",
     "ptrace",
     "adaptive_timeout",
@@ -2453,6 +2455,15 @@ def main() -> int:
         help="For each novel crash, replay the target (<= 64 execs) to isolate which "
         "recognised header fields (PNG, gzip, ...) the crash needs; recorded in the "
         "crash sidecar as failure_schema. Enabled by --hail-mary.",
+    )
+    fuzz_parser.add_argument(
+        "--crash-symbolize",
+        action="store_true",
+        help="Have the target shim symbolize the faulting PC on a crash "
+        "(__sanitizer_symbolize_pc; needs a sanitizer runtime in the target, "
+        "otherwise the raw PC is recorded) and hydrate the crash sidecar "
+        "(shim_symbol, and frames/rip/fault_addr when otherwise empty). "
+        "Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--hail-mary",

@@ -193,6 +193,8 @@
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
+#include <ucontext.h>
+#include <fcntl.h>
 #include <setjmp.h>
 #include <unistd.h>
 #include <sys/ipc.h>
@@ -3937,9 +3939,137 @@ static void __afl_restore_crash_handlers(void) {
     __afl_handlers_live = 0;
 }
 
+/* ── Crash symbolization (hydration of the crash sidecar) ─────────────
+ *
+ * __sanitizer_symbolize_pc() is the sanitizer runtime's PC symbolizer. It
+ * is NOT async-signal-safe (it may allocate and spawn llvm-symbolizer), so
+ * the handler never calls it while a guard frame can catch the signal:
+ * it only records {sig, pc, fault addr} in thread-local storage, and
+ * __afl_guard_run symbolizes after siglongjmp, in ordinary context.
+ * Where nothing can catch the signal (forkserver/one-shot children, which
+ * die right after the handler), the handler symbolizes inline under a
+ * short alarm(2) so a wedged symbolizer cannot hang the child.
+ *
+ * Output: one line appended to $__AFL_CRASH_SYM_OUT per crash,
+ *   SYM <sig> <pc-hex> <fault-hex> <fn>|<file>|<line>|<module>|<offset>
+ * Inlined frames are joined with ';'. The text field is "-" when no
+ * sanitizer runtime is linked (the weak symbol is unresolved): the raw PC
+ * is still written, and the Python side can resolve it from DWARF.
+ * Unset env var = the whole feature is a no-op. */
+#ifndef __AFL_CRASH_SYM
+#define __AFL_CRASH_SYM 1
+#endif
+
+#if __AFL_CRASH_SYM
+extern void __sanitizer_symbolize_pc(void *pc, const char *fmt, char *out_buf,
+                                     size_t out_buf_size) __attribute__((weak));
+
+/* Self-contained formatters: the cmplog ones live under __AFL_CMPLOG. */
+__AFL_NO_COV static char *__afl_sym_put_dec(char *p, int v) {
+    char tmp[12]; int n = 0;
+    if (v < 0) { *p++ = '-'; v = -v; }
+    do { tmp[n++] = (char)('0' + v % 10); v /= 10; } while (v);
+    while (n) *p++ = tmp[--n];
+    return p;
+}
+__AFL_NO_COV static char *__afl_sym_put_hex(char *p, uint64_t v) {
+    static const char hex[] = "0123456789abcdef";
+    *p++ = '0'; *p++ = 'x';
+    int started = 0;
+    for (int sh = 60; sh >= 0; sh -= 4) {
+        unsigned d = (unsigned)((v >> sh) & 0xf);
+        if (d || started || sh == 0) { *p++ = hex[d]; started = 1; }
+    }
+    return p;
+}
+__AFL_NO_COV static void __afl_sym_write_all(int fd, const char *buf, size_t len) {
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = write(fd, buf + off, len - off);
+        if (w <= 0) return;
+        off += (size_t)w;
+    }
+}
+
+struct __afl_sym_pending {
+    int sig;
+    uintptr_t pc;
+    uintptr_t addr;
+};
+static __thread struct __afl_sym_pending __afl_sym_pend;
+static __thread int __afl_sym_have = 0;
+static __thread int __afl_sym_busy = 0;
+
+/* Faulting PC out of the ucontext; 0 on an architecture we do not decode. */
+__AFL_NO_COV static uintptr_t __afl_sym_pc_of(void *uc) {
+    if (!uc) return 0;
+#if defined(__x86_64__) && defined(REG_RIP)
+    return (uintptr_t)((ucontext_t *)uc)->uc_mcontext.gregs[REG_RIP];
+#elif defined(__aarch64__)
+    return (uintptr_t)((ucontext_t *)uc)->uc_mcontext.pc;
+#else
+    return 0;
+#endif
+}
+
+/* Async-signal-safe: stores three words. */
+__AFL_NO_COV static void __afl_sym_capture(int sig, siginfo_t *si, void *uc) {
+    if (__afl_sym_busy) return;           /* the symbolizer itself faulted */
+    const char *out = getenv("__AFL_CRASH_SYM_OUT");
+    if (!out || !out[0]) return;
+    __afl_sym_pend.sig = sig;
+    __afl_sym_pend.pc = __afl_sym_pc_of(uc);
+    __afl_sym_pend.addr = si ? (uintptr_t)si->si_addr : 0;
+    __afl_sym_have = 1;
+}
+
+/* Append the pending record. Plain open/write/close each time: a crash is
+ * rare, and holding no fd means a fork child or a stolen fd number cannot
+ * corrupt the stream. */
+__AFL_NO_COV static void __afl_sym_emit(void) {
+    if (!__afl_sym_have) return;
+    __afl_sym_have = 0;
+    const char *path = getenv("__AFL_CRASH_SYM_OUT");
+    if (!path || !path[0]) return;
+
+    char text[768];
+    text[0] = '-'; text[1] = 0;
+    if (__sanitizer_symbolize_pc && __afl_sym_pend.pc) {
+        __afl_sym_busy = 1;
+        text[0] = 0;
+        __sanitizer_symbolize_pc((void *)__afl_sym_pend.pc, "%f|%s|%l|%m|%o",
+                                 text, sizeof(text));
+        __afl_sym_busy = 0;
+        text[sizeof(text) - 1] = 0;
+        for (char *q = text; *q; q++)
+            if (*q == '\n') *q = ';';
+        if (!text[0]) { text[0] = '-'; text[1] = 0; }
+    }
+
+    char buf[1024];
+    char *p = buf;
+    *p++ = 'S'; *p++ = 'Y'; *p++ = 'M'; *p++ = ' ';
+    p = __afl_sym_put_dec(p, __afl_sym_pend.sig);
+    *p++ = ' ';
+    p = __afl_sym_put_hex(p, (uint64_t)__afl_sym_pend.pc);
+    *p++ = ' ';
+    p = __afl_sym_put_hex(p, (uint64_t)__afl_sym_pend.addr);
+    *p++ = ' ';
+    for (const char *t = text; *t && p < buf + sizeof(buf) - 2; t++) *p++ = *t;
+    *p++ = '\n';
+
+    int fd = open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    __afl_sym_write_all(fd, buf, (size_t)(p - buf));
+    close(fd);
+}
+#else
+#define __afl_sym_capture(sig, si, uc) ((void)0)
+#define __afl_sym_emit() ((void)0)
+#endif
+
 static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
-    (void)uc;
-#if __AFL_CMPLOG
+    #if __AFL_CMPLOG
     /* Flush before escaping. cmplog_shim.c installed a second handler for
      * this and restored the previous disposition from inside it, so the
      * comparison buffer was flushed on the FIRST crash only -- every later
@@ -3954,9 +4084,20 @@ static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
     __afl_cmp_dump_sites();
 #endif
     __afl_sancov_fold();
+    __afl_sym_capture(sig, si, uc);
     sigjmp_buf *jb = __afl_guard_jmp;
     if (jb)
-        siglongjmp(*jb, sig);
+        siglongjmp(*jb, sig);   /* __afl_guard_run symbolizes after the jump */
+
+#if __AFL_CRASH_SYM
+    /* No guard frame: this process dies after the handler. Symbolize now,
+     * bounded so a wedged symbolizer cannot turn a crash into a hang. */
+    if (__afl_sym_have) {
+        alarm(2);
+        __afl_sym_emit();
+        alarm(0);
+    }
+#endif
 
     /* Not ours to recover: hand the signal back to whoever owned it.
      * A hardware fault re-executes and faults again with its real si_addr;
@@ -4127,6 +4268,8 @@ static int __afl_guard_run(int (*entry)(const uint8_t *, size_t),
     __afl_guard_jmp = prev;
     __afl_guard_timed = prev_timed;
     __afl_sancov_fold();
+    if (code < __AFL_JMP_EXIT) __afl_sym_emit();   /* a real crash signal */
+    else __afl_sym_have = 0;
     if (code == __AFL_JMP_TIMEOUT) return __AFL_GUARD_TIMEOUT_RC;
     if (code & __AFL_JMP_EXIT) return code & 0xFF;
     return -code;

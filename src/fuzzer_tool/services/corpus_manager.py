@@ -687,6 +687,10 @@ class CorpusManager:
         from fuzzer_tool.core.crash_metadata import CrashMetadata
 
         fault_addr = getattr(f, "_last_fault_addr", None)
+        # Drain on EVERY crash, not just novel ones: the sink is append-only,
+        # so a skipped drain would hand the next crash this one's record.
+        sink = getattr(f, "_crash_sym_sink", None)
+        shim_sym = sink.drain() if sink is not None else None
 
         # Decide FIRST whether this crash is one we will keep. Enrichment below
         # (nearest-corpus search over the whole corpus, GDB replay, target
@@ -727,7 +731,7 @@ class CorpusManager:
 
         meta: CrashMetadata | None = None
         if verdict.novel:
-            meta = self._novel_crash_meta(data, returncode, fault_addr)
+            meta = self._novel_crash_meta(data, returncode, fault_addr, shim_sym)
 
         result = save_crash(
             data,
@@ -786,7 +790,7 @@ class CorpusManager:
         ):
             save_crashing_seed(data, f.corpus_dir, f.seen_hashes, f.irreplaceable_hashes, f.bloom)
 
-    def _novel_crash_meta(self, data: bytes, returncode: int, fault_addr):
+    def _novel_crash_meta(self, data: bytes, returncode: int, fault_addr, shim_sym=None):
         """Build the CrashMetadata sidecar for a novel crash (enrichment is novel-only)."""
         f = self.f
         from fuzzer_tool.adapters.filesystem import hash_data
@@ -824,6 +828,16 @@ class CorpusManager:
             meta.rbp = f._last_regs.get("rbp", 0)
         if fault_addr is not None:
             meta.fault_addr = f"0x{fault_addr:x}"
+
+        # Shim-side symbolization (--crash-symbolize). Fills only what the
+        # ptrace/sanitizer paths left empty. Best-effort: never loses the crash.
+        if shim_sym is not None:
+            try:
+                from fuzzer_tool.core.crash_symbols import hydrate
+
+                hydrate(meta, shim_sym)
+            except Exception:
+                log.warning("shim crash symbol hydration failed", exc_info=True)
 
         # Name the crashing input's fields and mark those changed against
         # the parent seed. Cheap (one alignment) and novel-only; the causal

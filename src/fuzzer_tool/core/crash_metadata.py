@@ -88,6 +88,9 @@ class CrashMetadata:
     # sidecar; empty when gdb is unavailable or the target isn't traceable.
     gdb_replay: str = ""
     frames: list[str] = field(default_factory=list)
+    # Shim-side symbolization of the faulting PC (core.crash_symbols); empty
+    # when --crash-symbolize is off or the shim wrote no record.
+    shim_symbol: dict = field(default_factory=dict)
     access_size: int | None = None
     access_type: str | None = None  # "READ" / "WRITE" / "FREE"
     shadow_info: str = ""
@@ -203,6 +206,19 @@ class CrashMetadata:
         _append_frames(lines, "stack trace", self.frames, 16)
         _append_frames(lines, "allocated by", self.alloc_frames, 8)
         _append_frames(lines, "freed by", self.dealloc_frames, 8)
+
+        if self.shim_symbol:
+            sym = self.shim_symbol
+            lines.append(
+                "=== shim symbolization ("
+                + ("sanitizer runtime" if sym.get("symbolized") else "raw pc, no symbolizer")
+                + ") ==="
+            )
+            lines.append(f"  signal={sym.get('signal')} pc={sym.get('pc')} fault={sym.get('fault_addr')}")
+            for fr in sym.get("frames", []):
+                loc = f"{fr['file']}:{fr['line']}" if fr.get("file") else "?"
+                lines.append(f"  {fr.get('function') or '??'} {loc}")
+            lines.append("")
 
         self._sidecar_registers(lines)
 
@@ -399,6 +415,7 @@ class CrashMetadata:
             "mutation_ops": list(self.mutation_ops),
             "parent_sites": list(self.parent_sites),
             "frames": list(self.frames),
+            "shim_symbol": dict(self.shim_symbol),
             "alloc_frames": list(self.alloc_frames) if self.alloc_frames is not None else None,
             "dealloc_frames": list(self.dealloc_frames)
             if self.dealloc_frames is not None
