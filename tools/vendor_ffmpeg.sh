@@ -344,4 +344,4 @@ fi
 
 echo "=== FFmpeg vendored successfully ($MODE) ==="
 echo "Libraries: $FFMPEG_DIR/{libavformat,libavcodec,libavutil,libswresample}/*.a"
-echo "Next:      tools/build_ffmpeg_ready.sh   (links the ready-to-fuzz harness)"
+echo "Next:      tools/build_targets.sh --fast --ffmpeg-opts=noasan   (links ffmpeg_read_<ver>_noasan[.so])"

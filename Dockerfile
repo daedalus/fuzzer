@@ -116,10 +116,11 @@ RUN echo 'int main(void){return 0;}' > /tmp/probe.c \
 # `docker stop` (SIGTERM) still writes the report.
 FROM base AS ffmpeg
 ARG FFMPEG_BUILD_ARGS=""
-RUN tools/build_ffmpeg_ready.sh $FFMPEG_BUILD_ARGS
+RUN tools/vendor_ffmpeg.sh --top=1 $FFMPEG_BUILD_ARGS \
+    && tools/build_targets.sh --fast --ffmpeg-opts=noasan
 CMD mkdir -p /out/corpus \
     && cp -n corpus_ffmpeg/* /out/corpus/ \
-    && exec fuzzer-tool fuzz targets/ffmpeg_read_nosan.so \
+    && exec fuzzer-tool fuzz $(ls targets/ffmpeg_read_*_noasan.so | head -1) \
         --inprocess-direct --inprocess-func fuzz_ffmpeg \
         -d /out/corpus -o /out/crashes --resume \
         -c --elo all --lineage-backtrack --report /out/report_ffmpeg.md

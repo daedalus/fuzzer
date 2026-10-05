@@ -22,6 +22,13 @@
 #   tools/vendor_grep.sh      -> $FUZZ_VENDOR_ROOT/grep
 #   tools/vendor_ffmpeg.sh    -> $FUZZ_VENDOR_ROOT/ffmpeg
 #   tools/vendor_ffmpeg.sh --top=3 -> $FUZZ_VENDOR_ROOT/ffmpeg-<ver>  (ffmpeg_read_<ver>_{asan,noasan,ubsan,ng2,ng3}{,.so})
+#
+# ffmpeg_read is built ONLY in this versioned form — ffmpeg_read_<version>_<OPTS>
+# and ffmpeg_read_<version>_<OPTS>.so, OPTS in {noasan, asan, ubsan, ng2, ng3}.
+# There is no unversioned ffmpeg_read/ffmpeg_read.so target; the old
+# tools/build_ffmpeg_ready.sh (single-version nosan/asan build + seed corpus)
+# has been folded in here — its seed-corpus step now runs at the end of Main
+# against whichever versioned ffmpeg_read_*.so targets got built.
 #   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
 #   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
 #
@@ -1161,7 +1168,7 @@ build_simple_targets() {
     build_target "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$TARGETS/zlib_read${out_suffix}" "$ZLIB_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
     build_target "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$TARGETS/gzip_read${out_suffix}" "$GZIP_LIBS" "$flags" "$cc" "$extra_cflags $ZLIB_INC"
     build_target "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" "$TARGETS/jpeg_read${out_suffix}" "-ljpeg" "$flags" "$cc" "$extra_cflags"
-    build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}" "$FFMPEG_LIBS" "$flags" "$cc" "$extra_cflags $FFMPEG_INC"
+    # ffmpeg_read is built only in versioned form — see build_ffmpeg_versions.
     # grep_read — vendored GNU Grep (tools/vendor_grep.sh extracts to
     # vendor/grep). Skipped rather than built against the system grep: the
     # target links grep's matcher engines in-process, so without the vendored
@@ -1591,7 +1598,7 @@ build_simple_so_targets() {
     # survives across in-process (direct_lite) iterations, which a
     # process-per-exec build cannot show. No external deps.
     build_so_target "${TARGETS_SRC:-$TARGETS}/prng_token_read.c" "$TARGETS/prng_token_read${out_suffix}.so" "" "$flags" "$cc" "$extra_cflags"
-    build_so_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read${out_suffix}.so" "$FFMPEG_LIBS" "$flags" "$cc" "$extra_cflags $FFMPEG_INC"
+    # ffmpeg_read.so is built only in versioned form — see build_ffmpeg_versions.
     # grep_read.so — see the note on the executable build above. The
     # config.h -include has to precede the shim's, which build_so_target
     # appends after $extra_cflags; gnulib's replacement headers #error out
@@ -1826,7 +1833,6 @@ verify_afl() {
              "$TARGETS"/zlib_read "$TARGETS"/zlib_read_nosan "$TARGETS"/zlib_read.so "$TARGETS"/zlib_read_nosan.so \
              "$TARGETS"/gzip_read "$TARGETS"/gzip_read_nosan "$TARGETS"/gzip_read.so "$TARGETS"/gzip_read_nosan.so \
              "$TARGETS"/jpeg_read "$TARGETS"/jpeg_read_nosan "$TARGETS"/jpeg_read.so "$TARGETS"/jpeg_read_nosan.so \
-             "$TARGETS"/ffmpeg_read "$TARGETS"/ffmpeg_read_nosan "$TARGETS"/ffmpeg_read.so "$TARGETS"/ffmpeg_read_nosan.so \
              "$TARGETS"/test_target "$TARGETS"/test_target_nosan "$TARGETS"/test_target.so "$TARGETS"/test_target_nosan.so \
              "$TARGETS"/proto_target "$TARGETS"/proto_target_nosan "$TARGETS"/proto_target.so "$TARGETS"/proto_target_nosan.so \
              "$TARGETS"/nop_target "$TARGETS"/nop_target_nosan "$TARGETS"/nop_target.so "$TARGETS"/nop_target_nosan.so \
@@ -1845,7 +1851,6 @@ verify_afl() {
              "$TARGETS"/zlib_read_ng2.so "$TARGETS"/zlib_read_ng3.so \
              "$TARGETS"/gzip_read_ng2.so "$TARGETS"/gzip_read_ng3.so \
              "$TARGETS"/jpeg_read_ng2.so "$TARGETS"/jpeg_read_ng3.so \
-             "$TARGETS"/ffmpeg_read_ng2.so "$TARGETS"/ffmpeg_read_ng3.so \
              "$TARGETS"/nop_target_ng2.so "$TARGETS"/nop_target_ng3.so \
              "$TARGETS"/fuzzgoat_read_ng2.so "$TARGETS"/fuzzgoat_read_ng3.so \
              "$TARGETS"/tailslayer_read_ng2.so "$TARGETS"/tailslayer_read_ng3.so \
@@ -1867,6 +1872,24 @@ verify_afl() {
     if [ "$fail_count" -gt 0 ]; then
         warn "$fail_count targets without AFL symbols"
     fi
+
+    # ffmpeg_read only ever exists in its versioned form now —
+    # ffmpeg_read_<version>_<OPTS>[.so] — so it is checked by glob rather
+    # than by a fixed name in the list above.
+    local ffn=0 fffail=0
+    for f in "$TARGETS"/ffmpeg_read_*; do
+        [ -f "$f" ] || continue
+        [[ "$f" == *.log || "$f" == *.cmd ]] && continue
+        local n=$(nm "$f" 2>/dev/null | grep -c __afl || true)
+        if [ "$n" -gt 0 ]; then
+            ffn=$((ffn + 1))
+        else
+            warn "$(basename "$f"): no AFL symbols"
+            fffail=$((fffail + 1))
+        fi
+    done
+    [ "$ffn" -gt 0 ] && ok "$ffn versioned ffmpeg_read targets with AFL symbols"
+    [ "$fffail" -gt 0 ] && warn "$fffail versioned ffmpeg_read targets without AFL symbols"
 }
 
 # ── Verify fuzz_shm_run in .so targets ──────────────────────────
@@ -2188,20 +2211,8 @@ build_ngram_so_targets() {
         fi
         build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" "$TARGETS/jpeg_read_ng${k}.so" "$JPEG_NG_LIBS" "" "$DEFAULT_CC" "$JPEG_NG_INC" "$k"
 
-        # ffmpeg_read (prefer build_root ffmpeg libs, fall back to in-tree vendoring, then system)
-        local FFMPEG_NG_LIBS="-lavformat -lavcodec -lavutil -lswresample -lm"
-        local FFMPEG_NG_INC="-I/usr/include/x86_64-linux-gnu"
-        local ffmpeg_ng_root=""
-        if [ -f "$FUZZ_BUILD_ROOT/ffmpeg/libavformat/libavformat.a" ]; then
-            ffmpeg_ng_root="$FUZZ_BUILD_ROOT/ffmpeg"
-        elif [ -f "$VENDOR/ffmpeg/libavformat/libavformat.a" ]; then
-            ffmpeg_ng_root="$VENDOR/ffmpeg"
-        fi
-        if [ -n "$ffmpeg_ng_root" ]; then
-            FFMPEG_NG_LIBS="$ffmpeg_ng_root/libavformat/libavformat.a $ffmpeg_ng_root/libavcodec/libavcodec.a $ffmpeg_ng_root/libavutil/libavutil.a $ffmpeg_ng_root/libswresample/libswresample.a -lm -lz -llzma -lbz2 -lpthread -ldl"
-            FFMPEG_NG_INC="-I$ffmpeg_ng_root"
-        fi
-        build_ngram_flavor "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_ng${k}.so" "$FFMPEG_NG_LIBS" "" "$DEFAULT_CC" "$FFMPEG_NG_INC" "$k"
+        # ffmpeg_read ng flavors are built only in versioned form — see
+        # build_ffmpeg_version_ngram, which runs separately at the end of Main.
 
         # Standalone .so targets
         # tailsayer_read (C++)
@@ -2709,6 +2720,29 @@ fi
 # ── Compile perf_shim.so (utility library, not a fuzz target) ────
 echo "Compiling utility libraries..."
 compile_perf_shim
+
+# ── ffmpeg_read seed corpus (migrated from the retired build_ffmpeg_ready.sh) ──
+# Only generated when at least one versioned ffmpeg_read target exists and
+# the corpus is absent/empty — cheap synthetic WAV seeds good enough to get
+# a --inprocess-direct campaign started against any ffmpeg_read_<ver>_<OPTS>.so.
+if ls "$TARGETS"/ffmpeg_read_*.so >/dev/null 2>&1; then
+    FFMPEG_CORPUS="$REPO_ROOT/corpus_ffmpeg"
+    if [ ! -d "$FFMPEG_CORPUS" ] || [ -z "$(ls -A "$FFMPEG_CORPUS" 2>/dev/null)" ]; then
+        echo "Generating ffmpeg_read seed corpus at $FFMPEG_CORPUS..."
+        mkdir -p "$FFMPEG_CORPUS"
+        python3 - "$FFMPEG_CORPUS" <<'PY'
+import struct, sys, os
+d = sys.argv[1]
+def wav(p, n):
+    s = b''.join(struct.pack('<hh',(i*137)%3000-1500,(i*91)%3000-1500) for i in range(n))
+    body = b'WAVE'+b'fmt '+struct.pack('<I',16)+struct.pack('<HHIIHH',1,2,8000,32000,4,16)+b'data'+struct.pack('<I',len(s))+s
+    open(p,'wb').write(b'RIFF'+struct.pack('<I',len(body))+body)
+wav(os.path.join(d,'seed_stereo.wav'),64); wav(os.path.join(d,'seed_small.wav'),16)
+b=open(os.path.join(d,'seed_stereo.wav'),'rb').read(); open(os.path.join(d,'seed_trunc.wav'),'wb').write(b[:len(b)//2])
+PY
+        ok "ffmpeg_read seed corpus generated"
+    fi
+fi
 
 verify_afl
 verify_shm_run

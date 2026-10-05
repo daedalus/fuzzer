@@ -43,7 +43,7 @@ def test_regression_ffmpeg_stage_builds_harness(text):
     assert "ffmpeg" in stages
 
     stage = text.split("AS ffmpeg", 1)[1].split("\nFROM ", 1)[0]
-    assert "tools/build_ffmpeg_ready.sh" in stage
+    assert "tools/build_targets.sh" in stage
     assert "--inprocess-func fuzz_ffmpeg" in stage
 
 
