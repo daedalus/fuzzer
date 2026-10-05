@@ -1,11 +1,11 @@
 # Handover — Binary Fuzzing Survey + daedalus/fuzzer Snapshot
 
-**Date**: 2026-10-04  
-**Author**: Grok (survey + clone attempt); Claude (clone verification + FuzzBench port analysis, section 5)  
-**Status**: Complete survey; full clone verified and FuzzBench port analysis added (section 5)  
+**Date**: 2026-10-04 (updated evening with ROSA)  
+**Author**: Grok (survey + clone attempt + ROSA analysis); Claude (clone verification + FuzzBench port analysis, section 5)  
+**Status**: Complete survey; ROSA (ICSE'25) incorporated; FuzzBench port analysis present  
 **Related**: `https://github.com/daedalus/fuzzer` (master, ~2.3k commits, MIT)
 
-> Standing note: This document records an external survey of recent binary-only fuzzing techniques and a first-pass inspection of the daedalus/fuzzer (fuzzer-tool) repository. It is written in the style of the existing `docs/handover/` series so it can be dropped into the tree without format friction.
+> Standing note: This document records an external survey of recent binary-only fuzzing techniques, a first-pass inspection of the daedalus/fuzzer (fuzzer-tool) repository, and an analysis of ROSA (ICSE 2025). It is written in the style of the existing `docs/handover/` series so it can be dropped into the tree without format friction.
 
 ---
 
@@ -85,7 +85,52 @@ Focus: binary-only / COTS techniques that improve on classic QEMU/FRIDA/ZAFL bas
 
 - **BinSleuth** — automated sink-to-source slicing + path-reduction for under-constrained symbolic execution; large speed-ups and better real-world detection than Arbiter / hybrid baselines.
 
-### 2.5 Practical Baseline Recommendation (2026)
+
+### 2.5 Backdoor Detection via Fuzzing — ROSA (ICSE 2025)
+
+**Paper**: *ROSA: Finding Backdoors with Fuzzing*  
+**Venue**: ICSE 2025 (Best Artifact Award)  
+**Authors**: Dimitri Kokkonis, Michaël Marcozzi, Emilien Decoux (CEA List), Stefano Zacchiroli (Télécom Paris)  
+**Nutshell**: https://binsec.github.io/nutshells/icse-25.html  
+**PDF**: https://binsec.github.io/assets/publications/papers/2025-icse.pdf  
+**Tool**: https://github.com/binsec/rosa (Rust + patched AFL++/QEMU-AFL)  
+**Benchmark**: https://github.com/binsec/rosarum (ROSARUM)  
+**arXiv**: 2505.08544
+
+**Problem**  
+Code-level backdoors (hard-coded credentials, logic bombs, etc.) have been injected via supply-chain attacks (PHP, ProFTPD, vsFTPd, xz, router firmware). Manual reverse-engineering does not scale; prior automated approaches still require substantial binary RE and cover only a narrow class of backdoors.
+
+**Core idea**  
+Pair AFL++ with a **metamorphic test oracle** that detects anomalous runtime behaviour:
+
+1. **Phase 1** (≈ 1 min) — collect *representative inputs* that cover new CFG edges together with their system-call traces.
+2. **Phase 2** (hours) — for every new input, search the representative set for one that covers a similar edge set *and* emits the same syscall pattern. No match → flag as suspicious (possible backdoor trigger).
+3. **Post-processing** — human inspects the small set of suspicious inputs under `strace`. Because the full triggering input *and* the divergent syscall trace are already provided, no manual binary reverse-engineering is required.
+
+**Classic illustration (Sudo)**  
+Normal wrong passwords produce similar failure + syscall traces. The backdoor password `"let_me_in"` produces authentication success + fork/exec → clearly divergent syscalls → flagged.
+
+**Evaluation (ROSARUM)**  
+- 17 authentic + synthetic backdoors of different varieties.  
+- 10 × 8 h runs per program.  
+- **Detects all 17** backdoors in **1 h 30 min** on average.  
+- Average **≈ 7** suspicious inputs to vet.  
+- vs. prior SOTA (RE-based): finds all (prior found 4/17), **44× fewer** suspicious inputs, no manual RE needed.
+
+**Strengths**  
+Fully binary-only, high automation, low false-positive burden, strong open artifact + Docker images, works on closed-source firmware.
+
+**Limitations**  
+- Assumes the backdoor produces a *noticeably different* syscall footprint (silent/stealthy backdoors may evade).  
+- Still needs a short human vetting step.  
+- Currently Linux x86_64 only.  
+- Representative-input selection received minor corrections in the camera-ready (v2 PDF).
+
+**Relevance to daedalus/fuzzer**  
+ROSA sits in the same family as SPFuzz / TraceLib (syscall-pattern signals) but uses them as a *metamorphic oracle* rather than pure coverage. A natural experiment would be to add a syscall-trace similarity / outlier channel under the existing Elo arbitrator, turning daedalus/fuzzer into a dual-purpose vulnerability + backdoor hunter.
+
+### 2.6 Practical Baseline Recommendation (2026)
+
 
 | Scenario | Recommended starting point |
 |----------|---------------------------|
@@ -93,6 +138,7 @@ Focus: binary-only / COTS techniques that improve on classic QEMU/FRIDA/ZAFL bas
 | Linux binary, cannot rewrite | FRIDA persistent or QEMU persistent; fallback SPFuzz-style syscall patterns |
 | Full-system / kernel | Nyx / KVM snapshot + KBinCov-style feedback |
 | Closed-source Windows | WinAFL via PeAR or DynamoRIO |
+| Backdoor hunting (binary-only) | ROSA (AFL++ + metamorphic syscall oracle) |
 | Research / novelty | daedalus/fuzzer-style information-theoretic + multi-bandit schedulers |
 
 ---
@@ -114,9 +160,17 @@ Focus: binary-only / COTS techniques that improve on classic QEMU/FRIDA/ZAFL bas
 - PeAR — arXiv:2606.02126  
 - FuzzRDUCC — arXiv:2509.04967  
 - Bin2Wrong — USENIX ATC 2025, Yang & Nagy  
+- **ROSA** — ICSE 2025, Kokkonis et al.  
+  - Nutshell: https://binsec.github.io/nutshells/icse-25.html  
+  - PDF: https://binsec.github.io/assets/publications/papers/2025-icse.pdf  
+  - Tool: https://github.com/binsec/rosa  
+  - Benchmark: https://github.com/binsec/rosarum  
+  - arXiv: 2505.08544  
 - AFL++ binary-only guide (current recommendations)
 
 ---
+
+6. Feasibility of a ROSA-inspired "backdoor mode": collect representative (edge, syscall-trace) pairs, then flag inputs whose syscall footprint diverges from nearest neighbours while coverage stays similar.
 
 ---
 
@@ -160,4 +214,4 @@ Compared `google/fuzzbench` (72 fuzzer definitions under `fuzzers/`) and the ups
 
 ---
 
-*End of handover. Drop into `docs/handover/` and link from `docs/TODO.md` or `CHANGELOG.md` if desired.*
+*End of handover (updated with ROSA ICSE'25). Drop into `docs/handover/` and link from `docs/TODO.md` or `CHANGELOG.md` if desired.*
