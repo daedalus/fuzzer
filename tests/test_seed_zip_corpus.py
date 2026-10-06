@@ -760,3 +760,24 @@ def test_new_seeds_never_written_under_seeds_prefix(zcorpus):
     store.flush()
     assert _members(corpus)
     assert not any(n.startswith("seeds/") for n in _members(corpus))
+
+
+def test_repeated_seeds_prefix_is_still_root_level(tmp_path):
+    """seeds/seeds/ab/id_x (re-zipped nested tree) is one pool, not adopted again."""
+    corpus = tmp_path / "c"
+    corpus.mkdir()
+    d, cold = b"nested-seed" * 3, b"nested-cold" * 3
+    h, hc = hash_data(d), hash_data(cold)
+    assert seed_zip._parse(f"seeds/seeds/{h[:2]}/id_{h}") == ("", h)
+    with zipfile.ZipFile(corpus / seed_zip.ZIP_NAME, "w") as zf:
+        zf.writestr(f"seeds/seeds/{h[:2]}/id_{h}", d)
+        zf.writestr(f"seeds/seeds/pruned/{hc[:2]}/id_{hc}", cold)
+    before = _zip_names(corpus)
+    store = seed_zip.configure(corpus, ZipMode.ON)
+    try:
+        got, _, _ = load_corpus(corpus, add_default=False)
+        store.flush()
+        assert got == [d]
+        assert _zip_names(corpus) == before
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)

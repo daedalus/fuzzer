@@ -95,9 +95,16 @@ def _member(tree: str, h: str) -> str:
 
 
 def _strip_root(name: str) -> str:
-    """Drop one leading ``seeds/`` component: ``seeds/ab/id_x`` is ``ab/id_x``."""
-    head, sep, rest = name.partition("/")
-    return rest if sep and head == _ROOT_DIR else name
+    """Drop leading ``seeds/`` components: ``seeds/seeds/ab/id_x`` is ``ab/id_x``.
+
+    Repeated, because an archive re-zipped from a tree that already held a
+    ``seeds/`` level nests it again (``seeds/seeds/..``).
+    """
+    while True:
+        head, sep, rest = name.partition("/")
+        if not (sep and head == _ROOT_DIR and rest):
+            return name
+        name = rest
 
 
 def _canonical(tree: str, h: str) -> str:
@@ -139,7 +146,8 @@ def _is_foreign(name: str) -> bool:
     if not name or name.endswith("/") or name.startswith(("/", f"{_TOMB}/")):
         return False
     # seeds/pruned/ is the file layout's cold tier: pruned seeds stay pruned.
-    if name.startswith(f"{_ROOT_DIR}/{_COLD_DIR}/"):
+    stripped = _strip_root(name)
+    if stripped != name and stripped.startswith(f"{_COLD_DIR}/"):
         return False
     return ".." not in name.split("/")
 
