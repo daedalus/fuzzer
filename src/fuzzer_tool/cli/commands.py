@@ -947,6 +947,7 @@ def cmd_fuzz(args):
         grimoire=getattr(args, "grimoire", False),
         grimoire_max_execs=getattr(args, "grimoire_max_execs", 512),
         zip_seed_corpus=getattr(args, "zip_seed_corpus", False),
+        zip_compact_ratio=getattr(args, "zip_compact_ratio", 0.0),
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
     # and printed as the command that reproduces the run, so an argument
@@ -4890,6 +4891,17 @@ def main() -> int:
             "in a CuckooFilter (16-bit fingerprints, ~1e-4 realised false-positive "
             "rate at full load, transactional inserts). Both expose the same update_bytes "
             "contract, so the choice is opt-in and the default is unchanged."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--zip-compact-ratio",
+        type=float,
+        default=0.0,
+        metavar="R",
+        help=(
+            "At startup, run `compact-seeds` on corpus/seeds.zip when pruned seeds "
+            "outnumber live ones by more than R (e.g. 1.0): pruned seeds move to "
+            "corpus/seeds/pruned/, nothing is deleted. 0 (default) = never"
         ),
     )
     fuzz_parser.add_argument(

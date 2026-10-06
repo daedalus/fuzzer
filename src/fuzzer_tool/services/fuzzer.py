@@ -1693,6 +1693,8 @@ class Fuzzer:
         shm_write_guard=WriteGuard.OFF,
         # --zip-seed-corpus (adapters/seed_zip.py). Appended: positional signature.
         zip_seed_corpus=False,
+        # --zip-compact-ratio (seed_zip.compact_over). Appended: positional signature.
+        zip_compact_ratio=0.0,
         # --op-good-turing (core/schedulers/op_good_turing.py), prior shared with
         # good_turing_prior. Appended: positional signature.
         op_good_turing=False,
@@ -2299,6 +2301,9 @@ class Fuzzer:
         self.corpus_dir.mkdir(parents=True, exist_ok=True)
         self.crashes_dir.mkdir(parents=True, exist_ok=True)
         # Always set, so a previous Fuzzer on this dir cannot leak its mode.
+        # Close any store a previous Fuzzer left open: compaction needs the archive idle.
+        seed_zip.configure(self.corpus_dir, ZipMode.OFF)
+        seed_zip.compact_over(self.corpus_dir, zip_compact_ratio)
         seed_zip.configure(self.corpus_dir, ZipMode.ON if zip_seed_corpus else ZipMode.OFF)
 
         # Single-file state store (replaces per-component JSON files).

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **`fuzzer-tool compact-seeds -d CORPUS`** (`seed_zip.compact`): moves pruned seeds from `seeds.zip` to `seeds/pruned/` and rewrites the archive without them, their tombstones and re-admission duplicates. Offline, nothing deleted, replay-checked swap. 10k seeds / 90% pruned: 5.2 MB -> 0.4 MB, load 150 -> 20 ms. Tests: `tests/test_seed_zip_compact.py`.
+- **`--zip-compact-ratio R`** (`seed_zip.compact_over`, `pruned_ratio`): compact at startup when pruned seeds exceed R x live seeds in `seeds.zip`. Off by default; excluded from `--hail-mary` (a float, not a strategy).
 - **`div_trap` regularity operator**: plants `(MIN, -1)` in two adjacent fields (width 1/2/4/8, little/big endian, either order) to reach signed-division overflow (SIGFPE on x86 `idiv`, panic in Rust/Swift). No single-field operator can produce the pair. Handover `docs/handover/handover_div_trap_2026-10-05.md`; tests `tests/test_regression_div_trap.py`.
 
 ### Changed

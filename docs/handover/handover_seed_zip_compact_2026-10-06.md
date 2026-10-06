@@ -8,7 +8,7 @@ Source: Dostoevsky-style LSM simulator (user-supplied). Verdict: only `adapters/
 - Levels/size ratios: one hot level suffices; the block buffer already plays the memtable.
 
 ## Built
-`compact()`: spill cold seeds -> rewrite -> replay check -> `os.replace`. CLI `compact-seeds`.
+`compact()`: spill cold seeds -> rewrite -> replay check -> `os.replace`. CLI `compact-seeds`. Startup trigger `--zip-compact-ratio R` (`compact_over`): paper's space-amplification bound as a threshold; default off.
 
 ## Limits
 - One small file per pruned seed (what file mode already does); 9000 files in the benchmark.

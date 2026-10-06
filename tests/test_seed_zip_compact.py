@@ -282,3 +282,139 @@ def test_cli_compact_seeds(zcorpus, capsys, monkeypatch):
 
     assert commands.main() == 0
     assert "moved 1" in capsys.readouterr().out
+
+
+# ── startup trigger: pruned/live ratio ───────────────────────────────
+
+
+def _archive(corpus: Path, store, live: int, pruned: int) -> list[bytes]:
+    seeds = _seeds(live + pruned)
+    for d in seeds:
+        save_to_corpus(d, corpus, set())
+    for d in seeds[:pruned]:
+        store.retire(hash_data(d))
+    _closed(corpus)
+    return seeds
+
+
+def test_pruned_ratio(zcorpus):
+    corpus, store = zcorpus
+    _archive(corpus, store, live=2, pruned=3)
+
+    assert seed_zip.pruned_ratio(corpus) == 1.5
+
+
+def test_pruned_ratio_no_zip_is_zero(tmp_path):
+    assert seed_zip.pruned_ratio(tmp_path) == 0.0
+
+
+def test_compact_over_fires_above_threshold(zcorpus):
+    corpus, store = zcorpus
+    _archive(corpus, store, live=2, pruned=3)
+
+    stats = seed_zip.compact_over(corpus, 1.0)
+
+    assert stats.moved == 3
+    assert seed_zip.pruned_ratio(corpus) == 0.0
+
+
+def test_compact_over_holds_below_threshold(zcorpus):
+    corpus, store = zcorpus
+    _archive(corpus, store, live=2, pruned=3)
+    before = (corpus / seed_zip.ZIP_NAME).read_bytes()
+
+    stats = seed_zip.compact_over(corpus, 2.0)
+
+    assert stats.moved == 0
+    assert (corpus / seed_zip.ZIP_NAME).read_bytes() == before
+
+
+def test_compact_over_all_pruned_fires(zcorpus):
+    corpus, store = zcorpus
+    _archive(corpus, store, live=0, pruned=2)
+
+    assert seed_zip.compact_over(corpus, 100.0).moved == 2
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, float("nan")])
+def test_compact_over_nonpositive_or_nan_is_off(zcorpus, bad):
+    corpus, store = zcorpus
+    _archive(corpus, store, live=1, pruned=3)
+
+    assert seed_zip.compact_over(corpus, bad).moved == 0
+
+
+def _fuzzer(corpus: Path, **kw):
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    return Fuzzer(
+        target="nonexistent",
+        corpus_dir=str(corpus),
+        crashes_dir=str(corpus.parent / "crashes"),
+        **kw,
+    )
+
+
+def test_fuzzer_compacts_at_startup(tmp_path):
+    corpus = tmp_path / "corpus"
+    store = seed_zip.configure(corpus, ZipMode.ON)
+    seeds = _archive(corpus, store, live=2, pruned=3)
+    try:
+        f = _fuzzer(corpus, zip_seed_corpus=True, zip_compact_ratio=1.0)
+
+        assert not any(n.startswith(".pruned/") for n in _names(corpus))
+        assert rehydrate_by_hash(hash_data(seeds[0]), corpus) == seeds[0]
+        assert sorted(f.corpus) == sorted(seeds[3:])
+        f.save_to_corpus(b"new after compaction")  # store still writable
+        f._save_state()
+        with zipfile.ZipFile(corpus / seed_zip.ZIP_NAME) as zf:
+            assert b"new after compaction" in [zf.read(n) for n in zf.namelist()]
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)
+
+
+def test_fuzzer_default_never_compacts(tmp_path):
+    corpus = tmp_path / "corpus"
+    store = seed_zip.configure(corpus, ZipMode.ON)
+    _archive(corpus, store, live=1, pruned=3)
+    before = (corpus / seed_zip.ZIP_NAME).read_bytes()
+    try:
+        _fuzzer(corpus, zip_seed_corpus=True)
+
+        assert (corpus / seed_zip.ZIP_NAME).read_bytes() == before
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)
+
+
+def test_fuzzer_survives_stale_open_store(tmp_path):
+    corpus = tmp_path / "corpus"
+    seed_zip.configure(corpus, ZipMode.ON)  # a previous Fuzzer left it open
+    try:
+        _fuzzer(corpus, zip_compact_ratio=1.0)  # must not raise StoreOpenError
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)
+
+
+def _parsed_ratio(monkeypatch, *argv: str) -> float:
+    import sys
+
+    from fuzzer_tool.cli import commands
+
+    captured: dict[str, float] = {}
+
+    def _spy(args):
+        captured["v"] = args.zip_compact_ratio
+        return 0
+
+    monkeypatch.setattr(commands, "cmd_fuzz", _spy)
+    monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", *argv])
+    assert commands.main() == 0
+    return captured["v"]
+
+
+def test_cli_ratio_default_off(monkeypatch):
+    assert _parsed_ratio(monkeypatch) == 0.0
+
+
+def test_cli_ratio_parses(monkeypatch):
+    assert _parsed_ratio(monkeypatch, "--zip-compact-ratio", "0.5") == 0.5

@@ -594,4 +594,31 @@ def compact(corpus_dir: str | Path) -> CompactStats:
     return CompactStats(len(cold), dropped, before, path.stat().st_size)
 
 
+def pruned_ratio(corpus_dir: str | Path) -> float:
+    """Pruned seeds per live seed in seeds.zip (0.0 if there is no archive).
+
+    inf when seeds are pruned and none are live.
+
+    The archive's space amplification: how much of it is cold data a load
+    still has to index and skip.
+    """
+    corpus = Path(corpus_dir)
+    if not (corpus / ZIP_NAME).is_file():
+        return 0.0
+
+    store = open_readonly(corpus)
+    store._index()
+    pruned = len(store._main_seen - store._main_live)
+    live = len(store._main_live)
+    return pruned / live if live else float("inf") if pruned else 0.0
+
+
+def compact_over(corpus_dir: str | Path, ratio: float) -> CompactStats:
+    """compact() when pruned_ratio exceeds *ratio*; a ratio <= 0 (or NaN) is off."""
+    if not ratio > 0 or pruned_ratio(corpus_dir) <= ratio:
+        return CompactStats()
+
+    return compact(corpus_dir)
+
+
 atexit.register(_close_all)
