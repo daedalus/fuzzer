@@ -1890,7 +1890,9 @@ verify_afl() {
         fi
     done
     [ "$ffn" -gt 0 ] && ok "$ffn versioned ffmpeg_read targets with AFL symbols"
-    [ "$fffail" -gt 0 ] && warn "$fffail versioned ffmpeg_read targets without AFL symbols"
+    if [ "$fffail" -gt 0 ]; then
+        warn "$fffail versioned ffmpeg_read targets without AFL symbols"
+    fi
 }
 
 # ── Verify fuzz_shm_run in .so targets ──────────────────────────
@@ -2637,7 +2639,7 @@ fi
 # Uses nosan (coverage-only) FFmpeg libs — UBSAN doesn't need ASAN instrumentation.
 if [ "$BUILD_ASAN" -eq 1 ]; then
     echo "  Building UBSAN targets..."
-    build_vendored_ffmpeg_sancov ""
+    build_ffmpeg_versions "_ubsan" "-fsanitize=undefined" "clang"
     build_simple_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
     build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "UBSAN" "clang"
 fi
