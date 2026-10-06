@@ -96,8 +96,48 @@ _STRUCT_FMT = {
 }
 
 
+def _in_window(
+    data_len: int,
+    window: tuple[int, int],
+    min_len: int,
+    align: int,
+    max_len: int | None,
+) -> tuple[int, int] | None:
+    """Fit a caller's ``(offset, length)`` hint to ``_region``'s constraints.
+
+    The hint is where gains landed (``PositionKadaneScheduler.window``), not what
+    the operator needs: a hint shorter than *min_len* is widened around its
+    centre, a longer one is capped at ``MAX_REGION``, and the result is rounded
+    and aligned exactly as a random window would be. ``None`` when the hint is
+    unusable (outside the buffer, empty) or the constraints cannot be met, so
+    the caller falls back to a random window.
+    """
+    w_off, w_len = window
+    span = min(MAX_REGION, data_len)
+    if span < min_len or w_len < 1 or not 0 <= w_off < data_len:
+        return None
+    hi = span if max_len is None else span - (span % max_len)
+    length = max(min_len, min(w_len, hi))
+    if max_len is not None:
+        length -= length % max_len
+    if length < min_len:
+        return None
+    offset = min(max(w_off + w_len // 2 - length // 2, 0), data_len - length)
+    if align > 1:
+        offset -= offset % align
+        length = min(length, data_len - offset)
+        if length < min_len:
+            return None
+    return offset, length
+
+
 def _region(
-    data_len: int, rng, min_len: int = 1, align: int = 1, max_len: int | None = None
+    data_len: int,
+    rng,
+    min_len: int = 1,
+    align: int = 1,
+    max_len: int | None = None,
+    window: tuple[int, int] | None = None,
 ) -> tuple[int, int]:
     """Pick a random ``(offset, length)`` window to overwrite.
 
@@ -115,6 +155,10 @@ def _region(
             invariants (e.g. bit-plane interleaving requires multiples of 8)
             without altering the global ``_region`` contract for everyone
             else.
+        window: Optional ``(offset, length)`` hint. When it can be fitted to
+            the constraints above (``_in_window``) it is used and no draw is
+            consumed; otherwise the random window below is picked as usual.
+            ``None`` (every caller but the windowed operators) is unchanged.
 
     Returns:
         ``(offset, length)`` with ``offset + length <= data_len``, or
@@ -122,6 +166,10 @@ def _region(
     """
     if data_len < min_len or min_len < 1:
         return 0, 0
+    if window is not None:
+        fitted = _in_window(data_len, window, min_len, align, max_len)
+        if fitted is not None:
+            return fitted
     span = min(MAX_REGION, data_len)
     if span < min_len:
         return 0, 0
@@ -244,7 +292,7 @@ def fibonacci_pairs(data: bytes, rng) -> bytes:
 _STRIDES = (1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 7, 7, 7, 256, 256)
 
 
-def monotone_fill(data: bytes, rng) -> bytes:
+def monotone_fill(data: bytes, rng, window: tuple[int, int] | None = None) -> bytes:
     """Overwrite a region with a strictly monotone run of fixed-width words.
 
     dab_filltree measures how many words a fixed-depth binary tree accepts
@@ -258,12 +306,14 @@ def monotone_fill(data: bytes, rng) -> bytes:
         data: Input bytes.
         rng: Draw source, required. A ``RandPool`` or anything with
             the same API (tests inject ``ScriptedRng``).
+        window: Optional ``(offset, length)`` hint for where to write
+            (``PositionKadaneScheduler.window``); see ``_region``.
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
     width = rng.choice(_WIDTHS)
-    offset, length = _region(len(data), rng, min_len=width * 2, align=width)
+    offset, length = _region(len(data), rng, min_len=width * 2, align=width, window=window)
     if length < width * 2:
         return data
     big_endian = rng.randint(0, 1) == 0
@@ -2840,7 +2890,7 @@ def huffman_tree_mutate(data: bytes, rng) -> bytes:
 # ===========================  ==========================================
 
 
-def cusum_bias_run(data: bytes, rng) -> bytes:
+def cusum_bias_run(data: bytes, rng, window: tuple[int, int] | None = None) -> bytes:
     """Overwrite a region with a single repeated byte (0x00 or 0xFF).
 
     The cusum test walks the +-1 partial sums of the bit sequence and
@@ -2854,11 +2904,13 @@ def cusum_bias_run(data: bytes, rng) -> bytes:
         data: Input bytes.
         rng: Draw source, required. A ``RandPool`` or anything with
             the same API (tests inject ``ScriptedRng``).
+        window: Optional ``(offset, length)`` hint for where to write
+            (``PositionKadaneScheduler.window``); see ``_region``.
 
     Returns:
         Mutated bytes, the same length as *data*.
     """
-    offset, length = _region(len(data), rng, min_len=32)
+    offset, length = _region(len(data), rng, min_len=32, window=window)
     if length < 32:
         return data
     fill = rng.choice((0x00, 0xFF))

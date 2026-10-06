@@ -44,6 +44,7 @@ from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
 from fuzzer_tool.core.schedulers.pos_good_turing import PositionGoodTuringScheduler
 from fuzzer_tool.core.schedulers.pos_harmonic import PositionHarmonicScheduler
+from fuzzer_tool.core.schedulers.pos_kadane import PositionKadaneScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
 from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
@@ -598,6 +599,7 @@ def _arena(
     good_turing=None,
     saliency=None,
     harmonic=None,
+    kadane=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
@@ -624,6 +626,7 @@ def _arena(
         good_turing=good_turing,
         saliency=saliency,
         harmonic=harmonic,
+        kadane=kadane,
     )
 
 
@@ -1009,6 +1012,7 @@ class TestPool:
             good_turing=PositionGoodTuringScheduler(RandPool(seed=1)),
             saliency=PositionSaliencyScheduler(RandPool(seed=1), lambda: []),
             harmonic=PositionHarmonicScheduler(RandPool(seed=1)),
+            kadane=PositionKadaneScheduler(RandPool(seed=1)),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -1208,6 +1212,21 @@ class TestSettle:
         arena2 = PositionArena(f, region_fn=lambda d, n: 55, saliency=arm, arms=["uniform"])
         arena2.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
         assert arm._ticks == 0
+
+    def test_kadane_is_credited_off_policy(self):
+        # The picker was sensitivity, not kadane; its evidence still accrues.
+        arm = PositionKadaneScheduler(RandPool(seed=1))
+        f, arena = self._played(kadane=arm)
+        arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        arena.settle(SEED, [700], Outcome.GAIN, weight=1.0, score=1.0)
+        assert arm.scores(SEED, len(SEED))[700] > 0
+
+    def test_kadane_left_out_of_subset_is_not_credited(self):
+        arm = PositionKadaneScheduler(RandPool(seed=1))
+        f, _ = _arena(kadane=arm)
+        arena2 = PositionArena(f, region_fn=lambda d, n: 55, kadane=arm, arms=["uniform"])
+        arena2.settle(SEED, [700], Outcome.GAIN, weight=1.0, score=1.0)
+        assert arm.scores(SEED, len(SEED)) is None
 
     def test_good_turing_left_out_of_subset_is_not_credited(self):
         arm = PositionGoodTuringScheduler(RandPool(seed=1), min_observations=1)
@@ -1662,6 +1681,16 @@ class TestRealConstruction:
         g._load_learned()
         assert g._pos_harmonic.to_dict() == f._pos_harmonic.to_dict()
         assert g._pos_harmonic.stride(periodic) == 16
+
+    def test_position_arena_does_not_imply_kadane(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert f._pos_kadane is None
+        assert "kadane" not in f._position_arena.pool()
+
+    def test_pos_kadane_builds_and_joins_the_arena(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_kadane=True)
+        assert isinstance(f._pos_kadane, PositionKadaneScheduler)
+        assert "kadane" in f._position_arena.pool()
 
     def test_pos_saliency_builds_and_joins_the_arena(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True, pos_saliency=True)

@@ -77,6 +77,15 @@ class TestCredit:
         n, _ = br.counts(data)
         assert len(n) == MAX_BINS and n[-1] == 1
 
+    def test_width_is_bytes_per_bin_and_none_when_unseen(self):
+        br = BinRates(ScriptedRng(), 1.0, 1.0)
+        data = bytes(MAX_BINS * 3)
+        assert br.width(data) is None
+        br.credit(data, [0], 1.0)
+        assert br.width(data) == 3
+        br.credit(SEED, [0], 1.0)
+        assert br.width(SEED) == 1
+
 
 class TestPropose:
     def test_picks_the_oracle_bin(self):

@@ -789,6 +789,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("saliency")
     if getattr(f, "_pos_harmonic", None) is not None:
         names.append("harmonic")
+    if getattr(f, "_pos_kadane", None) is not None:
+        names.append("kadane")
     if getattr(f, "_pos_consolidated", None) is not None:
         names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
@@ -1740,6 +1742,10 @@ class Fuzzer:
         # Target-edge weighting for the saliency net: "gt" (Simple Good-Turing rarity,
         # default) or "support" (plain 1/support). Appended: positional signature.
         saliency_targets="gt",
+        # Position-arena Kadane arm (core/schedulers/pos_kadane.py): opt-in,
+        # not implied by position_arena or --hail-mary. Appended: positional
+        # signature.
+        pos_kadane=False,
         # Seed-arena Growing Tree 'newest' arm (core/schedulers/seed_newest.py):
         # newest live seed with probability seed_newest_p, else uniform. Off by
         # default and out of --hail-mary until measured. Appended: positional
@@ -3237,6 +3243,15 @@ class Fuzzer:
 
             self._pos_harmonic = PositionHarmonicScheduler(self._rng)
             log.info("Position harmonic scheduling enabled")
+        # Position-arena Kadane: offsets inside the maximum-excess-gain run of
+        # bins. Opt-in only (unmeasured): neither position_arena nor --hail-mary
+        # builds it. Needs no probe, only the rng. Off-policy extra, not persisted.
+        self._pos_kadane = None
+        if pos_kadane:
+            from fuzzer_tool.core.schedulers.pos_kadane import PositionKadaneScheduler
+
+            self._pos_kadane = PositionKadaneScheduler(self._rng)
+            log.info("Position kadane scheduling enabled")
         # Position-arena consolidated: the learning arms' features in one
         # proposer (see core/schedulers/pos_consolidated.py). Off-policy
         # extra, persisted.
@@ -3291,6 +3306,7 @@ class Fuzzer:
                 good_turing=self._pos_good_turing,
                 saliency=self._pos_saliency,
                 harmonic=self._pos_harmonic,
+                kadane=self._pos_kadane,
                 finch=self._pos_finch,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,

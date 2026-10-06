@@ -665,6 +665,7 @@ def cmd_fuzz(args):
         pos_saliency=getattr(args, "pos_saliency", False),
         pos_harmonic=getattr(args, "pos_harmonic", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
+        pos_kadane=getattr(args, "pos_kadane", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
@@ -2101,6 +2102,10 @@ def cmd_sweep(args):
 # arm declines (uniform fallback) on seeds with no detected record stride.
 # Bench arm: pos-arena-harmonic.
 #
+# pos_kadane (--pos-kadane) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the Kadane
+# window arm has only a synthetic check, no paired run on a real target.
+#
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
 # RandPool.sample for k>=3. It explores nothing --hail-mary is not already
@@ -3229,6 +3234,14 @@ def main() -> int:
         "record. Declines on seeds with no detected stride. Opt-in: NOT implied by "
         "--position-arena; enabled by --hail-mary. Joins the arena pool when "
         "--position-arena is on (core/schedulers/pos_harmonic.py).",
+    )
+    fuzz_parser.add_argument(
+        "--pos-kadane",
+        action="store_true",
+        help="Enable the position-arena Kadane scheduler: offsets drawn inside the "
+        "contiguous run of bins holding the most gains above the seed's pooled gain "
+        "rate (core/schedulers/pos_kadane.py). Opt-in: NOT implied by --position-arena "
+        "or --hail-mary (unmeasured). Joins the arena pool when --position-arena is on.",
     )
     fuzz_parser.add_argument(
         "--saliency-targets",

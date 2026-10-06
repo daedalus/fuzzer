@@ -4670,15 +4670,34 @@ class OperatorEngine:
         """
         return bytearray(fn(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
 
+    def _regularity_windowed(self, fn, buf, data):
+        """``_regularity`` for constructions that accept a ``window`` hint.
+
+        With ``--pos-kadane`` on, ``WINDOW_P`` of calls hand the construction
+        the parent's maximum-excess-gain run (``PositionKadaneScheduler.window``)
+        instead of letting it draw a random region; the rest, and every call
+        while the arm is off or has no run yet, stay random. Credit is unchanged:
+        the round is still credited to the offset the mutation loop drew, not to
+        the window.
+        """
+        window = None
+        kadane = getattr(self.f, "_pos_kadane", None)
+        if kadane is not None:
+            from fuzzer_tool.core.schedulers.pos_kadane import WINDOW_P
+
+            if self.ctx._rng.random() < WINDOW_P:
+                window = kadane.window(data, len(buf))
+        return bytearray(fn(bytes(buf), rng=self.ctx._rng, window=window)[: self.ctx.max_len])
+
     def _op_gcd_worst_case(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import fibonacci_pairs
 
         return self._regularity(fibonacci_pairs, buf)
 
-    def _op_monotone_fill(self, buf, _byte_idx, _data):
+    def _op_monotone_fill(self, buf, _byte_idx, data):
         from fuzzer_tool.core.mutations.structured import monotone_fill
 
-        return self._regularity(monotone_fill, buf)
+        return self._regularity_windowed(monotone_fill, buf, data)
 
     def _op_kmer_saturate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import de_bruijn_fill
@@ -4919,10 +4938,10 @@ class OperatorEngine:
 
         return self._regularity(huffman_tree_mutate, buf)
 
-    def _op_cusum_bias_run(self, buf, _byte_idx, _data):
+    def _op_cusum_bias_run(self, buf, _byte_idx, data):
         from fuzzer_tool.core.mutations.structured import cusum_bias_run
 
-        return self._regularity(cusum_bias_run, buf)
+        return self._regularity_windowed(cusum_bias_run, buf, data)
 
     def _op_apen_short_period(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import apen_short_period

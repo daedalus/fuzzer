@@ -107,6 +107,11 @@ class BinRates:
         t = self._tables.get(xxhash.xxh3_64_intdigest(data))
         return (t.n, t.s) if t is not None else None
 
+    def width(self, data: bytes) -> int | None:
+        """Bytes per bin for *data*'s table; None when the seed has no evidence."""
+        t = self._tables.get(xxhash.xxh3_64_intdigest(data))
+        return t.width if t is not None else None
+
     def seed_count(self) -> int:
         return len(self._tables)
 
