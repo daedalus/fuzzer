@@ -391,7 +391,7 @@ Off by default (loading is not: see below). New full seeds (`seeds/`, `irreplace
 ### Crash Analysis
 - **Sanitizer detection**: automatic ASAN/MSAN/TSAN/LSAN/UBSAN crash classification
 - **Crash minimization** (`tmin`): C-Reduce-style reducer (`core/reducer.py`). Stateful passes (`new`/`transform`/`advance`) keep their cursor on success instead of restarting ddmin; FIRST/MAIN/LAST phases, MAIN (grammar tree shrink + byte-chunk deletion) repeats to a fixpoint. Verdicts are memoized (blake2b-keyed LRU, 64K entries). Signature pinning prevents drift; a candidate crashing with a *different* signature is saved as a regular crash (smallest per signature, ≤64) to `--also-interesting DIR` (default: the crash file's directory). `minimize_bytes` uses the same engine; `--max-stages` caps accepted reductions. Measured: same result size, 2–10× fewer target runs when >1 byte matters.
-- **Corpus minimization**: greedy set-cover over SHM edge bitmaps (`minimize` subcommand)
+- **Corpus minimization**: set cover over SHM edge ids (`minimize` subcommand; `core/set_cover.py`)
 - **Crash exploitability tiers**: ASAN_EXPLOITABILITY classification in reports
 - **Levenshtein crash clustering**: groups crashes with similar stack traces (same root cause, different offsets)
 - **Fuzzy corpus similarity**: Hamming + Levenshtein + 4-gram Jaccard for crash-to-corpus nearest-neighbor search
@@ -1038,6 +1038,14 @@ fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 # Set-cover plus backups for the seeds whose loss would cost most edges
 fuzzer-tool minimize ./target -d corpus -c --minimax-robust --target-frac 1.0
 ```
+
+### Set cover (`core/set_cover.py`)
+
+`minimize -c` and `auto_minimize_corpus` (`_greedy_cover`) share `min_cover`: collapse identical edge sets, force seeds that are the sole holder of an edge, drop dominated seeds, lazy greedy, then drop redundant picks. Greedy alone can keep a seed that later picks made redundant (`A={1,2,3,4} B={1,2,5} C={3,4,6}`: greedy A,B,C; forced B,C).
+
+Ties go to the smaller file, but that alone can cost seeds (9 -> 11 on one corpus), so every tie-break x reduction combination runs and the best by (seeds, bytes) wins; the seed count never exceeds plain greedy.
+
+Measured on traced stdlib parsers (qcpa experiment 27, 1k-20k seeds): seeds equal or fewer than before in 14/14 cases (up to 5% fewer), bytes lower in 12/14 (up to 47%); wall-clock 0.4x-2x of the old loop (faster on `re`, 2x slower on cheap corpora; 4.6 s at 20k seeds). Edge presence only: hit-count buckets are not part of the cover.
 
 ### Irreplaceable Seeds
 

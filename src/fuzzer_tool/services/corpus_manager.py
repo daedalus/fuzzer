@@ -40,6 +40,7 @@ from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 from fuzzer_tool.core.running_stats import RunningMoments
+from fuzzer_tool.core.set_cover import min_cover
 from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.services.crash_explain import explain_static
 from fuzzer_tool.services.operators import HAVOC_SUB_OPS
@@ -1496,9 +1497,7 @@ class CorpusManager:
         return mandatory, target_size
 
     def _greedy_cover(self, unique: list[bytes], seed_edge_map: dict[int, set[int]]) -> set[int]:
-        """Greedy max-gain set cover over *seed_edge_map*; returns chosen seed ids."""
-        covered: set[int] = set()
-        mandatory: set[int] = set()
+        """Set cover over *seed_edge_map* (core/set_cover.py); returns chosen seed ids."""
         # Terminate against what these seeds can actually cover, not
         # against cumulative_edges. EdgeTracker._prune_tracked_seeds drops
         # entries from seed_edges once past max_tracked_seeds (200,000
@@ -1510,25 +1509,12 @@ class CorpusManager:
         # true: the loop never converged, always ran to best_gain == 0, and
         # selected every seed holding a unique edge — making `mandatory`,
         # and the target_size floor derived from it, meaningless.
-        coverable = set().union(*seed_edge_map.values()) if seed_edge_map else set()
         candidate_ids: set[int] = set(seed_edge_map.keys())
         if len(candidate_ids) > 5000:
             candidate_ids = self._cheap_candidates(unique, seed_edge_map)
-        while covered != coverable:
-            best_seed = None
-            best_gain = 0
-            for sid in candidate_ids:
-                if sid not in seed_edge_map:
-                    continue
-                gain = len(seed_edge_map[sid] - covered)
-                if gain > best_gain:
-                    best_gain = gain
-                    best_seed = sid
-            if best_seed is None:
-                break
-            covered |= seed_edge_map[best_seed]
-            mandatory.add(best_seed)
-        return mandatory
+        sizes = {id(seed): len(seed) for seed in unique}
+        pool = {sid: seed_edge_map[sid] for sid in candidate_ids if sid in seed_edge_map}
+        return set(min_cover(pool, sizes))
 
     def _cheap_candidates(
         self, unique: list[bytes], seed_edge_map: dict[int, set[int]]

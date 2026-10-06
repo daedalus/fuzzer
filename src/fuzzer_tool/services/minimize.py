@@ -18,6 +18,7 @@ from pathlib import Path
 
 from fuzzer_tool.adapters import libc_shm
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.set_cover import min_cover
 
 
 class PruneMode(Enum):
@@ -108,7 +109,7 @@ def minimize_corpus(
     """Minimize a corpus by removing redundant inputs.
 
     With -c/--coverage: replays each file, reads SHM edge bitmap, then
-    greedy set-cover keeps minimum files that cover all edges.
+    set-cover keeps few, small files that cover all edges.
     Without -c: content-hash dedup (keeps first occurrence of each hash).
 
     Args:
@@ -200,9 +201,11 @@ def _minimize_with_coverage(
     env_base["AFL_MAP_SIZE"] = str(shm.num_entries)
 
     seed_edges: dict[str, set[int]] = {}
+    seed_sizes: dict[str, int] = {}
     try:
         for i, fpath in enumerate(corpus_files):
             data = fpath.read_bytes()
+            seed_sizes[str(fpath)] = len(data)
             shm.reset_edge_map()
 
             if file_mode:
@@ -267,30 +270,11 @@ def _minimize_with_coverage(
             f"files ({actual_frac:.1%} coverage)"
         )
     else:
-        # Greedy set cover over edge-id sets. The previous version scored
-        # candidates with numpy popcounts over uint8 bitmap views, which was
-        # the right shape for AFL's byte bitmap and the wrong one for this
-        # shim's entry table; set difference is both correct here and cheaper
-        # than it looks, since the sets hold only edges actually hit.
-        covered: set[int] = set()
-        covered_files: list[str] = []
-        remaining = list(seed_edges.keys())
-
-        while remaining:
-            best_file = None
-            best_new_edges = 0
-            for fpath in remaining:
-                new = len(seed_edges[fpath] - covered)
-                if new > best_new_edges:
-                    best_new_edges = new
-                    best_file = fpath
-
-            if best_file is None or best_new_edges == 0:
-                break
-
-            covered_files.append(best_file)
-            covered |= seed_edges[best_file]
-            remaining.remove(best_file)
+        # Forced seeds + dominance + lazy greedy, smaller file on ties
+        # (core/set_cover.py). The previous version scored candidates with
+        # numpy popcounts over uint8 bitmap views, the right shape for AFL's
+        # byte bitmap and the wrong one for this shim's entry table.
+        covered_files = min_cover(seed_edges, seed_sizes)
 
     return _commit_results(corpus_files, covered_files, output_dir, corpus_path)
 
