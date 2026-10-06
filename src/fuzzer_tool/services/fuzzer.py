@@ -1716,7 +1716,7 @@ class Fuzzer:
         seed_newest_scheduler=False,
         seed_newest_p=DEFAULT_P_NEWEST,
         # Position-arena harmonic arm (core/schedulers/pos_harmonic.py): opt-in,
-        # not implied by position_arena or --hail-mary (unmeasured). Appended:
+        # not implied by position_arena; enabled by --hail-mary. Appended:
         # positional signature.
         pos_harmonic=False,
     ):
@@ -3194,7 +3194,7 @@ class Fuzzer:
             log.info("Position saliency scheduling enabled")
         # Position-arena harmonic: Fourier-series density over record phase,
         # fitted to gain offsets (see core/schedulers/pos_harmonic.py). Opt-in
-        # only: neither position_arena nor --hail-mary builds it. Off-policy
+        # only: position_arena does not build it (--hail-mary sets the flag). Off-policy
         # extra, persisted.
         self._pos_harmonic = None
         if pos_harmonic:

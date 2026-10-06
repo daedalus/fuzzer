@@ -19,8 +19,8 @@ The Bessel radial envelope of the original equation has no 1-D analogue here
 (a byte offset has one angular coordinate and one record index), so it is
 deliberately unused: the field and the scheduler share the angular math only.
 
-Opt-in (``--pos-harmonic``), not implied by ``--position-arena`` or
-``--hail-mary`` until measured. Persisted through ``state_store``. Declines
+Opt-in (``--pos-harmonic``), not implied by ``--position-arena``; enabled by
+``--hail-mary``. Persisted through ``state_store``. Declines
 (``None``) until a seed has a stride and ``MIN_GAINS`` gain rounds.
 """
 

@@ -2094,6 +2094,13 @@ def cmd_sweep(args):
 # lifted when the handover's #1/#3 wiring completed and the bench arm
 # pos-arena-saliency was added, so a --hail-mary run now exercises it.
 #
+# pos_harmonic (--pos-harmonic) is in _HAIL_MARY_FLAGS too: a Fourier-density
+# position arm over record phase (core/schedulers/pos_harmonic.py). Still
+# opt-in (not implied by --position-arena) and unmeasured; it is fielded under
+# --hail-mary because that preset trades throughput for edge novelty, and the
+# arm declines (uniform fallback) on seeds with no detected record stride.
+# Bench arm: pos-arena-harmonic.
+#
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
 # RandPool.sample for k>=3. It explores nothing --hail-mary is not already
@@ -2337,6 +2344,7 @@ _HAIL_MARY_FLAGS = (
     "pos_consolidated",
     "pos_good_turing",
     "pos_saliency",
+    "pos_harmonic",
     "position_arena",
     "target_arena",
 )
@@ -3219,7 +3227,7 @@ def main() -> int:
         "onto its detected record stride and fits a Fourier-series density over record "
         "phase, so mutations favour the productive field(s) inside a record in every "
         "record. Declines on seeds with no detected stride. Opt-in: NOT implied by "
-        "--position-arena or --hail-mary (unmeasured). Joins the arena pool when "
+        "--position-arena; enabled by --hail-mary. Joins the arena pool when "
         "--position-arena is on (core/schedulers/pos_harmonic.py).",
     )
     fuzz_parser.add_argument(
