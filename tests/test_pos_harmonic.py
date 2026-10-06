@@ -104,3 +104,39 @@ def test_miss_and_empty_rounds_do_not_create_state():
     s.record(REC, [], Outcome.GAIN)
     s.record(REC, [-1], Outcome.GAIN)
     assert s.seed_count() == 0
+
+
+def test_state_round_trips_and_behaves_the_same():
+    s = _trained(field_offset=5, rounds=6)
+    blob = s.to_dict()
+    t = PositionHarmonicScheduler(ScriptedRng())
+    t.from_dict(blob)
+    assert t.to_dict() == blob
+    assert t.stride(REC) == L
+    s._rng = ScriptedRng([NO_SPARK, 0.3])
+    t._rng = ScriptedRng([NO_SPARK, 0.3])
+    assert s.propose(REC, len(REC)) == t.propose(REC, len(REC))
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"version": 99, "seeds": {}},
+        {"version": 1, "seeds": {"1": {"stride": 1, "coeffs": [[0, 0]] * 6, "total": 1, "gains": 1}}},
+        {"version": 1, "seeds": {"1": {"stride": 16, "coeffs": [[0, 0]] * 5, "total": 1, "gains": 1}}},
+        {"version": 1, "seeds": {"1": {"stride": 16, "coeffs": [[float("nan"), 0]] * 6, "total": 1, "gains": 1}}},
+        {"version": 1, "seeds": {"1": {"stride": 16, "coeffs": [[0, 0]] * 6, "total": -1, "gains": 1}}},
+        {"version": 1, "seeds": [1]},
+        "junk",
+    ],
+)
+def test_malformed_state_clears_instead_of_raising(bad):
+    s = _trained()
+    s.from_dict(bad)
+    assert s.seed_count() == 0
+
+
+def test_empty_state_clears():
+    s = _trained()
+    s.from_dict({})
+    assert s.seed_count() == 0

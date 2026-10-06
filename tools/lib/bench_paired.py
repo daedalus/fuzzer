@@ -209,6 +209,8 @@ ARMS: dict[str, list[str]] = {
     # subset alone: this arm differs from pos-arena-uniform by --pos-saliency plus
     # the subset that lets it into the pool.
     "pos-arena-saliency": _ARENA + ["--pos-saliency", "--pos-arena-arms", "uniform,saliency"],
+    # Harmonic is opt-in like saliency: --pos-harmonic plus the subset that admits it.
+    "pos-arena-harmonic": _ARENA + ["--pos-harmonic", "--pos-arena-arms", "uniform,harmonic"],
     # Gravity splice donor (core/gravity.py). Only the six corpus-crossing
     # operators change; read "Gravity splice: ... hits, refits" in a cell's
     # log before trusting a null -- a closed fit gate means prior exponents.
@@ -279,6 +281,7 @@ ARM_BASELINES: dict[str, str] = {
     **{f"pos-arena-{a.replace('_', '-')}": "pos-arena-uniform" for a in ARENA_TESTABLE},
     "pos-arena-all": "pos-arena-uniform",
     "pos-arena-saliency": "pos-arena-uniform",
+    "pos-arena-harmonic": "pos-arena-uniform",
     "splice-gravity": "baseline",
     "elo-op-minimax": "elo",
     "wall-order": "baseline",

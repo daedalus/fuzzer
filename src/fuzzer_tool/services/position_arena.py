@@ -86,6 +86,10 @@ Arms::
                  of a small net fitted corpus bytes -> edges (NEUZZ-style;
                  opt-in, --pos-saliency, NOT implied by --position-arena;
                  see core/schedulers/pos_saliency.py)
+    harmonic     PositionHarmonicScheduler, offsets drawn from a Fourier-series
+                 density over record phase fitted to where gains landed
+                 (opt-in, --pos-harmonic, NOT implied by --position-arena;
+                 see core/schedulers/pos_harmonic.py)
     consolidated PositionConsolidatedScheduler, uniform/boundary/levy/bin
                  candidates scored by context x per-seed bin rates
                  (opt-in, --pos-consolidated; see
@@ -110,7 +114,7 @@ served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
 ``burn_front``, ``kl_ducb``, ``canary``, ``round_robin``, ``fibonacci``,
-``fractal``, ``context``, ``levy``, ``boundary``, ``changed``, ``rare_mask``, ``good_turing``, ``saliency`` and ``consolidated`` are each
+``fractal``, ``context``, ``levy``, ``boundary``, ``changed``, ``rare_mask``, ``good_turing``, ``saliency``, ``harmonic`` and ``consolidated`` are each
 credited off-policy on every settled round, whoever served the positions, like
 ``seed_canary`` on the seed side.
 """
@@ -156,6 +160,7 @@ POSITION_STRATEGY_NAMES = (
     "rare_mask",
     "good_turing",
     "saliency",
+    "harmonic",
     "consolidated",
 )
 
@@ -210,6 +215,7 @@ class PositionArena:
         finch: PositionScheduler | None = None,
         good_turing: PositionScheduler | None = None,
         saliency: PositionScheduler | None = None,
+        harmonic: PositionScheduler | None = None,
     ) -> None:
         self._f = f
         # None = every arm whose feature is on; otherwise only these (+ uniform).
@@ -241,6 +247,7 @@ class PositionArena:
         self._consolidated = consolidated if self.allows("consolidated") else None
         self._good_turing = good_turing if self.allows("good_turing") else None
         self._saliency = saliency if self.allows("saliency") else None
+        self._harmonic = harmonic if self.allows("harmonic") else None
         self._arms: dict[str, Arm] = {UNIFORM: (self._uniform, lambda: True)}
         self._add_trackers(region_fn)
         # Off-policy arms: fed every settled round whoever served. Single list
@@ -261,6 +268,7 @@ class PositionArena:
                 self._rare_mask,
                 self._good_turing,
                 self._saliency,
+                self._harmonic,
                 self._consolidated,
             )
             if e is not None

@@ -663,6 +663,7 @@ def cmd_fuzz(args):
         pos_consolidated=getattr(args, "pos_consolidated", False),
         pos_good_turing=getattr(args, "pos_good_turing", False),
         pos_saliency=getattr(args, "pos_saliency", False),
+        pos_harmonic=getattr(args, "pos_harmonic", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
@@ -3210,6 +3211,16 @@ def main() -> int:
         "(NEUZZ-style; core/schedulers/pos_saliency.py). Opt-in: NOT implied by "
         "--position-arena or --hail-mary (unmeasured). Joins the arena pool when "
         "--position-arena is on.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-harmonic",
+        action="store_true",
+        help="Enable the position-arena harmonic scheduler: folds each seed's gain offsets "
+        "onto its detected record stride and fits a Fourier-series density over record "
+        "phase, so mutations favour the productive field(s) inside a record in every "
+        "record. Declines on seeds with no detected stride. Opt-in: NOT implied by "
+        "--position-arena or --hail-mary (unmeasured). Joins the arena pool when "
+        "--position-arena is on (core/schedulers/pos_harmonic.py).",
     )
     fuzz_parser.add_argument(
         "--saliency-targets",

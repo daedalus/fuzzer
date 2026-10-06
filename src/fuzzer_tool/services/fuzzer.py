@@ -787,6 +787,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("good-turing")
     if getattr(f, "_pos_saliency", None) is not None:
         names.append("saliency")
+    if getattr(f, "_pos_harmonic", None) is not None:
+        names.append("harmonic")
     if getattr(f, "_pos_consolidated", None) is not None:
         names.append("consolidated")
     if getattr(f, "_pos_cmplog", None) is not None and getattr(f, "_cmplog", None) is not None:
@@ -1713,6 +1715,10 @@ class Fuzzer:
         # signature.
         seed_newest_scheduler=False,
         seed_newest_p=DEFAULT_P_NEWEST,
+        # Position-arena harmonic arm (core/schedulers/pos_harmonic.py): opt-in,
+        # not implied by position_arena or --hail-mary (unmeasured). Appended:
+        # positional signature.
+        pos_harmonic=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3186,6 +3192,16 @@ class Fuzzer:
                 trust_fn=self._saliency_trusted,
             )
             log.info("Position saliency scheduling enabled")
+        # Position-arena harmonic: Fourier-series density over record phase,
+        # fitted to gain offsets (see core/schedulers/pos_harmonic.py). Opt-in
+        # only: neither position_arena nor --hail-mary builds it. Off-policy
+        # extra, persisted.
+        self._pos_harmonic = None
+        if pos_harmonic:
+            from fuzzer_tool.core.schedulers.pos_harmonic import PositionHarmonicScheduler
+
+            self._pos_harmonic = PositionHarmonicScheduler(self._rng)
+            log.info("Position harmonic scheduling enabled")
         # Position-arena consolidated: the learning arms' features in one
         # proposer (see core/schedulers/pos_consolidated.py). Off-policy
         # extra, persisted.
@@ -3239,6 +3255,7 @@ class Fuzzer:
                 consolidated=self._pos_consolidated,
                 good_turing=self._pos_good_turing,
                 saliency=self._pos_saliency,
+                harmonic=self._pos_harmonic,
                 finch=self._pos_finch,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
@@ -4947,6 +4964,8 @@ class Fuzzer:
             self._state_store.set("pos_context", self._pos_context.to_dict())
         if getattr(self, "_pos_levy", None) is not None:
             self._state_store.set("pos_levy", self._pos_levy.to_dict())
+        if getattr(self, "_pos_harmonic", None) is not None:
+            self._state_store.set("pos_harmonic", self._pos_harmonic.to_dict())
         if getattr(self, "_pos_consolidated", None) is not None:
             self._state_store.set("pos_consolidated", self._pos_consolidated.to_dict())
         pll = getattr(self, "_pll", None)
@@ -4982,6 +5001,8 @@ class Fuzzer:
             self._pos_context.from_dict(self._state_store.get("pos_context", {}))
         if getattr(self, "_pos_levy", None) is not None:
             self._pos_levy.from_dict(self._state_store.get("pos_levy", {}))
+        if getattr(self, "_pos_harmonic", None) is not None:
+            self._pos_harmonic.from_dict(self._state_store.get("pos_harmonic", {}))
         if getattr(self, "_pos_consolidated", None) is not None:
             self._pos_consolidated.from_dict(self._state_store.get("pos_consolidated", {}))
         if self._wfc_enabled:

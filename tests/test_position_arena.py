@@ -43,6 +43,7 @@ from fuzzer_tool.core.schedulers.pos_effector import PositionEffectorScheduler
 from fuzzer_tool.core.schedulers.pos_fibonacci import PositionFibonacciScheduler
 from fuzzer_tool.core.schedulers.pos_fractal import PositionFractalScheduler
 from fuzzer_tool.core.schedulers.pos_good_turing import PositionGoodTuringScheduler
+from fuzzer_tool.core.schedulers.pos_harmonic import PositionHarmonicScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
 from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
@@ -596,6 +597,7 @@ def _arena(
     finch=None,
     good_turing=None,
     saliency=None,
+    harmonic=None,
 ):
     f = f or _Fuzzer(sensitivity=True, te=True)
     return f, PositionArena(
@@ -621,6 +623,7 @@ def _arena(
         finch=finch,
         good_turing=good_turing,
         saliency=saliency,
+        harmonic=harmonic,
     )
 
 
@@ -745,6 +748,24 @@ class TestPool:
     def test_boundary_absent_when_not_supplied(self):
         _, arena = _arena()
         assert "boundary" not in arena.pool()
+
+    def test_harmonic_joins_when_supplied(self):
+        _, arena = _arena(harmonic=PositionHarmonicScheduler(RandPool(seed=1)))
+        assert "harmonic" in arena.pool()
+
+    def test_harmonic_absent_when_not_supplied(self):
+        _, arena = _arena()
+        assert "harmonic" not in arena.pool()
+
+    def test_harmonic_dropped_by_the_arm_subset(self):
+        f = _Fuzzer(sensitivity=True, te=True)
+        arena = PositionArena(
+            f,
+            region_fn=lambda d, n: 55,
+            harmonic=PositionHarmonicScheduler(RandPool(seed=1)),
+            arms=["uniform", "sensitivity"],
+        )
+        assert "harmonic" not in arena.pool()
 
     def test_levy_absent_when_not_supplied(self):
         _, arena = _arena()
@@ -987,6 +1008,7 @@ class TestPool:
             finch=_finch()[0],
             good_turing=PositionGoodTuringScheduler(RandPool(seed=1)),
             saliency=PositionSaliencyScheduler(RandPool(seed=1), lambda: []),
+            harmonic=PositionHarmonicScheduler(RandPool(seed=1)),
         )
         assert set(arena.pool()) == set(POSITION_STRATEGY_NAMES)
 
@@ -1217,6 +1239,16 @@ class TestSettle:
         assert arm.anchor(SEED) == 100
         assert arm.context_obs == 1
         assert arm.seed_count() == 1
+
+    def test_harmonic_is_credited_off_policy(self):
+        # The picker was sensitivity, not harmonic; its density still learns.
+        periodic = bytes(range(16)) * 64
+        arm = PositionHarmonicScheduler(RandPool(seed=1))
+        f, arena = self._played(harmonic=arm)
+        for k in range(3):
+            arena.settle(periodic, [k * 16 + 5], Outcome.GAIN, weight=1.0, score=1.0)
+        assert arm.stride(periodic) == 16
+        assert arm.to_dict()["seeds"][arm._key(periodic)]["gains"] == 3
 
     def test_levy_misses_are_credited_and_age_the_anchor(self):
         # FALSIFICATION: MISS rounds must reach the arm, or the anchor never
@@ -1601,6 +1633,35 @@ class TestRealConstruction:
         f = self._build(tmp_path, elo="all", position_arena=True)
         assert f._pos_saliency is None
         assert "saliency" not in f._position_arena.pool()
+
+    def test_position_arena_does_not_imply_harmonic(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert f._pos_harmonic is None
+        assert "harmonic" not in f._position_arena.pool()
+
+    def test_pos_harmonic_builds_and_joins_the_arena(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_harmonic=True)
+        assert isinstance(f._pos_harmonic, PositionHarmonicScheduler)
+        assert "harmonic" in f._position_arena.pool()
+
+    def test_pos_harmonic_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_harmonic=True)
+        assert isinstance(f._pos_harmonic, PositionHarmonicScheduler)
+        assert f._position_arena is None
+
+    def test_harmonic_state_survives_save_and_load(self, tmp_path):
+        periodic = bytes(range(16)) * 64
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_harmonic=True)
+        for k in range(4):
+            f._pos_harmonic.record(periodic, [k * 16 + 5], Outcome.GAIN)
+        f._save_learned()
+        (tmp_path / "g").mkdir()
+        g = self._build(tmp_path / "g", elo="all", position_arena=True, pos_harmonic=True)
+        g._state_store = f._state_store
+        g.resume = True
+        g._load_learned()
+        assert g._pos_harmonic.to_dict() == f._pos_harmonic.to_dict()
+        assert g._pos_harmonic.stride(periodic) == 16
 
     def test_pos_saliency_builds_and_joins_the_arena(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True, pos_saliency=True)

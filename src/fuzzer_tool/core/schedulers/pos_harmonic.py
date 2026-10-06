@@ -19,12 +19,14 @@ The Bessel radial envelope of the original equation has no 1-D analogue here
 (a byte offset has one angular coordinate and one record index), so it is
 deliberately unused: the field and the scheduler share the angular math only.
 
-Prototype: not wired into ``position_arena``/CLI and not persisted. Declines
+Opt-in (``--pos-harmonic``), not implied by ``--position-arena`` or
+``--hail-mary`` until measured. Persisted through ``state_store``. Declines
 (``None``) until a seed has a stride and ``MIN_GAINS`` gain rounds.
 """
 
 from __future__ import annotations
 
+import logging
 import math
 from collections import OrderedDict
 from collections.abc import Sequence
@@ -38,6 +40,9 @@ from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 
+log = logging.getLogger(__name__)
+
+STATE_VERSION = 1
 MAX_SEEDS = 256
 HARMONICS = 6  # K: highest harmonic fitted
 MIN_GAINS = 3  # gain rounds before the density is trusted
@@ -114,6 +119,51 @@ class PositionHarmonicScheduler:
 
     def seed_count(self) -> int:
         return len(self._seeds)
+
+    def to_dict(self) -> dict:
+        """Seeds oldest-first, so a restore keeps the LRU order."""
+        return {
+            "version": STATE_VERSION,
+            "seeds": {
+                k: {
+                    "stride": s.stride,
+                    "coeffs": [[float(c.real), float(c.imag)] for c in s.coeffs],
+                    "total": s.total,
+                    "gains": s.gains,
+                }
+                for k, s in self._seeds.items()
+            },
+        }
+
+    def from_dict(self, data) -> None:
+        """Replace every seed with *data*'s; a malformed payload clears them."""
+        self._seeds = OrderedDict()
+        if not data:
+            return
+        try:
+            if data.get("version") != STATE_VERSION:
+                raise ValueError(f"version {data.get('version')!r}")
+            seeds: OrderedDict[int, _State] = OrderedDict()
+            for k, v in data["seeds"].items():
+                stride = None if v["stride"] is None else int(v["stride"])
+                coeffs = np.array([complex(re, im) for re, im in v["coeffs"]], dtype=np.complex128)
+                total, gains = float(v["total"]), int(v["gains"])
+                if (
+                    (stride is not None and stride < MIN_STRIDE)
+                    or coeffs.shape != (HARMONICS,)
+                    or not np.isfinite(coeffs).all()
+                    or not math.isfinite(total)
+                    or total < 0.0
+                    or gains < 0
+                ):
+                    raise ValueError("stride, coefficients, total or gain count out of range")
+                seeds[int(k)] = _State(stride, coeffs, total, gains)
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            log.warning("harmonic position state unreadable, starting fresh: %s", e)
+            return
+        while len(seeds) > MAX_SEEDS:
+            seeds.popitem(last=False)
+        self._seeds = seeds
 
     @staticmethod
     def _key(data: bytes) -> int:
