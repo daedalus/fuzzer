@@ -709,3 +709,54 @@ def test_cuckoo_sees_zip_pruned(tmp_path):
 def _read_zip(corpus: Path) -> list[bytes]:
     with zipfile.ZipFile(corpus / seed_zip.ZIP_NAME) as zf:
         return [zf.read(n) for n in zf.namelist()]
+
+
+# ── seeds/ prefix inside the archive = same level as the root ────────
+
+
+def _prefixed_zip(corpus: Path) -> list[bytes]:
+    """seeds.zip made by archiving the seeds/ directory itself."""
+    datas = [b"prefixed-one" * 3, b"prefixed-two" * 3]
+    cold = b"prefixed-cold" * 3
+    keep = b"prefixed-protected" * 3
+    corpus.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(corpus / seed_zip.ZIP_NAME, "w") as zf:
+        for d in datas:
+            h = hash_data(d)
+            zf.writestr(f"seeds/{h[:2]}/id_{h}", d)
+        hk = hash_data(keep)
+        zf.writestr(f"seeds/irreplaceable/{hk[:2]}/id_{hk}", keep)
+        hc = hash_data(cold)
+        zf.writestr(f"seeds/pruned/{hc[:2]}/id_{hc}", cold)
+    return datas + [keep]
+
+
+def test_parse_treats_seeds_prefix_as_root_level():
+    h = "5a40ac1b6a18d78b"
+    assert seed_zip._parse(f"seeds/{h[:2]}/id_{h}") == seed_zip._parse(f"{h[:2]}/id_{h}")
+    assert seed_zip._parse(f"seeds/crashing/{h[:2]}/id_{h}") == ("crashing", h)
+    assert seed_zip._parse(f"seeds/.pruned/{h[:2]}/id_{h}") == (".pruned", h)
+
+
+def test_seeds_prefixed_members_are_not_re_adopted(tmp_path):
+    """A seeds/-prefixed archive is one pool with the root layout: no copies."""
+    corpus = tmp_path / "c"
+    datas = _prefixed_zip(corpus)
+    before = _zip_names(corpus)
+    store = seed_zip.configure(corpus, ZipMode.ON)
+    try:
+        got, _, irreplaceable = load_corpus(corpus, add_default=False)
+        store.flush()
+        assert sorted(got) == sorted(datas)  # pruned/ stays out
+        assert irreplaceable == {hash_data(datas[-1])}
+        assert _zip_names(corpus) == before  # nothing appended, no seeds/ copies
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)
+
+
+def test_new_seeds_never_written_under_seeds_prefix(zcorpus):
+    corpus, store = zcorpus
+    save_to_corpus(b"fresh seed", corpus, set())
+    store.flush()
+    assert _members(corpus)
+    assert not any(n.startswith("seeds/") for n in _members(corpus))

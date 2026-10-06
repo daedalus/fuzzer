@@ -57,6 +57,12 @@ BLOCK_BYTES = 8 << 20  # bounds pending memory and data lost to a kill
 BLOCK_GROWTH = 16
 
 _TOMB = ".pruned"
+# seeds.zip sits beside seeds/, so members are rooted at the seeds/ level
+# (``ab/id_..``). A zip made by archiving the seeds/ directory itself
+# (``zip -r seeds.zip seeds``) carries that directory as a prefix; it names
+# the same tree, so it is read as the same level, never as foreign data.
+_ROOT_DIR = "seeds"
+_COLD_DIR = "pruned"
 _HASH_LEN = 16
 _HEX = frozenset("0123456789abcdef")
 
@@ -88,14 +94,26 @@ def _member(tree: str, h: str) -> str:
     return f"{prefix}{h[:2]}/id_{h}"
 
 
+def _strip_root(name: str) -> str:
+    """Drop one leading ``seeds/`` component: ``seeds/ab/id_x`` is ``ab/id_x``."""
+    head, sep, rest = name.partition("/")
+    return rest if sep and head == _ROOT_DIR else name
+
+
+def _canonical(tree: str, h: str) -> str:
+    return _member(tree, h)
+
+
 def _parse(name: str) -> tuple[str, str] | None:
     """``(tree, hash)`` for a well-formed member name, else None.
 
-    Rejects traversal, absolute paths, foreign subtrees and non-hash leaves:
-    a name is only ever looked up, never joined onto a filesystem path, but
-    an unexpected name must not be treated as corpus data either.
+    A leading ``seeds/`` is the same level as the archive root (see
+    ``_ROOT_DIR``). Rejects traversal, absolute paths, foreign subtrees and
+    non-hash leaves: a name is only ever looked up, never joined onto a
+    filesystem path, but an unexpected name must not be treated as corpus
+    data either.
     """
-    parts = name.split("/")
+    parts = _strip_root(name).split("/")
     if len(parts) == 2:
         tree, (shard, leaf) = "", parts
     elif len(parts) == 3 and (parts[0] in _PROTECTED or parts[0] == _TOMB):
@@ -119,6 +137,9 @@ def _is_foreign(name: str) -> bool:
     are refused.
     """
     if not name or name.endswith("/") or name.startswith(("/", f"{_TOMB}/")):
+        return False
+    # seeds/pruned/ is the file layout's cold tier: pruned seeds stay pruned.
+    if name.startswith(f"{_ROOT_DIR}/{_COLD_DIR}/"):
         return False
     return ".." not in name.split("/")
 
@@ -515,7 +536,10 @@ def _plan(names: list[str], cold: set[str]) -> list[int]:
     superseded by re-admission), data of cold seeds, and all but the last
     copy of a re-admitted name. Foreign members are kept verbatim.
     """
-    last = {n: i for i, n in enumerate(names)}
+    last = {}
+    for i, n in enumerate(names):
+        parsed = _parse(n)
+        last[_canonical(*parsed) if parsed else n] = i
     keep = []
     for i, name in enumerate(names):
         parsed = _parse(name)
@@ -524,7 +548,7 @@ def _plan(names: list[str], cold: set[str]) -> list[int]:
             continue
 
         tree, h = parsed
-        if tree == _TOMB or (not tree and h in cold) or last[name] != i:
+        if tree == _TOMB or (not tree and h in cold) or last[_canonical(tree, h)] != i:
             continue
         keep.append(i)
     return keep
@@ -577,7 +601,7 @@ def compact(corpus_dir: str | Path) -> CompactStats:
     before = path.stat().st_size
     with zipfile.ZipFile(path) as zf:
         for h in sorted(cold):
-            _spill(corpus, h, zf.read(_member("", h)))
+            _spill(corpus, h, zf.read(store._where[h]))
 
     tmp = path.with_name(path.name + ".tmp")
     try:

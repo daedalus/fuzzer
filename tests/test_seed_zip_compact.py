@@ -418,3 +418,23 @@ def test_cli_ratio_default_off(monkeypatch):
 
 def test_cli_ratio_parses(monkeypatch):
     assert _parsed_ratio(monkeypatch, "--zip-compact-ratio", "0.5") == 0.5
+
+
+def test_compact_handles_seeds_prefixed_members(zcorpus):
+    """Archive made from the seeds/ directory: pruned seed still spills to seeds/pruned/."""
+    corpus, store = zcorpus
+    seed_zip.configure(corpus, ZipMode.OFF)
+    live, cold = b"prefixed-live" * 3, b"prefixed-gone" * 3
+    with zipfile.ZipFile(corpus / seed_zip.ZIP_NAME, "w") as zf:
+        for d in (live, cold):
+            h = hash_data(d)
+            zf.writestr(f"seeds/{h[:2]}/id_{h}", d)
+        hc = hash_data(cold)
+        zf.writestr(f"seeds/.pruned/{hc[:2]}/id_{hc}", b"")
+    stats = seed_zip.compact(corpus)
+    assert stats.moved == 1
+    assert _cold_file(corpus, cold).read_bytes() == cold
+    names = _names(corpus)
+    hl = hash_data(live)
+    assert any(n.endswith(f"{hl[:2]}/id_{hl}") for n in names)
+    assert not any(hash_data(cold)[:16] in n for n in names)
