@@ -33,19 +33,28 @@ Useful for:
   (see `tests/test_regression_bithacks.py`, `tests/test_regression_hackers_delight.py`).
 - **Cheap and deterministic.** No dependencies, fast execs, suited to A/B runs of fuzzer changes.
 
-## Limitations (as committed)
+## Fuzz entry
 
-- The default fuzz entry runs only the 64-bit/multi-argument checks (`check64`).
-  `check32` is excluded because it trips known UB immediately, so the logic bug
-  above is NOT reachable by the fuzzer; it was found by the sequential sweep
-  (`bithacks_diff exh`) plus UBSan.
-- A 120 s clang run (trace-pc-guard) found 74 edges and no crashes. Coverage is
-  shallow and there is no deep state, so it will not separate good fuzzers from
-  mediocre ones; random inputs do about as well.
+Default mode (stdin or file arg, >= 24 bytes) runs `check32((uint32_t)w)` and
+`check64(v, w, p, q)`; any mismatch or UBSan error aborts. Hacks with documented
+caveats / out-of-spec inputs ("expect", "caveat", "VIOLATED", "OUTSIDE", and the
+broken `m&-((signed)(m-d)>>s)` modulus variant) are recorded but not fatal.
+The checks themselves use unsigned arithmetic so the fuzzer finds wrong results,
+not the known signed-overflow/shift UB (those are listed above and probed in
+`exh` mode). The parallel-mod table loop is capped at 6 steps; the s=1 row
+overrun is reported as an "expect fail" check instead of reading out of bounds.
+
+## Limitations
+
+- Clang trace-pc-guard run, 128 s: ~33k execs, 437 edges, no crashes. The logic bug
+  above is fatal-exempt by design, so the fuzzer cannot "rediscover" it as a crash
+  yet; making it a measurable rediscovery needs a per-hack fatal toggle.
+- Coverage is shallow and there is no deep state, so it will not separate good
+  fuzzers from mediocre ones; random inputs do about as well.
 - The sweep covered ~2^26 samples, not the full 2^32 space.
 - Bugs are in a reference web page, not shipped software.
 
-## Planned improvement
+## Fuzzer bug found while building this
 
-Add `check32` to the fuzz entry behind a skip-list for known-UB hacks, so the
-modulus bug becomes a rediscovery test with a measurable time to find.
+`snoob_prev` (Hacker's Delight operator) used an O(x) linear search and hung the
+mutator on 8-byte windows; fixed upstream in 9546a82c.

@@ -1,6 +1,6 @@
 // bithacks_diff.c - differential tester for graphics.stanford.edu/~seander/bithacks.html
 // ./bithacks_diff exh [lg]      : sweep, prints failing hacks
-// ./bithacks_diff [fuzz] < input : fuzz entry (default, no args), aborts on mismatch/UB
+// ./bithacks_diff [fuzz] [file]  : fuzz entry (default; stdin or file arg), aborts on mismatch/UB
 #define _GNU_SOURCE
 #include <stdio.h>
 #include <stdint.h>
@@ -152,8 +152,8 @@ static void check32(uint32_t v) {
     CHK("opposite signs (x^y)<0", ((sv ^ sw) < 0) == ((sv < 0) != (sw < 0)), "x=%08x y=%08x", v, w);
 
     { int mask = sv >> 31; unsigned ref = sv < 0 ? -(unsigned)sv : (unsigned)sv;
-      CHK("abs: (v+mask)^mask", (unsigned)((sv + mask) ^ mask) == ref, "v=%08x", v);
-      CHK("abs: (v^mask)-mask", (unsigned)((sv ^ mask) - mask) == ref, "v=%08x", v); }
+      CHK("abs: (v+mask)^mask", (unsigned)(((unsigned)sv + (unsigned)mask) ^ (unsigned)mask) == ref, "v=%08x", v);
+      CHK("abs: (v^mask)-mask", (unsigned)(((unsigned)sv ^ (unsigned)mask) - (unsigned)mask) == ref, "v=%08x", v); }
 
     { int mn = sv < sw ? sv : sw, mx = sv < sw ? sw : sv;
       CHK("min: y^((x^y)&-(x<y))", (sw ^ ((sv ^ sw) & -(sv < sw))) == mn, "x=%d y=%d", sv, sw);
@@ -161,10 +161,10 @@ static void check32(uint32_t v) {
       long long d = (long long)sv - sw; bool ok = d >= INT_MIN && d <= INT_MAX;
       int dd = (int)((unsigned)sv - (unsigned)sw);
       if (ok) {
-        CHK("min quick&dirty (precondition holds)", (sw + (dd & (dd >> 31))) == mn, "x=%d y=%d", sv, sw);
-        CHK("max quick&dirty (precondition holds)", (sv - (dd & (dd >> 31))) == mx, "x=%d y=%d", sv, sw);
+        CHK("min quick&dirty (precondition holds)", (int)((unsigned)sw + (unsigned)(dd & (dd >> 31))) == mn, "x=%d y=%d", sv, sw);
+        CHK("max quick&dirty (precondition holds)", (int)((unsigned)sv - (unsigned)(dd & (dd >> 31))) == mx, "x=%d y=%d", sv, sw);
       } else {
-        CHK("min quick&dirty (precondition VIOLATED, expected to fail)", (sw + (dd & (dd >> 31))) == mn, "x=%d y=%d", sv, sw);
+        CHK("min quick&dirty (precondition VIOLATED, expected to fail)", (int)((unsigned)sw + (unsigned)(dd & (dd >> 31))) == mn, "x=%d y=%d", sv, sw);
       } }
 
     CHK("pow2: v&(v-1)==0 (v=0 caveat)", ((v & (v - 1)) == 0) == (__builtin_popcount(v) == 1), "v=%08x", v);
@@ -183,7 +183,7 @@ static void check32(uint32_t v) {
       unsigned a = ww; a ^= (-(unsigned)f ^ a) & m; unsigned b2 = (ww & ~m) | (-(unsigned)f & m);
       CHK("cond set/clear: w^=(-f^w)&m", a == ref, "w=%08x m=%08x f=%d", ww, m, f);
       CHK("cond set/clear: superscalar", b2 == ref, "w=%08x m=%08x f=%d", ww, m, f); }
-    { int f = p & 1; int r1 = (int)((unsigned)(f ^ (f - 1)) * (unsigned)sv); int r2 = (sv ^ -f) + f;
+    { int f = p & 1; int r1 = (int)((unsigned)(f ^ (f - 1)) * (unsigned)sv); int r2 = (int)((unsigned)(sv ^ -f) + (unsigned)f);
       CHK("cond negate: fDontNegate", r1 == (f ? sv : (int)-(unsigned)sv), "v=%d f=%d", sv, f);
       CHK("cond negate: fNegate", r2 == (f ? (int)-(unsigned)sv : sv), "v=%d f=%d", sv, f); }
     { unsigned a = v, b = w, mask = p; CHK("merge bits", (a ^ ((a ^ b) & mask)) == ((a & ~mask) | (b & mask)), "a=%08x b=%08x m=%08x", a, b, mask); }
@@ -227,7 +227,7 @@ static void check32(uint32_t v) {
     // reverse
     { uint32_t ref = ref_rev32(v), vv = v, r = v; int s = sizeof(v) * CHAR_BIT - 1;
       for (vv >>= 1; vv; vv >>= 1) { r <<= 1; r |= vv & 1; s--; } r <<= s; CHK("reverse obvious loop", r == ref, "v=%08x", v);
-      uint32_t c = (BitReverseTable256[v & 0xff] << 24) | (BitReverseTable256[(v >> 8) & 0xff] << 16) | (BitReverseTable256[(v >> 16) & 0xff] << 8) | BitReverseTable256[(v >> 24) & 0xff];
+      uint32_t c = ((uint32_t)BitReverseTable256[v & 0xff] << 24) | ((uint32_t)BitReverseTable256[(v >> 8) & 0xff] << 16) | ((uint32_t)BitReverseTable256[(v >> 16) & 0xff] << 8) | BitReverseTable256[(v >> 24) & 0xff];
       CHK("reverse table opt1", c == ref, "v=%08x", v);
       { uint32_t cc, vv2 = v; unsigned char *pp = (unsigned char *)&vv2, *q = (unsigned char *)&cc; q[3] = BitReverseTable256[pp[0]]; q[2] = BitReverseTable256[pp[1]]; q[1] = BitReverseTable256[pp[2]]; q[0] = BitReverseTable256[pp[3]]; CHK("reverse table opt2", cc == ref, "v=%08x", v); }
       { unsigned char b = v & 0xff; unsigned char rb = ref >> 24 ? 0 : 0; rb = (unsigned char)(ref_rev32(b) >> 24);
@@ -245,10 +245,12 @@ static void check32(uint32_t v) {
       for (m = n, nn = n; nn > d; nn = m) { for (m = 0; nn; nn >>= s) m += nn & d; } m = m == d ? 0 : m;
       CHK("mod (1<<s)-1 loop", m == ref, "n=%08x s=%u got=%u ref=%u", n, s, m, ref);
       m = (n & Mm[s]) + ((n >> s) & Mm[s]);
-      for (const unsigned *q = &Qm[s][0], *r = &Rm[s][0]; m > d; q++, r++) m = (m >> *q) + (m & *r);
+      { const unsigned *q = &Qm[s][0], *r = &Rm[s][0]; for (int it = 0; m > d && it < 6; q++, r++, it++) m = (m >> *q) + (m & *r); }
+      CHK("mod parallel tables: row too short (7th step needed; expect fail at s=1)", m <= d, "n=%08x s=%u m=%u", n, s, m);
+      if (m <= d) { /* else the hack would read past the 6-entry row */
       unsigned m2 = m == d ? 0 : m; unsigned m3 = m & -((signed)(m - d) >> s);
       CHK("mod (1<<s)-1 parallel (tables)", m2 == ref, "n=%08x s=%u got=%u ref=%u", n, s, m2, ref);
-      CHK("mod (1<<s)-1 parallel (m&-((signed)(m-d)>>s) variant)", m3 == ref, "n=%08x s=%u got=%u ref=%u", n, s, m3, ref); }
+      CHK("mod (1<<s)-1 parallel (m&-((signed)(m-d)>>s) variant)", m3 == ref, "n=%08x s=%u got=%u ref=%u", n, s, m3, ref); } }
 
     // log2 (v != 0)
     if (v) { int ref = ref_log2(v); unsigned r = 0, vv = v;
@@ -276,7 +278,7 @@ static void check32(uint32_t v) {
       // trailing zeros
       { int ref2 = __builtin_ctz(v); uint32_t vv2 = v; int c;
         vv2 = (vv2 ^ (vv2 - 1)) >> 1; for (c = 0; vv2; c++) vv2 >>= 1; CHK("ctz linear", c == ref2, "v=%08x", v);
-        { unsigned cc = 32, t = v; t &= -(int)t; if (t) cc--; if (t & 0x0000FFFF) cc -= 16; if (t & 0x00FF00FF) cc -= 8; if (t & 0x0F0F0F0F) cc -= 4; if (t & 0x33333333) cc -= 2; if (t & 0x55555555) cc -= 1;
+        { unsigned cc = 32, t = v; t &= -t; if (t) cc--; if (t & 0x0000FFFF) cc -= 16; if (t & 0x00FF00FF) cc -= 8; if (t & 0x0F0F0F0F) cc -= 4; if (t & 0x33333333) cc -= 2; if (t & 0x55555555) cc -= 1;
           CHK("ctz parallel (needs -(int)v in C)", (int)cc == ref2, "v=%08x", v); }
         { unsigned cc, t = v; if (t & 1) cc = 0; else { cc = 1; if ((t & 0xffff) == 0) { t >>= 16; cc += 16; } if ((t & 0xff) == 0) { t >>= 8; cc += 8; } if ((t & 0xf) == 0) { t >>= 4; cc += 4; } if ((t & 3) == 0) { t >>= 2; cc += 2; } cc -= t & 1; }
           CHK("ctz binary search", (int)cc == ref2, "v=%08x", v); }
@@ -290,7 +292,7 @@ static void check32(uint32_t v) {
           CHK("roundup pow2 via float (v<=2^31)", r == ref2, "v=%u got=%u ref=%llu", v, r, (unsigned long long)ref2); }
         if (v > 1 && v < (1u << 25)) { float f = (float)(v - 1); uint32_t bits; memcpy(&bits, &f, 4); unsigned r = 1U << ((bits >> 23) - 126);
           CHK("roundup pow2 float quick&dirty (1<v<2^25)", r == ref2, "v=%u", v); }
-        if (v >= (1u << 25) && v <= (1u << 31)) { float f = (float)(v - 1); uint32_t bits; memcpy(&bits, &f, 4); unsigned r = 1U << ((bits >> 23) - 126);
+        if (v >= (1u << 25) && v <= (1u << 31)) { float f = (float)(v - 1); uint32_t bits; memcpy(&bits, &f, 4); unsigned sh = (bits >> 23) - 126; unsigned r = sh < 32 ? 1U << sh : 0;
           CHK("roundup pow2 float quick&dirty OUTSIDE domain (expect fail)", r == ref2, "v=%u got=%u ref=%llu", v, r, (unsigned long long)ref2); }
         if (v <= (1u << 31)) { uint32_t t = v; t--; t |= t >> 1; t |= t >> 2; t |= t >> 4; t |= t >> 8; t |= t >> 16; t++; CHK("roundup pow2 shift-or", t == ref2, "v=%u", v); } }
     }
@@ -308,7 +310,7 @@ static void check32(uint32_t v) {
     // interleave
     { uint32_t x = v & 0xffff, y = v >> 16; uint32_t ref = ref_spread16(x) | (ref_spread16(y) << 1); uint32_t z = 0;
       for (int i = 0; i < 16; i++) z |= (x & 1U << i) << i | (y & 1U << i) << (i + 1); CHK("interleave obvious", z == ref, "v=%08x", v);
-      z = MortonTable256[y >> 8] << 17 | MortonTable256[x >> 8] << 16 | MortonTable256[y & 0xFF] << 1 | MortonTable256[x & 0xFF]; CHK("interleave table (literal table!)", z == ref, "v=%08x", v);
+      z = (uint32_t)MortonTable256[y >> 8] << 17 | (uint32_t)MortonTable256[x >> 8] << 16 | (uint32_t)MortonTable256[y & 0xFF] << 1 | MortonTable256[x & 0xFF]; CHK("interleave table (literal table!)", z == ref, "v=%08x", v);
       { uint32_t xb = x & 0xff, yb = y & 0xff; uint32_t rb = ref_spread16(xb) | (ref_spread16(yb) << 1);
         unsigned short zz = ((xb * 0x0101010101010101ULL & 0x8040201008040201ULL) * 0x0102040810204081ULL >> 49) & 0x5555 | ((yb * 0x0101010101010101ULL & 0x8040201008040201ULL) * 0x0102040810204081ULL >> 48) & 0xAAAA;
         CHK("interleave 64-bit mult (bytes)", zz == rb, "x=%02x y=%02x got=%04x ref=%04x", xb, yb, zz, rb); }
@@ -386,7 +388,7 @@ static void check64(uint64_t v, uint64_t w, uint32_t p, uint32_t q) {
 // ============ edge / documented-behavior probes (ran under -fsanitize=undefined separately) ============
 static void edge_probes(void) {
     printf("-- documented-edge probes --\n");
-    { unsigned v = 0; unsigned c = 32; unsigned t = v; t &= -(int)t; if (t) c--; printf("ctz parallel v=0 -> %u (doc: 32)\n", c); }
+    { unsigned v = 0; unsigned c = 32; unsigned t = v; t &= -t; if (t) c--; printf("ctz parallel v=0 -> %u (doc: 32)\n", c); }
     { unsigned v = 0, c; if (v & 1) c = 0; else { c = 1; if ((v & 0xffff) == 0) { v >>= 16; c += 16; } if ((v & 0xff) == 0) { v >>= 8; c += 8; } if ((v & 0xf) == 0) { v >>= 4; c += 4; } if ((v & 3) == 0) { v >>= 2; c += 2; } c -= v & 1; } printf("ctz binary-search v=0 -> %u (doc: 31)\n", c); }
     { float f = (float)0u; uint32_t b; memcpy(&b, &f, 4); printf("ctz float-cast v=0 -> %d (doc: -127)\n", (int)(b >> 23) - 0x7f); }
     printf("ctz mod37 v=0 -> %d (doc: n/a)\n", Mod37BitPosition[0]);
@@ -413,12 +415,13 @@ static void report(void) {
 
 int main(int argc, char **argv) {
     init_tables(); init_R();
-    if (argc == 1 || !strcmp(argv[1], "fuzz")) {
+    if (argc == 1 || (strcmp(argv[1], "exh") && strcmp(argv[1], "full"))) {
         fuzzmode = 1; uint8_t buf[64] = {0}; ssize_t n = 0;
-        FILE *f = argc > 2 ? fopen(argv[2], "rb") : stdin; if (!f) return 1;
+        const char *path = argc > 2 ? argv[2] : (argc > 1 && strcmp(argv[1], "fuzz") ? argv[1] : NULL);
+        FILE *f = path ? fopen(path, "rb") : stdin; if (!f) return 1;
         n = fread(buf, 1, sizeof buf, f); if (n < 24) return 0;
         uint64_t v, w; uint32_t p, q; memcpy(&v, buf, 8); memcpy(&w, buf + 8, 8); memcpy(&p, buf + 16, 4); memcpy(&q, buf + 20, 4);
-        check64(v, w, p, q); return 0;
+        check32((uint32_t)w); check64(v, w, p, q); return 0;
     }
     if (argc > 1 && !strcmp(argv[1], "full")) { for (uint64_t i = 0; i <= 0xffffffffULL; i++) check32((uint32_t)i); report(); return 0; }
     int lg = argc > 2 ? atoi(argv[2]) : 26;
