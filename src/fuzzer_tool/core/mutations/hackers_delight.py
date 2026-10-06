@@ -61,17 +61,29 @@ def snoob(x: int) -> int:
 
 
 def snoob_prev(x: int) -> int:
-    """Previous number with the same population count.
+    """Previous number with the same population count, in O(1) big-int ops.
 
-    Linear search; a dual closed form can replace this later if needed.
+    Dual of :func:`snoob` via complement: within n = x.bit_length() bits,
+    the predecessor of x with popcount k is the complement of the successor
+    of ~x (which has popcount n-k).  Returns 0 when no predecessor exists
+    (x == 0, or x is the minimal value (1<<k)-1 for its popcount), matching
+    the previous linear-search behaviour.
+
+    The old implementation decremented one value at a time and could run
+    ~2**63 iterations on 64-bit windows (e.g. 0x8000000000000000), hanging
+    the fuzzer inside mutate().
     """
-    if x == 0:
+    if x <= 0:
         return 0
-    target = x.bit_count()
-    y = x - 1
-    while y > 0 and y.bit_count() != target:
-        y -= 1
-    return y
+    n = x.bit_length()
+    mask = (1 << n) - 1
+    comp = ~x & mask
+    if comp == 0:  # all ones: x == (1<<n)-1 is already minimal
+        return 0
+    nxt = snoob(comp)
+    if nxt >> n:  # complement successor overflowed: no predecessor
+        return 0
+    return ~nxt & mask
 
 
 # ---------------------------------------------------------------------------

@@ -157,3 +157,31 @@ def test_operators_run_on_randpool(name, seed):
     data = bytes((i * 29 + seed) & 0xFF for i in range(32))
     out = getattr(hd, name)(data, RandPool(seed=seed))
     assert len(out) == len(data)
+
+
+def _snoob_prev_bruteforce(x):
+    if x == 0:
+        return 0
+    t = x.bit_count()
+    y = x - 1
+    while y > 0 and y.bit_count() != t:
+        y -= 1
+    return y
+
+
+def test_snoob_prev_matches_bruteforce_exhaustive():
+    for x in range(0, 1 << 12):
+        assert snoob_prev(x) == _snoob_prev_bruteforce(x), x
+
+
+def test_snoob_prev_wide_values_do_not_hang():
+    # Linear search needed ~2**63 iterations for these (fuzzer hang).
+    import time
+
+    t0 = time.monotonic()
+    for x in (1 << 63, (1 << 63) | 1, 0xFFFF_FFFF_0000_0000, 0x8000_0000_0000_0001):
+        y = snoob_prev(x)
+        assert y < x and y.bit_count() == x.bit_count()
+        assert snoob(y) == x or snoob(y) > y
+    assert snoob_prev((1 << 64) - 1) == 0
+    assert time.monotonic() - t0 < 1.0
