@@ -41,6 +41,7 @@ import warnings
 import zipfile
 import zlib
 from collections.abc import Iterator
+from dataclasses import dataclass
 from enum import Enum, StrEnum
 from pathlib import Path
 
@@ -470,6 +471,127 @@ def flush_all() -> None:
 def _close_all() -> None:
     for store in _STORES.values():
         store.close()
+
+
+# ── compaction ───────────────────────────────────────────────────────
+
+_COLD = Path("seeds") / "pruned"
+
+
+class StoreOpenError(RuntimeError):
+    """compact() needs the archive closed: a live store appends to it."""
+
+
+class CompactError(RuntimeError):
+    """The rewritten archive disagrees with the original; nothing replaced."""
+
+
+@dataclass(frozen=True)
+class CompactStats:
+    moved: int = 0  # pruned seeds now in seeds/pruned/ only
+    dropped: int = 0  # members removed from the archive
+    bytes_before: int = 0
+    bytes_after: int = 0
+
+
+def _spill(corpus: Path, h: str, data: bytes) -> None:
+    """Write pruned seed *h* to seeds/pruned/ (the file-mode layout), durably."""
+    dest = corpus / _COLD / h[:2] / f"id_{h}"
+    if dest.exists():
+        return
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    with open(tmp, "wb") as fh:
+        fh.write(data)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, dest)
+
+
+def _plan(names: list[str], cold: set[str]) -> list[int]:
+    """Indices of members to keep.
+
+    Dropped: every tombstone (cold ones leave with their data, the rest were
+    superseded by re-admission), data of cold seeds, and all but the last
+    copy of a re-admitted name. Foreign members are kept verbatim.
+    """
+    last = {n: i for i, n in enumerate(names)}
+    keep = []
+    for i, name in enumerate(names):
+        parsed = _parse(name)
+        if parsed is None:
+            keep.append(i)
+            continue
+
+        tree, h = parsed
+        if tree == _TOMB or (not tree and h in cold) or last[name] != i:
+            continue
+        keep.append(i)
+    return keep
+
+
+def _rewrite(path: Path, tmp: Path, infos: list[zipfile.ZipInfo], keep: list[int]) -> None:
+    """Copy kept members into *tmp*, one at a time (bounded memory)."""
+    out = zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=COMPRESS_LEVEL)
+    with zipfile.ZipFile(path) as zin, out as zout:
+        for i in keep:
+            zout.writestr(infos[i].filename, zin.read(infos[i]))
+
+
+def _same_view(a: SeedZip, b: SeedZip) -> bool:
+    return (
+        a._main_live == b._main_live
+        and a._protected == b._protected
+        and len(a._foreign) == len(b._foreign)
+    )
+
+
+def compact(corpus_dir: str | Path) -> CompactStats:
+    """Move pruned seeds out of seeds.zip into seeds/pruned/; rewrite the archive.
+
+    Offline. Nothing is deleted: a pruned seed is on disk under seeds/pruned/
+    (where rehydration and the cuckoo filter already look) before the archive
+    is swapped in. The swap is one os.replace after a replay check, so a
+    failure leaves the original; a rerun is safe::
+
+        seeds.zip  [a b c .pruned/b b' ...]  ->  seeds.zip [a c]
+                                                 seeds/pruned/<hh>/id_b
+    """
+    corpus = Path(corpus_dir)
+    if lookup(corpus) is not None:
+        raise StoreOpenError(f"{corpus}: store is open")
+
+    path = corpus / ZIP_NAME
+    if not path.is_file():
+        return CompactStats()
+
+    store = open_readonly(corpus)
+    store._index()  # salvages a torn archive first
+    infos = store._infolist()
+    cold = store._main_seen - store._main_live
+    keep = _plan([i.filename for i in infos], cold)
+    dropped = len(infos) - len(keep)
+    if not dropped:
+        return CompactStats()
+
+    before = path.stat().st_size
+    with zipfile.ZipFile(path) as zf:
+        for h in sorted(cold):
+            _spill(corpus, h, zf.read(_member("", h)))
+
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        _rewrite(path, tmp, infos, keep)
+        check = open_readonly(corpus)
+        check._path = tmp
+        check._index()
+        if not _same_view(store, check):
+            raise CompactError(f"{path}: rewritten archive differs")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    return CompactStats(len(cold), dropped, before, path.stat().st_size)
 
 
 atexit.register(_close_all)

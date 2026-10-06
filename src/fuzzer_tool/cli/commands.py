@@ -1564,6 +1564,18 @@ def _rank_dump(out, scored, n):
     print(f"[*] Dumped top {n} seeds to {out}.{0}..{n - 1}")
 
 
+def cmd_compact_seeds(args):
+    """Move pruned seeds out of seeds.zip into seeds/pruned/."""
+    from fuzzer_tool.adapters.seed_zip import compact
+
+    st = compact(args.corpus)
+    print(
+        f"[*] moved {st.moved} pruned seeds, dropped {st.dropped} members, "
+        f"{st.bytes_before} -> {st.bytes_after} bytes"
+    )
+    return 0
+
+
 def cmd_rank(args):
     """Rank corpus seeds by interestingness."""
     _validate_target(args.target)
@@ -5876,6 +5888,13 @@ def main() -> int:
         help="Dump top seeds to files named PREFIX.0, PREFIX.1, ...",
     )
     rank_parser.set_defaults(func=cmd_rank)
+
+    compact_parser = subparsers.add_parser(
+        "compact-seeds",
+        help="Move pruned seeds out of seeds.zip into seeds/pruned/ (corpus must be idle)",
+    )
+    compact_parser.add_argument("-d", "--corpus", required=True, help="Corpus directory")
+    compact_parser.set_defaults(func=cmd_compact_seeds)
 
     # --- estimate ---
     est_parser = subparsers.add_parser(
