@@ -12,6 +12,8 @@ import re
 
 import numpy as np
 
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
+
 # ── Delimiter pairs ───────────────────────────────────────────────────
 
 # Maps opening byte -> closing byte
@@ -337,13 +339,8 @@ def _weighted_index(weights: list[int], rng=None) -> int:
     """
     total = sum(weights)
     if total <= 0:
-        idx = (
-            rng.randrange(len(weights))
-            if rng is not None
-            else __import__("random").randrange(len(weights))
-        )
-        return idx
-    r = rng.randrange(total) if rng is not None else __import__("random").randrange(total)
+        return (rng or get_default_rand_pool()).randrange(len(weights))
+    r = (rng or get_default_rand_pool()).randrange(total)
     acc = 0
     for i, w in enumerate(weights):
         acc += w
@@ -427,12 +424,7 @@ def mutate_tree_stutter(root: _Node, rng=None, max_len: int | None = None) -> bo
         return False
     idx = _weighted_index([w for _, w in pairs], rng)
     target = pairs[idx][0]
-    if rng is not None:
-        n_reps = rng.randint(2, 64)
-    else:
-        import random as _rand
-
-        n_reps = _rand.randint(2, 64)
+    n_reps = (rng or get_default_rand_pool()).randint(2, 64)
 
     if max_len is not None:
         subtree_len = target.byte_length()
@@ -552,12 +544,7 @@ def lightweight_tree_mutate(data: bytes, max_len: int = 65536, rng=None) -> byte
         return data
 
     # Choose a random mutation
-    if rng is not None:
-        op = _TREE_OPS[rng.randrange(4)]
-    else:
-        import random as _rand
-
-        op = _TREE_OPS[_rand.randrange(4)]
+    op = _TREE_OPS[(rng or get_default_rand_pool()).randrange(4)]
 
     mutated = False
     if op == "del":
@@ -639,7 +626,7 @@ def cycle_lemma_dyck_bytes(n_pairs: int, rng=None) -> bytes:
         return b""
 
     def _randrange(n: int) -> int:
-        return rng.randrange(n) if rng is not None else __import__("random").randrange(n)
+        return (rng or get_default_rand_pool()).randrange(n)
 
     # Step 1: uniform random shuffle of n (+1) and n (-1) steps
     # (Fisher-Yates over a list of {open, close} markers).

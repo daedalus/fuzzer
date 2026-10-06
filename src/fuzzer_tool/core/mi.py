@@ -16,6 +16,8 @@ from collections import defaultdict
 
 import numpy as np
 
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
+
 # Maximum edges tracked per (position, byte_val) pair in the joint
 # distribution.  Without this cap the joint dict grows without bound
 # and record() becomes O(positions × total_edges).  With the cap we
@@ -389,7 +391,7 @@ class MutualInformationTracker:
             return None
 
         # Weighted sampling using precomputed cumulative sum
-        r = __import__("random").random() * cum_w[n - 1]
+        r = get_default_rand_pool().random() * cum_w[n - 1]
         idx = bisect.bisect_right(cum_w, r, hi=n)
         return sorted_pos[min(idx, n - 1)]
 

@@ -7,7 +7,6 @@ import itertools
 import logging
 import math
 import os
-import random
 import resource
 import shutil
 import signal
@@ -18,7 +17,7 @@ import time
 from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.colorization import ColorMode
-from fuzzer_tool.core.rand_pool import RandPool
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.tuple_walk import TupleWalk
 
 if TYPE_CHECKING:
@@ -1992,7 +1991,8 @@ class Fuzzer:
         self.enable_x86_mutator = enable_x86_mutator
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
-        random.seed(seed)
+        # Fallback pool for code not handed an rng: seeded here, not the global `random`.
+        get_default_rand_pool().reseed(seed)
         # ── Vectorized random number pool for mutation hotpath ────────
         # Generates random values in batches (one numpy C-level call per
         # batch) instead of per-call Python-level random() invocations.
@@ -2000,7 +2000,7 @@ class Fuzzer:
         # Built here rather than further down with the schedulers: every
         # scheduler that follows Hard Rule 16 takes it as its `rng`, and the
         # MCTS seed schedulers are constructed ~600 lines above where it used
-        # to be assigned. It belongs next to `random.seed` anyway -- the three
+        # to be assigned. It belongs next to the default-pool seed anyway -- the three
         # streams start together, the same invariant `_reseed_after_stall`
         # maintains.
         self._rng = RandPool(seed=seed)
@@ -2010,7 +2010,7 @@ class Fuzzer:
         # — qea.py:267,361,364 (observe/mutate amplitudes) and
         # schedulers/op_monte_carlo.py:778,895 (spectral probe vectors) — ran off
         # OS entropy and made --seed non-reproducible whenever QEA or the
-        # Monte-Carlo scheduler was active. Seed it here, next to random.seed,
+        # Monte-Carlo scheduler was active. Seed it here, next to the default-pool seed,
         # so the three streams start together.
         self._seed_global_numpy(seed)
         # GA lifecycle parameters
@@ -7319,7 +7319,7 @@ class Fuzzer:
         Separate from ``RandPool``, which owns an independent
         ``default_rng`` Generator. ``np.random.seed`` accepts only
         ``[0, 2**32)``, so a wider seed is folded rather than raising;
-        ``None`` reseeds from OS entropy, matching ``random.seed(None)``.
+        ``None`` reseeds from OS entropy, matching an unseeded run.
 
         Args:
             seed: The run seed, or None for an unseeded run.
@@ -7357,7 +7357,7 @@ class Fuzzer:
         replay the same exhausted sequence.
 
         All three streams are reseeded together, matching how ``__init__``
-        seeds them: ``random`` drives the non-hotpath choices, ``RandPool``
+        seeds them: the default ``RandPool`` drives the fallback choices, ``RandPool``
         owns its own ``default_rng`` Generator and backs the mutation
         hotpath, and the global ``np.random`` state backs QEA and the
         Monte-Carlo scheduler. ``RandPool`` is NOT backed by global
@@ -7371,7 +7371,7 @@ class Fuzzer:
         """
         self._stall_reseed_count += 1
         new_seed = self._derive_stall_seed()
-        random.seed(new_seed)
+        get_default_rand_pool().reseed(new_seed)
         self._seed_global_numpy(new_seed)
         if _HAS_NUMPY:
             self._rng.reseed(new_seed)

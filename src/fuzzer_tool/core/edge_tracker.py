@@ -24,6 +24,7 @@ from collections import defaultdict
 
 from fuzzer_tool.core import fast_json as json
 from fuzzer_tool.core.crc32 import crc32_ieee
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 # ── Memory bounds ────────────────────────────────────────────────────
 # Below this many doubleton edges the classic Chao2 ratio Q1^2/(2*Q2) swings on
@@ -1416,11 +1417,10 @@ class EdgeTracker:
                     self._correlation_matrix[key] = self._correlation_matrix.get(key, 0) + 1
         else:
             # Large set: sample random pairs
-            import random as _rand
-
+            rng = get_default_rand_pool()
             for _ in range(max_pairs):
-                i = _rand.randint(0, n - 2)
-                j = _rand.randint(i + 1, n - 1)
+                i = rng.randint(0, n - 2)
+                j = rng.randint(i + 1, n - 1)
                 key = (edges[i], edges[j])
                 self._correlation_matrix[key] = self._correlation_matrix.get(key, 0) + 1
         if len(self._correlation_matrix) > CORRELATION_MATRIX_MAX:

@@ -27,7 +27,6 @@ import hashlib
 import json
 import logging
 import math
-import random
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -1089,7 +1088,7 @@ class QEALifecycle:
     def _tournament_select(self, pool: list[QEAIndividual]) -> QEAIndividual:
         """Tournament selection: pick best of k random individuals."""
         k = min(self.tournament_size, len(pool))
-        candidates = random.sample(pool, k)
+        candidates = self._rng.sample(pool, k)
         return max(candidates, key=lambda i: i.fitness)
 
     # ── Fitness evaluation ──────────────────────────────────────────

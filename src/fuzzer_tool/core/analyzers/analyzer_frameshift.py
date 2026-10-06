@@ -13,8 +13,9 @@ affect the target's execution behavior.
 """
 
 import logging
-import random
 from dataclasses import dataclass
+
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 log = logging.getLogger(__name__)
 
@@ -245,7 +246,7 @@ class FrameShift:
                 break
 
             # Insert 4 bytes at this position
-            insert_data = bytes(random.randint(0, 255) for _ in range(4))
+            insert_data = get_default_rand_pool().randbytes(4)
             modified = bytearray(data)
             modified[pos:pos] = insert_data
 

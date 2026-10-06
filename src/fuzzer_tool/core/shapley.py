@@ -2,8 +2,9 @@
 
 import collections
 import math
-import random
 from collections import defaultdict
+
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 try:
     import numpy as np
@@ -295,7 +296,7 @@ class ShapleyAttribution:
     @staticmethod
     def _inverse_iteration_py(laplacian: list[list[float]], n: int) -> list[float]:
         """Inverse power iteration for smallest eigenvector (pure-Python)."""
-        w = [random.gauss(0, 1) for _ in range(n)]
+        w = get_default_rand_pool().gauss_list(0.0, 1.0, n)
         norm = math.sqrt(sum(x * x for x in w))
         w = [x / norm for x in w]
         for _ in range(100):

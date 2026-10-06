@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 
 from fuzzer_tool.core.mutations import INTERESTING_8, INTERESTING_16, INTERESTING_32
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 log = logging.getLogger(__name__)
 
@@ -156,9 +157,8 @@ def _candidate_positions(buf: bytes, target: bytes, rng=None, cap: int = 48) -> 
             # replayed with the same -s takes the same path here.
             candidates.update(rng.randrange_list(len(buf), sample))
         else:
-            import random
-
-            candidates.update(random.sample(range(len(buf)), sample))
+            # Unique positions, as random.sample did before the pool migration.
+            candidates.update(get_default_rand_pool().sample(len(buf), sample))
 
     ordered = sorted(candidates)
     if len(ordered) <= cap:

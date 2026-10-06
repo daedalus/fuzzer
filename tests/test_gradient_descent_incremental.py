@@ -23,6 +23,7 @@ from fuzzer_tool.core.gradient_descent import (
     _window_distance,
     gradient_descent,
 )
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 # ---------------------------------------------------------------------------
 # Oracle: the old copy-and-rescore probe loop, verbatim, over a fixed site.
@@ -100,10 +101,10 @@ def test_descent_matches_copy_and_rescore_oracle():
             p = rnd.randrange(0, n - width)
             buf[p : p + max(1, width - 1)] = target[: max(1, width - 1)]
         frozen = bytes(buf)
-        # _candidate_positions falls back to the global random module when
+        # _candidate_positions falls back to the default RandPool when
         # overlap is sparse and no rng is threaded through, so both sides
-        # must see the same global state to pick the same site.
-        random.seed(4242)
+        # must see the same pool state to pick the same site.
+        get_default_rand_pool().reseed(4242)
         candidates = _candidate_positions(frozen, target, rng=None)
         if not candidates:
             continue
@@ -111,7 +112,7 @@ def test_descent_matches_copy_and_rescore_oracle():
         if site + width > n:
             continue
         checked += 1
-        random.seed(4242)
+        get_default_rand_pool().reseed(4242)
         got = gradient_descent(frozen, (target, b""))
         assert got == _old_descent(buf, site, target)
     assert checked > 100, f"test degenerate: only {checked} cases exercised"
