@@ -87,7 +87,7 @@ class TestApplyDelta:
 
 
 class TestDeltaSaveLoad:
-    def test_delta_file_smaller_than_full(self, tmp_path):
+    def test_no_delta_file_written(self, tmp_path):
         parent = b"A" * 100
         # Change 1 byte → delta should be smaller
         child = bytearray(parent)
@@ -103,8 +103,8 @@ class TestDeltaSaveLoad:
         )
         delta_files = [f for f in delta_files if f.name.startswith("delta_")]
         full_files = list((tmp_path / "seeds").rglob("id_*"))
-        assert len(delta_files) == 1
-        assert len(full_files) == 1
+        assert len(delta_files) == 0
+        assert len(full_files) == 2
 
     def test_snapshot_at_interval(self, tmp_path):
         parent = b"A" * 100

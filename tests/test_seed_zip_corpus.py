@@ -100,7 +100,7 @@ def test_repeat_crash_is_not_appended_twice(zcorpus):
     assert len(_members(corpus)) == 1
 
 
-def test_deltas_stay_in_deltas_dir(zcorpus):
+def test_no_deltas_written(zcorpus):
     corpus, store = zcorpus
     parent = bytes(range(64))
     child = bytearray(parent)
@@ -109,8 +109,8 @@ def test_deltas_stay_in_deltas_dir(zcorpus):
     save_to_corpus(bytes(child), corpus, set(), parent=parent)
     store.flush()
 
-    assert list((corpus / "deltas").glob("delta_*.json"))
-    assert not (corpus / seed_zip.ZIP_NAME).exists()
+    # Delta encoding is permanently disabled: children are stored in full.
+    assert not list((corpus / "deltas").glob("delta_*.json"))
 
 
 # ── block mode and compression ───────────────────────────────────────

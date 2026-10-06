@@ -702,7 +702,9 @@ def save_to_corpus(
 
     # Force full snapshot at interval to cap chain depth.
     # v1 delta handles same-length mutations; v2 handles length-changing ones.
-    use_delta = parent is not None and lineage_depth < SNAPSHOT_INTERVAL
+    # Delta encoding is permanently disabled: seeds are always stored in full.
+    # Delta readers (_resolve_deltas, rehydrate) stay for legacy corpora.
+    use_delta = False
 
     delta = None
     if use_delta:

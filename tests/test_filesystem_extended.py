@@ -165,7 +165,7 @@ class TestSaveToCorpus:
         result = save_to_corpus(b"hello", tmp_path, seen)
         assert result is False
 
-    def test_delta_encoding(self, tmp_path):
+    def test_delta_encoding_disabled(self, tmp_path):
         seen = set()
         # Save parent first
         parent = b"AAAA"
@@ -176,13 +176,10 @@ class TestSaveToCorpus:
         result = save_to_corpus(child, tmp_path, seen, parent=parent, lineage_depth=0)
         assert result is True
 
-        # Should have a delta file in deltas/
-        delta_files = list((tmp_path / "deltas").glob("delta_*.json"))
-        assert len(delta_files) == 1
-
-        # Full file should be in seeds/
-        full_files = list((tmp_path / "seeds").iterdir())
-        assert len(full_files) == 1
+        # Delta encoding is disabled: no delta files, both seeds stored in full
+        assert not list((tmp_path / "deltas").glob("delta_*.json"))
+        full_files = list((tmp_path / "seeds").rglob("id_*"))
+        assert len(full_files) == 2
 
     def test_with_bloom(self, tmp_path):
         bloom = BloomFilter(capacity=100)

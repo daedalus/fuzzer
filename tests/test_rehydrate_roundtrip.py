@@ -29,6 +29,19 @@ def _corpus(tmp_path):
     return tmp_path / "corpus"
 
 
+def _write_legacy_delta(d, parent, child, version):
+    """save_to_corpus no longer emits deltas; hand-write one to test the reader."""
+    from fuzzer_tool.adapters.filesystem import compute_delta, compute_delta_v2
+
+    diff = compute_delta(parent, child) if version == 1 else compute_delta_v2(parent, child)
+    assert diff is not None
+    rec = {"parent": hash_data(parent), "diff": diff, "v": version}
+    out = d / "deltas" / f"delta_{hash_data(child)}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(rec, separators=(",", ":")))
+    return out
+
+
 class TestRehydrateRoundTrip:
     def test_full_snapshot_round_trips(self, tmp_path):
         d, seen = _corpus(tmp_path), set()
@@ -37,15 +50,13 @@ class TestRehydrateRoundTrip:
         assert rehydrate_by_hash(hash_data(data), d) == data
 
     def test_delta_round_trips(self, tmp_path):
-        """The regression: a delta written by save_to_corpus must come back."""
+        """Legacy delta records must still rehydrate (writer no longer emits them)."""
         d, seen = _corpus(tmp_path), set()
         parent = b"A" * 64
         child = b"A" * 32 + b"B" + b"A" * 31
         save_to_corpus(parent, d, seen)
-        save_to_corpus(child, d, seen, parent=parent, lineage_depth=1)
+        _write_legacy_delta(d, parent, child, 1)
 
-        # Confirm the writer really chose the delta path, so this test cannot
-        # silently degrade into re-testing the full-snapshot case.
         deltas = list(d.rglob("delta_*.json"))
         assert len(deltas) == 1, f"expected one delta record, got {deltas}"
 
@@ -57,7 +68,7 @@ class TestRehydrateRoundTrip:
         parent = b"base input for v2 encoding"
         child = parent[:5] + b"XY" + parent[5:]
         save_to_corpus(parent, d, seen)
-        save_to_corpus(child, d, seen, parent=parent, lineage_depth=1)
+        _write_legacy_delta(d, parent, child, 2)
 
         rec = json.loads(next(d.rglob("delta_*.json")).read_text())
         assert rec["v"] == 2, f"expected a v2 record, got v{rec['v']}"
@@ -89,7 +100,7 @@ class TestRehydrateRoundTrip:
         parent = b"Q" * 48
         child = b"Q" * 20 + b"R" + b"Q" * 27
         save_to_corpus(parent, d, seen)
-        save_to_corpus(child, d, seen, parent=parent, lineage_depth=1)
+        _write_legacy_delta(d, parent, child, 1)
 
         flat = next(d.rglob("delta_*.json"))
         h = hash_data(child)
@@ -123,3 +134,14 @@ class TestRehydrateRoundTrip:
         assert len(corpus) == 4
         for entry in corpus:
             assert rehydrate_by_hash(hash_data(entry), d) == entry
+
+
+    def test_writer_never_emits_deltas(self, tmp_path):
+        """Delta encoding is disabled: save_to_corpus always stores full seeds."""
+        d, seen = _corpus(tmp_path), set()
+        parent = b"A" * 64
+        child = b"A" * 32 + b"B" + b"A" * 31
+        save_to_corpus(parent, d, seen)
+        save_to_corpus(child, d, seen, parent=parent, lineage_depth=1)
+        assert not list(d.rglob("delta_*.json"))
+        assert rehydrate_by_hash(hash_data(child), d) == child
