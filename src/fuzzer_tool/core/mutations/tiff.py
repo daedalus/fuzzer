@@ -126,7 +126,9 @@ class TiffMutator:
 
         for i in range(min(4, header.num_entries)):
             pos = ifd_pos + i * entry_size
-            if pos + 4 <= len(raw):
+            # The write lands at pos + 8 and is 4 bytes wide, so the entry
+            # must be fully in range (pos + 12), not just pos + 4.
+            if pos + 12 <= len(raw):
                 struct.pack_into("<I", raw, pos + 8, 0xFFFFFFFF)
         return bytes(raw[:max_len])
 
