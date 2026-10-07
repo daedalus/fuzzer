@@ -273,7 +273,8 @@ class TestPropose:
     def test_spark_boundary_is_exclusive(self):
         lv = _lv()
         _gain(lv, 500)
-        assert _propose(lv, 0.9, PLUS) == 500  # NO_SPARK draw, not a spark
+        lv._rng._randoms[:] = [SPARK_RATE, 0.9, PLUS]
+        assert lv.propose(SEED, len(SEED)) == 500  # random() == SPARK_RATE: no spark
 
     def test_propose_does_not_touch_the_state(self):
         lv = _lv()

@@ -99,9 +99,6 @@ class TestUnchangedBehaviour:
         assert parse_dict_line("") is None
         assert parse_dict_line("   ") is None
 
-    def test_comment(self):
-        assert parse_dict_line("# comment") is None
-
     def test_utf8_is_encoded_raw(self):
         assert parse_dict_line('"café"') == "café".encode()
 

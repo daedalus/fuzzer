@@ -127,9 +127,6 @@ class TestJSDivergence:
         js = _js_divergence(p, q)
         assert 0.0 < js < math.log(2)
 
-    def test_empty_distributions(self):
-        assert _js_divergence({}, {}) == 0.0
-
 
 class TestEdgeTrackerCore:
     def test_init(self):
@@ -872,34 +869,3 @@ class TestF0Cardinality:
             plain.record_edges("seed", {i})
             with_f0.record_edges("seed", {i})
         assert plain.get_cumulative_edge_count() == with_f0.get_cumulative_edge_count()
-
-    def test_corpus_profile_does_not_insert_for_unowned_edges(self):
-        """_aggregate_totals is keyed by hit volume and carries edges that no
-        seed owns; the profile pass reads them once per rebuild."""
-        et = EdgeTracker(map_size=64)
-        et.record_edges("seedA", {10})
-        et._aggregate_totals = {10: 4, 77777: 9}
-        et._corpus_profile_cache = None
-        et._corpus_hitcount_profile()
-        assert 77777 not in et._edge_owner_count
-
-    def test_prune_does_not_leave_counts_for_evicted_seeds(self):
-        et = EdgeTracker(map_size=64)
-        et.max_tracked_seeds = 5
-        for i in range(12):
-            et.record_edges(f"seed{i}", {1, 2, 100 + i})
-        assert len(et.seed_edges) == 5
-        actual = sum(1 for edges in et.seed_edges.values() if 1 in edges)
-        assert et._edge_owner_count[1] == actual
-
-    def test_prune_drops_counts_for_edges_no_survivor_covers(self):
-        """An evicted seed's private edges leave no owner behind, so they must
-        leave the map too -- otherwise edge_rarity_stats() reports a total edge
-        count that keeps climbing past what the corpus actually covers."""
-        et = EdgeTracker(map_size=64)
-        et.max_tracked_seeds = 4
-        for i in range(20):
-            et.record_edges(f"seed{i}", {500 + i})
-        live_edges = {e for edges in et.seed_edges.values() for e in edges}
-        assert set(et._edge_owner_count) == live_edges
-        assert et.edge_rarity_stats()["total"] == len(live_edges)

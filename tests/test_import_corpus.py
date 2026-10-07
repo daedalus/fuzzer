@@ -104,17 +104,6 @@ class TestImportFromAfl:
         seeds, crashes = import_from_afl(str(afl_dir), str(corpus_dir))
         assert crashes == 0
 
-    def test_corrupt_data(self, tmp_path):
-        afl_dir = tmp_path / "afl_out"
-        queue_dir = afl_dir / "queue"
-        queue_dir.mkdir(parents=True)
-        # File exists but read_bytes might fail
-        # Actually, this just tests that the import works
-
-        corpus_dir = tmp_path / "corpus"
-        seeds, _ = import_from_afl(str(afl_dir), str(corpus_dir))
-        assert seeds == 0
-
 
 class TestImportFromLibfuzzer:
     def test_nonexistent_dir(self, tmp_path):

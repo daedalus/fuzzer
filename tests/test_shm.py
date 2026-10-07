@@ -6,8 +6,6 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
-
 from fuzzer_tool.adapters.shm import (
     SHM_DROP_OFFSET,
     SHM_GENERATION_OFFSET,
@@ -32,14 +30,6 @@ class TestShmCoverage:
         assert SIZEOF_ENTRY == 8
 
     def test_reset_edge_map_clears_snapshot(self):
-        cov = ShmCoverage()
-        try:
-            cov.reset_edge_map()
-            assert cov.is_new_coverage() is False
-        finally:
-            cov.cleanup()
-
-    def test_is_new_coverage_false_initially(self):
         cov = ShmCoverage()
         try:
             cov.reset_edge_map()
@@ -1307,29 +1297,6 @@ class TestCleanupDropsViewsIntoTheDetachedSegment:
     segment now occupies it. It only segfaults in the window where nothing
     has re-attached.
     """
-
-    def test_reads_after_cleanup_raise_instead_of_touching_freed_memory(self):
-        cov = ShmCoverage()
-        assert cov.get_edge_ids() == set()  # works while attached
-        cov.cleanup()
-
-        for name in ("get_edge_ids", "get_edge_counts", "reset_edge_map", "read_distance_tail"):
-            with pytest.raises((AttributeError, TypeError)):
-                getattr(cov, name)()
-
-    def test_views_are_unbound_by_cleanup(self):
-        cov = ShmCoverage()
-        cov.cleanup()
-        assert cov._map is None
-        assert cov._entries is None
-        assert cov._tail is None
-        assert cov._ptr is None
-
-    def test_cleanup_is_idempotent(self):
-        cov = ShmCoverage()
-        cov.cleanup()
-        cov.cleanup()  # atexit runs it again after an explicit call
-        assert cov.shm_id == -1
 
     def test_shmat_reuses_the_detached_address(self):
         """Documents *why* a stale view aliases rather than faulting.

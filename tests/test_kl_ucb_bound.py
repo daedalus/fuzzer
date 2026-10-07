@@ -89,5 +89,13 @@ class TestKlUpperBound:
         p, budget = 0.5, 1e-6
         assert kl_upper_bound(p, budget) == pytest.approx(p + math.sqrt(2.0 * budget))
 
+    def test_strictly_tighter_than_gaussian(self):
+        # Falsification: on the bisection path the KL width must beat the
+        # Gaussian width sqrt(2*budget). Shared by KL-DUCB and KL-SWUCB.
+        p, budget = 0.5, 0.3
+        kl_width = kl_upper_bound(p, budget) - p
+        gaussian_width = min(1.0, p + math.sqrt(2.0 * budget)) - p
+        assert kl_width < gaussian_width - 1e-6
+
     def test_bounded_to_one(self):
         assert kl_upper_bound(0.5, 100.0) <= 1.0

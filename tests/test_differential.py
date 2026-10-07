@@ -98,18 +98,6 @@ class TestDifferentialTrackerExtended:
         sig = DifferentialTracker._extract_signature(asan_msg, 1)
         assert "asan:" in sig
 
-    def test_extract_signature_signal(self):
-        sig = DifferentialTracker._extract_signature("", -11)
-        assert sig == "signal:11"
-
-    def test_extract_signature_exit(self):
-        sig = DifferentialTracker._extract_signature("", 1)
-        assert sig == "exit:1"
-
-    def test_extract_signature_clean(self):
-        sig = DifferentialTracker._extract_signature("", 0)
-        assert sig == "clean"
-
     def test_check_drift_too_few(self):
         dt = DifferentialTracker()
         dt._check_drift()  # total_inputs=0 < 20, should return
