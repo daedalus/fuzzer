@@ -113,17 +113,22 @@ from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Literal
 
-from fuzzer_tool.core import lcg_recovery, prng_state_recovery
+from fuzzer_tool.core import lcg_recovery, mt19937_recovery, prng_state_recovery
 from fuzzer_tool.core.lcg_recovery import LCG_FAMILIES, LCGSpec, lcg_family
+from fuzzer_tool.core.mt19937_recovery import MT19937_SPEC, MT19937Spec
 from fuzzer_tool.core.prng_state_recovery import FAMILIES, LinearPRNG, family
 
-#: A recoverable generator: GF(2)-linear or LCG (P4-1).
-_Spec = LinearPRNG | LCGSpec
+#: A recoverable generator: GF(2)-linear, LCG, or MT19937.
+_Spec = LinearPRNG | LCGSpec | MT19937Spec
 
 
 def _driver(spec: _Spec) -> ModuleType:
-    """Recovery module for *spec*; both expose the same step/output/recover API."""
-    return lcg_recovery if isinstance(spec, LCGSpec) else prng_state_recovery
+    """Recovery module for *spec*; all expose the same step/output/recover API."""
+    if isinstance(spec, LCGSpec):
+        return lcg_recovery
+    if isinstance(spec, MT19937Spec):
+        return mt19937_recovery
+    return prng_state_recovery
 
 
 def _confident(spec: _Spec) -> int:
@@ -132,6 +137,9 @@ def _confident(spec: _Spec) -> int:
 
 # Every shipped linear family, in FAMILIES' smallest-state-first order
 # (cheapest elimination tried first), then the LCGs (one small LLL each).
+# MT19937 is deliberately *not* in this short-window list: it needs 624
+# consecutive outputs, far above _MAX_SAMPLES.  It is tried from the
+# long per-site history in _try_recover_mt when enough samples accumulate.
 _CANDIDATE_FAMILIES: tuple[_Spec, ...] = (*FAMILIES.values(), *LCG_FAMILIES.values())
 # Operand widths worth extracting at all: exactly the output widths some
 # family has, so a 2-byte compare is dropped at the source rather than
@@ -148,6 +156,8 @@ _MIN_SAMPLES: dict[int, int] = {
     for width in _OPERAND_WIDTHS
 }
 _MAX_SAMPLES = 16  # cap on candidates fed to one recovery attempt
+# MT19937 needs 624 outputs; keep a little headroom for the consistency word.
+_MT_HISTORY_CAP = 700
 # Per width, the window length at which every family of that width has been
 # tried. A failed window shorter than this keeps growing instead of sliding:
 # one draw per drain would otherwise pin a 4-byte window at xorshift32's 2
@@ -222,6 +232,10 @@ class PRNGStateLearner:
         # so a run is assembled across executions; bounded to _MAX_SAMPLES,
         # oldest dropped first.
         self._pending: dict[_Site, list[int]] = {}
+        # Long accumulator for MT19937 (needs 624 consecutive 4-byte outputs).
+        # Kept separate so the short-window path for taus88/xorshift stays
+        # cheap; only 4-byte sites are recorded and the cap is ~700.
+        self._mt_pending: dict[_Site, list[int]] = {}
         self.attempts = 0
         self.successes = 0
 
@@ -265,9 +279,18 @@ class PRNGStateLearner:
             window.extend(values)
             if len(window) > _MAX_SAMPLES:
                 del window[:-_MAX_SAMPLES]
+            # Long history for MT19937 (4-byte only).
+            if site[1] == MT19937_SPEC.out_bytes and values:
+                mt_win = self._mt_pending.setdefault(site, [])
+                mt_win.extend(values)
+                if len(mt_win) > _MT_HISTORY_CAP:
+                    del mt_win[:-_MT_HISTORY_CAP]
 
         site = self._best_site()
         if site is _NO_CANDIDATE:
+            # Still try MT from any long 4-byte history that has matured.
+            if self._try_recover_mt():
+                return True
             return self.has_state()
         window = self._pending[site]
         width = site[1]
@@ -278,10 +301,15 @@ class PRNGStateLearner:
             return True
 
         if len(window) < _MIN_SAMPLES[width]:
+            if self._try_recover_mt():
+                return True
             return self.has_state()
 
         if self._try_recover(window, width):
             window.clear()
+            return True
+
+        if self._try_recover_mt():
             return True
 
         # This window is not a run of this generator's outputs: either it
@@ -506,6 +534,38 @@ class PRNGStateLearner:
             return True
         return False
 
+    def _try_recover_mt(self) -> bool:
+        """Attempt MT19937 recovery from the long per-site history.
+
+        MT needs 624 consecutive 4-byte outputs — far more than the short
+        window used for taus88/xorshift.  When any site's ``_mt_pending``
+        reaches that length, untemper and verify; on success the short
+        windows are cleared so the learner does not keep re-trying small
+        families against an MT stream.
+        """
+        needed = _confident(MT19937_SPEC)
+        for site, hist in list(self._mt_pending.items()):
+            if len(hist) < needed:
+                continue
+            self.attempts += 1
+            # Use the most recent `needed` samples (aligned to the end of
+            # the stream so we recover the *current* state, not a stale one).
+            candidates = hist[-needed:]
+            try:
+                state = mt19937_recovery.recover_state(candidates, MT19937_SPEC)
+            except ValueError:
+                continue
+            if state is None or not mt19937_recovery.verify_state(
+                state, candidates, MT19937_SPEC
+            ):
+                continue
+            self._set_state(MT19937_SPEC, state, candidates)
+            self.successes += 1
+            self._mt_pending.clear()
+            self._pending.clear()
+            return True
+        return False
+
     # ------------------------------------------------------------------
     # Persistence (mirrors ChecksumLearner.to_dict/from_dict)
     # ------------------------------------------------------------------
@@ -530,7 +590,10 @@ class PRNGStateLearner:
             state = data.get("state")
             if state:
                 name = data.get("family") or "taus88"
-                spec: _Spec = family(name) or lcg_family(name) or FAMILIES["taus88"]
+                if name == MT19937_SPEC.name:
+                    spec: _Spec = MT19937_SPEC
+                else:
+                    spec = family(name) or lcg_family(name) or FAMILIES["taus88"]
                 restored = tuple(int(x) for x in state)
                 samples = [int(x) for x in data.get("confirmed_samples") or []]
                 # The frontier is derived, not stored, so rebuild it here --
