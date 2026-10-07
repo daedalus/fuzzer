@@ -950,3 +950,73 @@ class TestIntegrationAgainstLiveTarget:
         assert predicted in live_session["observed"], (
             f"predicted {predicted:#010x}, target drew {live_session['observed']}"
         )
+
+
+class TestMT19937Learner:
+    """MT19937 through the learner, end to end.
+
+    Before the fix the first execution after any MT19937 recovery raised
+    ``TypeError: cannot unpack non-iterable int object`` out of
+    ``_continues_from_frontier`` -- ``mt19937_recovery.walk_stream`` returned
+    bare words where every other family yields ``(state, word)`` -- and that
+    aborted the campaign. On FFmpeg the "recovery" was itself a false
+    positive on a site comparing small integers.
+    """
+
+    @staticmethod
+    def _mt_words(n: int, seed: int = 0xC0FFEE) -> list[int]:
+        from fuzzer_tool.core.mt19937_recovery import MT19937
+
+        gen = MT19937()
+        gen.seed(seed)
+        return [gen.random_uint32() for _ in range(n)]
+
+    def test_recovers_and_continues_without_crashing(self):
+        words = self._mt_words(640)
+        learner = _learner(_conds(words[:625]))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec is not None and learner._spec.name == "mt19937"
+        assert learner.predict(3) == words[625:628]
+
+        # The next drain continues the same stream: walked forward, not
+        # re-recovered, and no TypeError.
+        attempts = learner.attempts
+        learner.f._cmplog.last_conds = _conds(words[625:629])
+        assert learner.observe_execution(PAYLOAD2) is True
+        assert learner.attempts == attempts
+        assert learner.predict(3) == words[629:632]
+
+    def test_first_prediction_is_not_the_last_observed_draw(self):
+        words = self._mt_words(630)
+        learner = _learner(_conds(words[:625]))
+        learner.observe_execution(PAYLOAD)
+        assert learner.predict(1) == [words[625]]
+
+    def test_small_integer_window_is_not_recovered(self):
+        """A window of 4-bit values that satisfies the twist recurrence.
+
+        Exactly the shape found on FFmpeg; ``recover_state`` alone accepts it.
+        """
+        import random
+
+        from fuzzer_tool.core import mt19937_recovery
+        from fuzzer_tool.core.analyzers import analyzer_prng_state_learner as mod
+
+        rng = random.Random(1)
+        while True:
+            window = [rng.randrange(16) for _ in range(625)]
+            if mt19937_recovery.recover_state(window) is not None:
+                break
+        learner = _learner()
+        learner._mt_pending[(0x1000, 4)] = list(window)
+        assert mod._full_width_plausible(window) is False
+        assert learner._try_recover_mt() is False
+        assert not learner.has_state()
+        assert learner.attempts == 0, "an implausible window is not a recovery attempt"
+
+    def test_real_stream_is_plausible(self):
+        from fuzzer_tool.core.analyzers import analyzer_prng_state_learner as mod
+
+        for seed in range(50):
+            assert mod._full_width_plausible(self._mt_words(625, seed))
+

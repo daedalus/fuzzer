@@ -25,7 +25,7 @@ learner can treat an MT recovery the same way it treats a taus88 one
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 
 __all__ = [
@@ -214,14 +214,35 @@ def output_word(state: Sequence[int], spec: MT19937Spec = MT19937_SPEC) -> int:
 def predict_words(
     state: Sequence[int], n: int = 1, spec: MT19937Spec = MT19937_SPEC
 ) -> list[int]:
-    """The next *n* outputs after *state*'s own output position."""
+    """The next *n* outputs after *state*'s own output position.
+
+    Excludes *state*'s own output, the convention ``prng_state_recovery``
+    and ``lcg_recovery`` share and the learner's ``predict`` relies on: its
+    frontier's own output is the last draw already seen, so including it
+    handed that draw back as the "next" one.
+    """
     gen = MT19937.from_state_tuple(state)
+    gen.random_uint32()  # step past state's own output
     return [gen.random_uint32() for _ in range(n)]
 
 
-def walk_stream(state: Sequence[int], n: int, spec: MT19937Spec = MT19937_SPEC) -> list[int]:
-    """Emit *n* consecutive outputs starting from *state*."""
-    return predict_words(state, n, spec)
+def walk_stream(
+    state: Sequence[int], n: int, spec: MT19937Spec = MT19937_SPEC
+) -> Iterator[tuple[tuple[int, ...], int]]:
+    """Yield ``(state, its output)`` for each of the next *n* steps.
+
+    Same shape as ``prng_state_recovery.walk_stream`` and
+    ``lcg_recovery.walk_stream``. The learner unpacks it as pairs while
+    searching forward from a cached frontier; this used to return a bare
+    list of words, so the first execution after any MT19937 recovery died
+    with ``TypeError: cannot unpack non-iterable int object`` and took the
+    campaign with it.
+    """
+    gen = MT19937.from_state_tuple(state)
+    gen.random_uint32()  # step past state's own output
+    for _ in range(n):
+        current = gen.state_tuple()
+        yield current, gen.random_uint32()
 
 
 def recover_state(

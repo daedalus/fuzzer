@@ -205,6 +205,27 @@ def _history_cost(history: dict[_Site, _PCHistory]) -> int:
     return sum(1 + len(e.values) for e in history.values())
 
 
+def _full_width_plausible(words: list[int]) -> bool:
+    """Whether *words* could be consecutive outputs of a 32-bit MT19937.
+
+    ``confident_samples`` buys MT19937 one consistency word past the 624
+    that pin the state, and that word refutes a random 32-bit window at
+    2**-32 -- but cmplog windows are not random 32-bit words. A compare site
+    that keeps checking small integers (lengths, tags, enum values) fills
+    its window with them, and low-entropy windows satisfy the twist
+    recurrence far more often: measured 0.25% of random 4-bit windows and
+    6.3% of 2-bit ones. One such site on FFmpeg was "recovered" as MT19937
+    within 3,000 executions (625 words, 16 distinct, all below 16).
+
+    MT19937 is 623-dimensionally equidistributed, so a real stream has a
+    zero top byte in about 1 word in 256. Requiring a non-zero top byte in
+    at least half the window rejects every small-integer site while a real
+    stream fails it with probability far below anything observable (a
+    binomial tail at ~300 of 625 against a mean of 2.4).
+    """
+    return sum(1 for w in words if w >> 24) * 2 >= len(words)
+
+
 class PRNGStateLearner:
     """Learns and caches a recovered GF(2)-linear PRNG state, family included."""
 
@@ -547,10 +568,12 @@ class PRNGStateLearner:
         for site, hist in list(self._mt_pending.items()):
             if len(hist) < needed:
                 continue
-            self.attempts += 1
             # Use the most recent `needed` samples (aligned to the end of
             # the stream so we recover the *current* state, not a stale one).
             candidates = hist[-needed:]
+            if not _full_width_plausible(candidates):
+                continue
+            self.attempts += 1
             try:
                 state = mt19937_recovery.recover_state(candidates, MT19937_SPEC)
             except ValueError:
