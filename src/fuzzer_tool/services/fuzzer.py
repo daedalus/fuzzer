@@ -577,12 +577,12 @@ def _detect_afl(target_path: str) -> bool:
 def _detect_distance(target_path: str) -> bool:
     """Check if a binary has the AFLGo distance channel compiled in.
 
-    Distance builds define __afl_dist_flush (the shim under
-    __AFL_DISTANCE_MODE) and define __sanitizer_cov_trace_pc (trace-pc
-    instrumentation); the bare trace_pc symbol distinguishes them from
-    plain trace-pc-guard builds, which only carry the *_guard callbacks.
+    Only the shim under __AFL_DISTANCE_MODE defines __afl_dist_flush, so that
+    symbol alone decides. The bare __sanitizer_cov_trace_pc symbol used to
+    count too, but it is now defined in every build (gcc's trace-pc edge
+    coverage needs it with the distance channel off), so it no longer says
+    anything about distance.
     """
-    import re
     import subprocess
 
     try:
@@ -592,9 +592,7 @@ def _detect_distance(target_path: str) -> bool:
             text=True,
             timeout=5,
         )
-        if "__afl_dist_flush" in result.stdout:
-            return True
-        return bool(re.search(r"^[tT] __sanitizer_cov_trace_pc$", result.stdout, re.MULTILINE))
+        return "__afl_dist_flush" in result.stdout
     except (OSError, subprocess.TimeoutExpired):
         return False
 

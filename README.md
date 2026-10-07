@@ -360,7 +360,7 @@ that can produce full automatic edge coverage here.**
 | AFL edge instrumentation shim | ✅ | ✅ |
 | cmplog shim (libc interposition) | ✅ | ✅ (preferred) |
 | Manual `__afl_map_edge()` coverage | ✅ | ✅ |
-| **Automatic edge coverage** (`-fsanitize-coverage=trace-pc-guard`) | ❌ ⁵ | ✅ required |
+| **Automatic edge coverage** (`-fsanitize-coverage=trace-pc-guard`) | ❌ ⁵ (`trace-pc` via `--gcc-scov`, gcc ≥ 12) | ✅ required |
 | trace-cmp instrumentation | ⚠️ ⁵ | ✅ required |
 | MSAN (`-fsanitize=memory`) | ❌ | ✅ required |
 | TSAN (`-fsanitize=thread`) | ✅ | ✅ (used) |
@@ -369,15 +369,23 @@ that can produce full automatic edge coverage here.**
 #### ⁵ The gcc edge-coverage limitation
 
 gcc's `-fsanitize-coverage=` accepts only `trace-pc` and `trace-cmp` — not
-the `trace-pc-guard` variant the AFL shim's edge callbacks are built on. The
-one gcc-compatible callback the shim does implement,
-`__sanitizer_cov_trace_pc()`, is compiled into every shim build
-(`__AFL_DISTANCE_MODE` defaults to 1; `-D__AFL_DISTANCE_MODE=0` drops it).
-It depends on the AFLGo distance SHM but degrades gracefully without one:
-an unmapped segment leaves the lookup table NULL and the callback returns
-early. There is currently no measured standalone `trace-pc` path for gcc.
+the `trace-pc-guard` variant the AFL shim's guard callbacks are built on.
+gcc ≥ 12 builds can use `-fsanitize-coverage=trace-pc` instead: the shim's
+`__sanitizer_cov_trace_pc()` is defined in every build (also with
+`-D__AFL_DISTANCE_MODE=0`; the AFLGo distance probe is the only part behind
+that gate) and, under gcc, the shim excludes its own code from
+instrumentation (`__AFL_GCC_NO_COV`). gcc, unlike clang, does not skip
+functions named `__sanitizer_cov_*`; before this, a gcc trace-pc target
+segfaulted at startup with the callback calling itself.
 
-gcc targets therefore fall back to the hand-placed `__afl_map_edge()` calls
+`tools/build_targets.sh --gcc-scov` builds the targets that way (library
+objects get the flag automatically; `GCC_TRACE_PC=0` turns that off). Edge ids
+are PC-keyed, so they differ from a clang build of the same source: share
+corpora by seed bytes, never by edge map. gcc has no `trace-div`/`trace-gep`,
+no trace-loads/stores and no inline counters. Without the flag (or on gcc < 12)
+gcc targets use only the hand-placed `__afl_map_edge()` calls:
+
+Those hand-placed `__afl_map_edge()` calls sit
 in the target wrapper sources. Those see the wrapper's own branching, but not
 the branching inside the library being fuzzed. Measured on
 `targets/png_read.c` with an identical seed:

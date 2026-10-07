@@ -43,7 +43,11 @@ def _extract_fuzzgoat_compile() -> str:
     end = text.index("# ── Build a target")
     body = text[start:end]
     assert "compile_fuzzgoat_object() {" in body
-    return body
+    # The object's coverage flag now comes from cov_flag_for_cc (clang: guards,
+    # gcc: trace-pc), which the extracted function calls.
+    h0 = text.index("cov_flag_for_cc() {")
+    helper = text[h0 : text.index("\n}\n", h0) + 3]
+    return helper + "\n" + body
 
 
 class TestObjectCarriesCoverage:

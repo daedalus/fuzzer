@@ -415,6 +415,7 @@ class TestBuildScriptModes:
         script = (
             f"VENDOR={tmp_path / 'vendor'}\nBUILD_LOG={tmp_path / 'log'}\n"
             f"SANCOV_FLAG=-fsanitize-coverage={COUNTERS}\n"
+            f"{_bash_fn('cov_flag_for_cc')}\n"
             f"{_bash_fn('compile_fuzzgoat_object')}\ncompile_fuzzgoat_object {suffix} '' clang"
         )
         try:

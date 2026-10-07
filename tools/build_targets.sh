@@ -8,6 +8,7 @@
 #   tools/build_targets.sh --cmplog                   # Include cmplog in .so targets (default: on; explicit for clarity)
 #   tools/build_targets.sh --asan --cmplog            # Same as default
 #   tools/build_targets.sh --clang-scov               # Clang + compiler-inserted edge coverage (sancov)
+#   tools/build_targets.sh --gcc-scov                 # gcc >= 12 + trace-pc edge coverage (no trace-pc-guard in gcc)
 #   tools/build_targets.sh --sancov=inline-8bit-counters,pc-table  # Other sancov modes (implies --clang-scov)
 #   tools/build_targets.sh --indir-cov                # Add indirect-call (site, callee) coverage (implies --clang-scov)
 #   tools/build_targets.sh --tracecmp                 # Clang + compiler-IR comparison tracing
@@ -339,6 +340,7 @@ ASAN_CFLAGS="-fsanitize=address -fsanitize-recover=address"
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
 WITH_INDIR_COV=0
+WITH_GCC_SCOV=0   # --gcc-scov: gcc -fsanitize-coverage=trace-pc on the targets
 WITH_DISTANCE=0
 WITH_NGRAM=0
 WITH_MSAN=0
@@ -355,6 +357,7 @@ for arg in "$@"; do
     [ "$arg" = "--no-tracecmp" ] && WITH_TRACECMP=0
     [ "$arg" = "--vendor-tracecmp" ] && WITH_VENDOR_TRACECMP=1
     [ "$arg" = "--clang-scov" ] && WITH_CLANG_SCOV=1
+    [ "$arg" = "--gcc-scov" ] && WITH_GCC_SCOV=1
     [ "$arg" = "--indir-cov" ] && WITH_INDIR_COV=1 && WITH_CLANG_SCOV=1
     [ "$arg" = "--ffmpeg-sancov" ] && WITH_FFMPEG_SANCOV=1
     [ "$arg" = "--distance" ] && WITH_DISTANCE=1
@@ -721,15 +724,18 @@ select_png_zlib_libs() {
 #   gcc   (manual __afl_map_edge only)        ->   0 call sites,  43 bitmap slots
 #
 # gcc's -fsanitize-coverage= accepts only trace-pc and trace-cmp, not the
-# trace-pc-guard variant the AFL shim's edge callbacks are built on. The one
-# gcc-compatible callback the shim implements, __sanitizer_cov_trace_pc(), is
-# compiled only under __AFL_DISTANCE_MODE and depends on the AFLGo distance
-# SHM — without it, gcc builds link but crash at runtime. So gcc targets fall
-# back to the hand-placed __afl_map_edge() calls in the target wrappers, which
-# see the wrapper's own branching but not the library internals underneath.
+# trace-pc-guard variant the AFL shim's guard callbacks are built on. gcc
+# builds use trace-pc instead (see cov_flag_for_cc below): the shim's
+# __sanitizer_cov_trace_pc() is defined in every build and, on gcc >= 12, the
+# shim excludes its own code from instrumentation (it used to recurse until
+# the stack overflowed). Library objects get gcc trace-pc automatically; target
+# wrappers get it with --gcc-scov, mirroring --clang-scov. Edge ids differ from
+# a clang build of the same source (PC-keyed, not guard-indexed), so share
+# corpora by seed bytes, never by edge map.
 #
-# gcc still builds every target correctly and is a fine fallback; it just
-# yields shallower coverage. See README "Feature Compatibility Matrix".
+# Without GCC_TRACE_PC (or on gcc < 12) targets fall back to the hand-placed
+# __afl_map_edge() calls in the wrappers: shallower coverage, still working.
+# See README "Feature Compatibility Matrix".
 _pick_cc() {
     if [ "${USE_CCACHE:-1}" = "1" ] && command -v ccache &>/dev/null; then
         # Wrap clang with ccache. The `$cc` substitutions in compile_target
@@ -754,6 +760,34 @@ _pick_cc() {
     fi
 }
 DEFAULT_CC="$(_pick_cc)"
+
+# ── Per-compiler coverage flag ──────────────────────────────────────
+#
+# clang: -fsanitize-coverage=trace-pc-guard (or whatever --sancov chose).
+# gcc:   -fsanitize-coverage=trace-pc, plus trace-cmp under --cmplog. gcc has
+#        no trace-pc-guard, so its edges arrive through the shim's
+#        __sanitizer_cov_trace_pc (PC-keyed ids); needs gcc >= 12 because the
+#        shim marks its own code with no_sanitize_coverage and older gcc would
+#        instrument the callback itself and recurse.
+# GCC_TRACE_PC=0 restores the old behaviour (no coverage flag under gcc).
+# Prints nothing when the compiler cannot take one.
+GCC_TRACE_PC="${GCC_TRACE_PC:-1}"
+cov_flag_for_cc() {
+    local cc="$1" major
+    case "$cc" in
+        *clang*) echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"; return 0 ;;
+    esac
+    [ "$GCC_TRACE_PC" = "1" ] || return 0
+    # shellcheck disable=SC2086
+    major="$($cc -dumpversion 2>/dev/null | cut -d. -f1)"
+    case "$major" in ''|*[!0-9]*) return 0 ;; esac
+    [ "$major" -ge 12 ] || return 0
+    if [ "${WITH_CMPLOG:-0}" -eq 1 ]; then
+        echo "-fsanitize-coverage=trace-pc,trace-cmp"
+    else
+        echo "-fsanitize-coverage=trace-pc"
+    fi
+}
 
 # ── Compile perf_shim.so ─────────────────────────────────────────
 compile_perf_shim() {
@@ -837,11 +871,8 @@ compile_grep_objects() {
     local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
     [ -f "$GREP_SRC/lib/libgreputils.a" ] || return 1
     echo "Compiling grep objects${suffix:+ ($suffix)}..."
-    local cov_flag="${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"
-    case "$cc" in
-        *clang*) ;;
-        *) cov_flag="" ;;   # gcc has no trace-pc-guard; see _pick_cc
-    esac
+    local cov_flag
+    cov_flag="$(cov_flag_for_cc "$cc")"   # clang: trace-pc-guard; gcc: trace-pc
     local rc=0
     for src in lib/dfa lib/localeinfo src/kwset; do
         $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
@@ -885,7 +916,8 @@ compile_secp256k1_objects() {
     # emitting __afl_map_shm / __afl_area (those stay in the wrapper only via
     # -include $SHIM). This gives real library-level coverage without the
     # multiple-definition errors that -include $SHIM would cause.
-    local cov_flag="${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"
+    local cov_flag
+    cov_flag="$(cov_flag_for_cc "$cc")"   # gcc rejects trace-pc-guard; it gets trace-pc
     for src in secp256k1 precomputed_ecmult precomputed_ecmult_gen; do
         $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $module_flags \
             -I"$SECP256K1/src" -I"$SECP256K1/include" \
@@ -934,14 +966,11 @@ compile_sqlite_objects() {
     local rc=0
     # trace-pc-guard is clang-only (see _pick_cc): gcc's -fsanitize-coverage=
     # takes trace-pc and trace-cmp and errors out on this one, which would
-    # fail the whole compile and drop the target on a gcc-only box. Under gcc
-    # the object is built without it and coverage falls back to the wrapper's
-    # hand-placed __afl_map_edge() landmarks — shallower, but a working
-    # target beats a skipped one.
-    local cov_flag=""
-    case "$cc" in
-        *clang*) cov_flag="${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}" ;;
-    esac
+    # fail the whole compile and drop the target on a gcc-only box.
+    # cov_flag_for_cc hands gcc trace-pc instead (GCC_TRACE_PC=0 restores the
+    # old uninstrumented-object behaviour).
+    local cov_flag
+    cov_flag="$(cov_flag_for_cc "$cc")"
     $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $SQLITE_DEFINES -I"$SQLITE" \
         -c "$SQLITE/sqlite3.c" -o "/tmp/sqlite3${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
@@ -969,11 +998,8 @@ compile_fuzzgoat_object() {
     # the .so was silently uninstrumented (88 trace refs, 0 in json_parse_ex)
     # while its PIE sibling had 198.  Per-suffix path so one pass's object
     # cannot clobber another's before its link.
-    local cov_flag="${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"
-    case "$cc" in
-        *clang*) ;;
-        *) cov_flag="" ;;   # gcc has no trace-pc-guard; see _pick_cc
-    esac
+    local cov_flag
+    cov_flag="$(cov_flag_for_cc "$cc")"   # clang: trace-pc-guard; gcc: trace-pc
     $cc $flags $cov_flag -O2 -g $extra_cflags -I"$VENDOR/fuzzgoat" \
         -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o "/tmp/fuzzgoat${suffix}.o" 2>>"$BUILD_LOG"
 }
@@ -1925,7 +1951,7 @@ verify_shm_run() {
 # "AFL instrumentation: detected" and then `shm: 0` for the whole campaign.
 # Check the thing that actually produces edges.
 verify_sancov() {
-    [ "$WITH_CLANG_SCOV" -eq 0 ] && return 0
+    [ "$WITH_CLANG_SCOV" -eq 0 ] && [ "$WITH_GCC_SCOV" -eq 0 ] && return 0
     echo "Verifying sancov instrumentation in .so targets..."
     local ok_count=0
     local fail_count=0
@@ -1939,7 +1965,12 @@ verify_sancov() {
         # section is emitted by -fsanitize-coverage=trace-pc-guard, and it is
         # the array the instrumented call sites index into. --sancov builds
         # carry __sancov_cntrs / __sancov_bools instead (inline modes).
-        if readelf -S "$f" 2>/dev/null | grep -qE "__sancov_(guards|cntrs|bools)"; then
+        # gcc's trace-pc leaves no section, only calls to the shim callback. The
+        # shim excludes its own code from instrumentation under gcc, so any call
+        # means the target itself was instrumented.
+        if readelf -S "$f" 2>/dev/null | grep -qE "__sancov_(guards|cntrs|bools)" ||
+            { [ "$WITH_GCC_SCOV" -eq 1 ] &&
+              objdump -d "$f" 2>/dev/null | grep -qE "call.*<__sanitizer_cov_trace_pc(@plt)?>"; }; then
             ok_count=$((ok_count + 1))
         else
             warn "$(basename "$f"): no __sancov_{guards,cntrs,bools} — in-process modes record ZERO edges"
@@ -2556,6 +2587,8 @@ print_feature_matrix() {
     printf "  %-20s %-12s %s\n" "tracecmp" "$state" "compiler-IR tracing + no-builtin cmp (clang)"
     state=$([ "$WITH_CLANG_SCOV" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "clang-scov" "$state" "compiler-inserted edge coverage (clang)"
+    state=$([ "$WITH_GCC_SCOV" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "gcc-scov" "$state" "compiler-inserted edge coverage (gcc trace-pc)"
     state=$([ "$WITH_VENDOR_TRACECMP" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "vendor-tracecmp" "$state" "rebuild vendor libs + targets with trace-cmp (clang)"
     state=$([ "$WITH_DISTANCE" -eq 1 ] && echo "ON" || echo "OFF")
@@ -2707,6 +2740,32 @@ if [ "$WITH_CLANG_SCOV" -eq 1 ]; then
         if [ "$BUILD_ASAN" -eq 1 ]; then
             build_simple_so_targets "_ubsan" "-fsanitize=undefined" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
             build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "Clang-scov" "$SCOV_CC" "$SCOV_FLAGS"
+        fi
+    fi
+fi
+# ── gcc trace-pc pass (--gcc-scov) ──────────────────────────────────
+# The gcc counterpart of the clang-scov pass: same outputs, instrumented with
+# -fsanitize-coverage=trace-pc so the shim's __sanitizer_cov_trace_pc produces
+# the edges. Narrower on purpose: the vendored-library, fgrep and UBSAN
+# variants stay with the clang pass, whose helpers hard-code clang flags.
+if [ "$WITH_GCC_SCOV" -eq 1 ]; then
+    GCC_SCOV_CC="gcc"
+    GCC_SCOV_FLAGS="$(cov_flag_for_cc "$GCC_SCOV_CC")"
+    if ! command -v gcc &>/dev/null; then
+        warn "gcc not found — --gcc-scov requires gcc"
+    elif [ -z "$GCC_SCOV_FLAGS" ]; then
+        warn "--gcc-scov needs gcc >= 12 and GCC_TRACE_PC=1 (found: $(gcc -dumpversion 2>/dev/null))"
+    else
+        build_simple_targets "_asan" "$ASAN_CFLAGS" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
+        build_simple_targets "_nosan" "" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
+        build_simple_so_targets "_asan" "$ASAN_CFLAGS" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
+        build_simple_so_targets "_nosan" "" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
+        build_standalone_so_targets "_asan" "$ASAN_CFLAGS" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
+        build_standalone_so_targets "_nosan" "" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
+        # UBSAN .so variants carry fuzz_shm_run too; same gate as the clang pass.
+        if [ "$BUILD_ASAN" -eq 1 ]; then
+            build_simple_so_targets "_ubsan" "-fsanitize=undefined" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
+            build_standalone_so_targets "_ubsan" "-fsanitize=undefined" "Gcc-scov" "$GCC_SCOV_CC" "$GCC_SCOV_FLAGS"
         fi
     fi
 fi

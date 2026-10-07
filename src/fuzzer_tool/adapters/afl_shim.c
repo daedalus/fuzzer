@@ -172,6 +172,19 @@
 #  define __AFL_NO_COV
 #endif
 
+/* gcc, unlike clang, does not skip functions named __sanitizer_cov_*, so under
+ * -fsanitize-coverage=trace-pc every shim function that the -include drags into
+ * the target TU gets a call to __sanitizer_cov_trace_pc -- including that
+ * callback itself, which recurses until the stack is gone. __AFL_GCC_NO_COV
+ * marks shim code gcc must leave alone. It is empty under clang on purpose:
+ * clang's guard numbering (and so every edge id) must not move. Needs gcc >= 12
+ * (no_sanitize_coverage); build_targets.sh refuses trace-pc on older gcc. */
+#if !defined(__clang__)
+#  define __AFL_GCC_NO_COV __AFL_NO_COV
+#else
+#  define __AFL_GCC_NO_COV
+#endif
+
 /* ── Shim state lives in its own sections ─────────────────────────────
  *
  * The shim is -include'd into the target TU, so its writable globals share
@@ -798,7 +811,7 @@ static uint8_t   __afl_generation = 0;          /* generation counter for tag-ba
 /* Parse a SysV segment id from the environment: decimal, non-negative,
  * fits an int, nothing trailing. -1 otherwise. atoi() could not fail:
  * "123junk" attached segment 123 and "banana" attached segment 0. */
-static int __afl_parse_shmid(const char *s) {
+__AFL_GCC_NO_COV static int __afl_parse_shmid(const char *s) {
     errno = 0;
     char *end = NULL;
     long v = strtol(s, &end, 10);
@@ -812,13 +825,13 @@ static int __afl_parse_shmid(const char *s) {
  * must not print and count it again. */
 static int __afl_shm_refused = 0;
 
-static void __afl_refuse_shm(void) {
+__AFL_GCC_NO_COV static void __afl_refuse_shm(void) {
     __afl_shm_refused = 1;
     __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
 }
 
 __attribute__((visibility("default")))
-void __afl_map_shm(void) {
+__AFL_GCC_NO_COV void __afl_map_shm(void) {
     char *id = getenv("__AFL_SHM_ID");
     if (!id) return;   /* not under the fuzzer — silence is correct here */
     if (__afl_shm_refused) return;
@@ -989,7 +1002,7 @@ void __afl_map_shm(void) {
 static void __afl_check_crash_handlers(void);
 
 __attribute__((visibility("default")))
-uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
+__AFL_GCC_NO_COV uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
     __afl_check_crash_handlers();
     __afl_health[__AFL_HEALTH_ATTACHED] = __afl_area != NULL;
     __afl_health[__AFL_HEALTH_MAP_ENTRIES] = __afl_map_size;
@@ -1616,7 +1629,7 @@ __AFL_NO_COV static void __afl_probe_distance(uint64_t key);
 #endif
 
 __attribute__((visibility("hidden")))
-void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
+__AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
     if (!guard || *guard == 0) return;
     __afl_map_loc(*guard);
 #if __AFL_DISTANCE_MODE
@@ -1668,7 +1681,7 @@ __AFL_NO_COV static inline uint64_t __sfuzz_mix(unsigned slot, uint64_t v) {
 }
 
 __attribute__((visibility("default")))
-void __sfuzz_state(unsigned var_id, unsigned long long value) {
+__AFL_GCC_NO_COV void __sfuzz_state(unsigned var_id, unsigned long long value) {
     unsigned slot = var_id % SFUZZ_MAX_VARS;
     uint64_t prev = __sfuzz_prev[slot];
     __sfuzz_prev[slot] = (uint64_t)value;
@@ -1721,7 +1734,7 @@ __AFL_NO_COV static void __ltl_emit(uint32_t id, uint32_t offset) {
 }
 
 __attribute__((visibility("default")))
-void __fuzz_event_at(unsigned id, unsigned offset) {
+__AFL_GCC_NO_COV void __fuzz_event_at(unsigned id, unsigned offset) {
     uint64_t h = 1469598103934665603ULL;
     h = (h ^ __ltl_prev_event) * 1099511628211ULL;
     h = (h ^ id) * 1099511628211ULL;
@@ -1732,7 +1745,7 @@ void __fuzz_event_at(unsigned id, unsigned offset) {
 }
 
 __attribute__((visibility("default")))
-void __fuzz_event(unsigned id) {
+__AFL_GCC_NO_COV void __fuzz_event(unsigned id) {
     __fuzz_event_at(id, LTL_NO_OFFSET);
 }
 
@@ -1793,7 +1806,7 @@ __AFL_NO_COV static uint32_t __afl_guard_width(uint64_t n) {
 #define __AFL_GUARD_SALT 0xd1b54a32d192ed03ULL
 
 __attribute__((visibility("hidden")))
-void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
+__AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
     static uint32_t guard_counter;
     if (start == stop || *start) return;
     uint32_t mask = __afl_guard_width((uint64_t)(stop - start) + guard_counter);
@@ -1861,17 +1874,17 @@ __AFL_NO_COV static void __afl_sancov_register(uint8_t *start, uint8_t *stop) {
 }
 
 __attribute__((visibility("hidden")))
-void __sanitizer_cov_8bit_counters_init(uint8_t *start, uint8_t *stop) {
+__AFL_GCC_NO_COV void __sanitizer_cov_8bit_counters_init(uint8_t *start, uint8_t *stop) {
     __afl_sancov_register(start, stop);
 }
 
 __attribute__((visibility("hidden")))
-void __sanitizer_cov_bool_flag_init(uint8_t *start, uint8_t *stop) {
+__AFL_GCC_NO_COV void __sanitizer_cov_bool_flag_init(uint8_t *start, uint8_t *stop) {
     __afl_sancov_register(start, stop);
 }
 
 __attribute__((visibility("hidden")))
-void __sanitizer_cov_pcs_init(const uintptr_t *start, const uintptr_t *stop) {
+__AFL_GCC_NO_COV void __sanitizer_cov_pcs_init(const uintptr_t *start, const uintptr_t *stop) {
     (void)start;
     (void)stop;
 }
@@ -2011,7 +2024,7 @@ __AFL_NO_COV static inline void __afl_dataflow(void *addr, void *pc) {
 
 /* The return address must be taken in the callback's own body. */
 #define __AFL_DATAFLOW_CB(name)                                     \
-    __attribute__((visibility("hidden"))) void name(void *addr) {   \
+    __AFL_GCC_NO_COV __attribute__((visibility("hidden"))) void name(void *addr) {   \
         __afl_dataflow(addr, __builtin_return_address(0));          \
     }
 
@@ -2057,6 +2070,67 @@ void __sanitizer_cov_trace_pc_indir(uintptr_t callee) {
     __afl_map_id(__AFL_SYNTH_ID(h >> 32));
 }
 
+/* ── PC-keyed edge coverage (-fsanitize-coverage=trace-pc) ─────────────
+ *
+ * Independent of the AFLGo distance channel: gcc has no trace-pc-guard, so
+ * trace-pc is how a gcc build gets automatic edge coverage at all, and it must
+ * keep working under -D__AFL_DISTANCE_MODE=0 (distance only adds the table
+ * probe below). Under clang the edge id stays `key >> 1`, bit-identical to
+ * what ngram/distance builds produced before this section was un-gated.
+ *
+ * Non-clang ids are mixed (same splitmix finalizer the guard ids go through)
+ * and masked to __AFL_TRACEPC_BITS. The raw key is a sparse code offset whose
+ * low bits are shared by neighbouring blocks, so prev ^ cur would alias. The
+ * mask is private to this callback and never touches __afl_loc_mask, so
+ * hand-written __afl_map_edge ids in the same binary keep their width. */
+#ifndef __AFL_TRACEPC_BITS
+#define __AFL_TRACEPC_BITS 20
+#endif
+#if __AFL_TRACEPC_BITS > 24 || __AFL_TRACEPC_BITS < 8
+#error "__AFL_TRACEPC_BITS must be in [8, 24] (see VIRGIN_DENSE_MAX)"
+#endif
+#define __AFL_TRACEPC_SALT 0x3c6ef372fe94f82bULL
+
+static uint64_t   __afl_base = 0;           /* dladdr-derived object base */
+
+/* PC -> base-relative key, resolving __afl_base lazily on first use (any
+ * caller works to resolve it -- dladdr identifies the mapped object, not
+ * the specific PC within it). Shared by __sanitizer_cov_trace_pc() and
+ * __sanitizer_cov_trace_pc_guard(); matches the forward declaration above
+ * so the guard callback, defined earlier in this file, can call it. */
+__AFL_NO_COV static uint64_t __afl_pc_key(uintptr_t pc) {
+    if (__afl_base == 0) {
+        Dl_info info;
+        if (dladdr((void *)pc, &info) && info.dli_fbase)
+            __afl_base = (uintptr_t)info.dli_fbase;
+        else
+            __afl_base = 1;  /* dladdr failed — treat the PC as absolute */
+    }
+    return (uint64_t)pc - __afl_base;
+}
+
+/* Hidden visibility: same PLT-interposition rationale as the guard
+ * callbacks -- the CLI's libasan LD_PRELOAD must not shadow this.
+ * __AFL_GCC_NO_COV is load-bearing: without it gcc instruments this very
+ * function and recurses (see its definition). */
+__AFL_GCC_NO_COV __attribute__((visibility("hidden")))
+void __sanitizer_cov_trace_pc(void) {
+    uintptr_t pc = (uintptr_t)__builtin_return_address(0);
+    uint64_t key = __afl_pc_key(pc);
+
+#if defined(__clang__)
+    /* Edge coverage: PC-based (prev_loc ^ cur_loc, same sparse table). */
+    __afl_map_loc((uint32_t)(key >> 1));
+#else
+    uint32_t v = __afl_guard_mix(key ^ __AFL_TRACEPC_SALT) &
+                 (uint32_t)((1ULL << __AFL_TRACEPC_BITS) - 1);
+    __afl_map_loc(v ? v : 1);
+#endif
+#if __AFL_DISTANCE_MODE
+    __afl_probe_distance(key);
+#endif
+}
+
 /* ── AFLGo distance channel (__AFL_DISTANCE_MODE builds only) ─────────
  *
  * Distance builds compile the target with -fsanitize-coverage=trace-pc
@@ -2090,7 +2164,6 @@ struct __afl_dist_entry {
 
 static uint32_t  *__afl_dist_count = NULL;  /* entries + count at segment head */
 static struct __afl_dist_entry *__afl_dist_table = NULL;
-static uint64_t   __afl_base = 0;           /* dladdr-derived object base */
 static uint64_t   __afl_dist_sum = 0;
 static uint64_t   __afl_dist_hits = 0;
 
@@ -2103,7 +2176,7 @@ static uint32_t   __afl_node_bitmap_bytes = 0;
 /* Attach an auxiliary segment whose u32 header sizes its payload, and
  * refuse it when header + payload overruns the segment: both headers are
  * trusted as loop bounds on the hot path. Returns NULL on any failure. */
-static void *__afl_attach_sized(const char *env, uint64_t entry_bytes) {
+__AFL_GCC_NO_COV static void *__afl_attach_sized(const char *env, uint64_t entry_bytes) {
     char *id = getenv(env);
     if (!id) return NULL;
     int shmid = __afl_parse_shmid(id);
@@ -2128,7 +2201,7 @@ static void *__afl_attach_sized(const char *env, uint64_t entry_bytes) {
     return p;
 }
 
-static void __afl_map_node_shm(void) {
+__AFL_GCC_NO_COV static void __afl_map_node_shm(void) {
     void *p = __afl_attach_sized("__AFL_NODE_BITMAP_ID", 1);
     if (!p) return;
     uint32_t bytes = *(uint32_t *)p;
@@ -2137,27 +2210,11 @@ static void __afl_map_node_shm(void) {
     __afl_node_bitmap = (uint8_t *)((uint8_t *)p + 4);
 }
 
-static void __afl_map_dist_shm(void) {
+__AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
     void *p = __afl_attach_sized("__AFL_DIST_SHM_ID", sizeof(struct __afl_dist_entry));
     if (!p) return;
     __afl_dist_count = (uint32_t *)p;
     __afl_dist_table = (struct __afl_dist_entry *)((uint8_t *)p + 4);
-}
-
-/* PC -> base-relative key, resolving __afl_base lazily on first use (any
- * caller works to resolve it -- dladdr identifies the mapped object, not
- * the specific PC within it). Shared by __sanitizer_cov_trace_pc() and
- * __sanitizer_cov_trace_pc_guard(); matches the forward declaration above
- * so the guard callback, defined earlier in this file, can call it. */
-__AFL_NO_COV static uint64_t __afl_pc_key(uintptr_t pc) {
-    if (__afl_base == 0) {
-        Dl_info info;
-        if (dladdr((void *)pc, &info) && info.dli_fbase)
-            __afl_base = (uintptr_t)info.dli_fbase;
-        else
-            __afl_base = 1;  /* dladdr failed — treat the PC as absolute */
-    }
-    return (uint64_t)pc - __afl_base;
 }
 
 /* Distance-table lookup + node-bitmap probe for one already-computed key.
@@ -2187,25 +2244,13 @@ __AFL_NO_COV static void __afl_probe_distance(uint64_t key) {
     }
 }
 
-/* Hidden visibility: same PLT-interposition rationale as the guard
- * callbacks — the CLI's libasan LD_PRELOAD must not shadow this. */
-__attribute__((visibility("hidden")))
-void __sanitizer_cov_trace_pc(void) {
-    uintptr_t pc = (uintptr_t)__builtin_return_address(0);
-    uint64_t key = __afl_pc_key(pc);
-
-    /* Edge coverage: PC-based (prev_loc ^ cur_loc, same sparse table). */
-    __afl_map_loc((uint32_t)(key >> 1));
-    __afl_probe_distance(key);
-}
-
 #endif /* __AFL_DISTANCE_MODE */
 
 #if __AFL_DISTANCE_MODE
 /* Write the accumulated distance sum/count to the SHM tail (16 bytes
  * past the edge table; the Python side always allocates them).
  * count==0 means "no distance data" for the reader. */
-static void __afl_write_distance_tail(void) {
+__AFL_GCC_NO_COV static void __afl_write_distance_tail(void) {
     if (__afl_area) {
         uint64_t *dist_sum = (uint64_t *)((uint8_t *)__afl_area +
                                           __afl_map_size * sizeof(struct __afl_entry));
@@ -2231,7 +2276,7 @@ static void __afl_write_distance_tail(void) {
  * metadata region so Python can read them, then resets accumulators. */
 
 __attribute__((visibility("default")))
-void __afl_map_reset(void) {
+__AFL_GCC_NO_COV void __afl_map_reset(void) {
     if (__afl_area) {
         /* Advance the tag that is actually in effect, which lives in the
          * diag word: __afl_map_edge reads it from there, and the fuzzer's
@@ -2321,7 +2366,7 @@ void __afl_map_reset(void) {
  * touching the edge table (the fuzzer reads coverage after the run).
  * The Python runner calls it after each in-process run. */
 __attribute__((visibility("default")))
-void __afl_dist_flush(void) {
+__AFL_GCC_NO_COV void __afl_dist_flush(void) {
     __afl_write_distance_tail();
     __afl_dist_sum = 0;
     __afl_dist_hits = 0;
@@ -2331,7 +2376,7 @@ void __afl_dist_flush(void) {
  * at process exit instead.  (Persistent/in-process loops call reset per
  * iteration and the destructor only repeats the final values.) */
 __attribute__((destructor))
-static void __afl_write_distance_tail_exit(void) {
+__AFL_GCC_NO_COV static void __afl_write_distance_tail_exit(void) {
     __afl_write_distance_tail();
 }
 #endif /* __AFL_DISTANCE_MODE */
@@ -2866,7 +2911,7 @@ __AFL_NO_COV static void __afl_cmplog_flush(void) {
  * sprintf() was used for the result/width/pc fields. Hand-rolling them
  * keeps the whole record writer callable from __afl_crash_handler and
  * removes a printf parse from the hot path. */
-static char *__afl_put_i64(char *p, int64_t v) {
+__AFL_GCC_NO_COV static char *__afl_put_i64(char *p, int64_t v) {
     if (v < 0) { *p++ = '-'; v = -v; }
     char tmp[20];
     int n = 0;
@@ -2875,7 +2920,7 @@ static char *__afl_put_i64(char *p, int64_t v) {
     return p;
 }
 
-static char *__afl_put_hex64(char *p, uint64_t v) {
+__AFL_GCC_NO_COV static char *__afl_put_hex64(char *p, uint64_t v) {
     static const char hex[] = "0123456789abcdef";
     *p++ = '0'; *p++ = 'x';
     char tmp[16];
@@ -2885,7 +2930,7 @@ static char *__afl_put_hex64(char *p, uint64_t v) {
     return p;
 }
 
-static char *__afl_put_hexbytes(char *p, const unsigned char *b, size_t n) {
+__AFL_GCC_NO_COV static char *__afl_put_hexbytes(char *p, const unsigned char *b, size_t n) {
     static const char hex[] = "0123456789abcdef";
     for (size_t i = 0; i < n; i++) {
         *p++ = hex[b[i] >> 4];
@@ -3191,7 +3236,7 @@ __AFL_NO_COV static inline void __afl_cmplog_ints(uint64_t a, uint64_t b, size_t
 
 static __thread int __afl_in_dlsym = 0;
 
-static void *__afl_next_sym(const char *name) {
+__AFL_GCC_NO_COV static void *__afl_next_sym(const char *name) {
     if (__afl_in_dlsym) return NULL;
     __afl_in_dlsym = 1;
     void *p = dlsym(RTLD_NEXT, name);
@@ -3264,12 +3309,12 @@ __AFL_NO_COV static int __afl_fb_strncasecmp(const char *a, const char *b, size_
 __AFL_NO_COV static int __afl_fb_strcasecmp(const char *a, const char *b) {
     return __afl_fb_strncasecmp(a, b, (size_t)-1);
 }
-static void *__afl_fb_memchr(const void *s, int c, size_t n) {
+__AFL_GCC_NO_COV static void *__afl_fb_memchr(const void *s, int c, size_t n) {
     const unsigned char *p = s;
     for (size_t i = 0; i < n; i++) if (p[i] == (unsigned char)c) return (void *)(p + i);
     return NULL;
 }
-static void *__afl_fb_memmem(const void *h, size_t hl, const void *n, size_t nl) {
+__AFL_GCC_NO_COV static void *__afl_fb_memmem(const void *h, size_t hl, const void *n, size_t nl) {
     if (nl == 0) return (void *)h;
     if (hl < nl) return NULL;
     const unsigned char *p = h;
@@ -3277,10 +3322,10 @@ static void *__afl_fb_memmem(const void *h, size_t hl, const void *n, size_t nl)
         if (__afl_fb_memcmp(p + i, n, nl) == 0) return (void *)(p + i);
     return NULL;
 }
-static char *__afl_fb_strstr(const char *h, const char *n) {
+__AFL_GCC_NO_COV static char *__afl_fb_strstr(const char *h, const char *n) {
     return (char *)__afl_fb_memmem(h, __afl_fb_len(h), n, __afl_fb_len(n));
 }
-static char *__afl_fb_strcasestr(const char *h, const char *n) {
+__AFL_GCC_NO_COV static char *__afl_fb_strcasestr(const char *h, const char *n) {
     size_t nl = __afl_fb_len(n), hl = __afl_fb_len(h);
     if (nl == 0) return (char *)h;
     if (hl < nl) return NULL;
@@ -4115,7 +4160,7 @@ static volatile sig_atomic_t __afl_handlers_live = 0;
 /* Only a hardware fault re-executes into the same fault. Returning from
  * anything else loses the signal: a seccomp SIGSYS (si_code SYS_SECCOMP,
  * > 0) resumed past the trapped syscall and the violation vanished. */
-static int __afl_is_hw_fault(int sig, const siginfo_t *si) {
+__AFL_GCC_NO_COV static int __afl_is_hw_fault(int sig, const siginfo_t *si) {
     if (!si || si->si_code <= 0) return 0;
     return sig == SIGSEGV || sig == SIGBUS || sig == SIGFPE || sig == SIGILL;
 }
@@ -4128,7 +4173,7 @@ static int __afl_is_hw_fault(int sig, const siginfo_t *si) {
 #define __AFL_ALTSTACK_SIZE (64 * 1024)
 static __thread int __afl_altstack_ready = 0;
 
-static void __afl_install_altstack(void) {
+__AFL_GCC_NO_COV static void __afl_install_altstack(void) {
     __afl_altstack_ready = 1;
 
     stack_t cur;
@@ -4144,7 +4189,7 @@ static void __afl_install_altstack(void) {
     if (sigaltstack(&ss, NULL) != 0) munmap(mem, __AFL_ALTSTACK_SIZE);
 }
 
-static void __afl_restore_crash_handlers(void) {
+__AFL_GCC_NO_COV static void __afl_restore_crash_handlers(void) {
     for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++)
         sigaction(__afl_guard_signals[i], &__afl_old_handlers[i], NULL);
     __afl_handlers_live = 0;
@@ -4228,7 +4273,7 @@ __AFL_NO_COV static uintptr_t __afl_sym_pc_of(void *uc) {
 
 /* backtrace() lazily dlopens libgcc_s on first use (malloc, locks): do that
  * once at load, never first inside a signal handler. */
-__attribute__((constructor)) static void __afl_sym_prime(void) {
+__AFL_GCC_NO_COV __attribute__((constructor)) static void __afl_sym_prime(void) {
     void *tmp[2];
     (void)backtrace(tmp, 2);
 }
@@ -4322,7 +4367,7 @@ __AFL_NO_COV static void __afl_sym_emit(void) {
 #define __afl_sym_emit() ((void)0)
 #endif
 
-static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
+__AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
     #if __AFL_CMPLOG
     /* Flush before escaping. cmplog_shim.c installed a second handler for
      * this and restored the previous disposition from inside it, so the
@@ -4364,7 +4409,7 @@ static void __afl_crash_handler(int sig, siginfo_t *si, void *uc) {
     raise(sig);
 }
 
-static void __afl_install_crash_handlers(void) {
+__AFL_GCC_NO_COV static void __afl_install_crash_handlers(void) {
     struct sigaction sa;
     sa.sa_sigaction = __afl_crash_handler;
     sigemptyset(&sa.sa_mask);
@@ -4379,7 +4424,7 @@ static void __afl_install_crash_handlers(void) {
  * unable to recover -- the host's handler returns, the fault re-executes,
  * forever. Count it and let the next guarded call take the signals back;
  * the host's handler becomes the "previous owner" stray signals go to. */
-static void __afl_check_crash_handlers(void) {
+__AFL_GCC_NO_COV static void __afl_check_crash_handlers(void) {
     if (!__afl_handlers_live) return;
     struct sigaction cur;
     for (int i = 0; i < __afl_NUM_GUARD_SIGNALS; i++) {
@@ -4428,7 +4473,7 @@ static __thread uint64_t __afl_tick_epoch = 0;
 static __thread uint32_t __afl_tick_count = 0;
 static int __afl_timeout_handler_live = 0;
 
-static void __afl_timeout_handler(int sig, siginfo_t *si, void *uc) {
+__AFL_GCC_NO_COV static void __afl_timeout_handler(int sig, siginfo_t *si, void *uc) {
     (void)sig; (void)uc;
     sigjmp_buf *jb = __afl_guard_jmp;
     if (!jb || !__afl_guard_timed || !si || si->si_code != SI_TIMER) return;
@@ -4441,7 +4486,7 @@ static void __afl_timeout_handler(int sig, siginfo_t *si, void *uc) {
         siglongjmp(*jb, __AFL_JMP_TIMEOUT);
 }
 
-static int __afl_timer_ready(void) {
+__AFL_GCC_NO_COV static int __afl_timer_ready(void) {
     if (__afl_timer_state) return __afl_timer_state > 0;
     __afl_timer_state = -1;
 
@@ -4465,7 +4510,7 @@ static int __afl_timer_ready(void) {
 }
 
 /* Reprogram the periodic tick for a new budget; a no-op when unchanged. */
-static void __afl_timer_budget(uint64_t budget_us) {
+__AFL_GCC_NO_COV static void __afl_timer_budget(uint64_t budget_us) {
     if (budget_us == __afl_timer_budget_us) return;
     __afl_timer_budget_us = budget_us;
 
@@ -4490,7 +4535,7 @@ static void __afl_timer_budget(uint64_t budget_us) {
  *   -1       the timeout expired (__afl_guarded_call_timeout only)
  * Matches the subprocess convention (run_target_stdin returns -sig, an
  * exit status, or -1 for a timeout). */
-static int __afl_guard_run(int (*entry)(const uint8_t *, size_t),
+__AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t),
                            const uint8_t *data, size_t size, uint64_t timeout_us) {
     /* A stray signal handed the dispositions back, or a health read found
      * them displaced; take them again. */
@@ -4530,7 +4575,7 @@ static int __afl_guard_run(int (*entry)(const uint8_t *, size_t),
 }
 
 __attribute__((visibility("default")))
-int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
+__AFL_GCC_NO_COV int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
                        const uint8_t *data, size_t size) {
     return __afl_guard_run(entry, data, size, 0);
 }
@@ -4540,7 +4585,7 @@ int __afl_guarded_call(int (*entry)(const uint8_t *, size_t),
  * exactly as on a crash: whatever it held (locks, half-built heap state)
  * stays as it was. */
 __attribute__((visibility("default")))
-int __afl_guarded_call_timeout(int (*entry)(const uint8_t *, size_t),
+__AFL_GCC_NO_COV int __afl_guarded_call_timeout(int (*entry)(const uint8_t *, size_t),
                                const uint8_t *data, size_t size, uint64_t timeout_us) {
     return __afl_guard_run(entry, data, size, timeout_us);
 }
@@ -4548,7 +4593,7 @@ int __afl_guarded_call_timeout(int (*entry)(const uint8_t *, size_t),
 /* fork() inside a guarded entry: the child's copy of the guard frame
  * belongs to a copy of the host. Left armed, a crash in the child jumped
  * there and the child went on running the fuzzer. */
-static void __afl_guard_atfork_child(void) {
+__AFL_GCC_NO_COV static void __afl_guard_atfork_child(void) {
     __afl_guard_jmp = NULL;
     __afl_guard_timed = 0;
     __afl_timer_state = 0;      /* POSIX timers are not inherited */
@@ -4567,21 +4612,21 @@ static void __afl_guard_atfork_child(void) {
  * library objects linked into it) without interposing on the host, the
  * same pattern as the trace-pc-guard callbacks. Other shared libraries
  * keep libc's exit. */
-static void __afl_guard_escape(int status) {
+__AFL_GCC_NO_COV static void __afl_guard_escape(int status) {
     sigjmp_buf *jb = __afl_guard_jmp;
     if (jb)
         siglongjmp(*jb, __AFL_JMP_EXIT | (status & 0xFF));
 }
 
 __attribute__((visibility("hidden"), noreturn))
-void _exit(int status) {
+__AFL_GCC_NO_COV void _exit(int status) {
     __afl_guard_escape(status);
     syscall(SYS_exit_group, status);
     __builtin_unreachable();
 }
 
 __attribute__((visibility("hidden"), noreturn))
-void _Exit(int status) {
+__AFL_GCC_NO_COV void _Exit(int status) {
     _exit(status);
 }
 
@@ -4594,26 +4639,26 @@ __attribute__((visibility("hidden"), noreturn))
 void exit(int status);
 
 __attribute__((visibility("hidden"), noreturn))
-void verr(int status, const char *fmt, va_list ap) {
+__AFL_GCC_NO_COV void verr(int status, const char *fmt, va_list ap) {
     vwarn(fmt, ap);
     exit(status);
 }
 
 __attribute__((visibility("hidden"), noreturn))
-void verrx(int status, const char *fmt, va_list ap) {
+__AFL_GCC_NO_COV void verrx(int status, const char *fmt, va_list ap) {
     vwarnx(fmt, ap);
     exit(status);
 }
 
 __attribute__((visibility("hidden"), noreturn))
-void err(int status, const char *fmt, ...) {
+__AFL_GCC_NO_COV void err(int status, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     verr(status, fmt, ap);
 }
 
 __attribute__((visibility("hidden"), noreturn))
-void errx(int status, const char *fmt, ...) {
+__AFL_GCC_NO_COV void errx(int status, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     verrx(status, fmt, ap);
@@ -4621,7 +4666,7 @@ void errx(int status, const char *fmt, ...) {
 
 /* glibc error(): "prog: message[: strerror(errnum)]\n" after flushing
  * stdout; exits only for a nonzero status. */
-static void __afl_verror(int status, int errnum, const char *where, unsigned line,
+__AFL_GCC_NO_COV static void __afl_verror(int status, int errnum, const char *where, unsigned line,
                          const char *fmt, va_list ap) {
     fflush(stdout);
     fprintf(stderr, "%s:", program_invocation_name);
@@ -4634,7 +4679,7 @@ static void __afl_verror(int status, int errnum, const char *where, unsigned lin
 }
 
 __attribute__((visibility("hidden")))
-void error(int status, int errnum, const char *fmt, ...) {
+__AFL_GCC_NO_COV void error(int status, int errnum, const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
     __afl_verror(status, errnum, NULL, 0, fmt, ap);
@@ -4642,7 +4687,7 @@ void error(int status, int errnum, const char *fmt, ...) {
 }
 
 __attribute__((visibility("hidden")))
-void error_at_line(int status, int errnum, const char *file, unsigned line,
+__AFL_GCC_NO_COV void error_at_line(int status, int errnum, const char *file, unsigned line,
                    const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -4651,7 +4696,7 @@ void error_at_line(int status, int errnum, const char *file, unsigned line,
 }
 
 __attribute__((visibility("hidden"), noreturn))
-void exit(int status) {
+__AFL_GCC_NO_COV void exit(int status) {
     __afl_guard_escape(status);
     void (*real_exit)(int) = (void (*)(int))dlsym(RTLD_NEXT, "exit");
     if (real_exit)
@@ -4689,7 +4734,7 @@ void exit(int status) {
  * (stdlib.h declares abort() as __noreturn__).  The preprocessor
  * replaces all abort() calls with __afl_shim_abort() before the compiler
  * sees the declaration mismatch.                                           */
-static void __afl_shim_abort(void) {
+__AFL_GCC_NO_COV static void __afl_shim_abort(void) {
     static const char msg[] = "[shim] abort() intercepted\n";
     __afl_health[__AFL_HEALTH_ABORTS_INTERCEPTED]++;
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
@@ -4727,7 +4772,7 @@ static void __afl_shim_abort(void) {
 
 #define AFL_FORKSRV_FD 198
 
-static void __afl_start_forkserver(void) {
+__AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
     char hello[4] = {0, 0, 0, 0};
 
     /* Opt-in: only enter forkserver mode when the loader explicitly asks
@@ -4841,7 +4886,7 @@ static void __afl_start_forkserver(void) {
 
 /* Auto-attach when loaded */
 __attribute__((constructor))
-static void __afl_auto_init(void) {
+__AFL_GCC_NO_COV static void __afl_auto_init(void) {
     /* The whole startup window runs on an unusual stack (libc init →
      * constructor), which the caller-context frame walk cannot survive in
      * every build (-O1/-O2 omit frame pointers; observed SEGV in

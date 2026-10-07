@@ -12,6 +12,7 @@ separate Python process.
 
 import logging
 import os
+import re
 import struct
 from dataclasses import dataclass, field
 from typing import NamedTuple
@@ -755,6 +756,10 @@ def sancov_guard_status(target: str) -> str:
         bounds = _sancov_section_bounds(target, section)
         if bounds is not None and bounds[1] > bounds[0]:
             return "present"
+    # -fsanitize-coverage=trace-pc (gcc's only edge mode) leaves no section
+    # behind, only call sites.
+    if (trace_pc_call_sites(target) or 0) > 0:
+        return "present"
     return "absent"
 
 
@@ -851,6 +856,89 @@ def parse_sancov_guard_count(target: str) -> int | None:
     if stop <= start:
         return None
     return (stop - start) // 4
+
+
+_TRACE_PC_SYM = "__sanitizer_cov_trace_pc"
+
+
+def _static_symbol_addr(elf: bytes, name: str) -> int | None:
+    """st_value of *name* in .symtab, then .dynsym; None when absent."""
+    secs = _sym_sections(elf)
+    if secs is None:
+        return None
+    symtab, strtab, dynsym, dynstr = secs
+    want = name.encode()
+    for sym_sec, str_sec in ((symtab, strtab), (dynsym, dynstr)):
+        if sym_sec is None or str_sec is None:
+            continue
+        sym_off = struct.unpack_from("<Q", elf, sym_sec + 24)[0]
+        sym_size = struct.unpack_from("<Q", elf, sym_sec + 32)[0]
+        str_off = struct.unpack_from("<Q", elf, str_sec + 24)[0]
+        for i in range(sym_size // 24):
+            sym = sym_off + i * 24
+            st_name = struct.unpack_from("<I", elf, sym)[0]
+            at = str_off + st_name
+            if elf[at : at + len(want) + 1] != want + b"\x00":
+                continue
+            st_shndx = struct.unpack_from("<H", elf, sym + 6)[0]
+            st_value = struct.unpack_from("<Q", elf, sym + 8)[0]
+            if st_shndx != 0 and st_value > 0:  # defined, not an import
+                return st_value
+    return None
+
+
+def trace_pc_call_sites(target: str) -> int | None:
+    """Number of direct calls to ``__sanitizer_cov_trace_pc`` in *target*.
+
+    ``-fsanitize-coverage=trace-pc`` (the only automatic edge coverage gcc
+    offers) emits no guard array, so ``__sancov_guards`` is empty and the
+    guard-based checks above call such a binary uninstrumented. The call
+    sites are what actually produce its edges. Counting them is a
+    measurement of the binary, but not an exact block count: clang
+    instruments the shim's own code too, and those sites are included.
+
+    x86-64 little-endian ELF only (scans ``E8 rel32`` in executable
+    sections); needs the symbol, which lives in ``.symtab`` for the hidden
+    callback, so a stripped binary yields None, not 0.
+
+    Returns:
+        The call-site count (0 when the symbol exists but is never called),
+        or None when it cannot be determined (unsupported arch, stripped,
+        symbol absent, unreadable).
+    """
+    try:
+        with open(target, "rb") as f:
+            elf = f.read()
+        if not _elf64_le(elf) or struct.unpack_from("<H", elf, 18)[0] != 62:
+            return None
+        sym = _static_symbol_addr(elf, _TRACE_PC_SYM)
+        if sym is None:
+            return None
+        e_shoff = struct.unpack_from("<Q", elf, 40)[0]
+        e_shentsize = struct.unpack_from("<H", elf, 58)[0]
+        e_shnum = struct.unpack_from("<H", elf, 60)[0]
+        total = 0
+        for i in range(e_shnum):
+            sh = e_shoff + i * e_shentsize
+            sh_type = struct.unpack_from("<I", elf, sh + 4)[0]
+            sh_flags = struct.unpack_from("<Q", elf, sh + 8)[0]
+            if sh_type != 1 or not sh_flags & 0x4:  # PROGBITS + SHF_EXECINSTR
+                continue
+            sh_addr = struct.unpack_from("<Q", elf, sh + 16)[0]
+            sh_off = struct.unpack_from("<Q", elf, sh + 24)[0]
+            sh_size = struct.unpack_from("<Q", elf, sh + 32)[0]
+            code = elf[sh_off : sh_off + sh_size]
+            for m in re.finditer(b"\xe8", code):
+                at = m.start()
+                if at + 5 > len(code):
+                    break
+                rel = struct.unpack_from("<i", code, at + 1)[0]
+                if sh_addr + at + 5 + rel == sym:
+                    total += 1
+        return total
+    except (OSError, struct.error) as e:
+        log.debug("trace-pc call scan failed for %s: %s", target, e)
+        return None
 
 
 def find_load_segment(elf_data: bytes, vaddr: int) -> tuple[int, int, int] | None:
@@ -1777,6 +1865,9 @@ class MapSizeEstimate(NamedTuple):
     - ``"sancov_guards"`` — exact, ``__sancov_guards`` (trace-pc-guard).
     - ``"sancov_cntrs"``  — exact, ``__sancov_cntrs`` (inline-8bit-counters).
     - ``"sancov_bools"``  — exact, ``__sancov_bools`` (inline-bool-flag).
+    - ``"trace_pc_calls"`` — call sites of ``__sanitizer_cov_trace_pc``
+      (trace-pc builds, e.g. gcc). Read from the binary but not exact: clang
+      also instruments the shim, whose sites are counted.
     - ``"profile"``       — TargetProfile.total_branches.
     - ``"branch_density"`` — disassembly estimate. Approximate.
     - ``"default"``       — nothing worked; MAP_SIZE_DEFAULT.
@@ -1835,6 +1926,12 @@ def estimate_map_size_detail(target: str, profile: object | None = None) -> MapS
         bools = _sancov_section_bounds(target, "bools")
         if bools and bools[1] > bools[0]:
             blocks, source = bools[1] - bools[0], "sancov_bools"
+    if not blocks:
+        # trace-pc builds (gcc) carry no section: count call sites instead.
+        # A measurement, but not exact -- see trace_pc_call_sites.
+        tpc = trace_pc_call_sites(target)
+        if tpc:
+            blocks, source = tpc, "trace_pc_calls"
 
     # 2. Cached profile data — avoids a full-text disassembly.
     #    total_branches is a branch count, and _size_from_blocks applies
