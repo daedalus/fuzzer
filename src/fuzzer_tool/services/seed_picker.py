@@ -285,6 +285,80 @@ def _rank_by_flux(
     return best_op
 
 
+class _EdgeVectors:
+    """Per-seed edge sets as dense index arrays, for one weight pass.
+
+    ``_weight_edge_penalties`` reduces each seed's edge set against two
+    per-edge tables -- owner counts and the recent-pick window -- and did it
+    as a Python loop over the set. On FFmpeg a seed carries thousands of
+    context-sensitive edges, so one ``_compute_weights`` pass over a corpus of
+    1,500 walked ~10M dict lookups; it was the largest single cost per
+    execution in a long-input campaign (14ms of 40ms).
+
+    Here every edge id gets a dense index the first time a seed set holding
+    it is seen, each set is converted to an index array once (sets only ever
+    grow in place, so ``(object, len)`` identifies its contents), and a pass
+    reduces each seed with three numpy gathers. The integer results are
+    exactly the loop's: sums of the same integers.
+    """
+
+    def __init__(self) -> None:
+        self._index: dict[int, int] = {}
+        self._ids: list[int] = []
+        # id(set) -> (set, len, indices). The set is held so its id cannot be
+        # reused by another object while the entry lives.
+        self._arrays: dict[int, tuple[set[int], int, np.ndarray]] = {}
+        self.owners: np.ndarray | None = None
+        self.recent: np.ndarray | None = None
+
+    def indices(self, edges: set[int]) -> np.ndarray:
+        entry = self._arrays.get(id(edges))
+        if entry is not None and entry[0] is edges and entry[1] == len(edges):
+            return entry[2]
+        index = self._index
+        ids = self._ids
+        order = list(edges)
+        found = list(map(index.get, order))
+        if None in found:
+            for k, i in enumerate(found):
+                if i is None:
+                    e = order[k]
+                    i = index[e] = len(ids)
+                    ids.append(e)
+                    found[k] = i
+        out = np.array(found, dtype=np.int64)
+        self._arrays[id(edges)] = (edges, len(edges), out)
+        return out
+
+    def prepare(self, seed_sets: list[set[int]], owners, recent_sets) -> None:
+        """Index every set this pass reads, then build the per-edge tables."""
+        live: dict[int, tuple[set[int], int, np.ndarray]] = {}
+        for edges in seed_sets:
+            self.indices(edges)
+            live[id(edges)] = self._arrays[id(edges)]
+        recent_idx = []
+        for edges in recent_sets or ():
+            recent_idx.append(self.indices(edges))
+            live[id(edges)] = self._arrays[id(edges)]
+        # Drop arrays for sets no longer in the corpus or the window.
+        self._arrays = live
+        get = owners.get
+        self.owners = np.fromiter(
+            (get(e, 0) for e in self._ids), dtype=np.int64, count=len(self._ids)
+        )
+        if recent_idx:
+            self.recent = np.bincount(np.concatenate(recent_idx), minlength=len(self._ids))
+        else:
+            self.recent = None
+
+    def stats(self, edges: set[int]) -> tuple[int, int, int]:
+        """``(rare_count, total_owners, overlap)`` for one seed's edge set."""
+        idx = self.indices(edges)
+        n = self.owners[idx]
+        overlap = int(self.recent[idx].sum()) if self.recent is not None else 0
+        return int(np.count_nonzero(n <= RARE_EDGE_OWNERS)), int(n.sum()), overlap
+
+
 class SeedPicker:
     """Manages seed selection strategies.
 
@@ -293,6 +367,10 @@ class SeedPicker:
 
     def __init__(self, fuzzer, seed=None):
         self.f = fuzzer
+        # Dense per-seed edge arrays, kept across weight passes; the tables
+        # for one pass live in _pass_vectors only while that pass runs.
+        self._edge_vectors = _EdgeVectors()
+        self._pass_vectors: _EdgeVectors | None = None
 
         # Bound once here rather than read off the fuzzer per pick: the
         # katz/tang/aflgo arms below draw from it directly, and a picker
@@ -1439,6 +1517,14 @@ class SeedPicker:
         seed_edges = tracker.seed_edges.get(seed_key, set())
         if not seed_edges:
             return w
+        vectors = getattr(self, "_pass_vectors", None)
+        if vectors is not None:
+            # Inside _compute_weights: the pass already indexed this set and
+            # built the owner and window tables (see _EdgeVectors).
+            rare_count, total_owners, overlap = vectors.stats(seed_edges)
+            return self._apply_edge_penalties(
+                w, fuzz_count, len(seed_edges), rare_count, total_owners, overlap
+            )
         if recent_counts is None:
             recent_counts = self._recent_edge_counts(f)
         owners = tracker._edge_owner_count
@@ -1463,7 +1549,15 @@ class SeedPicker:
                 total_owners += n
                 if n <= rare_threshold:
                     rare_count += 1
+        return self._apply_edge_penalties(
+            w, fuzz_count, len(seed_edges), rare_count, total_owners, overlap
+        )
 
+    @staticmethod
+    def _apply_edge_penalties(
+        w: float, fuzz_count: int, n_edges: int, rare_count: int, total_owners: int, overlap: int
+    ) -> float:
+        """The multipliers ``_weight_edge_penalties`` derives from its counts."""
         if rare_count > 0:
             # log2 rather than linear: the marginal value of the twentieth rare
             # edge on a seed is not twenty times that of the first, and a linear
@@ -1476,7 +1570,7 @@ class SeedPicker:
         # thinly-covered edges is worth more. The old version read mean hit
         # *volume* and boosted seeds with high counts, which rewarded hot loops
         # -- the opposite of what a rarity-driven schedule wants.
-        mean_owners = total_owners / len(seed_edges)
+        mean_owners = total_owners / n_edges
         if mean_owners > CROWDED_EDGE_OWNERS:
             w *= max(0.5, CROWDED_EDGE_OWNERS / mean_owners)
         elif mean_owners < 1.5 and fuzz_count > 10:
@@ -1484,7 +1578,7 @@ class SeedPicker:
             w *= 0.7
 
         if overlap > 0:
-            w *= max(0.3, 1.0 - (overlap / max(len(seed_edges), 1)) * 0.5)
+            w *= max(0.3, 1.0 - (overlap / max(n_edges, 1)) * 0.5)
         return w
 
     def _weight_entropy_and_distance(
@@ -1894,43 +1988,76 @@ class SeedPicker:
         bt_key_to_seed = self._backtrack_keymap(seed_keys)
         # Window occurrence counts, folded once per pass rather than
         # re-intersected per seed. See _recent_edge_counts.
-        recent_counts = self._recent_edge_counts(f)
-        for i, seed in enumerate(corpus):
-            if not has_meta[i]:
-                continue
-            meta = seed_meta.get(seed)
-            fuzz_count = max(meta["fuzz_count"], 1)
-            sk = seed_keys[i] or f._seed_key(seed)
-            w = weights[i]
+        # Built once per pass for the per-seed edge reductions; cleared in
+        # finally so a call outside this pass never reads stale tables. The
+        # window Counter is only the scalar path's input, so it is skipped
+        # when the vectors carry the window instead.
+        self._pass_vectors = self._prepare_edge_vectors(f, corpus, has_meta, seed_keys)
+        recent_counts = self._recent_edge_counts(f) if self._pass_vectors is None else None
+        try:
+            for i, seed in enumerate(corpus):
+                if not has_meta[i]:
+                    continue
+                meta = seed_meta.get(seed)
+                fuzz_count = max(meta["fuzz_count"], 1)
+                sk = seed_keys[i] or f._seed_key(seed)
+                w = weights[i]
 
-            w, sub, spa = self._weight_cached(sk, w, classifications, f)
-            w = self._weight_edge_penalties(sk, w, fuzz_count, f, recent_counts)
-            w = self._weight_entropy_and_distance(
-                seed, sk, meta, w, f, entropy_map, mean_entropy, max_d
-            )
-            w = self._weight_static_features(seed, meta["coverage_edges"], w, f)
-            w = self._weight_length_and_cross_target(seed, meta, w, f)
-            w = self._weight_overlap_density(sk, w, f)
-            w = self._weight_fractal_diversity(seed, w, f)
-            w = self._weight_validity(meta, w, f)
-            w = self._weight_fake_novelty(meta, w)
-            w *= lineage_div.get(sk, 1.0)
-            w = self._weight_lineage_backtrack(sk, w, fuzz_count, f, bt_key_to_seed)
+                w, sub, spa = self._weight_cached(sk, w, classifications, f)
+                w = self._weight_edge_penalties(sk, w, fuzz_count, f, recent_counts)
+                w = self._weight_entropy_and_distance(
+                    seed, sk, meta, w, f, entropy_map, mean_entropy, max_d
+                )
+                w = self._weight_static_features(seed, meta["coverage_edges"], w, f)
+                w = self._weight_length_and_cross_target(seed, meta, w, f)
+                w = self._weight_overlap_density(sk, w, f)
+                w = self._weight_fractal_diversity(seed, w, f)
+                w = self._weight_validity(meta, w, f)
+                w = self._weight_fake_novelty(meta, w)
+                w *= lineage_div.get(sk, 1.0)
+                w = self._weight_lineage_backtrack(sk, w, fuzz_count, f, bt_key_to_seed)
 
-            weights[i] = max(w, 1e-6)
-            bf = pareto_scores[i][1]
-            is_pareto4d = (
-                getattr(f, "_use_overlap_density", False)
-                and getattr(f, "_overlap_mode", "") == "pareto4d"
-            )
-            if is_pareto4d:
-                od = f._overlap_density_cache.get(sk, 0.5)
-                pareto_scores[i] = (sub, bf, spa, od)
-            else:
-                pareto_scores[i] = (sub, bf, spa)
+                weights[i] = max(w, 1e-6)
+                bf = pareto_scores[i][1]
+                is_pareto4d = (
+                    getattr(f, "_use_overlap_density", False)
+                    and getattr(f, "_overlap_mode", "") == "pareto4d"
+                )
+                if is_pareto4d:
+                    od = f._overlap_density_cache.get(sk, 0.5)
+                    pareto_scores[i] = (sub, bf, spa, od)
+                else:
+                    pareto_scores[i] = (sub, bf, spa)
+        finally:
+            self._pass_vectors = None
 
         self._apply_front_bonus(weights, pareto_scores)
         return weights
+
+    def _prepare_edge_vectors(self, f, corpus, has_meta, seed_keys) -> _EdgeVectors | None:
+        """Index this pass's seed edge sets and build the per-edge tables.
+
+        None (scalar path) for a tracker without per-seed sets or owner
+        counts -- the stand-ins some tests build.
+        """
+        tracker = f._edge_tracker
+        seed_edges = getattr(tracker, "seed_edges", None)
+        owners = getattr(tracker, "_edge_owner_count", None)
+        if not isinstance(seed_edges, dict) or owners is None:
+            return None
+        vectors = getattr(self, "_edge_vectors", None)
+        if vectors is None:
+            vectors = self._edge_vectors = _EdgeVectors()
+        sets = []
+        for i, seed in enumerate(corpus):
+            if not has_meta[i]:
+                continue
+            edges = seed_edges.get(seed_keys[i] or f._seed_key(seed))
+            if edges:
+                sets.append(edges)
+        recent = getattr(f, "_recent_seed_edges", None) or ()
+        vectors.prepare(sets, owners, [e for e in recent if e])
+        return vectors
 
     def _extract_meta(self, now: float) -> tuple:
         """Phase 1: one pass over the corpus collecting metadata columns and entropy.
