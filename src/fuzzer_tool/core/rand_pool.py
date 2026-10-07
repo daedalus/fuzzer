@@ -523,12 +523,13 @@ class RandPool:
     def _floyd_indices(self, n: int, k: int) -> list[int]:
         """Floyd's sampling: exactly *k* unique indices in ``[0, n)``.
 
-        Uses only ``_draw()`` so the result stays on the pool's RNG stream.
-        O(k) space, exactly k draws.
+        Draws only from the pool's own stream (``randrange``: one word while
+        ``n <= 2**32``, composed words above that).  O(k) space, exactly k
+        draws for ``n <= 2**32``.
         """
         s: set[int] = set()
         for j in range(n - k, n):
-            t = self._draw() % (j + 1)
+            t = self.randrange(j + 1)
             if t in s:
                 s.add(j)
             else:
@@ -581,10 +582,10 @@ class RandPool:
         if k <= 0:
             return []
         if k == 1:
-            return [self._draw() % population]
+            return [self.randrange(population)]
         if k == 2:
-            a = self._draw() % population
-            b = self._draw() % (population - 1)
+            a = self.randrange(population)
+            b = self.randrange(population - 1)
             return [a, b if b < a else b + 1]
         if _RAND_FLOYD:
             return self._floyd_indices(population, k)
