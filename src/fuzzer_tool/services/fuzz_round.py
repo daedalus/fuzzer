@@ -1308,11 +1308,16 @@ class FuzzRound:
             if current_edges:
                 f._edge_tracker.record_edge_lifetimes(current_edges, f.exec_count)
 
-        # Track input-length → edge discovery correlation
-        if self._has_new_coverage and f._length_tracker:
-            new_edges = self._edges_now()
-            if new_edges:
-                f._length_tracker.record(len(self._mutated), new_edges)
+        # Track input-length → edge discovery correlation. The edges this
+        # round DISCOVERED (_on_new_edges sets them), not every edge the input
+        # hit: LengthEdgeTracker.record credits each edge passed to that
+        # length. Passing the whole trace scored a length by how much code
+        # its inputs execute -- long inputs win by construction -- and on
+        # FFmpeg, where one trace is thousands of context-sensitive edges,
+        # it overflowed the 200-edge per-length cap on every call and paid
+        # a sort of the whole bucket each time (~2ms per admitted input).
+        if self._has_new_coverage and f._length_tracker and f._last_new_edge_ids:
+            f._length_tracker.record(len(self._mutated), set(f._last_new_edge_ids))
 
         self._update_distance()
 
