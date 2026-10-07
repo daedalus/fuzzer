@@ -6,7 +6,7 @@ reflect_out)``; that tuple has no slot for a modulus or an integer multiplier,
 and overloading its fields with a second, incompatible meaning would be worse
 than a small parallel module.
 
-Two model families are supported, matching the two shapes that show up in real
+Three model families are supported, matching the shapes that show up in real
 formats:
 
 - ``weighted_sum``: ``(sum(data[j] * multiplier**j) + init_a) mod modulus`` —
@@ -15,8 +15,11 @@ formats:
 - ``fletcher``: two running sums mod ``modulus``, packed into one output.
   Covers Fletcher-16/32 *and* Adler-32 — Adler is the same two-running-sums
   shape with a prime modulus and ``init_a=1``.
+- ``linear``: ``(sum(weights[j] * word[j]) + init_a) mod modulus`` with
+  arbitrary small per-position weights (e.g. ``3*d0 - d1 + 7*d2``), found by
+  integer relation (``core/integer_relation.py``).
 
-Both families are **integer-linear mod N** (true Z/NZ arithmetic), which is
+All families are **integer-linear mod N** (true Z/NZ arithmetic), which is
 exactly what the GF(2) machinery in ``berlekamp_massey.py`` cannot represent.
 
 The active model is set by :class:`~fuzzer_tool.core.analyzers.analyzer_checksum_learner.ChecksumLearner`
@@ -39,13 +42,15 @@ _NUMPY_SAFE_WORDS = 1 << 21
 
 KIND_WEIGHTED_SUM = "weighted_sum"
 KIND_FLETCHER = "fletcher"
+KIND_LINEAR = "linear"
+_KINDS = (KIND_FLETCHER, KIND_WEIGHTED_SUM, KIND_LINEAR)
 
 
 class IntModel(NamedTuple):
     """A recovered integer-modulus checksum model.
 
     Attributes:
-        kind: Either ``weighted_sum`` or ``fletcher``.
+        kind: ``weighted_sum``, ``fletcher`` or ``linear``.
         modulus: The modulus ``N`` of the ``Z/NZ`` arithmetic.
         multiplier: Base ``k`` for ``weighted_sum``; unused (``1``) for ``fletcher``.
         init_a: Initial value of the (only, or first) running sum.
@@ -55,6 +60,7 @@ class IntModel(NamedTuple):
         out_bits: Total output width in bits.  For ``fletcher`` the two halves
             are packed as ``(b << out_bits // 2) | a``.
         big_endian: Word byte order when ``word_bytes == 2``.
+        weights: Per-word weights for ``linear``; empty otherwise.
     """
 
     kind: str
@@ -65,6 +71,7 @@ class IntModel(NamedTuple):
     word_bytes: int = 1
     out_bits: int = 32
     big_endian: bool = False
+    weights: tuple[int, ...] = ()
 
     @property
     def nbytes(self) -> int:
@@ -181,6 +188,17 @@ def weighted_raw(data: bytes, multiplier: int) -> int:
     return acc
 
 
+def linear_raw(data: bytes, model: IntModel) -> int:
+    """Unreduced ``sum(weights[j] * word[j])`` over the leading words.
+
+    Words past ``len(weights)`` are ignored; missing words count as zero, so
+    any length evaluates (crc_learn patches buffers of every length).
+    """
+    words = to_words(data, model.word_bytes, model.big_endian)
+    n = min(int(words.size), len(model.weights))
+    return int(np.dot(words[:n], np.asarray(model.weights[:n], dtype=np.int64)))
+
+
 # ── evaluation ─────────────────────────────────────────────────────────
 
 
@@ -194,6 +212,8 @@ def eval_model(model: IntModel, data: bytes) -> int:
         return (b << (model.out_bits // 2)) | a
     if model.kind == KIND_WEIGHTED_SUM:
         return (weighted_raw(data, model.multiplier) + model.init_a) % model.modulus
+    if model.kind == KIND_LINEAR:
+        return (linear_raw(data, model) + model.init_a) % model.modulus
     raise ValueError(f"unknown integer checksum kind: {model.kind!r}")
 
 
@@ -231,6 +251,7 @@ def model_from_dict(data: dict[str, object] | None) -> IntModel | None:
     Returns ``None`` for missing or malformed input rather than raising — a
     corrupt state file must not take down the fuzz run.
     """
+    data = _weights_tuple(data)
     if not data:
         return None
     try:
@@ -240,7 +261,7 @@ def model_from_dict(data: dict[str, object] | None) -> IntModel | None:
     # NamedTuple annotations are not enforced at runtime, so a state file
     # carrying a string where an int belongs would otherwise build a model
     # that only explodes later, inside a mutation.
-    if not isinstance(model.kind, str) or model.kind not in (KIND_FLETCHER, KIND_WEIGHTED_SUM):
+    if not isinstance(model.kind, str) or model.kind not in _KINDS:
         return None
     ints = (model.modulus, model.multiplier, model.init_a, model.init_b, model.word_bytes)
     if not all(isinstance(v, int) and not isinstance(v, bool) for v in ints):
@@ -250,3 +271,22 @@ def model_from_dict(data: dict[str, object] | None) -> IntModel | None:
     if not isinstance(model.out_bits, int) or model.out_bits not in (16, 32, 64):
         return None
     return model
+
+
+def _weights_tuple(data: dict[str, object] | None) -> dict[str, object] | None:
+    """*data* with ``weights`` as a tuple of ints (JSON stores a list); None if malformed.
+
+    Weights are required for ``linear`` and forbidden otherwise.
+    """
+    if not data:
+        return None
+
+    raw = data.get("weights", ())
+    if not isinstance(raw, list | tuple):
+        return None
+    if not all(isinstance(w, int) and not isinstance(w, bool) for w in raw):
+        return None
+    if (data.get("kind") == KIND_LINEAR) != bool(raw):
+        return None
+
+    return {**data, "weights": tuple(raw)}
