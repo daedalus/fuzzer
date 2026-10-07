@@ -1689,6 +1689,8 @@ A target that draws session tokens, nonces or sequence numbers from a weak linea
 
 LCGs are out of GF(2) reach (multiplicative step). `core/lcg_recovery.py` (P4-1) recovers truncated-output LCG state by LLL + Babai rounding over `core/lattice.py` (the LLL formerly private to `tools/edge_diagnostic.py`): java.util.Random, MSVC/POSIX `rand`, minstd. Power-of-two moduli drop bits above the output window. Every result is replayed against the observed draws before use. The learner tries LCGs after the linear families; persistence stores the family name.
 
+`core/integer_relation.py` finds integer relations `m·x = 0` among reals (`find_relation(x, Algo.HJLS|PSOS|PSLQ)`): one iteration in three numerics — PSLQ (Givens on H), PSOS (square-root-free L·D from partial sums of squares, LLL swap formulas), HJLS (classical Gram-Schmidt recomputed each step, gamma = sqrt 2). Decimal at `digits` precision; returns None past `maxcoeff`/`maxsteps` or when B outgrows the precision. Not wired yet (TODO.md).
+
 **Not one generator.** A step qualifies whenever it is built from XOR, constant-mask AND and shifts of its own state words, which is every combined Tausworthe/LFSR generator, every Marsaglia xorshift (Brent 2004 proved these are LFSRs), and classic Galois/Fibonacci LFSRs. A generator is described once, as a straight-line program over a register file, and that program is evaluated symbolically to get both the recovery equations and — regrouped into `(mask, shift)` terms — the concrete forward simulation, so simulated stream and recovered state cannot disagree. `combined_lfsr`, `xorshift`, `galois_lfsr` and `fib_lfsr` build one that is not shipped.
 
 Shipped families, with the counts derived (not assumed) from each one's own equations:
