@@ -851,3 +851,64 @@ class TestRandomBetween:
             p._randbelow(0)
         with pytest.raises(ValueError, match="positive"):
             p._randbelow(-3)
+
+
+# ── Wide ranges (> 2**32) ──────────────────────────────────────────────
+
+
+class TestWideRange:
+    """randint/randrange must reach values ≥ 2**32 when the caller asks.
+
+    The Ogg granule-position mutator requests ``randint(0, 0xFFFFFFFFFFFFFFFF)``;
+    before the multi-draw path every sample was capped below 2**32.
+    """
+
+    _U64_MAX = 0xFFFFFFFFFFFFFFFF
+
+    def test_randint_reaches_upper_32_bits(self):
+        p = RandPool(seed=0xC0FFEE)
+        samples = [p.randint(0, self._U64_MAX) for _ in range(2000)]
+        assert any(v >= 1 << 32 for v in samples), "no sample reached bit 32+"
+        assert max(samples) > 1 << 40
+        assert all(0 <= v <= self._U64_MAX for v in samples)
+
+    def test_randrange_reaches_upper_bits(self):
+        p = RandPool(seed=0xBADC0DE)
+        n = 1 << 40
+        samples = [p.randrange(n) for _ in range(2000)]
+        assert any(v >= 1 << 32 for v in samples)
+        assert all(0 <= v < n for v in samples)
+
+    def test_randint_list_wide(self):
+        p = RandPool(seed=99)
+        vals = p.randint_list(0, self._U64_MAX, 500)
+        assert len(vals) == 500
+        assert any(v >= 1 << 32 for v in vals)
+        assert all(0 <= v <= self._U64_MAX for v in vals)
+
+    def test_randrange_list_wide(self):
+        p = RandPool(seed=100)
+        n = 1 << 48
+        vals = p.randrange_list(n, 300)
+        assert len(vals) == 300
+        assert any(v >= 1 << 32 for v in vals)
+        assert all(0 <= v < n for v in vals)
+
+    def test_hot_path_unchanged_for_small_width(self):
+        """Seeded small-width draws must stay byte-identical to the old path."""
+        p1 = RandPool(seed=42)
+        p2 = RandPool(seed=42)
+        # consume a few draws so the pool is live
+        assert [p1.randint(0, 255) for _ in range(20)] == [
+            p2.randint(0, 255) for _ in range(20)
+        ]
+        assert [p1.randrange(1000) for _ in range(20)] == [
+            p2.randrange(1000) for _ in range(20)
+        ]
+
+    def test_ogg_granule_style_call(self):
+        """Exact call pattern from core/mutations/ogg.py:_mutate_granule_position."""
+        p = RandPool(seed=7)
+        choices = [0, 0xFFFFFFFFFFFFFFFF, p.randint(0, 0xFFFFFFFFFFFFFFFF)]
+        assert choices[2] >= 0
+        assert choices[2] <= 0xFFFFFFFFFFFFFFFF

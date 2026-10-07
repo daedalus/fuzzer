@@ -236,11 +236,14 @@ class RandPool:
         """Return *count* random integers in [0, *n*).  Vectorized.
 
         Equivalent to calling ``randrange(n)`` *count* times but all
-        values are sliced from the pool in one C-level operation.
-        Uses numpy vectorized modulo for fast conversion.
+        values are sliced from the pool in one C-level operation when
+        ``n`` fits in a uint32.  Wider ranges fall back to the scalar
+        path so the full span is reachable.
         """
         if n <= 0 or count <= 0:
             return []
+        if n > 1 << 32:
+            return [self.randrange(n) for _ in range(count)]
         if self._idx + count > _POOL_ENTRIES:
             self._refill()
         raw = self._pool[self._idx : self._idx + count]
@@ -292,12 +295,15 @@ class RandPool:
         """Generate *count* random integers in [a, b] using vectorized numpy.
 
         This is faster than calling ``randint(a, b)`` *count* times because
-        all values are sliced from the pool in a single C-level operation.
-        Uses numpy vectorized modulo + tolist() for fast conversion.
+        all values are sliced from the pool in a single C-level operation
+        when the width fits in a uint32.  Wider ranges fall back to the
+        scalar path so the full span is reachable.
         """
         width = b - a + 1
         if width <= 0 or count <= 0:
             return []
+        if width > 1 << 32:
+            return [self.randint(a, b) for _ in range(count)]
         # Fast path: pre-computed % 256 array, only while the request fits
         # in the current pool -- the spanning path has no matching _m256 run.
         if width == 256 and count <= _POOL_ENTRIES:
@@ -313,42 +319,58 @@ class RandPool:
         return ((self._take(count) % width).astype(np.int64) + a).tolist()
 
     def randrange(self, n: int) -> int:
-        return self._draw() % n if n > 0 else 0
+        """Return a random integer in ``[0, n)``.
+
+        For ``n <= 2**32`` uses a single pool word (modulo bias is accepted
+        for the hot path).  For larger ``n`` composes multiple 32-bit draws
+        via :meth:`_randbelow` so the full range is reachable — required by
+        callers such as the Ogg granule-position mutator that request a
+        64-bit span.
+        """
+        if n <= 0:
+            return 0
+        if n <= 1 << 32:
+            return self._draw() % n
+        return self._randbelow(n)
 
     def randint(self, a: int, b: int) -> int:
+        """Return a random integer in ``[a, b]`` (inclusive).
+
+        Widths that fit in a single uint32 pool word stay on the fast
+        path.  Wider ranges (e.g. ``randint(0, 0xFFFFFFFFFFFFFFFF)``)
+        compose two or more pool draws so every bit of the requested
+        range is reachable.
+        """
         width = b - a + 1
         if width <= 0:
             return a
-        if self._idx >= _POOL_ENTRIES:
-            self._refill()
-        pos = self._idx
-        self._idx += 1
-        # Fast path: pre-computed % 256 — avoids modulo at draw time
-        if width == 256:
-            return a + self._m256_l[pos]
-        return a + (self._pool_l[pos] % width)
+        if width <= 1 << 32:
+            if self._idx >= _POOL_ENTRIES:
+                self._refill()
+            pos = self._idx
+            self._idx += 1
+            # Fast path: pre-computed % 256 — avoids modulo at draw time
+            if width == 256:
+                return a + self._m256_l[pos]
+            return a + (self._pool_l[pos] % width)
+        return a + self._randbelow(width)
 
     def _randbelow(self, n: int) -> int:
         """Return a uniform integer in ``[0, n)`` with no modulo bias.
 
         Uses rejection sampling on the 32-bit pool draws (same algorithm as
-        CPython's ``Random._randbelow_with_getrandbits``).  For ``n`` that
-        are powers of two the mask path is bias-free with a single draw;
-        otherwise values ``>= n`` are discarded and redrawn.
+        CPython's ``Random._randbelow_with_getrandbits``).  For power-of-two
+        ``n`` that fit in 32 bits the mask path is bias-free with a single
+        draw; wider ranges (including power-of-two spans such as ``2**64``)
+        compose successive 32-bit draws so every bit is reachable.
         """
         if n <= 0:
             raise ValueError("n must be positive")
-        # Fast path: power-of-two — mask is exact, no rejection needed.
-        if (n & (n - 1)) == 0:
-            return self._draw() & (n - 1)
-        # General case: k = bit length of (n-1) so 2**k is the smallest
-        # power of two strictly greater than n-1; reject anything outside
-        # [0, n).
         k = (n - 1).bit_length()
+        # Fast path: power-of-two that fits in one pool word.
+        if k <= 32 and (n & (n - 1)) == 0:
+            return self._draw() & (n - 1)
         mask = (1 << k) - 1
-        # Our pool words are 32-bit.  For ranges that fit in 32 bits a single
-        # draw + mask is enough; larger ranges are vanishingly rare in the
-        # fuzzer and we fall back to a multi-draw composition.
         if k <= 32:
             while True:
                 r = self._draw() & mask
