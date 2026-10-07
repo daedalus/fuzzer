@@ -149,7 +149,7 @@ class ConsolidatedV1Scheduler:
         max_pseudocount: float = 200.0,
         category_max_pseudocount: float = 1000.0,
         rng: RandPool | None = None,
-        prior_mode: PriorMode = PriorMode.FIXED,
+        prior_mode: PriorMode | str = PriorMode.FIXED,
     ) -> None:
         if prior_strength < 0:
             raise ValueError(f"prior_strength must be >= 0, got {prior_strength!r}")
@@ -159,7 +159,9 @@ class ConsolidatedV1Scheduler:
         self.max_pseudocount = float(max_pseudocount)
         self.category_max_pseudocount = float(category_max_pseudocount)
         self._rng = rng if rng is not None else get_default_rand_pool()
-        self.prior_mode = prior_mode
+        # Converted, not stored: the mode check is by identity, so a raw
+        # "blup" from a direct caller would silently run FIXED.
+        self.prior_mode = PriorMode(prior_mode)
 
         # Arm state lives in parallel numpy arrays indexed by arm id, so a
         # selection is one vectorized Beta draw over the candidates rather

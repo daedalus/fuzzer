@@ -307,10 +307,36 @@ def test_adversarial_cli_rejects_unknown_prior(monkeypatch):
         _parse(monkeypatch, "--consolidated-prior", "reml")
 
 
-def test_cmd_fuzz_forwards_consolidated_prior():
-    from tests.test_dirichlet_wiring import _fuzzer_call_kwargs
+def test_cmd_fuzz_forwards_consolidated_prior(monkeypatch, tmp_path):
+    """The parsed value reaches Fuzzer(), not just the keyword."""
+    from types import SimpleNamespace
 
-    assert all("consolidated_prior" in k for k in _fuzzer_call_kwargs())
+    from fuzzer_tool.cli import commands
+    from tests import test_commands_extended
+
+    args = test_commands_extended.TestCmdFuzzConstruction()._make_default_args(tmp_path)
+    args.consolidated_prior = PriorMode.BLUP.value
+    captured = {}
+
+    def fake_fuzzer(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run=lambda iterations, max_execs=0: 0)
+
+    monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", fake_fuzzer)
+    assert commands.cmd_fuzz(args) == 0
+    assert captured["consolidated_prior"] is PriorMode.BLUP
+
+
+def test_regression_string_prior_mode_is_not_silently_fixed():
+    """A direct caller passing "blup" got FIXED: the mode check is by
+    identity and the string was stored unconverted."""
+    s = ConsolidatedV1Scheduler(prior_mode="blup", rng=RandPool(1))
+    assert s.prior_mode is PriorMode.BLUP
+
+
+def test_adversarial_unknown_prior_mode_raises():
+    with pytest.raises(ValueError):
+        ConsolidatedV1Scheduler(prior_mode="reml")
 
 
 @pytest.mark.skipif(not _TARGET.exists(), reason="targets/test_target not built")
