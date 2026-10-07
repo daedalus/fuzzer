@@ -104,6 +104,8 @@ in the non-UCB handover) before pointing a real campaign at it.
 
 from __future__ import annotations
 
+import numpy as np
+
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 DEFAULT_N_STATES = 5
@@ -185,15 +187,17 @@ def _value_iterate(
     (see ``whittle_index_table``); defaults to all-zeros (cold start).
     """
     K = len(reward)
-    V = list(v0) if v0 is not None else [0.0] * K
+    V = np.array(v0 if v0 is not None else [0.0] * K, dtype=float)
+
+    # Both action values from one matmul per sweep:
+    #   [Q_active; Q_passive] = [reward; m] + gamma * [P_A; P_P] @ V
+    #   V' = max(Q_active, Q_passive)
+    P = np.vstack((P_active, P_passive))
+    bias = np.concatenate((reward, np.full(K, m)))
     for _ in range(n_iters):
-        newV = [0.0] * K
-        for s in range(K):
-            q_active = reward[s] + gamma * sum(P_active[s][sp] * V[sp] for sp in range(K))
-            q_passive = m + gamma * sum(P_passive[s][sp] * V[sp] for sp in range(K))
-            newV[s] = max(q_active, q_passive)
-        V = newV
-    return V
+        Q = bias + gamma * (P @ V)
+        V = np.maximum(Q[:K], Q[K:])
+    return V.tolist()
 
 
 def _active_flags_all_states(
@@ -251,6 +255,9 @@ def whittle_index_table(
     K = len(reward)
     P_active = _active_kernel(K, reward)
     P_passive = _passive_kernel(K, passive_decay)
+    # Arrays for the value-iteration solve; lists stay for the flag check.
+    P_active_np = np.asarray(P_active)
+    P_passive_np = np.asarray(P_passive)
 
     grid = [grid_lo + i * (grid_hi - grid_lo) / (grid_points - 1) for i in range(grid_points)]
 
@@ -258,7 +265,7 @@ def whittle_index_table(
     V = [0.0] * K
     for g, m in enumerate(grid):
         n_iters = _VALUE_ITERS_COLD if g == 0 else _VALUE_ITERS_WARM
-        V = _value_iterate(m, P_active, P_passive, reward, gamma, n_iters=n_iters, v0=V)
+        V = _value_iterate(m, P_active_np, P_passive_np, reward, gamma, n_iters=n_iters, v0=V)
         flags = _active_flags_all_states(V, m, P_active, P_passive, reward, gamma)
         for s in range(K):
             active_flags[s][g] = flags[s]
