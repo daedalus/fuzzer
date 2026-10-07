@@ -110,7 +110,7 @@ class ConsolidatedV2Scheduler(ConsolidatedV1Scheduler):
         max_pseudocount: float = 200.0,
         category_max_pseudocount: float = 1000.0,
         rng: RandPool | None = None,
-        prior_mode: PriorMode = PriorMode.FIXED,
+        prior_mode: PriorMode | str = PriorMode.FIXED,
     ) -> None:
         if math.isnan(tau) or not 0.0 < tau <= 1.0:
             raise ValueError(f"tau must be in (0, 1], got {tau!r}")

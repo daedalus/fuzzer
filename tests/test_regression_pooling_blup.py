@@ -53,10 +53,20 @@ def test_regression_pooling_concentration_is_bounded():
 
 def test_regression_well_observed_seed_keeps_its_rate():
     """Falsification of the old blend: 1000 observations at 10% beside
-    seeds at 50% must stay near 10%; the blend moved it to ~23%."""
-    bsq = BayesianSeedQuality(hierarchical_pooling=0.5)
-    _feed_seeds(bsq, [(100, 1000)] + [(50, 100)] * 10)
-    assert bsq.posterior_mean("s0") == pytest.approx(0.1, abs=0.02)
+    seeds at 50% must stay near 10%; the blend moved it to ~23%. Exact
+    parameters, so disabled pooling (raw Beta(101, 901)) fails too."""
+    h = 0.5
+    rates = [(100, 1000)] + [(50, 100)] * 10
+    bsq = BayesianSeedQuality(hierarchical_pooling=h)
+    _feed_seeds(bsq, rates)
+
+    got = bsq._get_pooled_params("s0")
+
+    succ = [float(k) for k, _ in rates]
+    n = [float(t) for _, t in rates]
+    assert got == pytest.approx(_expected(101.0, 901.0, succ, n, h))
+    assert got != pytest.approx((101.0, 901.0))
+    assert got[0] / sum(got) == pytest.approx(0.1, abs=0.02)
 
 
 def test_poorly_observed_seed_shrinks_more():
@@ -68,14 +78,39 @@ def test_poorly_observed_seed_shrinks_more():
 
 
 def test_falsify_identical_seeds_pool_at_ceiling():
-    """Seeds with exactly equal rates: a fresh seed is predicted at the
-    population rate with all the population's evidence (500 observations)."""
+    """Seeds with exactly equal rates pool at the ceiling, all 500
+    observations at rate 0.2, *added* to the seed's own Beta(21, 81).
+    The old h=1 blend discarded the seed's own posterior: Beta(101, 401).
+    Disabled pooling leaves Beta(21, 81)."""
     bsq = BayesianSeedQuality(hierarchical_pooling=1.0)
     _feed_seeds(bsq, [(20, 100)] * 5)
-    bsq.init_seed("fresh")
-    a, b = bsq._get_pooled_params("fresh")
-    assert a + b == pytest.approx(2.0 + 500.0)
-    assert a / (a + b) == pytest.approx(0.2, abs=0.01)
+    total, rate = 500.0, 0.2
+    assert bsq._get_pooled_params("s0") == pytest.approx(
+        (21.0 + total * rate, 81.0 + total * (1.0 - rate))
+    )
+
+
+def test_regression_override_prior_is_not_evidence():
+    """A seed registered with a custom prior and never observed carries
+    no evidence; counting its prior as observations skewed the fit."""
+    rates = [(5, 50), (20, 50), (40, 50)]
+    plain = BayesianSeedQuality(hierarchical_pooling=1.0)
+    _feed_seeds(plain, rates)
+    boosted = BayesianSeedQuality(hierarchical_pooling=1.0)
+    _feed_seeds(boosted, rates)
+    boosted.init_seed("vip", prior_alpha=30.0, prior_beta=2.0)
+
+    assert boosted._get_pooled_params("s0") == pytest.approx(plain._get_pooled_params("s0"))
+
+
+def test_regression_override_prior_survives_state_round_trip():
+    src = BayesianSeedQuality(hierarchical_pooling=1.0)
+    _feed_seeds(src, [(5, 50), (20, 50)])
+    src.init_seed("vip", prior_alpha=30.0, prior_beta=2.0)
+    dst = BayesianSeedQuality(hierarchical_pooling=1.0)
+    dst.load_state_dict(src.state_dict())
+    assert dst._get_pooled_params("s0") == pytest.approx(src._get_pooled_params("s0"))
+    assert dst._get_pooled_params("vip") == pytest.approx(src._get_pooled_params("vip"))
 
 
 @pytest.mark.parametrize(

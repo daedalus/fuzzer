@@ -124,6 +124,9 @@ class BayesianSeedQuality:
         self._pooled_successes = 0
         self._pooled_failures = 0
         self._pool = PoolCache(POOL_MAX_STRENGTH, _POOL_REFIT_EVERY)
+        # init_seed() prior overrides, so the pooled fit can tell a seed's
+        # prior from its evidence. Overrides only: default seeds cost nothing.
+        self._seed_prior: dict[str, tuple[float, float]] = {}
         self._rng = rng or get_default_rand_pool()
 
     def init_seed(
@@ -154,6 +157,8 @@ class BayesianSeedQuality:
             prior_beta if prior_beta is not None else self._prior_beta,
             MIN_BETA_PARAM,
         )
+        if prior_alpha is not None or prior_beta is not None:
+            self._seed_prior[seed_id] = (self._alpha[seed_id], self._beta[seed_id])
 
     def record_outcome(self, seed_id: str, discovered: bool, weight: float = 1.0) -> None:
         """Record whether mutating this seed produced new coverage (or a crash).
@@ -238,13 +243,18 @@ class BayesianSeedQuality:
         return alpha_i + hm * mu, beta_i + hm * (1.0 - mu)
 
     def _evidence(self) -> tuple[np.ndarray, np.ndarray]:
-        """Per-seed (successes, observations), net of the default prior."""
+        """Per-seed (successes, observations), net of each seed's own prior."""
         n = len(self._alpha)
-        a = np.fromiter(self._alpha.values(), dtype=float, count=n)
-        b = np.fromiter((self._beta[k] for k in self._alpha), dtype=float, count=n)
-        succ = np.maximum(a - self._prior_alpha, 0.0)
-        fail = np.maximum(b - self._prior_beta, 0.0)
-        return succ, succ + fail
+        default = (self._prior_alpha, self._prior_beta)
+        prior = self._seed_prior
+        a = np.fromiter(
+            (v - prior.get(k, default)[0] for k, v in self._alpha.items()), dtype=float, count=n
+        )
+        b = np.fromiter(
+            (self._beta[k] - prior.get(k, default)[1] for k in self._alpha), dtype=float, count=n
+        )
+        succ = np.maximum(a, 0.0)
+        return succ, succ + np.maximum(b, 0.0)
 
     def posterior_sample(self, seed_id: str) -> float:
         """Draw a single Thompson sample from the seed's posterior.
@@ -398,6 +408,7 @@ class BayesianSeedQuality:
             "total_observations": self._total_observations,
             "pooled_successes": self._pooled_successes,
             "pooled_failures": self._pooled_failures,
+            "seed_prior": dict(self._seed_prior),
         }
 
     def load_state_dict(self, state: dict) -> None:
@@ -409,3 +420,4 @@ class BayesianSeedQuality:
         self._total_observations = state.get("total_observations", 0)
         self._pooled_successes = state.get("pooled_successes", 0)
         self._pooled_failures = state.get("pooled_failures", 0)
+        self._seed_prior.update(state.get("seed_prior", {}))
