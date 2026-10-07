@@ -135,6 +135,9 @@
 
 - [ ] **A/B `--grimoire`** (2026-10-04) — shipped unmeasured. Needs a paired run (`tools/lib/bench_paired.py` arm) on a text/structured target (grep/sqlite/js-like) vs previous commit; also persist the book across `--resume`, and a grammar export (backlog P3-6) for the Boltzmann sampler.
 
+- [ ] **Block-sensitivity probing for region liveness** (2026-10-06) — handover `docs/handover/handover_openai_math_survey_2026-10-06.md` P1 (families 132/192 of openai/math). Not started. Open: (a) add a paired-field region to `tools/gen_synthetic_target.py` that moves coverage only when two regions change together; (b) probe sampled pairs of DEAD regions in `LiveBitMaskEstimator` consumers and check whether any verdict flips LIVE; (c) falsifier: no flips on png/gzip/sqlite means drop it and record the null result. The papers' claims are asymptotic over total Boolean functions, not a rate for real parsers.
+- [ ] **Dictionary overlap diagnostic** (2026-10-06) — handover openai_math_survey P3. Compare total token bytes vs greedy-merge superstring length for `dictionaries/*` and auto-dict output; if savings are small, drop the superstring (family 128) idea. Also open: Thorp-style layered permutation op (P2) and graph-switch mutator (P4), both low priority, gated on an A/B or a graph-format target.
+
 ## Testing
 - [ ] **`test_converges_on_random_seed[FPL]` fails on some random seeds** (2026-09-30) — seen once in a 610-test run, green on rerun; synthetic env, no registry coupling. Log the seed (`0x...` in the message) and pin it as a regression case.
 - [ ] **Lizard CCN>15: 13 left** (2026-09-26) — `lizard --CCN 15 -w .`. Giants: `Fuzzer.__init__`, `fuzz_one`, `run`, `_print_enabled_features`, `_selected_schedulers_str`, `OperatorEngine.select_op`, `cli.main`, `cmd_fuzz`. `operator_strategy_pool`: every split slowed `select_op` 6–26%. Frozen test oracles (`_old_*`, `_reference_*`, `legacy`) stay as is.
