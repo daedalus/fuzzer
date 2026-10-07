@@ -68,6 +68,8 @@ class KatzChannel:
         self.bmp = None
         self._horizon: HorizonGraph | None = None
         self._scores = None
+        # (scores, horizon, seed name -> node index, peak score); see seed_energy.
+        self._energy_memo = None
         self._dirty = True
         self._last_recompute_exec = -_RECOMPUTE_MIN_INTERVAL
         # Seconds the last recompute took, and when it finished. Zero cost
@@ -237,15 +239,23 @@ class KatzChannel:
     def seed_energy(self, seed_key: str) -> float:
         """Normalized [0,1] centrality of a corpus seed's graph node."""
         res = self.ensure_scores()
-        n_u = self._horizon.n_u
-        idx = (
-            n_u + self._horizon.seed_names.index(seed_key)
-            if seed_key in self._horizon.seed_names
-            else None
-        )
+        # Per score vector, not per call: the seed-name lookup was two linear
+        # scans of the horizon's seed list and the peak a max over every
+        # graph node, on every pick between recomputes.
+        memo = getattr(self, "_energy_memo", None)
+        if memo is None or memo[0] is not res or memo[1] is not self._horizon:
+            n_u = self._horizon.n_u
+            # First occurrence wins, as list.index() did.
+            first = {}
+            for i, name in enumerate(self._horizon.seed_names):
+                if name not in first:
+                    first[name] = n_u + i
+            peak = float(res.scores.max()) if res.scores.size else 0.0
+            memo = self._energy_memo = (res, self._horizon, first, peak)
+        _, _, positions, peak = memo
+        idx = positions.get(seed_key)
         if idx is None:
             return 0.0
-        peak = float(res.scores.max()) if res.scores.size else 0.0
         if peak <= 0:
             return 0.0
         return min(float(res.scores[idx]) / peak, 1.0)
