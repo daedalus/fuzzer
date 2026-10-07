@@ -784,3 +784,70 @@ class TestRandPoolExhaustion:
         p = RandPool(seed=42, min_entropy=100.0)
         with pytest.raises(RuntimeError, match="entropy starvation"):
             p.randint(0, 255)  # triggers first refill → gate fails → retry 3× → raise
+
+
+# ── Unbiased random_between ────────────────────────────────────────────
+
+
+class TestRandomBetween:
+    """Bias-free inclusive range; counterpart to the classic modulo path."""
+
+    def test_inclusive_bounds(self):
+        p = RandPool(seed=1)
+        for _ in range(500):
+            v = p.random_between(3, 7)
+            assert 3 <= v <= 7
+
+    def test_single_value(self):
+        p = RandPool(seed=2)
+        assert p.random_between(42, 42) == 42
+
+    def test_empty_range_raises(self):
+        p = RandPool()
+        with pytest.raises(ValueError, match="empty range"):
+            p.random_between(5, 4)
+
+    def test_power_of_two_width(self):
+        """Power-of-two widths exercise the mask fast path."""
+        p = RandPool(seed=3)
+        vals = {p.random_between(0, 15) for _ in range(2000)}
+        assert vals == set(range(16))
+
+    def test_non_power_of_two_is_uniform(self):
+        """Classic bias case: width=10 over a large sample must stay near 10 %.
+
+        With a naïve ``% 10`` on a 32-bit source the residual bias is tiny
+        but still measurable in theory; rejection sampling must produce
+        counts that a chi-square accepts at the usual p>0.001 level.
+        """
+        p = RandPool(seed=99)
+        n = 20_000
+        counts = [0] * 10
+        for _ in range(n):
+            counts[p.random_between(0, 9)] += 1
+        exp = n / 10
+        chi2 = sum((c - exp) ** 2 / exp for c in counts)
+        # dof=9, critical value for p=0.001 is ~27.9; we stay well under.
+        assert chi2 < 27.0, f"chi2={chi2:.2f} counts={counts}"
+
+    def test_deterministic_with_seed(self):
+        p1 = RandPool(seed=123)
+        p2 = RandPool(seed=123)
+        seq1 = [p1.random_between(0, 99) for _ in range(50)]
+        seq2 = [p2.random_between(0, 99) for _ in range(50)]
+        assert seq1 == seq2
+
+    def test_advances_pool(self):
+        p1 = RandPool(seed=7)
+        p2 = RandPool(seed=7)
+        p1.random_between(0, 10)
+        assert [p1.randint(0, 255) for _ in range(5)] != [
+            p2.randint(0, 255) for _ in range(5)
+        ]
+
+    def test_randbelow_rejects_non_positive(self):
+        p = RandPool()
+        with pytest.raises(ValueError, match="positive"):
+            p._randbelow(0)
+        with pytest.raises(ValueError, match="positive"):
+            p._randbelow(-3)

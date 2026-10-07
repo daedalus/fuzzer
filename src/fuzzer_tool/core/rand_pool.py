@@ -15,8 +15,11 @@ Opt-in Floyd sampling (``--rand-floyd-sample`` / ``FUZZER_RAND_FLOYD=1``):
   The k==1 and k==2 fast paths are never touched so seeded runs remain
   byte-identical when the flag is off.
 
-Modulo bias is acceptable for fuzzing — we are generating test inputs, not
-cryptographic keys.  The pool is not thread-safe.
+Modulo bias is acceptable for the hot-path ``randrange`` / ``randint`` —
+we are generating test inputs, not cryptographic keys.  When exact
+uniformity matters (weighted-choice tables, distribution tests) use
+:meth:`RandPool.random_between` instead; it rejection-samples and is
+bias-free.  The pool is not thread-safe.
 
 Determinism
 -----------
@@ -84,6 +87,8 @@ class RandPool:
         idx = pool.randrange(len(buf))    # like random.randrange(n)
         val = pool.randint(0, 255)         # like random.randint(a, b)
         pick = pool.choice(seq)            # like random.choice(seq)
+        # bias-free inclusive range (rejection sampling):
+        x = pool.random_between(0, 9)
     """
 
     __slots__ = (
@@ -322,6 +327,62 @@ class RandPool:
         if width == 256:
             return a + self._m256_l[pos]
         return a + (self._pool_l[pos] % width)
+
+    def _randbelow(self, n: int) -> int:
+        """Return a uniform integer in ``[0, n)`` with no modulo bias.
+
+        Uses rejection sampling on the 32-bit pool draws (same algorithm as
+        CPython's ``Random._randbelow_with_getrandbits``).  For ``n`` that
+        are powers of two the mask path is bias-free with a single draw;
+        otherwise values ``>= n`` are discarded and redrawn.
+        """
+        if n <= 0:
+            raise ValueError("n must be positive")
+        # Fast path: power-of-two — mask is exact, no rejection needed.
+        if (n & (n - 1)) == 0:
+            return self._draw() & (n - 1)
+        # General case: k = bit length of (n-1) so 2**k is the smallest
+        # power of two strictly greater than n-1; reject anything outside
+        # [0, n).
+        k = (n - 1).bit_length()
+        mask = (1 << k) - 1
+        # Our pool words are 32-bit.  For ranges that fit in 32 bits a single
+        # draw + mask is enough; larger ranges are vanishingly rare in the
+        # fuzzer and we fall back to a multi-draw composition.
+        if k <= 32:
+            while True:
+                r = self._draw() & mask
+                if r < n:
+                    return r
+        # >32-bit range: compose from successive 32-bit draws.
+        while True:
+            r = 0
+            bits = 0
+            while bits < k:
+                r = (r << 32) | self._draw()
+                bits += 32
+            r &= mask
+            if r < n:
+                return r
+
+    def random_between(self, low: int, high: int) -> int:
+        """Return a uniform random integer in ``[low, high]`` (inclusive).
+
+        Unlike :meth:`randint` / :meth:`randrange`, this uses rejection
+        sampling so the distribution is exactly uniform even when the
+        range width does not divide the generator's period.  Slightly
+        slower; prefer it when constructing weighted-choice tables or
+        any place where the classic ``r % n`` bias would matter (see
+        the ERSC / LWN notes on modulo bias).
+
+        Raises ``ValueError`` if ``high < low``.
+        """
+        if high < low:
+            raise ValueError(f"empty range: high ({high}) < low ({low})")
+        width = high - low + 1
+        if width == 1:
+            return low
+        return low + self._randbelow(width)
 
     def randbytes(self, n: int) -> bytes:
         """Generate *n* random bytes. Matches ``random.randbytes`` API.
