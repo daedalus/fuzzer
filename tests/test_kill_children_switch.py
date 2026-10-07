@@ -18,9 +18,13 @@ from fuzzer_tool.services import fuzzer as F
 
 @pytest.fixture(autouse=True)
 def _restore_switch():
+    # _kill_children() latches _shutdown; left set, every later fuzz loop in
+    # this worker exits after one exec.
     original = F._kill_children_enabled
+    shutdown = F._shutdown
     yield
     F.set_kill_children_enabled(original)
+    F._shutdown = shutdown
 
 
 @pytest.fixture

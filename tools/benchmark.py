@@ -34,6 +34,8 @@ _REGISTRY: dict[str, tuple[str, str]] = {
     "randpool": ("bench_randpool.py", "RandPool vs random on the hotpath call mix"),
     "havoc": ("bench_havoc_subop.py", "adaptive havoc sub-op sampler vs uniform"),
     "huffman": ("bench_huffman_scheduler.py", "Huffman/Fenwick vs batched-CDF seed sampler"),
+    "group": ("bench_group_testing.py", "group testing vs binary splitting, oracle calls"),
+    "seedzip": ("bench_seed_zip.py", "loose seed files vs --zip-seed-corpus, write/read"),
 }
 
 BENCHMARKS: dict[str, str] = {name: script for name, (script, _) in _REGISTRY.items()}

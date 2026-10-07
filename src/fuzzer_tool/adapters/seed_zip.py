@@ -21,7 +21,7 @@ at a time, plus on every state save. The append handle stays open for the
 run; each block ends by rewriting the central directory in place, so the file
 on disk is a valid archive after every flush. Reopening per block instead
 re-parses the whole directory: measured 55 ms per block at 10k entries, half
-of the total write cost (tools/bench_seed_zip.py). The block size grows with
+of the total write cost (tools/lib/bench_seed_zip.py). The block size grows with
 the archive (BLOCK_GROWTH) because the in-place directory rewrite is itself
 O(entries).
 

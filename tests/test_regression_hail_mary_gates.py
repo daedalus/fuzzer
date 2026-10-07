@@ -65,6 +65,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "profile_hotpath",  # cProfile overhead makes exploratory run untrackable
         "debug",  # hail-mary is already verbose; extra debug is noise
         "joint_liveness",  # unmeasured; only effective with --region-profile
+        "cmp_prune_const",  # unmeasured: no A/B yet (DEEP_DIVE "Constant-Compare Pruning")
         "arm_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
         "x86_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
         "enable_regex_bomb_mutations",  # experimental, untested

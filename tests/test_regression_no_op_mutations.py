@@ -751,7 +751,36 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.op_afl_det = True
         f.fsm = parse_fsm("start A\nfinal D\nA -> B : 'a' | 'b'\nB -> B : 'a'\nB -> D : 'c'\n")
 
+        self._gate_grimoire(f)
+        self._gate_ltl(f)
+
         return unreachable
+
+    @staticmethod
+    def _gate_grimoire(f: Fuzzer) -> None:
+        """Book with every battery input generalized around two shared tokens."""
+        # --- grimoire band (3 operators) -------------------------------------
+        # extend wants any seed, string wants >= 2 pooled tokens present in the
+        # input, recurse wants the parent itself generalized with a GAP.
+        from fuzzer_tool.core.grimoire import GAP, GrimoireBook
+
+        book = GrimoireBook(f.max_len)
+        for inp in _battery():
+            book.add(inp, (GAP, b"IHDR", GAP, b"JFIF", GAP))
+        f._grimoire = SimpleNamespace(book=book)
+
+    @staticmethod
+    def _gate_ltl(f: Fuzzer) -> None:
+        """LTL channel whose frontier already holds a prefix (ltl_prefix gate)."""
+        # --- ltl_prefix -----------------------------------------------------
+        # Records are fed through observe(), the path production uses after
+        # reading the event file, so the event file itself is never touched.
+        from fuzzer_tool.core.ltl import LtlChannel, Record, parse_hoa
+        from tests.test_ltl import CHAIN
+
+        ch = LtlChannel(parse_hoa(CHAIN), os.devnull)
+        ch.observe([Record(1, 4, 0)], b"abcdefgh")
+        f.ltl = ch
 
     @staticmethod
     def _gate_redqueen(f: Fuzzer) -> None:

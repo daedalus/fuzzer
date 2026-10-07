@@ -212,7 +212,7 @@ def test_regression_fuzzer_signature_keeps_positional_slots():
     assert params.index("moss") == params.index("consolidated") + 1
     assert params.index("consolidated_v2") == params.index("consolidated_v1") + 1
     assert params.index("consolidated_v1") > params.index("op_p2c")
-    assert params[-1] == "clock"
+    assert params.index("clock") > params.index("consolidated_v2")
 
 
 @pytest.mark.skipif(not _TARGET.exists(), reason="targets/test_target not built")

@@ -2806,21 +2806,38 @@ class OperatorEngine:
         out = tail_append(bytes(buf), self.ctx.max_len, rng=self.ctx._rng)
         buf[n:] = out[n:]
 
+    def _grimoire_book(self):
+        """The stage's book, or None when --grimoire is off."""
+        stage = getattr(self.f, "_grimoire", None)
+        return None if stage is None else stage.book
+
     def _op_grimoire_extend(self, buf, _byte_idx, _data):
         """Add another generalized input's tokens to either side (--grimoire)."""
-        out = self.f._grimoire.book.extend(bytes(buf), self.ctx._rng)
+        book = self._grimoire_book()
+        if book is None:
+            return None
+
+        out = book.extend(bytes(buf), self.ctx._rng)
         if out is not None:
             return bytearray(out)
 
     def _op_grimoire_recurse(self, _buf, _byte_idx, data):
         """Fill the parent's GAPs with other generalized inputs (--grimoire)."""
-        out = self.f._grimoire.book.recurse(bytes(data), self.ctx._rng)
+        book = self._grimoire_book()
+        if book is None:
+            return None
+
+        out = book.recurse(bytes(data), self.ctx._rng)
         if out is not None:
             return bytearray(out)
 
     def _op_grimoire_string(self, buf, _byte_idx, _data):
         """Swap a pooled token present in the input for another (--grimoire)."""
-        out = self.f._grimoire.book.replace(bytes(buf), self.ctx._rng)
+        book = self._grimoire_book()
+        if book is None:
+            return None
+
+        out = book.replace(bytes(buf), self.ctx._rng)
         if out is not None:
             return bytearray(out)
 

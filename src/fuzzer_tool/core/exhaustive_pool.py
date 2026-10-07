@@ -464,6 +464,12 @@ class ExhaustivePool:
             return a  # RandPool's behaviour for an inverted range
         return a + self._bounded(width, f"randint({a}, {b})")
 
+    def random_between(self, low: int, high: int) -> int:
+        # Same reachable set as randint; RandPool raises on an empty range.
+        if high < low:
+            raise ValueError(f"empty range: high ({high}) < low ({low})")
+        return low + self._bounded(high - low + 1, f"random_between({low}, {high})")
+
     def choice(self, seq: Sequence) -> object:
         n = len(seq)
         if n == 0:
@@ -629,6 +635,29 @@ class ExhaustivePool:
         n = len(probs)
         self._bulk_guard(f"categorical(len={n}, {count})", n**count)
         return [self.weighted_choice(range(n), probs) for _ in range(count)]
+
+    def binomial_array(self, counts, p: float):
+        """Every reachable outcome vector: element i in ``[0, counts[i]]``.
+
+        p only shapes frequency, except at the ends: p <= 0 pins 0, p >= 1
+        pins counts[i] (e.g. counts=[2], p=0.5 -> 0, 1, 2).
+        """
+        import numpy as np
+
+        ns = [int(c) for c in np.atleast_1d(counts)]
+        if p <= 0.0:
+            return np.zeros(len(ns), dtype=np.int64)
+        if p >= 1.0:
+            return np.array(ns, dtype=np.int64)
+
+        paths = 1
+        for n in ns:
+            paths *= n + 1
+        self._bulk_guard(f"binomial_array(len={len(ns)})", paths)
+        return np.array(
+            [self._bounded(n + 1, f"binomial_array[{i}]") for i, n in enumerate(ns)],
+            dtype=np.int64,
+        )
 
     # ── Continuous draws: refused ────────────────────────────────────
 

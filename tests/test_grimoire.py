@@ -567,3 +567,36 @@ class TestRoundHooks:
         r._has_new_coverage = True
         r._note_novelty()
         stage.note.assert_called_once_with(b"mutant", [3, 4])
+
+
+class TestOperatorsWithoutStage:
+    """Grimoire off (``_grimoire`` None or absent): handlers decline, never raise."""
+
+    @staticmethod
+    def _engine(f):
+        from types import SimpleNamespace
+
+        from fuzzer_tool.services.operators import OperatorEngine
+
+        eng = OperatorEngine.__new__(OperatorEngine)
+        eng._ctx_cache = SimpleNamespace(_rng=ScriptedRng())
+        eng.f = f
+        return eng
+
+    @pytest.mark.parametrize("op", ["extend", "recurse", "string"])
+    def test_regression_grimoire_op_declines_when_off(self, op):
+        from types import SimpleNamespace
+
+        for f in (SimpleNamespace(_grimoire=None), SimpleNamespace()):
+            handler = getattr(self._engine(f), f"_op_grimoire_{op}")
+            assert handler(bytearray(b"abc"), 0, b"abc") is None
+
+    def test_op_uses_book_when_on(self):
+        """Falsification: with a stage the handler still mutates."""
+        from types import SimpleNamespace
+
+        stage = SimpleNamespace(book=_book((b"k1", K1), (b"k2", K2)))
+        eng = self._engine(SimpleNamespace(_grimoire=stage))
+        eng._ctx_cache._rng = ScriptedRng(choice_idxs=[1], randoms=[0.9])
+
+        assert eng._op_grimoire_extend(bytearray(b"xyz"), 0, b"xyz") == bytearray(b"xyzCD")

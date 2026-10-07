@@ -11,7 +11,7 @@ Write = N saves + final flush. Read = load_corpus warm, and cold after
 drop_caches when writable (root). Seeds are mutated slices of real files
 (ELF, text) plus incompressible noise, sized like a fuzz corpus.
 
-    python tools/bench_seed_zip.py --n 1000 10000 --reps 5 --out ~/bench_seed_zip
+    python tools/lib/bench_seed_zip.py --n 1000 10000 --reps 5 --out ~/bench_seed_zip
 """
 
 from __future__ import annotations
