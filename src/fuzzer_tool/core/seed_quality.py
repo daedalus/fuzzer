@@ -7,9 +7,10 @@ naturally balances exploration (seeds with few observations have wide
 posteriors) and exploitation (seeds with high historical success rates have
 posteriors concentrated at high values).
 
-Optional hierarchical pooling shrinks individual posteriors toward the
-population mean, sharing statistical strength across seeds with few
-observations.
+Optional hierarchical pooling adds an empirical-Bayes (BLUP) prior fitted
+from the spread of all seeds' rates (core/blup.py), so seeds with few
+observations borrow strength from the population and well-observed ones
+keep their own rate.
 
 Usage:
     bsq = BayesianSeedQuality()
@@ -22,6 +23,9 @@ Usage:
 
 from __future__ import annotations
 
+import numpy as np
+
+from fuzzer_tool.core.blup import POOL_MAX_STRENGTH, PoolCache
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 # Minimum parameter floor to avoid degenerate Beta(0, 0)
@@ -29,6 +33,9 @@ MIN_BETA_PARAM = 1e-6
 
 # Parameter value at which a Beta has a closed-form inverse CDF (see below).
 _UNIT_PARAM = 1.0
+
+# Observations between refits of the pooled prior (one pass over all seeds).
+_POOL_REFIT_EVERY = 64
 
 
 def _beta_sample(alpha: float, beta: float, rng: RandPool) -> float:
@@ -67,8 +74,9 @@ class BayesianSeedQuality:
     With the default Beta(1, 1) prior, the posterior is:
         θ | data ~ Beta(1 + successes, 1 + failures)
 
-    When hierarchical_pooling > 0, individual posteriors are shrunk toward a
-    population-level prior estimated from all seeds' aggregated outcomes.
+    When hierarchical_pooling > 0, each posterior gets an extra
+    Beta(h m mu, h m (1 - mu)) prior: mu the population rate, m the strength
+    the seeds' dispersion implies (core/blup.py).
 
     Args:
         prior_alpha: Prior alpha (pseudocount of successes). Default 1.0.
@@ -80,8 +88,8 @@ class BayesianSeedQuality:
             Beta(eps, eps).
         decay_interval: Number of observations between decay applications.
             Default 500.
-        hierarchical_pooling: Shrinkage strength (0.0 = no pooling, 1.0 = full
-            pooling toward population mean). Default 0.0.
+        hierarchical_pooling: Scale h on the fitted prior strength (0.0 = no
+            pooling, 1.0 = the full BLUP prior). Default 0.0.
     """
 
     # Declares that this class supports informative priors, matching the
@@ -115,6 +123,7 @@ class BayesianSeedQuality:
         # Pooled counts for hierarchical shrinkage
         self._pooled_successes = 0
         self._pooled_failures = 0
+        self._pool = PoolCache(POOL_MAX_STRENGTH, _POOL_REFIT_EVERY)
         self._rng = rng or get_default_rand_pool()
 
     def init_seed(
@@ -205,8 +214,10 @@ class BayesianSeedQuality:
     def _get_pooled_params(self, seed_id: str) -> tuple[float, float]:
         """Get posterior parameters with optional hierarchical shrinkage applied.
 
-        When hierarchical_pooling > 0, shrinks the individual seed's posterior
-        toward the population mean, sharing statistical strength across seeds.
+        When hierarchical_pooling > 0, adds the population BLUP prior: a
+        seed with n observations keeps weight n / (n + h m) on its own rate.
+        No pooling while the fit is undefined (under two observed seeds, or
+        a population rate of 0 or 1).
 
         Returns (alpha_eff, beta_eff) for the given seed.
         """
@@ -215,17 +226,25 @@ class BayesianSeedQuality:
 
         alpha_i = self._alpha[seed_id]
         beta_i = self._beta[seed_id]
+        if self._hierarchical_pooling <= 0:
+            return alpha_i, beta_i
 
-        if self._hierarchical_pooling > 0:
-            h = self._hierarchical_pooling
-            pooled_total = self._pooled_successes + self._pooled_failures
-            if pooled_total > 0:
-                pooled_alpha = self._prior_alpha + self._pooled_successes
-                pooled_beta = self._prior_beta + self._pooled_failures
-                alpha_i = (1 - h) * alpha_i + h * pooled_alpha
-                beta_i = (1 - h) * beta_i + h * pooled_beta
+        prior = self._pool.prior(self._total_observations, self._evidence)
+        if prior is None:
+            return alpha_i, beta_i
 
-        return alpha_i, beta_i
+        mu, m = prior
+        hm = self._hierarchical_pooling * m
+        return alpha_i + hm * mu, beta_i + hm * (1.0 - mu)
+
+    def _evidence(self) -> tuple[np.ndarray, np.ndarray]:
+        """Per-seed (successes, observations), net of the default prior."""
+        n = len(self._alpha)
+        a = np.fromiter(self._alpha.values(), dtype=float, count=n)
+        b = np.fromiter((self._beta[k] for k in self._alpha), dtype=float, count=n)
+        succ = np.maximum(a - self._prior_alpha, 0.0)
+        fail = np.maximum(b - self._prior_beta, 0.0)
+        return succ, succ + fail
 
     def posterior_sample(self, seed_id: str) -> float:
         """Draw a single Thompson sample from the seed's posterior.
@@ -235,8 +254,8 @@ class BayesianSeedQuality:
         data. Seeds with wide posteriors (few observations) produce a wider
         range of samples, naturally driving exploration.
 
-        When hierarchical_pooling > 0, the individual posterior is shrunk
-        toward the population mean — see _get_pooled_params() for details.
+        When hierarchical_pooling > 0, the population BLUP prior is added —
+        see _get_pooled_params() for details.
 
         Args:
             seed_id: Seed identifier.
@@ -266,6 +285,9 @@ class BayesianSeedQuality:
         if len(seed_ids) == 1:
             return 0
 
+        if self._hierarchical_pooling > 0:
+            return self._pooled_index(seed_ids)
+
         best_i, best_v = 0, -1.0
         for i, sid in enumerate(seed_ids):
             v = self.posterior_sample(sid)
@@ -273,6 +295,29 @@ class BayesianSeedQuality:
                 best_i, best_v = i, v
 
         return best_i
+
+    def _pooled_index(self, seed_ids: list[str]) -> int:
+        """Vectorised Thompson draw over the pooled posteriors.
+
+        Same parameters as ``_get_pooled_params`` per seed, one prior lookup
+        and one array draw instead of a Python loop of scalar draws.
+        """
+        n = len(seed_ids)
+        alpha, beta = self._alpha, self._beta
+        a = np.fromiter((alpha.get(s, self._prior_alpha) for s in seed_ids), dtype=float, count=n)
+        b = np.fromiter((beta.get(s, self._prior_beta) for s in seed_ids), dtype=float, count=n)
+
+        prior = self._pool.prior(self._total_observations, self._evidence)
+        if prior is not None:
+            # Unregistered seeds keep the bare default prior, as in _get_pooled_params.
+            known = np.fromiter((s in alpha for s in seed_ids), dtype=bool, count=n)
+            mu, m = prior
+            hm = self._hierarchical_pooling * m
+            a = a + known * (hm * mu)
+            b = b + known * (hm * (1.0 - mu))
+
+        draws = self._rng.betavariate_array(a, b)
+        return int(np.argmax(draws))
 
     def select_seed(self, seed_ids: list[str]) -> str:
         """Select a seed via Thompson sampling.
@@ -293,8 +338,7 @@ class BayesianSeedQuality:
         """Return the posterior mean (expected success probability).
 
         This is a deterministic point estimate: alpha / (alpha + beta).
-        When hierarchical_pooling > 0, includes shrinkage toward the
-        population mean.
+        When hierarchical_pooling > 0, includes the population BLUP prior.
 
         Useful for diagnostics and logging. NOT used by Thompson sampling
         (which draws a random sample to preserve exploration).

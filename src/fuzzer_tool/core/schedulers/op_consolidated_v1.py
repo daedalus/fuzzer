@@ -85,13 +85,33 @@ CMA-ES and MOpt.
 
 from __future__ import annotations
 
+from enum import Enum
+
 import numpy as np
 
+from fuzzer_tool.core.blup import fit_groups
 from fuzzer_tool.core.operator_categories import category_of
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 #: Floor on Beta parameters handed to the sampler; numpy's beta rejects 0.
 _MIN_PARAM = 1e-3
+
+#: Records between BLUP refits; a refit is one bincount pass over the arms.
+_REFIT_EVERY = 64
+
+#: Ceiling on a BLUP category strength. Measured on the tournament
+#: environments (8 paired seeds, control = FIXED vs FIXED, noise +/-13):
+#: 8 ties FIXED everywhere; 16/32/64/200 lose 28-59 on Fatigue150 (7-8/8
+#: seeds), where a prior pinned to the category mean slows reaction to
+#: fatigued and unlocked arms.
+_BLUP_MAX_STRENGTH = 8.0
+
+
+class PriorMode(Enum):
+    """Where the category prior's strength comes from."""
+
+    FIXED = "fixed"  # prior_strength for every category
+    BLUP = "blup"  # fitted per category from its operators' dispersion (core/blup.py)
 
 
 class ConsolidatedV1Scheduler:
@@ -109,6 +129,11 @@ class ConsolidatedV1Scheduler:
         category_max_pseudocount: The same ceiling for category evidence.
             Larger than the per-arm cap because a category pools many arms.
         rng: Shared ``RandPool`` (Hard Rule 16).
+        prior_mode: ``BLUP`` replaces ``prior_strength`` per category with
+            the empirical-Bayes strength its operators' spread implies:
+            alike operators pool up to ``_BLUP_MAX_STRENGTH``, unlike ones
+            down to ``blup.MIN_STRENGTH``. Falls back to ``prior_strength``
+            while a category has under two sampled operators.
     """
 
     #: init_arm() accepts (prior_alpha, prior_beta) overrides from
@@ -124,6 +149,7 @@ class ConsolidatedV1Scheduler:
         max_pseudocount: float = 200.0,
         category_max_pseudocount: float = 1000.0,
         rng: RandPool | None = None,
+        prior_mode: PriorMode = PriorMode.FIXED,
     ) -> None:
         if prior_strength < 0:
             raise ValueError(f"prior_strength must be >= 0, got {prior_strength!r}")
@@ -133,6 +159,7 @@ class ConsolidatedV1Scheduler:
         self.max_pseudocount = float(max_pseudocount)
         self.category_max_pseudocount = float(category_max_pseudocount)
         self._rng = rng if rng is not None else get_default_rand_pool()
+        self.prior_mode = prior_mode
 
         # Arm state lives in parallel numpy arrays indexed by arm id, so a
         # selection is one vectorized Beta draw over the candidates rather
@@ -146,6 +173,10 @@ class ConsolidatedV1Scheduler:
         self._cat_index: dict[str, int] = {}
         self._cat_alpha = np.zeros(0)
         self._cat_beta = np.zeros(0)
+
+        # BLUP per-category strength and the pull count it was fitted at.
+        self._cat_m = np.zeros(0)
+        self._fit_at = -_REFIT_EVERY
 
         # Candidate lists repeat (build_ops returns the same set for a seed),
         # so their index arrays are cached by content.
@@ -211,7 +242,21 @@ class ConsolidatedV1Scheduler:
         ca = self._cat_alpha[cats]
         cb = self._cat_beta[cats]
         mu = (ca + 1.0) / (ca + cb + 2.0)
-        return self.prior_strength * mu, self.prior_strength * (1.0 - mu)
+        m = self._strength()[cats] if self.prior_mode is PriorMode.BLUP else self.prior_strength
+        return m * mu, m * (1.0 - mu)
+
+    def _strength(self) -> np.ndarray:
+        """Per-category BLUP strength, refitted every ``_REFIT_EVERY`` pulls."""
+        n_cats = len(self._cat_index)
+        fresh = self._total_pulls - self._fit_at < _REFIT_EVERY
+        if fresh and len(self._cat_m) == n_cats:
+            return self._cat_m
+
+        evidence = self._alpha + self._beta
+        fit = fit_groups(self._alpha, evidence, self._arm_cat, n_cats, _BLUP_MAX_STRENGTH)
+        self._cat_m = np.where(fit.ok, fit.m, self.prior_strength)
+        self._fit_at = self._total_pulls
+        return self._cat_m
 
     def select_op(self, ops: list[str]) -> str:
         """One Thompson draw per candidate; the largest wins."""

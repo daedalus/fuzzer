@@ -19,6 +19,7 @@ from itertools import islice
 from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_structure_function import DispersionIndex
+from fuzzer_tool.core.blup import POOL_MAX_STRENGTH, PoolCache
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock
 from fuzzer_tool.core.cycle_detect import cesaro_average, floyd_detect
 from fuzzer_tool.core.dirichlet import dm_alpha
@@ -47,6 +48,9 @@ MIN_BETA_PARAM = 1e-6
 
 # Beta(1, 1): decay target for arms never registered through init_arm().
 _UNIFORM_PRIOR = (1.0, 1.0)
+
+# Records between refits of the pooled BLUP prior (one pass over all arms).
+_POOL_REFIT_EVERY = 64
 
 # Categories of the CEM per-position byte distribution.
 _BYTE_VALUES = 256
@@ -145,6 +149,7 @@ class MonteCarloScheduler:
         self._arm_prior: dict[str, tuple[float, float]] = {}
         self._pooled_successes = 0.0
         self._pooled_failures = 0.0
+        self._pool = PoolCache(POOL_MAX_STRENGTH, _POOL_REFIT_EVERY)
         self.arm_decay = arm_decay
         self.decay_interval = decay_interval
         self.elite_frac = elite_frac
@@ -252,18 +257,37 @@ class MonteCarloScheduler:
             self._arm_prior[name] = (self.arm_alpha[name], self.arm_beta[name])
 
     def _get_effective_params(self, op: str) -> tuple[float, float]:
-        """Get posterior parameters with optional hierarchical shrinkage."""
+        """Posterior parameters plus, when pooling, the arms' BLUP prior.
+
+        Same prior as BayesianSeedQuality: Beta(h m mu, h m (1 - mu)) with
+        (mu, m) fitted from the arms' dispersion (core/blup.py).
+        """
         a = self.arm_alpha.get(op, 1.0)
         b = self.arm_beta.get(op, 1.0)
-        if self._hierarchical_pooling > 0:
-            h = self._hierarchical_pooling
-            pooled_total = self._pooled_successes + self._pooled_failures
-            if pooled_total > 0:
-                pooled_alpha = 1.0 + self._pooled_successes
-                pooled_beta = 1.0 + self._pooled_failures
-                a = (1 - h) * a + h * pooled_alpha
-                b = (1 - h) * b + h * pooled_beta
-        return a, b
+        if self._hierarchical_pooling <= 0:
+            return a, b
+
+        prior = self._pool.prior(self._record_count, self._arm_evidence)
+        if prior is None:
+            return a, b
+
+        mu, m = prior
+        hm = self._hierarchical_pooling * m
+        return a + hm * mu, b + hm * (1.0 - mu)
+
+    def _arm_evidence(self) -> tuple[np.ndarray, np.ndarray]:
+        """Per-arm (successes, observations), net of each arm's prior."""
+        names = list(self.arm_alpha)
+        prior = self._arm_prior
+        succ = np.fromiter(
+            (self.arm_alpha[k] - prior.get(k, _UNIFORM_PRIOR)[0] for k in names), dtype=float
+        )
+        fail = np.fromiter(
+            (self.arm_beta.get(k, 1.0) - prior.get(k, _UNIFORM_PRIOR)[1] for k in names),
+            dtype=float,
+        )
+        succ = np.maximum(succ, 0.0)
+        return succ, succ + np.maximum(fail, 0.0)
 
     def select_op(self, ops: list[str], prev_op: str | None = None) -> str:
         """Select mutation operator via Thompson sampling with pairwise transitions.

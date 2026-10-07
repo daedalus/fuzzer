@@ -81,7 +81,11 @@ import math
 import numpy as np
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers.op_consolidated_v1 import _MIN_PARAM, ConsolidatedV1Scheduler
+from fuzzer_tool.core.schedulers.op_consolidated_v1 import (
+    _MIN_PARAM,
+    ConsolidatedV1Scheduler,
+    PriorMode,
+)
 
 
 class ConsolidatedV2Scheduler(ConsolidatedV1Scheduler):
@@ -90,8 +94,8 @@ class ConsolidatedV2Scheduler(ConsolidatedV1Scheduler):
     Args:
         tau: Fraction of a draw's excess over the mean that counts, in
             (0, 1]. 0.65 measured; see the module docstring.
-        prior_strength, max_pseudocount, category_max_pseudocount, rng:
-            As ``ConsolidatedV1Scheduler``.
+        prior_strength, max_pseudocount, category_max_pseudocount, rng,
+        prior_mode: As ``ConsolidatedV1Scheduler``.
     """
 
     #: init_arm() is v1's: (prior_alpha, prior_beta) become initial evidence.
@@ -106,10 +110,11 @@ class ConsolidatedV2Scheduler(ConsolidatedV1Scheduler):
         max_pseudocount: float = 200.0,
         category_max_pseudocount: float = 1000.0,
         rng: RandPool | None = None,
+        prior_mode: PriorMode = PriorMode.FIXED,
     ) -> None:
         if math.isnan(tau) or not 0.0 < tau <= 1.0:
             raise ValueError(f"tau must be in (0, 1], got {tau!r}")
-        super().__init__(prior_strength, max_pseudocount, category_max_pseudocount, rng)
+        super().__init__(prior_strength, max_pseudocount, category_max_pseudocount, rng, prior_mode)
         self.tau = float(tau)
 
     def select_op(self, ops: list[str]) -> str:

@@ -11,11 +11,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pytest
 
+from fuzzer_tool.core.blup import MIN_STRENGTH
 from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES, category_of
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.schedulers import ConsolidatedV1Scheduler
+from fuzzer_tool.core.schedulers import ConsolidatedV1Scheduler, ConsolidatedV2Scheduler
+from fuzzer_tool.core.schedulers.op_consolidated_v1 import _BLUP_MAX_STRENGTH, PriorMode
 
 
 def _two_categories():
@@ -227,3 +230,103 @@ def test_regression_legacy_consolidated_kwarg_builds_v1(tmp_path):
     )
     assert isinstance(f._consolidated_v1, ConsolidatedV1Scheduler)
     assert f._use_consolidated_v1
+
+
+# -- BLUP prior strength (core/blup.py) ---------------------------------------
+
+
+def _strength(s, op):
+    """Total pseudocount of *op*'s category prior."""
+    pa, pb = s._prior(np.array([s._arm_id(op)]))
+    return float(pa[0] + pb[0])
+
+
+def _blup(**kw):
+    return ConsolidatedV1Scheduler(prior_mode=PriorMode.BLUP, rng=RandPool(1), **kw)
+
+
+def test_blup_falsify_identical_ops_pool_fully():
+    """Falsification: two ops with exactly the same rate give the unseen op
+    of their category the full ceiling of pooling, not the fixed 4."""
+    (a1, a2, a_unseen), _ = _two_categories()
+    s = _blup(prior_strength=4.0)
+    for _ in range(150):
+        s.record(a1, True, 0.2)
+        s.record(a2, True, 0.2)
+    assert _strength(s, a_unseen) == pytest.approx(_BLUP_MAX_STRENGTH)
+    assert s.posterior_mean(a_unseen) == pytest.approx(0.2, abs=0.01)
+
+
+def test_blup_adversarial_outlier_keeps_its_own_rate():
+    """Adversarial: a strong op beside a weak one makes the category's ops
+    unlike each other, so pooling drops to the floor and the strong op is
+    not dragged toward the category mean."""
+    (a1, a2, a_unseen), _ = _two_categories()
+    s = _blup()
+    for _ in range(150):
+        s.record(a1, True, 0.02)
+        s.record(a2, True, 0.5)
+    assert _strength(s, a_unseen) == pytest.approx(MIN_STRENGTH)
+    assert s.posterior_mean(a2) == pytest.approx(0.5, abs=0.01)
+
+
+def test_blup_undefined_fit_falls_back_to_fixed_strength():
+    """One sampled op in a category: no dispersion to measure."""
+    (a1, _, a_unseen), _ = _two_categories()
+    s = _blup(prior_strength=4.0)
+    for _ in range(100):
+        s.record(a1, True, 0.3)
+    assert _strength(s, a_unseen) == pytest.approx(4.0)
+
+
+def test_fixed_mode_keeps_the_constant_strength():
+    (a1, a2, a_unseen), _ = _two_categories()
+    s = ConsolidatedV1Scheduler(prior_mode=PriorMode.FIXED, prior_strength=4.0, rng=RandPool(1))
+    for _ in range(150):
+        s.record(a1, True, 0.2)
+        s.record(a2, True, 0.2)
+    assert _strength(s, a_unseen) == pytest.approx(4.0)
+
+
+def test_v2_forwards_prior_mode():
+    s = ConsolidatedV2Scheduler(prior_mode=PriorMode.BLUP, rng=RandPool(1))
+    assert s.prior_mode is PriorMode.BLUP
+
+
+def test_cli_consolidated_prior_default_and_value(monkeypatch):
+    from tests.test_dirichlet_wiring import _parse
+
+    assert _parse(monkeypatch).consolidated_prior == PriorMode.FIXED.value
+    assert _parse(monkeypatch, "--consolidated-prior", "blup").consolidated_prior == "blup"
+
+
+def test_adversarial_cli_rejects_unknown_prior(monkeypatch):
+    from tests.test_dirichlet_wiring import _parse
+
+    with pytest.raises(SystemExit):
+        _parse(monkeypatch, "--consolidated-prior", "reml")
+
+
+def test_cmd_fuzz_forwards_consolidated_prior():
+    from tests.test_dirichlet_wiring import _fuzzer_call_kwargs
+
+    assert all("consolidated_prior" in k for k in _fuzzer_call_kwargs())
+
+
+@pytest.mark.skipif(not _TARGET.exists(), reason="targets/test_target not built")
+def test_fuzzer_builds_blup_schedulers(tmp_path):
+    from fuzzer_tool.services.fuzzer import Fuzzer
+
+    corpus, crashes = tmp_path / "c", tmp_path / "k"
+    corpus.mkdir()
+    crashes.mkdir()
+    f = Fuzzer(
+        target=str(_TARGET),
+        corpus_dir=str(corpus),
+        crashes_dir=str(crashes),
+        consolidated_v1=True,
+        consolidated_v2=True,
+        consolidated_prior=PriorMode.BLUP,
+    )
+    assert f._consolidated_v1.prior_mode is PriorMode.BLUP
+    assert f._consolidated_v2.prior_mode is PriorMode.BLUP
