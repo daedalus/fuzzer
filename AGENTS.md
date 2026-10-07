@@ -138,6 +138,7 @@ fuzzer, not just the target.
 | `tools/benchmark.py list` / `tools/benchmark.py <name> [args]` | All benchmarks behind one entry point (`smoke`, `sweep`, `paired`, `replicated`, …) |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
 | `vulture --min-confidence 80 .` | Find duplicated code |
+| `tools/find_dup_tests.py [PATH ...]` | Identical-body tests (AST, docstrings ignored); cross-file hits may bind different per-file names |
 | `fuzzer-tool fuzz <target> -d <corpus> -n <iters> --profile-hotpath [--profile-out PATH]` | cProfile hotpath profile of the fuzz run (tottime/cumtime/ncalls tables; dump defaults to `/tmp/fuzzer_hotpath.prof`) |
 | `dot -Tpng -Gdpi=130 docs/architecture.dot -o docs/images/architecture.png && dot -Tsvg docs/architecture.dot -o docs/images/architecture.svg` | Rebuild the architecture png/svg |
 
