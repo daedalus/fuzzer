@@ -644,11 +644,12 @@ class ExhaustivePool:
         """
         import numpy as np
 
-        ns = [int(c) for c in np.atleast_1d(counts)]
+        shape = np.shape(counts)
+        ns = [int(c) for c in np.ravel(counts)]
         if p <= 0.0:
-            return np.zeros(len(ns), dtype=np.int64)
+            return np.zeros(shape, dtype=np.int64)
         if p >= 1.0:
-            return np.array(ns, dtype=np.int64)
+            return np.array(ns, dtype=np.int64).reshape(shape)
 
         paths = 1
         for n in ns:
@@ -657,7 +658,7 @@ class ExhaustivePool:
         return np.array(
             [self._bounded(n + 1, f"binomial_array[{i}]") for i, n in enumerate(ns)],
             dtype=np.int64,
-        )
+        ).reshape(shape)
 
     # ── Continuous draws: refused ────────────────────────────────────
 

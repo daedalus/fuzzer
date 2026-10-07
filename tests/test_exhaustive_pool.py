@@ -538,6 +538,14 @@ class TestRandPoolParity:
 
         assert sorted(seen) == sorted(itertools.product(range(2), range(3)))
 
+    def test_regression_binomial_array_keeps_input_shape(self):
+        """Adversarial: 2-D counts come back 2-D, as RandPool's do."""
+        counts = [[1, 0], [0, 1]]
+        pool = ExhaustivePool()
+        shapes = {pool.binomial_array(counts, 0.5).shape for _ in pool.runs()}
+
+        assert shapes == {RandPool(seed=1).binomial_array(counts, 0.5).shape}
+
     @pytest.mark.parametrize(("p", "expect"), [(0.0, (0, 0)), (1.0, (1, 2))])
     def test_binomial_array_degenerate_p_is_one_path(self, p, expect):
         """Falsification: p at 0 or 1 pins the draw, as RandPool's does."""
