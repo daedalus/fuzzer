@@ -895,6 +895,20 @@ class FuzzRound:
         # baseline to diff against.
         f = self._f
         _liveness_parent = getattr(f, "_last_parent_seed", None)
+        # --joint-liveness: a two-region probe has no single offset to credit
+        # (the mutation loop publishes None for it), so its diff goes to the
+        # pair ledger instead of a region's estimator.
+        _joint_probe = getattr(f, "_last_joint_probe", None)
+        if _joint_probe is not None:
+            f._last_joint_probe = None
+            if f._current_edges_cache is None or _liveness_parent is None:
+                return
+            baseline_edges = f._edge_tracker.seed_edges.get(f._seed_key(_liveness_parent))
+            if baseline_edges:
+                f._operators.record_joint_coverage_diff(
+                    _joint_probe[0], _joint_probe[1], baseline_edges, f._current_edges_cache
+                )
+            return
         _liveness_offset = getattr(f, "_last_mutation_offset", None)
         if f._current_edges_cache is None or _liveness_parent is None or _liveness_offset is None:
             return

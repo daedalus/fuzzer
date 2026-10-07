@@ -64,6 +64,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "refresh_profile",  # profiling: hail-mary already slow, full re-analysis per run is overkill
         "profile_hotpath",  # cProfile overhead makes exploratory run untrackable
         "debug",  # hail-mary is already verbose; extra debug is noise
+        "joint_liveness",  # unmeasured; only effective with --region-profile
         "arm_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
         "x86_mutate",  # cross-arch toolchain; hail-mary force-enables only x86
         "enable_regex_bomb_mutations",  # experimental, untested

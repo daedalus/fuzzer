@@ -1,10 +1,10 @@
 # Handover: survey of `openai/math` for fuzzer-relevant results (2026-10-06)
 
-> **Status (2026-10-06): analysis only, nothing implemented.** No production code changed. The
-> survey read catalogue titles and abstracts (`CONTENTS.md`), plus the Lean scope page for family
-> 192. It did **not** read any manuscript PDF or check any Lean proof. Every fuzzer connection
-> below is a heuristic motivation, not a derived guarantee. Next step: pick a proposal (§4),
-> read the cited paper first, then build the falsifier.
+> **Status (2026-10-07): P1 implemented behind `--joint-liveness` (opt-in, unmeasured on real
+> formats); P2-P4 not started.** The survey itself (sections 1-3) is unchanged: it read catalogue
+> titles and abstracts plus the Lean scope page for family 192, not any manuscript or Lean proof,
+> and every fuzzer connection is a heuristic motivation, not a derived guarantee. See section 8 for
+> what P1 did and did not establish.
 
 ## 1. Source
 
@@ -171,3 +171,56 @@ Print through an ASCII-safe encoder or a UTF-8 terminal: the catalogue uses non-
    headlines is the only way to say.
 3. Is family 128's algorithm simple enough to implement and does it beat greedy on real
    dictionaries? Unknown until the paper is read.
+
+## 8. P1 implementation record (2026-10-07)
+
+**What exists.** `core/joint_liveness.py` (pair ledger), `OperatorEngine.joint_liveness_probe` /
+`record_joint_coverage_diff` / a revoke check in `_region_liveness_factor`, a probe hook in
+`OperatorEngine.mutate` (after the format-queue and fixpoint stages, off the bandit tournament),
+the pair branch in `FuzzRound._region_liveness`, `Fuzzer(joint_liveness=...)`, CLI
+`--joint-liveness`, `tools/gen_synthetic_target.py --pair-len N`, DEEP_DIVE entry, and tests
+(`tests/test_joint_liveness.py`; `TestPairedRegions` and `TestJointLivenessOnRealTarget` in
+`tests/test_synthetic_target.py`). Default behavior is unchanged: the flag is off, `src/` changes
+are additions only, and the default generator output is byte-identical to before.
+
+**Result (synthetic ground truth only).** On the compiled paired target (gcc, manual guards;
+window 0 = 1 live byte + 4095 dead bytes, A = window 1, B = window 2, `--pair-len 4096`):
+single-region probing left all three regions at the dead weight (0.1); joint probing took 7
+probes (2 hits on the A/B pair) and restored exactly A and B to 1.0, leaving region 0 dead.
+Control tests: independent dead regions are never revoked and probing stops after the per-pair
+budget (<= 6 pairs x 4 probes in the test). This establishes the mechanism, **not** that it
+matters on real parsers. TODO.md carries the real-target falsifier (no dead -> live flips on
+png/gzip/sqlite means drop the flag).
+
+**Design choices a reviewer should check.**
+- Evidence unit is the pair. Revocation needs 2 coverage-moving probes on one pair
+  (`JOINT_CONFIRM_HITS`) because a single unstable edge would otherwise revoke on noise. Both
+  rate (1/64), per-pair budget (32) and pair cap (256) are untuned.
+- "Moved" is any symmetric difference between the mutant's edge set and the parent's.
+- A probe round publishes `_last_mutation_offset = None` so region 0 is not credited with a
+  two-region diff; the exec loop routes it to the ledger and returns before the single-region
+  estimator runs.
+- Not persisted across `--resume` (same as the per-region estimators); state is dropped with the
+  region-cache entry.
+
+**Known limits (also in DEEP_DIVE).**
+1. Finds independent joint effects, not arithmetic relations (field + checksum): two random byte
+   changes essentially never satisfy one. Stays with the checksum patcher.
+2. Regions are the profiler's 4 KiB windows, not the target's fields. A pair inside one window
+   cannot be separated, and a pair must straddle distinct windows.
+3. `FormatLearner.record_liveness` has no `confirmed_dead=False` path, so its padding
+   corroboration for a revoked region is not retracted.
+4. Effective only with `--region-profile` (the dead-region down-weight is what it revokes);
+   `--joint-liveness` alone logs a warning. Excluded from `--hail-mary` until measured.
+
+**Observations found on the way (not changed; check before relying on them).**
+- `_reset_round_ops` publishes `_last_mutation_offset = 0`, and the exec loop only skips `None`.
+  By reading the code, format-seed and `--i2s-fixpoint` candidates look credited to region 0.
+  Not reproduced; if real it biases region-0 liveness toward live.
+- `tests/test_regression_hail_mary_gates.py::test_hail_mary_flags_cover_all_opt_in_bool_actions`
+  fails on clean `origin/master` (`cmp_prune_const` is in neither `_HAIL_MARY_FLAGS` nor
+  `_EXCLUDED_OPT_IN`). Pre-existing and unrelated to P1.
+
+**Next.** (1) Real-target falsifier on png/gzip/sqlite with `--region-profile --joint-liveness`.
+(2) Paired A/B via `tools/lib/bench_paired.py` before any hail-mary membership. (3) P3's cheap
+diagnostic (dictionary overlap) is independent and still untouched.

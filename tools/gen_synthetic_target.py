@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate a synthetic fuzz target with a controllable edge count.
 
-Three long-standing gaps in the target matrix, all of which this closes:
+Four long-standing gaps in the target matrix, all of which this closes:
 
 1. **Nothing exercises the coverage map cap except `ffmpeg_read`.** Every
    other target sizes to the 8192-entry floor at ~13% load, so anything
@@ -23,7 +23,17 @@ Three long-standing gaps in the target matrix, all of which this closes:
    calibration had to be validated against fakes. `--unstable N` emits
    blocks gated on ASLR, so the ground truth is known by construction.
 
-The point of all three is that ground truth is known *by construction*
+4. **No target has two regions that are dead alone and live together.**
+   `--pair-len N` appends regions A and B (N bytes each, right after the dead
+   region) whose bytes are OR-folded and tested as `(A != 0) & (B != 0)`.
+   Changing A alone or B alone moves no edge; changing both does. That is
+   the ground truth `core/joint_liveness.py` (--joint-liveness) needs: a
+   region the single-region estimator calls dead that block mutation shows
+   is live. The reference is an all-zero A and B, so a seed must carry zeros
+   there. Not combinable with `--unstable` (the unstable tail shares those
+   offsets).
+
+The point of all four is that ground truth is known *by construction*
 rather than inferred from the target's behaviour, which is what makes a
 false-negative rate measurable at all.
 
@@ -84,7 +94,7 @@ __attribute__((visibility("default"))) const int synth_dead_start = LIVE_LEN;
 __attribute__((visibility("default"))) const int synth_dead_len   = DEAD_LEN;
 __attribute__((visibility("default"))) const int synth_n_blocks   = N_BLOCKS;
 
-static volatile uint64_t sink;
+%(pair_decls)sstatic volatile uint64_t sink;
 
 #ifdef SYNTH_MANUAL_GUARDS
 /* gcc has no -fsanitize-coverage=trace-pc-guard. Call the shim's callback
@@ -131,6 +141,32 @@ FOOTER = r'''
     sink = acc;
     return 0;
 }
+'''
+
+PAIR_DECLS = r'''#define PAIR_LEN %(pair_len)d
+#define PAIR_A (LIVE_LEN + DEAD_LEN)
+#define PAIR_B (PAIR_A + PAIR_LEN)
+__attribute__((visibility("default"))) const int synth_pair_a_start = PAIR_A;
+__attribute__((visibility("default"))) const int synth_pair_b_start = PAIR_B;
+__attribute__((visibility("default"))) const int synth_pair_len     = PAIR_LEN;
+
+'''
+
+# Emitted between the dead-region read and the live-region selector. One extra
+# guard (index N_BLOCKS, the spare slot of synth_guards) marks the joint edge.
+# `&` not `&&`: a short-circuit would branch on A alone, and A alone must not
+# move any edge under clang's instrumentation either.
+PAIRED = r'''
+    /* ---- PAIRED REGIONS: dead alone, live together ---- */
+    uint8_t pair_a = 0, pair_b = 0;
+    for (size_t i = PAIR_A; i < n && i < (size_t)(PAIR_A + PAIR_LEN); i++)
+        pair_a |= buf[i];
+    for (size_t i = PAIR_B; i < n && i < (size_t)(PAIR_B + PAIR_LEN); i++)
+        pair_b |= buf[i];
+    {
+        uint32_t both = (uint32_t)(pair_a != 0) & (uint32_t)(pair_b != 0);
+        if (both) { sink = both; BLOCK_MARK(N_BLOCKS); }
+    }
 '''
 
 UNSTABLE = r'''
@@ -193,6 +229,13 @@ def main() -> int:
     ap.add_argument("--live-len", type=int, default=32, help="live prefix length in bytes")
     ap.add_argument("--dead-len", type=int, default=64, help="dead region length in bytes")
     ap.add_argument("--unstable", type=int, default=4, help="ASLR-gated unstable blocks")
+    ap.add_argument(
+        "--pair-len",
+        type=int,
+        default=0,
+        help="bytes per paired region (A,B): dead alone, live together; 0 = off "
+        "(requires --unstable 0)",
+    )
     ap.add_argument("-o", "--out", default="targets/synthetic_cov.c")
     args = ap.parse_args()
 
@@ -200,11 +243,23 @@ def main() -> int:
         print("--blocks must be >= 2", file=sys.stderr)
         return 2
 
+    if args.pair_len < 0 or (args.pair_len and args.unstable):
+        print("--pair-len must be >= 0 and needs --unstable 0", file=sys.stderr)
+        return 2
+
+    pair_decls = PAIR_DECLS % {"pair_len": args.pair_len} if args.pair_len else ""
     src = HEADER % {
         "live_len": args.live_len,
         "dead_len": args.dead_len,
         "n_blocks": args.blocks,
+        "pair_decls": pair_decls,
     }
+    if args.pair_len:
+        # Between the dead-region read and the live-region selector (the last
+        # line of HEADER is the sel loop, so splice before it).
+        marker = "    /* ---- LIVE REGION"
+        head, tail = src.split(marker, 1)
+        src = head + PAIRED.lstrip("\n") + "\n" + marker + tail
     src += gen_blocks(args.blocks, args.fanout)
 
     if args.unstable > 0:
@@ -221,8 +276,10 @@ def main() -> int:
 
     with open(args.out, "w") as fh:
         fh.write(src)
-    print(f"wrote {args.out}: {args.blocks} blocks, dead region [{args.live_len}, "
-          f"{args.live_len + args.dead_len}), {args.unstable} unstable")
+    print(
+        f"wrote {args.out}: {args.blocks} blocks, dead region [{args.live_len}, "
+        f"{args.live_len + args.dead_len}), {args.unstable} unstable"
+    )
     return 0
 
 

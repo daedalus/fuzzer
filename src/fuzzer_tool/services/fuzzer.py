@@ -1756,6 +1756,10 @@ class Fuzzer:
         # not implied by position_arena; enabled by --hail-mary. Appended:
         # positional signature.
         pos_harmonic=False,
+        # Joint (block) liveness probing of coverage-dead regions
+        # (core/joint_liveness.py): opt-in, unmeasured, only has an effect
+        # with region_profile. Appended: positional signature.
+        joint_liveness=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2654,6 +2658,20 @@ class Fuzzer:
         # is only worth paying on structured targets, and it is cached per
         # seed in OperatorEngine rather than recomputed per mutation.
         self._use_region_profile = region_profile
+
+        # Joint liveness (core/joint_liveness.py): pair probes over regions the
+        # per-region estimators call dead, so a region that only matters in
+        # combination regains its mutation weight. Down-weighting is a
+        # --region-profile mechanism, so without it there is nothing to revoke.
+        self._joint_liveness = None
+        self._last_joint_probe = None
+        if joint_liveness:
+            from fuzzer_tool.core.joint_liveness import JointLiveness
+
+            self._joint_liveness = JointLiveness(self._rng)
+            if not region_profile:
+                log.warning("--joint-liveness has no effect without --region-profile")
+            log.info("Joint liveness probing enabled")
 
         # Weighted mutation lineage tree (parent/ops/sites/new-edge weight
         # per seed). Initialised early so the post-metadata rebuild can
@@ -8856,6 +8874,8 @@ class Fuzzer:
             groups["Analysis"].append("overlap-density")
         if getattr(self, "_use_region_profile", False):
             groups["Analysis"].append("region-profile")
+        if getattr(self, "_joint_liveness", None) is not None:
+            groups["Analysis"].append("joint-liveness")
         if getattr(self, "_calibrate", 0) > 0:
             groups["Analysis"].append(f"calibrate={self._calibrate}")
         if getattr(self, "_use_bootstrap", False):

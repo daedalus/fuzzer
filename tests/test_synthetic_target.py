@@ -65,9 +65,10 @@ LIVE = (0, 32)
 DEAD = (32, 96)
 
 
-def _build(tmp_path, blocks=400, fanout=32, unstable=0):
+def _build(tmp_path, blocks=400, fanout=32, unstable=0, pair_len=0, extra=()):
     """Generate, compile and link a driver for one target variant."""
-    src = tmp_path / f"synth_{blocks}_{unstable}.c"
+    tag = "_".join([str(blocks), str(unstable), str(pair_len), *(a.lstrip("-") for a in extra)])
+    src = tmp_path / f"synth_{tag}.c"
     r = subprocess.run(
         [
             sys.executable,
@@ -78,6 +79,9 @@ def _build(tmp_path, blocks=400, fanout=32, unstable=0):
             str(fanout),
             "--unstable",
             str(unstable),
+            "--pair-len",
+            str(pair_len),
+            *extra,
             "-o",
             str(src),
         ],
@@ -86,7 +90,7 @@ def _build(tmp_path, blocks=400, fanout=32, unstable=0):
     )
     assert r.returncode == 0, r.stderr
 
-    obj = tmp_path / f"synth_{blocks}_{unstable}.o"
+    obj = tmp_path / f"synth_{tag}.o"
     r = subprocess.run(
         ["gcc", "-O1", "-DSYNTH_MANUAL_GUARDS", "-c", str(src), "-o", str(obj)],
         capture_output=True,
@@ -96,7 +100,7 @@ def _build(tmp_path, blocks=400, fanout=32, unstable=0):
 
     drv = tmp_path / "driver.c"
     drv.write_text(_DRIVER)
-    exe = tmp_path / f"drive_{blocks}_{unstable}"
+    exe = tmp_path / f"drive_{tag}"
     r = subprocess.run(
         [
             "gcc",
@@ -266,3 +270,137 @@ class TestGuardCountScales:
         assert len(large_ids) > len(small_ids) * 1.5, (
             f"200 blocks -> {len(small_ids)} edges, 4000 blocks -> {len(large_ids)}"
         )
+
+
+@pytest.fixture(scope="module")
+def paired(tmp_path_factory):
+    tp = tmp_path_factory.mktemp("paired")
+    exe = _build(tp, unstable=0, pair_len=16)
+    rnd = random.Random(7)
+    seed = bytearray(rnd.randrange(256) for _ in range(256))
+    seed[96:128] = bytes(32)
+    return tp, exe, bytes(seed)
+
+
+class TestPairedRegions:
+    """`--pair-len N`: regions A and B that are dead alone and live together.
+
+    The ground truth `--joint-liveness` (core/joint_liveness.py) is measured
+    against. Reference is an all-zero A and B, so the seed carries zeros there.
+    """
+
+    A = (96, 112)
+    B = (112, 128)
+
+    @staticmethod
+    def _poke(seed, region, value=0x5A):
+        d = bytearray(seed)
+        d[region[0] + 3] = value
+        return bytes(d)
+
+    def test_each_region_alone_moves_nothing(self, paired):
+        tp, exe, seed = paired
+        base_edges = _run(exe, seed, tp)
+        assert _run(exe, self._poke(seed, self.A), tp) == base_edges
+        assert _run(exe, self._poke(seed, self.B), tp) == base_edges
+
+    def test_both_regions_together_move_coverage(self, paired):
+        """Control: without this the test above passes on a target where the
+        paired regions are simply dead."""
+        tp, exe, seed = paired
+        base_edges = _run(exe, seed, tp)
+        both = self._poke(self._poke(seed, self.A), self.B)
+        joint = _run(exe, both, tp)
+        # Edges are (prev, cur) transitions, so the one new guard adds more
+        # than one map entry; what matters is that something is new.
+        assert joint - base_edges
+
+    def test_default_target_has_no_pair_edge(self, tmp_path_factory):
+        """--pair-len 0 must leave the original target untouched."""
+        tp = tmp_path_factory.mktemp("nopair")
+        exe = _build(tp, unstable=0)
+        rnd = random.Random(7)
+        seed = bytes(rnd.randrange(256) for _ in range(256))
+        both = bytearray(seed)
+        both[96:128] = b"\xff" * 32
+        # Bytes 96..128 are plain tail in the default layout: no joint edge,
+        # so changing them cannot add an edge beyond the ordinary tail case.
+        assert len(_run(exe, bytes(both), tp) - _run(exe, seed, tp)) <= 1
+
+
+class TestJointLivenessOnRealTarget:
+    """Real compiled target, real shim coverage, real OperatorEngine.
+
+    Layout: window 0 = one live byte + 4095 dead bytes (statistical region 0),
+    A = window 1, B = window 2. The profiler's regions are 4 KiB windows, not
+    the target's fields, so the pair must straddle distinct windows for pair
+    probing to be able to separate it -- a limit of --joint-liveness, not of
+    the target.
+    """
+
+    def test_single_region_probing_calls_all_dead_and_pair_probing_revokes_only_ab(
+        self, tmp_path_factory, monkeypatch
+    ):
+        import xxhash
+
+        import fuzzer_tool.services.operators as ops
+        from fuzzer_tool.core.joint_liveness import JointLiveness
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        tp = tmp_path_factory.mktemp("joint_real")
+        exe = _build(
+            tp,
+            unstable=0,
+            pair_len=4096,
+            extra=("--live-len", "1", "--dead-len", "4095"),
+        )
+        rnd = random.Random(1)
+        seed = bytes(rnd.randrange(256) for _ in range(4096)) + bytes(8192)
+
+        class _F:
+            def __init__(self, joint):
+                self.max_len = 1 << 20
+                self._rng = RandPool(seed=5)
+                self._use_region_profile = True
+                self._use_transfer_entropy = False
+                self._te = None
+                self._use_mi = False
+                self._mi = None
+                self._use_sensitivity = False
+                self._sensitivity = None
+                self._crash_mi = None
+                self._joint_liveness = joint
+                self._last_joint_probe = None
+
+        # The convergence window is the estimator's, not what is under test.
+        monkeypatch.setattr(ops, "_LIVENESS_SWITCH_AFTER", 20)
+        joint = JointLiveness(RandPool(seed=3), rate=1.0)
+        eng = ops.OperatorEngine(_F(joint))
+        _c, bounds, _t = eng.region_weights(seed)
+        assert bounds == [(0, 4096), (4096, 8192), (8192, 12288)]
+        base = _run(exe, seed, tp)
+
+        # What the existing estimator sees: single-region mutations only.
+        for lo, hi in bounds:
+            for _ in range(25):
+                off = rnd.randrange(max(lo, 1), hi)  # never the live byte
+                m = bytearray(seed)
+                m[off] ^= rnd.randrange(1, 256)
+                eng.record_coverage_diff(seed, off, base, _run(exe, bytes(m), tp))
+        dead = [eng._region_liveness_factor(seed, i) for i in range(3)]
+        assert dead == [ops._LIVENESS_DEAD_WEIGHT] * 3
+
+        key = xxhash.xxh3_64_intdigest(seed)
+        for _ in range(400):
+            m = eng.joint_liveness_probe(seed)
+            if m is None:
+                break
+            _k, pair = eng.f._last_joint_probe
+            eng.record_joint_coverage_diff(key, pair, base, _run(exe, m, tp))
+
+        assert [eng._region_liveness_factor(seed, i) for i in range(3)] == [
+            ops._LIVENESS_DEAD_WEIGHT,
+            1.0,
+            1.0,
+        ]
+        assert joint.revoked_regions == 2

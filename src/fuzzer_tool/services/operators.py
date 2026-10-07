@@ -5637,6 +5637,9 @@ class OperatorEngine:
     def _drop_region_liveness(self, key: int) -> None:
         """Evict *key*'s liveness with its region layout (LRU callback)."""
         self._region_liveness.pop(key, None)
+        joint = getattr(self.f, "_joint_liveness", None)
+        if joint is not None:
+            joint.drop(key)
 
     def region_weights(self, data: bytes):
         """Cumulative region weights for *data*, cached by content hash.
@@ -5776,8 +5779,71 @@ class OperatorEngine:
         if est is None:
             return 1.0
         if est.is_converged and est.mask == 0:
+            # --joint-liveness: a region dead on its own can still be live in
+            # combination with another one (core/joint_liveness.py); once a
+            # pair confirmed that, the single-region verdict no longer
+            # justifies the down-weight.
+            joint = getattr(self.f, "_joint_liveness", None)
+            if joint is not None and joint.is_revoked(key, region_idx):
+                return 1.0
             return _LIVENESS_DEAD_WEIGHT
         return 1.0
+
+    def joint_liveness_probe(self, data: bytes) -> bytes | None:
+        """One mutant touching two coverage-dead regions at once, or None.
+
+        --joint-liveness (core/joint_liveness.py): a region judged dead by
+        single-region mutations may only matter jointly with another. On the
+        `JOINT_PROBE_RATE` fraction of rounds, and only when *data* has at
+        least two regions converged dead (and not yet found jointly live),
+        flip one byte in each of a sampled pair of them. Publishes
+        ``f._last_joint_probe = (seed_key, pair)`` so the exec loop can fold
+        the outcome back through `record_joint_coverage_diff`.
+        """
+        joint = getattr(self.f, "_joint_liveness", None)
+        if joint is None or not joint.want_probe():
+            return None
+        entry = self.region_weights(data)
+        if entry is None:
+            return None
+        bounds = entry[1]
+        key = xxhash.xxh3_64_intdigest(data)
+        estimators = self._region_liveness.get(key)
+        if not estimators:
+            return None
+        dead = [
+            i for i, e in enumerate(estimators) if e is not None and e.is_converged and e.mask == 0
+        ]
+        pair = joint.pick_pair(key, dead)
+        if pair is None:
+            return None
+        buf = bytearray(data)
+        rng = self.ctx._rng
+        for region_idx in pair:
+            lo, hi = bounds[region_idx]
+            hi = min(hi, len(buf))
+            if lo >= hi:
+                return None
+            buf[rng.randint(lo, hi - 1)] ^= rng.randint(1, 255)
+        self.f._last_joint_probe = (key, pair)
+        return bytes(buf)
+
+    def record_joint_coverage_diff(
+        self, key: int, pair: tuple[int, int], baseline_edges: set, mutant_edges: set
+    ) -> bool:
+        """Fold one joint probe's outcome into the pair ledger.
+
+        *key*/*pair* are what `joint_liveness_probe` published. "Moved" means
+        any symmetric difference against the parent's edge set. Returns True
+        iff this probe revoked a region's dead verdict.
+        """
+        joint = getattr(self.f, "_joint_liveness", None)
+        if joint is None:
+            return False
+        revoked = joint.record(key, pair, bool(baseline_edges ^ mutant_edges))
+        if revoked:
+            log.info("Joint liveness: regions %s are live in combination", pair)
+        return revoked
 
     def _region_weighted_position(self, data: bytes, buf_len: int) -> int | None:
         """Draw a byte offset weighted by each region's mutation_weight(),
@@ -6359,6 +6425,9 @@ class OperatorEngine:
         # drew to whichever scheduler chose last.
         f._op_selector = None
         f._last_slopt_arm = None
+        # Cleared every round: only a round that builds a joint probe below
+        # may leave it set, or the exec loop would credit a stale pair.
+        f._last_joint_probe = None
         det_mutant = self.maybe_deterministic_mutation(data)
         if det_mutant is not None:
             self._reset_round_ops(data, det_mutant)
@@ -6379,6 +6448,16 @@ class OperatorEngine:
         if candidate is not None:
             self._reset_round_ops(data, candidate)
             return candidate
+
+        # --joint-liveness probe: off the bandit tournament like the format
+        # queue above. _reset_round_ops publishes offset 0, which would credit
+        # region 0 with a diff two regions caused; None skips the single-region
+        # observation and leaves the pair ledger to account for the round.
+        joint_mutant = self.joint_liveness_probe(data)
+        if joint_mutant is not None:
+            self._reset_round_ops(data, joint_mutant)
+            f._last_mutation_offset = None
+            return joint_mutant
 
         buf = bytearray(data)
         if not buf:

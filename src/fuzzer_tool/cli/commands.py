@@ -664,6 +664,7 @@ def cmd_fuzz(args):
         pos_good_turing=getattr(args, "pos_good_turing", False),
         pos_saliency=getattr(args, "pos_saliency", False),
         pos_harmonic=getattr(args, "pos_harmonic", False),
+        joint_liveness=getattr(args, "joint_liveness", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
@@ -2105,6 +2106,11 @@ def cmd_sweep(args):
 # pos_kadane (--pos-kadane) is excluded as unmeasured (see
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the Kadane
 # window arm has only a synthetic check, no paired run on a real target.
+#
+# joint_liveness (--joint-liveness) is excluded: it only has an effect together
+# with --region-profile (the dead-region down-weight is the thing it revokes)
+# and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
+# a real target) has not been run, so --hail-mary should not field it yet.
 #
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
@@ -4141,6 +4147,16 @@ def main() -> int:
             "Enable statistical region profiling for mutation targeting "
             "(labels seed windows incompressible/tabular/textual/repetitive "
             "and weights byte selection accordingly)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--joint-liveness",
+        action="store_true",
+        help=(
+            "Probe pairs of coverage-dead regions together (one byte flipped in each) "
+            "and restore the mutation weight of any pair that moves coverage jointly "
+            "though neither does alone (core/joint_liveness.py). Only has an effect "
+            "with --region-profile. Opt-in: unmeasured, NOT part of --hail-mary."
         ),
     )
     fuzz_parser.add_argument(
