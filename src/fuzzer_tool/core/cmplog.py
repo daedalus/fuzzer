@@ -353,6 +353,34 @@ class CmplogRecords(enum.Enum):
     OFF = 1
 
 
+def _eviction_victims(pool: list, value: dict, excess: int) -> set[int]:
+    """Indices of the *excess* entries smallest by ``(value, index)``.
+
+    The order :meth:`CmplogCollector._evict_tokens` defines. Credit is a
+    non-negative count (incremented on use, halved by ``_age_values``,
+    which also drops entries that reach zero), so ``(0, i)`` sorts below
+    every credited entry and the victims are simply the first *excess*
+    zero-credit entries in pool order -- whenever there are that many.
+    There nearly always are: credit is rare and the pool is mostly the
+    zero-value mass, oldest first. Walking the pool from the front and
+    stopping at the *excess*-th uncredited entry finds them without
+    computing a key for the whole pool; the full sort is kept for the case
+    where credited entries must go too.
+
+    The sort it replaces ran on every drain once the pool was saturated --
+    10,000 tokens and 5,000 pairs on FFmpeg, ~2/3 of a token collection.
+    """
+    victims: list[int] = []
+    get = value.get
+    for i, entry in enumerate(pool):
+        if not get(entry, 0):
+            victims.append(i)
+            if len(victims) == excess:
+                return set(victims)
+    order = sorted(range(len(pool)), key=lambda i: (get(pool[i], 0), i))
+    return set(order[:excess])
+
+
 class CmplogCollector:
     """Collect and process comparison tracing data from the cmplog shim.
 
@@ -1134,11 +1162,7 @@ class CmplogCollector:
         excess = len(self.tokens) - self._max_tokens
         if excess <= 0:
             return
-        order = sorted(
-            range(len(self.tokens)),
-            key=lambda i: (self._token_value.get(self.tokens[i], 0), i),
-        )
-        victims = set(order[:excess])
+        victims = _eviction_victims(self.tokens, self._token_value, excess)
         for i in victims:
             t = self.tokens[i]
             self._token_set.discard(t)
@@ -1151,11 +1175,7 @@ class CmplogCollector:
         excess = len(self.pairs) - self._max_pairs
         if excess <= 0:
             return
-        order = sorted(
-            range(len(self.pairs)),
-            key=lambda i: (self._pair_value.get(self.pairs[i], 0), i),
-        )
-        victims = set(order[:excess])
+        victims = _eviction_victims(self.pairs, self._pair_value, excess)
         for i in victims:
             p = self.pairs[i]
             self._pair_set.discard(p)
@@ -1288,14 +1308,17 @@ class CmplogCollector:
         if new_lines is None:
             return
 
+        # Runs on every execution over ~850 lines on FFmpeg; the dicts and
+        # their bound methods are hoisted out of the loop.
+        site_fired, site_asserted = self.site_fired, self.site_asserted
+        last_fired, last_asserted = self.last_site_fired, self.last_site_asserted
+        fired_get, asserted_get = site_fired.get, site_asserted.get
         for line in new_lines:
             parts = line.split()
-            if not parts:
-                continue
-            if parts[0] == "CND" and len(parts) == 2:
-                self._note_site_drops(parts[1])
-                continue
-            if parts[0] != "CNS" or len(parts) != 5:
+            n = len(parts)
+            if n != 5 or parts[0] != "CNS":
+                if n == 2 and parts[0] == "CND":
+                    self._note_site_drops(parts[1])
                 continue
             try:
                 pc = int(parts[2], 16)
@@ -1304,12 +1327,12 @@ class CmplogCollector:
             except ValueError:
                 continue
             key = (parts[1], pc)
-            self.site_fired[key] = self.site_fired.get(key, 0) + fired
-            self.site_asserted[key] = self.site_asserted.get(key, 0) + asserted
+            site_fired[key] = fired_get(key, 0) + fired
+            site_asserted[key] = asserted_get(key, 0) + asserted
             if fired:
-                self.last_site_fired[key] = self.last_site_fired.get(key, 0) + fired
+                last_fired[key] = last_fired.get(key, 0) + fired
             if asserted:
-                self.last_site_asserted[key] = self.last_site_asserted.get(key, 0) + asserted
+                last_asserted[key] = last_asserted.get(key, 0) + asserted
 
     def _read_site_lines(self) -> list[str] | None:
         """New lines of the sites file since the last drain; None when unread.
