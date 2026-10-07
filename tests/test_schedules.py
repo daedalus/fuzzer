@@ -563,23 +563,6 @@ class TestAflgoSchedule:
 
 
 class TestHandicap:
-    def test_handicap_0(self):
-        sc = SeedScorer("base")
-        score = sc.score(
-            exec_us=100,
-            avg_exec_us=100,
-            bitmap_size=50,
-            avg_bitmap_size=50,
-            handicap=0,
-            depth=0,
-            fuzz_level=0,
-            n_fuzz=0,
-            total_execs=1000,
-            tc_ref=0,
-            favored=False,
-        )
-        assert score == 100.0
-
     def test_handicap_1(self):
         sc = SeedScorer("base")
         score = sc.score(

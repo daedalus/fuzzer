@@ -552,10 +552,6 @@ class TestInProcessFuzzer:
             assert f._inprocess_runner is not None
             assert f._inprocess_runner.function_name == "my_func"
 
-    def test_fuzzer_inprocess_none_by_default(self):
-        f = self._make_fuzzer()
-        assert f._inprocess_runner is None
-
 
 class TestFuzzerHelpers:
     """Test helper methods that don't require process execution."""

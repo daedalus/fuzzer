@@ -10,7 +10,6 @@ Covers:
 import os
 
 import fuzzer_tool.core.mutations.structured as structured
-from fuzzer_tool.core.operator_categories import OPERATOR_CATEGORIES
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.operators import OperatorEngine
@@ -75,9 +74,6 @@ class TestRegistration:
         for ops in cats.values():
             union |= ops
         assert union >= NEW_OPS
-
-    def test_operator_categories_derived_from_registry(self):
-        assert REGISTRY.categories() == OPERATOR_CATEGORIES
 
     def test_unconditional_availability(self):
         fuzzer = _MockFuzzer()

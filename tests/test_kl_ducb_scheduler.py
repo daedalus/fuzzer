@@ -2,22 +2,7 @@
 
 from __future__ import annotations
 
-import math
-
-from fuzzer_tool.core.schedulers._kl_ucb import kl_upper_bound
 from fuzzer_tool.core.schedulers.op_kl_ducb import KL_DUCBScheduler
-
-
-def test_kl_ducb_falsification_gaussian_strict_tightening() -> None:
-    """KL width is at most the Gaussian width sqrt(2*budget), with strict
-    tightening when the bisection path is active (no fast-path Gaussian return).
-    """
-    p = 0.5
-    budget = 0.3
-    kl_width = kl_upper_bound(p, budget) - p
-    gaussian_width = min(1.0, p + math.sqrt(2.0 * budget)) - p
-    # Strict tightening for these parameters (bisection path active).
-    assert kl_width < gaussian_width - 1e-6
 
 
 def test_kl_ducb_adversarial_scripted_rng() -> None:

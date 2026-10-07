@@ -248,6 +248,7 @@ class TestShmCleanupDropsItsViews:
         cov = ShmCoverage()
         cov.cleanup()
         cov.cleanup()  # atexit runs it again after an explicit call
+        assert cov.shm_id == -1
 
     def test_resize_rebinds_every_view(self):
         """resize() drops the views before shmdt; it must rebind all of them."""

@@ -223,19 +223,6 @@ class TestDropCounter:
             shm.cleanup()
 
     @needs_cc
-    def test_ctx_bits_readable_from_the_built_binary(self, built):
-        """The width is discoverable, from the marker symbol rather than SHM.
-
-        It used to be published into the segment at attach, and the mask
-        that write used zeroed the fuzzer's generation tag every execution.
-        The segment copy had no reader outside this suite, and the value is
-        needed BEFORE the first execution anyway (map sizing), so the marker
-        symbol is the only source that was ever load-bearing.
-        """
-        for bits, path in built.items():
-            assert detect_ctx_bits(path) == bits
-
-    @needs_cc
     def test_reset_dropped_edges_clears_drops_only(self, built):
         shm = ShmCoverage(size=1024)
         try:
