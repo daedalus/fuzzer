@@ -50,6 +50,7 @@ from fuzzer_tool.core.mutations import (
     could_be_bitflip,
     could_be_interest,
     radamsa_mutate_num,
+    redundant_byte_table,
     splice,
     splice_common_prefix,
     splice_diff_located,
@@ -102,6 +103,10 @@ _REGION_MISS = object()
 # profile_buffer() skips windows below 512 bytes, so anything shorter has no
 # profile to weight by.
 _REGION_MIN_LEN = 512
+
+#: Below this length the early-exit scalar loop beats numpy call overhead
+#: (measured crossover ~256 B).
+_REDUNDANT_LUT_MIN_LEN = 256
 
 # --wall-order: unsolved branches searched per condstmt_solve call. The
 # alpha-beta wall search is factorial in one overlap component, so the
@@ -5171,6 +5176,17 @@ class OperatorEngine:
         """
         if len(original) != len(candidate):
             return False
+        if original == candidate:
+            return True
+
+        # Long buffers: look up only the differing bytes in a 256x256 table.
+        if len(original) >= _REDUNDANT_LUT_MIN_LEN:
+            old = np.frombuffer(original, dtype=np.uint8)
+            new = np.frombuffer(candidate, dtype=np.uint8)
+            diff = np.flatnonzero(old != new)
+            keys = (old[diff].astype(np.uint16) << 8) | new[diff]
+            return bool(redundant_byte_table()[keys].all())
+
         for a, b in zip(original, candidate, strict=True):
             if a == b:
                 continue

@@ -19,7 +19,8 @@ class ScriptedRng:
 
     Args:
         randints: Values returned one per scalar ``randint()`` call.
-        randoms: Floats returned one per ``random()`` call.
+        randoms: Floats returned one per ``random()`` call, or ``count`` at
+            a time per ``random_list(count)`` call.
         choice_idxs: Indices consumed one per ``choice()`` call
             (index-based like ``random.choice``/``RandPool.choice``).
         counts: Values returned (wrapped in a list) per single-value
@@ -66,6 +67,9 @@ class ScriptedRng:
 
     def random(self):
         return next(self._randoms)
+
+    def random_list(self, count):
+        return [next(self._randoms) for _ in range(count)]
 
     def choice(self, seq):
         return seq[next(self._choice_idxs)]

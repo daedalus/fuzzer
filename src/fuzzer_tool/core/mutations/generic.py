@@ -3,6 +3,8 @@
 import itertools
 from functools import cache
 
+import numpy as np
+
 from fuzzer_tool.core.reducer import ChunkPass, Oracle, Phase, Reducer, Verdict
 
 
@@ -1521,6 +1523,30 @@ def could_be_interest(old_val: int, new_val: int, blen: int, check_le: bool = Tr
 # ---------------------------------------------------------------------------
 # Supplementary mutations (from AFL++ afl-mutations.h)
 # ---------------------------------------------------------------------------
+
+
+_BYTE_VALUES = 256
+
+
+@cache
+def redundant_byte_table() -> np.ndarray:
+    """Flat ``[(old << 8) | new]`` table: True if deterministic stages cover old -> new.
+
+    One-byte case of bitflip / arithmetic / interesting-value dedup, built
+    from the scalar predicates so the two can never disagree. Lazy: ~150 ms.
+
+        e.g. table[(0x10 << 8) | 0x11] -> True  (single bitflip)
+    """
+    table = np.zeros(_BYTE_VALUES * _BYTE_VALUES, dtype=bool)
+    for old in range(_BYTE_VALUES):
+        for new in range(_BYTE_VALUES):
+            table[(old << 8) | new] = (
+                old == new
+                or could_be_bitflip(old ^ new)
+                or could_be_arith(old, new, 1)
+                or could_be_interest(old, new, 1)
+            )
+    return table
 
 
 def _big_int_squared(rng, cap: int = (1 << 30) - 1) -> int:

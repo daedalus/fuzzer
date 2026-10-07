@@ -7,13 +7,19 @@ space rather than each operator's marginal success rate.
 import collections
 from collections import defaultdict
 
+import numpy as np
+
 from fuzzer_tool.core.chaos import InertiaMode, make_chaos
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.simplex import project_rows
 
 #: Fractional jitter applied to initial particle positions. Enough to give
 #: PSO a gradient; small enough that no operator starts strongly favoured.
 _INIT_SPREAD = 0.5
+
+#: Uniform draws per (particle, operator) in the velocity update: r1, r2, r3.
+_N_RANDS = 3
 
 
 class _MOptParticle:
@@ -406,30 +412,35 @@ class MOptScheduler:
         # One inertia per window; chaotic mode draws it from the logistic map.
         w = self.w if self._chaos is None else self._chaos.inertia()
 
-        for p in self.particles:
-            # v = w*v + c1*r1*(pbest - pos) + c2*r2*(gbest - pos)
-            #         + c3*r3*(efficiency - pos)
-            for i in range(n):
-                r1 = self._rng.random()
-                r2 = self._rng.random()
-                r3 = self._rng.random()
-                cognitive = self.c1 * r1 * (p.pbest_pos[i] - p.pos[i])
-                social = self.c2 * r2 * (self.global_best_pos[i] - p.pos[i])
-                measured = self.c3 * r3 * (eff[i] - p.pos[i])
-                p.vel[i] = w * p.vel[i] + cognitive + social + measured
-                # Clamp velocity
-                p.vel[i] = max(-self.max_vel, min(self.max_vel, p.vel[i]))
+        # Vectorized over particles x operators. Draws keep the scalar order
+        # (particle-major, operator-minor, r1/r2/r3 interleaved), so a seeded
+        # pool is unchanged.
+        #
+        #   v   = w*v + c1*r1*(pbest - pos) + c2*r2*(gbest - pos) + c3*r3*(eff - pos)
+        #   v   = clip(v, -max_vel, max_vel)
+        #   pos = project(pos + v)
+        if self.particles:
+            pos = np.array([p.pos for p in self.particles])
+            vel = np.array([p.vel for p in self.particles])
+            pbest = np.array([p.pbest_pos for p in self.particles])
+            gbest = np.asarray(self.global_best_pos)
+            target = np.asarray(eff)
+            r = np.array(self._rng.random_list(pos.size * _N_RANDS)).reshape(*pos.shape, _N_RANDS)
 
-            # Update position: pos += vel
-            for i in range(n):
-                p.pos[i] += p.vel[i]
+            vel = (
+                w * vel
+                + self.c1 * r[..., 0] * (pbest - pos)
+                + self.c2 * r[..., 1] * (gbest - pos)
+                + self.c3 * r[..., 2] * (target - pos)
+            )
+            vel = np.clip(vel, -self.max_vel, self.max_vel)
+            pos = project_rows(pos + vel, self.min_prob_frac)
 
-            # Project back onto the probability simplex
-            self._normalize_to_simplex(p)
-
-            # Decay window for next iteration
-            p.execs_in_window = 0
-            p.discoveries.clear()
+            for p, pos_row, vel_row in zip(self.particles, pos, vel, strict=True):
+                p.pos = pos_row.tolist()
+                p.vel = vel_row.tolist()
+                p.execs_in_window = 0
+                p.discoveries.clear()
 
         self._op_execs.clear()
         self._op_disc.clear()
@@ -457,19 +468,10 @@ class MOptScheduler:
         simplex, so flooring-then-renormalizing returned exactly the uniform
         distribution and silently disabled PSO in production.
         """
-        n = len(particle.pos)
-        if n == 0:
+        if not particle.pos:
             return
 
-        clipped = [x if x > 0.0 else 0.0 for x in particle.pos]
-        total = sum(clipped)
-        particle.pos = [x / total for x in clipped] if total > 0.0 else [1.0 / n] * n
-
-        floor = self.min_prob_frac / n
-        if floor > 0.0:
-            particle.pos = [max(x, floor) for x in particle.pos]
-            total = sum(particle.pos)
-            particle.pos = [x / total for x in particle.pos]
+        particle.pos = project_rows(np.array([particle.pos]), self.min_prob_frac)[0].tolist()
 
     def particle_marginal_costs(self) -> dict[str, float | None]:
         """Current MC_i (execs per new discovery, between the last two PSO

@@ -76,10 +76,12 @@ A/B yet.
 """
 
 import collections
-import math
+
+import numpy as np
 
 from fuzzer_tool.core.chaos import InertiaMode, make_chaos
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.simplex import project_rows
 
 #: Fractional jitter applied to initial firefly positions. Same rationale
 #: and same magnitude as op_mopt.py's _INIT_SPREAD: enough to give firefly
@@ -333,31 +335,29 @@ class OpFireflyScheduler:
         # place instead would make firefly k's move depend on whether
         # firefly k-1 already moved this round -- an ordering artifact
         # with no basis in the model.
-        old_pos = [list(fly.pos) for fly in self.fireflies]
-        old_fitness = [fly.fitness for fly in self.fireflies]
-
+        #
+        # Vectorized: diff[i, j] = pos_j - pos_i; only brighter j attract i
+        # (this also drops j == i). Noise draws keep the scalar order
+        # (firefly-major, operator-minor), so a seeded pool is unchanged.
+        #
+        #   new_i = pos_i + sum_j beta_ij * (pos_j - pos_i) + alpha * U(-1, 1)
         # One step size per window; chaotic mode scales it by a mean-1 factor.
         alpha = self.alpha if self._chaos is None else self.alpha * self._chaos.alpha_factor()
 
-        for i, fly in enumerate(self.fireflies):
-            new_pos = list(old_pos[i])
-            for j in range(len(self.fireflies)):
-                if j == i or old_fitness[j] <= old_fitness[i]:
-                    continue
-                r2 = sum((old_pos[j][k] - old_pos[i][k]) ** 2 for k in range(n))
-                beta = self.beta0 * math.exp(-self.gamma * r2)
-                for k in range(n):
-                    new_pos[k] += beta * (old_pos[j][k] - old_pos[i][k])
-            # Random-walk term: applied to every firefly, including the
-            # current brightest (which has no j with old_fitness[j] >
-            # old_fitness[i], so the loop above is a no-op for it and this
-            # term is its only source of movement) -- per the model.
-            for k in range(n):
-                new_pos[k] += alpha * (self._rng.random() * 2.0 - 1.0)
-            fly.pos = new_pos
-            self._normalize_to_simplex(fly)
-            fly.execs_in_window = 0
-            fly.discoveries.clear()
+        if self.fireflies:
+            pos = np.array([fly.pos for fly in self.fireflies])
+            fit = np.array([fly.fitness for fly in self.fireflies])
+            diff = pos[None, :, :] - pos[:, None, :]
+            brighter = fit[None, :] > fit[:, None]
+            r2 = np.einsum("ijk,ijk->ij", diff, diff)
+            beta = np.where(brighter, self.beta0 * np.exp(-self.gamma * r2), 0.0)
+            noise = np.array(self._rng.random_list(pos.size)).reshape(pos.shape)
+            moved = pos + np.einsum("ij,ijk->ik", beta, diff) + alpha * (noise * 2.0 - 1.0)
+            moved = project_rows(moved, self.min_prob_frac)
+            for fly, row in zip(self.fireflies, moved, strict=True):
+                fly.pos = row.tolist()
+                fly.execs_in_window = 0
+                fly.discoveries.clear()
 
         self.alpha *= self.alpha_decay
 
@@ -369,19 +369,10 @@ class OpFireflyScheduler:
         absolute floor constant is harmless at a dozen operators and
         disables exploration entirely at the live registry's ~135.
         """
-        n = len(firefly.pos)
-        if n == 0:
+        if not firefly.pos:
             return
 
-        clipped = [x if x > 0.0 else 0.0 for x in firefly.pos]
-        total = sum(clipped)
-        firefly.pos = [x / total for x in clipped] if total > 0.0 else [1.0 / n] * n
-
-        floor = self.min_prob_frac / n
-        if floor > 0.0:
-            firefly.pos = [max(x, floor) for x in firefly.pos]
-            total = sum(firefly.pos)
-            firefly.pos = [x / total for x in firefly.pos]
+        firefly.pos = project_rows(np.array([firefly.pos]), self.min_prob_frac)[0].tolist()
 
     def firefly_stats(self) -> list[dict[str, str | float]]:
         """Get stats for each firefly (for diagnostics/logging)."""
