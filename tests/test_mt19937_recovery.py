@@ -103,6 +103,17 @@ class TestRecover:
         assert predict_words(gen_state, 5) == words[625:630]
 
 
+def _noise(n: int, salt: int) -> list[int]:
+    """Deterministic non-MT words. Not random.Random: that IS MT19937, and
+    its getrandbits(32) stream passes every check in this module."""
+    import hashlib
+
+    return [
+        int.from_bytes(hashlib.blake2b(f"{salt}:{i}".encode(), digest_size=4).digest(), "little")
+        for i in range(n)
+    ]
+
+
 class TestWalkStream:
     def test_yields_state_word_pairs_like_the_other_families(self):
         _, words = _stream_from_seed(5, 640)
@@ -120,3 +131,35 @@ class TestWalkStream:
         state = recover_state(words[:625])
         assert predict_words(state, 9) == [w for _, w in walk_stream(state, 9)]
 
+
+class TestTwistPrefixRejection:
+    """recover_state refutes a non-MT window from three untempers per extra
+    word instead of rebuilding and replaying the state. The result must be
+    exactly what the full replay decides."""
+
+    @staticmethod
+    def _full_replay(words):
+        state = tuple(untemper(w) for w in words[:624]) + (0,)
+        return state if verify_state(state, words) else None
+
+    def test_agrees_with_full_replay(self):
+        rng = random.Random(3)  # only picks offsets/lengths
+        for salt in range(200):
+            _, stream = _stream_from_seed(salt, 900)
+            off = rng.randrange(60)
+            n = rng.choice([624, 625, 626, 700, 800])
+            window = stream[off : off + n]
+            corrupt = list(window)
+            corrupt[rng.randrange(n)] ^= 1 << rng.randrange(32)
+            spliced = window[:630] + _noise(max(0, n - 630), salt)
+            for w in (window, corrupt, _noise(n, salt), spliced):
+                assert recover_state(w) == self._full_replay(w)
+
+    def test_rejects_noise_without_a_replay(self, monkeypatch):
+        import fuzzer_tool.core.mt19937_recovery as mod
+
+        def boom(*a, **k):
+            raise AssertionError("full replay ran on a window the prefix refutes")
+
+        monkeypatch.setattr(mod, "verify_state", boom)
+        assert recover_state(_noise(625, 1)) is None

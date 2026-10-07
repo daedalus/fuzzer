@@ -259,6 +259,8 @@ class PRNGStateLearner:
         self._mt_pending: dict[_Site, list[int]] = {}
         self.attempts = 0
         self.successes = 0
+        # (width, window) of the last _try_recover every family refuted.
+        self._last_refuted: tuple[int, tuple[int, ...]] | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -538,7 +540,20 @@ class PRNGStateLearner:
 
         One call is one recorded attempt regardless of how many families are
         probed inside it -- see the module docstring's cost-model note.
+
+        A window identical to the last one every family refuted is refused
+        without an attempt: recovery is a pure function of the window, so it
+        would be refuted again. That is the common case, not a corner one.
+        The best site's window only changes when that site logs a new draw,
+        and a window shorter than ``_FULL_SAMPLES`` does not slide on
+        failure, so between draws ``observe_execution`` hands this the same
+        window drain after drain. Measured on FFmpeg: 64 of 75 calls were
+        repeats, and each one re-ran every family's elimination (the GF(2)
+        solves and the LCG lattice reductions) for ~40ms.
         """
+        key = (width, tuple(candidates))
+        if key == self._last_refuted:
+            return False
         self.attempts += 1
         for spec in _CANDIDATE_FAMILIES:
             if spec.out_bytes != width or len(candidates) < _confident(spec):
@@ -553,6 +568,7 @@ class PRNGStateLearner:
             self._set_state(spec, state, candidates)
             self.successes += 1
             return True
+        self._last_refuted = key
         return False
 
     def _try_recover_mt(self) -> bool:

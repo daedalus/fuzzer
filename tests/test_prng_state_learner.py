@@ -1020,3 +1020,50 @@ class TestMT19937Learner:
         for seed in range(50):
             assert mod._full_width_plausible(self._mt_words(625, seed))
 
+
+class TestRefutedWindowIsNotRetried:
+    def test_identical_window_is_not_re_attempted(self):
+        """Recovery is a pure function of the window; a repeat is a known
+        refutation and must not pay every family's elimination again."""
+        from fuzzer_tool.core import prng_state_recovery
+
+        noise = [0xDEADBEEF, 0xCAFEBABE, 0x8BADF00D, 0xFEEDFACE]
+        learner = _learner(_conds(noise))
+        learner.observe_execution(PAYLOAD)
+        attempts = learner.attempts
+        assert attempts == 1
+
+        calls = []
+        real = prng_state_recovery.recover_state
+
+        def spy(*a, **k):
+            calls.append(1)
+            return real(*a, **k)
+
+        prng_state_recovery.recover_state = spy
+        try:
+            # Same site, nothing new logged: the window is unchanged.
+            learner.f._cmplog.last_conds = []
+            for _ in range(5):
+                assert learner._try_recover(list(learner._pending[(0x1000, 4)]), 4) is False
+        finally:
+            prng_state_recovery.recover_state = real
+        assert calls == []
+        assert learner.attempts == attempts
+
+    def test_a_changed_window_is_attempted(self):
+        noise = [0xDEADBEEF, 0xCAFEBABE, 0x8BADF00D, 0xFEEDFACE]
+        learner = _learner(_conds(noise))
+        learner.observe_execution(PAYLOAD)
+        attempts = learner.attempts
+        assert learner._try_recover(noise + [0x0BADC0DE], 4) is False
+        assert learner.attempts == attempts + 1
+
+    def test_a_refuted_window_does_not_block_a_real_stream(self):
+        # Longer than the refuted window, so _best_site picks it.
+        words = _stream(6)
+        learner = _learner(_conds([0xDEADBEEF, 0xCAFEBABE, 0x8BADF00D, 0xFEEDFACE]))
+        learner.observe_execution(PAYLOAD)
+        learner.f._cmplog.last_conds = _conds(words, pc=0x2000)
+        assert learner.observe_execution(PAYLOAD2) is True
+        assert learner.predict(1) == _stream(7)[6:]

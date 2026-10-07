@@ -261,6 +261,9 @@ def recover_state(
             f"need >= {needed} consecutive outputs to pin MT19937's {_N}-word state"
         )
 
+    if not _twist_prefix_consistent(observed_words):
+        return None
+
     mt = [untemper(_u32(w)) for w in observed_words[:_N]]
     # index=0 means the next output is temper(mt[0]), matching observed[0]
     state = tuple(mt) + (0,)
@@ -269,6 +272,43 @@ def recover_state(
     if not verify_state(state, observed_words, spec):
         return None
     return state
+
+
+# Extra words the twist check below can test from untwisted state alone.
+# The first twisted word ``k`` reads old ``mt[k]``, ``mt[k+1]`` and
+# ``mt[k+397]``; from k = 227 on, ``mt[k+397]`` wraps onto a word the same
+# twist has already rewritten, so only the first 227 are independent.
+_TWIST_PREFIX = _N - _M
+
+
+def _twist_prefix_consistent(observed_words: Sequence[int]) -> bool:
+    """Necessary condition for a window to be 624+ consecutive MT outputs.
+
+    The first 624 words pin the state and are reproduced by it *by
+    construction* (temper inverts untemper), so a recovery can only ever be
+    refuted by the words after them -- and each of those is fixed by three
+    of the first 624 through the recurrence. Checking that costs three
+    untempers per word; rebuilding and replaying the whole state, which
+    is how ``verify_state`` refutes the same window, costs 624 untempers, a
+    624-word twist and 625 tempers. A learner retrying windows that are not
+    MT output (every 4-byte compare site with 625 values qualifies) pays the
+    full price each time otherwise: measured at ~1.4ms per attempt and ~11
+    attempts per drain on FFmpeg.
+
+    Returns True when there is nothing to check (no extra words), so this
+    only ever rejects windows ``verify_state`` would also reject.
+    """
+    extra = min(len(observed_words) - _N, _TWIST_PREFIX)
+    for k in range(extra):
+        x = (untemper(observed_words[k]) & _UPPER_MASK) | (
+            untemper(observed_words[k + 1]) & _LOWER_MASK
+        )
+        xa = x >> 1
+        if x & 1:
+            xa ^= _MATRIX_A
+        if _temper(untemper(observed_words[k + _M]) ^ xa) != _u32(observed_words[_N + k]):
+            return False
+    return True
 
 
 def verify_state(
