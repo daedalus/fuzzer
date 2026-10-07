@@ -24,6 +24,7 @@ from collections.abc import Sequence
 from decimal import Decimal, localcontext
 from enum import Enum
 from fractions import Fraction
+from typing import Any
 
 Number = int | float | str | Decimal | Fraction
 
@@ -150,7 +151,7 @@ class _Search:
         for _ in range(maxsteps):
             hit = self._hit()
             if hit is not None:
-                return hit
+                return _bounded(hit, maxcoeff)
 
             # Any relation has norm >= 1 / max |H_jj|.
             if max(self._diag2()) * maxcoeff * maxcoeff < 1:
@@ -160,7 +161,8 @@ class _Search:
             if self._overflow():
                 return None
 
-        return self._hit()
+        hit = self._hit()
+        return None if hit is None else _bounded(hit, maxcoeff)
 
     def _step(self) -> int:
         """One iteration; returns the swapped row."""
@@ -310,6 +312,11 @@ class _Hjls(_Psos):
             star.append(v)
 
 
+def _bounded(hit: list[int], maxcoeff: int) -> list[int] | None:
+    """*hit* if its norm is within *maxcoeff*, else None."""
+    return hit if sum(c * c for c in hit) <= maxcoeff * maxcoeff else None
+
+
 def _dot(u: list[Decimal], v: list[Decimal]) -> Decimal:
     return sum((p * q for p, q in zip(u, v, strict=True)), Decimal(0))
 
@@ -334,7 +341,7 @@ def find_relation(
         algo: HJLS, PSOS or PSLQ.
         digits: Working Decimal precision.
         tol: Relative zero threshold; default ``10^-(4 digits / 5)``.
-        maxcoeff: Give up once every relation must have norm > maxcoeff.
+        maxcoeff: Norm bound; relations beyond it are never returned.
         maxsteps: Iteration budget.
         gamma: Selection parameter, >= sqrt(4/3); default per algorithm.
 
@@ -349,6 +356,8 @@ def find_relation(
         ctx.prec = digits
         xs = [_dec(v) for v in x]
         t = _dec(tol) if tol is not None else Decimal(10) ** -(digits * _TOL_NUM // _TOL_DEN)
+        if t <= 0:
+            raise ValueError("tol must be positive")
         g2 = _dec(gamma) ** 2 if gamma is not None else _dec(_GAMMA2[algo])
         if g2 < _dec(_MIN_GAMMA2) * (1 - t):
             raise ValueError("gamma must be >= sqrt(4/3)")
@@ -363,16 +372,16 @@ def find_relation(
         return _IMPL[algo](xs, g2, t * t, limit).run(maxsteps, maxcoeff)
 
 
-def hjls(x: Sequence[Number], **kw) -> list[int] | None:
+def hjls(x: Sequence[Number], **kw: Any) -> list[int] | None:
     """HJLS (Hastad, Just, Lagarias, Schnorr 1989); see find_relation."""
     return find_relation(x, Algo.HJLS, **kw)
 
 
-def psos(x: Sequence[Number], **kw) -> list[int] | None:
+def psos(x: Sequence[Number], **kw: Any) -> list[int] | None:
     """PSOS (Bailey, Ferguson 1988); see find_relation."""
     return find_relation(x, Algo.PSOS, **kw)
 
 
-def pslq(x: Sequence[Number], **kw) -> list[int] | None:
+def pslq(x: Sequence[Number], **kw: Any) -> list[int] | None:
     """PSLQ (Ferguson, Bailey 1992); see find_relation."""
     return find_relation(x, Algo.PSLQ, **kw)

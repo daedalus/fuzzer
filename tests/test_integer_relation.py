@@ -130,3 +130,17 @@ class TestEquivalence:
     def test_wrappers(self):
         x = [3, 5]
         assert pslq(x) == hjls(x) == psos(x) == _primitive([5, -3])
+
+
+@pytest.mark.parametrize("algo", ALGOS)
+class TestBounds:
+    def test_regression_hit_beyond_maxcoeff(self, algo):
+        """A relation found with norm > maxcoeff must not be returned."""
+        x = [1000, 1]
+        assert find_relation(x, algo, maxcoeff=2000) == _primitive([1, -1000])
+        assert find_relation(x, algo, maxcoeff=10) is None
+
+    @pytest.mark.parametrize("tol", [Decimal("-1e-30"), 0])
+    def test_regression_non_positive_tol(self, algo, tol):
+        with pytest.raises(ValueError):
+            find_relation(_alpha_powers(), algo, digits=DIGITS, tol=tol)
