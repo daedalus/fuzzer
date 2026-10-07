@@ -156,7 +156,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Covering-array constraints and t=3**: `covering_array.generate/verify_coverage/missing_tuples/required_tuple_count` take `forbidden=[{param: value}, ...]` (Moser-Tardos repair; one-parameter bans shrink domains); t=3 covered by tests.
 - **`covering_array_gzip`** operator (`core/mutations/covering_array_gzip.py`): pairwise sweep of the RFC 1952 header fields (CM, FLG, MTIME, XFL, OS); available only on gzip magic. Selection share on a real gzip target unmeasured.
 - **`tools/lib/factorial_design.py`**: Plackett-Burman screening designs (`design_matrix`, `fold_over`, `main_effects`, `screen`) for ranking hyperparameters in 12-16 runs instead of a grid.
-- **`core/group_testing.py`** + `tools/bench_group_testing.py`: non-adaptive pooled which-items-matter inference (COMP/DD, exact for any d) and a binary-splitting baseline. Not wired into `tmin`/colorizer (see handover section 6.5 result).
+- **`core/group_testing.py`** + `tools/lib/bench_group_testing.py`: non-adaptive pooled which-items-matter inference (COMP/DD, exact for any d) and a binary-splitting baseline. Not wired into `tmin`/colorizer (see handover section 6.5 result).
 - **`--second-order-blend W`** (default 0 = off): second-order operator chain `P(next | prev2, prev)` in `MonteCarloScheduler` (`core/op_chain2.py`, sparse, capped at 4096 contexts), backing off to `--pairwise-blend` on unseen contexts. Synthetic A/B only; real-target A/B not run.
 
 ### Changed

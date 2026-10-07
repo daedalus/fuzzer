@@ -338,6 +338,7 @@ ASAN_CFLAGS="-fsanitize=address -fsanitize-recover=address"
 
 WITH_VENDOR_TRACECMP=0
 WITH_CLANG_SCOV=0
+WITH_INDIR_COV=0
 WITH_DISTANCE=0
 WITH_NGRAM=0
 WITH_MSAN=0
@@ -374,7 +375,7 @@ add_indir_mode() {
         *) echo "$1,indirect-calls" ;;
     esac
 }
-[ "${WITH_INDIR_COV:-0}" -eq 1 ] && SANCOV_MODES=$(add_indir_mode "$SANCOV_MODES")
+[ "$WITH_INDIR_COV" -eq 1 ] && SANCOV_MODES=$(add_indir_mode "$SANCOV_MODES")
 
 # Modes are grouped by what they need at build/link time -- this is the one
 # place that knows, so --sancov= and the --tracecmp vendored builds agree:

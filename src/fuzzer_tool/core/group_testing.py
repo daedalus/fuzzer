@@ -20,7 +20,7 @@ Decoding (Bernoulli design, p = 1/(d+1)):
 
 Wired into ``colorize(mode=POOLED)`` via ``comp`` (``--colorize-mode pooled``).
 Not into ``tmin``: its oracle is conjunctive, not OR. See
-``tools/bench_group_testing.py`` and
+``tools/lib/bench_group_testing.py`` and
 ``docs/handover/handover_combinatorics_permutations_2026-09-02.md`` §6.
 """
 

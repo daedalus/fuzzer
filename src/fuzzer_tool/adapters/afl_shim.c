@@ -1184,7 +1184,8 @@ static inline uint32_t __afl_get_caller_ctx(void) {
      * any realistic frame without risking a wild read).  Anything outside
      * that window is an unlinked/garbage frame — skip context for it. */
     if (cfp <= cur || cfp - cur > (4u << 20)) return 0;
-    uintptr_t hi = __afl_ctx_stack_hi;
+    /* Raw load: a plain TLS read here gets an ASAN check in every guard callback. */
+    uintptr_t hi = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_hi);
     if (!hi) hi = __afl_ctx_resolve_stack_hi();
     /* caller_fp[0..1] (16 bytes) must lie wholly inside this thread's stack and
      * the slot must be 8-aligned; otherwise it is junk from a frame-pointer-less

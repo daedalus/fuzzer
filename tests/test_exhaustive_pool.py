@@ -518,6 +518,43 @@ class TestRandPoolParity:
         assert pool.exhausted
         assert seen == {0, 1, 2}
 
+    def test_random_between_walks_the_inclusive_range(self):
+        pool = ExhaustivePool()
+        seen = [pool.random_between(3, 6) for _ in pool.runs()]
+
+        assert sorted(seen) == list(range(3, 7))
+
+    def test_random_between_rejects_empty_range_like_randpool(self):
+        """Adversarial: randint returns a on b < a; random_between must raise."""
+        pool = ExhaustivePool()
+        with pytest.raises(ValueError):
+            pool.random_between(5, 4)
+        with pytest.raises(ValueError):
+            RandPool(seed=1).random_between(5, 4)
+
+    def test_binomial_array_walks_every_outcome_vector(self):
+        pool = ExhaustivePool()
+        seen = [tuple(pool.binomial_array([1, 2], 0.5)) for _ in pool.runs()]
+
+        assert sorted(seen) == sorted(itertools.product(range(2), range(3)))
+
+    def test_regression_binomial_array_keeps_input_shape(self):
+        """Adversarial: 2-D counts come back 2-D, as RandPool's do."""
+        counts = [[1, 0], [0, 1]]
+        pool = ExhaustivePool()
+        shapes = {pool.binomial_array(counts, 0.5).shape for _ in pool.runs()}
+
+        assert shapes == {RandPool(seed=1).binomial_array(counts, 0.5).shape}
+
+    @pytest.mark.parametrize(("p", "expect"), [(0.0, (0, 0)), (1.0, (1, 2))])
+    def test_binomial_array_degenerate_p_is_one_path(self, p, expect):
+        """Falsification: p at 0 or 1 pins the draw, as RandPool's does."""
+        pool = ExhaustivePool()
+        seen = [tuple(pool.binomial_array([1, 2], p)) for _ in pool.runs()]
+
+        assert seen == [expect]
+        assert tuple(RandPool(seed=1).binomial_array([1, 2], p)) == expect
+
 
 # ── Applied to the real operator table ───────────────────────────────
 
