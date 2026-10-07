@@ -193,3 +193,26 @@ class _Malicious:
         import os
 
         return (os.system, ("echo pwned",))
+
+
+class TestStateStoreCompression:
+    def test_saves_at_the_fast_gzip_level(self, tmp_path: Path, monkeypatch):
+        """The save blocks the fuzz loop; gzip's default level 9 cost 11s per
+        save on a 156 MB FFmpeg state against 0.87s at level 1."""
+        import gzip
+
+        import fuzzer_tool.core.state_store as mod
+
+        levels = []
+        real = gzip.GzipFile
+
+        def spy(*a, **k):
+            levels.append(k.get("compresslevel", 9))
+            return real(*a, **k)
+
+        monkeypatch.setattr(mod.gzip, "GzipFile", spy)
+        store = StateStore(tmp_path)
+        store.set("edge_tracker", {"x": 1})
+        assert store.save()
+        assert levels == [1]
+        assert StateStore(tmp_path).get("edge_tracker") == {"x": 1}
