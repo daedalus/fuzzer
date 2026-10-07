@@ -208,12 +208,18 @@ class ShmCoverage:
     SHM layout: front header (SHM_METADATA_SIZE bytes) + edge table (size * 8 bytes).
     """
 
-    def __init__(self, size: int = SHM_MAP_SIZE, touched_bitmap: bool = False):
+    def __init__(
+        self, size: int = SHM_MAP_SIZE, touched_bitmap: bool = False, touched_scan: bool = False
+    ):
         # size = number of entries (AFL_MAP_SIZE convention)
         self.num_entries = size
         self.table_bytes = size * SIZEOF_ENTRY
         self.shm_bytes = self.table_bytes + SHM_METADATA_SIZE + SHM_TAIL_SIZE
-        self.touched_enabled = bool(touched_bitmap)
+        # touched_scan: read live edges from the bitmap instead of walking the
+        # table (see _scan_touched). It owns the bitmap's per-execution clear,
+        # so it implies the region.
+        self.touched_scan = bool(touched_scan)
+        self.touched_enabled = bool(touched_bitmap) or self.touched_scan
         if self.touched_enabled:
             self.shm_bytes += touched_region_bytes(size)
 
@@ -326,6 +332,26 @@ class ShmCoverage:
         """Copy of the bitmap words; later executions cannot change it."""
         return self._touched_view().copy()
 
+    def _touched_slots(self) -> np.ndarray:
+        """Ascending slot indices whose bit is set: the candidates for a scan.
+
+        Coarse on 64-bit words, then byte-granular inside the surviving
+        words, so a sparse bitmap costs a pass over ``num_entries / 64`` words
+        and a handful of bytes, not a full unpack. Ascending order is the
+        order ``flatnonzero`` over the table yields, so callers see the same
+        arrays either way. Padding bits past ``num_entries`` are dropped.
+        """
+        words = self._touched_view()
+        nz = np.flatnonzero(words)
+        if nz.size == 0:
+            return nz
+        b8 = words.view(np.uint8)
+        cand = (nz[:, None] * 8 + np.arange(8)).ravel()
+        nzb = cand[b8[cand] != 0]
+        r, c = np.nonzero(np.unpackbits(b8[nzb], bitorder="little").reshape(-1, 8))
+        slots = nzb[r] * 8 + c
+        return slots[slots < self.num_entries]
+
     def slot_edge_ids(self, words: np.ndarray) -> np.ndarray:
         """Edge ids stored in the slots whose bit is set in *words*."""
         bits = np.unpackbits(np.ascontiguousarray(words).view(np.uint8), bitorder="little")
@@ -430,14 +456,17 @@ class ShmCoverage:
 
         arr = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)
         eid = arr["edge_id"]
-        occupied = np.flatnonzero(eid)
+        if self.touched_scan and self.touched_supported:
+            occupied = self._touched_slots()
+        else:
+            occupied = np.flatnonzero(eid)
         if occupied.size == 0:
             ids = eid[:0]
             counts = arr["count"][:0] if need_counts else None
         else:
             live_ids = eid[occupied]
             live_counts = arr["count"][occupied]
-            live = ((live_counts >> 24) & 0xFF) == self.read_generation()
+            live = (((live_counts >> 24) & 0xFF) == self.read_generation()) & (live_ids != 0)
             ids = live_ids[live]
             counts = live_counts[live] if need_counts else None
 
@@ -621,6 +650,10 @@ class ShmCoverage:
         if new_gen == 0:
             ctypes.memset(self._ptr + SHM_METADATA_SIZE, 0, self.table_bytes)
         ctypes.memset(self._tail, 0, SHM_TAIL_SIZE)
+        if self.touched_scan:
+            # Bits mean "went live this generation"; the bump just made every
+            # entry stale, so they go with it. Same point, same writer.
+            self.touched_clear()
 
     # ── AFLGo distance tail (per-execution average distance) ────────────
 

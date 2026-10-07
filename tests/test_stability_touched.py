@@ -284,3 +284,21 @@ class TestAgainstTheRealShim:
     def test_a_deterministic_seed_masks_nothing(self, loc_target):
         scripts = [[0x1111, 0x2222, 0x3333]] * 3
         assert _calibrate_for_real(loc_target, scripts, bitmap=True) == (set(), set())
+
+
+class TestTouchedScanConstruction:
+    @pytest.mark.parametrize("flag", [False, True])
+    def test_scan_flag_reaches_the_coverage_object(self, flag):
+        with patch("fuzzer_tool.services.fuzzer.ShmCoverage") as cls:
+            cls.return_value = MagicMock()
+            _fuzzer(use_coverage=True, touched_scan=flag)
+        assert cls.call_args.kwargs["touched_scan"] is flag
+
+    def test_cli_exposes_the_flag_and_passes_it_through(self):
+        import inspect
+
+        from fuzzer_tool.cli import commands
+
+        src = inspect.getsource(commands)
+        assert '"--touched-scan"' in src
+        assert 'touched_scan=getattr(args, "touched_scan", False)' in src

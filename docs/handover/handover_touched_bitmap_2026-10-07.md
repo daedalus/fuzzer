@@ -57,3 +57,20 @@ region is byte-for-byte the old layout; an older shim never writes the magic
 - Not run against a real long campaign; no A/B of mask quality on a real target.
 - Read-side `_scan` acceleration, Hamming-distance seed diversity and
   near-duplicate detection are possible follow-ups, unmeasured.
+
+## Addendum: read side wired (`--touched-scan`)
+- `_scan` now has a bitmap path behind `--touched-scan`. Same arrays, same
+  order as the full scan; differential tests cover random tables (sizes 64 to
+  65536, stale-generation registry entries, word/byte boundaries, padding bits)
+  and the real shim across generations.
+- Real shim-filled tables, scan alone (500 / 1800 live): 8192 -> 1.1x / 0.9x,
+  65536 -> 2.5x / 1.3x, 262144 -> 7.2x / 3.3x, 1M -> 21x / 9x. Per-exec
+  overhead: bit clear 0.9 us (8192) to 3.8 us (1M) plus ~1.2 us of atomic ORs.
+  Net positive from 65536 entries; no gain at 8192, so it is opt-in, not auto.
+- Contract: bits are cleared where entries go stale (`reset_edge_map`) and set
+  only by the shim. A stale bit is filtered by the entry test; a live entry
+  without a bit would be invisible, so any new writer of live entries must set
+  the bit. The shim OR is atomic by default now for that reason.
+- Not done: no A/B on a real long campaign (does the exec rate move end to
+  end?), no auto-enable by map size, `_scan_with_positions` still walks the
+  table.

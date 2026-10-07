@@ -1349,15 +1349,16 @@ static inline uint32_t __afl_home_slot(uint32_t edge_id) {
 
 /* Mark table slot idx live in this generation (no-op without the bitmap).
  *
- * Plain read-modify-write by default: two threads setting different bits in
- * one word can lose one, which in the fuzzer's OR & ~AND comparison reads as
- * a slot that fired in some runs and not others -- a false "unstable" edge,
- * and masking is permanent. Single-threaded targets cannot race. For
- * threaded targets build with -D__AFL_TOUCHED_ATOMIC=1: measured +16-24% on
- * the shim's per-exec time (500 first touches/exec) against +1-4% for the
- * plain form, which is why it is not the default. */
+ * Atomic OR by default. Two threads setting different bits in one word with a
+ * plain read-modify-write can lose one. The fuzzer reads the bitmap in two
+ * places and a lost bit hurts both: stability calibration sees a slot that
+ * fired in some runs and not others (a false "unstable" edge, masked for
+ * good), and the bitmap scan simply never sees the edge (lost coverage).
+ * Measured cost: +16-24% on the shim's per-exec time at 500 first touches
+ * per exec, about 1.2us, against 100us+ saved by the scan on large maps.
+ * A single-threaded target can build with -D__AFL_TOUCHED_ATOMIC=0. */
 #ifndef __AFL_TOUCHED_ATOMIC
-#define __AFL_TOUCHED_ATOMIC 0
+#define __AFL_TOUCHED_ATOMIC 1
 #endif
 __attribute__((always_inline))
 static inline void __afl_touch(uint32_t idx) {

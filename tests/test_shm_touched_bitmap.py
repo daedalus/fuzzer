@@ -197,20 +197,22 @@ def _live_slots(cov: ShmCoverage) -> set[int]:
 
 
 @pytest.fixture(scope="module")
-def atomic_target(tmp_path_factory):
+def plain_target(tmp_path_factory):
     return _build(
-        tmp_path_factory.mktemp("touched_atomic"),
+        tmp_path_factory.mktemp("touched_plain"),
         _DRIVER,
         "-D__AFL_CTX_SENSITIVE=0",
-        "-D__AFL_TOUCHED_ATOMIC=1",
+        "-D__AFL_TOUCHED_ATOMIC=0",
     )
 
 
 @requires_clang
-class TestAtomicBuild:
-    def test_atomic_build_sets_the_same_bits(self, atomic_target, target):
+class TestPlainBuild:
+    """Atomic is the default; the single-threaded opt-out must agree with it."""
+
+    def test_plain_build_sets_the_same_bits(self, plain_target, target):
         results = []
-        for exe in (target, atomic_target):
+        for exe in (target, plain_target):
             cov = ShmCoverage(size=SIZE, touched_bitmap=True)
             try:
                 _run(exe, cov, [1, 2, 999, 1001, 5000, 0xFFFFFFFE])

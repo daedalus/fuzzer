@@ -1281,6 +1281,7 @@ class Fuzzer:
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
         calibrate_stability=0,
+        touched_scan=False,
         # cmplog is always on by default; --no-cmplog-fifo-sink disables
         # the FIFO drain mode but not the comparison tracing itself.
         cmplog=True,
@@ -2161,6 +2162,8 @@ class Fuzzer:
         # Seed stability calibration (handover item D). n_runs per accepted
         # seed; 0 disables. Opt-in: see _calibrate_seed_stability.
         self._calibrate_stability = int(calibrate_stability or 0)
+        # Read live edges from the shim's touched-slot bitmap (ShmCoverage._scan_touched).
+        self._touched_scan = bool(touched_scan)
         # F2: rerun an execution that reported new coverage and keep only what
         # reproduces. See _confirm_new_coverage.
         self._confirm_novelty = bool(confirm_novelty)
@@ -2325,7 +2328,9 @@ class Fuzzer:
             else:
                 try:
                     self.shm_cov = ShmCoverage(
-                        size=self.map_size, touched_bitmap=self._calibrate_stability > 0
+                        size=self.map_size,
+                        touched_bitmap=self._calibrate_stability > 0,
+                        touched_scan=self._touched_scan,
                     )
                     print(f"[*] Coverage: AFL SHM bitmap, id={self.shm_cov.env_id}")
                 except OSError:
@@ -2336,7 +2341,9 @@ class Fuzzer:
             for t in self.multi_targets:
                 try:
                     self._target_shm_covs[t] = ShmCoverage(
-                        size=self.map_size, touched_bitmap=self._calibrate_stability > 0
+                        size=self.map_size,
+                        touched_bitmap=self._calibrate_stability > 0,
+                        touched_scan=self._touched_scan,
                     )
                 except OSError:
                     log.warning("Failed to create SHM for %s, using shared SHM", t)
