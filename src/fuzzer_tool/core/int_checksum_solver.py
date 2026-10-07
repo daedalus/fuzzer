@@ -2,7 +2,8 @@
 
 Companion to :mod:`fuzzer_tool.core.berlekamp_massey`, which recovers the GF(2)
 (CRC-style) family.  This module recovers the ``Z/NZ`` family — Adler-32,
-Fletcher-16/32, and bespoke ``sum(data[i] * k^i) mod N`` schemes.
+Fletcher-16/32, bespoke ``sum(data[i] * k^i) mod N`` schemes, and linear
+sums with arbitrary small per-word weights (via integer relation, below).
 
 How modulus recovery works
 --------------------------
@@ -48,17 +49,23 @@ therefore prefers *large* pairs where the GF(2) path must avoid them.
 
 from __future__ import annotations
 
+from collections import Counter
+from decimal import Decimal, localcontext
 from math import gcd
 
 from fuzzer_tool.core.int_checksum import (
     COMMON_MODELS,
     KIND_FLETCHER,
+    KIND_LINEAR,
     KIND_WEIGHTED_SUM,
     IntModel,
     eval_model,
+    linear_raw,
     sums,
+    to_words,
     weighted_raw,
 )
+from fuzzer_tool.core.integer_relation import Algo, find_relation
 
 # Cost bounds.  Every loop below is bounded: recovery runs inside fuzz_one()
 # and a prior unbounded GCD path already cost this project a 30+ second stall
@@ -113,7 +120,26 @@ _FLETCHER_CONFIGS = (
     (32, 2, True),
 )
 
+# Linear family: c = sum(w_j * word_j) + b (mod N), w small and arbitrary.
+# The word cap bounds the relation dimension (2 * words + 2) and so the
+# solve cost: ~0.2 s at 8 words, a few ms at 4.
+_LINEAR_MAX_WORDS = 8
+_LINEAR_MODULI = (1 << 16, 1 << 32)
+# (word_bytes, big_endian); words first: fewer unknowns, and a word model
+# also has a byte-weight form that would otherwise win.
+_LINEAR_CONFIGS = ((2, False), (2, True), (1, False))
+_LINEAR_MAX_NORM = 1 << 12
+_LINEAR_DIGITS = 80
+# Step budget per word: fits succeed in <= ~110 steps/word (measured, 16-bit
+# words); noise runs ~240 steps/word before the norm bound stops it.
+_LINEAR_STEPS_PER_WORD = 150
+# PSOS: fastest of the three here (no square roots); HJLS is ~40x slower.
+_RELATION_ALGO = Algo.PSOS
+# sqrt(p) are Q-independent: folding pairs with them keeps each pair's equation.
+_FOLD_PRIMES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
+
 Pair = tuple[bytes, int]
+Row = tuple[list[int], int]  # (words, checksum)
 
 
 def _field_width(modulus: int) -> int:
@@ -300,6 +326,154 @@ def _recover_weighted(pairs: list[Pair], min_matches: int) -> IntModel | None:
     return None
 
 
+def _fold(rows: list[Row], modulus: int) -> list[Decimal]:
+    """One relation vector for all *rows*, offset b removed by differencing.
+
+    Row s holds ``dw_s . w - q_s N - dc_s = 0`` (differences against row 0).
+    Weighting row s by sqrt(p_s) gives
+    ``x = [sum_s r_s dw_s[j] ..., r_1 N, ..., r_S N, sum_s r_s dc_s]``,
+    whose small relation is ``(w, -q_1..-q_S, -1)``.
+    """
+    base_w, base_c = rows[0]
+    diffs = [([a - b for a, b in zip(w, base_w, strict=True)], c - base_c) for w, c in rows[1:]]
+    with localcontext() as ctx:
+        ctx.prec = _LINEAR_DIGITS
+        rho = [Decimal(p).sqrt() for p in _FOLD_PRIMES[: len(diffs)]]
+        x = [_mix(rho, [dw[j] for dw, _ in diffs]) for j in range(len(base_w))]
+        x += [r * modulus for r in rho]
+        x.append(_mix(rho, [dc for _, dc in diffs]))
+    return x
+
+
+def _mix(rho: list[Decimal], col: list[int]) -> Decimal:
+    return sum((r * v for r, v in zip(rho, col, strict=True)), Decimal(0))
+
+
+def _linear_weights(rows: list[Row], modulus: int) -> tuple[int, ...] | None:
+    """Small weights w with ``c = w . words + b (mod N)`` on every row, or None.
+
+    Words constant across *rows* are dropped: their weight is unidentifiable
+    (folded into b) and a zero column is itself a trivial relation.
+    """
+    base = rows[0][0]
+    live = [j for j in range(len(base)) if any(w[j] != base[j] for w, _ in rows)]
+    if not live:
+        return None
+
+    sub = [([w[j] for j in live], c) for w, c in rows]
+    m = find_relation(
+        _fold(sub, modulus),
+        _RELATION_ALGO,
+        digits=_LINEAR_DIGITS,
+        maxcoeff=_LINEAR_MAX_NORM,
+        maxsteps=_LINEAR_STEPS_PER_WORD * len(live),
+    )
+    if m is None or abs(m[-1]) != 1:
+        return None
+
+    # Relation is (w', -q.., m_c): c = -m_c * (w' . words) + b.
+    weights = [0] * len(base)
+    for k, j in enumerate(live):
+        weights[j] = -m[-1] * m[k]
+    return tuple(weights)
+
+
+def _parity_consistent(rows: list[Row]) -> bool:
+    """Exact necessary condition for a linear model mod an even N.
+
+    ``c = w . words + b (mod N)`` reduced mod 2 is an affine GF(2) system in
+    the words' low bits; noise rows make it inconsistent. Bitmask elimination,
+    microseconds -- it keeps noise away from the relation solve. Row layout:
+    bits 0..L-1 word parities, bit L the offset, bit L+1 the checksum parity.
+    """
+    pivots: dict[int, int] = {}
+    for words, c in rows:
+        size = len(words)
+        coef_mask = (1 << (size + 1)) - 1
+        row = (1 << size) | ((c & 1) << (size + 1))
+        for j, w in enumerate(words):
+            row |= (w & 1) << j
+
+        while row & coef_mask:
+            lead = (row & coef_mask).bit_length() - 1
+            if lead not in pivots:
+                pivots[lead] = row
+                break
+            row ^= pivots[lead]
+
+        if not row & coef_mask and row:
+            return False
+    return True
+
+
+def _length_group(pairs: list[Pair]) -> list[Pair]:
+    """Pairs of the most common data length within the word cap."""
+    counts = Counter(len(d) for d, _ in pairs if len(d) <= _LINEAR_MAX_WORDS * 2)
+    if not counts:
+        return []
+
+    # Sorted: the fit set (first rows) must not depend on set iteration order.
+    size = max(counts, key=lambda n: (counts[n], n))
+    return sorted(p for p in pairs if len(p[0]) == size)
+
+
+def _recover_linear(pairs: list[Pair], min_matches: int) -> IntModel | None:
+    """Recover ``sum(w_j * word_j) + init mod N`` with small arbitrary w_j.
+
+    Fits on ``words + 2`` pairs of one length (one equation more than
+    unknowns after differencing), then must reproduce held-out pairs: a fit
+    always reproduces its own fit set, which is no evidence.
+    """
+    group = _length_group(pairs)
+    if not group:
+        return None
+
+    # Smallest modulus above every checksum: below it nothing wrapped, so a
+    # wider-modulus model would reduce to this one.
+    top = max(c for _, c in group)
+    modulus = next((n for n in _LINEAR_MODULI if top < n), None)
+    if modulus is None:
+        return None
+
+    size = len(group[0][0])
+    for word_bytes, big_endian in _LINEAR_CONFIGS:
+        words = size // word_bytes
+        fit = words + 2
+        if words > _LINEAR_MAX_WORDS or size % word_bytes or len(group) < fit + MIN_VERIFY_FLOOR:
+            continue
+
+        rows = [(to_words(d, word_bytes, big_endian).tolist(), c) for d, c in group]
+        if not _parity_consistent(rows):
+            continue
+
+        model = _linear_model(rows[:fit], group, modulus, word_bytes, big_endian)
+        if model is None:
+            continue
+        if verify_model(model, group[fit:]) and verify_model(model, pairs, min_matches):
+            return model
+    return None
+
+
+def _linear_model(
+    rows: list[Row], group: list[Pair], modulus: int, word_bytes: int, big_endian: bool
+) -> IntModel | None:
+    """Linear model fitted on *rows*; init is the modal offset over *group*."""
+    weights = _linear_weights(rows, modulus)
+    if weights is None:
+        return None
+
+    shape = IntModel(
+        KIND_LINEAR,
+        modulus,
+        word_bytes=word_bytes,
+        out_bits=_field_width(modulus),
+        big_endian=big_endian,
+        weights=weights,
+    )
+    init = _modal_value((c - linear_raw(d, shape)) % modulus for d, c in group)
+    return shape._replace(init_a=init)
+
+
 def _recover_fletcher(pairs: list[Pair], min_matches: int) -> IntModel | None:
     """Recover a two-running-sum (Adler/Fletcher) model with unknown modulus.
 
@@ -359,7 +533,7 @@ def recover_int_model(
 
     Tries, in order: the well-known models (Adler-32, Fletcher-16/32, plain
     sums) as a cheap pre-check, then general modulus recovery for the fletcher
-    family, then for the weighted-sum family.
+    family, then for the weighted-sum family, then the linear family.
 
     Args:
         pairs: Observed ``(data, checksum)`` pairs.  Should already be
@@ -392,4 +566,8 @@ def recover_int_model(
     model = _recover_fletcher(ranked, min_matches)
     if model is not None:
         return model
-    return _recover_weighted(ranked, min_matches)
+    model = _recover_weighted(ranked, min_matches)
+    if model is not None:
+        return model
+    # Unranked: the longest-first cut drops the short pairs this family needs.
+    return _recover_linear(usable, min_matches)
