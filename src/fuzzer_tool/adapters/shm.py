@@ -75,6 +75,37 @@ SHM_DROP_OFFSET = 24
 # computation when count == 0.
 SHM_TAIL_SIZE = 16  # bytes reserved at the end of SHM for the distance tail
 
+# Touched-slot bitmap (opt-in): after the distance tail, an 8-byte header and
+# one bit per edge-table slot. The shim sets a slot's bit when the slot becomes
+# live in the current generation (first claim, or reclaim of a stale entry for
+# the same edge) -- not on a plain hit, so the hit path is untouched. Whoever
+# starts an execution clears it; the shim never does (one writer per field).
+#
+# Appended rather than inserted so no existing offset moves: a segment sized
+# without the region is exactly the old layout and the shim leaves it alone.
+# The shim writes SHM_TOUCHED_MAGIC into the header at attach, which is how
+# this side learns the target can fill the bitmap at all. An older shim never
+# writes it, and "unsupported" must not be confused with "nothing fired".
+SHM_TOUCHED_MAGIC = b"TOUCHBM1"
+SHM_TOUCHED_HEADER = len(SHM_TOUCHED_MAGIC)
+
+
+def touched_region_bytes(num_entries: int) -> int:
+    """Header plus one bit per slot, rounded up to whole 64-bit words."""
+    return SHM_TOUCHED_HEADER + ((num_entries + 63) // 64) * 8
+
+
+def unstable_slots(snapshots) -> np.ndarray:
+    """Slots set in some snapshots but not all: ``OR & ~AND``.
+
+    For two runs this is their XOR. Slots stay bound to one edge for as long
+    as the table is not wiped, so across back-to-back runs a differing bit is
+    a differing edge. Popcount of the result is the Hamming distance.
+    """
+    stack = np.stack(snapshots)
+    return np.bitwise_or.reduce(stack) & ~np.bitwise_and.reduce(stack)
+
+
 # Upper bound on the edge_id the virgin bucket map indexes directly.
 #
 # The map is keyed by edge_id into a dense uint8 array rather than a dict,
@@ -177,11 +208,14 @@ class ShmCoverage:
     SHM layout: front header (SHM_METADATA_SIZE bytes) + edge table (size * 8 bytes).
     """
 
-    def __init__(self, size: int = SHM_MAP_SIZE):
+    def __init__(self, size: int = SHM_MAP_SIZE, touched_bitmap: bool = False):
         # size = number of entries (AFL_MAP_SIZE convention)
         self.num_entries = size
         self.table_bytes = size * SIZEOF_ENTRY
         self.shm_bytes = self.table_bytes + SHM_METADATA_SIZE + SHM_TAIL_SIZE
+        self.touched_enabled = bool(touched_bitmap)
+        if self.touched_enabled:
+            self.shm_bytes += touched_region_bytes(size)
 
         self.shm_id, self._ptr = _alloc_segment(self.shm_bytes)
 
@@ -194,6 +228,7 @@ class ShmCoverage:
         # Metadata is in the front header at self._ptr (offsets 0/8/16)
         # Distance tail at self._ptr + SHM_METADATA_SIZE + table_bytes
         self._tail = self._ptr + SHM_METADATA_SIZE + self.table_bytes
+        self._bind_touched()
 
         self.env_id = str(self.shm_id)
 
@@ -258,6 +293,45 @@ class ShmCoverage:
         # stats.py reads it, and because it stays correct either way.
         self._peak_cumulative_edges: int = 0
         self._register_atexit()
+
+    # -- Touched-slot bitmap ----------------------------------------------
+
+    def _bind_touched(self) -> None:
+        """(Re)derive the bitmap's address and word count from the current segment."""
+        self.touched_words = (self.num_entries + 63) // 64 if self.touched_enabled else 0
+        self._touched_ptr = self._tail + SHM_TAIL_SIZE if self.touched_enabled else 0
+
+    @property
+    def touched_supported(self) -> bool:
+        """True once a target has attached and announced it fills the bitmap."""
+        if not self.touched_enabled or self._ptr is None:
+            return False
+        return ctypes.string_at(self._touched_ptr, SHM_TOUCHED_HEADER) == SHM_TOUCHED_MAGIC
+
+    def _touched_view(self) -> np.ndarray:
+        if not self.touched_enabled:
+            raise RuntimeError("touched bitmap not enabled for this segment")
+        buf = (ctypes.c_char * (self.touched_words * 8)).from_address(
+            self._touched_ptr + SHM_TOUCHED_HEADER
+        )
+        return np.frombuffer(buf, dtype=np.uint64, count=self.touched_words)
+
+    def touched_clear(self) -> None:
+        """Zero the bits. The header (the shim's announcement) is left alone."""
+        if not self.touched_enabled:
+            raise RuntimeError("touched bitmap not enabled for this segment")
+        ctypes.memset(self._touched_ptr + SHM_TOUCHED_HEADER, 0, self.touched_words * 8)
+
+    def touched_snapshot(self) -> np.ndarray:
+        """Copy of the bitmap words; later executions cannot change it."""
+        return self._touched_view().copy()
+
+    def slot_edge_ids(self, words: np.ndarray) -> np.ndarray:
+        """Edge ids stored in the slots whose bit is set in *words*."""
+        bits = np.unpackbits(np.ascontiguousarray(words).view(np.uint8), bitorder="little")
+        slots = np.flatnonzero(bits[: self.num_entries])
+        ids = np.frombuffer(self._map, dtype=_ENTRY_DTYPE, count=self.num_entries)["edge_id"][slots]
+        return ids[ids != 0]
 
     # ── Properties (compat shim) ────────────────────────────────────────
     @property
@@ -1112,6 +1186,8 @@ class ShmCoverage:
         """
         new_table_bytes = new_num_entries * SIZEOF_ENTRY
         new_total_bytes = new_table_bytes + SHM_METADATA_SIZE + SHM_TAIL_SIZE
+        if self.touched_enabled:
+            new_total_bytes += touched_region_bytes(new_num_entries)
         if new_table_bytes <= self.table_bytes:
             return
 
@@ -1158,6 +1234,9 @@ class ShmCoverage:
         EntryArr = _entry_struct(new_num_entries)
         self._entries = EntryArr.from_address(new_ptr + SHM_METADATA_SIZE)
         self._tail = new_ptr + SHM_METADATA_SIZE + new_table_bytes
+        # The region is zeroed with the rest of the new segment, header
+        # included, so touched_supported is False until a target re-attaches.
+        self._bind_touched()
         self.env_id = str(self.shm_id)
 
         # _seen_edge_ids is NOT position-indexed, despite what the comment

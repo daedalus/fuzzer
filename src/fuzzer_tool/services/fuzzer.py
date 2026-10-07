@@ -39,7 +39,7 @@ from fuzzer_tool.adapters.process import (
     reset_env_cache,
 )
 from fuzzer_tool.adapters.seed_zip import ZipMode
-from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage
+from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage, unstable_slots
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
@@ -825,6 +825,37 @@ def _slide_windows(seed: bytes, win: int, out: list[bytes], cap: int | None) -> 
         if cap is not None and len(out) >= cap:
             break
         out.append(seed[i : i + win])
+
+
+def _repeat_runs(fuzzer, data: bytes, n_runs: int, sample, before=None):
+    """Execute *data* ``n_runs`` times, ``sample(shm)`` after each one.
+
+    ``before(shm)``, when given, runs ahead of each execution. Returns
+    ``(samples, path_hashes, dropped)`` or None, on the same terms as
+    ``Fuzzer._repeat_edge_sets``, which this is the loop of. Module-level
+    because that method is borrowed unbound by tests that stand in for the
+    fuzzer; a helper reached through ``self`` would not travel with it.
+    """
+    shm = fuzzer.shm_cov
+    if shm is None or n_runs < 2:
+        return None
+    samples: list = []
+    hashes: set[int] = set()
+    dropped = 0
+    shm.dropped_edges_delta()  # discard drops from before this measurement
+    for _ in range(n_runs):
+        if before is not None:
+            before(shm)
+        try:
+            fuzzer._run_target(data)
+        except Exception:
+            return None
+        samples.append(sample(shm))
+        hashes.add(shm.read_path_hash())
+        dropped += shm.dropped_edges_delta()
+    if not samples:
+        return None
+    return samples, hashes, dropped
 
 
 class Fuzzer:
@@ -2281,7 +2312,9 @@ class Fuzzer:
                 self._setup_ptrace(target, deep_coverage, max_bps)
             else:
                 try:
-                    self.shm_cov = ShmCoverage(size=self.map_size)
+                    self.shm_cov = ShmCoverage(
+                        size=self.map_size, touched_bitmap=self._calibrate_stability > 0
+                    )
                     print(f"[*] Coverage: AFL SHM bitmap, id={self.shm_cov.env_id}")
                 except OSError:
                     self._setup_ptrace(target, deep_coverage, max_bps, fallback_hint=True)
@@ -2290,7 +2323,9 @@ class Fuzzer:
         if self.multi_targets and self.use_coverage and not no_shm:
             for t in self.multi_targets:
                 try:
-                    self._target_shm_covs[t] = ShmCoverage(size=self.map_size)
+                    self._target_shm_covs[t] = ShmCoverage(
+                        size=self.map_size, touched_bitmap=self._calibrate_stability > 0
+                    )
                 except OSError:
                     log.warning("Failed to create SHM for %s, using shared SHM", t)
             if self._target_shm_covs:
@@ -6610,24 +6645,7 @@ class Fuzzer:
         to treat any drop as invalidating, for the reason spelled out in
         :meth:`_calibrate_seed_stability`.
         """
-        shm = self.shm_cov
-        if shm is None or n_runs < 2:
-            return None
-        edge_sets: list[set[int]] = []
-        hashes: set[int] = set()
-        dropped = 0
-        shm.dropped_edges_delta()  # discard drops from before this measurement
-        for _ in range(n_runs):
-            try:
-                self._run_target(data)
-            except Exception:
-                return None
-            edge_sets.append(shm.get_edge_ids())
-            hashes.add(shm.read_path_hash())
-            dropped += shm.dropped_edges_delta()
-        if not edge_sets:
-            return None
-        return edge_sets, hashes, dropped
+        return _repeat_runs(self, data, n_runs, lambda shm: shm.get_edge_ids())
 
     def _confirm_new_coverage(self, data: bytes, shm, has_new: bool, edge_ids, *, skip=False):
         """Rerun *data* once if it reported new coverage; keep what reproduces.
@@ -6671,6 +6689,44 @@ class Fuzzer:
             return hit_counts
         return {e: c for e, c in hit_counts.items() if e in keep}
 
+    def _unstable_from_bitmap(self, data: bytes, n_runs: int) -> set[int] | None:
+        """Stability verdict from per-run touched-slot bitmaps.
+
+        Same question as the edge-set path, answered without scanning the
+        table: ``OR & ~AND`` over the runs' bitmaps names the slots that went
+        live in some runs and not all, and one gather turns those into edge
+        ids. Returns the verdict (empty set included), or None when slots
+        cannot stand in for edges and the caller must measure by edge id.
+
+        A slot is bound to one edge only while the table is not wiped. The
+        generation tag is 8 bits and the table is wiped when it returns to
+        0, so a run under tag 0 after the first may have placed an edge
+        elsewhere than the run before it did; that reads as divergence with
+        no nondeterminism behind it, and masking is permanent. Drops veto
+        for the same reason as on the edge-set path.
+        """
+        shm = self.shm_cov
+        measured = _repeat_runs(
+            self,
+            data,
+            n_runs,
+            lambda s: (s.touched_snapshot(), s.read_generation()),
+            before=lambda s: s.touched_clear(),
+        )
+        if measured is None:
+            return set()
+        samples, hashes, dropped = measured
+        if self._stability_veto(dropped, n_runs):
+            return set()
+        if any(gen == 0 for _, gen in samples[1:]):
+            return None
+        if len(hashes) == 1:
+            return self._apply_unstable(set(), n_runs)
+        diff = unstable_slots([snap for snap, _ in samples])
+        if not diff.any():
+            return self._apply_unstable(set(), n_runs)
+        return self._apply_unstable({int(i) for i in shm.slot_edge_ids(diff)}, n_runs)
+
     def _calibrate_seed_stability(self, data: bytes, n_runs: int = 3) -> set[int]:
         """Re-run *data* and mask edges that don't reproduce.
 
@@ -6704,6 +6760,11 @@ class Fuzzer:
         become the default.
         """
         shm = self.shm_cov
+        if shm is not None and getattr(shm, "touched_supported", False):
+            verdict = self._unstable_from_bitmap(data, n_runs)
+            if verdict is not None:
+                return verdict
+            # None: slot identity is unsound for this measurement; measure again by edge id.
         measured = self._repeat_edge_sets(data, n_runs)
         if measured is None:
             # No SHM, too few runs, or a seed that will not re-run: none of
@@ -6712,6 +6773,41 @@ class Fuzzer:
             return set()
         edge_sets, hashes, dropped = measured
 
+        if self._stability_veto(dropped, n_runs):
+            return set()
+
+        # Cheap screen: one distinct hash across every run means the same
+        # edges fired the same number of times in the same order.
+        if len(hashes) == 1:
+            self._stability_calibrations += 1
+            return set()
+
+        stable = set.intersection(*edge_sets)
+        seen = set.union(*edge_sets)
+        return self._apply_unstable(seen - stable, n_runs)
+
+    def _apply_unstable(self, unstable: set[int], n_runs: int) -> set[int]:
+        """Count the calibration and mask *unstable*; shared by both verdict paths."""
+        shm = self.shm_cov
+        self._stability_calibrations += 1
+        if not unstable:
+            # Hashes diverged but the edge *sets* agree: ordering or trip
+            # counts moved, not which code ran. Not an unstable-edge case.
+            return set()
+
+        newly = shm.mask_edges(unstable)
+        self._unstable_edges |= unstable
+        if newly:
+            log.info(
+                "Stability calibration: %d unstable edge(s) masked (%d total) after %d runs",
+                newly,
+                len(self._unstable_edges),
+                n_runs,
+            )
+        return unstable
+
+    def _stability_veto(self, dropped: int, n_runs: int) -> bool:
+        """True when dropped edges make a set/slot divergence meaningless."""
         if dropped:
             # The verdict this function reaches is "these edges did not
             # reproduce, so they are nondeterministic", and masking is
@@ -6742,34 +6838,9 @@ class Fuzzer:
                 dropped,
                 n_runs,
             )
-            return set()
+            return True
 
-        # Cheap screen: one distinct hash across every run means the same
-        # edges fired the same number of times in the same order.
-        if len(hashes) == 1:
-            self._stability_calibrations += 1
-            return set()
-
-        stable = set.intersection(*edge_sets)
-        seen = set.union(*edge_sets)
-        unstable = seen - stable
-
-        self._stability_calibrations += 1
-        if not unstable:
-            # Hashes diverged but the edge *sets* agree: ordering or trip
-            # counts moved, not which code ran. Not an unstable-edge case.
-            return set()
-
-        newly = shm.mask_edges(unstable)
-        self._unstable_edges |= unstable
-        if newly:
-            log.info(
-                "Stability calibration: %d unstable edge(s) masked (%d total) after %d runs",
-                newly,
-                len(self._unstable_edges),
-                n_runs,
-            )
-        return unstable
+        return False
 
     def discovery_rate(self):
         return self._stats.discovery_rate()

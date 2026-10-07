@@ -427,6 +427,10 @@ const uint32_t __AFL_CAT(__afl_ngram_k_, __AFL_NGRAM_K) = __AFL_NGRAM_K;
  *   offset 24  uint64  dropped_edges   written by this shim, saturating
  *   offset 32  struct __afl_entry[__afl_map_size]
  *   ...        16-byte AFLGo distance tail (adapters/shm.py SHM_TAIL_SIZE)
+ *   ...        optional touched-slot bitmap: 8-byte magic, then one bit per
+ *              table slot (adapters/shm.py SHM_TOUCHED_*). Appended, so no
+ *              offset above moves and no layout bump is needed; the shim
+ *              enables it only when the segment is large enough.
  *
  * One field per address, one writer per field, no bit packing anywhere.
  * That is the whole design rule here, and it is a reaction to what the
@@ -525,6 +529,17 @@ static uint32_t *__afl_gen_word    = NULL;   /* offset 4:  uint32 */
 static uint64_t *__afl_path_hash   = NULL;   /* offset 8:  uint64 */
 static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
 static uint64_t *__afl_dropped     = NULL;   /* offset 24: uint64 */
+
+/* Touched-slot bitmap (optional region after the distance tail, see
+ * adapters/shm.py SHM_TOUCHED_*). NULL unless the segment was sized for it:
+ * a segment without the region is the old layout and is never written past
+ * its end. Bit i is set when table slot i becomes live in the current
+ * generation -- on first claim and on reclaim of a stale entry, never on a
+ * plain hit. The fuzzer owns clearing it. */
+static uint64_t *__afl_touched     = NULL;
+#define SHM_TOUCHED_MAGIC   "TOUCHBM1"
+#define SHM_TOUCHED_HEADER  8
+#define SHM_TAIL_BYTES      16
 
 /* ── Generation word (offset 4) ────────────────────────────────────────
  *
@@ -925,6 +940,21 @@ void __afl_map_shm(void) {
     __afl_edge_count  = (uint64_t *)(base + SHM_EDGE_COUNT_OFFSET);
     __afl_dropped     = (uint64_t *)(base + SHM_DROP_OFFSET);
 
+    /* Optional touched-slot bitmap. Enabled only when the segment is big
+     * enough to hold it after the tail; the magic is how the fuzzer learns
+     * this shim fills it (an older shim never writes it). Written before
+     * the mapping is write-locked below. */
+    {
+        size_t tail_end = SHM_TABLE_OFFSET
+                        + (size_t)__afl_map_size * sizeof(struct __afl_entry)
+                        + SHM_TAIL_BYTES;
+        size_t bm_bytes = SHM_TOUCHED_HEADER + (((size_t)__afl_map_size + 63) / 64) * 8;
+        if (shmctl(shmid, IPC_STAT, &ds) == 0 && (size_t)ds.shm_segsz >= tail_end + bm_bytes) {
+            memcpy(base + tail_end, SHM_TOUCHED_MAGIC, SHM_TOUCHED_HEADER);
+            __afl_touched = (uint64_t *)(base + tail_end + SHM_TOUCHED_HEADER);
+        }
+    }
+
     /* Write-lock the mapping; shim stores go through open/close. */
     size_t seg_len = need;
     if (shmctl(shmid, IPC_STAT, &ds) == 0) seg_len = (size_t)ds.shm_segsz;
@@ -1303,6 +1333,29 @@ static inline uint32_t __afl_home_slot(uint32_t edge_id) {
     return (uint32_t)(((__uint128_t)low * __afl_map_size) >> 64);
 }
 
+/* Mark table slot idx live in this generation (no-op without the bitmap).
+ *
+ * Plain read-modify-write by default: two threads setting different bits in
+ * one word can lose one, which in the fuzzer's OR & ~AND comparison reads as
+ * a slot that fired in some runs and not others -- a false "unstable" edge,
+ * and masking is permanent. Single-threaded targets cannot race. For
+ * threaded targets build with -D__AFL_TOUCHED_ATOMIC=1: measured +16-24% on
+ * the shim's per-exec time (500 first touches/exec) against +1-4% for the
+ * plain form, which is why it is not the default. */
+#ifndef __AFL_TOUCHED_ATOMIC
+#define __AFL_TOUCHED_ATOMIC 0
+#endif
+__attribute__((always_inline))
+static inline void __afl_touch(uint32_t idx) {
+    if (!__afl_touched) return;
+    uint64_t bit = 1ull << (idx & 63);
+#if __AFL_TOUCHED_ATOMIC
+    __atomic_fetch_or(&__afl_touched[idx >> 6], bit, __ATOMIC_RELAXED);
+#else
+    __afl_touched[idx >> 6] |= bit;
+#endif
+}
+
 /* Record edge_id in the SHM table for generation gen (see __afl_map_loc). */
 __attribute__((always_inline))
 static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
@@ -1316,6 +1369,7 @@ static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
         if (eid == 0) {                              /* empty slot — claim */
             __afl_area[idx].edge_id = edge_id;
             __afl_area[idx].count   = (gen << 24) | 1;
+            __afl_touch(idx);
             __afl_iter_edge_count++;                 /* track per-iteration new-slot insertion */
             __afl_total_edge_count++;                /* track cumulative across-reset count */
             if (__afl_edge_count)                    /* write CUMULATIVE count live to SHM header */
@@ -1348,6 +1402,7 @@ static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
              * total_edge_count is deliberately NOT bumped here: this edge
              * already owns a slot, so it is not a newly discovered edge. */
             __afl_area[idx].count = (gen << 24) | 1;
+            __afl_touch(idx);
             __afl_iter_edge_count++;
             return;
         }
