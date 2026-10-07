@@ -123,6 +123,7 @@ from fuzzer_tool.core.schedulers import (
     TsallisINFScheduler,
     WhittleIndexScheduler,
 )
+from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.op_p2c import OpP2CScheduler
 from fuzzer_tool.core.schedulers.op_stride import OpStrideScheduler
 from fuzzer_tool.core.schedulers.pos_base import Outcome
@@ -1760,6 +1761,9 @@ class Fuzzer:
         # (core/joint_liveness.py): opt-in, unmeasured, only has an effect
         # with region_profile. Appended: positional signature.
         joint_liveness=False,
+        # Consolidated v1/v2 category-prior strength (--consolidated-prior):
+        # FIXED or BLUP (core/blup.py). Appended: positional signature.
+        consolidated_prior=PriorMode.FIXED,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3873,7 +3877,9 @@ class Fuzzer:
         self._use_consolidated_v1 = consolidated_v1
         self._consolidated_v1 = None
         if consolidated_v1:
-            self._consolidated_v1 = ConsolidatedV1Scheduler(rng=self._rng)
+            self._consolidated_v1 = ConsolidatedV1Scheduler(
+                rng=self._rng, prior_mode=consolidated_prior
+            )
             log.info("Consolidated operator scheduler enabled")
 
         # Consolidated v2: v1 scored by an optimistic, tempered Thompson draw
@@ -3881,7 +3887,9 @@ class Fuzzer:
         self._use_consolidated_v2 = consolidated_v2
         self._consolidated_v2 = None
         if consolidated_v2:
-            self._consolidated_v2 = ConsolidatedV2Scheduler(rng=self._rng)
+            self._consolidated_v2 = ConsolidatedV2Scheduler(
+                rng=self._rng, prior_mode=consolidated_prior
+            )
             log.info("Consolidated v2 operator scheduler enabled")
 
         # MOSS: UCB whose exploration bonus ends at an arm's fair share t/K,

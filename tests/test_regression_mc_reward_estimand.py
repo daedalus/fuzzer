@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import pytest
 
+from fuzzer_tool.core.blup import MIN_STRENGTH, POOL_MAX_STRENGTH
 from fuzzer_tool.core.schedulers.op_monte_carlo import MonteCarloScheduler
+from tests.support.blup_ref import ref_fit, ref_strength
 
 NO_DECAY = 1.0
 
@@ -109,25 +111,37 @@ class TestDecayTowardPrior:
 
 
 def test_regression_decay_forgets_pooled_counts():
-    """With hierarchical pooling, undecayed pooled counts kept every arm's
-    effective posterior anchored to pre-decay evidence."""
-    mc = MonteCarloScheduler(arm_decay=0.5, decay_interval=1, hierarchical_pooling=1.0)
+    """With hierarchical pooling, the pooled prior must forget at the arms'
+    decay rate, else every arm stays anchored to pre-decay evidence."""
+    d = 0.9
+    mc = MonteCarloScheduler(arm_decay=d, decay_interval=1, hierarchical_pooling=1.0)
     mc.init_arm("A")
-    for _ in range(100):
-        mc.record("A", success=True, weight=1.0)
-    for _ in range(100):
-        mc.record("A", success=False)
+    mc.init_arm("B")
+    script = [("A", True), ("B", True)] * 100
+    for k in range(100):
+        script += [("A", False), ("B", k % 5 == 0)]
+    for op, hit in script:
+        mc.record(op, success=hit, weight=1.0)
+
     # Independent derivation: decay fires before each update.
-    succ = fail = 0.0
-    for k in range(200):
-        succ, fail = succ * 0.5, fail * 0.5
-        if k < 100:
-            succ += 1.0
+    succ = {"A": 0.0, "B": 0.0}
+    fail = {"A": 0.0, "B": 0.0}
+    for op, hit in script:
+        for k in succ:
+            succ[k] *= d
+            fail[k] *= d
+        if hit:
+            succ[op] += 1.0
         else:
-            fail += 1.0
+            fail[op] += 1.0
+    s = [succ["A"], succ["B"]]
+    n = [succ["A"] + fail["A"], succ["B"] + fail["B"]]
+    mu, rho = ref_fit(s, n)
+    m = ref_strength(rho, sum(n), POOL_MAX_STRENGTH, MIN_STRENGTH)
+
     a, b = mc._get_effective_params("fresh")
-    assert (a, b) == pytest.approx((1.0 + succ, 1.0 + fail))
-    # Undecayed pools sat at 101 / 202 = 0.5; recent evidence is all misses.
+    assert (a, b) == pytest.approx((1.0 + m * mu, 1.0 + m * (1.0 - mu)))
+    # Undecayed evidence sat at 220 / 400 = 0.55; recent evidence is ~10%.
     assert a / (a + b) < 0.3
 
 

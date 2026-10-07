@@ -18,6 +18,7 @@ from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
+from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
 from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
 from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST
@@ -803,6 +804,7 @@ def cmd_fuzz(args):
         continuum_reward_floor=getattr(args, "continuum_reward_floor", 0.0),
         consolidated_v1=getattr(args, "consolidated_v1", False),
         consolidated_v2=getattr(args, "consolidated_v2", False),
+        consolidated_prior=PriorMode(getattr(args, "consolidated_prior", PriorMode.FIXED.value)),
         moss=getattr(args, "moss", False),
         moss_gamma=getattr(args, "moss_gamma", 1.0),
         bayes_ucb=getattr(args, "bayes_ucb", False),
@@ -3965,6 +3967,16 @@ def main() -> int:
             "Enable the consolidated_v2 operator scheduler: consolidated_v1 scored "
             "by an optimistic, tempered Thompson draw. Takes precedence over every "
             "other operator scheduler when Elo is off"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--consolidated-prior",
+        choices=[m.value for m in PriorMode],
+        default=PriorMode.FIXED.value,
+        help=(
+            "consolidated_v1/v2 category-prior strength: 'fixed' (4 pseudocounts) or "
+            "'blup' (fitted per category from its operators' spread, 1-8). "
+            "Default: fixed."
         ),
     )
     fuzz_parser.add_argument(
