@@ -165,6 +165,7 @@ class FuzzRound:
         self._begin()
         self._search_fixpoint()
         self._generalize()
+        self._colorize()
         self._execute()
         self._mine_cmplog()
         self._periodic()
@@ -211,6 +212,18 @@ class FuzzRound:
         if stage is None or self._meta is None:
             return
         stage.generalize(self._data)
+
+    def _colorize(self) -> None:
+        # --colorize: once per seed (cached), before _execute for the same
+        # reason as _search_fixpoint. Deferred until the seed has had as many
+        # rounds as colorization costs, so it takes at most half the seed's
+        # runs: colorizing on admission spent 97% of a 2k-exec budget.
+        f = self._f
+        if not f.colorize or self._meta is None:
+            return
+        if self._meta["fuzz_count"] < f._colorize_budget(self._data):
+            return
+        f._colorize_seed(self._data)
 
     def _begin(self) -> None:
         f = self._f
@@ -467,8 +480,9 @@ class FuzzRound:
         # Colorization taints for this seed, if the pass is enabled. Bytes
         # inside a taint can be replaced without changing the execution
         # path, so an operand found there is coincidence, not
-        # input-to-state. See _colorize_seed().
-        taints = f._colorize_seed(self._mutated)
+        # input-to-state. See _colorize_seed(). Cached only: executing here
+        # would overwrite this round's coverage before _scan_coverage.
+        taints = f._cached_taints(self._mutated)
         _pending = f._cmplog.pending_new_pairs() if self._meta is not None else []
         if not _pending:
             return
@@ -1811,11 +1825,13 @@ class FuzzRound:
         data = self._data
         f._te_input_history.append(data[:64] if len(data) > 64 else data)
         f._te_edge_history.append(current_edges)
+        f._te_obs += 1
         if len(f._te_input_history) > f._te_history_max:
             f._te_input_history = f._te_input_history[-f._te_history_max :]
             f._te_edge_history = f._te_edge_history[-f._te_history_max :]
-        # Update byte→edge causal map periodically
-        if len(f._te_input_history) % 100 == 0 and len(f._te_input_history) > 50:
+        # Update byte→edge causal map periodically. Counted, not len(): the
+        # history is capped, so its length freezes and % 100 fired every round.
+        if f._te_obs % 100 == 0 and f._te_obs > 50:
             f._update_te_causal_map()
             # Same cadence: feed the causal-sector graph from the TE
             # edge history already being maintained above, rather
