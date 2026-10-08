@@ -24,7 +24,6 @@ Provides:
 """
 
 import math
-import random
 from collections import Counter, defaultdict
 
 try:
@@ -164,29 +163,31 @@ class TransferEntropy:
             return max(0.0, te_raw)
 
         # Deterministic, call-local RNG: reproducible bias estimate that
-        # doesn't consume or perturb any shared/global random state.
+        # doesn't consume or perturb any shared/global random state. All
+        # surrogates are drawn and scored in one numpy pass: the per-surrogate
+        # Python shuffle was ~10% of --hail-mary wall time.
         seed = (hash(tuple(source[:64])) ^ hash(tuple(target[:64])) ^ n) & 0xFFFFFFFF
-        rng = random.Random(seed)
-        shuffled = list(source)
+        rng = np.random.default_rng(seed)
+        codes = _factorize(source)
+        rows = rng.permuted(np.tile(codes, (n_surrogates, 1)), axis=1)
         y_future, y_hist = self._target_keys(target, n)
-        bias_sum = 0.0
-        surrogates_used = 0
-        for _ in range(n_surrogates):
-            rng.shuffle(shuffled)
-            # Only the source moves: the target keys are built once.
-            joint_both_s = self._joint_both(y_future, y_hist, shuffled)
-            count_both_s = len(y_future)
-            if count_both_s == 0:
-                continue
-            h_both_s = self._conditional_entropy_both(joint_both_s, count_both_s)
-            bias_sum += h_target - h_both_s
-            surrogates_used += 1
-
-        if surrogates_used == 0:
-            return max(0.0, te_raw)
-
-        bias = bias_sum / surrogates_used
+        h_both_s = self._surrogate_h_both(y_future, y_hist, rows)
+        bias = float(np.mean(h_target - h_both_s))
         return max(0.0, te_raw - bias)
+
+    def _surrogate_h_both(self, y_future: list[int], y_hist: list[tuple], rows) -> np.ndarray:
+        """H(Y_{t+1} | Y_t^{(k)}, X_t) per source row, in bits.
+
+        ``H = (sum_c n_c log n_c - sum_cy n_cy log n_cy) / m`` over contexts
+        c = (y_hist, x); the counts come from sorted run lengths, row-wise.
+        """
+        m = len(y_future)
+        x = np.asarray(rows, dtype=np.int64)[:, self.k : self.k + m]
+        x_card = int(x.max()) + 1
+        yf = _factorize(y_future)
+        ctx = _factorize(y_hist)[None, :] * x_card + x
+        joint = ctx * (int(yf.max()) + 1) + yf[None, :]
+        return (_row_nlogn(ctx) - _row_nlogn(joint)) / m
 
     def _conditional_entropy_target(self, joint: dict, count: int) -> float:
         """Compute H(Y_{t+1} | Y_t^{(k)}) from joint distribution."""
@@ -429,3 +430,20 @@ class TransferEntropy:
             return True
         except (OSError, json.JSONDecodeError):
             return False
+
+
+def _factorize(values) -> np.ndarray:
+    """Dense int codes in first-seen order (values may be ints or tuples)."""
+    ids: dict = {}
+    return np.fromiter((ids.setdefault(v, len(ids)) for v in values), dtype=np.int64)
+
+
+def _row_nlogn(codes: np.ndarray) -> np.ndarray:
+    """Per row, sum of n * log2(n) over the counts n of each distinct code."""
+    rows, m = codes.shape
+    ordered = np.sort(codes, axis=1)
+    starts = np.ones((rows, m), dtype=bool)
+    starts[:, 1:] = ordered[:, 1:] != ordered[:, :-1]
+    idx = np.flatnonzero(starts)
+    runs = np.diff(np.append(idx, rows * m)).astype(np.float64)
+    return np.bincount(idx // m, weights=runs * np.log2(runs), minlength=rows)
