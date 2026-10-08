@@ -78,7 +78,7 @@ def test_non_pruned_seed_not_in_cuckoo_filter(corpus_dir: Path) -> None:
 
 
 def test_pruned_seed_mutation_is_skipped(corpus_dir: Path) -> None:
-    """When a seed is pruned, its mutation is skipped in _dedup_mutate."""
+    """A pruned parent is not returned unmutated (was a wasted exec)."""
     seed = b"seed_to_prune"
     _write_seed(corpus_dir, seed)
 
@@ -92,11 +92,9 @@ def test_pruned_seed_mutation_is_skipped(corpus_dir: Path) -> None:
     h = f._seed_key(seed)
     f.cuckoo_seed_filter.add(h)
 
-    # Mutate the seed - the mutation should be skipped
+    # A pruned parent is mutated, never executed verbatim.
     result = f._dedup_mutate(seed)
-    # Since the seed's hash is in the cuckoo filter, the mutation
-    # should return the original data (pruned seed skipped)
-    assert result == seed
+    assert result != seed
 
 
 def test_non_pruned_seed_mutates_normally(corpus_dir: Path) -> None:

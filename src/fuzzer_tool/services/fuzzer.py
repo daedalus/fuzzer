@@ -5519,30 +5519,39 @@ class Fuzzer:
         filter never yields a false negative, so nothing already executed
         slips through as new.
 
-        When --cuckoo-seed-filter is enabled, the pruned-seed cuckoo filter
-        is checked before the exec bloom.  If the parent seed's hash matches
-        a previously-pruned seed, the mutation is skipped (original data
-        returned) — the seed was already deemed not valuable, so
-        re-discovering it is pure waste.
+        A mutant byte-identical to its parent is a repeat too: the parent
+        already ran. Compared directly (exact, early-exit), not via the bloom.
+
+        With --cuckoo-seed-filter, a mutant re-creating a pruned seed is a
+        repeat (prevents re-discovery). A pruned *parent* is mutated
+        normally: it is in the live corpus, so a later decision (recovery,
+        re-admission) overrode the prune; returning it unmutated executed
+        the parent verbatim.
         """
-        # Pruned-seed filter check: if the parent seed was previously
-        # pruned and not recovered, skip the mutation entirely and return
-        # the original data.
-        if self.cuckoo_seed_filter is not None:
-            h = self._seed_key(data)
-            if self.cuckoo_seed_filter.contains(h) and h not in self._cuckoo_recovered:
-                self._dedup_hits += 1
-                return data
         mutated = self.mutate(data)
-        if not self._dedup_execs:
-            return mutated
         for _ in range(EXEC_DEDUP_RETRIES):
-            if not self._exec_bloom.update_bytes(bytes(mutated), reset_on_full=True):
+            if not self._is_repeat(mutated, data):
                 return mutated
             self._dedup_hits += 1
             mutated = self.mutate(data)
         self._dedup_gaveup += 1
         return mutated
+
+    def _is_repeat(self, mutated, data: bytes) -> bool:
+        """True when executing *mutated* would re-run a known input."""
+        # Pruned seed: own opt-in, independent of --no-dedup-execs.
+        if self.cuckoo_seed_filter is not None:
+            h = self._seed_key(mutated)
+            if self.cuckoo_seed_filter.contains(h) and h not in self._cuckoo_recovered:
+                return True
+
+        if not self._dedup_execs:
+            return False
+
+        # Parent identity: exact; keeps the parent out of the bloom.
+        if mutated == data:
+            return True
+        return self._exec_bloom.update_bytes(bytes(mutated), reset_on_full=True)
 
     def _seed_entropy_pct(self, seed: bytes, meta: dict | None) -> float:
         """Byte entropy of ``seed`` on the 0-100 scale, memoised in seed_meta.

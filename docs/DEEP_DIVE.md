@@ -361,7 +361,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Filter sizing**: capacity = `max(10 * len(corpus) + persisted_pruned_count, 100_000)`, set after corpus is loaded. Persisted pruned entries (seeds and deltas) are counted for sizing.
 - **Persisted state**: Pruned seeds survive restarts; running `minimize --commit` writes pruned seeds to `corpus/seeds/pruned/` and `corpus/deltas/pruned/`. The filter is rebuilt from these persisted seeds on resume.
 - **Load scaling**: the table is sized so `capacity` items fill at most 90% of the slots (`CuckooFilter.MAX_LOAD`); a failed insert is rolled back (`n_failed` counts them), so a rejected add never evicts a stored seed; kicking uses a private RNG. Realised false-positive rate is ~2*b*load/2^f (~1e-4 at 16-bit fingerprints).
-- **Dedup check**: In `_dedup_mutate()`, before the exec bloom check, if the parent seed's hash is in the filter AND not in `_cuckoo_recovered`, the mutation is skipped (returns original data).
+- **Dedup check**: In `_dedup_mutate()`, a *mutant* whose hash is in the filter AND not in `_cuckoo_recovered` is re-rolled like an exec-bloom hit (up to `EXEC_DEDUP_RETRIES`). The parent is always mutated: a live parent was already re-admitted. Mutants byte-identical to the parent are re-rolled too (gated by `--no-dedup-execs`). Re-rolls / give-ups print in the run summary (`Exec dedup:`).
 
 ### Zip Seed Corpus (`--zip-seed-corpus`)
 

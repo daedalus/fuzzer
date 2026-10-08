@@ -805,6 +805,10 @@ class StatsReporter:
         print(f"  Duplicates rejected: {f._duplicate_reject_count}")
         if f._pruned_count > 0:
             print(f"  Seeds pruned:      {f._pruned_count}")
+        hits = getattr(f, "_dedup_hits", 0)
+        gaveup = getattr(f, "_dedup_gaveup", 0)
+        if hits or gaveup:
+            print(f"  Exec dedup:        {hits} re-rolls, {gaveup} gave up")
         flux = getattr(f, "_corpus_flux", None)
         if flux is not None and flux.total_additions + flux.total_evictions > 0:
             turnover = flux.turnover()
