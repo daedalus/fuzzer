@@ -50,6 +50,7 @@ BALLOT_SCHEDULERS = (
     "corral",
     "tsallis",
     "kalman_ts",
+    "gamma_poisson",
     "ids",
     "phe",
     "exp3_ix",

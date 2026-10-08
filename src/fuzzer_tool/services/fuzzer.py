@@ -100,6 +100,7 @@ from fuzzer_tool.core.schedulers import (
     Exp4Scheduler,
     FEWAScheduler,
     FPLScheduler,
+    GammaPoissonScheduler,
     GPUCBScheduler,
     GradientBanditScheduler,
     HierarchicalBanditScheduler,
@@ -215,6 +216,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "corral",
     "tsallis",
     "kalman_ts",
+    "gamma_poisson",
     "ids",
     "phe",
     "exp3_ix",
@@ -1416,6 +1418,8 @@ class Fuzzer:
         tsallis_eta=2.0,
         kalman_ts=False,
         kalman_ts_q0=1e-8,
+        gamma_poisson=False,
+        gamma_poisson_discount=0.9998,
         ids=False,
         ids_samples=128,
         phe=False,
@@ -3595,6 +3599,14 @@ class Fuzzer:
         if kalman_ts:
             self._kalman_ts = KalmanTSScheduler(q0=kalman_ts_q0, rng=self._rng)
             log.info("Kalman-TS enabled (q0=%.1e)", kalman_ts_q0)
+        # Gamma-Poisson: Kalman-TS's rare-yield counterpart, off-policy safe.
+        self._use_gamma_poisson = gamma_poisson
+        self._gamma_poisson = None
+        if gamma_poisson:
+            self._gamma_poisson = GammaPoissonScheduler(
+                discount=gamma_poisson_discount, rng=self._rng
+            )
+            log.info("Gamma-Poisson enabled (discount=%.6f)", gamma_poisson_discount)
         self._use_ids = ids
         self._ids = None
         if ids:
@@ -4166,6 +4178,7 @@ class Fuzzer:
             or self._corral
             or self._tsallis
             or self._kalman_ts
+            or self._gamma_poisson
             or self._ids
             or self._phe
             or self._exp3_ix
@@ -4386,6 +4399,8 @@ class Fuzzer:
             _register_arms(self._tsallis)
         if self._kalman_ts:
             _register_arms(self._kalman_ts, _format_priors)
+        if self._gamma_poisson:
+            _register_arms(self._gamma_poisson, _format_priors)
         if self._ids:
             _register_arms(self._ids, _format_priors)
         if self._phe:
@@ -8226,7 +8241,7 @@ class Fuzzer:
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        # corral, tsallis, kalman_ts, ids, phe, exp3_ix, regret_matching,
+        # corral, tsallis, kalman_ts, gamma_poisson, ids, phe, exp3_ix, regret_matching,
         # automaton and ant_colony are deliberately absent from this banner
         # too, same reason,
         # see core/schedulers/op_corral.py.
@@ -8743,7 +8758,7 @@ class Fuzzer:
             ops.append("bayes_ucb")
         if getattr(self, "_fpl", False):
             ops.append("fpl")
-        # corral, tsallis, kalman_ts, ids, phe, exp3_ix, regret_matching,
+        # corral, tsallis, kalman_ts, gamma_poisson, ids, phe, exp3_ix, regret_matching,
         # automaton and ant_colony are deliberately absent from this banner
         # too, same reason,
         # see core/schedulers/op_corral.py.

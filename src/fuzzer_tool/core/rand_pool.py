@@ -703,6 +703,14 @@ class RandPool:
             self._rng.gamma(alpha, scale=1.0 / beta, size=count) if beta > 0 else np.zeros(count)
         )
 
+    def gammavariate_array(self, alphas, betas) -> np.ndarray:
+        """Return one Gamma(alphas[i], rate=betas[i]) draw per element, as an array.
+
+        The Gamma counterpart of :meth:`betavariate_array`: a Thompson step
+        over K Gamma-Poisson arms in one C-level numpy call.
+        """
+        return self._rng.gamma(alphas) / np.asarray(betas, dtype=np.float64)
+
     def lognormvariate(self, mu: float = 0.0, sigma: float = 1.0) -> float:
         """Return a random float from LogNormal(*mu*, *sigma*).
 

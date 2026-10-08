@@ -91,6 +91,7 @@ def _all_operator_schedulers():
     corral = S.CorralScheduler()
     tsallis = S.TsallisINFScheduler()
     kalman_ts = S.KalmanTSScheduler()
+    gamma_poisson = S.GammaPoissonScheduler()
     ids = S.IDSScheduler()
     phe = S.PHEScheduler()
     exp3_ix = S.EXP3IXScheduler()
@@ -189,6 +190,12 @@ def _all_operator_schedulers():
         ("CorralScheduler", corral, corral.select_op, corral.record),
         ("TsallisINFScheduler", tsallis, tsallis.select_op, tsallis.record),
         ("KalmanTSScheduler", kalman_ts, kalman_ts.select_op, kalman_ts.record),
+        (
+            "GammaPoissonScheduler",
+            gamma_poisson,
+            gamma_poisson.select_op,
+            gamma_poisson.record,
+        ),
         ("IDSScheduler", ids, ids.select_op, ids.record),
         ("PHEScheduler", phe, phe.select_op, phe.record),
         ("EXP3IXScheduler", exp3_ix, exp3_ix.select_op, exp3_ix.record),

@@ -800,7 +800,7 @@ _FALLBACK_PRECEDENCE = (
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
     # op_tpe, op_strata, op_stride, op_p2c, op_good_turing, gradient, whittle, corral, softmax, topk,
-    # tsallis, kalman_ts, ids, phe, exp3_ix, regret_matching, automaton,
+    # tsallis, kalman_ts, gamma_poisson, ids, phe, exp3_ix, regret_matching, automaton,
     # ant_colony are deliberately absent
     # here: they are unproven exploratory arms
     # (see their module docstrings) that should only ever be reached via
@@ -921,6 +921,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("tsallis")
     if f._use_kalman_ts and f._kalman_ts:
         available.append("kalman_ts")
+    if f._use_gamma_poisson and f._gamma_poisson:
+        available.append("gamma_poisson")
     if f._use_ids and f._ids:
         available.append("ids")
     if f._use_phe and f._phe:
@@ -5592,6 +5594,9 @@ class OperatorEngine:
             f._last_mopt_particles.append(None)
         elif strategy == "kalman_ts" and f._kalman_ts:
             op = f._kalman_ts.select_op(ops)
+            f._last_mopt_particles.append(None)
+        elif strategy == "gamma_poisson" and f._gamma_poisson:
+            op = f._gamma_poisson.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "ids" and f._ids:
             op = f._ids.select_op(ops)

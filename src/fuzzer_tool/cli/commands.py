@@ -479,6 +479,7 @@ def cmd_fuzz(args):
         args.corral = True
         args.tsallis = True
         args.kalman_ts = True
+        args.gamma_poisson = True
         args.ids = True
         args.phe = True
         args.exp3_ix = True
@@ -735,6 +736,8 @@ def cmd_fuzz(args):
         tsallis_eta=getattr(args, "tsallis_eta", 2.0),
         kalman_ts=getattr(args, "kalman_ts", False),
         kalman_ts_q0=getattr(args, "kalman_ts_q0", 1e-8),
+        gamma_poisson=getattr(args, "gamma_poisson", False),
+        gamma_poisson_discount=getattr(args, "gamma_poisson_discount", 0.9998),
         ids=getattr(args, "ids", False),
         ids_samples=getattr(args, "ids_samples", 128),
         phe=getattr(args, "phe", False),
@@ -2227,6 +2230,7 @@ _HAIL_MARY_FLAGS = (
     "corral",
     "tsallis",
     "kalman_ts",
+    "gamma_poisson",
     "ids",
     "phe",
     "exp3_ix",
@@ -3538,6 +3542,19 @@ def main() -> int:
         default=1e-8,
         help="Kalman-TS initial drift variance per round; larger re-explores "
         "neglected operators sooner (default: 1e-8)",
+    )
+    fuzz_parser.add_argument(
+        "--gamma-poisson",
+        action="store_true",
+        help="Enable Gamma-Poisson Thompson sampling: discounted per-operator "
+        "rate posteriors for rare yields. Elo-only, so pair it with --elo",
+    )
+    fuzz_parser.add_argument(
+        "--gamma-poisson-discount",
+        type=float,
+        default=0.9998,
+        help="Gamma-Poisson evidence retention per round, in (0, 1]; memory "
+        "~1/(1-discount) rounds (default: 0.9998)",
     )
     fuzz_parser.add_argument(
         "--ids",
