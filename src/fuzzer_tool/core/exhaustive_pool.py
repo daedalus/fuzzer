@@ -675,6 +675,9 @@ class ExhaustivePool:
     def random_list(self, count: int) -> list[float]:
         self._continuous("random_list()")
 
+    def random_sequential(self, count: int) -> list[float]:
+        self._continuous("random_sequential()")
+
     def gauss(self, mu: float = 0.0, sigma: float = 1.0) -> float:
         self._continuous("gauss()")
 
