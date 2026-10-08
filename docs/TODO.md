@@ -178,6 +178,13 @@ Already ported: power factors (`--honggfuzz`), Magic, ASCIINumChange, SpecialStr
 - [ ] **Multi-worker + live sync** — threads sharing one coverage map, `--dynamic_input` dir polled and unlinked after import. Largest item; we are single-process.
 - Skip: `mangle_pickWeighted` tiers (`uint8_t roll` wraps when sum > 255; our bandits supersede), rare-edge counter (counts bucket collisions, not frequency), BTS (superseded by PT/LBR), socket_fuzzer protocol (niche).
 
+## Revizor port candidates (2026-10-08, microsoft/side-channel-fuzzer)
+Ported: input boosting (`taint_boost` op), priming check (`--priming-check`).
+- [ ] **`taint_boost` / `--priming-check`: measure** — both unmeasured. Open: (a) paired A/B on clang-built fuzzgoat (Hard Rule 52), `--colorize` with and without the op; (b) primed-id rate vs phantom rate under `--priming-check`; (c) withdrawal is conservative: an id the mutant reaches alone but whose state also steers the parent is dropped too; (d) taints only cached for colorized mutants, so the op is offered rarely.
+- [ ] **Relational leak oracle** — `analyser.py`: fix public input, boost secret bytes, flag classes whose edge sets (branch leak) or `--hw-perf` histograms (chi² homogeneity) differ. Needs a secp256k1 signing/ECDH mode with secret input.
+- [ ] **Sample-size escalation** — `fuzzer.py` noise stage: confirm noisy verdicts (exec-time anomaly, differential KS) at 10→50→100→500 samples.
+- [ ] **Pair minimizer** — `DifferentialInputMinimizerPass`: zero power-of-two blocks, then copy bytes across, for `--differential` / uninit-probe pairs.
+
 ## Standing notes
 
 These are not work items. They are the lessons the closed work left behind, and

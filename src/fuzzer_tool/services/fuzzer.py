@@ -1619,6 +1619,7 @@ class Fuzzer:
         # Seed arena's argmin floor (see core/schedulers/seed_canary.py).
         # The op_canary counterpart for the seed-selection Elo pool.
         confirm_novelty=False,
+        priming_check=False,
         antifuzz_evade=False,
         seed_canary_scheduler=False,
         # Seed arena's deterministic baseline (see
@@ -2161,7 +2162,11 @@ class Fuzzer:
         self._touched_scan = bool(touched_scan)
         # F2: rerun an execution that reported new coverage and keep only what
         # reproduces. See _confirm_new_coverage.
-        self._confirm_novelty = bool(confirm_novelty)
+        self._confirm_novelty = bool(confirm_novelty or priming_check)
+        # Revizor priming check: rerun the parent after a novel mutant; new ids
+        # it also hits are history-driven. See _primer_ids.
+        self._priming_check = bool(priming_check)
+        self._primed_ids = 0
         # AntiFuzz §4.2/§4.3: LD_PRELOAD shim faking self-ptrace + dropping delays.
         self._antifuzz_evade = bool(antifuzz_evade)
         self._confirmed_edges: frozenset[int] | None = None
@@ -6711,7 +6716,9 @@ class Fuzzer:
         """
         return _repeat_runs(self, data, n_runs, lambda shm: shm.get_edge_ids())
 
-    def _confirm_new_coverage(self, data: bytes, shm, has_new: bool, edge_ids, *, skip=False):
+    def _confirm_new_coverage(
+        self, data: bytes, shm, has_new: bool, edge_ids, *, skip=False, primer=None
+    ):
         """Rerun *data* once if it reported new coverage; keep what reproduces.
 
         F2: an execution can report ids no later execution of the same input
@@ -6726,18 +6733,24 @@ class Fuzzer:
         per new-coverage event and nothing otherwise. A crash or timeout is
         never rerun (its ids are short, not phantom), a rerun that raises leaves
         the verdict alone, and the flag off is a pass-through.
+
+        ``primer`` (``--priming-check``) is the parent seed. It runs between
+        the original and the rerun, so the shm still holds *data*'s run when
+        callers read counts afterwards. See :meth:`_primer_ids`.
         """
         self._confirmed_edges = None
         if not (self._confirm_novelty and has_new and shm is not None) or skip:
             return has_new, edge_ids
         new_ids = frozenset(shm.last_new_ids)
         old_bucket = bool(shm.last_old_bucket_novel)
+        primer_ids = self._primer_ids(data, primer, new_ids, shm)
         try:
             self._run_target(data)
         except Exception:
             return has_new, edge_ids
-        result = confirm(has_new, new_ids, old_bucket, edge_ids, shm.get_edge_ids())
+        result = confirm(has_new, new_ids, old_bucket, edge_ids, shm.get_edge_ids(), primer_ids)
         self._confirm_stats["reruns"] += 1
+        self._primed_ids += len(new_ids & primer_ids)
         if result.phantoms:
             shm.reject_phantoms(result.phantoms)
             self._confirm_stats["phantom_ids"] += len(result.phantoms)
@@ -6745,6 +6758,24 @@ class Fuzzer:
             self._confirm_stats["withdrawn"] += 1
         self._confirmed_edges = result.edge_ids
         return result.has_new, set(result.edge_ids)
+
+    def _primer_ids(self, data: bytes, primer, new_ids, shm) -> frozenset[int]:
+        """Edge ids of *primer* run right after *data* (Revizor priming check).
+
+        Empty when the check is off, nothing new is at stake, the primer is
+        *data* itself (that is the plain rerun), or the run raised: no
+        evidence never withdraws anything.
+        """
+        if not (self._priming_check and new_ids and primer) or primer == data:
+            return frozenset()
+
+        try:
+            self._run_target(primer)
+        except Exception:
+            log.debug("priming run failed; confirming without it", exc_info=True)
+            return frozenset()
+
+        return frozenset(shm.get_edge_ids())
 
     def _only_confirmed(self, hit_counts):
         """Restrict per-edge counts to the ids the last confirmation kept."""
@@ -7144,6 +7175,10 @@ class Fuzzer:
             cache.clear()
         cache[key] = taints
         return taints
+
+    def _cached_taints(self, data: bytes):
+        """Taints ``_colorize_seed`` already found for *data*; never executes."""
+        return self._colorize_taint_cache.get(hash(bytes(data)))
 
     def _rewind_cmplog_shim(self) -> None:
         """Rewind the direct_lite shim's cmplog offset after a collect."""

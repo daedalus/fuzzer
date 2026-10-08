@@ -773,6 +773,7 @@ def cmd_fuzz(args):
         dict_thompson=getattr(args, "dict_thompson", False),
         seed_residual=getattr(args, "seed_residual", False),
         confirm_novelty=getattr(args, "confirm_novelty", False),
+        priming_check=getattr(args, "priming_check", False),
         antifuzz_evade=getattr(args, "antifuzz_evade", False),
         successive_elim=getattr(args, "successive_elim", False),
         successive_elim_delta=getattr(args, "successive_elim_delta", 0.1),
@@ -2311,6 +2312,7 @@ _HAIL_MARY_FLAGS = (
     "pll",
     "recurrence",
     "confirm_novelty",
+    "priming_check",
     "antifuzz_evade",
     "ecofuzz",
     "metropolis",
@@ -4624,6 +4626,17 @@ def main() -> int:
             "operator reward reads them. Costs one extra execution per new-coverage event. OFF by "
             "default; not yet A/B validated -- see docs/handover/"
             "handover_strata_schedulers_2026-09-19.md and core/novelty_confirm.py."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--priming-check",
+        action="store_true",
+        default=False,
+        help=(
+            "Revizor priming check (implies --confirm-novelty): rerun the unchanged parent seed "
+            "after a novel mutant; new edge ids the parent also hits came from leftover state, "
+            "not the mutant's bytes, and are withdrawn. One extra execution per new-id event. "
+            "OFF by default; not yet A/B validated -- see core/novelty_confirm.py."
         ),
     )
     fuzz_parser.add_argument(
