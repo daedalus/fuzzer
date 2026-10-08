@@ -441,7 +441,7 @@ def _parse_cu_die(sections: dict[bytes, bytes], info: bytes, cu_off: int):
 # ── Line program parsing ───────────────────────────────────────────────
 
 
-def _read_v5_table(data: bytes, off: int, sections: dict[bytes, bytes]):
+def _read_v5_table(data: bytes, off: int, sections: dict[bytes, bytes], end: int | None = None):
     """Read one v5 include-directory or file-name table.
 
     LLVM (clang) emits these as [format_count][(ct, form) pairs][count]
@@ -449,7 +449,13 @@ def _read_v5_table(data: bytes, off: int, sections: dict[bytes, bytes]):
     MCDwarf.cpp's emitV5FileDirTables and readelf). Returns
     (entries, new_offset) where entries is a list of dicts keyed by
     content type.
+
+    *end* (default ``len(data)``) bounds the entries: the binary's count
+    is untrusted, so it is capped by bytes left, and reading stops at the
+    first entry that consumes nothing (zero-width forms) or overruns *end*.
     """
+    if end is None:
+        end = len(data)
     format_count, off = _uleb(data, off)
     formats = []
     for _ in range(format_count):
@@ -457,9 +463,15 @@ def _read_v5_table(data: bytes, off: int, sections: dict[bytes, bytes]):
         form, off = _uleb(data, off)
         formats.append((ct, form))
     count, off = _uleb(data, off)
+
+    # Each real entry takes >= 1 byte, so bytes left bound the count.
+    count = min(count, max(0, end - off))
     entries = []
     for _ in range(count):
-        fields, off = _read_v5_entry(data, off, formats, sections)
+        fields, nxt = _read_v5_entry(data, off, formats, sections)
+        if nxt <= off or nxt > end:
+            break
+        off = nxt
         entries.append(fields)
     return entries, off
 
@@ -527,10 +539,10 @@ def _line_file_tables(data, p, header_end, version, comp_dir, sections):
     files: list[tuple[str, int]] = []  # (display name, dir index)
     if version >= 5:
         dirs[0] = comp_dir or ""
-        dir_entries, p = _read_v5_table(data, p, sections)
+        dir_entries, p = _read_v5_table(data, p, sections, header_end)
         for fields in dir_entries:
             dirs.append(str(fields.get(_DW_LNCT_path, "")))
-        file_entries, p = _read_v5_table(data, p, sections)
+        file_entries, p = _read_v5_table(data, p, sections, header_end)
         for fields in file_entries:
             files.append(
                 (

@@ -498,6 +498,10 @@ class LineageTree:
             node = self.nodes.get(k)
             if node is None:
                 return 0.0
+
+            # In-progress sentinel: a child edge looping back to k adds 0
+            # instead of recursing forever.
+            memo[k] = 0.0
             cov, baseline = coverage_fn(k)
             total = max(cov - baseline, 0)
             for ck in self._children.get(k, ()):
@@ -759,10 +763,15 @@ class LineageTree:
         return self._subtree_keys(key)
 
     def _subtree_keys(self, key: str) -> list[str]:
+        # Visited set: a corrupt child cycle must not grow `out` forever.
         stack = [key]
         out: list[str] = []
+        seen: set[str] = set()
         while stack:
             k = stack.pop()
+            if k in seen:
+                continue
+            seen.add(k)
             out.append(k)
             stack.extend(self._children.get(k, ()))
         return out
@@ -776,8 +785,10 @@ class LineageTree:
         parent (e.g. an orphaned node after partial rebuild).
         """
         chain: list[tuple[str, list[int], list[int], int, bool]] = []
+        seen: set[str] = set()
         node = self.nodes.get(key)
-        while node is not None:
+        while node is not None and node.key not in seen:
+            seen.add(node.key)
             chain.append(
                 (node.key, list(node.child_ops), list(node.child_sites), node.depth, node.active)
             )
@@ -812,6 +823,35 @@ class LineageTree:
             seq=self._seq,
         )
 
+    def _cut_cycles(self) -> None:
+        """Detach the link closing each parent cycle; that node becomes a root.
+
+        Persisted meta can hold ``a -> a`` or ``a -> b -> a`` (``insert``
+        rejects these, rebuild did not). O(n): each key is walked once.
+        """
+        done: set[str] = set()
+        for start in self.nodes:
+            path: list[str] = []
+            on_path: set[str] = set()
+            k: str | None = start
+            while k is not None and k in self.nodes and k not in done:
+                if k in on_path:
+                    self._detach(path[-1])
+                    break
+                on_path.add(k)
+                path.append(k)
+                k = self.nodes[k].parent_key
+            done.update(path)
+
+    def _detach(self, key: str) -> None:
+        """Make *key* a root: drop its parent link both ways."""
+        node = self.nodes[key]
+        siblings = self._children.get(node.parent_key or "")
+        if siblings is not None:
+            siblings.discard(key)
+        node.parent_key = None
+        node.depth = 0
+
     def rebuild_from_meta(
         self,
         seed_meta: dict,
@@ -843,6 +883,7 @@ class LineageTree:
             self.nodes[node.key] = node
             if node.parent_key is not None:
                 self._children.setdefault(node.parent_key, set()).add(node.key)
+        self._cut_cycles()
 
         # Roots are recomputed in one pass rather than maintained during the
         # loop above: a node whose parent_key is set but whose parent never
