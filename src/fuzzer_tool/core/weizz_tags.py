@@ -40,6 +40,7 @@ absorbed both the Weizz port plan and the P1 tag-map writeup.
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import IntFlag
@@ -532,21 +533,6 @@ def synthetic_exec_fn(
 # ── Passive path: consume existing cmplog pairs ──────────────────────────
 
 
-def _looks_like_length(op: bytes, input_len: int) -> bool:
-    """Heuristic: small integer that could be a length/size field."""
-    if not op or len(op) > 8:
-        return False
-    # try LE then BE
-    for endian in ("little", "big"):
-        try:
-            v = int.from_bytes(op, endian)
-        except ValueError:
-            continue
-        if 0 < v <= input_len * 2:  # generous upper bound
-            return True
-    return False
-
-
 def _looks_like_magic(op_a: bytes, op_b: bytes) -> bool:
     """Constant / magic comparison: one side very short or all-same."""
     for op in (op_a, op_b):
@@ -613,15 +599,37 @@ class TagCollectorConfig:
 
 def _operand_flags(op_a: bytes, op_b: bytes, n: int) -> TagFlags:
     """Shape flags for a pair: length or checksum (length wins), plus magic."""
-    flags = TagFlags.NONE
-    if _looks_like_length(op_a, n) or _looks_like_length(op_b, n):
-        flags |= TagFlags.IS_LEN
-    elif _looks_like_checksum(op_a) or _looks_like_checksum(op_b):
-        # IS_LEN takes priority over checksum on the same operand.
-        flags |= TagFlags.IS_CHECKSUM
-    if _looks_like_magic(op_a, op_b):
-        flags |= TagFlags.IS_MAGIC
-    return flags
+    return _pick_flags(_pair_shape(op_a, op_b), n)
+
+
+# (length floor, flags if a length, flags if not): the input length only
+# enters through the length test ``0 < v <= 2n``, so a pair's shape is
+# classified once and picked per input.
+_Shape = tuple[float, TagFlags, TagFlags]
+
+
+def _pair_shape(op_a: bytes, op_b: bytes) -> _Shape:
+    """Input-length-free half of _operand_flags."""
+    floor = min(
+        (
+            v
+            for op in (op_a, op_b)
+            if op and len(op) <= 8
+            for v in (int.from_bytes(op, "little"), int.from_bytes(op, "big"))
+            if v > 0
+        ),
+        default=math.inf,
+    )
+    magic = TagFlags.IS_MAGIC if _looks_like_magic(op_a, op_b) else TagFlags.NONE
+    # IS_LEN takes priority over checksum on the same operand.
+    checksum = _looks_like_checksum(op_a) or _looks_like_checksum(op_b)
+    not_len = (TagFlags.IS_CHECKSUM if checksum else TagFlags.NONE) | magic
+    return floor, TagFlags.IS_LEN | magic, not_len
+
+
+def _pick_flags(shape: _Shape, n: int) -> TagFlags:
+    floor, if_len, if_not = shape
+    return if_len if floor <= n * 2 else if_not
 
 
 def _claim_span(
@@ -699,6 +707,53 @@ def _tag_stats(tags: list[ByteTag]) -> tuple[int, int]:
     return ntypes, max_counter
 
 
+# One plan per pool: (candidates, cmp_id, counter, shape) in claim order,
+# plus cmp_id -> counter. Keyed like scanner_for_pairs (owner identity +
+# length): per-call planning cost ~850 pairs of work per Weizz mutation.
+_PlanEntry = tuple[list[tuple[bytes, str]], int, int, _Shape]
+_Plan = tuple[list[_PlanEntry], dict[int, int]]
+_plan_key: tuple | None = None
+_plan_owner: object | None = None
+_plan: _Plan = ([], {})
+
+
+def _tag_plan(
+    pairs: Sequence[tuple[bytes, bytes]],
+    pair_pcs: dict[tuple[bytes, bytes], int | None] | None,
+    cfg: TagCollectorConfig,
+) -> _Plan:
+    """Pool-only half of the tag map: sort order, cmp ids, counters, shapes.
+
+    Cached only without *pair_pcs*: callers pass a fresh dict each time, so
+    its identity says nothing about its contents.
+    """
+    global _plan_key, _plan_owner, _plan
+    key = (len(pairs), cfg.min_operand_len, cfg.max_operand_len)
+    if not pair_pcs and _plan_owner is pairs and _plan_key == key:
+        return _plan
+
+    pcs = pair_pcs or {}
+    counter_by_id: dict[int, int] = {}
+    plan: list[_PlanEntry] = []
+    # Shorter / more specific operands claim bytes first.
+    for op_a, op_b in sorted(pairs, key=_pair_key):
+        if not op_a and not op_b:
+            continue
+        # skip pathological sizes
+        candidates = _sized_operands(op_a, op_b, cfg)
+        if not candidates:
+            continue
+
+        cid = _stable_cmp_id(op_a, op_b, pcs.get((op_a, op_b)))
+        counter = counter_by_id.setdefault(cid, len(counter_by_id) + 1)
+        plan.append((candidates, cid, counter, _pair_shape(op_a, op_b)))
+
+    if pair_pcs:
+        return plan, counter_by_id
+    _plan_owner, _plan_key, _plan = pairs, key, (plan, counter_by_id)
+    return _plan
+
+
 def build_tag_map_from_cmplog(
     data: bytes,
     pairs: Sequence[tuple[bytes, bytes]],
@@ -737,46 +792,27 @@ def build_tag_map_from_cmplog(
         return StructureMap(tags=[ByteTag() for _ in range(n)], input_len=n)
 
     tags = [ByteTag() for _ in range(n)]
-    pair_pcs = pair_pcs or {}
-    # Track first-seen offset per cmp_id for parent inference
     first_offset: dict[int, int] = {}
-    counter_by_id: dict[int, int] = {}
-    next_counter = 1
-    seen_ids: set[int] = set()
     dep_bytes: set[int] = set()
 
-    # Sort pairs so shorter / more specific operands claim bytes first
-    ordered = sorted(pairs, key=_pair_key)
-
     # Locate every operand in one multi-pattern pass, then consume the results
-    # in ``ordered``.  The claim loop below is order-dependent -- shorter, more
+    # in plan order.  The claim loop below is order-dependent -- shorter, more
     # specific operands take bytes first and later ones only fill what is still
     # untagged -- so the automaton is used to *collect* offsets, never to apply
     # them.  The application order is unchanged, which is what makes the tag
     # map identical byte for byte.
     offsets = scanner_for_pairs(pairs).scan(data, min_len=cfg.min_operand_len)
 
-    for op_a, op_b in ordered:
-        if not op_a and not op_b:
+    plan, counter_by_id = _tag_plan(pairs, pair_pcs, cfg)
+    for candidates, cid, counter, shape in plan:
+        # A pair with no operand in the input claims nothing.
+        if not any(op in offsets for op, _side in candidates):
             continue
-        # skip pathological sizes
-        candidates = _sized_operands(op_a, op_b, cfg)
-        if not candidates:
-            continue
-
-        cid = _stable_cmp_id(op_a, op_b, pair_pcs.get((op_a, op_b)))
-        if cid not in seen_ids:
-            seen_ids.add(cid)
-            counter_by_id[cid] = next_counter
-            next_counter += 1
-
-        flags = _operand_flags(op_a, op_b, n)
-
         _claim_pair(
             tags,
             candidates,
             offsets,
-            (cid, counter_by_id[cid], flags),
+            (cid, counter, _pick_flags(shape, n)),
             dep_bytes,
             first_offset,
             cfg.prefer_input_operand,

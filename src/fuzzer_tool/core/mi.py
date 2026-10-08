@@ -182,6 +182,10 @@ class MutualInformationTracker:
         max_pos = len(input_bytes) - 1 if input_bytes else 0
         if max_pos >= self.max_positions:
             max_pos = self.max_positions - 1
+        # Below min_observations the position cannot enter the cache, so a
+        # rebuild changes nothing structural (was 69% of rebuilds).
+        if self.position_counts.get(max_pos, 0) < self.min_observations:
+            return
         import bisect
 
         if (

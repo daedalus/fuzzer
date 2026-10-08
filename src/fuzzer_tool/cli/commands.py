@@ -2180,6 +2180,9 @@ def cmd_sweep(args):
 # one_fifth (--one-fifth) is excluded: it scales -M, which --slopt (in this
 # tuple) replaces, so under --hail-mary it would be a silent no-op.
 #
+# touched_scan (--touched-scan) is excluded: a coverage-read implementation,
+# not a strategy, and measured slower at 8192-entry maps.
+#
 # crash_explore (--crash-explore) is excluded: a mode switch (AFL -C), not a
 # strategy. It zeroes has_new_coverage on every non-crashing round, so under
 # --hail-mary nothing was admitted and the EdgeTracker froze.
@@ -2391,10 +2394,10 @@ def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentPar
     if args.elo == fuzz_parser.get_default("elo"):
         args.elo = "all"
 
-    # Boltzmann/Metropolis annealing is inert without a nonzero budget --
-    # give it one so enabling the flags actually does something.
-    if args.anneal_budget == fuzz_parser.get_default("anneal_budget"):
-        args.anneal_budget = 10000
+    # --anneal-budget stays 0: --elo all forces --metropolis, and a budget arms
+    # it. Near T=1 it admitted ~37% of non-improving mutants (120 of 140
+    # corpus writes in 1.5k execs); fuzzgoat, 6 paired seeds: median 78 edges
+    # with 10000, 134.5 without. Boltzmann still runs, at fixed T=1.
 
     # --dirichlet-alpha takes a value, not a bool -- special-case it like --elo.
     if args.dirichlet_alpha == fuzz_parser.get_default("dirichlet_alpha"):

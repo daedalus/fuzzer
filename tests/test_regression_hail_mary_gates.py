@@ -51,7 +51,7 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 #     "try every plausible strategy", not "add a scheduler built to lose")
 # Special-cased inside _apply_hail_mary (not plain bool dests in the tuple):
 #   * elo (string value "all")
-#   * anneal_budget (int)
+#   * anneal_budget (int; deliberately left 0, see test below)
 #   * dirichlet_alpha (string value "learned")
 #   * minimize_every_execs (int, default 5000 under --hail-mary)
 # Default-on BooleanOptionalAction features are not additive opt-ins.
@@ -152,6 +152,8 @@ _EXCLUDED_OPT_IN = frozenset(
         # Mode switch (AFL -C), not a strategy: zeroes has_new_coverage on
         # every non-crashing round, so nothing is ever admitted.
         "crash_explore",
+        # Coverage-read implementation, not a strategy; slower on small maps.
+        "touched_scan",
     }
 )
 
@@ -202,12 +204,24 @@ def _opt_in_bool_dests_from_source() -> set[str]:
 
 
 def _close_paren(text: str, k: int) -> int:
-    """Index just past the ``)`` closing the call whose ``(`` precedes *k*."""
+    """Index just past the ``)`` closing the call whose ``(`` precedes *k*.
+
+    Skips string literals: help text like ``"in (0, 1]"`` is unbalanced and
+    shifted every later block.
+    """
     depth = 1
-    while k < len(text) and depth:
-        if text[k] == "(":
+    n = len(text)
+    while k < n and depth:
+        c = text[k]
+        if c in "\"'":
+            end = text.find(c, k + 1)
+            while end > 0 and text[end - 1] == "\\":
+                end = text.find(c, end + 1)
+            k = n if end < 0 else end + 1
+            continue
+        if c == "(":
             depth += 1
-        elif text[k] == ")":
+        elif c == ")":
             depth -= 1
         k += 1
     return k
@@ -258,14 +272,7 @@ class TestHailMaryWiresEveryOptInGate:
             j = section.find(needle, i)
             if j < 0:
                 break
-            k = j + len(needle)
-            depth = 1
-            while k < len(section) and depth:
-                if section[k] == "(":
-                    depth += 1
-                elif section[k] == ")":
-                    depth -= 1
-                k += 1
+            k = _close_paren(section, j + len(needle))
             block = section[j:k]
             i = k
             if "store_true" not in block and "BooleanOptionalAction" not in block:
@@ -302,7 +309,7 @@ class TestHailMaryWiresEveryOptInGate:
         for dest in commands._HAIL_MARY_FLAGS:
             assert getattr(args, dest) is True, f"--hail-mary left {dest!r} off"
         assert args.elo == "all"
-        assert args.anneal_budget == 10000
+        assert args.anneal_budget == 0
         assert args.minimize_every_execs == 5000
         # --hail-mary implies --elo all, which force-enables both --ga and
         # --qea (see the "QEA and GA now run simultaneously" comment in
@@ -346,3 +353,23 @@ def test_regression_hail_mary_explicit_crash_explore(monkeypatch):
     args = _hail_mary_args(monkeypatch, "--crash-explore")
 
     assert args.crash_explore is True
+
+
+def test_regression_hail_mary_anneal_budget(monkeypatch):
+    """--hail-mary must not arm Metropolis admission.
+
+    --elo all force-enables --metropolis; with a budget it admitted ~37% of
+    non-improving mutants (exp(-1/T), T near 1 early): 120 of 140 corpus
+    writes over 1.5k execs. fuzzgoat, 6 paired seeds: median 78 -> 134.5 edges.
+    """
+    args = _hail_mary_args(monkeypatch)
+
+    assert args.metropolis is True
+    assert args.anneal_budget == 0
+
+
+def test_regression_hail_mary_explicit_anneal_budget(monkeypatch):
+    """Adversarial: an explicit --anneal-budget still wins under --hail-mary."""
+    args = _hail_mary_args(monkeypatch, "--anneal-budget", "500")
+
+    assert args.anneal_budget == 500

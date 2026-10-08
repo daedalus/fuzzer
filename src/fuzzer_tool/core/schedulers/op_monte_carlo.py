@@ -623,8 +623,10 @@ class MonteCarloScheduler:
         - JS > 0.1: still shifting → halve the interval (down to 0.25x base)
         """
         self.execs_since_refit += 1
-        has_enough_elite = len(self.elite_set) >= 10
-        if self.execs_since_refit < self.refit_interval and not has_enough_elite:
+        # Enough elites only brings the *first* fit forward; refitting every
+        # call once the set filled made refit_interval dead (~13 s/3k execs).
+        early_first = not self.cem_fitted and len(self.elite_set) >= 10
+        if self.execs_since_refit < self.refit_interval and not early_first:
             return
         self.execs_since_refit = 0
         if not self.elite_set:
