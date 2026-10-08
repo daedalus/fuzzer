@@ -43,6 +43,7 @@ import logging
 from array import array
 from dataclasses import dataclass, field
 
+from fuzzer_tool.core.misra_gries import MisraGries
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import RunningMoments
 
@@ -795,7 +796,7 @@ class FormatLearner:
         self._last_signature: str | None = None
         # Raw-signature recurrence counts, for promotion — not full
         # clusters, just a cheap int per candidate signature.
-        self._signature_counts: dict[str, int] = {}
+        self._signature_counts = MisraGries(MAX_TRACKED_SIGNATURES)
         # Small buffer of (entry, input_bytes) per not-yet-promoted raw
         # signature, capped at promote_threshold — replayed into a fresh
         # dedicated cluster the moment that signature is promoted, so a
@@ -830,21 +831,14 @@ class FormatLearner:
     def _count_signature(self, sig: str) -> int:
         """Misra–Gries count of *sig*; 0 when overflow dropped it.
 
-        A full table decrements every counter instead of storing the
-        newcomer, so any signature above n/(K+1) of the stream survives
-        while birthday repeats of garbage prefixes rarely reach promotion.
+        Any signature above n/(K+1) of the stream survives, while birthday
+        repeats of garbage prefixes rarely reach promotion. Overflow drops
+        zeroed counters; their pending buffers go with them.
         """
-        counts = self._signature_counts
-        if sig in counts:
-            counts[sig] += 1
-            return counts[sig]
+        count = self._signature_counts.add(sig)
+        if count:
+            return count
 
-        if len(counts) < MAX_TRACKED_SIGNATURES:
-            counts[sig] = 1
-            return 1
-
-        # Overflow: decrement all, drop zeros and their buffers.
-        self._signature_counts = {k: c - 1 for k, c in counts.items() if c > 1}
         for k in [k for k in self._pending if k not in self._signature_counts]:
             del self._pending[k]
         return 0

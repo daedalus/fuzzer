@@ -79,7 +79,7 @@ def test_counts_match_reference():
     for p in prefixes:
         _observe(fl, p)
 
-    assert fl._signature_counts == _reference_mg(keys, K, fl.promote_threshold)
+    assert dict(fl._signature_counts.items()) == _reference_mg(keys, K, fl.promote_threshold)
 
 
 def test_heavy_hitter_promoted_under_flood():
