@@ -23,6 +23,7 @@ import json
 import logging
 import math
 from array import array
+from collections.abc import Callable
 
 import numpy as np
 
@@ -1027,25 +1028,36 @@ class BayesianEloTracker(RoundRecorderMixin):
 
     def select_strategy(self, strategies: list[str], temperature: float | None = None) -> str:
         """Select a strategy via Thompson sampling from its posterior."""
+        return self.strategy_sampler(strategies)()
+
+    def strategy_sampler(self, strategies: list[str]) -> Callable[[], str]:
+        """select_strategy with the posteriors read once: each call is one draw.
+
+        Valid until the next rating update; the position arena holds one per
+        round (posteriors only move at settle, after execution).
+        """
         if not strategies:
-            return ""
+            return lambda: ""
         if len(strategies) == 1:
-            return strategies[0]
+            only = strategies[0]
+            return lambda: only
 
         rated = [s for s in strategies if self._strategy_match_count.get(s, 0) >= self.min_matches]
         if not rated:
-            return strategies[0]
+            first = strategies[0]
+            return lambda: first
 
         # One standard-normal draw per arm, scaled: the same numpy stream as a
-        # gauss() per arm (loc + scale * z), at one call instead of ~28 (the
-        # position arena asks ~50 times per exec). argmax keeps max()'s
-        # first-wins tie order.
+        # gauss() per arm (loc + scale * z). argmax keeps max()'s first-wins
+        # tie order.
         mu = np.fromiter((self._strategy_mu.get(s, self.initial_mu) for s in rated), float)
-        var = np.fromiter(
-            (self._strategy_sigma_sq.get(s, self.initial_sigma**2) for s in rated), float
+        sd = np.sqrt(
+            np.fromiter(
+                (self._strategy_sigma_sq.get(s, self.initial_sigma**2) for s in rated), float
+            )
         )
-        draws = mu + np.sqrt(var) * self._rng.normal_array(len(rated))
-        return rated[int(np.argmax(draws))]
+        rng, n = self._rng, len(rated)
+        return lambda: rated[int(np.argmax(mu + sd * rng.normal_array(n)))]
 
     def get_ranking(self, crash: bool = False) -> list[tuple[str, float]]:
         """Return operators sorted by posterior mean (highest first).

@@ -673,7 +673,7 @@ def _rare_mask(hit=True):
 
 
 def _force(f, name):
-    f._elo.select_strategy = lambda keys: f"pos_{name}"
+    f._elo.strategy_sampler = lambda keys: lambda: f"pos_{name}"
 
 
 class TestKeyspace:
@@ -1032,7 +1032,7 @@ class TestSelect:
     def test_elo_is_offered_prefixed_keys(self):
         f, arena = _arena()
         seen = []
-        f._elo.select_strategy = lambda keys: seen.append(list(keys)) or keys[0]
+        f._elo.strategy_sampler = lambda keys: seen.append(list(keys)) or (lambda: keys[0])
         arena.select(SEED, len(SEED))
         assert seen[0][0] == "pos_uniform"
         assert all(k.startswith("pos_") for k in seen[0])
@@ -1087,7 +1087,7 @@ class TestSelect:
         def boom(keys):
             raise AssertionError("no arbitration for a one-arm pool")
 
-        f._elo.select_strategy = boom
+        f._elo.strategy_sampler = boom
         assert 0 <= arena.select(SEED, 10) < 10
 
 
@@ -2119,3 +2119,51 @@ def test_active_edge_count_is_per_execution_not_cumulative():
         assert shm.read_edge_count() == 5  # header keeps growing
     finally:
         shm.cleanup()
+
+
+class TestRoundCache:
+    """Pool and Elo sampler are built once per round, not once per position.
+
+    SLOPT applies one op 2^t times; each application re-evaluated every gate
+    and re-read every posterior (~13 s of 28 s position time per 3k
+    --hail-mary execs). Nothing in mutate() moves either.
+    """
+
+    def test_regression_pool_built_once_per_round(self):
+        f, arena = _arena()
+        calls = []
+        real = arena.pool
+        arena.pool = lambda: calls.append(1) or real()
+        arena.begin_round()
+        for _ in range(5):
+            arena.select(SEED, len(SEED))
+        assert len(calls) == 1
+
+    def test_new_round_rebuilds(self):
+        """Falsification: begin_round and settle drop the cached pool."""
+        f, arena = _arena()
+        calls = []
+        real = arena.pool
+        arena.pool = lambda: calls.append(1) or real()
+        arena.begin_round()
+        arena.select(SEED, len(SEED))
+        arena.settle(SEED, [], Outcome.MISS, weight=1.0, score=0.0)
+        arena.select(SEED, len(SEED))
+        arena.begin_round()
+        arena.select(SEED, len(SEED))
+        assert len(calls) == 3
+
+    def test_cached_round_draws_like_uncached(self):
+        """Same Elo stream and picks as building pool + posteriors per call."""
+        f1, cached = _arena(_Fuzzer(sensitivity=True, te=True, mi=True))
+        f2, fresh = _arena(_Fuzzer(sensitivity=True, te=True, mi=True))
+        for f in (f1, f2):
+            for s in ("pos_uniform", "pos_sensitivity", "pos_te", "pos_mi", "pos_phase"):
+                f._elo._strategy_match_count[s] = 5
+        cached.begin_round()
+        got = [cached.select(SEED, len(SEED)) for _ in range(50)]
+        want = []
+        for _ in range(50):
+            fresh.begin_round()
+            want.append(fresh.select(SEED, len(SEED)))
+        assert got == want

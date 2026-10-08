@@ -33,6 +33,8 @@ import hashlib
 import math
 from functools import lru_cache
 
+import numpy as np
+
 from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
 
 
@@ -104,6 +106,34 @@ class PerlinNoise1D:
 
         t = _smootherstep(frac)
         return _lerp(d0, d1, t)
+
+    def field_array(self, xs: np.ndarray) -> np.ndarray:
+        """``__call__`` over an array: same float operations, same order."""
+        node0 = np.floor(xs)
+        frac = xs - node0
+        nodes = node0.astype(np.int64)
+        # Few distinct lattice nodes per buffer: hash each once.
+        uniq, inv = np.unique(nodes, return_inverse=True)
+        g0 = np.fromiter((self._gradient(int(v)) for v in uniq), float, len(uniq))[inv]
+        g1 = np.fromiter((self._gradient(int(v) + 1) for v in uniq), float, len(uniq))[inv]
+        d0 = g0 * frac
+        d1 = g1 * (frac - 1.0)
+        t = frac * frac * frac * (frac * (frac * 6 - 15) + 10)
+        return d0 + t * (d1 - d0)
+
+    def octaves_array(self, xs, n_octaves: int = 4, persistence: float = 0.5) -> np.ndarray:
+        """``octaves`` over an array of points (bit-identical per point)."""
+        xs = np.asarray(xs, dtype=np.float64)
+        total = np.zeros_like(xs)
+        amplitude = 1.0
+        frequency = 1.0
+        max_amplitude = 0.0
+        for _ in range(max(1, n_octaves)):
+            total = total + self.field_array(xs * frequency) * amplitude
+            max_amplitude += amplitude
+            amplitude *= persistence
+            frequency *= 2.0
+        return total / max_amplitude if max_amplitude else np.zeros_like(xs)
 
     def octaves(self, x: float, n_octaves: int = 4, persistence: float = 0.5) -> float:
         """Fractal Brownian motion: sum of *n_octaves* doubling-frequency layers.
@@ -213,7 +243,6 @@ class PerlinNoiseMutator(MutatorBase):
             return None
 
         noise = self._noise_for(data, rng)
-        out = bytearray(data)
         octaves = self.octaves
         scale = self.scale
         strength = self.strength
@@ -224,14 +253,12 @@ class PerlinNoiseMutator(MutatorBase):
         # while keeping the underlying field replayable.
         phase = rng.randint(0, 1 << 20)
 
-        for i in range(n):
-            x = (i + phase) / scale
-            v = noise.octaves(x, n_octaves=octaves) if octaves > 1 else noise(x)
-            delta = int(round(v * strength))
-            if delta:
-                out[i] = (out[i] + delta) & 0xFF
-
-        result = bytes(out)
+        # Whole buffer at once; np.rint is round-half-even like round().
+        # One octave reduces to noise(x) exactly (v * 1.0 / 1.0).
+        xs = (np.arange(n) + phase) / scale
+        delta = np.rint(noise.octaves_array(xs, n_octaves=octaves) * strength).astype(np.int64)
+        shifted = (np.frombuffer(bytes(data), dtype=np.uint8).astype(np.int64) + delta) & 0xFF
+        result = shifted.astype(np.uint8).tobytes()
         if max_len and len(result) > max_len:
             result = result[:max_len]
         return result

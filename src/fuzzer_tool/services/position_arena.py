@@ -285,6 +285,7 @@ class PositionArena:
             self._arms[extra.name] = (extra, lambda: True)
         self._used: list[str] = []
         self._seen_pool: list[str] = []
+        self._round: Callable[[], str] | None = None
 
     def allows(self, name: str) -> bool:
         """Whether *name* may join the pool under ``arms`` (uniform always may)."""
@@ -357,6 +358,7 @@ class PositionArena:
         outcome of the one that actually ran. ``settle`` still clears too.
         """
         self._used, self._seen_pool = [], []
+        self._round = None
 
     def used(self) -> list[str]:
         """Arms that served a position this round, in order."""
@@ -368,9 +370,7 @@ class PositionArena:
         The arm stays charged for the round even when it declines (see the
         module docstring): a decline is the arm's choice, not uniform's.
         """
-        pool = self.pool()
-        self._seen_pool.extend(n for n in pool if n not in self._seen_pool)
-        name = self._arbitrate(pool)
+        name = self._round_pick()()
 
         pos = self._arms[name][0].propose(data, buf_len)
         if pos is None:
@@ -379,12 +379,25 @@ class PositionArena:
         self._used.append(name)
         return min(max(pos, 0), buf_len - 1)
 
-    def _arbitrate(self, pool: list[str]) -> str:
-        if len(pool) == 1:
-            return pool[0]
+    def _round_pick(self) -> Callable[[], str]:
+        """This round's arm picker: gates and posteriors read once.
 
-        picked = self._f._elo.select_strategy([POS_STRATEGY_PREFIX + n for n in pool])
-        return picked.removeprefix(POS_STRATEGY_PREFIX)
+        Neither moves inside mutate() (gates read tracker state, posteriors
+        move at settle), so SLOPT's 2^t applications of one op reuse it;
+        rebuilding per position was ~13 s per 3k --hail-mary execs.
+        """
+        if self._round is not None:
+            return self._round
+        pool = self.pool()
+        self._seen_pool.extend(n for n in pool if n not in self._seen_pool)
+        if len(pool) == 1:
+            only = pool[0]
+            self._round = lambda: only
+            return self._round
+
+        sample = self._f._elo.strategy_sampler([POS_STRATEGY_PREFIX + n for n in pool])
+        self._round = lambda: sample().removeprefix(POS_STRATEGY_PREFIX)
+        return self._round
 
     def settle(
         self,
@@ -403,6 +416,7 @@ class PositionArena:
         served = list(dict.fromkeys(self._used))
         pool = self._seen_pool
         self._used, self._seen_pool = [], []
+        self._round = None
 
         elo = getattr(self._f, "_elo", None)
         if not (getattr(self._f, "_use_elo", False) and elo):

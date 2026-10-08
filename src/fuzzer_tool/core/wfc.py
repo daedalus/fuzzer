@@ -233,6 +233,9 @@ class WaveGrid:
                 for d, dname in enumerate(self._dir_names):
                     mat[i, j, d] = adjacency.compatible(t_i.name, t_j.name, dname)
         self._adj_matrix = mat
+        # Contiguous per-direction slices: mat[:, :, d] is strided, which
+        # slows the matmul in _prune_cell (the AC-3 inner loop).
+        self._adj_by_dir = [np.ascontiguousarray(mat[:, :, d]) for d in range(4)]
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -284,6 +287,16 @@ class WaveGrid:
                 break
 
         return self._to_grid()
+
+    def clear(self) -> None:
+        """Open every cell again, so one grid serves many runs.
+
+        A fresh WaveGrid rebuilds the n_tiles^2 adjacency matrix; callers
+        that collapse many waves over one alphabet (a BMP row each) clear
+        and re-run instead. run(seed) reseeds, so output is unchanged.
+        """
+        self.superpositions[:, :] = True
+        self.contradiction = False
 
     def to_1d(self) -> list[bytes | None]:
         """Return 1D output for height=1 grid."""
@@ -455,13 +468,13 @@ class WaveGrid:
 
         if self._adj_matrix is not None:
             for nidx in self._neighbors(idx):
-                d = self._dir_names.index(self._direction_to(idx, nidx))
+                d = self._dir_index(idx, nidx)
                 nbr_row = self.superpositions[nidx]
                 # compat[t] = any of tile t's compatible neighbors still possible?
                 # Use matmul instead of elementwise AND + any(axis=1): ~2-4x faster
                 # for typical tile alphabets because it avoids the n_tiles×n_tiles
                 # temporary and lets numpy use optimized matrix-vector paths.
-                compat = (self._adj_matrix[:, :, d] @ nbr_row) > 0
+                compat = (self._adj_by_dir[d] @ nbr_row) > 0
                 removed = ~compat & row
                 if removed.any():
                     row[removed] = False
@@ -527,6 +540,12 @@ class WaveGrid:
         if y < self.h - 1:
             result.append(idx + self.w)
         return result
+
+    def _dir_index(self, from_idx: int, to_idx: int) -> int:
+        """``_dir_names.index(_direction_to(...))`` without the string round-trip."""
+        if from_idx // self.w != to_idx // self.w:
+            return 3 if to_idx > from_idx else 2
+        return 1 if to_idx > from_idx else 0
 
     def _direction_to(self, from_idx: int, to_idx: int) -> Direction:
         """Direction from *from_idx* to *to_idx*.

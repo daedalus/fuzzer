@@ -81,12 +81,16 @@ class PositionCanaryScheduler:
         post = self._posterior_for(data)
         num_bins = max(1, -(-len(data) // post.width)) if data else 1
 
-        worst_bin = 0
-        worst_mean = self._mean(post, 0)
-        for b in range(1, num_bins):
-            mean = self._mean(post, b)
-            if mean < worst_mean:
-                worst_bin, worst_mean = b, mean
+        # Unobserved bins all sit at the prior mean, so only observed bins and
+        # the first unobserved one can be the minimum; (mean, bin) keeps the
+        # full scan's lowest-index tie-break. Scanning every bin per call was
+        # 4M _mean calls per 3k --hail-mary execs.
+        observed = {b for b in (*post.alpha, *post.beta) if 0 <= b < num_bins}
+        candidates = [(self._mean(post, b), b) for b in observed]
+        if len(observed) < num_bins:
+            free = next(b for b in range(num_bins) if b not in observed)
+            candidates.append((self._mean(post, free), free))
+        worst_bin = min(candidates)[1]
 
         last = buf_len - 1
         return min(worst_bin * post.width, last)

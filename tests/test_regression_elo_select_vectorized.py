@@ -63,3 +63,20 @@ def test_no_rated_arm_returns_first():
     before = RandPool(1).random()
     assert t.select_strategy(["a", "b"]) == "a"
     assert t._rng.random() == before
+
+
+def test_sampler_matches_repeated_select():
+    """A sampler built once draws exactly what per-call select_strategy draws."""
+    a, b = _tracker(7), _tracker(7)
+    sample = a.strategy_sampler(ARMS)
+    assert [sample() for _ in range(CALLS)] == [b.select_strategy(ARMS) for _ in range(CALLS)]
+    assert a._rng.random() == b._rng.random()
+
+
+def test_sampler_edge_cases_draw_nothing():
+    """Adversarial: empty, single, and all-unrated lists consume no randomness."""
+    t = BayesianEloTracker(rng=RandPool(2))
+    assert t.strategy_sampler([])() == ""
+    assert t.strategy_sampler(["only"])() == "only"
+    assert t.strategy_sampler(["a", "b"])() == "a"
+    assert t._rng.random() == RandPool(2).random()
