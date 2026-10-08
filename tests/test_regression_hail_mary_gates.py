@@ -154,6 +154,10 @@ _EXCLUDED_OPT_IN = frozenset(
         "crash_explore",
         # Coverage-read implementation, not a strategy; slower on small maps.
         "touched_scan",
+        # Stop condition: ended the campaign at the first crash.
+        "continue_until_crash",
+        # Input delivery: -F hides the input from stdin-only targets.
+        "file_mode",
     }
 )
 
@@ -373,3 +377,41 @@ def test_regression_hail_mary_explicit_anneal_budget(monkeypatch):
     args = _hail_mary_args(monkeypatch, "--anneal-budget", "500")
 
     assert args.anneal_budget == 500
+
+
+def test_regression_hail_mary_runs_past_first_crash(monkeypatch):
+    """--hail-mary must not end the campaign at the first crash.
+
+    --continue-until-crash is a stop condition, not a strategy: a fuzzgoat
+    --hail-mary run with --max-execs 1200 stopped at 473 on its first crash.
+    """
+    args = _hail_mary_args(monkeypatch)
+
+    assert args.continue_until_crash is False
+    assert "continue_until_crash" in _EXCLUDED_OPT_IN
+
+
+def test_regression_hail_mary_explicit_continue_until_crash(monkeypatch):
+    """Adversarial: an explicit --continue-until-crash still wins under --hail-mary."""
+    args = _hail_mary_args(monkeypatch, "--continue-until-crash")
+
+    assert args.continue_until_crash is True
+
+
+def test_regression_hail_mary_keeps_stdin_delivery(monkeypatch):
+    """--hail-mary must not switch input delivery to a file argument.
+
+    -F passes the input as argv[1] and leaves stdin inherited: a stdin-only
+    target never saw a mutant (edges stuck at the calibration count).
+    """
+    args = _hail_mary_args(monkeypatch)
+
+    assert args.file_mode is False
+    assert "file_mode" in _EXCLUDED_OPT_IN
+
+
+def test_regression_hail_mary_explicit_file_mode(monkeypatch):
+    """Adversarial: an explicit -F still wins under --hail-mary."""
+    args = _hail_mary_args(monkeypatch, "-F")
+
+    assert args.file_mode is True

@@ -57,6 +57,15 @@ class ByteSensitivityTracker:
         self._cum_cache_limit = 500
         self._rng = rng or get_default_rand_pool()
 
+    def analyzed(self, seed: bytes) -> bool:
+        """True once analyze_seed has scored *seed* (and not evicted it)."""
+        return bytes(seed[:64]) in self._analyzed
+
+    def cost(self, seed: bytes) -> int:
+        """Executions analyze_seed spends on *seed* (sampled positions)."""
+        n = min(len(seed), self.max_bytes)
+        return min(max(1, int(n * self.sample_rate)), n)
+
     def analyze_seed(
         self,
         seed: bytes,
@@ -82,8 +91,7 @@ class ByteSensitivityTracker:
         if n == 0:
             return []
 
-        sample_size = max(1, int(n * self.sample_rate))
-        positions = self._rng.sample(range(n), min(sample_size, n))
+        positions = self._rng.sample(range(n), self.cost(seed))
 
         scores = [0.0] * n
         for pos in positions:

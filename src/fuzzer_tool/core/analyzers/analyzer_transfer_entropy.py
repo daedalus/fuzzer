@@ -25,7 +25,7 @@ Provides:
 
 import math
 import random
-from collections import defaultdict
+from collections import Counter, defaultdict
 
 try:
     import numpy as np
@@ -72,27 +72,20 @@ class TransferEntropy:
         target: list[int],
     ) -> tuple[dict, dict, int, int]:
         """Build the joint-count distributions used by transfer_entropy."""
-        n = min(len(source), len(target))
+        y_future, y_hist = self._target_keys(target, min(len(source), len(target)))
+        joint_target = Counter(zip(y_future, y_hist, strict=True))
+        joint_both = self._joint_both(y_future, y_hist, source)
+        return joint_target, joint_both, len(y_future), len(y_future)
 
-        # P(Y_{t+1}, Y_t^{(k)}) — target alone
-        joint_target: dict = defaultdict(int)
-        # P(Y_{t+1}, Y_t^{(k)}, X_t) — with source
-        joint_both: dict = defaultdict(int)
-        count_target = 0
-        count_both = 0
+    def _target_keys(self, target: list[int], n: int) -> tuple[list[int], list[tuple]]:
+        """(Y_{t+1}, Y_t^{(k)}) for t in [k, n-1): fixed across surrogates."""
+        k = self.k
+        return target[k + 1 : n], [tuple(target[t - k + 1 : t + 1]) for t in range(k, n - 1)]
 
-        for t in range(self.k, n - 1):
-            y_future = target[t + 1]
-            y_hist = tuple(target[t - self.k + 1 : t + 1])
-            x_present = source[t]
-
-            joint_target[(y_future, y_hist)] += 1
-            count_target += 1
-
-            joint_both[(y_future, y_hist, x_present)] += 1
-            count_both += 1
-
-        return joint_target, joint_both, count_target, count_both
+    def _joint_both(self, y_future: list[int], y_hist: list[tuple], source: list[int]) -> Counter:
+        """(Y_{t+1}, Y_t^{(k)}, X_t) counts; keys and order as the old loop."""
+        x_present = source[self.k : self.k + len(y_future)]
+        return Counter(zip(y_future, y_hist, x_present, strict=True))
 
     def transfer_entropy(
         self,
@@ -175,11 +168,14 @@ class TransferEntropy:
         seed = (hash(tuple(source[:64])) ^ hash(tuple(target[:64])) ^ n) & 0xFFFFFFFF
         rng = random.Random(seed)
         shuffled = list(source)
+        y_future, y_hist = self._target_keys(target, n)
         bias_sum = 0.0
         surrogates_used = 0
         for _ in range(n_surrogates):
             rng.shuffle(shuffled)
-            _, joint_both_s, _, count_both_s = self._build_joints(shuffled, target)
+            # Only the source moves: the target keys are built once.
+            joint_both_s = self._joint_both(y_future, y_hist, shuffled)
+            count_both_s = len(y_future)
             if count_both_s == 0:
                 continue
             h_both_s = self._conditional_entropy_both(joint_both_s, count_both_s)

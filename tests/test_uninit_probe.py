@@ -202,7 +202,6 @@ def test_admitted_input_is_probed(monkeypatch):
     r = FuzzRound(f, b"seed")
     r._mutated = b"new"
     monkeypatch.setattr(FuzzRound, "_feed_population", lambda self: None)
-    monkeypatch.setattr(FuzzRound, "_analyze_sensitivity", lambda self: None)
     r._admit()
     f._uninit_probe.check.assert_called_once_with(b"new")
 
@@ -216,7 +215,6 @@ def test_admit_without_probe(monkeypatch):
     r = FuzzRound(f, b"seed")
     r._mutated = b"new"
     monkeypatch.setattr(FuzzRound, "_feed_population", lambda self: None)
-    monkeypatch.setattr(FuzzRound, "_analyze_sensitivity", lambda self: None)
     assert r._admit()
 
 
