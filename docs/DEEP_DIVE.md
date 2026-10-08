@@ -1811,3 +1811,8 @@ MIT
 - `--swap-walk`: m>2 byte swaps (`_op_swap_bytes`) draw from `TupleWalk` (`core/tuple_walk.py`): affine walk `(start + step*k) mod total` over all ordered tuples, each visited once per period, O(1) state per (n, m), 256 shapes max. Off by default; yield unmeasured.
 - `--colorize-mode {bisect,pooled}`: `pooled` runs fixed random pools (p=1/4) and marks bytes in any path-preserving pool dead (`group_testing.comp`), then verifies the union once. Sound, may under-taint; loses to bisect when many bytes are live. Default `bisect`.
 - `tools/sweep_qea_grover_angle.py --screen {c,grover}`: Plackett-Burman main effects (`tools/lib/factorial_design.py`) instead of the grid.
+
+### Revizor ports: input boosting, priming check (2026-10-08)
+
+- `taint_boost` op (adaptive band, `services/operators.py`): redraws a seed's colorization taints (path-irrelevant bytes) per `type_replace_byte` class, keeps the rest (`colorization.boost`, vectorized; Revizor `generate_boosted`). Siblings should keep the seed's path while data along it changes, which sanitizers catch without new edges. Offered only when `--colorize` has cached taints for the seed; never executes.
+- `--priming-check` (implies `--confirm-novelty`): after a mutant reports new ids, run the unchanged parent, then rerun the mutant. New ids the parent also hits came from leftover state, not the mutant's bytes, and are withdrawn like phantoms (`novelty_confirm.confirm(primer_ids=)`; Revizor `_priming_check`). One extra execution per new-id event; summary prints `primed ids rejected`. Off by default; unmeasured.

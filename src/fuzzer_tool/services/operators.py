@@ -4629,6 +4629,20 @@ class OperatorEngine:
                         chunk.data = bytes(rng.randint(0, 255) for _ in range(rng.randint(1, 32)))
                     return bytearray(serialize_png_chunks(chunks)[: self.ctx.max_len])
 
+    def _op_taint_boost(self, buf, _byte_idx, data):
+        """Revizor boosting: redraw the seed's path-irrelevant bytes.
+
+        The sibling should take the seed's path; what changes is the data
+        flowing along it (indices, lengths, values), which is what a
+        sanitizer catches without new edges. See ``colorization.boost``.
+        """
+        taints = self.f._cached_taints(data)
+        if not (buf and taints):
+            return
+        from fuzzer_tool.core.colorization import boost  # noqa: PLC0415
+
+        buf[:] = boost(bytes(buf), taints, self.ctx._rng)
+
     def _op_redqueen(self, buf, _byte_idx, data):
         rng = self.ctx._rng
         parent_meta = self.ctx.seed_meta.get(data)

@@ -655,6 +655,8 @@ class StatsReporter:
             f"  Novelty confirm:   {st['reruns']} reruns, {st['withdrawn']} successes "
             f"withdrawn, {st['phantom_ids']} phantom ids rejected"
         )
+        if getattr(f, "_priming_check", False):
+            print(f"  Priming check:     {f._primed_ids} primed ids rejected")
 
     def _print_lineage_shape(self, f) -> None:
         """Print the lineage topology fingerprint (corridor-heavy = newest-like).

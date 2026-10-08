@@ -18,6 +18,7 @@ diverse comparison values.
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
+from functools import cache
 
 import numpy as np
 
@@ -256,6 +257,76 @@ def colorize(
         original_checksum=original_checksum,
         exec_count=exec_count,
     )
+
+
+@cache
+def _class_tables() -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per-byte ``type_replace_byte`` behaviour as lookup tables.
+
+    ``start``/``size`` describe the byte's class (size 0 = no draw);
+    ``fixed`` is the deterministic replacement for swap-map and classless
+    bytes. Lazy: ``core.mutations`` is imported lazily here as in ``colorize``.
+    """
+    from fuzzer_tool.core.mutations import type_replace_byte
+    from fuzzer_tool.core.mutations.generic import _SWAP_MAP, _in_class
+
+    start = np.zeros(256, dtype=np.int32)
+    size = np.zeros(256, dtype=np.int32)
+    fixed = np.zeros(256, dtype=np.uint8)
+    for b in range(256):
+        cls = None if b in _SWAP_MAP else _in_class(b)
+        if cls is None:
+            fixed[b] = type_replace_byte(b, None)
+            continue
+        start[b], size[b] = cls[0], cls[1] - cls[0]
+    return start, size, fixed
+
+
+def _taint_index(length: int, taints) -> np.ndarray:
+    """Sorted unique byte offsets covered by *taints*, clipped to *length*."""
+    mask = np.zeros(length, dtype=bool)
+    for t in taints:
+        mask[max(t.start, 0) : min(t.end, length - 1) + 1] = True
+    return np.flatnonzero(mask)
+
+
+def boost(data: bytes, taints, rng: RandPool) -> bytes:
+    """Path-equivalent sibling of *data* (Revizor input boosting).
+
+    Redraws every byte inside *taints* from its ``type_replace_byte`` class
+    -- the replacement colorization proved path-preserving -- and keeps the
+    rest. Revizor keeps the bytes the trace depends on and randomizes the
+    others; colorization's taints are exactly those others.
+
+    Vectorized per-byte ``type_replace_byte``: a class byte ``b`` becomes
+    ``start + (b - start + 1 + u) mod (size + 1)``, ``u`` uniform on
+    ``[0, size)``, i.e. uniform over the class minus ``b`` (as in
+    ``_diverse_copy``). ``u`` is a 16-bit multiply-shift draw, so its bias
+    is at most ``size / 2**16``.
+
+        data  : F U Z Z _ a b c        taints = [4..7]
+        boost : F U Z Z \\t d f a       (header kept, tail redrawn per class)
+    """
+    idx = _taint_index(len(data), taints)
+    if idx.size == 0:
+        return bytes(data)
+
+    start, size, fixed = _class_tables()
+    out = np.frombuffer(data, dtype=np.uint8).copy()
+    vals = out[idx].astype(np.int32)
+
+    # Classless/swap bytes: deterministic, no draw.
+    out[idx] = fixed[vals]
+
+    # Class bytes: one 16-bit draw each, shifted off the original value.
+    drawn = np.flatnonzero(size[vals] > 0)
+    if drawn.size:
+        b, lo, sz = vals[drawn], start[vals[drawn]], size[vals[drawn]]
+        r = np.frombuffer(rng.randbytes(2 * drawn.size), dtype="<u2").astype(np.int32)
+        u = (r * sz) >> 16
+        out[idx[drawn]] = lo + (b - lo + 1 + u) % (sz + 1)
+
+    return out.tobytes()
 
 
 def _merge_ranges(ranges: list[list[int]]) -> list[TaintRegion]:

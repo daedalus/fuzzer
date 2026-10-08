@@ -278,6 +278,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "markov_bytes",
         "cem_bytes",
         "colorization",
+        "taint_boost",
         "skipdet_probe",
         "afl_det",
         "auto_extras",
@@ -315,6 +316,13 @@ def _has_branch_records(fuzzer, _data) -> bool:
     if not (cmplog and getattr(cmplog, "_pair_cmp", None)):
         return False
     return getattr(fuzzer, "_path_solver", None) is not None
+
+
+def _has_color_taints(fuzzer, data) -> bool:
+    """--colorize already proved some of this seed's bytes path-irrelevant."""
+    if not isinstance(getattr(fuzzer, "_colorize_taint_cache", None), dict):
+        return False
+    return bool(fuzzer._cached_taints(data))
 
 
 def _redqueen_available(fuzzer, data) -> bool:
@@ -760,6 +768,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "path_negate": _has_branch_records,
     # per-input ops
     "redqueen": _redqueen_available,
+    # Revizor boosting: needs this seed's colorization taints (cached only).
+    "taint_boost": _has_color_taints,
     # regularity op that measures the corpus rather than the seed
     "invariant_break": _has_corpus_samples,
     # learned checksum model (gated on a recovered GF(2) polynomial OR a

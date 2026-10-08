@@ -33,6 +33,7 @@ def confirm(
     old_bucket_novel: bool,
     edge_ids: Collection[int],
     rerun_ids: Collection[int],
+    primer_ids: Collection[int] = (),
 ) -> Confirmation:
     """Confirm one execution's novelty against one rerun.
 
@@ -43,9 +44,15 @@ def confirm(
     bucket event on an already-seen edge does not depend on a new id, which is
     why a phantom beside it must not withdraw it. With no new id the verdict is
     left as reported.
+
+    ``primer_ids`` (Revizor's priming check) are the ids of the unchanged
+    parent run right after the input. A new id the parent also hits came
+    from state the input left behind, not from its bytes: never seen before,
+    yet reached by bytes that never reached it. It is withdrawn like a phantom.
     """
     original = frozenset(edge_ids)
-    reproduced = original & frozenset(rerun_ids)
+    primed = new_ids & frozenset(primer_ids)
+    reproduced = (original & frozenset(rerun_ids)) - primed
     # No new id at all means the cause is not an id, so there is nothing to withdraw.
     still_new = has_new and (bool(new_ids & reproduced) or old_bucket_novel or not new_ids)
     return Confirmation(reproduced, original - reproduced, still_new)

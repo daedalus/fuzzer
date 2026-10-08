@@ -258,5 +258,8 @@ def make_minimal_fuzzer(seed=None, pool=None):
                 self_._rng = RandPool(seed)
             self_._dict_scratch = []
             self_._dict_scratch_idx = 0
+            # Mirrors Fuzzer._cached_taints: taint_boost reads it; empty = never offered.
+            self_._colorize_taint_cache = {}
+            self_._cached_taints = lambda d: self_._colorize_taint_cache.get(hash(bytes(d)))
 
     return MinimalFuzzer()

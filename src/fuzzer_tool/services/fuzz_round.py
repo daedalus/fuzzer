@@ -770,6 +770,7 @@ class FuzzRound:
             has_new_coverage,
             f._current_edges_cache,
             skip=self._is_crash or self._is_timeout,
+            primer=self._data,
         )
 
     def _poll_multi(self) -> bool:

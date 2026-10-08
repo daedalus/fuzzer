@@ -679,6 +679,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         f._cmplog = pool
 
         self._gate_redqueen(f)
+        self._gate_taint_boost(f)
 
         # --- grammar band --------------------------------------------------
         from fuzzer_tool.core.grammar import Grammar
@@ -797,6 +798,15 @@ class TestStateGatedOperatorsAreNotNoOps:
                 if inp.find(a) != -1
             ]
             f.seed_meta[inp] = {"redqueen_matches": matches, "redqueen_offsets": [0, 4]}
+
+    @staticmethod
+    def _gate_taint_boost(f: Fuzzer) -> None:
+        """Cache whole-input colorization taints so taint_boost has bytes to redraw."""
+        from fuzzer_tool.core.colorization import TaintRegion
+
+        for inp in _battery():
+            if inp:
+                f._colorize_taint_cache[hash(inp)] = [TaintRegion(0, len(inp) - 1)]
 
     @staticmethod
     def _gate_invariants(f: Fuzzer) -> None:

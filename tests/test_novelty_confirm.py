@@ -460,3 +460,146 @@ class TestHelp:
         )
         assert out.returncode == 0, out.stderr[-300:]
         assert "--confirm-novelty" in out.stdout
+
+
+class TestPrimingPureFunction:
+    """Revizor priming check: a new id the unchanged parent also hits is history, not input."""
+
+    def test_new_id_the_primer_reproduces_is_withdrawn(self):
+        c = confirm(True, frozenset({9}), False, {1, 9}, {1, 9}, primer_ids={1, 9})
+        assert c.has_new is False
+        assert c.phantoms == {9} and c.edge_ids == {1}
+
+    def test_old_ids_shared_with_the_primer_are_kept(self):
+        # The parent shares most edges with its mutant: only *new* ids are suspect.
+        c = confirm(True, frozenset({9}), False, {1, 2, 9}, {1, 2, 9}, primer_ids={1, 2})
+        assert c.has_new is True and c.edge_ids == {1, 2, 9}
+
+    def test_empty_primer_is_the_plain_confirmation(self):
+        args = (True, frozenset({8, 9}), False, {1, 8, 9}, {1, 8})
+        assert confirm(*args, primer_ids=()) == confirm(*args)
+
+    def test_bucket_novelty_survives_a_primed_id(self):
+        c = confirm(True, frozenset({9}), True, {1, 9}, {1, 9}, primer_ids={9})
+        assert c.has_new is True and c.phantoms == {9}
+
+    @pytest.mark.parametrize(
+        "orig,rerun,new,primer",
+        [({1, 2, 3}, {1, 2, 3}, {3}, {3, 4}), ({5}, {5}, {5}, set()), ({1, 2}, {2}, {1, 2}, {2})],
+    )
+    def test_partition_invariants_hold_with_a_primer(self, orig, rerun, new, primer):
+        c = confirm(True, frozenset(new), False, orig, rerun, primer_ids=primer)
+        assert c.edge_ids | c.phantoms == frozenset(orig)
+        assert c.edge_ids.isdisjoint(c.phantoms)
+        assert c.edge_ids.isdisjoint(frozenset(new) & frozenset(primer))
+
+
+class TestPrimingGate:
+    # _FakeShm runs: [original, primer-after-mutant, mutant rerun].
+
+    def test_off_by_default_runs_no_primer(self):
+        shm = _FakeShm([{1, 9}, {1, 9}], new={9})
+        f = _wired(shm, confirm_novelty=True)
+        assert f._confirm_new_coverage(b"x", shm, True, {1, 9}, primer=b"p") == (True, {1, 9})
+        assert shm.reruns == 1
+
+    def test_history_driven_novelty_is_withdrawn(self):
+        shm = _FakeShm([{1, 9}, {1, 9}, {1, 9}], new={9})
+        f = _wired(shm, priming_check=True)
+        assert f._confirm_new_coverage(b"x", shm, True, {1, 9}, primer=b"p") == (False, {1})
+        assert shm.rejected == {9} and shm.reruns == 2
+        assert f._primed_ids == 1
+
+    def test_input_driven_novelty_survives(self):
+        shm = _FakeShm([{1, 9}, {1}, {1, 9}], new={9})
+        f = _wired(shm, priming_check=True)
+        assert f._confirm_new_coverage(b"x", shm, True, {1, 9}, primer=b"p") == (True, {1, 9})
+        assert f._primed_ids == 0
+
+    def test_primer_runs_before_the_rerun(self):
+        # Callers read counts/path hash from the shm after confirmation: the
+        # last run must be the mutant's, not the parent's.
+        order = []
+        shm = _FakeShm([{1, 9}, {1}, {1, 9}], new={9})
+        f = _wired(shm, priming_check=True)
+        f._run_target = lambda data: (order.append(data), shm.advance(), (0, ""))[2]
+        f._confirm_new_coverage(b"x", shm, True, {1, 9}, primer=b"p")
+        assert order == [b"p", b"x"]
+
+    def test_priming_check_implies_confirmation(self):
+        assert _fuzzer(priming_check=True)._confirm_novelty is True
+
+
+class TestPrimingAdversarial:
+    def test_primer_identical_to_input_is_not_run(self):
+        # X after X is the plain rerun; running it twice proves nothing more.
+        shm = _FakeShm([{1, 9}, {1, 9}], new={9})
+        f = _wired(shm, priming_check=True)
+        assert f._confirm_new_coverage(b"x", shm, True, {1, 9}, primer=b"x") == (True, {1, 9})
+        assert shm.reruns == 1
+
+    def test_missing_primer_is_the_plain_confirmation(self):
+        shm = _FakeShm([{1, 9}, {1, 9}], new={9})
+        f = _wired(shm, priming_check=True)
+        assert f._confirm_new_coverage(b"x", shm, True, {1, 9}) == (True, {1, 9})
+        assert shm.reruns == 1
+
+    def test_primer_that_raises_withdraws_nothing(self):
+        shm = _FakeShm([{1, 9}, {1, 9}], new={9})
+        f = _wired(shm, priming_check=True)
+
+        def run(data):
+            if data == b"p":
+                raise OSError("cannot spawn")
+            shm.advance()
+            return 0, ""
+
+        f._run_target = run
+        assert f._confirm_new_coverage(b"x", shm, True, {1, 9}, primer=b"p") == (True, {1, 9})
+
+    def test_bucket_only_novelty_skips_the_primer(self):
+        # No new id: nothing the primer could withdraw, so it costs nothing.
+        shm = _FakeShm([{1}, {1}], new=(), old_bucket=True)
+        f = _wired(shm, priming_check=True)
+        assert f._confirm_new_coverage(b"x", shm, True, {1}, primer=b"p") == (True, {1})
+        assert shm.reruns == 1
+
+
+class TestPrimingWiring:
+    def test_fuzz_round_passes_the_parent_as_primer(self):
+        import ast
+        import inspect
+
+        from fuzzer_tool.services import fuzz_round
+
+        tree = ast.parse(inspect.getsource(fuzz_round))
+        calls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and getattr(n.func, "attr", None) == "_confirm_new_coverage"
+        ]
+        assert calls and all("primer" in {k.arg for k in c.keywords} for c in calls)
+
+    def test_cli_declares_and_passes_flag(self):
+        import ast
+        import inspect
+
+        from fuzzer_tool.cli import commands
+        from tests.test_regression_cli_fuzzer_kwargs import _fuzz_parser_dests
+
+        assert "priming_check" in _fuzz_parser_dests(ast.parse(inspect.getsource(commands)))
+        assert "priming_check=" in inspect.getsource(commands.cmd_fuzz)
+
+    def test_summary_reports_primed_ids(self, capsys):
+        from types import SimpleNamespace
+
+        from fuzzer_tool.services.stats import StatsReporter
+
+        f = SimpleNamespace(
+            _confirm_novelty=True,
+            _priming_check=True,
+            _primed_ids=3,
+            _confirm_stats={"reruns": 4, "withdrawn": 1, "phantom_ids": 2},
+        )
+        StatsReporter.__new__(StatsReporter)._print_summary_confirm(f)
+        assert "3 primed ids rejected" in capsys.readouterr().out
