@@ -2359,6 +2359,8 @@ class Fuzzer:
         # Close any store a previous Fuzzer left open: compaction needs the archive idle.
         seed_zip.configure(self.corpus_dir, ZipMode.OFF)
         seed_zip.compact_over(self.corpus_dir, zip_compact_ratio)
+        if zip_seed_corpus:  # zip mode off never writes the archive
+            seed_zip.uproot(self.corpus_dir)
         seed_zip.configure(self.corpus_dir, ZipMode.ON if zip_seed_corpus else ZipMode.OFF)
 
         # Single-file state store (replaces per-component JSON files).

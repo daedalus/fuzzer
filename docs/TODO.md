@@ -107,6 +107,7 @@
 - [ ] **`FractalVoronoiMutator._boundary_cache` / `_root_hash_cache` are unbounded** (2026-09-25) — only `_plan_cache` is capped (now LRU, `core/lru.py`); the other two grow with every distinct cell/root across input lengths. Bound them with `LRUCache` (Hard Rule 54).
 
 ## Corpus
+- [ ] **`seed_zip.uproot` follow-ups** (2026-10-08) — (a) flag off never writes, so a `seeds/`-prefixed archive stays prefixed until a `--zip-seed-corpus` run or `compact-seeds`; (b) `save_to_corpus` still creates an empty `seeds/` under the flag; (c) uproot cost on a 10k-member archive unmeasured (`tools/lib/bench_seed_zip.py`).
 - [ ] **`--zip-seed-corpus` follow-ups** (2026-10-02) — shipped with tests and an A/B (`docs/DEEP_DIVE.md` §Zip Seed Corpus). Open: (a) `discover_seed_files` callers (`minimize`, `root_cause`, `import`) and `report` seed counts are zip-blind; (b) a flush runs deflate-9 on the fuzz hot path: ~0.42 ms per seed, so a 625-seed block at 10k entries stalls ~260 ms; consider a background writer or level 6 (1.8x faster, +0.1% size); (c) no tool converts an existing `seeds/` tree into the zip or back; (d) `_checkpoint` uses private `zipfile` API (`_write_end_record`, `start_dir`) and falls back to close+reopen if it disappears.
 
 ## Crash triage

@@ -438,3 +438,138 @@ def test_compact_handles_seeds_prefixed_members(zcorpus):
     hl = hash_data(live)
     assert any(n.endswith(f"{hl[:2]}/id_{hl}") for n in names)
     assert not any(hash_data(cold)[:16] in n for n in names)
+
+
+# ── seeds/ prefix: seeds.zip sits beside seeds/, members live at its root ──
+
+
+def _prefixed_archive(corpus: Path, names: list[tuple[str, bytes]]) -> None:
+    with zipfile.ZipFile(corpus / seed_zip.ZIP_NAME, "w") as zf:
+        for name, data in names:
+            zf.writestr(name, data)
+
+
+def _rooted(tree: str, data: bytes) -> str:
+    h = hash_data(data)
+    return f"{tree}{h[:2]}/id_{h}"
+
+
+def test_regression_compact_drops_seeds_prefix(zcorpus):
+    corpus, _ = zcorpus
+    _closed(corpus)
+    live, cold = b"rooted-live" * 3, b"rooted-gone" * 3
+    hc = hash_data(cold)
+    _prefixed_archive(
+        corpus,
+        [
+            ("seeds/", b""),
+            (f"seeds/{_rooted('', live)}", live),
+            (f"seeds/{_rooted('', cold)}", cold),
+            (f"seeds/.pruned/{hc[:2]}/id_{hc}", b""),
+        ],
+    )
+
+    seed_zip.compact(corpus)
+
+    assert _names(corpus) == [_rooted("", live)]
+
+
+def test_uproot_roots_members_and_keeps_order(zcorpus):
+    """Tombstone then re-admission: order carries meaning, so it survives."""
+    corpus, _ = zcorpus
+    _closed(corpus)
+    a, b, gone = b"uproot-a" * 3, b"uproot-b" * 3, b"uproot-gone" * 3
+    ha, hg = hash_data(a), hash_data(gone)
+    _prefixed_archive(
+        corpus,
+        [
+            ("seeds/", b""),
+            ("seeds/ab/", b""),
+            (f"seeds/{_rooted('', a)}", a),
+            (f"seeds/.pruned/{ha[:2]}/id_{ha}", b""),
+            (f"seeds/seeds/{_rooted('', a)}", a),
+            (f"seeds/{_rooted('irreplaceable/', b)}", b),
+            (f"seeds/{_rooted('', gone)}", gone),
+            (f"seeds/.pruned/{hg[:2]}/id_{hg}", b""),
+        ],
+    )
+    before = _live(corpus)
+
+    assert seed_zip.uproot(corpus) is True
+
+    assert _names(corpus) == [
+        _rooted("", a),
+        f".pruned/{ha[:2]}/id_{ha}",
+        _rooted("", a),
+        _rooted("irreplaceable/", b),
+        _rooted("", gone),
+        f".pruned/{hg[:2]}/id_{hg}",
+    ]
+    assert _live(corpus) == before == sorted([a, b])
+
+
+def test_uproot_control_rooted_archive_untouched(zcorpus):
+    corpus, store = zcorpus
+    _archive(corpus, store, live=2, pruned=1)
+    before = (corpus / seed_zip.ZIP_NAME).read_bytes()
+
+    assert seed_zip.uproot(corpus) is False
+    assert (corpus / seed_zip.ZIP_NAME).read_bytes() == before
+
+
+def test_uproot_no_zip_is_noop(tmp_path):
+    assert seed_zip.uproot(tmp_path) is False
+    assert not (tmp_path / seed_zip.ZIP_NAME).exists()
+
+
+def test_uproot_adversarial_foreign_and_cold_names(zcorpus):
+    """seeds/pruned/ stays cold (never becomes foreign pruned/x); foreign is rooted."""
+    corpus, _ = zcorpus
+    _closed(corpus)
+    cold, foreign = b"cold-tier" * 3, b"third-party" * 3
+    _prefixed_archive(
+        corpus,
+        [
+            (f"seeds/pruned/{_rooted('', cold)}", cold),
+            ("seeds/foo.png", foreign),
+            ("seeds/../evil", b"x"),
+        ],
+    )
+
+    seed_zip.uproot(corpus)
+
+    names = _names(corpus)
+    assert "foo.png" in names
+    assert f"seeds/pruned/{_rooted('', cold)}" in names
+    assert "seeds/../evil" in names  # never foreign, kept verbatim
+    assert _live(corpus) == [foreign]
+
+
+def test_fuzzer_uproots_at_startup_in_zip_mode(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a = b"startup-root" * 3
+    _prefixed_archive(corpus, [("seeds/", b""), (f"seeds/{_rooted('', a)}", a)])
+    try:
+        f = _fuzzer(corpus, zip_seed_corpus=True)
+
+        f.save_to_corpus(b"written after uproot")
+        f._save_state()
+        assert not any(n.startswith("seeds/") for n in _names(corpus))
+        assert a in f.corpus
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)
+
+
+def test_fuzzer_zip_mode_off_never_uproots(tmp_path):
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    a = b"off-root" * 3
+    _prefixed_archive(corpus, [(f"seeds/{_rooted('', a)}", a)])
+    before = (corpus / seed_zip.ZIP_NAME).read_bytes()
+    try:
+        _fuzzer(corpus)
+
+        assert (corpus / seed_zip.ZIP_NAME).read_bytes() == before
+    finally:
+        seed_zip.configure(corpus, ZipMode.OFF)

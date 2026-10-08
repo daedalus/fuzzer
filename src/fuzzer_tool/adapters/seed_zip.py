@@ -152,6 +152,26 @@ def _is_foreign(name: str) -> bool:
     return ".." not in name.split("/")
 
 
+def _rooted(name: str) -> str | None:
+    """*name* at the archive root (``seeds/ab/id_x`` -> ``ab/id_x``); None drops it.
+
+    Directory entries (``seeds/``) carry no data. Cold (``seeds/pruned/..``)
+    and refused names stay verbatim: stripping must not turn them foreign.
+    """
+    if name.endswith("/"):
+        return None
+    parsed = _parse(name)
+    if parsed is not None:
+        return _canonical(*parsed)
+    stripped = _strip_root(name)
+    return stripped if _is_foreign(name) and _is_foreign(stripped) else name
+
+
+def _uprooted(names: list[str]) -> bool:
+    """True if any member is not at the archive root."""
+    return any(_rooted(n) != n for n in names)
+
+
 def _salvage(path: Path) -> None:
     """Rebuild *path* from its local headers; keep the original as .corrupt.
 
@@ -541,41 +561,58 @@ def _plan(names: list[str], cold: set[str]) -> list[int]:
     """Indices of members to keep.
 
     Dropped: every tombstone (cold ones leave with their data, the rest were
-    superseded by re-admission), data of cold seeds, and all but the last
-    copy of a re-admitted name. Foreign members are kept verbatim.
+    superseded by re-admission), data of cold seeds, directory entries, and
+    all but the last copy of a name at the archive root (``seeds/ab/id_x``
+    and ``ab/id_x`` are one). Foreign members are kept.
     """
-    last = {}
-    for i, n in enumerate(names):
-        parsed = _parse(n)
-        last[_canonical(*parsed) if parsed else n] = i
+    last = {_rooted(n): i for i, n in enumerate(names)}
     keep = []
     for i, name in enumerate(names):
-        parsed = _parse(name)
-        if parsed is None:
-            keep.append(i)
+        rooted = _rooted(name)
+        if rooted is None or last[rooted] != i:
             continue
 
-        tree, h = parsed
-        if tree == _TOMB or (not tree and h in cold) or last[_canonical(tree, h)] != i:
+        parsed = _parse(name)
+        if parsed is not None and (parsed[0] == _TOMB or (not parsed[0] and parsed[1] in cold)):
             continue
         keep.append(i)
     return keep
 
 
-def _rewrite(path: Path, tmp: Path, infos: list[zipfile.ZipInfo], keep: list[int]) -> None:
-    """Copy kept members into *tmp*, one at a time (bounded memory)."""
+def _rewrite(path: Path, tmp: Path, infos: list[zipfile.ZipInfo], keep) -> None:
+    """Copy kept members into *tmp* at the archive root, one at a time (bounded memory)."""
     out = zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED, compresslevel=COMPRESS_LEVEL)
-    with zipfile.ZipFile(path) as zin, out as zout:
+    with zipfile.ZipFile(path) as zin, out as zout, warnings.catch_warnings():
+        # uproot() keeps re-admitted duplicates: order carries meaning.
+        warnings.filterwarnings("ignore", "Duplicate name", UserWarning)
         for i in keep:
-            zout.writestr(infos[i].filename, zin.read(infos[i]))
+            name = _rooted(infos[i].filename)
+            if name is not None:
+                zout.writestr(name, zin.read(infos[i]))
 
 
 def _same_view(a: SeedZip, b: SeedZip) -> bool:
     return (
         a._main_live == b._main_live
         and a._protected == b._protected
-        and len(a._foreign) == len(b._foreign)
+        and {_rooted(n) for n in a._foreign} == set(b._foreign)
     )
+
+
+def _swap(corpus: Path, store: SeedZip, infos: list[zipfile.ZipInfo], keep) -> None:
+    """Replace seeds.zip with its *keep* members, rooted, after a replay check."""
+    path = corpus / ZIP_NAME
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        _rewrite(path, tmp, infos, keep)
+        check = open_readonly(corpus)
+        check._path = tmp
+        check._index()
+        if not _same_view(store, check):
+            raise CompactError(f"{path}: rewritten archive differs")
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def compact(corpus_dir: str | Path) -> CompactStats:
@@ -601,9 +638,10 @@ def compact(corpus_dir: str | Path) -> CompactStats:
     store._index()  # salvages a torn archive first
     infos = store._infolist()
     cold = store._main_seen - store._main_live
-    keep = _plan([i.filename for i in infos], cold)
+    names = [i.filename for i in infos]
+    keep = _plan(names, cold)
     dropped = len(infos) - len(keep)
-    if not dropped:
+    if not dropped and not _uprooted(names):
         return CompactStats()
 
     before = path.stat().st_size
@@ -611,19 +649,34 @@ def compact(corpus_dir: str | Path) -> CompactStats:
         for h in sorted(cold):
             _spill(corpus, h, zf.read(store._where[h]))
 
-    tmp = path.with_name(path.name + ".tmp")
-    try:
-        _rewrite(path, tmp, infos, keep)
-        check = open_readonly(corpus)
-        check._path = tmp
-        check._index()
-        if not _same_view(store, check):
-            raise CompactError(f"{path}: rewritten archive differs")
-        os.replace(tmp, path)
-    finally:
-        tmp.unlink(missing_ok=True)
-
+    _swap(corpus, store, infos, keep)
     return CompactStats(len(cold), dropped, before, path.stat().st_size)
+
+
+def uproot(corpus_dir: str | Path) -> bool:
+    """Move every seeds.zip member to the archive root; True if rewritten.
+
+    seeds.zip sits beside seeds/, so a zip of the seeds/ directory names the
+    same tree one level down. Unlike compact(), order and tombstones are
+    kept, so nothing changes liveness::
+
+        seeds.zip [seeds/ seeds/ab/id_x seeds/.pruned/ab/id_x]
+               -> seeds.zip [ab/id_x .pruned/ab/id_x]
+    """
+    corpus = Path(corpus_dir)
+    if lookup(corpus) is not None:
+        raise StoreOpenError(f"{corpus}: store is open")
+    if not (corpus / ZIP_NAME).is_file():
+        return False
+
+    store = open_readonly(corpus)
+    store._index()  # salvages a torn archive first
+    infos = store._infolist()
+    if not _uprooted([i.filename for i in infos]):
+        return False
+
+    _swap(corpus, store, infos, range(len(infos)))
+    return True
 
 
 def pruned_ratio(corpus_dir: str | Path) -> float:
