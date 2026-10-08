@@ -44,6 +44,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import IntFlag
 
+import xxhash
+
 from fuzzer_tool.core.aho_corasick import scanner_for_pairs
 
 log = logging.getLogger(__name__)
@@ -579,16 +581,21 @@ def _looks_like_checksum(op: bytes) -> bool:
     return True
 
 
+_CMP_ID_MASK = 0xFFFF  # ids are non-zero 16-bit
+
+
 def _stable_cmp_id(op_a: bytes, op_b: bytes, pc: int | None = None) -> int:
     """Stable non-zero id for a comparison site / operand group.
 
-    Prefer PC when available; otherwise hash the operand pair.
+    Prefer PC when available; otherwise hash the operand pair. The hash is
+    seed-free xxh3 (builtin ``hash()`` is salted per process), and ``op_a``
+    is length-framed so ``(b"ab", b"c")`` and ``(b"a", b"bc")`` differ.
     """
     if pc is not None and pc != 0:
         # keep low 16 bits non-zero; fold high bits
-        cid = (pc ^ (pc >> 16)) & 0xFFFF
+        cid = (pc ^ (pc >> 16)) & _CMP_ID_MASK
         return cid if cid else 1
-    h = hash((op_a, op_b)) & 0xFFFF
+    h = xxhash.xxh3_64_intdigest(op_a + op_b, seed=len(op_a)) & _CMP_ID_MASK
     return h if h else 1
 
 
