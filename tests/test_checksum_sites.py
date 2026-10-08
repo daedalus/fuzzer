@@ -419,3 +419,108 @@ class TestEngineHook:
         self._flip_first(f)
         mutant = f._operators.mutate(seed)
         assert mutant == b"\xff" + b"\x00" * 63
+
+
+# ── 8-bit sites: XOR8 (LRC), SUM8, NEG8 ──────────────────────────────────
+
+
+def _naive8(algo, data):
+    """Reference 8-bit checksums, one byte at a time."""
+    acc = 0
+    for b in data:
+        acc = acc ^ b if algo is Algo.XOR8 else acc + b
+    return (-acc if algo is Algo.NEG8 else acc) & 0xFF
+
+
+ALGOS_8 = (Algo.XOR8, Algo.SUM8, Algo.NEG8)
+
+
+def _framed(algo, start=0, n=40, salt=20):
+    """Body plus a trailing 8-bit checksum of ``body[start:]``, never 0."""
+    body = _body(n, salt)
+    while _naive8(algo, body[start:]) == 0:
+        body = body[:-1] + bytes([body[-1] ^ 1])
+    return body + bytes([_naive8(algo, body[start:])])
+
+
+class TestChecksum8:
+    @pytest.mark.parametrize("algo", ALGOS_8)
+    @pytest.mark.parametrize("n", [0, 1, 7, 256, 1000])
+    def test_matches_naive_reference(self, algo, n):
+        data = _body(n, 18)
+        assert checksum(algo, data) == _naive8(algo, data)
+        assert cs.WIDTH[algo] == 1
+
+    def test_control_algorithms_differ(self):
+        data = _body(64, 19)
+        assert len({checksum(a, data) for a in ALGOS_8}) == len(ALGOS_8)
+
+    @pytest.mark.parametrize("algo", ALGOS_8)
+    @pytest.mark.parametrize("start", cs.STARTS8)
+    def test_tail_found_with_a_hint(self, algo, start):
+        data = _framed(algo, start)
+        sites = locate(data, hints=[data[-1:]])
+        want = Site(algo, Endian.BIG, Span.PREFIX, Anchor.TAIL, len(data) - 1, start)
+        assert want in sites
+
+    @pytest.mark.parametrize("algo", ALGOS_8)
+    def test_falsification_tail_needs_a_hint(self, algo):
+        data = _framed(algo)
+        assert not [s for s in locate(data) if s.width == 1]
+        other = bytes([data[-1] ^ 0x5A])
+        assert not [s for s in locate(data, hints=[other]) if s.width == 1]
+
+    def test_falsification_random_buffers_rarely_yield_8bit_sites(self):
+        # Worst case: the tail byte is always hinted.
+        rng = np.random.default_rng(77)
+        samples = 600
+        flagged = 0
+        for n in rng.integers(16, 400, size=samples):
+            data = rng.integers(0, 256, size=int(n), dtype=np.uint8).tobytes()
+            flagged += any(s.width == 1 for s in locate(data, hints=[data[-1:]]))
+        assert flagged / samples < 0.05
+
+    def test_adversarial_zero_hint_is_ignored(self):
+        # LRC of a pair-repeating body is 0, and 0x00 is the commonest operand.
+        data = b"\x12\x34" * 20 + b"\x00"
+        assert not [s for s in locate(data, hints=[b"\x00"]) if s.width == 1]
+
+    def test_adversarial_constant_region_is_not_a_site(self):
+        data = b"\x07" * 41 + b"\x07"
+        assert not [s for s in locate(data, hints=[b"\x07"]) if s.width == 1]
+
+    @pytest.mark.parametrize("algo", ALGOS_8)
+    def test_repair_follows_a_length_change(self, algo):
+        data = _framed(algo)
+        site = Site(algo, Endian.BIG, Span.PREFIX, Anchor.TAIL, len(data) - 1, 0)
+        buf = bytearray(data)
+        buf[3:3] = b"grow"
+        buf[10] ^= 0xFF
+        assert repair(buf, [site], parent_len=len(data)) == 1
+        assert buf[-1] == _naive8(algo, bytes(buf[:-1]))
+
+
+class TestHintOperands:
+    def test_16bit_operands_kept(self):
+        assert b"\x12\x34" in cs.hint_operands([(b"\x12\x34", b"\xab\xcd")])
+
+    def test_one_byte_operand_is_a_byte_hint(self):
+        assert b"\x2a" in cs.hint_operands([(b"\x2a", b"\x2b")])
+
+    @pytest.mark.parametrize("op", [b"\x2a\x00\x00\x00", b"\x00\x00\x00\x2a", b"\x00\x2a"])
+    def test_zero_extended_operand_is_a_byte_hint(self, op):
+        assert b"\x2a" in cs.hint_operands([(op, op)])
+
+    def test_falsification_wide_value_is_not_a_byte_hint(self):
+        hints = cs.hint_operands([(b"\x2a\x01\x00\x00", b"\x00\x01\x00\x2a")])
+        assert not [h for h in hints if len(h) == 1]
+
+    def test_adversarial_zero_operand_dropped(self):
+        hints = cs.hint_operands([(b"\x00\x00\x00\x00", b"\x00")])
+        assert not [h for h in hints if len(h) == 1]
+
+    def test_adversarial_caps_hold(self):
+        pairs = [(i.to_bytes(2, "big"), i.to_bytes(2, "big")) for i in range(1, 2000)]
+        hints = cs.hint_operands(pairs)
+        assert len([h for h in hints if len(h) == 2]) <= cs.MAX_HINTS
+        assert len([h for h in hints if len(h) == 1]) <= cs.MAX_HINTS

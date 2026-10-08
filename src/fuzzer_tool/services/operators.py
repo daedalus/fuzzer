@@ -4924,6 +4924,16 @@ class OperatorEngine:
 
         return self._regularity(same_popcount_prev, buf)
 
+    def _op_parity_lock(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.parity import parity_lock
+
+        return self._regularity(parity_lock, buf)
+
+    def _op_parity_break(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.parity import parity_break
+
+        return self._regularity(parity_break, buf)
+
     def _op_lz_dict_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import lz_dict_mutate
 
