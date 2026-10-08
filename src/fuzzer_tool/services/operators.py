@@ -4571,6 +4571,12 @@ class OperatorEngine:
         out = zigzag_encode(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
         return self._or_declined("zigzag_encode", out, buf)
 
+    def _op_line_code(self, buf, byte_idx, _data):
+        from fuzzer_tool.core.mutations.line_code import line_code  # noqa: PLC0415
+
+        out = line_code(bytes(buf), byte_idx, self.ctx._rng, self._max_len())
+        return self._or_declined("line_code", out, buf)
+
     def _op_float16_edge(self, buf, byte_idx, _data):
         from fuzzer_tool.core.mutations.float16 import float16_edge  # noqa: PLC0415
 
