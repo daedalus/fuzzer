@@ -163,6 +163,54 @@ def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
     return b"".join(chunks), False
 
 
+# Fallback reap backoff, for kernels without pidfd_open (< 5.3).
+_REAP_POLL_MIN_S = 0.00005
+_REAP_POLL_MAX_S = 0.01
+
+
+def _reap_by(pid: int, deadline: float | None) -> int | None:
+    """Reap *pid* by *deadline*; wait status, or None if still running.
+
+    EOF on stderr does not prove exit: a target can close fd 2 and loop.
+    The pipe also closes just before the child turns zombie, so most clean
+    exits land here still running; a pidfd wakes on exit with no sleep.
+    """
+    done, status = os.waitpid(pid, os.WNOHANG)
+    if done:
+        return status
+
+    if deadline is None:
+        return os.waitpid(pid, 0)[1]
+
+    try:
+        pidfd = os.pidfd_open(pid)
+    except (AttributeError, OSError):
+        return _poll_reap(pid, deadline)
+
+    # pidfd turns readable once the child exits.
+    try:
+        poller = select.poll()
+        poller.register(pidfd, select.POLLIN)
+        left_ms = (deadline - time.monotonic()) * 1000.0
+        if left_ms <= 0 or not poller.poll(left_ms):
+            return None
+    finally:
+        os.close(pidfd)
+    return os.waitpid(pid, 0)[1]
+
+
+def _poll_reap(pid: int, deadline: float) -> int | None:
+    """Sleep-poll ``waitpid(WNOHANG)`` until *deadline*: 50us doubling to 10ms."""
+    delay = _REAP_POLL_MIN_S
+    while (left := deadline - time.monotonic()) > 0:
+        time.sleep(min(delay, left))
+        done, status = os.waitpid(pid, os.WNOHANG)
+        if done:
+            return status
+        delay = min(delay * 2, _REAP_POLL_MAX_S)
+    return None
+
+
 # ── Fast path (posix_spawn) ─────────────────────────────────────────────
 
 # Reusable temp file for fast path (avoid per-iteration file creation)
@@ -356,12 +404,9 @@ def run_target_fast(
     blocks in ``waitpid()``, and neither ever wakes. Reading only after the
     reap -- as this did -- deadlocks on any sufficiently chatty target.
 
-    Residual case, stated rather than papered over: a target that closes fd 2
-    and *then* loops forever produces EOF without exiting, and the reap below
-    blocks. Polling the reap instead would put a sleep on the hot path for
-    every execution to cover a target that deliberately closes its own stderr.
-    The common hang -- a target that loops without exiting -- never reaches
-    EOF and is caught by the poll deadline.
+    A target that closes fd 2 and *then* loops produces EOF without exiting;
+    ``_reap_by`` bounds that reap by the same deadline. An exited child costs
+    a ``waitpid`` and, if EOF beat the exit, a pidfd poll -- no sleep.
 
     Args:
         target: Path to target binary.
@@ -416,15 +461,18 @@ def run_target_fast(
         if lbr_session is not None and pid > 0:
             lbr_session.attach(pid)
 
+        deadline = None if timeout is None else time.monotonic() + timeout
         stderr_data, timed_out = _drain_until_eof(stderr_r, timeout)
-        if timed_out:
+        status = None if timed_out else _reap_by(pid, deadline)
+
+        # Drain deadline hit, or fd 2 closed by a still-running target.
+        if status is None:
             _kill_process_group(pid)
-
-        _, status = os.waitpid(pid, 0)
-        _untrack(pid)
-
-        if timed_out:
+            os.waitpid(pid, 0)
+            _untrack(pid)
             return -1, _timeout_stderr(stderr_data), pid
+
+        _untrack(pid)
 
         if os.WIFEXITED(status):
             rc = os.WEXITSTATUS(status)
