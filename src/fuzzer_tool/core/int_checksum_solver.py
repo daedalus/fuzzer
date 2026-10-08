@@ -504,7 +504,7 @@ def _recover_fletcher(pairs: list[Pair], min_matches: int) -> IntModel | None:
             if sum(a < modulus and b < modulus for a, b in halves) < required:
                 continue
             # Anchoring the inits on pair 0 breaks if pair 0 is the corrupt
-            # one, so take the value the majority of pairs agree on: for
+            # one, so take the value most pairs agree on (plurality): for
             # honest pairs (a - S1) mod N is the same constant.
             init_a = _modal_value((a - s1) % modulus for _n, s1, _s2, a, _b in decomposed)
             init_b = _modal_value(
