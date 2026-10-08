@@ -45,6 +45,7 @@ def _fuzzer(seeds: list[bytes], edges: set[int], *, multi: bool = False) -> Fuzz
     f.shm_cov = _FakeShm(edges)
     f._edge_tracker = EdgeTracker()
     f._edge_ledger = None
+    f._distance = None  # not directed: calibration tags no distance
     f._last_perf_deltas = {}
     f.crash_count = 0
     f.timeout_count = 0

@@ -57,6 +57,9 @@ class PtraceCoverage:
         self.total_edges = 0
         self.cumulative_edges = 0
         self.total_bp_hits = 0
+        # Link-time vaddrs of blocks hit this exec: the directed-distance
+        # input. Edge buckets are hashes; these are real block addresses.
+        self._hit_blocks: set[int] = set()
         self._base_address: int | None = None
         self._map_snapshot = classify_counts(bytes(self.edge_map))
         self.deep_coverage = deep_coverage
@@ -461,12 +464,19 @@ class PtraceCoverage:
         self.prev_locations.clear()
         self.prev_locations.extend([0] * (self.ngram_k - 1))
         self.total_edges = 0
+        self._hit_blocks.clear()
         self._map_snapshot = classify_counts(bytes(self.edge_map))
+
+    def blocks_hit(self) -> set[int]:
+        """Link-time vaddrs of the blocks this exec hit (read-only)."""
+        return self._hit_blocks
 
     def record_edge(self, addr: int) -> bool:
         # Use relative addresses for edge hashing (consistent with AFL).
         # Absolute addresses cause spurious collisions under PIE/ASLR.
         rel = addr - self._base_address if self._base_address else addr
+        # Inverse of _resolve_addr: non-PIE breakpoints already sit at vaddrs.
+        self._hit_blocks.add(rel if self._is_pie else addr)
         edge_id = rel
         for p in self.prev_locations:
             edge_id ^= p

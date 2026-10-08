@@ -69,9 +69,17 @@ def _shm_round(f, runtime: float | None, admit: bool) -> bool:
         return f.fuzz_one(PARENT)
 
 
+class _Ptrace:
+    """PtraceCoverage stand-in: the block addresses hit this exec."""
+
+    def blocks_hit(self) -> set[int]:
+        return {0x1000, 0x1040}
+
+
 def _py_round(f, dist: _Dist) -> FuzzRound:
-    # Python path: new coverage, no SHM tail; distance from the edge trace.
+    # Python path: new coverage, no SHM tail; distance from ptrace blocks.
     f._distance = dist
+    f.ptrace_cov = _Ptrace()
     f._current_edges_cache = {5, 7}
     rnd = FuzzRound(f, PARENT)
     rnd._meta = f.seed_meta.get(PARENT)
@@ -93,8 +101,9 @@ def test_regression_distance_parent_overwrite(fuzzer):
 
 
 def test_regression_distance_parent_overwrite_python(fuzzer):
-    """Python path: same contract when distance comes from the edge trace."""
+    """Python path: same contract when distance comes from ptrace blocks."""
     rnd = _py_round(fuzzer, _Dist(CHILD_DIST))
+    fuzzer.ptrace_cov = None  # _admit must not drive the stand-in as real ptrace
     assert fuzzer.seed_meta[PARENT]["avg_distance"] == PARENT_DIST
 
     rnd._admit()
@@ -139,6 +148,7 @@ def test_adversarial_parent_without_meta(fuzzer):
 def test_adversarial_sentinel_distance(fuzzer):
     """Adversarial: the no-valued-blocks sentinel tags the child but skips stats."""
     rnd = _py_round(fuzzer, _Dist(_NO_VALUE_DISTANCE))
+    fuzzer.ptrace_cov = None  # _admit must not drive the stand-in as real ptrace
 
     rnd._admit()
 

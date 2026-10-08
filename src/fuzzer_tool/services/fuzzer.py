@@ -7327,6 +7327,69 @@ class Fuzzer:
             return None
         return dist_sum / dist_count / 100.0
 
+    def _block_distance(self) -> float | None:
+        """Distance over the block addresses ptrace hit this exec.
+
+        ptrace is the only Python-side channel with real block addresses;
+        SHM/ptrace edge ids are hashes and never denote a block. None
+        without ptrace or without a hit.
+        """
+        cov = self.ptrace_cov
+        if self._distance is None or cov is None:
+            return None
+
+        blocks = cov.blocks_hit()
+        if not blocks:
+            return None
+        return self._distance.seed_distance({(b, b) for b in blocks})
+
+    def _exec_distance(self) -> float | None:
+        """This exec's distance: SHM tail, else ptrace blocks, else None."""
+        if self._distance is None:
+            return None
+
+        runtime_avg = self._read_runtime_avg_distance()
+        if runtime_avg is not None:
+            return runtime_avg
+        return self._block_distance()
+
+    def _tag_seed_distance(self, seed: bytes) -> None:
+        """Calibration: tag a seed with its measured distance.
+
+        aflgo/go rank by avg_distance, so seeds need it before their first
+        mutant. A seed that already carries one keeps it.
+        """
+        if self._distance is None:
+            return
+        meta = self.seed_meta.get(seed)
+        if meta is None or "avg_distance" in meta:
+            return
+
+        dist = self._exec_distance()
+        if dist is not None:
+            meta["avg_distance"] = dist
+
+    def _warn_no_dist_source(self) -> None:
+        """Warn once: directed mode on, but nothing measures real blocks.
+
+        Only the SHM distance tail (distance-instrumented build) and ptrace
+        (breakpoints at block addresses) yield per-block distance; edge ids
+        are hashes. Callers have ruled out the SHM tail.
+        """
+        if self._distance is None or self.ptrace_cov is not None:
+            return
+        if getattr(self, "_no_dist_warned", False):
+            return
+
+        self._no_dist_warned = True
+        msg = (
+            "--target-functions: target lacks the distance channel and coverage "
+            "is not ptrace, so seed distance is never measured (aflgo/go schedules "
+            "run without it). Build with tools/build_targets.sh --distance, or use --no-shm."
+        )
+        log.warning(msg)
+        print(f"[!] WARNING: {msg}")
+
     def _format_elapsed(self):
         return self._stats.format_elapsed()
 
@@ -8378,6 +8441,7 @@ class Fuzzer:
                 self.timeout_count += 1
                 self._corpus_manager.save_timeout(seed)
                 continue
+            self._tag_seed_distance(seed)
             has_new, edge_ids = self.shm_cov.is_new_coverage_with_edges()
             has_new, edge_ids = self._confirm_new_coverage(seed, self.shm_cov, has_new, edge_ids)
             if not edge_ids:
@@ -8959,6 +9023,8 @@ class Fuzzer:
                         "(function, address, or file.c:line) to engage the "
                         "distance channel (dist: stats + aflgo schedule/elo arm)"
                     )
+            else:
+                self._warn_no_dist_source()
         from fuzzer_tool.core.elf import detect_ngram_k
 
         print(f"[*] Ngram: k={detect_ngram_k(self.target)}")

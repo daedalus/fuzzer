@@ -365,6 +365,8 @@ class Grammar:
     def _expand_rule(self, name: str, depth: int) -> bytes:
         """Expand a rule into bytes."""
         self._expanded += 1
+        if self._expanded >= GENERATION_EXPANSION_CAP:
+            self._budget = 0  # cap hit: loops then test only the byte budget
         if depth <= 0 or name not in self.rules:
             if depth <= 0:
                 log.warning(
@@ -400,7 +402,7 @@ class Grammar:
         """
         result = b""
         for token in tokens:
-            if self._produced >= self._budget or self._expanded >= GENERATION_EXPANSION_CAP:
+            if self._produced >= self._budget:
                 break
             kind = token[0]
             if kind == "lit":
@@ -412,7 +414,7 @@ class Grammar:
                 _, name, lo, hi = token
                 count = self._rng.randint(lo, hi)
                 for _ in range(count):
-                    if self._produced >= self._budget or self._expanded >= GENERATION_EXPANSION_CAP:
+                    if self._produced >= self._budget:
                         break
                     result += self._expand_rule(name, depth - 1)
         return result
@@ -508,6 +510,7 @@ class Grammar:
 
         self._budget = max_len if max_len > 0 else GENERATION_BYTE_CAP
         self._produced = 0
+        self._expanded = 0
         result = self._boltzmann_sample_rule(rule, max_depth, x, memo)
         if max_len > 0:
             result = result[:max_len]
@@ -636,6 +639,9 @@ class Grammar:
         self, name: str, depth: int, x: float, memo: dict[tuple[str, int], tuple[float, float]]
     ) -> bytes:
         """Sample bytes for rule *name*, weighting each alternative by its GF."""
+        self._expanded += 1
+        if self._expanded >= GENERATION_EXPANSION_CAP:
+            self._budget = 0  # see _expand_rule
         if depth <= 0 or name not in self.rules:
             self._produced += 1
             return b"?"
@@ -779,30 +785,41 @@ text    = word* | ""
 word    = letter | digit | space
 letter  = "a" | "b" | "c" | "d" | "e" | "f" | "g" | "h" | "i" | "j" | "k" | "l" | "m" | "n" | "o" | "p" | "q" | "r" | "s" | "t" | "u" | "v" | "w" | "x" | "y" | "z"
 digit   = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
-space   = \\x20 | \\t
+space   = \\x20
+# RFC 8259 number: -? int frac? exp?
+number  = minus{0,1} int frac{0,1} exp{0,1}
+minus   = "-"
+int     = "0" | onenine digit*
+onenine = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
+frac    = "." digit+
+exp     = e sign{0,1} digit+
+e       = "e" | "E"
+sign    = "-" | "+"
 """,
     "http_request": """
 # HTTP request grammar
 request = method SP uri SP version CRLF headers CRLF body
-method  = GET | POST | PUT | DELETE | HEAD | PATCH
-uri     = / | /api | /api/v1 | /index.html | /health | /debug
-version = HTTP/1.0 | HTTP/1.1
+method  = "GET" | "POST" | "PUT" | "DELETE" | "HEAD" | "PATCH"
+uri     = "/" | "/api" | "/api/v1" | "/index.html" | "/health" | "/debug"
+version = "HTTP/1.0" | "HTTP/1.1"
 CRLF    = \\r\\n
 SP      = \\x20
 headers = header*
 header  = name ":" SP value CRLF
-name    = Host | Content-Type | Accept | Authorization | X-Request-ID | User-Agent
-value   = localhost | application/json | text/html | application/octet-stream | Bearer | close
-body    = {} | {"key":"value"} | data=12345
+name    = "Host" | "Content-Type" | "Accept" | "Authorization" | "X-Request-ID" | "User-Agent"
+value   = "localhost" | "application/json" | "text/html" | "application/octet-stream" | "Bearer" | "close"
+body    = "{}" | '{"key":"value"}' | "data=12345"
 """,
     "elf": """
-# Minimal ELF header
-magic   = \\x7f ELF
+# Minimal ELF header: e_ident[16]
+ident   = magic class data version osabi padding
+magic   = \\x7f "ELF"
 class   = \\x01 | \\x02
 data    = \\x01
 version = \\x01
 osabi   = \\x00 | \\x03 | \\x06 | \\x09
-padding = \\x00{8}
+padding = zero{8}
+zero    = \\x00
 """,
 }
 
