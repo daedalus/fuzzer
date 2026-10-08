@@ -282,6 +282,23 @@ class RandPool:
             count -= take
         return np.concatenate(parts)
 
+    def random_sequential(self, count: int) -> list[float]:
+        """*count* floats, exactly as *count* ``random()`` calls would draw them.
+
+        ``random_list`` refills early when a batch would cross the pool end;
+        this consumes the tail first, so callers replacing a ``random()`` loop
+        keep a seeded run's stream unchanged.
+        """
+        out: list[int] = []
+        while count > 0:
+            if self._idx >= _POOL_ENTRIES:
+                self._refill()
+            take = min(count, _POOL_ENTRIES - self._idx)
+            out.extend(self._pool_l[self._idx : self._idx + take])
+            self._idx += take
+            count -= take
+        return [v / 4294967296.0 for v in out]
+
     def random_list(self, count: int) -> list[float]:
         """Return *count* random floats in [0.0, 1.0).  Vectorized.
 

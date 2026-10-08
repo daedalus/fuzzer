@@ -236,6 +236,9 @@ class WaveGrid:
         # Contiguous per-direction slices: mat[:, :, d] is strided, which
         # slows the matmul in _prune_cell (the AC-3 inner loop).
         self._adj_by_dir = [np.ascontiguousarray(mat[:, :, d]) for d in range(4)]
+        self._bit_weights = np.left_shift(
+            np.uint64(1), np.arange(min(self.n_tiles, 64), dtype=np.uint64)
+        )
 
     # ── Public API ──────────────────────────────────────────────────
 
@@ -328,24 +331,41 @@ class WaveGrid:
     def _find_min_entropy(self) -> int | None:
         """Find cell with smallest non-zero entropy.
 
+        One pass instead of a per-cell loop (O(n^2) numpy calls per row):
+        counts in bulk, ``_entropy`` once per distinct possibility mask, and
+        the tie-break noise drawn as the same ``random()`` stream the loop
+        used -- one draw per open cell before the first dead cell. argmin
+        keeps the loop's first-minimum choice.
+
         Returns:
             Cell index, or None if all cells collapsed.
         """
-        min_entropy = float("inf")
-        best_idx = None
-        for i in range(self.n):
-            row = self.superpositions[i]
-            count = int(np.count_nonzero(row))
-            if count == 0:
-                self.contradiction = True
-                return None
-            if count == 1:
-                continue
-            entropy = self._entropy(row) + self._rng.random() * 1e-9
-            if entropy < min_entropy:
-                min_entropy = entropy
-                best_idx = i
-        return best_idx
+        counts = np.count_nonzero(self.superpositions, axis=1)
+        dead = np.flatnonzero(counts == 0)
+        limit = int(dead[0]) if dead.size else self.n
+        open_cells = np.flatnonzero(counts[:limit] > 1)
+        noise = self._rng.random_sequential(open_cells.size)
+        if dead.size:
+            self.contradiction = True
+            return None
+        if not open_cells.size:
+            return None
+
+        rows = self.superpositions[open_cells]
+        _, first, inverse = np.unique(self._mask_keys(rows), return_index=True, return_inverse=True)
+        entropy = np.array([self._entropy(rows[k]) for k in first])[inverse.ravel()]
+        return int(open_cells[np.argmin(entropy + np.asarray(noise) * 1e-9)])
+
+    def _mask_keys(self, rows: np.ndarray) -> np.ndarray:
+        """One sortable key per possibility mask (equal masks, equal keys).
+
+        Up to 64 tiles a mask packs into one uint64, so the dedup is a 1D
+        unique; np.unique(axis=0) on packed bytes cost more than it saved.
+        """
+        if self.n_tiles <= 64:
+            return rows.astype(np.uint64) @ self._bit_weights
+        packed = np.ascontiguousarray(np.packbits(rows, axis=1))
+        return packed.view(np.dtype((np.void, packed.shape[1]))).ravel()
 
     def _entropy(self, row: np.ndarray) -> float:
         """Shannon entropy of a cell's superposition."""
