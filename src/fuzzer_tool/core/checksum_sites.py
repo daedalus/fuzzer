@@ -382,12 +382,29 @@ def _byte_operand(op: bytes) -> bytes | None:
     return None
 
 
+# Last pool's hints, keyed like scanner_for_pairs (owner identity + length):
+# a scan reads every operand when the narrow cap never fills (~15 ms at 8k).
+_hint_owner: object | None = None
+_hint_len = -1
+_hint_cache: list[bytes] = []
+
+
 def hint_operands(pairs: Iterable[tuple[bytes, bytes]] | None) -> list[bytes]:
     """Cmplog operands that may be a compared input field.
 
     16-bit operands as-is, then distinct nonzero byte values (see
-    ``_byte_operand``); each kind capped at ``MAX_HINTS``.
+    ``_byte_operand``); each kind capped at ``MAX_HINTS``. Cached per pool
+    object and length; callers get a copy.
     """
+    global _hint_owner, _hint_len, _hint_cache
+    if not isinstance(pairs, list):
+        return _scan_hints(pairs)
+    if _hint_owner is not pairs or _hint_len != len(pairs):
+        _hint_owner, _hint_len, _hint_cache = pairs, len(pairs), _scan_hints(pairs)
+    return list(_hint_cache)
+
+
+def _scan_hints(pairs: Iterable[tuple[bytes, bytes]] | None) -> list[bytes]:
     wide: list[bytes] = []
     narrow: dict[bytes, None] = {}
     for pair in pairs or ():

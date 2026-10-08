@@ -24,6 +24,8 @@ import logging
 import math
 from array import array
 
+import numpy as np
+
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import RunningMoments
 
@@ -1034,17 +1036,16 @@ class BayesianEloTracker(RoundRecorderMixin):
         if not rated:
             return strategies[0]
 
-        samples = [
-            (
-                s,
-                self._rng.gauss(
-                    self._strategy_mu.get(s, self.initial_mu),
-                    math.sqrt(self._strategy_sigma_sq.get(s, self.initial_sigma**2)),
-                ),
-            )
-            for s in rated
-        ]
-        return max(samples, key=lambda x: x[1])[0]
+        # One standard-normal draw per arm, scaled: the same numpy stream as a
+        # gauss() per arm (loc + scale * z), at one call instead of ~28 (the
+        # position arena asks ~50 times per exec). argmax keeps max()'s
+        # first-wins tie order.
+        mu = np.fromiter((self._strategy_mu.get(s, self.initial_mu) for s in rated), float)
+        var = np.fromiter(
+            (self._strategy_sigma_sq.get(s, self.initial_sigma**2) for s in rated), float
+        )
+        draws = mu + np.sqrt(var) * self._rng.normal_array(len(rated))
+        return rated[int(np.argmax(draws))]
 
     def get_ranking(self, crash: bool = False) -> list[tuple[str, float]]:
         """Return operators sorted by posterior mean (highest first).

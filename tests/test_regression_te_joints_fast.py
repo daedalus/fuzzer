@@ -72,3 +72,26 @@ def test_joints_match_old_loop():
         old[2],
         old[3],
     ]
+
+
+def test_vectorized_surrogate_entropy_matches_dict_form():
+    """Row-wise H(Y_{t+1} | Y_t^(k), X_t) equals the dict computation per row."""
+    rng = RandPool(11)
+    te = TransferEntropy(history_length=2)
+    tgt = _series(rng, 3)
+    rows = [_series(rng, 5) for _ in range(4)]
+    y_future, y_hist = te._target_keys(tgt, LEN)
+
+    got = te._surrogate_h_both(y_future, y_hist, rows)
+
+    for row, h in zip(rows, got, strict=True):
+        joint = te._joint_both(y_future, y_hist, row)
+        expected = te._conditional_entropy_both(joint, len(y_future))
+        assert abs(h - expected) < 1e-9
+
+
+def test_surrogates_still_remove_bias_on_independent_streams():
+    """Falsification: independent streams report ~0 bits after correction."""
+    rng = RandPool(13)
+    src, tgt = _series(rng, 256), _series(rng, 256)
+    assert TransferEntropy().transfer_entropy(src, tgt) < 0.2
