@@ -66,15 +66,21 @@ def _pull_arms(mc, pulls=2000.0):
         mc.arm_beta[arm] = pulls / 4
 
 
+def _refit(mc):
+    """One refit now: the interval gates every refit after the first."""
+    mc.execs_since_refit = mc.refit_interval
+    mc.maybe_refit()
+
+
 def _two_refits(rng, shifted, base=1000, n=60):
     mc = MonteCarloScheduler(refit_interval=base)
     mc.elite_set = _elite(rng, n, STABLE_ALPHABET)
     _pull_arms(mc)
-    mc.maybe_refit()
+    _refit(mc)
     mc.elite_set = _elite(rng, n, SHIFTED_ALPHABET if shifted else STABLE_ALPHABET)
     _pull_arms(mc)
     before = mc.refit_interval
-    mc.maybe_refit()
+    _refit(mc)
     return mc, before
 
 
@@ -86,7 +92,7 @@ class TestRatchet:
         for _ in range(8):
             mc.elite_set = _elite(rng, 60, STABLE_ALPHABET)
             _pull_arms(mc)
-            mc.maybe_refit()
+            _refit(mc)
         assert mc.refit_interval > 1000, (
             f"interval fell to {mc.refit_interval} on an unchanged distribution"
         )
@@ -98,7 +104,7 @@ class TestRatchet:
         for alphabet in (b"AB", b"CD", b"EF", b"GH", b"IJ"):
             mc.elite_set = _elite(rng, 60, alphabet)
             _pull_arms(mc)
-            mc.maybe_refit()
+            _refit(mc)
         assert mc.refit_interval == 250  # base // 4
 
     def test_stable_branch_is_reachable(self):
@@ -150,12 +156,12 @@ class TestNullReference:
         mc_narrow = MonteCarloScheduler(refit_interval=100)
         for _ in range(2):
             mc_narrow.elite_set = _elite(rng, 60, b"AB")
-            mc_narrow.maybe_refit()
+            _refit(mc_narrow)
 
         mc_wide = MonteCarloScheduler(refit_interval=100)
         for _ in range(2):
             mc_wide.elite_set = _elite(rng, 60, bytes(range(256)))
-            mc_wide.maybe_refit()
+            _refit(mc_wide)
 
         # A 256-value support at the same n leaves far more room for
         # sampling noise than a 2-value one.
@@ -166,7 +172,7 @@ class TestNullReference:
         mc = MonteCarloScheduler(refit_interval=100)
         for _ in range(2):
             mc.elite_set = _elite(rng, 60, STABLE_ALPHABET)
-            mc.maybe_refit()
+            _refit(mc)
         assert 0.0 < mc.last_js_null_p95 <= mc.last_js_null_p99 <= math.log(2) + 1e-12
 
     def test_bandit_pull_counts_do_not_move_the_reference(self):
@@ -179,7 +185,7 @@ class TestNullReference:
                 mc.elite_set = _elite(trial_rng, 60, STABLE_ALPHABET)
                 mc.arm_alpha["a"] = pulls
                 mc.arm_beta["a"] = pulls
-                mc.maybe_refit()
+                _refit(mc)
             values.append(mc.last_js_null_p95)
         spread = max(values) - min(values)
         assert spread < 0.05, f"reference still tracks pull counts: {values}"
