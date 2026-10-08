@@ -99,6 +99,11 @@ def decode_quoted_literal(text: str) -> bytes:
 # 16 bytes could still cost gigabytes (finding #24).
 GENERATION_BYTE_CAP = 1 << 20  # 1 MiB
 
+# Rule expansions per generate() call. Bytes alone miss zero-byte rules:
+# ``a = b{32}; b = c{32}; ...; z = ""`` emits nothing yet costs 32^depth.
+# 64K = 16 expansions per byte at the default 4096-byte max_len.
+GENERATION_EXPANSION_CAP = 1 << 16
+
 
 # Unquoted escapes accepted by ``Grammar._parse_alternative`` (no ``\\0``,
 # unlike quoted literals).
@@ -139,6 +144,7 @@ class Grammar:
         # Live byte budget for one generate() call; see _expand_tokens.
         self._budget = GENERATION_BYTE_CAP
         self._produced = 0
+        self._expanded = 0
         # When True, mutate()'s replacement-generation paths (_mutate_extend,
         # _mutate_insert, _mutate_replace_section) sample the plain-text
         # fragment via generate_boltzmann() instead of generate()'s biased
@@ -287,6 +293,7 @@ class Grammar:
         max_len: int = 0,
         boltzmann: bool = False,
         target_size: float | None = None,
+        rng=None,
     ) -> bytes:
         """Generate a random input from the grammar.
 
@@ -330,6 +337,9 @@ class Grammar:
         gets sampled disproportionately more often as depth increases.
         ``boltzmann=True`` corrects this; see :meth:`generate_boltzmann`.
         """
+        # Same convention as mutate(): a caller-supplied rng wins, so the
+        # fuzzer's seeded (and stall-reseeded) stream drives generation.
+        self._rng = rng or self._rng
         if not self.rules:
             return b""
 
@@ -346,6 +356,7 @@ class Grammar:
 
         self._budget = max_len if max_len > 0 else GENERATION_BYTE_CAP
         self._produced = 0
+        self._expanded = 0
         result = self._expand_rule(rule, max_depth)
         if max_len > 0:
             result = result[:max_len]
@@ -353,6 +364,7 @@ class Grammar:
 
     def _expand_rule(self, name: str, depth: int) -> bytes:
         """Expand a rule into bytes."""
+        self._expanded += 1
         if depth <= 0 or name not in self.rules:
             if depth <= 0:
                 log.warning(
@@ -388,7 +400,7 @@ class Grammar:
         """
         result = b""
         for token in tokens:
-            if self._produced >= self._budget:
+            if self._produced >= self._budget or self._expanded >= GENERATION_EXPANSION_CAP:
                 break
             kind = token[0]
             if kind == "lit":
@@ -400,7 +412,7 @@ class Grammar:
                 _, name, lo, hi = token
                 count = self._rng.randint(lo, hi)
                 for _ in range(count):
-                    if self._produced >= self._budget:
+                    if self._produced >= self._budget or self._expanded >= GENERATION_EXPANSION_CAP:
                         break
                     result += self._expand_rule(name, depth - 1)
         return result
@@ -978,7 +990,7 @@ def _weighted_choice(nodes: list["TreeNode"], rng) -> "TreeNode":
         return rng.choice(nodes)
     r = rng.randint(0, total - 1)
     acc = 0
-    for node, w in zip(nodes, weights):
+    for node, w in zip(nodes, weights, strict=True):
         acc += w
         if r < acc:
             return node
@@ -1271,7 +1283,7 @@ class TreeMutator:
             return tree.serialize()[:max_len]
         target = _weighted_choice(targets, self._rng)
         # Generate a replacement of the same rule type
-        replacement_bytes = self.grammar.generate(target.rule, max_len=max_len)
+        replacement_bytes = self.grammar.generate(target.rule, max_len=max_len, rng=self._rng)
         replacement = TreeNode(rule=target.rule, data=replacement_bytes)
         # Replace in parent
         self._replace_in_tree(tree, target, replacement)
@@ -1349,7 +1361,7 @@ class TreeMutator:
         if not multi_targets:
             return tree.serialize()[:max_len]
         target = _weighted_choice(multi_targets, self._rng)
-        replacement_bytes = self.grammar.generate(target.rule, max_len=max_len)
+        replacement_bytes = self.grammar.generate(target.rule, max_len=max_len, rng=self._rng)
         self._replace_in_tree(tree, target, TreeNode(rule=target.rule, data=replacement_bytes))
         return tree.serialize()[:max_len]
 
@@ -1357,7 +1369,7 @@ class TreeMutator:
         """Byte-level mutation on a leaf node."""
         data = tree.serialize()
         if not data:
-            return self.grammar.generate(max_len=max_len)
+            return self.grammar.generate(max_len=max_len, rng=self._rng)
         buf = bytearray(data)
         idx = self._rng.randint(0, len(buf) - 1)
         buf[idx] ^= 1 << self._rng.randint(0, 7)

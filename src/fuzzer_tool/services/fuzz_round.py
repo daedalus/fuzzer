@@ -29,6 +29,7 @@ import os
 import resource
 from typing import TYPE_CHECKING
 
+from fuzzer_tool.core.analyzers.analyzer_distance import _NO_VALUE_DISTANCE
 from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
 from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
 from fuzzer_tool.core.cadence import due
@@ -128,6 +129,7 @@ class FuzzRound:
         "_success",
         "_effective",
         "_surprisal_weight",
+        "_distance",
     )
 
     def __init__(self, fuzzer: "Fuzzer", data: bytes):
@@ -156,6 +158,7 @@ class FuzzRound:
         self._success = False
         self._effective = None
         self._surprisal_weight = 0.0
+        self._distance: float | None = None
 
     def run(self) -> bool:
         """Run the round; True when the mutant crashed or was admitted."""
@@ -1331,13 +1334,14 @@ class FuzzRound:
         # distances accumulated in the target) when the target carries
         # the distance table; otherwise derive it in Python from the
         # edge trace.
+        # The value is the MUTANT's: held on the round and attached to the
+        # mutant's seed_meta on admission (_tag_distance), never the parent's.
         f = self._f
-        meta = self._meta
-        if not f._distance or meta is None:
+        if not f._distance:
             return
         runtime_avg = f._read_runtime_avg_distance()
         if runtime_avg is not None:
-            meta["avg_distance"] = runtime_avg
+            self._distance = runtime_avg
             self._note_distance(runtime_avg)
             return
         if not self._has_new_coverage:
@@ -1351,9 +1355,19 @@ class FuzzRound:
         f._edge_tracker.record_edge_trace(seed_key, edge_pairs)
         # Compute average distance
         avg_dist = f._distance.seed_distance({(i, i) for i in hit_bbs})
-        meta["avg_distance"] = avg_dist
-        if avg_dist < 20.0:  # exclude the no-valued-blocks sentinel
+        self._distance = avg_dist
+        if avg_dist < _NO_VALUE_DISTANCE:  # exclude the no-valued-blocks sentinel
             self._note_distance(avg_dist)
+
+    def _tag_distance(self) -> None:
+        # Admitted mutant inherits this round's measured distance; aflgo/go
+        # rank it by that. A duplicate re-measures the same bytes: same value.
+        if self._distance is None:
+            return
+        meta = self._f.seed_meta.get(self._mutated)
+        if meta is None:
+            return
+        meta["avg_distance"] = self._distance
 
     def _note_distance(self, value: float) -> None:
         f = self._f
@@ -1852,6 +1866,7 @@ class FuzzRound:
             return
         before = len(f.corpus)
         f.save_to_corpus(self._mutated, parent=self._data)
+        self._tag_distance()
         f._record_lineage_insert(self._mutated, self._data, before)
 
     def _triage_crash(self) -> None:
@@ -1903,6 +1918,7 @@ class FuzzRound:
         mutated = self._mutated
         _corpus_len_before = len(f.corpus)
         f.save_to_corpus(mutated, parent=data)
+        self._tag_distance()
         # Validity is a property of this execution, so it is recorded
         # here rather than reconstructed later: the seed picker reads it
         # off the metadata and nothing re-runs the input to ask again.
@@ -2015,6 +2031,7 @@ class FuzzRound:
             return False
         _corpus_len_before = len(f.corpus)
         f.save_to_corpus(mutated, parent=data)
+        self._tag_distance()
         f._record_lineage_insert(mutated, data, _corpus_len_before)
         f._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
         if f.mc and f.mc_cem:

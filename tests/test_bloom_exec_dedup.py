@@ -160,6 +160,7 @@ class _StubFuzzer:
         return self._mutants.pop(0)
 
     _dedup_mutate = Fuzzer._dedup_mutate
+    _is_repeat = Fuzzer._is_repeat
 
 
 class TestDedupMutate:

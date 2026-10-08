@@ -264,15 +264,16 @@ def _uniform_amplitudes(n_bits: int, *, alpha: float = ALPHA_UNIFORM) -> np.ndar
 # ── Collapse: amplitudes → concrete bytes ─────────────────────────────
 
 
-def collapse(amplitudes: np.ndarray) -> bytes:
+def collapse(amplitudes: np.ndarray, rng: RandPool | None = None) -> bytes:
     """Sample concrete bytes from qubit amplitudes.
 
     For each bit position i: bit = 0 with probability α_i², else 1.
 
-    Vectorized: uses ``np.random.random`` and ``np.packbits``.
+    Vectorized: uses ``RandPool.random_array`` and ``np.packbits``.
 
     Args:
         amplitudes: α values for each bit (ndarray or list, length multiple of 8).
+        rng: Draw source (Hard Rule 16); default shared pool.
 
     Returns:
         Collapsed concrete byte string.
@@ -280,7 +281,8 @@ def collapse(amplitudes: np.ndarray) -> bytes:
     if not isinstance(amplitudes, np.ndarray):
         amplitudes = np.asarray(amplitudes, dtype=np.float64)
     # P(bit=0) = α²: random < α² → bit=0, else bit=1
-    bits = (np.random.random(len(amplitudes)) >= amplitudes * amplitudes).astype(np.uint8)
+    rng = rng if rng is not None else get_default_rand_pool()
+    bits = (rng.random_array(len(amplitudes)) >= amplitudes * amplitudes).astype(np.uint8)
     return bytes(np.packbits(bits).tobytes())
 
 
@@ -433,6 +435,7 @@ def mutate_amplitudes(
     prob: float = 0.02,
     alpha_min: float = ALPHA_MIN,
     alpha_max: float = ALPHA_MAX,
+    rng: RandPool | None = None,
 ) -> np.ndarray:
     """Randomly perturb amplitudes to maintain diversity.
 
@@ -448,16 +451,20 @@ def mutate_amplitudes(
         prob: Per-bit mutation probability (default 0.02).
         alpha_min: Minimum amplitude after reset.
         alpha_max: Maximum amplitude after reset.
+        rng: Draw source (Hard Rule 16); default shared pool.
 
     Returns:
         Mutated amplitudes (same ndarray, modified in place).
     """
     if not isinstance(amplitudes, np.ndarray):
         amplitudes = np.asarray(amplitudes, dtype=np.float64)
-    mask = np.random.random(len(amplitudes)) < prob
-    n_mutate = mask.sum()
+    rng = rng if rng is not None else get_default_rand_pool()
+    mask = rng.random_array(len(amplitudes)) < prob
+    n_mutate = int(mask.sum())
     if n_mutate > 0:
-        amplitudes[mask] = np.random.uniform(alpha_min, alpha_max, size=n_mutate)
+        # Affine map of [0, 1) uniforms onto [alpha_min, alpha_max).
+        span = alpha_max - alpha_min
+        amplitudes[mask] = alpha_min + span * rng.random_array(n_mutate)
     return amplitudes
 
 
@@ -559,6 +566,7 @@ def collapse_correlated(
     coupling: np.ndarray,
     *,
     n_sweeps: int = CORRELATION_SWEEPS_DEFAULT,
+    rng: RandPool | None = None,
 ) -> bytes:
     """Sample concrete bytes jointly within each byte via Gibbs sampling.
 
@@ -582,6 +590,7 @@ def collapse_correlated(
             to run before reading out the sample. More sweeps mix the
             joint distribution closer to its stationary point; the
             default of 3 is a cheap approximation, not an exact sample.
+        rng: Draw source (Hard Rule 16); default shared pool.
 
     Returns:
         Collapsed concrete byte string.
@@ -592,6 +601,7 @@ def collapse_correlated(
         return b""
     num_bytes = n_bits // BITS_PER_BYTE
     coupling = np.asarray(coupling, dtype=np.float64)
+    rng = rng if rng is not None else get_default_rand_pool()
 
     fields = _alpha_to_field(amplitudes).reshape(num_bytes, BITS_PER_BYTE)
 
@@ -608,7 +618,7 @@ def collapse_correlated(
     # even at zero coupling (P(bit=0)=0.9² doubled to ~0.94 instead of
     # 0.81) -- caught by test_zero_coupling_matches_marginals.
     p_plus0 = _sigmoid(fields)
-    state = np.where(np.random.random((num_bytes, BITS_PER_BYTE)) < p_plus0, 1, -1)
+    state = np.where(rng.random_array((num_bytes, BITS_PER_BYTE)) < p_plus0, 1, -1)
 
     for _ in range(max(0, n_sweeps)):
         for bit_idx in range(BITS_PER_BYTE):
@@ -619,7 +629,7 @@ def collapse_correlated(
             j_row[:, bit_idx] = 0.0
             local_field = fields[:, bit_idx] + np.einsum("bj,bj->b", j_row, state)
             p_plus = _sigmoid(local_field)
-            draw = np.random.random(num_bytes) < p_plus
+            draw = rng.random_array(num_bytes) < p_plus
             state[:, bit_idx] = np.where(draw, 1, -1)
 
     bits = (state == -1).astype(np.uint8).reshape(-1)  # s=+1 -> bit 0, s=-1 -> bit 1
@@ -858,10 +868,13 @@ class QEALifecycle:
         parent = self._tournament_select(self.population)
         if self.use_correlation and parent.coupling is not None:
             collapsed_data = collapse_correlated(
-                parent.amplitudes, parent.coupling, n_sweeps=self.correlation_sweeps
+                parent.amplitudes,
+                parent.coupling,
+                n_sweeps=self.correlation_sweeps,
+                rng=self._rng,
             )
         else:
-            collapsed_data = collapse(parent.amplitudes)
+            collapsed_data = collapse(parent.amplitudes, self._rng)
 
         # Store for rotation gate feedback
         self._last_parent = parent
@@ -1040,16 +1053,22 @@ class QEALifecycle:
             # its own future collapses.
             if self.use_correlation and parent_a.coupling is not None:
                 bytes_a = collapse_correlated(
-                    parent_a.amplitudes, parent_a.coupling, n_sweeps=self.correlation_sweeps
+                    parent_a.amplitudes,
+                    parent_a.coupling,
+                    n_sweeps=self.correlation_sweeps,
+                    rng=self._rng,
                 )
             else:
-                bytes_a = collapse(parent_a.amplitudes)
+                bytes_a = collapse(parent_a.amplitudes, self._rng)
             if self.use_correlation and parent_b.coupling is not None:
                 bytes_b = collapse_correlated(
-                    parent_b.amplitudes, parent_b.coupling, n_sweeps=self.correlation_sweeps
+                    parent_b.amplitudes,
+                    parent_b.coupling,
+                    n_sweeps=self.correlation_sweeps,
+                    rng=self._rng,
                 )
             else:
-                bytes_b = collapse(parent_b.amplitudes)
+                bytes_b = collapse(parent_b.amplitudes, self._rng)
 
             # Use two-point crossover (from mutations module)
             child_bytes = crossover(bytes_a, bytes_b, self._rng)
@@ -1075,7 +1094,7 @@ class QEALifecycle:
             )
 
             # Apply amplitude mutation for diversity
-            mutate_amplitudes(child.amplitudes, prob=self.mutation_prob)
+            mutate_amplitudes(child.amplitudes, prob=self.mutation_prob, rng=self._rng)
 
             offspring.append(child)
 

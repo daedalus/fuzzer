@@ -1,7 +1,5 @@
 import math
 
-import numpy as np
-
 from fuzzer_tool.core.qea import _uniform_amplitudes, collapse
 from fuzzer_tool.core.qea_grover import (
     LiveFractionTracker,
@@ -10,6 +8,7 @@ from fuzzer_tool.core.qea_grover import (
     grover_success_probability,
     grover_theta,
 )
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 def test_theta_and_kopt_match_worked_example():
@@ -36,11 +35,11 @@ def test_tracker_falls_back_without_evidence():
 
 def test_or_mask_saturates_on_random_collapses():
     """Regression for the measured negative result: dead bits differ too."""
-    np.random.seed(0)
+    rng = RandPool(seed=0)
     n = 256
     amps = _uniform_amplitudes(n)
     tr = LiveFractionTracker(n)
     tr.observe_improvement(
-        int.from_bytes(collapse(amps), "big"), int.from_bytes(collapse(amps), "big")
+        int.from_bytes(collapse(amps, rng), "big"), int.from_bytes(collapse(amps, rng), "big")
     )
     assert tr.m > n // 4  # one sample already marks ~half the bits

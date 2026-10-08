@@ -48,6 +48,11 @@ from __future__ import annotations
 
 from fuzzer_tool.core.rand_pool import RandPool
 
+# Rejection-sampling cap for find_primitive_root. Primitive density
+# phi(m)/m stays well above 0.1 for any practical m, so a valid group
+# fails all draws with p < 0.9**1024 ~ 1e-47; exhaustion means no root.
+_MAX_ROOT_DRAWS = 1024
+
 
 def poly_deg(p: int) -> int:
     """Degree of a GF(2) polynomial encoded as a Python ``int``."""
@@ -194,13 +199,18 @@ def find_primitive_root(order: int, is_primitive, rng) -> int:
 
     Returns:
         A primitive element in ``[1, order)``.
+
+    Raises:
+        RuntimeError: No primitive element after :data:`_MAX_ROOT_DRAWS`
+            draws (e.g. the group is not cyclic).
     """
     if order <= 1:
         return 1
-    while True:
+    for _ in range(_MAX_ROOT_DRAWS):
         a = rng.randint(1, order - 1)
         if is_primitive(a):
             return a
+    raise RuntimeError(f"no primitive root of order {order} in {_MAX_ROOT_DRAWS} draws")
 
 
 class GF2n:
@@ -230,7 +240,8 @@ class GF2n:
         self.order = 1 << q  # |F|
         self.m = self.order - 1  # |F*|, exponent of the multiplicative group
         self.mod = modulus if modulus is not None else find_irreducible(q)
-        assert is_irreducible(self.mod, q), "supplied modulus is not irreducible"
+        if not is_irreducible(self.mod, q):
+            raise ValueError(f"modulus {self.mod:#x} is not irreducible of degree {q}")
         rng = RandPool(seed=seed)
         self._rng = rng
         self._log: list[int] | None = None  # built lazily; None => use the poly path
@@ -550,12 +561,9 @@ def compose_linear_runs(
 
     for name, masks in chain:
         if is_xor_linear(name):
-            if run_masks is None:
-                run_masks = masks
-            else:
-                # Sequential application: apply the run so far, then this
-                # step -- result(x) == masks(run_so_far(x)).
-                run_masks = compose_bitmask_maps(run_masks, masks)
+            # Sequential application: apply the run so far, then this
+            # step -- result(x) == masks(run_so_far(x)).
+            run_masks = masks if run_masks is None else compose_bitmask_maps(run_masks, masks)
             run_names.append(name)
         else:
             _flush()

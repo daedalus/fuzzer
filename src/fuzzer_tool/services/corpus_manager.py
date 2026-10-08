@@ -1166,6 +1166,12 @@ class CorpusManager:
             return
 
         trimmed = data[: len(data) // 2]
+
+        # Trimmed bytes already a seed (e.g. the parent): swapping would
+        # clobber its meta with ours, parent_key == own key -> lineage cycle.
+        if trimmed in f.seed_meta:
+            return
+
         rc, _ = f._runner.run_target(trimmed)
         if rc in (-2, -1):
             return

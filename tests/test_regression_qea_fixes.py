@@ -18,6 +18,7 @@ from fuzzer_tool.core.qea import (
     _bias_amplitudes_from,
     collapse,
 )
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 def _edge_tracker(total_edges=8, weight=1.0):
@@ -251,9 +252,10 @@ class TestBiasIsSymmetric:
         source = np.unpackbits(np.frombuffer(data, dtype=np.uint8)).mean()
 
         amps = _bias_amplitudes_from(data, strong_prob=0.9)
-        np.random.seed(0)
+        pool = RandPool(seed=0)
         densities = [
-            np.unpackbits(np.frombuffer(collapse(amps), dtype=np.uint8)).mean() for _ in range(200)
+            np.unpackbits(np.frombuffer(collapse(amps, pool), dtype=np.uint8)).mean()
+            for _ in range(200)
         ]
         assert abs(np.mean(densities) - source) < 0.02
 
