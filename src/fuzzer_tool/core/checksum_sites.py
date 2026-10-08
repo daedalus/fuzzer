@@ -17,7 +17,10 @@ patches only a trailing field; this module locates the field and the region.
 
 Limits (all deliberate):
 - Fixed algorithms only: CRC-32, Adler-32, CRC-16 (CCITT-false, XMODEM),
-  Fletcher-16, 16-bit sum. 8-bit fields match by chance too often.
+  Fletcher-16, 16-bit sum, and 8-bit XOR (LRC), sum, negated sum.
+- 8-bit fields match by chance 1 in 256, so they are tried only at the tail,
+  only over ``STARTS8`` or after a found field, and only when a nonzero
+  cmplog byte operand equals the field (the taint substitute).
 - 16-bit fields are tried only in the header window, at the tail, or where a
   cmplog operand equals the field bytes (the taint substitute). Random data
   yields a 16-bit false site in ~2-3% of seeds; 32-bit false sites: none seen.
@@ -47,6 +50,9 @@ class Algo(Enum):
     CRC16_XMODEM = "crc16_xmodem"
     FLETCHER16 = "fletcher16"
     SUM16 = "sum16"
+    XOR8 = "xor8"  # LRC: ISO 7816 TCK, many serial frames
+    SUM8 = "sum8"
+    NEG8 = "neg8"  # two's-complement sum: Modbus ASCII / Intel HEX LRC
 
 
 class Endian(Enum):
@@ -71,16 +77,21 @@ WIDTH = {
     Algo.CRC16_XMODEM: 2,
     Algo.FLETCHER16: 2,
     Algo.SUM16: 2,
+    Algo.XOR8: 1,
+    Algo.SUM8: 1,
+    Algo.NEG8: 1,
 }
 # Specific first: on a tie the earlier algorithm owns the field.
 _ALGOS_32 = (Algo.CRC32, Algo.ADLER32)
 _ALGOS_16 = (Algo.CRC16, Algo.CRC16_XMODEM, Algo.FLETCHER16, Algo.SUM16)
+_ALGOS_8 = (Algo.XOR8, Algo.SUM8, Algo.NEG8)
 
 LOCATE_MAX_LEN = 16384  # larger seeds are not scanned
 HEAD_WINDOW = 32  # 16-bit fields are tried in the first bytes
 MIN_REGION = 4  # a shorter region proves nothing
 STATIC_STARTS = (0, 4, 8, 12, 16)  # region starts tried on every seed
 NEXT_STARTS = (0, 4)  # after a found field: end, end + 4 (PNG length prefix)
+STARTS8 = (0, 1)  # 8-bit regions: whole frame, or after a start byte ('$', ':', TS)
 MAX_PASSES = 4
 MAX_SITES = 8
 MAX_HINT_HITS = 4
@@ -91,6 +102,7 @@ REPAIR_P = 0.9  # keep 10% broken so the check itself stays exercised
 _FLETCHER_MOD = 255
 _CRC16_CCITT_INIT = 0xFFFF
 _ADLER_INIT = 1
+_BYTE = 0xFF
 
 
 @dataclass(frozen=True)
@@ -117,6 +129,12 @@ def _fletcher16(data: bytes) -> int:
     return (s2 << 8) | s1
 
 
+def _xor8(data: bytes) -> int:
+    if not data:
+        return 0
+    return int(np.bitwise_xor.reduce(np.frombuffer(data, dtype=np.uint8)))
+
+
 _FUNCS: dict[Algo, Callable[[bytes], int]] = {
     Algo.CRC32: zlib.crc32,
     Algo.ADLER32: zlib.adler32,
@@ -124,6 +142,9 @@ _FUNCS: dict[Algo, Callable[[bytes], int]] = {
     Algo.CRC16_XMODEM: lambda d: binascii.crc_hqx(d, 0),
     Algo.FLETCHER16: _fletcher16,
     Algo.SUM16: lambda d: sum(d) & 0xFFFF,
+    Algo.XOR8: _xor8,
+    Algo.SUM8: lambda d: sum(d) & _BYTE,
+    Algo.NEG8: lambda d: -sum(d) & _BYTE,
 }
 
 
@@ -243,6 +264,26 @@ def _scan16(data: bytes, starts: Iterable[int], hints: Iterable[bytes]) -> list[
     return [s for s in out if s is not None]
 
 
+def _scan8(data: bytes, starts: Iterable[int], hints: Iterable[bytes]) -> list[Site]:
+    """Tail byte equal to an 8-bit checksum of ``[start, tail)``, hinted only.
+
+    A zero tail is skipped: 0x00 is the commonest operand and the checksum of
+    any pair-repeating body.
+    """
+    p = len(data) - 1
+    tail = data[p:]
+    if not data[p] or tail not in set(hints):
+        return []
+
+    out = []
+    for algo in _ALGOS_8:
+        for start in starts:
+            region = data[start:p]
+            if _region_ok(region) and checksum(algo, region) == data[p]:
+                out.append(Site(algo, Endian.BIG, Span.PREFIX, Anchor.TAIL, p, start))
+    return out
+
+
 def _suffix32(data: bytes, p: int, algo: Algo) -> Site | None:
     region = data[p + 4 :]
     if not _region_ok(region):
@@ -264,6 +305,8 @@ def _pass(data: bytes, w: _Windows, starts: set[int], hints: Iterable[bytes]) ->
         for p in range(min(HEAD_WINDOW, n - 3)):
             out.append(_suffix32(data, p, algo))
     out += _scan16(data, sorted(starts), hints)
+    # Static 16/32-bit starts are header guesses; 8-bit frames use their own.
+    out += _scan8(data, sorted(set(STARTS8) | starts - set(STATIC_STARTS)), hints)
     return [s for s in out if s is not None]
 
 
@@ -327,14 +370,36 @@ def repair(buf: bytearray, sites: Iterable[Site], parent_len: int) -> int:
     return done
 
 
+def _byte_operand(op: bytes) -> bytes | None:
+    """The byte of a nonzero operand that fits in 8 bits, either endianness.
+
+    ``uint8`` compares often reach cmplog zero-extended: ``2a 00 00 00``
+    (little) or ``00 00 00 2a`` (big) both yield ``b"\\x2a"``.
+    """
+    for byte in (op.lstrip(b"\0"), op.rstrip(b"\0")):
+        if len(byte) == 1:
+            return byte
+    return None
+
+
 def hint_operands(pairs: Iterable[tuple[bytes, bytes]] | None) -> list[bytes]:
-    """16-bit cmplog operands: a compared field that came from the input."""
-    out: list[bytes] = []
+    """Cmplog operands that may be a compared input field.
+
+    16-bit operands as-is, then distinct nonzero byte values (see
+    ``_byte_operand``); each kind capped at ``MAX_HINTS``.
+    """
+    wide: list[bytes] = []
+    narrow: dict[bytes, None] = {}
     for pair in pairs or ():
-        out += [op for op in pair if len(op) == 2]
-        if len(out) >= MAX_HINTS:
+        for op in pair:
+            byte = _byte_operand(op)
+            if byte is not None and len(narrow) < MAX_HINTS:
+                narrow[byte] = None
+            if len(op) == 2 and len(wide) < MAX_HINTS:
+                wide.append(op)
+        if len(wide) >= MAX_HINTS and len(narrow) >= MAX_HINTS:
             break
-    return out[:MAX_HINTS]
+    return wide + list(narrow)
 
 
 class SiteBook:

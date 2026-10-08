@@ -351,6 +351,8 @@ class TestRegularityOperators:
             "div_trap",
             "same_popcount_next",
             "same_popcount_prev",
+            "parity_lock",
+            "parity_break",
         }
     )
 
