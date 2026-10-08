@@ -1576,6 +1576,7 @@ class Fuzzer:
         op_span_reverse=False,
         op_span_relocate=False,
         op_append=False,
+        op_line_code=False,
         checksum_sites=False,
         grimoire=False,
         grimoire_max_execs=512,
@@ -2036,6 +2037,10 @@ class Fuzzer:
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate
         self.op_append = op_append
+        self.op_line_code = op_line_code
+        from fuzzer_tool.core.rq_encodings import LineEncoders, set_line_encoders  # noqa: PLC0415
+
+        set_line_encoders(LineEncoders.ON if op_line_code else LineEncoders.OFF)
         self.checksum_sites = checksum_sites
         self.grimoire = grimoire
         self.grimoire_max_execs = grimoire_max_execs

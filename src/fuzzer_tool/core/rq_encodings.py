@@ -18,6 +18,7 @@ import logging
 import struct
 import zlib
 from collections.abc import Callable
+from enum import Enum
 from itertools import product
 
 import numpy as np
@@ -25,6 +26,7 @@ import numpy as np
 from fuzzer_tool.core.gf2_common import apply_bitmask_map, invert_bitmask_map
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
+from fuzzer_tool.core.mutations.line_code import CODECS as _LINE_CODECS
 
 log = logging.getLogger(__name__)
 
@@ -585,6 +587,39 @@ class Fnv1aEncoder(Encoder):
 # ── Engine ─────────────────────────────────────────────────────────────
 
 
+#   input  man(b"MAGI")  --decode-->  b"MAGI"  ==  b"WXYZ"
+#   search man(b"MAGI");  write man(b"WXYZ")
+#
+# Stateless codes only: diff Manchester, BMC, NRZI and bit stuffing depend on
+# line state left by earlier bytes, so one operand has no fixed spelling.
+_LINE_STATELESS = ("man_ieee", "man_thomas", "gray")
+_LINE_MIN_OPERAND = 2  # one coded byte pair matches by accident
+_LINE_MAX_OPERAND = 16  # Manchester doubles it
+
+
+class LineCodeEncoder(Encoder):
+    """Line-coded bytes (Manchester, Gray) decoded before a compare."""
+
+    value_only = True  # decoded frames are matched for equality, not ranges
+
+    def __init__(self, codec: str, rev: bool = False):
+        self._codec = next(c for c in _LINE_CODECS if c.name == codec)
+        self.rev = rev
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        # Strings decode into a buffer (memcmp order); integers are shifted
+        # in MSB-first, so the wire holds the little-endian operand reversed.
+        if self.rev != (cmp_type != "STR"):
+            return False
+        return _LINE_MIN_OPERAND <= len(lhs) <= _LINE_MAX_OPERAND
+
+    def encode(self, val):
+        return [self._codec.enc(_reverse_if(val, self.rev))]
+
+    def name(self):
+        return f"line_{self._codec.name}{'_r' if self.rev else ''}"
+
+
 # All built-in encoders.
 # Mirrors the Encoders list in Redqueen encoding.py lines 235-242.
 BUILTIN_ENCODERS: list[Encoder] = []
@@ -633,6 +668,30 @@ MAX_MUTATIONS_PER_PAIR = 256
 # LRU-bounded so stale cmplog pairs age out while hot ones stay.
 _RQ_MUTATIONS_CACHE_MAX = 20000
 _rq_mutations_cache: LRUCache = LRUCache(_RQ_MUTATIONS_CACHE_MAX)
+
+
+# Line-code encoders cost one input scan each per cmplog pair, so they are
+# armed only with --op-line-code (Fuzzer construction sets the state).
+_LINE_ENCODERS = tuple(LineCodeEncoder(c, rev) for c in _LINE_STATELESS for rev in (False, True))
+
+
+class LineEncoders(Enum):
+    OFF = 0
+    ON = 1
+
+
+def set_line_encoders(state: LineEncoders) -> None:
+    """Add or remove the line-code encoders; idempotent."""
+    armed = _LINE_ENCODERS[0] in BUILTIN_ENCODERS
+    if armed == (state is LineEncoders.ON):
+        return
+
+    if state is LineEncoders.ON:
+        BUILTIN_ENCODERS.extend(_LINE_ENCODERS)
+    else:
+        BUILTIN_ENCODERS[:] = [e for e in BUILTIN_ENCODERS if e not in _LINE_ENCODERS]
+    # Cached pairs hold the old applicable-encoder set.
+    _rq_mutations_cache.clear()
 
 
 def find_offsets(data: bytes, pattern: bytes) -> list[int]:

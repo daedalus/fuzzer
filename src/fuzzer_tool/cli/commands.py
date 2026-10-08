@@ -952,6 +952,7 @@ def cmd_fuzz(args):
         op_afl_det=getattr(args, "op_afl_det", False),
         op_span_relocate=getattr(args, "op_span_relocate", False),
         op_append=getattr(args, "op_append", False),
+        op_line_code=getattr(args, "op_line_code", False),
         checksum_sites=getattr(args, "checksum_sites", False),
         grimoire=getattr(args, "grimoire", False),
         grimoire_max_execs=getattr(args, "grimoire_max_execs", 512),
@@ -2335,6 +2336,7 @@ _HAIL_MARY_FLAGS = (
     "op_span_reverse",
     "op_span_relocate",
     "op_append",
+    "op_line_code",
     "checksum_sites",
     "grimoire",
     "op_afl_det",
@@ -5667,6 +5669,14 @@ def main() -> int:
         help=(
             "Enable tail_append mutation operator (append random bytes at the "
             "end only; for linear instruction inputs). Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--op-line-code",
+        action="store_true",
+        help=(
+            "Enable line_code mutation operator (Manchester, BMC, NRZI, Gray, "
+            "HDLC/USB bit stuffing, 4B5B, PPP/SLIP/COBS). Off by default."
         ),
     )
     fuzz_parser.add_argument(

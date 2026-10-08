@@ -138,6 +138,8 @@ _CATEGORIES: dict[str, set[str]] = {
         "encoding_wrap",
         "escape_mutate",
         "ascii_float",
+        # Line codes (--op-line-code): Manchester, NRZI, bit/byte stuffing
+        "line_code",
         # Grimoire (--grimoire): token recombination from generalized inputs
         "grimoire_extend",
         "grimoire_recurse",
@@ -791,6 +793,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "span_relocate": lambda f, _d: bool(getattr(f, "op_span_relocate", False)),
     # Append-only insert for linear instruction inputs; --op-append
     "tail_append": lambda f, _d: bool(getattr(f, "op_append", False)),
+    # Manchester and friends; --op-line-code
+    "line_code": lambda f, _d: bool(getattr(f, "op_line_code", False)),
     # Grimoire (--grimoire): extend/string need generalized inputs in the book;
     # recurse also needs this parent to be one of them.
     "grimoire_extend": lambda f, _d: _grimoire_book(f) is not None and _grimoire_book(f).seeds > 0,
