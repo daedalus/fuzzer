@@ -2180,6 +2180,11 @@ def cmd_sweep(args):
 # one_fifth (--one-fifth) is excluded: it scales -M, which --slopt (in this
 # tuple) replaces, so under --hail-mary it would be a silent no-op.
 #
+# continue_until_crash and file_mode (-F) are excluded: a stop condition and
+# an input-delivery switch, not strategies. The first ended a --max-execs 1200
+# run at its first crash (473 execs); -F passes the input as argv[1], so a
+# stdin-only target never saw a mutant.
+#
 # touched_scan (--touched-scan) is excluded: a coverage-read implementation,
 # not a strategy, and measured slower at 8192-entry maps.
 #
@@ -2188,13 +2193,11 @@ def cmd_sweep(args):
 # --hail-mary nothing was admitted and the EdgeTracker froze.
 #
 _HAIL_MARY_FLAGS = (
-    "continue_until_crash",
     "isolate_crash_fields",
     "crash_symbolize",
     "deep_coverage",
     "ptrace",
     "adaptive_timeout",
-    "file_mode",
     "markov",
     "markov_gen",
     "markov_blend",

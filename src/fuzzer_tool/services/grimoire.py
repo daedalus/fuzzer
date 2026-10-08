@@ -56,6 +56,10 @@ class GrimoireStage:
         while len(self._novel) > _TABLE_MAX:
             self._novel.popitem(last=False)
 
+    def budget(self, data: bytes) -> int:
+        """Rounds a seed must earn before generalizing (2 * len, capped)."""
+        return min(2 * len(data), self._max_execs)
+
     def generalize(self, data: bytes) -> int:
         """Generalize ``data`` once; returns the executions spent."""
         if not data or len(data) > GENERALIZE_MAX_LEN:

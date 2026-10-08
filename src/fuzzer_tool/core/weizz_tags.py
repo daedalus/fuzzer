@@ -708,13 +708,29 @@ def _tag_stats(tags: list[ByteTag]) -> tuple[int, int]:
 
 
 # One plan per pool: (candidates, cmp_id, counter, shape) in claim order,
-# plus cmp_id -> counter. Keyed like scanner_for_pairs (owner identity +
-# length): per-call planning cost ~850 pairs of work per Weizz mutation.
+# cmp_id -> counter, and operand -> plan indices. Keyed like scanner_for_pairs
+# (owner identity + length). The index lets a call visit only the entries
+# whose operands occur in the input: scanning every entry cost 23 s per 2.5k
+# --hail-mary execs at a ~4k-pair pool.
 _PlanEntry = tuple[list[tuple[bytes, str]], int, int, _Shape]
-_Plan = tuple[list[_PlanEntry], dict[int, int]]
+_Plan = tuple[list[_PlanEntry], dict[int, int], dict[bytes, list[int]]]
 _plan_key: tuple | None = None
 _plan_owner: object | None = None
-_plan: _Plan = ([], {})
+_plan: _Plan = ([], {}, {})
+
+# Pair -> shape, kept across plan rebuilds: the pool mostly persists when it
+# grows or evicts. Cleared, not LRU-trimmed, past the cap (bounded memory).
+_SHAPE_CACHE_MAX = 1 << 16
+_shape_cache: dict[tuple[bytes, bytes], _Shape] = {}
+
+
+def _cached_shape(op_a: bytes, op_b: bytes) -> _Shape:
+    shape = _shape_cache.get((op_a, op_b))
+    if shape is None:
+        if len(_shape_cache) >= _SHAPE_CACHE_MAX:
+            _shape_cache.clear()
+        shape = _shape_cache[(op_a, op_b)] = _pair_shape(op_a, op_b)
+    return shape
 
 
 def _tag_plan(
@@ -735,6 +751,7 @@ def _tag_plan(
     pcs = pair_pcs or {}
     counter_by_id: dict[int, int] = {}
     plan: list[_PlanEntry] = []
+    by_op: dict[bytes, list[int]] = {}
     # Shorter / more specific operands claim bytes first.
     for op_a, op_b in sorted(pairs, key=_pair_key):
         if not op_a and not op_b:
@@ -746,11 +763,14 @@ def _tag_plan(
 
         cid = _stable_cmp_id(op_a, op_b, pcs.get((op_a, op_b)))
         counter = counter_by_id.setdefault(cid, len(counter_by_id) + 1)
-        plan.append((candidates, cid, counter, _pair_shape(op_a, op_b)))
+        for op, _side in candidates:
+            by_op.setdefault(op, []).append(len(plan))
+        plan.append((candidates, cid, counter, _cached_shape(op_a, op_b)))
 
+    built = (plan, counter_by_id, by_op)
     if pair_pcs:
-        return plan, counter_by_id
-    _plan_owner, _plan_key, _plan = pairs, key, (plan, counter_by_id)
+        return built
+    _plan_owner, _plan_key, _plan = pairs, key, built
     return _plan
 
 
@@ -803,11 +823,12 @@ def build_tag_map_from_cmplog(
     # map identical byte for byte.
     offsets = scanner_for_pairs(pairs).scan(data, min_len=cfg.min_operand_len)
 
-    plan, counter_by_id = _tag_plan(pairs, pair_pcs, cfg)
-    for candidates, cid, counter, shape in plan:
-        # A pair with no operand in the input claims nothing.
-        if not any(op in offsets for op, _side in candidates):
-            continue
+    plan, counter_by_id, by_op = _tag_plan(pairs, pair_pcs, cfg)
+    # Only entries with an operand in the input can claim; sorted indices
+    # keep plan (claim) order.
+    hits = sorted({i for op in offsets for i in by_op.get(op, ())})
+    for i in hits:
+        candidates, cid, counter, shape = plan[i]
         _claim_pair(
             tags,
             candidates,

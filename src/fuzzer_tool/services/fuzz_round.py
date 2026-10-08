@@ -166,6 +166,7 @@ class FuzzRound:
         self._search_fixpoint()
         self._generalize()
         self._colorize()
+        self._sensitize()
         self._execute()
         self._mine_cmplog()
         self._periodic()
@@ -203,13 +204,16 @@ class FuzzRound:
         fixpoint.search(self._data)
 
     def _generalize(self) -> None:
-        # --grimoire: the stage generalizes each tracked seed once. Not gated
-        # on fuzz_count: other paths bump it before a first round, which
-        # would leave those seeds ungeneralized forever. Before _execute for
-        # the same reason as _search_fixpoint: the stage's runs must not
-        # overwrite this round's coverage.
+        # --grimoire: the stage generalizes each tracked seed once, after the
+        # seed has had as many rounds as its budget (like _colorize): on the
+        # first round it spent 38% of a 3k-exec --hail-mary budget. >=, not
+        # ==: other paths bump fuzz_count before a first round. Before
+        # _execute for the same reason as _search_fixpoint: the stage's runs
+        # must not overwrite this round's coverage.
         stage = getattr(self._f, "_grimoire", None)
         if stage is None or self._meta is None:
+            return
+        if self._meta["fuzz_count"] < stage.budget(self._data):
             return
         stage.generalize(self._data)
 
@@ -224,6 +228,28 @@ class FuzzRound:
         if self._meta["fuzz_count"] < f._colorize_budget(self._data):
             return
         f._colorize_seed(self._data)
+
+    def _sensitize(self) -> None:
+        # --sensitivity: probe the parent's bytes once it has had as many
+        # rounds as the probes cost (like _colorize); probing each admission
+        # at once spent 19% of a 3k-exec --hail-mary budget. Before _execute:
+        # the probes overwrite the coverage map.
+        f = self._f
+        if not (f._use_sensitivity and f.shm_cov) or self._meta is None:
+            return
+        data = self._data
+        tracker = f._sensitivity
+        if self._meta["fuzz_count"] < tracker.cost(data) or tracker.analyzed(data):
+            return
+        edges = f._edge_tracker.seed_edges.get(f._seed_key(data))
+        if not edges:
+            return
+
+        def _exec_fn(candidate: bytes) -> set[int]:
+            f._run_target(candidate)
+            return f.shm_cov.get_edge_ids() if f.shm_cov else set()
+
+        tracker.analyze_seed(data, edges, _exec_fn)
 
     def _begin(self) -> None:
         f = self._f
@@ -1950,7 +1976,6 @@ class FuzzRound:
         self._note_novelty()
         f._record_entropy_gradient_credit(mutated, data, _corpus_len_before)
         self._feed_population()
-        self._analyze_sensitivity()
         self._probe_uninit()
         # Coverage-guided trimming: try to minimize inputs that hit new edges
         if self._has_new_coverage and len(mutated) > 10:
@@ -2000,25 +2025,6 @@ class FuzzRound:
             )
             if qea_ind is not None:
                 f.qea.add_to_population(qea_ind)
-
-    def _analyze_sensitivity(self) -> None:
-        # Analyze byte sensitivity for seeds that found new coverage (optional)
-        f = self._f
-        if not (self._has_new_coverage and f.shm_cov and f._use_sensitivity):
-            return
-        try:
-            edges = f.shm_cov.get_edge_ids()
-            if edges:
-
-                def _exec_fn(data):
-                    rc, _ = f._run_target(data)
-                    if f.shm_cov:
-                        return f.shm_cov.get_edge_ids()
-                    return set()
-
-                f._sensitivity.analyze_seed(self._mutated, edges, _exec_fn)
-        except Exception:
-            pass
 
     def _on_boring(self) -> bool:
         f = self._f

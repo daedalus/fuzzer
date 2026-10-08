@@ -12,6 +12,8 @@ from fuzzer_tool.core.grimoire import GAP, GrimoireBook, strip
 from fuzzer_tool.services.grimoire import GrimoireStage
 from tests.support.scripted_rng import ScriptedRng
 
+MAX_EXECS = 512
+
 
 def _contains(token):
     return lambda cand: token in cand
@@ -520,17 +522,34 @@ class TestRoundHooks:
         r._begin()
         return f, r
 
-    @pytest.mark.parametrize("fuzz_count", [0, 1, 2, 7])
-    def test_every_round_offers_the_seed_to_the_stage(self, fuzz_count):
-        # Other paths bump fuzz_count before a first FuzzRound, so the round
-        # must not gate on it; the stage owns once-per-seed.
+    @pytest.mark.parametrize("earned", [0, 1, 7])
+    def test_seed_that_earned_its_budget_is_offered(self, earned):
+        # Gated on fuzz_count >= budget, not == : other paths bump fuzz_count
+        # before a first FuzzRound, which only lets a seed pass sooner.
         from unittest.mock import MagicMock
 
         stage = MagicMock()
-        _, r = self._round(fuzz_count, stage)
+        stage.budget.return_value = 4
+        _, r = self._round(4 + earned - 1, stage)  # _begin adds the round
         r._generalize()
 
         stage.generalize.assert_called_once_with(b"seed")
+
+    def test_regression_fresh_seed_not_generalized(self):
+        """Generalizing on the first round spent 38% of a 3k-exec --hail-mary budget."""
+        from unittest.mock import MagicMock
+
+        stage = MagicMock()
+        stage.budget.return_value = 4
+        _, r = self._round(2, stage)  # third round, budget four
+        r._generalize()
+
+        stage.generalize.assert_not_called()
+
+    def test_budget_is_twice_the_length_capped(self):
+        stage = GrimoireStage(lambda cand: (), max_execs=MAX_EXECS, max_len=1 << 16)
+        assert stage.budget(b"x" * 10) == 20
+        assert stage.budget(b"x" * MAX_EXECS) == MAX_EXECS
 
     def test_seed_without_meta_is_not_generalized(self):
         from unittest.mock import MagicMock
