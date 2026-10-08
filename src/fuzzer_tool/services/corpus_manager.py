@@ -1175,6 +1175,7 @@ class CorpusManager:
         rc, _ = f._runner.run_target(trimmed)
         if rc in (-2, -1):
             return
+        trimmed_dist = f._exec_distance()
 
         trimmed_edges = self._edge_snapshot()
         if trimmed_edges is None:
@@ -1223,6 +1224,12 @@ class CorpusManager:
                 "added_at": clock_of(f).time(),
                 "lineage_depth": orig_meta.get("lineage_depth", 0) + 1,
             }
+            # Directed distance, as admission tags it: the trimmed run's own
+            # measurement, else the original's (same trace, same blocks).
+            if trimmed_dist is None:
+                trimmed_dist = orig_meta.get("avg_distance")
+            if trimmed_dist is not None:
+                f.seed_meta[trimmed]["avg_distance"] = trimmed_dist
             # The trimmed seed inherits the original's lineage edge so the
             # crash-path chain stays intact across the trim point, with a
             # synthetic ("trim", cut_point) operation appended.

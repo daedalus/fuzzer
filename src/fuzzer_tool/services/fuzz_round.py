@@ -1332,8 +1332,8 @@ class FuzzRound:
         # Compute directed distance for targeted fuzzing.  Prefer the
         # runtime average from the SHM tail (AFLGo channel, exact per-BB
         # distances accumulated in the target) when the target carries
-        # the distance table; otherwise derive it in Python from the
-        # edge trace.
+        # the distance table; otherwise, on new coverage, the ptrace block
+        # addresses. Edge ids are hashes, never blocks: no other source.
         # The value is the MUTANT's: held on the round and attached to the
         # mutant's seed_meta on admission (_tag_distance), never the parent's.
         f = self._f
@@ -1346,15 +1346,9 @@ class FuzzRound:
             return
         if not self._has_new_coverage:
             return
-        hit_bbs = self._edges_now()
-        if not hit_bbs:
+        avg_dist = f._block_distance()
+        if avg_dist is None:
             return
-        # Record edge trace for distance computation
-        seed_key = f._seed_key(self._data)
-        edge_pairs = {(i, i) for i in hit_bbs}  # self-loops as BB proxies
-        f._edge_tracker.record_edge_trace(seed_key, edge_pairs)
-        # Compute average distance
-        avg_dist = f._distance.seed_distance({(i, i) for i in hit_bbs})
         self._distance = avg_dist
         if avg_dist < _NO_VALUE_DISTANCE:  # exclude the no-valued-blocks sentinel
             self._note_distance(avg_dist)

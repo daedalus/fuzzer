@@ -66,6 +66,10 @@ class _FakeFuzzer:
     def get_seed_edge_count(self, key):
         return 3
 
+    # not directed: trim_new_coverage measures no distance
+    def _exec_distance(self):
+        return None
+
 
 @pytest.fixture
 def fuzzer(tmp_path):

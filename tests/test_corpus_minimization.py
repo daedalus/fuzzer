@@ -76,6 +76,10 @@ class MockFuzzer:
         # reads this in save_to_corpus/trim_new_coverage.
         self._use_lineage = False
 
+    def _exec_distance(self):
+        """Not directed: trim_new_coverage measures no distance."""
+        return None
+
     def mean_exec_time(self) -> float:
         """Corpus-wide mean target time per execution, in seconds.
 

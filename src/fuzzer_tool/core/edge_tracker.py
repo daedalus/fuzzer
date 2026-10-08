@@ -849,8 +849,6 @@ class EdgeTracker:
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig: array | None = None
         self._corpus_profile_cache: dict[float, float] | None = None
-        # Per-seed edge traces for directed distance: seed_key -> set of (prev, curr) edges
-        self.seed_edge_traces: dict[str, set[tuple[int, int]]] = {}
         # Per-target cumulative edge sets: target_name -> set of edge indices
         self.target_cumulative_edges: dict[str, set[int]] = {}
         # Per-seed per-target edge sets: seed_key -> {target_name: set of edges}
@@ -1226,7 +1224,6 @@ class EdgeTracker:
             self._global_edge_hits.clear()
         self.seed_edges.clear()
         self.seed_hit_counts.clear()
-        self.seed_edge_traces.clear()
         if isinstance(self._aggregate_totals, _DenseEdgeCounter):
             self._aggregate_totals = _DenseEdgeCounter(new_map_size)
         else:
@@ -1322,7 +1319,6 @@ class EdgeTracker:
         for key in keys_to_prune:
             self.seed_edges.pop(key, None)
             self.seed_hit_counts.pop(key, None)
-            self.seed_edge_traces.pop(key, None)
             self.seed_target_edges.pop(key, None)
             self.seed_stack_depth.pop(key, None)
             self.seed_path_hash.pop(key, None)
@@ -1720,22 +1716,6 @@ class EdgeTracker:
             result["method"] = "fallback_fit_failed"
 
         return result
-
-    def record_edge_trace(self, seed_key: str, edges: set[tuple[int, int]]):
-        """Record the (prev, curr) edge trace for a seed.
-
-        Used by directed distance computation to know which basic blocks
-        a seed's execution passed through.
-
-        Args:
-            seed_key: Hash of the seed input.
-            edges: Set of (prev_edge_index, curr_edge_index) pairs.
-        """
-        if edges:
-            if seed_key in self.seed_edge_traces:
-                self.seed_edge_traces[seed_key].update(edges)
-            else:
-                self.seed_edge_traces[seed_key] = set(edges)
 
     def compute_subsumption_weight(self, seed_key: str) -> float:
         """Fraction of this seed's edges that no other corpus seed covers.
@@ -3339,7 +3319,6 @@ class EdgeTracker:
             "minhash_sigs": {k: sig.tolist() for k, sig in self._minhash.signatures.items()},
             "aggregate_totals": {str(e): c for e, c in self._aggregate_totals.items()},
             "aggregate_total_count": self._aggregate_total_count,
-            "edge_traces": {k: [list(e) for e in v] for k, v in self.seed_edge_traces.items()},
             "edge_first_seen": {str(e): c for e, c in self._edge_first_seen.items()},
             "edge_last_seen": {str(e): c for e, c in self._edge_last_seen.items()},
             "coverage_timeline": [
@@ -3375,9 +3354,6 @@ class EdgeTracker:
         self._spectrum_dirty = True
         self._aggregate_cache = None
         self._restore_aggregates(data)
-        self.seed_edge_traces = {
-            k: {(e[0], e[1]) for e in v} for k, v in data.get("edge_traces", {}).items()
-        }
         self._edge_first_seen = _int_keyed(data.get("edge_first_seen", {}))
         self._frontier_cache = None
         self._zipf_cache = None
