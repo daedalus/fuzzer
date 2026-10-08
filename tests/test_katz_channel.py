@@ -25,7 +25,7 @@ def _icfg(n=4):
 
 def _channel():
     ch = KatzChannel(_icfg(), {k: k for k in range(4)})
-    # No SHM attached: sample() must degrade to None rather than crash.
+    # No SHM attached: observe() must degrade to False rather than crash.
     return ch
 
 
@@ -37,8 +37,8 @@ def _bits(idxs, n=4):
 
 
 class TestSamplingAndMasks:
-    def test_sample_without_shm_is_none(self):
-        assert _channel().sample() is None
+    def test_observe_without_shm_is_false(self):
+        assert _channel().observe() is False
 
     def test_record_accumulates_hits_and_masks(self):
         ch = _channel()

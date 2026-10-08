@@ -56,6 +56,7 @@ from fuzzer_tool.core.mutations import (
     splice_diff_located,
 )
 from fuzzer_tool.core.mutations.afl_det import det_variant
+from fuzzer_tool.core.mutations.murmur3 import murmur3_chain
 from fuzzer_tool.core.mutations.structured import _region
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
@@ -2491,43 +2492,9 @@ class OperatorEngine:
 
         seed = rng.randint(0, 0xFFFFFFFF)
 
-        def murmur3_32(data, seed=0):
-            c1, c2 = 0xCC9E2D51, 0x1B873593
-            h = seed
-            nblocks = len(data) // 4
-            for i in range(nblocks):
-                k = struct.unpack_from("<I", data, i * 4)[0]
-                k = (k * c1) & 0xFFFFFFFF
-                k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
-                k = (k * c2) & 0xFFFFFFFF
-                h ^= k
-                h = ((h << 13) | (h >> 19)) & 0xFFFFFFFF
-                h = (h * 5 + 0xE6546B64) & 0xFFFFFFFF
-            tail = data[nblocks * 4 :]
-            k = 0
-            for i, b in enumerate(tail):
-                k ^= b << (i * 8)
-            if k:
-                k = (k * c1) & 0xFFFFFFFF
-                k = ((k << 15) | (k >> 17)) & 0xFFFFFFFF
-                k = (k * c2) & 0xFFFFFFFF
-                h ^= k
-            h ^= len(data)
-            h ^= h >> 16
-            h = (h * 0x85EBCA6B) & 0xFFFFFFFF
-            h ^= h >> 13
-            h = (h * 0xC2B2AE35) & 0xFFFFFFFF
-            h ^= h >> 16
-            return h
-
         out = bytearray(buf)
         hash_input = bytes(buf[:offset]) if offset > 0 else b"\x00"
-        for i in range(0, length, 4):
-            h = murmur3_32(hash_input, seed ^ i)
-            block = struct.pack("<I", h)
-            for j in range(min(4, length - i)):
-                out[offset + i + j] = block[j]
-            hash_input = bytes(out[offset : offset + i + 4])
+        out[offset : offset + length] = murmur3_chain(hash_input, length, seed)
         buf[:] = out[: self.ctx.max_len]
         return buf
 
