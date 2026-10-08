@@ -1475,6 +1475,17 @@ class NodeBitmapShm:
         ctypes.memset(self._ptr + 4, 0, self.size_bytes)
         return buf
 
+    def read_into(self, out: np.ndarray) -> None:
+        """``read_and_clear`` into a caller-owned buffer, allocating nothing.
+
+        *out* is C-contiguous ``uint8`` with at least ``size_bytes`` slots.
+        Under an in-process ASAN target every Python allocation goes through
+        ASAN's allocator; a fresh 395 KB copy per execution (ffmpeg) cost
+        ~0.25 ms there against 0.01 ms without it.
+        """
+        ctypes.memmove(out.ctypes.data, self._ptr + 4, self.size_bytes)
+        ctypes.memset(self._ptr + 4, 0, self.size_bytes)
+
     def cleanup(self):
         if self._ptr:
             libc_shm.shmdt(self._ptr)

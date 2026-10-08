@@ -1049,10 +1049,8 @@ class FuzzRound:
         f = self._f
         if getattr(f, "_katz_channel", None) is None:
             return
-        bits = f._katz_channel.sample()
-        if bits is not None and bits.any():
-            katz_key = f._seed_key(self._data) if self._has_new_coverage else None
-            f._katz_channel.record(bits, seed_key=katz_key)
+        katz_key = f._seed_key(self._data) if self._has_new_coverage else None
+        f._katz_channel.observe(seed_key=katz_key)
 
     def _feed_entropic(self) -> None:
         # Every exec, crashes and timeouts included: each mutant spends the

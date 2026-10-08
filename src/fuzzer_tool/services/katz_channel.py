@@ -8,7 +8,7 @@ solver all assume:
    segment exported via ``__AFL_NODE_BITMAP_ID``. Only viable on trace-pc
    targets; returns None otherwise so non-instrumented campaigns are
    untouched.
-2. **sample/record** — Python reads-and-clears the bitmap after EVERY
+2. **observe/record** — Python reads-and-clears the bitmap after EVERY
    execution (eager C-side writes need no destructor). Global per-node
    hit counts feed β; per-seed OR-accumulated masks feed V and seed
    attachment. Masks are keyed by the same content hash EdgeTracker uses.
@@ -39,6 +39,9 @@ log = logging.getLogger(__name__)
 # new-coverage dirtiness alone would recompute every exec early on).
 _RECOMPUTE_MIN_INTERVAL = 50
 
+# Bit offsets within one 64-bit bitmap word, for observe()'s node ids.
+_WORD_LANES = np.arange(64, dtype=np.int64)
+
 # Ceiling on the share of wall time the recompute may consume. The exec
 # interval bounds *how often* it runs; this bounds *what it costs*, which is
 # the quantity that actually varies — by two orders of magnitude between a
@@ -64,6 +67,8 @@ class KatzChannel:
         self.n_nodes = icfg.n_nodes
         self.hit_counts = np.zeros(self.n_nodes, dtype=np.float64)
         self._masks: dict[str, bytes] = {}
+        # observe()'s reusable bitmap snapshot, padded to whole 64-bit words.
+        self._snap: np.ndarray | None = None
         self.table_shm = None
         self.bmp = None
         self._horizon: HorizonGraph | None = None
@@ -175,17 +180,45 @@ class KatzChannel:
 
     # ── sampling ─────────────────────────────────────────────────────
 
-    def sample(self) -> np.ndarray | None:
-        """Read-and-clear one execution's bitmap; None without a channel."""
+    def observe(self, seed_key: str | None = None) -> bool:
+        """Read-and-clear one execution's bitmap and record it; False if empty.
+
+        Sparse: an execution sets ~900 of ffmpeg's 3.16M node bits, ~485 of
+        49k words. Only nonzero 64-bit words are unpacked, into the node ids
+        they name; the per-seed mask is the packed snapshot itself. The dense
+        path (unpack 3.16M bits, flatnonzero over them, packbits for the
+        mask) allocated ~3.5 MB per execution: 2.9 ms under the in-process
+        ASAN allocator, 1.1 ms here.
+        """
         if self.bmp is None:
-            return None
-        buf = self.bmp.read_and_clear()
-        # view, not astype: unpackbits already yields 0/1 bytes; the copy
-        # cost ~5 ms per exec at ffmpeg's 3M nodes.
-        bits = np.unpackbits(np.frombuffer(buf, dtype=np.uint8), bitorder="little")[
-            : self.n_nodes
-        ].view(bool)
-        return bits
+            return False
+
+        # Word-padded snapshot, reused across executions (allocates nothing).
+        size = self.bmp.size_bytes
+        if self._snap is None or self._snap.size < size:
+            self._snap = np.zeros((size + 7) // 8 * 8, dtype=np.uint8)
+        snap = self._snap
+        self.bmp.read_into(snap)
+
+        # Node ids of the set bits, nonzero words only; e.g. word 3 with
+        # bits 0 and 5 set -> nodes 192 and 197.
+        words = snap.view(np.uint64)
+        hot = np.flatnonzero(words)
+        bits = np.unpackbits(words[hot].view(np.uint8), bitorder="little").view(bool)
+        nodes = (hot[:, None] * 64 + _WORD_LANES).ravel()[bits]
+
+        # The shim bounds-checks against size_bytes * 8: drop padding bits.
+        nodes = nodes[nodes < self.n_nodes]
+        if not nodes.size:
+            return False
+
+        self.hit_counts[nodes] += 1.0
+        if seed_key is not None:
+            if self.n_nodes % 8:
+                snap[size - 1] &= (1 << (self.n_nodes % 8)) - 1
+            self._merge_mask(seed_key, snap[:size])
+        self.exec_count += 1
+        return True
 
     def record(self, bits: np.ndarray, seed_key: str | None = None):
         """Accumulate one execution: global hits always, per-seed mask only
@@ -194,18 +227,19 @@ class KatzChannel:
         # node (3M on ffmpeg) cost ~25 ms per exec for ~1% set bits.
         self.hit_counts[np.flatnonzero(bits)] += 1.0
         if seed_key is not None:
-            packed = np.packbits(bits, bitorder="little").tobytes()
-            old = self._masks.get(seed_key)
-            if old is None:
-                self._masks[seed_key] = packed
-            else:
-                cur = np.frombuffer(old, dtype=np.uint8)
-                self._masks[seed_key] = np.bitwise_or(
-                    cur, np.frombuffer(packed, dtype=np.uint8)
-                ).tobytes()
-            # New OR merged bits change V / seed attachment either way.
-            self._dirty = True
+            self._merge_mask(seed_key, np.packbits(bits, bitorder="little"))
         self.exec_count += 1
+
+    def _merge_mask(self, seed_key: str, packed: np.ndarray):
+        """OR one execution's packed node bits into *seed_key*'s mask."""
+        old = self._masks.get(seed_key)
+        if old is None:
+            self._masks[seed_key] = packed.tobytes()
+        else:
+            cur = np.frombuffer(old, dtype=np.uint8)
+            self._masks[seed_key] = np.bitwise_or(cur, packed).tobytes()
+        # New OR merged bits change V / seed attachment either way.
+        self._dirty = True
 
     # ── scores ───────────────────────────────────────────────────────
 
