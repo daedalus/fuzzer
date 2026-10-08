@@ -37,6 +37,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
+from functools import lru_cache
 
 import xxhash
 
@@ -46,6 +47,12 @@ from fuzzer_tool.core.schedulers.pos_base import Outcome
 
 MAX_BINS = 4096  # offsets per seed are binned down to this, as pos_burn_front
 MAX_SEEDS = 256  # LRU bound on per-seed bandits
+
+
+@lru_cache(maxsize=64)
+def _bin_names(num_bins: int) -> list[str]:
+    """Arm names "0".."num_bins-1", built once per size (select_op only reads)."""
+    return [str(b) for b in range(num_bins)]
 
 
 @dataclass
@@ -83,7 +90,7 @@ class PositionKLDUCBScheduler:
         bandit = self._bandit_for(data)
         num_bins = max(1, -(-len(data) // bandit.width)) if data else 1
 
-        arm = bandit.ucb.select_op([str(b) for b in range(num_bins)])
+        arm = bandit.ucb.select_op(_bin_names(num_bins))
         if not arm:
             return self._rng.randint(0, buf_len - 1)
 

@@ -226,13 +226,34 @@ class CrashMITracker:
 
         return max(0.0, mi_val)
 
+    def _mi_rows(self, rows) -> list[float]:
+        """mi() for each of *rows* at once (equal up to summation order)."""
+        n, crashes = self.total_execs, self.total_crashes
+        if n == 0 or crashes == 0 or crashes == n:
+            return [0.0] * len(rows)
+        p_crash = crashes / n
+        p_no_crash = 1.0 - p_crash
+        total = self._byte_total_arr[rows].astype(_np.float64)
+        crash = self._joint_crash_arr[rows].astype(_np.float64)
+        p_x = total / n
+        with _np.errstate(divide="ignore", invalid="ignore"):
+            terms = _np.zeros_like(total)
+            for count, p_class in ((crash, p_crash), (total - crash, p_no_crash)):
+                p_xy = count / n
+                live = count > 0
+                terms[live] += p_xy[live] * _np.log2(p_xy[live] / (p_x[live] * p_class))
+        return _np.maximum(terms.sum(axis=1), 0.0).tolist()
+
     def all_mi(self) -> dict[int, float]:
         """Compute MI for all observed positions."""
         if self._cache_valid:
             return self._mi_cache
         counts = self._position_counts_arr
-        observed = _np.flatnonzero(counts >= self.min_observations).tolist() if self._rows else []
-        self._mi_cache = {pos: self.mi(pos) for pos in observed}
+        observed = _np.flatnonzero(counts >= self.min_observations) if self._rows else []
+        # One numpy pass over every observed row: the per-position mi() loop
+        # ran ~once per round (record() invalidates) at 6.4 s per 3k execs.
+        values = self._mi_rows(observed) if len(observed) else []
+        self._mi_cache = dict(zip(_np.asarray(observed).tolist(), values, strict=True))
         # Cache sorted positions and weights for weighted_position
         self._cached_positions = sorted(self._mi_cache.keys())
         self._cached_weights = [max(self._mi_cache[p], 0.01) for p in self._cached_positions]

@@ -400,10 +400,13 @@ class BmpMutator:
         # Build adjacency from existing pixel data
         adj = _first_row_adjacency(pixels, unique_tiles, tiles_per_row, sample_bytes)
 
-        # Generate each row via WFC
+        # Generate each row via WFC. One grid for the image: the alphabet and
+        # adjacency are fixed, and run(seed) reseeds, so clearing between
+        # rows matches a fresh grid without rebuilding its adjacency matrix.
         new_pixels = bytearray()
+        wave = WaveGrid(tile_list, adj, width=tiles_per_row, height=1)
         for row_y in range(h):
-            wave = WaveGrid(tile_list, adj, width=tiles_per_row, height=1)
+            wave.clear()
             row_result = wave.run(
                 seed=self._rng.randint(0, 2**31),
                 max_restarts=2,
