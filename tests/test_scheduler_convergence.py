@@ -73,6 +73,7 @@ from fuzzer_tool.core.schedulers import (
     EXP3IXScheduler,
     Exp3Scheduler,
     FPLScheduler,
+    GammaPoissonScheduler,
     GPUCBScheduler,
     GradientBanditScheduler,
     HierarchicalBanditScheduler,
@@ -418,6 +419,8 @@ RECOVERS = {
     "CUCB": (lambda: CUCBScheduler(rng=RandPool(FIXED_SEED)), 0.80),
     # Learned per-arm drift. Minimum over 12 seeds 0.946; FIXED_SEED 0.984.
     "KalmanTS": (lambda: KalmanTSScheduler(rng=RandPool(FIXED_SEED)), 0.85),
+    # Mean-preserving discount. Over 4 seeds: min 0.913.
+    "GammaPoisson": (lambda: GammaPoissonScheduler(rng=RandPool(FIXED_SEED)), 0.85),
     # The mix floor keeps a dead arm's replacement reachable. Over 12 seeds:
     # min 0.928, median 0.934; FIXED_SEED 0.939.
     "Automaton": (lambda: LearningAutomatonScheduler(rng=RandPool(FIXED_SEED)), 0.85),
@@ -440,6 +443,8 @@ RECOVERS = {
 #: Floors sit below the observed minimum over 100 seeds at ROUNDS:
 #: D-UCB 0.892, SW-UCB 0.895, CUCB 0.779.
 RECENCY_STATIONARY = {
+    # Over 4 seeds: min 0.948.
+    "GammaPoisson": (GammaPoissonScheduler, 0.90),
     "DUCB": (DUCBScheduler, 0.80),
     "SWUCB": (SWUCBScheduler, 0.80),
     "CUCB": (CUCBScheduler, 0.65),
@@ -510,6 +515,42 @@ def test_stays_stuck_on_decayed_arm(name):
     assert c.tail_share(env.best_early) > c.tail_share(env.best_late), (
         f"{name} now prefers the live arm over the decayed one -- good news; move it to RECOVERS"
     )
+
+
+# ---------------------------------------------------------------------------
+# Rare yields: the regime real operators run in
+# ---------------------------------------------------------------------------
+
+#: Arm rates scaled to fuzzing-like yields (best 0.015, base 0.0025). At
+#: n p ~ 1 per window a binomial count is Poisson, not normal (the law of
+#: rare events), which is what GammaPoisson models and KalmanTS does not.
+RARE_SCALE = 0.05
+
+#: ~1/p_base rounds per arm: enough for any scheduler to see each arm succeed.
+RARE_ROUNDS = 60_000
+
+
+def _rare_env() -> StationaryBernoulli:
+    return StationaryBernoulli.build(
+        p_best=0.30 * RARE_SCALE, p_runner_up=0.18 * RARE_SCALE, p_base=0.05 * RARE_SCALE
+    )
+
+
+@pytest.mark.slow
+def test_rare_yield_beats_gaussian():
+    """Gamma posteriors find a 0.015-rate arm the Gaussian filter cannot.
+
+    Over 4 seeds: GammaPoisson tail share min 0.863, KalmanTS max 0.461.
+    KalmanTS's obs_floor (0.01) is 4x the base arms' Bernoulli variance.
+    """
+    env = _rare_env()
+    gp = run(GammaPoissonScheduler(rng=RandPool(FIXED_SEED)), env, FIXED_SEED, RARE_ROUNDS)
+    kf = run(KalmanTSScheduler(rng=RandPool(FIXED_SEED)), env, FIXED_SEED, RARE_ROUNDS)
+
+    # Control: the environment is learnable at all, or the comparison is moot.
+    assert kf.tail_share(env.best) > uniform_baseline(env, RARE_ROUNDS)
+    assert gp.tail_share(env.best) >= 0.80
+    assert gp.tail_share(env.best) > kf.tail_share(env.best)
 
 
 # ---------------------------------------------------------------------------

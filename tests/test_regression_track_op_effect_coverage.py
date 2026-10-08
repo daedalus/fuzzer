@@ -60,6 +60,7 @@ _KWARGS = {
     "corral": {"corral": True},
     "tsallis": {"tsallis": True},
     "kalman_ts": {"kalman_ts": True},
+    "gamma_poisson": {"gamma_poisson": True},
     "ids": {"ids": True},
     "phe": {"phe": True},
     "exp3_ix": {"exp3_ix": True},

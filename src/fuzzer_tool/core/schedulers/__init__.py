@@ -21,6 +21,7 @@ from fuzzer_tool.core.schedulers.op_exp3_ix import EXP3IXScheduler
 from fuzzer_tool.core.schedulers.op_exp4 import Exp4Scheduler
 from fuzzer_tool.core.schedulers.op_fewa import FEWAScheduler
 from fuzzer_tool.core.schedulers.op_fpl import FPLScheduler
+from fuzzer_tool.core.schedulers.op_gamma_poisson import GammaPoissonScheduler
 from fuzzer_tool.core.schedulers.op_gp_ucb import GPUCBScheduler
 from fuzzer_tool.core.schedulers.op_gradient import GradientBanditScheduler
 from fuzzer_tool.core.schedulers.op_hierarchical import HierarchicalBanditScheduler
@@ -52,6 +53,7 @@ __all__ = [
     "CorralScheduler",
     "TsallisINFScheduler",
     "KalmanTSScheduler",
+    "GammaPoissonScheduler",
     "IDSScheduler",
     "PHEScheduler",
     "AntColonyScheduler",

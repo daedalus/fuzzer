@@ -578,6 +578,20 @@ class TestContinuousDistributions:
     def test_gammavariate_list_zero_count(self):
         assert RandPool().gammavariate_list(2, 1, 0) == []
 
+    def test_gammavariate_array_is_per_element(self):
+        """Shape and rate vary per element; 1e6-shape draws sit within 6 sd of a/b."""
+        alphas = np.array([1e6, 1e6, 4e6])
+        betas = np.array([1.0, 1e3, 2.0])
+        draws = RandPool(seed=5).gammavariate_array(alphas, betas)
+        assert draws.shape == alphas.shape
+        assert np.all(np.abs(draws - alphas / betas) < 6.0 * np.sqrt(alphas) / betas)
+
+    def test_gammavariate_array_is_seeded(self):
+        alphas = np.linspace(0.1, 5.0, 40)
+        a = RandPool(seed=9).gammavariate_array(alphas, alphas + 1.0)
+        b = RandPool(seed=9).gammavariate_array(alphas, alphas + 1.0)
+        assert np.array_equal(a, b)
+
     def test_lognormvariate(self):
         p = RandPool()
         vals = [p.lognormvariate(0, 1) for _ in range(100)]

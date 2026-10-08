@@ -53,6 +53,7 @@ class TestEloAllEnablesAllSchedulers:
             "fpl",
             "tsallis",
             "kalman_ts",
+            "gamma_poisson",
             "ids",
             "phe",
             "exp3_ix",

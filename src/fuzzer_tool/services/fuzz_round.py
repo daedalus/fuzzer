@@ -1599,6 +1599,7 @@ class FuzzRound:
             f._corral if selector == "corral" else None,
             f._tsallis if selector == "tsallis" else None,
             f._kalman_ts,
+            f._gamma_poisson,
             f._ids,
             f._phe,
             f._exp3_ix if selector == "exp3_ix" else None,

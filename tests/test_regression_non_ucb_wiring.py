@@ -10,6 +10,7 @@ import pytest
 from fuzzer_tool.core.schedulers import (
     AntColonyScheduler,
     EXP3IXScheduler,
+    GammaPoissonScheduler,
     IDSScheduler,
     KalmanTSScheduler,
     LearningAutomatonScheduler,
@@ -29,6 +30,11 @@ _CASES = {
         KalmanTSScheduler,
         ["--kalman-ts", "--kalman-ts-q0", "1e-6"],
         {"kalman_ts_q0": 1e-6},
+    ),
+    "gamma_poisson": (
+        GammaPoissonScheduler,
+        ["--gamma-poisson", "--gamma-poisson-discount", "0.999"],
+        {"gamma_poisson_discount": 0.999},
     ),
     "ids": (IDSScheduler, ["--ids", "--ids-samples", "64"], {"ids_samples": 64}),
     "phe": (PHEScheduler, ["--phe", "--phe-a", "2.5"], {"phe_a": 2.5}),
@@ -125,6 +131,7 @@ def test_select_op_dispatches_to_it(tmp_path, name):
         ("tsallis", "tsallis", True),
         ("tsallis", "bandit", False),  # on-policy: another selector's round
         ("kalman_ts", "bandit", True),  # off-policy safe: every round
+        ("gamma_poisson", "bandit", True),  # conjugate: every round
         ("ids", "bandit", True),
         ("phe", "bandit", True),
         ("exp3_ix", "exp3_ix", True),
