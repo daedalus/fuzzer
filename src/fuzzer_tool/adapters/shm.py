@@ -131,6 +131,20 @@ def touched_region_bytes(num_entries: int) -> int:
     return SHM_TOUCHED_HEADER + ((num_entries + 63) // 64) * 8
 
 
+# Must equal __AFL_HOME_GOLDEN in adapters/afl_shim.c.
+HOME_GOLDEN = 0x9E3779B1
+_U32 = 0xFFFFFFFF
+
+
+def home_slot(edge_id: int, num_entries: int) -> int:
+    """Probe start for *edge_id*; mirrors the shim's __afl_home_slot().
+
+    Fibonacci hash, not a modulo: context bits sit in the id's low byte, so
+    ``edge_id % n`` homed all context variants of an edge in one block.
+    """
+    return (((edge_id * HOME_GOLDEN) & _U32) * num_entries) >> 32
+
+
 def unstable_slots(snapshots) -> np.ndarray:
     """Slots set in some snapshots but not all: ``OR & ~AND``.
 
@@ -1189,7 +1203,7 @@ class ShmCoverage:
         next scan. Folding per call marks each bucket the count passes
         through, which is what a sequence of executions would have done.
         """
-        pos = edge_id % self.num_entries
+        pos = home_slot(edge_id, self.num_entries)
         stored = False
         window = min(self.PROBE_MAX, self.num_entries)
         for i in range(window):
