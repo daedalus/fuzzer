@@ -24,7 +24,7 @@ import pytest
 
 from fuzzer_tool.adapters import libc_shm
 from fuzzer_tool.adapters.inprocess import InProcessRunner
-from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SIZEOF_ENTRY, ShmCoverage
+from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SIZEOF_ENTRY, ShmCoverage, home_slot
 
 
 @pytest.fixture
@@ -67,7 +67,7 @@ def test_read_starts_at_the_table_not_at_the_header(cov, runner):
 def test_planted_entry_appears_at_its_table_position(cov, runner):
     """The returned bytes are the table, aligned to entry 0."""
     cov.record_edge(7)
-    idx = 7 % cov.num_entries
+    idx = home_slot(7, cov.num_entries)
     bitmap = bytes(runner.read_bitmap())
     entry = bitmap[idx * SIZEOF_ENTRY : (idx + 1) * SIZEOF_ENTRY]
     edge_id = int.from_bytes(entry[:4], "little")

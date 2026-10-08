@@ -510,11 +510,6 @@ const uint32_t __AFL_CAT(__afl_shm_layout_, __AFL_SHM_LAYOUT) = __AFL_SHM_LAYOUT
  * __afl_map_size (number of entries, not bytes).  Default 8192 entries:
  * edge table = 8192 × 8 = 65536 bytes, front region = 32 bytes. */
 static uint32_t __afl_map_size  = 8192;
-/* Divide-free edge_id modulo map size (see __afl_home_slot): mask is
- * size-1 for a power-of-two size, else 0; fastmod is Lemire's reciprocal
- * UINT64_MAX / size + 1 (exact for all 32-bit operands). */
-static uint32_t __afl_map_mask    = 8192 - 1;
-static uint64_t __afl_map_fastmod = UINT64_MAX / 8192 + 1;
 
 struct __afl_entry *__afl_area   = NULL;
 #if __AFL_NGRAM_K == 2
@@ -904,11 +899,8 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
             __afl_refuse_shm();
             return;
         }
-        if (s > 0) {
+        if (s > 0)
             __afl_map_size = (uint32_t)s;
-            __afl_map_mask = (s & (s - 1)) ? 0 : (uint32_t)(s - 1);
-            __afl_map_fastmod = UINT64_MAX / s + 1;
-        }
     }
 
     /* SHM was allocated as header bytes + table bytes */
@@ -1334,17 +1326,19 @@ static inline uint32_t __afl_edge_hash(uint32_t cur_loc) {
 #endif
 }
 
-/* Home slot: edge_id modulo map size, with no hardware divide per edge.
- * Power-of-two size: mask. Otherwise Lemire fastmod, two multiplies:
- *   low = fastmod * edge_id (mod 2^64);  slot = (low * size) >> 64
- * Size 1 wraps fastmod to 0, which yields slot 0 -- also correct. */
+/* Home slot: Fibonacci hash of edge_id scaled to map size, no divide.
+ *   slot = ((uint32)(edge_id * 0x9E3779B1) * size) >> 32
+ * Not edge_id % size: the call-site context is XORed into the LOW 8 bits,
+ * so under a modulo every context variant of an edge homed in one 256-slot
+ * block. ffmpeg packed those blocks solid and overflowed the probe window
+ * at 28% global load (51M drops). The multiply carries low-bit differences
+ * into the high half, spreading variants across the table. Mirrored by
+ * adapters/shm.py:home_slot. */
+#define __AFL_HOME_GOLDEN 0x9E3779B1u
 __attribute__((always_inline))
 static inline uint32_t __afl_home_slot(uint32_t edge_id) {
-    if (__afl_map_mask)
-        return edge_id & __afl_map_mask;
-
-    uint64_t low = __afl_map_fastmod * edge_id;
-    return (uint32_t)(((__uint128_t)low * __afl_map_size) >> 64);
+    uint32_t h = edge_id * __AFL_HOME_GOLDEN;
+    return (uint32_t)(((uint64_t)h * __afl_map_size) >> 32);
 }
 
 /* Mark table slot idx live in this generation (no-op without the bitmap).

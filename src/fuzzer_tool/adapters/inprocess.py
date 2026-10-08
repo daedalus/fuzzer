@@ -861,7 +861,7 @@ class InProcessRunner:
             return
 
         # Direct mode: re-run __afl_map_shm() to update __afl_area,
-        # __afl_map_size, and __afl_map_mask to the new SHM.
+        # and __afl_map_size to the new SHM.
         if self._lib is not None:
             try:
                 getattr(self._lib, "__afl_map_shm")()

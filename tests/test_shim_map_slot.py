@@ -1,8 +1,9 @@
 """Edge-table slot math: no runtime division on the per-edge path.
 
 `edge_id % __afl_map_size` and the probe wrap `(pos + i) % size` divided by a
-runtime variable on every edge hit. Power-of-two sizes use a mask; the probe
-wraps by subtraction. Placement must match plain `%` / linear probing.
+runtime variable on every edge hit. The home slot is a Fibonacci hash scaled
+by a multiply; the probe wraps by subtraction. Placement must match
+`_home` / linear probing.
 """
 
 from __future__ import annotations
@@ -21,6 +22,13 @@ POW2_SIZE = 1024
 ODD_SIZE = 1000
 TINY_SIZES = [1, 3]
 MAX_ID = 0xFFFFFFFF
+GOLDEN = 0x9E3779B1
+
+
+def _home(eid: int, size: int) -> int:
+    """Reference home slot, derived independently of the code under test."""
+    return (((eid * GOLDEN) & MAX_ID) * size) >> 32
+
 
 # argv[1:]: edge ids (decimal), each mapped raw into the table.
 _DRIVER = """
@@ -56,10 +64,11 @@ def _slots(exe: Path, size: int, ids: list[int]) -> dict[int, int]:
 
 @requires_clang
 @pytest.mark.parametrize("size", [POW2_SIZE, ODD_SIZE])
-def test_home_slot_matches_modulo(target, size):
-    ids = [1, size - 1, size, size + 2, 3 * size + 7, MAX_ID - 1]  # distinct homes
+def test_home_slot_matches_reference(target, size):
+    ids = [1, size - 1, size, size + 2, 3 * size + 7, MAX_ID - 1]
+    assert len({_home(i, size) for i in ids}) == len(ids)  # distinct homes
     got = _slots(target, size, ids)
-    assert got == {i: i % size for i in ids}
+    assert got == {i: _home(i, size) for i in ids}
 
 
 @requires_clang
@@ -67,7 +76,7 @@ def test_home_slot_matches_modulo(target, size):
 def test_probe_wraps_past_table_end(target, size):
     """Adversarial: every id homes on size-2, so probing must wrap to slot 0."""
     home = size - 2
-    ids = [home + k * size for k in range(5)]
+    ids = [i for i in range(1, 1 << 22) if _home(i, size) == home][:5]
     got = _slots(target, size, ids)
     assert got == {eid: (home + k) % size for k, eid in enumerate(ids)}
 
@@ -75,17 +84,17 @@ def test_probe_wraps_past_table_end(target, size):
 @requires_clang
 @pytest.mark.parametrize("size", TINY_SIZES)
 def test_tiny_sizes(target, size):
-    """Edge: size 1 wraps the reciprocal to 0; size 3 is the smallest odd."""
+    """Edge: size 1 maps everything to slot 0; size 3 is the smallest odd."""
     eid = MAX_ID - 1
-    assert _slots(target, size, [eid]) == {eid: eid % size}
+    assert _slots(target, size, [eid]) == {eid: _home(eid, size)}
 
 
 @requires_clang
-def test_control_non_pow2_not_masked(target):
-    """Falsification: a mask applied to a non-power-of-two size would differ."""
-    eid = ODD_SIZE + 5
-    assert eid & (ODD_SIZE - 1) != eid % ODD_SIZE
-    assert _slots(target, ODD_SIZE, [eid]) == {eid: eid % ODD_SIZE}
+def test_control_not_modulo(target):
+    """Falsification: a plain modulo home would differ."""
+    eid = POW2_SIZE + 5
+    assert _home(eid, POW2_SIZE) != eid % POW2_SIZE
+    assert _slots(target, POW2_SIZE, [eid]) == {eid: _home(eid, POW2_SIZE)}
 
 
 def test_hot_path_has_no_runtime_modulo():

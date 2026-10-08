@@ -23,6 +23,7 @@ from fuzzer_tool.adapters.shm import (
     SHM_TOUCHED_MAGIC,
     SIZEOF_ENTRY,
     ShmCoverage,
+    home_slot,
     touched_region_bytes,
     unstable_slots,
 )
@@ -248,7 +249,7 @@ class TestShimSetsBits:
         cov = ShmCoverage(size=SIZE, touched_bitmap=True)
         try:
             home = SIZE - 2  # probes wrap past the table end into slot 0
-            ids = [home + k * SIZE for k in range(4)]
+            ids = [i for i in range(1, 1 << 22) if home_slot(i, SIZE) == home][:4]
             _run(target, cov, ids)
             assert _bits(cov.touched_snapshot()) == {(home + k) % SIZE for k in range(4)}
         finally:
@@ -261,7 +262,7 @@ class TestShimSetsBits:
             cov.reset_edge_map()  # generation bump: entries go stale, stay in place
             cov.touched_clear()
             _run(target, cov, [10, 30])
-            assert _bits(cov.touched_snapshot()) == {10, 30}
+            assert _bits(cov.touched_snapshot()) == {home_slot(10, SIZE), home_slot(30, SIZE)}
         finally:
             cov.cleanup()
 
