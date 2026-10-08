@@ -2498,7 +2498,7 @@ class Fuzzer:
         self._peak_eps = 0.0
         self._total_exec_time = 0.0
         self._replay_budget_ms: float = 0.2  # max 200ms per batch for crash replay
-        self._crash_replays: dict[str, list[int]] = {}  # sig -> list of replay return codes
+        self._crash_replays: dict[str, list[int]] = {}  # sig -> list of ReplayOutcome verdicts
         # sig -> crash base name on disk, so the replay scheduler can open the
         # right file instead of guessing at it by filename prefix (finding #22).
         self._crash_files: dict[str, str] = {}

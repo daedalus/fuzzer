@@ -440,10 +440,12 @@ class TestReportBranchCoverage:
     def test_crash_reproducibility_with_data(self):
         """Lines 322-334: crash reproducibility with replays."""
         from fuzzer_tool.services.report import _crash_reproducibility
+        from fuzzer_tool.services.stats_reporter import ReplayOutcome
 
+        hit, miss = ReplayOutcome.CRASHED, ReplayOutcome.CLEAN
         f = _make_mock_fuzzer()
         f.replay_n = 3
-        f._crash_replays = {"sig1": [0, 0, 0], "sig2": [0, 0, -1]}
+        f._crash_replays = {"sig1": [hit, hit, hit], "sig2": [hit, hit, miss]}
         result = _crash_reproducibility(f)
         assert "Reproducibility" in result
         assert "100%" in result
