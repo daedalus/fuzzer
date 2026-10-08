@@ -2,143 +2,98 @@
 
 ``RandPool`` owns an independent ``np.random.default_rng(seed)`` Generator.
 That Generator shares NO state with the legacy module-level ``np.random.*``
-functions, and nothing anywhere in ``src/`` ever called ``np.random.seed``.
-
-Every global draw therefore ran off OS entropy regardless of ``--seed``:
-
-* ``core/qea.py:267``       -- observe(), collapsing amplitudes to a bitstring
-* ``core/qea.py:361,364``   -- mutate(), which amplitudes get perturbed
-* ``core/schedulers/op_monte_carlo.py:778,895`` -- spectral probe vectors
-
-so a seeded run was not reproducible whenever QEA or the Monte-Carlo scheduler
-was active. What kept this hidden is that ``_reseed_after_stall``'s docstring
-asserted the opposite -- "``np.random`` backs ``RandPool``" -- which is false
-and is corrected in the same commit.
-
-The tests below assert reproducibility of the actual draw sequences, not that
-some seeding call was made, so they cannot be satisfied by calling
-``np.random.seed`` somewhere ineffective.
+functions, so every global draw (QEA collapse/mutate, op_monte_carlo's
+spectral probe and correlated-Thompson noise) ran off OS entropy regardless
+of ``--seed``. A first fix seeded the global stream from ``Fuzzer``; the
+final one moved every consumer onto ``RandPool`` (Hard Rule 16) and deleted
+the global seeding. The scan below keeps the legacy stream out of ``src/``.
 """
 
+import ast
+from pathlib import Path
+
 import numpy as np
-import pytest
 
-from fuzzer_tool.services.fuzzer import SEED_MASK_32, Fuzzer
+import fuzzer_tool
 
-
-def _draws(n=12):
-    """A sample of the global stream, in the shapes qea/monte_carlo use."""
-    return (
-        np.random.random(n).tolist()
-        + np.random.randn(n).tolist()
-        + np.random.uniform(0.0, 1.0, size=n).tolist()
-    )
-
-
-class TestGlobalNumpySeeding:
-    def test_same_seed_gives_same_global_stream(self):
-        Fuzzer._seed_global_numpy(1234)
-        first = _draws()
-        Fuzzer._seed_global_numpy(1234)
-        second = _draws()
-        assert first == second
-
-    def test_different_seeds_give_different_streams(self):
-        Fuzzer._seed_global_numpy(1)
-        a = _draws()
-        Fuzzer._seed_global_numpy(2)
-        b = _draws()
-        assert a != b
-
-    def test_none_reseeds_from_entropy(self):
-        # An unseeded run must stay unseeded, matching random.seed(None).
-        Fuzzer._seed_global_numpy(None)
-        a = _draws()
-        Fuzzer._seed_global_numpy(None)
-        b = _draws()
-        assert a != b
+# Module-level np.random names that do NOT touch the legacy global state.
+_GENERATOR_API = {
+    "default_rng",
+    "Generator",
+    "SeedSequence",
+    "BitGenerator",
+    "PCG64",
+    "PCG64DXSM",
+    "Philox",
+    "SFC64",
+    "MT19937",
+}
 
 
-class TestFalsification:
-    def test_randpool_is_not_backed_by_global_numpy(self):
-        # Falsification of the docstring claim that caused the bug. If RandPool
-        # WERE backed by global np.random, reseeding the global would change
-        # RandPool's output. It does not -- which is exactly why seeding the
-        # global was still necessary.
-        from fuzzer_tool.core.rand_pool import RandPool
-
-        pool = RandPool(seed=99)
-        Fuzzer._seed_global_numpy(11111)
-        after_a = [pool.randint(0, 1_000_000) for _ in range(20)]
-
-        pool2 = RandPool(seed=99)
-        Fuzzer._seed_global_numpy(22222)
-        after_b = [pool2.randint(0, 1_000_000) for _ in range(20)]
-
-        # Same pool seed, wildly different global seed -> identical output.
-        assert after_a == after_b
-
-    def test_global_stream_actually_changes_with_seed(self):
-        # The complement: the global stream IS sensitive to the global seed.
-        # Together with the test above this pins down that the two streams are
-        # genuinely separate and both need seeding.
-        Fuzzer._seed_global_numpy(7)
-        a = _draws()
-        Fuzzer._seed_global_numpy(8)
-        b = _draws()
-        assert a != b
+def _global_draws(path: Path) -> list[str]:
+    """``np.random.<legacy>`` / ``numpy.random.<legacy>`` uses in *path*."""
+    hits = []
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or node.attr in _GENERATOR_API:
+            continue
+        mod = node.value
+        if not (isinstance(mod, ast.Attribute) and mod.attr == "random"):
+            continue
+        if isinstance(mod.value, ast.Name) and mod.value.id in ("np", "numpy"):
+            hits.append(f"{path.name}:{node.lineno} np.random.{node.attr}")
+    return hits
 
 
-class TestAdversarial:
-    def test_wide_seed_is_folded_not_raised(self):
-        # np.random.seed rejects anything >= 2**32. A run seeded from a 64-bit
-        # value must fold rather than crash at construction.
-        big = (1 << 62) | 0xDEADBEEF
-        Fuzzer._seed_global_numpy(big)
-        a = _draws()
-        Fuzzer._seed_global_numpy(big & SEED_MASK_32)
-        b = _draws()
-        assert a == b
+def test_regression_no_global_numpy_draws_in_src():
+    src = Path(fuzzer_tool.__file__).parent
+    hits = [h for f in sorted(src.rglob("*.py")) for h in _global_draws(f)]
+    assert hits == []
 
-    def test_boundary_seeds(self):
-        for seed in (0, 1, SEED_MASK_32 - 1, SEED_MASK_32, SEED_MASK_32 + 1):
-            Fuzzer._seed_global_numpy(seed)
-            first = _draws(4)
-            Fuzzer._seed_global_numpy(seed)
-            assert _draws(4) == first
 
-    def test_negative_seed_does_not_raise(self):
-        # Defensive: a caller deriving a seed by subtraction should not be able
-        # to abort a campaign at startup.
-        try:
-            Fuzzer._seed_global_numpy(-5)
-        except ValueError:
-            pytest.fail("negative seed must be folded, not raised")
-        assert _draws(3) == _draws(3) or True  # stream advanced without error
+def test_scan_detects_global_draw(tmp_path):
+    """Falsification: the scan must flag a legacy draw, or it proves nothing."""
+    f = tmp_path / "bad.py"
+    f.write_text("import numpy as np\nx = np.random.randn(3)\ny = np.random.default_rng(1)\n")
+    assert _global_draws(f) == ["bad.py:2 np.random.randn"]
 
-    def test_qea_draws_are_reproducible_under_seed(self):
-        # QEA now draws from its injected RandPool, not the global stream
-        # (see test_regression_qea_randpool.py); the pool seed governs it.
-        from fuzzer_tool.core import qea
-        from fuzzer_tool.core.rand_pool import RandPool
 
-        amplitudes = np.full(64, 0.5, dtype=np.float64)
+def test_randpool_is_not_backed_by_global_numpy():
+    # Reseeding the global stream between two same-seed pools must not move
+    # RandPool's output: the streams are separate.
+    from fuzzer_tool.core.rand_pool import RandPool
 
-        first = qea.collapse(amplitudes.copy(), RandPool(seed=4242))
-        second = qea.collapse(amplitudes.copy(), RandPool(seed=4242))
-        assert first == second
+    np.random.seed(11111)
+    after_a = [RandPool(seed=99).randint(0, 1_000_000) for _ in range(20)]
+    np.random.seed(22222)
+    after_b = [RandPool(seed=99).randint(0, 1_000_000) for _ in range(20)]
+    assert after_a == after_b
 
-        # And a differing seed must actually move it, or the assert above
-        # would pass on a constant.
-        third = qea.collapse(amplitudes.copy(), RandPool(seed=9999))
-        assert third != first
 
-    def test_qea_mutate_amplitudes_reproducible_under_seed(self):
-        from fuzzer_tool.core import qea
-        from fuzzer_tool.core.rand_pool import RandPool
+def test_qea_draws_are_reproducible_under_seed():
+    # QEA draws from its injected RandPool, not the global stream
+    # (see test_regression_qea_randpool.py); the pool seed governs it.
+    from fuzzer_tool.core import qea
+    from fuzzer_tool.core.rand_pool import RandPool
 
-        base = np.full(64, 0.5, dtype=np.float64)
+    amplitudes = np.full(64, 0.5, dtype=np.float64)
 
-        a = qea.mutate_amplitudes(base.copy(), rng=RandPool(seed=31337))
-        b = qea.mutate_amplitudes(base.copy(), rng=RandPool(seed=31337))
-        assert np.array_equal(np.asarray(a), np.asarray(b))
+    first = qea.collapse(amplitudes.copy(), RandPool(seed=4242))
+    second = qea.collapse(amplitudes.copy(), RandPool(seed=4242))
+    assert first == second
+
+    # A differing seed must actually move it, or the assert above would pass
+    # on a constant.
+    third = qea.collapse(amplitudes.copy(), RandPool(seed=9999))
+    assert third != first
+
+
+def test_qea_mutate_amplitudes_reproducible_under_seed():
+    from fuzzer_tool.core import qea
+    from fuzzer_tool.core.rand_pool import RandPool
+
+    base = np.full(64, 0.5, dtype=np.float64)
+
+    a = qea.mutate_amplitudes(base.copy(), rng=RandPool(seed=31337))
+    b = qea.mutate_amplitudes(base.copy(), rng=RandPool(seed=31337))
+    assert np.array_equal(np.asarray(a), np.asarray(b))

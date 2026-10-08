@@ -669,6 +669,14 @@ class RandPool:
         """
         return self._rng.random(shape)
 
+    def normal_array(self, shape) -> np.ndarray:
+        """Return standard-normal floats as an array of *shape*.
+
+        One C-level numpy call; :meth:`gauss_list`'s list round-trip costs
+        ~3.5x at a few hundred values (spectral / correlated-Thompson noise).
+        """
+        return self._rng.standard_normal(shape)
+
     def dirichlet(self, alphas) -> np.ndarray:
         """Return one point on the simplex drawn from Dirichlet(*alphas*).
 

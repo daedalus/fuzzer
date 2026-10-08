@@ -491,7 +491,7 @@ SEED_MIX_GAMMA = 0x9E3779B97F4A7C15  # odd, golden-ratio derived
 SEED_MIX_A = 0xBF58476D1CE4E5B9
 SEED_MIX_B = 0x94D049BB133111EB
 SEED_MASK_64 = 0xFFFFFFFFFFFFFFFF
-SEED_MASK_32 = 0xFFFFFFFF  # np.random.seed accepts [0, 2**32)
+SEED_MASK_32 = 0xFFFFFFFF  # stall seeds are 32-bit
 
 
 def _current_rss_kb() -> int | None:
@@ -2054,17 +2054,10 @@ class Fuzzer:
         # Built here rather than further down with the schedulers: every
         # scheduler that follows Hard Rule 16 takes it as its `rng`, and the
         # MCTS seed schedulers are constructed ~600 lines above where it used
-        # to be assigned. It belongs next to the default-pool seed anyway -- the three
+        # to be assigned. It belongs next to the default-pool seed anyway -- the two
         # streams start together, the same invariant `_reseed_after_stall`
-        # maintains.
+        # maintains. Nothing in src/ draws from the legacy global np.random.
         self._rng = RandPool(seed=seed)
-        # RandPool holds its OWN np.random.default_rng(seed) Generator, which
-        # shares no state with the legacy global np.random.* functions. The
-        # remaining global consumers -- op_monte_carlo.py's spectral probe and
-        # correlated-Thompson draws (np.random.randn) -- would otherwise run off
-        # OS entropy under --seed. QEA draws from self._rng. Seed the global
-        # here, next to the default-pool seed, so the three streams start together.
-        self._seed_global_numpy(seed)
         # GA lifecycle parameters
         self._ga_enabled = ga
         self._ga_pop_size = ga_pop_size
@@ -7473,22 +7466,6 @@ class Fuzzer:
         entropy_rate = dS / dt
         return entropy_rate < ENTROPY_FLAT_THRESHOLD
 
-    @staticmethod
-    def _seed_global_numpy(seed: int | None) -> None:
-        """Seed the legacy global ``np.random`` state.
-
-        Separate from ``RandPool``, which owns an independent
-        ``default_rng`` Generator. ``np.random.seed`` accepts only
-        ``[0, 2**32)``, so a wider seed is folded rather than raising;
-        ``None`` reseeds from OS entropy, matching an unseeded run.
-
-        Args:
-            seed: The run seed, or None for an unseeded run.
-        """
-        if not _HAS_NUMPY:
-            return
-        np.random.seed(None if seed is None else seed & SEED_MASK_32)
-
     def _derive_stall_seed(self) -> int:
         """Return the seed to apply for the current stall reseed.
 
@@ -7499,7 +7476,7 @@ class Fuzzer:
         be reproducible against, so OS entropy is used.
 
         Returns:
-            A seed in ``[0, 2**32)``, suitable for ``np.random.seed``.
+            A seed in ``[0, 2**32)``.
         """
         if self.seed is None:
             return int.from_bytes(os.urandom(4), "little")
@@ -7517,13 +7494,10 @@ class Fuzzer:
         *which* stream those choices come from, so a resumed run does not
         replay the same exhausted sequence.
 
-        All three streams are reseeded together, matching how ``__init__``
-        seeds them: the default ``RandPool`` drives the fallback choices, ``RandPool``
-        owns its own ``default_rng`` Generator and backs the mutation
-        hotpath, and the global ``np.random`` state backs the Monte-Carlo
-        scheduler's ``randn`` draws. ``RandPool`` is NOT backed by global
-        ``np.random`` — an earlier version of this docstring said it was,
-        which is why the global went unseeded. ``RandPool.reseed`` also drops
+        Both streams are reseeded together, matching how ``__init__``
+        seeds them: the default ``RandPool`` drives the fallback choices, and
+        ``self._rng`` backs the mutation hotpath and every scheduler. Nothing
+        draws from the legacy global ``np.random``. ``RandPool.reseed`` also drops
         the pre-fetched pool, which would otherwise keep dispensing
         old-stream values for another ``_POOL_ENTRIES`` draws.
 
@@ -7533,7 +7507,6 @@ class Fuzzer:
         self._stall_reseed_count += 1
         new_seed = self._derive_stall_seed()
         get_default_rand_pool().reseed(new_seed)
-        self._seed_global_numpy(new_seed)
         if _HAS_NUMPY:
             self._rng.reseed(new_seed)
         self._last_stall_seed = new_seed

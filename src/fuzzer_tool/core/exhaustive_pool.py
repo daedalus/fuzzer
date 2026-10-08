@@ -681,6 +681,12 @@ class ExhaustivePool:
     def gauss_list(self, mu: float, sigma: float, count: int) -> list[float]:
         self._continuous("gauss_list()")
 
+    def random_array(self, shape):
+        self._continuous("random_array()")
+
+    def normal_array(self, shape):
+        self._continuous("normal_array()")
+
     def expovariate(self, lambd: float = 1.0) -> float:
         self._continuous("expovariate()")
 
@@ -704,6 +710,9 @@ class ExhaustivePool:
 
     def gammavariate_list(self, alpha: float, beta: float, count: int) -> list[float]:
         self._continuous("gammavariate_list()")
+
+    def gammavariate_array(self, alphas, betas):
+        self._continuous("gammavariate_array()")
 
     def lognormvariate(self, mu: float = 0.0, sigma: float = 1.0) -> float:
         self._continuous("lognormvariate()")

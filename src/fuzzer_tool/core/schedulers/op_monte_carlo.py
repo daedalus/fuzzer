@@ -1428,7 +1428,7 @@ class MonteCarloScheduler:
         deflated = P - np.outer(v, v)
 
         # Power iteration on deflated matrix for λ₂
-        w = np.random.randn(n)
+        w = self._rng.normal_array(n)
         w /= np.linalg.norm(w)
         eigenvalue2 = 0.0
         for _ in range(max_iter):
@@ -1542,14 +1542,10 @@ class MonteCarloScheduler:
         if chol is None:
             return self._standard_thompson(ops)
 
-        z = (
-            np.random.randn(n).astype(np.float64)
-            if _HAS_NUMPY
-            else [self._rng.gauss(0, 1) for _ in range(n)]
-        )
         if _HAS_NUMPY:
-            noise = chol @ z
+            noise = chol @ self._rng.normal_array(n)
         else:
+            z = self._rng.gauss_list(0.0, 1.0, n)
             noise = [0.0] * n
             for i in range(n):
                 for j in range(i + 1):
@@ -1584,7 +1580,8 @@ class MonteCarloScheduler:
         n = a.shape[0]
         if n == 0:
             return None
-        diag = np.diag(a)
+        # np.diag returns a read-only view; copy before clamping.
+        diag = np.diag(a).copy()
         diag[diag <= 0] = 1.0
         np.fill_diagonal(a, diag)
         diag_min = float(np.min(diag))
