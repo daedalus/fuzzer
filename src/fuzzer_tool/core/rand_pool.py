@@ -661,6 +661,14 @@ class RandPool:
         """
         return self._rng.binomial(counts, p)
 
+    def random_array(self, shape) -> np.ndarray:
+        """Return uniform floats in [0.0, 1.0) as an array of *shape*.
+
+        One C-level numpy call; float64 ndarray for vectorised masks
+        (e.g. QEA collapse), skipping :meth:`random_list`'s list round-trip.
+        """
+        return self._rng.random(shape)
+
     def dirichlet(self, alphas) -> np.ndarray:
         """Return one point on the simplex drawn from Dirichlet(*alphas*).
 

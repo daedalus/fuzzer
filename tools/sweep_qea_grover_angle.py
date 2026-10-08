@@ -21,11 +21,12 @@ from factorial_design import screen  # noqa: E402
 
 from fuzzer_tool.core.qea import _uniform_amplitudes, collapse, rotation_gate
 from fuzzer_tool.core.qea_grover import LiveFractionTracker
+from fuzzer_tool.core.rand_pool import RandPool
 
 
 def run(n_bytes: int, m_live: int, mode: str, delta: float, seed: int, cap: int) -> int | None:
     rng = np.random.default_rng(seed)
-    np.random.seed(seed)
+    pool = RandPool(seed=seed)
     n = n_bytes * 8
     live = rng.choice(n, size=m_live, replace=False)
     target = rng.integers(0, 2, size=n)
@@ -35,11 +36,11 @@ def run(n_bytes: int, m_live: int, mode: str, delta: float, seed: int, cap: int)
         return int((bits[live] == target[live]).sum())
 
     amps = _uniform_amplitudes(n)
-    best = collapse(amps)
+    best = collapse(amps, pool)
     best_f = fit(best)
     tracker = LiveFractionTracker(n)
     for evals in range(1, cap + 1):
-        x = collapse(amps)
+        x = collapse(amps, pool)
         fx = fit(x)
         if fx == m_live:
             return evals

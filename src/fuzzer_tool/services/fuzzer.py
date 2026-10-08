@@ -2059,13 +2059,11 @@ class Fuzzer:
         # maintains.
         self._rng = RandPool(seed=seed)
         # RandPool holds its OWN np.random.default_rng(seed) Generator, which
-        # shares no state with the legacy global np.random.* functions. Nothing
-        # in src/ seeded that global, so every np.random draw outside RandPool
-        # — qea.py:267,361,364 (observe/mutate amplitudes) and
-        # schedulers/op_monte_carlo.py:778,895 (spectral probe vectors) — ran off
-        # OS entropy and made --seed non-reproducible whenever QEA or the
-        # Monte-Carlo scheduler was active. Seed it here, next to the default-pool seed,
-        # so the three streams start together.
+        # shares no state with the legacy global np.random.* functions. The
+        # remaining global consumers -- op_monte_carlo.py's spectral probe and
+        # correlated-Thompson draws (np.random.randn) -- would otherwise run off
+        # OS entropy under --seed. QEA draws from self._rng. Seed the global
+        # here, next to the default-pool seed, so the three streams start together.
         self._seed_global_numpy(seed)
         # GA lifecycle parameters
         self._ga_enabled = ga
@@ -7513,8 +7511,8 @@ class Fuzzer:
         All three streams are reseeded together, matching how ``__init__``
         seeds them: the default ``RandPool`` drives the fallback choices, ``RandPool``
         owns its own ``default_rng`` Generator and backs the mutation
-        hotpath, and the global ``np.random`` state backs QEA and the
-        Monte-Carlo scheduler. ``RandPool`` is NOT backed by global
+        hotpath, and the global ``np.random`` state backs the Monte-Carlo
+        scheduler's ``randn`` draws. ``RandPool`` is NOT backed by global
         ``np.random`` — an earlier version of this docstring said it was,
         which is why the global went unseeded. ``RandPool.reseed`` also drops
         the pre-fetched pool, which would otherwise keep dispensing

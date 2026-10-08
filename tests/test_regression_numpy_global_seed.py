@@ -117,32 +117,28 @@ class TestAdversarial:
         assert _draws(3) == _draws(3) or True  # stream advanced without error
 
     def test_qea_draws_are_reproducible_under_seed(self):
-        # End-to-end on the actual consumers. collapse() is qea.py:267 and
-        # mutate_amplitudes() is qea.py:361,364 -- the three global draws named
-        # in the finding.
+        # QEA now draws from its injected RandPool, not the global stream
+        # (see test_regression_qea_randpool.py); the pool seed governs it.
         from fuzzer_tool.core import qea
+        from fuzzer_tool.core.rand_pool import RandPool
 
         amplitudes = np.full(64, 0.5, dtype=np.float64)
 
-        Fuzzer._seed_global_numpy(4242)
-        first = qea.collapse(amplitudes.copy())
-        Fuzzer._seed_global_numpy(4242)
-        second = qea.collapse(amplitudes.copy())
+        first = qea.collapse(amplitudes.copy(), RandPool(seed=4242))
+        second = qea.collapse(amplitudes.copy(), RandPool(seed=4242))
         assert first == second
 
         # And a differing seed must actually move it, or the assert above
         # would pass on a constant.
-        Fuzzer._seed_global_numpy(9999)
-        third = qea.collapse(amplitudes.copy())
+        third = qea.collapse(amplitudes.copy(), RandPool(seed=9999))
         assert third != first
 
     def test_qea_mutate_amplitudes_reproducible_under_seed(self):
         from fuzzer_tool.core import qea
+        from fuzzer_tool.core.rand_pool import RandPool
 
         base = np.full(64, 0.5, dtype=np.float64)
 
-        Fuzzer._seed_global_numpy(31337)
-        a = qea.mutate_amplitudes(base.copy())
-        Fuzzer._seed_global_numpy(31337)
-        b = qea.mutate_amplitudes(base.copy())
+        a = qea.mutate_amplitudes(base.copy(), rng=RandPool(seed=31337))
+        b = qea.mutate_amplitudes(base.copy(), rng=RandPool(seed=31337))
         assert np.array_equal(np.asarray(a), np.asarray(b))
