@@ -196,6 +196,7 @@ def _activate_transfer_entropy(f: FuzzerLike) -> None:
     f._te_input_history = []
     f._te_edge_history = []
     f._te_history_max = 500
+    f._te_obs = 0  # observations ever recorded; drives the refresh cadence
     log.info("Transfer entropy tracking enabled")
 
 

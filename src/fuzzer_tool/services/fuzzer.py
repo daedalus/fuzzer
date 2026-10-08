@@ -7157,7 +7157,7 @@ class Fuzzer:
                 bytes(data),
                 exec_fn,
                 use_type_aware=True,
-                max_execs=min(2 * len(data), self.colorize_max_execs),
+                max_execs=self._colorize_budget(data),
                 rng=self._rng,
                 mode=self.colorize_mode,
             )
@@ -7175,6 +7175,10 @@ class Fuzzer:
             cache.clear()
         cache[key] = taints
         return taints
+
+    def _colorize_budget(self, data: bytes) -> int:
+        """Executions one colorization of *data* may spend."""
+        return min(2 * len(data), self.colorize_max_execs)
 
     def _cached_taints(self, data: bytes):
         """Taints ``_colorize_seed`` already found for *data*; never executes."""
@@ -7271,9 +7275,9 @@ class Fuzzer:
                 collect_structure_map,
             )
 
-            taints = None
-            if self.colorize:
-                taints = self._colorize_seed(data)
+            # Cached only: colorizing every admitted seed here cost up to
+            # 2*len runs each; FuzzRound._colorize amortizes it instead.
+            taints = self._cached_taints(data) if self.colorize else None
             smap = collect_structure_map(
                 data,
                 self._cmplog,
