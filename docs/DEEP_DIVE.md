@@ -1037,6 +1037,9 @@ When collision risk exceeds the threshold, the bitmap SHM is resized. In inproce
 ### Timeout in direct mode
 `--inprocess-direct` and direct_lite call `__afl_guarded_call_timeout(entry, data, size, timeout_us)` when the shim exports it (`InProcessRunner._call_guarded`). A per-thread POSIX timer ticks every budget/4 (floor 1 ms) on a real-time signal; a call that spans more than four ticks leaves through the guard and returns `-1`, reported as `(-1, "timeout")`, so a hang is cut between the budget and 1.25× it with no syscall per call. The Python `SIGALRM` + `setitimer` path remains for targets without the shim; it only sets a flag between bytecodes and cannot interrupt a C loop. A timed-out target is abandoned mid-execution, as on a crash. Tests: `tests/test_regression_shim_hardening.py`.
 
+### Timeouts earn no coverage
+Any backend: a run classified as timeout skips the novelty scan (`FuzzRound._scan_coverage`), so it is never admitted or credited and its edges stay unseen for the first clean input reaching them (wtf `RevokeLastNewCoverage`). Tests: `tests/test_regression_timeout_coverage_revoked.py`.
+
 ## Corpus Minimization
 
 ```bash

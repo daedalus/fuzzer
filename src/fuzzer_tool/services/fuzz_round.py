@@ -745,6 +745,15 @@ class FuzzRound:
         # Only the sparse SHM path maintains per-edge maxima; the ptrace
         # bitmap has no counts to take a maximum of, so it stays 0 there.
         active_shm = f._target_shm_covs.get(f.target) if f.multi_targets else f.shm_cov
+
+        # A timeout earns no coverage (wtf RevokeLastNewCoverage): not
+        # scanning leaves its edges unseen for the first clean input to
+        # reach them, instead of admitting a seed that replays as a hang.
+        if self._is_timeout:
+            self._scanned_shm = active_shm
+            f._confirmed_edges = None
+            return
+
         if active_shm:
             has_new, edge_ids = active_shm.is_new_coverage_with_edges()
             f._current_edges_cache = edge_ids
