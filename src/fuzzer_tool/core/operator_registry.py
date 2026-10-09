@@ -21,6 +21,7 @@ import re
 import struct
 from collections.abc import Callable
 from dataclasses import dataclass
+from enum import Enum
 
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.tree_mutator import has_bracket_delimiter as _tree_mutator_has_delims
@@ -633,17 +634,42 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
 _FORMAT_BOOTSTRAP_RATE = 0.02
 
 
+def _live_formats(fuzzer) -> set:
+    """The fuzzer's set of formats seen in real input, created on first use."""
+    live = getattr(fuzzer, "_live_formats", None)
+    if live is None:
+        live = set()
+        with contextlib.suppress(AttributeError):
+            fuzzer._live_formats = live
+    return live
+
+
+def _trickle(rng, k: int) -> list[bool]:
+    """*k* bootstrap coin flips, drawn as one batch.
+
+    ``random_sequential`` yields exactly what *k* ``random()`` calls would,
+    so batching keeps seeded runs unchanged. Permissive (all True) without
+    an rng or with a mock that does not return floats.
+    """
+    if rng is None:
+        return [True] * k
+    try:
+        batch = getattr(rng, "random_sequential", None)
+        draws = batch(k) if batch is not None else [rng.random() for _ in range(k)]
+        return [float(r) < _FORMAT_BOOTSTRAP_RATE for r in draws]
+    except (TypeError, ValueError):
+        # Mock/stub fuzzer in tests -- stay permissive rather than
+        # silently hiding operators.
+        return [True] * k
+
+
 def _format_available(name: str) -> Callable[[object, bytes], bool]:
     sniff = _FORMAT_SNIFFERS[name]
 
     def _check(fuzzer, data) -> bool:
         if fuzzer is None:
             return True
-        live = getattr(fuzzer, "_live_formats", None)
-        if live is None:
-            live = set()
-            with contextlib.suppress(AttributeError):
-                fuzzer._live_formats = live
+        live = _live_formats(fuzzer)
         # Check live first: once a format has been confirmed live, every
         # later call for that op is a plain set lookup instead of re-running
         # sniff() (a struct.unpack for STL, a chained byte-prefix check for
@@ -651,9 +677,6 @@ def _format_available(name: str) -> Callable[[object, bytes], bool]:
         # rest of a real fuzzing run once any matching seed has been seen.
         # Equivalent to the old sniff-first order: sniff() re-matching an
         # already-live format was always a same-result no-op add() before.
-        # Docs/TODO.md's "REGISTRY.available() re-evaluates data-independent
-        # predicates per exec" lever is about all 51 gated ops broadly; this
-        # is a first, narrower cut at the ~27 sniffer-gated ones specifically.
         if name in live:
             return True
         if data and sniff(data):
@@ -661,16 +684,10 @@ def _format_available(name: str) -> Callable[[object, bytes], bool]:
             return True
         # Never seen this format: keep a thin bootstrap trickle so a target
         # that does parse it can still be reached from a garbage corpus.
-        rng = getattr(fuzzer, "_rng", None)
-        if rng is None:
-            return True
-        try:
-            return float(rng.random()) < _FORMAT_BOOTSTRAP_RATE
-        except (TypeError, ValueError):
-            # Mock/stub fuzzer in tests — stay permissive rather than
-            # silently hiding operators.
-            return True
+        return _trickle(getattr(fuzzer, "_rng", None), 1)[0]
 
+    # Lets OperatorRegistry plan this op as format-gated and batch its draw.
+    _check.format_name = name
     return _check
 
 
@@ -907,18 +924,33 @@ class OperatorSpec:
     mutator: object | None = None
 
 
+class _Gate(Enum):
+    """How available() decides one operator (planned once per table change)."""
+
+    ALWAYS = "always"
+    FORMAT = "format"
+    PREDICATE = "predicate"
+    MUTATOR = "mutator"
+
+
 class OperatorRegistry:
     """Registry/dispatcher of mutation operators (single source of truth)."""
 
     def __init__(self) -> None:
         self._ops: dict[str, OperatorSpec] = {}
         self._categories_cache: dict[str, set[str]] | None = None
+        # available()'s plan, keyed on (registrations, table size): size
+        # catches the direct ``_ops.pop`` some test teardowns do.
+        self._version = 0
+        self._plan: list[tuple] = []
+        self._plan_key: tuple | None = None
 
     def register(self, spec: OperatorSpec) -> None:
         if spec.name in self._ops:
             raise ValueError(f"duplicate operator registration: {spec.name!r}")
         self._ops[spec.name] = spec
         self._categories_cache = None
+        self._version += 1
 
     def register_mutator(self, mutator) -> None:
         """Register a ``MutatorBase`` instance as an operator.
@@ -993,19 +1025,67 @@ class OperatorRegistry:
         # Class-based mutators get one fuzzer snapshot per call, not one each
         # (~22 per mutant): the fuzzer does not change while predicates run.
         ctx = None
-        names = []
-        for name, spec in self._ops.items():
-            if spec.available is None:
+        live = None if fuzzer is None else _live_formats(fuzzer)
+        names: list[str | None] = []  # None: a format the trickle dropped
+        pending: list[int] = []  # slots of unseen formats awaiting the trickle
+        for gate, name, fn in self._current_plan():
+            if gate is _Gate.ALWAYS:
+                names.extend(name)  # a run of ungated ops, one C-level extend
+            elif gate is _Gate.FORMAT:
+                if live is not None and name not in live and not (data and fn(data)):
+                    pending.append(len(names))
+                elif live is not None and name not in live:
+                    live.add(name)  # real file of this format seen -- keep it live
                 names.append(name)
-            elif spec.mutator is None:
-                if spec.available(fuzzer, data):
+            elif gate is _Gate.PREDICATE:
+                if fn(fuzzer, data):
                     names.append(name)
             else:
                 if ctx is None:
                     ctx = MutationContext.from_fuzzer(fuzzer)
-                if spec.mutator.is_available(ctx, data):
+                if fn.is_available(ctx, data):
                     names.append(name)
-        return names
+        return self._drop_trickled(names, pending, fuzzer)
+
+    @staticmethod
+    def _drop_trickled(names: list, pending: list[int], fuzzer) -> list[str]:
+        """Resolve unseen formats with one batched draw, in registry order."""
+        if not pending:
+            return names
+        keep = _trickle(getattr(fuzzer, "_rng", None), len(pending))
+        for slot, ok in zip(pending, keep, strict=True):
+            if not ok:
+                names[slot] = None
+        return list(filter(None, names))
+
+    def _current_plan(self) -> list[tuple]:
+        key = (self._version, len(self._ops))
+        if key != self._plan_key:
+            self._plan = self._build_plan()
+            self._plan_key = key
+        return self._plan
+
+    def _build_plan(self) -> list[tuple]:
+        """(gate, name, fn) per op in registry order, classified once.
+
+        Consecutive ungated ops collapse into one ALWAYS entry carrying the
+        tuple of their names (271 ops -> 24 runs + 123 gated at the time).
+        """
+        plan: list[tuple] = []
+        for name, spec in self._ops.items():
+            fmt = getattr(spec.available, "format_name", None)
+            if spec.available is None:
+                if plan and plan[-1][0] is _Gate.ALWAYS:
+                    plan[-1] = (_Gate.ALWAYS, (*plan[-1][1], name), None)
+                else:
+                    plan.append((_Gate.ALWAYS, (name,), None))
+            elif spec.mutator is not None:
+                plan.append((_Gate.MUTATOR, name, spec.mutator))
+            elif fmt is not None:
+                plan.append((_Gate.FORMAT, name, _FORMAT_SNIFFERS[fmt]))
+            else:
+                plan.append((_Gate.PREDICATE, name, spec.available))
+        return plan
 
     def categories(self) -> dict[str, set[str]]:
         """Derived category -> operator-names taxonomy."""

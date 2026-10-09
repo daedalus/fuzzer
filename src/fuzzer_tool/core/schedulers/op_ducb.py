@@ -102,8 +102,10 @@ class DUCBScheduler(DiscountedUCBBase):
 
     def _width(self, mean: float, n: float, log_n: float) -> float:
         """Gaussian confidence width: exploration * 2B * sqrt(xi*log(n) / n)."""
-        gaussian_scale = self.exploration * UCB_WIDTH_COEFF * self.b * math.sqrt(self.xi * log_n)
-        return gaussian_scale / math.sqrt(n)
+        return self._width_scale(log_n) / math.sqrt(n)
+
+    def _width_scale(self, log_n: float) -> float:
+        return self.exploration * UCB_WIDTH_COEFF * self.b * math.sqrt(self.xi * log_n)
 
     def bandit_stats(self) -> dict:
         """Return D-UCB diagnostics."""

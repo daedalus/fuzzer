@@ -85,6 +85,11 @@ fuzzer, not just the target.
 54. Always keep memory usage bounded.
 55. For cleanliness and maintainability: A big class with a lot of members and reentrancy is preferable than a big procedure.
 56. Always rebuild targets if `afl_shim.c` changes.
+57. **Push ifs up, fors down** wherever possible.
+    - **Ifs up:** decide flags, modes and feature availability once (setup, per run or per exec) and bind the result (a bound method, a table, a filtered list). Don't re-check them per mutation, per byte or per edge, and don't pass a mode flag down for the callee to branch on.
+    - **Fors down:** give functions the whole batch (`randbytes(n)`, `randint_list`, `translate`, numpy) instead of calling them per item, and hoist loop-invariant checks out of loops.
+    - **Measure:** benchmark before and after. Keep the change only if it is faster; if it isn't, record why (see `docs/DEEP_DIVE.md` §Push ifs up, fors down).
+    - **Cache safely:** a cache of state that can change must be revalidated cheaply or reset at a known boundary, for example `mutate()` clearing `_meta_strategy_cached`.
 
 ## Corpus Rules
 
