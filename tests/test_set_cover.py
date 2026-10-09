@@ -5,7 +5,7 @@ from itertools import combinations
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
-from fuzzer_tool.core.set_cover import Reduce, Tie, _Cover, min_cover
+from fuzzer_tool.core.set_cover import Reduce, Tie, _Cover, _to_masks, min_cover
 
 NUM_RANDOM_CASES = 40
 MAX_SEEDS = 12
@@ -34,7 +34,7 @@ TIE_TRAP_SIZES = {"s0": 2, "s1": 8, "s2": 2, "s3": 2, "s4": 2}
 def _cover_run(seed_edges, sizes, tie, reduce):
     order = {k: i for i, k in enumerate(seed_edges)}
     full = {k: frozenset(e) for k, e in seed_edges.items() if e}
-    return _Cover(order, full, sizes, tie, reduce).solve()
+    return _Cover(order, _to_masks(full), sizes, tie, reduce).solve()
 
 
 def _ref_greedy(seed_edges):

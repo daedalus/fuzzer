@@ -192,6 +192,9 @@ def _gdb_crash_replay(f, data: bytes, returncode: int) -> str:
 
 _use_xxhash = True
 
+# Extra seed_key memo entries allowed beyond 2x the corpus before a clear.
+SEED_KEY_MEMO_SLACK = 1024
+
 # Protected copies kept under corpus/seeds/crashing/ per crash signature.
 # Every distinct crashing input used to be written there and marked
 # irreplaceable, so a single easily-hit bug grew that directory without bound
@@ -337,6 +340,9 @@ class CorpusManager:
 
     def __init__(self, fuzzer):
         self.f = fuzzer
+        # Corpus seed -> content key. Corpus seeds are long-lived bytes with
+        # a cached hash, so a hit skips the xxh64 pass over the seed.
+        self._key_memo: dict[bytes, str] = {}
 
     def _entropy_add(self, data: bytes) -> None:
         """Fold an admitted seed into the byte-entropy readout.
@@ -421,7 +427,28 @@ class CorpusManager:
             self.load_state()
 
     def seed_key(self, data: bytes) -> str:
-        return seed_key(data)
+        """Content key of *data*; corpus seeds are memoized, mutants are not.
+
+        Bounded at twice the corpus plus slack: seeds that left the corpus
+        are dropped by clearing when the bound is hit.
+        """
+        if type(data) is not bytes:
+            return seed_key(data)
+
+        memo = self._key_memo
+        key = memo.get(data)
+        if key is not None:
+            return key
+
+        key = seed_key(data)
+        meta = getattr(self.f, "seed_meta", None)
+        if meta is None or data not in meta:
+            return key
+
+        if len(memo) >= 2 * len(meta) + SEED_KEY_MEMO_SLACK:
+            memo.clear()
+        memo[data] = key
+        return key
 
     def save_state(self):
         f = self.f
