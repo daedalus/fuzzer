@@ -24,6 +24,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from functools import lru_cache
 
+from fuzzer_tool.core.crc_engine import ORDER_BY_REFLECT
+from fuzzer_tool.core.crc_engine import fold as fold_crc
 from fuzzer_tool.core.gf2_common import poly_gcd
 
 # ---------------------------------------------------------------------------
@@ -302,7 +304,12 @@ def compute_checksum(
     # once per candidate polynomial, so the table is amortised across the
     # whole search as well as across the buffer.
     table = _crc_table(poly, width, reflect_in)
-    if reflect_in:
+
+    # Warm models fold a word / numpy lane at a time (core/crc_engine.py).
+    fast = fold_crc(poly, width, ORDER_BY_REFLECT[bool(reflect_in)], reg, data, table)
+    if fast is not None:
+        reg = fast
+    elif reflect_in:
         for byte in data:
             reg = (reg >> 8) ^ table[(reg ^ byte) & 0xFF]
     else:
