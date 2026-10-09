@@ -2775,6 +2775,9 @@ def lz_dict_mutate(data: bytes, rng) -> bytes:
     return _splice(data, offset, bytes(restored[:length]))
 
 
+_HUFF_MAX_BITS = 16  # longest code _huff_decode tries
+
+
 def _rank_codes(freq: list[int], symbols: list[int]) -> tuple[list[int], list[int]]:
     """Rank-ordered prefix codes: rank r gets a bit_length(r)-bit code."""
     codes = [0] * 256
@@ -2798,29 +2801,32 @@ def _huff_decode(
     bits: bytearray, codes: list[int], lengths: list[int], length: int
 ) -> tuple[bytearray, int]:
     """Greedy shortest-match decode (<=16-bit codes) -> (restored, bytes decoded)."""
-    decode_table = {}
-    for sym in range(256):
-        if lengths[sym] == 0:
-            continue
-        decode_table[(codes[sym], lengths[sym])] = sym
+    # Key = code under a leading 1 that encodes its length (0b1_01 is "01").
+    # A code wider than its length can never match, so it gets no key.
+    decode_table = {
+        (1 << lengths[sym]) | codes[sym]: sym
+        for sym in range(256)
+        if lengths[sym] and codes[sym] >> lengths[sym] == 0
+    }
     restored = bytearray(length)
     ridx = 0
     bidx = 0
-    while ridx < length and bidx < len(bits):
-        for bit_len in range(1, 17):
-            if bidx + bit_len > len(bits):
+    n = len(bits)
+    while ridx < length and bidx < n:
+        # Grow the prefix one bit per candidate length (was rebuilt per length).
+        prefix = 1
+        sym = None
+        for bit_len in range(1, min(_HUFF_MAX_BITS, n - bidx) + 1):
+            prefix = (prefix << 1) | bits[bidx + bit_len - 1]
+            sym = decode_table.get(prefix)
+            if sym is not None:
                 break
-            prefix = 0
-            for i in range(bit_len):
-                prefix = (prefix << 1) | bits[bidx + i]
-            key = (prefix, bit_len)
-            if key in decode_table:
-                restored[ridx] = decode_table[key]
-                ridx += 1
-                bidx += bit_len
-                break
-        else:
+        # No code fits the remaining bits: stop (the old loop spun here).
+        if sym is None:
             break
+        restored[ridx] = sym
+        ridx += 1
+        bidx += bit_len
     return restored, ridx
 
 
@@ -2863,12 +2869,11 @@ def huffman_tree_mutate(data: bytes, rng) -> bytes:
     a, b = rng.sample(non_zero, 2)
     codes[a], codes[b] = codes[b], codes[a]
     lengths[a], lengths[b] = lengths[b], lengths[a]
-    bits = bytearray()
-    for b in block:
-        sym_code = codes[b]
-        sym_len = lengths[b]
-        for i in range(sym_len - 1, -1, -1):
-            bits.append((sym_code >> i) & 1)
+    # Codeword per present symbol: low `len` bits of its code, MSB first.
+    words = [b""] * 256
+    for sym in non_zero:
+        words[sym] = _msb_bits(codes[sym] & ((1 << lengths[sym]) - 1), lengths[sym])
+    bits = bytearray(b"".join(map(words.__getitem__, block)))
     restored, ridx = _huff_decode(bits, codes, lengths, length)
     _pad_random(restored, ridx, rng)
     return _splice(data, offset, bytes(restored[:length]))
