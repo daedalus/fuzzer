@@ -2,18 +2,21 @@
 
 ## Overview
 
-The fuzzer supports three in-process execution modes that bypass the default
+The fuzzer supports in-process execution modes that bypass the default
 subprocess-per-iteration model. Each trades off speed, crash isolation, and
-coverage support differently.
+coverage support differently. A `.so` target auto-selects direct_lite; an
+executable passed with `--inprocess` runs in exec mode instead.
 
 | Mode | Flag | execs/sec | Crash isolation | Coverage |
 |------|------|-----------|-----------------|----------|
-| Direct ctypes | `--inprocess-direct` | ~2k–34k | None (crash kills fuzzer) | No |
-| Persistent subprocess | `--inprocess` | ~2.9k | Full (separate process) | Partial* |
-| Per-call subprocess | `--inprocess` | ~21 | Full | Partial* |
+| direct_lite | none (auto for `.so`) | ~124k (png_read_asan.so) | None; `__afl_guarded_call` escape | Yes* |
+| Direct ctypes | `--inprocess-direct` | ~2k–34k | None; `__afl_guarded_call` escape | Yes* |
+| Persistent subprocess | `--inprocess` | ~2.9k | Full (fork per call) | Yes* |
+| Per-call subprocess | `--inprocess` (fallback) | ~21 | Full | Yes* |
 
-\* Coverage bitmap is returned by the loader but the sanitizer's inline
-instrumentation does not populate it (see Coverage section below).
+\* For `afl_shim.c` builds (`tools/build_targets.sh`): the target writes edges
+straight into the fuzzer's SHM (`__AFL_SHM_ID`). Sancov-only `.so` builds still
+get none (see Coverage section below).
 
 ---
 
@@ -33,9 +36,10 @@ overhead is only the ctypes FFI call + target execution time.
   target kills the fuzzer process immediately. The target *must* handle
   errors internally via `setjmp`/`longjmp` (like our libpng wrapper does)
   or be compiled with sanitizers that trap via `__asan_on_error` instead
-  of signals.
+  of signals. *Resolved for `afl_shim.c` builds:* `__afl_guarded_call`
+  siglongjmps out of the fault and returns `-sig`.
 
-- **No coverage.** The sanitizer's inline instrumentation requires the
+- **No coverage.** *(Resolved for `afl_shim.c` builds, which write SHM edges.)* The sanitizer's inline instrumentation requires the
   sanitizer runtime to be linked, which doesn't happen when loading a `.so`
   via ctypes. A no-op shim provides the `__sanitizer_cov_8bit_counters_init`
   symbol but the inline code never initializes. The coverage bitmap
@@ -54,7 +58,7 @@ overhead is only the ctypes FFI call + target execution time.
 
 ---
 
-## Persistent Subprocess (`--inprocess` with `-c`)
+## Persistent Subprocess (`--inprocess`, `.so` target)
 
 **How it works:** Spawns one Python subprocess that stays alive across
 all iterations. The fuzzer sends input data via stdin and receives the
@@ -69,7 +73,8 @@ and `ctypes.CDLL` load overhead on every iteration.
   ctypes, which means the sanitizer runtime is not linked. The no-op
   `__sanitizer_cov_8bit_counters_init` shim prevents the sanitizer from
   initializing inline instrumentation. The bitmap is returned (correct
-  size) but all bytes are zero.
+  size) but all bytes are zero. *Resolved for `afl_shim.c` builds:* the
+  target writes SHM directly; the pipe's `bmp_len` is always 0.
 
 - **Single-threaded.** The persistent subprocess is a single process;
   running several fuzzer instances means several such subprocesses.
@@ -80,6 +85,9 @@ and `ctypes.CDLL` load overhead on every iteration.
 ---
 
 ## Coverage Limitations
+
+Applies only to sancov-only (`inline-8bit-counters`) `.so` builds; `afl_shim.c`
+builds get SHM edge coverage in every in-process mode.
 
 **Root cause:** Sanitizer coverage (`-fsanitize-coverage=inline-8bit-counters`)
 requires the sanitizer runtime to be linked into the binary. When a `.so` is
@@ -106,9 +114,9 @@ counter writes go nowhere.
 3. **Use a custom coverage mechanism** that doesn't depend on the sanitizer
    runtime — e.g., Intel Pin, DynamoRIO, or manual edge instrumentation.
 
-**Current workaround:** For coverage-guided fuzzing, compile the target as
-a standalone executable (not a `.so`) and use the fuzzer's default
-subprocess mode with `-c`.
+**Current workaround:** Build with `afl_shim.c` (`tools/build_targets.sh`), or
+compile the target as a standalone executable (not a `.so`) and use the
+fuzzer's default subprocess mode (coverage is on by default; `-c` is a no-op).
 
 ---
 
@@ -117,8 +125,7 @@ subprocess mode with `-c`.
 - **Linux x86_64** required. The ELF parser assumes 64-bit little-endian.
 - **clang** required for sanitizer-instrumented targets. GCC does not
   support `-fsanitize-coverage=inline-8bit-counters`.
-- **Python 3.10+** required for `match` syntax and type hints used in
-  the shim factory.
+- **Python 3.11+** required (`requires-python` in `pyproject.toml`).
 
 ---
 
@@ -127,18 +134,20 @@ subprocess mode with `-c`.
 1. **Per-call subprocess is slow (~21 execs/sec).** The persistent loader
    optimizes this to ~2,900 execs/sec but only activates with `-c`. Without
    coverage, each iteration spawns a new Python process.
+   *Resolved:* the persistent loader now starts for any `.so` target;
+   per-call is only the fallback when it fails to start.
 
 2. **`--inprocess-direct` + `-c` doesn't populate the bitmap.** The shim
    factory builds a minimal shim, but the sanitizer's inline instrumentation
    doesn't initialize. The fuzzer runs but coverage-guided decisions are
-   based on an empty bitmap.
+   based on an empty bitmap. *Resolved for `afl_shim.c` builds (SHM edges).*
 
 3. **The `shm-edges` display shows 0.** This is cosmetic — the bitmap
    from the persistent loader is 0 bytes of actual coverage data because
    the sanitizer isn't initialized. The fuzzer still runs and finds crashes
-   via signal detection.
+   via signal detection. *Resolved for `afl_shim.c` builds (SHM edges).*
 
-4. **ELF parsing fragility.** The persistent loader parses ELF symbol
+4. **ELF parsing fragility.** The shim factory (`core/elf.py::parse_sancov_offsets`) parses ELF symbol
    tables to find `__start___sancov_cntrs`. This works
    for standard clang-built `.so` files but may fail for:
    - Stripped binaries (no `.symtab`)
@@ -187,6 +196,10 @@ subprocess mode with `-c`.
 ---
 
 ## Coverage: Working Approach (Standalone Executables + C Loader)
+
+*Superseded:* `fuzz_loader.c` no longer reads a bitmap file (no C code writes
+`_COV_BITMAP_OUT`); `afl_shim.c` targets write SHM directly. An executable
+passed with `--inprocess` now runs in exec mode, not in-process.
 
 Coverage-guided fuzzing now works by:
 

@@ -41,12 +41,15 @@ The fuzzer writes a quintet of sidecar files per crash (via ``save_crash`` in
 
 ```
 crashes/
-  crash_<ts>_<cluster_id>_<sig>.bin   ← raw input bytes (only file counted as "crash")
-  crash_<ts>_<cluster_id>_<sig>.txt   ← human-readable report (target, returncode, GDB replay)
-  crash_<ts>_<cluster_id>_<sig>.json  ← same fields, machine-readable (CrashMetadata.to_dict())
-  crash_<ts>_<cluster_id>_<sig>.hex   ← xxd-style hexdump + text repr
-  crash_<ts>_<cluster_id>_<sig>.sh    ← base64 reproducer script
+  crash_<ts>_<cluster_id>_<san>_<err>.bin   ← raw input bytes (only file counted as "crash")
+  crash_<ts>_<cluster_id>_<san>_<err>.txt   ← human-readable report (target, returncode, GDB replay)
+  crash_<ts>_<cluster_id>_<san>_<err>.json  ← same fields, machine-readable (CrashMetadata.to_dict())
+  crash_<ts>_<cluster_id>_<san>_<err>.hex   ← xxd-style hexdump + text repr
+  crash_<ts>_<cluster_id>_<san>_<err>.sh    ← base64 reproducer script
 ```
+
+``<san>_<err>`` is e.g. ``addr_heapbufferoverflow``, or ``sig_signal11`` without a
+sanitizer report (``_crash_name_parts``).
 
 The ``.bin`` is the authoritative input; the ``.txt`` and ``.json`` carry the
 same triage fields (sanitizer, error_type, fault_addr, frames, registers,
@@ -65,12 +68,12 @@ companion ``.json`` sidecar with the parsed triage fields — read those
 directly:
 
 ```bash
-jq '.[] | {signal, sanitizer, error_type, fault_addr}' crashes/*.json
+jq '{returncode, sanitizer, error_type, fault_addr}' crashes/*.json
 ```
 
 The ``.json`` is written by ``save_crash`` and mirrors ``CrashMetadata.to_dict()``
 (sanitizer, error_type, fault_addr, frames, registers, gdb_replay,
-nearest_corpus, raw_stderr, target_sha256, returncode). No re-parse of the
+nearest_corpus_file, raw_stderr, target_sha256, returncode). No re-parse of the
 ``.txt`` is needed.
 
 ### 2. Classify
@@ -96,7 +99,7 @@ script is the fastest path. For ``.so`` targets, prefer the standalone PIE exe
 when available (avoids ASAN/shim LD_PRELOAD conflicts):
 
 ```bash
-printf '...' | gdb --batch -ex "file targets/ffmpeg_read" -ex "run" -ex "bt" -ex "quit"
+printf '...' | gdb --batch -ex "file ~/fuzzing/builds/ffmpeg_read_<ver>_noasan" -ex "run" -ex "bt" -ex "quit"
 ```
 
 **For ASAN crashes**, the ``.sh`` script with ``ASAN_OPTIONS=abort_on_error=1`` is
@@ -104,7 +107,7 @@ correct. If the ``.so`` build has an ASAN/shim conflict, build and use the
 standalone exe instead.
 
 **For ``.so`` targets with ``__afl_guarded_call``**, use the Python harness
-(``adapters/inprocess.py:96-108``). The guarded call is the ONLY correct way to
+(the ``__afl_guarded_call`` block in ``_LOADER_SCRIPT``, ``adapters/inprocess.py``). The guarded call is the ONLY correct way to
 invoke ``fuzz_shm_run`` from Python — bare ``ctypes.CDLL`` lets the signal
 terminate Python.
 
@@ -114,7 +117,7 @@ Three tools, in order of what they answer:
 
 | Tool | Answers |
 |------|---------|
-| ``fuzzer-tool replay <crash.bin>`` | "does it still crash?" + backtrace |
+| ``fuzzer-tool replay <target> <crash.bin>`` | "does it still crash?" + backtrace |
 | ``fuzzer-tool root-cause <target> <crash.bin>`` | minimal byte diff + mutation site |
 | ``fuzzer-tool tmin <target> <crash.bin> --lineage`` | smallest crashing input + parent chain |
 
