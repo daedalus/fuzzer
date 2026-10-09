@@ -20,8 +20,10 @@ import logging
 import re
 import struct
 from collections.abc import Callable
-from dataclasses import dataclass
-from enum import Enum
+from dataclasses import dataclass, field
+from itertools import compress
+
+import xxhash
 
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.tree_mutator import has_bracket_delimiter as _tree_mutator_has_delims
@@ -630,6 +632,9 @@ _FORMAT_SNIFFERS: dict[str, Callable[[bytes], bool]] = {
     ),
 }
 
+# Distinct inputs whose format sniff results are remembered (per plan).
+_SNIFF_CACHE_MAX = 256
+
 # Fraction of selections on which a not-yet-seen format is still offered.
 _FORMAT_BOOTSTRAP_RATE = 0.02
 
@@ -924,13 +929,18 @@ class OperatorSpec:
     mutator: object | None = None
 
 
-class _Gate(Enum):
-    """How available() decides one operator (planned once per table change)."""
+@dataclass
+class _Plan:
+    """available()'s precomputed layout: names in registry order, the
+    ungated mask, and each gated op's slot grouped by gate kind."""
 
-    ALWAYS = "always"
-    FORMAT = "format"
-    PREDICATE = "predicate"
-    MUTATOR = "mutator"
+    names: tuple[str, ...]
+    always: list[bool]
+    predicates: list[tuple[int, Callable]]
+    formats: list[tuple[int, str, Callable[[bytes], bool]]]
+    mutators: list[tuple[int, object]]
+    # input hash -> slots whose sniffer matched it (bounded, _SNIFF_CACHE_MAX)
+    sniffed: dict[int, frozenset[int]] = field(default_factory=dict)
 
 
 class OperatorRegistry:
@@ -942,7 +952,7 @@ class OperatorRegistry:
         # available()'s plan, keyed on (registrations, table size): size
         # catches the direct ``_ops.pop`` some test teardowns do.
         self._version = 0
-        self._plan: list[tuple] = []
+        self._plan: _Plan | None = None
         self._plan_key: tuple | None = None
 
     def register(self, spec: OperatorSpec) -> None:
@@ -1022,69 +1032,82 @@ class OperatorRegistry:
         Mirrors the historic build_ops() conditions (dictionary, markov,
         cem, grammar, cmplog, per-input redqueen).
         """
-        # Class-based mutators get one fuzzer snapshot per call, not one each
-        # (~22 per mutant): the fuzzer does not change while predicates run.
-        ctx = None
-        live = None if fuzzer is None else _live_formats(fuzzer)
-        names: list[str | None] = []  # None: a format the trickle dropped
-        pending: list[int] = []  # slots of unseen formats awaiting the trickle
-        for gate, name, fn in self._current_plan():
-            if gate is _Gate.ALWAYS:
-                names.extend(name)  # a run of ungated ops, one C-level extend
-            elif gate is _Gate.FORMAT:
-                if live is not None and name not in live and not (data and fn(data)):
-                    pending.append(len(names))
-                elif live is not None and name not in live:
-                    live.add(name)  # real file of this format seen -- keep it live
-                names.append(name)
-            elif gate is _Gate.PREDICATE:
-                if fn(fuzzer, data):
-                    names.append(name)
-            else:
-                if ctx is None:
-                    ctx = MutationContext.from_fuzzer(fuzzer)
-                if fn.is_available(ctx, data):
-                    names.append(name)
-        return self._drop_trickled(names, pending, fuzzer)
+        # One pass per gate kind over a precomputed mask, then one C-level
+        # compress: no per-op kind dispatch (was ~44 of 73 us per call).
+        plan = self._current_plan()
+        mask = plan.always.copy()
+
+        for i, fn in plan.predicates:
+            mask[i] = bool(fn(fuzzer, data))
+
+        pending = self._sniff_formats(plan, mask, fuzzer, data)
+
+        if plan.mutators:
+            # One fuzzer snapshot per call, not one per class-based mutator.
+            ctx = MutationContext.from_fuzzer(fuzzer)
+            for i, mutator in plan.mutators:
+                mask[i] = bool(mutator.is_available(ctx, data))
+
+        if pending:
+            # One batched draw for every unseen format, in registry order.
+            keep = _trickle(getattr(fuzzer, "_rng", None), len(pending))
+            for i, ok in zip(pending, keep, strict=True):
+                mask[i] = ok
+        return list(compress(plan.names, mask))
 
     @staticmethod
-    def _drop_trickled(names: list, pending: list[int], fuzzer) -> list[str]:
-        """Resolve unseen formats with one batched draw, in registry order."""
-        if not pending:
-            return names
-        keep = _trickle(getattr(fuzzer, "_rng", None), len(pending))
-        for slot, ok in zip(pending, keep, strict=True):
-            if not ok:
-                names[slot] = None
-        return list(filter(None, names))
+    def _sniff_formats(plan: "_Plan", mask: list, fuzzer, data: bytes) -> list[int]:
+        """Mark live or sniffed formats; return slots awaiting the trickle."""
+        formats = plan.formats
+        if fuzzer is None:
+            for i, _name, _sniff in formats:
+                mask[i] = True
+            return []
 
-    def _current_plan(self) -> list[tuple]:
+        # Sniffers are pure in the input, and one parent seed feeds many
+        # execs: sniff each content once (keyed by hash, so big seeds are
+        # not pinned), and keep applying hits to this fuzzer's live set.
+        key = xxhash.xxh3_64_intdigest(data) if data else 0
+        matched = plan.sniffed.get(key)
+        if matched is None:
+            matched = frozenset(i for i, _n, sniff in formats if data and sniff(data))
+            if len(plan.sniffed) >= _SNIFF_CACHE_MAX:
+                plan.sniffed.clear()
+            plan.sniffed[key] = matched
+
+        live = _live_formats(fuzzer)
+        pending = []
+        for i, name, _sniff in formats:
+            if name in live:
+                mask[i] = True
+            elif i in matched:
+                live.add(name)  # real file of this format seen -- keep it live
+                mask[i] = True
+            else:
+                pending.append(i)
+        return pending
+
+    def _current_plan(self) -> "_Plan":
         key = (self._version, len(self._ops))
         if key != self._plan_key:
             self._plan = self._build_plan()
             self._plan_key = key
         return self._plan
 
-    def _build_plan(self) -> list[tuple]:
-        """(gate, name, fn) per op in registry order, classified once.
-
-        Consecutive ungated ops collapse into one ALWAYS entry carrying the
-        tuple of their names (271 ops -> 24 runs + 123 gated at the time).
-        """
-        plan: list[tuple] = []
-        for name, spec in self._ops.items():
+    def _build_plan(self) -> "_Plan":
+        """Registry-ordered names plus per-gate (slot, fn) lists, built once."""
+        plan = _Plan(names=tuple(self._ops), always=[], predicates=[], formats=[], mutators=[])
+        for i, spec in enumerate(self._ops.values()):
+            plan.always.append(spec.available is None)
             fmt = getattr(spec.available, "format_name", None)
             if spec.available is None:
-                if plan and plan[-1][0] is _Gate.ALWAYS:
-                    plan[-1] = (_Gate.ALWAYS, (*plan[-1][1], name), None)
-                else:
-                    plan.append((_Gate.ALWAYS, (name,), None))
-            elif spec.mutator is not None:
-                plan.append((_Gate.MUTATOR, name, spec.mutator))
+                continue
+            if spec.mutator is not None:
+                plan.mutators.append((i, spec.mutator))
             elif fmt is not None:
-                plan.append((_Gate.FORMAT, name, _FORMAT_SNIFFERS[fmt]))
+                plan.formats.append((i, spec.name, _FORMAT_SNIFFERS[fmt]))
             else:
-                plan.append((_Gate.PREDICATE, name, spec.available))
+                plan.predicates.append((i, spec.available))
         return plan
 
     def categories(self) -> dict[str, set[str]]:
