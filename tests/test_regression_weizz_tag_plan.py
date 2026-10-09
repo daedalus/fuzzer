@@ -47,11 +47,10 @@ def _reference(data: bytes, pairs) -> list:
     """The pre-cache loop: every pair, in sort order, numbered as met."""
     cfg = wt.TagCollectorConfig()
     n = len(data)
-    tags = [wt.ByteTag() for _ in range(n)]
+    claims = wt._TagClaims(n)
     offsets = wt.scanner_for_pairs(pairs).scan(data, min_len=cfg.min_operand_len)
     counter_by_id: dict[int, int] = {}
     first_offset: dict[int, int] = {}
-    dep: set[int] = set()
     for op_a, op_b in sorted(pairs, key=wt._pair_key):
         candidates = wt._sized_operands(op_a, op_b, cfg)
         if not (op_a or op_b) or not candidates:
@@ -60,9 +59,9 @@ def _reference(data: bytes, pairs) -> list:
         counter_by_id.setdefault(cid, len(counter_by_id) + 1)
         flags = _old_flags(op_a, op_b, n)
         tag = (cid, counter_by_id[cid], flags)
-        wt._claim_pair(tags, candidates, offsets, tag, dep, first_offset, True)
-    wt._assign_parents(tags)
-    return [(t.cmp_id, t.parent, t.counter, int(t.flags)) for t in tags]
+        wt._claim_pair(claims, candidates, offsets, tag, first_offset, True)
+    wt._assign_parents(claims.tags)
+    return [(t.cmp_id, t.parent, t.counter, int(t.flags)) for t in claims.tags]
 
 
 def _actual(data: bytes, pairs) -> list:

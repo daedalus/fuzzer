@@ -37,6 +37,7 @@ Scope and honest limits:
 from __future__ import annotations
 
 import logging
+from bisect import bisect_left
 
 from fuzzer_tool.core.lru import LRUCache
 
@@ -109,6 +110,42 @@ class BranchRecord:
         )
 
 
+Located = tuple[BranchRecord, int, int]
+"""``(record, offset, other_value)``: a record mapped to its input window."""
+
+
+class _Windows:
+    """Located records plus a start-sorted index for overlap queries.
+
+    A window [s, s+w) meets [start, end) only if s < end and s > start - w,
+    so a bisect over sorted starts bounds the candidates to that band:
+
+        starts:  1   2   5   9  14      query [9, 13), max width 8
+                     ^-----------^      band s in [2, 13): 1 never visited;
+                                        2 and 5 kept only if s + w > 9
+    """
+
+    __slots__ = ("located", "_starts", "_order", "_max_width")
+
+    def __init__(self, located: list[Located]):
+        self.located = located
+        self._order = sorted(range(len(located)), key=lambda i: located[i][1])
+        self._starts = [located[i][1] for i in self._order]
+        self._max_width = max((rec.width for rec, _, _ in located), default=0)
+
+    def touching(self, start: int, end: int) -> list[Located]:
+        """Windows intersecting [start, end), in original record order."""
+        lo = bisect_left(self._starts, start - self._max_width + 1)
+        hi = bisect_left(self._starts, end)
+        located = self.located
+        out = []
+        for i in sorted(self._order[lo:hi]):
+            item = located[i]
+            if item[1] + item[0].width > start:
+                out.append(item)
+        return out
+
+
 class PathConstraintSolver:
     """Solves for inputs that take the opposite side of a recorded branch.
 
@@ -137,17 +174,34 @@ class PathConstraintSolver:
         flipping it tends to move the input further than flipping a single
         byte check.
         """
+        return self._frontier(self._map(records, input_data))
+
+    def _frontier(self, mapped: _Windows) -> list[BranchRecord]:
+        """frontier() over records already located by _map()."""
         out = []
-        for rec in records:
+        for rec, _, _ in mapped.located:
             if rec.key in self._attempted:
                 continue
             if not (0 < rec.width <= MAX_WIDTH):
                 continue
-            if self._locate(rec, input_data) is None:
-                continue
             out.append(rec)
         out.sort(key=lambda r: r.width, reverse=True)
         return out
+
+    def _map(self, records: list[BranchRecord], data: bytes) -> _Windows:
+        """``(record, offset, other_value)`` for every locatable record, in order.
+
+        Located once per solve: frontier, negate and _overlapping read this
+        instead of re-running ``data.find`` per record per candidate, which
+        was frontier x records x len(data) (54-76% of an ffmpeg --hail-mary
+        run).
+        """
+        out = []
+        for rec in records:
+            located = self._locate(rec, data)
+            if located is not None:
+                out.append((rec, located[0], located[1]))
+        return _Windows(out)
 
     def _locate(self, rec: BranchRecord, data: bytes) -> tuple[int, int] | None:
         """Find the operand window in *data*.
@@ -211,29 +265,19 @@ class PathConstraintSolver:
             candidate = (other + 2) & limit
         return candidate
 
-    def _overlapping(
-        self, rec: BranchRecord, others: list[BranchRecord], data: bytes
-    ) -> list[tuple[BranchRecord, int, int]]:
-        """Other mapped branches whose byte window intersects *rec*'s.
+    def _overlapping(self, rec: BranchRecord, start: int, mapped: _Windows) -> list[Located]:
+        """Other mapped branches whose byte window intersects *rec*'s at *start*.
 
         Only these can be invalidated by the mutation, so only these need to
         enter the constraint system.
         """
-        located = self._locate(rec, data)
-        if located is None:
-            return []
-        start, _ = located
         end = start + rec.width
+        key = rec.key
         out = []
-        for other in others:
-            if other is rec or other.key == rec.key:
+        for other, o_start, o_value in mapped.touching(start, end):
+            if other is rec or other.key == key:
                 continue
-            other_located = self._locate(other, data)
-            if other_located is None:
-                continue
-            o_start, o_value = other_located
-            if o_start < end and start < o_start + other.width:
-                out.append((other, o_start, o_value))
+            out.append((other, o_start, o_value))
         # Widest first, then bounded: the widest windows constrain the most
         # bytes and so are the ones most likely to be broken by the mutation.
         out.sort(key=lambda t: t[0].width, reverse=True)
@@ -258,7 +302,10 @@ class PathConstraintSolver:
         """
         if not input_data or len(input_data) > MAX_INPUT_BYTES:
             return None
+        return self._negate(rec, input_data, self._map(others or [], input_data))
 
+    def _negate(self, rec: BranchRecord, input_data: bytes, mapped: _Windows) -> bytes | None:
+        """negate() on a non-empty, in-bounds input with *mapped* already located."""
         located = self._locate(rec, input_data)
         if located is None:
             self.skipped_unmapped += 1
@@ -273,7 +320,7 @@ class PathConstraintSolver:
 
         observed = self._effective_result(rec, input_data)
         original = int.from_bytes(input_data[offset : offset + width], "little")
-        overlaps = self._overlapping(rec, others, input_data) if others else []
+        overlaps = self._overlapping(rec, offset, mapped)
 
         if not overlaps:
             value = self._direct_solve(observed, original, other, width)
@@ -372,8 +419,11 @@ class PathConstraintSolver:
         Passes the full record list so overlapping branches are preserved
         rather than clobbered by the mutation.
         """
-        for rec in self.frontier(records, input_data):
-            result = self.negate(rec, input_data, others=records)
+        if not input_data or len(input_data) > MAX_INPUT_BYTES:
+            return None
+        mapped = self._map(records, input_data)
+        for rec in self._frontier(mapped):
+            result = self._negate(rec, input_data, mapped)
             if result is not None and result != input_data:
                 return result
         return None

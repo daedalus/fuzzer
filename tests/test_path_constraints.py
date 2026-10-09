@@ -423,7 +423,8 @@ class TestFastPathAndConjunctive:
         target = _rec(0x10, 0x41424344, -1, pc=0)
         others = [target] + [_rec(0x10, 0x41424344 + i, -1, pc=i + 1) for i in range(50)]
         solver = PathConstraintSolver()
-        assert len(solver._overlapping(target, others, data)) <= MAX_OVERLAP
+        mapped = solver._map(others, data)
+        assert len(solver._overlapping(target, 4, mapped)) <= MAX_OVERLAP
 
     def test_non_overlapping_branches_are_not_folded_in(self):
         data = bytearray(32)
@@ -432,7 +433,7 @@ class TestFastPathAndConjunctive:
         near = _rec(0x10, 0x41424344, -1, pc=1)
         far = _rec(0x20, 0x51525354, -1, pc=2)
         solver = PathConstraintSolver()
-        assert solver._overlapping(near, [near, far], bytes(data)) == []
+        assert solver._overlapping(near, 0, solver._map([near, far], bytes(data))) == []
 
     def test_direct_solve_is_unsatisfiable_past_the_width_limit(self):
         """value >= 0xFF is satisfiable at width 1; > 0xFF is not."""
