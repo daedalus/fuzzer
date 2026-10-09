@@ -51,6 +51,15 @@ POS_STRATEGY_PREFIX = "pos_"
 # multi-target mode. Keys are ``tgt_<name>``.
 TGT_STRATEGY_PREFIX = "tgt_"
 
+# Family-wise false-flag rate of one canary-floor check (Bonferroni-split
+# across the arms tested). Elo ratings are not used for the floor: a miss
+# scores a loss against every arm that sat out, so at low gain rates they
+# track pick frequency rather than quality.
+_FLOOR_ALPHA = 0.05
+# Above this many hits on both sides the exact Beta sum is replaced by a
+# normal approximation, keeping the check O(1) in memory.
+_EXACT_MAX_HITS = 4096
+
 
 class Arena(enum.Enum):
     """The four disjoint Elo tournaments; they never play each other."""
@@ -111,6 +120,46 @@ def _record_strategy_win(wins: dict[str, int], a: str, b: str, score_a: float) -
         wins[a] = wins.get(a, 0) + 1
     elif score_a < 0.5:
         wins[b] = wins.get(b, 0) + 1
+
+
+def _lbeta(a: float, b: float) -> float:
+    return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+
+
+def _p_greater(a_a: int, b_a: int, a_b: int, b_b: int) -> float:
+    """P(X_b > X_a) for X ~ Beta(a, b), integer shapes; O(a_b) terms.
+
+    Closed form (Evan Miller): sum over i < a_b of
+    B(a_a+i, b_a+b_b) / ((b_b+i) B(1+i, b_b) B(a_a, b_a)). Consecutive
+    terms differ by (a_a+i)(b_b+i) / ((a_a+b_a+b_b+i)(1+i)), so the
+    log terms are one cumulative sum.
+    """
+    log_t0 = _lbeta(a_a, b_a + b_b) - _lbeta(a_a, b_a)
+    i = np.arange(a_b - 1, dtype=float)
+    ratios = np.log((a_a + i) * (b_b + i)) - np.log((a_a + b_a + b_b + i) * (1.0 + i))
+    logs = log_t0 + np.concatenate(([0.0], np.cumsum(ratios)))
+    return float(np.exp(logs).sum())
+
+
+def _prob_below(hits_a: int, n_a: int, hits_b: int, n_b: int) -> float:
+    """P(rate_a < rate_b) under uniform-prior Beta posteriors.
+
+    Sums over the side with fewer hits (P(a<b) = 1 - P(b<a)); past
+    ``_EXACT_MAX_HITS`` on both sides a normal approximation is exact enough.
+    """
+    a_a, b_a = hits_a + 1, n_a - hits_a + 1
+    a_b, b_b = hits_b + 1, n_b - hits_b + 1
+
+    if min(a_a, a_b) > _EXACT_MAX_HITS:
+        mean_a, mean_b = a_a / (a_a + b_a), a_b / (a_b + b_b)
+        var_a = mean_a * (1 - mean_a) / (a_a + b_a + 1)
+        var_b = mean_b * (1 - mean_b) / (a_b + b_b + 1)
+        z = (mean_b - mean_a) / math.sqrt(var_a + var_b)
+        return 0.5 * math.erfc(-z / math.sqrt(2.0))
+
+    if a_b <= a_a:
+        return min(1.0, _p_greater(a_a, b_a, a_b, b_b))
+    return max(0.0, 1.0 - _p_greater(a_b, b_b, a_a, b_a))
 
 
 def _softmax_select(scored: list[tuple[str, float]], temperature: float, rng: RandPool) -> str:
@@ -852,6 +901,10 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_sigma_sq: dict[str, float] = {}
         self._strategy_match_count: dict[str, int] = {}
         self._strategy_win_count: dict[str, int] = {}
+        # Rounds each strategy actually played, and how many gained: the
+        # canary-floor evidence (see strategies_below_canary).
+        self._strategy_hits: dict[str, int] = {}
+        self._strategy_trials: dict[str, int] = {}
 
         # Adaptive K-factor tracking
         self._prediction_errors: array = array("d")
@@ -1055,6 +1108,11 @@ class BayesianEloTracker(RoundRecorderMixin):
         expected = self._expected_score
         k = self._effective_k()
 
+        # One call is one round played by strategy_a.
+        trials, hits = self._strategy_trials, self._strategy_hits
+        trials[strategy_a] = trials.get(strategy_a, 0) + 1
+        hits[strategy_a] = hits.get(strategy_a, 0) + (score_a > 0.0)
+
         mu_a = sig_a = None
         for b in opponents:
             if b == strategy_a:
@@ -1172,19 +1230,20 @@ class BayesianEloTracker(RoundRecorderMixin):
     def strategies_below_canary(
         self, canary_name: str = "canary"
     ) -> list[tuple[str, float, float]]:
-        """Real strategies rated at or below the deliberately-worst canary.
+        """Real strategies whose gain rate is credibly below the canary's.
 
         ``canary_name`` always argmin-selects (see
-        ``core/schedulers/op_canary.py``), so it is meant to anchor the bottom
-        of ``get_strategy_ranking()``. A real strategy resting at or below
-        it is not evidence canary is doing well -- it means that strategy
-        is performing at or worse than a scheduler built to lose on
-        purpose, which is worth looking into.
+        ``core/schedulers/op_canary.py``), so it is meant to anchor the
+        bottom of the pool. A real strategy credibly worse than it is
+        performing worse than a scheduler built to lose on purpose, which
+        is worth looking into.
 
-        Both sides must have accumulated ``min_matches`` matches already
-        (the same gate ``get_strategy_ranking`` uses) -- an unrated
-        strategy sitting at ``initial_mu`` isn't a finding, it just hasn't
-        played enough games yet.
+        Evidence is each side's own rounds (hits / trials), not Elo
+        ratings: a miss counts as a loss to every arm that sat out, so at
+        low gain rates ratings follow pick frequency. A strategy is flagged
+        when P(rate < floor rate) under Beta(1+hits, 1+misses) posteriors
+        exceeds ``1 - _FLOOR_ALPHA / m`` (m = strategies tested). Ties and
+        near-ties are not findings. Both sides need ``min_matches`` trials.
 
         The operator arena (``canary_name="canary"``), seed arena
         (``canary_name="seed_canary"``) and position arena are disjoint;
@@ -1197,25 +1256,33 @@ class BayesianEloTracker(RoundRecorderMixin):
         argmin floor like the operator/seed canaries.
 
         Returns:
-            ``(strategy, strategy_mu, canary_mu)`` tuples, worst offender
-            (lowest strategy_mu) first. Empty if canary itself isn't rated
-            yet, or nothing else is at/below it.
+            ``(strategy, rate, floor_rate)`` tuples, worst offender (lowest
+            rate) first. Empty if the floor isn't rated yet, or nothing is
+            credibly below it.
         """
-        if self._strategy_match_count.get(canary_name, 0) < self.min_matches:
+        trials, hits = self._strategy_trials, self._strategy_hits
+        floor_n = trials.get(canary_name, 0)
+        if floor_n < self.min_matches:
             return []
-        canary_mu = self._strategy_mu.get(canary_name)
-        if canary_mu is None:
-            return []
+        floor_h = hits.get(canary_name, 0)
 
         # Filter by arena: the floor's own prefix names the tournament.
         arena = strategy_arena(canary_name)
+        rated = [
+            s
+            for s, n in trials.items()
+            if s != canary_name and strategy_arena(s) is arena and n >= self.min_matches
+        ]
+        if not rated:
+            return []
+
+        # Bonferroni: m arms tested per check, one family-wise alpha.
+        confidence = 1.0 - _FLOOR_ALPHA / len(rated)
+        floor_rate = floor_h / floor_n
         flagged = [
-            (s, mu, canary_mu)
-            for s, mu in self._strategy_mu.items()
-            if s != canary_name
-            and strategy_arena(s) is arena
-            and self._strategy_match_count.get(s, 0) >= self.min_matches
-            and mu <= canary_mu
+            (s, hits.get(s, 0) / trials[s], floor_rate)
+            for s in rated
+            if _prob_below(hits.get(s, 0), trials[s], floor_h, floor_n) > confidence
         ]
         flagged.sort(key=lambda row: row[1])
         return flagged
@@ -1251,6 +1318,8 @@ class BayesianEloTracker(RoundRecorderMixin):
             "strategy_sigma_sq": self._strategy_sigma_sq,
             "strategy_match_count": self._strategy_match_count,
             "strategy_win_count": self._strategy_win_count,
+            "strategy_hits": self._strategy_hits,
+            "strategy_trials": self._strategy_trials,
             "prediction_errors": list(self._prediction_errors),
             "best_win_rate": list(self._best_win_rate),
         }
@@ -1269,6 +1338,8 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_sigma_sq = data.get("strategy_sigma_sq", {})
         self._strategy_match_count = data.get("strategy_match_count", {})
         self._strategy_win_count = data.get("strategy_win_count", {})
+        self._strategy_hits = data.get("strategy_hits", {})
+        self._strategy_trials = data.get("strategy_trials", {})
         self._prediction_errors = array("d", data.get("prediction_errors", []))
         self._best_win_rate = array("d", data.get("best_win_rate", []))
 

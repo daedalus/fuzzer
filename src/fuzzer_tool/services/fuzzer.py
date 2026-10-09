@@ -8114,7 +8114,7 @@ class Fuzzer:
         )
 
     def _check_canary_inspection(self) -> None:
-        """Warn when a real scheduler ranks at or below the canary floor.
+        """Warn when a real scheduler is credibly below the canary floor.
 
         Called on the same cadence as ``apply_decay`` (every
         ``_elo_decay_interval`` recorded rounds), not every round --
@@ -8125,58 +8125,61 @@ class Fuzzer:
         # Only flag operator (non-seed) strategies below the canary floor.
         # Seed strategies have their own separate seed-canary floor check below.
         flagged = self._elo.strategies_below_canary()
-        for strategy, mu, canary_mu in flagged:
+        for strategy, rate, floor_rate in flagged:
             log.warning(
-                "Elo meta-scheduler: %r rated %.1f, at or below the canary "
-                "floor (%.1f) -- this scheduler needs inspection",
+                "Elo meta-scheduler: %r gain rate %.2f%%, credibly below the "
+                "canary floor (%.2f%%) -- this scheduler needs inspection",
                 strategy_display_name(strategy),
-                mu,
-                canary_mu,
+                100 * rate,
+                100 * floor_rate,
             )
         # Position arena: uniform is the always-on baseline floor. A
-        # proposer rated at or below it is no better than picking offsets
-        # blindly.
+        # proposer credibly below it is worse than picking offsets blindly.
+        reported: set[str] = set()
         if getattr(self, "_position_arena", None) is not None:
-            for strategy, mu, floor_mu in self._elo.strategies_below_canary("pos_uniform"):
+            for strategy, rate, floor_rate in self._elo.strategies_below_canary("pos_uniform"):
                 # The canary is built to lose; below uniform is its job.
                 if strategy == _POS_CANARY_KEY:
                     continue
+                reported.add(strategy)
                 log.warning(
-                    "Elo meta-scheduler: position strategy %r rated %.1f, at or "
-                    "below uniform (%.1f) -- this proposer needs inspection",
+                    "Elo meta-scheduler: position strategy %r gain rate %.2f%%, "
+                    "credibly below uniform (%.2f%%) -- this proposer needs inspection",
                     strategy_display_name(strategy),
-                    mu,
-                    floor_mu,
+                    100 * rate,
+                    100 * floor_rate,
                 )
         # Same check against the position arena's own deliberately-worst
         # floor (see core/schedulers/pos_canary.py), when it's running --
         # the pos_ counterpart of the operator/seed canary checks around
-        # this one. A real proposer at or below pos_canary is a stronger
-        # signal than merely tying uniform.
+        # this one. Proposers already reported below uniform are skipped:
+        # one warning per proposer per check.
         if _pos_canary_live(self):
             pos_flagged = self._elo.strategies_below_canary(_POS_CANARY_KEY)
-            for strategy, mu, canary_mu in pos_flagged:
+            for strategy, rate, floor_rate in pos_flagged:
+                if strategy in reported:
+                    continue
                 log.warning(
-                    "Elo meta-scheduler: position strategy %r rated %.1f, at or "
-                    "below the pos-canary floor (%.1f) -- this proposer "
+                    "Elo meta-scheduler: position strategy %r gain rate %.2f%%, "
+                    "credibly below the pos-canary floor (%.2f%%) -- this proposer "
                     "needs inspection",
                     strategy_display_name(strategy),
-                    mu,
-                    canary_mu,
+                    100 * rate,
+                    100 * floor_rate,
                 )
         # Same check for the seed arena's own floor (see
         # core/schedulers/seed_canary.py) -- a separate tournament under
         # seed_-prefixed keys, so it needs its own canary_name.
         if getattr(self, "_use_seed_canary", False) and self._seed_canary:
             seed_flagged = self._elo.strategies_below_canary("seed_canary")
-            for strategy, mu, canary_mu in seed_flagged:
+            for strategy, rate, floor_rate in seed_flagged:
                 log.warning(
-                    "Elo meta-scheduler: seed strategy %r rated %.1f, at or "
-                    "below the seed-canary floor (%.1f) -- this strategy "
+                    "Elo meta-scheduler: seed strategy %r gain rate %.2f%%, "
+                    "credibly below the seed-canary floor (%.2f%%) -- this strategy "
                     "needs inspection",
                     strategy_display_name(strategy),
-                    mu,
-                    canary_mu,
+                    100 * rate,
+                    100 * floor_rate,
                 )
 
     def _seed_convergence_rows(self) -> list[tuple[str, float, float, int]]:

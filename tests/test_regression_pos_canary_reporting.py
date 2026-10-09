@@ -15,15 +15,15 @@ from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker
 from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
 from fuzzer_tool.services.fuzzer import Fuzzer, _active_position_schedulers
 
-_UNIFORM_MU = 1500.0
-_MATCHES = 5
+_UNIFORM_HITS = 100
+_TRIALS = 1000
 
 
-def _rated_elo(ratings: dict[str, float]) -> BayesianEloTracker:
+def _rated_elo(hits: dict[str, int]) -> BayesianEloTracker:
     elo = BayesianEloTracker(min_matches=1)
-    for key, mu in ratings.items():
-        elo._strategy_mu[key] = mu
-        elo._strategy_match_count[key] = _MATCHES
+    for key, h in hits.items():
+        elo._strategy_hits[key] = h
+        elo._strategy_trials[key] = _TRIALS
     return elo
 
 
@@ -43,7 +43,7 @@ def _uniform_warnings(caplog) -> list[str]:
 
 def test_regression_pos_canary_not_flagged_below_uniform(caplog):
     """Falsification: the canary losing to uniform is its job, not a finding."""
-    f = _checker(_rated_elo({"pos_uniform": _UNIFORM_MU, "pos_canary": _UNIFORM_MU - 100}))
+    f = _checker(_rated_elo({"pos_uniform": _UNIFORM_HITS, "pos_canary": 0}))
 
     with caplog.at_level(logging.WARNING):
         f._check_canary_inspection()
@@ -53,9 +53,7 @@ def test_regression_pos_canary_not_flagged_below_uniform(caplog):
 
 def test_real_proposer_below_uniform_still_flagged(caplog):
     """Adversarial: skipping the canary must not silence real proposers."""
-    elo = _rated_elo(
-        {"pos_uniform": _UNIFORM_MU, "pos_canary": _UNIFORM_MU - 100, "pos_mi": _UNIFORM_MU - 50}
-    )
+    elo = _rated_elo({"pos_uniform": _UNIFORM_HITS, "pos_canary": 0, "pos_mi": _UNIFORM_HITS // 4})
     f = _checker(elo)
 
     with caplog.at_level(logging.WARNING):
