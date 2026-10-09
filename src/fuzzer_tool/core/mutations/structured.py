@@ -66,6 +66,7 @@ import math
 import struct
 from collections import Counter
 from functools import lru_cache
+from itertools import groupby
 
 from fuzzer_tool.core.debruijn_cache import fingerprint as _db_fingerprint
 from fuzzer_tool.core.debruijn_cache import load as _db_cache_load
@@ -1135,6 +1136,9 @@ def lmn_lock(data: bytes, rng) -> bytes:
 # transform meaningfully.
 
 
+_BYTE = tuple(bytes((b,)) for b in range(256))  # value -> one-byte bytes
+
+
 def _mtf_encode(data: bytes, alphabet: bytearray) -> bytes:
     """Encode *data* with Move-To-Front, mutating *alphabet* in place."""
     out = bytearray(len(data))
@@ -1204,19 +1208,17 @@ def _bwt_inverse(bwt_data: bytes, primary: int) -> bytes:
     n = len(bwt_data)
     if n <= 1:
         return bwt_data
-    table = sorted((bwt_data[i], i) for i in range(n))
-    # First column F and rank lookup for the LF-mapping.
-    F = [table[i][0] for i in range(n)]
-    rows_f: dict[int, list[int]] = {}
-    for i, c in enumerate(F):
-        rows_f.setdefault(c, []).append(i)
+    # LF-mapping: the k-th c in L is the k-th c in F, i.e. row i of L maps to
+    # i's slot in the stable sort of L (was an O(n) rank recount per step).
+    order = sorted(range(n), key=bwt_data.__getitem__)
+    lf = [0] * n
+    for k, i in enumerate(order):
+        lf[i] = k
     idx = primary
     out = bytearray(n)
-    for i in range(n):
-        c = bwt_data[idx]
-        out[n - 1 - i] = c
-        rank = sum(1 for j in range(idx + 1) if bwt_data[j] == c)
-        idx = rows_f[c][rank - 1]
+    for i in range(n - 1, -1, -1):
+        out[i] = bwt_data[idx]
+        idx = lf[idx]
     return bytes(out)
 
 
@@ -1280,15 +1282,7 @@ def rle(data: bytes, rng) -> bytes:
     """
     if len(data) < 2:
         return data
-    runs: list[tuple[int, int]] = []
-    i = 0
-    while i < len(data):
-        b = data[i]
-        j = i + 1
-        while j < len(data) and data[j] == b:
-            j += 1
-        runs.append((b, j - i))
-        i = j
+    runs: list[tuple[int, int]] = [(b, len(list(g))) for b, g in groupby(data)]
     if len(runs) < 2:
         return data
     n_mut = rng.randint(1, min(3, len(runs)))
@@ -1312,12 +1306,10 @@ def rle(data: bytes, rng) -> bytes:
                     runs[pos] = (runs[pos][0], runs[pos][1] + delta)
             else:
                 runs[pos] = (runs[pos][0], max(1, runs[pos][1] + delta))
-    out = bytearray()
-    for b, length in runs:
-        out.extend([b] * length)
+    out = b"".join(_BYTE[b] * length for b, length in runs)
     if len(out) != len(data):
         return data
-    return _splice(data, 0, bytes(out))
+    return _splice(data, 0, out)
 
 
 def delta_encode(data: bytes, rng) -> bytes:
@@ -1669,19 +1661,31 @@ def _pad_random(restored: bytearray, ridx: int, rng) -> None:
         ridx += 1
 
 
+# Bit stream (one 0/1 byte per bit) <-> ASCII digits, for ``int(..., 2)``.
+_BITS_TO_ASCII = bytes.maketrans(b"\x00\x01", b"01")
+_ASCII_TO_BITS = bytes.maketrans(b"01", b"\x00\x01")
+
+
+def _msb_bits(n: int, width: int) -> bytes:
+    """*n* as *width* 0/1 bytes, MSB first (e.g. 5, 4 -> 00 01 00 01)."""
+    return format(n, f"0{width}b").encode().translate(_ASCII_TO_BITS) if width else b""
+
+
+def _bits_int(bits, start: int, stop: int) -> int:
+    """MSB-first value of bits[start:stop]; 0 when empty."""
+    return int(bits[start:stop].translate(_BITS_TO_ASCII) or b"0", 2)
+
+
+@lru_cache(maxsize=8)
+def _rice_table(k: int) -> tuple[bytes, ...]:
+    """Golomb-Rice codeword of every byte value: q ones, a 0, k-bit LSB-first r."""
+    mask = (1 << k) - 1
+    return tuple(b"\x01" * (b >> k) + b"\x00" + _msb_bits(b & mask, k)[::-1] for b in range(256))
+
+
 def _rice_encode(block: bytearray, k: int) -> bytearray:
     """Golomb-Rice bits: unary quotient (1s then 0), then k-bit LSB-first remainder."""
-    mask = (1 << k) - 1
-    bits = bytearray()
-    for b in block:
-        q = b >> k
-        r = b & mask
-        # quotient in unary: q ones followed by a zero.
-        bits.extend([1] * q + [0])
-        # remainder in k bits, LSB-first.
-        for i in range(k):
-            bits.append((r >> i) & 1)
-    return bits
+    return bytearray(b"".join(map(_rice_table(k).__getitem__, block)))
 
 
 def _rice_edit(bits: bytearray, length: int, rng) -> None:
@@ -1705,18 +1709,16 @@ def _rice_decode(bits: bytearray, k: int, length: int) -> tuple[bytearray, int]:
     restored = bytearray(length)
     ridx = 0
     bidx = 0
-    while ridx < length and bidx < len(bits):
-        q = 0
-        while bidx < len(bits) and bits[bidx] == 1:
-            q += 1
-            bidx += 1
-        if bidx >= len(bits):
+    n = len(bits)
+    while ridx < length and bidx < n:
+        # Unary quotient: the run of 1s up to the next 0.
+        zero = bits.find(0, bidx)
+        if zero < 0:
             break
-        bidx += 1  # skip the terminating 0.
-        r = 0
-        for i in range(k):
-            if bidx + i < len(bits):
-                r |= bits[bidx + i] << i
+        q = zero - bidx
+        bidx = zero + 1
+        # LSB-first remainder; bits past the end read as 0.
+        r = _bits_int(bits[bidx : bidx + k][::-1], 0, k)
         restored[ridx] = ((q << k) | r) & 0xFF
         ridx += 1
         bidx += k
@@ -2100,15 +2102,21 @@ def length_miscalculate(data: bytes, rng) -> bytes:
     return bytes(out)
 
 
+def _gamma_word(n: int) -> bytes:
+    """Elias gamma codeword of *n* >= 1: log2 zeros, then n in binary."""
+    log2 = n.bit_length() - 1
+    return b"\x00" * log2 + _msb_bits(n, log2 + 1)
+
+
+@lru_cache(maxsize=1)
+def _gamma_table() -> tuple[bytes, ...]:
+    """Gamma codeword of every byte value + 1."""
+    return tuple(_gamma_word(b + 1) for b in range(256))
+
+
 def _gamma_encode(block: bytes) -> bytearray:
     """Elias gamma bits of each byte+1: log2 zeros, then N in binary."""
-    bits = bytearray()
-    for b in block:
-        n = b + 1
-        log2 = n.bit_length() - 1
-        bits.extend([0] * log2)
-        bits.extend(int(x) for x in format(n, f"0{log2 + 1}b"))
-    return bits
+    return bytearray(b"".join(map(_gamma_table().__getitem__, block)))
 
 
 def _edit_codebits(bits: bytearray, length: int, rng) -> None:
@@ -2129,20 +2137,17 @@ def _gamma_decode(bits: bytearray, length: int) -> tuple[bytearray, int]:
     restored = bytearray(length)
     ridx = 0
     bidx = 0
-    while ridx < length and bidx < len(bits):
-        # Count leading zeros.
-        log2 = 0
-        while bidx < len(bits) and bits[bidx] == 0:
-            log2 += 1
-            bidx += 1
-        if bidx >= len(bits) or log2 == 0:
+    n = len(bits)
+    while ridx < length and bidx < n:
+        # Leading zeros, up to the next 1.
+        one = bits.find(1, bidx)
+        if one < 0 or one == bidx:
             break
-        total_bits = log2 + 1
-        if bidx + total_bits > len(bits):
+        total_bits = one - bidx + 1
+        bidx = one
+        if bidx + total_bits > n:
             break
-        val = 0
-        for i in range(total_bits):
-            val = (val << 1) | bits[bidx + i]
+        val = _bits_int(bits, bidx, bidx + total_bits)
         restored[ridx] = (val - 1) & 0xFF
         ridx += 1
         bidx += total_bits
@@ -2187,38 +2192,34 @@ def elias_gamma(data: bytes, rng) -> bytes:
     return _splice(data, offset, bytes(restored[:length]))
 
 
-def _delta_encode(block: bytes) -> bytearray:
-    """Elias delta bits of each byte+1: gamma(log2 + 1), then low log2 bits."""
-    bits = bytearray()
-    for b in block:
+@lru_cache(maxsize=1)
+def _delta_table() -> tuple[bytes, ...]:
+    """Delta codeword of every byte value + 1: gamma(log2 + 1), then low log2 bits."""
+    table = []
+    for b in range(256):
         n = b + 1
         log2 = n.bit_length() - 1
-        # Gamma code of log2 + 1.
-        gamma = log2 + 1
-        g_log2 = gamma.bit_length() - 1
-        bits.extend([0] * g_log2)
-        bits.extend(int(x) for x in format(gamma, f"0{g_log2 + 1}b"))
-        # Remainder: binary of n without leading 1, length = log2 bits.
-        if log2 > 0:
-            bits.extend(int(x) for x in format(n & ((1 << log2) - 1), f"0{log2}b"))
-    return bits
+        table.append(_gamma_word(log2 + 1) + _msb_bits(n & ((1 << log2) - 1), log2))
+    return tuple(table)
+
+
+def _delta_encode(block: bytes) -> bytearray:
+    """Elias delta bits of each byte+1: gamma(log2 + 1), then low log2 bits."""
+    return bytearray(b"".join(map(_delta_table().__getitem__, block)))
 
 
 def _read_gamma(bits: bytearray, bidx: int) -> tuple[int, int]:
     """Read a gamma-coded value at *bidx* -> (value, new bidx), value -1 on failure."""
-    g_log2 = 0
-    while bidx < len(bits) and bits[bidx] == 0:
-        g_log2 += 1
-        bidx += 1
-    if bidx >= len(bits) or g_log2 == 0:
+    n = len(bits)
+    one = bits.find(1, bidx)
+    if one < 0:
+        return -1, n
+    if one == bidx:
         return -1, bidx
-    gamma_bits = g_log2 + 1
-    if bidx + gamma_bits > len(bits):
-        return -1, bidx
-    gamma = 0
-    for i in range(gamma_bits):
-        gamma = (gamma << 1) | bits[bidx + i]
-    return gamma, bidx + gamma_bits
+    gamma_bits = one - bidx + 1
+    if one + gamma_bits > n:
+        return -1, one
+    return _bits_int(bits, one, one + gamma_bits), one + gamma_bits
 
 
 def _delta_decode(bits: bytearray, length: int) -> tuple[bytearray, int]:
@@ -2237,9 +2238,7 @@ def _delta_decode(bits: bytearray, length: int) -> tuple[bytearray, int]:
         total_bits = log2
         if bidx + total_bits > len(bits):
             break
-        val = 1 << log2
-        for i in range(total_bits):
-            val = (val << 1) | bits[bidx + i]
+        val = (1 << log2 << total_bits) | _bits_int(bits, bidx, bidx + total_bits)
         restored[ridx] = (val - 1) & 0xFF
         ridx += 1
         bidx += total_bits
@@ -2768,6 +2767,9 @@ def lz_dict_mutate(data: bytes, rng) -> bytes:
     return _splice(data, offset, bytes(restored[:length]))
 
 
+_HUFF_MAX_BITS = 16  # longest code _huff_decode tries
+
+
 def _rank_codes(freq: list[int], symbols: list[int]) -> tuple[list[int], list[int]]:
     """Rank-ordered prefix codes: rank r gets a bit_length(r)-bit code."""
     codes = [0] * 256
@@ -2791,29 +2793,32 @@ def _huff_decode(
     bits: bytearray, codes: list[int], lengths: list[int], length: int
 ) -> tuple[bytearray, int]:
     """Greedy shortest-match decode (<=16-bit codes) -> (restored, bytes decoded)."""
-    decode_table = {}
-    for sym in range(256):
-        if lengths[sym] == 0:
-            continue
-        decode_table[(codes[sym], lengths[sym])] = sym
+    # Key = code under a leading 1 that encodes its length (0b1_01 is "01").
+    # A code wider than its length can never match, so it gets no key.
+    decode_table = {
+        (1 << lengths[sym]) | codes[sym]: sym
+        for sym in range(256)
+        if lengths[sym] and codes[sym] >> lengths[sym] == 0
+    }
     restored = bytearray(length)
     ridx = 0
     bidx = 0
-    while ridx < length and bidx < len(bits):
-        for bit_len in range(1, 17):
-            if bidx + bit_len > len(bits):
+    n = len(bits)
+    while ridx < length and bidx < n:
+        # Grow the prefix one bit per candidate length (was rebuilt per length).
+        prefix = 1
+        sym = None
+        for bit_len in range(1, min(_HUFF_MAX_BITS, n - bidx) + 1):
+            prefix = (prefix << 1) | bits[bidx + bit_len - 1]
+            sym = decode_table.get(prefix)
+            if sym is not None:
                 break
-            prefix = 0
-            for i in range(bit_len):
-                prefix = (prefix << 1) | bits[bidx + i]
-            key = (prefix, bit_len)
-            if key in decode_table:
-                restored[ridx] = decode_table[key]
-                ridx += 1
-                bidx += bit_len
-                break
-        else:
+        # No code fits the remaining bits: stop (the old loop spun here).
+        if sym is None:
             break
+        restored[ridx] = sym
+        ridx += 1
+        bidx += bit_len
     return restored, ridx
 
 
@@ -2856,12 +2861,11 @@ def huffman_tree_mutate(data: bytes, rng) -> bytes:
     a, b = rng.sample(non_zero, 2)
     codes[a], codes[b] = codes[b], codes[a]
     lengths[a], lengths[b] = lengths[b], lengths[a]
-    bits = bytearray()
-    for b in block:
-        sym_code = codes[b]
-        sym_len = lengths[b]
-        for i in range(sym_len - 1, -1, -1):
-            bits.append((sym_code >> i) & 1)
+    # Codeword per present symbol: low `len` bits of its code, MSB first.
+    words = [b""] * 256
+    for sym in non_zero:
+        words[sym] = _msb_bits(codes[sym] & ((1 << lengths[sym]) - 1), lengths[sym])
+    bits = bytearray(b"".join(map(words.__getitem__, block)))
     restored, ridx = _huff_decode(bits, codes, lengths, length)
     _pad_random(restored, ridx, rng)
     return _splice(data, offset, bytes(restored[:length]))

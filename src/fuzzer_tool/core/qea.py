@@ -189,7 +189,7 @@ class QEAIndividual:
             # Same rounding rationale as amplitudes above. Omitted (null)
             # for the common case (use_correlation=False) rather than
             # serializing a same-shaped zero tensor for every individual.
-            "coupling": self.coupling.round(6).tolist() if self.coupling is not None else None,
+            "coupling": _coupling_state(self.coupling),
         }
 
     @classmethod
@@ -210,8 +210,32 @@ class QEAIndividual:
             best_fitness=d.get("best_fitness", 0.0),
             seed_key=d.get("seed_key", ""),
             crash=d.get("crash", False),
-            coupling=np.array(coupling, dtype=np.float64) if coupling is not None else None,
+            coupling=_coupling_from_state(coupling),
         )
+
+
+# An all-zero coupling (every individual until a pick teaches it) persists as
+# {_ZERO_COUPLING_KEY: num_bytes} instead of 64 floats per byte: 190 of 200
+# individuals, 82 of 102 MB of state after 3k --hail-mary execs.
+_ZERO_COUPLING_KEY = "zero_bytes"
+
+
+def _coupling_state(coupling: np.ndarray | None) -> list | dict | None:
+    """Serializable coupling: None, the zero marker, or 6dp nested lists."""
+    if coupling is None:
+        return None
+    if not coupling.any():
+        return {_ZERO_COUPLING_KEY: coupling.shape[0]}
+    return coupling.round(6).tolist()
+
+
+def _coupling_from_state(state: list | dict | None) -> np.ndarray | None:
+    """Inverse of ``_coupling_state``; nested lists from older state load as-is."""
+    if state is None:
+        return None
+    if isinstance(state, dict):
+        return _zero_coupling(state[_ZERO_COUPLING_KEY])
+    return np.array(state, dtype=np.float64)
 
 
 # ── Amplitude vector creation ──────────────────────────────────────────
@@ -620,19 +644,33 @@ def collapse_correlated(
     p_plus0 = _sigmoid(fields)
     state = np.where(rng.random_array((num_bytes, BITS_PER_BYTE)) < p_plus0, 1, -1)
 
+    # J = 0: every sweep step redraws a bit from its own field, the same
+    # marginal as the draw above, so the sweeps cannot change the sample's
+    # distribution. Every individual starts here (40-50x a plain collapse).
+    if not coupling.any():
+        return _state_bytes(state)
+
+    # sum_j J[bit_idx, j] * s_j, diagonal is zero so no self-term to
+    # subtract, but coupling isn't guaranteed zero-diagonal by callers --
+    # guard explicitly rather than trust that invariant. Rows are copied
+    # once, bit-major, instead of once per bit per sweep.
+    j_rows = coupling.transpose(1, 0, 2).copy()
+    idx = np.arange(BITS_PER_BYTE)
+    j_rows[idx, :, idx] = 0.0
+
     for _ in range(max(0, n_sweeps)):
         for bit_idx in range(BITS_PER_BYTE):
-            # sum_j J[bit_idx, j] * s_j, diagonal is zero so no self-term
-            # to subtract, but coupling isn't guaranteed zero-diagonal by
-            # callers -- guard explicitly rather than trust that invariant.
-            j_row = coupling[:, bit_idx, :].copy()
-            j_row[:, bit_idx] = 0.0
-            local_field = fields[:, bit_idx] + np.einsum("bj,bj->b", j_row, state)
+            local_field = fields[:, bit_idx] + np.einsum("bj,bj->b", j_rows[bit_idx], state)
             p_plus = _sigmoid(local_field)
             draw = rng.random_array(num_bytes) < p_plus
             state[:, bit_idx] = np.where(draw, 1, -1)
 
-    bits = (state == -1).astype(np.uint8).reshape(-1)  # s=+1 -> bit 0, s=-1 -> bit 1
+    return _state_bytes(state)
+
+
+def _state_bytes(state: np.ndarray) -> bytes:
+    """Ising states (num_bytes, 8) -> bytes; s=+1 is bit 0, s=-1 is bit 1."""
+    bits = (state == -1).astype(np.uint8).reshape(-1)
     return bytes(np.packbits(bits).tobytes())
 
 

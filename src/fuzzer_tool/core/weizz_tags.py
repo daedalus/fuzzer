@@ -714,9 +714,11 @@ def _tag_stats(tags: list[ByteTag]) -> tuple[int, int]:
 # --hail-mary execs at a ~4k-pair pool.
 _PlanEntry = tuple[list[tuple[bytes, str]], int, int, _Shape]
 _Plan = tuple[list[_PlanEntry], dict[int, int], dict[bytes, list[int]]]
-_plan_key: tuple | None = None
-_plan_owner: object | None = None
-_plan: _Plan = ([], {}, {})
+# One slot per caller kind (with / without a pc map): the mutators build
+# without pcs and the seed path with the collector's, on the same pool, so a
+# single slot would evict on every alternation.
+# Slot value: (pairs owner, pcs owner, key, plan).
+_plans: dict[bool, tuple[object, object, tuple, _Plan]] = {}
 
 # Pair -> shape, kept across plan rebuilds: the pool mostly persists when it
 # grows or evicts. Cleared, not LRU-trimmed, past the cap (bounded memory).
@@ -740,13 +742,16 @@ def _tag_plan(
 ) -> _Plan:
     """Pool-only half of the tag map: sort order, cmp ids, counters, shapes.
 
-    Cached only without *pair_pcs*: callers pass a fresh dict each time, so
-    its identity says nothing about its contents.
+    Keyed on the identity and length of *pairs* and *pair_pcs* (both objects
+    retained, like ``scanner_for_pairs``). Exact for the collector's own maps:
+    it records a pc only when it appends that pair and rebinds ``pairs`` to
+    evict. A caller passing a fresh pc dict per call misses every time.
     """
-    global _plan_key, _plan_owner, _plan
-    key = (len(pairs), cfg.min_operand_len, cfg.max_operand_len)
-    if not pair_pcs and _plan_owner is pairs and _plan_key == key:
-        return _plan
+    slot = bool(pair_pcs)
+    key = (len(pairs), len(pair_pcs or ()), cfg.min_operand_len, cfg.max_operand_len)
+    hit = _plans.get(slot)
+    if hit is not None and hit[0] is pairs and hit[1] is (pair_pcs or None) and hit[2] == key:
+        return hit[3]
 
     pcs = pair_pcs or {}
     counter_by_id: dict[int, int] = {}
@@ -768,10 +773,8 @@ def _tag_plan(
         plan.append((candidates, cid, counter, _cached_shape(op_a, op_b)))
 
     built = (plan, counter_by_id, by_op)
-    if pair_pcs:
-        return built
-    _plan_owner, _plan_key, _plan = pairs, key, built
-    return _plan
+    _plans[slot] = (pairs, pair_pcs or None, key, built)
+    return built
 
 
 def build_tag_map_from_cmplog(
@@ -941,8 +944,10 @@ def collect_structure_map(
     ``colorization_result`` may be a ``ColorizationResult`` (``.taints``) or a
     list of ``(start, end)`` tuples.
     """
-    pairs = list(getattr(cmplog, "pairs", []) or [])
-    pair_pcs = dict(getattr(cmplog, "_pair_pc", {}) or {})
+    # The collector's own objects, not copies: the scanner and plan caches
+    # key on their identity (a copy rebuilt both, 54 ms per seed).
+    pairs = getattr(cmplog, "pairs", None) or []
+    pair_pcs = getattr(cmplog, "_pair_pc", None) or {}
 
     taints: list[tuple[int, int]] | None = None
     if colorization_result is not None:

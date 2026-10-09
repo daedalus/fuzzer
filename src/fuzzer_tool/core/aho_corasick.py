@@ -70,6 +70,12 @@ AC_MIN_TOKENS = 512
 #: pattern, since one long token costs one C scan.
 AC_MAX_NODES = 64_000
 
+#: A grown pool keeps its scanner until the tokens added since the last build
+#: outnumber 1/TAIL_REBUILD_RATIO of the built ones; those are scanned with
+#: ``bytes.find`` meanwhile. Rebuilds become geometric in pool size instead of
+#: one per growth (~21 ms each).
+TAIL_REBUILD_RATIO = 4
+
 
 class AhoCorasick:
     """Aho–Corasick automaton over a set of byte patterns.
@@ -179,7 +185,7 @@ class TokenScanner:
             tests and for the stats line, not consulted by the scan itself.
     """
 
-    __slots__ = ("_automaton", "_scan_tokens", "backend", "tokens")
+    __slots__ = ("_automaton", "_built", "_known", "_scan_tokens", "backend", "tokens")
 
     def __init__(
         self,
@@ -192,6 +198,8 @@ class TokenScanner:
         # deterministic order, so the trie and the fallback list are the same
         # from run to run for the same pool.
         self.tokens: list[bytes] = [t for t in dict.fromkeys(tokens) if t]
+        self._built = len(self.tokens)
+        self._known: set[bytes] | None = None
 
         if len(self.tokens) < min_tokens:
             self._automaton = None
@@ -216,6 +224,30 @@ class TokenScanner:
         self._automaton = AhoCorasick(accepted)
         self._scan_tokens = spare
         self.backend = "hybrid" if spare else "aho-corasick"
+
+    def absorb(self, tokens: Iterable[bytes]) -> bool:
+        """Add *tokens* on the ``find`` path; False when a rebuild is due instead.
+
+        Due when the tail would pass 1/``TAIL_REBUILD_RATIO`` of the built
+        tokens, or when a ``find``-only scanner reaches ``AC_MIN_TOKENS``.
+        On False nothing is added.
+        """
+        if self._known is None:
+            self._known = set(self.tokens)
+        known = self._known
+        new = [t for t in dict.fromkeys(tokens) if t and t not in known]
+        total = len(self.tokens) + len(new)
+        if self._automaton is None and total >= AC_MIN_TOKENS:
+            return False
+        if self._automaton is not None and (total - self._built) * TAIL_REBUILD_RATIO > self._built:
+            return False
+
+        known.update(new)
+        self.tokens.extend(new)
+        if self._scan_tokens is self.tokens:
+            return True  # find backend: the scan list is the token list
+        self._scan_tokens.extend(new)
+        return True
 
     def scan(self, data: bytes, min_len: int = 1) -> dict[bytes, list[int]]:
         """Map every known token occurring in *data* to its start offsets.
@@ -291,6 +323,14 @@ def scanner_for_pairs(pairs: Sequence[tuple[bytes, bytes]]) -> TokenScanner:
     global _cache_owner, _cache_len, _cache_scanner
     if _cache_scanner is not None and _cache_owner is pairs and _cache_len == len(pairs):
         return _cache_scanner
+
+    # Grown in place (the collector extends, and rebinds only to evict):
+    # absorb the new tail unless a rebuild is due.
+    grown = _cache_scanner is not None and _cache_owner is pairs and _cache_len < len(pairs)
+    if grown and _cache_scanner.absorb(tokens_from_pairs(pairs[_cache_len:])):
+        _cache_len = len(pairs)
+        return _cache_scanner
+
     scanner = TokenScanner(tokens_from_pairs(pairs))
     _cache_owner = pairs
     _cache_len = len(pairs)

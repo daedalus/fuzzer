@@ -990,11 +990,22 @@ class OperatorRegistry:
         Mirrors the historic build_ops() conditions (dictionary, markov,
         cem, grammar, cmplog, per-input redqueen).
         """
-        return [
-            name
-            for name, spec in self._ops.items()
-            if spec.available is None or spec.available(fuzzer, data)
-        ]
+        # Class-based mutators get one fuzzer snapshot per call, not one each
+        # (~22 per mutant): the fuzzer does not change while predicates run.
+        ctx = None
+        names = []
+        for name, spec in self._ops.items():
+            if spec.available is None:
+                names.append(name)
+            elif spec.mutator is None:
+                if spec.available(fuzzer, data):
+                    names.append(name)
+            else:
+                if ctx is None:
+                    ctx = MutationContext.from_fuzzer(fuzzer)
+                if spec.mutator.is_available(ctx, data):
+                    names.append(name)
+        return names
 
     def categories(self) -> dict[str, set[str]]:
         """Derived category -> operator-names taxonomy."""

@@ -23,7 +23,7 @@ import json
 import logging
 import math
 from array import array
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 
 import numpy as np
 
@@ -156,6 +156,18 @@ class RoundRecorderMixin:
         self, op_a: str, op_b: str, score_a: float, crash: bool = False
     ) -> None:  # pragma: no cover - interface declaration
         raise NotImplementedError
+
+    def record_strategy_match(
+        self, strategy_a: str, strategy_b: str, score_a: float
+    ) -> None:  # pragma: no cover - interface declaration
+        raise NotImplementedError
+
+    def record_strategy_matches(
+        self, strategy_a: str, opponents: Iterable[str], score_a: float
+    ) -> None:
+        """``record_strategy_match(strategy_a, b, score_a)`` for each b, in order."""
+        for b in opponents:
+            self.record_strategy_match(strategy_a, b, score_a)
 
     _prev_operators: list[str] = []
     _prev_success: bool = False
@@ -1025,6 +1037,57 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_match_count[strategy_a] += 1
         self._strategy_match_count[strategy_b] += 1
         _record_strategy_win(self._strategy_win_count, strategy_a, strategy_b, score_a)
+
+    def record_strategy_matches(
+        self, strategy_a: str, opponents: Iterable[str], score_a: float
+    ) -> None:
+        """``record_strategy_match(strategy_a, b, score_a)`` for each b, in order.
+
+        Same arithmetic in the same order with lookups hoisted: A's posterior
+        lives in locals between matches and K is cached (strategy matches do
+        not invalidate it). Ratings and dict order are bit-identical to the
+        loop. A self-match goes through the single-match path.
+        """
+        mu, sig, count = self._strategy_mu, self._strategy_sigma_sq, self._strategy_match_count
+        wins = self._strategy_win_count
+        init_mu, init_sig = self.initial_mu, self.initial_sigma**2
+        beta_sq, tau_sq = self.beta**2, self.tau**2
+        expected = self._expected_score
+        k = self._effective_k()
+
+        mu_a = sig_a = None
+        for b in opponents:
+            if b == strategy_a:
+                # Flush A, let the single-match path handle the aliasing.
+                if mu_a is not None:
+                    mu[strategy_a], sig[strategy_a] = mu_a, sig_a
+                self.record_strategy_match(strategy_a, b, score_a)
+                mu_a, sig_a = mu[strategy_a], sig[strategy_a]
+                continue
+
+            if mu_a is None:
+                mu_a = mu.setdefault(strategy_a, init_mu)
+                sig_a = sig.setdefault(strategy_a, init_sig)
+                count.setdefault(strategy_a, 0)
+            mu_b = mu.setdefault(b, init_mu)
+            sig_b = sig.setdefault(b, init_sig)
+            count.setdefault(b, 0)
+
+            ea = expected(mu_a, mu_b)
+            eb = expected(mu_b, mu_a)
+            var_a = sig_a / (sig_a + beta_sq)
+            var_b = sig_b / (sig_b + beta_sq)
+
+            mu_a = mu_a + var_a * k * (score_a - ea)
+            mu[b] = mu_b + var_b * k * ((1.0 - score_a) - eb)
+            sig_a = sig_a * (1.0 - var_a) + tau_sq
+            sig[b] = sig_b * (1.0 - var_b) + tau_sq
+            count[strategy_a] += 1
+            count[b] += 1
+            _record_strategy_win(wins, strategy_a, b, score_a)
+
+        if mu_a is not None:
+            mu[strategy_a], sig[strategy_a] = mu_a, sig_a
 
     def select_strategy(self, strategies: list[str], temperature: float | None = None) -> str:
         """Select a strategy via Thompson sampling from its posterior."""

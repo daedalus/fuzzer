@@ -1086,6 +1086,11 @@ class FormatLearner:
         summary["formats"] = [c.get_format_summary() for c in ranked]
         return summary
 
+    def primary_fields(self) -> list[dict]:
+        """``get_format_summary()["fields"]``, summarizing the primary cluster only."""
+        cluster = self.primary_cluster
+        return cluster.get_format_summary()["fields"] if cluster is not None else []
+
     def get_learned_value(
         self, offset: int, width: int, input_bytes: bytes | None = None
     ) -> bytes | None:

@@ -8061,11 +8061,11 @@ class Fuzzer:
         seed_strategies = getattr(self, "_seed_strategy_pool", [])
         if self._seed_strategy not in seed_strategies:
             return
-        for other in seed_strategies:
-            if other != self._seed_strategy:
-                self._elo.record_strategy_match(
-                    f"seed_{self._seed_strategy}", f"seed_{other}", score
-                )
+        self._elo.record_strategy_matches(
+            f"seed_{self._seed_strategy}",
+            [f"seed_{other}" for other in seed_strategies if other != self._seed_strategy],
+            score,
+        )
 
     def _settle_positions(self, outcome: Outcome, weight: float) -> None:
         """Close the round for position schedulers: burn-front credit and,
@@ -8107,9 +8107,11 @@ class Fuzzer:
         # list kept by hand here drifted from the selection side twice (cmaes,
         # then kl_ducb/kl_swucb in one direction and fpl in the other).
         all_strategies = operator_strategy_pool(self)
-        for other in all_strategies:
-            if other != self._meta_strategy:
-                self._elo.record_strategy_match(self._meta_strategy, other, score)
+        self._elo.record_strategy_matches(
+            self._meta_strategy,
+            [other for other in all_strategies if other != self._meta_strategy],
+            score,
+        )
 
     def _check_canary_inspection(self) -> None:
         """Warn when a real scheduler ranks at or below the canary floor.

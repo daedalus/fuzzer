@@ -83,6 +83,7 @@ class CrashMITracker:
         self._byte_total_arr = _np.zeros((0, 256), dtype=_np.uint32)
         self._joint_crash_arr = _np.zeros((0, 256), dtype=_np.uint32)
         self._position_counts_arr = _np.zeros(0, dtype=_np.uint64)
+        self._reset_sums()
         # Global: crash count, total count
         self.total_crashes: int = 0
         self.total_execs: int = 0
@@ -117,6 +118,7 @@ class CrashMITracker:
             values = _np.frombuffer(bytes(input_bytes), dtype=_np.uint8, count=n)
             rows = _np.arange(n)
             # Positions are distinct, so plain fancy-index += is safe here.
+            self._bump_sums(rows, values, n, is_crash)
             self._byte_total_arr[rows, values] += 1
             self._position_counts_arr[:n] += 1
             if is_crash:
@@ -148,6 +150,10 @@ class CrashMITracker:
         self._byte_total_arr = bt
         self._joint_crash_arr = jc
         self._position_counts_arr = pc
+        for name in ("_s_total", "_s_crash", "_s_clean", "_crash_rows"):
+            grown = _np.zeros(new_rows, dtype=getattr(self, name).dtype)
+            grown[: self._rows] = getattr(self, name)[: self._rows]
+            setattr(self, name, grown)
         self._rows = new_rows
 
     # ------------------------------------------------------------------
@@ -226,23 +232,58 @@ class CrashMITracker:
 
         return max(0.0, mi_val)
 
+    # ── Closed form ────────────────────────────────────────────────
+    # With f(k) = k log2 k and, per position, byte counts t (all), c (crash),
+    # d = t - c, expanding mi()'s sum gives
+    #   MI_p = (S_c + S_d - S_t + C_p log2(n/C) + D_p log2(n/(n-C))) / n
+    # where S_* = sum_x f(count_x). record() keeps S_* and C_p current (one
+    # byte per position per exec), so all_mi() is O(positions) instead of a
+    # pass over positions x 256 on every rebuild.
+
+    def _reset_sums(self) -> None:
+        self._s_total = _np.zeros(self._rows, dtype=_np.float64)
+        self._s_crash = _np.zeros(self._rows, dtype=_np.float64)
+        self._s_clean = _np.zeros(self._rows, dtype=_np.float64)
+        self._crash_rows = _np.zeros(self._rows, dtype=_np.uint64)
+
+    def _bump_sums(self, rows, values, n: int, is_crash: bool) -> None:
+        """Add f(k+1) - f(k) for the byte each position saw (before the +1)."""
+        total = self._byte_total_arr[rows, values]
+        crash = self._joint_crash_arr[rows, values]
+        self._s_total[:n] += _f_step(total)
+        if is_crash:
+            self._s_crash[:n] += _f_step(crash)
+            self._crash_rows[:n] += 1
+        else:
+            self._s_clean[:n] += _f_step(total - crash)
+
+    def _rebuild_sums(self) -> None:
+        """S_* and C_p from the histograms (after load)."""
+        self._reset_sums()
+        if not self._rows:
+            return
+        total = self._byte_total_arr.astype(_np.float64)
+        crash = self._joint_crash_arr.astype(_np.float64)
+        self._s_total = _f(total).sum(axis=1)
+        self._s_crash = _f(crash).sum(axis=1)
+        self._s_clean = _f(total - crash).sum(axis=1)
+        self._crash_rows = self._joint_crash_arr.sum(axis=1, dtype=_np.uint64)
+
     def _mi_rows(self, rows) -> list[float]:
-        """mi() for each of *rows* at once (equal up to summation order)."""
+        """mi() for each of *rows* from the running sums (closed form above)."""
         n, crashes = self.total_execs, self.total_crashes
         if n == 0 or crashes == 0 or crashes == n:
             return [0.0] * len(rows)
-        p_crash = crashes / n
-        p_no_crash = 1.0 - p_crash
-        total = self._byte_total_arr[rows].astype(_np.float64)
-        crash = self._joint_crash_arr[rows].astype(_np.float64)
-        p_x = total / n
-        with _np.errstate(divide="ignore", invalid="ignore"):
-            terms = _np.zeros_like(total)
-            for count, p_class in ((crash, p_crash), (total - crash, p_no_crash)):
-                p_xy = count / n
-                live = count > 0
-                terms[live] += p_xy[live] * _np.log2(p_xy[live] / (p_x[live] * p_class))
-        return _np.maximum(terms.sum(axis=1), 0.0).tolist()
+        crash_p = self._crash_rows[rows].astype(_np.float64)
+        clean_p = self._position_counts_arr[rows].astype(_np.float64) - crash_p
+        mi = (
+            self._s_crash[rows]
+            + self._s_clean[rows]
+            - self._s_total[rows]
+            + crash_p * math.log2(n / crashes)
+            + clean_p * math.log2(n / (n - crashes))
+        ) / n
+        return _np.maximum(mi, 0.0).tolist()
 
     def all_mi(self) -> dict[int, float]:
         """Compute MI for all observed positions."""
@@ -388,6 +429,7 @@ class CrashMITracker:
         self._byte_total_arr = _np.zeros((0, 256), dtype=_np.uint32)
         self._joint_crash_arr = _np.zeros((0, 256), dtype=_np.uint32)
         self._position_counts_arr = _np.zeros(0, dtype=_np.uint64)
+        self._reset_sums()
         if highest >= 0:
             self._grow(highest + 1)
             for pos, c in counts.items():
@@ -395,6 +437,7 @@ class CrashMITracker:
                     self._position_counts_arr[pos] = c
             self._fill_rows(self._byte_total_arr, totals)
             self._fill_rows(self._joint_crash_arr, joint)
+        self._rebuild_sums()
         self._cache_valid = False
 
     def _fill_rows(self, arr, src: dict[int, dict[int, int]]) -> None:
@@ -549,3 +592,24 @@ def estimate_execs_to_first_crash(
             f"ETA={execs:.0f}"
         ),
     )
+
+
+def _f(k):
+    """k * log2(k) elementwise, with 0 log 0 = 0."""
+    k = _np.asarray(k, dtype=_np.float64)
+    return k * _np.log2(_np.where(k > 0, k, 1.0))
+
+
+# f(k + 1) - f(k) tabulated for small counts (512 KiB): record() would
+# otherwise take three log2 passes per exec.
+_STEP_TABLE_SIZE = 1 << 16
+_STEP_TABLE = _f(_np.arange(1, _STEP_TABLE_SIZE + 1)) - _f(_np.arange(_STEP_TABLE_SIZE))
+
+
+def _f_step(k):
+    """f(k + 1) - f(k) for integer counts k >= 0."""
+    k = _np.asarray(k)
+    if k.size and int(k.max()) < _STEP_TABLE_SIZE:
+        return _STEP_TABLE[k]
+    kf = k.astype(_np.float64)
+    return _f(kf + 1.0) - _f(kf)

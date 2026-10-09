@@ -694,9 +694,9 @@ class TestFormatLearnerSeed:
         from fuzzer_tool.services.seed_picker import SeedPicker
 
         class MockLearner:
-            def get_format_summary(self):
-                # Missing 'fields' key
-                return {"timeline_size": 0, "hypotheses": 0, "classified": 0}
+            def primary_fields(self):
+                # No primary cluster
+                return []
 
         class MockFuzzer:
             corpus = [b"seed"]
@@ -718,24 +718,24 @@ class TestFormatLearnerSeed:
 
         # fields present but empty list
         class MockLearner2:
-            def get_format_summary(self):
-                return {"fields": []}
+            def primary_fields(self):
+                return []
 
         sp.f._format_learner = MockLearner2()
         assert sp._format_learner_seed() is None
 
         # fields with missing confidence keys
         class MockLearner3:
-            def get_format_summary(self):
-                return {"fields": [{"offset": 0, "width": 1}]}
+            def primary_fields(self):
+                return [{"offset": 0, "width": 1}]
 
         sp.f._format_learner = MockLearner3()
         assert sp._format_learner_seed() is None
 
         # fields with confidence but missing most_common_value
         class MockLearner4:
-            def get_format_summary(self):
-                return {"fields": [{"offset": 0, "width": 1, "confidence": 0.9}]}
+            def primary_fields(self):
+                return [{"offset": 0, "width": 1, "confidence": 0.9}]
 
         sp.f._format_learner = MockLearner4()
         assert sp._format_learner_seed() is None
