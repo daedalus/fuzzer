@@ -111,7 +111,7 @@ second dfsan-instrumented build plus a Python trace collector. **Effort M–H.**
 **B6. Input Processing Tree auto-repair** (`#21`, NestFuzz CCS '23) — DFSan-taint-derived
 inter-field and nesting dependencies; cascading mutation auto-repairs
 length/offset/container fields when mutating nested structures. Automates what
-`frameshift.py` plus the hand-written mutators do by hand. **Effort M–H.**
+`core/analyzers/analyzer_frameshift.py` plus the hand-written mutators do by hand. **Effort M–H.**
 
 ---
 
@@ -137,24 +137,24 @@ invariants are also unimplemented upstream; it is single-block only.
 **Scope it down before building anything.** Full register-level tracing is
 weeks. Start with invariants over the **cmplog operand values already captured**
 in `core/cmplog.py` — learn ranges per comparison site, flag violations. Reuses
-existing plumbing (`core/checksum_learner.py` already mines `f._cmplog.pairs`
+existing plumbing (`core/analyzers/analyzer_checksum_learner.py` already mines `f._cmplog.pairs`
 for a different purpose, so the access pattern exists) and answers whether the
 signal is worth the full build. **Open risk, and the first thing to measure:**
 the proxy may saturate immediately — if nearly every input violates some learned
 range, the signal is noise. **Effort ~1 week for the proxy.**
 
-**C2. Campaign-level novelty rate** (`R5`) — the fraction of generated inputs
+**C2. Campaign-level novelty rate (implemented 2026-09-01, `tools/novelty_rate.py`, `955873f3`)** (`R5`) — the fraction of generated inputs
 exercising at least one previously-unseen edge. We have novelty *signals* but
 not this *metric*. It converges much faster than total edge count, so it would
 make `bench_paired.py` cells shorter and lower-variance. Compute it offline from
 recorded runs, not in the hot loop. **Cheap, and it improves the measurement
 apparatus every other item here depends on.**
 
-**C3. LBR branch sampling** (`#19`, perf `PERF_SAMPLE_BRANCH_STACK`, Haswell+) —
+**C3. LBR branch sampling (implemented 2026-09-12, `--lbr`, `9a2dde1d`, unmeasured)** (`#19`, perf `PERF_SAMPLE_BRANCH_STACK`, Haswell+) —
 last-32-branches statistical samples at near-zero cost; a secondary signal for
 uninstrumented dependency code. One more event type in `perf_event.py`. **Effort L.**
 
-**C4. Intel PT coverage** (`#27`, honggfuzz `--linux_perf_ipt_block` + libipt;
+**C4. Intel PT coverage (implemented 2026-09-12, `--intel-pt`, `f08ee470`/`14f3d6af`, unmeasured)** (`#27`, honggfuzz `--linux_perf_ipt_block` + libipt;
 PTrix AsiaCCS '19) — module-free PT via perf AUX mmap buffers on kernel ≥4.2.
 Indirect-block-only decoding is the proven stability baseline (~10–15%
 overhead). `perf_shim.c` extension plus a libipt decode thread. **Effort M–H.**
@@ -168,7 +168,7 @@ per-seed BFS-counted reachable-uncovered blocks from its trace, inverse-rarity
 and depth weighted. Nearly free on the CFG/DWARF pipeline we already have; lands
 as a seed-scoring feature atop `cfg.py`/`cfg_cache.py`. **Effort L.**
 
-**D2. EcoFuzz energy allocation** (`#12`, USENIX Sec '20) — adversarial-MAB
+**D2. EcoFuzz energy allocation (implemented 2026-09-01, `--ecofuzz`, `5f0afba3`, unmeasured)** (`#12`, USENIX Sec '20) — adversarial-MAB
 estimating per-seed new-path reward probability against observed average cost;
 reported −32% execs at equal coverage. A scheduler arm plus a `SeedScorer`
 schedule. **Effort L.**
@@ -176,7 +176,7 @@ schedule. **Effort L.**
 **D3. Reaching-probability directed mode** (`#11`, SelectFuzz IEEE S&P '23) —
 block fitness as averaged successor reaching probability instead of graph
 distance, instrumenting only target-relevant blocks (<2% of reachable BBs) so
-irrelevant coverage never pollutes feedback. `distance.py` math plus one LLVM
+irrelevant coverage never pollutes feedback. `core/analyzers/analyzer_distance.py` math plus one LLVM
 pass. **Effort L–M.**
 
 **D5. Read the per-seed cost ledger we already keep** (Persistence Mechanics,
@@ -197,7 +197,7 @@ rewired off `fuzz_count` at the same time.
 
 **Still open on this entry:**
 
-- The **A/B for the Boltzmann change** through `tools/lib/bench_paired.py`. It
+- **Done** (`649bfbbc`, null: `docs/learnings/2026-08-30-boltzmann-ab-result.md`). The **A/B for the Boltzmann change** through `tools/lib/bench_paired.py`. It
   changes seed selection and was not benchmarked. Down-weighting expensive
   seeds is down-weighting deep paths on targets where depth costs time, and
   that risk is unmeasured.
@@ -219,7 +219,7 @@ rewired off `fuzz_count` at the same time.
 
 ## E — Corpus, reduction, crash triage
 
-**E1. Crash message normalization and grouping** (`R5`) — `core/trace.py`
+**E1. Crash message normalization and grouping** (`R5`) — `core/analyzers/analyzer_trace.py`
 produces backtraces; what is missing is normalizing the message (strip
 identifiers, source locations, numbers), grouping across runs sharing a
 crashes directory, and caching
@@ -257,7 +257,7 @@ From the TigerBeetle source, whose framing is not about fuzzing *targets* but
 about **fuzzing your own subsystems**: minimal data interfaces → drive them
 through a seeded generator → assert an always-true invariant.
 
-**F1. Minimal mutation interface** (`P1-4`) — the clearest structural finding in
+**F1. Minimal mutation interface (extraction implemented 2026-09-02, `86263051`/`d16f99ce`; derived-cache invariants open)** (`P1-4`) — the clearest structural finding in
 the repo. `services/operators.py` (3,511 lines) references `self.f` — the
 `Fuzzer` instance, itself 5,239 lines — **423 times**, but touches only **29
 distinct attributes**, and the distribution is extreme:
@@ -285,10 +285,11 @@ a real fuzzer for free.
 
 The prerequisite is done: `MutationContext` already replaces the `Fuzzer` in
 `core/mutator_interface.py`'s `mutate()` and `is_available()`, closing the
-`**ctx` leak while that interface still had no implementors. **What is not
+`**ctx` leak while that interface still had no implementors. ~~**What is not
 started is the `operators.py` extraction itself** — threading `ctx` instead of
 `self.f`, mechanical for most of it since 249 refs are a rename of
-`self.f.max_len` → `ctx.max_len`.
+`self.f.max_len` → `ctx.max_len`.~~ Done (`86263051`, `d16f99ce`): 57
+`self.f` refs left in `operators.py` (was 423).
 
 Related and cheap while in there: `_havoc_table`, `_havoc_trials`,
 `_elite_pool_corpus_len`, `_redqueen_sorted_version`, `_region_cache` and
@@ -386,7 +387,7 @@ question to settle deliberately rather than by accident: repair rewrites bytes
 the operator wrote, which muddies credit assignment — do repair-modified bytes
 count against the operator?
 
-**F9. `cycle_lock` regularity operator** (`R4`) — the 100-prisoners puzzle is
+**F9. `cycle_lock` regularity operator (implemented 2026-09-01, `48ea6d26`, unmeasured)** (`R4`) — the 100-prisoners puzzle is
 governed by the longest-cycle distribution in a random permutation. An operator
 building a permutation as a single n-cycle (worst case for any bounded
 pointer-chase) or as all fixed points stresses traversal-depth paths in targets

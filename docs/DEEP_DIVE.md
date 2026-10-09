@@ -603,7 +603,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--no-adaptive-havoc` | Draw havoc's 11 inline sub-mutations uniformly instead of weighting them by measured new-coverage rate (weighting is on by default; use this as the A/B baseline) |
 | `-g GRAMMAR` | Grammar-aware mutations (built-in: png, json, http_request, elf) |
 | `--cmplog` | Comparison tracing via LD_PRELOAD (or build the target with `-D__AFL_CMPLOG=1` for direct_lite compatibility) |
-| `--cmplog-workdir` | Directory for cmplog runtime log files (default `/tmp/<target>.cmplog`). Use a disk-backed path when `/tmp` is a small tmpfs to avoid filling it. |
+| `--cmplog-workdir` | Directory for cmplog runtime log files (default `$XDG_CACHE_HOME/fuzzer_cmplog`, else `~/.cache/fuzzer_cmplog`). |
 | `--markov-gen` | Markov-generated seeds (rate adapts to model quality via perplexity) |
 | `--mc-bandit` | Thompson sampling operator selection (Brier score calibration) |
 | `--mc-cem` | Cross-Entropy Method byte distribution |
