@@ -29,6 +29,7 @@ import os
 import resource
 from typing import TYPE_CHECKING
 
+from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_distance import _NO_VALUE_DISTANCE
 from fuzzer_tool.core.analyzers.analyzer_pll import Series as PLLSeries
 from fuzzer_tool.core.analyzers.analyzer_recurrence import Novelty
@@ -162,6 +163,14 @@ class FuzzRound:
 
     def run(self) -> bool:
         """Run the round; True when the mutant crashed or was admitted."""
+        # All z3 work in the round shares one budget (core/z3_budget.py).
+        z3_budget.BUDGET.open_round()
+        try:
+            return self._steps()
+        finally:
+            z3_budget.BUDGET.close_round()
+
+    def _steps(self) -> bool:
         self._begin()
         self._search_fixpoint()
         self._generalize()

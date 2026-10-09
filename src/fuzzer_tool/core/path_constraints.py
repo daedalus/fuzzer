@@ -39,6 +39,7 @@ from __future__ import annotations
 import logging
 from bisect import bisect_left
 
+from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.lru import LRUCache
 
 log = logging.getLogger(__name__)
@@ -350,10 +351,7 @@ class PathConstraintSolver:
         if z3 is None:
             return None
 
-        # Per-solver timeout. z3.set_param("timeout", ...) sets a *global*
-        # parameter that leaks into every other solver in the process.
         solver = z3.Solver()
-        solver.set("timeout", self.timeout_ms)
 
         # One symbolic byte per position touched by any participating window.
         lo = min([offset] + [s for _, s, _ in overlaps])
@@ -396,7 +394,8 @@ class PathConstraintSolver:
                 solver.add(expr == const)
 
         try:
-            status = solver.check()
+            # Per-solver timeout via the budget; None: round budget spent.
+            status = z3_budget.BUDGET.check(solver, self.timeout_ms)
         except z3.Z3Exception as exc:  # pragma: no cover - solver internals
             log.debug("path negation solver error: %s", exc)
             return None
@@ -423,6 +422,9 @@ class PathConstraintSolver:
             return None
         mapped = self._map(records, input_data)
         for rec in self._frontier(mapped):
+            # Spent z3 budget: stop before marking more branches attempted.
+            if z3_budget.BUDGET.spent():
+                return None
             result = self._negate(rec, input_data, mapped)
             if result is not None and result != input_data:
                 return result
