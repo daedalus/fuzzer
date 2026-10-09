@@ -1396,8 +1396,7 @@ class SeedPicker:
         if learner is None:
             return None
 
-        summary = learner.get_format_summary()
-        fields = summary.get("fields", [])
+        fields = learner.primary_fields()
         if not fields:
             return None
 
