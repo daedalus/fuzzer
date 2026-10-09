@@ -9,7 +9,7 @@ meta-scheduler, or state persistence (`state.pkl.gz` via `core/state_store.py`).
 
 Fuzzer state is saved to `{corpus_dir}/state.pkl.gz` on shutdown via `core/state_store.py:StateStore`. Use `--resume` to continue. Pass `--no-save-state` to skip writing the file entirely.
 
-Sections: `corpus` (exec counts, crash sigs, op stats, seed metadata), `edge_tracker`, `markov`, `mi`, `elo`, `ga`, `qea`, `crash_mi`, `sensitivity`, `length_tracker`, `seed_quality`, plus opt-in learners via `Fuzzer._save_learned` / `_load_learned`: `op_credit`, `burn_front`, `pll`, `wfc_tables`. Legacy per-component JSON files are auto-migrated on first `--resume` and cleaned up via `cleanup_legacy()`.
+Sections: `corpus` (exec counts, crash sigs, op stats, seed metadata), `edge_tracker`, `markov`, `mi`, `elo`, `ga`, `qea`, `crash_mi`, `sensitivity`, `length_tracker`, `seed_quality`, … (grep `_state_store.set`), plus opt-in learners via `Fuzzer._save_learned` / `_load_learned`: `op_credit`, `burn_front`, `pos_fractal`, `pos_context`, `pos_levy`, `pos_harmonic`, `pos_consolidated`, `pll`, `wfc_tables`, `dict_picker`, `gravity`. Legacy per-component JSON files are auto-migrated on first `--resume` and cleaned up via `cleanup_legacy()`.
 
 Reload paths must skip re-derivation (see "State & double-counting" in docs/refs/bug-classes.md).
 
@@ -46,12 +46,20 @@ struct __afl_entry { uint32_t edge_id; uint32_t count; };
   startup.
 - The AFLGo distance channel is also default-on (`__AFL_DISTANCE_MODE=1`;
   `=0` opts out) — inert until directed mode uploads a distance table.
-- Hash: `edge_id % map_size`, linear probing for matching or empty slot
-- No hardware divide per edge: power-of-two sizes mask, others use Lemire fastmod (exact, 2 multiplies); probe wrap is a subtraction (`afl_shim.c` `__afl_home_slot`). Same placement as `%`, no layout change. Per-edge cost 4.2 -> 3.1 ns (size 8192), 4.2 -> 3.4 ns (8000)
-- `AFL_MAP_SIZE` is in bytes (tradition); shim divides by 8 for entry count
-- Default 64KB SHM → 8192 entries (same memory as old 64KB bitmap)
-- Count is a 32-bit saturating counter (no Morris probability needed)
-- Python API: `ShmCoverage.get_edge_ids()`, `.get_edge_counts()`, `.read_entries()`
+- Home slot (`afl_shim.c` `__afl_home_slot`): Fibonacci hash
+  `((u32)(edge_id * 0x9E3779B1) * size) >> 32`, no divide. Not `%`: ctx XORs
+  the id's low 8 bits, so a modulo homed all ctx variants in one block.
+  Mirrored by `adapters/shm.py:home_slot`.
+- Linear probing, bounded to `__AFL_PROBE_MAX` (64) slots for insert and
+  lookup; wrap is a subtraction.
+- `AFL_MAP_SIZE` is the entry count, not bytes.
+- Segment: 32-byte front region (`SHM_TABLE_OFFSET` = `shm.py`
+  `SHM_METADATA_SIZE`), then 8192 entries × 8 B by default, then 16-byte
+  distance tail and optional touched-slot bitmap. Layout version
+  `__AFL_SHM_LAYOUT` = 3, advertised as `__afl_shm_layout_3`.
+- `count` word: high 8 bits generation tag, low 24 bits saturating hit count
+  (`__afl_map_reset` advances the tag; stale entries are reclaimed in place)
+- Python API: `ShmCoverage.get_edge_ids()`, `.get_edge_counts()`
 - `EdgeTracker.record_edges()` accepts `set[int]` (sparse) or `bytes` (legacy byte-bitmap)
 - Write guard (`--shm-write-guard`, opt-in): every shim store to the segment goes
   through `__afl_wguard_open()`/`__afl_wguard_close()`. A new write site outside
@@ -66,10 +74,11 @@ struct __afl_entry { uint32_t edge_id; uint32_t count; };
 
 ## Scheduling Architecture
 
-Operator selection is arbitrated by seven schedulers in `core/schedulers/` plus
-Elo meta-arbitration in `core/elo.py`. The schedulers are independent — they
-never import each other — and each is a self-contained bandit/optimizer over
-the operator space:
+Operator selection is arbitrated by the `op_*.py` schedulers in
+`core/schedulers/` (core seven below) plus Elo meta-arbitration in
+`core/analyzers/analyzer_elo.py`. Each is a bandit/optimizer over the operator
+space; only composites (`op_consolidated*`, `op_c2ucb`, `op_kuramoto`) import
+other schedulers:
 
 | File | Class | Mechanism |
 |------|-------|-----------|
@@ -80,7 +89,7 @@ the operator space:
 | `schedulers/op_epsilon_greedy.py` | `EpsilonGreedyScheduler` | Epsilon-greedy with exponential annealing |
 | `schedulers/op_hierarchical.py` | `HierarchicalBanditScheduler` | Two-level Thompson bandit: category → operator |
 | `schedulers/op_gp_ucb.py` | `GPUCBScheduler` | GP-UCB with RBF kernel over operator-category features |
-| `core/elo.py` | `BayesianEloTracker` | Meta-arbitration: Thompson-samples which scheduler's `select_op` to trust (`select_strategy`), ratings persisted to `elo.json` |
+| `analyzers/analyzer_elo.py` | `BayesianEloTracker` | Meta-arbitration: Thompson-samples which scheduler's `select_op` to trust (`select_strategy`), ratings persisted to the `elo` section of `state.pkl.gz` |
 
 - `--elo` enables Elo arbitration between whichever schedulers are enabled
   (the separate `--meta-elo` flag was consolidated into `--elo`; see `_use_elo`
@@ -105,53 +114,60 @@ credited off-policy on every round, delocalised operators excluded.
 
 `--target-arena` (needs `--elo` and >1 target) arbitrates which binary runs
 under `tgt_<name>` keys (`services/target_arena.py`). Pool = every
-`TargetSchedule` policy (`core/schedulers/tgt_base.py`) + `gale_shapley`
-(`tgt_gale_shapley.py`, stable seed->target matching via
-`core/stable_matching.py`); `weighted` first. `_select_next_target` ->
-`TargetArena.select`; `SeedPicker.pick_seed` takes Gale-Shapley's matched seed
-(`target_match`, unscored); `Fuzzer._settle_targets` (from `fuzz_one`) feeds
+`TargetSchedule` policy (`core/target_schedule.py`, impls in
+`core/schedulers/tgt_base.py`) + `gale_shapley` (`tgt_gale_shapley.py`, stable
+seed->target matching via `core/stable_matching.py`) + `auction`
+(`tgt_auction.py`, max-weight via `core/assignment.py`); `weighted` first.
+`_select_next_target` -> `TargetArena.select`; `SeedPicker.pick_seed` takes a
+matching arm's seed (`target_match`, unscored); `Fuzzer._settle_targets`
+(from `FuzzRound._record_arenas`) feeds
 every arm and plays served-vs-rest matches.
 
 ### Recording (`.record()` fan-out, `fuzz_round.py::FuzzRound._credit_ops`)
 
-Every enabled scheduler records shadow stats per run, with the same success +
-surprisal weight regardless of which scheduler was consulted:
+Every round yields `(op, success, surprisal_weight)` per used op:
 
-- Per-scheduler `record(op, success, weight=surprisal_weight)` for bandit
-  (2418), mopt (2438, gated on `not _use_elo or _meta_strategy == "mopt"`),
-  replicator (2445), exp3 (2452), eps_greedy (2459), hierarchical (2466),
-  gp_ucb (2473).
-- `elo.record_round` (2496) for operator-level matches when ≥2 ops were used.
-- `_record_operator_strategy_matches` (2507/3037) and
-  `_record_seed_strategy_matches` (2512/3020) for strategy-level matches.
+- Off-policy schedulers (`_record_mc`, `_record_schedulers`) record every
+  round regardless of who selected.
+- On-policy ones record only rounds they selected (`f._op_selector`): mopt
+  and op_firefly (crediting the drawing particle, `_record_particles`), exp3,
+  exp4, cmaes, corral, tsallis, exp3_ix, regret_matching, automaton.
+- `_record_elo`: `elo.record_round` for operator-level matches when ≥1 op
+  was used (SLOPT rounds have one).
+- `_record_arenas`: `_record_operator_strategy_matches`,
+  `_record_seed_strategy_matches`, `_settle_positions`, `_settle_targets`.
 
-### Selection (`select_op()` chain, operators.py:1556–1657)
+### Selection (`OperatorEngine.select_op`, `services/operators.py`)
 
-1. Stall short-circuit (1560): `_stall_recovery_active` → `random_stall`.
-2. Build `available` from enabled schedulers (1564–1580): replicator, bandit,
-   mopt, cem (only if `mc.cem_fitted`), exp3, eps_greedy, hierarchical, gp_ucb.
-3. Meta-strategy resolution (1582–1596): with Elo on, resolve once per exec
-   (cached in `_meta_strategy_cached`, re-resolved if no longer available);
-   with Elo on but <2 strategies, take `available[0]`.
-4. Meta-gated dispatch (1601–1631): the Elo-chosen strategy's `select_op`.
-   `cem` is reachable **only** via Elo.
-5. **Fallback precedence when Elo is off (1632–1656):**
-   `replicator → mopt → bandit → exp3 → eps_greedy → hierarchical → gp_ucb → random`
-   (first enabled scheduler wins; `cem` is not in the fallback chain).
+1. Stall short-circuit: `_stall_recovery_active` → `random_stall`.
+2. `available = operator_strategy_pool(f)`: the single ballot shared with
+   `_record_operator_strategy_matches`. `cem` only if `mc.cem_fitted`.
+3. Elo on, ≥2 available: resolve once per exec (cached in
+   `_meta_strategy_cached`, re-resolved if no longer available); Elo on, 1
+   available: `available[0]`.
+4. Elo off: first of `_FALLBACK_PRECEDENCE` that is available
+   (`consolidated_v2 → consolidated_v1 → replicator → mopt → bandit → exp3 → …`).
+   `cem`, `invasion` and exploratory arms (canary, katz, firefly, …) are
+   absent, reachable **only** via Elo.
+5. The chosen strategy is stored in `f._op_selector` and its `select_op`
+   dispatched.
 
 ### Elo strategy keyspaces
 
 Operator strategies use plain keys (`replicator`, `bandit`, …); seed strategies
-use `seed_<name>`-prefixed keys (`seed_ga`, `seed_weighted`, …) — registered at
-fuzzer.py:991–1017. The keyspaces are disjoint and never cross-compete; the
+use `seed_<name>`-prefixed keys (`seed_ga`, `seed_weighted`, …) — names in
+`services/fuzzer.py` `_OPERATOR_STRATEGY_NAMES` / `_SEED_STRATEGY_NAMES`,
+pre-registered by `core/analyzer_registry.py:_activate_elo`. The keyspaces are
+disjoint and never cross-compete; the
 shared tracker dicts and the shared ranking table only *look* like one group.
 Seed selection must select via the prefixed keys (see below).
 
 ### Seed-side arbitration
 
-`SeedPicker._pick_seed_elo()` (seed_picker.py:32–79) builds the eligible seed
-strategies (`ga`, `qea`, `weighted`, `pareto`, `format`, `bayesian`, `markov`,
-`boltzmann`, `aflgo`), exposes the pool via `_seed_strategy_pool` (so shadow
+`SeedPicker._pick_seed_elo()` (`services/seed_picker.py`) builds the eligible
+seed strategies (`_elo_core_arms`, `_elo_flag_arms`, `_elo_entropy_arms`,
+`_elo_gated_arms`: `ga`, `qea`, `weighted`, `mcts`, `pareto`, …), exposes the
+pool via `_seed_strategy_pool` (so shadow
 matches are only recorded against strategies that were actually selectable),
 and asks `_elo.select_strategy` for the winner using the `seed_*`-prefixed keys,
 then strips the prefix for downstream use (`_seed_strategy`, `strategy_map`,

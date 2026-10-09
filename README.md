@@ -2,7 +2,7 @@
 
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/daedalus/fuzzer)
 
-**Information-dense, coverage-guided binary fuzzer**: 148 mutation operators across 9 categories, 16 bandit and optimizer scheduler modules under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring.
+**Information-dense, coverage-guided binary fuzzer**: 271 mutation operators across 9 categories, 41 operator-scheduling strategies under Elo arbitration, AFL-style forkserver and SHM edge coverage, comparison tracing down to the individual call site, and information-theoretic seed scoring.
 
 > **Honest caveat**: This is probably the most complex fuzzer from an information-theory standpoint, and also the slowest raw-throughput. The tradeoff is speed for edge-discovery novelty. For production fuzzing at scale, AFL family fuzzers remain the best choice.
 
@@ -63,20 +63,20 @@ fuzzer-tool fuzz ./target --resume
 
 ### Mutation Engine
 
-**148 operators in 9 categories.** Every scheduler picks from the same registry, and
+**271 operators in 9 categories.** Every scheduler picks from the same registry, and
 `REGISTRY.register_mutator()` adds operators at runtime without a restart.
 
 | Category | Count | Representative operators |
 |---|---|---|
-| `bit` | 11 | `bit_flip`, `bit_rotate`, `bit_shift`, `span_invert`, `bit_repack`, `bit_transpose_{8,16,32,64}` |
-| `byte` | 15 | arithmetic 1/2/4/8-byte LE/BE, interesting-value overwrite, byte flips |
-| `block` | 14 | insert/delete/duplicate/swap/clone, block splice |
+| `bit` | 20 | `bit_flip`, `bit_rotate`, `bit_shift`, `span_invert`, `bit_repack`, `bit_transpose_{8,16,32,64}` |
+| `byte` | 21 | arithmetic 1/2/4/8-byte LE/BE, interesting-value overwrite, byte flips |
+| `block` | 18 | insert/delete/duplicate/swap/clone, block splice |
 | `dict` | 8 | `dict_insert`/`append`/`prepend`/`overwrite`, `dict_compound`, `checksum_repair` |
-| `structural` | 20 | `splice_common_prefix`, `crossover`, `elite_fuse`, `tlv_mutate`, `token_shuffle`, `special_strings`, `punctuation_insert`, `versifier_generate` |
-| `radamsa` | 7 | `tree_mutate`, `line_mutate`, `fuse_this`/`fuse_next`/`fuse_old`, `utf8_widen`, `utf8_insert` |
-| `format` | 36 | one `*_chunk_mutate` per container format, plus `format_lock`, `field_repair`, `png_crc_fix`, `recompress_{gzip,zlib}` |
-| `regularity` | 15 | `spectral_peak`, `rank_deficient`, `monotone_fill`, `kmer_saturate`, `popcount_lock`, `birthday_collide`, `gcd_worst_case`, `float_squeeze`, `feistel_scramble` |
-| `adaptive` | 22 | `havoc`, `redqueen`, `colorization`, `condstmt_solve`, `gradient_descent`, `magic_byte_search`, `crc_learn`, `markov_bytes`, `cem_bytes`, `path_negate`, `skipdet_probe` |
+| `structural` | 37 | `splice_common_prefix`, `crossover`, `elite_fuse`, `tlv_mutate`, `token_shuffle`, `special_strings`, `punctuation_insert`, `versifier_generate` |
+| `radamsa` | 11 | `tree_mutate`, `line_mutate`, `fuse_this`/`fuse_next`/`fuse_old`, `utf8_widen`, `utf8_insert` |
+| `format` | 73 | one `*_chunk_mutate` per container format, plus `format_lock`, `field_repair`, `png_crc_fix`, `recompress_{gzip,zlib}` |
+| `regularity` | 56 | `spectral_peak`, `rank_deficient`, `monotone_fill`, `kmer_saturate`, `popcount_lock`, `birthday_collide`, `gcd_worst_case`, `float_squeeze`, `feistel_scramble` |
+| `adaptive` | 27 | `havoc`, `redqueen`, `colorization`, `condstmt_solve`, `gradient_descent`, `magic_byte_search`, `crc_learn`, `markov_bytes`, `cem_bytes`, `path_negate`, `skipdet_probe` |
 
 **Regularity operators** are the statistical batteries run backwards: instead of testing a
 buffer for randomness, they synthesise inputs that are *pathologically* regular — spectral
@@ -146,7 +146,7 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 | AFL++ power schedules | `--schedule` | FAST/COE/RARE/MMOPT/LIN/QUAD/GO/AFLGO/ENTROPIC/DOPPLER seed-level energy |
 | AFLGo directed annealing | `--schedule aflgo` | Exact AFLGo power factor — symmetric 32×/1/32× energy by distance-to-target with time-based cooling (`--t-x`, `--aflgo-cooling`) |
 | Entropic power schedule | `--schedule entropic` | libFuzzer `-entropic`: energy ∝ log(1 + rare-feature count) from already-tracked rare-edge ownership |
-| **K-Scheduler Katz centrality** | auto | On trace-pc targets: whole-program ICFG → horizon graph (contracted visited deletion, DAG) → out-degree Katz with β from node-hit counts; Elo-rated `katz` seed arm plus a clamped `--schedule katz` energy |
+| **K-Scheduler Katz centrality** | auto | On trace-pc targets: whole-program ICFG → horizon graph (contracted visited deletion, DAG) → out-degree Katz with β from node-hit counts; Elo-rated `katz` seed arm plus a clamped `katz` power-schedule energy (not a `--schedule` choice) |
 | Seed strategies | — | Weighted, Pareto, format-aware, GA, QEA, Bayesian, Markov-gen |
 | **Mutation lineage tree** | `--lineage` | Weighted parent/ops/sites forest per seed: unproductive-branch pruning in auto-minimize, causal crash-path replay in `tmin`, LCA-based diversity scoring |
 
@@ -175,7 +175,7 @@ the coverage clock — not a distance between edge indices.
 - **Shannon entropy rate**: stall detection via flat vs. redistributing entropy
 - **Index of Dispersion**: Fano factor resolves genuine stall from bursty exploration
 - **Shapley value** (`--shapley`): fair operator credit via co-occurrence frequency
-- **Rate-distortion corpus minimization** (`--rate-distortion`): optimal compression preserving diversity
+- **Rate-distortion corpus minimization** (`minimize --rate-distortion`): optimal compression preserving diversity
 
 ### Evolutionary Lifecycles
 - **GA** (`--ga`): bounded population, speciation (MinHash LSH), tournament selection, generational replacement with elitism
@@ -252,7 +252,7 @@ What the counters buy:
 |---|---|---|
 | `png_read`, `jpeg_read` | libpng + zlib, libjpeg | `--ngram` adds `_ng2`/`_ng3` flavors here and for most other targets |
 | `zlib_read`, `gzip_read` | zlib | |
-| `ffmpeg_read` | FFmpeg 7.x | full demux→decode chain; link libraries derived from `ffbuild/config.mak` rather than hardcoded |
+| `ffmpeg_read` | FFmpeg (default 9.0.1) | built only as `ffmpeg_read_<ver>_<opts>`; full demux→decode chain; link libraries derived from `ffbuild/config.mak` rather than hardcoded |
 | `sqlite_read` | SQLite amalgamation | `deserialize` + `integrity_check` + full table scan, sandboxed to `:memory:` with an authorizer and a hard heap limit; **no mode byte**, so the 16-byte magic stays at offset 0 for the mutator sniffer |
 | `lz4_read` | LZ4 | block and frame APIs |
 | `secp256k1_read` | libsecp256k1 | |
@@ -419,14 +419,13 @@ sees it across a `.so` boundary. What remains instrumented is the thin target
 wrapper: `targets/png_read.c` is 175 lines that open a file, call
 `png_read_png`, and check the error path.
 
-`vendor/` is gitignored, so a fresh clone silently falls back to system libs.
+Vendored sources live outside the repo (`$FUZZ_VENDOR_ROOT`, default `~/fuzzing/vendoring/`), so a fresh clone silently falls back to system libs.
 Nothing fails and the numbers look plausible — the ceiling is just quietly
 much lower. Fetch the sources to fix it:
 
 ```bash
-git clone --depth 1 --branch v1.3.1  https://github.com/madler/zlib.git   vendor/zlib
-git clone --depth 1 --branch v1.6.43 https://github.com/pnggroup/libpng.git vendor/libpng
-bash tools/build_targets.sh   # look for: "Using vendored trace-cmp libraries"
+tools/vendor_libpng.sh        # zlib + libpng -> $FUZZ_VENDOR_ROOT
+bash tools/build_targets.sh   # look for: "libpng: vendored, zlib: vendored"
 ```
 
 No extra flag is needed — `--cmplog` is on by default, and
@@ -441,8 +440,8 @@ they exist. Measured on `targets/png_read.so`, identical corpus and 45s budget:
 To check which one you have:
 
 ```bash
-readelf -d targets/png_read.so | grep NEEDED     # libpng16.so.16 present => system libs
-nm targets/png_read.so | grep -c ' [Tt] png_'    # 2 => system libs, ~418 => vendored
+readelf -d ~/fuzzing/builds/png_read.so | grep NEEDED     # libpng16.so.16 present => system libs
+nm ~/fuzzing/builds/png_read.so | grep -c ' [Tt] png_'    # 2 => system libs, ~418 => vendored
 ```
 
 A suspiciously low edge plateau on a large, branchy library is usually this —
@@ -458,6 +457,8 @@ verify the link before tuning schedulers or dictionaries. See
 | `fuzz` | Run coverage-guided fuzzing |
 | `rank` | Rank seeds by edge coverage, rarity, subsumption |
 | `minimize` | Greedy set-cover corpus pruning |
+| `genseed` | Write from-scratch seeds for a format into a corpus dir |
+| `compact-seeds` | Move pruned seeds out of `seeds.zip` into `seeds/pruned/` |
 | `sweep` | Linear seed replay — find missed crashes |
 | `tmin` | Crash delta-debugging minimization |
 | `root-cause` | Isolate the minimal byte diff that turns a passing input into a crashing one |
@@ -484,7 +485,6 @@ verify the link before tuning schedulers or dictionaries. See
 | [`docs/learnings/`](docs/learnings/) | Research spikes and engineering learnings |
 | [`docs/FINDINGS/`](docs/FINDINGS/) | Bug discovery reports — one file per bug under `ffmpeg/` and `fgrep/`, see [Trophy Case](#trophy-case) |
 | [`AGENTS.md`](AGENTS.md) | Development guide and project conventions |
-| [`SPEC.md`](SPEC.md) | Original specification |
 
 ---
 
@@ -497,7 +497,7 @@ ruff check src/ tests/
 ruff format src/ tests/
 ```
 
-Current test suite: **5,400+ tests** across `tests/` and its `core/`, `services/`, `cli/`, and
+Current test suite: **14,000+ tests** across `tests/` and its `core/`, `services/`, `cli/`, and
 `integration/` subdirectories, including a large body of regression tests each pinned to a
 specific historical bug. Several toolchain-dependent families (`test_cfg_cache`,
 `test_distance_aflgo`, `test_icfg`, trace-cmp visibility) skip or fail without `clang`,

@@ -1,7 +1,7 @@
 # ASAN Direct-Lite Limitation
 
 **Date**: 2026-07-29
-**Status**: Layer 1 root cause identified (mid-process shadow offset mismatch); Layer 2 resolved (non-fatal reporting); Layer 3 resolved (recover-mode builds, 2026-10-02)
+**Status**: Layer 1 root cause identified (mid-process shadow offset mismatch), worked around by the `fuzzer-tool` LD_PRELOAD wrapper (`cli/ldpreload_wrapper.py`); Layer 2 resolved (non-fatal reporting); Layer 3 resolved (recover-mode builds, 2026-10-02)
 
 ## Layer 3: fatal check sites (2026-10-02)
 
@@ -14,7 +14,7 @@ Path: the `fuzzer-tool` wrapper preloads libasan at process start with `halt_on_
 
 ## Executive Summary
 
-ASAN-instrumented shared libraries (`.so` files built with `-fsanitize=address`) can be loaded and executed in direct_lite (`--inprocess-direct`) mode via `ctypes.CDLL(mode=RTLD_GLOBAL)` with a `verify_asan_link_order=0` shim. However, **ASAN memory bug detection does not trigger** — all three crash types (heap-buffer-overflow, use-after-free, stack-buffer-overflow) return `0` silently without ASAN aborting.
+ASAN-instrumented shared libraries (`.so` files built with `-fsanitize=address`) can be loaded and executed in-process (direct_lite, auto-selected for `.so`; or `--inprocess-direct`) via `ctypes.CDLL(mode=RTLD_GLOBAL)` with a `verify_asan_link_order=0` shim. However, **ASAN memory bug detection does not trigger** — all three crash types (heap-buffer-overflow, use-after-free, stack-buffer-overflow) return `0` silently without ASAN aborting.
 
 The same `.so` loaded via `dlopen` from a C program with `LD_PRELOAD=libasan.so.8` at process start correctly detects all three crash types. The failure is specific to mid-process ctypes/RTLD_GLOBAL loading.
 
@@ -147,7 +147,7 @@ Built a C-only reproducer (`/tmp/asan_midprocess.c`) that exactly mirrors the ct
 **Why LD_PRELOAD works**: At process start, ASAN initializes first (before any heap is used), maps the full shadow, and possibly restricts its heap to the address range that the low shadow covers. The compiled-in shadow offset matches the runtime shadow layout.
 
 **Fix in the fuzzer**:
-- `fuzzer-tool-asan` entry point: a CLI wrapper that sets `LD_PRELOAD=libasan.so.8` and `ASAN_OPTIONS=halt_on_error=0:detect_leaks=0`, then execve's into the real `fuzzer-tool`. Use this for ASAN targets: `fuzzer-tool-asan fuzz target_asan.so`
+- `fuzzer-tool` entry point is itself the wrapper (`cli/ldpreload_wrapper.py`): for a target that imports `__asan_init` (`U`) it sets `LD_PRELOAD=libasan.so.8` and merges `_ASAN_DEFAULTS` (`halt_on_error=0:abort_on_error=0:verify_asan_link_order=0:detect_leaks=0:...`) into `ASAN_OPTIONS`, then execs the real CLI (`fuzzer-tool-after-preload`). `fuzzer-tool fuzz target_asan.so` needs nothing else.
 - Automatic fallback: when the fuzzer detects an ASAN `.so` target and LD_PRELOAD was NOT set at process start, it falls back to persistent subprocess mode (where LD_PRELOAD is set in the child environment)
 
 ## Code Paths
@@ -188,37 +188,35 @@ Python process already running (no LD_PRELOAD)
 | Metric | Value |
 |---|---|
 | Throughput (png_read_asan.so) | ~124k eps |
-| Subprocess fallback | Eliminated (this fix) |
+| Subprocess fallback | Only when libasan was not preloaded at process start |
 | ASAN bug detection | **Not functional in direct_lite without LD_PRELOAD** |
 | AFL edge coverage | Working |
-| Crash isolation | None (afl_shim.c `_exit(128+sig)` provides exit-code signal) |
+| Crash isolation | None; `__afl_guarded_call` siglongjmps out of the fault and returns `-sig` |
 
 ### Workarounds for ASAN crash detection:
 
-1. **Use the `fuzzer-tool-asan` wrapper**: `fuzzer-tool-asan fuzz target_asan.so` — sets `LD_PRELOAD=libasan.so.8` and `ASAN_OPTIONS=halt_on_error=0:detect_leaks=0` at process start, then exec's the real fuzzer. This is the **recommended** approach for ASAN targets.
-2. **Use persistent subprocess mode** via automatic fallback (current default for ASAN targets) — the fuzzer detects ASAN and uses subprocess mode with LD_PRELOAD set in the child environment. Slower but works.
+1. **Use the `fuzzer-tool` entry point** (default): `fuzzer-tool fuzz target_asan.so` — the wrapper sets `LD_PRELOAD=libasan.so.8` and `ASAN_OPTIONS` at process start, then execs the real fuzzer. **Recommended**; `fuzzer-tool-after-preload` skips it.
+2. **Use persistent subprocess mode** — automatic fallback when libasan was not preloaded, or explicit `--inprocess` without `--inprocess-direct`; `LD_PRELOAD` set in the child environment. Slower but works.
 3. **Use a standalone executable target** instead of `.so` — fork+exec with `LD_PRELOAD=libasan.so.8` works correctly
-4. **Run with an external LD_PRELOAD wrapper**: `LD_PRELOAD=libasan.so.8 fuzzer-tool fuzz targets/target_asan.so ...` — ASAN initializes at process start
-2. **Use persistent subprocess mode** (`--inprocess` without `--inprocess-direct`) — fork + `LD_PRELOAD` at process start; ASAN detects bugs in the child
-3. **Run with an external LD_PRELOAD wrapper**: `LD_PRELOAD=libasan.so.8 fuzzer-tool fuzz targets/target_asan.so ...` — ASAN initializes at process start; crash kills the fuzzer but ASAN diagnostics are emitted
+4. **Run with an external LD_PRELOAD wrapper**: `LD_PRELOAD=libasan.so.8 fuzzer-tool-after-preload fuzz ~/fuzzing/builds/target_asan.so ...` — ASAN initializes at process start
 
 ## Reproducer Commands
 
 ```bash
 # Build the ASAN test target
-cd targets && gcc -g -fsanitize=address -shared -fPIC \
-  -o asan_target_asan.so asan_target.c
+clang -g -fsanitize=address -shared -fPIC \
+  -o /tmp/asan_target_asan.so targets/asan_target.c
 
 # Test from Python (direct_lite mode — broken)
 python3 -c "
 import ctypes, subprocess
 # verify_asan_link_order=0 shim
-r = subprocess.run(['cc', '-shared', '-fPIC', '-o', '/tmp/v0.so', '-x', 'c', '-'],
+r = subprocess.run(['clang', '-shared', '-fPIC', '-o', '/tmp/v0.so', '-x', 'c', '-'],
     input=b'const char *__asan_default_options(void) { return \"verify_asan_link_order=0\"; }',
     capture_output=True, timeout=30)
 ctypes.CDLL('/tmp/v0.so', mode=ctypes.RTLD_GLOBAL)
 ctypes.CDLL('/usr/lib/x86_64-linux-gnu/libasan.so.8', mode=ctypes.RTLD_GLOBAL)
-lib = ctypes.CDLL('targets/asan_target_asan.so', mode=ctypes.RTLD_GLOBAL)
+lib = ctypes.CDLL('/tmp/asan_target_asan.so', mode=ctypes.RTLD_GLOBAL)
 lib.fuzz.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
 lib.fuzz.restype = ctypes.c_int
 data, buf = b'BUG!U', ctypes.create_string_buffer(b'BUG!U')
@@ -232,7 +230,7 @@ cat > /tmp/c_test.c << 'EOF'
 #include <stdlib.h>
 typedef int (*fuzz_t)(const unsigned char *, size_t);
 int main(void) {
-    void *h = dlopen("./targets/asan_target_asan.so", RTLD_NOW);
+    void *h = dlopen("/tmp/asan_target_asan.so", RTLD_NOW);
     fuzz_t f = dlsym(h, "fuzz");
     unsigned char buf[] = "BUG!U";
     int r = f(buf, 5);
@@ -240,7 +238,7 @@ int main(void) {
     return 0;
 }
 EOF
-gcc -o /tmp/c_test /tmp/c_test.c -ldl
+clang -o /tmp/c_test /tmp/c_test.c -ldl
 LD_PRELOAD=/usr/lib/x86_64-linux-gnu/libasan.so.8 /tmp/c_test
 # → ASAN: heap-use-after-free on address ... — works!
 ```
@@ -269,8 +267,9 @@ The fuzzer now survives ASAN detections in-process:
 
 ## References
 
-- `src/fuzzer_tool/services/fuzzer.py` — ASAN ctypes preloading logic (lines 1010-1064)
-- `src/fuzzer_tool/cli/commands.py` — Removed ASAN `--inprocess-direct` fallback (lines 212-218)
+- `src/fuzzer_tool/services/fuzzer.py` — ASAN ctypes preloading logic (`_asan_ctypes_loaded` block) and direct_lite gate (`use_direct_lite`)
+- `src/fuzzer_tool/cli/commands.py` — ASAN `.so` LD_PRELOAD and `--inprocess-direct` notice (after `_detect_asan`)
+- `src/fuzzer_tool/cli/ldpreload_wrapper.py` — `fuzzer-tool` process-start LD_PRELOAD wrapper
 - `targets/asan_target.c` — ASAN crash test target (3 crash modes)
 - `/tmp/c_test_fuzz.c` — standalone C reproducer (deleted after testing)
 - `/tmp/trace_asan.so` — `__asan_report_load1` trace shim (deleted after testing)

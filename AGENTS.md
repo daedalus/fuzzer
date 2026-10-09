@@ -78,7 +78,7 @@ fuzzer, not just the target.
 47. Always do git commit and push after tests pass do not run tests after git commit and push.
 48. When planning to add new features: add code sketches and always add a section with the fully wiring the new feature.
 49. When planning a new feature always reason over small targeted code tests, copy the function to test and test it.
-50. The full pytest battery is almost 10k tests, running it is unpractical, always run the tests for the affected code.
+50. The full pytest battery is over 14k tests, running it is unpractical, always run the tests for the affected code.
 51. Whenever any method from scipy, sympy or gmpy is needed implement it by ourselves instead of importing more libraries.
 52. Always run calibrations against fuzzgoat target and make sure it's built with clang.
 53. For every layout update in `afl_shim.c` then increment `__AFL_SHM_LAYOUT` +1.
@@ -133,7 +133,7 @@ fuzzer, not just the target.
 | `ruff format src/ tests/` / `ruff check src/ tests/` | Format / lint |
 | `fuzzer-tool --help` | Show CLI help |
 | `tools/build_targets.sh` | Build all fuzz targets (ASAN + cmplog by default; see the script's flag list) |
-| `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` / `vendor_sqlite.sh` | Fetch vendored library sources into `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/`; legacy `vendor/` via `--in-tree-vendor`); required before building the matching targets |
+| `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` / `vendor_sqlite.sh` / `vendor_fuzzgoat.sh` / `vendor_libpng.sh` | Fetch vendored library sources into `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/`; legacy `vendor/` via `--in-tree-vendor`); required before building the matching targets |
 | `FUZZ_VENDOR_ROOT=...` / `FUZZ_BUILD_ROOT=...` | Env-var knobs; defaults are `~/fuzzing/vendoring/` (sources) and `~/fuzzing/builds/` (build artifacts). Both have legacy `--in-tree-*` flags. |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
 | `tools/benchmark.py list` / `tools/benchmark.py <name> [args]` | All benchmarks behind one entry point (`smoke`, `sweep`, `paired`, `replicated`, …) |
@@ -156,9 +156,9 @@ src/fuzzer_tool/
 ├── adapters/     # Process execution, filesystem ops, afl_shim.c (edge + cmplog) / perf_shim.c
 ├── services/     # Orchestration: fuzzer.py, operators.py, seed_picker.py, runner.py,
 │                 #   stats.py, corpus_manager.py, report.py
-└── cli/          # CLI entry point (commands.py, __main__.py)
+└── cli/          # CLI entry point (commands.py, ldpreload_wrapper.py)
 
-tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/grep/lz4/secp256k1/sqlite), corpus_png.py,
+tools/            # build_targets.sh, vendor_<lib>.sh (ffmpeg/fuzzgoat/grep/libpng/lz4/secp256k1/sqlite), corpus_png.py,
                   #   benchmark.py (entry point), release.sh
 tools/lib/        # Benchmark harnesses (bench*.sh/py, noise_probe, lineage_benchmark) + shared helpers
 targets/          # Fuzz target sources (*.c) + built artifacts (.so/.bin) under legacy layout.
@@ -168,12 +168,12 @@ dictionaries/     # Format token dicts (png.dict)
 vendor/           # Vendored library sources — gitignored, fetched by tools/vendor_<lib>.sh.
                   #   Default location is $FUZZ_VENDOR_ROOT (~/fuzzing/vendoring/); this in-tree
                   #   `vendor/` is the legacy path (use --in-tree-vendor for back-compat).
-                  #   FFmpeg 7.1.3, lz4, secp256k1, sqlite (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
+                  #   FFmpeg (default 9.0.1), fuzzgoat, grep, lz4, secp256k1, sqlite (+ zlib/libpng/libjpeg-turbo for trace-cmp builds)
 docs/             # DEEP_DIVE.md (comprehensive reference), TODO.md, refs/ (agent reference files), per-feature docs
 
 ~/fuzzing/        # OUT-OF-TREE build + cache roots (default layout; override via env vars)
 ├── vendoring/    #   $FUZZ_VENDOR_ROOT  — vendored library sources (read-only, per-lib dirs)
-└── targets/      #   $FUZZ_BUILD_ROOT  — built target artifacts (.so/.bin) and per-lib build trees
+└── builds/       #   $FUZZ_BUILD_ROOT  — built target artifacts (.so/.bin) and per-lib build trees
 ```
 
 ## Scheduler Interface
@@ -210,7 +210,7 @@ All schedulers:
 
 ```bash
 # Setup
-pip install -e ".[test]"
+pip install -e ".[dev]"
 
 # Test
 pytest --timeout=15 --timeout-method=signal

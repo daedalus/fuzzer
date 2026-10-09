@@ -4,7 +4,7 @@ This document is the **canonical layer model**. It exists because the project
 already had three descriptions of its own shape — `docs/architecture.dot`
 (wiring diagram), `README.md#architecture` (prose walkthrough), and
 `_print_enabled_features()` in `services/fuzzer.py` (the runtime's own
-7-bucket grouping) — and they disagree with each other in a few places. This
+8-bucket grouping) — and they disagree with each other in a few places. This
 file is the tie-breaker. The other three keep their jobs (diagram, pitch,
 runtime banner); this one says *where a new piece of code belongs* and *why*.
 
@@ -43,9 +43,10 @@ dictionary tokens) that later layers read but never recompute mid-campaign.
 ### 2 — Scheduling ("what to fuzz next")
 Three sub-layers, kept textually separate because they're different files and
 different questions, even though the diagram draws them as one node. They map
-onto three disjoint Elo tournaments (`strategy_arena()` in
+onto three of the four disjoint Elo tournaments (`strategy_arena()` in
 `core/analyzers/analyzer_elo.py`; keys `<name>` / `seed_<name>` /
-`pos_<name>`; they never play each other):
+`pos_<name>`; the fourth, `tgt_<name>`, is multi-target only,
+`services/target_arena.py`; they never play each other):
 - **2a Operator scheduling** — `core/schedulers/op_*.py`, `shapley.py`,
   Elo rating. Picks *which mutation operator* runs this iteration.
 - **2b Seed scheduling** — `services/seed_picker.py`, `schedules.py`,
@@ -56,8 +57,9 @@ onto three disjoint Elo tournaments (`strategy_arena()` in
   on. Contract in `pos_base.py`: `propose(data, buf_len) -> int | None`
   (`None` = no opinion), `record(data, offsets, outcome, weight)`. Arms:
   `uniform` (baseline, always pooled), `sensitivity`, `te`, `phase`, `mi`,
-  `crash_mi`, `region` (existing trackers, adapted; they keep their own
-  feedback loops) and `burn_front`. With `--position-arena` + `--elo`, Elo
+  `crash_mi`, `region`, `field` (existing trackers, adapted; they keep their
+  own feedback loops) and opt-in proposers (`burn_front`, `kl_ducb`,
+  `fractal`, `levy`, … — full list in `position_arena.py`'s docstring). With `--position-arena` + `--elo`, Elo
   picks the arm and a proposer rated at or below `pos_uniform` is logged;
   without it, `OperatorEngine.select_position` keeps its uniform pick over
   candidates. Sole caller: `select_position`.
@@ -67,8 +69,8 @@ onto three disjoint Elo tournaments (`strategy_arena()` in
 ### 3 — Mutation ("produce or repair the candidate")
 - **3a** Generic byte-level ops — `operator_registry.py` dispatch,
   `services/operators.py` (bit/byte/block/dict/radamsa/adaptive-havoc).
-- **3b** Format-aware structural ops — `core/mutations/*.py` (36+ container
-  formats: png/jpeg/gif/webp/tlv/grammar/tree_mutator/frameshift/markov/
+- **3b** Format-aware structural ops — `core/mutations/*.py` (68 modules,
+  e.g. png/jpeg/gif/webp/tlv/grammar/tree_mutator/frameshift/markov/
   regularity).
 - **3c** Constraint-driven **generation** — `wfc.py`, `wfc_chunks.py`,
   corpus-boost. Kept as its own bucket even though it's wired through the
@@ -96,14 +98,15 @@ source, it goes here, not in Analysis.
 
 ### 5 — Analysis ("turn raw signal into a decision input")
 Everything registered in `core/analyzer_registry.py` **whose output is
-read by layer 2 or 3, or is explicitly intended to be**: `mi.py`,
-`transfer_entropy.py`, `renyi.py`, `sensitivity.py`, `structure_function.py`,
-`causal_sector.py`, `occupation.py`, `garch.py`, `coverage_regime.py`,
-`discovery_uniformity.py`, `kuramoto_sync.py`, `distance.py` (AFLGo),
-`checksum_learner.py` (feeds 3d), `corpus_compression.py`, `csd.py`,
-`continuum.py`. Elo is cross-listed here and in 2a — it's wired as an
+read by layer 2 or 3, or is explicitly intended to be**: `mi.py`, `renyi.py`,
+and under `core/analyzers/analyzer_<name>.py`: `transfer_entropy`,
+`sensitivity`, `structure_function`, `causal_sector`, `occupation`, `garch`,
+`coverage_regime`, `discovery_uniformity`, `kuramoto_sync`, `distance`
+(AFLGo), `checksum_learner` (feeds 3d), `corpus_compression`,
+`critical_slowing` (registry `csd`), `navier_stokes` (registry `continuum`).
+Elo (`analyzer_elo.py`) is cross-listed here and in 2a — it's wired as an
 analyzer but its output is consumed as a scheduling weight.
-**Two named exceptions, and why they're exceptions:** `format_learner.py`
+**Two named exceptions, and why they're exceptions:** `analyzer_format_learner.py`
 and `analyzer_trace.py` are also wired through `analyzer_registry.py` but
 live in layer 8, not here — see below.
 
@@ -119,11 +122,11 @@ never touches normal-iteration scoring.
 
 ### 8 — Output / Observability (cross-cutting, no fuzzing decisions read this)
 `services/stats.py`, `stats_reporter.py`, `report.py`, `sendmail.py`, plus:
-- **`format_learner.py`** ("learn-format" in the banner) — today it only
-  *records* observations (`record_transition`, `record_liveness`); nothing
-  reads its hypotheses back into layer 2/3 yet (`live_bit_mask.py:69` notes
-  the wiring as a TODO). It is filed here, not in Analysis, precisely
-  because it doesn't feed a decision yet.
+- **`analyzer_format_learner.py`** ("learn-format" in the banner) — filed
+  here because it was record-only (`record_transition`, `record_liveness`).
+  Stale: the 2c `field` position arm now reads `weighted_position`
+  (`services/position_arena.py`), so the standing rule below applies — see
+  Known debt.
 - **`analyzer_trace.py` / `CrashTracer`** ("trace-crashes") — writes a
   report to `crashes_dir`; that's artifact generation, not feedback into
   the loop, even though it's dispatched through the same registry as the
@@ -134,7 +137,8 @@ banner group in `_print_enabled_features()`, and `analyzer_registry.py`'s
 own docstring, in the same commit. Don't leave the three disagreeing again.
 
 ### 9 — Developer Tooling (outside the runtime entirely)
-`tools/*.py`, `tools/*.sh` — benchmarks (`bench_*.py`), corpus/target
+`tools/*.py`, `tools/*.sh`, `tools/lib/` — benchmarks (`tools/lib/bench_*`,
+entry point `tools/benchmark.py`), corpus/target
 generation (`corpus_fuzzgoat.py`, `gen_*`, `vendor_*.sh`), diagnostics
 (`edge_diagnostic.py` — consolidated matrix/phantom/stored-ids/hail-mary
 probes formerly split across `edge_matrix_analysis.py` and
@@ -164,6 +168,9 @@ import fuzzer internals for analysis.
 
 ## Known debt (tracked, not yet fixed)
 
+- `format_learner` feeds the `field` position arm but is still in layer 8,
+  the banner's "Output" group and `analyzer_registry.py`'s docstring; move
+  all three to layer 5 together.
 - `docs/architecture.dot` still shows HW-perf counters under a separate
   "Feedback" cluster from "Execution" (see layer 4's resolution above) —
   needs a diagram edit to stop disagreeing with the README and this file.
