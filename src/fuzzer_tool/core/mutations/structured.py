@@ -66,6 +66,7 @@ import math
 import struct
 from collections import Counter
 from functools import lru_cache
+from itertools import groupby
 
 from fuzzer_tool.core.debruijn_cache import fingerprint as _db_fingerprint
 from fuzzer_tool.core.debruijn_cache import load as _db_cache_load
@@ -1135,6 +1136,9 @@ def lmn_lock(data: bytes, rng) -> bytes:
 # transform meaningfully.
 
 
+_BYTE = tuple(bytes((b,)) for b in range(256))  # value -> one-byte bytes
+
+
 def _mtf_encode(data: bytes, alphabet: bytearray) -> bytes:
     """Encode *data* with Move-To-Front, mutating *alphabet* in place."""
     out = bytearray(len(data))
@@ -1204,19 +1208,17 @@ def _bwt_inverse(bwt_data: bytes, primary: int) -> bytes:
     n = len(bwt_data)
     if n <= 1:
         return bwt_data
-    table = sorted((bwt_data[i], i) for i in range(n))
-    # First column F and rank lookup for the LF-mapping.
-    F = [table[i][0] for i in range(n)]
-    rows_f: dict[int, list[int]] = {}
-    for i, c in enumerate(F):
-        rows_f.setdefault(c, []).append(i)
+    # LF-mapping: the k-th c in L is the k-th c in F, i.e. row i of L maps to
+    # i's slot in the stable sort of L (was an O(n) rank recount per step).
+    order = sorted(range(n), key=bwt_data.__getitem__)
+    lf = [0] * n
+    for k, i in enumerate(order):
+        lf[i] = k
     idx = primary
     out = bytearray(n)
-    for i in range(n):
-        c = bwt_data[idx]
-        out[n - 1 - i] = c
-        rank = sum(1 for j in range(idx + 1) if bwt_data[j] == c)
-        idx = rows_f[c][rank - 1]
+    for i in range(n - 1, -1, -1):
+        out[i] = bwt_data[idx]
+        idx = lf[idx]
     return bytes(out)
 
 
@@ -1280,15 +1282,7 @@ def rle(data: bytes, rng) -> bytes:
     """
     if len(data) < 2:
         return data
-    runs: list[tuple[int, int]] = []
-    i = 0
-    while i < len(data):
-        b = data[i]
-        j = i + 1
-        while j < len(data) and data[j] == b:
-            j += 1
-        runs.append((b, j - i))
-        i = j
+    runs: list[tuple[int, int]] = [(b, len(list(g))) for b, g in groupby(data)]
     if len(runs) < 2:
         return data
     n_mut = rng.randint(1, min(3, len(runs)))
@@ -1312,12 +1306,10 @@ def rle(data: bytes, rng) -> bytes:
                     runs[pos] = (runs[pos][0], runs[pos][1] + delta)
             else:
                 runs[pos] = (runs[pos][0], max(1, runs[pos][1] + delta))
-    out = bytearray()
-    for b, length in runs:
-        out.extend([b] * length)
+    out = b"".join(_BYTE[b] * length for b, length in runs)
     if len(out) != len(data):
         return data
-    return _splice(data, 0, bytes(out))
+    return _splice(data, 0, out)
 
 
 def delta_encode(data: bytes, rng) -> bytes:
