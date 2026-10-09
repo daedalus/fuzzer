@@ -356,11 +356,9 @@ class TestOpBallot:
         assert name not in operator_strategy_pool(f)
 
     def test_elo_dispatch_uses_the_arm(self, name):
-        from fuzzer_tool.services.operators import OperatorEngine
+        from fuzzer_tool.services.operators import _PLAIN_STRATEGIES
 
-        src = inspect.getsource(OperatorEngine)
-        assert f'strategy == "{name}" and f._{name}' in src
-        assert f"op = f._{name}.select_op(ops)" in src
+        assert _PLAIN_STRATEGIES[name] == f"_{name}"
 
 
 # --- CLI --------------------------------------------------------------------

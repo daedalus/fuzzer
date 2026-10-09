@@ -46,6 +46,46 @@ def stderr_crash_marker(returncode: int, stderr: str) -> str | None:
     return next((m for m in CRASH_STDERR_MARKERS if m in stderr), None)
 
 
+# ── Child environment ───────────────────────────────────────────────────
+#
+# os.environ.copy() decodes every variable (~84us at 160 vars) and the spawn
+# path needs a fresh env per exec. Cache the decoded dict and revalidate it
+# against os.environ's raw bytes (~2us): os.environ changes mid-run (cmplog
+# LD_PRELOAD, map resize), so the cache can never be trusted blindly.
+
+
+def _decode_environ() -> dict[str, str]:
+    return os.environ.copy()
+
+
+class _EnvCache:
+    """Decoded os.environ, keyed by a copy of its raw bytes mapping."""
+
+    __slots__ = ("raw", "decoded")
+
+    def __init__(self) -> None:
+        self.raw: dict | None = None
+        self.decoded: dict[str, str] = {}
+
+
+_ENV_CACHE = _EnvCache()
+
+
+def environ_copy() -> dict[str, str]:
+    """Equivalent of ``os.environ.copy()``; decodes only when env changed."""
+    # CPython keeps the encoded mapping in _data; elsewhere, decode always.
+    raw = getattr(os.environ, "_data", None)
+    if raw is None:
+        return _decode_environ()
+
+    cache = _ENV_CACHE
+    if cache.raw != raw:
+        # Raw first: a change racing the decode then misses next call.
+        cache.raw = dict(raw)
+        cache.decoded = _decode_environ()
+    return dict(cache.decoded)
+
+
 # ── Shared child-process machinery ──────────────────────────────────────
 #
 # Used by all three execution modes. This lived under "Stdin mode" while only

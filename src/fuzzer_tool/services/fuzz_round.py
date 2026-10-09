@@ -1641,69 +1641,86 @@ class FuzzRound:
 
     def _record_schedulers(self, op_rewards) -> None:
         f = self._f
+        # Enabled schedulers are fixed at setup; only the on-policy member
+        # moves with the selector, so build the fan-out once per selector.
+        cache = getattr(f, "_record_fanout", None)
+        if cache is None:
+            cache = f._record_fanout = {}
         selector = f._op_selector
-        # Schedulers sharing the record(op, success, weight=...) signature.
-        for scheduler in (
-            f._replicator if f._use_replicator else None,
-            f._exp3 if selector == "exp3" else None,
-            f._exp4 if selector == "exp4" else None,
-            f._eps_greedy,
-            f._hierarchical,
-            f._gp_ucb,
-            f._bo_gp_ucb,
-            f._cmaes if selector == "cmaes" else None,
-            f._ducb,
-            f._swucb,
-            f._kl_ducb,
-            f._kl_swucb,
-            f._cucb,
-            f._cusum_ucb,
-            f._fewa,
-            f._fpl,
-            # On-policy, like exp3/cmaes above: the importance weight is only
-            # unbiased against the distribution that produced the draw, so a
-            # round another scheduler selected must not reach it.
-            f._corral if selector == "corral" else None,
-            f._tsallis if selector == "tsallis" else None,
-            f._kalman_ts,
-            f._gamma_poisson,
-            f._ids,
-            f._phe,
-            f._exp3_ix if selector == "exp3_ix" else None,
-            f._regret_matching if selector == "regret_matching" else None,
-            f._automaton if selector == "automaton" else None,
-            f._ant_colony,
-            f._gradient,
-            f._whittle,
-            f._successive_elim,
-            f._consolidated_v1,
-            f._consolidated_v2,
-            f._moss,
-            f._las_vegas,
-            f._bayes_ucb,
-            f._canary,
-            f._op_katz,
-            f._op_kuramoto,
-            f._op_tang,
-            f._op_kruskal_count,
-            f._op_credit,
-            f._op_tpe,
-            f._op_strata,
-            f._op_stride,
-            f._op_p2c,
-            f._op_good_turing,
-            f._softmax,
-            f._topk,
-        ):
-            if scheduler is None:
-                continue
+        fanout = cache.get(selector)
+        if fanout is None:
+            fanout = cache[selector] = self._fanout(selector)
+
+        for scheduler in fanout:
+            record = scheduler.record
             for op, ok, w in op_rewards:
-                scheduler.record(op, ok, weight=w)
+                record(op, ok, weight=w)
 
         # CUCB batches the round rather than updating per operator, so the
         # superarm is only complete once the loop above has run.
         if f._cucb:
             f._cucb.settle_round()
+
+    def _fanout(self, selector) -> tuple:
+        """Schedulers fed by a round *selector* chose, in declaration order."""
+        f = self._f
+        # Schedulers sharing the record(op, success, weight=...) signature.
+        return tuple(
+            scheduler
+            for scheduler in (
+                f._replicator if f._use_replicator else None,
+                f._exp3 if selector == "exp3" else None,
+                f._exp4 if selector == "exp4" else None,
+                f._eps_greedy,
+                f._hierarchical,
+                f._gp_ucb,
+                f._bo_gp_ucb,
+                f._cmaes if selector == "cmaes" else None,
+                f._ducb,
+                f._swucb,
+                f._kl_ducb,
+                f._kl_swucb,
+                f._cucb,
+                f._cusum_ucb,
+                f._fewa,
+                f._fpl,
+                # On-policy, like exp3/cmaes above: the importance weight is only
+                # unbiased against the distribution that produced the draw, so a
+                # round another scheduler selected must not reach it.
+                f._corral if selector == "corral" else None,
+                f._tsallis if selector == "tsallis" else None,
+                f._kalman_ts,
+                f._gamma_poisson,
+                f._ids,
+                f._phe,
+                f._exp3_ix if selector == "exp3_ix" else None,
+                f._regret_matching if selector == "regret_matching" else None,
+                f._automaton if selector == "automaton" else None,
+                f._ant_colony,
+                f._gradient,
+                f._whittle,
+                f._successive_elim,
+                f._consolidated_v1,
+                f._consolidated_v2,
+                f._moss,
+                f._las_vegas,
+                f._bayes_ucb,
+                f._canary,
+                f._op_katz,
+                f._op_kuramoto,
+                f._op_tang,
+                f._op_kruskal_count,
+                f._op_credit,
+                f._op_tpe,
+                f._op_strata,
+                f._op_stride,
+                f._op_p2c,
+                f._op_good_turing,
+                f._softmax,
+                f._topk,
+            )
+            if scheduler is not None
+        )
 
     def _record_contextual(self, op_rewards) -> None:
         f = self._f

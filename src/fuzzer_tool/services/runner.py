@@ -23,6 +23,7 @@ import time
 
 from fuzzer_tool.adapters.process import (
     SIGNAL_CRASH_CODES,
+    environ_copy,
     run_target_fast,
     run_target_file,
     run_target_stdin,
@@ -356,7 +357,7 @@ class TargetRunner:
     def _spawn_env(self, shm) -> dict:
         """Child environment: AFL map size, SHM id, cmplog variables."""
         f = self.f
-        env = os.environ.copy()
+        env = environ_copy()
         if f.use_coverage:
             env["AFL_MAP_SIZE"] = str(f.map_size)
         if shm:
@@ -739,7 +740,7 @@ class TargetRunner:
                 fh.write(_LOADER_SCRIPT)
             runner._loader_path = path
 
-        env = os.environ.copy()
+        env = environ_copy()
         env["_PTRACE_TRACEME"] = "1"
         env["_TIMEOUT"] = str(int(f.timeout))
         proc = subprocess.Popen(

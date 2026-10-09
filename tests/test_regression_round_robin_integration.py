@@ -32,6 +32,7 @@ class MockFuzzer:
 
         self._last_mopt_particles = []
         self._prev_bandit_op = None
+        self._meta_strategy_cached = None
 
         self._rng = RandPool()
 
