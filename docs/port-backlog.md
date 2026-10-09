@@ -33,7 +33,7 @@ measured coverage delta.
 Four proposals for one gap. Ranked by plumbing already in place, which is not
 the order any single source gave.
 
-**A1. Grimoire-style generalization (implemented 2026-10-04, `--grimoire`, unmeasured)** (`I.4`, LibAFL `GeneralizationStage`) —
+**A1. Grimoire-style generalization (implemented 2026-10-04, `--grimoire`, `864d3b26`, unmeasured)** (`I.4`, LibAFL `GeneralizationStage`) —
 blank spans of an input, re-execute, keep the spans whose removal does not
 change coverage. Yields structure and recombinable tokens with **no grammar
 supplied**, which is exactly where the ~155 hand-written format mutators have
@@ -66,7 +66,7 @@ that rather than fixing it), and `ts-ins`/`ts-add` without a good initial corpus
 accumulates oversized entries — wire to the minimizer. **Effort ~1 week
 including the bank, and only worth it if a real text-format target is in scope.**
 
-**A4. FormatFuzzer decision seeds** (`#9`, USENIX Sec '21, `uds-se/FormatFuzzer`).
+**A4. FormatFuzzer decision seeds (implemented 2026-09-06, `--formatfuzzer`, `e445fdc0`, unmeasured)** (`#9`, USENIX Sec '21, `uds-se/FormatFuzzer`).
 Compiles community 010 Editor binary templates (170+ formats incl. MP4/PNG/AVI/ZIP)
 into parser+generator pairs; the byte fuzzer mutates choice bits while output
 stays valid. Would generalize the hand-written mutator family. **Effort M.**
@@ -86,7 +86,7 @@ corpus dir — keep both, never overwrite. Whether a binary analogue exists
 `core/field_constraints.py` is where that would start. **Do not assume it
 transfers. Effort ~half a day for the text case.**
 
-**B2. FairFuzz-style rare-branch masks** (`I.5`) — per rare edge, compute which
+**B2. FairFuzz-style rare-branch masks (implemented 2026-09-30, `--pos-rare-mask` position arm, `899a60ec`, unmeasured)** (`I.5`) — per rare edge, compute which
 byte positions can be mutated while still hitting it, and restrict mutation to
 the complement. The "which branch is rare" half is done: `_edge_owner_count`
 rarity was corrected in the edge-distribution work (`0afc439`). Only the mask
