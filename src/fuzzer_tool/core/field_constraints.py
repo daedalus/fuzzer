@@ -37,6 +37,8 @@ import binascii
 import logging
 import struct
 
+from fuzzer_tool.core import z3_budget
+
 log = logging.getLogger(__name__)
 
 # Field kinds
@@ -45,6 +47,9 @@ CHECKSUM_CRC32 = "crc32"
 CHECKSUM_SUM = "sum"
 CONSTANT = "constant"
 OFFSET = "offset"
+
+COUPLED_TIMEOUT_MS = 200
+"""Requested z3 timeout for solve_coupled; z3_budget caps it."""
 
 MAX_REPAIR_PASSES = 8
 """Ordering makes one pass sufficient for acyclic graphs; extra passes only
@@ -391,13 +396,12 @@ def solve_coupled(
         return None
 
     solver = z3.Solver()
-    solver.set("timeout", 200)
     vars_ = [z3.BitVec(f"f{i}", f.width * 8) for i, f in enumerate(fields)]
 
     _pin_fields(solver, vars_, fields, data)
     _add_relations(z3, solver, vars_, fields, relations)
 
-    if solver.check() != z3.sat:
+    if z3_budget.BUDGET.check(solver, COUPLED_TIMEOUT_MS) != z3.sat:
         return None
 
     model = solver.model()
