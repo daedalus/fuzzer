@@ -84,6 +84,7 @@ fuzzer, not just the target.
 53. For every layout update in `afl_shim.c` then increment `__AFL_SHM_LAYOUT` +1.
 54. Always keep memory usage bounded.
 55. For cleanliness and maintainability: A big class with a lot of members and reentrancy is preferable than a big procedure.
+56. Always rebuild targets if `afl_shim.c` changes.
 
 ## Corpus Rules
 
