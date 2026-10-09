@@ -1202,6 +1202,10 @@ with `-fsanitize=address`. `build_simple_so_targets` selects the correct path ba
 on the `$suffix` parameter (`_asan` → `vendor/ffmpeg_asan/`, otherwise
 `vendor/ffmpeg/`).
 
+Sources are staged with `cow_copy_tree` (`cp -a --reflink=auto`, skipping `.git`,
+`.forgejo`, `presets`): copy-on-write on btrfs/xfs, plain copy elsewhere. It merges
+into the stage, so existing objects survive and unchanged sources keep their mtime.
+
 **FFmpeg configure flags** (`tools/lib/ffmpeg_config.sh`, sourced by both
 `vendor_ffmpeg.sh` and `build_vendored_ffmpeg_sancov`), chosen for edge coverage:
 

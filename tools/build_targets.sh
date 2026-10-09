@@ -434,6 +434,19 @@ NC='\033[0m'
 ok() { echo -e "  ${GREEN}OK${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
 
+# Copy-on-write tree copy: reflinks share extents (btrfs/xfs), so staging a
+# vendored tree costs no data I/O; elsewhere it falls back to a plain copy.
+# Merges into $2, so build objects already there survive. $3.. name
+# top-level entries to skip (e.g. .git).
+cow_copy_tree() {
+    local src="$1" dst="$2"; shift 2
+    local skip=() name
+    for name in "$@"; do skip+=(! -name "$name"); done
+    mkdir -p "$dst"
+    find "$src" -mindepth 1 -maxdepth 1 "${skip[@]}" \
+        -exec cp -a --reflink=auto -t "$dst" -- {} +
+}
+
 # ── Incremental rebuild ─────────────────────────────────────────────
 # The script relinked all 37 targets on every invocation, including a run
 # that changed nothing. .target.md5 already noticed this — it reported
@@ -1291,10 +1304,11 @@ build_vendored_ffmpeg_sancov() {
     # The stage is updated in place, not recreated. `rm -rf` here meant a
     # full re-copy of ~180MB and then a from-scratch compile of the whole
     # component set on every invocation, because the .o files live in the
-    # stage and were deleted along with it. rsync without --delete leaves
-    # them: only sources that actually changed upstream are copied, and
-    # make then rebuilds only what those touched. --delete would be wrong
-    # for the same reason — the objects have no counterpart in $SRC_DIR.
+    # stage and were deleted along with it. cow_copy_tree merges and leaves
+    # them; reflinks make the copy itself near free, and cp -a keeps source
+    # mtimes, so make rebuilds only what changed upstream. Deleting extras
+    # would be wrong for the same reason — the objects have no counterpart
+    # in $SRC_DIR.
     local STAGE_DIR="$BUILD_DIR/src"
     mkdir -p "$STAGE_DIR"
     # Copy source WITHOUT .git (1.8GB on FFmpeg 9.0.1) and other heavy unneeded dirs.
@@ -1312,7 +1326,7 @@ build_vendored_ffmpeg_sancov() {
     #     invalidates config.mak and every object built against it, so it
     #     forces reconfigure + make clean.
     #   source stamp — the vendored tree's revision and the contents of
-    #     patches/. A change here needs no reconfigure: rsync brings the
+    #     patches/. A change here needs no reconfigure: the copy brings the
     #     edited files over and make rebuilds their objects.
     #
     # The early return this replaces was commented out with "always
@@ -1413,9 +1427,7 @@ STUBEOF
         return 0
     fi
 
-    rsync -a --exclude='.git' --exclude='.forgejo' \
-              --exclude='presets' \
-              "$SRC_DIR"/ "$STAGE_DIR"/
+    cow_copy_tree "$SRC_DIR" "$STAGE_DIR" .git .forgejo presets
 
     # Only a configure-level change needs the reconfigure and the clean.
     # A source-only change (a new patch, an updated vendored tree) is
@@ -1458,14 +1470,14 @@ STUBEOF
                     [ -f "$FFMPEG_DIR/$lib/$lib.a" ] && cp -f "$FFMPEG_DIR/$lib/$lib.a" "$OUT_DIR/$lib/$lib.a"
                     # Headers: copy dir contents (not the dir itself).
                     if [ -d "$FFMPEG_DIR/$lib" ]; then
-                        cp -rn "$FFMPEG_DIR/$lib"/*.h "$OUT_DIR/$lib/" 2>/dev/null || true
+                        cp -rn --reflink=auto "$FFMPEG_DIR/$lib"/*.h "$OUT_DIR/$lib/" 2>/dev/null || true
                     fi
                 fi
             done
             # Top-level include headers (libavformat/avformat.h, etc.) live in $FFMPEG_DIR.
             for hdr in libavformat libavcodec libavutil libswresample libswscale; do
                 [ -d "$OUT_DIR/$hdr" ] || continue
-                cp -rn "$FFMPEG_DIR/$hdr"/*.h "$OUT_DIR/$hdr/" 2>/dev/null || true
+                cp -rn --reflink=auto "$FFMPEG_DIR/$hdr"/*.h "$OUT_DIR/$hdr/" 2>/dev/null || true
             done
             # ffbuild/config.mak records EXTRALIBS-<lib>, which is what
             # ffmpeg_extralibs() reads to derive the link line. Without it
