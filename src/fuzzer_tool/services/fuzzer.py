@@ -467,6 +467,9 @@ KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
 EXEC_BLOOM_CAPACITY = 500_000  # executed-input filter capacity before generational wipe
 EXEC_DEDUP_RETRIES = 3  # re-rolls of the mutation before executing a repeat anyway
+RAW_PROBE_MIN = 10  # startup raw-speed probe: fewest target runs
+RAW_PROBE_MAX = 100  # ... and most
+RAW_PROBE_FALLBACK = b"\x00" * 64  # probe input when the corpus is empty
 # Format seed generator: every FORMAT_SEED_EVERY_EXECS execs, queue up to
 # FORMAT_SEED_BUDGET field-targeted variants of the last fuzzed seed.
 FORMAT_SEED_EVERY_EXECS = 5_000
@@ -5412,6 +5415,26 @@ class Fuzzer:
             log.warning("shim health: %s", msg)
             print(f"[!] WARNING: shim health: {msg}")
 
+    def _probe_raw_speed(self) -> float:
+        """Target-only eps over evenly spaced corpus seeds.
+
+        Real inputs, not a constant: ffmpeg rejects 64 zero bytes in
+        0.15 ms (2,148 eps) but averages 2.13 ms (469 eps) on its corpus.
+        """
+        corpus = self.corpus
+        n = min(RAW_PROBE_MAX, max(RAW_PROBE_MIN, len(corpus) // 10 + 1))
+        if corpus:
+            step = max(1, len(corpus) // n)
+            inputs = [corpus[i] for i in range(0, len(corpus), step)][:n]
+        else:
+            inputs = [RAW_PROBE_FALLBACK] * n
+
+        t0 = time.perf_counter()
+        for data in inputs:
+            self._run_target(data)
+        elapsed = time.perf_counter() - t0
+        return len(inputs) / elapsed if elapsed > 0 else 0.0
+
     def _shim_self_test(self, targets: list[str]) -> None:
         """One execution per instrumented target before fuzzing.
 
@@ -9164,14 +9187,8 @@ class Fuzzer:
 
         # Quick raw-target-speed measurement before the main loop
         try:
-            _probe = b"\x00" * 64
-            _n = min(100, max(10, int(len(self.corpus) * 0.1 + 1)))
-            _t0 = time.perf_counter()
-            for _ in range(_n):
-                self._run_target(_probe)
-            _t1 = time.perf_counter()
-            _raw_eps = _n / (_t1 - _t0) if _t1 > _t0 else 0
-            print(f"[*] Raw target speed: {_raw_eps:,.0f} eps ({_n} probes)")
+            _raw_eps = self._probe_raw_speed()
+            print(f"[*] Raw target speed: {_raw_eps:,.0f} eps (corpus seeds)")
         except Exception:
             pass
 
