@@ -140,9 +140,8 @@ class TestAdversarialFloor:
 
     def test_elo_rates_canary_below_a_normal_strategy(self):
         """Integration-level falsification: after enough rounds of
-        record_strategy_match, BayesianEloTracker.strategies_below_canary
-        must be empty when a real strategy is actually winning most of its
-        matches against canary -- i.e. canary should NOT need inspection
+        record_strategy_matches, BayesianEloTracker.strategies_below_canary
+        must be empty when a real strategy gains more often than canary -- i.e. canary should NOT need inspection
         under ordinary conditions.
         """
         elo = BayesianEloTracker(
@@ -150,24 +149,24 @@ class TestAdversarialFloor:
         )
         rng = random.Random(7)
         for _ in range(200):
-            # "real" wins ~80% of its matches against canary.
-            score = 1.0 if rng.random() < 0.8 else 0.0
-            elo.record_strategy_match("real", "canary", score)
+            # Both play every round: "real" gains 40%, canary 10%.
+            elo.record_strategy_matches("real", ["canary"], float(rng.random() < 0.4))
+            elo.record_strategy_matches("canary", ["real"], float(rng.random() < 0.1))
         assert elo.strategies_below_canary() == []
         ranking = dict(elo.get_strategy_ranking())
         assert ranking["real"] > ranking["canary"]
 
     def test_flags_a_real_strategy_that_actually_regressed(self):
-        """When a 'real' strategy is losing to canary as often as it wins,
+        """When a 'real' strategy gains less often than canary,
         strategies_below_canary must surface it."""
         elo = BayesianEloTracker(
             initial_mu=1500, initial_sigma=350, beta=200, tau=5.0, min_matches=10
         )
         rng = random.Random(99)
         for _ in range(200):
-            # "broken" loses more often than it wins against canary --
-            # canary should never be beating a real strategy this badly.
-            score = 1.0 if rng.random() < 0.3 else 0.0
-            elo.record_strategy_match("broken", "canary", score)
+            # "broken" gains 10%, canary 40% -- canary should never be
+            # beating a real strategy this badly.
+            elo.record_strategy_matches("broken", ["canary"], float(rng.random() < 0.1))
+            elo.record_strategy_matches("canary", ["broken"], float(rng.random() < 0.4))
         flagged = elo.strategies_below_canary()
         assert any(name == "broken" for name, _, _ in flagged)

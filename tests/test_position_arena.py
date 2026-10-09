@@ -690,19 +690,17 @@ class TestKeyspace:
         # ADVERSARIAL: pos_ keys used to fall into the operator arena's
         # "not seed_" filter and would be flagged against op canary.
         elo = BayesianEloTracker(min_matches=1)
-        for k, mu in (("canary", 1500), ("pos_x", 1400), ("bandit", 1600)):
-            elo._strategy_mu[k] = mu
-            elo._strategy_match_count[k] = 5
+        for k, hits in (("canary", 100), ("pos_x", 0), ("bandit", 200)):
+            elo._strategy_hits[k] = hits
+            elo._strategy_trials[k] = 1000
         flagged = [s for s, *_ in elo.strategies_below_canary("canary")]
         assert "pos_x" not in flagged
 
     def test_position_floor_flags_a_proposer_below_uniform(self):
         elo = BayesianEloTracker(min_matches=1)
-        for k, mu in (("pos_uniform", 1500), ("pos_mi", 1400), ("pos_te", 1600)):
-            elo._strategy_mu[k] = mu
-            elo._strategy_match_count[k] = 5
-        elo._strategy_mu["seed_ga"] = 1000
-        elo._strategy_match_count["seed_ga"] = 5
+        for k, hits in (("pos_uniform", 100), ("pos_mi", 0), ("pos_te", 200), ("seed_ga", 0)):
+            elo._strategy_hits[k] = hits
+            elo._strategy_trials[k] = 1000
         flagged = [s for s, *_ in elo.strategies_below_canary("pos_uniform")]
         assert flagged == ["pos_mi"]
 
