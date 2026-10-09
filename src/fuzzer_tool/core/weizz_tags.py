@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import logging
 import math
+from bisect import bisect_left
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import IntFlag
@@ -632,31 +633,84 @@ def _pick_flags(shape: _Shape, n: int) -> TagFlags:
     return if_len if floor <= n * 2 else if_not
 
 
-def _claim_span(
-    tags: list[ByteTag],
-    off: int,
-    size: int,
-    cid: int,
-    counter: int,
-    flags: TagFlags,
-    dep_bytes: set[int],
-) -> bool:
-    """Tag still-untagged bytes of [off, off+size); False when none were free."""
-    end = off + size
-    # only claim still-untagged bytes (shorter operands win)
-    any_free = any(tags[i].cmp_id == 0 for i in range(off, end))
-    if not any_free:
-        return False
-    for i in range(off, end):
-        if tags[i].cmp_id == 0:
-            tags[i] = ByteTag(
-                cmp_id=cid,
-                parent=0,
-                counter=counter,
-                flags=flags,
-            )
+class _TagClaims:
+    """Byte tags under construction, with a skip list over still-free bytes.
+
+    A claim only turns a free byte (cmp_id 0) into a tagged one, so
+    ``_next[i]`` points at the first byte >= i that may still be free and
+    path compression skips claimed runs:
+
+        claimed:  . X X X . .
+        _next:    0 4 4 4 4 5      claim(1, 3) -> one hop to 4 >= end: refused
+
+    The per-byte rescan this replaces cost occurrences x operand size per
+    pair: 54% of an ffmpeg --hail-mary run, where operands like b"\\x00\\x00"
+    occur thousands of times in an 18 KB input.
+    """
+
+    __slots__ = ("tags", "dep_bytes", "_next")
+
+    def __init__(self, n: int):
+        self.tags = [ByteTag() for _ in range(n)]
+        self.dep_bytes: set[int] = set()
+        self._next = list(range(n + 1))  # n: sentinel, never claimed
+
+    def _find(self, i: int) -> int:
+        """First possibly-free byte >= i (path-compressed)."""
+        nxt = self._next
+        root = i
+        while nxt[root] != root:
+            root = nxt[root]
+        while nxt[i] != root:
+            nxt[i], i = root, nxt[i]
+        return root
+
+    def claim(self, off: int, size: int, cid: int, counter: int, flags: TagFlags) -> bool:
+        """Tag still-untagged bytes of [off, off+size); False when none were free."""
+        nxt = self._next
+        end = off + size
+        i = off if nxt[off] == off else self._find(off)
+        if i >= end:
+            return False
+
+        # Shorter operands claimed first win; only free bytes are written.
+        # The free-neighbour test inlines _find's common case.
+        tags, dep_bytes = self.tags, self.dep_bytes
+        while i < end:
+            tags[i] = ByteTag(cmp_id=cid, parent=0, counter=counter, flags=flags)
             dep_bytes.add(i)
-    return True
+            if cid:  # a cmp_id-0 tag still reads as free, as before
+                nxt[i] = i + 1
+            j = i + 1
+            i = j if nxt[j] == j else self._find(j)
+
+        # Point a fresh chain at its first free byte now, so a later refusal
+        # of any sub-span is one hop instead of a walk.
+        head = nxt[off]
+        if nxt[head] != head:
+            self._find(off)
+        return True
+
+    def claim_each(
+        self, offs: Sequence[int], size: int, cid: int, counter: int, flags: TagFlags
+    ) -> int:
+        """claim() at every offset of ascending *offs*; first claimed offset or -1.
+
+        A refusal at off means [off, f) is claimed, f = _find(off), so every
+        later offset below f - size + 1 is refused too: bisect past them.
+        A zero run holds thousands of occurrences of each zero operand.
+        """
+        first = -1
+        k, n = 0, len(offs)
+        while k < n:
+            off = offs[k]
+            if self.claim(off, size, cid, counter, flags):
+                if first < 0:
+                    first = off
+                k += 1
+                continue
+            k = bisect_left(offs, self._find(off) - size + 1, k + 1)
+        return first
 
 
 def _pair_key(p: tuple[bytes, bytes]) -> tuple[int, int]:
@@ -675,11 +729,10 @@ def _sized_operands(op_a: bytes, op_b: bytes, cfg: TagCollectorConfig) -> list[t
 
 
 def _claim_pair(
-    tags: list[ByteTag],
+    claims: _TagClaims,
     candidates: list[tuple[bytes, str]],
     offsets: dict,
     tag: tuple[int, int, TagFlags],
-    dep_bytes: set[int],
     first_offset: dict[int, int],
     prefer_input: bool,
 ) -> None:
@@ -688,15 +741,16 @@ def _claim_pair(
     With *prefer_input*, stop after the first operand that claimed bytes.
     """
     cid, counter, flags = tag
-    claimed = False
     for op, _side in candidates:
-        for off in offsets.get(op, ()):
-            if not _claim_span(tags, off, len(op), cid, counter, flags, dep_bytes):
-                continue
-            if cid not in first_offset:
-                first_offset[cid] = off
-            claimed = True
-        if claimed and prefer_input:
+        offs = offsets.get(op, ())
+        if len(offs) == 1:  # the common case: skip claim_each's loop setup
+            first = offs[0] if claims.claim(offs[0], len(op), cid, counter, flags) else -1
+        else:
+            first = claims.claim_each(offs, len(op), cid, counter, flags)
+        if first < 0:
+            continue
+        first_offset.setdefault(cid, first)
+        if prefer_input:
             break
 
 
@@ -814,9 +868,9 @@ def build_tag_map_from_cmplog(
     if n == 0 or n > cfg.max_input_len:
         return StructureMap(tags=[ByteTag() for _ in range(n)], input_len=n)
 
-    tags = [ByteTag() for _ in range(n)]
+    claims = _TagClaims(n)
+    tags, dep_bytes = claims.tags, claims.dep_bytes
     first_offset: dict[int, int] = {}
-    dep_bytes: set[int] = set()
 
     # Locate every operand in one multi-pattern pass, then consume the results
     # in plan order.  The claim loop below is order-dependent -- shorter, more
@@ -833,11 +887,10 @@ def build_tag_map_from_cmplog(
     for i in hits:
         candidates, cid, counter, shape = plan[i]
         _claim_pair(
-            tags,
+            claims,
             candidates,
             offsets,
             (cid, counter, _pick_flags(shape, n)),
-            dep_bytes,
             first_offset,
             cfg.prefer_input_operand,
         )
