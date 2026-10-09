@@ -498,7 +498,7 @@ Status grepped against `a8ccf8c`, FFmpeg at `d411d9e`. Everything below is
 | Allocation budget via `get_buffer2` | Absent. 0 hits for `max_pixels`/`max_samples`. |
 | Deterministic iteration bound | Partial and wall-clock: `g_watchdog_budget_ms = 900` plus `total_packets > 500`. Neither bounds work *inside* one packet. |
 | Seekable fuzzed I/O + declared filesize | Absent. `avio_alloc_context` gets `NULL` for both write and seek, so **all seek-dependent demuxer code is unreachable**. |
-| Filename/extension synthesis for probing | Absent. `avformat_open_input(&fmt_ctx, NULL, NULL, NULL)`. |
+| Filename/extension synthesis for probing | Partial (`2239795c`): `FUZZ_FFMPEG_EXT` pins an extension per campaign; `#EXTM3U` sniff → `m3u8`. No extension table. |
 | Decoder knobs from input | Absent. 0 hits for `err_recognition`, `lowres`, `idct_algo`, `skip_frame`, `flags2`, `workaround_bugs`, `strict_std`. |
 | `extradata` injection | Absent. Our three `extradata` hits are `fuzz_touch` reads of demuxer output, not injection. |
 | Parser stage (`av_parser_parse2`) | Absent. |
@@ -627,8 +627,8 @@ consensus-specific respectively. The pytest plugin (F6) was the real port;
 D4 was the other one and is now in Rejected, its subject having been retired.
 
 **`av_force_cpu_flags(0)`.** In FFmpeg's own builds this reaches the scalar
-reference implementations, which is real coverage. In ours `vendor_ffmpeg.sh`
-already passes `--disable-x86asm`, so most of the SIMD is not compiled in and
+reference implementations, which is real coverage. In ours `tools/lib/ffmpeg_config.sh`
+already passes `--disable-asm`, so most of the SIMD is not compiled in and
 the knob is close to a no-op. Revisit only if the vendored build ever enables asm.
 
 **One binary per codec.** Use `--inprocess-func` (J step 6) instead.
@@ -770,14 +770,14 @@ whole difference.
 Reproducing the ffmpeg target from scratch: `apt-get update` first (without it
 `apt-get install clang` 404s on libc6-i386/libxml2-dev), then
 `tools/vendor_ffmpeg.sh --nosan --minimal`, then
-`tools/build_ffmpeg_ready.sh --minimal --no-vendor`. `--minimal` restricts the
+`tools/build_targets.sh --ffmpeg-opts=noasan` (`build_ffmpeg_ready.sh` removed in `dd16aa87`). `--minimal` restricts the
 build to mov/matroska/wav/aiff/flac/mp3/ogg demuxers and seven decoders — enough
 for J steps 1–5, **not enough for a coverage comparison that means anything**.
 
 Watch disk during the suite: run it in chunks with a private `TMPDIR` and clean
 between chunks (~5 MB of scratch that way).
 
-`tools/profile_hotpath.py` cannot drive the ffmpeg target — it has
-`os.chdir("/home/dclavijo/my_code/fuzzer")` hardcoded and does not emit
+`tools/profile_hotpath.py` cannot drive the ffmpeg target — ~~it has
+`os.chdir("/home/dclavijo/my_code/fuzzer")` hardcoded~~ (fixed `12433c92`) and does not emit
 `--inprocess-direct`/`--inprocess-func`. Any before/after measurement for J
 steps 2 and 3 needs this fixed or needs another instrument.
