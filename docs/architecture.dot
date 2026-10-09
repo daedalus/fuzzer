@@ -42,7 +42,7 @@ digraph fuzzer_tool {
     subgraph cluster_start {
         label="Startup";
         color="#c8ccd2"; fillcolor="#f6f7f9"; fontcolor="#3c4551";
-        cli [label="cli/commands.py\lfuzz · rank · minimize · sweep · tmin\lroot-cause · replay · verify · estimate\limport · ppmd\l",
+        cli [label="cli/commands.py\lfuzz · rank · minimize · sweep · tmin\lroot-cause · crash-bisect · replay · verify\lestimate · import · ppmd · genseed · compact-seeds\l",
              fillcolor="#e3e7ec", fontcolor="#242a31"];
         profiler [label="core/target_profiler.py   +   cfg · icfg · dwarf\lELF strings · magic bytes · DIV constants\lcall graph · CFG · DWARF line tables\l",
                   fillcolor="#e3e7ec", fontcolor="#242a31"];
@@ -58,9 +58,9 @@ digraph fuzzer_tool {
     subgraph cluster_sched {
         label="1 · Scheduling   —   what to fuzz next";
         color="#bcd0c4"; fillcolor="#f2f8f4"; fontcolor="#33604a";
-        picker [label="services/seed_picker.py  +  core/schedules.py\lweights · Pareto front · crowding · saturation gate\lFAST COE RARE MMOPT LIN QUAD GO AFLGO ENTROPIC KATZ DOPPLER\lKRUSKAL-COUNT (coupling walkers · recombination)\lENTROPIC seed arm (local rare-edge entropy)\l",
+        picker [label="services/seed_picker.py  +  core/schedules.py\lweights · Pareto front · crowding · saturation gate\lFAST COE RARE MOPT LIN QUAD GO AFLGO ENTROPIC KATZ DOPPLER\lKRUSKAL-COUNT (coupling walkers · recombination)\lENTROPIC seed arm (local rare-edge entropy)\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
-        bandit [label="core/schedulers/ (16)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy mcts katz\l",
+        bandit [label="core/schedulers/op_* (54)  +  elo · shapley\lmonte_carlo mopt exp3 gp_ucb cmaes contextual\lducb swucb kl_ducb kl_swucb cucb hierarchical replicator epsilon_greedy consolidated katz …\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
         tarena [label="services/target_arena.py  (multi-target)\lElo over tgt_ arms: weighted round_robin wrr wfq phi\lgale_shapley (core/stable_matching.py)\lauction (core/assignment.py)\l",
                 fillcolor="#d8eade", fontcolor="#1f4433"];
@@ -68,11 +68,11 @@ digraph fuzzer_tool {
 
     // --------------------------------------------------------- mutation
     subgraph cluster_mut {
-        label="2 · Mutation   —   147 operators / 9 categories";
+        label="2 · Mutation   —   250+ operators / 9 categories";
         color="#c3c6da"; fillcolor="#f4f4fa"; fontcolor="#454a75";
         ops [label="services/operators.py\ldispatch · havoc (11 sub-ops, adaptive draw)\ldet stage · effector map → core/auto_dict\l",
              fillcolor="#c9cbe6", fontcolor="#2f3560"];
-        lib [label="core/mutations/ (36 format ops)  ·  core/operator_registry.py\lpng jpeg gif webp webm avif zip gzip zlib riff ogg flv asf mp3\ladts mpegts nal isobmff pgs sqlite der elf protobuf x86 arm\lgrammar · format_fsm · tree_mutator · frameshift · markov · wfc · regularity\lchecksum_learner (Berlekamp-Massey · int checksums · linear via integer_relation PSOS)\l",
+        lib [label="core/mutations/ (68 modules)  ·  core/operator_registry.py\lpng jpeg gif webp webm avif zip gzip zlib riff ogg flv asf mp3\ladts mpegts nal isobmff pgs sqlite der elf protobuf x86 arm\lgrammar · format_fsm · tree_mutator · frameshift · markov · wfc · regularity\lchecksum_learner (Berlekamp-Massey · int checksums · linear via integer_relation PSOS)\l",
              fillcolor="#dedff0", fontcolor="#2f3560"];
     }
 
@@ -92,7 +92,7 @@ digraph fuzzer_tool {
     subgraph cluster_fb {
         label="4 · Feedback   —   what came back";
         color="#b9cbd8"; fillcolor="#f2f7fa"; fontcolor="#37596e";
-        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM bitmap · hit buckets · per-edge max counts (PerfFuzz)\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\l",
+        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM edge hash table · hit buckets · per-edge max counts (PerfFuzz)\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];
         ltl [label="core/ltl.py  (--ltl)\lBuchi monitor over event trace\lltl:trap / ltl:lasso crash · frontier prefix\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];

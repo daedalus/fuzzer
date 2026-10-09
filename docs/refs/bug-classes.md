@@ -60,7 +60,7 @@ widely-used return-value APIs, or test mocks.
 
 ## Dispatch table & half-shipped features
 
-- **Every entry in `_build_dispatch()` must have a corresponding module and class.** If an operator name is registered in `MUTATIONS` / `FORMAT_MUTATIONS` and wired into the dispatch table, but the module it imports doesn't exist, the fuzzer crashes with `ModuleNotFoundError` the moment the scheduler picks that operator. This is invisible to unit tests because they never exercise the live dispatch path. The integration smoke test (`test_operator_smoke.py::test_all_ops_fire`) catches this by calling every handler once — it must pass before any release.
+- **Every operator in `core/operator_registry.py:REGISTRY` must have a handler and every module it imports.** `REGISTRY.dispatch()` raises `AttributeError` at build time for a missing `_op_<name>` handler, but if the handler's lazily imported module doesn't exist, the fuzzer crashes with `ModuleNotFoundError` the moment the scheduler picks that operator. This is invisible to unit tests because they never exercise the live dispatch path. The integration smoke test (`test_operator_smoke.py::test_all_ops_fire`) catches this by calling every handler once — it must pass before any release.
 
 ## Silent error swallowing
 
