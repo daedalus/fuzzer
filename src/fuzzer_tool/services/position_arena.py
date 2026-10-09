@@ -422,9 +422,6 @@ class PositionArena:
         if not (getattr(self._f, "_use_elo", False) and elo):
             return
 
+        opponents = [POS_STRATEGY_PREFIX + other for other in pool if other not in served]
         for name in served:
-            for other in pool:
-                if other not in served:
-                    elo.record_strategy_match(
-                        POS_STRATEGY_PREFIX + name, POS_STRATEGY_PREFIX + other, score
-                    )
+            elo.record_strategy_matches(POS_STRATEGY_PREFIX + name, opponents, score)

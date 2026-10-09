@@ -18,6 +18,7 @@ Two things are specific to invasion rather than a copy of that file:
 
 from __future__ import annotations
 
+from fuzzer_tool.core.analyzers.analyzer_elo import RoundRecorderMixin
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.operators import OperatorEngine
@@ -189,7 +190,7 @@ class TestInvasionOpponentBallot:
         f.mc = _FakeMC({})
         f._use_elo = True
 
-        class _RatingElo:
+        class _RatingElo(RoundRecorderMixin):
             def __init__(self):
                 self._strategy_match_count: dict[str, int] = {}
 

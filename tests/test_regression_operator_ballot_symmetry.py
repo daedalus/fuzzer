@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import pytest
 
+from fuzzer_tool.core.analyzers.analyzer_elo import RoundRecorderMixin
 from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.operators import OperatorEngine
 from tests.support.operator_env import BALLOT_SCHEDULERS, make_minimal_fuzzer
@@ -43,7 +44,7 @@ class _Mopt(_Pick):
         return ops[0], 0
 
 
-class _Elo:
+class _Elo(RoundRecorderMixin):
     """Records the ballot it was offered and every match it was asked to rate."""
 
     def __init__(self, pick):
