@@ -189,7 +189,7 @@ class QEAIndividual:
             # Same rounding rationale as amplitudes above. Omitted (null)
             # for the common case (use_correlation=False) rather than
             # serializing a same-shaped zero tensor for every individual.
-            "coupling": self.coupling.round(6).tolist() if self.coupling is not None else None,
+            "coupling": _coupling_state(self.coupling),
         }
 
     @classmethod
@@ -210,8 +210,32 @@ class QEAIndividual:
             best_fitness=d.get("best_fitness", 0.0),
             seed_key=d.get("seed_key", ""),
             crash=d.get("crash", False),
-            coupling=np.array(coupling, dtype=np.float64) if coupling is not None else None,
+            coupling=_coupling_from_state(coupling),
         )
+
+
+# An all-zero coupling (every individual until a pick teaches it) persists as
+# {_ZERO_COUPLING_KEY: num_bytes} instead of 64 floats per byte: 190 of 200
+# individuals, 82 of 102 MB of state after 3k --hail-mary execs.
+_ZERO_COUPLING_KEY = "zero_bytes"
+
+
+def _coupling_state(coupling: np.ndarray | None) -> list | dict | None:
+    """Serializable coupling: None, the zero marker, or 6dp nested lists."""
+    if coupling is None:
+        return None
+    if not coupling.any():
+        return {_ZERO_COUPLING_KEY: coupling.shape[0]}
+    return coupling.round(6).tolist()
+
+
+def _coupling_from_state(state: list | dict | None) -> np.ndarray | None:
+    """Inverse of ``_coupling_state``; nested lists from older state load as-is."""
+    if state is None:
+        return None
+    if isinstance(state, dict):
+        return _zero_coupling(state[_ZERO_COUPLING_KEY])
+    return np.array(state, dtype=np.float64)
 
 
 # ── Amplitude vector creation ──────────────────────────────────────────
