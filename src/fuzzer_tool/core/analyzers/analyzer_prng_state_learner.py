@@ -182,6 +182,13 @@ _RUN_HISTORY_BUDGET = 1 << 18
 # Sentinel for "no pending window at all", so a legitimate None PC bucket
 # (a shim build that logs no PCs) is not confused with the empty case.
 _NO_CANDIDATE = object()
+# Refuted observations in a row before attempts back off, and the cap on
+# observations skipped per back-off step (doubling from 1).
+PRNG_BACKOFF_AFTER = 8
+PRNG_BACKOFF_MAX = 64
+# A window is a byte-shift chain when at least this fraction of consecutive
+# pairs are one-byte shifts of each other (see _byte_shift_chain).
+_CHAIN_FRACTION = 0.5
 
 __all__ = ["PRNGStateLearner"]
 
@@ -226,6 +233,24 @@ def _full_width_plausible(words: list[int]) -> bool:
     return sum(1 for w in words if w >> 24) * 2 >= len(words)
 
 
+def _byte_shift_chain(words: list[int]) -> bool:
+    """Whether *words* read like a byte accumulator, not generator output.
+
+    A demuxer scanning for a sync word keeps ``acc = (acc << 8) | byte``
+    (or the little-endian mirror), so each word is the previous one shifted
+    by a byte: 0x1e08359b, 0x08359bc9, 0x359bc9bf, ... on ffmpeg. Compared on
+    the low 32 bits, 24 of them must match, so a generator pair passes at
+    2**-24; tiny-seed warm-up streams do not match either (tested per family).
+    """
+    if len(words) < 2:
+        return False
+    shifts = 0
+    for a, b in zip(words, words[1:], strict=False):
+        if not ((a << 8) ^ b) & 0xFFFFFF00 or not ((a >> 8) ^ b) & 0x00FFFFFF:
+            shifts += 1
+    return shifts >= _CHAIN_FRACTION * (len(words) - 1)
+
+
 class PRNGStateLearner:
     """Learns and caches a recovered GF(2)-linear PRNG state, family included."""
 
@@ -259,6 +284,11 @@ class PRNGStateLearner:
         self._mt_pending: dict[_Site, list[int]] = {}
         self.attempts = 0
         self.successes = 0
+        # Refute back-off: refuted observations in a row, the current skip
+        # length (0 = off), and observations left to skip.
+        self._refuted_streak = 0
+        self._backoff = 0
+        self._skip = 0
         # (width, window) of the last _try_recover every family refuted.
         self._last_refuted: tuple[int, tuple[int, ...]] | None = None
 
@@ -296,18 +326,12 @@ class PRNGStateLearner:
         if getattr(self.f, "_inprocess_runner", None) is None:
             return self.has_state()
 
-        fresh = self._extract_by_site(input_data)
-        for site, values in fresh.items():
-            window = self._pending.setdefault(site, [])
-            window.extend(values)
-            if len(window) > _MAX_SAMPLES:
-                del window[:-_MAX_SAMPLES]
-            # Long history for MT19937 (4-byte only).
-            if site[1] == MT19937_SPEC.out_bytes and values:
-                mt_win = self._mt_pending.setdefault(site, [])
-                mt_win.extend(values)
-                if len(mt_win) > _MT_HISTORY_CAP:
-                    del mt_win[:-_MT_HISTORY_CAP]
+        # Backing off after a refute streak: skip extraction and recovery.
+        if self._skip:
+            self._skip -= 1
+            return self.has_state()
+
+        self._accumulate(self._extract_by_site(input_data))
 
         site = self._best_site()
         if site is _NO_CANDIDATE:
@@ -344,7 +368,35 @@ class PRNGStateLearner:
         # A cached state that fresh evidence contradicts is worse than none:
         # every prediction it serves is known-wrong.
         self._clear_state()
+        self._note_refuted()
         return False
+
+    def _accumulate(self, fresh: dict[_Site, list[int]]) -> None:
+        """Append this drain's draws to each site's window (and MT history)."""
+        for site, values in fresh.items():
+            window = self._pending.setdefault(site, [])
+            window.extend(values)
+            if len(window) > _MAX_SAMPLES:
+                del window[:-_MAX_SAMPLES]
+            # Long history for MT19937 (4-byte only).
+            if site[1] == MT19937_SPEC.out_bytes and values:
+                mt_win = self._mt_pending.setdefault(site, [])
+                mt_win.extend(values)
+                if len(mt_win) > _MT_HISTORY_CAP:
+                    del mt_win[:-_MT_HISTORY_CAP]
+
+    def _note_refuted(self) -> None:
+        """Count a refuted observation; past the streak, back off exponentially.
+
+        ffmpeg: 200 windows, 0 recoveries, ~35 ms each. Skipped observations
+        only delay a real stream (the window keeps its draws); a recovery
+        resets the back-off.
+        """
+        self._refuted_streak += 1
+        if self._refuted_streak < PRNG_BACKOFF_AFTER:
+            return
+        self._backoff = min(PRNG_BACKOFF_MAX, self._backoff * 2 or 1)
+        self._skip = self._backoff
 
     def predict(self, n: int = 1) -> list[int] | None:
         """Predict the *n* draws after the last confirmed sample, or None.
@@ -492,6 +544,7 @@ class PRNGStateLearner:
         self._spec = spec
         self._state = state
         self._confirmed_samples = list(samples)
+        self._refuted_streak = self._backoff = self._skip = 0
         step = _driver(spec).step_state
         frontier = state
         for _ in range(len(samples) - 1):
@@ -556,6 +609,9 @@ class PRNGStateLearner:
         """
         key = (width, tuple(candidates))
         if key == self._last_refuted:
+            return False
+        if _byte_shift_chain(candidates):
+            self._last_refuted = key
             return False
         self.attempts += 1
         for spec in _CANDIDATE_FAMILIES:
