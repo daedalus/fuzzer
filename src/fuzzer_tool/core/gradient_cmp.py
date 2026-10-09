@@ -8,7 +8,15 @@ full encoding pipeline.
 Ported from honggfuzz mangle.c:mangle_GradientCmp (line 1328).
 """
 
+import heapq
 import random as _random
+from itertools import groupby
+
+# Last pool's byte -> ascending pair indices, keyed like scanner_for_pairs
+# (owner identity + length).
+_index_owner: object | None = None
+_index_len = -1
+_index: dict[int, list[int]] = {}
 
 
 def gradient_cmp(
@@ -45,7 +53,10 @@ def gradient_cmp(
     for idx, b in enumerate(buf):
         pos_map.setdefault(b, []).append(idx)
 
-    for cmp_a, cmp_b in cmp_values:
+    # Only pairs sharing a byte with the input can partially match; visit
+    # those in pool order (walking the whole pool was ~360 pairs per call).
+    for p in _candidate_pairs(cmp_values, pos_map):
+        cmp_a, cmp_b = cmp_values[p]
         if len(cmp_a) == 0 or len(cmp_a) > 32:
             continue
 
@@ -137,3 +148,23 @@ def _apply_gradient(buf: bytearray, off: int, first_diff: int, cmp_val: bytes, r
     else:
         # Flip single bit
         buf[target_off] ^= 1 << r.randint(0, 7)
+
+
+def _byte_index(cmp_values) -> dict[int, list[int]]:
+    """Byte value -> ascending indices of pairs containing it (cached per pool)."""
+    global _index_owner, _index_len, _index
+    if _index_owner is cmp_values and _index_len == len(cmp_values):
+        return _index
+    index: dict[int, list[int]] = {}
+    for p, (a, b) in enumerate(cmp_values):
+        for byte in set(a) | set(b):
+            index.setdefault(byte, []).append(p)
+    _index_owner, _index_len, _index = cmp_values, len(cmp_values), index
+    return index
+
+
+def _candidate_pairs(cmp_values, pos_map: dict):
+    """Ascending, distinct indices of pairs with a byte present in the input."""
+    index = _byte_index(cmp_values)
+    lists = [index[b] for b in pos_map if b in index]
+    return (p for p, _ in groupby(heapq.merge(*lists)))
