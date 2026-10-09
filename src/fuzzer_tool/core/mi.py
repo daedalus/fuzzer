@@ -41,6 +41,11 @@ MAX_JOINT_CELLS = 250_000
 MI_MAX_POSITIONS = 4096
 
 
+def _nlog2n(k: int) -> float:
+    """k * log2(k), with 0 log 0 = 0."""
+    return k * math.log2(k) if k > 0 else 0.0
+
+
 def _fold_edges(hit_edges: set[int], map_size: int) -> set[int]:
     """Fold opaque edge hashes into [0, map_size): mask for power-of-two maps, else modulo."""
     if map_size & (map_size - 1) == 0:
@@ -125,6 +130,7 @@ class MutualInformationTracker:
         # Live count of joint (position, byte_val, edge) cells, bounded by
         # MAX_JOINT_CELLS via least-observed-position eviction.
         self._joint_cells = 0
+        self._reset_sums()
 
     def record(self, input_bytes: bytes, hit_edges: set[int], map_size: int = 65536) -> None:
         """Record one input-coverage pair.
@@ -162,20 +168,73 @@ class MutualInformationTracker:
             if (
                 self.position_counts[pos] >= self.min_observations
                 and self._joint_cells < MAX_JOINT_CELLS
+                and hit_edges
             ):
-                for bv_edges, edge in enumerate(hit_edges):
-                    if self._joint_cells >= MAX_JOINT_CELLS:
-                        break
-                    old = self.joint[pos][byte_val].get(edge, 0)
-                    if old == 0:
-                        self._joint_cells += 1
-                    self.joint[pos][byte_val][edge] = old + 1
-                    # Update edge marginal array
-                    if edge >= self._edge_marginal_size:
-                        self._grow_edge_marginal(edge)
-                    self.edge_marginal[edge] += 1
-                    if bv_edges >= MAX_EDGES_PER_CELL:
-                        break
+                self._record_cells(pos, byte_val, hit_edges)
+
+    def _record_cells(self, pos: int, byte_val: int, hit_edges: set[int]) -> None:
+        """Count (pos, byte_val, edge) cells, keeping the profile sums in step.
+
+        Per cell increment c -> c+1: sum f(c) of the position grows by
+        f(c+1) - f(c), and K[pos, edge] by 1 (see ``mi_profile``).
+        """
+        cell = self.joint[pos][byte_val]
+        k_slot, k_cnt = self._k_slot, self._k_cnt
+        log2 = math.log2
+        s_f = 0.0
+        for bv_edges, edge in enumerate(hit_edges):
+            if self._joint_cells >= MAX_JOINT_CELLS:
+                break
+            old = cell.get(edge, 0)
+            if old == 0:
+                self._joint_cells += 1
+            cell[edge] = old + 1
+            # Update edge marginal array
+            if edge >= self._edge_marginal_size:
+                self._grow_edge_marginal(edge)
+            self.edge_marginal[edge] += 1
+
+            s_f += (old + 1) * log2(old + 1) - (old * log2(old) if old else 0.0)
+            key = pos << 32 | edge
+            slot = k_slot.get(key)
+            if slot is None:
+                k_slot[key] = len(k_cnt)
+                self._k_pos.append(pos)
+                self._k_edge.append(edge)
+                k_cnt.append(1)
+            else:
+                k_cnt[slot] += 1
+            if bv_edges >= MAX_EDGES_PER_CELL:
+                break
+        self._s_f[pos] = self._s_f.get(pos, 0.0) + s_f
+
+    def _reset_sums(self) -> None:
+        """Empty the closed-form profile sums (sum f(c) per position, K slots)."""
+        self._s_f: dict[int, float] = {}
+        self._k_slot: dict[int, int] = {}
+        self._k_pos = array("q")
+        self._k_edge = array("q")
+        self._k_cnt = array("q")
+
+    def _rebuild_sums(self) -> None:
+        """Recompute the profile sums from the joint (after a load)."""
+        self._reset_sums()
+        self._total_edges = None
+        for pos, byte_vals in self.joint.items():
+            s_f = 0.0
+            for edges in byte_vals.values():
+                for edge, c in edges.items():
+                    s_f += _nlog2n(c)
+                    key = pos << 32 | edge
+                    slot = self._k_slot.get(key)
+                    if slot is None:
+                        self._k_slot[key] = len(self._k_cnt)
+                        self._k_pos.append(pos)
+                        self._k_edge.append(edge)
+                        self._k_cnt.append(c)
+                    else:
+                        self._k_cnt[slot] += c
+            self._s_f[pos] = s_f
 
     def _drop_stale_wp(self, input_bytes: bytes) -> None:
         """Clear the weighted_position cache if this input's last position is new."""
@@ -238,10 +297,16 @@ class MutualInformationTracker:
         a reload; in-place value mutations (eviction) are visible through
         the view since it shares memory.
         """
-        if len(self.edge_marginal) != self._edge_marginal_view_len:
+        return int(self._marginal_view().sum())
+
+    def _marginal_view(self) -> np.ndarray:
+        """Zero-copy uint64 view over edge_marginal, rebuilt after growth or reload."""
+        if self._edge_marginal_view is None or (
+            len(self.edge_marginal) != self._edge_marginal_view_len
+        ):
             self._edge_marginal_view = np.frombuffer(self.edge_marginal, dtype=np.uint64)
             self._edge_marginal_view_len = len(self.edge_marginal)
-        return int(self._edge_marginal_view.sum())
+        return self._edge_marginal_view
 
     def mi(self, position: int) -> float:
         """Compute I(X_pos; Y) in bits.
@@ -287,7 +352,62 @@ class MutualInformationTracker:
         """
         if input_length is None:
             input_length = max(self.position_counts.keys()) + 1 if self.position_counts else 0
-        return {pos: self.mi(pos) for pos in range(input_length) if pos in self.position_counts}
+        positions = [pos for pos in range(input_length) if pos in self.position_counts]
+        profile = self._closed_profile(positions)
+        if profile is None:
+            return {pos: self.mi(pos) for pos in positions}
+        return profile
+
+    def _closed_profile(self, positions: list[int]) -> dict[int, float] | None:
+        """``mi()`` of each position from the running sums; None if they cannot apply.
+
+        n*MI = sum f(c) + C*log2(T) - sum_x J_x*log2(b_x) - sum_e K_e*log2(m_e),
+        f(k) = k*log2(k), C = sum c, J_x = sum_e c, K_e = sum_x c. The edge
+        term is one bincount; the byte term one pass over (byte -> edges)
+        dicts, not over cells. None (per-cell fallback) when a cell names an
+        edge with no marginal or a byte with no count: loaded state only.
+        """
+        out = dict.fromkeys(positions, 0.0)
+        if self._total_edges is None:
+            self._total_edges = self._edge_marginal_sum()
+        total_edges = self._total_edges
+        if total_edges == 0:
+            return out
+
+        # Edge term for every position at once.
+        k_edge = np.frombuffer(self._k_edge, dtype=np.int64)
+        if len(k_edge) and int(k_edge.max()) >= self._edge_marginal_size:
+            return None
+        m = self._marginal_view()[k_edge].astype(np.float64)
+        if (m <= 0).any():
+            return None
+        k_pos = np.frombuffer(self._k_pos, dtype=np.int64)
+        k_cnt = np.frombuffer(self._k_cnt, dtype=np.int64)
+        edge_term = np.bincount(
+            k_pos, weights=k_cnt * np.log2(m), minlength=max(positions, default=0) + 1
+        ).tolist()
+
+        log2_t = math.log2(total_edges)
+        for pos in positions:
+            n = self.position_counts[pos]
+            joint_pos = self.joint.get(pos)
+            if n < self.min_observations or not joint_pos:
+                continue
+            byte_counts = self.byte_marginal.get(pos, {})
+            c_total = 0
+            byte_term = 0.0
+            for byte_val, edges in joint_pos.items():
+                j = sum(edges.values())
+                if not j:
+                    continue
+                b = byte_counts.get(byte_val, 0)
+                if b <= 0:
+                    return None
+                c_total += j
+                byte_term += j * math.log2(b)
+            value = self._s_f.get(pos, 0.0) + c_total * log2_t - byte_term - edge_term[pos]
+            out[pos] = max(0.0, value / n)
+        return out
 
     def top_positions(
         self, k: int = 10, input_length: int | None = None
@@ -501,6 +621,7 @@ class MutualInformationTracker:
         )
         while self._joint_cells > MAX_JOINT_CELLS:
             self._evict_least_observed()
+        self._rebuild_sums()
 
     def save(self, path: str) -> bool:
         """Save tracker state to JSON (legacy interface)."""
