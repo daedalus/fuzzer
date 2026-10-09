@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 
+from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.field_constraints import LENGTH, Field, repair
 
 log = logging.getLogger(__name__)
@@ -177,7 +178,6 @@ def solve_coupled_sections(
     bits = width * 8
     modulus = 1 << bits
     solver = z3.Solver()
-    solver.set("timeout", timeout_ms)
 
     offsets = [z3.BitVec(f"off{i}", bits) for i in range(count)]
     sizes = [z3.BitVec(f"size{i}", bits) for i in range(count)]
@@ -200,7 +200,7 @@ def solve_coupled_sections(
             # A wrapping section cannot also end before the next one starts.
             return None
 
-    if solver.check() != z3.sat:
+    if z3_budget.BUDGET.check(solver, timeout_ms) != z3.sat:
         return None
 
     model = solver.model()

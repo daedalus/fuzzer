@@ -40,6 +40,7 @@ from fuzzer_tool.adapters.process import (
 )
 from fuzzer_tool.adapters.seed_zip import ZipMode
 from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage, unstable_slots
+from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
@@ -1531,6 +1532,8 @@ class Fuzzer:
         enable_smt_z3=False,
         path_negation=False,
         mod_solving="concolic",
+        smt_query_cap=z3_budget.QUERY_MAX_MS,
+        smt_round_budget=z3_budget.ROUND_BUDGET_MS,
         corpus_boost=0,
         boost_mean=None,
         boost_std=None,
@@ -2249,6 +2252,9 @@ class Fuzzer:
         # self.checksum_learner: constructed by analyzer_registry.wire_all()
         # below (swallow_errors=True there reproduces this analyzer's
         # original try/except-on-construction fail-open behaviour).
+
+        # z3 wall-time limits (ms): per query, and shared per fuzz round.
+        z3_budget.BUDGET.configure(smt_query_cap, smt_round_budget)
 
         # SMT solver: arithmetic constraint solving on cmplog pairs
         self._smt_solver = None

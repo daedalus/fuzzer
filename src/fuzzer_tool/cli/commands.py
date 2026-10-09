@@ -11,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
 from fuzzer_tool.core.colorization import ColorMode
@@ -935,6 +936,8 @@ def cmd_fuzz(args):
         reseed_on_stall=getattr(args, "reseed_on_stall", False),
         enable_smt_z3=getattr(args, "enable_smt_z3", False),
         mod_solving=getattr(args, "mod_solving", "heuristic"),
+        smt_query_cap=getattr(args, "smt_query_cap", z3_budget.QUERY_MAX_MS),
+        smt_round_budget=getattr(args, "smt_round_budget", z3_budget.ROUND_BUDGET_MS),
         chi2_operator_interval=getattr(args, "chi2_operator_interval", 0),
         # --profile-hotpath wraps run() in cProfile; the periodic stats
         # block prints from inside that window, so its own formatting and
@@ -2376,6 +2379,17 @@ _HAIL_MARY_FLAGS = (
     "position_arena",
     "target_arena",
 )
+
+
+def _positive_ms_arg(value: str) -> int:
+    """argparse type: a whole number of milliseconds, at least 1."""
+    try:
+        ms = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number of ms: {value!r}") from None
+    if ms < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1 ms, got {ms}")
+    return ms
 
 
 def _pos_arena_arms_arg(value: str) -> tuple[str, ...]:
@@ -4266,6 +4280,21 @@ def main() -> int:
         "concolic: full constraint model with z3 solver (default); "
         "heuristic: try common divisors on (remainder, 0) pairs; "
         "trace: use PC-correlated DIV/IDIV from static analysis",
+    )
+    fuzz_parser.add_argument(
+        "--smt-query-cap",
+        type=_positive_ms_arg,
+        default=z3_budget.QUERY_MAX_MS,
+        metavar="MS",
+        help=f"Longest single z3 query, ms (default: {z3_budget.QUERY_MAX_MS})",
+    )
+    fuzz_parser.add_argument(
+        "--smt-round-budget",
+        type=_positive_ms_arg,
+        default=z3_budget.ROUND_BUDGET_MS,
+        metavar="MS",
+        help="z3 wall time all queries of one fuzz round share, ms "
+        f"(default: {z3_budget.ROUND_BUDGET_MS})",
     )
     fuzz_parser.add_argument(
         "--ga-pop-size",

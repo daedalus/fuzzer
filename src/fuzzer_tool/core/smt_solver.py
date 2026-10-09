@@ -15,6 +15,7 @@ import logging
 import struct
 from collections import OrderedDict
 
+from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.cond_stmt import CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.overlap_density import _UnionFind
@@ -143,7 +144,8 @@ class ConcolicTrace:
             # A per-byte BitVec model over a large input is a memory bomb;
             # skip (the trace is cleared by the caller afterwards).
             return None
-        z3.set_param("timeout", timeout_ms)
+        if z3_budget.BUDGET.spent():
+            return None  # skip building a per-byte model z3 may not run
 
         solver = z3.Solver()
         vars_ = [z3.BitVec(f"b{i}", 8) for i in range(len(data))]
@@ -168,7 +170,7 @@ class ConcolicTrace:
         if not overridden:
             return None
 
-        if solver.check() == z3.sat:
+        if z3_budget.BUDGET.check(solver, timeout_ms) == z3.sat:
             model = solver.model()
             result = bytearray(len(data))
             for i in range(len(data)):

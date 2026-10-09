@@ -670,6 +670,8 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--qea` | Quantum-inspired evolutionary algorithm (amplitude encoding, rotation gate feedback) |
 | `--wfc` | Wave Function Collapse structural generation (chunk reordering, pixel generation) |
 | `--enable-smt-z3` | Z3-based SMT solving for arithmetic constraint solving on cmplog pairs |
+| `--smt-query-cap MS` | Longest single z3 query (default 30). Applies to every z3 call (`core/z3_budget.py`) |
+| `--smt-round-budget MS` | z3 wall time all queries of one fuzz round share (default 10); spent: z3 skipped, path-negation frontier kept |
 | `--hw-perf` | Hardware performance counters via perf_event_open (instructions, branches, misses) |
 | `--schedule base\|fast\|coe\|rare\|mopt\|lin\|quad\|go\|aflgo\|entropic\|doppler` | AFL++ power schedule (`aflgo` = exact AFLGo distance annealing, `entropic` = libFuzzer `-entropic`, log-scaled rare-feature energy, `doppler` = power Doppler flow energy) |
 | `--aflgo-cooling exp\|log\|lin\|quad` | Cooling schedule for the `aflgo` power factor (default exp) |
@@ -1129,6 +1131,8 @@ verification) from `tools/lib/bench_common.sh`.
 ### SMT Solver Evaluation (`--enable-smt-z3`)
 
 The SMT solver (Z3) attempts to solve arithmetic constraints discovered by cmplog, generating inputs that satisfy specific branch conditions rather than relying solely on random mutations. **Concolic mode is now the default** (`--mod-solving concolic`), providing full constraint modeling with z3 across whole execution traces. Override with `--mod-solving heuristic` or `--mod-solving trace` if needed. The concolic whole-input solve is capped at `_CONCOLIC_MAX_BYTES` (32 KiB) in `core/smt_solver.py`: it models one z3 `BitVec` per input byte, and over multi-MB seeds that model alone transiently exceeds a GB of memory (measured ~1.3 GB spikes), enough to OOM the fuzzer. Oversized inputs skip the whole-input solve (the per-pair cmplog solving is unaffected).
+
+**Time limits** (`core/z3_budget.py`, 2026-10-09): every z3 `check()` gets `min(requested, --smt-query-cap, round time left)`; `FuzzRound.run` opens a `--smt-round-budget` window shared by path negation, concolic, and the coupled field/section solvers, closed in `finally`. Outside a round only the query cap applies. The cap is 30, not 10: coupled-section solves take 15-27 ms. Concolic used `z3.set_param("timeout")`, a process-global leak; now per solver. Limits wall time inside `check()` only: concolic still builds its per-byte model in Python before it (~15% of an ffmpeg `--hail-mary` round). Tests: `tests/test_regression_z3_budget.py`.
 
 **30k-iteration comparison, zero corpus, `targets/png_read_tracecmp_asan.so`:**
 
