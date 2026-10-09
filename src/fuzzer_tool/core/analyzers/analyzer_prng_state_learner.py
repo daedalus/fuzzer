@@ -392,11 +392,14 @@ class PRNGStateLearner:
         by_site: dict[_Site, list[int]] = {}
         # Per-site membership; `value in bucket` scanned the list (O(n^2)).
         seen: set[tuple[_Site, int]] = set()
+        # Every width-w window of the input, once: input_data.find(op) per
+        # operand was an O(len) scan for each of ~thousands of records.
+        present = _windows(input_data, _OPERAND_WIDTHS)
         for cond in conds:
             base = cond.base
             for op in (base.op_a, base.op_b):
                 width = len(op)
-                if width not in _OPERAND_WIDTHS or input_data.find(op) >= 0:
+                if width not in _OPERAND_WIDTHS or op in present:
                     continue
                 value = int.from_bytes(op, "little")
                 site = (base.pc, width)
@@ -594,9 +597,7 @@ class PRNGStateLearner:
                 state = mt19937_recovery.recover_state(candidates, MT19937_SPEC)
             except ValueError:
                 continue
-            if state is None or not mt19937_recovery.verify_state(
-                state, candidates, MT19937_SPEC
-            ):
+            if state is None or not mt19937_recovery.verify_state(state, candidates, MT19937_SPEC):
                 continue
             self._set_state(MT19937_SPEC, state, candidates)
             self.successes += 1
@@ -645,3 +646,9 @@ class PRNGStateLearner:
             learner.attempts = int(data.get("attempts", 0))
             learner.successes = int(data.get("successes", 0))
         return learner
+
+
+def _windows(data: bytes, widths) -> set[bytes]:
+    """All substrings of *data* whose length is in *widths*."""
+    n = len(data)
+    return {data[i : i + w] for w in widths for i in range(n - w + 1)}

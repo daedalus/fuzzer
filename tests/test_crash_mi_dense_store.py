@@ -10,6 +10,7 @@ the fact that nothing is discarded any more.
 
 from __future__ import annotations
 
+import math
 import os
 import random
 
@@ -134,7 +135,11 @@ def test_save_load_round_trip_preserves_every_count():
     assert restored.joint_crash == tracker.joint_crash
     assert restored.total_execs == tracker.total_execs
     assert restored.total_crashes == tracker.total_crashes
-    assert restored.all_mi() == tracker.all_mi()
+    # MI comes from running f-sums (closed form); load() recomputes them in
+    # one pass, so they agree to rounding, not bit for bit.
+    got, want = restored.all_mi(), tracker.all_mi()
+    assert got.keys() == want.keys()
+    assert all(math.isclose(got[p], want[p], rel_tol=1e-12, abs_tol=1e-12) for p in want)
 
 
 def test_load_accepts_state_written_before_the_dense_store():
