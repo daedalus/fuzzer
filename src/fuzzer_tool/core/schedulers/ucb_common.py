@@ -52,23 +52,39 @@ class UCBBase(ABC):
         if len(ops) == 1:
             return ops[0]
 
-        unpulled = [op for op in ops if self._arm_count(op) <= 0.0]
+        # One count read per arm, reused by the unpulled scan, the total and
+        # the score loop (was three virtual calls per arm).
+        counts = [self._arm_count(op) for op in ops]
+        unpulled = [op for op, n in zip(ops, counts, strict=True) if n <= 0.0]
         if unpulled:
             return self._rng.choice(unpulled)
 
-        n_total = sum(self._arm_count(op) for op in ops)
-        log_n = math.log(max(n_total, MIN_LOG_ARG))
+        log_n = math.log(max(sum(counts), MIN_LOG_ARG))
+        return self._argmax(ops, counts, log_n)
 
+    def _argmax(self, ops: list[str], counts: list[float], log_n: float) -> str:
+        """Highest-index arm; the first one wins ties."""
+        mean_of = self._arm_mean
         best_op = ops[0]
         best_score = -math.inf
-        for op in ops:
-            n = self._arm_count(op)
-            mean = self._arm_mean(op, n)
-            score = mean + self._width(mean, n, log_n)
+        scale = self._width_scale(log_n)
+        if scale is None:
+            width = self._width
+            for op, n in zip(ops, counts, strict=True):
+                mean = mean_of(op, n)
+                score = mean + width(mean, n, log_n)
+                if score > best_score:
+                    best_score = score
+                    best_op = op
+            return best_op
+
+        # Gaussian width: scale / sqrt(n), scale hoisted out of the loop.
+        sqrt = math.sqrt
+        for op, n in zip(ops, counts, strict=True):
+            score = mean_of(op, n) + scale / sqrt(n)
             if score > best_score:
                 best_score = score
                 best_op = op
-
         return best_op
 
     # -- update -----------------------------------------------------------
@@ -102,6 +118,10 @@ class UCBBase(ABC):
     def _width(self, mean: float, n: float, log_n: float) -> float:
         """Confidence width added to one arm's index."""
         ...
+
+    def _width_scale(self, log_n: float) -> float | None:  # noqa: ARG002
+        """``s`` when the width is ``s / sqrt(n)`` for every arm, else None."""
+        return None
 
     @abstractmethod
     def _arm_update(self, name: str, reward: float) -> None:

@@ -5217,8 +5217,11 @@ class OperatorEngine:
             n = rng.randint_list(8, 16, 1)[0]
         else:
             n = rng.randint_list(2, 8, 1)[0]
-        for _ in range(n):
-            self._apply_single_mutation(buf)
+        # One batch for all n sub-mutations: a randint_list call costs
+        # ~3.6 us of overhead regardless of size (8 x 4: 29 us, 1 x 32: 6 us).
+        rs = rng.randint_list(0, 1 << 30, 4 * n)
+        for i in range(0, 4 * n, 4):
+            self._apply_single_mutation(buf, rs[i : i + 4])
         # Defense in depth: every _apply_single_mutation branch that can grow
         # buf is individually bounds-checked against max_len, but a single
         # missed edge case here has bitten this codebase before (see the
@@ -5263,15 +5266,15 @@ class OperatorEngine:
             return False
         return True
 
-    def _apply_single_mutation(self, buf: bytearray):
+    def _apply_single_mutation(self, buf: bytearray, r: list[int] | None = None):
         rng = self.ctx._rng
         if not buf:
             buf.extend(rng.randbytes(rng.randint(1, 16)))
             return
-        # Pre-fetch 4 random values in one vectorized call.
-        # Each branch uses 2-4 values from this batch, avoiding N
-        # individual randint/randrange Python calls.
-        r = self.ctx._rng.randint_list(0, 1 << 30, 4)
+        # 4 random values per sub-mutation; havoc_mutate passes its slice of
+        # one batch, direct callers draw their own.
+        if r is None:
+            r = rng.randint_list(0, 1 << 30, 4)
         f = self.f
         if f._adaptive_havoc:
             # Same draw (r[0]) as the uniform path, so RNG consumption per

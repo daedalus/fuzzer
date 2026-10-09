@@ -756,9 +756,9 @@ class TestHavocEscalation:
             applied = {"n": 0}
             real_apply = engine._apply_single_mutation
 
-            def counting_apply(buf, _real=real_apply, _applied=applied):
+            def counting_apply(buf, r=None, _real=real_apply, _applied=applied):
                 _applied["n"] += 1
-                _real(buf)
+                _real(buf, r)
 
             engine._apply_single_mutation = counting_apply
 

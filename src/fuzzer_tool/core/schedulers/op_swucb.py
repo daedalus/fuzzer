@@ -91,8 +91,10 @@ class SWUCBScheduler(WindowedUCBBase):
 
     def _width(self, mean: float, n: float, log_n: float) -> float:
         """Gaussian width: b * sqrt(xi * log_n) / sqrt(n)."""
-        width_scale = self.b * math.sqrt(self.xi * log_n)
-        return width_scale / math.sqrt(n)
+        return self._width_scale(log_n) / math.sqrt(n)
+
+    def _width_scale(self, log_n: float) -> float:
+        return self.b * math.sqrt(self.xi * log_n)
 
     def bandit_stats(self) -> dict:
         """Return SW-UCB diagnostics."""

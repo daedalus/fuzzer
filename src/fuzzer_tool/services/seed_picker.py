@@ -91,6 +91,9 @@ TARGET_MATCH = "target_match"
 # OS / network seed arms (core/schedulers/seed_<name>.py): Elo name -> the
 # fuzzer attribute holding it, and the per-pick signals its select_seed takes
 # after the key list (see _pick_os_seed). Arms absent here take none.
+#: _pass_xtarget outside a weight pass (None is a computed 'no gap').
+_XT_UNSET = object()
+
 _OS_SEED_ARMS = {
     "consolidated": "_seed_consolidated",
     "mlfq": "_seed_mlfq",
@@ -371,6 +374,9 @@ class SeedPicker:
         # for one pass live in _pass_vectors only while that pass runs.
         self._edge_vectors = _EdgeVectors()
         self._pass_vectors: _EdgeVectors | None = None
+        # Cross-target (least-covered target, factor) for the running pass;
+        # _XT_UNSET outside one. Same lifetime rule as _pass_vectors.
+        self._pass_xtarget: tuple | None | object = _XT_UNSET
 
         # Bound once here rather than read off the fuzzer per pick: the
         # katz/tang/aflgo arms below draw from it directly, and a picker
@@ -1691,19 +1697,37 @@ class SeedPicker:
             prod = f._length_tracker.length_productivity(len(seed))
             w *= 0.5 + min(prod, 2.0) * 0.75
 
-        if f.multi_targets and f._edge_tracker and f._edge_tracker.target_cumulative_edges:
-            target_edges = f._edge_tracker.target_cumulative_edges
-            if len(target_edges) > 1:
-                counts = {t: len(e) for t, e in target_edges.items()}
-                min_target = min(counts, key=counts.get)
-                max_target = max(counts, key=counts.get)
-                gap = counts[max_target] - counts[min_target]
-                if gap > 0:
-                    sk = f._seed_key(seed)
-                    seed_targets = f._edge_tracker.seed_target_edges.get(sk, {})
-                    if min_target in seed_targets and seed_targets[min_target]:
-                        w *= 1.0 + min(gap / max(counts[min_target], 1), 1.0)
+        xt = self._pass_xtarget
+        if xt is _XT_UNSET:
+            xt = self._cross_target_gap(f)
+        if xt is None:
+            return w
+        min_target, factor = xt
+        seed_targets = f._edge_tracker.seed_target_edges.get(f._seed_key(seed), {})
+        if seed_targets.get(min_target):
+            w *= factor
         return w
+
+    @staticmethod
+    def _cross_target_gap(f) -> tuple[str, float] | None:
+        """(least-covered target, weight factor), or None when no gap.
+
+        Seed-independent, so a weight pass computes it once.
+        """
+        # getattr: runs once per pass even when no seed reaches the bonus, so
+        # stand-in fuzzers without multi-target fields must read as off.
+        tracker = getattr(f, "_edge_tracker", None)
+        if not (getattr(f, "multi_targets", False) and tracker and tracker.target_cumulative_edges):
+            return None
+        target_edges = f._edge_tracker.target_cumulative_edges
+        if len(target_edges) <= 1:
+            return None
+        counts = {t: len(e) for t, e in target_edges.items()}
+        min_target = min(counts, key=counts.get)
+        gap = counts[max(counts, key=counts.get)] - counts[min_target]
+        if gap <= 0:
+            return None
+        return min_target, 1.0 + min(gap / max(counts[min_target], 1), 1.0)
 
     def _weight_overlap_density(self, seed_key: str, w: float, f) -> float:
         """Apply overlap-density-based weight modifier.
@@ -1993,6 +2017,12 @@ class SeedPicker:
         # when the vectors carry the window instead.
         self._pass_vectors = self._prepare_edge_vectors(f, corpus, has_meta, seed_keys)
         recent_counts = self._recent_edge_counts(f) if self._pass_vectors is None else None
+        self._pass_xtarget = self._cross_target_gap(f)
+        # Seed-independent: decided once per pass, not per seed.
+        is_pareto4d = (
+            getattr(f, "_use_overlap_density", False)
+            and getattr(f, "_overlap_mode", "") == "pareto4d"
+        )
         try:
             for i, seed in enumerate(corpus):
                 if not has_meta[i]:
@@ -2018,10 +2048,6 @@ class SeedPicker:
 
                 weights[i] = max(w, 1e-6)
                 bf = pareto_scores[i][1]
-                is_pareto4d = (
-                    getattr(f, "_use_overlap_density", False)
-                    and getattr(f, "_overlap_mode", "") == "pareto4d"
-                )
                 if is_pareto4d:
                     od = f._overlap_density_cache.get(sk, 0.5)
                     pareto_scores[i] = (sub, bf, spa, od)
@@ -2029,6 +2055,7 @@ class SeedPicker:
                     pareto_scores[i] = (sub, bf, spa)
         finally:
             self._pass_vectors = None
+            self._pass_xtarget = _XT_UNSET
 
         self._apply_front_bonus(weights, pareto_scores)
         return weights
