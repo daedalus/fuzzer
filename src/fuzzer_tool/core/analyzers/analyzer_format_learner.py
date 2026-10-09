@@ -43,6 +43,7 @@ import logging
 from array import array
 from dataclasses import dataclass, field
 
+from fuzzer_tool.core.misra_gries import MisraGries
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.running_stats import RunningMoments
 
@@ -53,7 +54,7 @@ DEFAULT_SIG_LEN = 2  # bytes of prefix used to cluster inputs into format hypoth
 DEFAULT_MAX_FORMATS = 6  # cap on concurrently tracked format clusters (bounds memory)
 DEFAULT_SIGNATURE = ""  # cluster key used before any real signature is known
 DEFAULT_PROMOTE_THRESHOLD = 3  # times a signature must recur before it gets its own cluster
-MAX_TRACKED_SIGNATURES = 4096  # cap on candidate signatures awaiting promotion
+MAX_TRACKED_SIGNATURES = 4096  # Misra–Gries counters for signatures awaiting promotion
 _FENWICK_INIT_SIZE = 64  # initial byte-offset capacity; doubles on demand
 
 
@@ -795,7 +796,7 @@ class FormatLearner:
         self._last_signature: str | None = None
         # Raw-signature recurrence counts, for promotion — not full
         # clusters, just a cheap int per candidate signature.
-        self._signature_counts: dict[str, int] = {}
+        self._signature_counts = MisraGries(MAX_TRACKED_SIGNATURES)
         # Small buffer of (entry, input_bytes) per not-yet-promoted raw
         # signature, capped at promote_threshold — replayed into a fresh
         # dedicated cluster the moment that signature is promoted, so a
@@ -827,16 +828,20 @@ class FormatLearner:
             return self.format_signature(input_bytes, self.sig_len)
         return self._last_signature
 
-    def _bound_signature_tracking(self):
-        """Cheap, approximate forgetting so `_signature_counts`/`_pending`
-        can't grow without limit over a long campaign full of one-off
-        prefixes that never recur."""
-        if len(self._signature_counts) < MAX_TRACKED_SIGNATURES:
-            return
-        stalest = sorted(self._signature_counts.items(), key=lambda kv: kv[1])
-        for sig, _ in stalest[: len(stalest) // 4 or 1]:
-            del self._signature_counts[sig]
-            self._pending.pop(sig, None)
+    def _count_signature(self, sig: str) -> int:
+        """Misra–Gries count of *sig*; 0 when overflow dropped it.
+
+        Any signature above n/(K+1) of the stream survives, while birthday
+        repeats of garbage prefixes rarely reach promotion. Overflow drops
+        zeroed counters; their pending buffers go with them.
+        """
+        count = self._signature_counts.add(sig)
+        if count:
+            return count
+
+        for k in [k for k in self._pending if k not in self._signature_counts]:
+            del self._pending[k]
+        return 0
 
     def _known_cluster_for(self, raw_signature: str) -> str:
         """Route a signature that's only being *read* (or is a secondary
@@ -1000,15 +1005,14 @@ class FormatLearner:
             self._get_or_create_cluster(raw_signature).record(entry, input_bytes, self.max_timeline)
             return
 
-        self._bound_signature_tracking()
-        pending = self._pending.setdefault(raw_signature, [])
-        pending.append((entry, input_bytes))
-        if len(pending) > self.promote_threshold:
-            pending.pop(0)
-        count = self._signature_counts.get(raw_signature, 0) + 1
-        self._signature_counts[raw_signature] = count
+        count = self._count_signature(raw_signature)
+        if count:
+            pending = self._pending.setdefault(raw_signature, [])
+            pending.append((entry, input_bytes))
+            if len(pending) > self.promote_threshold:
+                pending.pop(0)
 
-        if count >= self.promote_threshold:
+        if count and count >= self.promote_threshold:
             # Promote: this signature has now recurred enough to earn its
             # own cluster. Replay everything buffered for it (in order)
             # into a fresh cluster, rather than starting from just this

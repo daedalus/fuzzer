@@ -18,6 +18,7 @@ from fuzzer_tool.core.shim_health import Attach, health_issues
 from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.core.temporal_join import join_streams
 from fuzzer_tool.core.zipf import HeapsFit, TailLaw, ZipfFit
+from fuzzer_tool.services.stats_reporter import repro_rate
 
 try:
     import numpy as np
@@ -1186,7 +1187,7 @@ def _crash_reproducibility(f) -> str:
     for sig, replays in f._crash_replays.items():
         if len(replays) >= f.replay_n:
             total += 1
-            rate = sum(1 for r in replays if r >= 0) / len(replays)
+            rate = repro_rate(replays)
             reproducible += rate
             lines.append(f"  {sig[:40]}: {rate:.0%} ({len(replays)} replays)")
     if total > 0:

@@ -2,6 +2,44 @@
 
 import time
 from array import array
+from enum import IntEnum
+
+from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, stderr_crash_marker
+from fuzzer_tool.core.sanitizer import SanitizerReport
+
+# Adapter sentinels: -1 timeout, -2 infrastructure failure.
+_SENTINEL_CODES = (-1, -2)
+
+
+class ReplayOutcome(IntEnum):
+    """Verdict of one crash replay, stored in ``_crash_replays``."""
+
+    CLEAN = 0
+    CRASHED = 1
+    ERROR = -2
+    MISSING = -3
+
+
+def _replay_crashed(rc: int, stderr: str) -> bool:
+    """Did a replay crash? Raw ``rc`` is not enough: signals come back negative."""
+    if rc in SIGNAL_CRASH_CODES:
+        return True
+
+    if rc < 0 and rc not in _SENTINEL_CODES:
+        return True
+
+    report = SanitizerReport.parse(stderr)
+    if report and report.is_valid():
+        return True
+
+    return stderr_crash_marker(rc, stderr) is not None
+
+
+def repro_rate(replays) -> float:
+    """Fraction of replays that crashed again; 0.0 when none ran."""
+    if not replays:
+        return 0.0
+    return sum(1 for r in replays if r == ReplayOutcome.CRASHED) / len(replays)
 
 
 def format_elapsed(start_time: float, now: float | None = None) -> str:
@@ -112,11 +150,12 @@ def run_crash_replays(
             break
         crash_file = _find_crash_file(crashes_dir, sig, crash_files, seed_key_fn)
         if crash_file is None:
-            replays.append(-3)
+            replays.append(ReplayOutcome.MISSING)
             continue
         try:
             data = crash_file.read_bytes()
-            rc, _stderr, _pid = run_target_stdin(target, data, timeout)
-            replays.append(rc)
+            rc, stderr, _pid = run_target_stdin(target, data, timeout)
+            crashed = _replay_crashed(rc, stderr)
+            replays.append(ReplayOutcome.CRASHED if crashed else ReplayOutcome.CLEAN)
         except Exception:
-            replays.append(-2)
+            replays.append(ReplayOutcome.ERROR)

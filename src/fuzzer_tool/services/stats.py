@@ -48,6 +48,7 @@ from fuzzer_tool.services.stats_reporter import (
 from fuzzer_tool.services.stats_reporter import (
     record_discovery_snapshot as _record_discovery_snapshot_fn,
 )
+from fuzzer_tool.services.stats_reporter import repro_rate
 from fuzzer_tool.services.stats_reporter import (
     run_crash_replays as _run_crash_replays_fn,
 )
@@ -1419,11 +1420,7 @@ class StatsReporter:
         if f._crash_replays:
             done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
             if done:
-                avg_repro = (
-                    sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
-                    / len(done)
-                    * 100
-                )
+                avg_repro = sum(repro_rate(replays) for replays in done) / len(done) * 100
                 repro_str = f" | repro: {avg_repro:.0f}%"
         return repro_str
 
@@ -1938,11 +1935,7 @@ class StatsReporter:
         if f._crash_replays:
             done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
             if done:
-                avg_repro = (
-                    sum(sum(1 for r in replays if r >= 0) / len(replays) for replays in done)
-                    / len(done)
-                    * 100
-                )
+                avg_repro = sum(repro_rate(replays) for replays in done) / len(done) * 100
                 parts.append(f"repro:{avg_repro:.0f}%")
 
     def _supp_cmaes(self, f, parts: list[str]) -> None:
