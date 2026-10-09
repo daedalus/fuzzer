@@ -80,6 +80,29 @@ from fuzzer_tool.core.elf import (  # noqa: E402
 from fuzzer_tool.core.zipf import HeapsFit, ZipfFit, fit_heaps, fit_zipf  # noqa: E402
 
 
+def _hit_count_entropy(hc: dict[int, int]) -> float:
+    """Counts-form Shannon entropy of one hit-count map (see shannon_entropy_seed)."""
+    total = sum(hc.values())
+    if total == 0:
+        return 0.0
+    if _HAS_NUMPY and len(hc) > 50:
+        arr = np.fromiter(hc.values(), dtype=np.int64, count=len(hc))
+        arr = arr[arr > 0]
+        if arr.size == 0:
+            return 0.0
+        # bincount over the bucketed values, then one log2 per distinct
+        # bucket rather than one per edge.
+        mult = np.bincount(arr)
+        nz = np.flatnonzero(mult)
+        acc = float(np.sum(mult[nz] * nz * np.log2(nz)))
+        return _clamp_entropy(math.log2(total) - acc / total)
+    acc = 0.0
+    for count in hc.values():
+        if count > 0:
+            acc += count * math.log2(count)
+    return _clamp_entropy(math.log2(total) - acc / total)
+
+
 class _DenseEdgeCounter:
     """dict[int, int]-compatible counter backed by a fixed-size numpy array.
 
@@ -815,6 +838,8 @@ class EdgeTracker:
         self.seed_edges: dict[str, set[int]] = {}
         # Per-seed hit counts: seed_key -> {edge_index: hit_count} (sparse)
         self.seed_hit_counts: dict[str, dict[int, int]] = {}
+        # seed_key -> (hit-count dict, its length, entropy); see shannon_entropy_seed.
+        self._entropy_cache: dict[str, tuple[dict[int, int], int, float]] = {}
         # Global cumulative edge set (all edges ever seen)
         self.cumulative_edges: set[int] = set()
         # Total edges ever (preserved across bitmap resize — monotonically increasing)
@@ -979,6 +1004,7 @@ class EdgeTracker:
             self._minhash.add(seed_key, sig)
 
         # Invalidate caches
+        self._entropy_cache.pop(seed_key, None)
         self._aggregate_cache = None
         self._corpus_sig = None
         self._corpus_profile_cache = None
@@ -1224,6 +1250,7 @@ class EdgeTracker:
             self._global_edge_hits.clear()
         self.seed_edges.clear()
         self.seed_hit_counts.clear()
+        self._entropy_cache.clear()
         if isinstance(self._aggregate_totals, _DenseEdgeCounter):
             self._aggregate_totals = _DenseEdgeCounter(new_map_size)
         else:
@@ -1261,64 +1288,12 @@ class EdgeTracker:
         batch = int(self.max_tracked_seeds * PRUNE_BATCH_FRAC)
         low_water = max(1, self.max_tracked_seeds - batch)
         excess = len(self.seed_edges) - low_water
-
-        # Count how many currently-tracked seeds own each edge.
-        edge_owners: dict[int, int] = {}
-        for edges in self.seed_edges.values():
-            for e in edges:
-                edge_owners[e] = edge_owners.get(e, 0) + 1
-
-        # One revalidating pass, cheapest-first by how much unique coverage
-        # goes with the seed.  A seed whose every edge is held by another
-        # still-tracked seed has loss 0, so fully-subsumed seeds drain first
-        # and the old two-phase behaviour falls out of the ordering; ties keep
-        # insertion order, so age remains the tiebreak it always was.
-        #
-        # Two phases against a snapshot cannot get this right, and both ways
-        # it fails lose coverage silently:
-        #
-        #   * Two seeds jointly owning one edge each see an owner count of 2,
-        #     so a snapshot marks neither protected and evicting both drops
-        #     the edge.  Unreachable while ``excess`` was always 1; routine
-        #     once batches are pruned.
-        #   * Evicting a subsumed seed can make another seed's edges unique.
-        #     A subsumption phase would evict A because B covered for it, then
-        #     an age phase would evict B, dropping an edge that neither
-        #     eviction loses on its own.
-        #
-        # Hence the loss is recomputed at the moment of eviction and the entry
-        # re-queued if it went stale, rather than being ordered once up front.
-        #
-        # In real campaigns the ordering is decided almost entirely by the tie.
-        # Instrumented over png_read and gzip_read, 99.9% of tracked candidates
-        # had a loss of zero: a seed is admitted for coverage it alone had, but
-        # later seeds subsume it and the edge space saturates, so by the time
-        # the ceiling binds nearly everything is redundant.  Which seed goes is
-        # therefore settled by the tiebreak, not by the loss figure.
-        keys_to_prune: list[str] = []
-        evicted: set[str] = set()
-
-        def _unique_loss(key: str) -> int:
-            return sum(1 for e in self.seed_edges[key] if edge_owners.get(e, 0) <= 1)
-
-        heap = [(_unique_loss(k), i, k) for i, k in enumerate(self.seed_edges)]
-        heapq.heapify(heap)
-        while len(keys_to_prune) < excess and heap:
-            loss, order, key = heapq.heappop(heap)
-            if key in evicted:
-                continue
-            current = _unique_loss(key)
-            if current != loss:
-                heapq.heappush(heap, (current, order, key))
-                continue
-            keys_to_prune.append(key)
-            evicted.add(key)
-            for e in self.seed_edges[key]:
-                edge_owners[e] -= 1
+        keys_to_prune, owner_ids, owner_counts = self._prune_victims(excess)
 
         for key in keys_to_prune:
             self.seed_edges.pop(key, None)
             self.seed_hit_counts.pop(key, None)
+            self._entropy_cache.pop(key, None)
             self.seed_target_edges.pop(key, None)
             self.seed_stack_depth.pop(key, None)
             self.seed_path_hash.pop(key, None)
@@ -1334,23 +1309,88 @@ class EdgeTracker:
         # RARE_EDGE_OWNERS so they stop reading as rare -- a slow, silent decay
         # of the rarity signal the whole schedule is steered by.
         #
-        # edge_owners was decremented as each seed was selected above, so it is
+        # The owner tally was decremented as each seed was selected, so it is
         # already the survivor tally exactly -- no second O(seeds x edges) pass
-        # is needed to rebuild it. Zero and negative entries are dropped rather
-        # than stored: _edge_owner_count is read by bare subscript on a
+        # is needed to rebuild it. Zero entries are dropped rather than
+        # stored: _edge_owner_count is read by bare subscript on a
         # defaultdict, so keeping them would grow the map with edges no seed
         # owns.
         if keys_to_prune:
             self._owner_version += 1
-            rebuilt: defaultdict[int, int] = defaultdict(int)
-            for e, n in edge_owners.items():
-                if n > 0:
-                    rebuilt[e] = n
-            self._edge_owner_count = rebuilt
+            self._edge_owner_count = defaultdict(int, zip(owner_ids, owner_counts, strict=True))
 
         self._aggregate_cache = None
         self._corpus_sig = None
         self._corpus_profile_cache = None
+
+    def _prune_victims(self, excess: int) -> tuple[list[str], list[int], list[int]]:
+        """Pick *excess* seeds to evict; return them plus survivor owner counts.
+
+        One revalidating pass, cheapest-first by how much unique coverage goes
+        with the seed.  A seed whose every edge is held by another
+        still-tracked seed has loss 0, so fully-subsumed seeds drain first and
+        the old two-phase behaviour falls out of the ordering; ties keep
+        insertion order, so age remains the tiebreak it always was.
+
+        Two phases against a snapshot cannot get this right, and both ways it
+        fails lose coverage silently:
+
+          * Two seeds jointly owning one edge each see an owner count of 2, so
+            a snapshot marks neither protected and evicting both drops the
+            edge.  Unreachable while ``excess`` was always 1; routine once
+            batches are pruned.
+          * Evicting a subsumed seed can make another seed's edges unique.  A
+            subsumption phase would evict A because B covered for it, then an
+            age phase would evict B, dropping an edge that neither eviction
+            loses on its own.
+
+        Hence the loss is recomputed at the moment of eviction and the entry
+        re-queued if it went stale, rather than being ordered once up front.
+
+        In real campaigns the ordering is decided almost entirely by the tie.
+        Instrumented over png_read and gzip_read, 99.9% of tracked candidates
+        had a loss of zero: a seed is admitted for coverage it alone had, but
+        later seeds subsume it and the edge space saturates, so by the time the
+        ceiling binds nearly everything is redundant.
+
+        Vectorized: every seed's edges are flattened into one array and mapped
+        to dense slots, so owner counts are a bincount and a seed's loss is a
+        slice compare. ffmpeg (1,100 seeds x 2,400 edges): ~1 s per prune in
+        Python dicts, 20 prunes per 6,000 rounds.
+        """
+        keys = list(self.seed_edges)
+        sets = [self.seed_edges[k] for k in keys]
+        lens = np.fromiter((len(s) for s in sets), dtype=np.int64, count=len(sets))
+        ends = np.cumsum(lens)
+        starts = ends - lens
+        flat = np.concatenate(
+            [np.fromiter(s, dtype=np.int64, count=len(s)) for s in sets] or [np.empty(0, np.int64)]
+        )
+        ids = np.unique(flat)
+        slot = np.searchsorted(ids, flat)  # ~2x faster than return_inverse
+        owners = np.bincount(slot, minlength=ids.size)
+
+        # Initial losses: prefix sums of the sole-owner mask, one per seed.
+        sole = np.concatenate(([0], np.cumsum(owners[slot] <= 1)))
+        losses = (sole[ends] - sole[starts]).tolist()
+
+        def _loss(i: int) -> int:
+            return int(np.count_nonzero(owners[slot[starts[i] : ends[i]]] <= 1))
+
+        heap = [(loss, i) for i, loss in enumerate(losses)]
+        heapq.heapify(heap)
+        victims: list[str] = []
+        while len(victims) < excess and heap:
+            loss, i = heapq.heappop(heap)
+            current = _loss(i)
+            if current != loss:
+                heapq.heappush(heap, (current, i))
+                continue
+            victims.append(keys[i])
+            owners[slot[starts[i] : ends[i]]] -= 1
+
+        alive = owners > 0
+        return victims, ids[alive].tolist(), owners[alive].tolist()
 
     # ── Temporal coverage tracking methods ─────────────────────────────────
 
@@ -2360,25 +2400,19 @@ class EdgeTracker:
         hc = self.seed_hit_counts.get(seed_key)
         if not hc:
             return 0.0
-        total = sum(hc.values())
-        if total == 0:
-            return 0.0
-        if _HAS_NUMPY and len(hc) > 50:
-            arr = np.fromiter(hc.values(), dtype=np.int64, count=len(hc))
-            arr = arr[arr > 0]
-            if arr.size == 0:
-                return 0.0
-            # bincount over the bucketed values, then one log2 per distinct
-            # bucket rather than one per edge.
-            mult = np.bincount(arr)
-            nz = np.flatnonzero(mult)
-            acc = float(np.sum(mult[nz] * nz * np.log2(nz)))
-            return _clamp_entropy(math.log2(total) - acc / total)
-        acc = 0.0
-        for count in hc.values():
-            if count > 0:
-                acc += count * math.log2(count)
-        return _clamp_entropy(math.log2(total) - acc / total)
+
+        # Cached per seed; record_edges/prune invalidate, and the identity +
+        # length check catches callers that swap or resize the dict.
+        cache = getattr(self, "_entropy_cache", None)  # absent on __new__-built trackers
+        if cache is None:
+            cache = self._entropy_cache = {}
+        cached = cache.get(seed_key)
+        if cached is not None and cached[0] is hc and cached[1] == len(hc):
+            return cached[2]
+
+        value = _hit_count_entropy(hc)
+        cache[seed_key] = (hc, len(hc), value)
+        return value
 
     def compute_wasserstein_weight(self, seed_key: str) -> float:
         """Compute scheduling weight based on Wasserstein distance to corpus centroid.
@@ -3350,6 +3384,7 @@ class EdgeTracker:
             k: {int(e): c for e, c in hc.items()}
             for k, hc in data.get("seed_hit_counts", {}).items()
         }
+        self._entropy_cache = {}
         self._global_edge_hits = _int_keyed(data.get("global_edge_hits", {}))
         self._spectrum_dirty = True
         self._aggregate_cache = None

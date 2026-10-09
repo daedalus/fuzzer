@@ -18,8 +18,14 @@ holding a seed that later picks made redundant.
 
 Pipeline: collapse identical edge sets -> [force sole coverers, drop
 dominated seeds] x MAX_ROUNDS -> lazy greedy -> drop redundant picks.
-Memory is O(sum of edge-set sizes). Reductions are optional: capped
-rounds and scans only cost optimality, never correctness.
+Reductions are optional: capped rounds and scans only cost optimality,
+never correctness.
+
+Representation: each seed's edges are one int bitmask over a dense edge
+index, so restrict / take / subset are big-int ops. Holder counts per edge
+are a bit-sliced counter (one int per count bit), which yields the
+sole-holder and over-cap edge masks without a per-edge dict. ffmpeg
+(~1,000 seeds x 2,400 edges): 4.9 s on frozensets.
 """
 
 import heapq
@@ -27,6 +33,8 @@ from collections.abc import Collection, Hashable, Mapping
 from enum import Enum
 from itertools import product
 from typing import TypeVar
+
+import numpy as np
 
 K = TypeVar("K", bound=Hashable)
 
@@ -59,17 +67,78 @@ def min_cover(seed_edges: Mapping[K, Collection[int]], size: Mapping[K, int]) ->
     Result order is selection order; deterministic for a given input order.
     """
     order = {k: i for i, k in enumerate(seed_edges)}
-    full = {k: frozenset(e) for k, e in seed_edges.items() if e}
+    full = _to_masks({k: e for k, e in seed_edges.items() if e})
     sizes = {k: size[k] for k in full}
     runs = [_Cover(order, full, sizes, tie, red).solve() for tie, red in product(Tie, Reduce)]
     return min(runs, key=lambda keys: (len(keys), sum(sizes[k] for k in keys)))
+
+
+def _to_masks(full: Mapping[K, Collection[int]]) -> dict[K, int]:
+    """Edge sets -> int bitmasks over a dense index (bit i = i-th smallest edge id).
+
+    Bit order never changes a result: every tie-break is on seed rank.
+    """
+    if not full:
+        return {}
+
+    sets = list(full.values())
+    flat = np.concatenate([np.fromiter(e, dtype=np.int64, count=len(e)) for e in sets])
+    ids = np.unique(flat)
+    row = np.zeros(-(-ids.size // 8) * 8, dtype=np.uint8)
+
+    masks: dict[K, int] = {}
+    for key, edges in zip(full, sets, strict=True):
+        bits = np.searchsorted(ids, np.fromiter(edges, dtype=np.int64, count=len(edges)))
+        row[bits] = 1
+        masks[key] = int.from_bytes(np.packbits(row, bitorder="little").tobytes(), "little")
+        row[bits] = 0
+    return masks
+
+
+def _holder_planes(masks: Collection[int], width: int) -> tuple[list[int], int]:
+    """Bit-sliced per-edge holder count: plane p holds bit p of each edge's count.
+
+    Returns (planes, saturated): *saturated* marks edges whose count reached
+    2**width. Example, masks 0b011 and 0b110: planes [0b101, 0b010], i.e.
+    edge 0 -> 1, edge 1 -> 2, edge 2 -> 1.
+    """
+    planes = [0] * width
+    saturated = 0
+    for mask in masks:
+        carry = mask
+        for p in range(width):
+            if not carry:
+                break
+            planes[p], carry = planes[p] ^ carry, planes[p] & carry
+        saturated |= carry
+    return planes, saturated
+
+
+def _count_above(planes: list[int], saturated: int, bound: int) -> int:
+    """Mask of edges whose bit-sliced count exceeds *bound* (MSB-first compare)."""
+    above = 0
+    equal = -1  # all ones: every edge ties until a plane separates it
+    for p in reversed(range(len(planes))):
+        plane = planes[p]
+        if (bound >> p) & 1:
+            equal &= plane
+            continue
+        above |= equal & plane
+        equal &= ~plane
+    return above | saturated
+
+
+def _bit_indices(mask: int, nbytes: int) -> np.ndarray:
+    """Set-bit positions of *mask*, ascending."""
+    raw = np.frombuffer(mask.to_bytes(nbytes, "little"), dtype=np.uint8)
+    return np.flatnonzero(np.unpackbits(raw, bitorder="little"))
 
 
 class _Cover:
     def __init__(
         self,
         order: Mapping,
-        full: Mapping[K, frozenset],
+        full: Mapping[K, int],
         size: Mapping[K, int],
         tie: Tie,
         reduce: Reduce,
@@ -77,12 +146,21 @@ class _Cover:
         self._tie = tie
         self._reduce = reduce
         self._order = order
-        self._full = dict(full)  # frozensets shared, dict private: dominance deletes
+        self._full = dict(full)  # private: dominance deletes
         self._size = size
         self._live: dict = {}
-        self._holders: dict[int, list] = {}
-        self._uncovered: set[int] = set().union(*full.values()) if full else set()
+        self._uncovered = 0
+        for mask in full.values():
+            self._uncovered |= mask
+        self._nbytes = max(1, -(-self._uncovered.bit_length() // 8))
         self._chosen: list = []
+
+        # Holder index of the last _index(): live keys in row order, their
+        # packed masks (one row per key), and the sole / over-cap edge masks.
+        self._rows: list = []
+        self._matrix = np.zeros((0, self._nbytes), dtype=np.uint8)
+        self._sole = 0
+        self._crowded = 0
 
     def solve(self) -> list:
         if self._reduce is Reduce.ON:
@@ -109,7 +187,7 @@ class _Cover:
 
     def _collapse_equal(self) -> None:
         """Keep one seed per identical edge set: the smallest, then earliest."""
-        best: dict[frozenset, object] = {}
+        best: dict[int, object] = {}
         for key, edges in self._full.items():
             kept = best.get(edges)
             if kept is None or self._rank(key) < self._rank(kept):
@@ -120,26 +198,39 @@ class _Cover:
     def _restrict(self) -> None:
         """Restrict seeds to their uncovered edges; drop seeds left with none."""
         self._live = {}
+        uncovered = self._uncovered
         for key, edges in self._full.items():
-            rest = edges & self._uncovered
+            rest = edges & uncovered
             if rest:
                 self._live[key] = rest
 
     def _index(self) -> None:
-        """Restrict, then index which seeds hold each uncovered edge."""
+        """Restrict, then index which seeds hold each uncovered edge.
+
+        Counts saturate past DOMINATOR_SCAN_CAP, which is all _dominated
+        reads; sole holders are count == 1.
+        """
         self._restrict()
-        self._holders = {}
-        for key, edges in self._live.items():
-            for edge in edges:
-                self._holders.setdefault(edge, []).append(key)
+        self._rows = list(self._live)
+        nbytes = self._nbytes
+        packed = b"".join(m.to_bytes(nbytes, "little") for m in self._live.values())
+        self._matrix = np.frombuffer(packed, dtype=np.uint8).reshape(len(self._rows), nbytes)
+
+        planes, saturated = _holder_planes(self._live.values(), DOMINATOR_SCAN_CAP.bit_length())
+        multi = saturated
+        for plane in planes[1:]:
+            multi |= plane
+        self._sole = planes[0] & ~multi
+        self._crowded = _count_above(planes, saturated, DOMINATOR_SCAN_CAP)
 
     def _take(self, key) -> None:
         self._chosen.append(key)
-        self._uncovered -= self._full[key]
+        self._uncovered &= ~self._full[key]
 
     def _force(self) -> bool:
         """Take every seed that is the only holder of some uncovered edge."""
-        sole = {h[0] for h in self._holders.values() if len(h) == 1}
+        sole_edges = self._sole
+        sole = [k for k, edges in self._live.items() if edges & sole_edges]
         for key in sorted(sole, key=self._order.__getitem__):
             self._take(key)
         return bool(sole)
@@ -154,30 +245,35 @@ class _Cover:
         return dropped
 
     def _dominated(self, key) -> bool:
+        """A dominator holds every edge of *key*, so the holders of any one
+        edge are a complete rival list; past the scan cap on all of them,
+        give up (the set version scanned the rarest edge's holders)."""
         edges = self._live.get(key)
         if edges is None:
             return False
-        rarest = min(edges, key=lambda e: len(self._holders[e]))
-        rivals = self._holders[rarest]
-        if len(rivals) > DOMINATOR_SCAN_CAP:
+        scannable = edges & ~self._crowded
+        if not scannable:
             return False
-        return any(self._beats(rival, key, edges) for rival in rivals)
+        edge = (scannable & -scannable).bit_length() - 1
+        column = (self._matrix[:, edge >> 3] >> (edge & 7)) & 1
+        rows = self._rows
+        return any(self._beats(rows[i], key, edges) for i in np.flatnonzero(column).tolist())
 
-    def _beats(self, rival, key, edges: frozenset) -> bool:
+    def _beats(self, rival, key, edges: int) -> bool:
         if rival == key:
             return False
         other = self._live.get(rival)
-        if other is None or not edges <= other:
+        if other is None or edges & ~other:
             return False
-        return len(other) > len(edges) or self._rank(rival) < self._rank(key)
+        return other.bit_count() > edges.bit_count() or self._rank(rival) < self._rank(key)
 
     def _greedy(self) -> None:
         """Lazy greedy: gains only shrink, so a stale heap top is re-scored."""
-        heap = [(-len(e), *self._rank(k), k) for k, e in self._live.items()]
+        heap = [(-e.bit_count(), *self._rank(k), k) for k, e in self._live.items()]
         heapq.heapify(heap)
         while heap and self._uncovered:
             neg_gain, size, order, key = heapq.heappop(heap)
-            gain = len(self._live[key] & self._uncovered)
+            gain = (self._live[key] & self._uncovered).bit_count()
             if gain == 0:
                 continue
             if gain != -neg_gain:
@@ -187,15 +283,15 @@ class _Cover:
 
     def _drop_redundant(self) -> list:
         """Drop picks whose edges are all held by other picks, largest first."""
-        count: dict[int, int] = {}
-        for key in self._chosen:
-            for edge in self._full[key]:
-                count[edge] = count.get(edge, 0) + 1
+        if not self._chosen:
+            return []
+        bits = {key: _bit_indices(self._full[key], self._nbytes) for key in self._chosen}
+        count = np.bincount(np.concatenate(list(bits.values())), minlength=self._nbytes * 8)
         keep = set(self._chosen)
         for key in sorted(self._chosen, key=self._rank, reverse=True):
-            if any(count[e] == 1 for e in self._full[key]):
+            idx = bits[key]
+            if (count[idx] == 1).any():
                 continue
             keep.discard(key)
-            for edge in self._full[key]:
-                count[edge] -= 1
+            count[idx] -= 1
         return [k for k in self._chosen if k in keep]
