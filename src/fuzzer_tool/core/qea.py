@@ -620,19 +620,33 @@ def collapse_correlated(
     p_plus0 = _sigmoid(fields)
     state = np.where(rng.random_array((num_bytes, BITS_PER_BYTE)) < p_plus0, 1, -1)
 
+    # J = 0: every sweep step redraws a bit from its own field, the same
+    # marginal as the draw above, so the sweeps cannot change the sample's
+    # distribution. Every individual starts here (40-50x a plain collapse).
+    if not coupling.any():
+        return _state_bytes(state)
+
+    # sum_j J[bit_idx, j] * s_j, diagonal is zero so no self-term to
+    # subtract, but coupling isn't guaranteed zero-diagonal by callers --
+    # guard explicitly rather than trust that invariant. Rows are copied
+    # once, bit-major, instead of once per bit per sweep.
+    j_rows = coupling.transpose(1, 0, 2).copy()
+    idx = np.arange(BITS_PER_BYTE)
+    j_rows[idx, :, idx] = 0.0
+
     for _ in range(max(0, n_sweeps)):
         for bit_idx in range(BITS_PER_BYTE):
-            # sum_j J[bit_idx, j] * s_j, diagonal is zero so no self-term
-            # to subtract, but coupling isn't guaranteed zero-diagonal by
-            # callers -- guard explicitly rather than trust that invariant.
-            j_row = coupling[:, bit_idx, :].copy()
-            j_row[:, bit_idx] = 0.0
-            local_field = fields[:, bit_idx] + np.einsum("bj,bj->b", j_row, state)
+            local_field = fields[:, bit_idx] + np.einsum("bj,bj->b", j_rows[bit_idx], state)
             p_plus = _sigmoid(local_field)
             draw = rng.random_array(num_bytes) < p_plus
             state[:, bit_idx] = np.where(draw, 1, -1)
 
-    bits = (state == -1).astype(np.uint8).reshape(-1)  # s=+1 -> bit 0, s=-1 -> bit 1
+    return _state_bytes(state)
+
+
+def _state_bytes(state: np.ndarray) -> bytes:
+    """Ising states (num_bytes, 8) -> bytes; s=+1 is bit 0, s=-1 is bit 1."""
+    bits = (state == -1).astype(np.uint8).reshape(-1)
     return bytes(np.packbits(bits).tobytes())
 
 
