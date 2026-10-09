@@ -288,6 +288,9 @@ for _b in range(256):
         _COLORIZE_TBL[_b] = 0x21 + (_b * 31 + 11) % 94
 _COLORIZE_TBL = bytes(_COLORIZE_TBL)
 
+#: XOR 0xFF per byte, for ``bytes.translate``.
+_INVERT_TABLE = bytes(b ^ 0xFF for b in range(256))
+
 # Sentinel for "no cached pairs list yet", distinct from None -- None is a
 # legitimate value of ctx.cmplog_pairs and must not read as a cache hit.
 _MISSING = object()
@@ -837,6 +840,60 @@ _FALLBACK_PRECEDENCE = (
 )
 
 
+#: Strategies whose scheduler is ``f.<attr>`` with a plain ``select_op(ops)``
+#: and no swarm particle id. ``select_op`` dispatches these by lookup.
+_PLAIN_STRATEGIES = {
+    "consolidated_v2": "_consolidated_v2",
+    "consolidated_v1": "_consolidated_v1",
+    "replicator": "_replicator",
+    "exp3": "_exp3",
+    "exp4": "_exp4",
+    "eps_greedy": "_eps_greedy",
+    "hierarchical": "_hierarchical",
+    "gp_ucb": "_gp_ucb",
+    "bo_gp_ucb": "_bo_gp_ucb",
+    "cmaes": "_cmaes",
+    "ducb": "_ducb",
+    "swucb": "_swucb",
+    "kl_ducb": "_kl_ducb",
+    "kl_swucb": "_kl_swucb",
+    "cucb": "_cucb",
+    "cusum_ucb": "_cusum_ucb",
+    "fewa": "_fewa",
+    "moss": "_moss",
+    "bayes_ucb": "_bayes_ucb",
+    "fpl": "_fpl",
+    "gradient": "_gradient",
+    "whittle": "_whittle",
+    "successive_elim": "_successive_elim",
+    "las_vegas": "_las_vegas",
+    "corral": "_corral",
+    "tsallis": "_tsallis",
+    "kalman_ts": "_kalman_ts",
+    "gamma_poisson": "_gamma_poisson",
+    "ids": "_ids",
+    "phe": "_phe",
+    "exp3_ix": "_exp3_ix",
+    "regret_matching": "_regret_matching",
+    "automaton": "_automaton",
+    "ant_colony": "_ant_colony",
+    "round_robin": "_round_robin",
+    "canary": "_canary",
+    "op_katz": "_op_katz",
+    "op_kuramoto": "_op_kuramoto",
+    "op_tang": "_op_tang",
+    "op_kruskal_count": "_op_kruskal_count",
+    "op_credit": "_op_credit",
+    "op_tpe": "_op_tpe",
+    "op_strata": "_op_strata",
+    "op_stride": "_op_stride",
+    "op_p2c": "_op_p2c",
+    "op_good_turing": "_op_good_turing",
+    "softmax": "_softmax",
+    "topk": "_topk",
+}
+
+
 def operator_strategy_pool(f) -> list[str]:
     """The operator-strategy ballot: every scheduler that can select right now.
 
@@ -1189,14 +1246,22 @@ def _havoc_rare(buf, op, r, rng, max_len) -> None:
         buf[start:end] = region
 
 
+#: Below this length a Python byte loop beats np.bincount's call overhead
+#: (measured: 64 B 3.1us vs 6.1us; 1 KiB 31.6us vs 4.3us).
+_NP_HIST_MIN = 128
+
+
 def _byte_entropy_norm(data: bytes) -> float:
     """Shannon entropy of *data*'s bytes / 8, in [0, 1]; 0.0 when empty."""
     if not data:
         return 0.0
-    counts = [0] * 256
-    for byte in data:
-        counts[byte] += 1
     n = len(data)
+    if n >= _NP_HIST_MIN:
+        counts = np.bincount(np.frombuffer(data, np.uint8), minlength=256).tolist()
+    else:
+        counts = [0] * 256
+        for byte in data:
+            counts[byte] += 1
     entropy = 0.0
     for c in counts:
         if c:
@@ -1465,7 +1530,7 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import SIMD_BOUNDARIES
 
         if not buf:
-            buf.extend(rng.randint(0, 255) for _ in range(rng.choice(SIMD_BOUNDARIES)))
+            buf.extend(rng.randbytes(rng.choice(SIMD_BOUNDARIES)))
             return
         target_len = rng.choice(SIMD_BOUNDARIES)
         current_len = len(buf)
@@ -1954,7 +2019,7 @@ class OperatorEngine:
                 return
         # Fallback: random selection from entire buffer
         n_mutate = max(1, len(buf) // rng.randint(2, 10))
-        indices = [rng.randint(0, len(buf) - 1) for _ in range(n_mutate)]
+        indices = rng.randint_list(0, len(buf) - 1, n_mutate)
         for idx in indices:
             buf[idx] = tbl[buf[idx]]
 
@@ -1972,10 +2037,9 @@ class OperatorEngine:
         block_size = rng.randint(len(buf) // 10, len(buf) // 4)
         block_size = max(2, min(block_size, len(buf)))
         start = rng.randint(0, len(buf) - block_size)
-        # Bulk XOR via memoryview (avoids per-byte Python loop)
-        mv = memoryview(buf)[start : start + block_size]
-        for i in range(block_size):
-            mv[i] ^= 0xFF
+        # Bulk XOR 0xFF as a C-level translate, not a per-byte loop.
+        end = start + block_size
+        buf[start:end] = buf[start:end].translate(_INVERT_TABLE)
 
     def _op_afl_det(self, buf, _byte_idx, data):
         """Next step of AFL's deterministic sweep over the parent (T1-1).
@@ -2156,7 +2220,7 @@ class OperatorEngine:
                 return
             insert_size = rng.randint(1, max_insert)
             insert_pos = rng.randint(0, len(buf))
-            buf[insert_pos:insert_pos] = bytes(rng.randint(0, 255) for _ in range(insert_size))
+            buf[insert_pos:insert_pos] = rng.randbytes(insert_size)
         else:
             # Delete mode
             if len(buf) <= 1:
@@ -2188,7 +2252,7 @@ class OperatorEngine:
             max_size = min(64, self.ctx.max_len - len(buf))
             if max_size >= 1:
                 size = choose_len(max_size, rng=rng)
-                buf[idx:idx] = bytes(rng.randint(0, 255) for _ in range(size))
+                buf[idx:idx] = rng.randbytes(size)
 
     def _op_block_delete(self, buf, _byte_idx, _data):
         rng = self.ctx._rng
@@ -2955,7 +3019,7 @@ class OperatorEngine:
         if buf and len(buf) < self.ctx.max_len:
             size = rng.randint(1, min(64, self.ctx.max_len - len(buf)))
             if size > 0:
-                buf.extend(rng.randint(0, 255) for _ in range(size))
+                buf.extend(rng.randbytes(size))
 
     def _op_length_shrink(self, buf, _byte_idx, _data):
         rng = self.ctx._rng
@@ -2982,7 +3046,7 @@ class OperatorEngine:
         from fuzzer_tool.core.mutations import LENGTH_BOUNDARIES
 
         if not buf:
-            buf.extend(rng.randint(0, 255) for _ in range(rng.randint(1, 32)))
+            buf.extend(rng.randbytes(rng.randint(1, 32)))
             return
         # 30% chance: bias toward lengths that historically discovered edges
         if hasattr(self.f, "_length_tracker") and self.f._length_tracker and rng.randint(0, 9) < 3:
@@ -4338,7 +4402,7 @@ class OperatorEngine:
             else:
                 delta = rng.choice((-8, -1, 0, 1, 8, 64))
                 size = max(0, min(len(old) + delta, self.ctx.max_len // 2))
-                payload = (old + bytes(rng.randint(0, 255) for _ in range(size)))[:size]
+                payload = (old + rng.randbytes(size))[:size]
             out = resize_tlv_value(
                 raw, target, payload, tag_width=tag_w, length_width=len_w, big_endian=big
             )
@@ -4632,7 +4696,7 @@ class OperatorEngine:
                             data[rng.randint(0, len(data) - 1)] ^= 1 << rng.randint(0, 7)
                         chunk.data = bytes(data)
                     else:
-                        chunk.data = bytes(rng.randint(0, 255) for _ in range(rng.randint(1, 32)))
+                        chunk.data = rng.randbytes(rng.randint(1, 32))
                     return bytearray(serialize_png_chunks(chunks)[: self.ctx.max_len])
 
     def _op_taint_boost(self, buf, _byte_idx, data):
@@ -5202,7 +5266,7 @@ class OperatorEngine:
     def _apply_single_mutation(self, buf: bytearray):
         rng = self.ctx._rng
         if not buf:
-            buf.extend(rng.randint(0, 255) for _ in range(rng.randint(1, 16)))
+            buf.extend(rng.randbytes(rng.randint(1, 16)))
             return
         # Pre-fetch 4 random values in one vectorized call.
         # Each branch uses 2-4 values from this batch, avoiding N
@@ -5419,26 +5483,17 @@ class OperatorEngine:
         shared = getattr(f, "_current_context_shared", None) or [0.0] * (CONTEXT_DIM - 1)
         return [*shared, self._op_cost_feature(op)]
 
-    def select_op(self, ops: list[str]) -> str:
-        """Select a mutation operator using the active scheduling strategy."""
+    def _resolve_strategy(self, cached: str | None) -> str | None:
+        """Build the ballot and pick this exec's strategy; caches the pick."""
         f = self.f
-
-        if f._stall_recovery_active:
-            f._meta_strategy = "random_stall"
-            f._op_selector = None
-            return self.ctx._rng.choice(ops)
-
         available = operator_strategy_pool(f)
 
         if f._use_elo and f._elo and len(available) >= 2:
-            # Resolve the meta-strategy once per exec and reuse it for all
-            # mutations within it. Elo ratings move once per mutation, so
-            # re-sampling the strategy on every select_op call is
-            # over-frequent; mutate() resets _meta_strategy_cached each exec.
-            strategy = f._meta_strategy_cached
+            # Elo ratings move once per mutation, so re-sampling the strategy
+            # on every select_op call is over-frequent.
+            strategy = cached
             if strategy is None or strategy not in available:
                 strategy = f._elo.select_strategy(available)
-                f._meta_strategy_cached = strategy
             f._meta_strategy = strategy
         elif f._use_elo and f._elo and available:
             strategy = available[0]
@@ -5450,6 +5505,28 @@ class OperatorEngine:
             # not the other (cmaes, then fpl, which had neither).
             strategy = next((s for s in _FALLBACK_PRECEDENCE if s in available), None)
 
+        f._meta_strategy_cached = strategy
+        f._meta_strategy_key = strategy
+        return strategy
+
+    def select_op(self, ops: list[str]) -> str:
+        """Select a mutation operator using the active scheduling strategy."""
+        f = self.f
+
+        if f._stall_recovery_active:
+            f._meta_strategy = "random_stall"
+            f._op_selector = None
+            return self.ctx._rng.choice(ops)
+
+        # Ballot and strategy are fixed for the exec: resolve on the first
+        # mutation, reuse on the rest. mutate() clears the cache per exec; a
+        # cache set by anyone but _resolve_strategy() is revalidated.
+        strategy = f._meta_strategy_cached
+        if strategy is None or getattr(f, "_meta_strategy_key", None) is not strategy:
+            strategy = self._resolve_strategy(strategy)
+        elif f._use_elo and f._elo:
+            f._meta_strategy = strategy
+
         # Who actually chose this exec's operators, in either mode. The
         # reward fan-out reads it: a scheduler whose update is only valid for
         # its own draws must not be fed another scheduler's.
@@ -5458,16 +5535,16 @@ class OperatorEngine:
         if f._use_elo and f._elo and strategy:
             f._meta_strategy_used.add(strategy)
 
-        if strategy == "consolidated_v2" and f._consolidated_v2:
-            op = f._consolidated_v2.select_op(ops)
+        # Plain (ops) -> op schedulers: one dict hit instead of a ~48-arm
+        # string compare chain walked on every mutation.
+        attr = _PLAIN_STRATEGIES.get(strategy)
+        if attr is not None:
+            sched = getattr(f, attr)
+            op = sched.select_op(ops) if sched else self.ctx._rng.choice(ops)
             f._last_mopt_particles.append(None)
-        elif strategy == "consolidated_v1" and f._consolidated_v1:
-            op = f._consolidated_v1.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "replicator" and f._replicator:
-            op = f._replicator.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "mopt" and f._mopt:
+            return op
+
+        if strategy == "mopt" and f._mopt:
             op, pid = f._mopt.select_op(ops)
             f._last_mopt_particles.append(pid)
         elif strategy == "bandit" and f.mc and f.mc_bandit:
@@ -5487,59 +5564,11 @@ class OperatorEngine:
             if f.mc_bandit:
                 f._prev_bandit_op = op
             f._last_mopt_particles.append(None)
-        elif strategy == "exp3" and f._exp3:
-            op = f._exp3.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "exp4" and f._exp4:
-            op = f._exp4.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "eps_greedy" and f._eps_greedy:
-            op = f._eps_greedy.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "hierarchical" and f._hierarchical:
-            op = f._hierarchical.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "gp_ucb" and f._gp_ucb:
-            op = f._gp_ucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "bo_gp_ucb" and f._bo_gp_ucb:
-            op = f._bo_gp_ucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "cmaes" and f._cmaes:
-            op = f._cmaes.select_op(ops)
-            f._last_mopt_particles.append(None)
         elif strategy == "contextual" and f._contextual:
             op = f._contextual.select_op(ops, self._context_vector)
             f._last_mopt_particles.append(None)
         elif strategy == "c2ucb" and f._c2ucb:
             op = f._c2ucb.select_op(ops, self._context_vector)
-            f._last_mopt_particles.append(None)
-        elif strategy == "ducb" and f._ducb:
-            op = f._ducb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "swucb" and f._swucb:
-            op = f._swucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "kl_ducb" and f._kl_ducb:
-            op = f._kl_ducb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "kl_swucb" and f._kl_swucb:
-            op = f._kl_swucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "cucb" and f._cucb:
-            op = f._cucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "cusum_ucb" and f._cusum_ucb:
-            op = f._cusum_ucb.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "fewa" and f._fewa:
-            op = f._fewa.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "moss" and f._moss:
-            op = f._moss.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "bayes_ucb" and f._bayes_ucb:
-            op = f._bayes_ucb.select_op(ops)
             f._last_mopt_particles.append(None)
         elif strategy == "invasion" and f.mc and f.mc_bandit:
             # Not in _FALLBACK_PRECEDENCE by design: invasion reads f.mc's
@@ -5568,69 +5597,6 @@ class OperatorEngine:
                 op_stats, frontier_edges=frontier, flux_map=flux_map
             ) or self.ctx._rng.choice(ops)
             f._last_mopt_particles.append(None)
-        elif strategy == "fpl" and f._fpl:
-            op = f._fpl.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "gradient" and f._gradient:
-            op = f._gradient.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "whittle" and f._whittle:
-            op = f._whittle.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "successive_elim" and f._successive_elim:
-            op = f._successive_elim.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "las_vegas" and f._las_vegas:
-            op = f._las_vegas.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "corral" and f._corral:
-            op = f._corral.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "tsallis" and f._tsallis:
-            op = f._tsallis.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "kalman_ts" and f._kalman_ts:
-            op = f._kalman_ts.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "gamma_poisson" and f._gamma_poisson:
-            op = f._gamma_poisson.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "ids" and f._ids:
-            op = f._ids.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "phe" and f._phe:
-            op = f._phe.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "exp3_ix" and f._exp3_ix:
-            op = f._exp3_ix.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "regret_matching" and f._regret_matching:
-            op = f._regret_matching.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "automaton" and f._automaton:
-            op = f._automaton.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "ant_colony" and f._ant_colony:
-            op = f._ant_colony.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "round_robin" and f._round_robin:
-            op = f._round_robin.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "canary" and f._canary:
-            op = f._canary.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "op_katz" and f._op_katz:
-            op = f._op_katz.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "op_kuramoto" and f._op_kuramoto:
-            op = f._op_kuramoto.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "op_tang" and f._op_tang:
-            op = f._op_tang.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "op_kruskal_count" and f._op_kruskal_count:
-            op = f._op_kruskal_count.select_op(ops)
-            f._last_mopt_particles.append(None)
         elif strategy == "op_firefly" and f._op_firefly:
             # Firefly is the second swarm-style scheduler after mopt: it
             # also needs the id of the firefly that drew each op, so it
@@ -5640,30 +5606,6 @@ class OperatorEngine:
             # at once.
             op, fid = f._op_firefly.select_op(ops)
             f._last_mopt_particles.append(fid)
-        elif strategy == "op_credit" and f._op_credit:
-            op = f._op_credit.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "op_tpe" and f._op_tpe:
-            op = f._op_tpe.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "op_strata" and f._op_strata:
-            op = f._op_strata.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "op_stride" and f._op_stride:
-            op = f._op_stride.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "op_p2c" and f._op_p2c:
-            op = f._op_p2c.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "op_good_turing" and f._op_good_turing:
-            op = f._op_good_turing.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "softmax" and f._softmax:
-            op = f._softmax.select_op(ops)
-            f._last_mopt_particles.append(None)
-        elif strategy == "topk" and f._topk:
-            op = f._topk.select_op(ops)
-            f._last_mopt_particles.append(None)
         else:
             op = self.ctx._rng.choice(ops)
             f._last_mopt_particles.append(None)
