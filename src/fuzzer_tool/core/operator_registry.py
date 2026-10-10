@@ -25,7 +25,7 @@ from itertools import compress
 
 import xxhash
 
-from fuzzer_tool.core.mutator_interface import MutationContext
+from fuzzer_tool.core.mutator_interface import Availability, MutationContext
 from fuzzer_tool.core.tree_mutator import has_bracket_delimiter as _tree_mutator_has_delims
 
 log = logging.getLogger(__name__)
@@ -750,6 +750,30 @@ def _weizz_tags_available(f, data: bytes) -> bool:
     return bool(entry.get("weizz_tags_rle"))
 
 
+def _has_dictionary(f, _d) -> bool:
+    return bool(getattr(f, "dictionary", None))
+
+
+def _has_grammar(f, _d) -> bool:
+    return bool(getattr(f, "grammar", None))
+
+
+def _has_delims(_f, d) -> bool:
+    return _tree_mutator_has_delims(d)
+
+
+def _region_sized(_f, d) -> bool:
+    # Needs a parent region profile to confine itself to; _REGION_MIN_LEN in
+    # services/operators.py is the same 512, kept as a literal here so the
+    # registry stays free of a services import.
+    return len(d) >= 512
+
+
+# Input-only gates: available() caches them per input content.
+_has_delims.availability = Availability.INPUT
+_region_sized.availability = Availability.INPUT
+
+
 def _grimoire_book(f):
     stage = getattr(f, "_grimoire", None)
     return None if stage is None else stage.book
@@ -760,14 +784,14 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # format ops — gated on the format being relevant to this target
     **{n: _format_available(n) for n in _FORMAT_SNIFFERS},
     # dictionary ops — only when a dictionary is loaded
-    "dict_insert": lambda f, _d: bool(getattr(f, "dictionary", None)),
-    "dict_replace": lambda f, _d: bool(getattr(f, "dictionary", None)),
-    "dict_overwrite": lambda f, _d: bool(getattr(f, "dictionary", None)),
-    "dict_prepend": lambda f, _d: bool(getattr(f, "dictionary", None)),
-    "dict_append": lambda f, _d: bool(getattr(f, "dictionary", None)),
-    "checksum_repair": lambda f, _d: bool(getattr(f, "dictionary", None)),
-    "token_dup": lambda f, _d: bool(getattr(f, "dictionary", None)),
-    "dict_compound": lambda f, _d: bool(getattr(f, "dictionary", None)),
+    "dict_insert": _has_dictionary,
+    "dict_replace": _has_dictionary,
+    "dict_overwrite": _has_dictionary,
+    "dict_prepend": _has_dictionary,
+    "dict_append": _has_dictionary,
+    "checksum_repair": _has_dictionary,
+    "token_dup": _has_dictionary,
+    "dict_compound": _has_dictionary,
     # model / engine-gated ops
     "markov_bytes": lambda f, _d: bool(getattr(f, "markov_trained", False)),
     "cem_bytes": lambda f, _d: bool(
@@ -775,13 +799,10 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
         and getattr(f, "mc_cem", False)
         and getattr(f.mc, "cem_fitted", False)
     ),
-    "grammar_mutate": lambda f, _d: bool(getattr(f, "grammar", None)),
-    "grammar_tree_mutate": lambda f, _d: bool(getattr(f, "grammar", None)),
+    "grammar_mutate": _has_grammar,
+    "grammar_tree_mutate": _has_grammar,
     "fsm_regen": lambda f, _d: bool(getattr(f, "fsm", None)),
-    # Needs a parent region profile to confine itself to; _REGION_MIN_LEN in
-    # services/operators.py is the same 512, kept as a literal here so the
-    # registry stays free of a services import.
-    "region_shuffle": lambda _f, d: len(d) >= 512,
+    "region_shuffle": _region_sized,
     "redqueen_xform": _has_cmplog_pairs,
     "gradient_cmp": _has_cmplog_pairs,
     "gradient_descent": _has_cmplog_pairs,
@@ -870,8 +891,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # existing tree; only worth a slot when the seed already has nesting
     # delimiters to blend in with. See P2-2,
     # docs/handover/handover_generators_2026-09-20.md.
-    "tree_generate": lambda _f, d: _tree_mutator_has_delims(d),
-    "nest_bomb": lambda _f, d: _tree_mutator_has_delims(d),
+    "tree_generate": _has_delims,
+    "nest_bomb": _has_delims,
 }
 
 
@@ -936,11 +957,27 @@ class _Plan:
 
     names: tuple[str, ...]
     always: list[bool]
-    predicates: list[tuple[int, Callable]]
+    # context gate -> its slots (one call per distinct gate)
+    predicates: list[tuple[Callable, tuple[int, ...]]]
     formats: list[tuple[int, str, Callable[[bytes], bool]]]
     mutators: list[tuple[int, object]]
-    # input hash -> slots whose sniffer matched it (bounded, _SNIFF_CACHE_MAX)
+    # Availability.INPUT gates and mutators, cached per input in `sniffed`
+    input_gates: list[tuple[Callable, tuple[int, ...]]] = field(default_factory=list)
+    input_mutators: list[tuple[int, object]] = field(default_factory=list)
+    input_slots: tuple[int, ...] = ()
+    # input hash -> slots whose sniffer or input gate matched it (bounded,
+    # _SNIFF_CACHE_MAX)
     sniffed: dict[int, frozenset[int]] = field(default_factory=dict)
+
+
+def _input_hits(plan: _Plan, data: bytes) -> frozenset[int]:
+    """Slots that *data* alone enables: matched sniffers, input-only gates."""
+    hits = [i for i, _n, sniff in plan.formats if data and sniff(data)]
+    for fn, slots in plan.input_gates:
+        if fn(None, data):
+            hits.extend(slots)
+    hits.extend(i for i, m in plan.input_mutators if m.is_available(None, data))
+    return frozenset(hits)
 
 
 class OperatorRegistry:
@@ -1037,8 +1074,11 @@ class OperatorRegistry:
         plan = self._current_plan()
         mask = plan.always.copy()
 
-        for i, fn in plan.predicates:
-            mask[i] = bool(fn(fuzzer, data))
+        # Context gates (slow path): each distinct gate once, fanned out.
+        for fn, slots in plan.predicates:
+            ok = bool(fn(fuzzer, data))
+            for i in slots:
+                mask[i] = ok
 
         pending = self._sniff_formats(plan, mask, fuzzer, data)
 
@@ -1057,23 +1097,28 @@ class OperatorRegistry:
 
     @staticmethod
     def _sniff_formats(plan: "_Plan", mask: list, fuzzer, data: bytes) -> list[int]:
-        """Mark live or sniffed formats; return slots awaiting the trickle."""
+        """Mark live or sniffed formats and input-only gates; return slots
+        awaiting the trickle."""
         formats = plan.formats
+
+        # Sniffers and input-only gates are pure in the input, and one
+        # parent seed feeds many execs: evaluate each content once (keyed by
+        # hash, so big seeds are not pinned). Formats keep applying hits to
+        # this fuzzer's live set.
+        key = xxhash.xxh3_64_intdigest(data) if data else 0
+        matched = plan.sniffed.get(key)
+        if matched is None:
+            matched = _input_hits(plan, data)
+            if len(plan.sniffed) >= _SNIFF_CACHE_MAX:
+                plan.sniffed.clear()
+            plan.sniffed[key] = matched
+        for i in plan.input_slots:
+            mask[i] = i in matched
+
         if fuzzer is None:
             for i, _name, _sniff in formats:
                 mask[i] = True
             return []
-
-        # Sniffers are pure in the input, and one parent seed feeds many
-        # execs: sniff each content once (keyed by hash, so big seeds are
-        # not pinned), and keep applying hits to this fuzzer's live set.
-        key = xxhash.xxh3_64_intdigest(data) if data else 0
-        matched = plan.sniffed.get(key)
-        if matched is None:
-            matched = frozenset(i for i, _n, sniff in formats if data and sniff(data))
-            if len(plan.sniffed) >= _SNIFF_CACHE_MAX:
-                plan.sniffed.clear()
-            plan.sniffed[key] = matched
 
         live = _live_formats(fuzzer)
         pending = []
@@ -1095,19 +1140,37 @@ class OperatorRegistry:
         return self._plan
 
     def _build_plan(self) -> "_Plan":
-        """Registry-ordered names plus per-gate (slot, fn) lists, built once."""
+        """Registry-ordered names plus per-gate slot lists, built once.
+
+        Gates are grouped by function identity (one call per distinct gate)
+        and split by what they read (see ``Availability``).
+        """
         plan = _Plan(names=tuple(self._ops), always=[], predicates=[], formats=[], mutators=[])
+        groups: dict[int, tuple[Callable, list[int]]] = {}
+        input_groups: dict[int, tuple[Callable, list[int]]] = {}
         for i, spec in enumerate(self._ops.values()):
             plan.always.append(spec.available is None)
             fmt = getattr(spec.available, "format_name", None)
             if spec.available is None:
                 continue
             if spec.mutator is not None:
-                plan.mutators.append((i, spec.mutator))
+                if spec.mutator.availability is Availability.INPUT:
+                    plan.input_mutators.append((i, spec.mutator))
+                else:
+                    plan.mutators.append((i, spec.mutator))
             elif fmt is not None:
                 plan.formats.append((i, spec.name, _FORMAT_SNIFFERS[fmt]))
             else:
-                plan.predicates.append((i, spec.available))
+                pure = getattr(spec.available, "availability", None) is Availability.INPUT
+                target = input_groups if pure else groups
+                target.setdefault(id(spec.available), (spec.available, []))[1].append(i)
+
+        plan.predicates = [(fn, tuple(slots)) for fn, slots in groups.values()]
+        plan.input_gates = [(fn, tuple(slots)) for fn, slots in input_groups.values()]
+        plan.input_slots = tuple(
+            [i for _fn, slots in plan.input_gates for i in slots]
+            + [i for i, _m in plan.input_mutators]
+        )
         return plan
 
     def categories(self) -> dict[str, set[str]]:

@@ -20,7 +20,7 @@ from collections.abc import Callable
 from functools import lru_cache
 
 from fuzzer_tool.core.lru import LRUCache
-from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
+from fuzzer_tool.core.mutator_interface import Availability, MutationContext, MutatorBase
 
 # Geometry helpers are pure functions of (layer, cell): the jittered
 # Voronoi grid is deterministic and reads no instance state, so they are
@@ -168,6 +168,8 @@ class FractalVoronoiMutator(MutatorBase):
         cell_ops: List of callable sub-operators. If None, the mutator
             falls back to simple byte XOR (useful for standalone testing).
     """
+
+    availability = Availability.INPUT  # is_available reads only the input
 
     name = "fractal_voronoi"
     category = "structural"

@@ -35,7 +35,7 @@ from functools import lru_cache
 
 import numpy as np
 
-from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
+from fuzzer_tool.core.mutator_interface import Availability, MutationContext, MutatorBase
 
 
 def _smootherstep(t: float) -> float:
@@ -178,6 +178,8 @@ class PerlinNoiseMutator(MutatorBase):
             inputs get different fields (not degenerate mutation of every
             seed the same way).
     """
+
+    availability = Availability.INPUT  # is_available reads only the input
 
     name = "perlin_noise"
     category = "structural"
