@@ -21,6 +21,7 @@ import time
 import zlib
 from array import array
 from collections import defaultdict
+from collections.abc import Callable
 
 from fuzzer_tool.core import fast_json as json
 from fuzzer_tool.core.crc32 import crc32_ieee
@@ -798,6 +799,37 @@ def _int_keyed(raw: dict) -> dict[int, int]:
     return {int(e): c for e, c in raw.items()}
 
 
+class _GenClock:
+    """Generation tag -> exec count for one SHM table (8-bit, wraps at 256)."""
+
+    __slots__ = ("entry_tags", "execs", "last", "last_exec", "read_gen")
+
+    def __init__(self, read_gen, entry_tags) -> None:
+        self.read_gen = read_gen
+        self.entry_tags = entry_tags
+        self.execs = array("q", [-1]) * _GEN_SPAN
+        self.last = -1
+        self.last_exec = -1
+
+    def catch_up(self) -> None:
+        """Reruns since the last exec: their generations date to it."""
+        if self.last >= 0:
+            self.fill(self.read_gen(), self.last_exec)
+
+    def fill(self, gen: int, exec_count: int) -> None:
+        """Date generations up to *gen*: skipped ones (reruns) belong to the
+        last recorded exec, *gen* itself to *exec_count*."""
+        last = self.last
+        if last >= 0 and gen != last:
+            k = (last + 1) % _GEN_SPAN
+            while k != gen:
+                self.execs[k] = self.last_exec
+                k = (k + 1) % _GEN_SPAN
+        self.execs[gen] = exec_count
+        self.last = gen
+        self.last_exec = exec_count
+
+
 class EdgeTracker:
     """Track coverage edges per seed for smarter scheduling.
 
@@ -885,13 +917,13 @@ class EdgeTracker:
         # Per-edge lifetime: exec count when edge was first/last seen
         self._edge_first_seen: dict[int, int] = {}
         self._edge_last_seen: dict[int, int] = {}
-        # SHM-backed last-seen (attach_generations): exec count per 8-bit
-        # generation tag, folded into _edge_last_seen at table loss or read.
-        self._gen_exec = array("q", [-1]) * _GEN_SPAN
-        self._gen_last = -1
-        self._gen_last_exec = -1
-        self._read_gen = None
-        self._entry_tags = None
+        # SHM-backed last-seen (attach_generations): one generation clock per
+        # SHM table (key None single-target, the target in multi-target),
+        # folded into _edge_last_seen at table loss or read. _clock is the
+        # table the current exec ran on.
+        self._clocks: dict[object, _GenClock] = {}
+        self._clock: _GenClock | None = None
+        self._source: Callable[[], object] | None = None
         # discovery_frontier_edges() memo, keyed on len(_edge_first_seen).
         # Not serialized: from_dict resets it so a restore cannot be answered
         # from a stamp computed against a different map.
@@ -1020,7 +1052,11 @@ class EdgeTracker:
         self._corpus_profile_cache = None
 
         # Update temporal tracking
-        self.record_edge_lifetimes(new_edges, len(self.cumulative_edges))
+        if self._clock is None:
+            self.record_edge_lifetimes(new_edges, len(self.cumulative_edges))
+        else:
+            # Not an exec: must not date the current generation.
+            self._note_first_seen(new_edges, len(self.cumulative_edges))
         self.update_correlation(new_edges)
 
         # Prune old seeds if over limit
@@ -1429,20 +1465,41 @@ class EdgeTracker:
                 self._edge_first_seen[edge] = exec_count
             self._edge_last_seen[edge] = exec_count
 
-    def attach_generations(self, read_gen, entry_tags) -> None:
+    def attach_generations(self, read_gen, entry_tags, key: object = None) -> None:
         """Take last-seen from SHM generation tags instead of per-exec writes.
 
         Every SHM entry carries the generation of the last exec that hit it,
         so per exec only first-seen and generation -> exec count are kept
         (O(1) beyond the first-seen scan); ``fold_tags`` turns the tags into
         last-seen once per wrap window. The caller wires the SHM's
-        ``on_table_loss`` to ``fold_tags``.
+        ``on_table_loss`` to ``fold_tags`` (with *key*). One call per SHM
+        table; multi-target also calls ``follow_source``.
         """
-        self._read_gen = read_gen
-        self._entry_tags = entry_tags
+        clock = _GenClock(read_gen, entry_tags)
+        self._clocks[key] = clock
+        self._clock = clock
         self.record_edge_lifetimes = self._record_first_seen
 
+    def follow_source(self, source: Callable[[], object]) -> None:
+        """Multi-target: *source()* names the table (attach key) each exec ran on."""
+        self._source = source
+        self.record_edge_lifetimes = self._record_first_seen_multi
+
+    def _record_first_seen_multi(self, edge_set: set[int], exec_count: int) -> None:
+        self._clock = self._clocks[self._source()]
+        self._record_first_seen(edge_set, exec_count)
+
     def _record_first_seen(self, edge_set: set[int], exec_count: int) -> None:
+        # Per exec: inlined _note_first_seen + clock.stamp (hot path).
+        first = self._edge_first_seen
+        if not first.keys() >= edge_set:
+            for edge in edge_set:
+                if edge not in first:
+                    first[edge] = exec_count
+        clock = self._clock
+        clock.fill(clock.read_gen(), exec_count)
+
+    def _note_first_seen(self, edge_set: set[int], exec_count: int) -> None:
         first = self._edge_first_seen
         # Steady state: every edge already known. One C-level superset test
         # (281 us at 8k edges) instead of the per-edge loop (414 us).
@@ -1450,41 +1507,28 @@ class EdgeTracker:
             for edge in edge_set:
                 if edge not in first:
                     first[edge] = exec_count
-        self._fill_gens(self._read_gen(), exec_count)
 
-    def _fill_gens(self, gen: int, exec_count: int) -> None:
-        """Date generations up to *gen*: skipped ones (reruns) belong to the
-        last recorded exec, *gen* itself to *exec_count*."""
-        last = self._gen_last
-        if last >= 0 and gen != last:
-            k = (last + 1) % _GEN_SPAN
-            while k != gen:
-                self._gen_exec[k] = self._gen_last_exec
-                k = (k + 1) % _GEN_SPAN
-        self._gen_exec[gen] = exec_count
-        self._gen_last = gen
-        self._gen_last_exec = exec_count
-
-    def fold_tags(self, ids, tags) -> None:
+    def fold_tags(self, ids, tags, key: object = None) -> None:
         """Fold SHM ``(edge_id, generation tag)`` pairs into last-seen.
 
-        Ids never reported as edges (masked, phantom) are skipped. Tags are
-        no older than anything already folded, so plain assignment is right.
+        Ids never reported as edges (masked, phantom) are skipped. Keeps the
+        later of the current and folded value: tables of other targets may
+        hold newer hits of a shared edge id.
         """
-        if self._gen_last >= 0:
-            # Reruns since the last exec: their generations date to it.
-            self._fill_gens(self._read_gen(), self._gen_last_exec)
-        execs = np.frombuffer(self._gen_exec, dtype=np.int64)[tags]
+        clock = self._clocks[key]
+        clock.catch_up()
+        execs = np.frombuffer(clock.execs, dtype=np.int64)[tags]
         first = self._edge_first_seen
         last = self._edge_last_seen
+        last_get = last.get
         for edge, c in zip(ids.tolist(), execs.tolist(), strict=True):
-            if c >= 0 and edge in first:
+            if c >= 0 and edge in first and c > last_get(edge, -1):
                 last[edge] = c
 
     def _sync_last_seen(self) -> None:
-        """Fold the current (unwiped) window before anything reads last-seen."""
-        if self._entry_tags is not None:
-            self.fold_tags(*self._entry_tags())
+        """Fold every current (unwiped) window before anything reads last-seen."""
+        for key, clock in self._clocks.items():
+            self.fold_tags(*clock.entry_tags(), key=key)
 
     def record_coverage_snapshot(self, exec_count: int):
         """Record a point-in-time snapshot of cumulative edge count.
