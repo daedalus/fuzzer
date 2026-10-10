@@ -26,6 +26,9 @@ from fuzzer_tool.core import fast_json as json
 from fuzzer_tool.core.crc32 import crc32_ieee
 from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
+# SHM generation tags are 8 bits: one wrap window spans 256 resets.
+_GEN_SPAN = 256
+
 # ── Memory bounds ────────────────────────────────────────────────────
 # Below this many doubleton edges the classic Chao2 ratio Q1^2/(2*Q2) swings on
 # a single edge changing owner count, so use the bias-corrected form instead.
@@ -882,6 +885,13 @@ class EdgeTracker:
         # Per-edge lifetime: exec count when edge was first/last seen
         self._edge_first_seen: dict[int, int] = {}
         self._edge_last_seen: dict[int, int] = {}
+        # SHM-backed last-seen (attach_generations): exec count per 8-bit
+        # generation tag, folded into _edge_last_seen at table loss or read.
+        self._gen_exec = array("q", [-1]) * _GEN_SPAN
+        self._gen_last = -1
+        self._gen_last_exec = -1
+        self._read_gen = None
+        self._entry_tags = None
         # discovery_frontier_edges() memo, keyed on len(_edge_first_seen).
         # Not serialized: from_dict resets it so a restore cannot be answered
         # from a stamp computed against a different map.
@@ -1406,6 +1416,63 @@ class EdgeTracker:
                 self._edge_first_seen[edge] = exec_count
             self._edge_last_seen[edge] = exec_count
 
+    def attach_generations(self, read_gen, entry_tags) -> None:
+        """Take last-seen from SHM generation tags instead of per-exec writes.
+
+        Every SHM entry carries the generation of the last exec that hit it,
+        so per exec only first-seen and generation -> exec count are kept
+        (O(1) beyond the first-seen scan); ``fold_tags`` turns the tags into
+        last-seen once per wrap window. The caller wires the SHM's
+        ``on_table_loss`` to ``fold_tags``.
+        """
+        self._read_gen = read_gen
+        self._entry_tags = entry_tags
+        self.record_edge_lifetimes = self._record_first_seen
+
+    def _record_first_seen(self, edge_set: set[int], exec_count: int) -> None:
+        first = self._edge_first_seen
+        # Steady state: every edge already known. One C-level superset test
+        # (281 us at 8k edges) instead of the per-edge loop (414 us).
+        if not first.keys() >= edge_set:
+            for edge in edge_set:
+                if edge not in first:
+                    first[edge] = exec_count
+        self._fill_gens(self._read_gen(), exec_count)
+
+    def _fill_gens(self, gen: int, exec_count: int) -> None:
+        """Date generations up to *gen*: skipped ones (reruns) belong to the
+        last recorded exec, *gen* itself to *exec_count*."""
+        last = self._gen_last
+        if last >= 0 and gen != last:
+            k = (last + 1) % _GEN_SPAN
+            while k != gen:
+                self._gen_exec[k] = self._gen_last_exec
+                k = (k + 1) % _GEN_SPAN
+        self._gen_exec[gen] = exec_count
+        self._gen_last = gen
+        self._gen_last_exec = exec_count
+
+    def fold_tags(self, ids, tags) -> None:
+        """Fold SHM ``(edge_id, generation tag)`` pairs into last-seen.
+
+        Ids never reported as edges (masked, phantom) are skipped. Tags are
+        no older than anything already folded, so plain assignment is right.
+        """
+        if self._gen_last >= 0:
+            # Reruns since the last exec: their generations date to it.
+            self._fill_gens(self._read_gen(), self._gen_last_exec)
+        execs = np.frombuffer(self._gen_exec, dtype=np.int64)[tags]
+        first = self._edge_first_seen
+        last = self._edge_last_seen
+        for edge, c in zip(ids.tolist(), execs.tolist(), strict=True):
+            if c >= 0 and edge in first:
+                last[edge] = c
+
+    def _sync_last_seen(self) -> None:
+        """Fold the current (unwiped) window before anything reads last-seen."""
+        if self._entry_tags is not None:
+            self.fold_tags(*self._entry_tags())
+
     def record_coverage_snapshot(self, exec_count: int):
         """Record a point-in-time snapshot of cumulative edge count.
 
@@ -1505,6 +1572,7 @@ class EdgeTracker:
         Returns:
             Dict with median, mean, max lifetime (in execs).
         """
+        self._sync_last_seen()
         if not self._edge_first_seen or not self._edge_last_seen:
             return {"median": 0, "mean": 0.0, "max": 0}
         lifetimes = []
@@ -3341,6 +3409,7 @@ class EdgeTracker:
 
     def to_dict(self) -> dict:
         """Serialize tracker state to a dict (for StateStore pickle)."""
+        self._sync_last_seen()
         return {
             "map_size": self.map_size,
             "morris_mode": self._morris_mode,
