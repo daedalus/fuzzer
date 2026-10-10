@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from fuzzer_tool.core import covering_array, field_spec
-from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
+from fuzzer_tool.core.mutator_interface import Availability, MutationContext, MutatorBase
 
 _U32 = 0xFFFFFFFF
 _U24 = 0xFFFFFF
@@ -83,6 +83,8 @@ ZIP_FIELDS: tuple[field_spec.FieldDef, ...] = (
 
 class _HeaderCoveringMutator(MutatorBase):
     """Sweeps a pairwise covering array over a fixed-offset header."""
+
+    availability = Availability.INPUT  # is_available reads only the input
 
     category = "format"
     fields: ClassVar[tuple[field_spec.FieldDef, ...]] = ()

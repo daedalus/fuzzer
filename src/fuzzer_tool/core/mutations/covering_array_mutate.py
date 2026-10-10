@@ -40,7 +40,7 @@ from typing import Any
 
 from fuzzer_tool.core import covering_array, failure_inducing
 from fuzzer_tool.core.mutations.png import parse_png_chunks, serialize_png_chunks
-from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
+from fuzzer_tool.core.mutator_interface import Availability, MutationContext, MutatorBase
 
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
@@ -151,6 +151,8 @@ class PngCoveringArrayMutator(MutatorBase):
     why redrawing per call instead would silently drop the coverage
     guarantee this operator exists for.
     """
+
+    availability = Availability.INPUT  # is_available reads only the input
 
     name = "covering_array_ihdr"
     category = "format"

@@ -161,7 +161,8 @@ def test_report_empty_without_edges():
 @pytest.mark.parametrize("multi", [None, ["t1", "t2"]])
 def test_wiring_single_target_only(cov, multi):
     """Falsification + adversarial: single-target SHM folds; multi-target
-    (per-target tables, separate generations) keeps per-exec writes."""
+    without per-target tables keeps per-exec writes (see
+    test_regression_multi_target_last_seen)."""
     from types import SimpleNamespace
 
     from fuzzer_tool.services.corpus_manager import _wire_lifetimes

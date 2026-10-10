@@ -34,7 +34,7 @@ from typing import Any, ClassVar
 
 from fuzzer_tool.core import covering_array, field_spec
 from fuzzer_tool.core.mutations.covering_array_container import ZIP_FIELDS
-from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
+from fuzzer_tool.core.mutator_interface import Availability, MutationContext, MutatorBase
 
 _U32 = 0xFFFFFFFF
 _U24 = 0xFFFFFF
@@ -59,6 +59,8 @@ Values = tuple[tuple[str, tuple[int, ...]], ...]
 
 class _WalkedCoveringMutator(MutatorBase):
     """Fields come from ``layout(data, rng)``; values are fixed per operator."""
+
+    availability = Availability.INPUT  # is_available reads only the input
 
     category = "format"
     values: ClassVar[Values] = ()

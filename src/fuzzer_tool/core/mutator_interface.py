@@ -67,6 +67,7 @@ precisely while there are no implementors.
 
 from __future__ import annotations
 
+import enum
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -267,6 +268,17 @@ class MutationContext:
         )
 
 
+class Availability(enum.Enum):
+    """What an availability check reads, which decides how often it runs.
+
+    CONTEXT: fuzzer state; re-checked on every call. INPUT: the input bytes
+    only (context unused, may be None); cached per input content.
+    """
+
+    CONTEXT = "context"
+    INPUT = "input"
+
+
 class MutatorBase(ABC):
     """Abstract base for self-contained, registerable mutators.
 
@@ -280,6 +292,9 @@ class MutatorBase(ABC):
 
     #: Registry category band this mutator is classified under.
     category: str = "adaptive"
+
+    #: What is_available() reads; INPUT lets the registry cache it per input.
+    availability: Availability = Availability.CONTEXT
 
     @abstractmethod
     def mutate(

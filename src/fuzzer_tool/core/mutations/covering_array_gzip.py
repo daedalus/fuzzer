@@ -26,7 +26,7 @@ from __future__ import annotations
 from typing import Any
 
 from fuzzer_tool.core import covering_array, field_spec
-from fuzzer_tool.core.mutator_interface import MutationContext, MutatorBase
+from fuzzer_tool.core.mutator_interface import Availability, MutationContext, MutatorBase
 
 _GZIP_MAGIC = b"\x1f\x8b"
 HEADER_LEN = 10
@@ -49,6 +49,8 @@ _VALUE_SETS = tuple(f.values for f in _FIELDS)
 
 class GzipCoveringArrayMutator(MutatorBase):
     """``covering_array_gzip``: sweeps a pairwise covering array over the header."""
+
+    availability = Availability.INPUT  # is_available reads only the input
 
     name = "covering_array_gzip"
     category = "format"

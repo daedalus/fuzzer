@@ -12,6 +12,7 @@ Extracted from Fuzzer class (~lines 648-783, 1845-2231). Contains:
 Signal name mapping for crash return codes.
 """
 
+import functools
 import hashlib
 import logging
 import math
@@ -328,13 +329,33 @@ def _retire_seed_file(corpus_dir: Path, h: str) -> bool:
 
 
 def _wire_lifetimes(f) -> None:
-    """Single-target SHM: date each edge's last hit from the table's
-    generation tags (one fold per 256 execs) instead of per-edge writes."""
+    """SHM: date each edge's last hit from the table's generation tags (one
+    fold per 256 execs) instead of per-edge writes."""
+    if getattr(f, "multi_targets", None):
+        _wire_multi_lifetimes(f)
+        return
     shm = getattr(f, "shm_cov", None)
-    if shm is None or getattr(f, "multi_targets", None):
+    if shm is None:
         return
     f._edge_tracker.attach_generations(shm.read_generation, shm.entry_tags)
     shm.on_table_loss = f._edge_tracker.fold_tags
+
+
+def _wire_multi_lifetimes(f) -> None:
+    """One generation clock per target table, stamped for the target that ran.
+
+    A target without its own table (shared-SHM fallback) mixes generations
+    of several targets in one table: keep per-exec writes for the run.
+    """
+    tables = getattr(f, "_target_shm_covs", None) or {}
+    if any(tables.get(t) is None for t in f.multi_targets):
+        return
+    tracker = f._edge_tracker
+    for t in f.multi_targets:
+        shm = tables[t]
+        tracker.attach_generations(shm.read_generation, shm.entry_tags, key=t)
+        shm.on_table_loss = functools.partial(tracker.fold_tags, key=t)
+    tracker.follow_source(lambda: f.target)
 
 
 class CorpusManager:
