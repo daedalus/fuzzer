@@ -159,6 +159,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_smt_solver_activity(fuzzer))
     sections.append(_seed_contribution(fuzzer))
     sections.append(_edge_rarity(fuzzer))
+    sections.append(_edge_lifetimes(fuzzer))
     sections.append(_corpus_health(fuzzer))
     sections.append(_corpus_overview(fuzzer, corpus_dir))
     sections.append(_crash_analysis(fuzzer, crashes_dir))
@@ -2428,6 +2429,23 @@ def _edge_rarity(f) -> str:
         lines.append(f"  Co-occurrence:    {pairs_str}")
 
     return "\n".join(lines)
+
+
+def _edge_lifetimes(f) -> str:
+    """First-to-last-seen span per edge, in execs."""
+    et = getattr(f, "_edge_tracker", None)
+    if et is None:
+        return ""
+    st = et.edge_lifetime_stats()
+    if not st["max"]:
+        return ""
+    return "\n".join(
+        [
+            "",
+            "--- Edge Lifetimes ---",
+            f"  median {st['median']}, mean {st['mean']:.1f}, max {st['max']} execs",
+        ]
+    )
 
 
 def _crash_rate_trend(f) -> str:

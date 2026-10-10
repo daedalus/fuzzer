@@ -327,6 +327,16 @@ def _retire_seed_file(corpus_dir: Path, h: str) -> bool:
     return moved
 
 
+def _wire_lifetimes(f) -> None:
+    """Single-target SHM: date each edge's last hit from the table's
+    generation tags (one fold per 256 execs) instead of per-edge writes."""
+    shm = getattr(f, "shm_cov", None)
+    if shm is None or getattr(f, "multi_targets", None):
+        return
+    f._edge_tracker.attach_generations(shm.read_generation, shm.entry_tags)
+    shm.on_table_loss = f._edge_tracker.fold_tags
+
+
 class CorpusManager:
     """Manages corpus persistence, state, and minimization.
 
@@ -413,6 +423,7 @@ class CorpusManager:
 
         morris_mode = os.environ.get("AFL_MORRIS", "1") != "0"
         f._edge_tracker = EdgeTracker(map_size=f.map_size, morris_mode=morris_mode)
+        _wire_lifetimes(f)
         f._corpus_size_history: array = array("I")
         f._seed_size_moments = RunningMoments(window=200)
 

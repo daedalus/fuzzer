@@ -107,6 +107,7 @@ def _make_mock_fuzzer(**overrides):
         "avg_seeds_per_edge": 1.4,
     }
     f._edge_tracker.seed_uniqueness.return_value = {"a": 2, "b": 1}
+    f._edge_tracker.edge_lifetime_stats.return_value = {"median": 40, "mean": 52.5, "max": 300}
     f._edge_tracker.edge_cooccurrence.return_value = [(1, 2, 0.8)]
     f._edge_tracker.good_turing_estimate.return_value = {
         "n": 18,

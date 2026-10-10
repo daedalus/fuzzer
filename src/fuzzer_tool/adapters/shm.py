@@ -19,6 +19,7 @@ import ctypes
 import logging
 import os
 import weakref
+from collections.abc import Callable
 
 import numpy as np
 
@@ -269,6 +270,10 @@ class ShmCoverage:
         # table (see _scan_touched). It owns the bitmap's per-execution clear,
         # so it implies the region.
         self.touched_scan = bool(touched_scan)
+        # Called with entry_tags() just before the table's contents are
+        # discarded (generation wrap wipe, resize). Lets a consumer fold the
+        # per-entry last-hit tags instead of recording them every exec.
+        self.on_table_loss: Callable[[np.ndarray, np.ndarray], None] | None = None
         self.touched_enabled = bool(touched_bitmap) or self.touched_scan
         if self.touched_enabled:
             self.shm_bytes += touched_region_bytes(size)
@@ -687,6 +692,10 @@ class ShmCoverage:
         """
         gen = self.read_generation()
         new_gen = (gen + 1) & 0xFF
+        if new_gen == 0:
+            # Before the bump: the consumer dates tags against the window's
+            # own generations, which the header still reports.
+            self._notify_table_loss()
         ctypes.c_uint32.from_address(self._ptr + SHM_GENERATION_OFFSET).value = new_gen
         if new_gen == 0:
             ctypes.memset(self._ptr + SHM_METADATA_SIZE, 0, self.table_bytes)
@@ -781,6 +790,22 @@ class ShmCoverage:
             delta = raw
         self._last_dropped = raw
         return delta
+
+    def entry_tags(self) -> tuple[np.ndarray, np.ndarray]:
+        """``(edge_id, generation tag)`` of every claimed entry, live or stale.
+
+        The tag is the generation of the last execution that hit the entry,
+        so within one wrap window it dates each edge's last hit.
+        """
+        words = np.frombuffer(self._map, dtype="<u8", count=self.num_entries)
+        ids = words.astype(np.uint32)
+        claimed = ids != 0
+        tags = (words[claimed] >> np.uint64(56)).astype(np.uint8)
+        return ids[claimed], tags
+
+    def _notify_table_loss(self) -> None:
+        if self.on_table_loss is not None:
+            self.on_table_loss(*self.entry_tags())
 
     def read_generation(self) -> int:
         """Stale-entry tag (offset 4), owned by this side.
@@ -1265,6 +1290,8 @@ class ShmCoverage:
         if new_table_bytes <= self.table_bytes:
             return
 
+        # The old table is not carried over (see below): fold its tags first.
+        self._notify_table_loss()
         new_shm_id, new_ptr = _alloc_segment(new_total_bytes, what="resize")
 
         ctypes.memset(new_ptr, 0, new_total_bytes)
