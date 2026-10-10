@@ -204,19 +204,17 @@ def pairs_from_operand_records(lines: Iterable[str]) -> list[tuple[bytes, bytes]
     return out
 
 
-def conds_from_cmplog_text(lines: Iterable[str]) -> list[CondStmt]:
-    """Build CondStmt objects from raw cmplog log lines.
+def cond_tuples_from_cmplog_text(lines: Iterable[str]) -> list[tuple]:
+    """``(op_a, op_b, width, result, pc)`` per distinct ``CMP`` line, in order.
 
-    This consumes the same ``CMP <a> <b> <result> <width> [pc]`` lines
-    the cmplog shim writes, so no separate track file is needed.
+    The fields of ``conds_from_cmplog_text`` without building a CondStmt per
+    line: a drain ingests ~10k of them and reads only these five fields.
     """
-    out: list[CondStmt] = []
-    # Content keys, not CondStmt.key: that one carries the fresh cmpid, so it
-    # never matched and every repeat (~200k lines per ffmpeg drain) became an
-    # object. Repeats add nothing downstream; first occurrence keeps order.
+    out: list[tuple] = []
+    # Content keys: every repeat (~200k lines per ffmpeg drain) adds nothing
+    # downstream; first occurrence keeps order.
     seen_lines: set[str] = set()
     seen: set[tuple] = set()
-    cmpid = 0
     for line in lines:
         line = line.strip()
         if line in seen_lines:
@@ -243,7 +241,25 @@ def conds_from_cmplog_text(lines: Iterable[str]) -> list[CondStmt]:
             continue
 
         seen.add(k)
-        out.append(CondStmt.from_cmplog_pair(cmpid, op_a, op_b, width, result=result, pc=pc))
-        cmpid += 1
+        out.append(k)
+    return out
+
+
+def conds_from_tuples(tuples: Iterable[tuple]) -> list[CondStmt]:
+    """CondStmt list from ``cond_tuples_from_cmplog_text`` output; cmpid is
+    the encounter index."""
+    return [
+        CondStmt.from_cmplog_pair(i, op_a, op_b, width, result=result, pc=pc)
+        for i, (op_a, op_b, width, result, pc) in enumerate(tuples)
+    ]
+
+
+def conds_from_cmplog_text(lines: Iterable[str]) -> list[CondStmt]:
+    """Build CondStmt objects from raw cmplog log lines.
+
+    This consumes the same ``CMP <a> <b> <result> <width> [pc]`` lines
+    the cmplog shim writes, so no separate track file is needed.
+    """
+    out = conds_from_tuples(cond_tuples_from_cmplog_text(lines))
     log.debug("conds_from_cmplog_text: parsed %d CondStmt from input lines", len(out))
     return out

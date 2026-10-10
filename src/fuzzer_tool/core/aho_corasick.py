@@ -185,7 +185,7 @@ class TokenScanner:
             tests and for the stats line, not consulted by the scan itself.
     """
 
-    __slots__ = ("_automaton", "_built", "_known", "_scan_tokens", "backend", "tokens")
+    __slots__ = ("_automaton", "_built", "_known", "_live", "_scan_tokens", "backend", "tokens")
 
     def __init__(
         self,
@@ -200,6 +200,8 @@ class TokenScanner:
         self.tokens: list[bytes] = [t for t in dict.fromkeys(tokens) if t]
         self._built = len(self.tokens)
         self._known: set[bytes] | None = None
+        # Tokens still in the pool after retarget(); None = all of them.
+        self._live: set[bytes] | None = None
 
         if len(self.tokens) < min_tokens:
             self._automaton = None
@@ -243,10 +245,39 @@ class TokenScanner:
             return False
 
         known.update(new)
+        if self._live is not None:
+            self._live.update(new)
         self.tokens.extend(new)
         if self._scan_tokens is self.tokens:
             return True  # find backend: the scan list is the token list
         self._scan_tokens.extend(new)
+        return True
+
+    def retarget(self, tokens: Iterable[bytes]) -> bool:
+        """Follow a pool that dropped some tokens and gained others.
+
+        Fast path for the collector's eviction, which rebinds the pool every
+        drain once it is full: keep the automaton, ``find``-scan the new
+        tokens and filter dropped ones out of ``scan`` results (identical to
+        a fresh build). False -- nothing changed -- when dropped + new tokens
+        pass 1/``TAIL_REBUILD_RATIO`` of the built ones; the caller rebuilds.
+        """
+        if self._automaton is None:
+            return False  # find backend: a rebuild is a list copy
+        if self._known is None:
+            self._known = set(self.tokens)
+        known = self._known
+        live = dict.fromkeys(t for t in tokens if t)
+        new = [t for t in live if t not in known]
+        dead = len(known) - (len(live) - len(new))
+        tail = len(self.tokens) - self._built + len(new)
+        if (tail + dead) * TAIL_REBUILD_RATIO > self._built:
+            return False
+
+        known.update(new)
+        self.tokens.extend(new)
+        self._scan_tokens.extend(new)
+        self._live = set(live)
         return True
 
     def scan(self, data: bytes, min_len: int = 1) -> dict[bytes, list[int]]:
@@ -280,6 +311,10 @@ class TokenScanner:
                 pos = idx + 1
             if offsets:
                 found[tok] = offsets
+        live = self._live
+        if live is not None:
+            # Tokens that left the pool (see retarget) stay in the automaton.
+            found = {t: o for t, o in found.items() if t in live}
         return found
 
 
@@ -328,6 +363,13 @@ def scanner_for_pairs(pairs: Sequence[tuple[bytes, bytes]]) -> TokenScanner:
     # absorb the new tail unless a rebuild is due.
     grown = _cache_scanner is not None and _cache_owner is pairs and _cache_len < len(pairs)
     if grown and _cache_scanner.absorb(tokens_from_pairs(pairs[_cache_len:])):
+        _cache_len = len(pairs)
+        return _cache_scanner
+
+    # Rebound (eviction): retarget the automaton unless churn calls for a rebuild.
+    rebound = _cache_scanner is not None and _cache_owner is not pairs
+    if rebound and _cache_scanner.retarget(tokens_from_pairs(pairs)):
+        _cache_owner = pairs
         _cache_len = len(pairs)
         return _cache_scanner
 

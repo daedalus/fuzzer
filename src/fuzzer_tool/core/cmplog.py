@@ -37,7 +37,8 @@ from collections.abc import Iterable
 
 from fuzzer_tool.adapters.track_parser import (
     CondStmt,
-    conds_from_cmplog_text,
+    cond_tuples_from_cmplog_text,
+    conds_from_tuples,
     pairs_from_operand_records,
 )
 
@@ -1068,11 +1069,17 @@ class CmplogCollector:
         new_pairs: list[tuple[bytes, bytes]] = []
         batch_pairs: dict[tuple[bytes, bytes], None] = {}
         # Built once here rather than re-parsed by the consumer:
-        # conds_from_cmplog_text is the only thing that keeps encounter order
-        # and the PC field, and this is the one place the raw lines exist.
-        conds = conds_from_cmplog_text(new_lines)
-        self.last_conds = conds
-        self._ingest_conds(conds, tokens, new_pairs, batch_pairs)
+        # The parse is the only thing that keeps encounter order and the PC
+        # field, and this is the one place the raw lines exist. Plain tuples:
+        # CondStmt objects are built only if last_conds is read.
+        # A drain repeats each line many times (~200k lines, ~10k distinct
+        # on FFmpeg). Both parsers dedupe downstream, so drop repeats once at
+        # C level (order kept) instead of stripping and probing each copy.
+        new_lines = list(dict.fromkeys(new_lines))
+        cond_tuples = cond_tuples_from_cmplog_text(new_lines)
+        self._last_cond_tuples = cond_tuples
+        self._last_conds = None
+        self._ingest_conds(cond_tuples, tokens, new_pairs, batch_pairs)
 
         for pair in pairs_from_operand_records(new_lines):
             if pair not in self._pair_set:
@@ -1101,19 +1108,35 @@ class CmplogCollector:
         return new_tokens
 
     def _ingest_conds(self, conds, tokens: dict, new_pairs: list, batch_pairs: dict) -> None:
-        """Record each comparison's operand pair (+ PC / result) and tokens."""
-        for c in conds:
-            pair = (c.base.op_a, c.base.op_b)
-            if pair not in self._pair_set:
-                self._pair_set.add(pair)
+        """Record each comparison's operand pair (+ PC / result) and tokens.
+
+        *conds* are ``(op_a, op_b, width, result, pc)`` tuples.
+        """
+        pair_set = self._pair_set
+        for op_a, op_b, width, result, pc in conds:
+            pair = (op_a, op_b)
+            if pair not in pair_set:
+                pair_set.add(pair)
                 new_pairs.append(pair)
-                if c.base.pc is not None:
-                    self._pair_pc[pair] = c.base.pc
-                if c.base.result is not None and c.base.width is not None:
-                    self._pair_cmp[pair] = (c.base.result, c.base.width)
+                if pc is not None:
+                    self._pair_pc[pair] = pc
+                if result is not None and width is not None:
+                    self._pair_cmp[pair] = (result, width)
             batch_pairs[pair] = None
-            tokens[c.base.op_a] = None
-            tokens[c.base.op_b] = None
+            tokens[op_a] = None
+            tokens[op_b] = None
+
+    @property
+    def last_conds(self) -> list[CondStmt]:
+        """This drain's CondStmt list, built on first read (see _parse_lines)."""
+        if self._last_conds is None:
+            self._last_conds = conds_from_tuples(self._last_cond_tuples)
+        return self._last_conds
+
+    @last_conds.setter
+    def last_conds(self, value: list[CondStmt]) -> None:
+        self._last_conds = value
+        self._last_cond_tuples = ()
 
     def _after_batch(self, new_tokens: list[bytes], new_pairs: list) -> None:
         """Log the batch and flag hash-like pairs that survived eviction."""

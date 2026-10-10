@@ -104,13 +104,15 @@ def test_duplicate_and_empty_tokens_are_not_added():
 
 
 def test_rebound_pool_rebuilds(builds):
-    """A new pool object (eviction rebinds) never reuses the old scanner."""
+    """A new pool object (eviction rebinds) scans exactly like a fresh build.
+
+    Light churn now retargets the cached automaton instead of rebuilding it
+    (see test_regression_scanner_retarget.py); only the results are a
+    contract, not the scanner's internal token list.
+    """
     rnd = random.Random(5)
     pool = _pairs(rnd, 600)
     ac.scanner_for_pairs(pool)
     smaller = pool[:550]
-    assert (
-        ac.scanner_for_pairs(smaller).tokens
-        == ac.TokenScanner(ac.tokens_from_pairs(smaller)).tokens
-    )
-    assert len(builds) == 3  # first pool, rebound pool, the comparison build
+    data = b"".join(a + b for a, b in smaller[:50])
+    assert ac.scanner_for_pairs(smaller).scan(data, min_len=1) == _fresh_scan(smaller, data, 1)
