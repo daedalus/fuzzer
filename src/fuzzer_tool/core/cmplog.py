@@ -37,7 +37,8 @@ from collections.abc import Iterable
 
 from fuzzer_tool.adapters.track_parser import (
     CondStmt,
-    conds_from_cmplog_text,
+    cond_tuples_from_cmplog_text,
+    conds_from_tuples,
     pairs_from_operand_records,
 )
 
@@ -207,6 +208,11 @@ CMPLOG_COUNTS_MAX_BYTES = 4 * 1024 * 1024
 # callback, so it grows with the target's comparison density and gets a
 # correspondingly larger cap.
 CMPLOG_SITES_MAX_BYTES = 32 * 1024 * 1024
+# Bytes per newline count in _lines_end: ~100 lines of cmplog text.
+LINES_END_CHUNK = 4096
+# Parsed site lines kept by text: ~95% of FFmpeg's lines repeat verbatim
+# (17k distinct of 318k). Cleared when full, so memory stays bounded.
+SITE_LINE_CACHE_MAX = 65_536
 
 # ── Wall detection ────────────────────────────────────────────────────
 #
@@ -243,6 +249,28 @@ def _first_lines(data: bytes, n: int) -> bytes:
         if pos == 0:
             return data
     return data[:pos]
+
+
+def _lines_end(data: bytes, n: int, stop: int) -> int:
+    """End offset of the first *n* lines of ``data[:stop]`` (*stop* if fewer).
+
+    Counts newlines a chunk at a time in C, then ``find``s only inside the
+    chunk holding the n-th: ~10x fewer Python steps than one find per line.
+    """
+    pos = 0
+    while pos < stop:
+        nxt = min(pos + LINES_END_CHUNK, stop)
+        found = data.count(b"\n", pos, nxt)
+        if found >= n:
+            break
+        n -= found
+        pos = nxt
+    else:
+        return stop
+
+    for _ in range(n):
+        pos = data.find(b"\n", pos, stop) + 1
+    return pos
 
 
 class _FifoDrain:
@@ -534,6 +562,8 @@ class CmplogCollector:
         self.site_counts_enabled = bool(site_counts)
         self.sites_path: str | None = None
         self.site_fired: dict[tuple[str, int], int] = {}
+        # Site line text -> (key, fired, asserted); see SITE_LINE_CACHE_MAX.
+        self._site_line_cache: dict[str, tuple[tuple[str, int], int, int]] = {}
         self.site_asserted: dict[tuple[str, int], int] = {}
         # Per-drain site vector, parallel to last_asserted.  Only meaningful
         # when collect_sites runs on an execution boundary (via collect_counts).
@@ -1042,21 +1072,19 @@ class CmplogCollector:
         if not data:
             return []
 
-        # Reassemble lines split across drain boundaries.
-        data = self._fifo_partial + data
-        if not data.endswith(b"\n"):
-            last_nl = data.rfind(b"\n")
-            if last_nl == -1:
-                self._fifo_partial = data
-                return []
-            self._fifo_partial = data[last_nl + 1 :]
-            data = data[: last_nl + 1]
-        else:
-            self._fifo_partial = b""
+        # Reassemble lines split across drain boundaries. The carried
+        # partial holds no newline, so it only extends the first line.
+        last_nl = data.rfind(b"\n")
+        if last_nl == -1:
+            self._fifo_partial += data
+            return []
+        head = self._fifo_partial
+        self._fifo_partial = data[last_nl + 1 :]
 
         # Same cap as the file path: the remainder is dropped, not deferred.
-        data = _first_lines(data, CMPLOG_MAX_LINES_PER_READ)
-        new_lines = data.decode("latin-1").splitlines()
+        # Cap before joining, so dropped lines are never copied.
+        end = _lines_end(data, CMPLOG_MAX_LINES_PER_READ, last_nl + 1)
+        new_lines = (head + data[:end]).decode("latin-1").splitlines()
         return self._parse_lines(new_lines)
 
     def _parse_lines(self, new_lines: list[str]) -> list[bytes]:
@@ -1068,11 +1096,17 @@ class CmplogCollector:
         new_pairs: list[tuple[bytes, bytes]] = []
         batch_pairs: dict[tuple[bytes, bytes], None] = {}
         # Built once here rather than re-parsed by the consumer:
-        # conds_from_cmplog_text is the only thing that keeps encounter order
-        # and the PC field, and this is the one place the raw lines exist.
-        conds = conds_from_cmplog_text(new_lines)
-        self.last_conds = conds
-        self._ingest_conds(conds, tokens, new_pairs, batch_pairs)
+        # The parse is the only thing that keeps encounter order and the PC
+        # field, and this is the one place the raw lines exist. Plain tuples:
+        # CondStmt objects are built only if last_conds is read.
+        # A drain repeats each line many times (~200k lines, ~10k distinct
+        # on FFmpeg). Both parsers dedupe downstream, so drop repeats once at
+        # C level (order kept) instead of stripping and probing each copy.
+        new_lines = list(dict.fromkeys(new_lines))
+        cond_tuples = cond_tuples_from_cmplog_text(new_lines)
+        self._last_cond_tuples = cond_tuples
+        self._last_conds = None
+        self._ingest_conds(cond_tuples, tokens, new_pairs, batch_pairs)
 
         for pair in pairs_from_operand_records(new_lines):
             if pair not in self._pair_set:
@@ -1101,19 +1135,35 @@ class CmplogCollector:
         return new_tokens
 
     def _ingest_conds(self, conds, tokens: dict, new_pairs: list, batch_pairs: dict) -> None:
-        """Record each comparison's operand pair (+ PC / result) and tokens."""
-        for c in conds:
-            pair = (c.base.op_a, c.base.op_b)
-            if pair not in self._pair_set:
-                self._pair_set.add(pair)
+        """Record each comparison's operand pair (+ PC / result) and tokens.
+
+        *conds* are ``(op_a, op_b, width, result, pc)`` tuples.
+        """
+        pair_set = self._pair_set
+        for op_a, op_b, width, result, pc in conds:
+            pair = (op_a, op_b)
+            if pair not in pair_set:
+                pair_set.add(pair)
                 new_pairs.append(pair)
-                if c.base.pc is not None:
-                    self._pair_pc[pair] = c.base.pc
-                if c.base.result is not None and c.base.width is not None:
-                    self._pair_cmp[pair] = (c.base.result, c.base.width)
+                if pc is not None:
+                    self._pair_pc[pair] = pc
+                if result is not None and width is not None:
+                    self._pair_cmp[pair] = (result, width)
             batch_pairs[pair] = None
-            tokens[c.base.op_a] = None
-            tokens[c.base.op_b] = None
+            tokens[op_a] = None
+            tokens[op_b] = None
+
+    @property
+    def last_conds(self) -> list[CondStmt]:
+        """This drain's CondStmt list, built on first read (see _parse_lines)."""
+        if self._last_conds is None:
+            self._last_conds = conds_from_tuples(self._last_cond_tuples)
+        return self._last_conds
+
+    @last_conds.setter
+    def last_conds(self, value: list[CondStmt]) -> None:
+        self._last_conds = value
+        self._last_cond_tuples = ()
 
     def _after_batch(self, new_tokens: list[bytes], new_pairs: list) -> None:
         """Log the batch and flag hash-like pairs that survived eviction."""
@@ -1313,26 +1363,41 @@ class CmplogCollector:
         site_fired, site_asserted = self.site_fired, self.site_asserted
         last_fired, last_asserted = self.last_site_fired, self.last_site_asserted
         fired_get, asserted_get = site_fired.get, site_asserted.get
+        cache = self._site_line_cache
+        cached = cache.get
         for line in new_lines:
-            parts = line.split()
-            n = len(parts)
-            if n != 5 or parts[0] != "CNS":
-                if n == 2 and parts[0] == "CND":
-                    self._note_site_drops(parts[1])
-                continue
-            try:
-                pc = int(parts[2], 16)
-                fired = int(parts[3])
-                asserted = int(parts[4])
-            except ValueError:
-                continue
-            key = (parts[1], pc)
+            # Fast path: a line seen before; slow path parses it.
+            hit = cached(line)
+            if hit is None:
+                hit = self._parse_site_line(line)
+                if hit is None:
+                    continue
+                if len(cache) >= SITE_LINE_CACHE_MAX:
+                    cache.clear()
+                cache[line] = hit
+            key, fired, asserted = hit
             site_fired[key] = fired_get(key, 0) + fired
             site_asserted[key] = asserted_get(key, 0) + asserted
             if fired:
                 last_fired[key] = last_fired.get(key, 0) + fired
             if asserted:
                 last_asserted[key] = last_asserted.get(key, 0) + asserted
+
+    def _parse_site_line(self, line: str) -> tuple[tuple[str, int], int, int] | None:
+        """``CNS <cb> <pc> <fired> <asserted>`` -> (key, fired, asserted).
+
+        None for anything else; a ``CND <n>`` line is folded on the way.
+        """
+        parts = line.split()
+        n = len(parts)
+        if n != 5 or parts[0] != "CNS":
+            if n == 2 and parts[0] == "CND":
+                self._note_site_drops(parts[1])
+            return None
+        try:
+            return (parts[1], int(parts[2], 16)), int(parts[3]), int(parts[4])
+        except ValueError:
+            return None
 
     def _read_site_lines(self) -> list[str] | None:
         """New lines of the sites file since the last drain; None when unread.

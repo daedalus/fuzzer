@@ -189,6 +189,7 @@ class TestSiteTableSaturationFlag:
         c.site_dropped = 0
         c.sites_saturated = False
         c._sites_offset = 0
+        c._site_line_cache = {}
         sites = tmp_path / "s.sites"
         sites.write_text("CNS memcmp 1000 4 3\nCND 7\n")
         c.sites_path = str(sites)

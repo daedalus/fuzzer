@@ -1135,19 +1135,32 @@ class EdgeTracker:
     ) -> None:
         """Accumulate a sparse edge-ID set; fills *hc* and *new_edges* in place."""
         self._note_key_space("edge_id")
+        if not hit_edges:
+            return
+
+        # Invariants out of the edge loop; set/dict work in C where it can be.
+        new_edges.update(hit_edges)
+        if self._f0_enabled:
+            f0_update = self._f0.update
+            for edge_id in hit_edges:  # same order: the sketch draws RNG
+                f0_update(edge_id)
+        get_count = hit_counts.get if hit_counts else None
+        agg, agg_get = self._aggregate_totals, self._aggregate_totals.get
+        gh, gh_get = self._global_edge_hits, self._global_edge_hits.get
+        top = self.max_hit_count
+        total = 0
         for edge_id in hit_edges:
-            val = hit_counts.get(edge_id, 1) if hit_counts else 1
-            new_edges.add(edge_id)
+            val = get_count(edge_id, 1) if get_count else 1
             hc[edge_id] = val
-            if self._f0_enabled:
-                self._f0.update(edge_id)
-            self._aggregate_totals[edge_id] = self._aggregate_totals.get(edge_id, 0) + val
-            self._aggregate_total_count += val
-            old_gh = self._global_edge_hits.get(edge_id, 0)
-            self._global_edge_hits[edge_id] = old_gh + val
-            self._spectrum_dirty = True
-            if self._global_edge_hits[edge_id] > self.max_hit_count:
-                self.max_hit_count = self._global_edge_hits[edge_id]
+            agg[edge_id] = agg_get(edge_id, 0) + val
+            g = gh_get(edge_id, 0) + val
+            gh[edge_id] = g
+            total += val
+            if g > top:
+                top = g
+        self._aggregate_total_count += total
+        self.max_hit_count = top
+        self._spectrum_dirty = True
 
     def _record_target(self, seed_key: str, target_name: str, new_edges: set[int]) -> None:
         """Per-target edge tracking (multi-target runs)."""

@@ -254,6 +254,87 @@ def filter_cond_list(
     return out
 
 
+class LazyConds:
+    """``conds_from_cmplog_pairs`` as a sequence whose items are built on access.
+
+    Same dedup (first occurrence), order, cmpids and metadata as the eager
+    list, but a CondStmt exists only once something reads it. The operator
+    that consumes this touches one per call while the cmplog pool holds
+    ~10k pairs and is replaced every drain.
+    """
+
+    __slots__ = ("_base", "_built", "_meta", "_pairs", "_pc")
+
+    def __init__(
+        self,
+        pairs: Sequence[tuple[bytes, bytes]],
+        pair_meta: dict[tuple[bytes, bytes], tuple[int, int]] | None,
+        pair_pc: dict[tuple[bytes, bytes], int] | None,
+        base_cmpid: int = 0,
+    ) -> None:
+        self._pairs = list(dict.fromkeys(pairs))
+        self._meta = pair_meta or {}
+        self._pc = pair_pc or {}
+        self._base = base_cmpid
+        self._built: dict[int, CondStmt] = {}
+
+    def __len__(self) -> int:
+        return len(self._pairs)
+
+    def __getitem__(self, i: int) -> CondStmt:
+        c = self._built.get(i)
+        if c is not None:
+            return c
+        op_a, op_b = self._pairs[i]  # IndexError past the end, like a list
+        result, width = self._meta.get((op_a, op_b), (0, max(len(op_a), len(op_b))))
+        pc = self._pc.get((op_a, op_b))
+        c = CondStmt.from_cmplog_pair(self._base + i, op_a, op_b, width, result=result, pc=pc)
+        self._built[i] = c
+        return c
+
+    def __iter__(self):
+        for i in range(len(self._pairs)):
+            yield self[i]
+
+    def _closed(self) -> list[int]:
+        """Sorted indices of built conds that are no longer UNSOLVED."""
+        return sorted(i for i, c in self._built.items() if c.state is not CondState.UNSOLVED)
+
+    def unsolved_count(self) -> int:
+        return len(self._pairs) - len(self._closed())
+
+    def unsolved_view(self) -> _UnsolvedView:
+        """The UNSOLVED conds, in order, as an index-mapped sequence."""
+        return _UnsolvedView(self, self._closed())
+
+
+class _UnsolvedView:
+    """``[c for c in conds if c.state is UNSOLVED]`` without building them all."""
+
+    __slots__ = ("_closed", "_conds", "_n")
+
+    def __init__(self, conds: LazyConds, closed: list[int]) -> None:
+        self._conds = conds
+        self._closed = closed
+        self._n = len(conds) - len(closed)
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, k):
+        if isinstance(k, slice):
+            return [self[j] for j in range(*k.indices(self._n))]
+        if not 0 <= k < self._n:
+            raise IndexError(k)
+        # k-th unsolved index: step over closed indices at or below it.
+        idx = k
+        for closed in self._closed:
+            if closed > idx:
+                break
+            idx += 1
+        return self._conds[idx]
+
+
 def conds_from_cmplog_pairs(
     pairs: Sequence[tuple[bytes, bytes]],
     base_cmpid: int = 0,

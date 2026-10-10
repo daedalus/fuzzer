@@ -301,4 +301,4 @@ class TestTouchedScanConstruction:
 
         src = inspect.getsource(commands)
         assert '"--touched-scan"' in src
-        assert 'touched_scan=getattr(args, "touched_scan", False)' in src
+        assert 'touched_scan=getattr(args, "touched_scan", None)' in src

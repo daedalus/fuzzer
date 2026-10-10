@@ -28,7 +28,7 @@ import xxhash
 from fuzzer_tool.core.auto_dict import NO_HASH, harvest_tokens
 from fuzzer_tool.core.checksum_sites import hint_operands
 from fuzzer_tool.core.clock import clock_of
-from fuzzer_tool.core.cond_stmt import CondState, CondStmt
+from fuzzer_tool.core.cond_stmt import CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.gaussian import norm_cdf
 from fuzzer_tool.core.gravity import DONOR_CANDIDATES, pair_terms, pick_index
@@ -3289,8 +3289,9 @@ class OperatorEngine:
 
         # Prefer unsolved branches; fall back to any branch when all are
         # solved/unsolvable/timeout so the operator still produces a useful
-        # operand-substitution mutation.
-        unsolved = [c for c in conds if c.state is CondState.UNSOLVED]
+        # operand-substitution mutation. A lazy view: conds are built only
+        # when picked (see LazyConds).
+        unsolved = conds.unsolved_view()
         if unsolved and self.ctx.wall_order_enabled:
             target = self._wall_head(unsolved, bytes(buf))
         else:
@@ -3347,7 +3348,7 @@ class OperatorEngine:
         order = self._wall_solver.solve_comparison_wall(window, max_depth=_WALL_WINDOW)
         return order[0] if order else window[0]
 
-    def _get_cond_stmts(self) -> list[CondStmt]:
+    def _get_cond_stmts(self):
         """Lazily build and cache the CondStmt list from cmplog pairs."""
         cached = getattr(self, "_cond_stmts", None)
         if cached is not None:
@@ -3358,18 +3359,14 @@ class OperatorEngine:
             pairs = self.ctx.cmplog_pairs
             if getattr(self, "_cond_stmts_pairs", _MISSING) is pairs:
                 return cached
-        from fuzzer_tool.core.cond_stmt import (
-            conds_from_cmplog_pairs,
-        )
+        from fuzzer_tool.core.cond_stmt import LazyConds
 
         cmplog = self.ctx.cmplog
         pair_meta = getattr(cmplog, "_pair_cmp", {}) if cmplog else {}
         pair_pc = getattr(cmplog, "_pair_pc", {}) if cmplog else {}
-        cached = conds_from_cmplog_pairs(
-            self.ctx.cmplog_pairs,
-            pair_meta=pair_meta,
-            pair_pc=pair_pc,
-        )
+        # Rebuilt every drain (eviction rebinds the pool): cheap now, since
+        # only the conds the operator picks are ever constructed.
+        cached = LazyConds(self.ctx.cmplog_pairs, pair_meta, pair_pc)
         self._cond_stmts = cached
         self._cond_stmts_pairs = self.ctx.cmplog_pairs
         return cached

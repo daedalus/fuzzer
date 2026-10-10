@@ -67,6 +67,11 @@ def _live_entries(
     return slots, ids, (words >> np.uint64(32)).astype(np.uint32)
 
 
+# Smallest map where the touched-slot bitmap scan beats walking the table:
+# measured 2.5x/1.3x at 65536, 7.2x/3.3x at 262144, slower at 8192 (the
+# per-exec bit clear and shim ORs outweigh a small walk). See DEEP_DIVE.
+TOUCHED_SCAN_MIN_ENTRIES = 65536
+
 # Default number of hash table entries.
 # SHM default = 8192 entries * 8 bytes = 65536 bytes.
 SHM_MAP_SIZE = 8192  # number of entries

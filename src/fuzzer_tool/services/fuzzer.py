@@ -39,7 +39,12 @@ from fuzzer_tool.adapters.process import (
     reset_env_cache,
 )
 from fuzzer_tool.adapters.seed_zip import ZipMode
-from fuzzer_tool.adapters.shm import MAX_COUNT_GROWTH_FACTOR, ShmCoverage, unstable_slots
+from fuzzer_tool.adapters.shm import (
+    MAX_COUNT_GROWTH_FACTOR,
+    TOUCHED_SCAN_MIN_ENTRIES,
+    ShmCoverage,
+    unstable_slots,
+)
 from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
@@ -865,6 +870,19 @@ def _repeat_runs(fuzzer, data: bytes, n_runs: int, sample, before=None):
     return samples, hashes, dropped
 
 
+def resolve_touched_scan(requested: bool | None, map_size: int) -> bool:
+    """Bitmap scan when asked, else when the map is large enough to pay off.
+
+    The full table walk costs O(map) per exec (0.7 ms at 262,144 entries);
+    the bitmap scan is measured faster from ``TOUCHED_SCAN_MIN_ENTRIES`` up
+    and slower below. It falls back to the walk on its own when the shim
+    has no bitmap, so auto-enabling is safe on old targets.
+    """
+    if requested is not None:
+        return bool(requested)
+    return map_size >= TOUCHED_SCAN_MIN_ENTRIES
+
+
 class Fuzzer:
     # Decision clock; __init__ replaces it. Default for __new__-built test fuzzers.
     _clock: Clock = WALL_CLOCK
@@ -1287,7 +1305,7 @@ class Fuzzer:
         inprocess_direct=False,
         inprocess_func="LLVMFuzzerTestOneInput",
         calibrate_stability=0,
-        touched_scan=False,
+        touched_scan=None,
         # cmplog is always on by default; --no-cmplog-fifo-sink disables
         # the FIFO drain mode but not the comparison tracing itself.
         cmplog=True,
@@ -2169,8 +2187,9 @@ class Fuzzer:
         # Seed stability calibration (handover item D). n_runs per accepted
         # seed; 0 disables. Opt-in: see _calibrate_seed_stability.
         self._calibrate_stability = int(calibrate_stability or 0)
-        # Read live edges from the shim's touched-slot bitmap (ShmCoverage._scan_touched).
-        self._touched_scan = bool(touched_scan)
+        # Read live edges from the shim's touched-slot bitmap (ShmCoverage._scan_touched):
+        # None (default) decides by map size, True/False force it.
+        self._touched_scan = resolve_touched_scan(touched_scan, self.map_size)
         # F2: rerun an execution that reported new coverage and keep only what
         # reproduces. See _confirm_new_coverage.
         self._confirm_novelty = bool(confirm_novelty or priming_check)
