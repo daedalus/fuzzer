@@ -597,7 +597,7 @@ def cmd_fuzz(args):
         net_keepalive=getattr(args, "net_keepalive", False),
         net_settle_ms=getattr(args, "net_settle_ms", 10),
         calibrate_stability=getattr(args, "calibrate_stability", 0),
-        touched_scan=getattr(args, "touched_scan", False),
+        touched_scan=getattr(args, "touched_scan", None),
         cmplog=True,
         cmplog_max_tokens=getattr(args, "cmplog_max_tokens", 0),
         cmplog_max_pairs=getattr(args, "cmplog_max_pairs", 0),
@@ -4796,15 +4796,25 @@ def main() -> int:
     # disabling cmplog entirely.
     fuzz_parser.add_argument(
         "--touched-scan",
-        action="store_true",
+        action="store_const",
+        const=True,
+        default=None,
         help=(
             "Read each execution's live edges from the shim's touched-slot "
             "bitmap instead of walking the whole edge table. Pays off on "
             "large maps (measured: slower at 8192 entries, 2.4x at 65536, "
             "8x at 262144 for a sparse run); needs a target built with a "
             "shim that has the bitmap, else it silently scans the table as "
-            "before. Costs one atomic OR per newly live edge in the target."
+            "before. Costs one atomic OR per newly live edge in the target. "
+            "Default: on from 65536 entries; this flag forces it on."
         ),
+    )
+    fuzz_parser.add_argument(
+        "--no-touched-scan",
+        dest="touched_scan",
+        action="store_const",
+        const=False,
+        help="Always walk the edge table, even on large maps (see --touched-scan).",
     )
     fuzz_parser.add_argument(
         "--calibrate-stability",
