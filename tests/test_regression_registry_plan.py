@@ -124,3 +124,78 @@ def test_no_rng_offers_every_format():
     f._rng = None
     ops = set(REGISTRY.available(f, _PLAIN))
     assert set(reg._FORMAT_SNIFFERS) <= ops
+
+
+def test_interleaved_gates_keep_registry_order():
+    """Adversarial: gated ops evaluated in separate passes must still land in
+    registry order between ungated ones."""
+    probes = [
+        OperatorSpec(name="probe_a", category="bit", handler_name="_op_x"),
+        OperatorSpec(
+            name="probe_b", category="bit", handler_name="_op_x", available=lambda f, d: True
+        ),
+        OperatorSpec(
+            name="probe_c", category="bit", handler_name="_op_x", available=lambda f, d: False
+        ),
+        OperatorSpec(name="probe_d", category="bit", handler_name="_op_x"),
+        OperatorSpec(
+            name="probe_e", category="bit", handler_name="_op_x", available=lambda f, d: True
+        ),
+    ]
+    for spec in probes:
+        REGISTRY.register(spec)
+    try:
+        got = [n for n in REGISTRY.available(make_fuzzer(seed=1), _PLAIN) if n.startswith("probe_")]
+        assert got == ["probe_a", "probe_b", "probe_d", "probe_e"]
+    finally:
+        for spec in probes:
+            REGISTRY._ops.pop(spec.name, None)
+
+
+def _count_sniffs(monkeypatch) -> dict:
+    """Wrap every format sniffer in the current plan with a call counter."""
+    calls = {"n": 0}
+    plan = REGISTRY._current_plan()
+
+    def wrap(sniff):
+        def counted(d):
+            calls["n"] += 1
+            return sniff(d)
+
+        return counted
+
+    monkeypatch.setattr(plan, "formats", [(i, n, wrap(s)) for i, n, s in plan.formats])
+    plan.sniffed.clear()
+    return calls
+
+
+def test_sniffs_once_per_content(monkeypatch):
+    """Falsification: the same parent seed is not re-sniffed every exec."""
+    calls = _count_sniffs(monkeypatch)
+    f = make_fuzzer(seed=1)
+    REGISTRY.available(f, _PLAIN)
+    first = calls["n"]
+    assert first >= 1
+
+    for _ in range(4):
+        REGISTRY.available(f, bytes(_PLAIN))  # equal content, new object
+    assert calls["n"] == first
+
+
+def test_cached_match_still_marks_live(monkeypatch):
+    """Adversarial: a cache hit on a matching seed must still make the
+    format live for a fresh fuzzer (live sets are per fuzzer)."""
+    _count_sniffs(monkeypatch)
+    REGISTRY.available(make_fuzzer(seed=1), _PNG)
+    g = make_fuzzer(seed=2)
+    assert "png_chunk_mutate" in REGISTRY.available(g, _PNG)
+    assert "png_chunk_mutate" in g._live_formats
+
+
+def test_sniff_cache_bounded(monkeypatch):
+    """Adversarial: distinct inputs past the cap must not grow it unbounded."""
+    _count_sniffs(monkeypatch)
+    f = make_fuzzer(seed=1)
+    for i in range(reg._SNIFF_CACHE_MAX + 10):
+        REGISTRY.available(f, b"x%d" % i)
+    assert len(REGISTRY._current_plan().sniffed) <= reg._SNIFF_CACHE_MAX
