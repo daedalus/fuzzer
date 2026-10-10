@@ -4,10 +4,14 @@ seeds over their conflict set (generalizes a & b and a | b).
 Randomness is scripted (Hard Rule 39): every expected child is exact.
 """
 
+from unittest.mock import patch
+
 import pytest
 
 from fuzzer_tool.core.mutations.generic import bit_cross
-from fuzzer_tool.core.operator_registry import REGISTRY
+from fuzzer_tool.core.operator_registry import _AVAILABLE, REGISTRY
+from fuzzer_tool.services.corpus_manager import seed_key
+from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.operators import OperatorEngine
 
 AND, QUARTER, HALF, THREE_QUARTER, OR = range(5)
@@ -31,6 +35,7 @@ class ScriptedRng:
         self._words = list(words)
         self._pick = pick
         self.sizes = []
+        self.sample_calls = []
 
     def randrange(self, n):
         assert n == len(_LEVELS)
@@ -43,11 +48,17 @@ class ScriptedRng:
     def choice(self, seq):
         return seq[self._pick]
 
+    def sample(self, population, k):
+        self.sample_calls.append((len(population), k))
+        return list(population)[:k]
+
 
 class _Fuzzer:
-    def __init__(self, corpus, rng=None, max_len=65536):
+    def __init__(self, corpus, rng=None, max_len=65536, parents=None):
         self.corpus = corpus
-        self.seed_meta = {}
+        # seed_meta is keyed by bytes; parent_key holds the parent's content hash.
+        self.seed_meta = {c: {"parent_key": seed_key(p)} for c, p in (parents or {}).items()}
+        self._use_lineage = True
         self.max_len = max_len
         self._rng = rng
 
@@ -160,3 +171,129 @@ class TestOpBitCross:
         eng = self._engine([A, B], ScriptedRng(OR), max_len=5)
         got = eng._op_bit_cross(bytearray(A), 0, A)
         assert got == bytearray(_bytes(_int(A) | _int(B), N)[:5])
+
+
+def _seed(tag: int) -> bytes:
+    return bytes([tag]) * N
+
+
+ROOT, KID, GRANDKID, SIBLING, OTHER_ROOT = (_seed(t) for t in (0x11, 0x22, 0x33, 0x44, 0x5A))
+OR_ROOT_OTHER = bytearray(_bytes(_int(ROOT) | _int(OTHER_ROOT), N))
+CHAIN = {KID: ROOT, GRANDKID: KID, SIBLING: ROOT}
+
+
+class TestUnrelatedSeeds:
+    """a and b must not be ancestor/descendant (nor the same content)."""
+
+    def _op(self, corpus, base, parents=None, **kw):
+        rng = ScriptedRng(OR)
+        eng = OperatorEngine(_Fuzzer(corpus, rng, parents=parents or CHAIN, **kw))
+        return eng, rng, eng._op_bit_cross(bytearray(base), 0, base)
+
+    @pytest.mark.parametrize(
+        ("base", "donor"),
+        [
+            pytest.param(ROOT, KID, id="donor-is-child"),
+            pytest.param(ROOT, GRANDKID, id="donor-is-grandchild"),
+            pytest.param(KID, ROOT, id="donor-is-parent"),
+            pytest.param(GRANDKID, ROOT, id="donor-is-grandparent"),
+            pytest.param(ROOT, ROOT, id="same-content"),
+        ],
+    )
+    def test_related_donor_is_declined(self, base, donor):
+        _eng, _rng, got = self._op([base, donor], base)
+        assert got is None
+
+    @pytest.mark.parametrize(
+        ("base", "donor"),
+        [
+            pytest.param(KID, SIBLING, id="siblings"),
+            pytest.param(ROOT, OTHER_ROOT, id="separate-roots"),
+            pytest.param(GRANDKID, OTHER_ROOT, id="descendant-vs-other-root"),
+        ],
+    )
+    def test_unrelated_donor_is_used(self, base, donor):
+        _eng, _rng, got = self._op([base, donor], base)
+        assert got == bytearray(_bytes(_int(base) | _int(donor), N))
+
+    def test_related_seeds_are_filtered_before_the_donor_pick(self):
+        """choice() sees only unrelated seeds, so pick 0 is OTHER_ROOT."""
+        _eng, _rng, got = self._op([ROOT, KID, GRANDKID, OTHER_ROOT], ROOT)
+        assert got == OR_ROOT_OTHER
+
+    def test_cycle_in_parent_chain_terminates(self):
+        x, y, z = _seed(0x61), _seed(0x62), _seed(0x9A)
+        parents = {x: y, y: x}
+        _e, _r, got = self._op([x, y], x, parents=parents)
+        assert got is None
+        _e, _r, got = self._op([x, z], z, parents=parents)
+        assert got == bytearray(_bytes(_int(z) | _int(x), N))
+
+    def test_chain_through_a_pruned_ancestor_is_not_followed(self):
+        """Known limit: the middle seed left the corpus, so the link is lost."""
+        gone = _seed(0x71)
+        parents = {KID: gone, gone: ROOT}
+        _e, _r, got = self._op([ROOT, KID], ROOT, parents=parents)
+        assert got == bytearray(_bytes(_int(ROOT) | _int(KID), N))
+
+    def test_parent_map_follows_corpus_growth(self):
+        corpus = [ROOT]
+        rng = ScriptedRng(OR)
+        eng = OperatorEngine(_Fuzzer(corpus, rng, parents=CHAIN))
+        assert eng._op_bit_cross(bytearray(ROOT), 0, ROOT) is None
+        corpus.append(KID)
+        assert eng._op_bit_cross(bytearray(ROOT), 0, ROOT) is None
+        corpus.append(OTHER_ROOT)
+        assert eng._op_bit_cross(bytearray(ROOT), 0, ROOT) == OR_ROOT_OTHER
+
+    def test_only_a_bounded_sample_of_the_corpus_is_checked(self):
+        many = [_seed((i * 37 + 5) & 0xFF) for i in range(40)]
+        parents = {m: ROOT for m in many}
+        rng = ScriptedRng(OR)
+        eng = OperatorEngine(_Fuzzer([ROOT, *many, OTHER_ROOT], rng, parents={**parents, **CHAIN}))
+        # The scripted sample takes the first 16 indices; the rest are never hashed.
+        got = eng._op_bit_cross(bytearray(many[0]), 0, many[0])
+        assert rng.sample_calls == [(len(many) + 2, 16)]
+        assert got is not None
+
+    def test_available_only_with_lineage(self):
+        class F:
+            pass
+
+        f = F()
+        assert not _AVAILABLE["bit_cross"](f, b"")
+        f._use_lineage = True
+        assert _AVAILABLE["bit_cross"](f, b"")
+
+
+class TestRealFuzzer:
+    """The ancestry check against a real Fuzzer's bytes-keyed seed_meta."""
+
+    @staticmethod
+    def _fuzzer(tmp_path, lineage):
+        with patch("os.path.isfile", return_value=True), patch("os.access", return_value=True):
+            return Fuzzer(
+                target="/bin/true",
+                corpus_dir=f"{tmp_path}/corpus",
+                crashes_dir=f"{tmp_path}/crashes",
+                max_len=256,
+                timeout=1,
+                mutations_per_input=2,
+                lineage=lineage,
+            )
+
+    def test_child_of_base_is_skipped_unrelated_root_is_used(self, tmp_path):
+        f = self._fuzzer(tmp_path, lineage=True)
+        f.corpus = [ROOT, KID, OTHER_ROOT]
+        f.seed_meta = {
+            ROOT: {},
+            KID: {"parent_key": f._seed_key(ROOT)},
+            OTHER_ROOT: {},
+        }
+        f._rng = ScriptedRng(OR)
+        got = OperatorEngine(f)._op_bit_cross(bytearray(ROOT), 0, ROOT)
+        assert got == OR_ROOT_OTHER
+
+    def test_availability_follows_the_lineage_flag(self, tmp_path):
+        assert _AVAILABLE["bit_cross"](self._fuzzer(tmp_path / "on", lineage=True), b"")
+        assert not _AVAILABLE["bit_cross"](self._fuzzer(tmp_path / "off", lineage=False), b"")

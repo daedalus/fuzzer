@@ -794,6 +794,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "token_dup": _has_dictionary,
     "dict_compound": _has_dictionary,
     # model / engine-gated ops
+    # bit_cross needs parent_key, which seed_meta records only under --lineage
+    "bit_cross": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
     "markov_bytes": lambda f, _d: bool(getattr(f, "markov_trained", False)),
     "cem_bytes": lambda f, _d: bool(
         getattr(f, "mc", None)

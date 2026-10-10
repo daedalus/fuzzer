@@ -89,6 +89,9 @@ _ELITE_FUSE_MIN_CORPUS = 2
 # ahead on edge count -- there is still randomness in which two elites meet.
 _ELITE_FUSE_POOL_SIZE = 8
 
+# bit_cross: corpus seeds sampled (then ancestry-checked) per call.
+_BIT_CROSS_CANDIDATES = 16
+
 # ── gravity splice donor (--splice-donor gravity) ─────────────────────────
 # (m_base, m_donor, distance) for a pair with unknown coverage: zero donor
 # mass, so it weighs 0 and never outbids a pair the model can measure.
@@ -1402,6 +1405,9 @@ class OperatorEngine:
         # lookup on every mutation would cost more than the operator repays.
         self._elite_pool: list[bytes] | None = None
         self._elite_pool_corpus_len: int = -1
+        # Cache for _op_bit_cross: content key -> parent key, rebuilt on corpus growth.
+        self._parent_map: dict[str, str | None] | None = None
+        self._parent_map_corpus_len: int = -1
         # Cache for region-profile position weighting, keyed by seed content
         # hash. profile_buffer() runs a whole statistical battery per 4 KiB
         # window (~1 ms), so it must be paid once per seed, not once per
@@ -2788,19 +2794,76 @@ class OperatorEngine:
                     ]
                 )
 
-    def _op_bit_cross(self, buf, _byte_idx, data):
-        """Bit-level crossover of base and a donor over their differing bits.
+    def _key_fn(self):
+        """Content-key function: the fuzzer's memoized one, else the module's."""
+        key_of = getattr(self.f, "_seed_key", None)
+        if key_of is None:
+            # corpus_manager imports this module, so a top-level import cycles.
+            from fuzzer_tool.services.corpus_manager import seed_key  # noqa: PLC0415
 
-        Skips children equal to either parent: both are already executed.
+            key_of = seed_key
+        return key_of
+
+    def parent_map(self):
+        """Cached ``content key -> parent key`` over the corpus.
+
+        ``parent_key`` is recorded only under ``--lineage``. Rebuilt on
+        corpus growth only, like elite_seeds(). A chain through a seed that
+        left the corpus ends there.
+        """
+        corpus = self.ctx.corpus
+        if self._parent_map is None or self._parent_map_corpus_len != len(corpus):
+            key_of = self._key_fn()
+            meta = self.ctx.seed_meta or {}
+            self._parent_map = {
+                key_of(bytes(s)): (meta.get(bytes(s)) or {}).get("parent_key") for s in corpus
+            }
+            self._parent_map_corpus_len = len(corpus)
+        return self._parent_map
+
+    @staticmethod
+    def _is_ancestor(parents, ancestor, key):
+        """True when *ancestor* is on *key*'s parent chain (cycle-safe)."""
+        cur = parents.get(key)
+        for _ in range(len(parents)):
+            if cur is None:
+                return False
+            if cur == ancestor:
+                return True
+            cur = parents.get(cur)
+        return False
+
+    def _op_bit_cross(self, buf, _byte_idx, data):
+        """Bit-level crossover of the base with an *unrelated* donor seed.
+
+        The donor is never *data* itself, an ancestor or a descendant of it
+        (a mutation chain): recombining those recreates a parent. Siblings
+        and cousins are allowed. Only ``_BIT_CROSS_CANDIDATES`` sampled corpus
+        seeds are checked, then one is picked by ``_donor``. Also skips
+        children equal to either parent: both are already executed.
         """
         rng = self.ctx._rng
-        if not buf or len(self.ctx.corpus) < 2:
+        corpus = self.ctx.corpus
+        if not buf or len(corpus) < 2:
             return None
-        others = [c for c in self.ctx.corpus if c is not data]
-        if not others:
+        parents = self.parent_map()
+        key_of = self._key_fn()
+        base_key = key_of(bytes(data))
+        is_ancestor = self._is_ancestor
+        pool = []
+        for i in rng.sample(range(len(corpus)), min(len(corpus), _BIT_CROSS_CANDIDATES)):
+            other = corpus[i]
+            key = key_of(bytes(other))
+            if (
+                key != base_key
+                and not is_ancestor(parents, base_key, key)
+                and not is_ancestor(parents, key, base_key)
+            ):
+                pool.append(other)
+        if not pool:
             return None
         base = bytes(buf)
-        donor = bytes(self._donor(data, others, rng))
+        donor = bytes(self._donor(data, pool, rng))
         child = bit_cross(base, donor, rng=rng)
         if child in (base, donor):
             return None
