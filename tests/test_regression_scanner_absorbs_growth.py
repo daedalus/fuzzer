@@ -37,7 +37,8 @@ def builds(monkeypatch):
 
 
 def _pairs(rnd, n):
-    return [(rnd.randbytes(rnd.choice((1, 2, 4, 8))), rnd.randbytes(4)) for _ in range(n)]
+    # Non-integer widths: 1/2/4/8 take the trie-free fast path.
+    return [(rnd.randbytes(rnd.choice((3, 5, 6, 7))), rnd.randbytes(5)) for _ in range(n)]
 
 
 def _fresh_scan(pairs, data, min_len):

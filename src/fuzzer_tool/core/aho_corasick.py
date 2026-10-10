@@ -54,7 +54,9 @@ code scanned all 4096.  Both backends here scan the distinct set.
 """
 
 from collections import deque
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
+
+import numpy as np
 
 #: Unique-token count at or above which the automaton is used.  See the module
 #: docstring for the measurements behind the value.
@@ -75,6 +77,122 @@ AC_MAX_NODES = 64_000
 #: ``bytes.find`` meanwhile. Rebuilds become geometric in pool size instead of
 #: one per growth (~21 ms each).
 TAIL_REBUILD_RATIO = 4
+
+#: Token widths matched as one little-endian integer per seed offset (fast
+#: path, see :class:`_IntWindows`); other widths take the automaton / find.
+INT_WIDTH_DTYPES = {1: "<u1", 2: "<u2", 4: "<u4", 8: "<u8"}
+
+#: Hits per width from which numpy grouping is used: it wins on repeats (zero
+#: runs: 4920 hits, 5 tokens, 3.6x), ties on distinct hits, loses below this.
+GROUP_MIN_HITS = 256
+
+#: Native dtype each doubled width is widened into by :func:`_int_windows`.
+_WIDE_DTYPES = {2: np.uint16, 4: np.uint32, 8: np.uint64}
+
+
+def _split_widths(tokens: Iterable[bytes]) -> tuple[list[bytes], list[bytes]]:
+    """Partition *tokens* into (integer-width, other) lists, order kept."""
+    fast: list[bytes] = []
+    slow: list[bytes] = []
+    for tok in tokens:
+        (fast if len(tok) in INT_WIDTH_DTYPES else slow).append(tok)
+    return fast, slow
+
+
+class _IntWindows:
+    """1/2/4/8-byte tokens matched as integers: nothing to build but a sort.
+
+    cmplog operands are almost all of these widths, and the pool churns
+    faster than a trie can be kept (rebuilt every colorize call on FFmpeg,
+    7.4% of loop time). The seed's integer value at every offset is
+    binary-searched in a sorted token array per width:
+
+        seed  a  b  c  d       w=2: ab bc cd      (b[i] | b[i+1] << 8)
+                               w=4: abcd          (u16[i] | u16[i+2] << 16)
+    """
+
+    __slots__ = ("_arrays", "_sets")
+
+    def __init__(self, tokens: Iterable[bytes]) -> None:
+        self._sets: dict[int, set[bytes]] = {w: set() for w in INT_WIDTH_DTYPES}
+        self._arrays: dict[int, np.ndarray] = {}
+        self.add(tokens)
+
+    def add(self, tokens: Iterable[bytes]) -> None:
+        """Add tokens (each of an ``INT_WIDTH_DTYPES`` width)."""
+        sets = self._sets
+        for tok in tokens:
+            sets[len(tok)].add(tok)
+        self._arrays.clear()
+
+    def replace(self, tokens: Iterable[bytes]) -> None:
+        """Make *tokens* the whole set."""
+        for s in self._sets.values():
+            s.clear()
+        self.add(tokens)
+
+    def _array(self, width: int) -> np.ndarray:
+        """Sorted integer view of one width's tokens, built on first scan."""
+        arr = self._arrays.get(width)
+        if arr is None:
+            joined = b"".join(self._sets[width])
+            ints = np.frombuffer(joined, dtype=INT_WIDTH_DTYPES[width])
+            arr = np.sort(ints.astype(ints.dtype.newbyteorder("=")))
+            self._arrays[width] = arr
+        return arr
+
+    def scan(self, data: bytes, min_len: int, found: dict[bytes, list[int]]) -> None:
+        """Add every occurrence in *data* to *found*, offsets ascending."""
+        data = bytes(data)  # keys must be hashable bytes slices
+        sets = self._sets
+        top = max((w for w, toks in sets.items() if toks), default=0)
+        for width, win in _int_windows(data, top):
+            if not sets[width] or width < min_len:
+                continue
+            arr = self._array(width)
+            idx = np.minimum(np.searchsorted(arr, win), len(arr) - 1)
+            pos = np.flatnonzero(arr[idx] == win)
+            if pos.size < GROUP_MIN_HITS:
+                _append_hits(found, data, width, pos.tolist())
+                continue
+
+            # Group offsets by token: a stable sort on value keeps each
+            # group ascending (zero runs hit thousands of times).
+            vals = win[pos]
+            order = np.argsort(vals, kind="stable")
+            pos, vals = pos[order], vals[order]
+            cuts = np.flatnonzero(vals[1:] != vals[:-1]) + 1
+            for group in np.split(pos, cuts):
+                start = int(group[0])
+                found[data[start : start + width]] = group.tolist()
+
+
+def _append_hits(found: dict[bytes, list[int]], data: bytes, width: int, hits: list[int]) -> None:
+    """Few hits: append one by one (cheaper than numpy grouping)."""
+    for pos in hits:
+        tok = data[pos : pos + width]
+        offs = found.get(tok)
+        if offs is None:
+            found[tok] = [pos]
+        else:
+            offs.append(pos)
+
+
+def _int_windows(data: bytes, top: int) -> Iterator[tuple[int, np.ndarray]]:
+    """Yield (width, value at every offset) for widths 1, 2, 4, 8 up to *top*.
+
+    Each width joins two adjacent windows of half its width, little-endian:
+    ``u16[i] = b[i] | b[i+1] << 8``, ``u32[i] = u16[i] | u16[i+2] << 16``.
+    """
+    win = np.frombuffer(data, dtype=np.uint8)
+    width = 1
+    while width <= top and len(win):
+        yield width, win
+        half, width = width, width * 2
+        dtype = _WIDE_DTYPES.get(width)
+        if dtype is None or len(win) <= half:
+            return
+        win = win[:-half].astype(dtype) | (win[half:].astype(dtype) << dtype(8 * half))
 
 
 class AhoCorasick:
@@ -185,7 +303,16 @@ class TokenScanner:
             tests and for the stats line, not consulted by the scan itself.
     """
 
-    __slots__ = ("_automaton", "_built", "_known", "_live", "_scan_tokens", "backend", "tokens")
+    __slots__ = (
+        "_automaton",
+        "_built",
+        "_ints",
+        "_known",
+        "_live",
+        "_scan_tokens",
+        "backend",
+        "tokens",
+    )
 
     def __init__(
         self,
@@ -197,7 +324,10 @@ class TokenScanner:
         # dict.fromkeys rather than set(): deduplicates while keeping a
         # deterministic order, so the trie and the fallback list are the same
         # from run to run for the same pool.
-        self.tokens: list[bytes] = [t for t in dict.fromkeys(tokens) if t]
+        fast, slow = _split_widths(t for t in dict.fromkeys(tokens) if t)
+        self._ints = _IntWindows(fast)
+        # Automaton / find side: every width the integer path does not take.
+        self.tokens: list[bytes] = slow
         self._built = len(self.tokens)
         self._known: set[bytes] | None = None
         # Tokens still in the pool after retarget(); None = all of them.
@@ -234,6 +364,7 @@ class TokenScanner:
         tokens, or when a ``find``-only scanner reaches ``AC_MIN_TOKENS``.
         On False nothing is added.
         """
+        fast, tokens = _split_widths(tokens)
         if self._known is None:
             self._known = set(self.tokens)
         known = self._known
@@ -244,6 +375,7 @@ class TokenScanner:
         if self._automaton is not None and (total - self._built) * TAIL_REBUILD_RATIO > self._built:
             return False
 
+        self._ints.add(fast)
         known.update(new)
         if self._live is not None:
             self._live.update(new)
@@ -264,6 +396,7 @@ class TokenScanner:
         """
         if self._automaton is None:
             return False  # find backend: a rebuild is a list copy
+        fast, tokens = _split_widths(tokens)
         if self._known is None:
             self._known = set(self.tokens)
         known = self._known
@@ -274,6 +407,7 @@ class TokenScanner:
         if (tail + dead) * TAIL_REBUILD_RATIO > self._built:
             return False
 
+        self._ints.replace(fast)
         known.update(new)
         self.tokens.extend(new)
         self._scan_tokens.extend(new)
@@ -315,6 +449,7 @@ class TokenScanner:
         if live is not None:
             # Tokens that left the pool (see retarget) stay in the automaton.
             found = {t: o for t, o in found.items() if t in live}
+        self._ints.scan(data, min_len, found)
         return found
 
 
