@@ -110,7 +110,9 @@ class _WalkedCoveringMutator(MutatorBase):
         # Built once from the fuzzer's rng, then round-robin: redrawing per
         # call would drop the pairwise guarantee.
         if self._rows is None:
-            self._rows = covering_array.generate(self.value_sets(), t=2, rng=rng)
+            self._rows = covering_array.generate(
+                self.value_sets(), t=2, rng=rng, strategy=covering_array.OPERATOR_STRATEGY
+            )
 
         row = self._rows[self._idx % len(self._rows)]
         self._idx += 1

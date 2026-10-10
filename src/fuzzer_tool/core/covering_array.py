@@ -54,6 +54,11 @@ _Constraint = tuple[tuple[int, Any], ...]
 # test_covering_array.py's row-count regression bound).
 _DEFAULT_CANDIDATE_POOL = 50
 
+# Strategy the covering-array mutators pass to generate(). "density" gave fewer
+# rows and ~4-5x faster builds than "aetg" on the PNG IHDR / gzip domains (see
+# the density strategy commit); set to "aetg" to revert every operator at once.
+OPERATOR_STRATEGY = "density"
+
 # Sentinel: a parameter a tuple does not assign.
 _MISSING = object()
 

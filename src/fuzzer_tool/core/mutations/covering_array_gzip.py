@@ -77,7 +77,9 @@ class GzipCoveringArrayMutator(MutatorBase):
         # Built once from the fuzzer's rng (reproducible under --seed), then
         # round-robin: redrawing per call would drop the coverage guarantee.
         if self._rows is None:
-            self._rows = covering_array.generate(_VALUE_SETS, t=2, rng=rng)
+            self._rows = covering_array.generate(
+                _VALUE_SETS, t=2, rng=rng, strategy=covering_array.OPERATOR_STRATEGY
+            )
 
         row = self._rows[self._idx % len(self._rows)]
         self._idx += 1

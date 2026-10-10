@@ -184,7 +184,9 @@ class PngCoveringArrayMutator(MutatorBase):
             return None
 
         if self._rows is None:
-            self._rows = covering_array.generate(_VALUE_SETS, t=2, rng=rng)
+            self._rows = covering_array.generate(
+                _VALUE_SETS, t=2, rng=rng, strategy=covering_array.OPERATOR_STRATEGY
+            )
             if not self._rows:  # pragma: no cover - unreachable, domains non-empty
                 return None
 
