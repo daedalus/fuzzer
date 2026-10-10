@@ -112,6 +112,7 @@ _CATEGORIES: dict[str, set[str]] = {
     "structural": {
         "splice",
         "splice_diff_located",
+        "bit_cross",
         "elite_fuse",
         "crossover",
         "type_replace",

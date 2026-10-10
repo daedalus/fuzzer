@@ -1078,6 +1078,67 @@ def crossover(a: bytes, b: bytes, rng) -> bytes:
     return bytes(result)
 
 
+# P(conflicting bit -> 1) per level: 0 (AND), 1/4, 1/2, 3/4, 1 (OR).
+_BIT_CROSS_LEVELS = 5
+_BIT_CROSS_AND, _BIT_CROSS_QUARTER, _BIT_CROSS_HALF, _BIT_CROSS_3QUARTER = 0, 1, 2, 3
+
+
+def _bit_cross_word(n: int, level: int, rng) -> int:
+    """*n*-byte word whose bits are 1 with the probability of *level*."""
+    if level == _BIT_CROSS_AND:
+        return 0
+    if level == _BIT_CROSS_LEVELS - 1:
+        return (1 << (8 * n)) - 1
+    word = int.from_bytes(rng.randbytes(n), "big")
+    if level == _BIT_CROSS_HALF:
+        return word
+    other = int.from_bytes(rng.randbytes(n), "big")
+    if level == _BIT_CROSS_QUARTER:
+        return word & other
+    return word | other
+
+
+def bit_cross(a: bytes, b: bytes, rng) -> bytes:
+    """Bit-level uniform crossover of two inputs over their conflict set.
+
+    Bits where *a* and *b* agree are kept.  Each bit of ``D = a ^ b`` is
+    set to 1 with probability p, p drawn from {0, 1/4, 1/2, 3/4, 1}:
+    p=0 is ``a & b``, p=1 is ``a | b``.  Unlike either, intermediate p
+    reaches the other points of the 2^|D| family.  Plain ``a ^ b`` is not
+    used: it zeroes the shared bytes (magic, headers) and the parser
+    rejects the child.
+
+    Length is that of *a*; a short *b* is padded with *a*'s own tail.
+    Returns *a* unchanged when either input is empty or they are equal.
+
+    Example (p=0 / p=1)::
+
+        a=0b1100  b=0b1010  D=0b0110  ->  and=0b1000  or=0b1110
+
+    Args:
+        a: Base input.
+        b: Donor input.
+        rng: Random source (``rand_pool``).
+
+    Returns:
+        Child with len == len(a).
+    """
+    n = len(a)
+    if n == 0 or not b:
+        return a
+    if len(b) < n:
+        b = b + a[len(b) :]
+    x = int.from_bytes(a, "big")
+    diff = x ^ int.from_bytes(b[:n], "big")
+    if diff == 0:
+        return a
+    # Random bits are only needed across the span of differing bytes.
+    low = (diff & -diff).bit_length() - 1 >> 3
+    span = (diff.bit_length() + 7 >> 3) - low
+    word = _bit_cross_word(span, rng.randrange(_BIT_CROSS_LEVELS), rng) << (8 * low)
+    return ((x & ~diff) | (diff & word)).to_bytes(n, "big")
+
+
 DICT_MUTATIONS = [
     "dict_insert",
     "dict_replace",

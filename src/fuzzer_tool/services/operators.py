@@ -45,6 +45,7 @@ from fuzzer_tool.core.mutations import (
     MAGIC_TABLE,
     SPECIAL_STRINGS,
     ascii_num_replace,
+    bit_cross,
     choose_len,
     could_be_arith,
     could_be_bitflip,
@@ -2786,6 +2787,24 @@ class OperatorEngine:
                         : self.ctx.max_len
                     ]
                 )
+
+    def _op_bit_cross(self, buf, _byte_idx, data):
+        """Bit-level crossover of base and a donor over their differing bits.
+
+        Skips children equal to either parent: both are already executed.
+        """
+        rng = self.ctx._rng
+        if not buf or len(self.ctx.corpus) < 2:
+            return None
+        others = [c for c in self.ctx.corpus if c is not data]
+        if not others:
+            return None
+        base = bytes(buf)
+        donor = bytes(self._donor(data, others, rng))
+        child = bit_cross(base, donor, rng=rng)
+        if child in (base, donor):
+            return None
+        return bytearray(child[: self.ctx.max_len])
 
     def _op_type_replace(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import type_replace

@@ -120,6 +120,7 @@ _SPLICE_OPS = (
     "_op_insert_range_from_other",
     "_op_crossover",
     "_op_fuse_next",
+    "_op_bit_cross",
 )
 
 
