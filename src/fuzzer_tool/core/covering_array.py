@@ -238,6 +238,62 @@ def _best_row(
     return best_row, best_covered
 
 
+def _density_row(
+    value_sets: Sequence[Sequence[Any]],
+    needed: set[RequiredTuple],
+    rng: Any,
+    constraints: Sequence[_Constraint] = (),
+) -> Row | None:
+    """Row built by the method of conditional expectations (density algorithm).
+
+    Parameters are fixed in index order. The potential of a partial row is the
+    expected number of still-needed tuples a uniform-random completion covers:
+    a tuple contributes 0 if it contradicts an assigned parameter, else
+    ``prod(1/|V_i|)`` over its unassigned parameters. For parameter ``j`` the
+    potential averaged over its values equals the potential before the choice,
+    so taking the best value never lowers it: the finished row covers at least
+    the density of the empty row, ``sum over needed of prod(1/|V_i|)``. Ties
+    go to *rng*. Returns None if *constraints* leave a parameter no value.
+    """
+    k = len(value_sets)
+    by_param: list[list[RequiredTuple]] = [[] for _ in range(k)]
+    for tup in needed:
+        for i in tup[0]:
+            by_param[i].append(tup)
+    last_of: dict[int, list[_Constraint]] = {}
+    for c in constraints:
+        last_of.setdefault(c[-1][0], []).append(c)
+    sizes = [len(vs) for vs in value_sets]
+    row: list[Any] = [None] * k
+    for j in range(k):
+        score = dict.fromkeys(value_sets[j], 0.0)
+        for subset, combo in by_param[j]:
+            w, vj, ok = 1.0, None, True
+            for i, x in zip(subset, combo, strict=True):
+                if i == j:
+                    vj = x
+                elif i < j:
+                    if row[i] != x:
+                        ok = False
+                        break
+                else:
+                    w /= sizes[i]
+            if ok and vj in score:
+                score[vj] += w
+        allowed = [
+            v
+            for v in value_sets[j]
+            if not any(
+                c[-1][1] == v and all(row[i] == x for i, x in c[:-1]) for c in last_of.get(j, ())
+            )
+        ]
+        if not allowed:
+            return None
+        top = max(score[v] for v in allowed)
+        row[j] = _pick(rng, [v for v in allowed if score[v] >= top - 1e-12])
+    return tuple(row)
+
+
 def generate(
     value_sets: Sequence[Sequence[Any]],
     t: int = 2,
@@ -245,6 +301,7 @@ def generate(
     candidate_pool: int = _DEFAULT_CANDIDATE_POOL,
     max_rows: int | None = None,
     forbidden: Sequence[Forbidden] | None = None,
+    strategy: str = "aetg",
 ) -> list[Row]:
     """Build a *t*-way covering array over *value_sets*.
 
@@ -274,6 +331,10 @@ def generate(
             resampling; a tuple whose every completion is forbidden by
             constraints of size > 1 stays uncovered, which
             ``missing_tuples(..., forbidden=...)`` reports.
+        strategy: ``"aetg"`` (default) keeps the best of *candidate_pool*
+            random rows per round. ``"density"`` builds each row by
+            conditional expectations (``_density_row``), which has no random
+            pool: ``candidate_pool`` is ignored and rng only breaks ties.
 
     Returns:
         Rows covering every required tuple (unless ``max_rows`` cut
@@ -282,6 +343,8 @@ def generate(
         early rather than spin, which should only be reachable via a
         broken domain (see ``value_sets[i]`` emptiness check below).
     """
+    if strategy not in ("aetg", "density"):
+        raise ValueError(f"unknown strategy {strategy!r}; expected 'aetg' or 'density'")
     k = len(value_sets)
     if k == 0:
         return []
@@ -300,7 +363,15 @@ def generate(
     while needed:
         if max_rows is not None and len(rows) >= max_rows:
             break
-        pick = _best_row(value_sets, param_subsets, needed, rng, candidate_pool, constraints)
+        pick = None
+        if strategy == "density":
+            drow = _density_row(value_sets, needed, rng, constraints)
+            if drow is not None:
+                dcov = _row_tuples(drow, param_subsets) & needed
+                if dcov:
+                    pick = (drow, dcov)
+        if pick is None:
+            pick = _best_row(value_sets, param_subsets, needed, rng, candidate_pool, constraints)
         if pick is None:
             # Exhausted the retry budget without any candidate covering
             # anything still `needed`. Unreachable for well-formed

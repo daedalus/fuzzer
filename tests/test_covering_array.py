@@ -241,3 +241,72 @@ class TestStrengthThree:
         rows = ca.generate(vs, t=3, rng=random.Random(7), forbidden=forbidden)
         assert ca.verify_coverage(rows, vs, t=3, forbidden=forbidden)
         assert not any(r[0] == r[1] == r[2] == 1 for r in rows)
+
+
+_IHDR_LIKE = [
+    (0, 1, 2, 0x7FFFFFFF, 0xFFFFFFFF),
+    (0, 1, 2, 0x7FFFFFFF, 0xFFFFFFFF),
+    (0, 1, 2, 4, 8, 16, 255),
+    (0, 1, 2, 3, 4, 6, 255),
+    (0, 1, 255),
+    (0, 1, 255),
+    (0, 1, 42, 255),
+]
+
+
+class TestDensityStrategy:
+    """strategy="density": rows by conditional expectations (no random pool)."""
+
+    def test_unknown_strategy_rejected(self):
+        with pytest.raises(ValueError):
+            ca.generate([[0, 1], [0, 1]], strategy="nope")
+
+    def test_full_coverage_ihdr_like_domains(self):
+        for seed in range(10):
+            rows = ca.generate(_IHDR_LIKE, t=2, rng=random.Random(seed), strategy="density")
+            assert ca.verify_coverage(rows, _IHDR_LIKE, t=2)
+
+    def test_t3_full_coverage(self):
+        vs = [[0, 1]] * 6
+        rows = ca.generate(vs, t=3, rng=random.Random(0), strategy="density")
+        assert ca.verify_coverage(rows, vs, t=3)
+
+    def test_first_row_meets_density_guarantee(self):
+        # Expected coverage of a uniform-random row = number of parameter subsets
+        # (each contributes prod|V| tuples at prob 1/prod|V|); conditional
+        # expectations must reach at least that. C(7,2) = 21 here.
+        subsets = ca._param_subsets(len(_IHDR_LIKE), 2)
+        needed = ca._required_tuples(_IHDR_LIKE, subsets)
+        for seed in range(25):
+            row = ca._density_row(_IHDR_LIKE, needed, random.Random(seed))
+            assert len(ca._row_tuples(row, subsets) & needed) >= len(subsets)
+
+    def test_row_count_not_worse_than_aetg_on_ihdr_like(self):
+        def mean_rows(strategy):
+            return (
+                sum(
+                    len(ca.generate(_IHDR_LIKE, t=2, rng=random.Random(s), strategy=strategy))
+                    for s in range(10)
+                )
+                / 10
+            )
+
+        assert mean_rows("density") <= mean_rows("aetg")
+
+    def test_deterministic_given_same_seed(self):
+        a = ca.generate(_IHDR_LIKE, rng=random.Random(5), strategy="density")
+        b = ca.generate(_IHDR_LIKE, rng=random.Random(5), strategy="density")
+        assert a == b
+
+    def test_forbidden_respected_and_covered(self):
+        vs = [[0, 1, 2], [0, 1, 2], [0, 1]]
+        forbidden = [{0: 1, 1: 1}, {1: 2, 2: 0}]
+        rows = ca.generate(vs, t=2, rng=random.Random(2), forbidden=forbidden, strategy="density")
+        for row in rows:
+            assert not (row[0] == 1 and row[1] == 1)
+            assert not (row[1] == 2 and row[2] == 0)
+        assert ca.verify_coverage(rows, vs, t=2, forbidden=forbidden)
+
+    def test_max_rows_stops_early(self):
+        rows = ca.generate(_IHDR_LIKE, rng=random.Random(0), max_rows=3, strategy="density")
+        assert len(rows) == 3
