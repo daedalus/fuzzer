@@ -20,9 +20,11 @@ import zlib
 from collections.abc import Callable
 from enum import Enum
 from itertools import product
+from typing import NamedTuple
 
 import numpy as np
 
+from fuzzer_tool.core.berlekamp_massey import compute_checksum
 from fuzzer_tool.core.gf2_common import apply_bitmask_map, invert_bitmask_map
 from fuzzer_tool.core.hash_inverse import MIXERS
 from fuzzer_tool.core.lru import LRUCache
@@ -474,6 +476,97 @@ class Crc32Encoder(Encoder):
         return f"crc32_{'r' if self.reverse else 'p'}"
 
 
+class _CrcModel(NamedTuple):
+    """CRC parameters, as ``compute_checksum`` takes them (poly reversed when reflected)."""
+
+    label: str
+    width: int
+    poly: int
+    init: int
+    xor_out: int
+    reflected: bool
+
+
+# Checked against the published check values of "123456789" in the tests.
+_CRC_MODELS = (
+    _CrcModel("crc32c", 32, 0x82F63B78, 0xFFFFFFFF, 0xFFFFFFFF, True),
+    _CrcModel("crc32_bzip2", 32, 0x04C11DB7, 0xFFFFFFFF, 0xFFFFFFFF, False),
+    _CrcModel("crc32_mpeg2", 32, 0x04C11DB7, 0xFFFFFFFF, 0, False),
+    _CrcModel("crc16_ccitt", 16, 0x1021, 0xFFFF, 0, False),
+    _CrcModel("crc16_xmodem", 16, 0x1021, 0, 0, False),
+    _CrcModel("crc16_arc", 16, 0xA001, 0, 0, True),
+    _CrcModel("crc16_modbus", 16, 0xA001, 0xFFFF, 0, True),
+)
+
+# Keep 8 bits of headroom, as the CRC-32 filter does (24 of 32 bits).
+_CRC_HEADROOM_BITS = 8
+
+
+@functools.cache
+def _crc_model_inverse(model: _CrcModel) -> tuple[int, ...]:
+    """Rows of L^-1 for ``crc(x) = L.x ^ crc(0)`` over a ``width``-bit field."""
+    width = model.width
+    nbytes = width // 8
+
+    def crc(x: int) -> int:
+        return compute_checksum(
+            x.to_bytes(nbytes, "little"),
+            model.poly,
+            width,
+            model.init,
+            model.xor_out,
+            model.reflected,
+        )
+
+    zero = crc(0)
+    cols = [crc(1 << i) ^ zero for i in range(width)]
+    rows = [sum(((cols[i] >> j) & 1) << i for i in range(width)) for j in range(width)]
+    inv = invert_bitmask_map(rows, width)
+    assert inv is not None, f"{model.label} 1-field map is a bijection"
+    return tuple(inv)
+
+
+@functools.cache
+def _crc_zero(model: _CrcModel) -> int:
+    return compute_checksum(
+        bytes(model.width // 8),
+        model.poly,
+        model.width,
+        model.init,
+        model.xor_out,
+        model.reflected,
+    )
+
+
+class CrcModelEncoder(Encoder):
+    """``crc(value) == CONST`` for a CRC over a field of exactly its own width.
+
+    Same affine-bijection inverse as ``Crc32Encoder``, for other models
+    (CRC-32C, BZIP2, MPEG-2, and 16-bit CCITT/XMODEM/ARC/MODBUS).  Only the
+    constant is inverted: its +-i neighbours have unrelated preimages.
+    """
+
+    value_only = True
+
+    def __init__(self, model: _CrcModel, reverse: bool = False):
+        self.model = model
+        self.reverse = reverse
+        self._min_operand = 1 << (model.width - _CRC_HEADROOM_BITS)
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        if cmp_type == "STR" or cmp_size != self.model.width:
+            return False
+        return _to_int(lhs) >= self._min_operand and _to_int(rhs) >= self._min_operand
+
+    def encode(self, val):
+        model = self.model
+        x = apply_bitmask_map(_crc_model_inverse(model), _to_int(val) ^ _crc_zero(model))
+        return [_reverse_if(x.to_bytes(model.width // 8, "little"), self.reverse)]
+
+    def name(self):
+        return f"{self.model.label}_{'r' if self.reverse else 'p'}"
+
+
 # FNV-1a mixes XOR with multiplication, so there is no GF(2) matrix inverse
 # the way CRC-32 has.  Meet-in-the-middle recovers the 4-byte preimages in
 # 2^16 steps per side (~1.5 ms vectorized); results are cached per hash.
@@ -693,6 +786,9 @@ for flag in (False, True):
 BUILTIN_ENCODERS.append(Utf16NarrowEncoder())
 for rev in (False, True):
     BUILTIN_ENCODERS.append(Crc32Encoder(rev))
+for model_ in _CRC_MODELS:
+    for rev in (False, True):
+        BUILTIN_ENCODERS.append(CrcModelEncoder(model_, rev))
 for rev in (False, True):
     BUILTIN_ENCODERS.append(Fnv1aEncoder(rev))
 for label_, inv_ in MIXERS.items():

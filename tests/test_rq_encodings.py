@@ -10,8 +10,10 @@ from fuzzer_tool.core.hash_inverse import MIXERS
 from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.rq_encodings import (
+    _CRC_MODELS,
     BUILTIN_ENCODERS,
     Crc32Encoder,
+    CrcModelEncoder,
     CStrChrEncoder,
     CStringEncoder,
     Encoder,
@@ -732,3 +734,142 @@ class TestMixerEncoder:
         data = b"AA" + _le32(0x41424344) + b"BB"
         muts = generate_mutations(a, b, 32, "CMP", data, is_hash=c.is_hash_candidate)
         assert ((2,), (_le32(0xCAFEBABE),)) in [(m[0], m[1]) for m in _by_encoder(muts, "fmix32_p")]
+
+
+# Rocksoft parameters (normal-form poly) and published check values for b"123456789".
+_CRC_REF = {
+    "crc32c": (32, 0x1EDC6F41, 0xFFFFFFFF, True, 0xFFFFFFFF, 0xE3069283),
+    "crc32_bzip2": (32, 0x04C11DB7, 0xFFFFFFFF, False, 0xFFFFFFFF, 0xFC891918),
+    "crc32_mpeg2": (32, 0x04C11DB7, 0xFFFFFFFF, False, 0, 0x0376E6E7),
+    "crc16_ccitt": (16, 0x1021, 0xFFFF, False, 0, 0x29B1),
+    "crc16_xmodem": (16, 0x1021, 0, False, 0, 0x31C3),
+    "crc16_arc": (16, 0x8005, 0, True, 0, 0xBB3D),
+    "crc16_modbus": (16, 0x8005, 0xFFFF, True, 0, 0x4B37),
+}
+
+
+def _ref_crc(label: str, data: bytes) -> int:
+    """Bit-at-a-time reference, independent of ``compute_checksum``."""
+    width, poly, init, reflected, xor_out, _ = _CRC_REF[label]
+    mask, top = (1 << width) - 1, 1 << (width - 1)
+    reg = init
+    for b in data:
+        if reflected:
+            b = int(f"{b:08b}"[::-1], 2)
+        reg ^= b << (width - 8)
+        for _ in range(8):
+            reg = ((reg << 1) ^ poly) & mask if reg & top else (reg << 1) & mask
+    if reflected:
+        reg = int(f"{reg:0{width}b}"[::-1], 2)
+    return reg ^ xor_out
+
+
+def _crc_enc(label: str, reverse: bool = False) -> CrcModelEncoder:
+    (model,) = [m for m in _CRC_MODELS if m.label == label]
+    return CrcModelEncoder(model, reverse)
+
+
+def _crc_of(label: str, x: int) -> bytes:
+    width = _CRC_REF[label][0]
+    return _ref_crc(label, x.to_bytes(width // 8, "little")).to_bytes(width // 8, "little")
+
+
+class TestCrcModelEncoder:
+    """``crc(value) == CONST`` for CRC models beyond CRC-32/IEEE."""
+
+    @pytest.mark.parametrize("label", sorted(_CRC_REF))
+    def test_reference_matches_published_check_value(self, label):
+        """The test's own CRC is right, so the other tests mean something."""
+        assert _ref_crc(label, b"123456789") == _CRC_REF[label][5]
+
+    @pytest.mark.parametrize("label", sorted(_CRC_REF))
+    def test_solves_hashed_compare(self, label):
+        width = _CRC_REF[label][0]
+        n = width // 8
+        garbage, want = 0x41424344 % (1 << width), 0xBEEFCAFE % (1 << width)
+        data = b"AA" + garbage.to_bytes(n, "little") + b"BB"
+        hits = _by_encoder(
+            generate_mutations(
+                _crc_of(label, garbage), _crc_of(label, want), width, "CMP", data, hammer=True
+            ),
+            f"{label}_p",
+        )
+        assert ((2,), (want.to_bytes(n, "little"),)) in [(m[0], m[1]) for m in hits]
+
+    def test_reversed_field(self):
+        x, want = 0x01020304, 0xBEEFCAFE
+        data = x.to_bytes(4, "little")[::-1] + b"zz"
+        hits = _by_encoder(
+            generate_mutations(_crc_of("crc32c", x), _crc_of("crc32c", want), 32, "CMP", data),
+            "crc32c_r",
+        )
+        assert any(m[1] == (want.to_bytes(4, "little")[::-1],) for m in hits)
+
+    # Falsification: reference forward CRC of the preimage equals the constant;
+    # wrong model, width, type -> silent.
+    def test_falsify_crc_model(self):
+        rng = RandPool(seed=42)
+        for label, (width, *_rest) in _CRC_REF.items():
+            enc = _crc_enc(label)
+            n = width // 8
+            for _ in range(40):
+                x = rng.randbytes(n)
+                const = _crc_of(label, int.from_bytes(x, "little"))
+                assert enc.encode(const) == [x]
+                assert _ref_crc(label, enc.encode(const)[0]) == int.from_bytes(const, "little")
+        # A crc32c pair does not open a crc32_mpeg2 gate.
+        x, want = 0x41424344, 0xBEEFCAFE
+        data = b"AA" + x.to_bytes(4, "little") + b"BB"
+        muts = generate_mutations(_crc_of("crc32c", x), _crc_of("crc32c", want), 32, "CMP", data)
+        assert not _by_encoder(muts, "crc32_mpeg2_p")
+        enc = _crc_enc("crc32c")
+        assert not enc.is_applicable(16, "CMP", b"\x01\x02", b"\x03\x04")
+        assert not enc.is_applicable(64, "CMP", b"\x01" * 8, b"\x02" * 8)
+        assert not enc.is_applicable(512, "STR", b"abcd", b"efgh")
+
+    # Adversarial: full 16-bit space is a bijection; boundary values; filter edges.
+    def test_adversarial_exhaustive_16bit(self):
+        enc = _crc_enc("crc16_ccitt")
+        seen = set()
+        for x in range(1 << 16):
+            (pre,) = enc.encode(_crc_of("crc16_ccitt", x))
+            assert int.from_bytes(pre, "little") == x
+            seen.add(x)
+        assert len(seen) == 1 << 16
+
+    @pytest.mark.parametrize("label", sorted(_CRC_REF))
+    def test_adversarial_boundaries(self, label):
+        width = _CRC_REF[label][0]
+        enc = _crc_enc(label)
+        for x in (0, 1, (1 << width) - 1, 1 << (width - 1)):
+            const = _crc_of(label, x)
+            assert enc.encode(const) == [x.to_bytes(width // 8, "little")]
+
+    def test_adversarial_small_integer_skipped(self):
+        for label, (width, *_rest) in _CRC_REF.items():
+            enc = _crc_enc(label)
+            n = width // 8
+            lo, hi = 1 << (width - 8), (1 << (width - 8)) - 1
+            assert not enc.is_applicable(
+                width, "CMP", (12).to_bytes(n, "little"), (13).to_bytes(n, "little")
+            )
+            assert not enc.is_applicable(
+                width, "CMP", lo.to_bytes(n, "little"), hi.to_bytes(n, "little")
+            )
+            assert enc.is_applicable(
+                width, "CMP", lo.to_bytes(n, "little"), lo.to_bytes(n, "little")
+            )
+
+    def test_registered_and_16bit_pair_not_flagged_hash(self):
+        from fuzzer_tool.core.cmplog import CmplogCollector  # noqa: PLC0415
+
+        names = {e.name() for e in BUILTIN_ENCODERS}
+        assert {f"{m.label}_{d}" for m in _CRC_MODELS for d in "pr"} <= names
+        c = CmplogCollector()
+        a, b = _crc_of("crc16_arc", 0x4142), _crc_of("crc16_arc", 0xBEEF)
+        c.detect_hash_candidates([(a, b)])
+        data = b"AA" + (0x4142).to_bytes(2, "little") + b"BB"
+        muts = generate_mutations(a, b, 16, "CMP", data, is_hash=c.is_hash_candidate)
+        assert ((2,), ((0xBEEF).to_bytes(2, "little"),)) in [
+            (m[0], m[1]) for m in _by_encoder(muts, "crc16_arc_p")
+        ]
