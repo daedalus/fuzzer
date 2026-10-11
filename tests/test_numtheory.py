@@ -260,3 +260,120 @@ class TestAdversarial:
 
     def test_is_prime_bool_and_float_types(self):
         assert nt.is_prime(True) is False
+
+
+STRONG_LUCAS_PSP = (5459, 5777, 10877, 16109, 18971, 22499)
+
+
+class TestJacobiKronecker:
+    def test_jacobi_matches_euler_for_primes(self):
+        for p in _sieve(300)[1:]:
+            for a in range(-5, p + 5):
+                euler = pow(a, (p - 1) // 2, p)
+                expect = 0 if euler == 0 else (1 if euler == 1 else -1)
+                assert nt.jacobi(a, p) == expect
+                assert nt.legendre(a, p) == expect
+
+    def test_jacobi_multiplicative_in_n(self):
+        for m, n in ((3, 5), (7, 15), (9, 11), (21, 25)):
+            for a in range(-10, 40):
+                assert nt.jacobi(a, m * n) == nt.jacobi(a, m) * nt.jacobi(a, n)
+
+    def test_jacobi_rejects_even_or_nonpositive(self):
+        for n in (0, -3, 4):
+            with pytest.raises(ValueError):
+                nt.jacobi(3, n)
+
+    def test_legendre_rejects_composite_and_two(self):
+        for p in (2, 9, 15):
+            with pytest.raises(ValueError):
+                nt.legendre(3, p)
+
+    def test_kronecker_equals_jacobi_on_odd_positive(self):
+        for n in range(1, 60, 2):
+            for a in range(-20, 30):
+                assert nt.kronecker(a, n) == nt.jacobi(a, n)
+
+    def test_kronecker_edge_cases(self):
+        assert nt.kronecker(1, 0) == 1 and nt.kronecker(-1, 0) == 1
+        assert nt.kronecker(2, 0) == 0
+        assert nt.kronecker(4, 2) == 0
+        assert nt.kronecker(3, 2) == -1 and nt.kronecker(7, 2) == 1
+        assert nt.kronecker(-1, -1) == -1
+
+    def test_kronecker_multiplicative_in_n(self):
+        for a in range(-15, 30):
+            for m, n in ((2, 3), (4, 5), (-2, 7), (6, -5)):
+                assert nt.kronecker(a, m * n) == nt.kronecker(a, m) * nt.kronecker(a, n)
+
+    def test_quadratic_residues(self):
+        for n in (1, 2, 7, 8, 15, 16, 30):
+            assert nt.quadratic_residues(n) == sorted({x * x % n for x in range(n)})
+        with pytest.raises(ValueError):
+            nt.quadratic_residues(0)
+
+
+class TestStrongLucas:
+    def test_every_prime_passes(self):
+        for p in _sieve(20000)[3:]:
+            assert nt._strong_lucas(p)
+
+    def test_squares_fail(self):
+        for r in (7, 101, 65537):
+            assert not nt._strong_lucas(r * r)
+
+    def test_known_lucas_pseudoprimes_are_composite_for_is_prime(self):
+        # strong Lucas pseudoprimes (A217255): the Lucas half accepts, MR base 2 rejects.
+        for n in STRONG_LUCAS_PSP:
+            assert nt._strong_lucas(n)
+            assert not nt.is_prime(n)
+
+    def test_large_primes_and_composites(self):
+        big = nt.next_prime(1 << 90)
+        assert nt.is_prime(big)
+        assert nt.is_prime((1 << 127) - 1)
+        assert not nt.is_prime(big * nt.next_prime(big))
+        assert not nt.is_prime(((1 << 89) - 1) * ((1 << 107) - 1))
+
+    def test_is_prime_agrees_with_sieve(self):
+        primes = set(_sieve(5000))
+        assert [n for n in range(5000) if nt.is_prime(n)] == sorted(primes)
+
+
+class TestNthrootMod:
+    def test_coprime_exponent_unique_root(self):
+        for p, k in ((101, 7), (998244353, 5), (13, 5)):
+            for a in (1, 2, 3, p - 1):
+                r = nt.nthroot_mod(a, k, p)
+                assert r is not None and pow(r, k, p) == a % p
+
+    def test_all_roots_match_bruteforce(self):
+        for p in (7, 13, 17, 31, 61, 97, 101):
+            for k in (2, 3, 4, 6, 8):
+                for a in range(p):
+                    brute = [x for x in range(p) if pow(x, k, p) == a]
+                    if brute:
+                        assert nt.nthroot_mod(a, k, p, all_roots=True) == brute
+                        assert nt.nthroot_mod(a, k, p) == brute[0]
+                    else:
+                        assert nt.nthroot_mod(a, k, p) is None
+
+    def test_square_root_agrees_with_sqrt_mod(self):
+        for p in (101, 103, 109):
+            for a in range(1, p):
+                r = nt.nthroot_mod(a, 2, p)
+                s = nt.sqrt_mod(a, p)
+                assert (r is None) == (s is None)
+                if r is not None:
+                    assert r == s
+
+    def test_zero_and_p2(self):
+        assert nt.nthroot_mod(0, 3, 11) == 0
+        assert nt.nthroot_mod(0, 3, 11, all_roots=True) == [0]
+        assert nt.nthroot_mod(5, 3, 2) == 1
+
+    def test_argument_errors(self):
+        with pytest.raises(ValueError):
+            nt.nthroot_mod(2, 0, 7)
+        with pytest.raises(ValueError):
+            nt.nthroot_mod(2, 2, 15)

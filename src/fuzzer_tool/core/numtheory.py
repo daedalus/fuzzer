@@ -4,9 +4,10 @@ Hard Rule 51: no sympy/gmpy.  Everything is integer-only and deterministic
 (no RNG: Pollard-rho restarts walk ``c = 1, 2, 3, ...``).
 
     egcd / modinv / crt           Bezout, inverses, Chinese remainder
-    is_prime / next_prime / ...   Miller-Rabin, fixed bases
+    is_prime / next_prime / ...   Miller-Rabin, fixed bases (+ strong Lucas, BPSW, above 3.3e24)
+    jacobi / legendre / kronecker symbols; quadratic_residues
     factorint / divisors / ...    trial division + Brent rho + perfect powers
-    sqrt_mod                      Tonelli-Shanks
+    sqrt_mod / nthroot_mod        Tonelli-Shanks; k-th roots mod a prime
     mult_order / primitive_root   group structure of (Z/m)*
     discrete_log                  Pohlig-Hellman over BSGS
 
@@ -14,8 +15,9 @@ Uses: probing parameter handling of targets (primality tests, DH/RSA
 parameter checks) with adversarial moduli, and solving modular relations
 recovered from observed state.
 
-Limits: ``is_prime`` is exact below ``_MR_EXACT_BELOW`` and a fixed-base
-probabilistic test above.  ``factorint`` is rho-based: 64-bit inputs are
+Limits: ``is_prime`` is exact below ``_MR_EXACT_BELOW``; above it the fixed
+Miller-Rabin bases are joined by a strong Lucas test (Baillie-PSW: no
+counterexample is known, none is proven absent).  ``factorint`` is rho-based: 64-bit inputs are
 instant, balanced semiprimes beyond ~100 bits are not practical.
 ``discrete_log`` bounds BSGS memory: any prime factor of the group order
 above ``_BSGS_MAX_Q`` raises.
@@ -97,7 +99,7 @@ def _mr_witness(n: int, d: int, s: int, a: int) -> bool:
 
 
 def is_prime(n: int) -> bool:
-    """Miller-Rabin primality; exact below ~3.3e24, fixed-base above."""
+    """Miller-Rabin primality; exact below ~3.3e24, MR + strong Lucas (BPSW) above."""
     if n < 2:
         return False
     for p in _MR_BASES:
@@ -107,8 +109,11 @@ def is_prime(n: int) -> bool:
     while d % 2 == 0:
         d //= 2
         s += 1
-    bases = _MR_BASES if n < _MR_EXACT_BELOW else _MR_BASES + _MR_EXTRA
-    return not any(_mr_witness(n, d, s, a) for a in bases)
+    if n < _MR_EXACT_BELOW:
+        return not any(_mr_witness(n, d, s, a) for a in _MR_BASES)
+    if any(_mr_witness(n, d, s, a) for a in _MR_BASES + _MR_EXTRA):
+        return False
+    return _strong_lucas(n)
 
 
 def next_prime(n: int) -> int:
@@ -413,3 +418,140 @@ def discrete_log(n: int, h: int, g: int) -> int | None:
     if sol is None or pow(g, sol[0], n) != h:
         return None
     return sol[0]
+
+
+# --- Jacobi / Legendre / Kronecker, quadratic residues ----------------------
+
+
+def jacobi(a: int, n: int) -> int:
+    """Jacobi symbol ``(a/n)`` for odd positive *n*: -1, 0 or 1."""
+    if n <= 0 or n % 2 == 0:
+        raise ValueError("n must be odd and positive")
+    a %= n
+    out = 1
+    while a:
+        while a % 2 == 0:
+            a //= 2
+            if n % 8 in (3, 5):
+                out = -out
+        a, n = n, a
+        if a % 4 == 3 and n % 4 == 3:
+            out = -out
+        a %= n
+    return out if n == 1 else 0
+
+
+def legendre(a: int, p: int) -> int:
+    """Legendre symbol ``(a/p)`` for an odd prime *p*."""
+    if p == 2 or not is_prime(p):
+        raise ValueError(f"{p} is not an odd prime")
+    return jacobi(a, p)
+
+
+def kronecker(a: int, n: int) -> int:
+    """Kronecker symbol ``(a/n)`` for any integers (extends Jacobi to even/negative n)."""
+    if n == 0:
+        return 1 if abs(a) == 1 else 0
+    out = 1
+    if n < 0:
+        n = -n
+        if a < 0:
+            out = -out
+    v = 0
+    while n % 2 == 0:
+        n //= 2
+        v += 1
+    if v:
+        if a % 2 == 0:
+            return 0
+        if v % 2 and a % 8 in (3, 5):
+            out = -out
+    return out * jacobi(a, n)
+
+
+def quadratic_residues(n: int) -> list[int]:
+    """Sorted squares mod *n* (0 included)."""
+    if n < 1:
+        raise ValueError("modulus must be >= 1")
+    return sorted({x * x % n for x in range(n // 2 + 1)})
+
+
+# --- strong Lucas (second half of Baillie-PSW) ------------------------------
+
+
+def _half(x: int, n: int) -> int:
+    """``x / 2 mod n`` for odd *n*."""
+    x %= n
+    if x & 1:
+        x += n
+    return x >> 1
+
+
+def _strong_lucas(n: int) -> bool:
+    """Strong Lucas probable-prime test, Selfridge method A (odd *n* > 5)."""
+    if math.isqrt(n) ** 2 == n:
+        return False
+    d_par = 5
+    while True:
+        j = jacobi(d_par, n)
+        if j == -1:
+            break
+        if j == 0 and abs(d_par) != n:
+            return False
+        d_par = -d_par - 2 if d_par > 0 else -d_par + 2
+    p_par, q_par = 1, (1 - d_par) // 4
+    d, s = n + 1, 0
+    while d % 2 == 0:
+        d //= 2
+        s += 1
+    u, v, qk = 1, p_par, q_par % n
+    for bit in bin(d)[3:]:
+        u, v, qk = u * v % n, (v * v - 2 * qk) % n, qk * qk % n
+        if bit == "1":
+            u, v = _half(p_par * u + v, n), _half(d_par * u + p_par * v, n)
+            qk = qk * q_par % n
+    if u == 0 or v == 0:
+        return True
+    for _ in range(s - 1):
+        v, qk = (v * v - 2 * qk) % n, qk * qk % n
+        if v == 0:
+            return True
+    return False
+
+
+# --- k-th roots mod a prime --------------------------------------------------
+
+
+def nthroot_mod(a: int, k: int, p: int, all_roots: bool = False) -> int | list[int] | None:
+    """Solutions of ``x**k == a (mod p)`` for prime *p*.
+
+    Returns the least root (None when there is none), or the sorted list of
+    every root with ``all_roots``.  ``gcd(k, p-1) == 1`` is a single modular
+    exponentiation; otherwise the log of *a* base a primitive root is taken
+    (``discrete_log``, so the group-order limits of that function apply).
+    """
+    if k < 1:
+        raise ValueError("k must be >= 1")
+    if not is_prime(p):
+        raise ValueError(f"{p} is not prime")
+    a %= p
+    if a == 0:
+        return [0] if all_roots else 0
+    if p == 2:
+        return [1] if all_roots else 1
+    g = math.gcd(k, p - 1)
+    if g == 1:
+        r = pow(a, modinv(k, p - 1), p)
+        return [r] if all_roots else r
+    root = primitive_root(p)
+    assert root is not None
+    if pow(a, (p - 1) // g, p) != 1:
+        return None
+    lg = discrete_log(p, a, root)
+    if lg is None:
+        return None
+    # k*y == lg (mod p-1) has g solutions spaced (p-1)/g apart.
+    step = (p - 1) // g
+    y0 = lg // g * modinv(k // g, step) % step
+    roots = sorted(pow(root, y0 + i * step, p) for i in range(g))
+    return roots if all_roots else roots[0]

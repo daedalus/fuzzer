@@ -1114,6 +1114,8 @@ When collision risk exceeds the threshold, the coverage SHM (edge table) is resi
 ### Number theory (`core/numtheory.py`, `prime_inject`)
 Stdlib replacement for the `sympy.ntheory` subset (Hard Rule 51); deterministic, no RNG. `is_prime` is exact below ~3.3e24 (12 fixed Miller-Rabin bases), fixed-base probabilistic above. `factorint` is trial division, Brent rho (restarts `c=1,2,..`) and perfect-power splitting: 64-bit inputs are instant, balanced semiprimes past ~100 bits are not practical. `discrete_log` is Pohlig-Hellman over the order of the base, BSGS per prime factor; prime factors above 2^44 raise (table memory bound); non-unit bases fall back to a scan capped at 2^22.
 
+Above ~3.3e24 `is_prime` also runs a strong Lucas test (Selfridge method A, `_strong_lucas`), so the large-n path is Baillie-PSW plus the fixed extra bases; no BPSW counterexample is known. `jacobi`/`kronecker` use the reciprocity loop (no factoring); `nthroot_mod` needs a prime modulus and inherits `discrete_log`'s limits when `gcd(k, p-1) > 1`.
+
 `prime_inject` (regularity) writes boundary primes, Carmichael numbers, strong pseudoprimes, Mersenne/Fermat primes, prime squares and semiprimes into an aligned 1/2/4/8-byte slot. Table built once per width from `numtheory`. No A/B yet; no existing module calls `numtheory` besides the operator.
 
 ### Timeouts earn no coverage
