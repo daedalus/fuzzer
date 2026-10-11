@@ -1139,6 +1139,75 @@ def bit_cross(a: bytes, b: bytes, rng) -> bytes:
     return ((x & ~diff) | (diff & word)).to_bytes(n, "big")
 
 
+# arith_mid: (byte width, numpy byte order) of the field the mean is taken over.
+_ARITH_SHAPES = ((1, "|"), (2, ">"), (2, "<"), (4, ">"), (4, "<"))
+# Weight of the donor, k/4 for k = 1..3 (k=2 is the midpoint).
+_ARITH_QUARTERS = 3
+_ARITH_DENOM_SHIFT = 2  # /4
+
+
+def _arith_count(start: int, last: int, width: int, n: int) -> int:
+    """Whole *width*-byte fields from *start* covering up to *last*, clipped to *n*.
+
+    A partial tail field is dropped, so the count can be 0.
+    """
+    end = min(start + -(-(last - start) // width) * width, n)
+    return (end - start) // width
+
+
+def arith_mid(a: bytes, b: bytes, rng) -> bytes:
+    """Weighted arithmetic mean of two inputs over their differing span.
+
+    The span is read as consecutive 1/2/4-byte fields (BE or LE), the grid
+    starting ``phase`` bytes before the first differing byte (phase drawn in
+    [0, width)) so an integer at any offset can line up; each field becomes
+    ``floor(((4-k)*a + k*b) / 4)``, k in {1, 2, 3}.  k=2 on bytes equals
+    ``(a & b) + ((a ^ b) >> 1)``.  Equal fields are fixed points, so shared
+    bytes (magic, headers) survive.  Halves the interval between the parents,
+    so it bisects a comparison boundary (``x < K``) in log2|a-b| steps when the
+    field width matches the integer.
+
+    Length is that of *a*; a short *b* is padded with *a*'s own tail.  When no
+    whole field fits the span (diff inside a partial tail) it falls back to
+    bytes.  Returns *a* unchanged when either input is empty or they are equal.
+
+    Example (one byte, k=2)::
+
+        a=0x00  b=0x64  ->  0x32
+
+    Args:
+        a: Base input.
+        b: Donor input.
+        rng: Random source (``rand_pool``).
+
+    Returns:
+        Child with len == len(a).
+    """
+    n = len(a)
+    if n == 0 or not b:
+        return a
+    if len(b) < n:
+        b = b + a[len(b) :]
+    diff = np.flatnonzero(np.frombuffer(a, np.uint8) != np.frombuffer(b, np.uint8, n))
+    if diff.size == 0:
+        return a
+    first, last = int(diff[0]), int(diff[-1]) + 1
+    width, order = _ARITH_SHAPES[rng.randrange(len(_ARITH_SHAPES))]
+    k = rng.randrange(_ARITH_QUARTERS) + 1
+    start = max(first - (rng.randrange(width) if width > 1 else 0), 0)
+    count = _arith_count(start, last, width, n)
+    if count == 0:
+        width, order, start, count = 1, "|", first, last - first
+    dt = np.dtype(f"{order}u{width}")
+    # uint64 holds 4 * (2^32 - 1): no wrap for any field.
+    fa = np.frombuffer(a, dt, count, start).astype(np.uint64)
+    fb = np.frombuffer(b, dt, count, start).astype(np.uint64)
+    mean = (fa * (4 - k) + fb * k) >> _ARITH_DENOM_SHIFT
+    out = bytearray(a)
+    out[start : start + count * width] = mean.astype(dt).tobytes()
+    return bytes(out)
+
+
 DICT_MUTATIONS = [
     "dict_insert",
     "dict_replace",

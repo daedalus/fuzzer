@@ -112,6 +112,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "splice",
         "splice_diff_located",
         "bit_cross",
+        "arith_mid",
         "elite_fuse",
         "crossover",
         "type_replace",
@@ -796,6 +797,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # model / engine-gated ops
     # bit_cross needs parent_key, which seed_meta records only under --lineage
     "bit_cross": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
+    "arith_mid": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
     "markov_bytes": lambda f, _d: bool(getattr(f, "markov_trained", False)),
     "cem_bytes": lambda f, _d: bool(
         getattr(f, "mc", None)

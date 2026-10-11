@@ -640,6 +640,9 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.op_span_relocate = True
         f.op_append = True
         f.op_line_code = True
+        # bit_cross / arith_mid: gated on parent_key, which seed_meta records only
+        # under --lineage.
+        f._use_lineage = True
         # wfc_reorder_learned (core/wfc_chunks.py): same flag the existing
         # PNG/JPEG/BMP WFC reorder ops gate on.
         f._wfc_enabled = True

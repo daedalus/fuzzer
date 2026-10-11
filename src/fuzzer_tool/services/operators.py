@@ -44,6 +44,7 @@ from fuzzer_tool.core.mutations import (
     INTERESTING_UNSIGNED_32,
     MAGIC_TABLE,
     SPECIAL_STRINGS,
+    arith_mid,
     ascii_num_replace,
     bit_cross,
     choose_len,
@@ -2833,14 +2834,13 @@ class OperatorEngine:
             cur = parents.get(cur)
         return False
 
-    def _op_bit_cross(self, buf, _byte_idx, data):
-        """Bit-level crossover of the base with an *unrelated* donor seed.
+    def _unrelated_donor(self, buf, data):
+        """Donor from the corpus that is *unrelated* to *data*, else None.
 
-        The donor is never *data* itself, an ancestor or a descendant of it
-        (a mutation chain): recombining those recreates a parent. Siblings
-        and cousins are allowed. Only ``_BIT_CROSS_CANDIDATES`` sampled corpus
-        seeds are checked, then one is picked by ``_donor``. Also skips
-        children equal to either parent: both are already executed.
+        Never *data* itself, an ancestor or a descendant of it (a mutation
+        chain): recombining those recreates a parent. Siblings and cousins
+        are allowed. Only ``_BIT_CROSS_CANDIDATES`` sampled corpus seeds are
+        checked, then one is picked by ``_donor``.
         """
         rng = self.ctx._rng
         corpus = self.ctx.corpus
@@ -2862,12 +2862,29 @@ class OperatorEngine:
                 pool.append(other)
         if not pool:
             return None
+        return bytes(self._donor(data, pool, rng))
+
+    def _recombine(self, fn, buf, data):
+        """Child of ``fn(base, donor, rng=)``; None when it repeats a parent."""
+        donor = self._unrelated_donor(buf, data)
+        if donor is None:
+            return None
         base = bytes(buf)
-        donor = bytes(self._donor(data, pool, rng))
-        child = bit_cross(base, donor, rng=rng)
+        child = fn(base, donor, rng=self.ctx._rng)
         if child in (base, donor):
             return None
         return bytearray(child[: self.ctx.max_len])
+
+    def _op_bit_cross(self, buf, _byte_idx, data):
+        """Bit-level crossover of the base with an *unrelated* donor seed.
+
+        Skips children equal to either parent: both are already executed.
+        """
+        return self._recombine(bit_cross, buf, data)
+
+    def _op_arith_mid(self, buf, _byte_idx, data):
+        """Weighted arithmetic mean of the base and an *unrelated* donor seed."""
+        return self._recombine(arith_mid, buf, data)
 
     def _op_type_replace(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import type_replace
