@@ -95,20 +95,24 @@ def exact_order(toks: list[bytes], ov: dict[tuple[int, int], int]) -> list[int]:
     """Order with the largest total overlap (Held-Karp over subsets)."""
     n = len(toks)
     full = (1 << n) - 1
+    w = [[ov.get((i, j), 0) for j in range(n)] for i in range(n)]
+    bits = [1 << j for j in range(n)]
     best = [[-1] * n for _ in range(1 << n)]
     prev = [[-1] * n for _ in range(1 << n)]
     for i in range(n):
-        best[1 << i][i] = 0
+        best[bits[i]][i] = 0
 
     for mask in range(1 << n):
+        row = best[mask]
+        free = [j for j in range(n) if not mask & bits[j]]
         for i in range(n):
-            if best[mask][i] < 0:
+            base = row[i]
+            if base < 0:
                 continue
-            for j in range(n):
-                if mask >> j & 1:
-                    continue
-                v = best[mask][i] + ov.get((i, j), 0)
-                nm = mask | 1 << j
+            wi = w[i]
+            for j in free:
+                nm = mask | bits[j]
+                v = base + wi[j]
                 if v > best[nm][j]:
                     best[nm][j], prev[nm][j] = v, i
 
@@ -160,20 +164,18 @@ def _lift_gain(cur: list[int], i: int, seg: int, ov: dict) -> int:
     return _link(prev, cur[i], ov) + _link(cur[i + seg - 1], after, ov) - _link(prev, after, ov)
 
 
-def _rest_pos(pos: dict[int, int], x: int, i: int, n: int) -> int:
-    """Index of `x` in the order once the n-long segment at i is lifted out."""
-    return pos[x] - n if pos[x] >= i else pos[x]
-
-
 def _slots(seg: list[int], net: _Net, pos: dict[int, int], i: int) -> list[int]:
     """Slots in `rest` where `seg` links to a neighbour, ascending.
 
     Dropping seg between a and b gains link(a,seg0) + link(segN,b) - link(a,b),
     positive only if one of the first two terms is, so no other slot can win.
+    Once seg (n long, at i) is lifted out, an item at index q >= i sits at q - n.
     """
     inside, n = set(seg), len(seg)
-    slots = {_rest_pos(pos, a, i, n) + 1 for a in net.ins[seg[0]] if a not in inside}
-    slots |= {_rest_pos(pos, b, i, n) for b in net.outs[seg[-1]] if b not in inside}
+    after = [pos[a] for a in net.ins[seg[0]] if a not in inside]
+    before = [pos[b] for b in net.outs[seg[-1]] if b not in inside]
+    slots = {(q - n if q >= i else q) + 1 for q in after}
+    slots.update(q - n if q >= i else q for q in before)
     return sorted(slots)
 
 
@@ -181,13 +183,20 @@ def _best_slot(
     rest: list[int], seg: list[int], skip: int, net: _Net, pos: dict[int, int]
 ) -> tuple[int, int]:
     """(gain, slot) of the best place in `rest` to drop `seg`; slot -1 = none."""
+    get = net.ov.get
+    first, last, end = seg[0], seg[-1], len(rest)
     best, slot = 0, -1
     for p in _slots(seg, net, pos, skip):
         if p == skip:
             continue
-        a = rest[p - 1] if p > 0 else None
-        b = rest[p] if p < len(rest) else None
-        gain = _link(a, seg[0], net.ov) + _link(seg[-1], b, net.ov) - _link(a, b, net.ov)
+        # The end slots lack one neighbour: decide that per slot, not per link.
+        if 0 < p < end:
+            a, b = rest[p - 1], rest[p]
+            gain = get((a, first), 0) + get((last, b), 0) - get((a, b), 0)
+        elif p == 0:
+            gain = get((last, rest[0]), 0) if end else 0
+        else:
+            gain = get((rest[-1], first), 0)
         if gain > best:
             best, slot = gain, p
     return best, slot
