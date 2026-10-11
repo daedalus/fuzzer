@@ -21,7 +21,6 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
-from importlib.util import find_spec
 from typing import Any
 
 from fuzzer_tool.core.rand_pool import RandPool
@@ -40,7 +39,7 @@ _WORD = 4
 
 
 def _xxh32_py(data: bytes, seed: int = 0) -> int:
-    """Pure-Python XXH32 (fallback when the C ``xxhash`` module is absent)."""
+    """Pure-Python XXH32 (the LZ4 frame checksum)."""
     n = len(data)
     pos = 0
     if n >= _STRIPE:
@@ -89,15 +88,7 @@ def _xxh32_py(data: bytes, seed: int = 0) -> int:
     return h ^ (h >> 16)
 
 
-# C xxhash is ~100x faster; the pure version keeps the module dependency-free.
-if find_spec("xxhash") is not None:
-    import xxhash as _xxhash
-
-    def xxh32(data: bytes, seed: int = 0) -> int:
-        """XXH32 of *data* (C ``xxhash`` backend)."""
-        return _xxhash.xxh32_intdigest(data, seed)
-else:
-    xxh32 = _xxh32_py
+xxh32 = _xxh32_py
 
 
 # ── format constants ───────────────────────────────────────────────────────

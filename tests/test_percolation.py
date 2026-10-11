@@ -9,10 +9,10 @@ from fuzzer_tool.core.percolation import (
 
 
 def _seed_key(seed: bytes) -> str:
-    """Match CorpusManager.seed_key (xxhash 16-hex)."""
-    import xxhash
+    """Match CorpusManager.seed_key (XXH64 16-hex)."""
+    from fuzzer_tool.core.hashing import key16
 
-    return xxhash.xxh64(seed).hexdigest()[:16]
+    return key16(seed)
 
 
 def _make_corpus_and_tracker(spec: dict) -> tuple:

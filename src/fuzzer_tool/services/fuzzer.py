@@ -4175,7 +4175,7 @@ class Fuzzer:
         # analyzer_registry.wire_all() above (format_learner,
         # corpus_compression specs).
 
-        # Per-operator buffer-change tracking costs one xxh3 digest per
+        # Per-operator buffer-change tracking costs one hash64 digest per
         # mutation (~3.4us at 64KiB, no copy). Only pay it when something
         # actually consumes the credit assignment.
         self._track_op_effect = bool(

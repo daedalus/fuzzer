@@ -23,8 +23,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from itertools import compress
 
-import xxhash
-
+from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
 from fuzzer_tool.core.tree_mutator import has_bracket_delimiter as _tree_mutator_has_delims
 
@@ -1109,7 +1108,7 @@ class OperatorRegistry:
         # parent seed feeds many execs: evaluate each content once (keyed by
         # hash, so big seeds are not pinned). Formats keep applying hits to
         # this fuzzer's live set.
-        key = xxhash.xxh3_64_intdigest(data) if data else 0
+        key = hash64(data) if data else 0
         matched = plan.sniffed.get(key)
         if matched is None:
             matched = _input_hits(plan, data)

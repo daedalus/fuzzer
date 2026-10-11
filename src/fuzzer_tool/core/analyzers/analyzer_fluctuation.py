@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-import hashlib
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+
+from fuzzer_tool.core.hashing import hash64
 
 _EPS = 1e-12
 
@@ -66,17 +67,11 @@ class WorkFunctional:
     @staticmethod
     def state_key(record: TrajectoryRecord) -> str:
         if record.hit_edges:
-            try:
-                import xxhash
-            except ImportError:
-                xxhash = None  # type: ignore[assignment]
             data = b"".join(
                 (int(e) & 0xFFFFFFFF).to_bytes(4, "little", signed=False)
                 for e in sorted(record.hit_edges)
             )
-            if xxhash is not None:
-                return f"e_{xxhash.xxh3_64_intdigest(data):x}"
-            return f"e_{hashlib.sha256(data).hexdigest()[:16]}"
+            return f"e_{hash64(data):x}"
         if record.ops:
             # Not the builtin hash(): PYTHONHASHSEED salts str hashing per
             # process, so the same trajectory keyed differently on every run
@@ -84,11 +79,7 @@ class WorkFunctional:
             # process can no longer produce. Same defect class as the LSH
             # banding that was removed from crash clustering.
             data = "\x00".join(record.ops).encode("utf-8", "surrogatepass")
-            try:
-                import xxhash
-            except ImportError:
-                return f"o_{hashlib.sha256(data).hexdigest()[:16]}"
-            return f"o_{xxhash.xxh3_64_intdigest(data):016x}"
+            return f"o_{hash64(data):016x}"
         return "_"
 
     def _append(self, state_key: str, work: float) -> None:

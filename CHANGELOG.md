@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`xxhash` dependency removed** (`core/hashing.py`, Hard Rule 51): persisted keys (corpus names, `seed_meta`, GA/EdgeTracker keys) use an in-house XXH64, bit-exact with the reference, so existing corpora are unaffected; in-memory/pickled table keys (was XXH3) use `hash64` = CRC32 | Adler32 << 32; the LZ4 frame checksum always uses the pure XXH32. Also drops the SHA-256 fallback that gave a corpus different keys depending on whether xxhash was installed. Costs: `key16` ~150 us per 4 KiB (was ~1 us), `hash64` ~2.6 us per 4 KiB (was 0.22 us). Tests: `tests/test_hashing.py`.
+
 ### Added
 
 - **`core/numtheory.py`: Jacobi/Legendre/Kronecker, `quadratic_residues`, `nthroot_mod`, strong Lucas (BPSW)**: `jacobi`, `legendre`, `kronecker` (even/negative n), `quadratic_residues(n)`; `nthroot_mod(a, k, p, all_roots=False)` (one modexp when `gcd(k, p-1) == 1`, else discrete log base a primitive root with `g` solutions spaced `(p-1)/g`); `is_prime` above 3.3e24 now adds a strong Lucas test (Selfridge method A) to the fixed Miller-Rabin bases, i.e. Baillie-PSW. Checked against sympy on random inputs (jacobi, nthroot_mod, 70-140 bit primality). No caller besides tests yet.

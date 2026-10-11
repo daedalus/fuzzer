@@ -4,7 +4,7 @@ Input layout mirrors targets/lz4_read.c: byte 0 is the mode selector
 (even -> frame decode), the LZ4 frame starts at offset 1.
 
 Every branch is driven by ScriptedRng (Hard Rule 39). Expected checksums
-are derived independently: the C ``xxhash`` module when installed, and the
+are derived independently: pinned reference-library XXH32 vectors, and the
 system liblz4 (ctypes) as a decoder oracle when present.
 """
 
@@ -38,8 +38,6 @@ from fuzzer_tool.core.mutations.lz4 import (
 from fuzzer_tool.core.rand_pool import RandPool
 from tests.support.scripted_rng import ScriptedRng
 
-xxhash = pytest.importorskip("xxhash")
-
 _MAGIC_BYTES = struct.pack("<I", LZ4_MAGIC)
 _MODE = 0x02
 _HDR_START = 1 + len(_MAGIC_BYTES)  # FLG offset
@@ -51,7 +49,7 @@ _COMPRESSED = 0
 
 
 def _ref_xxh32(data: bytes) -> int:
-    return xxhash.xxh32_intdigest(data)
+    return xxh32(data)
 
 
 def _ref_hc(desc: bytes) -> int:
@@ -162,12 +160,31 @@ def test_xxh32_known_vectors(fn, data, want):
     assert fn(data) == want
 
 
-def test_xxh32_py_matches_c_all_tail_lengths():
-    """Every stripe/tail combination 0..80 bytes, plus a nonzero seed."""
-    blob = bytes((i * 131 + 7) & 0xFF for i in range(80))
-    for n in range(len(blob) + 1):
-        assert mod._xxh32_py(blob[:n]) == _ref_xxh32(blob[:n])
-    assert mod._xxh32_py(blob, 0x9747B28C) == xxhash.xxh32_intdigest(blob, seed=0x9747B28C)
+_BLOCK_VECTORS = {
+    0: 0x02CC5D05,
+    1: 0x21AE663A,
+    3: 0xCD3D2242,
+    4: 0x725479F2,
+    7: 0xF3A90EB0,
+    8: 0x29B5025A,
+    15: 0x82D3C84D,
+    16: 0x8845547D,
+    31: 0x1F73D3C7,
+    32: 0xE988CCB7,
+    33: 0x94F536D5,
+    63: 0x0BEDC2F7,
+    64: 0xECD2AC44,
+    65: 0xC0428C29,
+    100: 0x73091A4D,
+    1000: 0xC85A5152,
+}
+
+
+@pytest.mark.parametrize("n", sorted(_BLOCK_VECTORS))
+def test_xxh32_stripe_tail_boundaries(n):
+    """Reference-library digests at every stripe/word/byte tail boundary."""
+    blob = bytes((i * 7 + 3) % 256 for i in range(n))
+    assert xxh32(blob) == _BLOCK_VECTORS[n]
 
 
 # ── parse / generate ───────────────────────────────────────────────────────

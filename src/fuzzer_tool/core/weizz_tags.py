@@ -46,9 +46,8 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import IntFlag
 
-import xxhash
-
 from fuzzer_tool.core.aho_corasick import scanner_for_pairs
+from fuzzer_tool.core.hashing import hash64_seeded
 
 log = logging.getLogger(__name__)
 
@@ -582,7 +581,7 @@ def _stable_cmp_id(op_a: bytes, op_b: bytes, pc: int | None = None) -> int:
         # keep low 16 bits non-zero; fold high bits
         cid = (pc ^ (pc >> 16)) & _CMP_ID_MASK
         return cid if cid else 1
-    h = xxhash.xxh3_64_intdigest(op_a + op_b, seed=len(op_a)) & _CMP_ID_MASK
+    h = hash64_seeded(op_a + op_b, len(op_a)) & _CMP_ID_MASK
     return h if h else 1
 
 

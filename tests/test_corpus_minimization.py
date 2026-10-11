@@ -20,13 +20,10 @@ def _seed_key(data: bytes) -> str:
 
 
 def _cm_seed_key(data: bytes) -> str:
-    """Mirror the CorpusManager.seed_key logic, respecting xxhash availability."""
-    try:
-        import xxhash  # noqa: F401
+    """Mirror the CorpusManager.seed_key logic."""
+    from fuzzer_tool.core.hashing import key16
 
-        return xxhash.xxh64(data).hexdigest()[:16]
-    except ImportError:
-        return hashlib.sha256(data).hexdigest()[:16]
+    return key16(data)
 
 
 class MockFuzzer:
@@ -856,7 +853,7 @@ class TestSaveToCorpusCoverageEdges:
         # Simulate what fuzz_one does before save_to_corpus:
         # record the child seed's edges in EdgeTracker.
         child = b"child_seed_" + b"c" * 60
-        # Use _cm_seed_key to match CorpusManager.seed_key (may use xxhash).
+        # Use _cm_seed_key to match CorpusManager.seed_key .
         child_key = _cm_seed_key(child)
         et.record_edges(child_key, {10, 20})
         et.cumulative_edges = {10, 20, 30}

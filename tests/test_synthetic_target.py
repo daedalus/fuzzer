@@ -341,9 +341,8 @@ class TestJointLivenessOnRealTarget:
     def test_single_region_probing_calls_all_dead_and_pair_probing_revokes_only_ab(
         self, tmp_path_factory, monkeypatch
     ):
-        import xxhash
-
         import fuzzer_tool.services.operators as ops
+        from fuzzer_tool.core.hashing import hash64
         from fuzzer_tool.core.joint_liveness import JointLiveness
         from fuzzer_tool.core.rand_pool import RandPool
 
@@ -390,7 +389,7 @@ class TestJointLivenessOnRealTarget:
         dead = [eng._region_liveness_factor(seed, i) for i in range(3)]
         assert dead == [ops._LIVENESS_DEAD_WEIGHT] * 3
 
-        key = xxhash.xxh3_64_intdigest(seed)
+        key = hash64(seed)
         for _ in range(400):
             m = eng.joint_liveness_probe(seed)
             if m is None:

@@ -23,8 +23,6 @@ from array import array
 from enum import Enum
 from pathlib import Path
 
-import xxhash
-
 from fuzzer_tool.adapters import seed_zip
 from fuzzer_tool.adapters.filesystem import (
     load_corpus,
@@ -36,6 +34,7 @@ from fuzzer_tool.adapters.filesystem import (
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import seed_exec_us
+from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.pool_drift import PoolDrift
@@ -191,8 +190,6 @@ def _gdb_crash_replay(f, data: bytes, returncode: int) -> str:
         return ""
 
 
-_use_xxhash = True
-
 # Extra seed_key memo entries allowed beyond 2x the corpus before a clear.
 SEED_KEY_MEMO_SLACK = 1024
 
@@ -285,9 +282,7 @@ def seed_key(data: bytes) -> str:
     looked up a 16-char hash in a map keyed by full seed content and could
     never resolve a chain for any seed longer than 8 bytes.
     """
-    if _use_xxhash:
-        return xxhash.xxh64(data).hexdigest()[:16]
-    return hashlib.sha256(data).hexdigest()[:16]
+    return key16(data)
 
 
 def _retire_seed_file(corpus_dir: Path, h: str) -> bool:
@@ -1091,14 +1086,9 @@ class CorpusManager:
     def _ga_admit(self, data: bytes) -> str:
         """Add *data* to the GA population; return the GA seed key used."""
         f = self.f
-        import hashlib as _hashlib
-
         from fuzzer_tool.core.ga import Individual
 
-        if _use_xxhash:
-            seed_key = xxhash.xxh64(data).hexdigest()[:16]
-        else:
-            seed_key = _hashlib.sha256(data).hexdigest()[:16]
+        seed_key = key16(data)
         edge_count = len(f._edge_tracker.seed_edges.get(seed_key, set()))
         ind = Individual(
             data=data,

@@ -39,9 +39,8 @@ from bisect import bisect_left
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
 
-import xxhash
-
 from fuzzer_tool.core.aho_corasick import TokenScanner
+from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 
@@ -111,7 +110,7 @@ class PositionTokenScheduler:
         return _Matches(self.builds, starts, widths)
 
     def _matches(self, data: bytes) -> _Matches:
-        key = xxhash.xxh3_64_intdigest(data)
+        key = hash64(data)
         hit = self._cache.get(key)
         if hit is not None and hit.gen == self.builds:
             self._cache.move_to_end(key)
@@ -128,7 +127,7 @@ class PositionTokenScheduler:
 
     def match_starts(self, data: bytes) -> list[int]:
         """Cached occurrence starts for *data* (empty before the first scan)."""
-        hit = self._cache.get(xxhash.xxh3_64_intdigest(data))
+        hit = self._cache.get(hash64(data))
         return list(hit.starts) if hit is not None else []
 
     def cached_seeds(self) -> int:

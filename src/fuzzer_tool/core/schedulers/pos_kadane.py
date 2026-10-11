@@ -42,8 +42,8 @@ from collections import OrderedDict
 from collections.abc import Sequence
 
 import numpy as np
-import xxhash
 
+from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.kadane import max_subarray
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers._bin_rates import MAX_SEEDS, BinRates
@@ -98,7 +98,7 @@ class PositionKadaneScheduler:
             return
 
         self._rates.credit(data, live, 1.0 / len(live) if outcome is Outcome.GAIN else 0.0)
-        key = xxhash.xxh3_64_intdigest(data)
+        key = hash64(data)
         self._credits[key] = self._credits.get(key, 0) + 1
         self._credits.move_to_end(key)
         while len(self._credits) > MAX_SEEDS:
@@ -116,7 +116,7 @@ class PositionKadaneScheduler:
             return None
 
         live = -(-buf_len // width)
-        key = xxhash.xxh3_64_intdigest(data)
+        key = hash64(data)
         credits = self._credits.get(key, 0)
 
         slot = self._cache.get(key)

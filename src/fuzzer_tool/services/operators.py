@@ -23,7 +23,6 @@ from array import array
 from functools import partial
 
 import numpy as np
-import xxhash
 
 from fuzzer_tool.core.auto_dict import NO_HASH, harvest_tokens
 from fuzzer_tool.core.checksum_sites import hint_operands
@@ -32,6 +31,7 @@ from fuzzer_tool.core.cond_stmt import CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.gaussian import norm_cdf
 from fuzzer_tool.core.gravity import DONOR_CANDIDATES, pair_terms, pick_index
+from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations import (
@@ -2056,7 +2056,7 @@ class OperatorEngine:
         the bandit decides how often. Applied to *buf*, so stacked ops before
         it still count. Declines once the parent's sweep is done.
         """
-        key = xxhash.xxh3_64_intdigest(data)
+        key = hash64(data)
         cursors = self._afl_det_cursor
         k = cursors.pop(key, 0)
         base = bytes(buf)
@@ -5715,7 +5715,7 @@ class OperatorEngine:
         """
         if len(data) < _REGION_MIN_LEN:
             return None
-        key = xxhash.xxh3_64_intdigest(data)
+        key = hash64(data)
         entry = self._region_cache.get(key, _REGION_MISS)
         if entry is not _REGION_MISS:
             return entry
@@ -5803,7 +5803,7 @@ class OperatorEngine:
         if region_idx is None:
             return None
 
-        key = xxhash.xxh3_64_intdigest(data)
+        key = hash64(data)
         estimators = self._region_liveness.setdefault(key, [None] * len(bounds))
 
         diff_edges = baseline_edges ^ mutant_edges
@@ -5835,7 +5835,7 @@ class OperatorEngine:
         estimator recorded for this region yet" -- absence of an
         estimator is not evidence of anything.
         """
-        key = xxhash.xxh3_64_intdigest(data)
+        key = hash64(data)
         estimators = self._region_liveness.get(key)
         if not estimators or region_idx >= len(estimators):
             return 1.0
@@ -5871,7 +5871,7 @@ class OperatorEngine:
         if entry is None:
             return None
         bounds = entry[1]
-        key = xxhash.xxh3_64_intdigest(data)
+        key = hash64(data)
         estimators = self._region_liveness.get(key)
         if not estimators:
             return None
@@ -5931,7 +5931,7 @@ class OperatorEngine:
         if entry is None:
             return None
         cumulative, bounds, total = entry
-        estimators = self._region_liveness.get(xxhash.xxh3_64_intdigest(data))
+        estimators = self._region_liveness.get(hash64(data))
         if not estimators or not any(
             e is not None and e.is_converged and e.mask == 0 for e in estimators
         ):
@@ -6290,7 +6290,7 @@ class OperatorEngine:
 
         # Digest over a memoryview: no copy, ~3.4us at 64KiB. Only paid
         # when a scheduler consumes the signal (_track_op_effect).
-        _h_before = xxhash.xxh3_64_intdigest(memoryview(buf)) if track_effect else 0
+        _h_before = hash64(memoryview(buf)) if track_effect else 0
 
         # Evaluated on the buffer actually handed to the operator, and
         # before the call, because the operator may replace it. Returns
@@ -6353,7 +6353,7 @@ class OperatorEngine:
         # None means the handler mutated `buf` in place (the dominant
         # convention here); anything else replaces the buffer.
         _after = buf if result is None else result
-        if xxhash.xxh3_64_intdigest(memoryview(_after)) != h_before:
+        if hash64(memoryview(_after)) != h_before:
             f._last_ops_effective.add(op)
         elif op not in _DECLINE_EXEMPT:
             # Produced nothing. `_op_declined` covers the handlers

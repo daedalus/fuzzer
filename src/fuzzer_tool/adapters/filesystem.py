@@ -22,6 +22,7 @@ from fuzzer_tool.adapters.seed_zip import SeedTree
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.crash_metadata import CrashMetadata
+from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.ltl import violation_signature
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.similarity import crash_signature_similarity
@@ -345,9 +346,8 @@ def _zip_get(corpus_dir: Path, h: str) -> bytes | None:
 
 
 def hash_data(data: bytes) -> str:
-    """Compute fast hash for deduplication (xxhash, ~20x faster than SHA-256).
+    """Compute the persisted dedup key (16-hex XXH64, see core/hashing.py).
 
-    Falls back to SHA-256 if xxhash is not installed.
     For crash filenames where collision resistance matters, use hash_data_crypto().
 
     Args:
@@ -356,12 +356,7 @@ def hash_data(data: bytes) -> str:
     Returns:
         16-character hex digest.
     """
-    try:
-        import xxhash
-
-        return xxhash.xxh64(data).hexdigest()[:16]
-    except ImportError:
-        return hashlib.sha256(data).hexdigest()[:16]
+    return key16(data)
 
 
 def hash_data_crypto(data: bytes) -> str:

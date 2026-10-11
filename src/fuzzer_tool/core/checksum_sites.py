@@ -40,7 +40,8 @@ from dataclasses import dataclass
 from enum import Enum
 
 import numpy as np
-import xxhash
+
+from fuzzer_tool.core.hashing import hash64
 
 
 class Algo(Enum):
@@ -431,7 +432,7 @@ class SiteBook:
         return len(self._by_seed)
 
     def sites_for(self, parent: bytes, hints: Iterable[bytes] = ()) -> list[Site]:
-        key = xxhash.xxh3_64_intdigest(parent)
+        key = hash64(parent)
         cached = self._by_seed.get(key)
         if cached is not None:
             self._by_seed.move_to_end(key)
@@ -446,7 +447,7 @@ class SiteBook:
 
     def apply(self, parent: bytes, buf: bytearray, rng, hints_fn=None) -> int:
         """Repair *buf*, a mutant of *parent*, with probability ``REPAIR_P``."""
-        key = xxhash.xxh3_64_intdigest(parent)
+        key = hash64(parent)
         hints = hints_fn() if hints_fn is not None and key not in self._by_seed else ()
         sites = self.sites_for(parent, hints)
         if not sites or rng.random() >= REPAIR_P:

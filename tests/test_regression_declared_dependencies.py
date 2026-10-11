@@ -98,10 +98,18 @@ def test_unconditional_imports_are_declared_dependencies():
     )
 
 
-def test_xxhash_specifically_is_declared():
-    """Pins the original occurrence: corpus_manager imports it at module
-    level and sits in the CLI import chain."""
-    assert "xxhash" in _declared_distributions()
+def test_xxhash_is_not_a_dependency():
+    """xxhash was replaced by core/hashing.py: neither declared nor imported."""
+    src = Path(__file__).resolve().parent.parent / "src"
+    importers = [
+        str(p)
+        for p in src.rglob("*.py")
+        if "import xxhash" in p.read_text(encoding="utf-8")
+        or "from xxhash" in p.read_text(encoding="utf-8")
+    ]
+
+    assert "xxhash" not in _declared_distributions()
+    assert importers == []
 
 
 def test_helper_detects_the_imports_it_should():

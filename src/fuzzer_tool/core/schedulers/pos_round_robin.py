@@ -29,8 +29,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-import xxhash
-
+from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 
 MAX_BINS = 4096  # offsets per seed are binned down to this, as pos_burn_front
@@ -85,7 +84,7 @@ class PositionRoundRobinScheduler:
 
     @staticmethod
     def _key(data: bytes) -> int:
-        return xxhash.xxh3_64_intdigest(data)
+        return hash64(data)
 
     def _cycle_for(self, data: bytes) -> _Cycle:
         key = self._key(data)

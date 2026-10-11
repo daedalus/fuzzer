@@ -46,8 +46,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-import xxhash
-
+from fuzzer_tool.core.hashing import hash64
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 
@@ -183,7 +182,7 @@ class PositionLevyScheduler:
 
     @staticmethod
     def _key(data: bytes) -> int:
-        return xxhash.xxh3_64_intdigest(data)
+        return hash64(data)
 
     def _walk_for(self, data: bytes) -> _Walk:
         key = self._key(data)

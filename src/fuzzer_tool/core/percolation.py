@@ -15,6 +15,8 @@ Central home for percolation-framed types and algorithms:
 
 import enum
 
+from fuzzer_tool.core.hashing import key16
+
 
 class CoverageRegime(enum.Enum):
     """Percolation phase of coverage exploration.
@@ -383,6 +385,4 @@ def _release_edges(idx: int, edges, owners: dict[int, set[int]], unique: list[in
 
 def _seed_key(seed: bytes) -> str:
     """Hash a seed to a 16-char hex string for EdgeTracker lookup."""
-    import xxhash
-
-    return xxhash.xxh64(seed).hexdigest()[:16]
+    return key16(seed)

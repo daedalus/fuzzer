@@ -21,7 +21,7 @@ Three queries are supported:
    (bushy vs. degenerate-chain) usable alongside ``subtree_weight`` /
    ``pagerank_credit`` when picking which branch to spend budget on.
 
-The tree is keyed by ``seed_key`` strings (16-hex xxhash) — one hash
+The tree is keyed by ``seed_key`` strings (16-hex XXH64) — one hash
 space shared with ``hash_data``, crash sidecars, and on-disk delta
 records. It never uses Python's builtin ``hash()``.
 

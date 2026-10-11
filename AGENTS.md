@@ -208,7 +208,7 @@ All schedulers:
 - **No retry-until-random-hit loops** (Hard Rule 39). Inject a scripted RNG — `tests/support/scripted_rng.py` for `random`-API operators, same class for the `RandPool`-API `_rand_pool` seam — drive the exact draw sequence, and assert the exact output, deriving expected values from helpers/arithmetic rather than echoing literals back.
 - **No hardcoded counts in tests.** Use `>=` for minimum bounds, not `==` — operators and features are added frequently and `assert len(X) == N` breaks on every addition.
 - **Regression tests are mandatory** for every fixed bug (`test_regression_<description>`); equivalence assertions must derive one side independently of the code under test (see `docs/refs/bug-classes.md` §Testing).
-- **Hash functions must be consistent.** When matching filenames against content (corpus eviction, dedup), use `hash_data()` from `fuzzer_tool.adapters.filesystem` — not `hashlib.sha256()` directly. `hash_data()` prefers xxhash when installed; hardcoding SHA-256 causes silent data loss.
+- **Hash functions must be consistent.** When matching filenames against content (corpus eviction, dedup), use `hash_data()` from `fuzzer_tool.adapters.filesystem` — not `hashlib.sha256()` directly. `hash_data()` returns the in-house XXH64 key (`core/hashing.py`); hardcoding SHA-256 causes silent data loss.
 - **Cache invalidation on method renames.** When renaming a method with side-effect calls (e.g. `_invalidate_*_cache()`), grep for all call sites — a renamed method silently drops its callers' invalidation hooks.
 
 ## Development

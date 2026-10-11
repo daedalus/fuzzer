@@ -1,6 +1,6 @@
 """Tests for recompress_lz4 and recompress_idat (core/mutations/recompress).
 
-Frames and PNGs are built and checked by test-local readers using xxhash,
+Frames and PNGs are built and checked by test-local readers using xxh32 (core/hashing-independent LZ4 oracle: mutations.lz4),
 binascii.crc32 and zlib -- not by the module under test -- so a checksum the
 module forgets to repair fails here.
 """
@@ -10,8 +10,8 @@ import struct
 import zlib
 
 import pytest
-import xxhash
 
+from fuzzer_tool.core.mutations.lz4 import xxh32
 from fuzzer_tool.core.mutations.recompress import recompress_idat, recompress_lz4
 from fuzzer_tool.core.rand_pool import RandPool
 from tests.support.scripted_rng import ScriptedRng
@@ -40,7 +40,7 @@ def _flip(i, bit, *tail):
 
 
 def _hc(desc):
-    return (xxhash.xxh32(desc).intdigest() >> 8) & 0xFF
+    return (xxh32(desc) >> 8) & 0xFF
 
 
 def _frame(content, flg=_FLG_VERSION | _FLG_B_INDEP | _FLG_C_CHECKSUM):
@@ -52,7 +52,7 @@ def _frame(content, flg=_FLG_VERSION | _FLG_B_INDEP | _FLG_C_CHECKSUM):
         out += struct.pack("<I", len(content) | _UNCOMPRESSED) + content
     out += struct.pack("<I", 0)
     if flg & _FLG_C_CHECKSUM:
-        out += struct.pack("<I", xxhash.xxh32(content).intdigest())
+        out += struct.pack("<I", xxh32(content))
     return out
 
 
@@ -99,7 +99,7 @@ def _read_frame(data):
         blocks += 1
 
     if flg & _FLG_C_CHECKSUM:
-        assert struct.unpack_from("<I", data, pos)[0] == xxhash.xxh32(content).intdigest()
+        assert struct.unpack_from("<I", data, pos)[0] == xxh32(content)
     if size is not None:
         assert size == len(content), "content size not repaired"
     return content, blocks

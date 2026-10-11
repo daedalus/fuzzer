@@ -11,13 +11,12 @@ from __future__ import annotations
 import time
 from types import SimpleNamespace
 
-import xxhash
-
+from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.services.corpus_manager import CorpusManager
 
 
 def _expected(data: bytes) -> str:
-    return xxhash.xxh64(data).hexdigest()[:16]
+    return key16(data)
 
 
 def _manager(seeds: list[bytes]) -> CorpusManager:
