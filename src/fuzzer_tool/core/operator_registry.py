@@ -115,6 +115,10 @@ _CATEGORIES: dict[str, set[str]] = {
         "arith_mid",
         "geo_mid",
         "power_mid",
+        "lineage_step",
+        "diff_evo",
+        "bit_majority",
+        "field_median",
         "elite_fuse",
         "crossover",
         "type_replace",
@@ -802,6 +806,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "arith_mid": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
     "geo_mid": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
     "power_mid": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
+    # needs the parent_key -> bytes chain; the 3-seed operators need no lineage
+    "lineage_step": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
     "markov_bytes": lambda f, _d: bool(getattr(f, "markov_trained", False)),
     "cem_bytes": lambda f, _d: bool(
         getattr(f, "mc", None)

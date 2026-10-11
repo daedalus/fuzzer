@@ -640,7 +640,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.op_span_relocate = True
         f.op_append = True
         f.op_line_code = True
-        # bit_cross / arith_mid / geo_mid / power_mid: gated on parent_key, which seed_meta records only
+        # bit_cross / arith_mid / geo_mid / power_mid / lineage_step: gated on parent_key, which seed_meta records only
         # under --lineage.
         f._use_lineage = True
         # wfc_reorder_learned (core/wfc_chunks.py): same flag the existing
@@ -751,6 +751,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         self._gate_saliency(f)
 
         self._gate_weizz(f)
+        self._gate_lineage(f)
 
         # --- afl_det / fsm_regen: gated on --op-afl-det and --fsm -----------
         f.op_afl_det = True
@@ -924,6 +925,21 @@ class TestStateGatedOperatorsAreNotNoOps:
         sal = PositionSaliencyScheduler(RandPool(seed=7), lambda: samples)
         assert sal.refit(), "fixture failed to fit the saliency net"
         f._pos_saliency = sal
+
+    @staticmethod
+    def _gate_lineage(f: Fuzzer) -> None:
+        """Pair the corpus: each odd seed's parent_key is the even seed before it.
+
+        lineage_step resolves parent_key to bytes through the corpus, so the
+        parent has to be a corpus member.  Pairs only, not one long chain: a
+        chain makes every seed an ancestor of the next and leaves bit_cross and
+        the *_mid operators no unrelated donor.  Meta is merged, not replaced.
+        """
+        from fuzzer_tool.services.corpus_manager import seed_key
+
+        seeds = [bytes(c) for c in f.corpus]
+        for prev, cur in zip(seeds[::2], seeds[1::2], strict=False):
+            f.seed_meta[cur] = {**f.seed_meta.get(cur, {}), "parent_key": seed_key(prev)}
 
     @staticmethod
     def _gate_weizz(f: Fuzzer) -> None:

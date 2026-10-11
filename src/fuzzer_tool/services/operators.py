@@ -53,6 +53,10 @@ from fuzzer_tool.core.mutations import (
     could_be_interest,
     geo_mid,
     power_mid,
+    lineage_step,
+    diff_evo,
+    bit_majority,
+    field_median,
     radamsa_mutate_num,
     redundant_byte_table,
     splice,
@@ -1411,6 +1415,8 @@ class OperatorEngine:
         # Cache for _op_bit_cross: content key -> parent key, rebuilt on corpus growth.
         self._parent_map: dict[str, str | None] | None = None
         self._parent_map_corpus_len: int = -1
+        self._seed_by_key_map = None
+        self._seed_by_key_len: int = -1
         # Cache for region-profile position weighting, keyed by seed content
         # hash. profile_buffer() runs a whole statistical battery per 4 KiB
         # window (~1 ms), so it must be paid once per seed, not once per
@@ -2895,6 +2901,68 @@ class OperatorEngine:
     def _op_power_mid(self, buf, _byte_idx, data):
         """Harmonic or quadratic mean of the base and an *unrelated* donor seed."""
         return self._recombine(power_mid, buf, data)
+
+    def _seed_by_key(self):
+        """Cached ``content key -> seed bytes`` over the corpus (rebuilt on growth)."""
+        corpus = self.ctx.corpus
+        if self._seed_by_key_map is None or self._seed_by_key_len != len(corpus):
+            key_of = self._key_fn()
+            self._seed_by_key_map = {key_of(bytes(s)): bytes(s) for s in corpus}
+            self._seed_by_key_len = len(corpus)
+        return self._seed_by_key_map
+
+    def _distinct_donors(self, data, k):
+        """*k* corpus seeds with pairwise distinct content, none equal to *data*."""
+        rng = self.ctx._rng
+        corpus = self.ctx.corpus
+        key_of = self._key_fn()
+        base_key = key_of(bytes(data))
+        seen = {base_key}
+        pool = []
+        for i in rng.sample(range(len(corpus)), min(len(corpus), _BIT_CROSS_CANDIDATES)):
+            other = bytes(corpus[i])
+            key = key_of(other)
+            if key not in seen:
+                seen.add(key)
+                pool.append(other)
+        return rng.sample(pool, k) if len(pool) >= k else None
+
+    def _op_lineage_step(self, buf, _byte_idx, data):
+        """Momentum: repeat the step that took the parent to this seed (c + (c-p)*t)."""
+        parent_key = self.parent_map().get(self._key_fn()(bytes(data)))
+        parent = self._seed_by_key().get(parent_key) if parent_key is not None else None
+        if parent is None:
+            return None
+        base = bytes(buf)
+        child = lineage_step(base, parent, rng=self.ctx._rng)
+        return None if child in (base, parent) else bytearray(child[: self.ctx.max_len])
+
+    def _op_diff_evo(self, buf, _byte_idx, data):
+        """DE/rand/1: base + F*(b-c) with two other distinct corpus seeds."""
+        donors = self._distinct_donors(data, 2)
+        if donors is None:
+            return None
+        base = bytes(buf)
+        child = diff_evo(base, *donors, rng=self.ctx._rng)
+        return None if child == base else bytearray(child[: self.ctx.max_len])
+
+    def _op_bit_majority(self, buf, _byte_idx, data):
+        """Bitwise majority of the base and two other distinct corpus seeds."""
+        donors = self._distinct_donors(data, 2)
+        if donors is None:
+            return None
+        base = bytes(buf)
+        child = bit_majority(base, *donors)
+        return None if child in (base, *donors) else bytearray(child[: self.ctx.max_len])
+
+    def _op_field_median(self, buf, _byte_idx, data):
+        """Per-field median of the base and two other distinct corpus seeds."""
+        donors = self._distinct_donors(data, 2)
+        if donors is None:
+            return None
+        base = bytes(buf)
+        child = field_median(base, *donors, rng=self.ctx._rng)
+        return None if child == base else bytearray(child[: self.ctx.max_len])
 
     def _op_type_replace(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import type_replace
