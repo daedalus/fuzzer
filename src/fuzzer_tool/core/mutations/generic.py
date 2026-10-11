@@ -1278,6 +1278,96 @@ def geo_mid(a: bytes, b: bytes, rng) -> bytes:
     return bytes(out)
 
 
+# power_mid: kind drawn uniformly.
+_POWER_HARMONIC = 0
+_POWER_KINDS = 2  # harmonic, quadratic
+# A child within this of floor((x + y) / 2) in every field repeats arith_mid's.
+_POWER_NEAR = 1
+
+
+def _harm_fields(fa, fb):
+    """``ceil(2XY / (X+Y)) - 1`` per element (X = fa+1, Y = fb+1), exact in uint64.
+
+    2XY overflows, so split XY = q*S + r (S = X+Y): 2XY/S = 2q + 2r/S with
+    0 <= 2r < 2S, whose ceil is 0, 1 or 2.  Round up: floor maps (x, x+2) back
+    to x.  XY wraps only for X = Y = 2^32 (equal fields, overridden by callers).
+    """
+    x, y = fa + 1, fb + 1
+    s = x + y
+    q, r = np.divmod(x * y, s)
+    frac = (r > 0).astype(np.uint64) + (2 * r > s).astype(np.uint64)
+    return 2 * q + frac - 1
+
+
+def _quad_fields(fa, fb):
+    """``floor(sqrt((X^2 + Y^2) / 2)) - 1`` per element (X = fa+1, Y = fb+1).
+
+    X^2 + Y^2 reaches 2^65, so halve before adding: X^2 = 2*X*(X>>1) + X*(X&1).
+    Round down: the quadratic mean lies above the arithmetic mean.  The sum
+    wraps only for X = Y = 2^32 (equal fields, overridden by callers).
+    """
+    x, y = fa + 1, fb + 1
+    half = x * (x >> 1) + y * (y >> 1) + ((x * (x & 1) + y * (y & 1)) >> 1)
+    return _isqrt_u64(half) - 1
+
+
+def power_mid(a: bytes, b: bytes, rng) -> bytes:
+    """Harmonic or quadratic mean of two inputs over their differing span.
+
+    Same field grid as :func:`arith_mid`; the kind is drawn per call.  With
+    X = x+1, Y = y+1 (the +1 keeps 0 from absorbing) a field becomes
+    ``ceil(2XY / (X+Y)) - 1`` (harmonic, below the arithmetic mean: it cuts
+    close to the lower parent) or ``floor(sqrt((X^2+Y^2)/2)) - 1`` (quadratic,
+    above it: close to the upper parent).  Equal fields are fixed points.
+
+    For close parents every mean sits within 1 of ``floor((x+y)/2)``, so the
+    child would repeat :func:`arith_mid`: then *a* is returned (declined).  The
+    kinds only differ on parents of unlike magnitude.
+
+    Length is that of *a*; a short *b* is padded with *a*'s own tail.  When no
+    whole field fits the span it falls back to bytes.  Returns *a* unchanged
+    when either input is empty or they are equal.
+
+    Example (one field, harmonic)::
+
+        a=0  b=0xffffffff  ->  0x00000001      (quadratic: 0xb504f332)
+
+    Args:
+        a: Base input.
+        b: Donor input.
+        rng: Random source (``rand_pool``).
+
+    Returns:
+        Child with len == len(a).
+    """
+    n = len(a)
+    if n == 0 or not b:
+        return a
+    if len(b) < n:
+        b = b + a[len(b) :]
+    diff = np.flatnonzero(np.frombuffer(a, np.uint8) != np.frombuffer(b, np.uint8, n))
+    if diff.size == 0:
+        return a
+    first, last = int(diff[0]), int(diff[-1]) + 1
+    width, order = _ARITH_SHAPES[rng.randrange(len(_ARITH_SHAPES))]
+    kind = rng.randrange(_POWER_KINDS)
+    start = max(first - (rng.randrange(width) if width > 1 else 0), 0)
+    count = _arith_count(start, last, width, n)
+    if count == 0:
+        width, order, start, count = 1, "|", first, last - first
+    dt = np.dtype(f"{order}u{width}")
+    fa = np.frombuffer(a, dt, count, start).astype(np.uint64)
+    fb = np.frombuffer(b, dt, count, start).astype(np.uint64)
+    mean = _harm_fields if kind == _POWER_HARMONIC else _quad_fields
+    root = np.where(fa == fb, fa, mean(fa, fb))
+    gap = np.abs(root.astype(np.int64) - ((fa + fb) >> 1).astype(np.int64))
+    if gap.max() <= _POWER_NEAR:
+        return a
+    out = bytearray(a)
+    out[start : start + count * width] = root.astype(dt).tobytes()
+    return bytes(out)
+
+
 DICT_MUTATIONS = [
     "dict_insert",
     "dict_replace",

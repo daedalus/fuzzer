@@ -123,6 +123,7 @@ _SPLICE_OPS = (
     "_op_bit_cross",
     "_op_arith_mid",
     "_op_geo_mid",
+    "_op_power_mid",
 )
 
 

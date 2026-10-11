@@ -52,6 +52,7 @@ from fuzzer_tool.core.mutations import (
     could_be_bitflip,
     could_be_interest,
     geo_mid,
+    power_mid,
     radamsa_mutate_num,
     redundant_byte_table,
     splice,
@@ -2890,6 +2891,10 @@ class OperatorEngine:
     def _op_geo_mid(self, buf, _byte_idx, data):
         """Geometric mean of the base and an *unrelated* donor seed."""
         return self._recombine(geo_mid, buf, data)
+
+    def _op_power_mid(self, buf, _byte_idx, data):
+        """Harmonic or quadratic mean of the base and an *unrelated* donor seed."""
+        return self._recombine(power_mid, buf, data)
 
     def _op_type_replace(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations import type_replace
