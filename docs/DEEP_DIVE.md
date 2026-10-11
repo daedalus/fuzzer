@@ -822,6 +822,18 @@ python tools/extract_ffmpeg_seeds.py --source cve --max 1
 # Get all seeds for a specific CVE
 python tools/extract_ffmpeg_seeds.py --source cve --codecs magicyuv --max 50
 ```
+### Dictionary Seed (`tools/gen_dict_seed.py`)
+
+Writes one seed holding every token of the given dictionaries, overlapping tokens merged (`GIF` + `IFA` -> `GIFA`), to `<out>/seeds/id_<hash>_dictseed.bin`. Offline; not wired into `fuzz`. Dictionaries and operators are untouched.
+
+`core/token_superstring.py`: drop duplicate and contained tokens (`reduce_input`), then <= 10 tokens: exact order (Held-Karp); more: greedy best-overlap-first plus iterated local search (or-opt, double-bridge kicks), skipped above 100k overlap pairs. Ported from `improve.py`; the exact path is new, since `improve.py` never kicks below 8 tokens and its descent stalls above OPT on 3.
+
+Measured on `dictionaries/*.dict` (118 with >= 2 tokens): 160,214 B concatenated -> 143,473 B (10.4% shorter; per dictionary median 3.9%, max 47.7%). Greedy alone gives 143,514 B: ILS beat it in 6 dictionaries, by 41 B in total, and costs up to 22 s (`x86.dict`). `--kicks 0` skips the kicks. Whether a seed with many magic tokens reaches more comparison gates per execution is not measured.
+
+```bash
+python tools/gen_dict_seed.py -D dictionaries/gif.dict --out ~/corpus [--kicks N] [--rng-seed S]
+```
+
 ## Coverage Modes
 
 Coverage-guided mode is **on by default** (`--no-coverage` to opt out).
