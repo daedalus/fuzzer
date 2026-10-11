@@ -24,6 +24,7 @@ from itertools import product
 import numpy as np
 
 from fuzzer_tool.core.gf2_common import apply_bitmask_map, invert_bitmask_map
+from fuzzer_tool.core.hash_inverse import MIXERS
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
 from fuzzer_tool.core.mutations.line_code import CODECS as _LINE_CODECS
@@ -584,6 +585,43 @@ class Fnv1aEncoder(Encoder):
         return f"fnv1a_{'r' if self.reverse else 'p'}"
 
 
+# Bijective 32-bit finalizers (fmix32, lowbias32, xxh32 avalanche): one exact
+# preimage, no search.  Same small-int filter as CRC/FNV.  Only 4-byte fields:
+# 8-byte pairs with <=2 matching bytes are dropped upstream as hash-like
+# (cmplog ``_HASH_MIN_BYTES``), so 64-bit mixers could never fire.
+_MIXER_BITS = 32
+_MIXER_FIELD_BYTES = _MIXER_BITS // 8
+_MIXER_MIN_OPERAND = 1 << 24
+
+
+class MixerEncoder(Encoder):
+    """``mix(value) == CONST`` for a bijective 32-bit finalizer.
+
+    The operand is mix(x), not x: search for the preimage of the observed
+    operand and write the preimage of the constant (the constant only:
+    its +-i neighbours mix to unrelated values).
+    """
+
+    value_only = True
+
+    def __init__(self, label: str, inverse: Callable[[int], int], reverse: bool = False):
+        self.label = label
+        self.inverse = inverse
+        self.reverse = reverse
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        if cmp_type == "STR" or cmp_size != _MIXER_BITS:
+            return False
+        return _to_int(lhs) >= _MIXER_MIN_OPERAND and _to_int(rhs) >= _MIXER_MIN_OPERAND
+
+    def encode(self, val):
+        x = self.inverse(_to_int(val))
+        return [_reverse_if(x.to_bytes(_MIXER_FIELD_BYTES, "little"), self.reverse)]
+
+    def name(self):
+        return f"{self.label}_{'r' if self.reverse else 'p'}"
+
+
 # ── Engine ─────────────────────────────────────────────────────────────
 
 
@@ -657,6 +695,9 @@ for rev in (False, True):
     BUILTIN_ENCODERS.append(Crc32Encoder(rev))
 for rev in (False, True):
     BUILTIN_ENCODERS.append(Fnv1aEncoder(rev))
+for label_, inv_ in MIXERS.items():
+    for rev in (False, True):
+        BUILTIN_ENCODERS.append(MixerEncoder(label_, inv_, rev))
 
 MAX_MUTATIONS_PER_PAIR = 256
 

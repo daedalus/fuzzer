@@ -1859,6 +1859,8 @@ Fuzzification (Jung et al., USENIX Security '19) adds two more:
 
 `fnv1a_p`/`fnv1a_r` (`core/rq_encodings.py`) do the same for `fnv1a(input[0:4]) == C` (`targets/antifuzz_demo.c`) by vectorized meet-in-the-middle over 2+2 bytes (~1.5 ms per inversion, cached per hash). 4 bytes → 32 bits is not a bijection: ~1 preimage on average, none for about a third of hashes. Only the constant is inverted (`Encoder.value_only`): the ±i neighbours of a hash have unrelated preimages and would cost 129 inversions. Replacement variants are built only after the pattern is found in the input (Hard Rule 41): 400 non-matching random pairs take 0.010 s.
 
+`fmix32_*`/`lowbias32_*`/`xxh32_aval_*` (`MixerEncoder`, `core/hash_inverse.py`) cover `mix32(input[0:4]) == C` for the bijective 32-bit finalizers of Murmur3, lowbias32 and xxh32. Each step (`x ^= x >> s`, odd-constant multiply) inverts exactly, so there is one preimage and no search; only the constant is inverted (`value_only`). 4-byte fields only: 8-byte pairs with at most 2 matching bytes are screened out as hash-like by cmplog (`_HASH_MIN_BYTES`) before any encoder runs, so 64-bit mixers (fmix64, splitmix64) would be unreachable until that filter is revisited.
+
 ## Troubleshooting
 
 ### Zero edges discovered (ASan + LD_PRELOAD conflict)

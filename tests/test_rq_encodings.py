@@ -6,6 +6,7 @@ import zlib
 import pytest
 
 from fuzzer_tool.core import rq_encodings
+from fuzzer_tool.core.hash_inverse import MIXERS
 from fuzzer_tool.core.mutations.generic import encode_sleb128, encode_uleb128
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.rq_encodings import (
@@ -16,6 +17,7 @@ from fuzzer_tool.core.rq_encodings import (
     Encoder,
     Fnv1aEncoder,
     MemEncoder,
+    MixerEncoder,
     PlainEncoder,
     SextEncoder,
     SplitEncoder,
@@ -604,3 +606,129 @@ def _ref_invert(target: int) -> list[bytes]:
 
     def test_table_built_once(self):
         assert _fnv1a_fwd_table() is _fnv1a_fwd_table()
+
+
+_M32 = 0xFFFFFFFF
+
+
+def _fmix32(x: int) -> int:
+    """Independent Murmur3 fmix32 reference."""
+    x ^= x >> 16
+    x = (x * 0x85EBCA6B) & _M32
+    x ^= x >> 13
+    x = (x * 0xC2B2AE35) & _M32
+    return x ^ (x >> 16)
+
+
+def _lowbias32(x: int) -> int:
+    x ^= x >> 16
+    x = (x * 0x7FEB352D) & _M32
+    x ^= x >> 15
+    x = (x * 0x846CA68B) & _M32
+    return x ^ (x >> 16)
+
+
+def _xxh32_aval(x: int) -> int:
+    x ^= x >> 15
+    x = (x * 0x85EBCA77) & _M32
+    x ^= x >> 13
+    x = (x * 0xC2B2AE3D) & _M32
+    return x ^ (x >> 16)
+
+
+_MIXER_FWD = {"fmix32": _fmix32, "lowbias32": _lowbias32, "xxh32_aval": _xxh32_aval}
+
+
+def _le32(x: int) -> bytes:
+    return x.to_bytes(4, "little")
+
+
+class TestMixerEncoder:
+    """``if (mix32(value) == CONST)`` for bijective finalizers."""
+
+    @pytest.mark.parametrize("label", sorted(_MIXER_FWD))
+    def test_solves_hashed_compare(self, label):
+        fwd = _MIXER_FWD[label]
+        garbage, want = 0x41424344, 0xCAFEBABE
+        data = b"AA" + _le32(garbage) + b"BB"
+        hits = _by_encoder(
+            generate_mutations(_le32(fwd(garbage)), _le32(fwd(want)), 32, "CMP", data, hammer=True),
+            f"{label}_p",
+        )
+        assert ((2,), (_le32(want),)) in [(m[0], m[1]) for m in hits]
+
+    def test_reversed_field(self):
+        garbage, want = 0x01020304, 0xCAFEBABE
+        data = _le32(garbage)[::-1] + b"zz"
+        hits = _by_encoder(
+            generate_mutations(_le32(_fmix32(garbage)), _le32(_fmix32(want)), 32, "CMP", data),
+            "fmix32_r",
+        )
+        assert any(m[1] == (_le32(want)[::-1],) for m in hits)
+
+    # Falsification: independent forward reference; wrong family, width, type, filter.
+    def test_falsify_mixer(self):
+        rng = RandPool(seed=42)
+        for label, fwd in _MIXER_FWD.items():
+            enc = MixerEncoder(label, MIXERS[label])
+            for _ in range(50):
+                x = int.from_bytes(rng.randbytes(4), "little")
+                assert enc.encode(_le32(fwd(x))) == [_le32(x)]
+        # Wrong family: lowbias32 pair must not open an fmix32 gate.
+        x, want = 0x41424344, 0xCAFEBABE
+        data = b"AA" + _le32(x) + b"BB"
+        muts = generate_mutations(_le32(_lowbias32(x)), _le32(_lowbias32(want)), 32, "CMP", data)
+        assert not _by_encoder(muts, "fmix32_p")
+        enc = MixerEncoder("fmix32", MIXERS["fmix32"])
+        assert not enc.is_applicable(64, "CMP", b"\x01" * 8, b"\x02" * 8)
+        assert not enc.is_applicable(512, "STR", b"abcd", b"efgh")
+        assert not enc.is_applicable(16, "CMP", b"\x01\x02", b"\x03\x04")
+
+    # Adversarial: boundary values, small-int filter, bijectivity both ways.
+    def test_adversarial_boundaries(self):
+        for label, fwd in _MIXER_FWD.items():
+            inv = MIXERS[label]
+            for x in (0, 1, _M32, 1 << 31, (1 << 24) - 1, 1 << 24):
+                assert inv(fwd(x)) == x
+                assert fwd(inv(x)) == x
+
+    def test_adversarial_small_integer_skipped(self):
+        enc = MixerEncoder("fmix32", MIXERS["fmix32"])
+        assert not enc.is_applicable(32, "CMP", _le32(12), _le32(13))
+        assert not enc.is_applicable(32, "CMP", _le32(12), _le32(1 << 28))
+
+    def test_adversarial_encode_is_total(self):
+        """Any 4-byte operand has exactly one preimage; non-4-byte input is not crashed on."""
+        enc = MixerEncoder("fmix32", MIXERS["fmix32"])
+        assert len(enc.encode(b"\x00" * 4)) == 1
+        assert len(enc.encode(b"\xff" * 4)) == 1
+        assert len(enc.encode(b"\x01")) == 1
+
+    def test_no_match_never_encodes_replacements(self, monkeypatch):
+        """Pattern absent -> replacement side is not built (Hard Rule 41)."""
+        calls = []
+        real = rq_encodings._get_encoded_variants
+        monkeypatch.setattr(
+            rq_encodings,
+            "_get_encoded_variants",
+            lambda enc, *a: calls.append(enc.name()) or real(enc, *a),
+        )
+        rng = RandPool(seed=3)
+        data = b"\x00" * 64
+        for _ in range(50):
+            a, b = rng.randbytes(4), rng.randbytes(4)
+            generate_mutations(a, b, 32, "CMP", data, hammer=True)
+        assert not [c for c in calls if c.startswith(tuple(MIXERS))]
+
+    def test_registered_and_pipeline_not_flagged_hash(self):
+        """4-byte pairs are never screened out as hash-like upstream."""
+        from fuzzer_tool.core.cmplog import CmplogCollector  # noqa: PLC0415
+
+        names = {e.name() for e in BUILTIN_ENCODERS}
+        assert {f"{m}_{d}" for m in MIXERS for d in "pr"} <= names
+        c = CmplogCollector()
+        a, b = _le32(_fmix32(0x41424344)), _le32(_fmix32(0xCAFEBABE))
+        c.detect_hash_candidates([(a, b)])
+        data = b"AA" + _le32(0x41424344) + b"BB"
+        muts = generate_mutations(a, b, 32, "CMP", data, is_hash=c.is_hash_candidate)
+        assert ((2,), (_le32(0xCAFEBABE),)) in [(m[0], m[1]) for m in _by_encoder(muts, "fmix32_p")]
