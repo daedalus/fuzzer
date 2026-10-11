@@ -1111,6 +1111,11 @@ When collision risk exceeds the threshold, the coverage SHM (edge table) is resi
 ### Timeout in direct mode
 `--inprocess-direct` and direct_lite call `__afl_guarded_call_timeout(entry, data, size, timeout_us)` when the shim exports it (`InProcessRunner._call_guarded`). A per-thread POSIX timer ticks every budget/4 (floor 1 ms) on a real-time signal; a call that spans more than four ticks leaves through the guard and returns `-1`, reported as `(-1, "timeout")`, so a hang is cut between the budget and 1.25× it with no syscall per call. The Python `SIGALRM` + `setitimer` path remains for targets without the shim; it only sets a flag between bytecodes and cannot interrupt a C loop. A timed-out target is abandoned mid-execution, as on a crash. Tests: `tests/test_regression_shim_hardening.py`.
 
+### Number theory (`core/numtheory.py`, `prime_inject`)
+Stdlib replacement for the `sympy.ntheory` subset (Hard Rule 51); deterministic, no RNG. `is_prime` is exact below ~3.3e24 (12 fixed Miller-Rabin bases), fixed-base probabilistic above. `factorint` is trial division, Brent rho (restarts `c=1,2,..`) and perfect-power splitting: 64-bit inputs are instant, balanced semiprimes past ~100 bits are not practical. `discrete_log` is Pohlig-Hellman over the order of the base, BSGS per prime factor; prime factors above 2^44 raise (table memory bound); non-unit bases fall back to a scan capped at 2^22.
+
+`prime_inject` (regularity) writes boundary primes, Carmichael numbers, strong pseudoprimes, Mersenne/Fermat primes, prime squares and semiprimes into an aligned 1/2/4/8-byte slot. Table built once per width from `numtheory`. No A/B yet; no existing module calls `numtheory` besides the operator.
+
 ### Timeouts earn no coverage
 Any backend: a run classified as timeout skips the novelty scan (`FuzzRound._scan_coverage`), so it is never admitted or credited and its edges stay unseen for the first clean input reaching them (wtf `RevokeLastNewCoverage`). Tests: `tests/test_regression_timeout_coverage_revoked.py`.
 

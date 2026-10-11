@@ -1,0 +1,16 @@
+# Handover: numtheory + prime_inject (2026-10-11)
+
+Origin: Copilot job "explore what sympy has to offer ... implement it ourselves" stopped after reading (no code). Rule: Hard Rule 51.
+
+## Done
+- `core/numtheory.py`: egcd, modinv, crt, is_prime, next/prev_prime, factorint, divisors, totient, mobius, carmichael_lambda, sqrt_mod, mult_order, primitive_root, discrete_log. 45 tests.
+- `prime_inject` operator (regularity), registered in `operator_registry.py`, `_op_prime_inject` in `operators.py`. 15 tests.
+
+## Not done
+- No A/B of `prime_inject` on a real target (needs one with a primality or modular check).
+- Not used by `ntt.py` (fixed modulus), `lcg_recovery.py` (lattice only), `int_checksum_solver.py`.
+- sympy areas not ported: polynomials/Groebner, Diophantine, matrices over Z, simplify, solvers, continued fractions beyond existing, `legendre/jacobi/kronecker`, `nthroot_mod` for composite/higher roots, `quadratic_residues`, BPSW (Lucas), ECM/quadratic sieve, index calculus.
+- `architecture.png` untouched (no new subsystem).
+
+## Known issues
+- `test_regression_scheduler_operator_reach.py::...[BayesUCBScheduler]` exceeds 15 s on clean master too.

@@ -4991,6 +4991,11 @@ class OperatorEngine:
 
         return self._regularity(ntt_poly_mutate, buf)
 
+    def _op_prime_inject(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.prime_inject import prime_inject
+
+        return self._regularity(prime_inject, buf)
+
     def _op_endian_convert(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import endian_convert
 

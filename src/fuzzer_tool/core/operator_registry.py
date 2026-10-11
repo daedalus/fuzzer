@@ -254,6 +254,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "golomb",
         "naf_scalar_mutate",
         "ntt_poly_mutate",
+        "prime_inject",
         "endian_convert",
         "count_overflow",
         "zero_run_amplify",
