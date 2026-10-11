@@ -1208,6 +1208,76 @@ def arith_mid(a: bytes, b: bytes, rng) -> bytes:
     return bytes(out)
 
 
+_U32_MAX = 0xFFFFFFFF  # largest 4-byte field; its square still fits uint64
+
+
+def _isqrt_u64(n):
+    """Exact ``floor(sqrt(n))`` per element for uint64 *n* with root <= 2**32 - 1.
+
+    float64 sqrt is within 1 of the root, so one fix-up step each way is exact.
+    """
+    r = np.minimum(np.sqrt(n.astype(np.float64)), _U32_MAX).astype(np.uint64)
+    r = np.where(r * r > n, r - 1, r)
+    up = r + 1
+    return np.where((up <= _U32_MAX) & (up * up <= n), up, r)
+
+
+def geo_mid(a: bytes, b: bytes, rng) -> bytes:
+    """Geometric mean of two inputs over their differing span.
+
+    Same field grid as :func:`arith_mid` (1/2/4-byte fields, BE or LE, grid
+    starting ``phase`` bytes before the first differing byte); each field
+    becomes ``ceil(sqrt((x+1) * (y+1))) - 1``.  The +1 keeps 0 from absorbing
+    (``isqrt(0 * y) = 0`` would return the parent); rounding up keeps a gap of
+    2 reachable (floor maps x, x+2 back to x).  Halves the exponent, not
+    the value: it bisects a boundary in log space, so a small ``K`` between
+    0 and 2^32 takes ~log2(log2 K) steps where the arithmetic mean takes ~32.
+    The child field lies in ``[min, max]``; equal fields are fixed points, so
+    shared bytes (magic, headers) survive.  No weight is drawn: only 1/2 exists.
+
+    Length is that of *a*; a short *b* is padded with *a*'s own tail.  When no
+    whole field fits the span it falls back to bytes.  Returns *a* unchanged
+    when either input is empty or they are equal.
+
+    Example (one byte)::
+
+        a=0x03  b=0x23  ->  sqrt(4 * 36) - 1 = 0x0b
+
+    Args:
+        a: Base input.
+        b: Donor input.
+        rng: Random source (``rand_pool``).
+
+    Returns:
+        Child with len == len(a).
+    """
+    n = len(a)
+    if n == 0 or not b:
+        return a
+    if len(b) < n:
+        b = b + a[len(b) :]
+    diff = np.flatnonzero(np.frombuffer(a, np.uint8) != np.frombuffer(b, np.uint8, n))
+    if diff.size == 0:
+        return a
+    first, last = int(diff[0]), int(diff[-1]) + 1
+    width, order = _ARITH_SHAPES[rng.randrange(len(_ARITH_SHAPES))]
+    start = max(first - (rng.randrange(width) if width > 1 else 0), 0)
+    count = _arith_count(start, last, width, n)
+    if count == 0:
+        width, order, start, count = 1, "|", first, last - first
+    dt = np.dtype(f"{order}u{width}")
+    fa = np.frombuffer(a, dt, count, start).astype(np.uint64)
+    fb = np.frombuffer(b, dt, count, start).astype(np.uint64)
+    # (2^32)^2 wraps only when both fields are the maximum, i.e. equal: overridden.
+    prod = (fa + 1) * (fb + 1)
+    floor_root = _isqrt_u64(prod)
+    # Round up: floor lands on the lower parent for a gap of 2 (x, x+2 -> x), ceil does not.
+    root = floor_root + (floor_root * floor_root < prod) - 1
+    out = bytearray(a)
+    out[start : start + count * width] = np.where(fa == fb, fa, root).astype(dt).tobytes()
+    return bytes(out)
+
+
 DICT_MUTATIONS = [
     "dict_insert",
     "dict_replace",

@@ -640,7 +640,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.op_span_relocate = True
         f.op_append = True
         f.op_line_code = True
-        # bit_cross / arith_mid: gated on parent_key, which seed_meta records only
+        # bit_cross / arith_mid / geo_mid: gated on parent_key, which seed_meta records only
         # under --lineage.
         f._use_lineage = True
         # wfc_reorder_learned (core/wfc_chunks.py): same flag the existing

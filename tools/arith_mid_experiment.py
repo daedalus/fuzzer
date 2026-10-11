@@ -9,6 +9,7 @@ build of the target, never fuzzer feedback.
 
 Arms:
   arith_mid  weighted arithmetic mean of the pair
+  geo_mid    geometric mean of the pair
   bit_cross  bit-level uniform crossover
   splice     prefix of a + suffix of b
   crossover  two-point segment swap
@@ -30,7 +31,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from fuzzer_tool.core.mutations.generic import arith_mid, bit_cross, crossover, splice
+from fuzzer_tool.core.mutations.generic import arith_mid, bit_cross, crossover, geo_mid, splice
 from fuzzer_tool.core.rand_pool import RandPool
 
 REPO = Path(__file__).resolve().parent.parent
@@ -49,6 +50,7 @@ def _byte_rand(a: bytes, _b: bytes, rng) -> bytes:
 
 ARMS = {
     "arith_mid": arith_mid,
+    "geo_mid": geo_mid,
     "bit_cross": bit_cross,
     "splice": splice,
     "crossover": crossover,
