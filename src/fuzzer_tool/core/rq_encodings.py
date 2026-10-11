@@ -25,6 +25,8 @@ from typing import NamedTuple
 import numpy as np
 
 from fuzzer_tool.core.berlekamp_massey import compute_checksum
+from fuzzer_tool.core.byte_hash_mitm import SPECS as _BYTE_HASHES
+from fuzzer_tool.core.byte_hash_mitm import ByteHashSpec, preimages
 from fuzzer_tool.core.gf2_common import apply_bitmask_map, invert_bitmask_map
 from fuzzer_tool.core.hash_inverse import MIXERS
 from fuzzer_tool.core.lru import LRUCache
@@ -678,6 +680,32 @@ class Fnv1aEncoder(Encoder):
         return f"fnv1a_{'r' if self.reverse else 'p'}"
 
 
+class ByteHashEncoder(Encoder):
+    """``hash(value) == CONST`` for a 4-byte field under a byte-wise 32-bit hash.
+
+    Same shape as ``Fnv1aEncoder``: the operand is the hash, so search for its
+    preimages and write the preimages of the constant (the constant only: its
+    +-i neighbours hash to unrelated values).  Families in ``byte_hash_mitm``.
+    """
+
+    value_only = True
+
+    def __init__(self, spec: ByteHashSpec, reverse: bool = False):
+        self.spec = spec
+        self.reverse = reverse
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        if cmp_type == "STR" or cmp_size != _FNV_BITS:
+            return False
+        return _to_int(lhs) >= _FNV_MIN_OPERAND and _to_int(rhs) >= _FNV_MIN_OPERAND
+
+    def encode(self, val):
+        return [_reverse_if(p, self.reverse) for p in preimages(self.spec, _to_int(val))]
+
+    def name(self):
+        return f"{self.spec.name}_{'r' if self.reverse else 'p'}"
+
+
 # Bijective 32-bit finalizers (fmix32, lowbias32, xxh32 avalanche): one exact
 # preimage, no search.  Same small-int filter as CRC/FNV.  Only 4-byte fields:
 # 8-byte pairs with <=2 matching bytes are dropped upstream as hash-like
@@ -791,6 +819,9 @@ for model_ in _CRC_MODELS:
         BUILTIN_ENCODERS.append(CrcModelEncoder(model_, rev))
 for rev in (False, True):
     BUILTIN_ENCODERS.append(Fnv1aEncoder(rev))
+for spec_ in _BYTE_HASHES.values():
+    for rev in (False, True):
+        BUILTIN_ENCODERS.append(ByteHashEncoder(spec_, rev))
 for label_, inv_ in MIXERS.items():
     for rev in (False, True):
         BUILTIN_ENCODERS.append(MixerEncoder(label_, inv_, rev))
