@@ -38,7 +38,8 @@ from fuzzer_tool.services.operators import CONTEXT_DIM
 
 # Rounds per reachability run. The slowest built-in scheduler to cover the
 # whole table is MOpt, whose last operator first fires at ~2.5k selections
-# with 147 arms; 20k leaves a wide margin without making the suite slow.
+# with 147 arms; 20k leaves a wide margin. _drive stops early once every
+# operator has been seen, so the budget only matters for a failing run.
 _ROUNDS = 20_000
 
 #: Bernoulli success rate fed to record(). Deliberately low and uniform: a
@@ -52,10 +53,21 @@ def _drive(select, record, ops, rounds=_ROUNDS, seed=1234):
     """Run *rounds* select/record cycles; return the set of ops ever chosen."""
     random.seed(seed)
     seen: set[str] = set()
+    remaining = set(ops)
     for _ in range(rounds):
         op = select(ops)
         seen.add(op)
+        remaining.discard(op)
         record(op, random.random() < _P_SUCCESS)
+        # The property under test is "selected at least once", so there is
+        # nothing left to learn once every operator has been seen. Stopping
+        # here keeps expensive-per-round schedulers (BayesUCB bisects exact
+        # Beta quantiles; ~4ms/round with 270+ arms, 20k rounds ~20s+ and far
+        # more on a slow CI box) from burning the full budget after covering
+        # the table in a few hundred rounds. A scheduler that never reaches
+        # an arm still runs all *rounds* and fails exactly as before.
+        if not remaining:
+            break
     return seen
 
 
