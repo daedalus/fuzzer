@@ -19,6 +19,8 @@ Whether one execution carrying many magic tokens hits several comparison
 gates at once is not measured.
 """
 
+import numpy as np
+
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 DEFAULT_KICKS = 300
@@ -29,6 +31,7 @@ SEG_LENS = (1, 2, 3)  # or-opt segment lengths
 ILS_MAX_PAIRS = 100_000  # denser: greedy only (ruby.dict: 846k pairs, 9 s/sweep, +1 byte)
 MAX_OVERLAP = 256  # caps the prefix table at O(n * MAX_OVERLAP)
 CUTS = 3
+_NEG = -(1 << 30)  # unreachable (mask, last) state
 
 
 def reduce_input(tokens: list[bytes]) -> list[bytes]:
@@ -92,35 +95,44 @@ def greedy_order(toks: list[bytes], ov: dict[tuple[int, int], int]) -> list[int]
 
 
 def exact_order(toks: list[bytes], ov: dict[tuple[int, int], int]) -> list[int]:
-    """Order with the largest total overlap (Held-Karp over subsets)."""
+    """Order with the largest total overlap (Held-Karp over subsets).
+
+    Vectorised per (popcount layer, last token): every mask of a layer that
+    holds j is extended in one numpy step.  Ties resolve to the lowest
+    predecessor, as the scalar loop did (argmax = first maximum).
+    """
     n = len(toks)
     full = (1 << n) - 1
-    w = [[ov.get((i, j), 0) for j in range(n)] for i in range(n)]
-    bits = [1 << j for j in range(n)]
-    best = [[-1] * n for _ in range(1 << n)]
-    prev = [[-1] * n for _ in range(1 << n)]
-    for i in range(n):
-        best[bits[i]][i] = 0
+    w = np.zeros((n, n), dtype=np.int32)
+    for (i, j), k in ov.items():
+        w[i, j] = k
+    best = np.full((1 << n, n), _NEG, dtype=np.int32)
+    prev = np.full((1 << n, n), -1, dtype=np.int8)
+    best[1 << np.arange(n), np.arange(n)] = 0
 
-    for mask in range(1 << n):
-        row = best[mask]
-        free = [j for j in range(n) if not mask & bits[j]]
-        for i in range(n):
-            base = row[i]
-            if base < 0:
-                continue
-            wi = w[i]
-            for j in free:
-                nm = mask | bits[j]
-                v = base + wi[j]
-                if v > best[nm][j]:
-                    best[nm][j], prev[nm][j] = v, i
+    masks = np.arange(1 << n, dtype=np.int64)
+    pop = np.zeros(1 << n, dtype=np.int8)
+    for j in range(n):
+        pop += (masks >> j & 1).astype(np.int8)
+    layers = [masks[pop == k] for k in range(n + 1)]
 
-    last = max(range(n), key=lambda i: best[full][i])
+    for k in range(2, n + 1):
+        for j in range(n):
+            bit = 1 << j
+            cur = layers[k][layers[k] & bit != 0]
+            src = cur ^ bit
+            cand = best[src] + w[:, j]  # (m, n): last token i, then j
+            arg = cand.argmax(axis=1)
+            val = cand[np.arange(len(cur)), arg]
+            ok = best[src, arg] >= 0
+            best[cur[ok], j] = val[ok]
+            prev[cur[ok], j] = arg[ok]
+
+    last = int(best[full].argmax())
     order, mask = [], full
     while last >= 0:
         order.append(last)
-        mask, last = mask ^ (1 << last), prev[mask][last]
+        mask, last = mask ^ (1 << last), int(prev[mask, last])
     return order[::-1]
 
 
@@ -139,86 +151,115 @@ def _score(order: list[int], ov: dict[tuple[int, int], int]) -> int:
     return sum(ov.get(p, 0) for p in zip(order, order[1:], strict=False))
 
 
-def _link(a: int | None, b: int | None, ov: dict) -> int:
-    if a is None or b is None:
-        return 0
-    return ov.get((a, b), 0)
-
-
 class _Net:
-    """Overlap map plus its in/out neighbour lists."""
+    """Overlap map as a dense matrix plus in/out neighbours in CSR form.
+
+    Row/column `n` is a sentinel for "no neighbour" (overlap 0), so the ends
+    of an order need no special case.
+    """
 
     def __init__(self, n: int, ov: dict[tuple[int, int], int]) -> None:
         self.ov = ov
-        self.ins: list[list[int]] = [[] for _ in range(n)]
-        self.outs: list[list[int]] = [[] for _ in range(n)]
-        for i, j in ov:
-            self.outs[i].append(j)
-            self.ins[j].append(i)
+        self.n = n
+        self.w = np.zeros((n + 1, n + 1), dtype=np.int32)
+        for (i, j), k in ov.items():
+            self.w[i, j] = k
+        self.in_ptr, self.in_flat = self._csr(n, [(j, i) for i, j in ov])
+        self.out_ptr, self.out_flat = self._csr(n, list(ov))
+
+    @staticmethod
+    def _csr(n: int, pairs: list[tuple[int, int]]) -> tuple[np.ndarray, np.ndarray]:
+        """(node -> neighbours) as (indptr, flat)."""
+        ptr = np.zeros(n + 1, dtype=np.int64)
+        if not pairs:
+            return ptr, np.zeros(0, dtype=np.int64)
+        arr = np.array(sorted(pairs), dtype=np.int64)
+        np.cumsum(np.bincount(arr[:, 0], minlength=n), out=ptr[1:])
+        return ptr, arr[:, 1].copy()
 
 
-def _lift_gain(cur: list[int], i: int, seg: int, ov: dict) -> int:
-    """Overlap lost by lifting cur[i:i+seg] out and closing the gap."""
-    prev = cur[i - 1] if i > 0 else None
-    after = cur[i + seg] if i + seg < len(cur) else None
-    return _link(prev, cur[i], ov) + _link(cur[i + seg - 1], after, ov) - _link(prev, after, ov)
+def _score(order: list[int], ov: dict[tuple[int, int], int]) -> int:
+    """Total overlap along the order (bigger = shorter seed)."""
+    return sum(ov.get(p, 0) for p in zip(order, order[1:], strict=False))
 
 
-def _slots(seg: list[int], net: _Net, pos: dict[int, int], i: int) -> list[int]:
-    """Slots in `rest` where `seg` links to a neighbour, ascending.
+def _gather(ptr: np.ndarray, flat: np.ndarray, nodes: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(row, neighbour) for every neighbour of every node in `nodes`."""
+    counts = ptr[nodes + 1] - ptr[nodes]
+    rows = np.repeat(np.arange(len(nodes)), counts)
+    starts = np.repeat(ptr[nodes] - (np.cumsum(counts) - counts), counts)
+    return rows, flat[starts + np.arange(len(rows))]
 
-    Dropping seg between a and b gains link(a,seg0) + link(segN,b) - link(a,b),
-    positive only if one of the first two terms is, so no other slot can win.
-    Once seg (n long, at i) is lifted out, an item at index q >= i sits at q - n.
+
+def _first_move(arr: np.ndarray, pos: np.ndarray, seg_len: int, start: int, net: _Net):
+    """First or-opt move at a position >= start that gains overlap.
+
+    Returns (position, slot, gain) or None.  Evaluates every position against
+    the unchanged order in one numpy pass; the scalar sweep did the same one
+    position at a time, and positions before the first accepted move cannot
+    change, so the first accepted move is identical.
     """
-    inside, n = set(seg), len(seg)
-    after = [pos[a] for a in net.ins[seg[0]] if a not in inside]
-    before = [pos[b] for b in net.outs[seg[-1]] if b not in inside]
-    slots = {(q - n if q >= i else q) + 1 for q in after}
-    slots.update(q - n if q >= i else q for q in before)
-    return sorted(slots)
+    m, sent, w, L = len(arr), net.n, net.w, seg_len
+    idx = np.arange(start, m - L + 1)
+    if not len(idx):
+        return None
+    ap = np.concatenate(([sent], arr, [sent]))  # ap[k + 1] == arr[k]
+    first, last = arr[idx], arr[idx + L - 1]
+    prev, after = ap[idx], ap[idx + L + 1]
+    lost = w[prev, first] + w[last, after] - w[prev, after]
 
+    # Candidate slots: right after an in-neighbour of first, or right before
+    # an out-neighbour of last (neighbours inside the segment are skipped);
+    # once the segment is lifted out, an item at q >= i + L sits at q - L.
+    rows_a, nb_a = _gather(net.in_ptr, net.in_flat, first)
+    rows_b, nb_b = _gather(net.out_ptr, net.out_flat, last)
+    qa, qb = pos[nb_a], pos[nb_b]
+    ia, ib = idx[rows_a], idx[rows_b]
+    ka, kb = (qa < ia) | (qa >= ia + L), (qb < ib) | (qb >= ib + L)
+    slot_a = np.where(qa >= ia, qa - L, qa)[ka] + 1
+    slot_b = np.where(qb >= ib, qb - L, qb)[kb]
+    rows = np.concatenate((rows_a[ka], rows_b[kb]))
+    slot = np.concatenate((slot_a, slot_b))
+    keep = slot != idx[rows]
+    rows, slot = rows[keep], slot[keep]
 
-def _best_slot(
-    rest: list[int], seg: list[int], skip: int, net: _Net, pos: dict[int, int]
-) -> tuple[int, int]:
-    """(gain, slot) of the best place in `rest` to drop `seg`; slot -1 = none."""
-    get = net.ov.get
-    first, last, end = seg[0], seg[-1], len(rest)
-    best, slot = 0, -1
-    for p in _slots(seg, net, pos, skip):
-        if p == skip:
-            continue
-        # The end slots lack one neighbour: decide that per slot, not per link.
-        if 0 < p < end:
-            a, b = rest[p - 1], rest[p]
-            gain = get((a, first), 0) + get((last, b), 0) - get((a, b), 0)
-        elif p == 0:
-            gain = get((last, rest[0]), 0) if end else 0
-        else:
-            gain = get((rest[-1], first), 0)
-        if gain > best:
-            best, slot = gain, p
-    return best, slot
+    i = idx[rows]
+    ra, rb = slot - 1, slot  # `rest` index of the left and right neighbour
+    left = np.where(ra < i, ap[ra + 1], ap[ra + L + 1])
+    right = np.where(rb < i, ap[rb + 1], ap[rb + L + 1])
+    gain = w[left, first[rows]] + w[last[rows], right] - w[left, right]
+    pos_gain = gain > 0
+    # Best slot per position: biggest gain, ties to the lowest slot.
+    big = m + 3
+    key = gain[pos_gain].astype(np.int64) * big + (big - 1 - slot[pos_gain])
+    best = np.full(len(idx), -1, dtype=np.int64)
+    np.maximum.at(best, rows[pos_gain], key)
+    add = best // big
+    ok = (best >= 0) & (add > lost)
+    if not ok.any():
+        return None
+    j = int(ok.argmax())
+    return int(idx[j]), int(big - 1 - best[j] % big), int(add[j] - lost[j])
 
 
 def _sweep(cur: list[int], net: _Net) -> int:
     """One or-opt pass over `cur` (edited in place). Returns overlap gained."""
     total = 0
-    pos = {v: k for k, v in enumerate(cur)}
+    arr = np.array(cur, dtype=np.int64)
+    pos = np.empty(net.n, dtype=np.int64)
     for seg_len in SEG_LENS:
-        i = 0
-        while i + seg_len <= len(cur):
-            seg = cur[i : i + seg_len]
-            rest = cur[:i] + cur[i + seg_len :]
-            lost = _lift_gain(cur, i, seg_len, net.ov)
-            add, slot = _best_slot(rest, seg, i, net, pos)
-            i += 1
-            if slot < 0 or add <= lost:
-                continue
-            cur[:] = rest[:slot] + seg + rest[slot:]
-            pos = {v: k for k, v in enumerate(cur)}
-            total += add - lost
+        start = 0
+        while True:
+            pos[arr] = np.arange(len(arr))
+            move = _first_move(arr, pos, seg_len, start, net)
+            if move is None:
+                break
+            i, slot, gain = move
+            rest = np.concatenate((arr[:i], arr[i + seg_len :]))
+            arr = np.concatenate((rest[:slot], arr[i : i + seg_len], rest[slot:]))
+            total += gain
+            start = i + 1
+    cur[:] = arr.tolist()
     return total
 
 

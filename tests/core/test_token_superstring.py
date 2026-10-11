@@ -1,6 +1,7 @@
 """Tests for core/token_superstring.py (dictionary tokens -> one short seed)."""
 
 import itertools
+import random
 import subprocess
 import sys
 from pathlib import Path
@@ -429,6 +430,52 @@ def test_sweep_matches_full_scan_reference():
         fast, slow = list(order), list(order)
         assert _sweep(fast, _Net(len(ss), ov)) == _ref_sweep(slow, ov)
         assert fast == slow
+
+
+def test_sweep_matches_reference_from_shuffled_orders():
+    """Shuffled starts accept many moves per sweep: the batched pass must stop
+    and re-evaluate after each one exactly as the position-by-position loop."""
+    rng = random.Random(5)
+    for toks in _wide(25, 51, 30):
+        ss = reduce_input(toks)
+        ov = overlap_map(ss)
+        for _ in range(3):
+            order = list(range(len(ss)))
+            rng.shuffle(order)
+            fast, slow = list(order), list(order)
+            assert _sweep(fast, _Net(len(ss), ov)) == _ref_sweep(slow, ov)
+            assert fast == slow
+
+
+def _ref_exact(n, ov):
+    """Scalar Held-Karp with first-maximum ties (the order exact_order returns)."""
+    best = [[-1] * n for _ in range(1 << n)]
+    prev = [[-1] * n for _ in range(1 << n)]
+    for i in range(n):
+        best[1 << i][i] = 0
+    for mask in range(1 << n):
+        for i in range(n):
+            if best[mask][i] < 0:
+                continue
+            for j in range(n):
+                if not mask >> j & 1:
+                    v = best[mask][i] + ov.get((i, j), 0)
+                    if v > best[mask | 1 << j][j]:
+                        best[mask | 1 << j][j], prev[mask | 1 << j][j] = v, i
+    full = (1 << n) - 1
+    last = max(range(n), key=lambda i: best[full][i])
+    order, mask = [], full
+    while last >= 0:
+        order.append(last)
+        mask, last = mask ^ (1 << last), prev[mask][last]
+    return order[::-1]
+
+
+def test_exact_order_matches_scalar_held_karp_including_ties():
+    for toks in _wide(30, 61, 8) + _instances(30, seed=62):
+        ss = reduce_input(toks)[:8]
+        ov = overlap_map(ss)
+        assert exact_order(ss, ov) == _ref_exact(len(ss), ov)
 
 
 def test_control_reference_sweep_against_itself():
