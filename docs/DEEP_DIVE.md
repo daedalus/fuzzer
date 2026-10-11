@@ -1052,6 +1052,18 @@ Automatically detects ASAN-instrumented targets by checking for `__asan_init` sy
 
 Inside a guarded call the shim also catches what would end the host: `exit`/`_exit`/`_Exit`, and libc's `err`/`errx`/`verr`/`verrx`/`error`/`error_at_line` (hidden-visibility definitions bound to this module, so other libraries keep libc's) return the exit status instead; outside a guard they are the real calls. Guard frames are per call and per thread: nested guarded calls restore the outer frame, a nested plain call stays under an outer timeout, and a `fork()` child starts unguarded. Limits: `exit()` from a worker thread, a target that blocks the crash signal before faulting, and a crash handler the target installs mid-call still end the host (the last one is repaired on the next health read). Cmplog/count log fds are `O_CLOEXEC` and re-checked by inode before each write; a number the target closed and reused is dropped and the path reopened. SHM ids are parsed strictly for every segment.
 
+### Private heap (`-D__AFL_PRIVATE_HEAP=1`)
+direct_lite shares the process with the target, so a heap bug in the target corrupts the host's glibc heap (tcache, top chunk) and the host dies on a later malloc, outside any guard. The signal guard cannot repair that.
+
+The shim defines `malloc/free/calloc/realloc/reallocarray/memalign/aligned_alloc/posix_memalign/valloc/malloc_usable_size` with hidden visibility, so every call in the target's link unit binds to it (same pattern as `exit`); the host keeps libc.
+
+- Slots: power-of-two classes 16 B..1 MiB, one 128 MiB span each; larger blocks get their own mapping. State, free stack and a per-call stamp live in a side table, so a write through a dangling pointer cannot corrupt the allocator.
+- Double or invalid free: message on stderr, `raise(SIGABRT)`, contained by the guard (`-6`).
+- Crash or timeout: the guard frees every slot stamped by that call and clears the lock. State from earlier calls survives; a target global first allocated in the crashing call dangles.
+- Foreign pointers (`strdup`) go to libc's `free`/`realloc`. Limits: `getline`-style libc calls cannot take a private pointer; alignment above 4 KiB is refused; sanitizer builds fail to compile.
+- `__afl_ph_live()` counts live slots (leak probe).
+- Enabled by `tools/build_targets.sh` for the fuzzgoat `.so` (non-sanitizer). Rebuild targets after changing `afl_shim.c`.
+
 ### Shim health checks
 Failures the shim survives but the fuzzer cannot otherwise see.
 

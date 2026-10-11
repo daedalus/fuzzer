@@ -1652,7 +1652,10 @@ build_simple_so_targets() {
     fi
     if [ "$HAS_FUZZGOAT" -eq 1 ]; then
         compile_fuzzgoat_object "$1" "$flags" "$cc" "$extra_cflags"
-        build_so_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat${1}.o -lm" "$flags" "$cc" "$extra_cflags -I$VENDOR/fuzzgoat"
+        # fuzzgoat plants heap bugs; keep them off the host heap (sanitizers own malloc).
+        local ph_flag="-D__AFL_PRIVATE_HEAP=1"
+        [[ "$flags" == *-fsanitize=* ]] && ph_flag=""
+        build_so_target "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" "$TARGETS/fuzzgoat_read${out_suffix}.so" "/tmp/fuzzgoat${1}.o -lm" "$flags" "$cc" "$extra_cflags $ph_flag -I$VENDOR/fuzzgoat"
     fi
 }
 

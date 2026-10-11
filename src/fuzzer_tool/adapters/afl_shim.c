@@ -76,6 +76,10 @@
  *                          defines none of the __afl_* / trace_pc_guard
  *                          symbols, so it cannot shadow an instrumented
  *                          target the way cmplog_shim.so could.
+ *   -D__AFL_PRIVATE_HEAP=1 the target's malloc family runs on a private
+ *                          heap, so its heap bugs cannot corrupt the host
+ *                          in direct_lite (see "Private heap" below;
+ *                          refused under ASAN/MSAN/TSAN)
  *
  * Default-on channels (both opt-out with =0):
  *   __AFL_CTX_SENSITIVE=1  call-stack-sensitive edge hashing
@@ -4518,6 +4522,454 @@ __AFL_GCC_NO_COV static void __afl_timer_budget(uint64_t budget_us) {
     timer_settime(__afl_timer, 0, &its, NULL);
 }
 
+/* ── Private heap (-D__AFL_PRIVATE_HEAP=1) ────────────────────────────
+ *
+ * In direct_lite the target shares the fuzzer's process, so its heap is the
+ * fuzzer's heap. A use-after-free or an overflow in the target poisons
+ * glibc's tcache/top chunk, and the fuzzer dies on its next malloc, outside
+ * any guard. The signal guard cannot undo that.
+ *
+ * This block gives the target its own allocator. malloc & co. are defined
+ * here with hidden visibility, so every call in this module (wrapper plus the
+ * library objects linked into it) binds here and the host keeps libc's.
+ *
+ *   host malloc ──► libc heap                     (never touched by target)
+ *   target malloc ─► class regions, 16 B .. 1 MiB (one 128 MiB span each)
+ *                    + mmap'd blocks above 1 MiB
+ *
+ * Slot state, free stacks and call stamps live in a side table, not next to
+ * the data: an overflow or a write through a dangling pointer cannot corrupt
+ * the allocator. A double or invalid free is detected from the side table and
+ * raised as SIGABRT inside the guard, as glibc would have.
+ *
+ * After a crash or timeout the guard frees everything that call allocated,
+ * so a crashing input does not leak. State owned by earlier calls survives.
+ *
+ * Limits: pointers cross the libc boundary only as foreign ones (strdup'd
+ * memory is freed through libc), but libc functions that realloc/free a
+ * caller buffer (getline) cannot take a private pointer. Alignments above
+ * 4 KiB are refused. Sanitizer builds have their own allocator: refused. */
+#if __AFL_PRIVATE_HEAP
+
+#ifdef __has_feature
+#  if __has_feature(address_sanitizer) || __has_feature(memory_sanitizer) || \
+      __has_feature(thread_sanitizer)
+#    error "__AFL_PRIVATE_HEAP replaces malloc; sanitizer builds already have their own allocator"
+#  endif
+#endif
+
+#include <malloc.h>
+#include <sched.h>
+
+#define __AFL_PH_MIN_SHIFT    4                 /* 16 B smallest slot */
+#define __AFL_PH_MAX_SHIFT    20                /* 1 MiB largest slot */
+#define __AFL_PH_CLASSES      (__AFL_PH_MAX_SHIFT - __AFL_PH_MIN_SHIFT + 1)
+#define __AFL_PH_REGION_SHIFT 27                /* 128 MiB of address space per class */
+#define __AFL_PH_REGION       ((size_t)1 << __AFL_PH_REGION_SHIFT)
+#define __AFL_PH_MAX_SLOT     ((size_t)1 << __AFL_PH_MAX_SHIFT)
+#define __AFL_PH_PAGE         4096u
+#define __AFL_PH_BIG_SHIFT    12
+#define __AFL_PH_BIG_SLOTS    (1u << __AFL_PH_BIG_SHIFT)
+#define __AFL_PH_TOMB         ((void *)1)
+#define __AFL_PH_HASH         0x9E3779B97F4A7C15ULL
+#define __AFL_PH_ABORT_RC     134
+#define __AFL_PH_META_BYTES   9                 /* state 1 + stamp 4 + stack 4 per slot */
+
+enum { __AFL_PH_NEVER, __AFL_PH_LIVE, __AFL_PH_FREED };
+enum { __AFL_PH_COLD, __AFL_PH_READY, __AFL_PH_OFF };
+
+typedef struct {
+    uint8_t *state;
+    uint32_t *stamp;      /* guard call that allocated the slot */
+    uint32_t *stack;      /* freed slot indices, reused LIFO */
+    uint32_t nfresh, nstack, nslots;
+} __afl_ph_cls;
+
+typedef struct { void *p; size_t len; uint32_t stamp; } __afl_ph_big;
+
+static struct {
+    char *base;
+    __afl_ph_cls cls[__AFL_PH_CLASSES];
+    __afl_ph_big big[__AFL_PH_BIG_SLOTS];
+    uint32_t stamp, calls;
+    volatile int lock;
+    int mode;
+} __afl_ph;
+
+static void *(*__afl_ph_rmalloc)(size_t);
+static void *(*__afl_ph_rrealloc)(void *, size_t);
+static void (*__afl_ph_rfree)(void *);
+static int (*__afl_ph_rmemalign)(void **, size_t, size_t);
+static size_t (*__afl_ph_rusable)(void *);
+static __thread int __afl_ph_resolving;
+
+__AFL_GCC_NO_COV static void __afl_ph_lock(void) {
+    while (__atomic_exchange_n(&__afl_ph.lock, 1, __ATOMIC_ACQUIRE))
+        sched_yield();
+}
+
+__AFL_GCC_NO_COV static void __afl_ph_unlock(void) {
+    __atomic_store_n(&__afl_ph.lock, 0, __ATOMIC_RELEASE);
+}
+
+/* Reserve all class spans and side tables in one lazily committed mapping. */
+__AFL_GCC_NO_COV static int __afl_ph_init(void) {
+    if (__afl_ph.mode != __AFL_PH_COLD) return __afl_ph.mode == __AFL_PH_READY;
+    __afl_ph_lock();
+    if (__afl_ph.mode != __AFL_PH_COLD) {
+        __afl_ph_unlock();
+        return __afl_ph.mode == __AFL_PH_READY;
+    }
+
+    size_t data = (size_t)__AFL_PH_CLASSES * __AFL_PH_REGION, meta = 0;
+    for (int c = 0; c < __AFL_PH_CLASSES; c++)
+        meta += (__AFL_PH_REGION >> (c + __AFL_PH_MIN_SHIFT)) * __AFL_PH_META_BYTES;
+
+    char *m = mmap(NULL, data + __AFL_PH_REGION + meta, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (m == MAP_FAILED) {
+        __afl_ph.mode = __AFL_PH_OFF;
+        __afl_ph_unlock();
+        return 0;
+    }
+
+    /* Slots are size-aligned only if the span is region-aligned. */
+    __afl_ph.base = (char *)(((uintptr_t)m + __AFL_PH_REGION - 1) & ~(uintptr_t)(__AFL_PH_REGION - 1));
+    char *cur = m + data + __AFL_PH_REGION;
+    for (int c = 0; c < __AFL_PH_CLASSES; c++) {
+        __afl_ph_cls *k = &__afl_ph.cls[c];
+        size_t n = __AFL_PH_REGION >> (c + __AFL_PH_MIN_SHIFT);
+        k->nslots = (uint32_t)n;
+        k->state = (uint8_t *)cur;
+        cur += n;
+        k->stamp = (uint32_t *)cur;
+        cur += n * sizeof(uint32_t);
+        k->stack = (uint32_t *)cur;
+        cur += n * sizeof(uint32_t);
+    }
+    __afl_ph.mode = __AFL_PH_READY;
+    __afl_ph_unlock();
+    return 1;
+}
+
+/* libc's own entry points, for memory this heap does not own. */
+__AFL_GCC_NO_COV static int __afl_ph_resolve(void) {
+    if (__afl_ph_rmalloc) return 1;
+    if (__afl_ph_resolving) return 0;      /* dlsym allocating while we resolve */
+    __afl_ph_resolving = 1;
+    __afl_ph_rfree = (void (*)(void *))dlsym(RTLD_NEXT, "free");
+    __afl_ph_rrealloc = (void *(*)(void *, size_t))dlsym(RTLD_NEXT, "realloc");
+    __afl_ph_rmemalign = (int (*)(void **, size_t, size_t))dlsym(RTLD_NEXT, "posix_memalign");
+    __afl_ph_rusable = (size_t (*)(void *))dlsym(RTLD_NEXT, "malloc_usable_size");
+    __afl_ph_rmalloc = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
+    __afl_ph_resolving = 0;
+    return __afl_ph_rmalloc != NULL;
+}
+
+__AFL_GCC_NO_COV static void *__afl_ph_libc(size_t n, size_t align) {
+    void *p = NULL;
+    if (!__afl_ph_resolve()) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    if (align <= 16) return __afl_ph_rmalloc(n);
+    return __afl_ph_rmemalign(&p, align, n) ? NULL : p;
+}
+
+/* Raise SIGABRT from the allocator itself: the abort() macro above is a no-op. */
+__AFL_GCC_NO_COV static void __afl_ph_die(const char *msg) {
+    write(STDERR_FILENO, msg, strlen(msg));
+    raise(SIGABRT);
+    syscall(SYS_exit_group, __AFL_PH_ABORT_RC);
+}
+
+__AFL_GCC_NO_COV static int __afl_ph_in(const void *p) {
+    if (__afl_ph.mode != __AFL_PH_READY) return 0;
+    return (const char *)p >= __afl_ph.base &&
+           (size_t)((const char *)p - __afl_ph.base) < (size_t)__AFL_PH_CLASSES * __AFL_PH_REGION;
+}
+
+__AFL_GCC_NO_COV static unsigned __afl_ph_slot_of(size_t need) {
+    unsigned shift = need <= 1 ? 0 : 64 - (unsigned)__builtin_clzll(need - 1);
+    return shift < __AFL_PH_MIN_SHIFT ? __AFL_PH_MIN_SHIFT : shift;
+}
+
+/* Pop a freed slot or carve a fresh one. The slot is stamped last, so a
+ * longjmp in between loses the slot instead of duplicating it. */
+__AFL_GCC_NO_COV static void *__afl_ph_take(unsigned c) {
+    __afl_ph_cls *k = &__afl_ph.cls[c];
+    uint32_t i;
+    if (k->nstack) i = k->stack[--k->nstack];
+    else if (k->nfresh < k->nslots) i = k->nfresh++;
+    else return NULL;
+    k->stamp[i] = __afl_ph.stamp;
+    k->state[i] = __AFL_PH_LIVE;
+    return __afl_ph.base + ((size_t)c << __AFL_PH_REGION_SHIFT) + ((size_t)i << (c + __AFL_PH_MIN_SHIFT));
+}
+
+/* Returns an error message, NULL when the slot was freed. State is written
+ * before the push, so a longjmp in between leaks the slot, never duplicates it. */
+__AFL_GCC_NO_COV static const char *__afl_ph_put(const void *p) {
+    size_t off = (size_t)((const char *)p - __afl_ph.base);
+    unsigned c = (unsigned)(off >> __AFL_PH_REGION_SHIFT);
+    size_t in = off & (__AFL_PH_REGION - 1);
+    if (in & (((size_t)1 << (c + __AFL_PH_MIN_SHIFT)) - 1)) return "free(): invalid pointer (private heap)\n";
+
+    __afl_ph_cls *k = &__afl_ph.cls[c];
+    uint32_t i = (uint32_t)(in >> (c + __AFL_PH_MIN_SHIFT));
+    if (k->state[i] == __AFL_PH_FREED) return "free(): double free detected (private heap)\n";
+    if (k->state[i] != __AFL_PH_LIVE) return "free(): invalid pointer (private heap)\n";
+    k->state[i] = __AFL_PH_FREED;
+    k->stack[k->nstack++] = i;
+    return NULL;
+}
+
+__AFL_GCC_NO_COV static size_t __afl_ph_size_of(const void *p) {
+    size_t off = (size_t)((const char *)p - __afl_ph.base);
+    return (size_t)1 << ((off >> __AFL_PH_REGION_SHIFT) + __AFL_PH_MIN_SHIFT);
+}
+
+/* Blocks above the largest class: own mapping, tracked in an open-addressing table. */
+__AFL_GCC_NO_COV static unsigned __afl_ph_home(const void *p) {
+    return (unsigned)(((uint64_t)(uintptr_t)p >> 12) * __AFL_PH_HASH >> (64 - __AFL_PH_BIG_SHIFT));
+}
+
+__AFL_GCC_NO_COV static int __afl_ph_big_find(const void *p) {
+    unsigned h = __afl_ph_home(p);
+    for (unsigned n = 0; n < __AFL_PH_BIG_SLOTS; n++) {
+        unsigned i = (h + n) & (__AFL_PH_BIG_SLOTS - 1);
+        if (__afl_ph.big[i].p == p) return (int)i;
+        if (!__afl_ph.big[i].p) return -1;
+    }
+    return -1;
+}
+
+__AFL_GCC_NO_COV static void *__afl_ph_big_new(size_t n) {
+    if (n > SIZE_MAX - 2 * __AFL_PH_PAGE) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    size_t len = (n + __AFL_PH_PAGE - 1) & ~(size_t)(__AFL_PH_PAGE - 1);
+    void *p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    __afl_ph_lock();
+    unsigned h = __afl_ph_home(p);
+    for (unsigned k = 0; k < __AFL_PH_BIG_SLOTS; k++) {
+        __afl_ph_big *s = &__afl_ph.big[(h + k) & (__AFL_PH_BIG_SLOTS - 1)];
+        if (s->p && s->p != __AFL_PH_TOMB) continue;
+        s->p = p;
+        s->len = len;
+        s->stamp = __afl_ph.stamp;
+        __afl_ph_unlock();
+        return p;
+    }
+    __afl_ph_unlock();
+    munmap(p, len);
+    errno = ENOMEM;
+    return NULL;
+}
+
+/* 1 when p was a tracked big block (now unmapped). */
+__AFL_GCC_NO_COV static int __afl_ph_big_del(void *p) {
+    __afl_ph_lock();
+    int i = __afl_ph_big_find(p);
+    size_t len = i < 0 ? 0 : __afl_ph.big[i].len;
+    if (i >= 0) __afl_ph.big[i].p = __AFL_PH_TOMB;
+    __afl_ph_unlock();
+    if (i < 0) return 0;
+    munmap(p, len);
+    return 1;
+}
+
+__AFL_GCC_NO_COV static void *__afl_ph_alloc(size_t n, size_t align) {
+    if (!__afl_ph_init()) return __afl_ph_libc(n, align);
+    if (align > __AFL_PH_PAGE) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    size_t need = n > align ? n : align;
+    if (need > __AFL_PH_MAX_SLOT) return __afl_ph_big_new(n);
+
+    unsigned c = __afl_ph_slot_of(need) - __AFL_PH_MIN_SHIFT;
+    __afl_ph_lock();
+    void *p = __afl_ph_take(c);
+    __afl_ph_unlock();
+    if (p) return p;
+    return __afl_ph_libc(n, align);        /* class span exhausted */
+}
+
+__AFL_GCC_NO_COV static void __afl_ph_release(void *p) {
+    if (!p) return;
+    if (__afl_ph_in(p)) {
+        __afl_ph_lock();
+        const char *err = __afl_ph_put(p);
+        __afl_ph_unlock();
+        if (err) __afl_ph_die(err);
+        return;
+    }
+    if (__afl_ph_big_del(p)) return;
+    if (__afl_ph_resolve()) __afl_ph_rfree(p);
+}
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void *malloc(size_t n) { return __afl_ph_alloc(n, 16); }
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void free(void *p) { __afl_ph_release(p); }
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void *calloc(size_t a, size_t b) {
+    size_t n;
+    if (__builtin_mul_overflow(a, b, &n)) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    void *p = __afl_ph_alloc(n, 16);
+    if (!p) return NULL;
+    __afl_ph_lock();
+    int big = __afl_ph_big_find(p) >= 0;   /* fresh mapping: already zero */
+    __afl_ph_unlock();
+    if (!big) memset(p, 0, n);
+    return p;
+}
+
+__AFL_GCC_NO_COV static size_t __afl_ph_usable(void *p) {
+    if (__afl_ph_in(p)) return __afl_ph_size_of(p);
+    __afl_ph_lock();
+    int i = __afl_ph_big_find(p);
+    size_t len = i < 0 ? 0 : __afl_ph.big[i].len;
+    __afl_ph_unlock();
+    if (i >= 0) return len;
+    return (__afl_ph_resolve() && __afl_ph_rusable) ? __afl_ph_rusable(p) : 0;
+}
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV size_t malloc_usable_size(void *p) { return p ? __afl_ph_usable(p) : 0; }
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void *realloc(void *p, size_t n) {
+    if (!p) return __afl_ph_alloc(n, 16);
+    if (!n) {
+        __afl_ph_release(p);
+        return NULL;
+    }
+
+    int ours = __afl_ph_in(p);
+    if (!ours) {
+        __afl_ph_lock();
+        ours = __afl_ph_big_find(p) >= 0;
+        __afl_ph_unlock();
+    }
+    if (!ours) return __afl_ph_resolve() ? __afl_ph_rrealloc(p, n) : NULL;
+
+    size_t have = __afl_ph_usable(p);
+    if (n <= have && n > have / 2) return p;     /* same class: keep */
+
+    void *q = __afl_ph_alloc(n, 16);
+    if (!q) return NULL;
+    memcpy(q, p, have < n ? have : n);
+    __afl_ph_release(p);
+    return q;
+}
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void *reallocarray(void *p, size_t a, size_t b) {
+    size_t n;
+    if (__builtin_mul_overflow(a, b, &n)) {
+        errno = ENOMEM;
+        return NULL;
+    }
+    return realloc(p, n);
+}
+
+__AFL_GCC_NO_COV static int __afl_ph_pow2(size_t a) { return a && !(a & (a - 1)); }
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void *memalign(size_t a, size_t n) {
+    if (!__afl_ph_pow2(a)) {
+        errno = EINVAL;
+        return NULL;
+    }
+    return __afl_ph_alloc(n, a);
+}
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void *aligned_alloc(size_t a, size_t n) { return memalign(a, n); }
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void *valloc(size_t n) { return __afl_ph_alloc(n, __AFL_PH_PAGE); }
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV int posix_memalign(void **out, size_t a, size_t n) {
+    if (!__afl_ph_pow2(a) || a % sizeof(void *)) return EINVAL;
+    void *p = __afl_ph_alloc(n, a);
+    if (!p) return ENOMEM;
+    *out = p;
+    return 0;
+}
+
+/* Guard hooks. A call gets a fresh stamp; leaving restores the caller's, so a
+ * nested guard does not retag its parent's later allocations. */
+__AFL_GCC_NO_COV static uint32_t __afl_ph_enter(void) {
+    uint32_t prev = __afl_ph.stamp;
+    if (++__afl_ph.calls == 0) __afl_ph.calls = 1;
+    __afl_ph.stamp = __afl_ph.calls;
+    return prev;
+}
+
+__AFL_GCC_NO_COV static void __afl_ph_leave(uint32_t prev) { __afl_ph.stamp = prev; }
+
+/* Crash or timeout: free what the call allocated. The jump may have landed
+ * inside the allocator, so the lock is cleared first. */
+__AFL_GCC_NO_COV static void __afl_ph_reclaim(void) {
+    __afl_ph.lock = 0;
+    if (__afl_ph.mode != __AFL_PH_READY) return;
+
+    for (int c = 0; c < __AFL_PH_CLASSES; c++) {
+        __afl_ph_cls *k = &__afl_ph.cls[c];
+        for (uint32_t i = 0; i < k->nfresh; i++) {
+            if (k->state[i] != __AFL_PH_LIVE || k->stamp[i] != __afl_ph.stamp) continue;
+            k->state[i] = __AFL_PH_FREED;
+            k->stack[k->nstack++] = i;
+        }
+    }
+    for (unsigned i = 0; i < __AFL_PH_BIG_SLOTS; i++) {
+        __afl_ph_big *s = &__afl_ph.big[i];
+        if (!s->p || s->p == __AFL_PH_TOMB || s->stamp != __afl_ph.stamp) continue;
+        munmap(s->p, s->len);
+        s->p = __AFL_PH_TOMB;
+    }
+}
+
+__AFL_GCC_NO_COV static void __afl_ph_unwind(uint32_t prev, int code) {
+    if (code < __AFL_JMP_EXIT || code == __AFL_JMP_TIMEOUT) __afl_ph_reclaim();
+    __afl_ph_leave(prev);
+}
+
+/* Live allocations: a leak probe for tests and health reads. */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV long __afl_ph_live(void) {
+    long n = 0;
+    if (__afl_ph.mode != __AFL_PH_READY) return 0;
+    for (int c = 0; c < __AFL_PH_CLASSES; c++)
+        for (uint32_t i = 0; i < __afl_ph.cls[c].nfresh; i++)
+            n += __afl_ph.cls[c].state[i] == __AFL_PH_LIVE;
+    for (unsigned i = 0; i < __AFL_PH_BIG_SLOTS; i++)
+        n += __afl_ph.big[i].p && __afl_ph.big[i].p != __AFL_PH_TOMB;
+    return n;
+}
+
+#else
+#define __afl_ph_enter() 0u
+#define __afl_ph_leave(prev) ((void)(prev))
+#define __afl_ph_unwind(prev, code) ((void)(prev), (void)(code))
+#endif
+
 /* ── Guarded call wrapper ─────────────────────────────────────────────
  *
  * InProcessRunner's direct_lite mode calls this instead of the fuzz entry.
@@ -4544,6 +4996,7 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
     sigjmp_buf jb;
     sigjmp_buf *prev = __afl_guard_jmp;
     sig_atomic_t prev_timed = __afl_guard_timed;
+    uint32_t ph_prev = __afl_ph_enter();
     int code = sigsetjmp(jb, 1);
     if (code == 0) {
         /* A frame nested in a timed one stays under the outer budget: a
@@ -4555,12 +5008,14 @@ __AFL_GCC_NO_COV static int __afl_guard_run(int (*entry)(const uint8_t *, size_t
         int rc = entry(data, size);
         __afl_guard_jmp = prev;
         __afl_guard_timed = prev_timed;
+        __afl_ph_leave(ph_prev);
         __afl_sancov_fold();
         return rc;
     }
 
     __afl_guard_jmp = prev;
     __afl_guard_timed = prev_timed;
+    __afl_ph_unwind(ph_prev, code);
     __afl_sancov_fold();
     if (code < __AFL_JMP_EXIT) __afl_sym_emit();   /* a real crash signal */
     else __afl_sym_have = 0;
