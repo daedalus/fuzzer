@@ -956,6 +956,8 @@ def cmd_fuzz(args):
         op_afl_det=getattr(args, "op_afl_det", False),
         op_span_relocate=getattr(args, "op_span_relocate", False),
         op_append=getattr(args, "op_append", False),
+        poly1305_key=getattr(args, "poly1305_key", None),
+        poly1305_tag_at=getattr(args, "poly1305_tag_at", -16),
         op_line_code=getattr(args, "op_line_code", False),
         checksum_sites=getattr(args, "checksum_sites", False),
         grimoire=getattr(args, "grimoire", False),
@@ -2396,6 +2398,16 @@ def _pos_arena_arms_arg(value: str) -> tuple[str, ...]:
     """argparse ``type=`` for --pos-arena-arms; a bad name is a usage error."""
     try:
         return parse_arena_arms(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def _poly1305_key(value: str) -> bytes:
+    """argparse ``type=`` for --poly1305-key; a bad key is a usage error."""
+    from fuzzer_tool.core.mutations.poly1305_fix import parse_key  # noqa: PLC0415
+
+    try:
+        return parse_key(value)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e)) from None
 
@@ -5727,6 +5739,27 @@ def main() -> int:
         help=(
             "Enable tail_append mutation operator (append random bytes at the "
             "end only; for linear instruction inputs). Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--poly1305-key",
+        type=_poly1305_key,
+        default=None,
+        metavar="HEX",
+        help=(
+            "Enable poly1305_fix: mutate the message and rewrite a valid Poly1305 "
+            "tag under this 32-byte one-time key (64 hex digits, r||s). Raw "
+            "Poly1305 only, not the ChaCha20-Poly1305 AEAD framing."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--poly1305-tag-at",
+        type=int,
+        default=-16,
+        metavar="N",
+        help=(
+            "Offset of the 16-byte Poly1305 tag; negative counts from the end "
+            "(default -16). The message is every byte outside the tag."
         ),
     )
     fuzz_parser.add_argument(

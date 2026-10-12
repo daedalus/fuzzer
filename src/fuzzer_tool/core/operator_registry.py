@@ -171,6 +171,7 @@ _CATEGORIES: dict[str, set[str]] = {
     "format": {
         "png_chunk_mutate",
         "png_crc_fix",
+        "poly1305_fix",
         "jpeg_chunk_mutate",
         "jpeg_crc_fix",
         "bmp_chunk_mutate",
@@ -863,6 +864,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "span_relocate": lambda f, _d: bool(getattr(f, "op_span_relocate", False)),
     # Append-only insert for linear instruction inputs; --op-append
     "tail_append": lambda f, _d: bool(getattr(f, "op_append", False)),
+    # Poly1305 tag repair needs the one-time key; --poly1305-key
+    "poly1305_fix": lambda f, _d: getattr(f, "poly1305_key", None) is not None,
     # Manchester and friends; --op-line-code
     "line_code": lambda f, _d: bool(getattr(f, "op_line_code", False)),
     # Grimoire (--grimoire): extend/string need generalized inputs in the book;

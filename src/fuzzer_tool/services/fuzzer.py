@@ -1600,6 +1600,8 @@ class Fuzzer:
         op_span_reverse=False,
         op_span_relocate=False,
         op_append=False,
+        poly1305_key=None,
+        poly1305_tag_at=-16,
         op_line_code=False,
         checksum_sites=False,
         grimoire=False,
@@ -2062,6 +2064,8 @@ class Fuzzer:
         self.op_span_reverse = op_span_reverse
         self.op_span_relocate = op_span_relocate
         self.op_append = op_append
+        self.poly1305_key = poly1305_key
+        self.poly1305_tag_at = poly1305_tag_at
         self.op_line_code = op_line_code
         from fuzzer_tool.core.rq_encodings import LineEncoders, set_line_encoders  # noqa: PLC0415
 

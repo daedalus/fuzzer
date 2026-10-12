@@ -1129,6 +1129,9 @@ Above ~3.3e24 `is_prime` also runs a strong Lucas test (Selfridge method A, `_st
 
 `prime_inject` (regularity) writes boundary primes, Carmichael numbers, strong pseudoprimes, Mersenne/Fermat primes, prime squares and semiprimes into an aligned 1/2/4/8-byte slot. Table built once per width from `numtheory`. No A/B yet; no existing module calls `numtheory` besides the operator.
 
+### Poly1305 tag repair (`core/mutations/poly1305_fix.py`, `--poly1305-key`)
+A target that verifies a Poly1305 tag drops every mutated message before the parser runs. With the one-time key (`r || s`, 64 hex digits) the tag is a function of the message, so `poly1305_fix` (format) edits the message (bit flips, one byte inserted or deleted) and rewrites the tag in place; the operator is offered only when `--poly1305-key` is set. `--poly1305-tag-at N` places the 16-byte tag (negative counts from the end, default -16); the message is the bytes outside the tag, so length edits keep the tag slot consistent. Raw Poly1305 only: the AEAD construction (ChaCha20 key derivation, AAD padding, length block) and GHASH are not modelled. Isolation measurement against a toy tag gate: 2000/2000 repaired mutants pass, 0/2000 of the same edits without repair; MAC cost 2.5 us (64 B), 33 us (1 KiB), 142 us (4 KiB). No run against a real target.
+
 ### Timeouts earn no coverage
 Any backend: a run classified as timeout skips the novelty scan (`FuzzRound._scan_coverage`), so it is never admitted or credited and its edges stay unseen for the first clean input reaching them (wtf `RevokeLastNewCoverage`). Tests: `tests/test_regression_timeout_coverage_revoked.py`.
 

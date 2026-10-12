@@ -640,6 +640,9 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.op_span_relocate = True
         f.op_append = True
         f.op_line_code = True
+        # poly1305_fix: offered only when a one-time key is supplied.
+        f.poly1305_key = bytes(range(32))
+        f.poly1305_tag_at = -16
         # bit_cross / arith_mid / geo_mid / power_mid / lineage_step: gated on parent_key, which seed_meta records only
         # under --lineage.
         f._use_lineage = True

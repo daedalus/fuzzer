@@ -4873,6 +4873,21 @@ class OperatorEngine:
                         chunk.data = rng.randbytes(rng.randint(1, 32))
                     return bytearray(serialize_png_chunks(chunks)[: self.ctx.max_len])
 
+    def _op_poly1305_fix(self, buf, _byte_idx, _data):
+        """Mutate the message and rewrite a valid Poly1305 tag (--poly1305-key)."""
+        from fuzzer_tool.core.mutations.poly1305_fix import poly1305_fix
+
+        out = poly1305_fix(
+            bytes(buf),
+            self.f.poly1305_key,
+            self.ctx._rng,
+            self.ctx.max_len,
+            self.f.poly1305_tag_at,
+        )
+        if out is None:
+            return self._op_declined("poly1305_fix", buf)
+        return bytearray(out[: self.ctx.max_len])
+
     def _op_taint_boost(self, buf, _byte_idx, data):
         """Revizor boosting: redraw the seed's path-irrelevant bytes.
 
