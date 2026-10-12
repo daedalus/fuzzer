@@ -213,6 +213,15 @@ def _run_fuzzer(fuzzer, args):
         print(f"[*] cProfile stats saved to {profile_out}")
 
 
+def _parse_orbit_arg(spec):
+    """``--orbit-dedup`` text -> OrbitSpec list, or None when unset."""
+    if spec is None:
+        return None
+    from fuzzer_tool.core.orbit_dedup import parse_orbit_spec  # noqa: PLC0415
+
+    return parse_orbit_spec(spec)
+
+
 def cmd_fuzz(args):
     """Main fuzzing command."""
     # Applied before anything can spawn a child, so the setting is in force
@@ -312,6 +321,11 @@ def cmd_fuzz(args):
         except ValueError as e:
             print(f"[-] --rs-nsym/--rs-block: {e}")
             sys.exit(1)
+    try:
+        _parse_orbit_arg(getattr(args, "orbit_dedup", None))
+    except ValueError as e:
+        print(f"[-] --orbit-dedup: {e}")
+        sys.exit(1)
     # Filter out non-executable files (source files, scripts, etc.)
     if not args.inprocess and not args.inprocess_direct:
         executable = [t for t in expanded if os.access(t, os.X_OK)]
@@ -957,6 +971,7 @@ def cmd_fuzz(args):
         dedup_execs=not getattr(args, "no_dedup_execs", False),
         seed_calibration=not getattr(args, "no_calibration", False),
         exec_dedup_backend=getattr(args, "exec_dedup_backend", "bloom"),
+        orbit_dedup=_parse_orbit_arg(getattr(args, "orbit_dedup", None)),
         cuckoo_seed_filter=getattr(args, "cuckoo_seed_filter", False),
         perf_novelty=not getattr(args, "no_perf_novelty", False),
         reject_code=getattr(args, "reject_code", None),
@@ -5058,6 +5073,17 @@ def main() -> int:
         "--no-dedup-execs",
         action="store_true",
         help="Do not filter already-executed mutants through the exec bloom filter",
+    )
+    fuzz_parser.add_argument(
+        "--orbit-dedup",
+        metavar="SPEC",
+        default=None,
+        help=(
+            "Declare input symmetries so equivalent mutants cost one exec: "
+            "swap@OFF:SIZExCOUNT (commuting chunks), endian@OFF:SIZE (byte-order "
+            "agnostic field), comma-separated. Orbit size capped at 16. "
+            "A wrong declaration drops real novelty. Off by default."
+        ),
     )
     fuzz_parser.add_argument(
         "--no-calibration",

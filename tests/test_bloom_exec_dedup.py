@@ -151,6 +151,8 @@ class _StubFuzzer:
             raise ValueError(f"unknown backend {backend!r}")
         self._dedup_hits = 0
         self._dedup_gaveup = 0
+        self._orbit_specs = []
+        self._orbit_folded = 0
         self.mutate_calls = 0
         # Cuckoo seed filter: None when feature is disabled
         self.cuckoo_seed_filter = None

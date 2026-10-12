@@ -80,6 +80,7 @@ from fuzzer_tool.core.novelty_confirm import confirm
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.one_fifth import OneFifthRule
 from fuzzer_tool.core.operator_registry import REGISTRY
+from fuzzer_tool.core.orbit_dedup import canonical
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check
@@ -1569,6 +1570,7 @@ class Fuzzer:
         # reset_on_full) contract that _dedup_mutate drives, so the
         # branch lives in one place: here, at construction.
         exec_dedup_backend="bloom",
+        orbit_dedup=None,
         fluctuation=False,
         fluctuation_beta=1.0,
         fluctuation_window=1000,
@@ -2464,6 +2466,12 @@ class Fuzzer:
 
         self._dedup_hits = 0
         self._dedup_gaveup = 0
+        # --orbit-dedup: the exec filter hashes the orbit minimum, so inputs
+        # the user declared equivalent cost one exec. _orbit_folded counts
+        # repeats whose raw bytes differ from their orbit minimum (upper
+        # bound on drops caused by the declaration).
+        self._orbit_specs = list(orbit_dedup or [])
+        self._orbit_folded = 0
         # Performance novelty (per-edge max hit count). Separate from the
         # coverage signal on purpose -- see ShmCoverage._update_max_counts.
         self._perf_novelty = perf_novelty
@@ -5616,7 +5624,18 @@ class Fuzzer:
         # Parent identity: exact; keeps the parent out of the bloom.
         if mutated == data:
             return True
-        return self._exec_bloom.update_bytes(bytes(mutated), reset_on_full=True)
+        if not self._orbit_specs:
+            return self._exec_bloom.update_bytes(bytes(mutated), reset_on_full=True)
+
+        # Orbit mode: same orbit as the parent, or as a past mutant, is a repeat.
+        raw = bytes(mutated)
+        key = canonical(raw, self._orbit_specs)
+        if key == canonical(bytes(data), self._orbit_specs):
+            self._orbit_folded += key != raw
+            return True
+        seen = self._exec_bloom.update_bytes(key, reset_on_full=True)
+        self._orbit_folded += seen and key != raw
+        return seen
 
     def _seed_entropy_pct(self, seed: bytes, meta: dict | None) -> float:
         """Byte entropy of ``seed`` on the 0-100 scale, memoised in seed_meta.

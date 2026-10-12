@@ -32,6 +32,8 @@ class _Stub:
         self._exec_bloom = BloomFilter(capacity=1000, error_rate=1e-3)
         self._dedup_hits = 0
         self._dedup_gaveup = 0
+        self._orbit_specs = []
+        self._orbit_folded = 0
         self.mutate_calls = 0
         self.cuckoo_seed_filter = None
         self._cuckoo_recovered: set[str] = set()

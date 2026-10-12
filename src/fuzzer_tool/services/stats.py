@@ -812,6 +812,9 @@ class StatsReporter:
         gaveup = getattr(f, "_dedup_gaveup", 0)
         if hits or gaveup:
             print(f"  Exec dedup:        {hits} re-rolls, {gaveup} gave up")
+        folded = getattr(f, "_orbit_folded", 0)
+        if folded:
+            print(f"  Orbit dedup:       {folded} folded repeats (upper bound on drops)")
         flux = getattr(f, "_corpus_flux", None)
         if flux is not None and flux.total_additions + flux.total_evictions > 0:
             turnover = flux.turnover()
