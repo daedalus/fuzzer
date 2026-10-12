@@ -61,6 +61,8 @@ from fuzzer_tool.core.mutations import (
     line_blend,
     nm_reflect,
     opposition,
+    position_marginal,
+    masked_merge,
     radamsa_mutate_num,
     redundant_byte_table,
     splice,
@@ -68,7 +70,17 @@ from fuzzer_tool.core.mutations import (
     splice_diff_located,
 )
 from fuzzer_tool.core.mutations.afl_det import det_variant
+from fuzzer_tool.core.mutations.int_encodings import (
+    bcd_pack,
+    bit_compress,
+    bit_matrix_transpose,
+    negabinary,
+    sign_extend,
+    timestamp_specials,
+    varint_reencode,
+)
 from fuzzer_tool.core.mutations.murmur3 import murmur3_chain
+from fuzzer_tool.core.mutations.text_edges import line_ending_swap, nul_inject
 from fuzzer_tool.core.mutations.structured import _region
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
@@ -3005,6 +3017,61 @@ class OperatorEngine:
             return None
         base = bytes(buf)
         child = opposition(base, *donors, rng=self.ctx._rng)
+        return None if child == base else bytearray(child[: self.ctx.max_len])
+
+    def _solo_child(self, fn, buf):
+        """Child of ``fn(base, rng)``; declines when the child repeats the base."""
+        base = bytes(buf)
+        child = fn(base, self.ctx._rng)
+        return None if child == base else bytearray(child[: self.ctx.max_len])
+
+    def _op_varint_reencode(self, buf, _byte_idx, _data):
+        """Rewrite a varint (LEB128, VLQ, QUIC, EBML) in overlong form."""
+        return self._solo_child(varint_reencode, buf)
+
+    def _op_sign_extend(self, buf, _byte_idx, _data):
+        """Sign-extend a narrow value inside a 2/4/8-byte field."""
+        return self._solo_child(sign_extend, buf)
+
+    def _op_bcd_pack(self, buf, _byte_idx, _data):
+        """Re-encode digits as packed BCD, or plant an invalid BCD nibble."""
+        return self._solo_child(bcd_pack, buf)
+
+    def _op_negabinary(self, buf, _byte_idx, _data):
+        """Convert a field to or from base -2."""
+        return self._solo_child(negabinary, buf)
+
+    def _op_bit_compress(self, buf, _byte_idx, _data):
+        """Gather (pext) or scatter (pdep) a field's bits through a mask."""
+        return self._solo_child(bit_compress, buf)
+
+    def _op_bit_matrix_transpose(self, buf, _byte_idx, _data):
+        """Transpose an n x n bit matrix at a random offset."""
+        return self._solo_child(bit_matrix_transpose, buf)
+
+    def _op_timestamp_specials(self, buf, _byte_idx, _data):
+        """Overwrite a field with a timestamp at an epoch edge."""
+        return self._solo_child(timestamp_specials, buf)
+
+    def _op_line_ending_swap(self, buf, _byte_idx, _data):
+        """Rewrite one line-ending kind as another, everywhere or once."""
+        return self._solo_child(line_ending_swap, buf)
+
+    def _op_nul_inject(self, buf, _byte_idx, _data):
+        """Put a NUL inside a printable run."""
+        return self._solo_child(nul_inject, buf)
+
+    def _op_masked_merge(self, buf, _byte_idx, data):
+        """Bitwise select between the base and one other seed through a byte mask."""
+        return self._pair_child(masked_merge, buf, data)
+
+    def _op_position_marginal(self, buf, _byte_idx, data):
+        """Per-position parent draw over the base and two other distinct seeds."""
+        donors = self._distinct_donors(data, 2)
+        if donors is None:
+            return None
+        base = bytes(buf)
+        child = position_marginal(base, donors, self.ctx._rng)
         return None if child == base else bytearray(child[: self.ctx.max_len])
 
     def _op_type_replace(self, buf, _byte_idx, _data):

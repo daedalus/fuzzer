@@ -1723,6 +1723,95 @@ def opposition(a: bytes, b: bytes, c: bytes, rng) -> bytes:
     return _put_fields(a, dt, width, start, count, lo + hi - fa)
 
 
+# Byte patterns for masked_merge: a bit set takes the base, a clear bit the donor.
+# Each tuple repeats over the input; the first two are the nibble stripes.
+_MERGE_MASKS = (
+    (0xF0,),
+    (0x0F,),
+    (0xFF, 0x00),
+    (0x00, 0xFF),
+    (0xFF, 0xFF, 0x00, 0x00),
+    (0x00, 0x00, 0xFF, 0xFF),
+    (0xAA,),
+    (0x55,),
+    (0xCC,),
+    (0x33,),
+)
+
+
+def masked_merge(a: bytes, b: bytes, rng) -> bytes:
+    """Bitwise select between *a* and *b* through a repeating byte mask.
+
+    ``(a & m) | (b & ~m)`` with ``m`` a periodic pattern drawn from
+    :data:`_MERGE_MASKS` (nibble stripes, alternating bytes or byte pairs,
+    bit stripes) rotated by a drawn phase.  A uniform-crossover cut finds
+    byte boundaries only; this also splits inside a byte, so a flag word or
+    a packed field takes some bits from each parent.
+
+    Length is that of *a*; a short *b* is padded with *a*'s tail.  Returns
+    *a* without drawing when either input is empty.
+
+    Example (mask 0xF0)::
+
+        a=ab cd  b=12 34  ->  a2 c4
+
+    Args:
+        a: Base input.
+        b: Donor input.
+        rng: Draw source with ``randrange``.
+
+    Returns:
+        Child with len == len(a).
+    """
+    if not a or not b:
+        return a
+    pattern = _MERGE_MASKS[rng.randrange(len(_MERGE_MASKS))]
+    phase = rng.randrange(len(pattern))
+    period = np.array(pattern[phase:] + pattern[:phase], np.uint8)
+    n = len(a)
+    mask = np.resize(period, n)
+    va = np.frombuffer(a, np.uint8)
+    vb = np.frombuffer(_padded(b, a), np.uint8)
+    return ((va & mask) | (vb & ~mask)).tobytes()
+
+
+def position_marginal(a: bytes, donors: list[bytes], rng) -> bytes:
+    """Take each byte of a window from a uniformly drawn parent, per position.
+
+    Parents are *a* and every donor, aligned at offset 0 and padded with *a*'s
+    tail.  A window of drawn length and start is filled position by position:
+    one parent index per byte, uniform over the parents, so the child's
+    marginal at each offset is the parents' own value distribution there.
+    Bytes outside the window are *a*'s.  Not a corpus-wide histogram: the
+    marginal is over the parents handed in, not over every seed.
+
+    Length is that of *a*.  Returns *a* without drawing when it is empty or
+    there are no donors.
+
+    Example (window 4 at 0, picks base/d1/d2/d1)::
+
+        a=AAAA  d1=BBBB  d2=CCCC  ->  A B C B
+
+    Args:
+        a: Base input.
+        donors: Other inputs.
+        rng: Draw source with ``randrange``.
+
+    Returns:
+        Child with len == len(a).
+    """
+    n = len(a)
+    if n == 0 or not donors:
+        return a
+    length = 1 + rng.randrange(n)
+    start = rng.randrange(n - length + 1)
+    parents = np.stack([np.frombuffer(x, np.uint8) for x in (a, *(_padded(d, a) for d in donors))])
+    pick = np.array([rng.randrange(len(parents)) for _ in range(length)])
+    out = np.frombuffer(a, np.uint8).copy()
+    out[start : start + length] = parents[pick, np.arange(start, start + length)]
+    return out.tobytes()
+
+
 DICT_MUTATIONS = [
     "dict_insert",
     "dict_replace",

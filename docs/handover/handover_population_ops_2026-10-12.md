@@ -120,7 +120,7 @@ Reading it honestly:
 - `position_marginal` (UMDA per aligned offset) from the chat analysis was **not** built: it needs a
   corpus-wide per-offset histogram, which is a larger change than a three-seed operator.
 - `varint_reencode`, `sign_extend`, `bcd_pack`, `line_ending_swap`, `timestamp_specials`, `nul_inject`
-  from the chat analysis are still open. `O1`-`O7` in `handover_mutator_gaps_2026-10-11.md` overlap with
+  from the chat analysis are now implemented (see CHANGELOG, `int_encodings.py`, `text_edges.py`); `position_marginal` landed as a three-parent per-offset draw, not the corpus-wide histogram. `O1`-`O7` in `handover_mutator_gaps_2026-10-11.md` overlap with
   the first of these (overlong LEB128 is O1); do those first.
 - No gate that rewards a value *past* both seeds, which is what `line_blend` t > 1 and `nm_reflect`
   alpha = 2 are for. Writing one in `targets/arith_gates.c` is the cheapest way to test the claim.
