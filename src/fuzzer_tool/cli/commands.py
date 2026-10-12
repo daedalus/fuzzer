@@ -304,6 +304,14 @@ def cmd_fuzz(args):
     if not expanded:
         print("[-] No executable targets found from glob pattern")
         sys.exit(1)
+    if getattr(args, "rs_nsym", None) is not None:
+        from fuzzer_tool.core.mutations.rs_fix import check_params  # noqa: PLC0415
+
+        try:
+            check_params(args.rs_nsym, args.rs_block)
+        except ValueError as e:
+            print(f"[-] --rs-nsym/--rs-block: {e}")
+            sys.exit(1)
     # Filter out non-executable files (source files, scripts, etc.)
     if not args.inprocess and not args.inprocess_direct:
         executable = [t for t in expanded if os.access(t, os.X_OK)]
@@ -958,6 +966,10 @@ def cmd_fuzz(args):
         op_append=getattr(args, "op_append", False),
         poly1305_key=getattr(args, "poly1305_key", None),
         poly1305_tag_at=getattr(args, "poly1305_tag_at", -16),
+        rs_nsym=getattr(args, "rs_nsym", None),
+        rs_block=getattr(args, "rs_block", 255),
+        rs_fcr=getattr(args, "rs_fcr", 0),
+        rs_poly=getattr(args, "rs_poly", 0x11D),
         op_line_code=getattr(args, "op_line_code", False),
         checksum_sites=getattr(args, "checksum_sites", False),
         grimoire=getattr(args, "grimoire", False),
@@ -2408,6 +2420,16 @@ def _poly1305_key(value: str) -> bytes:
 
     try:
         return parse_key(value)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e)) from None
+
+
+def _rs_poly(value: str) -> int:
+    """argparse ``type=`` for --rs-poly; a bad polynomial is a usage error."""
+    from fuzzer_tool.core.mutations.rs_fix import parse_poly  # noqa: PLC0415
+
+    try:
+        return parse_poly(value)
     except ValueError as e:
         raise argparse.ArgumentTypeError(str(e)) from None
 
@@ -5761,6 +5783,38 @@ def main() -> int:
             "Offset of the 16-byte Poly1305 tag; negative counts from the end "
             "(default -16). The message is every byte outside the tag."
         ),
+    )
+    fuzz_parser.add_argument(
+        "--rs-nsym",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Enable rs_fix: treat the input as consecutive Reed-Solomon codewords "
+            "(GF(256), systematic, data then N parity bytes), then edit data and "
+            "re-encode, or corrupt symbols (correctable and not). N >= 2."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--rs-block",
+        type=int,
+        default=255,
+        metavar="N",
+        help="RS codeword length including parity, at most 255 (default 255; last block may be short).",
+    )
+    fuzz_parser.add_argument(
+        "--rs-fcr",
+        type=int,
+        default=0,
+        metavar="N",
+        help="First consecutive root exponent of the RS generator (default 0, as QR/DataMatrix).",
+    )
+    fuzz_parser.add_argument(
+        "--rs-poly",
+        type=_rs_poly,
+        default=0x11D,
+        metavar="POLY",
+        help="GF(256) field polynomial, must be primitive (default 0x11d).",
     )
     fuzz_parser.add_argument(
         "--op-line-code",

@@ -643,6 +643,11 @@ class TestStateGatedOperatorsAreNotNoOps:
         # poly1305_fix: offered only when a one-time key is supplied.
         f.poly1305_key = bytes(range(32))
         f.poly1305_tag_at = -16
+        # rs_fix: offered only when a parity length is supplied.
+        f.rs_nsym = 8
+        f.rs_block = 255
+        f.rs_fcr = 0
+        f.rs_poly = 0x11D
         # bit_cross / arith_mid / geo_mid / power_mid / lineage_step: gated on parent_key, which seed_meta records only
         # under --lineage.
         f._use_lineage = True

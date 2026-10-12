@@ -1602,6 +1602,10 @@ class Fuzzer:
         op_append=False,
         poly1305_key=None,
         poly1305_tag_at=-16,
+        rs_nsym=None,
+        rs_block=255,
+        rs_fcr=0,
+        rs_poly=0x11D,
         op_line_code=False,
         checksum_sites=False,
         grimoire=False,
@@ -2066,6 +2070,10 @@ class Fuzzer:
         self.op_append = op_append
         self.poly1305_key = poly1305_key
         self.poly1305_tag_at = poly1305_tag_at
+        self.rs_nsym = rs_nsym
+        self.rs_block = rs_block
+        self.rs_fcr = rs_fcr
+        self.rs_poly = rs_poly
         self.op_line_code = op_line_code
         from fuzzer_tool.core.rq_encodings import LineEncoders, set_line_encoders  # noqa: PLC0415
 

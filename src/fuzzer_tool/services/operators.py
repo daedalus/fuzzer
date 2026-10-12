@@ -4888,6 +4888,22 @@ class OperatorEngine:
             return self._op_declined("poly1305_fix", buf)
         return bytearray(out[: self.ctx.max_len])
 
+    def _op_rs_fix(self, buf, _byte_idx, _data):
+        """Edit one Reed-Solomon block and re-encode, or inject symbol errors (--rs-nsym)."""
+        from fuzzer_tool.core.mutations.rs_fix import rs_fix
+
+        out = rs_fix(
+            bytes(buf),
+            self.ctx._rng,
+            self.f.rs_nsym,
+            self.f.rs_block,
+            self.f.rs_fcr,
+            self.f.rs_poly,
+        )
+        if out is None:
+            return self._op_declined("rs_fix", buf)
+        return bytearray(out[: self.ctx.max_len])
+
     def _op_taint_boost(self, buf, _byte_idx, data):
         """Revizor boosting: redraw the seed's path-irrelevant bytes.
 
