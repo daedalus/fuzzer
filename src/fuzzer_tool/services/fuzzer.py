@@ -42,6 +42,7 @@ from fuzzer_tool.adapters.seed_zip import ZipMode
 from fuzzer_tool.adapters.shm import (
     MAX_COUNT_GROWTH_FACTOR,
     TOUCHED_SCAN_MIN_ENTRIES,
+    SharedVirgin,
     ShmCoverage,
     unstable_slots,
 )
@@ -1100,6 +1101,32 @@ class Fuzzer:
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
 
+    def _enable_shared_virgin(self) -> None:
+        """Make novelty a union over the per-target coverage tables.
+
+        Each target keeps its own SHM table (one target runs per exec, so
+        nothing is summed within an exec) but they share one virgin store:
+        an edge id or hit-count bucket seen through any target is old for
+        all. Per-target ``cumulative_edges`` still counts what each target
+        itself reaches, so the scheduler weights are unchanged. Edge ids are
+        salted per binary, so ids only coincide across targets that load the
+        same instrumented module (otherwise ~0.2-1% by chance).
+        """
+        if not self.multi_targets:
+            print("[!] --shared-virgin needs multi-target mode; ignoring")
+            return
+        covs: list[ShmCoverage] = list(self._target_shm_covs.values())
+        if self.shm_cov is not None and len(covs) < len(self.multi_targets):
+            covs.append(self.shm_cov)  # targets that fell back to the shared SHM
+        if len(covs) < 2:
+            print("[!] --shared-virgin: fewer than two coverage tables; ignoring")
+            return
+        shared = SharedVirgin()
+        for cov in covs:
+            cov.share_virgin(shared)
+        self._shared_virgin = shared
+        print(f"[*] Shared virgin map across {len(covs)} coverage tables")
+
     def _ensure_ctx_ids_are_exec_stable(self, targets: list[str]) -> None:
         """Put a context-sensitive target in base-relative mode if ASLR survived.
 
@@ -1307,6 +1334,7 @@ class Fuzzer:
         inprocess_func="LLVMFuzzerTestOneInput",
         calibrate_stability=0,
         touched_scan=None,
+        shared_virgin=False,
         # cmplog is always on by default; --no-cmplog-fifo-sink disables
         # the FIFO drain mode but not the comparison tracing itself.
         cmplog=True,
@@ -2396,6 +2424,11 @@ class Fuzzer:
                     log.warning("Failed to create SHM for %s, using shared SHM", t)
             if self._target_shm_covs:
                 print(f"[*] Multi-target: {len(self._target_shm_covs)} per-target SHM regions")
+
+        # --shared-virgin: one novelty store across the per-target tables.
+        self._shared_virgin: SharedVirgin | None = None
+        if shared_virgin:
+            self._enable_shared_virgin()
 
         # Here rather than beside the disable_aslr() call above: that runs
         # before self.use_coverage is assigned and before the coverage

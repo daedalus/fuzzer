@@ -191,6 +191,38 @@ def unstable_slots(snapshots) -> np.ndarray:
 # already unbounded, and it stays correct there.
 VIRGIN_DENSE_MAX = 1 << 24
 
+
+class SharedVirgin:
+    """Novelty state held in common by several :class:`ShmCoverage` tables.
+
+    Backs ``--shared-virgin`` in multi-target mode. Holds exactly the state
+    that decides "is this new": the ever-seen id set, the masked-id set and
+    the (edge, hit-count bucket) virgin map. Every ShmCoverage that joins via
+    :meth:`ShmCoverage.share_virgin` reads and writes these by reference, so
+    an id (or bucket) observed through one target is old for all of them.
+
+    The dense array is allocated at its final size, VIRGIN_DENSE_MAX, up
+    front. ShmCoverage grows a private ``_virgin`` by rebinding it, which
+    would silently detach a sharer; at full size that branch never runs.
+    ``np.zeros`` is lazily committed, so untouched pages cost no memory.
+
+    Not shared, on purpose: the per-edge maxima (PerfFuzz). They compare raw
+    trip counts, which are only meaningful within one binary.
+    """
+
+    __slots__ = ("masked", "seen", "virgin", "wide")
+
+    def __init__(self) -> None:
+        self.seen: set[int] = set()
+        self.masked: set[int] = set()
+        self.virgin: np.ndarray = np.zeros(VIRGIN_DENSE_MAX, dtype=np.uint8)
+        self.wide: dict[int, int] = {}
+
+    def __len__(self) -> int:
+        """Distinct edge ids seen across every sharer (the union)."""
+        return len(self.seen)
+
+
 # Multiplicative growth an edge's hit count must show over its previous
 # maximum before the execution is reported as performance novelty. See
 # ShmCoverage._update_max_counts for why this is not strict `>`.
@@ -311,6 +343,12 @@ class ShmCoverage:
         # past the dense range.
         self._virgin: np.ndarray = np.zeros(0, dtype=np.uint8)
         self._virgin_wide: dict[int, int] = {}
+        # --shared-virgin: set by share_virgin(). _local_ids is then the set
+        # of ids THIS table has reached, kept so cumulative_edges still means
+        # "edges this target covers" (what the schedulers weigh by) while
+        # _seen_edge_ids means "edges any target has covered" (novelty).
+        self._shared: SharedVirgin | None = None
+        self._local_ids: set[int] | None = None
         # Count of (edge, bucket) pairs observed for the first time — the
         # coverage that set membership alone cannot see.  Diagnostic only.
         self.bucket_transitions: int = 0
@@ -562,6 +600,43 @@ class ShmCoverage:
     def has_edge(self, edge_id: int) -> bool:
         """Whether *edge_id* fired in the current table (no set built)."""
         return bool((self._active_edge_ids() == edge_id).any())
+
+    def share_virgin(self, shared: SharedVirgin) -> None:
+        """Join *shared*: from now on novelty is judged against its union.
+
+        Whatever this table already holds is folded in first, so joining
+        late loses nothing. ``cumulative_edges`` keeps counting the ids this
+        table itself reaches (an id another target saw first still counts
+        here the first time this target fires it).
+        """
+        if self._shared is shared:
+            return
+        if self._shared is not None:
+            raise ValueError("ShmCoverage already shares a virgin store")
+        local = set(self._seen_edge_ids)
+        shared.seen |= local
+        shared.masked |= self._masked_edge_ids
+        n = self._virgin.size
+        if n:
+            np.bitwise_or(shared.virgin[:n], self._virgin, out=shared.virgin[:n])
+        for eid, bits in self._virgin_wide.items():
+            shared.wide[eid] = shared.wide.get(eid, 0) | bits
+        self._seen_edge_ids = shared.seen
+        self._masked_edge_ids = shared.masked
+        self._virgin = shared.virgin
+        self._virgin_wide = shared.wide
+        self._local_ids = local
+        self._shared = shared
+
+    def _note_local(self, ids) -> None:
+        """Count the ids in *ids* this table has not reached before."""
+        local = self._local_ids
+        assert local is not None
+        fresh = ids - local
+        if fresh:
+            local |= fresh
+            self.cumulative_edges += len(fresh)
+            self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
 
     def reject_phantoms(self, edge_ids) -> int:
         """Withdraw ids this scan counted as new but a rerun did not reproduce.
@@ -1156,9 +1231,14 @@ class ShmCoverage:
         self._seen_edge_ids.update(new)
         new_found = False
         if new:
-            self.cumulative_edges += len(new)
-            self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
+            if self._local_ids is None:
+                self.cumulative_edges += len(new)
+                self._peak_cumulative_edges = max(
+                    self._peak_cumulative_edges, self.cumulative_edges
+                )
             new_found = True
+        if self._local_ids is not None:
+            self._note_local(ids)
 
         # Hit-count bucketing. OR'd with the set-membership result rather
         # than replacing it: a new edge whose count is 0 occupies no bucket,
@@ -1248,10 +1328,13 @@ class ShmCoverage:
                 ec.value = ec.value + 1
                 if edge_id not in self._seen_edge_ids:
                     self._seen_edge_ids.add(edge_id)
-                    self.cumulative_edges += 1
-                    self._peak_cumulative_edges = max(
-                        self._peak_cumulative_edges, self.cumulative_edges
-                    )
+                    if self._local_ids is None:
+                        self.cumulative_edges += 1
+                        self._peak_cumulative_edges = max(
+                            self._peak_cumulative_edges, self.cumulative_edges
+                        )
+                if self._local_ids is not None:
+                    self._note_local({edge_id})
                 self._note_bucket(edge_id, 1)
                 stored = True
                 break

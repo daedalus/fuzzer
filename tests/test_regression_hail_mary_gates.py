@@ -154,6 +154,9 @@ _EXCLUDED_OPT_IN = frozenset(
         "crash_explore",
         # Coverage-read implementation, not a strategy; slower on small maps.
         "touched_scan",
+        # Coverage-accounting mode, multi-target only: not a strategy, and it
+        # changes what every other strategy is rewarded for.
+        "shared_virgin",
         # Stop condition: ended the campaign at the first crash.
         "continue_until_crash",
         # Input delivery: -F hides the input from stdin-only targets.

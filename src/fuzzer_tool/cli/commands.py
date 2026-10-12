@@ -620,6 +620,7 @@ def cmd_fuzz(args):
         net_settle_ms=getattr(args, "net_settle_ms", 10),
         calibrate_stability=getattr(args, "calibrate_stability", 0),
         touched_scan=getattr(args, "touched_scan", None),
+        shared_virgin=getattr(args, "shared_virgin", False),
         cmplog=True,
         cmplog_max_tokens=getattr(args, "cmplog_max_tokens", 0),
         cmplog_max_pairs=getattr(args, "cmplog_max_pairs", 0),
@@ -2216,6 +2217,10 @@ def cmd_sweep(args):
 # an input-delivery switch, not strategies. The first ended a --max-execs 1200
 # run at its first crash (473 execs); -F passes the input as argv[1], so a
 # stdin-only target never saw a mutant.
+#
+# shared_virgin (--shared-virgin) is excluded: a coverage-accounting mode that
+# only means anything with --targets, not a strategy; under --hail-mary it
+# would silently change what every other strategy is rewarded for.
 #
 # touched_scan (--touched-scan) is excluded: a coverage-read implementation,
 # not a strategy, and measured slower at 8192-entry maps.
@@ -4864,6 +4869,20 @@ def main() -> int:
         action="store_const",
         const=False,
         help="Always walk the edge table, even on large maps (see --touched-scan).",
+    )
+    fuzz_parser.add_argument(
+        "--shared-virgin",
+        action="store_true",
+        help=(
+            "Multi-target only: judge novelty against one virgin map shared by "
+            "every target instead of one per target. An edge id (or hit-count "
+            "bucket) seen through any target is then old for all, so coverage "
+            "of code several harnesses share is rewarded once. Edge ids are "
+            "salted per binary: for unrelated binaries this changes ~0.2-1%% "
+            "of ids (chance collisions), and those collisions are masked "
+            "across targets. Per-target edge counts, and so the scheduler "
+            "weights, are unchanged. Default: one virgin map per target."
+        ),
     )
     fuzz_parser.add_argument(
         "--calibrate-stability",
