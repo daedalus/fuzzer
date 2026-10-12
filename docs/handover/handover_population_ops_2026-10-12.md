@@ -101,18 +101,63 @@ need an unrelated donor. If an A/B shows parent/child pairs waste execs, switch 
 
 Reading it honestly:
 
-- **No evidence the new operators help.** `line_blend` ties `arith_mid` on the only gate the pair ops can
-  solve. Nothing separates them on the 32-bit windows.
+- **No evidence the new operators help at this budget.** At 10000 execs `line_blend` ties `arith_mid` on
+  the only gate the pair ops can solve; nothing separates them on the 32-bit windows (see 50000 below).
 - `field_minmax`, `opposition` and `field_median` pick values already present in a parent, so a window gate
   cannot reward them. That is expected, not a defect; they target per-field *combinations*, which this
   target does not test.
 - Three-seed arms start from `[LOW, MID, HIGH]`; they are not comparable one-to-one with the two-seed
   arms.
-- **The baseline in `docs/TODO.md` (`power_mid` entry: `arith_mid` 12/20, G1/G2 gates 10/9) does not
-  reproduce.** The original, unmodified harness at this base gives `arith_mid` 0/20 with G1 1/20, G2 0/20,
-  G3 20/20. The target has not changed since the arith_mid commit and `RandPool` has not changed since
-  2026-10-08. I did not find the cause (candidates **[unverified]**: a different execs/seed invocation, a
-  different oracle build). Recheck before using any synthetic number to rank operators.
+- The baseline in `docs/TODO.md` (`power_mid` entry: `arith_mid` 12/20, G1/G2 gates 10/9) is **not**
+  reproduced at 10000 execs: the unmodified harness gives `arith_mid` 0/20 with G1 1/20, G2 0/20, G3 20/20.
+  See the 50000-exec table below: the budget moves the picture a lot, but still does not give 12/20.
+
+## Synthetic gates at 50000 execs, 20 seeds (added later the same day)
+
+The 10000-exec budget is too short for the 32-bit gates (G1 is 1/20 for `arith_mid` there, 19/20 at 50000).
+
+| Arm | all 3 | G1 | G2 | G3 | median execs when all solved |
+|---|---|---|---|---|---|
+| `arith_mid` | 2/20 | 19 | 2 | 20 | 35530 |
+| `line_blend` | 6/20 | 13 | 11 | 20 | 43132 |
+| `geo_mid` | 0/20 | 3 | 1 | 20 | |
+| `power_mid` | 0/20 | 2 | 0 | 20 | |
+| `bit_cross` | 0/20 | 6 | 0 | 18 | |
+| `byte_rand` | 1/20 | 6 | 8 | 14 | 42129 |
+| `nm_reflect`, `diff_evo` (three-seed corpus) | 0/20 | 0 | 0 | 20 / 19 | |
+| `field_minmax`, `opposition`, `field_median`, `identity` | 0/20 | 0 | 0 | 0 | |
+
+- `line_blend` versus `arith_mid` is **mixed**: better on G2 (11 vs 2, two-sided Fisher p = 0.006), worse
+  on G1 (13 vs 19, p = 0.04), 6 vs 2 on "all three" (p = 0.24). Three unadjusted comparisons on 20 seeds
+  each: treat it as "different", not "better".
+- `byte_rand` solves G2 8/20, four times `arith_mid`: on this target G2 is not a gate that numeric
+  bisection wins, so G2 says little about which operator is better in general.
+- `geo_mid`, `power_mid` trail `arith_mid` on G1 (3, 2 vs 19), matching the TODO's earlier note.
+- Baseline discrepancy: `arith_mid` at 50000 is all 2/20, G1 19, G2 2, against the TODO's 12/20 and
+  10/9 (the TODO entries do not state the budget). The budget explains part of the gap, not all of it.
+
+## Operator yield (`tools/measure_operators.py --reps 40`, 33-input synthetic battery, 1320 slots)
+
+Not coverage: it measures whether each operator is offered, changes the buffer and raises.
+
+| Operator | change % | none % | us/call (incl. donor draw) |
+|---|---|---|---|
+| `line_blend`, `nm_reflect`, `opposition`, `masked_merge` | 100 | 0 | 106-159 |
+| `varint_reencode` | 97 | 3 | 19 |
+| `timestamp_specials` | 96 | 4 | 16 |
+| `field_minmax` | 94 | 6 | 82 |
+| `position_marginal` | 86 | 14 | 186 |
+| `sign_extend`, `bit_matrix_transpose` | 80, 78 | 20, 22 | 19, 33 |
+| `bcd_pack` | 78 | 22 | 23 |
+| `bit_compress` | 69 | 31 | 24 |
+| `negabinary` | 65 | 35 | 17 |
+| `nul_inject` | 64 | 36 | 19 |
+| `line_ending_swap` | 42 | 58 | 23 |
+
+All 15 are offered on every slot, none raised. The declines are the expected ones: `negabinary`,
+`bit_compress` and `sign_extend` return the input on zero-valued fields, `line_ending_swap` on the 58% of
+the battery with no line ending, `nul_inject` where there is no printable run of four. `arith_mid` shows
+0% offered in this tool (it is `--lineage`-gated), so it is not a reference row.
 
 ## Not done
 
