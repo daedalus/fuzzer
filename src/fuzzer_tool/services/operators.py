@@ -6749,6 +6749,13 @@ class OperatorEngine:
             self._reset_round_ops(data, candidate)
             return candidate
 
+        # --affine-mod candidates (FuzzRound._search_affine): same path.
+        affine = getattr(f, "_affine_mod", None)
+        candidate = affine.pop() if affine is not None else None
+        if candidate is not None:
+            self._reset_round_ops(data, candidate)
+            return candidate
+
         # --joint-liveness probe: off the bandit tournament like the format
         # queue above. _reset_round_ops publishes offset 0, which would credit
         # region 0 with a diff two regions caused; None skips the single-region

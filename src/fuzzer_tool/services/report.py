@@ -974,6 +974,7 @@ def _seed_contribution(f) -> str:
 
     lines.extend(_format_seed_gen_lines(f))
     lines.extend(_i2s_fixpoint_lines(f))
+    lines.extend(_affine_mod_lines(f))
     return "\n".join(lines)
 
 
@@ -988,6 +989,19 @@ def _i2s_fixpoint_lines(f) -> list[str]:
         "",
         f"  I2S fixpoint: {stats['execs']} execs, {outcomes or 'no searches'}, "
         f"{fixpoint.queued} queued",
+    ]
+
+
+def _affine_mod_lines(f) -> list[str]:
+    """--affine-mod search outcomes; empty when off."""
+    affine = getattr(f, "_affine_mod", None)
+    if affine is None:
+        return []
+    stats = affine.stats
+    outcomes = ", ".join(f"{k}={v}" for k, v in stats.items() if k != "execs")
+    return [
+        "",
+        f"  Affine mod: {stats['execs']} execs, {outcomes or 'no fits'}, {affine.queued} queued",
     ]
 
 

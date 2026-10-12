@@ -25,6 +25,7 @@ from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN
 from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST
 from fuzzer_tool.core.shim_health import WriteGuard
 from fuzzer_tool.core.target_schedule import TargetSchedule
+from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.fuzzer import Fuzzer
 from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
@@ -594,6 +595,8 @@ def cmd_fuzz(args):
         uninit_probe=getattr(args, "uninit_probe", False),
         i2s_fixpoint=getattr(args, "i2s_fixpoint", False),
         i2s_fixpoint_iters=getattr(args, "i2s_fixpoint_iters", 8),
+        affine_mod=getattr(args, "affine_mod", False),
+        affine_mod_execs=getattr(args, "affine_mod_execs", AFFINE_MOD_EXECS),
         mc_elite_frac=args.mc_elite_frac,
         mc_refit_interval=args.mc_refit_int,
         mc_decay_interval=getattr(args, "mc_decay_interval", 100),
@@ -2376,6 +2379,7 @@ _HAIL_MARY_FLAGS = (
     "lbr",
     "colorize",
     "i2s_fixpoint",
+    "affine_mod",
     "weizz_tags",
     "formatfuzzer",
     "op_span_reverse",
@@ -4801,6 +4805,23 @@ def main() -> int:
         default=8,
         metavar="N",
         help="Probe budget per --i2s-fixpoint search (default: 8).",
+    )
+    fuzz_parser.add_argument(
+        "--affine-mod",
+        action="store_true",
+        default=False,
+        help="Solve (a*x + b) %% m == t compares: on each new corpus entry, find the "
+        "input field behind an unsatisfied compare whose operands are not in the "
+        "input, fit a, b, m from unit-step probes, and queue the field values that "
+        "satisfy it. Fails closed on maps that are not affine mod m. Up to "
+        "--affine-mod-execs execs per admission; needs cmplog.",
+    )
+    fuzz_parser.add_argument(
+        "--affine-mod-execs",
+        type=int,
+        default=AFFINE_MOD_EXECS,
+        metavar="N",
+        help=f"Probe budget per --affine-mod search (default: {AFFINE_MOD_EXECS}).",
     )
     fuzz_parser.add_argument(
         "--mc-elite-frac", type=float, default=0.1, help="CEM elite fraction (default: 0.1)"

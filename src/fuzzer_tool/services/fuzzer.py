@@ -169,6 +169,8 @@ from fuzzer_tool.core.skipdet import SkipDetector
 from fuzzer_tool.core.slopt import SloptBatchBandit
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.core.validity import ValidityChannel
+from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
+from fuzzer_tool.services.affine_mod import AffineMod
 from fuzzer_tool.services.corpus_manager import CorpusManager
 from fuzzer_tool.services.fuzz_round import FuzzRound
 from fuzzer_tool.services.i2s_fixpoint import I2SFixpoint
@@ -1310,6 +1312,8 @@ class Fuzzer:
         uninit_probe=False,
         i2s_fixpoint=False,
         i2s_fixpoint_iters=8,
+        affine_mod=False,
+        affine_mod_execs=AFFINE_MOD_EXECS,
         mc_elite_frac=0.1,
         mc_refit_interval=1000,
         mc_decay_interval=100,
@@ -3451,6 +3455,8 @@ class Fuzzer:
         self._i2s_fixpoint = (
             I2SFixpoint(self._i2s_probe, i2s_fixpoint_iters) if i2s_fixpoint else None
         )
+        # --affine-mod: solve (a*x + b) % m == t compares on admitted inputs.
+        self._affine_mod = AffineMod(self._i2s_probe, affine_mod_execs) if affine_mod else None
         self._op_dispatch = self._build_dispatch()
         self._replicator = None
         if replicator:

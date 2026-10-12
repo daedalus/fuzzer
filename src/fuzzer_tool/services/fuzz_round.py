@@ -7,6 +7,7 @@ round. Long-lived state stays on the Fuzzer (``self._f``).
     run()
      ├─ _begin           reset the Fuzzer's per-round fields
  ├─ _search_fixpoint --i2s-fixpoint, seed's first round only
+ ├─ _search_affine   --affine-mod, seed's first round only
      ├─ _execute         mutate, timed target run, cmp counters
      ├─ _mine_cmplog     tokens, learners, dictionary cap, redqueen/SMT
      ├─ _periodic        RSS / EPS / crash-rate bookkeeping
@@ -173,6 +174,7 @@ class FuzzRound:
     def _steps(self) -> bool:
         self._begin()
         self._search_fixpoint()
+        self._search_affine()
         self._generalize()
         self._colorize()
         self._sensitize()
@@ -211,6 +213,13 @@ class FuzzRound:
         if fixpoint is None or self._meta is None or self._meta["fuzz_count"] != 1:
             return
         fixpoint.search(self._data)
+
+    def _search_affine(self) -> None:
+        # --affine-mod: same cadence and placement as _search_fixpoint.
+        affine = getattr(self._f, "_affine_mod", None)
+        if affine is None or self._meta is None or self._meta["fuzz_count"] != 1:
+            return
+        affine.search(self._data)
 
     def _generalize(self) -> None:
         # --grimoire: the stage generalizes each tracked seed once, after the
