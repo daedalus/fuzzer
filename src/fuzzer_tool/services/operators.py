@@ -57,6 +57,10 @@ from fuzzer_tool.core.mutations import (
     diff_evo,
     bit_majority,
     field_median,
+    field_minmax,
+    line_blend,
+    nm_reflect,
+    opposition,
     radamsa_mutate_num,
     redundant_byte_table,
     splice,
@@ -2962,6 +2966,45 @@ class OperatorEngine:
             return None
         base = bytes(buf)
         child = field_median(base, *donors, rng=self.ctx._rng)
+        return None if child == base else bytearray(child[: self.ctx.max_len])
+
+    def _pair_child(self, fn, buf, data):
+        """Child of ``fn(base, donor, rng=)`` with one other distinct corpus seed.
+
+        Unlike :meth:`_recombine` this needs no lineage; it declines when the
+        child repeats a parent (both are already executed).
+        """
+        donors = self._distinct_donors(data, 1)
+        if donors is None:
+            return None
+        base = bytes(buf)
+        child = fn(base, donors[0], rng=self.ctx._rng)
+        return None if child in (base, donors[0]) else bytearray(child[: self.ctx.max_len])
+
+    def _op_line_blend(self, buf, _byte_idx, data):
+        """Extended line recombination a + t*(b-a), t in [-1/2, 3/2], with one other seed."""
+        return self._pair_child(line_blend, buf, data)
+
+    def _op_field_minmax(self, buf, _byte_idx, data):
+        """Per-field min or max of the base and one other distinct corpus seed."""
+        return self._pair_child(field_minmax, buf, data)
+
+    def _op_nm_reflect(self, buf, _byte_idx, data):
+        """Nelder-Mead step of the base through the centroid of two other seeds."""
+        donors = self._distinct_donors(data, 2)
+        if donors is None:
+            return None
+        base = bytes(buf)
+        child = nm_reflect(base, *donors, rng=self.ctx._rng)
+        return None if child == base else bytearray(child[: self.ctx.max_len])
+
+    def _op_opposition(self, buf, _byte_idx, data):
+        """Mirror the base inside the per-field range of itself and two other seeds."""
+        donors = self._distinct_donors(data, 2)
+        if donors is None:
+            return None
+        base = bytes(buf)
+        child = opposition(base, *donors, rng=self.ctx._rng)
         return None if child == base else bytearray(child[: self.ctx.max_len])
 
     def _op_type_replace(self, buf, _byte_idx, _data):

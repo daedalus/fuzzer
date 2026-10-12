@@ -1551,6 +1551,178 @@ def field_median(a: bytes, b: bytes, c: bytes, rng) -> bytes:
     return _put_fields(a, dt, width, start, count, med)
 
 
+# line_blend: child = a + t * (b - a), t = num / 8 for num in this tuple, i.e. t in
+# [-1/2, 3/2] in eighths.  t=0 (a) and t=1 (b) are left out: those children are the
+# parents, already executed.  arith_mid only reaches t in {1/4, 1/2, 3/4}.
+_LINE_BLEND_NUMS = (-4, -3, -2, -1, 1, 2, 3, 4, 5, 6, 7, 9, 10, 11, 12)
+_LINE_BLEND_SHIFT = 3  # /8
+
+
+def line_blend(a: bytes, b: bytes, rng) -> bytes:
+    """Extended line recombination: ``a + t * (b - a)`` per field, t in [-1/2, 3/2].
+
+    One t (a multiple of 1/8, never 0 or 1) is drawn per call.  Fields are
+    1/2/4-byte (BE or LE) over the span where *a* and *b* differ (grid as
+    :func:`arith_mid`); the result is floored (shift, exact on negative gaps) and
+    saturates to ``[0, 2^(8w)-1]``.  Unlike :func:`arith_mid`, t outside [0, 1]
+    steps *past* either parent, so a boundary beyond both seeds is reachable.
+
+    Length is that of *a*; a short *b* is padded with *a*'s own tail.  Returns
+    *a* unchanged when either input is empty or they are equal.
+
+    Example (one byte, t = 3/2)::
+
+        a=0x10  b=0x30  ->  0x40
+
+    Args:
+        a: Base input.
+        b: Donor input.
+        rng: Random source (``rand_pool``).
+
+    Returns:
+        Child with len == len(a).
+    """
+    n = len(a)
+    if n == 0 or not b:
+        return a
+    b = _padded(b, a)
+    grid = _field_grid(
+        n, np.frombuffer(a, np.uint8) != np.frombuffer(b, np.uint8), rng, len(_LINE_BLEND_NUMS)
+    )
+    if grid is None:
+        return a
+    dt, width, start, count, param = grid
+    fa = np.frombuffer(a, dt, count, start).astype(np.int64)
+    fb = np.frombuffer(b, dt, count, start).astype(np.int64)
+    step = ((fb - fa) * _LINE_BLEND_NUMS[param]) >> _LINE_BLEND_SHIFT
+    return _put_fields(a, dt, width, start, count, np.clip(fa + step, 0, (1 << (8 * width)) - 1))
+
+
+def field_minmax(a: bytes, b: bytes, rng) -> bytes:
+    """Per-field minimum or maximum of two inputs (kind drawn 50/50).
+
+    Fields are 1/2/4-byte (BE or LE) over the span where *a* and *b* differ
+    (grid as :func:`arith_mid`).  Each field takes the smaller (or larger)
+    parent value, so the child mixes both parents and pushes every field to one
+    end of the range the two seeds span; values are numeric, not bytewise.
+    Equal fields are fixed points.
+
+    Length is that of *a*; a short *b* is padded with *a*'s own tail.  Returns
+    *a* unchanged when either input is empty or they are equal.
+
+    Example (one byte)::
+
+        a=0x10,0x90  b=0x20,0x40  ->  min 0x10,0x40   max 0x20,0x90
+
+    Args:
+        a: Base input.
+        b: Donor input.
+        rng: Random source (``rand_pool``).
+
+    Returns:
+        Child with len == len(a).
+    """
+    n = len(a)
+    if n == 0 or not b:
+        return a
+    b = _padded(b, a)
+    grid = _field_grid(n, np.frombuffer(a, np.uint8) != np.frombuffer(b, np.uint8), rng, 2)
+    if grid is None:
+        return a
+    dt, width, start, count, param = grid
+    fa = np.frombuffer(a, dt, count, start)
+    fb = np.frombuffer(b, dt, count, start)
+    return _put_fields(
+        a, dt, width, start, count, np.maximum(fa, fb) if param else np.minimum(fa, fb)
+    )
+
+
+# nm_reflect: alpha = s / 2 for s in (1, 2, 4), i.e. contraction, reflection, expansion.
+_NM_SCALES = (1, 2, 4)
+
+
+def nm_reflect(a: bytes, b: bytes, c: bytes, rng) -> bytes:
+    """Nelder-Mead step of *a* through the centroid of *b* and *c*, per field.
+
+    With ``cen = (b + c) / 2`` a field becomes ``cen + alpha * (cen - a)``,
+    alpha in {1/2, 1, 2} (contraction, reflection, expansion).  alpha = 1 is the
+    parallelogram rule ``b + c - a``.  *a* plays the worst vertex, so it is the
+    one that moves.  Fields are 1/2/4-byte (BE or LE) over the span where any
+    input differs (grid as :func:`arith_mid`); results are floored and saturate
+    to ``[0, 2^(8w)-1]``.  Where all three agree *a* survives.
+
+    Length is that of *a*; short *b*/*c* are padded with *a*'s tail.  Returns
+    *a* unchanged when all inputs agree or any is empty.
+
+    Example (one byte, alpha = 1)::
+
+        a=0x10  b=0x30  c=0x20  ->  0x40
+
+    Args:
+        a: Base input (the vertex that is moved).
+        b: First anchor.
+        c: Second anchor.
+        rng: Random source (``rand_pool``).
+
+    Returns:
+        Child with len == len(a).
+    """
+    n = len(a)
+    if n == 0 or not b or not c:
+        return a
+    b, c = _padded(b, a), _padded(c, a)
+    va, vb, vc = (np.frombuffer(v, np.uint8) for v in (a, b, c))
+    grid = _field_grid(n, (va != vb) | (va != vc), rng, len(_NM_SCALES))
+    if grid is None:
+        return a
+    dt, width, start, count, param = grid
+    fa, fb, fc = (np.frombuffer(x, dt, count, start).astype(np.int64) for x in (a, b, c))
+    twice = fb + fc  # 2 * centroid, exact
+    # cen + alpha*(cen - a) = (twice + s * (twice - 2a) / 2) / 2, both shifts floor.
+    out = (twice + ((_NM_SCALES[param] * (twice - 2 * fa)) >> 1)) >> 1
+    return _put_fields(a, dt, width, start, count, np.clip(out, 0, (1 << (8 * width)) - 1))
+
+
+def opposition(a: bytes, b: bytes, c: bytes, rng) -> bytes:
+    """Opposition-based step: mirror *a* inside the range the three inputs span.
+
+    Per 1/2/4-byte field (BE or LE, grid as :func:`arith_mid` over where any
+    input differs) ``lo + hi - a`` with ``lo = min(a, b, c)`` and
+    ``hi = max(a, b, c)``.  A field at the low end goes to the high end and
+    vice versa; the midpoint is a fixed point.  The result never leaves
+    ``[lo, hi]``, so no saturation is needed.
+
+    Length is that of *a*; short *b*/*c* are padded with *a*'s tail.  Returns
+    *a* unchanged when all inputs agree or any is empty.
+
+    Example (one byte)::
+
+        a=0x10  b=0x30  c=0x20  ->  0x30
+
+    Args:
+        a: Base input.
+        b: Second input.
+        c: Third input.
+        rng: Random source (``rand_pool``).
+
+    Returns:
+        Child with len == len(a).
+    """
+    n = len(a)
+    if n == 0 or not b or not c:
+        return a
+    b, c = _padded(b, a), _padded(c, a)
+    va, vb, vc = (np.frombuffer(v, np.uint8) for v in (a, b, c))
+    grid = _field_grid(n, (va != vb) | (va != vc), rng)
+    if grid is None:
+        return a
+    dt, width, start, count, _ = grid
+    fa, fb, fc = (np.frombuffer(x, dt, count, start).astype(np.int64) for x in (a, b, c))
+    lo = np.minimum(np.minimum(fa, fb), fc)
+    hi = np.maximum(np.maximum(fa, fb), fc)
+    return _put_fields(a, dt, width, start, count, lo + hi - fa)
+
+
 DICT_MUTATIONS = [
     "dict_insert",
     "dict_replace",

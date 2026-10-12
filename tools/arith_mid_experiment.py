@@ -11,11 +11,17 @@ Arms:
   arith_mid  weighted arithmetic mean of the pair
   geo_mid    geometric mean of the pair
   power_mid  harmonic or quadratic mean of the pair (declines close pairs)
+  line_blend extended line recombination a + t*(b-a), t in [-1/2, 3/2]
+  field_minmax per-field min or max of the pair
   bit_cross  bit-level uniform crossover
   splice     prefix of a + suffix of b
   crossover  two-point segment swap
   byte_rand  one random byte replaced (ignores the donor)
   identity   returns a (control: must solve nothing, else the oracle is broken)
+
+Three-seed arms (diff_evo, field_median, nm_reflect, opposition) need a third parent,
+so their corpus starts as [LOW, MID, HIGH] (MID = 0x80 fill) and the other two seeds
+are drawn at random; they are not comparable one-to-one with the two-seed arms.
 
 Usage:
     python tools/arith_mid_experiment.py --execs 10000 --seeds 20
@@ -36,7 +42,13 @@ from fuzzer_tool.core.mutations.generic import (
     arith_mid,
     bit_cross,
     crossover,
+    diff_evo,
+    field_median,
+    field_minmax,
     geo_mid,
+    line_blend,
+    nm_reflect,
+    opposition,
     power_mid,
     splice,
 )
@@ -48,6 +60,7 @@ SEED_LEN = 16
 SOLVED_ALL = (1 << GATES) - 1
 LOW_SEED = b"K" + bytes(SEED_LEN - 1)
 HIGH_SEED = b"K" + b"\xff" * (SEED_LEN - 1)
+MID_SEED = b"K" + b"\x80" * (SEED_LEN - 1)
 
 
 def _byte_rand(a: bytes, _b: bytes, rng) -> bytes:
@@ -58,6 +71,8 @@ def _byte_rand(a: bytes, _b: bytes, rng) -> bytes:
 
 ARMS = {
     "arith_mid": arith_mid,
+    "line_blend": line_blend,
+    "field_minmax": field_minmax,
     "geo_mid": geo_mid,
     "power_mid": power_mid,
     "bit_cross": bit_cross,
@@ -65,6 +80,13 @@ ARMS = {
     "crossover": crossover,
     "byte_rand": _byte_rand,
     "identity": lambda a, _b, _rng: a,
+}
+
+ARMS3 = {
+    "diff_evo": diff_evo,
+    "field_median": field_median,
+    "nm_reflect": nm_reflect,
+    "opposition": opposition,
 }
 
 
@@ -88,10 +110,10 @@ def _novel(edges: tuple[int, ...], seen: list[int]) -> bool:
     return any(e & ~s for e, s in zip(edges, seen, strict=True))
 
 
-def run_one(oracle: Oracle, op, seed: int, execs: int) -> tuple[int, int, int | None]:
+def run_one(oracle: Oracle, op, seed: int, execs: int, three: bool = False):
     """(solved mask, corpus size, execs to solve every gate or None)."""
     rng = RandPool(seed=seed)
-    corpus = [LOW_SEED, HIGH_SEED]
+    corpus = [LOW_SEED, MID_SEED, HIGH_SEED] if three else [LOW_SEED, HIGH_SEED]
     mask, seen = 0, [0] * GATES
     for s in corpus:
         m, e = oracle.run(s)
@@ -100,7 +122,11 @@ def run_one(oracle: Oracle, op, seed: int, execs: int) -> tuple[int, int, int | 
     for n in range(1, execs + 1):
         i = rng.randrange(len(corpus))
         j = (i + 1 + rng.randrange(len(corpus) - 1)) % len(corpus)
-        child = op(corpus[i], corpus[j], rng)
+        if three:
+            k = rng.choice([x for x in range(len(corpus)) if x not in (i, j)])
+            child = op(corpus[i], corpus[j], corpus[k], rng)
+        else:
+            child = op(corpus[i], corpus[j], rng)
         m, e = oracle.run(child)
         if m & ~mask or _novel(e, seen):
             corpus.append(child)
@@ -115,7 +141,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--execs", type=int, default=10000)
     ap.add_argument("--seeds", type=int, default=20)
-    ap.add_argument("--arms", nargs="+", default=list(ARMS))
+    ap.add_argument("--arms", nargs="+", default=[*ARMS, *ARMS3])
     a = ap.parse_args()
     tmp = Path(tempfile.mkdtemp(prefix="arith_gates_"))
     try:
@@ -136,7 +162,9 @@ def main() -> int:
         oracle = Oracle(lib)
         print(f"{'arm':10s} {'all':>5s} {'G1':>4s} {'G2':>4s} {'G3':>4s}  median-execs-to-all")
         for arm in a.arms:
-            runs = [run_one(oracle, ARMS[arm], s, a.execs) for s in range(1, a.seeds + 1)]
+            three = arm in ARMS3
+            op = ARMS3[arm] if three else ARMS[arm]
+            runs = [run_one(oracle, op, s, a.execs, three) for s in range(1, a.seeds + 1)]
             solved = [sum(m >> g & 1 for m, _c, _n in runs) for g in (1, 2, 3)]
             done = [n for _m, _c, n in runs if n is not None]
             med = f"{statistics.median(done):.0f}" if done else f">{a.execs}"
