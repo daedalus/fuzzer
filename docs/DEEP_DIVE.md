@@ -863,6 +863,27 @@ Measured on `dictionaries/*.dict` (118 with >= 2 tokens): 160,214 B concatenated
 python tools/gen_dict_seed.py -D dictionaries/gif.dict --out ~/corpus [--kicks N] [--rng-seed S]
 ```
 
+### Version-Diff Crash Seeds (`tools/gen_ffmpeg_803_seeds.py` + `tools/mint_ffmpeg_803_baselines.sh`)
+
+A pack of seeds aimed at **FFmpeg 8.0.3**, derived from the `8.0.3 → 8.1.3` source diff
+read in the *fix* direction: every seed reaches code 8.0.3 ships unguarded and 8.1.3 hardened,
+so any crash it produces is 8.0.3-only. The 9.0.2 marginal delta (`8.1.3 → 9.0.2`) was analyzed
+separately in `DIFF_DEEPDIVE_9.0.2.md` and adds no new hand-craftable crash.
+
+`tools/gen_ffmpeg_803_seeds.py` writes 14 crafted magic seeds into `<out>/seeds/` (default
+`~/fuzzing/ffmpeg_803_potential_crashes`). `tools/mint_ffmpeg_803_baselines.sh` mints 12 short
+real streams per container the parser fixes touch (mov/mpegts/matroska/ogg/flv/mxf/w64/apng/…),
+also into `<out>/seeds/`. Both are offline; neither is wired into `fuzz`.
+
+```bash
+python tools/gen_ffmpeg_803_seeds.py --out ~/fuzzing/ffmpeg_803_potential_crashes
+tools/mint_ffmpeg_803_baselines.sh --out ~/fuzzing/ffmpeg_803_potential_crashes
+```
+
+The only confirmed 8.0.3-only crash is `vpk_div0.vpk` → SIGFPE at `libavformat/vpk.c:89`;
+clean on 8.1.3 and 9.0.2. The rest are coverage / MSAN / reachability probes (see the pack's
+`README.md` and `DIFF_DEEPDIVE.md` §2G for the caveats).
+
 ## Coverage Modes
 
 Coverage-guided mode is **on by default** (`--no-coverage` to opt out).

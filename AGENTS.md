@@ -141,6 +141,8 @@ fuzzer, not just the target.
 | `tools/vendor_lz4.sh` / `vendor_grep.sh` / `vendor_ffmpeg.sh` / `vendor_secp256k1.sh` / `vendor_sqlite.sh` / `vendor_fuzzgoat.sh` / `vendor_libpng.sh` | Fetch vendored library sources into `$FUZZ_VENDOR_ROOT/<lib>/` (default `~/fuzzing/vendoring/`; legacy `vendor/` via `--in-tree-vendor`); required before building the matching targets |
 | `FUZZ_VENDOR_ROOT=...` / `FUZZ_BUILD_ROOT=...` | Env-var knobs; defaults are `~/fuzzing/vendoring/` (sources) and `~/fuzzing/builds/` (build artifacts). Both have legacy `--in-tree-*` flags. |
 | `python tools/corpus_png.py --out corpus --download` | Generate PNG corpus |
+| `python tools/gen_ffmpeg_803_seeds.py [--out DIR]` | Write the 8.0.3 version-diff crash seeds (14 crafted) into `<out>/seeds/` (default `~/fuzzing/ffmpeg_803_potential_crashes`) |
+| `tools/mint_ffmpeg_803_baselines.sh [--out DIR]` | Mint 12 container mutation baselines for the 8.0.3 seed pack into `<out>/seeds/` |
 | `tools/benchmark.py list` / `tools/benchmark.py <name> [args]` | All benchmarks behind one entry point (`smoke`, `sweep`, `paired`, `replicated`, …) |
 | `lizard --CCN 15 -w .` | Cyclomatic complexity violations |
 | `vulture --min-confidence 80 .` | Find duplicated code |
