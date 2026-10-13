@@ -2317,9 +2317,21 @@ def _digit_spans(data: bytes) -> list[tuple[int, int]]:
     return numbers
 
 
+# Decimal values at the signed and unsigned limits of 8/16/32/64-bit fields, plus
+# 2**53 (first double that cannot count by one): where a parsed number overflows.
+_INT_WIDTHS = (8, 16, 32, 64)
+_DECIMAL_EDGES = tuple(
+    sorted(
+        {v for w in _INT_WIDTHS for v in (2 ** (w - 1) - 1, 2 ** (w - 1), 2**w - 1, 2**w)} | {2**53}
+    )
+)
+
+
 def _random_num(rng) -> int:
-    """Replacement value: small int, big int, big-int squared, or negative big."""
-    strategy = rng.randint(0, 3)
+    """Replacement value: small int, big int, big-int squared, negative big, or a width limit."""
+    strategy = rng.randint(0, 4)
+    if strategy == 4:
+        return rng.choice(_DECIMAL_EDGES)
     if strategy == 0:
         return rng.randint(0, 999)
     if strategy == 1:
@@ -2334,9 +2346,9 @@ def ascii_num_replace(data: bytes, rng) -> bytes:
 
     Ported from go-fuzz case 15.  Finds runs of digits (optionally prefixed
     with '-') of length >= 2 and replaces the whole token with a random
-    value chosen from: small int [0, 999], big int, big-int squared, or
-    negative big int.  If the original token was negative, the replacement
-    is also mostly negative.
+    value chosen from: small int [0, 999], big int, big-int squared,
+    negative big int, or a 8/16/32/64-bit limit (``_DECIMAL_EDGES``).  If the
+    original token was negative, the replacement is also mostly negative.
     """
     if len(data) < 2:
         return data
@@ -3109,6 +3121,29 @@ _FUNNY_UNICODE: list[bytes] = [
     b"\xe2\x80\x8c",  # U+200C zero-width non-joiner
     b"\xe2\x80\x8d",  # U+200D zero-width joiner
     b"\xef\xbb\xbf",  # U+FEFF zero-width no-break space (BOM)
+    # Case mapping changes the length: a buffer sized from the input overflows
+    b"\xc4\xb0",  # U+0130 lower: 2 -> 3 bytes (i + combining dot)
+    b"\xc8\xba",  # U+023A lower: 2 -> 3 bytes
+    b"\xc8\xbe",  # U+023E lower: 2 -> 3 bytes
+    b"\xc5\x89",  # U+0149 upper: 2 -> 3 bytes
+    b"\xc7\xb0",  # U+01F0 upper: 2 -> 3 bytes
+    b"\xce\xb0",  # U+03B0 upper: 2 -> 6 bytes
+    b"\xd6\x87",  # U+0587 upper: 2 -> 4 bytes
+    b"\xef\xac\x81",  # U+FB01 upper: 1 -> 2 code points (FI)
+    b"\xef\xac\x83",  # U+FB03 upper: 1 -> 3 code points (FFI)
+    b"\xe1\xbe\x80",  # U+1F80 upper: 3 -> 5 bytes
+    b"\xe1\xbe\xb3",  # U+1FB3 upper: 3 -> 4 bytes
+    # Line breaks and bidi controls that line- and layout-aware code treats specially
+    b"\xc2\x85",  # U+0085 NEL, C1 line break
+    b"\xe2\x80\xa8",  # U+2028 line separator
+    b"\xe2\x80\xa9",  # U+2029 paragraph separator
+    b"\xe2\x80\x8e",  # U+200E left-to-right mark
+    b"\xe2\x80\x8f",  # U+200F right-to-left mark
+    b"\xe2\x81\xa6",  # U+2066 left-to-right isolate
+    b"\xe2\x81\xa7",  # U+2067 right-to-left isolate
+    b"\xe2\x81\xa8",  # U+2068 first strong isolate
+    b"\xe2\x81\xa9",  # U+2069 pop directional isolate
+    b"\xd8\x9c",  # U+061C Arabic letter mark
 ]
 
 

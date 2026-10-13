@@ -990,6 +990,13 @@ _FLOAT_PATTERNS = (
     (0x7FF8000000000000, 0x7FC00000),  # quiet NaN
     (0x7FF0000000000001, 0x7F800001),  # signalling NaN
     (0x8000000000000000, 0x80000000),  # negative zero
+    (0x0010000000000000, 0x00800000),  # smallest normal
+    (0x8000000000000001, 0x80000001),  # smallest negative denormal
+    (0xFFEFFFFFFFFFFFFF, 0xFF7FFFFF),  # most negative finite
+    (0x7FFFFFFFFFFFFFFF, 0x7FFFFFFF),  # NaN with every payload bit set
+    (0x433FFFFFFFFFFFFF, 0x4B7FFFFF),  # 2^53 - 1 / 2^24 - 1: last x + 1 != x
+    (0x4340000000000000, 0x4B800000),  # 2^53 / 2^24: first x + 1 == x
+    (0x4340000000000001, 0x4B800001),  # 2^53 + 2 / 2^24 + 2: next representable
 )
 
 _FLOAT_WIDTHS = (4, 8)

@@ -2,7 +2,9 @@
 
 **Date:** 2026-10-11
 **Base:** `19943bc8` (`Add orbit dedup: --orbit-dedup swap/endian canonicalization before exec filter (G1)`)
-**Status:** analysis only. Nothing implemented. **[verified]** = read in the tree at the
+**Status:** analysis only at the time of writing. Resolved 2026-10-12, with two corrections (O2 and O4 were mostly covered already): see `handover_pattern_gaps_2026-10-12.md`.
+
+Original status: analysis only. Nothing implemented. **[verified]** = read in the tree at the
 base commit. **[unverified]** = grep-only or design assumption; confirm before coding.
 
 ## Scope
