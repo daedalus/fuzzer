@@ -8592,6 +8592,7 @@ class Fuzzer:
         prune_was_enabled = getattr(edge_tracker, "_prune_enabled", True)
         if edge_tracker is not None:
             edge_tracker._prune_enabled = False
+            print("[-] Disabled prunning during seed calibration.")
         # --no-calibration: skip the pass, its RSS and its per-seed executions.
         if not self._seed_calibration:
             if edge_tracker is not None:
@@ -8657,6 +8658,7 @@ class Fuzzer:
         # Re‑enable pruning and perform a final prune to enforce the bound.
         if edge_tracker is not None:
             edge_tracker._prune_enabled = prune_was_enabled
+            print("[+] Re-enabling prunning during seed calibration...")
             edge_tracker._maybe_prune()
         explorer = getattr(self, "_crash_explorer", None)
         if explorer is not None and not explorer.variants:
