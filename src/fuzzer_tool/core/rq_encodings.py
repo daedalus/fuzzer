@@ -75,6 +75,13 @@ class Encoder:
     #: where a nearby value maps to an unrelated one, or inversion is costly).
     value_only = False
 
+    #: The encoder inverts a hash/checksum EXACTLY (it searches for the preimage of
+    #: the observed operand and writes the preimage of the constant). A pair that
+    #: ``CmplogCollector.detect_hash_candidates`` flags as hash-like cannot be solved by
+    #: plain substitution, but it is exactly what these encoders are for, so
+    #: ``generate_mutations`` keeps them and drops the rest (handover F1).
+    inverts_hash = False
+
     def is_applicable(  # noqa: ARG002
         self, cmp_size: int, cmp_type: str, lhs: bytes, rhs: bytes
     ) -> bool:
@@ -462,6 +469,8 @@ class Crc32Encoder(Encoder):
     preimage of the constant.
     """
 
+    inverts_hash = True
+
     def __init__(self, reverse: bool = False):
         self.reverse = reverse
 
@@ -547,6 +556,8 @@ class CrcModelEncoder(Encoder):
     (CRC-32C, BZIP2, MPEG-2, and 16-bit CCITT/XMODEM/ARC/MODBUS).  Only the
     constant is inverted: its +-i neighbours have unrelated preimages.
     """
+
+    inverts_hash = True
 
     value_only = True
 
@@ -662,6 +673,8 @@ class Fnv1aEncoder(Encoder):
     ``targets/antifuzz_demo.c`` (``fnv1a(input[0:4]) == fnv1a("crsh")``).
     """
 
+    inverts_hash = True
+
     value_only = True
 
     def __init__(self, reverse: bool = False):
@@ -687,6 +700,8 @@ class ByteHashEncoder(Encoder):
     preimages and write the preimages of the constant (the constant only: its
     +-i neighbours hash to unrelated values).  Families in ``byte_hash_mitm``.
     """
+
+    inverts_hash = True
 
     value_only = True
 
@@ -722,6 +737,8 @@ class MixerEncoder(Encoder):
     operand and write the preimage of the constant (the constant only:
     its +-i neighbours mix to unrelated values).
     """
+
+    inverts_hash = True
 
     value_only = True
 
@@ -946,14 +963,18 @@ def generate_mutations(
     mutations: list[tuple[tuple[int, ...], tuple[bytes, ...], Encoder]] = []
     seen: set[tuple] = set()
 
-    # Skip hash-like comparisons that can't be cracked by I2S substitution
-    if is_hash is not None and is_hash(operand_a, operand_b):
-        return mutations
+    # Hash-like comparisons cannot be cracked by I2S substitution, so the
+    # substitution encoders skip them; the exact inverters (CRC, FNV, byte hashes,
+    # bijective mixers) are what such a pair is for and still see it. The old
+    # blanket ``return`` made any encoder for an 8-byte field unreachable (F1).
+    hash_only = is_hash is not None and is_hash(operand_a, operand_b)
 
-    pair_key = (cmp_size, cmp_type, operand_a, operand_b, hammer)
+    pair_key = (cmp_size, cmp_type, operand_a, operand_b, hammer, hash_only)
     enc_cache = _cache.get(pair_key)
     if enc_cache is None:
         enc_cache = _applicable_encoders(cmp_size, cmp_type, operand_a, operand_b)
+        if hash_only:
+            enc_cache = {e: v for e, v in enc_cache.items() if e.inverts_hash}
         _cache[pair_key] = enc_cache
 
     for enc, (pattern_alts, repl_variants) in enc_cache.items():

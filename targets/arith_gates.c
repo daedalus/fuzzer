@@ -22,10 +22,42 @@
  *
  * Intended solution: 'K', 12 34 56 78, EF CD AB 00, 13 57 (any window value).
  *
+ * Extended gates (only evaluated when len >= EXT_MIN_LEN = 24, so every 11..23
+ * byte input behaves exactly as before and earlier synthetic results still
+ * reproduce):
+ *
+ *   gate  field                      solved iff
+ *   ----  -------------------------  ---------------------------------------
+ *   G4    BE32 buf[11..14]           x in [0x50000000, +16): a window PAST both
+ *                                    seeds. Only the low side has a distance
+ *                                    gradient (x < W fires below[log2(W-x)]);
+ *                                    beyond the window one flat edge fires, so
+ *                                    nothing between two seeds below W reaches
+ *                                    it: only t > 1 extrapolation (line_blend,
+ *                                    nm_reflect alpha = 2) can.
+ *   G5    BE16 buf[15..16] = f1,     f1 >= 0xC000 fires edge A, f2 <= 0x3FFF
+ *         BE16 buf[17..18] = f2      fires edge B, solved iff both. A seed with
+ *                                    f1 high / f2 high and one with f1 low /
+ *                                    f2 low each own one edge; the answer is a
+ *                                    per-field combination (max of f1, min of
+ *                                    f2), which field_minmax draws directly.
+ *   G6    LE32 buf[20..23] = x       (7*x + 13) % 1009 == 500, evaluated in
+ *                                    64 bits so the compare is an 8-byte pair
+ *                                    (v, 500): the --affine-mod target, and the
+ *                                    probe for the cmplog 8-byte hash filter.
+ *                                    Not reachable by any pair operator.
+ *
+ * G4/G5 are scored by tools/arith_mid_experiment.py --ext; G6 needs a cmplog
+ * build (see the build line below).
+ *
  * Build (coverage build mirrors targets/compcov_gates.c; -O2, clang):
  *   clang -O2 -g -fsanitize-coverage=trace-pc-guard \
  *     -include src/fuzzer_tool/adapters/afl_shim.c \
  *     -o <out>/arith_gates targets/arith_gates.c -ldl
+ * G6 only produces a cmplog record on a build that logs comparisons:
+ *   clang -O2 -g -fsanitize-coverage=trace-pc-guard,trace-cmp -D__AFL_CMPLOG=1 \
+ *     -include src/fuzzer_tool/adapters/afl_shim.c \
+ *     -o <out>/arith_gates_cmp targets/arith_gates.c -ldl
  * Ground-truth library (no shim, no coverage), used by
  * tools/arith_mid_experiment.py:
  *   clang -O2 -shared -fPIC -DGATES_PLAIN -o <out>/arith_gates_ref.so targets/arith_gates.c
@@ -42,9 +74,13 @@ extern void __afl_map_edge(unsigned int cur_loc);
 #endif
 
 #define GATES_MIN_LEN 11
-#define GATES 4
+#define EXT_MIN_LEN 24
+#define GATES 7
 #define BANDS 32
 #define GATE_EDGE(g) __afl_map_edge(0x7100u + (unsigned)(g))
+#define G4_WINDOW 0x50000000u
+#define G5_EDGE_A 0x7180u
+#define G5_EDGE_B 0x7181u
 #define BAND_EDGE(g, side, j) \
     __afl_map_edge(0x7200u + 0x80u * (unsigned)(g) + BANDS * (unsigned)(side) + (unsigned)(j))
 
@@ -86,6 +122,39 @@ int fuzz_gates(const unsigned char *buf, size_t len) {
     if (window(3, ((uint32_t)buf[9] << 8) | buf[10], 0x1357u, 4)) {
         GATE_EDGE(3);
         mask |= 1 << 3;
+    }
+    if (len < EXT_MIN_LEN) return mask;
+
+    /* G4: window past both seeds. Gradient below the window only. */
+    {
+        uint32_t x = be32(buf + 11);
+        if (x < G4_WINDOW) {
+            int j = floor_log2(G4_WINDOW - x);
+            BAND_EDGE(4, 0, j);
+            g_edges[4] |= 1ull << j;
+        } else if (x - G4_WINDOW < 16) {
+            GATE_EDGE(4);
+            mask |= 1 << 4;
+        } else {
+            BAND_EDGE(4, 1, 0); /* overshoot: one flat edge, no gradient */
+            g_edges[4] |= 1ull << BANDS;
+        }
+    }
+
+    /* G5: conjunction of two independently rewarded fields. */
+    {
+        uint32_t f1 = ((uint32_t)buf[15] << 8) | buf[16];
+        uint32_t f2 = ((uint32_t)buf[17] << 8) | buf[18];
+        int a = f1 >= 0xC000u, b = f2 <= 0x3FFFu;
+        if (a) { __afl_map_edge(G5_EDGE_A); g_edges[5] |= 1ull << 0; }
+        if (b) { __afl_map_edge(G5_EDGE_B); g_edges[5] |= 1ull << 1; }
+        if (a && b) { GATE_EDGE(5); mask |= 1 << 5; }
+    }
+
+    /* G6: modular-affine compare; the 64-bit v keeps the compare 8 bytes wide. */
+    {
+        uint64_t v = (7ull * le32(buf + 20) + 13ull) % 1009ull;
+        if (v == 500ull) { GATE_EDGE(6); mask |= 1 << 6; }
     }
     return mask;
 }

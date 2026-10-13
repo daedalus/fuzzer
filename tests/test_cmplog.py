@@ -266,3 +266,26 @@ class TestCmplogSizeCap:
         c.collect_tokens()
         assert log_file.stat().st_size == 0
         assert c.log_path == str(log_file)
+
+
+class TestAffineModPairIsNotHashFlagged:
+    """--affine-mod's compare ``(a*x+b) % m == t`` in 64 bits logs the pair (v, t).
+
+    v < m and t are both small, so their 8-byte forms share their high zero bytes:
+    far more than ``_HASH_MAX_MATCH_BYTES`` matching positions. The hash-like
+    filter must keep it, or the encoders and --affine-mod never see it.
+    """
+
+    def test_small_modulus_pair_is_kept(self):
+        c = CmplogCollector()
+        pairs = []
+        for v in (0, 1, 7, 499, 1008):
+            pairs.append((v.to_bytes(8, "little"), (500).to_bytes(8, "little")))
+            pairs.append((v.to_bytes(8, "big"), (500).to_bytes(8, "big")))
+        assert c.detect_hash_candidates(pairs) == 0
+
+    def test_a_real_64_bit_digest_pair_is_still_flagged(self):
+        c = CmplogCollector()
+        a = bytes.fromhex("0123456789abcdef")
+        b = bytes.fromhex("fedcba9876543210")
+        assert c.detect_hash_candidates([(a, b)]) == 1

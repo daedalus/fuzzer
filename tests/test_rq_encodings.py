@@ -873,3 +873,37 @@ class TestCrcModelEncoder:
         assert ((2,), ((0xBEEF).to_bytes(2, "little"),)) in [
             (m[0], m[1]) for m in _by_encoder(muts, "crc16_arc_p")
         ]
+
+
+class TestHashFlaggedPairsKeepExactInverters:
+    """F1: a hash-like flag removes the substitution encoders, not the exact inverters."""
+
+    def _mutations(self, is_hash):
+        x, want = b"abcd", b"wxyz"
+        data = b"\x00" * 4 + x + b"\x00" * 8
+        return generate_mutations(
+            _crc_le(x), _crc_le(want), 32, "CMP", data, is_hash=is_hash
+        )
+
+    def test_unflagged_pair_is_solved_by_crc32(self):
+        assert any(enc.name().startswith("crc32") for _o, _r, enc in self._mutations(None))
+
+    def test_flagged_pair_still_reaches_the_crc32_inverter(self):
+        muts = self._mutations(lambda _a, _b: True)
+        assert muts
+        assert all(enc.inverts_hash for _o, _r, enc in muts)
+        assert any(enc.name().startswith("crc32") for _o, _r, enc in muts)
+
+    def test_flagged_pair_drops_plain_substitution(self):
+        # The operand bytes are present in the input verbatim: PlainEncoder would
+        # swap them for the constant. Flagged as a hash, it must not.
+        a, b = b"\x01\x02\x03\x04\x05\x06\x07\x08", b"\xa1\xb2\xc3\xd4\xe5\xf6\x17\x28"
+        data = b"zz" + a + b"zz"
+        assert generate_mutations(a, b, 64, "CMP", data)
+        assert generate_mutations(a, b, 64, "CMP", data, is_hash=lambda _a, _b: True) == []
+
+    def test_cached_result_is_not_shared_between_flagged_and_unflagged(self):
+        flagged = self._mutations(lambda _a, _b: True)
+        plain = self._mutations(None)
+        assert {e.name() for _o, _r, e in plain} >= {e.name() for _o, _r, e in flagged}
+        assert self._mutations(lambda _a, _b: True) == flagged
