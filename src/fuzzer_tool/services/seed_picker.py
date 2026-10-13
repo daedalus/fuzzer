@@ -37,6 +37,14 @@ log = logging.getLogger(__name__)
 # ── Edge rarity thresholds (units: distinct corpus seeds covering an edge) ──
 # An edge reached by at most this many seeds counts as rare. Matches the
 # singleton+cold buckets that EdgeTracker.edge_rarity_stats() reports.
+# Per-seed edge analyses (subsumption, hit-count diversity, Wasserstein,
+# coverage proximity) cost ~O(edges) each in pure Python.  On a corpus wider
+# than LAZY_WEIGHT_MIN_CORPUS a weight pass computes at most
+# WEIGHT_FILL_PER_PASS of them; the rest use neutral multipliers until a later
+# pass reaches them, so the first pick no longer stalls for the whole corpus.
+LAZY_WEIGHT_MIN_CORPUS = 512
+WEIGHT_FILL_PER_PASS = 32
+_NEUTRAL_WEIGHTS = (1.0, 1.0, 1.0, 0.5)
 RARE_EDGE_OWNERS = 3
 # Multiplier on log2(1 + rare_count) for the rare-edge energy bonus.
 RARE_EDGE_GAIN = 0.5
@@ -1426,6 +1434,8 @@ class SeedPicker:
         w *= 0.01 if staleness > stale_threshold else 1.0
         return w, burst_factor
 
+    _weight_fill_left: float = float("inf")
+
     def _weight_cached(
         self, seed_key: str, w: float, classifications: dict | None, f
     ) -> tuple[float, float, float]:
@@ -1434,7 +1444,8 @@ class SeedPicker:
         The secretary rule is display-only (P2-4): its stop fires on a 1/t
         envelope, so it must not reweight seeds.
         """
-        if seed_key not in f._cached_weights:
+        wts = f._cached_weights.get(seed_key)
+        if wts is None:
             # When saturated, skip the expensive edge-tracker analyses
             # (subsumption, hitcount diversity, Wasserstein, coverage
             # proximity) and return neutral multipliers. These mainly help
@@ -1442,17 +1453,24 @@ class SeedPicker:
             # well-characterised and the per-seed analysis is wasted work.
             # _saturation_gated, not the raw estimate: the gate also accounts
             # for staleness and for the stall override (see _saturation_gate).
+            wts = _NEUTRAL_WEIGHTS
             if getattr(f, "_saturation_gated", False):
-                f._cached_weights[seed_key] = (1.0, 1.0, 1.0, 0.5)
+                f._cached_weights[seed_key] = wts
             elif seed_key in f._edge_tracker.seed_edges and f._edge_tracker.seed_edges[seed_key]:
-                sub = f._edge_tracker.compute_subsumption_weight(seed_key)
-                div = f._edge_tracker.compute_hitcount_diversity_weight(seed_key)
-                spa = f._edge_tracker.compute_wasserstein_weight(seed_key)
-                cov = f._edge_tracker.compute_coverage_proximity(seed_key)
-                f._cached_weights[seed_key] = (sub, div, spa, cov)
+                if self._weight_fill_left > 0:
+                    self._weight_fill_left -= 1
+                    wts = (
+                        f._edge_tracker.compute_subsumption_weight(seed_key),
+                        f._edge_tracker.compute_hitcount_diversity_weight(seed_key),
+                        f._edge_tracker.compute_wasserstein_weight(seed_key),
+                        f._edge_tracker.compute_coverage_proximity(seed_key),
+                    )
+                    f._cached_weights[seed_key] = wts
+                # else: fill budget spent -- neutral for this pass, not cached,
+                # so a later pass computes it (see WEIGHT_FILL_PER_PASS).
             else:
-                f._cached_weights[seed_key] = (1.0, 1.0, 1.0, 0.5)
-        sub, div, spa, cov = f._cached_weights[seed_key]
+                f._cached_weights[seed_key] = wts
+        sub, div, spa, cov = wts
         w *= sub * div * spa
         w *= 0.5 + cov
 
@@ -1971,6 +1989,11 @@ class SeedPicker:
         n = len(corpus)
         weights = [1.0] * n
         pareto_scores: list[tuple[float, float, float]] = [(1.0, 1.0, 1.0)] * n
+        # Wide corpora: spread the per-seed edge analyses over several passes
+        # instead of stalling the first pick for minutes.
+        self._weight_fill_left = (
+            WEIGHT_FILL_PER_PASS if n > LAZY_WEIGHT_MIN_CORPUS else float("inf")
+        )
 
         _saturated = self._saturation_gate()
 

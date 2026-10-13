@@ -64,6 +64,7 @@ from fuzzer_tool.core.coverage_noise import (
 )
 from fuzzer_tool.core.crash_explore import CrashExplorer
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
+from fuzzer_tool.core.edge_tracker import CALIBRATION_PRUNE_SLACK
 from fuzzer_tool.core.elf import (
     SHM_LAYOUT_CURRENT,
     detect_elf_type,
@@ -480,6 +481,10 @@ EXEC_BLOOM_CAPACITY = 500_000  # executed-input filter capacity before generatio
 EXEC_DEDUP_RETRIES = 3  # re-rolls of the mutation before executing a repeat anyway
 RAW_PROBE_MIN = 10  # startup raw-speed probe: fewest target runs
 RAW_PROBE_MAX = 100  # ... and most
+# Seed calibration prunes the edge tracker early once the per-seed edge sets
+# hold this many (seed, edge) pairs (~100 bytes each), whatever the seed count.
+CALIBRATION_EDGE_ENTRY_BUDGET = 40_000_000
+CALIBRATION_PROGRESS_EVERY = 1000  # seeds between progress lines
 RAW_PROBE_FALLBACK = b"\x00" * 64  # probe input when the corpus is empty
 # Format seed generator: every FORMAT_SEED_EVERY_EXECS execs, queue up to
 # FORMAT_SEED_BUDGET field-targeted variants of the last fuzzed seed.
@@ -8591,32 +8596,41 @@ class Fuzzer:
         genuinely carry. Crashes/timeouts during calibration are counted,
         not fatal — a hostile corpus must not kill startup.
         """
-        # Defer pruning during calibration to avoid per‑seed prune cost.
+        # Let the tracked-seed count overshoot its bound while calibrating, so
+        # the prune pass runs once per CALIBRATION_PRUNE_SLACK-1 bounds of
+        # insertions rather than every batch, without growing without limit.
         edge_tracker = getattr(self, "_edge_tracker", None)
-        prune_was_enabled = getattr(edge_tracker, "_prune_enabled", True)
+        slack_was = getattr(edge_tracker, "_prune_slack", 1.0)
         if edge_tracker is not None:
-            edge_tracker._prune_enabled = False
-            print("[-] Disabled prunning during seed calibration.")
+            edge_tracker._prune_slack = CALIBRATION_PRUNE_SLACK
         # --no-calibration: skip the pass, its RSS and its per-seed executions.
-        if not self._seed_calibration:
+        if (
+            not self._seed_calibration
+            or not self.use_coverage
+            or not self.shm_cov
+            or self.multi_targets
+            or not self.corpus
+        ):
             if edge_tracker is not None:
-                edge_tracker._prune_enabled = prune_was_enabled
-            return
-        if not self.use_coverage or not self.shm_cov or self.multi_targets:
-            if edge_tracker is not None:
-                edge_tracker._prune_enabled = prune_was_enabled
-            return
-        if not self.corpus:
-            if edge_tracker is not None:
-                edge_tracker._prune_enabled = prune_was_enabled
+                edge_tracker._prune_slack = slack_was
             return
         baseline_edges = 0
+        redundant = 0
+        entries = 0
+        entries_limit = CALIBRATION_EDGE_ENTRY_BUDGET
+        n_seeds = len(self.corpus)
         t0 = time.monotonic()
         # Widest seed seen, for the edge-id stability probe below: more edges
         # is more chances for a drifting id to show, at identical cost.
         probe_seed: bytes | None = None
         probe_width = 0
-        for seed in list(self.corpus):
+        for done, seed in enumerate(list(self.corpus), 1):
+            if done % CALIBRATION_PROGRESS_EVERY == 0:
+                print(
+                    f"[*] Seed calibration: {done}/{n_seeds} seeds, {redundant} redundant, "
+                    f"{len(self._edge_tracker.seed_edges)} tracked "
+                    f"({time.monotonic() - t0:.0f}s)"
+                )
             returncode, stderr = self._run_target(seed)
             if self._is_crash(returncode, stderr):
                 self.crash_count += 1
@@ -8634,11 +8648,17 @@ class Fuzzer:
             if len(edge_ids) > probe_width:
                 probe_seed, probe_width = seed, len(edge_ids)
             hit_counts = self._only_confirmed(self.shm_cov.get_edge_counts())
+            self._strata_observe(seed, edge_ids)
+            if self._edge_tracker.is_redundant(edge_ids):
+                # Nothing new: it would be the first seed pruned, so keep only
+                # its contribution to the global hit statistics.
+                self._edge_tracker.absorb_redundant(edge_ids, hit_counts)
+                redundant += 1
+                continue
             stack_depth = self.shm_cov.read_stack_depth()
             path_hash = self.shm_cov.read_path_hash()
             if path_hash == 0:
                 path_hash = self.shm_cov.compute_path_hash_from_edges(edge_ids)
-            self._strata_observe(seed, edge_ids)
             new = self._edge_tracker.record_edges(
                 self._seed_key(seed),
                 edge_ids,
@@ -8653,16 +8673,23 @@ class Fuzzer:
                 hw_branch_misses=self._last_perf_deltas.get("branch_misses", 0),
             )
             baseline_edges += len(new)
+            entries += len(edge_ids)
+            if entries > entries_limit:
+                # Bound RAM by edge entries, not seed count: wide seeds blow
+                # past the seed-count slack long before it triggers.
+                self._edge_tracker.prune_to_bound()
+                entries = self._edge_tracker.tracked_edge_entries()
+                entries_limit = max(CALIBRATION_EDGE_ENTRY_BUDGET, entries * 2)
+        self._edge_tracker.flush_absorbed()
         if baseline_edges or len(self.corpus):
             print(
                 f"[*] Seed calibration: {len(self.corpus)} seeds -> "
-                f"{baseline_edges} baseline edges "
+                f"{baseline_edges} baseline edges, {redundant} redundant "
                 f"({time.monotonic() - t0:.2f}s)"
             )
-        # Re‑enable pruning and perform a final prune to enforce the bound.
+        # Restore the normal bound and enforce it once.
         if edge_tracker is not None:
-            edge_tracker._prune_enabled = prune_was_enabled
-            print("[+] Re-enabling prunning during seed calibration...")
+            edge_tracker._prune_slack = slack_was
             edge_tracker._maybe_prune()
         explorer = getattr(self, "_crash_explorer", None)
         if explorer is not None and not explorer.variants:

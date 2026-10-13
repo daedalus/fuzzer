@@ -1,27 +1,40 @@
-"""Regression: seed calibration defers EdgeTracker pruning.
+"""Regression: seed calibration batches EdgeTracker pruning and stays bounded.
 
 The calibration pass records one execution per corpus seed.  Before the
 fix, ``record_edges`` called ``_maybe_prune`` on every insertion that
 pushed the tracked-seed count over ``max_tracked_seeds``, so a wide
 corpus paid the full prune cost many times during startup and also
-evicted seeds it had just recorded.  The fix disables pruning while the
-calibration loop runs and performs one prune once it finishes.
+evicted seeds it had just recorded.  Disabling pruning outright fixed the
+cost but let ``seed_edges`` grow without bound (~100 bytes per edge per
+seed), exhausting RAM on 10^5-seed corpora.  The pass now lets the tracked
+count overshoot by ``CALIBRATION_PRUNE_SLACK``, prunes early when the
+per-seed edge sets exceed an entry budget, folds seeds that add no edge
+into the global statistics without keeping per-seed state, and enforces
+the normal bound once at the end.
 """
 
 from __future__ import annotations
 
-from fuzzer_tool.core.edge_tracker import EdgeTracker
+import itertools
+
+from fuzzer_tool.core.edge_tracker import CALIBRATION_PRUNE_SLACK, EdgeTracker
+from fuzzer_tool.services import fuzzer as fuzzer_mod
 from fuzzer_tool.services.fuzzer import Fuzzer
 
 
 class _FakeShm:
     """Minimal SHM surface required by ``_calibrate_seed_baselines``."""
 
+    def __init__(self, edge_sets=None):
+        self._sets = itertools.cycle(edge_sets or [{1, 2, 3}])
+        self._cur = {1, 2, 3}
+
     def is_new_coverage_with_edges(self):
-        return True, {1, 2, 3}
+        self._cur = set(next(self._sets))
+        return True, self._cur
 
     def get_edge_counts(self):
-        return {1: 1, 2: 1, 3: 1}
+        return dict.fromkeys(self._cur, 1)
 
     def read_stack_depth(self):
         return 0
@@ -41,10 +54,10 @@ class _FakeCorpusManager:
 class _FakeFuzzer:
     """A Fuzzer-shaped object that drives only ``_calibrate_seed_baselines``."""
 
-    def __init__(self, tracker: EdgeTracker, corpus: list[bytes]):
+    def __init__(self, tracker: EdgeTracker, corpus: list[bytes], edge_sets=None):
         self._seed_calibration = True
         self.use_coverage = True
-        self.shm_cov = _FakeShm()
+        self.shm_cov = _FakeShm(edge_sets)
         self.multi_targets = False
         self.corpus = corpus
         self._edge_tracker = tracker
@@ -104,24 +117,63 @@ def test_prune_flag_blocks_eviction() -> None:
     assert len(tracker.seed_edges) <= tracker.max_tracked_seeds
 
 
-def test_calibration_defers_prune_until_after_loop(monkeypatch) -> None:
-    """Prune fires with the flag restored, not while the loop is running."""
-    tracker = EdgeTracker(max_tracked_seeds=1)
-    fake = _FakeFuzzer(tracker, [b"a", b"b", b"c"])
+def test_calibration_slack_then_single_bound_enforcement(monkeypatch) -> None:
+    """The loop runs with slack > 1; the bound is enforced once after it."""
+    tracker = EdgeTracker(max_tracked_seeds=2)
+    corpus = [bytes([i]) for i in range(12)]
+    fake = _FakeFuzzer(tracker, corpus, [{100 + i} for i in range(12)])
 
-    seen_true: list[bool] = []
+    slack_seen: list[float] = []
+    peak = [0]
     original = EdgeTracker._maybe_prune
 
     def spy(self):
-        seen_true.append(self._prune_enabled)
+        slack_seen.append(self._prune_slack)
+        peak[0] = max(peak[0], len(self.seed_edges))
         return original(self)
 
     monkeypatch.setattr(EdgeTracker, "_maybe_prune", spy)
 
     Fuzzer._calibrate_seed_baselines(fake)
 
-    # The pass must have disabled pruning (we saw the flag False), and the
-    # bound must be enforced exactly once after the loop (one True).
-    assert False in seen_true
-    assert seen_true.count(True) == 1
+    assert CALIBRATION_PRUNE_SLACK in slack_seen  # loop ran with the slack
+    assert slack_seen[-1] == 1.0  # restored before the final prune
+    # Bounded during the loop (slack * max + one insertion), not unbounded.
+    assert peak[0] <= int(2 * CALIBRATION_PRUNE_SLACK) + 1
     assert len(tracker.seed_edges) <= tracker.max_tracked_seeds
+    assert tracker._prune_slack == 1.0
+
+
+def test_calibration_redundant_seeds_keep_no_per_seed_state() -> None:
+    """A seed adding no edge feeds the global counters but is not tracked."""
+    tracker = EdgeTracker(max_tracked_seeds=100)
+    fake = _FakeFuzzer(tracker, [b"a", b"b", b"c"], [{1, 2, 3}, {1, 2}, {2, 3}])
+
+    Fuzzer._calibrate_seed_baselines(fake)
+
+    assert len(tracker.seed_edges) == 1  # only the first seed owns anything
+    assert tracker.cumulative_edges == {1, 2, 3}
+    assert tracker._global_edge_hits == {1: 2, 2: 3, 3: 2}
+    assert tracker._aggregate_total_count == 7
+    assert not tracker._absorb_pending
+
+
+def test_calibration_entry_budget_forces_early_prune(monkeypatch) -> None:
+    """Wide seeds trip the edge-entry budget before the seed-count slack."""
+    monkeypatch.setattr(fuzzer_mod, "CALIBRATION_EDGE_ENTRY_BUDGET", 10)
+    tracker = EdgeTracker(max_tracked_seeds=10)
+    sets = [set(range(i * 4, i * 4 + 4)) for i in range(8)]
+    fake = _FakeFuzzer(tracker, [bytes([i]) for i in range(8)], sets)
+
+    pruned: list[int] = []
+    original = EdgeTracker.prune_to_bound
+
+    def spy(self):
+        pruned.append(len(self.seed_edges))
+        return original(self)
+
+    monkeypatch.setattr(EdgeTracker, "prune_to_bound", spy)
+
+    Fuzzer._calibrate_seed_baselines(fake)
+
+    assert pruned, "entry budget never forced a prune"

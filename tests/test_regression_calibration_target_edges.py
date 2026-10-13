@@ -73,9 +73,12 @@ def test_regression_calibration_target_edges():
     assert tracker.seed_target_edges == {}
     assert tracker.target_cumulative_edges == {}
 
-    # The coverage itself must still land.
-    for s in seeds:
-        assert tracker.seed_edges[seed_key(s)] == edges
+    # The coverage itself must still land: the first seed owns the edges, the
+    # second adds none and is folded into the global hit counts untracked.
+    assert tracker.seed_edges[seed_key(seeds[0])] == edges
+    assert seed_key(seeds[1]) not in tracker.seed_edges
+    assert tracker.cumulative_edges == edges
+    assert set(tracker._global_edge_hits.values()) == {2}
 
 
 def test_calibration_matches_fuzz_loop_contract():

@@ -22,6 +22,7 @@ import zlib
 from array import array
 from collections import defaultdict
 from collections.abc import Callable
+from itertools import repeat
 
 from fuzzer_tool.core import fast_json as json
 from fuzzer_tool.core.crc32 import crc32_ieee
@@ -68,6 +69,15 @@ COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
 # rather than being pruned to half.
 MAX_TRACKED_SEEDS = 1_000
 PRUNE_BATCH_FRAC = 0.1
+# Seed calibration lets the tracked-seed count overshoot max_tracked_seeds by
+# this factor before pruning, so a wide corpus pays the prune pass once per
+# (slack - 1) * max_tracked_seeds insertions instead of once per batch, while
+# memory stays bounded (fully deferring it grew seed_edges without limit).
+CALIBRATION_PRUNE_SLACK = 4.0
+# Redundant-seed statistics are folded into the global counters in batches of
+# about this many (edge, count) entries: one sort per batch instead of one
+# dict update per edge per seed.
+ABSORB_FLUSH_ENTRIES = 4_000_000
 
 try:
     import numpy as np
@@ -887,6 +897,11 @@ class EdgeTracker:
         self._global_edge_hits: dict[int, int] = {}
         # Pruning control flag
         self._prune_enabled: bool = True
+        # Multiplier on max_tracked_seeds before _maybe_prune fires (1.0 = off)
+        self._prune_slack: float = 1.0
+        # absorb_redundant() batch: [(edge_ids, counts)] awaiting flush
+        self._absorb_pending: list = []
+        self._absorb_entries: int = 0
 
         # Which key space the tracked dicts are in. record_edges() accepts two
         # kinds of input that produce DIFFERENT and incompatible keys:
@@ -1071,6 +1086,82 @@ class EdgeTracker:
             self._f0_history.append((len(self.cumulative_edges), self._f0.estimate()))
 
         return new_contributions
+
+    def is_redundant(self, edge_ids) -> bool:
+        """True when *edge_ids* adds nothing to ``cumulative_edges``."""
+        return (
+            _HAS_NUMPY
+            and bool(self.cumulative_edges)
+            and self.cumulative_edges.issuperset(edge_ids)
+        )
+
+    def absorb_redundant(self, edge_ids, hit_counts: dict[int, int] | None = None) -> None:
+        """Fold an execution that found no new edge into the global statistics.
+
+        Equivalent to ``record_edges`` followed by the prune that would evict
+        this seed first (it owns nothing no other seed covers): the aggregate
+        and Good-Turing hit counters still see its hits, but no per-seed set,
+        hit-count dict, owner tally, MinHash signature or metadata is kept.
+        That per-seed state is ~100 bytes per edge, which is what exhausts RAM
+        on a corpus of 10^5 seeds.  Entries are buffered and merged by
+        ``flush_absorbed`` with one sort per batch.
+        """
+        n = len(edge_ids)
+        if not n:
+            return
+        ids = np.fromiter(edge_ids, dtype=np.int64, count=n)
+        if hit_counts:
+            vals = np.fromiter(map(hit_counts.get, edge_ids, repeat(1)), dtype=np.int64, count=n)
+        else:
+            vals = np.ones(n, dtype=np.int64)
+        self._absorb_pending.append((ids, vals))
+        self._absorb_entries += n
+        if self._absorb_entries >= ABSORB_FLUSH_ENTRIES:
+            self.flush_absorbed()
+
+    def flush_absorbed(self) -> None:
+        """Merge buffered ``absorb_redundant`` entries into the global counters."""
+        if not self._absorb_pending:
+            return
+        self._note_key_space("edge_id")
+        ids = np.concatenate([p[0] for p in self._absorb_pending])
+        vals = np.concatenate([p[1] for p in self._absorb_pending])
+        self._absorb_pending.clear()
+        self._absorb_entries = 0
+        order = np.argsort(ids, kind="stable")
+        ids, vals = ids[order], vals[order]
+        starts = np.flatnonzero(np.concatenate(([True], ids[1:] != ids[:-1])))
+        uniq = ids[starts].tolist()
+        sums = np.add.reduceat(vals, starts).tolist()
+        agg, agg_get = self._aggregate_totals, self._aggregate_totals.get
+        gh, gh_get = self._global_edge_hits, self._global_edge_hits.get
+        top = self.max_hit_count
+        for edge_id, val in zip(uniq, sums, strict=True):
+            agg[edge_id] = agg_get(edge_id, 0) + val
+            g = gh_get(edge_id, 0) + val
+            gh[edge_id] = g
+            if g > top:
+                top = g
+        if self._f0_enabled:
+            f0_update = self._f0.update
+            for edge_id in uniq:
+                f0_update(edge_id)
+        self._aggregate_total_count += int(vals.sum())
+        self.max_hit_count = top
+        self._spectrum_dirty = True
+        self._aggregate_cache = None
+
+    def prune_to_bound(self) -> None:
+        """Prune now to the normal bound, ignoring any calibration slack."""
+        slack, self._prune_slack = self._prune_slack, 1.0
+        try:
+            self._maybe_prune()
+        finally:
+            self._prune_slack = slack
+
+    def tracked_edge_entries(self) -> int:
+        """Total (seed, edge) pairs held by the per-seed edge sets."""
+        return sum(map(len, self.seed_edges.values()))
 
     def _record_seed_meta(
         self,
@@ -1345,7 +1436,7 @@ class EdgeTracker:
         """
         if not self._prune_enabled:
             return
-        if len(self.seed_edges) <= self.max_tracked_seeds:
+        if len(self.seed_edges) <= int(self.max_tracked_seeds * self._prune_slack):
             return
 
         batch = int(self.max_tracked_seeds * PRUNE_BATCH_FRAC)
