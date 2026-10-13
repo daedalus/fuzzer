@@ -21,7 +21,7 @@ from collections import Counter
 import numpy as np
 
 from fuzzer_tool.core.analyzers.analyzer_recurrence import Recurrence
-from fuzzer_tool.core.cadence import bucket, due
+from fuzzer_tool.core.cadence import bucket, due, phase_of
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
 from fuzzer_tool.core.coverage_noise import fake_novelty_factor
@@ -1904,7 +1904,14 @@ class SeedPicker:
             gt = f._edge_tracker.good_turing_estimate()
             sat = gt.get("saturation", 0.0)
             f._saturation = sat
-            f._saturation_exec = exec_count
+            # First evaluation only: stamp it phase-late so the refresh lattice
+            # leaves the 2000-multiples (core/cadence.py). The gap between
+            # refreshes only grows, so the minimum spacing is unchanged.
+            f._saturation_exec = exec_count + (
+                phase_of("seed_picker.saturation", SATURATION_REFRESH_EXECS)
+                if last_eval is None
+                else 0
+            )
             # Fit only when the gate would engage: early runs refresh on
             # every new edge and pay nothing.
             f._saturation_growing = sat >= SATURATION_GATE and self._zipf_growing()

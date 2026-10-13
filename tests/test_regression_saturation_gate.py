@@ -14,6 +14,7 @@ estimated sample coverage is >= 0.99. Three properties were missing:
 
 import types
 
+from fuzzer_tool.core.cadence import phase_of
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 from fuzzer_tool.services.seed_picker import (
     SATURATION_MAX_GATED_EXECS,
@@ -67,10 +68,13 @@ class TestGateIsReEvaluated:
         # Saturation drops, but no new edge is recorded, so the old
         # invalidation path never fires.
         f._edge_tracker.good_turing_estimate = lambda: {"saturation": 0.2}
-        f.exec_count = SATURATION_REFRESH_EXECS - 1
+        # The first evaluation is stamped phase-late (core/cadence.py), so the
+        # refresh comes at REFRESH + phase; it is never earlier than REFRESH.
+        phase = phase_of("seed_picker.saturation", SATURATION_REFRESH_EXECS)
+        f.exec_count = SATURATION_REFRESH_EXECS + phase - 1
         assert p._saturation_gate() is True  # still inside the refresh window
 
-        f.exec_count = SATURATION_REFRESH_EXECS
+        f.exec_count = SATURATION_REFRESH_EXECS + phase
         f._last_new_edge_exec = f.exec_count
         assert p._saturation_gate() is False
 

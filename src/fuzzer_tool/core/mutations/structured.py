@@ -1442,7 +1442,17 @@ def bitcast_float(data: bytes, rng) -> bytes:
         value = struct.unpack(fmt, data[offset : offset + width])[0]
     except struct.error:
         return data
-    strategy = rng.randint(0, 4)
+    strategy = rng.randint(0, 5)
+    if strategy == 5:
+        # Pathological bit patterns (denormal edges, 1 ulp from 1.0, the
+        # 2^53 / 2^24 x+1==x boundary, NaN payloads, -0.0).  Written as raw
+        # bits: struct.pack of a Python float would canonicalise the NaN
+        # payload and lose exactly the patterns this arm exists for.
+        bits = rng.choice(_FLOAT_PATTERNS)[1 if width == 4 else 0]
+        packed = bits.to_bytes(width, "little" if endian == "<" else "big")
+        out = bytearray(data)
+        out[offset : offset + width] = packed
+        return bytes(out)
     if strategy == 0:
         value = 0.0
     elif strategy == 1:

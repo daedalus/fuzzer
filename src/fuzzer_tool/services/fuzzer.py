@@ -50,7 +50,7 @@ from fuzzer_tool.core import z3_budget
 from fuzzer_tool.core.analyzers.analyzer_elo import POS_STRATEGY_PREFIX, strategy_display_name
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import byte_entropy_pct
-from fuzzer_tool.core.cadence import phase_of
+from fuzzer_tool.core.cadence import due, phase_of
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import WALL_CLOCK, Clock, ClockMode, clock_of
 from fuzzer_tool.core.cmplog import CmplogRecords
@@ -1941,8 +1941,8 @@ class Fuzzer:
         # Drop-driven resize bookkeeping. The interval is in executions and
         # only rate-limits the check; the stats interval already gates how
         # often the surrounding block runs at all.
-        self._drop_resize_checked_at = 0
         self._drop_resize_interval = 1000
+        self._drop_resize_checked_at = phase_of("fuzzer.drop_resize", self._drop_resize_interval)
         self._drop_cap_warned = False
         self._stall_recovery_execs = 0  # execs spent in recovery mode
         self._stall_reseed_count = 0  # times the RNG was reseeded on stall
@@ -6086,7 +6086,7 @@ class Fuzzer:
             f"{1 if has_new_coverage else 0},{1 if is_crash else 0},"
             f"{'+'.join(self._last_ops_used)}\n"
         )
-        if self.exec_count % 100 == 0:
+        if due(self.exec_count, 100, "fuzzer.ablation_flush"):
             self._ablation_file.flush()
 
     def _flush_pending_minimize(self):

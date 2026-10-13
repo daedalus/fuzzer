@@ -292,9 +292,14 @@ class TestTangScheduler:
     def test_maybe_refit_honours_the_interval(self):
         tracker, _ = _low_rank_tracker()
         sched = TangRecommendationScheduler(RandPool(seed=1), refit_interval=500)
+        # The first fit is immediate; its stamp carries the site's cadence phase,
+        # so the second lands at interval + phase (never earlier than interval).
+        from fuzzer_tool.core.cadence import phase_of
+
+        phase = phase_of("tang.refit", 500)
         assert sched.maybe_refit(tracker, exec_count=0) is True
-        assert sched.maybe_refit(tracker, exec_count=499) is False
-        assert sched.maybe_refit(tracker, exec_count=500) is True
+        assert sched.maybe_refit(tracker, exec_count=499 + phase) is False
+        assert sched.maybe_refit(tracker, exec_count=500 + phase) is True
         assert sched.refits == 2
 
     def test_stats_reports_the_fitted_shape(self):

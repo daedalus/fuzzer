@@ -69,6 +69,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from fuzzer_tool.core.cadence import phase_of
+
 log = logging.getLogger(__name__)
 
 # The fuzzer instance is passed around duck-typed (mirrors operator_registry's
@@ -524,7 +526,9 @@ def _activate_elo(f: FuzzerLike) -> None:
     )
     log.info("Elo rating system enabled (k=16, decay=0.99)")
     f._elo_decay_interval = 100
-    f._elo_decay_counter = 0
+    # Start part-way through the first period so the first decay does not land
+    # on the same round as the other 100-period sites (see core/cadence.py).
+    f._elo_decay_counter = phase_of("elo.decay", f._elo_decay_interval)
     f._elo_match_window = []
     elo_data = f._state_store.get("elo")
     if elo_data is not None:

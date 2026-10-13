@@ -54,6 +54,7 @@ from __future__ import annotations
 import collections
 import math
 
+from fuzzer_tool.core.cadence import phase_of
 from fuzzer_tool.core.chi_squared import chi_squared_pvalue
 
 # Footprint of the discovery_rate() sliding window (5 snapshots -> MA(4)).
@@ -159,7 +160,7 @@ class OnlineGarch11:
         self._sum_sq = 0.0
         self._sigma2 = 0.0
         self._eps = 0.0
-        self._last_fit_at = 0
+        self._last_fit_at = phase_of("garch.refit", self._refit_interval) if self._refit_interval else 0
 
     # ── observation ───────────────────────────────────────────────────
 
@@ -187,7 +188,7 @@ class OnlineGarch11:
         self._sum_sq = 0.0
         self._sigma2 = 0.0
         self._eps = 0.0
-        self._last_fit_at = 0
+        self._last_fit_at = phase_of("garch.refit", self._refit_interval) if self._refit_interval else 0
 
     # ── readouts ──────────────────────────────────────────────────────
 

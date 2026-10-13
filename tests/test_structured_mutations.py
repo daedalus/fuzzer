@@ -652,3 +652,42 @@ class TestLmnLock:
         tiny = os.urandom(3)
         for _ in range(20):
             assert len(S.lmn_lock(tiny, rng=rp)) == 3
+
+
+class TestBitcastFloatPatterns:
+    """bitcast_float reaches the _FLOAT_PATTERNS bit patterns, not just 0/inf/nan/x*1e3."""
+
+    def test_writes_every_pattern_class_as_raw_bits(self):
+        import random
+        import struct
+
+        from fuzzer_tool.core.mutations.structured import _FLOAT_PATTERNS, bitcast_float
+
+        class Rng:
+            def __init__(self, seed):
+                self.r = random.Random(seed)
+
+            def randint(self, a, b):
+                return self.r.randint(a, b)
+
+            def choice(self, seq):
+                return self.r.choice(seq)
+
+        seen32, seen64 = set(), set()
+        base = bytes(range(16))
+        for seed in range(4000):
+            out = bitcast_float(base, Rng(seed))
+            assert len(out) == len(base)
+            for off in range(0, 9):
+                for w, seen, idx in ((4, seen32, 1), (8, seen64, 0)):
+                    if off + w > 16 or out[off : off + w] == base[off : off + w]:
+                        continue
+                    for end in ("<", ">"):
+                        bits = int.from_bytes(out[off : off + w], "little" if end == "<" else "big")
+                        if bits in {p[idx] for p in _FLOAT_PATTERNS}:
+                            seen.add(bits)
+        # NaN payloads survive (struct.pack would canonicalise them) and the
+        # denormal / 2^53 boundary patterns are reachable.
+        assert 0x7FF0000000000001 in seen64 or 0x7F800001 in seen32
+        assert 0x4340000000000000 in seen64 or 0x4B800000 in seen32
+        assert len(seen32) + len(seen64) >= 20

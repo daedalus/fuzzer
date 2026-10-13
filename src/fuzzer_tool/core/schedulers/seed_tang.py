@@ -55,6 +55,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from fuzzer_tool.core.cadence import phase_of
+
 #: Rank of the low-rank approximation. Tang's ``k`` is "constant or
 #: polylog(m, n)"; 10 is where the measured reconstruction recall plateaus on
 #: real corpora (rank 5 -> 0.26, rank 10 -> 0.52 on zlib under MNAR masking).
@@ -224,7 +226,16 @@ class TangRecommendationScheduler:
         """
         if exec_count - self._last_refit_exec < self.refit_interval:
             return False
-        self._last_refit_exec = exec_count
+        # The first fit still happens at once. Its stamp is pushed forward by
+        # this site's phase (core/cadence.py), so the SECOND fit lands at
+        # interval + phase and every later one stays on that lattice instead of
+        # on the multiples of 2000 that seed_picker.saturation also uses. The
+        # gap only ever grows, so "at least refit_interval executions between
+        # refits" still holds.
+        first = self._last_refit_exec < 0
+        self._last_refit_exec = exec_count + (
+            phase_of("tang.refit", self.refit_interval) if first else 0
+        )
         return self.refit(edge_tracker)
 
     def refit(self, edge_tracker) -> bool:
