@@ -8587,12 +8587,23 @@ class Fuzzer:
         genuinely carry. Crashes/timeouts during calibration are counted,
         not fatal — a hostile corpus must not kill startup.
         """
+        # Defer pruning during calibration to avoid per‑seed prune cost.
+        edge_tracker = getattr(self, "_edge_tracker", None)
+        prune_was_enabled = getattr(edge_tracker, "_prune_enabled", True)
+        if edge_tracker is not None:
+            edge_tracker._prune_enabled = False
         # --no-calibration: skip the pass, its RSS and its per-seed executions.
         if not self._seed_calibration:
+            if edge_tracker is not None:
+                edge_tracker._prune_enabled = prune_was_enabled
             return
         if not self.use_coverage or not self.shm_cov or self.multi_targets:
+            if edge_tracker is not None:
+                edge_tracker._prune_enabled = prune_was_enabled
             return
         if not self.corpus:
+            if edge_tracker is not None:
+                edge_tracker._prune_enabled = prune_was_enabled
             return
         baseline_edges = 0
         t0 = time.monotonic()
@@ -8643,6 +8654,10 @@ class Fuzzer:
                 f"{baseline_edges} baseline edges "
                 f"({time.monotonic() - t0:.2f}s)"
             )
+        # Re‑enable pruning and perform a final prune to enforce the bound.
+        if edge_tracker is not None:
+            edge_tracker._prune_enabled = prune_was_enabled
+            edge_tracker._maybe_prune()
         explorer = getattr(self, "_crash_explorer", None)
         if explorer is not None and not explorer.variants:
             print("[!] --crash-explore: no seed crashed; nothing to explore")

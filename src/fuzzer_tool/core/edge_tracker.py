@@ -885,6 +885,8 @@ class EdgeTracker:
         self._aggregate_cache: dict[int, float] | None = None
         # Good-Turing: global cumulative hit count per edge (across all seeds)
         self._global_edge_hits: dict[int, int] = {}
+        # Pruning control flag
+        self._prune_enabled: bool = True
 
         # Which key space the tracked dicts are in. record_edges() accepts two
         # kinds of input that produce DIFFERENT and incompatible keys:
@@ -1341,6 +1343,8 @@ class EdgeTracker:
         ceiling was raised to 200,000 in fe8fd42 rather than the cost being
         paid.  Pruning in batches amortises the pass and keeps the bound.
         """
+        if not self._prune_enabled:
+            return
         if len(self.seed_edges) <= self.max_tracked_seeds:
             return
 
