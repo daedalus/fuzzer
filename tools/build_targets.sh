@@ -2388,11 +2388,18 @@ build_vendored_tracecmp_targets() {
     local OUT_SUFFIX="_tracecmp"
     local ALL_FLAGS="$CTX_FLAGS $TRACE_FLAGS $ASAN_FLAGS"
 
-    # png_read
+    # png_read. -D__AFL_CMPLOG=1 is required, not decorative: COMPCOV level 2
+    # (__AFL_COMPCOV_LEVEL=2, byte-level folding of the target's own comparisons
+    # into the edge map) and the trace-cmp callbacks the vendored libpng/zlib
+    # objects call both live in the shim's cmplog layer. Without the define the
+    # shim compiles neither, the .so builds and loads, and COMPCOV level 2 is a
+    # silent no-op. -Wl,-Bsymbolic binds the shim's strong callbacks inside this
+    # .so so a preloaded or sancov-runtime stub cannot interpose them (same link
+    # line as the hand-built COMPCOV A/B). $CMPLOG_LIBS is the -ldl its dlsym needs.
     if [ -f "${TARGETS_SRC:-$TARGETS}/png_read.c" ]; then
-        $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
+        $CC -O2 -g $ALL_FLAGS $CMPLOG_CFLAGS -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
             -o "$TARGETS/png_read${OUT_SUFFIX}.so" \
-            "${TARGETS_SRC:-$TARGETS}/png_read.c" $VENDOR_LIBS $VENDOR_INC 2>/dev/null && \
+            "${TARGETS_SRC:-$TARGETS}/png_read.c" $VENDOR_LIBS $VENDOR_INC $CMPLOG_LIBS 2>/dev/null && \
             ok "png_read${OUT_SUFFIX}.so" || warn "failed: png_read${OUT_SUFFIX}.so"
     fi
 
