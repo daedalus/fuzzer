@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from fuzzer_tool.core.circular_stats import MIN_STRIDE, fold_offsets
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.pos_base import Outcome
@@ -167,7 +167,7 @@ class PositionHarmonicScheduler:
 
     @staticmethod
     def _key(data: bytes) -> int:
-        return hash64(data)
+        return hash64_len(data)
 
     def _state_for(self, data: bytes) -> _State:
         key = self._key(data)

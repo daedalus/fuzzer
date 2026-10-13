@@ -10,7 +10,7 @@ import struct
 
 import pytest
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.mutations import afl_det
 from fuzzer_tool.core.mutations.generic import INTERESTING_8, INTERESTING_16, INTERESTING_32
 from fuzzer_tool.core.operator_registry import REGISTRY
@@ -163,14 +163,14 @@ class TestOperator:
         # interest8 value 0 on a zero byte is a no-op; the cursor must pass it.
         data = b"\x00"
         k = _stage_start(1, "interest8") + INTERESTING_8.index(0)
-        self.engine._afl_det_cursor[hash64(data)] = k
+        self.engine._afl_det_cursor[hash64_len(data)] = k
         out = self.engine._op_afl_det(bytearray(data), 0, data)
         assert bytes(out) != data
-        assert self.engine._afl_det_cursor[hash64(data)] == k + 2
+        assert self.engine._afl_det_cursor[hash64_len(data)] == k + 2
 
     def test_declines_when_sweep_done(self):
         data = b"\x00"
-        self.engine._afl_det_cursor[hash64(data)] = afl_det.det_total(1)
+        self.engine._afl_det_cursor[hash64_len(data)] = afl_det.det_total(1)
         out = self.engine._op_afl_det(bytearray(data), 0, data)
         assert bytes(out) == data
         assert self.f._op_declines.get("afl_det") == 1

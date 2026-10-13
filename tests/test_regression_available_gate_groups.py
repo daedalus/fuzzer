@@ -15,7 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from fuzzer_tool.core import operator_registry as reg
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext, MutatorBase
 from fuzzer_tool.core.operator_registry import REGISTRY, OperatorRegistry, OperatorSpec
 from fuzzer_tool.core.rand_pool import RandPool
@@ -45,7 +45,7 @@ def _ref_available(ops, sniffed, fuzzer, data):
     for i, fn in preds:
         mask[i] = bool(fn(fuzzer, data))
 
-    key = hash64(data) if data else 0
+    key = hash64_len(data) if data else 0
     matched = sniffed.get(key)
     if matched is None:
         matched = frozenset(i for i, _n, sniff in formats if data and sniff(data))

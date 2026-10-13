@@ -162,3 +162,39 @@ def test_hash64_length_extension_distinct():
 def test_xxh64_rejects_str():
     with pytest.raises(TypeError):
         xxh64("abc")  # type: ignore[arg-type]
+
+
+def test_hash64_len_separates_equal_digests(monkeypatch):
+    """Equal 32-bit-weak digests, different lengths -> different keys."""
+    import fuzzer_tool.core.hashing as h
+
+    monkeypatch.setattr(h, "hash64", lambda data: 7)
+    assert h.hash64_len(b"a" * 10) != h.hash64_len(b"b" * 11)
+
+
+def test_hash64_len_same_input_same_key():
+    from fuzzer_tool.core.hashing import hash64_len
+
+    assert hash64_len(_blob(100)) == hash64_len(bytes(_blob(100)))
+
+
+def test_hash64_len_empty_and_memoryview():
+    from fuzzer_tool.core.hashing import hash64_len
+
+    assert hash64_len(b"") == hash64_len(memoryview(b""))
+    assert hash64_len(b"") != hash64_len(b"\0")
+
+
+def test_length_keyed_table_no_merge_on_collision(monkeypatch):
+    """A colliding digest must not hand a seed another length's bins."""
+    import fuzzer_tool.core.hashing as h
+    from fuzzer_tool.core.schedulers._bin_rates import BinRates
+
+    from tests.test_pos_bin_rates import ScriptedRng
+
+    monkeypatch.setattr(h, "hash64", lambda data: 7)
+    rates = BinRates(ScriptedRng(), 1.0, 1.0)
+    rates.credit(b"a" * 100, [3], 1.0)
+
+    assert rates.width(b"b" * 90_000) is None
+    assert rates.counts(b"b" * 90_000) is None

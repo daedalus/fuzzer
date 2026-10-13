@@ -32,7 +32,7 @@ from __future__ import annotations
 from collections.abc import Iterable, Sequence
 from typing import Any
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.schedulers.seed_good_turing import (
@@ -208,7 +208,7 @@ class PositionGoodTuringScheduler:
 
     @staticmethod
     def _key(data: bytes) -> int:
-        return hash64(data)
+        return hash64_len(data)
 
     def _state_for(self, data: bytes, offsets: Sequence[int]) -> _SeedState | None:
         """The seed's state, created on first use; None when no offset is usable."""

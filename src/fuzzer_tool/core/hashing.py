@@ -5,7 +5,7 @@ Two families, split by whether the digest outlives the process:
 * ``xxh64`` / ``key16`` -- XXH64, bit-exact with the reference. Corpus
   filenames and ``seed_meta`` keys are persisted, so the scheme must not
   change under an existing corpus. Pure Python: ~150 us per 4 KiB.
-* ``hash64`` / ``hash64_seeded`` -- CRC32 | Adler32 << 32. Keys for
+* ``hash64`` / ``hash64_len`` / ``hash64_seeded`` -- CRC32 | Adler32 << 32. Keys for
   in-memory and pickled tables. Stable across processes (unlike the
   builtin ``hash``, which PYTHONHASHSEED salts). ~2.6 us per 4 KiB
   (XXH3 was 0.22, BLAKE2b-64 6.7). Not collision-resistant: CRC32 is
@@ -35,6 +35,7 @@ _WORD32 = 4
 _ROT_LANES = (1, 7, 12, 18)
 _U32 = 0xFFFFFFFF
 _HI_SHIFT = 32
+_LEN_SHIFT = 64
 _KEY_HEX_CHARS = 16
 
 
@@ -129,6 +130,15 @@ def key16(data: bytes) -> str:
 def hash64(data: bytes) -> int:
     """64-bit content key for tables; stable across processes."""
     return crc32(data) | (adler32(data) << _HI_SHIFT)
+
+
+def hash64_len(data: bytes) -> int:
+    """``hash64`` with the length above bit 64: key for length-sized state.
+
+    A digest collision across lengths cannot share a table whose bins
+    were sized for another length.
+    """
+    return hash64(data) | (len(data) << _LEN_SHIFT)
 
 
 def hash64_seeded(data: bytes, seed: int) -> int:

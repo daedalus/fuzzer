@@ -36,7 +36,7 @@ from collections import OrderedDict
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.weizz_tags import TagFlags
@@ -155,7 +155,7 @@ class PositionCmplogScheduler:
         if not isinstance(meta, dict):
             return None
 
-        key = hash64(data)
+        key = hash64_len(data)
         sig = self._signature(meta)
         hit = self._cache.get(key)
         if hit is not None and hit.sig == sig:

@@ -31,7 +31,7 @@ from fuzzer_tool.core.cond_stmt import CondStmt
 from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.gaussian import norm_cdf
 from fuzzer_tool.core.gravity import DONOR_CANDIDATES, pair_terms, pick_index
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64, hash64_len
 from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations import (
@@ -2081,7 +2081,7 @@ class OperatorEngine:
         the bandit decides how often. Applied to *buf*, so stacked ops before
         it still count. Declines once the parent's sweep is done.
         """
-        key = hash64(data)
+        key = hash64_len(data)
         cursors = self._afl_det_cursor
         k = cursors.pop(key, 0)
         base = bytes(buf)
@@ -5955,7 +5955,7 @@ class OperatorEngine:
         """
         if len(data) < _REGION_MIN_LEN:
             return None
-        key = hash64(data)
+        key = hash64_len(data)
         entry = self._region_cache.get(key, _REGION_MISS)
         if entry is not _REGION_MISS:
             return entry
@@ -6043,7 +6043,7 @@ class OperatorEngine:
         if region_idx is None:
             return None
 
-        key = hash64(data)
+        key = hash64_len(data)
         estimators = self._region_liveness.setdefault(key, [None] * len(bounds))
 
         diff_edges = baseline_edges ^ mutant_edges
@@ -6075,7 +6075,7 @@ class OperatorEngine:
         estimator recorded for this region yet" -- absence of an
         estimator is not evidence of anything.
         """
-        key = hash64(data)
+        key = hash64_len(data)
         estimators = self._region_liveness.get(key)
         if not estimators or region_idx >= len(estimators):
             return 1.0
@@ -6111,7 +6111,7 @@ class OperatorEngine:
         if entry is None:
             return None
         bounds = entry[1]
-        key = hash64(data)
+        key = hash64_len(data)
         estimators = self._region_liveness.get(key)
         if not estimators:
             return None
@@ -6171,7 +6171,7 @@ class OperatorEngine:
         if entry is None:
             return None
         cumulative, bounds, total = entry
-        estimators = self._region_liveness.get(hash64(data))
+        estimators = self._region_liveness.get(hash64_len(data))
         if not estimators or not any(
             e is not None and e.is_converged and e.mask == 0 for e in estimators
         ):

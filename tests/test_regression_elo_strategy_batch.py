@@ -1,89 +1,132 @@
-"""Elo strategy matches: one batched call per (strategy, opponents, score).
+"""Elo strategy matches: only the arm that played is rated.
 
-Every round plays the served strategy against each other pool member
-(position arena, seed and operator schedulers): 268k record_strategy_match
-calls per 2000 ``--hail-mary`` execs, each re-doing three setdefaults, the
-attribute reads and the K lookup. ``record_strategy_matches`` hoists those
-and runs the same arithmetic in the same order; the oracle is the per-match
-loop on a copy, compared exactly, dict order included.
+Every round the served strategy is scored against the other pool members
+(position arena, seed and operator schedulers). Rating the idle ones with
+``1 - score`` credited each of them on every miss, so ratings tracked pick
+frequency instead of hit rate. Now the played arm is judged against each
+idle arm's historical mean score; idle arms are not rated, counted or
+credited.
 """
-
-import copy
-import random
 
 import pytest
 
 from fuzzer_tool.core.analyzers.analyzer_elo import BayesianEloTracker, EloTracker
 from fuzzer_tool.core.rand_pool import RandPool
 
-NAMES = [f"s{i}" for i in range(12)]
+_MAKERS = [lambda: BayesianEloTracker(rng=RandPool(seed=0)), EloTracker]
+_IDS = ["bayesian", "point"]
+_POOL = ("a", "b", "c", "d")
+_PICK_CYCLE = ("a",) * 7 + ("b", "c", "d")
+_HITS_IN_TEN = 3
+_TOL = 25.0
 
 
-def _state(t):
-    return [
-        list(d.items())
-        for d in (
-            t._strategy_mu,
-            t._strategy_sigma_sq,
-            t._strategy_match_count,
-            t._strategy_win_count,
-        )
-    ]
+def _ratings(t):
+    """Raw ratings; the ranking hides arms below min_matches."""
+    return dict(t._strategy_mu if hasattr(t, "_strategy_mu") else t._strategy_ratings)
 
 
-def _loop(t, a, opponents, score):
-    for b in opponents:
-        t.record_strategy_match(a, b, score)
+def _play(t, arm, score, pool=_POOL):
+    t.record_strategy_matches(arm, [o for o in pool if o != arm], score)
 
 
-def _script(seed):
-    rnd = random.Random(seed)
-    for _ in range(60):
-        a = rnd.choice(NAMES)
-        opponents = rnd.sample(NAMES, rnd.randrange(0, len(NAMES)))
-        score = rnd.choice((0.0, 0.5, 1.0, rnd.random()))
-        yield a, opponents, score
+def _rate(make, rounds):
+    """Equal hit rate (3 in 10 per arm), arm 'a' picked 7x as often as the rest."""
+    t = make()
+    plays = dict.fromkeys(_POOL, 0)
+    for i in range(rounds):
+        arm = _PICK_CYCLE[i % len(_PICK_CYCLE)]
+        _play(t, arm, 1.0 if plays[arm] % 10 < _HITS_IN_TEN else 0.0)
+        plays[arm] += 1
+    return _ratings(t)
 
 
-@pytest.mark.parametrize("seed", range(4))
-def test_regression_elo_strategy_batch(seed):
-    """Bayesian tracker: batched equals the per-match loop, bit for bit."""
-    batched = BayesianEloTracker(rng=RandPool(seed=0))
-    looped = copy.deepcopy(batched)
-    control = copy.deepcopy(batched)
-    for a, opponents, score in _script(seed):
-        batched.record_strategy_matches(a, opponents, score)
-        _loop(looped, a, opponents, score)
-        _loop(control, a, opponents, score)
-    # Control (Hard Rule 46): the oracle against a second run of itself.
-    assert _state(control) == _state(looped)
-    assert _state(batched) == _state(looped)
+@pytest.mark.parametrize("make", _MAKERS, ids=_IDS)
+def test_rating_tracks_hit_rate_not_pick_frequency(make):
+    """Falsification: equal hit rates -> the frequent arm is not rated lower."""
+    r = _rate(make, 4000)
+    rest = [r["b"], r["c"], r["d"]]
+
+    assert abs(r["a"] - sum(rest) / len(rest)) < _TOL
 
 
-def test_self_match_and_repeats_match_loop():
-    """Adversarial: the strategy in its own opponent list, and repeated opponents."""
-    batched = BayesianEloTracker(rng=RandPool(seed=0))
-    looped = copy.deepcopy(batched)
-    opponents = ["x", "a", "x", "a", "y"]
-    for score in (0.9, 0.1, 0.5):
-        batched.record_strategy_matches("a", opponents, score)
-        _loop(looped, "a", opponents, score)
-    assert _state(batched) == _state(looped)
+@pytest.mark.parametrize("make", _MAKERS, ids=_IDS)
+def test_better_hit_rate_rates_higher(make):
+    """Adversarial: frequency is irrelevant, hit rate is not."""
+    t = make()
+    plays = dict.fromkeys(_POOL, 0)
+    for i in range(4000):
+        arm = _PICK_CYCLE[i % len(_PICK_CYCLE)]
+        good = arm == "d"  # rarest arm hits 6 in 10, the rest 3 in 10
+        score = 1.0 if plays[arm] % 10 < (6 if good else 3) else 0.0
+        plays[arm] += 1
+        _play(t, arm, score)
+
+    r = _ratings(t)
+    assert r["d"] > max(r["a"], r["b"], r["c"]) + _TOL
 
 
-def test_empty_opponents_creates_nothing():
-    """Adversarial: no opponents leaves the tables untouched."""
-    t = BayesianEloTracker(rng=RandPool(seed=0))
+def test_rating_control_is_stable_against_itself():
+    """Control (Hard Rule 46): the same script twice gives the same ratings."""
+    assert _rate(_MAKERS[0], 600) == _rate(_MAKERS[0], 600)
+
+
+@pytest.mark.parametrize("make", _MAKERS, ids=_IDS)
+def test_idle_arm_untouched_by_others_play(make):
+    """A miss must not move, count or credit an arm that did not play."""
+    t = make()
+    _play(t, "a", 1.0)  # first round has no reference: nothing rated yet
+    _play(t, "b", 1.0)  # rated against a's history
+    _play(t, "a", 1.0)
+    before = _ratings(t)["b"], t._strategy_match_count["b"], dict(t._strategy_win_count)
+    for _ in range(50):
+        _play(t, "a", 0.0)
+
+    after = _ratings(t)["b"], t._strategy_match_count["b"], dict(t._strategy_win_count)
+    assert after[:2] == before[:2]
+    assert after[2].get("b") == before[2].get("b")
+
+
+@pytest.mark.parametrize("make", _MAKERS, ids=_IDS)
+def test_unplayed_opponent_is_no_reference(make):
+    """Adversarial: an opponent that never played gives A no match and is not created."""
+    t = make()
+    t.record_strategy_matches("a", ["ghost"], 0.0)
+
+    assert _ratings(t) == {}
+    assert "ghost" not in t._strategy_match_count
+
+
+@pytest.mark.parametrize("make", _MAKERS, ids=_IDS)
+def test_self_and_empty_opponents_are_skipped(make):
+    """Adversarial: self in the opponent list, and an empty list."""
+    t = make()
     t.record_strategy_matches("a", [], 1.0)
-    assert _state(t) == [[], [], [], []]
+    t.record_strategy_matches("a", ["a", "a"], 1.0)
+
+    assert _ratings(t) == {}
 
 
-def test_point_elo_tracker_has_the_batch_too():
-    """Falsification: the point-estimate tracker batches through the same loop."""
-    batched = EloTracker()
-    looped = copy.deepcopy(batched)
-    for a, opponents, score in _script(9):
-        batched.record_strategy_matches(a, opponents, score)
-        _loop(looped, a, opponents, score)
-    assert batched._strategy_ratings == looped._strategy_ratings
-    assert batched._strategy_match_count == looped._strategy_match_count
+def test_point_tracker_matches_reference():
+    """One miss against one idle arm, checked against the formula by hand."""
+    t = EloTracker()
+    t.record_strategy_matches("b", ["a"], 0.5)  # b played once, score 0.5, no reference
+    t.record_strategy_matches("a", ["b"], 1.0)
+
+    expected_s = 0.5 + (1.0 - 0.5) / 2.0
+    ea = t._expected_score(t.default_rating, t.default_rating)
+    assert _ratings(t)["a"] == pytest.approx(t.default_rating + t.k_factor * (expected_s - ea))
+
+
+@pytest.mark.parametrize("make", _MAKERS, ids=_IDS)
+def test_baseline_survives_roundtrip(make):
+    """Falsification: the baseline is part of the persisted state."""
+    t = make()
+    for _ in range(5):
+        _play(t, "b", 1.0)
+    fresh = make()
+    fresh.from_dict(t.to_dict())
+    _play(fresh, "a", 1.0)
+    _play(t, "a", 1.0)
+
+    assert _ratings(fresh) == _ratings(t)

@@ -20,7 +20,7 @@ import inspect
 
 import pytest
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.joint_liveness import JointLiveness
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.operators import (
@@ -73,7 +73,7 @@ def _dead_engine(joint):
     for lo, _hi in bounds:
         for _ in range(_LIVENESS_SWITCH_AFTER + 1):
             engine.record_coverage_diff(seed, lo + 1, set(BASE), set(BASE))
-    key = hash64(seed)
+    key = hash64_len(seed)
     for idx in range(len(bounds)):
         assert engine._region_liveness_factor(seed, idx) == _LIVENESS_DEAD_WEIGHT
     return engine, seed, bounds, key

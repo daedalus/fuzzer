@@ -264,9 +264,9 @@ class TestCache:
         s._targets(first)  # touch: now most recent
         s._targets(b"one-more-seed!!!")
         assert len(s._cache) == MAX_SEEDS
-        from fuzzer_tool.core.hashing import hash64
+        from fuzzer_tool.core.hashing import hash64_len
 
-        assert hash64(first) in s._cache
+        assert hash64_len(first) in s._cache
 
     def test_target_cap(self):
         s = _sched(meta={"redqueen_offsets": list(range(MAX_TARGETS + 100))})

@@ -34,7 +34,7 @@ DIB_V4HEADER = 108
 # minutes. Above these the pixel mutator falls back to plain byte flips.
 BMP_WFC_MAX_CELLS = 512  # row width in tiles
 BMP_WFC_MAX_TILES = 64  # distinct tile alphabet
-BMP_WFC_MAX_TOTAL = 200_000  # tiles across all rows
+BMP_WFC_MAX_TOTAL = 2_000  # tiles across all rows (512x64 took 7.4 s at 200k)
 
 
 @dataclass

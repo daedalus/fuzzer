@@ -39,7 +39,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.op_kl_ducb import KL_DUCBScheduler
 from fuzzer_tool.core.schedulers.pos_base import Outcome
@@ -127,7 +127,7 @@ class PositionKLDUCBScheduler:
 
     @staticmethod
     def _key(data: bytes) -> int:
-        return hash64(data)
+        return hash64_len(data)
 
     def _bandit_for(self, data: bytes) -> _Bandit:
         key = self._key(data)

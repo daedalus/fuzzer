@@ -12,13 +12,23 @@ from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.wfc import WaveGrid
 
 
+def _tiles(info) -> int:
+    """Tiles the mutator counts: row width in samples times height."""
+    bpp = max(1, info.bit_count // 8)
+    stride = ((abs(info.width) * bpp + 3) // 4) * 4
+    if len(info.pixel_data) < stride * 2:  # _wfc_pixels returns early
+        return 1 << 62
+    return stride // bpp * abs(info.height)
+
+
 def _bmp(seed: int) -> bytes:
     m, r = BmpMutator(seed=seed), RandPool(seed)
     while True:
         b = m._generate_random_bmp(4096, rng=r)
         info = parse_bmp(b)
         if info and abs(info.width) >= 4 and abs(info.height) >= 4 and info.pixel_data:
-            return b
+            if _tiles(info) <= bmp.BMP_WFC_MAX_TOTAL:  # stay under the WFC cap
+                return b
 
 
 def _pixels(data: bytes, seed: int) -> bytes:

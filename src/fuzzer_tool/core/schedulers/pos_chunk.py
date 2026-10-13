@@ -40,7 +40,7 @@ from bisect import bisect_left
 from collections import OrderedDict
 from collections.abc import Sequence
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.mutations.png import parse_png_chunks
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers.pos_base import Outcome
@@ -121,7 +121,7 @@ class PositionChunkScheduler:
         return array("I", (a for a, _ in spans)), array("I", (b for _, b in spans))
 
     def _spans(self, data: bytes) -> tuple[array, array]:
-        key = hash64(data)
+        key = hash64_len(data)
         hit = self._cache.get(key)
         if hit is not None:
             self._cache.move_to_end(key)
@@ -137,7 +137,7 @@ class PositionChunkScheduler:
 
     def spans(self, data: bytes) -> list[tuple[int, int]]:
         """Cached ``(start, end)`` spans for *data* (empty before the first parse)."""
-        hit = self._cache.get(hash64(data))
+        hit = self._cache.get(hash64_len(data))
         return list(zip(hit[0], hit[1], strict=True)) if hit is not None else []
 
     def cached_seeds(self) -> int:

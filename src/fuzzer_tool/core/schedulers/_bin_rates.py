@@ -25,7 +25,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.rand_pool import RandPool
 
 MAX_BINS = 4096  # offsets per seed are binned down to this, as pos_burn_front
@@ -68,7 +68,7 @@ class BinRates:
 
     def reset(self, data: bytes) -> None:
         """Forget *data*'s evidence (the signal it measured changed)."""
-        self._tables.pop(hash64(data), None)
+        self._tables.pop(hash64_len(data), None)
 
     # -- proposal ---------------------------------------------------------------
 
@@ -96,7 +96,7 @@ class BinRates:
         b = int(np.searchsorted(cum, self._rng.random() * cum[-1], side="right"))
         b = min(b, len(cum) - 1)
 
-        width = self._tables[hash64(data)].width
+        width = self._tables[hash64_len(data)].width
         start = b * width
         span = min(width, buf_len - start)
         return start if span <= 1 else start + self._rng.randint(0, span - 1)
@@ -104,12 +104,12 @@ class BinRates:
     # -- introspection ----------------------------------------------------------
 
     def counts(self, data: bytes) -> tuple[np.ndarray, np.ndarray] | None:
-        t = self._tables.get(hash64(data))
+        t = self._tables.get(hash64_len(data))
         return (t.n, t.s) if t is not None else None
 
     def width(self, data: bytes) -> int | None:
         """Bytes per bin for *data*'s table; None when the seed has no evidence."""
-        t = self._tables.get(hash64(data))
+        t = self._tables.get(hash64_len(data))
         return t.width if t is not None else None
 
     def seed_count(self) -> int:
@@ -118,7 +118,7 @@ class BinRates:
     # -- storage ----------------------------------------------------------------
 
     def _table(self, data: bytes, *, create: bool) -> _Table | None:
-        key = hash64(data)
+        key = hash64_len(data)
         t = self._tables.get(key)
         if t is not None:
             self._tables.move_to_end(key)

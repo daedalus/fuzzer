@@ -37,7 +37,7 @@ from collections.abc import Callable, Collection, Sequence
 
 import numpy as np
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers._bin_rates import MAX_SEEDS, BinRates
 from fuzzer_tool.core.schedulers.pos_base import Outcome
@@ -79,7 +79,7 @@ class PositionRareMaskScheduler:
         return best if count(best) <= RARE_MAX else None
 
     def _target(self, data: bytes, *, tick: bool) -> int | None:
-        key = hash64(data)
+        key = hash64_len(data)
         slot = self._targets.get(key)
         if slot is not None and slot[1] < RETARGET_EVERY:
             self._targets.move_to_end(key)

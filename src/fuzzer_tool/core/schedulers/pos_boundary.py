@@ -54,7 +54,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.schedulers._bytecls import BYTE_CLASS
 from fuzzer_tool.core.schedulers.pos_base import Outcome
@@ -171,7 +171,7 @@ class PositionBoundaryScheduler:
         self._cache: OrderedDict[int, tuple[list[int], list[float]]] = OrderedDict()
 
     def _targets(self, data: bytes) -> tuple[list[int], list[float]]:
-        key = hash64(data)
+        key = hash64_len(data)
         hit = self._cache.get(key)
         if hit is not None:
             self._cache.move_to_end(key)

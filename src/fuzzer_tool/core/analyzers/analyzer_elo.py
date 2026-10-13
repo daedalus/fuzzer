@@ -122,6 +122,17 @@ def _record_strategy_win(wins: dict[str, int], a: str, b: str, score_a: float) -
         wins[b] = wins.get(b, 0) + 1
 
 
+def _vs_baseline(score_a: float, plays: int, score_sum: float) -> float | None:
+    """Match score of one round against an idle arm's historical mean score.
+
+    Centred so two arms with equal hit rates average 0.5 whatever their pick
+    frequency; None while the idle arm has no history to compare with.
+    """
+    if plays < 1:
+        return None
+    return 0.5 + (score_a - score_sum / plays) / 2.0
+
+
 def _lbeta(a: float, b: float) -> float:
     return math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
 
@@ -399,6 +410,10 @@ class EloTracker(RoundRecorderMixin):
         self._strategy_ratings: dict[str, float] = {}
         self._strategy_match_count: dict[str, int] = {}
         self._strategy_win_count: dict[str, int] = {}
+        # Rounds each strategy played and their summed scores: the baseline
+        # that idle arms are compared with (see record_strategy_matches).
+        self._strategy_plays: dict[str, int] = {}
+        self._strategy_score_sum: dict[str, float] = {}
 
         # Per-operator reward moments for UCB-style exploration bonus.
         self._reward_moments: dict[str, RunningMoments] = {}
@@ -667,6 +682,44 @@ class EloTracker(RoundRecorderMixin):
         self._strategy_match_count[strategy_b] = self._strategy_match_count.get(strategy_b, 0) + 1
         _record_strategy_win(self._strategy_win_count, strategy_a, strategy_b, score_a)
 
+    def record_strategy_matches(
+        self, strategy_a: str, opponents: Iterable[str], score_a: float
+    ) -> None:
+        """Score *strategy_a*, the arm that played, against each idle opponent.
+
+        Only the arm that played is rated. Rating the idle ones with
+        ``1 - score_a`` credited each of them on every miss, so ratings
+        tracked pick frequency, not hit rate. Each opponent instead supplies
+        its historical mean score as the bar this round is judged against;
+        opponents never played are skipped and self is skipped.
+        """
+        ratings, count = self._strategy_ratings, self._strategy_match_count
+        plays, sums = self._strategy_plays, self._strategy_score_sum
+        k = self.k_factor
+
+        ra = None
+        for b in opponents:
+            if b == strategy_a:
+                continue
+
+            s_ab = _vs_baseline(score_a, plays.get(b, 0), sums.get(b, 0.0))
+            if s_ab is None:
+                continue
+
+            if ra is None:
+                ra = ratings.get(strategy_a, self.default_rating)
+                count.setdefault(strategy_a, 0)
+            ra += k * (s_ab - self._expected_score(ra, ratings.get(b, self.default_rating)))
+            count[strategy_a] += 1
+            if s_ab > 0.5:
+                self._strategy_win_count[strategy_a] = self._strategy_win_count.get(strategy_a, 0) + 1
+
+        if ra is not None:
+            ratings[strategy_a] = ra
+
+        plays[strategy_a] = plays.get(strategy_a, 0) + 1
+        sums[strategy_a] = sums.get(strategy_a, 0.0) + score_a
+
     def select_strategy(self, strategies: list[str], temperature: float = 400.0) -> str:
         """Select a strategy weighted by Elo rating.
 
@@ -800,6 +853,8 @@ class EloTracker(RoundRecorderMixin):
             "strategy_ratings": self._strategy_ratings,
             "strategy_match_count": self._strategy_match_count,
             "strategy_win_count": self._strategy_win_count,
+            "strategy_plays": self._strategy_plays,
+            "strategy_score_sum": self._strategy_score_sum,
             "reward_moments": reward_moments_ser,
         }
 
@@ -819,6 +874,8 @@ class EloTracker(RoundRecorderMixin):
         self._strategy_ratings = data.get("strategy_ratings", {})
         self._strategy_match_count = data.get("strategy_match_count", {})
         self._strategy_win_count = data.get("strategy_win_count", {})
+        self._strategy_plays = data.get("strategy_plays", {})
+        self._strategy_score_sum = data.get("strategy_score_sum", {})
         self._reward_moments = {}
         for op, rm_data in data.get("reward_moments", {}).items():
             rm = RunningMoments()
@@ -905,6 +962,8 @@ class BayesianEloTracker(RoundRecorderMixin):
         # canary-floor evidence (see strategies_below_canary).
         self._strategy_hits: dict[str, int] = {}
         self._strategy_trials: dict[str, int] = {}
+        # Summed scores over those rounds: the bar idle arms are judged by.
+        self._strategy_score_sum: dict[str, float] = {}
 
         # Adaptive K-factor tracking
         self._prediction_errors: array = array("d")
@@ -1094,58 +1153,51 @@ class BayesianEloTracker(RoundRecorderMixin):
     def record_strategy_matches(
         self, strategy_a: str, opponents: Iterable[str], score_a: float
     ) -> None:
-        """``record_strategy_match(strategy_a, b, score_a)`` for each b, in order.
+        """Score *strategy_a*, the arm that played, against each idle opponent.
 
-        Same arithmetic in the same order with lookups hoisted: A's posterior
-        lives in locals between matches and K is cached (strategy matches do
-        not invalidate it). Ratings and dict order are bit-identical to the
-        loop. A self-match goes through the single-match path.
+        Only the arm that played is rated. Rating the idle ones with
+        ``1 - score_a`` credited each of them on every miss, so ratings
+        tracked pick frequency, not hit rate. Each opponent instead supplies
+        its historical mean score as the bar this round is judged against;
+        opponents never played are skipped and self is skipped. Opponent
+        posteriors, counts and wins are untouched and never created.
         """
         mu, sig, count = self._strategy_mu, self._strategy_sigma_sq, self._strategy_match_count
-        wins = self._strategy_win_count
-        init_mu, init_sig = self.initial_mu, self.initial_sigma**2
+        init_mu = self.initial_mu
         beta_sq, tau_sq = self.beta**2, self.tau**2
         expected = self._expected_score
         k = self._effective_k()
-
-        # One call is one round played by strategy_a.
-        trials, hits = self._strategy_trials, self._strategy_hits
-        trials[strategy_a] = trials.get(strategy_a, 0) + 1
-        hits[strategy_a] = hits.get(strategy_a, 0) + (score_a > 0.0)
+        trials, sums = self._strategy_trials, self._strategy_score_sum
 
         mu_a = sig_a = None
         for b in opponents:
             if b == strategy_a:
-                # Flush A, let the single-match path handle the aliasing.
-                if mu_a is not None:
-                    mu[strategy_a], sig[strategy_a] = mu_a, sig_a
-                self.record_strategy_match(strategy_a, b, score_a)
-                mu_a, sig_a = mu[strategy_a], sig[strategy_a]
+                continue
+
+            s_ab = _vs_baseline(score_a, trials.get(b, 0), sums.get(b, 0.0))
+            if s_ab is None:
                 continue
 
             if mu_a is None:
                 mu_a = mu.setdefault(strategy_a, init_mu)
-                sig_a = sig.setdefault(strategy_a, init_sig)
+                sig_a = sig.setdefault(strategy_a, self.initial_sigma**2)
                 count.setdefault(strategy_a, 0)
-            mu_b = mu.setdefault(b, init_mu)
-            sig_b = sig.setdefault(b, init_sig)
-            count.setdefault(b, 0)
 
-            ea = expected(mu_a, mu_b)
-            eb = expected(mu_b, mu_a)
             var_a = sig_a / (sig_a + beta_sq)
-            var_b = sig_b / (sig_b + beta_sq)
-
-            mu_a = mu_a + var_a * k * (score_a - ea)
-            mu[b] = mu_b + var_b * k * ((1.0 - score_a) - eb)
+            mu_a = mu_a + var_a * k * (s_ab - expected(mu_a, mu.get(b, init_mu)))
             sig_a = sig_a * (1.0 - var_a) + tau_sq
-            sig[b] = sig_b * (1.0 - var_b) + tau_sq
             count[strategy_a] += 1
-            count[b] += 1
-            _record_strategy_win(wins, strategy_a, b, score_a)
+            if s_ab > 0.5:
+                self._strategy_win_count[strategy_a] = self._strategy_win_count.get(strategy_a, 0) + 1
 
         if mu_a is not None:
             mu[strategy_a], sig[strategy_a] = mu_a, sig_a
+
+        # One call is one round played by strategy_a.
+        hits = self._strategy_hits
+        trials[strategy_a] = trials.get(strategy_a, 0) + 1
+        hits[strategy_a] = hits.get(strategy_a, 0) + (score_a > 0.0)
+        sums[strategy_a] = sums.get(strategy_a, 0.0) + score_a
 
     def select_strategy(self, strategies: list[str], temperature: float | None = None) -> str:
         """Select a strategy via Thompson sampling from its posterior."""
@@ -1320,6 +1372,7 @@ class BayesianEloTracker(RoundRecorderMixin):
             "strategy_win_count": self._strategy_win_count,
             "strategy_hits": self._strategy_hits,
             "strategy_trials": self._strategy_trials,
+            "strategy_score_sum": self._strategy_score_sum,
             "prediction_errors": list(self._prediction_errors),
             "best_win_rate": list(self._best_win_rate),
         }
@@ -1340,6 +1393,7 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_win_count = data.get("strategy_win_count", {})
         self._strategy_hits = data.get("strategy_hits", {})
         self._strategy_trials = data.get("strategy_trials", {})
+        self._strategy_score_sum = data.get("strategy_score_sum", {})
         self._prediction_errors = array("d", data.get("prediction_errors", []))
         self._best_win_rate = array("d", data.get("best_win_rate", []))
 

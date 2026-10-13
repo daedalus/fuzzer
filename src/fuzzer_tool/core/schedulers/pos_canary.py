@@ -40,7 +40,7 @@ from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
-from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.hashing import hash64_len
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 
 MAX_BINS = 4096  # offsets per seed are binned down to this, as pos_burn_front
@@ -129,7 +129,7 @@ class PositionCanaryScheduler:
 
     @staticmethod
     def _key(data: bytes) -> int:
-        return hash64(data)
+        return hash64_len(data)
 
     def _posterior_for(self, data: bytes) -> _Posterior:
         key = self._key(data)
