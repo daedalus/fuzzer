@@ -549,6 +549,17 @@ static uint64_t *__afl_dropped     = NULL;   /* offset 24: uint64 */
  * generation -- on first claim and on reclaim of a stale entry, never on a
  * plain hit. The fuzzer owns clearing it. */
 static uint64_t *__afl_touched     = NULL;
+
+/* Atomic or plain OR when a slot goes live in the touched bitmap.
+ * -D__AFL_TOUCHED_ATOMIC=0|1 sets the default (1: atomic). $__AFL_TOUCHED_ATOMIC
+ * ("0" or "1", read once at attach by __afl_map_shm; fuzzer-tool
+ * --touched-atomic / --no-touched-atomic) overrides it per run, so one
+ * binary serves both a threaded target and a single-threaded one that
+ * wants the ~30 ns/first-touch back. Read per first touch, never per hit. */
+#ifndef __AFL_TOUCHED_ATOMIC
+#define __AFL_TOUCHED_ATOMIC 1
+#endif
+static int __afl_touched_atomic = __AFL_TOUCHED_ATOMIC;
 #define SHM_TOUCHED_MAGIC   "TOUCHBM1"
 #define SHM_TOUCHED_HEADER  8
 #define SHM_TAIL_BYTES      16
@@ -961,6 +972,17 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
         if (shmctl(shmid, IPC_STAT, &ds) == 0 && (size_t)ds.shm_segsz >= tail_end + bm_bytes) {
             memcpy(base + tail_end, SHM_TOUCHED_MAGIC, SHM_TOUCHED_HEADER);
             __afl_touched = (uint64_t *)(base + tail_end + SHM_TOUCHED_HEADER);
+            const char *ta = getenv("__AFL_TOUCHED_ATOMIC");
+            if (ta && ta[0] && !ta[1] && (ta[0] == '0' || ta[0] == '1')) {
+                __afl_touched_atomic = ta[0] == '1';
+            } else if (ta && ta[0]) {
+                /* A typo must not silently pick a mode the user did not ask for. */
+                char msg[128];
+                int n = snprintf(msg, sizeof(msg),
+                                 "__afl_shim: __AFL_TOUCHED_ATOMIC=%.16s is not 0 or 1"
+                                 " -- ignored, atomic=%d\n", ta, __afl_touched_atomic);
+                if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+            }
         }
     }
 
@@ -1355,18 +1377,14 @@ static inline uint32_t __afl_home_slot(uint32_t edge_id) {
  * Measured cost: +16-24% on the shim's per-exec time at 500 first touches
  * per exec, about 1.2us, against 100us+ saved by the scan on large maps.
  * A single-threaded target can build with -D__AFL_TOUCHED_ATOMIC=0. */
-#ifndef __AFL_TOUCHED_ATOMIC
-#define __AFL_TOUCHED_ATOMIC 1
-#endif
 __attribute__((always_inline))
 static inline void __afl_touch(uint32_t idx) {
     if (!__afl_touched) return;
     uint64_t bit = 1ull << (idx & 63);
-#if __AFL_TOUCHED_ATOMIC
-    __atomic_fetch_or(&__afl_touched[idx >> 6], bit, __ATOMIC_RELAXED);
-#else
-    __afl_touched[idx >> 6] |= bit;
-#endif
+    if (__afl_touched_atomic)
+        __atomic_fetch_or(&__afl_touched[idx >> 6], bit, __ATOMIC_RELAXED);
+    else
+        __afl_touched[idx >> 6] |= bit;
 }
 
 /* Record edge_id in the SHM table for generation gen (see __afl_map_loc). */

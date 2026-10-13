@@ -154,6 +154,8 @@ _EXCLUDED_OPT_IN = frozenset(
         "crash_explore",
         # Coverage-read implementation, not a strategy; slower on small maps.
         "touched_scan",
+        # Shim build knob (atomic vs plain touched-bit OR), not a strategy.
+        "touched_atomic",
         # Coverage-accounting mode, multi-target only: not a strategy, and it
         # changes what every other strategy is rewarded for.
         "shared_virgin",

@@ -162,6 +162,7 @@ from fuzzer_tool.core.shim_health import (
     Attach,
     ShimWatch,
     WriteGuard,
+    export_touched_atomic,
     export_wguard,
     self_test_issues,
 )
@@ -1795,6 +1796,7 @@ class Fuzzer:
         pos_consolidated=False,
         clock=ClockMode.WALL,
         shm_write_guard=WriteGuard.OFF,
+        touched_atomic=None,
         # --zip-seed-corpus (adapters/seed_zip.py). Appended: positional signature.
         zip_seed_corpus=False,
         # --zip-compact-ratio (seed_zip.compact_over). Appended: positional signature.
@@ -1845,6 +1847,8 @@ class Fuzzer:
         # Opt-in edge-table write guard (--shm-write-guard); the shim reads
         # it at attach, so it must precede every target start.
         export_wguard(shm_write_guard)
+        # Atomic vs plain touched-bit OR (--touched-atomic); read at attach too.
+        export_touched_atomic(touched_atomic)
         # In-process modes dlopen the target; an executable cannot be.
         # Run it in exec mode instead (--hail-mary forces in-process).
         if (inprocess or inprocess_direct) and is_elf_executable(target):

@@ -40,6 +40,11 @@ SELF_TEST_INPUT = b"\x00" * 64
 # Read by the shim at attach; selects the edge-table write guard.
 WGUARD_ENV = "__AFL_WGUARD"
 
+# Read by the shim at attach; "0" = plain OR, "1" = atomic OR when an edge
+# slot first goes live in the touched bitmap. Unset keeps the shim's build
+# default (atomic).
+TOUCHED_ATOMIC_ENV = "__AFL_TOUCHED_ATOMIC"
+
 
 class ShimField(IntEnum):
     """Index of each counter in ``__afl_shim_health()``'s output (C ABI)."""
@@ -70,6 +75,18 @@ def export_wguard(mode: WriteGuard) -> None:
     if mode is WriteGuard.OFF:
         return
     os.environ[WGUARD_ENV] = mode.name.lower()
+
+
+def export_touched_atomic(atomic: bool | None) -> None:
+    """Ask the shim for an atomic (True) or plain (False) touched-bit OR.
+
+    None sets nothing, and clears nothing: the shim keeps its build default.
+    Plain is only safe for a single-threaded target; a threaded one can lose
+    a bit (a false unstable edge, a lost scan edge).
+    """
+    if atomic is None:
+        return
+    os.environ[TOUCHED_ATOMIC_ENV] = "1" if atomic else "0"
 
 
 class Attach(Enum):

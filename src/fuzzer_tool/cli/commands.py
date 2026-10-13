@@ -654,6 +654,7 @@ def cmd_fuzz(args):
         seed=args.seed,
         clock=ClockMode(getattr(args, "clock", ClockMode.WALL.value)),
         shm_write_guard=WriteGuard[getattr(args, "shm_write_guard", "off").upper()],
+        touched_atomic=getattr(args, "touched_atomic", None),
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
         asan_target=getattr(args, "asan_target", None),
@@ -2227,6 +2228,9 @@ def cmd_sweep(args):
 #
 # touched_scan (--touched-scan) is excluded: a coverage-read implementation,
 # not a strategy, and measured slower at 8192-entry maps.
+#
+# touched_atomic (--touched-atomic / --no-touched-atomic) is excluded: a shim
+# build knob, not a strategy; plain OR is unsafe for threaded targets.
 #
 # crash_explore (--crash-explore) is excluded: a mode switch (AFL -C), not a
 # strategy. It zeroes has_new_coverage on every non-crashing round, so under
@@ -4890,6 +4894,34 @@ def main() -> int:
         action="store_const",
         const=False,
         help="Always walk the edge table, even on large maps (see --touched-scan).",
+    )
+    fuzz_parser.add_argument(
+        "--touched-atomic",
+        dest="touched_atomic",
+        action="store_const",
+        const=True,
+        default=None,
+        help=(
+            "Set the touched-slot bitmap bit with an atomic OR (the shim's "
+            "default). Only matters with --calibrate-stability or "
+            "--touched-scan, which allocate the bitmap; passed to the shim "
+            "as __AFL_TOUCHED_ATOMIC=1 at attach."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--no-touched-atomic",
+        dest="touched_atomic",
+        action="store_const",
+        const=False,
+        default=None,
+        help=(
+            "Set the touched-slot bitmap bit with a plain OR: saves roughly "
+            "30 ns per newly live edge (measured +16-24%% shim time per exec "
+            "at 500 first touches). Only safe for a single-threaded target: "
+            "a threaded one can lose a bit, i.e. a false unstable edge or a "
+            "missed edge in --touched-scan. Passed to the shim as "
+            "__AFL_TOUCHED_ATOMIC=0 at attach."
+        ),
     )
     fuzz_parser.add_argument(
         "--shared-virgin",
