@@ -228,6 +228,13 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_._wfc_enabled = False
             self_._smt_solver = None
             self_.enable_regex_bomb = False
+            # Option-gated operators read their config bare; defaults match Fuzzer.__init__.
+            self_.poly1305_key = None
+            self_.poly1305_tag_at = -16
+            self_.rs_nsym = None
+            self_.rs_block = 255
+            self_.rs_fcr = 0
+            self_.rs_poly = 0x11D
             # Read on the mutate() path, which this mock did not previously
             # reach: test_operator_smoke and test_exhaustive_pool call the
             # _op_* handlers directly.

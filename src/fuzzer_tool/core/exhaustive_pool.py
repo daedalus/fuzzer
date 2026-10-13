@@ -517,7 +517,7 @@ class ExhaustivePool:
         Sequential draws without replacement -- bounds n, n-1, ..., so the
         tree is n!/(n-k)! wide rather than n**k.
         """
-        is_seq = isinstance(population, list | tuple | bytes)
+        is_seq = isinstance(population, list | tuple | bytes | bytearray | range)
         n = len(population) if is_seq else population
         if k > n:
             k = n

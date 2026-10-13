@@ -4987,6 +4987,8 @@ class OperatorEngine:
         """Mutate the message and rewrite a valid Poly1305 tag (--poly1305-key)."""
         from fuzzer_tool.core.mutations.poly1305_fix import poly1305_fix
 
+        if self.f.poly1305_key is None:
+            return self._op_declined("poly1305_fix", buf)
         out = poly1305_fix(
             bytes(buf),
             self.f.poly1305_key,
@@ -5002,6 +5004,8 @@ class OperatorEngine:
         """Edit one Reed-Solomon block and re-encode, or inject symbol errors (--rs-nsym)."""
         from fuzzer_tool.core.mutations.rs_fix import rs_fix
 
+        if self.f.rs_nsym is None:
+            return self._op_declined("rs_fix", buf)
         out = rs_fix(
             bytes(buf),
             self.ctx._rng,
