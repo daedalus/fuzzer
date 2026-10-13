@@ -32,20 +32,20 @@ def lz76_complexity(seq: Sequence[Hashable]) -> int:
         return 0
     if n == 1:
         return 1
-    i, k, kmax, l, c = 0, 1, 1, 1, 1
+    i, k, kmax, left, c = 0, 1, 1, 1, 1
     while True:
-        if seq[i + k - 1] == seq[l + k - 1]:
+        if seq[i + k - 1] == seq[left + k - 1]:
             k += 1
-            if l + k > n:
+            if left + k > n:
                 c += 1
                 break
         else:
             kmax = max(k, kmax)
             i += 1
-            if i == l:
+            if i == left:
                 c += 1
-                l += kmax
-                if l + 1 > n:
+                left += kmax
+                if left + 1 > n:
                     break
                 i, k, kmax = 0, 1, 1
             else:
@@ -85,9 +85,7 @@ class PathNovelty:
 
     def __init__(self, capacity: int = 256) -> None:
         self.capacity = max(1, capacity)
-        self._refs: OrderedDict[int, tuple[tuple[int, ...], frozenset[int]]] = (
-            OrderedDict()
-        )
+        self._refs: OrderedDict[int, tuple[tuple[int, ...], frozenset[int]]] = OrderedDict()
 
     def __len__(self) -> int:
         return len(self._refs)

@@ -26,9 +26,14 @@ def _bmp(seed: int) -> bytes:
     while True:
         b = m._generate_random_bmp(4096, rng=r)
         info = parse_bmp(b)
-        if info and abs(info.width) >= 4 and abs(info.height) >= 4 and info.pixel_data:
-            if _tiles(info) <= bmp.BMP_WFC_MAX_TOTAL:  # stay under the WFC cap
-                return b
+        if (
+            info
+            and abs(info.width) >= 4
+            and abs(info.height) >= 4
+            and info.pixel_data
+            and _tiles(info) <= bmp.BMP_WFC_MAX_TOTAL
+        ):  # stay under the WFC cap
+            return b
 
 
 def _pixels(data: bytes, seed: int) -> bytes:
