@@ -179,17 +179,13 @@ class TestSiteSaturationFallback:
 
 class TestSiteTableSaturationFlag:
     def test_cnd_line_sets_sites_saturated(self, tmp_path):
-        from fuzzer_tool.core.cmplog import CmplogCollector
+        from fuzzer_tool.core.cmplog import CmplogCollector, _SiteCounters
 
         c = CmplogCollector.__new__(CmplogCollector)
-        c.site_fired = {}
-        c.site_asserted = {}
-        c.last_site_fired = {}
-        c.last_site_asserted = {}
+        c._sites = _SiteCounters(c._note_site_drops)
         c.site_dropped = 0
         c.sites_saturated = False
         c._sites_offset = 0
-        c._site_line_cache = {}
         sites = tmp_path / "s.sites"
         sites.write_text("CNS memcmp 1000 4 3\nCND 7\n")
         c.sites_path = str(sites)

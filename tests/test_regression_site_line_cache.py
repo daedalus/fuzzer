@@ -1,7 +1,7 @@
 """collect_sites parses each distinct ``CNS`` line once.
 
-FFmpeg writes ~850 site lines per exec and 95% repeat verbatim (318k lines,
-17k distinct over 400 execs); split + three int() per line was 6% of
+FFmpeg writes ~1000 site lines per exec and 96% repeat verbatim (1.44M lines,
+57k distinct over 1400 execs); split + three int() per line was 6% of
 fuzz-loop wall time. Parsed lines are cached by their text (fast path);
 unseen, ``CND`` and malformed lines take the parser (slow path). The cache
 is bounded. Totals must equal the uncached loop.
@@ -98,14 +98,16 @@ def test_repeated_lines_parsed_once(tmp_path, monkeypatch):
     d = _drains(4, rounds=6, distinct=10)
     distinct_cns = {ln for lines in d for ln in lines if ln.startswith("CNS")}
     _, _, _, _, c = _run_new(tmp_path, d)
-    assert len(c._site_line_cache) <= len(distinct_cns)
+    assert len(c._sites._lines) <= len(distinct_cns)
 
 
 def test_cache_stays_bounded(tmp_path, monkeypatch):
     """Adversarial: unbounded distinct lines (ASLR-like churn) never grow
-    the cache past its cap, and totals stay exact across the reset."""
+    the cache past its cap plus one drain, and totals stay exact across
+    the resets."""
     monkeypatch.setattr(cmplog, "SITE_LINE_CACHE_MAX", 50)
-    d = _drains(5, rounds=10, per=100, distinct=400)
+    per = 100
+    d = _drains(5, rounds=10, per=per, distinct=400)
     lasts, fired, asserted, dropped, c = _run_new(tmp_path, d)
-    assert len(c._site_line_cache) <= 50
+    assert len(c._sites._lines) <= 50 + per
     assert (lasts, fired, asserted, dropped) == _run_ref(d)
