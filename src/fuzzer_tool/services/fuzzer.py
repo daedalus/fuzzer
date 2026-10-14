@@ -8659,6 +8659,7 @@ class Fuzzer:
         # is more chances for a drifting id to show, at identical cost.
         probe_seed: bytes | None = None
         probe_width = 0
+        self._edge_tracker.defer_counters(True)
         for done, seed in enumerate(list(self.corpus), 1):
             if done % CALIBRATION_PROGRESS_EVERY == 0:
                 print(
@@ -8722,7 +8723,7 @@ class Fuzzer:
                 self._edge_tracker.prune_to_bound()
                 entries = self._edge_tracker.tracked_edge_entries()
                 entries_limit = max(CALIBRATION_EDGE_ENTRY_BUDGET, entries * 2)
-        self._edge_tracker.flush_absorbed()
+        self._edge_tracker.defer_counters(False)
         if baseline_edges or len(self.corpus):
             print(
                 f"[*] Seed calibration: {len(self.corpus)} seeds -> "

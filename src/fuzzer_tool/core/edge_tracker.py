@@ -902,6 +902,11 @@ class EdgeTracker:
         # absorb_redundant() batch: [(edge_ids, counts)] awaiting flush
         self._absorb_pending: list = []
         self._absorb_entries: int = 0
+        # defer_counters(): record_edges() buffers its (ids, counts) columns in
+        # _deferred_pending instead of updating the global dicts per edge;
+        # flush_absorbed() merges them with one sort. F0 already saw these.
+        self._defer_counters: bool = False
+        self._deferred_pending: list = []
 
         # Which key space the tracked dicts are in. record_edges() accepts two
         # kinds of input that produce DIFFERENT and incompatible keys:
@@ -1134,13 +1139,18 @@ class EdgeTracker:
             self.flush_absorbed()
 
     def flush_absorbed(self) -> None:
-        """Merge buffered ``absorb_redundant`` entries into the global counters."""
-        if not self._absorb_pending:
+        """Merge buffered ``absorb_redundant`` / deferred entries into the global counters."""
+        if not self._absorb_pending and not self._deferred_pending:
             return
         self._note_key_space("edge_id")
-        ids = np.concatenate([p[0] for p in self._absorb_pending])
-        vals = np.concatenate([p[1] for p in self._absorb_pending])
-        self._absorb_pending.clear()
+        absorbed = self._absorb_pending
+        chunks = absorbed + self._deferred_pending
+        ids = np.concatenate([p[0] for p in chunks])
+        vals = np.concatenate([p[1] for p in chunks])
+        # F0 only needs the absorbed ids: deferred ones were fed at record time.
+        f0_ids = np.unique(np.concatenate([p[0] for p in absorbed])).tolist() if absorbed else []
+        self._absorb_pending = []
+        self._deferred_pending = []
         self._absorb_entries = 0
         order = np.argsort(ids, kind="stable")
         ids, vals = ids[order], vals[order]
@@ -1158,12 +1168,18 @@ class EdgeTracker:
                 top = g
         if self._f0_enabled:
             f0_update = self._f0.update
-            for edge_id in uniq:
+            for edge_id in f0_ids:
                 f0_update(edge_id)
         self._aggregate_total_count += int(vals.sum())
         self.max_hit_count = top
         self._spectrum_dirty = True
         self._aggregate_cache = None
+
+    def defer_counters(self, on: bool = True) -> None:
+        """Buffer per-seed counter updates (calibration); turning off flushes."""
+        self._defer_counters = on
+        if not on:
+            self.flush_absorbed()
 
     def prune_to_bound(self) -> None:
         """Prune now to the normal bound, ignoring any calibration slack."""
@@ -1287,6 +1303,28 @@ class EdgeTracker:
             f0_update = self._f0.update
             for edge_id in hit_edges:  # same order: the sketch draws RNG
                 f0_update(edge_id)
+        if (
+            self._defer_counters
+            and _HAS_NUMPY
+            and hit_counts
+            and len(hit_counts) == len(hit_edges)
+            and hit_counts.keys() == hit_edges
+        ):
+            # Same keys as the hit set (the shm path): no per-edge lookups.
+            # The global dicts are brought up to date by flush_absorbed().
+            n = len(hit_counts)
+            hc.update(hit_counts)
+            self._deferred_pending.append(
+                (
+                    np.fromiter(hit_counts, dtype=np.int64, count=n),
+                    np.fromiter(hit_counts.values(), dtype=np.int64, count=n),
+                )
+            )
+            self._absorb_entries += n
+            if self._absorb_entries >= ABSORB_FLUSH_ENTRIES:
+                self.flush_absorbed()
+            self._spectrum_dirty = True
+            return
         get_count = hit_counts.get if hit_counts else None
         agg, agg_get = self._aggregate_totals, self._aggregate_totals.get
         gh, gh_get = self._global_edge_hits, self._global_edge_hits.get
