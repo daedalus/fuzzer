@@ -24,6 +24,7 @@ from enum import Enum
 from fuzzer_tool.core import affine_mod as core
 from fuzzer_tool.core import derived_fit
 from fuzzer_tool.core.i2s_fixpoint import MIN_OPERAND, Pair, Probe
+from fuzzer_tool.core.numtheory import modinv
 
 # Pending candidates; oldest dropped first.
 QUEUE_MAX = 64
@@ -90,13 +91,15 @@ def _signed(v: int, bits: int) -> int:
 def _weight(x: int, delta: int, bits: int) -> int | None:
     """Per-unit weight of a byte from its +1 screen delta.
 
-    A byte at 0xFF wrapped to 0: the delta is -255 * w.
+    A byte at 0xFF wrapped to 0: the delta is -255 * w (mod 2^bits). 255 is
+    odd, so w = -delta * 255^-1 exactly; a signed check of -delta first
+    rejected 8-bit w = 1 (255 reads as -1).
     """
     if x < derived_fit.BYTE_MAX:
         return _signed(delta, bits)
 
-    back = _signed(-delta % (1 << bits), bits)
-    return back // derived_fit.BYTE_MAX if back % derived_fit.BYTE_MAX == 0 else None
+    mod = 1 << bits
+    return _signed(-delta * modinv(derived_fit.BYTE_MAX, mod) % mod, bits)
 
 
 def _links(base: bytes, after: dict[int, bytes]) -> dict[int, int] | None:
@@ -275,16 +278,19 @@ class AffineMod:
         if self._derived:
             self._solve_gf2(data, win)
 
-    def _verify(self, cand: bytes, const: bytes, side: Side) -> None:
-        """Queue *cand*; one probe checks the compare now holds."""
+    def _verify(self, cand: bytes, const: bytes, side: Side) -> bool:
+        """Queue *cand*; one probe checks the compare now holds (or vanished)."""
         self._queue.append(cand)
         pairs = self._run(cand)
         raw = _read_raw(pairs, const, side)
         if raw == const:
             self._outcomes["solved"] += 1
-        elif raw is None and pairs is not None:
+            return True
+        if raw is None and pairs is not None:
             # Satisfied string compares log nothing; coverage decides.
             self._outcomes["vanished"] += 1
+            return True
+        return False
 
     def _queue_solutions(
         self, data: bytes, win: _Window, order: Order, model: core.AffineMod | core.Ramp
@@ -332,8 +338,13 @@ class AffineMod:
         def read_bytes(assign: dict[int, int]) -> bytes | None:
             # A string compare that holds logs no record: a run with pairs but
             # without this one reads as satisfied (_verify re-checks it).
-            pairs = self._run(_put(data, assign))
+            cand = _put(data, assign)
+            pairs = self._run(cand)
             raw = _read_raw(pairs, const, side)
+            if raw is None and pairs is not None:
+                # A short FIFO drain also drops records: re-read once.
+                pairs = self._run(cand)
+                raw = _read_raw(pairs, const, side)
             return const if raw is None and pairs is not None else raw
 
         xs = {off: data[off] for off in links.values()}
@@ -367,15 +378,14 @@ class AffineMod:
             return False
 
         self._outcomes["additive"] += 1
-        self._verify(_put(data, dict(zip(offs, out, strict=True))), const, side)
-        return True
+        # A failed check leaves the key to the byte map.
+        return self._verify(_put(data, dict(zip(offs, out, strict=True))), const, side)
 
     def _solve_derived(self, data: bytes, base_pairs: list[Pair], moved: Moved) -> None:
-        # Cheapest first: additive needs 1 exec, the byte map one per guess round.
+        # Cheapest first, across all keys: additive needs 1 exec, the byte map
+        # one per guess round, so an early string compare cannot starve a sum.
+        open_keys: list[tuple[Key, bytes, dict[int, bytes]]] = []
         for key, after in moved.items():
-            if self._left <= 0:
-                return
-
             pair, side = key
             base = _read_raw(base_pairs, pair[1 - side.value], side)
             if base is None:
@@ -384,6 +394,11 @@ class AffineMod:
             many = len(after) > 1
             if _int_width(len(base)) and many and self._solve_additive(data, key, base, after):
                 continue
+            open_keys.append((key, base, after))
+
+        for key, base, after in open_keys:
+            if self._left <= 0:
+                return
             if len(base) >= MIN_OPERAND:
                 self._solve_bytemap(data, key, base, after)
 

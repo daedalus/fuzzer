@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from fuzzer_tool.services.affine_mod import AffineMod, Families
+from fuzzer_tool.services.affine_mod import DERIVED_SCREEN_BYTES, AffineMod, Families
 from fuzzer_tool.services.fuzzer import Fuzzer
 from tests import test_commands_extended
 
@@ -225,3 +225,69 @@ def test_regression_satisfied_string_compare_logs_no_record():
 
     assert any(_rot(c) == HELLO for c in cands)
     assert svc.stats["vanished"] >= 1
+
+
+# ── review follow-ups (PR #144) ──────────────────────────────────────
+
+
+def _collect(svc):
+    out = []
+    while (cand := svc.pop()) is not None:
+        out.append(cand)
+    return out
+
+
+def test_regression_weight_of_a_saturated_byte_in_a_narrow_sum():
+    """A byte at 0xFF wraps on the +1 screen; its 8-bit weight was rejected as
+    not divisible by 255 (signed -1), so a sum of two 0xFF bytes was unsolvable."""
+    seed = SEED[:3] + b"\xff\xff" + SEED[5:]
+
+    def probe(data):
+        return NOISE + [(bytes([(data[3] + data[4]) & 0xFF]), b"\x10")]
+
+    svc = AffineMod(probe, 400, Families.DERIVED)
+    svc.search(seed)
+
+    assert any((c[3] + c[4]) & 0xFF == 0x10 for c in _collect(svc))
+
+
+def test_regression_failed_additive_guess_falls_through_to_bytemap():
+    """A per-byte map that is x + 0x60 below 0x80 looks additive on the screen;
+    the additive guess (0x85) lands in the x ^ 0x55 half and fails verification,
+    and that used to skip the byte map (which finds 0xB0)."""
+
+    def bytewise(d):
+        return bytes(c + 0x60 if c < 0x80 else c ^ 0x55 for c in d[3:7])
+
+    want = bytes([0xE5]) + bytewise(SEED)[1:]
+    svc = AffineMod(lambda d: NOISE + [(bytewise(d), want)], 600, Families.DERIVED)
+    svc.search(SEED)
+
+    assert any(bytewise(c) == want for c in _collect(svc))
+
+
+def test_regression_string_search_does_not_starve_additive_fits():
+    """An early byte-map search spent the budget before a later 1-exec sum fit."""
+    svc = AffineMod(_probe(ROT_GATE, SUM_GATE), 140, Families.DERIVED)
+    svc.search(SEED)
+
+    assert any(_sum16(c) == SUM_TARGET for c in _collect(svc))
+
+
+def test_regression_short_drain_is_not_read_as_satisfied():
+    """A FIFO drain can come back without a record; one missing read marked
+    every open byte-map position solved and queued a wrong candidate."""
+    calls = [0]
+    first_round = 1 + DERIVED_SCREEN_BYTES + 1
+
+    def probe(data):
+        calls[0] += 1
+        v = _rot(data)
+        if calls[0] == first_round or v == HELLO:
+            return NOISE
+        return NOISE + [(v, HELLO)]
+
+    svc = AffineMod(probe, 400, Families.DERIVED)
+    svc.search(SEED)
+
+    assert any(_rot(c) == HELLO for c in _collect(svc))
