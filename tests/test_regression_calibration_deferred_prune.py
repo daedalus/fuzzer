@@ -177,3 +177,38 @@ def test_calibration_entry_budget_forces_early_prune(monkeypatch) -> None:
     Fuzzer._calibrate_seed_baselines(fake)
 
     assert pruned, "entry budget never forced a prune"
+
+
+def test_calibration_uses_shm_arrays_for_redundant_seeds() -> None:
+    """With ``get_edge_arrays`` and no confirmation rerun, no per-seed dict is built."""
+    import numpy as np
+
+    class _ArrayShm(_FakeShm):
+        def get_edge_counts(self):
+            raise AssertionError("redundant seed built a dict")
+
+        def get_edge_arrays(self):
+            ids = np.array(sorted(self._cur), dtype=np.uint32)
+            return ids, np.ones(len(ids), dtype=np.int64)
+
+    tracker = EdgeTracker(max_tracked_seeds=100)
+    fake = _FakeFuzzer(tracker, [b"a", b"b", b"c"], [{1, 2, 3}, {1, 2}, {2, 3}])
+    fake._confirmed_edges = None
+    fake.shm_cov = _ArrayShm([{1, 2, 3}, {1, 2}, {2, 3}])
+    # The first seed (not redundant) still needs counts; allow it.
+    first = fake.shm_cov.get_edge_counts
+
+    calls = []
+
+    def counts_once():
+        calls.append(1)
+        if len(calls) > 1:
+            return first()
+        return {1: 1, 2: 1, 3: 1}
+
+    fake.shm_cov.get_edge_counts = counts_once
+
+    Fuzzer._calibrate_seed_baselines(fake)
+
+    assert len(calls) == 1  # only the non-redundant first seed
+    assert tracker._global_edge_hits == {1: 2, 2: 3, 3: 2}

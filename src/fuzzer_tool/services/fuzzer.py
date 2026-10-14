@@ -8647,14 +8647,21 @@ class Fuzzer:
                 continue
             if len(edge_ids) > probe_width:
                 probe_seed, probe_width = seed, len(edge_ids)
-            hit_counts = self._only_confirmed(self.shm_cov.get_edge_counts())
             self._strata_observe(seed, edge_ids)
             if self._edge_tracker.is_redundant(edge_ids):
                 # Nothing new: it would be the first seed pruned, so keep only
                 # its contribution to the global hit statistics.
-                self._edge_tracker.absorb_redundant(edge_ids, hit_counts)
+                get_arrays = getattr(self.shm_cov, "get_edge_arrays", None)
+                if get_arrays is not None and self._confirmed_edges is None:
+                    # No confirmation rerun narrowed the set: the shm columns
+                    # are exactly the edges, so skip the per-seed dict.
+                    self._edge_tracker.absorb_redundant_arrays(*get_arrays())
+                else:
+                    hit_counts = self._only_confirmed(self.shm_cov.get_edge_counts())
+                    self._edge_tracker.absorb_redundant(edge_ids, hit_counts)
                 redundant += 1
                 continue
+            hit_counts = self._only_confirmed(self.shm_cov.get_edge_counts())
             stack_depth = self.shm_cov.read_stack_depth()
             path_hash = self.shm_cov.read_path_hash()
             if path_hash == 0:

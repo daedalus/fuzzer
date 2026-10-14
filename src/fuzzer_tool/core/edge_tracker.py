@@ -1119,6 +1119,20 @@ class EdgeTracker:
         if self._absorb_entries >= ABSORB_FLUSH_ENTRIES:
             self.flush_absorbed()
 
+    def absorb_redundant_arrays(self, ids, counts) -> None:
+        """``absorb_redundant`` for numpy columns (no Python set or dict built).
+
+        *ids* and *counts* are the live ``(edge_id, count)`` columns of one
+        execution; the caller has checked ``is_redundant`` on the same ids.
+        """
+        n = len(ids)
+        if not n:
+            return
+        self._absorb_pending.append((ids.astype(np.int64, copy=False), counts))
+        self._absorb_entries += n
+        if self._absorb_entries >= ABSORB_FLUSH_ENTRIES:
+            self.flush_absorbed()
+
     def flush_absorbed(self) -> None:
         """Merge buffered ``absorb_redundant`` entries into the global counters."""
         if not self._absorb_pending:

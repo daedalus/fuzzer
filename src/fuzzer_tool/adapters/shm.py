@@ -718,6 +718,17 @@ class ShmCoverage:
         """Edge ids suppressed by :meth:`mask_edges`, for reporting."""
         return set(self._masked_edge_ids)
 
+    def get_edge_arrays(self) -> tuple[np.ndarray, np.ndarray]:
+        """Live ``(edge_ids, counts)`` columns, without building a dict.
+
+        Same entries and generation filter as :meth:`get_edge_counts`, for
+        callers that feed numpy (``EdgeTracker.absorb_redundant_arrays``) and
+        would otherwise pay for a 25k-entry Python dict they immediately
+        flatten again.
+        """
+        active_ids, active_counts = self._active_columns()
+        return active_ids, (active_counts & 0xFFFFFF).astype(np.int64)
+
     def get_edge_counts(self) -> dict[int, int]:
         """Return {edge_id: count} for all non-empty entries.
 

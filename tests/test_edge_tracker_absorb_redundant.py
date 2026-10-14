@@ -65,3 +65,21 @@ def test_absorb_feeds_f0_only_when_enabled(enabled: bool) -> None:
     if enabled:
         assert t._f0.size > 0
     assert t._aggregate_total_count == 5
+
+
+def test_absorb_arrays_matches_dict_path() -> None:
+    """The numpy-column entry point gives the same global counters as the dict one."""
+    import numpy as np
+
+    dict_t, arr_t = EdgeTracker(), EdgeTracker()
+    for t in (dict_t, arr_t):
+        t.record_edges("s0", {1, 2, 3, 4}, target_name="", hit_counts={1: 2, 2: 1, 3: 5, 4: 1})
+    runs = [({1, 3}, {1: 4, 3: 1}), ({2, 3, 4}, {2: 1, 3: 2, 4: 7})]
+    for edges, counts in runs:
+        dict_t.absorb_redundant(edges, counts)
+        ids = np.array(sorted(edges), dtype=np.uint32)
+        arr_t.absorb_redundant_arrays(ids, np.array([counts[e] for e in sorted(edges)], np.int64))
+    dict_t.flush_absorbed()
+    arr_t.flush_absorbed()
+
+    assert _globals(arr_t) == _globals(dict_t)
