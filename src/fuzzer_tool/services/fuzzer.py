@@ -1136,6 +1136,25 @@ class Fuzzer:
         self._shared_virgin = shared
         print(f"[*] Shared virgin map across {len(covs)} coverage tables")
 
+    def _warn_ctx_env_ignored(self, target) -> None:
+        """Say so when __AFL_CTX_SENSITIVE is set but the target's shim predates it.
+
+        Such a shim hashes context regardless, so the flag silently doing
+        nothing would look exactly like it working.
+        """
+        from fuzzer_tool.core import elf
+
+        if not target or os.environ.get(elf.CTX_SENSITIVE_ENV) not in ("0", "1"):
+            return
+        if elf.detect_ctx_env_capable(target) is False and elf.detect_ctx_bits(target):
+            msg = (
+                f"{elf.CTX_SENSITIVE_ENV}={os.environ[elf.CTX_SENSITIVE_ENV]} has no effect: "
+                f"{os.path.basename(target)} was built against a shim that does not read it "
+                "(no __afl_ctx_env_capable marker); rebuild with the current afl_shim.c"
+            )
+            log.warning(msg)
+            print(f"[!] WARNING: {msg}")
+
     def _ensure_ctx_ids_are_exec_stable(self, targets: list[str]) -> None:
         """Put a context-sensitive target in base-relative mode if ASLR survived.
 
@@ -5104,6 +5123,7 @@ class Fuzzer:
 
         target = getattr(self, "target", None)
         self._edge_ledger = EdgeLedger(elf.effective_ctx_bits(target) if target else None)
+        self._warn_ctx_env_ignored(target)
         if not seed_arm:
             return
 

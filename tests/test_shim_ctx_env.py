@@ -94,11 +94,40 @@ class TestShimReadsEnv:
         assert len(on) > len(off)
         assert _run(ctx_target, "1")[2] == on
 
-    @pytest.mark.parametrize("env_value", [None, "0", "1"])
-    def test_context_free_build_cannot_be_switched_on(self, free_target, ctx_target, env_value):
-        got, _, ids = _run(free_target, env_value)
-        assert got == 0
-        assert ids == _run(ctx_target, "0")[2]
+    @pytest.mark.parametrize(("env_value", "mode"), [(None, 0), ("0", 0), ("1", 1)])
+    def test_context_free_build_follows_the_env_both_ways(self, free_target, env_value, mode):
+        got, err, _ = _run(free_target, env_value)
+        assert (got, err) == (mode, "")
+
+    def test_context_free_build_switched_on_separates_call_sites(self, free_target):
+        _, _, off = _run(free_target, None)
+        _, _, on = _run(free_target, "1")
+        assert len(on) > len(off)
+
+    def test_zero_width_build_stays_off_even_when_asked(self, tmp_path_factory):
+        exe = _build(tmp_path_factory.mktemp("cx_w0"), _DRIVER, "-D__AFL_CTX_BITS=0")
+        assert _run(exe, "1")[0] == 0
+
+    def test_markers(self, ctx_target, free_target):
+        assert elf.detect_ctx_bits(str(ctx_target)) == 8
+        assert elf.detect_ctx_bits(str(free_target)) == 0
+        for t in (ctx_target, free_target):
+            assert elf.detect_ctx_on_bits(str(t)) == 8
+            assert elf.detect_ctx_env_capable(str(t)) is True
+
+    @pytest.mark.parametrize(
+        ("env_value", "ctx_expect", "free_expect"),
+        [(None, 8, 0), ("0", 0, 0), ("1", 8, 8), ("junk", 8, 0)],
+    )
+    def test_python_plans_for_what_the_shim_will_do(
+        self, monkeypatch, ctx_target, free_target, env_value, ctx_expect, free_expect
+    ):
+        if env_value is None:
+            monkeypatch.delenv(CTX_SENSITIVE_ENV, raising=False)
+        else:
+            monkeypatch.setenv(CTX_SENSITIVE_ENV, env_value)
+        assert effective_ctx_bits(str(ctx_target)) == ctx_expect
+        assert effective_ctx_bits(str(free_target)) == free_expect
 
     @pytest.mark.parametrize("bad", ["banana", "2", "01", "-1", "off"])
     def test_typo_keeps_default_and_says_so(self, ctx_target, bad):
@@ -115,20 +144,26 @@ class TestShimReadsEnv:
 
 
 @pytest.mark.parametrize(
-    ("marker", "env_value", "expected"),
+    ("marker", "on_bits", "capable", "env_value", "expected"),
     [
-        (8, None, 8),
-        (8, "1", 8),
-        (8, "0", 0),
-        (8, "banana", 8),  # the shim ignores it, so the planner must too
-        (0, "0", 0),
-        (0, "1", 0),
-        (None, "0", None),  # unknown stays unknown: no marker is not evidence
-        (None, None, None),
+        (8, 8, True, None, 8),
+        (8, 8, True, "1", 8),
+        (8, 8, True, "0", 0),
+        (8, 8, True, "banana", 8),  # the shim ignores it, so the planner must too
+        (0, 8, True, "1", 8),  # a context-free build switched on
+        (0, 8, True, "0", 0),
+        (0, 12, True, "1", 12),
+        (8, 8, False, "0", 8),  # older shim ignores the variable: plan for ctx
+        (0, None, False, "1", 0),
+        (8, 8, None, "0", 8),  # unreadable symbols: not evidence the shim honours it
+        (None, None, None, "0", None),  # unknown stays unknown
+        (None, None, None, None, None),
     ],
 )
-def test_effective_ctx_bits(monkeypatch, marker, env_value, expected):
+def test_effective_ctx_bits(monkeypatch, marker, on_bits, capable, env_value, expected):
     monkeypatch.setattr(elf, "detect_ctx_bits", lambda _t: marker)
+    monkeypatch.setattr(elf, "detect_ctx_on_bits", lambda _t: on_bits)
+    monkeypatch.setattr(elf, "detect_ctx_env_capable", lambda _t: capable)
     if env_value is None:
         monkeypatch.delenv(CTX_SENSITIVE_ENV, raising=False)
     else:
@@ -138,6 +173,8 @@ def test_effective_ctx_bits(monkeypatch, marker, env_value, expected):
 
 def test_map_sizing_follows_the_switch(monkeypatch):
     monkeypatch.setattr(elf, "detect_ctx_bits", lambda _t: 8)
+    monkeypatch.setattr(elf, "detect_ctx_on_bits", lambda _t: 8)
+    monkeypatch.setattr(elf, "detect_ctx_env_capable", lambda _t: True)
     monkeypatch.setattr(elf, "parse_sancov_guard_count", lambda _t: 5000)
     monkeypatch.delenv(CTX_SENSITIVE_ENV, raising=False)
     wide = elf.estimate_map_size_detail("/x")
@@ -152,20 +189,42 @@ def test_map_sizing_follows_the_switch(monkeypatch):
 
 
 def test_export_sets_env_only_when_asked(monkeypatch):
-    monkeypatch.delenv(CTX_SENSITIVE_ENV, raising=False)
+    # setenv-then-delenv leaves teardown restoring "absent": export_* writes
+    # os.environ directly, and a bare delenv would restore whatever it last set.
+    monkeypatch.setenv(CTX_SENSITIVE_ENV, "x")
+    monkeypatch.delenv(CTX_SENSITIVE_ENV)
     export_ctx_sensitive(None)
     assert CTX_SENSITIVE_ENV not in os.environ
     export_ctx_sensitive(False)
     assert os.environ[CTX_SENSITIVE_ENV] == "0"
     export_ctx_sensitive(True)
     assert os.environ[CTX_SENSITIVE_ENV] == "1"
-    monkeypatch.delenv(CTX_SENSITIVE_ENV)
 
 
 def test_unset_does_not_clear_an_inherited_value(monkeypatch):
     monkeypatch.setenv(CTX_SENSITIVE_ENV, "0")
     export_ctx_sensitive(None)
     assert os.environ[CTX_SENSITIVE_ENV] == "0"
+
+
+def test_warns_when_the_shim_cannot_honour_it(monkeypatch, capsys):
+    monkeypatch.setenv(CTX_SENSITIVE_ENV, "0")
+    monkeypatch.setattr(elf, "detect_ctx_bits", lambda _t: 8)
+    monkeypatch.setattr(elf, "detect_ctx_env_capable", lambda _t: False)
+    Fuzzer._warn_ctx_env_ignored(MagicMock(), "/opt/old_target")
+    assert "has no effect" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(("capable", "env_value"), [(True, "0"), (None, "0"), (False, None)])
+def test_no_warning_otherwise(monkeypatch, capsys, capable, env_value):
+    if env_value is None:
+        monkeypatch.delenv(CTX_SENSITIVE_ENV, raising=False)
+    else:
+        monkeypatch.setenv(CTX_SENSITIVE_ENV, env_value)
+    monkeypatch.setattr(elf, "detect_ctx_bits", lambda _t: 8)
+    monkeypatch.setattr(elf, "detect_ctx_env_capable", lambda _t: capable)
+    Fuzzer._warn_ctx_env_ignored(MagicMock(), "/opt/t")
+    assert capsys.readouterr().out == ""
 
 
 def test_fuzzer_exports_it():

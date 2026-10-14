@@ -1577,28 +1577,74 @@ def detect_ctx_bits(target: str) -> int | None:
     return best
 
 
-#: Read by the shim at attach: "0" turns the call-stack context term off for
-#: the run, "1" leaves it on. Only a ``__AFL_CTX_SENSITIVE=1`` build can honour
-#: "1"; a context-free build ignores both. See ``effective_ctx_bits``.
+#: Read by the shim at attach: "0" drops the call-stack context term for the
+#: run, "1" keeps it, whatever the build's default. Both hash paths are always
+#: compiled in, so it works in either direction. See ``effective_ctx_bits``.
 CTX_SENSITIVE_ENV = "__AFL_CTX_SENSITIVE"
+
+
+def _marker_widths(target: str, prefix: str) -> int | None:
+    """Widest ``<prefix>N`` marker symbol in *target*, None when there is none."""
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("%s detection failed for %s: %s", prefix, target, e)
+        return None
+    best = None
+    for name in names:
+        if name.startswith(prefix) and name[len(prefix) :].isdigit():
+            v = int(name[len(prefix) :])
+            best = v if best is None else max(best, v)
+    return best
+
+
+def detect_ctx_on_bits(target: str) -> int | None:
+    """Context width the shim hashes when context is ON, whatever the default.
+
+    ``detect_ctx_bits`` is the default state (0 for a ``-D__AFL_CTX_SENSITIVE=0``
+    build); this is what ``__AFL_CTX_SENSITIVE=1`` switches it to. None when
+    the marker is absent -- a shim that predates the runtime switch.
+    """
+    return _marker_widths(target, "__afl_ctx_on_bits_")
+
+
+def detect_ctx_env_capable(target: str) -> bool | None:
+    """Whether the target's shim reads ``$__AFL_CTX_SENSITIVE`` at all.
+
+    False is an older shim that ignores it: planning around the variable
+    there would size the map and decide ASLR for ids the run never produces.
+    None is "could not read the symbol table", which is not evidence either way.
+    """
+    try:
+        names = _symbol_names(target)
+    except Exception as e:  # noqa: BLE001
+        log.debug("ctx env-capable detection failed for %s: %s", target, e)
+        return None
+    return "__afl_ctx_env_capable" in names
 
 
 def effective_ctx_bits(target: str) -> int | None:
     """``detect_ctx_bits`` as the next run of *target* will see it.
 
-    The marker symbol states what the binary was built with; the shim can be
-    told per run to drop the context term (``__AFL_CTX_SENSITIVE=0``), which
-    makes the ids context-free whatever the marker says. Everything that sizes
-    the map, groups edge families, needs ASLR off or records the resume
-    contract must use this value, or it plans for ids the run will not produce.
+    The marker states what the binary does by default; ``__AFL_CTX_SENSITIVE``
+    can override that per run in either direction. Everything that sizes the
+    map, groups edge families, needs ASLR off or records the resume contract
+    must use this value, or it plans for ids the run will not produce.
 
-    Returns 0 when the environment switches context off for a build that has
-    it; otherwise exactly what ``detect_ctx_bits`` returns (None stays None).
+    The variable counts only when the shim reads it (``__afl_ctx_env_capable``)
+    and only when it is exactly "0" or "1" -- the shim ignores anything else,
+    so the planner must too. None (no marker, unknown shim) stays None.
     """
     bits = detect_ctx_bits(target)
-    if bits and os.environ.get(CTX_SENSITIVE_ENV) == "0":
+    env = os.environ.get(CTX_SENSITIVE_ENV)
+    if bits is None or env not in ("0", "1"):
+        return bits
+    if detect_ctx_env_capable(target) is not True:
+        return bits
+    if env == "0":
         return 0
-    return bits
+    on = detect_ctx_on_bits(target)
+    return bits if on is None else on
 
 
 def detect_ngram_k(target: str) -> int:

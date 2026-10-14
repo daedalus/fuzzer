@@ -297,8 +297,12 @@ struct __afl_entry {
  * constructor-window guard), so frame-pointer-less builds degrade to noisy
  * or zero context rather than crash -- but meaningful disambiguation needs
  * -fno-omit-frame-pointer on every TU including this one (clang/gcc omit
- * them at -O1/-O2). Pass -D__AFL_CTX_SENSITIVE=0 to fall back to the old
- * plain prev_loc^cur_loc hash exactly. */
+ * them at -O1/-O2). Pass -D__AFL_CTX_SENSITIVE=0 to default to the old
+ * plain prev_loc^cur_loc hash exactly.
+ *
+ * This macro only sets the DEFAULT. Both paths are always compiled in and
+ * $__AFL_CTX_SENSITIVE ("0" or "1", read once at attach) picks one per run,
+ * in either direction -- see __afl_ctx_on. */
 #define __AFL_CTX_SENSITIVE 1
 #endif
 
@@ -329,19 +333,23 @@ struct __afl_entry {
  * AND the map has room; check the drop counter (offset 24, see
  * __afl_note_drop) rather than guessing. __AFL_CTX_BITS=0 is equivalent to __AFL_CTX_SENSITIVE=0.
  */
-#if __AFL_CTX_SENSITIVE
-#  ifndef __AFL_CTX_BITS
-#    define __AFL_CTX_BITS 8
-#  endif
-#else
-#  ifdef __AFL_CTX_BITS
-#    undef __AFL_CTX_BITS
-#  endif
-#  define __AFL_CTX_BITS 0
+/* __AFL_CTX_BITS is the width used WHEN context is on, whatever the default
+ * state: a -D__AFL_CTX_SENSITIVE=0 build can still be switched on per run and
+ * then hashes 8 bits (or the -D__AFL_CTX_BITS it was built with). */
+#ifndef __AFL_CTX_BITS
+#  define __AFL_CTX_BITS 8
 #endif
 
 #if __AFL_CTX_BITS < 0 || __AFL_CTX_BITS > 32
 #  error "__AFL_CTX_BITS must be in [0, 32]"
+#endif
+
+/* Width of the DEFAULT state: what the build does with no environment
+ * override, and what the __afl_ctx_bits_N marker below advertises. */
+#if __AFL_CTX_SENSITIVE
+#  define __AFL_CTX_DEFAULT_BITS __AFL_CTX_BITS
+#else
+#  define __AFL_CTX_DEFAULT_BITS 0
 #endif
 
 #if __AFL_CTX_BITS >= 32
@@ -352,16 +360,21 @@ struct __afl_entry {
 #  define __AFL_CTX_MASK ((1u << __AFL_CTX_BITS) - 1u)
 #endif
 
-/* Runtime switch for the call-stack context term. Only meaningful in a
- * build with __AFL_CTX_SENSITIVE=1 (the walk is compiled out otherwise, and
- * the variable below is never read). $__AFL_CTX_SENSITIVE ("0" or "1", read
- * once at attach by __afl_map_shm; fuzzer-tool --ctx-sensitive /
- * --no-ctx-sensitive) selects it per run; unset keeps the build default.
- * "0" makes __afl_get_caller_ctx() return 0, so edge_id = prev_loc ^ cur_loc
- * exactly as in a -D__AFL_CTX_SENSITIVE=0 build, minus the walk. It does NOT
- * change the advertised __afl_ctx_bits_N marker: the Python side applies the
- * same variable (elf.effective_ctx_bits) wherever it reads that marker. */
-static int __afl_ctx_on = __AFL_CTX_SENSITIVE;
+/* Runtime switch for the call-stack context term: both hash paths are always
+ * compiled in and this picks one. $__AFL_CTX_SENSITIVE ("0" or "1", read once
+ * at attach by __afl_map_shm; fuzzer-tool --ctx-sensitive /
+ * --no-ctx-sensitive) selects it per run, in either direction; unset keeps
+ * the build default (-D__AFL_CTX_SENSITIVE, 1). Off makes
+ * __afl_get_caller_ctx() return 0 before the walk, so
+ * edge_id = prev_loc ^ cur_loc exactly as the old context-free hash. A
+ * context-free default build switched on needs -fno-omit-frame-pointer to
+ * mean anything, like any context build.
+ *
+ * The __afl_ctx_bits_N marker states the DEFAULT width and
+ * __afl_ctx_on_bits_N the width when on; __afl_ctx_env_capable says this shim
+ * honours the variable at all. The Python side combines the three with the
+ * same variable (elf.effective_ctx_bits) wherever it plans around the ids. */
+static int __afl_ctx_on = __AFL_CTX_SENSITIVE && __AFL_CTX_BITS > 0;
 
 /* Static advertisement of the context width, so the Python side can size
  * the coverage map BEFORE the first execution -- at sizing time there is no
@@ -374,7 +387,18 @@ static int __afl_ctx_on = __AFL_CTX_SENSITIVE;
 #define __AFL_CAT2(a, b) a##b
 #define __AFL_CAT(a, b) __AFL_CAT2(a, b)
 __attribute__((visibility("default"), used))
-const uint32_t __AFL_CAT(__afl_ctx_bits_, __AFL_CTX_BITS) = __AFL_CTX_BITS;
+const uint32_t __AFL_CAT(__afl_ctx_bits_, __AFL_CTX_DEFAULT_BITS) = __AFL_CTX_DEFAULT_BITS;
+
+/* Width when context is on, independent of the default; read with
+ * __afl_ctx_env_capable below to know what $__AFL_CTX_SENSITIVE=1 means. */
+__attribute__((visibility("default"), used))
+const uint32_t __AFL_CAT(__afl_ctx_on_bits_, __AFL_CTX_BITS) = __AFL_CTX_BITS;
+
+/* Presence-only: this shim reads $__AFL_CTX_SENSITIVE. Absent means an older
+ * shim that ignores it, so the variable must not be planned around. See
+ * elf.detect_ctx_env_capable(). */
+__attribute__((visibility("default"), used))
+const uint32_t __afl_ctx_env_capable = 1;
 
 /* Static advertisement of ONE capability of this shim: that
  * __afl_get_caller_ctx() honours FUZZER_KEEP_ASLR=1 by hashing return
@@ -960,11 +984,11 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
         return;
     }
 
-    /* Runtime ctx switch; see __afl_ctx_on. Only a ctx build reads it. */
+    /* Runtime ctx switch; see __afl_ctx_on. */
     {
         const char *cx = getenv("__AFL_CTX_SENSITIVE");
         if (cx && cx[0] && !cx[1] && (cx[0] == '0' || cx[0] == '1')) {
-            __afl_ctx_on = __AFL_CTX_SENSITIVE && cx[0] == '1';
+            __afl_ctx_on = cx[0] == '1' && __AFL_CTX_BITS > 0;
         } else if (cx && cx[0]) {
             char msg[128];
             int n = snprintf(msg, sizeof(msg),
@@ -1108,8 +1132,7 @@ __AFL_GCC_NO_COV uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
  * above. */
 
 /* COMPCOV (cmplog builds) reuses the base-relative helpers below for its
- * site keys, so they are compiled in for either channel. */
-#if __AFL_CTX_SENSITIVE || __AFL_CMPLOG
+ * site keys; the context walk shares them. */
 /* dladdr()/Dl_info, for __afl_ctx_resolve_base() below. Included here
  * (rather than assumed from the __AFL_DISTANCE_MODE include further up)
  * because CTX_SENSITIVE and DISTANCE_MODE are independently-gated default-on
@@ -1162,9 +1185,6 @@ __AFL_NO_COV static inline int __afl_ctx_use_relative(void) {
     }
     return __afl_ctx_relative_mode;
 }
-#endif /* __AFL_CTX_SENSITIVE || __AFL_CMPLOG */
-
-#if __AFL_CTX_SENSITIVE
 /* Frame-slot load ASAN cannot see. The walk's one unvalidated hop can pass
  * the range check yet land in a stack redzone; an instrumented load then
  * aborts the whole in-process fuzzer. no_sanitize("address") on the walk
@@ -1302,7 +1322,6 @@ static inline uint32_t __afl_get_caller_ctx(void) {
      * the same bucket, which is exactly what the mixing exists to avoid. */
     return (uint32_t)p & __AFL_CTX_MASK;
 }
-#endif
 
 /* ── Fire log (debug build only) ───────────────────────────────────────
  * -D__AFL_TRACE_FIRES=1 appends every final edge_id, one decimal per line, to
@@ -1363,18 +1382,9 @@ static inline uint32_t __afl_edge_hash(uint32_t cur_loc) {
     }
     h ^= cur_loc;
     h *= 16777619u;
-# if __AFL_CTX_SENSITIVE
     return __afl_get_caller_ctx() ^ h;
-# else
-    return h;
-# endif
 #else
-#if __AFL_CTX_SENSITIVE
-    uint32_t caller_ctx = __afl_get_caller_ctx();
-    return caller_ctx ^ __afl_prev_loc ^ cur_loc;
-#else
-    return __afl_prev_loc ^ cur_loc;
-#endif
+    return __afl_get_caller_ctx() ^ __afl_prev_loc ^ cur_loc;
 #endif
 }
 

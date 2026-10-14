@@ -4934,9 +4934,11 @@ def main() -> int:
         const=True,
         default=None,
         help=(
-            "Keep the shim's call-stack context term in edge ids (the default "
-            "for a target built with __AFL_CTX_SENSITIVE=1). Cannot switch on a "
-            "context-free build. Passed to the shim as __AFL_CTX_SENSITIVE=1."
+            "Use the shim's call-stack context term in edge ids, whatever the "
+            "build's default: a target built with -D__AFL_CTX_SENSITIVE=0 "
+            "switches to context hashing (8 bits unless built with another "
+            "-D__AFL_CTX_BITS) but needs -fno-omit-frame-pointer to mean "
+            "anything. Passed to the shim as __AFL_CTX_SENSITIVE=1."
         ),
     )
     fuzz_parser.add_argument(

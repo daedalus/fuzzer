@@ -130,14 +130,16 @@ def test_last_flag_wins(monkeypatch, tmp_path):
 
 
 def test_export_sets_env_only_when_asked(monkeypatch):
-    monkeypatch.delenv(TOUCHED_ATOMIC_ENV, raising=False)
+    # setenv-then-delenv leaves teardown restoring "absent": export_* writes
+    # os.environ directly, and a bare delenv would restore whatever it last set.
+    monkeypatch.setenv(TOUCHED_ATOMIC_ENV, "x")
+    monkeypatch.delenv(TOUCHED_ATOMIC_ENV)
     export_touched_atomic(None)
     assert TOUCHED_ATOMIC_ENV not in os.environ
     export_touched_atomic(False)
     assert os.environ[TOUCHED_ATOMIC_ENV] == "0"
     export_touched_atomic(True)
     assert os.environ[TOUCHED_ATOMIC_ENV] == "1"
-    monkeypatch.delenv(TOUCHED_ATOMIC_ENV)
 
 
 def test_unset_does_not_clear_an_inherited_value(monkeypatch):
