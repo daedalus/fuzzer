@@ -8644,6 +8644,10 @@ class Fuzzer:
         entries = 0
         entries_limit = CALIBRATION_EDGE_ENTRY_BUDGET
         n_seeds = len(self.corpus)
+        # Edges the restored tracker already holds, before the seeds run again.
+        restored = (
+            self._edge_tracker.get_cumulative_edge_count() if getattr(self, "resume", False) else 0
+        )
         t0 = time.monotonic()
         # Widest seed seen, for the edge-id stability probe below: more edges
         # is more chances for a drifting id to show, at identical cost.
@@ -8726,6 +8730,7 @@ class Fuzzer:
         explorer = getattr(self, "_crash_explorer", None)
         if explorer is not None and not explorer.variants:
             print("[!] --crash-explore: no seed crashed; nothing to explore")
+        self._report_resume_reach(restored)
         self._report_comparison_reach(len(self.corpus))
         self._report_edge_id_stability(probe_seed)
         self._report_coverage_noise(probe_seed)
@@ -8922,6 +8927,25 @@ class Fuzzer:
         )
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
+
+    def _report_resume_reach(self, restored: int) -> None:
+        """Say how much of the restored coverage the live seeds reproduce.
+
+        ``--resume`` restores the tracker's cumulative edge set from state but
+        rebuilds the SHM map by re-running the live seeds, so the summary's
+        "Edges discovered" (SHM) reads lower than the tracker. The gap is
+        mostly phantom edges, ids one run reported and no rerun of the same
+        input does (core/novelty_confirm.py), plus anything only a pruned or
+        mutated-away input reached. Both numbers are printed so the gap is
+        visible at startup instead of reading as lost coverage.
+        """
+        if not restored or not self.shm_cov:
+            return
+        reproduced = min(getattr(self.shm_cov, "cumulative_edges", 0), restored)
+        print(
+            f"[*] Resume coverage: {restored} restored (tracker), "
+            f"{reproduced} reproducible by live seeds ({100 * reproduced // restored}%)"
+        )
 
     def _report_comparison_reach(self, n_execs: int) -> None:
         """Say whether the comparison instrumentation reached the target.

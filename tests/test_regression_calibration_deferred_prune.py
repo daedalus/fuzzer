@@ -94,6 +94,9 @@ class _FakeFuzzer:
     def _report_comparison_reach(self, _n):
         pass
 
+    def _report_resume_reach(self, _restored):
+        pass
+
     def _report_edge_id_stability(self, _seed):
         pass
 
