@@ -648,6 +648,10 @@ class TestStateGatedOperatorsAreNotNoOps:
         f.rs_block = 255
         f.rs_fcr = 0
         f.rs_poly = 0x11D
+        # hash_len_ext: offered only when a hash is named.
+        f.hlx_algo = "sha256"
+        f.hlx_key_len = 16
+        f.hlx_digest_at = None
         # bit_cross / arith_mid / geo_mid / power_mid / lineage_step: gated on parent_key, which seed_meta records only
         # under --lineage.
         f._use_lineage = True

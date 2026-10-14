@@ -40,7 +40,7 @@ def test_regression_sample_range_clamps_k_and_handles_empty():
 _BUF = b"abcdefghijklmnopqrstuvwxyz012345"
 
 
-@pytest.mark.parametrize("name", ["poly1305_fix", "rs_fix"])
+@pytest.mark.parametrize("name", ["poly1305_fix", "rs_fix", "hash_len_ext"])
 def test_regression_gated_op_declines_without_its_option(name):
     eng = OperatorEngine(make_minimal_fuzzer())
     buf = bytearray(_BUF)

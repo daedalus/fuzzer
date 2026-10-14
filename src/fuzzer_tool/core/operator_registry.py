@@ -187,6 +187,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "png_chunk_mutate",
         "png_crc_fix",
         "poly1305_fix",
+        "hash_len_ext",
         "rs_fix",
         "jpeg_chunk_mutate",
         "jpeg_crc_fix",
@@ -882,6 +883,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "tail_append": lambda f, _d: bool(getattr(f, "op_append", False)),
     # Poly1305 tag repair needs the one-time key; --poly1305-key
     "poly1305_fix": lambda f, _d: getattr(f, "poly1305_key", None) is not None,
+    # Merkle-Damgard length extension needs the hash and key length; --hlx-algo
+    "hash_len_ext": lambda f, _d: getattr(f, "hlx_algo", None) is not None,
     # Reed-Solomon parity repair / symbol errors need the parity length; --rs-nsym
     "rs_fix": lambda f, _d: getattr(f, "rs_nsym", None) is not None,
     # Manchester and friends; --op-line-code

@@ -5000,6 +5000,24 @@ class OperatorEngine:
             return self._op_declined("poly1305_fix", buf)
         return bytearray(out[: self.ctx.max_len])
 
+    def _op_hash_len_ext(self, buf, _byte_idx, _data):
+        """Append padding plus a suffix and extend H(key||msg) (--hlx-algo)."""
+        from fuzzer_tool.core.mutations.hash_len_ext import hash_len_ext
+
+        if self.f.hlx_algo is None:
+            return self._op_declined("hash_len_ext", buf)
+        out = hash_len_ext(
+            bytes(buf),
+            self.f.hlx_algo,
+            self.f.hlx_key_len,
+            self.ctx._rng,
+            self.ctx.max_len,
+            self.f.hlx_digest_at,
+        )
+        if out is None:
+            return self._op_declined("hash_len_ext", buf)
+        return bytearray(out[: self.ctx.max_len])
+
     def _op_rs_fix(self, buf, _byte_idx, _data):
         """Edit one Reed-Solomon block and re-encode, or inject symbol errors (--rs-nsym)."""
         from fuzzer_tool.core.mutations.rs_fix import rs_fix

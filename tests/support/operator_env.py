@@ -235,6 +235,9 @@ def make_minimal_fuzzer(seed=None, pool=None):
             self_.rs_block = 255
             self_.rs_fcr = 0
             self_.rs_poly = 0x11D
+            self_.hlx_algo = None
+            self_.hlx_key_len = 16
+            self_.hlx_digest_at = None
             # Read on the mutate() path, which this mock did not previously
             # reach: test_operator_smoke and test_exhaustive_pool call the
             # _op_* handlers directly.

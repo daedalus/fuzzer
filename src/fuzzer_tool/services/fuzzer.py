@@ -1666,6 +1666,9 @@ class Fuzzer:
         rs_block=255,
         rs_fcr=0,
         rs_poly=0x11D,
+        hlx_algo=None,
+        hlx_key_len=16,
+        hlx_digest_at=None,
         op_line_code=False,
         checksum_sites=False,
         grimoire=False,
@@ -2141,6 +2144,9 @@ class Fuzzer:
         self.rs_block = rs_block
         self.rs_fcr = rs_fcr
         self.rs_poly = rs_poly
+        self.hlx_algo = hlx_algo
+        self.hlx_key_len = hlx_key_len
+        self.hlx_digest_at = hlx_digest_at
         self.op_line_code = op_line_code
         from fuzzer_tool.core.rq_encodings import LineEncoders, set_line_encoders  # noqa: PLC0415
 

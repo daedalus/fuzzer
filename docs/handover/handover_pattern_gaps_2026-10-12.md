@@ -13,7 +13,7 @@
 | O3 `case_map_grow` | Real. Added as 11 `_FUNNY_UNICODE` entries, not an operator. |
 | O4 `unicode_ctrl` | **Mostly a false gap.** `_FUNNY_UNICODE` already had RLO/LRO, zero-width, BOMs. Residue (NEL, U+2028/2029, LRM/RLM, isolates, ALM) added. |
 | O5 `int_str_boundary` | Real: `_random_num` drew only random 30-bit values and squares. Fifth strategy `_DECIMAL_EDGES`. |
-| O6 `hash_len_ext` | Not started. Needs a digest-field oracle. |
+| O6 `hash_len_ext` | Done 2026-10-13 (`--hlx-algo`; seed carries the digest, key length supplied). |
 | O7 sequence-level mutation | Not started. Needs a message-boundary model. |
 
 The 2026-10-11 chat summary was wrong about O2 (`bitcast_float` does emit NaN/inf) and

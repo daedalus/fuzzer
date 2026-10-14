@@ -104,6 +104,10 @@ Merkle-Damgard length extension for `H(key||msg)` with MD5/SHA-1/SHA-256: append
 passed by flags like `--poly1305-key`. Narrow target set; build only if a target
 exists.
 
+**Done 2026-10-13**: `core/mutations/hash_len_ext.py`, flags `--hlx-algo`, `--hlx-key-len`,
+`--hlx-digest-at`. MD5/SHA-1/SHA-256 only; seed digest must be valid; key length is a user
+guess. Unit-tested against hashlib; not run on a real target.
+
 ## O7 — sequence-level mutation
 
 Reorder, duplicate, drop or splice whole messages for stateful protocols. Grep for

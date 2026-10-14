@@ -991,6 +991,9 @@ def cmd_fuzz(args):
         rs_block=getattr(args, "rs_block", 255),
         rs_fcr=getattr(args, "rs_fcr", 0),
         rs_poly=getattr(args, "rs_poly", 0x11D),
+        hlx_algo=getattr(args, "hlx_algo", None),
+        hlx_key_len=getattr(args, "hlx_key_len", 16),
+        hlx_digest_at=getattr(args, "hlx_digest_at", None),
         op_line_code=getattr(args, "op_line_code", False),
         checksum_sites=getattr(args, "checksum_sites", False),
         grimoire=getattr(args, "grimoire", False),
@@ -5946,6 +5949,33 @@ def main() -> int:
         default=0x11D,
         metavar="POLY",
         help="GF(256) field polynomial, must be primitive (default 0x11d).",
+    )
+    fuzz_parser.add_argument(
+        "--hlx-algo",
+        choices=("md5", "sha1", "sha256"),
+        default=None,
+        help=(
+            "Enable hash_len_ext: seeds are msg plus a valid H(key||msg) digest; "
+            "append padding and a suffix and extend the digest (Merkle-Damgard "
+            "length extension). Needs the key length (--hlx-key-len)."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--hlx-key-len",
+        type=int,
+        default=16,
+        metavar="N",
+        help="Secret length in bytes assumed by hash_len_ext (default 16).",
+    )
+    fuzz_parser.add_argument(
+        "--hlx-digest-at",
+        type=int,
+        default=None,
+        metavar="N",
+        help=(
+            "Offset of the digest for hash_len_ext; negative counts from the end "
+            "(default: the last digest-size bytes)."
+        ),
     )
     fuzz_parser.add_argument(
         "--op-line-code",
