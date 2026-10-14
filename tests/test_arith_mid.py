@@ -265,11 +265,8 @@ class TestOpArithMid:
         got = eng._op_arith_mid(bytearray(root), 0, root)
         assert got == bytearray(_oracle(root, other, B1, MID))
 
-    def test_available_only_with_lineage(self):
-        class F:
-            pass
-
-        f = F()
-        assert not _AVAILABLE["arith_mid"](f, b"")
-        f._use_lineage = True
-        assert _AVAILABLE["arith_mid"](f, b"")
+    def test_available_without_lineage(self):
+        # parent_key only filters ancestors out of the donor pool; with no
+        # lineage the filter is a no-op, so the op is ungated (no registry gate).
+        assert "arith_mid" not in _AVAILABLE
+        assert _AVAILABLE.get("geo_mid") is not None  # still lineage-gated

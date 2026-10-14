@@ -195,9 +195,13 @@ class TestAvailabilityPredicates:
         assert not _sniff_der(b"\x30\x85\x00\x00\x00\x00")  # 5 length bytes: out of range
 
     def test_dict_ops_gated_on_dictionary(self):
-        assert not {"dict_insert", "dict_replace", "checksum_repair"} & self._available()
+        assert not {"dict_insert", "dict_replace"} & self._available()
         avail = self._available(dictionary=["token"])
-        assert {"dict_insert", "dict_replace", "checksum_repair"} <= avail
+        assert {"dict_insert", "dict_replace"} <= avail
+
+    def test_checksum_repair_needs_no_dictionary(self):
+        # the handler stamps crc32(prefix); it never reads the dictionary
+        assert "checksum_repair" in self._available()
 
     def test_markov_gated_on_trained(self):
         assert "markov_bytes" not in self._available()

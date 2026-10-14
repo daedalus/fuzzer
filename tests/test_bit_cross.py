@@ -256,14 +256,10 @@ class TestUnrelatedSeeds:
         assert rng.sample_calls == [(len(many) + 2, 16)]
         assert got is not None
 
-    def test_available_only_with_lineage(self):
-        class F:
-            pass
-
-        f = F()
-        assert not _AVAILABLE["bit_cross"](f, b"")
-        f._use_lineage = True
-        assert _AVAILABLE["bit_cross"](f, b"")
+    def test_available_without_lineage(self):
+        # Ungated: without --lineage the ancestor filter is a no-op and
+        # _recombine still declines children equal to either parent.
+        assert "bit_cross" not in _AVAILABLE
 
 
 class TestRealFuzzer:
@@ -294,6 +290,10 @@ class TestRealFuzzer:
         got = OperatorEngine(f)._op_bit_cross(bytearray(ROOT), 0, ROOT)
         assert got == OR_ROOT_OTHER
 
-    def test_availability_follows_the_lineage_flag(self, tmp_path):
-        assert _AVAILABLE["bit_cross"](self._fuzzer(tmp_path / "on", lineage=True), b"")
-        assert not _AVAILABLE["bit_cross"](self._fuzzer(tmp_path / "off", lineage=False), b"")
+    def test_works_without_lineage_flag(self, tmp_path):
+        f = self._fuzzer(tmp_path, lineage=False)
+        f.corpus = [ROOT, KID, OTHER_ROOT]
+        f.seed_meta = {ROOT: {}, KID: {}, OTHER_ROOT: {}}
+        f._rng = ScriptedRng(OR)
+        # no parent_key anywhere: every other seed is an eligible donor, no crash
+        assert OperatorEngine(f)._op_bit_cross(bytearray(ROOT), 0, ROOT) is not None

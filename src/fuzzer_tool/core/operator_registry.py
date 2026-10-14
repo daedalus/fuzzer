@@ -815,13 +815,14 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "dict_overwrite": _has_dictionary,
     "dict_prepend": _has_dictionary,
     "dict_append": _has_dictionary,
-    "checksum_repair": _has_dictionary,
     "token_dup": _has_dictionary,
     "dict_compound": _has_dictionary,
     # model / engine-gated ops
-    # bit_cross needs parent_key, which seed_meta records only under --lineage
-    "bit_cross": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
-    "arith_mid": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
+    # bit_cross and arith_mid use parent_key only to skip ancestors/descendants
+    # as donors (recorded under --lineage). Without it the ancestor test is a
+    # no-op and _recombine still declines children equal to either parent, so
+    # they are always available. geo_mid/power_mid stay gated: they trail
+    # arith_mid on every synthetic gate and are unmeasured on real targets.
     "geo_mid": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
     "power_mid": lambda f, _d: bool(getattr(f, "_use_lineage", False)),
     # needs the parent_key -> bytes chain; the 3-seed operators need no lineage
