@@ -138,7 +138,8 @@ class TestCoverageContract:
 
     def test_current_contract_detects_legacy_k2(self):
         c = current_coverage_contract(self._stub())
-        assert c == {"ngram_k": 2, "node_channel": False, "edge_ids": 1}
+        # /bin/true carries no ctx marker: unknown, not context-free.
+        assert c == {"ngram_k": 2, "node_channel": False, "edge_ids": 1, "ctx_bits": None}
 
     def test_missing_saved_section_resumes_freely(self):
         check_coverage_contract(None, {"ngram_k": 3, "node_channel": True})

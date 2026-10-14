@@ -1577,6 +1577,30 @@ def detect_ctx_bits(target: str) -> int | None:
     return best
 
 
+#: Read by the shim at attach: "0" turns the call-stack context term off for
+#: the run, "1" leaves it on. Only a ``__AFL_CTX_SENSITIVE=1`` build can honour
+#: "1"; a context-free build ignores both. See ``effective_ctx_bits``.
+CTX_SENSITIVE_ENV = "__AFL_CTX_SENSITIVE"
+
+
+def effective_ctx_bits(target: str) -> int | None:
+    """``detect_ctx_bits`` as the next run of *target* will see it.
+
+    The marker symbol states what the binary was built with; the shim can be
+    told per run to drop the context term (``__AFL_CTX_SENSITIVE=0``), which
+    makes the ids context-free whatever the marker says. Everything that sizes
+    the map, groups edge families, needs ASLR off or records the resume
+    contract must use this value, or it plans for ids the run will not produce.
+
+    Returns 0 when the environment switches context off for a build that has
+    it; otherwise exactly what ``detect_ctx_bits`` returns (None stays None).
+    """
+    bits = detect_ctx_bits(target)
+    if bits and os.environ.get(CTX_SENSITIVE_ENV) == "0":
+        return 0
+    return bits
+
+
 def detect_ngram_k(target: str) -> int:
     """Read __AFL_NGRAM_K out of a target's symbol table.
 
@@ -1904,7 +1928,7 @@ def estimate_map_size_detail(target: str, profile: object | None = None) -> MapS
     Returns:
         MapSizeEstimate. `entries` is what estimate_map_size() returns.
     """
-    ctx_bits = detect_ctx_bits(target) or 0
+    ctx_bits = effective_ctx_bits(target) or 0
     ngram_k = detect_ngram_k(target)
 
     blocks = 0

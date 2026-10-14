@@ -655,6 +655,7 @@ def cmd_fuzz(args):
         clock=ClockMode(getattr(args, "clock", ClockMode.WALL.value)),
         shm_write_guard=WriteGuard[getattr(args, "shm_write_guard", "off").upper()],
         touched_atomic=getattr(args, "touched_atomic", None),
+        ctx_sensitive=getattr(args, "ctx_sensitive", None),
         extra_crash_codes=args.crash_codes,
         replay_n=args.replay_n,
         asan_target=getattr(args, "asan_target", None),
@@ -2231,6 +2232,9 @@ def cmd_sweep(args):
 #
 # touched_atomic (--touched-atomic / --no-touched-atomic) is excluded: a shim
 # build knob, not a strategy; plain OR is unsafe for threaded targets.
+#
+# ctx_sensitive (--ctx-sensitive / --no-ctx-sensitive) is excluded: it changes
+# every edge id, so --hail-mary would stop being comparable to any other run.
 #
 # crash_explore (--crash-explore) is excluded: a mode switch (AFL -C), not a
 # strategy. It zeroes has_new_coverage on every non-crashing round, so under
@@ -4921,6 +4925,33 @@ def main() -> int:
             "a threaded one can lose a bit, i.e. a false unstable edge or a "
             "missed edge in --touched-scan. Passed to the shim as "
             "__AFL_TOUCHED_ATOMIC=0 at attach."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--ctx-sensitive",
+        dest="ctx_sensitive",
+        action="store_const",
+        const=True,
+        default=None,
+        help=(
+            "Keep the shim's call-stack context term in edge ids (the default "
+            "for a target built with __AFL_CTX_SENSITIVE=1). Cannot switch on a "
+            "context-free build. Passed to the shim as __AFL_CTX_SENSITIVE=1."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--no-ctx-sensitive",
+        dest="ctx_sensitive",
+        action="store_const",
+        const=False,
+        default=None,
+        help=(
+            "Drop the call-stack context term for this run without rebuilding: "
+            "edge ids become prev_loc ^ cur_loc and the per-edge frame walk is "
+            "skipped (about 20%% of exec time on ffmpeg_read 9.0.2). Map sizing, "
+            "ASLR handling and the resume contract follow. Corpus state written "
+            "with context on will not resume under this flag. Passed to the shim "
+            "as __AFL_CTX_SENSITIVE=0."
         ),
     )
     fuzz_parser.add_argument(

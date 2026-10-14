@@ -352,6 +352,17 @@ struct __afl_entry {
 #  define __AFL_CTX_MASK ((1u << __AFL_CTX_BITS) - 1u)
 #endif
 
+/* Runtime switch for the call-stack context term. Only meaningful in a
+ * build with __AFL_CTX_SENSITIVE=1 (the walk is compiled out otherwise, and
+ * the variable below is never read). $__AFL_CTX_SENSITIVE ("0" or "1", read
+ * once at attach by __afl_map_shm; fuzzer-tool --ctx-sensitive /
+ * --no-ctx-sensitive) selects it per run; unset keeps the build default.
+ * "0" makes __afl_get_caller_ctx() return 0, so edge_id = prev_loc ^ cur_loc
+ * exactly as in a -D__AFL_CTX_SENSITIVE=0 build, minus the walk. It does NOT
+ * change the advertised __afl_ctx_bits_N marker: the Python side applies the
+ * same variable (elf.effective_ctx_bits) wherever it reads that marker. */
+static int __afl_ctx_on = __AFL_CTX_SENSITIVE;
+
 /* Static advertisement of the context width, so the Python side can size
  * the coverage map BEFORE the first execution -- at sizing time there is no
  * running target to ask.  The value is encoded in the symbol NAME rather
@@ -949,6 +960,20 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
         return;
     }
 
+    /* Runtime ctx switch; see __afl_ctx_on. Only a ctx build reads it. */
+    {
+        const char *cx = getenv("__AFL_CTX_SENSITIVE");
+        if (cx && cx[0] && !cx[1] && (cx[0] == '0' || cx[0] == '1')) {
+            __afl_ctx_on = __AFL_CTX_SENSITIVE && cx[0] == '1';
+        } else if (cx && cx[0]) {
+            char msg[128];
+            int n = snprintf(msg, sizeof(msg),
+                             "__afl_shim: __AFL_CTX_SENSITIVE=%.16s is not 0 or 1"
+                             " -- ignored, ctx=%d\n", cx, __afl_ctx_on);
+            if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+        }
+    }
+
     /* Edge table starts after the front region */
     uint8_t *base = (uint8_t *)p;
     __afl_area = (struct __afl_entry *)(base + SHM_TABLE_OFFSET);
@@ -1190,6 +1215,7 @@ static uintptr_t __afl_ctx_resolve_stack_hi(void) {
 __attribute__((visibility("default"), always_inline))
 static inline uint32_t __afl_get_caller_ctx(void) {
     if (__afl_mapping) return 0;
+    if (!__afl_ctx_on) return 0;
     /* Safe two-level unwind.  trace-pc-guard fires at basic-block entry,
      * including a function's *entry* block before its prologue has linked
      * the frame pointer.  At that instant the second frame up is not yet

@@ -163,6 +163,7 @@ from fuzzer_tool.core.shim_health import (
     Attach,
     ShimWatch,
     WriteGuard,
+    export_ctx_sensitive,
     export_touched_atomic,
     export_wguard,
     self_test_issues,
@@ -1182,7 +1183,7 @@ class Fuzzer:
             # ptrace and the in-process modes do not go through the shim's
             # context hash, so the premise does not hold for them.
             return
-        from fuzzer_tool.core.elf import detect_ctx_bits, detect_ctx_relative_capable
+        from fuzzer_tool.core.elf import detect_ctx_relative_capable, effective_ctx_bits
 
         capable, stale = [], []
         for t in targets:
@@ -1190,7 +1191,7 @@ class Fuzzer:
                 continue
             # None means "no marker, unknown shim", which is not evidence of
             # context sensitivity; only a positive width is.
-            if not detect_ctx_bits(t):
+            if not effective_ctx_bits(t):
                 continue
             # None here is "could not read the symbol table", which is not
             # evidence that the shim is old -- leave those to the probe.
@@ -1802,6 +1803,7 @@ class Fuzzer:
         clock=ClockMode.WALL,
         shm_write_guard=WriteGuard.OFF,
         touched_atomic=None,
+        ctx_sensitive=None,
         # --zip-seed-corpus (adapters/seed_zip.py). Appended: positional signature.
         zip_seed_corpus=False,
         # --zip-compact-ratio (seed_zip.compact_over). Appended: positional signature.
@@ -1854,6 +1856,9 @@ class Fuzzer:
         export_wguard(shm_write_guard)
         # Atomic vs plain touched-bit OR (--touched-atomic); read at attach too.
         export_touched_atomic(touched_atomic)
+        # Context term on/off (--ctx-sensitive); the shim reads it at attach and
+        # the sizing / ASLR / contract code below reads it via effective_ctx_bits.
+        export_ctx_sensitive(ctx_sensitive)
         # In-process modes dlopen the target; an executable cannot be.
         # Run it in exec mode instead (--hail-mary forces in-process).
         if (inprocess or inprocess_direct) and is_elf_executable(target):
@@ -5098,7 +5103,7 @@ class Fuzzer:
         from fuzzer_tool.core.schedulers.seed_strata import Guard, StrataSeedScheduler
 
         target = getattr(self, "target", None)
-        self._edge_ledger = EdgeLedger(elf.detect_ctx_bits(target) if target else None)
+        self._edge_ledger = EdgeLedger(elf.effective_ctx_bits(target) if target else None)
         if not seed_arm:
             return
 
@@ -8802,9 +8807,9 @@ class Fuzzer:
         )
         log.warning(msg)
         print(f"[!] WARNING: {msg}")
-        from fuzzer_tool.core.elf import detect_ctx_bits, detect_ctx_relative_capable
+        from fuzzer_tool.core.elf import detect_ctx_relative_capable, effective_ctx_bits
 
-        ctx_bits = detect_ctx_bits(self.target) if self.target else None
+        ctx_bits = effective_ctx_bits(self.target) if self.target else None
         if ctx_bits and not self._aslr_disabled:
             # Relative mode is on by this point for any target that can
             # honour it (see _ensure_ctx_ids_are_exec_stable), so the marker

@@ -21,7 +21,7 @@ import os
 from collections.abc import Sequence
 from enum import Enum, IntEnum
 
-from fuzzer_tool.core.elf import detect_scoped_crash_handler
+from fuzzer_tool.core.elf import CTX_SENSITIVE_ENV, detect_scoped_crash_handler
 
 #: Prefix of every diagnostic afl_shim.c writes to stderr (attach failures,
 #: refused segments). Fixed by the C source; never printed by a healthy run.
@@ -87,6 +87,19 @@ def export_touched_atomic(atomic: bool | None) -> None:
     if atomic is None:
         return
     os.environ[TOUCHED_ATOMIC_ENV] = "1" if atomic else "0"
+
+
+def export_ctx_sensitive(on: bool | None) -> None:
+    """Ask the shim to keep (True) or drop (False) the call-stack context term.
+
+    None sets nothing, and clears nothing: the shim keeps its build default.
+    Off makes edge ids context-free (``prev_loc ^ cur_loc``) without a rebuild
+    and skips the frame walk on every edge; it can only turn a context build
+    off, never switch a context-free build on.
+    """
+    if on is None:
+        return
+    os.environ[CTX_SENSITIVE_ENV] = "1" if on else "0"
 
 
 class Attach(Enum):

@@ -156,6 +156,8 @@ _EXCLUDED_OPT_IN = frozenset(
         "touched_scan",
         # Shim build knob (atomic vs plain touched-bit OR), not a strategy.
         "touched_atomic",
+        # Changes every edge id (context term on/off), not a strategy.
+        "ctx_sensitive",
         # Coverage-accounting mode, multi-target only: not a strategy, and it
         # changes what every other strategy is rewarded for.
         "shared_virgin",

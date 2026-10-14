@@ -234,10 +234,11 @@ def current_coverage_contract(f) -> dict:
     """The coverage semantics this session runs under. Resume states are
     only valid when every part matches (edge ids change with k and with the
     shim's id scheme; node-channel state is meaningless without the bitmap)."""
-    from fuzzer_tool.core.elf import detect_edge_id_scheme, detect_ngram_k
+    from fuzzer_tool.core.elf import detect_edge_id_scheme, detect_ngram_k, effective_ctx_bits
 
     return {
         "ngram_k": detect_ngram_k(f.target),
+        "ctx_bits": effective_ctx_bits(f.target),
         "node_channel": getattr(f, "_katz_channel", None) is not None,
         "edge_ids": detect_edge_id_scheme(f.target),
     }
@@ -255,6 +256,18 @@ def check_coverage_contract(saved: dict | None, current: dict) -> None:
                 f"state={saved.get(key)!r} vs current={current.get(key)!r} — "
                 "start a fresh corpus dir or rebuild the target to match the saved run"
             )
+    # ctx_bits joined later still: a state without it resumes freely. Both
+    # sides must be known -- None is an unreadable target or a shim with no
+    # marker, which is not evidence of a different id space.
+    saved_ctx, cur_ctx = saved.get("ctx_bits"), current.get("ctx_bits")
+    if saved_ctx is not None and cur_ctx is not None and saved_ctx != cur_ctx:
+        raise RuntimeError(
+            f"coverage contract mismatch on 'ctx_bits': state={saved_ctx!r} vs "
+            f"current={cur_ctx!r} — the call-stack context term changes every edge "
+            "id (--ctx-sensitive / --no-ctx-sensitive, or a rebuild with a "
+            "different __AFL_CTX_SENSITIVE); start a fresh corpus dir or rerun "
+            "with the flag the saved run used"
+        )
     # edge_ids joined the contract after the scheme change, so a contract
     # without it was written by a scheme-1 run (or by a scheme-2 build in the
     # short window before this key existed -- refusing that is the safe
