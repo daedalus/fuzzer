@@ -54,7 +54,8 @@ fixes, pass with them).
 - `ruff format` clean. `ruff check src tests`: 59 errors at `6c86d7c5` and after
   (none added); one is an import-order warning in `services/operators.py` from `0ce384af`,
   left alone.
-- Not run: full suite (Hard Rule 50), fuzzgoat calibration (Hard Rule 52, no clang here).
+- Fuzzgoat A/B (clang 18, `~/fuzzing/builds/fuzzgoat_read_nosan`, 250-input corpus from `tools/corpus_fuzzgoat.py`, default flags, `-n 10000`, seeds 1-8, arm order alternated): median edges 466 base vs 468.5 tables, per-seed delta median +4.5, 6 wins / 2 losses, sign test p=0.29: **no detectable effect**. Edge counts are bimodal by seed (~460 or ~970), so the test has no power for a ~1% effect. Throughput within noise (eps 440-556 both arms).
+- Not run: full suite (Hard Rule 50).
 - Speed: the only hot-path change is one extra branch in `_random_num`; not timed.
 
 ## Open
