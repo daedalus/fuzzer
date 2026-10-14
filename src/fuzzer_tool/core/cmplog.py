@@ -33,7 +33,9 @@ import select
 import threading
 import time
 import uuid
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
+
+import numpy as np
 
 from fuzzer_tool.adapters.track_parser import (
     CondStmt,
@@ -211,7 +213,8 @@ CMPLOG_SITES_MAX_BYTES = 32 * 1024 * 1024
 # Bytes per newline count in _lines_end: ~100 lines of cmplog text.
 LINES_END_CHUNK = 4096
 # Parsed site lines kept by text: ~95% of FFmpeg's lines repeat verbatim
-# (17k distinct of 318k). Cleared when full, so memory stays bounded.
+# (57k distinct of 1.44M). Cleared between drains once over this, so memory
+# stays bounded (cap + one drain).
 SITE_LINE_CACHE_MAX = 65_536
 
 # ── Wall detection ────────────────────────────────────────────────────
@@ -409,6 +412,198 @@ def _eviction_victims(pool: list, value: dict, excess: int) -> set[int]:
     return set(order[:excess])
 
 
+_SiteKey = tuple[str, int]
+
+# Slot marker for a line that folds nothing (CND, malformed): not cached.
+_NO_SLOT = -1
+
+# Pending last-fired drains before they are folded into a dict (bounds
+# memory when collect_sites runs without a collect_counts reset).
+_LAST_FIRED_CHUNKS_MAX = 64
+
+
+class _SiteLines(dict):
+    """Site line text -> slot; a miss parses the line (slow path)."""
+
+    def __init__(self, parse: Callable[[str], int]) -> None:
+        super().__init__()
+        self._parse = parse
+
+    def __missing__(self, line: str) -> int:
+        return self._parse(line)
+
+
+class _SiteCounters:
+    """Per-site (callback, pc) fired / asserted totals, folded per drain.
+
+    ~95% of site lines repeat verbatim. Each distinct ``CNS`` line gets a
+    slot (site id, fired, asserted); a drain is one ``map`` over the line
+    cache plus ``np.add.at`` into per-site totals:
+
+        lines --map--> slots --gather--> (site, fired, asserted) --add.at--> totals
+
+    ``last_asserted`` (read every exec) is kept as a dict; ``last_fired``
+    (no hot-path reader) is built on read.
+    """
+
+    def __init__(self, on_drop: Callable[[str], None]) -> None:
+        self._on_drop = on_drop
+        self._lines = _SiteLines(self._parse)
+        self._site_ids: dict[_SiteKey, int] = {}
+        self._sites: list[_SiteKey] = []
+        self._slot_site = np.zeros(1024, np.int64)
+        self._slot_fired = np.zeros(1024, np.int64)
+        self._slot_asserted = np.zeros(1024, np.int64)
+        self._n_slots = 0
+        self._fired = np.zeros(1024, np.int64)
+        self._asserted = np.zeros(1024, np.int64)
+        # Sites present in each total since its last reset: a reset
+        # (``= {}``) empties the view, a seen site with zero fires stays in it.
+        self._fired_seen = np.zeros(1024, np.bool_)
+        self._asserted_seen = np.zeros(1024, np.bool_)
+        self.last_asserted: dict[_SiteKey, int] = {}
+        self._last_fired_base: dict[_SiteKey, int] = {}
+        self._last_fired_chunks: list[tuple[np.ndarray, np.ndarray]] = []
+        self._last_fired: dict[_SiteKey, int] | None = {}
+
+    # ── fold ──────────────────────────────────────────────────────────
+    def fold(self, lines: list[str]) -> None:
+        """Add one drain's lines to the totals and the last-drain views."""
+        if len(self._lines) >= SITE_LINE_CACHE_MAX:
+            self._lines.clear()  # memory bound; sites and totals are kept
+            self._n_slots = 0
+        slots = np.fromiter(map(self._lines.__getitem__, lines), np.int64, len(lines))
+        slots = slots[slots != _NO_SLOT]
+        site = self._slot_site[slots]
+        fired = self._slot_fired[slots]
+        asserted = self._slot_asserted[slots]
+        np.add.at(self._fired, site, fired)
+        np.add.at(self._asserted, site, asserted)
+        self._fired_seen[site] = True
+        self._asserted_seen[site] = True
+
+        self._last_fired_chunks.append((site, fired))
+        self._last_fired = None
+        if len(self._last_fired_chunks) > _LAST_FIRED_CHUNKS_MAX:
+            self._last_fired_base = self.last_fired()
+            self._last_fired_chunks = []
+        self._add_last_asserted(site, asserted)
+
+    def _add_last_asserted(self, site: np.ndarray, asserted: np.ndarray) -> None:
+        hit = asserted > 0
+        if not hit.any():
+            return
+        per_site = np.zeros(len(self._sites), np.int64)
+        np.add.at(per_site, site[hit], asserted[hit])
+        ids = np.flatnonzero(per_site)
+        last = self.last_asserted
+        for key, n in zip(
+            map(self._sites.__getitem__, ids.tolist()), per_site[ids].tolist(), strict=True
+        ):
+            last[key] = last.get(key, 0) + n
+
+    def _parse(self, line: str) -> int:
+        """``CNS <cb> <pc> <fired> <asserted>`` -> new slot; ``CND <n>`` is
+        reported and, like anything else, folds nothing (not cached)."""
+        parts = line.split()
+        n = len(parts)
+        if n != 5 or parts[0] != "CNS":
+            if n == 2 and parts[0] == "CND":
+                self._on_drop(parts[1])
+            return _NO_SLOT
+        try:
+            key = (parts[1], int(parts[2], 16))
+            fired, asserted = int(parts[3]), int(parts[4])
+        except ValueError:
+            return _NO_SLOT
+
+        slot = self._n_slots
+        if slot >= len(self._slot_site):
+            self._slot_site, self._slot_fired, self._slot_asserted = (
+                _grown(a) for a in (self._slot_site, self._slot_fired, self._slot_asserted)
+            )
+        self._slot_site[slot] = self._site_id(key)
+        self._slot_fired[slot] = fired
+        self._slot_asserted[slot] = asserted
+        self._n_slots = slot + 1
+        dict.__setitem__(self._lines, line, slot)
+        return slot
+
+    def _site_id(self, key: _SiteKey) -> int:
+        sid = self._site_ids.get(key)
+        if sid is not None:
+            return sid
+        sid = len(self._sites)
+        self._site_ids[key] = sid
+        self._sites.append(key)
+        if sid >= len(self._fired):
+            self._fired, self._asserted = _grown(self._fired), _grown(self._asserted)
+            self._fired_seen = _grown(self._fired_seen)
+            self._asserted_seen = _grown(self._asserted_seen)
+        return sid
+
+    # ── views ─────────────────────────────────────────────────────────
+    def fired_totals(self) -> dict[_SiteKey, int]:
+        return self._totals(self._fired, self._fired_seen)
+
+    def asserted_totals(self) -> dict[_SiteKey, int]:
+        return self._totals(self._asserted, self._asserted_seen)
+
+    def _totals(self, counts: np.ndarray, seen: np.ndarray) -> dict[_SiteKey, int]:
+        """Sites seen since the last reset (zeros included) -> total."""
+        ids = np.flatnonzero(seen[: len(self._sites)])
+        return dict(
+            zip(map(self._sites.__getitem__, ids.tolist()), counts[ids].tolist(), strict=True)
+        )
+
+    def set_fired(self, values: dict[_SiteKey, int]) -> None:
+        """Replace the fired totals with *values* (``= {}`` resets them)."""
+        ids = self._ids_of(values)  # may grow the arrays: fetch them after
+        self._fired[:] = 0
+        self._fired_seen[:] = False
+        self._fired[ids] = list(values.values())
+        self._fired_seen[ids] = True
+
+    def set_asserted(self, values: dict[_SiteKey, int]) -> None:
+        """Replace the asserted totals with *values* (``= {}`` resets them)."""
+        ids = self._ids_of(values)
+        self._asserted[:] = 0
+        self._asserted_seen[:] = False
+        self._asserted[ids] = list(values.values())
+        self._asserted_seen[ids] = True
+
+    def _ids_of(self, values: dict[_SiteKey, int]) -> np.ndarray:
+        return np.array([self._site_id(k) for k in values], np.int64)
+
+    def last_fired(self) -> dict[_SiteKey, int]:
+        """Sites that fired since the last reset -> fires (built on read)."""
+        if self._last_fired is not None:
+            return self._last_fired
+        last = dict(self._last_fired_base)
+        sites = self._sites
+        for site, fired in self._last_fired_chunks:
+            hit = fired > 0
+            for sid, n in zip(site[hit].tolist(), fired[hit].tolist(), strict=True):
+                key = sites[sid]
+                last[key] = last.get(key, 0) + n
+        self._last_fired = last
+        return last
+
+    def last_fired_cached(self) -> bool:
+        """Whether last_fired() is already built (for tests)."""
+        return self._last_fired is not None
+
+    def set_last_fired(self, values: dict[_SiteKey, int]) -> None:
+        self._last_fired_base = dict(values)
+        self._last_fired_chunks = []
+        self._last_fired = None
+
+
+def _grown(arr: np.ndarray) -> np.ndarray:
+    """*arr* doubled, zero-filled."""
+    return np.concatenate([arr, np.zeros_like(arr)])
+
+
 class CmplogCollector:
     """Collect and process comparison tracing data from the cmplog shim.
 
@@ -561,14 +756,11 @@ class CmplogCollector:
         # nothing here is worth that on a target nobody is investigating.
         self.site_counts_enabled = bool(site_counts)
         self.sites_path: str | None = None
-        self.site_fired: dict[tuple[str, int], int] = {}
-        # Site line text -> (key, fired, asserted); see SITE_LINE_CACHE_MAX.
-        self._site_line_cache: dict[str, tuple[tuple[str, int], int, int]] = {}
-        self.site_asserted: dict[tuple[str, int], int] = {}
-        # Per-drain site vector, parallel to last_asserted.  Only meaningful
-        # when collect_sites runs on an execution boundary (via collect_counts).
-        self.last_site_fired: dict[tuple[str, int], int] = {}
-        self.last_site_asserted: dict[tuple[str, int], int] = {}
+        # site_fired / site_asserted and the per-drain last_site_fired /
+        # last_site_asserted (parallel to last_asserted; only meaningful when
+        # collect_sites runs on an execution boundary, via collect_counts)
+        # are views over this; see _SiteCounters.
+        self._sites = _SiteCounters(self._note_site_drops)
         self.site_dropped = 0
         # True once the shim's fixed-size site table has refused at least one
         # insertion.  The table never grows or evicts, so from that point the
@@ -1358,46 +1550,44 @@ class CmplogCollector:
         if new_lines is None:
             return
 
-        # Runs on every execution over ~850 lines on FFmpeg; the dicts and
-        # their bound methods are hoisted out of the loop.
-        site_fired, site_asserted = self.site_fired, self.site_asserted
-        last_fired, last_asserted = self.last_site_fired, self.last_site_asserted
-        fired_get, asserted_get = site_fired.get, site_asserted.get
-        cache = self._site_line_cache
-        cached = cache.get
-        for line in new_lines:
-            # Fast path: a line seen before; slow path parses it.
-            hit = cached(line)
-            if hit is None:
-                hit = self._parse_site_line(line)
-                if hit is None:
-                    continue
-                if len(cache) >= SITE_LINE_CACHE_MAX:
-                    cache.clear()
-                cache[line] = hit
-            key, fired, asserted = hit
-            site_fired[key] = fired_get(key, 0) + fired
-            site_asserted[key] = asserted_get(key, 0) + asserted
-            if fired:
-                last_fired[key] = last_fired.get(key, 0) + fired
-            if asserted:
-                last_asserted[key] = last_asserted.get(key, 0) + asserted
+        # Runs on every execution over ~1000 lines on FFmpeg.
+        self._sites.fold(new_lines)
 
-    def _parse_site_line(self, line: str) -> tuple[tuple[str, int], int, int] | None:
-        """``CNS <cb> <pc> <fired> <asserted>`` -> (key, fired, asserted).
+    @property
+    def site_fired(self) -> dict[tuple[str, int], int]:
+        """(callback, pc) -> total fires (a snapshot)."""
+        return self._sites.fired_totals()
 
-        None for anything else; a ``CND <n>`` line is folded on the way.
-        """
-        parts = line.split()
-        n = len(parts)
-        if n != 5 or parts[0] != "CNS":
-            if n == 2 and parts[0] == "CND":
-                self._note_site_drops(parts[1])
-            return None
-        try:
-            return (parts[1], int(parts[2], 16)), int(parts[3]), int(parts[4])
-        except ValueError:
-            return None
+    @site_fired.setter
+    def site_fired(self, values: dict[tuple[str, int], int]) -> None:
+        self._sites.set_fired(values)
+
+    @property
+    def site_asserted(self) -> dict[tuple[str, int], int]:
+        """(callback, pc) -> total satisfied comparisons (a snapshot)."""
+        return self._sites.asserted_totals()
+
+    @site_asserted.setter
+    def site_asserted(self, values: dict[tuple[str, int], int]) -> None:
+        self._sites.set_asserted(values)
+
+    @property
+    def last_site_fired(self) -> dict[tuple[str, int], int]:
+        """Fires per site since the last reset (built on read)."""
+        return self._sites.last_fired()
+
+    @last_site_fired.setter
+    def last_site_fired(self, values: dict[tuple[str, int], int]) -> None:
+        self._sites.set_last_fired(values)
+
+    @property
+    def last_site_asserted(self) -> dict[tuple[str, int], int]:
+        """Satisfied comparisons per site since the last reset."""
+        return self._sites.last_asserted
+
+    @last_site_asserted.setter
+    def last_site_asserted(self, values: dict[tuple[str, int], int]) -> None:
+        self._sites.last_asserted = dict(values)
 
     def _read_site_lines(self) -> list[str] | None:
         """New lines of the sites file since the last drain; None when unread.
