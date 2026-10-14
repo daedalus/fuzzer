@@ -1423,69 +1423,98 @@ static inline void __afl_touch(uint32_t idx) {
         __afl_touched[idx >> 6] |= bit;
 }
 
-/* Record edge_id in the SHM table for generation gen (see __afl_map_loc). */
+/* Settle edge_id in slot idx if the slot is empty or already holds it.
+ * Returns 1 when settled, 0 on a collision with a different edge.
+ * tag = gen << 24, the generation as stored in count's high byte. */
+__attribute__((always_inline))
+static inline int __afl_probe_slot(struct __afl_entry *area, uint32_t idx,
+                                   uint32_t edge_id, uint32_t tag) {
+    struct __afl_entry e = area[idx];                /* one 8-byte load */
+
+    if (e.edge_id == 0) {                            /* empty slot — claim */
+        area[idx].edge_id = edge_id;
+        area[idx].count   = tag | 1;
+        __afl_touch(idx);
+        __afl_iter_edge_count++;                     /* track per-iteration new-slot insertion */
+        __afl_total_edge_count++;                    /* track cumulative across-reset count */
+        if (__afl_edge_count)                        /* write CUMULATIVE count live to SHM header */
+            *__afl_edge_count = __afl_total_edge_count;
+        return 1;
+    }
+
+    /* Hash collision against a live or stale *different* edge -- keep
+     * probing. A stale different edge is not reclaimed: its slot still
+     * records an edge this target has genuinely reached, and dropping it
+     * would lose cumulative coverage. */
+    if (e.edge_id != edge_id) return 0;
+
+    /* Existing edge, this generation: bump the saturating 24-bit count.
+     * (count ^ tag) < 2^24 <=> high byte == gen. */
+    if ((e.count ^ tag) < 0x01000000u) {
+        if ((e.count & 0x00FFFFFFu) != 0x00FFFFFFu)
+            area[idx].count = e.count + 1;
+        return 1;
+    }
+
+    /* Stale entry for this same edge: reclaim IN PLACE.
+     *
+     * This branch used to fall through and keep probing, which meant
+     * every generation inserted a *fresh duplicate* of every edge
+     * that fired, in a new slot, while the stale copy was never
+     * freed. The table therefore filled at (edges per exec) slots
+     * per execution regardless of how few distinct edges the target
+     * had, saturated after roughly map_size/edges_per_exec
+     * executions, and from then on could claim no slot at all --
+     * every subsequent execution reported ZERO current-generation
+     * edges, silently ending coverage guidance mid-campaign.
+     * Measured pre-fix on an 8192-entry map with 43 distinct edges:
+     * saturated at exec ~190, edge visibility 43 -> 0 at exec 200.
+     *
+     * Reclaiming in place makes table occupancy the union of
+     * distinct edges ever seen, which is bounded by the target's
+     * guard count -- the behaviour the generation design intended.
+     * total_edge_count is deliberately NOT bumped here: this edge
+     * already owns a slot, so it is not a newly discovered edge. */
+    area[idx].count = tag | 1;
+    __afl_touch(idx);
+    __afl_iter_edge_count++;
+    return 1;
+}
+
+/* Record edge_id in the SHM table for generation gen (see __afl_map_loc).
+ *
+ * The window is split once into two straight runs instead of testing the
+ * wrap on every slot:
+ *
+ *     [pos ............ size)  head = min(window, size - pos) slots
+ *     [0 .. window - head)     only when the window crosses the end
+ *
+ * Globals are copied to locals: the table stores are uint32_t, so the
+ * compiler must otherwise assume they alias __afl_map_size and reload it
+ * every step. Measured against the per-slot-wrap loop, 2^18 entries:
+ * -7% at load 0.13, -11% at load 0.77 (min ns per edge).
+ * SSE2/AVX2 compares and cache-line bucket homes were measured and
+ * rejected; see docs/DEEP_DIVE.md "Edge-table probe". */
 __attribute__((always_inline))
 static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
                                       uint32_t window, uint32_t gen) {
-    for (uint32_t i = 0; i < window; i++) {
-        /* pos < size and i < size: wrap by subtraction. Written as
-         * i < size - pos so pos + i cannot overflow uint32. */
-        uint32_t idx = (i < __afl_map_size - pos) ? pos + i : i - (__afl_map_size - pos);
-        uint32_t eid = __afl_area[idx].edge_id;
+    struct __afl_entry *area = __afl_area;
+    uint32_t size = __afl_map_size;
+    uint32_t tag  = gen << 24;
+    uint32_t head = (size - pos < window) ? size - pos : window;
 
-        if (eid == 0) {                              /* empty slot — claim */
-            __afl_area[idx].edge_id = edge_id;
-            __afl_area[idx].count   = (gen << 24) | 1;
-            __afl_touch(idx);
-            __afl_iter_edge_count++;                 /* track per-iteration new-slot insertion */
-            __afl_total_edge_count++;                /* track cumulative across-reset count */
-            if (__afl_edge_count)                    /* write CUMULATIVE count live to SHM header */
-                *__afl_edge_count = __afl_total_edge_count;
-            return;
-        }
-        if (eid == edge_id) {                        /* existing edge */
-            if ((__afl_area[idx].count >> 24) == gen) {
-                if ((__afl_area[idx].count & 0x00FFFFFFu) < 0x00FFFFFFu)
-                    __afl_area[idx].count++;
-                return;
-            }
-            /* Stale entry for this same edge: reclaim IN PLACE.
-             *
-             * This branch used to fall through and keep probing, which meant
-             * every generation inserted a *fresh duplicate* of every edge
-             * that fired, in a new slot, while the stale copy was never
-             * freed. The table therefore filled at (edges per exec) slots
-             * per execution regardless of how few distinct edges the target
-             * had, saturated after roughly map_size/edges_per_exec
-             * executions, and from then on could claim no slot at all --
-             * every subsequent execution reported ZERO current-generation
-             * edges, silently ending coverage guidance mid-campaign.
-             * Measured pre-fix on an 8192-entry map with 43 distinct edges:
-             * saturated at exec ~190, edge visibility 43 -> 0 at exec 200.
-             *
-             * Reclaiming in place makes table occupancy the union of
-             * distinct edges ever seen, which is bounded by the target's
-             * guard count -- the behaviour the generation design intended.
-             * total_edge_count is deliberately NOT bumped here: this edge
-             * already owns a slot, so it is not a newly discovered edge. */
-            __afl_area[idx].count = (gen << 24) | 1;
-            __afl_touch(idx);
-            __afl_iter_edge_count++;
-            return;
-        }
-        /* else: hash collision against a live or stale *different* edge —
-         * keep probing. A stale different edge is not reclaimed: its slot
-         * still records an edge this target has genuinely reached, and
-         * dropping it would lose cumulative coverage. */
+    for (uint32_t i = 0; i < head; i++)
+        if (__afl_probe_slot(area, pos + i, edge_id, tag)) return;
 
-        /* Window exhausted and still nowhere to put it. Unlike the old
-         * unbounded loop, this does not mean the table is full -- it means
-         * this edge's neighbourhood is. Count it either way: a dropped edge
-         * is invisible to the fuzzer, and read_dropped_edges() is how that
-         * cost is meant to be observed. */
-        if (i == window - 1)
-            __afl_note_drop();
-    }
+    for (uint32_t i = 0; i < window - head; i++)
+        if (__afl_probe_slot(area, i, edge_id, tag)) return;
+
+    /* Window exhausted and still nowhere to put it. Unlike the old
+     * unbounded loop, this does not mean the table is full -- it means
+     * this edge's neighbourhood is. Count it either way: a dropped edge
+     * is invisible to the fuzzer, and read_dropped_edges() is how that
+     * cost is meant to be observed. */
+    __afl_note_drop();
 }
 
 /* Shift cur_loc into the previous-location state for the next edge. */

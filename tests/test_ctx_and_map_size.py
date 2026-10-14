@@ -38,11 +38,15 @@ from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.elf import (
     MAP_SIZE_DEFAULT,
     MAP_SIZE_MAX,
+    TARGET_LOAD_FACTOR,
     _map_size_max,
     _size_from_blocks,
     ctx_inflation_factor,
     detect_ctx_bits,
 )
+
+# Distinct edges measured on ffmpeg_read, the largest target in the tree.
+FFMPEG_EDGES = 201_279
 
 SHIM = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -254,6 +258,10 @@ class TestMapSizing:
         assert _size_from_blocks(1, 0) == MAP_SIZE_DEFAULT
         assert _size_from_blocks(10_000_000, 32) == MAP_SIZE_MAX
 
+    def test_regression_cap_keeps_largest_target_at_target_load(self):
+        """ffmpeg_read filled the old 262,144 cap to 0.77: longer probes, 0.04% drops."""
+        assert FFMPEG_EDGES / MAP_SIZE_MAX <= TARGET_LOAD_FACTOR
+
     def test_result_is_a_power_of_two(self):
         for blocks in (1, 999, 5_000, 33_333, 250_000):
             n = _size_from_blocks(blocks, 0)
@@ -275,6 +283,10 @@ class TestMapSizeMaxOverride:
     def test_override_rounds_to_power_of_two(self, monkeypatch):
         monkeypatch.setenv("AFL_MAP_SIZE_MAX", "300000")
         assert _map_size_max() == 524_288
+
+    def test_override_can_lower_the_cap(self, monkeypatch):
+        monkeypatch.setenv("AFL_MAP_SIZE_MAX", str(MAP_SIZE_MAX // 2))
+        assert _map_size_max() == MAP_SIZE_MAX // 2
 
     def test_garbage_override_falls_back(self, monkeypatch):
         monkeypatch.setenv("AFL_MAP_SIZE_MAX", "not-a-number")
