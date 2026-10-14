@@ -8,10 +8,10 @@ targets reliably, so the flag was removed entirely in favor of always-on
 auto-detect.
 
 The constructor's `cmplog` parameter is now a boolean: `True` (default) means
-on-with-auto-detect, `False` means force off. There is no user-facing
-`--no-cmplog` flag any more; the only cmplog-related opt-out is
-`--no-cmplog-fifo-sink`, which controls the FIFO drain mode but not
-whether cmplog runs.
+on-with-auto-detect, `False` means force off. The user-facing switch for
+`False` is `--no-cmplog` (a store_true opt-out; there is still no `--cmplog`
+flag). `--no-cmplog-fifo-sink` is separate: it controls the FIFO drain mode but
+not whether cmplog runs.
 """
 
 from __future__ import annotations
@@ -86,8 +86,9 @@ class TestWiring:
         assert sig.parameters["cmplog"].default is True
 
     def test_no_cmplog_argparse_flag(self):
-        """There is no --cmplog flag; cmplog is always enabled when the
-        target has instrumentation. The only opt-out is --no-cmplog-fifo-sink."""
+        """There is no --cmplog flag; cmplog is on by default when the target
+        has instrumentation. Opt-outs: --no-cmplog (whole run) and
+        --no-cmplog-fifo-sink (FIFO drain mode only)."""
         import inspect
 
         from fuzzer_tool.cli import commands
@@ -108,3 +109,36 @@ class TestWiring:
         assert "BooleanOptionalAction" in decl
         assert "default=True" in decl
         assert hasattr(argparse, "BooleanOptionalAction")
+
+
+class TestNoCmplogFlag:
+    """--no-cmplog is the opt-out of comparison tracing for a whole run."""
+
+    def test_flag_declared_as_store_true_opt_out(self):
+        import inspect
+
+        from fuzzer_tool.cli import commands
+
+        src = inspect.getsource(commands)
+        idx = src.index('"--no-cmplog",')
+        decl = src[idx : idx + 200]
+        assert 'dest="no_cmplog"' in decl
+        assert 'action="store_true"' in decl
+
+    def test_flag_is_wired_into_fuzzer_construction(self):
+        import inspect
+
+        from fuzzer_tool.cli import commands
+
+        src = inspect.getsource(commands)
+        assert 'cmplog=not getattr(args, "no_cmplog", False)' in src
+
+    def test_hail_mary_does_not_force_cmplog_off(self):
+        from fuzzer_tool.cli import commands
+
+        assert "no_cmplog" not in commands._HAIL_MARY_FLAGS
+
+    def test_disabled_run_announces_itself_and_creates_no_collector(self, monkeypatch, capsys):
+        fz = _make_fuzzer(monkeypatch, False, detected=True)
+        assert fz._cmplog is None
+        assert "Cmplog: disabled (--no-cmplog)" in capsys.readouterr().out

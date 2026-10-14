@@ -624,7 +624,7 @@ def cmd_fuzz(args):
         calibrate_stability=getattr(args, "calibrate_stability", 0),
         touched_scan=getattr(args, "touched_scan", None),
         shared_virgin=getattr(args, "shared_virgin", False),
-        cmplog=True,
+        cmplog=not getattr(args, "no_cmplog", False),
         cmplog_max_tokens=getattr(args, "cmplog_max_tokens", 0),
         cmplog_max_pairs=getattr(args, "cmplog_max_pairs", 0),
         cmplog_workdir=getattr(args, "cmplog_workdir", None)
@@ -2127,6 +2127,8 @@ def cmd_sweep(args):
 # --enable-regex-bomb-mutations (experimental),
 # --send-mail-require-tls (email config).
 # poisson_disk_admission was added by PR: poisson-disk admission gate.
+# --no-cmplog is a store_true opt-OUT (dest no_cmplog), deliberately not in
+# _HAIL_MARY_FLAGS: --hail-mary must not switch cmplog off.
 # cmplog_fifo_sink was changed to --no-cmplog-fifo-sink (opt-out,
 # default=True) in the same commit; added to _HAIL_MARY_FLAGS so the
 # FIFO drain is force-enabled alongside the rest of the strategy set.
@@ -5010,6 +5012,22 @@ def main() -> int:
             "Disable the AFL-style deterministic stage (bitflip/byte-flip/arithmetic/"
             "interesting-value sweep) for favored seeds before havoc. On by default; "
             "a full pass costs 8*len(seed) execs per favored seed."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--no-cmplog",
+        dest="no_cmplog",
+        action="store_true",
+        help=(
+            "Turn comparison tracing off for this run. Cmplog is on by default and every "
+            "trace-cmp callback in the target then hashes, dedups and logs its operands "
+            "(tens of ns each, millions per exec on a large target such as ffmpeg), so "
+            "raw exec speed can be dominated by the hooks. With this flag no cmplog "
+            "collector or FIFO is created and the hooks reduce to a cheap disabled check "
+            "(about 5 ns each), but redqueen/input-to-state mutation, --pos-cmplog, "
+            "--compcov-level, --cmp-prune-const and --enable-smt-z3 lose their data "
+            "source. Use it to measure the hook cost or to fuzz targets where raw speed "
+            "matters more than solving comparisons."
         ),
     )
     fuzz_parser.add_argument(

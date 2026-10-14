@@ -2352,6 +2352,8 @@ class Fuzzer:
             else:
                 print("[!] Cmplog: failed to compile shim, disabling")
                 self._cmplog = None
+        else:
+            print("[*] Cmplog: disabled (--no-cmplog); trace-cmp hooks in the target log nothing")
 
         # self.checksum_learner: constructed by analyzer_registry.wire_all()
         # below (swallow_errors=True there reproduces this analyzer's
