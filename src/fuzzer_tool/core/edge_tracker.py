@@ -17,6 +17,7 @@ import logging
 import math
 import random
 import struct
+import sys
 import time
 import zlib
 from array import array
@@ -46,6 +47,10 @@ _COOCCUR_EDGE_CAP = 200
 _COOCCUR_MIN_JACCARD = 0.1
 CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
 COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
+# MinHash band hashing reads the array('Q') buffer directly when native order
+# already matches the little-endian struct packing it replaces.
+_LITTLE_ENDIAN = sys.byteorder == "little"
+_SIG_ITEM = array("Q").itemsize
 
 # Tracked-seed ceiling, and the fraction of it a prune drops back to.
 #
@@ -568,8 +573,10 @@ class MinHashLSH:
         self.band_size = num_perm // num_bands
         # Per-seed MinHash signatures: seed_key -> array('Q') of length num_perm
         self.signatures: dict[str, array] = {}
-        # LSH buckets: (band_idx, band_hash) -> set of seed_keys
-        self.buckets: dict[tuple[int, int], set[str]] = {}
+        # LSH buckets, one dict per band: band crc32 -> seed_key, or a set of
+        # them once two seeds share it. Most buckets hold one seed; a bare str
+        # skips a 216 B set and the (band, crc) tuple key per entry.
+        self._bands: list[dict[int, str | set[str]]] = [{} for _ in range(num_bands)]
         # Precomputed hash function coefficients: h(x) = (a*x + b) & mask
         # Uses uint64 wrapping — consistent, no prime needed, fully vectorizable.
         rng = random.Random(seed)
@@ -645,36 +652,61 @@ class MinHashLSH:
             return array("Q", _np.minimum(a, b))
         return array("Q", (min(x, y) for x, y in zip(existing_sig, new_sig, strict=True)))
 
+    def _band_hashes(self, sig: array) -> list[int]:
+        """crc32 of each band's little-endian packed values, one buffer for all bands."""
+        raw = sig.tobytes() if _LITTLE_ENDIAN else struct.pack(f"<{len(sig)}Q", *sig)
+        step = self.band_size * _SIG_ITEM
+        return [crc32_ieee(raw[lo : lo + step]) for lo in range(0, self.num_bands * step, step)]
+
+    def _link(self, band: dict[int, str | set[str]], h: int, seed_key: str) -> None:
+        """Add `seed_key` to bucket `h`; a lone member is stored bare, not in a set."""
+        cur = band.get(h)
+        if cur is None:
+            band[h] = seed_key
+            return
+        if cur.__class__ is str:
+            if cur != seed_key:
+                band[h] = {cur, seed_key}
+            return
+        cur.add(seed_key)
+
+    def _unlink(self, band: dict[int, str | set[str]], h: int, seed_key: str) -> None:
+        """Drop `seed_key` from bucket `h`; empty buckets go, singletons go bare."""
+        cur = band.get(h)
+        if cur is None:
+            return
+        if cur.__class__ is str:
+            if cur == seed_key:
+                del band[h]
+            return
+        cur.discard(seed_key)
+        if len(cur) == 1:
+            band[h] = next(iter(cur))
+
     def add(self, seed_key: str, sig: list[int] | array):
-        """Add a seed's signature to the index."""
-        self.signatures[seed_key] = sig if isinstance(sig, array) else array("Q", sig)
-        # Insert into LSH buckets
-        for band_idx in range(self.num_bands):
-            start = band_idx * self.band_size
-            end = start + self.band_size
-            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
-            band_hash = crc32_ieee(band_bytes)
-            bucket_key = (band_idx, band_hash)
-            if bucket_key not in self.buckets:
-                self.buckets[bucket_key] = set()
-            self.buckets[bucket_key].add(seed_key)
+        """Add or replace a seed's signature in the index."""
+        sig = sig if isinstance(sig, array) else array("Q", sig)
+        new = self._band_hashes(sig)
+
+        # Re-add after a signature update: relink only the bands that moved,
+        # else the seed stays a candidate for bands it no longer has.
+        old_sig = self.signatures.get(seed_key)
+        old = self._band_hashes(old_sig) if old_sig is not None else [None] * self.num_bands
+        self.signatures[seed_key] = sig
+        for band, o, h in zip(self._bands, old, new, strict=True):
+            if o == h:
+                continue
+            if o is not None:
+                self._unlink(band, o, seed_key)
+            self._link(band, h, seed_key)
 
     def remove(self, seed_key: str):
         """Remove a seed from the index."""
         sig = self.signatures.pop(seed_key, None)
         if sig is None:
             return
-        for band_idx in range(self.num_bands):
-            start = band_idx * self.band_size
-            end = start + self.band_size
-            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
-            band_hash = crc32_ieee(band_bytes)
-            bucket_key = (band_idx, band_hash)
-            bucket = self.buckets.get(bucket_key)
-            if bucket:
-                bucket.discard(seed_key)
-                if not bucket:
-                    del self.buckets[bucket_key]
+        for band, h in zip(self._bands, self._band_hashes(sig), strict=True):
+            self._unlink(band, h, seed_key)
 
     def approximate_jaccard(self, key_a: str, key_b: str) -> float:
         """Estimate Jaccard similarity between two seeds via MinHash signatures.
@@ -700,15 +732,14 @@ class MinHashLSH:
 
         # Collect all candidates from LSH buckets
         candidates: set[str] = set()
-        for band_idx in range(self.num_bands):
-            start = band_idx * self.band_size
-            end = start + self.band_size
-            band_bytes = struct.pack(f"<{end - start}Q", *sig[start:end])
-            band_hash = crc32_ieee(band_bytes)
-            bucket_key = (band_idx, band_hash)
-            bucket = self.buckets.get(bucket_key)
-            if bucket:
-                candidates.update(bucket)
+        for band, h in zip(self._bands, self._band_hashes(sig), strict=True):
+            bucket = band.get(h)
+            if bucket is None:
+                continue
+            if bucket.__class__ is str:
+                candidates.add(bucket)
+                continue
+            candidates.update(bucket)
         candidates.discard(seed_key)
 
         # Filter by full Jaccard threshold
