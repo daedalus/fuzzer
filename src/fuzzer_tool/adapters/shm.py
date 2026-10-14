@@ -577,7 +577,7 @@ class ShmCoverage:
 
         ``position`` is the SHM slot index the live edge occupies -- the
         ``edge_pos`` of the (pos, id, count) matrices.  The shim derives it
-        by linear probing from ``home = edge_id % num_entries``, so
+        by linear probing from ``home = home_slot(edge_id, num_entries)``, so
         ``position == home + displacement`` with displacement in
         ``[0, PROBE_MAX)``.
 

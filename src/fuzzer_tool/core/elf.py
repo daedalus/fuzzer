@@ -1525,7 +1525,13 @@ TARGET_LOAD_FACTOR = 0.5
 # generation-tagged entries would make reset O(1) and let the cap follow
 # instrumentation size instead of clear bandwidth. Until then, a target that
 # wants more must say so via AFL_MAP_SIZE_MAX and accept the reset cost.
-MAP_SIZE_MAX = 262144
+#
+# 524288: generation tags removed the per-exec clear and the touched bitmap
+# makes the scan O(touched), so the cap now follows probe cost. ffmpeg_read
+# (201,279 edges) filled 262144 to load 0.77; at 524288 (load 0.38) the
+# probe measured -22% per edge on a cache-cold stream, flat on a hot one,
+# and its 0.04% permanent edge drops went to zero.
+MAP_SIZE_MAX = 524288
 
 
 def _map_size_max() -> int:

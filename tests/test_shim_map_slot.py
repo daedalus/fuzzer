@@ -23,6 +23,9 @@ ODD_SIZE = 1000
 TINY_SIZES = [1, 3]
 MAX_ID = 0xFFFFFFFF
 GOLDEN = 0x9E3779B1
+COUNT_MASK = 0x00FFFFFF
+EXTRA_IDS = 2
+FIRES = 2
 
 
 def _home(eid: int, size: int) -> int:
@@ -46,8 +49,8 @@ def target(tmp_path_factory):
     return _build(tmp_path_factory.mktemp("slot"), _DRIVER, "-D__AFL_CTX_SENSITIVE=0")
 
 
-def _slots(exe: Path, size: int, ids: list[int]) -> dict[int, int]:
-    """Run the driver; return {edge_id: slot index} from the raw table."""
+def _entries(exe: Path, size: int, ids: list[int]) -> tuple[dict[int, tuple[int, int]], int]:
+    """Run the driver; return ({edge_id: (slot, count)}, dropped edges)."""
     cov = ShmCoverage(size=size)
     try:
         env = _clean_env(__AFL_SHM_ID=cov.env_id, AFL_MAP_SIZE=str(size))
@@ -57,9 +60,19 @@ def _slots(exe: Path, size: int, ids: list[int]) -> dict[int, int]:
         )
         assert r.returncode == 0, r.stderr
         table = np.frombuffer(cov._map, dtype=_ENTRY_DTYPE, count=cov.num_entries)
-        return {int(e): i for i, e in enumerate(table["edge_id"]) if e}
+        got = {
+            int(e): (i, int(c) & COUNT_MASK)
+            for i, (e, c) in enumerate(zip(table["edge_id"], table["count"], strict=True))
+            if e
+        }
+        return got, cov.read_dropped_edges()
     finally:
         cov.cleanup()
+
+
+def _slots(exe: Path, size: int, ids: list[int]) -> dict[int, int]:
+    """Run the driver; return {edge_id: slot index} from the raw table."""
+    return {eid: slot for eid, (slot, _) in _entries(exe, size, ids)[0].items()}
 
 
 @requires_clang
@@ -82,6 +95,27 @@ def test_probe_wraps_past_table_end(target, size):
 
 
 @requires_clang
+@pytest.mark.parametrize("size", [POW2_SIZE, ODD_SIZE])
+def test_wrapped_edges_found_again(target, size):
+    """Falsification: a lookup past the table end hits the entry, not a new slot."""
+    home = size - 2
+    ids = [i for i in range(1, 1 << 22) if _home(i, size) == home][:5]
+    got, dropped = _entries(target, size, ids * FIRES)
+    assert got == {eid: ((home + k) % size, FIRES) for k, eid in enumerate(ids)}
+    assert dropped == 0
+
+
+@requires_clang
+@pytest.mark.parametrize("size", [TINY_SIZES[1], ShmCoverage.PROBE_MAX])
+def test_full_window_drops_each_extra_once(target, size):
+    """Adversarial: window == table; every id past capacity is one drop."""
+    ids = list(range(1, size + EXTRA_IDS + 1))
+    got, dropped = _entries(target, size, ids)
+    assert set(got) == set(ids[:size])
+    assert dropped == EXTRA_IDS
+
+
+@requires_clang
 @pytest.mark.parametrize("size", TINY_SIZES)
 def test_tiny_sizes(target, size):
     """Edge: size 1 maps everything to slot 0; size 3 is the smallest odd."""
@@ -101,3 +135,10 @@ def test_hot_path_has_no_runtime_modulo():
     src = Path(SHIM).read_text()
     assert "(pos + i) % __afl_map_size" not in src
     assert "% __afl_map_size" not in src
+
+
+def test_probe_wrap_decided_once():
+    """Wrap and drop are settled per probe, not re-tested on every slot."""
+    src = Path(SHIM).read_text()
+    assert "i - (__afl_map_size - pos)" not in src
+    assert "i == window - 1" not in src
