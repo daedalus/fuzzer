@@ -95,8 +95,12 @@ other schedulers:
   (the separate `--meta-elo` flag was consolidated into `--elo`; see `_use_elo`
   in `src/fuzzer_tool/services/fuzzer.py`). Enable `--mc-bandit`/`--mopt`/
   `--replicator`/etc. alongside `--elo` to add those strategies to the pool.
-- Probabilistic selection via Thompson sampling over the Gaussian posterior
-  (softmax over Elo gap, temperature=400 for the operator-level ranking).
+- Probabilistic selection via tempered Thompson sampling over the Gaussian
+  posterior: draw `mu + z·sigma·T_eff/T_base`, `T_eff/T_base = 2 − win_rate`
+  in [1, 2], where `win_rate` is how often the favourite won the last 50
+  matches (untempered below 20). One history for operator matches, one per
+  strategy arena. The softmax (temperature 400) is the legacy `EloTracker`,
+  not instantiated.
 
 ### Position arena (third Elo tournament)
 

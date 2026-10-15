@@ -566,7 +566,7 @@ class TestBayesianEloTracker:
         # temperature should decrease from base
         for _ in range(50):
             belo.record_match("A", "B", score_a=1.0)
-        temp = belo._effective_temperature()
+        temp = belo._effective_temperature(belo._best_win_rate)
         # After 50 wins, A is clearly higher-rated; best_win_rate ~1.0
         # Scale = 2.0 - 1.0 = 1.0, so temp ~= base
         assert temp <= belo._base_temperature * 1.05

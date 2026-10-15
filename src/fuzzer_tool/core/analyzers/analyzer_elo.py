@@ -59,6 +59,17 @@ _FLOOR_ALPHA = 0.05
 # Above this many hits on both sides the exact Beta sum is replaced by a
 # normal approximation, keeping the check O(1) in memory.
 _EXACT_MAX_HITS = 4096
+# Tempered Thompson: favourite-won history needed before tempering, the
+# window it is judged over, and the cap the strategy history is trimmed to
+# (trimmed at 2x, amortised).
+_TEMP_MIN_HISTORY = 20
+_TEMP_WINDOW = 50
+_WIN_HISTORY_CAP = 100
+
+
+def _favourite_won(mu_a: float, mu_b: float, score_a: float) -> float:
+    """1.0 when the higher-rated side won (ties favour A), else 0.0."""
+    return float((score_a > 0.5) == (mu_a >= mu_b))
 
 
 class Arena(enum.Enum):
@@ -712,7 +723,9 @@ class EloTracker(RoundRecorderMixin):
             ra += k * (s_ab - self._expected_score(ra, ratings.get(b, self.default_rating)))
             count[strategy_a] += 1
             if s_ab > 0.5:
-                self._strategy_win_count[strategy_a] = self._strategy_win_count.get(strategy_a, 0) + 1
+                self._strategy_win_count[strategy_a] = (
+                    self._strategy_win_count.get(strategy_a, 0) + 1
+                )
 
         if ra is not None:
             ratings[strategy_a] = ra
@@ -919,7 +932,9 @@ class BayesianEloTracker(RoundRecorderMixin):
     3. **Adaptive K-factor**: K scales with recent prediction error — when
        the model is consistently surprised, K grows to react faster.
     4. **Adaptive temperature**: temperature adjusts based on how often the
-       top-rated operator actually wins (log-likelihood tracking).
+       top-rated operator actually wins; it widens the Thompson draws
+       (sigma * T_eff / T_base, in [1, 2]). Operators and each strategy
+       arena keep separate histories.
 
     Args:
         initial_mu: Prior mean for new operators (default 1500).
@@ -972,7 +987,11 @@ class BayesianEloTracker(RoundRecorderMixin):
 
         # Adaptive temperature tracking
         self._best_win_rate: array = array("d")
+        # Per arena: arenas never play each other, so their noise must not mix.
+        self._strategy_best_win_rate: dict[Arena, array] = {}
         self._base_temperature = 400.0
+        # Per-arena strategy draw scale, dropped whenever its history changes.
+        self._strategy_scale: dict[Arena, float] = {}
 
         # Per-iteration K-factor cache: _effective_k() is called ~78K times per run
         # across record_match and record_strategy_match. The K value only changes
@@ -1007,20 +1026,43 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._eff_k_cache = self._base_k * (0.5 + 1.5 * ratio)
         return self._eff_k_cache
 
-    def _effective_temperature(self) -> float:
+    def _effective_temperature(self, history: array) -> float:
         """Adaptive temperature based on how often the top-rated wins.
 
-        When the best operator wins consistently, temperature decreases
+        When the favourite wins consistently, temperature decreases
         (more greedy). When outcomes are noisy, temperature increases.
+
+        Args:
+            history: Favourite-won flags (1.0/0.0), operator or strategy.
         """
-        if len(self._best_win_rate) < 20:
+        if len(history) < _TEMP_MIN_HISTORY:
             return self._base_temperature
-        recent = self._best_win_rate[-50:]
+        recent = history[-_TEMP_WINDOW:]
         win_rate = sum(recent) / len(recent)
         # win_rate near 1.0 → confident, lower T (more greedy)
         # win_rate near 0.5 → noisy, higher T (more exploratory)
         scale = 2.0 - win_rate  # 1.0 → 1.0, 0.5 → 1.5, 0.0 → 2.0
         return self._base_temperature * scale
+
+    def _draw_scale(self, history: array) -> float:
+        """Thompson sigma multiplier: T_eff / T_base, in [1, 2]."""
+        return self._effective_temperature(history) / self._base_temperature
+
+    def _track_strategy_wins(self, arena: Arena, flags: Iterable[float]) -> None:
+        """Extend *arena*'s favourite-won history; trim at 2x cap."""
+        hist = self._strategy_best_win_rate.setdefault(arena, array("d"))
+        hist.extend(flags)
+        if len(hist) > 2 * _WIN_HISTORY_CAP:
+            del hist[:-_WIN_HISTORY_CAP]
+        self._strategy_scale.pop(arena, None)
+
+    def _strategy_draw_scale(self, arena: Arena) -> float:
+        """Cached _draw_scale over *arena*'s strategy history."""
+        scale = self._strategy_scale.get(arena)
+        if scale is None:
+            hist = self._strategy_best_win_rate.get(arena, array("d"))
+            scale = self._strategy_scale[arena] = self._draw_scale(hist)
+        return scale
 
     def init_arm(self, name: str) -> None:
         """Register an operator with the prior N(initial_mu, initial_sigma^2)."""
@@ -1083,11 +1125,11 @@ class BayesianEloTracker(RoundRecorderMixin):
         if len(self._best_win_rate) > 100:
             self._best_win_rate = self._best_win_rate[-100:]
 
-    def _thompson_sample(self, name: str) -> float:
-        """Draw from the operator's posterior N(mu, sigma)."""
+    def _thompson_sample(self, name: str, scale: float = 1.0) -> float:
+        """Draw from the operator's posterior N(mu, (scale * sigma)^2)."""
         mu = self.mu.get(name, self.initial_mu)
         sigma = math.sqrt(self.sigma_sq.get(name, self.initial_sigma**2))
-        return self._rng.gauss(mu, sigma)
+        return self._rng.gauss(mu, scale * sigma)
 
     def select_op(self, operators: list[str], temperature: float | None = None) -> str:
         """Select an operator via Thompson sampling from posteriors.
@@ -1113,7 +1155,9 @@ class BayesianEloTracker(RoundRecorderMixin):
         if not rated:
             return operators[0]
 
-        samples = [(op, self._thompson_sample(op)) for op in rated]
+        # Tempered: noisy outcomes widen every draw by the same factor.
+        scale = self._draw_scale(self._best_win_rate)
+        samples = [(op, self._thompson_sample(op, scale)) for op in rated]
         return max(samples, key=lambda x: x[1])[0]
 
     def select_crash_op(self, operators: list[str], temperature: float | None = None) -> str:
@@ -1149,6 +1193,8 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_match_count[strategy_a] += 1
         self._strategy_match_count[strategy_b] += 1
         _record_strategy_win(self._strategy_win_count, strategy_a, strategy_b, score_a)
+        flag = _favourite_won(mu_a, mu_b, score_a)
+        self._track_strategy_wins(strategy_arena(strategy_a), (flag,))
 
     def record_strategy_matches(
         self, strategy_a: str, opponents: Iterable[str], score_a: float
@@ -1169,6 +1215,8 @@ class BayesianEloTracker(RoundRecorderMixin):
         k = self._effective_k()
         trials, sums = self._strategy_trials, self._strategy_score_sum
 
+        # Favourite-won flags, one per rated opponent; extended once below.
+        fav: list[bool] = []
         mu_a = sig_a = None
         for b in opponents:
             if b == strategy_a:
@@ -1183,15 +1231,21 @@ class BayesianEloTracker(RoundRecorderMixin):
                 sig_a = sig.setdefault(strategy_a, self.initial_sigma**2)
                 count.setdefault(strategy_a, 0)
 
+            mu_b = mu.get(b, init_mu)
+            fav.append((s_ab > 0.5) == (mu_a >= mu_b))
+
             var_a = sig_a / (sig_a + beta_sq)
-            mu_a = mu_a + var_a * k * (s_ab - expected(mu_a, mu.get(b, init_mu)))
+            mu_a = mu_a + var_a * k * (s_ab - expected(mu_a, mu_b))
             sig_a = sig_a * (1.0 - var_a) + tau_sq
             count[strategy_a] += 1
             if s_ab > 0.5:
-                self._strategy_win_count[strategy_a] = self._strategy_win_count.get(strategy_a, 0) + 1
+                self._strategy_win_count[strategy_a] = (
+                    self._strategy_win_count.get(strategy_a, 0) + 1
+                )
 
         if mu_a is not None:
             mu[strategy_a], sig[strategy_a] = mu_a, sig_a
+            self._track_strategy_wins(strategy_arena(strategy_a), fav)
 
         # One call is one round played by strategy_a.
         hits = self._strategy_hits
@@ -1229,6 +1283,9 @@ class BayesianEloTracker(RoundRecorderMixin):
                 (self._strategy_sigma_sq.get(s, self.initial_sigma**2) for s in rated), float
             )
         )
+
+        # Tempered once per sampler (ifs up): noisy outcomes widen the draws.
+        sd *= self._strategy_draw_scale(strategy_arena(rated[0]))
         rng, n = self._rng, len(rated)
         return lambda: rated[int(np.argmax(mu + sd * rng.normal_array(n)))]
 
@@ -1375,6 +1432,9 @@ class BayesianEloTracker(RoundRecorderMixin):
             "strategy_score_sum": self._strategy_score_sum,
             "prediction_errors": list(self._prediction_errors),
             "best_win_rate": list(self._best_win_rate),
+            "strategy_best_win_rate": {
+                a.value: list(h) for a, h in self._strategy_best_win_rate.items()
+            },
         }
 
     def from_dict(self, data: dict) -> None:
@@ -1396,6 +1456,10 @@ class BayesianEloTracker(RoundRecorderMixin):
         self._strategy_score_sum = data.get("strategy_score_sum", {})
         self._prediction_errors = array("d", data.get("prediction_errors", []))
         self._best_win_rate = array("d", data.get("best_win_rate", []))
+        self._strategy_best_win_rate = {
+            Arena(a): array("d", h) for a, h in data.get("strategy_best_win_rate", {}).items()
+        }
+        self._strategy_scale = {}
 
     def save(self, path: str) -> bool:
         """Save state to JSON (legacy interface)."""
