@@ -526,8 +526,9 @@ root cause, ASAN output, and the configuration that found it — under
 ### FFmpeg 7.1.3
 
 Found through [`targets/ffmpeg_read.c`](targets/ffmpeg_read.c), which drives the full
-`avformat_open_input → find_stream_info → av_read_frame → send_packet → receive_frame` chain
-across every registered demuxer, decoder, and parser, built with ASAN and AFL edge coverage.
+`avformat_open_input → find_stream_info → av_read_frame → decode` chain (audio/video:
+`send_packet → receive_frame`; subtitles: `decode_subtitle2`) across every registered demuxer,
+decoder, and parser, built with ASAN and AFL edge coverage.
 
 | Bug | Severity | Summary |
 |---|---|---|

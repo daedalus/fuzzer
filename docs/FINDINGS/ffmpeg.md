@@ -18,7 +18,9 @@
 
 ```
 avformat_open_input → avformat_find_stream_info → av_read_frame
-→ avcodec_send_packet → avcodec_receive_frame → close
+→ audio/video: avcodec_send_packet → avcodec_receive_frame
+→ subtitles:   avcodec_decode_subtitle2
+→ close
 ```
 
 Covers all registered demuxers, decoders, and parsers. Compiled with ASAN (`-fsanitize=address`) and AFL edge coverage via `afl_shim.c`. See `targets/ffmpeg_read.c` for details.
@@ -51,8 +53,11 @@ Covers all registered demuxers, decoders, and parsers. Compiled with ASAN (`-fsa
 
 ## Triage before reporting
 
-Rule out harness misuse first:
+Rule out harness misuse first. Signals (suspect, not proof):
 
-1. Minimize the input. If any payload crashes once a given decoder/parser is opened, the harness is the cause.
-2. An abort in API dispatch (`av_assert0` in `decode.c`/`encode.c`), not in a parser, means a broken API contract until proven otherwise.
-3. Reproduce through the library's own entry point (the ffmpeg CLI or an upstream `tools/target_*_fuzzer.c`). If only our harness crashes, fix the harness.
+1. Minimize the input. A crash that survives any payload once a decoder/parser is opened points at the call sequence, not the bytes.
+2. An abort in API dispatch (`av_assert0` in `decode.c`/`encode.c`), not in a parser.
+
+Decision:
+
+3. Check every harness call against the API docs (`avcodec.h`). Then reproduce through the library's own entry point (the ffmpeg CLI or an upstream `tools/target_*_fuzzer.c`). Crashes there, or with documented calls only: library bug, report it. Crashes only through an undocumented call sequence: fix the harness.

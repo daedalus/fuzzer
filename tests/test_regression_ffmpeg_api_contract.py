@@ -131,13 +131,19 @@ def _violations(src: str) -> list[str]:
     for media, api in TYPE_API.items():
         if not re.search(rf"case\s+{media}\s*:[^;]*?return\s+{api}\s*;", body, re.S):
             errors.append(f"{media} not mapped to {api}")
+    for media in re.findall(r"case\s+(\w+)\s*:", body):
+        if media not in TYPE_API:
+            errors.append(f"unexpected case {media}")
     if not re.search(r"default\s*:\s*return\s+DECODE_API_NONE\s*;", body):
         errors.append("default is not DECODE_API_NONE")
     if "codec->type" not in body:
         errors.append("fuzz_decode_api does not read codec->type")
 
-    # 1: the slot's API is only ever set from the mapping function.
-    for rhs in API_ASSIGN.findall(code):
+    # 1: the slot's API is only ever set from the mapping function, and is set.
+    rhss = API_ASSIGN.findall(code)
+    if not any(rhs.startswith("fuzz_decode_api(") for rhs in rhss):
+        errors.append("api never bound from fuzz_decode_api")
+    for rhs in rhss:
         if not rhs.startswith("fuzz_decode_api(") and rhs != "DECODE_API_NONE":
             errors.append(f"api assigned from {rhs!r}")
 
@@ -214,6 +220,19 @@ def test_control_good_passes() -> None:
             "case AVMEDIA_TYPE_SUBTITLE: return DECODE_API_SUBTITLE;",
             "case AVMEDIA_TYPE_SUBTITLE: return DECODE_API_FRAME;",
             "AVMEDIA_TYPE_SUBTITLE not mapped",
+        ),
+        # Extra media type let into the frame API.
+        (
+            "    case AVMEDIA_TYPE_AUDIO:    return DECODE_API_FRAME;",
+            "    case AVMEDIA_TYPE_AUDIO:    return DECODE_API_FRAME;\n"
+            "    case AVMEDIA_TYPE_DATA:     return DECODE_API_FRAME;",
+            "unexpected case AVMEDIA_TYPE_DATA",
+        ),
+        # Decoder open never binds the API: packets silently skip decoding.
+        (
+            "slot->api = fuzz_decode_api(slot->ctx->codec);",
+            "",
+            "api never bound from fuzz_decode_api",
         ),
         # Mapping keyed on the context type, which codecpar overwrites.
         ("switch (codec->type)", "switch (ctx->codec_type)", "does not read codec->type"),
