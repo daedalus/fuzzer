@@ -89,7 +89,7 @@ fn = getattr(lib, func_name)
 fn.restype = ctypes.c_int
 fn.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
 
-buf = (ctypes.c_uint8 * len(data))(*data)
+buf = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
 
 # Use __afl_guarded_call when available — it uses
 # sigsetjmp/siglongjmp to survive signals (SIGSEGV,
@@ -161,6 +161,17 @@ sys.exit(max(0, min(rc, 125)))
 #: (afl_shim.c ``__AFL_GUARD_TIMEOUT_RC``).
 GUARD_TIMEOUT_RC = -1
 _US_PER_S = 1_000_000
+
+
+def _input_buf(data) -> ctypes.Array:
+    """Exact-size ``c_uint8`` copy of *data*, filled in C.
+
+    ``(c_uint8 * n)(*data)`` passed every byte as a Python argument:
+    275 us at 2 KB, 2.6 ms at 20 KB, paid on most execs since mutant
+    lengths vary. Exact size, not a reused larger buffer: under in-process
+    ASAN the redzone must start right after the input to catch overreads.
+    """
+    return (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
 
 
 def read_shim_health(lib: ctypes.CDLL) -> tuple[int, ...] | None:
@@ -634,7 +645,7 @@ class InProcessRunner:
             os.dup2(write_fd, 2)
             os.close(write_fd)
 
-            buf = (ctypes.c_uint8 * len(data))(*data)
+            buf = _input_buf(data)
             rc = self._call_guarded(buf, len(data))
             if rc is None:
                 rc = self._func_ptr(buf, len(data))
@@ -692,7 +703,7 @@ class InProcessRunner:
 
         n = len(data)
         if not hasattr(self, "_c_buf") or self._c_buf is None or len(self._c_buf) != n:
-            self._c_buf = (ctypes.c_uint8 * n)(*data)
+            self._c_buf = _input_buf(data)
         else:
             ctypes.memmove(self._c_buf, data, n)
 

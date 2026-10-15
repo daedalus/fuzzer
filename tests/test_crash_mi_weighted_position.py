@@ -35,12 +35,12 @@ def test_draw_is_normalised_by_the_eligible_prefix_not_the_total():
     share of 2.1%.
     """
     tracker = _tracker_with_positions(200)
-    eligible = [p for p in tracker._cached_positions if p < 50]
+    eligible = [p for p in tracker._pos_arr.tolist() if p < 50]
     assert len(eligible) > 10, "test degenerate: too few eligible positions"
 
-    weights = {p: max(tracker._mi_cache[p], 0.01) for p in eligible}
+    weights = {p: max(tracker.all_mi()[p], 0.01) for p in eligible}
     total = sum(weights.values())
-    assert total < tracker._cached_total * 0.9, (
+    assert total < float(tracker._prefix_arr[-1]) * 0.9, (
         "test degenerate: the eligible prefix is nearly the whole mass, "
         "so the old bug would not show"
     )
@@ -60,8 +60,8 @@ def test_draw_is_normalised_by_the_eligible_prefix_not_the_total():
 
 def test_full_distribution_matches_the_prefix_weights():
     tracker = _tracker_with_positions(200)
-    eligible = [p for p in tracker._cached_positions if p < 60]
-    weights = {p: max(tracker._mi_cache[p], 0.01) for p in eligible}
+    eligible = [p for p in tracker._pos_arr.tolist() if p < 60]
+    weights = {p: max(tracker.all_mi()[p], 0.01) for p in eligible}
     total = sum(weights.values())
 
     draws = 60000
@@ -76,12 +76,12 @@ def test_unrestricted_draw_covers_every_position():
     """With input_length past the end, every tracked position is eligible."""
     tracker = _tracker_with_positions(60)
     counts = Counter(tracker.weighted_position(10_000) for _ in range(20000))
-    assert set(counts) == set(tracker._cached_positions)
+    assert set(counts) == set(tracker._pos_arr.tolist())
 
 
 def test_returns_none_when_no_position_is_eligible():
     tracker = _tracker_with_positions(60)
-    assert min(tracker._cached_positions) == 0
+    assert min(tracker._pos_arr.tolist()) == 0
     assert tracker.weighted_position(0) is None
 
 

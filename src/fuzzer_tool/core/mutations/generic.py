@@ -3533,13 +3533,22 @@ def _is_dec(s):
     return True
 
 
+# Bytes 0x20-0x7E, deleted by translate() so only non-printables remain.
+_PRINTABLE = bytes(range(0x20, 0x7F))
+
+
+def _is_texty(data: bytes) -> bool:
+    """>= 90% printable ASCII; counted in C (was a per-byte Python sum)."""
+    printable = len(data) - len(data.translate(None, _PRINTABLE))
+    return printable >= len(data) * 9 // 10
+
+
 def _build_verse(data, rng):
     # Same bytearray hazard as extract_corpus_literals: _tokenize slices
     # `data`, and downstream those slices land in sets and dict keys, which
     # raises TypeError for bytearray. Callers pass corpus entries directly.
     data = bytes(data)
-    printable = sum(1 for b in data if 0x20 <= b < 0x7F)
-    if printable < len(data) * 9 // 10:
+    if not _is_texty(data):
         return None
     v = Verse(rng)
     nodes = _tokenize(data)
