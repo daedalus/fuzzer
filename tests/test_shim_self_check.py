@@ -292,7 +292,7 @@ def test_fuzz_run_self_test_passes_on_healthy_target(tmp_path):
     (corpus / "seed").write_bytes(b"seed")
     r = subprocess.run(
         [sys.executable, "-m", "fuzzer_tool", "fuzz", str(exe), "-d", str(corpus),
-         "-o", str(tmp_path / "crashes"), "-n", "20"],
+         "-o", str(tmp_path / "crashes"), "--max-execs", "20"],
         capture_output=True, text=True, timeout=180, cwd=tmp_path, env=_clean_env(),
     )  # fmt: skip
 
@@ -324,7 +324,7 @@ def test_fuzz_run_flags_shim_that_attached_nothing(tmp_path):
     (corpus / "seed").write_bytes(b"seed")
     r = subprocess.run(
         [sys.executable, "-m", "fuzzer_tool", "fuzz", str(exe), "-d", str(corpus),
-         "-o", str(tmp_path / "crashes"), "-n", "20"],
+         "-o", str(tmp_path / "crashes"), "--max-execs", "20"],
         capture_output=True, text=True, timeout=180, cwd=tmp_path, env=_clean_env(),
     )  # fmt: skip
 

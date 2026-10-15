@@ -233,7 +233,7 @@ class TestMain:
         monkeypatch.setattr(
             sys,
             "argv",
-            ["fuzzer-tool", "fuzz", "/tmp/target", "-n", "100"],
+            ["fuzzer-tool", "fuzz", "/tmp/target", "--max-execs", "100"],
         )
         # Need a valid target — use a temp path that gets cleaned up
         import tempfile
@@ -243,7 +243,7 @@ class TestMain:
         target.write_bytes(b"\x7fELF")
         target.chmod(0o755)
         monkeypatch.setitem(sys.modules, "fuzzer_tool.cli.commands.sys", sys)
-        monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", str(target), "-n", "100"])
+        monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", str(target), "--max-execs", "100"])
 
         with contextlib.suppress(SystemExit):
             main()
@@ -270,7 +270,7 @@ class TestCmdFuzzConstruction:
             file_mode=False,
             target_args=None,
             coverage=False,
-            iterations=0,
+            max_execs=0,
             max_len=4096,
             mutations=8,
             deep_coverage=False,

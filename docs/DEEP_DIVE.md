@@ -664,7 +664,7 @@ fuzz loop (every 500 iterations alongside existing crash reproducibility checks)
 fuzzer-tool fuzz ./target --resume
 
 # Full report after run
-fuzzer-tool fuzz ./target -n 5000 --report report.txt
+fuzzer-tool fuzz ./target --max-execs 5000 --report report.txt
 
 # Rank corpus seeds by interestingness
 fuzzer-tool rank ./target -d corpus -n 20
@@ -1011,8 +1011,8 @@ to the removed segment.
 ## State Persistence
 
 ```bash
-fuzzer-tool fuzz ./target -n 10000
-fuzzer-tool fuzz ./target --resume -n 10000
+fuzzer-tool fuzz ./target --max-execs 10000
+fuzzer-tool fuzz ./target --resume --max-execs 10000
 ```
 
 State files:
@@ -1040,7 +1040,7 @@ Per-target memory across campaigns, ported from Stardust's opening selection
 opening → preset, game result → campaign edges, map → target build.
 
 ```bash
-fuzzer-tool fuzz ./target --preset-ledger -n 100000   # run repeatedly, fresh corpus each time
+fuzzer-tool fuzz ./target --preset-ledger --max-execs 100000   # run repeatedly, fresh corpus each time
 ```
 
 - **Store:** `~/fuzzing/<target>/ledger/state.pkl.gz` (`StateStore`, sanitized pickle), last 256 campaigns.
@@ -1048,7 +1048,7 @@ fuzzer-tool fuzz ./target --preset-ledger -n 100000   # run repeatedly, fresh co
 - **Choice (`core/campaign_ledger.py:select`):** presets under `min_trials` first, in ballot order; then UCB1 `mean + sqrt(2 ln(max(total,1)) / potential)`. Each past campaign weighs `exp(-0.05·(age+1))`, ×2 on the same build (ELF build-id, else sha256). Scores are normalized by the best in history. Deterministic.
 - **Stall prior:** each campaign records `max_gap`, its longest silence (execs) that still ended in a new edge (`FuzzRound._on_new_edges`). With `--stall` at its default and ≥3 recent campaigns, `--stall` = min of their `max_gap`, clamped to [100, 1e6]. A campaign with no discovery omits the key, which ends the scan (falls back to the default).
 - **Recorded:** fresh campaigns with SHM coverage only. `--resume` inherits coverage, so it is not scored.
-- **Limits:** needs ≥4 campaigns before UCB1 compares anything; scores assume similar budgets (`-n`); short campaigns give small `max_gap`, so an aggressive stall prior.
+- **Limits:** needs ≥4 campaigns before UCB1 compares anything; scores assume similar budgets (`--max-execs`); short campaigns give small `max_gap`, so an aggressive stall prior.
 
 ## Kalman Filter Online Estimation
 

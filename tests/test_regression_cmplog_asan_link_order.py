@@ -121,7 +121,7 @@ def test_regression_shared_asan_target_crashes_found(tmp_path):
     r = subprocess.run(
         ["python3", "-m", "fuzzer_tool", "fuzz", str(target)]
         + ["-d", str(tmp_path / "corpus"), "-o", str(crashes)]
-        + ["-n", "20", "-t", "2", "-s", "42"],
+        + ["--max-execs", "20", "-t", "2", "-s", "42"],
         capture_output=True,
         text=True,
         timeout=60,

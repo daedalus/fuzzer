@@ -320,7 +320,7 @@ def test_cmd_fuzz_forwards_consolidated_prior(monkeypatch, tmp_path):
 
     def fake_fuzzer(**kwargs):
         captured.update(kwargs)
-        return SimpleNamespace(run=lambda iterations, max_execs=0: 0)
+        return SimpleNamespace(run=lambda max_execs=0: 0)
 
     monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", fake_fuzzer)
     assert commands.cmd_fuzz(args) == 0

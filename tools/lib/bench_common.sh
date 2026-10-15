@@ -168,7 +168,7 @@ run_combo() {
     cleanup_shm
 
     echo "[*] Running: $name"
-    python -m fuzzer_tool fuzz "$TARGET" -d "$dir" -c -n "$ITERS" \
+    python -m fuzzer_tool fuzz "$TARGET" -d "$dir" -c --max-execs "$ITERS" \
         $DICT $GRAMMAR "${flags[@]}" $REPORT_FLAG 2>&1 | tee "$log" || true
 
     local edges corpus eps dur p50 coll crash_ci
