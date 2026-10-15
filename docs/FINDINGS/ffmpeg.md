@@ -18,7 +18,9 @@
 
 ```
 avformat_open_input → avformat_find_stream_info → av_read_frame
-→ avcodec_send_packet → avcodec_receive_frame → close
+→ audio/video: avcodec_send_packet → avcodec_receive_frame
+→ subtitles:   avcodec_decode_subtitle2
+→ close
 ```
 
 Covers all registered demuxers, decoders, and parsers. Compiled with ASAN (`-fsanitize=address`) and AFL edge coverage via `afl_shim.c`. See `targets/ffmpeg_read.c` for details.
@@ -33,15 +35,29 @@ Covers all registered demuxers, decoders, and parsers. Compiled with ASAN (`-fsa
 
 | Metric | Value |
 |--------|-------|
-| Total crashes discovered | 2 |
+| Total crashes discovered | 2 (1 valid) |
 | Crash input size | 46 bytes / 21 bytes |
 | Crash input type | PGS subtitle stream / VPK container header |
 | Trigger | `avcodec_send_packet` on subtitle decoder / `vpk_read_packet` final-block branch |
 | Crash type | `av_assert0(0)` / `SIGFPE` |
-| Severity | **HIGH** / **Medium** |
-| Exploitability | Remotely triggerable via media file parsing |
+| Severity | none (invalid, harness misuse) / **Medium** |
+| Exploitability | n/a / remotely triggerable via media file parsing |
 
 ## Bugs
 
-- **[av_assert0_subtitle_decoder](av_assert0_subtitle_decoder.md)** — Reachable `av_assert0(0)` in `decode_simple_internal` via subtitle decoder. 46-byte PGS subtitle input triggers assertion failure in `avcodec_send_packet`. Severity: HIGH.
 - **[vpk_divide_by_zero](vpk_divide_by_zero.md)** — Integer divide-by-zero in `vpk_read_packet` (VPK demuxer). A 21-byte VPK stream whose channel count is zeroed by a failed decoder open causes `SIGFPE`. Severity: Medium. Reported as [FFmpeg#24290](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/24290); fix pending in [PR #24297](https://code.ffmpeg.org/FFmpeg/FFmpeg/pulls/24297).
+
+## Invalid
+
+- **[av_assert0_subtitle_decoder](av_assert0_subtitle_decoder.md)** — harness called `avcodec_send_packet` on a subtitle decoder. Closed upstream as misuse ([FFmpeg#23945](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/23945)). Harness fixed; contract enforced by `tests/test_regression_ffmpeg_api_contract.py`.
+
+## Triage before reporting
+
+Rule out harness misuse first. Signals (suspect, not proof):
+
+1. Minimize the input. A crash that survives any payload once a decoder/parser is opened points at the call sequence, not the bytes.
+2. An abort in API dispatch (`av_assert0` in `decode.c`/`encode.c`), not in a parser.
+
+Decision:
+
+3. Check every harness call against the API docs (`avcodec.h`). Then reproduce through the library's own entry point (the ffmpeg CLI or an upstream `tools/target_*_fuzzer.c`). Crashes there, or with documented calls only: library bug, report it. Crashes only through an undocumented call sequence: fix the harness.
