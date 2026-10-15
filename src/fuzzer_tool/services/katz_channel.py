@@ -21,6 +21,7 @@ solver all assume:
 import logging
 import os
 import time
+from collections.abc import Collection
 
 import numpy as np
 
@@ -52,6 +53,9 @@ _MAX_RECOMPUTE_OVERHEAD = 0.05
 # ratio to a sub-millisecond rebuild would delay a refresh the campaign can
 # trivially afford, and on a small ICFG every rebuild is that cheap.
 _COST_GATE_FLOOR = 0.005
+
+# Mask key for the union of seeds that left the corpus (NUL: never a hash).
+EVICTED_KEY = "\0evicted"
 
 
 class KatzChannel:
@@ -239,6 +243,32 @@ class KatzChannel:
             cur = np.frombuffer(old, dtype=np.uint8)
             self._masks[seed_key] = np.bitwise_or(cur, packed).tobytes()
         # New OR merged bits change V / seed attachment either way.
+        self._dirty = True
+
+    @property
+    def seed_masks(self) -> int:
+        """Per-seed masks held, the evicted union excluded."""
+        return len(self._masks) - (EVICTED_KEY in self._masks)
+
+    def retain(self, live: Collection[str]) -> None:
+        """Fold masks of seeds not in *live* into ``EVICTED_KEY``.
+
+        Bounds masks by the corpus, not by every seed ever admitted, while
+        the union keeps V (visited nodes) unchanged: evicted seeds stop
+        being Katz candidates, their coverage stays visited.
+        """
+        gone = [k for k in self._masks if k not in live and k != EVICTED_KEY]
+        if not gone:
+            return
+
+        folded = self._masks.get(EVICTED_KEY)
+        acc = np.frombuffer(self._masks.pop(gone[0]), dtype=np.uint8).copy()
+        for key in gone[1:]:
+            np.bitwise_or(acc, np.frombuffer(self._masks.pop(key), dtype=np.uint8), out=acc)
+        if folded is not None:
+            np.bitwise_or(acc, np.frombuffer(folded, dtype=np.uint8), out=acc)
+
+        self._masks[EVICTED_KEY] = acc.tobytes()
         self._dirty = True
 
     # ── scores ───────────────────────────────────────────────────────

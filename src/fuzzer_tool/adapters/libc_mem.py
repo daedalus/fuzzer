@@ -29,6 +29,11 @@ def _rss_bytes() -> int:
         return int(fh.read().split()[1]) * _PAGE
 
 
+def current_rss() -> int:
+    """Current resident set size in bytes (``rss:`` on the stats line is the peak)."""
+    return _rss_bytes()
+
+
 def trim_heap() -> int:
     """Release free heap memory to the OS.
 

@@ -27,6 +27,11 @@ _ERROR_RE = re.compile(
 )
 
 
+# Rows per _rebuild_sums block: float64 temporaries stay ~8 MiB each instead
+# of 134 MiB each at 65,536 rows (measured: +640 MiB on an ffmpeg resume).
+_REBUILD_CHUNK_ROWS = 4096
+
+
 def _highest_pos(sources, cap: int) -> int:
     """Largest position key in [0, cap) across *sources*; -1 when none."""
     highest = -1
@@ -262,11 +267,18 @@ class CrashMITracker:
         self._reset_sums()
         if not self._rows:
             return
-        total = self._byte_total_arr.astype(_np.float64)
-        crash = self._joint_crash_arr.astype(_np.float64)
-        self._s_total = _f(total).sum(axis=1)
-        self._s_crash = _f(crash).sum(axis=1)
-        self._s_clean = _f(total - crash).sum(axis=1)
+
+        # Row blocks: peak is a few blocks of float64, not the whole table.
+        step = _REBUILD_CHUNK_ROWS
+        for lo in range(0, self._rows, step):
+            hi = lo + step
+            total = self._byte_total_arr[lo:hi].astype(_np.float64)
+            crash = self._joint_crash_arr[lo:hi].astype(_np.float64)
+            self._s_total[lo:hi] = _f(total).sum(axis=1)
+            self._s_crash[lo:hi] = _f(crash).sum(axis=1)
+            total -= crash
+            self._s_clean[lo:hi] = _f(total).sum(axis=1)
+
         self._crash_rows = self._joint_crash_arr.sum(axis=1, dtype=_np.uint64)
 
     def _mi_rows(self, rows) -> list[float]:
@@ -383,20 +395,23 @@ class CrashMITracker:
         return min(1.0, avg_mi)
 
     def save(self) -> dict:
-        """Serialize tracker state."""
+        """Serialize tracker state as sparse cell bytes.
+
+        Flat cell index (``pos * 256 + byte``) and count per nonzero cell,
+        as raw uint32 bytes: a few objects to pickle and re-verify, not one
+        dict entry per cell (936k cells on an ffmpeg campaign).
+        """
+        rows = self._rows
         return {
             "max_positions": self.max_positions,
             "min_observations": self.min_observations,
             "total_crashes": self.total_crashes,
             "total_execs": self.total_execs,
-            "position_counts": dict(self.position_counts),
-            "joint_crash": {
-                str(pos): {str(bv): c for bv, c in bv_map.items()}
-                for pos, bv_map in self.joint_crash.items()
-            },
-            "byte_total": {
-                str(pos): {str(bv): c for bv, c in bv_map.items()}
-                for pos, bv_map in self.byte_total.items()
+            "sparse": {
+                "rows": rows,
+                "counts": self._position_counts_arr[:rows].tobytes(),
+                **_sparse_cells("total", self._byte_total_arr[:rows]),
+                **_sparse_cells("crash", self._joint_crash_arr[:rows]),
             },
         }
 
@@ -412,41 +427,62 @@ class CrashMITracker:
         self.total_crashes = data.get("total_crashes", 0)
         self.total_execs = data.get("total_execs", 0)
 
-        counts = {int(k): int(v) for k, v in data.get("position_counts", {}).items()}
-        joint = {
-            int(p): {int(bv): int(c) for bv, c in m.items()}
-            for p, m in data.get("joint_crash", {}).items()
-        }
-        totals = {
-            int(p): {int(bv): int(c) for bv, c in m.items()}
-            for p, m in data.get("byte_total", {}).items()
-        }
-
-        cap = min(self.max_positions, self.DENSE_POSITION_CAP)
-        highest = _highest_pos((counts, joint, totals), cap)
-
         self._rows = 0
         self._byte_total_arr = _np.zeros((0, 256), dtype=_np.uint32)
         self._joint_crash_arr = _np.zeros((0, 256), dtype=_np.uint32)
         self._position_counts_arr = _np.zeros(0, dtype=_np.uint64)
         self._reset_sums()
-        if highest >= 0:
-            self._grow(highest + 1)
-            for pos, c in counts.items():
-                if 0 <= pos < self._rows:
-                    self._position_counts_arr[pos] = c
-            self._fill_rows(self._byte_total_arr, totals)
-            self._fill_rows(self._joint_crash_arr, joint)
+
+        sparse = data.get("sparse")
+        if sparse is not None:
+            self._load_sparse(sparse)
+        else:
+            self._load_legacy(data)
         self._rebuild_sums()
         self._cache_valid = False
 
-    def _fill_rows(self, arr, src: dict[int, dict[int, int]]) -> None:
-        """Copy {pos: {byte: count}} into dense *arr*, dropping out-of-range keys."""
-        for pos, m in src.items():
+    def _load_sparse(self, sparse: dict) -> None:
+        """Restore ``save()``'s sparse cell bytes; cells past the cap drop."""
+        cap = min(self.max_positions, self.DENSE_POSITION_CAP)
+        rows = min(int(sparse.get("rows", 0)), cap)
+        if rows <= 0:
+            return
+
+        self._grow(rows)
+        counts = _np.frombuffer(sparse["counts"], dtype=_np.uint64)[:rows]
+        self._position_counts_arr[: counts.size] = counts
+        _put_cells(self._byte_total_arr, sparse, "total", rows)
+        _put_cells(self._joint_crash_arr, sparse, "crash", rows)
+
+    def _load_legacy(self, data: dict) -> None:
+        """Nested ``{"pos": {"byte": count}}`` state, filled without int-dict copies."""
+        counts = data.get("position_counts", {})
+        joint = data.get("joint_crash", {})
+        totals = data.get("byte_total", {})
+
+        cap = min(self.max_positions, self.DENSE_POSITION_CAP)
+        highest = _highest_pos((map(int, counts), map(int, joint), map(int, totals)), cap)
+        if highest < 0:
+            return
+
+        self._grow(highest + 1)
+        for k, c in counts.items():
+            pos = int(k)
             if 0 <= pos < self._rows:
-                for bv, c in m.items():
-                    if 0 <= bv < 256:
-                        arr[pos, bv] = c
+                self._position_counts_arr[pos] = int(c)
+        self._fill_rows(self._byte_total_arr, totals)
+        self._fill_rows(self._joint_crash_arr, joint)
+
+    def _fill_rows(self, arr, src: dict) -> None:
+        """Copy {"pos": {"byte": count}} into dense *arr*, dropping out-of-range keys."""
+        for p, m in src.items():
+            pos = int(p)
+            if not 0 <= pos < self._rows:
+                continue
+            for bv, c in m.items():
+                b = int(bv)
+                if 0 <= b < 256:
+                    arr[pos, b] = int(c)
 
 
 @dataclass
@@ -592,6 +628,21 @@ def estimate_execs_to_first_crash(
             f"ETA={execs:.0f}"
         ),
     )
+
+
+def _sparse_cells(name: str, arr) -> dict[str, bytes]:
+    """Nonzero cells of *arr* as ``{name}_idx`` / ``{name}_val`` uint32 bytes."""
+    flat = arr.reshape(-1)
+    idx = _np.flatnonzero(flat).astype(_np.uint32)
+    return {f"{name}_idx": idx.tobytes(), f"{name}_val": flat[idx].astype(_np.uint32).tobytes()}
+
+
+def _put_cells(arr, sparse: dict, name: str, rows: int) -> None:
+    """Scatter ``_sparse_cells`` bytes into *arr*, keeping cells below *rows*."""
+    idx = _np.frombuffer(sparse.get(f"{name}_idx", b""), dtype=_np.uint32)
+    val = _np.frombuffer(sparse.get(f"{name}_val", b""), dtype=_np.uint32)
+    keep = idx < rows * 256
+    arr.reshape(-1)[idx[keep]] = val[keep]
 
 
 def _f(k):

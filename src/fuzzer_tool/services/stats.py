@@ -21,6 +21,7 @@ import contextlib
 import json
 import logging
 import os
+import resource
 import time
 
 from fuzzer_tool.adapters import libc_mem
@@ -373,6 +374,16 @@ def _format_count(n: int) -> str:
 # criterion this replaced so the two agree on a target with uniform execution
 # cost; the number itself was never calibrated and is not calibrated here.
 STALE_SEED_EXEC_EQUIVALENTS = 50
+
+
+def _maxrss_kb() -> int:
+    """Kernel peak RSS of this process, KB (Linux ``ru_maxrss`` unit)."""
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+
+def _fmt_kb(kb: int) -> str:
+    """``424MB``, or ``300KB`` below one MB."""
+    return f"{kb // 1024}MB" if kb >= 1024 else f"{kb}KB"
 
 
 def _fmt_ms(ms: float | None) -> str:
@@ -1392,13 +1403,16 @@ class StatsReporter:
         return mc_str
 
     def _print_stats_mem_strs(self, f) -> tuple[str, str]:
-        """Peak RSS and heap trim (trims the heap: side effect)."""
-        rss_kb = f._peak_rss
-        rss_str = f" | rss: {rss_kb // 1024}MB" if rss_kb >= 1024 else f" | rss: {rss_kb}KB"
-
+        """Peak and live RSS, heap trim (trims the heap: side effect)."""
         # Return freed malloc pages each status tick (glibc keeps them mapped).
         freed_kb = libc_mem.trim_heap() >> 10
         trim_str = f" | trim: {freed_kb >> 10}MB" if freed_kb >= 1024 else f" | trim: {freed_kb}KB"
+
+        # Peak never falls (load/exit spikes); live is after the trim.
+        # _peak_rss refreshes per 100 execs: take the kernel's peak here too.
+        live_kb = libc_mem.current_rss() >> 10
+        f._peak_rss = max(f._peak_rss, _maxrss_kb())
+        rss_str = f" | rss: {_fmt_kb(f._peak_rss)} | live: {_fmt_kb(live_kb)}"
         return rss_str, trim_str
 
     def _print_stats_ops_str(self, f) -> str:
