@@ -135,9 +135,11 @@ int main(int argc, char **argv) {
             uint32_t id = locs[i];
             if (strcmp(mode, "probe") == 0)
                 __afl_probe_insert(id, __afl_home_slot(id), __AFL_PROBE_MAX, 1);
-            else if (strcmp(mode, "dist") == 0)
+            else if (strcmp(mode, "dist") == 0) {
+#if __AFL_DISTANCE_MODE
                 __afl_probe_distance((uint64_t)id);
-            else
+#endif
+            } else
                 __afl_map_loc(id);
         }
     }

@@ -39,6 +39,7 @@ Likely memory-pressure in synthetic `attach()` (8 MB table + distance table). Pa
 
 | Field | Meaning |
 |---|---|
+| ctx | `__AFL_CTX_BITS`, not whether context sensitivity is on (noctx builds print it too) |
 | ns/call | Per-edge cost (min of N reps) |
 | edges/s | Shim arithmetic ceiling: 1e9 / ns/call |
 | eps(ceil) | Theoretical max: edges/s / guard_callbacks_per_exec (zero overhead assumption) |
@@ -58,9 +59,8 @@ tools/build-shim-bench.sh
 # Small noctx (ctx=0)
 ./shim-micro-benchmark-noctx full 8192 2000 50000000 7 41000 50 0.0098
 
-# Distance mode (requires BENCH_DIST=1 and distance table fill)
-tools/build-shim-bench.sh --nodist
-BENCH_DIST=1 ./shim-micro-benchmark-nodist dist 8192 2000 1000000 3 100000 50 0.0
+# Distance mode (default build; BENCH_DIST=1 attaches the table; on a --nodist build `dist` times an empty loop)
+BENCH_DIST=1 ./shim-micro-benchmark dist 8192 2000 1000000 3 100000 50 0.0
 
 # Report ns/call and edges/s only (default guards=distinct, no realistic eps)
 ./shim-micro-benchmark full 8192 2000 50000000 7
