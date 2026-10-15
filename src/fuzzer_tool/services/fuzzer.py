@@ -5525,6 +5525,14 @@ class Fuzzer:
         )
         f.observe(record)
 
+    def _retain_katz(self) -> None:
+        """Fold Katz masks of seeds no longer in the corpus into one union."""
+        ch = self._katz_channel
+        # Cheap gate: hash the corpus only when some mask has no live seed.
+        if ch is None or ch.seed_masks <= len(self.corpus):
+            return
+        ch.retain({self._seed_key(d) for d in self.corpus})
+
     def _run_target(self, data: bytes):
         t0 = time.perf_counter_ns()
         result = self._runner.run_target(data)

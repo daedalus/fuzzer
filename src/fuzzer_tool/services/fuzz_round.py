@@ -680,6 +680,7 @@ class FuzzRound:
         rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         if rss > f._peak_rss:
             f._peak_rss = rss
+        f._retain_katz()
         elapsed = clock_of(f).time() - f.start_time
         eps = (f.exec_count - f._resume_baseline_exec) / elapsed if elapsed > 0 else 0
         if eps > f._peak_eps:
