@@ -71,6 +71,7 @@ from fuzzer_tool.core.elf import (
     detect_shm_layout,
     is_elf_executable,
 )
+from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
 from fuzzer_tool.core.format_seed_generator import FormatSeedGenerator
 from fuzzer_tool.core.gravity import GravityModel, SpliceDonor
@@ -2592,6 +2593,8 @@ class Fuzzer:
         # crashes through the ptrace-attached loader) is usable here.
         self._triage_ok: bool | None = None
         self._init_shim_watch()
+        # Target vs cycle wall time, drained per stats line.
+        self._exec_timer = ExecTimer()
         self.exec_count = 0
         self.crash_count = 0
         self.timeout_count = 0
@@ -5523,7 +5526,9 @@ class Fuzzer:
         f.observe(record)
 
     def _run_target(self, data: bytes):
+        t0 = time.perf_counter_ns()
         result = self._runner.run_target(data)
+        self._exec_timer.add_target(time.perf_counter_ns() - t0)
 
         # Shim health, inlined: this runs on every execution. Empty stderr
         # short-circuits; counters are read once per SHIM_HEALTH_PERIOD.
@@ -6872,7 +6877,11 @@ class Fuzzer:
 
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.
-        return FuzzRound(self, data).run()
+        t0 = time.perf_counter_ns()
+        try:
+            return FuzzRound(self, data).run()
+        finally:
+            self._exec_timer.add_cycle(time.perf_counter_ns() - t0)
 
     def _record_discovery_snapshot(self):
         return self._stats.record_discovery_snapshot()
