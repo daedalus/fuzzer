@@ -3,7 +3,7 @@
 #
 # Examples:
 #   tools/runme.sh png           # run png_read with defaults
-#   tools/runme.sh gzip -n 50000 # gzip_read, 50k iterations
+#   tools/runme.sh gzip --max-execs 50000 # gzip_read, 50k execs
 #   tools/runme.sh zlib --elo    # zlib_read with Elo scheduling
 set -euo pipefail
 
@@ -31,6 +31,6 @@ fuzzer-tool fuzz "$EXE" \
     $DICT_FLAG \
     $GRAM_FLAG \
     --calibrate 2000 --stall 1000 --max-collision-risk 25 \
-    -n 105000 --elo \
+    --max-execs 105000 --elo \
     --report "/tmp/${TARGET}_fuzz_report.txt" \
     "$@"

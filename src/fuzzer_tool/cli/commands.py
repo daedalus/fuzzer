@@ -173,10 +173,7 @@ def _run_fuzzer(fuzzer, args):
     and unprofiled arms.
     """
     if not getattr(args, "profile_hotpath", False):
-        fuzzer.run(
-            iterations=args.iterations,
-            max_execs=getattr(args, "max_execs", 0),
-        )
+        fuzzer.run(max_execs=getattr(args, "max_execs", 0))
         return
 
     import cProfile
@@ -185,10 +182,7 @@ def _run_fuzzer(fuzzer, args):
     pr = cProfile.Profile()
     pr.enable()
     try:
-        fuzzer.run(
-            iterations=args.iterations,
-            max_execs=getattr(args, "max_execs", 0),
-        )
+        fuzzer.run(max_execs=getattr(args, "max_execs", 0))
     finally:
         pr.disable()
         stats = pstats.Stats(pr)
@@ -2612,9 +2606,6 @@ def main() -> int:
     fuzz_parser.add_argument("-m", "--max-len", type=int, default=4096, help="Max input length")
     fuzz_parser.add_argument("-t", "--timeout", type=float, default=1, help="Timeout in seconds")
     fuzz_parser.add_argument(
-        "-n", "--iterations", type=int, default=0, help="Number of iterations (0=infinite)"
-    )
-    fuzz_parser.add_argument(
         "--max-execs",
         type=int,
         default=0,
@@ -2625,7 +2616,7 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--continue-until-crash",
         action="store_true",
-        help="Ignore -n, fuzz until the first crash is found",
+        help="Stop at the first crash",
     )
     fuzz_parser.add_argument(
         "--isolate-crash-fields",

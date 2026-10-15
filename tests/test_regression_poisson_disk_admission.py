@@ -207,7 +207,7 @@ class TestPoissonDiskAdmissionCLI:
                 "--poisson-disk-admission",
                 "--poisson-disk-min-jaccard",
                 "0.4",
-                "-n",
+                "--max-execs",
                 "1",
                 "--no-shm",
             ],

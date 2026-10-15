@@ -68,7 +68,7 @@ def _fuzz_with_loader(target: Path, seed: bytes, tmpdir: Path, *, inprocess: boo
         str(corpus_dir),
         "-o",
         str(crashes_dir),
-        "-n",
+        "--max-execs",
         "100",
         "-t",
         "2",

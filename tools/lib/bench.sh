@@ -59,7 +59,7 @@ cleanup_shm
 echo "============================================================"
 echo " Benchmark: baseline vs enhanced vs enhanced+ vs optimal vs qea"
 echo " Target:    $TARGET"
-echo " Iterations: $ITERS"
+echo " Max execs: $ITERS"
 echo " Extra flags: ${EXTRA_FLAGS:-none}"
 echo "============================================================"
 echo ""
@@ -67,7 +67,7 @@ echo ""
 # Run baseline
 echo "[*] Running baseline (no features)..."
 run_with_retry /tmp/fuzz_bench_baseline.log \
-    fuzz "$TARGET" -d "$BASELINE_DIR" -c -n "$ITERS" $EXTRA_FLAGS $REPORT_FLAG
+    fuzz "$TARGET" -d "$BASELINE_DIR" -c --max-execs "$ITERS" $EXTRA_FLAGS $REPORT_FLAG
 echo ""
 
 # Clean SHM between runs to prevent stale segment interference
@@ -77,7 +77,7 @@ sleep 1
 # Run enhanced
 echo "[*] Running enhanced (elo + bandit + mopt${EXTRA_FLAGS:+$EXTRA_FLAGS})..."
 run_with_retry /tmp/fuzz_bench_enhanced.log \
-    fuzz "$TARGET" -d "$ENHANCED_DIR" -c -n "$ITERS" --elo --mc-bandit --mopt $EXTRA_FLAGS $REPORT_FLAG
+    fuzz "$TARGET" -d "$ENHANCED_DIR" -c --max-execs "$ITERS" --elo --mc-bandit --mopt $EXTRA_FLAGS $REPORT_FLAG
 echo ""
 
 # Clean SHM between runs
@@ -87,7 +87,7 @@ sleep 1
 # Run enhanced+ (markov + replicator + shapley + renyi + transfer-entropy + grammar)
 echo "[*] Running enhanced+ (all enhanced + markov + replicator + shapley + renyi + transfer-entropy + grammar)..."
 run_with_retry /tmp/fuzz_bench_enhanced+.log \
-    fuzz "$TARGET" -d "$ENHANCEDP_DIR" -c -n "$ITERS" \
+    fuzz "$TARGET" -d "$ENHANCEDP_DIR" -c --max-execs "$ITERS" \
     --elo --mc-bandit --mopt \
     --markov --markov-gen --markov-order 0,1,2,3 \
     --replicator --shapley --renyi-weight --transfer-entropy \
@@ -103,7 +103,7 @@ sleep 1
 # Sweep-validated: 74 edges at -n 1k, 184 edges at -n 10k (vs 167 baseline, 172 enhanced+).
 echo "[*] Running optimal (elo + mopt + replicator + markov ensemble)..."
 run_with_retry /tmp/fuzz_bench_optimal.log \
-    fuzz "$TARGET" -d "$OPTIMAL_DIR" -c -n "$ITERS" \
+    fuzz "$TARGET" -d "$OPTIMAL_DIR" -c --max-execs "$ITERS" \
     --elo --mopt --replicator \
     --markov --markov-gen --markov-order 0,1,2,3 \
     $EXTRA_FLAGS $REPORT_FLAG
@@ -118,7 +118,7 @@ sleep 1
 # outperforms the standard committed-byte approach on real targets.
 echo "[*] Running QEA (quantum-inspired evolutionary algorithm)..."
 run_with_retry /tmp/fuzz_bench_qea.log \
-    fuzz "$TARGET" -d "$QEA_DIR" -c -n "$ITERS" --qea $EXTRA_FLAGS $REPORT_FLAG
+    fuzz "$TARGET" -d "$QEA_DIR" -c --max-execs "$ITERS" --qea $EXTRA_FLAGS $REPORT_FLAG
 echo ""
 
 # ── Extract metrics ───────────────────────────────────────────────────

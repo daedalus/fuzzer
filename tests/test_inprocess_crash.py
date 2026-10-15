@@ -99,7 +99,7 @@ def _fuzzer_crash_test(target, seed_data, tmpdir, **extra_kwargs):
         str(corpus_dir),
         "-o",
         str(crashes_dir),
-        "-n",
+        "--max-execs",
         "100",
         "-t",
         "2",
