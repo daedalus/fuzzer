@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.shim_health import (
     SHIM_HEALTH_PERIOD,
     SHIM_STDERR_TAG,
@@ -156,6 +157,7 @@ def _bare_fuzzer(stderr: str = "", counters=None, edges=None, targets=()) -> Fuz
         SimpleNamespace(shim_health=lambda: counters) if counters is not None else None
     )
     f._init_shim_watch()
+    f._exec_timer = ExecTimer()
     return f
 
 

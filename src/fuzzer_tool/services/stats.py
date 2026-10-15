@@ -33,6 +33,7 @@ from fuzzer_tool.core.analyzers.analyzer_elo import (
 from fuzzer_tool.core.circular_stats import PhaseConcentration
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
+from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.lineage import LineageTree
 from fuzzer_tool.core.pool_drift import PoolDrift
@@ -372,6 +373,11 @@ def _format_count(n: int) -> str:
 # criterion this replaced so the two agree on a target with uniform execution
 # cost; the number itself was never calibrated and is not calibrated here.
 STALE_SEED_EXEC_EQUIVALENTS = 50
+
+
+def _fmt_ms(ms: float | None) -> str:
+    """``0.50ms``, or ``-`` for an empty window."""
+    return "-" if ms is None else f"{ms:.2f}ms"
 
 
 class StatsReporter:
@@ -1480,6 +1486,15 @@ class StatsReporter:
             fmt_str = f" | fmt: {classified}/{len(fl.hypotheses)} fields v{fl.format_model_version}"
         return fmt_str
 
+    def _print_stats_timer_str(self, f) -> str:
+        """Avg ms per target exec and per fuzz cycle since the last line."""
+        timer = getattr(f, "_exec_timer", None)
+        if not isinstance(timer, ExecTimer):
+            return ""
+
+        tgt, cyc = timer.drain()
+        return f" | tgt: {_fmt_ms(tgt)} | cyc: {_fmt_ms(cyc)}"
+
     def _print_stats_perf_str(self, f) -> str:
         """Hardware perf counters."""
         perf_str = ""
@@ -1849,7 +1864,8 @@ class StatsReporter:
         line += "\n"
         line += (
             f"[*] execs: {f.exec_count} | corpus: {len(f.corpus)} | "
-            f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f} | "
+            f"crashes: {f.crash_count}{sig_str}{timeout_str} | eps: {eps:.0f}"
+            f"{self._print_stats_timer_str(f)} | "
             f"time: {elapsed:.0f}s{rss_str}{seed_ovh_str}{trim_str}{dict_str}{markov_str}{cmplog_str}"
             f"{smt_str}{cov_str}{ph_str}{dist_str}{mc_str}{qea_str}{ga_str}{mi_str}{kc_str}{elo_str}"
             f"{sens_str}{te_str}{sec_str}{shap_str}{fs_str}{rep_str}{mopt_str}"
