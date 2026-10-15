@@ -54,8 +54,9 @@ class DUCBScheduler(DiscountedUCBBase):
     Args:
         gamma: Discount factor per record, in (0, 1]. 1.0 degenerates to
             UCB1. The default 0.9999 gives an effective memory of
-            1/(1-gamma) = 10,000 pulls, ~1,250 mutation rounds at the default
-            ``mutations_per_input = 8``. The horizon has to stay well above
+            1/(1-gamma) = 10,000 pulls, ~1,250 mutation rounds at
+            ``mutations_per_input = 8`` (~2,700 at the default 1, which
+            averages ~3.7 pulls per round). The horizon has to stay well above
             the number of candidate arms or every arm's discounted count sits
             near zero and the index is pure exploration: with 147 registered
             operators, 10,000 pulls is ~68 per arm.

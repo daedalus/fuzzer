@@ -50,8 +50,8 @@ class SWUCBScheduler(WindowedUCBBase):
 
     Args:
         window: tau, the number of most recent pulls that count. The default
-            4000 is ~500 mutation rounds at the default
-            ``mutations_per_input = 8`` -- long enough that a 147-operator
+            4000 is ~500 mutation rounds at ``mutations_per_input = 8``
+            (~1,100 at the default 1, ~3.7 pulls per round) -- long enough that a 147-operator
             candidate list still gets ~27 pulls per arm inside the window,
             which is the floor below which the empirical means are noise.
         xi: Exploration constant inside the confidence width. The paper's
