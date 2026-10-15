@@ -47,22 +47,22 @@ from fuzzer_tool.core.mutations import (
     arith_mid,
     ascii_num_replace,
     bit_cross,
+    bit_majority,
     choose_len,
     could_be_arith,
     could_be_bitflip,
     could_be_interest,
-    geo_mid,
-    power_mid,
-    lineage_step,
     diff_evo,
-    bit_majority,
     field_median,
     field_minmax,
+    geo_mid,
     line_blend,
+    lineage_step,
+    masked_merge,
     nm_reflect,
     opposition,
     position_marginal,
-    masked_merge,
+    power_mid,
     radamsa_mutate_num,
     redundant_byte_table,
     splice,
@@ -80,8 +80,8 @@ from fuzzer_tool.core.mutations.int_encodings import (
     varint_reencode,
 )
 from fuzzer_tool.core.mutations.murmur3 import murmur3_chain
-from fuzzer_tool.core.mutations.text_edges import line_ending_swap, nul_inject
 from fuzzer_tool.core.mutations.structured import _region
+from fuzzer_tool.core.mutations.text_edges import line_ending_swap, nul_inject
 from fuzzer_tool.core.mutator_interface import MutationContext
 from fuzzer_tool.core.operator_registry import REGISTRY, format_gate_matches
 from fuzzer_tool.core.schedulers.pos_burn_front import BurnFrontPositionScheduler
@@ -4163,26 +4163,43 @@ class OperatorEngine:
         """
         if not buf or not self.ctx.corpus:
             return None
-        rng = self.ctx._rng
         verse = getattr(self, "_versifier_verse", None)
         if verse is None or getattr(self, "_versifier_corpus_len", 0) != len(self.ctx.corpus):
-            from fuzzer_tool.core.mutations.generic import _build_verse
-
-            corpus = self.ctx.corpus
-            verse = None
-            for raw in reversed(corpus):
-                candidate = _build_verse(raw, rng)
-                if candidate is not None:
-                    verse = candidate
-                    break
-            self._versifier_verse = verse
-            self._versifier_corpus_len = len(corpus)
+            verse = self._newest_verse()
         if verse is None:
             return None
         result = verse.Rhyme()
         if not result:
             return None
         return bytearray(result[: self.ctx.max_len])
+
+    def _newest_verse(self):
+        """Verse of the newest texty corpus seed, reusing the cached one.
+
+        The walk stops at the seed the cached verse came from (still the
+        newest texty one), so binary admissions cost a C byte count each
+        instead of a re-tokenize of the same text seed.
+        """
+        from fuzzer_tool.core.mutations import generic
+
+        corpus = self.ctx.corpus
+        src = getattr(self, "_versifier_src", None)
+        verse, found = None, None
+        for raw in reversed(corpus):
+            if raw is src:
+                verse, found = self._versifier_verse, raw
+                break
+            if not generic._is_texty(raw):
+                continue
+            verse = generic._build_verse(raw, self.ctx._rng)
+            if verse is not None:
+                found = raw
+                break
+
+        self._versifier_verse = verse
+        self._versifier_src = found
+        self._versifier_corpus_len = len(corpus)
+        return verse
 
     def _op_png_chunk_mutate(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.png import PngChunkMutator, parse_png_chunks

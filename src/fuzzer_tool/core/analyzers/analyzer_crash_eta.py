@@ -8,7 +8,6 @@ input bytes and crash outcomes.
 
 from __future__ import annotations
 
-import bisect
 import math
 import re
 from dataclasses import dataclass
@@ -92,14 +91,14 @@ class CrashMITracker:
         # Global: crash count, total count
         self.total_crashes: int = 0
         self.total_execs: int = 0
-        # Cached MI values
-        self._mi_cache: dict[int, float] = {}
+        # Sampler arrays (_refresh): observed positions, their MI, and the
+        # prefix sums of max(MI, 0.01). The dict view is built on demand.
         self._cache_valid: bool = False
-        # Sampling caches, rebuilt by all_mi()
-        self._cached_positions: list[int] = []
-        self._cached_weights: list[float] = []
-        self._cached_prefix: list[float] = []
-        self._cached_total: float = 0.0
+        self._pos_arr = _np.zeros(0, dtype=_np.int64)
+        self._mi_arr = _np.zeros(0, dtype=_np.float64)
+        self._prefix_arr = _np.zeros(0, dtype=_np.float64)
+        self._mi_cache: dict[int, float] = {}
+        self._mi_dict_valid: bool = False
 
     def record(self, input_bytes: bytes, is_crash: bool) -> None:
         """Record one input-crash pair.
@@ -297,29 +296,31 @@ class CrashMITracker:
         ) / n
         return _np.maximum(mi, 0.0).tolist()
 
-    def all_mi(self) -> dict[int, float]:
-        """Compute MI for all observed positions."""
+    def _refresh(self) -> None:
+        """Rebuild the sampler arrays when record() invalidated them.
+
+        Arrays only: the dict/sorted-list/prefix-list rebuild over 65,536
+        positions every 50 execs cost 0.27 ms/exec on ffmpeg. np.cumsum adds
+        in order, so the prefix sums equal the old running Python sum.
+        """
         if self._cache_valid:
-            return self._mi_cache
+            return
         counts = self._position_counts_arr
         observed = _np.flatnonzero(counts >= self.min_observations) if self._rows else []
-        # One numpy pass over every observed row: the per-position mi() loop
-        # ran ~once per round (record() invalidates) at 6.4 s per 3k execs.
-        values = self._mi_rows(observed) if len(observed) else []
-        self._mi_cache = dict(zip(_np.asarray(observed).tolist(), values, strict=True))
-        # Cache sorted positions and weights for weighted_position
-        self._cached_positions = sorted(self._mi_cache.keys())
-        self._cached_weights = [max(self._mi_cache[p], 0.01) for p in self._cached_positions]
-        self._cached_total = sum(self._cached_weights)
-        # Prefix sums, so a draw restricted to the positions below some
-        # input length can be normalised by that prefix's mass rather than
-        # by the total, and located by bisection instead of a scan.
-        self._cached_prefix = []
-        running = 0.0
-        for w in self._cached_weights:
-            running += w
-            self._cached_prefix.append(running)
+        self._pos_arr = _np.asarray(observed, dtype=_np.int64)
+        self._mi_arr = _np.asarray(
+            self._mi_rows(self._pos_arr) if len(observed) else [], dtype=_np.float64
+        )
+        self._prefix_arr = _np.cumsum(_np.maximum(self._mi_arr, 0.01))
         self._cache_valid = True
+        self._mi_dict_valid = False
+
+    def all_mi(self) -> dict[int, float]:
+        """Compute MI for all observed positions."""
+        self._refresh()
+        if not self._mi_dict_valid:
+            self._mi_cache = dict(zip(self._pos_arr.tolist(), self._mi_arr.tolist(), strict=True))
+            self._mi_dict_valid = True
         return self._mi_cache
 
     def top_positions(self, k: int = 10) -> list[tuple[int, float]]:
@@ -344,24 +345,24 @@ class CrashMITracker:
         inert for any input shorter than the tracked range, which is the
         normal case since positions accumulate up to max_positions.
         """
-        if not self._cache_valid:
-            self.all_mi()
-        if not self._cached_positions:
+        self._refresh()
+        positions = self._pos_arr
+        if not positions.size:
             return None
-        # Binary search for cutoff index
-        idx = bisect.bisect_left(self._cached_positions, input_length)
+        # Cutoff: positions below input_length (bisect_left == side="left").
+        idx = int(_np.searchsorted(positions, input_length, side="left"))
         if idx == 0:
             return None
-        prefix = self._cached_prefix
-        eligible_mass = prefix[idx - 1]
+        prefix = self._prefix_arr
+        eligible_mass = float(prefix[idx - 1])
         if eligible_mass <= 0.0:
-            return self._cached_positions[self._rng.randrange(idx)]
+            return int(positions[self._rng.randrange(idx)])
         r = self._rng.random() * eligible_mass
         # prefix is non-decreasing, so the first entry >= r is the pick.
-        i = bisect.bisect_left(prefix, r, 0, idx)
+        i = int(_np.searchsorted(prefix[:idx], r, side="left"))
         if i >= idx:
             i = idx - 1
-        return self._cached_positions[i]
+        return int(positions[i])
 
     def top_values(self, position: int, k: int = 5) -> list[int]:
         """Return the k byte values at position with highest crash count."""
