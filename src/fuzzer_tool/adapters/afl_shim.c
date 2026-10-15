@@ -1178,12 +1178,20 @@ __AFL_NO_COV static inline uintptr_t __afl_ctx_resolve_base(void *ra) {
  * would just add dladdr() cost for nothing), 1 = base-relative mode. */
 static int __afl_ctx_relative_mode = -1;
 
-__AFL_NO_COV static inline int __afl_ctx_use_relative(void) {
-    if (__afl_ctx_relative_mode < 0) {
-        const char *v = getenv("FUZZER_KEEP_ASLR");
-        __afl_ctx_relative_mode = (v && v[0] == '1' && v[1] == '\0') ? 1 : 0;
-    }
+/* One-time getenv, out of line: kept in the body below, it stopped clang
+ * inlining the per-edge check (a call/ret per edge, ~0.3 ns). */
+__attribute__((noinline, cold))
+__AFL_NO_COV static int __afl_ctx_relative_init(void) {
+    const char *v = getenv("FUZZER_KEEP_ASLR");
+    __afl_ctx_relative_mode = (v && v[0] == '1' && v[1] == '\0') ? 1 : 0;
     return __afl_ctx_relative_mode;
+}
+
+__AFL_NO_COV __attribute__((always_inline))
+static inline int __afl_ctx_use_relative(void) {
+    int mode = __afl_ctx_relative_mode;
+    if (__builtin_expect(mode >= 0, 1)) return mode;
+    return __afl_ctx_relative_init();
 }
 /* Frame-slot load ASAN cannot see. The walk's one unvalidated hop can pass
  * the range check yet land in a stack redzone; an instrumented load then
