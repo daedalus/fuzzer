@@ -9593,7 +9593,8 @@ class Fuzzer:
             while not _shutdown:
                 if iterations and i >= iterations:
                     break
-                if max_execs and self.exec_count >= max_execs:
+                # Budget counts this process's execs, not ones restored by --resume.
+                if max_execs and self.exec_count - self._resume_baseline_exec >= max_execs:
                     break
                 if self.continue_until_crash and self.crash_count > 0:
                     break

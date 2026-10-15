@@ -2618,9 +2618,10 @@ def main() -> int:
         "--max-execs",
         type=int,
         default=0,
-        help="Stop once this many target executions have run (0=unlimited; "
-        "checked once per iteration, so it may overshoot by one "
-        "mutation budget plus the initial seed pass)",
+        help="Stop once this many target executions have run in this process "
+        "(0=unlimited; --resume'd execs not counted; checked once per "
+        "iteration, so it may overshoot by one mutation budget plus the "
+        "initial seed pass)",
     )
     fuzz_parser.add_argument(
         "--continue-until-crash",

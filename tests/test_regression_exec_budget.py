@@ -51,6 +51,28 @@ class TestRunHonorsExecBudget:
         seed_pass = 2
         assert seed_pass <= f.exec_count <= budget + seed_pass
 
+    @pytest.mark.parametrize("restored", [8_912, 10**9])
+    def test_regression_max_execs_relative_to_resume(self, tmp_root, restored):
+        """--resume restored 8,912 execs; --max-execs 3000 stopped at once."""
+        (tmp_root / "corpus" / "seed_a").write_bytes(b"AAAA")
+        (tmp_root / "corpus" / "seed_b").write_bytes(b"BBBB")
+        f = end_of_run._make_fuzzer(
+            tmp_root,
+            corpus_dir=str(tmp_root / "corpus"),
+            quiet_stats=True,
+        )
+
+        # What load_state does on --resume.
+        f.exec_count = restored
+        f._resume_baseline_exec = restored
+
+        budget = 5
+        with patch.object(f, "_run_target", return_value=(0, "")):
+            f.run(iterations=10_000, max_execs=budget)
+
+        ran = f.exec_count - restored
+        assert budget <= ran <= 4 * budget
+
     def test_iterations_still_bounds_a_finite_run(self, tmp_root):
         f = end_of_run._make_fuzzer(tmp_root)
         with patch.object(f, "_run_target", return_value=(0, "")):
