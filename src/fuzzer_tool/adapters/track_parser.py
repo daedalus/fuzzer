@@ -146,8 +146,12 @@ OPERAND_MIN_VALUE = 256
 _OPERAND_WIDTHS = (4, 8)
 
 # What makes each operand kind interesting, as the value to substitute in.
-# A divisor wants 0 (division by zero) and 1 (degenerate quotient); an index
-# wants 0 and the all-ones word (out of bounds in both directions).
+# A divisor wants 0 (division by zero), 1 (degenerate quotient) and the
+# all-ones word: as a signed divisor that is -1, and MIN / -1 overflows --
+# SIGFPE on x86 idiv (quotient and remainder alike), UB in C everywhere.
+# trace-div reports only the divisor, so this pins -1 at the exact site and
+# leaves MIN in the dividend to div_trap and the interesting-value tables.
+# An index wants 0 and the all-ones word (out of bounds in both directions).
 _OPERAND_TARGETS: dict[str, tuple[bytes, ...]] = {}
 
 
@@ -157,7 +161,8 @@ def _operand_targets(kind: str, width: int) -> tuple[bytes, ...]:
     if cached is not None:
         return cached
     zero = (0).to_bytes(width, "little")
-    out = (zero, (1).to_bytes(width, "little")) if kind == "DIV" else (zero, b"\xff" * width)
+    ones = b"\xff" * width
+    out = (zero, (1).to_bytes(width, "little"), ones) if kind == "DIV" else (zero, ones)
     _OPERAND_TARGETS[key] = out
     return out
 
@@ -198,7 +203,8 @@ def pairs_from_operand_records(lines: Iterable[str]) -> list[tuple[bytes, bytes]
         if int.from_bytes(value, "little") < OPERAND_MIN_VALUE:
             continue
 
-        out.extend((value, target) for target in _operand_targets(kind, width))
+        # An operand already at its target (a divisor that is -1) is a no-op pair.
+        out.extend((value, t) for t in _operand_targets(kind, width) if t != value)
 
     log.debug("pairs_from_operand_records: built %d pairs", len(out))
     return out

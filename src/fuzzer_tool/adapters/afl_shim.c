@@ -3986,8 +3986,9 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
  * They get their own record kinds rather than a CMP with an invented
  * opponent: the fuzzer counts CMP records to find comparison walls, and a
  * divisor has nothing to be satisfied against. core/cmplog.py pairs each
- * observed operand with the values that make it interesting (0/1 for a
- * divisor, 0/all-ones for an index).
+ * observed operand with the values that make it interesting (0/1/all-ones
+ * for a divisor -- all-ones is -1, the MIN / -1 overflow -- and 0/all-ones
+ * for an index).
  *
  *   DIV <hex value> <width> 0x<pc>
  *   GEP <hex index> <width> 0x<pc>

@@ -8,7 +8,8 @@ operand and polluting the wall statistics that read those records.
 
 They are written as their own record kinds instead, and the collector
 turns each into I2S pairs against the values that make them interesting:
-a divisor against 0 and 1 (division by zero, degenerate quotient), an
+a divisor against 0, 1 and -1 (division by zero, degenerate quotient,
+the MIN / -1 signed overflow), an
 index against 0 and the all-ones word (out of bounds). The existing
 redqueen mutator consumes those pairs unchanged.
 """
@@ -112,6 +113,7 @@ class TestAgainstTheRealShim:
         targets = {b for a, b in c.pairs if a == divisor}
         assert targets, f"divisor absent from {len(c.pairs)} pairs"
         assert b"\x00\x00\x00\x00" in targets
+        assert b"\xff" * 4 in targets
 
     def test_the_gep_index_reaches_the_pair_pool(self, tmp_path, operand_target):
         c = _run(operand_target, tmp_path)
@@ -128,13 +130,29 @@ class TestAgainstTheRealShim:
 
 
 class TestParsing:
-    def test_divisor_pairs_against_zero_and_one(self):
+    def test_divisor_pairs_against_zero_one_and_minus_one(self):
         val = (0x12345678).to_bytes(4, "little")
         pairs = pairs_from_operand_records([f"DIV {val.hex()} 4 0x400123"])
         assert pairs == [
             (val, (0).to_bytes(4, "little")),
             (val, (1).to_bytes(4, "little")),
+            (val, b"\xff" * 4),
         ]
+
+    @pytest.mark.parametrize("width", [4, 8])
+    def test_divisor_is_paired_against_minus_one(self, width):
+        """MIN / -1 overflows (SIGFPE on x86 idiv): the observed divisor's
+        bytes must be offered -1, not only 0 and 1."""
+        val = (0x1234).to_bytes(width, "little")
+        pairs = pairs_from_operand_records([f"DIV {val.hex()} {width} 0x400123"])
+        assert (val, b"\xff" * width) in pairs
+
+    def test_operand_already_at_target_gets_no_self_pair(self):
+        """A divisor that is already -1 must not yield the no-op (-1, -1)."""
+        ones = b"\xff" * 4
+        pairs = pairs_from_operand_records([f"DIV {ones.hex()} 4 0x400123"])
+        assert (ones, ones) not in pairs
+        assert pairs == [(ones, b"\x00" * 4), (ones, (1).to_bytes(4, "little"))]
 
     def test_index_pairs_against_zero_and_all_ones(self):
         val = (0xABCD).to_bytes(8, "little")
