@@ -482,6 +482,9 @@ EXEC_BLOOM_CAPACITY = 500_000  # executed-input filter capacity before generatio
 EXEC_DEDUP_RETRIES = 3  # re-rolls of the mutation before executing a repeat anyway
 RAW_PROBE_MIN = 10  # startup raw-speed probe: fewest target runs
 RAW_PROBE_MAX = 100  # ... and most
+# Operators stacked per input (-M). 1 beat 8 on clang-ASAN fuzzgoat (+94.5
+# median edges, 19/20 seeds) and tied on png at 2.2x exec/s (DEEP_DIVE).
+MUTATIONS_DEFAULT = 1
 # Seed calibration prunes the edge tracker early once the per-seed edge sets
 # hold this many (seed, edge) pairs (~100 bytes each), whatever the seed count.
 CALIBRATION_EDGE_ENTRY_BUDGET = 40_000_000
@@ -1303,7 +1306,7 @@ class Fuzzer:
         crashes_dir,
         max_len=4096,
         timeout=1,
-        mutations_per_input=8,
+        mutations_per_input=MUTATIONS_DEFAULT,
         use_coverage=False,
         deep_coverage=False,
         max_bps=50000,

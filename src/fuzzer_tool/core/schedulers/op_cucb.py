@@ -27,7 +27,7 @@ seeds), with the round succeeding when any arm in the stack fires:
                8 | 0.029   <- the shipped default
               16 | 0.006
 
-At the default ``mutations_per_input = 8`` the true 0.25 gap reaches the
+At ``mutations_per_input = 8`` (default before 2026-10-15) the true 0.25 gap reaches the
 posterior as 0.029: an 8.6x loss of the signal every operator scheduler in the
 tree is trying to read.
 
