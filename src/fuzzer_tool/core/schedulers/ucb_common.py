@@ -11,11 +11,19 @@ from __future__ import annotations
 
 import collections
 import math
+import sys
 from abc import ABC, abstractmethod
 
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 
 MIN_LOG_ARG = 1.0 + 1e-9
+
+
+def _check_per_arm(per_arm: float | None) -> float | None:
+    """Validate an auto-horizon pulls-per-arm target (None = fixed horizon)."""
+    if per_arm is not None and per_arm <= 0.0:
+        raise ValueError(f"per_arm must be positive, got {per_arm!r}")
+    return per_arm
 
 
 class UCBBase(ABC):
@@ -27,9 +35,20 @@ class UCBBase(ABC):
 
     supports_priors = False
 
+    # Largest candidate list seen; maxsize disables horizon growth (fixed mode).
+    _k_seen: int = sys.maxsize
+
     def __init__(self, rng: RandPool | None = None) -> None:
         self._rng = rng if rng is not None else get_default_rand_pool()
         self._total_pulls: int = 0
+
+    def _grow_k(self, k: int) -> None:
+        """Resize the horizon for a larger candidate count (auto mode only).
+
+        Unreachable in fixed mode (``_k_seen`` stays maxsize); a subclass that
+        enables auto mode must override it.
+        """
+        raise NotImplementedError(f"{type(self).__name__} has no auto horizon (k={k})")
 
     # -- arm bookkeeping --------------------------------------------------
 
@@ -49,7 +68,12 @@ class UCBBase(ABC):
         if not ops:
             return ""
 
-        if len(ops) == 1:
+        # One compare per call; only auto-horizon schedulers ever grow.
+        n_ops = len(ops)
+        if n_ops > self._k_seen:
+            self._grow_k(n_ops)
+
+        if n_ops == 1:
             return ops[0]
 
         # One count read per arm, reused by the unpulled scan, the total and
@@ -132,14 +156,26 @@ class UCBBase(ABC):
 class DiscountedUCBBase(UCBBase):
     """Base for schedulers that track exponentially discounted statistics."""
 
-    def __init__(self, gamma: float, rng: RandPool | None = None) -> None:
+    def __init__(
+        self, gamma: float, rng: RandPool | None = None, per_arm: float | None = None
+    ) -> None:
         if not 0.0 < gamma <= 1.0:
             raise ValueError(f"gamma must be in (0, 1], got {gamma!r}")
         self.gamma = gamma
+        # Auto horizon: memory 1/(1-gamma) = per_arm * K. No forgetting
+        # until the first candidate list sets K.
+        self.per_arm = _check_per_arm(per_arm)
+        if per_arm is not None:
+            self.gamma = 1.0
+            self._k_seen = 0
         self._n_rel: dict[str, float] = {}
         self._x_rel: dict[str, float] = {}
         self._discount: float = 1.0
         super().__init__(rng=rng)
+
+    def _grow_k(self, k: int) -> None:
+        self._k_seen = k
+        self.gamma = 1.0 - 1.0 / (self.per_arm * k)
 
     # -- arm bookkeeping --------------------------------------------------
 
@@ -194,15 +230,27 @@ class DiscountedUCBBase(UCBBase):
 class WindowedUCBBase(UCBBase):
     """Base for schedulers that track a fixed-size sliding window."""
 
-    def __init__(self, window: int, rng: RandPool | None = None) -> None:
+    def __init__(
+        self, window: int, rng: RandPool | None = None, per_arm: float | None = None
+    ) -> None:
         if window <= 0:
             raise ValueError(f"window must be positive, got {window!r}")
         self.window = window
+        # Auto horizon: window = ceil(per_arm * K). Unbounded until the
+        # first candidate list sets K.
+        self.per_arm = _check_per_arm(per_arm)
+        if per_arm is not None:
+            self.window = sys.maxsize
+            self._k_seen = 0
         self._history: collections.deque = collections.deque()  # type: ignore[name-defined]
         self._counts: dict[str, int] = {}
         self._sums: dict[str, float] = {}
         self._known: set[str] = set()
         super().__init__(rng=rng)
+
+    def _grow_k(self, k: int) -> None:
+        self._k_seen = k
+        self.window = math.ceil(self.per_arm * k)
 
     # -- arm bookkeeping --------------------------------------------------
 

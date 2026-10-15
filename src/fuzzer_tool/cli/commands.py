@@ -487,11 +487,11 @@ def cmd_fuzz(args):
         args.gp_ucb = True
         args.bo_gp_ucb = True
         args.ducb = True
-        args.ducb_gamma = 0.9999
+        args.ducb_gamma = None
         args.kl_ducb = True
         args.kl_ducb_gamma = 0.9999
         args.swucb = True
-        args.swucb_window = 4000
+        args.swucb_window = None
         args.kl_swucb = True
         args.kl_swucb_window = 4000
         args.cucb = True
@@ -739,9 +739,9 @@ def cmd_fuzz(args):
         gp_ucb=getattr(args, "gp_ucb", False),
         bo_gp_ucb=getattr(args, "bo_gp_ucb", False),
         ducb=getattr(args, "ducb", False),
-        ducb_gamma=getattr(args, "ducb_gamma", 0.9999),
+        ducb_gamma=getattr(args, "ducb_gamma", None),
         swucb=getattr(args, "swucb", False),
-        swucb_window=getattr(args, "swucb_window", 4000),
+        swucb_window=getattr(args, "swucb_window", None),
         cucb=getattr(args, "cucb", False),
         cucb_gamma=getattr(args, "cucb_gamma", 0.9995),
         cusum_ucb=getattr(args, "cusum_ucb", False),
@@ -3474,10 +3474,11 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--ducb-gamma",
         type=float,
-        default=0.9999,
+        default=None,
         help=(
             "D-UCB discount per pull; effective memory is 1/(1-gamma) pulls "
-            "and must stay well above the operator count (default: 0.9999)"
+            "and must stay well above the operator count (default: auto, "
+            "memory = 68 pulls x candidate operators)"
         ),
     )
     fuzz_parser.add_argument(
@@ -3491,8 +3492,8 @@ def main() -> int:
     fuzz_parser.add_argument(
         "--swucb-window",
         type=int,
-        default=4000,
-        help="SW-UCB window length in pulls (default: 4000)",
+        default=None,
+        help="SW-UCB window length in pulls (default: auto, 27 pulls x candidate operators)",
     )
     fuzz_parser.add_argument(
         "--kl-ducb",

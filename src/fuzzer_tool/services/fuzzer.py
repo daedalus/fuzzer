@@ -134,8 +134,10 @@ from fuzzer_tool.core.schedulers import (
     WhittleIndexScheduler,
 )
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
+from fuzzer_tool.core.schedulers.op_ducb import DUCB_PER_ARM
 from fuzzer_tool.core.schedulers.op_p2c import OpP2CScheduler
 from fuzzer_tool.core.schedulers.op_stride import OpStrideScheduler
+from fuzzer_tool.core.schedulers.op_swucb import SWUCB_PER_ARM
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.schedulers.seed_aimd import SeedAIMDScheduler
 from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
@@ -1472,11 +1474,11 @@ class Fuzzer:
         bo_gp_length_scale=1.0,
         bo_gp_noise=0.01,
         ducb=False,
-        ducb_gamma=0.9999,
+        ducb_gamma=None,
         kl_ducb=False,
         kl_ducb_gamma=0.9999,
         swucb=False,
-        swucb_window=4000,
+        swucb_window=None,
         kl_swucb=False,
         kl_swucb_window=4000,
         cucb=False,
@@ -3604,13 +3606,20 @@ class Fuzzer:
         # shared RandPool per Hard Rule 16 so --seed reproduces the campaign.
         self._use_ducb = ducb
         self._ducb = None
-        if ducb:
+        # None (default): horizon sized from the candidate count (per_arm x K).
+        if ducb and ducb_gamma is None:
+            self._ducb = DUCBScheduler(per_arm=DUCB_PER_ARM, rng=self._rng)
+            log.info("D-UCB enabled (memory %.0f pulls x candidates)", DUCB_PER_ARM)
+        elif ducb:
             self._ducb = DUCBScheduler(gamma=ducb_gamma, rng=self._rng)
             log.info("D-UCB enabled (gamma=%.5f)", ducb_gamma)
 
         self._use_swucb = swucb
         self._swucb = None
-        if swucb:
+        if swucb and swucb_window is None:
+            self._swucb = SWUCBScheduler(per_arm=SWUCB_PER_ARM, rng=self._rng)
+            log.info("SW-UCB enabled (window %.0f pulls x candidates)", SWUCB_PER_ARM)
+        elif swucb:
             self._swucb = SWUCBScheduler(window=swucb_window, rng=self._rng)
             log.info("SW-UCB enabled (window=%d)", swucb_window)
 
