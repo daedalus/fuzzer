@@ -1,8 +1,23 @@
 # Reachable `av_assert0(0)` in `decode_simple_internal` via Subtitle Decoder
 
+> **Status: INVALID — harness API misuse, not a library bug.** Reported as
+> [FFmpeg#23945](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/23945); closed by
+> the maintainer. `avcodec_send_packet`/`avcodec_receive_frame` serve audio and
+> video only; subtitles use `avcodec_decode_subtitle2`. The assert reports the
+> misuse; any 1-byte packet triggers it, so the input bytes are irrelevant.
+> Corrections to the report below: no application using the API correctly is
+> affected (severity none); PGS uses `FF_CODEC_CB_TYPE_DECODE_SUB`, not
+> `DECODE`; the assert is at `decode.c:474` on master.
+>
+> **Fix (ours)**: `targets/ffmpeg*_read.c` bind the decode API from the
+> decoder's `codec->type` (`fuzz_decode_api`), frame API whitelisted to
+> audio/video. Enforced by `tests/test_regression_ffmpeg_api_contract.py`.
+>
+> The rest of this file is the original report, kept as record.
+
 **File**: `libavcodec/decode.c:464`
-**Severity**: HIGH — crafted 46-byte input crashes any FFmpeg-based application
-**Root cause**: The `avcodec_send_packet`/`receive_frame` API dispatches subtitle decoders through a code path that asserts the codec type must be VIDEO or AUDIO, but subtitle codecs have type SUBTITLE.
+**Severity**: ~~HIGH~~ none — harness misuse
+**Root cause**: The harness called the audio/video decode API on a subtitle decoder.
 **Discovered by**: fuzzer-tool with ASAN via `targets/ffmpeg_read.c`
 
 ---
@@ -218,44 +233,6 @@ static const unsigned char pgs_crash[] = {
 /* Expect: avcodec_send_packet returns error, does not crash */
 ```
 
-## Testing the Bug
-
-A minimal standalone C reproducer is at **`targets/repro_ffmpeg_assert.c`**. It opens the `hdmv_pgs_subtitle` decoder, calls `avcodec_send_packet`, and observes the crash:
-
-```bash
-# Compile (needs libavcodec + libavutil dev packages)
-gcc -O0 -g -o /tmp/repro targets/repro_ffmpeg_assert.c \
-    $(pkg-config --cflags --libs libavcodec libavutil)
-
-# Run — crashes immediately
-/tmp/repro
-```
-
-**Expected output (buggy build):**
-```
-OK: found decoder 'pgssub' (type=3)
-OK: avcodec_open2 succeeded (codec_type=3)
-calling avcodec_send_packet...
-[pgssub @ 0x....] Unknown subtitle segment type 0x0, length 0
-Assertion 0 failed at src/libavcodec/decode.c:468
-Aborted (exit 134)
-```
-
-**Expected output (fixed build):**
-```
-OK: found decoder 'pgssub' (type=3)
-OK: avcodec_open2 succeeded (codec_type=3)
-calling avcodec_send_packet...
-avcodec_send_packet returned -22
-OK - bug is fixed (send_packet returned error -22 instead of crashing)
-```
-
 ## Upstream Status
 
-Not reported upstream at the time of discovery. The bug is present in FFmpeg 7.1.3 (confirmed on system FFmpeg 7.1.5 as well, line 468).
-
-**To report** (per [ffmpeg.org/bugreports.html](https://www.ffmpeg.org/bugreports.html)):
-1. Verify the bug still exists against the **latest development branch** (git HEAD), not just the vendored 7.1.3.
-2. Register at [code.ffmpeg.org](https://code.ffmpeg.org/user/sign_up) and submit an issue at [code.ffmpeg.org/FFmpeg/FFmpeg/issues](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues).
-3. Include: the 46-byte crash input, the gdb backtrace (see above), and the minimal C reproducer at `targets/repro_ffmpeg_assert.c`.
-4. Upload the crash sample to [streams.videolan.org/upload/](https://streams.videolan.org/upload/) (select FFmpeg project).
+Reported as [FFmpeg#23945](https://code.ffmpeg.org/FFmpeg/FFmpeg/issues/23945); closed as caller misuse. Not a bug. The standalone reproducer `targets/repro_ffmpeg_assert.c` was removed: it only demonstrated the misuse.

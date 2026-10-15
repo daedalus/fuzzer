@@ -1950,7 +1950,9 @@ If this prints `(stripped)`, the environment is clean.
 Bugs discovered by fuzzing with this tool are documented in `docs/FINDINGS/`:
 
 - **[FINDINGS/fgrep.md](FINDINGS/fgrep.md)** — Unsigned integer underflow in fgrep AVX2 search (3 bugs, severity MEDIUM)
-- **[FINDINGS/ffmpeg.md](FINDINGS/ffmpeg.md)** — Reachable `av_assert0(0)` in FFmpeg 7.1.3 when `avcodec_send_packet` is called on a subtitle decoder (severity HIGH — denial-of-service via 46-byte crafted input)
+- **[FINDINGS/ffmpeg.md](FINDINGS/ffmpeg.md)** — Divide-by-zero in the VPK demuxer (MEDIUM). The `av_assert0(0)` subtitle report was harness misuse (FFmpeg#23945, invalid).
+
+FFmpeg harnesses bind each decoder's API from `codec->type` (`fuzz_decode_api` in `targets/ffmpeg*_read.c`): audio/video → `send_packet`/`receive_frame`, subtitle → `decode_subtitle2`, anything else → none. `tests/test_regression_ffmpeg_api_contract.py` lints every harness for this. Triage rules before reporting: `FINDINGS/ffmpeg.md` §Triage before reporting.
 
 ## License
 

@@ -71,12 +71,36 @@ static int fuzz_read_packet(void *opaque, unsigned char *buf, int buf_size) {
 
 #define FUZZ_MAX_DECODERS 128
 
+/* Decode API a decoder accepts. NONE is 0 so a zeroed slot decodes nothing. */
+typedef enum {
+    DECODE_API_NONE = 0,  /* no decode contract: touch packets only */
+    DECODE_API_FRAME,     /* avcodec_send_packet / avcodec_receive_frame */
+    DECODE_API_SUBTITLE,  /* avcodec_decode_subtitle2 */
+} DecodeApi;
+
 typedef struct {
     AVCodecContext *ctx;
     int              codec_id;
-    int              codec_type;   /* AVMediaType: picks the decode API */
+    DecodeApi        api;          /* bound at open from codec->type */
     int              inited;
 } DecoderSlot;
+
+/* Map a decoder to the API libavcodec accepts for it.
+ *
+ * Keyed on codec->type, the decoder's own type and what libavcodec
+ * dispatches on; codecpar->codec_type is input-controlled and is copied into
+ * the context on reuse without avcodec_open2's mismatch check. The frame API
+ * is a whitelist: a subtitle decoder driven through it aborts in
+ * decode_simple_internal on any payload (FFmpeg#23945, closed as harness
+ * misuse). Enforced by tests/test_regression_ffmpeg_api_contract.py. */
+static DecodeApi fuzz_decode_api(const AVCodec *codec) {
+    switch (codec->type) {
+    case AVMEDIA_TYPE_VIDEO:
+    case AVMEDIA_TYPE_AUDIO:    return DECODE_API_FRAME;
+    case AVMEDIA_TYPE_SUBTITLE: return DECODE_API_SUBTITLE;
+    default:                    return DECODE_API_NONE;
+    }
+}
 
 static AVPacket    *g_pkt          = NULL;
 static AVFrame     *g_frame        = NULL;
@@ -599,7 +623,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     for (unsigned i = 0; i < nb_streams; i++) {
         const AVCodecParameters *par = fmt_ctx->streams[i]->codecpar;
         /* Audio, video and subtitles are all decoded -- but not through the
-         * same API, which is the whole point of tracking codec_type below.
+         * same API, which is the whole point of DecoderSlot.api.
          *
          * avcodec_send_packet/avcodec_receive_frame is the frame-based API
          * for audio and video only. A subtitle decoder driven through it
@@ -647,12 +671,11 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
                 continue;
             }
             slot->codec_id   = par->codec_id;
-            slot->codec_type = par->codec_type;
+            slot->api        = fuzz_decode_api(slot->ctx->codec);
             slot->inited     = 1;
             fuzz_phase_stats.decoder_opens++;
         } else {
             avcodec_parameters_to_context(slot->ctx, par);
-            slot->codec_type = par->codec_type;
             fuzz_phase_stats.decoder_reuses++;
         }
         __afl_map_edge(0x1100 + (i & 0xFF));
@@ -665,8 +688,11 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
         __afl_map_edge(0x1200 + (g_pkt->stream_index & 0x1F));
 
         int si = g_pkt->stream_index;
-        if (si >= 0 && (int)si < (int)nb_streams && g_decs[si].inited && g_decs[si].ctx) {
-            if (g_decs[si].codec_type == AVMEDIA_TYPE_SUBTITLE) {
+        int valid = si >= 0 && (int)si < (int)nb_streams;
+        DecodeApi api = valid && g_decs[si].inited && g_decs[si].ctx
+                      ? g_decs[si].api : DECODE_API_NONE;
+        if (api != DECODE_API_NONE) {
+            if (api == DECODE_API_SUBTITLE) {
                 /* Subtitles use the packet-in/AVSubtitle-out API. Driving
                  * them through send_packet/receive_frame trips
                  * av_assert0(frame->buf[0]) inside decode_simple_internal. */
@@ -691,7 +717,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
                  * struct is zeroed above so this is safe on failure too.
                  * Omitting it leaks every decoded subtitle, per execution. */
                 avsubtitle_free(&sub);
-            } else {
+            } else if (api == DECODE_API_FRAME) {
                 ret = avcodec_send_packet(g_decs[si].ctx, g_pkt);
                 if (ret >= 0) {
                     while (avcodec_receive_frame(g_decs[si].ctx, g_frame) >= 0) {
@@ -700,7 +726,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
                     }
                 }
             }
-        } else if (si >= 0 && (int)si < (int)nb_streams) {
+        } else if (valid) {
             /* A packet on a stream with no decoder -- data, attachment, or a
              * codec we could not open. The demuxer still produced it, so read
              * the payload and its side data instead of dropping the packet
