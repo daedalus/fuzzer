@@ -44,6 +44,10 @@ from fuzzer_tool.core.schedulers.ucb_common import WindowedUCBBase
 
 MIN_LOG_ARG = 1.0 + 1e-9
 
+#: Auto-horizon pulls per candidate arm: the window floor below which the
+#: per-arm means are noise (see ``window``).
+SWUCB_PER_ARM = 27.0
+
 
 class SWUCBScheduler(WindowedUCBBase):
     """Sliding-Window UCB (Garivier & Moulines) over mutation operators.
@@ -54,6 +58,10 @@ class SWUCBScheduler(WindowedUCBBase):
             (~1,100 at the default 1, ~3.7 pulls per round) -- long enough that a 147-operator
             candidate list still gets ~27 pulls per arm inside the window,
             which is the floor below which the empirical means are noise.
+        per_arm: When set, ``window`` is ignored and follows the largest
+            candidate list seen, K: ``ceil(per_arm * K)``. The CLI default
+            (``SWUCB_PER_ARM``), since 246 operators left 4000 pulls at ~16
+            per arm.
         xi: Exploration constant inside the confidence width. The paper's
             analysis uses 1/2 and its experiments 0.6; both over-explore at
             this reward scale, the same finding ``GPUCBScheduler`` records for
@@ -82,12 +90,13 @@ class SWUCBScheduler(WindowedUCBBase):
         xi: float = 0.15,
         b: float = 1.0,
         rng: RandPool | None = None,
+        per_arm: float | None = None,
     ):
         if xi <= 0.0:
             raise ValueError(f"xi must be positive, got {xi!r}")
         self.xi = xi
         self.b = b
-        super().__init__(window=window, rng=rng)
+        super().__init__(window=window, rng=rng, per_arm=per_arm)
 
     def _width(self, mean: float, n: float, log_n: float) -> float:
         """Gaussian width: b * sqrt(xi * log_n) / sqrt(n)."""

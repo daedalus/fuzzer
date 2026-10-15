@@ -47,6 +47,10 @@ from fuzzer_tool.core.schedulers.ucb_common import DiscountedUCBBase
 #: Paper's leading coefficient on the confidence width.
 UCB_WIDTH_COEFF = 2.0
 
+#: Auto-horizon pulls per candidate arm: the fixed default's design point,
+#: 10,000 pulls over 147 operators (see ``gamma``).
+DUCB_PER_ARM = 68.0
+
 
 class DUCBScheduler(DiscountedUCBBase):
     """Discounted UCB (Garivier & Moulines) over mutation operators.
@@ -60,6 +64,9 @@ class DUCBScheduler(DiscountedUCBBase):
             the number of candidate arms or every arm's discounted count sits
             near zero and the index is pure exploration: with 147 registered
             operators, 10,000 pulls is ~68 per arm.
+        per_arm: When set, ``gamma`` is ignored and follows the largest
+            candidate list seen, K: memory ``1/(1-gamma) = per_arm * K``.
+            The CLI default (``DUCB_PER_ARM``).
         xi: Exploration constant inside the confidence width.
         b: Reward range. Rewards handed to ``record()`` are cost-adjusted
             surprisal weights, which ``Fuzzer.fuzz_one`` clamps to [0, 1].
@@ -91,6 +98,7 @@ class DUCBScheduler(DiscountedUCBBase):
         b: float = 1.0,
         exploration: float = 0.25,
         rng: RandPool | None = None,
+        per_arm: float | None = None,
     ):
         if xi <= 0.0:
             raise ValueError(f"xi must be positive, got {xi!r}")
@@ -99,7 +107,7 @@ class DUCBScheduler(DiscountedUCBBase):
         self.xi = xi
         self.b = b
         self.exploration = exploration
-        super().__init__(gamma=gamma, rng=rng)
+        super().__init__(gamma=gamma, rng=rng, per_arm=per_arm)
 
     def _width(self, mean: float, n: float, log_n: float) -> float:
         """Gaussian confidence width: exploration * 2B * sqrt(xi*log(n) / n)."""
