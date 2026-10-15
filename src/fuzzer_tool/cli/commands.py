@@ -26,7 +26,7 @@ from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST
 from fuzzer_tool.core.shim_health import WriteGuard
 from fuzzer_tool.core.target_schedule import TargetSchedule
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
-from fuzzer_tool.services.fuzzer import Fuzzer
+from fuzzer_tool.services.fuzzer import MUTATIONS_DEFAULT, Fuzzer
 from fuzzer_tool.services.ledger import LedgerSession
 from fuzzer_tool.services.position_arena import POSITION_STRATEGY_NAMES, parse_arena_arms
 
@@ -2662,7 +2662,9 @@ def main() -> int:
         "recorded (not --resume); score is cumulative SHM edges.",
     )
     fuzz_parser.set_defaults(ledger_preset=None)
-    fuzz_parser.add_argument("-M", "--mutations", type=int, default=8, help="Mutations per input")
+    fuzz_parser.add_argument(
+        "-M", "--mutations", type=int, default=MUTATIONS_DEFAULT, help="Mutations per input"
+    )
     fuzz_parser.add_argument(
         "-c",
         "--coverage",

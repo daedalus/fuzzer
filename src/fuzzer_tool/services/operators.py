@@ -1353,6 +1353,23 @@ def _phase_position(f, data: bytes, buf_len: int):
     return f._get_phase_weighted_position(buf_len, meta.get("record_stride") if meta else None)
 
 
+# Position plan slots, in select_position's candidate-list order (the order
+# rng.choice sees). Evaluation order is the plan's own order.
+(
+    _SLOT_SENS,
+    _SLOT_TE,
+    _SLOT_PHASE,
+    _SLOT_MI,
+    _SLOT_CRASH_MI,
+    _SLOT_REGION,
+    _SLOT_FIELD,
+    _SLOT_BURN,
+    _SLOT_RR,
+    _SLOT_FIB,
+) = range(10)
+_POS_SLOT_COUNT = 10
+
+
 def _round_mutations(f) -> int:
     """Mutations this round: -M scaled by seed energy and the 1/5 rule, floored at 16 in stall recovery."""
     n_mutations = f.mutations_per_input
@@ -1409,6 +1426,9 @@ class OperatorEngine:
 
     def __init__(self, fuzzer):
         self.f = fuzzer
+        # Position plan for the current mutate() round (_pos_plan); None
+        # falls back to select_position.
+        self._round_pos_plan: tuple | None = None
         # Cache for _op_redqueen_xform: sorted cmplog pairs + version counter.
         # Rebuilt only when the pair list grows or is recreated (collect_tokens),
         # avoiding O(N log N) sort on every invocation (~2,500 sorts saved per run).
@@ -6532,13 +6552,89 @@ class OperatorEngine:
         )
         return sens_pos, crash_mi_pos, region_pos, field_pos, burn_pos, rr_pos, fib_pos
 
+    def _pos_plan(self) -> tuple | None:
+        """select_position's enabled proposers, gated once per round (Hard Rule 57).
+
+        ``(slot, propose)`` pairs in select_position's evaluation order;
+        ``propose(data, buf_len, slots)`` returns an offset or None. Gates
+        cannot change inside a round (no exec runs in mutate()), so the
+        snapshot is exact until the next mutate() rebuilds it. None means
+        the arena or debug path: _plan_position defers to select_position.
+        """
+        f = self.f
+        arena = getattr(f, "_position_arena", None)
+        if isinstance(arena, PositionArena) and getattr(f, "_use_elo", False) and f._elo:
+            return None
+        if getattr(f, "debug", False):
+            return None
+
+        plan: list = []
+
+        # TE, then phase only when TE proposed (see select_position).
+        if f._use_transfer_entropy and f._te:
+            plan.append((_SLOT_TE, lambda d, n, s: f._get_te_weighted_position(n)))
+            plan.append(
+                (
+                    _SLOT_PHASE,
+                    lambda d, n, s: None if s[_SLOT_TE] is None else _phase_position(f, d, n),
+                )
+            )
+        if f._use_mi and f._mi:
+            mi = f._mi.weighted_position
+            plan.append((_SLOT_MI, lambda d, n, s: mi(n)))
+
+        self._side_plan(plan)
+        return tuple(plan)
+
+    def _side_plan(self, plan: list) -> None:
+        """_pos_plan's half for _side_positions' sources, same order. Split out for CCN."""
+        f = self.f
+        if f._use_sensitivity and f._sensitivity:
+            sens = f._sensitivity.get_weighted_position
+            plan.append((_SLOT_SENS, lambda d, n, s: sens(d, n)))
+        cmi = f._crash_mi
+        if cmi and cmi.total_execs >= cmi.min_observations:
+            plan.append((_SLOT_CRASH_MI, lambda d, n, s: cmi.weighted_position(n)))
+        if getattr(f, "_use_region_profile", False):
+            plan.append((_SLOT_REGION, lambda d, n, s: self._region_weighted_position(d, n)))
+        fl = getattr(f, "_format_learner", None)
+        if fl:
+            plan.append((_SLOT_FIELD, lambda d, n, s: fl.weighted_position(d, n)))
+        burn = getattr(f, "_burn_front", None)
+        if isinstance(burn, BurnFrontPositionScheduler):
+            plan.append((_SLOT_BURN, lambda d, n, s: burn.propose(d, n)))
+        rr = getattr(f, "_pos_round_robin", None)
+        if isinstance(rr, PositionRoundRobinScheduler):
+            plan.append((_SLOT_RR, lambda d, n, s: rr.propose(d, n)))
+        fib = getattr(f, "_pos_fibonacci", None)
+        if isinstance(fib, PositionFibonacciScheduler):
+            plan.append((_SLOT_FIB, lambda d, n, s: fib.propose(d, n)))
+
+    def _plan_position(self, plan: tuple | None, buf: bytearray, data: bytes) -> int:
+        """select_position through a prebuilt plan: same draws, no per-call gating."""
+        if plan is None:
+            return self.select_position(buf, data)
+        if not buf:
+            return 0
+        n = len(buf)
+        rng = self.ctx._rng
+        if not plan:
+            return rng.randint(0, n - 1)
+
+        # Evaluate in plan order, choose in candidate-slot order.
+        slots: list = [None] * _POS_SLOT_COUNT
+        for slot, propose in plan:
+            slots[slot] = propose(data, n, slots)
+        candidates = [p for p in slots if p is not None]
+        return rng.choice(candidates) if candidates else rng.randint(0, n - 1)
+
     # ── Main mutation orchestrator ─────────────────────────────────────
 
     def _apply_op_once(self, op: str, buf: bytearray, data: bytes, track_effect: bool) -> bytearray:
         f = self.f
         f._last_ops_used.append(op)
 
-        byte_idx = self.select_position(buf, data)
+        byte_idx = self._plan_position(self._round_pos_plan, buf, data)
         # A delocalised operator never read this position, so publishing
         # it as the mutation offset fabricates the region attribution the
         # liveness estimator is built on. See _DELOCALISED_OPS.
@@ -6731,6 +6827,7 @@ class OperatorEngine:
         # sub-mutations) shares this snapshot rather than each rebuilding
         # its own.
         self._ctx_cache = MutationContext.from_fuzzer(f)
+        self._round_pos_plan = self._pos_plan()
 
         # Deterministic stage: drains before any bandit-driven mutation for
         # a favored, not-yet-determinized seed (see maybe_deterministic_mutation
