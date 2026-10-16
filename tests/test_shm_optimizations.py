@@ -14,8 +14,8 @@ class TestTemporalTracking:
         et.record_edge_lifetimes({1, 2, 3}, exec_count=10)
         et.record_edge_lifetimes({1, 2, 3, 4}, exec_count=20)
 
-        assert et._edge_first_seen[1] == 10
-        assert et._edge_first_seen[4] == 20
+        assert et._edge_first_exec[1] == 10
+        assert et._edge_first_exec[4] == 20
         assert et._edge_last_seen[1] == 20
         assert et._edge_last_seen[4] == 20
 

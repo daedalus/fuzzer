@@ -79,7 +79,7 @@ def test_fold_matches_per_exec_oracle(cov, n_execs, rerun_every):
     assert et.edge_lifetime_stats() == oracle.edge_lifetime_stats()
     et._sync_last_seen()
     assert et._edge_last_seen == oracle._edge_last_seen
-    assert et._edge_first_seen == oracle._edge_first_seen
+    assert et._edge_first_exec == oracle._edge_first_exec
 
 
 def test_attached_path_skips_per_edge_last_seen_writes(cov):
@@ -103,7 +103,7 @@ def test_resize_folds_before_discard(cov):
     _run(cov, et, None, 30)
     cov.resize(_SIZE * 2)
     assert et._edge_last_seen
-    assert set(et._edge_last_seen) == set(et._edge_first_seen)
+    assert set(et._edge_last_seen) == set(et._edge_first_exec)
 
 
 def test_phantom_ids_excluded(cov):
