@@ -47,6 +47,8 @@ import zlib
 from collections.abc import Callable
 from typing import Any
 
+import numpy as np
+
 from fuzzer_tool.core.berlekamp_massey import (
     compute_checksum as _compute_checksum,
 )
@@ -389,19 +391,40 @@ class ChecksumLearner:
         if not cmplog or not cmplog.pairs:
             return pairs
 
-        for op_a, op_b in cmplog.pairs:
-            len_a = len(op_a)
-            len_b = len(op_b)
-            if len_a == 4 and len_b == 4:
-                # The checksum operand appears AFTER the data operand in
-                # the input buffer; the earlier one is the "data".
-                pos_a = input_data.find(op_a)
-                pos_b = input_data.find(op_b)
-                if pos_a >= 0 and pos_b >= 0 and pos_a != pos_b:
-                    data_op = op_a if pos_a < pos_b else op_b
-                    checksum_op = op_b if pos_a < pos_b else op_a
-                    pairs.append((data_op, int.from_bytes(checksum_op, "big")))
+        idx, ops_a, ops_b = self._quad_operands(cmplog.pairs)
+        if not idx or len(input_data) < 4:
+            return pairs
+
+        # First offset of every operand in one pass (== bytes.find), instead
+        # of two finds per pair over the whole input (6 ms per collect at
+        # 2 KB x 5,000 pairs, 157 ms at 64 KB).
+        pos_a, pos_b = _first_offsets(input_data, ops_a, ops_b)
+        hit = np.flatnonzero((pos_a >= 0) & (pos_b >= 0) & (pos_a != pos_b))
+
+        # The checksum operand appears AFTER the data operand in the input
+        # buffer; the earlier one is the "data".
+        pool = cmplog.pairs
+        for h in hit.tolist():
+            op_a, op_b = pool[idx[h]]
+            data_op, checksum_op = (op_a, op_b) if pos_a[h] < pos_b[h] else (op_b, op_a)
+            pairs.append((data_op, int.from_bytes(checksum_op, "big")))
         return pairs
+
+    def _quad_operands(self, pool: list) -> tuple[list[int], np.ndarray, np.ndarray]:
+        """4-byte pairs of *pool* as big-endian uint32 arrays, cached per pool.
+
+        The pool only grows in place (extend) or is replaced (eviction), so
+        (object, length) identifies it; holding the list keeps its id unique.
+        """
+        cache = getattr(self, "_quad_cache", None)
+        if cache is not None and cache[0] is pool and cache[1] == len(pool):
+            return cache[2], cache[3], cache[4]
+
+        idx = [i for i, (a, b) in enumerate(pool) if len(a) == 4 and len(b) == 4]
+        ops_a = np.frombuffer(b"".join(pool[i][0] for i in idx), dtype=">u4")
+        ops_b = np.frombuffer(b"".join(pool[i][1] for i in idx), dtype=">u4")
+        self._quad_cache = (pool, len(pool), idx, ops_a, ops_b)
+        return idx, ops_a, ops_b
 
     # ------------------------------------------------------------------
     # Recovery
@@ -697,3 +720,20 @@ class ChecksumLearner:
                     reflect_out=False,
                 )
         return learner
+
+
+def _first_offsets(data: bytes, *operands: np.ndarray) -> tuple[np.ndarray, ...]:
+    """First offset of each uint32 operand among *data*'s 4-byte windows; -1 if absent.
+
+    Windows as big-endian uint32 (b"ABCD" -> 0x41424344); np.unique's
+    return_index is each value's first window, i.e. bytes.find's answer.
+    """
+    raw = np.frombuffer(data, dtype=np.uint8).astype(np.uint32)
+    keys = raw[:-3] << 24 | raw[1:-2] << 16 | raw[2:-1] << 8 | raw[3:]
+    uniq, first = np.unique(keys, return_index=True)
+
+    out = []
+    for ops in operands:
+        j = np.minimum(np.searchsorted(uniq, ops), len(uniq) - 1)
+        out.append(np.where(uniq[j] == ops, first[j], -1))
+    return tuple(out)

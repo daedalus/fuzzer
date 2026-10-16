@@ -28,6 +28,8 @@ rather than kept as dead code.
 
 import logging
 
+import numpy as np
+
 log = logging.getLogger(__name__)
 
 
@@ -165,22 +167,21 @@ class SkipDetector:
 
     def _count_new_bits(self, seed_trace_mini: bytearray) -> int:
         """Bits set in the seed trace not yet explored by deterministic stages."""
-        new_det_bits = 0
-        for i in range(min(len(seed_trace_mini) * 8, self.map_size)):
-            byte_idx = i >> 3
-            bit_idx = i & 7
-            if (
-                byte_idx < len(seed_trace_mini)
-                and (seed_trace_mini[byte_idx] >> bit_idx) & 1
-                and not self.virgin_det_bits[i]
-            ):
-                new_det_bits += 1
-        return new_det_bits
+        bits, virgin = self._bit_views(seed_trace_mini)
+        return int(np.count_nonzero(bits & (virgin == 0)))
 
     def _mark_det_bits(self, seed_trace_mini: bytearray) -> None:
         """Mark the seed's trace bits as deterministically explored."""
-        for i in range(min(len(seed_trace_mini) * 8, self.map_size)):
-            byte_idx = i >> 3
-            bit_idx = i & 7
-            if byte_idx < len(seed_trace_mini) and (seed_trace_mini[byte_idx] >> bit_idx) & 1:
-                self.virgin_det_bits[i] = 1
+        bits, virgin = self._bit_views(seed_trace_mini)
+        virgin[bits.view(np.bool_)] = 1
+
+    def _bit_views(self, seed_trace_mini: bytearray) -> tuple[np.ndarray, np.ndarray]:
+        """Trace bits (bit i = byte i>>3, bit i&7) and a writable virgin view.
+
+        Vectorized: the per-bit Python loops walked up to map_size (524,288)
+        bits per call. The virgin view writes through to the bytearray.
+        """
+        n = min(len(seed_trace_mini) * 8, self.map_size)
+        bits = np.unpackbits(np.frombuffer(seed_trace_mini, np.uint8), bitorder="little")[:n]
+        virgin = np.frombuffer(self.virgin_det_bits, np.uint8)[:n]
+        return bits, virgin
