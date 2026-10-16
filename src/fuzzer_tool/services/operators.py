@@ -3523,12 +3523,18 @@ class OperatorEngine:
             )
 
     def _op_gradient_descent(self, buf, _byte_idx, _data):
-        from fuzzer_tool.core.gradient_descent import gradient_descent
+        from fuzzer_tool.core.gradient_descent import gradient_descent, pick_objective
 
         if not (buf and self.ctx.cmplog_pairs):
             return
         pair = self.ctx._rng.choice(self.ctx.cmplog_pairs)
-        result = gradient_descent(bytes(buf), pair, max_len=self.ctx.max_len, rng=self.ctx._rng)
+
+        # A PC marks a trace-cmp integer compare: score by branch distance.
+        cmplog = self.ctx.cmplog
+        objective = pick_objective(cmplog.pair_pc(*pair) if cmplog else None)
+        result = gradient_descent(
+            bytes(buf), pair, max_len=self.ctx.max_len, rng=self.ctx._rng, objective=objective
+        )
         if result and result != bytes(buf):
             return bytearray(result[: self.ctx.max_len])
 

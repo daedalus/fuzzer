@@ -14,6 +14,7 @@ iterating for a bounded number of epochs.
 from __future__ import annotations
 
 import logging
+from enum import Enum
 
 from fuzzer_tool.core.mutations import INTERESTING_8, INTERESTING_16, INTERESTING_32
 from fuzzer_tool.core.rand_pool import get_default_rand_pool
@@ -50,6 +51,28 @@ _STEPS = (1, -1, 2, -2, 4, -4, 8, -8, 16, -16, 32, -32, 64, -64, 128, -128)
 
 # Popcount of every byte value, for the incremental window objective.
 _POPCOUNT = bytes(bin(i).count("1") for i in range(256))
+
+# trace-cmp integer widths; numeric scoring is meaningless for other lengths.
+_INT_WIDTHS = frozenset((1, 2, 4, 8))
+# Offsets around the constant. SanitizerCoverage hides the predicate, so
+# cover all six: ==/!= flip at 0, </>= at -1/0, >/<= at 0/+1.
+_BOUNDARY = (-1, 0, 1)
+# trace-cmp logs operands little-endian; container fields are often BE.
+_ORDERS = ("little", "big")
+
+
+class Objective(Enum):
+    """What the solver minimizes."""
+
+    # Hamming distance to the operand bytes: memcmp/strcmp, unknown compares.
+    BITWISE = "bitwise"
+    # |int(window) - goal|, the branch distance: trace-cmp integer compares.
+    NUMERIC = "numeric"
+
+
+def pick_objective(pc: int | None) -> Objective:
+    """trace-cmp records carry a PC; libc byte compares do not."""
+    return Objective.BITWISE if pc is None else Objective.NUMERIC
 
 
 def _distance(a: bytes, b: bytes) -> int:
@@ -193,6 +216,7 @@ def gradient_descent(
     max_len: int = 0,
     max_epochs: int = _MAX_EPOCHS,
     rng=None,
+    objective: Objective = Objective.BITWISE,
 ) -> bytes:
     """Optimize *input_buf* to match one operand of *cmp_pair*.
 
@@ -203,6 +227,8 @@ def gradient_descent(
         max_epochs: Maximum descent epochs.
         rng: Seeded rand pool, threaded into candidate-site selection so
             a campaign replayed with the same -s takes the same path.
+        objective: NUMERIC applies to 1/2/4/8-byte operands only; other
+            widths fall back to BITWISE.
 
     Returns:
         Optimized input bytes, or the original if no improvement found.
@@ -221,6 +247,10 @@ def gradient_descent(
     buf = bytearray(input_buf[:max_len] if max_len else input_buf)
     if not buf:
         return input_buf
+
+    if objective is Objective.NUMERIC and width in _INT_WIDTHS and len(op_a) == len(op_b):
+        source = op_a if target is op_b else op_b
+        return _solve_numeric(buf, target, source, rng)
 
     candidates = _candidate_positions(bytes(buf), target, rng)
     if not candidates:
@@ -247,6 +277,75 @@ def gradient_descent(
 
     _descend_window(best, site, target, best_score, max_epochs)
     return bytes(best)
+
+
+def _solve_numeric(buf: bytearray, target: bytes, source: bytes, rng) -> bytes:
+    """Write ``goal = target + off`` into the field holding *source*.
+
+    Branch distance (Handwired's pre-ReLU ``a - b``): the compare reads an
+    input-derived operand (*source*) against *target*. The solver never
+    executes the target, so the minimizer of ``|field - goal|`` is ``goal``
+    itself; the search is over *where* the field is: exact *source* hits in
+    either byte order, else the window numerically closest to it.
+
+    Example: limit 4096, BE field 4090 -> field becomes 4095/4096/4097.
+    """
+    width = len(target)
+    if len(buf) < width:
+        return bytes(buf)
+
+    # Boundary draw first, so the draw order is fixed whatever the buffer.
+    r = rng or get_default_rand_pool()
+    goal = (int.from_bytes(target, "little") + r.choice(_BOUNDARY)) % (1 << 8 * width)
+
+    frozen = bytes(buf)
+    orders = _ORDERS[:1] if width == 1 else _ORDERS
+    hits = [(p, o) for o in orders for p in _exact_sites(frozen, _encode(source, o))]
+    if len(hits) > 1:
+        # Small values (0, 1) recur; a fixed first hit biases to the head.
+        site, order = r.choice(hits)
+    elif hits:
+        site, order = hits[0]
+    else:
+        site, order = _closest(frozen, source, orders, rng)
+
+    want = goal.to_bytes(width, order)
+    if site < 0 or frozen[site : site + width] == want:
+        return frozen
+
+    buf[site : site + width] = want
+    return bytes(buf)
+
+
+def _encode(source: bytes, order: str) -> bytes:
+    """*source* is logged little-endian; re-encode it in *order*."""
+    return source if order == "little" else source[::-1]
+
+
+def _exact_sites(buf: bytes, probe: bytes) -> list[int]:
+    """Every offset where *probe* occurs (overlapping)."""
+    sites = []
+    pos = buf.find(probe)
+    while pos >= 0:
+        sites.append(pos)
+        pos = buf.find(probe, pos + 1)
+    return sites
+
+
+def _closest(buf: bytes, source: bytes, orders: tuple, rng) -> tuple[int, str]:
+    """(site, order) of the candidate window numerically closest to *source*."""
+    width = len(source)
+    last = len(buf) - width
+    value = int.from_bytes(source, "little")
+    best = (1 << 8 * width, -1, orders[0])
+    for order in orders:
+        for p in _candidate_positions(buf, _encode(source, order), rng):
+            if p > last:
+                continue
+            dist = abs(int.from_bytes(buf[p : p + width], order) - value)
+            if dist < best[0]:
+                best = (dist, p, order)
+    return best[1], best[2]
 
 
 def _descend_window(
