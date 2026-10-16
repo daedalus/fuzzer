@@ -1965,6 +1965,11 @@ class StatsReporter:
             avg_len = corpus_bytes // len(f.corpus)
             parts.append(f"avg-len:{avg_len}")
 
+        # Seeds needed to cover every edge (quick_cover upper bound).
+        cover = getattr(f, "_min_cover_size", -1)
+        if cover >= 0:
+            parts.append(f"min-cover:{cover}")
+
         if f._crash_replays:
             done = [v for v in f._crash_replays.values() if len(v) >= f.replay_n]
             if done:
@@ -2141,6 +2146,7 @@ class StatsReporter:
                 rec["edges"] = int(getattr(f.shm_cov, "cumulative_edges", 0))
                 rec["dropped_edges"] = int(f.shm_cov.read_dropped_edges())
             rec["novel_inputs"] = getattr(f, "_novel_input_count", 0)
+            rec["min_cover"] = getattr(f, "_min_cover_size", -1)
             if f._cmplog is not None:
                 rec["cmplog_tokens"] = len(f._cmplog.tokens)
                 rec["cmplog_pairs"] = len(f._cmplog.pairs)

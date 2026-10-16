@@ -158,6 +158,7 @@ from fuzzer_tool.core.schedules import (
 )
 from fuzzer_tool.core.secretary import DEFAULT_EXPLORATION_FRAC, SecretaryStopping
 from fuzzer_tool.core.seed_quality import BayesianSeedQuality
+from fuzzer_tool.core.set_cover import quick_cover
 from fuzzer_tool.core.shapley import ShapleyAttribution
 from fuzzer_tool.core.shim_health import (
     SELF_TEST_INPUT,
@@ -478,6 +479,8 @@ ADAPTIVE_TIMEOUT_FLOOR = 0.005
 # but not without bound, or one pathological input drags the deadline up
 # and every later hang costs that much wall clock.
 ADAPTIVE_TIMEOUT_MAX_GROWTH = 10.0
+# Min-cover stat: wait COVER_BUDGET x last solve time between solves (<= ~1/COVER_BUDGET overhead).
+COVER_BUDGET = 50
 MAX_CRASH_SIGS = 10_000  # max unique crash signatures before pruning old entries
 KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
@@ -2662,6 +2665,12 @@ class Fuzzer:
         self._hf_entropy_penalties: int = 0
         self._hf_timeout_penalties: int = 0
         self._favored: set[str] = set()
+
+        # Live min-cover stat (_refresh_cover); -1 = not computed yet.
+        self._min_cover_size = -1
+        self._cover_version = -1
+        self._cover_cost = 0.0
+        self._cover_at = 0.0
 
         # self._exec_time_tracker / self._exec_time_anomaly: constructed by
         # analyzer_registry.wire_all() below.
@@ -6508,6 +6517,25 @@ class Fuzzer:
             covered |= self._edge_tracker.seed_edges[k]
         self._favored = favored
 
+    def _refresh_cover(self, now: float) -> None:
+        """Recompute the min-cover seed count when coverage changed.
+
+        Skipped while the edge tracker's owner version is unchanged
+        (plateaus cost nothing) and within COVER_BUDGET x last solve time
+        of the previous solve, bounding overhead on large corpora.
+        """
+        et = self._edge_tracker
+        if et.owner_version == self._cover_version:
+            return
+        if now - self._cover_at < COVER_BUDGET * self._cover_cost:
+            return
+
+        t0 = time.perf_counter()
+        self._min_cover_size = len(quick_cover(et.seed_edges))
+        self._cover_cost = time.perf_counter() - t0
+        self._cover_version = et.owner_version
+        self._cover_at = now
+
     def _maybe_retune_timeout(self) -> None:
         """Feed ``suggested_timeout()`` back into the live timeout.
 
@@ -9756,6 +9784,7 @@ class Fuzzer:
                     # Update favored set / top_rated cull queue every interval
                     if self._edge_tracker.seed_edges:
                         self._cull_queue()
+                        self._refresh_cover(clock_of(self).time())
                     # Sample Shannon entropy for rate-of-change tracking
                     if self._edge_tracker._global_edge_hits:
                         sh = self._edge_tracker.shannon_entropy_global()
