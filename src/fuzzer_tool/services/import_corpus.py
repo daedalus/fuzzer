@@ -11,7 +11,7 @@ import string
 import sys
 from pathlib import Path
 
-from fuzzer_tool.adapters.filesystem import hash_data
+from fuzzer_tool.adapters.filesystem import free_slot, hash_data
 from fuzzer_tool.core.misra_gries import MisraGries
 
 # Misra–Gries counters per returned token: 64x kept 198-200 of the exact
@@ -33,23 +33,34 @@ def _write_seed(dest_corpus: Path, data: bytes, h: str) -> Path:
     """
     sub = dest_corpus / "seeds" / h[:2]
     sub.mkdir(parents=True, exist_ok=True)
-    dest = sub / f"id_{h}"
+    dest = free_slot(sub / f"id_{h}", data)
     dest.write_bytes(data)
     return dest
 
 
-def _existing_hashes(dest_corpus: Path) -> set[str]:
-    """Hash every seed already stored in *dest_corpus* (seeds/ + legacy root)."""
-    seen: set[str] = set()
+def _existing_hashes(dest_corpus: Path) -> dict[str, list[Path]]:
+    """Map hash -> files of every seed already in *dest_corpus* (seeds/ + legacy root)."""
+    seen: dict[str, list[Path]] = {}
     if not dest_corpus.is_dir():
         return seen
     for f in dest_corpus.rglob("id_*"):
         if f.is_file():
             try:
-                seen.add(hash_data(f.read_bytes()))
+                seen.setdefault(hash_data(f.read_bytes()), []).append(f)
             except OSError:
                 continue
     return seen
+
+
+def _admit(dest_corpus: Path, data: bytes, seen: dict[str, list[Path]]) -> bool:
+    """Write *data* unless its bytes are held; a forged hash twin is kept too."""
+    h = hash_data(data)
+    held = seen.setdefault(h, [])
+    if any(p.read_bytes() == data for p in held):
+        return False
+
+    held.append(_write_seed(dest_corpus, data, h))
+    return True
 
 
 def import_from_afl(
@@ -83,11 +94,7 @@ def import_from_afl(
         for f in sorted(queue_dir.iterdir()):
             if not f.is_file():
                 continue
-            data = f.read_bytes()
-            h = hash_data(data)
-            if h not in seen_hashes:
-                seen_hashes.add(h)
-                _write_seed(corpus_out, data, h)
+            if _admit(corpus_out, f.read_bytes(), seen_hashes):
                 seeds_imported += 1
 
     # Import from crashes/
@@ -100,14 +107,14 @@ def import_from_afl(
                 continue
             data = f.read_bytes()
             h = hash_data(data)
-            dest = crash_out / f"imported_{h}.bin"
+            dest = free_slot(crash_out / f"imported_{h}.bin", data)
             if not dest.exists():
                 dest.write_bytes(data)
                 crashes_imported += 1
                 # Copy metadata if exists
                 meta = f.with_suffix(".txt")
                 if meta.exists():
-                    shutil.copy2(meta, crash_out / f"imported_{h}.txt")
+                    shutil.copy2(meta, dest.with_suffix(".txt"))
 
     return seeds_imported, crashes_imported
 
@@ -138,10 +145,7 @@ def import_from_libfuzzer(corpus_dir: str, target_corpus: str) -> int:
         data = f.read_bytes()
         if not data:
             continue
-        h = hash_data(data)
-        if h not in seen_hashes:
-            seen_hashes.add(h)
-            _write_seed(dest, data, h)
+        if _admit(dest, data, seen_hashes):
             imported += 1
 
     return imported
@@ -176,10 +180,7 @@ def import_from_honggfuzz(
         data = f.read_bytes()
         if not data:
             continue
-        h = hash_data(data)
-        if h not in seen_hashes:
-            seen_hashes.add(h)
-            _write_seed(dest, data, h)
+        if _admit(dest, data, seen_hashes):
             imported += 1
 
     return imported, 0

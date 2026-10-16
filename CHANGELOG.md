@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Forged `key16` collisions no longer lose seeds** (`adapters/filesystem.py::free_slot`, `services/import_corpus.py`): XXH64 with a fixed seed has forgeable second preimages, yet load unlinked any file whose `id_<h>` name was taken and import skipped any seen hash, without comparing bytes. A distinct twin now goes to `id_<h>~1`, `~2`, ... (crashes: `imported_<h>~1.bin`). Tests: `tests/test_regression_key16_collision.py`.
+
 ### Changed
 
 - **`fuzz -n/--iterations` removed; budget with `--max-execs` only** (`cli/commands.py`): one iteration ran a whole mutation budget, so `-n` was not an exec count. `Fuzzer.run(iterations=)` stays for library callers. Tests: `tests/test_regression_no_iterations_flag.py`.

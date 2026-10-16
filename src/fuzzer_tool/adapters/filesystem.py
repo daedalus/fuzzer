@@ -394,13 +394,30 @@ def _read_full_file(f: Path, base_real: Path) -> tuple[str, bytes] | None:
 
     # Normalize filename to id_{hash} so pruning can find it.
     expected = f"id_{h}"
-    if f.name != expected:
-        dest = f.with_name(expected)
+    if f.name != expected and not f.name.startswith(expected + _SLOT_SEP):
+        dest = free_slot(f.with_name(expected), data)
         if not dest.exists():
             f.rename(dest)
         else:
-            f.unlink()  # duplicate of an already-loaded seed
+            f.unlink()  # same bytes already stored under dest
     return h, data
+
+
+# key16 is XXH64 with a fixed seed: second preimages are forgeable, so a taken
+# name does not prove equal bytes. A distinct input gets id_<h>~1, id_<h>~2, ...
+_SLOT_SEP = "~"
+
+
+def free_slot(dest: Path, data: bytes) -> Path:
+    """*dest* or its first ``~n`` sibling that is free or already holds *data*.
+
+    Example: ``id_ab`` taken by other bytes -> ``id_ab~1``; ``x.bin`` -> ``x~1.bin``.
+    """
+    slot, n = dest, 0
+    while slot.exists() and slot.read_bytes() != data:
+        n += 1
+        slot = dest.with_name(f"{dest.stem}{_SLOT_SEP}{n}{dest.suffix}")
+    return slot
 
 
 def _absorb(
