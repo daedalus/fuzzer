@@ -209,3 +209,243 @@ class TestInputBuffer:
         buf = inprocess._input_buf(kind(src))
         src[0] = 0x7F
         assert bytes(buf) == b"\x00\x01\xfe\xff"
+
+
+# ── checksum-learner cmplog pairs ───────────────────────────────────────
+
+from fuzzer_tool.core.analyzers.analyzer_checksum_learner import ChecksumLearner  # noqa: E402
+
+
+def _old_pairs(pool, data):
+    """Pre-change per-pair bytes.find loop, kept as the oracle."""
+    out = []
+    for a, b in pool:
+        if len(a) == 4 and len(b) == 4:
+            pa, pb = data.find(a), data.find(b)
+            if pa >= 0 and pb >= 0 and pa != pb:
+                out.append((a if pa < pb else b, int.from_bytes(b if pa < pb else a, "big")))
+    return out
+
+
+def _learner(pool):
+    return ChecksumLearner(SimpleNamespace(_cmplog=SimpleNamespace(pairs=pool)))
+
+
+DATA = bytes((i * 37 + (i >> 3)) & 0xFF for i in range(600)) + b"ABCDABCD" + b"\x00\x01\x02\x03"
+POOL = [
+    (DATA[10:14], DATA[100:104]),  # data before checksum
+    (DATA[200:204], DATA[50:54]),  # reversed order
+    (b"ABCD", b"BCDA"),  # repeated token: first occurrence wins
+    (b"ABCD", b"ABCD"),  # same position -> dropped
+    (DATA[0:4], b"\xde\xad\xbe\xef"),  # one side absent
+    (b"\x00\x01", DATA[5:9]),  # non-4-byte operand
+    (DATA[-4:], DATA[3:7]),  # operand at the very end
+    (DATA[596:600], DATA[597:601]),  # overlapping windows
+]
+
+
+class TestChecksumCmplogPairs:
+    def test_control_oracle_matches_itself(self):
+        assert _old_pairs(POOL, DATA) == _old_pairs(list(POOL), DATA)
+
+    def test_regression_matches_find_oracle(self):
+        assert _learner(POOL).extract_cmplog_pairs(DATA) == _old_pairs(POOL, DATA)
+
+    def test_regression_no_per_pair_find(self):
+        """Falsification: the old loop called bytes.find twice per pair."""
+
+        class NoFind(bytes):
+            def find(self, *a, **k):
+                raise AssertionError("per-pair find")
+
+        assert _learner(POOL).extract_cmplog_pairs(NoFind(DATA)) == _old_pairs(POOL, DATA)
+
+    def test_pool_growth_and_replacement_invalidate(self):
+        """Adversarial: extend (same list) and eviction (new list) both seen."""
+        pool = list(POOL[:2])
+        learner = _learner(pool)
+        assert learner.extract_cmplog_pairs(DATA) == _old_pairs(pool, DATA)
+
+        pool.extend(POOL[2:])
+        assert learner.extract_cmplog_pairs(DATA) == _old_pairs(pool, DATA)
+
+        learner.f._cmplog.pairs = list(POOL[5:7])
+        assert learner.extract_cmplog_pairs(DATA) == _old_pairs(POOL[5:7], DATA)
+
+    @pytest.mark.parametrize("data", [b"", b"abc", b"abcd"])
+    def test_short_inputs(self, data):
+        """Adversarial: fewer than two 4-byte windows."""
+        pool = [(b"abcd", b"abcd"), (b"abcd", b"zzzz")]
+        assert _learner(pool).extract_cmplog_pairs(data) == _old_pairs(pool, data)
+
+    def test_empty_pool(self):
+        assert _learner([]).extract_cmplog_pairs(DATA) == []
+
+
+# ── cmplog per-drain asserted view ──────────────────────────────────────
+
+import tracemalloc  # noqa: E402
+
+import numpy as np  # noqa: E402
+
+from fuzzer_tool.core.cmplog import _SiteCounters  # noqa: E402
+
+
+def _counters(n_sites: int) -> _SiteCounters:
+    sc = _SiteCounters(lambda _n: None)
+    sc._sites = [("cb", i) for i in range(n_sites)]
+    return sc
+
+
+def _old_last_asserted(sc, site, asserted, start=None):
+    """Pre-change dense per-site accumulation, kept as the oracle."""
+    last = dict(start or {})
+    hit = asserted > 0
+    if not hit.any():
+        return last
+    per_site = np.zeros(len(sc._sites), np.int64)
+    np.add.at(per_site, site[hit], asserted[hit])
+    ids = np.flatnonzero(per_site)
+    for key, n in zip(
+        map(sc._sites.__getitem__, ids.tolist()), per_site[ids].tolist(), strict=True
+    ):
+        last[key] = last.get(key, 0) + n
+    return last
+
+
+SITE = np.array([7, 3, 7, 0, 9, 3, 3], np.int64)
+ASSERTED = np.array([2, 0, 5, 1, 0, 4, 1], np.int64)
+
+
+class TestLastAsserted:
+    def test_control_oracle_matches_itself(self):
+        sc = _counters(16)
+        assert _old_last_asserted(sc, SITE, ASSERTED) == _old_last_asserted(sc, SITE, ASSERTED)
+
+    def test_regression_matches_dense_oracle_with_order(self):
+        """Same totals and the same insertion order (dicts are ordered)."""
+        sc = _counters(16)
+        start = {("cb", 9): 1, ("cb", 3): 2}
+        sc.last_asserted = dict(start)
+        sc._add_last_asserted(SITE, ASSERTED)
+        want = _old_last_asserted(sc, SITE, ASSERTED, start)
+        assert list(sc.last_asserted.items()) == list(want.items())
+
+    def test_regression_empty_view_bulk_insert(self):
+        """Falsification: the per-drain view starts empty; no per-site get()."""
+
+        class NoGet(dict):
+            def get(self, *a, **k):
+                raise AssertionError("per-site merge on an empty view")
+
+        sc = _counters(16)
+        sc.last_asserted = NoGet()
+        sc._add_last_asserted(SITE, ASSERTED)
+        want = _old_last_asserted(sc, SITE, ASSERTED)
+        assert list(sc.last_asserted.items()) == list(want.items())
+
+    def test_no_hits_is_noop(self):
+        """Adversarial: every count zero."""
+        sc = _counters(4)
+        sc._add_last_asserted(np.array([1, 2], np.int64), np.zeros(2, np.int64))
+        assert sc.last_asserted == {}
+
+    def test_regression_memory_independent_of_site_count(self):
+        """Falsification: the dense version zeroed len(sites) int64s per drain."""
+        sc = _counters(1_000_000)
+        site = np.array([5, 999_999, 5], np.int64)
+        asserted = np.array([1, 2, 3], np.int64)
+
+        tracemalloc.start()
+        try:
+            sc._add_last_asserted(site, asserted)
+            _, peak = tracemalloc.get_traced_memory()
+        finally:
+            tracemalloc.stop()
+
+        assert sc.last_asserted == {("cb", 5): 4, ("cb", 999_999): 2}
+        assert peak < 1_000_000  # dense: 8 MB
+
+
+# ── cmplog pool eviction ────────────────────────────────────────────────
+
+from fuzzer_tool.core.cmplog import _drop_indices  # noqa: E402
+
+POOL10 = [f"t{i}".encode() for i in range(10)]
+
+
+@pytest.mark.parametrize(
+    "victims",
+    [{0}, {0, 1, 2}, {0, 2, 5}, {9}, set(range(10)), {3, 9}],
+)
+def test_drop_indices_matches_comprehension(victims):
+    want = [t for i, t in enumerate(POOL10) if i not in victims]
+    assert _drop_indices(list(POOL10), victims) == want
+
+
+def test_regression_drop_does_not_walk_tail():
+    """Falsification: the comprehension iterated all 10k tokens per drain."""
+
+    class NoIter(list):
+        def __iter__(self):
+            raise AssertionError("walked the whole pool")
+
+    pool = NoIter(POOL10)
+    assert _drop_indices(pool, {0, 1}) == POOL10[2:]
+
+
+# ── skip-det bit counting ───────────────────────────────────────────────
+
+from fuzzer_tool.core.skipdet import SkipDetector  # noqa: E402
+
+
+def _old_count(virgin, trace, map_size):
+    n = 0
+    for i in range(min(len(trace) * 8, map_size)):
+        if i >> 3 < len(trace) and (trace[i >> 3] >> (i & 7)) & 1 and not virgin[i]:
+            n += 1
+    return n
+
+
+def _old_mark(virgin, trace, map_size):
+    for i in range(min(len(trace) * 8, map_size)):
+        if i >> 3 < len(trace) and (trace[i >> 3] >> (i & 7)) & 1:
+            virgin[i] = 1
+
+
+TRACES = [
+    bytearray(),
+    bytearray(b"\x01"),
+    bytearray(b"\xff\x00\xa5"),
+    bytearray((i * 29) & 0xFF for i in range(200)),  # longer than map/8 below
+]
+
+
+class TestSkipDetBits:
+    @pytest.mark.parametrize("map_size", [13, 64, 1024])
+    def test_regression_count_and_mark_match_loop(self, map_size):
+        sd = SkipDetector(map_size)
+        virgin = bytearray(map_size)
+        for trace in TRACES:
+            assert sd._count_new_bits(trace) == _old_count(virgin, trace, map_size)
+            sd._mark_det_bits(trace)
+            _old_mark(virgin, trace, map_size)
+            assert sd.virgin_det_bits == virgin
+            assert isinstance(sd.virgin_det_bits, bytearray)
+
+    def test_regression_no_per_bit_indexing(self):
+        """Falsification: the loops indexed virgin_det_bits once per bit (524k)."""
+
+        class NoIndex(bytearray):
+            def __getitem__(self, i):
+                raise AssertionError("per-bit index")
+
+            def __setitem__(self, i, v):
+                raise AssertionError("per-bit store")
+
+        sd = SkipDetector(64)
+        sd.virgin_det_bits = NoIndex(64)
+        trace = bytearray(b"\x0f" * 8)
+        assert sd._count_new_bits(trace) == 32
+        sd._mark_det_bits(trace)
+        assert sd._count_new_bits(trace) == 0

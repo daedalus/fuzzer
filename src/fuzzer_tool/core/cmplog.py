@@ -412,6 +412,18 @@ def _eviction_victims(pool: list, value: dict, excess: int) -> set[int]:
     return set(order[:excess])
 
 
+def _drop_indices(pool: list, victims: set[int]) -> list:
+    """*pool* without the entries at *victims* (non-empty), order kept.
+
+    Victims cluster at the front (oldest uncredited first), so only the
+    head up to the last victim is filtered in Python; the tail is one C
+    slice. The full comprehension walked 10,000 tokens per drain.
+    """
+    last = max(victims)
+    head = [x for i, x in enumerate(pool[: last + 1]) if i not in victims]
+    return head + pool[last + 1 :]
+
+
 _SiteKey = tuple[str, int]
 
 # Slot marker for a line that folds nothing (CND, malformed): not cached.
@@ -493,13 +505,20 @@ class _SiteCounters:
         hit = asserted > 0
         if not hit.any():
             return
-        per_site = np.zeros(len(self._sites), np.int64)
-        np.add.at(per_site, site[hit], asserted[hit])
-        ids = np.flatnonzero(per_site)
+
+        # Sum per distinct hit site, ascending id (the dense version's order),
+        # sized by the hits: a zeroed len(sites) array per drain was 34% of fold.
+        ids, inv = np.unique(site[hit], return_inverse=True)
+        per_site = np.zeros(len(ids), np.int64)
+        np.add.at(per_site, inv, asserted[hit])
+
         last = self.last_asserted
-        for key, n in zip(
-            map(self._sites.__getitem__, ids.tolist()), per_site[ids].tolist(), strict=True
-        ):
+        keys = map(self._sites.__getitem__, ids.tolist())
+        if not last:
+            # collect_counts empties the view per drain: one C-level insert.
+            last.update(zip(keys, per_site.tolist(), strict=True))
+            return
+        for key, n in zip(keys, per_site.tolist(), strict=True):
             last[key] = last.get(key, 0) + n
 
     def _parse(self, line: str) -> int:
@@ -1410,7 +1429,7 @@ class CmplogCollector:
             self._token_set.discard(t)
             self._token_value.pop(t, None)
             self.evicted_token_count += 1
-        self.tokens = [t for i, t in enumerate(self.tokens) if i not in victims]
+        self.tokens = _drop_indices(self.tokens, victims)
 
     def _evict_pairs(self) -> None:
         """Trim the pair pool back to its cap. See _evict_tokens for why."""
@@ -1432,7 +1451,7 @@ class CmplogCollector:
             self._pair_pc.pop(p, None)
             self.hash_candidates.discard(p)
             self.evicted_pair_count += 1
-        self.pairs = [p for i, p in enumerate(self.pairs) if i not in victims]
+        self.pairs = _drop_indices(self.pairs, victims)
         if self._pending_redqueen:
             # Same reasoning as the companion maps above: a queued pair the
             # collector no longer holds is an offer the scan would solve
