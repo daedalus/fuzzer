@@ -436,6 +436,15 @@ const uint32_t __afl_ctx_relative_capable = 1;
 __attribute__((visibility("default"), used))
 const uint32_t __afl_edge_ids_v2 = 2;
 
+/* Presence-only: clang trace-pc ids are mixed (scheme 3; raw `key >> 1`
+ * before). Clang-only because gcc's were already mixed. A guard build carries
+ * it too but has no trace-pc call sites, so elf.detect_edge_id_scheme keeps
+ * it at 2. */
+#if defined(__clang__)
+__attribute__((visibility("default"), used))
+const uint32_t __afl_tracepc_ids_mixed = 3;
+#endif
+
 /* Crash-handler scope marker. Present means the crash handler only jumps
  * inside __afl_guarded_call and hands every other signal back to its
  * previous owner, SIGPIPE is not hooked, and __afl_shim_health() exists.
@@ -2165,21 +2174,32 @@ void __sanitizer_cov_trace_pc_indir(uintptr_t callee) {
  * Independent of the AFLGo distance channel: gcc has no trace-pc-guard, so
  * trace-pc is how a gcc build gets automatic edge coverage at all, and it must
  * keep working under -D__AFL_DISTANCE_MODE=0 (distance only adds the table
- * probe below). Under clang the edge id stays `key >> 1`, bit-identical to
- * what ngram/distance builds produced before this section was un-gated.
+ * probe below).
  *
- * Non-clang ids are mixed (same splitmix finalizer the guard ids go through)
- * and masked to __AFL_TRACEPC_BITS. The raw key is a sparse code offset whose
- * low bits are shared by neighbouring blocks, so prev ^ cur would alias. The
- * mask is private to this callback and never touches __afl_loc_mask, so
- * hand-written __afl_map_edge ids in the same binary keep their width. */
+ * Ids are mixed to __AFL_TRACEPC_BITS. The raw key is a sparse code offset
+ * whose low bits are shared by neighbouring blocks, so prev ^ cur aliases:
+ * clang fed `key >> 1` raw until scheme 3 and merged ~2% of edges (2.3% on
+ * tests/test_regression_tracepc_alias.py). The width is private to this
+ * callback and never touches __afl_loc_mask, so hand-written __afl_map_edge
+ * ids in the same binary keep their width.
+ *
+ *   clang  Fibonacci hash, top 24 bits: one multiply (~1.1 ns per callback
+ *          over raw; splitmix measured the same). Full dense width: its
+ *          trace-pc builds (distance, ngram) are the large targets, and the
+ *          block count is unknown here.
+ *   gcc    splitmix & 20 bits, unchanged, so state saved under it stays valid. */
 #ifndef __AFL_TRACEPC_BITS
-#define __AFL_TRACEPC_BITS 20
+#  if defined(__clang__)
+#    define __AFL_TRACEPC_BITS 24
+#  else
+#    define __AFL_TRACEPC_BITS 20
+#  endif
 #endif
 #if __AFL_TRACEPC_BITS > 24 || __AFL_TRACEPC_BITS < 8
 #error "__AFL_TRACEPC_BITS must be in [8, 24] (see VIRGIN_DENSE_MAX)"
 #endif
 #define __AFL_TRACEPC_SALT 0x3c6ef372fe94f82bULL
+#define __AFL_TRACEPC_GOLDEN 0x9E3779B97F4A7C15ULL  /* 2^64 / phi, odd */
 
 static uint64_t   __afl_base = 0;           /* dladdr-derived object base */
 
@@ -2209,13 +2229,13 @@ void __sanitizer_cov_trace_pc(void) {
     uint64_t key = __afl_pc_key(pc);
 
 #if defined(__clang__)
-    /* Edge coverage: PC-based (prev_loc ^ cur_loc, same sparse table). */
-    __afl_map_loc((uint32_t)(key >> 1));
+    /* Fibonacci hash, top bits: one multiply spreads neighbouring keys. */
+    uint32_t v = (uint32_t)((key * __AFL_TRACEPC_GOLDEN) >> (64 - __AFL_TRACEPC_BITS));
 #else
     uint32_t v = __afl_guard_mix(key ^ __AFL_TRACEPC_SALT) &
                  (uint32_t)((1ULL << __AFL_TRACEPC_BITS) - 1);
-    __afl_map_loc(v ? v : 1);
 #endif
+    __afl_map_loc(v ? v : 1);
 #if __AFL_DISTANCE_MODE
     __afl_probe_distance(key);
 #endif
@@ -2253,6 +2273,7 @@ struct __afl_dist_entry {
 } __attribute__((packed));
 
 static uint32_t  *__afl_dist_count = NULL;  /* entries + count at segment head */
+static uint32_t   __afl_dist_mask = 0;      /* capacity - 1; capacity is a power of two */
 static struct __afl_dist_entry *__afl_dist_table = NULL;
 static uint64_t   __afl_dist_sum = 0;
 static uint64_t   __afl_dist_hits = 0;
@@ -2303,6 +2324,18 @@ __AFL_GCC_NO_COV static void __afl_map_node_shm(void) {
 __AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
     void *p = __afl_attach_sized("__AFL_DIST_SHM_ID", sizeof(struct __afl_dist_entry));
     if (!p) return;
+
+    /* The probe masks instead of dividing (two divisions per block, measured
+     * masking saved 1.5-5.7 ns per probe); DistanceTableShm always writes a
+     * power of two. Cached here, so a later header write cannot widen the loop. */
+    uint32_t cap = *(uint32_t *)p;
+    if (cap & (cap - 1)) {
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        __afl_dist_table = NULL;  /* no stale table from an earlier attach */
+        return;
+    }
+    __afl_dist_mask = cap - 1;
     __afl_dist_count = (uint32_t *)p;
     __afl_dist_table = (struct __afl_dist_entry *)((uint8_t *)p + 4);
 }
@@ -2315,11 +2348,10 @@ __AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
  * for calls to whichever of the two symbols the build actually calls. */
 __AFL_NO_COV static void __afl_probe_distance(uint64_t key) {
     if (!__afl_dist_table || !__afl_dist_count) return;
-    uint32_t size = *__afl_dist_count;
-    if (size == 0) return;
-    uint32_t pos = (uint32_t)(key % size);
-    for (uint32_t i = 0; i < size; i++) {
-        uint32_t idx = (pos + i) % size;
+    uint32_t mask = __afl_dist_mask;
+    uint32_t pos = (uint32_t)key & mask;
+    for (uint32_t i = 0; i <= mask; i++) {
+        uint32_t idx = (pos + i) & mask;
         uint64_t k = __afl_dist_table[idx].key;
         if (k == 0) break;  /* empty slot — no distance for this block */
         if (k == key) {

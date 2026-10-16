@@ -74,4 +74,7 @@ suppress = [
     # references on get_default_rand_pool's return type (RandPool is defined
     # above the function, so the quotes were redundant). No runtime change.
     "src/fuzzer_tool/core/rand_pool.py:get_default_rand_pool",
+    # Renamed to test_clang_trace_pc_edge_ids_depend_on_input: clang trace-pc
+    # ids are mixed since edge-id scheme 3, so the old name stated a falsehood.
+    "tests/test_gcc_trace_pc.py:TestClangUnchanged.test_clang_trace_pc_edge_ids_are_unmixed",
 ]
