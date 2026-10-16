@@ -636,6 +636,7 @@ class StatsReporter:
                 f" {'[STALLED]' if bayes['p_stalled'] > 0.5 else ''}"
             )
         self._print_summary_zipf(f)
+        self._print_summary_edge_stats(f)
         self._print_summary_confirm(f)
 
     def _print_summary_zipf(self, f) -> None:
@@ -650,6 +651,38 @@ class StatsReporter:
         if heaps is not None:
             print(
                 f"  Heaps:             beta={heaps.beta:.2f}, 2x execs -> +{heaps.doubling_gain:.1%} edges"
+            )
+
+    def _print_summary_edge_stats(self, f) -> None:
+        """Hit concentration, plateau, rarefied half corpus, seed resample."""
+        et = f._edge_tracker
+        prof = et.hit_profile()
+        if prof is None:
+            return
+        share = " / ".join(f"top{k} {v:.0%}" for k, v in prof.top_share.items())
+        print(f"  Hit share:         {share} (median {prof.quantiles[50]:.0f} hits)")
+
+        # Only a slowdown is a plateau; a faster tail is a breakthrough.
+        pl = et.coverage_plateau()
+        if pl is not None and pl.tail_rate < pl.head_rate:
+            print(
+                f"  Plateau:           from exec {pl.exec_at:,}: {pl.head_rate:.2f} -> "
+                f"{pl.tail_rate:.2f} edges/kexec (+{pl.tail_edges} since)"
+            )
+
+        # Half the seeds already holding ~all edges means the corpus is saturated.
+        m = len(et.seed_edges)
+        full = et.rarefied_edges(m)
+        if m >= 2 and full > 0:
+            half = et.rarefied_edges(m // 2)
+            print(
+                f"  Half corpus:       {half / full:.0%} of edges ({m // 2} of {m} seeds, rarefied)"
+            )
+
+        ci = et.seed_robustness(f._rng)
+        if ci is not None:
+            print(
+                f"  Seed resample:     {ci[0] * 100:.0f}-{ci[1]:.0%} of edges survive (95% CI, bootstrap)"
             )
 
     def _print_summary_gravity(self, f) -> None:

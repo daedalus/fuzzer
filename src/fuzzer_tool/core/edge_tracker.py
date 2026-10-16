@@ -47,6 +47,7 @@ _COOCCUR_EDGE_CAP = 200
 _COOCCUR_MIN_JACCARD = 0.1
 CORRELATION_MATRIX_MAX = 10_000  # max edge-pair entries in branch correlation
 COVERAGE_TIMELINE_MAX = 1_000  # max snapshots in coverage timeline
+BOOT_NNZ_BUDGET = 500_000  # seed-edge incidences; bootstrap costs resamples x this
 # MinHash band hashing reads the array('Q') buffer directly when native order
 # already matches the little-endian struct packing it replaces.
 _LITTLE_ENDIAN = sys.byteorder == "little"
@@ -91,6 +92,7 @@ try:
 except ImportError:
     _HAS_NUMPY = False
 
+from fuzzer_tool.core import edge_stats  # noqa: E402
 from fuzzer_tool.core.count_class import classify_counts  # noqa: E402
 from fuzzer_tool.core.elf import (  # noqa: E402
     MAP_SIZE_DEFAULT,
@@ -3324,6 +3326,28 @@ class EdgeTracker:
     def heaps_estimate(self) -> HeapsFit | None:
         """Heaps' law fit of the coverage timeline, D(N) = k * N^beta."""
         return fit_heaps(self._coverage_execs, self._coverage_edges)
+
+    def hit_profile(self) -> edge_stats.HitProfile | None:
+        """Hit concentration across edges (see core/edge_stats.py)."""
+        return edge_stats.hit_profile(self._global_edge_hits.values())
+
+    def coverage_plateau(self) -> edge_stats.Plateau | None:
+        """Two-segment break of the coverage timeline."""
+        return edge_stats.plateau(
+            list(zip(self._coverage_execs, self._coverage_edges, strict=False))
+        )
+
+    def rarefied_edges(self, seeds: int) -> float:
+        """Expected edges covered by *seeds* random corpus seeds."""
+        owners = (self._edge_owner_count or {}).values()
+        return float(edge_stats.rarefy(owners, len(self.seed_edges), [seeds])[0])
+
+    def seed_robustness(self, rng, resamples: int = edge_stats.BOOT_RESAMPLES):
+        """95% CI of the edge fraction a seed resample keeps; None over budget."""
+        incidence = list(self.seed_edges.values())
+        if sum(map(len, incidence)) > BOOT_NNZ_BUDGET:
+            return None
+        return edge_stats.boot_ci(incidence, edge_stats.kept_fraction, resamples, rng)
 
     def edge_rarity_stats(self) -> dict:
         """Compute per-edge rarity statistics, in units of *seeds*.

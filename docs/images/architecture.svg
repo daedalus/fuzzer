@@ -268,16 +268,17 @@
 <!-- cov -->
 <g id="node13" class="node">
 <title>cov</title>
-<path fill="#c6dcea" stroke="transparent" stroke-width="0" d="M677,-351C677,-351 331,-351 331,-351 325,-351 319,-345 319,-339 319,-339 319,-314 319,-314 319,-308 325,-302 331,-302 331,-302 677,-302 677,-302 683,-302 689,-308 689,-314 689,-314 689,-339 689,-339 689,-345 683,-351 677,-351"/>
-<text text-anchor="start" x="331" y="-335" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">adapters/shm.py &#160;→ &#160;core/edge_tracker.py</text>
-<text text-anchor="start" x="331" y="-324" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">SHM edge hash table · hit buckets · per&#45;edge max counts (PerfFuzz)</text>
-<text text-anchor="start" x="331" y="-313" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">edge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first&#45;seen</text>
+<path fill="#c6dcea" stroke="transparent" stroke-width="0" d="M677,-356.5C677,-356.5 331,-356.5 331,-356.5 325,-356.5 319,-350.5 319,-344.5 319,-344.5 319,-308.5 319,-308.5 319,-302.5 325,-296.5 331,-296.5 331,-296.5 677,-296.5 677,-296.5 683,-296.5 689,-302.5 689,-308.5 689,-308.5 689,-344.5 689,-344.5 689,-350.5 683,-356.5 677,-356.5"/>
+<text text-anchor="start" x="331" y="-340.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">adapters/shm.py &#160;→ &#160;core/edge_tracker.py</text>
+<text text-anchor="start" x="331" y="-329.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">SHM edge hash table · hit buckets · per&#45;edge max counts (PerfFuzz)</text>
+<text text-anchor="start" x="331" y="-318.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">edge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first&#45;seen</text>
+<text text-anchor="start" x="331" y="-307.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap</text>
 </g>
 <!-- target&#45;&gt;cov -->
 <g id="edge6" class="edge">
 <title>target&#45;&gt;cov</title>
-<path fill="none" stroke="#3f4a58" stroke-width="1.8" d="M2052.34,-454.4C2046.92,-451.17 2040.97,-448.25 2035,-446.5 1974.97,-428.88 971.01,-440.8 909,-432.5 792.23,-416.87 660.86,-378.9 580.25,-353.17"/>
-<polygon fill="#3f4a58" stroke="#3f4a58" stroke-width="1.8" points="580.78,-350.84 573.58,-351.03 579.33,-355.37 580.78,-350.84"/>
+<path fill="none" stroke="#3f4a58" stroke-width="1.8" d="M2052.34,-454.4C2046.92,-451.17 2040.97,-448.25 2035,-446.5 1974.97,-428.88 971.01,-440.8 909,-432.5 800.28,-417.95 678.91,-384.03 597.63,-358.66"/>
+<polygon fill="#3f4a58" stroke="#3f4a58" stroke-width="1.8" points="598.08,-356.3 590.88,-356.54 596.65,-360.84 598.08,-356.3"/>
 <text text-anchor="middle" x="927" y="-425.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;bitmap</text>
 </g>
 <!-- cmplog -->
@@ -317,7 +318,7 @@
 <!-- cov&#45;&gt;picker -->
 <g id="edge30" class="edge">
 <title>cov&#45;&gt;picker</title>
-<path fill="none" stroke="#2f7d5a" stroke-width="1.6" d="M579.93,-351.07C667.06,-376.83 814.74,-416.55 945,-432.5 964.58,-434.9 2351.12,-432.49 2365,-446.5 2419.38,-501.41 2377.47,-746.41 2314,-790.5 2295.24,-803.53 1925.66,-801.62 1903,-804.5 1889.1,-806.27 1874.72,-808.57 1860.37,-811.19"/>
+<path fill="none" stroke="#2f7d5a" stroke-width="1.6" d="M598.8,-356.59C687.35,-382.2 823.72,-417.65 945,-432.5 964.58,-434.9 2351.12,-432.49 2365,-446.5 2419.38,-501.41 2377.47,-746.41 2314,-790.5 2295.24,-803.53 1925.66,-801.62 1903,-804.5 1889.1,-806.27 1874.72,-808.57 1860.37,-811.19"/>
 <polygon fill="#2f7d5a" stroke="#2f7d5a" stroke-width="1.6" points="1859.59,-808.91 1853.34,-812.5 1860.46,-813.59 1859.59,-808.91"/>
 <text text-anchor="middle" x="2423" y="-574.7" font-family="Helvetica,sans-Serif" font-size="8.50" fill="#2f7d5a">rarity · Chao2 &#160;</text>
 </g>
@@ -334,8 +335,8 @@
 <!-- cov&#45;&gt;infoth -->
 <g id="edge20" class="edge">
 <title>cov&#45;&gt;infoth</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M476.97,-301.81C448.81,-277.13 404.23,-238.06 370.8,-208.76"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="372.21,-206.84 365.53,-204.14 369.08,-210.42 372.21,-206.84"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M470.52,-296.16C442.34,-271.46 401.8,-235.93 370.82,-208.78"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="372.23,-206.85 365.55,-204.16 369.09,-210.43 372.23,-206.85"/>
 </g>
 <!-- ledger -->
 <g id="node17" class="node">
@@ -348,7 +349,7 @@
 <!-- cov&#45;&gt;ledger -->
 <g id="edge21" class="edge">
 <title>cov&#45;&gt;ledger</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M501.8,-301.87C501.4,-287.59 502.55,-269.35 509,-254.5 518.44,-232.75 535.9,-213.03 552.01,-198.08"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M501.73,-296.47C501.76,-283.19 503.34,-267.54 509,-254.5 518.44,-232.75 535.9,-213.03 552.01,-198.08"/>
 <polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="553.96,-199.52 557.41,-193.19 550.77,-195.99 553.96,-199.52"/>
 </g>
 <!-- corpus -->
@@ -363,7 +364,7 @@
 <!-- cov&#45;&gt;corpus -->
 <g id="edge24" class="edge">
 <title>cov&#45;&gt;corpus</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" d="M574.29,-301.9C613.17,-287.79 661.8,-268.38 703,-246.5 727.64,-233.42 753.79,-216.82 775.29,-202.39"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" d="M589.11,-296.43C625.07,-282.96 666.89,-265.67 703,-246.5 727.64,-233.42 753.79,-216.82 775.29,-202.39"/>
 <polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="776.63,-204.35 780.94,-198.58 773.97,-200.41 776.63,-204.35"/>
 <text text-anchor="middle" x="715.5" y="-256.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;new coverage</text>
 </g>
@@ -377,7 +378,7 @@
 <!-- cov&#45;&gt;obs -->
 <g id="edge27" class="edge">
 <title>cov&#45;&gt;obs</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M407.57,-301.94C375.57,-294.14 339.76,-285.43 307,-277.5 249.69,-263.63 217.28,-290.48 178,-246.5 131.65,-194.6 139.56,-104.61 146.88,-61.06"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M385,-296.44C359.28,-290.18 332.23,-283.61 307,-277.5 249.69,-263.63 217.28,-290.48 178,-246.5 131.65,-194.6 139.56,-104.61 146.88,-61.06"/>
 <polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="149.25,-61.34 148.09,-54.23 144.56,-60.51 149.25,-61.34"/>
 </g>
 <!-- ltl&#45;&gt;lib -->
