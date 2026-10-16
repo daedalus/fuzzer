@@ -393,7 +393,7 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 
 ### Corpus Management
 - **Delta-encoded corpus**: parent-child diffs for small mutations (< 25% change), periodic full snapshots every 20 generations
-- **In-house XXH64 dedup keys** (`core/hashing.py::key16`): bit-exact with the reference, so existing corpora keep their names; pure Python, ~150 us per 4 KiB
+- **In-house XXH64 dedup keys** (`core/hashing.py::key16`): bit-exact with the reference, so existing corpora keep their names; pure Python, ~150 us per 4 KiB. Fixed seed, so collisions are forgeable: load and import compare bytes before treating a taken name as a duplicate, and keep a distinct twin as `id_<h>~n` (`filesystem.free_slot`)
 - **Delta snapshotting**: caps chain depth at 20 hops, prevents unbounded reconstruction cost
 - **Auto-minimize**: corpus pruning guided by Wasserstein spatial diversity
 - **Hamming fuzzy dedup**: near-duplicate detection via Hamming distance on equal-length seeds (`--fuzzy-dedup N`)

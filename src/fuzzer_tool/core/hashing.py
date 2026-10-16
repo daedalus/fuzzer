@@ -5,6 +5,8 @@ Two families, split by whether the digest outlives the process:
 * ``xxh64`` / ``key16`` -- XXH64, bit-exact with the reference. Corpus
   filenames and ``seed_meta`` keys are persisted, so the scheme must not
   change under an existing corpus. Pure Python: ~150 us per 4 KiB.
+  Fixed seed, invertible lane rounds: second preimages are forgeable, so
+  a name match is not byte equality (``filesystem.free_slot``).
 * ``hash64`` / ``hash64_len`` / ``hash64_seeded`` -- CRC32 | Adler32 << 32. Keys for
   in-memory and pickled tables. Stable across processes (unlike the
   builtin ``hash``, which PYTHONHASHSEED salts). ~2.6 us per 4 KiB
@@ -13,6 +15,9 @@ Two families, split by whether the digest outlives the process:
   that any 1-bit flip or burst <= 32 bits changes the key, which is
   what the per-op "buffer changed" check needs. A merged key only
   pools two seeds' statistics; never use it for identity on disk.
+  Chosen collisions take < 1 s and hold for every seed of
+  ``hash64_seeded``: both sums are linear, so equal-length deltas
+  ignore the initial state.
 
     data --+--> key16()  -> "ef46db3751d8e999"   persisted names
            '--> hash64() -> 0x024d0127352441c2   table keys
@@ -102,7 +107,7 @@ def _tail(h: int, data: bytes, pos: int) -> int:
 
 def xxh64(data: bytes, seed: int = 0) -> int:
     """XXH64 of *data* as an int; bit-exact with the reference."""
-    if not isinstance(data, (bytes, bytearray, memoryview)):
+    if not isinstance(data, bytes | bytearray | memoryview):
         raise TypeError(f"bytes-like required, got {type(data).__name__}")
 
     data = bytes(data)
@@ -145,6 +150,7 @@ def hash64_seeded(data: bytes, seed: int) -> int:
     """``hash64`` with the seed as the initial state of both sums.
 
     The seed is wrapped to 64 bits: low half starts CRC32, high half Adler32.
+    Domain separation only: equal-length collisions survive every seed.
     """
     seed &= _U64
     lo = crc32(data, seed & _U32)
