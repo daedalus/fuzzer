@@ -1213,6 +1213,8 @@ Ties go to the smaller file, but that alone can cost seeds (9 -> 11 on one corpu
 
 Measured on traced stdlib parsers (qcpa experiment 27, 1k-20k seeds): seeds equal or fewer than before in 14/14 cases (up to 5% fewer), bytes lower in 12/14 (up to 47%); wall-clock 0.4x-2x of the old loop (faster on `re`, 2x slower on cheap corpora; 4.6 s at 20k seeds). Edge presence only: hit-count buckets are not part of the cover.
 
+**Live `min-cover:N` stat.** `quick_cover` (one lazy greedy + redundancy drop, no reductions or multi-start) gives the seed count covering every discovered edge, as an upper bound on the minimum. Synthetic 5,000 seeds x 20,000 edges: 0.67 s vs 7.1 s for `min_cover`, same count (421). `Fuzzer._refresh_cover` runs on the stats tick only when `EdgeTracker.owner_version` changed and at least `COVER_BUDGET` (50) x the last solve time has passed, so overhead stays <= ~2% and plateaus cost nothing. Shown on the status line as `min-cover:N`, in `--log-json` as `min_cover` (-1 = not computed). `_favored` (`_cull_queue`) is cost-weighted, ~2x larger, so it is not this number.
+
 ### Irreplaceable Seeds
 
 Seeds placed in `corpus/seeds/irreplaceable/` are never pruned by minimization. When the minimizer's set-cover identifies mandatory (keystone) seeds that uniquely cover edges, those seeds are promoted to irreplaceable — copied to `seeds/irreplaceable/` and the original in `seeds/` is removed. On subsequent runs they are loaded alongside regular seeds and bypass all pruning logic.

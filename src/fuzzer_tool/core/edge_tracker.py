@@ -3281,6 +3281,11 @@ class EdgeTracker:
                 count += 1
         return count
 
+    @property
+    def owner_version(self) -> int:
+        """Bumps whenever any seed's edge set grows or seeds are pruned."""
+        return self._owner_version
+
     def edge_owner_count(self, edge_id: int) -> int:
         """How many distinct corpus seeds cover ``edge_id``.
 

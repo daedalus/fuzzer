@@ -73,6 +73,18 @@ def min_cover(seed_edges: Mapping[K, Collection[int]], size: Mapping[K, int]) ->
     return min(runs, key=lambda keys: (len(keys), sum(sizes[k] for k in keys)))
 
 
+def quick_cover(seed_edges: Mapping[K, Collection[int]]) -> list[K]:
+    """One lazy-greedy pass + redundancy drop: a cheap upper bound on min_cover.
+
+    No reductions, no size tie-break, no multi-start: ~1/10 of min_cover's
+    cost (5,000 seeds x 20,000 edges: 0.67 s vs 7.1 s), same count on the
+    corpora measured. For live stats, not for pruning.
+    """
+    order = {k: i for i, k in enumerate(seed_edges)}
+    full = _to_masks({k: e for k, e in seed_edges.items() if e})
+    return _Cover(order, full, dict.fromkeys(full, 0), Tie.ORDER, Reduce.OFF).solve()
+
+
 def _to_masks(full: Mapping[K, Collection[int]]) -> dict[K, int]:
     """Edge sets -> int bitmasks over a dense index (bit i = i-th smallest edge id).
 
