@@ -146,6 +146,90 @@ def test_pext_pdep_oracle():
             assert ie._pdep(ie._pext(x, mask), mask) == x & mask
 
 
+def _bits_ref(x: int, mask: int, nbits: int) -> tuple[list[int], list[int]]:
+    """Positions of the mask's set bits, and x's bit at each one (LSB first)."""
+    pos = [i for i in range(nbits) if mask >> i & 1]
+    return pos, [x >> i & 1 for i in pos]
+
+
+def _pext_ref(x: int, mask: int, nbits: int) -> int:
+    _, bits = _bits_ref(x, mask, nbits)
+    return sum(b << k for k, b in enumerate(bits))
+
+
+def _pdep_ref(x: int, mask: int, nbits: int) -> int:
+    pos, _ = _bits_ref(0, mask, nbits)
+    return sum((x >> k & 1) << p for k, p in enumerate(pos))
+
+
+@pytest.mark.parametrize("width", [1, 2, 4, 8])
+def test_pext_pdep_bytes_match_reference(width):
+    """Table pext/pdep over a repeated mask byte equals the bit-by-bit reference."""
+    rng = random.Random(width)
+    nbits = 8 * width
+    for byte in range(256):
+        mask = int.from_bytes(bytes([byte]) * width, "big")
+        for _ in range(8):
+            x = rng.getrandbits(nbits)
+            assert ie._pext_bytes(x, byte, width) == _pext_ref(x, mask, nbits)
+            assert ie._pdep_bytes(x, byte, width) == _pdep_ref(x, mask, nbits)
+
+
+def test_pext_pdep_bytes_known_values():
+    """Falsification: a byte-order or bit-order slip changes these."""
+    assert ie._pext_bytes(0xB7, 0x0F, 1) == 0x07
+    assert ie._pext_bytes(0xABCD, 0x0F, 2) == 0xBD
+    assert ie._pext_bytes(0xABCD, 0xF0, 2) == 0xAC
+    assert ie._pdep_bytes(0xBD, 0x0F, 2) == 0x0B0D
+    assert ie._pdep_bytes(0b0110, 0x81, 2) == 0x0180
+
+
+def test_pext_pdep_bytes_edge_masks():
+    """Adversarial: empty mask, full mask, bits outside the field."""
+    top = (1 << 64) - 1
+    assert ie._pext_bytes(top, 0x00, 8) == 0
+    assert ie._pdep_bytes(top, 0x00, 8) == 0
+    assert ie._pext_bytes(top, 0xFF, 8) == top
+    assert ie._pdep_bytes(0x1234, 0xFF, 2) == 0x1234
+    # pdep input wider than popcount * width: excess high bits are dropped.
+    assert ie._pdep_bytes(0xFFFF, 0x01, 2) == 0x0101
+
+
+def _bit_compress_run(monkeypatch, path: str, seed: int) -> list[bytes]:
+    """bit_compress over fixed inputs; path 'loop' is the pre-table full-mask code."""
+    if path == "loop":
+
+        def ext(x, byte, width):
+            return ie._pext(x, int.from_bytes(bytes([byte]) * width, "big"))
+
+        def dep(x, byte, width):
+            return ie._pdep(x, int.from_bytes(bytes([byte]) * width, "big"))
+
+        monkeypatch.setattr(ie, "_pext_bytes", ext)
+        monkeypatch.setattr(ie, "_pdep_bytes", dep)
+
+    data_rng = random.Random(seed)
+    inputs = [data_rng.randbytes(data_rng.randrange(1, 40)) for _ in range(300)]
+    rng = random.Random(seed + 1)
+    out = [ie.bit_compress(d, rng) for d in inputs]
+    monkeypatch.undo()
+    return out
+
+
+def test_regression_bit_compress_table_matches_loop(monkeypatch):
+    """Table path reproduces the bit-loop path draw for draw."""
+    # Control: the oracle against itself must agree first.
+    assert _bit_compress_run(monkeypatch, "loop", 7) == _bit_compress_run(monkeypatch, "loop", 7)
+    assert _bit_compress_run(monkeypatch, "table", 7) == _bit_compress_run(monkeypatch, "loop", 7)
+
+
+def test_pext_tables_bounded():
+    """Memory stays bounded: one table pair per mask byte, at most 256."""
+    for byte in range(256):
+        ie._pext_bytes(0, byte, 1)
+    assert len(ie._BIT_TABLES) <= 256
+
+
 # --- bit_matrix_transpose: involution -------------------------------------------
 def test_transpose_8x8_example_and_involution():
     row = b"\xff" + b"\x00" * 7
