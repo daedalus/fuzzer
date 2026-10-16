@@ -6,6 +6,7 @@ module's own step/output functions.
 
 import pytest
 
+from fuzzer_tool.core import lcg_recovery
 from fuzzer_tool.core.lcg_recovery import (
     LCG_FAMILIES,
     LCGSpec,
@@ -101,6 +102,71 @@ class TestRecovery:
         """Control (Rule 46): recovery on the same stream twice returns the same state."""
         ys = _stream(MSVC, 424242, 6)
         assert recover_state(ys, MSVC) == recover_state(ys, MSVC)
+
+
+POSIX = LCG_FAMILIES["posix_rand"]
+
+
+def _brute_candidates(spec: LCGSpec, y0: int, y1: int) -> list[tuple[int]]:
+    """Every state with output y0 whose successor outputs y1: all 2^shift hidden values."""
+    out = []
+    for h in range(1 << spec.shift):
+        x = (y0 << spec.shift) + h
+        if _ref_stream(x, 2, spec.a, spec.c, spec.m, spec.shift, spec.out_bits) == [y0, y1]:
+            out.append((x,))
+    return out
+
+
+class TestClosedForm:
+    """orlp.net "When Random Isn't": h0 = ceil((c + M*k) / a), a handful of k."""
+
+    @pytest.mark.parametrize("spec", [MSVC, JAVA], ids=["msvc", "java"])
+    def test_needs_fewer_samples_than_lattice(self, spec):
+        lattice = -(-spec.state_bits // spec.out_bits) + 1
+        assert min_samples(spec) < lattice
+        assert min_samples(spec) * spec.out_bits > spec.state_bits
+
+    def test_large_multiplier_keeps_lattice_count(self):
+        """Falsification: posix_rand has ~33k k values; it stays on LLL and its count."""
+        assert min_samples(POSIX) == -(-POSIX.state_bits // POSIX.out_bits) + 1
+
+    @pytest.mark.parametrize("spec", [MSVC, JAVA], ids=["msvc", "java"])
+    def test_recovers_at_min_samples(self, spec):
+        rng = RandPool(seed=3)
+        n = min_samples(spec)
+        for _ in range(50):
+            x0 = rng.randrange(spec.m) % spec.modulus
+            ys = _stream(spec, x0, n + 4)
+            assert recover_state(ys[:n], spec) == (x0,)
+            assert predict_words((x0,), n + 3, spec) == ys[1 : n + 4]
+
+    @pytest.mark.parametrize("low", [0, 1, 0xFFFF], ids=["h0_zero_k_minus_1", "h0_one", "h0_max"])
+    def test_candidates_match_brute_force(self, low):
+        """Adversarial: hidden-bit edges; h0 = 0 with h1 != 0 needs k = -1."""
+        x0 = (0x2468 << MSVC.shift) | low
+        y0, y1 = _stream(MSVC, x0, 2)
+        if low == 0:
+            h1 = ((MSVC.a * x0 + MSVC.c) % MSVC.modulus) & ((1 << MSVC.shift) - 1)
+            assert h1 != 0
+        assert sorted(lcg_recovery._closed_form_states([y0, y1], MSVC)) == _brute_candidates(
+            MSVC, y0, y1
+        )
+
+    def test_candidates_match_brute_force_random(self):
+        rng = RandPool(seed=8)
+        for _ in range(10):
+            y0, y1 = _stream(MSVC, rng.randrange(MSVC.modulus), 2)
+            got = sorted(lcg_recovery._closed_form_states([y0, y1], MSVC))
+            assert got == _brute_candidates(MSVC, y0, y1)
+
+    def test_ambiguous_window_returns_none(self, monkeypatch):
+        """Adversarial: two states fitting every word must not yield a guess."""
+        x0 = 0x1357_9BDF % MSVC.modulus
+        monkeypatch.setattr(
+            lcg_recovery, "_closed_form_states", lambda ys, spec: [(x0,), (x0 ^ 1,)]
+        )
+        monkeypatch.setattr(lcg_recovery, "verify_state", lambda st, ys, spec: True)
+        assert recover_state(_stream(MSVC, x0, 3), MSVC) is None
 
 
 class TestWalk:

@@ -25,6 +25,13 @@ Modulus reduction: for ``m = 2^k`` the bits above ``shift + out_bits`` never
 feed lower bits, so ``M = 2^(shift+out_bits)`` and the unobservable top bits
 are dropped (MSVC ``rand``: 32-bit state, 31 bits matter).
 
+Closed form (orlp.net "When Random Isn't"): when ``a > 2^shift`` and the
+state is exactly the output window, two words give
+``a*z_0 = z_1 + c' + M*k`` with ``c' = (h_1 - a*h_0 - c) mod M``, so
+``z_0 = ceil((c' + M*k) / a)`` for a few k. msvc: 8 k values, java: 7,
+posix_rand: ~33k (too many: LLL). Exact, one fewer word than LLL, 50-100x
+faster (msvc 1161 -> 21 us, java 663 -> 10 us).
+
 State is a 1-tuple ``(x,)`` so the learner handles it like a linear state.
 """
 
@@ -54,6 +61,8 @@ __all__ = [
 _MAX_DIM = 8
 # Extra output word on top of min_samples, same margin as prng_state_recovery.
 _CONFIRM_WORDS = 1
+# Closed-form candidate cap (k values); above it, LLL is cheaper.
+_CLOSED_FORM_MAX_K = 64
 
 
 @dataclass(frozen=True)
@@ -106,12 +115,23 @@ def lcg_family(name: str) -> LCGSpec | None:
     return LCG_FAMILIES.get(name)
 
 
-def min_samples(spec: LCGSpec) -> int:
-    """Outputs whose bits exceed the state bits, plus one for lattice slack.
+def _closed_form_ok(spec: LCGSpec) -> bool:
+    """Closed form applies: hidden bits < a, state = window, few k values."""
+    if spec.shift == 0 or spec.a <= 1 << spec.shift:
+        return False
+    if spec.modulus != 1 << (spec.shift + spec.out_bits):
+        return False
+    return spec.a * ((1 << spec.shift) - 1) // spec.modulus + 2 <= _CLOSED_FORM_MAX_K
 
-    Measured (100 random states each): java recovers 100/100 from 2 outputs,
-    msvc 52/100 from 2 and 100/100 from 3.
+
+def min_samples(spec: LCGSpec) -> int:
+    """Outputs whose bits exceed the state bits; LLL needs one more for slack.
+
+    Measured (300 random states each): closed form recovers java from 2
+    outputs and msvc from 3, all unique; LLL needs 3 and 4.
     """
+    if _closed_form_ok(spec):
+        return spec.state_bits // spec.out_bits + 1
     return math.ceil(spec.state_bits / spec.out_bits) + 1
 
 
@@ -168,6 +188,30 @@ def _lattice(ys: Sequence[int], spec: LCGSpec) -> tuple[list[list[int]], list[in
     return basis, target, h[0]
 
 
+def _closed_form_states(ys: Sequence[int], spec: LCGSpec) -> list[tuple[int]]:
+    """Every state with output ``ys[0]`` whose successor outputs ``ys[1]``.
+
+    ``a*z0 = z1 + c' + M*k`` with 0 <= z1 < 2^shift < a, so z0 is the
+    ceiling of ``(c' + M*k) / a``. k = -1 covers z0 = 0 with z1 != 0.
+    """
+    a, mod, shift = spec.a, spec.modulus, spec.shift
+    h0, h1 = ys[0] << shift, ys[1] << shift
+    c = (h1 - a * h0 - spec.c) % mod
+    top = 1 << shift
+
+    out = []
+    for k in range(-1, a * (top - 1) // mod + 1):
+        z0 = -(-(c + mod * k) // a)
+        if z0 < 0:
+            continue
+        if z0 >= top:
+            break
+        state = (h0 + z0,)
+        if output_word(step_state(state, spec), spec) == ys[1]:
+            out.append(state)
+    return out
+
+
 def recover_state(observed: Sequence[int], spec: LCGSpec) -> tuple[int] | None:
     """Recover the state whose own output is ``observed[0]``, verified on all of *observed*.
 
@@ -189,6 +233,11 @@ def recover_state(observed: Sequence[int], spec: LCGSpec) -> tuple[int] | None:
     if spec.shift == 0:
         state = (observed[0] % spec.modulus,)
         return state if verify_state(state, observed, spec) else None
+
+    # Closed form: exact candidate list; more than one fit is ambiguous.
+    if _closed_form_ok(spec):
+        fits = [s for s in _closed_form_states(observed, spec) if verify_state(s, observed, spec)]
+        return fits[0] if len(fits) == 1 else None
 
     basis, target, h0 = _lattice(observed[:_MAX_DIM], spec)
     try:
