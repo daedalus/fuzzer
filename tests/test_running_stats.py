@@ -506,3 +506,16 @@ class TestWindowedTwoStack:
             a = (lo_first.stddev, lo_first.mean, lo_first.kurtosis, lo_first.skewness)
             b = (hi_first.kurtosis, hi_first.skewness, hi_first.mean, hi_first.stddev)
             assert a == (b[3], b[2], b[0], b[1])
+
+    def test_regression_nan_inf_leave_window(self):
+        """Adversarial: a NaN/inf only poisons windows that contain it.
+
+        Power sums subtracted inf - inf = NaN and stayed NaN for good.
+        """
+        tail = [1.0, 2.0, 3.0, 4.0, 5.0]
+        for bad in (math.nan, math.inf, -math.inf):
+            m = RunningMoments(window=len(tail))
+            for v in tail + [bad] + tail * 3:
+                m.update(v)
+            assert m.mean == statistics.fmean(tail), bad
+            assert m.variance == statistics.variance(tail), bad
