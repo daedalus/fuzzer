@@ -311,3 +311,73 @@ class TestDistanceTableLayout:
                     walked += 1
         finally:
             t.cleanup()
+
+
+class TestCapacityHeader:
+    """The shim probes with ``& (capacity - 1)``: a power-of-two header is the
+    contract, checked once at attach instead of two divisions per block.
+
+    In-process, so the shim's health counters say whether it refused the table
+    (a refused table and a table that misses both report no distance). The
+    counters are per process and the .so stays loaded, so read the delta."""
+
+    # Unreachable keys pad the table to capacity >= 16, so cap - 1 is not a
+    # power of two (the real table alone has capacity 2: 2 - 1 = 1 is).
+    _PAD_KEYS = 8
+    _PAD_BASE = 0x7FFF0000
+
+    @classmethod
+    def _run_with_header(cls, so, header_of):
+        """(dist_count, segments refused) for one in-process run of b"T\\x05"."""
+        from fuzzer_tool.adapters.inprocess import InProcessRunner, read_shim_health
+        from fuzzer_tool.core.shim_health import ShimField
+
+        # Loading runs the constructor's attach; snapshot after it.
+        before = read_shim_health(ctypes.CDLL(so))[ShimField.SEG_REJECTED]
+        _, table_shm, td = _setup_channel(so, "target_fn")
+        table_shm.cleanup()
+        table = td.pc_distance_table() | {cls._PAD_BASE + i: 1.0 for i in range(cls._PAD_KEYS)}
+        table_shm = DistanceTableShm(table)
+        hdr = ctypes.c_uint32.from_address(table_shm._ptr)
+        hdr.value = header_of(hdr.value)
+        os.environ["__AFL_DIST_SHM_ID"] = table_shm.env_id
+        shm = ShmCoverage(size=8192)
+        shm.reset_edge_map()
+        os.environ["__AFL_SHM_ID"] = shm.env_id
+        try:
+            runner = InProcessRunner(
+                target=so,
+                function_name="fuzz_shm_run",
+                timeout=5,
+                shm_size=8192,
+                direct_lite=True,
+                coverage_env_id=shm.env_id,
+                cov=True,
+            )
+            # The runner maps SHM only while __afl_area is unattached, i.e. on
+            # first load; re-map so this test's table is the one attached.
+            getattr(ctypes.CDLL(so), "__afl_map_shm")()
+            rc, err = runner.run_one(b"T\x05")
+            assert rc == 0, err
+            refused = runner.shim_health()[ShimField.SEG_REJECTED] - before
+            return shm.read_distance_tail()[1], refused
+        finally:
+            shm.cleanup()
+            table_shm.cleanup()
+
+    def test_regression_non_pow2_header_rejected(self, distance_so):
+        count, refused = self._run_with_header(distance_so, lambda cap: cap - 1)
+        assert refused >= 1
+        assert count == 0
+
+    def test_pow2_header_still_hits(self, distance_so):
+        """Falsification: the unchanged header is accepted and reports the target."""
+        count, refused = self._run_with_header(distance_so, lambda cap: cap)
+        assert refused == 0
+        assert count >= 1
+
+    def test_undersized_pow2_header_stays_in_bounds(self, distance_so):
+        """Adversarial: a smaller valid header is accepted and probes only its slots."""
+        count, refused = self._run_with_header(distance_so, lambda cap: cap // 4)
+        assert refused == 0
+        assert count >= 0

@@ -101,7 +101,9 @@ def _edges(exe, *args):
 
 def _instrumented_functions(exe):
     """Names of functions in *exe* that contain a call to the trace-pc callback."""
-    dis = subprocess.run(["objdump", "-d", "--no-show-raw-insn", exe], capture_output=True, text=True).stdout
+    dis = subprocess.run(
+        ["objdump", "-d", "--no-show-raw-insn", exe], capture_output=True, text=True
+    ).stdout
     names, cur = set(), None
     for line in dis.splitlines():
         m = re.match(r"^[0-9a-f]+ <(.+)>:$", line)
@@ -147,7 +149,11 @@ class TestGccTracePc:
         Any shim function left unmarked is a latent recursion or re-entrancy
         hazard under gcc even when this particular binary happens to survive.
         """
-        flags = [TRACE_PC, *extra] if not any(f.startswith("-fsanitize-coverage") for f in extra) else extra
+        flags = (
+            [TRACE_PC, *extra]
+            if not any(f.startswith("-fsanitize-coverage") for f in extra)
+            else extra
+        )
         exe = _build(tmp_path, "t", "gcc", *flags)
         offenders = {n for n in _instrumented_functions(exe) if _is_shim(n)}
         assert not offenders, sorted(offenders)
@@ -231,8 +237,8 @@ class TestClangUnchanged:
         assert edges
 
     @requires_clang
-    def test_clang_trace_pc_edge_ids_are_unmixed(self, tmp_path):
-        """Clang keeps ``key >> 1`` ids; mixing is gcc-only (ngram/distance builds)."""
+    def test_clang_trace_pc_edge_ids_depend_on_input(self, tmp_path):
+        """Clang ids are mixed too since scheme 3 (tests/test_regression_tracepc_alias.py)."""
         exe = _build(tmp_path, "t", "clang", TRACE_PC, "-D__AFL_CTX_SENSITIVE=0")
         _, a = _edges(exe, "X")
         _, b = _edges(exe, "Y")
@@ -294,5 +300,9 @@ class TestBuildScriptFlag:
         src.write_text(_PLAIN)
         for cmplog in ("0", "1"):
             flag = _flag("gcc", cmplog=cmplog)
-            r = subprocess.run(["gcc", "-c", flag, str(src), "-o", str(tmp_path / "t.o")], capture_output=True, text=True)
+            r = subprocess.run(
+                ["gcc", "-c", flag, str(src), "-o", str(tmp_path / "t.o")],
+                capture_output=True,
+                text=True,
+            )
             assert r.returncode == 0, r.stderr
