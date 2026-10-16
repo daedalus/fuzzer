@@ -3,6 +3,7 @@
 import math
 import random
 import statistics
+from fractions import Fraction
 
 from fuzzer_tool.core.running_stats import RunningMoments
 
@@ -375,7 +376,7 @@ class TestWindowedVarianceNeverNegative:
 
 
 class TestWindowedShiftedSums:
-    """Power sums are kept centred on a window value (see _slide_update)."""
+    """Large-offset precision (formerly shifted power sums; now Pébay merges)."""
 
     def test_regression_large_offset_keeps_precision(self):
         """Adversarial: raw sums of 1e8-scale values lose the 1e-2 spread."""
@@ -398,7 +399,7 @@ class TestWindowedShiftedSums:
         assert b.variance == a.variance
 
     def test_falsification_legacy_raw_sums_load(self):
-        """A save without "shift" holds raw sums; loading must treat them so."""
+        """A legacy power-sum save (s1..s4, no stacks) rebuilds from buf."""
         window = [5.0, 6.0, 7.0]
         legacy = {
             "n": 3,
@@ -418,3 +419,90 @@ class TestWindowedShiftedSums:
         m.update(8.0)
         assert m.mean == statistics.mean([6.0, 7.0, 8.0])
         assert math.isclose(m.variance, statistics.variance([6.0, 7.0, 8.0]))
+
+
+def _exact_moments(window):
+    """Exact (variance, skewness, kurtosis) via Fraction two-pass."""
+    xs = [Fraction(v) for v in window]
+    n = len(xs)
+    mean = sum(xs) / n
+    m2, m3, m4 = (sum((x - mean) ** k for x in xs) / n for k in (2, 3, 4))
+    var = float(m2 * n / (n - 1))
+    skew = float(m3) / float(m2) ** 1.5
+    kurt = float(m4 / (m2 * m2)) - 3.0
+    return var, skew, kurt
+
+
+class TestWindowedTwoStack:
+    """Windowed moments merge Pébay aggregates over two stacks: no eviction
+    by subtraction, so no cancellation however far the stream drifts."""
+
+    def test_control_reference_against_itself(self):
+        """Control (Hard Rule 46): reference must be order-invariant."""
+        rng = random.Random(7)
+        window = [rng.paretovariate(1.5) for _ in range(30)]
+        assert _exact_moments(window) == _exact_moments(window[::-1])
+
+    def test_regression_drift_after_first_slide(self):
+        """Adversarial: regime jumps 0 -> 1e8 after the window first fills.
+
+        Shifted power sums centre once, on the first slide; the 1e-2 spread
+        at 1e8 then cancels away in S2 - S1**2/n.
+        """
+        wsize = 20
+        vals = [0.01 * (i % 5) for i in range(wsize + 1)]
+        vals += [1e8 + 0.01 * (i % 7) for i in range(200)]
+        m = RunningMoments(window=wsize)
+        for v in vals:
+            m.update(v)
+
+        var, skew, kurt = _exact_moments(vals[-wsize:])
+        assert math.isclose(m.variance, var, rel_tol=1e-6)
+        assert math.isclose(m.skewness, skew, rel_tol=1e-4, abs_tol=1e-6)
+        assert math.isclose(m.kurtosis, kurt, rel_tol=1e-4)
+
+    def test_falsification_heavy_tail_every_step(self):
+        """Every window position matches the exact reference on all moments."""
+        rng = random.Random(3)
+        vals = [rng.paretovariate(1.2) * 1e3 for _ in range(400)]
+        for wsize in (1, 2, 5, 33):
+            m = RunningMoments(window=wsize)
+            for i, v in enumerate(vals):
+                m.update(v)
+                window = vals[max(0, i - wsize + 1) : i + 1]
+                assert math.isclose(m.mean, statistics.fmean(window), rel_tol=1e-12)
+                if len(window) < 4:
+                    continue
+                var, skew, kurt = _exact_moments(window)
+                assert math.isclose(m.variance, var, rel_tol=1e-9), (wsize, i)
+                assert math.isclose(m.skewness, skew, rel_tol=1e-7), (wsize, i)
+                assert math.isclose(m.kurtosis, kurt, rel_tol=1e-7), (wsize, i)
+
+    def test_round_trip_mid_front_stack(self):
+        """Save with a half-drained front stack; resumed run stays identical."""
+        a = RunningMoments(window=6)
+        for v in range(13):
+            a.update(float(v * v))
+        b = RunningMoments(window=6)
+        b.load(a.save())
+        for v in (2.5, -1.0, 40.0, 7.0):
+            a.update(v)
+            b.update(v)
+            assert (b.mean, b.variance, b.skewness, b.kurtosis) == (
+                a.mean,
+                a.variance,
+                a.skewness,
+                a.kurtosis,
+            )
+
+    def test_lazy_merge_read_order_invariant(self):
+        """Adversarial: lazy sync must not depend on which moment is read first."""
+        rng = random.Random(11)
+        vals = [rng.lognormvariate(0, 2) for _ in range(300)]
+        lo_first, hi_first = RunningMoments(window=17), RunningMoments(window=17)
+        for v in vals:
+            lo_first.update(v)
+            hi_first.update(v)
+            a = (lo_first.stddev, lo_first.mean, lo_first.kurtosis, lo_first.skewness)
+            b = (hi_first.kurtosis, hi_first.skewness, hi_first.mean, hi_first.stddev)
+            assert a == (b[3], b[2], b[0], b[1])

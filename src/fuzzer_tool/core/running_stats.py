@@ -6,8 +6,16 @@ and excess kurtosis.  Two variants:
   RunningMoments          — unbounded, all history counts equally
   RunningMoments(window=N) — bounded window, O(1) per update
 
-The windowed variant uses power sums (S1, S2, S3, S4) internally for
-O(1) eviction/insertion instead of O(window) full recomputation.
+The windowed variant runs a two-stack queue of Pébay aggregates
+(n, mean, M2, M3, M4): amortised O(1) per update, and eviction never
+subtracts, so no cancellation however far the stream drifts.
+
+    oldest ──────────────────────────────▶ newest
+    [ front: suffix aggregates ][ back: one running aggregate ]
+      pop() evicts the oldest     push() folds in the newest
+    window = merge(front[-1], back); empty front → refill from buffer
+
+See https://orlp.net/blog/two-stack-sliding-window-aggregation/.
 
 Reference
 ---------
@@ -20,6 +28,31 @@ from __future__ import annotations
 
 import collections
 import math
+
+#: Aggregate tuple layout: (n, mean, M2, M3, M4).
+_Agg = tuple[int, float, float, float, float]
+_EMPTY: _Agg = (0, 0.0, 0.0, 0.0, 0.0)
+
+
+def _merge(a: _Agg, b: _Agg) -> _Agg:
+    """Combine two disjoint aggregates (Pébay pairwise formulas, associative)."""
+    na, ma, m2a, m3a, m4a = a
+    nb, mb, m2b, m3b, m4b = b
+    n = na + nb
+    d = mb - ma
+    d_n = d / n
+    d2 = d * d_n
+    nab = na * nb
+    m2 = m2a + m2b + d2 * nab
+    m3 = m3a + m3b + d2 * d_n * nab * (na - nb) + 3 * d_n * (na * m2b - nb * m2a)
+    m4 = (
+        m4a
+        + m4b
+        + d2 * d_n * d_n * nab * (na * na - nab + nb * nb)
+        + 6 * d_n * d_n * (na * na * m2b + nb * nb * m2a)
+        + 4 * d_n * (na * m3b - nb * m3a)
+    )
+    return (n, ma + d_n * nb, m2, m3, m4)
 
 
 class RunningMoments:
@@ -41,11 +74,15 @@ class RunningMoments:
         # usage (e.g. GP-UCB select_op reading stddev per arm per select)
         # recomputed sqrt per access otherwise.
         self._stddev_cache: float | None = None
+        # Window moments await a merge before the next read:
+        # _stale → mean/M2 (_sync_lo), _stale_hi → M3/M4 (_sync).
+        self._stale: bool = False
+        self._stale_hi: bool = False
         if window is not None:
             self._buf: collections.deque[float] = collections.deque(maxlen=window)
-            # Power sums for O(1) sliding window updates.
-            # Not initialized until first slide transition (_sums_stale=True).
-            self._sums_stale: bool = True
+            # Two-stack queue; an empty front refills from _buf on next slide.
+            self._front: list[_Agg] = []
+            self._back: _Agg = _EMPTY
         else:
             self._buf = collections.deque()  # type: ignore[assignment]
 
@@ -57,22 +94,7 @@ class RunningMoments:
         """Incorporate a new observation."""
         self._stddev_cache = None
         if self._window is not None and self._n >= self._window:
-            # Lazy-initialize power sums on first slide transition.
-            if self._sums_stale:
-                # Sums of (v - shift)**p: centring on a window value keeps
-                # S2 - S1**2/n from cancelling to ULP noise, e.g. a constant
-                # stream sums exact zeros and its variance is exactly 0.
-                self._shift = self._buf[0]
-                d = [v - self._shift for v in self._buf]
-                self._s1 = sum(d)
-                self._s2 = sum(v * v for v in d)
-                self._s3 = sum(v**3 for v in d)
-                self._s4 = sum(v**4 for v in d)
-                self._sums_stale = False
-            x_old = self._buf[0]
-            self._buf.popleft()
-            self._buf.append(x)
-            self._slide_update(x, x_old)
+            self._slide_update(x)
         else:
             self._n += 1
             self._buf.append(x)
@@ -95,40 +117,76 @@ class RunningMoments:
         self._m3 += term1 * delta_n * (n - 2) - 3 * delta_n * self._m2
         self._m2 += term1
 
-    def _slide_update(self, x_new: float, x_old: float) -> None:
-        """O(1) sliding-window update using power sums.
+    def _slide_update(self, x: float) -> None:
+        """Evict the oldest, fold *x* into back: amortised O(1).
 
-        Maintains S1..S4 as sliding sums via evict-and-insert, then
-        derives central moments from them.  Avoids O(window) full
-        recomputation on every call.
+        Inlines ``_inc_update``'s step on a tuple: this runs once per exec.
+        Moments merge lazily on read (``_sync_lo`` / ``_sync``).
         """
-        n = self._window
-        x_new -= self._shift
-        x_old -= self._shift
-        # Evict old, insert new in the power sums.
-        self._s1 += x_new - x_old
-        self._s2 += x_new * x_new - x_old * x_old
-        self._s3 += x_new * x_new * x_new - x_old * x_old * x_old
-        self._s4 += (x_new**4) - (x_old**4)
+        front = self._front
+        if not front:
+            self._refill()
+        front.pop()
+        self._buf.append(x)  # maxlen evicts the oldest
 
-        # Central moments (population, not sample), shift-invariant.
-        m1 = self._s1 / n
-        self._mean = self._shift + m1
-        m2 = self._s2 / n - m1 * m1
-        m3 = self._s3 / n - 3 * m1 * self._s2 / n + 2 * m1 * m1 * m1
-        m4 = (
-            self._s4 / n
-            - 4 * m1 * self._s3 / n
-            + 6 * m1 * m1 * self._s2 / n
-            - 3 * m1 * m1 * m1 * m1
-        )
-        # Store raw (sums, not Bessel-corrected) for consistency with
-        # the unbounded variant's internal M* representation.  The
-        # Bessel correction is applied in the variance/skewness/kurtosis
-        # properties.
-        self._m2 = m2 * n
-        self._m3 = m3 * n
-        self._m4 = m4 * n
+        n0, mean, m2, m3, m4 = self._back
+        n = n0 + 1
+        delta = x - mean
+        delta_n = delta / n
+        delta_n2 = delta_n * delta_n
+        term1 = delta * delta_n * n0
+        m4 += term1 * delta_n2 * (n * n - 3 * n + 3) + 6 * delta_n2 * m2 - 4 * delta_n * m3
+        m3 += term1 * delta_n * (n - 2) - 3 * delta_n * m2
+        self._back = (n, mean + delta_n, m2 + term1, m3, m4)
+        self._stale = self._stale_hi = True
+
+    def _sync_lo(self) -> None:
+        """Merge mean and M2 only: what mean/variance/stddev read."""
+        self._stale = False
+        front = self._front
+        nb, mb, m2b, _, _ = self._back
+        if not front:
+            self._mean, self._m2 = mb, m2b
+            return
+
+        na, ma, m2a, _, _ = front[-1]
+        d = mb - ma
+        d_n = d / (na + nb)
+        self._mean = ma + d_n * nb
+        self._m2 = m2a + m2b + (d * d_n) * (na * nb)  # same rounding as _merge
+
+    def _sync(self) -> None:
+        """Window moments = merge(front[-1], back), all four."""
+        self._stale = self._stale_hi = False
+        front = self._front
+        agg = _merge(front[-1], self._back) if front else self._back
+        _, self._mean, self._m2, self._m3, self._m4 = agg
+
+    def _refill(self) -> None:
+        """Move the back segment into front as suffix aggregates.
+
+        Called only when front is empty, so the back segment is all of
+        ``_buf``, e.g. [a, b, c] → front [agg(c), agg(b, c), agg(a, b, c)];
+        front[-1] covers the whole window, pop() drops a first.
+        """
+        front = self._front
+        append = front.append
+        n0, mean, m2, m3, m4 = _EMPTY
+
+        # _inc_update's step, inlined: a call per element costs ~2x.
+        for x in reversed(self._buf):
+            n = n0 + 1
+            delta = x - mean
+            delta_n = delta / n
+            delta_n2 = delta_n * delta_n
+            term1 = delta * delta_n * n0
+            m4 += term1 * delta_n2 * (n * n - 3 * n + 3) + 6 * delta_n2 * m2 - 4 * delta_n * m3
+            m3 += term1 * delta_n * (n - 2) - 3 * delta_n * m2
+            m2 += term1
+            mean += delta_n
+            n0 = n
+            append((n, mean, m2, m3, m4))
+        self._back = _EMPTY
 
     # ------------------------------------------------------------------
     # Properties
@@ -137,26 +195,22 @@ class RunningMoments:
     @property
     def mean(self) -> float:
         """Arithmetic mean of observations."""
+        if self._stale:
+            self._sync_lo()
         return self._mean if self._n >= 1 else 0.0
 
     @property
     def variance(self) -> float:
         """Sample variance (Bessel-corrected, /n-1). 0.0 if n < 2.
 
-        Clamped at zero. The sliding-window path recovers the central
-        moments from power sums (S1..S4), and m2 = S2 - S1**2/n is a
-        difference of two quantities that are nearly equal whenever the
-        observations are tightly clustered relative to their magnitude --
-        so it can land a few ULP below zero on a sample whose true
-        variance is exactly zero. ``stddev`` then raised ValueError out of
-        math.sqrt, which is a crash on a perfectly legitimate state (a
-        target with constant timing, a short window full of duplicates).
-        Reproduced at window=2 on both a raw-seconds stream (-2.2e-19 after
-        22 updates) and a log-seconds one (-3.6e-15 after 11); the
-        unbounded Welford path is unaffected.
+        Clamped at zero: a guard for ``stddev``'s sqrt. The former
+        power-sum window went a few ULP negative on zero-variance streams
+        (-2.2e-19 at window=2); Pébay merges only add non-negative terms.
         """
         if self._n < 2:
             return 0.0
+        if self._stale:
+            self._sync_lo()
         return max(self._m2 / (self._n - 1), 0.0)
 
     @property
@@ -171,6 +225,8 @@ class RunningMoments:
         """Sample skewness (adjusted Fisher-Pearson). 0.0 if n < 3."""
         if self._n < 3:
             return 0.0
+        if self._stale_hi:
+            self._sync()
         var = self._m2 / self._n
         if var <= 0.0:
             return 0.0
@@ -182,6 +238,8 @@ class RunningMoments:
         """Excess kurtosis (Fisher). 0.0 if n < 4."""
         if self._n < 4:
             return 0.0
+        if self._stale_hi:
+            self._sync()
         var = self._m2 / self._n
         if var <= 0.0:
             return 0.0
@@ -204,7 +262,7 @@ class RunningMoments:
         sd = self.stddev
         if sd <= 0.0:
             return 0.0
-        return (x - self._mean) / sd
+        return (x - self.mean) / sd
 
     # ------------------------------------------------------------------
     # Serialisation
@@ -212,6 +270,8 @@ class RunningMoments:
 
     def save(self) -> dict:
         """Serialize for persistence."""
+        if self._stale_hi:
+            self._sync()
         data = {
             "n": self._n,
             "mean": self._mean,
@@ -221,17 +281,16 @@ class RunningMoments:
             "window": self._window,
             "buf": list(self._buf),
         }
-        if self._window is not None and not self._sums_stale:
-            data["s1"] = self._s1
-            data["s2"] = self._s2
-            data["s3"] = self._s3
-            data["s4"] = self._s4
-            data["shift"] = self._shift
+        if self._window is not None:
+            # Stacks fix merge order, so a resumed run is bit-identical.
+            data["front"] = list(self._front)
+            data["back"] = self._back
         return data
 
     def load(self, data: dict) -> None:
         """Restore from persistence."""
         self._stddev_cache = None
+        self._stale = self._stale_hi = False
         self._n = data.get("n", 0)
         self._mean = data.get("mean", 0.0)
         self._m2 = data.get("m2", 0.0)
@@ -240,17 +299,9 @@ class RunningMoments:
         self._window = data.get("window")
         if self._window is not None:
             self._buf = collections.deque(data.get("buf", []), maxlen=self._window)
-            # Restore power sums for O(1) sliding window if persisted.
-            if "s1" in data:
-                self._s1 = data["s1"]
-                self._s2 = data["s2"]
-                self._s3 = data["s3"]
-                self._s4 = data["s4"]
-                # Pre-shift saves hold raw sums, i.e. shift 0.
-                self._shift = data.get("shift", 0.0)
-                self._sums_stale = False
-            else:
-                self._sums_stale = True
+            # Legacy saves (s1..s4, no stacks) rebuild from buf on next slide.
+            self._front = [tuple(a) for a in data.get("front", [])]
+            self._back = tuple(data.get("back", _EMPTY))
         else:
             self._buf = collections.deque(data.get("buf", []))
 
