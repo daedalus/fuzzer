@@ -15,6 +15,8 @@ from tests.conftest import requires_clang
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import frontier  # noqa: E402
 
+from fuzzer_tool.adapters import frontier_cov  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[1]
 STUB = REPO / "tools" / "lib" / "frontier_stub.c"
 
@@ -179,7 +181,7 @@ def test_ffmpeg_cov_counts_library_branches(tmp_path):
 def test_merged_profile_matches_per_input_sum(cov_bin, tmp_path, monkeypatch):
     # Two paths to corpus counts: one merged profile vs summed per-input exports.
     # MERGE_BATCH=1 forces a fold per input (the batch boundary on every step).
-    monkeypatch.setattr(frontier, "MERGE_BATCH", 1)
+    monkeypatch.setattr(frontier_cov, "MERGE_BATCH", 1)
     inputs = _corpus(tmp_path, b"ax", b"zz", b"ab")
     cov = frontier.Coverage(cov_bin, tmp_path / "work")
     summed = frontier.Coverage.merged(cov.run(inputs))

@@ -2114,7 +2114,22 @@ build_frontier_targets() {
     echo "Building frontier coverage executables (_cov)..."
     [ "$HAS_FUZZGOAT" -eq 1 ] && frontier_link "$TARGETS/fuzzgoat_read_cov" "fuzzgoat_read.c" \
         "$VENDOR/fuzzgoat/fuzzgoat.c -I$VENDOR/fuzzgoat -lm" "-O0"
+    build_frontier_libpng
     build_frontier_ffmpeg
+}
+
+# png_read_cov: libpng core sources compiled straight into the exe (no
+# configure in the read-only vendor tree); the prebuilt pnglibconf.h goes to
+# the build root. zlib stays the system one: only libpng is measured.
+LIBPNG_CORE="png pngerror pngget pngmem pngpread pngread pngrio pngrtran pngrutil pngset pngtrans pngwio pngwrite pngwtran pngwutil"
+build_frontier_libpng() {
+    local src="$VENDOR/libpng" conf="$FUZZ_BUILD_ROOT/libpng_cov"
+    [ -f "$src/png.c" ] || { warn "libpng not vendored — skipping png_read_cov (tools/vendor_libpng.sh)"; return 0; }
+    mkdir -p "$conf"
+    cp -f "$src/scripts/pnglibconf.h.prebuilt" "$conf/pnglibconf.h"
+    local f srcs=""
+    for f in $LIBPNG_CORE; do srcs="$srcs $src/$f.c"; done
+    frontier_link "$TARGETS/png_read_cov" "png_read.c" "-I$conf -I$src $srcs -lz -lm" "-O0"
 }
 
 # $1 out  $2 wrapper source (targets/)  $3 library sources/archives and flags  $4 opt level
@@ -2675,7 +2690,7 @@ print_feature_matrix() {
     state=$([ "$WITH_DISTANCE" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "distance" "$state" "AFLGo SHM-tail distance .so targets (clang)"
     state=$([ "$WITH_FRONTIER" -eq 1 ] && echo "ON" || echo "OFF")
-    printf '  %-20s %-12s %s\n' "frontier" "$state" "branch-coverage _cov exes for tools/frontier.py (fuzzgoat, ffmpeg; clang)"
+    printf '  %-20s %-12s %s\n' "frontier" "$state" "branch-coverage _cov exes for tools/frontier.py (fuzzgoat, png, ffmpeg; clang)"
     state=$([ "$WITH_FFMPEG_SANCOV" -eq 1 ] && echo "ON (default)" || echo "OFF")
     printf '  %-20s %-12s %s\n' "ffmpeg-sancov" "$state" "auto-rebuild vendored FFmpeg with coverage"
     local ffvers

@@ -22,37 +22,27 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
-import os
 import re
-import subprocess
 import sys
 import tempfile
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
 import numpy as np
 
-# llvm-cov export branch record: [line, col, end_line, end_col, true, false, ...]
-_LINE, _COL, _TRUE, _FALSE = 0, 1, 4, 5
-RUN_TIMEOUT = 10
-MERGE_BATCH = 256  # raw profiles per llvm-profdata merge
+from fuzzer_tool.adapters.frontier_cov import (  # noqa: F401  (re-exported for tests)
+    STUB_NAME,
+    Branch,
+    Coverage,
+    Run,
+    Side,
+    frontier_of,
+)
+
 SEED_SAMPLE = 200  # inputs exported one by one (per-seed reach)
 SAMPLE_SEED = 5
 SKIP_SUFFIXES = (".pkl", ".gz", ".json")
-STUB_NAME = "frontier_stub.c"
-
-Branch = tuple[str, int, int]  # (file basename, line, col)
-
-
-class Side(Enum):
-    """The side of a frontier condition never taken."""
-
-    TRUE = "true"
-    FALSE = "false"
 
 
 class Kind(Enum):
@@ -77,120 +67,6 @@ def classify(line: str) -> Kind:
         if pat.search(line):
             return kind
     return Kind.OPEN
-
-
-def frontier_of(branches: dict[Branch, tuple[int, int]]) -> dict[Branch, Side]:
-    """Conditions with exactly one side counted, mapped to the missing side."""
-    return {
-        b: Side.FALSE if t else Side.TRUE for b, (t, f) in branches.items() if bool(t) != bool(f)
-    }
-
-
-@dataclass
-class Run:
-    """One input's branch counts."""
-
-    path: Path
-    branches: dict[Branch, tuple[int, int]]
-
-
-class Coverage:
-    """Runs inputs through a ``_cov`` binary and reads branch counts back."""
-
-    def __init__(self, binary: Path, workdir: Path, workers: int = 4) -> None:
-        self._bin = Path(binary)
-        self._work = Path(workdir)
-        self._workers = workers
-        self.sources: dict[str, str] = {}  # basename -> full path
-
-    def run(self, files: Sequence[Path]) -> list[Run]:
-        """Branch counts per input, in input order."""
-        if not files:
-            return []
-        self._work.mkdir(parents=True, exist_ok=True)
-        with ThreadPoolExecutor(self._workers) as ex:
-            return list(ex.map(self._one, range(len(files)), files))
-
-    def profile(self, files: Sequence[Path]) -> dict[Branch, tuple[int, int]]:
-        """Corpus-wide counts: every input run, profiles merged, one export.
-
-        ``llvm-cov export`` reloads the binary's coverage mapping per call
-        (FFmpeg: ~4 s), so this is the cheap path; ``run`` exports per input.
-        Raw profiles are folded into the merged one MERGE_BATCH at a time,
-        which bounds disk use (FFmpeg: 3.5 MB per raw).
-        """
-        if not files:
-            return {}
-        self._work.mkdir(parents=True, exist_ok=True)
-        acc = self._work / "all.profdata"
-        for start in range(0, len(files), MERGE_BATCH):
-            batch = files[start : start + MERGE_BATCH]
-            with ThreadPoolExecutor(self._workers) as ex:
-                raws = [r for r in ex.map(self._exec, range(start, start + len(batch)), batch) if r]
-            self._fold(acc, raws)
-        return self._export(acc) if acc.exists() else {}
-
-    @staticmethod
-    def merged(runs: Sequence[Run]) -> dict[Branch, tuple[int, int]]:
-        """Summed counts over runs (same as merging the profiles)."""
-        out: dict[Branch, tuple[int, int]] = {}
-        for r in runs:
-            for b, (t, f) in r.branches.items():
-                t0, f0 = out.get(b, (0, 0))
-                out[b] = (t0 + t, f0 + f)
-        return out
-
-    def _exec(self, i: int, path: Path) -> Path | None:
-        """Run one input; its raw profile, or None when none was written."""
-        raw = self._work / f"{i}.profraw"
-        env = {**os.environ, "LLVM_PROFILE_FILE": str(raw)}
-        # Crashes and timeouts are expected; the stub dumps the profile on a fatal signal.
-        try:
-            subprocess.run(
-                [str(self._bin), str(path)], env=env, capture_output=True, timeout=RUN_TIMEOUT
-            )
-        except subprocess.TimeoutExpired:
-            print(f"timeout: {path}", file=sys.stderr)
-        return raw if raw.exists() else None
-
-    @staticmethod
-    def _fold(acc: Path, raws: Sequence[Path]) -> None:
-        """Merge raws (and acc, if present) into acc; delete the raws."""
-        if not raws:
-            return
-        inputs = [str(acc)] if acc.exists() else []
-        tmp = acc.with_suffix(".tmp")
-        cmd = ["llvm-profdata", "merge", "-sparse", *inputs, *map(str, raws), "-o", str(tmp)]
-        subprocess.run(cmd, check=True, capture_output=True)
-        tmp.replace(acc)
-        for r in raws:
-            r.unlink()
-
-    def _one(self, i: int, path: Path) -> Run:
-        raw = self._exec(i, path)
-        if raw is None:
-            return Run(path, {})
-
-        prof = self._work / f"{i}.profdata"
-        self._fold(prof, [raw])
-        branches = self._export(prof)
-        prof.unlink()
-        return Run(path, branches)
-
-    def _export(self, prof: Path) -> dict[Branch, tuple[int, int]]:
-        cmd = ["llvm-cov", "export", str(self._bin), f"-instr-profile={prof}", "-skip-expansions"]
-        data = json.loads(subprocess.run(cmd, capture_output=True, text=True, check=True).stdout)
-        out: dict[Branch, tuple[int, int]] = {}
-        for fdata in data["data"][0]["files"]:
-            name = os.path.basename(fdata["filename"])
-            if name == STUB_NAME:
-                continue
-            self.sources[name] = fdata["filename"]
-            for b in fdata["branches"]:
-                key = (name, b[_LINE], b[_COL])
-                t, f = out.get(key, (0, 0))
-                out[key] = (t + b[_TRUE], f + b[_FALSE])
-        return out
 
 
 # ── report ──────────────────────────────────────────────────────────────────
