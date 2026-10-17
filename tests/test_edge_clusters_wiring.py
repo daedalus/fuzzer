@@ -198,3 +198,44 @@ def test_report_section():
     assert "--- Edge Clusters ---" in text
     assert "Near-miss seeds:  1" in text
     assert _edge_clusters(_ns(EdgeTracker())) == ""
+
+
+# ── --cluster-jaccard (number of centroids) ─────────────────────────────────
+
+
+def test_cluster_jaccard_reaches_both_models():
+    f = _make_fuzzer(edge_clusters=True, cluster_jaccard=0.6)
+    assert f._edge_clusters.jaccard == 0.6
+    g = _make_fuzzer(pos_centroid=True, cluster_jaccard=0.9)
+    assert g._pos_clusters.jaccard == 0.9
+
+
+def test_cluster_jaccard_default():
+    from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
+
+    assert _make_fuzzer(pos_centroid=True)._pos_clusters.jaccard == CLUSTER_JACCARD
+
+
+def test_cluster_jaccard_cli_wired():
+    from tests.test_regression_cli_fuzzer_kwargs import _fuzz_parser_dests
+
+    tree = ast.parse(inspect.getsource(commands.cmd_fuzz))
+    calls = [
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Call) and getattr(n.func, "id", None) == "Fuzzer"
+    ]
+    assert all("cluster_jaccard" in {k.arg for k in c.keywords} for c in calls)
+    assert "cluster_jaccard" in _fuzz_parser_dests(ast.parse(inspect.getsource(commands)))
+
+
+def test_cluster_jaccard_sweep_arms():
+    import sys
+
+    sys.path.insert(0, "tools/lib")
+    import bench_paired
+
+    for j in ("60", "90"):
+        arm = f"pos-arena-centroid-j{j}"
+        assert bench_paired.ARMS[arm][-2:] == ["--cluster-jaccard", f"0.{j}"]
+        assert bench_paired.ARM_BASELINES[arm] == "pos-arena-uniform"

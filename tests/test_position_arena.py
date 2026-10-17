@@ -34,6 +34,7 @@ from fuzzer_tool.core.schedulers.pos_burn_front import (
     BurnFrontPositionScheduler,
 )
 from fuzzer_tool.core.schedulers.pos_canary import PositionCanaryScheduler
+from fuzzer_tool.core.schedulers.pos_centroid import PositionCentroidScheduler
 from fuzzer_tool.core.schedulers.pos_changed import PositionChangedScheduler
 from fuzzer_tool.core.schedulers.pos_chunk import PositionChunkScheduler
 from fuzzer_tool.core.schedulers.pos_cmplog import PositionCmplogScheduler
@@ -66,6 +67,7 @@ NEW_ARM_FLAGS = [
     "pos_chunk",
     "pos_changed",
     "pos_rare_mask",
+    "pos_centroid",
     "pos_finch",
 ]
 NO_SPARK = 0.99  # random() draw above SPARK_RATE
@@ -594,6 +596,7 @@ def _arena(
     chunk=None,
     changed=None,
     rare_mask=None,
+    centroid=None,
     consolidated=None,
     finch=None,
     good_turing=None,
@@ -621,6 +624,7 @@ def _arena(
         chunk=chunk,
         changed=changed,
         rare_mask=rare_mask,
+        centroid=centroid,
         consolidated=consolidated,
         finch=finch,
         good_turing=good_turing,
@@ -661,6 +665,12 @@ def _token(tokens=(b"ab",)):
 
 def _changed(moved=True):
     return PositionChangedScheduler(RandPool(seed=1), moved=lambda d: moved)
+
+
+def _centroid(hit=True):
+    return PositionCentroidScheduler(
+        RandPool(seed=1), gaps_of=lambda d: [7], hit_any=lambda edges: hit
+    )
 
 
 def _rare_mask(hit=True):
@@ -944,7 +954,7 @@ class TestPool:
 
     def test_new_arms_absent_when_not_supplied(self):
         _, arena = _arena()
-        for name in ("effector", "token", "chunk", "changed", "rare_mask"):
+        for name in ("effector", "token", "chunk", "changed", "rare_mask", "centroid"):
             assert name not in arena.pool()
 
     def test_changed_and_rare_mask_join_when_supplied(self):
@@ -1005,6 +1015,7 @@ class TestPool:
             chunk=chunk,
             changed=_changed(),
             rare_mask=_rare_mask(),
+            centroid=_centroid(),
             consolidated=PositionConsolidatedScheduler(RandPool(seed=1)),
             finch=_finch()[0],
             good_turing=PositionGoodTuringScheduler(RandPool(seed=1)),
@@ -1233,6 +1244,13 @@ class TestSettle:
         arm.observe({1})
         arena2.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
         assert arm.seed_count() == 0
+
+    def test_centroid_is_credited_off_policy(self):
+        arm = _centroid(hit=True)
+        f, arena = self._played(centroid=arm)
+        arena.settle(SEED, [100], Outcome.MISS, weight=1.0, score=0.0)
+        w = arm.weights(SEED, len(SEED))
+        assert w[100] > w[0]
 
     def test_rare_mask_is_credited_off_policy(self):
         arm = _rare_mask(hit=True)
@@ -1600,8 +1618,9 @@ class TestRealConstruction:
         assert isinstance(f._pos_chunk, PositionChunkScheduler)
         assert isinstance(f._pos_changed, PositionChangedScheduler)
         assert isinstance(f._pos_rare_mask, PositionRareMaskScheduler)
+        assert isinstance(f._pos_centroid, PositionCentroidScheduler)
         pool = f._position_arena.pool()
-        assert {"changed", "rare_mask"} <= set(pool)
+        assert {"changed", "rare_mask", "centroid"} <= set(pool)
         # Gated: no drained map, no parsed seed yet; token follows the dictionary.
         assert not {"effector", "chunk"} & set(pool)
         assert ("token" in pool) == bool(f.dictionary)

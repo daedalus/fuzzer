@@ -77,6 +77,7 @@ ARENA_TESTABLE = (
     "chunk",
     "changed",
     "rare_mask",
+    "centroid",
     "good_turing",
     "consolidated",
 )
@@ -212,6 +213,13 @@ ARMS: dict[str, list[str]] = {
     # subset alone: this arm differs from pos-arena-uniform by --pos-saliency plus
     # the subset that lets it into the pool.
     "pos-arena-saliency": _ARENA + ["--pos-saliency", "--pos-arena-arms", "uniform,saliency"],
+    # Centroid count sweep: --cluster-jaccard 0.60 / 0.90 (default 0.75 is
+    # pos-arena-centroid). Lower J -> fewer, looser clusters, more gaps.
+    **{
+        f"pos-arena-centroid-j{j}": _ARENA
+        + ["--pos-arena-arms", "uniform,centroid", "--cluster-jaccard", f"0.{j}"]
+        for j in ("60", "90")
+    },
     # Harmonic is opt-in like saliency: --pos-harmonic plus the subset that admits it.
     "pos-arena-harmonic": _ARENA + ["--pos-harmonic", "--pos-arena-arms", "uniform,harmonic"],
     # Kadane is opt-in like saliency: --pos-kadane plus the subset that admits it.
@@ -287,6 +295,8 @@ ARM_BASELINES: dict[str, str] = {
     **{f"pos-arena-{a.replace('_', '-')}": "pos-arena-uniform" for a in ARENA_TESTABLE},
     "pos-arena-all": "pos-arena-uniform",
     "pos-arena-saliency": "pos-arena-uniform",
+    "pos-arena-centroid-j60": "pos-arena-uniform",
+    "pos-arena-centroid-j90": "pos-arena-uniform",
     "pos-arena-harmonic": "pos-arena-uniform",
     "pos-arena-kadane": "pos-arena-uniform",
     "splice-gravity": "baseline",

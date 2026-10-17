@@ -133,6 +133,27 @@ def _record_strategy_win(wins: dict[str, int], a: str, b: str, score_a: float) -
         wins[b] = wins.get(b, 0) + 1
 
 
+def _cold_arm(
+    strategies: list[str], count: dict[str, int], plays: dict[str, int], min_matches: int
+) -> str | None:
+    """Least-matched arm still below *min_matches*; None once every arm is rated.
+
+    Selection reads only rated arms and only a played arm gets rated
+    (record_strategy_matches skips opponents never played), so without this
+    an arena played its first arm forever. Fewest plays breaks ties, then
+    list order: a just-played arm with no rated opponent yields to the next.
+    """
+    best, best_key = None, None
+    for s in strategies:
+        c = count.get(s, 0)
+        if c >= min_matches:
+            continue
+        key = (c, plays.get(s, 0))
+        if best_key is None or key < best_key:
+            best, best_key = s, key
+    return best
+
+
 def _vs_baseline(score_a: float, plays: int, score_sum: float) -> float | None:
     """Match score of one round against an idle arm's historical mean score.
 
@@ -750,6 +771,12 @@ class EloTracker(RoundRecorderMixin):
         if len(strategies) == 1:
             return strategies[0]
 
+        cold = _cold_arm(
+            strategies, self._strategy_match_count, self._strategy_plays, self.min_matches
+        )
+        if cold is not None:
+            return cold
+
         rated = [s for s in strategies if self._strategy_match_count.get(s, 0) >= self.min_matches]
         if not rated:
             return strategies[0]
@@ -1268,6 +1295,12 @@ class BayesianEloTracker(RoundRecorderMixin):
         if len(strategies) == 1:
             only = strategies[0]
             return lambda: only
+
+        cold = _cold_arm(
+            strategies, self._strategy_match_count, self._strategy_trials, self.min_matches
+        )
+        if cold is not None:
+            return lambda: cold
 
         rated = [s for s in strategies if self._strategy_match_count.get(s, 0) >= self.min_matches]
         if not rated:

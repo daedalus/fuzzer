@@ -6,6 +6,9 @@
                         near-duplicates: a few seeds tell the members apart
     seeds x clusters ──► near_misses(seed)
                         rare classes of a cluster the seed is on but lacks
+    clusters ──► medoid (centroid: max mean Jaccard to the members)
+    seed ──► gaps(seed)  members it lacks of clusters whose medoid it holds,
+                         nearest the medoid first (pos_centroid's targets)
 
 A class is the unit rarity should count. FFmpeg 5k: 2,536 singleton edges
 were 75 singleton classes, one block per keystone seed, so a per-edge rare
@@ -19,13 +22,17 @@ from collections.abc import Iterable, Mapping
 
 import numpy as np
 
-from fuzzer_tool.core.edge_matrix import RefitCadence
+from fuzzer_tool.core.edge_matrix import DEFAULT_REFIT_INTERVAL, RefitCadence
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
 
 RARE_OWNERS = 3  # same bound as seed_picker.RARE_EDGE_OWNERS
 CLUSTER_JACCARD = 0.75
-MAX_CLUSTER_CLASSES = 2_000  # K x K float32 intersections (16 MB); above it clusters = classes
-MAX_INCIDENCE_CELLS = 4_000_000  # dense seeds x classes matrix (4 MB bool)
+# Refit time ~ K^2 x seeds: FFmpeg 10k (3,230 classes, 581 seeds) 1.5 s; at
+# 2,000 the cap skipped clustering there and left every seed without gaps.
+MAX_CLUSTER_CLASSES = 8_000
+LEAD_BLOCK = 512  # Jaccard rows per block: memory LEAD_BLOCK x K float32
+MAX_INCIDENCE_CELLS = 4_000_000  # dense seeds x classes float32 matrix (16 MB)
+GAP_LIMIT = 8  # gaps returned per seed
 REPORT_NNZ_BUDGET = 500_000  # seed-edge cells; same bound as the summary's edge classes
 
 _EMPTY = np.empty(0, dtype=np.int64)
@@ -53,8 +60,13 @@ def fit_tracker(tracker) -> "EdgeClusters | None":
 class EdgeClusters:
     """Incidence classes and near-duplicate clusters, refit wholesale."""
 
-    def __init__(self) -> None:
-        self.cadence = RefitCadence()
+    def __init__(
+        self, refit_interval: int = DEFAULT_REFIT_INTERVAL, jaccard: float = CLUSTER_JACCARD
+    ) -> None:
+        if not 0.0 < jaccard <= 1.0:
+            raise ValueError(f"cluster Jaccard threshold must be in (0, 1], got {jaccard}")
+        self.jaccard = jaccard  # higher -> more, tighter clusters (more centroids)
+        self.cadence = RefitCadence(interval=refit_interval)
         self.version = 0
         self._reset()
 
@@ -64,6 +76,8 @@ class EdgeClusters:
         self._owners = _EMPTY  # seeds per class
         self._sizes = _EMPTY  # edges per class
         self._leader = _EMPTY  # class index of each class's cluster leader
+        self._medoid = _EMPTY  # class index of each class's cluster medoid
+        self._to_medoid = np.empty(0)  # Jaccard of each class to its medoid
         self._near: dict[object, int] = {}
         self._singleton_edges = 0
 
@@ -107,34 +121,61 @@ class EdgeClusters:
         self._heads, self._owners = heads, owners
         self._sizes = np.bincount(edge_cls, minlength=n_cls)
         self._singleton_edges = int(np.count_nonzero(owners[edge_cls] == 1))
-        self._leader = np.arange(n_cls)
+        self._leader = self._medoid = np.arange(n_cls)
+        self._to_medoid = np.ones(n_cls)
         if n_cls > MAX_CLUSTER_CLASSES or len(keys) * n_cls > MAX_INCIDENCE_CELLS:
             return
 
-        inc = np.zeros((len(keys), n_cls), dtype=bool)
-        inc[p_seed, p_cls] = True
+        # float32 matmul runs on BLAS (int32 does not); counts < 2^24 stay exact.
+        inc = np.zeros((len(keys), n_cls), dtype=np.float32)
+        inc[p_seed, p_cls] = 1.0
         self._leader = self._lead(inc)
-        self._near = self._near_misses(keys, inc)
+        self._medoids(inc)
+        self._near = self._near_misses(keys, inc > 0)
+
+    def _jaccard_rows(self, inc: np.ndarray, rows: np.ndarray, cols: np.ndarray) -> np.ndarray:
+        """Jaccard of classes *rows* against classes *cols*."""
+        inter = inc[:, rows].T @ inc[:, cols]
+        owners = self._owners
+        return inter / (owners[rows, None] + owners[None, cols] - inter)
+
+    def _medoids(self, inc: np.ndarray) -> None:
+        """Per cluster, the member with the highest mean Jaccard to the others.
+
+        Ties go to the widest class, then the lowest head: the leader's order.
+        """
+        for lead in np.unique(self._leader).tolist():
+            mem = np.flatnonzero(self._leader == lead)
+            if mem.size == 1:
+                continue
+            jac = self._jaccard_rows(inc, mem, mem)
+            mean = (jac.sum(axis=1) - 1.0) / (mem.size - 1)
+            pick = np.lexsort((self._heads[mem], -self._owners[mem], -mean))[0]
+            self._medoid[mem] = mem[pick]
+            self._to_medoid[mem] = jac[pick]
 
     def _lead(self, inc: np.ndarray) -> np.ndarray:
-        """Leader clustering: widest class first; join the most similar leader."""
-        owners = self._owners
-        # float32 matmul runs on BLAS (int32 does not); counts < 2^24 stay exact.
-        m32 = inc.astype(np.float32)
-        inter = m32.T @ m32
-        jac = inter / (owners[:, None] + owners[None, :] - inter)
+        """Leader clustering: widest class first; join the most similar leader.
 
-        leader = np.empty(owners.size, dtype=np.int64)
+        Jaccard rows are computed LEAD_BLOCK classes at a time in visiting
+        order, so memory is LEAD_BLOCK x K, not K x K.
+        """
+        n_cls = self._owners.size
+        order = np.lexsort((self._heads, -self._owners))
+        leader = np.empty(n_cls, dtype=np.int64)
         leaders: list[int] = []
-        for c in np.lexsort((self._heads, -owners)).tolist():
-            if leaders:
-                sims = jac[c, leaders]
-                best = int(np.argmax(sims))
-                if sims[best] >= CLUSTER_JACCARD:
-                    leader[c] = leaders[best]
-                    continue
-            leaders.append(c)
-            leader[c] = c
+        for start in range(0, n_cls, LEAD_BLOCK):
+            block = order[start : start + LEAD_BLOCK]
+            jac = self._jaccard_rows(inc, block, np.arange(n_cls))
+            for row, c in enumerate(block.tolist()):
+                if leaders:
+                    sims = jac[row, leaders]
+                    best = int(np.argmax(sims))
+                    if sims[best] >= self.jaccard:
+                        leader[c] = leaders[best]
+                        continue
+                leaders.append(c)
+                leader[c] = c
         return leader
 
     def _near_misses(self, keys: list, inc: np.ndarray) -> dict[object, int]:
@@ -180,6 +221,26 @@ class EdgeClusters:
         """Share of the seed's classes no other seed holds."""
         idx = np.unique(self._seen(edges))
         return float(np.count_nonzero(self._owners[idx] == 1) / idx.size) if idx.size else 0.0
+
+    def medoid_of(self, edge: int) -> int:
+        """Head edge id of *edge*'s cluster medoid; -1 if unseen."""
+        idx = self._seen([edge])
+        return int(self._heads[self._medoid[idx[0]]]) if idx.size else -1
+
+    def gaps(self, edges: Iterable[int], limit: int = GAP_LIMIT) -> list[int]:
+        """Head edges of member classes *edges* lack, in clusters whose medoid they hold.
+
+        Nearest the medoid (highest Jaccard) first: the siblings most seeds
+        already reach from the same centre.
+        """
+        idx = self._seen(edges)
+        if not idx.size:
+            return []
+        held = np.zeros(self._heads.size, dtype=bool)
+        held[idx] = True
+        cand = np.flatnonzero(held[self._medoid] & ~held)
+        order = cand[np.lexsort((self._heads[cand], -self._to_medoid[cand]))]
+        return self._heads[order[:limit]].tolist()
 
     def near_misses(self, seed_key: object) -> int:
         return self._near.get(seed_key, 0)
