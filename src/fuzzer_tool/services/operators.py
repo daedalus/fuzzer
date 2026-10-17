@@ -4093,6 +4093,23 @@ class OperatorEngine:
             pos = rng.randint(0, len(buf))
             buf[pos:pos] = compound
 
+    def _op_literal_mismatch(self, buf, byte_idx, _data):
+        """Keep a dictionary/cmplog literal's first k bytes, break byte k or cut."""
+        from fuzzer_tool.core.mutations.generic import literal_mismatch
+
+        rng = self.ctx._rng
+        words, cmp_tokens = self.ctx.dictionary, self.ctx.cmplog_tokens
+        tokens = words or cmp_tokens
+        if words and cmp_tokens:
+            tokens = (words, cmp_tokens)[rng.randint(0, 1)]
+        if not tokens:
+            return self._op_declined("literal_mismatch", buf)
+
+        out = literal_mismatch(bytes(buf), tokens, byte_idx, self.ctx.max_len, rng=rng)
+        if out is None:
+            return self._op_declined("literal_mismatch", buf)
+        return bytearray(out)
+
     def _op_punctuation_insert(self, buf, _byte_idx, _data):
         """Insert 1-4 random punctuation characters at a random position.
 

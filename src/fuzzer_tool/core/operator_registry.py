@@ -107,6 +107,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "checksum_repair",
         "token_dup",
         "dict_compound",
+        "literal_mismatch",
     },
     "structural": {
         "splice",
@@ -780,6 +781,11 @@ def _has_dictionary(f, _d) -> bool:
     return bool(getattr(f, "dictionary", None))
 
 
+def _has_literals(f, d) -> bool:
+    """Dictionary or cmplog tokens (literal_mismatch)."""
+    return _has_dictionary(f, d) or bool(getattr(getattr(f, "_cmplog", None), "tokens", None))
+
+
 def _has_grammar(f, _d) -> bool:
     return bool(getattr(f, "grammar", None))
 
@@ -817,6 +823,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "dict_append": _has_dictionary,
     "token_dup": _has_dictionary,
     "dict_compound": _has_dictionary,
+    "literal_mismatch": _has_literals,
     # model / engine-gated ops
     # bit_cross and arith_mid use parent_key only to skip ancestors/descendants
     # as donors (recorded under --lineage). Without it the ancestor test is a
