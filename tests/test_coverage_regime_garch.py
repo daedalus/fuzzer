@@ -115,7 +115,9 @@ class TestPrecedenceIsUnchanged:
             "cramers_v": 0.4,
             "total_edges": 200,
         }
-        regime = d.observe(2.0, 0, result, execs_since_edge=5, exec_count=5000)
+        # Escalation needs a rejection confirmed one full window later.
+        for _ in range(CoverageHomogeneityDetector().window_size + 1):
+            regime = d.observe(2.0, 0, result, execs_since_edge=5, exec_count=5000)
         assert regime is CoverageRegime.SUBCRITICAL
         assert "biased exploration" in d.reason
 
