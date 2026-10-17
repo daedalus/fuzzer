@@ -21,6 +21,7 @@ from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
+from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
 from fuzzer_tool.core.schedulers.seed_good_turing import HORIZON as GOOD_TOULMIN_HORIZON
 from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST
@@ -697,6 +698,7 @@ def cmd_fuzz(args):
         pos_kadane=getattr(args, "pos_kadane", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         frontier_bin=getattr(args, "frontier_bin", None),
+        frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
@@ -3159,6 +3161,13 @@ def main() -> int:
         "build_targets.sh --frontier). New seeds are measured in a worker thread; seeds "
         "executing rarely reached one-sided branch conditions are picked "
         "(core/schedulers/seed_frontier.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--frontier-p",
+        type=float,
+        default=DEFAULT_P_FRONTIER,
+        help="Share of seed picks the --frontier-bin arm serves; the rest go to the default "
+        "picker, which also sees seeds the oracle has not measured yet.",
     )
     fuzz_parser.add_argument(
         "--seed-newest-p",

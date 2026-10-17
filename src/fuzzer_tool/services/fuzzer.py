@@ -146,6 +146,7 @@ from fuzzer_tool.core.schedulers.seed_bfq import SeedBFQScheduler
 from fuzzer_tool.core.schedulers.seed_codel import SeedCoDelScheduler
 from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
+from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
 from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST, SeedNewestScheduler
 from fuzzer_tool.core.schedulers.seed_p2c import SeedP2CScheduler
@@ -1888,6 +1889,8 @@ class Fuzzer:
         # clang source-coverage <name>_cov build (build_targets.sh --frontier).
         # Off by default and out of --hail-mary. Appended: positional signature.
         frontier_bin=None,
+        # Share of picks the frontier arm serves (--frontier-p). Appended: positional signature.
+        frontier_p=DEFAULT_P_FRONTIER,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3242,7 +3245,7 @@ class Fuzzer:
         self._frontier_oracle = None
         self._seed_frontier = None
         if frontier_bin:
-            self._build_frontier(frontier_bin)
+            self._build_frontier(frontier_bin, frontier_p)
         self._seed_os_arms = tuple(
             arm
             for arm in (
@@ -5200,7 +5203,7 @@ class Fuzzer:
         self._seed_strata = StrataSeedScheduler(self._rng, self._edge_ledger, guard)
         log.info("strata enabled (guard %s, family shift %d)", guard.value, self._edge_ledger.shift)
 
-    def _build_frontier(self, frontier_bin: str) -> None:
+    def _build_frontier(self, frontier_bin: str, frontier_p: float) -> None:
         """Oracle (worker thread, temp workdir) + the 'frontier' seed arm."""
         import tempfile
 
@@ -5209,7 +5212,9 @@ class Fuzzer:
 
         work = Path(tempfile.mkdtemp(prefix="fuzzer_frontier_"))
         self._frontier_oracle = FrontierOracle(Path(frontier_bin).expanduser(), work)
-        self._seed_frontier = FrontierSeedScheduler(self._rng, self._frontier_oracle)
+        self._seed_frontier = FrontierSeedScheduler(
+            self._rng, self._frontier_oracle, p_frontier=frontier_p
+        )
         log.info("frontier seed arm enabled (%s)", frontier_bin)
 
     def _frontier_observe(self, seed: bytes) -> None:

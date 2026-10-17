@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from fuzzer_tool.core.schedulers.seed_frontier import FrontierSeedScheduler
+from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER, FrontierSeedScheduler
 from tests.support.scripted_rng import ScriptedRng
 
 A, B, C = ("f.c", 1, 1), ("f.c", 2, 1), ("f.c", 3, 1)
@@ -26,8 +26,8 @@ class _Oracle:
         return out
 
 
-def _sched(oracle, *randoms):
-    return FrontierSeedScheduler(ScriptedRng(randoms=list(randoms)), oracle)
+def _sched(oracle, *randoms, p=1.0):
+    return FrontierSeedScheduler(ScriptedRng(randoms=list(randoms)), oracle, p_frontier=p)
 
 
 def test_weight_is_rare_reach():
@@ -43,6 +43,24 @@ def test_roulette_follows_weights():
     total = 1.75
     assert _sched(o, 0.5 / total).select_seed(keys) == "s1"
     assert _sched(o, 1.2 / total).select_seed(keys) == "s2"
+
+
+def test_mix_gate_hands_off_to_default_picker():
+    # p=0.5: a gate draw >= p declines (default picker, any seed); < p runs the roulette.
+    o = _Oracle({"s1": {A}}, {A: 1})
+    keys = ["s0", "s1"]
+    assert _sched(o, 0.5, p=0.5).select_seed(keys) == ""
+    assert _sched(o, 0.49, 0.5, p=0.5).select_seed(keys) == "s1"
+    assert DEFAULT_P_FRONTIER == 0.5
+
+
+def test_adversarial_p_bounds():
+    o = _Oracle({"s1": {A}}, {A: 1})
+    for bad in (-0.1, 1.5):
+        with pytest.raises(ValueError):
+            FrontierSeedScheduler(ScriptedRng(), o, p_frontier=bad)
+    # p=0 never weights, never draws a roulette value.
+    assert _sched(o, 0.0, p=0.0).select_seed(["s1"]) == ""
 
 
 def test_falsification_unmeasured_corpus_declines():
@@ -159,3 +177,11 @@ def test_stats_field():
     assert _frontier_str(types.SimpleNamespace(_frontier_oracle=_O())) == (
         " | frontier: open=7 closed=2 seeds=5 queue=1"
     )
+
+
+def test_frontier_p_reaches_arm(tmp_path):
+    f = _make_fuzzer(frontier_bin=str(tmp_path / "x_cov"), frontier_p=0.3)
+    try:
+        assert f._seed_frontier._p == 0.3
+    finally:
+        f._frontier_oracle.close()
