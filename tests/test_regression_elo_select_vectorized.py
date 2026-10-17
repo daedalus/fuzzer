@@ -37,7 +37,10 @@ def _tracker(seed: int) -> BayesianEloTracker:
     for i, s in enumerate(ARMS):
         t._strategy_mu[s] = 1500.0 + (i % 7) * 4.0
         t._strategy_sigma_sq[s] = (60.0 + i) ** 2
-        t._strategy_match_count[s] = t.min_matches if i % 5 else 0  # some unrated
+        # All rated: an unrated arm is now explored before any draw
+        # (tests/test_regression_elo_cold_start.py), so the sampled path this
+        # pins only ever sees rated arms.
+        t._strategy_match_count[s] = t.min_matches
     return t
 
 
