@@ -5379,6 +5379,11 @@ class OperatorEngine:
 
         return self._regularity(div_trap, buf)
 
+    def _op_overflow_pair(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.structured import overflow_pair
+
+        return self._regularity(overflow_pair, buf)
+
     # ── Hacker's Delight rightmost-bit + Gosper same-popcount (2026-10-05) ──
     def _op_rightmost_clear(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.hackers_delight import rightmost_clear
