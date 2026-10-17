@@ -40,6 +40,8 @@ class ScriptedRng:
             (counts and p ignored).
         gamma_arrays: Arrays returned one per ``gammavariate_array()`` call
             (shapes and rates ignored).
+        randrange_lists: Lists returned one per ``randrange_list()`` call
+            (n and count ignored).
     """
 
     def __init__(
@@ -54,6 +56,7 @@ class ScriptedRng:
         beta_arrays=(),
         binomial_arrays=(),
         gamma_arrays=(),
+        randrange_lists=(),
     ):
         self._randints = iter(randints)
         self._randoms = iter(randoms)
@@ -65,6 +68,7 @@ class ScriptedRng:
         self._beta_arrays = iter(beta_arrays)
         self._binomial_arrays = iter(binomial_arrays)
         self._gamma_arrays = iter(gamma_arrays)
+        self._randrange_lists = iter(randrange_lists)
 
     def randint(self, _a, _b):
         return next(self._randints)
@@ -97,6 +101,9 @@ class ScriptedRng:
 
     def gammavariate_array(self, _alphas, _betas):
         return next(self._gamma_arrays)
+
+    def randrange_list(self, _n, _count):
+        return next(self._randrange_lists)
 
     def shuffle(self, seq):
         seq.reverse()

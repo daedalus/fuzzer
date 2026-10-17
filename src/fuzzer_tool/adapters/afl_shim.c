@@ -4625,6 +4625,14 @@ static __thread uint64_t __afl_tick_epoch = 0;
 static __thread uint32_t __afl_tick_count = 0;
 static int __afl_timeout_handler_live = 0;
 
+/* Recover-mode ASAN holds its thread-registry lock while printing a report.
+ * Jumping out of one left it held: the next thread exit blocked in ASAN's
+ * FinishThread forever (fuzzer shutdown hang). A tick during a report
+ * defers; the next tick after it ends the call. Weak: NULL without ASAN.
+ * Residual: the few instructions between the lock and the report being
+ * registered. */
+extern int __asan_report_present(void) __attribute__((weak));
+
 __AFL_GCC_NO_COV static void __afl_timeout_handler(int sig, siginfo_t *si, void *uc) {
     (void)sig; (void)uc;
     sigjmp_buf *jb = __afl_guard_jmp;
@@ -4634,8 +4642,9 @@ __AFL_GCC_NO_COV static void __afl_timeout_handler(int sig, siginfo_t *si, void 
         __afl_tick_epoch = __afl_guard_epoch;
         __afl_tick_count = 0;
     }
-    if (++__afl_tick_count > __AFL_TIMEOUT_TICKS)
-        siglongjmp(*jb, __AFL_JMP_TIMEOUT);
+    if (++__afl_tick_count <= __AFL_TIMEOUT_TICKS) return;
+    if (__asan_report_present && __asan_report_present()) return;
+    siglongjmp(*jb, __AFL_JMP_TIMEOUT);
 }
 
 __AFL_GCC_NO_COV static int __afl_timer_ready(void) {
