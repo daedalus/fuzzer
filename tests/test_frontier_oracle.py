@@ -65,6 +65,16 @@ def test_falsification_closed_condition_leaves_reach(cov_bin, tmp_path):
     assert o.stats()["closed"] >= 1
 
 
+def test_duplicate_key_measured_once(cov_bin, tmp_path):
+    o = _oracle(cov_bin, tmp_path)
+    o.submit("a", b"ax")
+    o.submit("a", b"ax")  # queued twice
+    o.drain()
+    o.submit("a", b"ax")  # already measured
+    o.drain()
+    assert o.epoch == 1
+
+
 def test_adversarial_bounded_queue_and_unknown_key(cov_bin, tmp_path):
     o = _oracle(cov_bin, tmp_path, max_pending=1)
     for k in ("a", "b", "c"):
@@ -93,3 +103,16 @@ def test_thread_mode_processes_in_background(cov_bin, tmp_path):
     finally:
         o.close()
     assert not (tmp_path / "oracle").exists() or not any((tmp_path / "oracle").iterdir())
+
+
+def test_rare_reach_matches_reachers(cov_bin, tmp_path):
+    # Two seeds execute b's condition: each gets 1/2 from it; 'zz' gets 0.
+    o = _oracle(cov_bin, tmp_path)
+    for k, data in (("a1", b"ax"), ("a2", b"ay"), ("z", b"zz")):
+        o.submit(k, data)
+    o.drain()
+    cond = _cond_b(o)
+    want = sum(1.0 / o.reachers(c) for c in o.open_reached("a1"))
+    assert o.reachers(cond) == 2
+    assert o.rare_reach(["a1", "z", "missing"]) == [want, 0.0, 0.0]
+    assert o.epoch == 3

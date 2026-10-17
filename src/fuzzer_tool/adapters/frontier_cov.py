@@ -26,6 +26,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import weakref
 from collections import OrderedDict, deque
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -208,6 +209,7 @@ class FrontierOracle:
         self._lock = threading.Lock()
         self._wake = threading.Condition(self._lock)
         self._queue: deque[tuple[object, bytes]] = deque()
+        self._queued: set = set()
         self._busy = False
         self._closing = False
 
@@ -219,6 +221,10 @@ class FrontierOracle:
         self._dropped = 0
         self._closed = 0
         self.version = 0  # bumps when the frontier changes
+        self.epoch = 0  # bumps on every measured seed
+
+        # The workdir goes at close() or interpreter exit, whichever comes first.
+        self._cleanup = weakref.finalize(self, shutil.rmtree, self._work, True)
 
         self._thread = None
         if mode is OracleMode.THREAD:
@@ -228,12 +234,18 @@ class FrontierOracle:
     # -- producer ---------------------------------------------------------------
 
     def submit(self, key, data: bytes) -> None:
-        """Queue a seed for measurement; dropped (counted) when the queue is full."""
+        """Queue a seed for measurement; dropped (counted) when the queue is full.
+
+        A key already measured or queued is skipped: the totals count each seed once.
+        """
         with self._lock:
+            if key in self._reach or key in self._queued:
+                return
             if len(self._queue) >= self._max_pending:
                 self._dropped += 1
                 return
             self._queue.append((key, bytes(data)))
+            self._queued.add(key)
             self._wake.notify()
 
     def drain(self) -> None:
@@ -253,7 +265,7 @@ class FrontierOracle:
             self._wake.notify_all()
         if self._thread is not None:
             self._thread.join()
-        shutil.rmtree(self._work, ignore_errors=True)
+        self._cleanup()
 
     # -- queries ----------------------------------------------------------------
 
@@ -268,6 +280,16 @@ class FrontierOracle:
             if reach is None:
                 return None
             return frozenset(c for c in reach if c in self._frontier)
+
+    def rare_reach(self, keys) -> list[float]:
+        """Per key: sum of 1/reachers over the open conditions it executes; 0 if unmeasured."""
+        with self._lock:
+            front, reachers = self._frontier, self._reachers
+            out = []
+            for k in keys:
+                reach = self._reach.get(k)
+                out.append(sum(1.0 / reachers[c] for c in reach if c in front) if reach else 0.0)
+            return out
 
     def reachers(self, cond: Branch) -> int:
         with self._lock:
@@ -300,6 +322,7 @@ class FrontierOracle:
             if not self._queue:
                 return False
             key, data = self._queue.popleft()
+            self._queued.discard(key)
             self._busy = True
             self._seq += 1
             tag = f"s{self._seq}"
@@ -338,6 +361,7 @@ class FrontierOracle:
         while len(self._reach) > self._max_seeds:
             _, evicted = self._reach.popitem(last=False)
             self._drop_reach(evicted)
+        self.epoch += 1
 
     def _drop_reach(self, executed: frozenset[Branch]) -> None:
         for b in executed:

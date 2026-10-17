@@ -182,6 +182,18 @@ def _pll_str(f) -> str:
     return " | pll: " + " ".join(parts)
 
 
+def _frontier_str(f) -> str:
+    """Compact live-stats field for the frontier oracle; empty when off."""
+    oracle = getattr(f, "_frontier_oracle", None)
+    if oracle is None:
+        return ""
+    st = oracle.stats()
+    return (
+        f" | frontier: open={st['frontier']} closed={st['closed']} "
+        f"seeds={st['seeds']} queue={st['pending']}"
+    )
+
+
 def _strata_str(f) -> str:
     """Compact live-stats field for the strata arms; empty when off."""
     from fuzzer_tool.core.edge_ledger import EdgeLedger
@@ -1900,6 +1912,7 @@ class StatsReporter:
             _kruskal_str(f)
             + _entropy_seed_str(f)
             + _strata_str(f)
+            + _frontier_str(f)
             + _pll_str(f)
             + _recurrence_str(f)
             + _one_fifth_str(f)

@@ -282,6 +282,7 @@ _SEED_STRATEGY_NAMES = (
     "p2c",
     "newest",
     "consolidated",
+    "frontier",
 )
 
 
@@ -1883,6 +1884,10 @@ class Fuzzer:
         # Consolidated v1/v2 category-prior strength (--consolidated-prior):
         # FIXED or BLUP (core/blup.py). Appended: positional signature.
         consolidated_prior=PriorMode.FIXED,
+        # Frontier-guided seed arm (core/schedulers/seed_frontier.py): path to a
+        # clang source-coverage <name>_cov build (build_targets.sh --frontier).
+        # Off by default and out of --hail-mary. Appended: positional signature.
+        frontier_bin=None,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3234,6 +3239,10 @@ class Fuzzer:
         self._seed_consolidated = (
             SeedConsolidatedScheduler(rng=self._rng) if seed_consolidated_scheduler else None
         )
+        self._frontier_oracle = None
+        self._seed_frontier = None
+        if frontier_bin:
+            self._build_frontier(frontier_bin)
         self._seed_os_arms = tuple(
             arm
             for arm in (
@@ -3247,6 +3256,7 @@ class Fuzzer:
                 self._seed_aimd,
                 self._seed_p2c,
                 self._seed_newest,
+                self._seed_frontier,
             )
             if arm is not None
         )
@@ -5190,6 +5200,24 @@ class Fuzzer:
         self._seed_strata = StrataSeedScheduler(self._rng, self._edge_ledger, guard)
         log.info("strata enabled (guard %s, family shift %d)", guard.value, self._edge_ledger.shift)
 
+    def _build_frontier(self, frontier_bin: str) -> None:
+        """Oracle (worker thread, temp workdir) + the 'frontier' seed arm."""
+        import tempfile
+
+        from fuzzer_tool.adapters.frontier_cov import FrontierOracle
+        from fuzzer_tool.core.schedulers.seed_frontier import FrontierSeedScheduler
+
+        work = Path(tempfile.mkdtemp(prefix="fuzzer_frontier_"))
+        self._frontier_oracle = FrontierOracle(Path(frontier_bin).expanduser(), work)
+        self._seed_frontier = FrontierSeedScheduler(self._rng, self._frontier_oracle)
+        log.info("frontier seed arm enabled (%s)", frontier_bin)
+
+    def _frontier_observe(self, seed: bytes) -> None:
+        """Queue a corpus seed for frontier measurement; no-op when off."""
+        oracle = getattr(self, "_frontier_oracle", None)
+        if oracle is not None:
+            oracle.submit(self._seed_key(seed), seed)
+
     def _strata_observe(self, seed: bytes, edges) -> None:
         """Mirror one record_edges call into the ledger; credit the strata pick."""
         # getattr: __new__-built test fuzzers reach record_edges without __init__.
@@ -6094,7 +6122,12 @@ class Fuzzer:
             self._crash_files.pop(sig, None)
 
     def save_to_corpus(self, data: bytes, parent: bytes | None = None):
-        return self._corpus_manager.save_to_corpus(data, parent)
+        before = len(self.corpus)
+        result = self._corpus_manager.save_to_corpus(data, parent)
+        # Every admission path ends here: the frontier oracle sees each new seed.
+        if len(self.corpus) > before:
+            self._frontier_observe(data)
+        return result
 
     def _trim_new_coverage(self, data: bytes, parent: bytes):
         return self._corpus_manager.trim_new_coverage(data, parent)
@@ -8797,6 +8830,7 @@ class Fuzzer:
             if len(edge_ids) > probe_width:
                 probe_seed, probe_width = seed, len(edge_ids)
             self._strata_observe(seed, edge_ids)
+            self._frontier_observe(seed)
             if self._edge_tracker.is_redundant(edge_ids):
                 # Nothing new: it would be the first seed pruned, so keep only
                 # its contribution to the global hit statistics.
@@ -9270,6 +9304,8 @@ class Fuzzer:
             groups["Seed selection"].append("doppler")
         if getattr(self, "_tang", None) is not None:
             groups["Seed selection"].append("tang")
+        if getattr(self, "_seed_frontier", None) is not None:
+            groups["Seed selection"].append("frontier")
         if getattr(self, "_kruskal_count", None) is not None:
             groups["Seed selection"].append("kruskal-count")
         if getattr(self, "_entropy_kl", None) is not None:

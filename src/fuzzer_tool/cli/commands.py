@@ -696,6 +696,7 @@ def cmd_fuzz(args):
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
+        frontier_bin=getattr(args, "frontier_bin", None),
         seed_newest_p=getattr(args, "seed_newest_p", DEFAULT_P_NEWEST),
         lst_revisit=getattr(args, "lst_revisit", 0.0),
         burn_front=getattr(args, "burn_front", False),
@@ -3149,6 +3150,15 @@ def main() -> int:
         "probability --seed-newest-p, else a uniform seed (DFS-like corridors vs bushy). Elo arm; "
         "also the no-elo pick when enabled (core/schedulers/seed_newest.py). Not in --hail-mary "
         "until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--frontier-bin",
+        default=None,
+        metavar="PATH",
+        help="Seed-arena arm 'frontier': clang source-coverage build (<name>_cov from "
+        "build_targets.sh --frontier). New seeds are measured in a worker thread; seeds "
+        "executing rarely reached one-sided branch conditions are picked "
+        "(core/schedulers/seed_frontier.py). Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--seed-newest-p",
