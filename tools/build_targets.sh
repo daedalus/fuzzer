@@ -16,6 +16,7 @@
 #   tools/build_targets.sh --vendor-tracecmp --asan   # Same with ASAN
 #   tools/build_targets.sh --distance                 # AFLGo distance .so targets (_dist / _dist_asan)
 #   tools/build_targets.sh --ngram                    # png_read k=2/k=3 n-gram flavors (_ng2 / _ng3)
+#   tools/build_targets.sh --frontier                 # clang branch-coverage exes (_cov) for tools/frontier.py
 #
 # Some targets need vendored sources fetched first (all are optional — the
 # build warns and skips when the tree is absent):
@@ -343,6 +344,7 @@ WITH_INDIR_COV=0
 WITH_GCC_SCOV=0   # --gcc-scov: gcc -fsanitize-coverage=trace-pc on the targets
 WITH_DISTANCE=0
 WITH_NGRAM=0
+WITH_FRONTIER=0
 WITH_MSAN=0
 WITH_TSAN=0
 WITH_FFMPEG_SANCOV=1  # auto-rebuild vendored FFmpeg with coverage if needed
@@ -362,6 +364,7 @@ for arg in "$@"; do
     [ "$arg" = "--ffmpeg-sancov" ] && WITH_FFMPEG_SANCOV=1
     [ "$arg" = "--distance" ] && WITH_DISTANCE=1
     [ "$arg" = "--ngram" ] && WITH_NGRAM=1
+    [ "$arg" = "--frontier" ] && WITH_FRONTIER=1
     [ "$arg" = "--msan" ] && WITH_MSAN=1
     [ "$arg" = "--tsan" ] && WITH_TSAN=1
     case "$arg" in
@@ -2092,6 +2095,34 @@ verify_vendor_tracecmp() {
 # .so builds) so `--cmplog` keeps the fuzzer in direct_lite mode
 # instead of falling back to the persistent loader, where the tail is
 # not streamed.  Builds ASAN and no-ASAN variants following the repo's
+# ── Frontier coverage executables (--frontier) ───────────────────
+# clang source-based coverage over wrapper *and* library sources, for
+# tools/frontier.py (branch conditions taken one way only). Built -O0 so
+# branches map 1:1 to source; frontier_stub.c replaces the AFL shim.
+# Spec: name:library sources and flags.
+build_frontier_targets() {
+    [ "$WITH_FRONTIER" -eq 0 ] && return 0
+    if ! command -v clang &>/dev/null; then
+        warn "clang not found — --frontier requires clang"
+        return 1
+    fi
+    echo "Building frontier coverage executables (_cov)..."
+    local stub="$REPO_ROOT/tools/lib/frontier_stub.c"
+    local specs=()
+    [ "$HAS_FUZZGOAT" -eq 1 ] && specs+=("fuzzgoat_read:$VENDOR/fuzzgoat/fuzzgoat.c -I$VENDOR/fuzzgoat -lm")
+    for spec in "${specs[@]}"; do
+        local name="${spec%%:*}" libs="${spec#*:}"
+        local out="$TARGETS/${name}_cov"
+        # shellcheck disable=SC2086
+        if clang -O0 -g -fprofile-instr-generate -fcoverage-mapping -o "$out" \
+            "${TARGETS_SRC:-$TARGETS}/$name.c" "$stub" $libs 2>>"$BUILD_LOG"; then
+            ok "${name}_cov"
+        else
+            warn "failed: ${name}_cov (see $BUILD_LOG)"
+        fi
+    done
+}
+
 # suffix convention (no suffix = no-ASAN, _asan = ASAN).
 # NOTE: vendored libraries keep their default trace-pc-guard
 # instrumentation, so distance is measured on the wrapper's own blocks
@@ -2615,6 +2646,8 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "vendor-tracecmp" "$state" "rebuild vendor libs + targets with trace-cmp (clang)"
     state=$([ "$WITH_DISTANCE" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "distance" "$state" "AFLGo SHM-tail distance .so targets (clang)"
+    state=$([ "$WITH_FRONTIER" -eq 1 ] && echo "ON" || echo "OFF")
+    printf '  %-20s %-12s %s\n' "frontier" "$state" "branch-coverage _cov exes for tools/frontier.py (clang)"
     state=$([ "$WITH_FFMPEG_SANCOV" -eq 1 ] && echo "ON (default)" || echo "OFF")
     printf '  %-20s %-12s %s\n' "ffmpeg-sancov" "$state" "auto-rebuild vendored FFmpeg with coverage"
     local ffvers
@@ -2669,6 +2702,7 @@ case "$OPTS" in
     --clang-scov) BUILD_ASAN=1; BUILD_NOSAN=1 ;;
     --vendor-tracecmp) [ "$HAS_ASAN_ARG" -eq 1 ] && BUILD_ASAN=1 || BUILD_NOSAN=1 ;;
     --ngram) BUILD_NOSAN=1 ;;
+    --frontier) ;;
     *) BUILD_ASAN=1; BUILD_NOSAN=1 ;;
 esac
 
@@ -2796,6 +2830,9 @@ if [ "$WITH_VENDOR_TRACECMP" -eq 1 ]; then
 fi
 if [ "$WITH_DISTANCE" -eq 1 ]; then
     build_distance_so_targets
+fi
+if [ "$WITH_FRONTIER" -eq 1 ]; then
+    build_frontier_targets
 fi
 if [ "$WITH_NGRAM" -eq 1 ]; then
     build_ngram_so_targets

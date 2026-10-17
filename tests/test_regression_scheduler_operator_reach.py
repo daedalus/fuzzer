@@ -26,6 +26,7 @@ cannot trade away for exploitation no matter how it weighs its arms.
 
 from __future__ import annotations
 
+import itertools
 import random
 
 import pytest
@@ -35,6 +36,7 @@ from fuzzer_tool.core.mutator_interface import MutatorBase
 from fuzzer_tool.core.operator_categories import UNCATEGORIZED, category_of
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.services.operators import CONTEXT_DIM
+from tests.support.scripted_rng import ScriptedRng
 
 # Rounds per reachability run. The slowest built-in scheduler to cover the
 # whole table is MOpt, whose last operator first fires at ~2.5k selections
@@ -84,7 +86,11 @@ def _all_operator_schedulers():
     mopt = S.MOptScheduler()
     replicator = S.ReplicatorScheduler()
     exp3 = S.Exp3Scheduler()
-    eps = S.EpsilonGreedyScheduler()
+    # Explore every round, choice walks the ops in order: reach through the
+    # explore branch, not a lucky draw (~2.1k explores over ~300 arms missed one).
+    eps = S.EpsilonGreedyScheduler(
+        rng=ScriptedRng(randoms=itertools.repeat(0.0), choice_idxs=itertools.count())
+    )
     hier = S.HierarchicalBanditScheduler()
     gp = S.GPUCBScheduler()
     bo = S.BOGPUCBScheduler()

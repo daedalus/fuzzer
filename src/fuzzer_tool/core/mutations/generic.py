@@ -1,6 +1,7 @@
 """Mutation operators and dictionary handling."""
 
 import itertools
+from enum import IntEnum
 from functools import cache
 
 import numpy as np
@@ -2487,6 +2488,59 @@ def tail_append(data: bytes, max_len: int, *, rng) -> bytes:
 
     size = min(choose_len(min(_TAIL_APPEND_MAX, room), rng), room)
     return data + rng.randbytes(size)[:size]
+
+
+class Mismatch(IntEnum):
+    """How ``literal_mismatch`` breaks a literal after its kept prefix."""
+
+    FLIP = 0  # byte k changed, length kept: "tr" + "x" + "e"
+    CUT = 1  # input ends after k bytes: "tr" then EOF
+
+
+def literal_mismatch(data: bytes, tokens, start: int, max_len: int, *, rng) -> bytes | None:
+    """Keep a literal's first k bytes and break it at byte k.
+
+    A parser matching ``true`` byte by byte (``*++p != 'r' || ...``) has one
+    branch per byte. Whole-token inserts take only the matching sides; this
+    takes the k-th mismatching one, or the length check when the input ends
+    mid-literal.
+
+    The literal is edited where it occurs at/after ``start`` (wrapping), or
+    inserted at ``start`` when absent.
+
+    Args:
+        data: Input bytes.
+        tokens: Literals (dictionary / cmplog tokens; str or bytes).
+        start: Search start and insertion point (the planned site).
+        max_len: Maximum output length.
+        rng: RNG.
+
+    Returns:
+        Mutated bytes, or None when the token is shorter than 2 bytes.
+    """
+    tok = rng.choice(tokens)
+    if isinstance(tok, str):
+        tok = tok.encode()
+    if len(tok) < 2:
+        return None
+
+    k = rng.randint(1, len(tok) - 1)
+    mode = Mismatch(rng.randint(0, 1))
+    start = min(max(start, 0), len(data))
+
+    # First occurrence at/after start, else the first anywhere.
+    pos = data.find(tok, start)
+    if pos < 0:
+        pos = data.find(tok)
+
+    if mode is Mismatch.CUT:
+        head = data[:pos] if pos >= 0 else data[:start]
+        return (head + tok[:k])[:max_len]
+
+    bad = tok[:k] + bytes([tok[k] ^ rng.randint(1, 255)]) + tok[k + 1 :]
+    if pos >= 0:
+        return data[:pos] + bad + data[pos + len(tok) :]
+    return (data[:start] + bad + data[start:])[:max_len]
 
 
 def splice_diff_located(a: bytes, b: bytes, rng) -> bytes:

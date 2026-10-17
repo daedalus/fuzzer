@@ -83,6 +83,71 @@ static void process_value(json_value *value, int depth)
     }
 }
 
+/* Optional settings trailer: input ending in "\0 F" parses with
+ * json_parse_ex() so settings-gated branches become reachable. F bits:
+ *   0x01 comments   0x02 max_memory = 64 << (F >> 4)
+ *   0x04 error buf  0x08 allocation #(F >> 4) + 1 returns NULL
+ * e.g. "[1," + "\0\x04" fills the error buffer. */
+#define TRAILER_LEN 2
+#define F_COMMENTS 0x01
+#define F_LIMIT 0x02
+#define F_ERRBUF 0x04
+#define F_FAILALLOC 0x08
+#define LIMIT_BASE 64
+
+static unsigned int alloc_count, alloc_fail_at;
+
+static void *failing_alloc(size_t n, int zero, void *user)
+{
+    (void)user;
+    if (++alloc_count == alloc_fail_at) {
+        __afl_map_edge(0x100A);
+        return NULL;
+    }
+    return zero ? calloc(1, n) : malloc(n);
+}
+
+static void plain_free(void *p, void *user)
+{
+    (void)user;
+    free(p);
+}
+
+static int has_trailer(const unsigned char *buf, size_t size)
+{
+    return size >= TRAILER_LEN && buf[size - TRAILER_LEN] == '\0';
+}
+
+static json_value *parse_trailer(const unsigned char *buf, size_t len,
+                                 unsigned char flags, json_settings *settings)
+{
+    char err[json_error_max] = {0};
+    unsigned int nibble = flags >> 4;
+
+    __afl_map_edge(0x1006);
+    memset(settings, 0, sizeof *settings);
+    if (flags & F_COMMENTS) {
+        __afl_map_edge(0x1007);
+        settings->settings |= json_enable_comments;
+    }
+    if (flags & F_LIMIT) {
+        __afl_map_edge(0x1008);
+        settings->max_memory = (unsigned long)LIMIT_BASE << nibble;
+    }
+
+    /* Always custom: json_value_free_ex() needs mem_free set. */
+    alloc_count = 0;
+    alloc_fail_at = (flags & F_FAILALLOC) ? nibble + 1 : 0;
+    settings->mem_alloc = failing_alloc;
+    settings->mem_free = plain_free;
+
+    json_value *value = json_parse_ex(settings, (const json_char *)buf, len,
+                                      (flags & F_ERRBUF) ? err : NULL);
+    if (!value && err[0])
+        __afl_map_edge(0x1009);
+    return value;
+}
+
 __attribute__((visibility("default")))
 int fuzz_shm_run(const unsigned char *buf, size_t size)
 {
@@ -92,11 +157,18 @@ int fuzz_shm_run(const unsigned char *buf, size_t size)
         return 0;
     }
 
-    json_value *value = json_parse((const json_char *)buf, size);
+    json_settings settings = {0};
+    int trailer = has_trailer(buf, size);
+    json_value *value = trailer
+        ? parse_trailer(buf, size - TRAILER_LEN, buf[size - 1], &settings)
+        : json_parse((const json_char *)buf, size);
     if (value) {
         __afl_map_edge(0x1002);
         process_value(value, 0);
-        json_value_free(value);
+        if (trailer)
+            json_value_free_ex(&settings, value);
+        else
+            json_value_free(value);
         __afl_map_edge(0x1003);
     } else {
         __afl_map_edge(0x1004);

@@ -320,6 +320,8 @@ UNWIRED_ARMS = {
     # arm is a question about which quantity is right, not a knob to keep.
     "boltzmann-count": 'services/seed_picker.py: n = max(meta.get("fuzz_count", 1), 1)',
     "boltzmann-cost": "services/seed_picker.py: n = effective_fuzz_count(meta, mean_exec)",
+    # Off arm: a tree without the op (no per-op CLI switch). 2026-10-17 used a master worktree.
+    "literal-mismatch": "core/operator_registry.py: drop literal_mismatch from _CATEGORIES['dict']",
 }
 
 # ── Running ────────────────────────────────────────────────────────────

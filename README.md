@@ -63,7 +63,7 @@ fuzzer-tool fuzz ./target --resume
 
 ### Mutation Engine
 
-**271 operators in 9 categories.** Every scheduler picks from the same registry, and
+**299 operators in 9 categories.** Every scheduler picks from the same registry, and
 `REGISTRY.register_mutator()` adds operators at runtime without a restart.
 
 | Category | Count | Representative operators |
@@ -71,7 +71,7 @@ fuzzer-tool fuzz ./target --resume
 | `bit` | 20 | `bit_flip`, `bit_rotate`, `bit_shift`, `span_invert`, `bit_repack`, `bit_transpose_{8,16,32,64}` |
 | `byte` | 21 | arithmetic 1/2/4/8-byte LE/BE, interesting-value overwrite, byte flips |
 | `block` | 18 | insert/delete/duplicate/swap/clone, block splice |
-| `dict` | 8 | `dict_insert`/`append`/`prepend`/`overwrite`, `dict_compound`, `checksum_repair` |
+| `dict` | 9 | `dict_insert`/`append`/`prepend`/`overwrite`, `dict_compound`, `literal_mismatch`, `checksum_repair` |
 | `structural` | 37 | `splice_common_prefix`, `crossover`, `elite_fuse`, `tlv_mutate`, `token_shuffle`, `special_strings`, `punctuation_insert`, `versifier_generate` |
 | `radamsa` | 11 | `tree_mutate`, `line_mutate`, `fuse_this`/`fuse_next`/`fuse_old`, `utf8_widen`, `utf8_insert` |
 | `format` | 73 | one `*_chunk_mutate` per container format, plus `format_lock`, `field_repair`, `png_crc_fix`, `recompress_{gzip,zlib}` |
