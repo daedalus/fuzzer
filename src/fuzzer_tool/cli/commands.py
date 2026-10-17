@@ -715,6 +715,7 @@ def cmd_fuzz(args):
         pos_chunk=getattr(args, "pos_chunk", False),
         pos_changed=getattr(args, "pos_changed", False),
         pos_rare_mask=getattr(args, "pos_rare_mask", False),
+        pos_centroid=getattr(args, "pos_centroid", False),
         pos_finch=getattr(args, "pos_finch", False),
         garch=getattr(args, "garch", False),
         continuum=getattr(args, "continuum", False),
@@ -2420,6 +2421,7 @@ _HAIL_MARY_FLAGS = (
     "pos_chunk",
     "pos_changed",
     "pos_rare_mask",
+    "pos_centroid",
     "pos_finch",
     "pos_consolidated",
     "pos_good_turing",
@@ -3308,6 +3310,13 @@ def main() -> int:
         "whose mutation keeps the seed's rarest edge hit. Implied by --position-arena.",
     )
     fuzz_parser.add_argument(
+        "--pos-centroid",
+        action="store_true",
+        help="Enable the position-arena centroid scheduler: favours bytes whose mutation "
+        "reaches an edge-cluster member the seed lacks, in clusters whose medoid it holds "
+        "(core/edge_clusters.py). Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
         "--pos-consolidated",
         action="store_true",
         help="Enable the position-arena consolidated scheduler: uniform, boundary, levy and "
@@ -3361,13 +3370,13 @@ def main() -> int:
         action="store_true",
         help="Elo arbitration over position proposers (sensitivity, TE, phase, MI, "
         "crash-MI, region, burn-front, kl-ducb, canary, round-robin, fibonacci, fractal, context, levy, boundary, "
-        "effector, token, chunk, changed, rare-mask, good-turing, consolidated) with "
+        "effector, token, chunk, changed, rare-mask, centroid, good-turing, consolidated) with "
         "uniform as the baseline arm, under pos_ keys. Needs --elo; a proposer rated at "
         "or below uniform (or, once running, the pos-canary floor) is logged. Implies "
         "--burn-front, --pos-kl-ducb, --pos-canary, --pos-round-robin, "
         "--pos-fibonacci, --pos-fractal, --pos-cmplog, --pos-lineage, --pos-context, "
         "--pos-levy, --pos-boundary, --pos-effector, --pos-finch, --pos-token, --pos-chunk, "
-        "--pos-changed, --pos-rare-mask, --pos-good-turing and --pos-consolidated. "
+        "--pos-changed, --pos-rare-mask, --pos-centroid, --pos-good-turing and --pos-consolidated. "
         "Enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(

@@ -78,6 +78,10 @@ Arms::
     rare_mask    PositionRareMaskScheduler, FairFuzz branch mask: bins
                  whose mutation keeps the seed's rarest edge (opt-in,
                  --pos-rare-mask; see core/schedulers/pos_rare_mask.py)
+    centroid     PositionCentroidScheduler, bins whose mutation reaches an
+                 edge-cluster member the seed lacks, in clusters whose medoid
+                 it holds (opt-in, --pos-centroid; see
+                 core/schedulers/pos_centroid.py)
     good_turing  PositionGoodTuringScheduler, offset bins drawn by per-bin
                  Good-Turing discovery probability over edge identity
                  (opt-in, --pos-good-turing; see
@@ -118,7 +122,7 @@ served one plays each pool member that did not, with the round score. Arms
 that shared a round do not play each other.
 
 ``burn_front``, ``kl_ducb``, ``canary``, ``round_robin``, ``fibonacci``,
-``fractal``, ``context``, ``levy``, ``boundary``, ``changed``, ``rare_mask``, ``good_turing``, ``saliency``, ``harmonic``, ``kadane`` and ``consolidated`` are each
+``fractal``, ``context``, ``levy``, ``boundary``, ``changed``, ``rare_mask``, ``centroid``, ``good_turing``, ``saliency``, ``harmonic``, ``kadane`` and ``consolidated`` are each
 credited off-policy on every settled round, whoever served the positions, like
 ``seed_canary`` on the seed side.
 """
@@ -162,6 +166,7 @@ POSITION_STRATEGY_NAMES = (
     "chunk",
     "changed",
     "rare_mask",
+    "centroid",
     "good_turing",
     "saliency",
     "harmonic",
@@ -216,6 +221,7 @@ class PositionArena:
         chunk: PositionScheduler | None = None,
         changed: PositionScheduler | None = None,
         rare_mask: PositionScheduler | None = None,
+        centroid: PositionScheduler | None = None,
         consolidated: PositionScheduler | None = None,
         finch: PositionScheduler | None = None,
         good_turing: PositionScheduler | None = None,
@@ -250,6 +256,7 @@ class PositionArena:
         self._finch = finch if self.allows("finch") else None
         self._changed = changed if self.allows("changed") else None
         self._rare_mask = rare_mask if self.allows("rare_mask") else None
+        self._centroid = centroid if self.allows("centroid") else None
         self._consolidated = consolidated if self.allows("consolidated") else None
         self._good_turing = good_turing if self.allows("good_turing") else None
         self._saliency = saliency if self.allows("saliency") else None
@@ -273,6 +280,7 @@ class PositionArena:
                 self._boundary,
                 self._changed,
                 self._rare_mask,
+                self._centroid,
                 self._good_turing,
                 self._saliency,
                 self._harmonic,

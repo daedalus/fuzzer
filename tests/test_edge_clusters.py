@@ -133,3 +133,61 @@ def test_rare_threshold_matches_owner_counts(threshold):
     assert c.rare_classes(edges) == len({c.class_of(e) for e in edges if owners[e] <= threshold})
     assert len(rare_heads) >= 1
     assert np.all(c.class_owner_counts() >= 1)
+
+
+# ── centroids (medoids) and gaps ────────────────────────────────────────────
+
+
+def _medoid_seeds() -> dict[str, set[int]]:
+    # L on s0..s9, M on s0..s8, P on s1..s8: J(L,M)=.9, J(L,P)=.8, J(M,P)=8/9.
+    # All join leader L; mean J to the others: L .85, M .894, P .844 -> medoid M.
+    seeds = {f"s{i}": {100} for i in range(10)}
+    for i in range(9):
+        seeds[f"s{i}"].add(200)
+    for i in range(1, 9):
+        seeds[f"s{i}"].add(300)
+    return seeds
+
+
+def _mean_jaccard(seeds, e, others) -> float:
+    own = {k for k, s in seeds.items() if e in s}
+    return sum(_jaccard(own, {k for k, s in seeds.items() if o in s}) for o in others) / len(others)
+
+
+def test_medoid_maximises_mean_jaccard():
+    seeds = _medoid_seeds()
+    c = _fit(seeds)
+    members = (100, 200, 300)
+    want = max(members, key=lambda e: _mean_jaccard(seeds, e, [o for o in members if o != e]))
+    assert want == 200 and c.cluster_of(100) == 100  # medoid differs from leader
+    assert {c.medoid_of(e) for e in members} == {want}
+
+
+def test_gaps_are_missing_members_of_held_centroids():
+    c = _fit()
+    # s3 holds A (the medoid side) and lacks B; s0 holds both; s4's cluster is complete.
+    assert c.gaps(SEEDS["s3"]) == [c.class_of(5)]
+    assert c.gaps(SEEDS["s0"]) == []
+    assert c.gaps(SEEDS["s4"]) == []
+
+
+def test_gaps_need_the_centroid():
+    # Adversarial: a seed holding only a peripheral member is not at the centre.
+    seeds = _medoid_seeds()
+    c = _fit(seeds)
+    assert c.gaps({300}) == []
+    assert c.gaps({200}) == [100, 300]  # nearest the medoid first: J .9 then .889
+
+
+def test_gaps_limit_and_unknown():
+    c = _fit(_medoid_seeds())
+    assert c.gaps({200}, limit=1) == [100]
+    assert c.gaps({999}) == []
+    assert _fit({}).gaps({1}) == []
+
+
+def test_refit_interval_is_configurable():
+    from fuzzer_tool.core.edge_matrix import DEFAULT_REFIT_INTERVAL
+
+    assert EdgeClusters().cadence.interval == DEFAULT_REFIT_INTERVAL
+    assert EdgeClusters(refit_interval=500).cadence.interval == 500

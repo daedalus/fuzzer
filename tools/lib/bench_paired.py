@@ -77,6 +77,7 @@ ARENA_TESTABLE = (
     "chunk",
     "changed",
     "rare_mask",
+    "centroid",
     "good_turing",
     "consolidated",
 )

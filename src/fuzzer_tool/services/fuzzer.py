@@ -458,6 +458,9 @@ ENTROPY_HISTORY_MAX = 200  # max samples before trimming
 ENTROPY_HISTORY_TRIM = 100  # keep this many after trim
 ENTROPY_WINDOW = 4  # samples for rate-of-change computation
 ENTROPY_FLAT_THRESHOLD = 0.001  # rate below which entropy is "flat"
+# pos_centroid owns a cluster model when --edge-clusters is off: refit 4x the
+# substrate cadence so a short run sees its gaps (fuzzgoat ~10 ms per refit).
+POS_CLUSTERS_REFIT_EXECS = 500
 
 # ── Adaptive timeout (--adaptive-timeout) ────────────────────────────────
 # suggested_timeout() reads the empirical CDF, so it needs a settled one:
@@ -813,6 +816,8 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("changed")
     if getattr(f, "_pos_rare_mask", None) is not None:
         names.append("rare-mask")
+    if getattr(f, "_pos_centroid", None) is not None:
+        names.append("centroid")
     if getattr(f, "_pos_good_turing", None) is not None:
         names.append("good-turing")
     if getattr(f, "_pos_saliency", None) is not None:
@@ -1811,6 +1816,7 @@ class Fuzzer:
         pos_chunk=False,
         pos_changed=False,
         pos_rare_mask=False,
+        pos_centroid=False,
         pos_finch=False,
         # OS / network scheduler ports (core/schedulers/seed_<name>.py,
         # op_<name>.py). Seed arms: Elo arms and no-elo fallbacks, like drr.
@@ -3456,6 +3462,7 @@ class Fuzzer:
             "chunk": pos_chunk,
             "changed": pos_changed,
             "rare_mask": pos_rare_mask,
+            "centroid": pos_centroid,
             "finch": pos_finch,
         }
         self._build_new_pos_arms(
@@ -3489,6 +3496,7 @@ class Fuzzer:
                 chunk=self._pos_chunk,
                 changed=self._pos_changed,
                 rare_mask=self._pos_rare_mask,
+                centroid=self._pos_centroid,
                 consolidated=self._pos_consolidated,
                 good_turing=self._pos_good_turing,
                 saliency=self._pos_saliency,
@@ -6790,6 +6798,7 @@ class Fuzzer:
         Probes are bound here so ``core`` never reaches into services or
         adapters.
         """
+        from fuzzer_tool.core.schedulers.pos_centroid import PositionCentroidScheduler
         from fuzzer_tool.core.schedulers.pos_changed import PositionChangedScheduler
         from fuzzer_tool.core.schedulers.pos_chunk import PositionChunkScheduler
         from fuzzer_tool.core.schedulers.pos_effector import PositionEffectorScheduler
@@ -6801,6 +6810,7 @@ class Fuzzer:
         tracker = self._edge_tracker
         self._pos_effector = self._pos_token = self._pos_chunk = None
         self._pos_changed = self._pos_rare_mask = self._pos_finch = None
+        self._pos_centroid = self._pos_clusters = None
 
         # Byteflip-LIVE bytes from drained deterministic stages.
         if "effector" in enabled:
@@ -6848,6 +6858,24 @@ class Fuzzer:
             )
             log.info("Position rare-mask scheduling enabled")
 
+        # Cluster centroids: reach the members a seed lacks. Shares the
+        # --edge-clusters model when on; otherwise its own, so the arm does
+        # not also switch rarity counting (single-variable A/B).
+        if "centroid" in enabled:
+            from fuzzer_tool.core.edge_clusters import EdgeClusters
+
+            clusters = getattr(self, "_edge_clusters", None) or EdgeClusters(
+                refit_interval=POS_CLUSTERS_REFIT_EXECS
+            )
+            self._pos_clusters = clusters
+            self._pos_centroid = PositionCentroidScheduler(
+                self._rng,
+                gaps_of=lambda d: clusters.gaps(tracker.seed_edges.get(self._seed_key(d)) or ()),
+                hit_any=self._edges_hit_any,
+                version=lambda: clusters.version,
+            )
+            log.info("Position centroid scheduling enabled")
+
     def _path_moved(self, parent: bytes) -> bool | None:
         """Did this exec's trace differ from *parent*'s? None when unmeasurable.
 
@@ -6873,6 +6901,13 @@ class Fuzzer:
         if shm is None:
             return None
         return shm.has_edge(edge_id)
+
+    def _edges_hit_any(self, edges) -> bool | None:
+        """Whether any of *edges* fired in this exec; None without SHM."""
+        shm = self.shm_cov
+        if shm is None:
+            return None
+        return any(shm.has_edge(e) for e in edges)
 
     def _note_det_effector(self) -> None:
         """Tell the operator engine whether the byteflip just run moved the trace.

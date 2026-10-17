@@ -1258,6 +1258,9 @@ class FuzzRound:
         clusters = getattr(f, "_edge_clusters", None)
         if clusters is not None:
             clusters.maybe_refit(f._edge_tracker, f.exec_count)
+        pos_clusters = getattr(f, "_pos_clusters", None)
+        if pos_clusters is not None and pos_clusters is not clusters:
+            pos_clusters.maybe_refit(f._edge_tracker, f.exec_count)
         # The saliency net rides the same discovery hook and the same RefitCadence
         # policy (executions, min seeds before stamping, skip if nothing grew).
         saliency = getattr(f, "_pos_saliency", None)
