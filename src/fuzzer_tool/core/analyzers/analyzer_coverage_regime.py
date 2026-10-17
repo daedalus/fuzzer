@@ -9,6 +9,7 @@ loop via a property; the loop does not embed strategy logic in the detector.
 here for use by the detector.
 """
 
+import collections
 import logging
 import math
 
@@ -199,6 +200,10 @@ class CoverageRegimeDetector:
         self._last_discovery_rate: float = 0.0
         self._last_structure_delta: int = 0
         self._last_exec_count: int = 0
+        # Homogeneity verdicts, current last. A rejection escalates only when
+        # the one a full window back also rejected (see _homog_confirmed).
+        lag = homogeneity.window_size if homogeneity is not None else 0
+        self._homog_rejects: collections.deque = collections.deque(maxlen=lag + 1)
 
     def observe(
         self,
@@ -247,6 +252,11 @@ class CoverageRegimeDetector:
 
         self._actionable = False
         self._last_regime = self._regime
+
+        rejected = homogeneity_result is not None and not homogeneity_result.get(
+            "homogeneous", True
+        )
+        self._homog_rejects.append(rejected)
 
         self._classify(
             discovery_rate=discovery_rate,
@@ -316,7 +326,7 @@ class CoverageRegimeDetector:
 
         # Homogeneity: clustered coverage without a CSD signal = biased
         # exploration, i.e. subcritical in the percolation sense.
-        if homogeneity_result is not None and not homogeneity_result.get("homogeneous", True):
+        if homogeneity_result is not None and self._homog_confirmed():
             chi2 = homogeneity_result.get("chi2", 0.0)
             p = homogeneity_result.get("p_value", 1.0)
             self._regime = CoverageRegime.SUBCRITICAL
@@ -403,6 +413,17 @@ class CoverageRegimeDetector:
     def continuum(self):
         return self._continuum
 
+    def _homog_confirmed(self) -> bool:
+        """Rejected now and one full window ago.
+
+        The test reruns every tick on a sliding window, so at alpha per tick
+        a long campaign rejects by chance; and one burst stays in the window
+        for ``window_size`` ticks, rejecting on each. Windows ``window_size``
+        ticks apart share no tick: both rejecting by chance is ~alpha^2.
+        """
+        h = self._homog_rejects
+        return len(h) == h.maxlen and h[0] and h[-1]
+
     def _garch_spike(self) -> str:
         """Reason string for a forecast volatility spike, or "" for none."""
         if self._garch is None or not self._garch.clustering:
@@ -449,6 +470,7 @@ class CoverageRegimeDetector:
         self._actionable = False
         self._regime_history.clear()
         self._continuum_history.clear()
+        self._homog_rejects.clear()
         self._stall_triggered = False
         if self._continuum is not None:
             self._continuum.reset()

@@ -732,6 +732,17 @@ def holm(ps: list[float]) -> list[float]:
     return out
 
 
+def _add_holm(results: list[dict]) -> None:
+    """Set ``holm_p`` on each comparison: Holm over the family a reader scans.
+
+    A table of m raw p-values shows ~m*alpha below alpha by chance; the
+    smallest one is the row the eye picks.
+    """
+    adj = holm([r["mcnemar_p"] for r in results])
+    for r, p in zip(results, adj, strict=True):
+        r["holm_p"] = p
+
+
 # Pre-registered strata thresholds (§6).
 STRATA_ALPHA = 0.05
 STRATA_EPS_FLOOR = 0.98  # A1 may lose < 2% execs/s
@@ -811,7 +822,7 @@ def _print_pooled(arm: str, r: dict) -> None:
     """One pooled comparison row, plus the coverage-drop (MCAR) note when cells were dropped."""
     print(
         f"{arm:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} {r['losses']:>4} "
-        f"{r['ties']:>4} {r['mcnemar_p']:>9.3g} {r['fisher_p']:>9.3g} "
+        f"{r['ties']:>4} {r['mcnemar_p']:>9.3g} {r['holm_p']:>9.3g} {r['fisher_p']:>9.3g} "
         f"{r['median_delta']:>+7.1f} {r['median_spread']:>6.1f}"
     )
     if not r["dropped_no_coverage"]:
@@ -826,26 +837,38 @@ def _print_pooled(arm: str, r: dict) -> None:
     )
 
 
-def _print_by_target(arm: str, baseline: str, base: list, rows: list, metric: str) -> None:
-    """Per-target breakdown of one arm vs baseline; skips targets missing from either arm."""
-    print(f"\nper-target: {arm} vs {baseline}")
+def _target_results(base: list, loaded: dict, metric: str) -> list[tuple[str, str, dict]]:
+    """(arm, target, comparison) for every arm x target both sides ran."""
+    out = []
+    for arm, rows in sorted(loaded.items()):
+        targets = sorted({r["target"] for r in base} | {r["target"] for r in rows})
+        for tgt in targets:
+            b = [r for r in base if r["target"] == tgt]
+            t = [r for r in rows if r["target"] == tgt]
+            if not b or not t:
+                continue
+            out.append((arm, tgt, compare(b, t, metric)))
+    return out
+
+
+def _print_by_target(baseline: str, results: list[tuple[str, str, dict]]) -> None:
+    """Per-target breakdown, Holm-adjusted over all arm x target rows."""
+    _add_holm([r for _, _, r in results])
     sub = (
         f"{'target':<20} {'cells':>5} {'rep':>3} {'W':>4} {'L':>4} {'T':>4} "
-        f"{'McNemar':>9} {'Wilcox':>8} {'med Δ':>7} {'noise':>6}"
+        f"{'McNemar':>9} {'Holm':>9} {'Wilcox':>8} {'med Δ':>7} {'noise':>6}"
     )
-    print(sub)
-    print("-" * len(sub))
-    targets = sorted({r["target"] for r in base} | {r["target"] for r in rows})
-    for tgt in targets:
-        b = [r for r in base if r["target"] == tgt]
-        t = [r for r in rows if r["target"] == tgt]
-        if not b or not t:
-            continue
-        r = compare(b, t, metric)
+    last_arm = None
+    for arm, tgt, r in results:
+        if arm != last_arm:
+            print(f"\nper-target: {arm} vs {baseline}")
+            print(sub)
+            print("-" * len(sub))
+            last_arm = arm
         print(
             f"{Path(tgt).name:<20} {r['cells']:>5} {r['reps']:>3} {r['wins']:>4} "
             f"{r['losses']:>4} {r['ties']:>4} {r['mcnemar_p']:>9.3g} "
-            f"{r['wilcoxon_p']:>8.3g} {r['median_delta']:>+7.1f} "
+            f"{r['holm_p']:>9.3g} {r['wilcoxon_p']:>8.3g} {r['median_delta']:>+7.1f} "
             f"{r['median_spread']:>6.1f}"
         )
 
@@ -865,12 +888,14 @@ def cmd_analyse(args: argparse.Namespace) -> int:
     print(f"baseline: {args.baseline}  ({len(base)} cells)\n")
     hdr = (
         f"{'arm':<20} {'cells':>5} {'rep':>3} {'W':>4} {'L':>4} {'T':>4} "
-        f"{'McNemar':>9} {'Fisher':>9} {'med Δ':>7} {'noise':>6}"
+        f"{'McNemar':>9} {'Holm':>9} {'Fisher':>9} {'med Δ':>7} {'noise':>6}"
     )
     print(hdr)
     print("-" * len(hdr))
-    for arm, rows in sorted(loaded.items()):
-        _print_pooled(arm, compare(base, rows, args.metric))
+    pooled = {arm: compare(base, rows, args.metric) for arm, rows in sorted(loaded.items())}
+    _add_holm(list(pooled.values()))
+    for arm, r in pooled.items():
+        _print_pooled(arm, r)
 
     if args.by_target:
         # A pooled row is not enough to read an arm whose effect is expected on
@@ -878,8 +903,7 @@ def cmd_analyse(args: argparse.Namespace) -> int:
         # move dilute a real effect, and a target near coverage saturation
         # contributes ties that read as agreement. Break the same pairing out
         # per target so the shape of the result is visible, not just its sum.
-        for arm, rows in sorted(loaded.items()):
-            _print_by_target(arm, args.baseline, base, rows, args.metric)
+        _print_by_target(args.baseline, _target_results(base, loaded, args.metric))
 
     # Compute and output risk matrix if requested
     if args.risk_matrix:
@@ -887,12 +911,17 @@ def cmd_analyse(args: argparse.Namespace) -> int:
         print("\nRisk Matrix (for minimax-robust scheduler selection):")
         print("Format: {scheduler: {target: mean_regret}}")
         print(json.dumps(risk_matrix, indent=2))
-        arm, regret = minimax_arm(risk_matrix)
-        print(f"\nminimax-robust arm: {arm} (worst-target regret {regret:.3f})")
+        arm, regret, held = holdout_minimax({**loaded, args.baseline: base})
+        held_s = "n/a" if held is None else f"{held:.3f}"
+        print(f"\nminimax-robust arm: {arm} (worst-target regret {regret:.3f}, held-out {held_s})")
 
     print(
         "\nMcNemar is the test to read: the matrix is paired by construction. "
         "Fisher is shown only to make the cost of discarding the pairing visible."
+    )
+    print(
+        "Holm adjusts McNemar over every row of its table: read it, not the raw p, "
+        "when scanning for the best arm or target."
     )
     print(
         "A ~10-point difference in per-cell win rate needs roughly 100 paired cells "
@@ -986,6 +1015,34 @@ def minimax_arm(risk_matrix: dict[str, dict[str, float]]) -> tuple[str, float]:
     targets = sorted({t for row in risk_matrix.values() for t in row})
     arm = tracker.select_minimax_scheduler(list(risk_matrix), targets)
     return arm, max(risk_matrix[arm].values())
+
+
+def _seed_fold(loaded: dict[str, list[dict]], seeds: set) -> dict[str, list[dict]]:
+    """Rows of *loaded* restricted to *seeds*."""
+    return {arm: [r for r in rows if r["seed"] in seeds] for arm, rows in loaded.items()}
+
+
+def holdout_minimax(loaded: dict[str, list[dict]]) -> tuple[str, float, float | None]:
+    """Minimax arm, its in-sample worst regret, and a 2-fold held-out regret.
+
+    Picking and scoring on the same seeds reports the winner's own noise as
+    skill (winner's curse). Held-out: pick on even-indexed seeds, score on
+    odd, and vice versa; mean of the two. E.g. two equal arms that alternate
+    wins: each fold's pick shows regret 0, scores 1 held out. None below 2
+    seeds.
+    """
+    arm, regret = minimax_arm(compute_risk_matrix(loaded))
+    seeds = sorted({r["seed"] for rows in loaded.values() for r in rows})
+    if len(seeds) < 2:
+        return arm, regret, None
+
+    folds = (set(seeds[0::2]), set(seeds[1::2]))
+    held = []
+    for pick, score in (folds, folds[::-1]):
+        picked, _ = minimax_arm(compute_risk_matrix(_seed_fold(loaded, pick)))
+        risk = compute_risk_matrix(_seed_fold(loaded, score))
+        held.append(max(risk[picked].values()))
+    return arm, regret, statistics.fmean(held)
 
 
 def main() -> int:
