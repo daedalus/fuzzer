@@ -345,6 +345,7 @@ WITH_GCC_SCOV=0   # --gcc-scov: gcc -fsanitize-coverage=trace-pc on the targets
 WITH_DISTANCE=0
 WITH_NGRAM=0
 WITH_FRONTIER=0
+PROFILE_COV_FLAGS="-fprofile-instr-generate -fcoverage-mapping"  # --frontier
 WITH_MSAN=0
 WITH_TSAN=0
 WITH_FFMPEG_SANCOV=1  # auto-rebuild vendored FFmpeg with coverage if needed
@@ -1406,6 +1407,11 @@ STUBEOF
         LINK_FLAGS="-fsanitize=address"
         EXTRA_LIBS="-lsancov_stub"
     fi
+    # --frontier: clang source coverage instead of sancov (tools/frontier.py).
+    if [ "$asan_suffix" = "_cov" ]; then
+        COV_FLAGS="$PROFILE_COV_FLAGS"
+        LINK_FLAGS="-fprofile-instr-generate"
+    fi
     local cfg_stamp
     # Every configure input goes in the stamp: installing a dev package changes
     # $FFMPEG_FEATURE_FLAGS, and a stale tree would silently keep the old set.
@@ -2097,9 +2103,8 @@ verify_vendor_tracecmp() {
 # not streamed.  Builds ASAN and no-ASAN variants following the repo's
 # ── Frontier coverage executables (--frontier) ───────────────────
 # clang source-based coverage over wrapper *and* library sources, for
-# tools/frontier.py (branch conditions taken one way only). Built -O0 so
-# branches map 1:1 to source; frontier_stub.c replaces the AFL shim.
-# Spec: name:library sources and flags.
+# tools/frontier.py (branch conditions taken one way only). fuzzgoat -O0;
+# FFmpeg keeps configure's -O. frontier_stub.c replaces the AFL shim.
 build_frontier_targets() {
     [ "$WITH_FRONTIER" -eq 0 ] && return 0
     if ! command -v clang &>/dev/null; then
@@ -2107,19 +2112,42 @@ build_frontier_targets() {
         return 1
     fi
     echo "Building frontier coverage executables (_cov)..."
-    local stub="$REPO_ROOT/tools/lib/frontier_stub.c"
-    local specs=()
-    [ "$HAS_FUZZGOAT" -eq 1 ] && specs+=("fuzzgoat_read:$VENDOR/fuzzgoat/fuzzgoat.c -I$VENDOR/fuzzgoat -lm")
-    for spec in "${specs[@]}"; do
-        local name="${spec%%:*}" libs="${spec#*:}"
-        local out="$TARGETS/${name}_cov"
-        # shellcheck disable=SC2086
-        if clang -O0 -g -fprofile-instr-generate -fcoverage-mapping -o "$out" \
-            "${TARGETS_SRC:-$TARGETS}/$name.c" "$stub" $libs 2>>"$BUILD_LOG"; then
-            ok "${name}_cov"
-        else
-            warn "failed: ${name}_cov (see $BUILD_LOG)"
+    [ "$HAS_FUZZGOAT" -eq 1 ] && frontier_link "$TARGETS/fuzzgoat_read_cov" "fuzzgoat_read.c" \
+        "$VENDOR/fuzzgoat/fuzzgoat.c -I$VENDOR/fuzzgoat -lm" "-O0"
+    build_frontier_ffmpeg
+}
+
+# $1 out  $2 wrapper source (targets/)  $3 library sources/archives and flags  $4 opt level
+frontier_link() {
+    local out="$1" src="${TARGETS_SRC:-$TARGETS}/$2" libs="$3" opt="$4"
+    # shellcheck disable=SC2086
+    if clang $opt -g $PROFILE_COV_FLAGS -o "$out" "$src" "$REPO_ROOT/tools/lib/frontier_stub.c" \
+        $libs 2>>"$BUILD_LOG"; then
+        ok "$(basename "$out")"
+    else
+        warn "failed: $(basename "$out") (see $BUILD_LOG)"
+    fi
+}
+
+# One ffmpeg_read_<ver>_cov per vendored version, against its own _cov archives
+# (configure + make with source coverage).
+build_frontier_ffmpeg() {
+    ffmpeg_opt_wanted "cov" || return 0
+    local dir ver root
+    for dir in "$VENDOR"/ffmpeg-*/; do
+        [ -f "$dir/configure" ] || continue
+        ver="$(basename "$dir")"
+        ver="${ver#ffmpeg-}"
+        build_vendored_ffmpeg_sancov "_cov" "ffmpeg-$ver"
+
+        root="$FUZZ_BUILD_ROOT/ffmpeg-${ver}_cov"
+        if [ ! -f "$root/libavformat/libavformat.a" ] || [ -f "$root/.stale" ]; then
+            rm -f "$TARGETS/ffmpeg_read_${ver}_cov"
+            warn_failed "ffmpeg_read_${ver}_cov: no current archives in $root"
+            continue
         fi
+        frontier_link "$TARGETS/ffmpeg_read_${ver}_cov" "ffmpeg_read.c" \
+            "-I$root $root/libavformat/libavformat.a $root/libavcodec/libavcodec.a $root/libavutil/libavutil.a $root/libswresample/libswresample.a $(ffmpeg_extralibs "$root")" "-O1"
     done
 }
 
@@ -2647,7 +2675,7 @@ print_feature_matrix() {
     state=$([ "$WITH_DISTANCE" -eq 1 ] && echo "ON" || echo "OFF")
     printf '  %-20s %-12s %s\n' "distance" "$state" "AFLGo SHM-tail distance .so targets (clang)"
     state=$([ "$WITH_FRONTIER" -eq 1 ] && echo "ON" || echo "OFF")
-    printf '  %-20s %-12s %s\n' "frontier" "$state" "branch-coverage _cov exes for tools/frontier.py (clang)"
+    printf '  %-20s %-12s %s\n' "frontier" "$state" "branch-coverage _cov exes for tools/frontier.py (fuzzgoat, ffmpeg; clang)"
     state=$([ "$WITH_FFMPEG_SANCOV" -eq 1 ] && echo "ON (default)" || echo "OFF")
     printf '  %-20s %-12s %s\n' "ffmpeg-sancov" "$state" "auto-rebuild vendored FFmpeg with coverage"
     local ffvers

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -144,3 +145,31 @@ def test_empty_corpus(tmp_path):
     cov = frontier.Coverage(tmp_path / "missing", tmp_path / "work")
     assert cov.run([]) == []
     assert cov.merged([]) == {}
+
+
+def _ffmpeg_cov() -> Path | None:
+    root = Path(os.environ.get("FUZZ_BUILD_ROOT", Path.home() / "fuzzing" / "builds"))
+    found = sorted(root.glob("ffmpeg_read_*_cov"))
+    return found[-1] if found else None
+
+
+@pytest.mark.skipif(
+    _ffmpeg_cov() is None, reason="no ffmpeg_read_<ver>_cov (build_targets.sh --frontier)"
+)
+def test_ffmpeg_cov_counts_library_branches(tmp_path):
+    # The archives carry coverage too: a WAV input must count branches in
+    # libavformat's wav demuxer, not only in the wrapper.
+    wav = tmp_path / "in.wav"
+    pcm = bytes(64)
+    wav.write_bytes(
+        b"RIFF" + (36 + len(pcm)).to_bytes(4, "little") + b"WAVEfmt "
+        + (16).to_bytes(4, "little") + (1).to_bytes(2, "little") + (1).to_bytes(2, "little")
+        + (8000).to_bytes(4, "little") + (16000).to_bytes(4, "little")
+        + (2).to_bytes(2, "little") + (16).to_bytes(2, "little")
+        + b"data" + len(pcm).to_bytes(4, "little") + pcm
+    )  # fmt: skip
+    runs = frontier.Coverage(_ffmpeg_cov(), tmp_path / "work").run([wav])
+    files = {f for f, _, _ in runs[0].branches}
+    assert "ffmpeg_read.c" in files
+    assert "wavdec.c" in files
+    assert frontier.STUB_NAME not in files
