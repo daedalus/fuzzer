@@ -92,7 +92,7 @@ digraph fuzzer_tool {
     subgraph cluster_fb {
         label="4 · Feedback   —   what came back";
         color="#b9cbd8"; fillcolor="#f2f7fa"; fontcolor="#37596e";
-        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM edge hash table · hit buckets · per-edge max counts (PerfFuzz)\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\lcore/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap\l",
+        cov [label="adapters/shm.py  →  core/edge_tracker.py\lSHM edge hash table · hit buckets · per-edge max counts (PerfFuzz)\ledge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first-seen\lcore/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap\lcore/edge_clusters.py: incidence classes · clusters · near-misses (--edge-clusters)\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];
         ltl [label="core/ltl.py  (--ltl)\lBuchi monitor over event trace\lltl:trap / ltl:lasso crash · frontier prefix\l",
              fillcolor="#c6dcea", fontcolor="#22475c"];

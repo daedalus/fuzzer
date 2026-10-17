@@ -13,6 +13,7 @@ from pathlib import Path
 
 from fuzzer_tool.core.analyzers.analyzer_elo import Arena, strategy_arena, strategy_display_name
 from fuzzer_tool.core.clock import clock_of
+from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD, fit_tracker
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.shim_health import Attach, health_issues
 from fuzzer_tool.core.size_bloat import seed_size_bloat
@@ -159,6 +160,7 @@ def generate_report(fuzzer, corpus_dir: str, crashes_dir: str) -> str:
     sections.append(_smt_solver_activity(fuzzer))
     sections.append(_seed_contribution(fuzzer))
     sections.append(_edge_rarity(fuzzer))
+    sections.append(_edge_clusters(fuzzer))
     sections.append(_edge_lifetimes(fuzzer))
     sections.append(_corpus_health(fuzzer))
     sections.append(_corpus_overview(fuzzer, corpus_dir))
@@ -2443,6 +2445,24 @@ def _edge_rarity(f) -> str:
         lines.append(f"  Co-occurrence:    {pairs_str}")
 
     return "\n".join(lines)
+
+
+def _edge_clusters(f) -> str:
+    """Incidence classes, near-duplicate clusters and near-miss seeds."""
+    clusters = fit_tracker(getattr(f, "_edge_tracker", None))
+    if clusters is None:
+        return ""
+    st = clusters.stats()
+    return "\n".join(
+        [
+            "",
+            "--- Edge Clusters ---",
+            f"  Classes:          {st['classes']} for {st['edges']} edges (largest {st['largest_class']})",
+            f"  Clusters:         {st['clusters']} (Jaccard >= {CLUSTER_JACCARD})",
+            f"  Singletons:       {st['singleton_edges']} edges in {st['singleton_classes']} classes",
+            f"  Near-miss seeds:  {clusters.near_miss_seeds()}",
+        ]
+    )
 
 
 def _edge_lifetimes(f) -> str:

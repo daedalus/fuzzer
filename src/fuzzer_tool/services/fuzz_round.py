@@ -1255,6 +1255,9 @@ class FuzzRound:
         # whenever new edges (hence new seed rows) have appeared.
         if f._matrix_substrate is not None:
             f._matrix_substrate.maybe_refit(f._edge_tracker, f.exec_count)
+        clusters = getattr(f, "_edge_clusters", None)
+        if clusters is not None:
+            clusters.maybe_refit(f._edge_tracker, f.exec_count)
         # The saliency net rides the same discovery hook and the same RefitCadence
         # policy (executions, min seeds before stamping, skip if nothing grew).
         saliency = getattr(f, "_pos_saliency", None)

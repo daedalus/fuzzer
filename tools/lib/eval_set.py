@@ -169,12 +169,21 @@ CONTAINER_SIGNAL_TARGETS: list[tuple[str, str]] = [
     ("/root/fuzzing/builds/jpeg_read_noasan.so", "-D dictionaries/jpeg.dict -m 65536"),
 ]
 
+# fuzzgoat: the calibration target (AGENTS.md Hard Rule 52), clang build from
+# tools/build_targets.sh. noasan: run_cell launches `python -m fuzzer_tool`,
+# not the wrapper that preloads libasan, so the ASAN .so ran at 51 eps vs 330
+# here. A new set, not comparable with others.
+FUZZGOAT_TARGETS: list[tuple[str, str]] = [
+    ("/root/fuzzing/builds/fuzzgoat_read_noasan.so", "-D dictionaries/json.dict"),
+]
+
 TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "locked": LOCKED_TARGETS,
     "cmplog": CMPLOG_TARGETS,
     "direct_lite": DIRECT_LITE_TARGETS,
     "direct_lite_signal": DIRECT_LITE_SIGNAL_TARGETS,
     "container_signal": CONTAINER_SIGNAL_TARGETS,
+    "fuzzgoat": FUZZGOAT_TARGETS,
 }
 
 # ── Seeds ──────────────────────────────────────────────────────────────

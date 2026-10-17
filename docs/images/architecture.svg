@@ -31,8 +31,8 @@
 </g>
 <g id="clust5" class="cluster">
 <title>cluster_fb</title>
-<path fill="#f2f7fa" stroke="#b9cbd8" stroke-width="1.3" d="M111,-125C111,-125 685,-125 685,-125 691,-125 697,-131 697,-137 697,-137 697,-908.5 697,-908.5 697,-914.5 691,-920.5 685,-920.5 685,-920.5 111,-920.5 111,-920.5 105,-920.5 99,-914.5 99,-908.5 99,-908.5 99,-137 99,-137 99,-131 105,-125 111,-125"/>
-<text text-anchor="middle" x="196.5" y="-907.7" font-family="Helvetica Bold" font-size="11.00" fill="#37596e">4 · Feedback &#160;&#160;— &#160;&#160;what came back</text>
+<path fill="#f2f7fa" stroke="#b9cbd8" stroke-width="1.3" d="M59,-125C59,-125 685,-125 685,-125 691,-125 697,-131 697,-137 697,-137 697,-908.5 697,-908.5 697,-914.5 691,-920.5 685,-920.5 685,-920.5 59,-920.5 59,-920.5 53,-920.5 47,-914.5 47,-908.5 47,-908.5 47,-137 47,-137 47,-131 53,-125 59,-125"/>
+<text text-anchor="middle" x="144.5" y="-907.7" font-family="Helvetica Bold" font-size="11.00" fill="#37596e">4 · Feedback &#160;&#160;— &#160;&#160;what came back</text>
 </g>
 <g id="clust6" class="cluster">
 <title>cluster_corpus</title>
@@ -268,34 +268,35 @@
 <!-- cov -->
 <g id="node13" class="node">
 <title>cov</title>
-<path fill="#c6dcea" stroke="transparent" stroke-width="0" d="M677,-356.5C677,-356.5 331,-356.5 331,-356.5 325,-356.5 319,-350.5 319,-344.5 319,-344.5 319,-308.5 319,-308.5 319,-302.5 325,-296.5 331,-296.5 331,-296.5 677,-296.5 677,-296.5 683,-296.5 689,-302.5 689,-308.5 689,-308.5 689,-344.5 689,-344.5 689,-350.5 683,-356.5 677,-356.5"/>
-<text text-anchor="start" x="331" y="-340.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">adapters/shm.py &#160;→ &#160;core/edge_tracker.py</text>
-<text text-anchor="start" x="331" y="-329.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">SHM edge hash table · hit buckets · per&#45;edge max counts (PerfFuzz)</text>
-<text text-anchor="start" x="331" y="-318.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">edge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first&#45;seen</text>
-<text text-anchor="start" x="331" y="-307.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap</text>
+<path fill="#c6dcea" stroke="transparent" stroke-width="0" d="M677,-362C677,-362 279,-362 279,-362 273,-362 267,-356 267,-350 267,-350 267,-303 267,-303 267,-297 273,-291 279,-291 279,-291 677,-291 677,-291 683,-291 689,-297 689,-303 689,-303 689,-350 689,-350 689,-356 683,-362 677,-362"/>
+<text text-anchor="start" x="279" y="-346" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">adapters/shm.py &#160;→ &#160;core/edge_tracker.py</text>
+<text text-anchor="start" x="279" y="-335" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">SHM edge hash table · hit buckets · per&#45;edge max counts (PerfFuzz)</text>
+<text text-anchor="start" x="279" y="-324" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">edge_owner_count → rarity · Chao2 richness · Zipf/Heaps fit · first&#45;seen</text>
+<text text-anchor="start" x="279" y="-313" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/edge_stats.py: hit share · plateau · rarefaction · seed bootstrap</text>
+<text text-anchor="start" x="279" y="-302" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/edge_clusters.py: incidence classes · clusters · near&#45;misses (&#45;&#45;edge&#45;clusters)</text>
 </g>
 <!-- target&#45;&gt;cov -->
 <g id="edge6" class="edge">
 <title>target&#45;&gt;cov</title>
-<path fill="none" stroke="#3f4a58" stroke-width="1.8" d="M2052.34,-454.4C2046.92,-451.17 2040.97,-448.25 2035,-446.5 1974.97,-428.88 971.01,-440.8 909,-432.5 800.28,-417.95 678.91,-384.03 597.63,-358.66"/>
-<polygon fill="#3f4a58" stroke="#3f4a58" stroke-width="1.8" points="598.08,-356.3 590.88,-356.54 596.65,-360.84 598.08,-356.3"/>
-<text text-anchor="middle" x="927" y="-425.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;bitmap</text>
+<path fill="none" stroke="#3f4a58" stroke-width="1.8" d="M2052.34,-454.4C2046.92,-451.17 2040.97,-448.25 2035,-446.5 1974.87,-428.85 969.17,-440.39 907,-432.5 800.06,-418.93 681.19,-388.6 595.75,-364.01"/>
+<polygon fill="#3f4a58" stroke="#3f4a58" stroke-width="1.8" points="596.34,-361.7 589.15,-362.1 595.02,-366.27 596.34,-361.7"/>
+<text text-anchor="middle" x="925" y="-425.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;bitmap</text>
 </g>
 <!-- cmplog -->
 <g id="node15" class="node">
 <title>cmplog</title>
-<path fill="#c6dcea" stroke="transparent" stroke-width="0" d="M283,-356.5C283,-356.5 119,-356.5 119,-356.5 113,-356.5 107,-350.5 107,-344.5 107,-344.5 107,-308.5 107,-308.5 107,-302.5 113,-296.5 119,-296.5 119,-296.5 283,-296.5 283,-296.5 289,-296.5 295,-302.5 295,-308.5 295,-308.5 295,-344.5 295,-344.5 295,-350.5 289,-356.5 283,-356.5"/>
-<text text-anchor="start" x="119" y="-340.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/cmplog.py</text>
-<text text-anchor="start" x="119" y="-329.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">pairs + tokens · fired/asserted</text>
-<text text-anchor="start" x="119" y="-318.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">per callback and per call site (PC)</text>
-<text text-anchor="start" x="119" y="-307.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">walls · progress reward</text>
+<path fill="#c6dcea" stroke="transparent" stroke-width="0" d="M231,-356.5C231,-356.5 67,-356.5 67,-356.5 61,-356.5 55,-350.5 55,-344.5 55,-344.5 55,-308.5 55,-308.5 55,-302.5 61,-296.5 67,-296.5 67,-296.5 231,-296.5 231,-296.5 237,-296.5 243,-302.5 243,-308.5 243,-308.5 243,-344.5 243,-344.5 243,-350.5 237,-356.5 231,-356.5"/>
+<text text-anchor="start" x="67" y="-340.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">core/cmplog.py</text>
+<text text-anchor="start" x="67" y="-329.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">pairs + tokens · fired/asserted</text>
+<text text-anchor="start" x="67" y="-318.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">per callback and per call site (PC)</text>
+<text text-anchor="start" x="67" y="-307.5" font-family="Helvetica,sans-Serif" font-size="10.00" fill="#22475c">walls · progress reward</text>
 </g>
 <!-- target&#45;&gt;cmplog -->
 <g id="edge18" class="edge">
 <title>target&#45;&gt;cmplog</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" d="M2052.34,-454.4C2046.93,-451.16 2040.97,-448.25 2035,-446.5 1966.7,-426.51 825.14,-434.51 754,-432.5 666.39,-430.02 644.58,-426.9 557,-423.5 529.23,-422.42 332.99,-425.35 307,-415.5 277.52,-404.32 250.29,-381.32 230.81,-361.64"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="232.48,-359.93 226.03,-356.71 229.06,-363.25 232.48,-359.93"/>
-<text text-anchor="middle" x="786.5" y="-425.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;cmp channels</text>
+<path fill="none" stroke="#68727e" stroke-width="1.1" d="M2052.34,-454.39C2046.93,-451.16 2040.97,-448.25 2035,-446.5 2000.5,-436.4 776.93,-433.44 741,-432.5 644.95,-429.98 621.02,-426.92 525,-423.5 495.01,-422.43 283.08,-426.11 255,-415.5 225.5,-404.36 198.28,-381.35 178.8,-361.66"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="180.47,-359.96 174.02,-356.73 177.05,-363.27 180.47,-359.96"/>
+<text text-anchor="middle" x="773.5" y="-425.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;cmp channels</text>
 </g>
 <!-- crash -->
 <g id="node19" class="node">
@@ -318,7 +319,7 @@
 <!-- cov&#45;&gt;picker -->
 <g id="edge30" class="edge">
 <title>cov&#45;&gt;picker</title>
-<path fill="none" stroke="#2f7d5a" stroke-width="1.6" d="M598.8,-356.59C687.35,-382.2 823.72,-417.65 945,-432.5 964.58,-434.9 2351.12,-432.49 2365,-446.5 2419.38,-501.41 2377.47,-746.41 2314,-790.5 2295.24,-803.53 1925.66,-801.62 1903,-804.5 1889.1,-806.27 1874.72,-808.57 1860.37,-811.19"/>
+<path fill="none" stroke="#2f7d5a" stroke-width="1.6" d="M598.19,-362.03C691.37,-386.99 824.21,-418.66 943,-432.5 962.62,-434.79 2351.1,-432.47 2365,-446.5 2419.38,-501.41 2377.47,-746.41 2314,-790.5 2295.24,-803.53 1925.66,-801.62 1903,-804.5 1889.1,-806.27 1874.72,-808.57 1860.37,-811.19"/>
 <polygon fill="#2f7d5a" stroke="#2f7d5a" stroke-width="1.6" points="1859.59,-808.91 1853.34,-812.5 1860.46,-813.59 1859.59,-808.91"/>
 <text text-anchor="middle" x="2423" y="-574.7" font-family="Helvetica,sans-Serif" font-size="8.50" fill="#2f7d5a">rarity · Chao2 &#160;</text>
 </g>
@@ -335,8 +336,8 @@
 <!-- cov&#45;&gt;infoth -->
 <g id="edge20" class="edge">
 <title>cov&#45;&gt;infoth</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M470.52,-296.16C442.34,-271.46 401.8,-235.93 370.82,-208.78"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="372.23,-206.85 365.55,-204.16 369.09,-210.43 372.23,-206.85"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M444.27,-290.88C420.65,-266.64 389.05,-234.21 364.46,-208.97"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="366.09,-207.23 359.64,-204.02 362.68,-210.56 366.09,-207.23"/>
 </g>
 <!-- ledger -->
 <g id="node17" class="node">
@@ -349,8 +350,8 @@
 <!-- cov&#45;&gt;ledger -->
 <g id="edge21" class="edge">
 <title>cov&#45;&gt;ledger</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M501.73,-296.47C501.76,-283.19 503.34,-267.54 509,-254.5 518.44,-232.75 535.9,-213.03 552.01,-198.08"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="553.96,-199.52 557.41,-193.19 550.77,-195.99 553.96,-199.52"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="1,5" d="M476.74,-290.7C477.61,-278.64 480.12,-265.42 486,-254.5 498.64,-231.03 520.67,-211.43 541.03,-196.98"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="542.48,-198.87 546.72,-193.04 539.77,-194.95 542.48,-198.87"/>
 </g>
 <!-- corpus -->
 <g id="node18" class="node">
@@ -364,9 +365,9 @@
 <!-- cov&#45;&gt;corpus -->
 <g id="edge24" class="edge">
 <title>cov&#45;&gt;corpus</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" d="M589.11,-296.43C625.07,-282.96 666.89,-265.67 703,-246.5 727.64,-233.42 753.79,-216.82 775.29,-202.39"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="776.63,-204.35 780.94,-198.58 773.97,-200.41 776.63,-204.35"/>
-<text text-anchor="middle" x="715.5" y="-256.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;new coverage</text>
+<path fill="none" stroke="#68727e" stroke-width="1.1" d="M593.16,-290.92C629.07,-278.6 668.34,-263.5 703,-246.5 728.45,-234.02 755.1,-217.17 776.7,-202.43"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="778.12,-204.34 782.37,-198.53 775.42,-200.42 778.12,-204.34"/>
+<text text-anchor="middle" x="718.5" y="-256.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;new coverage</text>
 </g>
 <!-- obs -->
 <g id="node20" class="node">
@@ -378,8 +379,8 @@
 <!-- cov&#45;&gt;obs -->
 <g id="edge27" class="edge">
 <title>cov&#45;&gt;obs</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M385,-296.44C359.28,-290.18 332.23,-283.61 307,-277.5 249.69,-263.63 217.28,-290.48 178,-246.5 131.65,-194.6 139.56,-104.61 146.88,-61.06"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="149.25,-61.34 148.09,-54.23 144.56,-60.51 149.25,-61.34"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M315.77,-290.91C250.57,-275.51 188.25,-258.24 178,-246.5 132.21,-194.1 139.86,-104.35 147,-60.95"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="149.36,-61.26 148.18,-54.15 144.67,-60.44 149.36,-61.26"/>
 </g>
 <!-- ltl&#45;&gt;lib -->
 <g id="edge17" class="edge">
@@ -391,14 +392,14 @@
 <!-- cmplog&#45;&gt;bandit -->
 <g id="edge34" class="edge">
 <title>cmplog&#45;&gt;bandit</title>
-<path fill="none" stroke="#22688c" stroke-width="1.1" stroke-dasharray="5,2" d="M225.97,-356.88C245.6,-377.59 274.91,-403.66 307,-415.5 336.4,-426.35 839.74,-421.38 871,-423.5 904.06,-425.74 911.94,-430.34 945,-432.5 965.76,-433.86 2428.36,-431.72 2443,-446.5 2456.76,-460.39 2444.14,-470.98 2443,-490.5 2440.11,-540.09 2449.4,-555.77 2430,-601.5 2425.07,-613.13 2417.79,-612.27 2412,-623.5 2380.31,-684.92 2403.82,-712.68 2371,-773.5 2366.21,-782.37 2365.15,-786.28 2356,-790.5 2313.67,-810.03 1563.42,-800.25 1517,-804.5 1474.72,-808.37 1428.85,-815.21 1387.88,-822.3"/>
+<path fill="none" stroke="#22688c" stroke-width="1.1" stroke-dasharray="5,2" d="M173.97,-356.89C193.59,-377.6 222.91,-403.68 255,-415.5 286.75,-427.2 830.23,-421.36 864,-423.5 899.27,-425.73 907.73,-430.33 943,-432.5 963.8,-433.78 2428.34,-431.7 2443,-446.5 2456.76,-460.39 2444.14,-470.98 2443,-490.5 2440.11,-540.09 2449.4,-555.77 2430,-601.5 2425.07,-613.13 2417.79,-612.27 2412,-623.5 2380.31,-684.92 2403.82,-712.68 2371,-773.5 2366.21,-782.37 2365.15,-786.28 2356,-790.5 2313.67,-810.03 1563.42,-800.25 1517,-804.5 1474.72,-808.37 1428.85,-815.21 1387.88,-822.3"/>
 <polygon fill="#22688c" stroke="#22688c" stroke-width="1.1" points="1387.38,-819.97 1381.09,-823.48 1388.2,-824.66 1387.38,-819.97"/>
 <text text-anchor="middle" x="2469" y="-574.7" font-family="Helvetica,sans-Serif" font-size="8.50" fill="#22688c">walls / stall &#160;</text>
 </g>
 <!-- cmplog&#45;&gt;ops -->
 <g id="edge33" class="edge">
 <title>cmplog&#45;&gt;ops</title>
-<path fill="none" stroke="#22688c" stroke-width="1.4" d="M225.97,-356.89C245.59,-377.6 274.91,-403.67 307,-415.5 338.49,-427.1 877.51,-421.33 911,-423.5 945.38,-425.73 953.61,-430.34 988,-432.5 1009.06,-433.82 2492.15,-431.51 2507,-446.5 2520.76,-460.39 2516.1,-473.19 2507,-490.5 2498.97,-505.77 2483.03,-497.23 2475,-512.5 2471.28,-519.58 2470.46,-523.92 2475,-530.5 2490.66,-553.19 2517.34,-529.81 2533,-552.5 2545.37,-570.42 2546.76,-584.62 2533,-601.5 2522.17,-614.77 2398.95,-630.05 2382,-632.5 2195,-659.48 1976.64,-674.93 1841.32,-682.64"/>
+<path fill="none" stroke="#22688c" stroke-width="1.4" d="M173.96,-356.9C193.59,-377.62 222.9,-403.69 255,-415.5 289.05,-428.03 871.79,-421.22 908,-423.5 943.27,-425.72 951.73,-430.33 987,-432.5 1008.07,-433.79 2492.14,-431.5 2507,-446.5 2520.76,-460.39 2516.1,-473.19 2507,-490.5 2498.97,-505.77 2483.03,-497.23 2475,-512.5 2471.28,-519.58 2470.46,-523.92 2475,-530.5 2490.66,-553.19 2517.34,-529.81 2533,-552.5 2545.37,-570.42 2546.76,-584.62 2533,-601.5 2522.17,-614.77 2398.95,-630.05 2382,-632.5 2195,-659.48 1976.64,-674.93 1841.32,-682.64"/>
 <polygon fill="#22688c" stroke="#22688c" stroke-width="1.4" points="1840.79,-680.29 1834.14,-683.05 1841.06,-685.04 1840.79,-680.29"/>
 <text text-anchor="start" x="2475" y="-523.7" font-family="Helvetica,sans-Serif" font-size="8.50" fill="#22688c"> &#160;redqueen · colorize · i2s fixpoint</text>
 <text text-anchor="start" x="2475" y="-514.7" font-family="Helvetica,sans-Serif" font-size="8.50" fill="#22688c"> &#160;grimoire · SMT · magic bytes</text>
@@ -406,15 +407,15 @@
 <!-- cmplog&#45;&gt;corpus -->
 <g id="edge25" class="edge">
 <title>cmplog&#45;&gt;corpus</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" d="M255.52,-296.46C271.67,-289.06 289.68,-281.95 307,-277.5 307,-277.5 703,-246.5 703,-246.5 731.35,-236.91 759.63,-219.05 781.5,-202.94"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="783.18,-204.65 787.2,-198.68 780.33,-200.84 783.18,-204.65"/>
-<text text-anchor="middle" x="628" y="-256.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;cmp progress</text>
+<path fill="none" stroke="#68727e" stroke-width="1.1" d="M203.22,-296.49C219.44,-289.04 237.57,-281.9 255,-277.5 261.05,-275.97 697.08,-248.47 703,-246.5 731.5,-237 759.88,-219.05 781.78,-202.87"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="783.48,-204.57 787.49,-198.58 780.62,-200.76 783.48,-204.57"/>
+<text text-anchor="middle" x="625" y="-256.7" font-family="Helvetica,sans-Serif" font-size="8.50"> &#160;cmp progress</text>
 </g>
 <!-- cmplog&#45;&gt;obs -->
 <g id="edge28" class="edge">
 <title>cmplog&#45;&gt;obs</title>
-<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M158.21,-296.42C148.04,-287.19 138.55,-276.07 133,-263.5 102.76,-195.01 127.49,-103.73 142.53,-60.58"/>
-<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="144.81,-61.29 144.86,-54.08 140.33,-59.69 144.81,-61.29"/>
+<path fill="none" stroke="#68727e" stroke-width="1.1" stroke-dasharray="5,2" d="M139.89,-296.46C137.09,-286.16 134.39,-274.42 133,-263.5 124.41,-195.82 124.45,-177.68 133,-110 135.1,-93.38 139.75,-75.14 143.93,-60.93"/>
+<polygon fill="#68727e" stroke="#68727e" stroke-width="1.1" points="146.24,-61.5 145.93,-54.3 141.69,-60.12 146.24,-61.5"/>
 </g>
 <!-- infoth&#45;&gt;obs -->
 <g id="edge29" class="edge">
@@ -425,14 +426,14 @@
 <!-- ledger&#45;&gt;picker -->
 <g id="edge22" class="edge">
 <title>ledger&#45;&gt;picker</title>
-<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M569.82,-193.12C556.11,-213.99 542.4,-244.06 560,-263.5 581.14,-286.84 669.95,-272.29 701,-277.5 962.32,-321.36 1018.22,-381.45 1281,-415.5 1298.68,-417.79 2550.42,-434.96 2564,-446.5 2569.72,-451.36 2600.54,-564.35 2584,-601.5 2571.84,-628.81 2555.08,-625.3 2534,-646.5 2480.73,-700.08 2474.35,-720 2421,-773.5 2413,-781.52 2412.53,-786.31 2402,-790.5 2350.47,-811.02 1958.04,-797.67 1903,-804.5 1888.82,-806.26 1874.15,-808.59 1859.52,-811.25"/>
+<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M563.72,-193.06C545.45,-213.62 526.47,-243.24 545,-263.5 556.74,-276.34 683.82,-274.7 701,-277.5 962.52,-320.12 1018.22,-381.45 1281,-415.5 1298.68,-417.79 2550.42,-434.96 2564,-446.5 2569.72,-451.36 2600.54,-564.35 2584,-601.5 2571.84,-628.81 2555.08,-625.3 2534,-646.5 2480.73,-700.08 2474.35,-720 2421,-773.5 2413,-781.52 2412.53,-786.31 2402,-790.5 2350.47,-811.02 1958.04,-797.67 1903,-804.5 1888.82,-806.26 1874.15,-808.59 1859.52,-811.25"/>
 <polygon fill="#2f7d5a" stroke="#2f7d5a" stroke-width="1.1" points="1859.06,-808.92 1852.81,-812.5 1859.93,-813.6 1859.06,-808.92"/>
 <text text-anchor="middle" x="2600.5" y="-519.2" font-family="Helvetica,sans-Serif" font-size="8.50">strata &#160;</text>
 </g>
 <!-- ledger&#45;&gt;bandit -->
 <g id="edge23" class="edge">
 <title>ledger&#45;&gt;bandit</title>
-<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M574.46,-193.31C564.35,-214.61 555.07,-245.21 573,-263.5 586.81,-277.59 1263.51,-274.48 1283,-277.5 1496.45,-310.59 1536.2,-378.44 1749,-415.5 1879.69,-438.26 1914.45,-427.11 2047,-432.5 2062.99,-433.15 2611.24,-435.64 2623,-446.5 2748.7,-562.63 2610.89,-732.18 2450,-790.5 2401.26,-808.17 1568.63,-799.82 1517,-804.5 1474.61,-808.34 1428.62,-815.2 1387.57,-822.31"/>
+<path fill="none" stroke="#2f7d5a" stroke-width="1.1" stroke-dasharray="5,2" d="M568.33,-193.38C553.45,-214.43 538.47,-244.61 557,-263.5 571.12,-277.9 1263.07,-274.41 1283,-277.5 1496.46,-310.55 1536.2,-378.44 1749,-415.5 1879.69,-438.26 1914.45,-427.11 2047,-432.5 2062.99,-433.15 2611.24,-435.64 2623,-446.5 2748.7,-562.63 2610.89,-732.18 2450,-790.5 2401.26,-808.17 1568.63,-799.82 1517,-804.5 1474.61,-808.34 1428.62,-815.2 1387.57,-822.31"/>
 <polygon fill="#2f7d5a" stroke="#2f7d5a" stroke-width="1.1" points="1387.05,-819.98 1380.76,-823.5 1387.87,-824.67 1387.05,-819.98"/>
 <text text-anchor="middle" x="2690" y="-519.2" font-family="Helvetica,sans-Serif" font-size="8.50">stratum &#160;</text>
 </g>

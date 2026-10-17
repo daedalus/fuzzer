@@ -25,6 +25,7 @@ from fuzzer_tool.core.cadence import bucket, due, phase_of
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
 from fuzzer_tool.core.coverage_noise import fake_novelty_factor
+from fuzzer_tool.core.edge_clusters import count_distinct
 from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
@@ -321,6 +322,9 @@ class _EdgeVectors:
         self._arrays: dict[int, tuple[set[int], int, np.ndarray]] = {}
         self.owners: np.ndarray | None = None
         self.recent: np.ndarray | None = None
+        self.classes: np.ndarray | None = None  # class index per edge (--edge-clusters)
+        self._rare_by_set: dict[int, int] = {}  # id(set) -> rare classes, one pass
+        self._rare = self._rare_edges
 
     def indices(self, edges: set[int]) -> np.ndarray:
         entry = self._arrays.get(id(edges))
@@ -341,8 +345,11 @@ class _EdgeVectors:
         self._arrays[id(edges)] = (edges, len(edges), out)
         return out
 
-    def prepare(self, seed_sets: list[set[int]], owners, recent_sets) -> None:
-        """Index every set this pass reads, then build the per-edge tables."""
+    def prepare(self, seed_sets: list[set[int]], owners, recent_sets, clusters=None) -> None:
+        """Index every set this pass reads, then build the per-edge tables.
+
+        With *clusters* (core/edge_clusters.py) the rare count is per class.
+        """
         live: dict[int, tuple[set[int], int, np.ndarray]] = {}
         for edges in seed_sets:
             self.indices(edges)
@@ -361,13 +368,48 @@ class _EdgeVectors:
             self.recent = np.bincount(np.concatenate(recent_idx), minlength=len(self._ids))
         else:
             self.recent = None
+        if clusters is None:
+            self.classes, self._rare = None, self._rare_edges
+        else:
+            self.classes = clusters.class_index(np.array(self._ids, dtype=np.int64))
+            self._rare_by_set = self._count_rare_classes(seed_sets)
+            self._rare = self._rare_classes
+
+    def _count_rare_classes(self, seed_sets: list[set[int]]) -> dict[int, int]:
+        """Rare classes per set for the whole pass: one unique over (set, class) pairs.
+
+        Per-set np.unique cost 4x the per-edge pass (fuzzgoat 2.2 -> 8.6 ms).
+        """
+        if not seed_sets:
+            return {}
+        idx = [self._arrays[id(s)][2] for s in seed_sets]
+        lens = np.fromiter(map(len, idx), dtype=np.int64, count=len(idx))
+        flat = np.concatenate(idx)
+        sid = np.repeat(np.arange(len(idx)), lens)
+        cls = self.classes[flat]
+        rare = self.owners[flat] <= RARE_EDGE_OWNERS
+        known = rare & (cls >= 0)
+        width = int(cls.max(initial=0)) + 1
+        pairs = np.unique(sid[known] * width + cls[known])
+        per_set = np.bincount(pairs // width, minlength=len(idx))
+        per_set += np.bincount(sid[rare & (cls < 0)], minlength=len(idx))
+        return {id(s): int(c) for s, c in zip(seed_sets, per_set.tolist(), strict=True)}
+
+    def _rare_edges(self, edges: set[int], idx: np.ndarray, n: np.ndarray) -> int:
+        return int(np.count_nonzero(n <= RARE_EDGE_OWNERS))
+
+    def _rare_classes(self, edges: set[int], idx: np.ndarray, n: np.ndarray) -> int:
+        cached = self._rare_by_set.get(id(edges))
+        if cached is not None:
+            return cached
+        return count_distinct(self.classes[idx], n <= RARE_EDGE_OWNERS)
 
     def stats(self, edges: set[int]) -> tuple[int, int, int]:
         """``(rare_count, total_owners, overlap)`` for one seed's edge set."""
         idx = self.indices(edges)
         n = self.owners[idx]
         overlap = int(self.recent[idx].sum()) if self.recent is not None else 0
-        return int(np.count_nonzero(n <= RARE_EDGE_OWNERS)), int(n.sum()), overlap
+        return self._rare(edges, idx, n), int(n.sum()), overlap
 
 
 class SeedPicker:
@@ -1540,6 +1582,10 @@ class SeedPicker:
         seed_edges = tracker.seed_edges.get(seed_key, set())
         if not seed_edges:
             return w
+        # --edge-clusters: one branch away from a rare class (core/edge_clusters.py).
+        clusters = getattr(f, "_edge_clusters", None)
+        if clusters is not None:
+            w *= 1.0 + RARE_EDGE_GAIN * math.log2(1.0 + clusters.near_misses(seed_key))
         vectors = getattr(self, "_pass_vectors", None)
         if vectors is not None:
             # Inside _compute_weights: the pass already indexed this set and
@@ -1572,6 +1618,8 @@ class SeedPicker:
                 total_owners += n
                 if n <= rare_threshold:
                     rare_count += 1
+        if clusters is not None:
+            rare_count = tracker.rare_edge_count(seed_key, rare_threshold + 1)
         return self._apply_edge_penalties(
             w, fuzz_count, len(seed_edges), rare_count, total_owners, overlap
         )
@@ -2112,7 +2160,7 @@ class SeedPicker:
             if edges:
                 sets.append(edges)
         recent = getattr(f, "_recent_seed_edges", None) or ()
-        vectors.prepare(sets, owners, [e for e in recent if e])
+        vectors.prepare(sets, owners, [e for e in recent if e], getattr(f, "_edge_clusters", None))
         return vectors
 
     def _extract_meta(self, now: float) -> tuple:
