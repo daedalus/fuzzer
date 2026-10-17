@@ -93,6 +93,17 @@ sampling it soon enough. Both are why this is an Elo-only arm and not a
 member of the fallback chain. ``tests/test_corral_scheduler.py`` pins the
 entropy bound so that a future fix shows up as a failure there.
 
+Measured null: per-arm baseline
+-------------------------------
+Replacing ``b`` with a per-arm mean ``m_i`` (Hazan & Kale, *Better
+Algorithms for Benign Bandits*, JMLR 2011; Wei & Luo, COLT 2018) does not
+help. Prototype, unpulled arms falling back to ``b``: medians within noise of
+the global ``b`` on equal arms (4 and 12, 20 seeds), the 12-arm stationary
+harness and DecayingBest (12 seeds); minima mostly worse (DecayingBest 0.163
+at an EMA window of 32, vs 0.780). Variation bounds need small
+``sum (l_t - mu)^2``; sparse Bernoulli rewards make it grow ~linearly in T,
+and the ``(loss - m) / p`` spike on a success is unchanged by any ``m``.
+
 On-policy only
 --------------
 ``record`` credits an arm only against a probability this scheduler itself
