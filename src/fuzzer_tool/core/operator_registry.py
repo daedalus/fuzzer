@@ -303,6 +303,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "murmurhash3",
         "swar_lane",
         "div_trap",
+        "overflow_pair",
         "same_popcount_next",
         "same_popcount_prev",
         "parity_lock",

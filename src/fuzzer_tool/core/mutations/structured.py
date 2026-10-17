@@ -2590,6 +2590,61 @@ def div_trap(data: bytes, rng) -> bytes:
     return _splice(data, offset, pair)
 
 
+# Operand pairs (a, b) that wrap one operation at a ``bits``-wide field, as
+# unsigned bit patterns.  Each is the failure input of a common idiom:
+#   add_signed    SMAX + 1          (x + y) >> 1 average, signed sum
+#   add_unsigned  UMAX + 1 -> 0     off + len <= size bounds check
+#   sub_signed    SMIN - 1          branch-free min/max via (a - b) >> 31
+#   sub_unsigned  0 - 1 -> UMAX     len - hdr_len
+#   mul           2^(b/2) squared   count * size allocation
+#   shift         1 << bits         shift count == width is UB
+_OVF_PAIRS = {
+    "add_signed": lambda bits: ((1 << (bits - 1)) - 1, 1),
+    "add_unsigned": lambda bits: ((1 << bits) - 1, 1),
+    "sub_signed": lambda bits: (1 << (bits - 1), 1),
+    "sub_unsigned": lambda bits: (0, 1),
+    "mul": lambda bits: (1 << (bits // 2), 1 << (bits // 2)),
+    "shift": lambda bits: (1, bits),
+}
+_OVF_KINDS = tuple(_OVF_PAIRS)
+# A parser may read either operand first.
+_OVF_ORDERS = ("a_first", "b_first")
+
+
+def overflow_pair(data: bytes, rng) -> bytes:
+    """Plant an operand pair that wraps +, -, * or << in adjacent fields.
+
+    Generalises ``div_trap`` to the other arithmetic traps (see
+    ``_OVF_PAIRS``).  Single operands are in the interesting-value tables; the
+    overflow needs both side by side.  Same field grid as ``div_trap``: a width
+    that fits twice, a random offset, a byte order, then a kind and an operand
+    order.  Overwrites exactly ``2 * width`` bytes.  Length-preserving.
+
+    Args:
+        data: Input bytes.
+        rng: Draw source, required. A ``RandPool`` or anything with the same
+            API (tests inject ``ScriptedRng``).
+
+    Returns:
+        Mutated bytes, the same length as *data*.
+    """
+    widths = [w for w in _DIV_WIDTHS if 2 * w <= len(data)]
+    if not widths:
+        return data
+
+    width = rng.choice(widths)
+    offset = rng.randint(0, len(data) - 2 * width)
+    endian = rng.choice(_DIV_ENDIANS)
+    kind = rng.choice(_OVF_KINDS)
+    order = rng.choice(_OVF_ORDERS)
+
+    # e.g. width 4, add_signed, little: ff ff ff 7f | 01 00 00 00
+    a, b = _OVF_PAIRS[kind](8 * width)
+    if order == _OVF_ORDERS[1]:
+        a, b = b, a
+    return _splice(data, offset, a.to_bytes(width, endian) + b.to_bytes(width, endian))
+
+
 def swar_lane(data: bytes, rng) -> bytes:
     """Write a window whose every byte sits on a SWAR lane boundary.
 
