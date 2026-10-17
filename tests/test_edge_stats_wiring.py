@@ -68,6 +68,17 @@ def test_summary_skips_plateau_on_speedup():
         et._coverage_edges[i] = i if i < BREAK else BREAK + HEAD * (i - BREAK)
     out = _summary(et, ScriptedRng(randrange_lists=_all_seeds_draws()))
     assert "Plateau:" not in out
+    assert "Slowdown:" not in out
+
+
+def test_summary_labels_fast_tail_slowdown():
+    # Regression: FFmpeg 5k printed "Plateau:" for 5171 -> 1004 edges/kexec.
+    et = _tracker()
+    for i in range(POINTS):
+        et._coverage_edges[i] = HEAD * min(i, BREAK) + (HEAD // 2) * max(i - BREAK, 0)
+    out = _summary(et, ScriptedRng(randrange_lists=_all_seeds_draws()))
+    assert f"Slowdown:          from exec {BREAK * KEXEC:,}" in out
+    assert "Plateau:" not in out
 
 
 def test_robustness_skips_over_budget(monkeypatch):

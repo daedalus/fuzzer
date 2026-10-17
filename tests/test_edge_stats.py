@@ -10,6 +10,8 @@ from fuzzer_tool.core.edge_stats import (
     CI_LOW_PCT,
     KEXEC,
     MIN_SEGMENT,
+    PLATEAU_RATIO,
+    CurveShape,
     boot_ci,
     hit_profile,
     plateau,
@@ -103,6 +105,16 @@ def test_plateau_degenerate():
 def test_plateau_flat_line():
     p = plateau([(i * KEXEC, 7) for i in range(12)])
     assert p.head_rate == 0 and p.tail_rate == 0 and p.tail_edges == 0
+    assert p.shape is CurveShape.PLATEAU
+
+
+def test_shape_by_rate_ratio():
+    # FFmpeg 5k: 5171 -> 1004 edges/kexec is still growing, not a plateau.
+    head = 100
+    cut = int(head * PLATEAU_RATIO)
+    assert plateau(_two_lines(head, cut - 1, 20, 10)).shape is CurveShape.PLATEAU
+    assert plateau(_two_lines(head, cut + 1, 20, 10)).shape is CurveShape.SLOWDOWN
+    assert plateau(_two_lines(head, head * 2, 20, 10)).shape is CurveShape.SPEEDUP
 
 
 # ── rarefy ──────────────────────────────────────────────────────────────────

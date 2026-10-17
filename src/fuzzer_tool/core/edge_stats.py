@@ -14,6 +14,7 @@ References: Colwell et al. (2012) "Models and estimators linking
 individual-based and sample-based rarefaction"; Efron (1979) bootstrap.
 """
 
+import enum
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
@@ -24,6 +25,10 @@ QUANTILES = (10, 50, 90, 99)
 DECADES = 10  # 10^0 .. 10^9 covers uint32 hit counters
 MIN_SEGMENT = 3  # points per side of the plateau break
 KEXEC = 1000  # rates are edges per 1000 execs
+# Tail at or below this share of the head rate is a plateau, above it a
+# slowdown. Scale-free: fuzzgoat 13.65 -> 0.64 (5%) plateaus, FFmpeg 5k
+# 5171 -> 1004 edges/kexec (19%) is still growing.
+PLATEAU_RATIO = 0.1
 BOOT_RESAMPLES = 200
 CI_LOW_PCT = 2.5
 CI_HIGH_PCT = 97.5
@@ -42,6 +47,14 @@ class HitProfile:
     decades: tuple[int, ...]  # edges with hits in [10^d, 10^(d+1))
 
 
+class CurveShape(enum.Enum):
+    """Coverage curve after the break, by tail / head rate."""
+
+    PLATEAU = "Plateau"
+    SLOWDOWN = "Slowdown"
+    SPEEDUP = "Speedup"
+
+
 @dataclass(frozen=True)
 class Plateau:
     """Best two-segment fit of the coverage curve."""
@@ -50,6 +63,15 @@ class Plateau:
     head_rate: float  # edges / kexec before the break
     tail_rate: float  # edges / kexec after it
     tail_edges: int  # edges gained from the break to the end
+
+    @property
+    def shape(self) -> CurveShape:
+        # A flat curve (0 -> 0) is a plateau.
+        if self.tail_rate <= PLATEAU_RATIO * max(self.head_rate, 0.0):
+            return CurveShape.PLATEAU
+        if self.tail_rate < self.head_rate:
+            return CurveShape.SLOWDOWN
+        return CurveShape.SPEEDUP
 
 
 def hit_profile(hits: Iterable[int]) -> HitProfile | None:

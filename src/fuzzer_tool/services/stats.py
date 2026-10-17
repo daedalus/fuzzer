@@ -34,6 +34,7 @@ from fuzzer_tool.core.analyzers.analyzer_elo import (
 from fuzzer_tool.core.circular_stats import PhaseConcentration
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
+from fuzzer_tool.core.edge_stats import CurveShape
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.kalman import RobustKF
 from fuzzer_tool.core.lineage import LineageTree
@@ -662,11 +663,12 @@ class StatsReporter:
         share = " / ".join(f"top{k} {v:.0%}" for k, v in prof.top_share.items())
         print(f"  Hit share:         {share} (median {prof.quantiles[50]:.0f} hits)")
 
-        # Only a slowdown is a plateau; a faster tail is a breakthrough.
+        # A faster tail is a breakthrough, not worth a line.
         pl = et.coverage_plateau()
-        if pl is not None and pl.tail_rate < pl.head_rate:
+        if pl is not None and pl.shape is not CurveShape.SPEEDUP:
+            label = f"{pl.shape.value}:"
             print(
-                f"  Plateau:           from exec {pl.exec_at:,}: {pl.head_rate:.2f} -> "
+                f"  {label:<19}from exec {pl.exec_at:,}: {pl.head_rate:.2f} -> "
                 f"{pl.tail_rate:.2f} edges/kexec (+{pl.tail_edges} since)"
             )
 
