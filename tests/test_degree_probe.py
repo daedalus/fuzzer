@@ -8,8 +8,10 @@ from fuzzer_tool.core.degree_probe import (
     Degree,
     blr_defect,
     classify,
+    classify_exact,
     second_derivative,
     solve_affine,
+    solve_low,
 )
 from fuzzer_tool.core.rand_pool import RandPool
 
@@ -165,3 +167,62 @@ class TestSolveAffine:
 
         solve_affine(f, N, 1)
         assert len(calls) <= N + 2
+
+
+class TestClassifyExact:
+    @pytest.mark.parametrize(
+        ("f", "deg"),
+        [
+            (_const, Degree.CONSTANT),
+            (_affine, Degree.AFFINE),
+            (_quadratic, Degree.QUADRATIC),
+            (_cubic, Degree.HIGH),
+        ],
+    )
+    def test_known_degrees(self, f, deg):
+        assert classify_exact(f, N) is deg
+
+    # Regression: the documented blind spot -- [x == K] looks constant to
+    # random probing; the full ANF sees its degree-n monomial.
+    def test_regression_equality_gate_is_high_not_constant(self):
+        assert classify_exact(_point, N) is Degree.HIGH
+
+    def test_wide_field_refused(self):
+        with pytest.raises(ValueError):
+            classify_exact(_affine, 64)
+
+
+class TestSolveLow:
+    @pytest.mark.parametrize("want", [0, 1])
+    def test_quadratic_solution_satisfies_target(self, want):
+        x = solve_low(_quadratic, N, want)
+        assert x is not None
+        assert _quadratic(x) == want
+
+    def test_pure_quadratic_with_no_linear_term_is_solved(self):
+        """Falsification of solve_affine's reach: no unit vector flips x0&x1."""
+        f = lambda x: x & (x >> 1) & 1  # noqa: E731
+        assert solve_affine(f, N, 1) is None
+        x = solve_low(f, N, 1)
+        assert x is not None
+        assert f(x) == 1
+
+    def test_constant_is_unsolvable(self):
+        assert solve_low(_const, N, 0) is None
+
+    def test_exec_cost_is_the_layer(self):
+        calls = []
+
+        def f(x):
+            calls.append(x)
+            return 0
+
+        solve_low(f, N, 1)
+        assert len(calls) == 1 + N + N * (N - 1) // 2
+
+    # Adversarial: a degree-n gate only flips at its key; the scan of the
+    # weight <= 2 layer must not return a wrong value.
+    def test_point_function_never_yields_wrong_value(self):
+        for want in (0, 1):
+            x = solve_low(_point, N, want)
+            assert x is None or _point(x) == want

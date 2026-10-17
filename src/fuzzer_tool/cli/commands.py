@@ -4888,7 +4888,8 @@ def main() -> int:
         action="store_true",
         default=False,
         help="--affine-mod plus operand maps Redqueen cannot patch: GF(2)-affine "
-        "(parity, syndromes), additive (byte sums, weighted checksums) and per-byte "
+        "(parity, syndromes), GF(2) degree 2 (<= 16-bit fields), polynomial mod 2^k "
+        "(x*x + 3*x), additive (byte sums, weighted checksums) and per-byte "
         "maps into string compares (strcmp(rot13(x), ...)). Screens 64 bytes; shares "
         "--affine-mod-execs; needs cmplog.",
     )

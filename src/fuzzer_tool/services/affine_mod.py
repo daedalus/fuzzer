@@ -15,14 +15,18 @@ on the same screen, cheapest first::
 
     bytes that move one operand byte each ──▶ byte map   (strcmp(rot13(x)))
     run of bytes moving an integer v      ──▶ additive   (sum, checksum)
-    window, modular fit failed            ──▶ GF(2)      (parity, syndrome)
+    window, modular fit failed            ──▶ polynomial (x*x + 3*x mod 2^k)
+                                          ──▶ GF(2)      (parity, syndrome)
+    window <= 2 bytes, GF(2) fit failed   ──▶ GF(2) deg 2 (x & rotl(x) ^ ...)
 """
 
 from collections import Counter, deque
 from enum import Enum
 
+import numpy as np
+
 from fuzzer_tool.core import affine_mod as core
-from fuzzer_tool.core import derived_fit
+from fuzzer_tool.core import anf, derived_fit, poly_mod
 from fuzzer_tool.core.i2s_fixpoint import MIN_OPERAND, Pair, Probe
 from fuzzer_tool.core.numtheory import modinv
 
@@ -48,6 +52,13 @@ FIELD_WIDTHS = (1, 2, 4, 8)
 
 # Probe budget per search (screen + fits + one verify per window).
 MAX_SEARCH_EXECS = 400
+
+# GF(2) degree-2 fit: widest window (16 bits: 137 layer execs, 2^16 table).
+QUAD_MAX_BYTES = 2
+QUAD_DEGREE = 2
+
+# Points x0 ^ mask checking the degree-2 fit off its layer.
+_QUAD_CONFIRMS = (0xFFFF, 0x5555, 0x3333, 0x0F0F)
 
 
 class Order(Enum):
@@ -275,8 +286,12 @@ class AffineMod:
             self._queue_solutions(data, win, order, result.model)
             return
 
-        if self._derived:
-            self._solve_gf2(data, win)
+        if not self._derived:
+            return
+        if self._solve_poly(data, win) or self._solve_gf2(data, win):
+            return
+        if win.width <= QUAD_MAX_BYTES:
+            self._solve_quad(data, win)
 
     def _verify(self, cand: bytes, const: bytes, side: Side) -> bool:
         """Queue *cand*; one probe checks the compare now holds (or vanished)."""
@@ -308,7 +323,54 @@ class AffineMod:
 
     # ── --derived-cmp families ───────────────────────────────────────
 
-    def _solve_gf2(self, data: bytes, win: _Window) -> None:
+    def _observer(self, data: bytes, win: _Window, order: Order) -> core.Observe:
+        def observe(x: int) -> int | None:
+            return _read(self._run(_patch(data, win, x, order)), win.const, win.side)
+
+        return observe
+
+    def _solve_poly(self, data: bytes, win: _Window) -> bool:
+        """``p(x) mod 2^k == t``, degree 1..MAX_DEGREE; True once fitted."""
+        target = int.from_bytes(win.const, "little")
+        bits = 8 * len(win.const)
+        orders = (Order.LITTLE,) if win.width == 1 else tuple(Order)
+        for order in orders:
+            x0 = int.from_bytes(data[win.start : win.start + win.width], order.value)
+            model = poly_mod.fit(self._observer(data, win, order), x0, 8 * win.width, bits)
+            if model is None:
+                continue
+
+            self._outcomes["poly"] += 1
+            sols = [x for x in poly_mod.solve(model, target, 8 * win.width, near=x0) if x != x0]
+            for n, x in enumerate(sols):
+                cand = _patch(data, win, x, order)
+                # One verifying probe per window, as for the modular family.
+                if n == 0:
+                    self._verify(cand, win.const, win.side)
+                else:
+                    self._queue.append(cand)
+            return True
+
+        return False
+
+    def _solve_quad(self, data: bytes, win: _Window) -> None:
+        """Every operand bit of degree <= 2 in the field bits: fit the ANF, invert by table."""
+        n = 8 * win.width
+        read = self._observer(data, win, Order.LITTLE)
+        x0 = int.from_bytes(data[win.start : win.start + win.width], "little")
+
+        # Fit g(d) = v(x0 ^ d): same degree, layer probes stay near the seed.
+        table = anf.fit_low(lambda d: read(x0 ^ d), n, QUAD_DEGREE, _QUAD_CONFIRMS)
+        if table is None:
+            return
+
+        self._outcomes["gf2q"] += 1
+        hits = np.flatnonzero(table == np.uint64(int.from_bytes(win.const, "little")))
+        if hits.size:
+            d = int(hits[0])
+            self._verify(_patch(data, win, x0 ^ d, Order.LITTLE), win.const, win.side)
+
+    def _solve_gf2(self, data: bytes, win: _Window) -> bool:
         # Byte order only permutes the bits of x: one order suffices.
         def read_gf2(x: int) -> int | None:
             return _read(self._run(_patch(data, win, x, Order.LITTLE)), win.const, win.side)
@@ -316,12 +378,13 @@ class AffineMod:
         x0 = int.from_bytes(data[win.start : win.start + win.width], "little")
         model = derived_fit.fit_gf2(read_gf2, x0, 8 * win.width)
         if model is None:
-            return
+            return False
 
         self._outcomes["gf2"] += 1
         x = derived_fit.solve_gf2(model, int.from_bytes(win.const, "little"))
         if x is not None and x != x0:
             self._verify(_patch(data, win, x, Order.LITTLE), win.const, win.side)
+        return True
 
     def _solve_bytemap(self, data: bytes, key: Key, base: bytes, after: dict[int, bytes]) -> bool:
         """strcmp(f(x), "...") with one input byte per operand byte."""

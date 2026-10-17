@@ -68,6 +68,29 @@ def _avalanche(data: bytes) -> int:
     return h ^ h >> 13
 
 
+def _poly(data: bytes) -> int:
+    x = int.from_bytes(data[41:45], "little")
+    return (x * x + 3 * x + 7) & 0xFFFFFFFF
+
+
+def _quad16(x: int) -> int:
+    r = (x << 3 | x >> 13) & 0xFFFF
+    return (x & r) ^ (x >> 5) ^ 0xA5C3
+
+
+def _quad(data: bytes) -> int:
+    return _quad16(int.from_bytes(data[46:48], "little"))
+
+
+def _cubic(data: bytes) -> int:
+    x = int.from_bytes(data[46:48], "little")
+    return x & (x >> 1) & (x >> 2) ^ 0x1234
+
+
+POLY_TARGET = (0x13572468**2 + 3 * 0x13572468 + 7) & 0xFFFFFFFF
+QUAD_TARGET = _quad16(0xBEEF)
+
+
 def _u32(v: int) -> bytes:
     return v.to_bytes(4, "little")
 
@@ -85,6 +108,9 @@ SYND_GATE = (lambda d: _u32(_syndrome(d)), _u32(G3_TARGET))
 SUM_GATE = (lambda d: _u32(_sum16(d)), _u32(SUM_TARGET))
 ROT_GATE = (_rot, HELLO)
 HASH_GATE = (lambda d: _u32(_avalanche(d)), _u32(0x46044640))
+POLY_GATE = (lambda d: _u32(_poly(d)), _u32(POLY_TARGET))
+QUAD_GATE = (lambda d: _quad(d).to_bytes(2, "little"), QUAD_TARGET.to_bytes(2, "little"))
+CUBIC_GATE = (lambda d: _cubic(d).to_bytes(2, "little"), (0x1234 ^ 0x0101).to_bytes(2, "little"))
 
 
 def _search(gate, families, max_execs=400):
@@ -105,8 +131,10 @@ def _search(gate, families, max_execs=400):
         (SYND_GATE, lambda d: _syndrome(d) == G3_TARGET),
         (SUM_GATE, lambda d: _sum16(d) == SUM_TARGET),
         (ROT_GATE, lambda d: _rot(d) == HELLO),
+        (POLY_GATE, lambda d: _poly(d) == POLY_TARGET),
+        (QUAD_GATE, lambda d: _quad(d) == QUAD_TARGET),
     ],
-    ids=["gf2_syndrome", "additive_sum", "bytemap_rot13"],
+    ids=["gf2_syndrome", "additive_sum", "bytemap_rot13", "poly_mod", "gf2_quadratic"],
 )
 def test_derived_family_queues_a_satisfying_input(gate, holds):
     svc, cands = _search(gate, Families.DERIVED)
@@ -116,7 +144,11 @@ def test_derived_family_queues_a_satisfying_input(gate, holds):
     assert all(len(c) == len(SEED) for c in cands)
 
 
-@pytest.mark.parametrize("gate", [SYND_GATE, SUM_GATE, ROT_GATE], ids=["gf2", "sum", "rot13"])
+@pytest.mark.parametrize(
+    "gate",
+    [SYND_GATE, SUM_GATE, ROT_GATE, POLY_GATE, QUAD_GATE],
+    ids=["gf2", "sum", "rot13", "poly", "quad"],
+)
 def test_modular_family_alone_does_not_solve_derived_gates(gate):
     """Falsification: without --derived-cmp these gates stay closed."""
     svc, cands = _search(gate, Families.MODULAR)
@@ -127,6 +159,20 @@ def test_avalanche_hash_queues_nothing():
     """Adversarial: compcov G4 is no family; fail closed within budget."""
     svc, cands = _search(HASH_GATE, Families.DERIVED, max_execs=400)
     assert "solved" not in svc.stats
+    assert svc.stats["execs"] <= 400
+
+
+def test_poly_and_quad_families_are_counted():
+    svc, _ = _search(POLY_GATE, Families.DERIVED)
+    assert svc.stats["poly"] >= 1
+    svc, _ = _search(QUAD_GATE, Families.DERIVED)
+    assert svc.stats["gf2q"] >= 1
+
+
+def test_cubic_gf2_gate_is_not_fitted_as_quadratic():
+    """Adversarial: a degree-3 map must fail the quadratic confirms."""
+    svc, _ = _search(CUBIC_GATE, Families.DERIVED)
+    assert "gf2q" not in svc.stats
     assert svc.stats["execs"] <= 400
 
 

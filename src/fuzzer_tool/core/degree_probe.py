@@ -5,7 +5,7 @@ small field, observing one edge), classify how ``f`` depends on ``x`` and,
 for the cheapest class, solve it exactly::
 
     f(x) = c ^ (w . x)          AFFINE      n+2 execs, exact
-    degree <= 2                 QUADRATIC   hand to a solver / havoc
+    degree <= 2                 QUADRATIC   solve_low: <= 1+n+C(n,2) execs, exact
     anything else               HIGH
 
 Identities (all over GF(2), ``^`` is XOR):
@@ -19,7 +19,8 @@ Limits, stated so callers do not over-trust a verdict:
   equality gate, ``f = [x == K]``) is indistinguishable from a constant by
   random probing and may land in any class (measured over 300 seeds,
   n=8: constant 208, quadratic 46, high 42, affine 4); that is cmplog's job,
-  not this module's.  ``solve_affine``
+  not this module's.  ``classify_exact`` reads all ``2^n`` points and has no
+  blind spot, for small ``n`` only.  ``solve_affine``
   re-executes its answer, so a wrong verdict costs one exec, never a wrong
   result.
 - A nondeterministic edge breaks every identity above.  It is reported as
@@ -37,6 +38,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from enum import Enum
 
+import numpy as np
+
+from fuzzer_tool.core import anf
+
 # BLR and second-derivative trials per classification.
 TRIALS = 24
 
@@ -44,6 +49,12 @@ TRIALS = 24
 STABILITY_SAMPLES = 4
 
 BitFn = Callable[[int], int]
+
+# Exact ANF degree -> verdict; anything above 2 is HIGH.
+_BY_DEGREE = {0: "CONSTANT", 1: "AFFINE", 2: "QUADRATIC"}
+
+# solve_low's layer: a nonconstant f of degree <= 2 flips at weight <= 2.
+LOW_DEGREE = 2
 
 
 class Degree(Enum):
@@ -130,4 +141,30 @@ def solve_affine(f: BitFn, n_bits: int, want: int) -> int | None:
         if (f(1 << i) & 1) ^ c:
             x = 1 << i
             return x if f(x) & 1 == want else None
+    return None
+
+
+def classify_exact(f: BitFn, n_bits: int) -> Degree:
+    """Exact verdict from the full truth table: ``2^n_bits`` execs, no noise check.
+
+    Example: ``[x == K]`` is degree ``n`` (HIGH), never CONSTANT.
+    """
+    if not 1 <= n_bits <= anf.MAX_BITS:
+        raise ValueError(f"n_bits must be in [1, {anf.MAX_BITS}], got {n_bits}")
+
+    table = np.array([f(x) & 1 for x in range(1 << n_bits)], dtype=np.uint64)
+    return Degree[_BY_DEGREE.get(anf.degree(table), "HIGH")]
+
+
+def solve_low(f: BitFn, n_bits: int, want: int, degree: int = LOW_DEGREE) -> int | None:
+    """Input ``x`` with ``f(x) == want`` for ``deg f <= degree``, else ``None``.
+
+    Scans the weight ``<= degree`` layer, lowest weight first: complete for
+    such ``f`` (minimal-monomial flip, ``core.anf``), and every return is a
+    read value, so a higher-degree ``f`` costs execs, never a wrong answer.
+    """
+    want &= 1
+    for x in anf.layer(n_bits, degree):
+        if f(x) & 1 == want:
+            return x
     return None
