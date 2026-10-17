@@ -27,7 +27,7 @@ def main():
         "-c",
         "-d",
         corpus,
-        "-n",
+        "--max-execs",
         iterations,
         "--stats-interval",
         "99999",

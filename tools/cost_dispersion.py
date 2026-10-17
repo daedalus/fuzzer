@@ -41,7 +41,7 @@ def main() -> int:
     workdir = Path(tempfile.mkdtemp(prefix="disp_"))
     cmd = [
         sys.executable, "-m", "fuzzer_tool", "fuzz", args.target,
-        "-d", str(workdir), "-c", "-n", str(args.iters), "-s", str(args.seed),
+        "-d", str(workdir), "-c", "--max-execs", str(args.iters), "-s", str(args.seed),
         *args.flags.split(), "--boltzmann",
     ]
     print(f"[*] {Path(args.target).name}: running {args.iters} execs to fill the ledger")

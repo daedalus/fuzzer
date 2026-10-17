@@ -50,7 +50,7 @@ def run(label, extra_args=None):
         "-c",
         "-d",
         CORPUS,
-        "-n",
+        "--max-execs",
         ITERS,
         "--stats-interval",
         "99999",

@@ -34,6 +34,7 @@ from fuzzer_tool.core.analyzers.analyzer_elo import (
 from fuzzer_tool.core.circular_stats import PhaseConcentration
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count
+from fuzzer_tool.core.edge_clusters import fit_tracker
 from fuzzer_tool.core.edge_stats import CurveShape
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.kalman import RobustKF
@@ -817,6 +818,18 @@ class StatsReporter:
             f"largest class {stats['largest_class']})"
         )
 
+    def _print_summary_edge_clusters(self, f) -> None:
+        """Incidence classes and clusters: what per-edge rarity over-counts."""
+        clusters = fit_tracker(f._edge_tracker)
+        if clusters is None:
+            return
+        st = clusters.stats()
+        print(
+            f"  Edge clusters:     {st['classes']} classes, {st['clusters']} clusters for "
+            f"{st['edges']} edges ({st['singleton_edges']} singleton edges in "
+            f"{st['singleton_classes']} classes)"
+        )
+
     def _print_summary_rarity(self, f) -> None:
         """Print edge rarity summary lines."""
         rarity = f._edge_tracker.edge_rarity_stats()
@@ -834,6 +847,7 @@ class StatsReporter:
                 f"({effective / total_edges:.0%} of the edges carry the admitted inputs' hits)"
             )
         self._print_summary_edge_classes(f)
+        self._print_summary_edge_clusters(f)
         uniqueness = f._edge_tracker.seed_uniqueness()
         if uniqueness:
             irreplaceable = sum(1 for v in uniqueness.values() if v > 0)

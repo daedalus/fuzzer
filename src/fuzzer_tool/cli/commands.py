@@ -796,6 +796,7 @@ def cmd_fuzz(args):
         pool_drift=getattr(args, "pool_drift", False),
         dict_thompson=getattr(args, "dict_thompson", False),
         seed_residual=getattr(args, "seed_residual", False),
+        edge_clusters=getattr(args, "edge_clusters", False),
         confirm_novelty=getattr(args, "confirm_novelty", False),
         priming_check=getattr(args, "priming_check", False),
         antifuzz_evade=getattr(args, "antifuzz_evade", False),
@@ -2352,6 +2353,7 @@ _HAIL_MARY_FLAGS = (
     "pool_drift",
     "dict_thompson",
     "seed_residual",
+    "edge_clusters",
     "op_katz",
     "op_kuramoto",
     "op_tang",
@@ -4587,6 +4589,15 @@ def main() -> int:
         "(first in the fallback chain without --elo) weighting each seed by the "
         "smoothed entropy of the rare edges its mutants hit. Not --schedule entropic. "
         "OFF by default.",
+    )
+    fuzz_parser.add_argument(
+        "--edge-clusters",
+        action="store_true",
+        default=False,
+        help="Count edge rarity per incidence class (edges every seed hits together) "
+        "instead of per edge, and boost seeds one branch from a rare class of a "
+        "near-duplicate cluster. Applies to the seed picker's rare bonus, honggfuzz "
+        "rare-edge energy and subsumption weight. OFF by default.",
     )
     fuzz_parser.add_argument(
         "--good-turing-seed",

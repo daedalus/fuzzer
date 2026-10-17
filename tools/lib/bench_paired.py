@@ -190,6 +190,9 @@ ARMS: dict[str, list[str]] = {
     # Elo arms, so they pair against `elo`, not `baseline`. Prior left at its
     # default: the sweep is a separate A/B.
     "elo-good-turing-seed": ["--elo", "--mc-bandit", "--good-turing-seed"],
+    # Rarity per incidence class + near-miss bonus (core/edge_clusters.py).
+    # Acts on the default weighted picker, so it pairs against plain baseline.
+    "edge-clusters": ["--edge-clusters"],
     "elo-op-good-turing": ["--elo", "--mc-bandit", "--op-good-turing"],
     # Arena arm subsets (--pos-arena-arms). The control is the arena with
     # uniform as its only member: same Elo/bandit stack and same arena
@@ -279,6 +282,7 @@ ARM_BASELINES: dict[str, str] = {
     **{arm: "baseline" for arm in GROWING_TREE_ARMS},
     "elo-good-turing-seed": "elo",
     "elo-op-good-turing": "elo",
+    "edge-clusters": "baseline",
     "pos-arena-uniform": "elo",
     **{f"pos-arena-{a.replace('_', '-')}": "pos-arena-uniform" for a in ARENA_TESTABLE},
     "pos-arena-all": "pos-arena-uniform",
@@ -345,7 +349,7 @@ def run_cell(
         "-d",
         str(workdir),
         "-c",
-        "-n",
+        "--max-execs",
         str(iters),
         "-s",
         str(seed),

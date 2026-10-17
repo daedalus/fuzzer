@@ -1716,6 +1716,7 @@ class Fuzzer:
         good_turing_estimator="gt",
         good_turing_horizon=0.5,
         seed_residual=False,
+        edge_clusters=False,
         strata=False,
         pool_drift=False,
         dict_thompson=False,
@@ -3157,6 +3158,14 @@ class Fuzzer:
                 self._rng, self._matrix_substrate, outcome_fn=self._seed_residual_outcomes
             )
             log.info("seed_residual enabled")
+        # Rarity per incidence class + near-miss bonus (core/edge_clusters.py).
+        # Off by default; gated on a paired benchmark.
+        self._edge_clusters = None
+        if edge_clusters:
+            from fuzzer_tool.core.edge_clusters import EdgeClusters
+
+            self._edge_clusters = EdgeClusters()
+            self._edge_tracker.attach_clusters(self._edge_clusters)
         # Strata arms (docs/handover/handover_strata_schedulers_2026-09-19.md
         # §3.2-3.4): one EdgeLedger of confirmed ids folded into families,
         # shared by the seed arm and the op arm. Off by default; unmeasured.

@@ -94,6 +94,7 @@ except ImportError:
 
 from fuzzer_tool.core import edge_stats  # noqa: E402
 from fuzzer_tool.core.count_class import classify_counts  # noqa: E402
+from fuzzer_tool.core.edge_clusters import count_distinct  # noqa: E402
 from fuzzer_tool.core.elf import (  # noqa: E402
     MAP_SIZE_DEFAULT,
     _map_size_max,
@@ -2125,13 +2126,45 @@ class EdgeTracker:
         if len(self.seed_edges) <= 1:
             return 1.0  # only seed — all edges are novel
 
+        return max(0.1, self._unique_fraction(seed_edges))
+
+    def _unique_fraction(self, seed_edges: set[int]) -> float:
         owners_get = self._edge_owner_count.get
         unique = 0
         for edge_id in seed_edges:
             if owners_get(edge_id, 1) <= 1:
                 unique += 1
+        return unique / len(seed_edges)
 
-        return max(0.1, unique / len(seed_edges))
+    # ── Rarity per edge class (--edge-clusters) ────────────────────────
+
+    def attach_clusters(self, clusters) -> None:
+        """Count rarity per incidence class (core/edge_clusters.py), not per edge.
+
+        Rebinds rare_edge_count and the subsumption fraction once (ifs up),
+        like attach_generations. Owner counts stay live; classes come from
+        the last refit, and edges it did not see count one each.
+        """
+        self._clusters = clusters
+        self.rare_edge_count = self._rare_class_count
+        self._unique_fraction = self._class_unique_fraction
+
+    def _owner_mask(self, edges: set[int], max_owners: int) -> tuple[np.ndarray, np.ndarray]:
+        get = self._edge_owner_count.get
+        arr = np.fromiter(edges, dtype=np.int64, count=len(edges))
+        owners = np.fromiter((get(e, 1) for e in edges), dtype=np.int64, count=len(edges))
+        return self._clusters.class_index(arr), owners <= max_owners
+
+    def _rare_class_count(self, seed_key: str, threshold: int = 4) -> int:
+        edges = self.seed_edges.get(seed_key)
+        if not edges:
+            return 0
+        cls, rare = self._owner_mask(edges, threshold - 1)
+        return count_distinct(cls, rare)
+
+    def _class_unique_fraction(self, seed_edges: set[int]) -> float:
+        cls, unique = self._owner_mask(seed_edges, 1)
+        return count_distinct(cls, unique) / count_distinct(cls, np.ones(cls.size, dtype=bool))
 
     def _build_aggregate_distribution(self) -> dict[int, float]:
         """Build the corpus-wide aggregate hit-count distribution.

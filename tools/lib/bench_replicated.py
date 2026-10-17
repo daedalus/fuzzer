@@ -76,7 +76,7 @@ def run_one(src: str, target: str, flags: str, seed: int, iters: int, timeout: i
         "-d",
         str(workdir),
         "-c",
-        "-n",
+        "--max-execs",
         str(iters),
         "-s",
         str(seed),
