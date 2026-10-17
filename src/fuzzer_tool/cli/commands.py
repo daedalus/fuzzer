@@ -16,6 +16,7 @@ from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
 from fuzzer_tool.core.colorization import ColorMode
 from fuzzer_tool.core.dirichlet import AlphaMode
+from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
@@ -798,6 +799,7 @@ def cmd_fuzz(args):
         dict_thompson=getattr(args, "dict_thompson", False),
         seed_residual=getattr(args, "seed_residual", False),
         edge_clusters=getattr(args, "edge_clusters", False),
+        cluster_jaccard=getattr(args, "cluster_jaccard", CLUSTER_JACCARD),
         confirm_novelty=getattr(args, "confirm_novelty", False),
         priming_check=getattr(args, "priming_check", False),
         antifuzz_evade=getattr(args, "antifuzz_evade", False),
@@ -4607,6 +4609,15 @@ def main() -> int:
         "instead of per edge, and boost seeds one branch from a rare class of a "
         "near-duplicate cluster. Applies to the seed picker's rare bonus, honggfuzz "
         "rare-edge energy and subsumption weight. OFF by default.",
+    )
+    fuzz_parser.add_argument(
+        "--cluster-jaccard",
+        type=float,
+        default=CLUSTER_JACCARD,
+        metavar="J",
+        help="Edge-cluster threshold in (0, 1] for --edge-clusters and --pos-centroid: "
+        "a class joins a cluster leader at Jaccard >= J. Higher -> more, tighter "
+        f"clusters (more centroids, fewer gaps). Default {CLUSTER_JACCARD}.",
     )
     fuzz_parser.add_argument(
         "--good-turing-seed",

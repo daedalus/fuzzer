@@ -60,7 +60,12 @@ def fit_tracker(tracker) -> "EdgeClusters | None":
 class EdgeClusters:
     """Incidence classes and near-duplicate clusters, refit wholesale."""
 
-    def __init__(self, refit_interval: int = DEFAULT_REFIT_INTERVAL) -> None:
+    def __init__(
+        self, refit_interval: int = DEFAULT_REFIT_INTERVAL, jaccard: float = CLUSTER_JACCARD
+    ) -> None:
+        if not 0.0 < jaccard <= 1.0:
+            raise ValueError(f"cluster Jaccard threshold must be in (0, 1], got {jaccard}")
+        self.jaccard = jaccard  # higher -> more, tighter clusters (more centroids)
         self.cadence = RefitCadence(interval=refit_interval)
         self.version = 0
         self._reset()
@@ -166,7 +171,7 @@ class EdgeClusters:
                 if leaders:
                     sims = jac[row, leaders]
                     best = int(np.argmax(sims))
-                    if sims[best] >= CLUSTER_JACCARD:
+                    if sims[best] >= self.jaccard:
                         leader[c] = leaders[best]
                         continue
                 leaders.append(c)

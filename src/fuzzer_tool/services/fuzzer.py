@@ -17,6 +17,7 @@ import time
 from typing import TYPE_CHECKING
 
 from fuzzer_tool.core.colorization import ColorMode
+from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.tuple_walk import TupleWalk
 
@@ -1722,6 +1723,7 @@ class Fuzzer:
         good_turing_horizon=0.5,
         seed_residual=False,
         edge_clusters=False,
+        cluster_jaccard=CLUSTER_JACCARD,
         strata=False,
         pool_drift=False,
         dict_thompson=False,
@@ -3166,11 +3168,12 @@ class Fuzzer:
             log.info("seed_residual enabled")
         # Rarity per incidence class + near-miss bonus (core/edge_clusters.py).
         # Off by default; gated on a paired benchmark.
+        self._cluster_jaccard = cluster_jaccard
         self._edge_clusters = None
         if edge_clusters:
             from fuzzer_tool.core.edge_clusters import EdgeClusters
 
-            self._edge_clusters = EdgeClusters()
+            self._edge_clusters = EdgeClusters(jaccard=cluster_jaccard)
             self._edge_tracker.attach_clusters(self._edge_clusters)
         # Strata arms (docs/handover/handover_strata_schedulers_2026-09-19.md
         # §3.2-3.4): one EdgeLedger of confirmed ids folded into families,
@@ -6865,7 +6868,7 @@ class Fuzzer:
             from fuzzer_tool.core.edge_clusters import EdgeClusters
 
             clusters = getattr(self, "_edge_clusters", None) or EdgeClusters(
-                refit_interval=POS_CLUSTERS_REFIT_EXECS
+                refit_interval=POS_CLUSTERS_REFIT_EXECS, jaccard=self._cluster_jaccard
             )
             self._pos_clusters = clusters
             self._pos_centroid = PositionCentroidScheduler(

@@ -191,3 +191,23 @@ def test_refit_interval_is_configurable():
 
     assert EdgeClusters().cadence.interval == DEFAULT_REFIT_INTERVAL
     assert EdgeClusters(refit_interval=500).cadence.interval == 500
+
+
+def test_jaccard_threshold_sets_cluster_count():
+    # _medoid_seeds: J(L,M)=.9, J(L,P)=.8. At 0.85, P leaves L's cluster; at
+    # 0.95 all three stand alone. Fewer centroids as the threshold drops.
+    counts = {j: _fit_j(_medoid_seeds(), j).stats()["clusters"] for j in (0.75, 0.85, 0.95)}
+    assert counts == {0.75: 1, 0.85: 2, 0.95: 3}
+
+
+def test_jaccard_threshold_bounds():
+    # Adversarial: outside (0, 1] is a configuration error, not a silent clamp.
+    for bad in (0.0, -0.1, 1.5):
+        with pytest.raises(ValueError):
+            EdgeClusters(jaccard=bad)
+
+
+def _fit_j(seeds, jaccard) -> EdgeClusters:
+    c = EdgeClusters(jaccard=jaccard)
+    c.refit(seeds)
+    return c
