@@ -173,3 +173,27 @@ def test_ffmpeg_cov_counts_library_branches(tmp_path):
     assert "ffmpeg_read.c" in files
     assert "wavdec.c" in files
     assert frontier.STUB_NAME not in files
+
+
+@requires_clang
+def test_merged_profile_matches_per_input_sum(cov_bin, tmp_path, monkeypatch):
+    # Two paths to corpus counts: one merged profile vs summed per-input exports.
+    # MERGE_BATCH=1 forces a fold per input (the batch boundary on every step).
+    monkeypatch.setattr(frontier, "MERGE_BATCH", 1)
+    inputs = _corpus(tmp_path, b"ax", b"zz", b"ab")
+    cov = frontier.Coverage(cov_bin, tmp_path / "work")
+    summed = frontier.Coverage.merged(cov.run(inputs))
+    assert frontier.Coverage.merged(cov.run(inputs)) == summed  # control: reference vs itself
+    assert cov.profile(inputs) == summed
+
+
+def test_sample_prefers_fuzzed_seeds(tmp_path):
+    from fuzzer_tool.core.hashing import key16
+
+    files = _corpus(tmp_path, *(bytes([i]) * 4 for i in range(10)))
+    fuzzed = files[7]
+    meta = {key16(fuzzed.read_bytes()): {"fuzz_count": 3, "child_count": 1}}
+    picked = frontier._sample(files, meta, 2)
+    assert picked[0] == fuzzed and len(set(picked)) == 2
+    assert frontier._sample(files, meta, 50) == files  # adversarial: n above corpus size
+    assert frontier.Coverage(tmp_path / "x", tmp_path / "w").profile([]) == {}

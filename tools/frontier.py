@@ -39,6 +39,9 @@ import numpy as np
 # llvm-cov export branch record: [line, col, end_line, end_col, true, false, ...]
 _LINE, _COL, _TRUE, _FALSE = 0, 1, 4, 5
 RUN_TIMEOUT = 10
+MERGE_BATCH = 256  # raw profiles per llvm-profdata merge
+SEED_SAMPLE = 200  # inputs exported one by one (per-seed reach)
+SAMPLE_SEED = 5
 SKIP_SUFFIXES = (".pkl", ".gz", ".json")
 STUB_NAME = "frontier_stub.c"
 
@@ -108,6 +111,25 @@ class Coverage:
         with ThreadPoolExecutor(self._workers) as ex:
             return list(ex.map(self._one, range(len(files)), files))
 
+    def profile(self, files: Sequence[Path]) -> dict[Branch, tuple[int, int]]:
+        """Corpus-wide counts: every input run, profiles merged, one export.
+
+        ``llvm-cov export`` reloads the binary's coverage mapping per call
+        (FFmpeg: ~4 s), so this is the cheap path; ``run`` exports per input.
+        Raw profiles are folded into the merged one MERGE_BATCH at a time,
+        which bounds disk use (FFmpeg: 3.5 MB per raw).
+        """
+        if not files:
+            return {}
+        self._work.mkdir(parents=True, exist_ok=True)
+        acc = self._work / "all.profdata"
+        for start in range(0, len(files), MERGE_BATCH):
+            batch = files[start : start + MERGE_BATCH]
+            with ThreadPoolExecutor(self._workers) as ex:
+                raws = [r for r in ex.map(self._exec, range(start, start + len(batch)), batch) if r]
+            self._fold(acc, raws)
+        return self._export(acc) if acc.exists() else {}
+
     @staticmethod
     def merged(runs: Sequence[Run]) -> dict[Branch, tuple[int, int]]:
         """Summed counts over runs (same as merging the profiles)."""
@@ -118,8 +140,9 @@ class Coverage:
                 out[b] = (t0 + t, f0 + f)
         return out
 
-    def _one(self, i: int, path: Path) -> Run:
-        raw, prof = self._work / f"{i}.profraw", self._work / f"{i}.profdata"
+    def _exec(self, i: int, path: Path) -> Path | None:
+        """Run one input; its raw profile, or None when none was written."""
+        raw = self._work / f"{i}.profraw"
         env = {**os.environ, "LLVM_PROFILE_FILE": str(raw)}
         # Crashes and timeouts are expected; the stub dumps the profile on a fatal signal.
         try:
@@ -128,16 +151,29 @@ class Coverage:
             )
         except subprocess.TimeoutExpired:
             print(f"timeout: {path}", file=sys.stderr)
-        if not raw.exists():
+        return raw if raw.exists() else None
+
+    @staticmethod
+    def _fold(acc: Path, raws: Sequence[Path]) -> None:
+        """Merge raws (and acc, if present) into acc; delete the raws."""
+        if not raws:
+            return
+        inputs = [str(acc)] if acc.exists() else []
+        tmp = acc.with_suffix(".tmp")
+        cmd = ["llvm-profdata", "merge", "-sparse", *inputs, *map(str, raws), "-o", str(tmp)]
+        subprocess.run(cmd, check=True, capture_output=True)
+        tmp.replace(acc)
+        for r in raws:
+            r.unlink()
+
+    def _one(self, i: int, path: Path) -> Run:
+        raw = self._exec(i, path)
+        if raw is None:
             return Run(path, {})
 
-        subprocess.run(
-            ["llvm-profdata", "merge", "-sparse", str(raw), "-o", str(prof)],
-            check=True,
-            capture_output=True,
-        )
+        prof = self._work / f"{i}.profdata"
+        self._fold(prof, [raw])
         branches = self._export(prof)
-        raw.unlink()
         prof.unlink()
         return Run(path, branches)
 
@@ -176,14 +212,14 @@ def _source_line(sources: dict[str, str], b: Branch, cache: dict[str, list[str]]
     return lines[b[1] - 1].strip() if 0 < b[1] <= len(lines) else ""
 
 
-def _print_frontier(cov: Coverage, runs: list[Run], merged, front, top: int) -> None:
+def _print_frontier(cov: Coverage, n_inputs: int, runs: list[Run], merged, front, top: int) -> None:
     both = sum(1 for t, f in merged.values() if t and f)
     never = sum(1 for t, f in merged.values() if not t and not f)
     print(
-        f"inputs {len(runs)} | conditions {len(merged)}: both-ways {both}, frontier {len(front)}, never {never}"
+        f"inputs {n_inputs} | conditions {len(merged)}: both-ways {both}, frontier {len(front)}, never {never}"
     )
 
-    # Seeds reaching each frontier condition (either side counted).
+    # Sampled seeds reaching each frontier condition (either side counted).
     reach = dict.fromkeys(front, 0)
     for r in runs:
         for b in front:
@@ -192,7 +228,7 @@ def _print_frontier(cov: Coverage, runs: list[Run], merged, front, top: int) -> 
     cache: dict[str, list[str]] = {}
     kinds = {b: classify(_source_line(cov.sources, b, cache)) for b in front}
     print("by hint: " + ", ".join(f"{k.value} {sum(v is k for v in kinds.values())}" for k in Kind))
-    print("frontier (file:line:col  missing  hint  seeds  source):")
+    print(f"frontier (file:line:col  missing  hint  seeds of {len(runs)} sampled  source):")
     for b in sorted(front, key=lambda b: (kinds[b] is not Kind.OPEN, -reach[b], b))[:top]:
         line = _source_line(cov.sources, b, cache)[:60]
         print(
@@ -208,15 +244,38 @@ def _spearman(a: np.ndarray, b: np.ndarray) -> float:
     return float(np.corrcoef(_ranks(a), _ranks(b))[0, 1])
 
 
-def _print_seed_reach(corpus: Path, runs: list[Run], front) -> None:
-    """Frontier reach vs child rate, with a shuffled control."""
-    from fuzzer_tool.core.hashing import key16
-    from fuzzer_tool.core.rand_pool import RandPool
-    from fuzzer_tool.core.state_store import StateStore
+def _seed_meta(corpus: Path) -> dict:
+    """seed_meta from the corpus state, {} when there is none."""
+    from fuzzer_tool.core.state_store import STATE_FILENAME, StateStore
 
+    if not (corpus / STATE_FILENAME).exists():
+        return {}
     store = StateStore(str(corpus))
     store.load()
-    meta = (store.get("corpus") or {}).get("seed_meta") or {}
+    return (store.get("corpus") or {}).get("seed_meta") or {}
+
+
+def _sample(files: list[Path], meta: dict, n: int) -> list[Path]:
+    """Up to n inputs for per-seed export: fuzzed seeds first (they carry a child rate)."""
+    from fuzzer_tool.core.hashing import key16
+    from fuzzer_tool.core.rand_pool import RandPool
+
+    if len(files) <= n:
+        return files
+
+    rng = RandPool(SAMPLE_SEED)
+    fuzzed = [f for f in files if (meta.get(key16(f.read_bytes())) or {}).get("fuzz_count")]
+    taken = set(fuzzed)
+    rest = [f for f in files if f not in taken]
+    picked = rng.sample(fuzzed, min(n, len(fuzzed)))
+    return picked + rng.sample(rest, n - len(picked))
+
+
+def _print_seed_reach(meta: dict, runs: list[Run], front) -> None:
+    """Frontier reach vs child rate over the sampled seeds, with a shuffled control."""
+    from fuzzer_tool.core.hashing import key16
+    from fuzzer_tool.core.rand_pool import RandPool
+
     rows = []
     for r in runs:
         m = meta.get(key16(r.path.read_bytes()))
@@ -229,7 +288,7 @@ def _print_seed_reach(corpus: Path, runs: list[Run], front) -> None:
         return
 
     rate, hit = (np.array(c, float) for c in zip(*rows, strict=True))
-    shuffled = rate[np.array(RandPool(5).sample(range(len(rate)), len(rate)))]
+    shuffled = rate[np.array(RandPool(SAMPLE_SEED).sample(range(len(rate)), len(rate)))]
     print(
         f"seed reach ({len(rows)} seeds): Spearman child-rate ~ frontier reached {_spearman(rate, hit):+.2f}"
         f" | control (shuffled) {_spearman(shuffled, hit):+.2f}"
@@ -243,20 +302,27 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("binary", type=Path, help="<name>_cov from build_targets.sh --frontier")
     ap.add_argument("corpus", type=Path)
     ap.add_argument("--top", type=int, default=20, help="frontier rows to list")
-    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--workers", type=int, default=4, help="parallel runs / exports")
+    ap.add_argument(
+        "--seed-sample",
+        type=int,
+        default=SEED_SAMPLE,
+        help="inputs exported per seed (4 s each on FFmpeg)",
+    )
     args = ap.parse_args(argv)
 
     corpus = args.corpus.expanduser()
+    files = _corpus_files(corpus)
+    meta = _seed_meta(corpus)
     with tempfile.TemporaryDirectory(prefix="frontier_") as work:
         cov = Coverage(args.binary.expanduser(), Path(work), args.workers)
-        runs = cov.run(_corpus_files(corpus))
-    merged = Coverage.merged(runs)
-    front = frontier_of(merged)
-    _print_frontier(cov, runs, merged, front, args.top)
-    from fuzzer_tool.core.state_store import STATE_FILENAME
+        merged = cov.profile(files)
+        runs = cov.run(_sample(files, meta, args.seed_sample))
 
-    if (corpus / STATE_FILENAME).exists():
-        _print_seed_reach(corpus, runs, front)
+    front = frontier_of(merged)
+    _print_frontier(cov, len(files), runs, merged, front, args.top)
+    if meta:
+        _print_seed_reach(meta, runs, front)
     return 0
 
 
