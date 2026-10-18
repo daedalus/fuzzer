@@ -5421,6 +5421,11 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
     struct __afl_entry *saved_area = __afl_area;
     __afl_area = NULL;
 
+    /* Resolve the ctx stack bound once, here: with __afl_area detached the
+     * loop never walks, so each child otherwise pays pthread_getattr_np
+     * (a /proc/self/maps parse) on its first edge. Forked TLS inherits it. */
+    if (__afl_ctx_on && !__afl_ctx_stack_hi) __afl_ctx_resolve_stack_hi();
+
 #if __AFL_CMPLOG
     /* Same argument, one layer over: every child forks from the parent's
      * counter state, so anything counted before this point is re-counted

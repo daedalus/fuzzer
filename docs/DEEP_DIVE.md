@@ -989,6 +989,8 @@ constructors — the cost a spawn-per-exec loop pays every time. `ForkserverRunn
 
 The forkserver child is exec'd with `LD_BIND_NOW=1` (a caller's own value wins), so every PLT slot is resolved once before the fork loop and children inherit them bound. Measured on a shim target calling ~15 libc/libm functions, 7 interleaved reps of 3k execs: **+11.6%** median eps (2438 → 2730), lazy-vs-lazy control +0.4%. Not set for the fork+exec fallback, which would pay eager binding on every exec.
 
+The ctx stack bound (`__afl_ctx_stack_hi`, a `pthread_getattr_np` `/proc/self/maps` parse) is resolved in the parent before the fork loop when ctx is on; children inherit it via TLS. Before, the detached parent never walked, so every child paid it: ~114k instructions per exec (callgrind, fuzzgoat), forkserver small-input exec 904 → 814 us (`tests/test_regression_forkserver_stack_hi.py`).
+
 Measured against `posix_spawn`: **5.27×** on `test_target`, **1.38×** on an ASAN
 target with heavy static init, **2.77×** end to end through the CLI (484 → 1341 eps).
 The ASAN figure is the one to plan around, since every target here is built with ASAN
