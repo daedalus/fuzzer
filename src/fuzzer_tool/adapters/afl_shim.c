@@ -1498,6 +1498,105 @@ static inline int __afl_probe_slot(struct __afl_entry *area, uint32_t idx,
     return 1;
 }
 
+/* ── Probe run ISA ────────────────────────────────────────────────────
+ *
+ * __afl_probe_run settles edge_id in the first slot of [start, start + n)
+ * that is empty or already holds it. Chosen at compile time:
+ *
+ *     -D__AFL_PROBE_ISA=0  scalar, one slot per step (default, legacy)
+ *     -D__AFL_PROBE_ISA=1  SSE2, 2 slots per compare
+ *     -D__AFL_PROBE_ISA=2  AVX2, 4 slots per compare (needs -mavx2)
+ *
+ * An ISA the compiler cannot target falls back to scalar. The SIMD runs
+ * check the first slot scalar (hot edges hit their home slot), then compare
+ * edge ids of a vector of entries against edge_id and 0 at once:
+ *
+ *     entries  [id0 c0 | id1 c1 | id2 c2 | id3 c3]   one 32-byte load
+ *     mask     cmpeq(id) | cmpeq(0), even lanes only -> first hit = ctz / 2
+ *
+ * Loads never pass start + n (the remainder is scalar), so no read leaves
+ * the table. Placement is identical to scalar: tests/test_shim_simd_probe.py. */
+#define __AFL_PROBE_SCALAR 0
+#define __AFL_PROBE_SSE2   1
+#define __AFL_PROBE_AVX2   2
+
+#ifndef __AFL_PROBE_ISA
+#  define __AFL_PROBE_ISA __AFL_PROBE_SCALAR
+#endif
+#if __AFL_PROBE_ISA < __AFL_PROBE_SCALAR || __AFL_PROBE_ISA > __AFL_PROBE_AVX2
+#  error "__AFL_PROBE_ISA must be 0 (scalar), 1 (SSE2) or 2 (AVX2)"
+#endif
+
+#if __AFL_PROBE_ISA == __AFL_PROBE_AVX2 && defined(__AVX2__)
+#  define __AFL_PROBE_MODE __AFL_PROBE_AVX2
+#  define __AFL_PROBE_LANES 4u
+#elif __AFL_PROBE_ISA == __AFL_PROBE_SSE2 && defined(__SSE2__)
+#  define __AFL_PROBE_MODE __AFL_PROBE_SSE2
+#  define __AFL_PROBE_LANES 2u
+#else
+#  define __AFL_PROBE_MODE __AFL_PROBE_SCALAR
+#endif
+
+#if __AFL_PROBE_MODE != __AFL_PROBE_SCALAR
+#  include <immintrin.h>
+#endif
+
+/* The mode actually built, for tests and benches. */
+static const int __afl_probe_mode __attribute__((unused)) = __AFL_PROBE_MODE;
+
+#if __AFL_PROBE_MODE == __AFL_PROBE_AVX2
+/* Even-lane bits of the 8 x 32-bit movemask: the edge_id halves. */
+#  define __AFL_PROBE_ID_BITS 0x55u
+__attribute__((always_inline))
+static inline int __afl_probe_vec(const struct __afl_entry *e, __m256i id, __m256i zero) {
+    __m256i v = _mm256_loadu_si256((const __m256i *)e);
+    __m256i hit = _mm256_or_si256(_mm256_cmpeq_epi32(v, id), _mm256_cmpeq_epi32(v, zero));
+    return _mm256_movemask_ps(_mm256_castsi256_ps(hit)) & __AFL_PROBE_ID_BITS;
+}
+#elif __AFL_PROBE_MODE == __AFL_PROBE_SSE2
+/* Even-lane bits of the 4 x 32-bit movemask: the edge_id halves. */
+#  define __AFL_PROBE_ID_BITS 0x5u
+__attribute__((always_inline))
+static inline int __afl_probe_vec(const struct __afl_entry *e, __m128i id, __m128i zero) {
+    __m128i v = _mm_loadu_si128((const __m128i *)e);
+    __m128i hit = _mm_or_si128(_mm_cmpeq_epi32(v, id), _mm_cmpeq_epi32(v, zero));
+    return _mm_movemask_ps(_mm_castsi128_ps(hit)) & __AFL_PROBE_ID_BITS;
+}
+#endif
+
+__attribute__((always_inline))
+static inline int __afl_probe_run(struct __afl_entry *area, uint32_t start,
+                                  uint32_t n, uint32_t edge_id, uint32_t tag) {
+#if __AFL_PROBE_MODE == __AFL_PROBE_SCALAR
+    for (uint32_t i = 0; i < n; i++)
+        if (__afl_probe_slot(area, start + i, edge_id, tag)) return 1;
+    return 0;
+#else
+    if (!n) return 0;
+
+    /* Home slot first: a hot edge settles here without a vector load. */
+    if (__afl_probe_slot(area, start, edge_id, tag)) return 1;
+
+#  if __AFL_PROBE_MODE == __AFL_PROBE_AVX2
+    __m256i id = _mm256_set1_epi32((int)edge_id), zero = _mm256_setzero_si256();
+#  else
+    __m128i id = _mm_set1_epi32((int)edge_id), zero = _mm_setzero_si128();
+#  endif
+
+    /* Whole vectors; the first lane with a hit is the slot scalar would pick. */
+    uint32_t i = 1;
+    for (; i + __AFL_PROBE_LANES <= n; i += __AFL_PROBE_LANES) {
+        int m = __afl_probe_vec(&area[start + i], id, zero);
+        if (!m) continue;
+        return __afl_probe_slot(area, start + i + (uint32_t)(__builtin_ctz(m) >> 1), edge_id, tag);
+    }
+
+    for (; i < n; i++)
+        if (__afl_probe_slot(area, start + i, edge_id, tag)) return 1;
+    return 0;
+#endif
+}
+
 /* Record edge_id in the SHM table for generation gen (see __afl_map_loc).
  *
  * The window is split once into two straight runs instead of testing the
@@ -1510,8 +1609,8 @@ static inline int __afl_probe_slot(struct __afl_entry *area, uint32_t idx,
  * compiler must otherwise assume they alias __afl_map_size and reload it
  * every step. Measured against the per-slot-wrap loop, 2^18 entries:
  * -7% at load 0.13, -11% at load 0.77 (min ns per edge).
- * SSE2/AVX2 compares and cache-line bucket homes were measured and
- * rejected; see docs/DEEP_DIVE.md "Edge-table probe". */
+ * Cache-line bucket homes were measured and rejected; SIMD runs are
+ * opt-in (__AFL_PROBE_ISA); see docs/DEEP_DIVE.md "Edge-table probe". */
 __attribute__((always_inline))
 static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
                                       uint32_t window, uint32_t gen) {
@@ -1520,11 +1619,8 @@ static inline void __afl_probe_insert(uint32_t edge_id, uint32_t pos,
     uint32_t tag  = gen << 24;
     uint32_t head = (size - pos < window) ? size - pos : window;
 
-    for (uint32_t i = 0; i < head; i++)
-        if (__afl_probe_slot(area, pos + i, edge_id, tag)) return;
-
-    for (uint32_t i = 0; i < window - head; i++)
-        if (__afl_probe_slot(area, i, edge_id, tag)) return;
+    if (__afl_probe_run(area, pos, head, edge_id, tag)) return;
+    if (__afl_probe_run(area, 0, window - head, edge_id, tag)) return;
 
     /* Window exhausted and still nowhere to put it. Unlike the old
      * unbounded loop, this does not mean the table is full -- it means
