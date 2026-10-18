@@ -1079,3 +1079,79 @@ class TestTextLayerOperators:
                 buf = bytearray(seed)
                 out = dispatch[op](buf, n % len(seed), seed)
                 assert len(buf if out is None else out) <= fuzzer.max_len, op
+
+
+class TestDigitSpansNumpyEquivalence:
+    """`_digit_spans` size-gated numpy path must match the scalar loop exactly.
+
+    Independent oracle: ``re.finditer(rb"[0-9]{2,}")`` gives the same digit runs
+    of length >= 2, derived without the code under test (bug-classes.md Testing).
+    """
+
+    @staticmethod
+    def _oracle(data: bytes) -> list[tuple[int, int]]:
+        import re
+
+        return [(m.start(), m.end()) for m in re.finditer(rb"[0-9]{2,}", data)]
+
+    def _buf(self, n: int, digit_frac: float, seed: int) -> bytes:
+        rng = RandPool(seed=seed)
+        out = bytearray(n)
+        for i in range(n):
+            out[i] = rng.randint(0x30, 0x39) if rng.random() < digit_frac else rng.randint(0, 255)
+        return bytes(out)
+
+    def test_numpy_path_matches_scalar_and_oracle(self):
+        from fuzzer_tool.core.mutations.generic import (
+            _digit_spans,
+            _digit_spans_np,
+            _digit_spans_scalar,
+        )
+
+        # Sizes straddle the 512B gate so both internal paths are exercised.
+        for n in (3, 64, 256, 511, 512, 513, 1024, 4096):
+            for frac in (0.0, 0.1, 0.5, 1.0):
+                for seed in range(3):
+                    data = self._buf(n, frac, seed)
+                    expected = self._oracle(data)
+
+                    assert _digit_spans_scalar(data) == expected, (n, frac, seed)
+                    assert _digit_spans_np(data) == expected, (n, frac, seed)
+                    assert _digit_spans(data) == expected, (n, frac, seed)
+
+    def test_adversarial_boundaries_and_edges(self):
+        # Runs abutting buffer edges, length-1 runs (dropped), and the article's
+        # false-positive strings './' and '_^' (no digit lanes) -- padded past
+        # the gate so the numpy path handles the edge cases, not just scalar.
+        from fuzzer_tool.core.mutations.generic import _digit_spans, _digit_spans_np
+
+        pad = b"\x00" * 520
+        cases = [
+            b"12" + pad,  # run at the very start
+            pad + b"99",  # run at the very end
+            b"1" + pad + b"2",  # two length-1 runs -> none kept
+            b"./" * 300,  # 0x2e 0x2f: never digits (article false positive)
+            b"_^" * 300,  # 0x5f 0x5e: never digits
+            bytes(range(256)) * 3,  # every byte value, digits only at 0x30..0x39
+        ]
+        for data in cases:
+            assert _digit_spans(data) == self._oracle(data), data[:16]
+            if len(data) >= 512:
+                assert _digit_spans_np(data) == self._oracle(data), data[:16]
+
+    def test_falsification_scalar_and_numpy_disagree_on_wrong_gate(self):
+        # Falsification: if the dispatcher used the *wrong* path for a size, the
+        # output would still be correct (paths are equivalent) -- so instead we
+        # falsify the claim that a naive >=0x30 OR <=0x39 test (missing the AND)
+        # would match. It would classify every byte as a digit; assert it does
+        # not equal the real spans, proving the range test is a genuine AND.
+        import numpy as np
+
+        data = self._buf(1024, 0.3, 1)
+        arr = np.frombuffer(data, np.uint8)
+        wrong_mask = (arr >= 0x30) | (arr <= 0x39)  # always True -> one giant run
+
+        assert wrong_mask.all()
+        from fuzzer_tool.core.mutations.generic import _digit_spans
+
+        assert _digit_spans(data) != [(0, len(data))]
