@@ -33,6 +33,7 @@
 # against whichever versioned ffmpeg_read_*.so targets got built.
 #   tools/vendor_secp256k1.sh -> $FUZZ_VENDOR_ROOT/secp256k1  (secp256k1_read.so)
 #   tools/vendor_sqlite.sh    -> $FUZZ_VENDOR_ROOT/sqlite     (sqlite_read.so)
+#   tools/vendor_brainflayer.sh -> $FUZZ_VENDOR_ROOT/brainflayer (ec_pubkey_diff.so, hash_simd_diff.so)
 #
 # Layout (2026-09-03, see session notes):
 #   $FUZZ_VENDOR_ROOT/<lib>/     sources (read-only here, fetched by vendor scripts)
@@ -236,6 +237,10 @@ if [ -f "$GREP_SRC/config.h" ] && grep -q "define HAVE_LIBPCRE 1" "$GREP_SRC/con
     fi
 fi
 SECP256K1="${SECP256K1_DIR:-$VENDOR/secp256k1}"
+# brainflayer + its pinned libsecp256k1 (vendor/brainflayer/secp256k1), for
+# the ec_pubkey_diff and hash_simd_diff differential targets.
+BRAINFLAYER="${BRAINFLAYER_DIR:-$VENDOR/brainflayer}"
+BRAINFLAYER_SECP256K1="$BRAINFLAYER/secp256k1"
 SQLITE="${SQLITE_DIR:-$VENDOR/sqlite}"
 # Shared by compile_sqlite_objects and the sqlite_read.so link: the wrapper
 # includes sqlite3.h, and a header parsed under different SQLITE_* defines
@@ -944,6 +949,74 @@ compile_secp256k1_objects() {
         ok "secp256k1 objects${suffix:+ ($suffix)}"
     else
         warn "secp256k1 objects${suffix:+ ($suffix)} failed"
+        return 1
+    fi
+}
+
+# ── Compile brainflayer ec_pubkey_diff objects ────────────────────
+# Vendored via tools/vendor_brainflayer.sh (clones daedalus/brainflayer and
+# its pinned libsecp256k1 into vendor/brainflayer/).
+#
+# ec_pubkey_fast.c is brainflayer's precomputed-table pubkey derivation; it
+# pulls the library's field/group/scalar/ecmult_gen implementations in as
+# headers, so it needs -I"$BRAINFLAYER" to resolve its "secp256k1/src/..."
+# includes, and -Wno-unused-function (its batch/incr helpers go unused in the
+# differential harness) — both straight from brainflayer's own Makefile.
+# The reference library (secp256k1.c) is compiled with -DHAVE_CONFIG_H so it
+# reads the vendored libsecp256k1-config.h, whose 10x26 field matches the
+# representation ec_pubkey_fast.c #includes.
+#
+# Same shim discipline as the secp256k1 objects (Hard Rule 8): compiled
+# WITHOUT `-include $SHIM`, which applies to every .c on a command line and
+# would emit __afl_map_shm / __afl_area into each object and fail the link.
+compile_brainflayer_ec_objects() {
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    [ -f "$BRAINFLAYER/ec_pubkey_fast.c" ] || return 1
+    [ -f "$BRAINFLAYER_SECP256K1/src/secp256k1.c" ] || return 1
+    echo "Compiling brainflayer ec objects${suffix:+ ($suffix)}..."
+    local cov_flag
+    cov_flag="$(cov_flag_for_cc "$cc")"   # clang: trace-pc-guard; gcc: trace-pc
+    local rc=0
+    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags -Wno-unused-function \
+        -I"$BRAINFLAYER" -c "$BRAINFLAYER/ec_pubkey_fast.c" \
+        -o "/tmp/bf_ec_pubkey_fast${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
+    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
+        -c "$BRAINFLAYER/mmapf.c" -o "/tmp/bf_mmapf${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
+    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags -DHAVE_CONFIG_H=1 \
+        -I"$BRAINFLAYER_SECP256K1" -I"$BRAINFLAYER_SECP256K1/src" \
+        -I"$BRAINFLAYER_SECP256K1/include" \
+        -c "$BRAINFLAYER_SECP256K1/src/secp256k1.c" \
+        -o "/tmp/bf_secp256k1${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
+    if [ $rc -eq 0 ]; then
+        ok "brainflayer ec objects${suffix:+ ($suffix)}"
+    else
+        warn "brainflayer ec objects${suffix:+ ($suffix)} failed"
+        return 1
+    fi
+}
+
+# ── Compile brainflayer hash_simd_diff objects ─────────────────────
+# sha256_pub.c (OpenSSL scalar + the SSE2/AVX2/AVX-512 SIMD lanes from
+# sha256_simd.h) and ripemd160_256.c (scalar + ripemd160_simd.h lanes). Same
+# shim discipline as above. The SIMD code uses GCC/clang vector extensions
+# and target-attribute multiversioning; the OpenSSL scalar path pulls in
+# -lcrypto, added at link in build_standalone_so_targets.
+compile_brainflayer_hash_objects() {
+    local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
+    [ -f "$BRAINFLAYER/sha256_pub.c" ] || return 1
+    [ -f "$BRAINFLAYER/ripemd160_256.c" ] || return 1
+    echo "Compiling brainflayer hash objects${suffix:+ ($suffix)}..."
+    local cov_flag
+    cov_flag="$(cov_flag_for_cc "$cc")"
+    local rc=0
+    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
+        -c "$BRAINFLAYER/sha256_pub.c" -o "/tmp/bf_sha256_pub${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
+    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
+        -c "$BRAINFLAYER/ripemd160_256.c" -o "/tmp/bf_ripemd160_256${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
+    if [ $rc -eq 0 ]; then
+        ok "brainflayer hash objects${suffix:+ ($suffix)}"
+    else
+        warn "brainflayer hash objects${suffix:+ ($suffix)} failed"
         return 1
     fi
 }
@@ -1736,6 +1809,46 @@ build_standalone_so_targets() {
         warn "secp256k1_read${out_suffix}.so: vendor/secp256k1 not found, skipping (run tools/vendor_secp256k1.sh)"
     fi
 
+    # ec_pubkey_diff — brainflayer's precomputed-table pubkey derivation vs
+    # the reference libsecp256k1 (tools/vendor_brainflayer.sh -> vendor/
+    # brainflayer). Same object discipline as secp256k1_read: the fast path,
+    # mmap helper and reference library are compiled separately, without the
+    # shim. _nosan builds a distinct _nosan.so so the base pass is preserved.
+    local BF_EC_OBJS="/tmp/bf_ec_pubkey_fast${suffix}.o /tmp/bf_mmapf${suffix}.o /tmp/bf_secp256k1${suffix}.o"
+    local BF_EC_INC="-I$BRAINFLAYER"
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" ]; then
+        :  # target source absent — nothing to build
+    elif [ "$suffix" = "_nosan" ]; then
+        if compile_brainflayer_ec_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+            build_so_target "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" "$TARGETS/ec_pubkey_diff_nosan.so" "$BF_EC_OBJS -Wl,--export-dynamic" "$flags $BF_EC_INC"
+        else
+            warn "ec_pubkey_diff_nosan.so: compile failed, skipping"
+        fi
+    elif compile_brainflayer_ec_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+        build_so_target "${TARGETS_SRC:-$TARGETS}/ec_pubkey_diff.c" "$TARGETS/ec_pubkey_diff${out_suffix}.so" "$BF_EC_OBJS -Wl,--export-dynamic" "$flags $BF_EC_INC"
+    else
+        warn "ec_pubkey_diff${out_suffix}.so: vendor/brainflayer not found, skipping (run tools/vendor_brainflayer.sh)"
+    fi
+
+    # hash_simd_diff — brainflayer's wide-SIMD SHA-256/RIPEMD-160 vs their
+    # scalar (OpenSSL / scalar) references. Same object discipline. -lcrypto
+    # for the OpenSSL scalar SHA-256 reference side.
+    local BF_HASH_OBJS="/tmp/bf_sha256_pub${suffix}.o /tmp/bf_ripemd160_256${suffix}.o"
+    local BF_HASH_INC="-I$BRAINFLAYER"
+    if [ ! -f "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c" ]; then
+        :  # target source absent — nothing to build
+    elif [ "$suffix" = "_nosan" ]; then
+        if compile_brainflayer_hash_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+            build_so_target "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c" "$TARGETS/hash_simd_diff_nosan.so" "$BF_HASH_OBJS -lcrypto -Wl,--export-dynamic" "$flags $BF_HASH_INC"
+        else
+            warn "hash_simd_diff_nosan.so: compile failed, skipping"
+        fi
+    elif compile_brainflayer_hash_objects "$suffix" "$flags" "$DEFAULT_CC"; then
+        build_so_target "${TARGETS_SRC:-$TARGETS}/hash_simd_diff.c" "$TARGETS/hash_simd_diff${out_suffix}.so" "$BF_HASH_OBJS -lcrypto -Wl,--export-dynamic" "$flags $BF_HASH_INC"
+    else
+        warn "hash_simd_diff${out_suffix}.so: vendor/brainflayer not found, skipping (run tools/vendor_brainflayer.sh)"
+    fi
+
     # sqlite_read — vendored SQLite amalgamation (tools/vendor_sqlite.sh
     # extracts to vendor/sqlite). Same object discipline as lz4_read and
     # secp256k1_read above: sqlite3.c is compiled separately, without
@@ -1891,6 +2004,8 @@ verify_afl() {
              "$TARGETS"/tailslayer_read "$TARGETS"/tailslayer_read.so \
              "$TARGETS"/lz4_read "$TARGETS"/lz4_read_nosan "$TARGETS"/lz4_read.so "$TARGETS"/lz4_read_nosan.so \
              "$TARGETS"/secp256k1_read.so "$TARGETS"/secp256k1_read_nosan.so \
+             "$TARGETS"/ec_pubkey_diff.so "$TARGETS"/ec_pubkey_diff_noasan.so "$TARGETS"/ec_pubkey_diff_nosan.so "$TARGETS"/ec_pubkey_diff_asan.so \
+             "$TARGETS"/hash_simd_diff.so "$TARGETS"/hash_simd_diff_noasan.so "$TARGETS"/hash_simd_diff_nosan.so "$TARGETS"/hash_simd_diff_asan.so \
              "$TARGETS"/sqlite_read.so "$TARGETS"/sqlite_read_nosan.so \
              "$TARGETS"/grep_read "$TARGETS"/grep_read_nosan "$TARGETS"/grep_read.so "$TARGETS"/grep_read_nosan.so \
              "$TARGETS"/fuzzgoat_read "$TARGETS"/fuzzgoat_read_nosan "$TARGETS"/fuzzgoat_read.so "$TARGETS"/fuzzgoat_read_nosan.so \
@@ -2720,6 +2835,10 @@ print_feature_matrix() {
     printf '  %-20s %-12s %s\n' "secp256k1_read" "$state" "$([ -d "$SECP256K1/src" ] && echo "found at $SECP256K1" || echo "not vendored — run tools/vendor_secp256k1.sh")"
     state=$([ -f "$SQLITE/sqlite3.c" ] && echo "BUILD" || echo "SKIP")
     printf '  %-20s %-12s %s\n' "sqlite_read" "$state" "$([ -f "$SQLITE/sqlite3.c" ] && echo "found at $SQLITE" || echo "not vendored — run tools/vendor_sqlite.sh")"
+    state=$([ -f "$BRAINFLAYER_SECP256K1/src/secp256k1.c" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "ec_pubkey_diff" "$state" "$([ -f "$BRAINFLAYER/ec_pubkey_fast.c" ] && echo "found at $BRAINFLAYER" || echo "not vendored — run tools/vendor_brainflayer.sh")"
+    state=$([ -f "$BRAINFLAYER/sha256_pub.c" ] && echo "BUILD" || echo "SKIP")
+    printf '  %-20s %-12s %s\n' "hash_simd_diff" "$state" "$([ -f "$BRAINFLAYER/sha256_pub.c" ] && echo "found at $BRAINFLAYER" || echo "not vendored — run tools/vendor_brainflayer.sh")"
     echo ""
 }
 
