@@ -8796,6 +8796,10 @@ class Fuzzer:
             if edge_tracker is not None:
                 edge_tracker._prune_slack = slack_was
             return
+        if getattr(self, "resume", False) and self._prime_from_saved_novelty():
+            if edge_tracker is not None:
+                edge_tracker._prune_slack = slack_was
+            return
         baseline_edges = 0
         redundant = 0
         entries = 0
@@ -8893,6 +8897,80 @@ class Fuzzer:
         self._report_comparison_reach(len(self.corpus))
         self._report_edge_id_stability(probe_seed)
         self._report_coverage_noise(probe_seed)
+
+    def _prime_from_saved_novelty(self) -> bool:
+        """On --resume, load the saved SHM novelty map instead of re-running seeds.
+
+        Returns True when the map was restored and the seed pass can be
+        skipped; False leaves everything untouched and the caller runs the
+        full pass.
+
+        The pass does two jobs on resume. It refills the SHM virgin map,
+        which is never persisted by the tracker (the fuzz loop's novelty
+        signal comes from that map, so an empty one makes early mutants read
+        as new coverage), and it feeds consumers that only learn from live
+        executions. The first job is what the saved map replaces. The second
+        cannot be replaced, so the pass still runs when any of those
+        consumers is active: cmplog (tokens and operand pairs are not
+        persisted), directed distance, the frontier oracle, crash
+        exploration, or a strata ledger with no saved state.
+
+        Only trusted when the saved contract's target hash matches the
+        current binary; a mismatch (already warned about in load_state), a
+        missing hash, or a payload that fails validation all fall back.
+        """
+        store = getattr(self, "_state_store", None)
+        saved = store.get("shm_novelty") if store is not None else None
+        if saved is None:
+            return False
+        state = getattr(self, "_resume_target_state", "unknown")
+        if state != "match":
+            if state == "unknown":
+                print(
+                    "[*] Resume: saved SHM novelty state not used, target hash "
+                    "unavailable on one side; running full seed calibration"
+                )
+            return False
+        if self._edge_tracker.get_cumulative_edge_count() == 0:
+            return False
+        needs = [
+            name
+            for name, active in (
+                ("cmplog", getattr(self, "_cmplog", None) is not None),
+                ("directed distance", getattr(self, "_distance", None) is not None),
+                ("frontier oracle", getattr(self, "_frontier_oracle", None) is not None),
+                ("crash exploration", getattr(self, "_crash_explorer", None) is not None),
+                (
+                    "strata ledger",
+                    getattr(self, "_edge_ledger", None) is not None and store.get("strata") is None,
+                ),
+            )
+            if active
+        ]
+        if needs:
+            print(
+                "[*] Resume: saved SHM novelty state not used, seed executions "
+                f"still feed {', '.join(needs)}; running full seed calibration"
+            )
+            return False
+        if not self.shm_cov.import_novelty(saved):
+            print("[!] Resume: saved SHM novelty state is unusable; running full seed calibration")
+            return False
+        print(
+            f"[*] Resume: restored SHM novelty map ({len(saved['seen'])} edge ids, "
+            f"{saved['cumulative_edges']} counted); seed calibration skipped"
+        )
+        # The one thing the pass measured that no saved state carries: do ids
+        # still reproduce across processes? Three runs of the widest known seed.
+        meta = getattr(self, "seed_meta", {})
+        probe_seed = max(
+            self.corpus,
+            key=lambda sd: meta.get(sd, {}).get("coverage_edges", 0),
+            default=None,
+        )
+        self._report_edge_id_stability(probe_seed)
+        self._report_coverage_noise(probe_seed)
+        return True
 
     def _build_uninit_probe(self) -> UninitProbe:
         """Probe bound to this target's argv shape and crash directory."""

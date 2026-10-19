@@ -230,6 +230,47 @@ def _returncode_to_signal(returncode: int) -> tuple[str | None, int | None]:
     return None, None
 
 
+def target_fingerprint(f) -> str | None:
+    """Truncated SHA-256 of the target file, or None when it cannot be read.
+
+    Cached on ``f._target_sha256`` in the same 16-hex form crash metadata
+    already uses, so the binary is hashed once per session whichever caller
+    asks first. "unknown" (what crash metadata stores for an unreadable
+    target) is reported as None: unknown, not a value to compare.
+
+    Covers the target file itself only. A target that loads separately built
+    libraries is not fingerprinted through them.
+    """
+    cached = getattr(f, "_target_sha256", None)
+    if cached is None:
+        try:
+            h = hashlib.sha256()
+            with open(f.target, "rb") as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+            cached = h.hexdigest()[:16]
+        except (OSError, TypeError, ValueError):
+            cached = "unknown"
+        f._target_sha256 = cached
+    return None if cached == "unknown" else cached
+
+
+def compare_target_fingerprint(saved: dict | None, current: dict) -> str:
+    """``"match"``, ``"mismatch"`` or ``"unknown"`` for a resumed target.
+
+    Unknown when either side lacks a hash (a state written before the hash
+    joined the contract, or an unreadable target). Never an error: unlike
+    the id-scheme keys, a different binary does not by itself prove the
+    saved state is wrong, so the caller warns and declines to *trust* the
+    saved novelty map instead of refusing the resume.
+    """
+    saved_hash = (saved or {}).get("target_sha256")
+    cur_hash = current.get("target_sha256")
+    if not saved_hash or not cur_hash:
+        return "unknown"
+    return "match" if saved_hash == cur_hash else "mismatch"
+
+
 def current_coverage_contract(f) -> dict:
     """The coverage semantics this session runs under. Resume states are
     only valid when every part matches (edge ids change with k and with the
@@ -241,6 +282,7 @@ def current_coverage_contract(f) -> dict:
         "ctx_bits": effective_ctx_bits(f.target),
         "node_channel": getattr(f, "_katz_channel", None) is not None,
         "edge_ids": detect_edge_id_scheme(f.target),
+        "target_sha256": target_fingerprint(f),
     }
 
 
@@ -598,6 +640,14 @@ class CorpusManager:
         if hasattr(f, "_seed_quality"):
             store.set("seed_quality", f._seed_quality.state_dict())
         store.set("coverage_contract", current_coverage_contract(f))
+        # The SHM novelty map (see ShmCoverage.export_novelty). Single-target
+        # only: multi-target tables share or split novelty differently and
+        # are rebuilt by their own calibration.
+        export = getattr(getattr(f, "shm_cov", None), "export_novelty", None)
+        if export is not None and not getattr(f, "multi_targets", None):
+            novelty = export()
+            if novelty is not None:
+                store.set("shm_novelty", novelty)
         if getattr(f, "_katz_channel", None) is not None:
             store.set("katz", f._katz_channel.state_dict())
         # Coverage regime detector state (percolation phase classification)
@@ -607,9 +657,20 @@ class CorpusManager:
 
     def load_state(self):
         f = self.f
-        check_coverage_contract(
-            f._state_store.get("coverage_contract"), current_coverage_contract(f)
-        )
+        saved_contract = f._state_store.get("coverage_contract")
+        current_contract = current_coverage_contract(f)
+        check_coverage_contract(saved_contract, current_contract)
+        f._resume_target_state = compare_target_fingerprint(saved_contract, current_contract)
+        if f._resume_target_state == "mismatch":
+            msg = (
+                f"target changed since this state was saved "
+                f"(sha256 {saved_contract.get('target_sha256')} -> "
+                f"{current_contract.get('target_sha256')}): restored coverage, hit "
+                "counts and seed metadata describe the old binary, and the saved SHM "
+                "novelty map will not be used; seed calibration will rebuild it"
+            )
+            log.warning(msg)
+            print(f"[!] Resume: {msg}")
         state = f._state_store.get("corpus")
         if not state:
             return

@@ -12,7 +12,11 @@ import pytest
 from fuzzer_tool.core.horizon import HorizonGraph
 from fuzzer_tool.core.icfg import InterproceduralCFG
 from fuzzer_tool.core.schedulers.seed_katz import KatzResult
-from fuzzer_tool.services.corpus_manager import check_coverage_contract, current_coverage_contract
+from fuzzer_tool.services.corpus_manager import (
+    check_coverage_contract,
+    current_coverage_contract,
+    target_fingerprint,
+)
 from fuzzer_tool.services.katz_channel import KatzChannel
 
 
@@ -137,7 +141,10 @@ class TestCoverageContract:
         return SimpleNamespace(target="/bin/true", _katz_channel=katz)
 
     def test_current_contract_detects_legacy_k2(self):
-        c = current_coverage_contract(self._stub())
+        stub = self._stub()
+        c = current_coverage_contract(stub)
+        # The target hash is the file's own fingerprint, not a fixed value.
+        assert c.pop("target_sha256") == target_fingerprint(stub)
         # /bin/true carries no ctx marker: unknown, not context-free.
         assert c == {"ngram_k": 2, "node_channel": False, "edge_ids": 1, "ctx_bits": None}
 

@@ -638,6 +638,105 @@ class ShmCoverage:
             self.cumulative_edges += len(fresh)
             self._peak_cumulative_edges = max(self._peak_cumulative_edges, self.cumulative_edges)
 
+    # -- Persistable novelty state ----------------------------------------
+
+    NOVELTY_STATE_VERSION = 1
+
+    def export_novelty(self) -> dict | None:
+        """Snapshot what decides "is this new", for ``--resume``.
+
+        The tracker's edge set survives a resume but this map does not, so a
+        resumed run starts with an empty virgin map and every early mutant
+        reads as new coverage until seed calibration re-runs the corpus to
+        refill it. Persisting the map removes that dependency.
+
+        Sparse on purpose: the dense arrays are mostly zero, so only occupied
+        indices are stored. Plain lists, not ndarrays: the state store's
+        sanitised reader refuses numpy's buffer reconstructor and drops the
+        whole section, so an array payload would silently never persist. Returns None when the novelty store is shared
+        across targets (``--shared-virgin``): that state belongs to the
+        union, not to this table, and is not persisted.
+        """
+        if self._shared is not None:
+            return None
+        vidx = np.flatnonzero(self._virgin)
+        midx = np.flatnonzero(self._max_counts)
+        return {
+            "version": self.NOVELTY_STATE_VERSION,
+            "seen": sorted(self._seen_edge_ids),
+            "masked": sorted(self._masked_edge_ids),
+            "virgin_idx": vidx.tolist(),
+            "virgin_bits": self._virgin[vidx].tolist(),
+            "virgin_wide": {int(k): int(v) for k, v in self._virgin_wide.items()},
+            "max_idx": midx.tolist(),
+            "max_val": self._max_counts[midx].tolist(),
+            "max_wide": {int(k): int(v) for k, v in self._max_counts_wide.items()},
+            "cumulative_edges": int(self.cumulative_edges),
+            "peak_cumulative_edges": int(self._peak_cumulative_edges),
+            "bucket_transitions": int(self.bucket_transitions),
+            "max_count_transitions": int(self.max_count_transitions),
+        }
+
+    def import_novelty(self, state: object) -> bool:
+        """Load a snapshot from :meth:`export_novelty` into a pristine table.
+
+        All-or-nothing: the payload is validated in full before anything is
+        assigned, so a malformed or tampered state leaves the table exactly
+        as it was and returns False. Also refuses a table that has already
+        observed anything, or one that shares its store, since merging into
+        either would mix two sources of "seen".
+        """
+        if self._shared is not None or self._seen_edge_ids or self.cumulative_edges:
+            return False
+        try:
+            if not isinstance(state, dict) or state.get("version") != self.NOVELTY_STATE_VERSION:
+                return False
+            seen = {int(x) for x in np.asarray(state["seen"]).tolist()}
+            masked = {int(x) for x in np.asarray(state["masked"]).tolist()}
+            vidx = np.asarray(state["virgin_idx"], dtype=np.int64)
+            vbits = np.asarray(state["virgin_bits"], dtype=np.uint8)
+            midx = np.asarray(state["max_idx"], dtype=np.int64)
+            mval = np.asarray(state["max_val"], dtype=np.uint32)
+            if vidx.shape != vbits.shape or midx.shape != mval.shape:
+                return False
+            if vidx.ndim != 1 or midx.ndim != 1:
+                return False
+            for idx in (vidx, midx):
+                if idx.size and (int(idx.min()) < 0 or int(idx.max()) >= VIRGIN_DENSE_MAX):
+                    return False
+            vwide = {int(k): int(v) & 0xFF for k, v in dict(state["virgin_wide"]).items()}
+            mwide = {int(k): int(v) for k, v in dict(state["max_wide"]).items()}
+            cumulative = int(state["cumulative_edges"])
+            peak = int(state["peak_cumulative_edges"])
+            transitions = int(state["bucket_transitions"])
+            max_transitions = int(state["max_count_transitions"])
+            if min(cumulative, peak, transitions, max_transitions) < 0:
+                return False
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return False
+
+        def grown(hi: int) -> int:
+            return 1 << max(10, (hi - 1).bit_length())
+
+        virgin = np.zeros(grown(int(vidx.max()) + 1) if vidx.size else 0, dtype=np.uint8)
+        virgin[vidx] = vbits
+        maxima = np.zeros(grown(int(midx.max()) + 1) if midx.size else 0, dtype=np.uint32)
+        maxima[midx] = mval
+
+        # A masked id is, by construction, also a seen one (mask_edges folds
+        # it in); enforce it so a hand-edited state cannot un-see a mask.
+        self._seen_edge_ids.update(seen | masked)
+        self._masked_edge_ids.update(masked)
+        self._virgin = virgin
+        self._virgin_wide = vwide
+        self._max_counts = maxima
+        self._max_counts_wide = mwide
+        self.cumulative_edges = cumulative
+        self._peak_cumulative_edges = max(peak, cumulative)
+        self.bucket_transitions = transitions
+        self.max_count_transitions = max_transitions
+        return True
+
     def reject_phantoms(self, edge_ids) -> int:
         """Withdraw ids this scan counted as new but a rerun did not reproduce.
 
