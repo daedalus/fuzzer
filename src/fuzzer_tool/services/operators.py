@@ -4754,6 +4754,18 @@ class OperatorEngine:
                 return bytearray(out[: self.ctx.max_len])
         return self._op_declined("tlv_nest_mutate", buf)
 
+    def _op_seq_mutate(self, buf, _byte_idx, data):
+        """Reorder, duplicate, drop or splice whole messages (length-framed or delimited)."""
+        from fuzzer_tool.core.mutations.seq_mutate import seq_mutate
+
+        rng = self.ctx._rng
+        others = [c for c in self.ctx.corpus if c is not data]
+        donor = self._donor(data, others, rng) if others else None
+        out = seq_mutate(bytes(buf), rng, self.ctx.max_len, donor)
+        if out is None:
+            return self._op_declined("seq_mutate", buf)
+        return bytearray(out)
+
     def _der_mutate(self, op: str, method: str, buf, byte_idx, data):
         """Shared driver for the BER/DER operators (png-handler pattern)."""
         from fuzzer_tool.core.mutations.der import DerMutator, parse_der

@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from itertools import compress
 
 from fuzzer_tool.core.hashing import hash64
+from fuzzer_tool.core.mutations.seq_mutate import split_msgs as _split_msgs
 from fuzzer_tool.core.mutator_interface import Availability, MutationContext
 from fuzzer_tool.core.tree_mutator import has_bracket_delimiter as _tree_mutator_has_delims
 
@@ -110,6 +111,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "literal_mismatch",
     },
     "structural": {
+        "seq_mutate",
         "splice",
         "splice_diff_located",
         "bit_cross",
@@ -805,8 +807,13 @@ def _region_sized(_f, d) -> bool:
     return len(d) >= 512
 
 
+def _has_msgs(_f, d) -> bool:
+    return _split_msgs(d) is not None
+
+
 # Input-only gates: available() caches them per input content.
 _has_delims.availability = Availability.INPUT
+_has_msgs.availability = Availability.INPUT
 _region_sized.availability = Availability.INPUT
 
 
@@ -848,6 +855,8 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "grammar_tree_mutate": _has_grammar,
     "fsm_regen": lambda f, _d: bool(getattr(f, "fsm", None)),
     "region_shuffle": _region_sized,
+    # sequence edits need a message-boundary model; sniffed from the input
+    "seq_mutate": _has_msgs,
     "redqueen_xform": _has_cmplog_pairs,
     "gradient_cmp": _has_cmplog_pairs,
     "gradient_descent": _has_cmplog_pairs,

@@ -116,6 +116,8 @@ gave only unrelated hits **[unverified]**. Not a single-operator change: needs a
 boundary model (`format_lock`, `tlv_nest_mutate`, the `record_stride` seed meta used by
 `chunk_shuffle` may already provide one). Scope separately.
 
+**Done 2026-10-14**: `core/mutations/seq_mutate.py`, operator `seq_mutate` (structural), no flag. Boundary model sniffed from the input (length-prefixed u16/u32, CRLFCRLF/CRLF/LF delimiters); swap/dup/drop/splice-from-corpus. Stride records left to `chunk_shuffle`. Unit-tested; not run on a real target.
+
 ## Checked and covered
 
 - `arithmetic` already uses widths 1/2/4/8 on aligned offsets (`operators.py:2179`).
