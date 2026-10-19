@@ -280,6 +280,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "naf_scalar_mutate",
         "ntt_poly_mutate",
         "prime_inject",
+        "lsystem_expand",
         "endian_convert",
         "count_overflow",
         "zero_run_amplify",

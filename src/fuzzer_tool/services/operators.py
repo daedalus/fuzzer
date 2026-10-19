@@ -5314,6 +5314,11 @@ class OperatorEngine:
 
         return self._regularity(prime_inject, buf)
 
+    def _op_lsystem_expand(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.lsystem_expand import lsystem_expand
+
+        return self._regularity(lsystem_expand, buf)
+
     def _op_endian_convert(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import endian_convert
 
