@@ -332,6 +332,8 @@ class TestRegularityOperators:
             "ntt_poly_mutate",
             "prime_inject",
             "lsystem_expand",
+            "lsystem_stochastic",
+            "lsystem_ctx",
             "endian_convert",
             "count_overflow",
             "zero_run_amplify",
