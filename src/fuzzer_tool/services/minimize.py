@@ -387,6 +387,9 @@ def _minimize_with_coverage(
         )
         return len(corpus_files), 0
 
+    total_edges = len(set().union(*seed_edges.values()))
+    print(f"[*] Total unique edges: {total_edges}")
+
     if prune is PruneMode.MINIMAX_ROBUST:
         from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
 
