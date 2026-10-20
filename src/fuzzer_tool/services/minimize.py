@@ -307,15 +307,27 @@ def _minimize_with_coverage(
             # Reclaim heap memory periodically like in fuzz mode
             if (i + 1) % 100 == 0:
                 with contextlib.suppress(Exception):
-                    libc_mem.trim_heap()
+                    freed = libc_mem.trim_heap() >> 10
+                    if freed > 0:
+                        freed_mb = freed // 1024
+                        if freed_mb >= 1:
+                            print(f"\r[*] Trimmed {freed_mb}MB heap", end=" ", flush=True)
+                        else:
+                            print(f"\r[*] Trimmed {freed}KB heap", end=" ", flush=True)
 
             if (i + 1) % 10 == 0 or (i + 1) == len(corpus_files):
                 elapsed = time.time() - start_time
                 files_done = i + 1
                 total_files = len(corpus_files)
                 live_kb = None
+                trim_str = ""
                 with contextlib.suppress(Exception):
-                    libc_mem.trim_heap()
+                    freed = libc_mem.trim_heap() >> 10
+                    if freed > 0:
+                        if freed >= 1024:
+                            trim_str = f" | trim: {freed // 1024}MB"
+                        else:
+                            trim_str = f" | trim: {freed}KB"
                     live_kb = libc_mem.current_rss() >> 10
                 if elapsed > 0 and files_done > 0:
                     rate = files_done / elapsed
@@ -326,7 +338,7 @@ def _minimize_with_coverage(
                         rss_str += f" | live: {_fmt_kb(live_kb)}"
                     print(
                         f"\r[*] Replayed {files_done}/{total_files} ({files_done / total_files * 100:.1f}%) "
-                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s{rss_str}",
+                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s | elapsed: {elapsed:.1f}s{rss_str}{trim_str}",
                         end="",
                         flush=True,
                     )
@@ -335,7 +347,9 @@ def _minimize_with_coverage(
                     if live_kb is not None:
                         rss_str += f" | live: {_fmt_kb(live_kb)}"
                     print(
-                        f"\r[*] Replayed {files_done}/{total_files}{rss_str}...", end="", flush=True
+                        f"\r[*] Replayed {files_done}/{total_files} | elapsed: {elapsed:.1f}s{rss_str}{trim_str}...",
+                        end="",
+                        flush=True,
                     )
     finally:
         map_entries = shm.num_entries
