@@ -995,11 +995,14 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     /* The segment must hold the table AFL_MAP_SIZE promises. A mismatch
      * (bytes passed for entries, a foreign segment) otherwise writes past
      * the end: a SIGSEGV blamed on the input, or silent corruption.
-     * IPC_STAT failing is not evidence either way, so it is skipped. */
+     * IPC_STAT failing leaves the size unverified, so the segment is
+     * refused like an undersized one. */
     struct shmid_ds ds;
     size_t need = SHM_TABLE_OFFSET + (size_t)__afl_map_size * sizeof(struct __afl_entry)
                 + (__AFL_DISTANCE_MODE ? 2 * sizeof(uint64_t) : 0);
-    if (shmctl(shmid, IPC_STAT, &ds) == 0 && (size_t)ds.shm_segsz < need) {
+    int stat_ok = shmctl(shmid, IPC_STAT, &ds) == 0;
+    if (!stat_ok) ds.shm_segsz = 0;
+    if (!stat_ok || (size_t)ds.shm_segsz < need) {
         char msg[192];
         int n = snprintf(msg, sizeof(msg),
                          "__afl_shim: segment %d is %zu bytes, %u entries need %zu"
@@ -5518,7 +5521,7 @@ __AFL_GCC_NO_COV static void __afl_shim_abort(void) {
  * writes. Retries EINTR and accumulates short transfers. Returns 1 when all
  * n bytes moved, 0 on a clean EOF before the first byte (reads only), -1 on
  * a real error or an EOF in the middle of a message. Async-signal-safe. */
-__AFL_GCC_NO_COV static int __afl_fs_io(int write_p, int fd, void *buf, size_t n) {
+__AFL_NO_COV static int __afl_fs_io(int write_p, int fd, void *buf, size_t n) {
     size_t done = 0;
     while (done < n) {
         ssize_t r = write_p ? write(fd, (char *)buf + done, n - done)

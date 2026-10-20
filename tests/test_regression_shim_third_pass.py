@@ -247,3 +247,32 @@ def test_regression_zero_capacity_distance_table_refused(tmp_path):
 
     assert fields[ATTACHED] == 1
     assert fields[SEG_REJECTED] == 1
+
+
+# ── A (main map): unverifiable segment size ────────────────────────────
+
+
+@requires_clang
+def test_regression_main_segment_refused_when_ipc_stat_fails(tmp_path):
+    exe = _build(tmp_path, _HEALTH_MAIN, "-fsanitize-coverage=trace-pc-guard")
+    src = tmp_path / "failstat.c"
+    src.write_text(_FAIL_STAT_SRC)
+    so = tmp_path / "failstat.so"
+    r = subprocess.run(
+        ["clang", "-shared", "-fPIC", str(src), "-o", str(so), "-ldl"],
+        capture_output=True,
+        text=True,
+    )
+    assert r.returncode == 0, r.stderr
+
+    shm = ShmCoverage(size=MAP_ENTRIES)
+    base = {"__AFL_SHM_ID": shm.env_id, "AFL_MAP_SIZE": str(MAP_ENTRIES)}
+    try:
+        sane = _health(exe, **base)
+        failing = _health(exe, **base, LD_PRELOAD=str(so), FAIL_STAT_ID=shm.env_id)
+    finally:
+        shm.cleanup()
+
+    assert sane[ATTACHED] == 1
+    assert failing[ATTACHED] == 0
+    assert failing[SEG_REJECTED] >= 1
