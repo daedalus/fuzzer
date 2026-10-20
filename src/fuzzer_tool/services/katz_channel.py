@@ -286,6 +286,7 @@ class KatzChannel:
             elapsed = self._clock.monotonic() - self._last_recompute_wall
             due = elapsed * _MAX_RECOMPUTE_OVERHEAD >= self._last_cost
         if self._scores is None or (self._dirty and due) or force:
+            self._last_recompute_exec = self.exec_count
             t0 = self._clock.monotonic()
             masks = {k: v for k, v in self._masks.items() if len(v) * 8 >= self.n_nodes}
             self._horizon = build_horizon_graph(self.icfg, masks)

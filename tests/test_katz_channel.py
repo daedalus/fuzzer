@@ -74,6 +74,7 @@ class TestScores:
         again = ch.ensure_scores()
         assert first is again  # not dirty / interval not elapsed
         ch.exec_count += 1000
+        ch._last_cost = 0.0  # bypass overhead gate in unit test
         ch.record(_bits({1}), seed_key="s2")  # new mask -> dirty
         second = ch.ensure_scores()
         assert second is not first
