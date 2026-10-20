@@ -21,6 +21,19 @@ from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.set_cover import min_cover
 
 
+class ExecMode(Enum):
+    """How coverage-mode replay runs the target (same backends as ``fuzz``)."""
+
+    SPAWN = "spawn"  # one process per seed (default)
+    LOADER = "loader"  # --inprocess: subprocess loader, crash-isolated
+    DIRECT_LITE = "direct_lite"  # --inprocess-direct: ctypes call, shim in the .so
+    DIRECT = "direct"  # --inprocess --inprocess-direct: ctypes call
+
+
+DEFAULT_INPROCESS_FUNC = "LLVMFuzzerTestOneInput"
+_SO_SUFFIXES = (".so", ".dylib", ".dll")
+
+
 class PruneMode(Enum):
     """Coverage-mode pruning criterion."""
 
@@ -59,6 +72,36 @@ def _read_shm_edges(shm_id: str, size: int = 65536) -> bytearray:
     finally:
         libc_shm.shmdt(ptr)
     return bytearray(data)
+
+
+def _open_runner(target: str, mode: ExecMode, func: str, timeout: float, shm: ShmCoverage):
+    """InProcessRunner on ``shm``'s segment, or None when it cannot start.
+
+    A missing entry point or a failed dlopen is a failed measurement; the
+    caller keeps the whole corpus rather than read it as "covers nothing".
+    """
+    from fuzzer_tool.adapters.inprocess import InProcessRunner
+
+    # fuzz probes the entry when the default name is kept on a .so.
+    if func == DEFAULT_INPROCESS_FUNC and target.lower().endswith(_SO_SUFFIXES):
+        from fuzzer_tool.services.fuzzer import Fuzzer
+
+        func = Fuzzer._probe_so_function(target)
+
+    try:
+        return InProcessRunner(
+            target=target,
+            function_name=func,
+            timeout=timeout,
+            shm_size=shm.num_entries,
+            direct=mode is ExecMode.DIRECT,
+            direct_lite=mode is ExecMode.DIRECT_LITE,
+            coverage_env_id=shm.env_id,
+            cov=True,
+        )
+    except (AttributeError, OSError, ImportError) as e:
+        print(f"[-] In-process runner failed for {func}: {e}", file=sys.stderr)
+        return None
 
 
 def _discover_corpus_files(corpus_path: Path) -> list[Path]:
@@ -105,6 +148,8 @@ def minimize_corpus(
     target_frac: float = 0.95,
     fuzzy_dedup: int = 0,
     prune: PruneMode = PruneMode.SET_COVER,
+    exec_mode: ExecMode = ExecMode.SPAWN,
+    inprocess_func: str = DEFAULT_INPROCESS_FUNC,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -126,6 +171,8 @@ def minimize_corpus(
             0 disables fuzzy dedup. Only used without coverage mode.
             e.g. fuzzy_dedup=3 removes seeds that differ by <=3 bytes.
         prune: Coverage-mode pruning criterion.
+        exec_mode: Coverage-mode replay backend (spawn, loader, direct_lite, direct).
+        inprocess_func: Entry point for the in-process backends.
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -153,12 +200,35 @@ def minimize_corpus(
             corpus_path,
             prune=PruneMode.RATE_DISTORTION if rate_distortion else prune,
             target_frac=target_frac,
+            exec_mode=exec_mode,
+            inprocess_func=inprocess_func,
         )
     else:
         kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path, fuzzy_dedup)
 
     print(f"[+] Minimized: {len(corpus_files)} -> {kept} files ({removed} removed)")
     return kept, removed
+
+
+def _spawn_replay(target, timeout, file_mode, tmp_dir, target_args, env):
+    """Replay callable that spawns the target once per input."""
+    from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
+
+    if file_mode:
+        return lambda data: run_target_file(
+            target, data, timeout, str(tmp_dir), target_args or [], env=env
+        )
+    return lambda data: run_target_stdin(target, data, timeout, env=env)
+
+
+def _runner_replay(runner):
+    """Replay callable on an InProcessRunner, from a clean shim state per input."""
+
+    def replay(data):
+        runner.reset_exec_state()
+        return runner.run_one(data)
+
+    return replay
 
 
 def _minimize_with_coverage(
@@ -171,10 +241,10 @@ def _minimize_with_coverage(
     corpus_path: Path,
     prune: PruneMode = PruneMode.SET_COVER,
     target_frac: float = 0.95,
+    exec_mode: ExecMode = ExecMode.SPAWN,
+    inprocess_func: str = DEFAULT_INPROCESS_FUNC,
 ) -> tuple[int, int]:
     """Greedy set-cover, rate-distortion or minimax-robust pruning over SHM edge bitmaps."""
-    from fuzzer_tool.adapters.process import run_target_file, run_target_stdin
-
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
 
     # One segment, reset between files, owned by ShmCoverage.
@@ -202,25 +272,31 @@ def _minimize_with_coverage(
 
     seed_edges: dict[str, set[int]] = {}
     seed_sizes: dict[str, int] = {}
+    runner = None
     try:
+        # One replay callable, chosen once: the loop below never branches on mode.
+        if exec_mode is ExecMode.SPAWN:
+            replay = _spawn_replay(target, timeout, file_mode, tmp_dir, target_args, env_base)
+        else:
+            runner = _open_runner(target, exec_mode, inprocess_func, timeout, shm)
+            if runner is None:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return len(corpus_files), 0
+            replay = _runner_replay(runner)
+
         for i, fpath in enumerate(corpus_files):
             data = fpath.read_bytes()
             seed_sizes[str(fpath)] = len(data)
             shm.reset_edge_map()
-
-            if file_mode:
-                run_target_file(
-                    target, data, timeout, str(tmp_dir), target_args or [], env=env_base
-                )
-            else:
-                run_target_stdin(target, data, timeout, env=env_base)
-
+            replay(data)
             seed_edges[str(fpath)] = shm.get_edge_ids()
 
             if (i + 1) % 10 == 0 or (i + 1) == len(corpus_files):
                 print(f"\r[*] Replayed {i + 1}/{len(corpus_files)}...", end="", flush=True)
     finally:
         map_entries = shm.num_entries
+        if runner is not None:
+            runner.stop()
         shm.cleanup()
 
     print()

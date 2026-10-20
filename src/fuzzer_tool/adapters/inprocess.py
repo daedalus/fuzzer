@@ -361,6 +361,18 @@ class InProcessRunner:
         guarded.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
         return guarded(ptr, buf, n)
 
+    def reset_exec_state(self) -> None:
+        """Clear the shim's per-execution state in a directly loaded target.
+
+        ``__afl_map_reset`` zeroes prev_loc, which nothing else does between
+        in-process calls: without it the first edge of a run is hashed
+        against wherever the previous input stopped, so equal inputs report
+        different edge ids. No-op for loader modes and old shim builds.
+        """
+        reset = getattr(self._lib, "__afl_map_reset", None) if self._lib else None
+        if reset is not None:
+            reset()
+
     def shim_health(self) -> tuple[int, ...] | None:
         """Shim counters of the directly loaded target; None when unavailable."""
         if self._lib is None:

@@ -1376,9 +1376,31 @@ def cmd_genseed(args):
     return 0
 
 
+def _minimize_exec_mode(args, target):
+    """Replay backend for ``minimize``; same flag mapping as ``fuzz``.
+
+    An ELF executable cannot be dlopen'd, so it stays on spawn, as in fuzz.
+    """
+    from fuzzer_tool.core.elf import is_elf_executable
+    from fuzzer_tool.services.minimize import ExecMode
+
+    if not (args.inprocess or args.inprocess_direct):
+        return ExecMode.SPAWN
+    if is_elf_executable(target):
+        print(f"[*] {target} is an executable: exec mode, not in-process")
+        return ExecMode.SPAWN
+    if args.inprocess and args.inprocess_direct:
+        return ExecMode.DIRECT
+    if args.inprocess_direct:
+        return ExecMode.DIRECT_LITE
+    return ExecMode.LOADER
+
+
 def cmd_minimize(args):
     """Corpus minimization subcommand."""
-    _validate_target(args.target)
+    # A module:function target has no file to check.
+    if not (args.inprocess and ":" in args.target):
+        _validate_target(args.target)
     from fuzzer_tool.services.minimize import PruneMode, minimize_corpus
 
     prune = PruneMode.SET_COVER
@@ -1397,6 +1419,8 @@ def cmd_minimize(args):
         output_dir=args.output,
         target_frac=getattr(args, "target_frac", 0.95),
         prune=prune,
+        exec_mode=_minimize_exec_mode(args, args.target),
+        inprocess_func=args.inprocess_func,
     )
 
     if removed == 0:
@@ -6282,6 +6306,23 @@ def main() -> int:
         type=float,
         default=0.95,
         help="Target coverage fraction for rate-distortion (default: 0.95)",
+    )
+    min_parser.add_argument(
+        "--inprocess",
+        action="store_true",
+        help="With -c: replay through the in-process subprocess loader (C .so or "
+        "Python module:function), like fuzz",
+    )
+    min_parser.add_argument(
+        "--inprocess-direct",
+        action="store_true",
+        help="With -c: replay by direct ctypes call (alone: direct_lite; with "
+        "--inprocess: direct). Target must not SIGSEGV",
+    )
+    min_parser.add_argument(
+        "--inprocess-func",
+        default="LLVMFuzzerTestOneInput",
+        help="Function name for in-process replay (default: LLVMFuzzerTestOneInput)",
     )
     min_parser.set_defaults(func=cmd_minimize)
 

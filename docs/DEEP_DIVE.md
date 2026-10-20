@@ -1246,7 +1246,14 @@ fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 
 # Set-cover plus backups for the seeds whose loss would cost most edges
 fuzzer-tool minimize ./target -d corpus -c --minimax-robust --target-frac 1.0
+
+# Fuzz-harness .so (no main): replay in-process, same flags as fuzz
+fuzzer-tool minimize ./t.so -d corpus -c --inprocess                    # subprocess loader
+fuzzer-tool minimize ./t.so -d corpus -c --inprocess-direct             # direct_lite
+fuzzer-tool minimize ./t.so -d corpus -c --inprocess --inprocess-direct # direct
 ```
+
+`-c` alone spawns the target, so a `.so` never produced an edge and the blackout guard refused to prune. `--inprocess*` pick the `fuzz` backends (`services/minimize.py::ExecMode`); `--inprocess-func` names the entry (default `LLVMFuzzerTestOneInput`, probed like `fuzz`). An ELF executable stays on spawn. Direct modes call `__afl_map_reset` before each seed (`InProcessRunner.reset_exec_state`): nothing else zeroes `prev_loc` between in-process calls, so equal inputs got different edge ids. A runner that cannot start (missing entry, failed dlopen) keeps the whole corpus. Tests: `tests/test_minimize_inprocess.py`.
 
 ### Set cover (`core/set_cover.py`)
 
