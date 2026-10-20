@@ -304,6 +304,10 @@ def _minimize_with_coverage(
             replay(data)
             seed_edges[str(fpath)] = shm.get_edge_ids()
             peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
+            # Reclaim heap memory periodically like in fuzz mode
+            if (i + 1) % 100 == 0:
+                with contextlib.suppress(Exception):
+                    libc_mem.trim_heap()
 
             if (i + 1) % 10 == 0 or (i + 1) == len(corpus_files):
                 elapsed = time.time() - start_time
@@ -311,6 +315,7 @@ def _minimize_with_coverage(
                 total_files = len(corpus_files)
                 live_kb = None
                 with contextlib.suppress(Exception):
+                    libc_mem.trim_heap()
                     live_kb = libc_mem.current_rss() >> 10
                 if elapsed > 0 and files_done > 0:
                     rate = files_done / elapsed
