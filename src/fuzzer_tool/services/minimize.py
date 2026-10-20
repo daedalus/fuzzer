@@ -161,6 +161,7 @@ def minimize_corpus(
     prune: PruneMode = PruneMode.SET_COVER,
     exec_mode: ExecMode = ExecMode.SPAWN,
     inprocess_func: str = DEFAULT_INPROCESS_FUNC,
+    max_seeds: int = 0,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -184,6 +185,7 @@ def minimize_corpus(
         prune: Coverage-mode pruning criterion.
         exec_mode: Coverage-mode replay backend (spawn, loader, direct_lite, direct).
         inprocess_func: Entry point for the in-process backends.
+        max_seeds: Max seeds to process (0=all). Allows batch minification.
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -197,6 +199,9 @@ def minimize_corpus(
     if not corpus_files:
         print("[-] Corpus is empty", file=sys.stderr)
         return 0, 0
+
+    if max_seeds > 0 and len(corpus_files) > max_seeds:
+        corpus_files = corpus_files[:max_seeds]
 
     print(f"[*] Corpus: {len(corpus_files)} files in {corpus_dir}")
 

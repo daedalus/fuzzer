@@ -1421,6 +1421,7 @@ def cmd_minimize(args):
         prune=prune,
         exec_mode=_minimize_exec_mode(args, args.target),
         inprocess_func=args.inprocess_func,
+        max_seeds=getattr(args, "max_seeds", 0),
     )
 
     if removed == 0:
@@ -6323,6 +6324,13 @@ def main() -> int:
         "--inprocess-func",
         default="LLVMFuzzerTestOneInput",
         help="Function name for in-process replay (default: LLVMFuzzerTestOneInput)",
+    )
+    min_parser.add_argument(
+        "-n",
+        "--max-seeds",
+        type=int,
+        default=0,
+        help="Max seeds to process (0=all). Allows batch minification.",
     )
     min_parser.set_defaults(func=cmd_minimize)
 
