@@ -9,8 +9,10 @@ Two modes:
 
 import contextlib
 import ctypes
+import gzip
 import hashlib
 import os
+import pickle
 import resource
 import shutil
 import sys
@@ -20,6 +22,7 @@ from enum import Enum
 from pathlib import Path
 
 from fuzzer_tool.adapters import libc_mem, libc_shm
+from fuzzer_tool.adapters.filesystem import hash_data
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.set_cover import min_cover
 
@@ -162,6 +165,7 @@ def minimize_corpus(
     exec_mode: ExecMode = ExecMode.SPAWN,
     inprocess_func: str = DEFAULT_INPROCESS_FUNC,
     max_seeds: int = 0,
+    batch_mode: bool = False,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -196,9 +200,24 @@ def minimize_corpus(
         return 0, 0
 
     all_corpus_files = _discover_corpus_files(corpus_path)
-    corpus_files = all_corpus_files
+    state_file = corpus_path / ".minimize_batch_state.pkl.gz"
+    processed_hashes = set()
+    if batch_mode and state_file.exists():
+        try:
+            with gzip.open(state_file, "rb") as f:
+                state = pickle.load(f)
+            processed_hashes = set(state.get("processed", set()))
+        except Exception:
+            processed_hashes = set()
+
+    corpus_files = (
+        [f for f in all_corpus_files if hash_data(f.read_bytes()) not in processed_hashes]
+        if batch_mode
+        else all_corpus_files
+    )
+
     if not corpus_files:
-        print("[-] Corpus is empty", file=sys.stderr)
+        print("[-] Corpus is empty or all files already processed in batch mode", file=sys.stderr)
         return 0, 0
 
     if max_seeds > 0 and len(corpus_files) > max_seeds:
@@ -219,6 +238,8 @@ def minimize_corpus(
             target_frac=target_frac,
             exec_mode=exec_mode,
             inprocess_func=inprocess_func,
+            batch_mode=batch_mode,
+            all_corpus_files=all_corpus_files,
         )
     else:
         kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path, fuzzy_dedup)
@@ -260,6 +281,8 @@ def _minimize_with_coverage(
     target_frac: float = 0.95,
     exec_mode: ExecMode = ExecMode.SPAWN,
     inprocess_func: str = DEFAULT_INPROCESS_FUNC,
+    batch_mode: bool = False,
+    all_corpus_files: list[Path] | None = None,
 ) -> tuple[int, int]:
     """Greedy set-cover, rate-distortion or minimax-robust pruning over SHM edge bitmaps."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
@@ -422,7 +445,14 @@ def _minimize_with_coverage(
         # byte bitmap and the wrong one for this shim's entry table.
         covered_files = min_cover(seed_edges, seed_sizes)
 
-    return _commit_results(corpus_files, covered_files, output_dir, corpus_path)
+    return _commit_results(
+        corpus_files,
+        covered_files,
+        output_dir,
+        corpus_path,
+        batch_mode=batch_mode,
+        all_corpus_files=all_corpus_files,
+    )
 
 
 def _minimize_by_hash(
@@ -475,6 +505,8 @@ def _commit_results(
     kept: list[str],
     output_dir: str | None,
     corpus_path: Path,
+    batch_mode: bool = False,
+    all_corpus_files: list[Path] | None = None,
 ) -> tuple[int, int]:
     """Write minimized corpus to output dir or prune in-place.
 
@@ -485,6 +517,23 @@ def _commit_results(
     """
     kept_set = set(kept)
     out_path = Path(output_dir) if output_dir else corpus_path
+
+    state_file = corpus_path / ".minimize_batch_state.pkl.gz"
+    state = {"processed": set(), "survivors": set()}
+    if batch_mode and state_file.exists():
+        try:
+            with gzip.open(state_file, "rb") as f:
+                state = pickle.load(f)
+            if "processed" not in state:
+                state["processed"] = set()
+            else:
+                state["processed"] = set(state["processed"])
+            if "survivors" not in state:
+                state["survivors"] = set()
+            else:
+                state["survivors"] = set(state["survivors"])
+        except Exception:
+            state = {"processed": set(), "survivors": set()}
 
     if output_dir:
         out_path.mkdir(parents=True, exist_ok=True)
@@ -504,6 +553,23 @@ def _commit_results(
                 meta = fpath.with_suffix(".txt")
                 if meta.exists():
                     shutil.move(str(meta), str(pruned_dir / meta.name))
+            elif batch_mode:
+                # In batch mode, keep survivors in place and record them
+                pass
+
+    if batch_mode:
+        processed = state.get("processed", set())
+        survivors = state.get("survivors", set())
+        for fpath in corpus_files:
+            h = hash_data(fpath.read_bytes())
+            processed.add(h)
+            if str(fpath) in kept_set:
+                survivors.add(h)
+        try:
+            with gzip.open(state_file, "wb") as f:
+                pickle.dump({"processed": processed, "survivors": survivors}, f)
+        except Exception:
+            pass
 
     removed = len(corpus_files) - len(kept)
     return len(kept), removed

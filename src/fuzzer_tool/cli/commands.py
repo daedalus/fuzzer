@@ -1422,6 +1422,7 @@ def cmd_minimize(args):
         exec_mode=_minimize_exec_mode(args, args.target),
         inprocess_func=args.inprocess_func,
         max_seeds=getattr(args, "max_seeds", 0),
+        batch_mode=getattr(args, "batch", False),
     )
 
     if removed == 0:
@@ -6331,6 +6332,11 @@ def main() -> int:
         type=int,
         default=0,
         help="Max seeds to process (0=all). Allows batch minification.",
+    )
+    min_parser.add_argument(
+        "--batch",
+        action="store_true",
+        help="Batch mode: track processed seeds across runs, always keep survivors, process remaining seeds",
     )
     min_parser.set_defaults(func=cmd_minimize)
 
