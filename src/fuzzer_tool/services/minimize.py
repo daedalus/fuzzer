@@ -13,6 +13,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 from enum import Enum
 from pathlib import Path
 
@@ -284,6 +285,7 @@ def _minimize_with_coverage(
                 return len(corpus_files), 0
             replay = _runner_replay(runner)
 
+        start_time = time.time()
         for i, fpath in enumerate(corpus_files):
             data = fpath.read_bytes()
             seed_sizes[str(fpath)] = len(data)
@@ -292,7 +294,21 @@ def _minimize_with_coverage(
             seed_edges[str(fpath)] = shm.get_edge_ids()
 
             if (i + 1) % 10 == 0 or (i + 1) == len(corpus_files):
-                print(f"\r[*] Replayed {i + 1}/{len(corpus_files)}...", end="", flush=True)
+                elapsed = time.time() - start_time
+                files_done = i + 1
+                total_files = len(corpus_files)
+                if elapsed > 0 and files_done > 0:
+                    rate = files_done / elapsed
+                    remaining = total_files - files_done
+                    eta = remaining / rate if rate > 0 else 0
+                    print(
+                        f"\r[*] Replayed {files_done}/{total_files} ({files_done / total_files * 100:.1f}%) "
+                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s",
+                        end="",
+                        flush=True,
+                    )
+                else:
+                    print(f"\r[*] Replayed {files_done}/{total_files}...", end="", flush=True)
     finally:
         map_entries = shm.num_entries
         if runner is not None:
