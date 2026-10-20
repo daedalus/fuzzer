@@ -302,12 +302,15 @@ def _minimize_with_coverage(
             replay = _runner_replay(runner)
 
         start_time = time.time()
+        unique_edges = set()
         for i, fpath in enumerate(corpus_files):
             data = fpath.read_bytes()
             seed_sizes[str(fpath)] = len(data)
             shm.reset_edge_map()
             replay(data)
-            seed_edges[str(fpath)] = shm.get_edge_ids()
+            edges = shm.get_edge_ids()
+            seed_edges[str(fpath)] = edges
+            unique_edges.update(edges)
             peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
             # Reclaim heap memory periodically like in fuzz mode
             if (i + 1) % 100 == 0:
@@ -343,7 +346,7 @@ def _minimize_with_coverage(
                         rss_str += f" | live: {_fmt_kb(live_kb)}"
                     print(
                         f"\r[*] Replayed {files_done}/{total_files} ({files_done / total_files * 100:.1f}%) "
-                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s | elapsed: {elapsed:.1f}s{rss_str}{trim_str}",
+                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s | elapsed: {elapsed:.1f}s | edges: {len(unique_edges)}{rss_str}{trim_str}",
                         end="",
                         flush=True,
                     )
@@ -352,7 +355,7 @@ def _minimize_with_coverage(
                     if live_kb is not None:
                         rss_str += f" | live: {_fmt_kb(live_kb)}"
                     print(
-                        f"\r[*] Replayed {files_done}/{total_files} | elapsed: {elapsed:.1f}s{rss_str}{trim_str}...",
+                        f"\r[*] Replayed {files_done}/{total_files} | elapsed: {elapsed:.1f}s | edges: {len(unique_edges)}{rss_str}{trim_str}...",
                         end="",
                         flush=True,
                     )
