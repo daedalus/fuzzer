@@ -195,7 +195,8 @@ def minimize_corpus(
         print(f"[-] Corpus directory not found: {corpus_dir}", file=sys.stderr)
         return 0, 0
 
-    corpus_files = _discover_corpus_files(corpus_path)
+    all_corpus_files = _discover_corpus_files(corpus_path)
+    corpus_files = all_corpus_files
     if not corpus_files:
         print("[-] Corpus is empty", file=sys.stderr)
         return 0, 0
@@ -203,7 +204,7 @@ def minimize_corpus(
     if max_seeds > 0 and len(corpus_files) > max_seeds:
         corpus_files = corpus_files[:max_seeds]
 
-    print(f"[*] Corpus: {len(corpus_files)} files in {corpus_dir}")
+    print(f"[*] Corpus: {len(corpus_files)} files in {corpus_dir} (total: {len(all_corpus_files)})")
 
     if use_coverage:
         kept, removed = _minimize_with_coverage(
