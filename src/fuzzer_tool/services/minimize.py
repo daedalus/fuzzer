@@ -7,9 +7,11 @@ Two modes:
      with optional Hamming-based fuzzy dedup for near-duplicates.
 """
 
+import contextlib
 import ctypes
 import hashlib
 import os
+import resource
 import shutil
 import sys
 import tempfile
@@ -17,9 +19,17 @@ import time
 from enum import Enum
 from pathlib import Path
 
-from fuzzer_tool.adapters import libc_shm
+from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.set_cover import min_cover
+
+
+def _maxrss_kb() -> int:
+    return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+
+def _fmt_kb(kb: int) -> str:
+    return f"{kb // 1024}MB" if kb >= 1024 else f"{kb}KB"
 
 
 class ExecMode(Enum):
@@ -274,6 +284,7 @@ def _minimize_with_coverage(
     seed_edges: dict[str, set[int]] = {}
     seed_sizes: dict[str, int] = {}
     runner = None
+    peak_rss_kb = _maxrss_kb()
     try:
         # One replay callable, chosen once: the loop below never branches on mode.
         if exec_mode is ExecMode.SPAWN:
@@ -292,23 +303,35 @@ def _minimize_with_coverage(
             shm.reset_edge_map()
             replay(data)
             seed_edges[str(fpath)] = shm.get_edge_ids()
+            peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
 
             if (i + 1) % 10 == 0 or (i + 1) == len(corpus_files):
                 elapsed = time.time() - start_time
                 files_done = i + 1
                 total_files = len(corpus_files)
+                live_kb = None
+                with contextlib.suppress(Exception):
+                    live_kb = libc_mem.current_rss() >> 10
                 if elapsed > 0 and files_done > 0:
                     rate = files_done / elapsed
                     remaining = total_files - files_done
                     eta = remaining / rate if rate > 0 else 0
+                    rss_str = f" | rss: {_fmt_kb(peak_rss_kb)}"
+                    if live_kb is not None:
+                        rss_str += f" | live: {_fmt_kb(live_kb)}"
                     print(
                         f"\r[*] Replayed {files_done}/{total_files} ({files_done / total_files * 100:.1f}%) "
-                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s",
+                        f"{rate:.1f} seeds/s ETA: {eta:.1f}s{rss_str}",
                         end="",
                         flush=True,
                     )
                 else:
-                    print(f"\r[*] Replayed {files_done}/{total_files}...", end="", flush=True)
+                    rss_str = f" | rss: {_fmt_kb(peak_rss_kb)}"
+                    if live_kb is not None:
+                        rss_str += f" | live: {_fmt_kb(live_kb)}"
+                    print(
+                        f"\r[*] Replayed {files_done}/{total_files}{rss_str}...", end="", flush=True
+                    )
     finally:
         map_entries = shm.num_entries
         if runner is not None:
