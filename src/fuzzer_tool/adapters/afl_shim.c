@@ -2445,7 +2445,9 @@ __AFL_GCC_NO_COV static void *__afl_attach_sized(const char *env, uint64_t entry
     struct shmid_ds ds;
     uint64_t head = *(uint32_t *)p;
     uint64_t need = 4 + head * entry_bytes;
-    if (head == 0 || (shmctl(shmid, IPC_STAT, &ds) == 0 && (uint64_t)ds.shm_segsz < need)) {
+    /* An IPC_STAT failure means the size is unverified, and the header is
+     * trusted as a loop bound: refuse it rather than wave it through. */
+    if (head == 0 || shmctl(shmid, IPC_STAT, &ds) != 0 || (uint64_t)ds.shm_segsz < need) {
         shmdt(p);
         __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
         return NULL;
@@ -2457,7 +2459,11 @@ __AFL_GCC_NO_COV static void __afl_map_node_shm(void) {
     void *p = __afl_attach_sized("__AFL_NODE_BITMAP_ID", 1);
     if (!p) return;
     uint32_t bytes = *(uint32_t *)p;
-    if (bytes > (1u << 28)) return;  /* insane header: ignore */
+    if (bytes > (1u << 28)) {  /* insane header: detach, don't leak the mapping */
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return;
+    }
     __afl_node_bitmap_bytes = bytes;
     __afl_node_bitmap = (uint8_t *)((uint8_t *)p + 4);
 }
@@ -2468,7 +2474,7 @@ __AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
 
     /* The probe masks with capacity - 1 instead of % capacity. */
     uint32_t cap = *(uint32_t *)p;
-    if (cap & (cap - 1)) {
+    if (cap == 0 || (cap & (cap - 1))) {
         shmdt(p);
         __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
         __afl_dist_table = NULL;  /* no stale table from an earlier attach */
@@ -3185,10 +3191,12 @@ __AFL_NO_COV static void __afl_cmplog_flush(void) {
  * keeps the whole record writer callable from __afl_crash_handler and
  * removes a printf parse from the hot path. */
 __AFL_GCC_NO_COV static char *__afl_put_i64(char *p, int64_t v) {
-    if (v < 0) { *p++ = '-'; v = -v; }
+    /* Magnitude in unsigned arithmetic: -v is undefined for INT64_MIN. */
+    uint64_t u = (uint64_t)v;
+    if (v < 0) { *p++ = '-'; u = 0 - u; }
     char tmp[20];
     int n = 0;
-    do { tmp[n++] = (char)('0' + (v % 10)); v /= 10; } while (v);
+    do { tmp[n++] = (char)('0' + (u % 10)); u /= 10; } while (u);
     while (n) *p++ = tmp[--n];
     return p;
 }
@@ -5506,6 +5514,25 @@ __AFL_GCC_NO_COV static void __afl_shim_abort(void) {
 
 #define AFL_FORKSRV_FD 198
 
+/* Exact-length transfer on the forkserver pipes. write_p == 0 reads, else
+ * writes. Retries EINTR and accumulates short transfers. Returns 1 when all
+ * n bytes moved, 0 on a clean EOF before the first byte (reads only), -1 on
+ * a real error or an EOF in the middle of a message. Async-signal-safe. */
+__AFL_GCC_NO_COV static int __afl_fs_io(int write_p, int fd, void *buf, size_t n) {
+    size_t done = 0;
+    while (done < n) {
+        ssize_t r = write_p ? write(fd, (char *)buf + done, n - done)
+                            : read(fd, (char *)buf + done, n - done);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) return (!write_p && done == 0) ? 0 : -1;
+        done += (size_t)r;
+    }
+    return 1;
+}
+
 __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
     char hello[4] = {0, 0, 0, 0};
 
@@ -5525,7 +5552,7 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
     if (!optin || strcmp(optin, "1") != 0) return;
 
     /* No control pipe: not being driven by the loader. */
-    if (write(AFL_FORKSRV_FD + 1, hello, 4) != 4) return;
+    if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, hello, 4) != 1) return;
 
     /* This loop is itself instrumented — it lives in the same translation
      * unit as the target. Left recording, it would (a) write its own edges
@@ -5588,7 +5615,12 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
 
     while (1) {
         char cmd[4];
-        if (read(AFL_FORKSRV_FD, cmd, 4) != 4) _exit(0);
+        /* EOF: the loader closed the pipe, end quietly. A signal landing
+         * on the blocked read() (EINTR) or a short read must not kill the
+         * server and read as a lost campaign. */
+        int got = __afl_fs_io(0, AFL_FORKSRV_FD, cmd, 4);
+        if (got == 0) _exit(0);
+        if (got < 0) _exit(1);
 
         pid_t child = fork();
         if (child < 0) _exit(1);
@@ -5609,7 +5641,7 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
         /* Both sides, before the pid is published: the loader may kill
          * the group as soon as it reads it. */
         setpgid(child, child);
-        if (write(AFL_FORKSRV_FD + 1, &child, 4) != 4) _exit(0);
+        if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, &child, 4) != 1) _exit(0);
 
         int status = 0;
         while (waitpid(child, &status, 0) < 0) {
@@ -5619,7 +5651,7 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
             if (errno != EINTR) _exit(1);
         }
 
-        if (write(AFL_FORKSRV_FD + 1, &status, 4) != 4) _exit(0);
+        if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, &status, 4) != 1) _exit(0);
     }
 }
 
