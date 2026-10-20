@@ -2445,12 +2445,18 @@ __AFL_GCC_NO_COV static void *__afl_attach_sized(const char *env, uint64_t entry
         return NULL;
     }
 
+    /* Size first: the u32 header must itself lie inside the segment, and an
+     * IPC_STAT failure leaves the size unverified. The header is a loop bound
+     * on the hot path, so either case refuses the segment. */
     struct shmid_ds ds;
+    if (shmctl(shmid, IPC_STAT, &ds) != 0 || (uint64_t)ds.shm_segsz < 4) {
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return NULL;
+    }
     uint64_t head = *(uint32_t *)p;
     uint64_t need = 4 + head * entry_bytes;
-    /* An IPC_STAT failure means the size is unverified, and the header is
-     * trusted as a loop bound: refuse it rather than wave it through. */
-    if (head == 0 || shmctl(shmid, IPC_STAT, &ds) != 0 || (uint64_t)ds.shm_segsz < need) {
+    if (head == 0 || (uint64_t)ds.shm_segsz < need) {
         shmdt(p);
         __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
         return NULL;
