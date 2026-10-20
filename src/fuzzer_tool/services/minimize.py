@@ -210,11 +210,17 @@ def minimize_corpus(
         except Exception:
             processed_hashes = set()
 
-    corpus_files = (
-        [f for f in all_corpus_files if hash_data(f.read_bytes()) not in processed_hashes]
-        if batch_mode
-        else all_corpus_files
-    )
+    if batch_mode:
+        filtered = []
+        for f in all_corpus_files:
+            try:
+                if hash_data(f.read_bytes()) not in processed_hashes:
+                    filtered.append(f)
+            except Exception:
+                continue
+        corpus_files = filtered
+    else:
+        corpus_files = all_corpus_files
 
     if not corpus_files:
         print("[-] Corpus is empty or all files already processed in batch mode", file=sys.stderr)
@@ -548,11 +554,26 @@ def _commit_results(
         pruned_dir.mkdir(parents=True, exist_ok=True)
         for fpath in corpus_files:
             if str(fpath) not in kept_set:
-                dest = pruned_dir / fpath.name
+                # Preserve directory structure like the seed corpus (seeds/xx/id_*)
+                rel = (
+                    fpath.relative_to(corpus_path)
+                    if str(fpath).startswith(str(corpus_path))
+                    else Path(fpath.name)
+                )
+                dest_dir = pruned_dir / rel.parent
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / rel.name
                 shutil.move(str(fpath), str(dest))
                 meta = fpath.with_suffix(".txt")
                 if meta.exists():
-                    shutil.move(str(meta), str(pruned_dir / meta.name))
+                    meta_rel = (
+                        meta.relative_to(corpus_path)
+                        if str(meta).startswith(str(corpus_path))
+                        else Path(meta.name)
+                    )
+                    meta_dest_dir = pruned_dir / meta_rel.parent
+                    meta_dest_dir.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(meta), str(meta_dest_dir / meta_rel.name))
             elif batch_mode:
                 # In batch mode, keep survivors in place and record them
                 pass
@@ -561,7 +582,13 @@ def _commit_results(
         processed = state.get("processed", set())
         survivors = state.get("survivors", set())
         for fpath in corpus_files:
-            h = hash_data(fpath.read_bytes())
+            fpath_p = Path(fpath)
+            if not fpath_p.exists():
+                continue
+            try:
+                h = hash_data(fpath_p.read_bytes())
+            except Exception:
+                continue
             processed.add(h)
             if str(fpath) in kept_set:
                 survivors.add(h)
