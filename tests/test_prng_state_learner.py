@@ -416,6 +416,56 @@ class TestLCGRecovery:
         assert learner.predict(1) == words[10:11]
 
 
+class TestMWCRecovery:
+    """Multiply-with-carry (FCSR): known family and unknown multiplier, through the learner."""
+
+    # a*2^32 - 1 is a safe prime, but the multiplier is not a shipped family.
+    UNKNOWN_A = 4294000674
+
+    @staticmethod
+    def _mwc(n: int, a: int, x: int, c: int) -> list[int]:
+        out = []
+        for _ in range(n):
+            out.append(x)
+            c, x = divmod(a * x + c, 1 << 32)
+        return out
+
+    def test_recovers_a_shipped_family(self):
+        words = self._mwc(5, 4294883355, 0x1234_5678, 0x0ABC_DEF0)
+        learner = _learner(_conds(words[:4]))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.name == "mwc32_4294883355"
+        assert learner.predict(1) == words[4:]
+
+    def test_recovers_an_unknown_multiplier_from_five_words(self):
+        words = self._mwc(6, self.UNKNOWN_A, 0xDEAD_BEEF, 12345)
+        learner = _learner(_conds(words[:5]))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.a == self.UNKNOWN_A
+        assert learner.predict(1) == words[5:]
+
+    def test_round_trip_rebuilds_an_unknown_multiplier(self):
+        words = self._mwc(7, self.UNKNOWN_A, 99, 7)
+        learner = _learner(_conds(words[:5]))
+        learner.observe_execution(PAYLOAD)
+        restored = PRNGStateLearner.from_dict(_fuzzer(), learner.to_dict())
+        assert restored._spec.a == self.UNKNOWN_A
+        assert restored.predict(2) == words[5:7]
+
+    def test_adversarial_poisoned_family_name_falls_back(self):
+        """A tampered dict must not crash resume or build an out-of-range multiplier."""
+        data = {"state": [1, 2], "family": "mwc32_99999999999", "confirmed_samples": [1]}
+        restored = PRNGStateLearner.from_dict(_fuzzer(), data)
+        assert restored._spec.name == "taus88"
+
+    def test_lcg_window_is_not_claimed_as_mwc(self):
+        """Adversarial: a java.util.Random stream keeps its own family."""
+        words = TestLCGRecovery._lcg(6, 0x1234_5678_9ABC, 0x5DEECE66D, 0xB, 1 << 48, 16, 32)
+        learner = _learner(_conds(words[:5]))
+        assert learner.observe_execution(PAYLOAD) is True
+        assert learner._spec.name == "java"
+
+
 class TestWideOperandStreams:
     """64-bit generators are observed and predicted at their own width.
 

@@ -113,19 +113,22 @@ from dataclasses import dataclass, field
 from types import ModuleType
 from typing import Any, Literal
 
-from fuzzer_tool.core import lcg_recovery, mt19937_recovery, prng_state_recovery
+from fuzzer_tool.core import fcsr_recovery, lcg_recovery, mt19937_recovery, prng_state_recovery
+from fuzzer_tool.core.fcsr_recovery import MWC_FAMILIES, MWCSpec, mwc_family
 from fuzzer_tool.core.lcg_recovery import LCG_FAMILIES, LCGSpec, lcg_family
 from fuzzer_tool.core.mt19937_recovery import MT19937_SPEC, MT19937Spec
 from fuzzer_tool.core.prng_state_recovery import FAMILIES, LinearPRNG, family
 
-#: A recoverable generator: GF(2)-linear, LCG, or MT19937.
-_Spec = LinearPRNG | LCGSpec | MT19937Spec
+#: A recoverable generator: GF(2)-linear, LCG, MWC (FCSR), or MT19937.
+_Spec = LinearPRNG | LCGSpec | MWCSpec | MT19937Spec
 
 
 def _driver(spec: _Spec) -> ModuleType:
     """Recovery module for *spec*; all expose the same step/output/recover API."""
     if isinstance(spec, LCGSpec):
         return lcg_recovery
+    if isinstance(spec, MWCSpec):
+        return fcsr_recovery
     if isinstance(spec, MT19937Spec):
         return mt19937_recovery
     return prng_state_recovery
@@ -136,11 +139,17 @@ def _confident(spec: _Spec) -> int:
 
 
 # Every shipped linear family, in FAMILIES' smallest-state-first order
-# (cheapest elimination tried first), then the LCGs (one small LLL each).
+# (cheapest elimination tried first), then the LCGs (one small LLL each),
+# then the known-multiplier MWCs (a few integer ops; unknown multipliers are
+# tried last, see _try_unknown_mwc).
 # MT19937 is deliberately *not* in this short-window list: it needs 624
 # consecutive outputs, far above _MAX_SAMPLES.  It is tried from the
 # long per-site history in _try_recover_mt when enough samples accumulate.
-_CANDIDATE_FAMILIES: tuple[_Spec, ...] = (*FAMILIES.values(), *LCG_FAMILIES.values())
+_CANDIDATE_FAMILIES: tuple[_Spec, ...] = (
+    *FAMILIES.values(),
+    *LCG_FAMILIES.values(),
+    *MWC_FAMILIES.values(),
+)
 # Operand widths worth extracting at all: exactly the output widths some
 # family has, so a 2-byte compare is dropped at the source rather than
 # accumulated into a window no family could ever fit. Currently {4, 8}.
@@ -627,8 +636,25 @@ class PRNGStateLearner:
             self._set_state(spec, state, candidates)
             self.successes += 1
             return True
+        if self._try_unknown_mwc(candidates, width):
+            return True
         self._last_refuted = key
         return False
+
+    def _try_unknown_mwc(self, candidates: list[int], width: int) -> bool:
+        """Recover an MWC whose multiplier no shipped family has (2-adic synthesis).
+
+        Runs only after every family refuted the window: one lattice
+        reduction on <= 512 bits, replayed against every sample.
+        """
+        if width != fcsr_recovery.OUT_BYTES or len(candidates) < fcsr_recovery.MIN_UNKNOWN_WORDS:
+            return False
+        found = fcsr_recovery.recover_unknown(candidates)
+        if found is None:
+            return False
+        self._set_state(found[0], found[1], candidates)
+        self.successes += 1
+        return True
 
     def _try_recover_mt(self) -> bool:
         """Attempt MT19937 recovery from the long per-site history.
@@ -689,7 +715,9 @@ class PRNGStateLearner:
                 if name == MT19937_SPEC.name:
                     spec: _Spec = MT19937_SPEC
                 else:
-                    spec = family(name) or lcg_family(name) or FAMILIES["taus88"]
+                    spec = (
+                        family(name) or lcg_family(name) or mwc_family(name) or FAMILIES["taus88"]
+                    )
                 restored = tuple(int(x) for x in state)
                 samples = [int(x) for x in data.get("confirmed_samples") or []]
                 # The frontier is derived, not stored, so rebuild it here --
