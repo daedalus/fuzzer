@@ -11,7 +11,7 @@ Origin: Copilot job "explore what sympy has to offer ... implement it ourselves"
 
 ## Not done
 - No A/B of `prime_inject` on a real target (needs one with a primality or modular check).
-- Not used by `ntt.py` (fixed modulus), `lcg_recovery.py` (lattice only), `int_checksum_solver.py`.
+- Not used by `ntt.py` (fixed modulus), `lcg_recovery.py` (lattice only), `fcsr_recovery.py` (own 2-D Gauss reduction), `int_checksum_solver.py`.
 - sympy areas not ported: polynomials/Groebner, Diophantine, matrices over Z, simplify, solvers, continued fractions beyond existing, `nthroot_mod` for composite moduli, ECM/quadratic sieve, index calculus.
 - `architecture.png` untouched (no new subsystem).
 
