@@ -966,8 +966,15 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     if (size_str && size_str[0]) {
         errno = 0;
         char *size_end = NULL;
-        unsigned long long s = strtoull(size_str, &size_end, 10);
-        if (size_str[0] == '-' || *size_end != '\0' || errno == ERANGE || s > UINT32_MAX) {
+        /* strtoull accepts leading whitespace, '+' and '-'; the value is part of
+         * the shared-memory ABI, so only ASCII decimal digits are valid. */
+        int digits_only = 1;
+        for (const unsigned char *q = (const unsigned char *)size_str; *q; q++) {
+            if (*q < '0' || *q > '9') { digits_only = 0; break; }
+        }
+        unsigned long long s = digits_only ? strtoull(size_str, &size_end, 10) : 0;
+        if (!digits_only || size_end == size_str || *size_end != '\0' ||
+            errno == ERANGE || s > UINT32_MAX) {
             char msg[128];
             int n = snprintf(msg, sizeof(msg),
                              "__afl_shim: AFL_MAP_SIZE=%.32s is not a valid entry count"
@@ -980,7 +987,15 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
             __afl_map_size = (uint32_t)s;
     }
 
-    /* SHM was allocated as header bytes + table bytes */
+    /* SHM was allocated as header bytes + table bytes. Check the arithmetic
+     * first: on a 32-bit build a valid uint32 map size overflows size_t before
+     * IPC_STAT gets to reject the segment. */
+    const size_t tail_bytes = (__AFL_DISTANCE_MODE ? 2 * sizeof(uint64_t) : 0);
+    if ((size_t)__afl_map_size >
+        (SIZE_MAX - SHM_TABLE_OFFSET - tail_bytes) / sizeof(struct __afl_entry)) {
+        __afl_refuse_shm();
+        return;
+    }
     void *p = shmat(shmid, NULL, 0);
     if (p == (void *)-1) {
         char msg[160];
@@ -999,7 +1014,7 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
      * refused like an undersized one. */
     struct shmid_ds ds;
     size_t need = SHM_TABLE_OFFSET + (size_t)__afl_map_size * sizeof(struct __afl_entry)
-                + (__AFL_DISTANCE_MODE ? 2 * sizeof(uint64_t) : 0);
+                + tail_bytes;
     int stat_ok = shmctl(shmid, IPC_STAT, &ds) == 0;
     if (!stat_ok) ds.shm_segsz = 0;
     if (!stat_ok || (size_t)ds.shm_segsz < need) {
@@ -1047,8 +1062,13 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
         size_t tail_end = SHM_TABLE_OFFSET
                         + (size_t)__afl_map_size * sizeof(struct __afl_entry)
                         + SHM_TAIL_BYTES;
-        size_t bm_bytes = SHM_TOUCHED_HEADER + (((size_t)__afl_map_size + 63) / 64) * 8;
-        if (shmctl(shmid, IPC_STAT, &ds) == 0 && (size_t)ds.shm_segsz >= tail_end + bm_bytes) {
+        /* Size the optional bitmap without overflowing size_t. */
+        size_t words = (size_t)__afl_map_size / 64 + (((size_t)__afl_map_size % 64) != 0);
+        int bm_size_ok = words <= (SIZE_MAX - SHM_TOUCHED_HEADER) / sizeof(uint64_t);
+        size_t bm_bytes = bm_size_ok ? SHM_TOUCHED_HEADER + words * sizeof(uint64_t) : 0;
+        int bm_end_ok = bm_size_ok && tail_end <= SIZE_MAX - bm_bytes;
+        if (bm_end_ok && shmctl(shmid, IPC_STAT, &ds) == 0 &&
+            (size_t)ds.shm_segsz >= tail_end + bm_bytes) {
             memcpy(base + tail_end, SHM_TOUCHED_MAGIC, SHM_TOUCHED_HEADER);
             __afl_touched = (uint64_t *)(base + tail_end + SHM_TOUCHED_HEADER);
             const char *ta = getenv("__AFL_TOUCHED_ATOMIC");

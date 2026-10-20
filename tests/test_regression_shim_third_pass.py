@@ -276,3 +276,44 @@ def test_regression_main_segment_refused_when_ipc_stat_fails(tmp_path):
     assert sane[ATTACHED] == 1
     assert failing[ATTACHED] == 0
     assert failing[SEG_REJECTED] >= 1
+
+
+# ── review follow-ups: AFL_MAP_SIZE syntax, 32-bit size_t overflow ─────
+
+
+@requires_clang
+@pytest.mark.parametrize("bad", [" 4096", "+4096", "4096 ", "0x1000", "-1", "4096abc"])
+def test_regression_map_size_accepts_only_ascii_digits(tmp_path, bad):
+    exe = _build(tmp_path, _HEALTH_MAIN, "-fsanitize-coverage=trace-pc-guard")
+    shm = ShmCoverage(size=MAP_ENTRIES)
+    try:
+        ok = _health(exe, __AFL_SHM_ID=shm.env_id, AFL_MAP_SIZE=str(MAP_ENTRIES))
+        got = _health(exe, __AFL_SHM_ID=shm.env_id, AFL_MAP_SIZE=bad)
+    finally:
+        shm.cleanup()
+    assert ok[ATTACHED] == 1
+    assert got[ATTACHED] == 0, f"AFL_MAP_SIZE={bad!r} must be refused"
+
+
+@requires_clang
+def test_regression_map_size_overflow_refused_on_32bit(tmp_path):
+    """On a 32-bit size_t, 32 + n * sizeof(entry) wraps for a large uint32 n
+    and the wrapped value fits a small segment: it must be refused instead."""
+    c = tmp_path / "t.c"
+    c.write_text(textwrap.dedent(_HEALTH_MAIN))
+    exe = tmp_path / "t32"
+    cmd = [
+        "clang", "-m32", "-w", "-O1", "-fsanitize-coverage=trace-pc-guard",
+        "-include", str(SHIM), str(c), "-o", str(exe), "-ldl", "-l:libatomic.so.1",  # 32-bit: 64-bit atomics on a 4-byte-aligned bitmap
+    ]  # fmt: skip
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        pytest.skip(f"no 32-bit toolchain: {r.stderr.strip().splitlines()[-1:]}")
+    shm = ShmCoverage(size=MAP_ENTRIES)
+    try:
+        fields = _health(
+            exe, __AFL_SHM_ID=shm.env_id, AFL_MAP_SIZE=str(2**32 - 1)
+        )  # fmt: skip
+    finally:
+        shm.cleanup()
+    assert fields[ATTACHED] == 0
