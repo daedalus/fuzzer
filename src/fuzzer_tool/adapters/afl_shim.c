@@ -260,13 +260,27 @@ static void __afl_map_node_shm(void);
  *   ATTACHED       1 when the edge table is attached
  *   MAP_ENTRIES    edge-table entries in effect
  *   SEG_REJECTED   SHM segments refused (bad id, size, or header)
- *   CMPLOG_DROPPED cmplog records lost (writer contention, failed write)
+ *   CMPLOG_DROPPED cmplog records lost (writer contention, failed write,
+ *                  unopenable sink); the sum of the last four fields below
+ *                  up to lost updates, since the counters are non-atomic
  *   STRAY_SIGNALS  crash signals outside __afl_guarded_call
  *   ABORTS_INTERCEPTED  abort() calls the shim's override turned into returns
  *   HANDLERS_DISPLACED  health reads that found another crash handler
  *                       installed over the shim's (re-armed on the next
  *                       guarded call)
  *   WGUARD         edge-table write guard in effect (__AFL_WGUARD_*)
+ *   CMPLOG_REENTRANT   callbacks that found the writer lock held by their own
+ *                      thread (the record writer re-entered through an
+ *                      instrumented call, or a signal handler interrupted it)
+ *   CMPLOG_CONTENDED   callbacks that found the lock held by *another* thread:
+ *                      the target runs instrumented code on two threads
+ *   CMPLOG_WRITE_FAILED  flushes that failed (FIFO full or closed); one count
+ *                      per batch, however many records the batch held
+ *   CMPLOG_NO_SINK     pending batches discarded because the sink fd was
+ *                      replaced under the shim and reopening $_CMPLOG_OUT
+ *                      failed; one count per batch. The shim then stops
+ *                      generating records (every writer gates on fd >= 0),
+ *                      so this counts the batch in flight, not later records
  * Non-atomic: magnitudes, never accounting records. */
 enum {
     __AFL_HEALTH_ATTACHED = 0,
@@ -277,6 +291,10 @@ enum {
     __AFL_HEALTH_ABORTS_INTERCEPTED,
     __AFL_HEALTH_HANDLERS_DISPLACED,
     __AFL_HEALTH_WGUARD,
+    __AFL_HEALTH_CMPLOG_REENTRANT,
+    __AFL_HEALTH_CMPLOG_CONTENDED,
+    __AFL_HEALTH_CMPLOG_WRITE_FAILED,
+    __AFL_HEALTH_CMPLOG_NO_SINK,
     __AFL_HEALTH_FIELDS
 };
 static uint64_t __afl_health[__AFL_HEALTH_FIELDS];
@@ -2735,6 +2753,9 @@ __AFL_NO_COV static inline int __afl_cmplog_acquire(void) {
         return 1;
     }
     __afl_health[__AFL_HEALTH_CMPLOG_DROPPED]++;
+    /* __afl_cmplog_held is thread-local: set means this thread owns the lock. */
+    __afl_health[__afl_cmplog_held ? __AFL_HEALTH_CMPLOG_REENTRANT
+                                   : __AFL_HEALTH_CMPLOG_CONTENDED]++;
     return 0;
 }
 
@@ -3121,6 +3142,10 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
             __afl_cmplog_fd = __afl_log_open(path, O_NONBLOCK, &__afl_cmplog_fd_id);
         }
         if (__afl_cmplog_fd < 0) {
+            /* pos > 0 here, so records were buffered while the fd was
+             * valid and are lost now; count the batch. */
+            __afl_health[__AFL_HEALTH_CMPLOG_DROPPED]++;
+            __afl_health[__AFL_HEALTH_CMPLOG_NO_SINK]++;
             __afl_cmplog_pos = 0;
             return;
         }
@@ -3136,6 +3161,7 @@ __AFL_NO_COV static void __afl_cmplog_flush_locked(void) {
          * steady-state path whenever the collector falls behind. */
         if (w <= 0) {
             __afl_health[__AFL_HEALTH_CMPLOG_DROPPED]++;
+            __afl_health[__AFL_HEALTH_CMPLOG_WRITE_FAILED]++;
             break;
         }
         off += (size_t)w;

@@ -57,6 +57,10 @@ class ShimField(IntEnum):
     ABORTS_INTERCEPTED = 5
     HANDLERS_DISPLACED = 6
     WGUARD = 7
+    CMPLOG_REENTRANT = 8
+    CMPLOG_CONTENDED = 9
+    CMPLOG_WRITE_FAILED = 10
+    CMPLOG_NO_SINK = 11
 
 
 class WriteGuard(IntEnum):
@@ -150,7 +154,15 @@ def health_issues(counters: Sequence[int], attach: Attach) -> list[str]:
 
     dropped = _field(counters, ShimField.CMPLOG_DROPPED)
     if dropped:
-        issues.append(f"{dropped} cmplog record(s) dropped (writer contention or failed write)")
+        msg = f"{dropped} cmplog record(s) dropped (writer contention, failed write or lost sink)"
+        parts = [
+            (_field(counters, ShimField.CMPLOG_REENTRANT), "same-thread re-entry"),
+            (_field(counters, ShimField.CMPLOG_CONTENDED), "another thread held the lock"),
+            (_field(counters, ShimField.CMPLOG_WRITE_FAILED), "failed flush(es)"),
+            (_field(counters, ShimField.CMPLOG_NO_SINK), "batch(es) lost when the sink could not be reopened"),
+        ]
+        detail = ", ".join(f"{n} {what}" for n, what in parts if n)
+        issues.append(f"{msg}: {detail}" if detail else msg)
 
     stray = _field(counters, ShimField.STRAY_SIGNALS)
     if stray:
@@ -252,5 +264,14 @@ def _field_issue(counters: Sequence[int], field: ShimField, attach: Attach) -> s
     only[ShimField.ATTACHED] = 1
     if field < len(counters):
         only[field] = counters[field]
+    if field is ShimField.CMPLOG_DROPPED:
+        # the breakdown rides along so the one-shot warning can say why
+        for extra in (
+            ShimField.CMPLOG_REENTRANT,
+            ShimField.CMPLOG_CONTENDED,
+            ShimField.CMPLOG_WRITE_FAILED,
+            ShimField.CMPLOG_NO_SINK,
+        ):
+            only[extra] = _field(counters, extra)
     issues = health_issues(only, attach)
     return issues[0] if issues else None
