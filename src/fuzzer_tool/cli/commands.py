@@ -696,6 +696,7 @@ def cmd_fuzz(args):
         joint_liveness=getattr(args, "joint_liveness", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
+        pos_pca=getattr(args, "pos_pca", False),
         seed_newest_scheduler=getattr(args, "seed_newest_scheduler", False),
         frontier_bin=getattr(args, "frontier_bin", None),
         frontier_p=getattr(args, "frontier_p", DEFAULT_P_FRONTIER),
@@ -2186,6 +2187,10 @@ def cmd_sweep(args):
 # tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the Kadane
 # window arm has only a synthetic check, no paired run on a real target.
 #
+# pos_pca (--pos-pca) is excluded as unmeasured (see
+# tests/test_regression_hail_mary_gates.py::_EXCLUDED_OPT_IN): the PCA group arm
+# has only a synthetic planted-group check, no paired run on a real target.
+#
 # joint_liveness (--joint-liveness) is excluded: it only has an effect together
 # with --region-profile (the dead-region down-weight is the thing it revokes)
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
@@ -3328,6 +3333,15 @@ def main() -> int:
         help="Enable the position-arena finch scheduler: like --pos-effector but weights "
         "each byte by how many edges its byteflip moved, plus a per-seed bonus learned "
         "from gain rounds (needs --deterministic). Implied by --position-arena.",
+    )
+    fuzz_parser.add_argument(
+        "--pos-pca",
+        action="store_true",
+        help="Enable the position-arena PCA scheduler: groups bytes by which edges their "
+        "byteflip moved (PCA, shared reject path dropped) and spreads proposals across the "
+        "groups (core/schedulers/pos_pca.py; needs the deterministic stage). Opt-in: NOT implied by "
+        "--position-arena or --hail-mary (unmeasured). Joins the arena pool when "
+        "--position-arena is on.",
     )
     fuzz_parser.add_argument(
         "--pos-token",

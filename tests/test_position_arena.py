@@ -49,6 +49,7 @@ from fuzzer_tool.core.schedulers.pos_kadane import PositionKadaneScheduler
 from fuzzer_tool.core.schedulers.pos_kl_ducb import PositionKLDUCBScheduler
 from fuzzer_tool.core.schedulers.pos_levy import PositionLevyScheduler
 from fuzzer_tool.core.schedulers.pos_lineage import PositionLineageScheduler
+from fuzzer_tool.core.schedulers.pos_pca import PositionPCAScheduler
 from fuzzer_tool.core.schedulers.pos_rare_mask import PositionRareMaskScheduler
 from fuzzer_tool.core.schedulers.pos_round_robin import PositionRoundRobinScheduler
 from fuzzer_tool.core.schedulers.pos_saliency import PositionSaliencyScheduler
@@ -599,6 +600,7 @@ def _arena(
     centroid=None,
     consolidated=None,
     finch=None,
+    pca=None,
     good_turing=None,
     saliency=None,
     harmonic=None,
@@ -627,6 +629,7 @@ def _arena(
         centroid=centroid,
         consolidated=consolidated,
         finch=finch,
+        pca=pca,
         good_turing=good_turing,
         saliency=saliency,
         harmonic=harmonic,
@@ -1018,6 +1021,7 @@ class TestPool:
             centroid=_centroid(),
             consolidated=PositionConsolidatedScheduler(RandPool(seed=1)),
             finch=_finch()[0],
+            pca=_pca()[0],
             good_turing=PositionGoodTuringScheduler(RandPool(seed=1)),
             saliency=PositionSaliencyScheduler(RandPool(seed=1), lambda: []),
             harmonic=PositionHarmonicScheduler(RandPool(seed=1)),
@@ -1709,6 +1713,24 @@ class TestRealConstruction:
         assert isinstance(f._pos_kadane, PositionKadaneScheduler)
         assert "kadane" in f._position_arena.pool()
 
+    def test_position_arena_does_not_imply_pca(self, tmp_path):
+        f = self._build(tmp_path, elo="all", position_arena=True)
+        assert f._pos_pca is None
+        assert f._operators._pca_capture is False
+
+    def test_pos_pca_builds_enables_capture_and_waits_for_groups(self, tmp_path):
+        from fuzzer_tool.core.schedulers.pos_pca import PositionPCAScheduler
+
+        f = self._build(tmp_path, elo="all", position_arena=True, pos_pca=True)
+        assert isinstance(f._pos_pca, PositionPCAScheduler)
+        assert f._operators._pca_capture is True
+        assert "pca" not in f._position_arena.pool()  # no drained map yet
+
+    def test_pos_pca_alone_does_not_build_an_arena(self, tmp_path):
+        f = self._build(tmp_path, pos_pca=True)
+        assert isinstance(f._pos_pca, PositionPCAScheduler)
+        assert f._position_arena is None
+
     def test_pos_saliency_builds_and_joins_the_arena(self, tmp_path):
         f = self._build(tmp_path, elo="all", position_arena=True, pos_saliency=True)
         assert isinstance(f._pos_saliency, PositionSaliencyScheduler)
@@ -2072,6 +2094,58 @@ class TestFinchArm:
         f = _Fuzzer(sensitivity=True, te=True)
         arena = PositionArena(f, region_fn=lambda d, n: 1, finch=arm, arms=["uniform", "fractal"])
         assert "finch" not in arena.pool()
+
+
+def _pca(ready=True):
+    import numpy as np
+
+    from fuzzer_tool.core.byte_pca import ByteGroups
+    from fuzzer_tool.core.schedulers.pos_pca import PositionPCAScheduler
+
+    groups = ByteGroups(
+        offsets=np.array([40, 41], dtype=np.uint32),
+        comp=np.array([0, 1], dtype=np.int8),
+        weight=np.array([1.0, 1.0], dtype=np.float32),
+        count=4,
+    )
+    box = {"ready": ready}
+    arm = PositionPCAScheduler(
+        RandPool(seed=1),
+        groups_of=lambda d: groups,
+        ready=lambda: box["ready"],
+        key_of=lambda d: bytes(d[:4]).hex(),
+    )
+    return arm, box
+
+
+class TestPCAArm:
+    """The pca arm is gated on its own groups yet learns from every settled round."""
+
+    def test_gated_on_its_own_active(self):
+        arm, box = _pca(ready=False)
+        _, arena = _arena(pca=arm)
+        assert "pca" not in arena.pool()
+        box["ready"] = True
+        assert "pca" in arena.pool()
+
+    def test_settle_feeds_record_even_when_another_arm_served(self):
+        from fuzzer_tool.core.schedulers.pos_base import Outcome
+
+        arm, _ = _pca()
+        _, arena = _arena(pca=arm)
+        data = bytes(range(64))
+        arena.settle(data, [40], Outcome.GAIN, 1.0, 1.0)
+        assert arm.seeds_tracked() == 1
+
+    def test_left_out_of_the_arm_subset_it_is_dropped(self):
+        from fuzzer_tool.core.schedulers.pos_base import Outcome
+
+        arm, _ = _pca()
+        f = _Fuzzer(sensitivity=True, te=True)
+        arena = PositionArena(f, region_fn=lambda d, n: 1, pca=arm, arms=["uniform", "fractal"])
+        assert "pca" not in arena.pool()
+        arena.settle(bytes(range(64)), [40], Outcome.GAIN, 1.0, 1.0)
+        assert arm.seeds_tracked() == 0
 
 
 class TestDetMagnitude:

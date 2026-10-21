@@ -224,6 +224,8 @@ ARMS: dict[str, list[str]] = {
     "pos-arena-harmonic": _ARENA + ["--pos-harmonic", "--pos-arena-arms", "uniform,harmonic"],
     # Kadane is opt-in like saliency: --pos-kadane plus the subset that admits it.
     "pos-arena-kadane": _ARENA + ["--pos-kadane", "--pos-arena-arms", "uniform,kadane"],
+    # PCA is opt-in like kadane; the byteflip pass it reads is on by default.
+    "pos-arena-pca": _ARENA + ["--pos-pca", "--pos-arena-arms", "uniform,pca"],
     # Gravity splice donor (core/gravity.py). Only the seven corpus-crossing
     # operators change; read "Gravity splice: ... hits, refits" in a cell's
     # log before trusting a null -- a closed fit gate means prior exponents.
@@ -299,6 +301,7 @@ ARM_BASELINES: dict[str, str] = {
     "pos-arena-centroid-j90": "pos-arena-uniform",
     "pos-arena-harmonic": "pos-arena-uniform",
     "pos-arena-kadane": "pos-arena-uniform",
+    "pos-arena-pca": "pos-arena-uniform",
     "splice-gravity": "baseline",
     "elo-op-minimax": "elo",
     "wall-order": "baseline",

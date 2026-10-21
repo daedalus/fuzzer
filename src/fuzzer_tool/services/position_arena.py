@@ -65,6 +65,12 @@ Arms::
                  from gain rounds. Tracker-style like effector, but also fed
                  every settled round (opt-in, --pos-finch; see
                  core/schedulers/pos_finch.py)
+    pca          PositionPCAScheduler, bytes grouped by which edges their byteflip
+                 moved (PCA, clutter component dropped), a group picked by gain
+                 rate. Tracker-style like finch: joins once a drained effector
+                 map produced groups, also fed every settled round (opt-in,
+                 --pos-pca, NOT implied by --position-arena; see
+                 core/schedulers/pos_pca.py)
     token        PositionTokenScheduler, occurrences of dictionary tokens
                  in the seed. Tracker-style: joins while the dictionary is
                  non-empty (opt-in, --pos-token; see
@@ -162,6 +168,7 @@ POSITION_STRATEGY_NAMES = (
     "boundary",
     "effector",
     "finch",
+    "pca",
     "token",
     "chunk",
     "changed",
@@ -224,6 +231,7 @@ class PositionArena:
         centroid: PositionScheduler | None = None,
         consolidated: PositionScheduler | None = None,
         finch: PositionScheduler | None = None,
+        pca: PositionScheduler | None = None,
         good_turing: PositionScheduler | None = None,
         saliency: PositionScheduler | None = None,
         harmonic: PositionScheduler | None = None,
@@ -250,10 +258,11 @@ class PositionArena:
         self._boundary = boundary if self.allows("boundary") else None
         # Passive arms gated on their own active(): wired in _add_trackers.
         self._gated: tuple[PositionScheduler, ...] = tuple(
-            a for a in (effector, finch, token, chunk) if a is not None and self.allows(a.name)
+            a for a in (effector, finch, pca, token, chunk) if a is not None and self.allows(a.name)
         )
         # Gated arms that learn from outcomes: fed every settled round too.
         self._finch = finch if self.allows("finch") else None
+        self._pca = pca if self.allows("pca") else None
         self._changed = changed if self.allows("changed") else None
         self._rare_mask = rare_mask if self.allows("rare_mask") else None
         self._centroid = centroid if self.allows("centroid") else None
@@ -348,7 +357,7 @@ class PositionArena:
         for name, fn, gate in specs:
             if self.allows(name):
                 self._arms[name] = (CallablePosition(name, fn), gate)
-        # effector / finch / token / chunk: each knows when it has data.
+        # effector / finch / pca / token / chunk: each knows when it has data.
         for arm in self._gated:
             self._arms[arm.name] = (arm, arm.active)
 
@@ -420,6 +429,8 @@ class PositionArena:
             extra.record(data, offsets, outcome, weight)
         if self._finch is not None:
             self._finch.record(data, offsets, outcome, weight)
+        if self._pca is not None:
+            self._pca.record(data, offsets, outcome, weight)
 
         served = list(dict.fromkeys(self._used))
         pool = self._seen_pool

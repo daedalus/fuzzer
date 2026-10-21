@@ -91,6 +91,9 @@ _EXCLUDED_OPT_IN = frozenset(
         # stays out until it wins its own A/B (docs/TODO.md), same criterion as
         # seed_newest_scheduler above.
         "pos_kadane",
+        # Unmeasured: the PCA byte-group position arm (core/schedulers/pos_pca.py),
+        # same criterion as pos_kadane above.
+        "pos_pca",
         # Changes maintenance-tick cadence (crash/sanitizer replays and
         # gc.collect move off i % 500 onto the stats-interval cadence),
         # not a fuzzing strategy. --hail-mary force-enabling it would

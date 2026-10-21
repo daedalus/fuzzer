@@ -25,6 +25,7 @@ from functools import partial
 import numpy as np
 
 from fuzzer_tool.core.auto_dict import NO_HASH, harvest_tokens
+from fuzzer_tool.core.byte_pca import MAX_ROWS, ByteGroups, byte_groups, sketch_row
 from fuzzer_tool.core.checksum_sites import hint_operands
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cond_stmt import CondStmt
@@ -359,6 +360,9 @@ AUTO_DICT_CAP = 500
 # Finished effector maps kept for the position arena's ``effector`` arm
 # (core/schedulers/pos_effector.py), as sorted LIVE offsets per seed key.
 MAX_EFF_SEEDS = 256
+# In-flight seeds that sketch their byteflip traces for the PCA arm: each holds
+# up to MAX_ROWS x SKETCH_COLS int16 (1 MiB), so the cap bounds the transient.
+MAX_PCA_CAPTURES = 8
 
 
 class DeterministicEffectorMap:
@@ -381,10 +385,12 @@ class DeterministicEffectorMap:
     rather than keeping it as evidence.
     """
 
-    __slots__ = ("eff", "hashes", "pending", "mags", "base_count")
+    __slots__ = ("eff", "hashes", "pending", "mags", "base_count", "rows")
 
-    def __init__(self, length: int):
+    def __init__(self, length: int, capture: bool = False):
         self.eff = bytearray(length)
+        # (byte idx, sketched trace) per LIVE flip, for the PCA arm; None = off.
+        self.rows: list[tuple[int, np.ndarray]] | None = [] if capture else None
         # Edges the flip moved per byte (0 = inert/unmeasured), saturating at
         # the uint16 ceiling: the quantitative half of the map (Finch arm).
         self.mags = array("H", bytes(2 * length))
@@ -1507,6 +1513,10 @@ class OperatorEngine:
         # Same seeds, with the per-byte flip magnitudes: (offsets, magnitudes)
         # of the bytes that moved the trace, for the position arena's Finch arm.
         self._det_heat: LRUCache = LRUCache(MAX_EFF_SEEDS)
+        # PCA byte groups of the same drained seeds (core/byte_pca.py), for the
+        # position arena's pca arm; capture is off until the arm asks for it.
+        self._det_groups: LRUCache = LRUCache(MAX_EFF_SEEDS)
+        self._pca_capture = False
         # Cache backing the `ctx` property below: refreshed once per
         # mutate() round rather than rebuilt on every ctx access. See
         # `ctx`'s docstring for why (measured ~19% round-latency cost from
@@ -6323,7 +6333,7 @@ class OperatorEngine:
         """
         q = self._det_queues.get(seed_key)
         if q is None:
-            effector = DeterministicEffectorMap(len(data))
+            effector = DeterministicEffectorMap(len(data), capture=self._may_capture())
             self._det_eff[seed_key] = effector
             meta = self.f.seed_meta.get(data)
             fuzz_count = meta.get("fuzz_count", 0) if meta else 0
@@ -6338,6 +6348,7 @@ class OperatorEngine:
             done = self._det_eff.pop(seed_key, None)
             if done is not None:
                 self._keep_effector(seed_key, done.eff, done.mags)
+                self._keep_groups(seed_key, done.rows)
                 self._learn_auto_tokens(data, done.hashes)
             return None
         effector = self._det_eff.get(seed_key)
@@ -6362,6 +6373,41 @@ class OperatorEngine:
                 array("I", hot.astype(np.uint32).tobytes()),
                 array("H", m[hot].tobytes()),
             )
+
+    def enable_pca_capture(self) -> None:
+        """Sketch byteflip traces from now on (the pca position arm needs them)."""
+        self._pca_capture = True
+
+    def _may_capture(self) -> bool:
+        if not self._pca_capture:
+            return False
+        live = sum(1 for m in self._det_eff.values() if m.rows is not None)
+        return live < MAX_PCA_CAPTURES
+
+    def wants_det_edges(self, seed_key: str) -> bool:
+        """Whether the pending byteflip of *seed_key* still needs its edge ids."""
+        effector = self._det_eff.get(seed_key)
+        return effector is not None and effector.rows is not None and len(effector.rows) < MAX_ROWS
+
+    def _keep_groups(self, seed_key: str, rows: list[tuple[int, np.ndarray]] | None) -> None:
+        """PCA-group a drained map's sketched rows and store them under *seed_key*."""
+        if not rows:
+            return
+        rows = sorted(rows, key=lambda r: r[0])
+        offsets = np.fromiter((r[0] for r in rows), dtype=np.int64, count=len(rows))
+        groups = byte_groups(offsets, np.stack([r[1] for r in rows]))
+        if groups is not None:
+            self._det_groups[seed_key] = groups
+
+    def effector_groups(self, data: bytes) -> ByteGroups | None:
+        """PCA byte groups of *data*, or None before its map drains (or no groups)."""
+        if not self._det_groups:
+            return None
+        return self._det_groups.get(self.f._seed_key(data))
+
+    def has_effector_groups(self) -> bool:
+        """Whether any seed has PCA groups (the pca arm's arena gate)."""
+        return bool(self._det_groups)
 
     def _learn_auto_tokens(self, data: bytes, hashes: array) -> None:
         """Add the drained map's atomic tokens to the dictionary, capped."""
@@ -6426,7 +6472,11 @@ class OperatorEngine:
         return max(1, abs(edge_count - effector.base_count))
 
     def note_deterministic_result(
-        self, changed: bool, path_hash: int = NO_HASH, magnitude: int | None = None
+        self,
+        changed: bool,
+        path_hash: int = NO_HASH,
+        magnitude: int | None = None,
+        edge_ids: np.ndarray | None = None,
     ) -> None:
         """Record whether the pending byteflip mutant changed the trace.
 
@@ -6444,6 +6494,8 @@ class OperatorEngine:
         *path_hash* is the changed trace's hash, kept for the auto-dictionary.
         *magnitude* is how many edges the flip moved (see ``det_magnitude``);
         a changed byte without one counts 1, and is saturated at uint16.
+        *edge_ids* is the changed trace itself, sketched for the PCA arm when
+        this seed's map captures rows.
         """
         pending = self._det_pending
         self._det_pending = None
@@ -6458,6 +6510,8 @@ class OperatorEngine:
             effector.hashes[idx] = path_hash
             mag = 1 if magnitude is None else int(magnitude)
             effector.mags[idx] = min(max(mag, 1), 0xFFFF)
+            if edge_ids is not None and effector.rows is not None:
+                effector.rows.append((idx, sketch_row(edge_ids)))
 
     def maybe_deterministic_mutation(self, data: bytes) -> bytes | None:
         """Return the next deterministic-stage mutant for *data*, or None.

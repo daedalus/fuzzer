@@ -811,7 +811,7 @@ def _active_position_schedulers(f) -> list[str]:
         names.append("levy")
     if getattr(f, "_pos_boundary", None) is not None:
         names.append("boundary")
-    for arm in ("effector", "finch", "token", "chunk"):
+    for arm in ("effector", "finch", "pca", "token", "chunk"):
         sched = getattr(f, f"_pos_{arm}", None)
         if sched is not None and sched.active():
             names.append(arm)
@@ -1891,6 +1891,10 @@ class Fuzzer:
         frontier_bin=None,
         # Share of picks the frontier arm serves (--frontier-p). Appended: positional signature.
         frontier_p=DEFAULT_P_FRONTIER,
+        # Position-arena PCA arm (core/schedulers/pos_pca.py): opt-in, not implied
+        # by position_arena or --hail-mary; needs --deterministic. Appended:
+        # positional signature.
+        pos_pca=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3480,9 +3484,14 @@ class Fuzzer:
             "rare_mask": pos_rare_mask,
             "centroid": pos_centroid,
             "finch": pos_finch,
+            "pca": pos_pca,
         }
+        # Unmeasured arms are built by their own flag only, never by the arena.
+        opt_in_only = frozenset({"pca"})
         self._build_new_pos_arms(
-            frozenset(n for n, on in flags.items() if on or position_arena),
+            frozenset(
+                n for n, on in flags.items() if on or (position_arena and n not in opt_in_only)
+            ),
             asked=frozenset(n for n, on in flags.items() if on),
         )
         self._use_position_arena = position_arena
@@ -3519,6 +3528,7 @@ class Fuzzer:
                 harmonic=self._pos_harmonic,
                 kadane=self._pos_kadane,
                 finch=self._pos_finch,
+                pca=self._pos_pca,
                 cmplog=self._pos_cmplog,
                 lineage=self._pos_lineage,
                 arms=pos_arena_arms,
@@ -6831,7 +6841,7 @@ class Fuzzer:
         }
 
     def _build_new_pos_arms(self, enabled: frozenset[str], asked: frozenset[str]) -> None:
-        """Construct the effector/finch/token/chunk/changed/rare_mask position arms.
+        """Construct the effector/finch/pca/token/chunk/changed/rare_mask position arms.
 
         *enabled*: arms to build (their flag or ``--position-arena``); *asked*:
         arms whose own flag is on (only those warn about a missing
@@ -6844,13 +6854,14 @@ class Fuzzer:
         from fuzzer_tool.core.schedulers.pos_chunk import PositionChunkScheduler
         from fuzzer_tool.core.schedulers.pos_effector import PositionEffectorScheduler
         from fuzzer_tool.core.schedulers.pos_finch import PositionFinchScheduler
+        from fuzzer_tool.core.schedulers.pos_pca import PositionPCAScheduler
         from fuzzer_tool.core.schedulers.pos_rare_mask import PositionRareMaskScheduler
         from fuzzer_tool.core.schedulers.pos_token import PositionTokenScheduler
 
         ops = self._operators
         tracker = self._edge_tracker
         self._pos_effector = self._pos_token = self._pos_chunk = None
-        self._pos_changed = self._pos_rare_mask = self._pos_finch = None
+        self._pos_changed = self._pos_rare_mask = self._pos_finch = self._pos_pca = None
         self._pos_centroid = self._pos_clusters = None
 
         # Byteflip-LIVE bytes from drained deterministic stages.
@@ -6873,6 +6884,20 @@ class Fuzzer:
             log.info("Position finch scheduling enabled")
             if "finch" in asked and not getattr(self, "_skip_detector", None):
                 log.warning("--pos-finch needs --deterministic: the arm stays out of the pool")
+
+        # PCA behaviour groups of the byteflip traces (core/byte_pca.py). Opt-in
+        # only: the engine sketches each LIVE flip's trace once this is on.
+        if "pca" in enabled:
+            self._pos_pca = PositionPCAScheduler(
+                self._rng,
+                groups_of=ops.effector_groups,
+                ready=ops.has_effector_groups,
+                key_of=self._seed_key,
+            )
+            ops.enable_pca_capture()
+            log.info("Position pca scheduling enabled")
+            if "pca" in asked and not getattr(self, "_skip_detector", None):
+                log.warning("--pos-pca needs --deterministic: the arm stays out of the pool")
 
         # Dictionary-token occurrences; the list is re-read (it is replaced on prune).
         if "token" in enabled:
@@ -6994,7 +7019,10 @@ class Fuzzer:
         # the method leaves every live byte at magnitude 1.
         count = getattr(self.shm_cov, "active_edge_count", None)
         magnitude = engine.det_magnitude(seed_key, changed, count() if count else 0)
-        engine.note_deterministic_result(changed, current, magnitude)
+        edge_ids = None
+        if changed and engine.wants_det_edges(seed_key):
+            edge_ids = self.shm_cov.get_edge_arrays()[0]
+        engine.note_deterministic_result(changed, current, magnitude, edge_ids)
 
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.
