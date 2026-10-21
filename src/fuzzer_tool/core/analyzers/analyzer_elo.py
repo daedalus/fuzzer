@@ -1244,7 +1244,7 @@ class BayesianEloTracker(RoundRecorderMixin):
 
         # Favourite-won flags, one per rated opponent; extended once below.
         fav: list[bool] = []
-        mu_a = sig_a = None
+        mu_a = sig_a = mu_a0 = None
         for b in opponents:
             if b == strategy_a:
                 continue
@@ -1257,9 +1257,12 @@ class BayesianEloTracker(RoundRecorderMixin):
                 mu_a = mu.setdefault(strategy_a, init_mu)
                 sig_a = sig.setdefault(strategy_a, self.initial_sigma**2)
                 count.setdefault(strategy_a, 0)
+                # Favourites are judged on the pre-batch rating, so the
+                # flags do not depend on opponent order.
+                mu_a0 = mu_a
 
             mu_b = mu.get(b, init_mu)
-            fav.append((s_ab > 0.5) == (mu_a >= mu_b))
+            fav.append((s_ab > 0.5) == (mu_a0 >= mu_b))
 
             var_a = sig_a / (sig_a + beta_sq)
             mu_a = mu_a + var_a * k * (s_ab - expected(mu_a, mu_b))

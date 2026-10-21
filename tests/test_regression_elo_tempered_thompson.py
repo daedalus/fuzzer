@@ -112,6 +112,18 @@ def test_regression_batch_flag_uses_prematch_ratings():
     assert list(t._strategy_best_win_rate[OP]) == [0.0]
 
 
+def test_regression_batch_flags_ignore_opponent_order():
+    """Adversarial: a win over X lifts DOG past Y; Y is still an upset."""
+    t = _rated_fav(bar=0.0)
+    for name in ("x", "y"):
+        t._strategy_mu[name] = DOG_MU + 0.5
+        t._strategy_trials[name] = 4
+        t._strategy_score_sum[name] = 0.0
+    t.record_strategy_matches(DOG, ["x", "y"], 1.0)
+    assert t._strategy_mu[DOG] > DOG_MU + 0.5  # the crossing happened
+    assert list(t._strategy_best_win_rate[OP]) == [0.0, 0.0]
+
+
 def test_adversarial_favourite_always_loses_caps_scale():
     """All upsets: scale 2, never beyond."""
     t = _tracker([0.0] * 50)

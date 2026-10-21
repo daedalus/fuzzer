@@ -5802,9 +5802,9 @@ class Fuzzer:
             self._dedup_hits += 1
             mutated = self.mutate(data)
         self._dedup_gaveup += 1
-        return self._avoid_pruned(mutated)
+        return self._avoid_pruned(mutated, data)
 
-    def _avoid_pruned(self, mutated: bytes) -> bytes:
+    def _avoid_pruned(self, mutated: bytes, data: bytes) -> bytes:
         """Replace a give-up mutant that is itself a pruned seed.
 
         The give-up path hands its last mutant to the target anyway,
@@ -5823,7 +5823,7 @@ class Fuzzer:
         h = self._seed_key(mutated)
         if h in self._cuckoo_recovered or not self.cuckoo_seed_filter.contains(h):
             return mutated
-        return self._operators.force_change(mutated)
+        return self._operators.force_change(mutated, data)
 
     def _is_repeat(self, mutated, data: bytes) -> bool:
         """True when executing *mutated* would re-run a known input."""

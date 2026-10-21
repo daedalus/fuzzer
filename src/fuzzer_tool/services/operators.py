@@ -5650,19 +5650,26 @@ class OperatorEngine:
     def build_dispatch(self):
         return REGISTRY.dispatch(self)
 
-    def force_change(self, mutated: bytes) -> bytes:
+    def force_change(self, mutated: bytes, data: bytes) -> bytes:
         """Return *mutated* with one bit flipped.
 
         The canonical bit flip always changes a non-empty buffer, so it
         moves a mutant off a key it must not execute (a pruned seed).
         It goes through the operator table so the round's accounting
-        names the operator that actually produced the change.
+        names the operator that actually produced the change, and the
+        distance to parent *data* is re-measured for the seed metadata.
         """
         if not mutated:
             return mutated
+        from fuzzer_tool.core.similarity import hamming_distance
+
         buf = bytearray(mutated)
         self._apply_op_once("bit_flip", buf, mutated, self.f._track_op_effect)
-        return bytes(buf)
+        result = bytes(buf)
+        self.f._last_hamming_distance = (
+            hamming_distance(data, result) if len(data) == len(result) else -1
+        )
+        return result
 
     def havoc_mutate(self, buf: bytearray) -> bytearray:
         """Apply 2-8 random mutations (scaled up during stall recovery).
