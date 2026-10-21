@@ -15,11 +15,11 @@
  * tools/fxt_gates_ref.py is the independent Python reference (gate names and sections).
  *
  * Classes (what a solver needs, not what the fuzzer does):
- *   BIT    GF(2)-affine            G0 G2(carry) G19 G25 G42(crc)
- *   RING   integer/modular maps    G1 G3 G22-G24 G26-G30 G36 G37 G38 G40
- *   MONO   monotone, bisectable    G31 G32 G34 G35 G39
- *   RANK   structure + rank        G4 G6-G18 G20 G21 G43
- *   HASH   search only             G41 G44 (algebraic predicates, no gradient)
+ *   BIT    GF(2)-affine            G0 G2(carry) G25 G43
+ *   RING   integer/modular maps    G1 G3 G22-G24 G26-G30 G37
+ *   MONO   monotone, bisectable    G31-G34 G35(decreasing) G36 G38(per byte)
+ *   RANK   structure + rank        G4-G19 G21
+ *   HASH   search only             G20 G39-G42 G44 (no gradient)
  *
  * Build (coverage build mirrors targets/gf2_gates.c; -O2, clang):
  *   clang -O2 -g -fsanitize-coverage=trace-pc-guard \
@@ -608,12 +608,17 @@ static int g_euclid_steps(const unsigned char *p, u64 *op) {
     return 1;
 }
 
-/* Partial sum of the Golay-Rudin-Shapiro sequence over k < n. */
+/* RS_PREFIX[n]: partial sum of the Golay-Rudin-Shapiro sequence over k < n, n < 2^16.
+ * Built once at load: the per-exec loop was 29 of 31.5 us per input. */
+static i32 RS_PREFIX[1u << 16];
+
+__attribute__((constructor)) static void rs_prefix_init(void) {
+    for (u32 k = 0; k + 1 < (1u << 16); k++)
+        RS_PREFIX[k + 1] = RS_PREFIX[k] + ((__builtin_popcount(k & (k >> 1)) & 1) ? -1 : 1);
+}
+
 static int g_rudin_shapiro(const unsigned char *p, u64 *op) {
-    u32 n = le16(p);
-    i32 s = 0;
-    for (u32 k = 0; k < n; k++) s += (__builtin_popcount(k & (k >> 1)) & 1) ? -1 : 1;
-    *op = (u32)s;
+    *op = (u32)RS_PREFIX[le16(p)];
     return 1;
 }
 

@@ -169,6 +169,25 @@ class TestRankBijection:
             assert _c_operand(oracle, _put(w, g, field), g) == i
             assert ref.gate(g, field) == (True, i)
 
+    def test_regression_rudin_shapiro_table(self, oracle):
+        # The O(n) loop was 93% of exec time; the table must keep every 16-bit partial sum.
+        g, w = GATE["rudin_shapiro"], oracle.witness()
+        for n in range(1 << 16):
+            field = n.to_bytes(2, "little")
+            assert _c_operand(oracle, _put(w, g, field), g) == ref.gate(g, field)[1], n
+
+    @pytest.mark.parametrize("n", [0, 1, 2, 3, 4, 0x7FFF, 0xFFFF])
+    def test_rudin_shapiro_edges(self, oracle, n):
+        # Direct definition, independent of both tables; negative sums wrap mod 2^32.
+        want = sum(1 - 2 * ((k & (k >> 1)).bit_count() & 1) for k in range(n)) & ref.M32
+        field = n.to_bytes(2, "little")
+        assert (
+            _c_operand(
+                oracle, _put(oracle.witness(), GATE["rudin_shapiro"], field), GATE["rudin_shapiro"]
+            )
+            == want
+        )
+
     def test_unbalanced_dyck_is_invalid(self, oracle):
         # Falsification: ")(" prefix and an unclosed word both fail the precondition.
         g, w = GATE["dyck_lex"], oracle.witness()
