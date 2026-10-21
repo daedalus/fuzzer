@@ -5802,20 +5802,19 @@ class Fuzzer:
             self._dedup_hits += 1
             mutated = self.mutate(data)
         self._dedup_gaveup += 1
-        return self._avoid_pruned(mutated, data)
+        return self._avoid_pruned(mutated)
 
-    def _avoid_pruned(self, mutated: bytes, data: bytes) -> bytes:
+    def _avoid_pruned(self, mutated: bytes) -> bytes:
         """Replace a give-up mutant that is itself a pruned seed.
 
         The give-up path hands its last mutant to the target anyway,
         but the cuckoo filter keeps pruned seeds out of the exec
-        stream and that promise outranks the bound: a parent that is a
-        pruned seed, plus a mutation that changed nothing, leave the
-        parent itself as the mutant, and executing it re-discovers
-        exactly what the filter tracks.
+        stream and that promise outranks the bound: executing a pruned
+        seed (the parent itself after a no-op round, or any other
+        pruned key) re-discovers exactly what the filter tracks.
 
         A recovered seed is exempt (it is live again, so its own key
-        is not a pruned seed any more) and so is every parent the
+        is not a pruned seed any more) and so is every mutant the
         filter does not hold: there the give-up is just a wasted exec,
         which is the bound the re-roll budget documents.
         """
@@ -5824,7 +5823,7 @@ class Fuzzer:
         h = self._seed_key(mutated)
         if h in self._cuckoo_recovered or not self.cuckoo_seed_filter.contains(h):
             return mutated
-        return self._operators.force_change(mutated, data)
+        return self._operators.force_change(mutated)
 
     def _is_repeat(self, mutated, data: bytes) -> bool:
         """True when executing *mutated* would re-run a known input."""

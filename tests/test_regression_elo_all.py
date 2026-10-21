@@ -95,6 +95,17 @@ class _StubFuzzer:
     """Minimal fuzzer exposing only the attrs the record/convergence helpers touch."""
 
 
+def _history(f, *names):
+    """Give *names* one played round (mean 0), so they are Elo references.
+
+    record_strategy_matches rates only the arm that played, against
+    opponents with history; a never-played opponent is skipped.
+    """
+    for n in names:
+        f._elo._strategy_trials[n] = 1
+        f._elo._strategy_score_sum[n] = 0.0
+
+
 class TestSeedEloRecordsPoolOnly:
     def _make(self, strategy, pool, used, elo=True):
         f = _StubFuzzer()
@@ -110,9 +121,11 @@ class TestSeedEloRecordsPoolOnly:
         return f
 
     def test_records_only_pool_members(self):
+        # seed_outsider has history but is not in the pool: no reference.
         f = self._make("weighted", ["weighted", "pareto"], {"weighted"})
+        _history(f, "seed_pareto", "seed_outsider")
         Fuzzer._record_seed_strategy_matches(f, 1.0)
-        assert f._elo._strategy_match_count == {"seed_weighted": 1, "seed_pareto": 1}
+        assert f._elo._strategy_match_count == {"seed_weighted": 1}
 
     def test_strategy_outside_pool_records_nothing(self):
         f = self._make("random_stall", ["weighted", "pareto"], {"weighted"})
@@ -129,9 +142,15 @@ class TestSeedEloRecordsPoolOnly:
         Fuzzer._record_seed_strategy_matches(f, 1.0)
         assert f._elo is None
 
+    def _play_both(self, f):
+        _history(f, "seed_pareto")
+        Fuzzer._record_seed_strategy_matches(f, 1.0)
+        f._seed_strategy = "pareto"
+        Fuzzer._record_seed_strategy_matches(f, 1.0)
+
     def test_convergence_rows_only_used(self):
         f = self._make("weighted", ["weighted", "pareto"], {"weighted", "pareto"})
-        Fuzzer._record_seed_strategy_matches(f, 1.0)
+        self._play_both(f)
         rows = Fuzzer._seed_convergence_rows(f)
         assert {r[0] for r in rows} == {"weighted", "pareto"}
         for _name, rating, delta, count in rows:
@@ -140,8 +159,9 @@ class TestSeedEloRecordsPoolOnly:
             assert abs(delta - (rating - f._elo.initial_mu)) < 1e-6
 
     def test_unused_strategy_excluded_from_report(self):
+        # pareto is rated with matches, but not in the used set.
         f = self._make("weighted", ["weighted", "pareto"], {"weighted"})
-        Fuzzer._record_seed_strategy_matches(f, 1.0)
+        self._play_both(f)
         assert [r[0] for r in Fuzzer._seed_convergence_rows(f)] == ["weighted"]
 
 
@@ -181,16 +201,17 @@ class TestOperatorEloRecordsUsedOnly:
 
     def test_records_against_enabled_schedulers_only(self):
         f = self._make("bandit", {"bandit", "mopt"})
+        _history(f, "mopt")
         Fuzzer._record_operator_strategy_matches(f, 1.0)
-        assert f._elo._strategy_match_count == {"bandit": 1, "mopt": 1}
+        assert f._elo._strategy_match_count == {"bandit": 1}
 
     def test_disabled_scheduler_not_an_opponent(self):
         # mopt is enabled by _make (an opponent); exp3 is disabled and must
-        # not appear as an opponent
+        # not be one, even with history: one match, not two.
         f = self._make("bandit", {"bandit"})
+        _history(f, "mopt", "exp3")
         Fuzzer._record_operator_strategy_matches(f, 1.0)
-        assert "exp3" not in f._elo._strategy_match_count
-        assert set(f._elo._strategy_match_count) == {"bandit", "mopt"}
+        assert f._elo._strategy_match_count == {"bandit": 1}
 
     def test_random_stall_records_nothing(self):
         f = self._make("random_stall", set())
@@ -199,6 +220,9 @@ class TestOperatorEloRecordsUsedOnly:
 
     def test_convergence_rows_only_used(self):
         f = self._make("bandit", {"bandit", "mopt"})
+        _history(f, "mopt")
+        Fuzzer._record_operator_strategy_matches(f, 1.0)
+        f._meta_strategy = "mopt"
         Fuzzer._record_operator_strategy_matches(f, 1.0)
         rows = Fuzzer._operator_convergence_rows(f)
         assert {r[0] for r in rows} == {"bandit", "mopt"}
@@ -211,17 +235,20 @@ class TestOperatorEloRecordsUsedOnly:
         # selected as the active scheduler → must not appear in the report
         f = self._make("bandit", {"bandit"})
         f._gp_ucb = True
+        _history(f, "mopt", "gp_ucb")
         Fuzzer._record_operator_strategy_matches(f, 1.0)
         assert [r[0] for r in Fuzzer._operator_convergence_rows(f)] == ["bandit"]
 
     def test_canary_included_even_though_never_selected(self):
         # canary is designed to be selected the least of anyone (see
         # core/schedulers/op_canary.py) -- unlike gp_ucb above, it must still
-        # show up in the report whenever it's enabled and has accrued match
-        # data as an opponent, even though it was never f._meta_strategy.
+        # show up in the report whenever it's enabled and rated, even though
+        # it is not in f._meta_strategy_used.
         f = self._make("bandit", {"bandit"})
         f._use_canary = True
         f._canary = object()
+        _history(f, "bandit")
+        f._elo.record_strategy_matches("canary", ["bandit"], 0.0)
         Fuzzer._record_operator_strategy_matches(f, 1.0)
         assert "canary" not in f._meta_strategy_used
         assert f._elo._strategy_match_count.get("canary", 0) > 0
@@ -234,8 +261,11 @@ class TestOperatorEloRecordsUsedOnly:
         f = self._make("bandit", {"bandit", "mopt"})
         f._use_exp3 = True
         f._exp3 = True
+        _history(f, "mopt", "exp3")
         for _ in range(20):
             Fuzzer._record_operator_strategy_matches(f, 1.0)
+        f._meta_strategy = "mopt"
+        Fuzzer._record_operator_strategy_matches(f, 0.0)
         rows = Fuzzer._operator_convergence_rows(f)
         names = [r[0] for r in rows]
         assert names[0] == "bandit"
@@ -280,13 +310,20 @@ class TestSeedAndOpArenasNeverCrossCompete:
         f._seed_strategy = "weighted"
         f._seed_strategy_pool = ["weighted", "pareto"]
         f._seed_strategies_used = {"weighted", "pareto"}
+        _history(f, "bandit", "mopt", "seed_weighted", "seed_pareto")
         return f
+
+    def _round(self, f):
+        """Every arm plays once: bandit/weighted hit, mopt/pareto miss."""
+        for op, seed, score in (("bandit", "weighted", 1.0), ("mopt", "pareto", 0.0)):
+            f._meta_strategy, f._seed_strategy = op, seed
+            Fuzzer._record_operator_strategy_matches(f, score)
+            Fuzzer._record_seed_strategy_matches(f, score)
 
     def test_no_key_ever_crosses_arenas(self):
         f = self._make()
         for _ in range(5):
-            Fuzzer._record_operator_strategy_matches(f, 1.0)
-            Fuzzer._record_seed_strategy_matches(f, 1.0)
+            self._round(f)
         op_keys = {"bandit", "mopt"}
         seed_keys = {"seed_weighted", "seed_pareto"}
         assert set(f._elo._strategy_match_count) == op_keys | seed_keys
@@ -300,8 +337,7 @@ class TestSeedAndOpArenasNeverCrossCompete:
     def test_report_partitions_both_pools_with_no_overlap(self):
         f = self._make()
         for _ in range(10):
-            Fuzzer._record_operator_strategy_matches(f, 1.0)
-            Fuzzer._record_seed_strategy_matches(f, 1.0)
+            self._round(f)
         ranking = f._elo.get_strategy_ranking()
         op_strategies = [p for p in ranking if not p[0].startswith("seed_")]
         seed_strategies = [p for p in ranking if p[0].startswith("seed_")]
@@ -312,10 +348,9 @@ class TestSeedAndOpArenasNeverCrossCompete:
 
     def test_live_status_line_reports_separate_arena_leaders(self):
         f = self._make()
-        f._meta_strategy = "bandit"
         for _ in range(10):
-            Fuzzer._record_operator_strategy_matches(f, 1.0)
-            Fuzzer._record_seed_strategy_matches(f, 1.0)
+            self._round(f)
+        f._meta_strategy, f._seed_strategy = "bandit", "weighted"
         # The two arenas must not be flattened into a single "top" pick, and
         # both leaders are shown under their op_/seed_ display names.
         line = _elo_status_str(f)

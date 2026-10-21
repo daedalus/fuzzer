@@ -86,7 +86,6 @@ docs/sweeps/*.tsv
 # analysis and the learnings doc are the durable record.
 results/
 targets/fuzzgoat_read
-targets/fuzzgoat_read_nosan
 targets/*_noasan
 targets/*_nosan
 docs/handover/handover_misc_port_plan_2026-09-21.md

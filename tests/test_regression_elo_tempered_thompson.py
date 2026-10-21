@@ -89,6 +89,29 @@ def test_strategy_matches_records_per_rated_opponent():
     assert list(t._strategy_best_win_rate[OP]) == [0.0]
 
 
+def _rated_fav(bar: float, dog_mu: float = DOG_MU) -> BayesianEloTracker:
+    """FAV has history with mean score *bar*; DOG plays against it."""
+    t = BayesianEloTracker(rng=RandPool(1))
+    t._strategy_mu.update({FAV: FAV_MU, DOG: dog_mu})
+    t._strategy_trials[FAV] = 4
+    t._strategy_score_sum[FAV] = 4 * bar
+    return t
+
+
+def test_regression_batch_records_favourite_win_on_loss():
+    """An underdog loss is a favourite win and must be recorded."""
+    t = _rated_fav(bar=1.0)
+    t.record_strategy_matches(DOG, [FAV], 0.0)
+    assert list(t._strategy_best_win_rate[OP]) == [1.0]
+
+
+def test_regression_batch_flag_uses_prematch_ratings():
+    """Adversarial: a win that lifts DOG past FAV is still an upset."""
+    t = _rated_fav(bar=0.0, dog_mu=FAV_MU - 1e-6)
+    t.record_strategy_matches(DOG, [FAV], 1.0)
+    assert list(t._strategy_best_win_rate[OP]) == [0.0]
+
+
 def test_adversarial_favourite_always_loses_caps_scale():
     """All upsets: scale 2, never beyond."""
     t = _tracker([0.0] * 50)

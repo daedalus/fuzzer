@@ -5650,20 +5650,18 @@ class OperatorEngine:
     def build_dispatch(self):
         return REGISTRY.dispatch(self)
 
-    def force_change(self, mutated: bytes, data: bytes) -> bytes:
-        """Return a mutant that differs from its parent *data*.
+    def force_change(self, mutated: bytes) -> bytes:
+        """Return *mutated* with one bit flipped.
 
-        A round whose operators all declined leaves the buffer
-        untouched, and a mutant equal to the parent re-runs an input
-        the target has already seen. The canonical bit flip always
-        changes a non-empty buffer, so it is the fallback. It goes
-        through the operator table so the round's accounting names the
-        operator that actually produced the change.
+        The canonical bit flip always changes a non-empty buffer, so it
+        moves a mutant off a key it must not execute (a pruned seed).
+        It goes through the operator table so the round's accounting
+        names the operator that actually produced the change.
         """
-        if mutated != data or not data:
+        if not mutated:
             return mutated
-        buf = bytearray(data)
-        self._apply_op_once("bit_flip", buf, data, self.f._track_op_effect)
+        buf = bytearray(mutated)
+        self._apply_op_once("bit_flip", buf, mutated, self.f._track_op_effect)
         return bytes(buf)
 
     def havoc_mutate(self, buf: bytearray) -> bytearray:

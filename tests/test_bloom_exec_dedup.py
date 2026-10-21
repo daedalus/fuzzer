@@ -163,6 +163,7 @@ class _StubFuzzer:
 
     _dedup_mutate = Fuzzer._dedup_mutate
     _is_repeat = Fuzzer._is_repeat
+    _avoid_pruned = Fuzzer._avoid_pruned
 
 
 class TestDedupMutate:

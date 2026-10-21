@@ -41,9 +41,7 @@ class _Stub:
         # test_regression_cuckoo_seed_filter.py; the stub only needs a
         # mutant that differs from its parent.
         self._operators = SimpleNamespace(
-            force_change=lambda mutated, data: (
-                mutated if mutated != data or not data else bytes([data[0] ^ 0x01]) + data[1:]
-            )
+            force_change=lambda mutated: bytes([mutated[0] ^ 0x01]) + mutated[1:]
         )
         if pruned:
             self.cuckoo_seed_filter = CuckooFilter(capacity=1000)

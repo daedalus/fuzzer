@@ -152,6 +152,31 @@ def test_giveup_parent_unchanged_when_not_pruned(corpus_dir: Path) -> None:
     assert f._dedup_mutate(seed) == seed
 
 
+def test_regression_giveup_pruned_mutant_not_executed(corpus_dir: Path) -> None:
+    """Adversarial: the give-up mutant differs from its parent but is a pruned seed.
+
+    Checking only "mutant == parent" let it through verbatim.
+    """
+    seed, pruned = b"live_parent", b"pruned_other"
+    _write_seed(corpus_dir, seed)
+
+    f = Fuzzer(
+        target="nonexistent",
+        corpus_dir=str(corpus_dir),
+        crashes_dir=str(corpus_dir / "crashes"),
+        cuckoo_seed_filter=True,
+    )
+    f.cuckoo_seed_filter.add(f._seed_key(pruned))
+    # Real round (it sets the per-round state), then hand back the pruned key.
+    real = f._operators.mutate
+    f._operators.mutate = lambda data: (real(data), pruned)[1]
+
+    result = f._dedup_mutate(seed)
+
+    assert result != pruned
+    assert not f.cuckoo_seed_filter.contains(f._seed_key(result))
+
+
 def test_non_pruned_seed_mutates_normally(corpus_dir: Path) -> None:
     """Seeds not in the cuckoo filter should mutate normally."""
     seed = b"active_seed"
