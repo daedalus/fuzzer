@@ -1104,9 +1104,17 @@ class TestSelect:
         assert 0 <= arena.select(SEED, 10) < 10
 
 
+_POOL = ("uniform", "te", "phase", "sensitivity")
+
+
 class TestSettle:
     def _played(self, picked="sensitivity", **kw):
         f, arena = _arena(**kw)
+        # One played round (mean 0) each: only arms with history are
+        # Elo references; a never-played opponent is skipped.
+        for name in _POOL:
+            f._elo._strategy_trials[f"pos_{name}"] = 1
+            f._elo._strategy_score_sum[f"pos_{name}"] = 0.0
         _force(f, picked)
         arena.select(SEED, len(SEED))
         return f, arena
@@ -1114,15 +1122,15 @@ class TestSettle:
     def test_picked_arm_plays_every_unpicked_member(self):
         f, arena = self._played()
         arena.settle(SEED, [], Outcome.MISS, weight=0.0, score=0.0)
-        counts = f._elo._strategy_match_count
-        assert counts["pos_sensitivity"] == 3  # vs uniform, te, phase
-        assert counts["pos_uniform"] == counts["pos_te"] == counts["pos_phase"] == 1
+        # vs uniform, te, phase; idle arms are never rated or counted.
+        assert f._elo._strategy_match_count == {"pos_sensitivity": 3}
 
     def test_score_orients_the_match(self):
         f, arena = self._played()
         arena.settle(SEED, [], Outcome.GAIN, weight=1.0, score=1.0)
         mu = f._elo._strategy_mu
-        assert mu["pos_sensitivity"] > mu["pos_uniform"]
+        assert mu["pos_sensitivity"] > f._elo.initial_mu
+        assert "pos_uniform" not in mu
 
     def test_round_state_resets_after_settle(self):
         f, arena = self._played()
@@ -1146,9 +1154,8 @@ class TestSettle:
         _force(f, "te")
         arena.select(SEED, len(SEED))
         arena.settle(SEED, [], Outcome.GAIN, weight=1.0, score=1.0)
-        counts = f._elo._strategy_match_count
-        assert counts["pos_te"] == 3
-        assert counts["pos_sensitivity"] == 1  # as te's opponent only
+        # sensitivity served only the discarded mutant: no match of its own.
+        assert f._elo._strategy_match_count == {"pos_te": 3}
 
     def test_mutate_starts_a_position_round(self, monkeypatch):
         # Wiring: OperatorEngine.mutate must reset the arena before anything

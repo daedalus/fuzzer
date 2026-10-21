@@ -4640,9 +4640,10 @@ __AFL_NO_COV static void __afl_sym_emit(void) {
     *p++ = ' ';
 
     /* <pc-hex>:<text> entries joined by '@'; text is '-' without a runtime.
-     * Callers' saved PCs point after the call, so symbolize pc-1 for them
-     * (a noreturn call at the end of a function would otherwise land in
-     * the next one). */
+     * The runtime symbolizes pc-1 (it assumes a return address), which is
+     * right for callers' saved PCs but lands frame 0, the exact faulting
+     * PC, on the previous instruction: under clang that is the ASAN check,
+     * line 0. So frame 0 passes pc+1 and callers pass pc as-is. */
     int nf = __afl_sym_pend.nframes ? __afl_sym_pend.nframes : 1;
     for (int i = 0; i < nf; i++) {
         uintptr_t pc = __afl_sym_pend.nframes ? __afl_sym_pend.frames[i] : __afl_sym_pend.pc;
@@ -4651,7 +4652,7 @@ __AFL_NO_COV static void __afl_sym_emit(void) {
         if (__sanitizer_symbolize_pc && pc) {
             __afl_sym_busy = 1;
             text[0] = 0;
-            __sanitizer_symbolize_pc((void *)(i ? pc - 1 : pc), "%f|%s|%l|%m|%o",
+            __sanitizer_symbolize_pc((void *)(i ? pc : pc + 1), "%f|%s|%l|%m|%o",
                                      text, sizeof(text));
             __afl_sym_busy = 0;
             text[sizeof(text) - 1] = 0;

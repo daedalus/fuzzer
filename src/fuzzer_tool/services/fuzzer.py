@@ -5809,13 +5809,12 @@ class Fuzzer:
 
         The give-up path hands its last mutant to the target anyway,
         but the cuckoo filter keeps pruned seeds out of the exec
-        stream and that promise outranks the bound: a parent that is a
-        pruned seed, plus a mutation that changed nothing, leave the
-        parent itself as the mutant, and executing it re-discovers
-        exactly what the filter tracks.
+        stream and that promise outranks the bound: executing a pruned
+        seed (the parent itself after a no-op round, or any other
+        pruned key) re-discovers exactly what the filter tracks.
 
         A recovered seed is exempt (it is live again, so its own key
-        is not a pruned seed any more) and so is every parent the
+        is not a pruned seed any more) and so is every mutant the
         filter does not hold: there the give-up is just a wasted exec,
         which is the bound the re-roll budget documents.
         """

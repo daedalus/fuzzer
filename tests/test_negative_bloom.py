@@ -3,7 +3,6 @@
 import argparse
 import gzip
 import pickle
-import random
 
 import pytest
 
@@ -16,12 +15,13 @@ from fuzzer_tool.core.negative_bloom import (
     load,
     save,
 )
+from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.core.state_store import UnsafeStateError
 from fuzzer_tool.services.fuzzer import Fuzzer
 
 
 def _seeds(n, seed=7):
-    rng = random.Random(seed)
+    rng = RandPool(seed=seed)
     return [rng.randbytes(16) + i.to_bytes(4, "big") for i in range(n)]
 
 

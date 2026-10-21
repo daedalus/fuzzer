@@ -738,10 +738,9 @@ class EloTracker(RoundRecorderMixin):
             if s_ab is None:
                 continue
 
-            count.setdefault(strategy_a, 0)
-
             if ra is None:
                 ra = ratings.get(strategy_a, self.default_rating)
+                count.setdefault(strategy_a, 0)
             ra += k * (s_ab - self._expected_score(ra, ratings.get(b, self.default_rating)))
             count[strategy_a] += 1
             if s_ab > 0.5:
@@ -1245,35 +1244,34 @@ class BayesianEloTracker(RoundRecorderMixin):
 
         # Favourite-won flags, one per rated opponent; extended once below.
         fav: list[bool] = []
-        mu_a = sig_a = None
+        mu_a = sig_a = mu_a0 = None
         for b in opponents:
             if b == strategy_a:
                 continue
 
             s_ab = _vs_baseline(score_a, trials.get(b, 0), sums.get(b, 0.0))
             if s_ab is None:
-                # Opponent has no history to compare with: judge the played
-                # arm against its raw score at the opponent's initial rating.
-                s_ab = score_a
+                continue
 
-            count.setdefault(strategy_a, 0)
-            count.setdefault(b, 0)
             if mu_a is None:
                 mu_a = mu.setdefault(strategy_a, init_mu)
                 sig_a = sig.setdefault(strategy_a, self.initial_sigma**2)
+                count.setdefault(strategy_a, 0)
+                # Favourites are judged on the pre-batch rating, so the
+                # flags do not depend on opponent order.
+                mu_a0 = mu_a
 
-            mu_b = mu.setdefault(b, init_mu)
+            mu_b = mu.get(b, init_mu)
+            fav.append((s_ab > 0.5) == (mu_a0 >= mu_b))
 
             var_a = sig_a / (sig_a + beta_sq)
             mu_a = mu_a + var_a * k * (s_ab - expected(mu_a, mu_b))
             sig_a = sig_a * (1.0 - var_a) + tau_sq
             count[strategy_a] += 1
-            count[b] += 1
             if s_ab > 0.5:
                 self._strategy_win_count[strategy_a] = (
                     self._strategy_win_count.get(strategy_a, 0) + 1
                 )
-                fav.append((s_ab > 0.5) == (mu_a >= mu_b))
 
         if mu_a is not None:
             mu[strategy_a], sig[strategy_a] = mu_a, sig_a

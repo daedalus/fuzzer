@@ -100,12 +100,11 @@ def byte_groups(offsets: np.ndarray, rows: np.ndarray) -> ByteGroups | None:
     # components to preserve grouping resolution. If dropping would leave
     # only 1 component (which can split by at most pole sign, not distinct
     # fields), keep all components instead.
-    if live > DROP_LEADING and live - DROP_LEADING >= 2:
+    if live - DROP_LEADING >= 2:
         keep = slice(DROP_LEADING, min(live, DROP_LEADING + MAX_COMPONENTS))
     else:
         keep = slice(0, live)
 
-    kept = scores[:, keep]
     if live <= DROP_LEADING:
         return None
 

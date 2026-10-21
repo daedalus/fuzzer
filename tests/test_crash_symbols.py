@@ -101,7 +101,7 @@ int main(void){ uint8_t b[1]={0}; return __afl_guarded_call(boom,b,1) == -11 ? 0
 
 
 def _build(tmp_path, *flags):
-    cc = shutil.which("gcc") or shutil.which("clang")
+    cc = shutil.which("clang") or shutil.which("gcc")
     if not cc:
         pytest.skip("no C compiler")
     (tmp_path / "h.c").write_text(_HARNESS)
@@ -128,25 +128,22 @@ def _build(tmp_path, *flags):
     return exe
 
 
-def _asan_runtime() -> str | None:
-    """Path to the ASAN runtime, or None when the compiler cannot name it.
+def _asan_runtime(exe) -> str | None:
+    """Shared ASAN runtime *exe* links, or None when it is static (clang).
 
-    The shim's SIGSEGV handler must run before ASAN's, so the ASAN runtime
-    has to be loaded first; linking it into the executable is not enough
-    because libasan is not first in the initial library list.
+    A shared runtime must come first in the initial library list or ASAN
+    aborts at startup; an inherited LD_PRELOAD pushes it back.
     """
-    cc = shutil.which("gcc") or shutil.which("clang")
-    if not cc:
+    ldd = shutil.which("ldd")
+    if not ldd:
         return None
-    try:
-        out = subprocess.run(
-            [cc, "-fsanitize=address", "-print-file-name=libasan.so"],
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-    except OSError:
-        return None
-    return out if out and Path(out).exists() else None
+    out = subprocess.run([ldd, str(exe)], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        # "libasan.so.8 => /usr/lib/x86_64-linux-gnu/libasan.so.8 (0x...)"
+        name, _, rest = line.partition("=>")
+        if "asan" in name and rest.split():
+            return rest.split()[0]
+    return None
 
 
 def _run(exe, out, **env):
@@ -154,12 +151,13 @@ def _run(exe, out, **env):
     e.pop(cs.ENV_VAR, None)
     if out is not None:
         e[cs.ENV_VAR] = str(out)
-    if "ASAN_OPTIONS" in e:
-        libasan = _asan_runtime()
-        if libasan:
-            # ASAN must be first; prepend to any existing LD_PRELOAD
-            existing = e.get("LD_PRELOAD", "")
-            e["LD_PRELOAD"] = libasan + ((":" + existing) if existing else "")
+
+    # Only the sanitizer runs ask for ASAN; an inherited ASAN_OPTIONS must
+    # not preload it into the no-sanitizer harness.
+    libasan = _asan_runtime(exe) if "ASAN_OPTIONS" in env else None
+    if libasan:
+        existing = e.get("LD_PRELOAD", "")
+        e["LD_PRELOAD"] = libasan + ((":" + existing) if existing else "")
     return subprocess.run([str(exe)], env=e, capture_output=True, text=True)
 
 

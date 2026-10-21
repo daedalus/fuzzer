@@ -294,3 +294,5 @@ reproduces the EBADF by exiting a subprocess child without calling `stop()`.
   The session recipe simply never enabled it — `-c` is `--coverage`, and
   `--cmplog` has no short form. Add `--cmplog` explicitly to the FFmpeg recipe.
 - [ ] **A/B `--op-append`** (2026-10-03) — shipped unmeasured. Needs a linear-instruction target (one record per call/move); compare reject rate (`--reject-code`, Rejection by Operator / Position) and edges with the arm on vs off. No such target exists in `targets/` yet.
+- [x] **Review fixes for 69aa954** (2026-10-21) — Elo batch contract restored (only the played arm is rated; `elo_all`/position-arena tests had stale pairwise expectations), favourite-won flag back to one per rated opponent before the update, `_avoid_pruned` guards any pruned give-up mutant, `lsystem_stochastic` restored (rewrite was 54% slower), shim frame-0 symbolization (`__sanitizer_symbolize_pc` already does pc-1; clang reported line 0).
+- [ ] **Rebuild targets after the `afl_shim.c` symbolization fix** (2026-10-21) — `tools/build_targets.sh` (Hard Rule 56); not built in the review container.
