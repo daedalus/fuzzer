@@ -368,8 +368,15 @@ class InProcessRunner:
         in-process calls: without it the first edge of a run is hashed
         against wherever the previous input stopped, so equal inputs report
         different edge ids. No-op for loader modes and old shim builds.
+
+        Prefers ``__afl_exec_reset``: same run-state clear, no generation
+        bump (``reset_edge_map()`` already did one). Older shims fall back.
         """
-        reset = getattr(self._lib, "__afl_map_reset", None) if self._lib else None
+        if not self._lib:
+            return
+        reset = getattr(self._lib, "__afl_exec_reset", None) or getattr(
+            self._lib, "__afl_map_reset", None
+        )
         if reset is not None:
             reset()
 

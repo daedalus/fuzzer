@@ -1069,8 +1069,9 @@ class ShmCoverage:
         """Read the monotonic edge count from the SHM front header (offset 16).
 
         The C shim increments this counter on each new-slot insertion.
-        A changed value guarantees at least one new distinct edge was recorded
-        this iteration.  Returns 0 when no edges were recorded.
+        A changed value means a slot was claimed this iteration: a new edge,
+        or a known one re-claiming after a wrap wipe. Change signal only, not
+        a distinct-edge count.  Returns 0 when no edges were recorded.
         """
         return ctypes.c_uint64.from_address(self._ptr + 16).value
 
