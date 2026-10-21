@@ -5421,6 +5421,47 @@ class OperatorEngine:
 
         return self._regularity(overflow_pair, buf)
 
+    # ── FXT book (Arndt, Matters Computational) ──
+    def _op_rational_pair(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.fxt import rational_pair
+
+        return self._regularity(rational_pair, buf)
+
+    def _op_sum_shift(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.fxt import sum_shift
+
+        return self._regularity(sum_shift, buf)
+
+    def _op_multiset_next(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.fxt import multiset_next
+
+        return self._regularity(multiset_next, buf)
+
+    def _op_haar_coef(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.fxt import haar_coef
+
+        return self._regularity(haar_coef, buf)
+
+    def _op_revbin_permute(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.fxt import revbin_permute
+
+        return self._regularity(revbin_permute, buf)
+
+    def _op_hilbert_patch(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.fxt import hilbert_patch
+
+        return self._regularity(hilbert_patch, buf)
+
+    def _op_hadamard_oa(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.fxt import hadamard_oa
+
+        return self._regularity(hadamard_oa, buf)
+
+    def _op_fib_encode(self, buf, _byte_idx, _data):
+        from fuzzer_tool.core.mutations.fxt import fib_encode
+
+        return self._regularity(fib_encode, buf)
+
     # ── Hacker's Delight rightmost-bit + Gosper same-popcount (2026-10-05) ──
     def _op_rightmost_clear(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.hackers_delight import rightmost_clear
