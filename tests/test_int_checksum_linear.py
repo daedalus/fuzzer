@@ -193,14 +193,14 @@ def test_parity_filter_rejects_noise():
 
 
 def test_parity_filter_skips_relation_search(monkeypatch):
-    """Noise must not reach the integer-relation solve (Hard Rule 41)."""
+    """Noise must not reach the null-lattice solve (Hard Rule 41)."""
     rng = random.Random(13)
     pairs = [
         (bytes(rng.randrange(256) for _ in range(16)), rng.randrange(1 << 16)) for _ in range(64)
     ]
     calls = []
-    real = solver.find_relation
-    monkeypatch.setattr(solver, "find_relation", lambda *a, **k: calls.append(1) or real(*a, **k))
+    real = solver.null_relations
+    monkeypatch.setattr(solver, "null_relations", lambda *a, **k: calls.append(1) or real(*a, **k))
     assert recover_int_model(pairs) is None
     assert not calls
 

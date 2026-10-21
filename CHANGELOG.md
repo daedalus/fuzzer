@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Linear integer-checksum recovery uses an exact integer kernel** (`core/null_lattice.py`, `int_checksum_solver._linear_weights`): replaces the sqrt(prime)-folded PSOS solve. Same models recovered; 2-4x faster at N=2^16, equal at N=2^32, 6-11x faster on parity-passing noise (`recover_int_model`, 40 pairs, 15 seeds). `integer_relation.py` no longer has a `src/` caller. Tests: `tests/test_null_lattice.py`.
+
 - **`--resume` restores the SHM novelty map and can skip seed calibration** (`ShmCoverage.export_novelty`/`import_novelty`, `Fuzzer._prime_from_saved_novelty`, `corpus_manager.target_fingerprint`): the fuzz loop's novelty signal is the SHM virgin map, which resume never restored, so every resume re-ran all seeds to refill it. The map is now saved in `state.pkl.gz` (`shm_novelty`, plain lists: the sanitised reader drops ndarrays) and loaded on resume; the seed pass is skipped only when the target hash matches and nothing needs live seed runs (cmplog, `--distance`, frontier oracle, `--crash-explore`, an unsaved strata ledger). Otherwise the full pass runs as before. The coverage contract records a target SHA-256; a mismatch warns, does not refuse, and the saved map is not used. Edge-id stability is still probed (3 runs). Not measured on a real target. Tests: `tests/test_regression_resume_shm_novelty.py`.
 
 - **`fuzz -n/--iterations` removed; budget with `--max-execs` only** (`cli/commands.py`): one iteration ran a whole mutation budget, so `-n` was not an exec count. `Fuzzer.run(iterations=)` stays for library callers. Tests: `tests/test_regression_no_iterations_flag.py`.

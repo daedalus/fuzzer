@@ -50,7 +50,6 @@ therefore prefers *large* pairs where the GF(2) path must avoid them.
 from __future__ import annotations
 
 from collections import Counter
-from decimal import Decimal, localcontext
 from math import gcd
 
 from fuzzer_tool.core.int_checksum import (
@@ -65,7 +64,7 @@ from fuzzer_tool.core.int_checksum import (
     to_words,
     weighted_raw,
 )
-from fuzzer_tool.core.integer_relation import Algo, find_relation
+from fuzzer_tool.core.null_lattice import null_relations
 
 # Cost bounds.  Every loop below is bounded: recovery runs inside fuzz_one()
 # and a prior unbounded GCD path already cost this project a 30+ second stall
@@ -128,15 +127,8 @@ _LINEAR_MODULI = (1 << 16, 1 << 32)
 # (word_bytes, big_endian); words first: fewer unknowns, and a word model
 # also has a byte-weight form that would otherwise win.
 _LINEAR_CONFIGS = ((2, False), (2, True), (1, False))
+# Largest relation norm accepted: sqrt(sum w^2 + q^2 + 1) over (w, q.., 1).
 _LINEAR_MAX_NORM = 1 << 12
-_LINEAR_DIGITS = 80
-# Step budget per word: fits succeed in <= ~110 steps/word (measured, 16-bit
-# words); noise runs ~240 steps/word before the norm bound stops it.
-_LINEAR_STEPS_PER_WORD = 150
-# PSOS: fastest of the three here (no square roots); HJLS is ~40x slower.
-_RELATION_ALGO = Algo.PSOS
-# sqrt(p) are Q-independent: folding pairs with them keeps each pair's equation.
-_FOLD_PRIMES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37)
 
 Pair = tuple[bytes, int]
 Row = tuple[list[int], int]  # (words, checksum)
@@ -326,27 +318,25 @@ def _recover_weighted(pairs: list[Pair], min_matches: int) -> IntModel | None:
     return None
 
 
-def _fold(rows: list[Row], modulus: int) -> list[Decimal]:
-    """One relation vector for all *rows*, offset b removed by differencing.
+def _relation_matrix(rows: list[Row], modulus: int) -> list[list[int]]:
+    """Equations of ``c = w . words + b (mod N)``, offset b removed by differencing.
 
-    Row s holds ``dw_s . w - q_s N - dc_s = 0`` (differences against row 0).
-    Weighting row s by sqrt(p_s) gives
-    ``x = [sum_s r_s dw_s[j] ..., r_1 N, ..., r_S N, sum_s r_s dc_s]``,
-    whose small relation is ``(w, -q_1..-q_S, -1)``.
+    Row s (against row 0) reads ``dw_s . w - N q_s - dc_s m = 0``; the unknown
+    vector is ``z = (w, q_1..q_S, m)`` and the wanted relation has ``m = 1``::
+
+        [ dw_1   -N   0  ..  -dc_1 ]
+        [ dw_2    0  -N  ..  -dc_2 ]   z = (w, q_1, q_2, .., m)
     """
     base_w, base_c = rows[0]
-    diffs = [([a - b for a, b in zip(w, base_w, strict=True)], c - base_c) for w, c in rows[1:]]
-    with localcontext() as ctx:
-        ctx.prec = _LINEAR_DIGITS
-        rho = [Decimal(p).sqrt() for p in _FOLD_PRIMES[: len(diffs)]]
-        x = [_mix(rho, [dw[j] for dw, _ in diffs]) for j in range(len(base_w))]
-        x += [r * modulus for r in rho]
-        x.append(_mix(rho, [dc for _, dc in diffs]))
-    return x
-
-
-def _mix(rho: list[Decimal], col: list[int]) -> Decimal:
-    return sum((r * v for r, v in zip(rho, col, strict=True)), Decimal(0))
+    diffs = rows[1:]
+    width = len(base_w)
+    matrix = []
+    for s, (w, c) in enumerate(diffs):
+        line = [a - b for a, b in zip(w, base_w, strict=True)]
+        line += [0] * len(diffs) + [base_c - c]
+        line[width + s] = -modulus
+        matrix.append(line)
+    return matrix
 
 
 def _linear_weights(rows: list[Row], modulus: int) -> tuple[int, ...] | None:
@@ -361,21 +351,18 @@ def _linear_weights(rows: list[Row], modulus: int) -> tuple[int, ...] | None:
         return None
 
     sub = [([w[j] for j in live], c) for w, c in rows]
-    m = find_relation(
-        _fold(sub, modulus),
-        _RELATION_ALGO,
-        digits=_LINEAR_DIGITS,
-        maxcoeff=_LINEAR_MAX_NORM,
-        maxsteps=_LINEAR_STEPS_PER_WORD * len(live),
-    )
-    if m is None or abs(m[-1]) != 1:
-        return None
+    for z in null_relations(_relation_matrix(sub, modulus)):
+        # Reduced basis, shortest first: the true relation is the first with m = +-1.
+        if abs(z[-1]) != 1:
+            continue
+        if sum(x * x for x in z) > _LINEAR_MAX_NORM * _LINEAR_MAX_NORM:
+            return None
 
-    # Relation is (w', -q.., m_c): c = -m_c * (w' . words) + b.
-    weights = [0] * len(base)
-    for k, j in enumerate(live):
-        weights[j] = -m[-1] * m[k]
-    return tuple(weights)
+        weights = [0] * len(base)
+        for k, j in enumerate(live):
+            weights[j] = z[-1] * z[k]
+        return tuple(weights)
+    return None
 
 
 def _parity_consistent(rows: list[Row]) -> bool:
