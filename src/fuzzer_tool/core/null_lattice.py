@@ -9,17 +9,16 @@ is already integer, so the SVD and the quantisation drop out and the kernel
 is computed exactly:
 
     A --column ops (unimodular U)--> A U = [pivots | 0] --> kernel = U's tail
-      --lll_reduce (repeated)--> short, near-orthogonal kernel basis
+      --lll_integral--> short, near-orthogonal kernel basis
 
 Why not the embedding: with the S equations as extra lattice columns the LLL
-dimension is n + S; the kernel has rank n - S, so reducing it directly is 2-5x
-smaller in dimension and ~5x faster here (modulus relations, n = 19).
+dimension is n + S; the kernel has rank n - S, so reducing it directly is
+smaller and faster (modulus relations, n = 19).
 
-Rank is exact (``len(result) == n - rank``), so no SVD threshold is needed.
-Every vector is built from integer operations only: it satisfies ``A z = 0``
-exactly.  ``lll_reduce`` keeps float Gram-Schmidt, so a weak reduction can
-leave a valid but long vector; callers must treat "no short vector" as "none
-found", never as "none exists".
+Rank is exact (``len(result) == n - rank``) and so is the reduction: both
+steps are integer arithmetic, so every vector satisfies ``A z = 0`` and the
+basis is LLL-reduced (delta = 3/4) with no float error.  The first vector is
+within 2^((k-1)/2) of the shortest kernel vector (k = kernel rank).
 
     >>> null_relations([[1, 2, 3], [4, 5, 6]])
     [(1, -2, 1)]
@@ -30,14 +29,7 @@ from __future__ import annotations
 import operator
 from collections.abc import Sequence
 
-from fuzzer_tool.core.lattice import lll_reduce
-
-# LLL passes over the kernel basis.  The elimination leaves entries far larger
-# than the answer, and one float-GS pass then under-reduces (8-word relations
-# at modulus 2^32: 1 of 20 found after one pass, 20 of 20 after four).  Each
-# pass is exact on the integers, so extra passes only tighten the basis;
-# the loop exits at the first fixed point.
-_MAX_PASSES = 8
+from fuzzer_tool.core.lattice import lll_integral
 
 Matrix = Sequence[Sequence[int]]
 
@@ -59,7 +51,7 @@ def null_relations(rows: Matrix) -> list[tuple[int, ...]]:
     """
     matrix = _checked(rows)
     kernel = _int_kernel(matrix)
-    return _canonical(_reduce(kernel))
+    return _canonical(lll_integral(kernel))
 
 
 def _checked(rows: Matrix) -> list[list[int]]:
@@ -127,17 +119,6 @@ def _sub_col(cols: list[list[int]], unit: list[list[int]], j: int, p: int, q: in
     uj, up = unit[j], unit[p]
     for r in range(len(uj)):
         uj[r] -= q * up[r]
-
-
-def _reduce(kernel: list[list[int]]) -> list[list[int]]:
-    """Repeat LLL until the basis stops changing, at most ``_MAX_PASSES`` times."""
-    basis = kernel
-    for _ in range(_MAX_PASSES):
-        nxt = lll_reduce(basis)
-        if nxt == basis:
-            break
-        basis = nxt
-    return basis
 
 
 def _canonical(basis: list[list[int]]) -> list[tuple[int, ...]]:
