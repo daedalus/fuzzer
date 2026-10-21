@@ -37,6 +37,14 @@ class _Stub:
         self.mutate_calls = 0
         self.cuckoo_seed_filter = None
         self._cuckoo_recovered: set[str] = set()
+        # The engine's force_change is exercised end to end in
+        # test_regression_cuckoo_seed_filter.py; the stub only needs a
+        # mutant that differs from its parent.
+        self._operators = SimpleNamespace(
+            force_change=lambda mutated, data: (
+                mutated if mutated != data or not data else bytes([data[0] ^ 0x01]) + data[1:]
+            )
+        )
         if pruned:
             self.cuckoo_seed_filter = CuckooFilter(capacity=1000)
             for seed in pruned:
@@ -51,6 +59,7 @@ class _Stub:
 
     _dedup_mutate = Fuzzer._dedup_mutate
     _is_repeat = Fuzzer._is_repeat
+    _avoid_pruned = Fuzzer._avoid_pruned
 
 
 def test_regression_parent_identical_rerolled():

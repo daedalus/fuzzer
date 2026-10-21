@@ -88,6 +88,9 @@ class _FakeFuzzer:
     def _strata_observe(self, _seed, _edges):
         pass
 
+    def _frontier_observe(self, _seed):
+        pass
+
     def _seed_key(self, seed):
         return str(hash(seed))
 

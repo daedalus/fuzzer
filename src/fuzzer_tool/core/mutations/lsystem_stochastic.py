@@ -1,18 +1,4 @@
-"""Stochastic L-system expansion: several weighted successors per symbol.
-
-Each symbol rewrites to one of 2-3 successors, drawn per occurrence, so one
-rule set yields many different derivations of the same window::
-
-    0 (0.5) -> 1[0]0        0 (0.5) -> 0        1 -> 11
-
-Same window, generation count, cap and overwrite as
-:mod:`fuzzer_tool.core.mutations.lsystem_expand`; successors are slices of
-the window, weights are small integers.
-"""
-
 from __future__ import annotations
-
-from bisect import bisect_right
 
 from fuzzer_tool.core.mutations.lsystem_expand import (
     _BYTE,
@@ -28,23 +14,23 @@ MAX_BRANCH = 3
 #: Largest integer weight of one successor.
 MAX_WEIGHT = 4
 
-#: symbol -> (cumulative thresholds ending at 1.0, successors).
-Rules = dict[int, tuple[tuple[float, ...], tuple[bytes, ...]]]
+#: symbol -> (weights, successors).
+Rules = dict[int, tuple[tuple[int, ...], tuple[bytes, ...]]]
 
 
 def derive_stoch(axiom: bytes, rules: Rules, gens: int, cap: int, rng) -> bytes:
     """Rewrite *axiom* in parallel, picking each successor at random.
 
-    One uniform draw per symbol per generation (symbols without a rule
-    ignore theirs); the draw ``u`` picks successor ``bisect_right(thresholds, u)``.
+    One integer draw per symbol per generation (symbols without a rule
+    ignore theirs); the draw ``r`` picks successor by cumulating weights.
     A generation over *cap* is not applied.
 
     Args:
         axiom: Start string.
-        rules: Symbol -> (cumulative thresholds, successors).
+        rules: Symbol -> (weights, successors).
         gens: Generations to apply.
         cap: Longest string allowed.
-        rng: Draw source with ``random_list``.
+        rng: Draw source with ``randint``.
 
     Returns:
         The last generation that fits in *cap*.
@@ -52,18 +38,28 @@ def derive_stoch(axiom: bytes, rules: Rules, gens: int, cap: int, rng) -> bytes:
     get = rules.get
     cur = axiom
     for _ in range(gens):
-        draws = rng.random_list(len(cur))
         parts = []
-        for b, u in zip(cur, draws, strict=True):
+        for b in cur:
             rule = get(b)
-            parts.append(_BYTE[b] if rule is None else rule[1][bisect_right(rule[0], u)])
+            if rule is None:
+                parts.append(_BYTE[b])
+            else:
+                weights, succs = rule
+                total = sum(weights)
+                r = rng.randint(1, total)
+                acc = 0
+                for i, w in enumerate(weights):
+                    acc += w
+                    if r <= acc:
+                        parts.append(succs[i])
+                        break
         if sum(map(len, parts)) > cap:
             break
         cur = b"".join(parts)
     return cur
 
 
-def _rule(axiom: bytes, rng) -> tuple[tuple[float, ...], tuple[bytes, ...]]:
+def _rule(axiom: bytes, rng) -> tuple[tuple[int, ...], tuple[bytes, ...]]:
     """2..MAX_BRANCH weighted successors, each a slice of *axiom*."""
     n = len(axiom)
     succs, weights = [], []
@@ -73,13 +69,7 @@ def _rule(axiom: bytes, rng) -> tuple[tuple[float, ...], tuple[bytes, ...]]:
         succs.append(axiom[start : start + length])
         weights.append(rng.randint(1, MAX_WEIGHT))
 
-    total = sum(weights)
-    acc, cum = 0, []
-    for w in weights:
-        acc += w
-        cum.append(acc / total)
-    cum[-1] = 1.0
-    return tuple(cum), tuple(succs)
+    return tuple(weights), tuple(succs)
 
 
 def lsystem_stochastic(data: bytes, rng) -> bytes:

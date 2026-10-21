@@ -97,6 +97,61 @@ def test_pruned_seed_mutation_is_skipped(corpus_dir: Path) -> None:
     assert result != seed
 
 
+def _decline_every_op(f: Fuzzer) -> None:
+    """Make every round a no-op.
+
+    The scheduler always draws ``splice``, which declines on a
+    single-seed corpus (it needs a second seed to splice in), so each
+    round hands the parent back unchanged.
+    """
+    f._operators.select_op = lambda ops: "splice"
+
+
+def test_pruned_parent_never_executed_verbatim(corpus_dir: Path) -> None:
+    """A pruned parent whose every mutation declines is not executed verbatim.
+
+    The give-up path normally hands its last mutant to the target
+    anyway, but a pruned seed is exactly what the cuckoo filter exists
+    to keep out of the exec stream.
+    """
+    seed = b"seed_to_prune"
+    _write_seed(corpus_dir, seed)
+
+    f = Fuzzer(
+        target="nonexistent",
+        corpus_dir=str(corpus_dir),
+        crashes_dir=str(corpus_dir / "crashes"),
+        cuckoo_seed_filter=True,
+    )
+    f.cuckoo_seed_filter.add(f._seed_key(seed))
+    _decline_every_op(f)
+
+    result = f._dedup_mutate(seed)
+
+    assert result != seed, "the pruned parent was executed verbatim"
+    assert not f.cuckoo_seed_filter.contains(f._seed_key(result))
+
+
+def test_giveup_parent_unchanged_when_not_pruned(corpus_dir: Path) -> None:
+    """The forced change is for pruned parents only.
+
+    An ordinary parent that every mutation declines is still executed:
+    the re-roll budget is a bound, not a guarantee.
+    """
+    seed = b"ordinary_seed"
+    _write_seed(corpus_dir, seed)
+
+    f = Fuzzer(
+        target="nonexistent",
+        corpus_dir=str(corpus_dir),
+        crashes_dir=str(corpus_dir / "crashes"),
+        cuckoo_seed_filter=True,
+    )
+    _decline_every_op(f)
+
+    assert f._dedup_mutate(seed) == seed
+
+
 def test_non_pruned_seed_mutates_normally(corpus_dir: Path) -> None:
     """Seeds not in the cuckoo filter should mutate normally."""
     seed = b"active_seed"

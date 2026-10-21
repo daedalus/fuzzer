@@ -96,7 +96,16 @@ def byte_groups(offsets: np.ndarray, rows: np.ndarray) -> ByteGroups | None:
     w, scores = np.maximum(w[order], 0.0), scores[:, order]
 
     live = int(np.count_nonzero(w > w[0] * EIG_FLOOR))
-    keep = slice(DROP_LEADING, min(live, DROP_LEADING + MAX_COMPONENTS))
+    # Only drop the leading component if there are enough remaining
+    # components to preserve grouping resolution. If dropping would leave
+    # only 1 component (which can split by at most pole sign, not distinct
+    # fields), keep all components instead.
+    if live > DROP_LEADING and live - DROP_LEADING >= 2:
+        keep = slice(DROP_LEADING, min(live, DROP_LEADING + MAX_COMPONENTS))
+    else:
+        keep = slice(0, live)
+
+    kept = scores[:, keep]
     if live <= DROP_LEADING:
         return None
 

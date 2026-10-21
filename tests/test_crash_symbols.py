@@ -40,7 +40,9 @@ def test_parse_backtrace_inlined_and_libc_null_file():
     assert sym.frames[0].render().startswith("0x7f00 in pthread_kill (libc.so.6+0x9ec0b)")
 
 
-@pytest.mark.parametrize("bad", ["", "garbage", "SYM x y z", "SYM 11 zz 0x0 -", "SYM 11", "SYM 11 0x1 0x0 nocolon"])
+@pytest.mark.parametrize(
+    "bad", ["", "garbage", "SYM x y z", "SYM 11 zz 0x0 -", "SYM 11", "SYM 11 0x1 0x0 nocolon"]
+)
 def test_parse_rejects_malformed(bad):
     assert cs.parse_line(bad) is None
 
@@ -105,7 +107,19 @@ def _build(tmp_path, *flags):
     (tmp_path / "h.c").write_text(_HARNESS)
     exe = tmp_path / "h"
     r = subprocess.run(
-        [cc, "-g", "-O0", *flags, "-o", str(exe), str(tmp_path / "h.c"), str(SHIM), "-ldl", "-lpthread", "-lrt"],
+        [
+            cc,
+            "-g",
+            "-O0",
+            *flags,
+            "-o",
+            str(exe),
+            str(tmp_path / "h.c"),
+            str(SHIM),
+            "-ldl",
+            "-lpthread",
+            "-lrt",
+        ],
         capture_output=True,
         text=True,
     )
@@ -114,11 +128,38 @@ def _build(tmp_path, *flags):
     return exe
 
 
+def _asan_runtime() -> str | None:
+    """Path to the ASAN runtime, or None when the compiler cannot name it.
+
+    The shim's SIGSEGV handler must run before ASAN's, so the ASAN runtime
+    has to be loaded first; linking it into the executable is not enough
+    because libasan is not first in the initial library list.
+    """
+    cc = shutil.which("gcc") or shutil.which("clang")
+    if not cc:
+        return None
+    try:
+        out = subprocess.run(
+            [cc, "-fsanitize=address", "-print-file-name=libasan.so"],
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    except OSError:
+        return None
+    return out if out and Path(out).exists() else None
+
+
 def _run(exe, out, **env):
     e = {**os.environ, **env}
     e.pop(cs.ENV_VAR, None)
     if out is not None:
         e[cs.ENV_VAR] = str(out)
+    if "ASAN_OPTIONS" in e:
+        libasan = _asan_runtime()
+        if libasan:
+            # ASAN must be first; prepend to any existing LD_PRELOAD
+            existing = e.get("LD_PRELOAD", "")
+            e["LD_PRELOAD"] = libasan + ((":" + existing) if existing else "")
     return subprocess.run([str(exe)], env=e, capture_output=True, text=True)
 
 
