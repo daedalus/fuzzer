@@ -539,6 +539,11 @@ class TestCmdMinimize:
             output=None,
             rate_distortion=False,
             target_frac=0.95,
+            inprocess=False,
+            inprocess_direct=False,
+            inprocess_func="LLVMFuzzerTestOneInput",
+            max_seeds=0,
+            batch=False,
         )
         with pytest.raises(SystemExit):
             cmd_minimize(args)
