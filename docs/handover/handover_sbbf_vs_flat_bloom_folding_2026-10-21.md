@@ -193,7 +193,8 @@ control flagged it immediately: ~50k false negatives. For a `(hi*N)>>32` index
 the correct fold is adjacent pairs — exactly the article's
 `block[2i] | block[2i+1]`. The half-overlay corresponds to low-bits indexing,
 a different (incompatible) block scheme. The FN guard is the oracle that can
-fail; without it the broken fold looks fine on inserts.
+fail; without it the broken fold looks fine on inserts. §11 names both trees:
+adjacent pairs = Eytzinger order, half-overlay = bit-reversed order.
 
 ---
 
@@ -251,3 +252,71 @@ class SBBF:
 Flat reference is `fuzzer_tool.core.bloom.BloomFilter`; match memory by forcing
 `m` to `num_blocks * 256`. Control (Rule 46): every FPR comparison asserts
 FN=0 on the inserted keys before trusting the FPR.
+
+---
+
+## 11. Folding is the Eytzinger (binary-heap) index map
+
+Stack every fold level in one 1-indexed array, the level with `z` blocks at
+`[z, 2z)`, root at 1:
+
+```
+index:  1 | 2  3 | 4  5  6  7 | 8 ... 15      z = 1, 2, 4, 8
+        root     |  fold of 8..15 |  leaves
+rule:   heap[i] = heap[2i] | heap[2i+1]
+```
+
+That is the Eytzinger child rule. Verified for every internal node (64
+leaves, 300 keys). One key's node per level: 122 → 61 → 30 → 15 → 7 → 3 → 1,
+so each fold is a parent step, `>> 1`.
+
+**Why.** `((h >> 32) * z) >> 32` is the top `log2(z)` bits of the hash: a
+prefix. Blocks are the leaves of a binary trie over hash prefixes, left to
+right. Eytzinger numbers the trie node for prefix `p` at depth `d` as
+`2^d + p`. Halving `z` drops the last prefix bit and moves each block to its
+parent, so only adjacent pairs can merge.
+
+**The §8 bug in these terms.** The half-overlay fold indexes by low hash bits
+(a suffix), not the prefix. Verified: it equals the adjacent-pair fold applied
+to the leaves in bit-reversed order. Wrong tree → keys land in blocks they
+were never written to.
+
+**Where it stops.** Eytzinger stores sorted keys in BFS order so binary search
+is cache-friendly. Folded levels hold OR-combined bits; there is nothing to
+search. It is a heap-indexed OR segment tree, not a search tree.
+
+**Stacked pyramid: not useful here.** A "no" at a coarse level means "no" at
+every finer level, so top-down early rejection is possible. But coarse levels
+fill first (1024 blocks were already 78% full in §4), so that "no" almost
+never fires; the finest level is the most selective and must be checked
+anyway; and the pyramid costs ~2× memory.
+
+**Repo link.** Open candidate C1 in
+`handover_oeis_port_candidates_2026-09-12.md` (Eytzinger layout) is gated on
+repeated binary search over a static sorted array. This does not change that
+gate: folding has no search.
+
+Reproducer:
+
+```python
+import hashlib
+Z = 64
+keys = [f"k-{i}".encode() for i in range(300)]
+hi32 = lambda k: int.from_bytes(hashlib.sha256(k).digest()[:4], "big")
+
+leaves = [0] * Z                                  # block -> bitmask of key ids
+for n, k in enumerate(keys):
+    leaves[(hi32(k) * Z) >> 32] |= 1 << n
+
+heap, cur = [0] * (2 * Z), leaves
+heap[Z:] = leaves
+while len(cur) > 1:                               # article's fold rule
+    cur = [cur[2 * i] | cur[2 * i + 1] for i in range(len(cur) // 2)]
+    heap[len(cur):2 * len(cur)] = cur
+assert all(heap[i] == heap[2 * i] | heap[2 * i + 1] for i in range(1, Z))
+
+rev = lambda x, b: int(f"{x:0{b}b}"[::-1], 2)     # §8 bug = bit-reversed tree
+half = [leaves[i] | leaves[i + Z // 2] for i in range(Z // 2)]
+via_rev = [leaves[rev(2 * i, 6)] | leaves[rev(2 * i + 1, 6)] for i in range(Z // 2)]
+assert sorted(half) == sorted(via_rev)
+```
