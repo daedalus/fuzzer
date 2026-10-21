@@ -1895,6 +1895,10 @@ class Fuzzer:
         # by position_arena or --hail-mary; needs --deterministic. Appended:
         # positional signature.
         pos_pca=False,
+        # Negative bloom (core/negative_bloom.py): a pre-built filter of
+        # known inputs; a mutant in it is skipped before execution. None
+        # disables the mode. Appended: positional signature.
+        negative_bloom=None,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2575,6 +2579,11 @@ class Fuzzer:
 
         self._dedup_hits = 0
         self._dedup_gaveup = 0
+        # Negative bloom: a pre-built filter of known inputs. A mutant
+        # matching it is skipped before execution, independent of
+        # --no-dedup-execs (the filter is the user's word, not the fuzzer's).
+        self._neg_bloom = negative_bloom
+        self._neg_bloom_hits = 0
         # --orbit-dedup: the exec filter hashes the orbit minimum, so inputs
         # the user declared equivalent cost one exec. _orbit_folded counts
         # repeats whose raw bytes differ from their orbit minimum (upper
@@ -5797,6 +5806,13 @@ class Fuzzer:
 
     def _is_repeat(self, mutated, data: bytes) -> bool:
         """True when executing *mutated* would re-run a known input."""
+        # Negative bloom: user-provided filter of known inputs. Checked
+        # before anything else; independent of --no-dedup-execs.
+        neg_bloom = getattr(self, "_neg_bloom", None)
+        if neg_bloom is not None and neg_bloom.query_bytes(bytes(mutated)):
+            self._neg_bloom_hits += 1
+            return True
+
         # Pruned seed: own opt-in, independent of --no-dedup-execs.
         if self.cuckoo_seed_filter is not None:
             h = self._seed_key(mutated)

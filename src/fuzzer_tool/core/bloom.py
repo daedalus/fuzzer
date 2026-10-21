@@ -11,6 +11,11 @@ from fuzzer_tool.core.similarity import hamming_distance
 
 _M128 = (1 << 128) - 1
 
+#: Serialization version.  Bumped when the dict layout changes so a
+#: ``from_dict`` on an older payload fails loudly instead of silently
+#: producing a half-initialised filter.
+_BLOOM_VERSION = 1
+
 
 class BloomFilter:
     """Bloom filter backed by a :class:`bytearray`.
@@ -75,6 +80,9 @@ class BloomFilter:
         self._byte_len = (self.m + 7) // 8
         self._bits = bytearray(self._byte_len)
         self.n_added = 0
+        self.n_queries = 0
+        self.n_accepted = 0
+        self.n_rejected = 0
         self._recent_keys: deque[bytes] | None = None
 
     @property
@@ -172,10 +180,94 @@ class BloomFilter:
         if reset_on_full and self.n_added >= self.capacity:
             self.clear()
         value = int.from_bytes(hashlib.sha256(key).digest(), "big")
+        self.n_queries += 1
         if self._check(value):
+            self.n_rejected += 1
             return True
         self._set(value)
+        self.n_accepted += 1
         return False
+
+    def query_bytes(self, key: bytes) -> bool:
+        """Pure membership test over the raw-bytes keyspace.
+
+        Unlike :meth:`update_bytes` this never inserts, so it cannot
+        produce a false negative later: a hit means the key was added
+        before, a miss means it was not (bloom false positives aside).
+        Counts the probe in :attr:`n_queries`; no accepted/rejected
+        tally because nothing was added.
+
+        Args:
+            key: Raw bytes to test.
+
+        Returns:
+            True if *key* is probably in the filter.
+        """
+        self.n_queries += 1
+        return self._check(int.from_bytes(hashlib.sha256(key).digest(), "big"))
+
+    def to_dict(self) -> dict[str, object]:
+        """Serialise to a plain dict (gzip+pickle on the wire).
+
+        The version field lets :meth:`from_dict` reject payloads from a
+        future layout instead of building a half-initialised filter.
+        """
+        return {
+            "version": _BLOOM_VERSION,
+            "capacity": self.capacity,
+            "error_rate": self.error_rate,
+            "m": self.m,
+            "k": self._k,
+            "double": self._double,
+            "bits": bytes(self._bits),
+            "n_added": self.n_added,
+            "n_queries": self.n_queries,
+            "n_accepted": self.n_accepted,
+            "n_rejected": self.n_rejected,
+        }
+
+    @classmethod
+    def from_dict(cls, state: dict[str, object]) -> "BloomFilter":
+        """Reconstruct a filter written by :meth:`to_dict`.
+
+        Raises:
+            ValueError: on a missing/wrong version, a bit-length mismatch,
+                or an invalid capacity/error_rate.
+        """
+        if not isinstance(state, dict):
+            raise ValueError("bloom state must be a dict")
+        version = state.get("version")
+        if version != _BLOOM_VERSION:
+            raise ValueError(f"unsupported bloom version {version!r}; expected {_BLOOM_VERSION}")
+        capacity = state["capacity"]
+        error_rate = state["error_rate"]
+        if not isinstance(capacity, int) or capacity < 1:
+            raise ValueError(f"invalid bloom capacity {capacity!r}")
+        if not isinstance(error_rate, float) or not (0.0 < error_rate < 1.0):
+            raise ValueError(f"invalid bloom error_rate {error_rate!r}")
+
+        bf = cls.__new__(cls)
+        bf.capacity = capacity
+        bf.error_rate = error_rate
+        bf.m = state["m"]
+        bf._mask = bf.m - 1
+        bf._bits_per_slice = bf.m.bit_length() - 1
+        bf._k = state["k"]
+        bf._double = state["double"]
+        bf._byte_len = (bf.m + 7) // 8
+        bits = state["bits"]
+        if not isinstance(bits, bytes | bytearray) or len(bits) != bf._byte_len:
+            raise ValueError(
+                f"bloom bits length {len(bits) if hasattr(bits, '__len__') else 'n/a'} "
+                f"!= {bf._byte_len}"
+            )
+        bf._bits = bytearray(bits)
+        bf.n_added = state["n_added"]
+        bf.n_queries = state["n_queries"]
+        bf.n_accepted = state["n_accepted"]
+        bf.n_rejected = state["n_rejected"]
+        bf._recent_keys = None
+        return bf
 
     @property
     def load_factor(self) -> float:
@@ -185,6 +277,9 @@ class BloomFilter:
     def clear(self) -> None:
         self._bits = bytearray(self._byte_len)
         self.n_added = 0
+        self.n_queries = 0
+        self.n_accepted = 0
+        self.n_rejected = 0
         if self._recent_keys is not None:
             self._recent_keys.clear()
 

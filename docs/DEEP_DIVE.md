@@ -416,6 +416,21 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Dedup check**: In `_dedup_mutate()`, a *mutant* whose hash is in the filter AND not in `_cuckoo_recovered` is re-rolled like an exec-bloom hit (up to `EXEC_DEDUP_RETRIES`). The parent is always mutated: a live parent was already re-admitted. Mutants byte-identical to the parent are re-rolled too (gated by `--no-dedup-execs`). Re-rolls / give-ups print in the run summary (`Exec dedup:`).
 - **Orbit dedup** (`core/orbit_dedup.py`, `--orbit-dedup SPEC`, off by default; algebra handover G1): the exec filter hashes the orbit minimum of a mutant, so inputs the user declares equivalent cost one exec. Spec: `swap@OFF:SIZExCOUNT` (commuting chunks, sorted) and `endian@OFF:SIZE` (min of field, reversed), comma-separated, non-overlapping, total orbit <= 16. A mutant in its parent's orbit is a repeat. Input too short for an item is left unchanged. Summary prints `Orbit dedup:` = repeats whose raw bytes differ from their orbit minimum (upper bound on drops caused by the declaration). A wrong declaration drops real novelty. Unmeasured: no A/B on a real target.
 
+### Negative Bloom Filter (`--negative-bloom FILE`, off by default)
+
+- **Purpose**: A static, corpus-derived bloom filter that stores every known input from the corpus directory. Mutants that hash into the filter are skipped before execution, independent of `--no-dedup-execs`. The filter is persisted as a compressed pickle (`neg.pkl.gz`) via the `fuzzer-tool negative-bloom` CLI subcommand and reused across fuzzing sessions. Its size is always 10x the corpus count (configurable via `NEG_BLOOM_FACTOR`).
+- **Construction**: `fuzzer-tool negative-bloom --corpus DIR --out neg.pkl.gz` reads every seed from the corpus (without injecting the synthetic `b"AAAAAAAA"` default seed), builds a `BloomFilter(10 * len(seeds))`, and writes it as a gzip'd pickle. Ingest stats are printed: ``N`` update-queries, ``M`` accepted (new), ``R`` rejected (already present).
+- **Lifetime**: The filter is loaded once at Fuzzer construction time from `--negative-bloom FILE`. It is never mutated during the run (no insertions, no resets, no generational wipe) — it simply answers membership queries. This makes it safe to reuse across campaigns and to persist in version control.
+- **Integration flow**:
+  1. `fuzzer-tool negative-bloom` builds and saves the filter.
+  2. `fuzzer-tool fuzz --negative-bloom neg.pkl.gz` loads it and passes it to ``Fuzzer(negative_bloom=bf)``.
+  3. ``Fuzzer._is_repeat()`` consults ``self._neg_bloom.query_bytes(bytes(mutated))`` **first**, before any exec bloom or dedup check. A hit increments ``self._neg_bloom_hits`` and returns `True` (mutant skipped).
+  4. If the negative bloom misses (mutant is new), execution proceeds normally; the exec bloom still dedupes repeats independently.
+- **Stats**: ``self._neg_bloom_hits`` is printed in the run summary as ``Negative bloom: N mutants skipped`` (following the same `getattr` pattern as exec dedup and orbit dedup).
+- **Counters**: ``n_queries`` / ``n_accepted`` / ``n_rejected`` in the `BloomFilter` accumulate during the initial build via ``update_bytes``. During fuzzing, only ``query_bytes`` is called (which increments ``n_queries`` but not ``n_accepted``/``n_rejected`` since nothing is inserted), and the hit counter ``_neg_bloom_hits`` tracks fuzzing-time skips.
+- **Comparison with exec dedup**: The exec bloom (`_exec_bloom`) is a generational running filter (wipes after 500K entries) that tracks all executed mutants in-process. The negative bloom is a static corpus filter that can be shared across runs and never evolves. They are complementary: negative bloom is checked first, exec bloom afterwards, and each hit increments its own independent counter.
+- **Failures**: A corrupted or wrong-version pickle raises ``NegativeBloomError`` → ``SystemExit`` from ``load_negative_bloom``. The `--no-negative-bloom` effect is the default when the flag is omitted.
+
 ### Zip Seed Corpus (`--zip-seed-corpus`)
 
 Off by default (loading is not: see below). New full seeds (`seeds/`, `irreplaceable/`, `crashing/`, `timeouts/`) go only to `corpus/seeds.zip`, deflate level 9; loading unions `seeds/**` with the zip. Deltas stay in `deltas/`. Code: `adapters/seed_zip.py`.

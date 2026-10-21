@@ -893,6 +893,9 @@ class StatsReporter:
         folded = getattr(f, "_orbit_folded", 0)
         if folded:
             print(f"  Orbit dedup:       {folded} folded repeats (upper bound on drops)")
+        neg_hits = getattr(f, "_neg_bloom_hits", 0)
+        if neg_hits:
+            print(f"  Negative bloom:    {neg_hits} mutants skipped")
         flux = getattr(f, "_corpus_flux", None)
         if flux is not None and flux.total_additions + flux.total_evictions > 0:
             turnover = flux.turnover()

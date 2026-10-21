@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 
 from fuzzer_tool.core import z3_budget
+from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
 from fuzzer_tool.core.colorization import ColorMode
@@ -19,6 +20,7 @@ from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
+from fuzzer_tool.core.negative_bloom import NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
@@ -546,6 +548,10 @@ def cmd_fuzz(args):
         args.alphabeta = True
         args.schedule = "fast"
 
+    # Negative-bloom filter: a pre-built corpus filter loaded once and
+    # consulted in _is_repeat(). None when the flag is unset.
+    negative_bloom = load_negative_bloom(getattr(args, "negative_bloom", None))
+
     fuzzer = Fuzzer(
         target=args.target,
         multi_targets=args.targets if len(args.targets) > 1 else None,
@@ -1003,6 +1009,7 @@ def cmd_fuzz(args):
         grimoire_max_execs=getattr(args, "grimoire_max_execs", 512),
         zip_seed_corpus=getattr(args, "zip_seed_corpus", False),
         zip_compact_ratio=getattr(args, "zip_compact_ratio", 0.0),
+        negative_bloom=negative_bloom,
     )
     # shlex.join, not " ".join: this string is now persisted into state.json
     # and printed as the command that reproduces the run, so an argument
@@ -1428,6 +1435,53 @@ def cmd_minimize(args):
 
     if removed == 0:
         print("[*] Corpus already minimal")
+    return 0
+
+
+# ── negative-bloom subcommand ─────────────────────────────────────────────────
+
+
+def load_negative_bloom(path: str | Path | None) -> "BloomFilter | None":
+    """Load a negative-bloom file for use in fuzzing.
+
+    Returns ``None`` when *path* is ``None`` (flag unset).  Any unusable file
+    (missing, truncated, corrupted, wrong version) prints ``[!]`` to stderr
+    and raises :exc:`SystemExit`.
+    """
+    if path is None:
+        return None
+    from fuzzer_tool.core.negative_bloom import load as _load_nb
+
+    try:
+        return _load_nb(path)
+    except NegativeBloomError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        sys.exit(1)
+
+
+def cmd_negative_bloom(args) -> int:
+    """Build a negative-bloom filter from a corpus directory.
+
+    Reads every seed under ``args.corpus`` (without injecting the synthetic
+    default seed), builds a BloomFilter sized 10x the corpus, writes it as a
+    gzip'd pickle to ``args.out``, and prints ingest stats.
+    """
+    from fuzzer_tool.adapters.filesystem import load_corpus
+    from fuzzer_tool.core.negative_bloom import build, print_stats, save
+
+    corpus_dir = Path(args.corpus)
+    if not corpus_dir.exists():
+        print(f"[!] corpus directory not found: {corpus_dir}", file=sys.stderr)
+        return 1
+
+    seeds, _, _ = load_corpus(corpus_dir, add_default=False)
+    if not seeds:
+        print(f"[!] no seeds found in {corpus_dir}", file=sys.stderr)
+        return 1
+
+    bf = build(seeds)
+    save(Path(args.out), bf)
+    print_stats(bf)
     return 0
 
 
@@ -5368,6 +5422,13 @@ def main() -> int:
         ),
     )
     fuzz_parser.add_argument(
+        "--negative-bloom",
+        metavar="FILE",
+        default=None,
+        help="Path to a negative-bloom file (built by `fuzzer-tool negative-bloom`); "
+        "mutants matching it are skipped at dedup time.",
+    )
+    fuzz_parser.add_argument(
         "--reject-code",
         type=int,
         default=None,
@@ -6522,6 +6583,25 @@ def main() -> int:
         help="Show top N most/least novel seeds (default: 10)",
     )
     ppmd_parser.set_defaults(func=cmd_ppmd)
+
+    # --- negative-bloom ---
+    neg_parser = subparsers.add_parser(
+        "negative-bloom",
+        help="Build a negative-bloom filter from a corpus directory.",
+    )
+    neg_parser.add_argument(
+        "-d",
+        "--corpus",
+        required=True,
+        help="Corpus directory",
+    )
+    neg_parser.add_argument(
+        "-o",
+        "--out",
+        required=True,
+        help="Output bloom file path (e.g. neg.pkl.gz)",
+    )
+    neg_parser.set_defaults(func=cmd_negative_bloom)
 
     args = parser.parse_args()
 
