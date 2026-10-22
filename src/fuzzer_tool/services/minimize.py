@@ -25,6 +25,7 @@ from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.filesystem import hash_data
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.set_cover import min_cover
 
 
@@ -151,6 +152,19 @@ def _discover_corpus_files(corpus_path: Path) -> list[Path]:
     )
 
 
+def _pick_seeds(files: list[Path], max_seeds: int, rng: RandPool) -> list[Path]:
+    """Uniform k-of-n subset of *files*, in disk order; all when uncapped.
+
+    Disk order is seeds/<hh>/ by hash prefix, so a head slice only ever
+    saw low-prefix seeds.
+    """
+    n = len(files)
+    if max_seeds <= 0 or n <= max_seeds:
+        return files
+
+    return [files[i] for i in sorted(rng.sample(n, max_seeds))]
+
+
 def minimize_corpus(
     target: str,
     corpus_dir: str,
@@ -167,6 +181,7 @@ def minimize_corpus(
     inprocess_func: str = DEFAULT_INPROCESS_FUNC,
     max_seeds: int = 0,
     batch_mode: bool = False,
+    rng: RandPool | None = None,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -190,7 +205,9 @@ def minimize_corpus(
         prune: Coverage-mode pruning criterion.
         exec_mode: Coverage-mode replay backend (spawn, loader, direct_lite, direct).
         inprocess_func: Entry point for the in-process backends.
-        max_seeds: Max seeds to process (0=all). Allows batch minification.
+        max_seeds: Max seeds to process (0=all), drawn uniformly at random.
+            Allows batch minification.
+        rng: Sampler for ``max_seeds`` (default: shared RandPool).
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -227,8 +244,7 @@ def minimize_corpus(
         print("[-] Corpus is empty or all files already processed in batch mode", file=sys.stderr)
         return 0, 0
 
-    if max_seeds > 0 and len(corpus_files) > max_seeds:
-        corpus_files = corpus_files[:max_seeds]
+    corpus_files = _pick_seeds(corpus_files, max_seeds, rng or get_default_rand_pool())
 
     print(f"[*] Corpus: {len(corpus_files)} files in {corpus_dir} (total: {len(all_corpus_files)})")
 

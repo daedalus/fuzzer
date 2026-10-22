@@ -6414,7 +6414,7 @@ def main() -> int:
         "--max-seeds",
         type=int,
         default=0,
-        help="Max seeds to process (0=all). Allows batch minification.",
+        help="Max seeds to process, drawn uniformly at random (0=all). Allows batch minification.",
     )
     min_parser.add_argument(
         "--batch",
