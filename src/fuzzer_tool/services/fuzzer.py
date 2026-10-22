@@ -88,6 +88,7 @@ from fuzzer_tool.core.orbit_dedup import canonical
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check
+from fuzzer_tool.core.run_mode import RunMode, Switch
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
@@ -916,6 +917,10 @@ def resolve_touched_scan(requested: bool | None, map_size: int) -> bool:
 class Fuzzer:
     # Decision clock; __init__ replaces it. Default for __new__-built test fuzzers.
     _clock: Clock = WALL_CLOCK
+    # Round pipeline and switches; __init__ sets them per RunMode / Switch.
+    _run_mode = RunMode.FULL
+    _markov_switch = Switch.ON
+    _auto_minimize = Switch.ON
 
     def _warn_no_coverage(self) -> None:
         """Warn that an in-process target is running without coverage.
@@ -1332,6 +1337,7 @@ class Fuzzer:
         markov_order=1,
         markov_generate=False,
         markov_blend=False,
+        markov=Switch.ON,
         dirichlet_alpha=AlphaMode.FIXED,
         mc_bandit=False,
         mc_cem=False,
@@ -1411,6 +1417,7 @@ class Fuzzer:
         max_corpus=0,
         max_corpus_bytes=0,
         minimize_every_execs=0,
+        auto_minimize=Switch.ON,
         prune_corpus_max_memory=80,
         no_shm=False,
         use_ptrace=False,
@@ -1423,6 +1430,7 @@ class Fuzzer:
         adaptive_timeout=False,
         resume=False,
         trace_crashes=True,
+        run_mode=RunMode.FULL,
         learn_format=False,
         corpus_ppmd=False,
         corpus_quasiperiodicity=False,
@@ -2077,6 +2085,11 @@ class Fuzzer:
         self.max_corpus = max_corpus
         self.max_corpus_bytes = max_corpus_bytes
         self.minimize_every_execs = minimize_every_execs
+        # --no-auto-minimize: no trim on admission, no corpus-size prune.
+        # The memory-pressure prune stays (bounded memory).
+        self._auto_minimize = auto_minimize
+        # --lightweight: FuzzRound.run picks the lean pipeline.
+        self._run_mode = run_mode
         self.prune_corpus_max_memory = prune_corpus_max_memory
         self._last_corpus_prune_exec = 0
         self._last_bloat_warn_exec = 0
@@ -2776,6 +2789,7 @@ class Fuzzer:
             self.markov = MarkovChain(order=orders[0], rng=self._rng, alpha_mode=dirichlet_alpha)
         self.markov_generate = markov_generate
         self.markov_trained = False
+        self._markov_switch = markov
 
         # ── Extracted modules ──────────────────────────────────────────
         self._operators = OperatorEngine(self)
@@ -2992,14 +3006,16 @@ class Fuzzer:
         # of truth; never re-derived from runs to avoid double-counting).
         if self._use_lineage and self._lineage is not None:
             self._lineage.rebuild_from_meta(self.seed_meta, self._seed_key)
-        # Load persisted Markov state from state store; skip retrain if loaded
-        markov_data = self._state_store.get("markov")
+        # Load persisted Markov state from state store; skip retrain if loaded.
+        # --no-markov: neither, so markov_trained stays False and markov_bytes unarmed.
+        markov_on = self._markov_switch is Switch.ON
+        markov_data = self._state_store.get("markov") if markov_on else None
         if markov_data is not None:
             loaded = True
             self.markov.from_dict(markov_data)
         else:
             loaded = False
-        if self.corpus and not loaded:
+        if self.corpus and not loaded and markov_on:
             self.markov.train_corpus(self.corpus)
         self.markov_trained = self.markov.is_trained()
 
@@ -6384,6 +6400,8 @@ class Fuzzer:
         corpus does not stay bloated for the entire campaign. The trigger is
         throttled to avoid thrashing.
         """
+        if self._auto_minimize is Switch.OFF:
+            return
         if self.exec_count - self._last_corpus_prune_exec < 1000:
             return
         self._last_corpus_prune_exec = self.exec_count

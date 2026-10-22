@@ -22,6 +22,7 @@ from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.negative_bloom import NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
+from fuzzer_tool.core.run_mode import RunMode, Switch
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
@@ -568,6 +569,7 @@ def cmd_fuzz(args):
         target_args=args.target_args,
         markov_order=args.markov_order if use_markov else 0,
         markov_generate=args.markov_gen,
+        markov=Switch.OFF if getattr(args, "no_markov", False) else Switch.ON,
         mc_bandit=args.mc_bandit,
         slopt=getattr(args, "slopt", False),
         one_fifth=getattr(args, "one_fifth", False),
@@ -639,6 +641,7 @@ def cmd_fuzz(args):
         max_corpus=args.max_corpus,
         max_corpus_bytes=getattr(args, "max_corpus_bytes", 0),
         minimize_every_execs=getattr(args, "minimize_every_execs", 0),
+        auto_minimize=Switch.OFF if getattr(args, "no_auto_minimize", False) else Switch.ON,
         prune_corpus_max_memory=getattr(args, "prune_corpus_on_max_memory", 80),
         bootstrap=getattr(args, "bootstrap", False),
         bootstrap_k=getattr(args, "bootstrap_k", 1),
@@ -648,6 +651,7 @@ def cmd_fuzz(args):
         adaptive_timeout=getattr(args, "adaptive_timeout", False),
         resume=args.resume,
         trace_crashes=args.trace,
+        run_mode=RunMode.LITE if getattr(args, "lightweight", False) else RunMode.FULL,
         learn_format=getattr(args, "learn_format", False),
         corpus_ppmd=getattr(args, "corpus_ppmd", False),
         corpus_quasiperiodicity=getattr(args, "corpus_quasiperiodicity", False),
@@ -2214,6 +2218,7 @@ def cmd_sweep(args):
 # poisson_disk_admission was added by PR: poisson-disk admission gate.
 # --no-cmplog is a store_true opt-OUT (dest no_cmplog), deliberately not in
 # _HAIL_MARY_FLAGS: --hail-mary must not switch cmplog off.
+# --lightweight is excluded too: it is the inverse preset and rejects --hail-mary.
 # cmplog_fifo_sink was changed to --no-cmplog-fifo-sink (opt-out,
 # default=True) in the same commit; added to _HAIL_MARY_FLAGS so the
 # FIFO drain is force-enabled alongside the rest of the strategy set.
@@ -2606,6 +2611,63 @@ def _apply_hail_mary(args: argparse.Namespace, fuzz_parser: argparse.ArgumentPar
     )
 
 
+# --lightweight: dest -> off value, applied to dests the user did not pass.
+_LIGHTWEIGHT_OFF: dict[str, object] = {
+    "no_cmplog": True,
+    "no_markov": True,
+    "no_auto_minimize": True,
+    "no_perf_novelty": True,
+    "no_adaptive_havoc": True,
+    "deterministic": False,
+    "trace": False,
+    "resize_map_on_stall": False,
+}
+
+# Default-on features --lightweight keeps: coverage plumbing, exec speed-ups
+# (forkserver, dedup bloom), seed calibration, hygiene and resume.
+# cmplog_fifo_sink is inert once cmplog is off.
+_LIGHTWEIGHT_KEEP = frozenset(
+    {
+        "coverage",
+        "no_shm",
+        "no_cfg_cache",
+        "no_kill_children",
+        "forkserver",
+        "cmplog_fifo_sink",
+        "no_save_state",
+        "no_dedup_execs",
+        "no_calibration",
+    }
+)
+
+
+def _apply_lightweight(args: argparse.Namespace, fuzz_parser: argparse.ArgumentParser) -> None:
+    """--lightweight: switch off every ``_LIGHTWEIGHT_OFF`` dest left at default."""
+    if args.hail_mary or args.elo:
+        fuzz_parser.error("--lightweight excludes --hail-mary and --elo")
+
+    explicit = _explicit_dests(fuzz_parser, _LIGHTWEIGHT_OFF)
+    if args.markov or args.markov_gen:
+        explicit.add("no_markov")  # asking for Markov keeps it
+
+    for dest, off in _LIGHTWEIGHT_OFF.items():
+        if dest not in explicit:
+            setattr(args, dest, off)
+
+
+def _explicit_dests(fuzz_parser: argparse.ArgumentParser, dests) -> set[str]:
+    """The *dests* given on the ``fuzz`` command line, True-default ones included.
+
+    argparse fills a default only into attributes the namespace lacks, so a
+    sentinel that survives the re-parse means the flag was not passed.
+    """
+    unset = object()
+    probe = argparse.Namespace(**dict.fromkeys(dests, unset))
+    argv = sys.argv[sys.argv.index("fuzz") + 1 :]
+    fuzz_parser.parse_known_args(argv, probe)
+    return {d for d in dests if getattr(probe, d) is not unset}
+
+
 # --preset-ledger ballot; mirrors tools/lib/bench.sh's arms. Order matters:
 # untried presets run first, in this order.
 _LEDGER_PRESETS: dict[str, tuple[str, ...]] = {
@@ -2745,6 +2807,15 @@ def main() -> int:
         "noisy, exploratory last resort -- not a normal run mode.",
     )
     fuzz_parser.add_argument(
+        "--lightweight",
+        action="store_true",
+        help="Execs/s mode: edge coverage, crash detection and corpus admission "
+        "only. Turns off cmplog, Markov, auto-minimize, tracing, perf novelty, "
+        "adaptive havoc, the deterministic stage and every side signal, learner "
+        "and operator credit in the round. Explicit flags win. Excludes "
+        "--hail-mary and --elo.",
+    )
+    fuzz_parser.add_argument(
         "--preset-ledger",
         action="store_true",
         help="Pick a config preset per campaign by UCB1 over this target's past "
@@ -2828,6 +2899,12 @@ def main() -> int:
         help="Target arguments ({file} placeholder)",
     )
     fuzz_parser.add_argument("--markov", action="store_true", help="Enable Markov chain mutation")
+    fuzz_parser.add_argument(
+        "--no-markov",
+        action="store_true",
+        help="Never load or train the Markov chain (markov_bytes stays unarmed). "
+        "Conflicts with --markov/--markov-gen. Set by --lightweight.",
+    )
     fuzz_parser.add_argument(
         "--markov-gen", action="store_true", help="Enable Markov chain seed generation"
     )
@@ -5346,6 +5423,12 @@ def main() -> int:
         help="Fire corpus minimization every N executions (0=disabled)",
     )
     fuzz_parser.add_argument(
+        "--no-auto-minimize",
+        action="store_true",
+        help="No trim of new-coverage inputs and no corpus-size prune "
+        "(the memory-pressure prune stays). Set by --lightweight.",
+    )
+    fuzz_parser.add_argument(
         "--prune-corpus-on-max-memory",
         type=int,
         default=80,
@@ -6638,6 +6721,12 @@ def main() -> int:
 
     if args.command == "fuzz" and getattr(args, "hail_mary", False):
         _apply_hail_mary(args, fuzz_parser)
+
+    if args.command == "fuzz" and getattr(args, "lightweight", False):
+        _apply_lightweight(args, fuzz_parser)
+
+    if args.command == "fuzz" and args.no_markov and (args.markov or args.markov_gen):
+        fuzz_parser.error("--no-markov conflicts with --markov/--markov-gen")
 
     if args.command == "fuzz" and getattr(args, "preset_ledger", False):
         _apply_preset_ledger(args, fuzz_parser)

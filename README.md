@@ -115,6 +115,8 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 - **Differential fuzzing** (`--differential`): run every input through a second target and
   flag return-code, stdout, or sanitizer-signature divergence, with drift tracking
 - **Multi-target**: several binaries, shared corpus, weighted round-robin
+- **Lightweight** (`--lightweight`): execs/s mode — edge coverage, crash saving and corpus
+  admission only; cmplog, Markov, auto-minimize and per-round learners off (~1.9x eps on fuzzgoat)
 
 ### Scheduling Intelligence
 | Strategy | Flag | Description |

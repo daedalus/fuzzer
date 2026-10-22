@@ -39,6 +39,7 @@ from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cmplog import CmplogRecords
 from fuzzer_tool.core.one_fifth import Outcome as FifthOutcome
 from fuzzer_tool.core.ro_rd import classify_operator_name
+from fuzzer_tool.core.run_mode import RunMode, Switch
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.secretary import SecretaryStopping
 from fuzzer_tool.core.validity import Validity
@@ -167,6 +168,9 @@ class FuzzRound:
         # All z3 work in the round shares one budget (core/z3_budget.py).
         z3_budget.BUDGET.open_round()
         try:
+            # --lightweight picks the lean pipeline; one identity test per exec.
+            if self._f._run_mode is RunMode.LITE:
+                return self._lite_steps()
             return self._steps()
         finally:
             z3_budget.BUDGET.close_round()
@@ -2051,7 +2055,8 @@ class FuzzRound:
         self._feed_population()
         self._probe_uninit()
         # Coverage-guided trimming: try to minimize inputs that hit new edges
-        if self._has_new_coverage and len(mutated) > 10:
+        trim = f._auto_minimize is Switch.ON
+        if trim and self._has_new_coverage and len(mutated) > 10:
             f._trim_new_coverage(mutated, data)
         if f.mc and f.mc_cem:
             f.mc.add_elite(mutated, 2, temperature=f._temperature)
@@ -2138,4 +2143,34 @@ class FuzzRound:
             f.mc.maybe_refit()
         f._record_fluctuation_observation("success", mutant_edges)
         f._maybe_periodic_minimize()
+        return True
+
+    # ── Lightweight (--lightweight) ──────────────────────────────────
+
+    def _lite_steps(self) -> bool:
+        # --lightweight (RunMode.LITE): coverage, crashes and admission only.
+        # No side signals, op credit, learners, trim or minimize
+        # (DEEP_DIVE §Performance, Lightweight mode).
+        self._begin()
+        self._execute()
+        self._periodic()
+        self._classify()
+        self._scan_coverage()
+        self._record_edges()
+
+        if self._is_crash:
+            return self._lite_crash()
+        if not (self._has_new_coverage or self._is_interesting):
+            return False
+
+        self._f.save_to_corpus(self._mutated, parent=self._data)
+        return True
+
+    def _lite_crash(self) -> bool:
+        # Count, triage (fault address for the signature), save, bound.
+        f = self._f
+        f.crash_count += 1
+        self._triage_crash()
+        f.save_crash(self._mutated, self._returncode, self._stderr)
+        f._prune_crash_data()
         return True

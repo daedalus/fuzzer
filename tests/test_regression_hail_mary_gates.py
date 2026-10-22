@@ -60,6 +60,7 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 _EXCLUDED_OPT_IN = frozenset(
     {
         "hail_mary",
+        "lightweight",  # the inverse preset; the two are mutually exclusive
         "no_cmplog",  # opt-OUT of comparison tracing; --hail-mary must not turn cmplog off
         "resume",
         "refresh_profile",  # profiling: hail-mary already slow, full re-analysis per run is overkill

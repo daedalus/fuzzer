@@ -39,6 +39,7 @@ from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
+from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.set_cover import min_cover
 from fuzzer_tool.core.size_bloat import seed_size_bloat
@@ -1206,18 +1207,24 @@ class CorpusManager:
             except Exception:  # noqa: BLE001 — never block corpus save
                 pass
 
-    def _after_admit(self, data: bytes) -> None:
-        """Post-admission bookkeeping: Markov, size stats, bloat and max_len tracking."""
+    def _train_markov(self, data: bytes) -> None:
+        # Fold the admitted input into the chain; --no-markov skips this.
         f = self.f
         f.markov.train(data)
         f.markov_trained = f.markov.is_trained()
-        # Mutator feedback hook (e.g. wfc_reorder_learned's adjacency tables).
-        REGISTRY.notify_new_coverage(data, getattr(f, "_last_new_edge_count", 0))
         if f.markov.snapshot_and_check_plateau():
             log.info(
                 "Markov plateau detected (JS=%.4f) — reducing generation rate",
                 f.markov.last_js_divergence,
             )
+
+    def _after_admit(self, data: bytes) -> None:
+        """Post-admission bookkeeping: Markov, size stats, bloat and max_len tracking."""
+        f = self.f
+        if getattr(f, "_markov_switch", Switch.ON) is Switch.ON:
+            self._train_markov(data)
+        # Mutator feedback hook (e.g. wfc_reorder_learned's adjacency tables).
+        REGISTRY.notify_new_coverage(data, getattr(f, "_last_new_edge_count", 0))
         f._corpus_size_history.append(len(data))
         # The contextual schedulers' corpus-size percentile feature reads
         # this; nothing fed it before, so its guard (count >= 5) never
@@ -1237,7 +1244,9 @@ class CorpusManager:
         # nearly every check of a stationary lognormal corpus and never
         # on real bloat, which piles sizes at the cap and skews left.
         # See core/size_bloat.py. Rate-limited to once per 500 execs.
-        if f.exec_count - f._last_bloat_warn_exec >= 500:
+        # --no-auto-minimize: no bloat check at all.
+        bloat_check = getattr(f, "_auto_minimize", Switch.ON) is Switch.ON
+        if bloat_check and f.exec_count - f._last_bloat_warn_exec >= 500:
             reason = seed_size_bloat(f._corpus_size_history, f.max_len)
             if reason is not None:
                 f._last_bloat_warn_exec = f.exec_count
