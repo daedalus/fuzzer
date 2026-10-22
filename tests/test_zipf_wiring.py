@@ -5,6 +5,7 @@ import types
 from contextlib import redirect_stdout
 
 from fuzzer_tool.core import edge_tracker as edge_tracker_mod
+from fuzzer_tool.core.cadence import phase_of
 from fuzzer_tool.core.edge_tracker import EdgeTracker
 from fuzzer_tool.core.zipf import HeapsFit, TailLaw, ZipfFit
 from fuzzer_tool.services.report import _zipf_tail
@@ -163,12 +164,17 @@ class TestSaturationGateVeto:
         f, p = _gate(1.0, TailLaw.POWER_LAW, ZIPF_GROWTH_BETA * 2)
         assert p._saturation_gate() is False
 
-        # Growth stops; the veto clears on the next refresh, not before.
+        # Growth stops; the veto clears on the next refresh, not before. The
+        # first evaluation is stamped phase-late (core/cadence.py), so the
+        # refresh comes at REFRESH + phase.
         f._edge_tracker.heaps_estimate = lambda: HeapsFit(0.0, 1.0, 1.0)
-        f.exec_count = SATURATION_REFRESH_EXECS - 1
+        refresh = SATURATION_REFRESH_EXECS + phase_of(
+            "seed_picker.saturation", SATURATION_REFRESH_EXECS
+        )
+        f.exec_count = refresh - 1
         f._last_new_edge_exec = f.exec_count
         assert p._saturation_gate() is False
-        f.exec_count = SATURATION_REFRESH_EXECS
+        f.exec_count = refresh
         f._last_new_edge_exec = f.exec_count
         assert p._saturation_gate() is True
 
