@@ -694,6 +694,7 @@ def cmd_fuzz(args):
         seed_codel_scheduler=getattr(args, "seed_codel_scheduler", False),
         seed_aimd_scheduler=getattr(args, "seed_aimd_scheduler", False),
         seed_p2c_scheduler=getattr(args, "seed_p2c_scheduler", False),
+        seed_dpp_scheduler=getattr(args, "seed_dpp_scheduler", False),
         seed_consolidated_scheduler=getattr(args, "seed_consolidated_scheduler", False),
         pos_consolidated=getattr(args, "pos_consolidated", False),
         pos_good_turing=getattr(args, "pos_good_turing", False),
@@ -3229,6 +3230,13 @@ def main() -> int:
         help="Seed-arena arm 'p2c': power of two choices: two uniform draws, higher posterior mean"
         " of finds wins. Elo arm; also the no-elo pick when enabled "
         "(core/schedulers/seed_p2c.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-dpp-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'dpp': determinantal point process over hashed edge sets; favours "
+        "rare-edge seeds unlike the last 8 picks. Elo arm; also the no-elo pick when enabled "
+        "(core/schedulers/seed_dpp.py). Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--seed-newest-scheduler",

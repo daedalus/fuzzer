@@ -115,6 +115,7 @@ _OS_SEED_ARMS = {
     "p2c": "_seed_p2c",
     "newest": "_seed_newest",
     "frontier": "_seed_frontier",
+    "dpp": "_seed_dpp",
 }
 _OS_SEED_SIGNALS = {
     "stride": ("weight",),

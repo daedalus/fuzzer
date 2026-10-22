@@ -87,6 +87,9 @@ _EXCLUDED_OPT_IN = frozenset(
         # its own A/B (bench_paired seed-newest-p* arms), same criterion as
         # gate_bonus / temperature_control.
         "seed_newest_scheduler",
+        # Unmeasured: the DPP seed arm (core/schedulers/seed_dpp.py) stays out
+        # until it wins its bench_paired seed-dpp A/B.
+        "seed_dpp_scheduler",
         # Unmeasured: the Kadane window position arm (core/schedulers/pos_kadane.py)
         # stays out until it wins its own A/B (docs/TODO.md), same criterion as
         # seed_newest_scheduler above.

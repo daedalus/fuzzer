@@ -183,6 +183,9 @@ ARMS: dict[str, list[str]] = {
     # Growing Tree seed arms (see SEED_NEWEST_PCTS). No --elo: the arm is the
     # sole seed strategy, so each differs from `baseline` by that one picker.
     "seed-round-robin": ["--seed-round-robin-scheduler"],
+    # DPP seed arm (docs/handover/handover_dpp_seed_selector_2026-10-22.md):
+    # sole seed strategy without --elo, same single-knob pairing as above.
+    "seed-dpp": ["--seed-dpp-scheduler"],
     **{
         f"seed-newest-p{pct}": ["--seed-newest-scheduler", "--seed-newest-p", str(pct / 100)]
         for pct in SEED_NEWEST_PCTS
@@ -290,6 +293,7 @@ ARM_BASELINES: dict[str, str] = {
     "pos-round-robin": "baseline",
     "pos-fibonacci": "baseline",
     **{arm: "baseline" for arm in GROWING_TREE_ARMS},
+    "seed-dpp": "baseline",
     "elo-good-turing-seed": "elo",
     "elo-op-good-turing": "elo",
     "edge-clusters": "baseline",

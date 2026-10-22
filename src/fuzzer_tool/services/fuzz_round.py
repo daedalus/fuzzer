@@ -1099,6 +1099,14 @@ class FuzzRound:
         # past the per-pick budget the seed-picker profiling established.
         if f._tang is not None:
             f._tang.maybe_refit(f._edge_tracker, f.exec_count)
+        self._refit_dpp()
+
+    def _refit_dpp(self) -> None:
+        # DPP kernel rebuild: off the pick path like Tang's; interval gated inside.
+        f = self._f
+        if f._seed_dpp is None:
+            return
+        f._seed_dpp.maybe_refit(f._edge_tracker, f.exec_count)
 
     def _feed_weizz(self) -> None:
         # Weizz structure tags: once-per-lineage passive collection after a
