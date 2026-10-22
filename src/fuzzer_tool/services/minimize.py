@@ -23,6 +23,7 @@ from pathlib import Path
 
 from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.filesystem import hash_data
+from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
 from fuzzer_tool.core.set_cover import min_cover
 
@@ -292,6 +293,10 @@ def _minimize_with_coverage(
 ) -> tuple[int, int]:
     """Greedy set-cover, rate-distortion or minimax-robust pruning over SHM edge bitmaps."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
+
+    # Caller-context edge ids hash a raw return address; with ASLR on, every
+    # replay reports fresh ids and set-cover runs on noise. Same as fuzz.
+    disable_aslr()
 
     # One segment, reset between files, owned by ShmCoverage.
     #

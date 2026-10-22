@@ -1287,6 +1287,8 @@ fuzzer-tool minimize ./t.so -d corpus -c --inprocess --inprocess-direct # direct
 
 `-c` alone spawns the target, so a `.so` never produced an edge and the blackout guard refused to prune. `--inprocess*` pick the `fuzz` backends (`services/minimize.py::ExecMode`); `--inprocess-func` names the entry (default `LLVMFuzzerTestOneInput`, probed like `fuzz`). An ELF executable stays on spawn. Direct modes call `__afl_map_reset` before each seed (`InProcessRunner.reset_exec_state`): nothing else zeroes `prev_loc` between in-process calls, so equal inputs got different edge ids. A runner that cannot start (missing entry, failed dlopen) keeps the whole corpus. Tests: `tests/test_minimize_inprocess.py`.
 
+`minimize -c` calls `disable_aslr()` like `fuzz`: caller-context edge ids hash a raw return address, so under PIE+ASLR each replay got fresh ids and set-cover ran on noise (fuzzgoat: 3070 phantom edges, 430 -> 376 seeds, kept set re-replayed at 2912; fixed: 501, 430 -> 131, re-replay 501). `FUZZER_KEEP_ASLR=1` is honoured (shim uses base-relative ids). Tests: `tests/test_regression_minimize_aslr.py`.
+
 ### Set cover (`core/set_cover.py`)
 
 `minimize -c` and `auto_minimize_corpus` (`_greedy_cover`) share `min_cover`: collapse identical edge sets, force seeds that are the sole holder of an edge, drop dominated seeds, lazy greedy, then drop redundant picks. Greedy alone can keep a seed that later picks made redundant (`A={1,2,3,4} B={1,2,5} C={3,4,6}`: greedy A,B,C; forced B,C).
