@@ -225,6 +225,7 @@ _DELOCALISED_OPS = frozenset(
         "block_shuffle_variable",
         "byte_shuffle",
         "chunk_shuffle",
+        "coupled_pair",
         "grimoire_extend",
         "grimoire_recurse",
         "grimoire_string",
@@ -3579,16 +3580,18 @@ class OperatorEngine:
         tracker = getattr(self.f, "_byte_interaction", None)
         pairs = tracker.pairs(data) if tracker is not None else ()
 
-        # Pairs are (i, j) with i < j: j inside the buffer covers both.
+        # Parent offsets only hold while no earlier op in the stack resized
+        # the buffer. Pairs are (i, j) with i < j: j inside covers both.
         n = len(buf)
-        live = [p for p in pairs if p[1] < n]
+        live = [p for p in pairs if p[1] < n] if n == len(data) else ()
         if not live:
             return self._op_declined("coupled_pair", buf)
 
+        # Offset 1..255: both bytes always change.
         rng = self.ctx._rng
         i, j = rng.choice(live)
-        buf[i] = rng.randint(0, 255)
-        buf[j] = rng.randint(0, 255)
+        buf[i] = (buf[i] + rng.randint(1, 255)) & 0xFF
+        buf[j] = (buf[j] + rng.randint(1, 255)) & 0xFF
 
     def _op_magic_byte_search(self, buf, _byte_idx, _data):
         """Plant a cmplog operand verbatim at a candidate site (Angora MB)."""

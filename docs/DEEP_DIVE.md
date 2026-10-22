@@ -2074,11 +2074,14 @@ MIT
 ```
 FuzzRound._sensitize → scores ─┐
 FuzzRound._interact  → top-8 offsets → 8 singles + 28 pairs → I_ij ≥ 0.02 → pairs
-_op_coupled_pair     → pick pair → rewrite both bytes
+_op_coupled_pair     → pick pair → add 1..255 to both bytes
 ```
 
 - Runs on the parent before `_execute`, once `fuzz_count ≥ cost()` (36). Implies `--sensitivity`. Per-seed FIFO cache (50 seeds), not persisted.
 - One perturbation value per offset, shared by singles and pairs. AND gates (+1) and XOR cancellation (−2) both register.
+- Top-8 is padded with random unscored offsets: a pure AND gate scores 0 per byte, and `--sensitivity` samples 2% of offsets.
+- `coupled_pair` declines when the buffer length differs from the parent's (offsets shifted) and is in `_DELOCALISED_OPS` (two sites, no single offset).
+- Status line: `pairs: coupled/analyzed seeds`.
 - `mixed_difference` kept as a per-edge loop: the set-algebra form (`|A^B^C^D| + 2·(|AD−(B∪C)| + |BC−(A∪D)|)`) was 15–40% slower at 100–20k edges, numpy 40% slower (conversion cost).
 - Unmeasured on a real target; not in `--hail-mary`.
 

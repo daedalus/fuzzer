@@ -20,8 +20,9 @@ Example: edge 99 fires only when both bytes change (an AND gate)::
 
     x_0 = 0, x_i = 0, x_j = 0, x_ij = 1  ->  d2 = +1
 
-Cost: only the ``top_k`` offsets with the highest first-order score are
-probed, ``k`` singles plus ``k*(k-1)/2`` pairs. Coupled pairs feed the
+Cost: only ``top_k`` offsets are probed -- highest first-order score
+first, padded with random unscored offsets -- ``k`` singles plus
+``k*(k-1)/2`` pairs. Coupled pairs feed the
 ``coupled_pair`` operator. Not persisted across ``--resume``.
 """
 
@@ -120,11 +121,21 @@ class ByteInteractionTracker:
         return found
 
     def _hottest(self, seed: bytes, scores) -> list[int]:
-        # Top-k positive first-order offsets inside the seed, ascending.
-        n = min(len(seed), len(scores))
-        live = [i for i in range(n) if scores[i] > 0.0]
+        # Top-k positive first-order offsets, padded with random unscored
+        # ones: a pure AND gate scores 0 per byte, and --sensitivity samples
+        # only a fraction of offsets, so first order alone would miss it.
+        n = len(seed)
+        m = min(n, len(scores))
+        live = [i for i in range(m) if scores[i] > 0.0]
         live.sort(key=lambda i: (-scores[i], i))
-        return sorted(live[: self._top_k])
+        hot = live[: self._top_k]
+
+        need = min(self._top_k, n) - len(hot)
+        if need > 0:
+            taken = set(hot)
+            rest = [i for i in range(n) if i not in taken]
+            hot += self._rng.sample(rest, need)
+        return sorted(hot)
 
     def _probe(self, seed: bytes, e0: set[int], exec_fn, hot: list[int]) -> list[tuple[int, int]]:
         # One value per offset, reused by singles and pairs so the mixed
