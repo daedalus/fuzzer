@@ -247,3 +247,26 @@ class TestCuckooDedupBackend:
     def test_backend_unknown_raises(self):
         with pytest.raises(ValueError):
             _StubFuzzer([b"x"], backend="bogus")
+
+
+class TestDigestApi:
+    def test_digest_methods_match_bytes_methods(self):
+        a = BloomFilter(capacity=500, error_rate=1e-3)
+        b = BloomFilter(capacity=500, error_rate=1e-3)
+        keys = [i.to_bytes(3, "big") for i in range(300)] * 2
+
+        for k in keys:
+            assert a.update_digest(BloomFilter.digest_bytes(k)) == b.update_bytes(k)
+        assert a._bits == b._bits
+        assert all(a.query_digest(BloomFilter.digest_bytes(k)) for k in keys)
+        assert a.n_queries == b.n_queries + len(keys)
+
+    def test_digest_reset_on_full(self):
+        # Adversarial: generational wipe must fire on the digest path too.
+        bf = BloomFilter(capacity=4, error_rate=1e-3)
+        digests = [BloomFilter.digest_bytes(bytes([i])) for i in range(5)]
+        for d in digests[:4]:
+            bf.update_digest(d, reset_on_full=True)
+        bf.update_digest(digests[4], reset_on_full=True)
+        assert bf.n_added == 1
+        assert bf.query_digest(digests[0]) is False

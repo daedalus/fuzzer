@@ -203,6 +203,61 @@ class TestFuzzerSkip:
         assert f._exec_bloom.n_added == 0
 
 
+class _CountingSha:
+    """Counts ``hashlib.sha256`` calls made by ``core.bloom``."""
+
+    def __init__(self, real):
+        self._real = real
+        self.calls = 0
+
+    def __call__(self, data=b""):
+        self.calls += 1
+        return self._real(data)
+
+
+def _count_sha(monkeypatch):
+    import fuzzer_tool.core.bloom as bloom_mod
+
+    counter = _CountingSha(bloom_mod.hashlib.sha256)
+    monkeypatch.setattr(bloom_mod.hashlib, "sha256", counter)
+    return counter
+
+
+class TestSingleHash:
+    def test_regression_neg_bloom_hashes_mutant_once(self, monkeypatch):
+        # Control: exec bloom alone hashes once.
+        f = _StubFuzzer(None)
+        sha = _count_sha(monkeypatch)
+        f._is_repeat(b"fresh", b"parent")
+        assert sha.calls == 1
+
+        # Negative bloom + exec bloom share that one digest.
+        g = _StubFuzzer(build([b"seed-a"]))
+        sha.calls = 0
+        g._is_repeat(b"fresh", b"parent")
+        assert sha.calls == 1
+
+    def test_shared_digest_matches_independent_filter(self):
+        # Falsification: reference exec filter fed through update_bytes.
+        f = _StubFuzzer(build([b"seed-a"]))
+        ref = BloomFilter(capacity=64, error_rate=1e-3)
+        mutants = [i.to_bytes(4, "big") for i in range(150)] * 2  # repeats + wipe
+
+        for m in mutants:
+            assert f._is_repeat(m, b"parent") == ref.update_bytes(m, reset_on_full=True)
+        assert f._exec_bloom._bits == ref._bits
+
+    def test_cuckoo_exec_backend_with_neg_bloom(self):
+        # Adversarial: the shared int digest must never reach a cuckoo filter.
+        from fuzzer_tool.core.cuckoo import CuckooFilter
+
+        f = _StubFuzzer(build([b"seed-a"]))
+        f._exec_bloom = CuckooFilter(capacity=64)
+        assert f._is_repeat(b"fresh", b"parent") is False
+        assert f._is_repeat(b"fresh", b"parent") is True
+        assert f._is_repeat(b"seed-a", b"parent") is True
+
+
 def _make_corpus(root, seeds):
     sd = root / "seeds"
     sd.mkdir(parents=True)

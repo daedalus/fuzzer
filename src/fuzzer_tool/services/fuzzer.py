@@ -5829,10 +5829,14 @@ class Fuzzer:
         """True when executing *mutated* would re-run a known input."""
         # Negative bloom: user-provided filter of known inputs. Checked
         # before anything else; independent of --no-dedup-execs.
+        # Its digest is reused by a bloom exec filter: one SHA-256 per mutant.
+        digest = None
         neg_bloom = getattr(self, "_neg_bloom", None)
-        if neg_bloom is not None and neg_bloom.query_bytes(bytes(mutated)):
-            self._neg_bloom_hits += 1
-            return True
+        if neg_bloom is not None:
+            digest = BloomFilter.digest_bytes(bytes(mutated))
+            if neg_bloom.query_digest(digest):
+                self._neg_bloom_hits += 1
+                return True
 
         # Pruned seed: own opt-in, independent of --no-dedup-execs.
         if self.cuckoo_seed_filter is not None:
@@ -5847,6 +5851,8 @@ class Fuzzer:
         if mutated == data:
             return True
         if not self._orbit_specs:
+            if digest is not None and isinstance(self._exec_bloom, BloomFilter):
+                return self._exec_bloom.update_digest(digest, reset_on_full=True)
             return self._exec_bloom.update_bytes(bytes(mutated), reset_on_full=True)
 
         # Orbit mode: same orbit as the parent, or as a past mutant, is a repeat.

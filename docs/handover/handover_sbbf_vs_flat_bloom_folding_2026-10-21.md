@@ -320,3 +320,47 @@ half = [leaves[i] | leaves[i + Z // 2] for i in range(Z // 2)]
 via_rev = [leaves[rev(2 * i, 6)] | leaves[rev(2 * i + 1, 6)] for i in range(Z // 2)]
 assert sorted(half) == sorted(via_rev)
 ```
+
+---
+
+## 12. Corrections (2026-10-22, independent re-analysis)
+
+Re-derived from the article, the uploaded script and `core/bloom.py` without
+reading this file first. Verdict stands: no SBBF. Corrections:
+
+1. **§7, negative bloom "already sized correctly": wrong.** `NEG_BLOOM_FACTOR=10`
+   over-provisions 8-16x. Realised FPR at save, target 1e-3:
+
+   | seeds | 10x RAM / FPR | 1x RAM / FPR |
+   |-------|---------------|--------------|
+   | 500 | 16 KiB / 6e-22 | 1 KiB / 4.4e-4 |
+   | 5,000 | 128 KiB / 4e-18 | 16 KiB / 1.5e-5 |
+   | 50,000 | 1 MiB / 1e-14 | 128 KiB / 2.0e-5 |
+
+   Keeping 10x is still right, for a different reason: a negative-bloom false
+   positive skips a novel mutant unexecuted; 1x loses ~1 in 2,300 at 500 seeds
+   to save at most ~1 MiB.
+2. **§7, corpus filter "grows unbounded across sessions": wrong.**
+   `Fuzzer.bloom` (100k, sliced) is never persisted; `load_corpus` rebuilds it
+   every start, and an exact set backs it.
+3. **§4, "Rule 16 requires xxh64": misread.** Rule 16 is the PRNG rule. The
+   xxh64 rule (`hash_data()`) covers filename/content matching, not bloom keys.
+4. **§8/§9 omit the flat fold.** Half-overlay (`bits[:m/2] | bits[m/2:]`) is the
+   *correct* fold for `core/bloom.py`, which indexes by low bits (`& mask`).
+   Double-hash mode: FN 0/20000. Sliced mode: FN 19998/20000 unless the
+   original slice width is kept (then 0). So a fold needs no new module: a
+   `BloomFilter.fold()` plus a persisted slice width (`from_dict` recomputes it
+   from `m` today).
+5. **Uploaded script misses its target.** `estimated_fpp = occupancy**8`
+   (Jensen): observed FPR exceeded `target_fpp` in 9/100 configs (n=13000,
+   target 0.01: est 0.0081, observed 0.0115). Exact per-block
+   `mean(prod(word_fill))` matched observed. `for_capacity` floors (360 bits
+   requested -> 256).
+6. **Shipped instead:** `_is_repeat` hashed each mutant twice with
+   `--negative-bloom`. Now one `BloomFilter.digest_bytes` feeds
+   `query_digest` / `update_digest`: 64 B -15%, 16 KiB -43%, default path
+   unchanged.
+
+Fold-sized SBBF vs flat, matched FPR target, 5k-500k keys, misses only,
+bytearray SBBF with flat-identical bit addressing: query 0.71-0.93x of flat,
+wall 1.02-1.54x slower, zip size set by power-of-two rounding (0.85-1.83x).

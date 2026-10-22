@@ -426,10 +426,11 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Integration flow**:
   1. `fuzzer-tool negative-bloom` builds and saves the filter.
   2. `fuzzer-tool fuzz --negative-bloom neg.pkl.gz` loads it and passes it to ``Fuzzer(negative_bloom=bf)``.
-  3. ``Fuzzer._is_repeat()`` consults ``self._neg_bloom.query_bytes(bytes(mutated))`` **first**, before any exec bloom or dedup check. A hit increments ``self._neg_bloom_hits`` and returns `True` (mutant skipped).
+  3. ``Fuzzer._is_repeat()`` takes ``BloomFilter.digest_bytes(bytes(mutated))`` once and consults ``self._neg_bloom.query_digest(digest)`` **first**, before any exec bloom or dedup check. A hit increments ``self._neg_bloom_hits`` and returns `True` (mutant skipped).
   4. If the negative bloom misses (mutant is new), execution proceeds normally; the exec bloom still dedupes repeats independently.
+  5. A bloom exec filter (non-orbit path) reuses that digest via ``update_digest``: one SHA-256 per mutant instead of two. Measured `_is_repeat` with the negative bloom: 64 B -15%, 16 KiB -43%; default path (no negative bloom) unchanged. Cuckoo and orbit keys hash their own input.
 - **Stats**: ``self._neg_bloom_hits`` is printed in the run summary as ``Negative bloom: N mutants skipped`` (following the same `getattr` pattern as exec dedup and orbit dedup).
-- **Counters**: ``n_queries`` / ``n_accepted`` / ``n_rejected`` in the `BloomFilter` accumulate during the initial build via ``update_bytes``. During fuzzing, only ``query_bytes`` is called (which increments ``n_queries`` but not ``n_accepted``/``n_rejected`` since nothing is inserted), and the hit counter ``_neg_bloom_hits`` tracks fuzzing-time skips.
+- **Counters**: ``n_queries`` / ``n_accepted`` / ``n_rejected`` in the `BloomFilter` accumulate during the initial build via ``update_bytes``. During fuzzing, only ``query_digest`` is called (which increments ``n_queries`` but not ``n_accepted``/``n_rejected`` since nothing is inserted), and the hit counter ``_neg_bloom_hits`` tracks fuzzing-time skips.
 - **Comparison with exec dedup**: The exec bloom (`_exec_bloom`) is a generational running filter (wipes after 500K entries) that tracks all executed mutants in-process. The negative bloom is a static corpus filter that can be shared across runs and never evolves. They are complementary: negative bloom is checked first, exec bloom afterwards, and each hit increments its own independent counter.
 - **Failures**: A corrupted or wrong-version pickle raises ``NegativeBloomError`` → ``SystemExit`` from ``load_negative_bloom``. The `--no-negative-bloom` effect is the default when the flag is omitted.
 

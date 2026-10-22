@@ -177,9 +177,28 @@ class BloomFilter:
                 the configured bound for unbounded streams at the cost of
                 forgetting older keys — a generational filter in one array.
         """
+        # Inlined, not delegated to update_digest: the extra call frames cost
+        # ~10% on the default exec-dedup path (64-byte inputs).
         if reset_on_full and self.n_added >= self.capacity:
             self.clear()
         value = int.from_bytes(hashlib.sha256(key).digest(), "big")
+        self.n_queries += 1
+        if self._check(value):
+            self.n_rejected += 1
+            return True
+        self._set(value)
+        self.n_accepted += 1
+        return False
+
+    @staticmethod
+    def digest_bytes(key: bytes) -> int:
+        """Digest of *key* for the ``*_digest`` methods: hash once, probe many filters."""
+        return int.from_bytes(hashlib.sha256(key).digest(), "big")
+
+    def update_digest(self, value: int, reset_on_full: bool = False) -> bool:
+        """:meth:`update_bytes` on a precomputed :meth:`digest_bytes` value."""
+        if reset_on_full and self.n_added >= self.capacity:
+            self.clear()
         self.n_queries += 1
         if self._check(value):
             self.n_rejected += 1
@@ -205,6 +224,11 @@ class BloomFilter:
         """
         self.n_queries += 1
         return self._check(int.from_bytes(hashlib.sha256(key).digest(), "big"))
+
+    def query_digest(self, value: int) -> bool:
+        """:meth:`query_bytes` on a precomputed :meth:`digest_bytes` value."""
+        self.n_queries += 1
+        return self._check(value)
 
     def to_dict(self) -> dict[str, object]:
         """Serialise to a plain dict (gzip+pickle on the wire).
