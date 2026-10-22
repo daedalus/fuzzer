@@ -9,6 +9,7 @@ run on an input that must fail it, so the oracle can fail.
 import itertools
 import math
 from fractions import Fraction
+from types import SimpleNamespace
 
 import pytest
 
@@ -54,6 +55,43 @@ class TestRegistration:
         data = _seeded(1)
         out = dispatch[name](bytearray(data), 0, data)
         assert out is not None and len(out) == len(data)
+
+    @pytest.mark.parametrize("name", OPS)
+    def test_regression_zero_max_len_is_uncapped(self, name):
+        # MutationContext: max_len 0 means uncapped; [:0] emptied every result.
+        fuzzer = _MockFuzzer()
+        fuzzer._rng = RandPool(seed=7)
+        fuzzer.max_len = 0
+        dispatch = REGISTRY.dispatch(OperatorEngine(fuzzer))
+        data = _seeded(1)
+        assert len(dispatch[name](bytearray(data), 0, data)) == len(data)
+
+    @pytest.mark.parametrize(("max_len", "want"), [(0, b"abcdef"), (4, b"abcd")])
+    def test_regression_pipeline_clamp_zero_is_uncapped(self, max_len, want):
+        # mutate()'s post-op clamp: 0 is uncapped, a real cap (control) clamps.
+        fuzzer = _MockFuzzer()
+        fuzzer._rng = RandPool(seed=7)
+        fuzzer.max_len = max_len
+        fuzzer._last_ops_used, fuzzer._last_ops_with_sites = [], []
+        fuzzer._last_ops_applicable = set()
+        fuzzer._op_attempts, fuzzer._last_op_costs, fuzzer._op_time_ema = {}, {}, {}
+        fuzzer._frameshift = SimpleNamespace(relations=None)
+        fuzzer._op_dispatch = {"bit_flip": lambda _b, _i, _d: bytearray(b"abcdef")}
+        engine = OperatorEngine(fuzzer)
+        engine._plan_position = lambda *_a: 0
+
+        out = engine._apply_op_once("bit_flip", bytearray(b"xyz"), b"xyz", False)
+        assert bytes(out) == want
+
+    @pytest.mark.parametrize("name", OPS)
+    def test_nonzero_max_len_still_caps(self, name):
+        # Control: a real cap still clamps.
+        fuzzer = _MockFuzzer()
+        fuzzer._rng = RandPool(seed=7)
+        fuzzer.max_len = 8
+        dispatch = REGISTRY.dispatch(OperatorEngine(fuzzer))
+        data = _seeded(1)
+        assert len(dispatch[name](bytearray(data), 0, data)) == 8
 
     @pytest.mark.parametrize("name", OPS)
     @pytest.mark.parametrize("data", (b"", b"\x11"))
@@ -401,12 +439,24 @@ class TestHadamardOA:
         assert len(set(rows)) == 16
         assert all(bin(a ^ b).count("1") == 8 for a, b in itertools.combinations(rows, 2))
 
-    def test_every_column_pair_sees_all_four_combinations(self):
-        # Strength-2 orthogonal array: over the 16 rows, each column pair hits 00/01/10/11 4 times.
-        rows = F.HADAMARD_ROWS
-        for i, j in itertools.combinations(range(1, 16), 2):
-            counts = {(r >> i & 1, r >> j & 1) for r in rows}
-            assert counts == {(0, 0), (0, 1), (1, 0), (1, 1)}
+    @staticmethod
+    def _balanced(rows) -> bool:
+        # Strength 2: every column pair hits 00/01/10/11 exactly len(rows)/4 times.
+        want = {(a, b): len(rows) // 4 for a in (0, 1) for b in (0, 1)}
+        for i, j in itertools.combinations(range(1, F.OA_ORDER), 2):
+            pairs = [(r >> i & 1, r >> j & 1) for r in rows]
+            if {c: pairs.count(c) for c in want} != want:
+                return False
+        return True
+
+    def test_every_column_pair_is_balanced(self):
+        assert self._balanced(F.HADAMARD_ROWS)
+
+    def test_balance_oracle_rejects_duplicate_row(self):
+        # Control: one row repeated keeps all four combinations but skews counts.
+        rows = list(F.HADAMARD_ROWS)
+        rows[1] = rows[2]
+        assert not self._balanced(rows)
 
     def test_orthogonality_oracle_rejects_identity_rows(self):
         assert bin(0x0001 ^ 0x0002).count("1") != 8

@@ -31,9 +31,11 @@ def _extract() -> str:
     return body
 
 
-def _run(tmp_path: Path, cc_exit: int) -> list[str]:
+def _run(tmp_path: Path, cc_exit: int, version: str = "clang version 18.1.3") -> list[str]:
     cc = tmp_path / "fakecc"
-    cc.write_text(f"#!/bin/sh\nexit {cc_exit}\n")
+    cc.write_text(
+        f'#!/bin/sh\n[ "$1" = --version ] && {{ echo "{version}"; exit 0; }}\nexit {cc_exit}\n'
+    )
     cc.chmod(0o755)
     script = textwrap.dedent(
         f"""
@@ -57,6 +59,16 @@ def test_regression_missing_runtime_skips_asan_and_counts_failure(tmp_path):
 
     assert out[-1] == "0 1"
     assert any("libclang-rt" in line for line in out[:-1])
+
+
+def test_regression_gcc_gets_gcc_runtime_advice(tmp_path):
+    """A gcc probe failure must not point at clang's runtime package."""
+    out = _run(tmp_path, cc_exit=1, version="gcc (Debian 14.2.0-19) 14.2.0")
+
+    assert out[-1] == "0 1"
+    warning = " ".join(out[:-1])
+    assert "libasan" in warning
+    assert "libclang-rt" not in warning
 
 
 def test_runtime_present_keeps_asan(tmp_path):

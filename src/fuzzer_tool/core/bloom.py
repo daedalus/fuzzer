@@ -326,6 +326,11 @@ class BloomFilter:
         bf.n_accepted = state["n_accepted"]
         bf.n_rejected = state["n_rejected"]
         bf._recent_keys = None
+
+        # Folded (slice wider than log2(m)): payloads saved before the refit
+        # carry a halved capacity below n_added.  Refit is idempotent otherwise.
+        if bf._bits_per_slice > bf.m.bit_length() - 1:
+            bf._refit_capacity()
         return bf
 
     @classmethod
