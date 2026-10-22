@@ -2084,7 +2084,18 @@ _op_coupled_pair     → pick pair → add 1..255 to both bytes
 - `coupled_pair` declines when the buffer length differs from the parent's (offsets shifted) and is in `_DELOCALISED_OPS` (two sites, no single offset).
 - Status line: `pairs: coupled/analyzed seeds`.
 - `mixed_difference` kept as a per-edge loop: the set-algebra form (`|A^B^C^D| + 2·(|AD−(B∪C)| + |BC−(A∪D)|)`) was 15–40% slower at 100–20k edges, numpy 40% slower (conversion cost).
-- Unmeasured on a real target; not in `--hail-mary`.
+- A/B 2026-10-22, FFmpeg 9.0.2 clang+ASAN (`ffmpeg_read_9.0.2_asan.so`), WAV seeds, `-D wav.dict`, 600 s wall per run (~52 s startup), 4 paired seeds, 2 runs concurrent. Inconclusive; not in `--hail-mary`.
+
+| seed | base | `--sensitivity` | `--byte-interaction` |
+|---|---|---|---|
+| 1 | 21000 | 22040 | 18749 |
+| 2 | 21192 | 18764 | 19952 |
+| 3 | 20960 | 19685 | 20280 |
+| 4 | 21094 | 20093 | 15075 |
+
+  - `--sensitivity` vs base: 1/4 wins, median Δ −1138 edges (sign p=0.63). Execs −14% to −36%; seed 4 fuzzer-side cycle 113 ms vs 22 ms base.
+  - `--byte-interaction` vs `--sensitivity`: 2/4 wins, median Δ −1348 (p=1.0). Pairs found on every analyzed seed (8–19). Seed 4 ran 5.7k execs at 9 eps: one bad run dominates.
+  - 3 concurrent runs OOM'd the 16 GB cgroup (5–7 GB RSS each); one hung in native code and ignored SIGINT.
 
 ### Swap walk, pooled colorization, screening (2026-09-30)
 
