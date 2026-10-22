@@ -434,6 +434,13 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 - **Comparison with exec dedup**: The exec bloom (`_exec_bloom`) is a generational running filter (wipes after 500K entries) that tracks all executed mutants in-process. The negative bloom is a static corpus filter that can be shared across runs and never evolves. They are complementary: negative bloom is checked first, exec bloom afterwards, and each hit increments its own independent counter.
 - **Failures**: A corrupted or wrong-version pickle raises ``NegativeBloomError`` → ``SystemExit`` from ``load_negative_bloom``. The `--no-negative-bloom` effect is the default when the flag is omitted.
 
+### Bloom Folding (`BloomFilter.fold` / `fold_to`, not wired)
+- **What**: shrink a flat `BloomFilter` in place after the data is in, instead of guessing `capacity` up front (Parquet SBBF folding, applied to the flat layout).
+- **Fold**: probes are `p & (m-1)`, so halving `m` maps bit `i + m/2` onto bit `i`: `bits[:m/2] | bits[m/2:]` (numpy, 0.33 ms per MiB). Not adjacent pairs: that is the SBBF fold, for a high-bits block index. `k` and `capacity // 2` follow; `n_added` stays.
+- **Slice width kept**: sliced mode reads slice *i* at `i * _bits_per_slice`. Re-deriving the width from the new `m` loses ~all keys (19998/20000 measured); keeping it loses none. Persisted as `slice_bits` (bloom dict v2; v1 payloads load with `log2(m)`).
+- **`fold_to(target)`**: folds while `fill ** k <= target`, scoring each candidate on its real popcount, not `n_added`. Stops at `MIN_FOLD_BITS` (16).
+- **Wiring**: none. The negative bloom (`NEG_BLOOM_FACTOR=10`) is the only fit, and 1x sizing there costs ~1 in 2,300 skipped novel mutants at 500 seeds (handover `sbbf_vs_flat_bloom_folding` §12).
+
 ### Zip Seed Corpus (`--zip-seed-corpus`)
 
 Off by default (loading is not: see below). New full seeds (`seeds/`, `irreplaceable/`, `crashing/`, `timeouts/`) go only to `corpus/seeds.zip`, deflate level 9; loading unions `seeds/**` with the zip. Deltas stay in `deltas/`. Code: `adapters/seed_zip.py`.
