@@ -1,5 +1,20 @@
 # Plan: DPP seed selector (2026-10-22)
 
+## Status
+Implemented: `core/schedulers/seed_dpp.py`, `tests/test_seed_dpp.py`, wired as
+below. Deviations from the plan:
+- Not exported from `core/schedulers/__init__.py`. The OS arms (`p2c`, `drr`,
+  `newest`) aren't exported, so the export tests are untouched.
+- No banner line, for the same reason.
+- The refit hook is `FuzzRound._refit_dpp()`, called from `_feed_models`.
+- The bench arm is `seed-dpp` vs `baseline` (no `--elo`), as with `seed-round-robin`.
+- Speed: per-seed (edge ids, hashed row) cache plus bincount frequencies.
+  Warm refit went from 2.1 s to 0.45 s at 10k×2000 incidences.
+  `np.unique(return_inverse=True)` alone was 4 s.
+- Pick path: key→row index cached on key-list identity, 1.3 → 0.7 ms at 10k seeds.
+
+A/B still open (`docs/TODO.md`).
+
 ## Ask
 Seed arm that favours seeds whose coverage differs from the seeds picked just
 before them. The aim is fewer near-duplicate seeds back to back without

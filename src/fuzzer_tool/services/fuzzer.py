@@ -148,6 +148,7 @@ from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedSchedu
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
+from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
 from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST, SeedNewestScheduler
 from fuzzer_tool.core.schedulers.seed_p2c import SeedP2CScheduler
 from fuzzer_tool.core.schedulers.seed_sfq import SeedSFQScheduler
@@ -284,6 +285,7 @@ _SEED_STRATEGY_NAMES = (
     "newest",
     "consolidated",
     "frontier",
+    "dpp",
 )
 
 
@@ -1899,6 +1901,9 @@ class Fuzzer:
         # known inputs; a mutant in it is skipped before execution. None
         # disables the mode. Appended: positional signature.
         negative_bloom=None,
+        # Seed-arena DPP arm (core/schedulers/seed_dpp.py): favours seeds whose
+        # coverage differs from the last few picks. Off by default; appended.
+        seed_dpp_scheduler=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3255,6 +3260,7 @@ class Fuzzer:
         self._seed_consolidated = (
             SeedConsolidatedScheduler(rng=self._rng) if seed_consolidated_scheduler else None
         )
+        self._seed_dpp = SeedDPPScheduler(rng=self._rng) if seed_dpp_scheduler else None
         self._frontier_oracle = None
         self._seed_frontier = None
         if frontier_bin:
@@ -3273,6 +3279,7 @@ class Fuzzer:
                 self._seed_p2c,
                 self._seed_newest,
                 self._seed_frontier,
+                self._seed_dpp,
             )
             if arm is not None
         )
