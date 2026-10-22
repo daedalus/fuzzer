@@ -604,6 +604,12 @@ static uint64_t *__afl_path_hash   = NULL;   /* offset 8:  uint64 */
 static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
 static uint64_t *__afl_dropped     = NULL;   /* offset 24: uint64 */
 
+/* Stack-depth sampling on/off. $__AFL_STACK_DEPTH ("0" or "1", read once at
+ * attach) turns it off where nothing reads offset 0: the fuzzer exports 0
+ * unless --honggfuzz, the depth's only consumer (-11 Ir/edge). Unset keeps
+ * it on, so one-shot runs and external readers see the live value. */
+static int __afl_stack_on = 1;
+
 /* Touched-slot bitmap (optional region after the distance tail, see
  * adapters/shm.py SHM_TOUCHED_*). NULL unless the segment was sized for it:
  * a segment without the region is the old layout and is never written past
@@ -1116,6 +1122,20 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
         }
     }
 
+    /* Runtime stack-depth switch; see __afl_stack_on. */
+    {
+        const char *sd = getenv("__AFL_STACK_DEPTH");
+        if (sd && sd[0] && !sd[1] && (sd[0] == '0' || sd[0] == '1')) {
+            __afl_stack_on = sd[0] == '1';
+        } else if (sd && sd[0]) {
+            char msg[128];
+            int n = snprintf(msg, sizeof(msg),
+                             "__afl_shim: __AFL_STACK_DEPTH=%.16s is not 0 or 1"
+                             " -- ignored, stack depth=%d\n", sd, __afl_stack_on);
+            if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+        }
+    }
+
     /* Edge table starts after the front region */
     uint8_t *base = (uint8_t *)p;
     uint64_t *touched = NULL;
@@ -1424,19 +1444,21 @@ static inline uint32_t __afl_get_caller_ctx(void) {
      * resolve, when both are 0): this thread's TLS. */
     uintptr_t hi = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_main_hi);
     uintptr_t lo = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_main_lo);
-    if (cur < lo || cur >= hi) {
-        hi = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_hi);
-        if (!hi) hi = __afl_ctx_resolve_stack_hi();
-        lo = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_lo);
-    }
     /* caller_fp[0..1] (16 bytes) must lie wholly inside this thread's stack and
      * the slot must be 8-aligned; otherwise it is junk from a frame-pointer-less
      * callee and loading it can fault. */
-    if (hi <= 1 || (cfp & 7u) || cfp > hi - 16) return 0;
-    /* cur >= lo with cur < cfp <= hi - 16 puts the hop inside the stack, so
-     * no canonical-address test is needed (an x86 `cfp >> 47` one rejected
-     * every aarch64 stack with bit 47 set). */
-    if (cur < lo) return 0;
+    if (cur >= lo && cur < hi) {
+        /* Main stack: lo <= cur < hi already, so only the hop is checked. */
+        if ((cfp & 7u) || cfp > hi - 16) return 0;
+    } else {
+        hi = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_hi);
+        if (!hi) hi = __afl_ctx_resolve_stack_hi();
+        if (hi <= 1 || (cfp & 7u) || cfp > hi - 16) return 0;
+        /* cur >= lo with cur < cfp <= hi - 16 puts the hop inside the stack, so
+         * no canonical-address test is needed (an x86 `cfp >> 47` one rejected
+         * every aarch64 stack with bit 47 set). */
+        if (cur < (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_lo)) return 0;
+    }
     void *ra = __afl_raw_load(caller_fp + 1);   /* return addr into caller's caller */
     if (!ra) return 0;
 
@@ -1926,7 +1948,7 @@ __attribute__((visibility("default"), always_inline))
 static inline void __afl_map_loc(uint32_t cur_loc) {
     if (!__afl_area) return;
     __afl_wtok_t wk = __afl_wguard_open();
-    __afl_note_stack();
+    if (__afl_stack_on) __afl_note_stack();
 
     /* COMPCOV on: clear bit 31 of the hash, then carry bit 31 over from
      * cur_loc. Real callers never set it, so their ids never carry it; the one

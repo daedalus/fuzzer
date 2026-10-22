@@ -8,6 +8,7 @@ Real ``-fsanitize-coverage=trace-pc-guard`` builds under clang, like
 tests/test_shim_ctx_instrumented.py.
 """
 
+import inspect
 import os
 import shutil
 import subprocess
@@ -15,6 +16,8 @@ import subprocess
 import pytest
 
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.shim_health import STACK_DEPTH_ENV, export_stack_depth
+from fuzzer_tool.services.fuzzer import Fuzzer
 
 SHIM = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -97,13 +100,14 @@ def _build(tmp_path, *flags):
     return str(exe)
 
 
-def _depth(exe, mode, n):
+def _depth(exe, mode, n, **extra):
     cov = ShmCoverage(size=65536)
     try:
         env = dict(
             os.environ,
             __AFL_SHM_ID=str(cov.shm_id),
             AFL_MAP_SIZE=str(cov.num_entries),
+            **extra,
         )
         proc = subprocess.run([exe, mode, str(n)], env=env, capture_output=True, timeout=10)
         assert proc.returncode == 0, f"target died: rc={proc.returncode}"
@@ -147,3 +151,36 @@ def test_other_thread_stack_is_not_depth(tmp_path):
 def test_deep_recursion_reports_depth_under_asan(tmp_path):
     exe = _build(tmp_path, "-fsanitize=address")
     assert _depth(exe, "r", 400) >= 400 * FRAME_BYTES
+
+
+# ── __AFL_STACK_DEPTH: off when nothing reads it ───────────────────────
+# Only the --honggfuzz power schedule reads the depth; elsewhere the per-edge
+# frame sampling was paid for nothing.
+
+
+@needs_clang
+def test_depth_off_skips_tracking(tmp_path):
+    """Falsification: =0 publishes no depth for the same deep recursion."""
+    exe = _build(tmp_path)
+    assert _depth(exe, "r", 400, **{STACK_DEPTH_ENV: "0"}) == 0
+
+
+@needs_clang
+@pytest.mark.parametrize("value", ["1", "", "yes"])
+def test_depth_on_unless_exactly_zero(tmp_path, value):
+    """Adversarial: "1", empty and a typo all keep the build default (on)."""
+    exe = _build(tmp_path)
+    assert _depth(exe, "r", 400, **{STACK_DEPTH_ENV: value}) >= 400 * FRAME_BYTES
+
+
+def test_export_stack_depth(monkeypatch):
+    monkeypatch.setenv(STACK_DEPTH_ENV, "x")
+    export_stack_depth(False)
+    assert os.environ[STACK_DEPTH_ENV] == "0"
+    export_stack_depth(True)
+    assert os.environ[STACK_DEPTH_ENV] == "1"
+
+
+def test_fuzzer_exports_its_reader():
+    """The honggfuzz schedule is the only reader, so it decides."""
+    assert "export_stack_depth(honggfuzz)" in inspect.getsource(Fuzzer.__init__)
