@@ -578,6 +578,22 @@ const uint32_t __AFL_CAT(__afl_shm_layout_, __AFL_SHM_LAYOUT) = __AFL_SHM_LAYOUT
 static uint32_t __afl_map_size  = 8192;
 
 struct __afl_entry *__afl_area   = NULL;
+
+/* Guard path, chosen per edge by one flag instead of ~10 setting checks.
+ * FAST holds when the default setup does: table and header attached, write
+ * guard off, not mid-setup, ctx on and not ASLR-relative, COMPCOV off, no
+ * distance table (ffmpeg_read: -21 Ir/edge). __afl_fast is cleared before any
+ * of those inputs change and recomputed by __afl_fast_refresh() after, so
+ * it is never set while, say, __afl_area is NULL. */
+enum __afl_path {
+    __AFL_PATH_ANY,    /* every check */
+    __AFL_PATH_FAST,   /* what __afl_fast vouches for, folded away */
+    __AFL_PATH_LEAF,   /* FAST, main stack only: elsewhere the caller falls back */
+};
+static int __afl_fast = 0;
+/* noinline: __afl_map_shm is instrumented under clang, and inlined here the
+ * mode-dependent branches would record shim edges that differ by setting. */
+__AFL_NO_COV __attribute__((noinline)) static void __afl_fast_refresh(void);
 #if __AFL_NGRAM_K == 2
 uint32_t           __afl_prev_loc = 0;
 #else
@@ -953,6 +969,7 @@ static void *__afl_shm_seg = NULL;
 __AFL_GCC_NO_COV static void __afl_shm_detach(void) {
     void *seg = __afl_shm_seg;
     if (!seg) return;
+    __afl_fast = 0;
     __atomic_store_n(&__afl_area, NULL, __ATOMIC_RELAXED);
     __atomic_thread_fence(__ATOMIC_RELEASE);
     __afl_stack_depth = NULL;
@@ -982,6 +999,7 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     char *id = getenv("__AFL_SHM_ID");
     if (!id) return;   /* not under the fuzzer — silence is correct here */
     if (__afl_shm_refused && strcmp(id, __afl_shm_refused_id) == 0) return;
+    __afl_fast = 0;    /* everything below may change what it vouches for */
 
     /* Past this point the fuzzer has explicitly asked for coverage, so a
      * failure must not be silent. It used to be: all three early returns
@@ -1220,6 +1238,7 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     __afl_map_node_shm();
     __afl_mapping = 0;
 #endif
+    __afl_fast_refresh();
 }
 
 /* Copy up to n health counters (see __AFL_HEALTH_*) into out; returns the
@@ -1392,6 +1411,13 @@ static __thread uintptr_t __afl_ctx_stack_lo = 0;
  * is not an option, the shim's TLS block exceeds glibc's dlopen surplus. */
 static uintptr_t __afl_ctx_main_lo = 0;
 static uintptr_t __afl_ctx_main_hi = 0;
+/* Main thread's last walk: return address -> ctx. ctx is a pure function of
+ * ra, and 91% of consecutive ffmpeg_read edges read the same ra, so a hit
+ * skips the base lookup and the mix. Main stack only: other threads never
+ * read or write it. Written ra = 0, ctx, ra, so a signal handler on the main
+ * stack never pairs a new ra with an old ctx. */
+static uintptr_t __afl_ctx_last_ra  = 0;
+static uintptr_t __afl_ctx_last_ctx = 0;
 
 __AFL_NO_COV __attribute__((noinline))
 static uintptr_t __afl_ctx_resolve_stack_hi(void) {
@@ -1415,10 +1441,9 @@ static uintptr_t __afl_ctx_resolve_stack_hi(void) {
     return hi;
 }
 
-__attribute__((visibility("default"), always_inline))
-static inline uint32_t __afl_get_caller_ctx(void) {
-    if (__afl_mapping) return 0;
-    if (!__afl_ctx_on) return 0;
+__attribute__((always_inline))
+static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) {
+    if (path == __AFL_PATH_ANY && (__afl_mapping || !__afl_ctx_on)) return 0;
     /* Safe two-level unwind.  trace-pc-guard fires at basic-block entry,
      * including a function's *entry* block before its prologue has linked
      * the frame pointer.  At that instant the second frame up is not yet
@@ -1447,9 +1472,13 @@ static inline uint32_t __afl_get_caller_ctx(void) {
     /* caller_fp[0..1] (16 bytes) must lie wholly inside this thread's stack and
      * the slot must be 8-aligned; otherwise it is junk from a frame-pointer-less
      * callee and loading it can fault. */
-    if (cur >= lo && cur < hi) {
+    int main_stack = cur >= lo && cur < hi;
+    if (main_stack) {
         /* Main stack: lo <= cur < hi already, so only the hop is checked. */
         if ((cfp & 7u) || cfp > hi - 16) return 0;
+    } else if (path == __AFL_PATH_LEAF) {
+        *off_main = 1;   /* TLS path calls out: not in the leaf */
+        return 0;
     } else {
         hi = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_hi);
         if (!hi) hi = __afl_ctx_resolve_stack_hi();
@@ -1461,6 +1490,8 @@ static inline uint32_t __afl_get_caller_ctx(void) {
     }
     void *ra = __afl_raw_load(caller_fp + 1);   /* return addr into caller's caller */
     if (!ra) return 0;
+    if (main_stack && (uintptr_t)ra == (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ra))
+        return (uint32_t)(uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ctx);
 
     /* The claim that used to sit here -- "ASLR/PIE base differences across
      * runs don't matter, we only need identical call chains WITHIN one
@@ -1484,7 +1515,7 @@ static inline uint32_t __afl_get_caller_ctx(void) {
      * already uses for __afl_base, and PtraceCoverage.record_edge uses via
      * /proc/pid/maps -- just not previously wired into this function. */
     uintptr_t addr = (uintptr_t)ra;
-    if (__afl_ctx_use_relative()) {
+    if (path == __AFL_PATH_ANY && __afl_ctx_use_relative()) {
         uintptr_t base = __afl_ctx_resolve_base(ra);
         /* dladdr() failure (base == 0) falls back to the raw address --
          * degraded (exec-unstable) context for that one call site, not a
@@ -1510,7 +1541,20 @@ static inline uint32_t __afl_get_caller_ctx(void) {
      * that spreading while bounding the ID inflation. Masking the raw
      * return address instead would put neighbouring call instructions in
      * the same bucket, which is exactly what the mixing exists to avoid. */
-    return (uint32_t)p & __AFL_CTX_MASK;
+    uint32_t ctx = (uint32_t)p & __AFL_CTX_MASK;
+    if (main_stack) {
+        __afl_ctx_last_ra = 0;
+        __atomic_signal_fence(__ATOMIC_SEQ_CST);
+        __afl_ctx_last_ctx = ctx;
+        __atomic_signal_fence(__ATOMIC_SEQ_CST);
+        __afl_ctx_last_ra = (uintptr_t)ra;
+    }
+    return ctx;
+}
+
+__attribute__((visibility("default"), always_inline))
+static inline uint32_t __afl_get_caller_ctx(void) {
+    return __afl_caller_ctx_as(__AFL_PATH_ANY, NULL);
 }
 
 /* ── Fire log (debug build only) ───────────────────────────────────────
@@ -1560,7 +1604,7 @@ __AFL_NO_COV static inline uint32_t __afl_guard_mix(uint64_t x);
 /* Edge id for cur_loc: n-gram / previous-location hash, optionally
  * XORed with the caller context. May return 0 -- caller remaps it. */
 __attribute__((always_inline))
-static inline uint32_t __afl_edge_hash(uint32_t cur_loc) {
+static inline uint32_t __afl_edge_hash_as(uint32_t cur_loc, enum __afl_path path) {
 #if __AFL_NGRAM_K > 2
     /* FNV-1a over the k−1 ring slots (oldest→newest from __afl_prev_idx)
      * then cur_loc. Order-sensitive and cheap (2 ops/slot); XOR chains go
@@ -1572,9 +1616,9 @@ static inline uint32_t __afl_edge_hash(uint32_t cur_loc) {
     }
     h ^= cur_loc;
     h *= 16777619u;
-    return __afl_get_caller_ctx() ^ h;
+    return __afl_caller_ctx_as(path, NULL) ^ h;
 #else
-    return __afl_get_caller_ctx() ^ __afl_prev_loc ^ cur_loc;
+    return __afl_caller_ctx_as(path, NULL) ^ __afl_prev_loc ^ cur_loc;
 #endif
 }
 
@@ -1866,18 +1910,9 @@ __AFL_NO_COV static void __afl_id_scheme_init(void) {
 #endif
 }
 
-/* Insert a final, non-zero edge id for the current generation. No
- * prev_loc hashing and no prev_loc push: synthetic channels that must not
- * rename the real edge after them (COMPCOV) call this directly;
- * __afl_map_loc() is this plus the edge-chain bookkeeping. */
+/* Settle edge_id starting at its home slot pos, for generation gen. */
 __attribute__((always_inline))
-static inline void __afl_map_id_raw(uint32_t edge_id) {
-    uint32_t gen = __afl_generation;
-    if (__afl_gen_word)
-        gen = *__afl_gen_word & __AFL_GEN_MASK;
-
-    uint32_t pos = __afl_home_slot(edge_id);
-
+static inline void __afl_map_from_home(uint32_t edge_id, uint32_t pos, uint32_t gen) {
     /* Home slot first: hot edges settle there, before any window math
      * (ffmpeg_read: -8 Ir/edge). The rest of the window follows from
      * pos + 1, so placement is unchanged. */
@@ -1896,6 +1931,24 @@ static inline void __afl_map_id_raw(uint32_t edge_id) {
 
     uint32_t next = pos + 1 == __afl_map_size ? 0 : pos + 1;
     __afl_probe_insert(edge_id, next, window - 1, gen);
+}
+
+/* Insert a final, non-zero edge id for the current generation. No
+ * prev_loc hashing and no prev_loc push: synthetic channels that must not
+ * rename the real edge after them (COMPCOV) call this directly;
+ * __afl_map_loc() is this plus the edge-chain bookkeeping. */
+__attribute__((always_inline))
+static inline void __afl_map_id_raw_as(uint32_t edge_id, enum __afl_path path) {
+    uint32_t gen = __afl_generation;
+    if (path == __AFL_PATH_FAST || __afl_gen_word)
+        gen = *__afl_gen_word & __AFL_GEN_MASK;
+
+    __afl_map_from_home(edge_id, __afl_home_slot(edge_id), gen);
+}
+
+__attribute__((always_inline))
+static inline void __afl_map_id_raw(uint32_t edge_id) {
+    __afl_map_id_raw_as(edge_id, __AFL_PATH_ANY);
 }
 
 /* __afl_map_id_raw() inside the write guard. */
@@ -1944,10 +1997,12 @@ static inline void __afl_note_stack(void) {
     if (__afl_stack_depth) *__afl_stack_depth = __afl_max_stack_depth;
 }
 
-__attribute__((visibility("default"), always_inline))
-static inline void __afl_map_loc(uint32_t cur_loc) {
-    if (!__afl_area) return;
-    __afl_wtok_t wk = __afl_wguard_open();
+/* FAST folds away every setting check __afl_fast vouches for. */
+__attribute__((always_inline))
+static inline void __afl_map_loc_as(uint32_t cur_loc, enum __afl_path path) {
+    const int any = path == __AFL_PATH_ANY;
+    if (any && !__afl_area) return;
+    __afl_wtok_t wk = any ? __afl_wguard_open() : 0;
     if (__afl_stack_on) __afl_note_stack();
 
     /* COMPCOV on: clear bit 31 of the hash, then carry bit 31 over from
@@ -1955,8 +2010,8 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
      * synthetic caller that routes through here (__sfuzz_state, which also
      * wants the prev_loc chain) sets it on cur_loc and keeps its tag whatever
      * the hash width. COMPCOV off: keep = ~0, tag = 0, the hash is untouched. */
-    uint32_t edge_id = __afl_edge_hash(cur_loc);
-    if (__builtin_expect(__afl_id_tag != 0, 0))   /* COMPCOV only (-3 Ir/edge off) */
+    uint32_t edge_id = __afl_edge_hash_as(cur_loc, path);
+    if (any && __builtin_expect(__afl_id_tag != 0, 0))   /* COMPCOV only (-3 Ir/edge off) */
         edge_id = (edge_id & __afl_id_keep) | (cur_loc & __afl_id_tag);
     /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
      * edge that hashes to 0 would be silently dropped and the slot
@@ -1968,18 +2023,23 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
      * one id. Measured on fuzzgoat: 80 of 344 real edges merged by that
      * alone. The remap below merges only the id-0 edge with the id-1 edge. */
     if (!edge_id) edge_id = 1;
-    __afl_map_id_raw(edge_id);
+    __afl_map_id_raw_as(edge_id, path);
 
     /* Accumulate rolling path hash: hash = hash * 31 ^ edge_id */
     __afl_path_hash_acc = (__afl_path_hash_acc * 31) ^ edge_id;
-    if (__afl_path_hash)
+    if (!any || __afl_path_hash)
         *__afl_path_hash = __afl_path_hash_acc;
 #if __AFL_TRACE_FIRES
     __afl_log_fire(edge_id);
 #endif
-    __afl_wguard_close(wk);
+    if (any) __afl_wguard_close(wk);
 
     __afl_push_prev(cur_loc);
+}
+
+__attribute__((visibility("default"), always_inline))
+static inline void __afl_map_loc(uint32_t cur_loc) {
+    __afl_map_loc_as(cur_loc, __AFL_PATH_ANY);
 }
 
 /* ── Compiler-inserted edge coverage callbacks ────────────────────────
@@ -2024,9 +2084,39 @@ struct __afl_dist_entry;
 static struct __afl_dist_entry *__afl_dist_table;
 #endif
 
-__attribute__((visibility("hidden")))
-__AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
-    if (!guard || *guard == 0) return;
+__AFL_NO_COV __attribute__((noinline)) static void __afl_fast_refresh(void) {
+    __afl_fast = __afl_area && __afl_gen_word && __afl_path_hash &&
+                 __afl_wguard_mode == __AFL_WGUARD_OFF && !__afl_mapping &&
+                 __afl_ctx_on && !__afl_ctx_use_relative() && !__afl_id_tag
+#if __AFL_DISTANCE_MODE
+                 && !__afl_dist_table
+#endif
+                 ;
+}
+
+/* Leaf guard: the fast path makes no call that returns into it, so it needs
+ * no callee-saved registers (5 pushes and pops a call). Every way off it is
+ * a tail call; musttail guarantees the generic body's frame sits where the
+ * guard's would, so its ctx walk and distance key read the same caller
+ * frame. Without musttail (gcc) the generic body is inlined instead. */
+#if defined(__clang__) && defined(__has_attribute)
+#  if __has_attribute(musttail) && __AFL_NGRAM_K == 2 && !__AFL_TRACE_FIRES
+#    define __AFL_LEAF_GUARD 1
+#  endif
+#endif
+#ifndef __AFL_LEAF_GUARD
+#  define __AFL_LEAF_GUARD 0
+#endif
+
+/* Generic guard body: every check, plus the distance channel. */
+#if __AFL_LEAF_GUARD
+__AFL_NO_COV __attribute__((noinline))
+static void __afl_guard_slow(uint32_t *guard)
+#else
+__AFL_GCC_NO_COV __attribute__((always_inline))
+static inline void __afl_guard_slow(uint32_t *guard)
+#endif
+{
     __afl_map_loc(*guard);
 #if __AFL_DISTANCE_MODE
     /* Guard builds get the same AFLGo distance / K-Scheduler node-bitmap
@@ -2037,6 +2127,61 @@ __AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
      * Table first: without one the key is dead work (-4 Ir/edge). */
     if (__afl_dist_table)
         __afl_probe_distance(__afl_pc_key((uintptr_t)__builtin_return_address(0)));
+#endif
+}
+
+#if __AFL_LEAF_GUARD
+/* Path hash and prev_loc chain once the edge is in the table. */
+__attribute__((always_inline))
+static inline void __afl_guard_finish(uint32_t edge_id, uint32_t cur_loc) {
+    __afl_path_hash_acc = (__afl_path_hash_acc * 31) ^ edge_id;
+    *__afl_path_hash = __afl_path_hash_acc;
+    __afl_push_prev(cur_loc);
+}
+
+/* Home slot missed (claim, reclaim, collision): the rest of the insert and
+ * the finish, so this call is the leaf guard's last act. */
+__AFL_NO_COV __attribute__((noinline))
+static void __afl_guard_settle(uint32_t edge_id, uint32_t pos, uint32_t gen,
+                               uint32_t cur_loc) {
+    __afl_map_from_home(edge_id, pos, gen);
+    __afl_guard_finish(edge_id, cur_loc);
+}
+#endif
+
+__attribute__((visibility("hidden")))
+__AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
+    uint32_t cur_loc = *guard;
+    if (cur_loc == 0) return;   /* trace-pc-guard never passes NULL */
+#if __AFL_LEAF_GUARD
+    if (!__builtin_expect(__afl_fast, 1))
+        __attribute__((musttail)) return __afl_guard_slow(guard);
+    int off_main = 0;
+    uint32_t ctx = __afl_caller_ctx_as(__AFL_PATH_LEAF, &off_main);
+    if (off_main)
+        __attribute__((musttail)) return __afl_guard_slow(guard);
+    if (__afl_stack_on) __afl_note_stack();
+
+    /* __afl_map_loc_as(FAST) with the home-slot hit inline. */
+    uint32_t edge_id = ctx ^ __afl_prev_loc ^ cur_loc;
+    if (!edge_id) edge_id = 1;
+    uint32_t gen = *__afl_gen_word & __AFL_GEN_MASK;
+    uint32_t pos = __afl_home_slot(edge_id);
+    struct __afl_entry *area = __afl_area;
+    struct __afl_entry e = area[pos];
+    if (e.edge_id != edge_id || (e.count ^ (gen << 24)) >= 0x01000000u) {
+        __afl_guard_settle(edge_id, pos, gen, cur_loc);
+        return;
+    }
+    if ((e.count & 0x00FFFFFFu) != 0x00FFFFFFu)
+        area[pos].count = e.count + 1;
+    __afl_guard_finish(edge_id, cur_loc);
+#else
+    if (__builtin_expect(__afl_fast, 1)) {
+        __afl_map_loc_as(cur_loc, __AFL_PATH_FAST);
+        return;
+    }
+    __afl_guard_slow(guard);
 #endif
 }
 
@@ -3307,6 +3452,20 @@ static uint64_t __afl_cmp_site_dropped;   /* insertions the table refused */
 static int      __afl_cmp_sites_fd = -1;
 static struct __afl_fd_id __afl_cmp_sites_fd_id;
 
+/* Any trace-cmp consumer live: counts, sites, COMPCOV, or records not
+ * paused. Every trace-cmp callback returns on 0 before touching anything
+ * else; with records paused (19 rounds in 20) they cost 33 Ir each for
+ * nothing, 22% of ffmpeg_read's instructions. Consumers are configured at
+ * init (env), so __afl_cmplog_init and __cmplog_pause are the only
+ * writers. A closed or stolen fd leaves it on: slower, never a lost record. */
+static int __afl_cmp_on = 0;
+static int __afl_cmplog_cfg = 0;   /* records configured at init */
+
+__AFL_NO_COV static void __afl_cmp_refresh(void) {
+    __afl_cmp_on = __afl_cmp_counts_fd >= 0 || __afl_cmp_sites_fd >= 0 ||
+                   __afl_compcov_level > 0 || (__afl_cmplog_cfg && !__afl_cmplog_paused);
+}
+
 /* splitmix64's finalizer. The low bits of a return address are nearly
  * constant across sites in one function, so the index has to come from
  * mixed bits or every site in a hot loop lands in the same probe run. */
@@ -4409,43 +4568,55 @@ __AFL_NO_COV static inline int __afl_const_pruned(uint64_t c, size_t n) {
 
 #define MAX_SWITCH_CASES 256
 
+/* First statement of every trace-cmp callback; see __afl_cmp_on. */
+#define __AFL_CMP_GATE() \
+    do { if (__builtin_expect(!__afl_cmp_on, 1)) return; } while (0)
+
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp1(uint8_t a, uint8_t b) {
+    __AFL_CMP_GATE();
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP1, a == b);
     __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp2(uint16_t a, uint16_t b) {
+    __AFL_CMP_GATE();
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP2, a == b);
     __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 2, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp4(uint32_t a, uint32_t b) {
+    __AFL_CMP_GATE();
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP4, a == b);
     __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 4, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_cmp8(uint64_t a, uint64_t b) {
+    __AFL_CMP_GATE();
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CMP8, a == b);
     __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 8, __builtin_return_address(0), 0);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp1(uint8_t a, uint8_t b) {
+    __AFL_CMP_GATE();
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP1, a == b);
     if (!__afl_const_pruned(a, 1))
         __afl_cmplog_ints(a, b, 1, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp2(uint16_t a, uint16_t b) {
+    __AFL_CMP_GATE();
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP2, a == b);
     if (!__afl_const_pruned(a, 2))
         __afl_cmplog_ints(a, b, 2, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 2, __builtin_return_address(0), 1);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp4(uint32_t a, uint32_t b) {
+    __AFL_CMP_GATE();
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP4, a == b);
     if (!__afl_const_pruned(a, 4))
         __afl_cmplog_ints(a, b, 4, __builtin_return_address(0));
     __afl_compcov_ints(a, b, 4, __builtin_return_address(0), 1);
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) {
+    __AFL_CMP_GATE();
     __AFL_CMP_COUNT(__AFL_CMP_TRACE_CONST_CMP8, a == b);
     if (!__afl_const_pruned(a, 8))
         __afl_cmplog_ints(a, b, 8, __builtin_return_address(0));
@@ -4457,6 +4628,7 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_const_cmp8(uint64_t a, uint64_t b) {
  * a standalone TU compiled without -fsanitize-coverage; it does now. Match
  * the builtin and cast inside. */
 __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
+    __AFL_CMP_GATE();
     if (!cases) return;
     uint64_t *ref = (uint64_t *)cases;
     int64_t count = (int64_t)ref[0];
@@ -4538,12 +4710,15 @@ __AFL_NO_COV static inline void __afl_cmplog_operand(const char *kind, uint64_t 
 }
 
 __AFL_CMP_VIS void __sanitizer_cov_trace_div4(uint32_t val) {
+    __AFL_CMP_GATE();
     __afl_cmplog_operand("DIV", val, 4, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_div8(uint64_t val) {
+    __AFL_CMP_GATE();
     __afl_cmplog_operand("DIV", val, 8, __builtin_return_address(0));
 }
 __AFL_CMP_VIS void __sanitizer_cov_trace_gep(uintptr_t idx) {
+    __AFL_CMP_GATE();
     __afl_cmplog_operand("GEP", (uint64_t)idx, sizeof(uintptr_t),
                          __builtin_return_address(0));
 }
@@ -4605,13 +4780,15 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
     if (sites && sites[0])
         __afl_cmp_sites_fd = __afl_log_open(sites, 0, &__afl_cmp_sites_fd_id);
     const char *path = getenv("_CMPLOG_OUT");
-    if (!path || !path[0]) return;
     /* O_NONBLOCK: see the matching comment in __afl_cmplog_flush. Without
      * it, a FIFO sink with no reader open yet would hang the target here,
      * before the forkserver hello -- the loader would then be waiting on
      * a hello that never arrives, with nothing in the logs to explain
      * why. */
-    __afl_cmplog_fd = __afl_log_open(path, O_NONBLOCK, &__afl_cmplog_fd_id);
+    if (path && path[0])
+        __afl_cmplog_fd = __afl_log_open(path, O_NONBLOCK, &__afl_cmplog_fd_id);
+    __afl_cmplog_cfg = __afl_cmplog_fd >= 0;
+    __afl_cmp_refresh();
 }
 
 __AFL_NO_COV static void __afl_cmplog_fini(void) {
@@ -4659,7 +4836,10 @@ void __cmplog_reset(void) {
 
 /* paused != 0: drop CMP/DIV/GEP records until called again with 0. */
 __AFL_NO_COV __attribute__((visibility("default")))
-void __cmplog_pause(int paused) { __afl_cmplog_paused = paused != 0; }
+void __cmplog_pause(int paused) {
+    __afl_cmplog_paused = paused != 0;
+    __afl_cmp_refresh();
+}
 
 __AFL_NO_COV __attribute__((visibility("default")))
 void __cmplog_close(void) {
@@ -5991,6 +6171,7 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
      * returns before prev_loc is read or written — every child forks from
      * an identical coverage state. */
     struct __afl_entry *saved_area = __afl_area;
+    __afl_fast = 0;
     __afl_area = NULL;
 
     /* Resolve the ctx stack bound once, here: with __afl_area detached the
@@ -6055,6 +6236,7 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
              * fall through into main(). */
             setpgid(0, 0);
             __afl_area = saved_area;
+            __afl_fast_refresh();
 #if __AFL_DISTANCE_MODE
             /* Probes keep accumulating with the area detached; they were
              * the server's, not this input's. */
@@ -6104,6 +6286,7 @@ __AFL_GCC_NO_COV static void __afl_auto_init(void) {
     __afl_install_crash_handlers();
     pthread_atfork(NULL, NULL, __afl_guard_atfork_child);
     __afl_mapping = 0;
+    __afl_fast_refresh();
     /* Last: the crash handlers must already be installed in the parent so
      * every forked child inherits them. */
     __afl_start_forkserver();
