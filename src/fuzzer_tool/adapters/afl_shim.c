@@ -604,6 +604,12 @@ static uint64_t *__afl_path_hash   = NULL;   /* offset 8:  uint64 */
 static uint64_t *__afl_edge_count  = NULL;   /* offset 16: uint64 */
 static uint64_t *__afl_dropped     = NULL;   /* offset 24: uint64 */
 
+/* Stack-depth sampling on/off. $__AFL_STACK_DEPTH ("0" or "1", read once at
+ * attach) turns it off where nothing reads offset 0: the fuzzer exports 0
+ * unless --honggfuzz, the depth's only consumer (-11 Ir/edge). Unset keeps
+ * it on, so one-shot runs and external readers see the live value. */
+static int __afl_stack_on = 1;
+
 /* Touched-slot bitmap (optional region after the distance tail, see
  * adapters/shm.py SHM_TOUCHED_*). NULL unless the segment was sized for it:
  * a segment without the region is the old layout and is never written past
@@ -1116,6 +1122,20 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
         }
     }
 
+    /* Runtime stack-depth switch; see __afl_stack_on. */
+    {
+        const char *sd = getenv("__AFL_STACK_DEPTH");
+        if (sd && sd[0] && !sd[1] && (sd[0] == '0' || sd[0] == '1')) {
+            __afl_stack_on = sd[0] == '1';
+        } else if (sd && sd[0]) {
+            char msg[128];
+            int n = snprintf(msg, sizeof(msg),
+                             "__afl_shim: __AFL_STACK_DEPTH=%.16s is not 0 or 1"
+                             " -- ignored, stack depth=%d\n", sd, __afl_stack_on);
+            if (n > 0) { ssize_t w = write(2, msg, (size_t)n); (void)w; }
+        }
+    }
+
     /* Edge table starts after the front region */
     uint8_t *base = (uint8_t *)p;
     uint64_t *touched = NULL;
@@ -1365,6 +1385,13 @@ static __thread uintptr_t __afl_ctx_stack_hi = 0;
 /* Lower bound, resolved with hi. A frame below it is off the thread stack
  * (sigaltstack, coroutine), where cfp in (cur, hi] is not known mapped. */
 static __thread uintptr_t __afl_ctx_stack_lo = 0;
+/* Main thread's [lo, hi) in plain globals, published by its first resolve.
+ * Stacks don't overlap, so a frame inside it is on the main thread and needs
+ * no TLS read. A .so reaches __afl_ctx_stack_* through __tls_get_addr on
+ * every edge (ffmpeg_read: -22 Ir/edge, -15% wall-clock); initial-exec TLS
+ * is not an option, the shim's TLS block exceeds glibc's dlopen surplus. */
+static uintptr_t __afl_ctx_main_lo = 0;
+static uintptr_t __afl_ctx_main_hi = 0;
 
 __AFL_NO_COV __attribute__((noinline))
 static uintptr_t __afl_ctx_resolve_stack_hi(void) {
@@ -1381,6 +1408,10 @@ static uintptr_t __afl_ctx_resolve_stack_hi(void) {
         pthread_attr_destroy(&a);
     }
     __afl_ctx_stack_hi = hi;
+    if (hi > 1 && (pid_t)syscall(SYS_gettid) == getpid()) {
+        __afl_ctx_main_lo = __afl_ctx_stack_lo;
+        __afl_ctx_main_hi = hi;
+    }
     return hi;
 }
 
@@ -1408,17 +1439,26 @@ static inline uint32_t __afl_get_caller_ctx(void) {
      * any realistic frame without risking a wild read).  Anything outside
      * that window is an unlinked/garbage frame — skip context for it. */
     if (cfp <= cur || cfp - cur > (4u << 20)) return 0;
-    /* Raw load: a plain TLS read here gets an ASAN check in every guard callback. */
-    uintptr_t hi = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_hi);
-    if (!hi) hi = __afl_ctx_resolve_stack_hi();
+    /* Raw loads: a plain read here gets an ASAN check in every guard callback.
+     * Main stack: the globals; any other stack (or before the first
+     * resolve, when both are 0): this thread's TLS. */
+    uintptr_t hi = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_main_hi);
+    uintptr_t lo = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_main_lo);
     /* caller_fp[0..1] (16 bytes) must lie wholly inside this thread's stack and
      * the slot must be 8-aligned; otherwise it is junk from a frame-pointer-less
      * callee and loading it can fault. */
-    if (hi <= 1 || (cfp & 7u) || cfp > hi - 16) return 0;
-    /* cur >= lo with cur < cfp <= hi - 16 puts the hop inside the stack, so
-     * no canonical-address test is needed (an x86 `cfp >> 47` one rejected
-     * every aarch64 stack with bit 47 set). */
-    if (cur < (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_lo)) return 0;
+    if (cur >= lo && cur < hi) {
+        /* Main stack: lo <= cur < hi already, so only the hop is checked. */
+        if ((cfp & 7u) || cfp > hi - 16) return 0;
+    } else {
+        hi = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_hi);
+        if (!hi) hi = __afl_ctx_resolve_stack_hi();
+        if (hi <= 1 || (cfp & 7u) || cfp > hi - 16) return 0;
+        /* cur >= lo with cur < cfp <= hi - 16 puts the hop inside the stack, so
+         * no canonical-address test is needed (an x86 `cfp >> 47` one rejected
+         * every aarch64 stack with bit 47 set). */
+        if (cur < (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_lo)) return 0;
+    }
     void *ra = __afl_raw_load(caller_fp + 1);   /* return addr into caller's caller */
     if (!ra) return 0;
 
@@ -1573,6 +1613,29 @@ static inline void __afl_touch(uint32_t idx) {
         __afl_touched[idx >> 6] |= bit;
 }
 
+/* Claim an empty slot. Out of line and cold, like __afl_slot_reclaim: both
+ * run once per edge per generation, and inlined at every coverage site they
+ * cost the hit path callee-saved registers (ffmpeg_read: -1.9 Ir/edge). */
+__AFL_NO_COV __attribute__((noinline, cold))
+static void __afl_slot_claim(struct __afl_entry *area, uint32_t idx,
+                             uint32_t edge_id, uint32_t tag) {
+    area[idx].edge_id = edge_id;
+    area[idx].count   = tag | 1;
+    __afl_touch(idx);
+    __afl_iter_edge_count++;                     /* track per-iteration new-slot insertion */
+    __afl_total_edge_count++;                    /* track cumulative across-reset count */
+    if (__afl_edge_count)                        /* write CUMULATIVE count live to SHM header */
+        *__afl_edge_count = __afl_total_edge_count;
+}
+
+/* Reclaim a stale entry for the same edge in place (see __afl_probe_slot). */
+__AFL_NO_COV __attribute__((noinline, cold))
+static void __afl_slot_reclaim(struct __afl_entry *area, uint32_t idx, uint32_t tag) {
+    area[idx].count = tag | 1;
+    __afl_touch(idx);
+    __afl_iter_edge_count++;
+}
+
 /* Settle edge_id in slot idx if the slot is empty or already holds it.
  * Returns 1 when settled, 0 on a collision with a different edge.
  * tag = gen << 24, the generation as stored in count's high byte. */
@@ -1582,13 +1645,7 @@ static inline int __afl_probe_slot(struct __afl_entry *area, uint32_t idx,
     struct __afl_entry e = area[idx];                /* one 8-byte load */
 
     if (e.edge_id == 0) {                            /* empty slot — claim */
-        area[idx].edge_id = edge_id;
-        area[idx].count   = tag | 1;
-        __afl_touch(idx);
-        __afl_iter_edge_count++;                     /* track per-iteration new-slot insertion */
-        __afl_total_edge_count++;                    /* track cumulative across-reset count */
-        if (__afl_edge_count)                        /* write CUMULATIVE count live to SHM header */
-            *__afl_edge_count = __afl_total_edge_count;
+        __afl_slot_claim(area, idx, edge_id, tag);
         return 1;
     }
 
@@ -1627,9 +1684,7 @@ static inline int __afl_probe_slot(struct __afl_entry *area, uint32_t idx,
      * already owns a slot. It counts slot claims, not distinct edges:
      * after a table wipe known edges claim again and bump it, which
      * shm.py's read fast path relies on as its change signal. */
-    area[idx].count = tag | 1;
-    __afl_touch(idx);
-    __afl_iter_edge_count++;
+    __afl_slot_reclaim(area, idx, tag);
     return 1;
 }
 
@@ -1709,7 +1764,7 @@ static inline int __afl_probe_run(struct __afl_entry *area, uint32_t start,
 #else
     if (!n) return 0;
 
-    /* Home slot first: a hot edge settles here without a vector load. */
+    /* First slot scalar: the nearest displaced edges settle without a vector load. */
     if (__afl_probe_slot(area, start, edge_id, tag)) return 1;
 
 #  if __AFL_PROBE_MODE == __AFL_PROBE_AVX2
@@ -1823,6 +1878,11 @@ static inline void __afl_map_id_raw(uint32_t edge_id) {
 
     uint32_t pos = __afl_home_slot(edge_id);
 
+    /* Home slot first: hot edges settle there, before any window math
+     * (ffmpeg_read: -8 Ir/edge). The rest of the window follows from
+     * pos + 1, so placement is unchanged. */
+    if (__afl_probe_slot(__afl_area, pos, edge_id, gen << 24)) return;
+
     /* Linear probe, bounded to __AFL_PROBE_MAX slots.
      *
      * The bound converts a map_size-iteration worst case into a constant.
@@ -1832,8 +1892,10 @@ static inline void __afl_map_id_raw(uint32_t edge_id) {
      * insert placed. Do not bound one without the other. */
     uint32_t window = __AFL_PROBE_MAX;
     if (window > __afl_map_size) window = __afl_map_size;
+    if (window < 2) { __afl_note_drop(); return; }
 
-    __afl_probe_insert(edge_id, pos, window, gen);
+    uint32_t next = pos + 1 == __afl_map_size ? 0 : pos + 1;
+    __afl_probe_insert(edge_id, next, window - 1, gen);
 }
 
 /* __afl_map_id_raw() inside the write guard. */
@@ -1886,14 +1948,16 @@ __attribute__((visibility("default"), always_inline))
 static inline void __afl_map_loc(uint32_t cur_loc) {
     if (!__afl_area) return;
     __afl_wtok_t wk = __afl_wguard_open();
-    __afl_note_stack();
+    if (__afl_stack_on) __afl_note_stack();
 
     /* COMPCOV on: clear bit 31 of the hash, then carry bit 31 over from
      * cur_loc. Real callers never set it, so their ids never carry it; the one
      * synthetic caller that routes through here (__sfuzz_state, which also
      * wants the prev_loc chain) sets it on cur_loc and keeps its tag whatever
      * the hash width. COMPCOV off: keep = ~0, tag = 0, the hash is untouched. */
-    uint32_t edge_id = (__afl_edge_hash(cur_loc) & __afl_id_keep) | (cur_loc & __afl_id_tag);
+    uint32_t edge_id = __afl_edge_hash(cur_loc);
+    if (__builtin_expect(__afl_id_tag != 0, 0))   /* COMPCOV only (-3 Ir/edge off) */
+        edge_id = (edge_id & __afl_id_keep) | (cur_loc & __afl_id_tag);
     /* edge_id == 0 means "empty slot" to the probe loop below, so a valid
      * edge that hashes to 0 would be silently dropped and the slot
      * reclaimed by the next collision. Remap exactly that one value to 1.
@@ -1956,6 +2020,8 @@ static inline void __afl_map_edge(uint32_t cur_loc) {
  * __afl_get_caller_ctx() already documents for __afl_map_edge(). */
 __AFL_NO_COV static uint64_t __afl_pc_key(uintptr_t pc);
 __AFL_NO_COV static void __afl_probe_distance(uint64_t key);
+struct __afl_dist_entry;
+static struct __afl_dist_entry *__afl_dist_table;
 #endif
 
 __attribute__((visibility("hidden")))
@@ -1967,8 +2033,10 @@ __AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
      * channel as trace-pc builds, keyed off this call site's own return
      * address -- exactly the address icfg.py's probe_key_node_table() and
      * TargetDistance.pc_distance_table() recover when they scan for calls
-     * to __sanitizer_cov_trace_pc_guard instead of the bare trace_pc. */
-    __afl_probe_distance(__afl_pc_key((uintptr_t)__builtin_return_address(0)));
+     * to __sanitizer_cov_trace_pc_guard instead of the bare trace_pc.
+     * Table first: without one the key is dead work (-4 Ir/edge). */
+    if (__afl_dist_table)
+        __afl_probe_distance(__afl_pc_key((uintptr_t)__builtin_return_address(0)));
 #endif
 }
 

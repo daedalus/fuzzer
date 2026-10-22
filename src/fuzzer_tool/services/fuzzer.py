@@ -172,6 +172,7 @@ from fuzzer_tool.core.shim_health import (
     ShimWatch,
     WriteGuard,
     export_ctx_sensitive,
+    export_stack_depth,
     export_touched_atomic,
     export_wguard,
     self_test_issues,
@@ -1932,6 +1933,8 @@ class Fuzzer:
         # Context term on/off (--ctx-sensitive); the shim reads it at attach and
         # the sizing / ASLR / contract code below reads it via effective_ctx_bits.
         export_ctx_sensitive(ctx_sensitive)
+        # Stack-depth sampling: --honggfuzz is its only reader; read at attach.
+        export_stack_depth(honggfuzz)
         # In-process modes dlopen the target; an executable cannot be.
         # Run it in exec mode instead (--hail-mary forces in-process).
         if (inprocess or inprocess_direct) and is_elf_executable(target):

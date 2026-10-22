@@ -45,6 +45,10 @@ WGUARD_ENV = "__AFL_WGUARD"
 # default (atomic).
 TOUCHED_ATOMIC_ENV = "__AFL_TOUCHED_ATOMIC"
 
+# Read by the shim at attach; "0" skips per-edge stack-depth sampling (SHM
+# offset 0 stays 0). Unset keeps the shim's default (on).
+STACK_DEPTH_ENV = "__AFL_STACK_DEPTH"
+
 
 class ShimField(IntEnum):
     """Index of each counter in ``__afl_shim_health()``'s output (C ABI)."""
@@ -91,6 +95,14 @@ def export_touched_atomic(atomic: bool | None) -> None:
     if atomic is None:
         return
     os.environ[TOUCHED_ATOMIC_ENV] = "1" if atomic else "0"
+
+
+def export_stack_depth(on: bool) -> None:
+    """Ask the shim to sample (True) or skip (False) the stack depth per edge.
+
+    Always set: the run knows whether anything reads the depth.
+    """
+    os.environ[STACK_DEPTH_ENV] = "1" if on else "0"
 
 
 def export_ctx_sensitive(on: bool | None) -> None:
@@ -159,7 +171,10 @@ def health_issues(counters: Sequence[int], attach: Attach) -> list[str]:
             (_field(counters, ShimField.CMPLOG_REENTRANT), "same-thread re-entry"),
             (_field(counters, ShimField.CMPLOG_CONTENDED), "another thread held the lock"),
             (_field(counters, ShimField.CMPLOG_WRITE_FAILED), "failed flush(es)"),
-            (_field(counters, ShimField.CMPLOG_NO_SINK), "batch(es) lost when the sink could not be reopened"),
+            (
+                _field(counters, ShimField.CMPLOG_NO_SINK),
+                "batch(es) lost when the sink could not be reopened",
+            ),
         ]
         detail = ", ".join(f"{n} {what}" for n, what in parts if n)
         issues.append(f"{msg}: {detail}" if detail else msg)

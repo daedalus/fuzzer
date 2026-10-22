@@ -12,6 +12,13 @@
 
 FFMPEG_ASM_FLAG="--disable-asm"
 
+# make, not configure: configure appends -fomit-frame-pointer after
+# --extra-cflags unless CFLAGS carry -fsanitize= (configure:6537), so
+# coverage-only trees lost frame pointers and the shim's caller-ctx walk
+# bailed on 96% of edges. ffbuild/common.mak appends ECFLAGS last and
+# configure never sets it, so this one wins.
+FFMPEG_MAKE_FLAGS="ECFLAGS=-fno-omit-frame-pointer"
+
 # feature:header:lib for deps probed by a link test, as configure does.
 _FFMPEG_LINK_DEPS="zlib:zlib.h:-lz bzlib:bzlib.h:-lbz2 lzma:lzma.h:-llzma"
 
