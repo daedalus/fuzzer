@@ -701,6 +701,7 @@ def cmd_fuzz(args):
         pos_saliency=getattr(args, "pos_saliency", False),
         pos_harmonic=getattr(args, "pos_harmonic", False),
         joint_liveness=getattr(args, "joint_liveness", False),
+        byte_interaction=getattr(args, "byte_interaction", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
         pos_pca=getattr(args, "pos_pca", False),
@@ -2250,6 +2251,9 @@ def cmd_sweep(args):
 # with --region-profile (the dead-region down-weight is the thing it revokes)
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
 # a real target) has not been run, so --hail-mary should not field it yet.
+#
+# byte_interaction (--byte-interaction) is excluded as unmeasured: only the
+# synthetic AND/XOR checks in tests/test_byte_interaction.py, no paired run.
 #
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
@@ -4413,6 +4417,16 @@ def main() -> int:
             "and restore the mutation weight of any pair that moves coverage jointly "
             "though neither does alone (core/joint_liveness.py). Only has an effect "
             "with --region-profile. Opt-in: unmeasured, NOT part of --hail-mary."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--byte-interaction",
+        action="store_true",
+        help=(
+            "Second-order sensitivity: probe pairs of the hottest --sensitivity offsets, "
+            "find bytes that only move coverage together, and mutate them jointly "
+            "(coupled_pair op; core/analyzers/analyzer_interaction.py). Implies "
+            "--sensitivity. Opt-in: unmeasured, NOT part of --hail-mary."
         ),
     )
     fuzz_parser.add_argument(

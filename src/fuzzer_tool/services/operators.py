@@ -3570,6 +3570,26 @@ class OperatorEngine:
         if result != data:
             return bytearray(result)
 
+    def _op_coupled_pair(self, buf, _byte_idx, data):
+        """Rewrite both bytes of one coupled pair (core/analyzers/analyzer_interaction.py).
+
+        Coupled bytes (length + payload, two guards) only move coverage
+        together; mutating one alone is mostly rejected by the target.
+        """
+        tracker = getattr(self.f, "_byte_interaction", None)
+        pairs = tracker.pairs(data) if tracker is not None else ()
+
+        # Pairs are (i, j) with i < j: j inside the buffer covers both.
+        n = len(buf)
+        live = [p for p in pairs if p[1] < n]
+        if not live:
+            return self._op_declined("coupled_pair", buf)
+
+        rng = self.ctx._rng
+        i, j = rng.choice(live)
+        buf[i] = rng.randint(0, 255)
+        buf[j] = rng.randint(0, 255)
+
     def _op_magic_byte_search(self, buf, _byte_idx, _data):
         """Plant a cmplog operand verbatim at a candidate site (Angora MB)."""
         from fuzzer_tool.core.mb_cbh import magic_byte_search

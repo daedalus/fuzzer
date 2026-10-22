@@ -178,6 +178,7 @@ class FuzzRound:
         self._generalize()
         self._colorize()
         self._sensitize()
+        self._interact()
         self._execute()
         self._mine_cmplog()
         self._periodic()
@@ -263,11 +264,33 @@ class FuzzRound:
         if not edges:
             return
 
-        def _exec_fn(candidate: bytes) -> set[int]:
-            f._run_target(candidate)
-            return f.shm_cov.get_edge_ids() if f.shm_cov else set()
+        tracker.analyze_seed(data, edges, self._probe_run)
 
-        tracker.analyze_seed(data, edges, _exec_fn)
+    def _interact(self) -> None:
+        # --byte-interaction: second-order probes over the parent's hottest
+        # first-order offsets, once --sensitivity scored it and the seed has
+        # had as many rounds as the probes cost. Before _execute, like _sensitize.
+        f = self._f
+        if not (f._use_byte_interaction and f.shm_cov) or self._meta is None:
+            return
+        data = self._data
+        tracker = f._byte_interaction
+        if self._meta["fuzz_count"] < tracker.cost() or tracker.analyzed(data):
+            return
+        scores = f._sensitivity.scores(data)
+        if not scores:
+            return
+        edges = f._edge_tracker.seed_edges.get(f._seed_key(data))
+        if not edges:
+            return
+
+        tracker.analyze_seed(data, edges, self._probe_run, scores)
+
+    def _probe_run(self, candidate: bytes) -> set[int]:
+        # One analysis probe: run *candidate*, return its edge set.
+        f = self._f
+        f._run_target(candidate)
+        return f.shm_cov.get_edge_ids() if f.shm_cov else set()
 
     def _begin(self) -> None:
         f = self._f

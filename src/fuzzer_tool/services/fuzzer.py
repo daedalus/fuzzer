@@ -1904,6 +1904,9 @@ class Fuzzer:
         # Seed-arena DPP arm (core/schedulers/seed_dpp.py): favours seeds whose
         # coverage differs from the last few picks. Off by default; appended.
         seed_dpp_scheduler=False,
+        # Second-order byte interaction (core/analyzers/analyzer_interaction.py):
+        # opt-in, implies sensitivity (its first-order input). Appended.
+        byte_interaction=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2840,7 +2843,8 @@ class Fuzzer:
         # (via the "early" analyzer_registry phase, before
         # _init_seed_metadata) so load_state (resume) can restore
         # sensitivity.json — it crashed with AttributeError otherwise.
-        self._use_sensitivity = sensitivity
+        self._use_sensitivity = sensitivity or byte_interaction
+        self._use_byte_interaction = byte_interaction
         from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
         _ANALYZER_REGISTRY.wire_all(self, phase="early")

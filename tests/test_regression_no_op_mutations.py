@@ -761,6 +761,7 @@ class TestStateGatedOperatorsAreNotNoOps:
 
         self._gate_prng(f)
         self._gate_saliency(f)
+        self._gate_interaction(f)
 
         self._gate_weizz(f)
         self._gate_lineage(f)
@@ -937,6 +938,26 @@ class TestStateGatedOperatorsAreNotNoOps:
         sal = PositionSaliencyScheduler(RandPool(seed=7), lambda: samples)
         assert sal.refit(), "fixture failed to fit the saliency net"
         f._pos_saliency = sal
+
+    @staticmethod
+    def _gate_interaction(f: Fuzzer) -> None:
+        """Analyze every battery input with an AND gate on bytes 0 and 1 (coupled_pair gate)."""
+        # --- coupled_pair ----------------------------------------------------
+        # A real tracker fed a fake target whose edge 9 needs both bytes changed.
+        from fuzzer_tool.core.analyzers.analyzer_interaction import ByteInteractionTracker
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        tracker = ByteInteractionTracker(max_seeds=1 << 16, rng=RandPool(seed=11))
+        for inp in [bytes(c) for c in f.corpus] + _battery():
+            if len(inp) < 2:
+                continue
+
+            def run(cand, inp=inp):
+                return {1} | ({9} if cand[0] != inp[0] and cand[1] != inp[1] else set())
+
+            tracker.analyze_seed(inp, {1}, run, [0.5, 0.5])
+            assert tracker.has_data(inp), "fixture failed to find the coupled pair"
+        f._byte_interaction = tracker
 
     @staticmethod
     def _gate_lineage(f: Fuzzer) -> None:

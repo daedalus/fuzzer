@@ -805,6 +805,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--sensitivity` | Per-byte sensitivity analysis (Lyapunov exponent) for mutation targeting |
 | `--region-profile` | Statistical region profiling for mutation targeting (labels seed windows incompressible/tabular/textual/repetitive) |
 | `--joint-liveness` | Probe pairs of coverage-dead regions together; restore weight of pairs that move coverage jointly (needs `--region-profile`) |
+| `--byte-interaction` | Second-order sensitivity: find byte pairs that only move coverage together; `coupled_pair` op mutates them jointly (implies `--sensitivity`) |
 | `--secretary` | Secretary-problem stopping ranks for seeds/operators/corpus — display only, does not reweight or minimize |
 | `--bayesian` | Bayesian methods: Thompson-sampled seed selection, hierarchical operator priors, Bayesian coverage growth model |
 | `--ga` | Genetic algorithm lifecycle mode (bounded population, speciation, crossover) |
@@ -2065,6 +2066,21 @@ FFmpeg harnesses bind each decoder's API from `codec->type` (`fuzz_decode_api` i
 
 MIT
 
+
+### Second-order byte interaction (2026-10-22)
+
+`--byte-interaction` (`core/analyzers/analyzer_interaction.py`). `--sensitivity` is the first-order term (one byte changed); coupled bytes (length + payload, two guards) look ordinary alone. Per edge, the discrete mixed partial `x_ij - x_i - x_j + x_0` is zero iff bytes i, j act independently; pair strength `I_ij = Σ|·| / |union|`.
+
+```
+FuzzRound._sensitize → scores ─┐
+FuzzRound._interact  → top-8 offsets → 8 singles + 28 pairs → I_ij ≥ 0.02 → pairs
+_op_coupled_pair     → pick pair → rewrite both bytes
+```
+
+- Runs on the parent before `_execute`, once `fuzz_count ≥ cost()` (36). Implies `--sensitivity`. Per-seed FIFO cache (50 seeds), not persisted.
+- One perturbation value per offset, shared by singles and pairs. AND gates (+1) and XOR cancellation (−2) both register.
+- `mixed_difference` kept as a per-edge loop: the set-algebra form (`|A^B^C^D| + 2·(|AD−(B∪C)| + |BC−(A∪D)|)`) was 15–40% slower at 100–20k edges, numpy 40% slower (conversion cost).
+- Unmeasured on a real target; not in `--hail-mary`.
 
 ### Swap walk, pooled colorization, screening (2026-09-30)
 

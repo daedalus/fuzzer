@@ -394,6 +394,27 @@ REGISTRY.register(
 )
 
 
+def _activate_byte_interaction(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.analyzers.analyzer_interaction import ByteInteractionTracker
+
+    f._byte_interaction = ByteInteractionTracker(rng=f._rng)
+
+
+def _deactivate_byte_interaction(f: FuzzerLike) -> None:
+    f._byte_interaction = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="byte_interaction",
+        category="mutation_feedback",
+        activate=_activate_byte_interaction,
+        available=lambda f: bool(getattr(f, "_use_byte_interaction", False)),
+        deactivate=_deactivate_byte_interaction,
+    )
+)
+
+
 def _activate_execution_time(f: FuzzerLike) -> None:
     from fuzzer_tool.core.analyzers.analyzer_execution_time import ExecutionTimeTracker
 

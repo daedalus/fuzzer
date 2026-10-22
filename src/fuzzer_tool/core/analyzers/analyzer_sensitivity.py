@@ -173,6 +173,10 @@ class ByteSensitivityTracker:
                 return i
         return buf_len - 1
 
+    def scores(self, seed: bytes) -> list[float]:
+        """Per-offset scores for *seed*; empty when not analyzed."""
+        return self._sensitivity.get(bytes(seed[:64]), [])
+
     def has_data(self, seed: bytes) -> bool:
         """Check if sensitivity data exists for a seed."""
         return bytes(seed[:64]) in self._analyzed
