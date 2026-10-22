@@ -300,3 +300,36 @@ def test_cli_flag_reaches_fuzzer():
     src = inspect.getsource(commands)
     assert '"--byte-interaction"' in src
     assert 'byte_interaction=getattr(args, "byte_interaction", False)' in src
+
+
+# -- observability ----------------------------------------------------------
+
+
+def test_coupled_counts_seeds_with_pairs():
+    exec_fn, _ = _target({99: lambda c: {5, 9} <= c})
+    t = _tracker()
+
+    t.analyze_seed(SEED, BASE, exec_fn, _scores(5, 9))
+    t.analyze_seed(b"\xff" + SEED[1:], BASE, exec_fn, _scores(4))
+
+    assert (t.coupled(), t.tracked()) == (1, 2)
+
+
+def test_stats_line_reports_pairs():
+    from fuzzer_tool.services.stats import StatsReporter
+
+    sens = SimpleNamespace(_analyzed={b"a", b"b"})
+    inter = SimpleNamespace(coupled=lambda: 1, tracked=lambda: 2)
+    f = SimpleNamespace(_sensitivity=sens, _byte_interaction=inter)
+
+    line = StatsReporter._print_stats_sens_str(None, f)
+
+    assert line == " | sens: 2 seeds | pairs: 1/2 seeds"
+
+
+def test_stats_line_without_interaction_unchanged():
+    from fuzzer_tool.services.stats import StatsReporter
+
+    f = SimpleNamespace(_sensitivity=SimpleNamespace(_analyzed={b"a"}), _byte_interaction=None)
+
+    assert StatsReporter._print_stats_sens_str(None, f) == " | sens: 1 seeds"

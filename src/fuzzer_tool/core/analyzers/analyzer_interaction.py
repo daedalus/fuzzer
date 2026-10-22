@@ -92,6 +92,10 @@ class ByteInteractionTracker:
         """Seeds currently held."""
         return len(self._pairs)
 
+    def coupled(self) -> int:
+        """Held seeds with at least one coupled pair."""
+        return sum(1 for v in self._pairs.values() if v)
+
     def analyze_seed(
         self, seed: bytes, original_edges: set[int], exec_fn, scores
     ) -> list[tuple[int, int]]:
