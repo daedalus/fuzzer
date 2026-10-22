@@ -2854,6 +2854,24 @@ if [ "$HAS_FGREP" -eq 0 ]; then
     warn "fgrep directory not found at $FGREP — skipping fgrep targets"
 fi
 
+# ── ASAN runtime preflight
+# Without clang's ASAN runtime every ASAN link failed on its own ("cannot
+# find libclang_rt.asan*.a", 30 times) and nothing named the package. Probe
+# one link: on failure warn once with the fix, skip ASAN (+ UBSAN) variants,
+# and count one failure so the exit status still reports it.
+check_asan_runtime() {
+    [ "$BUILD_ASAN" -eq 1 ] || return 0
+    local cc="${ASAN_PROBE_CC:-$DEFAULT_CC}"
+    if echo 'int main(void){return 0;}' \
+        | "$cc" $ASAN_CFLAGS -x c - -o /dev/null 2>/dev/null; then
+        return 0
+    fi
+    warn "ASAN runtime missing for $cc -- skipping ASAN/UBSAN variants (Debian/Ubuntu: apt-get install libclang-rt-<clang major>-dev)"
+    BUILD_FAILURES=$((BUILD_FAILURES + 1))
+    BUILD_ASAN=0
+}
+# ── end ASAN runtime preflight
+
 # Dispatch by flags — multiple flags can be combined
 HAS_ASAN_ARG=0
 for _a in "$@"; do [ "$_a" = "--asan" ] && HAS_ASAN_ARG=1; done
@@ -2868,6 +2886,7 @@ case "$OPTS" in
     --frontier) ;;
     *) BUILD_ASAN=1; BUILD_NOSAN=1 ;;
 esac
+check_asan_runtime
 
 print_feature_matrix
 

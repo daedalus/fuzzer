@@ -638,6 +638,8 @@ The campaign keeps corpus, crashes and `report_ffmpeg.md` in `/out` and
 resumes from it on rerun; `docker stop` still writes the report. The image
 installs `libclang-rt-dev` because Ubuntu's clang omits compiler-rt, without
 which every `-fsanitize*` link fails; the build probes an ASAN link to catch that.
+`tools/build_targets.sh` runs the same probe (`check_asan_runtime`): on failure it warns once with the
+package (`libclang-rt-<clang major>-dev`), skips ASAN/UBSAN variants, and counts one build failure.
 
 ## Quick Start
 
