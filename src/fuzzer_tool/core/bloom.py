@@ -356,7 +356,8 @@ class BloomFilter:
 
         ``k`` and the slice width stay.  Sliced mode reads slice *i* at
         ``i * _bits_per_slice``; re-deriving the width from the new ``m``
-        moves every probe (false negatives).  ``capacity`` halves with ``m``.
+        moves every probe (false negatives).  ``capacity`` is refit to the
+        new ``m`` (see :meth:`_refit_capacity`).
 
         Raises:
             ValueError: if ``m < MIN_FOLD_BITS``.
@@ -403,7 +404,18 @@ class BloomFilter:
         self._bits = bytearray(folded.tobytes())
         self.m //= 2
         self._mask = self.m - 1
-        self.capacity = max(1, self.capacity // 2)
+        self._refit_capacity()
+
+    def _refit_capacity(self) -> None:
+        """Keys the folded filter holds before ``fill**k`` passes ``error_rate``.
+
+        ``fill = 1 - exp(-k*n/m)``, so ``n = -(m/k) * ln(1 - p**(1/k))``.
+        Halving the old capacity instead left it below ``n_added`` after
+        :meth:`fold_to` (0.625n after 4 folds of a 10x filter): the next
+        ``reset_on_full`` insert wiped every key.
+        """
+        per_probe = self.error_rate ** (1 / self._k)
+        self.capacity = max(1, math.floor(-self.m / self._k * math.log1p(-per_probe)))
 
     @property
     def load_factor(self) -> float:
