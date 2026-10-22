@@ -1692,6 +1692,11 @@ class StatsReporter:
                     sens_str = f" | sens: {analyzed} seeds"
             except (AttributeError, TypeError):
                 pass
+
+        # --byte-interaction: seeds with coupled pairs / seeds analyzed.
+        inter = getattr(f, "_byte_interaction", None)
+        if inter is not None and inter.tracked():
+            sens_str += f" | pairs: {inter.coupled()}/{inter.tracked()} seeds"
         return sens_str
 
     def _print_stats_te_str(self, f) -> str:

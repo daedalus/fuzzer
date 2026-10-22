@@ -5,6 +5,7 @@ bytes differ from the seed, never on the drawn values, so every assertion is
 deterministic regardless of the RNG stream (Hard Rule 39).
 """
 
+import ast
 import inspect
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -23,8 +24,9 @@ from fuzzer_tool.core.analyzers.analyzer_interaction import (
 from fuzzer_tool.core.operator_registry import _AVAILABLE, REGISTRY
 from fuzzer_tool.core.rand_pool import RandPool
 from fuzzer_tool.services.fuzz_round import FuzzRound
-from fuzzer_tool.services.fuzzer import Fuzzer
-from fuzzer_tool.services.operators import OperatorEngine
+from fuzzer_tool.services.operators import _DELOCALISED_OPS, OperatorEngine
+from tests import test_commands_extended
+from tests import test_regression_cli_fuzzer_kwargs as cli_kwargs
 from tests.support.scripted_rng import ScriptedRng
 
 SEED = bytes(range(16))
@@ -136,13 +138,33 @@ def test_top_k_picks_highest_first_order_offsets():
     assert set().union(*calls) == {3, 11}
 
 
-def test_fewer_than_two_hot_offsets_spends_nothing():
+def test_regression_pure_and_gate_found_without_first_order_signal():
+    """Each byte alone is inert (score 0); only the pair moves coverage."""
+    seed = SEED[:8]
+    exec_fn, _ = _target({99: lambda c: {2, 5} <= c})
+    t = _tracker(top_k=8)
+
+    assert t.analyze_seed(seed, BASE, exec_fn, [0.0] * len(seed)) == [(2, 5)]
+
+
+def test_padding_fills_top_k_from_unscored_offsets():
+    exec_fn, calls = _target({})
+    t = _tracker(top_k=4)
+
+    t.analyze_seed(SEED, BASE, exec_fn, _scores(4))
+
+    probed = set().union(*calls)
+    assert 4 in probed
+    assert len(probed) == 4
+
+
+def test_one_byte_seed_spends_nothing():
     exec_fn, calls = _target({})
     t = _tracker()
 
-    assert t.analyze_seed(SEED, BASE, exec_fn, _scores(4)) == []
+    assert t.analyze_seed(SEED[:1], BASE, exec_fn, _scores(0)) == []
     assert calls == []
-    assert t.analyzed(SEED)
+    assert t.analyzed(SEED[:1])
 
 
 def test_empty_seed_and_short_scores():
@@ -206,8 +228,37 @@ def test_op_coupled_pair_writes_both_bytes():
     OperatorEngine._op_coupled_pair(eng, buf, 0, SEED)
 
     expect = bytearray(SEED)
-    expect[4], expect[12] = 0xAA, 0xBB
+    expect[4] = (SEED[4] + 0xAA) & 0xFF
+    expect[12] = (SEED[12] + 0xBB) & 0xFF
     assert buf == expect
+
+
+def test_regression_coupled_pair_always_changes_both_bytes():
+    # Draws equal to the current bytes (an identity write before the fix),
+    # plus the extremes of the 1..255 offset range.
+    for di, dj in ((SEED[2], SEED[9]), (1, 1), (255, 255)):
+        buf = bytearray(SEED)
+        eng = _engine([(2, 9)], ScriptedRng(choice_idxs=[0], randints=[di, dj]))
+
+        OperatorEngine._op_coupled_pair(eng, buf, 0, SEED)
+
+        assert buf[2] != SEED[2] and buf[9] != SEED[9]
+
+
+def test_regression_coupled_pair_declines_after_length_change():
+    """An earlier op in the stack inserted bytes: parent offsets no longer apply."""
+    buf = bytearray(b"X" + SEED)
+    eng = _engine([(2, 9)], ScriptedRng())
+
+    OperatorEngine._op_coupled_pair(eng, buf, 0, SEED)
+
+    assert eng.declined == ["coupled_pair"]
+    assert buf == bytearray(b"X" + SEED)
+
+
+def test_regression_coupled_pair_is_delocalised():
+    """Two sites: publishing the planned byte_idx would misattribute the edit."""
+    assert "coupled_pair" in _DELOCALISED_OPS
 
 
 def test_op_coupled_pair_skips_pairs_past_buffer():
@@ -215,16 +266,16 @@ def test_op_coupled_pair_skips_pairs_past_buffer():
     # Only (2, 9) fits; choice index 0 must land on it, not on (4, 12).
     eng = _engine([(4, 12), (2, 9)], ScriptedRng(choice_idxs=[0], randints=[1, 2]))
 
-    OperatorEngine._op_coupled_pair(eng, buf, 0, SEED)
+    OperatorEngine._op_coupled_pair(eng, buf, 0, SEED[:10])
 
-    assert (buf[2], buf[9]) == (1, 2)
+    assert (buf[2], buf[9]) == (SEED[2] + 1, SEED[9] + 2)
 
 
 def test_op_coupled_pair_declines_without_pairs():
     buf = bytearray(SEED[:3])
     eng = _engine([(4, 12)], ScriptedRng())
 
-    OperatorEngine._op_coupled_pair(eng, buf, 0, SEED)
+    OperatorEngine._op_coupled_pair(eng, buf, 0, SEED[:3])
 
     assert eng.declined == ["coupled_pair"]
     assert buf == bytearray(SEED[:3])
@@ -295,8 +346,53 @@ def test_analyzer_registry_wiring():
     assert "byte_interaction" in ANALYZERS.names()
 
 
-def test_cli_flag_reaches_fuzzer():
-    assert inspect.signature(Fuzzer.__init__).parameters["byte_interaction"].default is False
-    src = inspect.getsource(commands)
-    assert '"--byte-interaction"' in src
-    assert 'byte_interaction=getattr(args, "byte_interaction", False)' in src
+def test_regression_cli_flag_reaches_fuzzer(monkeypatch, tmp_path):
+    """Parser dest and the Fuzzer() keyword must both be byte_interaction."""
+    tree = ast.parse(inspect.getsource(commands))
+    assert "byte_interaction" in cli_kwargs._fuzz_parser_dests(tree)
+
+    args = test_commands_extended.TestCmdFuzzConstruction()._make_default_args(tmp_path)
+    args.byte_interaction = True
+    captured = {}
+
+    def fake_fuzzer(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(run=lambda max_execs=0: 0)
+
+    monkeypatch.setattr("fuzzer_tool.cli.commands.Fuzzer", fake_fuzzer)
+    assert commands.cmd_fuzz(args) == 0
+    assert captured.get("byte_interaction") is True
+
+
+# -- observability ----------------------------------------------------------
+
+
+def test_coupled_counts_seeds_with_pairs():
+    coupled, _ = _target({99: lambda c: {5, 9} <= c})
+    flat, _ = _target({})
+    t = _tracker()
+
+    t.analyze_seed(SEED, BASE, coupled, _scores(5, 9))
+    t.analyze_seed(b"\xff" + SEED[1:], BASE, flat, _scores(4))
+
+    assert (t.coupled(), t.tracked()) == (1, 2)
+
+
+def test_stats_line_reports_pairs():
+    from fuzzer_tool.services.stats import StatsReporter
+
+    sens = SimpleNamespace(_analyzed={b"a", b"b"})
+    inter = SimpleNamespace(coupled=lambda: 1, tracked=lambda: 2)
+    f = SimpleNamespace(_sensitivity=sens, _byte_interaction=inter)
+
+    line = StatsReporter._print_stats_sens_str(None, f)
+
+    assert line == " | sens: 2 seeds | pairs: 1/2 seeds"
+
+
+def test_stats_line_without_interaction_unchanged():
+    from fuzzer_tool.services.stats import StatsReporter
+
+    f = SimpleNamespace(_sensitivity=SimpleNamespace(_analyzed={b"a"}), _byte_interaction=None)
+
+    assert StatsReporter._print_stats_sens_str(None, f) == " | sens: 1 seeds"
