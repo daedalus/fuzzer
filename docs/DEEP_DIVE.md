@@ -436,9 +436,11 @@ For production and sensitive binaries using AFL family fuzzers is the best cours
 
 ### Bloom Folding (`BloomFilter.fold` / `fold_to`, not wired)
 - **What**: shrink a flat `BloomFilter` in place after the data is in, instead of guessing `capacity` up front (Parquet SBBF folding, applied to the flat layout).
-- **Fold**: probes are `p & (m-1)`, so halving `m` maps bit `i + m/2` onto bit `i`: `bits[:m/2] | bits[m/2:]` (numpy, 0.33 ms per MiB). Not adjacent pairs: that is the SBBF fold, for a high-bits block index. `k` and `capacity // 2` follow; `n_added` stays.
+- **Fold**: probes are `p & (m-1)`, so halving `m` maps bit `i + m/2` onto bit `i`: `bits[:m/2] | bits[m/2:]` (numpy, 0.33 ms per MiB). Not adjacent pairs: that is the SBBF fold, for a high-bits block index. `k` and `n_added` stay. `capacity` is refit to the folded `m`: keys before `fill ** k` passes `error_rate`, `-(m/k) * ln(1 - p**(1/k))`. Halving it instead left 0.625n after `fold_to` on a 10x filter, so the next `reset_on_full` insert wiped every key.
+- **Inserts after fold**: no false negatives, but `fold_to(p)` leaves no headroom: doubling the keys took the rate 28x over target (500 keys, p=1e-3). For a filter that keeps growing, fold to a stricter target; `capacity - n_added` is the room left.
 - **Slice width kept**: sliced mode reads slice *i* at `i * _bits_per_slice`. Re-deriving the width from the new `m` loses ~all keys (19998/20000 measured); keeping it loses none. Persisted as `slice_bits` (bloom dict v2; v1 payloads load with `log2(m)`).
 - **`fold_to(target)`**: folds while `fill ** k <= target`, scoring each candidate on its real popcount, not `n_added`. Stops at `MIN_FOLD_BITS` (16).
+- **`ProbeCount.FROM_RATE`**: build the oversized filter with `k = log2(1/p)` instead of the default `m/n * ln2` (`FROM_SIZE`). `k` never changes on fold, and power-of-two rounding of the oversized `m` inflates the default (19 vs 10 at p=1e-3). A/B, 10x + `fold_to` vs a filter sized for n, 500-500k keys, p=1e-2/1e-3: `FROM_RATE` lands on the same `m` in 8/8 configs (`FROM_SIZE`: 7/8, 2x at 50k/1e-2), FPR <= target, FN 0, wall 0.64-1.19x (`FROM_SIZE` up to 1.64x). The 1.19x is 500k/1e-3: inserts into the 16 MiB oversized array.
 - **Wiring**: none. The negative bloom (`NEG_BLOOM_FACTOR=10`) is the only fit, and 1x sizing there costs ~1 in 2,300 skipped novel mutants at 500 seeds (handover `sbbf_vs_flat_bloom_folding` §12).
 
 ### Zip Seed Corpus (`--zip-seed-corpus`)
