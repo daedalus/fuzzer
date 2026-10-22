@@ -15,9 +15,9 @@
  * tools/fxt_gates_ref.py is the independent Python reference (gate names and sections).
  *
  * Classes (what a solver needs, not what the fuzzer does):
- *   BIT    GF(2)-affine            G0 G2(carry) G25 G43
- *   RING   integer/modular maps    G1 G3 G22-G24 G26-G30 G37
- *   MONO   monotone, bisectable    G31-G34 G35(decreasing) G36 G38(per byte)
+ *   BIT    GF(2)-affine            G0 G25 G43
+ *   RING   integer/modular maps    G1 G2(add, xor) G3 G22-G24 G26-G30 G37
+ *   MONO   monotone, bisectable    G31-G34 G35(decreasing) G36(low nibble) G38(per byte)
  *   RANK   structure + rank        G4-G19 G21
  *   HASH   search only             G20 G39-G42 G44 (no gradient)
  *
@@ -608,17 +608,31 @@ static int g_euclid_steps(const unsigned char *p, u64 *op) {
     return 1;
 }
 
-/* RS_PREFIX[n]: partial sum of the Golay-Rudin-Shapiro sequence over k < n, n < 2^16.
- * Built once at load: the per-exec loop was 29 of 31.5 us per input. */
-static i32 RS_PREFIX[1u << 16];
-
-__attribute__((constructor)) static void rs_prefix_init(void) {
-    for (u32 k = 0; k + 1 < (1u << 16); k++)
-        RS_PREFIX[k + 1] = RS_PREFIX[k] + ((__builtin_popcount(k & (k >> 1)) & 1) ? -1 : 1);
+/* Sum of bit j's weight 2^ceil(j/2) over the set bits of m (m < 2^16): gather the
+ * even bits (weight 2^i at j = 2i) and the odd bits (2^(i+1) at j = 2i+1). */
+static u32 even_bits(u32 x) {
+    x &= 0x5555u;
+    x = (x | x >> 1) & 0x3333u;
+    x = (x | x >> 2) & 0x0F0Fu;
+    return (x | x >> 4) & 0x00FFu;
 }
 
+static i32 rs_weight(u32 m) { return (i32)(even_bits(m) + 2u * even_bits(m >> 1)); }
+
+/* Partial sum of the Golay-Rudin-Shapiro sequence over k < n, n < 2^16, branch-free.
+ * P_{j+1} = P_j + x^(2^j) Q_j, Q_{j+1} = P_j - x^(2^j) Q_j, P_j(1) = 2^ceil(j/2): each
+ * set bit j of n adds one whole P_j block, negated when the bits above j hold an odd
+ * number of adjacent 11 pairs. A suffix XOR of n & n>>1 gives those parities at once.
+ * The O(n) loop was 29 of 31.5 us per input; a load-time table re-ran in every
+ * forkserver child (the shim's constructor runs first and forks from inside it). */
 static int g_rudin_shapiro(const unsigned char *p, u64 *op) {
-    *op = (u32)RS_PREFIX[le16(p)];
+    u32 n = le16(p), par = n & (n >> 1);
+    par ^= par >> 1;
+    par ^= par >> 2;
+    par ^= par >> 4;
+    par ^= par >> 8;
+    u32 neg = n & (par >> 1);
+    *op = (u32)(rs_weight(n & ~neg) - rs_weight(neg));
     return 1;
 }
 

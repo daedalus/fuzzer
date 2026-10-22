@@ -2866,7 +2866,10 @@ check_asan_runtime() {
         | "$cc" $ASAN_CFLAGS -x c - -o /dev/null 2>/dev/null; then
         return 0
     fi
-    warn "ASAN runtime missing for $cc -- skipping ASAN/UBSAN variants (Debian/Ubuntu: apt-get install libclang-rt-<clang major>-dev)"
+    # The runtime package depends on which compiler probed.
+    local pkg="libasan<N> for your gcc"
+    "$cc" --version 2>/dev/null | grep -qi clang && pkg="libclang-rt-<clang major>-dev"
+    warn "ASAN runtime missing for $cc -- skipping ASAN/UBSAN variants (Debian/Ubuntu: apt-get install $pkg)"
     BUILD_FAILURES=$((BUILD_FAILURES + 1))
     BUILD_ASAN=0
 }

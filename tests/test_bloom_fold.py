@@ -243,8 +243,38 @@ class TestFoldCapacity:
         bf.fold_to(p)
 
         assert not bf.over_capacity
-        bf.update_bytes(b"new", reset_on_full=True)
+
+        # Fill to the refit capacity (false positives do not count, so step
+        # until n_added reaches it): no reset yet, every old key survives.
+        i = 0
+        while bf.n_added < bf.capacity:
+            bf.update_bytes(b"f" + i.to_bytes(4, "big"), reset_on_full=True)
+            i += 1
         assert all(bf.query_bytes(k) for k in keys)
+
+        # One past capacity: the reset fires and starts a new generation.
+        bf.update_bytes(b"new", reset_on_full=True)
+        assert bf.n_added == 1
+
+    def test_regression_from_dict_refits_folded_capacity(self):
+        # A folded payload saved with the old halved capacity (< n_added)
+        # loaded as-is: the next reset_on_full insert wiped every key.
+        n, p = 500, 1e-3
+        bf = BloomFilter(10 * n, p, ProbeCount.FROM_RATE)
+        for k in _keys(n):
+            bf.update_bytes(k)
+        bf.fold_to(p)
+        state = bf.to_dict()
+        state["capacity"] = n // 2
+
+        loaded = BloomFilter.from_dict(state)
+        assert loaded.capacity == _capacity_for(loaded.m, loaded._k, p)
+        assert not loaded.over_capacity
+
+    def test_from_dict_keeps_unfolded_capacity(self):
+        # Control: an unfolded payload's capacity is the caller's, not refit.
+        bf = BloomFilter(12_345, 1e-3)
+        assert BloomFilter.from_dict(bf.to_dict()).capacity == 12_345
 
     def test_capacity_matches_fill_model(self):
         bf, _ = _filled(DOUBLE, n=5_000)

@@ -170,11 +170,25 @@ class TestRankBijection:
             assert ref.gate(g, field) == (True, i)
 
     def test_regression_rudin_shapiro_table(self, oracle):
-        # The O(n) loop was 93% of exec time; the table must keep every 16-bit partial sum.
+        # The O(n) loop was 93% of exec time; the closed form must keep every 16-bit partial sum.
         g, w = GATE["rudin_shapiro"], oracle.witness()
         for n in range(1 << 16):
             field = n.to_bytes(2, "little")
             assert _c_operand(oracle, _put(w, g, field), g) == ref.gate(g, field)[1], n
+
+    @pytest.mark.skipif(shutil.which("readelf") is None, reason="needs readelf")
+    def test_regression_no_load_time_constructor(self, tmp_path):
+        # The shim is -included first, so its forkserver constructor runs before
+        # any target constructor: the 2^16 prefix-table init re-ran in every child.
+        obj = tmp_path / "fxt_gates.o"
+        src = REPO / "targets" / "fxt_gates.c"
+        subprocess.run(
+            ["clang", "-O2", "-c", "-DGATES_PLAIN", "-o", str(obj), str(src)], check=True
+        )
+        sections = subprocess.run(
+            ["readelf", "-SW", str(obj)], capture_output=True, text=True, check=True
+        ).stdout
+        assert ".init_array" not in sections
 
     @pytest.mark.parametrize("n", [0, 1, 2, 3, 4, 0x7FFF, 0xFFFF])
     def test_rudin_shapiro_edges(self, oracle, n):

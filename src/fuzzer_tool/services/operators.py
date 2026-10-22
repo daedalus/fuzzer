@@ -5160,9 +5160,9 @@ class OperatorEngine:
         The constructions are length-preserving, so the ``max_len`` clamp is
         a formality here -- it is applied anyway to match every other
         buffer-returning handler, rather than relying on a property the
-        module happens to have today.
+        module happens to have today. ``max_len`` 0 is uncapped.
         """
-        return bytearray(fn(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len])
+        return bytearray(fn(bytes(buf), rng=self.ctx._rng)[: self.ctx.max_len or None])
 
     def _regularity_windowed(self, fn, buf, data):
         """``_regularity`` for constructions that accept a ``window`` hint.
@@ -5181,7 +5181,9 @@ class OperatorEngine:
 
             if self.ctx._rng.random() < WINDOW_P:
                 window = kadane.window(data, len(buf))
-        return bytearray(fn(bytes(buf), rng=self.ctx._rng, window=window)[: self.ctx.max_len])
+        return bytearray(
+            fn(bytes(buf), rng=self.ctx._rng, window=window)[: self.ctx.max_len or None]
+        )
 
     def _op_gcd_worst_case(self, buf, _byte_idx, _data):
         from fuzzer_tool.core.mutations.structured import fibonacci_pairs
@@ -6862,21 +6864,19 @@ class OperatorEngine:
         prev_ema = f._op_time_ema.get(op)
         f._op_time_ema[op] = _dt if prev_ema is None else (0.9 * prev_ema + 0.1 * _dt)
 
+        # MutationContext: max_len 0 means uncapped ([:None] keeps it all).
+        cap = self.ctx.max_len or None
         if result is not None:
             if op == "havoc":
                 return self._absorb_havoc(result)
-            new_len = min(len(result), self.ctx.max_len)
+            new_len = len(result) if cap is None else min(len(result), cap)
             if f._frameshift.relations:
                 if new_len > old_len:
                     f._frameshift.on_insert(byte_idx, new_len - old_len)
                 elif new_len < old_len:
                     f._frameshift.on_delete(byte_idx, old_len - new_len)
-            buf = (
-                result[: self.ctx.max_len]
-                if isinstance(result, bytearray)
-                else bytearray(result[: self.ctx.max_len])
-            )
-        elif len(buf) > self.ctx.max_len:
+            buf = result[:cap] if isinstance(result, bytearray) else bytearray(result[:cap])
+        elif cap is not None and len(buf) > cap:
             # In-place handlers (result is None, the dominant convention
             # here) are individually responsible for staying within
             # max_len, and most do -- but a single missed bounds check
@@ -6885,7 +6885,7 @@ class OperatorEngine:
             # buf branch above was clamped. Enforce the invariant here
             # too, for every in-place op, not just the ones we've
             # already found bugs in.
-            del buf[self.ctx.max_len :]
+            del buf[cap:]
 
         return buf
 
