@@ -1289,6 +1289,8 @@ fuzzer-tool minimize ./t.so -d corpus -c --inprocess --inprocess-direct # direct
 
 `minimize -c` calls `disable_aslr()` like `fuzz`: caller-context edge ids hash a raw return address, so under PIE+ASLR each replay got fresh ids and set-cover ran on noise (fuzzgoat: 3070 phantom edges, 430 -> 376 seeds, kept set re-replayed at 2912; fixed: 501, 430 -> 131, re-replay 501). `FUZZER_KEEP_ASLR=1` is honoured (shim uses base-relative ids). Tests: `tests/test_regression_minimize_aslr.py`.
 
+`--max-seeds N` processes a uniform N-of-n subset (`_pick_seeds`, `RandPool.sample`), kept in disk order. It was the first N on disk: `seeds/<hh>/` sorts by hash prefix, so batches only saw low-prefix seeds. Tests: `tests/test_regression_minimize_uniform_pick.py`.
+
 ### Set cover (`core/set_cover.py`)
 
 `minimize -c` and `auto_minimize_corpus` (`_greedy_cover`) share `min_cover`: collapse identical edge sets, force seeds that are the sole holder of an edge, drop dominated seeds, lazy greedy, then drop redundant picks. Greedy alone can keep a seed that later picks made redundant (`A={1,2,3,4} B={1,2,5} C={3,4,6}`: greedy A,B,C; forced B,C).
