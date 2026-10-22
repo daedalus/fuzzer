@@ -72,6 +72,14 @@ def _live_entries(
 # per-exec bit clear and shim ORs outweigh a small walk). See DEEP_DIVE.
 TOUCHED_SCAN_MIN_ENTRIES = 65536
 
+# Most bits per word _touched_slots strips one at a time; denser bitmaps are
+# unpacked whole. Rounds cost a pass over every live word each, so past ~16
+# the unpack wins. Measured at 262,144 entries: 1.6x at 2k live slots, 1.8x
+# at 10k, 1.7x at 50k; parity at 100. See DEEP_DIVE.
+_LOWBIT_MAX_POP = 16
+
+_ONE = np.uint64(1)
+
 # Default number of hash table entries.
 # SHM default = 8192 entries * 8 bytes = 65536 bytes.
 SHM_MAP_SIZE = 8192  # number of entries
@@ -433,22 +441,40 @@ class ShmCoverage:
     def _touched_slots(self) -> np.ndarray:
         """Ascending slot indices whose bit is set: the candidates for a scan.
 
-        Coarse on 64-bit words, then byte-granular inside the surviving
-        words, so a sparse bitmap costs a pass over ``num_entries / 64`` words
-        and a handful of bytes, not a full unpack. Ascending order is the
-        order ``flatnonzero`` over the table yields, so callers see the same
-        arrays either way. Padding bits past ``num_entries`` are dropped.
+        Coarse on 64-bit words, then per set bit inside the surviving words.
+        The mode is picked once from the densest word: up to
+        ``_LOWBIT_MAX_POP`` bits, round r strips each word's lowest bit into
+        column r (``w & -w``, index = popcount(low - 1)), so the row-major
+        read is already ascending -- no sort. Denser, whole words are
+        unpacked. Ascending order is the order ``flatnonzero`` over the table
+        yields, so callers see the same arrays either way. Padding bits past
+        ``num_entries`` are dropped.
         """
         words = self._touched_view()
         nz = np.flatnonzero(words)
         if nz.size == 0:
             return nz
-        b8 = words.view(np.uint8)
-        cand = (nz[:, None] * 8 + np.arange(8)).ravel()
-        nzb = cand[b8[cand] != 0]
-        r, c = np.nonzero(np.unpackbits(b8[nzb], bitorder="little").reshape(-1, 8))
-        slots = nzb[r] * 8 + c
-        return slots[slots < self.num_entries]
+
+        n = self.num_entries
+        w = words[nz]
+        pop = np.bitwise_count(w)
+        rounds = int(pop.max())
+        if rounds > _LOWBIT_MAX_POP:
+            p = np.flatnonzero(np.unpackbits(w.view(np.uint8), bitorder="little"))
+            slots = nz[p >> 6] * 64 + (p & 63)
+            return slots[slots < n]
+
+        # One column per round; columns past a word's popcount are junk and
+        # masked out after (cheaper than a per-round where).
+        base = nz * 64
+        out = np.empty((nz.size, rounds), dtype=np.int64)
+        for r in range(rounds):
+            low = w & -w
+            out[:, r] = base + np.bitwise_count(low - _ONE)
+            w ^= low
+
+        slots = out[np.arange(rounds) < pop[:, None]]
+        return slots[slots < n]
 
     def slot_edge_ids(self, words: np.ndarray) -> np.ndarray:
         """Edge ids stored in the slots whose bit is set in *words*."""
