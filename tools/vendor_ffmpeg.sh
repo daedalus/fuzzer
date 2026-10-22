@@ -314,7 +314,7 @@ echo "[3/5] Configuring FFmpeg ($MODE$([ "$MINIMAL" -eq 1 ] && echo ", minimal")
 # ── Step 4: Build ────────────────────────────────────────────────
 NPROC=$(nproc 2>/dev/null || echo 4)
 echo "[4/5] Building FFmpeg ($NPROC cores)..."
-(cd "$FFMPEG_DIR" && make -j"$NPROC" -s \
+(cd "$FFMPEG_DIR" && make -j"$NPROC" $FFMPEG_MAKE_FLAGS -s \
     libavutil/libavutil.a libavcodec/libavcodec.a \
     libavformat/libavformat.a libswresample/libswresample.a 2>&1 | tail -5) || {
     echo "ERROR: make failed"

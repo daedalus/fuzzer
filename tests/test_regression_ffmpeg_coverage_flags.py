@@ -122,24 +122,35 @@ printf '\\tfor l in libavformat libavcodec libavutil libswresample; do : > $$l/$
 """
 
 
-def _sancov(tmp_path: Path, features: str) -> list[str]:
-    """Run build_vendored_ffmpeg_sancov on a stub ffmpeg-9.0.2 tree; return configure calls."""
+def _sancov(
+    tmp_path: Path, features: str, configure: str = CONFIGURE_STUB, pre: str = ""
+) -> list[str]:
+    """Run build_vendored_ffmpeg_sancov on a stub ffmpeg-9.0.2 tree; return configure calls.
+
+    *pre* is shell run just before the call (e.g. sourcing the shared lib).
+    """
     vendor = tmp_path / "vendor" / "ffmpeg-9.0.2"
     vendor.mkdir(parents=True, exist_ok=True)
     conf = vendor / "configure"
-    conf.write_text(CONFIGURE_STUB)
+    conf.write_text(configure)
     conf.chmod(0o755)
     log = tmp_path / "configure.log"
 
-    fn = re.search(r"^build_vendored_ffmpeg_sancov\(\) \{.*?^\}", BUILD.read_text(), re.M | re.S)
-    assert fn
+    # cow_copy_tree stages the tree; without it every stub build failed at configure.
+    fns = [
+        re.search(rf"^{name}\(\) \{{.*?^\}}", BUILD.read_text(), re.M | re.S)
+        for name in ("cow_copy_tree", "build_vendored_ffmpeg_sancov")
+    ]
+    assert all(fns)
     script = (
         "warn() { :; }; ok() { :; }; warn_failed() { echo FAILED; }; log_section() { :; }\n"
-        f"{fn.group(0)}\n"
+        + "\n".join(f.group(0) for f in fns)
+        + "\n"
         f'VENDOR="{tmp_path}/vendor"; FUZZ_BUILD_ROOT="{tmp_path}/build"; REPO_ROOT="{ROOT}"\n'
         f'BUILD_LOG="{tmp_path}/build.log"; WITH_FFMPEG_SANCOV=1; FORCE_REBUILD=0; USE_CCACHE=0\n'
         f'ASAN_CFLAGS="-fsanitize=address"; FFMPEG_ASM_FLAG=--disable-asm\n'
         f'FFMPEG_FEATURE_FLAGS="{features}"\n'
+        f"{pre}\n"
         'build_vendored_ffmpeg_sancov "" ffmpeg-9.0.2\n'
     )
     r = subprocess.run(
@@ -184,3 +195,93 @@ def test_versioned_tree_reconfigures_on_flag_change(tmp_path):
     assert len(same) == 1
     assert len(changed) == 2
     assert "--enable-libxml2" in changed[-1].split()
+
+
+# ── Frame pointers (FFmpeg configure:6537 vs the shim's caller-ctx walk) ──
+
+# FFmpeg's own flag handling, reduced to the two lines that decide it:
+#   configure    appends -fomit-frame-pointer after --extra-cflags unless
+#                CFLAGS already carry -fsanitize= (coverage-only trees don't)
+#   common.mak   CFLAGS += $(ECFLAGS), the only thing compiled after that
+# Every compile logs its effective CFLAGS to $FLAGS_LOG.
+CONFIGURE_FP_STUB = """#!/bin/sh
+echo "$@" >> "$CONF_LOG"
+for a; do case "$a" in --extra-cflags=*) X="${a#--extra-cflags=}";; esac; done
+FP=-fomit-frame-pointer
+case "$X" in *-fsanitize=*) FP=;; esac
+mkdir -p ffbuild && echo "CFLAGS= $X $FP" > ffbuild/config.mak
+L="libavformat/libavformat.a libavcodec/libavcodec.a libavutil/libavutil.a libswresample/libswresample.a"
+printf 'include ffbuild/config.mak\\nCFLAGS += $(ECFLAGS)\\nall: %s\\n' "$L" > Makefile
+printf '%%.a:\\n\\tmkdir -p $(dir $@) && : > $@\\n\\techo "$(CFLAGS)" >> "$(FLAGS_LOG)"\\n' >> Makefile
+printf 'clean:\\n\\trm -f %s\\n' "$L" >> Makefile
+"""
+
+FP_FLAGS = ("-fomit-frame-pointer", "-fno-omit-frame-pointer")
+
+
+def _last_fp(cflags: str) -> str:
+    """The frame-pointer flag clang obeys: the last one on the line."""
+    return [f for f in cflags.split() if f in FP_FLAGS][-1]
+
+
+def _sancov_fp(tmp_path: Path, pre: str) -> tuple[list[str], list[str]]:
+    """Stub-FFmpeg sancov build; return (configure calls, effective CFLAGS per compile)."""
+    log = tmp_path / "cflags.log"
+    os.environ["FLAGS_LOG"] = str(log)
+    try:
+        calls = _sancov(tmp_path, "--disable-autodetect", CONFIGURE_FP_STUB, pre)
+    finally:
+        del os.environ["FLAGS_LOG"]
+    return calls, log.read_text().splitlines() if log.exists() else []
+
+
+@needs_build_tools
+def test_regression_ffmpeg_frame_pointer_kept(tmp_path):
+    """Falsification: every coverage-only compile ends on -fno-omit-frame-pointer.
+
+    configure appended -fomit-frame-pointer last, so 0 of 2,221 libavformat
+    functions had a frame and the shim's caller-ctx walk bailed on 96% of edges.
+    """
+    _, cflags = _sancov_fp(tmp_path, f'. "{LIB}"')
+
+    assert cflags
+    assert all(_last_fp(c) == "-fno-omit-frame-pointer" for c in cflags)
+
+
+@needs_build_tools
+def test_regression_ffmpeg_fp_stale_tree_rebuilds(tmp_path):
+    """Adversarial: a tree stamped before the fix must reconfigure, not stay 'up to date'."""
+    calls, _ = _sancov_fp(tmp_path, f'. "{LIB}"; FFMPEG_MAKE_FLAGS=""')
+    calls, cflags = _sancov_fp(tmp_path, f'. "{LIB}"')
+
+    assert len(calls) == 2
+    assert _last_fp(cflags[-1]) == "-fno-omit-frame-pointer"
+
+
+@pytest.mark.skipif(shutil.which("clang") is None, reason="clang required")
+@pytest.mark.skipif(shutil.which("objdump") is None, reason="objdump required")
+def test_ffmpeg_make_flags_give_clang_a_frame(tmp_path):
+    """Adversarial: clang, fed configure's order plus the lib's make flags, emits a frame."""
+    r = subprocess.run(
+        ["bash", "-c", f'. "{LIB}" && echo "${{FFMPEG_MAKE_FLAGS#ECFLAGS=}}"'],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    src = tmp_path / "f.c"
+    src.write_text("int g(int);\nint f(int x) { return g(x) + 1; }\n")
+    obj = tmp_path / "f.o"
+    cflags = ["-O3", "-fomit-frame-pointer", *r.stdout.split()]
+    subprocess.run(["clang", *cflags, "-c", str(src), "-o", str(obj)], check=True, timeout=60)
+    asm = subprocess.run(["objdump", "-d", str(obj)], capture_output=True, text=True).stdout
+
+    assert "push   %rbp" in asm
+
+
+def test_regression_vendor_script_uses_make_flags():
+    """vendor_ffmpeg.sh builds the same archives; its make must carry the flags too."""
+    text = VENDOR.read_text()
+    make = re.search(r'make -j"\$NPROC"[^\n]*', text)
+
+    assert make
+    assert "$FFMPEG_MAKE_FLAGS" in make.group(0)

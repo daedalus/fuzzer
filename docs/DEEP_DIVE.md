@@ -1450,6 +1450,7 @@ into the stage, so existing objects survive and unchanged sources keep their mti
 | `--disable-asm` | sancov cannot instrument asm; C DSP runs instead, and x86 inline asm (cabac) no longer hides loads from ASAN |
 | `--disable-autodetect` + explicit zlib/bzlib/lzma | host-independent; png/exr/zmbv/tiff-deflate/mov cmov/mkv zlib |
 | `--enable-libxml2` | dash + imf demuxers |
+| make `ECFLAGS=-fno-omit-frame-pointer` (`FFMPEG_MAKE_FLAGS`) | configure appends `-fomit-frame-pointer` after `--extra-cflags` unless CFLAGS hold `-fsanitize=` (configure:6537); no-ASAN trees had 0/2,221 libavformat frames and the caller-ctx walk bailed on 96% of edges. `ECFLAGS` compiles last (`ffbuild/common.mak`). In the config stamp, so old trees rebuild |
 
 A dep whose header/lib (or `pkg-config libxml-2.0`) is missing is dropped with a note;
 the flag set is part of the config stamp, so installing a dev package triggers a reconfigure.

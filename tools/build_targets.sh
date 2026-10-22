@@ -1490,8 +1490,9 @@ STUBEOF
     local cfg_stamp
     # Every configure input goes in the stamp: installing a dev package changes
     # $FFMPEG_FEATURE_FLAGS, and a stale tree would silently keep the old set.
-    cfg_stamp=$(printf '%s|%s|%s|%s|%s|%s' "$COV_FLAGS" "$LINK_FLAGS" "$EXTRA_LIBS" "$cc_id" \
-                       "$FFMPEG_ASM_FLAG" "$FFMPEG_FEATURE_FLAGS" | md5sum | cut -d' ' -f1)
+    cfg_stamp=$(printf '%s|%s|%s|%s|%s|%s|%s' "$COV_FLAGS" "$LINK_FLAGS" "$EXTRA_LIBS" "$cc_id" \
+                       "$FFMPEG_ASM_FLAG" "$FFMPEG_FEATURE_FLAGS" "$FFMPEG_MAKE_FLAGS" \
+                       | md5sum | cut -d' ' -f1)
 
     # Nothing changed and the archives are all there: this is the common
     # case for a repeat run, and it used to cost a 180MB re-copy plus a
@@ -1546,7 +1547,7 @@ STUBEOF
     fi
     if [ "$cfg_ok" -eq 1 ]; then
         log_section "vendored FFmpeg${label}: make"
-        if (cd "$FFMPEG_DIR" && make -j$(nproc) CC="$make_cc" -s >>"$BUILD_LOG" 2>&1); then
+        if (cd "$FFMPEG_DIR" && make -j$(nproc) CC="$make_cc" $FFMPEG_MAKE_FLAGS -s >>"$BUILD_LOG" 2>&1); then
             # Promote the .a artifacts to the canonical build location.
             for lib in libavformat libavcodec libavutil libswresample libswscale; do
                 if [ -d "$FFMPEG_DIR/$lib" ]; then
