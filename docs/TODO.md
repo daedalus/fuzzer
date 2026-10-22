@@ -9,6 +9,8 @@
 > & Instrumentation* — picked up by a planning pass on the strength of this file
 > alone. Verify against the code before starting work, and when closing an item,
 > close it in the same commit as the implementation.
+>
+> A/B-pending features are indexed in `docs/AB_PENDING.md`; update its row when an A/B lands.
 
 ## Coverage & Instrumentation
 - [x] **Set-cover edge reductions null on fuzzgoat and FFmpeg** (2026-10-22) — DEEP_DIVE §Set cover. FFmpeg 3,303 seeds: same 311 seeds, -1.0% bytes, 2.1x solve time. Discarded.
