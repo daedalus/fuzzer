@@ -350,6 +350,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "crc_learn",
         "prng_predict",
         "saliency_ladder",
+        "coupled_pair",
     },
 }
 
@@ -898,6 +899,10 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # so the operator can come alive even if the position arena rarely draws the arm.
     "saliency_ladder": lambda f, _d: bool(
         getattr(f, "_pos_saliency", None) is not None and f._pos_saliency.warm()
+    ),
+    # Second-order coupled bytes: needs --byte-interaction pairs for this parent.
+    "coupled_pair": lambda f, d: bool(
+        getattr(f, "_byte_interaction", None) is not None and f._byte_interaction.has_data(d)
     ),
     # flag-gated base op
     "regex_bomb": lambda f, _d: bool(getattr(f, "enable_regex_bomb", False)),

@@ -53,6 +53,7 @@ _FLAG_GATED = {
     "recurrence",
     "checksum_sites",
     "grimoire",
+    "byte_interaction",
 }
 _ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner", "prng_state_learner"}
 
