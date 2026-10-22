@@ -2,7 +2,7 @@
 
 import pytest
 
-from fuzzer_tool.core.bloom import BloomFilter
+from fuzzer_tool.core.bloom import BloomFilter, ProbeCount
 
 # (capacity, error_rate) -> sliced and double-hashing modes.
 SLICED = (100_000, 0.01)
@@ -173,3 +173,52 @@ class TestFoldPersistence:
         state["slice_bits"] = width
         with pytest.raises(ValueError):
             BloomFilter.from_dict(state)
+
+
+class TestProbeCount:
+    def test_from_rate_ignores_size(self):
+        # k = log2(1/p): 2^-7 ~ 7.8e-3, 2^-10 ~ 9.8e-4.
+        for cap in (500, 50_000, 5_000_000):
+            assert BloomFilter(cap, 1e-2, ProbeCount.FROM_RATE)._k == 7
+            assert BloomFilter(cap, 1e-3, ProbeCount.FROM_RATE)._k == 10
+
+    def test_from_size_is_default(self):
+        bf = BloomFilter(50_000, 1e-2)
+        assert bf._k == BloomFilter(50_000, 1e-2, ProbeCount.FROM_SIZE)._k
+        assert bf._k == round(bf.m / bf.capacity * 0.6931471805599453)
+
+    @pytest.mark.parametrize("target", [1e-2, 1e-3])
+    def test_regression_fold_inherits_oversized_k(self, target):
+        # 10x then fold must land on the size and k of a filter built for n.
+        n = 50_000
+        keys = _keys(n)
+        direct = BloomFilter(n, target)
+        folded = BloomFilter(10 * n, target, ProbeCount.FROM_RATE)
+        for k in keys:
+            direct.update_bytes(k)
+            folded.update_bytes(k)
+        folded.fold_to(target)
+
+        assert folded.m <= direct.m
+        assert folded._k <= direct._k
+        assert _fill(folded._bits) ** folded._k <= target
+        assert all(folded.query_bytes(k) for k in keys)
+
+    def test_control_from_size_overshoots(self):
+        # Control: without FROM_RATE the 10x build keeps a larger k.
+        assert BloomFilter(500_000, 1e-2)._k > BloomFilter(50_000, 1e-2)._k
+
+    @pytest.mark.parametrize("target", [0.5, 1e-9])
+    def test_extreme_rates_fold_cleanly(self, target):
+        # Adversarial: k=1, and k=30 (double hashing) both fold without FN.
+        bf = BloomFilter(10_000, target, ProbeCount.FROM_RATE)
+        keys = _keys(1_000)
+        for k in keys:
+            bf.update_bytes(k)
+        bf.fold_to(target)
+        assert bf._k >= 1
+        assert all(bf.query_bytes(k) for k in keys)
+
+    def test_roundtrip_keeps_k(self):
+        bf = BloomFilter(10_000, 1e-3, ProbeCount.FROM_RATE)
+        assert BloomFilter.from_dict(bf.to_dict())._k == bf._k

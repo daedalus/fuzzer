@@ -6,6 +6,7 @@ Includes fuzzy near-duplicate detection via Hamming distance on stored keys.
 import hashlib
 import math
 from collections import deque
+from enum import Enum
 
 import numpy as np
 
@@ -19,6 +20,21 @@ _M128 = (1 << 128) - 1
 _BLOOM_VERSION = 2
 #: v1 predates :meth:`BloomFilter.fold`: its slice width is always log2(m).
 _BLOOM_V1 = 1
+
+
+class ProbeCount(Enum):
+    """Where *k* comes from.
+
+    FROM_SIZE: optimal for ``capacity`` keys in the rounded ``m``
+        (``m/n * ln2``); power-of-two rounding can inflate it up to 2x.
+    FROM_RATE: optimal for ``error_rate`` alone (``log2(1/p)``), whatever
+        the size.  For a filter built oversized and then :meth:`fold_to`:
+        the folded size is unknown up front, and FROM_SIZE would carry the
+        oversized k (e.g. 19 instead of 10 at p=1e-3) into it.
+    """
+
+    FROM_SIZE = "from_size"
+    FROM_RATE = "from_rate"
 
 
 class BloomFilter:
@@ -66,7 +82,12 @@ class BloomFilter:
     #: Smallest ``m`` that can fold: both halves must stay whole bytes.
     MIN_FOLD_BITS = 16
 
-    def __init__(self, capacity: int, error_rate: float = 0.01) -> None:
+    def __init__(
+        self,
+        capacity: int,
+        error_rate: float = 0.01,
+        probes: ProbeCount = ProbeCount.FROM_SIZE,
+    ) -> None:
         if capacity < 1:
             raise ValueError("capacity must be >= 1")
         if not (0.0 < error_rate < 1.0):
@@ -80,7 +101,10 @@ class BloomFilter:
         self.m = 1 << max(1, (max(int(m_ideal), 1) - 1).bit_length())
         self._mask = self.m - 1
         self._bits_per_slice = self.m.bit_length() - 1
-        self._k_ideal = max(1, round(self.m / n * math.log(2)))
+        if probes is ProbeCount.FROM_RATE:
+            self._k_ideal = max(1, round(-math.log2(error_rate)))
+        else:
+            self._k_ideal = max(1, round(self.m / n * math.log(2)))
         # Independent slicing is only possible while all k slices fit in one
         # digest; otherwise fall back to double hashing rather than shrinking
         # k (which used to inflate the realised rate above the requested one).
