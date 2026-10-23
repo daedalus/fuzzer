@@ -1010,6 +1010,7 @@ def cmd_fuzz(args):
         hlx_key_len=getattr(args, "hlx_key_len", 16),
         hlx_digest_at=getattr(args, "hlx_digest_at", None),
         op_line_code=getattr(args, "op_line_code", False),
+        rq_xor_key=getattr(args, "rq_xor_key", False),
         checksum_sites=getattr(args, "checksum_sites", False),
         grimoire=getattr(args, "grimoire", False),
         grimoire_max_execs=getattr(args, "grimoire_max_execs", 512),
@@ -2498,6 +2499,7 @@ _HAIL_MARY_FLAGS = (
     "op_span_relocate",
     "op_append",
     "op_line_code",
+    "rq_xor_key",
     "checksum_sites",
     "grimoire",
     "op_afl_det",
@@ -6264,6 +6266,14 @@ def main() -> int:
         help=(
             "Enable line_code mutation operator (Manchester, BMC, NRZI, Gray, "
             "HDLC/USB bit stuffing, 4B5B, PPP/SLIP/COBS). Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--rq-xor-key",
+        action="store_true",
+        help=(
+            "Redqueen through an unknown repeating XOR key (1-8 bytes): input "
+            "deobfuscated before a compare. Off by default."
         ),
     )
     fuzz_parser.add_argument(

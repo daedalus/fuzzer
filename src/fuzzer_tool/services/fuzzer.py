@@ -1699,6 +1699,7 @@ class Fuzzer:
         hlx_key_len=16,
         hlx_digest_at=None,
         op_line_code=False,
+        rq_xor_key=False,
         checksum_sites=False,
         grimoire=False,
         grimoire_max_execs=512,
@@ -2210,6 +2211,9 @@ class Fuzzer:
         from fuzzer_tool.core.rq_encodings import LineEncoders, set_line_encoders  # noqa: PLC0415
 
         set_line_encoders(LineEncoders.ON if op_line_code else LineEncoders.OFF)
+        from fuzzer_tool.core.rq_encodings import XorKeyStage, set_xor_key_stage  # noqa: PLC0415
+
+        set_xor_key_stage(XorKeyStage.ON if rq_xor_key else XorKeyStage.OFF)
         self.checksum_sites = checksum_sites
         self.grimoire = grimoire
         self.grimoire_max_execs = grimoire_max_execs

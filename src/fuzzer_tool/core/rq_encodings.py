@@ -796,6 +796,97 @@ class LineCodeEncoder(Encoder):
         return f"line_{self._codec.name}{'_r' if self.rev else ''}"
 
 
+# XOR-key deobfuscation: the target XORs the input with an unknown key of
+# period p before the compare. The key cancels in the lag-p stream:
+#
+#   input   x = "MAGIC_OK" ^ K        lag_p(x) == lag_p("MAGIC_OK")
+#   search  lag_p(operand_a) in lag_p(input)  -> offset o
+#   key     K = input[o:o+n] ^ operand_a
+#   write   operand_b ^ K                    (K extended periodically)
+#
+# K depends on the input, so this stage runs per call after the cached ones.
+_XOR_MAX_PERIOD = 8  # key lengths 1..8 bytes
+_XOR_MIN_INVARIANT = 3  # matched lag bytes: 2^-24 false hits per offset
+
+
+def _xor_bytes(a: bytes, b: bytes) -> bytes:
+    """a ^ b for equal lengths (int path: fastest on short operands)."""
+    return (_int_from_bytes(a, "big") ^ _int_from_bytes(b, "big")).to_bytes(len(a), "big")
+
+
+class XorKeyEncoder(Encoder):
+    """Input XORed with an unknown repeating key before a compare."""
+
+    def __init__(self, period: int, reverse: bool = False):
+        self.period = period
+        self.reverse = reverse
+
+    def is_applicable(self, cmp_size, cmp_type, lhs, rhs):  # noqa: ARG002
+        if self.reverse and cmp_type == "STR":
+            return False
+        return len(lhs) - self.period >= _XOR_MIN_INVARIANT
+
+    def encode(self, val):
+        return [_reverse_if(val, self.reverse)]
+
+    def name(self):
+        return f"xor_key_{self.period}_{'r' if self.reverse else 'p'}"
+
+
+_XOR_ENCODERS = tuple(
+    XorKeyEncoder(p, rev) for p in range(1, _XOR_MAX_PERIOD + 1) for rev in (False, True)
+)
+
+
+class _InputLags:
+    """Lag-p streams of the last input; one input serves many pairs.
+
+    Keyed by identity: the held reference keeps the bytes alive, so the id
+    cannot be reused. Bounded: one input, <= _XOR_MAX_PERIOD streams.
+    """
+
+    def __init__(self) -> None:
+        self._data: bytes | None = None
+        self._lags: dict[int, bytes] = {}
+
+    def get(self, data: bytes, p: int) -> bytes:
+        if data is not self._data:
+            self._data = data
+            self._lags = {}
+
+        lag = self._lags.get(p)
+        if lag is None:
+            arr = np.frombuffer(data, np.uint8)
+            lag = np.bitwise_xor(arr[:-p], arr[p:]).tobytes()
+            self._lags[p] = lag
+        return lag
+
+
+_input_lags = _InputLags()
+
+
+class XorKeyStage(Enum):
+    OFF = 0
+    ON = 1
+
+
+def _xor_stage_off(*_args) -> None:
+    """Disarmed XOR-key stage."""
+
+
+# One find per key period per pair (~+27% per call on 4 KiB): armed only
+# with --rq-xor-key (Fuzzer construction binds the stage).
+_xor_stage = XorKeyStage.OFF
+_xor_stage_fn: Callable[..., None] = _xor_stage_off
+
+
+def set_xor_key_stage(state: XorKeyStage) -> None:
+    """Arm or disarm the XOR-key stage of generate_mutations."""
+    global _xor_stage, _xor_stage_fn  # noqa: PLW0603
+    _xor_stage = state
+    _xor_stage_fn = _xor_key_mutations if state is XorKeyStage.ON else _xor_stage_off
+
+
 # All built-in encoders.
 # Mirrors the Encoders list in Redqueen encoding.py lines 235-242.
 BUILTIN_ENCODERS: list[Encoder] = []
@@ -1018,7 +1109,81 @@ def generate_mutations(
                             mutations.append((offset_combo, repl, enc))
                             count += 1
 
+    # XOR-key stage: substitution through a key, so hash-like pairs skip it.
+    if not hash_only:
+        _xor_stage_fn(operand_a, operand_b, cmp_size, cmp_type, input_data, hammer, seen, mutations)
     return mutations
+
+
+_XOR_PAT_CACHE_MAX = 4096
+_xor_pat_cache: LRUCache = LRUCache(_XOR_PAT_CACHE_MAX)
+
+
+def _xor_patterns(op_a: bytes, op_b: bytes, cmp_size: int, cmp_type: str) -> tuple:
+    """Per-pair (encoder, operand, lag pattern) list; input-independent, cached."""
+    pair_key = (op_a, cmp_size, cmp_type)
+    pats = _xor_pat_cache.get(pair_key)
+    if pats is not None:
+        return pats
+
+    out = []
+    for enc in _XOR_ENCODERS:
+        if not enc.is_applicable(cmp_size, cmp_type, op_a, op_b):
+            continue
+        # Key-free invariant; a p-periodic operand would match every p-periodic run.
+        a = enc.encode(op_a)[0]
+        p = enc.period
+        pat = _xor_bytes(a[:-p], a[p:])
+        if any(pat):
+            out.append((enc, a, pat))
+    pats = tuple(out)
+    _xor_pat_cache[pair_key] = pats
+    return pats
+
+
+def _xor_key_mutations(
+    op_a: bytes,
+    op_b: bytes,
+    cmp_size: int,
+    cmp_type: str,
+    data: bytes,
+    hammer: bool,
+    seen: set[tuple],
+    mutations: list,
+) -> None:
+    """Append I2S mutations through an unknown repeating XOR key (see XorKeyEncoder)."""
+    n = len(op_a)
+    if n > len(data):
+        return
+    # Identity cache: a mutable buffer could change under the same id.
+    if type(data) is not bytes:
+        data = bytes(data)
+
+    for enc, a, pat in _xor_patterns(op_a, op_b, cmp_size, cmp_type):
+        p = enc.period
+        variants = None
+        count = 0
+        for off in find_offsets(_input_lags.get(data, p), pat):
+            if count >= MAX_MUTATIONS_PER_PAIR:
+                break
+
+            # Key 0 is a plain match: PlainEncoder already wrote it.
+            chunk = data[off : off + n]
+            key = _xor_bytes(chunk, a)[:p]
+            if not any(key):
+                continue
+
+            if variants is None:
+                variants = _get_encoded_variants(enc, cmp_type, cmp_size, op_b, hammer)
+            for (rv,) in variants:
+                m = len(rv)
+                repl = _xor_bytes(rv, (key * (m // p + 1))[:m])
+                k = ((off,), (repl,))
+                if repl == chunk or k in seen:
+                    continue
+                seen.add(k)
+                mutations.append(((off,), (repl,), enc))
+                count += 1
 
 
 def _get_encoded_variants(
