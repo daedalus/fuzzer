@@ -405,6 +405,11 @@ def _fmt_ms(ms: float | None) -> str:
     return "-" if ms is None else f"{ms:.2f}ms"
 
 
+def _sub_ms(a: float | None, b: float | None) -> float | None:
+    """``a - b``, or None when either side has no samples."""
+    return None if a is None or b is None else a - b
+
+
 class StatsReporter:
     """Manages statistics collection and reporting.
 
@@ -418,8 +423,6 @@ class StatsReporter:
         # observation cadence, the position is drawn every mutation.
         self._phase_lock_key: tuple[int, int | None] | None = None
         self._phase_lock: PhaseConcentration | None = None
-        self.cum_diff = 0
-        self.cum_n = 0
 
     def record_discovery_snapshot(self):
         f = self.f
@@ -1572,11 +1575,12 @@ class StatsReporter:
         if not isinstance(timer, ExecTimer):
             return ""
         tgt, cyc = timer.drain()
-        diff = cyc - tgt
-        self.cum_diff += diff
-        self.cum_n += 1
-        f_avg_diff = round(self.cum_diff / self.cum_n)
-        return f" | tgt: {_fmt_ms(tgt)} cyc: {_fmt_ms(cyc)} diff: {_fmt_ms(diff)} avg_diff: {_fmt_ms(f_avg_diff)}"
+        diff = _sub_ms(cyc, tgt)
+
+        # Lifetime, drained first: weighted per sample, no float re-rounding.
+        life_tgt, life_cyc = timer.lifetime()
+        avg_diff = _sub_ms(life_cyc, life_tgt)
+        return f" | tgt: {_fmt_ms(tgt)} cyc: {_fmt_ms(cyc)} diff: {_fmt_ms(diff)} avg_diff: {_fmt_ms(avg_diff)}"
 
     def _print_stats_perf_str(self, f) -> str:
         """Hardware perf counters."""

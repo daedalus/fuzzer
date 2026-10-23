@@ -38,6 +38,19 @@ class TestExecTimer:
             t.add_target(hour_ns)
         assert t.drain()[0] == hour_ns / NS_PER_MS
 
+    def test_lifetime_survives_drain(self):
+        t = ExecTimer()
+        t.add_target(NS_PER_MS)
+        t.add_cycle(4 * NS_PER_MS)
+        t.drain()
+        t.add_target(3 * NS_PER_MS)
+        t.drain()
+        assert t.lifetime() == (2.0, 4.0)
+
+    def test_lifetime_empty(self):
+        """Adversarial: no samples ever -> no average."""
+        assert ExecTimer().lifetime() == (None, None)
+
 
 class TestStatsLine:
     def _str(self, timer):
@@ -47,10 +60,38 @@ class TestStatsLine:
         t = ExecTimer()
         t.add_target(NS_PER_MS // 2)
         t.add_cycle(2 * NS_PER_MS)
-        assert self._str(t) == " | tgt: 0.50ms | cyc: 2.00ms"
+        assert self._str(t) == " | tgt: 0.50ms cyc: 2.00ms diff: 1.50ms avg_diff: 1.50ms"
 
     def test_missing_side_prints_dash(self):
-        assert self._str(ExecTimer()) == " | tgt: - | cyc: -"
+        assert self._str(ExecTimer()) == " | tgt: - cyc: - diff: - avg_diff: -"
+
+    def test_regression_avg_diff_not_rounded(self):
+        """Falsification: sub-ms overhead must not round to 0.00ms."""
+        t = ExecTimer()
+        t.add_target(NS_PER_MS)
+        t.add_cycle(NS_PER_MS * 13 // 10)
+        assert self._str(t).endswith("avg_diff: 0.30ms")
+
+    def test_regression_avg_diff_weighted(self):
+        """Adversarial: a 1-cycle window must not weigh as much as a 9-cycle one."""
+        t = ExecTimer()
+        t.add_target(NS_PER_MS)
+        t.add_cycle(11 * NS_PER_MS)
+        self._str(t)
+        for _ in range(9):
+            t.add_target(NS_PER_MS)
+            t.add_cycle(NS_PER_MS)
+
+        # Lifetime: tgt 10/10 = 1ms, cyc 20/10 = 2ms -> 1ms (unweighted: 5ms).
+        assert self._str(t).endswith("diff: 0.00ms avg_diff: 1.00ms")
+
+    def test_regression_empty_window_keeps_avg(self):
+        """Adversarial: an idle window prints '-' for diff, keeps lifetime avg."""
+        t = ExecTimer()
+        t.add_target(NS_PER_MS)
+        t.add_cycle(3 * NS_PER_MS)
+        self._str(t)
+        assert self._str(t) == " | tgt: - cyc: - diff: - avg_diff: 2.00ms"
 
 
 @pytest.fixture
