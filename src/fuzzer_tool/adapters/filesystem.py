@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import NamedTuple
 
@@ -368,26 +369,31 @@ def hash_data_crypto(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()[:16]
 
 
+def _is_full_seed(f: Path, base_real: Path) -> bool:
+    """False for non-files, symlinks, entries escaping *base_real*, deltas."""
+    if not f.is_file():
+        return False
+    # is_symlink catches a symlinked file; the resolve comparison also
+    # catches a file reached through a symlinked *parent*. Both are
+    # needed -- neither subsumes the other.
+    if f.is_symlink():
+        return False
+    try:
+        if f.resolve().parent != base_real:
+            return False
+    except OSError:
+        return False
+    return not (f.suffix == ".json" and f.name.startswith("delta_"))
+
+
 def _read_full_file(f: Path, base_real: Path) -> tuple[str, bytes] | None:
     """Read one full corpus file, renaming it to ``id_{hash}``.
 
     Returns None for non-files, symlinks, entries escaping *base_real*, and
     delta records (loaded separately).
     """
-    if not f.is_file():
+    if not _is_full_seed(f, base_real):
         return None
-    # is_symlink catches a symlinked file; the resolve comparison also
-    # catches a file reached through a symlinked *parent*. Both are
-    # needed -- neither subsumes the other.
-    if f.is_symlink():
-        return None
-    try:
-        if f.resolve().parent != base_real:
-            return None
-    except OSError:
-        return None
-    if f.suffix == ".json" and f.name.startswith("delta_"):
-        return None  # handled as delta, not full file
 
     data = f.read_bytes()
     h = hash_data(data)
@@ -621,20 +627,100 @@ def _load_full_from_zip(
     load_irreplaceable: bool,
 ) -> None:
     """Union seeds.zip into *full_files* (keyed by content, as files are)."""
-    store = seed_zip.lookup(corpus_dir)
+    store = _seed_store(corpus_dir)
     if store is None:
-        # Zip mode off: still read an existing seeds.zip, through an
-        # unregistered store, so writes keep going to files and the archive
-        # is never appended to.
-        if not (corpus_dir / seed_zip.ZIP_NAME).is_file():
-            return
-        store = seed_zip.open_readonly(corpus_dir)
+        return
 
     for data, protected in store.live():
         h = hash_data(data)
         full_files.setdefault(h, data)
         if protected and load_irreplaceable:
             irreplaceable_hashes.add(h)
+
+
+def _seed_store(corpus_dir: Path) -> "seed_zip.SeedZip | None":
+    """The corpus seeds.zip store, or None when there is no archive."""
+    store = seed_zip.lookup(corpus_dir)
+    if store is not None:
+        return store
+
+    # Zip mode off: still read an existing seeds.zip, through an
+    # unregistered store, so writes keep going to files and the archive
+    # is never appended to.
+    if not (corpus_dir / seed_zip.ZIP_NAME).is_file():
+        return None
+    return seed_zip.open_readonly(corpus_dir)
+
+
+def iter_seed_batches(corpus_dir: Path, batch_size: int) -> Iterator[list[bytes]]:
+    """Corpus seeds in lists of at most *batch_size*; read-only.
+
+    Same roots as :func:`load_corpus` (seeds/, seeds.zip, deltas; pruned/
+    skipped) minus its per-seed XXH64 key and ``id_`` rename, the cost on
+    big corpora (pure-Python XXH64, ~150 us per 4 KiB). One batch in memory
+    at a time; duplicates are kept. A delta whose parent sits in pruned/ is
+    rebuilt here (``rehydrate_by_hash``) where load_corpus drops it.
+
+    Raises:
+        ValueError: if *batch_size* < 1.
+    """
+    if batch_size < 1:
+        raise ValueError(f"batch_size must be >= 1, got {batch_size}")
+
+    batch: list[bytes] = []
+    for data in _iter_seeds(Path(corpus_dir)):
+        batch.append(data)
+        if len(batch) < batch_size:
+            continue
+        yield batch
+        batch = []
+
+    if batch:
+        yield batch
+
+
+def _iter_seeds(corpus_dir: Path) -> Iterator[bytes]:
+    """Every live seed: loose full files, then seeds.zip, then deltas."""
+    for rel in _CORPUS_FULL_ROOTS:
+        yield from _iter_full_dir(corpus_dir / rel)
+
+    store = _seed_store(corpus_dir)
+    if store is not None:
+        yield from (data for data, _ in store.live())
+
+    for h in _delta_hashes(corpus_dir):
+        data = rehydrate_by_hash(h, corpus_dir)
+        if data is not None:
+            yield data
+
+
+def _iter_full_dir(base: Path) -> Iterator[bytes]:
+    """Full seeds under *base* and its subdirectories, pruned/ skipped."""
+    stack = [base] if base.is_dir() else []
+    while stack:
+        cur = stack.pop()
+        real = cur.resolve()
+        for f in cur.iterdir():
+            if f.is_dir():
+                if f.name != "pruned":
+                    stack.append(f)
+                continue
+            if _is_full_seed(f, real):
+                yield f.read_bytes()
+
+
+def _delta_hashes(corpus_dir: Path) -> Iterator[str]:
+    """Hashes of ``delta_<h>.json`` records under the delta roots, pruned/ skipped."""
+    stack = [corpus_dir / rel for rel in _CORPUS_DELTA_ROOTS if (corpus_dir / rel).is_dir()]
+    while stack:
+        cur = stack.pop()
+        for f in cur.iterdir():
+            if f.is_dir():
+                if f.name != "pruned":
+                    stack.append(f)
+                continue
+            if f.suffix == ".json" and f.name.startswith("delta_"):
+                yield f.name[len("delta_") : -len(".json")]
 
 
 def _loose_has(dest: Path) -> bool:

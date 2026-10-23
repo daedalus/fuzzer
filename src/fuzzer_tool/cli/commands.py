@@ -20,7 +20,7 @@ from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
 from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
-from fuzzer_tool.core.negative_bloom import NegativeBloomError
+from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.run_mode import RunMode, Switch
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
@@ -1471,25 +1471,64 @@ def cmd_negative_bloom(args) -> int:
 
     Reads every seed under ``args.corpus`` (without injecting the synthetic
     default seed), builds a BloomFilter sized 10x the corpus, writes it as a
-    gzip'd pickle to ``args.out``, and prints ingest stats.
+    gzip'd pickle to ``args.out``, and prints ingest stats.  An existing
+    ``args.out`` is loaded first and the seeds are added on top; an
+    unreadable one is left untouched.  ``args.batch_size`` seeds are read
+    at a time (0: whole corpus through ``load_corpus``).
     """
-    from fuzzer_tool.adapters.filesystem import load_corpus
-    from fuzzer_tool.core.negative_bloom import build, print_stats, save
+    from fuzzer_tool.core.negative_bloom import load, print_stats, save
+
+    batch_size = getattr(args, "batch_size", NEG_BLOOM_BATCH)
+    if batch_size < 0:
+        print(f"[!] --batch-size must be >= 0, got {batch_size}", file=sys.stderr)
+        return 1
 
     corpus_dir = Path(args.corpus)
     if not corpus_dir.exists():
         print(f"[!] corpus directory not found: {corpus_dir}", file=sys.stderr)
         return 1
 
-    seeds, _, _ = load_corpus(corpus_dir, add_default=False)
-    if not seeds:
+    # Extend, never clobber: a bad file aborts before anything is written.
+    out = Path(args.out)
+    try:
+        base = load(out) if out.exists() else None
+    except NegativeBloomError as exc:
+        print(f"[!] {exc}", file=sys.stderr)
+        return 1
+
+    try:
+        bf = _ingest_seeds(corpus_dir, batch_size, base)
+    except NegativeBloomError:
         print(f"[!] no seeds found in {corpus_dir}", file=sys.stderr)
         return 1
 
-    bf = build(seeds)
-    save(Path(args.out), bf)
+    save(out, bf)
     print_stats(bf)
+    if bf.over_capacity:
+        print(
+            f"[!] {bf.n_added} seeds over capacity {bf.capacity}: FP rate rising", file=sys.stderr
+        )
     return 0
+
+
+def _ingest_seeds(corpus_dir: Path, batch_size: int, base: "BloomFilter | None") -> "BloomFilter":
+    """Seeds of *corpus_dir* into *base* (or a new filter), batched unless 0."""
+    from fuzzer_tool.adapters.filesystem import iter_seed_batches, load_corpus
+    from fuzzer_tool.core.negative_bloom import build, build_batched
+
+    if batch_size == 0:
+        seeds, _, _ = load_corpus(corpus_dir, add_default=False)
+        return build(seeds, base)
+
+    def _progress(batches):
+        done = 0
+        for batch in batches:
+            done += len(batch)
+            print(f"\r  Read {done} seeds", end="", flush=True)
+            yield batch
+        print()
+
+    return build_batched(_progress(iter_seed_batches(corpus_dir, batch_size)), base)
 
 
 def _verify_exec(args, data):
@@ -6714,7 +6753,13 @@ def main() -> int:
         "-o",
         "--out",
         required=True,
-        help="Output bloom file path (e.g. neg.pkl.gz)",
+        help="Output bloom file path (e.g. neg.pkl.gz); an existing file is extended",
+    )
+    neg_parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=NEG_BLOOM_BATCH,
+        help=f"Seeds read per batch (default: {NEG_BLOOM_BATCH}); 0 loads the whole corpus at once",
     )
     neg_parser.set_defaults(func=cmd_negative_bloom)
 
