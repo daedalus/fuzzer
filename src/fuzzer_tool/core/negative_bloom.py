@@ -2,12 +2,14 @@
 
     seeds --build--> BloomFilter(10 x len(seeds)) --save--> neg.pkl.gz
     neg.pkl.gz --load--> Fuzzer._neg_bloom: mutant in filter -> skipped
+    neg.pkl.gz exists --load--> + new seeds --save--> neg.pkl.gz (CLI extends)
 
 The file is a gzip'd pickle of ``BloomFilter.to_dict()``, read back through
 the sanitised unpickler of ``state_store`` (a tampered file cannot run code).
 """
 
 import gzip
+import hashlib
 import os
 import pickle
 import tempfile
@@ -22,6 +24,9 @@ from fuzzer_tool.core.state_store import _safe_loads
 #: below ``NEG_BLOOM_ERROR_RATE`` and leaves room for growth.
 NEG_BLOOM_FACTOR = 10
 NEG_BLOOM_ERROR_RATE = 1e-3
+#: Seeds read per batch by the CLI (``--batch-size``); 0 there loads all at once.
+NEG_BLOOM_BATCH = 4096
+_DIGEST_LEN = hashlib.sha256().digest_size
 _GZIP_LEVEL = 6
 #: Decompressed-size cap (Rule 54): a gzip bomb must not exhaust memory.
 MAX_RAW_BYTES = 1 << 30
@@ -41,21 +46,45 @@ class NegativeBloomError(Exception):
     """Unusable negative-bloom input or file."""
 
 
-def build(seeds: Iterable[bytes]) -> BloomFilter:
+def build(seeds: Iterable[bytes], base: BloomFilter | None = None) -> BloomFilter:
     """Filter holding every seed, sized ``NEG_BLOOM_FACTOR`` x the corpus.
 
     Duplicate seeds count once (``n_added``); ``n_queries`` / ``n_accepted``
     / ``n_rejected`` give the ingest stats: probes, accepted (new), rejected
-    (already present).
+    (already present).  A *base* filter is extended in place, not resized.
     """
     items = list(seeds)
     if not items:
         raise NegativeBloomError("empty corpus: nothing to put in the negative bloom")
 
-    bf = BloomFilter(capacity=NEG_BLOOM_FACTOR * len(items), error_rate=NEG_BLOOM_ERROR_RATE)
+    bf = base if base is not None else _sized(len(items))
     for item in items:
         bf.update_bytes(bytes(item))
     return bf
+
+
+def build_batched(batches: Iterable[list[bytes]], base: BloomFilter | None = None) -> BloomFilter:
+    """:func:`build` over seed batches, one batch in memory at a time.
+
+    The count sizes the filter, so digests are kept (32 B per seed, 6.4 MB
+    for 200k) until the last batch, then inserted.
+    """
+    digests = bytearray()
+    for batch in batches:
+        for seed in batch:
+            digests += hashlib.sha256(seed).digest()
+    if not digests:
+        raise NegativeBloomError("empty corpus: nothing to put in the negative bloom")
+
+    bf = base if base is not None else _sized(len(digests) // _DIGEST_LEN)
+    view = memoryview(digests)
+    for off in range(0, len(digests), _DIGEST_LEN):
+        bf.update_digest(int.from_bytes(view[off : off + _DIGEST_LEN], "big"))
+    return bf
+
+
+def _sized(count: int) -> BloomFilter:
+    return BloomFilter(capacity=NEG_BLOOM_FACTOR * count, error_rate=NEG_BLOOM_ERROR_RATE)
 
 
 def print_stats(bf: BloomFilter) -> None:

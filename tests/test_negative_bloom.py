@@ -6,12 +6,14 @@ import pickle
 
 import pytest
 
+from fuzzer_tool.adapters.filesystem import iter_seed_batches
 from fuzzer_tool.cli.commands import cmd_negative_bloom, load_negative_bloom
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.negative_bloom import (
     NEG_BLOOM_FACTOR,
     NegativeBloomError,
     build,
+    build_batched,
     load,
     save,
 )
@@ -265,6 +267,109 @@ def _make_corpus(root, seeds):
         (sd / f"seed{i}").write_bytes(s)
 
 
+def _args(corpus, out, batch_size=4):
+    return argparse.Namespace(corpus=str(corpus), out=str(out), batch_size=batch_size)
+
+
+def _batches(corpus, size):
+    return list(iter_seed_batches(corpus, size))
+
+
+class TestBatched:
+    def test_matches_in_memory_build(self, tmp_path):
+        seeds = _seeds(37)
+        _make_corpus(tmp_path / "c", seeds)
+
+        # Control: the in-memory reference agrees with itself.
+        assert bytes(build(seeds)._bits) == bytes(build(list(reversed(seeds)))._bits)
+
+        bf = build_batched(_batches(tmp_path / "c", 5))
+        ref = build(seeds)
+        assert bytes(bf._bits) == bytes(ref._bits)
+        assert (bf.capacity, bf.n_added) == (ref.capacity, ref.n_added)
+
+    @pytest.mark.parametrize("size", [1, 3, 37, 1000])
+    def test_batch_sizes_bounded_and_complete(self, tmp_path, size):
+        seeds = _seeds(37)
+        _make_corpus(tmp_path / "c", seeds)
+        batches = _batches(tmp_path / "c", size)
+        assert all(1 <= len(b) <= size for b in batches)
+        assert sorted(s for b in batches for s in b) == sorted(seeds)
+
+    def test_files_not_renamed(self, tmp_path):
+        _make_corpus(tmp_path / "c", _seeds(4))
+        names = sorted(p.name for p in (tmp_path / "c" / "seeds").iterdir())
+        _batches(tmp_path / "c", 2)
+        assert sorted(p.name for p in (tmp_path / "c" / "seeds").iterdir()) == names
+
+    def test_same_seed_set_as_load_corpus(self, tmp_path):
+        # Falsification: pruned/, symlinks, deltas and nested dirs read as load_corpus does.
+        import json
+
+        from fuzzer_tool.adapters.filesystem import (
+            compute_delta,
+            hash_data,
+            load_corpus,
+            save_to_corpus,
+        )
+
+        corpus = tmp_path / "c"
+        parent, child = b"P" * 400, b"P" * 399 + b"Q"
+        save_to_corpus(parent, corpus, set())
+        # Legacy delta record (save_to_corpus no longer writes them).
+        (corpus / "deltas").mkdir()
+        delta = {"parent": hash_data(parent), "diff": compute_delta(parent, child), "v": 1}
+        (corpus / "deltas" / f"delta_{hash_data(child)}.json").write_text(json.dumps(delta))
+        (corpus / "seeds" / "pruned").mkdir(parents=True, exist_ok=True)
+        (corpus / "seeds" / "pruned" / "gone").write_bytes(b"pruned-seed")
+        (corpus / "seeds" / "ab").mkdir(exist_ok=True)
+        (corpus / "seeds" / "ab" / "nested").write_bytes(b"nested-seed")
+        (tmp_path / "outside").write_bytes(b"outside-seed")
+        (corpus / "seeds" / "link").symlink_to(tmp_path / "outside")
+
+        streamed = sorted(s for b in _batches(corpus, 2) for s in b)
+        loaded, _, _ = load_corpus(corpus, add_default=False)
+        assert streamed == sorted(loaded)
+        assert child in streamed
+        assert b"pruned-seed" not in streamed and b"outside-seed" not in streamed
+
+    def test_reads_seed_zip(self, tmp_path):
+        from fuzzer_tool.adapters import seed_zip
+        from fuzzer_tool.adapters.filesystem import save_to_corpus
+        from fuzzer_tool.adapters.seed_zip import ZipMode
+
+        corpus = tmp_path / "c"
+        corpus.mkdir()
+        seed_zip.configure(corpus, ZipMode.ON)
+        try:
+            save_to_corpus(b"zipped-seed", corpus, set())
+            seed_zip.flush_all()
+        finally:
+            seed_zip.configure(corpus, ZipMode.OFF)
+
+        # Zip mode off: the archive is still read, read-only.
+        assert [s for b in _batches(corpus, 8) for s in b] == [b"zipped-seed"]
+
+    def test_extends_base(self):
+        base = build([b"a", b"b"])
+        bf = build_batched([[b"b", b"c"]], base)
+        assert bf is base
+        assert bf.query_bytes(b"c") and bf.n_added == 3 and bf.n_rejected == 1
+
+    def test_empty_rejected(self):
+        with pytest.raises(NegativeBloomError):
+            build_batched([])
+
+    def test_empty_with_base_rejected(self):
+        with pytest.raises(NegativeBloomError):
+            build_batched([], build([b"a"]))
+
+    def test_bad_batch_size(self, tmp_path):
+        _make_corpus(tmp_path / "c", [b"x"])
+        with pytest.raises(ValueError):
+            _batches(tmp_path / "c", 0)
+
+
 class TestCli:
     def test_cmd_builds_file(self, tmp_path):
         seeds = _seeds(40)
@@ -297,6 +402,63 @@ class TestCli:
         out = tmp_path / "o.pkl.gz"
         cmd_negative_bloom(argparse.Namespace(corpus=str(tmp_path / "c"), out=str(out)))
         assert not load(out).query_bytes(b"AAAAAAAA")
+
+    def test_cmd_extends_existing_file(self, tmp_path):
+        old, new = _seeds(30, seed=1), _seeds(20, seed=2)
+        _make_corpus(tmp_path / "a", old)
+        _make_corpus(tmp_path / "b", new)
+        out = tmp_path / "neg.blf"
+
+        assert cmd_negative_bloom(_args(tmp_path / "a", out)) == 0
+        assert cmd_negative_bloom(_args(tmp_path / "b", out)) == 0
+
+        bf = load(out)
+        assert all(bf.query_bytes(s) for s in old + new)
+        assert bf.n_added == len(old) + len(new)
+        assert bf.capacity == NEG_BLOOM_FACTOR * len(old)  # sized by the first build
+
+    def test_cmd_rerun_same_corpus_adds_nothing(self, tmp_path):
+        seeds = _seeds(25)
+        _make_corpus(tmp_path / "c", seeds)
+        out = tmp_path / "neg.blf"
+        cmd_negative_bloom(_args(tmp_path / "c", out))
+        bits = bytes(load(out)._bits)
+
+        assert cmd_negative_bloom(_args(tmp_path / "c", out)) == 0
+        bf = load(out)
+        assert bytes(bf._bits) == bits
+        assert bf.n_added == len(seeds)
+
+    def test_cmd_corrupt_existing_file_kept(self, tmp_path):
+        # Adversarial: an unreadable bloom must not be silently replaced.
+        _make_corpus(tmp_path / "c", _seeds(5))
+        out = tmp_path / "neg.blf"
+        out.write_bytes(b"not a bloom")
+
+        assert cmd_negative_bloom(_args(tmp_path / "c", out)) == 1
+        assert out.read_bytes() == b"not a bloom"
+
+    def test_cmd_empty_corpus_keeps_existing(self, tmp_path):
+        _make_corpus(tmp_path / "a", _seeds(5))
+        (tmp_path / "empty").mkdir()
+        out = tmp_path / "neg.blf"
+        cmd_negative_bloom(_args(tmp_path / "a", out))
+        before = out.read_bytes()
+
+        assert cmd_negative_bloom(_args(tmp_path / "empty", out)) == 1
+        assert out.read_bytes() == before
+
+    def test_cmd_negative_batch_size(self, tmp_path):
+        _make_corpus(tmp_path / "c", [b"x"])
+        assert cmd_negative_bloom(_args(tmp_path / "c", tmp_path / "o", batch_size=-1)) == 1
+        assert not (tmp_path / "o").exists()
+
+    def test_cmd_legacy_mode(self, tmp_path):
+        seeds = _seeds(10)
+        _make_corpus(tmp_path / "c", seeds)
+        out = tmp_path / "neg.blf"
+        assert cmd_negative_bloom(_args(tmp_path / "c", out, batch_size=0)) == 0
+        assert all(load(out).query_bytes(s) for s in seeds)
 
     def test_load_helper_none(self):
         assert load_negative_bloom(None) is None
