@@ -383,8 +383,10 @@ class ShmCoverage:
         # fast path instead of an empty set() when nothing changed, so
         # callers that snapshot the return value (e.g. Fuzzer._prev_edge_set)
         # get a real "same as before" set rather than a value that reads as
-        # "the target fired zero edges this exec".
-        self._last_ids: set[int] = set()
+        # "the target fired zero edges this exec". Kept as the scan's id
+        # array; the set is built on first read (see _last_ids).
+        self._ids_arr: np.ndarray | None = None
+        self._ids_set: set[int] | None = set()
         # What made the most recent scan report novelty, kept apart because
         # a caller that wants to confirm the novelty has to know which part
         # of it a rerun can contradict. Ids seen for the first time can be
@@ -1321,8 +1323,25 @@ class ShmCoverage:
 
     # ── New-coverage detection ──────────────────────────────────────────
 
+    @property
+    def _last_ids(self) -> set[int]:
+        # Built on first read: is_new_coverage() callers never need it
+        # (~0.33 ms per ffmpeg exec).
+        if self._ids_set is None:
+            self._ids_set = set(self._ids_arr.tolist())
+        return self._ids_set
+
+    @_last_ids.setter
+    def _last_ids(self, ids: set[int]) -> None:
+        self._ids_set, self._ids_arr = ids, None
+
     def _check_new_coverage(self) -> tuple[bool, set[int]]:
-        """Check for new coverage and return (has_new, current_edge_ids).
+        """Check for new coverage and return (has_new, current_edge_ids)."""
+        new_found = self._scan_new()
+        return new_found, self._last_ids
+
+    def _scan_new(self) -> bool:
+        """Check for new coverage; the current ids stay readable as ``_last_ids``.
 
         Two-tier approach:
         1. Fast path: compare edge_count AND path_hash against last seen
@@ -1359,12 +1378,12 @@ class ShmCoverage:
             # Fuzzer._prev_edge_set / format-learner new_edges tracking).
             self.last_new_ids = frozenset()
             self.last_old_bucket_novel = False
-            return False, self._last_ids
+            return False
 
         # Slow path: extract edge_ids not yet in _seen_edge_ids
         active_ids, active_counts = self._active_columns()
-        ids = set(active_ids.tolist())
-        new = ids - self._seen_edge_ids
+        self._ids_arr, self._ids_set = active_ids, None
+        new = self._unseen(active_ids)
         self._seen_edge_ids.update(new)
         new_found = False
         if new:
@@ -1375,7 +1394,7 @@ class ShmCoverage:
                 )
             new_found = True
         if self._local_ids is not None:
-            self._note_local(ids)
+            self._note_local(self._last_ids)
 
         # Hit-count bucketing. OR'd with the set-membership result rather
         # than replacing it: a new edge whose count is 0 occupies no bucket,
@@ -1399,11 +1418,23 @@ class ShmCoverage:
 
         self._last_edge_count = edge_count
         self._last_path_hash = path_hash
-        self._last_ids = ids
 
         if new_found:
             self.total_edges += 1
-        return new_found, ids
+        return new_found
+
+    def _unseen(self, active_ids: np.ndarray) -> set[int]:
+        """Ids in *active_ids* not in ``_seen_edge_ids``.
+
+        Every id with virgin bits is already seen (bits are only set for
+        seen or masked ids), so only virgin-zero ids reach the set lookup:
+        ~5k ids per ffmpeg exec, nearly all old.
+        """
+        virgin = self._virgin
+        if virgin.size:
+            clipped = np.minimum(active_ids, virgin.size - 1)
+            active_ids = active_ids[(active_ids >= virgin.size) | (virgin[clipped] == 0)]
+        return set(active_ids.tolist()) - self._seen_edge_ids
 
     def is_new_coverage(self) -> bool:
         """Check if the current hash table has any edge not seen before.
@@ -1412,8 +1443,7 @@ class ShmCoverage:
         detection, falling through to a numpy vectorized scan when the
         count changed.
         """
-        new_found, _ = self._check_new_coverage()
-        return new_found
+        return self._scan_new()
 
     def is_new_coverage_with_edges(self) -> tuple[bool, set[int]]:
         """Check for new coverage AND return current edge set in one scan.

@@ -126,7 +126,7 @@ class TestSignalSeparation:
         """has_new_coverage gates record_edges, cmplog, the format learner,
         the GA and the distance metric, all of which read it as 'reached
         somewhere new'. Spinning a known loop reached nowhere new."""
-        src = inspect.getsource(ShmCoverage._check_new_coverage)
+        src = inspect.getsource(ShmCoverage._scan_new)
         assert "_last_max_gain = self._update_max_counts" in src
         # The assignment must not also set new_found.
         for line in src.splitlines():
@@ -136,7 +136,7 @@ class TestSignalSeparation:
     def test_fast_path_reports_no_gain(self):
         """An unchanged path_hash means identical counts, so no max moved —
         and the fast path never scans, so a stale value must not leak."""
-        src = inspect.getsource(ShmCoverage._check_new_coverage)
+        src = inspect.getsource(ShmCoverage._scan_new)
         head = src.split("if edge_count == self._last_edge_count")[0]
         assert "self._last_max_gain = 0" in head
 

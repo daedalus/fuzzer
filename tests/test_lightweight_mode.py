@@ -148,6 +148,7 @@ def _round(f: Fuzzer, result: tuple[int, str], crash: bool, new_cov: bool) -> bo
         patch.object(f, "_is_crash", return_value=crash),
         patch.object(f, "_is_interesting", return_value=False),
         patch.object(FuzzRound, "_scan_coverage", _fake_scan(new_cov)),
+        patch.object(FuzzRound, "_lite_scan", _fake_scan(new_cov)),
     ):
         return f.fuzz_one(f.corpus[0])
 
