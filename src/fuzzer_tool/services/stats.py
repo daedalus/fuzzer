@@ -418,6 +418,8 @@ class StatsReporter:
         # observation cadence, the position is drawn every mutation.
         self._phase_lock_key: tuple[int, int | None] | None = None
         self._phase_lock: PhaseConcentration | None = None
+        self.cum_diff = 0
+        self.cum_n = 0
 
     def record_discovery_snapshot(self):
         f = self.f
@@ -1569,9 +1571,12 @@ class StatsReporter:
         timer = getattr(f, "_exec_timer", None)
         if not isinstance(timer, ExecTimer):
             return ""
-
         tgt, cyc = timer.drain()
-        return f" | tgt: {_fmt_ms(tgt)} | cyc: {_fmt_ms(cyc)}"
+        diff = cyc - tgt
+        self.cum_diff += diff
+        self.cum_n += 1
+        f_avg_diff = round(self.cum_diff / self.cum_n)
+        return f" | tgt: {_fmt_ms(tgt)} cyc: {_fmt_ms(cyc)} diff: {_fmt_ms(diff)} avg_diff: {_fmt_ms(f_avg_diff)}"
 
     def _print_stats_perf_str(self, f) -> str:
         """Hardware perf counters."""
