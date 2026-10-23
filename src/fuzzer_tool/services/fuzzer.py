@@ -184,6 +184,7 @@ from fuzzer_tool.core.validity import ValidityChannel
 from fuzzer_tool.services.affine_mod import MAX_SEARCH_EXECS as AFFINE_MOD_EXECS
 from fuzzer_tool.services.affine_mod import AffineMod, Families
 from fuzzer_tool.services.corpus_manager import CorpusManager
+from fuzzer_tool.services.favored_cover import favored_cover
 from fuzzer_tool.services.fuzz_round import FuzzRound
 from fuzzer_tool.services.i2s_fixpoint import I2SFixpoint
 from fuzzer_tool.services.maintenance import MaintenanceJob, MaintenanceQueue
@@ -6630,38 +6631,24 @@ class Fuzzer:
         build a favored set that covers all edges. Seeds in the favored set
         receive energy bonuses in FAST/COE schedules.
         """
-        top_rated: dict[int, tuple[str, float]] = {}
+        seed_edges = self._edge_tracker.seed_edges
         mean_us = self.mean_exec_time() * 1_000_000
-        for key, edges in self._edge_tracker.seed_edges.items():
+        costs = []
+        for key in seed_edges:
             m = self.seed_meta.get(key) or {}
-            exec_us = seed_exec_us(m, mean_us)
-            input_size = max(1, m.get("input_size", 1))
-            cost = exec_us * input_size
-            for e in edges:
-                cur = top_rated.get(e)
-                if cur is None or cost < cur[1]:
-                    top_rated[e] = (key, cost)
+            costs.append(seed_exec_us(m, mean_us) * max(1, m.get("input_size", 1)))
 
-        covered: set[int] = set()
-        favored: set[str] = set()
         # Cover the rarest edges first: an edge reached by one seed forces that
         # seed into the favored set, while an edge reached by many is likely to
-        # be picked up for free along the way.
-        #
-        # This used to sort by ``rare_edge_count(e)``, which is keyed by *seed*,
-        # not by edge. Passing an edge id looked up an absent seed and returned
-        # 0 for every edge, so the key was constant and ``sorted`` -- being
-        # stable -- left the edges in dict insertion order. The greedy cover ran
-        # in an arbitrary order and the rarity prioritisation this loop exists
-        # for never happened. The edge id breaks ties so the favored set is a
-        # function of the coverage data alone, not of insertion history.
-        et = self._edge_tracker
-        for e in sorted(top_rated, key=lambda e: (et.edge_owner_count(e), e)):
-            if e in covered:
-                continue
-            k = top_rated[e][0]
-            favored.add(k)
-            covered |= self._edge_tracker.seed_edges[k]
+        # be picked up for free along the way. The edge id breaks ties so the
+        # favored set is a function of the coverage data alone, not of
+        # insertion history. Vectorized in services/favored_cover.py.
+        vectors = self._seed_picker._edge_vectors
+        sets = list(seed_edges.values())
+        favored = favored_cover(
+            list(seed_edges), sets, costs, vectors, self._edge_tracker.edge_owner_count
+        )
+        vectors.retain(sets)
         self._favored = favored
 
     def _refresh_cover(self, now: float) -> None:

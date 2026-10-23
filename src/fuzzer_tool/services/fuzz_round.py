@@ -2155,7 +2155,7 @@ class FuzzRound:
         self._execute()
         self._periodic()
         self._classify()
-        self._scan_coverage()
+        self._lite_scan()
         self._record_edges()
 
         if self._is_crash:
@@ -2165,6 +2165,23 @@ class FuzzRound:
 
         self._f.save_to_corpus(self._mutated, parent=self._data)
         return True
+
+    def _lite_scan(self) -> None:
+        # The novelty verdict without the edge set: LITE never reads it, and
+        # building it cost ~0.33 ms per ffmpeg exec. _edges_now() reads the
+        # table on demand. Multi-target and --confirm-novelty need the set.
+        f = self._f
+        shm = f.shm_cov
+        if shm is None or f.multi_targets or f._confirm_novelty:
+            self._scan_coverage()
+            return
+
+        f._current_edges_cache = None
+        f._confirmed_edges = None
+        self._scanned_shm = shm
+        # A timeout earns no coverage (see _scan_coverage).
+        if not self._is_timeout:
+            self._has_new_coverage = shm.is_new_coverage()
 
     def _lite_crash(self) -> bool:
         # Count, triage (fault address for the signature), save, bound.

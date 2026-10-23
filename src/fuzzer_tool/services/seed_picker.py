@@ -47,6 +47,8 @@ LAZY_WEIGHT_MIN_CORPUS = 512
 WEIGHT_FILL_PER_PASS = 32
 _NEUTRAL_WEIGHTS = (1.0, 1.0, 1.0, 0.5)
 RARE_EDGE_OWNERS = 3
+# Pareto front: maximal points among the newest seeds.
+PARETO_WINDOW = 100
 # Multiplier on log2(1 + rare_count) for the rare-edge energy bonus.
 RARE_EDGE_GAIN = 0.5
 # Mean owners per edge above which a seed's coverage is considered crowded.
@@ -346,6 +348,18 @@ class _EdgeVectors:
         out = np.array(found, dtype=np.int64)
         self._arrays[id(edges)] = (edges, len(edges), out)
         return out
+
+    def __len__(self) -> int:
+        return len(self._ids)
+
+    def id_array(self) -> np.ndarray:
+        """Edge id per dense index (int64)."""
+        return np.array(self._ids, dtype=np.int64)
+
+    def retain(self, sets: list[set[int]]) -> None:
+        """Drop cached arrays of sets not in *sets* (pruned seeds)."""
+        live = {id(s) for s in sets}
+        self._arrays = {k: v for k, v in self._arrays.items() if k in live}
 
     def prepare(self, seed_sets: list[set[int]], owners, recent_sets, clusters=None) -> None:
         """Index every set this pass reads, then build the per-edge tables.
@@ -2497,10 +2511,15 @@ class SeedPicker:
             return _cdf_pick(f.corpus, weights, f._cdf_cache, "corpus", f._rng)
 
     def _rebuild_pareto(self, now: float, cache_key: int, use_pareto4d: bool) -> None:
-        """Recompute per-seed Pareto scores and the cached front (cold path)."""
+        """Recompute per-seed Pareto scores and the cached front (cold path).
+
+        Only the last PARETO_WINDOW seeds are scored: the front reads no
+        others, and a rebuild runs on every admission.
+        """
         f = self.f
+        start = max(0, len(f.corpus) - PARETO_WINDOW)
         pareto_scores: list[tuple[float, ...]] = []
-        for seed in f.corpus:
+        for seed in f.corpus[start:]:
             meta = f.seed_meta.get(seed)
             if meta is None:
                 pareto_scores.append((1.0, 1.0, 1.0))
@@ -2516,7 +2535,8 @@ class SeedPicker:
                 pareto_scores.append((sub, burst, spa))
         f._pareto_cache = pareto_scores
         f._pareto_cache_key = cache_key
-        f._pareto_front_cache = self._pareto_front(pareto_scores, window=100)
+        front = self._pareto_front(pareto_scores, window=PARETO_WINDOW)
+        f._pareto_front_cache = {start + i for i in front}
 
     def _log_pick_signals(
         self, selected: bytes, now: float, weights: list[float] | None = None
