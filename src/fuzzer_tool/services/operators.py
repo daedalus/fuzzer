@@ -21,6 +21,7 @@ import os
 import struct
 from array import array
 from functools import partial
+from operator import is_
 
 import numpy as np
 
@@ -1458,6 +1459,7 @@ class OperatorEngine:
         # Cache for _op_bit_cross: content key -> parent key, rebuilt on corpus growth.
         self._parent_map: dict[str, str | None] | None = None
         self._parent_map_corpus_len: int = -1
+        self._parent_map_seeds: list[bytes] = []  # corpus entries already mapped
         self._seed_by_key_map = None
         self._seed_by_key_len: int = -1
         # Cache for region-profile position weighting, keyed by seed content
@@ -2868,13 +2870,28 @@ class OperatorEngine:
         left the corpus ends there.
         """
         corpus = self.ctx.corpus
-        if self._parent_map is None or self._parent_map_corpus_len != len(corpus):
-            key_of = self._key_fn()
-            meta = self.ctx.seed_meta or {}
-            self._parent_map = {
-                key_of(bytes(s)): (meta.get(bytes(s)) or {}).get("parent_key") for s in corpus
-            }
-            self._parent_map_corpus_len = len(corpus)
+        n = self._parent_map_corpus_len
+        if self._parent_map is not None and n == len(corpus):
+            return self._parent_map
+
+        # Appends only (the seeds already mapped are the same objects, in
+        # place): map the tail. A trim swap or a rebound list rebuilds.
+        start = 0
+        seen = self._parent_map_seeds
+        if self._parent_map is not None and 0 <= n < len(corpus) and all(map(is_, seen, corpus)):
+            start = n
+        else:
+            self._parent_map, seen = {}, []
+
+        key_of = self._key_fn()
+        meta = self.ctx.seed_meta or {}
+        tail = corpus[start:]
+        self._parent_map.update(
+            (key_of(bytes(s)), (meta.get(bytes(s)) or {}).get("parent_key")) for s in tail
+        )
+        seen.extend(tail)
+        self._parent_map_seeds = seen
+        self._parent_map_corpus_len = len(corpus)
         return self._parent_map
 
     @staticmethod
