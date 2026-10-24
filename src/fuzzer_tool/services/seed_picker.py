@@ -327,6 +327,7 @@ class _EdgeVectors:
         self.owners: np.ndarray | None = None
         self.recent: np.ndarray | None = None
         self.classes: np.ndarray | None = None  # class index per edge (--edge-clusters)
+        self._owners_src = None  # owner dict self.owners was read from
         self._rare_by_set: dict[int, int] = {}  # id(set) -> rare classes, one pass
         self._rare = self._rare_edges
 
@@ -363,10 +364,14 @@ class _EdgeVectors:
         live = {id(s) for s in sets}
         self._arrays = {k: v for k, v in self._arrays.items() if k in live}
 
-    def prepare(self, seed_sets: list[set[int]], owners, recent_sets, clusters=None) -> None:
+    def prepare(
+        self, seed_sets: list[set[int]], owners, recent_sets, clusters=None, changes=None
+    ) -> None:
         """Index every set this pass reads, then build the per-edge tables.
 
         With *clusters* (core/edge_clusters.py) the rare count is per class.
+        *changes* (``EdgeTracker.drain_owner_changes``) names the ids whose
+        owner count moved since the last pass; None re-reads every count.
         """
         live: dict[int, tuple[set[int], int, np.ndarray]] = {}
         for edges in seed_sets:
@@ -378,11 +383,7 @@ class _EdgeVectors:
             live[id(edges)] = self._arrays[id(edges)]
         # Drop arrays for sets no longer in the corpus or the window.
         self._arrays = live
-        get = owners.get
-        # map, not a generator: 4.5 -> 3.2 ms over 60k ids.
-        self.owners = np.fromiter(
-            map(get, self._ids, itertools.repeat(0)), dtype=np.int64, count=len(self._ids)
-        )
+        self._gather_owners(owners, changes)
         if recent_idx:
             self.recent = np.bincount(np.concatenate(recent_idx), minlength=len(self._ids))
         else:
@@ -393,6 +394,27 @@ class _EdgeVectors:
             self.classes = clusters.class_index(np.array(self._ids, dtype=np.int64))
             self._rare_by_set = self._count_rare_classes(seed_sets)
             self._rare = self._rare_classes
+
+    def _gather_owners(self, owners, changes) -> None:
+        # Owner count per dense index. Incremental when the same dict was
+        # read last pass: ids indexed since, plus the changed ones (88k
+        # lookups were ~19 ms of a ~100 ms pass at 9.4k ffmpeg seeds).
+        get, ids, old = owners.get, self._ids, self.owners
+        if changes is None or old is None or owners is not self._owners_src:
+            self._owners_src = owners
+            self.owners = np.fromiter(
+                map(get, ids, itertools.repeat(0)), dtype=np.int64, count=len(ids)
+            )
+            return
+
+        tail = ids[old.size :]
+        arr = np.concatenate((old, np.fromiter(map(get, tail, itertools.repeat(0)), np.int64)))
+        index = self._index
+        moved = [e for s in changes for e in s if e in index]
+        if moved:
+            pos = np.fromiter(map(index.__getitem__, moved), dtype=np.int64, count=len(moved))
+            arr[pos] = np.fromiter(map(get, moved, itertools.repeat(0)), np.int64, len(moved))
+        self.owners = arr
 
     def _count_rare_classes(self, seed_sets: list[set[int]]) -> dict[int, int]:
         """Rare classes per set for the whole pass: one unique over (set, class) pairs.
@@ -2179,7 +2201,14 @@ class SeedPicker:
             if edges:
                 sets.append(edges)
         recent = getattr(f, "_recent_seed_edges", None) or ()
-        vectors.prepare(sets, owners, [e for e in recent if e], getattr(f, "_edge_clusters", None))
+        drain = getattr(tracker, "drain_owner_changes", None)
+        vectors.prepare(
+            sets,
+            owners,
+            [e for e in recent if e],
+            getattr(f, "_edge_clusters", None),
+            changes=drain() if drain is not None else None,
+        )
         return vectors
 
     def _extract_meta(self, now: float) -> tuple:

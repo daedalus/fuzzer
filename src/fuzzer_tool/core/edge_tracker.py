@@ -84,6 +84,9 @@ CALIBRATION_PRUNE_SLACK = 4.0
 # about this many (edge, count) entries: one sort per batch instead of one
 # dict update per edge per seed.
 ABSORB_FLUSH_ENTRIES = 4_000_000
+# Owner-count change log (drain_owner_changes): past this many ids it drops
+# and the consumer re-reads every count instead.
+OWNER_LOG_MAX = 1_000_000
 
 try:
     import numpy as np
@@ -874,6 +877,49 @@ class _GenClock:
         self.last_exec = exec_count
 
 
+def _sorted_profile(prof: dict[float, float]) -> tuple[np.ndarray, np.ndarray]:
+    """(support ascending, mass) arrays of a hit-count profile."""
+    keys = np.fromiter(prof, dtype=np.float64, count=len(prof))
+    vals = np.fromiter(prof.values(), dtype=np.float64, count=len(prof))
+    order = np.argsort(keys)
+    return keys[order], vals[order]
+
+
+def _cdf_norms(a: tuple, b: tuple) -> tuple[float, float, float]:
+    """(L1, Linf, L2) of the CDF difference a - b over the merged support.
+
+    Bit-identical to the per-point loop it replaced: ``np.cumsum`` adds left
+    to right. *b* (the cached corpus side, ~88k points on ffmpeg) is merged by
+    inserting *a*'s missing points, not re-sorted per call.
+    """
+    ka, va = a
+    kb, vb = b
+    if not ka.size and not kb.size:
+        return 0.0, 0.0, 0.0
+
+    # Merged support: kb plus ka's points kb lacks, in order.
+    pos = np.searchsorted(kb, ka)
+    hit = pos < kb.size
+    hit[hit] = kb[pos[hit]] == ka[hit]
+    xs = np.insert(kb, pos[~hit], ka[~hit])
+    step = np.zeros(xs.size)
+    step[np.searchsorted(xs, ka)] = va
+    step[np.searchsorted(xs, kb)] -= vb
+
+    # cdf_diff as the loop saw it at each point: the sum before adding it.
+    after = np.cumsum(step)
+    before = np.empty_like(after)
+    before[0] = 0.0
+    before[1:] = after[:-1]
+    gap = np.diff(xs, prepend=xs[0])
+    abs_diff = np.abs(before)
+
+    wasserstein = float(np.cumsum(abs_diff * gap)[-1])
+    ks = float(max(abs_diff.max(), abs(after[-1])))
+    crps = float(np.cumsum(before * before * gap)[-1])
+    return wasserstein, ks, crps
+
+
 class EdgeTracker:
     """Track coverage edges per seed for smarter scheduling.
 
@@ -965,6 +1011,7 @@ class EdgeTracker:
         self._minhash = MinHashLSH(num_perm=64, num_bands=8)
         self._corpus_sig: array | None = None
         self._corpus_profile_cache: dict[float, float] | None = None
+        self._corpus_sorted: tuple | None = None  # (profile dict, sorted arrays)
         # Per-target cumulative edge sets: target_name -> set of edge indices
         self.target_cumulative_edges: dict[str, set[int]] = {}
         # Per-seed per-target edge sets: seed_key -> {target_name: set of edges}
@@ -992,6 +1039,10 @@ class EdgeTracker:
         # is bumped on every owner-count change, the seed count is the fit's
         # cap. Not serialized: from_dict resets it.
         self._owner_version = 0
+        # Ids whose owner count rose since the last drain_owner_changes().
+        self._owner_log: list[set[int]] = []
+        self._owner_log_n = 0
+        self._owner_log_ok = False  # False: the next drain asks for a full read
         self._zipf_cache: tuple[tuple[int, int], ZipfFit] | None = None
         # Edge discovery time-series: list of (exec_count, cumulative_edge_count)
         self._coverage_execs: array = array("Q")  # exec_count per coverage snapshot
@@ -1086,6 +1137,8 @@ class EdgeTracker:
         else:
             for edge_id in new_owners:
                 self._edge_owner_count[edge_id] = self._edge_owner_count[edge_id] + 1
+        if new_owners:
+            self._log_owners(new_owners)
 
         self.seed_edges[seed_key].update(new_edges)
 
@@ -1125,6 +1178,25 @@ class EdgeTracker:
             self._f0_history.append((len(self.cumulative_edges), self._f0.estimate()))
 
         return new_contributions
+
+    def _log_owners(self, ids: set[int]) -> None:
+        if not self._owner_log_ok:
+            return
+        self._owner_log.append(ids)
+        self._owner_log_n += len(ids)
+        if self._owner_log_n > OWNER_LOG_MAX:
+            self._owner_log, self._owner_log_n, self._owner_log_ok = [], 0, False
+
+    def drain_owner_changes(self) -> list[set[int]] | None:
+        """Ids whose owner count rose since the last drain; None: re-read all.
+
+        One consumer: the seed picker's weight pass. Counts replaced
+        wholesale (prune, reload, resize) bind a new dict, which the
+        consumer detects by identity.
+        """
+        log, ok = self._owner_log, self._owner_log_ok
+        self._owner_log, self._owner_log_n, self._owner_log_ok = [], 0, True
+        return log if ok else None
 
     def is_redundant(self, edge_ids) -> bool:
         """True when *edge_ids* adds nothing to ``cumulative_edges``."""
@@ -2250,8 +2322,17 @@ class EdgeTracker:
         corpus = self._corpus_hitcount_profile()
         if not corpus:
             return 0.0, 0.0
-        wasserstein, ks, _crps = self._cdf_walk(self._hitcount_profile(hc), corpus)
+        wasserstein, ks, _crps = _cdf_norms(
+            _sorted_profile(self._hitcount_profile(hc)), self._corpus_profile_sorted(corpus)
+        )
         return wasserstein, ks
+
+    def _corpus_profile_sorted(self, corpus: dict[float, float]):
+        # Sorted arrays of the cached corpus profile, rebuilt with it.
+        cached = self._corpus_sorted
+        if cached is None or cached[0] is not corpus:
+            cached = self._corpus_sorted = (corpus, _sorted_profile(corpus))
+        return cached[1]
 
     def _wasserstein_vs_aggregate(self, hc: dict[int, int]) -> float:
         """Wasserstein-1 between a seed's hit-count profile and the corpus's.
@@ -2369,25 +2450,11 @@ class EdgeTracker:
         """L1, Linf and L2 norms of the CDF difference between two profiles.
 
         One pass over the merged support. Returns (wasserstein, ks, crps).
+        Vectorized; ``np.cumsum`` adds left to right like the loop it replaced,
+        so the values are bit-identical (88k-point corpus support: ~9 ms per
+        call in Python).
         """
-        xs = sorted(set(prof_a) | set(prof_b))
-        if not xs:
-            return 0.0, 0.0, 0.0
-        cdf_diff = 0.0
-        wasserstein = 0.0
-        ks = 0.0
-        crps = 0.0
-        prev = xs[0]
-        for x in xs:
-            gap = x - prev
-            abs_diff = abs(cdf_diff)
-            wasserstein += abs_diff * gap
-            ks = max(ks, abs_diff)
-            crps += cdf_diff * cdf_diff * gap
-            cdf_diff += prof_a.get(x, 0.0) - prof_b.get(x, 0.0)
-            prev = x
-        ks = max(ks, abs(cdf_diff))
-        return wasserstein, ks, crps
+        return _cdf_norms(_sorted_profile(prof_a), _sorted_profile(prof_b))
 
     def _corpus_hitcount_profile(self) -> dict[float, float]:
         """Corpus-wide hit-count profile, one observation per discovered edge.
