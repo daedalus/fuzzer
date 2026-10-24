@@ -845,13 +845,17 @@ def shannon_entropy_test(data: bytes) -> float:
     relationship chi2 ≈ 2*n*ln(2)*(log2(N) - H), where N=256 is the
     alphabet size. Under the null of uniform byte distribution, the
     chi-squared statistic follows a chi^2(255) distribution.
+
+    G overstates chi^2 at small cell counts (16/cell at 4 KiB rejected
+    ~1.25% at alpha 0.01); Williams' q = 1 + (N+1)/(6n) corrects it.
     """
     n = len(data)
     if n < 256:
         return 1.0
     h = shannon_entropy(data)
-    chi2 = 2.0 * n * math.log(2.0) * (8.0 - h)
-    return chisq_sf(chi2, 255)
+    g = 2.0 * n * math.log(2.0) * (8.0 - h)
+    q = 1.0 + 257.0 / (6.0 * n)
+    return chisq_sf(g / q, 255)
 
 
 # Per-test rejection level used by _classify.

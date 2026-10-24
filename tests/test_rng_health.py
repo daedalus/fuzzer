@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
@@ -132,3 +133,56 @@ def test_reports_rng_health_never_raises_on_check_error(capsys):
     f = object.__new__(Fuzzer)
     f._rng = _BrokenRng()
     f._report_rng_health()  # must not raise
+
+
+# ── calibration: healthy streams must fail at the nominal rate ─────────
+
+_NULL_STREAMS = 1000
+_ALPHA = 0.01
+# Binomial(1000, 0.01) exceeds 20 with p ~ 0.001; the double-counted
+# entropy p-value gave ~37.
+_MAX_FALSE_ALARMS = 20
+
+
+def test_regression_health_false_alarm_rate():
+    fails = sum(not quick_health_check(RandPool(seed=s)).ok for s in range(_NULL_STREAMS))
+    assert fails <= _MAX_FALSE_ALARMS, f"{fails}/{_NULL_STREAMS} healthy streams flagged"
+
+
+def test_regression_entropy_not_combined():
+    # entropy is a G-test on the same histogram as byte_chisq (corr ~0.99):
+    # Fisher must see it once, not twice.
+    from fuzzer_tool.core.randomness import fishers_method
+
+    r = quick_health_check(RandPool(seed=3))
+    independent = [p for name, p in r.pvalues.items() if name != "entropy"]
+    assert r.combined_p == pytest.approx(fishers_method(independent))
+    assert "entropy" in r.pvalues  # still reported
+
+
+class _SkewedRng:
+    """Uniform over 0..239 only: no constant, no stickiness, just 16 missing values."""
+
+    def __init__(self):
+        self._rng = np.random.default_rng(5)
+
+    def randint_list(self, a, b, count):
+        return self._rng.integers(0, 240, count).tolist()
+
+
+def test_skewed_stream_flagged_without_entropy_in_combination():
+    r = quick_health_check(_SkewedRng())
+    assert not r.ok
+    assert r.pvalues["byte_chisq"] < _ALPHA
+
+
+def test_regression_entropy_test_calibrated():
+    # Raw G overstates chi2 at 16 counts/cell; Williams' q fixes it.
+    from fuzzer_tool.core.randomness import byte_chisq, ks_uniform, shannon_entropy_test
+
+    rng = np.random.default_rng(11)
+    streams = [rng.integers(0, 256, 4096, dtype=np.uint8).tobytes() for _ in range(2000)]
+
+    # Control (Rule 46): the oracle must pass a known-calibrated test first.
+    assert ks_uniform([byte_chisq(d) for d in streams]) > 0.001
+    assert ks_uniform([shannon_entropy_test(d) for d in streams]) > 0.001
