@@ -22,7 +22,10 @@ previous value more often than chance (e.g. a pool-refill boundary bug or
 an EMA-style feedback loop feeding the RNG), since marginal byte frequencies
 stay uniform under stickiness.
 
-The five p-values are combined with ``fishers_method``. This never raises:
+``entropy`` is a G-test on the same histogram as ``byte_chisq`` (corr
+~0.99), so it is reported but left out of the ``fishers_method``
+combination: counting it twice flagged ~3.7% of healthy streams at the 1%
+threshold. This never raises:
 a suspect RNG is a warning, not a reason to abort a run that was otherwise
 ready to go.
 """
@@ -42,6 +45,7 @@ from fuzzer_tool.core.randomness import (
 
 _DEFAULT_N_BYTES = 4096
 _P_THRESHOLD = 0.01  # standard NIST SP 800-22 significance level
+_REDUNDANT = frozenset({"entropy"})  # same histogram as byte_chisq
 
 
 @dataclass
@@ -72,7 +76,7 @@ def quick_health_check(rng, n_bytes: int = _DEFAULT_N_BYTES) -> RngHealthResult:
     Draws ``n_bytes`` bytes (default 4096 -- one ``RandPool`` refill's
     worth, negligible next to a fuzzing campaign) and runs monobit,
     byte_chisq, runs_test, shannon_entropy and repeat_test, then combines
-    the five p-values with Fisher's method. Also flags an outright-constant
+    all but entropy (redundant with byte_chisq) with Fisher's method. Also flags an outright-constant
     stream, which a single small sample could in principle slip past the
     statistical tests.
 
@@ -95,7 +99,7 @@ def quick_health_check(rng, n_bytes: int = _DEFAULT_N_BYTES) -> RngHealthResult:
         "entropy": shannon_entropy_test(data),
         "repeat": repeat_test(values, alphabet=256),
     }
-    combined_p = fishers_method(list(pvalues.values()))
+    combined_p = fishers_method([p for name, p in pvalues.items() if name not in _REDUNDANT])
 
     return RngHealthResult(
         n_bytes=len(data),
