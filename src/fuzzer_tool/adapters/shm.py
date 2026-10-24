@@ -236,6 +236,11 @@ class SharedVirgin:
 # ShmCoverage._update_max_counts for why this is not strict `>`.
 MAX_COUNT_GROWTH_FACTOR = 1.5
 
+# Budget, in stored edge ids, for ShmCoverage._known_paths (~4 B each). The
+# cache is cleared when a new path would exceed it: bounded memory, one
+# re-scan per path afterwards.
+_KNOWN_PATH_IDS_MAX = 1 << 22
+
 
 def _atexit_weak(obj) -> None:
     """Run ``obj.cleanup()`` at exit without keeping ``obj`` alive.
@@ -379,6 +384,11 @@ class ShmCoverage:
         self._last_edge_count: int = 0
         # Last seen path_hash for fast-path — catches same-count but different-edge sets
         self._last_path_hash: int = 0
+        # Folded paths: (path_hash, edge_count) -> live ids of that exec.
+        # A folded path cannot carry a new id, bucket or maximum, so a repeat
+        # skips the scan (AFL's known trace checksum). See _scan_new.
+        self._known_paths: dict[tuple[int, int], np.ndarray] = {}
+        self._known_path_ids: int = 0
         # Current edge set as of the last slow-path scan. Returned by the
         # fast path instead of an empty set() when nothing changed, so
         # callers that snapshot the return value (e.g. Fuzzer._prev_edge_set)
@@ -808,6 +818,8 @@ class ShmCoverage:
         newly = ids - self._seen_edge_ids
         self._seen_edge_ids.update(ids)
         self._masked_edge_ids.update(ids)
+        # Cached ids may hold what a mask or reject_phantoms withdraws.
+        self._forget_paths()
 
         # Mark every bucket for each masked edge as already visited.
         # bucket_bits() yields a one-hot bit per count class, so 0xFF is
@@ -1380,6 +1392,18 @@ class ShmCoverage:
             self.last_old_bucket_novel = False
             return False
 
+        # Known path: folded on an earlier exec, so nothing in it is new.
+        # Hash 0 means a hand-built table (see above), never cached.
+        key = (path_hash, edge_count)
+        known = self._known_paths.get(key) if path_hash else None
+        if known is not None:
+            self._ids_arr, self._ids_set = known, None
+            self.last_new_ids = frozenset()
+            self.last_old_bucket_novel = False
+            self._last_edge_count = edge_count
+            self._last_path_hash = path_hash
+            return False
+
         # Slow path: extract edge_ids not yet in _seen_edge_ids
         active_ids, active_counts = self._active_columns()
         self._ids_arr, self._ids_set = active_ids, None
@@ -1418,10 +1442,23 @@ class ShmCoverage:
 
         self._last_edge_count = edge_count
         self._last_path_hash = path_hash
+        if path_hash:
+            self._remember_path(key, active_ids)
 
         if new_found:
             self.total_edges += 1
         return new_found
+
+    def _remember_path(self, key: tuple[int, int], ids: np.ndarray) -> None:
+        """Cache *ids* for a folded path; clear first if over budget."""
+        if self._known_path_ids + ids.size > _KNOWN_PATH_IDS_MAX:
+            self._forget_paths()
+        self._known_paths[key] = ids
+        self._known_path_ids += ids.size
+
+    def _forget_paths(self) -> None:
+        self._known_paths.clear()
+        self._known_path_ids = 0
 
     def _unseen(self, active_ids: np.ndarray) -> set[int]:
         """Ids in *active_ids* not in ``_seen_edge_ids``.
@@ -1612,6 +1649,7 @@ class ShmCoverage:
         # forcing one full scan on the next execution costs a single exec
         # and removes any dependence on that being true.
         self._last_edge_count = 0
+        self._forget_paths()
 
     # ── Lifecycle ────────────────────────────────────────────────────────
 

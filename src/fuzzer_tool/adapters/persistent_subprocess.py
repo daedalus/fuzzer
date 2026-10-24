@@ -33,6 +33,8 @@ import tempfile
 import threading
 import time
 
+from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
+
 log = logging.getLogger(__name__)
 
 
@@ -298,7 +300,7 @@ class PersistentLoader:
     Timeout enforcement:
     - Loader script forks a child per call with os.setsid() (own process group)
     - Loader writes child PID to a temp file for outer-layer cleanup
-    - run_one uses threaded readline with timeout
+    - run_one polls the reply pipe with a deadline (PipeReader)
     - On timeout: kills loader + orphaned grandchild (via PID file or process tree)
     """
 
@@ -317,6 +319,7 @@ class PersistentLoader:
         # --ptrace when fault-address/register capture is worth the cost.
         self.use_ptrace = use_ptrace
         self._proc = None
+        self._reader: PipeReader | None = None
         self._ready = False
         self._last_bitmap = None
         self._restarting = False
@@ -361,6 +364,7 @@ class PersistentLoader:
             stderr=subprocess.PIPE,
             env=env,
         )
+        self._reader = PipeReader(self._proc.stdout.fileno())
 
         # Drain stderr in background — prevents pipe-buffer deadlock when
         # ASAN/instrumented targets write diagnostic output to stderr.
@@ -371,7 +375,7 @@ class PersistentLoader:
         self._proc.stdin.write(init.encode())
         self._proc.stdin.flush()
 
-        resp = self._proc.stdout.readline()
+        resp = self._reader.readline(NO_DEADLINE)
         if resp.strip() == b"READY":
             self._ready = True
             log.info("Persistent loader started: %s", self.target)
@@ -426,19 +430,12 @@ class PersistentLoader:
             self._ready = False
             return self._restart_retry(data)
 
-        # Threaded readline with timeout — prevents hang if loader gets stuck
-        result = [None]
-
-        def _readline():
-            result[0] = self._proc.stdout.readline()
-
-        t = threading.Thread(target=_readline, daemon=True)
-        t.start()
-        t.join(timeout=self.timeout)
-        if t.is_alive():
+        # Deadline-bounded read — prevents hang if loader gets stuck
+        deadline = t_start + self.timeout
+        header = self._reader.readline(deadline)
+        if header is None:
             return self._on_hang()
 
-        header = result[0]
         if not header:
             return -2, None
 
@@ -456,7 +453,7 @@ class PersistentLoader:
 
         bitmap = None
         if bmp_len > 0:
-            bitmap = self._proc.stdout.read(bmp_len)
+            bitmap = self._reader.read_exact(bmp_len, deadline)
 
         self._last_bitmap = bitmap
 

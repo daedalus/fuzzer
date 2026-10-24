@@ -29,6 +29,7 @@ from fuzzer_tool.adapters.shim_factory import (
     load_shim,
 )
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SIZEOF_ENTRY
+from fuzzer_tool.adapters.stderr_capture import StderrCapture
 
 log = logging.getLogger(__name__)
 
@@ -192,6 +193,24 @@ def read_shim_health(lib: ctypes.CDLL) -> tuple[int, ...] | None:
     return tuple(buf)
 
 
+# Guard strategies bound by InProcessRunner._bind_guard.
+def _call_timed(r: "InProcessRunner", buf, n: int) -> int:
+    """Guarded call with the shim's own deadline; sets ``_guard_timed_out``."""
+    rc = r._guard_fn(r._guard_ptr, buf, n, int(r.timeout * _US_PER_S))
+    r._guard_timed_out = rc == GUARD_TIMEOUT_RC
+    return rc
+
+
+def _call_plain(r: "InProcessRunner", buf, n: int) -> int:
+    r._guard_timed_out = False
+    return r._guard_fn(r._guard_ptr, buf, n)
+
+
+def _call_unguarded(r: "InProcessRunner", buf, n: int) -> None:
+    r._guard_timed_out = False
+    return None
+
+
 class InProcessRunner:
     """Call target function with minimal overhead.
 
@@ -230,6 +249,15 @@ class InProcessRunner:
         self._func: Callable[[bytes], int] | None = None
         self._lib: ctypes.CDLL | None = None
         self._func_ptr = None  # cached function pointer
+        # Shim guard + distance flush, bound once per load (_bind_guard).
+        # A plain function, not a bound method: a bound method on self is a
+        # reference cycle and would defer __del__ (and stop()) to the GC.
+        self._guard_call = _call_unguarded
+        self._guard_fn = None
+        self._guard_ptr = None
+        self._dist_flush = None
+        # fd 2 -> reused pipe around direct-mode calls (ASAN reports).
+        self._stderr = StderrCapture()
         self._is_c = False
         self._loader_path: str | None = None
         self._bitmap_out: str | None = None
@@ -321,6 +349,7 @@ class InProcessRunner:
                 ctypes.c_size_t,
             ]
             self._func_ptr = fn_ptr  # cache the resolved symbol
+            self._bind_guard()
         except OSError as e:
             if shim_loaded:
                 log.warning("Direct mode failed (%s), falling back to subprocess", e)
@@ -329,17 +358,21 @@ class InProcessRunner:
             else:
                 raise
 
-    def _call_guarded(self, buf, n: int) -> int | None:
-        """Run the entry through the shim's guard; None when the target has none.
+    def _bind_guard(self) -> None:
+        """Bind the shim's guard once per load; ``_guard_call`` runs the entry.
 
         Prefers ``__afl_guarded_call_timeout``: a C infinite loop never
         returns to Python, so the SIGALRM handler (which only sets a flag)
         cannot end it, and direct mode hung forever. The shim's own timer
         leaves through the guard and the call returns GUARD_TIMEOUT_RC.
-        Sets ``self._guard_timed_out``.
+        Without either guard ``_guard_call`` returns None.
+
+        Bound here, not per exec: symbol lookups, ``restype``/``argtypes``
+        and the pointer cast cost ~2 us per exec, and a missing symbol is a
+        failing ``dlsym`` every time.
         """
-        self._guard_timed_out = False
-        ptr = ctypes.cast(self._func_ptr, ctypes.c_void_p)
+        self._guard_ptr = ctypes.cast(self._func_ptr, ctypes.c_void_p)
+        self._dist_flush = getattr(self._lib, "__afl_dist_flush", None)
 
         timed = getattr(self._lib, "__afl_guarded_call_timeout", None)
         if timed is not None:
@@ -350,16 +383,23 @@ class InProcessRunner:
                 ctypes.c_size_t,
                 ctypes.c_uint64,
             ]
-            rc = timed(ptr, buf, n, int(self.timeout * _US_PER_S))
-            self._guard_timed_out = rc == GUARD_TIMEOUT_RC
-            return rc
+            self._guard_fn, self._guard_call = timed, _call_timed
+            return
 
         guarded = getattr(self._lib, "__afl_guarded_call", None)
         if guarded is None:
-            return None
+            self._guard_call = _call_unguarded
+            return
+
         guarded.restype = ctypes.c_int
         guarded.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
-        return guarded(ptr, buf, n)
+        self._guard_fn, self._guard_call = guarded, _call_plain
+
+    def _unbind_guard(self) -> None:
+        self._guard_call = _call_unguarded
+        self._guard_fn = None
+        self._guard_ptr = None
+        self._dist_flush = None
 
     def reset_exec_state(self) -> None:
         """Clear the shim's per-execution state in a directly loaded target.
@@ -569,12 +609,9 @@ class InProcessRunner:
         old call zeroed ``shm_size`` bytes of a ``24 + shm_size * 8`` byte
         segment -- one eighth of the table.
 
-        Note for whoever picks this up next: on the ``services/runner.py``
-        path this reset is redundant, because ``reset_edge_map()`` already
-        bumped the generation immediately before ``run_one()``. Removing the
-        call from ``_run_c_direct`` would save a full-table memset per
-        execution, but that wants measuring on a built target rather than
-        arguing about. Tracked in docs/TODO.md.
+        ``_run_c_direct`` no longer calls this: ``reset_edge_map()`` bumps the
+        generation before every ``run_one()`` (see
+        ``tests/test_regression_direct_reset_memset.py``).
         """
         if self.coverage_env_id:
             try:
@@ -643,8 +680,9 @@ class InProcessRunner:
         """
         if self._lib is None or self._func_ptr is None:
             return -2, "runner not initialized"
-        if self._coverage_enabled():
-            self.reset_bitmap()
+        # No reset_bitmap() here: run_target's reset_edge_map() generation bump
+        # already aged out the previous exec. A memset re-claimed every slot
+        # cold and bumped edge_count, defeating the _scan_new fast path.
 
         timed_out = False
 
@@ -655,17 +693,14 @@ class InProcessRunner:
         old_alarm = signal.signal(signal.SIGALRM, _alarm_handler)
         signal.setitimer(signal.ITIMER_REAL, self.timeout)
         result: tuple[int, str] | None = None
-        old_stderr_fd = None
-        read_fd = None
+        capturing = False
         try:
             # Capture stderr for ASAN output
-            old_stderr_fd = os.dup(2)
-            read_fd, write_fd = os.pipe()
-            os.dup2(write_fd, 2)
-            os.close(write_fd)
+            self._stderr.begin()
+            capturing = True
 
             buf = _input_buf(data)
-            rc = self._call_guarded(buf, len(data))
+            rc = self._guard_call(self, buf, len(data))
             if rc is None:
                 rc = self._func_ptr(buf, len(data))
             elif self._guard_timed_out:
@@ -676,28 +711,15 @@ class InProcessRunner:
                 rc = 128 + (-rc)
 
             # Restore stderr and read any captured output
-            os.dup2(old_stderr_fd, 2)
-            os.close(old_stderr_fd)
-            old_stderr_fd = None
-            os.set_blocking(read_fd, False)
-            stderr_buf = []
-            with contextlib.suppress(OSError):
-                stderr_buf.append(os.read(read_fd, 65536))
-            os.close(read_fd)
-            read_fd = None
+            captured = self._stderr.finish()
+            capturing = False
 
-            if timed_out:
-                result = (-1, "timeout")
-            else:
-                result = (rc, b"".join(stderr_buf).decode(errors="replace"))
+            result = (-1, "timeout") if timed_out else (rc, captured)
         except Exception as e:
             # Restore stderr on exception
-            with contextlib.suppress(Exception):
-                if old_stderr_fd is not None:
-                    os.dup2(old_stderr_fd, 2)
-                    os.close(old_stderr_fd)
-                if read_fd is not None:
-                    os.close(read_fd)
+            if capturing:
+                with contextlib.suppress(Exception):
+                    self._stderr.finish()
             result = (-2, str(e))
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
@@ -728,13 +750,8 @@ class InProcessRunner:
 
         # Conditional stderr capture for ASAN diagnostic reporting
         _captured_stderr = ""
-        _saved_stderr = None
-        _read_fd = None
         if self.capture_stderr:
-            _saved_stderr = os.dup(2)
-            _read_fd, _write_fd = os.pipe()
-            os.dup2(_write_fd, 2)
-            os.close(_write_fd)
+            self._stderr.begin()
 
         self._timed_out = False
         if not hasattr(self, "_alarm_handler"):
@@ -754,26 +771,17 @@ class InProcessRunner:
             # rc < 0 means a signal crashed us; siglongjmp'd back with -sig
             # (e.g. -6 for SIGABRT). Already in the right format — matches
             # how run_target_stdin returns signal codes.
-            rc = self._call_guarded(self._c_buf, n)
+            rc = self._guard_call(self, self._c_buf, n)
             if rc is None:
                 rc = self._func_ptr(self._c_buf, n)
             elif self._guard_timed_out:
                 self._timed_out = True
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
-            if self.capture_stderr and _saved_stderr is not None and _read_fd is not None:
-                # Restore original stderr
-                os.dup2(_saved_stderr, 2)
-                os.close(_saved_stderr)
-                # Read captured stderr (non-blocking to avoid hang if ASAN
-                # closed/replaced its own fd during halt_on_error recovery)
-                os.set_blocking(_read_fd, False)
-                try:
-                    _buf = os.read(_read_fd, 65536)
-                    _captured_stderr = _buf.decode(errors="replace")
-                except OSError:
-                    _captured_stderr = ""
-                os.close(_read_fd)
+            if self.capture_stderr:
+                # Restore stderr; the read end is non-blocking, so a closed
+                # or replaced ASAN fd cannot hang the drain.
+                _captured_stderr = self._stderr.finish()
 
         if self._timed_out:
             return -1, "timeout"
@@ -790,10 +798,11 @@ class InProcessRunner:
         without touching the edge table.  No-op when the target has no
         distance channel.
         """
+        flush = self._dist_flush
+        if flush is None:
+            return
         try:
-            flush = getattr(self._lib, "__afl_dist_flush", None)
-            if flush is not None:
-                flush()
+            flush()
         except Exception:
             log.debug("__afl_dist_flush failed", exc_info=True)
 
@@ -858,11 +867,6 @@ class InProcessRunner:
         except Exception as e:
             return -2, str(e)
 
-    def _coverage_enabled(self) -> bool:
-        return (self._shim is not None and self._shim.coverage_type != "none") or bool(
-            self.coverage_env_id
-        )
-
     def update_shm_after_resize(self, new_ptr: int, new_size: int, new_env_id: str = "") -> None:
         """Redirect coverage writes to the resized SHM segment.
 
@@ -918,6 +922,8 @@ class InProcessRunner:
         self._func = None
         self._lib = None
         self._func_ptr = None
+        self._unbind_guard()
+        self._stderr.close()
         self._is_c = False
         self._shim_handle = None
         if self._persistent:
