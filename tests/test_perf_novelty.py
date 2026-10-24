@@ -39,6 +39,8 @@ class _FakeShm(ShmCoverage):
         self._last_max_gain = 0
         self._seen_edge_ids = set()
         self._masked_edge_ids = set()
+        self._known_paths = {}
+        self._known_path_ids = 0
         self._ptr = None  # ShmCoverage.__del__ -> cleanup() reads this
 
     def cleanup(self):

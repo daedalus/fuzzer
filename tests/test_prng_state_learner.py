@@ -753,6 +753,82 @@ class TestOperatorPlacement:
         assert bytes(buf[40:48]) == nxt.to_bytes(8, "little")
         assert bytes(buf[4:8]) == narrow_field, "the 4-byte field is untouched"
 
+    def _two_fields(self):
+        """Two 4-byte token fields; pairs listed in reverse buffer order."""
+        first, second = b"\x11\x22\x33\x44", b"\x55\x66\x77\x88"
+        buf = bytearray(b"HDR-" + first + b"-mid-" + second + b"-tail")
+        offsets = (bytes(buf).find(first), bytes(buf).find(second))
+        pairs = [(second, b"\x00" * 4), (first, b"\x00" * 4)]
+        return buf, offsets, pairs
+
+    @pytest.mark.parametrize("min_pairs", [0, 10**9], ids=["scanner", "find"])
+    def test_candidates_are_ascending_offsets(self, monkeypatch, min_pairs):
+        """Candidates are ordered by offset, not by pool order, on both
+        paths: choice index 0 picks the lowest field although its pair is
+        listed last."""
+        from fuzzer_tool.services import operators
+        from tests.support.scripted_rng import ScriptedRng
+
+        monkeypatch.setattr(operators, "PRNG_SCAN_MIN_PAIRS", min_pairs)
+
+        words = _stream(5)
+        learner = _learner(_conds(words[:4]))
+        learner.observe_execution(PAYLOAD)
+        buf, (low, high), pairs = self._two_fields()
+
+        engine = self._engine(learner, pairs, rng=ScriptedRng(choice_idxs=[0]))
+        engine._op_prng_predict(buf, 0, bytes(buf))
+
+        assert bytes(buf[low : low + 4]) == words[4].to_bytes(4, "little")
+        assert bytes(buf[high : high + 4]) == pairs[0][0], "the other field is untouched"
+
+    @pytest.mark.parametrize("min_pairs,shared", [(2, True), (3, False)])
+    def test_scanner_from_pool_size(self, monkeypatch, min_pairs, shared):
+        """At ``PRNG_SCAN_MIN_PAIRS`` pairs offsets come from
+        ``scanner_for_pairs`` (its cache then holds this pool, shared with
+        colorize/weizz); one pair fewer, the find loop leaves it alone."""
+        from fuzzer_tool.core import aho_corasick
+        from fuzzer_tool.services import operators
+        from tests.support.scripted_rng import ScriptedRng
+
+        monkeypatch.setattr(operators, "PRNG_SCAN_MIN_PAIRS", min_pairs)
+        words = _stream(5)
+        learner = _learner(_conds(words[:4]))
+        learner.observe_execution(PAYLOAD)
+        buf, _, pairs = self._two_fields()
+
+        aho_corasick._reset_scanner_cache()
+        try:
+            engine = self._engine(learner, pairs, rng=ScriptedRng(choice_idxs=[1]))
+            engine._op_prng_predict(buf, 0, bytes(buf))
+            assert (aho_corasick._cache_owner is pairs) is shared
+        finally:
+            aho_corasick._reset_scanner_cache()
+
+    @pytest.mark.parametrize("min_pairs", [0, 10**9], ids=["scanner", "find"])
+    def test_repeats_collapse_to_first_occurrence(self, monkeypatch, min_pairs):
+        """Adversarial: a token occurring twice, listed in both operands of
+        two pairs, is one candidate (its first offset), so no draw is made;
+        ScriptedRng with nothing scripted raises if one is."""
+        from fuzzer_tool.services import operators
+        from tests.support.scripted_rng import ScriptedRng
+
+        monkeypatch.setattr(operators, "PRNG_SCAN_MIN_PAIRS", min_pairs)
+
+        words = _stream(5)
+        learner = _learner(_conds(words[:4]))
+        learner.observe_execution(PAYLOAD)
+        tok = b"\x11\x22\x33\x44"
+        buf = bytearray(b"AB" + tok + b"-gap-" + tok + b"-end")
+        first, second = 2, bytes(buf).rfind(tok)
+        pairs = [(tok, tok), (tok, b"\x01\x02")]
+
+        engine = self._engine(learner, pairs, rng=ScriptedRng())
+        engine._op_prng_predict(buf, 0, bytes(buf))
+
+        assert bytes(buf[first : first + 4]) == words[4].to_bytes(4, "little")
+        assert bytes(buf[second : second + 4]) == tok
+
     def test_buffer_shorter_than_the_wide_draw_is_left_alone(self):
         """Six bytes is enough for a 4-byte token and not for an 8-byte one."""
         learner, _ = self._wide_learner()

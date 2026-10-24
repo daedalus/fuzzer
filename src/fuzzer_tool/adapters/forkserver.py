@@ -28,7 +28,9 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 
+from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
 from fuzzer_tool.adapters.process import _clean_env
 
 log = logging.getLogger(__name__)
@@ -175,6 +177,7 @@ class ForkserverRunner:
         self._restarting = False
         self._stderr_lines: list[str] = []
         self._stderr_thread: threading.Thread | None = None
+        self._reader: PipeReader | None = None
 
     def start(self) -> bool:
         if self._proc and self._proc.poll() is None:
@@ -203,6 +206,7 @@ class ForkserverRunner:
             stderr=subprocess.PIPE,
             env=env,
         )
+        self._reader = PipeReader(self._proc.stdout.fileno())
 
         # Drain stderr in background.
         #
@@ -241,7 +245,7 @@ class ForkserverRunner:
             log.warning("Forkserver: failed to send INIT")
             return False
 
-        resp = self._proc.stdout.readline()
+        resp = self._reader.readline(NO_DEADLINE)
         parts = resp.decode(errors="replace").strip().split()
         if parts and parts[0] == "READY":
             self._ready = True
@@ -293,20 +297,13 @@ class ForkserverRunner:
             self._ready = False
             return self._restart_retry(data, -2)
 
-        # Threaded readline with timeout
-        result = [None]
-
-        def _readline():
-            result[0] = self._proc.stdout.readline()
-
-        t = threading.Thread(target=_readline, daemon=True)
-        t.start()
         # Wait past the loader's own timeout before declaring the
         # loader itself hung: it needs to reap the child and drain its stderr
-        # after firing, and joining at exactly the alarm deadline would tear
+        # after firing, and giving up at exactly the alarm deadline would tear
         # down a healthy loader on every timing-out input.
-        t.join(timeout=self.timeout + _LOADER_GRACE)
-        if t.is_alive():
+        deadline = time.monotonic() + self.timeout + _LOADER_GRACE
+        header = self._reader.readline(deadline)
+        if header is None:
             log.warning("Forkserver timed out after %.1fs, restarting", self.timeout)
             proc = self._proc
             with contextlib.suppress(Exception):
@@ -316,7 +313,7 @@ class ForkserverRunner:
             self._ready = False
             return self._restart_retry(data, -1)
 
-        return self._read_result(result[0])
+        return self._read_result(header, deadline)
 
     def _restart_retry(self, data: bytes, fail_rc: int) -> tuple[int, str]:
         """Restart the loader once and rerun *data*; ``(fail_rc, "")`` otherwise.
@@ -335,7 +332,7 @@ class ForkserverRunner:
             self._restarting = False
         return fail_rc, ""
 
-    def _read_result(self, header) -> tuple[int, str]:
+    def _read_result(self, header: bytes, deadline: float) -> tuple[int, str]:
         """Parse the ``RC <rc> <err_len>`` reply and read the stderr payload."""
         if not header:
             return -2, ""
@@ -349,7 +346,7 @@ class ForkserverRunner:
 
         stderr = ""
         if err_len > 0:
-            raw = self._proc.stdout.read(err_len)
+            raw = self._reader.read_exact(err_len, deadline)
             if raw:
                 stderr = raw.decode(errors="replace")
 
@@ -394,19 +391,12 @@ class ForkserverRunner:
         # between execs when it reads a command -- so a stall here means the
         # loader is wedged, and blocking forever on stdout would take the
         # fuzz loop with it.
-        result: list = [None]
-
-        def _readline():
-            result[0] = self._proc.stdout.readline()
-
-        t = threading.Thread(target=_readline, daemon=True)
-        t.start()
-        t.join(timeout=self.timeout + _LOADER_GRACE)
-        if t.is_alive():
+        reply = self._reader.readline(time.monotonic() + self.timeout + _LOADER_GRACE)
+        if reply is None:
             log.warning("Forkserver: no reply to TIMEOUT; leaving deadline at %.3fs", self.timeout)
             return False
 
-        parts = (result[0] or b"").decode(errors="replace").split()
+        parts = (reply or b"").decode(errors="replace").split()
         if len(parts) >= 2 and parts[0] == "TIMEOUT_OK":
             # Trust the loader's echo, not the request: it clamps, and the
             # two sides disagreeing about the deadline is the whole failure
@@ -414,7 +404,7 @@ class ForkserverRunner:
             self.timeout = float(parts[1])
             return True
 
-        log.warning("Forkserver: unexpected reply to TIMEOUT: %r", result[0])
+        log.warning("Forkserver: unexpected reply to TIMEOUT: %r", reply)
         return False
 
     def update_shm_after_resize(self, new_env_id: str, new_size: int) -> None:
