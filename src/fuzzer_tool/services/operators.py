@@ -25,6 +25,7 @@ from operator import is_
 
 import numpy as np
 
+from fuzzer_tool.core.aho_corasick import scanner_for_pairs
 from fuzzer_tool.core.auto_dict import NO_HASH, harvest_tokens
 from fuzzer_tool.core.byte_pca import MAX_ROWS, ByteGroups, byte_groups, sketch_row
 from fuzzer_tool.core.checksum_sites import hint_operands
@@ -438,6 +439,33 @@ def _split_det_quota(costs: list[int], budget: int) -> list[int]:
 # deterministic pass covers. The generator below is the actual systematic
 # walk: every bit, then every byte, then every arithmetic delta, then every
 # interesting value, in order.
+
+
+#: cmplog pool size from which ``prng_predict`` locates operands with the
+#: pool's cached ``TokenScanner``; below it, one ``bytes.find`` per operand is
+#: cheaper (warm, 4-byte draw: 10 pairs 1 vs 17 us, 500 pairs 50 vs 40 us at
+#: 64 B / 379 vs 267 us at 4 KiB, 5000 pairs 0.56 vs 0.02 ms / 4.1 vs 0.65 ms).
+PRNG_SCAN_MIN_PAIRS = 500
+
+
+def _prng_offsets(src: bytes, pairs, width: int) -> list[int]:
+    """Ascending first offsets in *src* of the *width*-byte operands in *pairs*."""
+    if not pairs:
+        return []
+
+    if len(pairs) >= PRNG_SCAN_MIN_PAIRS:
+        found = scanner_for_pairs(pairs).scan(src, min_len=width)
+        return sorted({o[0] for t, o in found.items() if len(t) == width})
+
+    seen: set[int] = set()
+    for op_a, op_b in pairs:
+        for op in (op_a, op_b):
+            if len(op) != width:
+                continue
+            pos = src.find(op)
+            if pos >= 0:
+                seen.add(pos)
+    return sorted(seen)
 
 
 def _det_flip_seen(xor: int) -> bool:
@@ -2545,19 +2573,9 @@ class OperatorEngine:
             return
 
         rng = self.ctx._rng
-        src = bytes(buf)
-        offsets: list[int] = []
-        seen: set[int] = set()
-        for op_a, op_b in self.ctx.cmplog_pairs or ():
-            for op in (op_a, op_b):
-                if len(op) != width:
-                    continue
-                pos = src.find(op)
-                if 0 <= pos <= len(buf) - width and pos not in seen:
-                    seen.add(pos)
-                    offsets.append(pos)
+        offsets = _prng_offsets(bytes(buf), self.ctx.cmplog_pairs, width)
         if offsets:
-            pos = offsets[0] if len(offsets) == 1 else rng.choice_list(offsets, 1)[0]
+            pos = offsets[0] if len(offsets) == 1 else rng.choice(offsets)
         else:
             pos = rng.randint(0, len(buf) - width)
         buf[pos : pos + width] = predicted
