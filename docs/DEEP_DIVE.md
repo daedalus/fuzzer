@@ -1443,6 +1443,27 @@ listing each feature flag (`cmplog`, `tracecmp`, `clang-scov`, `gcc-scov`, `vend
 optional target groups (fgrep, tailslayer, lz4, fuzzgoat, secp256k1, sqlite) will build or be skipped based on what the
 script found on disk — so the exact effect of the passed flags is visible at a glance.
 
+### Path-stable builds
+
+`-g` records absolute paths in DWARF and `__FILE__`, so one source built under two roots
+gave different bytes. Every compile site passes `$DEBUG_CFLAGS` (`-g` plus
+`-ffile-prefix-map`) instead of a bare `-g`; FFmpeg gets it through `COV_FLAGS`, so its
+config stamp reconfigures on change. The script also exports `LC_ALL=C`: `ls *.o` sets link
+order, and its sort order follows the locale.
+
+| Root | Placeholder |
+|------|-------------|
+| `$REPO_ROOT` | `/fuzz/src` |
+| `$VENDOR` (`FUZZ_VENDOR_ROOT`) | `/fuzz/vendor` |
+| `$TARGETS` (`FUZZ_BUILD_ROOT`) | `/fuzz/build` |
+
+- Clang applies the last matching map; the nested `--in-tree-vendor` root follows `REPO_ROOT`.
+- Debugging: `set substitute-path /fuzz/vendor ~/fuzzing/vendoring` (gdb).
+- DWARF lookups (`core/dwarf.py`) key on basename; crash dedup keys on function names. Neither changes.
+- `--fast` built twice under two roots: 21/21 binaries byte-identical.
+- Not covered: ASAN's per-module name keeps the source path as passed (clang 18 ignores the map).
+- Tests: `tests/test_regression_build_repro_flags.py`.
+
 **Dual vendored FFmpeg builds**: FFmpeg fuzz targets require coverage-instrumented
 vendored static libraries. Since the vendored FFmpeg `.a` files are compiled with
 `-fsanitize-coverage=trace-pc-guard,trace-cmp`, they embed undefined references to
