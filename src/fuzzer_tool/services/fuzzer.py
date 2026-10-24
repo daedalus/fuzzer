@@ -195,6 +195,7 @@ from fuzzer_tool.services.ptrace_coverage import (
 )
 from fuzzer_tool.services.runner import TargetRunner
 from fuzzer_tool.services.seed_picker import SeedPicker
+from fuzzer_tool.services.seed_stage import SeedStage
 from fuzzer_tool.services.stats import StatsReporter
 from fuzzer_tool.services.target_arena import TargetArena
 from fuzzer_tool.services.uninit_probe import UninitProbe
@@ -1918,6 +1919,9 @@ class Fuzzer:
         # Second-order byte interaction (core/analyzers/analyzer_interaction.py):
         # opt-in, implies sensitivity (its first-order input). Appended.
         byte_interaction=False,
+        # AFL-style stage (services/seed_stage.py): one pick serves up to this
+        # many execs. 1 = one pick per exec (old loop). Appended.
+        stage_execs=1,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2867,6 +2871,7 @@ class Fuzzer:
         # sensitivity.json — it crashed with AttributeError otherwise.
         self._use_sensitivity = sensitivity or byte_interaction
         self._use_byte_interaction = byte_interaction
+        self._stage = SeedStage(stage_execs)
         from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
         _ANALYZER_REGISTRY.wire_all(self, phase="early")
@@ -9910,10 +9915,12 @@ class Fuzzer:
                 # This gives freshly-added seeds one full iteration to be selected.
                 if self._minimize_pending:
                     self._flush_pending_minimize()
-                seed = self._pick_seed()
+                # --stage-execs: reuse the stage's seed and score; else pick.
+                staged = self._stage.resume(self.seed_meta)
+                seed = staged if staged is not None else self._pick_seed()
                 # Compute seed-level energy multiplier for mutation budget
                 meta = self.seed_meta.get(seed)
-                if meta is not None and self._seed_scorer:
+                if staged is None and meta is not None and self._seed_scorer:
                     # Lazy recompute aggregate cache when corpus changed
                     if not self._agg_cache_valid:
                         self._refresh_agg_cache()
@@ -10019,9 +10026,11 @@ class Fuzzer:
                         ),
                         **hf_kwargs,
                     )
-                else:
+                elif staged is None:
                     # Markov-generated or synthetic seed: reset to neutral multiplier
                     self._last_perf_score = 100.0
+                if staged is None:
+                    self._stage.begin(seed, self._last_perf_score)
                 if self._diff_tracker:
                     self._check_differential(seed)
                 # Deterministic-stage mutations are now drawn inline by

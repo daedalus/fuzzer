@@ -735,6 +735,7 @@ def cmd_fuzz(args):
         pos_harmonic=getattr(args, "pos_harmonic", False),
         joint_liveness=getattr(args, "joint_liveness", False),
         byte_interaction=getattr(args, "byte_interaction", False),
+        stage_execs=getattr(args, "stage_execs", 1),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
         pos_pca=getattr(args, "pos_pca", False),
@@ -2613,6 +2614,17 @@ def _positive_ms_arg(value: str) -> int:
     return ms
 
 
+def _positive_int_arg(value: str) -> int:
+    """argparse type: a whole number, at least 1."""
+    try:
+        n = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a whole number: {value!r}") from None
+    if n < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {n}")
+    return n
+
+
 def _pos_arena_arms_arg(value: str) -> tuple[str, ...]:
     """argparse ``type=`` for --pos-arena-arms; a bad name is a usage error."""
     try:
@@ -3420,6 +3432,14 @@ def main() -> int:
         metavar="P",
         help="With --seed-newest-scheduler: probability of picking the newest seed, in [0, 1]. "
         "0 is uniform random, 1 is pure newest (locks onto the latest seed). Default %(default)s.",
+    )
+    fuzz_parser.add_argument(
+        "--stage-execs",
+        type=_positive_int_arg,
+        default=1,
+        metavar="K",
+        help="AFL-style stage: one seed pick serves up to K execs, scaled by the seed's perf "
+        "score (services/seed_stage.py). 1 (default) picks every exec. Unmeasured.",
     )
     fuzz_parser.add_argument(
         "--seed-consolidated-scheduler",
