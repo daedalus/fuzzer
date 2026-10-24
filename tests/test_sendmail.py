@@ -219,3 +219,88 @@ class TestSendMessage:
         assert msg["Subject"] == "ALERT target crash_1_sig"
         assert "SEGV" in msg.get_body().get_content()
         assert len(list(msg.iter_attachments())) == 2
+
+
+class TestSmtpTestMode:
+    """--send-mail-test: one probe mail, no fuzzing."""
+
+    def test_test_email_goes_through_smtp(self):
+        from fuzzer_tool.services.sendmail import send_test_email
+
+        cfg = MailConfig(to="a@b.c", smtp_server="smtp.example:2525", from_addr="u@b.c")
+        fake = MagicMock()
+        with patch("fuzzer_tool.services.sendmail.smtplib.SMTP", return_value=fake) as smtp_cls:
+            send_test_email(cfg, target="/bin/tgt")
+
+        smtp_cls.assert_called_once_with("smtp.example", 2525, timeout=30)
+        msg: EmailMessage = fake.send_message.call_args[0][0]
+        assert "test" in msg["Subject"].lower()
+        assert "tgt" in msg["Subject"]
+        assert "/bin/tgt" in msg.get_body().get_content()
+        assert list(msg.iter_attachments()) == []
+
+    def test_falsification_transport_error_propagates(self):
+        # A test mode that swallows errors would report success on a dead server.
+        import smtplib
+
+        from fuzzer_tool.services.sendmail import send_test_email
+
+        cfg = MailConfig(to="a@b.c", smtp_server="smtp.example:25", from_addr="u@b.c")
+        fake = MagicMock()
+        fake.send_message.side_effect = smtplib.SMTPRecipientsRefused({"a@b.c": (550, b"no")})
+        with (
+            patch("fuzzer_tool.services.sendmail.smtplib.SMTP", return_value=fake),
+            pytest.raises(smtplib.SMTPRecipientsRefused),
+        ):
+            send_test_email(cfg, target="t")
+
+    def test_adversarial_subject_template_ignored(self):
+        # Crash-only placeholders ({base_name}) must not leak into the probe subject.
+        from fuzzer_tool.services.sendmail import send_test_email
+
+        cfg = MailConfig(to="a@b.c", from_addr="u@b.c", subject="{bogus} {base_name")
+        with patch("fuzzer_tool.services.sendmail.send_message") as send:
+            send_test_email(cfg, target="")
+
+        msg: EmailMessage = send.call_args[0][1]
+        assert "{" not in msg["Subject"]
+
+
+class TestCliMailTest:
+    def _args(self, **kw):
+        import argparse
+
+        base = {
+            "send_mail_test": True,
+            "send_email_on_crash": "a@b.c",
+            "send_mail_smtp_server": "smtp.example:25",
+            "targets": ["/bin/tgt"],
+        }
+        base.update(kw)
+        return argparse.Namespace(**base)
+
+    def test_success_returns_zero_and_skips_fuzzing(self):
+        from fuzzer_tool.cli.commands import cmd_fuzz
+
+        with patch("fuzzer_tool.services.sendmail.send_message") as send:
+            rc = cmd_fuzz(self._args())
+
+        assert rc == 0
+        send.assert_called_once()
+
+    def test_failure_returns_nonzero(self):
+        from fuzzer_tool.cli.commands import cmd_fuzz
+
+        with patch("fuzzer_tool.services.sendmail.send_message", side_effect=OSError("refused")):
+            rc = cmd_fuzz(self._args())
+
+        assert rc == 1
+
+    def test_requires_recipient(self):
+        from fuzzer_tool.cli.commands import cmd_fuzz
+
+        with patch("fuzzer_tool.services.sendmail.send_message") as send:
+            rc = cmd_fuzz(self._args(send_email_on_crash=None))
+
+        assert rc == 2
+        send.assert_not_called()
