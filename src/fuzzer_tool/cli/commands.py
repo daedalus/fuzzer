@@ -85,6 +85,31 @@ def _mail_config_from_args(args):
     )
 
 
+def _run_mail_test(args) -> int:
+    """--send-mail-test: send one probe mail, exit 0 on delivery, 1 on failure."""
+    try:
+        config = _mail_config_from_args(args)
+    except ValueError as exc:
+        print(f"[!] mail test: {exc}")
+        return 2
+
+    if config is None:
+        print("[!] --send-mail-test needs --send-email-on-crash EMAIL")
+        return 2
+
+    from fuzzer_tool.services.sendmail import send_test_email
+
+    targets = getattr(args, "targets", None) or [""]
+    try:
+        send_test_email(config, target=str(targets[0]))
+    except Exception as exc:  # report any transport error, then exit non-zero
+        print(f"[!] mail test failed: {exc}")
+        return 1
+
+    print(f"[+] mail test sent to {config.to} via {config.smtp_server or 'sendmail'}")
+    return 0
+
+
 def _load_hash_list(path: str | None) -> set[str] | None:
     """Load a file of hex hashes (one per line) into a set."""
     if not path:
@@ -224,6 +249,10 @@ def _parse_orbit_arg(spec):
 
 def cmd_fuzz(args):
     """Main fuzzing command."""
+    # Mail config probe: no target is run.
+    if getattr(args, "send_mail_test", False):
+        return _run_mail_test(args)
+
     # Applied before anything can spawn a child, so the setting is in force
     # for the whole run including early teardown.
     if getattr(args, "no_kill_children", False):
@@ -2254,7 +2283,7 @@ def cmd_sweep(args):
 # Also excluded (not strategy gates): --debug (verbose noise),
 # --arm-mutate/--x86-mutate (require cross-arch toolchain),
 # --enable-regex-bomb-mutations (experimental),
-# --send-mail-require-tls (email config).
+# --send-mail-require-tls / --send-mail-test (email config).
 # poisson_disk_admission was added by PR: poisson-disk admission gate.
 # --no-cmplog is a store_true opt-OUT (dest no_cmplog), deliberately not in
 # _HAIL_MARY_FLAGS: --hail-mary must not switch cmplog off.
@@ -5726,6 +5755,14 @@ def main() -> int:
         help=(
             "Require STARTTLS (or use implicit SSL on port 465) when talking "
             "to --send-mail-smtp-server"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--send-mail-test",
+        action="store_true",
+        help=(
+            "Send one test email with the --send-email-on-crash settings and "
+            "exit (0 sent, 1 failed); no fuzzing"
         ),
     )
     fuzz_parser.add_argument(

@@ -303,6 +303,27 @@ def send_crash_email(
     send_message(config, msg)
 
 
+def send_test_email(config: MailConfig, *, target: str = "") -> None:
+    """Send a probe mail over the configured transport; errors propagate.
+
+    Backs ``--send-mail-test``: proves server, auth and TLS work before a
+    long campaign relies on them. The crash subject template is ignored —
+    its placeholders have no values here.
+    """
+    target_base = os.path.basename(target) if target else "target"
+    subject = f"[fuzzer-tool] SMTP test ({target_base})"
+    transport = config.smtp_server or "system sendmail"
+    body = (
+        "fuzzer-tool: mail test\n\n"
+        f"  target:    {target or '-'}\n"
+        f"  transport: {transport}\n"
+        f"  host:      {socket.gethostname()}\n\n"
+        "Crash notifications will use this transport.\n"
+    )
+    msg = build_crash_message(config, subject=subject, body=body)
+    send_message(config, msg)
+
+
 __all__ = [
     "MailConfig",
     "build_crash_message",
@@ -310,4 +331,5 @@ __all__ = [
     "format_crash_body",
     "send_crash_email",
     "send_message",
+    "send_test_email",
 ]
