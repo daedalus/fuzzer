@@ -66,7 +66,14 @@ class TestExecPathCallSites:
             assert "lbr_session" in inspect.signature(fn).parameters
 
     def test_all_three_runners_attach_it(self):
-        assert inspect.getsource(process).count("lbr_session.attach(") == 3
+        # run_target_fast attaches itself; stdin and file mode hand the
+        # session to _spawn_capture, which attaches it once for both.
+        assert "lbr_session.attach(" in inspect.getsource(process.run_target_fast)
+        assert "lbr_session.attach(" in inspect.getsource(process._attach_sessions)
+        assert "_attach_sessions(sessions, pid)" in inspect.getsource(process._spawn_capture)
+        for fn in (process.run_target_stdin, process.run_target_file):
+            src = inspect.getsource(fn)
+            assert "lbr_session" in src.split("_spawn_capture(", 1)[1]
 
     def test_runner_passes_and_drains_at_every_exec_path(self):
         src = inspect.getsource(runner)

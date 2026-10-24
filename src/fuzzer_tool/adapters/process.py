@@ -143,28 +143,6 @@ def _timeout_stderr(data: bytes) -> str:
     return data.decode(errors="replace") if data else "timeout"
 
 
-def _read_partial(stream) -> bytes:
-    """Read what a killed target left in *stream*, without blocking.
-
-    The process group is dead, but a descendant that escaped it (setsid)
-    may still hold the write end; a blocking read would wait on it.
-    """
-    fd = stream.fileno()
-    os.set_blocking(fd, False)
-    chunks: list[bytes] = []
-    total = 0
-    while total < _STDERR_CAP:
-        try:
-            chunk = os.read(fd, _STDERR_CAP - total)
-        except BlockingIOError:
-            break
-        if not chunk:
-            break
-        chunks.append(chunk)
-        total += len(chunk)
-    return b"".join(chunks)
-
-
 def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
     """Read *fd* until EOF or *timeout*, returning (data, timed_out).
 
@@ -249,6 +227,193 @@ def _poll_reap(pid: int, deadline: float) -> int | None:
             return status
         delay = min(delay * 2, _REAP_POLL_MAX_S)
     return None
+
+
+# ── Thread-free spawn (stdin / file modes) ──────────────────────────────
+
+_PUMP_CHUNK = 65536
+# Popen(restore_signals=True) resets these in the child; posix_spawn would
+# otherwise hand the target the parent's SIG_IGN.
+_CHILD_DEFAULT_SIGNALS = (signal.SIGPIPE, signal.SIGXFSZ)
+
+
+class _Pump:
+    """Feed a child's stdin and drain its stderr on one thread with poll.
+
+    Replaces a writer thread plus a watchdog thread per exec. Both pipes are
+    serviced together, so a child that fills stderr before reading stdin
+    cannot deadlock the parent. stderr EOF means every writer is gone,
+    i.e. the child exited (see ``_drain_until_eof``).
+    """
+
+    def __init__(self, stderr_fd: int, stdin_fd: int | None, data: bytes):
+        self._err = stderr_fd
+        self._in = stdin_fd
+        self._data = memoryview(data)
+        self._sent = 0
+        self._chunks: list[bytes] = []
+        self._total = 0
+        self._poller = select.poll()
+        self._poller.register(stderr_fd, select.POLLIN)
+        if stdin_fd is None:
+            return
+        if not data:
+            self._close_stdin()
+            return
+        os.set_blocking(stdin_fd, False)
+        self._poller.register(stdin_fd, select.POLLOUT)
+
+    def _close_stdin(self) -> None:
+        if self._in is None:
+            return
+        with contextlib.suppress(KeyError):
+            self._poller.unregister(self._in)
+        os.close(self._in)
+        self._in = None
+
+    def _feed(self) -> None:
+        """Write the next chunk; EOF the child's stdin when done or refused."""
+        try:
+            self._sent += os.write(self._in, self._data[self._sent : self._sent + _PUMP_CHUNK])
+        except BlockingIOError:
+            return
+        except BrokenPipeError:
+            # The child exited or closed stdin without reading it all.
+            self._sent = len(self._data)
+        if self._sent >= len(self._data):
+            self._close_stdin()
+
+    def _drain(self) -> bool:
+        """Read one chunk of stderr; False at EOF."""
+        try:
+            chunk = os.read(self._err, _PUMP_CHUNK)
+        except OSError:
+            return False
+        if not chunk:
+            return False
+        if self._total < _STDERR_CAP:
+            self._chunks.append(chunk[: _STDERR_CAP - self._total])
+            self._total += len(chunk)
+        return True
+
+    def run(self, deadline: float | None) -> tuple[bytes, bool]:
+        """Pump until stderr EOF or *deadline*: (stderr, timed_out)."""
+        try:
+            while True:
+                left_ms = None if deadline is None else (deadline - time.monotonic()) * 1000.0
+                if left_ms is not None and left_ms <= 0:
+                    return b"".join(self._chunks), True
+
+                ready = self._poller.poll(left_ms)
+                if not ready:
+                    return b"".join(self._chunks), True
+
+                for fd, _ in ready:
+                    if fd == self._in:
+                        self._feed()
+                        continue
+                    if not self._drain():
+                        return b"".join(self._chunks), False
+        finally:
+            self._close_stdin()
+
+
+def _attach_sessions(sessions: tuple, pid: int) -> None:
+    """Attach ``(perf_counters, pt_session, lbr_session)`` to *pid*."""
+    perf_counters, pt_session, lbr_session = sessions
+    if perf_counters is not None:
+        perf_counters.open_for_pid(pid)
+    if pt_session is not None:
+        pt_session.attach(pid)
+    if lbr_session is not None:
+        lbr_session.attach(pid)
+
+
+def _status_rc(status: int) -> int:
+    """Wait status -> rc: exit code, -signum, or -2."""
+    if os.WIFEXITED(status):
+        return os.WEXITSTATUS(status)
+    if os.WIFSIGNALED(status):
+        return -os.WTERMSIG(status)
+    return -2
+
+
+def _spawn_capture(
+    argv: list[str],
+    data: bytes | None,
+    timeout: float,
+    env: dict[str, str] | None,
+    sessions: tuple = (None, None, None),
+) -> tuple[int, str, int]:
+    """Spawn *argv*, feed *data* on stdin (None: inherit), capture stderr.
+
+    ``posix_spawnp`` in a new session, stdout to /dev/null: what the
+    ``Popen(..., preexec_fn=os.setsid)`` callers did, minus the threads.
+    *sessions* is ``(perf_counters, pt_session, lbr_session)``, attached to
+    the child pid right after spawn. Returns ``(rc, stderr, pid)``: rc is
+    -signum on a signal, -1 on timeout, -2 on infrastructure failure.
+    """
+    pid = 0
+    fds: list[int] = []
+    try:
+        stderr_r, stderr_w = os.pipe()
+        fds += [stderr_r, stderr_w]
+        actions = [
+            (os.POSIX_SPAWN_OPEN, 1, os.devnull, os.O_WRONLY, 0),
+            (os.POSIX_SPAWN_DUP2, stderr_w, 2),
+        ]
+        stdin_w = None
+        if data is not None:
+            stdin_r, stdin_w = os.pipe()
+            fds += [stdin_r, stdin_w]
+            actions.append((os.POSIX_SPAWN_DUP2, stdin_r, 0))
+
+        pid = os.posix_spawnp(
+            argv[0],
+            argv,
+            _clean_env(env),
+            file_actions=actions,
+            setsid=True,
+            setsigdef=_CHILD_DEFAULT_SIGNALS,
+        )
+        _track(pid)
+
+        # Close the child's ends of both pipes.
+        keep = (stderr_r, stdin_w)
+        for fd in fds:
+            if fd not in keep:
+                os.close(fd)
+        fds = [fd for fd in keep if fd is not None]
+
+        _attach_sessions(sessions, pid)
+
+        # The pump owns (and closes) stdin_w from here.
+        pump = _Pump(stderr_r, stdin_w, data or b"")
+        fds = [stderr_r]
+        deadline = time.monotonic() + timeout
+        stderr_data, timed_out = pump.run(deadline)
+        status = None if timed_out else _reap_by(pid, deadline)
+
+        # Deadline hit, or fd 2 closed by a still-running target.
+        if status is None:
+            _kill_process_group(pid)
+            os.waitpid(pid, 0)
+            _untrack(pid)
+            return -1, _timeout_stderr(stderr_data), pid
+
+        _untrack(pid)
+        return _status_rc(status), stderr_data.decode(errors="replace"), pid
+    except Exception as e:
+        if pid > 0:
+            _kill_process_group(pid)
+            with contextlib.suppress(ChildProcessError, OSError):
+                os.waitpid(pid, 0)
+            _untrack(pid)
+        return -2, str(e), pid
+    finally:
+        for fd in fds:
+            with contextlib.suppress(OSError):
+                os.close(fd)
 
 
 # ── Fast path (posix_spawn) ─────────────────────────────────────────────
@@ -560,8 +725,7 @@ def run_target_stdin(
 ) -> tuple[int, str, int]:
     """Execute target with data on stdin.
 
-    Uses blocking os.waitpid + watchdog thread instead of
-    communicate(timeout=...) to avoid CPython's busy-poll backoff.
+    Thread-free: ``_spawn_capture`` feeds stdin and drains stderr with poll.
 
     Args:
         target: Path to target binary.
@@ -576,67 +740,7 @@ def run_target_stdin(
     Returns:
         Tuple of (returncode, stderr, subprocess_pid).
     """
-    try:
-        proc = None
-        proc = subprocess.Popen(
-            [target],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            env=_clean_env(env),
-            preexec_fn=os.setsid,
-        )
-        _track(proc.pid)
-
-        # Open perf counters on child PID immediately after spawn
-        if perf_counters is not None and proc.pid > 0:
-            perf_counters.open_for_pid(proc.pid)
-        if pt_session is not None and proc.pid > 0:
-            pt_session.attach(proc.pid)
-        if lbr_session is not None and proc.pid > 0:
-            lbr_session.attach(proc.pid)
-
-        # Write data in a thread to avoid pipe deadlock
-        writer = threading.Thread(target=_write_and_close, args=(proc.stdin, data), daemon=True)
-        writer.start()
-
-        # Watchdog: kill process group if still alive after timeout.
-        done = threading.Event()
-        timed_out = threading.Event()
-
-        def _watchdog():
-            if done.wait(timeout=timeout):
-                return
-            timed_out.set()
-            with contextlib.suppress(OSError):
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-
-        w = threading.Thread(target=_watchdog, daemon=True)
-        w.start()
-
-        # Blocking wait
-        try:
-            _, status = os.waitpid(proc.pid, 0)
-            if os.WIFEXITED(status):
-                proc.returncode = os.WEXITSTATUS(status)
-            elif os.WIFSIGNALED(status):
-                proc.returncode = -os.WTERMSIG(status)
-            else:
-                proc.returncode = -2
-        except ChildProcessError:
-            proc.returncode = -2
-
-        done.set()  # wake the watchdog immediately
-        _untrack(proc.pid)
-
-        if timed_out.is_set():
-            return -1, _timeout_stderr(_read_partial(proc.stderr)), proc.pid
-
-        stderr = proc.stderr.read()
-        return proc.returncode, stderr.decode(errors="replace"), proc.pid
-    except Exception as e:
-        real_pid = proc.pid if proc is not None else 0
-        return -2, str(e), real_pid
+    return _spawn_capture([target], data, timeout, env, (perf_counters, pt_session, lbr_session))
 
 
 # ── Output capture ──────────────────────────────────────────────────────
@@ -712,7 +816,7 @@ def run_target_file(
 ) -> tuple[int, str, int]:
     """Execute target with data written to a temp file.
 
-    Uses blocking os.waitpid + watchdog thread.
+    Thread-free: ``_spawn_capture`` drains stderr with poll.
 
     Args:
         target: Path to target binary.
@@ -733,64 +837,16 @@ def run_target_file(
 
     tmp_file = Path(tmp_dir) / f"fuzz_{os.getpid()}"
     try:
-        proc = None
         tmp_file.write_bytes(data)
-        if target_args:
-            cmd = [target] + [a.replace("{file}", str(tmp_file)) for a in target_args]
-        else:
-            cmd = [target, str(tmp_file)]
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            env=_clean_env(env),
-            preexec_fn=os.setsid,
-        )
-        _track(proc.pid)
+    except OSError as e:
+        return -2, str(e), 0
+    if target_args:
+        cmd = [target] + [a.replace("{file}", str(tmp_file)) for a in target_args]
+    else:
+        cmd = [target, str(tmp_file)]
 
-        # Open perf counters on child PID immediately after spawn
-        if perf_counters is not None and proc.pid > 0:
-            perf_counters.open_for_pid(proc.pid)
-        if pt_session is not None and proc.pid > 0:
-            pt_session.attach(proc.pid)
-        if lbr_session is not None and proc.pid > 0:
-            lbr_session.attach(proc.pid)
-
-        # Watchdog
-        done = threading.Event()
-        timed_out = threading.Event()
-
-        def _watchdog():
-            if done.wait(timeout=timeout):
-                return
-            timed_out.set()
-            with contextlib.suppress(OSError):
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-
-        w = threading.Thread(target=_watchdog, daemon=True)
-        w.start()
-
-        try:
-            _, status = os.waitpid(proc.pid, 0)
-            if os.WIFEXITED(status):
-                proc.returncode = os.WEXITSTATUS(status)
-            elif os.WIFSIGNALED(status):
-                proc.returncode = -os.WTERMSIG(status)
-            else:
-                proc.returncode = -2
-        except ChildProcessError:
-            proc.returncode = -2
-
-        done.set()
-        _untrack(proc.pid)
+    try:
+        return _spawn_capture(cmd, None, timeout, env, (perf_counters, pt_session, lbr_session))
+    finally:
         with contextlib.suppress(OSError):
             tmp_file.unlink()
-
-        if timed_out.is_set():
-            return -1, _timeout_stderr(_read_partial(proc.stderr)), proc.pid
-
-        stderr = proc.stderr.read()
-        return proc.returncode, stderr.decode(errors="replace"), proc.pid
-    except Exception as e:
-        real_pid = proc.pid if proc is not None else 0
-        return -2, str(e), real_pid
