@@ -6213,6 +6213,22 @@ __AFL_NO_COV static int __afl_fs_io(int write_p, int fd, void *buf, size_t n) {
     return 1;
 }
 
+/* ── Persistent mode and deferred init (AFL++-compatible macros) ──────
+ *
+ *     while (__AFL_LOOP(1000)) { read input; run; }   one child, n inputs
+ *     __AFL_INIT();                                   fork after setup
+ *
+ * Persistent: between inputs the child raises SIGSTOP; the forkserver
+ * resumes it with SIGCONT instead of forking. Only in a forkserver child
+ * with __AFL_PERSISTENT=1: anywhere else the loop body runs once, as a
+ * plain main() would. Deferred: with __AFL_DEFER_FORKSRV=1 the constructor
+ * does not start the forkserver and __AFL_INIT() does. The fuzzer sets
+ * both only when it finds the macros' signature strings in the binary
+ * (core/elf.py detect_afl_modes). */
+static int __afl_forksrv_child = 0;   /* this process is a forkserver child */
+static int __afl_persistent = 0;      /* __AFL_PERSISTENT=1, read at server start */
+static int __afl_defer_pending = 0;   /* constructor deferred the forkserver */
+
 __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
     char hello[4] = {0, 0, 0, 0};
 
@@ -6233,6 +6249,9 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
 
     /* No control pipe: not being driven by the loader. */
     if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, hello, 4) != 1) return;
+
+    const char *persist = getenv("__AFL_PERSISTENT");
+    __afl_persistent = persist && strcmp(persist, "1") == 0;
 
     /* This loop is itself instrumented — it lives in the same translation
      * unit as the target. Left recording, it would (a) write its own edges
@@ -6294,6 +6313,8 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
     chld_dfl.sa_flags = 0;
     sigaction(SIGCHLD, &chld_dfl, &chld_old);
 
+    pid_t child = -1;
+    int child_stopped = 0;   /* persistent child parked in SIGSTOP */
     while (1) {
         char cmd[4];
         /* EOF: the loader closed the pipe, end quietly. A signal landing
@@ -6303,7 +6324,15 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
         if (got == 0) _exit(0);
         if (got < 0) _exit(1);
 
-        pid_t child = fork();
+        if (child_stopped) {
+            /* Persistent: wake the parked child for the next input. */
+            child_stopped = 0;
+            kill(child, SIGCONT);
+            if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, &child, 4) != 1) _exit(0);
+            goto wait_child;
+        }
+
+        child = fork();
         if (child < 0) _exit(1);
 
         if (child == 0) {
@@ -6323,6 +6352,7 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
             sigaction(SIGCHLD, &chld_old, NULL);
             close(AFL_FORKSRV_FD);
             close(AFL_FORKSRV_FD + 1);
+            __afl_forksrv_child = 1;
             return;
         }
 
@@ -6331,17 +6361,82 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
         setpgid(child, child);
         if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, &child, 4) != 1) _exit(0);
 
+    wait_child:;
         int status = 0;
-        while (waitpid(child, &status, 0) < 0) {
+        /* WUNTRACED: a persistent child's SIGSTOP ends one input. */
+        while (waitpid(child, &status, __afl_persistent ? WUNTRACED : 0) < 0) {
             /* Retry EINTR only — a stray signal must not be read as a
              * crash. Anything else would spin forever; end the server so
              * the loader sees EOF instead of a hang. */
             if (errno != EINTR) _exit(1);
         }
 
+        /* Parked, not finished: the input ran clean. The loader only knows
+         * exit and signal statuses, so report exit 0. */
+        if (WIFSTOPPED(status)) {
+            child_stopped = 1;
+            status = 0;
+        }
+
         if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, &status, 4) != 1) _exit(0);
     }
 }
+
+/* Per-input work an exiting child would do, for a child that stays. */
+__AFL_GCC_NO_COV static void __afl_persist_sync(void) {
+#if __AFL_DISTANCE_MODE
+    __afl_dist_flush();
+#endif
+#if __AFL_CMPLOG
+    __afl_cmplog_flush();
+    __afl_cmp_dump_counts();
+    __afl_cmp_dump_sites();
+#endif
+}
+
+/* __AFL_LOOP(max_cnt): 1 while this child should run another input. */
+__attribute__((unused))
+__AFL_GCC_NO_COV static int __afl_persistent_loop(unsigned max_cnt) {
+    static int first = 1;
+    static unsigned left = 0;
+    if (first) {
+        first = 0;
+        left = max_cnt ? max_cnt : 1;
+        return 1;
+    }
+    if (!(__afl_persistent && __afl_forksrv_child) || --left == 0) return 0;
+
+    __afl_persist_sync();
+    raise(SIGSTOP);
+    /* Resumed: the next input starts from a clean run state (prev_loc,
+     * path hash), as a fresh fork would. */
+    __afl_exec_reset();
+    return 1;
+}
+
+/* __AFL_INIT(): start the forkserver here if the constructor deferred it. */
+__attribute__((unused))
+__AFL_GCC_NO_COV static void __afl_manual_init(void) {
+    if (!__afl_defer_pending) return;
+    __afl_defer_pending = 0;
+    __afl_start_forkserver();
+}
+
+/* The signature strings let the fuzzer see which macro a harness uses. */
+#define __AFL_LOOP(_n)                                                        \
+    ({                                                                        \
+        static volatile const char *__afl_sig_loop __attribute__((used)) =   \
+            "##SIG_AFL_PERSISTENT##";                                         \
+        (void)__afl_sig_loop;                                                 \
+        __afl_persistent_loop(_n);                                            \
+    })
+#define __AFL_INIT()                                                          \
+    do {                                                                      \
+        static volatile const char *__afl_sig_init __attribute__((used)) =   \
+            "##SIG_AFL_DEFER_FORKSRV##";                                      \
+        (void)__afl_sig_init;                                                 \
+        __afl_manual_init();                                                  \
+    } while (0)
 
 /* Auto-attach when loaded */
 __attribute__((constructor))
@@ -6365,7 +6460,12 @@ __AFL_GCC_NO_COV static void __afl_auto_init(void) {
     __afl_mapping = 0;
     __afl_fast_refresh();
     /* Last: the crash handlers must already be installed in the parent so
-     * every forked child inherits them. */
+     * every forked child inherits them. Deferred: __AFL_INIT() starts it. */
+    const char *defer = getenv("__AFL_DEFER_FORKSRV");
+    if (defer && strcmp(defer, "1") == 0) {
+        __afl_defer_pending = 1;
+        return;
+    }
     __afl_start_forkserver();
 }
 

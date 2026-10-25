@@ -5109,9 +5109,10 @@ class Fuzzer:
         ):
             return
 
-        from fuzzer_tool.adapters.forkserver import ForkserverRunner
+        from fuzzer_tool.adapters.forkserver import ForkserverRunner, mode_env
 
-        env: dict[str, str] = {}
+        # Persistent loop / deferred init, when the harness has the macros.
+        env: dict[str, str] = mode_env(self.target)
         if self.use_coverage:
             env["AFL_MAP_SIZE"] = str(self.map_size)
         if self.shm_cov:

@@ -108,6 +108,7 @@ per-sub-operator reward instead of uniformly (`--no-adaptive-havoc` restores uni
 - **Execution dedup** (`--no-dedup-execs` to disable): a bloom filter over already-executed
   mutants, so a re-derived input never costs a target run
 - **Persistent mode** (`--persistent`) for AFL-loop targets, no fork per iteration
+- **`__AFL_LOOP` / `__AFL_INIT`** in shim-built harnesses (auto-detected): one forkserver child serves many inputs; fork after the harness's own setup
 
 ### Campaign Modes
 - **Network targets** (`--net-host`/`--net-port`/`--net-proto`/`--net-settle-ms`): drive the

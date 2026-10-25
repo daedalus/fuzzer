@@ -10,7 +10,9 @@ in persistent_subprocess.py retains its own copy since it runs in a
 separate Python process.
 """
 
+import enum
 import logging
+import mmap
 import os
 import re
 import struct
@@ -1842,6 +1844,35 @@ def is_elf_executable(target: str) -> bool:
         if struct.unpack_from("<I", phdrs, off)[0] == _PT_INTERP:
             return True
     return False
+
+
+class AflMode(enum.Enum):
+    """Forkserver modes a harness opts into via afl_shim.c's macros."""
+
+    PERSISTENT = "persistent"  # while (__AFL_LOOP(n)) { ... }
+    DEFERRED = "deferred"  # __AFL_INIT() after the harness's own setup
+
+
+# AFL++'s signatures: the macros put them in .rodata. Read as bytes, not
+# symbols, so a stripped harness is still recognised.
+_AFL_MODE_SIGS = {
+    AflMode.PERSISTENT: b"##SIG_AFL_PERSISTENT##",
+    AflMode.DEFERRED: b"##SIG_AFL_DEFER_FORKSRV##",
+}
+
+
+def detect_afl_modes(target: str) -> set[AflMode]:
+    """Modes whose signature string is in *target*; empty if unreadable.
+
+    The env these imply must only be set for a harness that has the macro:
+    a deferred forkserver that is never started hangs the loader's handshake.
+    """
+    try:
+        with open(target, "rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as m:
+            return {mode for mode, sig in _AFL_MODE_SIGS.items() if m.find(sig) >= 0}
+    except (OSError, ValueError) as e:
+        log.debug("afl-mode detection failed for %s: %s", target, e)
+        return set()
 
 
 def detect_shm_layout(target: str) -> int:
