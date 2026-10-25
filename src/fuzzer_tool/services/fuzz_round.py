@@ -1273,6 +1273,7 @@ class FuzzRound:
             hw_instructions=f._last_perf_deltas.get("instructions", 0),
             hw_branches=f._last_perf_deltas.get("branches", 0),
             hw_branch_misses=f._last_perf_deltas.get("branch_misses", 0),
+            exec_s=self._t_elapsed,
         )
 
     def _on_new_edges(self, new, hit_edges) -> None:

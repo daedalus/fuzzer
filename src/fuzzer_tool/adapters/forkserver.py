@@ -98,10 +98,12 @@ STDERR_LINES_MAX = 100  # max stderr lines retained from child processes
 _LOADER_GRACE = 1.0
 
 
-# Env each opted-in mode needs; read by afl_shim.c in the forkserver child.
+# Env each opted-in mode needs: read by afl_shim.c in the forkserver child,
+# except __AFL_SHM_FUZZ, which tells fuzz_loader.c to create the segment.
 _MODE_ENV = {
     AflMode.PERSISTENT: "__AFL_PERSISTENT",
     AflMode.DEFERRED: "__AFL_DEFER_FORKSRV",
+    AflMode.SHM_TESTCASE: "__AFL_SHM_FUZZ",
 }
 
 

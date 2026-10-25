@@ -736,6 +736,7 @@ def cmd_fuzz(args):
         joint_liveness=getattr(args, "joint_liveness", False),
         byte_interaction=getattr(args, "byte_interaction", False),
         stage_execs=getattr(args, "stage_execs", 1),
+        prune_cost=getattr(args, "prune_cost", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
         pos_kadane=getattr(args, "pos_kadane", False),
         pos_pca=getattr(args, "pos_pca", False),
@@ -3440,6 +3441,12 @@ def main() -> int:
         metavar="K",
         help="AFL-style stage: one seed pick serves up to K execs, scaled by the seed's perf "
         "score (services/seed_stage.py). 1 (default) picks every exec. Unmeasured.",
+    )
+    fuzz_parser.add_argument(
+        "--prune-cost",
+        action="store_true",
+        help="Edge-tracker eviction: among seeds losing equal unique coverage, drop the most "
+        "expensive exec first instead of the oldest (core/edge_tracker.py EvictTie). Unmeasured.",
     )
     fuzz_parser.add_argument(
         "--seed-consolidated-scheduler",
