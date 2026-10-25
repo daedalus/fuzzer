@@ -120,6 +120,12 @@ ARMS: dict[str, list[str]] = {
     "elo": ["--elo", "--mc-bandit"],
     "elo-seed-residual": ["--elo", "--mc-bandit", "--seed-residual"],
     "elo-op-credit": ["--elo", "--mc-bandit", "--op-credit"],
+    # Reactive gradient (core/schedulers/op_reactive.py) vs its static parent.
+    # Both pair against "elo"; read reactive with `analyse --baseline elo-gradient`.
+    "elo-gradient": ["--elo", "--mc-bandit", "--gradient"],
+    "elo-reactive": ["--elo", "--mc-bandit", "--reactive"],
+    # The control that must not reject (Rule 46): elo-gradient again.
+    "elo-gradient-ctl": ["--elo", "--mc-bandit", "--gradient"],
     # The reward-shaping form of the same class arithmetic, without the selector
     # change: --shaped-reward rescales the reward EVERY arm reads, so this pairs
     # against "elo" and isolates the reward, which is what makes it the cheapest
@@ -268,6 +274,8 @@ GROWING_TREE_ARMS = (
 
 GOOD_TURING_ARMS = ("elo-good-turing-seed", "elo-op-good-turing")
 
+REACTIVE_ARMS = ("elo-gradient", "elo-reactive")
+
 # Arena subset group (pos-arena-uniform is the control the rest pair against).
 POSITION_ARENA_ARMS = (
     "pos-arena-uniform",
@@ -296,6 +304,7 @@ ARM_BASELINES: dict[str, str] = {
     "seed-dpp": "baseline",
     "elo-good-turing-seed": "elo",
     "elo-op-good-turing": "elo",
+    **{arm: "elo" for arm in REACTIVE_ARMS},
     "edge-clusters": "baseline",
     "pos-arena-uniform": "elo",
     **{f"pos-arena-{a.replace('_', '-')}": "pos-arena-uniform" for a in ARENA_TESTABLE},
