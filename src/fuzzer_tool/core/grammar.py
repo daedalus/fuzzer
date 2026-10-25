@@ -104,6 +104,9 @@ GENERATION_BYTE_CAP = 1 << 20  # 1 MiB
 # 64K = 16 expansions per byte at the default 4096-byte max_len.
 GENERATION_EXPANSION_CAP = 1 << 16
 
+# Minimum depth of a rule that can never terminate (``a = "x" a``).
+UNREACHABLE_DEPTH = 1 << 30
+
 
 # Unquoted escapes accepted by ``Grammar._parse_alternative`` (no ``\\0``,
 # unlike quoted literals).
@@ -129,6 +132,20 @@ def _unquoted_escape(alt: str, i: int, n: int) -> int | None:
     return v if 0 <= v <= 255 else None
 
 
+def _alt_need(alt: list, mu: dict[str, int]) -> int:
+    """Depth one alternative needs to terminate, given rule depths *mu*.
+
+    ``[lit "(", ref expr, lit ")"]`` -> 1 + mu[expr]; optional repeats
+    (``x*``) cost nothing since they can repeat zero times.
+    """
+    need = 0
+    for token in alt:
+        kind = token[0]
+        if kind == "ref" or (kind == "repeat" and token[2] > 0):
+            need = max(need, mu.get(token[1], 0))
+    return need + 1
+
+
 class Grammar:
     """Simple grammar-based generator and mutator.
 
@@ -145,6 +162,12 @@ class Grammar:
         self._budget = GENERATION_BYTE_CAP
         self._produced = 0
         self._expanded = 0
+        # Minimum termination depths; see _plan_depths.
+        self._mu: dict[str, int] = {}
+        self._needs: dict[str, list[int]] = {}
+        # rule -> (alts, worst need): one lookup on the hot path.
+        self._table: dict[str, tuple[list, int]] = {}
+        self._fit_alts: dict[tuple[str, int], list] = {}
         # When True, mutate()'s replacement-generation paths (_mutate_extend,
         # _mutate_insert, _mutate_replace_section) sample the plain-text
         # fragment via generate_boltzmann() instead of generate()'s biased
@@ -165,6 +188,7 @@ class Grammar:
                 self.rules[name].extend(alts)
             else:
                 self.rules[name] = alts.copy()
+        self._plan_depths()
         return self
 
     def parse(self, spec: str):
@@ -192,6 +216,56 @@ class Grammar:
 
             if alternatives:
                 self.rules[name] = alternatives
+        self._plan_depths()
+
+    def _plan_depths(self) -> None:
+        """Precompute each rule's minimum termination depth (mu).
+
+        Gopinath & Zeller, *Building Fast Fuzzers* §4: once depth runs low,
+        expand only alternatives that still terminate, instead of emitting
+        ``b"?"``. mu(alt) = 1 + max mu over refs and mandatory repeats;
+        mu(rule) = min over alts. ``a = "(" a ")" | "x"`` -> mu(a) = 1.
+        Unknown refs cost 0 so their warning still fires; exit-less cycles
+        stay at UNREACHABLE_DEPTH. Fixed point, converges in <= len(rules)
+        passes.
+        """
+        mu = dict.fromkeys(self.rules, UNREACHABLE_DEPTH)
+        changed = True
+        while changed:
+            changed = False
+            for name, alts in self.rules.items():
+                best = min(_alt_need(alt, mu) for alt in alts)
+                if best < mu[name]:
+                    mu[name] = best
+                    changed = True
+
+        self._mu = mu
+        self._needs = {n: [_alt_need(a, mu) for a in alts] for n, alts in self.rules.items()}
+        self._table = {n: (alts, max(self._needs[n])) for n, alts in self.rules.items()}
+        self._fit_alts.clear()
+
+    def _alts_at(self, name: str, depth: int) -> list:
+        """Alternatives of *name* that terminate within *depth* levels.
+
+        All of them when depth is plentiful (same list, same RNG draws).
+        None fit -> all of them: the old ``b"?"`` fallback.
+        """
+        alts, worst = self._table[name]
+        if depth >= worst:
+            return alts
+
+        key = (name, depth)
+        fit = self._fit_alts.get(key)
+        if fit is None:
+            fit = [
+                a for a, need in zip(alts, self._needs[name], strict=True) if need <= depth
+            ] or alts
+            self._fit_alts[key] = fit
+        return fit
+
+    def _fits(self, name: str, depth: int) -> bool:
+        """True when *name* can terminate within *depth* levels."""
+        return self._mu.get(name, 0) <= depth
 
     def parse_file(self, path: str):
         """Parse a grammar file.
@@ -367,7 +441,8 @@ class Grammar:
         self._expanded += 1
         if self._expanded >= GENERATION_EXPANSION_CAP:
             self._budget = 0  # cap hit: loops then test only the byte budget
-        if depth <= 0 or name not in self.rules:
+        entry = self._table.get(name)
+        if depth <= 0 or entry is None:
             if depth <= 0:
                 log.warning(
                     "Grammar recursion depth exhausted at rule '%s' — possible cyclic grammar", name
@@ -387,9 +462,10 @@ class Grammar:
             self._produced += 1
             return b"?"
 
-        alts = self.rules[name]
-        alt = self._rng.choice(alts)
-        return self._expand_tokens(alt, depth)
+        alts, worst = entry
+        if depth < worst:
+            alts = self._alts_at(name, depth)
+        return self._expand_tokens(self._rng.choice(alts), depth)
 
     def _expand_tokens(self, tokens: list, depth: int) -> bytes:
         """Expand a list of tokens into bytes, stopping once the budget is spent.
@@ -412,7 +488,8 @@ class Grammar:
                 result += self._expand_rule(token[1], depth - 1)
             elif kind == "repeat":
                 _, name, lo, hi = token
-                count = self._rng.randint(lo, hi)
+                # Optional copies of a rule too deep to finish: drop them.
+                count = self._rng.randint(lo, hi) if self._mu.get(name, 0) < depth else lo
                 for _ in range(count):
                     if self._produced >= self._budget:
                         break
@@ -536,7 +613,7 @@ class Grammar:
         else:
             y_total = 0.0
             yp_total = 0.0
-            for alt in self.rules[name]:
+            for alt in self._alts_at(name, depth):
                 ay, ayp = self._gf_token_seq(alt, depth, x, memo)
                 y_total += ay
                 yp_total += ayp
@@ -590,6 +667,8 @@ class Grammar:
         forward from k to k+1 rather than recomputing the power each time.
         """
         ay, ayp = self._gf_and_deriv(name, depth - 1, x, memo)
+        if not self._fits(name, depth - 1):
+            hi = lo  # mirrors _boltzmann_expand_tokens
         y_total = 0.0
         yp_total = 0.0
         ak = 1.0  # ay ** 0
@@ -646,7 +725,7 @@ class Grammar:
             self._produced += 1
             return b"?"
 
-        alts = self.rules[name]
+        alts = self._alts_at(name, depth)
         if len(alts) == 1:
             chosen = alts[0]
         else:
@@ -671,7 +750,7 @@ class Grammar:
                 result += self._boltzmann_sample_rule(token[1], depth - 1, x, memo)
             elif kind == "repeat":
                 _, name2, lo, hi = token
-                if lo == hi:
+                if lo == hi or not self._fits(name2, depth - 1):
                     count = lo
                 else:
                     ay, _ = self._gf_and_deriv(name2, depth - 1, x, memo)
