@@ -85,6 +85,38 @@ def _mail_config_from_args(args):
     )
 
 
+def _push_targets_from_args(args):
+    """Push targets from --push-on-crash or $FUZZER_PUSH_URL; None when neither."""
+    from fuzzer_tool.services.push import push_targets
+
+    return push_targets(getattr(args, "push_on_crash", None)) or None
+
+
+def _run_push_test(args) -> int:
+    """--push-test: probe every push target, exit 0 all sent, 1 any failed, 2 bad config."""
+    try:
+        targets = _push_targets_from_args(args)
+    except ValueError as exc:
+        print(f"[!] push test: {exc}")
+        return 2
+
+    if not targets:
+        print("[!] --push-test needs --push-on-crash URL or $FUZZER_PUSH_URL")
+        return 2
+
+    from fuzzer_tool.services.push import send_test_push
+
+    names = getattr(args, "targets", None) or [""]
+    failures = send_test_push(targets, target=str(names[0]))
+    for failure in failures:
+        print(f"[!] push test failed: {failure}")
+    if failures:
+        return 1
+
+    print(f"[+] push test sent to {', '.join(t.label for t in targets)}")
+    return 0
+
+
 def _run_mail_test(args) -> int:
     """--send-mail-test: send one probe mail, exit 0 on delivery, 1 on failure."""
     try:
@@ -252,6 +284,8 @@ def cmd_fuzz(args):
     # Mail config probe: no target is run.
     if getattr(args, "send_mail_test", False):
         return _run_mail_test(args)
+    if getattr(args, "push_test", False):
+        return _run_push_test(args)
 
     # Applied before anything can spawn a child, so the setting is in force
     # for the whole run including early teardown.
@@ -997,6 +1031,7 @@ def cmd_fuzz(args):
         ff_bin_dir=getattr(args, "ff_bin_dir", None),
         ff_templates=getattr(args, "ff_templates", None),
         email_on_crash=_mail_config_from_args(args),
+        push_on_crash=_push_targets_from_args(args),
         enable_x86_mutator=getattr(args, "x86_mutate", False),
         enable_arm_mutator=getattr(args, "arm_mutate", False),
         refresh_profile=getattr(args, "refresh_profile", False),
@@ -5816,6 +5851,28 @@ def main() -> int:
         help=(
             "Send one test email with the --send-email-on-crash settings and "
             "exit (0 sent, 1 failed); no fuzzing"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--push-on-crash",
+        action="append",
+        default=None,
+        metavar="URL",
+        help=(
+            "Push an alert for every *novel* crash (repeatable). URL picks the "
+            "service: https://ntfy.sh/TOPIC (ntfy), gotify://HOST/TOKEN, "
+            "pushover://USER_KEY@APP_TOKEN, json+https://HOST/PATH (JSON "
+            "webhook: Slack/Discord-compatible). Default: whitespace-separated "
+            "URLs in $FUZZER_PUSH_URL. No crash bytes are sent; public ntfy "
+            "topics are readable by anyone who knows the name."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--push-test",
+        action="store_true",
+        help=(
+            "Send one test push to each --push-on-crash target and exit "
+            "(0 sent, 1 failed, 2 bad config); no fuzzing"
         ),
     )
     fuzz_parser.add_argument(

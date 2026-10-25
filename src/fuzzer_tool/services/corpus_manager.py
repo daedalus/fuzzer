@@ -901,6 +901,8 @@ class CorpusManager:
             f._last_crash_signature = None
         if result and getattr(f, "email_on_crash", None) is not None:
             self._mail_crash(result, returncode, stderr)
+        if result and getattr(f, "_push", None) is not None:
+            self._push_crash(result, returncode, stderr)
         return result
 
     def _record_frames(self, verdict) -> None:
@@ -1022,6 +1024,23 @@ class CorpusManager:
             )
         except Exception as exc:  # never let mail failure kill the campaign
             print(f"[!] crash email failed: {exc}")
+
+    def _push_crash(self, result, returncode: int, stderr: str) -> None:
+        """Queue the crash push; never blocks, a spawn failure never kills the campaign."""
+        f = self.f
+        from fuzzer_tool.services.push import crash_message
+
+        msg = crash_message(
+            target=str(f.target),
+            base_name=str(result),
+            returncode=returncode,
+            exec_count=getattr(f, "exec_count", 0),
+            stderr=stderr or "",
+        )
+        try:
+            f._push.notify(msg)
+        except OSError as exc:
+            print(f"[!] crash push failed: {exc}")
 
     def save_timeout(self, data: bytes) -> None:
         f = self.f

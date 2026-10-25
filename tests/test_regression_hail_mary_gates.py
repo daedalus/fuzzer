@@ -74,6 +74,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "enable_regex_bomb_mutations",  # experimental, untested
         "send_mail_require_tls",  # email config, not a strategy
         "send_mail_test",  # mail probe; exits before fuzzing
+        "push_test",  # push probe; exits before fuzzing
         "mc_cycle_detect",  # MC diagnostic, not a strategy; has real per-tick overhead
         "uninit_probe",  # 3 execs per admission; executables only, hail-mary often runs .so
         # Not a strategy: a second implementation of RandPool.sample for
