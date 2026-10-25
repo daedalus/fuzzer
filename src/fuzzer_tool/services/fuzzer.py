@@ -126,6 +126,7 @@ from fuzzer_tool.core.schedulers import (
     MOptScheduler,
     MOSSScheduler,
     PHEScheduler,
+    ReactiveGradientScheduler,
     RegretMatchingScheduler,
     ReplicatorScheduler,
     RoundRobinScheduler,
@@ -247,6 +248,7 @@ _OPERATOR_STRATEGY_NAMES = (
     "regret_matching",
     "automaton",
     "ant_colony",
+    "reactive",
     "invasion",
     "round_robin",
     "canary",
@@ -1524,6 +1526,9 @@ class Fuzzer:
         gradient_temp_decay=0.9995,
         gradient_min_temperature=0.05,
         gradient_floor=0.05,
+        reactive=False,
+        reactive_forget=0.003,
+        reactive_spike=3.0,
         corral=False,
         corral_eta=0.6,
         tsallis=False,
@@ -3827,6 +3832,23 @@ class Fuzzer:
                 gradient_floor,
             )
 
+        # Reactive gradient bandit: gradient's preference rule plus
+        # success-clocked decay (forgetting) and a reward spike guard. Off by
+        # default and Elo-only, like gradient. See core/schedulers/op_reactive.py.
+        self._use_reactive = reactive
+        self._reactive = None
+        if reactive:
+            self._reactive = ReactiveGradientScheduler(
+                forget=reactive_forget,
+                spike=reactive_spike,
+                rng=self._rng,
+            )
+            log.info(
+                "Reactive gradient bandit enabled (forget=%.4f, spike=%.1f)",
+                reactive_forget,
+                reactive_spike,
+            )
+
         # Corral: log-barrier OMD over the operator arms with
         # importance-weighted losses. Off by default and Elo-only, for a
         # measured reason rather than by analogy -- see
@@ -4454,6 +4476,7 @@ class Fuzzer:
             or self._fewa
             or self._fpl
             or self._gradient
+            or self._reactive
             or self._whittle
             or self._successive_elim
             or self._canary
@@ -4673,6 +4696,8 @@ class Fuzzer:
             _register_arms(self._ant_colony, _format_priors)
         if self._gradient:
             _register_arms(self._gradient)
+        if self._reactive:
+            _register_arms(self._reactive)
         if self._whittle:
             _register_arms(self._whittle)
         if self._successive_elim:

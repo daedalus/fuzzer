@@ -172,6 +172,7 @@ class _FakeFuzzer:
         "automaton": ("_use_automaton", "_automaton"),
         "ant_colony": ("_use_ant_colony", "_ant_colony"),
         "gradient": ("_use_gradient", "_gradient"),
+        "reactive": ("_use_reactive", "_reactive"),
         "whittle": ("_use_whittle", "_whittle"),
         "fewa": ("_use_fewa", "_fewa"),
         "softmax": ("_use_softmax", "_softmax"),

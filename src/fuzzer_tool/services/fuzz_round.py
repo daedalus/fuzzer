@@ -1750,6 +1750,7 @@ class FuzzRound:
                 f._automaton if selector == "automaton" else None,
                 f._ant_colony,
                 f._gradient,
+                f._reactive,
                 f._whittle,
                 f._successive_elim,
                 f._consolidated_v1,
