@@ -213,6 +213,15 @@ SIGNAL_NAMES = {
 }
 
 
+def _label_fault(meta, runner) -> None:
+    """Name a guard-page overread (``--input-placement guard``); sanitizer type wins."""
+    label = getattr(runner, "_last_fault_label", "")
+    if not label or meta.error_type:
+        return
+    meta.error_type = label
+    meta.access_type = "READ"
+
+
 def _returncode_to_signal(returncode: int) -> tuple[str | None, int | None]:
     """Map a subprocess return code to (signal_name, signal_number).
 
@@ -995,6 +1004,8 @@ class CorpusManager:
             from fuzzer_tool.services.crash_isolate import isolate_for_fuzzer
 
             isolate_for_fuzzer(f, meta, data, returncode)
+
+        _label_fault(meta, getattr(f, "_inprocess_runner", None))
 
         # Populate error_type from return code for subprocess/inprocess
         # mode where ptrace isn't available and sanitizer reports are absent.

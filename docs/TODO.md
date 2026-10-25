@@ -263,7 +263,7 @@ Ported: input boosting (`taint_boost` op), priming check (`--priming-check`).
 
 ## Sandsifter port candidates (2026-10-25, xoreaxeaxeax/sandsifter `injector.c`)
 Already covered: 64 KiB signal altstack (`afl_shim.c` `__AFL_ALTSTACK_SIZE`), single-step tracing (`ptrace_coverage.py`).
-- [ ] **Guard-page input placement** — `injector.c:main`/`inject`: input ends flush against a `PROT_NONE` page, so the first byte past it faults (`si_addr` = page start). Ours: `inprocess._input_buf` is exact-size, caught only by ASAN redzones; no-ASAN in-process builds (`*_nosan`) read past the input silently. Open: (a) behind a flag, copy input into a reused `mmap` pair ending at the guard page (one `memcpy`, no per-exec `mprotect`); (b) classify a SEGV whose `si_addr` equals the guard as an overread, not a target crash; (c) underreads need a second guard before the input (alignment: input start then unaligned); (d) measure exec/s vs `from_buffer_copy` (Hard Rule 41).
+- [ ] **Guard-page input placement** (2026-10-25) — shipped as `--input-placement guard` (DEEP_DIVE §Guard-page input placement; micro-benchmark only). Open: (a) underreads need a second guard before the input (input start then unaligned); (b) end-to-end exec/s and fuzzgoat calibration on a clang `*_nosan` build (Hard Rule 52; no build root in this container); (c) rebuild targets for `__afl_last_fault_addr` (Hard Rule 56); (d) persistent/forkserver loaders keep exact placement; (e) `minimize` does not take the flag.
 - Skip: tunnel search (length-change byte deepening; effector maps in `position_arena.py` supersede), instruction-length probing and opcode blacklists (CPU fuzzing, out of scope).
 
 ## Standing notes

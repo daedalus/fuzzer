@@ -30,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`--input-placement guard`** (`adapters/guard_arena.py`, `__afl_last_fault_addr` in `afl_shim.c`): direct in-process modes end each input at a `PROT_NONE` page; an overread faults and is labelled `guard-overread`. Faster than the exact heap copy (264 vs 366 ns at 64 B). Rebuild targets for the label. Tests: `tests/test_guard_arena.py`.
 - **`--reactive` operator scheduler** (`core/schedulers/op_reactive.py`): gradient bandit with success-clocked decoupled decay and a reward spike guard. Recovers on DecayingBest (revived-arm share min 0.946; `--gradient` 0.003) at equal stationary share. Elo-only. Tests: `tests/core/test_reactive_bandit.py`, convergence harness.
 - **Crash push notifications** (`--push-on-crash URL`, `--push-test`, `$FUZZER_PUSH_URL`; `services/push.py`): one alert per novel crash to ntfy, Gotify, Pushover or a JSON webhook (Slack/Discord-shaped), chosen by URL scheme. Sent from a child process, so `save_crash` never blocks and the fuzzer stays single-threaded; at most 4 in flight, overflow counted into the next alert; drained for 5 s at run end. No crash bytes sent. Tested against a local HTTP server only. Tests: `tests/test_push.py`.
 - **XOR-key Redqueen stage** (`--rq-xor-key`, `core/rq_encodings.py`): solves compares on input XORed with an unknown 1-8 byte repeating key via the key-free lag-XOR invariant. Off by default (+27% per `generate_mutations` call); in `--hail-mary`. Tests: `tests/test_rq_xor_key.py`.

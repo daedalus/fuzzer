@@ -21,3 +21,15 @@ class Switch(Enum):
 
     ON = "on"
     OFF = "off"
+
+
+class InputPlacement(Enum):
+    """Where direct in-process modes put the input bytes.
+
+    EXACT  exact-size heap copy; ASAN redzones catch overreads.
+    GUARD  flush against a PROT_NONE page (``adapters/guard_arena.py``);
+           catches overreads without ASAN, labelled ``guard-overread``.
+    """
+
+    EXACT = "exact"
+    GUARD = "guard"

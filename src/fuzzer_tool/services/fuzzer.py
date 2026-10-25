@@ -88,7 +88,7 @@ from fuzzer_tool.core.orbit_dedup import canonical
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check
-from fuzzer_tool.core.run_mode import RunMode, Switch
+from fuzzer_tool.core.run_mode import InputPlacement, RunMode, Switch
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
@@ -1932,6 +1932,8 @@ class Fuzzer:
         prune_cost=False,
         # Novel-crash push targets (services/push.py); None disables. Appended.
         push_on_crash=None,
+        # Direct in-process input placement (--input-placement). Appended.
+        input_placement=InputPlacement.EXACT,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -1975,6 +1977,7 @@ class Fuzzer:
         # each crash regardless of this flag; this only controls the
         # always-on per-iteration trace in the persistent loader.
         self.use_ptrace = use_ptrace
+        self.input_placement = input_placement
         # Weight havoc's 11 inline sub-mutations by their measured hit rate
         # instead of drawing them uniformly. On by default: the priors start
         # uniform, the per-draw cost is a bisect over 11 floats, and the
@@ -4977,6 +4980,7 @@ class Fuzzer:
                 debug=self.debug,
                 capture_stderr=target_is_asan or target_is_ubsan,
                 use_ptrace=self.use_ptrace,
+                placement=self.input_placement,
             )
             if use_direct_lite and target_is_asan and _asan_fatal_in_process(self.target):
                 # A plain ASAN check runs Die() inside this process: the first
@@ -5070,6 +5074,7 @@ class Fuzzer:
                 # report never reaches is_crash.
                 capture_stderr=target_is_asan or target_is_ubsan,
                 use_ptrace=self.use_ptrace,
+                placement=self.input_placement,
             )
             mode = "direct ctypes" if direct_ok else "subprocess loader"
             cov_note = f", SHM cov id={cov_env_id}" if cov_env_id else ""
