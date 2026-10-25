@@ -6438,6 +6438,124 @@ __AFL_GCC_NO_COV static void __afl_manual_init(void) {
         __afl_manual_init();                                                  \
     } while (0)
 
+/* ── SHM testcase delivery (__AFL_FUZZ_TEST_CASE_BUF / _LEN) ─────────
+ *
+ *     unsigned char *buf = __AFL_FUZZ_TEST_CASE_BUF;   once, stable
+ *     while (__AFL_LOOP(n)) { int len = __AFL_FUZZ_TEST_CASE_LEN; ... }
+ *
+ * With __AFL_SHM_FUZZ_ID (set by fuzz_loader.c when the fuzzer asks for
+ * it) the input is read in place from {u32 len; u8 data[]}: no file write,
+ * no read(2). Without it the macros read argv[1], else stdin, into a
+ * buffer of the same capacity, as the harnesses' old main() did, so a
+ * crash still replays with `target file`.
+ *
+ * The buffer is larger than the input, so under ASAN [len, cap) is
+ * poisoned per input: a read one past the input must still be reported. */
+#define __AFL_SHM_FUZZ_BYTES (1u << 20)   /* data capacity; = fuzz_loader.c */
+
+struct __afl_fuzz_seg {
+    uint32_t len;
+    uint8_t data[];
+};
+
+extern void __asan_poison_memory_region(void const volatile *, size_t) __attribute__((weak));
+extern void __asan_unpoison_memory_region(void const volatile *, size_t) __attribute__((weak));
+
+static struct __afl_fuzz_seg *__afl_fuzz_seg = NULL;
+static uint8_t *__afl_fuzz_data = NULL;   /* segment data, or the fallback */
+static uint32_t __afl_fuzz_cap = 0;
+static int __afl_argc = 0;
+static char **__afl_argv = NULL;
+
+/* glibc passes (argc, argv, envp) to constructors: the fallback needs
+ * argv[1], and the harness's main() no longer looks at it. */
+__attribute__((constructor))
+__AFL_GCC_NO_COV static void __afl_fuzz_args(int argc, char **argv) {
+    __afl_argc = argc;
+    __afl_argv = argv;
+}
+
+__AFL_GCC_NO_COV static void __afl_fuzz_attach(void) {
+    if (__afl_fuzz_data) return;
+
+    const char *id = getenv("__AFL_SHM_FUZZ_ID");
+    char *end = NULL;
+    long shmid = (id && id[0]) ? strtol(id, &end, 10) : -1;
+    struct shmid_ds ds;
+    if (shmid >= 0 && shmid <= INT_MAX && !*end &&
+        shmctl((int)shmid, IPC_STAT, &ds) == 0 && ds.shm_segsz > sizeof(struct __afl_fuzz_seg)) {
+        void *p = shmat((int)shmid, NULL, 0);
+        if (p != (void *)-1) {
+            __afl_fuzz_seg = p;
+            __afl_fuzz_data = __afl_fuzz_seg->data;
+            __afl_fuzz_cap = (uint32_t)(ds.shm_segsz - sizeof(struct __afl_fuzz_seg));
+            return;
+        }
+    }
+
+    __afl_fuzz_data = malloc(__AFL_SHM_FUZZ_BYTES);
+    __afl_fuzz_cap = __afl_fuzz_data ? __AFL_SHM_FUZZ_BYTES : 0;
+}
+
+/* Fallback: read argv[1] if given, else stdin, up to capacity. */
+__AFL_GCC_NO_COV static uint32_t __afl_fuzz_read_alt(void) {
+    int fd = 0;
+    if (__afl_argc >= 2 && __afl_argv && __afl_argv[1]) {
+        fd = open(__afl_argv[1], O_RDONLY);
+        if (fd < 0) return 0;
+    }
+    uint32_t n = 0;
+    while (n < __afl_fuzz_cap) {
+        ssize_t r = read(fd, __afl_fuzz_data + n, __afl_fuzz_cap - n);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        n += (uint32_t)r;
+    }
+    if (fd != 0) close(fd);
+    return n;
+}
+
+__attribute__((unused))
+__AFL_GCC_NO_COV static unsigned char *__afl_fuzz_buf(void) {
+    __afl_fuzz_attach();
+    return __afl_fuzz_data;
+}
+
+__attribute__((unused))
+__AFL_GCC_NO_COV static int __afl_fuzz_len(void) {
+    __afl_fuzz_attach();
+    if (!__afl_fuzz_data) return 0;
+
+    uint32_t n;
+    if (__afl_fuzz_seg) {
+        n = __atomic_load_n(&__afl_fuzz_seg->len, __ATOMIC_ACQUIRE);
+        if (n > __afl_fuzz_cap) n = __afl_fuzz_cap;
+    } else {
+        n = __afl_fuzz_read_alt();
+    }
+
+    if (__asan_poison_memory_region && __asan_unpoison_memory_region) {
+        __asan_unpoison_memory_region(__afl_fuzz_data, n);
+        __asan_poison_memory_region(__afl_fuzz_data + n, __afl_fuzz_cap - n);
+    }
+    return (int)n;
+}
+
+/* AFL++'s manual-control surface; turns on the AFL++ main() harnesses
+ * already carry behind this guard. Both spellings of the testcase macros. */
+#define __AFL_HAVE_MANUAL_CONTROL 1
+#define __AFL_FUZZ_INIT()
+#define __AFL_FUZZ_TEST_CASE_BUF (__afl_fuzz_buf())
+#define __AFL_FUZZ_TEST_CASE_LEN                                              \
+    ({                                                                        \
+        static volatile const char *__afl_sig_fuzz __attribute__((used)) =   \
+            "##SIG_AFL_SHM_FUZZ##";                                           \
+        (void)__afl_sig_fuzz;                                                 \
+        __afl_fuzz_len();                                                     \
+    })
+#define __AFL_FUZZ_TESTCASE_BUF __AFL_FUZZ_TEST_CASE_BUF
+#define __AFL_FUZZ_TESTCASE_LEN __AFL_FUZZ_TEST_CASE_LEN
+
 /* Auto-attach when loaded */
 __attribute__((constructor))
 __AFL_GCC_NO_COV static void __afl_auto_init(void) {

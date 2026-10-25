@@ -1851,6 +1851,7 @@ class AflMode(enum.Enum):
 
     PERSISTENT = "persistent"  # while (__AFL_LOOP(n)) { ... }
     DEFERRED = "deferred"  # __AFL_INIT() after the harness's own setup
+    SHM_TESTCASE = "shm_testcase"  # __AFL_FUZZ_TEST_CASE_LEN reads a segment
 
 
 # AFL++'s signatures: the macros put them in .rodata. Read as bytes, not
@@ -1858,6 +1859,7 @@ class AflMode(enum.Enum):
 _AFL_MODE_SIGS = {
     AflMode.PERSISTENT: b"##SIG_AFL_PERSISTENT##",
     AflMode.DEFERRED: b"##SIG_AFL_DEFER_FORKSRV##",
+    AflMode.SHM_TESTCASE: b"##SIG_AFL_SHM_FUZZ##",
 }
 
 
