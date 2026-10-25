@@ -4986,6 +4986,9 @@ static int __afl_guard_signals[] = {
 static __thread sigjmp_buf *volatile __afl_guard_jmp = NULL;
 static __thread volatile sig_atomic_t __afl_guard_timed = 0;  /* active frame is timed */
 static volatile sig_atomic_t __afl_handlers_live = 0;
+/* si_addr of the last guarded crash on this thread; read by
+ * __afl_last_fault_addr() (guard-page overread labelling). */
+static __thread uintptr_t __afl_guard_fault = 0;
 
 /* siglongjmp values: a signal number, or one of these escape codes. */
 #define __AFL_JMP_EXIT     0x100   /* | (status & 0xFF): exit()/_exit() in the guard */
@@ -5226,6 +5229,7 @@ __AFL_GCC_NO_COV static void __afl_crash_handler(int sig, siginfo_t *si, void *u
     __afl_sym_capture(sig, si, uc);
     sigjmp_buf *jb = __afl_guard_jmp;
     if (jb) {
+        __afl_guard_fault = si ? (uintptr_t)si->si_addr : 0;
         /* A tick held by sa_mask fires as siglongjmp unmasks it, before
          * the landing: untimed, it cannot turn this crash into a timeout. */
         __afl_guard_timed = 0;
@@ -5930,6 +5934,13 @@ __AFL_GCC_NO_COV long __afl_ph_live(void) {
 #define __afl_ph_leave(prev) ((void)(prev))
 #define __afl_ph_unwind(prev) ((void)(prev))
 #endif
+
+/* Fault address of the last crash a guarded call recovered on this
+ * thread (0 if none had si_addr). Meaningful for SIGSEGV/SIGBUS only. */
+__attribute__((visibility("default")))
+__AFL_GCC_NO_COV uintptr_t __afl_last_fault_addr(void) {
+    return __afl_guard_fault;
+}
 
 /* ── Guarded call wrapper ─────────────────────────────────────────────
  *

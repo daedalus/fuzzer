@@ -1272,6 +1272,16 @@ The fuzzer exports `__AFL_WGUARD` (`core/shim_health.export_wguard`); the shim a
 ### Hybrid abort interception
 `afl_shim.c` replaces `abort()` in every build (ASAN included) with a macro calling `__afl_shim_abort()`, which writes `[shim] abort() intercepted` to stderr, counts it (`ABORTS_INTERCEPTED`) and returns. This keeps library assertion failures (FFmpeg's ~1600 `av_assert0` sites) from flooding the crash set; the cost is that the target runs on past the failed assertion. Only code compiled with the shim is affected: `abort()` inside precompiled libraries (libc `assert`, ASAN) still raises `SIGABRT`, which the crash handler recovers inside the guard or hands back outside it. ASAN errors are reported via stderr (`halt_on_error=0:abort_on_error=0`) and parsed by `SanitizerReport`.
 
+### Guard-page input placement (`--input-placement guard`)
+Opt-in, default `exact`, not set by `--hail-mary`. Direct in-process modes (`--inprocess-direct`, direct_lite) copy each input into one reused mapping so it ends flush against a `PROT_NONE` page (`adapters/guard_arena.py::GuardArena`, idea from sandsifter `injector.c`):
+
+```
+| stale | input (n) | PROT_NONE |
+                    ^ buf[n] faults, si_addr in guard page
+```
+
+A build without ASAN reads past an exact-size heap copy silently; here the first byte past the input faults. The shim records `si_addr` on every recovered crash (`__afl_last_fault_addr()`); `InProcessRunner._crash_guard` reads it for SIGSEGV/SIGBUS and sets `_last_fault_label = "guard-overread"` when it lies in the guard page, and `corpus_manager._label_fault` writes it to `error_type` (access `READ`) unless a sanitizer already named the crash. The mapping grows to the largest input and never shrinks; one array per length is cached (cap 1024, cleared on remap). Cost (bytes inputs, random lengths): 264 vs 366 ns at <=64 B, 294 vs 972 ns at <=2 KiB, 1.5 vs 2.1 us at <=64 KiB against `_input_buf`. Limits: underreads are not caught (bytes before the input are stale); the arena is not ASAN heap, so ASAN's redzone for the input buffer is replaced by the guard page; a shim without `__afl_last_fault_addr` recovers the crash but leaves it unlabelled (startup warning); loader modes ignore the flag. Tests: `tests/test_guard_arena.py`.
+
 ### SHM resize in inprocess mode
 When collision risk exceeds the threshold, the coverage SHM (edge table) is resized. In inprocess mode, `InProcessRunner.update_shm_after_resize` re-runs the target's `__afl_map_shm()` (re-reads `__AFL_SHM_ID`/`AFL_MAP_SIZE`, so `__afl_area` and `__afl_map_size` follow the new segment; falls back to patching `__afl_area`) and invalidates the cached SHM attachment, so coverage writes don't go to freed memory. The persistent loader is restarted instead. The shim validates the new segment first, then publishes size, header pointers and table together and detaches the old segment. A refused re-attach detaches and turns coverage off; refusal is sticky only for that segment id.
 

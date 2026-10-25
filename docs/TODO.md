@@ -262,6 +262,11 @@ Ported: input boosting (`taint_boost` op), priming check (`--priming-check`).
 - [ ] **Sample-size escalation** — `fuzzer.py` noise stage: confirm noisy verdicts (exec-time anomaly, differential KS) at 10→50→100→500 samples.
 - [ ] **Pair minimizer** — `DifferentialInputMinimizerPass`: zero power-of-two blocks, then copy bytes across, for `--differential` / uninit-probe pairs.
 
+## Sandsifter port candidates (2026-10-25, xoreaxeaxeax/sandsifter `injector.c`)
+Already covered: 64 KiB signal altstack (`afl_shim.c` `__AFL_ALTSTACK_SIZE`), single-step tracing (`ptrace_coverage.py`).
+- [ ] **Guard-page input placement** (2026-10-25) — shipped as `--input-placement guard` (DEEP_DIVE §Guard-page input placement; micro-benchmark only). Open: (a) underreads need a second guard before the input (input start then unaligned); (b) end-to-end exec/s and fuzzgoat calibration on a clang `*_nosan` build (Hard Rule 52; no build root in this container); (c) rebuild targets for `__afl_last_fault_addr` (Hard Rule 56); (d) persistent/forkserver loaders keep exact placement; (e) `minimize` does not take the flag.
+- Skip: tunnel search (length-change byte deepening; effector maps in `position_arena.py` supersede), instruction-length probing and opcode blacklists (CPU fuzzing, out of scope).
+
 ## Standing notes
 
 These are not work items. They are the lessons the closed work left behind, and

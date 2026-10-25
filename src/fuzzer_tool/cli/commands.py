@@ -22,7 +22,7 @@ from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
-from fuzzer_tool.core.run_mode import RunMode, Switch
+from fuzzer_tool.core.run_mode import InputPlacement, RunMode, Switch
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
 from fuzzer_tool.core.schedulers.seed_good_turing import ESTIMATORS as GOOD_TURING_ESTIMATORS
@@ -724,6 +724,9 @@ def cmd_fuzz(args):
         seed=args.seed,
         clock=ClockMode(getattr(args, "clock", ClockMode.WALL.value)),
         shm_write_guard=WriteGuard[getattr(args, "shm_write_guard", "off").upper()],
+        input_placement=InputPlacement(
+            getattr(args, "input_placement", InputPlacement.EXACT.value)
+        ),
         touched_atomic=getattr(args, "touched_atomic", None),
         ctx_sensitive=getattr(args, "ctx_sensitive", None),
         extra_crash_codes=args.crash_codes,
@@ -2982,6 +2985,13 @@ def main() -> int:
         "a stray store from the target faults (SIGSEGV). 'pkey': x86 protection "
         "keys, needs PKU, else falls back to off. 'mprotect': any host, two "
         "syscalls per edge (debug only). Default: off.",
+    )
+    fuzz_parser.add_argument(
+        "--input-placement",
+        choices=[m.value for m in InputPlacement],
+        default=InputPlacement.EXACT.value,
+        help="Direct in-process modes: 'guard' ends each input at a PROT_NONE page, so "
+        "an overread faults (labelled guard-overread) without ASAN. Default: exact.",
     )
     fuzz_parser.add_argument(
         "--no-cfg-cache",

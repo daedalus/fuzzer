@@ -22,6 +22,7 @@ import tempfile
 from collections.abc import Callable
 
 from fuzzer_tool.adapters import libc_shm
+from fuzzer_tool.adapters.guard_arena import GUARD_OVERREAD, GuardArena
 from fuzzer_tool.adapters.shim_factory import (
     ShimResult,
     build_shim,
@@ -30,6 +31,7 @@ from fuzzer_tool.adapters.shim_factory import (
 )
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE, SIZEOF_ENTRY
 from fuzzer_tool.adapters.stderr_capture import StderrCapture
+from fuzzer_tool.core.run_mode import InputPlacement
 
 log = logging.getLogger(__name__)
 
@@ -162,6 +164,8 @@ sys.exit(max(0, min(rc, 125)))
 #: (afl_shim.c ``__AFL_GUARD_TIMEOUT_RC``).
 GUARD_TIMEOUT_RC = -1
 _US_PER_S = 1_000_000
+# Signals whose si_addr is the faulting data address.
+_FAULT_SIGS = frozenset((signal.SIGSEGV, signal.SIGBUS))
 
 
 def _input_buf(data) -> ctypes.Array:
@@ -211,6 +215,37 @@ def _call_unguarded(r: "InProcessRunner", buf, n: int) -> None:
     return None
 
 
+# Input-buffer strategies bound once in __init__ (InputPlacement).
+def _fill_exact(r: "InProcessRunner", data) -> ctypes.Array:
+    return _input_buf(data)
+
+
+def _fill_cached(r: "InProcessRunner", data) -> ctypes.Array:
+    """Reuse the last buffer when the length matches (direct_lite)."""
+    buf = r._c_buf
+    if buf is None or len(buf) != len(data):
+        return _input_buf(data)
+    ctypes.memmove(buf, data, len(data))
+    return buf
+
+
+def _fill_guard(r: "InProcessRunner", data) -> ctypes.Array:
+    return r._arena.place(data)
+
+
+# Crash hooks: only guard placement reads the fault address.
+def _crash_plain(r: "InProcessRunner", sig: int) -> None:
+    return None
+
+
+def _crash_guard(r: "InProcessRunner", sig: int) -> None:
+    """Label a SEGV/BUS inside the guard page ``guard-overread``."""
+    fault = r._fault_fn
+    addr = fault() if fault is not None and sig in _FAULT_SIGS else None
+    r._last_fault_addr = addr
+    r._last_fault_label = GUARD_OVERREAD if r._arena.owns(addr) else ""
+
+
 class InProcessRunner:
     """Call target function with minimal overhead.
 
@@ -234,6 +269,7 @@ class InProcessRunner:
         debug: bool = False,
         capture_stderr: bool = False,
         use_ptrace: bool = False,
+        placement: InputPlacement = InputPlacement.EXACT,
     ):
         self.target = target
         self.function_name = function_name
@@ -256,6 +292,12 @@ class InProcessRunner:
         self._guard_fn = None
         self._guard_ptr = None
         self._dist_flush = None
+        self._fault_fn = None
+        # Input placement, bound once: guard arena or heap copy.
+        self._c_buf: ctypes.Array | None = None
+        self._arena = GuardArena() if placement is InputPlacement.GUARD else None
+        self._fill = _fill_guard if self._arena else _fill_cached if direct_lite else _fill_exact
+        self._on_crash = _crash_guard if self._arena else _crash_plain
         # fd 2 -> reused pipe around direct-mode calls (ASAN reports).
         self._stderr = StderrCapture()
         self._is_c = False
@@ -268,6 +310,8 @@ class InProcessRunner:
         # Fault-address/register relay from the last run (None/{} when absent)
         self._last_fault_addr: int | None = None
         self._last_regs: dict[str, int] = {}
+        # GUARD_OVERREAD for the last crash in the guard page, else "".
+        self._last_fault_label = ""
 
         # Shim state
         self._shim: ShimResult | None = None
@@ -373,6 +417,7 @@ class InProcessRunner:
         """
         self._guard_ptr = ctypes.cast(self._func_ptr, ctypes.c_void_p)
         self._dist_flush = getattr(self._lib, "__afl_dist_flush", None)
+        self._bind_fault()
 
         timed = getattr(self._lib, "__afl_guarded_call_timeout", None)
         if timed is not None:
@@ -395,11 +440,24 @@ class InProcessRunner:
         guarded.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t]
         self._guard_fn, self._guard_call = guarded, _call_plain
 
+    def _bind_fault(self) -> None:
+        """Bind ``__afl_last_fault_addr`` for guard placement; warn if absent."""
+        if self._arena is None:
+            return
+        fn = getattr(self._lib, "__afl_last_fault_addr", None)
+        if fn is None:
+            log.warning("guard placement: shim lacks __afl_last_fault_addr, overreads unlabelled")
+            return
+        fn.restype = ctypes.c_size_t
+        fn.argtypes = []
+        self._fault_fn = fn
+
     def _unbind_guard(self) -> None:
         self._guard_call = _call_unguarded
         self._guard_fn = None
         self._guard_ptr = None
         self._dist_flush = None
+        self._fault_fn = None
 
     def reset_exec_state(self) -> None:
         """Clear the shim's per-execution state in a directly loaded target.
@@ -699,13 +757,14 @@ class InProcessRunner:
             self._stderr.begin()
             capturing = True
 
-            buf = _input_buf(data)
+            buf = self._fill(self, data)
             rc = self._guard_call(self, buf, len(data))
             if rc is None:
                 rc = self._func_ptr(buf, len(data))
             elif self._guard_timed_out:
                 timed_out = True
             elif rc < 0:
+                self._on_crash(self, -rc)
                 # __afl_guarded_call siglongjmp'd back with -sig. Convert to
                 # the 128+sig convention used elsewhere in this module.
                 rc = 128 + (-rc)
@@ -743,10 +802,7 @@ class InProcessRunner:
             return -2, "runner not initialized"
 
         n = len(data)
-        if not hasattr(self, "_c_buf") or self._c_buf is None or len(self._c_buf) != n:
-            self._c_buf = _input_buf(data)
-        else:
-            ctypes.memmove(self._c_buf, data, n)
+        self._c_buf = self._fill(self, data)
 
         # Conditional stderr capture for ASAN diagnostic reporting
         _captured_stderr = ""
@@ -776,6 +832,8 @@ class InProcessRunner:
                 rc = self._func_ptr(self._c_buf, n)
             elif self._guard_timed_out:
                 self._timed_out = True
+            elif rc < 0:
+                self._on_crash(self, -rc)
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             if self.capture_stderr:
@@ -923,6 +981,9 @@ class InProcessRunner:
         self._lib = None
         self._func_ptr = None
         self._unbind_guard()
+        self._c_buf = None
+        if self._arena is not None:
+            self._arena.close()
         self._stderr.close()
         self._is_c = False
         self._shim_handle = None
