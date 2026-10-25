@@ -802,6 +802,9 @@ def cmd_fuzz(args):
         gradient_temp_decay=getattr(args, "gradient_temp_decay", 0.9995),
         gradient_min_temperature=getattr(args, "gradient_min_temperature", 0.05),
         gradient_floor=getattr(args, "gradient_floor", 0.05),
+        reactive=getattr(args, "reactive", False),
+        reactive_forget=getattr(args, "reactive_forget", 0.003),
+        reactive_spike=getattr(args, "reactive_spike", 3.0),
         corral=getattr(args, "corral", False),
         corral_eta=getattr(args, "corral_eta", 0.6),
         tsallis=getattr(args, "tsallis", False),
@@ -2466,6 +2469,7 @@ _HAIL_MARY_FLAGS = (
     "automaton",
     "ant_colony",
     "gradient",
+    "reactive",
     "whittle",
     "successive_elim",
     "las_vegas",
@@ -4080,6 +4084,28 @@ def main() -> int:
             "exploration and be unable to recover from a regime switch "
             "(default: 0.05)"
         ),
+    )
+    fuzz_parser.add_argument(
+        "--reactive",
+        action="store_true",
+        help=(
+            "Enable the reactive gradient bandit: --gradient plus "
+            "success-clocked forgetting and a reward spike guard "
+            "(experimental, off by default, Elo-only -- see "
+            "core/schedulers/op_reactive.py)"
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--reactive-forget",
+        type=float,
+        default=0.003,
+        help="Fraction of every preference dropped per success (default: 0.003)",
+    )
+    fuzz_parser.add_argument(
+        "--reactive-spike",
+        type=float,
+        default=3.0,
+        help="Reward cap as a multiple of the success-reward EMA; 0 disables (default: 3.0)",
     )
     fuzz_parser.add_argument(
         "--whittle",

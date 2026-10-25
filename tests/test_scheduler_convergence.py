@@ -84,6 +84,7 @@ from fuzzer_tool.core.schedulers import (
     MOptScheduler,
     MOSSScheduler,
     PHEScheduler,
+    ReactiveGradientScheduler,
     RegretMatchingScheduler,
     ReplicatorScheduler,
     SWUCBScheduler,
@@ -145,6 +146,13 @@ RELIABLE = {
     # ROUNDS with the corrected defaults: share 0.938, slope max 0.267.
     "Gradient": (
         lambda seed: GradientBanditScheduler(rng=RandPool(seed)),
+        0.90,
+        0.45,
+    ),
+    # Gradient plus success-clocked forgetting (core/schedulers/op_reactive.py).
+    # Over 40 seeds: share min 0.938, slope max 0.249. FIXED_SEED 0.954 / 0.202.
+    "Reactive": (
+        lambda seed: ReactiveGradientScheduler(rng=RandPool(seed)),
         0.90,
         0.45,
     ),
@@ -424,6 +432,9 @@ RECOVERS = {
     # The mix floor keeps a dead arm's replacement reachable. Over 12 seeds:
     # min 0.928, median 0.934; FIXED_SEED 0.939.
     "Automaton": (lambda: LearningAutomatonScheduler(rng=RandPool(FIXED_SEED)), 0.85),
+    # Gradient (STUCK below) plus success-clocked forgetting. Over 20 seeds:
+    # min 0.946; FIXED_SEED 0.955.
+    "Reactive": (lambda: ReactiveGradientScheduler(rng=RandPool(FIXED_SEED)), 0.85),
 }
 
 

@@ -67,6 +67,7 @@ _KWARGS = {
     "regret_matching": {"regret_matching": True},
     "automaton": {"automaton": True},
     "ant_colony": {"ant_colony": True},
+    "reactive": {"reactive": True},
     "invasion": {"invasion": True, "mc_bandit": True},
     "canary": {"canary_scheduler": True},
     "exp4": {"exp4": True},

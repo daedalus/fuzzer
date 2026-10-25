@@ -50,6 +50,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Gamma-Poisson (`--gamma-poisson`) | Discounted Gamma–Poisson Thompson | S | vs `--kalman-ts` |
 | Tsallis-INF / Kalman-TS / IDS | Elo-only bandits | S | vs MOSS/consolidated_v2 |
 | Bayes-UCB (`--bayes-ucb`) | Quantile UCB | U | vs MOSS and default |
+| Reactive gradient (`--reactive`) | Gradient + success-clocked forgetting, spike guard | S | vs `--gradient` under `--elo` |
 | Chaotic inertia (`--swarm-inertia chaotic`) | Logistic-map PSO inertia | U | vs `constant` for `--mopt`, `--op-firefly` |
 | Learned α / dict Thompson (`--dirichlet-alpha learned`, `--dict-thompson`) | Learned Dirichlet α; Thompson over tokens | N | 3k trend negative; 10k+ execs |
 | Minimax (`--op-minimax`, `--minimax-select`, `--wall-order`) | Minimax op / minimization / ordering | N | png null; `--reps 2 --set cmplog` |

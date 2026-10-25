@@ -866,7 +866,7 @@ _FALLBACK_PRECEDENCE = (
     "las_vegas",
     "round_robin",
     # canary, op_katz, op_kuramoto, op_tang, op_kruskal_count, op_firefly,
-    # op_tpe, op_strata, op_stride, op_p2c, op_good_turing, gradient, whittle, corral, softmax, topk,
+    # op_tpe, op_strata, op_stride, op_p2c, op_good_turing, gradient, reactive, whittle, corral, softmax, topk,
     # tsallis, kalman_ts, gamma_poisson, ids, phe, exp3_ix, regret_matching, automaton,
     # ant_colony are deliberately absent
     # here: they are unproven exploratory arms
@@ -927,6 +927,7 @@ _PLAIN_STRATEGIES = {
     "bayes_ucb": "_bayes_ucb",
     "fpl": "_fpl",
     "gradient": "_gradient",
+    "reactive": "_reactive",
     "whittle": "_whittle",
     "successive_elim": "_successive_elim",
     "las_vegas": "_las_vegas",
@@ -1058,6 +1059,8 @@ def operator_strategy_pool(f) -> list[str]:
         available.append("ant_colony")
     if f._use_gradient and f._gradient:
         available.append("gradient")
+    if f._use_reactive and f._reactive:
+        available.append("reactive")
     if f._use_whittle and f._whittle:
         available.append("whittle")
     if f._use_successive_elim and f._successive_elim:

@@ -104,6 +104,7 @@ def _all_operator_schedulers():
     round_robin = S.RoundRobinScheduler()
     exp4 = S.Exp4Scheduler()
     gradient = S.GradientBanditScheduler()
+    reactive = S.ReactiveGradientScheduler()
     successive_elim = S.SuccessiveEliminationScheduler()
     whittle = S.WhittleIndexScheduler()
     corral = S.CorralScheduler()
@@ -193,6 +194,7 @@ def _all_operator_schedulers():
         ),
         ("Exp4Scheduler", exp4, exp4.select_op, exp4.record),
         ("GradientBanditScheduler", gradient, gradient.select_op, gradient.record),
+        ("ReactiveGradientScheduler", reactive, reactive.select_op, reactive.record),
         (
             "SuccessiveEliminationScheduler",
             successive_elim,

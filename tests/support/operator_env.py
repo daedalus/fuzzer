@@ -58,6 +58,7 @@ BALLOT_SCHEDULERS = (
     "automaton",
     "ant_colony",
     "gradient",
+    "reactive",
     "gp_ucb",
     "hierarchical",
     "kl_ducb",
