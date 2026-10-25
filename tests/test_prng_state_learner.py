@@ -974,6 +974,7 @@ def live_session(token_so):
     shm = ShmCoverage(size=map_size)
     os.environ["__AFL_SHM_ID"] = str(shm.env_id)
     os.environ["AFL_MAP_SIZE"] = str(map_size)
+    collector = None
     try:
         collector = CmplogCollector()
         collector.setup_env_for_run()
@@ -1043,6 +1044,10 @@ def live_session(token_so):
             }
         return result
     finally:
+        # Module scope outlives the per-test env restore: undo
+        # setup_env_for_run (LD_PRELOAD, _CMPLOG_*) here.
+        if collector is not None:
+            collector.stop()
         for key, value in saved.items():
             if value is None:
                 os.environ.pop(key, None)
