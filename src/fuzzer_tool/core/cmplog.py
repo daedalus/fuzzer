@@ -37,6 +37,7 @@ from collections.abc import Callable, Iterable
 
 import numpy as np
 
+from fuzzer_tool.adapters.cmp_shm import CMP_SHM_ENV, SITE_SLOTS, CmpCounterShm
 from fuzzer_tool.adapters.track_parser import (
     CondStmt,
     cond_tuples_from_cmplog_text,
@@ -477,6 +478,8 @@ class _SiteCounters:
         self._last_fired_base: dict[_SiteKey, int] = {}
         self._last_fired_chunks: list[tuple[np.ndarray, np.ndarray]] = []
         self._last_fired: dict[_SiteKey, int] | None = {}
+        # SHM site-table slot -> site id (-1: not seen yet); see fold_slots.
+        self._shm_slot_site = np.full(SITE_SLOTS, _NO_SLOT, np.int64)
 
     # ── fold ──────────────────────────────────────────────────────────
     def fold(self, lines: list[str]) -> None:
@@ -487,8 +490,28 @@ class _SiteCounters:
         slots = np.fromiter(map(self._lines.__getitem__, lines), np.int64, len(lines))
         slots = slots[slots != _NO_SLOT]
         site = self._slot_site[slots]
-        fired = self._slot_fired[slots]
-        asserted = self._slot_asserted[slots]
+        self._fold_arrays(site, self._slot_fired[slots], self._slot_asserted[slots])
+
+    def fold_slots(
+        self,
+        slots: np.ndarray,
+        fired: np.ndarray,
+        asserted: np.ndarray,
+        key_of: Callable[[int], _SiteKey],
+    ) -> None:
+        """Fold one SHM site-table drain (``CmpCounterShm.drain_sites``).
+
+        Table slots keep their key for the segment's life, so the slot ->
+        site id map is cached; only a first-seen slot calls *key_of*.
+        """
+        cache = self._shm_slot_site
+        new = slots[cache[slots] < 0]
+        for slot in new.tolist():
+            cache[slot] = self._site_id(key_of(slot))
+        self._fold_arrays(cache[slots], fired, asserted)
+
+    def _fold_arrays(self, site: np.ndarray, fired: np.ndarray, asserted: np.ndarray) -> None:
+        """Add per-site (fired, asserted) to the totals and last-drain views."""
         np.add.at(self._fired, site, fired)
         np.add.at(self._asserted, site, asserted)
         self._fired_seen[site] = True
@@ -788,6 +811,8 @@ class CmplogCollector:
         # per-callback vector too.
         self.sites_saturated = False
         self._sites_offset: int = 0
+        # Counters segment ($_CMPLOG_COUNTS_SHM); used once a shim marks it.
+        self.counts_shm: CmpCounterShm | None = None
 
     def start(self) -> bool:
         """Compile the LD_PRELOAD comparison-logging shim.
@@ -948,6 +973,9 @@ class CmplogCollector:
         env = dict(env)  # copy
         env["_CMPLOG_OUT"] = self.log_path
         env["_CMPLOG_COUNTS"] = self.counts_path
+        shm_id = self._counts_shm_id()
+        if shm_id:
+            env[CMP_SHM_ENV] = shm_id
         if self.sites_path:
             env["_CMPLOG_SITE_COUNTS"] = self.sites_path
         if self.compcov_level:
@@ -962,6 +990,16 @@ class CmplogCollector:
             env["ASAN_OPTIONS"] = _asan_link_order_off(env.get("ASAN_OPTIONS"))
 
         return env
+
+    def _counts_shm_id(self) -> str | None:
+        """Id of the counters segment, created on first use; None if unavailable."""
+        if self.counts_shm is None:
+            try:
+                self.counts_shm = CmpCounterShm()
+            except OSError:
+                log.debug("Cmplog: no counters segment; using text sidecars", exc_info=True)
+                return None
+        return self.counts_shm.env_id
 
     def setup_env_for_run(self):
         """Set _CMPLOG_OUT in the current process environment.
@@ -996,6 +1034,7 @@ class CmplogCollector:
                     "_CMPLOG_OUT",
                     "_CMPLOG_COUNTS",
                     "_CMPLOG_SITE_COUNTS",
+                    CMP_SHM_ENV,
                     "LD_PRELOAD",
                     "ASAN_OPTIONS",
                     "__AFL_COMPCOV_LEVEL",
@@ -1008,6 +1047,9 @@ class CmplogCollector:
             self.sites_path = self._sites_path_for(self.log_path)
         os.environ["_CMPLOG_OUT"] = self.log_path
         os.environ["_CMPLOG_COUNTS"] = self.counts_path
+        shm_id = self._counts_shm_id()
+        if shm_id:
+            os.environ[CMP_SHM_ENV] = shm_id
         if self.sites_path:
             os.environ["_CMPLOG_SITE_COUNTS"] = self.sites_path
         if self.compcov_level:
@@ -1490,6 +1532,14 @@ class CmplogCollector:
         self.last_asserted = {}
         self.last_site_fired = {}
         self.last_site_asserted = {}
+        shm = self.counts_shm
+        if shm is not None and shm.attached:
+            for name, fired, asserted in shm.drain_counts():
+                self._add_count(name, fired, asserted)
+            self._update_rates()
+            self._collect_sites_shm(shm)
+            return self.last_fired, self.last_asserted
+
         if not self.counts_path or not os.path.exists(self.counts_path):
             # Sites live in their own file and their own offset; drain them
             # even when the counts file is missing, or their totals go stale
@@ -1529,17 +1579,31 @@ class CmplogCollector:
                 asserted = int(parts[3])
             except ValueError:
                 continue
-            name = parts[1]
-            self.cmp_fired[name] = self.cmp_fired.get(name, 0) + fired
-            self.cmp_asserted[name] = self.cmp_asserted.get(name, 0) + asserted
-            if fired:
-                self.last_fired[name] = self.last_fired.get(name, 0) + fired
-            if asserted:
-                self.last_asserted[name] = self.last_asserted.get(name, 0) + asserted
+            self._add_count(parts[1], fired, asserted)
 
         self._update_rates()
         self.collect_sites()
         return self.last_fired, self.last_asserted
+
+    def _add_count(self, name: str, fired: int, asserted: int) -> None:
+        """Fold one callback's delta into the totals and this drain's vector."""
+        self.cmp_fired[name] = self.cmp_fired.get(name, 0) + fired
+        self.cmp_asserted[name] = self.cmp_asserted.get(name, 0) + asserted
+        if fired:
+            self.last_fired[name] = self.last_fired.get(name, 0) + fired
+        if asserted:
+            self.last_asserted[name] = self.last_asserted.get(name, 0) + asserted
+
+    def _collect_sites_shm(self, shm: CmpCounterShm) -> None:
+        """``collect_sites`` for the SHM table: same totals, no text."""
+        dropped = shm.take_dropped()
+        if dropped:
+            self._note_site_drops(str(dropped))
+        if not self.site_counts_enabled:
+            return
+        slots, fired, asserted = shm.drain_sites()
+        if slots.size:
+            self._sites.fold_slots(slots, fired, asserted, shm.site_key)
 
     def collect_sites(self) -> None:
         """Fold the shim's per-site counter deltas into the run totals.
@@ -2000,6 +2064,9 @@ class CmplogCollector:
         The shim itself is cached in tempdir for reuse and is not removed.
         """
         self.restore_env()
+        if self.counts_shm is not None:
+            self.counts_shm.close()
+            self.counts_shm = None
         if self.counts_path and os.path.exists(self.counts_path):
             with contextlib.suppress(OSError):
                 os.unlink(self.counts_path)

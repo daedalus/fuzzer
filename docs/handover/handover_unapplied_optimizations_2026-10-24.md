@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-24
 **Scope:** per-exec hot path (`services/`, `adapters/`, `afl_shim.c`) and `docs/port-backlog.md` against live code.
-**Status:** T1, T2, T3, T7, T10 implemented (DEEP_DIVE §Performance, "Per-exec overhead cuts"). T9 tried and dropped (within noise). T11 skipped (< 1 us, six reassignment sites). Open: T4, T5, T6, T8. Remaining gains are estimates.
+**Status:** T1-T8 and T10 implemented (DEEP_DIVE §Performance, "Per-exec overhead cuts"); T5 opt-in (`--stage-execs`), fuzzgoat A/B inconclusive; T6 without SHM testcase delivery. T9 tried and dropped (within noise). T11 skipped (< 1 us, six reassignment sites).
 
 ## 1. Throughput (execs/s)
 

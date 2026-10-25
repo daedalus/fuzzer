@@ -3400,8 +3400,12 @@ static const char *const __afl_cmp_names[__AFL_CMP_SITES] = {
     "trace_const_cmp4", "trace_const_cmp8", "trace_switch",
 };
 
-static uint64_t __afl_cmp_fired[__AFL_CMP_SITES];
-static uint64_t __afl_cmp_hit[__AFL_CMP_SITES];
+/* Process-private storage; repointed into $_CMPLOG_COUNTS_SHM when set
+ * (see __afl_cmp_shm_attach). */
+static uint64_t __afl_cmp_fired_own[__AFL_CMP_SITES];
+static uint64_t __afl_cmp_hit_own[__AFL_CMP_SITES];
+static uint64_t *__afl_cmp_fired = __afl_cmp_fired_own;
+static uint64_t *__afl_cmp_hit = __afl_cmp_hit_own;
 static int      __afl_cmp_counts_fd = -1;
 static struct __afl_fd_id __afl_cmp_counts_fd_id;
 
@@ -3447,10 +3451,75 @@ struct __afl_cmp_site {
     uint32_t id;        /* which callback, index into __afl_cmp_names */
 };
 
-static struct __afl_cmp_site __afl_cmp_sites[__AFL_CMP_SITE_SLOTS];
-static uint64_t __afl_cmp_site_dropped;   /* insertions the table refused */
+static struct __afl_cmp_site __afl_cmp_sites_own[__AFL_CMP_SITE_SLOTS];
+static struct __afl_cmp_site *__afl_cmp_sites = __afl_cmp_sites_own;
+static uint64_t __afl_cmp_site_dropped_own;   /* insertions the table refused */
+static uint64_t *__afl_cmp_site_dropped = &__afl_cmp_site_dropped_own;
 static int      __afl_cmp_sites_fd = -1;
 static struct __afl_fd_id __afl_cmp_sites_fd_id;
+
+/* ── Counters in SHM ($_CMPLOG_COUNTS_SHM) ────────────────────────────
+ *
+ * Both counter sets above, in a SysV segment the fuzzer created, instead of
+ * text dumped per exec and parsed back (~1000 CNS lines per ffmpeg exec).
+ * The fuzzer reads them through numpy views and zeroes what it read: the
+ * same delta contract as the dumps, so the dumps become no-ops.
+ *
+ *     magic | site_dropped | fired[27] | hit[27] | sites[4096]
+ *
+ * Mirrors adapters/cmp_shm.py. The magic is written last at attach: a
+ * fuzzer that never sees it (an older shim) keeps reading the sidecars.
+ * Shared across fork, so a forked child's comparisons land here too, and
+ * nothing may zero it on fork (see __afl_cmplog_atfork_child).
+ * A separate segment, not part of the edge map: __AFL_SHM_LAYOUT is
+ * unchanged. */
+#define __AFL_CMP_SHM_MAGIC 0x31304d4853504d43ULL   /* "CMPSHM01" LE */
+
+struct __afl_cmp_shm {
+    uint64_t magic;
+    uint64_t site_dropped;
+    uint64_t fired[__AFL_CMP_SITES];
+    uint64_t hit[__AFL_CMP_SITES];
+    struct __afl_cmp_site sites[__AFL_CMP_SITE_SLOTS];
+};
+_Static_assert(sizeof(struct __afl_cmp_site) == 32, "cmp_shm.py _SITE layout");
+
+static int __afl_cmp_shm_on = 0;      /* counters live in the segment */
+static int __afl_cmp_shm_sites = 0;   /* ... and per-site counting is on */
+
+/* Counting is on with a sidecar fd or the segment. */
+#define __AFL_CMP_COUNTS_ON (__afl_cmp_counts_fd >= 0 || __afl_cmp_shm_on)
+#define __AFL_CMP_SITES_ON  (__afl_cmp_sites_fd >= 0 || __afl_cmp_shm_sites)
+
+/* Attach $_CMPLOG_COUNTS_SHM and repoint the counters into it.
+ * 1 on success; 0 leaves the sidecar path in charge. */
+__AFL_NO_COV static int __afl_cmp_shm_attach(int want_sites) {
+    if (__afl_cmp_shm_on) return 1;
+    const char *id = getenv("_CMPLOG_COUNTS_SHM");
+    if (!id || !id[0]) return 0;
+
+    char *end = NULL;
+    long shmid = strtol(id, &end, 10);
+    if (*end || shmid < 0 || shmid > INT_MAX) return 0;
+
+    /* Refuse a segment too small for the layout rather than write past it. */
+    struct shmid_ds ds;
+    if (shmctl((int)shmid, IPC_STAT, &ds) < 0) return 0;
+    if (ds.shm_segsz < sizeof(struct __afl_cmp_shm)) return 0;
+
+    void *p = shmat((int)shmid, NULL, 0);
+    if (p == (void *)-1) return 0;
+
+    struct __afl_cmp_shm *seg = p;
+    __afl_cmp_fired = seg->fired;
+    __afl_cmp_hit = seg->hit;
+    __afl_cmp_sites = seg->sites;
+    __afl_cmp_site_dropped = &seg->site_dropped;
+    __afl_cmp_shm_on = 1;
+    __afl_cmp_shm_sites = want_sites;
+    __atomic_store_n(&seg->magic, __AFL_CMP_SHM_MAGIC, __ATOMIC_RELEASE);
+    return 1;
+}
 
 /* Any trace-cmp consumer live: counts, sites, COMPCOV, or records not
  * paused. Every trace-cmp callback returns on 0 before touching anything
@@ -3462,7 +3531,7 @@ static int __afl_cmp_on = 0;
 static int __afl_cmplog_cfg = 0;   /* records configured at init */
 
 __AFL_NO_COV static void __afl_cmp_refresh(void) {
-    __afl_cmp_on = __afl_cmp_counts_fd >= 0 || __afl_cmp_sites_fd >= 0 ||
+    __afl_cmp_on = __AFL_CMP_COUNTS_ON || __AFL_CMP_SITES_ON ||
                    __afl_compcov_level > 0 || (__afl_cmplog_cfg && !__afl_cmplog_paused);
 }
 
@@ -3494,17 +3563,17 @@ __AFL_NO_COV static void __afl_cmp_site_count(uint32_t id, int satisfied, void *
         if (satisfied) e->hit++;
         return;
     }
-    __afl_cmp_site_dropped++;
+    (*__afl_cmp_site_dropped)++;
 }
 
 /* The fd doubles as the enable flag: no output file, no counting. */
 #define __AFL_CMP_COUNT(id, satisfied)                                   \
     do {                                                                 \
-        if (__afl_cmp_counts_fd >= 0) {                                  \
+        if (__AFL_CMP_COUNTS_ON) {                                       \
             __afl_cmp_fired[(id)]++;                                     \
             if (satisfied) __afl_cmp_hit[(id)]++;                        \
         }                                                                \
-        if (__afl_cmp_sites_fd >= 0) {                                   \
+        if (__AFL_CMP_SITES_ON) {                                        \
             /* Expanded inside the interceptor, so frame 0's return       \
              * address is the call site in the target. Every interceptor  \
              * already invokes this macro; none needed editing. */        \
@@ -3641,6 +3710,7 @@ __AFL_GCC_NO_COV static char *__afl_put_hexbytes(char *p, const unsigned char *b
  * "CNT " + 16 name + 2 * 20 digits + 2 separators + newline = 63 bytes,
  * so the 64-byte headroom check below cannot under-reserve. */
 __AFL_NO_COV static void __afl_cmp_dump_counts(void) {
+    if (__afl_cmp_shm_on) return;   /* the fuzzer reads the segment */
     __afl_log_keep(&__afl_cmp_counts_fd, &__afl_cmp_counts_fd_id, "_CMPLOG_COUNTS", 0);
     if (__afl_cmp_counts_fd < 0) return;
     char buf[2048];
@@ -3681,6 +3751,7 @@ __AFL_NO_COV static void __afl_cmp_write_all(int fd, const char *buf, size_t len
  * its insertion probe once for the life of the process rather than once
  * per sync point. */
 __AFL_NO_COV static void __afl_cmp_dump_sites(void) {
+    if (__afl_cmp_shm_on) return;   /* the fuzzer reads the segment */
     __afl_log_keep(&__afl_cmp_sites_fd, &__afl_cmp_sites_fd_id, "_CMPLOG_SITE_COUNTS", 0);
     if (__afl_cmp_sites_fd < 0) return;
     char buf[4096];
@@ -3708,15 +3779,15 @@ __AFL_NO_COV static void __afl_cmp_dump_sites(void) {
         e->fired = 0;
         e->hit   = 0;
     }
-    if (__afl_cmp_site_dropped) {
+    if (*__afl_cmp_site_dropped) {
         if ((size_t)(p - buf) + 64 > sizeof(buf)) {
             __afl_cmp_write_all(__afl_cmp_sites_fd, buf, (size_t)(p - buf));
             p = buf;
         }
         *p++ = 'C'; *p++ = 'N'; *p++ = 'D'; *p++ = ' ';
-        p = __afl_put_i64(p, (int64_t)__afl_cmp_site_dropped);
+        p = __afl_put_i64(p, (int64_t)*__afl_cmp_site_dropped);
         *p++ = '\n';
-        __afl_cmp_site_dropped = 0;
+        *__afl_cmp_site_dropped = 0;
     }
     if (p != buf) __afl_cmp_write_all(__afl_cmp_sites_fd, buf, (size_t)(p - buf));
 }
@@ -4639,7 +4710,7 @@ __AFL_CMP_VIS void __sanitizer_cov_trace_switch(uint64_t val, void *cases) {
      * and, worse, as 199 unsatisfied ones -- the arm that was actually
      * taken drowned in the arms that never could be. Asserted here means
      * the value hit some case, i.e. the switch did not fall to default. */
-    if (__afl_cmp_counts_fd >= 0 || __afl_cmp_sites_fd >= 0) {
+    if (__AFL_CMP_COUNTS_ON || __AFL_CMP_SITES_ON) {
         int matched = 0;
         for (int64_t i = 0; i < count; i++)
             if (val == ref[2 + i]) { matched = 1; break; }
@@ -4735,7 +4806,7 @@ __AFL_NO_COV static void __afl_cmp_counts_zero(void) {
         __afl_cmp_sites[i].fired = 0;
         __afl_cmp_sites[i].hit   = 0;
     }
-    __afl_cmp_site_dropped = 0;
+    *__afl_cmp_site_dropped = 0;
 }
 
 /* fork() child: the record buffer, its lock and the counters are the
@@ -4746,7 +4817,9 @@ __AFL_NO_COV static void __afl_cmplog_atfork_child(void) {
     __afl_cmplog_pos = 0;
     __afl_cmplog_held = 0;
     __atomic_store_n(&__afl_cmplog_lock, 0, __ATOMIC_RELEASE);
-    __afl_cmp_counts_zero();
+    /* Shared counters are not the parent's copy: zeroing them here would
+     * wipe what the parent (or the fuzzer, in direct_lite) has not read. */
+    if (!__afl_cmp_shm_on) __afl_cmp_counts_zero();
     __afl_cmplog_new_scope();
 }
 
@@ -4770,15 +4843,19 @@ __AFL_NO_COV static void __afl_cmplog_init(void) {
      * record stream at all), and the record stream gets truncated and
      * rotated on a schedule the counts must not share. */
     const char *counts = getenv("_CMPLOG_COUNTS");
-    if (counts && counts[0])
-        __afl_cmp_counts_fd = __afl_log_open(counts, 0, &__afl_cmp_counts_fd_id);
     /* Separate switch, not a mode of the one above: per-site counting is a
      * hash and a probe per comparison against two array increments, and
      * memcmp is hot enough in most targets that it is not something to opt
      * everyone into. */
     const char *sites = getenv("_CMPLOG_SITE_COUNTS");
-    if (sites && sites[0])
-        __afl_cmp_sites_fd = __afl_log_open(sites, 0, &__afl_cmp_sites_fd_id);
+    int want_sites = sites && sites[0];
+    /* The segment, when offered, replaces both sidecars. */
+    if (!__afl_cmp_shm_attach(want_sites)) {
+        if (counts && counts[0])
+            __afl_cmp_counts_fd = __afl_log_open(counts, 0, &__afl_cmp_counts_fd_id);
+        if (want_sites)
+            __afl_cmp_sites_fd = __afl_log_open(sites, 0, &__afl_cmp_sites_fd_id);
+    }
     const char *path = getenv("_CMPLOG_OUT");
     /* O_NONBLOCK: see the matching comment in __afl_cmplog_flush. Without
      * it, a FIFO sink with no reader open yet would hang the target here,
@@ -6136,6 +6213,22 @@ __AFL_NO_COV static int __afl_fs_io(int write_p, int fd, void *buf, size_t n) {
     return 1;
 }
 
+/* ── Persistent mode and deferred init (AFL++-compatible macros) ──────
+ *
+ *     while (__AFL_LOOP(1000)) { read input; run; }   one child, n inputs
+ *     __AFL_INIT();                                   fork after setup
+ *
+ * Persistent: between inputs the child raises SIGSTOP; the forkserver
+ * resumes it with SIGCONT instead of forking. Only in a forkserver child
+ * with __AFL_PERSISTENT=1: anywhere else the loop body runs once, as a
+ * plain main() would. Deferred: with __AFL_DEFER_FORKSRV=1 the constructor
+ * does not start the forkserver and __AFL_INIT() does. The fuzzer sets
+ * both only when it finds the macros' signature strings in the binary
+ * (core/elf.py detect_afl_modes). */
+static int __afl_forksrv_child = 0;   /* this process is a forkserver child */
+static int __afl_persistent = 0;      /* __AFL_PERSISTENT=1, read at server start */
+static int __afl_defer_pending = 0;   /* constructor deferred the forkserver */
+
 __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
     char hello[4] = {0, 0, 0, 0};
 
@@ -6156,6 +6249,9 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
 
     /* No control pipe: not being driven by the loader. */
     if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, hello, 4) != 1) return;
+
+    const char *persist = getenv("__AFL_PERSISTENT");
+    __afl_persistent = persist && strcmp(persist, "1") == 0;
 
     /* This loop is itself instrumented — it lives in the same translation
      * unit as the target. Left recording, it would (a) write its own edges
@@ -6217,6 +6313,8 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
     chld_dfl.sa_flags = 0;
     sigaction(SIGCHLD, &chld_dfl, &chld_old);
 
+    pid_t child = -1;
+    int child_stopped = 0;   /* persistent child parked in SIGSTOP */
     while (1) {
         char cmd[4];
         /* EOF: the loader closed the pipe, end quietly. A signal landing
@@ -6226,7 +6324,15 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
         if (got == 0) _exit(0);
         if (got < 0) _exit(1);
 
-        pid_t child = fork();
+        if (child_stopped) {
+            /* Persistent: wake the parked child for the next input. */
+            child_stopped = 0;
+            kill(child, SIGCONT);
+            if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, &child, 4) != 1) _exit(0);
+            goto wait_child;
+        }
+
+        child = fork();
         if (child < 0) _exit(1);
 
         if (child == 0) {
@@ -6246,6 +6352,7 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
             sigaction(SIGCHLD, &chld_old, NULL);
             close(AFL_FORKSRV_FD);
             close(AFL_FORKSRV_FD + 1);
+            __afl_forksrv_child = 1;
             return;
         }
 
@@ -6254,17 +6361,82 @@ __AFL_GCC_NO_COV static void __afl_start_forkserver(void) {
         setpgid(child, child);
         if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, &child, 4) != 1) _exit(0);
 
+    wait_child:;
         int status = 0;
-        while (waitpid(child, &status, 0) < 0) {
+        /* WUNTRACED: a persistent child's SIGSTOP ends one input. */
+        while (waitpid(child, &status, __afl_persistent ? WUNTRACED : 0) < 0) {
             /* Retry EINTR only — a stray signal must not be read as a
              * crash. Anything else would spin forever; end the server so
              * the loader sees EOF instead of a hang. */
             if (errno != EINTR) _exit(1);
         }
 
+        /* Parked, not finished: the input ran clean. The loader only knows
+         * exit and signal statuses, so report exit 0. */
+        if (WIFSTOPPED(status)) {
+            child_stopped = 1;
+            status = 0;
+        }
+
         if (__afl_fs_io(1, AFL_FORKSRV_FD + 1, &status, 4) != 1) _exit(0);
     }
 }
+
+/* Per-input work an exiting child would do, for a child that stays. */
+__AFL_GCC_NO_COV static void __afl_persist_sync(void) {
+#if __AFL_DISTANCE_MODE
+    __afl_dist_flush();
+#endif
+#if __AFL_CMPLOG
+    __afl_cmplog_flush();
+    __afl_cmp_dump_counts();
+    __afl_cmp_dump_sites();
+#endif
+}
+
+/* __AFL_LOOP(max_cnt): 1 while this child should run another input. */
+__attribute__((unused))
+__AFL_GCC_NO_COV static int __afl_persistent_loop(unsigned max_cnt) {
+    static int first = 1;
+    static unsigned left = 0;
+    if (first) {
+        first = 0;
+        left = max_cnt ? max_cnt : 1;
+        return 1;
+    }
+    if (!(__afl_persistent && __afl_forksrv_child) || --left == 0) return 0;
+
+    __afl_persist_sync();
+    raise(SIGSTOP);
+    /* Resumed: the next input starts from a clean run state (prev_loc,
+     * path hash), as a fresh fork would. */
+    __afl_exec_reset();
+    return 1;
+}
+
+/* __AFL_INIT(): start the forkserver here if the constructor deferred it. */
+__attribute__((unused))
+__AFL_GCC_NO_COV static void __afl_manual_init(void) {
+    if (!__afl_defer_pending) return;
+    __afl_defer_pending = 0;
+    __afl_start_forkserver();
+}
+
+/* The signature strings let the fuzzer see which macro a harness uses. */
+#define __AFL_LOOP(_n)                                                        \
+    ({                                                                        \
+        static volatile const char *__afl_sig_loop __attribute__((used)) =   \
+            "##SIG_AFL_PERSISTENT##";                                         \
+        (void)__afl_sig_loop;                                                 \
+        __afl_persistent_loop(_n);                                            \
+    })
+#define __AFL_INIT()                                                          \
+    do {                                                                      \
+        static volatile const char *__afl_sig_init __attribute__((used)) =   \
+            "##SIG_AFL_DEFER_FORKSRV##";                                      \
+        (void)__afl_sig_init;                                                 \
+        __afl_manual_init();                                                  \
+    } while (0)
 
 /* Auto-attach when loaded */
 __attribute__((constructor))
@@ -6288,7 +6460,12 @@ __AFL_GCC_NO_COV static void __afl_auto_init(void) {
     __afl_mapping = 0;
     __afl_fast_refresh();
     /* Last: the crash handlers must already be installed in the parent so
-     * every forked child inherits them. */
+     * every forked child inherits them. Deferred: __AFL_INIT() starts it. */
+    const char *defer = getenv("__AFL_DEFER_FORKSRV");
+    if (defer && strcmp(defer, "1") == 0) {
+        __afl_defer_pending = 1;
+        return;
+    }
     __afl_start_forkserver();
 }
 

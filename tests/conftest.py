@@ -50,6 +50,9 @@ requires_z3 = pytest.mark.skipif(
 _ENV_OWNED = (
     "LD_PRELOAD",
     "_CMPLOG_OUT",
+    # setup_env_for_run exports it; a leaked id points later shims at a live
+    # counters segment, so they write no sidecars.
+    "_CMPLOG_COUNTS_SHM",
     "__AFL_SHM_ID",
     "__AFL_DIST_SHM_ID",
     "__AFL_NODE_BITMAP_ID",

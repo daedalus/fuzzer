@@ -18,6 +18,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
+| Seed stage (`--stage-execs K`) | One pick serves up to K execs, sized by perf score | N | fuzzgoat K=8 vs 1, 3 reps: inside control spread. `--reps >= 10`, K in {4, 16}, and FFmpeg (pick cost larger) |
 | Newest-seed picker (`--seed-newest-scheduler`) | Growing-tree pick: newest with prob p, else random | U | arms `seed-newest-p{0,30,60,100}`, `seed-round-robin` vs `baseline`; compare lineage shape |
 | Entropic seed (`--entropic-seed`) | libFuzzer Entropic energy | N | fuzzgoat null (9W/7L); png/grep, `--elo` vs weighted |
 | Good-Turing seed/op/pos (`--good-turing-seed`, `--op-good-turing`, `--pos-good-turing`, `--good-turing-estimator`) | Unseen-edge mass per seed / op / bin | U | `elo-good-turing-seed`, `elo-op-good-turing` vs `elo`, `pos-arena-good-turing`; prior sweep; add `elo-good-toulmin-seed` |

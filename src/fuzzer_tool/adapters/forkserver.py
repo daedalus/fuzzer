@@ -32,6 +32,7 @@ import time
 
 from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
 from fuzzer_tool.adapters.process import _clean_env
+from fuzzer_tool.core.elf import AflMode, detect_afl_modes
 
 log = logging.getLogger(__name__)
 
@@ -95,6 +96,18 @@ STDERR_LINES_MAX = 100  # max stderr lines retained from child processes
 # timeout, because the work it covers is process teardown, whose cost does
 # not shrink just because the target got a tighter deadline.
 _LOADER_GRACE = 1.0
+
+
+# Env each opted-in mode needs; read by afl_shim.c in the forkserver child.
+_MODE_ENV = {
+    AflMode.PERSISTENT: "__AFL_PERSISTENT",
+    AflMode.DEFERRED: "__AFL_DEFER_FORKSRV",
+}
+
+
+def mode_env(target: str) -> dict[str, str]:
+    """Loader env for the forkserver modes *target*'s harness opted into."""
+    return {_MODE_ENV[mode]: "1" for mode in detect_afl_modes(target)}
 
 
 def _ensure_compiled() -> str | None:

@@ -86,9 +86,14 @@ def test_annotation_matches_runtime_return(name):
     """The annotation is the contract callers are checked against, so pin it to
     what the function actually returns rather than trusting the annotation."""
     src = inspect.getsource(getattr(process, name))
+    srcs = [src]
+    # Helpers that delegate return whatever _spawn_capture returns.
+    if "_spawn_capture(" in src:
+        srcs.append(inspect.getsource(process._spawn_capture))
     returns = [
         node
-        for node in ast.walk(ast.parse(src.lstrip()))
+        for s in srcs
+        for node in ast.walk(ast.parse(s.lstrip()))
         if isinstance(node, ast.Return) and isinstance(node.value, ast.Tuple)
     ]
     assert returns, f"{name} has no tuple return to check"
