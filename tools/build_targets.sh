@@ -66,6 +66,10 @@ if [ -z "${TMPDIR:-}" ]; then
     export TMPDIR="$HOME/tmp"
 fi
 
+# ls/sort order follows LC_COLLATE, and `ls *.o` sets link order: pin it so
+# two machines link the same objects in the same order.
+export LC_ALL=C
+
 # ── Path roots ────────────────────────────────────────────────────────
 # FUZZ_VENDOR_ROOT: where vendored **sources** live. Defaults to
 #   ~/fuzzing/vendoring/; override with FUZZ_VENDOR_ROOT=...
@@ -333,6 +337,14 @@ NOBUILTIN_CMP="$NOBUILTIN_CMP -fno-builtin-strcspn -fno-builtin-memrchr"
 # stale archive built without it is invisible at link time. It also keeps
 # stack traces walkable for the crash reports (see build_c_targets).
 FRAME_POINTER="-fno-omit-frame-pointer"
+
+# Path-stable debug info. -g records absolute repo/vendor/build-root paths
+# in DWARF and __FILE__, so one source built under two roots differs. Remap
+# them to fixed placeholders; gdb: `set substitute-path /fuzz/vendor <root>`.
+# Clang applies the last matching map, so the more specific roots follow
+# REPO_ROOT (--in-tree-vendor nests vendor/ inside it).
+# Not covered: ASAN's per-module name keeps the path as passed (clang 18).
+DEBUG_CFLAGS="-g -ffile-prefix-map=$REPO_ROOT=/fuzz/src -ffile-prefix-map=$VENDOR=/fuzz/vendor -ffile-prefix-map=$TARGETS=/fuzz/build"
 
 # ASAN flags for every target and library pass. Recover mode is required by
 # in-process (direct_lite): the wrapper runs it with halt_on_error=0, which
@@ -820,7 +832,7 @@ compile_perf_shim() {
         return 1
     fi
     local rc=0
-    $cc -O2 -g -shared -fPIC -o "$out" "$PERF_SHIM" 2>>"$BUILD_LOG" || rc=$?
+    $cc -O2 $DEBUG_CFLAGS -shared -fPIC -o "$out" "$PERF_SHIM" 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "perf_shim.so"
     else
@@ -833,11 +845,11 @@ compile_fgrep_objects() {
     local suffix="$1" flags="$2" cc="${3:-$DEFAULT_CC}" extra_cflags="${4:-}"
     echo "Compiling fgrep objects${suffix:+ ($suffix)}..."
     for src in regex_engine simd cpu; do
-        $cc $flags -fPIC -O2 -g $extra_cflags -I"$FGREP/include" -I"$FGREP/src" \
+        $cc $flags -fPIC -O2 $DEBUG_CFLAGS $extra_cflags -I"$FGREP/include" -I"$FGREP/src" \
             -c "$FGREP/src/${src}.c" -o "/tmp/${src}${suffix}.o"
     done
     for src in output search bmh_simd io fileutil; do
-        $cc $flags -fPIC -O2 -g -mavx2 $extra_cflags -I"$FGREP/include" -I"$FGREP/src" \
+        $cc $flags -fPIC -O2 $DEBUG_CFLAGS -mavx2 $extra_cflags -I"$FGREP/include" -I"$FGREP/src" \
             -c "$FGREP/src/${src}.c" -o "/tmp/${src}${suffix}.o"
     done
     ok "fgrep objects${suffix:+ ($suffix)}"
@@ -860,7 +872,7 @@ compile_lz4_objects() {
     echo "Compiling lz4 objects${suffix:+ ($suffix)}..."
     local rc=0
     for src in lz4 lz4frame lz4hc xxhash; do
-        $cc $flags -fPIC -O2 -g $extra_cflags -DXXH_NAMESPACE=LZ4_ -I"$LZ4/lib" \
+        $cc $flags -fPIC -O2 $DEBUG_CFLAGS $extra_cflags -DXXH_NAMESPACE=LZ4_ -I"$LZ4/lib" \
             -c "$LZ4/lib/${src}.c" -o "/tmp/${src}${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     done
     if [ $rc -eq 0 ]; then
@@ -897,7 +909,7 @@ compile_grep_objects() {
     cov_flag="$(cov_flag_for_cc "$cc")"   # clang: trace-pc-guard; gcc: trace-pc
     local rc=0
     for src in lib/dfa lib/localeinfo src/kwset; do
-        $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
+        $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags \
             -include "$GREP_SRC/config.h" $GREP_INC \
             -c "$GREP_SRC/${src}.c" -o "/tmp/grep_$(basename "$src")${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     done
@@ -941,7 +953,7 @@ compile_secp256k1_objects() {
     local cov_flag
     cov_flag="$(cov_flag_for_cc "$cc")"   # gcc rejects trace-pc-guard; it gets trace-pc
     for src in secp256k1 precomputed_ecmult precomputed_ecmult_gen; do
-        $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $module_flags \
+        $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $module_flags \
             -I"$SECP256K1/src" -I"$SECP256K1/include" \
             -c "$SECP256K1/src/${src}.c" -o "/tmp/${src}${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     done
@@ -977,12 +989,12 @@ compile_brainflayer_ec_objects() {
     local cov_flag
     cov_flag="$(cov_flag_for_cc "$cc")"   # clang: trace-pc-guard; gcc: trace-pc
     local rc=0
-    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags -Wno-unused-function \
+    $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags -Wno-unused-function \
         -I"$BRAINFLAYER" -c "$BRAINFLAYER/ec_pubkey_fast.c" \
         -o "/tmp/bf_ec_pubkey_fast${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
-    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
+    $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags \
         -c "$BRAINFLAYER/mmapf.c" -o "/tmp/bf_mmapf${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
-    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags -DHAVE_CONFIG_H=1 \
+    $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags -DHAVE_CONFIG_H=1 \
         -I"$BRAINFLAYER_SECP256K1" -I"$BRAINFLAYER_SECP256K1/src" \
         -I"$BRAINFLAYER_SECP256K1/include" \
         -c "$BRAINFLAYER_SECP256K1/src/secp256k1.c" \
@@ -1009,9 +1021,9 @@ compile_brainflayer_hash_objects() {
     local cov_flag
     cov_flag="$(cov_flag_for_cc "$cc")"
     local rc=0
-    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
+    $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags \
         -c "$BRAINFLAYER/sha256_pub.c" -o "/tmp/bf_sha256_pub${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
-    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags \
+    $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags \
         -c "$BRAINFLAYER/ripemd160_256.c" -o "/tmp/bf_ripemd160_256${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "brainflayer hash objects${suffix:+ ($suffix)}"
@@ -1061,7 +1073,7 @@ compile_sqlite_objects() {
     # old uninstrumented-object behaviour).
     local cov_flag
     cov_flag="$(cov_flag_for_cc "$cc")"
-    $cc $flags $cov_flag -fPIC -O2 -g $extra_cflags $SQLITE_DEFINES -I"$SQLITE" \
+    $cc $flags $cov_flag -fPIC -O2 $DEBUG_CFLAGS $extra_cflags $SQLITE_DEFINES -I"$SQLITE" \
         -c "$SQLITE/sqlite3.c" -o "/tmp/sqlite3${suffix}.o" 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "sqlite object${suffix:+ ($suffix)}"
@@ -1090,7 +1102,7 @@ compile_fuzzgoat_object() {
     # cannot clobber another's before its link.
     local cov_flag
     cov_flag="$(cov_flag_for_cc "$cc")"   # clang: trace-pc-guard; gcc: trace-pc
-    $cc $flags $cov_flag -O2 -g $extra_cflags -I"$VENDOR/fuzzgoat" \
+    $cc $flags $cov_flag -O2 $DEBUG_CFLAGS $extra_cflags -I"$VENDOR/fuzzgoat" \
         -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o "/tmp/fuzzgoat${suffix}.o" 2>>"$BUILD_LOG"
 }
 
@@ -1127,7 +1139,7 @@ build_target() {
     fi
     local rc=0
     # FRAME_POINTER: ctx hashing is default-on in afl_shim.c; see the header.
-    local cmd="$cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -include $SHIM -o $out $src $libs $cmplog_libs"
+    local cmd="$cc $extra_flags -O2 $DEBUG_CFLAGS $FRAME_POINTER $extra_cflags $cmplog_cflags -include $SHIM -o $out $src $libs $cmplog_libs"
     # shellcheck disable=SC2086
     if target_is_current "$out" $cmd; then
         ok "$(basename "$out") (up to date)"
@@ -1135,7 +1147,7 @@ build_target() {
         return 0
     fi
     log_cmd "$cmd"
-    $cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -include "$SHIM" \
+    $cc $extra_flags -O2 $DEBUG_CFLAGS $FRAME_POINTER $extra_cflags $cmplog_cflags -include "$SHIM" \
         -o "$out" "$src" $libs $cmplog_libs 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
@@ -1185,7 +1197,7 @@ build_so_target() {
         fi
     fi
     # FRAME_POINTER: ctx hashing is default-on in afl_shim.c; see the header.
-    local cmd="$target_cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include $SHIM -o $out $src $libs $cmplog_libs"
+    local cmd="$target_cc $extra_flags -O2 $DEBUG_CFLAGS $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include $SHIM -o $out $src $libs $cmplog_libs"
     # shellcheck disable=SC2086
     if target_is_current "$out" $cmd; then
         ok "$(basename "$out") (up to date)"
@@ -1193,7 +1205,7 @@ build_so_target() {
         return 0
     fi
     log_cmd "$cmd"
-    $target_cc $extra_flags -O2 -g $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
+    $target_cc $extra_flags -O2 $DEBUG_CFLAGS $FRAME_POINTER $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
         -o "$out" "$src" $libs $cmplog_libs 2>>"$BUILD_LOG" || rc=$?
     if [ $rc -eq 0 ]; then
         ok "$(basename "$out")"
@@ -1487,6 +1499,8 @@ STUBEOF
         COV_FLAGS="$PROFILE_COV_FLAGS"
         LINK_FLAGS="-fprofile-instr-generate"
     fi
+    # In COV_FLAGS, not just --extra-cflags, so cfg_stamp sees it.
+    COV_FLAGS="$COV_FLAGS $DEBUG_CFLAGS"
     local cfg_stamp
     # Every configure input goes in the stamp: installing a dev package changes
     # $FFMPEG_FEATURE_FLAGS, and a stale tree would silently keep the old set.
@@ -1765,7 +1779,7 @@ build_standalone_so_targets() {
             # shim as its own C object precisely to dodge this.)
             local bsym_flag=""
             [ "$WITH_CMPLOG" -eq 1 ] && bsym_flag="-Wl,-Bsymbolic"
-            $cxx $flags -O2 -g $FRAME_POINTER -shared -fPIC $bsym_flag -include "$SHIM" $inc \
+            $cxx $flags -O2 $DEBUG_CFLAGS $FRAME_POINTER -shared -fPIC $bsym_flag -include "$SHIM" $inc \
                 -o "$out" "$src" $cmplog_cflags $cmplog_libs 2>/dev/null && ok "tailslayer_read${out_suffix}.so" || warn "failed: tailslayer_read${out_suffix}.so"
         fi
     elif [ -f "$TARGETS/tailslayer_read.cpp" ] && [ ! -d "$TAILSLAYER/include" ]; then
@@ -1887,7 +1901,7 @@ compile_vendored_libs() {
 
     # zlib
     if [ -d "$VENDOR/zlib" ]; then
-        (cd "$VENDOR/zlib" && CC=$cc CFLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp} ${FRAME_POINTER}" \
+        (cd "$VENDOR/zlib" && CC=$cc CFLAGS="-O2 $DEBUG_CFLAGS -fPIC ${scov_flag} ${no_builtin_cmp} ${FRAME_POINTER}" \
             ./configure --static 2>/dev/null && make -j$(nproc) 2>/dev/null) && \
             ok "zlib (vendored)" || warn "zlib (vendored) failed"
     else
@@ -1898,7 +1912,7 @@ compile_vendored_libs() {
     if [ -d "$VENDOR/libpng" ] && [ -d "$VENDOR/zlib" ]; then
         (cd "$VENDOR/libpng" && CC=$cc \
             CPPFLAGS="-I../zlib" \
-            CFLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp} ${FRAME_POINTER} -I../zlib" \
+            CFLAGS="-O2 $DEBUG_CFLAGS -fPIC ${scov_flag} ${no_builtin_cmp} ${FRAME_POINTER} -I../zlib" \
             LDFLAGS="-L../zlib" \
             ./configure --with-pkgconfig=no 2>/dev/null && make -j$(nproc) 2>/dev/null) && \
             ok "libpng (vendored)" || warn "libpng (vendored) failed"
@@ -1910,7 +1924,7 @@ compile_vendored_libs() {
     if [ -d "$VENDOR/libjpeg-turbo" ]; then
         (cd "$VENDOR/libjpeg-turbo" && \
             cmake -DCMAKE_C_COMPILER=$cc \
-                  -DCMAKE_C_FLAGS="-O2 -g -fPIC ${scov_flag} ${no_builtin_cmp} ${FRAME_POINTER}" \
+                  -DCMAKE_C_FLAGS="-O2 $DEBUG_CFLAGS -fPIC ${scov_flag} ${no_builtin_cmp} ${FRAME_POINTER}" \
                   -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
                   -G "Unix Makefiles" . 2>/dev/null && \
             make -j$(nproc) 2>/dev/null) && \
@@ -2254,7 +2268,7 @@ build_frontier_libpng() {
 frontier_link() {
     local out="$1" src="${TARGETS_SRC:-$TARGETS}/$2" libs="$3" opt="$4"
     # shellcheck disable=SC2086
-    if clang $opt -g $PROFILE_COV_FLAGS -o "$out" "$src" "$REPO_ROOT/tools/lib/frontier_stub.c" \
+    if clang $opt $DEBUG_CFLAGS $PROFILE_COV_FLAGS -o "$out" "$src" "$REPO_ROOT/tools/lib/frontier_stub.c" \
         $libs 2>>"$BUILD_LOG"; then
         ok "$(basename "$out")"
     else
@@ -2311,7 +2325,7 @@ build_distance_so_targets() {
                 cmplog_cflags="$CMPLOG_CFLAGS"
                 cmplog_libs="$CMPLOG_LIBS"
             fi
-            clang $extra_flags -g $FRAME_POINTER -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc \
+            clang $extra_flags $DEBUG_CFLAGS $FRAME_POINTER -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc \
                 $cmplog_cflags -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
                 -o "$TARGETS/${name}${out_suffix}.so" "${TARGETS_SRC:-$TARGETS}/$name.c" \
                 $libs $cmplog_libs 2>/dev/null
@@ -2356,7 +2370,7 @@ build_ngram_so_targets() {
         local bsymbolic_flag=""
         [ "$WITH_CMPLOG" -eq 1 ] && bsymbolic_flag="-Wl,-Bsymbolic"
         local rc=0
-        $cc $flags -O2 -g $FRAME_POINTER -D__AFL_DISTANCE_MODE -D__AFL_NGRAM_K=${k} \
+        $cc $flags -O2 $DEBUG_CFLAGS $FRAME_POINTER -D__AFL_DISTANCE_MODE -D__AFL_NGRAM_K=${k} \
             -fsanitize-coverage=trace-pc $extra_cflags $cmplog_cflags -shared -fPIC $bsymbolic_flag -include "$SHIM" \
             -o "$out" "$src" $libs $cmplog_libs 2>>"$BUILD_LOG" || rc=$?
         if [ $rc -eq 0 ]; then
@@ -2375,13 +2389,13 @@ build_ngram_so_targets() {
         echo "  Rebuilding vendored libpng+zlib with trace-pc..."
         (cd "$VENDOR_ZLIB_DIR" && \
             make -s clean >/dev/null 2>&1; \
-            CC=clang CFLAGS="-O2 -g -fPIC $FRAME_POINTER -fsanitize-coverage=trace-pc" \
+            CC=clang CFLAGS="-O2 $DEBUG_CFLAGS -fPIC $FRAME_POINTER -fsanitize-coverage=trace-pc" \
             ./configure --static 2>/dev/null && \
             make -j$(nproc) -s 2>/dev/null) && \
             ok "vendor/zlib (trace-pc)" || warn "vendor/zlib build failed"
         (cd "$VENDOR_LIBPNG_DIR" && \
             make -s clean >/dev/null 2>&1; \
-            CC=clang CFLAGS="-O2 -g -fPIC $FRAME_POINTER -fsanitize-coverage=trace-pc -I../zlib" \
+            CC=clang CFLAGS="-O2 $DEBUG_CFLAGS -fPIC $FRAME_POINTER -fsanitize-coverage=trace-pc -I../zlib" \
             LDFLAGS="-L../zlib" \
             ./configure --enable-shared=no --quiet 2>/dev/null && \
             make -j$(nproc) -s 2>/dev/null) && \
@@ -2405,7 +2419,7 @@ build_ngram_so_targets() {
             cmplog_cflags="$CMPLOG_CFLAGS"
             cmplog_libs="$CMPLOG_LIBS"
         fi
-        clang -O2 -g $FRAME_POINTER -D__AFL_DISTANCE_MODE -D__AFL_NGRAM_K=$k \
+        clang -O2 $DEBUG_CFLAGS $FRAME_POINTER -D__AFL_DISTANCE_MODE -D__AFL_NGRAM_K=$k \
             -fsanitize-coverage=trace-pc $cmplog_cflags \
             -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
             -o "$TARGETS/png_read_ng${k}.so" "${TARGETS_SRC:-$TARGETS}/png_read.c" \
@@ -2535,7 +2549,7 @@ build_vendored_tracecmp_targets() {
     if [ -f "$VENDOR_ZLIB_DIR/configure" ]; then
         echo "  [1/3] Compiling vendor/zlib with trace-cmp..."
         (cd "$VENDOR_ZLIB_DIR" && \
-            CC=clang CFLAGS="-O2 -g -fPIC $CTX_FLAGS $TRACE_FLAGS" \
+            CC=clang CFLAGS="-O2 $DEBUG_CFLAGS -fPIC $CTX_FLAGS $TRACE_FLAGS" \
             ./configure --static 2>/dev/null && \
             make -j$(nproc) -s 2>/dev/null) && \
             ok "vendor/zlib (trace-cmp)" || warn "vendor/zlib build failed"
@@ -2548,7 +2562,7 @@ build_vendored_tracecmp_targets() {
     if [ -f "$VENDOR_LIBPNG_DIR/configure" ]; then
         echo "  [2/3] Compiling vendor/libpng with trace-cmp..."
         (cd "$VENDOR_LIBPNG_DIR" && \
-            CC=clang CFLAGS="-O2 -g -fPIC $CTX_FLAGS $TRACE_FLAGS -I../zlib" \
+            CC=clang CFLAGS="-O2 $DEBUG_CFLAGS -fPIC $CTX_FLAGS $TRACE_FLAGS -I../zlib" \
             LDFLAGS="-L../zlib" \
             ./configure --enable-shared=no --quiet 2>/dev/null && \
             make -j$(nproc) -s 2>/dev/null) && \
@@ -2589,7 +2603,7 @@ build_vendored_tracecmp_targets() {
     # .so so a preloaded or sancov-runtime stub cannot interpose them (same link
     # line as the hand-built COMPCOV A/B). $CMPLOG_LIBS is the -ldl its dlsym needs.
     if [ -f "${TARGETS_SRC:-$TARGETS}/png_read.c" ]; then
-        $CC -O2 -g $ALL_FLAGS $CMPLOG_CFLAGS -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
+        $CC -O2 $DEBUG_CFLAGS $ALL_FLAGS $CMPLOG_CFLAGS -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
             -o "$TARGETS/png_read${OUT_SUFFIX}.so" \
             "${TARGETS_SRC:-$TARGETS}/png_read.c" $VENDOR_LIBS $VENDOR_INC $CMPLOG_LIBS 2>/dev/null && \
             ok "png_read${OUT_SUFFIX}.so" || warn "failed: png_read${OUT_SUFFIX}.so"
@@ -2597,7 +2611,7 @@ build_vendored_tracecmp_targets() {
 
     # zlib_read
     if [ -f "${TARGETS_SRC:-$TARGETS}/zlib_read.c" ]; then
-        $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
+        $CC -O2 $DEBUG_CFLAGS $ALL_FLAGS -shared -fPIC -include "$SHIM" \
             -o "$TARGETS/zlib_read${OUT_SUFFIX}.so" \
             "${TARGETS_SRC:-$TARGETS}/zlib_read.c" "$ZLIB_A" $LIBS 2>/dev/null && \
             ok "zlib_read${OUT_SUFFIX}.so" || warn "failed: zlib_read${OUT_SUFFIX}.so"
@@ -2605,7 +2619,7 @@ build_vendored_tracecmp_targets() {
 
     # gzip_read
     if [ -f "${TARGETS_SRC:-$TARGETS}/gzip_read.c" ]; then
-        $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
+        $CC -O2 $DEBUG_CFLAGS $ALL_FLAGS -shared -fPIC -include "$SHIM" \
             -o "$TARGETS/gzip_read${OUT_SUFFIX}.so" \
             "${TARGETS_SRC:-$TARGETS}/gzip_read.c" "$ZLIB_A" $LIBS 2>/dev/null && \
             ok "gzip_read${OUT_SUFFIX}.so" || warn "failed: gzip_read${OUT_SUFFIX}.so"
@@ -2613,7 +2627,7 @@ build_vendored_tracecmp_targets() {
 
     # jpeg_read (needs system libjpeg — no vendored jpeg yet)
     if [ -f "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" ]; then
-        $CC -O2 -g $ALL_FLAGS -shared -fPIC -include "$SHIM" \
+        $CC -O2 $DEBUG_CFLAGS $ALL_FLAGS -shared -fPIC -include "$SHIM" \
             -o "$TARGETS/jpeg_read${OUT_SUFFIX}.so" \
             "${TARGETS_SRC:-$TARGETS}/jpeg_read.c" -ljpeg $LIBS 2>/dev/null && \
             ok "jpeg_read${OUT_SUFFIX}.so" || warn "failed: jpeg_read${OUT_SUFFIX}.so"
@@ -2645,11 +2659,11 @@ build_vendored_tracecmp_targets() {
         if [ ! -f "$ASAN_LIB" ]; then
             ASAN_LIB=$(gcc -print-file-name=libasan.a 2>/dev/null)
         fi
-        $CC -O2 -g -fsanitize=address -fvisibility=hidden -fPIC -c \
+        $CC -O2 $DEBUG_CFLAGS -fsanitize=address -fvisibility=hidden -fPIC -c \
             "src/fuzzer_tool/adapters/tracecmp_shim.c" \
             -o "$TC_SHIM_OBJ" 2>/dev/null
         if [ -f "$ASAN_LIB" ] && [ -f "$TC_SHIM_OBJ" ]; then
-            $CC -O2 -g $FRAME_POINTER \
+            $CC -O2 $DEBUG_CFLAGS $FRAME_POINTER \
                 -fsanitize=address \
                 -fsanitize-coverage=trace-cmp,trace-pc-guard \
                 -shared -fPIC \
@@ -2680,7 +2694,7 @@ build_vendored_tracecmp_targets() {
             png_read) tgt_libs="$LIBPNG_A $ZLIB_A $LIBS" ;;
             zlib_read|gzip_read) tgt_libs="$ZLIB_A $LIBS" ;;
         esac
-        $CC -O2 -g $ALL_FLAGS -include "$SHIM" \
+        $CC -O2 $DEBUG_CFLAGS $ALL_FLAGS -include "$SHIM" \
             -o "$out_file" "$src_file" $tgt_libs $VENDOR_INC 2>/dev/null && \
             ok "$(basename "$out_file")" || warn "failed: $(basename "$out_file")"
     done
@@ -2738,7 +2752,7 @@ build_tracecmp_targets() {
         [ -f "$src" ] || { warn "source not found: $src"; continue; }
 
         rc=0
-        $CC -O2 -g $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -include "$SHIM" \
+        $CC -O2 $DEBUG_CFLAGS $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -include "$SHIM" \
             -o "$TARGETS/${spec}_tcg" "$src" $CMPLOG_LIBS 2>/dev/null || rc=$?
         if [ $rc -eq 0 ]; then
             ok "${spec}_tcg (trace-cmp + no-builtin)"
@@ -2747,7 +2761,7 @@ build_tracecmp_targets() {
         fi
 
         rc=0
-        $CC -O2 -g $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -shared -fPIC -Wl,-Bsymbolic \
+        $CC -O2 $DEBUG_CFLAGS $FRAME_POINTER $TRACE_FLAGS $NOBUILTIN_CMP $CMPLOG_CFLAGS -shared -fPIC -Wl,-Bsymbolic \
             -include "$SHIM" \
             -o "$TARGETS/${spec}_tcg.so" "$src" $CMPLOG_LIBS 2>/dev/null || rc=$?
         if [ $rc -eq 0 ]; then
