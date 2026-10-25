@@ -121,7 +121,7 @@ the corpus itself, independent of which seed gets picked next (that's 2b).
 never touches normal-iteration scoring.
 
 ### 8 — Output / Observability (cross-cutting, no fuzzing decisions read this)
-`services/stats.py`, `stats_reporter.py`, `report.py`, `sendmail.py`, plus:
+`services/stats.py`, `stats_reporter.py`, `report.py`, `sendmail.py`, `push.py`, plus:
 - **`analyzer_format_learner.py`** ("learn-format" in the banner) — filed
   here because it was record-only (`record_transition`, `record_liveness`).
   Stale: the 2c `field` position arm now reads `weighted_position`

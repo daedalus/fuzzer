@@ -1930,6 +1930,8 @@ class Fuzzer:
         # Edge-tracker eviction ties by exec cost, not age (backlog D5).
         # Off by default; unmeasured. Appended.
         prune_cost=False,
+        # Novel-crash push targets (services/push.py); None disables. Appended.
+        push_on_crash=None,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -2233,6 +2235,11 @@ class Fuzzer:
         self.op_afl_det = op_afl_det
         # MailConfig | None — novel-crash email notification (see services/sendmail.py)
         self.email_on_crash = email_on_crash
+        self._push = None
+        if push_on_crash:
+            from fuzzer_tool.services.push import PushNotifier
+
+            self._push = PushNotifier(push_on_crash)
         self.enable_x86_mutator = enable_x86_mutator
         self.enable_arm_mutator = enable_arm_mutator
         self.seed = seed
@@ -10328,6 +10335,9 @@ class Fuzzer:
             # uuid and the cache directory grew for the life of the machine.
             with contextlib.suppress(Exception):
                 self._cmplog.stop()
+        if self._push is not None:
+            # Lets alerts for crashes found just before stop still go out.
+            self._push.close()
         if self._ablation_file:
             self._ablation_file.flush()
             self._ablation_file.close()
