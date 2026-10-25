@@ -12,6 +12,7 @@ ends of the map are "far". This captures coverage spatial diversity that
 Jaccard (set overlap) and JS (frequency divergence) miss.
 """
 
+import enum
 import heapq
 import logging
 import math
@@ -75,6 +76,18 @@ _SIG_ITEM = array("Q").itemsize
 # rather than being pruned to half.
 MAX_TRACKED_SEEDS = 1_000
 PRUNE_BATCH_FRAC = 0.1
+
+
+class EvictTie(enum.Enum):
+    """How _prune_victims orders seeds that lose equal unique coverage.
+
+    99.9% of candidates lose none, so the tie decides nearly every eviction.
+    """
+
+    AGE = "age"  # oldest first (insertion order)
+    COST = "cost"  # most expensive exec first (--prune-cost, backlog D5)
+
+
 # Seed calibration lets the tracked-seed count overshoot max_tracked_seeds by
 # this factor before pruning, so a wide corpus pays the prune pass once per
 # (slack - 1) * max_tracked_seeds insertions instead of once per batch, while
@@ -942,6 +955,10 @@ class EdgeTracker:
         self.map_size = map_size
         self.max_tracked_seeds = max_tracked_seeds
         self._morris_mode = morris_mode
+        # Eviction tie-break; seed_cost (seed key -> exec seconds of its last
+        # record) is only kept under EvictTie.COST, and pruned with the seed.
+        self.evict_tie = EvictTie.AGE
+        self.seed_cost: dict[str, float] = {}
         # ── Streaming F0 (CVM) distinct-elements estimator ─────────────────
         # Opt-in: the exact cardinality is already available as
         # len(cumulative_edges), so the estimator only pays for itself when
@@ -1074,6 +1091,7 @@ class EdgeTracker:
         hw_instructions: int = 0,
         hw_branches: int = 0,
         hw_branch_misses: int = 0,
+        exec_s: float = 0.0,
     ) -> set[int]:
         """Record edges hit by a seed execution.
 
@@ -1089,6 +1107,8 @@ class EdgeTracker:
             hw_instructions: Hardware instruction count delta (from perf_event_open).
             hw_branches: Hardware branch count delta (from perf_event_open).
             hw_branch_misses: Hardware branch miss count delta (from perf_event_open).
+            exec_s: Target time of this execution; the eviction cost under
+                EvictTie.COST.
 
         Returns:
             Set of NEW edge indices not previously seen.
@@ -1096,6 +1116,8 @@ class EdgeTracker:
         self._record_seed_meta(
             seed_key, stack_depth, path_hash, hw_instructions, hw_branches, hw_branch_misses
         )
+        if self.evict_tie is EvictTie.COST and exec_s > 0:
+            self.seed_cost[seed_key] = exec_s
         new_edges = set()
         if seed_key not in self.seed_edges:
             self.seed_edges[seed_key] = set()
@@ -1612,6 +1634,7 @@ class EdgeTracker:
             self.seed_hw_instructions.pop(key, None)
             self.seed_hw_branches.pop(key, None)
             self.seed_hw_branch_misses.pop(key, None)
+            self.seed_cost.pop(key, None)
             self._minhash.remove(key)
 
         # Owner counts are incremented in record_edges but were never adjusted
@@ -1689,14 +1712,20 @@ class EdgeTracker:
         def _loss(i: int) -> int:
             return int(np.count_nonzero(owners[slot[starts[i] : ends[i]]] <= 1))
 
-        heap = [(loss, i) for i, loss in enumerate(losses)]
+        # Ties: insertion order (AGE) or most expensive first (COST).
+        if self.evict_tie is EvictTie.COST:
+            cost = self.seed_cost
+            ties = [-cost.get(k, 0.0) for k in keys]
+        else:
+            ties = range(len(keys))
+        heap = [(loss, tie, i) for i, (loss, tie) in enumerate(zip(losses, ties, strict=True))]
         heapq.heapify(heap)
         victims: list[str] = []
         while len(victims) < excess and heap:
-            loss, i = heapq.heappop(heap)
+            loss, tie, i = heapq.heappop(heap)
             current = _loss(i)
             if current != loss:
-                heapq.heappush(heap, (current, i))
+                heapq.heappush(heap, (current, tie, i))
                 continue
             victims.append(keys[i])
             owners[slot[starts[i] : ends[i]]] -= 1
