@@ -261,6 +261,11 @@ Ported: input boosting (`taint_boost` op), priming check (`--priming-check`).
 - [ ] **Sample-size escalation** — `fuzzer.py` noise stage: confirm noisy verdicts (exec-time anomaly, differential KS) at 10→50→100→500 samples.
 - [ ] **Pair minimizer** — `DifferentialInputMinimizerPass`: zero power-of-two blocks, then copy bytes across, for `--differential` / uninit-probe pairs.
 
+## Sandsifter port candidates (2026-10-25, xoreaxeaxeax/sandsifter `injector.c`)
+Already covered: 64 KiB signal altstack (`afl_shim.c` `__AFL_ALTSTACK_SIZE`), single-step tracing (`ptrace_coverage.py`).
+- [ ] **Guard-page input placement** — `injector.c:main`/`inject`: input ends flush against a `PROT_NONE` page, so the first byte past it faults (`si_addr` = page start). Ours: `inprocess._input_buf` is exact-size, caught only by ASAN redzones; no-ASAN in-process builds (`*_nosan`) read past the input silently. Open: (a) behind a flag, copy input into a reused `mmap` pair ending at the guard page (one `memcpy`, no per-exec `mprotect`); (b) classify a SEGV whose `si_addr` equals the guard as an overread, not a target crash; (c) underreads need a second guard before the input (alignment: input start then unaligned); (d) measure exec/s vs `from_buffer_copy` (Hard Rule 41).
+- Skip: tunnel search (length-change byte deepening; effector maps in `position_arena.py` supersede), instruction-length probing and opcode blacklists (CPU fuzzing, out of scope).
+
 ## Standing notes
 
 These are not work items. They are the lessons the closed work left behind, and
