@@ -65,7 +65,7 @@ from fuzzer_tool.core.coverage_noise import (
 )
 from fuzzer_tool.core.crash_explore import CrashExplorer
 from fuzzer_tool.core.dirichlet import AlphaMode, DirichletPicker
-from fuzzer_tool.core.edge_tracker import CALIBRATION_PRUNE_SLACK
+from fuzzer_tool.core.edge_tracker import CALIBRATION_PRUNE_SLACK, EvictTie
 from fuzzer_tool.core.elf import (
     SHM_LAYOUT_CURRENT,
     detect_elf_type,
@@ -1927,6 +1927,9 @@ class Fuzzer:
         # AFL-style stage (services/seed_stage.py): one pick serves up to this
         # many execs. 1 = one pick per exec (old loop). Appended.
         stage_execs=1,
+        # Edge-tracker eviction ties by exec cost, not age (backlog D5).
+        # Off by default; unmeasured. Appended.
+        prune_cost=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3019,6 +3022,7 @@ class Fuzzer:
         if self.corpus is not loaded:
             self._corpus_manager.rebuild_entropy()
         self._init_seed_metadata()
+        self._edge_tracker.evict_tie = EvictTie.COST if prune_cost else EvictTie.AGE
 
         # Rebuild the lineage tree from persisted seed_meta (single source
         # of truth; never re-derived from runs to avoid double-counting).

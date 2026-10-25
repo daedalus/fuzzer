@@ -55,6 +55,8 @@ Timeout enforcement:
 #include <fcntl.h>
 #include <errno.h>
 #include <sys/time.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
 /* Inputs arrive over the stdin pipe and are consumed immediately by
    read_bytes(), so there is no pipe-buffer deadlock and no need for the
@@ -63,6 +65,8 @@ Timeout enforcement:
 #define MAX_DATA (16 * 1024 * 1024)
 /* Matches the 65536 that run_target_fast() reads back from its stderr pipe. */
 #define MAX_ERR 65536
+/* Testcase segment capacity; = __AFL_SHM_FUZZ_BYTES in afl_shim.c. */
+#define SHM_FUZZ_BYTES (1u << 20)
 
 typedef int (*fuzz_fn)(const uint8_t *, size_t);
 
@@ -200,7 +204,37 @@ static void redirect_stdout_to_null(void) {
     if (devnull != STDOUT_FILENO) close(devnull);
 }
 
+/* {u32 len; u8 data[]} the target reads via __AFL_FUZZ_TEST_CASE_*;
+   NULL unless the fuzzer set __AFL_SHM_FUZZ=1 (harness uses the macros). */
+static uint8_t *shm_fuzz = NULL;
+
+/* Create the testcase segment and export its id to the target. Marked for
+   removal at once: Linux still lets the target attach it by id, and it is
+   freed when the last process detaches, so a crash cannot leak it. */
+static void setup_shm_fuzz(void) {
+    const char *on = getenv("__AFL_SHM_FUZZ");
+    if (!on || strcmp(on, "1") != 0) return;
+
+    int id = shmget(IPC_PRIVATE, sizeof(uint32_t) + SHM_FUZZ_BYTES, IPC_CREAT | 0600);
+    if (id < 0) return;
+    void *p = shmat(id, NULL, 0);
+    shmctl(id, IPC_RMID, NULL);
+    if (p == (void *)-1) return;
+
+    char idbuf[16];
+    snprintf(idbuf, sizeof(idbuf), "%d", id);
+    setenv("__AFL_SHM_FUZZ_ID", idbuf, 1);
+    shm_fuzz = p;
+}
+
 static int stage_input(const uint8_t *data, size_t len) {
+    if (shm_fuzz) {
+        /* Truncate rather than overrun; the length word goes last. */
+        uint32_t n = len > SHM_FUZZ_BYTES ? SHM_FUZZ_BYTES : (uint32_t)len;
+        memcpy(shm_fuzz + sizeof(uint32_t), data, n);
+        __atomic_store_n((uint32_t *)shm_fuzz, n, __ATOMIC_RELEASE);
+        return 1;
+    }
     if (input_fd < 0) return 0;
     if (lseek(input_fd, 0, SEEK_SET) < 0) return 0;
     size_t written = 0;
@@ -493,6 +527,7 @@ static int setup_exec(void) {
         fprintf(stderr, "open input file failed: %s\n", input_path);
         return 0;
     }
+    setup_shm_fuzz();
     use_forksrv = start_forkserver();
     if (!use_forksrv)
         fprintf(stderr, "forkserver handshake failed, using fork+exec\n");
@@ -687,7 +722,8 @@ int main(void) {
        additive: callers that only compare the first token, or only read
        parts[1], are unaffected, and a caller that wants TIMEOUT can detect
        support instead of guessing from a binary it did not build. */
-    printf("READY %s retune\n", is_executable ? (use_forksrv ? "forkserver" : "exec") : "dlopen");
+    printf("READY %s retune%s\n", is_executable ? (use_forksrv ? "forkserver" : "exec") : "dlopen",
+           shm_fuzz ? " shmfuzz" : "");
     fflush(stdout);
 
     serve();
