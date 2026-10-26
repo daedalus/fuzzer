@@ -94,6 +94,8 @@ _UBSAN_GENERIC_TYPE = "undefined"
 _ASAN_HEADER_TYPES = (
     ("attempting double-free", "double-free"),
     ("attempting free on address which was not malloc()-ed", "bad-free"),
+    ("hard rss limit exhausted", "rss-limit-exhausted"),
+    ("out of memory:", "out-of-memory"),
 )
 
 # Stack frame line: "#0 0x4011d6 in foo a.c:1" or unsymbolized "#0 0x4011d6  (/bin/t+0x11d6)".
@@ -154,6 +156,8 @@ ASAN_EXPLOITABILITY = {
     "invalid-malloc-size": "MEDIUM",
     "attempting-free-on-non-deallocated-memory": "MEDIUM",
     "bad-free": "MEDIUM",
+    "rss-limit-exhausted": "LOW",
+    "out-of-memory": "LOW",
     "negative-size-param": "MEDIUM",
     "initialization-order-fiasco": "LOW",
     "odr-violation": "LOW",

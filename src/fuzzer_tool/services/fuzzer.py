@@ -34,7 +34,7 @@ try:
 except ImportError:
     _HAS_NUMPY = False
 
-from fuzzer_tool.adapters import seed_zip
+from fuzzer_tool.adapters import process, seed_zip
 from fuzzer_tool.adapters.process import (
     _child_pids,
     disable_aslr,
@@ -759,6 +759,59 @@ def _export_abort_mode(mode: AbortMode) -> None:
         os.environ[_ABORT_ENV] = "1"
         return
     os.environ.pop(_ABORT_ENV, None)
+
+
+class Shadow(Enum):
+    """Whether the target reserves sanitizer shadow memory (ASAN/MSAN/TSAN)."""
+
+    NONE = "none"
+    RESERVED = "reserved"  # terabytes of address space: no RLIMIT_AS
+
+
+# Runtime-init symbols of the shadow-reserving sanitizers.
+_SHADOW_INIT_SYMBOLS = (b"__asan_init", b"__msan_init", b"__tsan_init")
+# Option variables that take hard_rss_limit_mb / malloc_limit_mb.
+_SANITIZER_OPTION_VARS = ("ASAN_OPTIONS", "MSAN_OPTIONS", "TSAN_OPTIONS")
+
+
+def _shadow_of(target_path: str) -> Shadow:
+    """RESERVED when ``nm`` finds an ASAN/MSAN/TSAN init symbol."""
+    import subprocess
+
+    for flags in ([], ["-D"]):
+        try:
+            r = subprocess.run(["nm", *flags, target_path], capture_output=True, timeout=10)
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        if r.returncode == 0 and any(s in r.stdout for s in _SHADOW_INIT_SYMBOLS):
+            return Shadow.RESERVED
+    return Shadow.NONE
+
+
+def _merge_sanitizer_opts(var: str, opts: tuple[str, ...]) -> None:
+    """Add *opts* to ``$var`` (``a=1:b=2``), replacing keys already set."""
+    keys = {o.split("=", 1)[0] for o in opts}
+    kept = [o for o in os.environ.get(var, "").split(":") if o and o.split("=", 1)[0] not in keys]
+    os.environ[var] = ":".join([*kept, *opts])
+
+
+def _export_rss_limit(mb: int, shadow: Shadow) -> None:
+    """--rss-limit-mb for spawned targets (0 = off).
+
+    Sanitizer runtimes enforce it themselves (hard_rss_limit_mb kills the
+    run with a report, malloc_limit_mb fails one allocation). Plain targets
+    get RLIMIT_AS (process.set_rss_limit, fuzz_loader via the env var);
+    never a shadow-reserving sanitizer target, whose startup would fail.
+    """
+    if mb <= 0:
+        return
+    opts = (f"hard_rss_limit_mb={mb}", f"malloc_limit_mb={mb}")
+    for var in _SANITIZER_OPTION_VARS:
+        _merge_sanitizer_opts(var, opts)
+    if shadow is Shadow.RESERVED:
+        return
+    os.environ[process.RSS_LIMIT_ENV] = str(mb)
+    process.set_rss_limit(mb)
 
 
 class SymMode(Enum):
@@ -1677,6 +1730,7 @@ class Fuzzer:
         isolate_crash_fields=False,
         crash_symbolize=False,
         abort_is_crash=False,
+        rss_limit_mb=0,
         multi_targets=None,
         debug=False,
         enable_regex_bomb=False,
@@ -2144,6 +2198,8 @@ class Fuzzer:
         # os.environ was snapshotted above, so _restore_environ() removes it.
         self.crash_symbolize = crash_symbolize
         _export_abort_mode(AbortMode.CRASH if abort_is_crash else AbortMode.RETURN)
+        if rss_limit_mb > 0:
+            _export_rss_limit(rss_limit_mb, _shadow_of(target))
         _export_sym_mode(SymMode.SYMBOLIZE if crash_symbolize else SymMode.RAW)
         from fuzzer_tool.core.crash_symbols import CrashSymbolSink
 

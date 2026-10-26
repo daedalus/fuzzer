@@ -55,6 +55,7 @@ Timeout enforcement:
 #include <fcntl.h>
 #include <errno.h>
 #include <poll.h>
+#include <sys/resource.h>
 #include <sys/time.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -340,6 +341,16 @@ static int read_status_draining(int *status, uint8_t *err, int *err_len) {
     }
 }
 
+/* --rss-limit-mb (env __FUZZ_RSS_LIMIT_MB): cap the target's address space
+   before exec. Unset or 0 = no limit. Never set for sanitizer targets. */
+static void apply_rss_limit(void) {
+    const char *v = getenv("__FUZZ_RSS_LIMIT_MB");
+    long mb = v ? atol(v) : 0;
+    if (mb <= 0) return;
+    struct rlimit rl = {(rlim_t)mb << 20, (rlim_t)mb << 20};
+    setrlimit(RLIMIT_AS, &rl);
+}
+
 /* Exec the target once and complete the forkserver handshake.
    Returns 1 if the target speaks the protocol, 0 to fall back. */
 static int start_forkserver(void) {
@@ -383,6 +394,7 @@ static int start_forkserver(void) {
         redirect_stdout_to_null();
         signal(SIGCHLD, SIG_DFL);
         signal(SIGALRM, SIG_DFL);
+        apply_rss_limit();
         execl(target_path_global, target_path_global, input_path, (char *)NULL);
         _exit(127);
     }
@@ -422,6 +434,12 @@ static int start_forkserver(void) {
     return 1;
 }
 
+/* Return code for a death by sig: -sig, or 128+sig for SIGHUP/SIGINT, whose
+   -sig would read as the -1 timeout / -2 failure sentinels. */
+static int signal_rc(int sig) {
+    return (sig == SIGHUP || sig == SIGINT) ? 128 + sig : -sig;
+}
+
 static int run_forkserver(const uint8_t *data, size_t len, uint8_t *err, int *err_len) {
     *err_len = 0;
     if (!stage_input(data, len)) return -2;
@@ -459,7 +477,7 @@ static int run_forkserver(const uint8_t *data, size_t len, uint8_t *err, int *er
     if (timed_out) return -1;
     if (!ok) return -2;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    if (WIFSIGNALED(status)) return signal_rc(WTERMSIG(status));
     return -2;
 }
 
@@ -484,6 +502,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
         signal(SIGALRM, SIG_DFL);
         /* argv[1] = input path, stdin = same file: matches run_target_fast so
            targets keep whichever of the two they already read. */
+        apply_rss_limit();
         execl(target_path_global, target_path_global, input_path, (char *)NULL);
         _exit(127);
     }
@@ -523,7 +542,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
     }
     if (waited < 0) return -2;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    if (WIFSIGNALED(status)) return signal_rc(WTERMSIG(status));
     return -2;
 }
 

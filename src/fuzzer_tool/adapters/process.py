@@ -14,6 +14,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import resource
 import select
 import signal
 import subprocess
@@ -41,6 +42,18 @@ EXIT_SIGNAL_BASE = 128
 
 # Crash return codes: -sig (killed by the signal) and 128+sig (handler exit).
 SIGNAL_CRASH_CODES = {-s for s in CRASH_SIGNALS} | {EXIT_SIGNAL_BASE + s for s in CRASH_SIGNALS}
+
+
+# Signals whose -sig would read as an adapter sentinel (-1 timeout, -2 failure).
+_SENTINEL_SIGNALS = frozenset({int(signal.SIGHUP), int(signal.SIGINT)})
+
+
+def signal_rc(sig: int) -> int:
+    """Return code for a death by *sig*: -sig, or 128+sig where -sig is a sentinel.
+
+    A SIGHUP death read as a timeout and a SIGINT death as a failed run.
+    """
+    return EXIT_SIGNAL_BASE + sig if sig in _SENTINEL_SIGNALS else -sig
 
 
 def signal_number(returncode: int) -> int:
@@ -150,6 +163,34 @@ class _TailBuffer:
 
     def getvalue(self) -> bytes:
         return b"".join(self._chunks)[-self._cap :]
+
+
+# ── Memory limit (--rss-limit-mb) ──────────────────────────────────────
+#
+# RLIMIT_AS on each spawned child, 0 = off. Set right after posix_spawn
+# (it has no rlimit action): a target that reads its input first is bound
+# before it allocates. fuzz_loader.c reads RSS_LIMIT_ENV and calls
+# setrlimit before exec. Never for sanitizer targets: their shadow memory
+# is a huge address-space reservation (see services/fuzzer.py).
+
+RSS_LIMIT_ENV = "__FUZZ_RSS_LIMIT_MB"
+_MB = 1 << 20
+_rss_limit_bytes = 0
+
+
+def set_rss_limit(mb: int) -> None:
+    """Cap the address space of children spawned from here on (0 = off)."""
+    global _rss_limit_bytes
+    _rss_limit_bytes = max(0, mb) * _MB
+
+
+def _limit_child(pid: int) -> None:
+    """Apply the RLIMIT_AS cap to a just-spawned child; no-op when off."""
+    if not _rss_limit_bytes:
+        return
+    # The child may already be gone (crashed on startup): nothing to bound.
+    with contextlib.suppress(ProcessLookupError):
+        resource.prlimit(pid, resource.RLIMIT_AS, (_rss_limit_bytes, _rss_limit_bytes))
 
 
 def _track(pid: int) -> None:
@@ -379,7 +420,7 @@ def _status_rc(status: int) -> int:
     if os.WIFEXITED(status):
         return os.WEXITSTATUS(status)
     if os.WIFSIGNALED(status):
-        return -os.WTERMSIG(status)
+        return signal_rc(os.WTERMSIG(status))
     return -2
 
 
@@ -422,6 +463,7 @@ def _spawn_capture(
             setsigdef=_CHILD_DEFAULT_SIGNALS,
         )
         _track(pid)
+        _limit_child(pid)
 
         # Close the child's ends of both pipes.
         keep = (stderr_r, stdin_w)
@@ -697,6 +739,7 @@ def run_target_fast(
         os.close(stdin_fd)
         os.close(stderr_w)
         _track(pid)
+        _limit_child(pid)
 
         # Open perf counters on the child PID while still running
         # (inherit=1 doesn't survive exec, so we attach directly).
@@ -727,7 +770,7 @@ def run_target_fast(
         if os.WIFEXITED(status):
             rc = os.WEXITSTATUS(status)
         elif os.WIFSIGNALED(status):
-            rc = -os.WTERMSIG(status)
+            rc = signal_rc(os.WTERMSIG(status))
         else:
             rc = -2
         return rc, stderr_data.decode(errors="replace"), pid
