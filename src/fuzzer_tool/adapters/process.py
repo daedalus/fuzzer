@@ -767,6 +767,7 @@ def run_target_stdin(
     perf_counters=None,
     pt_session=None,
     lbr_session=None,
+    args: list[str] | None = None,
 ) -> tuple[int, str, int]:
     """Execute target with data on stdin.
 
@@ -781,11 +782,13 @@ def run_target_stdin(
         pt_session: Optional PtTraceSession (opens an Intel PT event on the
             child PID).  Drained by the caller once the child has exited.
         lbr_session: Optional LbrSession, same protocol as pt_session.
+        args: Arguments after *target* (argv[1:]).
 
     Returns:
         Tuple of (returncode, stderr, subprocess_pid).
     """
-    return _spawn_capture([target], data, timeout, env, (perf_counters, pt_session, lbr_session))
+    argv = [target, *(args or ())]
+    return _spawn_capture(argv, data, timeout, env, (perf_counters, pt_session, lbr_session))
 
 
 # ── Output capture ──────────────────────────────────────────────────────

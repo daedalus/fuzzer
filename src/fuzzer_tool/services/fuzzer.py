@@ -496,6 +496,9 @@ ADAPTIVE_TIMEOUT_MAX_GROWTH = 10.0
 # Min-cover stat: wait COVER_BUDGET x last solve time between solves (<= ~1/COVER_BUDGET overhead).
 COVER_BUDGET = 50
 MAX_CRASH_SIGS = 10_000  # max unique crash signatures before pruning old entries
+# Crashing-input hashes kept (~109 B each). Forgetting is safe: a repeat input
+# re-classifies to a known (or on-disk) signature and is not written again.
+MAX_CRASH_HASHES = 200_000
 KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
 EXEC_BLOOM_CAPACITY = 500_000  # executed-input filter capacity before generational wipe
@@ -6243,17 +6246,22 @@ class Fuzzer:
         """Trim crash structures when they exceed MAX_CRASH_SIGS.
 
         Keeps the most frequent crash signatures and evicts all data for
-        the least frequent ones. Leaves crash_hashes intact (small memory
-        footprint, prevents duplicate disk writes).
+        the least frequent ones; on equal counts the newest stay (the oldest
+        count-1 bugs are the least likely to recur). Leaves crash_hashes
+        until they exceed MAX_CRASH_HASHES; an evicted signature that recurs
+        is recognised on disk by save_crash.
         """
+        if len(self.crash_hashes) > MAX_CRASH_HASHES:
+            self.crash_hashes.clear()
         if len(self.crash_sigs) <= MAX_CRASH_SIGS:
             return
-        # Keep top 75% of signatures sorted by frequency descending
+        # Keep top 75%: count descending, then newest first; insertion order kept.
         keep_count = max(MAX_CRASH_SIGS * 3 // 4, 1)
-        sorted_sigs = sorted(self.crash_sigs.items(), key=lambda x: -x[1])
-        kept = {sig for sig, _ in sorted_sigs[:keep_count]}
+        age = {sig: i for i, sig in enumerate(self.crash_sigs)}
+        ranked = sorted(self.crash_sigs, key=lambda s: (-self.crash_sigs[s], -age[s]))
+        kept = set(ranked[:keep_count])
         evicted = set(self.crash_sigs) - kept
-        self.crash_sigs = dict(sorted_sigs[:keep_count])
+        self.crash_sigs = {sig: n for sig, n in self.crash_sigs.items() if sig in kept}
         # Evict associated data for dropped signatures
         for sig in evicted:
             self.crash_frames.pop(sig, None)

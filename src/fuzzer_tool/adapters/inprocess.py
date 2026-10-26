@@ -16,13 +16,13 @@ import importlib
 import logging
 import os
 import signal
-import subprocess
 import sys
 import tempfile
 from collections.abc import Callable
 
 from fuzzer_tool.adapters import libc_shm
 from fuzzer_tool.adapters.guard_arena import GUARD_OVERREAD, GuardArena
+from fuzzer_tool.adapters.process import run_target_stdin
 from fuzzer_tool.adapters.shim_factory import (
     ShimResult,
     build_shim,
@@ -68,10 +68,9 @@ if os.path.isfile(target) and os.access(target, os.X_OK) \
         [target],
         stdin=subprocess.PIPE,
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
+    )  # stderr inherited: the target's report reaches the parent
     try:
-        _, stderr = proc.communicate(input=data, timeout=float(os.environ.get('_TIMEOUT', '5')))
+        proc.communicate(input=data, timeout=float(os.environ.get('_TIMEOUT', '5')))
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
@@ -901,27 +900,16 @@ class InProcessRunner:
                 env["__AFL_SHM_ID"] = self.coverage_env_id
                 env["AFL_MAP_SIZE"] = str(self.shm_size)
 
-            proc = subprocess.Popen(
-                [sys.executable, self._loader_path, self.target, self.function_name],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+            # Spawn path, not communicate(): stderr keeps a bounded tail and
+            # the timeout kills the loader's session (the target included).
+            rc, stderr, _pid = run_target_stdin(
+                sys.executable,
+                data,
+                self.timeout,
                 env=env,
-                preexec_fn=os.setsid,
+                args=[self._loader_path, self.target, self.function_name],
             )
-            try:
-                _, stderr = proc.communicate(input=data, timeout=self.timeout)
-                return proc.returncode, stderr.decode(errors="replace")
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(OSError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-                for _ in range(10):
-                    try:
-                        proc.wait(timeout=0.5)
-                        break
-                    except subprocess.TimeoutExpired:
-                        continue
-                return -1, "timeout"
+            return rc, stderr
         except Exception as e:
             return -2, str(e)
 
