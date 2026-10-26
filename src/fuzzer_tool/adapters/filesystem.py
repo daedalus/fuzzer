@@ -38,6 +38,7 @@ log = logging.getLogger(__name__)
 # The reproducer shell script keeps 0o755 so the user can run it directly.
 _READONLY_FILE_MODE = 0o444
 _REPRODUCER_MODE = 0o755
+_READONLY_MODE = 0o444  # crash artifacts, see _chmod
 
 # ── Memory bounds ────────────────────────────────────────────────────
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
@@ -1211,39 +1212,52 @@ def save_crash(
     ts = int(time.time())
     base_name = f"crash_{ts}_{metadata.cluster_id}_{sanitizer_short}_{error_short}"
 
-    # Write crash input
-    crash_file = crashes_dir / f"{base_name}.bin"
-    crash_file.write_bytes(data)
-    _chmod_readonly(crash_file)
-
-    # Build and write enriched sidecar
+    # Build every artifact before touching disk, then publish them together:
+    # a failure part-way used to leave a .bin without its .json (or the reverse).
     _fill_report(metadata, report, returncode)
-
-    sidecar = crashes_dir / f"{base_name}.txt"
-    sidecar.write_text(metadata.format_sidecar())
-    _chmod_readonly(sidecar)
-
-    # Companion machine-readable sidecar: same fields, JSON-encoded so
-    # dashboards and downstream tools can ingest a crash without re-parsing
-    # the .txt. Written after the .txt so the human-readable artifact is
-    # the primary one on disk; the .json is the structured companion.
-    json_sidecar = crashes_dir / f"{base_name}.json"
-    json_sidecar.write_text(json.dumps(metadata.to_dict(), indent=2, default=str))
-    _chmod_readonly(json_sidecar)
-
-    # Write reproducer script
-    script = crashes_dir / f"{base_name}.sh"
-    script.write_text(metadata.format_reproducer(data, metadata.target or "./target"))
-    script.chmod(_REPRODUCER_MODE)
-
-    # Write hexdump
-    hexdump_file = crashes_dir / f"{base_name}.hex"
     metadata.build_hexdump(data)
     metadata.build_text_repr(data)
-    hexdump_file.write_text(metadata.input_hexdump + "\n\n" + metadata.input_text_repr + "\n")
-    _chmod_readonly(hexdump_file)
+    artifacts = (
+        (".bin", data, _READONLY_MODE),
+        (".txt", metadata.format_sidecar().encode(), _READONLY_MODE),
+        # Machine-readable companion of the .txt for dashboards / tools.
+        (".json", json.dumps(metadata.to_dict(), indent=2, default=str).encode(), _READONLY_MODE),
+        (
+            ".sh",
+            metadata.format_reproducer(data, metadata.target or "./target").encode(),
+            _REPRODUCER_MODE,
+        ),
+        (
+            ".hex",
+            (metadata.input_hexdump + "\n\n" + metadata.input_text_repr + "\n").encode(),
+            _READONLY_MODE,
+        ),
+    )
+    _publish_crash(crashes_dir, base_name, artifacts)
 
     return base_name
+
+
+def _publish_crash(crashes_dir: Path, base_name: str, artifacts) -> None:
+    """Write ``(ext, content, mode)`` artifacts to temps, then rename all into place.
+
+    Temps are dot-files (``.<base>.<ext>.tmp``): no ``*.json`` / ``*.bin`` glob
+    sees them, and they are removed if any write fails.
+    """
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for ext, content, mode in artifacts:
+            tmp = crashes_dir / f".{base_name}{ext}.tmp"
+            tmp.write_bytes(content)
+            _chmod(tmp, mode)
+            staged.append((tmp, crashes_dir / f"{base_name}{ext}"))
+    except BaseException:
+        for tmp, _ in staged:
+            tmp.unlink(missing_ok=True)
+        raise
+
+    for tmp, final in staged:
+        os.replace(tmp, final)
 
 
 # Artifact extensions written per crash by save_crash().
@@ -1287,8 +1301,8 @@ def _fill_report(metadata: CrashMetadata, report: SanitizerReport | None, return
     metadata.exploitability = report.exploitability
 
 
-def _chmod_readonly(path: Path) -> None:
-    """Lock a crash-sidecar artifact to read-only on disk.
+def _chmod(path: Path, mode: int) -> None:
+    """Set a crash artifact's mode; read-only for all but the reproducer.
 
     A discovered crash reproducer is the only authoritative record of a
     sanitizer hit; a corpus-minimize sweep or crash-dedup that mutates an
@@ -1298,6 +1312,6 @@ def _chmod_readonly(path: Path) -> None:
     files inside it are not.
     """
     try:
-        path.chmod(0o444)
+        path.chmod(mode)
     except OSError as e:
-        log.debug("Could not chmod %s read-only: %s", path, e)
+        log.debug("Could not chmod %s to %o: %s", path, mode, e)
