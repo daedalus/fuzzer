@@ -67,7 +67,7 @@ def min_cover(seed_edges: Mapping[K, Collection[int]], size: Mapping[K, int]) ->
     Result order is selection order; deterministic for a given input order.
     """
     order = {k: i for i, k in enumerate(seed_edges)}
-    full = _to_masks({k: e for k, e in seed_edges.items() if e})
+    full = _to_masks({k: e for k, e in seed_edges.items() if len(e)})
     sizes = {k: size[k] for k in full}
     runs = [_Cover(order, full, sizes, tie, red).solve() for tie, red in product(Tie, Reduce)]
     return min(runs, key=lambda keys: (len(keys), sum(sizes[k] for k in keys)))
@@ -93,18 +93,25 @@ def _to_masks(full: Mapping[K, Collection[int]]) -> dict[K, int]:
     if not full:
         return {}
 
-    sets = list(full.values())
-    flat = np.concatenate([np.fromiter(e, dtype=np.int64, count=len(e)) for e in sets])
+    sets = [_id_array(e) for e in full.values()]
+    flat = np.concatenate(sets)
     ids = np.unique(flat)
     row = np.zeros(-(-ids.size // 8) * 8, dtype=np.uint8)
 
     masks: dict[K, int] = {}
     for key, edges in zip(full, sets, strict=True):
-        bits = np.searchsorted(ids, np.fromiter(edges, dtype=np.int64, count=len(edges)))
+        bits = np.searchsorted(ids, edges)
         row[bits] = 1
         masks[key] = int.from_bytes(np.packbits(row, bitorder="little").tobytes(), "little")
         row[bits] = 0
     return masks
+
+
+def _id_array(edges: Collection[int]) -> np.ndarray:
+    """Edge ids as int64: arrays (cmin) convert in C, sets iterate."""
+    if isinstance(edges, np.ndarray):
+        return edges.astype(np.int64, copy=False)
+    return np.fromiter(edges, dtype=np.int64, count=len(edges))
 
 
 def _holder_planes(masks: Collection[int], width: int) -> tuple[list[int], int]:
