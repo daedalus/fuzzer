@@ -1,5 +1,6 @@
 """Regression: sanitizer report parsing (header anchor, crash stack, stack hash, UBSAN)."""
 
+from fuzzer_tool.adapters.filesystem import classify_crash
 from fuzzer_tool.core.sanitizer import SanitizerReport
 
 # Real ASAN layout: crash stack, then the allocation stack after a blank line.
@@ -173,3 +174,51 @@ def test_ubsan_runtime_error_without_summary() -> None:
 def test_ubsan_runtime_error_echo_not_report() -> None:
     # Adversarial: a mid-line "runtime error:" is not a UBSAN header.
     assert SanitizerReport.parse("got: x.c:1:1: runtime error: division by zero\n") is None
+
+
+# ── Dedup: fuzzy signature matching ─────────────────────────────────────
+
+
+def _known(stderr: str) -> dict[str, int]:
+    report = SanitizerReport.parse(stderr)
+    assert report is not None
+    return {report.signature: 1}
+
+
+def test_regression_fuzzy_match_keeps_error_type() -> None:
+    # A UAF in the same frames as a known overflow is another bug.
+    frames = ["parse_chunk", "read_block", "decode", "main"]
+    hbo = _stack([0x401000 + i for i in range(4)], frames).replace(
+        "heap-use-after-free", "heap-buffer-overflow"
+    )
+    uaf = _stack([0x401000 + i for i in range(4)], frames)
+
+    v = classify_crash(b"u", 1, uaf, set(), _known(hbo))
+
+    assert v.novel
+
+
+def test_regression_fuzzy_match_keeps_unsymbolized_offsets() -> None:
+    # Offsets are the only identity of an unsymbolized frame.
+    def unsym(off: int) -> str:
+        return (
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1\n"
+            f"    #0 0x55d000400000  (/opt/t/target+{off:#x})\n"
+        )
+
+    v = classify_crash(b"b", 1, unsym(0x22E8), set(), _known(unsym(0x11D6)))
+
+    assert v.novel
+
+
+def test_fuzzy_match_folds_inlined_frame() -> None:
+    # Falsification: same bug, one extra inlined frame, still folds.
+    base = ["parse_chunk", "read_block", "decode", "main"]
+    inlined = ["parse_chunk", "parse_chunk_inl", "read_block", "decode", "main"]
+    known = _stack([0x401000 + i for i in range(4)], base)
+    new = _stack([0x401000 + i for i in range(5)], inlined)
+
+    v = classify_crash(b"i", 1, new, set(), _known(known))
+
+    assert not v.novel
+    assert v.matched_signature == next(iter(_known(known)))

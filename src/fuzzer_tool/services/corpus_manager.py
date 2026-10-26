@@ -691,7 +691,9 @@ class CorpusManager:
         f.timeout_count = state.get("timeout_count", 0)
         f.crash_sigs = state.get("crash_sigs", {})
         f.crash_frames = state.get("crash_frames", {})
-        f.crash_min_sizes = state.get("crash_min_sizes", {})
+        # Keyed by signature; states before that keyed it by stack hash.
+        min_sizes = state.get("crash_min_sizes", {})
+        f.crash_min_sizes = {s: n for s, n in min_sizes.items() if s in f.crash_sigs}
         f.op_counts = state.get("op_counts", {})
         f.op_success = state.get("op_success", {})
         # Absent in states written before applicability was tracked. Left
@@ -848,6 +850,7 @@ class CorpusManager:
             fault_addr=fault_addr,
             crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
             crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
+            crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
         )
 
         # Preserve the crashing input as corpus material: stored under
@@ -908,9 +911,11 @@ class CorpusManager:
                 crash_files[counted_sig] = str(result)
         else:
             f._last_crash_signature = None
-        if result and getattr(f, "email_on_crash", None) is not None:
+        # A smaller trigger of a known bug is no news.
+        alert = result and not verdict.replaces
+        if alert and getattr(f, "email_on_crash", None) is not None:
             self._mail_crash(result, returncode, stderr)
-        if result and getattr(f, "_push", None) is not None:
+        if alert and getattr(f, "_push", None) is not None:
             self._push_crash(result, returncode, stderr)
         return result
 

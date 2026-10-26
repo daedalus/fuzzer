@@ -2737,7 +2737,7 @@ class Fuzzer:
         self.intel_pt_mode: str = intel_pt_mode
         self.lbr: bool = lbr
         self.lbr_period: int = int(lbr_period or 0)
-        self.crash_min_sizes: dict[str, int] = {}  # stack_hash -> min trigger size
+        self.crash_min_sizes: dict[str, int] = {}  # signature -> min trigger size
         # Honggfuzz power factor stats (for display)
         self._hf_novelty_boosts: int = 0
         self._hf_freshness_boosts: int = 0
