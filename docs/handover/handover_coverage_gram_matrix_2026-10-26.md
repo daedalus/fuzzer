@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-26
 **Scope:** what the seed×edge incidence matrix A (S×E) gives us through its Gram matrix B = AAᵀ and through C = BBᵀ = B² = A(AᵀA)Aᵀ, and how that maps onto what the repo already has.
-**Status:** analysis only. Nothing implemented, nothing measured on a real corpus.
+**Status:** analysis only, nothing implemented. §8–§10 are measurements on corpora; §11 closes the subsumption item (the minimizer already does it) and is the current recommendation.
 
 ## 1. Definitions
 
@@ -54,12 +54,12 @@ Checked on a fresh clone at HEAD `177eacf7`. None of it materializes B or C; eac
 | MinHash near-duplicate lookup | `services/corpus_manager.py` (`find_similar`, `min_jaccard`) | pairwise lookup, no subsumption test |
 | Seed overlap threshold in picker | `services/seed_picker.py:2321` (`_overlap_min_jaccard`) | threshold only |
 
-Not found: subsumption test from B, spectral/participation-ratio saturation signal, bridge-seed score, structural-equivalence clustering.
+Not found: spectral/participation-ratio saturation signal, bridge-seed score, structural-equivalence clustering. *Correction (§11):* a subsumption test does exist, in `core/set_cover.py` (`_collapse_equal`, `_dominate`, run before the greedy pass) and as a report section in `edge_diagnostic.py matrix --subsumption`. The first draft of this table missed both.
 
 ## 6. Candidate work, in order of expected value
 
 1. **Participation-ratio / spectrum analyzer.** New analyzer under `core/analyzers/` (follow `analyzer_registry.py`). Truncated SVD of sparse A every N refits; report top-k singular values, PR = (Σσ²)² / Σσ⁴, and its trend as a saturation signal next to `analyzer_corpus_flux.py`. Cost O(k·nnz(A)). Falsifiable on synthetic corpora: duplicated seeds must lower PR, orthogonal seeds must raise it.
-2. **Subsumption in corpus minimization.** Exact test B[i,j] = B[i,i] on sparse A (or per-edge-owner counts) as a cheap pre-pass before the set-cover work in `services/minimize.py`. Needs a check that the existing minimizer does not already catch it.
+2. **Subsumption in corpus minimization.** ~~Exact test B[i,j] = B[i,i] as a pre-pass before `services/minimize.py`.~~ Closed by §11: `core/set_cover.py` already does it, on residual edges, and removes a superset of what the B test removes. Do not add.
 3. **Bridge-seed score.** Betweenness-like score from the 2-step term: Σ over pairs (i,j) with B[i,j] = 0 of B[i,k]·B[k,j], computed matrix-free. Feed as a seed-scheduler weight; needs a paired A/B before wiring (no arm has measurements yet).
 4. **Matrix-free power iteration** for Cv and eigenvector centrality, shared with 1.
 
@@ -154,3 +154,46 @@ Prerequisites for all four:
 **Limits.** One 10k-exec run per target with default flags and no repeats; corpus is the retained unique files, not the live set; ffmpeg is a minimal component build linked by hand, with many seed formats not compiled in; no timing and no check against later discovery; labels exist only for fuzzgoat (JSON parse) and png_read (signature).
 
 **Effect on §6, §8, §9.** No change to the ranking: (1) subsumption pre-pass stays the only item with a clear result, now on six corpora; (2) the spectrum analyzer stays unvalidated, and rank growth is not a plateau signal at this corpus size; (3) bridge-seed score and C-based clustering stay dropped. The "evolved corpus" open item of §9 is closed for these three targets; a target without an early wholesale reject, a longer run and a link to future edge discovery are still open.
+
+## 11. Subsumption vs the existing minimizer (2026-10-26)
+
+**Question.** Would a B-test subsumption pre-pass before `services/minimize.py` remove anything the minimizer does not already remove? `min_cover` (`core/set_cover.py`) runs `_collapse_equal` (one seed per identical edge set), then up to `MAX_ROUNDS = 8` rounds of `_force` (take sole holders of an edge) and `_dominate` (drop a seed whose *uncovered* edges sit inside another seed's), then lazy greedy. `_dominated` scans the holders of one scannable edge and skips edges held by more than `DOMINATOR_SCAN_CAP = 256` seeds.
+
+**Method.** For each corpus, compute the seed set removable by the B test on raw A (seed i removed if some j ≠ i has B[i,j] = B[i,i] and a strictly larger row, or an equal row with better rank; rank is `(file size, order)` for `Tie.SIZE` and `order` for `Tie.ORDER`, as in `_Cover`). Compare with the seeds `_Cover(..., Reduce.ON)` removes after `_reduce_all()`: every seed neither chosen (forced) nor still live. Both `Tie` modes. Then compare `min_cover` with reductions on and off.
+
+**Corpora.**
+- *Python parser edges (sanity check).* `json` with the pure-Python scanner, edges = (previous line, line) under `sys.settrace`; `corpus_fuzzgoat.py` plus random byte mutations, de-duplicated: 612 × 204 and 1,427 × 208.
+- *fuzzgoat, real edges.* No clang or root in the sandbox, so `zig cc` (PyPI `ziglang` 0.17, a clang front-end) stood in as `clang`. Built by hand with the `build_targets.sh` recipe: `fuzzgoat.c` compiled separately with `-fsanitize-coverage=trace-pc-guard -fno-omit-frame-pointer -fPIE -pie`, linked with `targets/fuzzgoat_read.c`, `afl_shim.c`, `-D__AFL_CMPLOG=1`, `-ldl`. Collected with `edge_diagnostic.py matrix --repeats 0 --save`. Corpora: the stock 250 inputs, and 900 seeds made by random byte mutation (insert/delete/replace) of those. Neither is a fuzzer-evolved corpus. The build reproduces rank 114 and 117 distinct rows from §8; edge count (864 vs 797) and the B-test count (148 vs 150) differ, so ids are not comparable with the clang-18 build.
+
+**Results** (script `cmp2.py`, not committed)
+
+| | json 612 | json 1,427 | fuzzgoat 250 | fuzzgoat 900 |
+|---|---|---|---|---|
+| seeds × edges | 612 × 204 | 1,427 × 208 | 250 × 864 | 900 × 915 |
+| edges held by >256 seeds | n/a | n/a | 0 | 106 |
+| B test removes | 534 | 1,325 | 148 | 740 |
+| reduction removes | 555 | 1,366 | 198 | 832 |
+| B-only | 0 | 1 | 2–3 | 2–3 |
+| reduction-only | 21 | 42 | 52–53 | 94–95 |
+| `min_cover` keeps | 21 | 20 | 52 | 68 |
+
+- The fuzzgoat B-only counts are 2 for `Tie.ORDER` and 3 for `Tie.SIZE`.
+- On both fuzzgoat corpora the residual left for the greedy phase is 0: forced picks and dominance alone produce the whole cover (52 and 68 seeds).
+- Reductions on vs off: 52 vs 52 and 68 vs 69 seeds; run time 1–2 ms either way. A pre-pass has no speed case.
+- The cap did not bite: with 106 over-cap edges on fuzzgoat 900, no seed was left without a scannable edge.
+- Union coverage was preserved by `min_cover` in every run.
+
+**Why the reduction removes more.** After forced picks cover some edges, more seeds become dominated on their residual edges. A one-shot test on raw A never sees that cascade. These are the reduction-only seeds.
+
+**Why B-only is not zero.** The B-only seeds are tie-break cases, not gaps. On raw A the seed is strictly contained in a bigger one; on the residual edges (after forced picks cover the extra edges) the two tie, and the seed wins on rank, so the minimizer keeps it and deletes the bigger one. Both covers are valid. In every inspected case all raw dominators of the B-only seed had already been deleted from the working set; I did not trace each cascade step by step.
+
+**Pitfall.** My first accounting of the reduction counted only seeds deleted from the working set and reported 5 "missed" seeds. Those had no uncovered edges left after forced picks and are dropped by `_restrict()` instead. A regression test must count removed = all − chosen − live.
+
+**Limits.** Generated and mutated corpora, not a fuzz run. fuzzgoat only (png_read and ffmpeg not repeated). `zig cc` is not the clang 18 of §8–§10. The cap regime where a seed has no scannable edge was not reached, so it is untested rather than shown harmless.
+
+**Effect on §6.**
+1. Subsumption pre-pass: **closed, do not add.** `core/set_cover.py` already does it, on residual edges, and `edge_diagnostic.py matrix --subsumption` already reports seed-poset width and height and edge implication classes.
+2. Spectrum analyzer: unchanged (§8–§10): unvalidated.
+3. Bridge-seed score and C-based clustering: unchanged: dropped.
+4. Connected components of B after stripping near-universal edges: still the one cheap addition worth a diagnostic line in `-c` mode.
+5. Optional: a regression test that every seed removable by the B test is also removed by the reduction, allowing the tie-break exceptions above.
