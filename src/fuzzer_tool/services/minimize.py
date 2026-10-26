@@ -21,6 +21,8 @@ import time
 from enum import Enum
 from pathlib import Path
 
+import numpy as np
+
 from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.filesystem import hash_data
 from fuzzer_tool.adapters.process import disable_aslr
@@ -57,6 +59,83 @@ class PruneMode(Enum):
     RATE_DISTORTION = "rate_distortion"
     # Set-cover plus backups for the seeds whose removal loses most edges.
     MINIMAX_ROBUST = "minimax_robust"
+
+
+class Twins(Enum):
+    """What to do with seeds whose edge sets are identical."""
+
+    COLLAPSE = "collapse"  # keep the smallest: twins add nothing to a cover
+    KEEP = "keep"  # minimax-robust: a twin is a free backup
+
+
+# Twin policy per prune mode; anything absent collapses.
+_TWINS = {PruneMode.MINIMAX_ROBUST: Twins.KEEP}
+
+
+class _EdgeBook:
+    """Per-seed edge ids as sorted uint32 arrays, twins collapsed or kept.
+
+    An array is ~1/15 the bytes of a set[int]. Under COLLAPSE the
+    coverage bytes are the dedup key and the stored array is a view on
+    them, so each unique coverage is held once.
+
+        add a {1,2} 10B; add b {1,2} 4B; add c {1,3}  ->  edges: b, c
+    """
+
+    def __init__(self, twins: Twins) -> None:
+        self.edges: dict[str, np.ndarray] = {}
+        self.sizes: dict[str, int] = {}
+        self._by_sig: dict[bytes, str] = {}
+        self.add = self._add_collapse if twins is Twins.COLLAPSE else self._add_keep
+
+    def _add_keep(self, key: str, ids: np.ndarray, size: int) -> None:
+        self.edges[key] = ids.copy()
+        self.sizes[key] = size
+
+    def _add_collapse(self, key: str, ids: np.ndarray, size: int) -> None:
+        sig = ids.tobytes()
+        kept = self._by_sig.get(sig)
+        if kept is not None and self.sizes[kept] <= size:
+            return
+
+        # Smaller twin replaces the kept one.
+        if kept is not None:
+            del self.edges[kept], self.sizes[kept]
+        self._by_sig[sig] = key
+        self.edges[key] = np.frombuffer(sig, dtype=np.uint32)
+        self.sizes[key] = size
+
+
+def _as_sets(edges: dict[str, np.ndarray]) -> dict[str, set[int]]:
+    """Set view for the rate-distortion pruners, which use set algebra."""
+    return {k: set(e.tolist()) for k, e in edges.items()}
+
+
+def _prune(book: _EdgeBook, prune: PruneMode, target_frac: float, map_entries: int) -> list[str]:
+    """Keys of the seeds *prune* keeps from *book*."""
+    n = len(book.edges)
+    if prune is PruneMode.MINIMAX_ROBUST:
+        from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
+
+        rd = RateDistortionCorpus(map_size=map_entries)
+        kept, frac = rd.minimax_robust_pruning(_as_sets(book.edges), target_fraction=target_frac)
+        print(f"[*] Minimax-robust: kept {len(kept)}/{n} files ({frac:.1%} coverage)")
+        return kept
+
+    if prune is PruneMode.RATE_DISTORTION:
+        print("[*] Using rate-distortion optimal pruning...")
+        from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
+
+        rd = RateDistortionCorpus(map_size=map_entries)
+        kept, frac = rd.optimal_pruning(_as_sets(book.edges), target_fraction=target_frac)
+        print(f"[*] Rate-distortion: kept {len(kept)}/{n} files ({frac:.1%} coverage)")
+        return kept
+
+    # Forced seeds + dominance + lazy greedy, smaller file on ties
+    # (core/set_cover.py). The previous version scored candidates with
+    # numpy popcounts over uint8 bitmap views, the right shape for AFL's
+    # byte bitmap and the wrong one for this shim's entry table.
+    return min_cover(book.edges, book.sizes)
 
 
 def _read_shm_edges(shm_id: str, size: int = 65536) -> bytearray:
@@ -337,8 +416,7 @@ def _minimize_with_coverage(
     env_base["__AFL_SHM_ID"] = shm.env_id
     env_base["AFL_MAP_SIZE"] = str(shm.num_entries)
 
-    seed_edges: dict[str, set[int]] = {}
-    seed_sizes: dict[str, int] = {}
+    book = _EdgeBook(_TWINS.get(prune, Twins.COLLAPSE))
     runner = None
     peak_rss_kb = _maxrss_kb()
     try:
@@ -356,12 +434,11 @@ def _minimize_with_coverage(
         unique_edges = set()
         for i, fpath in enumerate(corpus_files):
             data = fpath.read_bytes()
-            seed_sizes[str(fpath)] = len(data)
             shm.reset_edge_map()
             replay(data)
-            edges = shm.get_edge_ids()
-            seed_edges[str(fpath)] = edges
-            unique_edges.update(edges)
+            edges = shm.edge_id_array()
+            book.add(str(fpath), edges, len(data))
+            unique_edges.update(edges.tolist())
             peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
             # Reclaim heap memory periodically like in fuzz mode
             if (i + 1) % 100 == 0:
@@ -429,7 +506,7 @@ def _minimize_with_coverage(
     # worthless: an uninstrumented target, a failed attach, or a segment the
     # child never wrote. Callers must read "no edges" as "no coverage
     # information", never as "covers nothing".
-    if not any(seed_edges.values()):
+    if not unique_edges:
         print(
             "[-] No edges recorded for any corpus file -- refusing to prune.\n"
             "    Every file would look redundant and the whole corpus would be "
@@ -441,36 +518,10 @@ def _minimize_with_coverage(
         )
         return len(corpus_files), 0
 
-    total_edges = len(set().union(*seed_edges.values()))
-    print(f"[*] Total unique edges: {total_edges}")
+    print(f"[*] Total unique edges: {len(unique_edges)}")
+    print(f"[*] Coverage twins collapsed: {len(corpus_files) - len(book.edges)}")
 
-    if prune is PruneMode.MINIMAX_ROBUST:
-        from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
-
-        rd = RateDistortionCorpus(map_size=map_entries)
-        covered_files, actual_frac = rd.minimax_robust_pruning(
-            seed_edges, target_fraction=target_frac
-        )
-        print(
-            f"[*] Minimax-robust: kept {len(covered_files)}/{len(corpus_files)} "
-            f"files ({actual_frac:.1%} coverage)"
-        )
-    elif prune is PruneMode.RATE_DISTORTION:
-        print("[*] Using rate-distortion optimal pruning...")
-        from fuzzer_tool.core.rate_distortion import RateDistortionCorpus
-
-        rd = RateDistortionCorpus(map_size=map_entries)
-        covered_files, actual_frac = rd.optimal_pruning(seed_edges, target_fraction=target_frac)
-        print(
-            f"[*] Rate-distortion: kept {len(covered_files)}/{len(corpus_files)} "
-            f"files ({actual_frac:.1%} coverage)"
-        )
-    else:
-        # Forced seeds + dominance + lazy greedy, smaller file on ties
-        # (core/set_cover.py). The previous version scored candidates with
-        # numpy popcounts over uint8 bitmap views, the right shape for AFL's
-        # byte bitmap and the wrong one for this shim's entry table.
-        covered_files = min_cover(seed_edges, seed_sizes)
+    covered_files = _prune(book, prune, target_frac, map_entries)
 
     return _commit_results(
         corpus_files,

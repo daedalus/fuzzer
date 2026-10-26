@@ -2,6 +2,7 @@
 
 from itertools import combinations
 
+import numpy as np
 import pytest
 
 from fuzzer_tool.core.rand_pool import RandPool
@@ -198,6 +199,9 @@ class _FakeShm:
 
     def get_edge_ids(self):
         return set(type(self).table[type(self).current])
+
+    def edge_id_array(self):
+        return np.array(sorted(self.get_edge_ids()), dtype=np.uint32)
 
     def cleanup(self):
         pass

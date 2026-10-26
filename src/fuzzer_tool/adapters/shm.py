@@ -635,6 +635,14 @@ class ShmCoverage:
         """
         return set(self._active_edge_ids().tolist())
 
+    def edge_id_array(self) -> np.ndarray:
+        """Live edge ids as a sorted uint32 copy.
+
+        ~1/15 the bytes of ``get_edge_ids`` for per-seed storage (cmin), and
+        sorted so equal coverage gives equal ``tobytes()``.
+        """
+        return np.sort(self._active_edge_ids()).astype(np.uint32, copy=False)
+
     def has_edge(self, edge_id: int) -> bool:
         """Whether *edge_id* fired in the current table (no set built)."""
         return bool((self._active_edge_ids() == edge_id).any())
