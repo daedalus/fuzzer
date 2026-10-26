@@ -48,12 +48,15 @@ maintenance (i % 500): run_crash_replays via f._runner.run_target
 `fuzz_round._judge`: `_success = bool(self._is_crash or ...)`; Elo gets `crash=self._is_crash`. Every repeat of a shallow bug pays the operator. Sketch: `_is_novel_crash` from `CorpusManager.triage_skippable`-style pure classify before `_judge`; signal crashes in direct_lite lack the fault address at that point (triage runs later), so novelty is approximate there. Needs paired A/B (`tools/lib/bench_paired.py`, fuzzgoat), register in `docs/AB_PENDING.md`.
 
 ### (c) Replays check "crashed", not "same crash"
+**Fixed `1f289da`**: `ReplayOutcome.DIVERGED`, `crash_signature()`; report shows the count.
 `stats_reporter._replay_crashed`. Sketch: add `ReplayOutcome.DIVERGED`; compare `sig.split("@")[0]` (bug class) with the replay's class. Existing tests key replays by dummy `"SIG"`: update fixtures.
 
 ### (d) Prune evicts the newest bugs
+**Fixed `c991192`**: ties keep newest; `save_crash` treats a cluster still on disk as a repeat.
 `Fuzzer._prune_crash_data` keeps top-75% by count; new count-1 signatures go first and are re-written as "new" on the next hit. Option: evict oldest among equal counts (insertion order), or keep a Bloom of evicted signatures (`core/bloom.py`).
 
 ### (e) Non-atomic crash writes
+**Fixed `ce61f4e`**: artifacts built first, written to dot-temps, renamed together.
 `filesystem.save_crash` writes five files separately; an interrupt leaves partial sets. Sketch: write to `crashes/.tmp/<base>.*`, `os.rename` each into place, `.bin` last.
 
 ### (f) No RSS limit
@@ -63,9 +66,11 @@ No `RLIMIT_AS`/RSS cap anywhere in `src/`; a memory-hungry input runs until the 
 Signatures (frames, unsymbolized names) and stack hashes changed; resumed older campaigns write each known bug once more under the new signature. Blocklists built from old stack hashes no longer match: regenerate them.
 
 ### (h) Subprocess loader stderr unbounded
+**Fixed `8cbb1bd`**: spawn path (tail cap); loader's exe path relays stderr (was dropped).
 `InProcessRunner` subprocess path: `proc.communicate()` (`inprocess.py::_run_c_subprocess`) reads all stderr into memory (Hard Rule 54). Bound with `_TailBuffer`-style reads.
 
 ### (i) `crash_hashes` unbounded
+**Fixed `3d20f89`**: `MAX_CRASH_HASHES = 200_000`, cleared past it (safe given on-disk recognition).
 Existing TODO (2026-09-24); unchanged.
 
 ## Verify
