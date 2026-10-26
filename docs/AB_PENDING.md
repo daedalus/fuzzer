@@ -18,7 +18,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
-| Novel crash reward (`--novel-crash-reward`) | Only new-signature crashes pay operators / Elo | U | arm `novel-crash-reward` vs `baseline`, `--set fuzzgoat`, metrics `unique` and `edges`; A/A control first |
+| Novel crash reward (`--novel-crash-reward`) | Only new-signature crashes pay operators / Elo | N | fuzzgoat noasan, 20 seeds x 10k: unique W8 L5 T7 p=0.58, edges W11 L9 p=0.82 (median +20); control `novel-crash-reward-ctl` W6 L5 / W10 L9, p=1. Too few crashes at 10k; 50k run owed |
 
 ## Seed scheduling
 
