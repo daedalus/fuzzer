@@ -19,6 +19,22 @@ if _malloc_trim is not None:
 # Slack left at the heap top: none, release everything releasable.
 _NO_PAD = 0
 
+# Set once an in-process target aborted on the shared glibc heap: the arena
+# lock may be held forever, and malloc_trim (which locks every arena) would
+# block the process for good.
+_heap_tainted = False
+
+
+def mark_heap_tainted() -> None:
+    """Record that a target crash may have left a glibc arena lock held."""
+    global _heap_tainted
+    _heap_tainted = True
+
+
+def heap_tainted() -> bool:
+    return _heap_tainted
+
+
 _STATM = "/proc/self/statm"
 _PAGE = os.sysconf("SC_PAGE_SIZE")
 
@@ -38,10 +54,11 @@ def trim_heap() -> int:
     """Release free heap memory to the OS.
 
     Returns:
-        Bytes of RSS released; 0 if none, or no ``malloc_trim``. Clamped at 0:
+        Bytes of RSS released; 0 if none, no ``malloc_trim``, or the heap is tainted
+        (see ``mark_heap_tainted``). Clamped at 0:
         another thread can grow RSS during the call.
     """
-    if _malloc_trim is None:
+    if _malloc_trim is None or _heap_tainted:
         return 0
 
     before = _rss_bytes()

@@ -66,3 +66,18 @@ def test_trim_heap_without_symbol():
         assert libc_mem.trim_heap() == 0
     finally:
         importlib.reload(libc_mem)
+
+
+def test_tainted_heap_skips_malloc_trim(monkeypatch):
+    """After an in-process abort on the shared heap, malloc_trim would deadlock."""
+    from fuzzer_tool.adapters import libc_mem
+
+    calls = []
+    monkeypatch.setattr(libc_mem, "_malloc_trim", lambda pad: calls.append(pad))
+    monkeypatch.setattr(libc_mem, "_heap_tainted", False)
+    libc_mem.trim_heap()
+    assert calls == [0]
+    libc_mem.mark_heap_tainted()
+    assert libc_mem.heap_tainted()
+    assert libc_mem.trim_heap() == 0
+    assert calls == [0]

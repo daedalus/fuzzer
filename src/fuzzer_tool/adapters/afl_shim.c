@@ -5465,6 +5465,13 @@ __AFL_GCC_NO_COV static void __afl_timer_budget(uint64_t budget_us) {
 #define __AFL_PH_ABORT_RC     134
 #define __AFL_PH_META_BYTES   9                 /* state 1 + stamp 4 + stack 4 per slot */
 
+/* Marker for the host: bound by InProcessRunner. Absent => the target shares
+ * the host's glibc heap, and an abort() inside malloc/free leaves an arena
+ * lock held that the guard's siglongjmp cannot release (every later host
+ * malloc/malloc_trim then deadlocks). */
+__attribute__((visibility("default"), used))
+int __afl_private_heap_active(void) { return 1; }
+
 enum { __AFL_PH_NEVER, __AFL_PH_LIVE, __AFL_PH_FREED };
 enum { __AFL_PH_COLD, __AFL_PH_READY, __AFL_PH_OFF };
 

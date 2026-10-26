@@ -20,7 +20,7 @@ import sys
 import tempfile
 from collections.abc import Callable
 
-from fuzzer_tool.adapters import libc_shm
+from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.guard_arena import GUARD_OVERREAD, GuardArena
 from fuzzer_tool.adapters.process import run_target_stdin
 from fuzzer_tool.adapters.shim_factory import (
@@ -416,6 +416,7 @@ class InProcessRunner:
         """
         self._guard_ptr = ctypes.cast(self._func_ptr, ctypes.c_void_p)
         self._dist_flush = getattr(self._lib, "__afl_dist_flush", None)
+        self._private_heap = getattr(self._lib, "__afl_private_heap_active", None) is not None
         self._bind_fault()
 
         timed = getattr(self._lib, "__afl_guarded_call_timeout", None)
@@ -833,6 +834,7 @@ class InProcessRunner:
                 self._timed_out = True
             elif rc < 0:
                 self._on_crash(self, -rc)
+                self._note_shared_heap_abort(-rc)
         finally:
             signal.setitimer(signal.ITIMER_REAL, 0)
             if self.capture_stderr:
@@ -846,6 +848,25 @@ class InProcessRunner:
         # accumulators never flush on their own — write the SHM tail now.
         self._flush_distance_tail()
         return rc, _captured_stderr
+
+    def _note_shared_heap_abort(self, sig: int) -> None:
+        """Flag the host heap after an abort that may have held an arena lock.
+
+        glibc aborts inside malloc/free with the arena lock held; the guard's
+        siglongjmp cannot release it, so the next host malloc_trim (or large
+        malloc) deadlocks. A private heap (-D__AFL_PRIVATE_HEAP=1) avoids it.
+        """
+        if sig != signal.SIGABRT or getattr(self, "_private_heap", False):
+            return
+        if not libc_mem.heap_tainted():
+            log.warning(
+                "%s aborted in-process on the shared glibc heap: an arena lock may be "
+                "left held and the host can deadlock. Rebuild the target with "
+                "-D__AFL_PRIVATE_HEAP=1 or run it in spawn/loader mode. "
+                "Heap trimming is disabled.",
+                self.target,
+            )
+        libc_mem.mark_heap_tainted()
 
     def _flush_distance_tail(self) -> None:
         """Flush the shim's accumulated distance to the SHM tail.

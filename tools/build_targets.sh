@@ -1656,7 +1656,13 @@ build_ffmpeg_versions() {
         libs="$root/libavformat/libavformat.a $root/libavcodec/libavcodec.a $root/libavutil/libavutil.a $root/libswresample/libswresample.a $(ffmpeg_extralibs "$root")"
         inc="-I$root${extra_cflags:+ $extra_cflags}"
         build_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}${suffix}" "$libs" "$flags" "$cc" "$inc"
-        build_so_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}${suffix}.so" "$libs" "$flags" "$cc" "$inc"
+        # In-process (direct_lite) an FFmpeg abort inside glibc free() leaves an arena
+        # lock held and the next malloc_trim deadlocks; give the .so its own heap.
+        # Sanitizer builds that own malloc (asan/msan/tsan) are refused by the shim.
+        local ph_inc="$inc"
+        [[ "$flags" == *-fsanitize=address* || "$flags" == *-fsanitize=memory* || "$flags" == *-fsanitize=thread* ]] \
+            || ph_inc="$inc -D__AFL_PRIVATE_HEAP=1"
+        build_so_target "${TARGETS_SRC:-$TARGETS}/ffmpeg_read.c" "$TARGETS/ffmpeg_read_${ver}${suffix}.so" "$libs" "$flags" "$cc" "$ph_inc"
     done
 }
 
