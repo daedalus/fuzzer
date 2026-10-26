@@ -1491,7 +1491,10 @@ def cmd_minimize(args):
     # A module:function target has no file to check.
     if not (args.inprocess and ":" in args.target):
         _validate_target(args.target)
+    from fuzzer_tool.core.rand_pool import RandPool
     from fuzzer_tool.services.minimize import PruneMode, minimize_corpus
+
+    rng = RandPool(seed=args.seed) if getattr(args, "seed", None) is not None else None
 
     prune = PruneMode.SET_COVER
     if getattr(args, "rate_distortion", False):
@@ -1513,6 +1516,7 @@ def cmd_minimize(args):
         inprocess_func=args.inprocess_func,
         max_seeds=getattr(args, "max_seeds", 0),
         batch_mode=getattr(args, "batch", False),
+        rng=rng,
     )
 
     if removed == 0:
@@ -6757,6 +6761,13 @@ def main() -> int:
         "--batch",
         action="store_true",
         help="Batch mode: track processed seeds across runs, always keep survivors, process remaining seeds",
+    )
+    min_parser.add_argument(
+        "-s",
+        "--seed",
+        type=int,
+        default=None,
+        help="RNG seed for reproducible seed selection (default: None -> fixed fallback 0x5EED_5EED)",
     )
     min_parser.set_defaults(func=cmd_minimize)
 

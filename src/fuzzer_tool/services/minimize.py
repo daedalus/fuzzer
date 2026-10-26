@@ -433,6 +433,9 @@ def _minimize_with_coverage(
         start_time = time.time()
         unique_edges = set()
         for i, fpath in enumerate(corpus_files):
+            if not fpath.exists():
+                print(f"[!] Skipping missing corpus file: {fpath}")
+                continue
             data = fpath.read_bytes()
             shm.reset_edge_map()
             replay(data)
@@ -551,6 +554,9 @@ def _minimize_by_hash(
     kept_data: list[bytes] = []
 
     for fpath in corpus_files:
+        if not fpath.exists():
+            print(f"[!] Skipping missing corpus file: {fpath}")
+            continue
         data = fpath.read_bytes()
         h = hashlib.sha256(data).hexdigest()[:16]
         if h in seen_hashes:
