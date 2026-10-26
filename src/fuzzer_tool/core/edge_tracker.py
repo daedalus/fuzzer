@@ -1074,6 +1074,15 @@ class EdgeTracker:
         # ── Rare edge tracking ──────────────────────────────────────────
         # Per-edge owner count: how many distinct seeds hit each edge
         self._edge_owner_count: defaultdict[int, int] = defaultdict(int)
+        # ── Eviction ledger ────────────────────────────────────────────
+        # seed_key -> sorted uint32 edges that left seed_edges with their last
+        # tracked holder.  seed_edges is a bounded cache (max_tracked_seeds);
+        # the ledger is what keeps a pruned seed's coverage attributable, so
+        # a corpus minimizer reading attributed_edges() sees the whole corpus
+        # instead of the cached slice.  Bounded by the edge count, not by
+        # (seed, edge) pairs: an edge is written once, by the seed that lost
+        # it last.
+        self.evicted_sole: dict[str, np.ndarray] = {}
         # ── Hardware perf metrics per seed ──────────────────────────────
         self.seed_hw_instructions: dict[str, int] = {}
         self.seed_hw_branches: dict[str, int] = {}
@@ -1121,6 +1130,11 @@ class EdgeTracker:
         new_edges = set()
         if seed_key not in self.seed_edges:
             self.seed_edges[seed_key] = set()
+            # A seed that runs again is tracked again, so its ledger entry is
+            # superseded: the same input reproduces the same edges, which
+            # seed_edges then holds in full, and a stale partial copy would
+            # keep answering after the seed has moved on.
+            self.evicted_sole.pop(seed_key, None)
         if seed_key not in self.seed_hit_counts:
             self.seed_hit_counts[seed_key] = {}
         hc = self.seed_hit_counts[seed_key]
@@ -1581,6 +1595,7 @@ class EdgeTracker:
         else:
             self._global_edge_hits.clear()
         self.seed_edges.clear()
+        self.evicted_sole.clear()
         self.seed_hit_counts.clear()
         self._entropy_cache.clear()
         if isinstance(self._aggregate_totals, _DenseEdgeCounter):
@@ -1605,6 +1620,10 @@ class EdgeTracker:
         seed, so fully-subsumed seeds go before any seed that owns an edge no
         other tracked seed covers; ties keep insertion order.
 
+        What an eviction takes out of ``seed_edges`` is written to
+        ``evicted_sole`` first, so the coverage stays attributable even though
+        the cache is bounded -- see ``attributed_edges``.
+
         Overflowing the ceiling prunes back below it by PRUNE_BATCH_FRAC, not
         to the ceiling itself.  Without that margin ``excess`` is 1 in steady
         state, so the owner-count pass below -- O(tracked seeds x edges per
@@ -1622,7 +1641,14 @@ class EdgeTracker:
         batch = int(self.max_tracked_seeds * PRUNE_BATCH_FRAC)
         low_water = max(1, self.max_tracked_seeds - batch)
         excess = len(self.seed_edges) - low_water
-        keys_to_prune, owner_ids, owner_counts = self._prune_victims(excess)
+        keys_to_prune, owner_ids, owner_counts, orphans = self._prune_victims(excess)
+
+        # Fold what left with the victims into the ledger before dropping
+        # them: those edges now have no entry in seed_edges, and the ledger is
+        # the only thing that still answers for them.
+        for key, edges in orphans.items():
+            prior = self.evicted_sole.get(key)
+            self.evicted_sole[key] = edges if prior is None else np.union1d(prior, edges)
 
         for key in keys_to_prune:
             self.seed_edges.pop(key, None)
@@ -1658,8 +1684,38 @@ class EdgeTracker:
         self._corpus_sig = None
         self._corpus_profile_cache = None
 
-    def _prune_victims(self, excess: int) -> tuple[list[str], list[int], list[int]]:
-        """Pick *excess* seeds to evict; return them plus survivor owner counts.
+    def attributed_edges(self, seed_key: str) -> set[int]:
+        """Edges *seed_key* is known to cover: its tracked set, else its ledger.
+
+        The ledger entry is partial by design -- only the edges the seed held
+        alone when it left ``seed_edges`` -- and a partial superset is exactly
+        what a set cover needs from a seed: the edges it can still answer for.
+        Returns the live set, not a copy, matching ``seed_edges``; callers
+        read it.
+        """
+        edges = self.seed_edges.get(seed_key)
+        if edges is not None:
+            return edges
+        orphan = self.evicted_sole.get(seed_key)
+        return set(orphan.tolist()) if orphan is not None else set()
+
+    def forget_evicted(self, keep_keys) -> int:
+        """Drop ledger entries for seeds outside *keep_keys*; returns how many.
+
+        Call once the corpus no longer holds them: the edges they recorded are
+        answered for by the seeds the cover kept, so the entries are dead
+        weight that would otherwise accumulate for the whole campaign.
+        """
+        keep = set(keep_keys)
+        gone = [k for k in self.evicted_sole if k not in keep]
+        for k in gone:
+            del self.evicted_sole[k]
+        return len(gone)
+
+    def _prune_victims(
+        self, excess: int
+    ) -> tuple[list[str], list[int], list[int], dict[str, np.ndarray]]:
+        """Pick *excess* seeds to evict; return them, survivor owners, orphans.
 
         One revalidating pass, cheapest-first by how much unique coverage goes
         with the seed.  A seed whose every edge is held by another
@@ -1721,6 +1777,7 @@ class EdgeTracker:
         heap = [(loss, tie, i) for i, (loss, tie) in enumerate(zip(losses, ties, strict=True))]
         heapq.heapify(heap)
         victims: list[str] = []
+        orphans: dict[str, np.ndarray] = {}
         while len(victims) < excess and heap:
             loss, tie, i = heapq.heappop(heap)
             current = _loss(i)
@@ -1728,10 +1785,16 @@ class EdgeTracker:
                 heapq.heappush(heap, (current, tie, i))
                 continue
             victims.append(keys[i])
-            owners[slot[starts[i] : ends[i]]] -= 1
+            lo, hi = starts[i], ends[i]
+            if current:
+                # `current` counts this seed's edges whose owner count is 1:
+                # its eviction takes the last tracked holder away, so these
+                # are exactly the edges no survivor will answer for.
+                orphans[keys[i]] = flat[lo:hi][owners[slot[lo:hi]] <= 1].astype(np.uint32)
+            owners[slot[lo:hi]] -= 1
 
         alive = owners > 0
-        return victims, ids[alive].tolist(), owners[alive].tolist()
+        return victims, ids[alive].tolist(), owners[alive].tolist(), orphans
 
     # ── Temporal coverage tracking methods ─────────────────────────────────
 
@@ -3808,6 +3871,7 @@ class EdgeTracker:
             "morris_mode": self._morris_mode,
             "cumulative_edges": sorted(self.cumulative_edges),
             "seed_edges": {k: sorted(v) for k, v in self.seed_edges.items()},
+            "evicted_sole": {k: v.tolist() for k, v in self.evicted_sole.items()},
             "seed_hit_counts": {
                 k: {str(e): c for e, c in hc.items()} for k, hc in self.seed_hit_counts.items()
             },
@@ -3843,6 +3907,9 @@ class EdgeTracker:
         self._morris_mode = data.get("morris_mode", self._morris_mode)
         self.cumulative_edges = set(data.get("cumulative_edges", []))
         self.seed_edges = {k: set(v) for k, v in data.get("seed_edges", {}).items()}
+        self.evicted_sole = {
+            k: np.asarray(v, dtype=np.uint32) for k, v in data.get("evicted_sole", {}).items()
+        }
         self.seed_hit_counts = {
             k: {int(e): c for e, c in hc.items()}
             for k, hc in data.get("seed_hit_counts", {}).items()

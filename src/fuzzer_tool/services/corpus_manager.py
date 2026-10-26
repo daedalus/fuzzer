@@ -1721,11 +1721,15 @@ class CorpusManager:
         et = f._edge_tracker
         all_edges = et.cumulative_edges if et and et.cumulative_edges else set()
         mandatory: set[int] = set()
-        if all_edges and et.seed_edges:
+        if all_edges and (et.seed_edges or et.evicted_sole):
             seed_edge_map: dict[int, set[int]] = {}
             for seed in unique:
                 sk = self.seed_key(seed)
-                s_edges = et.seed_edges.get(sk, set())
+                # attributed_edges also answers for seeds the tracker evicted:
+                # seed_edges alone is the bounded cache and covers only part
+                # of the corpus, so a cover over it drops every seed holding
+                # an edge the cache no longer remembers.
+                s_edges = et.attributed_edges(sk)
                 if s_edges:
                     seed_edge_map[id(seed)] = s_edges
             if seed_edge_map:
@@ -1742,13 +1746,14 @@ class CorpusManager:
     def _greedy_cover(self, unique: list[bytes], seed_edge_map: dict[int, set[int]]) -> set[int]:
         """Set cover over *seed_edge_map* (core/set_cover.py); returns chosen seed ids."""
         # Terminate against what these seeds can actually cover, not
-        # against cumulative_edges. EdgeTracker._prune_tracked_seeds drops
-        # entries from seed_edges once past max_tracked_seeds (200,000
-        # since fe8fd42, up from 200 -- so in practice it no longer
-        # fires at all; see docs/TODO.md) but
-        # never removes their edges from cumulative_edges, so on any run
-        # past 200 seeds all_edges is a strict superset of anything the
-        # loop can reach. `covered != all_edges` was therefore permanently
+        # against cumulative_edges. EdgeTracker._maybe_prune drops entries
+        # from seed_edges past max_tracked_seeds (1,000 since 3be902df; it was
+        # 200, then 200,000 for one commit -- see docs/TODO.md) without
+        # removing their edges from cumulative_edges, so all_edges stays a
+        # strict superset of anything the loop can reach. The caller passes
+        # attributed_edges, which includes the eviction ledger, so the gap is
+        # now only edges no corpus seed holds at all. Without that,
+        # `covered != all_edges` was permanently
         # true: the loop never converged, always ran to best_gain == 0, and
         # selected every seed holding a unique edge — making `mandatory`,
         # and the target_size floor derived from it, meaningless.
@@ -1997,32 +2002,48 @@ class CorpusManager:
         kept_coverage: set[int] = set()
         for seed in unique:
             sk = self.seed_key(seed)
-            kept_coverage.update(et.seed_edges.get(sk, set()))
+            kept_coverage.update(et.attributed_edges(sk))
         uncovered = et.cumulative_edges - kept_coverage
         if not uncovered:
             return
 
         recovered_count = 0
+        recovered_edges: set[int] = set()
         for seed in f.corpus:
             if seed in unique:
                 continue
             sk = self.seed_key(seed)
-            seed_edges = et.seed_edges.get(sk, set())
-            if seed_edges & uncovered:
-                unique.append(seed)
-                mandatory.add(id(seed))
-                if f.corpus_dir:
-                    self._promote_seed(seed)
-                # Mark seed as recovered so mutations are not skipped from it
-                if getattr(f, "cuckoo_seed_filter", None) is not None:
-                    h = self.seed_key(seed)
-                    f._cuckoo_recovered.add(h)
-                recovered_count += 1
+            seed_edges = et.attributed_edges(sk)
+            hit = seed_edges & uncovered
+            if not hit:
+                continue
+            unique.append(seed)
+            mandatory.add(id(seed))
+            recovered_edges |= hit
+            if f.corpus_dir:
+                self._promote_seed(seed)
+            # Mark seed as recovered so mutations are not skipped from it
+            if getattr(f, "cuckoo_seed_filter", None) is not None:
+                h = self.seed_key(seed)
+                f._cuckoo_recovered.add(h)
+            recovered_count += 1
         if recovered_count:
             log.warning(
                 "Recovered %d seeds to cover %d uncovered edges after minimization",
                 recovered_count,
                 len(uncovered),
+            )
+
+        # Edges no corpus seed can answer for: attribution was lost before the
+        # cover ran (a seed evicted while the tracker had no entry for it, or a
+        # snapshot written before the ledger existed). Nothing here can recover
+        # them, so say so instead of letting the drop pass as a clean minimize.
+        still = uncovered - recovered_edges
+        if still:
+            log.warning(
+                "Minimization left %d/%d edges with no known holder in the corpus",
+                len(still),
+                len(et.cumulative_edges),
             )
 
     def _commit_minimize(self, unique: list[bytes], removed: int, stale_ratio: float) -> None:
@@ -2044,6 +2065,10 @@ class CorpusManager:
                     f._cuckoo_recovered.discard(h)
 
         f.corpus = unique
+        if f._edge_tracker is not None:
+            # Seeds a cover dropped can never be picked again, so their ledger
+            # entries answer for nothing; only keep what the corpus still holds.
+            f._edge_tracker.forget_evicted(self.seed_key(seed) for seed in unique)
         self.rebuild_entropy()
         new_meta = {}
         for seed in unique:

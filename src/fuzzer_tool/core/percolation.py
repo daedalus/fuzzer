@@ -51,9 +51,7 @@ _REGIME_FALLBACK_EXEC_PER_EDGE: dict[CoverageRegime, float] = {
 }
 
 
-def _phi_at_profile(
-    sorted_keys: list[int], phi_profile: dict[int, int], v: float
-) -> float:
+def _phi_at_profile(sorted_keys: list[int], phi_profile: dict[int, int], v: float) -> float:
     """Nearest known Φ(n) at or below *v* (Φ is non-decreasing in n).
 
     Mirrors ``target_difficulty._phi_at`` so percolation.py does not import
@@ -181,10 +179,7 @@ def estimate_time_to_next_discovery(
     except TypeError:
         current = 0
 
-    if target_size is not None:
-        goal = int(target_size)
-    else:
-        goal = current + max(1, int(target_delta))
+    goal = int(target_size) if target_size is not None else current + max(1, int(target_delta))
 
     if goal <= current:
         return 0.0
@@ -267,7 +262,7 @@ def bootstrap_minimize_corpus(
     if not corpus:
         return [], []
 
-    if not edge_tracker.seed_edges:
+    if not _tracker_has_edges(edge_tracker):
         return list(corpus), []
 
     if k == 1:
@@ -283,7 +278,7 @@ def bootstrap_minimize_corpus(
 
         for idx, seed in enumerate(kept):
             sk = _seed_key(seed)
-            edges = edge_tracker.seed_edges.get(sk, set())
+            edges = _tracker_edges(edge_tracker, sk)
             if not edges:
                 # Seed has no tracked edges → always removable.
                 seed_to_edges[idx] = set()
@@ -330,7 +325,7 @@ def _minimize_preserving_coverage(
     import heapq
 
     n = len(corpus)
-    edges_of, owners = _edge_owners(corpus, edge_tracker.seed_edges)
+    edges_of, owners = _edge_owners(corpus, edge_tracker)
 
     removed_idx: list[int] = []
     alive = [True] * n
@@ -360,17 +355,35 @@ def _minimize_preserving_coverage(
 
 
 def _edge_owners(
-    corpus: list[bytes], seed_edges: dict
+    corpus: list[bytes], edge_tracker
 ) -> tuple[list[frozenset | set], dict[int, set[int]]]:
     """Per-seed edge sets and, per edge, the indices of seeds covering it."""
     edges_of: list[frozenset | set] = []
     owners: dict[int, set[int]] = {}
     for idx, seed in enumerate(corpus):
-        edges = seed_edges.get(_seed_key(seed), set())
+        edges = _tracker_edges(edge_tracker, _seed_key(seed))
         edges_of.append(edges)
         for e in edges:
             owners.setdefault(e, set()).add(idx)
     return edges_of, owners
+
+
+def _tracker_edges(edge_tracker, sk: str) -> set[int]:
+    """Edges attributed to *sk*: the tracked set, or the eviction ledger.
+
+    ``seed_edges`` is bounded by ``max_tracked_seeds``, so reading it alone
+    treats every evicted seed as covering nothing and removes it as
+    redundant -- which drops its edges from the corpus.
+    """
+    reader = getattr(edge_tracker, "attributed_edges", None)
+    if reader is not None:
+        return reader(sk)
+    return edge_tracker.seed_edges.get(sk, set())
+
+
+def _tracker_has_edges(edge_tracker) -> bool:
+    """Whether the tracker attributes any coverage at all."""
+    return bool(edge_tracker.seed_edges or getattr(edge_tracker, "evicted_sole", None))
 
 
 def _release_edges(idx: int, edges, owners: dict[int, set[int]], unique: list[int]) -> None:
