@@ -178,6 +178,18 @@ class CrashSymbolSink:
                 os.unlink(self.path)
 
 
+def crash_pcs(sym: CrashSymbol | None) -> tuple[int, ...] | None:
+    """Distinct frame PCs, innermost first (inlined frames share one); None without a record."""
+    if sym is None:
+        return None
+
+    out: list[int] = []
+    for pc in [f.pc for f in sym.frames] or [sym.pc]:
+        if pc and (not out or out[-1] != pc):
+            out.append(pc)
+    return tuple(out) or None
+
+
 def hydrate(meta, sym: CrashSymbol | None) -> bool:
     """Fill *meta* from a shim record. Never overwrites a value another
     source (sanitizer report, ptrace) already set. Returns True if applied."""

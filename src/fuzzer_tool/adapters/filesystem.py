@@ -1004,6 +1004,7 @@ def classify_crash(
     crash_blocklist: set[str] | None = None,
     crash_allowlist: set[str] | None = None,
     crash_min_sizes: dict[str, int] | None = None,
+    crash_pcs: tuple[int, ...] | None = None,
 ) -> CrashVerdict:
     """Classify a crash against what is already known, recording nothing.
 
@@ -1028,6 +1029,8 @@ def classify_crash(
         crash_allowlist: Set of stack hashes that override the blocklist.
         crash_min_sizes: Signature -> smallest saved trigger (``--save-smaller``);
             a smaller repeat is novel, with ``replaces`` set.
+        crash_pcs: Crash-stack PCs from the shim's crash record (innermost
+            first); name the site of a crash without a sanitizer report.
 
     Returns:
         A :class:`CrashVerdict` describing the decision and the derived
@@ -1035,7 +1038,7 @@ def classify_crash(
     """
     h = hash_data(data)
     report = SanitizerReport.parse(stderr)
-    sig = _signature(stderr, report, returncode, fault_addr)
+    sig = _signature(stderr, report, returncode, fault_addr, crash_pcs)
     stack_h = report.stack_hash() if report else ""
 
     if h in crash_hashes:
@@ -1076,16 +1079,37 @@ def crash_signature(stderr: str, returncode: int, fault_addr: int | None = None)
 
 
 def _signature(
-    stderr: str, report: SanitizerReport | None, returncode: int, fault_addr: int | None
+    stderr: str,
+    report: SanitizerReport | None,
+    returncode: int,
+    fault_addr: int | None,
+    crash_pcs: tuple[int, ...] | None = None,
 ) -> str:
-    """LTL violation, else sanitizer signature, else ``signal:<n>[@<addr>]``."""
-    return violation_signature(stderr) or _crash_sig(report, returncode, fault_addr)
+    """LTL violation, else sanitizer signature, else ``signal:<n>[@...]``."""
+    return violation_signature(stderr) or _crash_sig(report, returncode, fault_addr, crash_pcs)
 
 
-def _crash_sig(report: SanitizerReport | None, returncode: int, fault_addr: int | None) -> str:
-    """Sanitizer signature, else ``signal:<n>[@<fault_addr>]``."""
+# Crash-site signature: page offsets (ASLR-stable) of the first frames.
+_SITE_FRAMES = 6
+_PAGE_OFFSET_MASK = 0xFFF
+
+
+def _crash_sig(
+    report: SanitizerReport | None,
+    returncode: int,
+    fault_addr: int | None,
+    crash_pcs: tuple[int, ...] | None = None,
+) -> str:
+    """Sanitizer signature, else ``signal:<n>`` plus crash site or fault address.
+
+    Site: ``signal:11@0x1d6@0x250`` from the shim's crash-stack PCs; without
+    them every SIGSEGV of a no-sanitizer target shared ``signal:11``.
+    """
     if report and report.is_valid():
         return report.signature
+    if crash_pcs:
+        sites = "".join(f"@{pc & _PAGE_OFFSET_MASK:#05x}" for pc in crash_pcs[:_SITE_FRAMES])
+        return f"signal:{signal_number(returncode)}{sites}"
     if fault_addr is not None:
         # Distinguish NULL-deref / wild-pointer / stack-overflow crashes that
         # all share the same signal number but fault at different addresses.
@@ -1125,6 +1149,7 @@ def save_crash(
     crash_min_sizes: dict[str, int] | None = None,
     fault_addr: int | None = None,
     verdict: CrashVerdict | None = None,
+    crash_pcs: tuple[int, ...] | None = None,
 ) -> bool:
     """Save crash input with enriched triage metadata.
 
@@ -1169,6 +1194,7 @@ def save_crash(
             crash_blocklist=crash_blocklist,
             crash_allowlist=crash_allowlist,
             crash_min_sizes=crash_min_sizes,
+            crash_pcs=crash_pcs,
         )
     )
     h, sig, report = v.input_hash, v.signature, v.report

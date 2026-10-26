@@ -73,6 +73,26 @@ Signatures (frames, unsymbolized names) and stack hashes changed; resumed older 
 **Fixed `3d20f89`**: `MAX_CRASH_HASHES = 200_000`, cleared past it (safe given on-disk recognition).
 Existing TODO (2026-09-24); unchanged.
 
+## Follow-ups shipped (2026-10-26, second pass)
+
+- **Crash-site signatures** (`dff50f6`, `63b94bb`): plain `.so` SIGSEGVs were one `signal:11` bucket. `signal:N@<page offsets>` from the shim crash record; sink default-on for targets without a sanitizer runtime (`fuzzer._target_runtime`). Sink file closed at exit (`atexit`). Note: sancov executables link clang's UBSAN standalone runtime; their `UndefinedBehaviorSanitizer: SEGV` report already splits sites.
+- **`--abort-is-crash`**: shim `__afl_shim_abort` raises SIGABRT when `__AFL_ABORT_CRASH=1` (`fuzzer._export_abort_mode`). Default unchanged (FFmpeg `av_assert0` flood). Excluded from `--hail-mary`. Targets must be rebuilt (Hard Rule 56); SHM layout unchanged, no `__AFL_SHM_LAYOUT` bump.
+- Test runs left ~115 empty `/tmp/fuzzer_crashsym_*` files from before the `atexit` fix; deleting them was blocked in this session.
+
+## Fuzzgoat calibration (Hard Rule 52)
+
+clang builds from `tools/build_targets.sh`, base `d32da74` vs branch, 20k execs, seeds 1-3, `fuzzer-tool fuzz <so> -s N`.
+
+| target | base (crashes / unique / edges) | branch |
+|---|---|---|
+| `fuzzgoat_read_asan.so` | 5/2/758, 9/3/830, 14/4/827 | 7/4/956, 7/5/712, 51/5/856 |
+| `fuzzgoat_read_noasan.so` | 4/1/756, 3/1/798, 12/1/768 | 2/2/712, 6/2/764, 13/1/758 |
+
+- Edges: within run-to-run spread.
+- ASAN: extra uniques are real stack splits (UAF via `json_parse` vs `parse_trailer`; base merged them through alloc-stack frames in the signature). Found the `attempting ...` parse gap: 11 bad-free reports typed `attempting`; fixed (`bad-free` / `double-free`).
+- noasan: base filed every glibc abort (`free(): invalid pointer` / double free) as one `signal:6`; branch splits them by crash site, and the same site gets the same cluster id across runs (ASLR-stable): `6b429bba` in seeds 1 and 2, `7b56d567` in seeds 2 and 3.
+- Still one bucket: in-process ASAN `.so` SIGSEGVs the shim catches before ASAN reports (`signal:11`, sink off for sanitizer targets).
+
 ## Verify
 
 ```
