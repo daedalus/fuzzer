@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from fuzzer_tool.adapters import seed_zip
+from fuzzer_tool.adapters.process import signal_number
 from fuzzer_tool.adapters.seed_zip import SeedTree
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
@@ -977,6 +978,8 @@ class CrashVerdict(NamedTuple):
             for a fuzzy match), or None.
         blocked: True when the stack hash is blocklisted and not allowlisted.
         duplicate_input: True when this exact input already crashed.
+        replaces: True when *novel* only because the input is a smaller
+            trigger of a known signature (``--save-smaller``).
     """
 
     novel: bool
@@ -987,6 +990,7 @@ class CrashVerdict(NamedTuple):
     matched_signature: str | None
     blocked: bool
     duplicate_input: bool
+    replaces: bool = False
 
 
 def classify_crash(
@@ -998,6 +1002,7 @@ def classify_crash(
     fault_addr: int | None = None,
     crash_blocklist: set[str] | None = None,
     crash_allowlist: set[str] | None = None,
+    crash_min_sizes: dict[str, int] | None = None,
 ) -> CrashVerdict:
     """Classify a crash against what is already known, recording nothing.
 
@@ -1020,6 +1025,8 @@ def classify_crash(
             runner, folded into the fallback signature.
         crash_blocklist: Set of stack hashes to skip (known crashes).
         crash_allowlist: Set of stack hashes that override the blocklist.
+        crash_min_sizes: Signature -> smallest saved trigger (``--save-smaller``);
+            a smaller repeat is novel, with ``replaces`` set.
 
     Returns:
         A :class:`CrashVerdict` describing the decision and the derived
@@ -1042,16 +1049,19 @@ def classify_crash(
     ):
         return CrashVerdict(False, h, sig, stack_h, report, None, True, False)
 
-    # Deduplicate by signature: skip if this crash signature was already seen.
+    # Deduplicate by signature: skip if this crash signature was already seen,
+    # unless it is a smaller trigger to replace the saved one.
     if sig in crash_sigs:
-        return CrashVerdict(False, h, sig, stack_h, report, sig, False, False)
+        smaller = crash_min_sizes is not None and len(data) < crash_min_sizes.get(sig, len(data))
+        return CrashVerdict(smaller, h, sig, stack_h, report, sig, False, False, smaller)
 
     # Fuzzy matching groups crashes at the same function with different
     # instruction offsets or inlined frames. Only sanitizer signatures are
     # fuzzy-matched: normalize_frame() strips 0x-addresses and numbers, which
     # is noise for ASAN sigs but IS the distinguishing signal for
-    # address-bearing fallback sigs like "signal:11@0xdead0000".
-    if report and report.is_valid() and "@" in sig:
+    # address-bearing fallback sigs like "signal:11@0xdead0000". The same
+    # holds for unsymbolized "module+0x11d6" frames.
+    if report and report.is_valid() and "@" in sig and _UNSYMBOLIZED_MARK not in sig:
         existing_sig = _fuzzy_sig_match(sig, crash_sigs)
         if existing_sig is not None:
             return CrashVerdict(False, h, sig, stack_h, report, existing_sig, False, False)
@@ -1066,13 +1076,24 @@ def _crash_sig(report: SanitizerReport | None, returncode: int, fault_addr: int 
     if fault_addr is not None:
         # Distinguish NULL-deref / wild-pointer / stack-overflow crashes that
         # all share the same signal number but fault at different addresses.
-        return f"signal:{abs(returncode)}@{fault_addr:#x}"
-    return f"signal:{abs(returncode)}"
+        return f"signal:{signal_number(returncode)}@{fault_addr:#x}"
+    return f"signal:{signal_number(returncode)}"
+
+
+# Unsymbolized sanitizer frame, e.g. "target+0x11d6" (core/sanitizer.py).
+_UNSYMBOLIZED_MARK = "+0x"
 
 
 def _fuzzy_sig_match(sig: str, crash_sigs: dict[str, int]) -> str | None:
-    """First known signature at least 0.8-similar to *sig*, else None."""
+    """First known signature at least 0.8-similar to *sig*, else None.
+
+    Only within the same "sanitizer:error_type": frames dominate the string,
+    so a UAF and an overflow in the same frames scored as one bug.
+    """
+    head = sig.split("@", 1)[0] + "@"
     for existing_sig in crash_sigs:
+        if not existing_sig.startswith(head):
+            continue
         if crash_signature_similarity(sig, existing_sig) >= 0.8:
             return existing_sig
     return None
@@ -1110,7 +1131,7 @@ def save_crash(
         metadata: Optional pre-built CrashMetadata from the fuzzer.
         crash_blocklist: Set of stack hashes to skip (known crashes).
         crash_allowlist: Set of stack hashes that override blocklist.
-        crash_min_sizes: Dict of stack_hash -> minimum trigger size.
+        crash_min_sizes: Dict of signature -> minimum trigger size.
         fault_addr: Optional faulting memory address (si_addr) captured by the
             ptrace runner; folded into the fallback signal signature so
             same-signal crashes at different addresses dedup separately.
@@ -1134,9 +1155,10 @@ def save_crash(
             fault_addr=fault_addr,
             crash_blocklist=crash_blocklist,
             crash_allowlist=crash_allowlist,
+            crash_min_sizes=crash_min_sizes,
         )
     )
-    h, sig, stack_h, report = v.input_hash, v.signature, v.stack_hash, v.report
+    h, sig, report = v.input_hash, v.signature, v.report
 
     if v.duplicate_input:
         return False
@@ -1147,20 +1169,17 @@ def save_crash(
         return False
 
     crash_hashes.add(h)
-    crash_sigs[sig] = 1
-
-    # Smaller crash replacement: if a crash with the same stack hash exists
-    # and the new trigger is smaller, remove the old one.
-    if crash_min_sizes is not None and stack_h:
-        old_min = crash_min_sizes.get(stack_h)
-        if old_min is not None and len(data) < old_min:
-            # New trigger is smaller — find and remove the old crash files
-            _evict_crash(crashes_dir, h, stack_h)
-        crash_min_sizes[stack_h] = len(data)
+    crash_sigs[sig] = crash_sigs.get(sig, 0) + 1
 
     # Build CrashMetadata if not provided
     if metadata is None:
         metadata = CrashMetadata()
+
+    # Smaller trigger of a known signature: drop its files, then write this one.
+    if crash_min_sizes is not None:
+        if v.replaces:
+            _evict_crash(crashes_dir, metadata.build_cluster_id(sig))
+        crash_min_sizes[sig] = len(data)
 
     # Store raw stderr (contains ASAN file:line diagnostics)
     if not metadata.raw_stderr:
@@ -1219,30 +1238,14 @@ def save_crash(
 _CRASH_EXTS = (".bin", ".txt", ".sh", ".hex", ".json")
 
 
-def _evict_crash(crashes_dir: Path, h: str, stack_h: str) -> None:
-    """Remove the first on-disk crash with stack hash *stack_h* but other input."""
-    for f in crashes_dir.iterdir():
-        if not f.is_file() or f.suffix not in _CRASH_EXTS:
-            continue
-        try:
-            old_data = f.read_bytes() if f.suffix == ".bin" else None
-            if not old_data or hash_data(old_data) == h:
-                continue
+def _evict_crash(crashes_dir: Path, cluster_id: str) -> None:
+    """Remove the on-disk files of signature cluster *cluster_id*.
 
-            # Check if this old crash has the same stack hash
-            txt = crashes_dir / f"{f.stem}.txt"
-            old_report = SanitizerReport.parse(txt.read_text() if txt.exists() else "")
-            if not old_report or old_report.stack_hash() != stack_h:
-                continue
-
-            # Remove old crash files
-            for ext in _CRASH_EXTS:
-                old_file = crashes_dir / f"{f.stem}{ext}"
-                if old_file.exists():
-                    old_file.unlink()
-            return
-        except Exception:
-            continue
+    Names are ``crash_<ts>_<cluster_id>_<san>_<err>.<ext>`` (see save_crash).
+    """
+    for f in crashes_dir.glob(f"crash_*_{cluster_id}_*"):
+        if f.suffix in _CRASH_EXTS and f.name.split("_")[2] == cluster_id:
+            f.unlink(missing_ok=True)
 
 
 def _crash_name_parts(report: SanitizerReport | None, returncode: int) -> tuple[str, str]:
@@ -1251,7 +1254,7 @@ def _crash_name_parts(report: SanitizerReport | None, returncode: int) -> tuple[
         error_short = report.error_type.replace("-", "")[:20]
         sanitizer_short = report.sanitizer.replace("Sanitizer", "")[:4].lower()
         return error_short, sanitizer_short
-    return f"signal{abs(returncode)}", "sig"
+    return f"signal{signal_number(returncode)}", "sig"
 
 
 def _fill_report(metadata: CrashMetadata, report: SanitizerReport | None, returncode: int) -> None:

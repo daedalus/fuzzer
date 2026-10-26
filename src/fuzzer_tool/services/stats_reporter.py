@@ -2,6 +2,7 @@
 
 import time
 from array import array
+from collections.abc import Callable
 from enum import IntEnum
 
 from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, stderr_crash_marker
@@ -109,6 +110,17 @@ def _find_crash_file(crashes_dir, sig: str, crash_files, seed_key_fn):
     return _scan_crash_file(crashes_dir, sig, seed_key_fn)
 
 
+def _stdin_runner(target: str, timeout: float) -> Callable[[bytes], tuple[int, str]]:
+    """Spawn *target* per input, data on stdin: ``(rc, stderr)``."""
+    from fuzzer_tool.adapters.process import run_target_stdin
+
+    def _run(data: bytes) -> tuple[int, str]:
+        rc, stderr, _pid = run_target_stdin(target, data, timeout)
+        return rc, stderr
+
+    return _run
+
+
 def run_crash_replays(
     crashes_dir,
     target: str,
@@ -118,6 +130,7 @@ def run_crash_replays(
     seed_key_fn,
     budget_ms: float = 200,
     crash_files: dict[str, str] | None = None,
+    run_fn: Callable[[bytes], tuple[int, str]] | None = None,
 ) -> None:
     """Replay pending crashes for reproducibility scoring (non-blocking).
 
@@ -138,10 +151,15 @@ def run_crash_replays(
     The scan survives only as a fallback for signatures with no recorded
     file -- state restored from an older run -- and now uses the content-hash
     identity alone, never a prefix.
+
+    ``run_fn`` executes one input the way the campaign does (mode, env,
+    ``@@`` arguments, ``.so`` loading); without it the target is spawned
+    with the input on stdin.
     """
     if replay_n <= 0 or not crash_replays:
         return
-    from fuzzer_tool.adapters.process import run_target_stdin
+    if run_fn is None:
+        run_fn = _stdin_runner(target, timeout)
 
     t0 = time.monotonic()
     pending = [(sig, replays) for sig, replays in crash_replays.items() if len(replays) < replay_n]
@@ -154,7 +172,7 @@ def run_crash_replays(
             continue
         try:
             data = crash_file.read_bytes()
-            rc, stderr, _pid = run_target_stdin(target, data, timeout)
+            rc, stderr = run_fn(data)
             crashed = _replay_crashed(rc, stderr)
             replays.append(ReplayOutcome.CRASHED if crashed else ReplayOutcome.CLEAN)
         except Exception:

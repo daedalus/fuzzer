@@ -37,6 +37,11 @@ from fuzzer_tool.adapters.pipe_reader import NO_DEADLINE, PipeReader
 
 log = logging.getLogger(__name__)
 
+# End-of-run stderr marker the loader writes before each RC reply.
+_STDERR_MARK = "\x7ffuzz-run-end\x7f"
+# Upper bound on waiting for the drain thread to reach a run's marker.
+_STDERR_SYNC_TIMEOUT = 1.0
+
 
 def _close_streams(proc: subprocess.Popen) -> None:
     """Close the raw fds of *proc*, unblocking any thread stuck reading them.
@@ -132,6 +137,14 @@ else:
     sys.exit(1)
 
 timeout_seconds = int(os.environ.get("_TIMEOUT", "5"))
+# Signals afl_shim's crash handler re-encodes as _exit(128 + sig).
+_CRASH_SIGNALS = (
+    signal.SIGILL, signal.SIGTRAP, signal.SIGABRT, signal.SIGBUS,
+    signal.SIGFPE, signal.SIGSEGV, signal.SIGSYS,
+)
+# Written to stderr after each run, before the RC reply: everything the
+# child wrote precedes it in the pipe (see PersistentLoader.consume_stderr).
+_STDERR_MARK = os.environ.get("_STDERR_MARK", "").encode()
 # Track child PID file so outer layer can kill orphaned grandchild on timeout
 child_pid_file = os.environ.get("_CHILD_PID_FILE", "")
 
@@ -256,10 +269,11 @@ while True:
             # Check if child was killed by signal (SIGSEGV, SIGABRT, etc.)
             if os.WIFSIGNALED(status):
                 rc = -(os.WTERMSIG(status))
-            elif os.WIFEXITED(status) and os.WEXITSTATUS(status) >= 128:
+            elif os.WIFEXITED(status) and os.WEXITSTATUS(status) - 128 in _CRASH_SIGNALS:
                 # Exit via _exit(128 + sig) from crash handler (afl_shim.c).
                 # Convert to negative signal code for consistency with the
-                # WIFSIGNALED path above.
+                # WIFSIGNALED path above. Other exits >= 128 (exit(129),
+                # exit(255)) are target exit codes, not signals.
                 rc = -(os.WEXITSTATUS(status) - 128)
             else:
                 rc_byte = os.read(read_pipe, 1)
@@ -286,6 +300,9 @@ while True:
         rsp_s = "-" if regs is None else f"{regs['rsp']:#x}"
         rbp_s = "-" if regs is None else f"{regs['rbp']:#x}"
         resp = f"RC {rc} 0 {fault_s} {rip_s} {rsp_s} {rbp_s}\n".encode()
+        if _STDERR_MARK:
+            sys.stderr.buffer.write(b"\n" + _STDERR_MARK + b"\n")
+            sys.stderr.buffer.flush()
         sys.stdout.buffer.write(resp)
         sys.stdout.buffer.flush()
 """
@@ -333,6 +350,12 @@ class PersistentLoader:
         self._stderr_lock = threading.Lock()
         self._stderr_buffer: collections.deque[str] = collections.deque(maxlen=2000)
 
+        # Run markers seen by the drain thread vs replies read: stderr is
+        # complete for a run once its marker arrived.
+        self._stderr_cond = threading.Condition(self._stderr_lock)
+        self._stderr_marks = 0
+        self._replies = 0
+
         # Throughput monitoring
         self._exec_times: list[float] = []  # rolling window of exec durations
         self._exec_window_size = 100  # track last N execs
@@ -356,6 +379,10 @@ class PersistentLoader:
             env["AFL_MAP_SIZE"] = "8192"
         env["_CHILD_PID_FILE"] = self._child_pid_file
         env["_PTRACE_ENABLE"] = "1" if self.use_ptrace else "0"
+        env["_STDERR_MARK"] = _STDERR_MARK
+        with self._stderr_lock:
+            self._stderr_marks = 0
+            self._replies = 0
 
         self._proc = subprocess.Popen(
             [sys.executable, self._loader_path],
@@ -397,6 +424,11 @@ class PersistentLoader:
         try:
             for line in proc.stderr:
                 text = line.decode(errors="replace").rstrip()
+                if text == _STDERR_MARK:
+                    with self._stderr_cond:
+                        self._stderr_marks += 1
+                        self._stderr_cond.notify_all()
+                    continue
                 if text:
                     log.debug("loader stderr: %s", text[:200])
                     with self._stderr_lock:
@@ -405,8 +437,20 @@ class PersistentLoader:
             pass
 
     def consume_stderr(self) -> str:
-        """Return and clear stderr accumulated since the last call."""
-        with self._stderr_lock:
+        """Return and clear stderr accumulated since the last call.
+
+        Waits (bounded) for the drain thread to reach the last reply's
+        marker: without it a late report landed on the next run.
+        """
+        with self._stderr_cond:
+            synced = self._stderr_cond.wait_for(
+                lambda: self._stderr_marks >= self._replies, _STDERR_SYNC_TIMEOUT
+            )
+
+            # Resync after a lost marker so one miss costs one wait, not one per run.
+            if not synced:
+                log.debug("loader stderr marker missing; resyncing")
+                self._replies = self._stderr_marks
             lines = list(self._stderr_buffer)
             self._stderr_buffer.clear()
         return "".join(lines)
@@ -445,6 +489,8 @@ class PersistentLoader:
 
         rc = int(parts[1])
         bmp_len = int(parts[2])
+        with self._stderr_lock:
+            self._replies += 1
 
         # Optional trailing tokens relayed by newer loaders:
         # <fault_addr> <rip> <rsp> <rbp> ('-' when absent).

@@ -22,6 +22,7 @@ import threading
 import time
 
 from fuzzer_tool.adapters.process import (
+    CRASH_SIGNALS,
     SIGNAL_CRASH_CODES,
     environ_copy,
     run_target_fast,
@@ -46,6 +47,13 @@ log = logging.getLogger(__name__)
 # seconds. Independent of the per-exec timeout, which the run loop spends in
 # full; see _run_ptrace_coverage.
 _INITIAL_STOP_TIMEOUT = 1.0
+
+# Tracee stderr kept per ptrace run: the tail, as adapters/process.py keeps.
+_PTRACE_STDERR_CAP = 65536
+
+# Signal stops that end a traced run as a crash; any other (SIGCHLD from a
+# helper process, SIGALRM, ...) is delivered and tracing goes on.
+_FATAL_STOP_SIGNALS = frozenset(CRASH_SIGNALS) - {signal.SIGTRAP}
 
 # Hang confirmation (AFL's hang_tmout idea): a timed-out input is re-run once
 # at this multiple of the deadline. A masked crash whose wrapper waits on a
@@ -466,6 +474,19 @@ class TargetRunner:
         return True
 
     def _run_target_ptrace(self, data: bytes) -> tuple[int, str]:
+        """Traced run; the tracee's stderr tail is returned with the result.
+
+        stderr goes to a file, not a pipe: nothing drains a pipe while the
+        loop waits on ptrace stops, so a long report would block the tracee.
+        """
+        with tempfile.TemporaryFile() as err:
+            rc, msg = self._ptrace_run(data, err.fileno())
+            size = os.fstat(err.fileno()).st_size
+            err.seek(max(0, size - _PTRACE_STDERR_CAP))
+            stderr = err.read().decode(errors="replace")
+        return rc, stderr + msg
+
+    def _ptrace_run(self, data: bytes, err_fd: int) -> tuple[int, str]:
         f = self.f
         cov = f.ptrace_cov
         cov.reset_edge_map()
@@ -487,7 +508,7 @@ class TargetRunner:
         pid = os.fork()
         f._last_child_pid = pid
         if pid == 0:
-            self._ptrace_child(stdin_r, stdin_w, libc, f.target)
+            self._ptrace_child(stdin_r, stdin_w, libc, f.target, err_fd)
 
         os.close(stdin_r)
         writer = threading.Thread(target=_write_and_close, args=(stdin_w, data))
@@ -518,8 +539,11 @@ class TargetRunner:
                 writer.join(timeout=f.timeout)
 
     @staticmethod
-    def _ptrace_child(stdin_r: int, stdin_w: int, libc, target: str) -> None:
-        """Forked child: wire stdin, silence output, PTRACE_TRACEME, exec. Never returns."""
+    def _ptrace_child(stdin_r: int, stdin_w: int, libc, target: str, err_fd: int) -> None:
+        """Forked child: wire stdin, stderr to *err_fd*, silence stdout, PTRACE_TRACEME, exec.
+
+        Never returns.
+        """
         # Everything here runs in the forked child, which shares the
         # parent's entire Python stack (pytest included). If execv
         # raises without being caught, the exception unwinds back into
@@ -533,7 +557,7 @@ class TargetRunner:
             os.close(stdin_w)
             devnull = os.open(os.devnull, os.O_WRONLY)
             os.dup2(devnull, 1)
-            os.dup2(devnull, 2)
+            os.dup2(err_fd, 2)
             os.close(devnull)
             ld_preload = os.environ.get("LD_PRELOAD", "")
             if ld_preload:
@@ -639,6 +663,10 @@ class TargetRunner:
             if not os.WIFSTOPPED(status):
                 continue
             sig = os.WSTOPSIG(status)
+            if sig != signal.SIGTRAP and sig not in _FATAL_STOP_SIGNALS:
+                libc.ptrace(PTRACE_CONT, pid, None, ctypes.c_void_p(sig))
+                continue
+
             last_sig = sig
             if sig != signal.SIGTRAP:
                 # Fatal-signal stop (SIGSEGV/SIGBUS/...): capture the
@@ -817,8 +845,12 @@ class TargetRunner:
         # never target behavior; every other negative code is a fatal signal.
         if returncode < 0 and returncode not in (-1, -2):
             return True
-        if returncode in (-1, 0) and ("ASAN" in stderr or "AddressSanitizer" in stderr):
-            return True
+        # A clean or timed-out exit counts only with a real report header,
+        # not a log line that mentions ASAN.
+        if returncode in (-1, 0) and "Sanitizer" in stderr:
+            report = SanitizerReport.parse(stderr)
+            if report and report.is_valid():
+                return True
         return stderr_crash_marker(returncode, stderr) is not None
 
     def is_crash(self, returncode: int, stderr: str) -> bool:

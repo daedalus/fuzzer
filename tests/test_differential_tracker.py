@@ -51,7 +51,9 @@ class TestDifferentialTracker:
         assert "signature" in dt.drift_description.lower() or dt.last_kl_signature > 0.0
 
     def test_extract_signature_asan(self):
-        sig = DifferentialTracker._extract_signature("AddressSanitizer: heap-buffer-overflow", 0)
+        sig = DifferentialTracker._extract_signature(
+            "==1==ERROR: AddressSanitizer: heap-buffer-overflow on address 0x1", 0
+        )
         assert sig.startswith("asan:")
 
     def test_extract_signature_signal(self):

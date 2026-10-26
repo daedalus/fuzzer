@@ -526,6 +526,7 @@ class StatsReporter:
             f._seed_key,
             budget_ms,
             getattr(f, "_crash_files", None),
+            run_fn=f._runner.run_target,
         )
 
     def _print_temperature_control(self, f) -> None:
