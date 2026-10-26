@@ -32,8 +32,8 @@ maintenance (i % 500): run_crash_replays via f._runner.run_target
 
 ## Pending: process
 
-1. **Regression comparison.** ~500 crash/ptrace/forkserver/stderr test files, base `d32da74` vs branch, run in parallel. Diff the FAILED/ERROR sets; any branch-only failure is ours. Known pre-existing: `tests/test_regressions.py::TestEloDecayInitIndependentOfChi2` (2).
-2. **Draft PR** not opened; open after (1).
+1. **Regression comparison: done.** 10,421 tests over ~500 crash/ptrace/forkserver/stderr files. Branch-only failures: none after updating `test_fuzzer.py::test_is_interesting_asan` (pinned the bare-"ASAN" spoof). Pre-existing on base `d32da74`: `test_exhaustive_pool.py::TestCoinFlipRewrite`, `test_regression_hail_mary_gates.py`, `test_regressions.py::TestEloDecayInitIndependentOfChi2` (2). Forkserver tests flaked only under two parallel suites; pass serially.
+2. **Draft PR** opened for this branch.
 3. **impactguard not run.** PyPI install was blocked in the container; the pre-commit hook was uninstalled again. Run `impactguard-check-staged` (or the hook) on the branch and fix any breaking changes (Hard Rule 3). Public surface touched: `CrashVerdict.replaces`, `classify_crash(crash_min_sizes=)`, `run_crash_replays(run_fn=)`, `process.CRASH_SIGNALS` / `EXIT_SIGNAL_BASE` / `signal_number`, `SanitizerReport(location=, pcs=)`, `CorpusManager.triage_skippable`.
 4. **Full suite** not run (14k tests, Hard Rule 50); only affected files.
 5. **Fuzzgoat calibration** (Hard Rule 52) not run: confirm crash counts / unique signatures vs base on a clang ASAN fuzzgoat build.
