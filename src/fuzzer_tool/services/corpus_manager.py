@@ -826,6 +826,7 @@ class CorpusManager:
         f = self.f
         from fuzzer_tool.adapters.filesystem import classify_crash
         from fuzzer_tool.core.crash_metadata import CrashMetadata
+        from fuzzer_tool.core.crash_symbols import crash_pcs
 
         fault_addr = getattr(f, "_last_fault_addr", None)
         # Drain on EVERY crash, not just novel ones: the sink is append-only,
@@ -851,6 +852,7 @@ class CorpusManager:
             crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
             crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
             crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
+            crash_pcs=crash_pcs(shim_sym),
         )
 
         # Preserve the crashing input as corpus material: stored under
