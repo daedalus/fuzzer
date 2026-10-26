@@ -1016,6 +1016,7 @@ def cmd_fuzz(args):
         isolate_crash_fields=getattr(args, "isolate_crash_fields", False),
         crash_symbolize=getattr(args, "crash_symbolize", False),
         abort_is_crash=getattr(args, "abort_is_crash", False),
+        rss_limit_mb=getattr(args, "rss_limit_mb", 0),
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
         stall_release_edges=getattr(args, "stall_release_edges", 1),
@@ -2927,6 +2928,16 @@ def main() -> int:
         "otherwise the raw PC is recorded) and hydrate the crash sidecar "
         "(shim_symbol, and frames/rip/fault_addr when otherwise empty). "
         "Enabled by --hail-mary.",
+    )
+    fuzz_parser.add_argument(
+        "--rss-limit-mb",
+        type=int,
+        default=0,
+        metavar="MB",
+        help="Memory cap for spawned targets (0 = off). Plain targets: RLIMIT_AS, "
+        "so an allocation past it fails. Sanitizer targets: hard_rss_limit_mb / "
+        "malloc_limit_mb (report types rss-limit-exhausted / out-of-memory). "
+        "In-process modes share the fuzzer's process and are not limited.",
     )
     fuzz_parser.add_argument(
         "--abort-is-crash",

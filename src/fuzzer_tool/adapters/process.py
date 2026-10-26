@@ -14,6 +14,7 @@ import contextlib
 import hashlib
 import logging
 import os
+import resource
 import select
 import signal
 import subprocess
@@ -162,6 +163,34 @@ class _TailBuffer:
 
     def getvalue(self) -> bytes:
         return b"".join(self._chunks)[-self._cap :]
+
+
+# ── Memory limit (--rss-limit-mb) ──────────────────────────────────────
+#
+# RLIMIT_AS on each spawned child, 0 = off. Set right after posix_spawn
+# (it has no rlimit action): a target that reads its input first is bound
+# before it allocates. fuzz_loader.c reads RSS_LIMIT_ENV and calls
+# setrlimit before exec. Never for sanitizer targets: their shadow memory
+# is a huge address-space reservation (see services/fuzzer.py).
+
+RSS_LIMIT_ENV = "__FUZZ_RSS_LIMIT_MB"
+_MB = 1 << 20
+_rss_limit_bytes = 0
+
+
+def set_rss_limit(mb: int) -> None:
+    """Cap the address space of children spawned from here on (0 = off)."""
+    global _rss_limit_bytes
+    _rss_limit_bytes = max(0, mb) * _MB
+
+
+def _limit_child(pid: int) -> None:
+    """Apply the RLIMIT_AS cap to a just-spawned child; no-op when off."""
+    if not _rss_limit_bytes:
+        return
+    # The child may already be gone (crashed on startup): nothing to bound.
+    with contextlib.suppress(ProcessLookupError):
+        resource.prlimit(pid, resource.RLIMIT_AS, (_rss_limit_bytes, _rss_limit_bytes))
 
 
 def _track(pid: int) -> None:
@@ -434,6 +463,7 @@ def _spawn_capture(
             setsigdef=_CHILD_DEFAULT_SIGNALS,
         )
         _track(pid)
+        _limit_child(pid)
 
         # Close the child's ends of both pipes.
         keep = (stderr_r, stdin_w)
@@ -709,6 +739,7 @@ def run_target_fast(
         os.close(stdin_fd)
         os.close(stderr_w)
         _track(pid)
+        _limit_child(pid)
 
         # Open perf counters on the child PID while still running
         # (inherit=1 doesn't survive exec, so we attach directly).
