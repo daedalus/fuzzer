@@ -2160,6 +2160,8 @@ class Fuzzer:
 
             self._crash_sym_sink = CrashSymbolSink()
             self._crash_sym_sink.enable()
+            # Fuzzers that never reach cleanup (tests, aborted setup) still drop the file.
+            atexit.register(self._crash_sym_sink.close)
         self.target_args = target_args or []
         self.max_corpus = max_corpus
         self.max_corpus_bytes = max_corpus_bytes
