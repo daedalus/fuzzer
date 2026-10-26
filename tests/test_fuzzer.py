@@ -72,7 +72,10 @@ class TestFuzzerUnit:
 
     def test_is_interesting_asan(self):
         f = self._make_fuzzer()
-        assert f._is_interesting(0, "ASAN detected")
+        assert f._is_interesting(
+            0, "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1"
+        )
+        assert not f._is_interesting(0, "ASAN detected")  # a log line is no report
 
     def test_with_markov(self):
         f = self._make_fuzzer(markov_order=1, markov_generate=True)
