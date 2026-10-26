@@ -496,6 +496,9 @@ ADAPTIVE_TIMEOUT_MAX_GROWTH = 10.0
 # Min-cover stat: wait COVER_BUDGET x last solve time between solves (<= ~1/COVER_BUDGET overhead).
 COVER_BUDGET = 50
 MAX_CRASH_SIGS = 10_000  # max unique crash signatures before pruning old entries
+# Crashing-input hashes kept (~109 B each). Forgetting is safe: a repeat input
+# re-classifies to a known (or on-disk) signature and is not written again.
+MAX_CRASH_HASHES = 200_000
 KERNEL_CRASHES_MAX = 500  # max kernel-verified crashes retained
 SEEN_HASHES_MAX = 200_000  # max unique seed hashes retained
 EXEC_BLOOM_CAPACITY = 500_000  # executed-input filter capacity before generational wipe
@@ -6245,9 +6248,11 @@ class Fuzzer:
         Keeps the most frequent crash signatures and evicts all data for
         the least frequent ones; on equal counts the newest stay (the oldest
         count-1 bugs are the least likely to recur). Leaves crash_hashes
-        intact (small memory footprint, prevents duplicate disk writes); an
-        evicted signature that recurs is recognised on disk by save_crash.
+        until they exceed MAX_CRASH_HASHES; an evicted signature that recurs
+        is recognised on disk by save_crash.
         """
+        if len(self.crash_hashes) > MAX_CRASH_HASHES:
+            self.crash_hashes.clear()
         if len(self.crash_sigs) <= MAX_CRASH_SIGS:
             return
         # Keep top 75%: count descending, then newest first; insertion order kept.

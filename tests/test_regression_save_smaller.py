@@ -86,6 +86,7 @@ def test_regression_prune_drops_min_size_by_signature(tmp_path, monkeypatch) -> 
         crash_min_sizes=c.min_sizes,
         _crash_replays={},
         _crash_files={},
+        crash_hashes=set(),
     )
     monkeypatch.setattr(fuzzer_mod, "MAX_CRASH_SIGS", 1)
     Fuzzer._prune_crash_data(fake)  # type: ignore[arg-type]
@@ -99,7 +100,12 @@ def test_regression_prune_drops_min_size_by_signature(tmp_path, monkeypatch) -> 
 
 def _fake(sigs: dict[str, int]) -> SimpleNamespace:
     return SimpleNamespace(
-        crash_sigs=sigs, crash_frames={}, crash_min_sizes={}, _crash_replays={}, _crash_files={}
+        crash_sigs=sigs,
+        crash_frames={},
+        crash_min_sizes={},
+        _crash_replays={},
+        _crash_files={},
+        crash_hashes=set(),
     )
 
 
@@ -130,3 +136,33 @@ def test_regression_pruned_signature_not_resaved(tmp_path) -> None:
     assert not c.save(b"second", _HBO)
     assert c.inputs() == [b"first"]
     assert c.sigs == {next(iter(c.sigs)): 1}
+
+
+def test_regression_crash_hashes_bounded(monkeypatch) -> None:
+    # One entry per crashing exec, repeats included: it grew without bound.
+    fake = _fake({"sig": 1})
+    fake.crash_hashes = {f"{i:016x}" for i in range(9)}
+    monkeypatch.setattr(fuzzer_mod, "MAX_CRASH_HASHES", 8)
+    Fuzzer._prune_crash_data(fake)  # type: ignore[arg-type]
+
+    assert len(fake.crash_hashes) <= 8
+
+
+def test_crash_hashes_under_bound_kept(monkeypatch) -> None:
+    # Falsification: below the bound nothing is forgotten.
+    fake = _fake({"sig": 1})
+    fake.crash_hashes = {f"{i:016x}" for i in range(8)}
+    monkeypatch.setattr(fuzzer_mod, "MAX_CRASH_HASHES", 8)
+    Fuzzer._prune_crash_data(fake)  # type: ignore[arg-type]
+
+    assert len(fake.crash_hashes) == 8
+
+
+def test_forgotten_input_hash_not_resaved(tmp_path) -> None:
+    # Edge: a repeat input after the hashes were dropped is still a repeat.
+    c = _Crashes(tmp_path)
+    c.save(b"same", _HBO)
+    c.hashes.clear()
+
+    assert not c.save(b"same", _HBO)
+    assert c.inputs() == [b"same"]
