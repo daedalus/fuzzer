@@ -92,3 +92,41 @@ def test_regression_prune_drops_min_size_by_signature(tmp_path, monkeypatch) -> 
 
     assert set(fake.crash_sigs) == {frequent}
     assert set(fake.crash_min_sizes) == {frequent}
+
+
+# ── Prune policy ────────────────────────────────────────────────────────
+
+
+def _fake(sigs: dict[str, int]) -> SimpleNamespace:
+    return SimpleNamespace(
+        crash_sigs=sigs, crash_frames={}, crash_min_sizes={}, _crash_replays={}, _crash_files={}
+    )
+
+
+def test_regression_prune_keeps_newest_on_ties(monkeypatch) -> None:
+    # Equal counts: the newest (most likely to be hit again) survive.
+    fake = _fake({f"sig{i}": 1 for i in range(8)})
+    monkeypatch.setattr(fuzzer_mod, "MAX_CRASH_SIGS", 4)
+    Fuzzer._prune_crash_data(fake)  # type: ignore[arg-type]
+
+    assert list(fake.crash_sigs) == ["sig5", "sig6", "sig7"]
+
+
+def test_prune_keeps_frequent_first(monkeypatch) -> None:
+    # Falsification: frequency still outranks age.
+    fake = _fake({"old_hot": 9, **{f"sig{i}": 1 for i in range(7)}})
+    monkeypatch.setattr(fuzzer_mod, "MAX_CRASH_SIGS", 4)
+    Fuzzer._prune_crash_data(fake)  # type: ignore[arg-type]
+
+    assert list(fake.crash_sigs) == ["old_hot", "sig5", "sig6"]
+
+
+def test_regression_pruned_signature_not_resaved(tmp_path) -> None:
+    # Forgotten in memory, still on disk: a re-hit is a repeat, not a new bug.
+    c = _Crashes(tmp_path)
+    c.save(b"first", _HBO)
+    c.sigs.clear()
+
+    assert not c.save(b"second", _HBO)
+    assert c.inputs() == [b"first"]
+    assert c.sigs == {next(iter(c.sigs)): 1}

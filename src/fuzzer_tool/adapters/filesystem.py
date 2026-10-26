@@ -1188,6 +1188,10 @@ def save_crash(
     if metadata is None:
         metadata = CrashMetadata()
 
+    # A signature pruned from memory (_prune_crash_data) may still be on disk.
+    if not v.replaces and _cluster_files(crashes_dir, metadata.build_cluster_id(sig)):
+        return False
+
     # Smaller trigger of a known signature: drop its files, then write this one.
     if crash_min_sizes is not None:
         if v.replaces:
@@ -1264,14 +1268,22 @@ def _publish_crash(crashes_dir: Path, base_name: str, artifacts) -> None:
 _CRASH_EXTS = (".bin", ".txt", ".sh", ".hex", ".json")
 
 
-def _evict_crash(crashes_dir: Path, cluster_id: str) -> None:
-    """Remove the on-disk files of signature cluster *cluster_id*.
+def _cluster_files(crashes_dir: Path, cluster_id: str) -> list[Path]:
+    """On-disk artifacts of signature cluster *cluster_id*.
 
     Names are ``crash_<ts>_<cluster_id>_<san>_<err>.<ext>`` (see save_crash).
     """
-    for f in crashes_dir.glob(f"crash_*_{cluster_id}_*"):
-        if f.suffix in _CRASH_EXTS and f.name.split("_")[2] == cluster_id:
-            f.unlink(missing_ok=True)
+    return [
+        f
+        for f in crashes_dir.glob(f"crash_*_{cluster_id}_*")
+        if f.suffix in _CRASH_EXTS and f.name.split("_")[2] == cluster_id
+    ]
+
+
+def _evict_crash(crashes_dir: Path, cluster_id: str) -> None:
+    """Remove the on-disk files of signature cluster *cluster_id*."""
+    for f in _cluster_files(crashes_dir, cluster_id):
+        f.unlink(missing_ok=True)
 
 
 def _crash_name_parts(report: SanitizerReport | None, returncode: int) -> tuple[str, str]:
