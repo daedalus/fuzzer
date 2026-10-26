@@ -89,6 +89,13 @@ _UBSAN_RUNTIME_TYPES = (
 )
 _UBSAN_GENERIC_TYPE = "undefined"
 
+# ASAN headers that spell the bug as a sentence; the names are its SUMMARY's.
+# Both used to parse as "attempting".
+_ASAN_HEADER_TYPES = (
+    ("attempting double-free", "double-free"),
+    ("attempting free on address which was not malloc()-ed", "bad-free"),
+)
+
 # Stack frame line: "#0 0x4011d6 in foo a.c:1" or unsymbolized "#0 0x4011d6  (/bin/t+0x11d6)".
 _FRAME_LINE_RE = re.compile(
     r"^\s*#(\d+)\s+(0x[0-9a-fA-F]+)\s+(?:in\s+(\S+)|\(([^)\s]+)\))", re.MULTILINE
@@ -146,6 +153,7 @@ ASAN_EXPLOITABILITY = {
     "allocation-size-too-big": "MEDIUM",
     "invalid-malloc-size": "MEDIUM",
     "attempting-free-on-non-deallocated-memory": "MEDIUM",
+    "bad-free": "MEDIUM",
     "negative-size-param": "MEDIUM",
     "initialization-order-fiasco": "LOW",
     "odr-violation": "LOW",
@@ -359,6 +367,7 @@ class SanitizerReport:
             if spec:
                 error_type = spec.group(1).strip()
                 break
+        error_type = next((t for phrase, t in _ASAN_HEADER_TYPES if phrase in header), error_type)
 
         addr_m = SANITIZER_FAULT_ADDR_RE.search(header)
         fault_addr = addr_m.group(1) if addr_m else ""

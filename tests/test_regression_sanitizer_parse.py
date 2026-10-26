@@ -222,3 +222,36 @@ def test_fuzzy_match_folds_inlined_frame() -> None:
 
     assert not v.novel
     assert v.matched_signature == next(iter(_known(known)))
+
+
+# ── ASAN "attempting ..." headers ───────────────────────────────────────
+
+
+def test_regression_asan_bad_free_type() -> None:
+    # Was error type "attempting": bad-free and double-free shared it.
+    stderr = (
+        "==1==ERROR: AddressSanitizer: attempting free on address which was not"
+        " malloc()-ed: 0x50200003182f in thread T0\n    #0 0x4 in free\n"
+    )
+    report = SanitizerReport.parse(stderr)
+
+    assert report is not None
+    assert report.error_type == "bad-free"
+    assert report.exploitability == "MEDIUM"
+
+
+def test_regression_asan_double_free_type() -> None:
+    stderr = "==1==ERROR: AddressSanitizer: attempting double-free on 0x602 in thread T0:\n"
+    report = SanitizerReport.parse(stderr)
+
+    assert report is not None
+    assert report.error_type == "double-free"
+    assert report.exploitability == "CRITICAL"
+
+
+def test_asan_plain_type_unchanged() -> None:
+    # Falsification: hyphenated types still come from the header token.
+    report = SanitizerReport.parse(_HBO)
+
+    assert report is not None
+    assert report.error_type == "heap-buffer-overflow"
