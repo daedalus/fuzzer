@@ -742,6 +742,25 @@ def _asan_fatal_in_process(target_path: str) -> bool:
     return False
 
 
+class AbortMode(Enum):
+    """What the shim's abort() override does (``--abort-is-crash``)."""
+
+    RETURN = "return"  # marker + return: library assertions are not crashes
+    CRASH = "crash"  # raise SIGABRT
+
+
+# Read by afl_shim.c's __afl_shim_abort.
+_ABORT_ENV = "__AFL_ABORT_CRASH"
+
+
+def _export_abort_mode(mode: AbortMode) -> None:
+    """Export *mode* to targets started from here on (env, inherited)."""
+    if mode is AbortMode.CRASH:
+        os.environ[_ABORT_ENV] = "1"
+        return
+    os.environ.pop(_ABORT_ENV, None)
+
+
 class TargetRuntime(Enum):
     """Whether a sanitizer runtime is linked into (or needed by) the target."""
 
@@ -1690,6 +1709,7 @@ class Fuzzer:
         continue_until_crash=False,
         isolate_crash_fields=False,
         crash_symbolize=False,
+        abort_is_crash=False,
         multi_targets=None,
         debug=False,
         enable_regex_bomb=False,
@@ -2154,6 +2174,7 @@ class Fuzzer:
         # appends it to a sink file; save_crash() drains it into the sidecar.
         # os.environ was snapshotted above, so _restore_environ() removes it.
         self.crash_symbolize = crash_symbolize
+        _export_abort_mode(AbortMode.CRASH if abort_is_crash else AbortMode.RETURN)
         self._crash_sym_sink = None
         if _sym_sink_wanted(crash_symbolize, _target_runtime(target)):
             from fuzzer_tool.core.crash_symbols import CrashSymbolSink

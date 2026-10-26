@@ -73,6 +73,12 @@ Signatures (frames, unsymbolized names) and stack hashes changed; resumed older 
 **Fixed `3d20f89`**: `MAX_CRASH_HASHES = 200_000`, cleared past it (safe given on-disk recognition).
 Existing TODO (2026-09-24); unchanged.
 
+## Follow-ups shipped (2026-10-26, second pass)
+
+- **Crash-site signatures** (`dff50f6`, `63b94bb`): plain `.so` SIGSEGVs were one `signal:11` bucket. `signal:N@<page offsets>` from the shim crash record; sink default-on for targets without a sanitizer runtime (`fuzzer._target_runtime`). Sink file closed at exit (`atexit`). Note: sancov executables link clang's UBSAN standalone runtime; their `UndefinedBehaviorSanitizer: SEGV` report already splits sites.
+- **`--abort-is-crash`**: shim `__afl_shim_abort` raises SIGABRT when `__AFL_ABORT_CRASH=1` (`fuzzer._export_abort_mode`). Default unchanged (FFmpeg `av_assert0` flood). Excluded from `--hail-mary`. Targets must be rebuilt (Hard Rule 56); SHM layout unchanged, no `__AFL_SHM_LAYOUT` bump.
+- Test runs left ~115 empty `/tmp/fuzzer_crashsym_*` files from before the `atexit` fix; deleting them was blocked in this session.
+
 ## Verify
 
 ```

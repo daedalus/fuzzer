@@ -1014,6 +1014,7 @@ def cmd_fuzz(args):
         continue_until_crash=getattr(args, "continue_until_crash", False),
         isolate_crash_fields=getattr(args, "isolate_crash_fields", False),
         crash_symbolize=getattr(args, "crash_symbolize", False),
+        abort_is_crash=getattr(args, "abort_is_crash", False),
         calibrate=getattr(args, "calibrate", 0),
         stall_threshold=getattr(args, "stall", 1000),
         stall_release_edges=getattr(args, "stall_release_edges", 1),
@@ -2450,6 +2451,9 @@ def cmd_sweep(args):
 # ctx_sensitive (--ctx-sensitive / --no-ctx-sensitive) is excluded: it changes
 # every edge id, so --hail-mary would stop being comparable to any other run.
 #
+# abort_is_crash (--abort-is-crash) is excluded: it redefines what a crash
+# is (assertions), not a strategy.
+#
 # crash_explore (--crash-explore) is excluded: a mode switch (AFL -C), not a
 # strategy. It zeroes has_new_coverage on every non-crashing round, so under
 # --hail-mary nothing was admitted and the EdgeTracker froze.
@@ -2920,6 +2924,14 @@ def main() -> int:
         "otherwise the raw PC is recorded) and hydrate the crash sidecar "
         "(shim_symbol, and frames/rip/fault_addr when otherwise empty). "
         "Enabled by --hail-mary.",
+    )
+    fuzz_parser.add_argument(
+        "--abort-is-crash",
+        action="store_true",
+        help="Make abort() in shim-compiled code a crash (SIGABRT). By default "
+        "the shim turns it into a stderr marker and a return, so library "
+        "assertions (FFmpeg av_assert0) do not flood the crash set. Not "
+        "enabled by --hail-mary.",
     )
     fuzz_parser.add_argument(
         "--hail-mary",

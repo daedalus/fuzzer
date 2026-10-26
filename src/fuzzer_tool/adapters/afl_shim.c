@@ -6167,10 +6167,22 @@ __AFL_GCC_NO_COV void exit(int status) {
  * (stdlib.h declares abort() as __noreturn__).  The preprocessor
  * replaces all abort() calls with __afl_shim_abort() before the compiler
  * sees the declaration mismatch.                                           */
+/* --abort-is-crash (__AFL_ABORT_CRASH=1): abort() raises SIGABRT, a real
+ * crash, for targets whose assertions are bugs. Read once, on first abort. */
+__AFL_GCC_NO_COV static int __afl_abort_is_crash(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *v = getenv("__AFL_ABORT_CRASH");
+        mode = v && v[0] == '1';
+    }
+    return mode;
+}
+
 __AFL_GCC_NO_COV static void __afl_shim_abort(void) {
     static const char msg[] = "[shim] abort() intercepted\n";
     __afl_health[__AFL_HEALTH_ABORTS_INTERCEPTED]++;
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    if (__afl_abort_is_crash()) raise(SIGABRT);   /* returns only if SIGABRT is blocked */
 }
 #define abort() __afl_shim_abort()
 
