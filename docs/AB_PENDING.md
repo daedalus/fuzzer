@@ -18,7 +18,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 
 | Feature (switch) | What | St | A/B owed |
 |---|---|---|---|
-| Novel crash reward (`--novel-crash-reward`) | Only new-signature crashes pay operators / Elo | N | fuzzgoat noasan, 20 seeds x 10k: unique W8 L5 T7 p=0.58, edges W11 L9 p=0.82 (median +20); control `novel-crash-reward-ctl` W6 L5 / W10 L9, p=1. Too few crashes at 10k; 50k run owed |
+| Novel crash reward (`--novel-crash-reward`) | Only new-signature crashes pay operators / Elo | N | fuzzgoat noasan, 20 seeds. 10k: unique W8 L5 T7 p=0.58, edges W11 L9 p=0.82. 50k: unique W8 L8 T4 p=1, edges W9 L11 p=0.82 (median -13), crashes W9 L11. Controls (`novel-crash-reward-ctl`) clean: 50k unique W4 L6 p=0.75, edges W11 L9 p=0.82. Fuzzgoat yields a few crashes per run, so repeat-crash reward is rare there: needs a target where one shallow crash dominates (FFmpeg asserts with `--abort-is-crash`). Stays opt-in |
 
 ## Seed scheduling
 
