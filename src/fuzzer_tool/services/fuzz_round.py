@@ -2007,6 +2007,8 @@ class FuzzRound:
             and str(f.target).lower().endswith((".so", ".dylib", ".dll"))
         ):
             return
+        if f._corpus_manager.triage_skippable(self._mutated, self._returncode, self._stderr):
+            return
         if f._triage_ok is None:
             f._triage_ok = ptrace_available()
         if f._triage_ok:

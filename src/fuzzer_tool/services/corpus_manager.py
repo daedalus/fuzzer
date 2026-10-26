@@ -919,6 +919,32 @@ class CorpusManager:
             self._push_crash(result, returncode, stderr)
         return result
 
+    def triage_skippable(self, data: bytes, returncode: int, stderr: str) -> bool:
+        """True when a fault-address triage cannot change this crash's fate.
+
+        A repeat input is dropped unread, and a sanitizer signature ignores
+        the fault address, so a known one stays known. A signal signature
+        may still split on the address (``signal:11@0x0``).
+        """
+        from fuzzer_tool.adapters.filesystem import classify_crash
+
+        f = self.f
+        verdict = classify_crash(
+            data,
+            returncode,
+            stderr,
+            f.crash_hashes,
+            f.crash_sigs,
+            crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
+            crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
+            crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
+        )
+        if verdict.duplicate_input:
+            return True
+
+        sanitizer = verdict.report is not None and verdict.report.is_valid()
+        return sanitizer and not verdict.novel
+
     def _record_frames(self, verdict) -> None:
         """Remember the first valid stack frames seen for each crash signature."""
         f = self.f
