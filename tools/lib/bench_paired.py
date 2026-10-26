@@ -147,6 +147,8 @@ ARMS: dict[str, list[str]] = {
     # same single-variable reason; deliberately not combined with
     # --shaped-reward or --op-credit.
     "elo-continuum-reward": ["--elo", "--mc-bandit", "--continuum-reward"],
+    # Repeat crashes stop paying operators (fuzz_round._judge). Metric: unique.
+    "novel-crash-reward": ["--novel-crash-reward"],
     # Generation group (docs/handover/handover_generators_2026-09-20.md G0).
     # Each pairs against the baseline named in ARM_BASELINES.
     #
@@ -345,6 +347,8 @@ UNWIRED_ARMS = {
 _EDGES = re.compile(r"Edges discovered:\s+(\d+)")
 _CORPUS = re.compile(r"Corpus:\s+(\d+)")
 _CRASHES = re.compile(r"Crashes:\s+(\d+)")
+# "Crashes:  7 (4 unique signatures)": distinct bugs, not crashing execs.
+_UNIQUE = re.compile(r"Crashes:\s+\d+ \((\d+) unique")
 # Campaign summary prints "Avg eps:"; the report section "Avg throughput:".
 _EPS = re.compile(r"(?:Avg eps|Avg throughput):\s+([\d.]+)")
 
@@ -358,6 +362,7 @@ def _parse(log: str) -> dict:
         "edges": one(_EDGES),
         "corpus": one(_CORPUS),
         "crashes": one(_CRASHES),
+        "unique": one(_UNIQUE),
         "eps": float(m.group(1)) if (m := _EPS.search(log)) else 0.0,
         "coverage_attached": _EDGES.search(log) is not None and one(_EDGES) > 0,
     }
@@ -1105,7 +1110,9 @@ def main() -> int:
     a = sub.add_parser("analyse", help="paired analysis of recorded runs")
     a.add_argument("files", nargs="+")
     a.add_argument("--baseline", default="baseline")
-    a.add_argument("--metric", default="edges", choices=("edges", "corpus", "crashes", "eps"))
+    a.add_argument(
+        "--metric", default="edges", choices=("edges", "corpus", "crashes", "unique", "eps")
+    )
     a.add_argument(
         "--by-target",
         action="store_true",

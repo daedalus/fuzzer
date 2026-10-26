@@ -33,3 +33,14 @@ class InputPlacement(Enum):
 
     EXACT = "exact"
     GUARD = "guard"
+
+
+class CrashReward(Enum):
+    """Which crashes pay the operators that produced them (``--novel-crash-reward``).
+
+    ANY    every crash, repeats included (default).
+    NOVEL  only a crash that would be saved: repeats of a known bug do not.
+    """
+
+    ANY = "any"
+    NOVEL = "novel"

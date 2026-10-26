@@ -89,7 +89,7 @@ from fuzzer_tool.core.orbit_dedup import canonical
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check
-from fuzzer_tool.core.run_mode import InputPlacement, RunMode, Switch
+from fuzzer_tool.core.run_mode import CrashReward, InputPlacement, RunMode, Switch
 from fuzzer_tool.core.running_stats import RunningMoments
 from fuzzer_tool.core.sanitizer import SanitizerReport
 from fuzzer_tool.core.scaling_exponent import ScalingExponentDetector
@@ -761,57 +761,23 @@ def _export_abort_mode(mode: AbortMode) -> None:
     os.environ.pop(_ABORT_ENV, None)
 
 
-class TargetRuntime(Enum):
-    """Whether a sanitizer runtime is linked into (or needed by) the target."""
+class SymMode(Enum):
+    """What the shim's crash record holds (``$__AFL_CRASH_SYM_OUT``)."""
 
-    PLAIN = "plain"
-    SANITIZER = "sanitizer"
-
-
-# Symbols only a sanitizer runtime (or its instrumentation) brings. The shim
-# itself defines __sanitizer_cov_* and weak __asan_* hooks, so those do not
-# count; clang links the UBSAN standalone runtime (with
-# __sanitizer_symbolize_pc) into every sancov executable.
-_RUNTIME_SYMBOLS = frozenset(
-    {"__asan_init", "__msan_init", "__tsan_init", "__sanitizer_symbolize_pc"}
-)
-_UBSAN_HANDLER_PREFIX = "__ubsan_handle_"
-_WEAK_TYPES = frozenset("wv")
+    RAW = "raw"  # PCs only: names the crash site for dedup, no symbolizer cost
+    SYMBOLIZE = "symbolize"  # --crash-symbolize: also function/file/line
 
 
-def _runtime_symbol(line: str) -> bool:
-    """``nm`` line naming a sanitizer runtime symbol, defined or needed (not weak)."""
-    parts = line.split()
-    if len(parts) < 2 or parts[-2] in _WEAK_TYPES:
-        return False
-    name = parts[-1]
-    return name in _RUNTIME_SYMBOLS or name.startswith(_UBSAN_HANDLER_PREFIX)
+# Read by afl_shim.c's __afl_sym_emit.
+_SYM_RAW_ENV = "__AFL_CRASH_SYM_RAW"
 
 
-def _target_runtime(target_path: str) -> TargetRuntime:
-    """SANITIZER when ``nm`` finds a sanitizer runtime symbol."""
-    import subprocess
-
-    for flags in ([], ["-D"]):
-        try:
-            r = subprocess.run(["nm", *flags, target_path], capture_output=True, timeout=10)
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            continue
-        if r.returncode != 0:
-            continue
-        if any(_runtime_symbol(line) for line in r.stdout.decode(errors="replace").splitlines()):
-            return TargetRuntime.SANITIZER
-    return TargetRuntime.PLAIN
-
-
-def _sym_sink_wanted(crash_symbolize: bool, runtime: TargetRuntime) -> bool:
-    """Shim crash-record sink: always for --crash-symbolize, else for plain targets.
-
-    A plain target's record is PCs only (no runtime to symbolize, so cheap)
-    and names its crash site for dedup (``signal:11@0x1d6@...``). Sanitizer
-    targets have a report, and symbolizing every crash there would cost.
-    """
-    return crash_symbolize or runtime is TargetRuntime.PLAIN
+def _export_sym_mode(mode: SymMode) -> None:
+    """Export *mode* to targets started from here on (env, inherited)."""
+    if mode is SymMode.RAW:
+        os.environ[_SYM_RAW_ENV] = "1"
+        return
+    os.environ.pop(_SYM_RAW_ENV, None)
 
 
 def _detect_ubsan(target_path: str) -> bool:
@@ -1441,6 +1407,7 @@ class Fuzzer:
         ecofuzz_mc_penalty_multiplier=None,
         metropolis=False,
         crash_explore=False,
+        novel_crash_reward=False,
         uninit_probe=False,
         i2s_fixpoint=False,
         i2s_fixpoint_iters=8,
@@ -2170,19 +2137,20 @@ class Fuzzer:
         self.dictionary = dictionary or []
         self.file_mode = file_mode
         self.isolate_crash_fields = isolate_crash_fields
-        # --crash-symbolize: the shim symbolizes the faulting PC on a crash and
-        # appends it to a sink file; save_crash() drains it into the sidecar.
+        # Shim crash record (PCs + backtrace per crash), always on: a signal
+        # crash without a sanitizer report (plain target, or a fault the
+        # shim's guard catches first) is named by its PCs. --crash-symbolize
+        # also resolves names; otherwise PCs only, no symbolizer cost.
         # os.environ was snapshotted above, so _restore_environ() removes it.
         self.crash_symbolize = crash_symbolize
         _export_abort_mode(AbortMode.CRASH if abort_is_crash else AbortMode.RETURN)
-        self._crash_sym_sink = None
-        if _sym_sink_wanted(crash_symbolize, _target_runtime(target)):
-            from fuzzer_tool.core.crash_symbols import CrashSymbolSink
+        _export_sym_mode(SymMode.SYMBOLIZE if crash_symbolize else SymMode.RAW)
+        from fuzzer_tool.core.crash_symbols import CrashSymbolSink
 
-            self._crash_sym_sink = CrashSymbolSink()
-            self._crash_sym_sink.enable()
-            # Fuzzers that never reach cleanup (tests, aborted setup) still drop the file.
-            atexit.register(self._crash_sym_sink.close)
+        self._crash_sym_sink = CrashSymbolSink()
+        self._crash_sym_sink.enable()
+        # Fuzzers that never reach cleanup (tests, aborted setup) still drop the file.
+        atexit.register(self._crash_sym_sink.close)
         self.target_args = target_args or []
         self.max_corpus = max_corpus
         self.max_corpus_bytes = max_corpus_bytes
@@ -3699,6 +3667,9 @@ class Fuzzer:
         self._metropolis = metropolis
         # --crash-explore (AFL -C): keep only crashes on new crash paths.
         self._crash_explorer = CrashExplorer() if crash_explore else None
+        # --novel-crash-reward: only crashes that would be saved pay operators.
+        self._crash_reward = CrashReward.NOVEL if novel_crash_reward else CrashReward.ANY
+        self._pending_crash_sym = None  # shim record held between novelty check and save
         # --uninit-probe: re-run admitted inputs under two heap fills.
         self._uninit_probe = self._build_uninit_probe() if uninit_probe else None
         # --i2s-fixpoint: iterate Redqueen on admitted inputs to self-consistency.

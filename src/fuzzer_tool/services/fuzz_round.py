@@ -39,7 +39,7 @@ from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cmplog import CmplogRecords
 from fuzzer_tool.core.one_fifth import Outcome as FifthOutcome
 from fuzzer_tool.core.ro_rd import classify_operator_name
-from fuzzer_tool.core.run_mode import RunMode, Switch
+from fuzzer_tool.core.run_mode import CrashReward, RunMode, Switch
 from fuzzer_tool.core.schedulers.pos_base import Outcome
 from fuzzer_tool.core.secretary import SecretaryStopping
 from fuzzer_tool.core.validity import Validity
@@ -120,6 +120,7 @@ class FuzzRound:
         "_applicable_now",
         "_is_timeout",
         "_is_crash",
+        "_rewarded_crash",
         "_is_interesting",
         "_is_slow",
         "_scanned_shm",
@@ -1491,8 +1492,16 @@ class FuzzRound:
         # but it arrives during exactly the stretches where the edge signal
         # is silent, which is when the cmplog-band operators are doing their
         # work and getting paid nothing for it.
+        #
+        # --novel-crash-reward: a repeat of a known bug pays nothing, or the
+        # operators that keep re-triggering one shallow crash keep winning.
+        f = self._f
+        self._rewarded_crash = self._is_crash and (
+            f._crash_reward is CrashReward.ANY
+            or f._corpus_manager.crash_is_novel(self._mutated, self._returncode, self._stderr)
+        )
         self._success = bool(
-            self._is_crash
+            self._rewarded_crash
             or self._is_interesting
             or self._has_new_coverage
             or self._is_slow
@@ -1873,7 +1882,9 @@ class FuzzRound:
             # denominator diluted everyone else's share.
             raw_share = f._last_new_edge_count / len(winners)
             edge_counts = {op: f._cost_adjusted_weight(op, raw_share) for op in winners}
-        f._elo.record_round(unique_ops, winners, edge_counts=edge_counts, crash=self._is_crash)
+        f._elo.record_round(
+            unique_ops, winners, edge_counts=edge_counts, crash=self._rewarded_crash
+        )
         # Apply periodic decay
         f._elo_decay_counter += 1
         if f._elo_decay_counter >= f._elo_decay_interval:

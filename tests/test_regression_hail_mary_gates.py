@@ -61,6 +61,7 @@ _EXCLUDED_OPT_IN = frozenset(
     {
         "hail_mary",
         "abort_is_crash",  # redefines a crash (assertions), not a strategy
+        "novel_crash_reward",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "lightweight",  # the inverse preset; the two are mutually exclusive
         "no_cmplog",  # opt-OUT of comparison tracing; --hail-mary must not turn cmplog off
         "resume",
