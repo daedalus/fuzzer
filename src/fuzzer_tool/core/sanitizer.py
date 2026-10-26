@@ -66,6 +66,7 @@ SANITIZER_ERROR_LINE_RE = re.compile(
 
 # UBSAN diagnostic line: "/src/a.c:3:5: runtime error: signed integer overflow: ..."
 _UBSAN_RUNTIME_RE = re.compile(r"^(\S+:\d+:\d+): runtime error: ([^\n]*)", re.MULTILINE)
+_UBSAN_RUNTIME_MARK = ": runtime error: "
 _UBSAN = "UndefinedBehaviorSanitizer"
 
 # "runtime error:" text -> UBSAN check name; first match wins, so specific
@@ -180,22 +181,18 @@ _ASAN_READ_DOWNGRADE = {
 }
 
 
-def _frame_name(m: re.Match) -> str:
-    """Function name, else "module+offset" for an unsymbolized frame."""
-    return m.group(3) or m.group(4).rsplit("/", 1)[-1]
-
-
 def _crash_stack(text: str, start: int = 0) -> list[tuple[int, str]]:
     """``(pc, frame)`` of the first stack at or after *start*.
 
     Stops at the next ``#0``: the allocation / free stacks that follow
-    (e.g. "allocated by thread T0 here:") belong to other sites.
+    (e.g. "allocated by thread T0 here:") belong to other sites. A frame is
+    its function name, else "module+offset" when unsymbolized.
     """
     out: list[tuple[int, str]] = []
-    for m in _FRAME_LINE_RE.finditer(text, start):
-        if m.group(1) == "0" and out:
+    for idx, pc, name, module in _FRAME_LINE_RE.findall(text, start):
+        if idx == "0" and out:
             break
-        out.append((int(m.group(2), 16), _frame_name(m)))
+        out.append((int(pc, 16), name or module.rsplit("/", 1)[-1]))
     return out
 
 
@@ -331,7 +328,7 @@ class SanitizerReport:
             Parsed report, or None if no sanitizer output found.
         """
         m = SANITIZER_ERROR_LINE_RE.search(stderr)
-        u = _UBSAN_RUNTIME_RE.search(stderr)
+        u = _UBSAN_RUNTIME_RE.search(stderr) if _UBSAN_RUNTIME_MARK in stderr else None
         if not m and not u:
             return None
 
