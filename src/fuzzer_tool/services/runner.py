@@ -817,8 +817,12 @@ class TargetRunner:
         # never target behavior; every other negative code is a fatal signal.
         if returncode < 0 and returncode not in (-1, -2):
             return True
-        if returncode in (-1, 0) and ("ASAN" in stderr or "AddressSanitizer" in stderr):
-            return True
+        # A clean or timed-out exit counts only with a real report header,
+        # not a log line that mentions ASAN.
+        if returncode in (-1, 0) and "Sanitizer" in stderr:
+            report = SanitizerReport.parse(stderr)
+            if report and report.is_valid():
+                return True
         return stderr_crash_marker(returncode, stderr) is not None
 
     def is_crash(self, returncode: int, stderr: str) -> bool:

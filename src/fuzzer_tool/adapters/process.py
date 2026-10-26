@@ -9,6 +9,7 @@ during fuzzing. Supports three execution modes:
 Also supports optional hardware performance counter tracking on child processes.
 """
 
+import collections
 import contextlib
 import hashlib
 import logging
@@ -23,8 +24,34 @@ import time
 
 log = logging.getLogger(__name__)
 
-# Signal numbers that indicate a crash (not a clean exit)
-SIGNAL_CRASH_CODES = {134, 135, 136, 139, -6, -7, -8, -11}  # SIGABRT/SIGBUS/SIGFPE/SIGSEGV
+# Fatal signals a crash handler re-encodes as 128+sig (afl_shim, the loaders).
+CRASH_SIGNALS = tuple(
+    int(s)
+    for s in (
+        signal.SIGILL,
+        signal.SIGTRAP,
+        signal.SIGABRT,
+        signal.SIGBUS,
+        signal.SIGFPE,
+        signal.SIGSEGV,
+        signal.SIGSYS,
+    )
+)
+EXIT_SIGNAL_BASE = 128
+
+# Crash return codes: -sig (killed by the signal) and 128+sig (handler exit).
+SIGNAL_CRASH_CODES = {-s for s in CRASH_SIGNALS} | {EXIT_SIGNAL_BASE + s for s in CRASH_SIGNALS}
+
+
+def signal_number(returncode: int) -> int:
+    """Signal behind *returncode*: -11 and 139 are both SIGSEGV (11).
+
+    Other codes keep their magnitude, so exit(129) is not read as SIGHUP.
+    """
+    if returncode - EXIT_SIGNAL_BASE in CRASH_SIGNALS:
+        return returncode - EXIT_SIGNAL_BASE
+    return abs(returncode)
+
 
 # Fault names a shell, libc or sanitizer prints when a process dies.
 CRASH_STDERR_MARKERS = ("SIGSEGV", "SIGABRT", "SIGFPE", "SIGBUS", "Segmentation fault", "Aborted")
@@ -98,7 +125,31 @@ _TRACKED_PIDS_LOCK = threading.Lock()
 # Cap on retained stderr, matching what this path used to read in one call.
 # Bytes past the cap are still read and discarded -- the read is what keeps
 # the child from blocking, so stopping early would reintroduce the deadlock.
+# The TAIL is kept: a sanitizer report is the last thing a crashing child
+# prints, after whatever log noise came first.
 _STDERR_CAP = 65536
+
+
+class _TailBuffer:
+    """The last ``cap`` bytes added."""
+
+    __slots__ = ("_cap", "_chunks", "_total")
+
+    def __init__(self, cap: int = _STDERR_CAP) -> None:
+        self._cap = cap
+        self._chunks: collections.deque[bytes] = collections.deque()
+        self._total = 0
+
+    def add(self, chunk: bytes) -> None:
+        self._chunks.append(chunk)
+        self._total += len(chunk)
+
+        # Drop whole chunks that lie entirely before the last cap bytes.
+        while self._total - len(self._chunks[0]) >= self._cap:
+            self._total -= len(self._chunks.popleft())
+
+    def getvalue(self) -> bytes:
+        return b"".join(self._chunks)[-self._cap :]
 
 
 def _track(pid: int) -> None:
@@ -153,8 +204,7 @@ def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
     Returns the bytes captured so far when the deadline expires; a timed-out
     target's partial stderr is still worth having for triage.
     """
-    chunks: list[bytes] = []
-    total = 0
+    tail = _TailBuffer()
     poller = select.poll()
     poller.register(fd, select.POLLIN)
     deadline = None if timeout is None else time.monotonic() + timeout
@@ -165,20 +215,18 @@ def _drain_until_eof(fd: int, timeout: float | None) -> tuple[bytes, bool]:
         else:
             remaining_ms = (deadline - time.monotonic()) * 1000.0
             if remaining_ms <= 0:
-                return b"".join(chunks), True
+                return tail.getvalue(), True
             ready = poller.poll(remaining_ms)
         if not ready:
-            return b"".join(chunks), True
+            return tail.getvalue(), True
         try:
             chunk = os.read(fd, 65536)
         except OSError:
             break
         if not chunk:
             break  # EOF: the child closed its stderr, i.e. exited
-        if total < _STDERR_CAP:
-            chunks.append(chunk[: _STDERR_CAP - total])
-            total += len(chunk)
-    return b"".join(chunks), False
+        tail.add(chunk)
+    return tail.getvalue(), False
 
 
 # Fallback reap backoff, for kernels without pidfd_open (< 5.3).
@@ -251,8 +299,7 @@ class _Pump:
         self._in = stdin_fd
         self._data = memoryview(data)
         self._sent = 0
-        self._chunks: list[bytes] = []
-        self._total = 0
+        self._tail = _TailBuffer()
         self._poller = select.poll()
         self._poller.register(stderr_fd, select.POLLIN)
         if stdin_fd is None:
@@ -291,9 +338,7 @@ class _Pump:
             return False
         if not chunk:
             return False
-        if self._total < _STDERR_CAP:
-            self._chunks.append(chunk[: _STDERR_CAP - self._total])
-            self._total += len(chunk)
+        self._tail.add(chunk)
         return True
 
     def run(self, deadline: float | None) -> tuple[bytes, bool]:
@@ -302,18 +347,18 @@ class _Pump:
             while True:
                 left_ms = None if deadline is None else (deadline - time.monotonic()) * 1000.0
                 if left_ms is not None and left_ms <= 0:
-                    return b"".join(self._chunks), True
+                    return self._tail.getvalue(), True
 
                 ready = self._poller.poll(left_ms)
                 if not ready:
-                    return b"".join(self._chunks), True
+                    return self._tail.getvalue(), True
 
                 for fd, _ in ready:
                     if fd == self._in:
                         self._feed()
                         continue
                     if not self._drain():
-                        return b"".join(self._chunks), False
+                        return self._tail.getvalue(), False
         finally:
             self._close_stdin()
 

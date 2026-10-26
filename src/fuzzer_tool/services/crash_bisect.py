@@ -24,7 +24,12 @@ from fuzzer_tool.adapters.git_worktree import (
     GitError,
     GitWorktree,
 )
-from fuzzer_tool.adapters.process import SIGNAL_CRASH_CODES, run_target_file, run_target_stdin
+from fuzzer_tool.adapters.process import (
+    SIGNAL_CRASH_CODES,
+    run_target_file,
+    run_target_stdin,
+    signal_number,
+)
 from fuzzer_tool.core.sanitizer import SanitizerReport
 
 _TIMEOUT_CODES = (-2, -1)
@@ -84,7 +89,7 @@ def _crash_key(rc: int, stderr: str, match: SigMatch) -> str | None:
             return report.signature
         return f"{report.sanitizer}:{report.error_type}"
     if rc in SIGNAL_CRASH_CODES or rc < 0:
-        return f"signal:{abs(rc)}"
+        return f"signal:{signal_number(rc)}"
     return None
 
 

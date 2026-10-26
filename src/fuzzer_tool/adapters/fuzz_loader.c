@@ -54,6 +54,7 @@ Timeout enforcement:
 #include <setjmp.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <poll.h>
 #include <sys/time.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -252,19 +253,30 @@ static int stage_input(const uint8_t *data, size_t len) {
    waitpid() matters: a child that writes more than the pipe buffer holds
    (an ASAN report runs to several KB) would otherwise block on write()
    while we block on waitpid(), and only the timeout would break the tie. */
-static int drain_stderr(int fd, uint8_t *buf, int maxlen) {
+/* One read() from fd into buf, keeping the LAST maxlen bytes: a sanitizer
+   report is printed after whatever noise came first. Returns read()'s result. */
+static ssize_t read_tail(int fd, uint8_t *buf, int maxlen, int *got) {
+    if (*got < maxlen) {
+        ssize_t r = read(fd, buf + *got, (size_t)(maxlen - *got));
+        if (r > 0) *got += (int)r;
+        return r;
+    }
+
     uint8_t sink[4096];
+    ssize_t r = read(fd, sink, sizeof(sink));
+    if (r <= 0) return r;
+
+    memmove(buf, buf + r, (size_t)(maxlen - r));
+    memcpy(buf + maxlen - r, sink, (size_t)r);
+    return r;
+}
+
+static int drain_stderr(int fd, uint8_t *buf, int maxlen) {
     int got = 0;
     while (1) {
-        ssize_t r;
-        if (got < maxlen) {
-            r = read(fd, buf + got, (size_t)(maxlen - got));
-        } else {
-            r = read(fd, sink, sizeof(sink));
-        }
+        ssize_t r = read_tail(fd, buf, maxlen, &got);
         if (r < 0 && errno == EINTR) continue;  /* SIGALRM — keep draining */
         if (r <= 0) break;
-        if (got < maxlen) got += (int)r;
     }
     return got;
 }
@@ -304,21 +316,28 @@ static int read_full(int fd, void *buf, size_t n) {
    read-to-EOF trick used by the fork+exec path does not apply; the child is
    already reaped by the time we get here, so everything it wrote is sitting
    in the buffer and a non-blocking drain is exact. */
-static int drain_stderr_nonblock(uint8_t *buf, int maxlen) {
-    uint8_t sink[4096];
-    int got = 0;
+static void drain_stderr_nonblock(uint8_t *buf, int maxlen, int *got) {
     while (1) {
-        ssize_t r;
-        if (got < maxlen) {
-            r = read(fsrv_err_fd, buf + got, (size_t)(maxlen - got));
-        } else {
-            r = read(fsrv_err_fd, sink, sizeof(sink));
-        }
+        ssize_t r = read_tail(fsrv_err_fd, buf, maxlen, got);
         if (r < 0 && errno == EINTR) continue;
         if (r <= 0) break;   /* EAGAIN on an empty non-blocking pipe */
-        if (got < maxlen) got += (int)r;
     }
-    return got;
+}
+
+/* Read the child's 4-byte status while draining its stderr: a child writing
+   more than the pipe buffer blocks until it is read, and used to sit there
+   until the timeout. Returns 0 on EOF, error or an interrupting timeout. */
+static int read_status_draining(int *status, uint8_t *err, int *err_len) {
+    struct pollfd fds[2] = {{fsrv_st_fd, POLLIN, 0}, {fsrv_err_fd, POLLIN, 0}};
+    while (1) {
+        if (poll(fds, 2, -1) < 0) {
+            if (errno == EINTR && !timed_out) continue;
+            return 0;
+        }
+
+        if (fds[1].revents & POLLIN) drain_stderr_nonblock(err, MAX_ERR, err_len);
+        if (fds[0].revents) return read_full(fsrv_st_fd, status, 4);
+    }
 }
 
 /* Exec the target once and complete the forkserver handshake.
@@ -423,7 +442,7 @@ static int run_forkserver(const uint8_t *data, size_t len, uint8_t *err, int *er
     arm_timeout(timeout_seconds);
 
     int status = 0;
-    int ok = read_full(fsrv_st_fd, &status, 4);
+    int ok = read_status_draining(&status, err, err_len);
 
     if (timed_out) {
         /* The handler killed the child; the forkserver still owes us the
@@ -435,7 +454,7 @@ static int run_forkserver(const uint8_t *data, size_t len, uint8_t *err, int *er
     signal(SIGALRM, SIG_DFL);
     exec_child_pid = -1;
 
-    *err_len = drain_stderr_nonblock(err, MAX_ERR);
+    drain_stderr_nonblock(err, MAX_ERR, err_len);
 
     if (timed_out) return -1;
     if (!ok) return -2;

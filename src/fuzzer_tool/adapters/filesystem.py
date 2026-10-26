@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from fuzzer_tool.adapters import seed_zip
+from fuzzer_tool.adapters.process import signal_number
 from fuzzer_tool.adapters.seed_zip import SeedTree
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
@@ -1066,8 +1067,8 @@ def _crash_sig(report: SanitizerReport | None, returncode: int, fault_addr: int 
     if fault_addr is not None:
         # Distinguish NULL-deref / wild-pointer / stack-overflow crashes that
         # all share the same signal number but fault at different addresses.
-        return f"signal:{abs(returncode)}@{fault_addr:#x}"
-    return f"signal:{abs(returncode)}"
+        return f"signal:{signal_number(returncode)}@{fault_addr:#x}"
+    return f"signal:{signal_number(returncode)}"
 
 
 def _fuzzy_sig_match(sig: str, crash_sigs: dict[str, int]) -> str | None:
@@ -1251,7 +1252,7 @@ def _crash_name_parts(report: SanitizerReport | None, returncode: int) -> tuple[
         error_short = report.error_type.replace("-", "")[:20]
         sanitizer_short = report.sanitizer.replace("Sanitizer", "")[:4].lower()
         return error_short, sanitizer_short
-    return f"signal{abs(returncode)}", "sig"
+    return f"signal{signal_number(returncode)}", "sig"
 
 
 def _fill_report(metadata: CrashMetadata, report: SanitizerReport | None, returncode: int) -> None:
