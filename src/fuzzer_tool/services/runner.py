@@ -28,6 +28,7 @@ from fuzzer_tool.adapters.process import (
     run_target_fast,
     run_target_file,
     run_target_stdin,
+    signal_rc,
     stderr_crash_marker,
 )
 from fuzzer_tool.adapters.shm import SHM_METADATA_SIZE
@@ -612,7 +613,7 @@ class TargetRunner:
             os.waitpid(pid, 0)
             return -sig, ""
         if os.WIFSIGNALED(status):
-            return -os.WTERMSIG(status), ""
+            return signal_rc(os.WTERMSIG(status)), ""
         if os.WIFEXITED(status):
             return os.WEXITSTATUS(status), ""
         os.kill(pid, signal.SIGKILL)
@@ -656,7 +657,7 @@ class TargetRunner:
                 child_reaped = True
                 break
             if os.WIFSIGNALED(status):
-                returncode = -os.WTERMSIG(status)
+                returncode = signal_rc(os.WTERMSIG(status))
                 child_reaped = True
                 break
 
@@ -716,7 +717,7 @@ class TargetRunner:
                     return _ptrace_report_timeout(pid)
             elif waited != 0:
                 if os.WIFSIGNALED(status):
-                    returncode = -os.WTERMSIG(status)
+                    returncode = signal_rc(os.WTERMSIG(status))
                 elif os.WIFEXITED(status):
                     returncode = os.WEXITSTATUS(status)
         else:
@@ -725,7 +726,7 @@ class TargetRunner:
 
         if returncode == 0 and not child_reaped:
             if os.WIFSIGNALED(status):
-                returncode = -os.WTERMSIG(status)
+                returncode = signal_rc(os.WTERMSIG(status))
             elif os.WIFEXITED(status):
                 returncode = os.WEXITSTATUS(status)
             elif os.WIFSTOPPED(status):
@@ -799,7 +800,7 @@ class TargetRunner:
                     reaped = True
                     break
                 if os.WIFSIGNALED(status):
-                    returncode = -os.WTERMSIG(status)
+                    returncode = signal_rc(os.WTERMSIG(status))
                     reaped = True
                     break
                 if os.WIFSTOPPED(status):

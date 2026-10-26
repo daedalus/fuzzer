@@ -43,6 +43,18 @@ EXIT_SIGNAL_BASE = 128
 SIGNAL_CRASH_CODES = {-s for s in CRASH_SIGNALS} | {EXIT_SIGNAL_BASE + s for s in CRASH_SIGNALS}
 
 
+# Signals whose -sig would read as an adapter sentinel (-1 timeout, -2 failure).
+_SENTINEL_SIGNALS = frozenset({int(signal.SIGHUP), int(signal.SIGINT)})
+
+
+def signal_rc(sig: int) -> int:
+    """Return code for a death by *sig*: -sig, or 128+sig where -sig is a sentinel.
+
+    A SIGHUP death read as a timeout and a SIGINT death as a failed run.
+    """
+    return EXIT_SIGNAL_BASE + sig if sig in _SENTINEL_SIGNALS else -sig
+
+
 def signal_number(returncode: int) -> int:
     """Signal behind *returncode*: -11 and 139 are both SIGSEGV (11).
 
@@ -379,7 +391,7 @@ def _status_rc(status: int) -> int:
     if os.WIFEXITED(status):
         return os.WEXITSTATUS(status)
     if os.WIFSIGNALED(status):
-        return -os.WTERMSIG(status)
+        return signal_rc(os.WTERMSIG(status))
     return -2
 
 
@@ -727,7 +739,7 @@ def run_target_fast(
         if os.WIFEXITED(status):
             rc = os.WEXITSTATUS(status)
         elif os.WIFSIGNALED(status):
-            rc = -os.WTERMSIG(status)
+            rc = signal_rc(os.WTERMSIG(status))
         else:
             rc = -2
         return rc, stderr_data.decode(errors="replace"), pid

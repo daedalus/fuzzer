@@ -422,6 +422,12 @@ static int start_forkserver(void) {
     return 1;
 }
 
+/* Return code for a death by sig: -sig, or 128+sig for SIGHUP/SIGINT, whose
+   -sig would read as the -1 timeout / -2 failure sentinels. */
+static int signal_rc(int sig) {
+    return (sig == SIGHUP || sig == SIGINT) ? 128 + sig : -sig;
+}
+
 static int run_forkserver(const uint8_t *data, size_t len, uint8_t *err, int *err_len) {
     *err_len = 0;
     if (!stage_input(data, len)) return -2;
@@ -459,7 +465,7 @@ static int run_forkserver(const uint8_t *data, size_t len, uint8_t *err, int *er
     if (timed_out) return -1;
     if (!ok) return -2;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    if (WIFSIGNALED(status)) return signal_rc(WTERMSIG(status));
     return -2;
 }
 
@@ -523,7 +529,7 @@ static int run_executable(const uint8_t *data, size_t len, uint8_t *err, int *er
     }
     if (waited < 0) return -2;
     if (WIFEXITED(status)) return WEXITSTATUS(status);
-    if (WIFSIGNALED(status)) return -WTERMSIG(status);
+    if (WIFSIGNALED(status)) return signal_rc(WTERMSIG(status));
     return -2;
 }
 

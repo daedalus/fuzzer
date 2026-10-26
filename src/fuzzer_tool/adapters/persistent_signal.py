@@ -31,6 +31,7 @@ import struct
 import time
 
 from fuzzer_tool.adapters import libc_shm
+from fuzzer_tool.adapters.process import signal_rc
 
 log = logging.getLogger(__name__)
 
@@ -157,7 +158,7 @@ class PersistentRunner:
                 return os.WEXITSTATUS(status), "target exited"
             if os.WIFSIGNALED(status):
                 self._started = False
-                return -os.WTERMSIG(status), ""
+                return signal_rc(os.WTERMSIG(status)), ""
             if os.WIFSTOPPED(status):
                 sig = os.WSTOPSIG(status)
                 if sig in (signal.SIGSTOP, signal.SIGTRAP):

@@ -268,7 +268,9 @@ while True:
                 _ptrace_libc.ptrace(PTRACE_CONT, child_pid, None, ctypes.c_void_p(sig))
             # Check if child was killed by signal (SIGSEGV, SIGABRT, etc.)
             if os.WIFSIGNALED(status):
-                rc = -(os.WTERMSIG(status))
+                # SIGHUP/SIGINT as 128+sig: -1/-2 are the timeout/failure sentinels.
+                sig = os.WTERMSIG(status)
+                rc = 128 + sig if sig in (signal.SIGHUP, signal.SIGINT) else -sig
             elif os.WIFEXITED(status) and os.WEXITSTATUS(status) - 128 in _CRASH_SIGNALS:
                 # Exit via _exit(128 + sig) from crash handler (afl_shim.c).
                 # Convert to negative signal code for consistency with the

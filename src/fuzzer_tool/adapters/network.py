@@ -30,6 +30,7 @@ import os
 import socket
 import time
 
+from fuzzer_tool.adapters.process import signal_rc
 from fuzzer_tool.core.kalman import KalmanFilter
 
 log = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ class NetworkRunner:
         if pid == 0:
             return 0
         if os.WIFSIGNALED(status):
-            return -os.WTERMSIG(status)
+            return signal_rc(os.WTERMSIG(status))
         if os.WIFEXITED(status):
             return os.WEXITSTATUS(status)
         return 0
