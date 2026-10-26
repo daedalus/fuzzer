@@ -264,7 +264,7 @@ def test_regression_versions_build_noasan_and_so(tmp_path):
         r"build_target \S+ \S+/ffmpeg_read_9\.0\.2_noasan .*-I\S+/ffmpeg-9\.0\.2$", noasan, re.M
     )
     assert re.search(
-        r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_noasan\.so .*-I\S+/ffmpeg-9\.0\.2$",
+        r"build_so_target \S+ \S+/ffmpeg_read_9\.0\.2_noasan\.so .*-I\S+/ffmpeg-9\.0\.2( -D__AFL_PRIVATE_HEAP=1)?$",
         noasan,
         re.M,
     )

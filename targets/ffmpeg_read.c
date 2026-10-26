@@ -137,6 +137,30 @@ static void fuzz_release_io_state(void) {
     }
 }
 
+/* In-process with the private heap, a call that crashes, exits or times out
+ * has every slot it allocated freed behind our back. The globals above then
+ * dangle: the next call tears them down (g_io_state, g_avio_ctx, g_pkt,
+ * decoders) and the heap reports a double free, on that call and on every
+ * one after it, because the abort leaves the globals as they were. Drop them
+ * without freeing when the shim says a call was abandoned. What is left
+ * live is a few hundred bytes (g_pkt, g_frame); decoders and io state are
+ * released at the end of each call, so none of those survive to here. */
+#if __AFL_PRIVATE_HEAP
+static uint32_t g_abandon_seen;
+static void fuzz_forget_abandoned_state(void) {
+    uint32_t now = __afl_ph_abandon_count();
+    if (now == g_abandon_seen) return;
+    g_abandon_seen = now;
+    g_pkt = NULL;
+    g_frame = NULL;
+    g_io_state = NULL;
+    g_avio_ctx = NULL;
+    memset(g_decs, 0, sizeof(g_decs));
+}
+#else
+#define fuzz_forget_abandoned_state() ((void)0)
+#endif
+
 static void fuzz_cleanup_decoders(void) {
     for (int i = 0; i < FUZZ_MAX_DECODERS; i++) {
         if (g_decs[i].ctx) {
@@ -558,6 +582,8 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     __afl_map_edge(0x1000);
     if (size < 16) { __afl_map_edge(0x1001); return 0; }
 
+    fuzz_forget_abandoned_state();
+
     /* Silence FFmpeg's internal logging */
     av_log_set_level(AV_LOG_QUIET);
 
@@ -756,6 +782,11 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     FUZZ_PHASE_START(t_cleanup_start);
     avformat_close_input(&fmt_ctx);
     fuzz_release_io_state();
+    /* Nothing per-input may outlive the call: an abandoned call frees its
+     * heap (see fuzz_forget_abandoned_state), so a decoder kept for the next
+     * call could not be told apart from a stale one. */
+    av_packet_unref(g_pkt);
+    fuzz_cleanup_decoders();
 
     /* Ask glibc to release free top arena pages back to the kernel. */
     malloc_trim(0);

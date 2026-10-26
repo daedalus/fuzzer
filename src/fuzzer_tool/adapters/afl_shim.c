@@ -5901,10 +5901,23 @@ __AFL_GCC_NO_COV static uint32_t __afl_ph_enter(void) {
 
 __AFL_GCC_NO_COV static void __afl_ph_leave(uint32_t prev) { __afl_ph_stamp = prev; }
 
+/* Number of calls abandoned so far (crash, exit or timeout). Everything such
+ * a call allocated is freed, including state the target meant to keep for its
+ * next call (a cached context, a scratch buffer in a global). The target
+ * compares this against the value it saw last and drops its own pointers when
+ * it moved: otherwise the next call frees them and the heap reports a double
+ * free, then does so again on every call after it. */
+static uint32_t __afl_ph_abandoned;
+__attribute__((visibility("default"), used))
+__AFL_GCC_NO_COV uint32_t __afl_ph_abandon_count(void) {
+    return __atomic_load_n(&__afl_ph_abandoned, __ATOMIC_RELAXED);
+}
+
 /* Crash, exit or timeout: free what this thread's call allocated. The jump
  * may have landed inside the allocator, so a lock this thread holds is
  * dropped first; another thread's is waited for, not broken. */
 __AFL_GCC_NO_COV static void __afl_ph_reclaim(void) {
+    __atomic_add_fetch(&__afl_ph_abandoned, 1, __ATOMIC_RELAXED);
     if (__afl_ph_held()) __afl_ph_unlock();
     if (__afl_ph.mode != __AFL_PH_READY) return;
     uint32_t me = __afl_ph_stamp;

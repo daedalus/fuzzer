@@ -150,6 +150,29 @@ int t_foreign(const uint8_t *d, size_t n) {
     free(NULL);
     return malloc_usable_size(malloc(100)) >= 100 ? 0 : 2;
 }
+/* A cached allocation kept in a global across calls; the first call aborts
+ * after making it, so the guard frees it behind the target's back. */
+static void *g_keep;
+static int g_calls;
+int t_stale_naive(const uint8_t *d, size_t n) {
+    (void)d; (void)n;
+    free(g_keep);
+    g_keep = malloc(64);
+    if (++g_calls == 1) raise(SIGABRT);
+    return 0;
+}
+#if __AFL_PRIVATE_HEAP
+static uint32_t g_seen;
+int t_stale_aware(const uint8_t *d, size_t n) {
+    (void)d; (void)n;
+    uint32_t now = __afl_ph_abandon_count();
+    if (now != g_seen) { g_seen = now; g_keep = NULL; }
+    free(g_keep);
+    g_keep = malloc(64);
+    if (++g_calls == 1) raise(SIGABRT);
+    return 0;
+}
+#endif
 int t_zero(const uint8_t *d, size_t n) {
     (void)d; (void)n;
     void *a = malloc(0), *b = malloc(0);
@@ -254,3 +277,16 @@ def test_crash_reclaims_the_call_allocations(build):
 def test_timeout_never_leaves_the_heap_locked(build):
     rc, rcs, out = _run(build, "priv.so", "t_spin", n=20, timeout_us=20000)
     assert rc == 0 and rcs == [-1] * 20 and "host=OK" in out
+
+
+@requires_clang
+def test_stale_global_after_abort_poisons_every_later_call(build):
+    """Control: a pointer cached in a global dangles once its call is abandoned."""
+    _, rcs, _ = _run(build, "priv.so", "t_stale_naive", n=5)
+    assert rcs == [-6] * 5
+
+
+@requires_clang
+def test_abandon_count_lets_the_target_drop_stale_state(build):
+    rc, rcs, out = _run(build, "priv.so", "t_stale_aware", n=5)
+    assert rc == 0 and rcs == [-6, 0, 0, 0, 0] and "host=OK" in out, out
