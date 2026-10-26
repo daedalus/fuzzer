@@ -27,7 +27,9 @@ from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.filesystem import hash_data
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.edge_hist import hist_report
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
+from fuzzer_tool.core.run_mode import Switch
 from fuzzer_tool.core.set_cover import min_cover
 
 
@@ -261,6 +263,7 @@ def minimize_corpus(
     max_seeds: int = 0,
     batch_mode: bool = False,
     rng: RandPool | None = None,
+    edge_hist: Switch = Switch.OFF,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -287,6 +290,8 @@ def minimize_corpus(
         max_seeds: Max seeds to process (0=all), drawn uniformly at random.
             Allows batch minification.
         rng: Sampler for ``max_seeds`` (default: shared RandPool).
+        edge_hist: ON prints seeds-per-edge-count histograms (replayed, kept);
+            coverage mode only.
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -342,6 +347,7 @@ def minimize_corpus(
             inprocess_func=inprocess_func,
             batch_mode=batch_mode,
             all_corpus_files=all_corpus_files,
+            edge_hist=edge_hist,
         )
     else:
         kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path, fuzzy_dedup)
@@ -385,6 +391,7 @@ def _minimize_with_coverage(
     inprocess_func: str = DEFAULT_INPROCESS_FUNC,
     batch_mode: bool = False,
     all_corpus_files: list[Path] | None = None,
+    edge_hist: Switch = Switch.OFF,
 ) -> tuple[int, int]:
     """Greedy set-cover, rate-distortion or minimax-robust pruning over SHM edge bitmaps."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
@@ -432,6 +439,7 @@ def _minimize_with_coverage(
 
         start_time = time.time()
         unique_edges = set()
+        replayed_counts: list[int] = []
         for i, fpath in enumerate(corpus_files):
             if not fpath.exists():
                 print(f"[!] Skipping missing corpus file: {fpath}")
@@ -442,6 +450,7 @@ def _minimize_with_coverage(
             edges = shm.edge_id_array()
             book.add(str(fpath), edges, len(data))
             unique_edges.update(edges.tolist())
+            replayed_counts.append(edges.size)
             peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
             # Reclaim heap memory periodically like in fuzz mode
             if (i + 1) % 100 == 0:
@@ -526,6 +535,9 @@ def _minimize_with_coverage(
 
     covered_files = _prune(book, prune, target_frac, map_entries)
 
+    if edge_hist is Switch.ON:
+        _print_edge_hist(replayed_counts, unique_edges, book, covered_files)
+
     return _commit_results(
         corpus_files,
         covered_files,
@@ -534,6 +546,24 @@ def _minimize_with_coverage(
         batch_mode=batch_mode,
         all_corpus_files=all_corpus_files,
     )
+
+
+def _print_edge_hist(
+    replayed_counts: list[int],
+    unique_edges: set[int],
+    book: _EdgeBook,
+    kept_keys: list[str],
+) -> None:
+    """Edge histograms before (every replayed seed) and after pruning.
+
+    "kept" counts come from the book, so twins collapsed before pruning are
+    in "replayed" only.
+    """
+    print(hist_report(replayed_counts, len(unique_edges), "minimize: replayed"))
+
+    kept = [book.edges[k] for k in kept_keys]
+    kept_unique = len(np.unique(np.concatenate(kept))) if kept else 0
+    print(hist_report([e.size for e in kept], kept_unique, "minimize: kept"))
 
 
 def _minimize_by_hash(

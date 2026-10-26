@@ -68,6 +68,7 @@ _EXCLUDED_OPT_IN = frozenset(
         "refresh_profile",  # profiling: hail-mary already slow, full re-analysis per run is overkill
         "profile_hotpath",  # cProfile overhead makes exploratory run untrackable
         "debug",  # hail-mary is already verbose; extra debug is noise
+        "edge_hist",  # display only: prints a histogram, changes no strategy
         "joint_liveness",  # unmeasured; only effective with --region-profile
         "byte_interaction",  # unmeasured: synthetic checks only
         "cmp_prune_const",  # unmeasured: no A/B yet (DEEP_DIVE "Constant-Compare Pruning")

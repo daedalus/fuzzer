@@ -495,6 +495,7 @@ Off by default (loading is not: see below). New full seeds (`seeds/`, `irreplace
 - **Crash minimization** (`tmin`): C-Reduce-style reducer (`core/reducer.py`). Stateful passes (`new`/`transform`/`advance`) keep their cursor on success instead of restarting ddmin; FIRST/MAIN/LAST phases, MAIN (grammar tree shrink + byte-chunk deletion) repeats to a fixpoint. Verdicts are memoized (blake2b-keyed LRU, 64K entries). Signature pinning prevents drift; a candidate crashing with a *different* signature is saved as a regular crash (smallest per signature, ≤64) to `--also-interesting DIR` (default: the crash file's directory). `minimize_bytes` uses the same engine; `--max-stages` caps accepted reductions. Measured: same result size, 2–10× fewer target runs when >1 byte matters.
 - **Corpus minimization**: set cover over SHM edge ids (`minimize` subcommand; `core/set_cover.py`)
   - Edge store (`services/minimize.py` `_EdgeBook`, 2026-10-26): per-seed edges are sorted uint32 arrays (`ShmCoverage.edge_id_array`), not `set[int]`. Seeds with identical coverage collapse to the smallest (the array is a view on the dedup key, held once); `--minimax-robust` keeps twins as backups. Rate-distortion modes get sets at the boundary. Same input, same cover (191/191, 194/194 seeds, equal bytes). fuzzgoat 20k-file corpus, 3 reps, A/A2 control: peak RSS 170 -> 78 MB (spawn), 188 -> 81 MB (`--inprocess-direct`); wall 5.4 -> 3.9 s direct_lite, spawn unchanged (~60 s, exec-bound). Synthetic, tracemalloc: 10k distinct seeds x 1,800 edges store 1,785 -> 73 MB, peak 2,062 -> 488 MB, prune 17 -> 12 s; 20k seeds with 7% unique coverage store 340 -> 3 MB, prune 5.9 -> 1.4 s. Tests: `tests/test_minimize_edge_book.py`.
+  - `--edge-hist` (`core/edge_hist.py`, 2026-10-26): with `-c`, prints seeds-per-edge-count histograms (power-of-two bins) and edges/seed (unique edges / seeds) for the replayed corpus and for the kept set. Replayed counts are taken before twin collapse. Without `-c` it warns and prints nothing. Tests: `tests/test_edge_hist.py`.
 - **Crash exploitability tiers**: ASAN_EXPLOITABILITY classification in reports
 - **Levenshtein crash clustering**: groups crashes with similar stack traces (same root cause, different offsets), only within one `sanitizer:error_type`; unsymbolized signatures match exactly
 - **Fuzzy corpus similarity**: Hamming + Levenshtein + 4-gram Jaccard for crash-to-corpus nearest-neighbor search
@@ -890,6 +891,7 @@ fuzzer-tool rank ./target -d corpus -n 10 --dump top_seeds
 | `--asan-target PATH` | Path to ASAN-instrumented .so/executable for auto sanitizer crash replay |
 | `--ubsan-target PATH` | Path to UBSAN-instrumented .so/executable for auto sanitizer crash replay |
 | `--report [FILE]` | Generate explainability report (stdout or file) |
+| `--edge-hist` | After the run, print seeds-by-edge-count histogram and edges/seed. Covers the `EdgeTracker`'s seeds only (those that added coverage, capped at `MAX_TRACKED_SEEDS`); the corpus size is shown when larger |
 | `--stats-interval N` | Print live stats and dump stats file every N iterations (default: 1000) |
 
 ## Subcommands
@@ -1345,6 +1347,9 @@ fuzzer-tool minimize ./target -d corpus -c --rate-distortion --target-frac 0.95
 
 # Set-cover plus backups for the seeds whose loss would cost most edges
 fuzzer-tool minimize ./target -d corpus -c --minimax-robust --target-frac 1.0
+
+# Histogram of seeds by edge count + edges/seed, before and after pruning
+fuzzer-tool minimize ./target -d corpus -c --edge-hist
 
 # Fuzz-harness .so (no main): replay in-process, same flags as fuzz
 fuzzer-tool minimize ./t.so -d corpus -c --inprocess                    # subprocess loader

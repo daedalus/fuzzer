@@ -1143,6 +1143,11 @@ def cmd_fuzz(args):
     if getattr(args, "ledger_preset", None) is not None:
         _record_ledger(args, fuzzer)
 
+    if getattr(args, "edge_hist", False):
+        from fuzzer_tool.core.edge_hist import fuzz_hist
+
+        print(fuzz_hist(fuzzer))
+
     if args.report is not None:
         from fuzzer_tool.services.report import generate_report
 
@@ -1502,6 +1507,10 @@ def cmd_minimize(args):
     if getattr(args, "minimax_robust", False):
         prune = PruneMode.MINIMAX_ROBUST
 
+    edge_hist = Switch.ON if getattr(args, "edge_hist", False) else Switch.OFF
+    if edge_hist is Switch.ON and not args.coverage:
+        print("[!] --edge-hist needs -c/--coverage: no edge data without it", file=sys.stderr)
+
     kept, removed = minimize_corpus(
         target=args.target,
         corpus_dir=args.corpus,
@@ -1517,6 +1526,7 @@ def cmd_minimize(args):
         max_seeds=getattr(args, "max_seeds", 0),
         batch_mode=getattr(args, "batch", False),
         rng=rng,
+        edge_hist=edge_hist,
     )
 
     if removed == 0:
@@ -2330,7 +2340,8 @@ def cmd_sweep(args):
 # --refresh-profile and --profile-hotpath, since hail-mary is already slow
 # and adding full profiling/cProfile overhead per iteration makes it
 # untrackable rather than exploratory.
-# Also excluded (not strategy gates): --debug (verbose noise),
+# Also excluded (not strategy gates): --debug (verbose noise), --edge-hist
+# (display only),
 # --arm-mutate/--x86-mutate (require cross-arch toolchain),
 # --enable-regex-bomb-mutations (experimental),
 # --send-mail-require-tls / --send-mail-test (email config).
@@ -5810,6 +5821,12 @@ def main() -> int:
         help="Generate explainability report after run (default: stdout, or specify output file)",
     )
     fuzz_parser.add_argument(
+        "--edge-hist",
+        action="store_true",
+        help="After the run, print a histogram of seeds by edge count and the "
+        "edges/seed ratio (tracked seeds only)",
+    )
+    fuzz_parser.add_argument(
         "--replay-n",
         type=int,
         default=0,
@@ -6768,6 +6785,12 @@ def main() -> int:
         type=int,
         default=None,
         help="RNG seed for reproducible seed selection (default: None -> fixed fallback 0x5EED_5EED)",
+    )
+    min_parser.add_argument(
+        "--edge-hist",
+        action="store_true",
+        help="With -c: print histograms of seeds by edge count and the edges/seed "
+        "ratio, for the replayed corpus and for the kept set",
     )
     min_parser.set_defaults(func=cmd_minimize)
 
