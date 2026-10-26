@@ -831,8 +831,7 @@ class CorpusManager:
         fault_addr = getattr(f, "_last_fault_addr", None)
         # Drain on EVERY crash, not just novel ones: the sink is append-only,
         # so a skipped drain would hand the next crash this one's record.
-        sink = getattr(f, "_crash_sym_sink", None)
-        shim_sym = sink.drain() if sink is not None else None
+        shim_sym = self._drain_sym()
 
         # Decide FIRST whether this crash is one we will keep. Enrichment below
         # (nearest-corpus search over the whole corpus, GDB replay, target
@@ -920,6 +919,42 @@ class CorpusManager:
         if alert and getattr(f, "_push", None) is not None:
             self._push_crash(result, returncode, stderr)
         return result
+
+    def _drain_sym(self):
+        """This crash's shim record: the one crash_is_novel() took, else the sink's."""
+        f = self.f
+        sym = getattr(f, "_pending_crash_sym", None)
+        if sym is not None:
+            f._pending_crash_sym = None
+            return sym
+
+        sink = getattr(f, "_crash_sym_sink", None)
+        return sink.drain() if sink is not None else None
+
+    def crash_is_novel(self, data: bytes, returncode: int, stderr: str) -> bool:
+        """Would save_crash() write this crash? Pure, but drains the shim record.
+
+        The record is held for save_crash(): the sink is append-and-truncate,
+        so a second drain would come back empty and lose the crash site.
+        """
+        from fuzzer_tool.adapters.filesystem import classify_crash
+        from fuzzer_tool.core.crash_symbols import crash_pcs
+
+        f = self.f
+        f._pending_crash_sym = self._drain_sym()
+        verdict = classify_crash(
+            data,
+            returncode,
+            stderr,
+            f.crash_hashes,
+            f.crash_sigs,
+            fault_addr=getattr(f, "_last_fault_addr", None),
+            crash_blocklist=f.crash_blocklist if f.crash_blocklist else None,
+            crash_allowlist=f.crash_allowlist if f.crash_allowlist else None,
+            crash_min_sizes=f.crash_min_sizes if f.save_smaller else None,
+            crash_pcs=crash_pcs(f._pending_crash_sym),
+        )
+        return verdict.novel
 
     def triage_skippable(self, data: bytes, returncode: int, stderr: str) -> bool:
         """True when a fault-address triage cannot change this crash's fate.

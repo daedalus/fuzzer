@@ -659,6 +659,7 @@ def cmd_fuzz(args):
         ecofuzz_mc_penalty_multiplier=getattr(args, "ecofuzz_mc_penalty_multiplier", None),
         metropolis=getattr(args, "metropolis", False),
         crash_explore=getattr(args, "crash_explore", False),
+        novel_crash_reward=getattr(args, "novel_crash_reward", False),
         uninit_probe=getattr(args, "uninit_probe", False),
         i2s_fixpoint=getattr(args, "i2s_fixpoint", False),
         i2s_fixpoint_iters=getattr(args, "i2s_fixpoint_iters", 8),
@@ -2453,6 +2454,8 @@ def cmd_sweep(args):
 #
 # abort_is_crash (--abort-is-crash) is excluded: it redefines what a crash
 # is (assertions), not a strategy.
+#
+# novel_crash_reward (--novel-crash-reward) is excluded until its A/B lands.
 #
 # crash_explore (--crash-explore) is excluded: a mode switch (AFL -C), not a
 # strategy. It zeroes has_new_coverage on every non-crashing round, so under
@@ -5212,6 +5215,14 @@ def main() -> int:
         help="Crash exploration (AFL -C): seed with crashing inputs; keep only "
         "mutants that still crash on a new path. Compare variants' fault addresses "
         "to judge exploitability.",
+    )
+    fuzz_parser.add_argument(
+        "--novel-crash-reward",
+        action="store_true",
+        default=False,
+        help="Only a crash that would be saved (a new signature) counts as an "
+        "operator success and an Elo crash win; repeats of a known bug do not. "
+        "Default: every crash counts. A/B pending (docs/AB_PENDING.md).",
     )
     fuzz_parser.add_argument(
         "--uninit-probe",

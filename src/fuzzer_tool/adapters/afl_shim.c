@@ -5151,6 +5151,18 @@ __AFL_NO_COV static void __afl_sym_capture(int sig, siginfo_t *si, void *uc) {
     __afl_sym_have = 1;
 }
 
+/* __AFL_CRASH_SYM_RAW=1: PCs only, no __sanitizer_symbolize_pc. The record
+ * then names the crash site for dedup at the cost of a backtrace, not a
+ * symbolizer call per crash. Read once. */
+__AFL_NO_COV static int __afl_sym_raw(void) {
+    static int raw = -1;
+    if (raw < 0) {
+        const char *v = getenv("__AFL_CRASH_SYM_RAW");
+        raw = v && v[0] == '1';
+    }
+    return raw;
+}
+
 /* Append the pending record. Plain open/write/close each time: a crash is
  * rare, and holding no fd means a fork child or a stolen fd number cannot
  * corrupt the stream. */
@@ -5180,7 +5192,7 @@ __AFL_NO_COV static void __afl_sym_emit(void) {
         uintptr_t pc = __afl_sym_pend.nframes ? __afl_sym_pend.frames[i] : __afl_sym_pend.pc;
         char text[384];
         text[0] = '-'; text[1] = 0;
-        if (__sanitizer_symbolize_pc && pc) {
+        if (__sanitizer_symbolize_pc && pc && !__afl_sym_raw()) {
             __afl_sym_busy = 1;
             text[0] = 0;
             __sanitizer_symbolize_pc((void *)(i ? pc : pc + 1), "%f|%s|%l|%m|%o",

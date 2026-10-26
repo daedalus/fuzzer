@@ -14,6 +14,12 @@ Close a row in the commit that records the result (DEEP_DIVE + TODO).
 
 Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclusive, rerun owed.
 
+## Crash handling
+
+| Feature (switch) | What | St | A/B owed |
+|---|---|---|---|
+| Novel crash reward (`--novel-crash-reward`) | Only new-signature crashes pay operators / Elo | U | arm `novel-crash-reward` vs `baseline`, `--set fuzzgoat`, metrics `unique` and `edges`; A/A control first |
+
 ## Seed scheduling
 
 | Feature (switch) | What | St | A/B owed |

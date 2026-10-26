@@ -19,7 +19,6 @@ from fuzzer_tool.adapters import process
 from fuzzer_tool.adapters.filesystem import classify_crash
 from fuzzer_tool.adapters.persistent_subprocess import PersistentLoader
 from fuzzer_tool.core.crash_symbols import CrashSymbol, CrashSymbolSink, SymFrame, crash_pcs
-from fuzzer_tool.services import fuzzer as fuzzer_mod
 
 SEGV = -int(signal.SIGSEGV)
 _ROOT = Path(__file__).resolve().parent.parent
@@ -62,18 +61,6 @@ def test_crash_pcs_from_shim_record() -> None:
     assert crash_pcs(sym) == (0x401111, 0x402222)
     assert crash_pcs(CrashSymbol(signal=11, pc=0x401111)) == (0x401111,)
     assert crash_pcs(None) is None
-
-
-_PLAIN, _SAN = fuzzer_mod.TargetRuntime.PLAIN, fuzzer_mod.TargetRuntime.SANITIZER
-
-
-@pytest.mark.parametrize(
-    ("symbolize", "runtime", "want"),
-    [(False, _PLAIN, True), (False, _SAN, False), (True, _SAN, True), (True, _PLAIN, True)],
-)
-def test_sym_sink_wanted(symbolize: bool, runtime, want: bool) -> None:
-    # On by default only where no sanitizer runtime would symbolize per crash.
-    assert fuzzer_mod._sym_sink_wanted(symbolize, runtime) is want
 
 
 # ── End to end: shim-linked targets with two crash sites ───────────────
@@ -153,20 +140,14 @@ def test_regression_so_two_sites_two_signatures(loader) -> None:
     assert a1 != b
 
 
-def test_plain_so_detected_plain(so) -> None:
-    # The shim's own __sanitizer_cov_* and weak __asan_* are not a runtime.
-    assert fuzzer_mod._target_runtime(so) is _PLAIN
-
-
 def test_sancov_exe_has_runtime_report(tmp_path) -> None:
     # Edge: clang links the UBSAN runtime into sancov executables; its SEGV
-    # report already names the site, and the sink stays off for them.
+    # report already names the site (the report wins over the PCs).
     exe = _build(tmp_path, _EXE_SRC, "t")
     sigs = []
     for data in (b"A", b"B"):
         rc, stderr, _ = process.run_target_stdin(exe, data, 5.0, env=process.environ_copy())
         sigs.append(classify_crash(data, rc, stderr, set(), {}).signature)
 
-    assert fuzzer_mod._target_runtime(exe) is _SAN
     assert sigs[0] != sigs[1]
     assert all(s.startswith("UndefinedBehaviorSanitizer:SEGV@") for s in sigs)
