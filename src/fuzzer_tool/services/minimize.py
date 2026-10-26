@@ -623,6 +623,8 @@ def _commit_results(
         out_path.mkdir(parents=True, exist_ok=True)
         for fpath_str in kept:
             fpath = Path(fpath_str)
+            if not fpath.exists():
+                continue
             shutil.copy2(fpath, out_path / fpath.name)
             meta = fpath.with_suffix(".txt")
             if meta.exists():
@@ -632,6 +634,8 @@ def _commit_results(
         pruned_dir.mkdir(parents=True, exist_ok=True)
         for fpath in corpus_files:
             if str(fpath) not in kept_set:
+                if not fpath.exists():
+                    continue
                 # Preserve directory structure like the seed corpus (seeds/xx/id_*)
                 rel = (
                     fpath.relative_to(corpus_path)
