@@ -19,7 +19,7 @@ from fuzzer_tool.core.shim_health import Attach, health_issues
 from fuzzer_tool.core.size_bloat import seed_size_bloat
 from fuzzer_tool.core.temporal_join import join_streams
 from fuzzer_tool.core.zipf import HeapsFit, TailLaw, ZipfFit
-from fuzzer_tool.services.stats_reporter import repro_rate
+from fuzzer_tool.services.stats_reporter import ReplayOutcome, repro_rate
 
 try:
     import numpy as np
@@ -1206,7 +1206,9 @@ def _crash_reproducibility(f) -> str:
             total += 1
             rate = repro_rate(replays)
             reproducible += rate
-            lines.append(f"  {sig[:40]}: {rate:.0%} ({len(replays)} replays)")
+            diverged = replays.count(ReplayOutcome.DIVERGED)
+            note = f", {diverged} as another bug" if diverged else ""
+            lines.append(f"  {sig[:40]}: {rate:.0%} ({len(replays)} replays{note})")
     if total > 0:
         avg = reproducible / total
         lines.insert(2, f"  Overall repro rate:   {avg:.0%} ({total} crashes replayed)")

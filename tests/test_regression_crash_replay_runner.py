@@ -65,3 +65,57 @@ def test_replay_clean_run_not_reproduced(fuzzer) -> None:
     StatsReporter.run_crash_replays(SimpleNamespace(f=fuzzer), budget_ms=10_000)
 
     assert fuzzer._crash_replays[SIG] == [ReplayOutcome.CLEAN]
+
+
+# ── Same crash, not just a crash ─────────────────────────────────────────
+
+ASAN_UAF = (
+    "==1==ERROR: AddressSanitizer: heap-use-after-free on address 0x1\n"
+    "    #0 0x401111 in parse_chunk\n"
+)
+
+
+def _replay_as(fuzzer, sig: str, rc: int, stderr: str) -> list[int]:
+    fuzzer._crash_replays = {sig: []}
+    fuzzer._crash_files = {sig: BASE}
+    fuzzer._runner.run_target = lambda data: (rc, stderr)
+    StatsReporter.run_crash_replays(SimpleNamespace(f=fuzzer), budget_ms=10_000)
+    return fuzzer._crash_replays[sig]
+
+
+def test_regression_replay_other_bug_diverged(fuzzer) -> None:
+    # Saved as a UAF; the replay hits a plain SIGSEGV: not reproduced.
+    sig = "AddressSanitizer:heap-use-after-free@parse_chunk"
+
+    assert _replay_as(fuzzer, sig, -int(signal.SIGSEGV), "") == [ReplayOutcome.DIVERGED]
+
+
+def test_replay_same_bug_class_reproduced(fuzzer) -> None:
+    # Falsification: same sanitizer:type, frames may differ.
+    sig = "AddressSanitizer:heap-use-after-free@other_frame"
+
+    assert _replay_as(fuzzer, sig, 1, ASAN_UAF) == [ReplayOutcome.CRASHED]
+
+
+def test_replay_signal_mode_forms_match(fuzzer) -> None:
+    # Edge: saved in-process as signal:11, replayed as 128+11.
+    assert _replay_as(fuzzer, "signal:11@0x0", 128 + int(signal.SIGSEGV), "") == [
+        ReplayOutcome.CRASHED
+    ]
+
+
+def test_replay_legacy_key_not_compared(fuzzer) -> None:
+    # Edge: content-hash keys from older states carry no bug class.
+    assert _replay_as(fuzzer, "a3f09c2b11d4e5f6", 1, ASAN_UAF) == [ReplayOutcome.CRASHED]
+
+
+def test_report_counts_diverged_replays() -> None:
+    from fuzzer_tool.services.report import _crash_reproducibility
+
+    f = SimpleNamespace(
+        _crash_replays={"signal:11": [ReplayOutcome.CRASHED, ReplayOutcome.DIVERGED]},
+        replay_n=2,
+    )
+    text = _crash_reproducibility(f)
+
+    assert "signal:11: 50% (2 replays, 1 as another bug)" in text

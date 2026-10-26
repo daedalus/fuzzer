@@ -1034,7 +1034,7 @@ def classify_crash(
     """
     h = hash_data(data)
     report = SanitizerReport.parse(stderr)
-    sig = violation_signature(stderr) or _crash_sig(report, returncode, fault_addr)
+    sig = _signature(stderr, report, returncode, fault_addr)
     stack_h = report.stack_hash() if report else ""
 
     if h in crash_hashes:
@@ -1067,6 +1067,18 @@ def classify_crash(
             return CrashVerdict(False, h, sig, stack_h, report, existing_sig, False, False)
 
     return CrashVerdict(True, h, sig, stack_h, report, None, False, False)
+
+
+def crash_signature(stderr: str, returncode: int, fault_addr: int | None = None) -> str:
+    """Dedup signature of one crashing run, as :func:`classify_crash` derives it."""
+    return _signature(stderr, SanitizerReport.parse(stderr), returncode, fault_addr)
+
+
+def _signature(
+    stderr: str, report: SanitizerReport | None, returncode: int, fault_addr: int | None
+) -> str:
+    """LTL violation, else sanitizer signature, else ``signal:<n>[@<addr>]``."""
+    return violation_signature(stderr) or _crash_sig(report, returncode, fault_addr)
 
 
 def _crash_sig(report: SanitizerReport | None, returncode: int, fault_addr: int | None) -> str:

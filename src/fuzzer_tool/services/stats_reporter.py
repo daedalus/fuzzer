@@ -17,6 +17,7 @@ class ReplayOutcome(IntEnum):
 
     CLEAN = 0
     CRASHED = 1
+    DIVERGED = 2  # crashed, but as another bug class
     ERROR = -2
     MISSING = -3
 
@@ -34,6 +35,32 @@ def _replay_crashed(rc: int, stderr: str) -> bool:
         return True
 
     return stderr_crash_marker(rc, stderr) is not None
+
+
+# Signature separators: "<class>@<frame>...", class "<sanitizer>:<type>" / "signal:<n>".
+_FRAME_SEP = "@"
+_CLASS_SEP = ":"
+
+
+def _bug_class(sig: str) -> str:
+    """ "AddressSanitizer:heap-use-after-free@f@g" -> "AddressSanitizer:heap-use-after-free"."""
+    return sig.split(_FRAME_SEP, 1)[0]
+
+
+def _replay_verdict(sig: str, rc: int, stderr: str) -> ReplayOutcome:
+    """CRASHED only for the saved bug class; frames and fault address may vary.
+
+    Keys without a class (content hashes from older states) are not compared.
+    """
+    if not _replay_crashed(rc, stderr):
+        return ReplayOutcome.CLEAN
+    if _CLASS_SEP not in sig:
+        return ReplayOutcome.CRASHED
+
+    from fuzzer_tool.adapters.filesystem import crash_signature
+
+    same = _bug_class(crash_signature(stderr, rc)) == _bug_class(sig)
+    return ReplayOutcome.CRASHED if same else ReplayOutcome.DIVERGED
 
 
 def repro_rate(replays) -> float:
@@ -173,7 +200,6 @@ def run_crash_replays(
         try:
             data = crash_file.read_bytes()
             rc, stderr = run_fn(data)
-            crashed = _replay_crashed(rc, stderr)
-            replays.append(ReplayOutcome.CRASHED if crashed else ReplayOutcome.CLEAN)
+            replays.append(_replay_verdict(sig, rc, stderr))
         except Exception:
             replays.append(ReplayOutcome.ERROR)
