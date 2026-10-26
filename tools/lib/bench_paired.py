@@ -40,6 +40,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import re
 import shutil
 import statistics
@@ -56,7 +57,8 @@ import bench_lock  # noqa: E402
 from eval_set import DEFAULT_ITERS, SEEDS, TARGET_SETS, cells  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
-RESULTS = REPO / "results" / "paired"
+# $FUZZ_BENCH_RESULTS keeps results out of the source tree (AGENTS.md Rule 17).
+RESULTS = Path(os.environ.get("FUZZ_BENCH_RESULTS", REPO / "results" / "paired"))
 
 # ── Arms ───────────────────────────────────────────────────────────────
 # An arm is a name and the extra CLI flags that define it. Keep arms
@@ -149,6 +151,8 @@ ARMS: dict[str, list[str]] = {
     "elo-continuum-reward": ["--elo", "--mc-bandit", "--continuum-reward"],
     # Repeat crashes stop paying operators (fuzz_round._judge). Metric: unique.
     "novel-crash-reward": ["--novel-crash-reward"],
+    # The control that must not reject (Rule 46): baseline again.
+    "novel-crash-reward-ctl": [],
     # Generation group (docs/handover/handover_generators_2026-09-20.md G0).
     # Each pairs against the baseline named in ARM_BASELINES.
     #
