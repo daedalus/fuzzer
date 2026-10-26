@@ -121,3 +121,36 @@ Prerequisites for all four:
 3. Bridge-seed score and C-based clustering: drop. On two targets C is B reweighted, the bridge score is a hub score or undefined, and C-cosine is saturated.
 4. Connected components of B after stripping near-universal edges is cheap and found the real islands on png_read. Worth a diagnostic line, not a scheduler.
 5. Still open: an evolved corpus, and a target where inputs aren't rejected wholesale at an early check (e.g. ffmpeg or sqlite).
+
+## 10. Evolved corpora, 10k execs per target, incl. ffmpeg (2026-10-26)
+
+**Setup.** Each target was fuzzed with `fuzzer-tool fuzz <target> -d <dir> --max-execs 10000` (default flags, one run each), starting from the generated seeds of §8/§9. The corpus analysed is every unique file under `<dir>/seeds/` outside `pruned/`, `irreplaceable/` and `timeouts/` (650, 477 and 765 files). It is not the fuzzer's live set: the fuzzgoat run's own report says 509 seeds. Collection, script and null model as in §8/§9 (`gram3.py`, now also with a `jsonc` mode that labels fuzzgoat seeds by `json.loads`, and a `none` mode).
+- fuzzgoat and png_read: same binaries as before.
+- ffmpeg: `tools/vendor_ffmpeg.sh --nosan --minimal` (clang, trace-pc-guard + trace-cmp; component set limited to mov/matroska/wav/flac/mp3/ogg and a few audio codecs), then `targets/ffmpeg_read.c` linked by hand against the four static libraries with `-lz -lbz2`. Not the versioned `ffmpeg_read_<ver>_*` targets of `build_targets.sh`. Seeds: 14 from `tools/gen_ffmpeg_803_seeds.py` plus 5 written by hand (3 WAV, 1 MP3 frame run, 1 FLAC header). Many of the 14 target formats are not compiled into the minimal build.
+
+| | fuzzgoat | png_read | ffmpeg (minimal) |
+|---|---|---|---|
+| seeds × edges (density) | 650 × 2003 (0.081) | 477 × 2401 (0.197) | 765 × 8594 (0.170) |
+| edges owned by all / ≥90% / singletons | 46 / 52 / 852 | 1 / 4 / 365 | 1 / 333 / 850 |
+| removable by B test (union preserved) | 306 (47%) | 111 (23%) | 209 (27%) |
+| seeds kept by B test / greedy set cover | 344 / 205 | 366 / 149 | 556 / 228 |
+| rank(A) | 397 | 398 | 583 |
+| PR(B) raw vs null | 3.06 vs 3.30 | 1.92 vs 1.97 | 2.04 vs 2.14 |
+| PR(B) core-stripped vs null | 5.39 vs 7.38 | 1.93 vs 1.97 | 2.01 vs 2.27 |
+| PR rarity (A·D⁻¹ᐟ²) vs null | 10.01 vs 25.81 | 9.90 vs 10.96 | 12.68 vs 14.66 |
+| C vs B: hub rho / pair-cos rho | 0.996 / 0.957 | 1.000 / 0.973 | 0.999 / 0.961 |
+| disjoint pairs after core strip | 5,261 (2.5%), all 2-step bridged | 22,895 (20.2%), none bridged | 764 (0.3%), none bridged |
+| ARI(B-cos, C-cos), k = 4 / 8 | 1.000 / 0.829 | 0.132 / 0.189 | 1.000 / 0.996 |
+
+**Reading**
+- Subsumption survives evolution, but the share drops from 56–60% (generated corpora) to 23–47%, and the B test keeps 1.5–2.4× as many seeds as greedy set cover. It finds the lossless exact-subset cases only. Union coverage was preserved in all three.
+- Raw PR stays near its null everywhere (within 3–8%). Rarity-weighted PR is below the null in all three, by a wide margin only on fuzzgoat (10.0 vs 25.8); on png_read and ffmpeg it is 10–14% below. Same caveat as §9: nothing ties it to future discovery.
+- Rank grows nearly linearly in the corpus prefix instead of saturating (fuzzgoat 55 at 65 seeds to 397 at 650; ffmpeg 73 at 76 to 583 at 765), while PR is flat. On a 10k-exec corpus rank is tracking the number of distinct profiles, not a plateau.
+- C is again B reweighted (top eigenvector overlap 1.000000 on all three). rank(C) comes out slightly below rank(B) (527 vs 583 on ffmpeg, 394 vs 397 and 397 vs 398 on the others): this is `matrix_rank`'s tolerance on a matrix whose spectrum has been squared, not a real rank drop (C = B² has B's rank).
+- png_read is the one place C changes the answer, for the worse: rarity C-cosine clustering stays at the baseline purity (0.889) at k = 4 and 8 while B-cosine reaches 1.0 (ARI between them 0.13 and 0.19). Mean C-cosine is 0.951 vs 0.548 for B: saturated.
+- Bridge score: vacuous or undefined in all three (fuzzgoat: all 5,261 disjoint pairs bridged but the score only tracks hubs; png_read and ffmpeg: no bridges). The 764 disjoint ffmpeg pairs equal S−1, consistent with one seed whose non-core edges nobody else shares; I did not look at which seed it is.
+- Validity labels (fuzzgoat: 185 parse / 465 don't; png_read: 423 signature / 54 raw): AUCs for coverage size, B row sum, rarity row sum and C row sum are 0.78 / 0.82 / 0.78 / 0.83 on fuzzgoat and 1.000 on png_read. Size-residualized AUC is 0.37–0.65 in both: no structure beyond coverage size. Purity of the rarity-B and rarity-C clusterings on fuzzgoat is 0.72 vs a 0.715 baseline; raw B-cosine reaches 0.883 at k = 8, but purity rises mechanically with the number of small clusters and I did not control for that.
+
+**Limits.** One 10k-exec run per target with default flags and no repeats; corpus is the retained unique files, not the live set; ffmpeg is a minimal component build linked by hand, with many seed formats not compiled in; no timing and no check against later discovery; labels exist only for fuzzgoat (JSON parse) and png_read (signature).
+
+**Effect on §6, §8, §9.** No change to the ranking: (1) subsumption pre-pass stays the only item with a clear result, now on six corpora; (2) the spectrum analyzer stays unvalidated, and rank growth is not a plateau signal at this corpus size; (3) bridge-seed score and C-based clustering stay dropped. The "evolved corpus" open item of §9 is closed for these three targets; a target without an early wholesale reject, a longer run and a link to future edge discovery are still open.
