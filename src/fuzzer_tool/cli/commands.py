@@ -16,6 +16,7 @@ from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.chaos import InertiaMode
 from fuzzer_tool.core.clock import ClockMode
 from fuzzer_tool.core.colorization import ColorMode
+from fuzzer_tool.core.count_items import CountItems
 from fuzzer_tool.core.dirichlet import AlphaMode
 from fuzzer_tool.core.edge_clusters import CLUSTER_JACCARD
 from fuzzer_tool.core.gravity import SpliceDonor
@@ -1517,6 +1518,10 @@ def cmd_minimize(args):
     if edge_comp is Switch.ON and not args.coverage:
         print("[!] --edge-components needs -c/--coverage: no edge data without it", file=sys.stderr)
 
+    count_mode = CountItems(args.count_aware) if getattr(args, "count_aware", None) else CountItems.OFF
+    if count_mode is not CountItems.OFF and not args.coverage:
+        print("[!] --count-aware needs -c/--coverage: no edge data without it", file=sys.stderr)
+
     kept, removed = minimize_corpus(
         target=args.target,
         corpus_dir=args.corpus,
@@ -1534,6 +1539,7 @@ def cmd_minimize(args):
         rng=rng,
         edge_hist=edge_hist,
         edge_components=edge_comp,
+        count_items=count_mode,
     )
 
     if removed == 0:
@@ -6814,6 +6820,15 @@ def main() -> int:
         action="store_true",
         help="With -c: print connected components of the seed Gram matrix "
         "(seeds sharing an edge) after stripping edges held by >10%% of seeds",
+    )
+    min_parser.add_argument(
+        "--count-aware",
+        choices=[m.value for m in CountItems if m is not CountItems.OFF],
+        default=None,
+        help="With -c: cover (edge, hit-count) items instead of bare edges, so seeds that "
+        "differ only in how often an edge ran are kept. 'bucket' = AFL count buckets (what "
+        "the virgin map treats as new coverage), 'thermo' = nested count >= 2^k levels "
+        "(fewer seeds kept)",
     )
     min_parser.set_defaults(func=cmd_minimize)
 

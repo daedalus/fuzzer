@@ -27,6 +27,8 @@ from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.filesystem import hash_data
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.count_items import _TAG_BITS, CountItems
+from fuzzer_tool.core.count_items import count_items as _count_items
 from fuzzer_tool.core.edge_components import components_report
 from fuzzer_tool.core.edge_hist import hist_report
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
@@ -85,7 +87,8 @@ class _EdgeBook:
         add a {1,2} 10B; add b {1,2} 4B; add c {1,3}  ->  edges: b, c
     """
 
-    def __init__(self, twins: Twins) -> None:
+    def __init__(self, twins: Twins, dtype: type = np.uint32) -> None:
+        self._dtype = dtype
         self.edges: dict[str, np.ndarray] = {}
         self.sizes: dict[str, int] = {}
         self._by_sig: dict[bytes, str] = {}
@@ -105,7 +108,7 @@ class _EdgeBook:
         if kept is not None:
             del self.edges[kept], self.sizes[kept]
         self._by_sig[sig] = key
-        self.edges[key] = np.frombuffer(sig, dtype=np.uint32)
+        self.edges[key] = np.frombuffer(sig, dtype=self._dtype)
         self.sizes[key] = size
 
 
@@ -266,6 +269,7 @@ def minimize_corpus(
     rng: RandPool | None = None,
     edge_hist: Switch = Switch.OFF,
     edge_components: Switch = Switch.OFF,
+    count_items: CountItems = CountItems.OFF,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -294,6 +298,8 @@ def minimize_corpus(
         rng: Sampler for ``max_seeds`` (default: shared RandPool).
         edge_hist: ON prints seeds-per-edge-count histograms (replayed, kept);
             coverage mode only.
+        count_items: BUCKET or THERMO covers (edge, hit-count) items instead of
+            bare edges (see core/count_items.py); coverage mode only.
         edge_components: ON prints connected components of the seed Gram
             matrix after stripping near-universal edges; coverage mode only.
 
@@ -353,12 +359,40 @@ def minimize_corpus(
             all_corpus_files=all_corpus_files,
             edge_hist=edge_hist,
             edge_components=edge_components,
+            count_items=count_items,
         )
     else:
         kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path, fuzzy_dedup)
 
     print(f"[+] Minimized: {len(corpus_files)} -> {kept} files ({removed} removed)")
     return kept, removed
+
+
+def _edge_ids(arr: np.ndarray) -> np.ndarray:
+    """Distinct edge ids of a book entry; count items carry the id above the tag bits."""
+    if arr.dtype == np.uint64:
+        return np.unique(arr >> np.uint64(_TAG_BITS))
+    return arr
+
+
+def _observer(shm, mode: CountItems):
+    """Callable returning ``(edge ids, cover items)`` for the last replay.
+
+    Chosen once so the replay loop does not branch on the mode.
+    """
+    if mode is CountItems.OFF:
+
+        def ids_only():
+            ids = shm.edge_id_array()
+            return ids, ids
+
+        return ids_only
+
+    def with_counts():
+        ids, counts = shm.get_edge_arrays()
+        return np.unique(ids).astype(np.uint32, copy=False), _count_items(ids, counts, mode)
+
+    return with_counts
 
 
 def _spawn_replay(target, timeout, file_mode, tmp_dir, target_args, env):
@@ -398,6 +432,7 @@ def _minimize_with_coverage(
     all_corpus_files: list[Path] | None = None,
     edge_hist: Switch = Switch.OFF,
     edge_components: Switch = Switch.OFF,
+    count_items: CountItems = CountItems.OFF,
 ) -> tuple[int, int]:
     """Greedy set-cover, rate-distortion or minimax-robust pruning over SHM edge bitmaps."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
@@ -429,7 +464,8 @@ def _minimize_with_coverage(
     env_base["__AFL_SHM_ID"] = shm.env_id
     env_base["AFL_MAP_SIZE"] = str(shm.num_entries)
 
-    book = _EdgeBook(_TWINS.get(prune, Twins.COLLAPSE))
+    book = _EdgeBook(_TWINS.get(prune, Twins.COLLAPSE), np.uint32 if count_items is CountItems.OFF else np.uint64)
+    observe = _observer(shm, count_items)
     runner = None
     peak_rss_kb = _maxrss_kb()
     try:
@@ -453,10 +489,10 @@ def _minimize_with_coverage(
             data = fpath.read_bytes()
             shm.reset_edge_map()
             replay(data)
-            edges = shm.edge_id_array()
-            book.add(str(fpath), edges, len(data))
-            unique_edges.update(edges.tolist())
-            replayed_counts.append(edges.size)
+            ids, items = observe()
+            book.add(str(fpath), items, len(data))
+            unique_edges.update(ids.tolist())
+            replayed_counts.append(ids.size)
             peak_rss_kb = max(peak_rss_kb, _maxrss_kb())
             # Reclaim heap memory periodically like in fuzz mode
             if (i + 1) % 100 == 0:
@@ -545,7 +581,7 @@ def _minimize_with_coverage(
         _print_edge_hist(replayed_counts, unique_edges, book, covered_files)
 
     if edge_components is Switch.ON:
-        print(components_report(book.edges))
+        print(components_report({k: _edge_ids(e) for k, e in book.edges.items()}))
 
     return _commit_results(
         corpus_files,
@@ -570,7 +606,7 @@ def _print_edge_hist(
     """
     print(hist_report(replayed_counts, len(unique_edges), "minimize: replayed"))
 
-    kept = [book.edges[k] for k in kept_keys]
+    kept = [_edge_ids(book.edges[k]) for k in kept_keys]
     kept_unique = len(np.unique(np.concatenate(kept))) if kept else 0
     print(hist_report([e.size for e in kept], kept_unique, "minimize: kept"))
 
