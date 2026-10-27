@@ -1520,10 +1520,10 @@ static uintptr_t __afl_ctx_resolve_stack_hi(void) {
  * __afl_slot_claim: inlined at every coverage site, even a bare increment on
  * the miss/bail paths cost the hit path registers (clang, shim-micro-benchmark
  * full: +3%). */
-__AFL_NO_COV __attribute__((noinline, cold))
-static void __afl_ctx_note_miss(void) { __afl_health[__AFL_HEALTH_CTX_RA_CHANGES]++; }
-__AFL_NO_COV __attribute__((noinline, cold))
-static void __afl_ctx_note_bail(void) { __afl_health[__AFL_HEALTH_CTX_BAILS]++; }
+__AFL_NO_COV __attribute__((always_inline))
+static inline void __afl_ctx_note_miss(void) { __afl_health[__AFL_HEALTH_CTX_RA_CHANGES]++; }
+__AFL_NO_COV __attribute__((always_inline))
+static inline void __afl_ctx_note_bail(void) { __afl_health[__AFL_HEALTH_CTX_BAILS]++; }
 /* A failed walk: context 0 for this edge. */
 #define __AFL_CTX_BAIL() do { __afl_ctx_note_bail(); return 0; } while (0)
 
