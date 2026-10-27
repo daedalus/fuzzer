@@ -85,7 +85,7 @@ from fuzzer_tool.core.novelty_confirm import confirm
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
 from fuzzer_tool.core.one_fifth import OneFifthRule
 from fuzzer_tool.core.operator_registry import REGISTRY
-from fuzzer_tool.core.orbit_dedup import canonical
+from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD, OrbitProbe, canonical
 from fuzzer_tool.core.percolation import CoverageRegime
 from fuzzer_tool.core.reject_stats import RejectStats
 from fuzzer_tool.core.rng_health import quick_health_check
@@ -1014,6 +1014,18 @@ def resolve_touched_scan(requested: bool | None, map_size: int) -> bool:
     return map_size >= TOUCHED_SCAN_MIN_ENTRIES
 
 
+def _orbit_skip(f, repeat: bool, folded: bool) -> bool:
+    """Final repeat verdict; lets 1 in N folded repeats run as probes."""
+    probe = getattr(f, "_orbit_probe", None)
+    if probe is not None:
+        f._orbit_probe_pending = False
+        if repeat and folded and probe.due(getattr(f, "_orbit_probe_rng", None)):
+            f._orbit_probe_pending = True
+            return False
+    f._orbit_folded += repeat and folded
+    return repeat
+
+
 class Fuzzer:
     # Decision clock; __init__ replaces it. Default for __new__-built test fuzzers.
     _clock: Clock = WALL_CLOCK
@@ -1763,6 +1775,7 @@ class Fuzzer:
         # branch lives in one place: here, at construction.
         exec_dedup_backend="bloom",
         orbit_dedup=None,
+        orbit_probe=DEFAULT_PROBE_PERIOD,
         fluctuation=False,
         fluctuation_beta=1.0,
         fluctuation_window=1000,
@@ -2745,6 +2758,9 @@ class Fuzzer:
         # bound on drops caused by the declaration).
         self._orbit_specs = list(orbit_dedup or [])
         self._orbit_folded = 0
+        # Folded repeats executed anyway to catch a wrong declaration.
+        self._orbit_probe = OrbitProbe(orbit_probe) if self._orbit_specs and orbit_probe else None
+        self._orbit_probe_pending = False
         # Performance novelty (per-edge max hit count). Separate from the
         # coverage signal on purpose -- see ShmCoverage._update_max_counts.
         self._perf_novelty = perf_novelty
@@ -6048,11 +6064,9 @@ class Fuzzer:
         raw = bytes(mutated)
         key = canonical(raw, self._orbit_specs)
         if key == canonical(bytes(data), self._orbit_specs):
-            self._orbit_folded += key != raw
-            return True
+            return _orbit_skip(self, True, key != raw)
         seen = self._exec_bloom.update_bytes(key, reset_on_full=True)
-        self._orbit_folded += seen and key != raw
-        return seen
+        return _orbit_skip(self, seen, key != raw)
 
     def _seed_entropy_pct(self, seed: bytes, meta: dict | None) -> float:
         """Byte entropy of ``seed`` on the 0-100 scale, memoised in seed_meta.

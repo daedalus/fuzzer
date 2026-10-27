@@ -899,6 +899,12 @@ class StatsReporter:
         folded = getattr(f, "_orbit_folded", 0)
         if folded:
             print(f"  Orbit dedup:       {folded} folded repeats (upper bound on drops)")
+        probe = getattr(f, "_orbit_probe", None)
+        if probe is not None and probe.probes:
+            print(
+                f"  Orbit probe:       {probe.probes} probes, "
+                f"{probe.diffs} differ, {probe.flaky} flaky"
+            )
         neg_hits = getattr(f, "_neg_bloom_hits", 0)
         if neg_hits:
             print(f"  Negative bloom:    {neg_hits} mutants skipped")

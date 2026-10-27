@@ -22,6 +22,7 @@ from fuzzer_tool.core.gravity import SpliceDonor
 from fuzzer_tool.core.mutations import load_dictionary
 from fuzzer_tool.core.negative_bloom import NEG_BLOOM_BATCH, NegativeBloomError
 from fuzzer_tool.core.one_fifth import DEFAULT_TARGET as ONE_FIFTH_TARGET
+from fuzzer_tool.core.orbit_dedup import DEFAULT_PROBE_PERIOD
 from fuzzer_tool.core.run_mode import InputPlacement, RunMode, Switch
 from fuzzer_tool.core.schedulers.op_consolidated_v1 import PriorMode
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
@@ -1068,6 +1069,7 @@ def cmd_fuzz(args):
         seed_calibration=not getattr(args, "no_calibration", False),
         exec_dedup_backend=getattr(args, "exec_dedup_backend", "bloom"),
         orbit_dedup=_parse_orbit_arg(getattr(args, "orbit_dedup", None)),
+        orbit_probe=getattr(args, "orbit_probe", DEFAULT_PROBE_PERIOD),
         cuckoo_seed_filter=getattr(args, "cuckoo_seed_filter", False),
         perf_novelty=not getattr(args, "no_perf_novelty", False),
         reject_code=getattr(args, "reject_code", None),
@@ -5682,6 +5684,16 @@ def main() -> int:
             "swap@OFF:SIZExCOUNT (commuting chunks), endian@OFF:SIZE (byte-order "
             "agnostic field), comma-separated. Orbit size capped at 16. "
             "A wrong declaration drops real novelty. Off by default."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--orbit-probe",
+        type=int,
+        metavar="N",
+        default=DEFAULT_PROBE_PERIOD,
+        help=(
+            "With --orbit-dedup, execute 1 in N folded repeats against its orbit "
+            "minimum and warn when coverage differs (wrong declaration). 0 = off."
         ),
     )
     fuzz_parser.add_argument(

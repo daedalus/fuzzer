@@ -16,18 +16,26 @@ Example: ``swap@8:4x3,endian@0:4``.
 * Total orbit size (product over items) is capped at ``MAX_ORBIT``. A wrong
   declaration silently drops real novelty, so big orbits are refused.
 * Items must not overlap. An input too short for an item is left unchanged.
+
+A wrong declaration drops novelty silently, so 1 in ``DEFAULT_PROBE_PERIOD``
+folded repeats is executed anyway (``OrbitProbe``): twice for a flakiness
+control, once as its orbit minimum. Differing coverage flags the spec.
 """
 
 from __future__ import annotations
 
 import math
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
+
+from fuzzer_tool.core.rand_pool import get_default_rand_pool
 
 MAX_ORBIT = 16
 MIN_ENDIAN_SIZE = 2
 MAX_ENDIAN_SIZE = 8
+DEFAULT_PROBE_PERIOD = 64
 
 _ITEM_RE = re.compile(
     r"^(?P<kind>swap|endian)@(?P<off>0x[0-9a-fA-F]+|\d+):(?P<size>\d+)(?:x(?P<count>\d+))?$"
@@ -121,3 +129,56 @@ def _fold(data: bytes, s: OrbitSpec) -> bytes:
     step = s.size
     chunks = [data[s.offset + i * step : s.offset + (i + 1) * step] for i in range(s.count)]
     return data[: s.offset] + b"".join(sorted(chunks)) + data[s.end :]
+
+
+class Verdict(Enum):
+    SAME = "same"
+    DIFF = "diff"
+    FLAKY = "flaky"
+
+
+def judge(first: set, again: set, minimum: set) -> Verdict:
+    """Compare edge sets of x, x again (control) and x's orbit minimum."""
+    if first != again:
+        return Verdict.FLAKY
+    return Verdict.SAME if first == minimum else Verdict.DIFF
+
+
+def run_probe(data: bytes, specs: list[OrbitSpec], run: Callable[[bytes], set]) -> Verdict:
+    """Execute ``data`` twice and its orbit minimum once via ``run``."""
+    first = run(data)
+    again = run(data)
+    return judge(first, again, run(canonical(data, specs)))
+
+
+class OrbitProbe:
+    """Samples folded repeats and tallies how often orbit members disagree."""
+
+    MIN_PROBES = 10  # stable probes before a verdict on the spec
+    SUSPECT_RATIO = 0.2  # share of stable probes that differ
+
+    def __init__(self, period: int = DEFAULT_PROBE_PERIOD):
+        self.period = period
+        self.probes = 0
+        self.diffs = 0
+        self.flaky = 0
+        self.warned = False
+
+    def due(self, rng=None) -> bool:
+        """True for about 1 in ``period`` calls; never when period is 0."""
+        if self.period <= 0:
+            return False
+        rng = rng or get_default_rand_pool()
+        return rng.random() * self.period < 1
+
+    def record(self, verdict: Verdict) -> None:
+        self.probes += 1
+        self.diffs += verdict is Verdict.DIFF
+        self.flaky += verdict is Verdict.FLAKY
+
+    def suspect(self) -> bool:
+        """True once enough stable probes differ: the declaration is likely wrong."""
+        stable = self.probes - self.flaky
+        if stable < self.MIN_PROBES:
+            return False
+        return self.diffs / stable > self.SUSPECT_RATIO

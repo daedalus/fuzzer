@@ -38,6 +38,7 @@ from fuzzer_tool.core.cadence import due
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cmplog import CmplogRecords
 from fuzzer_tool.core.one_fifth import Outcome as FifthOutcome
+from fuzzer_tool.core.orbit_dedup import run_probe
 from fuzzer_tool.core.ro_rd import classify_operator_name
 from fuzzer_tool.core.run_mode import CrashReward, RunMode, Switch
 from fuzzer_tool.core.schedulers.pos_base import Outcome
@@ -297,6 +298,18 @@ class FuzzRound:
         f._run_target(candidate)
         return f.shm_cov.get_edge_ids() if f.shm_cov else set()
 
+    def _probe_orbit(self) -> None:
+        # A folded repeat let through: compare it with its orbit minimum.
+        f = self._f
+        if not getattr(f, "_orbit_probe_pending", False) or not f.shm_cov:
+            return
+        probe = f._orbit_probe
+        probe.record(run_probe(self._mutated, f._orbit_specs, self._probe_run))
+        if probe.warned or not probe.suspect():
+            return
+        probe.warned = True
+        print("[!] --orbit-dedup: orbit members differ in coverage; declaration likely wrong")
+
     def _begin(self) -> None:
         f = self._f
         data = self._data
@@ -352,6 +365,7 @@ class FuzzRound:
         # times, so the contamination carried a multiplier driven by bloom
         # saturation rather than by anything the target did.
         self._mutated = f._dedup_mutate(self._data)
+        self._probe_orbit()
         self._gate_records()
         self._ltl_clear()
         clock = clock_of(f)
