@@ -17,6 +17,8 @@
 #   tools/build_targets.sh --distance                 # AFLGo distance .so targets (_dist / _dist_asan)
 #   tools/build_targets.sh --ngram                    # png_read k=2/k=3 n-gram flavors (_ng2 / _ng3)
 #   tools/build_targets.sh --frontier                 # clang branch-coverage exes (_cov) for tools/frontier.py
+#   tools/build_targets.sh --no-sibling-calls         # add -fno-optimize-sibling-calls: a wrapper's `return f()` stays a call, so
+#                                                     # call-site context (CTX) still tells its callers apart (NO_SIBLING_CALLS=1 too)
 #
 # Some targets need vendored sources fetched first (all are optional — the
 # build warns and skips when the tree is absent):
@@ -385,11 +387,23 @@ for arg in "$@"; do
     [ "$arg" = "--frontier" ] && WITH_FRONTIER=1
     [ "$arg" = "--msan" ] && WITH_MSAN=1
     [ "$arg" = "--tsan" ] && WITH_TSAN=1
+    [ "$arg" = "--no-sibling-calls" ] && NO_SIBLING_CALLS=1
     case "$arg" in
         --sancov=*) SANCOV_MODES="${arg#--sancov=}" && WITH_CLANG_SCOV=1 ;;
         --ffmpeg-opts=*) FFMPEG_OPTS="${arg#--ffmpeg-opts=}" ;;
     esac
 done
+
+# --no-sibling-calls: a tail call (`return f(x);` at -O2) becomes a jmp, so f's
+# return address is its caller's caller's and two wrappers around f get the
+# same call-site context (measured on gcc 13, clang 18 and zig 0.17: a_tail and
+# b_tail hash alike; at -O0, where nothing is a jmp, they differ). The flag
+# costs a little speed, so it is opt-in. FRAME_POINTER feeds every target and
+# vendored-library compile below, so the flag rides along with it.
+NO_SIBLING_CALLS="${NO_SIBLING_CALLS:-0}"
+if [ "$NO_SIBLING_CALLS" = "1" ]; then
+    FRAME_POINTER="$FRAME_POINTER -fno-optimize-sibling-calls"
+fi
 
 # --indir-cov extends whatever --sancov chose (flag order must not matter);
 # a mode already present is not repeated.
@@ -454,6 +468,23 @@ NC='\033[0m'
 
 ok() { echo -e "  ${GREEN}OK${NC}: $1"; }
 warn() { echo -e "  ${YELLOW}WARN${NC}: $1"; }
+
+# warn_if_frame_pointer_omitted CONFIG_MAK WHAT
+# Warns when the compile flags a configure step wrote would drop frame
+# pointers: the LAST -f[no-]omit-frame-pointer in CFLAGS-like lines wins, so
+# an -fomit-frame-pointer that configure appends after ours silently turns
+# call-site context (CTX) into a constant. Never fails the build: the answer
+# is a warning, and a missing or unreadable file says nothing.
+warn_if_frame_pointer_omitted() {
+    local mak="$1" what="${2:-build}" last
+    [ -f "$mak" ] || return 0
+    last="$(grep -E '^(CC|CFLAGS|CPPFLAGS)[A-Z_]*=' "$mak" 2>/dev/null \
+            | tr ' ' '\n' | grep -E '^-f(no-)?omit-frame-pointer$' | tail -n 1 || true)"
+    if [ "$last" != "-fno-omit-frame-pointer" ]; then
+        warn "$what: compile flags end with '${last:-no frame-pointer flag}'; call-site context (CTX) will collapse to a constant. Put -fno-omit-frame-pointer last (see FRAME_POINTER)"
+    fi
+    return 0
+}
 
 # Copy-on-write tree copy: reflinks share extents (btrfs/xfs), so staging a
 # vendored tree costs no data I/O; elsewhere it falls back to a plain copy.
@@ -807,10 +838,19 @@ DEFAULT_CC="$(_pick_cc)"
 # Prints nothing when the compiler cannot take one.
 GCC_TRACE_PC="${GCC_TRACE_PC:-1}"
 cov_flag_for_cc() {
-    local cc="$1" major
+    local cc="$1" major first
     case "$cc" in
         *clang*) echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard}"; return 0 ;;
     esac
+    # zig cc is clang underneath, but (measured, zig 0.17) it turns UBSan on at
+    # -O0: 134 coverage call sites instead of 31 on targets/compcov_gates.c, and
+    # unresolved __ubsan_handle_* at link, since nothing here provides them.
+    # -fno-sanitize=undefined puts it back at clang's behaviour.
+    first="${cc%% *}"
+    if [ "${first##*/}" = "zig" ]; then
+        echo "${SANCOV_FLAG:--fsanitize-coverage=trace-pc-guard} -fno-sanitize=undefined"
+        return 0
+    fi
     [ "$GCC_TRACE_PC" = "1" ] || return 0
     # shellcheck disable=SC2086
     major="$($cc -dumpversion 2>/dev/null | cut -d. -f1)"
@@ -1500,7 +1540,13 @@ STUBEOF
         LINK_FLAGS="-fprofile-instr-generate"
     fi
     # In COV_FLAGS, not just --extra-cflags, so cfg_stamp sees it.
-    COV_FLAGS="$COV_FLAGS $DEBUG_CFLAGS"
+    # FRAME_POINTER too: every other vendored library gets it, and FFmpeg's
+    # configure otherwise leaves its -O3 default (-fomit-frame-pointer on gcc
+    # and clang) in charge, so CTX walks frames with junk in rbp (the shim's
+    # s337m_probe note). Kept in COV_FLAGS for the same reason as above: the
+    # configure stamp must see it. warn_if_frame_pointer_omitted re-checks the
+    # flags configure actually wrote, because flag order decides which wins.
+    COV_FLAGS="$COV_FLAGS $FRAME_POINTER $DEBUG_CFLAGS"
     local cfg_stamp
     # Every configure input goes in the stamp: installing a dev package changes
     # $FFMPEG_FEATURE_FLAGS, and a stale tree would silently keep the old set.
@@ -1560,6 +1606,7 @@ STUBEOF
             >>"$BUILD_LOG" 2>&1) || cfg_ok=0
     fi
     if [ "$cfg_ok" -eq 1 ]; then
+        warn_if_frame_pointer_omitted "$FFMPEG_DIR/ffbuild/config.mak" "vendored FFmpeg${label}"
         log_section "vendored FFmpeg${label}: make"
         if (cd "$FFMPEG_DIR" && make -j$(nproc) CC="$make_cc" $FFMPEG_MAKE_FLAGS -s >>"$BUILD_LOG" 2>&1); then
             # Promote the .a artifacts to the canonical build location.

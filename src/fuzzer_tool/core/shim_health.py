@@ -65,6 +65,9 @@ class ShimField(IntEnum):
     CMPLOG_CONTENDED = 9
     CMPLOG_WRITE_FAILED = 10
     CMPLOG_NO_SINK = 11
+    CTX_RA_CHANGES = 12
+    CTX_COLLAPSED = 13
+    CTX_BAILS = 14
 
 
 class WriteGuard(IntEnum):
@@ -197,6 +200,16 @@ def health_issues(counters: Sequence[int], attach: Attach) -> list[str]:
             "crashes before the re-arm could not be recovered"
         )
 
+    if _field(counters, ShimField.CTX_COLLAPSED):
+        issues.append(
+            "call-context looks collapsed: many distinct edges but a single caller "
+            "return address. The instrumented code was probably built without "
+            "-fno-omit-frame-pointer (gcc and clang drop it at -O2), so edge ids "
+            "carry no call-site context. Rebuild with tools/build_targets.sh, or "
+            "add the flag to the target's own build. A harness whose coverage sits "
+            "in one function behind one call site trips this legitimately"
+        )
+
     return issues
 
 
@@ -270,6 +283,7 @@ _PROBLEM_FIELDS = (
     ShimField.STRAY_SIGNALS,
     ShimField.ABORTS_INTERCEPTED,
     ShimField.HANDLERS_DISPLACED,
+    ShimField.CTX_COLLAPSED,
 )
 
 

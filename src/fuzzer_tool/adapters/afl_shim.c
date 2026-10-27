@@ -281,7 +281,16 @@ static void __afl_map_node_shm(void);
  *                      failed; one count per batch. The shim then stops
  *                      generating records (every writer gates on fd >= 0),
  *                      so this counts the batch in flight, not later records
- * Non-atomic: magnitudes, never accounting records. */
+ * Non-atomic: magnitudes, never accounting records.
+ *
+ * Call-context fields (see __afl_ctx_collapse_suspect):
+ *   CTX_RA_CHANGES  main-stack frame walks that missed the last-return-address
+ *                   cache, i.e. saw a new caller (the first walk counts)
+ *   CTX_COLLAPSED   1 when the collapse detector holds; computed at read time
+ *   CTX_BAILS       frame walks that failed a bounds check (context 0 for
+ *                   that edge)
+ * The parser in tests/test_shim_health.py reads this enum line by line, so
+ * keep one bare name per line and put comments here, not beside the names. */
 enum {
     __AFL_HEALTH_ATTACHED = 0,
     __AFL_HEALTH_MAP_ENTRIES,
@@ -295,6 +304,9 @@ enum {
     __AFL_HEALTH_CMPLOG_CONTENDED,
     __AFL_HEALTH_CMPLOG_WRITE_FAILED,
     __AFL_HEALTH_CMPLOG_NO_SINK,
+    __AFL_HEALTH_CTX_RA_CHANGES,
+    __AFL_HEALTH_CTX_COLLAPSED,
+    __AFL_HEALTH_CTX_BAILS,
     __AFL_HEALTH_FIELDS
 };
 static uint64_t __afl_health[__AFL_HEALTH_FIELDS];
@@ -1246,9 +1258,72 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
  * with more fields than it asked for. out may be NULL when n == 0. */
 static void __afl_check_crash_handlers(void);
 
+/* Call-context collapse detector.
+ *
+ * __afl_caller_ctx_as() walks saved frame pointers. If the instrumented code
+ * was built without them (gcc/clang -O2 default: -fomit-frame-pointer), the
+ * walk does not fail: it reads the frame of whatever function last linked
+ * rbp -- for a harness, main's -- passes every bounds check, and returns the
+ * SAME return address for every edge. The result is a constant context:
+ * valid-looking edge ids that carry no call-site information, no crash, no
+ * log line. docs/learnings/2026-10-27-ctx-collapse-selfcheck.md has the
+ * measurements.
+ *
+ * Two failure shapes, one signature. (a) rbp still holds a caller's frame
+ * (nothing in the instrumented code touched it): constant context. (b) rbp
+ * is a general register holding junk: the walk fails a bounds check and every
+ * edge gets context 0 (counted in CTX_BAILS). Either way the main-stack slow
+ * path (the one that runs when the return address changed since the last
+ * edge) ran at most once, yet at least __AFL_CTX_COLLAPSE_MIN_EDGES distinct
+ * edge slots were claimed. A real target with that many edges reaches its
+ * instrumented functions from more than one call site. Cost: one increment on
+ * the cache-miss path and on the bail-out paths, nothing on the hit path (91%
+ * of edges on ffmpeg_read).
+ *
+ * Limits: main-thread frames only (a target that runs entirely on a worker
+ * thread is never judged), and a harness whose whole coverage sits in ONE
+ * function reached from ONE call site trips it legitimately, so this is a
+ * suspicion, reported as such. */
+#ifndef __AFL_CTX_COLLAPSE_MIN_EDGES
+#  define __AFL_CTX_COLLAPSE_MIN_EDGES 128
+#endif
+__AFL_GCC_NO_COV static int __afl_ctx_collapse_suspect(void) {
+    if (!__afl_ctx_on) return 0;
+    uint64_t changes = __afl_health[__AFL_HEALTH_CTX_RA_CHANGES];
+    uint64_t bails   = __afl_health[__AFL_HEALTH_CTX_BAILS];
+    /* Never saw a second context (changes <= 1), and the walk did run at
+     * least once, either through (changes == 1: constant context) or into a
+     * bounds check (bails > 0: junk rbp, context 0 on every edge). Neither
+     * counter set means no walk happened at all, which says nothing. */
+    return changes <= 1 && (changes + bails) > 0 &&
+           __afl_total_edge_count >= __AFL_CTX_COLLAPSE_MIN_EDGES;
+}
+
+/* One stderr line per process, from an atexit hook. The tag lets
+ * core/shim_health.ShimWatch.stderr() dedup it across executions. Not run by
+ * forkserver children that leave through _exit(); direct mode reads the
+ * CTX_COLLAPSED counter instead. */
+static int __afl_ctx_reported = 0;
+__AFL_GCC_NO_COV static void __afl_ctx_report_collapse(void) {
+    static const char msg[] =
+        "__afl_shim: call-context looks collapsed: >=128 distinct edges but a "
+        "single caller return address (or failed frame walks); the instrumented code was probably built "
+        "without -fno-omit-frame-pointer, so edge ids carry no call-site context\n";
+    if (__afl_ctx_reported || !__afl_ctx_collapse_suspect()) return;
+    __afl_ctx_reported = 1;
+    ssize_t w = write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    (void)w;
+}
+
+__attribute__((constructor))
+__AFL_GCC_NO_COV static void __afl_ctx_arm_report(void) {
+    atexit(__afl_ctx_report_collapse);
+}
+
 __attribute__((visibility("default")))
 __AFL_GCC_NO_COV uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
     __afl_check_crash_handlers();
+    __afl_health[__AFL_HEALTH_CTX_COLLAPSED] = (uint64_t)__afl_ctx_collapse_suspect();
     __afl_health[__AFL_HEALTH_ATTACHED] = __afl_area != NULL;
     __afl_health[__AFL_HEALTH_MAP_ENTRIES] = __afl_map_size;
     __afl_health[__AFL_HEALTH_WGUARD] = (uint64_t)__afl_wguard_mode;
@@ -1441,6 +1516,17 @@ static uintptr_t __afl_ctx_resolve_stack_hi(void) {
     return hi;
 }
 
+/* Counters for the collapse detector, out of line and cold like
+ * __afl_slot_claim: inlined at every coverage site, even a bare increment on
+ * the miss/bail paths cost the hit path registers (clang, shim-micro-benchmark
+ * full: +3%). */
+__AFL_NO_COV __attribute__((noinline, cold))
+static void __afl_ctx_note_miss(void) { __afl_health[__AFL_HEALTH_CTX_RA_CHANGES]++; }
+__AFL_NO_COV __attribute__((noinline, cold))
+static void __afl_ctx_note_bail(void) { __afl_health[__AFL_HEALTH_CTX_BAILS]++; }
+/* A failed walk: context 0 for this edge. */
+#define __AFL_CTX_BAIL() do { __afl_ctx_note_bail(); return 0; } while (0)
+
 __attribute__((always_inline))
 static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) {
     if (path == __AFL_PATH_ANY && (__afl_mapping || !__afl_ctx_on)) return 0;
@@ -1455,7 +1541,7 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
      * dereferencing a wild pointer.  fp[0] is our own saved FP and is
      * always valid; caller_fp[1] is only read after the range check. */
     void **fp = (void **)__builtin_frame_address(0);
-    if (!fp) return 0;  /* frame-pointer-less build: no walkable chain */
+    if (!fp) __AFL_CTX_BAIL();  /* frame-pointer-less build: no walkable chain */
     uintptr_t cur = (uintptr_t)fp;
     void **caller_fp = (void **)__afl_raw_load(fp);   /* saved FP of the frame above */
     uintptr_t cfp = (uintptr_t)caller_fp;
@@ -1463,7 +1549,7 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
      * address than ours and within a sane single-hop span (4 MiB covers
      * any realistic frame without risking a wild read).  Anything outside
      * that window is an unlinked/garbage frame — skip context for it. */
-    if (cfp <= cur || cfp - cur > (4u << 20)) return 0;
+    if (cfp <= cur || cfp - cur > (4u << 20)) __AFL_CTX_BAIL();
     /* Raw loads: a plain read here gets an ASAN check in every guard callback.
      * Main stack: the globals; any other stack (or before the first
      * resolve, when both are 0): this thread's TLS. */
@@ -1475,23 +1561,26 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
     int main_stack = cur >= lo && cur < hi;
     if (main_stack) {
         /* Main stack: lo <= cur < hi already, so only the hop is checked. */
-        if ((cfp & 7u) || cfp > hi - 16) return 0;
+        if ((cfp & 7u) || cfp > hi - 16) __AFL_CTX_BAIL();
     } else if (path == __AFL_PATH_LEAF) {
         *off_main = 1;   /* TLS path calls out: not in the leaf */
         return 0;
     } else {
         hi = (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_hi);
         if (!hi) hi = __afl_ctx_resolve_stack_hi();
-        if (hi <= 1 || (cfp & 7u) || cfp > hi - 16) return 0;
+        if (hi <= 1 || (cfp & 7u) || cfp > hi - 16) __AFL_CTX_BAIL();
         /* cur >= lo with cur < cfp <= hi - 16 puts the hop inside the stack, so
          * no canonical-address test is needed (an x86 `cfp >> 47` one rejected
          * every aarch64 stack with bit 47 set). */
-        if (cur < (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_lo)) return 0;
+        if (cur < (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_stack_lo)) __AFL_CTX_BAIL();
     }
     void *ra = __afl_raw_load(caller_fp + 1);   /* return addr into caller's caller */
     if (!ra) return 0;
     if (main_stack && (uintptr_t)ra == (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ra))
         return (uint32_t)(uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ctx);
+    /* Cache miss: the return address changed (or first walk). Counted for
+     * __afl_ctx_collapse_suspect(); this is the cold path, the hit above is not. */
+    if (main_stack) __afl_ctx_note_miss();
 
     /* The claim that used to sit here -- "ASLR/PIE base differences across
      * runs don't matter, we only need identical call chains WITHIN one
@@ -1552,7 +1641,7 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
     return ctx;
 }
 
-__attribute__((visibility("default"), always_inline))
+__attribute__((always_inline))
 static inline uint32_t __afl_get_caller_ctx(void) {
     return __afl_caller_ctx_as(__AFL_PATH_ANY, NULL);
 }
@@ -2037,7 +2126,7 @@ static inline void __afl_map_loc_as(uint32_t cur_loc, enum __afl_path path) {
     __afl_push_prev(cur_loc);
 }
 
-__attribute__((visibility("default"), always_inline))
+__attribute__((always_inline))
 static inline void __afl_map_loc(uint32_t cur_loc) {
     __afl_map_loc_as(cur_loc, __AFL_PATH_ANY);
 }
@@ -2064,7 +2153,7 @@ static inline void __afl_map_loc(uint32_t cur_loc) {
  * executable failed to link and a .so linked with __afl_map_edge undefined,
  * which dlopen(RTLD_NOW) refuses and RTLD_LAZY turns into a crash on the
  * first coverage point. */
-__attribute__((visibility("default"), always_inline))
+__attribute__((always_inline))
 static inline void __afl_map_edge(uint32_t cur_loc) {
     uint32_t v = __afl_guard_mix((uint64_t)cur_loc ^ 0x6a09e667f3bcc909ULL) & __afl_loc_mask;
     __afl_map_loc(v ? v : 1);
@@ -6210,7 +6299,7 @@ __AFL_GCC_NO_COV static int __afl_abort_is_crash(void) {
     return mode;
 }
 
-__AFL_GCC_NO_COV static void __afl_shim_abort(void) {
+__AFL_GCC_NO_COV __attribute__((unused)) static void __afl_shim_abort(void) {
     static const char msg[] = "[shim] abort() intercepted\n";
     __afl_health[__AFL_HEALTH_ABORTS_INTERCEPTED]++;
     write(STDERR_FILENO, msg, sizeof(msg) - 1);
