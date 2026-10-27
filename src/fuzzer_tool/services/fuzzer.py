@@ -3108,8 +3108,10 @@ class Fuzzer:
         # (both upload __AFL_DIST_SHM_ID; evaluation campaigns are not
         # directed). Built before _load_corpus(): --resume checks the
         # node_channel contract and restores Katz state there.
+        # --lightweight (RunMode.LITE) never builds it: the ICFG decode is
+        # the dominant startup cost and LITE does no Katz scheduling.
         self._katz_channel = None
-        if not targets:
+        if not targets and run_mode is not RunMode.LITE:
             try:
                 from fuzzer_tool.services.katz_channel import KatzChannel
 

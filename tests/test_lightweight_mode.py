@@ -279,3 +279,21 @@ def test_auto_minimize_on_bloat(tmp):
     f = _make(tmp)
     _bloat(f)
     assert f._minimize_pending is True
+
+
+# ── ICFG / K-Scheduler node channel ──────────────────────────────────
+
+
+@pytest.mark.parametrize(
+    ("mode", "builds"),
+    [(RunMode.LITE, 0), (RunMode.FULL, 1)],
+)
+def test_lite_skips_icfg_build(tmp, mode, builds):
+    """Falsification: LITE never builds the ICFG; FULL still tries (control)."""
+    from fuzzer_tool.services.katz_channel import KatzChannel
+
+    with patch.object(KatzChannel, "build", return_value=None) as build:
+        f = _make(tmp, run_mode=mode)
+
+    assert build.call_count == builds
+    assert f._katz_channel is None
