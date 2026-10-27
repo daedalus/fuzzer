@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-26
 **Scope:** what the seed×edge incidence matrix A (S×E) gives us through its Gram matrix B = AAᵀ and through C = BBᵀ = B² = A(AᵀA)Aᵀ, and how that maps onto what the repo already has.
-**Status:** analysis only, nothing implemented. §8–§10 are measurements on corpora; §11 closes the subsumption item (the minimizer already does it) and is the current recommendation.
+**Status:** analysis only, nothing implemented. §8–§10 are measurements on corpora; §11 closes the subsumption item (the minimizer already does it) and is the current recommendation. §12 extends A to a cube and tests a mirror; one candidate signal, nothing implemented.
 
 ## 1. Definitions
 
@@ -197,3 +197,32 @@ Prerequisites for all four:
 3. Bridge-seed score and C-based clustering: unchanged: dropped.
 4. Connected components of B after stripping near-universal edges: still the one cheap addition worth a diagnostic line in `-c` mode.
 5. Optional: a regression test that every seed removable by the B test is also removed by the reduction, allowing the tie-break exceptions above.
+
+## 12. Cube extensions and mirror (2026-10-26)
+
+**Setup.** Python tracer on the pure-Python `json` scanner (edges = (previous line, line)), so counts and executions are available without a clang build. Scripts `cube.py`, `an.py`, `camp.py`, `an2.py`, `mirror.py`, `mirror2.py` (not committed). One run each; toy target.
+
+**12.1 Hit-count cube (seed x edge x level).** T[s,e,k] = 1 if count >= 2^k, k = 0..7; 400 seeds x 177 edges x 8 levels.
+- Mode Grams (two axes contracted): rank 272 (seed), 89 (edge), 8 (level; 6 at 99% energy). Top eigenvalue holds 73-77% of the trace on every axis. Participation ratio 1.84 / 1.78 / 1.64 vs edge-shuffle null 4.03 / 4.58 / 1.64 (level equals its null by construction).
+- Adjacent levels correlate 0.80-0.86 (nested): the level axis adds about 6 dimensions, not 8.
+- Pair cosine vs binary B: Spearman 0.948. Seed rank 85 -> 272 once counts count: nearly every seed gets a distinct profile, so rank is not a saturation signal here either.
+- Subsumption: binary B test removes 284 of 400; count-aware (thermometer subset) removes 261. 24 seeds are binary-redundant but carry a distinct hit-count profile. `core/set_cover.py` has no count awareness; `core/count_class.py` exists. Untested on a real corpus.
+
+**12.2 Execution cube (exec x parent seed x edge).** 8000 execs from 20 seeds (uniform parent, char mutations, corpus grew to 45), 184 edges, 25 new-edge events.
+- Each exec has one parent, so the seed axis partitions the exec axis. Contracting (exec, edge) gives a diagonal S x S (off-diagonal mass 0: edge-hit volume per parent); contracting (seed, edge) gives an N x N nonzero only inside sibling blocks. The cube is a block matrix, not a third independent axis.
+- Edge Gram: rank 92, top eigenvalue 68.5%. Parent identity explains 64.7% of exec-coverage variance (shuffled parents: 0.6%).
+- Discovery curve: distinct edge-set profiles 157, 257, 415, 633, 936 at n = 500, 1000, 2000, 4000, 8000; rank of the exec x edge unfolding 76, 82, 88, 89, 92. Rank saturates while profiles keep growing.
+- Predictive check, first half vs second half (44 parents with >= 20 first-half execs; target = second-half children whose edge set is new campaign-wide): distinct-profile ratio of the parent's children rho +0.90, rank of the child block +0.88, edges reached by children +0.89, child count +0.08, child diversity (1 - mean pairwise Jaccard) +0.05. Controlling for parent coverage size: +0.77, +0.73, +0.60.
+
+**12.3 Mirror.** Point inversion R on (n, s, e), rho = <T, RT> / <T, T>, label-shuffle null, 100 draws.
+- Any subset containing n or s: rho 0.000-0.016 vs null 0.007-0.023, chance. No time-reversal or seed-order symmetry.
+- Edge only: hot-to-rare order 0.185 vs 0.414 +- 0.036 (z -6.3); discovery order 0.289 vs 0.412 +- 0.032 (z -3.9). Largely built in: hot-to-rare reversal is the most mismatched pairing.
+- M J M^T (J = edge reversal): rank 92, signature +35/-35 (hot-to-rare) and +37/-37 (discovery order). Indefinite, unlike the Gram.
+- Edge and seed indices are labels; real edge ids are hashed, so a mirror there is arbitrary. No scheduler signal.
+
+**Effect on section 6.**
+1. New candidate: per-parent child-profile distinctness as a seed-scheduler weight (12.2). Survives the size control on 44 parents of one toy run; needs a paired A/B (`tools/lib/bench_paired.py`) before wiring.
+2. Count-class subsumption in `min_cover` (12.1): untested on fuzzgoat/png_read.
+3. Mirror and the S x S exec-cube contraction: dropped.
+
+**Limits.** Python-tracer toy, one run, 25 global new-edge events, "novel" means a new edge set not a new edge, parent coverage is a confound only partly controlled, no real instrumented target.
