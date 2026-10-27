@@ -761,6 +761,7 @@ def cmd_fuzz(args):
         seed_drr_scheduler=getattr(args, "seed_drr_scheduler", False),
         seed_mlfq_scheduler=getattr(args, "seed_mlfq_scheduler", False),
         seed_stride_scheduler=getattr(args, "seed_stride_scheduler", False),
+        seed_stride_cost=getattr(args, "seed_stride_cost", False),
         seed_eevdf_scheduler=getattr(args, "seed_eevdf_scheduler", False),
         seed_bfq_scheduler=getattr(args, "seed_bfq_scheduler", False),
         seed_sfq_scheduler=getattr(args, "seed_sfq_scheduler", False),
@@ -972,6 +973,7 @@ def cmd_fuzz(args):
         lineage_backtrack=getattr(args, "lineage_backtrack", False),
         mds_select=getattr(args, "mds_select", False),
         minimax_select=getattr(args, "minimax_select", False),
+        inverse_lottery_select=getattr(args, "inverse_lottery_select", False),
         op_minimax=getattr(args, "op_minimax", False),
         wall_order=getattr(args, "wall_order", False),
         secretary=getattr(args, "secretary", False),
@@ -2400,6 +2402,10 @@ def cmd_sweep(args):
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
 # a real target) has not been run, so --hail-mary should not field it yet.
 #
+# seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
+# (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
+# paired run (docs/AB_PENDING.md). The first is also inert without the stride arm.
+#
 # byte_interaction (--byte-interaction) is excluded as unmeasured: only the
 # synthetic AND/XOR checks in tests/test_byte_interaction.py, no paired run.
 #
@@ -3306,6 +3312,13 @@ def main() -> int:
         "single-seed loss), then top-K by score. Count-budget path only.",
     )
     fuzz_parser.add_argument(
+        "--inverse-lottery-select",
+        action="store_true",
+        help="In auto_minimize_corpus, evict the optional seeds over budget by an inverse "
+        "lottery (P(victim) proportional to 1 / keep-score, without replacement) instead of "
+        "always dropping the lowest scores. Count-budget path only.",
+    )
+    fuzz_parser.add_argument(
         "--op-minimax",
         action="store_true",
         help="The bandit (--mc-bandit) picks operators by alpha-beta lookahead over "
@@ -3455,6 +3468,13 @@ def main() -> int:
         help="Seed-arena arm 'stride': stride scheduling: deterministic proportional share, "
         "favored seeds 2x tickets. Elo arm; also the no-elo pick when enabled "
         "(core/schedulers/seed_stride.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-stride-cost",
+        action="store_true",
+        help="With --seed-stride-scheduler: compensation tickets. The stride becomes cost / "
+        "tickets (cost = mean exec time relative to the corpus mean), so equal tickets get "
+        "equal target time instead of equal picks. No effect without the stride arm.",
     )
     fuzz_parser.add_argument(
         "--seed-eevdf-scheduler",

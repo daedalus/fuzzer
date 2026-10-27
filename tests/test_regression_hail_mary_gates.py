@@ -46,6 +46,9 @@ _COMMANDS_PATH = Path(commands.__file__).resolve()
 #     real overhead --hail-mary shouldn't add silently)
 #   * --rand-floyd-sample (a second implementation of RandPool.sample for
 #     k>=3, not a strategy; moves the draw stream for no behavioural gain)
+#   * --seed-stride-cost / --inverse-lottery-select (lottery-scheduling ports,
+#     unmeasured: A/B pending in docs/AB_PENDING.md; the first is also inert
+#     without --seed-stride-scheduler)
 #   * --canary-scheduler (deliberately worst-in-class, a floor for the Elo
 #     tournament's ranking, not a strategy trying to win; --hail-mary means
 #     "try every plausible strategy", not "add a scheduler built to lose")
@@ -62,6 +65,8 @@ _EXCLUDED_OPT_IN = frozenset(
         "hail_mary",
         "abort_is_crash",  # redefines a crash (assertions), not a strategy
         "novel_crash_reward",  # unmeasured: A/B pending (docs/AB_PENDING.md)
+        "seed_stride_cost",  # unmeasured: A/B pending (docs/AB_PENDING.md); inert without the stride arm
+        "inverse_lottery_select",  # unmeasured: A/B pending (docs/AB_PENDING.md)
         "lightweight",  # the inverse preset; the two are mutually exclusive
         "no_cmplog",  # opt-OUT of comparison tracing; --hail-mary must not turn cmplog off
         "resume",

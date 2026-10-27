@@ -35,6 +35,7 @@ from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import seed_exec_us
 from fuzzer_tool.core.hashing import key16
+from fuzzer_tool.core.inverse_lottery import inverse_lottery_victims
 from fuzzer_tool.core.operator_registry import REGISTRY
 from fuzzer_tool.core.periodicity import estimate_record_size
 from fuzzer_tool.core.pool_drift import PoolDrift
@@ -1818,10 +1819,32 @@ class CorpusManager:
             return mandatory_seeds + self._minimax_select_optional(
                 scored, target_size - len(mandatory_seeds), mandatory_seeds
             )
+        if getattr(f, "_use_inverse_lottery_select", False):
+            return mandatory_seeds + self._inverse_lottery_select_optional(
+                scored, target_size - len(mandatory_seeds)
+            )
         # Count-budget: keep top-K by score (original behavior)
         budget = target_size - len(mandatory_seeds)
         keep = min(budget, len(scored))
         return mandatory_seeds + [s for _, s in scored[:keep]]
+
+    def _inverse_lottery_select_optional(
+        self, scored: list[tuple[float, bytes]], budget: int
+    ) -> list[bytes]:
+        """Keep *budget* optional seeds; evict the rest by inverse lottery.
+
+        Victims are drawn with P ~ 1 / keep-score (core/inverse_lottery.py), so
+        the lowest scores go first on average but a low-scoring seed can
+        survive and a high-scoring one can, rarely, be culled. Survivors keep
+        their score order. A non-positive budget evicts every optional seed.
+        """
+        budget = max(0, budget)
+        victims = set(
+            inverse_lottery_victims(
+                [score for score, _ in scored], len(scored) - budget, self.f._rng
+            )
+        )
+        return [seed for i, (_, seed) in enumerate(scored) if i not in victims]
 
     def _minimax_select_optional(
         self, scored: list[tuple[float, bytes]], budget: int, kept: list[bytes]

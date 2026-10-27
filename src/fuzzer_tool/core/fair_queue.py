@@ -287,6 +287,16 @@ class Stride:
     Equal tickets are plain round robin in list order. A joining flow starts
     at the lowest live pass: no banked credit, no penalty. A heap keeps a
     pick O(log n); a membership change rebuilds it in O(n).
+
+    With a ``cost`` signal the stride becomes ``cost / tickets`` (Waldspurger's
+    compensation, charged at pick time from a predicted cost rather than
+    settled after the run): a flow that costs twice the mean is served half as
+    often, so equal tickets mean equal *time*, not equal picks::
+
+        tickets a=b=1, cost a=1 b=4:   a b a a a a a b ...
+
+    Without ``cost`` (or with a flat one) the sequence is identical to plain
+    stride -- the falsification condition.
     """
 
     def __init__(self) -> None:
@@ -294,7 +304,12 @@ class Stride:
         self._seq = 0
         self._seen: list[Hashable] | None = None
 
-    def pick(self, flows: Sequence[Hashable], weight: Callable[[Hashable], float]):
+    def pick(
+        self,
+        flows: Sequence[Hashable],
+        weight: Callable[[Hashable], float],
+        cost: Callable[[Hashable], float] | None = None,
+    ):
         if not flows:
             return ""
         if len(flows) == 1:
@@ -303,7 +318,8 @@ class Stride:
             self._rebuild(flows)
 
         pass_, _, flow = self._heap[0]
-        stride = 1.0 / neutral(weight(flow))
+        charge = NEUTRAL_COST if cost is None else neutral(cost(flow))
+        stride = charge / neutral(weight(flow))
         heapq.heapreplace(self._heap, (pass_ + stride, self._tick(), flow))
         return flow
 

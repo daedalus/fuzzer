@@ -1705,6 +1705,7 @@ class Fuzzer:
         lineage_backtrack=False,
         mds_select=False,
         minimax_select=False,
+        inverse_lottery_select=False,
         op_minimax=False,
         wall_order=False,
         mcts=False,
@@ -1957,6 +1958,7 @@ class Fuzzer:
         # Op arms: Elo-only. Appended: positional signature.
         seed_mlfq_scheduler=False,
         seed_stride_scheduler=False,
+        seed_stride_cost=False,
         seed_eevdf_scheduler=False,
         seed_bfq_scheduler=False,
         seed_sfq_scheduler=False,
@@ -3058,6 +3060,9 @@ class Fuzzer:
         # auto_minimize_corpus), --op-minimax (bandit lookahead),
         # --wall-order (condstmt_solve wall order).
         self._use_minimax_select = bool(minimax_select)
+        # --inverse-lottery-select: auto_minimize_corpus evicts optional seeds
+        # by an inverse lottery (P(victim) ~ 1/keep-score) instead of top-K.
+        self._use_inverse_lottery_select = bool(inverse_lottery_select)
         self._use_op_minimax = bool(op_minimax)
         self._use_wall_order = bool(wall_order)
         # MCTS seed scheduling walks the lineage genealogy, so it is
@@ -3417,7 +3422,11 @@ class Fuzzer:
         # OS / network seed arms. _seed_os_arms is the live subset the
         # outcome record site feeds (_record_seed_os_arms).
         self._seed_mlfq = SeedMLFQScheduler() if seed_mlfq_scheduler else None
-        self._seed_stride = SeedStrideScheduler() if seed_stride_scheduler else None
+        self._seed_stride = (
+            SeedStrideScheduler(cost_aware=bool(seed_stride_cost))
+            if seed_stride_scheduler
+            else None
+        )
         self._seed_eevdf = SeedEEVDFScheduler() if seed_eevdf_scheduler else None
         self._seed_bfq = SeedBFQScheduler() if seed_bfq_scheduler else None
         self._seed_sfq = SeedSFQScheduler(rng=self._rng) if seed_sfq_scheduler else None

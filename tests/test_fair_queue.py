@@ -323,6 +323,59 @@ def test_stride_empty_and_single():
     assert Stride().pick(["x"], _unit) == "x"
 
 
+# --- Stride: compensation (cost) ----------------------------------------------
+
+
+def test_stride_flat_cost_is_plain_stride():
+    """Falsification: a flat cost reproduces the cost-free sequence exactly."""
+    w = {"a": 3.0, "b": 1.0, "c": 2.0}
+    plain, flat = Stride(), Stride()
+    flows = ["a", "b", "c"]
+
+    assert [flat.pick(flows, w.get, lambda _k: 1.0) for _ in range(60)] == [
+        plain.pick(flows, w.get) for _ in range(60)
+    ]
+
+
+def test_stride_cost_gives_equal_time_not_equal_picks():
+    """Equal tickets, cost 1:4 -> picks 4:1, so each flow gets the same total cost."""
+    cost = {"a": 1.0, "b": 4.0}
+    q = Stride()
+    picks = [q.pick(["a", "b"], _unit, cost.get) for _ in range(500)]
+
+    assert _counts(picks) == {"a": 400, "b": 100}
+
+
+def test_stride_cost_scales_with_tickets():
+    """Doubling both tickets and cost leaves the share unchanged."""
+    w, c = {"a": 2.0, "b": 1.0}, {"a": 2.0, "b": 1.0}
+    q = Stride()
+    picks = [q.pick(["a", "b"], w.get, c.get) for _ in range(300)]
+
+    assert _counts(picks) == {"a": 150, "b": 150}
+
+
+@pytest.mark.parametrize("bad", [0.0, -1.0, NAN, INF])
+def test_stride_bad_cost_is_neutral(bad):
+    """Adversarial: garbage cost counts as 1, never free and never starving."""
+    cost = {"a": bad, "b": 1.0}
+    q = Stride()
+    picks = [q.pick(["a", "b"], _unit, cost.get) for _ in range(20)]
+
+    assert _counts(picks) == {"a": 10, "b": 10}
+
+
+def test_stride_cost_late_joiner_banks_no_credit():
+    """Adversarial: cost does not break the join-at-lowest-pass rule."""
+    cost = {"a": 1.0, "b": 1.0, "c": 2.0}
+    q = Stride()
+    for _ in range(100):
+        q.pick(["a", "b"], _unit, cost.get)
+    picks = [q.pick(["a", "b", "c"], _unit, cost.get) for _ in range(40)]
+
+    assert _counts(picks) == {"a": 16, "b": 16, "c": 8}
+
+
 # --- EEVDF ------------------------------------------------------------------
 
 

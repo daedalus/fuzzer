@@ -61,6 +61,7 @@ Status: **U** unmeasured · **S** synthetic/harness only · **N** null/inconclus
 | Chaotic inertia (`--swarm-inertia chaotic`) | Logistic-map PSO inertia | U | vs `constant` for `--mopt`, `--op-firefly` |
 | Learned α / dict Thompson (`--dirichlet-alpha learned`, `--dict-thompson`) | Learned Dirichlet α; Thompson over tokens | N | 3k trend negative; 10k+ execs |
 | Minimax (`--op-minimax`, `--minimax-select`, `--wall-order`) | Minimax op / minimization / ordering | N | png null; `--reps 2 --set cmplog` |
+| Lottery ports (`--seed-stride-cost`, `--inverse-lottery-select`) | Compensation tickets on the stride arm; inverse-lottery eviction in `auto_minimize_corpus` | U | arms `seed-stride-cost` vs `seed-stride`, `inverse-lottery-select` vs `minimize-2k`; judge stride-cost on edges at fixed wall time, `--set ffmpeg` (widest exec-cost spread) |
 | MCTS vs alpha-beta (`--mcts`, `--alphabeta`) | Lineage tree search | N | png null; ffmpeg set, then retire one |
 | Preset ledger (`--preset-ledger`) | UCB1 over flag presets across campaigns | U | vs `baseline` via `benchmark.py replicated` |
 | Recurrence gate (`--recurrence`) | RQA TRAPPED read on the exec stream | U | does forcing the gate shorten plateaus |

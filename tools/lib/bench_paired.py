@@ -253,6 +253,14 @@ ARMS: dict[str, list[str]] = {
     "wall-order": ["--wall-order"],
     "minimize-2k": ["--minimize-every-execs", "2000"],
     "minimax-select": ["--minimize-every-execs", "2000", "--minimax-select"],
+    # Lottery-scheduling ports (docs/handover/handover_lottery_scheduling_\
+    # 2026-10-27.md). seed-stride-cost pairs against plain seed-stride, which
+    # pairs against baseline; judge it on edges at fixed WALL time, since at
+    # fixed execs compensation cannot show an effect. inverse-lottery-select
+    # only acts inside auto_minimize_corpus, so it shares minimize-2k.
+    "seed-stride": ["--seed-stride-scheduler"],
+    "seed-stride-cost": ["--seed-stride-scheduler", "--seed-stride-cost"],
+    "inverse-lottery-select": ["--minimize-every-execs", "2000", "--inverse-lottery-select"],
 }
 
 STRATA_ARMS = (
@@ -325,6 +333,9 @@ ARM_BASELINES: dict[str, str] = {
     "elo-op-minimax": "elo",
     "wall-order": "baseline",
     "minimax-select": "minimize-2k",
+    "seed-stride": "baseline",
+    "seed-stride-cost": "seed-stride",
+    "inverse-lottery-select": "minimize-2k",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

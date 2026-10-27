@@ -3,7 +3,7 @@
 Date: 2026-10-27
 fuzzer HEAD: `b5789e61`
 References: Waldspurger & Weihl, *Lottery Scheduling* (OSDI 1994); Waldspurger & Weihl, *Stride Scheduling* (MIT/LCS/TM-528, 1995)
-Status: analysis only. Nothing implemented, nothing measured.
+Status: ports 1 and 3 (the two Low-cost ones) implemented behind off-by-default flags, unit-tested, NOT benchmarked. Ports 2, 4 and 5 are still analysis only. See section 6.
 
 ## 1. Summary
 
@@ -54,7 +54,7 @@ Design sketch:
 
 Falsification: constant cost must reproduce the current `Stride` sequence exactly. Add that as a test in `tests/test_fair_queue.py`.
 
-Check before implementing (not verified in this analysis): `SeedPicker`'s weight function may already include a speed or perf-score factor (AFL-style). If so, compensation double-counts speed and the ticket weight must be stripped of it first.
+Resolved at implementation (section 6): `SeedPicker`'s weight is favored-only (`FAVORED_WEIGHT` or 1.0), so there is no speed factor to double-count, and a per-key `cost` signal (ledger exec time over the corpus mean) already exists. The `settle` design above was dropped: cost is charged at pick time from that prediction, which needs no lazy-deletion heap.
 
 ### 3.3 Port 2 — Ticket currencies
 
@@ -81,7 +81,7 @@ Candidate uses:
 
 Why it helps: set-cover minimization is deterministic and keeps one covering set. A randomized cull keeps the survivors diverse and cannot systematically evict one lineage.
 
-Design sketch: a small pure function `inverse_lottery(keys, tickets, rng, floor)` returning a victim. Tickets are floored so a zero-ticket key cannot get infinite probability, and capped so one extreme value does not dominate. Eviction call sites still have to be located in the code.
+Design sketch: a small pure function returning victims. Tickets are floored so a zero-ticket key cannot get infinite probability. No cap is needed (see section 6: the key is linear in the ticket). The eviction site is `CorpusManager._select_budget`, count-budget path.
 
 ### 3.5 Port 4 — Partial-sum tree draw
 
@@ -115,3 +115,24 @@ If "the lottery" meant the lottery ticket hypothesis (Frankle & Carbin), the ana
 2. Port 2 group key: `--edge-components` versus `fractal_partition` cells, and which backing rule.
 3. Port 3: which eviction sites to cover first.
 4. Whether to build the paired-benchmark arm subset flag before any of these.
+
+## 6. Implementation status (2026-10-27, on top of `ba6cf7eb`)
+
+Implemented, off by default, unit-tested, not benchmarked:
+
+| Port | Flag | Where | Notes |
+|------|------|-------|-------|
+| 1 Compensation tickets | `--seed-stride-cost` (with `--seed-stride-scheduler`) | `Stride.pick(flows, weight, cost=None)` in `core/fair_queue.py`; `SeedStrideScheduler(cost_aware=...)`; `"stride": ("weight", "cost")` in `_OS_SEED_SIGNALS` | stride = `neutral(cost) / neutral(weight)`. Flat cost reproduces plain stride exactly (tested). Garbage cost counts as 1. Cost is the cost-ledger prediction, charged at pick time, so the `settle` step of section 3.2 was not needed. |
+| 3 Inverse lottery | `--inverse-lottery-select` | new `core/inverse_lottery.py`; `CorpusManager._inverse_lottery_select_optional`, called from `_select_budget` after the mds/minimax branches | k victims without replacement as the k smallest `Exp(1) * score` (Efraimidis-Spirakis), O(n log n), one pass. Equal scores give a uniform cull (tested). Count-budget path only; `--max-corpus-bytes` knapsack and `--mds-select` / `--minimax-select` take precedence. |
+
+Also added: bench arms `seed-stride` (vs `baseline`), `seed-stride-cost` (vs `seed-stride`), `inverse-lottery-select` (vs `minimize-2k`) in `tools/lib/bench_paired.py`; a row in `docs/AB_PENDING.md`; a CHANGELOG entry. Neither flag is in `_HAIL_MARY_FLAGS` (a test pins that until there is a measurement).
+
+Tests: `tests/test_fair_queue.py` (Stride cost), `tests/test_inverse_lottery.py`, `tests/test_lottery_flags.py`, and two cases in `tests/test_os_net_scheduler_wiring.py` (cost flag on and off).
+
+Deviations from the sketch in sections 3.2 and 3.4: no `settle`; no ticket cap.
+
+Pitfall found while writing the corpus test: when several seeds hold identical edge sets, `_greedy_cover` breaks the tie by `id(seed)`, so which seed is mandatory differs from run to run even with a fixed RNG. A test of any selection branch needs one seed that alone holds an edge, or its control is not deterministic.
+
+Not implemented: ports 2 (currencies), 4 (partial-sum tree), 5 (transfer). Open decisions 2-4 of section 5 still stand; decision 1 (start with port 1) is done.
+
+Next, in order: run `seed-stride-cost` vs `seed-stride` on ffmpeg at fixed wall time; run `inverse-lottery-select` vs `minimize-2k` on fuzzgoat and png_read; then decide on port 2.

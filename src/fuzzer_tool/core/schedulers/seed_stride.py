@@ -9,6 +9,11 @@ Weight comes from the caller per pick (``SeedPicker``: AFL-favored 2x), so
 this module holds no reference to the fuzzer. Flat weight is exactly
 ``seed_round_robin`` -- the falsification condition. ``record`` only feeds
 the Elo match; selection ignores it.
+
+``cost_aware`` (``--seed-stride-cost``) adds compensation: the stride becomes
+``cost / tickets`` with cost the seed's mean exec time relative to the corpus
+mean, so equal tickets get equal target *time* rather than equal picks. Flat
+cost is exactly the plain arm.
 """
 
 from __future__ import annotations
@@ -29,10 +34,16 @@ class SeedStrideScheduler(ArmCounts):
     #: No informative priors: selection reads tickets, never the posterior.
     supports_priors = False
 
-    def __init__(self) -> None:
+    def __init__(self, cost_aware: bool = False) -> None:
         super().__init__()
         self._stride = Stride()
+        self._cost_aware = bool(cost_aware)
 
-    def select_seed(self, seed_ids: list[str], weight_fn: Callable[[str], float] = _unit) -> str:
+    def select_seed(
+        self,
+        seed_ids: list[str],
+        weight_fn: Callable[[str], float] = _unit,
+        cost_fn: Callable[[str], float] = _unit,
+    ) -> str:
         self._trim(seed_ids)
-        return self._stride.pick(seed_ids, weight_fn)
+        return self._stride.pick(seed_ids, weight_fn, cost_fn if self._cost_aware else None)

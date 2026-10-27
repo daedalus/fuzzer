@@ -175,6 +175,31 @@ class TestSeedSignals:
 
         assert picks.count(SEED_A) == pytest.approx(200, abs=1)
 
+    def test_stride_cost_flag_gives_equal_time(self):
+        """--seed-stride-cost: a seed 4x slower is picked a quarter as often."""
+        meta = {
+            SEED_A: {"total_time": 0.001, "cost_samples": 1},
+            SEED_B: {"total_time": 0.004, "cost_samples": 1},
+        }
+        f = _fuzzer("stride", corpus=(SEED_A, SEED_B), meta=meta)
+        f._seed_stride = SeedStrideScheduler(cost_aware=True)
+        sp = _picker(f)
+        picks = [sp._pick_os_seed("stride") for _ in range(500)]
+
+        assert picks.count(SEED_A) == pytest.approx(4 * picks.count(SEED_B), abs=4)
+
+    def test_stride_default_ignores_cost(self):
+        """Control: without the flag the same slow seed still gets equal picks."""
+        meta = {
+            SEED_A: {"total_time": 0.001, "cost_samples": 1},
+            SEED_B: {"total_time": 0.004, "cost_samples": 1},
+        }
+        f = _fuzzer("stride", corpus=(SEED_A, SEED_B), meta=meta)
+        sp = _picker(f)
+        picks = [sp._pick_os_seed("stride") for _ in range(500)]
+
+        assert picks.count(SEED_A) == pytest.approx(250, abs=1)
+
     def test_eevdf_slow_seed_gets_equal_time(self):
         """Cost comes from the ledger (total_time / cost_samples) relative to the mean."""
         meta = {

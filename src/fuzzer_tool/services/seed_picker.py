@@ -120,7 +120,7 @@ _OS_SEED_ARMS = {
     "dpp": "_seed_dpp",
 }
 _OS_SEED_SIGNALS = {
-    "stride": ("weight",),
+    "stride": ("weight", "cost"),
     "eevdf": ("cost", "weight"),
     "bfq": ("weight",),
     "sfq": ("flow",),
