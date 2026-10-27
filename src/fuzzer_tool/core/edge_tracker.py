@@ -574,6 +574,11 @@ def _js_divergence(p: dict[int, float], q: dict[int, float]) -> float:
     return 0.5 * _kl(p, m) + 0.5 * _kl(q, m)
 
 
+# compute_signature builds one (num_perm, n) block when n is at most this;
+# larger sets go a band of rows at a time to bound the temporary.
+_MINHASH_ONE_SHOT_MAX = 1024
+
+
 class MinHashLSH:
     """MinHash + Locality-Sensitive Hashing for approximate Jaccard similarity.
 
@@ -632,6 +637,16 @@ class MinHashLSH:
             # the same result comes from a band of rows at a time at a
             # fraction of the footprint.
             out = _np.empty(self.num_perm, dtype=_np.uint64)
+            if len(edges) <= _MINHASH_ONE_SHOT_MAX:
+                # Small sets (the common per-admission case: only the newly
+                # owned edges are folded in) are dominated by the per-band
+                # numpy call overhead, not by arithmetic. One outer product,
+                # an in-place add and one row-min give the same uint64
+                # wrapped values; the block stays at most
+                # num_perm * _MINHASH_ONE_SHOT_MAX * 8 bytes.
+                blk = _np.multiply.outer(self._coeffs_a_np, edges)
+                _np.add(blk, self._coeffs_b_np[:, None], out=blk)
+                return array("Q", blk.min(axis=1))
             band = 8
             for lo in range(0, self.num_perm, band):
                 hi = lo + band
