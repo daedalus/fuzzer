@@ -283,12 +283,13 @@ static void __afl_map_node_shm(void);
  *                      so this counts the batch in flight, not later records
  * Non-atomic: magnitudes, never accounting records.
  *
- * Call-context fields (see __afl_ctx_collapse_suspect):
- *   CTX_RA_CHANGES  main-stack frame walks that missed the last-return-address
- *                   cache, i.e. saw a new caller (the first walk counts)
- *   CTX_COLLAPSED   1 when the collapse detector holds; computed at read time
- *   CTX_BAILS       frame walks that failed a bounds check (context 0 for
- *                   that edge)
+ * Call-context fields (see __afl_ctx_collapse_suspect). All three are
+ * derived from sticky flags at read time, not counted per edge:
+ *   CTX_RA_CHANGES  0 = no main-stack frame walk yet, 1 = walks saw one
+ *                   caller, 2 = two or more (saturating)
+ *   CTX_COLLAPSED   1 when the collapse detector holds
+ *   CTX_BAILS       1 if any frame walk failed a bounds check (context 0 for
+ *                   that edge), else 0
  * The parser in tests/test_shim_health.py reads this enum line by line, so
  * keep one bare name per line and put comments here, not beside the names. */
 enum {
@@ -1272,7 +1273,7 @@ static void __afl_check_crash_handlers(void);
  * Two failure shapes, one signature. (a) rbp still holds a caller's frame
  * (nothing in the instrumented code touched it): constant context. (b) rbp
  * is a general register holding junk: the walk fails a bounds check and every
- * edge gets context 0 (counted in CTX_BAILS). Either way the main-stack slow
+ * edge gets context 0 (flagged in CTX_BAILS). Either way the main-stack slow
  * path (the one that runs when the return address changed since the last
  * edge) ran at most once, yet at least __AFL_CTX_COLLAPSE_MIN_EDGES distinct
  * edge slots were claimed. A real target with that many edges reaches its
@@ -1287,16 +1288,31 @@ static void __afl_check_crash_handlers(void);
 #ifndef __AFL_CTX_COLLAPSE_MIN_EDGES
 #  define __AFL_CTX_COLLAPSE_MIN_EDGES 128
 #endif
+/* -D__AFL_CTX_CHECK=0 compiles the detector and its per-edge bookkeeping out
+ * entirely, for raw-speed runs. */
+#ifndef __AFL_CTX_CHECK
+#  define __AFL_CTX_CHECK 1
+#endif
+/* Sticky flags, set by plain stores on the miss and bail paths only. Not
+ * counters: a counter is a read-modify-write on one address per edge, a
+ * loop-carried dependency through memory on exactly the targets this detects
+ * (every edge bails) or stresses (every edge misses). Measured on a 150-call
+ * chain, worst case vs the shim before the detector: inline counters +5 to
+ * +10%, out-of-line counters +8 to +19%, sticky flags 0 to +5%
+ * (docs/learnings/2026-10-27-ctx-collapse-selfcheck.md). */
+static uint8_t __afl_ctx_walked = 0, __afl_ctx_multi = 0, __afl_ctx_bailed = 0;
 __AFL_GCC_NO_COV static int __afl_ctx_collapse_suspect(void) {
+#if __AFL_CTX_CHECK
     if (!__afl_ctx_on) return 0;
-    uint64_t changes = __afl_health[__AFL_HEALTH_CTX_RA_CHANGES];
-    uint64_t bails   = __afl_health[__AFL_HEALTH_CTX_BAILS];
-    /* Never saw a second context (changes <= 1), and the walk did run at
-     * least once, either through (changes == 1: constant context) or into a
-     * bounds check (bails > 0: junk rbp, context 0 on every edge). Neither
-     * counter set means no walk happened at all, which says nothing. */
-    return changes <= 1 && (changes + bails) > 0 &&
+    /* Never saw a second context (!multi), and the walk did run at least
+     * once, either through (walked: constant context) or into a bounds check
+     * (bailed: junk rbp, context 0 on every edge). Neither flag set means no
+     * walk happened at all, which says nothing. */
+    return !__afl_ctx_multi && (__afl_ctx_walked || __afl_ctx_bailed) &&
            __afl_total_edge_count >= __AFL_CTX_COLLAPSE_MIN_EDGES;
+#else
+    return 0;
+#endif
 }
 
 /* One stderr line per process, from an atexit hook. The tag lets
@@ -1324,6 +1340,9 @@ __attribute__((visibility("default")))
 __AFL_GCC_NO_COV uint32_t __afl_shim_health(uint64_t *out, uint32_t n) {
     __afl_check_crash_handlers();
     __afl_health[__AFL_HEALTH_CTX_COLLAPSED] = (uint64_t)__afl_ctx_collapse_suspect();
+    __afl_health[__AFL_HEALTH_CTX_RA_CHANGES] =
+        __afl_ctx_walked ? (__afl_ctx_multi ? 2u : 1u) : 0u;
+    __afl_health[__AFL_HEALTH_CTX_BAILS] = __afl_ctx_bailed;
     __afl_health[__AFL_HEALTH_ATTACHED] = __afl_area != NULL;
     __afl_health[__AFL_HEALTH_MAP_ENTRIES] = __afl_map_size;
     __afl_health[__AFL_HEALTH_WGUARD] = (uint64_t)__afl_wguard_mode;
@@ -1516,16 +1535,23 @@ static uintptr_t __afl_ctx_resolve_stack_hi(void) {
     return hi;
 }
 
-/* Counters for the collapse detector, out of line and cold like
- * __afl_slot_claim: inlined at every coverage site, even a bare increment on
- * the miss/bail paths cost the hit path registers (clang, shim-micro-benchmark
- * full: +3%). */
-__AFL_NO_COV __attribute__((always_inline))
-static inline void __afl_ctx_note_miss(void) { __afl_health[__AFL_HEALTH_CTX_RA_CHANGES]++; }
-__AFL_NO_COV __attribute__((always_inline))
-static inline void __afl_ctx_note_bail(void) { __afl_health[__AFL_HEALTH_CTX_BAILS]++; }
+/* Collapse-detector bookkeeping: plain byte stores, no call, no
+ * read-modify-write (see the flags' comment above __afl_ctx_collapse_suspect).
+ * A miss with a nonzero last_ra means a second distinct caller; the load is
+ * on the miss path only, the hit path is what it was before the detector. */
+#if __AFL_CTX_CHECK
+#  define __AFL_CTX_NOTE_BAIL() (__afl_ctx_bailed = 1)
+#  define __AFL_CTX_NOTE_MISS()                                                     \
+    do {                                                                            \
+        __afl_ctx_walked = 1;                                                       \
+        if (__afl_raw_load((void *const *)&__afl_ctx_last_ra)) __afl_ctx_multi = 1; \
+    } while (0)
+#else
+#  define __AFL_CTX_NOTE_BAIL() ((void)0)
+#  define __AFL_CTX_NOTE_MISS() ((void)0)
+#endif
 /* A failed walk: context 0 for this edge. */
-#define __AFL_CTX_BAIL() do { __afl_ctx_note_bail(); return 0; } while (0)
+#define __AFL_CTX_BAIL() do { __AFL_CTX_NOTE_BAIL(); return 0; } while (0)
 
 __attribute__((always_inline))
 static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) {
@@ -1578,9 +1604,9 @@ static inline uint32_t __afl_caller_ctx_as(enum __afl_path path, int *off_main) 
     if (!ra) return 0;
     if (main_stack && (uintptr_t)ra == (uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ra))
         return (uint32_t)(uintptr_t)__afl_raw_load((void *const *)&__afl_ctx_last_ctx);
-    /* Cache miss: the return address changed (or first walk). Counted for
+    /* Cache miss: the return address changed (or first walk). Flagged for
      * __afl_ctx_collapse_suspect(); this is the cold path, the hit above is not. */
-    if (main_stack) __afl_ctx_note_miss();
+    if (main_stack) __AFL_CTX_NOTE_MISS();
 
     /* The claim that used to sit here -- "ASLR/PIE base differences across
      * runs don't matter, we only need identical call chains WITHIN one

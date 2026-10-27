@@ -200,7 +200,8 @@ def test_frame_pointers_keep_context_and_stay_silent(tmp_path, toolchain):
     cc, cov = toolchain
     r = _run_harness(tmp_path, cc, cov, target_fp="-fno-omit-frame-pointer")
     assert r["collapsed"] == 0
-    assert r["ra_changes"] > 100, "each call site should be a distinct context"
+    assert r["ra_changes"] == 2, "two or more distinct callers (saturating flag)"
+    assert r["bails"] == 0
     assert TAG_LINE not in r["stderr"]
 
 
@@ -220,8 +221,19 @@ def test_junk_rbp_gives_zero_context_and_is_flagged(tmp_path, toolchain):
     # run()'s own entry guard fires before the asm loads rbp, so one walk
     # succeeds; every callee after it fails the bounds check.
     assert r["ra_changes"] <= 1
-    assert r["bails"] > 100
+    assert r["bails"] == 1, "sticky flag: at least one failed walk"
     assert r["stderr"].count(TAG_LINE) == 1
+
+
+def test_check_switch_compiles_the_detector_out(tmp_path, toolchain):
+    cc, cov = toolchain
+    r = _run_harness(
+        tmp_path, cc, cov, target_fp="-fomit-frame-pointer",
+        shim_defs=("-D__AFL_CTX_CHECK=0",),
+    )  # fmt: skip
+    assert r["collapsed"] == 0
+    assert (r["ra_changes"], r["bails"]) == (0, 0), "no bookkeeping when compiled out"
+    assert TAG_LINE not in r["stderr"]
 
 
 def test_small_targets_are_not_judged(tmp_path, toolchain):

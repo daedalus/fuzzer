@@ -21,13 +21,28 @@ A call chain (`leaf` reached from `a_call`, `b_call`, and tail-call wrappers `a_
 ## Rejected
 
 - **A synthetic two-level chain run at shim init.** It checks the shim's own build, not the target's. The target is what is built without the flag.
-- **A hot-path counter of distinct contexts.** Even one inlined increment on the miss and bail paths cost +3% on `shim-micro-benchmark full` under clang (medians 5.54 vs 5.38 ns). Moved into `noinline, cold` helpers, as `__afl_slot_claim` already is: 5.16 vs 5.18 ns (clang), 5.51 vs 5.57 ns (gcc), indistinguishable from the old shim on this machine.
+- **Per-edge counters** (the first version): the first A/B used `shim-micro-benchmark`, where almost every edge hits the return-address cache, and showed nothing. It never ran the paths the counters sit on. A 150-call chain built three ways (frame pointers kept: every edge a cache miss; omitted with a constant context: all hits; omitted with junk rbp: every edge bails) showed it: out-of-line counters cost +8 to +19%, inline counters +2 to +11%. A counter is a read-modify-write on one address, a loop-carried dependency through memory, on exactly the targets it exists to catch.
 
 ## Approach
 
-`CTX_RA_CHANGES` counts main-stack walks that missed the return-address cache, `CTX_BAILS` counts walks that failed a bounds check. The detector fires when at most one distinct return address was seen, the walk ran at least once, and at least 128 distinct edge slots were claimed. It reads as a health field (`CTX_COLLAPSED`, direct mode) and as one stderr line per process from an atexit hook (tag `__afl_shim:`, so `ShimWatch` dedups it).
+Three sticky byte flags set by plain stores, on the miss and bail paths only: a walk happened, a second distinct caller was seen (a miss while `last_ra` is already set), a walk failed a bounds check. The hit path is what it was. The health fields `CTX_RA_CHANGES` (0, 1, or 2 meaning two or more) and `CTX_BAILS` (0 or 1) are derived from them at read time. The detector fires when no second caller was seen, a walk ran or bailed, and at least 128 distinct edge slots were claimed. It reads as `CTX_COLLAPSED` (direct mode) and as one stderr line per process from an atexit hook (tag `__afl_shim:`, so `ShimWatch` dedups it). `-D__AFL_CTX_CHECK=0` compiles all of it out.
 
 Companions: FFmpeg's configure now gets `$FRAME_POINTER` (it was the one vendored library without it) and a post-configure check that the last frame-pointer flag in `config.mak` is `-fno-omit-frame-pointer`; `--no-sibling-calls` (or `NO_SIBLING_CALLS=1`) adds `-fno-optimize-sibling-calls`; `cov_flag_for_cc` knows `zig cc` and adds `-fno-sanitize=undefined`; the unused-function and gcc visibility warnings are gone.
+
+## Speed
+
+Median-of-trials is useless on this shared single core (the same binary moved 5 to 10% between runs); the table is the minimum of 25 interleaved trials, ns per `run()` of the 150-call chain (~300 edge callbacks), against the shim before the detector. Worst cases, not typical targets: a target that mostly hits the cache sees none of it.
+
+| target build | inline counters | sticky flags | `-D__AFL_CTX_CHECK=0` |
+|---|---|---|---|
+| clang, frame pointers kept (all misses) | +7.9% | +3.6% | -1.7% |
+| clang, constant context (all hits) | +10.5% | +2.4% | -4.9% |
+| clang, junk rbp (all bails) | +12.4% | +4.3% | -0.7% |
+| gcc, frame pointers kept | +3.4% | +4.1% | -1.7% |
+| gcc, constant context | +3.7% | +1.7% | -0.2% |
+| gcc, junk rbp | +5.4% | +2.4% | +0.8% |
+
+Run-to-run noise is about 3 to 5%, so the gcc rows do not separate the first two columns. Removing the bookkeeping entirely (counters as no-ops) brought clang back to the old shim, so the cost is the bookkeeping, not code layout; on gcc the junk-rbp row stayed +6.5% with no bookkeeping, so part of that cost is something else that was not isolated. What is left on the default build is a few percent in the worst cases; use `-D__AFL_CTX_CHECK=0` for raw-speed runs.
 
 ## Limits
 
@@ -39,7 +54,7 @@ Companions: FFmpeg's configure now gets `$FRAME_POINTER` (it was the one vendore
 
 ## Verification
 
-`tests/test_ctx_collapse_selfcheck.py` (31 tests, clang guard and gcc trace-pc): detector silent with frame pointers, with CTX off, and under 128 edges; fires on constant and junk-rbp shapes; one stderr line; C and Python field indices agree. 184 related tests pass (`test_shim_health`, `test_shim_ctx_*`, `test_regression_ctx_*`, `test_gcc_trace_pc`, `test_regression_build_flags`).
+`tests/test_ctx_collapse_selfcheck.py` (clang guard and gcc trace-pc): detector silent with frame pointers, with CTX off, with `__AFL_CTX_CHECK=0`, and under 128 edges; fires on constant and junk-rbp shapes; one stderr line; C and Python field indices agree. 304 related tests pass (`test_shim_health`, `test_shim_ctx_*`, `test_regression_ctx_*`, `test_regression_shim_*`, `test_sancov_modes`, `test_gcc_trace_pc`, `test_regression_build_flags`).
 
 ## Generalizes to
 
