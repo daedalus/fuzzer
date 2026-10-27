@@ -151,6 +151,7 @@ from fuzzer_tool.core.schedulers.seed_consolidated import SeedConsolidatedSchedu
 from fuzzer_tool.core.schedulers.seed_dpp import SeedDPPScheduler
 from fuzzer_tool.core.schedulers.seed_eevdf import SeedEEVDFScheduler
 from fuzzer_tool.core.schedulers.seed_frontier import DEFAULT_P_FRONTIER
+from fuzzer_tool.core.schedulers.seed_lottery import SeedLotteryScheduler
 from fuzzer_tool.core.schedulers.seed_mlfq import SeedMLFQScheduler
 from fuzzer_tool.core.schedulers.seed_newest import DEFAULT_P_NEWEST, SeedNewestScheduler
 from fuzzer_tool.core.schedulers.seed_p2c import SeedP2CScheduler
@@ -293,6 +294,7 @@ _SEED_STRATEGY_NAMES = (
     "consolidated",
     "frontier",
     "dpp",
+    "lottery",
 )
 
 
@@ -1959,6 +1961,9 @@ class Fuzzer:
         seed_mlfq_scheduler=False,
         seed_stride_scheduler=False,
         seed_stride_cost=False,
+        seed_lottery_scheduler=False,
+        seed_lottery_currency="off",
+        seed_lottery_transfer=0.0,
         seed_eevdf_scheduler=False,
         seed_bfq_scheduler=False,
         seed_sfq_scheduler=False,
@@ -3442,6 +3447,15 @@ class Fuzzer:
             SeedConsolidatedScheduler(rng=self._rng) if seed_consolidated_scheduler else None
         )
         self._seed_dpp = SeedDPPScheduler(rng=self._rng) if seed_dpp_scheduler else None
+        self._seed_lottery = (
+            SeedLotteryScheduler(
+                rng=self._rng,
+                currency=seed_lottery_currency,
+                transfer=seed_lottery_transfer,
+            )
+            if seed_lottery_scheduler
+            else None
+        )
         self._frontier_oracle = None
         self._seed_frontier = None
         if frontier_bin:
@@ -3461,6 +3475,7 @@ class Fuzzer:
                 self._seed_newest,
                 self._seed_frontier,
                 self._seed_dpp,
+                self._seed_lottery,
             )
             if arm is not None
         )

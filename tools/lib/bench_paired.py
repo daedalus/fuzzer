@@ -261,6 +261,21 @@ ARMS: dict[str, list[str]] = {
     "seed-stride": ["--seed-stride-scheduler"],
     "seed-stride-cost": ["--seed-stride-scheduler", "--seed-stride-cost"],
     "inverse-lottery-select": ["--minimize-every-execs", "2000", "--inverse-lottery-select"],
+    # The lottery arm (core/schedulers/seed_lottery.py). Each option pairs against
+    # the arm before it: lottery vs stride (same compensation, random vs
+    # deterministic draw), then currency and transfer vs plain lottery.
+    # seed-lottery-transfer needs --lineage to have any parent to credit, so it
+    # pairs against seed-lottery-lineage, not seed-lottery: --lineage alone is a
+    # change and must not be credited to the transfer.
+    "seed-lottery": ["--seed-lottery-scheduler"],
+    "seed-lottery-lineage": ["--seed-lottery-scheduler", "--lineage"],
+    "seed-lottery-currency": ["--seed-lottery-scheduler", "--seed-lottery-currency", "sqrt"],
+    "seed-lottery-transfer": [
+        "--seed-lottery-scheduler",
+        "--lineage",
+        "--seed-lottery-transfer",
+        "0.5",
+    ],
 }
 
 STRATA_ARMS = (
@@ -336,6 +351,10 @@ ARM_BASELINES: dict[str, str] = {
     "seed-stride": "baseline",
     "seed-stride-cost": "seed-stride",
     "inverse-lottery-select": "minimize-2k",
+    "seed-lottery": "seed-stride-cost",
+    "seed-lottery-currency": "seed-lottery",
+    "seed-lottery-lineage": "seed-lottery",
+    "seed-lottery-transfer": "seed-lottery-lineage",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as

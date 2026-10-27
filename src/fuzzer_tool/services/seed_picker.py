@@ -26,6 +26,7 @@ from fuzzer_tool.core.clock import clock_of
 from fuzzer_tool.core.cost_ledger import effective_fuzz_count, seed_exec_time
 from fuzzer_tool.core.coverage_noise import fake_novelty_factor
 from fuzzer_tool.core.edge_clusters import count_distinct
+from fuzzer_tool.core.edge_components import components as edge_components
 from fuzzer_tool.core.job_scheduling import least_slack
 from fuzzer_tool.core.marginal_cost import MarginalCostTracker
 from fuzzer_tool.core.rand_pool import RandPool
@@ -118,6 +119,7 @@ _OS_SEED_ARMS = {
     "newest": "_seed_newest",
     "frontier": "_seed_frontier",
     "dpp": "_seed_dpp",
+    "lottery": "_seed_lottery",
 }
 _OS_SEED_SIGNALS = {
     "stride": ("weight", "cost"),
@@ -125,7 +127,16 @@ _OS_SEED_SIGNALS = {
     "bfq": ("weight",),
     "sfq": ("flow",),
     "consolidated": ("cost", "weight", "flow"),
+    "lottery": ("weight", "cost", "group", "flow"),
 }
+
+# Currency label of a seed the last component pass had not seen yet, so a fresh
+# seed is its own currency until the next pass (SeedLotteryScheduler).
+FRESH_GROUP = -1
+# Component pass is redone when the corpus moved by more than this fraction, or
+# after this many execs, whichever comes first. One pass is O(total incidence).
+COMPONENT_DRIFT = 0.1
+COMPONENT_REFRESH_EXECS = 5000
 
 # ── Invasion percolation operator selection (percolation handover Module 4) ─
 # Resistance at or above which an operator counts as stuck: success_rate <=
@@ -468,6 +479,8 @@ class SeedPicker:
         # Cross-target (least-covered target, factor) for the running pass;
         # _XT_UNSET outside one. Same lifetime rule as _pass_vectors.
         self._pass_xtarget: tuple | None | object = _XT_UNSET
+        # (corpus size, exec_count, key -> component) from the last component pass.
+        self._group_memo: tuple[int, int, dict[str, int]] | None = None
 
         # Bound once here rather than read off the fuzzer per pick: the
         # katz/tang/aflgo arms below draw from it directly, and a picker
@@ -1017,7 +1030,36 @@ class SeedPicker:
             meta = f.seed_meta.get(key_to_seed[key])
             return meta.get("parent_key") if meta else None
 
-        return {"cost": cost, "weight": weight, "flow": flow}
+        def group(key: str) -> int:
+            return self._component_labels(key_to_seed).get(key, FRESH_GROUP)
+
+        return {"cost": cost, "weight": weight, "flow": flow, "group": group}
+
+    def _component_labels(self, key_to_seed: dict[str, bytes]) -> dict[str, int]:
+        """Connected component of each seed (core/edge_components.py), memoized.
+
+        Redone when the corpus size drifted by more than COMPONENT_DRIFT or
+        COMPONENT_REFRESH_EXECS execs passed; seeds admitted since get
+        FRESH_GROUP. No coverage tracker means no labels: one currency.
+        """
+        f = self.f
+        n = len(key_to_seed)
+        memo = self._group_memo
+        if (
+            memo is not None
+            and abs(n - memo[0]) <= max(1, int(COMPONENT_DRIFT * memo[0]))
+            and f.exec_count - memo[1] < COMPONENT_REFRESH_EXECS
+        ):
+            return memo[2]
+        tracker = getattr(f, "_edge_tracker", None)
+        labels: dict[str, int] = {}
+        if tracker is not None and n:
+            edges = {
+                k: np.fromiter(tracker.attributed_edges(k), dtype=np.int64) for k in key_to_seed
+            }
+            labels = edge_components(edges)[0]
+        self._group_memo = (n, f.exec_count, labels)
+        return labels
 
     def _pick_os_seed(self, name: str) -> bytes | None:
         """Run the OS / network seed arm *name*; None when disabled or empty.

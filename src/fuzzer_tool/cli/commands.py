@@ -762,6 +762,9 @@ def cmd_fuzz(args):
         seed_mlfq_scheduler=getattr(args, "seed_mlfq_scheduler", False),
         seed_stride_scheduler=getattr(args, "seed_stride_scheduler", False),
         seed_stride_cost=getattr(args, "seed_stride_cost", False),
+        seed_lottery_scheduler=getattr(args, "seed_lottery_scheduler", False),
+        seed_lottery_currency=getattr(args, "seed_lottery_currency", "off"),
+        seed_lottery_transfer=getattr(args, "seed_lottery_transfer", 0.0),
         seed_eevdf_scheduler=getattr(args, "seed_eevdf_scheduler", False),
         seed_bfq_scheduler=getattr(args, "seed_bfq_scheduler", False),
         seed_sfq_scheduler=getattr(args, "seed_sfq_scheduler", False),
@@ -2402,6 +2405,10 @@ def cmd_sweep(args):
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
 # a real target) has not been run, so --hail-mary should not field it yet.
 #
+# seed_lottery_scheduler (--seed-lottery-scheduler) is excluded as unmeasured: unit
+# tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
+# options are not boolean gates and take no part in the tuple.
+#
 # seed_stride_cost (--seed-stride-cost) and inverse_lottery_select
 # (--inverse-lottery-select) are excluded as unmeasured: unit tests only, no
 # paired run (docs/AB_PENDING.md). The first is also inert without the stride arm.
@@ -3475,6 +3482,32 @@ def main() -> int:
         help="With --seed-stride-scheduler: compensation tickets. The stride becomes cost / "
         "tickets (cost = mean exec time relative to the corpus mean), so equal tickets get "
         "equal target time instead of equal picks. No effect without the stride arm.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-lottery-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'lottery': lottery scheduling (Waldspurger & Weihl 1994): a "
+        "random draw over tickets = weight / cost (favored seeds 2x, slow seeds fewer), "
+        "O(log n) per update via a Fenwick tree. Elo arm; also the no-elo pick when "
+        "enabled (core/schedulers/seed_lottery.py). Not in --hail-mary until it wins its A/B.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-lottery-currency",
+        choices=("off", "equal", "sqrt"),
+        default="off",
+        help="With --seed-lottery-scheduler: tickets are denominated per connected component "
+        "of the seed Gram matrix. A pick draws a component first (equal backing, or "
+        "sqrt of its size), then a seed inside it, so a large cluster of near-duplicates "
+        "cannot take share from distinct code regions. 'off' is one flat pool.",
+    )
+    fuzz_parser.add_argument(
+        "--seed-lottery-transfer",
+        type=float,
+        default=0.0,
+        metavar="F",
+        help="With --seed-lottery-scheduler: when a seed's fuzzing succeeds, add F x its reward "
+        "to its lineage parent's ticket credit (capped, halves at each refresh). Needs "
+        "--lineage; 0 (default) is off.",
     )
     fuzz_parser.add_argument(
         "--seed-eevdf-scheduler",

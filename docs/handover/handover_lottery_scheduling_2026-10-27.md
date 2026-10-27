@@ -3,7 +3,7 @@
 Date: 2026-10-27
 fuzzer HEAD: `b5789e61`
 References: Waldspurger & Weihl, *Lottery Scheduling* (OSDI 1994); Waldspurger & Weihl, *Stride Scheduling* (MIT/LCS/TM-528, 1995)
-Status: ports 1 and 3 (the two Low-cost ones) implemented behind off-by-default flags, unit-tested, NOT benchmarked. Ports 2, 4 and 5 are still analysis only. See section 6.
+Status: all five ports implemented behind off-by-default flags and unit-tested; none benchmarked. Ports 1 and 3 are in sections 6; ports 2, 4 and 5 are one seed arm, section 7.
 
 ## 1. Summary
 
@@ -136,3 +136,43 @@ Pitfall found while writing the corpus test: when several seeds hold identical e
 Not implemented: ports 2 (currencies), 4 (partial-sum tree), 5 (transfer). Open decisions 2-4 of section 5 still stand; decision 1 (start with port 1) is done.
 
 Next, in order: run `seed-stride-cost` vs `seed-stride` on ffmpeg at fixed wall time; run `inverse-lottery-select` vs `minimize-2k` on fuzzgoat and png_read; then decide on port 2.
+
+## 7. Ports 2, 4 and 5: the `lottery` seed arm (2026-10-27, on top of `59381eac`)
+
+The three remaining ports are one arm, because in the 1994 paper they are one mechanism: a lottery over tickets (port 4), tickets denominated in currencies (port 2), and tickets lent between related clients (port 5).
+
+| Port | Flag | Where |
+|------|------|-------|
+| 4 Partial-sum tree | `--seed-lottery-scheduler` | `core/fenwick_sampler.py` (`FenwickSampler`: O(log n) set/remove/draw, slot reuse, compaction, drift-safe descent); `core/schedulers/seed_lottery.py` (`SeedLotteryScheduler`, Elo arm `lottery`) |
+| 2 Currencies | `--seed-lottery-currency {off,equal,sqrt}` | currency = connected component of the seed Gram matrix (`core/edge_components.components`), computed online in `SeedPicker._component_labels` |
+| 5 Transfer | `--seed-lottery-transfer F` | `SeedLotteryScheduler.record`; parent from the existing `flow` signal (lineage `parent_key`), so it needs `--lineage` |
+
+Behaviour:
+- Tickets = weight / cost (compensation always on in this arm). Flat weight and cost is a uniform random pick (tested).
+- Between refreshes a seed keeps the tickets it was admitted with; every 256 picks all seeds are re-read (weight, cost, group, parent) and transfer credit halves. A joiner is drawable on the next pick without waiting for a refresh.
+- Currencies: a draw picks a component by backing (`equal` = 1, `sqrt` = sqrt(size)), then a seed inside it. One group, or `off`, is the flat pool (tested). `off` never calls the group signal, so it costs nothing.
+- Components are recomputed when the corpus size drifts more than 10% or after 5000 execs; a seed admitted since gets its own `FRESH_GROUP` currency until then.
+- Transfer: a successful seed adds `F x reward` to its lineage parent's credit; tickets = base x (1 + credit), credit capped at 4, halves every refresh, dropped when the parent leaves the corpus.
+
+Bench arms: `seed-lottery` (vs `seed-stride-cost`), `seed-lottery-currency` (vs `seed-lottery`), `seed-lottery-lineage` (vs `seed-lottery`), `seed-lottery-transfer` (vs `seed-lottery-lineage`, because `--lineage` alone is a change and must not be credited to the transfer).
+
+### Measured (one sandbox microbenchmark, not a campaign)
+
+Scheduling overhead per pick, `Stride` (rebuilds on a membership change) against the lottery arm, one run each:
+
+| corpus | no churn | one new seed per 10 picks | one new seed per pick |
+|-------:|---------|---------------------------|-----------------------|
+| 500 | 1.0 / 5.6 us | 15 / 12 us | 593 / 161 us |
+| 2,500 | 3.0 / 26.5 us | 93 / 48 us | 1,382 / 355 us |
+| 10,000 | 9.2 / 97.8 us | 446 / 193 us | 5,310 / 1,115 us |
+
+(stride / lottery.) The tree wins 2-5x under churn and loses 5-10x on a static corpus, because the arm re-reads every seed once per 256 picks (about 25 ms at 10,000 seeds). In absolute terms both are small next to a pick's cost: one pick is followed by a whole mutation round of target executions. So the Fenwick tree is not a throughput argument; whether the lottery is a better scheduler is a coverage question only the paired runs can answer. This lowers the value rating of port 4 given in section 1.
+
+### Open risks, not resolved
+
+1. Giant component: `edge_components` strips edges held by more than 10% of seeds, but a real corpus may still be one component holding most seeds, which makes `--seed-lottery-currency` a no-op (one currency). Not checked on a real corpus here; the Gram handover's `minimize -c --edge-components` report prints the component sizes. Look at that before running the currency arm.
+2. Transfer credit memory is short by design (halves every 256 picks); the cap (4) and the half-life are not tuned.
+3. The lottery arm is compensated unconditionally, so `seed-lottery` vs `seed-stride-cost` isolates the random draw, not compensation. `seed-lottery` vs plain `seed-stride` would mix the two.
+4. Currency and transfer arms are untested on a real target; the unit tests check the mechanics (shares, caps, decay, drops), not that they find more coverage.
+
+Not done: nothing from the five ports remains to implement. Remaining work is measurement (section 4 plan plus the arms above).
