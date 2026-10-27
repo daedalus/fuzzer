@@ -81,3 +81,20 @@ def test_tainted_heap_skips_malloc_trim(monkeypatch):
     assert libc_mem.heap_tainted()
     assert libc_mem.trim_heap() == 0
     assert calls == [0]
+
+
+def test_trim_heap_gives_up_when_an_arena_lock_is_held(monkeypatch):
+    """Adversarial: malloc_trim blocked on a lock held forever must not hang the host."""
+    import threading
+
+    from fuzzer_tool.adapters import libc_mem
+
+    stuck = threading.Event()
+    monkeypatch.setattr(libc_mem, "_malloc_trim", lambda pad: stuck.wait(30))
+    monkeypatch.setattr(libc_mem, "_TRIM_TIMEOUT_S", 0.2)
+    monkeypatch.setattr(libc_mem, "_heap_tainted", False)
+    try:
+        assert libc_mem.trim_heap() == 0
+        assert libc_mem.heap_tainted()
+    finally:
+        stuck.set()

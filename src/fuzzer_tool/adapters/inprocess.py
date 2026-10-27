@@ -763,8 +763,10 @@ class InProcessRunner:
                 rc = self._func_ptr(buf, len(data))
             elif self._guard_timed_out:
                 timed_out = True
+                self._note_shared_heap_abort(0)
             elif rc < 0:
                 self._on_crash(self, -rc)
+                self._note_shared_heap_abort(-rc)
                 # __afl_guarded_call siglongjmp'd back with -sig. Convert to
                 # the 128+sig convention used elsewhere in this module.
                 rc = 128 + (-rc)
@@ -832,6 +834,7 @@ class InProcessRunner:
                 rc = self._func_ptr(self._c_buf, n)
             elif self._guard_timed_out:
                 self._timed_out = True
+                self._note_shared_heap_abort(0)
             elif rc < 0:
                 self._on_crash(self, -rc)
                 self._note_shared_heap_abort(-rc)
@@ -850,21 +853,26 @@ class InProcessRunner:
         return rc, _captured_stderr
 
     def _note_shared_heap_abort(self, sig: int) -> None:
-        """Flag the host heap after an abort that may have held an arena lock.
+        """Flag the host heap after a call the guard abandoned (sig 0: timeout).
 
-        glibc aborts inside malloc/free with the arena lock held; the guard's
-        siglongjmp cannot release it, so the next host malloc_trim (or large
-        malloc) deadlocks. A private heap (-D__AFL_PRIVATE_HEAP=1) avoids it.
+        The guard's siglongjmp lands wherever the signal hit. If that was
+        inside glibc malloc/free (an abort() on a bad free, a SIGSEGV on a
+        corrupted chunk, a timeout tick), the arena lock stays held and the
+        next host malloc_trim (or large malloc) deadlocks. Any abandoned call
+        counts, not only SIGABRT. A private heap (-D__AFL_PRIVATE_HEAP=1)
+        keeps the target's allocations off the host's arenas.
         """
-        if sig != signal.SIGABRT or getattr(self, "_private_heap", False):
+        if getattr(self, "_private_heap", False):
             return
         if not libc_mem.heap_tainted():
+            what = "timed out" if sig == 0 else f"died on signal {sig}"
             log.warning(
-                "%s aborted in-process on the shared glibc heap: an arena lock may be "
+                "%s %s in-process on the shared glibc heap: an arena lock may be "
                 "left held and the host can deadlock. Rebuild the target with "
                 "-D__AFL_PRIVATE_HEAP=1 or run it in spawn/loader mode. "
                 "Heap trimming is disabled.",
                 self.target,
+                what,
             )
         libc_mem.mark_heap_tainted()
 
