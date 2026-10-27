@@ -1513,6 +1513,10 @@ def cmd_minimize(args):
     if edge_hist is Switch.ON and not args.coverage:
         print("[!] --edge-hist needs -c/--coverage: no edge data without it", file=sys.stderr)
 
+    edge_comp = Switch.ON if getattr(args, "edge_components", False) else Switch.OFF
+    if edge_comp is Switch.ON and not args.coverage:
+        print("[!] --edge-components needs -c/--coverage: no edge data without it", file=sys.stderr)
+
     kept, removed = minimize_corpus(
         target=args.target,
         corpus_dir=args.corpus,
@@ -1529,6 +1533,7 @@ def cmd_minimize(args):
         batch_mode=getattr(args, "batch", False),
         rng=rng,
         edge_hist=edge_hist,
+        edge_components=edge_comp,
     )
 
     if removed == 0:
@@ -6803,6 +6808,12 @@ def main() -> int:
         action="store_true",
         help="With -c: print histograms of seeds by edge count and the edges/seed "
         "ratio, for the replayed corpus and for the kept set",
+    )
+    min_parser.add_argument(
+        "--edge-components",
+        action="store_true",
+        help="With -c: print connected components of the seed Gram matrix "
+        "(seeds sharing an edge) after stripping edges held by >10%% of seeds",
     )
     min_parser.set_defaults(func=cmd_minimize)
 

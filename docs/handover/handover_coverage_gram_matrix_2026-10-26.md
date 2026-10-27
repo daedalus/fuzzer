@@ -226,3 +226,22 @@ Prerequisites for all four:
 3. Mirror and the S x S exec-cube contraction: dropped.
 
 **Limits.** Python-tracer toy, one run, 25 global new-edge events, "novel" means a new edge set not a new edge, parent coverage is a confound only partly controlled, no real instrumented target.
+
+## 13. Components diagnostic (2026-10-27)
+
+Implements item 4 of section 11 as `minimize -c --edge-components` (`core/edge_components.py`). Components of B after stripping edges held by more than `STRIP_FRAC` of seeds; min-label propagation over the seed-edge incidences, so no S x S array. Checked against a union-find reference on 20 random books and on a synthetic corpus (20k seeds, 3 planted regions, 200 universal edges): 3 components, 0.36 s.
+
+**Real data.** fuzzgoat (`zig cc` build as in section 11, stock 250-input corpus, 393 edges, book of 107 seeds after twin collapse; `minimize` keeps 44 and all 393 edges). Sweep of the strip threshold:
+
+| strip > | edges stripped | components | largest | isolated seeds |
+|---|---|---|---|---|
+| 50% | 15 | 2 | 106 (99.1%) | 1 |
+| 30% | 75 | 2 | 106 (99.1%) | 1 |
+| 20% | 112 | 4 | 104 (97.2%) | 3 |
+| 10% | 170 | 14 | 80 (74.8%) | 10 |
+| 5% | 237 | 46 | 50 (46.7%) | 40 |
+| 2% | 283 | 88 | 9 (8.4%) | 83 |
+
+Reading: the corpus is one blob down to about 20%; at 5% and below the count mostly measures seeds left with no shared edge, not regions. The default is now 0.1, the first row where the split is not dominated by isolated seeds. That choice rests on one corpus and one target; png_read and ffmpeg are not run, so treat 0.1 as a starting point. Open: the same sweep on png_read and ffmpeg; whether components at 10% line up with parser regions (not checked).
+
+**clang vs zig cc (2026-10-27).** Same build recipe with Ubuntu clang 18.1.3 and with `zig cc` (clang 22.1.8). Both `fuzzgoat.c` objects carry 276 `__sanitizer_cov_trace_pc_guard` call sites (text 12,456 vs 12,364 bytes). `minimize -c` on the 250-seed corpus gives the same 393 edges, 143 twins collapsed, 44 kept, and the strip sweep above matches row for row on both builds. So the table does not depend on the compiler for this target. This is a different edge count from the 797 of section 8, which comes from `edge_diagnostic.py matrix` on another build and measure; the two were not reconciled.

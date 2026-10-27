@@ -27,6 +27,7 @@ from fuzzer_tool.adapters import libc_mem, libc_shm
 from fuzzer_tool.adapters.filesystem import hash_data
 from fuzzer_tool.adapters.process import disable_aslr
 from fuzzer_tool.adapters.shm import ShmCoverage
+from fuzzer_tool.core.edge_components import components_report
 from fuzzer_tool.core.edge_hist import hist_report
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.run_mode import Switch
@@ -264,6 +265,7 @@ def minimize_corpus(
     batch_mode: bool = False,
     rng: RandPool | None = None,
     edge_hist: Switch = Switch.OFF,
+    edge_components: Switch = Switch.OFF,
 ) -> tuple[int, int]:
     """Minimize a corpus by removing redundant inputs.
 
@@ -292,6 +294,8 @@ def minimize_corpus(
         rng: Sampler for ``max_seeds`` (default: shared RandPool).
         edge_hist: ON prints seeds-per-edge-count histograms (replayed, kept);
             coverage mode only.
+        edge_components: ON prints connected components of the seed Gram
+            matrix after stripping near-universal edges; coverage mode only.
 
     Returns:
         Tuple of (files_kept, files_removed).
@@ -348,6 +352,7 @@ def minimize_corpus(
             batch_mode=batch_mode,
             all_corpus_files=all_corpus_files,
             edge_hist=edge_hist,
+            edge_components=edge_components,
         )
     else:
         kept, removed = _minimize_by_hash(corpus_files, output_dir, corpus_path, fuzzy_dedup)
@@ -392,6 +397,7 @@ def _minimize_with_coverage(
     batch_mode: bool = False,
     all_corpus_files: list[Path] | None = None,
     edge_hist: Switch = Switch.OFF,
+    edge_components: Switch = Switch.OFF,
 ) -> tuple[int, int]:
     """Greedy set-cover, rate-distortion or minimax-robust pruning over SHM edge bitmaps."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="cmin_"))
@@ -537,6 +543,9 @@ def _minimize_with_coverage(
 
     if edge_hist is Switch.ON:
         _print_edge_hist(replayed_counts, unique_edges, book, covered_files)
+
+    if edge_components is Switch.ON:
+        print(components_report(book.edges))
 
     return _commit_results(
         corpus_files,
