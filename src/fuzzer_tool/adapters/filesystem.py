@@ -734,6 +734,27 @@ def _has_seed(store, tree: SeedTree, h: str, dest: Path) -> bool:
     return (store is not None and store.has(tree, h)) or _loose_has(dest)
 
 
+def without_timeout_seeds(seeds: list[bytes], corpus_dir: Path | None) -> list[bytes]:
+    """*seeds* minus those stored under ``seeds/timeouts/`` (loose or in seeds.zip).
+
+    Timeout seeds are loaded into the live corpus as irreplaceable entries and
+    each one runs to the full execution timeout, so a consumer that times
+    "typical" runs (the startup raw-speed probe) must not sample them.
+    """
+    if corpus_dir is None:
+        return seeds
+    store = seed_zip.lookup(corpus_dir) or seed_zip.peek(corpus_dir)
+    root = Path(corpus_dir) / "seeds" / SeedTree.TIMEOUTS
+    if store is None and not root.is_dir():
+        return seeds
+
+    def _timed_out(data: bytes) -> bool:
+        h = hash_data(data)
+        return _has_seed(store, SeedTree.TIMEOUTS, h, root / h[:2] / f"id_{h}")
+
+    return [d for d in seeds if not _timed_out(d)]
+
+
 def _put_seed(corpus_dir: Path, tree: SeedTree, h: str, dest: Path, data: bytes) -> None:
     """Write a full seed unless the pool already holds it.
 

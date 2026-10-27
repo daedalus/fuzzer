@@ -15,7 +15,7 @@ from fuzzer_tool.services.fuzzer import RAW_PROBE_FALLBACK, Fuzzer
 
 def _probe(corpus: list[bytes]) -> tuple[list[bytes], float]:
     seen: list[bytes] = []
-    fake = SimpleNamespace(corpus=corpus, _run_target=seen.append)
+    fake = SimpleNamespace(corpus=corpus, corpus_dir=None, _run_target=seen.append)
     eps = Fuzzer._probe_raw_speed(fake)
     return seen, eps
 

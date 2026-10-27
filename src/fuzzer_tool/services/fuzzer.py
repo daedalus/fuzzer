@@ -35,6 +35,7 @@ except ImportError:
     _HAS_NUMPY = False
 
 from fuzzer_tool.adapters import process, seed_zip
+from fuzzer_tool.adapters.filesystem import without_timeout_seeds
 from fuzzer_tool.adapters.process import (
     _child_pids,
     disable_aslr,
@@ -5891,7 +5892,9 @@ class Fuzzer:
         Real inputs, not a constant: ffmpeg rejects 64 zero bytes in
         0.15 ms (2,148 eps) but averages 2.13 ms (469 eps) on its corpus.
         """
-        corpus = self.corpus
+        # seeds/timeouts/ entries run to the full timeout: sampling them
+        # reports the timeout, not the target (2 eps on a 40%-timeouts corpus).
+        corpus = without_timeout_seeds(self.corpus, self.corpus_dir)
         n = min(RAW_PROBE_MAX, max(RAW_PROBE_MIN, len(corpus) // 10 + 1))
         if corpus:
             step = max(1, len(corpus) // n)
