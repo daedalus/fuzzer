@@ -139,3 +139,7 @@ are what the gate checks, so a run that trips the gate is a run whose arm was
 silent and must not be counted as an arm result). Also record the
 falsification line for `seed_residual`: if the partial correlations sit at
 zero the arm is a row sum whatever the win count says.
+
+## Selector arms, first paired run (2026-10-27)
+
+`--seed-residual` and `--op-credit` vs plain `--elo` on a clang fuzzgoat build, seeds 0-23, 2,000 execs: seed_residual no effect (14/10, CI [-17.5, +22.7]); op_credit +40 median, +85 mean (CI [+30, +143]) but 14/9 wins, a tail of 8 seeds reaching 490-643 edges where the baseline never exceeds 427. Exploratory, no frozen threshold, so neither is adopted; one `op_credit` cell segfaulted and did not reproduce. Write-up: `docs/learnings/2026-10-27-seed-residual-op-credit-ab.md`.
