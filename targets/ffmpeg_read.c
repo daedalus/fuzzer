@@ -71,6 +71,41 @@ static int fuzz_read_packet(void *opaque, unsigned char *buf, int buf_size) {
 
 #define FUZZ_MAX_DECODERS 128
 
+/* Decode work is bounded by pixels, not frame count: cost is frames x size
+ * (2 s clip, 6 ms at 320x240, 39 ms at 720p, 81 ms at 1080p). A call stops
+ * once its decoded video frames sum past the budget, so small frames still
+ * reach later-frame paths and a 1080p stream ends after two frames. */
+#ifndef FUZZ_PIXEL_BUDGET
+#define FUZZ_PIXEL_BUDGET (4 * 1024 * 1024)
+#endif
+#if FUZZ_PIXEL_BUDGET < 1
+#error "FUZZ_PIXEL_BUDGET must be >= 1"
+#endif
+
+/* Largest single frame a decoder may allocate (as FFmpeg's own decoder
+ * fuzzer does): a fuzzed header must not demand a gigapixel buffer. */
+#ifndef FUZZ_MAX_FRAME_PIXELS
+#define FUZZ_MAX_FRAME_PIXELS (4096 * 4096)
+#endif
+#if FUZZ_MAX_FRAME_PIXELS < 1
+#error "FUZZ_MAX_FRAME_PIXELS must be >= 1"
+#endif
+
+/* malloc_trim(0) costs ~1.3 ms per call; running it every call was ~25% of a
+ * small-seed execution. Every FUZZ_TRIM_EVERY calls keeps RSS bounded. */
+#ifndef FUZZ_TRIM_EVERY
+#define FUZZ_TRIM_EVERY 16
+#endif
+#if FUZZ_TRIM_EVERY < 1
+#error "FUZZ_TRIM_EVERY must be >= 1"
+#endif
+
+/* Pixels one frame adds to the budget; 0 for audio and bad sizes. */
+static inline int64_t fuzz_frame_pixels(int w, int h) {
+    if (w <= 0 || h <= 0) return 0;
+    return (int64_t)w * h;
+}
+
 /* Decode API a decoder accepts. NONE is 0 so a zeroed slot decodes nothing. */
 typedef enum {
     DECODE_API_NONE = 0,  /* no decode contract: touch packets only */
@@ -117,6 +152,7 @@ static FuzzIOState *g_io_state     = NULL;
 static AVIOContext *g_avio_ctx     = NULL;
 static int          fuzz_network_inited = 0;
 static int          fuzz_reset_counter = 0;
+static unsigned     fuzz_trim_counter  = 0;
 static DecoderSlot  g_decs[FUZZ_MAX_DECODERS];
 
 /* Release the run-scoped AVIO opaque. Safe to call more than once, and safe
@@ -643,6 +679,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
 
     unsigned total_packets = 0;
     unsigned total_frames  = 0;
+    int64_t  total_pixels  = 0;
 
     /* Per-stream decoder contexts — reuse existing open decoders when
      * the codec ID matches the new stream, otherwise reset. */
@@ -688,6 +725,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
             slot->ctx = avcodec_alloc_context3(codec);
             if (!slot->ctx) continue;
             avcodec_parameters_to_context(slot->ctx, par);
+            slot->ctx->max_pixels = FUZZ_MAX_FRAME_PIXELS;
             ret = avcodec_open2(slot->ctx, codec, NULL);
             if (ret < 0) {
                 avcodec_free_context(&slot->ctx);
@@ -748,6 +786,7 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
                 if (ret >= 0) {
                     while (avcodec_receive_frame(g_decs[si].ctx, g_frame) >= 0) {
                         total_frames++;
+                        total_pixels += fuzz_frame_pixels(g_frame->width, g_frame->height);
                         __afl_map_edge(0x1400 + (si & 0xFF));
                     }
                 }
@@ -774,7 +813,8 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
         }
 
         /* Guard against pathological inputs */
-        if (total_packets > 500 || total_frames > 500) break;
+        if (total_packets > 500 || total_frames > 500 ||
+            total_pixels > FUZZ_PIXEL_BUDGET) break;
     }
     FUZZ_PHASE_END(t_decode_start, fuzz_phase_stats.t_decode_ns);
     fuzz_report_phase("decode", fuzz_phase_stats.t_decode_ns);
@@ -789,7 +829,8 @@ int fuzz_ffmpeg(const unsigned char *buf, size_t size) {
     fuzz_cleanup_decoders();
 
     /* Ask glibc to release free top arena pages back to the kernel. */
-    malloc_trim(0);
+    if (++fuzz_trim_counter % FUZZ_TRIM_EVERY == 0)
+        malloc_trim(0);
     FUZZ_PHASE_END(t_cleanup_start, fuzz_phase_stats.t_cleanup_ns);
     fuzz_report_phase("cleanup", fuzz_phase_stats.t_cleanup_ns);
 
