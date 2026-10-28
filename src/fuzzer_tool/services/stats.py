@@ -1114,16 +1114,31 @@ class StatsReporter:
             gt = f._edge_tracker.good_turing_estimate()
             max_edges = gt["n"] + gt["estimated_undiscovered"]
             sat = gt["saturation"] * 100 if max_edges > 0 else 0
+            blocks = self._blocks_str(f)
             if dropped > 0:
-                return f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}% drop: {dropped}"
+                return (
+                    f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}% drop: {dropped}{blocks}"
+                )
             else:
-                return f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}%"
+                return f" | shm: {shm_edges} max: {max_edges} sat: {sat:.0f}%{blocks}"
         if f.ptrace_cov:
             s = f" | edges: {f.ptrace_cov.cumulative_edges} hits: {f.ptrace_cov.total_bp_hits}"
             if f.ptrace_cov.deep_coverage:
                 s += f" bps:{len(f.ptrace_cov.original_bytes)}"
             return s
         return ""
+
+    @staticmethod
+    def _blocks_str(f) -> str:
+        """Guard sites hit over guard sites instrumented; "" without guards."""
+        bb = f._block_bitmap
+        if bb is None:
+            return ""
+
+        total = bb.total()
+        if not total:
+            return ""
+        return f" blocks: {bb.covered()}/{total}"
 
     def _print_stats_density_str(self, f) -> str:
         """Format map density string with optional collision-induced resize."""

@@ -1838,3 +1838,52 @@ class NodeBitmapShm:
 
     def __del__(self):
         self.cleanup()
+
+
+# Header of BlockBitmapShm: u32 head, then the shim's u32 guard-site count.
+_BLOCK_HEAD_BYTES = 8
+
+
+class BlockBitmapShm:
+    """Cumulative guard-site bitmap shared with the shim.
+
+    The shim sets bit ``i`` when global guard index ``i`` first fires and
+    writes how many guard sites it numbered into the header, giving a hard
+    ``blocks: hit/instrumented`` ratio. Never cleared: Python only counts.
+
+    Layout::
+
+        uint32 head            4 + payload bytes (the shim's write bound)
+        uint32 guard_sites     written by the shim; 0 = no guards numbered
+        uint8  bits[payload]
+    """
+
+    def __init__(self, num_bits: int):
+        self.size_bytes = max(1, (num_bits + 7) // 8)
+        self.shm_bytes = _BLOCK_HEAD_BYTES + self.size_bytes
+
+        self.shm_id, self._ptr = _alloc_segment(self.shm_bytes, "block bitmap")
+        ctypes.memset(self._ptr, 0, self.shm_bytes)
+        ctypes.c_uint32.from_address(self._ptr).value = 4 + self.size_bytes
+        self.env_id = str(self.shm_id)
+        _atexit_weak(self)
+
+    def total(self) -> int:
+        """Guard sites the shim numbered (all modules, shim's own included)."""
+        return ctypes.c_uint32.from_address(self._ptr + 4).value
+
+    def covered(self) -> int:
+        """Guard sites that fired at least once, across every execution."""
+        buf = (ctypes.c_uint8 * self.size_bytes).from_address(self._ptr + _BLOCK_HEAD_BYTES)
+        return int(np.bitwise_count(np.frombuffer(buf, dtype=np.uint8)).sum())
+
+    def cleanup(self):
+        if self._ptr:
+            libc_shm.shmdt(self._ptr)
+        self._ptr = None
+        if self.shm_id >= 0:
+            libc_shm.shmctl_rmid(self.shm_id)
+            self.shm_id = -1
+
+    def __del__(self):
+        self.cleanup()
