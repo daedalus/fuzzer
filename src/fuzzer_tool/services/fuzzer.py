@@ -7293,11 +7293,12 @@ class Fuzzer:
 
     def fuzz_one(self, data: bytes) -> bool:
         # One FuzzRound per iteration: per-round flags cannot leak forward.
+        mark = self._exec_timer.cycle_mark()
         t0 = time.perf_counter_ns()
         try:
             return FuzzRound(self, data).run()
         finally:
-            self._exec_timer.add_cycle(time.perf_counter_ns() - t0)
+            self._exec_timer.add_cycle(time.perf_counter_ns() - t0, mark)
 
     def _record_discovery_snapshot(self):
         return self._stats.record_discovery_snapshot()
