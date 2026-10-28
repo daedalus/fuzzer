@@ -1315,6 +1315,28 @@ def _publish_crash(crashes_dir: Path, base_name: str, artifacts) -> None:
 _CRASH_EXTS = (".bin", ".txt", ".sh", ".hex", ".json")
 
 
+def load_crash_sidecars(crashes_dir: Path) -> list[dict]:
+    """``.json`` sidecars written by save_crash, each with ``crash_input`` set.
+
+    ``crash_input`` is the sibling ``.bin`` name. Corrupt or non-object
+    sidecars are logged and skipped; other ``*.json`` files are ignored.
+    """
+    out: list[dict] = []
+    for f in sorted(Path(crashes_dir).glob("crash_*.json")):
+        try:
+            side = json.loads(f.read_text())
+        except (OSError, ValueError) as e:
+            log.warning("Skipping unreadable crash sidecar %s: %s", f, e)
+            continue
+        if not isinstance(side, dict):
+            log.warning("Skipping crash sidecar %s: not an object", f)
+            continue
+
+        side["crash_input"] = f.with_suffix(".bin").name
+        out.append(side)
+    return out
+
+
 def _cluster_files(crashes_dir: Path, cluster_id: str) -> list[Path]:
     """On-disk artifacts of signature cluster *cluster_id*.
 

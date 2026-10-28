@@ -1167,6 +1167,13 @@ def cmd_fuzz(args):
             Path(args.report).write_text(report)
             print(f"[*] Report saved to {args.report}")
 
+    sarif = getattr(args, "sarif", None)
+    if sarif is not None:
+        from fuzzer_tool.services.sarif_export import export_sarif
+
+        n = export_sarif(crashes_dir, sarif, getattr(args, "sarif_src_root", ""))
+        print(f"[*] SARIF: {n} result(s) -> {sarif}")
+
     if plot_graph_path is not None:
         from fuzzer_tool.core.plotting import generate_html_report
 
@@ -1762,6 +1769,19 @@ def _replay_exec(args, data, env):
         if tmp_dir and tmp_dir.exists():
             shutil.rmtree(tmp_dir, ignore_errors=True)
     return returncode, stderr
+
+
+def cmd_sarif(args):
+    """Export a crashes directory as a SARIF log for code scanning."""
+    from fuzzer_tool.services.sarif_export import export_sarif
+
+    if not Path(args.crashes_dir).is_dir():
+        print(f"[-] Crashes directory not found: {args.crashes_dir}", file=sys.stderr)
+        return 1
+
+    n = export_sarif(args.crashes_dir, args.output, args.src_root)
+    print(f"[*] SARIF: {n} result(s) -> {args.output}")
+    return 0
 
 
 def cmd_replay(args):
@@ -5910,6 +5930,18 @@ def main() -> int:
         help="Generate explainability report after run (default: stdout, or specify output file)",
     )
     fuzz_parser.add_argument(
+        "--sarif",
+        default=None,
+        metavar="FILE",
+        help="After the run, write the crashes as a SARIF 2.1.0 log (GitHub code scanning)",
+    )
+    fuzz_parser.add_argument(
+        "--sarif-src-root",
+        default="",
+        metavar="DIR",
+        help="Source root SARIF paths are made relative to (default: absolute file:// URIs)",
+    )
+    fuzz_parser.add_argument(
         "--edge-hist",
         action="store_true",
         help="After the run, print a histogram of seeds by edge count and the "
@@ -6955,6 +6987,22 @@ def main() -> int:
         "-F", "--file-mode", action="store_true", help="Write input to temp file instead of stdin"
     )
     verify_parser.set_defaults(func=cmd_verify)
+
+    # --- sarif ---
+    sarif_parser = subparsers.add_parser(
+        "sarif", help="Export crashes as a SARIF 2.1.0 log (GitHub code scanning)"
+    )
+    sarif_parser.add_argument("crashes_dir", help="Directory of saved crashes (.json sidecars)")
+    sarif_parser.add_argument(
+        "-o", "--output", default="crashes.sarif", help="Output file (default: crashes.sarif)"
+    )
+    sarif_parser.add_argument(
+        "--src-root",
+        default="",
+        metavar="DIR",
+        help="Source root paths are made relative to (default: absolute file:// URIs)",
+    )
+    sarif_parser.set_defaults(func=cmd_sarif)
 
     # --- import ---
     import_parser = subparsers.add_parser(

@@ -2,6 +2,7 @@
 
 import re
 from array import array
+from typing import NamedTuple
 
 from fuzzer_tool.core.hashing import xxh64
 
@@ -125,6 +126,14 @@ SANITIZER_DEALLOC_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# Frame with its source site: "#1 0x4011d6 in foo /src/a.c:12:5". Groups:
+# func, path, line, col (all optional) | module for "(/bin/t+0x11d6)".
+_FRAME_LOC_RE = re.compile(
+    r"^[ \t]*#(\d+)[ \t]+0x[0-9a-fA-F]+[ \t]+"
+    r"(?:in[ \t]+(\S+)(?:[ \t]+(\S+?):(\d+)(?::(\d+))?)?|\(([^)\s]+)\))",
+    re.MULTILINE,
+)
+
 # Stack hash: first N crash-stack PCs, page offset only (survives ASLR).
 _NUM_FRAMES_SANITIZER = 14
 _PAGE_OFFSET_MASK = 0xFFF
@@ -206,6 +215,69 @@ def _crash_stack(text: str, start: int = 0) -> list[tuple[int, str]]:
             break
         out.append((int(pc, 16), name or module.rsplit("/", 1)[-1]))
     return out
+
+
+class Frame(NamedTuple):
+    """One stack frame with its source site; ``path`` empty when unsymbolized."""
+
+    func: str
+    path: str
+    line: int
+    col: int
+    module: str
+
+
+def crash_frames(text: str, start: int = 0) -> list[Frame]:
+    """Frames of the first stack at or after *start*, with file:line:col.
+
+    Same stop rule as ``_crash_stack``: the next ``#0`` starts another stack.
+    """
+    out: list[Frame] = []
+    for idx, func, path, line, col, module in _FRAME_LOC_RE.findall(text, start):
+        if idx == "0" and out:
+            break
+        mod = module.rsplit("/", 1)[-1]
+        out.append(Frame(func, path, int(line or 0), int(col or 0), mod))
+    return out
+
+
+def _site_frame(site: str) -> Frame:
+    """UBSAN "a.c:12:5" site as a one-frame stack."""
+    path, line, col = site.rsplit(":", 2)
+    return Frame("", path, int(line), int(col), "")
+
+
+def _use_ubsan(m: re.Match | None, u: re.Match | None) -> bool:
+    """UBSAN's "runtime error:" line names the check and the site; its
+    SUMMARY only says "undefined-behavior"."""
+    if not u:
+        return False
+    return not m or u.start() < m.start() or m.group(1).lower() == _UBSAN.lower()
+
+
+def report_stacks(stderr: str) -> dict[str, list[Frame]]:
+    """``crash`` / ``free`` / ``alloc`` stacks of a sanitizer report, with sites.
+
+    Empty when *stderr* holds no report. A UBSAN report without a stack gets
+    its ``runtime error:`` site as the one crash frame.
+    """
+    m = SANITIZER_ERROR_LINE_RE.search(stderr)
+    u = _UBSAN_RUNTIME_RE.search(stderr) if _UBSAN_RUNTIME_MARK in stderr else None
+    if not m and not u:
+        return {}
+
+    ubsan = _use_ubsan(m, u)
+    crash = crash_frames(stderr, u.start() if ubsan else m.start())
+    if ubsan and not crash:
+        crash = [_site_frame(u.group(1))]
+    stacks = {"crash": crash}
+
+    # Free before alloc: the order ASAN prints them in.
+    for key, rx in (("free", SANITIZER_DEALLOC_RE), ("alloc", SANITIZER_ALLOC_RE)):
+        hit = rx.search(stderr)
+        if hit:
+            stacks[key] = crash_frames(hit.group(1))
+    return stacks
 
 
 def _ubsan_type(message: str) -> str:
@@ -344,9 +416,7 @@ class SanitizerReport:
         if not m and not u:
             return None
 
-        # UBSAN's "runtime error:" line names the check and the site; its
-        # SUMMARY only says "undefined-behavior".
-        if u and (not m or u.start() < m.start() or m.group(1).lower() == _UBSAN.lower()):
+        if _use_ubsan(m, u):
             stack = _crash_stack(stderr, u.start())
             return cls(
                 _UBSAN,

@@ -242,6 +242,7 @@ What the counters buy:
 - Levenshtein crash clustering, stack-hash dedup, exploitability tiers
 - Crash minimization (delta-debugging with signature pinning)
 - Blocklist/allowlist and smaller-crash replacement
+- **SARIF export** (`fuzzer-tool sarif`, `fuzz --sarif`): crashes as code-scanning alerts on the faulting source line
 - **Crash exploration** (`--crash-explore`, AFL `-C`): from crashing seeds, keep mutants that still crash on a new path
 - **Uninitialized-memory probe** (`--uninit-probe`): new corpus entries re-run under two heap fill bytes; fill-dependent output is saved as a leak
 - **Root-cause isolation** (`root-cause` subcommand): binary-search the minimal byte diff
