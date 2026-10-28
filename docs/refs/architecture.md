@@ -33,8 +33,17 @@ struct __afl_entry { uint32_t edge_id; uint32_t count; };
   shim (`__AFL_CTX_SENSITIVE=1`; `-D__AFL_CTX_SENSITIVE=0` restores plain
   `prev_loc ^ cur_loc`), masked to `__AFL_CTX_BITS` (default 8) and advertised
   via the `__afl_ctx_bits_N` symbol for map sizing. Every shim build carries
-  `-fno-omit-frame-pointer` (applied centrally by `tools/build_targets.sh`)
-  because the context walk reads the caller's saved frame pointer.
+  `-fno-omit-frame-pointer` (applied centrally by `tools/build_targets.sh`,
+  including the vendored FFmpeg configure step) because the context walk reads
+  the caller's saved frame pointer. Both hash paths are always compiled in, so
+  the choice doesn't require a rebuild: `--ctx-sensitive`/`--no-ctx-sensitive`
+  (`$__AFL_CTX_SENSITIVE`, read once at attach by a capable shim — see
+  `__afl_ctx_env_capable`) picks per run, consulted by map sizing, the ASLR
+  check and `EdgeLedger` via `elf.effective_ctx_bits`; an incapable (older)
+  shim ignores the variable and `Fuzzer` warns that the flag can't take
+  effect. Measured on ffmpeg_read 9.0.2: context off is ~22% faster per-exec
+  than context on (439.0 vs 587.9 us/exec compile-time, 443.6 vs 570.6
+  runtime-switched — no regression from making it a runtime choice).
 - `caller_ctx` hashes a return address, which moves between processes under
   ASLR — so ids would not be comparable across executions, which is why
   `adapters/process.disable_aslr()` runs before anything spawns. When ASLR
@@ -44,6 +53,20 @@ struct __afl_entry { uint32_t edge_id; uint32_t count; };
   build that can do this advertises `__afl_ctx_relative_capable`; an older
   target has no such symbol, ignores the variable, and gets warned about at
   startup.
+- The context walk degrades to `ctx=0` rather than crashing on a bad frame
+  pointer (non-canonical address, or a value past the calling thread's real
+  stack resolved via `pthread_getattr_np` — see
+  `docs/learnings/2026-08-11-rebuild-shim-ctx-segv.md` and its two follow-up
+  hardening passes). That only prevents a crash; a frame-pointer-omitted
+  caller can still produce a walk that *succeeds* and returns the same wrong
+  context for every call site, silently — edge ids stay valid-looking.
+  `__afl_ctx_collapse_suspect()` catches that case statistically (sticky
+  flags on the miss/bail paths, not a counter on the hit path, to keep the
+  common case cheap): it fires when no second distinct caller was ever seen
+  across >= 128 claimed edge slots. Reads as `ShimField.CTX_COLLAPSED` in
+  direct mode and as one deduped `__afl_shim:` stderr line via an atexit hook
+  otherwise; `-D__AFL_CTX_CHECK=0` compiles it out. See
+  `docs/learnings/2026-10-27-ctx-collapse-selfcheck.md`.
 - The AFLGo distance channel is also default-on (`__AFL_DISTANCE_MODE=1`;
   `=0` opts out) — inert until directed mode uploads a distance table.
 - Home slot (`afl_shim.c` `__afl_home_slot`): Fibonacci hash

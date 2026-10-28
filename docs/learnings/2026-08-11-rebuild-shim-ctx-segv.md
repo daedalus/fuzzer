@@ -3,6 +3,18 @@
 **Date:** 2026-08-11
 **Context:** `fuzzer-new`, `tools/build_targets.sh` + `src/fuzzer_tool/adapters/afl_shim.c`, commits `392b37b` / `451131c`
 
+**Follow-ups (CTX defaulted back on since, in `285ce79e`, once the walk itself was
+hardened rather than just disabled — read these before touching
+`__afl_get_caller_ctx`):** the NULL/4 MiB-hop guard here still let two more crash
+shapes through — a non-canonical frame pointer (`1b2961fa`) and a canonical-but
+past-the-real-stack-end one from a frame-pointer-less caller using rbp as a general
+register, seen fuzzing ffmpeg (`2095f2db`, now bounds the walk to the thread's real
+stack via `pthread_getattr_np`). Neither of those is the case this doc warns a NULL
+check can't catch — a walk that *succeeds* and returns the same wrong context for
+every call site, silently, is a separate failure mode with no error to catch; see
+`docs/learnings/2026-10-27-ctx-collapse-selfcheck.md` for the statistical detector
+that catches it instead.
+
 ## Problem
 
 A routine `tools/build_targets.sh` rebuild ("rebuild targets") silently produced 4 broken targets — `png_read_nosan`, `zlib_read_nosan`, `gzip_read_nosan`, `ffmpeg_read_nosan` — and, once rebuilt, the full test suite crashed: `test_shm_distance_channel` SEGV'd inside the coverage shim during SHM-map setup. Two distinct defects, both hidden by `2>/dev/null` and by a pre-commit hook stack that runs **no pytest** (AGENTS.md's claim that hooks run the full suite is false — verified in this session).
