@@ -56,6 +56,7 @@ _ENV_OWNED = (
     "__AFL_SHM_ID",
     "__AFL_DIST_SHM_ID",
     "__AFL_NODE_BITMAP_ID",
+    "__AFL_BLOCK_BITMAP_ID",
     "AFL_MAP_SIZE",
     # Every Fuzzer() writes it; a leaked "0" silences later stack-depth tests.
     "__AFL_STACK_DEPTH",

@@ -45,6 +45,7 @@ from fuzzer_tool.adapters.seed_zip import ZipMode
 from fuzzer_tool.adapters.shm import (
     MAX_COUNT_GROWTH_FACTOR,
     TOUCHED_SCAN_MIN_ENTRIES,
+    BlockBitmapShm,
     SharedVirgin,
     ShmCoverage,
     unstable_slots,
@@ -73,6 +74,7 @@ from fuzzer_tool.core.elf import (
     detect_elf_type,
     detect_shm_layout,
     is_elf_executable,
+    parse_sancov_guard_count,
 )
 from fuzzer_tool.core.exec_timer import ExecTimer
 from fuzzer_tool.core.fair_queue import SmoothWRR, WeightedFairQueue
@@ -499,6 +501,9 @@ ADAPTIVE_TIMEOUT_FLOOR = 0.005
 ADAPTIVE_TIMEOUT_MAX_GROWTH = 10.0
 # Min-cover stat: wait COVER_BUDGET x last solve time between solves (<= ~1/COVER_BUDGET overhead).
 COVER_BUDGET = 50
+# Block bitmap size when the target has no __sancov_guards section (.so builds,
+# dlopen-only coverage): 512 KiB, ~4M guard sites.
+BLOCK_BITMAP_DEFAULT_BITS = 1 << 22
 MAX_CRASH_SIGS = 10_000  # max unique crash signatures before pruning old entries
 # Crashing-input hashes kept (~109 B each). Forgetting is safe: a repeat input
 # re-classifies to a known (or on-disk) signature and is not written again.
@@ -2679,6 +2684,12 @@ class Fuzzer:
                     log.warning("Failed to create SHM for %s, using shared SHM", t)
             if self._target_shm_covs:
                 print(f"[*] Multi-target: {len(self._target_shm_covs)} per-target SHM regions")
+
+        # Block bitmap for the stats "blocks:" field. Single target only:
+        # targets sharing os.environ would share one guard index space.
+        self._block_bitmap: BlockBitmapShm | None = None
+        if self.shm_cov and not self.multi_targets:
+            self._block_bitmap = self._open_block_bitmap(target)
 
         # --shared-virgin: one novelty store across the per-target tables.
         self._shared_virgin: SharedVirgin | None = None
@@ -5378,6 +5389,19 @@ class Fuzzer:
         self._pt_session = session
         print(f"[*] Coverage: Intel PT ({mode.value}), aux={session.aux_size >> 10} KiB")
         return True
+
+    def _open_block_bitmap(self, target: str) -> BlockBitmapShm | None:
+        """Export a guard-site bitmap sized 2x the ELF count (dlopen headroom)."""
+        guards = parse_sancov_guard_count(target)
+        bits = BLOCK_BITMAP_DEFAULT_BITS if guards is None else max(2 * guards, 8)
+        try:
+            bb = BlockBitmapShm(num_bits=bits)
+        except OSError as e:
+            log.warning("Block bitmap disabled: %s", e)
+            return None
+
+        os.environ["__AFL_BLOCK_BITMAP_ID"] = bb.env_id
+        return bb
 
     def _setup_ptrace(self, target, deep_coverage, max_bps, fallback_hint=False):
         from fuzzer_tool.core.elf import detect_ngram_k

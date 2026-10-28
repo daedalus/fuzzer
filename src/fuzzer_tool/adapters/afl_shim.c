@@ -251,6 +251,7 @@ static void __afl_cmplog_fini(void);
 #include <dlfcn.h>
 static void __afl_map_dist_shm(void);
 static void __afl_map_node_shm(void);
+static void __afl_map_block_shm(void);
 #endif
 
 /* ── Health counters ──────────────────────────────────────────────────
@@ -1249,6 +1250,7 @@ __AFL_GCC_NO_COV void __afl_map_shm(void) {
     __afl_mapping = 1;  /* map_dist_shm is instrumented; no ctx during setup */
     __afl_map_dist_shm();
     __afl_map_node_shm();
+    __afl_map_block_shm();
     __afl_mapping = 0;
 #endif
     __afl_fast_refresh();
@@ -2209,6 +2211,52 @@ __AFL_NO_COV __attribute__((noinline)) static void __afl_fast_refresh(void) {
                  ;
 }
 
+/* ── Block coverage bitmap ─────────────────────────────────────────────
+ *
+ * Which guard sites ever fired: the "blocks: hit/instrumented" figure the
+ * edge map cannot give (an edge id hashes hashed guard ids). Bit i is the
+ * global guard index i, numbered across modules in init order; the header
+ * carries how many sites were numbered. Cumulative: Python only counts.
+ *
+ *   [u32 head = 4 + payload][u32 guard sites][payload bits]
+ *
+ * The leaf guard marks from its settle path, i.e. once per new edge per
+ * execution, never on a home-slot hit. */
+#define __AFL_GUARD_MAX_REGIONS 64
+
+struct __afl_guard_region {
+    const uint32_t *start;
+    const uint32_t *stop;
+    uint32_t first;  /* global index of start[0] */
+};
+
+static struct __afl_guard_region __afl_guard_regions[__AFL_GUARD_MAX_REGIONS];
+static uint32_t  __afl_guard_nregions;
+static uint32_t  __afl_guard_total;   /* guard sites numbered so far */
+static uint8_t  *__afl_block_bitmap = NULL;
+static uint32_t *__afl_block_sites = NULL;
+static uint32_t  __afl_block_bits = 0;
+
+/* One region per module, so the scan is 1-2 compares in practice. Indices
+ * past the payload are dropped: the header is a write bound. */
+__AFL_NO_COV __attribute__((noinline))
+static void __afl_block_mark(const uint32_t *guard) {
+    for (uint32_t i = 0; i < __afl_guard_nregions; i++) {
+        const struct __afl_guard_region *r = &__afl_guard_regions[i];
+        if (guard < r->start || guard >= r->stop) continue;
+
+        uint32_t idx = r->first + (uint32_t)(guard - r->start);
+        if (idx >= __afl_block_bits) return;
+
+        /* Test first: a set bit is the common case, and a read keeps the
+         * line shared between threads. */
+        uint8_t bit = (uint8_t)(1u << (idx & 7));
+        if (!(__afl_block_bitmap[idx >> 3] & bit))
+            __atomic_fetch_or(&__afl_block_bitmap[idx >> 3], bit, __ATOMIC_RELAXED);
+        return;
+    }
+}
+
 /* Leaf guard: the fast path makes no call that returns into it, so it needs
  * no callee-saved registers (5 pushes and pops a call). Every way off it is
  * a tail call; musttail guarantees the generic body's frame sits where the
@@ -2233,6 +2281,7 @@ static inline void __afl_guard_slow(uint32_t *guard)
 #endif
 {
     __afl_map_loc(*guard);
+    if (__afl_block_bitmap) __afl_block_mark(guard);
 #if __AFL_DISTANCE_MODE
     /* Guard builds get the same AFLGo distance / K-Scheduler node-bitmap
      * channel as trace-pc builds, keyed off this call site's own return
@@ -2258,8 +2307,9 @@ static inline void __afl_guard_finish(uint32_t edge_id, uint32_t cur_loc) {
  * the finish, so this call is the leaf guard's last act. */
 __AFL_NO_COV __attribute__((noinline))
 static void __afl_guard_settle(uint32_t edge_id, uint32_t pos, uint32_t gen,
-                               uint32_t cur_loc) {
+                               uint32_t cur_loc, const uint32_t *guard) {
     __afl_map_from_home(edge_id, pos, gen);
+    if (__afl_block_bitmap) __afl_block_mark(guard);
     __afl_guard_finish(edge_id, cur_loc);
 }
 #endif
@@ -2285,7 +2335,7 @@ __AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
     struct __afl_entry *area = __afl_area;
     struct __afl_entry e = area[pos];
     if (e.edge_id != edge_id || (e.count ^ (gen << 24)) >= 0x01000000u) {
-        __afl_guard_settle(edge_id, pos, gen, cur_loc);
+        __afl_guard_settle(edge_id, pos, gen, cur_loc, guard);
         return;
     }
     if ((e.count & 0x00FFFFFFu) != 0x00FFFFFFu)
@@ -2294,6 +2344,7 @@ __AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard(uint32_t *guard) {
 #else
     if (__builtin_expect(__afl_fast, 1)) {
         __afl_map_loc_as(cur_loc, __AFL_PATH_FAST);
+        if (__afl_block_bitmap) __afl_block_mark(guard);
         return;
     }
     __afl_guard_slow(guard);
@@ -2465,15 +2516,24 @@ __AFL_NO_COV static uint32_t __afl_guard_width(uint64_t n) {
 
 __attribute__((visibility("hidden")))
 __AFL_GCC_NO_COV void __sanitizer_cov_trace_pc_guard_init(uint32_t *start, uint32_t *stop) {
-    static uint32_t guard_counter;
     if (start == stop || *start) return;
-    uint32_t mask = __afl_guard_width((uint64_t)(stop - start) + guard_counter);
+
+    /* Region for the block bitmap; past the cap a module is numbered but
+     * never marked. */
+    if (__afl_guard_nregions < __AFL_GUARD_MAX_REGIONS)
+        __afl_guard_regions[__afl_guard_nregions++] =
+            (struct __afl_guard_region){start, stop, __afl_guard_total};
+
+    uint32_t mask = __afl_guard_width((uint64_t)(stop - start) + __afl_guard_total);
     uint64_t salt = (uint64_t)(stop - start) * __AFL_GUARD_SALT;
     for (uint32_t *g = start; g < stop; g++) {
         /* 0 means "disabled guard" to __sanitizer_cov_trace_pc_guard. */
-        uint32_t v = __afl_guard_mix(salt ^ ++guard_counter) & mask;
+        uint32_t v = __afl_guard_mix(salt ^ ++__afl_guard_total) & mask;
         *g = v ? v : 1;
     }
+
+    /* A module dlopen'd after attach grows the denominator. */
+    if (__afl_block_sites) *__afl_block_sites = __afl_guard_total;
 }
 
 /* ── Inline counters, bool flags, pc-table ────────────────────────────
@@ -2917,6 +2977,25 @@ __AFL_GCC_NO_COV static void __afl_map_node_shm(void) {
     }
     __afl_node_bitmap_bytes = bytes;
     __afl_node_bitmap = (uint8_t *)((uint8_t *)p + 4);
+}
+
+/* Block bitmap (see __afl_block_mark). Once: a resize re-runs map_shm. */
+__AFL_GCC_NO_COV static void __afl_map_block_shm(void) {
+    if (__afl_block_bitmap) return;
+    void *p = __afl_attach_sized("__AFL_BLOCK_BITMAP_ID", 1);
+    if (!p) return;
+
+    /* head = guard-site slot + payload; no payload means nothing to mark. */
+    uint32_t head = *(uint32_t *)p;
+    if (head <= 4 || head > (1u << 28)) {
+        shmdt(p);
+        __afl_health[__AFL_HEALTH_SEG_REJECTED]++;
+        return;
+    }
+    __afl_block_sites = (uint32_t *)p + 1;
+    *__afl_block_sites = __afl_guard_total;
+    __afl_block_bits = (head - 4) * 8;
+    __afl_block_bitmap = (uint8_t *)p + 8;
 }
 
 __AFL_GCC_NO_COV static void __afl_map_dist_shm(void) {
