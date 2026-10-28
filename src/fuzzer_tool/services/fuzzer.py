@@ -2514,7 +2514,6 @@ class Fuzzer:
         # cmplog=False is accepted for programmatic callers that need it off.
         if cmplog:
             has_cmplog = _detect_cmplog(self.target)
-            is_lib = self.target.lower().endswith((".so", ".dylib", ".dll"))
             if has_cmplog:
                 print("[*] Cmplog: target is instrumented, enabling comparison tracing")
             else:
@@ -2544,9 +2543,9 @@ class Fuzzer:
                 site_counts=True,
                 compcov_level=self._compcov_level,
                 prune_const=cmp_prune_const,
-                # An executable with the shim compiled in already intercepts
+                # A target with the shim compiled in already intercepts
                 # libc; a preloaded copy would count every call twice.
-                preload=Preload.NONE if has_cmplog and not is_lib else Preload.SHIM,
+                preload=Preload.NONE if has_cmplog else Preload.SHIM,
             )
             if self._cmplog.start():
                 from fuzzer_tool.core.elf import detect_cmplog_functions
@@ -5117,7 +5116,7 @@ class Fuzzer:
             # it in a subprocess that inherits os.environ.
             if self._cmplog is not None:
                 self._cmplog.setup_env_for_run()
-                if use_direct_lite:
+                if use_direct_lite and getattr(self._cmplog, "preload", None) != Preload.NONE:
                     self._cmplog.preload_shims()
             self._inprocess_runner = InProcessRunner(
                 target=self.target,
@@ -5209,7 +5208,7 @@ class Fuzzer:
                 # loads the .so in-process (needs the env var set before
                 # CDLL below), subprocess loader inherits os.environ.
                 self._cmplog.setup_env_for_run()
-                if direct_ok:
+                if direct_ok and getattr(self._cmplog, "preload", None) != Preload.NONE:
                     self._cmplog.preload_shims()
             self._inprocess_runner = InProcessRunner(
                 target=self.target,

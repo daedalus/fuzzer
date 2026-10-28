@@ -2182,6 +2182,7 @@ class FuzzRound:
         # (DEEP_DIVE §Performance, Lightweight mode).
         self._begin()
         self._execute()
+        self._mine_cmplog()
         self._periodic()
         self._classify()
         self._lite_scan()

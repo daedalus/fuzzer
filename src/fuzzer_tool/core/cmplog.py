@@ -308,6 +308,8 @@ class _FifoDrain:
         # None → use the class default. 0 → unlimited. >0 → cap in bytes.
         if max_buffered is None:
             self._max_buffered = self._MAX_BUFFERED
+        elif max_buffered == 0:
+            self._max_buffered = float("inf")  # unlimited
         else:
             self._max_buffered = max_buffered
         os.mkfifo(path, 0o644)
@@ -931,13 +933,19 @@ class CmplogCollector:
             return
         log_dir = self.workdir or _get_cmplog_dir()
         os.makedirs(log_dir, exist_ok=True)
-        local_id = uuid.uuid4().hex[:12]
-        self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
         if self.fifo_sink:
+            # Create a FIFO directly for the cmplog sink
+            self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{uuid.uuid4().hex[:12]}.fifo")
             self._fifo = _FifoDrain(
                 self.log_path, max_buffered=self.fifo_max_buffered, debug=self.debug
             )
             print(f"[*] Cmplog: open fifo file {self.log_path}")
+        else:
+            # For file sink, create a regular file
+            local_id = uuid.uuid4().hex[:12]
+            self.log_path = os.path.join(log_dir, f"fuzz_cmplog_{local_id}.cmplog")
+            with contextlib.suppress(OSError), open(self.log_path, "w") as f:
+                f.truncate(0)
 
     def setup_env(self, env: dict[str, str]) -> dict[str, str]:
         """Add cmplog env vars to the execution environment.
