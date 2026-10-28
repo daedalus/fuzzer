@@ -61,6 +61,7 @@ GATES: tuple[tuple[str, str, int], ...] = (
     ("primitive_poly", "40.5", 2),
     ("crc16", "41.3", 6),
     ("gf256_trace", "42.3", 2),
+    ("perm_sqrt", "2.3x", 4),  # extension of chapter 2, not a book section
 )
 GATE_COUNT = len(GATES)
 FIELD_LEN = tuple(g[2] for g in GATES)
@@ -572,6 +573,33 @@ def _gf256_trace(b: bytes) -> Result:
     return True, int(_gmul(a, c) == 1 and tr == 1)
 
 
+def _perm_sqrt(b: bytes) -> Result:
+    """Number of square roots of the permutation (cycle-type closed form)."""
+    p = _perm(_le(b), 8)
+    if p is None:
+        return False, 0
+    m: dict[int, int] = {}
+    seen = [False] * 8
+    for s in range(8):
+        n, i = 0, s
+        while not seen[i]:
+            seen[i] = True
+            i = p[i]
+            n += 1
+        if n:
+            m[n] = m.get(n, 0) + 1
+    total = 1
+    for k, c in m.items():
+        if k % 2 == 0:
+            total *= 0 if c % 2 else math.prod(range(c - 1, 0, -2)) * k ** (c // 2)
+        else:
+            total *= sum(
+                math.factorial(c) // (math.factorial(c - 2 * j) * math.factorial(j) * 2**j) * k**j
+                for j in range(c // 2 + 1)
+            )
+    return True, total
+
+
 _FNS: tuple[Callable[[bytes], Result], ...] = (
     _gray, _popcount, _negabinary, _inv_mod_2n, _perm_order, _inversions, _heap,
     _comb_colex, _composition, _debruijn, _mixed_radix, _perm_lex, _involution,
@@ -579,7 +607,7 @@ _FNS: tuple[Callable[[bytes], Result], ...] = (
     _necklace, _hadamard_lfsr, _rho_path, _dft4, _convolution, _walsh, _reed_muller,
     _haar, _hartley4, _ntt4, _wavelet_s, _cast_out, _isqrt, _newton, _agm, _log2_q16,
     _cordic, _binary_split, _chebyshev, _vandermonde, _euclid_steps, _rudin_shapiro,
-    _modexp_sqrt, _primitive_poly, _crc16, _gf256_trace,
+    _modexp_sqrt, _primitive_poly, _crc16, _gf256_trace, _perm_sqrt,
 )  # fmt: skip
 
 

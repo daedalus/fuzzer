@@ -211,6 +211,33 @@ class TestRankBijection:
             assert ref.gate(g, field)[0] is False
 
 
+class TestPermSqrt:
+    """Operand = number of square roots, against brute-force squaring over S8."""
+
+    def test_counts_match_brute_force_squaring(self, oracle):
+        g, w = GATE["perm_sqrt"], oracle.witness()
+        roots = dict.fromkeys(itertools.permutations(range(8)), 0)
+        for q in roots.copy():
+            roots[tuple(q[q[i]] for i in range(8))] += 1
+        for p, want in roots.items():
+            x = sum(v << (3 * j) for j, v in enumerate(p))
+            field = x.to_bytes(4, "little")
+            assert _c_operand(oracle, _put(w, g, field), g) == want, p
+            assert ref.gate(g, field) == (True, want), p
+
+    def test_even_cycles_must_pair(self, oracle):
+        # Falsification: one 2-cycle has no root; two 2-cycles + 4 fixed points: 2 * 10.
+        g, w = GATE["perm_sqrt"], oracle.witness()
+        for p, want in (((1, 0, 2, 3, 4, 5, 6, 7), 0), ((1, 0, 3, 2, 4, 5, 6, 7), 20)):
+            x = sum(v << (3 * j) for j, v in enumerate(p))
+            assert _c_operand(oracle, _put(w, g, x.to_bytes(4, "little")), g) == want
+
+    def test_non_permutation_is_invalid(self, oracle):
+        g, w = GATE["perm_sqrt"], oracle.witness()
+        assert _c_operand(oracle, _put(w, g, bytes(4)), g) == ref.SENTINEL
+        assert ref.gate(g, bytes(4))[0] is False
+
+
 def _balanced(s: tuple[str, ...]) -> bool:
     depth = 0
     for c in s:

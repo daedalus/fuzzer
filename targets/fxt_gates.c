@@ -13,12 +13,13 @@
  * Chapter 5 (conventions) has no algorithm of its own: its ranking/unranking appears in
  * the rank gates (6-17). Chapters 1-4 and 21-42 are one gate each; chapter 23 has two.
  * tools/fxt_gates_ref.py is the independent Python reference (gate names and sections).
+ * G45 perm_sqrt is not a book chapter: it extends chapter 2 (permutation cycle structure).
  *
  * Classes (what a solver needs, not what the fuzzer does):
  *   BIT    GF(2)-affine            G0 G25 G43
  *   RING   integer/modular maps    G1 G2(add, xor) G3 G22-G24 G26-G30 G37
  *   MONO   monotone, bisectable    G31-G34 G35(decreasing) G36(low nibble) G38(per byte)
- *   RANK   structure + rank        G4-G19 G21
+ *   RANK   structure + rank        G4-G19 G21 G45
  *   HASH   search only             G20 G39-G42 G44 (no gradient)
  *
  * Build (coverage build mirrors targets/gf2_gates.c; -O2, clang):
@@ -40,8 +41,8 @@ static void __afl_map_edge(unsigned int cur_loc) { (void)cur_loc; }
 extern void __afl_map_edge(unsigned int cur_loc);
 #endif
 
-#define GATES 45
-#define INPUT_LEN 200
+#define GATES 46
+#define INPUT_LEN 204
 #define EDGE_BASE 0x7400u
 #define VALID_EDGE(g) __afl_map_edge(EDGE_BASE + 2u * (unsigned)(g))
 #define SOLVED_EDGE(g) __afl_map_edge(EDGE_BASE + 2u * (unsigned)(g) + 1u)
@@ -712,6 +713,39 @@ static int g_gf256_trace(const unsigned char *p, u64 *op) {
     return 1;
 }
 
+/* Number of permutations q of 0..7 with q*q == p (cycle-type closed form).
+ * Even k: m cycles pair up, (m-1)!! * k^(m/2), 0 when m is odd.
+ * Odd k: sum_j m! / ((m-2j)! j! 2^j) * k^j over j merged pairs. */
+static int g_perm_sqrt(const unsigned char *p, u64 *op) {
+    unsigned q[8], seen = 0, m[9] = {0};
+    u64 total = 1;
+    if (!perm3(le32(p), 8, q)) return 0;
+    for (unsigned s = 0; s < 8; s++) {
+        unsigned n = 0, i = s;
+        while (!(seen >> i & 1u)) { seen |= 1u << i; i = q[i]; n++; }
+        m[n]++;
+    }
+    for (unsigned k = 1; k <= 8; k++) {
+        u64 f = 0;
+        if (!m[k]) continue;
+        if (!(k & 1u)) {
+            if (m[k] & 1u) { total = 0; break; }
+            f = 1;
+            for (unsigned c = m[k] - 1; c > 1; c -= 2) f *= c;
+            for (unsigned j = 0; j < m[k] / 2; j++) f *= k;
+        } else {
+            for (unsigned j = 0; 2 * j <= m[k]; j++) {
+                u64 t = fact(m[k]) / (fact(m[k] - 2 * j) * fact(j) << j);
+                for (unsigned c = 0; c < j; c++) t *= k;
+                f += t;
+            }
+        }
+        total *= f;
+    }
+    *op = total;
+    return 1;
+}
+
 static const gate_fn GATE_FN[GATES] = {
     g_gray, g_popcount, g_negabinary, g_inv_mod_2n, g_perm_order, g_inversions, g_heap,
     g_comb_colex, g_composition, g_debruijn, g_mixed_radix, g_perm_lex, g_involution,
@@ -720,18 +754,19 @@ static const gate_fn GATE_FN[GATES] = {
     g_haar, g_hartley4, g_ntt4, g_wavelet_s, g_cast_out, g_isqrt, g_newton, g_agm,
     g_log2_q16, g_cordic, g_binary_split, g_chebyshev, g_vandermonde, g_euclid_steps,
     g_rudin_shapiro, g_modexp_sqrt, g_primitive_poly, g_crc16, g_gf256_trace,
+    g_perm_sqrt,
 };
 
 /* Field length in bytes; offsets are cumulative and sum to INPUT_LEN. */
 static const unsigned char GATE_LEN[GATES] = {
     4, 8, 4, 4, 4, 8, 8, 4, 2, 4, 4, 4, 4, 2, 2, 4, 2, 4, 4, 4, 2, 4, 8, 8, 8, 2, 8, 4, 4,
-    8, 8, 8, 4, 8, 4, 2, 1, 3, 2, 4, 2, 4, 2, 6, 2,
+    8, 8, 8, 4, 8, 4, 2, 1, 3, 2, 4, 2, 4, 2, 6, 2, 4,
 };
 
 /* Gates whose structural precondition fires a separate "valid" edge. */
 static const unsigned char GATE_STAGED[GATES] = {
     0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0,
-    0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1,
+    0, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1,
 };
 
 static const u64 g_target[GATES] = {
@@ -746,7 +781,7 @@ static const u64 g_target[GATES] = {
     0x13C6EF39ull, 0x1EF06473ull, 0x1BB5BCull, 0xF8073F58ull,
     0x677A818ull, 0xD3EED06Full, 0x72363EAull, 0x15ull,
     0xEDull, 0x4532032Eull, 0x1ull, 0xD78Cull,
-    0x1ull,
+    0x1ull, 0x1Aull,
 };
 
 /* One solving input: the field of every gate set to a value that opens it. */
@@ -764,6 +799,7 @@ __attribute__((unused)) static const unsigned char g_witness[INPUT_LEN] = {
     0x34, 0x12, 0xFF, 0x00, 0x34, 0x12, 0x00, 0x7A, 0x5E, 0xEA, 0x15, 0x0D, 0x00, 0x40, 0xAB, 0x0D,
     0xEF, 0xBE, 0x11, 0x0D, 0xF1, 0x6F, 0x2F, 0x45, 0x5B, 0x4A, 0x3C, 0x1B, 0x6A, 0x2F, 0x03, 0x80,
     0x46, 0x58, 0x54, 0x42, 0x4B, 0x21, 0x20, 0x3A,
+    0x11, 0xC6, 0xFA, 0x00,
 };
 
 /* Operand of each gate on the last fuzz_gates() call (SENTINEL when invalid). */
