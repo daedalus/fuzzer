@@ -5564,6 +5564,19 @@ def main() -> int:
         ),
     )
     fuzz_parser.add_argument(
+        "--cmplog",
+        dest="no_cmplog",
+        action="store_false",
+        default=argparse.SUPPRESS,
+        help=(
+            "Explicitly turn comparison tracing on. It already is by default, so alone this "
+            "changes nothing; it exists to override --no-cmplog (last one on the command line "
+            "wins) and the cmplog-off that --lightweight applies. Under --lightweight only the "
+            "collector is re-enabled: the LITE round still skips cmplog mining, so "
+            "redqueen/input-to-state mutation stays idle there."
+        ),
+    )
+    fuzz_parser.add_argument(
         "--cmplog-max-tokens",
         type=int,
         default=0,

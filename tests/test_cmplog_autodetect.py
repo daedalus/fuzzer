@@ -9,8 +9,9 @@ auto-detect.
 
 The constructor's `cmplog` parameter is now a boolean: `True` (default) means
 on-with-auto-detect, `False` means force off. The user-facing switch for
-`False` is `--no-cmplog` (a store_true opt-out; there is still no `--cmplog`
-flag). `--no-cmplog-fifo-sink` is separate: it controls the FIFO drain mode but
+`False` is `--no-cmplog` (a store_true opt-out). `--cmplog` is its explicit
+counterpart (store_false on the same dest): a no-op by default, it overrides
+`--no-cmplog` and `--lightweight`. `--no-cmplog-fifo-sink` is separate: it controls the FIFO drain mode but
 not whether cmplog runs.
 """
 
@@ -85,16 +86,20 @@ class TestWiring:
         sig = inspect.signature(fuzzer_mod.Fuzzer.__init__)
         assert sig.parameters["cmplog"].default is True
 
-    def test_no_cmplog_argparse_flag(self):
-        """There is no --cmplog flag; cmplog is on by default when the target
-        has instrumentation. Opt-outs: --no-cmplog (whole run) and
-        --no-cmplog-fifo-sink (FIFO drain mode only)."""
+    def test_cmplog_flag_is_explicit_counterpart_of_no_cmplog(self):
+        """--cmplog shares the no_cmplog dest as store_false and adds no default of
+        its own (SUPPRESS), so --no-cmplog stays the only source of the default."""
         import inspect
 
         from fuzzer_tool.cli import commands
 
         src = inspect.getsource(commands)
-        assert '"--cmplog"' not in src
+        idx = src.index('"--cmplog",')
+        decl = src[idx : idx + 200]
+        assert 'dest="no_cmplog"' in decl
+        assert 'action="store_false"' in decl
+        assert "argparse.SUPPRESS" in decl
+        assert src.index('"--no-cmplog",') < idx  # get_default() must see --no-cmplog first
 
     def test_cmplog_fifo_sink_is_boolean_optional(self):
         """--no-cmplog-fifo-sink is the opt-out for the FIFO drain mode."""

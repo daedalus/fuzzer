@@ -297,3 +297,49 @@ def test_lite_skips_icfg_build(tmp, mode, builds):
 
     assert build.call_count == builds
     assert f._katz_channel is None
+
+
+# ── --cmplog (explicit counterpart of --no-cmplog) ───────────────────
+
+
+def test_cmplog_flag_overrides_lightweight(monkeypatch):
+    """--lightweight turns cmplog off, but an explicit --cmplog keeps it on."""
+    args, _ = _cli(monkeypatch, "--lightweight", "--cmplog")
+
+    assert args.no_cmplog is False
+    assert args.no_markov is True  # the rest of the preset still applies
+
+
+def test_cmplog_flag_is_noop_by_default(monkeypatch):
+    """Control: --cmplog alone equals the default (cmplog on)."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(commands, "cmd_fuzz", lambda a: captured.setdefault("a", a) and 0)
+    monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", "--cmplog"])
+    commands.main()
+
+    assert captured["a"].no_cmplog is False
+
+
+@pytest.mark.parametrize(
+    ("flags", "expected_no_cmplog"),
+    [
+        (("--no-cmplog", "--cmplog"), False),
+        (("--cmplog", "--no-cmplog"), True),
+        (("--no-cmplog",), True),
+    ],
+)
+def test_cmplog_vs_no_cmplog_last_wins(monkeypatch, flags, expected_no_cmplog):
+    """Adversarial: both flags share one dest, so the last one given decides."""
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(commands, "cmd_fuzz", lambda a: captured.setdefault("a", a) and 0)
+    monkeypatch.setattr(sys, "argv", ["fuzzer-tool", "fuzz", "/bin/true", *flags])
+    commands.main()
+
+    assert captured["a"].no_cmplog is expected_no_cmplog
+
+
+def test_default_still_comes_from_no_cmplog(monkeypatch):
+    """--cmplog must not change the parser default of the shared dest."""
+    _, parser = _cli(monkeypatch, "--lightweight")
+
+    assert parser.get_default("no_cmplog") is False
