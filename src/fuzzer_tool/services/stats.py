@@ -405,11 +405,6 @@ def _fmt_ms(ms: float | None) -> str:
     return "-" if ms is None else f"{ms:.2f}ms"
 
 
-def _sub_ms(a: float | None, b: float | None) -> float | None:
-    """``a - b``, or None when either side has no samples."""
-    return None if a is None or b is None else a - b
-
-
 class StatsReporter:
     """Manages statistics collection and reporting.
 
@@ -1581,12 +1576,10 @@ class StatsReporter:
         timer = getattr(f, "_exec_timer", None)
         if not isinstance(timer, ExecTimer):
             return ""
-        tgt, cyc = timer.drain()
-        diff = _sub_ms(cyc, tgt)
+        tgt, cyc, diff = timer.drain()
 
-        # Lifetime, drained first: weighted per sample, no float re-rounding.
-        life_tgt, life_cyc = timer.lifetime()
-        avg_diff = _sub_ms(life_cyc, life_tgt)
+        # Lifetime, drained first: weighted per cycle, exact ns totals.
+        avg_diff = timer.lifetime()[2]
         return f" | tgt: {_fmt_ms(tgt)} cyc: {_fmt_ms(cyc)} diff: {_fmt_ms(diff)} avg_diff: {_fmt_ms(avg_diff)}"
 
     def _print_stats_perf_str(self, f) -> str:
