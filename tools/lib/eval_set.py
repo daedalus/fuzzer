@@ -177,6 +177,13 @@ FUZZGOAT_TARGETS: list[tuple[str, str]] = [
     ("/root/fuzzing/builds/fuzzgoat_read_noasan.so", "-D dictionaries/json.dict"),
 ]
 
+# fuzzgoat_katz: trace-pc fuzzgoat (tools/build_targets.sh --distance), the
+# build the Katz node channel needs; noasan for the reason above. Not
+# comparable with the fuzzgoat set (different instrumentation).
+FUZZGOAT_KATZ_TARGETS: list[tuple[str, str]] = [
+    ("/root/fuzzing/builds/fuzzgoat_read_dist.so", "-D dictionaries/json.dict"),
+]
+
 # ffmpeg: FFmpeg 9.0.2 clang build (tools/vendor_ffmpeg.sh --top=1, then
 # tools/build_targets.sh --ffmpeg-opts=noasan); noasan for the reason above.
 # Cells start from an empty corpus like every set. Not comparable with others.
@@ -191,6 +198,7 @@ TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "direct_lite_signal": DIRECT_LITE_SIGNAL_TARGETS,
     "container_signal": CONTAINER_SIGNAL_TARGETS,
     "fuzzgoat": FUZZGOAT_TARGETS,
+    "fuzzgoat_katz": FUZZGOAT_KATZ_TARGETS,
     "ffmpeg": FFMPEG_TARGETS,
 }
 
