@@ -16,16 +16,9 @@ import math
 import numpy as np
 import pytest
 
+from fuzzer_tool.core.rank_stats import rank_auc as auc
 from fuzzer_tool.core.schedulers.seed_entropy_kl import EntropyKLSeedStrategy
 from tests.test_regression_entropy_kl_length_bias import SEED, _draw, _null_corpus, _zipf
-
-
-def auc(scores, labels) -> float:
-    s, y = np.asarray(scores, dtype=np.float64), np.asarray(labels)
-    ranks = np.argsort(np.argsort(s)).astype(np.float64)
-    n1 = int(y.sum())
-    n0 = len(y) - n1
-    return float((ranks[y == 1].sum() - n1 * (n1 - 1) / 2) / (n1 * n0))
 
 
 def _mixed_corpus(trial: int):

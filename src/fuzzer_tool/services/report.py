@@ -2353,6 +2353,27 @@ def _strata_lines(f) -> list[str]:
     return lines
 
 
+def _score_auc_line(f, scores: dict[bytes, float]) -> str:
+    """AUC of a seed score vs "produced a lineage child"; "" when undefined.
+
+    0.5 is chance: the score does not rank productive seeds first. Older seeds
+    had more picks to produce a child, so age confounds it. Needs --lineage.
+    """
+    from fuzzer_tool.core.lineage import LineageTree
+    from fuzzer_tool.core.rank_stats import rank_auc
+
+    lineage = getattr(f, "_lineage", None)
+    if not isinstance(lineage, LineageTree):
+        return ""
+
+    seeds = [s for s in f.corpus if s in scores]
+    labels = [lineage.child_count(f._seed_key(s)) > 0 for s in seeds]
+    auc = rank_auc([scores[s] for s in seeds], labels)
+    if math.isnan(auc):
+        return ""
+    return f"    auc={auc:.2f} (score vs lineage child, n={len(seeds)})"
+
+
 def _entropy_seed_lines(f) -> list[str]:
     """Byte-entropy seed arm counters; empty when both arms are off."""
     from fuzzer_tool.core.schedulers.seed_entropy_deviation import EntropyDeviationSeedStrategy
@@ -2371,6 +2392,9 @@ def _entropy_seed_lines(f) -> list[str]:
             f"    scored={st['scored']} selected={st['selected']} "
             f"pooled={st['pooled']} mean_kl={st['mean_kl']:.3f} bits"
         )
+        auc_line = _score_auc_line(f, kl.cached_scores())
+        if auc_line:
+            lines.append(auc_line)
 
     z = getattr(f, "_entropy_zscore", None)
     if isinstance(z, EntropyZScoreSeedStrategy):

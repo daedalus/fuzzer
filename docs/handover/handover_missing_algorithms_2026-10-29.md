@@ -1,13 +1,13 @@
 # Handover: algorithms present in tests, missing from src
 
-Status: **PLAN ONLY — not implemented.** Source: 2026-10-29 audit of all
+Status: **P1 shipped (2026-10-29); P2-P4 plan only.** Source: 2026-10-29 audit of all
 1,149 test files (six parallel passes, claims re-checked against src).
 
 ## Verdicts
 
 | # | Algorithm | Test location | Verdict |
 |---|---|---|---|
-| 1 | ROC AUC (Mann-Whitney U) + shared tied ranks / Spearman | `test_entropy_kl_miller_madow.py:23`, `test_target_arena.py:232` | **Implement** (P1) |
+| 1 | ROC AUC (Mann-Whitney U) + shared tied ranks / Spearman | `test_entropy_kl_miller_madow.py:23` | **Shipped** (P1) |
 | 2 | Poisson / geometric samplers | `test_gravity.py:29`, `test_discovery_uniformity.py:27,161` | **Implement** (P2) |
 | 3 | Hadamard by Sylvester / Paley | `tools/lib/factorial_design.py` | **Implement** (P3) |
 | 4 | Permutation sign / cycle type | `test_swap_tuple.py:31`, `test_structured_mutations.py:326` | Implement only with P4's consumer |
@@ -21,54 +21,16 @@ Status: **PLAN ONLY — not implemented.** Source: 2026-10-29 audit of all
 
 ---
 
-## P1 — `core/rank_stats.py`: tied ranks, Spearman, AUC
+## P1 — `core/rank_stats.py` (shipped 2026-10-29)
 
-Three Spearman/rank copies exist (`edge_matrix.rank_corr`,
-`analyzer_coverage_regime._spearman_rank_correlation`, plus
-`tools/{frontier,edge_diagnostic,entropy_shapley_vs_loo}.py`), and the AUC
-that `seed_entropy_kl.py:45` quotes (0.73 -> 0.98) has no code. Hard Rule 1:
-one place.
-
-```python
-def tied_ranks(x: np.ndarray) -> np.ndarray:
-    """1-based ranks, ties averaged: [3, 1, 3] -> [2.5, 1, 2.5]."""
-    order = np.argsort(x, kind="stable")
-    ranks = np.empty(len(x))
-    ranks[order] = np.arange(1, len(x) + 1)
-    _, inv, counts = np.unique(x, return_inverse=True, return_counts=True)
-    sums = np.bincount(inv, weights=ranks)
-    return (sums / counts)[inv]
-
-
-def spearman(x, y) -> float:
-    """Pearson on tied ranks; nan when either side is constant."""
-
-
-def rank_auc(scores, labels) -> float:
-    """P(score_pos > score_neg) + 0.5 P(tie) = U / (n1 n0); nan if a class is empty."""
-    r = tied_ranks(np.asarray(scores, dtype=np.float64))
-    pos = np.asarray(labels, dtype=bool)
-    n1, n0 = int(pos.sum()), int((~pos).sum())
-    if not n1 or not n0:
-        return float("nan")
-    return (r[pos].sum() - n1 * (n1 + 1) / 2) / (n1 * n0)
-```
-
-**Wiring**
-- `edge_matrix.rank_corr` and `analyzer_coverage_regime._spearman_rank_correlation`
-  call `spearman` (keep their signatures; the latter keeps its p-value).
-- `tools/frontier.py`, `tools/edge_diagnostic.py`, `tools/entropy_shapley_vs_loo.py`
-  import `tied_ranks`/`spearman` instead of local copies.
-- Seed-score AUC in the report (`services/report.py`): per seed scheduler with
-  `scores()`, AUC of score vs label "seed has >= 1 lineage child"
-  (`LineageTree`). Report-only; no per-exec cost.
-- Tests: `test_entropy_kl_miller_madow.py` and `test_target_arena.py` import
-  `rank_auc`; new `tests/test_rank_stats.py`.
-
-**Tests:** oracle = all-pairs count over (pos, neg) with ties as 0.5 (control:
-oracle vs itself); falsification: perfect separation -> 1.0, reversed -> 0.0;
-adversarial: all ties -> 0.5, empty class -> nan, NaN scores rejected.
-Equivalence: the replaced Spearman copies give identical floats on seeded data.
+- `average_ranks`, `rank_corr` moved from `edge_matrix` (re-exported there); new `rank_auc`.
+- `tools/frontier.py`, `edge_diagnostic.py`, `entropy_shapley_vs_loo.py` use `rank_corr`.
+- Report: `auc=` under Entropy KL (`EntropyKLSeedStrategy.cached_scores()`,
+  `LineageTree.child_count`), end-of-run only.
+- Kept: `analyzer_coverage_regime._spearman_rank_correlation` — numpy is slower at
+  its n <= 100 (12.5x at n=3, 0.92x at 100). See DEEP_DIVE §Byte-entropy seed arms.
+- Dropped from the plan: `test_target_arena.py:_auc` is an `AuctionTarget` fixture,
+  not ROC AUC.
 
 ---
 
@@ -144,6 +106,6 @@ checks a permutation's sign. Sketch: `core/permutation.py`
 
 ## Order
 
-P1 (dedup + real consumer), then P3, then P2 once `_trickle` is decided.
+P3, then P2 once `_trickle` is decided.
 Each lands with TDD (test first, observe fail), lizard on new files,
 DEEP_DIVE entry, and a TODO close in the same commit.

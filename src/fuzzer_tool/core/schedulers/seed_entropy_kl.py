@@ -237,6 +237,14 @@ class EntropyKLSeedStrategy:
             self._refresh()
         return [self._kl.get(s, 0.0) for s in seeds]
 
+    def cached_scores(self) -> dict[bytes, float]:
+        """Copy of the scores from the last refresh; no sync, no refresh.
+
+        For read-only consumers (the report): :meth:`scores` re-syncs the
+        pool to the list it is given, so a partial list would evict seeds.
+        """
+        return dict(self._kl)
+
     def raw_scores(self, seeds: list[bytes]) -> list[float]:
         """Uncalibrated plug-in KL (biased upward for short seeds)."""
         self.scores(seeds)

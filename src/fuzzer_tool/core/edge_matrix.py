@@ -11,8 +11,8 @@ Design and evidence: ``docs/handover/handover_edge_id_axis_2026-09-18.md``, sect
   ``total`` (hit volume), ``degree`` (classes touched) and ``mass`` (``sum 1/owners``
   over those classes: incidence, never volume, because rho(owners, total) = +0.957 is
   exactly how the two were confused once, F6).
-* Rank helpers with no scipy (Hard Rule 51), including the partial rank correlation the
-  falsification monitor needs.
+* The partial rank correlation the falsification monitor needs, on the rank helpers in
+  ``core/rank_stats.py`` (no scipy, Hard Rule 51).
 
 Nothing here draws random numbers, and nothing here uses a statistic the handover
 excludes: no id-axis quantity (F3, F12), no low-rank seed score, no l2 mass, no GF(2)
@@ -30,6 +30,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+# Re-exported: seed_residual, tools/edge_matrix_modes and tests import them from here.
+from fuzzer_tool.core.rank_stats import average_ranks, rank_corr  # noqa: F401
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer, coverage_trust
 
 log = logging.getLogger(__name__)
@@ -48,23 +50,6 @@ FLAT_EDGE_GROWTH = 0.01
 #: (2^H falling while the edge count is flat) is the handover's; this scale is not
 #: calibrated, so consumers only widen exploration with it, never stop on it.
 SATURATION_SCALE = 0.25
-
-
-def average_ranks(values: np.ndarray) -> np.ndarray:
-    """0-based ranks with ties given their average rank."""
-    _uniq, inverse, counts = np.unique(values, return_inverse=True, return_counts=True)
-    first = np.cumsum(counts) - counts
-    return (first + (counts - 1) / 2.0)[inverse]
-
-
-def rank_corr(x: np.ndarray, y: np.ndarray) -> float:
-    """Spearman rho; 0.0 when either side is constant or there are under 3 points."""
-    if len(x) < 3 or len(x) != len(y):
-        return 0.0
-    rx, ry = average_ranks(np.asarray(x, float)), average_ranks(np.asarray(y, float))
-    rx, ry = rx - rx.mean(), ry - ry.mean()
-    den = math.sqrt(float((rx * rx).sum() * (ry * ry).sum()))
-    return float((rx * ry).sum() / den) if den > 0 else 0.0
 
 
 def partial_rank_corr(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> float:
