@@ -24,6 +24,7 @@ from fuzzer_tool.adapters.seed_zip import SeedTree
 from fuzzer_tool.core.bloom import BloomFilter
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.crash_metadata import CrashMetadata
+from fuzzer_tool.core.crash_symbols import sidecar_pcs
 from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.ltl import violation_signature
 from fuzzer_tool.core.sanitizer import SanitizerReport
@@ -1111,7 +1112,7 @@ def _signature(
 
 
 # Crash-site signature: page offsets (ASLR-stable) of the first frames.
-_SITE_FRAMES = 6
+_SITE_FRAMES = 3
 _PAGE_OFFSET_MASK = 0xFFF
 
 
@@ -1138,6 +1139,47 @@ def _crash_sig(
     return f"signal:{signal_number(returncode)}"
 
 
+def saved_crash_sigs(crashes_dir: Path) -> list[str]:
+    """Signatures of the crashes saved in *crashes_dir*, by the current rules.
+
+    Re-derived from each ``.json`` sidecar (stderr, return code, shim
+    record): ``crash_sigs`` restored from an older state may use another
+    format. Unreadable sidecars are logged and skipped.
+    """
+    if not crashes_dir.is_dir():
+        return []
+
+    out: list[str] = []
+    for path in sorted(crashes_dir.glob("crash_*.json")):
+        sig = _sidecar_sig(path)
+        if sig is not None and sig not in out:
+            out.append(sig)
+    return out
+
+
+def _sidecar_sig(path: Path) -> str | None:
+    """Signature of one ``.json`` sidecar; None when it cannot be read."""
+    try:
+        side = json.loads(path.read_text(errors="replace"))
+        stderr, rc = side["raw_stderr"], side.get("returncode")
+        shim = side.get("shim_symbol") or {}
+        fault = str(side.get("fault_addr") or "")
+        if not isinstance(stderr, str) or not isinstance(shim, dict):
+            raise TypeError("sidecar field types")
+        report = SanitizerReport.parse(stderr)
+        reported = report is not None and report.is_valid()
+        if not isinstance(rc, int) and not reported:
+            raise TypeError("no return code and no sanitizer report")
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+        log.warning("crash sidecar %s unreadable: %s", path.name, exc)
+        return None
+
+    # The report alone names a sanitizer crash; rc only shapes signal sigs.
+    rc = rc if isinstance(rc, int) else 0
+    fault_addr = int(fault, 16) if fault.startswith("0x") else None
+    return _signature(stderr, report, rc, fault_addr, sidecar_pcs(shim))
+
+
 # Unsymbolized sanitizer frame, e.g. "target+0x11d6" (core/sanitizer.py).
 _UNSYMBOLIZED_MARK = "+0x"
 
@@ -1154,7 +1196,30 @@ def _fuzzy_sig_match(sig: str, crash_sigs: dict[str, int]) -> str | None:
             continue
         if crash_signature_similarity(sig, existing_sig) >= 0.8:
             return existing_sig
+        if _one_frame_apart(sig.split("@")[1:], existing_sig.split("@")[1:]):
+            return existing_sig
     return None
+
+
+def _one_frame_apart(a: list[str], b: list[str]) -> bool:
+    """One stack is the other plus one (inlined) frame, up to truncation.
+
+    ``[parse, parse_inl, read]`` vs ``[parse, read, decode]``: dropping
+    ``parse_inl`` leaves a prefix of the other. Short signatures (3 frames)
+    fall below the Levenshtein threshold for this.
+    """
+    if not a or not b or a[0] != b[0]:
+        return False
+
+    for longer, shorter in ((a, b), (b, a)):
+        # The dropped frame lies inside the shorter span and keeps a caller:
+        # neither a prefix nor a different last frame counts.
+        for i in range(1, min(len(longer) - 1, len(shorter))):
+            rest = longer[:i] + longer[i + 1 :]
+            n = min(len(rest), len(shorter))
+            if rest[:n] == shorter[:n]:
+                return True
+    return False
 
 
 def save_crash(

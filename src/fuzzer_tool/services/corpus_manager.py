@@ -30,6 +30,7 @@ from fuzzer_tool.adapters.filesystem import (
     save_irreplaceable,
     save_timeout_seed,
     save_to_corpus,
+    saved_crash_sigs,
 )
 from fuzzer_tool.core.byte_entropy import CumulativeByteEntropy
 from fuzzer_tool.core.clock import clock_of
@@ -666,6 +667,13 @@ class CorpusManager:
             store.set("regime", f._regime.save())
         store.save()
 
+    def resync_crash_sigs(self) -> None:
+        """Add saved crashes' signatures as the current parser derives them,
+        so a format change does not re-save every known bug once."""
+        f = self.f
+        for sig in saved_crash_sigs(Path(f.crashes_dir)):
+            f.crash_sigs.setdefault(sig, 1)
+
     def load_state(self):
         f = self.f
         saved_contract = f._state_store.get("coverage_contract")
@@ -691,6 +699,7 @@ class CorpusManager:
         f.crash_count = state.get("crash_count", 0)
         f.timeout_count = state.get("timeout_count", 0)
         f.crash_sigs = state.get("crash_sigs", {})
+        self.resync_crash_sigs()
         f.crash_frames = state.get("crash_frames", {})
         # Keyed by signature; states before that keyed it by stack hash.
         min_sizes = state.get("crash_min_sizes", {})
