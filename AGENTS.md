@@ -90,6 +90,7 @@ fuzzer, not just the target.
     - **Fors down:** give functions the whole batch (`randbytes(n)`, `randint_list`, `translate`, numpy) instead of calling them per item, and hoist loop-invariant checks out of loops.
     - **Measure:** benchmark before and after. Keep the change only if it is faster; if it isn't, record why (see `docs/DEEP_DIVE.md` §Push ifs up, fors down).
     - **Cache safely:** a cache of state that can change must be revalidated cheaply or reset at a known boundary, for example `mutate()` clearing `_meta_strategy_cached`.
+58. **Optimization bar: > 7.5% on the function.** Ship a behavior-preserving speedup when it beats the current code by more than 7.5% on the function it changes, at realistic input sizes (interleaved min-of-N, not single shots). At or below 7.5%, or above it at some sizes and below at others, don't ship; record the numbers in the handover or `docs/DEEP_DIVE.md`.
 
 ## Corpus Rules
 

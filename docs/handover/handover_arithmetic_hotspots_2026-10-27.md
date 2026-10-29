@@ -307,3 +307,52 @@ corpus.
   there.
 - `pip install -e .` and `pip install pytest ruff py-spy
   --break-system-packages` were needed in a fresh container.
+
+### 7.7 Update 2026-10-29: cmplog parse path (7.5 lead)
+
+Drains are capped at `CMPLOG_MAX_LINES_PER_READ` (10k lines) and run every
+1/5/20 iterations by pool size (`fuzz_round._collect_due`). Synthetic drains,
+interleaved min-of-N, this host. Warm `_parse_lines` share at 10k lines /
+9k distinct: cond parse 41%, `_ingest_conds` 14%, `_evict_pairs` 13%,
+operand parse 10%.
+
+Shipped: `cond_tuples_from_cmplog_text` splits `"CMP "` lines once, no
+`strip`; stripped-line set dropped (the key set dedupes). Regression test
+`tests/test_regression_cmp_parse_fastpath.py` (pre-change oracle, Rule 46
+control, adversarial whitespace; a naive `parts[0] == "CMP"` variant fails 3/4).
+
+| Distinct lines | Parse before / after (ms) | Warm drain before / after (ms) |
+|---:|---:|---:|
+| 300 | 0.173 / 0.140 | 0.356 / 0.322 |
+| 2470 | 1.559 / 1.206 | 3.553 / 3.188 |
+| 3911 | 2.701 / 2.039 | 6.589 / 5.751 |
+
+Not shipped:
+- `_ingest_conds` with `itemgetter` + `dict.fromkeys` bulk updates: 5-13%
+  slower (the per-pair loop still runs for new-pair detection).
+- Cross-drain line→tuple cache: would remove most of the parse on repeat
+  lines, but needs a memory bound and eviction for ≤1 ms per drain at the
+  saturated 1/20 cadence. Not built.
+
+### 7.8 Update 2026-10-29: 7.5% bar
+
+Bar set by the user: a gain > 7.5% on the function is worth shipping.
+Re-measured at 10k-line drains (interleaved min-of-N):
+
+| Change | Gain | Shipped |
+|---|---:|---|
+| `detect_hash_candidates`: zero bytes of `int(a) ^ int(b)` | 62% | yes |
+| pending-redqueen prune: `filter(set.__contains__)` | 47% | yes |
+| `_eviction_victims`: `islice` over zero-credit generator | 14-20% | yes |
+| `_evict_pairs`: `difference_update` + bound `pop` per map | 16% | yes (and `_evict_tokens`) |
+| occurrence count: bound locals | 12% | yes |
+| `pairs_from_operand_records` split once | 5-9% | no: under the bar at 3000+ distinct |
+
+Warm `_parse_lines`, master vs branch, best of 3 process pairs:
+0.449 → 0.416 ms (300 distinct), 3.494 → 2.984 (3000), 6.401 → 5.159 (9000).
+
+Tests: `tests/test_regression_cmplog_drain_loops.py` (pre-change hash oracle,
+Rule 46 control, leading-zero / 2-vs-3-match cut, eviction state under 3x
+cap churn). A variant that skips re-padding in `to_bytes` fails 2/4.
+`_eviction_victims` stays covered by `tests/test_cmplog_eviction_victims.py`
+(full-sort oracle, 3000 random pools).

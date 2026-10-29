@@ -217,28 +217,28 @@ def cond_tuples_from_cmplog_text(lines: Iterable[str]) -> list[tuple]:
     line: a drain ingests ~10k of them and reads only these five fields.
     """
     out: list[tuple] = []
-    # Content keys: every repeat (~200k lines per ffmpeg drain) adds nothing
-    # downstream; first occurrence keeps order.
-    seen_lines: set[str] = set()
+    # Content keys: the key set alone dedupes; a stripped-line set only
+    # duplicated it (_parse_lines already drops raw repeats).
     seen: set[tuple] = set()
     for line in lines:
-        line = line.strip()
-        if line in seen_lines:
-            continue
-
-        seen_lines.add(line)
+        # Shim lines start with "CMP ": skip strip, split once.
+        # Only other lines pay for strip ("  CMP ..." still parses).
         if not line.startswith("CMP "):
-            continue
-        parts = line[4:].split()
-        if len(parts) < 2:
+            line = line.strip()
+            if not line.startswith("CMP "):
+                continue
+
+        parts = line.split()
+        n = len(parts)
+        if n < 3:
             continue
         try:
-            op_a = bytes.fromhex(parts[0])
-            op_b = bytes.fromhex(parts[1])
-            result = int(parts[2]) if len(parts) > 2 else None
-            width = int(parts[3]) if len(parts) > 3 else None
-            pc = int(parts[4], 16) if len(parts) > 4 else None
-        except (ValueError, IndexError):
+            op_a = bytes.fromhex(parts[1])
+            op_b = bytes.fromhex(parts[2])
+            result = int(parts[3]) if n > 3 else None
+            width = int(parts[4]) if n > 4 else None
+            pc = int(parts[5], 16) if n > 5 else None
+        except ValueError:
             continue
         if not op_a and not op_b:
             continue
