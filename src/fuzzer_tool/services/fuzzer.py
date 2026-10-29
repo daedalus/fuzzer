@@ -2063,6 +2063,9 @@ class Fuzzer:
         input_placement=InputPlacement.EXACT,
         # 'branch' seed arm over the Katz channel's ICFG (--seed-branch-scheduler). Appended.
         seed_branch_scheduler=False,
+        # Viterbi field segmentation (core/field_hmm.py, --field-hmm). Appended.
+        field_hmm=False,
+        field_hmm_states=8,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3049,6 +3052,8 @@ class Fuzzer:
         # sensitivity.json — it crashed with AttributeError otherwise.
         self._use_sensitivity = sensitivity or byte_interaction
         self._use_byte_interaction = byte_interaction
+        self._use_field_hmm = field_hmm
+        self._field_hmm_states = field_hmm_states
         self._stage = SeedStage(stage_execs)
         from fuzzer_tool.core.analyzer_registry import REGISTRY as _ANALYZER_REGISTRY
 
@@ -10505,6 +10510,8 @@ class Fuzzer:
         self._dump_coverage_report()
         if self.markov.is_trained():
             self._state_store.set("markov", self.markov.to_dict())
+        if self._field_hmm is not None:
+            self._state_store.set("field_hmm", self._field_hmm.to_state())
         if self._use_mi and self._mi:
             self._state_store.set("mi", self._mi.to_dict())
         self._state_store.set("crash_mi", self._crash_mi.save())

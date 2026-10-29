@@ -18,7 +18,7 @@ from fuzzer_tool.services.operators import OperatorEngine
 SEED = 1234
 DRAWS = 64
 BUF_LEN = 512
-GATES = ("te", "mi", "sens", "crash", "field")
+GATES = ("te", "mi", "sens", "crash", "field", "hmm")
 
 
 class _Proposer:
@@ -54,6 +54,9 @@ class _Fuzzer:
         self._format_learner = _Proposer(self._rng, 5) if "field" in enabled else None
         if self._format_learner:
             self._format_learner.weighted_position = lambda _d, n: self._format_learner.pick(n)
+        self._field_hmm = _Proposer(self._rng, 6) if "hmm" in enabled else None
+        if self._field_hmm:
+            self._field_hmm.propose = lambda _d, n: self._field_hmm.pick(n)
         self._mi.weighted_position = self._mi.pick
         self._sensitivity.get_weighted_position = lambda _d, n: self._sensitivity.pick(n)
 
@@ -111,3 +114,23 @@ def test_plan_ignores_gate_flipped_after_build():
     got = eng._plan_position(plan, buf, bytes(buf))
     assert got == _old({"mi"})[0]
     assert eng._pos_plan() == ()
+
+
+@pytest.mark.parametrize("path", ["select_position", "plan"])
+def test_field_hmm_proposer_is_a_candidate(path):
+    """--field-hmm span starts reach the candidate pool on both paths."""
+    f = _Fuzzer({"hmm"})
+    proposed = []
+    pick = f._field_hmm.propose
+    f._field_hmm.propose = lambda d, n: proposed.append(pick(d, n)) or proposed[-1]
+    eng = OperatorEngine(f)
+    buf = bytearray(BUF_LEN)
+
+    if path == "plan":
+        plan = eng._pos_plan()
+        got = [eng._plan_position(plan, buf, bytes(buf)) for _ in range(DRAWS)]
+    else:
+        got = [eng.select_position(buf, bytes(buf)) for _ in range(DRAWS)]
+
+    # Sole candidate: rng.choice over one element returns it.
+    assert got == proposed

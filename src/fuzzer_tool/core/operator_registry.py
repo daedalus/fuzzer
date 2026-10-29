@@ -352,6 +352,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "prng_predict",
         "saliency_ladder",
         "coupled_pair",
+        "hmm_segment",
     },
 }
 
@@ -914,6 +915,10 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     # Second-order coupled bytes: needs --byte-interaction pairs for this parent.
     "coupled_pair": lambda f, d: bool(
         getattr(f, "_byte_interaction", None) is not None and f._byte_interaction.has_data(d)
+    ),
+    # Viterbi fields: needs --field-hmm and at least two spans in this parent.
+    "hmm_segment": lambda f, d: bool(
+        getattr(f, "_field_hmm", None) is not None and f._field_hmm.has_spans(d)
     ),
     # flag-gated base op
     "regex_bomb": lambda f, _d: bool(getattr(f, "enable_regex_bomb", False)),

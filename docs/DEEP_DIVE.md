@@ -2217,6 +2217,28 @@ _op_coupled_pair     → pick pair → add 1..255 to both bytes
   - `--byte-interaction` vs `--sensitivity`: 2/4 wins, median Δ −1348 (p=1.0). Pairs found on every analyzed seed (8–19). Seed 4 ran 5.7k execs at 9 eps: one bad run dominates.
   - 3 concurrent runs OOM'd the 16 GB cgroup (5–7 GB RSS each); one hung in native code and ignored SIGINT.
 
+### Viterbi field segmentation (2026-10-29)
+
+`--field-hmm [--field-hmm-states K]` (`core/field_hmm.py`, `core/analyzers/analyzer_field_hmm.py`). A K-state byte HMM (default 8; first-order transitions, 256-way emissions) labels each byte with a hidden state by Viterbi; a run of one state is a span. Works without cmplog or format knowledge.
+
+```
+activate ─► saved model (state.pkl.gz "field_hmm") or fit on corpus
+admit ────► every 64 admits: refit on newest 256 seeds, rename, drop caches
+seed ─────► Viterbi spans (first 4096 bytes), FIFO cache 512 seeds
+            ├─► hmm_segment op: havoc | splice same-state donor | dup | delete one span
+            └─► position slot: a span start
+```
+
+- Training: hard EM (decode, recount, renormalise; pseudo-counts 1.0 transition, 0.1 emission) on the first 512 bytes per seed. The MAP objective never decreases. No RNG: the first path bands byte values into K states.
+- States are anonymous. Byte values separate zero / ASCII / high-entropy runs, not a length field from payload. A state takes a `FieldKind` (MAGIC/LENGTH/CHECKSUM) only by majority vote of `--weizz-tags` labels (≥ 8 votes, strict majority).
+- Spans are recomputed after a refit or resume, not persisted per seed: they are a pure function of (model, seed).
+- `hmm_segment` (adaptive band) is offered when the parent has ≥ 2 spans; declines once an earlier op resized the buffer, or on splice without a donor (64 kept per state). In `_DELOCALISED_OPS`.
+- Decode speed (n=4096, min of 5): K ≤ 4 pure Python (5.5 ms at K=4; numpy 16.7 ms), K > 4 numpy over states (15.7 ms at K=8; Python 17.9 ms). Picked once per model. Training is batched over seeds: 256 × 512 bytes, K=8, 115 ms per fit.
+- Measured 2026-10-29; not in `--hail-mary`.
+  - fuzzgoat (clang noasan, 20 seeds x 10k, `tools/benchmark.py paired`): edges W9 L11, McNemar p=0.82, median Δ −21.5; A/A control W9 L11 p=0.82 (clean). Throughput 753 vs 845 eps median.
+  - PNG kill criterion (handover §7), truth = `core/field_map.py` exact boundaries, 104 generated PNGs, null = same cut count at random offsets (2000 draws; random-vs-null control rejects 3.5-7.5%). Micro-F1 exact: K=4 0.026 vs 0.025 (p=0.027), K=8 0.028 vs 0.026 (p=0.0005), K=16 0.028 vs 0.028 (p=0.51); at ±1 byte worse than random for every K.
+  - Cause: ~700 spans per seed vs ~17 true cuts. High-entropy IDAT flips states every few bytes, so `hmm_segment` acts like byte havoc. Criterion met: drop, or retry with sticky transitions / a minimum span length.
+
 ### Swap walk, pooled colorization, screening (2026-09-30)
 
 - `--swap-walk`: m>2 byte swaps (`_op_swap_bytes`) draw from `TupleWalk` (`core/tuple_walk.py`): affine walk `(start + step*k) mod total` over all ordered tuples, each visited once per period, O(1) state per (n, m), 256 shapes max. Off by default; yield unmeasured.

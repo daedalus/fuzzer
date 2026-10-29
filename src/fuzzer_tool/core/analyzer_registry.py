@@ -415,6 +415,34 @@ REGISTRY.register(
 )
 
 
+def _activate_field_hmm(f: FuzzerLike) -> None:
+    from fuzzer_tool.core.analyzers.analyzer_field_hmm import FieldHmmAnalyzer
+
+    # Saved model first; a missing or different-K one is refit on the corpus.
+    f._field_hmm = FieldHmmAnalyzer(n_states=f._field_hmm_states, rng=f._rng)
+    saved = f._state_store.get("field_hmm")
+    if saved is not None and f._field_hmm.load_state(saved):
+        return
+    if saved is not None:
+        log.warning("field_hmm: saved model does not fit %d states; refitting", f._field_hmm_states)
+    f._field_hmm.fit_corpus(f.corpus, f.seed_meta)
+
+
+def _deactivate_field_hmm(f: FuzzerLike) -> None:
+    f._field_hmm = None
+
+
+REGISTRY.register(
+    AnalyzerSpec(
+        name="field_hmm",
+        category="mutation_feedback",
+        activate=_activate_field_hmm,
+        available=lambda f: bool(getattr(f, "_use_field_hmm", False)),
+        deactivate=_deactivate_field_hmm,
+    )
+)
+
+
 def _activate_execution_time(f: FuzzerLike) -> None:
     from fuzzer_tool.core.analyzers.analyzer_execution_time import ExecutionTimeTracker
 

@@ -762,6 +762,7 @@ class TestStateGatedOperatorsAreNotNoOps:
         self._gate_prng(f)
         self._gate_saliency(f)
         self._gate_interaction(f)
+        self._gate_field_hmm(f)
 
         self._gate_weizz(f)
         self._gate_lineage(f)
@@ -958,6 +959,18 @@ class TestStateGatedOperatorsAreNotNoOps:
             tracker.analyze_seed(inp, {1}, run, [0.5, 0.5])
             assert tracker.has_data(inp), "fixture failed to find the coupled pair"
         f._byte_interaction = tracker
+
+    @staticmethod
+    def _gate_field_hmm(f: Fuzzer) -> None:
+        """Fit a real --field-hmm model on the corpus + battery (hmm_segment gate)."""
+        from fuzzer_tool.core.analyzers.analyzer_field_hmm import FieldHmmAnalyzer
+        from fuzzer_tool.core.rand_pool import RandPool
+
+        seeds = [bytes(c) for c in f.corpus] + _battery()
+        hmm = FieldHmmAnalyzer(n_states=8, rng=RandPool(seed=13))
+        hmm.fit_corpus(seeds, {})
+        assert any(hmm.has_spans(s) for s in seeds), "fixture found no multi-span seed"
+        f._field_hmm = hmm
 
     @staticmethod
     def _gate_lineage(f: Fuzzer) -> None:

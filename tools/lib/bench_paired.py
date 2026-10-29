@@ -285,6 +285,10 @@ ARMS: dict[str, list[str]] = {
         "--seed-lottery-transfer",
         "0.5",
     ],
+    # Viterbi field spans (core/field_hmm.py): hmm_segment op + span-start positions.
+    "field-hmm": ["--field-hmm"],
+    # A/A control (Rule 46): baseline again, must not reject.
+    "field-hmm-ctl": [],
 }
 
 STRATA_ARMS = (
@@ -368,6 +372,8 @@ ARM_BASELINES: dict[str, str] = {
     "seed-lottery-currency": "seed-lottery",
     "seed-lottery-lineage": "seed-lottery",
     "seed-lottery-transfer": "seed-lottery-lineage",
+    "field-hmm": "baseline",
+    "field-hmm-ctl": "baseline",
 }
 
 # Arms that are compile-time rather than flag-driven still belong here, as
