@@ -169,6 +169,10 @@ ARMS: dict[str, list[str]] = {
     # (the E3 question) with `analyse --baseline elo-mcts`.
     "elo-lineage": ["--elo", "--mc-bandit", "--lineage"],
     "elo-mcts": ["--elo", "--mc-bandit", "--lineage", "--mcts"],
+    # Line-graph 'branch' seed arm; needs --set fuzzgoat_katz (trace-pc), where
+    # Katz is on in both. ctl is elo again: the A/A control (Rule 46).
+    "seed-branch": ["--elo", "--mc-bandit", "--seed-branch-scheduler"],
+    "seed-branch-ctl": ["--elo", "--mc-bandit"],
     "elo-alphabeta": ["--elo", "--mc-bandit", "--lineage", "--alphabeta"],
     # bootstrap runs only inside corpus minimization, and the recorded `edges`
     # is the tracker's cumulative count, which minimization does not shrink.
@@ -331,6 +335,8 @@ ARM_BASELINES: dict[str, str] = {
     "pos-fibonacci": "baseline",
     **{arm: "baseline" for arm in GROWING_TREE_ARMS},
     "seed-dpp": "baseline",
+    "seed-branch": "elo",
+    "seed-branch-ctl": "elo",
     "elo-good-turing-seed": "elo",
     "elo-op-good-turing": "elo",
     **{arm: "elo" for arm in REACTIVE_ARMS},

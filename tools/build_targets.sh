@@ -2381,13 +2381,29 @@ build_distance_so_targets() {
             clang $extra_flags $DEBUG_CFLAGS $FRAME_POINTER -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc \
                 $cmplog_cflags -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" \
                 -o "$TARGETS/${name}${out_suffix}.so" "${TARGETS_SRC:-$TARGETS}/$name.c" \
-                $libs $cmplog_libs 2>/dev/null
+                $libs $cmplog_libs 2>/dev/null || true  # missing lib: warned below, not fatal
             if [ -f "$TARGETS/${name}${out_suffix}.so" ]; then
                 ok "${name}${out_suffix}.so ($label)"
             else
                 warn "failed: ${name}${out_suffix}.so ($label)"
             fi
         done
+
+        # fuzzgoat: the library object gets trace-pc too (no shim), or the
+        # K-Scheduler node table covers only the wrapper.
+        [ "$HAS_FUZZGOAT" -eq 1 ] || continue
+        local fg_obj="/tmp/fuzzgoat${out_suffix}.o"
+        clang ${extra_flags/-lasan/} $DEBUG_CFLAGS $FRAME_POINTER -fsanitize-coverage=trace-pc -fPIC \
+            -I"$VENDOR/fuzzgoat" -c "$VENDOR/fuzzgoat/fuzzgoat.c" -o "$fg_obj" 2>>"$BUILD_LOG" || true
+        clang $extra_flags $DEBUG_CFLAGS $FRAME_POINTER -D__AFL_DISTANCE_MODE -fsanitize-coverage=trace-pc \
+            -shared -fPIC -Wl,-Bsymbolic -include "$SHIM" -I"$VENDOR/fuzzgoat" \
+            -o "$TARGETS/fuzzgoat_read${out_suffix}.so" "${TARGETS_SRC:-$TARGETS}/fuzzgoat_read.c" \
+            "$fg_obj" -lm 2>>"$BUILD_LOG" || true
+        if [ -f "$TARGETS/fuzzgoat_read${out_suffix}.so" ]; then
+            ok "fuzzgoat_read${out_suffix}.so ($label)"
+        else
+            warn "failed: fuzzgoat_read${out_suffix}.so ($label)"
+        fi
     done
 }
 
