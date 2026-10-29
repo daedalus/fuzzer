@@ -35,6 +35,7 @@ from fuzzer_tool.core.crc32 import crc32
 from fuzzer_tool.core.gaussian import norm_cdf
 from fuzzer_tool.core.gravity import DONOR_CANDIDATES, pair_terms, pick_index
 from fuzzer_tool.core.hashing import hash64, hash64_len
+from fuzzer_tool.core.interval_coloring import color_classes
 from fuzzer_tool.core.live_bit_mask import LiveBitMaskEstimator
 from fuzzer_tool.core.lru import LRUCache
 from fuzzer_tool.core.mutations import (
@@ -232,6 +233,7 @@ _DELOCALISED_OPS = frozenset(
         "grimoire_recurse",
         "grimoire_string",
         "ltl_prefix",
+        "redqueen_batch",
         "tail_append",
         "token_shuffle",
     }
@@ -243,6 +245,9 @@ _DELOCALISED_OPS = frozenset(
 # structural validity and is correct to be a no-op on an already-valid
 # input, which its own docstring states.
 _DECLINE_EXEMPT = frozenset({"havoc", "field_repair"})
+
+# Seeds whose redqueen_batch color classes stay cached.
+_RQ_BATCH_SEEDS = 256
 
 # Records per region when the parent seed carries no inferred `record_stride`.
 _REGION_SHUFFLE_RECORDS = 8
@@ -1263,6 +1268,27 @@ def _rq_replay_matches(buf, matches, rng) -> None:
             _rq_overwrite(buf, off, op_b)
 
 
+def _rq_batch_classes(matches) -> list[list[int]]:
+    """Match indices grouped so spans in a group never overlap.
+
+    A span covers op_b too: a longer replacement writes past op_a.
+
+        (0,AAAA) (2,AABB) (8,CCCC)  ->  [[0, 2], [1]]
+    """
+    starts = [m[0] for m in matches]
+    ends = [off + max(len(a), len(b), 1) for off, a, b in matches]
+    return color_classes(starts, ends)
+
+
+def _rq_replay_batch(buf, matches, classes, rng) -> None:
+    """_op_redqueen_batch: replay one class of pairwise disjoint matches."""
+    for i in rng.choice(classes):
+        off, op_a, op_b = matches[i]
+        end = off + len(op_a)
+        if end <= len(buf) and bytes(buf[off:end]) == op_a:
+            _rq_overwrite(buf, off, op_b)
+
+
 def _rq_splice_tokens(buf, offsets, tokens, rng) -> None:
     """_op_redqueen: write a random cmplog token at a recorded offset."""
     for _ in range(rng.randint(1, min(4, len(offsets)))):
@@ -1544,6 +1570,8 @@ class OperatorEngine:
         # LIVE offsets of drained effector maps, kept for the position arena
         # (see effector_live). ~2k offsets per seed at MAX_DET_MUTATIONS.
         self._det_live: LRUCache = LRUCache(MAX_EFF_SEEDS)
+        # redqueen_batch color classes per seed match list (see _rq_classes).
+        self._rq_batches: LRUCache = LRUCache(_RQ_BATCH_SEEDS)
         # Same seeds, with the per-byte flip magnitudes: (offsets, magnitudes)
         # of the bytes that moved the trace, for the position arena's Finch arm.
         self._det_heat: LRUCache = LRUCache(MAX_EFF_SEEDS)
@@ -5209,6 +5237,25 @@ class OperatorEngine:
                 off = rng.choice(offsets)
                 if off < len(buf):
                     buf[off] ^= 0xFF
+
+    def _op_redqueen_batch(self, buf, _byte_idx, data):
+        parent_meta = self.ctx.seed_meta.get(data)
+        matches = parent_meta.get("redqueen_matches") if parent_meta else None
+        if buf and matches:
+            _rq_replay_batch(buf, matches, self._rq_classes(matches), self.ctx._rng)
+
+    def _rq_classes(self, matches) -> list[list[int]]:
+        """``_rq_batch_classes``, cached per match list (~40 us at 50 matches).
+
+        Redqueen only appends to a seed's list, so its length revalidates
+        the entry; the entry holds the list, so its id is not reused.
+        """
+        hit = self._rq_batches.get(id(matches))
+        if hit is not None and hit[0] is matches and hit[1] == len(matches):
+            return hit[2]
+        classes = _rq_batch_classes(matches)
+        self._rq_batches[id(matches)] = (matches, len(matches), classes)
+        return classes
 
     # ── Regularity operators (diehard/dieharder inverses) ──────────────
     # Each one delegates to a length-preserving construction in

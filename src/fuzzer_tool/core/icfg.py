@@ -29,7 +29,7 @@ import numpy as np
 from fuzzer_tool.core.analyzers.analyzer_distance import _CALL_RE, CfgPool
 from fuzzer_tool.core.centrality import betweenness_centrality, closeness_centrality
 from fuzzer_tool.core.cfg import FunctionCFG
-from fuzzer_tool.core.mincut import min_cut
+from fuzzer_tool.core.mincut import min_cut, min_vertex_cut
 from fuzzer_tool.core.np_sets import sorted_isin, sorted_unique
 
 log = logging.getLogger(__name__)
@@ -138,6 +138,21 @@ class InterproceduralCFG:
         _, cut = min_cut(self.n_nodes, edges, sources, sinks)
         return {(self.node_addrs[u], self.node_addrs[v]) for u, v in cut}
 
+    def bottleneck_blocks(self, hit_addrs: set[int], target_addrs: set[int]) -> set[int]:
+        """Fewest blocks separating *hit_addrs* from *target_addrs* (vertex Menger).
+
+        Same address handling as ``bottleneck_edges``. Empty when a hit block
+        has an edge straight into a target: no block between them to cut.
+        """
+        sources = {i for a in hit_addrs if (i := self._node_at(a)) is not None}
+        sinks = {i for a in target_addrs if (i := self._node_at(a)) is not None}
+        sources -= sinks
+        if not sources or not sinks:
+            return set()
+        edges = list(zip(self.src.tolist(), self.dst.tolist(), strict=True))
+        _, cut = min_vertex_cut(self.n_nodes, edges, sources, sinks)
+        return {self.node_addrs[v] for v in cut}
+
     def centrality_scores(self, normalized: bool = True) -> dict[int, float]:
         """Betweenness centrality of every block, keyed by start address.
 
@@ -161,6 +176,55 @@ class InterproceduralCFG:
         edges = list(zip(self.src.tolist(), self.dst.tolist(), strict=True))
         scores = closeness_centrality(self.n_nodes, edges)
         return {self.node_addrs[i]: s for i, s in enumerate(scores)}
+
+    def line_graph(self):
+        """Implicit line graph over every edge (``core/line_graph.py``), cached."""
+        # Lazy: line_graph -> horizon -> icfg.
+        from fuzzer_tool.core.line_graph import LineGraph
+
+        if getattr(self, "_line_graph", None) is None:
+            self._line_graph = LineGraph(self.n_nodes, self.src, self.dst)
+        return self._line_graph
+
+    def edge_pair_space(self) -> int:
+        """Edge pairs a path can take: the ``__AFL_NGRAM_K=3`` coverage ceiling."""
+        return self.line_graph().n_arcs
+
+    def _edge_ids(self, pairs: set[tuple[int, int]]) -> np.ndarray:
+        """Edge ids whose (src, dst) block addresses are in *pairs*; unknown ignored."""
+        keys = [
+            (u << _KEY_SHIFT) | v
+            for a, b in pairs
+            if (u := self._node_at(a)) is not None and (v := self._node_at(b)) is not None
+        ]
+        packed = (self.src << _KEY_SHIFT) | self.dst
+        return np.flatnonzero(np.isin(packed, np.array(keys, dtype=np.int64)))
+
+    def _addr_pair(self, e: int) -> tuple[int, int]:
+        return self.node_addrs[int(self.src[e])], self.node_addrs[int(self.dst[e])]
+
+    def edge_distances(self, target_edges: set[tuple[int, int]]) -> dict[tuple[int, int], int]:
+        """Line-graph hops from each edge to the nearest target branch.
+
+        Keys and *target_edges* are (src, dst) block addresses; edges that
+        cannot reach a target are omitted. Targets are branches, not blocks:
+        an edge into the target's head by another branch does not count.
+        """
+        dist = self.line_graph().distances(self._edge_ids(target_edges))
+        return {self._addr_pair(e): int(dist[e]) for e in np.flatnonzero(dist >= 0)}
+
+    def frontier_edges(
+        self, hit_addrs: set[int], target_edges: set[tuple[int, int]]
+    ) -> list[tuple[tuple[int, int], int]]:
+        """Edges from hit to unhit blocks, nearest to a target branch first.
+
+        Distance ``line_graph.UNREACHED`` (-1) sorts last.
+        """
+        visited = np.zeros(self.n_nodes, dtype=bool)
+        hit = [i for a in hit_addrs if (i := self._node_at(a)) is not None]
+        visited[hit] = True
+        edges, dist = self.line_graph().frontier(visited, self._edge_ids(target_edges))
+        return [(self._addr_pair(e), d) for e, d in zip(edges.tolist(), dist.tolist(), strict=True)]
 
 
 def _decode_all_cfgs(td) -> dict[str, FunctionCFG]:

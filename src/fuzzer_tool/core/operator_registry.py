@@ -339,6 +339,7 @@ _CATEGORIES: dict[str, set[str]] = {
         "path_negate",
         "length_offset_goal",
         "redqueen",
+        "redqueen_batch",
         "havoc",
         "overwrite_copy",
         "overwrite_fixed",
@@ -380,6 +381,13 @@ def _redqueen_available(fuzzer, data) -> bool:
     return bool(
         parent_meta and (parent_meta.get("redqueen_matches") or parent_meta.get("redqueen_offsets"))
     )
+
+
+def _has_redqueen_matches(fuzzer, data) -> bool:
+    """redqueen_batch colors match spans; bare offsets have none."""
+    seed_meta = getattr(fuzzer, "seed_meta", None)
+    parent_meta = seed_meta.get(data) if hasattr(seed_meta, "get") else None
+    return bool(parent_meta and parent_meta.get("redqueen_matches"))
 
 
 # corpus_invariants() defaults to this many samples before it will call an
@@ -880,6 +888,7 @@ _AVAILABLE: dict[str, Callable[[object, bytes], bool] | None] = {
     "path_negate": _has_branch_records,
     # per-input ops
     "redqueen": _redqueen_available,
+    "redqueen_batch": _has_redqueen_matches,
     # Revizor boosting: needs this seed's colorization taints (cached only).
     "taint_boost": _has_color_taints,
     # regularity op that measures the corpus rather than the seed

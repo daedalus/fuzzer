@@ -790,6 +790,7 @@ def cmd_fuzz(args):
         seed_codel_scheduler=getattr(args, "seed_codel_scheduler", False),
         seed_aimd_scheduler=getattr(args, "seed_aimd_scheduler", False),
         seed_p2c_scheduler=getattr(args, "seed_p2c_scheduler", False),
+        seed_branch_scheduler=getattr(args, "seed_branch_scheduler", False),
         seed_dpp_scheduler=getattr(args, "seed_dpp_scheduler", False),
         seed_consolidated_scheduler=getattr(args, "seed_consolidated_scheduler", False),
         pos_consolidated=getattr(args, "pos_consolidated", False),
@@ -1549,7 +1550,13 @@ def cmd_minimize(args):
     if edge_comp is Switch.ON and not args.coverage:
         print("[!] --edge-components needs -c/--coverage: no edge data without it", file=sys.stderr)
 
-    count_mode = CountItems(args.count_aware) if getattr(args, "count_aware", None) else CountItems.OFF
+    hall = Switch.ON if getattr(args, "hall", False) else Switch.OFF
+    if hall is Switch.ON and not args.coverage:
+        print("[!] --hall needs -c/--coverage: no edge data without it", file=sys.stderr)
+
+    count_mode = (
+        CountItems(args.count_aware) if getattr(args, "count_aware", None) else CountItems.OFF
+    )
     if count_mode is not CountItems.OFF and not args.coverage:
         print("[!] --count-aware needs -c/--coverage: no edge data without it", file=sys.stderr)
 
@@ -1571,6 +1578,7 @@ def cmd_minimize(args):
         edge_hist=edge_hist,
         edge_components=edge_comp,
         count_items=count_mode,
+        hall=hall,
     )
 
     if removed == 0:
@@ -2443,6 +2451,9 @@ def cmd_sweep(args):
 # with --region-profile (the dead-region down-weight is the thing it revokes)
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
 # a real target) has not been run, so --hail-mary should not field it yet.
+#
+# seed_branch_scheduler (--seed-branch-scheduler) is excluded as unmeasured: unit
+# tests only, no paired run (docs/AB_PENDING.md).
 #
 # seed_lottery_scheduler (--seed-lottery-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
@@ -3582,6 +3593,14 @@ def main() -> int:
         help="Seed-arena arm 'aimd': AIMD (TCP): per-seed window +1 on a find, halved after 8 "
         "fruitless visits; stride share by window. Elo arm; also the no-elo pick when enabled"
         " (core/schedulers/seed_aimd.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-branch-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'branch': picks seeds near the least-tried open branches "
+        "(covered block, never-covered successor), by line-graph hops over the Katz "
+        "channel's ICFG; needs a trace-pc, undirected run. Elo arm "
+        "(core/schedulers/seed_branch.py). Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--seed-p2c-scheduler",
@@ -6948,6 +6967,12 @@ def main() -> int:
         action="store_true",
         help="With -c: print connected components of the seed Gram matrix "
         "(seeds sharing an edge) after stripping edges held by >10%% of seeds",
+    )
+    min_parser.add_argument(
+        "--hall",
+        action="store_true",
+        help="With -c: keep a distinct seed for every rare edge (<= 3 owners) on top of "
+        "the cover (Hall matching), and report the edges no distinct seed can cover",
     )
     min_parser.add_argument(
         "--count-aware",

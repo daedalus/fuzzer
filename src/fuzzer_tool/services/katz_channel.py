@@ -32,6 +32,7 @@ from fuzzer_tool.core.icfg import (
     build_interprocedural_cfg,
     probe_key_node_table,
 )
+from fuzzer_tool.core.schedulers.seed_branch import BranchFrontier
 from fuzzer_tool.core.schedulers.seed_katz import build_beta, katz_scores
 
 log = logging.getLogger(__name__)
@@ -87,6 +88,9 @@ class KatzChannel:
         self._last_cost = 0.0
         self._last_recompute_wall = self._clock.monotonic()
         self.exec_count = 0  # caller updates so the interval gate works
+        # 'branch' seed arm (--seed-branch-scheduler): refreshed with Katz.
+        self._branch: BranchFrontier | None = None
+        self._branch_memo: dict[str, float] = {}
 
     # ── setup ────────────────────────────────────────────────────────
 
@@ -295,11 +299,49 @@ class KatzChannel:
             # the sum of per-node counts.
             beta = build_beta(self._horizon, self.hit_counts, float(self.exec_count))
             self._scores = katz_scores(self._horizon, beta=beta)
+            if self._branch is not None:
+                self._refresh_branch(masks)
             self._last_cost = self._clock.monotonic() - t0
             self._last_recompute_wall = self._clock.monotonic()
             self._dirty = False
             self._last_recompute_exec = self.exec_count
         return self._scores
+
+    def enable_branch(self) -> None:
+        """Score seeds for the 'branch' arm on every recompute."""
+        self._branch = BranchFrontier(self.icfg)
+        self._dirty = True
+
+    @property
+    def branch_ready(self) -> bool:
+        """The arm has targets: some visited block has an unvisited successor."""
+        if self._branch is None:
+            return False
+        self.ensure_scores()
+        return self._branch.ready
+
+    def _refresh_branch(self, masks: dict[str, bytes]) -> None:
+        """Re-target the branch arm from V (union of masks) and hit counts."""
+        acc = np.zeros((self.n_nodes + 7) // 8, dtype=np.uint8)
+        for m in masks.values():
+            np.bitwise_or(acc, np.frombuffer(m, dtype=np.uint8)[: acc.size], out=acc)
+        visited = np.unpackbits(acc, bitorder="little")[: self.n_nodes].view(bool)
+        self._branch.refresh(visited, self.hit_counts)
+        self._branch_memo.clear()
+
+    def branch_energy(self, seed_key: str) -> float:
+        """[0,1] energy of a seed for the 'branch' arm; 0 when off or unknown."""
+        if self._branch is None:
+            return 0.0
+        self.ensure_scores()
+
+        # Per recompute: refresh clears the memo.
+        e = self._branch_memo.get(seed_key)
+        if e is None:
+            mask = self._masks.get(seed_key)
+            ok = mask is not None and len(mask) * 8 >= self.n_nodes
+            e = self._branch_memo[seed_key] = self._branch.energy(mask) if ok else 0.0
+        return e
 
     def seed_energy(self, seed_key: str) -> float:
         """Normalized [0,1] centrality of a corpus seed's graph node."""

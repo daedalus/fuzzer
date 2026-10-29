@@ -54,6 +54,8 @@ PARETO_WINDOW = 100
 RARE_EDGE_GAIN = 0.5
 # Mean owners per edge above which a seed's coverage is considered crowded.
 CROWDED_EDGE_OWNERS = 10.0
+# 'branch' arm weight floor: a zero-energy seed keeps a sliver of the roulette.
+_BRANCH_FLOOR = 1e-4
 
 # ── Saturation gate ────────────────────────────────────────────────────────
 # Above this estimated sample coverage the per-seed discovery analyses
@@ -566,6 +568,9 @@ class SeedPicker:
             available.append("aflgo")
         if getattr(f, "_katz_channel", None) is not None and f.corpus:
             available.append("katz")
+            # Listed once it has targets: before, every energy is 0.
+            if f._katz_channel.branch_ready:
+                available.append("branch")
         if getattr(f, "_tang", None) is not None and f._tang.fitted and f.corpus:
             available.append("tang")
         if getattr(f, "_kruskal_count", None) is not None and f.corpus:
@@ -654,6 +659,7 @@ class SeedPicker:
             "mcts": lambda: self._pick_mcts_seed(),
             "alphabeta": lambda: self._pick_alphabeta_seed(),
             "katz": lambda: self._pick_katz_seed(),
+            "branch": lambda: self._pick_branch_seed(),
             "tang": lambda: self._pick_tang_seed(),
             "kruskal_count": lambda: self._pick_kruskal_count_seed(),
             "entropy_kl": lambda: self._pick_entropy_kl_seed(),
@@ -741,6 +747,31 @@ class SeedPicker:
         r = self._rng.random() * total
         acc = 0.0
         for seed, w in zip(f.corpus, weights, strict=False):
+            acc += w
+            if acc >= r:
+                return seed
+        return f.corpus[-1]
+
+    def _pick_branch_seed(self) -> bytes | None:
+        """Roulette over line-graph branch energy -- the Elo-arbitrated 'branch' arm.
+
+        Energy is GAMMA ** hops from the seed's nearest covered block to a
+        least-tried frontier branch (core/schedulers/seed_branch.py). Declines
+        when no seed scores, so the arm never plays as uniform.
+        """
+        f = self.f
+        ch = getattr(f, "_katz_channel", None)
+        if ch is None or not f.corpus:
+            return None
+
+        energies = [ch.branch_energy(f._seed_key(s)) for s in f.corpus]
+        if max(energies) <= 0:
+            return None
+
+        weights = [max(e, _BRANCH_FLOOR) for e in energies]
+        r = self._rng.random() * sum(weights)
+        acc = 0.0
+        for seed, w in zip(f.corpus, weights, strict=True):
             acc += w
             if acc >= r:
                 return seed
