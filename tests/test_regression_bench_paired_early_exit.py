@@ -100,3 +100,24 @@ def test_exec_count_edges(runs, tmp_path, log, complete) -> None:
     script.append(log)
 
     assert bool(_arm(tmp_path)) is complete
+
+
+@pytest.mark.parametrize(
+    ("out", "err"),
+    [
+        (b"partial stdout\n", b"ASAN: stderr diag\n"),
+        (None, b"ASAN: stderr diag\n"),  # adversarial: stderr only
+    ],
+)
+def test_regression_timeout_log_keeps_stderr(monkeypatch, tmp_path, out, err) -> None:
+    def fake_run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, 10, output=out, stderr=err)
+
+    monkeypatch.setattr(bench_paired.subprocess, "run", fake_run)
+    monkeypatch.setattr(bench_paired, "RESULTS", tmp_path)
+
+    assert _arm(tmp_path) == []
+
+    (kept,) = (tmp_path / "s_baseline_early").glob("*.log")
+    expected = b"".join(b for b in (out, err) if b).decode()
+    assert kept.read_text() == expected
