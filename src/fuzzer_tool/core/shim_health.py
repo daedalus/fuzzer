@@ -149,6 +149,14 @@ def _field(counters: Sequence[int], field: ShimField) -> int:
     return counters[field] if field < len(counters) else 0
 
 
+def cmplog_loss(counters: Sequence[int]) -> tuple[int, int]:
+    """``(records dropped, failed flushes)``; 0s on a shim predating them."""
+    return (
+        _field(counters, ShimField.CMPLOG_DROPPED),
+        _field(counters, ShimField.CMPLOG_WRITE_FAILED),
+    )
+
+
 def health_issues(counters: Sequence[int], attach: Attach) -> list[str]:
     """Issues implied by one ``__afl_shim_health()`` snapshot.
 
