@@ -307,3 +307,33 @@ corpus.
   there.
 - `pip install -e .` and `pip install pytest ruff py-spy
   --break-system-packages` were needed in a fresh container.
+
+### 7.7 Update 2026-10-29: cmplog parse path (7.5 lead)
+
+Drains are capped at `CMPLOG_MAX_LINES_PER_READ` (10k lines) and run every
+1/5/20 iterations by pool size (`fuzz_round._collect_due`). Synthetic drains,
+interleaved min-of-N, this host. Warm `_parse_lines` share at 10k lines /
+9k distinct: cond parse 41%, `_ingest_conds` 14%, `_evict_pairs` 13%,
+operand parse 10%.
+
+Shipped: `cond_tuples_from_cmplog_text` splits `"CMP "` lines once, no
+`strip`; stripped-line set dropped (the key set dedupes). Regression test
+`tests/test_regression_cmp_parse_fastpath.py` (pre-change oracle, Rule 46
+control, adversarial whitespace; a naive `parts[0] == "CMP"` variant fails 3/4).
+
+| Distinct lines | Parse before / after (ms) | Warm drain before / after (ms) |
+|---:|---:|---:|
+| 300 | 0.173 / 0.140 | 0.356 / 0.322 |
+| 2470 | 1.559 / 1.206 | 3.553 / 3.188 |
+| 3911 | 2.701 / 2.039 | 6.589 / 5.751 |
+
+Not shipped:
+- `pairs_from_operand_records` split-once variant: 2.30 → 2.10 ms at 200k
+  lines; under 1% of a drain.
+- `_ingest_conds` with `itemgetter` + `dict.fromkeys` bulk updates: 5-13%
+  slower (the per-pair loop still runs for new-pair detection).
+- `_eviction_victims` via `islice` over a generator: 0.31 → 0.24 ms at a
+  15k pool, 5000 victims; negligible. cProfile overstated it (per-call `len`).
+- Cross-drain line→tuple cache: would remove most of the parse on repeat
+  lines, but needs a memory bound and eviction for ≤1 ms per drain at the
+  saturated 1/20 cadence. Not built.
