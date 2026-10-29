@@ -790,6 +790,7 @@ def cmd_fuzz(args):
         seed_codel_scheduler=getattr(args, "seed_codel_scheduler", False),
         seed_aimd_scheduler=getattr(args, "seed_aimd_scheduler", False),
         seed_p2c_scheduler=getattr(args, "seed_p2c_scheduler", False),
+        seed_branch_scheduler=getattr(args, "seed_branch_scheduler", False),
         seed_dpp_scheduler=getattr(args, "seed_dpp_scheduler", False),
         seed_consolidated_scheduler=getattr(args, "seed_consolidated_scheduler", False),
         pos_consolidated=getattr(args, "pos_consolidated", False),
@@ -2451,6 +2452,9 @@ def cmd_sweep(args):
 # and it is unmeasured -- the falsifier in docs/TODO.md (no dead->live flips on
 # a real target) has not been run, so --hail-mary should not field it yet.
 #
+# seed_branch_scheduler (--seed-branch-scheduler) is excluded as unmeasured: unit
+# tests only, no paired run (docs/AB_PENDING.md).
+#
 # seed_lottery_scheduler (--seed-lottery-scheduler) is excluded as unmeasured: unit
 # tests only, no paired run (docs/AB_PENDING.md). Its currency and transfer
 # options are not boolean gates and take no part in the tuple.
@@ -3589,6 +3593,14 @@ def main() -> int:
         help="Seed-arena arm 'aimd': AIMD (TCP): per-seed window +1 on a find, halved after 8 "
         "fruitless visits; stride share by window. Elo arm; also the no-elo pick when enabled"
         " (core/schedulers/seed_aimd.py).",
+    )
+    fuzz_parser.add_argument(
+        "--seed-branch-scheduler",
+        action="store_true",
+        help="Seed-arena arm 'branch': picks seeds near the least-tried open branches "
+        "(covered block, never-covered successor), by line-graph hops over the Katz "
+        "channel's ICFG; needs a trace-pc, undirected run. Elo arm "
+        "(core/schedulers/seed_branch.py). Not in --hail-mary until it wins its A/B.",
     )
     fuzz_parser.add_argument(
         "--seed-p2c-scheduler",

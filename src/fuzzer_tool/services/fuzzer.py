@@ -271,6 +271,7 @@ _SEED_STRATEGY_NAMES = (
     "boltzmann",
     "ecofuzz",
     "katz",
+    "branch",
     "mcts",
     "alphabeta",
     "tang",
@@ -2060,6 +2061,8 @@ class Fuzzer:
         push_on_crash=None,
         # Direct in-process input placement (--input-placement). Appended.
         input_placement=InputPlacement.EXACT,
+        # 'branch' seed arm over the Katz channel's ICFG (--seed-branch-scheduler). Appended.
+        seed_branch_scheduler=False,
     ):
         # Decision clock (--clock). Built first: start_time, the WFQ clock and
         # several schedulers read it during construction.
@@ -3156,6 +3159,14 @@ class Fuzzer:
                     )
             except Exception as e:  # noqa: BLE001
                 log.warning("Katz channel setup failed: %s", e)
+
+        # The branch arm reads the Katz channel's ICFG and node masks.
+        if seed_branch_scheduler and self._katz_channel is not None:
+            self._katz_channel.enable_branch()
+        elif seed_branch_scheduler:
+            log.warning(
+                "--seed-branch-scheduler needs the Katz node channel (trace-pc, undirected)"
+            )
 
         self._load_corpus()
         loaded = self.corpus
@@ -9728,6 +9739,8 @@ class Fuzzer:
             groups["Seed selection"].append("aflgo")
         if getattr(self, "_katz_channel", None) is not None:
             groups["Seed selection"].append("katz")
+            if self._katz_channel._branch is not None:
+                groups["Seed selection"].append("branch")
         if getattr(self, "_doppler", None) is not None:
             groups["Seed selection"].append("doppler")
         if getattr(self, "_tang", None) is not None:
