@@ -104,6 +104,7 @@ Off arm needs a tree without the op.
 | `literal_mismatch` + frontier (`tools/frontier.py`) | Literal-chain gap op | N | `--reps 3`, frontier counts as metric |
 | `gradient_descent` NUMERIC | Trace-cmp objective | N | +1056 edges p=0.29; ~45 seeds |
 | `coupled_pair` (`--byte-interaction`) | Interacting byte pairs | S | fuzzgoat; tune top-K |
+| `hmm_segment` + span positions (`--field-hmm`) | Viterbi field spans | U | fuzzgoat; png kill criterion (handover §7) |
 | Grimoire (`--grimoire`) | Generalised input splicing | U | text target (grep/sqlite) |
 | `op_append` (`--op-append`) | Append one record | U | needs linear-instruction target |
 | `taint_boost` / `--priming-check` | Revizor input boosting; primed-id filter | U | `--colorize` with / without |

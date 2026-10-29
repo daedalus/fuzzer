@@ -1389,6 +1389,10 @@ class CorpusManager:
         f = self.f
         if getattr(f, "_markov_switch", Switch.ON) is Switch.ON:
             self._train_markov(data)
+        # --field-hmm: periodic refit; spans are decoded lazily per seed.
+        hmm = getattr(f, "_field_hmm", None)
+        if hmm is not None:
+            hmm.on_admit(f.corpus, f.seed_meta)
         # Mutator feedback hook (e.g. wfc_reorder_learned's adjacency tables).
         REGISTRY.notify_new_coverage(data, getattr(f, "_last_new_edge_count", 0))
         f._corpus_size_history.append(len(data))

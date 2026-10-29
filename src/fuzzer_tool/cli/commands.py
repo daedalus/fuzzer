@@ -799,6 +799,8 @@ def cmd_fuzz(args):
         pos_harmonic=getattr(args, "pos_harmonic", False),
         joint_liveness=getattr(args, "joint_liveness", False),
         byte_interaction=getattr(args, "byte_interaction", False),
+        field_hmm=getattr(args, "field_hmm", False),
+        field_hmm_states=getattr(args, "field_hmm_states", 8),
         stage_execs=getattr(args, "stage_execs", 1),
         prune_cost=getattr(args, "prune_cost", False),
         saliency_targets=getattr(args, "saliency_targets", "gt"),
@@ -2465,6 +2467,9 @@ def cmd_sweep(args):
 #
 # byte_interaction (--byte-interaction) is excluded as unmeasured: only the
 # synthetic AND/XOR checks in tests/test_byte_interaction.py, no paired run.
+#
+# field_hmm (--field-hmm) is excluded as unmeasured: unit tests only, no
+# paired run (docs/AB_PENDING.md).
 #
 # rand_floyd_sample (--rand-floyd-sample) is excluded for a different
 # reason: it is not a strategy at all, it is a second implementation of
@@ -4838,6 +4843,23 @@ def main() -> int:
             "(coupled_pair op; core/analyzers/analyzer_interaction.py). Implies "
             "--sensitivity. Opt-in: unmeasured, NOT part of --hail-mary."
         ),
+    )
+    fuzz_parser.add_argument(
+        "--field-hmm",
+        action="store_true",
+        help=(
+            "Segment seeds into fields with a byte HMM decoded by Viterbi; the "
+            "hmm_segment op havocs, splices, duplicates or deletes whole fields, and "
+            "field starts join the position proposers (core/field_hmm.py). "
+            "Opt-in: unmeasured, NOT part of --hail-mary."
+        ),
+    )
+    fuzz_parser.add_argument(
+        "--field-hmm-states",
+        type=int,
+        default=8,
+        metavar="K",
+        help="Hidden states of the --field-hmm model, 1..256 (default: 8).",
     )
     fuzz_parser.add_argument(
         "--chi2-operator-interval",

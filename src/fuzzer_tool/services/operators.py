@@ -20,6 +20,7 @@ import math
 import os
 import struct
 from array import array
+from enum import Enum
 from functools import partial
 from operator import is_
 
@@ -232,6 +233,7 @@ _DELOCALISED_OPS = frozenset(
         "grimoire_extend",
         "grimoire_recurse",
         "grimoire_string",
+        "hmm_segment",
         "ltl_prefix",
         "redqueen_batch",
         "tail_append",
@@ -1418,6 +1420,15 @@ def _phase_position(f, data: bytes, buf_len: int):
     return f._get_phase_weighted_position(buf_len, meta.get("record_stride") if meta else None)
 
 
+class _SegAction(Enum):
+    """hmm_segment's edit of one field span."""
+
+    HAVOC = 0
+    SPLICE = 1
+    DUP = 2
+    DELETE = 3
+
+
 # Position plan slots, in select_position's candidate-list order (the order
 # rng.choice sees). Evaluation order is the plan's own order.
 (
@@ -1431,8 +1442,9 @@ def _phase_position(f, data: bytes, buf_len: int):
     _SLOT_BURN,
     _SLOT_RR,
     _SLOT_FIB,
-) = range(10)
-_POS_SLOT_COUNT = 10
+    _SLOT_HMM,
+) = range(11)
+_POS_SLOT_COUNT = 11
 
 
 def _round_mutations(f) -> int:
@@ -3658,6 +3670,37 @@ class OperatorEngine:
         i, j = rng.choice(live)
         buf[i] = (buf[i] + rng.randint(1, 255)) & 0xFF
         buf[j] = (buf[j] + rng.randint(1, 255)) & 0xFF
+
+    def _op_hmm_segment(self, buf, _byte_idx, data):
+        """Edit one Viterbi field span as a unit (core/field_hmm.py, --field-hmm).
+
+        Example: spans [(0, 4, s0), (4, 8, s1)] -> havoc bytes 4..8, splice
+        in another seed's s1 span, duplicate 0..4 or delete it.
+        """
+        # Span offsets are the parent's: void once an earlier op resized buf.
+        hmm = getattr(self.f, "_field_hmm", None)
+        if hmm is None or len(buf) != len(data) or not hmm.has_spans(data):
+            return self._op_declined("hmm_segment", buf)
+
+        rng = self.ctx._rng
+        starts, ends, states = hmm.segments(data)
+        i = rng.randint(0, starts.size - 1)
+        start, end, state = int(starts[i]), int(ends[i]), int(states[i])
+        action = _SegAction(rng.randint(0, len(_SegAction) - 1))
+
+        # Same length: in place. Length changes return a new buffer (clamped).
+        if action is _SegAction.HAVOC:
+            buf[start:end] = rng.randbytes(end - start)
+            return None
+        if action is _SegAction.DUP:
+            return buf[:end] + buf[start:end] + buf[end:]
+        if action is _SegAction.DELETE:
+            return buf[:start] + buf[end:]
+
+        donor = hmm.donor(state, rng)
+        if donor is None:
+            return self._op_declined("hmm_segment", buf)
+        return buf[:start] + donor + buf[end:]
 
     def _op_magic_byte_search(self, buf, _byte_idx, _data):
         """Plant a cmplog operand verbatim at a candidate site (Angora MB)."""
@@ -6775,7 +6818,7 @@ class OperatorEngine:
         # the buffer; `get_phase_weighted_position` returns None otherwise.
         phase_pos = None if te_pos is None else _phase_position(f, data, buf_len)
         mi_pos = f._mi.weighted_position(buf_len) if f._use_mi and f._mi else None
-        sens_pos, crash_mi_pos, region_pos, field_pos, burn_pos, rr_pos, fib_pos = (
+        sens_pos, crash_mi_pos, region_pos, field_pos, burn_pos, rr_pos, fib_pos, hmm_pos = (
             self._side_positions(data, buf_len)
         )
         candidates = [
@@ -6791,6 +6834,7 @@ class OperatorEngine:
                 burn_pos,
                 rr_pos,
                 fib_pos,
+                hmm_pos,
             ]
             if p is not None
         ]
@@ -6804,13 +6848,13 @@ class OperatorEngine:
                 f"phase={phase_pos} "
                 f"mi={mi_pos} crash_mi={crash_mi_pos} region={region_pos} field={field_pos} "
                 f"burn={burn_pos} "
-                f"round_robin={rr_pos} fibonacci={fib_pos} "
+                f"round_robin={rr_pos} fibonacci={fib_pos} hmm={hmm_pos} "
                 f"candidates={candidates} fallback={not candidates} byte_idx={byte_idx}"
             )
         return byte_idx
 
     def _side_positions(self, data: bytes, buf_len: int) -> tuple:
-        """select_position's sensitivity/crash-MI/region/burn/round-robin/fibonacci picks.
+        """select_position's sensitivity/crash-MI/region/burn/round-robin/fibonacci/hmm picks.
 
         Split out for CCN; evaluated in the original order, None when off.
         """
@@ -6848,7 +6892,10 @@ class OperatorEngine:
         fib_pos = (
             fib.propose(data, buf_len) if isinstance(fib, PositionFibonacciScheduler) else None
         )
-        return sens_pos, crash_mi_pos, region_pos, field_pos, burn_pos, rr_pos, fib_pos
+        # --field-hmm: a field start (core/analyzers/analyzer_field_hmm.py).
+        hmm = getattr(f, "_field_hmm", None)
+        hmm_pos = hmm.propose(data, buf_len) if hmm is not None else None
+        return sens_pos, crash_mi_pos, region_pos, field_pos, burn_pos, rr_pos, fib_pos, hmm_pos
 
     def _pos_plan(self) -> tuple | None:
         """select_position's enabled proposers, gated once per round (Hard Rule 57).
@@ -6907,6 +6954,9 @@ class OperatorEngine:
         fib = getattr(f, "_pos_fibonacci", None)
         if isinstance(fib, PositionFibonacciScheduler):
             plan.append((_SLOT_FIB, lambda d, n, s: fib.propose(d, n)))
+        hmm = getattr(f, "_field_hmm", None)
+        if hmm is not None:
+            plan.append((_SLOT_HMM, lambda d, n, s: hmm.propose(d, n)))
 
     def _plan_position(self, plan: tuple | None, buf: bytearray, data: bytes) -> int:
         """select_position through a prebuilt plan: same draws, no per-call gating."""

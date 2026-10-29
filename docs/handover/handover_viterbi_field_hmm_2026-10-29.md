@@ -1,6 +1,20 @@
 # Plan: Viterbi field segmentation (`--field-hmm`)
 
-Status: plan only, nothing implemented. TODO: `docs/TODO.md` §Operators.
+Status: implemented 2026-10-29 (DEEP_DIVE §Viterbi field segmentation);
+A/B owed (`docs/AB_PENDING.md`, bench arm `field-hmm`). TODO: `docs/TODO.md` §Operators.
+
+Deviations from the plan below:
+
+- Spans are not stored in `seed_meta`: they are a pure function of (model,
+  seed), cached per seed in the analyzer (FIFO 512) and recomputed after a
+  refit or resume. No epoch, no stale-span path.
+- Smoothing is fixed (1.0 transition, 0.1 emission), not `dm_alpha`: a
+  refit alpha would break the non-decreasing objective.
+- `_LIGHTWEIGHT_OFF` untouched: it lists default-on features only.
+- Decoder bound once per model: pure Python for K ≤ 4, numpy for K > 4
+  (§7 numbers in DEEP_DIVE). Training is batched across seeds.
+- §8 open questions unchanged: K is a flag (no BIC), raw-byte emissions only,
+  Weizz tags still not persisted.
 
 ## 1. Goal
 
@@ -85,7 +99,7 @@ class FieldHMM:
     def name_states(self, labelled: Iterable[tuple[np.ndarray, list[FieldKind]]]) -> None:
         """Majority-vote FieldKind per state from external labels."""
 
-    def to_state(self) -> dict: ...      # plain dict + ndarray (StateStore allowlist)
+    def to_state(self) -> dict: ...  # plain dict + ndarray (StateStore allowlist)
     def load_state(self, d: dict) -> None: ...
 
 

@@ -54,6 +54,7 @@ _FLAG_GATED = {
     "checksum_sites",
     "grimoire",
     "byte_interaction",
+    "field_hmm",
 }
 _ALL_NAMES = _ALWAYS_ON | _FLAG_GATED | {"checksum_learner", "prng_state_learner"}
 

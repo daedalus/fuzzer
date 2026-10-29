@@ -2212,6 +2212,25 @@ _op_coupled_pair     → pick pair → add 1..255 to both bytes
   - `--byte-interaction` vs `--sensitivity`: 2/4 wins, median Δ −1348 (p=1.0). Pairs found on every analyzed seed (8–19). Seed 4 ran 5.7k execs at 9 eps: one bad run dominates.
   - 3 concurrent runs OOM'd the 16 GB cgroup (5–7 GB RSS each); one hung in native code and ignored SIGINT.
 
+### Viterbi field segmentation (2026-10-29)
+
+`--field-hmm [--field-hmm-states K]` (`core/field_hmm.py`, `core/analyzers/analyzer_field_hmm.py`). A K-state byte HMM (default 8; first-order transitions, 256-way emissions) labels each byte with a hidden state by Viterbi; a run of one state is a span. Works without cmplog or format knowledge.
+
+```
+activate ─► saved model (state.pkl.gz "field_hmm") or fit on corpus
+admit ────► every 64 admits: refit on newest 256 seeds, rename, drop caches
+seed ─────► Viterbi spans (first 4096 bytes), FIFO cache 512 seeds
+            ├─► hmm_segment op: havoc | splice same-state donor | dup | delete one span
+            └─► position slot: a span start
+```
+
+- Training: hard EM (decode, recount, renormalise; pseudo-counts 1.0 transition, 0.1 emission) on the first 512 bytes per seed. The MAP objective never decreases. No RNG: the first path bands byte values into K states.
+- States are anonymous. Byte values separate zero / ASCII / high-entropy runs, not a length field from payload. A state takes a `FieldKind` (MAGIC/LENGTH/CHECKSUM) only by majority vote of `--weizz-tags` labels (≥ 8 votes, strict majority).
+- Spans are recomputed after a refit or resume, not persisted per seed: they are a pure function of (model, seed).
+- `hmm_segment` (adaptive band) is offered when the parent has ≥ 2 spans; declines once an earlier op resized the buffer, or on splice without a donor (64 kept per state). In `_DELOCALISED_OPS`.
+- Decode speed (n=4096, min of 5): K ≤ 4 pure Python (5.5 ms at K=4; numpy 16.7 ms), K > 4 numpy over states (15.7 ms at K=8; Python 17.9 ms). Picked once per model. Training is batched over seeds: 256 × 512 bytes, K=8, 115 ms per fit.
+- Unmeasured; not in `--hail-mary`. Kill criterion in `docs/handover/handover_viterbi_field_hmm_2026-10-29.md` §7.
+
 ### Swap walk, pooled colorization, screening (2026-09-30)
 
 - `--swap-walk`: m>2 byte swaps (`_op_swap_bytes`) draw from `TupleWalk` (`core/tuple_walk.py`): affine walk `(start + step*k) mod total` over all ordered tuples, each visited once per period, O(1) state per (n, m), 256 shapes max. Off by default; yield unmeasured.
