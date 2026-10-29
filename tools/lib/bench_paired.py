@@ -398,6 +398,8 @@ _CRASHES = re.compile(r"Crashes:\s+(\d+)")
 _UNIQUE = re.compile(r"Crashes:\s+\d+ \((\d+) unique")
 # Campaign summary prints "Avg eps:"; the report section "Avg throughput:".
 _EPS = re.compile(r"(?:Avg eps|Avg throughput):\s+([\d.]+)")
+# Run summary "Executions:        10,000": execs actually run.
+_EXECS = re.compile(r"Executions:\s+([\d,]+)")
 
 
 def _parse(log: str) -> dict:
@@ -411,6 +413,7 @@ def _parse(log: str) -> dict:
         "crashes": one(_CRASHES),
         "unique": one(_UNIQUE),
         "eps": float(m.group(1)) if (m := _EPS.search(log)) else 0.0,
+        "execs": int(m.group(1).replace(",", "")) if (m := _EXECS.search(log)) else 0,
         "coverage_attached": _EDGES.search(log) is not None and one(_EDGES) > 0,
     }
 
@@ -476,6 +479,9 @@ def run_cell(
         "rc": rc,
         **_parse(log),
     }
+    # Short of the budget: not a result. Keep the log for diagnosis.
+    if row["execs"] < iters:
+        row["log"] = log
     return row
 
 
@@ -554,6 +560,22 @@ def _load_rows(out: Path, restart: bool) -> list:
         return []
 
 
+def _keep_early(out: Path, row: dict) -> None:
+    """Save the log of a cell that stopped short of ``iters``; it is not checkpointed.
+
+    Unrecorded, so a resume re-runs it instead of pairing a partial campaign.
+    """
+    early = out.with_name(f"{out.stem}_early")
+    early.mkdir(exist_ok=True)
+    name = f"{Path(row['target']).name}_s{row['seed']}_r{row['rep']}.log"
+    (early / name).write_text(row["log"])
+    print(
+        f"  [!] {row['arm']} {Path(row['target']).name} seed={row['seed']} rep={row['rep']}: "
+        f"{row['execs']}/{row['iters']} execs rc={row['rc']}, not recorded; log in {early / name}",
+        flush=True,
+    )
+
+
 def _run_arm(args: argparse.Namespace, arm: str, matrix: list, done: int, total: int) -> int:
     """Run every missing cell of one arm, checkpointing each; returns updated *done*."""
     out = RESULTS / f"{args.set}_{arm}.json"
@@ -574,6 +596,9 @@ def _run_arm(args: argparse.Namespace, arm: str, matrix: list, done: int, total:
             if (target, seed, rep) in have:
                 continue
             row = run_cell(arm, target, flags, seed, args.iters, args.timeout, rep)
+            if "log" in row:
+                _keep_early(out, row)
+                continue
             rows.append(row)
             flag = "" if row["coverage_attached"] else "  [NO COVERAGE]"
             print(
