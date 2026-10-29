@@ -470,7 +470,8 @@ def run_cell(
         log = proc.stdout + proc.stderr
         rc = proc.returncode
     except subprocess.TimeoutExpired as exc:
-        log = (exc.stdout or b"").decode(errors="replace") if exc.stdout else ""
+        # Timeout output is bytes even under text=True; stderr holds sanitizer reports.
+        log = b"".join(x for x in (exc.stdout, exc.stderr) if x).decode(errors="replace")
         rc = -1
     finally:
         shutil.rmtree(workdir, ignore_errors=True)
