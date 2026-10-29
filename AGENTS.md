@@ -90,7 +90,8 @@ fuzzer, not just the target.
     - **Fors down:** give functions the whole batch (`randbytes(n)`, `randint_list`, `translate`, numpy) instead of calling them per item, and hoist loop-invariant checks out of loops.
     - **Measure:** benchmark before and after. Keep the change only if it is faster; if it isn't, record why (see `docs/DEEP_DIVE.md` §Push ifs up, fors down).
     - **Cache safely:** a cache of state that can change must be revalidated cheaply or reset at a known boundary, for example `mutate()` clearing `_meta_strategy_cached`.
-58. **Optimization bar: > 7.5% on the function.** Ship a behavior-preserving speedup when it beats the current code by more than 7.5% on the function it changes, at realistic input sizes (interleaved min-of-N, not single shots). At or below 7.5%, or above it at some sizes and below at others, don't ship; record the numbers in the handover or `docs/DEEP_DIVE.md`.
+58. **Optimization bar: never slower.** Ship a behavior-preserving speedup when it is never slower than the current code on the function it changes, at any realistic input size (interleaved min-of-N, not single shots; a loss within run-to-run noise is not slower — re-measure). Gains > 7.5% are meaningful; smaller never-slower gains still ship. Slower at any realistic size: don't ship; record the numbers in the handover or `docs/DEEP_DIVE.md`.
+    - **In-run check for per-exec code:** a change to code that runs per exec or per mutation must also show its gain inside a real fuzz run (fuzzgoat built with clang, master vs branch alternated, wrapper timers). Warm microbenchmarks overstate memory-bound code: a 17-20% gain on the coverage-map walk measured 0-1% in-run.
 
 ## Corpus Rules
 

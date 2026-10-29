@@ -412,3 +412,48 @@ Fuzzgoat map: 32,768 entries, slow path on 92% of execs, 25 live entries;
 `weighted_position` runs ~4x per exec (crash-MI position source), so it was
 ~32 us/exec. Lists cost one `tolist()` per refresh (406 refreshes / 20k
 execs).
+
+### 7.11 Update 2026-10-29: arithmetic batch, rule change
+
+Hard Rule 58 reworded (user decision): ship any behavior-preserving speedup
+that is never slower at any realistic size (loss within noise is not slower);
+per-exec/per-mutation code must also show its gain in a real run. In-run A/B
+is now paired: inside one fuzzgoat run each real call also runs the frozen
+master version on the same arguments (shadow state for stateful methods),
+alternating order.
+
+Arithmetic-module survey (default run / `--hail-mary`): per-exec arithmetic
+(`gaussian.norm_cdf`, `RunningMoments`) is already O(1) scalar; MinHash and
+`randomness.profile_buffer` are numpy. `numtheory` runs a few times per run
+(`prime_inject` is `@cache`d), `gf2_common`/`lattice` only during checksum /
+PRNG recovery, `ks_pvalue`/`integer_relation` never, `hash_len_ext` behind
+`--hlx-algo`. Pure-Python candidates: `murmur3_32` + chain (ungated
+`murmurhash3` op), LZ4 `_xxh32_py` (format-gated), `xxh64` (per admission).
+
+| Change | Kind | Micro | In-run (paired) | Shipped |
+|---|---|---:|---:|---|
+| `xxh64`: rounds, rotates, merge inlined; masks dropped before masked products | arithmetic | 14-32% (>= 8 B), -1/+4% at 0/1 B (noise) | +16-19% | yes |
+| `murmur3_32`: `_mix_k`/`_fmix` inlined; `_chain_scalar` fused round | arithmetic | 9-20% (>= 4 B), +3% at 1 B | chain +3.8-6.4% | yes |
+| LZ4 `_xxh32_py`: `iter_unpack` stripes | arithmetic | 0.7-9.7% | format-gated, not reached | yes |
+| `_update_virgin_buckets` / `_update_max_counts`: one `max()` replaces range check + `all()` | non-arithmetic | 15-17% (25 live) .. 4% (15k) | +15% / +12%, 0 verdict diffs | yes |
+| `pairs_from_operand_records` split once | non-arithmetic | 4-13%, never slower | no cmplog on fuzzgoat | no (in-run unverified) |
+| `_live_entries` contiguous copy | non-arithmetic | 17-20% | 0-1% | no |
+
+### 7.12 All shipped optimizations, by kind
+
+Arithmetic = the speedup is in numeric work (integer/float/bitwise math,
+hash rounds). Non-arithmetic = parsing, containers, caching, search,
+interpreter or numpy-call overhead.
+
+| PR | Change | Kind |
+|---|---|---|
+| #238 | `detect_hash_candidates`: zero bytes of `a ^ b` | arithmetic |
+| #238 | `cond_tuples_from_cmplog_text` fast path | non-arithmetic (parsing) |
+| #238 | pending-redqueen `filter`, `islice` victims, batched eviction | non-arithmetic (containers) |
+| #238 | occurrence count locals | non-arithmetic (interpreter) |
+| #239 | sniff cache 256 -> 4096 | non-arithmetic (caching) |
+| #239 | crash-MI `record` flat gather + step-table path | partly: numeric code, gain from fewer gathers |
+| #239 | `randint_list(0, ...)` no cast/add | arithmetic (marginal) |
+| #240 | `weighted_position` bisect | non-arithmetic (search) |
+| this | `xxh64`, `murmur3_32`/chain, `_xxh32_py` | arithmetic |
+| this | SHM fold range check | non-arithmetic (numpy-call overhead) |
