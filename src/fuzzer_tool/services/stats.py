@@ -42,6 +42,7 @@ from fuzzer_tool.core.lineage import LineageTree
 from fuzzer_tool.core.pool_drift import PoolDrift
 from fuzzer_tool.core.rand_pool import RandPool, get_default_rand_pool
 from fuzzer_tool.core.scheduler_substrate import EdgeCanonicalizer
+from fuzzer_tool.core.shim_health import cmplog_loss
 from fuzzer_tool.core.zipf import TailLaw
 from fuzzer_tool.services.stats_reporter import (
     discovery_rate as _discovery_rate,
@@ -1422,6 +1423,12 @@ class StatsReporter:
             fired, asserted = f._cmplog.total_comparisons()
             if fired:
                 cmplog_str += f" {_format_count(fired)}c/{_format_count(asserted)}a"
+
+            # Shim record loss, from the periodic health read (direct mode only).
+            shim = getattr(f, "_shim_counters", None)
+            if shim is not None:
+                dropped, failed = cmplog_loss(shim)
+                cmplog_str += f" drop:{_format_count(dropped)} wfail:{_format_count(failed)}"
         return cmplog_str
 
     def _print_stats_dist_str(self, f) -> str:

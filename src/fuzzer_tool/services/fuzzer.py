@@ -5925,6 +5925,8 @@ class Fuzzer:
         decrement, keeping the hot path at the cost of an int compare.
         """
         self._shim_watch = ShimWatch()
+        # Last __afl_shim_health() snapshot; the stats line reuses it.
+        self._shim_counters: tuple[int, ...] | None = None
         phase = phase_of("fuzzer.shim_health", SHIM_HEALTH_PERIOD)
         self._shim_countdown = (SHIM_HEALTH_PERIOD - phase) or SHIM_HEALTH_PERIOD
 
@@ -5934,6 +5936,8 @@ class Fuzzer:
         counters = runner.shim_health() if runner is not None else None
         if counters is None:
             return
+
+        self._shim_counters = counters
         attach = Attach.EXPECTED if self.use_coverage else Attach.NOT_EXPECTED
         self._warn_shim(self._shim_watch.counters(counters, attach))
 
