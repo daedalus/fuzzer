@@ -54,7 +54,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bench_lock  # noqa: E402
-from eval_set import DEFAULT_ITERS, SEEDS, TARGET_SETS, cells  # noqa: E402
+from eval_set import DEFAULT_ITERS, SEED_DIRS, SEEDS, TARGET_SETS, cells  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
 # $FUZZ_BENCH_RESULTS keeps results out of the source tree (AGENTS.md Rule 17).
@@ -409,11 +409,28 @@ def _parse(log: str) -> dict:
     }
 
 
+def _seed_workdir(target: str, workdir: Path) -> None:
+    """Copy *target*'s seed pack (eval_set.SEED_DIRS) into *workdir*.
+
+    A copy: cells write their corpus there. A listed pack that is missing
+    raises rather than running the cell unseeded.
+    """
+    pack = SEED_DIRS.get(target)
+    if pack is None:
+        return
+    try:
+        shutil.copytree(pack / "seeds", workdir / "seeds")
+    except FileNotFoundError:
+        shutil.rmtree(workdir, ignore_errors=True)
+        raise
+
+
 def run_cell(
     arm: str, target: str, flags: str, seed: int, iters: int, timeout: int, rep: int = 0
 ) -> dict:
     """Run one campaign and return its parsed outcome."""
     workdir = Path(tempfile.mkdtemp(prefix=f"paired_{arm}_"))
+    _seed_workdir(target, workdir)
     cmd = [
         sys.executable,
         "-m",

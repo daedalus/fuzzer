@@ -33,6 +33,8 @@ Selection criteria for the targets:
 
 from __future__ import annotations
 
+from pathlib import Path
+
 # ── Target sets ────────────────────────────────────────────────────────
 
 # Default: broad, seven targets. ~7 x n_seeds x n_arms campaigns.
@@ -184,6 +186,20 @@ FFMPEG_TARGETS: list[tuple[str, str]] = [
     ("/root/fuzzing/builds/ffmpeg_read_9.0.2_noasan.so", "-D dictionaries/wav.dict"),
 ]
 
+# ffmpeg_803: FFmpeg 8.0.3 (FFMPEG_VERSIONS=8.0.3 tools/vendor_ffmpeg.sh
+# --top=1, then tools/build_targets.sh), seeded with the crash seeds of
+# tools/gen_ffmpeg_803_seeds.py: a target whose cells reach crashes, for
+# crash-reward A/Bs. Not comparable with the empty-corpus sets.
+FFMPEG_803_TARGETS: list[tuple[str, str]] = [
+    ("/root/fuzzing/builds/ffmpeg_read_8.0.3_noasan.so", "-D dictionaries/wav.dict"),
+]
+
+# Target -> seed pack (holds seeds/, the layout load_corpus reads). Listed
+# targets start each cell from a copy of it instead of an empty corpus.
+SEED_DIRS: dict[str, Path] = {
+    FFMPEG_803_TARGETS[0][0]: Path.home() / "fuzzing" / "ffmpeg_803_potential_crashes",
+}
+
 TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "locked": LOCKED_TARGETS,
     "cmplog": CMPLOG_TARGETS,
@@ -192,6 +208,7 @@ TARGET_SETS: dict[str, list[tuple[str, str]]] = {
     "container_signal": CONTAINER_SIGNAL_TARGETS,
     "fuzzgoat": FUZZGOAT_TARGETS,
     "ffmpeg": FFMPEG_TARGETS,
+    "ffmpeg_803": FFMPEG_803_TARGETS,
 }
 
 # ── Seeds ──────────────────────────────────────────────────────────────
