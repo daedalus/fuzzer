@@ -29,7 +29,7 @@ import numpy as np
 from fuzzer_tool.core.analyzers.analyzer_distance import _CALL_RE, CfgPool
 from fuzzer_tool.core.centrality import betweenness_centrality, closeness_centrality
 from fuzzer_tool.core.cfg import FunctionCFG
-from fuzzer_tool.core.mincut import min_cut
+from fuzzer_tool.core.mincut import min_cut, min_vertex_cut
 from fuzzer_tool.core.np_sets import sorted_isin, sorted_unique
 
 log = logging.getLogger(__name__)
@@ -137,6 +137,21 @@ class InterproceduralCFG:
         edges = list(zip(self.src.tolist(), self.dst.tolist(), strict=True))
         _, cut = min_cut(self.n_nodes, edges, sources, sinks)
         return {(self.node_addrs[u], self.node_addrs[v]) for u, v in cut}
+
+    def bottleneck_blocks(self, hit_addrs: set[int], target_addrs: set[int]) -> set[int]:
+        """Fewest blocks separating *hit_addrs* from *target_addrs* (vertex Menger).
+
+        Same address handling as ``bottleneck_edges``. Empty when a hit block
+        has an edge straight into a target: no block between them to cut.
+        """
+        sources = {i for a in hit_addrs if (i := self._node_at(a)) is not None}
+        sinks = {i for a in target_addrs if (i := self._node_at(a)) is not None}
+        sources -= sinks
+        if not sources or not sinks:
+            return set()
+        edges = list(zip(self.src.tolist(), self.dst.tolist(), strict=True))
+        _, cut = min_vertex_cut(self.n_nodes, edges, sources, sinks)
+        return {self.node_addrs[v] for v in cut}
 
     def centrality_scores(self, normalized: bool = True) -> dict[int, float]:
         """Betweenness centrality of every block, keyed by start address.
