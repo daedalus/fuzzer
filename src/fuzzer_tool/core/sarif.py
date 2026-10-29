@@ -190,6 +190,12 @@ def _properties(side: dict) -> dict:
     ops = side.get("mutation_ops")
     if isinstance(ops, list) and ops:
         props["mutation_ops"] = [str(o) for o in ops]
+
+    # --replay-n score, once finished; flaky = reproduced below 100%.
+    repro = side.get("repro")
+    if isinstance(repro, dict) and isinstance(repro.get("rate"), (int, float)):
+        props["repro_rate"] = float(repro["rate"])
+        props["flaky"] = bool(repro.get("flaky"))
     return props
 
 

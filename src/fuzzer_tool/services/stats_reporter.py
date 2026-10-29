@@ -148,6 +148,14 @@ def _stdin_runner(target: str, timeout: float) -> Callable[[bytes], tuple[int, s
     return _run
 
 
+def _record_repro(crash_file, replays) -> None:
+    """Persist a finished score (sidecar, SARIF): below 100% is flaky."""
+    from fuzzer_tool.adapters.filesystem import record_repro
+
+    crashed = sum(1 for r in replays if r == ReplayOutcome.CRASHED)
+    record_repro(crash_file, crashed, len(replays))
+
+
 def run_crash_replays(
     crashes_dir,
     target: str,
@@ -203,3 +211,5 @@ def run_crash_replays(
             replays.append(_replay_verdict(sig, rc, stderr))
         except Exception:
             replays.append(ReplayOutcome.ERROR)
+        if len(replays) == replay_n:
+            _record_repro(crash_file, replays)

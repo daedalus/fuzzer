@@ -167,11 +167,12 @@ class _TailBuffer:
 
 # ── Memory limit (--rss-limit-mb) ──────────────────────────────────────
 #
-# RLIMIT_AS on each spawned child, 0 = off. Set right after posix_spawn
-# (it has no rlimit action): a target that reads its input first is bound
-# before it allocates. fuzz_loader.c reads RSS_LIMIT_ENV and calls
-# setrlimit before exec. Never for sanitizer targets: their shadow memory
-# is a huge address-space reservation (see services/fuzzer.py).
+# RLIMIT_AS on each spawned child, 0 = off. Stdin spawns: prlimit right
+# after posix_spawn (it has no rlimit action); the target blocks on its
+# input until then. File input: set before exec (_limited_argv).
+# fuzz_loader.c reads RSS_LIMIT_ENV and calls setrlimit before exec; the
+# persistent loader caps each per-call child. Never for sanitizer targets:
+# their shadow memory is a huge address-space reservation (services/fuzzer.py).
 
 RSS_LIMIT_ENV = "__FUZZ_RSS_LIMIT_MB"
 _MB = 1 << 20
@@ -182,6 +183,24 @@ def set_rss_limit(mb: int) -> None:
     """Cap the address space of children spawned from here on (0 = off)."""
     global _rss_limit_bytes
     _rss_limit_bytes = max(0, mb) * _MB
+
+
+# The input file exists before spawn: the target can allocate before a
+# post-spawn prlimit lands (1 in 2000 spawns). /bin/sh sets the limit and
+# execs the target in place (same pid); argv stays out of the script text.
+_SH = "/bin/sh"
+_LIMIT_SCRIPT = 'ulimit -v {kib} 2>/dev/null; exec "$0" "$@"'
+
+
+def _limited_argv(argv: list[str]) -> list[str]:
+    """*argv*, behind a limit-then-exec shell when the cap is on.
+
+    ~1.2 ms more per spawn (one exec), only with --rss-limit-mb.
+    """
+    if not _rss_limit_bytes:
+        return argv
+    script = _LIMIT_SCRIPT.format(kib=_rss_limit_bytes >> 10)
+    return [_SH, "-c", script, *argv]
 
 
 def _limit_child(pid: int) -> None:
@@ -735,11 +754,11 @@ def run_target_fast(
         )
         # Own process group, so a timeout kill reaches anything the target
         # spawned. The sibling paths get this from preexec_fn=os.setsid.
-        pid = os.posix_spawn(target, [target, fname], e, file_actions=file_actions, setpgroup=0)
+        argv = _limited_argv([target, fname])
+        pid = os.posix_spawn(argv[0], argv, e, file_actions=file_actions, setpgroup=0)
         os.close(stdin_fd)
         os.close(stderr_w)
         _track(pid)
-        _limit_child(pid)
 
         # Open perf counters on the child PID while still running
         # (inherit=1 doesn't survive exec, so we attach directly).
