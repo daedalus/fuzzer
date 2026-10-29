@@ -199,3 +199,23 @@ def test_sniff_cache_bounded(monkeypatch):
     for i in range(reg._SNIFF_CACHE_MAX + 10):
         REGISTRY.available(f, b"x%d" % i)
     assert len(REGISTRY._current_plan().sniffed) <= reg._SNIFF_CACHE_MAX
+
+
+# Seeds a mid-size campaign cycles through (fuzzgoat reached 470 in 20k
+# execs; the 256 cap thrashed: 18% of build_ops calls re-sniffed).
+_CORPUS_WORKING_SET = 2000
+
+
+def test_regression_sniff_cache_holds_corpus(monkeypatch):
+    """Falsification: a corpus-sized working set is sniffed once, not once per
+    cache wrap."""
+    calls = _count_sniffs(monkeypatch)
+    f = make_fuzzer(seed=1)
+    seeds = [b"seed-%d" % i for i in range(_CORPUS_WORKING_SET)]
+    for s in seeds:
+        REGISTRY.available(f, s)
+    first = calls["n"]
+
+    for s in seeds:
+        REGISTRY.available(f, s)
+    assert calls["n"] == first

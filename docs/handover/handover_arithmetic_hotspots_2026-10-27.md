@@ -356,3 +356,34 @@ Rule 46 control, leading-zero / 2-vs-3-match cut, eviction state under 3x
 cap churn). A variant that skips re-padding in `to_bytes` fails 2/4.
 `_eviction_victims` stays covered by `tests/test_cmplog_eviction_victims.py`
 (full-sort oracle, 3000 random pools).
+
+### 7.9 Update 2026-10-29: fuzzgoat profile pass
+
+§3.4 numpy schedulers surveyed: 7 of 10 are flag-gated or never called at
+runtime (`seed_entropy_kl`/`zscore` `--entropy-kl`/`--entropy-zscore`,
+`seed_tang` `--tang`, `seed_dpp`, `op_monte_carlo` `--mc-*`/`--mopt`;
+`seed_entropy_shapley` and `spectral_kl` tests/tools only). Default runs
+touch only `periodicity.estimate_record_size` (per admission) and `zipf`
+(gated). Not optimized: no default-run cost.
+
+Real profile instead: fuzzgoat `fuzzgoat_read_noasan.so` built with clang
+(Hard Rule 52; no ASAN runtime on this host), direct_lite, py-spy 200 Hz,
+60k execs. Shares of the round loop: `mutate` 40% (`build_ops` 11.5%,
+handlers 12%), coverage check 13%, `_feed_models` 10%, target call ~5%.
+
+| Change | Gain | Shipped |
+|---|---:|---|
+| `_SNIFF_CACHE_MAX` 256 → 4096 (miss 18% → 2%) | `available` 71.3 → 59.7 us in-run (16%) | yes |
+| `CrashMITracker.record`: flat gather, cached row offsets, count bound picks the step table | 40-44% | yes |
+| `RandPool.randint_list` `a == 0`: no int64 cast/add | 35-45% | yes |
+| static-flag gates decided once | ~6% of `available` | no |
+| `_live_entries` contiguous u64 gen compare | +19% at 65k entries, -12..36% at 262k | no |
+| `katz.observe`, `_regularity`, `_is_repeat` | fixed numpy/hash overhead or operator work | not attempted |
+
+`available` costs 24.7 us warm vs ~60 us in-run: cache-cold effects, not
+one line. End-to-end 20k-exec wall time (18.6-23.1 s per run) varies more
+than the expected few-percent gain; not claimed.
+
+Open: `_trickle` geometric skip (needs ~2 draws instead of ~48 per call)
+changes the seeded stream that `tests/test_regression_registry_plan.py`
+pins; needs a decision.
