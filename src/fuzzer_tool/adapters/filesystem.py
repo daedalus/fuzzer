@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from fuzzer_tool.adapters import seed_zip
+from fuzzer_tool.adapters.libc_symbols import libc_symbol
 from fuzzer_tool.adapters.process import signal_number
 from fuzzer_tool.adapters.seed_zip import SeedTree
 from fuzzer_tool.core.bloom import BloomFilter
@@ -27,7 +28,11 @@ from fuzzer_tool.core.crash_metadata import CrashMetadata
 from fuzzer_tool.core.crash_symbols import sidecar_pcs
 from fuzzer_tool.core.hashing import key16
 from fuzzer_tool.core.ltl import violation_signature
-from fuzzer_tool.core.sanitizer import SanitizerReport, signal_exploitability
+from fuzzer_tool.core.sanitizer import (
+    SanitizerReport,
+    is_runtime_module,
+    signal_exploitability,
+)
 from fuzzer_tool.core.similarity import crash_signature_similarity
 
 SNAPSHOT_INTERVAL = 20
@@ -1479,8 +1484,11 @@ def _fill_report(metadata: CrashMetadata, report: SanitizerReport | None, return
     if not report:
         metadata.returncode = returncode
         fault = metadata.fault_addr
-        metadata.exploitability = signal_exploitability(
-            signal_number(returncode),
+        signo = signal_number(returncode)
+        metadata.exploitability = shim_exploitability(
+            signo, metadata.shim_symbol
+        ) or signal_exploitability(
+            signo,
             int(fault, 16) if fault.startswith("0x") else None,
             metadata.rip,
             metadata.rsp,
@@ -1498,6 +1506,36 @@ def _fill_report(metadata: CrashMetadata, report: SanitizerReport | None, return
     metadata.alloc_frames = report.alloc_frames
     metadata.dealloc_frames = report.dealloc_frames
     metadata.exploitability = report.exploitability
+
+
+# libc entry points whose abort means heap corruption (glibc malloc checks).
+_HEAP_FUNCS = frozenset((
+    "free", "__libc_free", "cfree", "malloc", "__libc_malloc", "calloc", "__libc_calloc",
+    "realloc", "__libc_realloc", "reallocarray", "memalign", "posix_memalign",
+    "aligned_alloc", "malloc_trim",
+))  # fmt: skip
+_SIGABRT = 6
+
+
+def shim_exploitability(signo: int, shim_symbol: dict) -> str | None:
+    """HIGH for an abort inside the allocator the target called, from the
+    shim record; None when the record says nothing.
+
+    direct_lite: glibc's "free(): invalid pointer" goes to the fuzzer's own
+    stderr, so signal_exploitability never sees it. The libc frame right
+    above the first target frame is the call the target made.
+    """
+    frames = shim_symbol.get("frames") if signo == _SIGABRT else None
+    if not isinstance(frames, list):
+        return None
+
+    mods = [str(fr.get("module") or "") if isinstance(fr, dict) else "" for fr in frames]
+    first = next((i for i, m in enumerate(mods) if m and not is_runtime_module(m)), 0)
+    if first == 0 or not mods[first - 1]:
+        return None
+
+    entry = libc_symbol(mods[first - 1], int(frames[first - 1].get("offset") or 0))
+    return "HIGH" if entry in _HEAP_FUNCS else None
 
 
 def _chmod(path: Path, mode: int) -> None:
