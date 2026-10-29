@@ -2,7 +2,8 @@
 
 **Date:** 2026-10-27
 **Repo state:** `master` @ `0fb976c1` (`perf(shim): sticky flags instead of per-edge counters in the ctx collapse detector`). `git pull` was a no-op (already up to date).
-**Scope:** Static survey only. No code was changed, nothing was profiled.
+**Scope:** Sections 1-6 are a static survey (no code changed, nothing profiled).
+Section 7 (2026-10-28) records the optimization pass that followed.
 
 ---
 
@@ -180,15 +181,18 @@ integer/byte manipulations, not because they are mathematically deep.
 
 ## 5. Not done / open items
 
-- No profiling, so the hot-path ranking above is inferred from structure,
-  not measured. A `cProfile`/`py-spy` run on a real fuzzing session would
-  confirm which of these modules dominate wall time.
+- The Section 3 ranking is still structural. Section 7 measured individual
+  functions and one real run, but not a representative long campaign; see
+  7.5 for what that run can and cannot show.
 - GF(2) bit operations are likely under-counted relative to their
   importance. A weighted count (XOR/AND/shift weighted higher) or a
   loop-depth-aware metric would refine the ranking.
-- No vectorization review was done for the numpy-heavy schedulers listed
-  in 3.4.
+- Vectorization of the numpy-heavy schedulers in 3.4 was not reviewed
+  (only `_compute_weights` was looked at, see 7.3).
 - C targets and `perf_shim.c` were not examined for arithmetic content.
+- A `py-spy record -f raw --nonblocking` run on the target and mode the
+  user actually fuzzes (the docs use ffmpeg `nosan` `.so`) is still the
+  right base for the next optimization.
 
 ## 6. Reproduction
 
@@ -203,3 +207,103 @@ python3 arith.py
 ```
 
 Suggested location for this document: `docs/handover/handover_arithmetic_hotspots_2026-10-27.md`.
+
+---
+
+## 7. Update 2026-10-28: optimization pass
+
+Repo at `ca49cb39` after `git pull --rebase`; later pulls added the SARIF
+export (`749f8590`). Python 3.12, numpy available, gcc only (no clang).
+
+### 7.1 Shipped: MinHash one-shot block
+
+`MinHashLSH.compute_signature` (`core/edge_tracker.py`) now builds one
+`(num_perm, n)` block (outer product, in-place add, row min) for
+`n <= _MINHASH_ONE_SHOT_MAX` (1024). Larger sets keep the banded path so the
+temporary stays bounded. Same uint64 wrapped values. Landed upstream as
+`84d999ac`, with `tests/test_minhash_one_shot.py` (matches the pure-Python
+reference on both sides of the cutoff, near 2**64, empty set, and
+one-shot vs banded on the same set).
+
+| Edges in set | Before | After |
+|---:|---:|---:|
+| 1 | 43 us | 5 us |
+| 100 | 67 us | 29 us |
+| 400 | 105 us | 56 us |
+| 1000 | 186 us | 126 us |
+| 4000 | 454 us | 448 us |
+
+Why: per-admission updates fold in only newly owned edges, so n is small
+and the 8-row banding costs more in numpy call overhead than arithmetic.
+
+### 7.2 Micro-benchmarks (single-call, this host)
+
+| Function | Time |
+|---|---:|
+| `xxh64` 4 KiB / 200 B | 210 us / 16 us |
+| `MinHashLSH.compute_signature` n=4000 / n=100 (before 7.1) | 469 us / 68 us |
+| `ks_two_sample` 200x200 | 123 us |
+| `RunningMoments.update` (x1000) | 571 us (1436 us with window 256) |
+| `numtheory.is_prime(2**89-1)` | 351 us |
+| `numtheory.factorint` of a 60-bit semiprime | 7.4 ms |
+| `numtheory.sqrt_mod` / `modinv` | 22 us / 1.6 us |
+| `gaussian.norm_cdf` / `norm_ppf` | 0.2 us / 0.6 us |
+| `ks_pvalue.kolmogorov_pvalue_two_sample` | 3.8 us |
+
+None of these except MinHash had slack worth a patch. `seed_key` callers in
+`CorpusManager` are memoized, so `xxh64` runs on admissions, not per exec.
+
+### 7.3 Looked at and not shipped
+
+- **`_EdgeVectors.stats` (`services/seed_picker.py`)**: variants with
+  `np.add.reduce`, `take(..., mode="clip")` and a fused two-column gather
+  were within 4-12% of the current code (interleaved min of 25 rounds,
+  us/seed, current vs best variant: 4.31/3.88 at 30 edges, 5.10/4.73 at 300,
+  12.25/10.84 at 3000). A fused gather was 2-7x slower. Not worth a patch.
+  Single-shot timings were unusable: the same variant varied about 2x between
+  runs on this host, so only interleaved min-of-N numbers were trusted.
+- **`_compute_weights`**: synthetic corpus, bounded tracker kept 980 of 3000
+  seeds, about 13 us/seed warm. Under cProfile the edge penalty and `stats`
+  path was the largest slice (about 30%). `docs/DEEP_DIVE.md` already records
+  that batching `stats` with `reduceat` was slower, so it was left alone.
+- **`ks_two_sample` (`core/edge_tracker.py`)**: only caller is
+  `services/differential.py`, once per 10 inputs in differential mode, over
+  windows of up to 500 samples. Negligible amortized cost. A bit-identical
+  vectorization would also have to reproduce the walk's tie handling exactly.
+
+### 7.4 Pre-existing test failures
+
+`tests/test_regressions.py::TestEloDecayInitIndependentOfChi2` (two tests)
+failed on clean `master` at `0fb976c1`, with and without the MinHash change.
+Not re-checked on later commits.
+
+### 7.5 One real run (gzip target, py-spy)
+
+Built `gzip_read.so` with `gcc -O2 -g -shared -fPIC -include
+src/fuzzer_tool/adapters/afl_shim.c ... -lz -Wl,--export-dynamic`, 2-4 seed
+corpus.
+
+- Plain `--inprocess` runs the target through `_run_c_subprocess`, one
+  subprocess per exec: about 25 execs/s, `tgt` about 34 ms, fuzzer-side
+  `diff` about 4.5 ms.
+- `--inprocess-direct`, with or without `--inprocess`, showed the same
+  `tgt` of about 34 ms, so it was not confirmed that a direct mode engaged on
+  this host.
+- `py-spy record -f raw --nonblocking` (`--native` cannot be combined with
+  `--nonblocking`), 45 s, 706 non-import samples of 1294. Inclusive shares of
+  the non-import samples: cmplog token collection `collect_tokens` 16.3%
+  (`_collect_tokens_fifo` 14.7%, `_parse_lines` 7.6%); target path
+  `_run_target` 14.2% (`_spawn_capture` 7.9%); `mutate` 7.5%;
+  `_feed_learners` 6.2%.
+- Caveat: tiny corpus, subprocess-per-exec, few samples. It shows the
+  cmplog parse path is worth a look; it does not show steady-state cost on a
+  large corpus. Do not read it as a ranking.
+
+### 7.6 Tooling notes
+
+- `fuzzer-tool fuzz <target.so> -d CORPUS -o CRASHES` (`-c` toggles
+  coverage; it does not take a path).
+- Use `date` arithmetic for wall time inside `sh -c`; `time` is not a binary
+  there.
+- `pip install -e .` and `pip install pytest ruff py-spy
+  --break-system-packages` were needed in a fresh container.
